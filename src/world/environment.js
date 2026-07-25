@@ -114,13 +114,37 @@ export function buildEnvSnapshot({
   // and "what Foundry/GM asked for". A GM sliding darkness up mid-day wins;
   // night wins over a GM who left it at 0. min/max chosen over multiplication
   // so neither authority can be silently diluted by the other.
-  const nightDarkness = 1 - sun.dayFactor01;
+  //
+  // Keyed to the SKY, not to the direct sun (2026-07-23, author: *"allowing
+  // darkness to hit 1 at a point after dusk and before dawn"*). `dayFactor01`
+  // dies as the sun touches the horizon; `skyFactor01` carries the lit sky down
+  // through the three twilights and only reaches 0 at `fullDarkElevationDeg`.
+  // Using the former made the scene snap to full night at sunset and deleted
+  // the blue hour entirely — there was no window where the sun gave nothing but
+  // the sky still gave something. See world/sun.js#SKY_PHASES.
+  const nightDarkness = 1 - sun.skyFactor01;
   const darkness01 = clamp01(Math.max(nightDarkness, clamp01(darknessInput)));
 
   const amb = ambientInput ?? DEFAULT_AMBIENT;
 
   return deepFreeze({
-    time: { frame: time.frame, tMs: time.tMs, dtSec: time.dtSec, todHour: hour },
+    // BOTH clocks ride the call sheet (core/frame-clock.js's own header says
+    // why there are two): `tMs`/`dtSec` are SIM time — scaled, and what every
+    // effect reads, so the pause ramp reaches all of them without any of them
+    // knowing it exists. `realMs`/`realDtSec` are wall time, for the handful of
+    // housekeeping consumers (throttles, hitch logs, probes) that must keep
+    // counting while the world is stopped. `timeScale`/`paused` are carried so
+    // a diagnostic can SHOW the ramp rather than infer it.
+    time: {
+      frame: time.frame,
+      tMs: time.tMs,
+      dtSec: time.dtSec,
+      realMs: Number.isFinite(time.realMs) ? time.realMs : time.tMs,
+      realDtSec: Number.isFinite(time.realDtSec) ? time.realDtSec : time.dtSec,
+      timeScale: Number.isFinite(time.timeScale) ? time.timeScale : 1,
+      paused: time.paused === true,
+      todHour: hour,
+    },
     sun,
     // Foundry's ambient endpoints (sRGB 0..1). Carried through so the light
     // pass reproduces Foundry's own ladder rather than re-reading a global.

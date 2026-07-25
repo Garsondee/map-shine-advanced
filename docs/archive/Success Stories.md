@@ -342,8 +342,8 @@ Several pipeline gaps stacked:
 
 2. **Disabled overhead path** renders the restrict-only pass after `roofBlockTarget` so the RT stays valid when projection is off.
 
-3. **Fade-correct restrict capture**  
-   - **Enabled path:** after Pass **1**, restore saved **material opacity** and `uOpacity` / `uTileOpacity`, then run Pass **1c**. Use **pre–Pass-1** visibility from `roofSpriteVisibilityOverrides` so hidden tiles do not stamp.  
+3. **Fade-correct restrict capture**
+   - **Enabled path:** after Pass **1**, restore saved **material opacity** and `uOpacity` / `uTileOpacity`, then run Pass **1c**. Use **pre–Pass-1** visibility from `roofSpriteVisibilityOverrides` so hidden tiles do not stamp.
    - **Disabled path:** run the restrict pass **after** restoring roof-block opacity and tree uniforms so the capture matches **live** fade.
 
 ### Key Diagnostic Insight
@@ -430,7 +430,7 @@ Several independent issues stacked:
 
 ### Problem We Saw
 
-- Foundry tiles authored with the **`VISION`** occlusion mode (intended to fade a roof where a token can actually *see through* it — windows, doorways, ruined walls) showed **no holes at all** under the V2 bus.
+- Foundry tiles authored with the **`VISION`** occlusion mode (intended to fade a roof where a token can actually _see through_ it — windows, doorways, ruined walls) showed **no holes at all** under the V2 bus.
 - The bus shader already had a `uMsFoundryVision` weight + a `B`-channel path in `uMsFoundryOccTex` from the earlier RADIAL replica work, but nothing was driving them, so VISION-mode tiles rendered as plain opaque overheads.
 
 ### What We Wanted (Product / Parity)
@@ -457,22 +457,22 @@ Several gaps stacked together. Almost all of them were the same shape as the RAD
 1. **Reuse the same replica RT, add a real-geometry vision pass on the B channel**
    - Added a third RT (`_rtVision`, bus-buffer-sized, RGBA8) inside `ReplicaOcclusionMaskPass`.
    - Built a dedicated `_visionScene` populated by `VisionPolygonComputer.compute(...)` for each controlled token with sight.
-   - Polygons are authored in **bus world coords** (`(foundryX, sceneHeight - foundryY, GROUND_Z + 0.05)`) and rendered through the **FloorCompositor camera** — the *same* projection RADIAL holes already use, so parallax stays consistent.
+   - Polygons are authored in **bus world coords** (`(foundryX, sceneHeight - foundryY, GROUND_Z + 0.05)`) and rendered through the **FloorCompositor camera** — the _same_ projection RADIAL holes already use, so parallax stays consistent.
    - Cleared the vision RT to **white** ("not occluded"); polygons output **black** ("occluded"). The radial fullscreen FS then samples `_rtVision.r` and writes it into `gl_FragColor.b`, so the existing bus consumer (`foMask.b < uMsFoundryOccElev → foOcc.b = 1`) lights up at every LOS-covered pixel without any change to bus materials.
-   - The `_rt → _rtResolved` copy from the RADIAL story is preserved; bus tiles still sample only the *resolved* texture, so no new feedback-loop surface area was introduced.
+   - The `_rt → _rtResolved` copy from the RADIAL story is preserved; bus tiles still sample only the _resolved_ texture, so no new feedback-loop surface area was introduced.
 2. **Drive `uMsFoundryVision` from the `occlusion.modes` bit + active-source gate**
    - `applyFoundryOcclusionMaskBusUniforms` now sets `uMsFoundryVision = 1` only when the tile has the `VISION` bit **and** `bridge.hasActiveVisionSource()` reports a built polygon. With no controlled sight token, the gate stays 0 and VISION tiles render normally — same GM-friendly default Foundry has.
-   - Same rationale, same fix as RADIAL: `occlusion.modes` bits are *authoritative*; live `_occlusionState.vision` is unreliable under Map Shine canvas replacement.
+   - Same rationale, same fix as RADIAL: `occlusion.modes` bits are _authoritative_; live `_occlusionState.vision` is unreliable under Map Shine canvas replacement.
 3. **Extend RADIAL → "wants foundry mask" everywhere it mattered**
    - `FloorRenderBus.populate()`, `syncRuntimeTileState()`, and `upsertTileFromDocument()` now key off `(flags & (RADIAL | VISION | SURFACE))` for both shader install and uniform refresh.
-   - The deferred-compile branch inside `installBusMeshRadialOcclusionShader` does the same so the *first* draw of a VISION-only tile is already correct (no one-frame opaque flash before the next sync tick).
+   - The deferred-compile branch inside `installBusMeshRadialOcclusionShader` does the same so the _first_ draw of a VISION-only tile is already correct (no one-frame opaque flash before the next sync tick).
 4. **Keep base opacity for any shader-driven hole roof**
    - The V1 hover-fade loop now treats RADIAL **and** VISION **and** SURFACE as `keepBaseOpacityForShaderHoles`, so hovering a shader-hole roof never collapses it to `alpha = 0`. The mask carves the hole instead.
 
 ### Key Diagnostic Insight
 
 - "Has the bit set, has the weight, has no hole" → the missing piece had to be **the mask itself**. The bus shader was already wired for vision; nobody was filling in the **B** channel.
-- The `_occlusionState.vision = 0` pattern is the *exact same* failure shape as `_occlusionState.radial = 0` in the RADIAL story. Once a flag-bit + replica-RT model is on the table for any one channel, the rest should be ported the same way rather than relying on PIXI PCO state.
+- The `_occlusionState.vision = 0` pattern is the _exact same_ failure shape as `_occlusionState.radial = 0` in the RADIAL story. Once a flag-bit + replica-RT model is on the table for any one channel, the rest should be ported the same way rather than relying on PIXI PCO state.
 
 ### Final Outcome
 
@@ -506,7 +506,7 @@ Several gaps stacked together. Almost all of them were the same shape as the RAD
 
 ### What Fixed It
 
-1. **Fourth RT + bus-camera scene (`_rtSurface`, `_surfaceScene`)**  
+1. **Fourth RT + bus-camera scene (`_rtSurface`, `_surfaceScene`)**
    - Clear to **white**; draw **black** filled meshes from **`RegionDocument#triangulation`** in the same **bus world** convention as VISION (`(foundryX, sceneHeight - foundryY, GROUND_Z + ε)`).
    - **Primary source set:** `canvas.masks.occlusion.occludedSurfaces` — only entries with **`occlusion === true`** (matches Foundry’s own occluded-surface set).
    - **Fallback:** occludable tokens from **`canvas.tokens._getOccludableTokens`** + **`RegionDocument#testPoint`** on scene regions whose embedded behaviors expose **`system.occlusion`** / **`top`/`bottom` occlusion** (covers hosts where the accessor is missing).
@@ -530,4 +530,3 @@ Several gaps stacked together. Almost all of them were the same shape as the RAD
 - **Confirmed in session** on a real scene with a large roof: behavior matched expectations once the roof tile used the **SURFACE** occlusion bit and **Define Surface** regions with **occlusion** were set up for the under-roof volume; a plain “big overhead tile” without SURFACE does not exercise this mode.
 - **Quick re-test checklist:** (1) Overhead tile has **`SURFACE`** in `occlusion.modes` (and desired `occlusion.alpha`). (2) A **Region** uses **Define Surface** with **Occlusion** enabled where tokens should count as “beneath the surface.” (3) An **occludable** token sits in that relationship to the surface. (4) On the V2 bus, the roof should **fade only where the mask stamps** (region footprint, camera-aligned), not as a full-tile binary wipe unless authored that way.
 - **Optional debug:** `MapShine.debug.probeReplicaOcclusionV2()` — confirm **`hasActiveSurfaceOcclusion`** when under a qualifying surface, **`readBack.aNorm`** dropping where the surface pass stamps, and bus uniforms **`uMsFoundrySurface`** on SURFACE tiles only when the mask is active.
-

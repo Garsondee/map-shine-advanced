@@ -21,7 +21,6 @@
 // Through the DOORS, exemplifying zones/one-door: the wiring registry imports
 // each zone's index.js, never its internals.
 import {
-  registerParticleSystem,
   buildLightVisibilityPass,
   buildGradePass,
   buildWaterPass,
@@ -42,14 +41,20 @@ import {
  * (`buildLightAccumulatePass`) is deleted from effects/lighting/lighting-pass.js;
  * a real producer runs in vt-pan-viewer.js (effects/lighting/environmental-
  * light.js does the TSL). 'light.visibility' STAYS a seam — shadows aren't built.
+ *
+ * 'sims.particles' + 'surface.particles' are NOT here either (2026-07-21): both
+ * flipped to 'live' — see graph/pass-impls.js. The engine is real
+ * (effects/particles/particle-runtime.js#createParticleEngine); the sim is
+ * stepped directly in renderFrame (sims stage is out of the plan range, like
+ * tickWindSim) and the instanced draw runs as a viewer closure. The old shared
+ * `registerParticleSystem` door is gone (particle-engine.js now opens onto the
+ * engine). First slice: ambient dust on the wind field.
  * @type {Record<string, (ctx: object) => never>}
  */
 export const PASS_SEAMS = Object.freeze({
-  'sims.particles': registerParticleSystem,
   'sims.fluids': buildFluidSimPass,
   'light.visibility': buildLightVisibilityPass,
   'surface.response': buildSurfaceResponsePass,
   'surface.water': buildWaterPass,
-  'surface.particles': registerParticleSystem, // draw half shares the engine door
   'post.grade': buildGradePass,
 });

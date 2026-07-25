@@ -31,11 +31,11 @@ The most actionable finding: **`canvas-replacement.js` is imported during `init`
 ]
 ```
 
-| Asset | Role | Notes |
-|-------|------|-------|
+| Asset                 | Role            | Notes                                                                                        |
+| --------------------- | --------------- | -------------------------------------------------------------------------------------------- |
 | `tweakpane-loader.js` | First ES module | Top-level `await import('./tweakpane.js')`; logs loudly to console; sets `window.Tweakpane`. |
-| `module.js` | Main entry | Registers hooks, static imports, top-level side effects. |
-| `lib/lib.js` | Classic script | **File is empty (0 bytes)** but still listed in `module.json`. Harmless but stale. |
+| `module.js`           | Main entry      | Registers hooks, static imports, top-level side effects.                                     |
+| `lib/lib.js`          | Classic script  | **File is empty (0 bytes)** but still listed in `module.json`. Harmless but stale.           |
 
 ---
 
@@ -71,12 +71,12 @@ sequenceDiagram
 
 **`module.js` static imports (parse/eval cost before `init`):**
 
-| Import | Concern |
-|--------|---------|
-| `./foundry/weather-sync-bridge.js` | **Heavy for entrypoint.** Pulls `WeatherController` (~157 KB), multiple UI bridges, `environmentControlApi`, `environmentFadeController`. Only needed synchronously for socket handler registration — could be lazy. |
-| `./scene/level-transition-curtain.js` | Side-effect import (`import './scene/...'`). Only exports a class; instantiation happens later in `manager-wiring.js`. This early import also pulls `scene-settings.js` (~44 KB) and `loading-overlay.js`. |
-| `./ui/player-light-picker-dialog.js` | Moderate; acceptable if player-light tools must work early. |
-| `./core/gm-parity.js`, `./core/player-light-allowance.js`, `./foundry/level-navigation-keybindings.js` | Light; appropriate for synchronous keybinding registration. |
+| Import                                                                                                 | Concern                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `./foundry/weather-sync-bridge.js`                                                                     | **Heavy for entrypoint.** Pulls `WeatherController` (~157 KB), multiple UI bridges, `environmentControlApi`, `environmentFadeController`. Only needed synchronously for socket handler registration — could be lazy. |
+| `./scene/level-transition-curtain.js`                                                                  | Side-effect import (`import './scene/...'`). Only exports a class; instantiation happens later in `manager-wiring.js`. This early import also pulls `scene-settings.js` (~44 KB) and `loading-overlay.js`.           |
+| `./ui/player-light-picker-dialog.js`                                                                   | Moderate; acceptable if player-light tools must work early.                                                                                                                                                          |
+| `./core/gm-parity.js`, `./core/player-light-allowance.js`, `./foundry/level-navigation-keybindings.js` | Light; appropriate for synchronous keybinding registration.                                                                                                                                                          |
 
 **Top-level side effects in `module.js` (lines 438–732):**
 
@@ -101,14 +101,14 @@ sequenceDiagram
 
 **Suspicious / outdated items:**
 
-| Item | Location | Severity | Detail |
-|------|----------|----------|--------|
-| Empty try/catch blocks | `module.js` 1301–1309 | Low | Leftover scaffolding around `canvasReplacement.initialize()` — does nothing. |
-| Foundry version comments | `module.js` 832–839 | Low | Comments still say "v13"; `module.json` targets v14. |
-| Scene control tool order collision | `module.js` 1000 & 1079 | Low | Both `map-shine-gm-effect-controls` and `map-shine-player-light` use `order: 104`. |
-| **`canvas-replacement` loaded in `init`** | `module.js` 1305–1306 | **High** | ~507 KB file with **115 static imports** parsed during `init`, before `ready`/bootstrap. Most of this code only runs at `canvasReady`. |
-| Sidecar cache never populated | `module.js` 251, 344, 366 | **Medium** | `_msaSidecars` Map is documented as "Pre-fetched during the ready hook" but **no code ever calls `_msaSidecars.set()`**. Sidecar JSON fallback path is dead unless added elsewhere. |
-| Duplicate loading service wiring | `init` + `ready` | Low | `MapShine.loadingScreenService` assigned in both hooks; `LoadingScreenManager` created in `ready` and lazily on tool click in `init`. |
+| Item                                      | Location                  | Severity   | Detail                                                                                                                                                                              |
+| ----------------------------------------- | ------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Empty try/catch blocks                    | `module.js` 1301–1309     | Low        | Leftover scaffolding around `canvasReplacement.initialize()` — does nothing.                                                                                                        |
+| Foundry version comments                  | `module.js` 832–839       | Low        | Comments still say "v13"; `module.json` targets v14.                                                                                                                                |
+| Scene control tool order collision        | `module.js` 1000 & 1079   | Low        | Both `map-shine-gm-effect-controls` and `map-shine-player-light` use `order: 104`.                                                                                                  |
+| **`canvas-replacement` loaded in `init`** | `module.js` 1305–1306     | **High**   | ~507 KB file with **115 static imports** parsed during `init`, before `ready`/bootstrap. Most of this code only runs at `canvasReady`.                                              |
+| Sidecar cache never populated             | `module.js` 251, 344, 366 | **Medium** | `_msaSidecars` Map is documented as "Pre-fetched during the ready hook" but **no code ever calls `_msaSidecars.set()`**. Sidecar JSON fallback path is dead unless added elsewhere. |
+| Duplicate loading service wiring          | `init` + `ready`          | Low        | `MapShine.loadingScreenService` assigned in both hooks; `LoadingScreenManager` created in `ready` and lazily on tool click in `init`.                                               |
 
 **`canvas-replacement.initialize()` at init:**
 
@@ -129,15 +129,15 @@ Registers a very large hook surface area (`canvasConfig`, `canvasInit`, `drawCan
 
 **Bootstrap (`scripts/core/bootstrap.js`) — what it actually does:**
 
-| Step | Output | Used later? |
-|------|--------|-------------|
-| Dynamic import `three.custom.js` (~1.2 MB) | `window.THREE` | Yes — required by `createThreeCanvas` |
-| `capabilities.detect()` | WebGL probe context (explicitly released) | Yes — tier gating |
-| `rendererStrategy.create()` | **Primary WebGL renderer** | Yes — attached to DOM in `createThreeCanvas` |
-| `GameSystemManager` | `MapShine.gameSystem` | Yes — vision/fog adapters (PF2e, 5e, etc.) |
-| `new THREE.Scene()` + `OrthographicCamera` | `MapShine.scene`, `MapShine.camera` | **Likely unused** — compositor builds its own scene/camera stack |
-| `installConsoleHelpers()` | Large diagnostic surface on `window.MapShine` | Debug-only value; pulls heavy imports (calibration, profiler, replica mask helpers) at ready time |
-| `showSuccessNotification()` | UI toast | Runs on **every world load**, before any scene is shown |
+| Step                                       | Output                                        | Used later?                                                                                       |
+| ------------------------------------------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Dynamic import `three.custom.js` (~1.2 MB) | `window.THREE`                                | Yes — required by `createThreeCanvas`                                                             |
+| `capabilities.detect()`                    | WebGL probe context (explicitly released)     | Yes — tier gating                                                                                 |
+| `rendererStrategy.create()`                | **Primary WebGL renderer**                    | Yes — attached to DOM in `createThreeCanvas`                                                      |
+| `GameSystemManager`                        | `MapShine.gameSystem`                         | Yes — vision/fog adapters (PF2e, 5e, etc.)                                                        |
+| `new THREE.Scene()` + `OrthographicCamera` | `MapShine.scene`, `MapShine.camera`           | **Likely unused** — compositor builds its own scene/camera stack                                  |
+| `installConsoleHelpers()`                  | Large diagnostic surface on `window.MapShine` | Debug-only value; pulls heavy imports (calibration, profiler, replica mask helpers) at ready time |
+| `showSuccessNotification()`                | UI toast                                      | Runs on **every world load**, before any scene is shown                                           |
 
 **Suspicious bootstrap behavior:**
 
@@ -207,11 +207,11 @@ No `new MaskManager()` in this file. Only teardown references `window.MapShine.m
 
 ### 4. `canvas-replacement.js` monolith loaded at `init` (high)
 
-| Metric | Value |
-|--------|-------|
-| Lines | ~10,825 |
-| File size | ~507 KB |
-| Static `import` statements | ~115 |
+| Metric                     | Value   |
+| -------------------------- | ------- |
+| Lines                      | ~10,825 |
+| File size                  | ~507 KB |
+| Static `import` statements | ~115    |
 
 The file mixes: hook registration, `createThreeCanvas` orchestration, libWrapper patches, scene update filtering, teardown, diagnostics, GM console helpers, UI-only mode, recovery paths, and more. **All of it parses when `init` awaits the dynamic import**, even though scene-specific work waits until `canvasReady`.
 
@@ -267,11 +267,11 @@ Not necessarily wrong (Foundry token HUD + browser extensions issue), but it is 
 
 Several globals expose both legacy and V2 names:
 
-| Legacy / alias | V2 / actual |
-|----------------|-------------|
-| `MapShine.playerLightEffect` | `playerLightEffectV2` / `floorCompositorV2._playerLightEffect` |
-| `effectComposer._floorCompositorV2` | Primary render path |
-| `EffectComposer` class | Wrapper around `FloorCompositor` |
+| Legacy / alias                      | V2 / actual                                                    |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `MapShine.playerLightEffect`        | `playerLightEffectV2` / `floorCompositorV2._playerLightEffect` |
+| `effectComposer._floorCompositorV2` | Primary render path                                            |
+| `EffectComposer` class              | Wrapper around `FloorCompositor`                               |
 
 `module.js` `getPlayerLightEffectInstance()` checks three paths — reasonable defensive coding, but a sign that consolidation could simplify tooling code.
 
@@ -293,18 +293,18 @@ These were reviewed and appear to be deliberate, even if complex:
 
 ## Hook registration map (from `module.js` only)
 
-| Hook | Purpose |
-|------|---------|
-| `canvasDraw`, `canvasReady` | Fog native suppression (dynamic import) |
-| `init` (once) | Settings, loading overlay, scene controls, adventure hooks, canvas-replacement init |
-| `ready` (once) | Bootstrap, loading screen manager, no-scene overlay dismiss |
-| `renderSceneControls`, `canvasReady`, `controlToken`, `updateToken` | Player light tool UI state |
-| `getSceneControlButtons` | MSA toolbar buttons, fog reset override |
-| `getActorSheetHeaderButtons` | Movement style dialog |
-| `renderTileConfig` | Roof / bypass / cloud tile flags |
-| `renderTokenHUD` | Password manager ignores |
-| `preUpdateAdventure`, `preCreateAdventure` | Adventure export flag capture |
-| `preImportAdventure`, `importAdventure` | Adventure import injection + auto-enable |
+| Hook                                                                | Purpose                                                                             |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `canvasDraw`, `canvasReady`                                         | Fog native suppression (dynamic import)                                             |
+| `init` (once)                                                       | Settings, loading overlay, scene controls, adventure hooks, canvas-replacement init |
+| `ready` (once)                                                      | Bootstrap, loading screen manager, no-scene overlay dismiss                         |
+| `renderSceneControls`, `canvasReady`, `controlToken`, `updateToken` | Player light tool UI state                                                          |
+| `getSceneControlButtons`                                            | MSA toolbar buttons, fog reset override                                             |
+| `getActorSheetHeaderButtons`                                        | Movement style dialog                                                               |
+| `renderTileConfig`                                                  | Roof / bypass / cloud tile flags                                                    |
+| `renderTokenHUD`                                                    | Password manager ignores                                                            |
+| `preUpdateAdventure`, `preCreateAdventure`                          | Adventure export flag capture                                                       |
+| `preImportAdventure`, `importAdventure`                             | Adventure import injection + auto-enable                                            |
 
 All canvas lifecycle hooks beyond fog suppression live in `canvas-replacement.initialize()`.
 
@@ -312,16 +312,16 @@ All canvas lifecycle hooks beyond fog suppression live in `canvas-replacement.in
 
 ## Suggested prioritization (for future work — not done in this audit)
 
-| Priority | Item | Expected benefit |
-|----------|------|------------------|
-| P0 | Remove unused `ParticleSystem` import from `canvas-replacement.js` | Large reduction in init-time JS parse/eval |
-| P1 | Split `canvas-replacement.js` hook facade vs scene loader | Faster init, clearer ownership |
-| P1 | Lazy-import `weather-sync-bridge` in socket registrar | Slimmer entry module graph |
-| P2 | Implement or remove `_msaSidecars` prefetch + docs | Correct adventure import fallback |
-| P2 | Remove empty `lib/lib.js` from `module.json` | Minor cleanup |
-| P2 | Bootstrap: `skipSceneInit: true` by default; drop success toast or defer to first scene | Less wasted GPU objects / UI noise |
-| P3 | Update ARCHITECTURE-SUMMARY version/platform | Documentation accuracy |
-| P3 | Remove duplicate password guard call + empty try/catch blocks in `module.js` | Housekeeping |
+| Priority | Item                                                                                    | Expected benefit                           |
+| -------- | --------------------------------------------------------------------------------------- | ------------------------------------------ |
+| P0       | Remove unused `ParticleSystem` import from `canvas-replacement.js`                      | Large reduction in init-time JS parse/eval |
+| P1       | Split `canvas-replacement.js` hook facade vs scene loader                               | Faster init, clearer ownership             |
+| P1       | Lazy-import `weather-sync-bridge` in socket registrar                                   | Slimmer entry module graph                 |
+| P2       | Implement or remove `_msaSidecars` prefetch + docs                                      | Correct adventure import fallback          |
+| P2       | Remove empty `lib/lib.js` from `module.json`                                            | Minor cleanup                              |
+| P2       | Bootstrap: `skipSceneInit: true` by default; drop success toast or defer to first scene | Less wasted GPU objects / UI noise         |
+| P3       | Update ARCHITECTURE-SUMMARY version/platform                                            | Documentation accuracy                     |
+| P3       | Remove duplicate password guard call + empty try/catch blocks in `module.js`            | Housekeeping                               |
 
 ---
 
@@ -373,11 +373,11 @@ Beyond the P0 `ParticleSystem` import issue, the codebase contains **several ent
 
 These symbols are imported at the top of the file but never referenced in code (grep-verified). Each one still forces its module graph to parse when `canvas-replacement` loads during `init`.
 
-| Import | File | Impact |
-|--------|------|--------|
-| `ParticleSystem` | `particles/ParticleSystem.js` | **Critical** — transitively loads `WeatherParticles.js` (~465 KB), `EffectComposer.js`, `WeatherController.js`, Quarks |
-| `MaskManager` | `masks/MaskManager.js` (~456 lines) | Class never instantiated; replaced by `GpuSceneMaskCompositor` |
-| `clearAssetCache` | `assets/loader.js` | Only mentioned in a comment at line 10791; `warmupBundleTextures` / `getCacheStats` are used |
+| Import            | File                                | Impact                                                                                                                 |
+| ----------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `ParticleSystem`  | `particles/ParticleSystem.js`       | **Critical** — transitively loads `WeatherParticles.js` (~465 KB), `EffectComposer.js`, `WeatherController.js`, Quarks |
+| `MaskManager`     | `masks/MaskManager.js` (~456 lines) | Class never instantiated; replaced by `GpuSceneMaskCompositor`                                                         |
+| `clearAssetCache` | `assets/loader.js`                  | Only mentioned in a comment at line 10791; `warmupBundleTextures` / `getCacheStats` are used                           |
 
 **Action:** Delete the three imports. No replacement needed.
 
@@ -387,11 +387,11 @@ These symbols are imported at the top of the file but never referenced in code (
 
 These modules are pulled into the `canvas-replacement` graph, have module-scope variables and dispose paths, but **`new …()` never appears anywhere in the repo**.
 
-| Subsystem | File | Evidence | Notes |
-|-----------|------|----------|-------|
-| **DepthPassManager** | `scene/depth-pass-manager.js` (~624 lines) | `depthPassManager` stays `null`; teardown at 10711–10714 is unreachable | Comment at 7765–7766 explicitly says *"V2: Depth passes are not used"*. `EffectComposer.setDepthPassManager()` exists but is never called. Tweakpane still exposes depth-pass debug bindings. |
-| **MaskManager** | `masks/MaskManager.js` (~456 lines) | `setMaskManager()` only defined, never called; `window.MapShine.maskManager` only set to `null` on teardown | Superseded by `GpuSceneMaskCompositor` via `SceneComposer`. Comments at 1281, 6662, 7736 acknowledge removal. |
-| **DynamicExposureManager** | `core/DynamicExposureManager.js` (~714 lines) | `dynamicExposureManager` stays `null`; passed to `exposeGlobals` as null | **Tweakpane UI still has a full "Dynamic Exposure" folder** (`tweakpane-manager.js` ~1877+) calling `window.MapShine?.dynamicExposureManager` — feature is visible in UI but non-functional. `FloorCompositor` comments reference it as the intended driver for `ContextualSceneGradeEffectV2`. |
+| Subsystem                  | File                                          | Evidence                                                                                                    | Notes                                                                                                                                                                                                                                                                                           |
+| -------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **DepthPassManager**       | `scene/depth-pass-manager.js` (~624 lines)    | `depthPassManager` stays `null`; teardown at 10711–10714 is unreachable                                     | Comment at 7765–7766 explicitly says _"V2: Depth passes are not used"_. `EffectComposer.setDepthPassManager()` exists but is never called. Tweakpane still exposes depth-pass debug bindings.                                                                                                   |
+| **MaskManager**            | `masks/MaskManager.js` (~456 lines)           | `setMaskManager()` only defined, never called; `window.MapShine.maskManager` only set to `null` on teardown | Superseded by `GpuSceneMaskCompositor` via `SceneComposer`. Comments at 1281, 6662, 7736 acknowledge removal.                                                                                                                                                                                   |
+| **DynamicExposureManager** | `core/DynamicExposureManager.js` (~714 lines) | `dynamicExposureManager` stays `null`; passed to `exposeGlobals` as null                                    | **Tweakpane UI still has a full "Dynamic Exposure" folder** (`tweakpane-manager.js` ~1877+) calling `window.MapShine?.dynamicExposureManager` — feature is visible in UI but non-functional. `FloorCompositor` comments reference it as the intended driver for `ContextualSceneGradeEffectV2`. |
 
 **Streamlining options (pick one per subsystem):**
 
@@ -405,14 +405,14 @@ These modules are pulled into the `canvas-replacement` graph, have module-scope 
 
 Grep for `from '…FileName` across `scripts/` found **no imports** for:
 
-| File | Lines | Notes |
-|------|-------|-------|
-| `effects/LightRegistry.js` | ~200+ | V1 light registry |
-| `effects/MapShineLightAdapter.js` | ~200+ | V1 light adapter |
-| `effects/DebugLayerEffect.js` | ~508 | V1 debug effect; only listed in `tools/audit-tweakpane-schema-refs.mjs` |
-| `effects/MaskDebugEffect.js` | ~440 | V1 mask debug; superseded by `compositor-v2/MaskDebugOverlayPass.js` |
-| `effects/LightingEffect_setBaseMesh.js` | 8 | Stray method snippet, not a module |
-| `scripts/lib/lib.js` | 0 | Listed in `module.json` `"scripts"` array |
+| File                                    | Lines | Notes                                                                   |
+| --------------------------------------- | ----- | ----------------------------------------------------------------------- |
+| `effects/LightRegistry.js`              | ~200+ | V1 light registry                                                       |
+| `effects/MapShineLightAdapter.js`       | ~200+ | V1 light adapter                                                        |
+| `effects/DebugLayerEffect.js`           | ~508  | V1 debug effect; only listed in `tools/audit-tweakpane-schema-refs.mjs` |
+| `effects/MaskDebugEffect.js`            | ~440  | V1 mask debug; superseded by `compositor-v2/MaskDebugOverlayPass.js`    |
+| `effects/LightingEffect_setBaseMesh.js` | 8     | Stray method snippet, not a module                                      |
+| `scripts/lib/lib.js`                    | 0     | Listed in `module.json` `"scripts"` array                               |
 
 **Action:** Safe to delete after confirming no dynamic `import()` paths (none found). Update audit tool references for debug effects.
 
@@ -424,10 +424,10 @@ Grep for `from '…FileName` across `scripts/` found **no imports** for:
 
 ### D.1 Two loading curtain implementations
 
-| Curtain | File | Loading API | Used for |
-|---------|------|-------------|----------|
-| **Scene transition** | `scene/scene-transition-curtain.js` | `loadingScreenService` (unified) | Full Foundry scene switches (`canvas-replacement` tearDown / reset paths) |
-| **Level transition** | `scene/level-transition-curtain.js` | **`loading-overlay.js` directly** (legacy) | Floor/level changes via `CameraFollower` |
+| Curtain              | File                                | Loading API                                | Used for                                                                  |
+| -------------------- | ----------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------- |
+| **Scene transition** | `scene/scene-transition-curtain.js` | `loadingScreenService` (unified)           | Full Foundry scene switches (`canvas-replacement` tearDown / reset paths) |
+| **Level transition** | `scene/level-transition-curtain.js` | **`loading-overlay.js` directly** (legacy) | Floor/level changes via `CameraFollower`                                  |
 
 `level-transition-curtain.js` bypasses `LoadingScreenService`, so styled loading screens / presets may not apply during level changes. `module.js` also side-effect-imports `level-transition-curtain.js` at parse time even though only `manager-wiring.js` instantiates it.
 
@@ -480,69 +480,69 @@ Each flag gates an early-exit branch (~7644, 7747, 7751, 8003, 9681, 9904) left 
 
 Similar **perf-test kill-switches** (currently `false`, could be removed or moved to debug settings):
 
-| Flag | File |
-|------|------|
+| Flag                    | File                          |
+| ----------------------- | ----------------------------- |
 | `DISABLE_ALL_PARTICLES` | `particles/ParticleSystem.js` |
-| `DISABLE_TILE_UPDATES` | `scene/tile-manager.js` |
+| `DISABLE_TILE_UPDATES`  | `scene/tile-manager.js`       |
 
 ---
 
 ## F. Bootstrap & ready-hook streamlining
 
-| Item | Current behavior | Recommendation |
-|------|------------------|----------------|
-| Throwaway `THREE.Scene` + `OrthographicCamera` | Created on every bootstrap unless `skipSceneInit` | Default bootstrap to `skipSceneInit: true`; remove scene/camera from bootstrap state |
-| `showSuccessNotification()` | Toast on every world load at end of bootstrap | Defer until first successful `createThreeCanvas`, or remove |
-| `installConsoleHelpers()` | Runs at bootstrap; pulls ~3,323-line module with calibration/profiler deps | Defer until first scene load or GM enables debug mode |
-| Duplicate `loadingScreenService` init | Assigned in both `init` and `ready` hooks | Keep `init` only; `ready` can reuse instance |
-| `LoadingScreenManager` | Created in `ready` + lazily on toolbar click in `init` | Pick one path |
+| Item                                           | Current behavior                                                           | Recommendation                                                                       |
+| ---------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Throwaway `THREE.Scene` + `OrthographicCamera` | Created on every bootstrap unless `skipSceneInit`                          | Default bootstrap to `skipSceneInit: true`; remove scene/camera from bootstrap state |
+| `showSuccessNotification()`                    | Toast on every world load at end of bootstrap                              | Defer until first successful `createThreeCanvas`, or remove                          |
+| `installConsoleHelpers()`                      | Runs at bootstrap; pulls ~3,323-line module with calibration/profiler deps | Defer until first scene load or GM enables debug mode                                |
+| Duplicate `loadingScreenService` init          | Assigned in both `init` and `ready` hooks                                  | Keep `init` only; `ready` can reuse instance                                         |
+| `LoadingScreenManager`                         | Created in `ready` + lazily on toolbar click in `init`                     | Pick one path                                                                        |
 
 ---
 
 ## G. `module.js` housekeeping (quick wins)
 
-| Item | Lines | Action |
-|------|-------|--------|
-| Empty try/catch around `canvasReplacement.initialize()` | 1301–1309 | Delete empty blocks |
-| Duplicate `_installGlobalPasswordManagerInsertGuard()` | 438 + 740 | Keep one call (init hook) |
-| Side-effect `import './scene/level-transition-curtain.js'` | 19 | Remove — loaded by `manager-wiring.js` when needed |
-| Scene control `order: 104` collision | GM effect controls + player light | Assign unique orders |
-| `_msaSidecars` never populated | 251–366 | Implement prefetch in `ready` **or** delete sidecar fallback + comments |
+| Item                                                       | Lines                             | Action                                                                  |
+| ---------------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------------- |
+| Empty try/catch around `canvasReplacement.initialize()`    | 1301–1309                         | Delete empty blocks                                                     |
+| Duplicate `_installGlobalPasswordManagerInsertGuard()`     | 438 + 740                         | Keep one call (init hook)                                               |
+| Side-effect `import './scene/level-transition-curtain.js'` | 19                                | Remove — loaded by `manager-wiring.js` when needed                      |
+| Scene control `order: 104` collision                       | GM effect controls + player light | Assign unique orders                                                    |
+| `_msaSidecars` never populated                             | 251–366                           | Implement prefetch in `ready` **or** delete sidecar fallback + comments |
 
 ---
 
 ## H. What must NOT be removed (common false positives)
 
-| Asset | Why it stays |
-|-------|--------------|
-| `WeatherParticles.js` (V1 class) | Wrapped by `WeatherParticlesV2`; live particle simulation |
-| `SmellyFliesEffect.js` | Instantiated in `FloorCompositor`, not a V2 class yet |
-| `EffectComposer.js` | Active orchestrator despite name |
-| `SceneComposer.js` | Owns `GpuSceneMaskCompositor` |
-| `DetectionFilterEffect.js` | Constructed in `createThreeCanvas` |
-| `ThreeLightSource` / `ThreeDarknessSource` | Used by `LightingEffectV2` |
-| Adventure import/export hooks in `module.js` | Working auto-capture path (sidecar is the broken part) |
-| Isolation/recovery infrastructure in `LoadCoordinator` | Active safety net |
+| Asset                                                  | Why it stays                                              |
+| ------------------------------------------------------ | --------------------------------------------------------- |
+| `WeatherParticles.js` (V1 class)                       | Wrapped by `WeatherParticlesV2`; live particle simulation |
+| `SmellyFliesEffect.js`                                 | Instantiated in `FloorCompositor`, not a V2 class yet     |
+| `EffectComposer.js`                                    | Active orchestrator despite name                          |
+| `SceneComposer.js`                                     | Owns `GpuSceneMaskCompositor`                             |
+| `DetectionFilterEffect.js`                             | Constructed in `createThreeCanvas`                        |
+| `ThreeLightSource` / `ThreeDarknessSource`             | Used by `LightingEffectV2`                                |
+| Adventure import/export hooks in `module.js`           | Working auto-capture path (sidecar is the broken part)    |
+| Isolation/recovery infrastructure in `LoadCoordinator` | Active safety net                                         |
 
 ---
 
 ## Updated prioritization (removal & streamlining)
 
-| Priority | Item | Type | Est. savings |
-|----------|------|------|--------------|
-| **P0** | Remove dead imports: `ParticleSystem`, `MaskManager`, `clearAssetCache` | Delete | **~700 KB+ parse graph** |
-| **P0** | Remove empty `lib/lib.js` from `module.json` | Delete | Trivial |
-| **P1** | Delete or rewire `DepthPassManager` + teardown + Tweakpane depth UI | Remove or fix | ~624 lines + import graph |
-| **P1** | Delete or rewire `DynamicExposureManager` + Tweakpane folder | Remove or fix | ~714 lines; fixes broken UI |
-| **P1** | Delete orphan files: `LightRegistry`, `MapShineLightAdapter`, `DebugLayerEffect`, `MaskDebugEffect`, `LightingEffect_setBaseMesh.js` | Delete | ~1,150+ lines |
-| **P1** | Consolidate V2 effect imports through `effect-wiring.js` only | Refactor | Cleaner graph; fewer duplicate module evals |
-| **P1** | Split `canvas-replacement.js` → hooks facade + deferred scene loader | Refactor | Faster init |
-| **P2** | Unify curtains on `loadingScreenService`; drop legacy overlay import in level curtain | Refactor | UX consistency |
-| **P2** | Remove isolation flag dead branches in `createThreeCanvas` | Delete | ~250 lines |
-| **P2** | Lazy-import weather bridge + defer console helpers | Refactor | Slimmer entry / ready |
-| **P2** | Bootstrap: skip scene init, defer toast, defer console helpers | Refactor | Less wasted work at ready |
-| **P3** | Delete `MaskManager.js` after confirming no external consumers | Delete | ~456 lines |
-| **P3** | `module.js` housekeeping (empty try/catch, duplicate guard, sidecar docs) | Delete/fix | Clarity |
+| Priority | Item                                                                                                                                 | Type          | Est. savings                                |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------- | ------------------------------------------- |
+| **P0**   | Remove dead imports: `ParticleSystem`, `MaskManager`, `clearAssetCache`                                                              | Delete        | **~700 KB+ parse graph**                    |
+| **P0**   | Remove empty `lib/lib.js` from `module.json`                                                                                         | Delete        | Trivial                                     |
+| **P1**   | Delete or rewire `DepthPassManager` + teardown + Tweakpane depth UI                                                                  | Remove or fix | ~624 lines + import graph                   |
+| **P1**   | Delete or rewire `DynamicExposureManager` + Tweakpane folder                                                                         | Remove or fix | ~714 lines; fixes broken UI                 |
+| **P1**   | Delete orphan files: `LightRegistry`, `MapShineLightAdapter`, `DebugLayerEffect`, `MaskDebugEffect`, `LightingEffect_setBaseMesh.js` | Delete        | ~1,150+ lines                               |
+| **P1**   | Consolidate V2 effect imports through `effect-wiring.js` only                                                                        | Refactor      | Cleaner graph; fewer duplicate module evals |
+| **P1**   | Split `canvas-replacement.js` → hooks facade + deferred scene loader                                                                 | Refactor      | Faster init                                 |
+| **P2**   | Unify curtains on `loadingScreenService`; drop legacy overlay import in level curtain                                                | Refactor      | UX consistency                              |
+| **P2**   | Remove isolation flag dead branches in `createThreeCanvas`                                                                           | Delete        | ~250 lines                                  |
+| **P2**   | Lazy-import weather bridge + defer console helpers                                                                                   | Refactor      | Slimmer entry / ready                       |
+| **P2**   | Bootstrap: skip scene init, defer toast, defer console helpers                                                                       | Refactor      | Less wasted work at ready                   |
+| **P3**   | Delete `MaskManager.js` after confirming no external consumers                                                                       | Delete        | ~456 lines                                  |
+| **P3**   | `module.js` housekeeping (empty try/catch, duplicate guard, sidecar docs)                                                            | Delete/fix    | Clarity                                     |
 
 ---
 
@@ -591,7 +591,7 @@ Split canvas-replacement, consolidate effect-wiring imports, lazy weather bridge
 
 ## Executive summary (Part 3)
 
-The live runtime is **V2-only**: `createThreeCanvas` logs *"legacy V1 paths bypassed"* and leaves `controlsIntegration = null` in baseline mode. Several large subsystems were started but never wired (`SceneContext`, `ControlsIntegration`, `MaskManager`, `DepthPassManager`). A separate **`V3_module/` tree** (46 files) is not referenced by `module.json` and appears to be experimental scratch code. Multiple V1 `EffectBase` effects remain on disk with zero importers.
+The live runtime is **V2-only**: `createThreeCanvas` logs _"legacy V1 paths bypassed"_ and leaves `controlsIntegration = null` in baseline mode. Several large subsystems were started but never wired (`SceneContext`, `ControlsIntegration`, `MaskManager`, `DepthPassManager`). A separate **`V3_module/` tree** (46 files) is not referenced by `module.json` and appears to be experimental scratch code. Multiple V1 `EffectBase` effects remain on disk with zero importers.
 
 ---
 
@@ -599,11 +599,11 @@ The live runtime is **V2-only**: `createThreeCanvas` logs *"legacy V1 paths bypa
 
 Verified beyond Part 2:
 
-| Import | Evidence | Action |
-|--------|----------|--------|
-| `TileEffectBindingManager` | Only appears on import line; live usage is in `tile-manager.js` | Remove import |
-| `LightEnhancementStore` | Only in import line + stale comment `_depEffectTotal` (line 7777); never `new LightEnhancementStore` | Remove import; delete store file |
-| `ControlsIntegration` | Import + ~15 references, but **`new ControlsIntegration` → 0 matches**; V2 baseline always sets `controlsIntegration = null` (8483–8486) | Remove import and dead Map Maker / hybrid branches |
+| Import                     | Evidence                                                                                                                                 | Action                                             |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `TileEffectBindingManager` | Only appears on import line; live usage is in `tile-manager.js`                                                                          | Remove import                                      |
+| `LightEnhancementStore`    | Only in import line + stale comment `_depEffectTotal` (line 7777); never `new LightEnhancementStore`                                     | Remove import; delete store file                   |
+| `ControlsIntegration`      | Import + ~15 references, but **`new ControlsIntegration` → 0 matches**; V2 baseline always sets `controlsIntegration = null` (8483–8486) | Remove import and dead Map Maker / hybrid branches |
 
 **Extended P0 dead-import list for `canvas-replacement.js`:**
 
@@ -615,14 +615,14 @@ Verified beyond Part 2:
 
 ### J.1 `ControlsIntegration` stack (~2,000+ lines)
 
-| File | Lines | Status |
-|------|-------|--------|
-| `foundry/controls-integration.js` | ~1,970 | Never constructed |
-| `foundry/input-router.js` | (child) | Only used by ControlsIntegration |
+| File                                  | Lines   | Status                           |
+| ------------------------------------- | ------- | -------------------------------- |
+| `foundry/controls-integration.js`     | ~1,970  | Never constructed                |
+| `foundry/input-router.js`             | (child) | Only used by ControlsIntegration |
 | `foundry/layer-visibility-manager.js` | (child) | Only used by ControlsIntegration |
-| `foundry/camera-sync.js` | (child) | Only used by ControlsIntegration |
+| `foundry/camera-sync.js`              | (child) | Only used by ControlsIntegration |
 
-V2 baseline explicitly skips this at load (8483: *"ControlsIntegration SKIPPED (V2 baseline)"*). Map Maker re-enable paths in the same file appear unreachable in normal play.
+V2 baseline explicitly skips this at load (8483: _"ControlsIntegration SKIPPED (V2 baseline)"_). Map Maker re-enable paths in the same file appear unreachable in normal play.
 
 **Action:** If Map Maker / hybrid PIXI mode is permanently retired, delete the stack and strip related branches from `canvas-replacement.js`. If not, document the re-enable flag and remove the import from the default load graph via dynamic import.
 
@@ -664,14 +664,14 @@ Dev regression helper under `core/diagnostics/` — **zero importers**, never re
 
 ## K. Additional orphan files (zero runtime importers)
 
-| File | Lines | Notes |
-|------|-------|-------|
-| `particles/DustMotesEffect.js` | ~1,045 | V1 `EffectBase`; only in `audit-tweakpane-schema-refs.mjs` |
-| `effects/FoundryAnimatedLightingShaders.js` | ~104 | Duplicate of animated shader paths in `FoundryLightingShaderChunks.js` → `ThreeLightSource.js` |
-| `effects/LightEnhancementStore.js` | ~162 | Imported but never constructed |
-| `core/scene-context.js` | ~337 | Unfinished refactor container |
-| `foundry/unified-camera.js` | ~815 | Never instantiated |
-| `core/diagnostics/load-refactor-regression-check.js` | small | Never hooked |
+| File                                                 | Lines  | Notes                                                                                          |
+| ---------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------- |
+| `particles/DustMotesEffect.js`                       | ~1,045 | V1 `EffectBase`; only in `audit-tweakpane-schema-refs.mjs`                                     |
+| `effects/FoundryAnimatedLightingShaders.js`          | ~104   | Duplicate of animated shader paths in `FoundryLightingShaderChunks.js` → `ThreeLightSource.js` |
+| `effects/LightEnhancementStore.js`                   | ~162   | Imported but never constructed                                                                 |
+| `core/scene-context.js`                              | ~337   | Unfinished refactor container                                                                  |
+| `foundry/unified-camera.js`                          | ~815   | Never instantiated                                                                             |
+| `core/diagnostics/load-refactor-regression-check.js` | small  | Never hooked                                                                                   |
 
 Part 2 orphans still apply: `LightRegistry.js`, `MapShineLightAdapter.js`, `DebugLayerEffect.js`, `MaskDebugEffect.js`, `LightingEffect_setBaseMesh.js`, empty `lib/lib.js`.
 
@@ -681,7 +681,7 @@ Part 2 orphans still apply: `LightRegistry.js`, `MapShineLightAdapter.js`, `Debu
 
 ### L.1 Mask fan-out: legacy sync vs `MaskBindingController`
 
-`FloorCompositor` runs **`_syncOutdoorsMaskConsumers`** on every relevant update. **`MaskBindingController`** only activates when `window.MapShine.maskBindingControllerEnabled === true` (defaults **false**). Comments describe running both *"during rollout"*.
+`FloorCompositor` runs **`_syncOutdoorsMaskConsumers`** on every relevant update. **`MaskBindingController`** only activates when `window.MapShine.maskBindingControllerEnabled === true` (defaults **false**). Comments describe running both _"during rollout"_.
 
 **Streamline:** Enable controller by default, validate, delete legacy sync path (~complexity in FloorCompositor).
 
@@ -705,9 +705,9 @@ Still exports `EffectBase`, `SceneMeshEffect`, `PostProcessEffect`, `ParticleEff
 
 ### L.5 Dual loading curtains (from Part 2 — confirmed)
 
-| Curtain | Loading API |
-|---------|-------------|
-| `scene-transition-curtain.js` | `loadingScreenService` |
+| Curtain                       | Loading API                          |
+| ----------------------------- | ------------------------------------ |
+| `scene-transition-curtain.js` | `loadingScreenService`               |
 | `level-transition-curtain.js` | Legacy `loading-overlay.js` directly |
 
 Styled presets may not apply during floor changes.
@@ -739,10 +739,10 @@ Runtime only imports `scripts/vendor/three/three.custom.js` (via `bootstrap.js`)
 
 ### M.3 Stale tool artifacts
 
-| Path | Notes |
-|------|-------|
+| Path                                                 | Notes                   |
+| ---------------------------------------------------- | ----------------------- |
 | `scripts/tools/_mad-scientist-export-2026-06-02.txt` | Data dump, not imported |
-| `scripts/tools/_lightning-storm-export.txt` | Same |
+| `scripts/tools/_lightning-storm-export.txt`          | Same                    |
 
 **Action:** Delete or add to `.gitignore`.
 
@@ -768,15 +768,15 @@ Update after file deletion in Batch 2.
 
 ## O. `@deprecated` / removal signals in live code
 
-| Location | Signal |
-|----------|--------|
-| `canvas-replacement.js` ~7762 | `"legacy V1 paths bypassed"` |
-| `canvas-replacement.js` ~8483 | `ControlsIntegration SKIPPED (V2 baseline)` |
-| `canvas-replacement.js` ~2200 | `visionManager and fogManager are no longer used` (module-scope vars may remain) |
-| `FloorCompositor.js` | `_isMaskBindingControllerEnabled()` — legacy sync is default |
-| `scene/composer.js` | Multiple `@deprecated Use GpuSceneMaskCompositor` methods |
-| `compositor-v2/effects/OverheadShadowsEffectV2.js` | Deprecated re-export |
-| `interaction-manager.js` ~4964 | Tree canopy hover-hide noted as *"V1-only feature"* |
+| Location                                           | Signal                                                                           |
+| -------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `canvas-replacement.js` ~7762                      | `"legacy V1 paths bypassed"`                                                     |
+| `canvas-replacement.js` ~8483                      | `ControlsIntegration SKIPPED (V2 baseline)`                                      |
+| `canvas-replacement.js` ~2200                      | `visionManager and fogManager are no longer used` (module-scope vars may remain) |
+| `FloorCompositor.js`                               | `_isMaskBindingControllerEnabled()` — legacy sync is default                     |
+| `scene/composer.js`                                | Multiple `@deprecated Use GpuSceneMaskCompositor` methods                        |
+| `compositor-v2/effects/OverheadShadowsEffectV2.js` | Deprecated re-export                                                             |
+| `interaction-manager.js` ~4964                     | Tree canopy hover-hide noted as _"V1-only feature"_                              |
 
 These comments mark safe follow-up audits after Batch 1–3 land.
 
@@ -784,22 +784,22 @@ These comments mark safe follow-up audits after Batch 1–3 land.
 
 ## P. Revised master prioritization (Parts 1–3 combined)
 
-| Priority | Item | Est. impact |
-|----------|------|-------------|
-| **P0** | Remove all dead imports in `canvas-replacement.js` (7 imports — see section I) | **~700 KB+ init parse** |
-| **P0** | Remove empty `lib/lib.js` from `module.json` | Trivial |
-| **P1** | Delete V1 orphan effects: `DustMotesEffect`, `ParticleSystem` wrapper, `DebugLayerEffect`, `MaskDebugEffect` | ~2,000+ lines |
-| **P1** | Delete unwired: `SceneContext`, `LightEnhancementStore`, `FoundryAnimatedLightingShaders`, `unified-camera.js`, `LightRegistry`, `MapShineLightAdapter` | ~2,400+ lines |
-| **P1** | `MaskManager`: delete file + strip all `maskManager?.` fallbacks | ~456 lines + scattered branches |
-| **P1** | `ControlsIntegration` stack: delete or dynamic-import for Map Maker only | ~2,000+ lines |
-| **P1** | `DepthPassManager` + `DynamicExposureManager`: delete or rewire | ~1,300 lines; fixes broken exposure UI |
-| **P1** | Consolidate effect schema imports via `effect-wiring.js` | Cleaner init graph |
-| **P2** | Split `canvas-replacement.js` (hooks vs scene loader) | Faster init |
-| **P2** | Unify curtains on `loadingScreenService` | UX consistency |
-| **P2** | Finish `MaskBindingController` rollout; remove `_syncOutdoorsMaskConsumers` | Runtime simplification |
-| **P2** | Remove isolation branches + bootstrap deferrals | ~250+ lines; less ready-hook work |
-| **P3** | Exclude `V3_module/` + unused three bundles from release zip | Smaller artifact |
-| **P3** | Update `audit-tweakpane-schema-refs.mjs`, ARCHITECTURE-SUMMARY, `module.js` housekeeping | Docs/tooling hygiene |
+| Priority | Item                                                                                                                                                    | Est. impact                            |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| **P0**   | Remove all dead imports in `canvas-replacement.js` (7 imports — see section I)                                                                          | **~700 KB+ init parse**                |
+| **P0**   | Remove empty `lib/lib.js` from `module.json`                                                                                                            | Trivial                                |
+| **P1**   | Delete V1 orphan effects: `DustMotesEffect`, `ParticleSystem` wrapper, `DebugLayerEffect`, `MaskDebugEffect`                                            | ~2,000+ lines                          |
+| **P1**   | Delete unwired: `SceneContext`, `LightEnhancementStore`, `FoundryAnimatedLightingShaders`, `unified-camera.js`, `LightRegistry`, `MapShineLightAdapter` | ~2,400+ lines                          |
+| **P1**   | `MaskManager`: delete file + strip all `maskManager?.` fallbacks                                                                                        | ~456 lines + scattered branches        |
+| **P1**   | `ControlsIntegration` stack: delete or dynamic-import for Map Maker only                                                                                | ~2,000+ lines                          |
+| **P1**   | `DepthPassManager` + `DynamicExposureManager`: delete or rewire                                                                                         | ~1,300 lines; fixes broken exposure UI |
+| **P1**   | Consolidate effect schema imports via `effect-wiring.js`                                                                                                | Cleaner init graph                     |
+| **P2**   | Split `canvas-replacement.js` (hooks vs scene loader)                                                                                                   | Faster init                            |
+| **P2**   | Unify curtains on `loadingScreenService`                                                                                                                | UX consistency                         |
+| **P2**   | Finish `MaskBindingController` rollout; remove `_syncOutdoorsMaskConsumers`                                                                             | Runtime simplification                 |
+| **P2**   | Remove isolation branches + bootstrap deferrals                                                                                                         | ~250+ lines; less ready-hook work      |
+| **P3**   | Exclude `V3_module/` + unused three bundles from release zip                                                                                            | Smaller artifact                       |
+| **P3**   | Update `audit-tweakpane-schema-refs.mjs`, ARCHITECTURE-SUMMARY, `module.js` housekeeping                                                                | Docs/tooling hygiene                   |
 
 ---
 
@@ -845,16 +845,16 @@ V3_module exclusion; unused three.js bundles; dev snippet organization.
 
 ### Done
 
-| Change | Files / notes |
-|--------|----------------|
-| Removed dead imports from `canvas-replacement.js` | `ParticleSystem`, `MaskManager`, `TileEffectBindingManager`, `LightEnhancementStore`, `DepthPassManager`, `clearAssetCache` |
-| Removed isolation-mode dead branches | `_finishIsolation`, seven `isolate*` flags and early-exit blocks |
-| Removed unreachable teardown | `MaskManager.dispose`, `depthPassManager` dispose |
-| `module.js` housekeeping | Removed duplicate password guard at eval time, empty try/catch around canvas init, side-effect import of `level-transition-curtain.js` |
-| `module.json` | Removed empty `scripts/lib/lib.js` entry |
-| Deleted orphan V1 / unwired files | See Batch 2 list below |
-| Deleted `V3_module/` | Experimental prototype tree (46 files) |
-| Updated `audit-tweakpane-schema-refs.mjs` | Removed dead V1 effect paths |
+| Change                                            | Files / notes                                                                                                                          |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Removed dead imports from `canvas-replacement.js` | `ParticleSystem`, `MaskManager`, `TileEffectBindingManager`, `LightEnhancementStore`, `DepthPassManager`, `clearAssetCache`            |
+| Removed isolation-mode dead branches              | `_finishIsolation`, seven `isolate*` flags and early-exit blocks                                                                       |
+| Removed unreachable teardown                      | `MaskManager.dispose`, `depthPassManager` dispose                                                                                      |
+| `module.js` housekeeping                          | Removed duplicate password guard at eval time, empty try/catch around canvas init, side-effect import of `level-transition-curtain.js` |
+| `module.json`                                     | Removed empty `scripts/lib/lib.js` entry                                                                                               |
+| Deleted orphan V1 / unwired files                 | See Batch 2 list below                                                                                                                 |
+| Deleted `V3_module/`                              | Experimental prototype tree (46 files)                                                                                                 |
+| Updated `audit-tweakpane-schema-refs.mjs`         | Removed dead V1 effect paths                                                                                                           |
 
 ### Orphan files deleted
 

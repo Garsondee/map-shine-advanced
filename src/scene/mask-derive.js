@@ -1,7 +1,11 @@
 /**
  * MASK DERIVATION — the pure math that turns ingested coarse content (art
  * opacity, outdoors masks) into the catalog's DERIVED products (coverAbove,
- * skyReach), per floor, on a fixed small scene-space grid.
+ * skyReach) PLUS the raw rasterized `outdoors` value alone (2026-07-21 —
+ * see `DerivedFloorProducts`'s own doc for why a general "is this indoors"
+ * signal needs to exist SEPARATELY from skyReach's narrower, rain-specific
+ * "is there open sky above me" question), per floor, on a fixed small
+ * scene-space grid.
  *
  * ============================================================================
  * THE KEYHOLE SHAPE OF THIS (why it is a few KB of Uint8, not a render pass)
@@ -138,9 +142,16 @@ export function itemWorldCorners(placement) {
  * @param {MaskGrid} grid
  * @param {ContentGrid} content
  * @param {Parameters<typeof worldToItemUv>[0]} placement
+ * @param {number} [valueScale=1] - multiplier applied to each sampled byte
+ *   before the MAX. 1 = plain coverage (the `coverAbove` case). For the caster
+ *   height field this carries the caster's HEIGHT: a fully-opaque texel writes
+ *   the full height, and a half-covered silhouette texel writes half — which is
+ *   not a rounding artefact but the soft edge a real penumbra wants.
  */
-export function compositeItemMax(grid, content, placement) {
+export function compositeItemMax(grid, content, placement, valueScale = 1) {
   const { spec, data } = grid;
+  const scale = Number.isFinite(valueScale) ? Math.max(0, valueScale) : 1;
+  if (scale === 0) return;
   const corners = itemWorldCorners(placement);
   const minX = Math.min(...corners.map((c) => c.x));
   const maxX = Math.max(...corners.map((c) => c.x));
@@ -160,7 +171,8 @@ export function compositeItemMax(grid, content, placement) {
       if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
       const cx = Math.min(content.w - 1, Math.floor(u * content.w));
       const cy = Math.min(content.h - 1, Math.floor(v * content.h));
-      const value = content.data[cy * content.w + cx];
+      const raw = content.data[cy * content.w + cx];
+      const value = scale === 1 ? raw : Math.min(255, Math.round(raw * scale));
       const i = gy * spec.w + gx;
       if (value > data[i]) data[i] = value;
     }
@@ -185,8 +197,29 @@ export function compositeItemMax(grid, content, placement) {
  *   own migrated home of `foregroundElevation` — common/documents/scene.mjs:195
  *   maps one onto the other). +Infinity = "no ceiling declared": nothing
  *   counts as above, and the report says so rather than inventing a number.
+ * @property {number} [bottomElevation] - the floor's `elevation.bottom` — the
+ *   GROUND a caster's height is measured from. Non-finite = "unknown", which
+ *   makes the OVERHEAD band empty (there is no floor to be raised above) and is
+ *   reported rather than guessed at zero.
  * @property {{placement: Parameters<typeof worldToItemUv>[0], content: ContentGrid}|null} outdoors -
  *   the floor's authored outdoors content, or null to serve the catalog default.
+ */
+
+/**
+ * @typedef {object} CasterHeightSpec - how {@link deriveFloorProducts} turns
+ *   elevations into the occluder height field (docs/planning/Sun-Shadows.md §3.1).
+ * @property {number} scalePx - world px represented by a byte value of 255.
+ * @property {number} distancePixels - `canvas.dimensions.distancePixels`, the
+ *   ONE conversion from Foundry's scene distance units to world pixels. Never
+ *   assumed: an elevation of "5" is five FEET (or metres, or whatever the scene
+ *   declares), not five pixels.
+ * @property {number} buildingHeightPx - how tall the dark of `_Outdoors` stands.
+ *   The one number with no Foundry source, so the one number with a slider.
+ * @property {{building?: boolean, overhead?: boolean, skyReach?: boolean}} [include] -
+ *   the ROH isolation toggles, applied HERE rather than as shader uniforms: a
+ *   disabled producer's channel is simply never written, so turning it off
+ *   genuinely removes it (tsl/no-uniform-gates — a uniform set to zero still
+ *   executes every pixel and pays for its bindings).
  */
 
 /**
@@ -194,8 +227,29 @@ export function compositeItemMax(grid, content, placement) {
  * @property {number} index
  * @property {MaskGrid} coverAbove
  * @property {MaskGrid} skyReach
+ * @property {MaskGrid} outdoors - the RAW authored outdoors value alone
+ *   (white=outdoors/black=indoors, absent-value-filled outside the mask's
+ *   own reach) — deliberately NOT multiplied by `(1-coverAbove)` the way
+ *   `skyReach` is. `skyReach` answers "is there open sky above me" (its
+ *   real, narrow, V2-inherited purpose: keeping rain from falling under a
+ *   bridge/roof — Wind.md's author, 2026-07-21); THIS answers the simpler,
+ *   more common question "is this location indoors or outdoors", which is
+ *   what general shelter/exposure consumers (wind sway, ambient sound, …)
+ *   actually want and `skyReach` only coincidentally matches on a
+ *   single-floor scene with no ceiling declared (coverAbove ≡ 0 there).
+ * @property {MaskGrid} casterHeight - THE OCCLUDER HEIGHT FIELD, max-combined
+ *   across the three producers: how tall the thing between this texel and the
+ *   sun is, as a byte over `CasterHeightSpec.scalePx`. This is what a point
+ *   consumer samples ("how high is the bridge over my head?"); the GPU march
+ *   reads `casterChannels` instead so the three can be told apart.
+ * @property {{building: MaskGrid, overhead: MaskGrid, skyReach: MaskGrid}} casterChannels -
+ *   the same field, unmerged. Three producers of ONE physical quantity, kept
+ *   separable for exactly two reasons: the author's isolation toggles, and the
+ *   pixel probe being able to answer "which of the three is missing" instead of
+ *   "the shadow looks wrong".
  * @property {{expectedItemIds: string[], missingItemIds: string[], hiddenExcludedIds: string[],
- *             outdoorsSource: 'authored'|'default', ceilingElevation: number}} completeness
+ *             outdoorsSource: 'authored'|'default', ceilingElevation: number,
+ *             bottomElevation: number, overheadItemIds: string[], skyReachItemIds: string[]}} completeness
  */
 
 /**
@@ -209,36 +263,88 @@ export function compositeItemMax(grid, content, placement) {
  * author-observed stack (roof at 10, upstairs ground at 10, both over a
  * floor-9 rug that must NOT count).
  *
+ * THE THREE CASTER BANDS, on the same elevation axis, so they cannot overlap or
+ * leave a gap (docs/planning/Sun-Shadows.md §3.1):
+ *
+ *   elevation >= ceilingElevation                    → SKY-REACH (art overhead:
+ *                                                      upper grounds, this
+ *                                                      floor's own roof)
+ *   bottomElevation < elevation < ceilingElevation   → OVERHEAD (this floor's
+ *                                                      own raised tiles —
+ *                                                      balconies, awnings)
+ *   elevation <= bottomElevation                     → nothing (it is the
+ *                                                      ground, or under it)
+ *
  * @param {object} args
  * @param {MaskGridSpec} args.gridSpec
  * @param {DeriveItemInput[]} args.items
  * @param {DeriveFloorInput[]} args.floors
  * @param {number} args.outdoorsAbsentValue - 0..1 (catalog `outdoors.absentValue`).
+ * @param {CasterHeightSpec} [args.casterHeights] - omit to leave the height
+ *   field empty (every channel zero) — the honest state before a scene has told
+ *   us its grid scale, not a guess.
  * @returns {DerivedFloorProducts[]}
  */
-export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentValue }) {
+export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentValue, casterHeights = null }) {
   const products = [];
+  const heightScalePx = casterHeights?.scalePx > 0 ? casterHeights.scalePx : 0;
+  const distancePixels = Number.isFinite(casterHeights?.distancePixels) ? casterHeights.distancePixels : 0;
+  const include = casterHeights?.include ?? {};
+  const wantBuilding = heightScalePx > 0 && include.building !== false;
+  const wantOverhead = heightScalePx > 0 && distancePixels > 0 && include.overhead !== false;
+  const wantSkyReach = heightScalePx > 0 && distancePixels > 0 && include.skyReach !== false;
+
   for (const floor of floors) {
     const cover = createMaskGrid(gridSpec);
     const expected = [];
     const missing = [];
     const hiddenExcluded = [];
+    const overheadIds = [];
+    const skyReachIds = [];
+
+    const bottomElevation = Number.isFinite(floor.bottomElevation) ? floor.bottomElevation : null;
+    const casterBuilding = createMaskGrid(gridSpec);
+    const casterOverhead = createMaskGrid(gridSpec);
+    const casterSkyReach = createMaskGrid(gridSpec);
+
+    /** An item's height above THIS floor's ground, in world px (0 if unknown). */
+    const heightPxOf = (item) =>
+      bottomElevation === null ? 0 : Math.max(0, (item.elevation - bottomElevation) * distancePixels);
 
     for (const item of items) {
-      if (!(item.elevation >= floor.ceilingElevation)) continue;
+      const isAbove = item.elevation >= floor.ceilingElevation;
+      // The overhead band needs a known ground to be measured from; without one
+      // there is no such thing as "raised above this floor" and the completeness
+      // record says so (bottomElevation: null) rather than treating 0 as ground.
+      const isOverhead =
+        bottomElevation !== null && item.elevation > bottomElevation && item.elevation < floor.ceilingElevation;
+      if (!isAbove && !isOverhead) continue;
       if (item.hidden) {
         hiddenExcluded.push(item.id);
         continue;
       }
-      expected.push(item.id);
+      // `expected`/`missing` stay scoped to the COVER question (art at or above
+      // the ceiling) so `coverAbove`'s own completeness contract is unchanged;
+      // the two caster bands get their own id lists below.
+      if (isAbove) expected.push(item.id);
       if (!item.alpha) {
-        missing.push(item.id);
+        if (isAbove) missing.push(item.id);
         continue;
       }
-      compositeItemMax(cover, item.alpha, item.placement);
+      if (isAbove) {
+        compositeItemMax(cover, item.alpha, item.placement);
+        if (wantSkyReach) {
+          skyReachIds.push(item.id);
+          compositeItemMax(casterSkyReach, item.alpha, item.placement, heightPxOf(item) / heightScalePx);
+        }
+      } else if (wantOverhead) {
+        overheadIds.push(item.id);
+        compositeItemMax(casterOverhead, item.alpha, item.placement, heightPxOf(item) / heightScalePx);
+      }
     }
 
     const sky = createMaskGrid(gridSpec);
+    const outdoors = createMaskGrid(gridSpec);
     const absentByte = Math.round(outdoorsAbsentValue * 255);
     if (floor.outdoors) {
       // Rasterize the authored outdoors through ITS OWN placement (the mask
@@ -250,24 +356,79 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
       compositeItemMax(covered, makeUniformContent(1, 255), floor.outdoors.placement);
       for (let i = 0; i < sky.data.length; i++) {
         const o = covered.data[i] > 0 ? outdoorsGrid.data[i] : absentByte;
+        outdoors.data[i] = o; // the RAW value — see this file's own DerivedFloorProducts typedef
         sky.data[i] = Math.round((o * (255 - cover.data[i])) / 255);
       }
     } else {
+      outdoors.data.fill(absentByte);
       for (let i = 0; i < sky.data.length; i++) {
         sky.data[i] = Math.round((absentByte * (255 - cover.data[i])) / 255);
       }
+    }
+
+    // THE BUILDING CHANNEL — the dark of `_Outdoors` IS the building footprint.
+    // No item, no alpha, no elevation: the author already painted where the
+    // walls are, and that painting is a REQUIRED mask, so this producer can
+    // never be starved the way the art-opacity ones can.
+    if (wantBuilding && casterHeights.buildingHeightPx > 0) {
+      const buildingByte = Math.min(255, Math.round((casterHeights.buildingHeightPx / heightScalePx) * 255));
+      for (let i = 0; i < casterBuilding.data.length; i++) {
+        // (255 − outdoors) = indoor-ness. A doorway painted mid-grey therefore
+        // casts a HALF-height shadow, which reads as a soft threshold rather
+        // than a wall appearing out of nowhere — the same interpolation the sky
+        // light already relies on at a door.
+        casterBuilding.data[i] = Math.round((buildingByte * (255 - outdoors.data[i])) / 255);
+      }
+    }
+
+    // OVERHEAD gated to EXTERIOR protrusions (author, 2026-07-24: *"Overhead
+    // shadows from inside of a building are ending up projected outside the
+    // building."*). An overhead tile sitting over INDOOR ground is interior
+    // architecture under a roof — the sun never reaches it, so it must not
+    // cast a sun-shadow at all (and certainly not one that leaks out past the
+    // wall onto the courtyard, which is what a receiver-gated-only shadow did).
+    // Only overhead whose OWN footprint is over OUTDOOR ground survives — an
+    // exterior balcony/awning protruding over the open air, which is exactly
+    // the "protruding exterior element" the original brief wanted. Multiplying
+    // by the outdoors value keeps the soft threshold at a wall's edge rather
+    // than a hard cut.
+    for (let i = 0; i < casterOverhead.data.length; i++) {
+      casterOverhead.data[i] = Math.round((casterOverhead.data[i] * outdoors.data[i]) / 255);
+    }
+
+    // MAX, not sum: three producers describing ONE physical quantity (how tall
+    // the occluder is). A chimney on a roof over a building is not three
+    // shadows stacked, it is the tallest of the three. This is the same
+    // reasoning `combineVisibility` uses for min-combining visibility, one
+    // level down.
+    const casterHeight = createMaskGrid(gridSpec);
+    for (let i = 0; i < casterHeight.data.length; i++) {
+      const b = casterBuilding.data[i];
+      const o = casterOverhead.data[i];
+      const s = casterSkyReach.data[i];
+      casterHeight.data[i] = b > o ? (b > s ? b : s) : o > s ? o : s;
     }
 
     products.push({
       index: floor.index,
       coverAbove: cover,
       skyReach: sky,
+      outdoors,
+      casterHeight,
+      casterChannels: { building: casterBuilding, overhead: casterOverhead, skyReach: casterSkyReach },
       completeness: {
         expectedItemIds: expected,
         missingItemIds: missing,
         hiddenExcludedIds: hiddenExcluded,
         outdoorsSource: floor.outdoors ? 'authored' : 'default',
         ceilingElevation: floor.ceilingElevation,
+        // null (not 0) when the floor declares no ground: "we do not know" and
+        // "it is at zero" produce very different shadows, and only one of them
+        // is a fact (feedback_required_masks_fail_loud's reasoning, applied to a
+        // number rather than a file).
+        bottomElevation,
+        overheadItemIds: overheadIds,
+        skyReachItemIds: skyReachIds,
       },
     });
   }

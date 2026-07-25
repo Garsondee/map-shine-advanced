@@ -10,6 +10,9 @@
  * between the light's own colour and a cycling hue, weighted by the
  * intensity slider.
  *
+ * GPU-ONLY REWRITE (2026-07-20): `time`/`uIntensityRaw` are now the
+ * scaffold-supplied params (no longer self-created uniforms).
+ *
  * @module effects/lighting/animations/chroma
  */
 
@@ -25,13 +28,13 @@ import { hsb2rgb } from './tsl-noise-toolkit.js';
  * @param {*} args.THREE
  * @param {*} args.uLightColor
  * @param {*} args.uColorationAlpha
- * @returns {{finalColor: *, uniforms: {uTime: *, uIntensityRaw: *}}}
+ * @param {*} args.time
+ * @param {*} args.uIntensityRaw
+ * @returns {{finalColor: *}}
  */
-export function buildChromaColorationSeed({ THREE, uLightColor, uColorationAlpha }) {
-  const { uniform, float, mix } = THREE.TSL;
-  const uTime = uniform(float(0));
-  const uIntensityRaw = uniform(float(5));
-  const hue = hsb2rgb(THREE.TSL, uTime.mul(float(0.25)), float(1), float(1));
+export function buildChromaColorationSeed({ THREE, uLightColor, uColorationAlpha, time, uIntensityRaw }) {
+  const { float, mix } = THREE.TSL;
+  const hue = hsb2rgb(THREE.TSL, time.mul(float(0.25)), float(1), float(1));
   const finalColor = mix(uLightColor, hue, uIntensityRaw.mul(float(0.1))).mul(uColorationAlpha);
-  return { finalColor, uniforms: { uTime, uIntensityRaw } };
+  return { finalColor };
 }

@@ -105,6 +105,59 @@ export function ndcToWorld(ndc, worldRect) {
 }
 
 /**
+ * A FULLSCREEN `QuadMesh`'s own uv → the world position under that pixel.
+ *
+ * Built for the sky light (2026-07-23), which is computed inside the fullscreen
+ * illumination pass but must be gated by the `_Outdoors` mask, i.e. by where in
+ * the WORLD each screen pixel is. It lives here, in the module that owns the
+ * Y-flip law, because a second copy of this mapping anywhere else is precisely
+ * how this project got the map upside-down once already
+ * (`feedback_y_flip_recurring_risk`, bitten twice).
+ *
+ * **AND THERE IS NO FLIP IN IT — that is the whole point, and it is derived,
+ * not hoped.** Two documented facts compose:
+ *
+ *   1. three's `QuadGeometry` (three.webgpu.js:49443) puts **v=0 at the screen
+ *      TOP**, and three normalises both backends to that rule for
+ *      render-target textures (`NodeBuilder.isFlipY`). This is the fact
+ *      `vt-pan-viewer.js`'s present pass already documents at length, read from
+ *      the vendored source rather than guessed.
+ *   2. {@link computeCameraFrustum} puts **`top = worldRect.minY`**.
+ *
+ * Screen top is therefore both `v = 0` and `minY`, so uv and world run the SAME
+ * direction on both axes and nothing is negated. That is exactly the payoff
+ * this module's header promises ("no term anywhere else has to be negated — and
+ * a negation that doesn't exist can't be applied twice"), collected here.
+ *
+ * Verified as a round trip against {@link worldToNdc} in this module's own test,
+ * via {@link ndcToQuadUv}, so the chain is proven before a browser is involved.
+ *
+ * @param {number} u @param {number} v - the fullscreen quad's own uv, 0..1.
+ * @param {{minX:number, minY:number, maxX:number, maxY:number}} worldRect - the
+ *   view rect the camera was built from THIS frame.
+ * @returns {{x:number, y:number}} the world point under that pixel.
+ */
+export function quadUvToWorld(u, v, worldRect) {
+  return {
+    x: worldRect.minX + u * (worldRect.maxX - worldRect.minX),
+    y: worldRect.minY + v * (worldRect.maxY - worldRect.minY),
+  };
+}
+
+/**
+ * NDC → a fullscreen `QuadMesh`'s uv. The bridge that lets {@link quadUvToWorld}
+ * be tested against the already-proven {@link worldToNdc}, rather than asserted
+ * on its own. `x` maps straight through; `y` inverts because NDC +1 is the
+ * screen TOP and v=0 is the screen top (fact 1 above).
+ *
+ * @param {{x:number, y:number}} ndc
+ * @returns {{u:number, v:number}}
+ */
+export function ndcToQuadUv(ndc) {
+  return { u: (ndc.x + 1) / 2, v: (1 - ndc.y) / 2 };
+}
+
+/**
  * A mouse/pointer event's CLIENT (viewport) coordinates → NDC, given the
  * canvas element's own `getBoundingClientRect()` — the first half of the
  * interactive pixel probe's click→world chain (`ndcToWorld` above is the

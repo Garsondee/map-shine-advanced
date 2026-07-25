@@ -6,96 +6,107 @@ Complete inventory of controls in the main **Map Shine Advanced** Tweakpane pane
 Effect parameters are parsed from each effect's `getControlSchema()` source. Standard per-effect chrome (Enabled, Reset, etc.) is listed explicitly.
 
 **Notes:**
-- Controls tagged *advanced* are hidden until **Advanced Mode** is enabled in the toolbar.
-- Controls tagged *GM only* render only for GMs.
-- *Hidden* parameters exist in schema but do not render in the panel.
+
+- Controls tagged _advanced_ are hidden until **Advanced Mode** is enabled in the toolbar.
+- Controls tagged _GM only_ render only for GMs.
+- _Hidden_ parameters exist in schema but do not render in the panel.
 - Weather **Rain Particles** group is registered under **Particles & VFX** via `categoryId`.
 
 ## Panel chrome (always visible)
 
 ### Universal toolbar
-- **Scene status** — ON/OFF badge + Enable/Disable toggle *(GM only)*
+
+- **Scene status** — ON/OFF badge + Enable/Disable toggle _(GM only)_
 - **Filter sections…** — search input
-- **Advanced Mode** — checkbox *(reveals advanced-tagged controls)*
+- **Advanced Mode** — checkbox _(reveals advanced-tagged controls)_
 
 ### Presets bar
+
 - **Presets** — scene preset dropdown (built-in JSON presets + Custom)
-- **Revert** — button *(visible after preset apply)*
+- **Revert** — button _(visible after preset apply)_
 
 ---
 
 ## Top-level sections (outside effect categories)
 
 ### Quick Actions
-Grid buttons *(several marked advanced — hidden until Advanced Mode)*:
 
-| Button | Advanced |
-|--------|----------|
-| Defaults | yes |
-| Undo Defaults | yes |
-| Texture Manager | yes |
-| Effect Stack | yes |
-| Streaming Minimap | yes |
-| Tile Streaming Report | no |
-| Diagnostic Center | yes |
-| Pixel Probe | yes |
-| Breaker Box | yes |
-| Performance Recorder | yes |
-| Map Points | no *(GM only)* |
-| Tile Motion | no |
-| Token Movement | no |
-| Camera Path | no *(GM only)* |
-| Levels Authoring | no *(GM only)* |
-| Copy From Scene | yes *(GM only)* |
-| Reset Effects… | yes *(GM only)* |
-| Apply to All Scenes… | yes *(GM only)* |
-| Scene Recovery | yes |
-| Scene Reset | yes |
+Grid buttons _(several marked advanced — hidden until Advanced Mode)_:
+
+| Button                | Advanced        |
+| --------------------- | --------------- |
+| Defaults              | yes             |
+| Undo Defaults         | yes             |
+| Texture Manager       | yes             |
+| Effect Stack          | yes             |
+| Streaming Minimap     | yes             |
+| Tile Streaming Report | no              |
+| Diagnostic Center     | yes             |
+| Pixel Probe           | yes             |
+| Breaker Box           | yes             |
+| Performance Recorder  | yes             |
+| Map Points            | no _(GM only)_  |
+| Tile Motion           | no              |
+| Token Movement        | no              |
+| Camera Path           | no _(GM only)_  |
+| Levels Authoring      | no _(GM only)_  |
+| Copy From Scene       | yes _(GM only)_ |
+| Reset Effects…        | yes _(GM only)_ |
+| Apply to All Scenes…  | yes _(GM only)_ |
+| Scene Recovery        | yes             |
+| Scene Reset           | yes             |
 
 ### Panel Appearance
+
 - **Colour scheme** (dropdown)
 
 ### Intros
+
 - **Enable** (toggle)
 - **Loading Screens…** (button)
 
-### Getting Started *(onboarding only — scene not yet enabled)*
+### Getting Started _(onboarding only — scene not yet enabled)_
+
 - Description text
 - **Enable Map Shine Advanced for this Scene** / **Upgrade Scene…** (button)
 
-### Support & Links *(advanced primary folder)*
+### Support & Links _(advanced primary folder)_
+
 - Report a Bug (link)
 - Documentation (link)
 - Discord (link)
 
 ---
 
-## Gameplay & Interaction *(category)*
+## Gameplay & Interaction _(category)_
 
 ### Tokens & Character Rendering
 
 #### Color Correction
+
 - **Enabled**
 - **Exposure**
 - **Brightness**
 - **Contrast**
 - **Saturation**
-- **Gamma** *(advanced)*
-- **Temperature** *(advanced)*
-- **Tint** *(advanced)*
-- **Window Light Intensity** *(advanced)*
+- **Gamma** _(advanced)_
+- **Temperature** _(advanced)_
+- **Tint** _(advanced)_
+- **Window Light Intensity** _(advanced)_
 - **Reset Token CC** (button)
 
 ---
 
-## Lighting & Shadows *(category)*
+## Lighting & Shadows _(category)_
 
 ### Sun & Shadows
 
 #### Direction
+
 - **Sun latitude**
 
-#### Time-of-day softness *(advanced folder)*
+#### Time-of-day softness _(advanced folder)_
+
 - **Noon (sharp)**
 - **Golden hour (soft)**
 - **Midnight (moon)**
@@ -103,7 +114,8 @@ Grid buttons *(several marked advanced — hidden until Advanced Mode)*:
 - **Noon peak width (h)**
 - **Midnight peak width (h)**
 
-#### Length & smear *(advanced folder)*
+#### Length & smear _(advanced folder)_
+
 - **Noon length**
 - **Golden hour length**
 - **Midnight length**
@@ -111,69 +123,82 @@ Grid buttons *(several marked advanced — hidden until Advanced Mode)*:
 - **Golden hour smear**
 - **Midnight smear**
 
-#### Weather *(advanced folder)*
+#### Weather _(advanced folder)_
+
 - **Cloud softness boost**
 
 ---
 
-## Camera & Post *(category — external integrations)*
+## Camera & Post _(category — external integrations)_
 
 ### Dice So Nice
+
 - **Enabled**
-- **Performance** *(advanced folder)*: Preset, Max Pixel Ratio, Max Upload FPS, Hide Delay (ms)
-- **Look**: Opacity, Tint, Brightness, Saturation, Contrast, Gamma *(advanced)*
+- **Performance** _(advanced folder)_: Preset, Max Pixel Ratio, Max Upload FPS, Hide Delay (ms)
+- **Look**: Opacity, Tint, Brightness, Saturation, Contrast, Gamma _(advanced)_
 - **Reset Dice So Nice Look** (button)
 
 ### Sequencer / JB2A
+
 - **Enabled**
 - **Look**: Brightness, Tint
-- **Mirror scale** *(advanced)*: Footprint multiplier
-- **Placement** *(advanced)*: Along-cast delta, Toward target (+px), Z bias (world), Forward Pivot, Reverse Pivot
+- **Mirror scale** _(advanced)_: Footprint multiplier
+- **Placement** _(advanced)_: Along-cast delta, Toward target (+px), Z bias (world), Forward Pivot, Reverse Pivot
 - **Diagnostics**: Probe Active Mirrors, Probe Active Mirrors (Deep)
 - **Reset Sequencer Look + Placement** (button)
 
 ---
 
-## Particles & VFX *(category)*
+## Particles & VFX _(category)_
 
 ### Rope & Chain
+
 - **Rope Texture** + Browse Rope Texture (button)
 - **Chain Texture** + Browse Chain Texture (button)
 
-#### Rope Defaults *(advanced)*
+#### Rope Defaults _(advanced)_
+
 Segment Length, Damping, Wind Force, Wind Gust Amount, Invert Wind Direction, Gravity Strength, Slack Factor, Bend Stiffness, Constraint Iterations, Width, Tapering, UV Repeat (px), Window Light Boost, End Fade Size, End Fade Strength
 
-#### Chain Defaults *(advanced)*
+#### Chain Defaults _(advanced)_
+
 Same controls as Rope Defaults
 
 ---
 
-## Developer Tools *(category — advanced primary folder)*
+## Developer Tools _(category — advanced primary folder)_
 
 ### UI
+
 - **Run UI Validator** (button)
 
 ### Settings
+
 - Copy Non-Default Settings, Copy Changed This Session, Copy All Current Settings (buttons)
 
 ### Scene
+
 - Dump Surface Report, Pixel Probe — Pick on Map (A/B/C), Pixel Probe — Show Last Report, Pixel Probe — Cancel Pick, Paste Scene Settings, Copy effects from another scene… (buttons)
 
 ### Calibration
+
 - **Calibration Mode** (dropdown)
 - Chart Spec Path, Run Calibration Scan, Export Calibration Report, Run Calibration Scan (v2 tiled), **Workflow: apply neutral first**, Run Full Calibration Workflow, Apply Calibration Neutral Preset (buttons)
 
 ### Mask Registry
+
 - Dump Registry State (button)
 - Dump Tile Contributions (button)
-- **Mask Type Toggles** *(folder)*: water, fire, outdoors, windows, specular, normal, tree, bush, dust, ash, iridescence, prism, roughness, fluid
+- **Mask Type Toggles** _(folder)_: water, fire, outdoors, windows, specular, normal, tree, bush, dust, ash, iridescence, prism, roughness, fluid
 
 ### Mask overlay (V2)
+
 - **Show overlay**
 - **Mask** (dropdown)
 - **Opacity**
 
 ### Indoors vs Outdoors (effective mask)
+
 - **Show debug view**
 - **View** (dropdown)
 - **Replace scene (B&W)**
@@ -184,6 +209,7 @@ Same controls as Rope Defaults
 - Rebuild masks (defringe), Log stack diagnostics (buttons)
 
 ### VRAM Budget
+
 - Dump Budget State (button)
 
 ---
@@ -223,7 +249,7 @@ Same controls as Rope Defaults
 - **Night Cancel Boost** (`lightDarknessNightBoost`) — slider
 - **Follow Point Light Gain** (`lightFollowLightIntensity`) — boolean
 
-##### Flashlight *(advanced)*
+##### Flashlight _(advanced)_
 
 - **Intensity** (`flashlightIntensity`) — slider
 - **Legacy Cone Angle (deg)** (`flashlightAngleDeg`) — slider
@@ -248,7 +274,7 @@ Same controls as Rope Defaults
 - **Noise Scale** (`flashlightBeamNoiseScale`) — slider
 - **Noise Speed** (`flashlightBeamNoiseSpeed`) — slider
 
-##### Torch *(advanced)*
+##### Torch _(advanced)_
 
 - **Spring Stiffness** (`springStiffness`) — slider
 - **Spring Damping** (`springDamping`) — slider
@@ -267,7 +293,7 @@ Same controls as Rope Defaults
 - **Wander (px)** (`wanderPixels`) — slider
 - **Wander Speed** (`wanderSpeed`) — slider
 
-##### Night vision *(advanced)*
+##### Night vision _(advanced)_
 
 - **Eyepiece Style** (`nightVisionEyepieceStyle`) — list
 - **Eyepiece Radius** (`nightVisionEyepieceRadius`) — slider
@@ -418,7 +444,6 @@ Same controls as Rope Defaults
 
 #### Parameters (flat)
 
-
 ### Grid
 
 - **Effect ID:** `grid`
@@ -523,7 +548,7 @@ Same controls as Rope Defaults
 - **Day threshold** (`envDayThreshold`) — slider
 - **Heavy darkness threshold** (`envDarknessHeavyThreshold`) — slider
 
-##### Token modifiers *(advanced)*
+##### Token modifiers _(advanced)_
 
 - **Cloud shadow low** (`cloudShadowThresholdLow`) — slider
 - **Cloud shadow high** (`cloudShadowThresholdHigh`) — slider
@@ -592,7 +617,6 @@ Same controls as Rope Defaults
 - **Mask probe** (`statusMaskProbe`) — readonly, string
 - **CC overlay** (`statusCcOverlay`) — readonly, string
 - **Last probe age** (`statusProbeAge`) — readonly, string
-
 
 ## Lighting & Shadows
 
@@ -671,7 +695,7 @@ Same controls as Rope Defaults
 - **Rim band (att 1)** (`falloffRimBandAtAtt1`) — slider
 - **Falloff exponent bias** (`falloffExponent`) — slider
 
-##### Lamp colour (HDR radiance buffer) *(advanced)*
+##### Lamp colour (HDR radiance buffer) _(advanced)_
 
 - **CI buffer scale** (`colorationMixScale`) — slider
 - **Max CI mix** (`colorationMaxMix`) — slider
@@ -684,7 +708,7 @@ Same controls as Rope Defaults
 - **Colour falloff curve** (`colorationFalloffPower`) — slider
 - **Colour energy gain** (`colorationEnergyGain`) — slider
 
-##### Ambient occlusion from shadows *(advanced)*
+##### Ambient occlusion from shadows _(advanced)_
 
 - **Combined shadow strength** (`combinedShadowEffectStrength`) — slider
 - **Cloud shadow on ambient** (`cloudShadowAmbientInfluence`) — slider
@@ -693,7 +717,7 @@ Same controls as Rope Defaults
 - **Structural shadow vs sky/day fill** (`structuralSunAmbientOcclusion`) — slider
 - **Structural occlusion on HDR lights** (`directStructuralOcclusionStrength`) — slider
 
-##### Roof / floor occlusion *(advanced)*
+##### Roof / floor occlusion _(advanced)_
 
 - **Wall Inset (px)** (`wallInsetPx`) — slider
 - **Wall Padding (px)** (`wallPaddingPx`) — slider
@@ -701,18 +725,18 @@ Same controls as Rope Defaults
 - **Upper Floor Through-Gaps** (`upperFloorTransmissionEnabled`) — boolean
 - **Upper Light Strength** (`upperFloorTransmissionStrength`) — slider
 
-##### Advanced darkness response *(advanced)*
+##### Advanced darkness response _(advanced)_
 
 - **Interior Darkness** (`interiorDarkness`) — slider
 - **Negative Darkness Strength** (`negativeDarknessStrength`) — slider
 - **Darkness Punch Gain** (`darknessPunchGain`) — slider
 
-##### Advanced light animation *(advanced)*
+##### Advanced light animation _(advanced)_
 
 - **Wind Influence** (`lightAnimWindInfluence`) — slider
 - **Outdoor Power** (`lightAnimOutdoorPower`) — slider
 
-##### Performance (internal RT scale) *(advanced)*
+##### Performance (internal RT scale) _(advanced)_
 
 - **Foundry lights RT scale** (`internalLightResolutionScale`) — slider
 - **Window emit RT scale** (`internalWindowResolutionScale`) — slider
@@ -766,8 +790,8 @@ Same controls as Rope Defaults
 
 #### Mask status (under Enabled)
 
-- _outdoors mask status
-- _windows mask status
+- \_outdoors mask status
+- \_windows mask status
 
 #### Parameter groups
 
@@ -788,7 +812,7 @@ Same controls as Rope Defaults
 - **Fringe Saturation** (`rgbFringeSaturation`) — slider
 - **Fringe RGB Balance** (`rgbFringeBalance`) — color
 
-##### Refraction Animation *(advanced)*
+##### Refraction Animation _(advanced)_
 
 - **Animate Refraction** (`rgbShiftAnimate`) — boolean
 - **Animation Speed** (`rgbShiftAnimSpeed`) — slider
@@ -817,7 +841,7 @@ Same controls as Rope Defaults
 - **Sparkle Tint** (`sparkleColor`) — color
 - **Specular Boost** (`specularBoost`) — slider
 
-##### Lightning on Windows *(advanced)*
+##### Lightning on Windows _(advanced)_
 
 - **Lightning Coupling** (`lightningWindowEnabled`) — boolean
 - **Flash Intensity Boost** (`lightningWindowIntensityBoost`) — slider
@@ -835,7 +859,7 @@ Same controls as Rope Defaults
 - **Shadow Gamma** (`cloudShadowGamma`) — slider
 - **Min Light** (`cloudShadowMinLight`) — slider
 
-##### Time-of-day window light *(advanced)*
+##### Time-of-day window light _(advanced)_
 
 - **todTimelineEnabled** (`todTimelineEnabled`)
 - **useCameraGradeAnchorHours** (`useCameraGradeAnchorHours`)
@@ -869,7 +893,7 @@ Same controls as Rope Defaults
 - **Atmosphere tint** (`atmoTintColor`) — color
 - **Atmosphere blend** (`atmoBlendOpacity`) — slider
 
-##### Water specular (bloom) *(advanced)*
+##### Water specular (bloom) _(advanced)_
 
 - **Link water specular** (`waterSpecularBloomEnabled`) — boolean
 - **Water bloom strength** (`waterSpecularBloomStrength`) — slider
@@ -880,7 +904,7 @@ Same controls as Rope Defaults
 - **Surface tint** (`tintColor`) — color
 - **Surface blend** (`blendOpacity`) — slider
 
-##### Lightning strike *(advanced)*
+##### Lightning strike _(advanced)_
 
 - **Adapt during strikes** (`lightningBloomAdaptEnabled`) — boolean
 - **Strike threshold boost** (`lightningBloomThresholdBoost`) — slider
@@ -891,13 +915,13 @@ Same controls as Rope Defaults
 - **Passthrough peak** (`lightningBloomPassthroughPeak`) — slider
 - **Map-point adapt weight** (`lightningBloomMapPointWeight`) — slider
 
-##### Outdoor spill (window glow) *(advanced)*
+##### Outdoor spill (window glow) _(advanced)_
 
 - **Suppress outdoor spill** (`outdoorSpillSuppressEnabled`) — boolean
 - **Spill lum lo (× threshold)** (`outdoorSpillLumLoMul`) — slider
 - **Spill lum hi (× threshold)** (`outdoorSpillLumHiMul`) — slider
 
-##### Fog clip (vision) *(advanced)*
+##### Fog clip (vision) _(advanced)_
 
 - **Clip to vision (FoW)** (`fogClipEnabled`) — boolean
 
@@ -927,7 +951,7 @@ Same controls as Rope Defaults
 - **Fluid Colour Boost** (`fluidColorBoost`) — advanced, slider
 - **Fluid Colour Saturation** (`fluidColorSaturation`) — advanced, slider
 
-##### Tile Shadow Projection *(advanced)*
+##### Tile Shadow Projection _(advanced)_
 
 - **Enable Tile Shadow Projection** (`tileProjectionEnabled`) — checkbox
 - **Tile Projection Strength** (`tileProjectionOpacity`) — slider
@@ -938,12 +962,12 @@ Same controls as Rope Defaults
 - **Tile Outdoor Strength Scale** (`tileProjectionOutdoorOpacityScale`) — slider
 - **Tile Indoor Strength Scale** (`tileProjectionIndoorOpacityScale`) — slider
 
-##### Receiver Regions *(advanced)*
+##### Receiver Regions _(advanced)_
 
 - **Outdoor Shadow Length Scale** (`outdoorShadowLengthScale`) — slider
 - **Indoor Shadow Length Scale** (`indoorReceiverShadowLengthScale`) — slider
 
-##### Debug *(advanced)*
+##### Debug _(advanced)_
 
 - **Debug View** (`debugView`) — list
 
@@ -962,7 +986,7 @@ Same controls as Rope Defaults
 
 #### Mask status (under Enabled)
 
-- _outdoors mask status
+- \_outdoors mask status
 
 #### Parameter groups
 
@@ -1023,7 +1047,7 @@ Same controls as Rope Defaults
 
 #### Mask status (under Enabled)
 
-- _handPaintedShadow mask status
+- \_handPaintedShadow mask status
 
 #### Parameter groups
 
@@ -1038,7 +1062,6 @@ Same controls as Rope Defaults
 - **Contact blend (high)** (`contactSharpBlendHigh`) — advanced, slider
 - **Edge inflate (px)** (`shadowEdgeInflatePx`) — advanced, slider
 - **Resolution** (`resolutionScale`) — advanced, slider
-
 
 ## Atmosphere & Weather
 
@@ -1056,14 +1079,14 @@ Same controls as Rope Defaults
 
 #### Parameter groups
 
-##### Dynamic Weather *(advanced)*
+##### Dynamic Weather _(advanced)_
 
 - **Dynamic Weather** (`dynamicEnabled`) — boolean
 - **Biome Preset** (`dynamicPresetId`)
 - **Evolution Speed (x)** (`dynamicEvolutionSpeed`)
 - **Pause Evolution** (`dynamicPaused`) — boolean
 
-##### Dynamic Bounds (GM) *(advanced)*
+##### Dynamic Bounds (GM) _(advanced)_
 
 - **Clamp To Bounds** (`dynamicBoundsEnabled`) — GM only, boolean
 - **Precip Min** (`dynamicBoundsPrecipitationMin`) — GM only
@@ -1077,7 +1100,7 @@ Same controls as Rope Defaults
 - **Temp Min** (`dynamicBoundsFreezeLevelMin`) — GM only
 - **Temp Max** (`dynamicBoundsFreezeLevelMax`) — GM only
 
-##### GM Transition *(advanced)*
+##### GM Transition _(advanced)_
 
 - **Transition Time (s)** (`transitionDuration`)
 - **Precipitation** (`queuedPrecipitation`) — GM only
@@ -1089,11 +1112,11 @@ Same controls as Rope Defaults
 - **Queue From Current** (button) — GM only
 - **Start Transition** (button) — GM only
 
-##### Environment *(advanced)*
+##### Environment _(advanced)_
 
 - **Force Indoor Mask** (`roofMaskForceEnabled`) — boolean
 
-##### Simulation *(advanced)*
+##### Simulation _(advanced)_
 
 - **Transition Time (s)** (`transitionDuration`)
 - **Simulation Speed** (`simulationSpeed`)
@@ -1110,13 +1133,13 @@ Same controls as Rope Defaults
 - **Temperature (Rain <-> Snow)** (`freezeLevel`)
 - **Ash Intensity** (`ashIntensity`)
 
-##### Wetness *(advanced)*
+##### Wetness _(advanced)_
 
 - **Wetting Duration (s)** (`wettingDuration`)
 - **Drying Duration (s)** (`dryingDuration`)
 - **Rain Threshold** (`precipThreshold`)
 
-##### Roof & tree drips *(advanced)*
+##### Roof & tree drips _(advanced)_
 
 - **Drips Enabled** (`roofDripEnabled`) — boolean
 - **Drip Emission (rain)** (`roofDripEmissionRainMult`)
@@ -1128,7 +1151,7 @@ Same controls as Rope Defaults
 - **Drop Size Max** (`roofDripSizeMax`)
 - **Max Particles** (`roofDripMaxParticles`)
 
-##### Rain Splashes *(advanced)*
+##### Rain Splashes _(advanced)_
 
 - **Splash 1 (Thin Ring) Intensity** (`rainSplash1IntensityScale`)
 - **Splash 1 (Thin Ring) Life Min (s)** (`rainSplash1LifeMin`)
@@ -1155,7 +1178,7 @@ Same controls as Rope Defaults
 - **Splash 4 (Puddle) Size Max (px)** (`rainSplash4SizeMax`)
 - **Splash 4 (Puddle) Peak Opacity** (`rainSplash4OpacityPeak`)
 
-##### Flurries *(advanced)*
+##### Flurries _(advanced)_
 
 - **Rain/Snow Flurry** (`precipFlurryVariability`)
 - **Ash Flurry** (`ashFlurryVariability`)
@@ -1167,7 +1190,7 @@ Same controls as Rope Defaults
 
 These groups render under another top-level category but persist under this effect.
 
-##### Rain Particles → Particles & VFX *(advanced)*
+##### Rain Particles → Particles & VFX _(advanced)_
 
 - **Rain Intensity Scale** (`rainIntensityScale`)
 - **Rain Streak Length** (`rainStreakLength`)
@@ -1183,7 +1206,7 @@ These groups render under another top-level category but persist under this effe
 - **Rain Length Spread** (`rainLengthSpread`)
 - **Rain highlight (magenta)** (`debugRainHighlight`) — boolean
 
-##### Snow Particles → Particles & VFX *(advanced)*
+##### Snow Particles → Particles & VFX _(advanced)_
 
 - **Snow Intensity Scale** (`snowIntensityScale`)
 - **Snow Flake Size** (`snowFlakeSize`)
@@ -1212,7 +1235,6 @@ These groups render under another top-level category but persist under this effe
 #### Parameter groups
 
 ##### About
-
 
 ##### Wind Profile Tuning
 
@@ -1298,21 +1320,21 @@ These groups render under another top-level category but persist under this effe
 - **Darkness Strength** (`darknessStrength`) — slider
 - **Darkness Min Color** (`darknessColorMin`) — slider
 
-##### HDR Composite *(advanced)*
+##### HDR Composite _(advanced)_
 
 - **HDR Haze Strength** (`hdrHazeStrength`) — slider
 - **Fog Glow Add** (`fogAdditive`) — slider
 - **Reference Luminance** (`fogRefLuminance`) — slider
 - **Light Smothering** (`lightOcclusionStrength`) — slider
 
-##### Fog Banks & Storms *(advanced)*
+##### Fog Banks & Storms _(advanced)_
 
 - **Bank Scale** (`macroScale`) — slider
 - **Bank Contrast** (`macroStrength`) — slider
 - **Building Encroachment** (`buildingEncroachment`) — slider
 - **Rain Responsiveness** (`rainResponsiveness`) — slider
 
-##### Swirls & Detail *(advanced)*
+##### Swirls & Detail _(advanced)_
 
 - **Enable Swirls** (`noiseEnabled`) — boolean
 - **Detail Scale** (`noiseScale`) — slider
@@ -1322,11 +1344,11 @@ These groups render under another top-level category but persist under this effe
 - **Swirl Scale** (`curlScale`) — slider
 - **Swirl Depth** (`swirlIterations`) — dropdown
 
-##### Wind & Motion *(advanced)*
+##### Wind & Motion _(advanced)_
 
 - **Animation Speed** (`noiseSpeed`) — slider
 
-##### Indoor & Building Mask *(advanced)*
+##### Indoor & Building Mask _(advanced)_
 
 - **Reduce Indoors** (`useIndoorMask`) — boolean
 - **Indoor Reduction** (`indoorFogReduction`) — slider
@@ -1334,7 +1356,7 @@ These groups render under another top-level category but persist under this effe
 - **Building Clearance (px)** (`indoorBufferPx`) — slider
 - **Clearance Softness (px)** (`indoorSoftnessPx`) — slider
 
-##### Low-Density Cutout *(advanced)*
+##### Low-Density Cutout _(advanced)_
 
 - **Enable Cutout** (`cutoutEnabled`) — boolean
 - **Cutout Scale** (`cutoutScale`) — slider
@@ -1342,7 +1364,7 @@ These groups render under another top-level category but persist under this effe
 - **Cutout Speed** (`cutoutSpeed`) — slider
 - **Cutout Contrast** (`cutoutContrast`) — slider
 
-##### Advanced *(advanced)*
+##### Advanced _(advanced)_
 
 - **Depth Modulation** (`useDepthModulation`) — boolean
 - **Force Full-Screen Fog** (`debugForceFog`) — GM only, boolean
@@ -1360,7 +1382,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Parameter groups
 
-##### Timing *(advanced)*
+##### Timing _(advanced)_
 
 - **Min Delay (ms)** (`minDelayMs`) — slider
 - **Max Delay (ms)** (`maxDelayMs`) — slider
@@ -1385,7 +1407,7 @@ These groups render under another top-level category but persist under this effe
 - **Core Static Range** (`coreStaticRange`) — slider
 - **Wind Drift** (`windDriftStrength`) — slider
 
-##### Shape *(advanced)*
+##### Shape _(advanced)_
 
 - **Segments** (`segments`) — slider
 - **Curve Amount** (`curveAmount`) — slider
@@ -1413,7 +1435,7 @@ These groups render under another top-level category but persist under this effe
 - **Flicker Rate** (`outsideFlashFlickerRate`) — slider
 - **Flash Clamp** (`outsideFlashMaxClamp`) — slider
 
-##### Origin Flash Light *(advanced)*
+##### Origin Flash Light _(advanced)_
 
 - **Enabled** (`originFlashEnabled`) — boolean
 - **Anchor Point** (`originFlashAnchor`) — list
@@ -1436,7 +1458,7 @@ These groups render under another top-level category but persist under this effe
 - **Wall Padding (px)** (`originFlashWallPaddingPx`) — slider
 - **Allow Window Light** (`originFlashAllowWindows`) — boolean
 
-##### Audio *(advanced)*
+##### Audio _(advanced)_
 
 - **Audio Enabled** (`audioEnabled`) — boolean
 - **Strike Sound Path** (`audioStrikePath`) — string
@@ -1484,7 +1506,7 @@ These groups render under another top-level category but persist under this effe
 - **Flash Color G** (`lightningFlashColorG`) — slider
 - **Flash Color B** (`lightningFlashColorB`) — slider
 
-##### Flash Envelope *(advanced)*
+##### Flash Envelope _(advanced)_
 
 - **Attack (ms)** (`flashAttackMs`) — slider
 - **Flicker Hold (ms)** (`flashFlickerHoldMs`) — slider
@@ -1498,7 +1520,7 @@ These groups render under another top-level category but persist under this effe
 - **Min Delay (ms)** (`minDelayMs`) — slider
 - **Max Delay (ms)** (`maxDelayMs`) — slider
 
-##### GM Triggers *(advanced)*
+##### GM Triggers _(advanced)_
 
 - **Small Strike** (button) — GM only
 - **Big Strike** (button) — GM only
@@ -1517,7 +1539,6 @@ These groups render under another top-level category but persist under this effe
 
 #### Parameters (flat)
 
-
 ### Sprite Clouds
 
 - **Effect ID:** `cloud`
@@ -1530,8 +1551,6 @@ These groups render under another top-level category but persist under this effe
 - **Defaults prompt (for devs)** (button)
 
 #### Parameters (flat)
-
-
 
 ## Surface & Materials
 
@@ -1551,8 +1570,8 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _outdoors mask status
-- _specular mask status
+- \_outdoors mask status
+- \_specular mask status
 
 #### Parameter groups
 
@@ -1563,7 +1582,7 @@ These groups render under another top-level category but persist under this effe
 - **Mask colour saturation** (`specularMaskSaturation`) — slider
 - **Player light specular boost** (`playerLightSpecularBoost`) — slider
 
-##### Shimmer *(advanced)*
+##### Shimmer _(advanced)_
 
 - **Shimmer on** (`stripeEnabled`) — boolean
 - **Layer blend** (`stripeBlendMode`) — list
@@ -1571,7 +1590,7 @@ These groups render under another top-level category but persist under this effe
 - **Brightness gate** (`stripeMaskThreshold`) — slider
 - **World scale (px)** (`worldPatternScale`) — slider
 
-##### Shimmer layer 1 *(advanced)*
+##### Shimmer layer 1 _(advanced)_
 
 - **On** (`stripe1Enabled`) — boolean
 - **Density** (`stripe1Frequency`) — slider
@@ -1584,7 +1603,7 @@ These groups render under another top-level category but persist under this effe
 - **Softness** (`stripe1Gaps`) — slider
 - **Elongation** (`stripe1Softness`) — slider
 
-##### Shimmer layer 2 *(advanced)*
+##### Shimmer layer 2 _(advanced)_
 
 - **On** (`stripe2Enabled`) — boolean
 - **Density** (`stripe2Frequency`) — slider
@@ -1597,7 +1616,7 @@ These groups render under another top-level category but persist under this effe
 - **Softness** (`stripe2Gaps`) — slider
 - **Elongation** (`stripe2Softness`) — slider
 
-##### Shimmer layer 3 *(advanced)*
+##### Shimmer layer 3 _(advanced)_
 
 - **On** (`stripe3Enabled`) — boolean
 - **Density** (`stripe3Frequency`) — slider
@@ -1610,7 +1629,7 @@ These groups render under another top-level category but persist under this effe
 - **Softness** (`stripe3Gaps`) — slider
 - **Elongation** (`stripe3Softness`) — slider
 
-##### Micro sparkle *(advanced)*
+##### Micro sparkle _(advanced)_
 
 - **Sparkle on** (`sparkleEnabled`) — boolean
 - **Strength** (`sparkleIntensity`) — slider
@@ -1637,24 +1656,24 @@ These groups render under another top-level category but persist under this effe
 - **Outdoor baseline** (`wetBaseSheen`) — slider
 - **Wind ripple** (`wetWindRippleStrength`) — slider
 
-##### Frost / ice *(advanced)*
+##### Frost / ice _(advanced)_
 
 - **Frost on** (`frostGlazeEnabled`) — boolean
 - **Freeze threshold** (`frostThreshold`) — slider
 - **Frost strength** (`frostIntensity`) — slider
 - **Blue tint** (`frostTintStrength`) — slider
 
-##### Dynamic light tint *(advanced)*
+##### Dynamic light tint _(advanced)_
 
 - **Tint from lights** (`dynamicLightTintEnabled`) — boolean
 - **Tint mix** (`dynamicLightTintStrength`) — slider
 
-##### Wind-linked shimmer *(advanced)*
+##### Wind-linked shimmer _(advanced)_
 
 - **Wind-linked motion** (`windDrivenStripesEnabled`) — boolean
 - **Wind amount** (`windStripeInfluence`) — slider
 
-##### Building shadow suppression *(advanced)*
+##### Building shadow suppression _(advanced)_
 
 - **Suppress in shadow** (`buildingShadowSuppressionEnabled`) — boolean
 - **Shadow mix** (`buildingShadowSuppressionStrength`) — slider
@@ -1673,7 +1692,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _fluid mask status
+- \_fluid mask status
 
 #### Parameter groups
 
@@ -1685,7 +1704,7 @@ These groups render under another top-level category but persist under this effe
 - **Color B (Old)** (`colorB`) — color
 - **Age Gamma** (`ageGamma`) — advanced, slider
 
-##### Mask Thresholds *(advanced)*
+##### Mask Thresholds _(advanced)_
 
 - **Low Threshold** (`maskThresholdLo`) — slider
 - **High Threshold** (`maskThresholdHi`) — slider
@@ -1699,20 +1718,20 @@ These groups render under another top-level category but persist under this effe
 - **Slug Width** (`slugWidth`) — slider
 - **Edge Softness** (`edgeSoftness`) — slider
 
-##### Noise & Bubbles *(advanced)*
+##### Noise & Bubbles _(advanced)_
 
 - **Noise Scale** (`noiseScale`) — slider
 - **Noise Strength** (`noiseStrength`) — slider
 - **Bubble Scale** (`bubbleScale`) — slider
 - **Bubble Strength** (`bubbleStrength`) — slider
 
-##### Edge Effects *(advanced)*
+##### Edge Effects _(advanced)_
 
 - **Edge Noise Scale** (`edgeNoiseScale`) — slider
 - **Edge Noise Amp** (`edgeNoiseAmp`) — slider
 - **Meniscus Strength** (`meniscusStrength`) — slider
 
-##### Foam *(advanced)*
+##### Foam _(advanced)_
 
 - **Foam Strength** (`foamStrength`) — slider
 - **Foam Scale** (`foamScale`) — slider
@@ -1723,14 +1742,14 @@ These groups render under another top-level category but persist under this effe
 - **Foam Density** (`foamDensity`) — slider
 - **Foam Frothiness** (`foamFrothiness`) — slider
 
-##### Surface Effects *(advanced)*
+##### Surface Effects _(advanced)_
 
 - **Caustics Enabled** (`causticEnabled`) — boolean
 - **Caustic Strength** (`causticStrength`) — slider
 - **Caustic Scale** (`causticScale`) — slider
 - **RGB Shift** (`rgbShift`) — slider
 
-##### Iridescence *(advanced)*
+##### Iridescence _(advanced)_
 
 - **Strength** (`iridescenceStrength`) — slider
 - **Animation Speed** (`iriSpeed`) — slider
@@ -1746,7 +1765,7 @@ These groups render under another top-level category but persist under this effe
 - **Detail Weight** (`iriDetailWeight`) — slider
 - **Color Saturation** (`iriSaturation`) — slider
 
-##### Churn & Distortion *(advanced)*
+##### Churn & Distortion _(advanced)_
 
 - **Enable Churn** (`churnEnabled`) — boolean
 - **Distortion Amount** (`churnStrength`) — slider
@@ -1755,7 +1774,7 @@ These groups render under another top-level category but persist under this effe
 - **Detail (Octave Mix)** (`churnOctaves`) — slider
 - **Flow Bias** (`churnFlowBias`) — slider
 
-##### HDR / Bloom Boost *(advanced)*
+##### HDR / Bloom Boost _(advanced)_
 
 - **Enable HDR Boost** (`hdrBoostEnabled`) — boolean
 - **Boost Intensity** (`hdrBoostStrength`) — slider
@@ -1763,13 +1782,13 @@ These groups render under another top-level category but persist under this effe
 - **Edge Glow** (`hdrBoostEdge`) — slider
 - **Center Glow** (`hdrBoostCenter`) — slider
 
-##### Endpoint Pools *(advanced)*
+##### Endpoint Pools _(advanced)_
 
 - **Start Pool** (`poolStart`) — slider
 - **End Pool** (`poolEnd`) — slider
 - **Pool Softness** (`poolSoftness`) — slider
 
-##### Roof Occlusion *(advanced)*
+##### Roof Occlusion _(advanced)_
 
 - **Enable Roof Occlusion** (`roofOcclusionEnabled`) — boolean
 - **Roof Alpha Threshold** (`roofAlphaThreshold`) — slider
@@ -1790,7 +1809,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _iridescence mask status
+- \_iridescence mask status
 
 #### Parameter groups
 
@@ -1805,19 +1824,19 @@ These groups render under another top-level category but persist under this effe
 - **Angle** (`angle`) — slider
 - **Parallax strength** (`parallaxStrength`) — slider
 
-##### Spectral & lighting *(advanced)*
+##### Spectral & lighting _(advanced)_
 
 - **Noise type** (`noiseType`) — list
 - **Ignore darkness** (`ignoreDarkness`) — slider
 - **Color cycle speed** (`colorCycleSpeed`) — slider
 
-##### Distortion & noise *(advanced)*
+##### Distortion & noise _(advanced)_
 
 - **Distortion strength** (`distortionStrength`) — slider
 - **Noise scale** (`noiseScale`) — slider
 - **Phase multiplier** (`phaseMult`) — slider
 
-##### Mask *(advanced)*
+##### Mask _(advanced)_
 
 - **Mask threshold** (`maskThreshold`) — slider
 - **Invert mask** (`invertMask`) — boolean
@@ -1836,7 +1855,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _prism mask status
+- \_prism mask status
 
 #### Parameter groups
 
@@ -1848,18 +1867,18 @@ These groups render under another top-level category but persist under this effe
 - **Opacity** (`opacity`) — slider
 - **Mask Brightness Cutoff** (`maskThreshold`) — advanced, slider
 
-##### Crystal Facets *(advanced)*
+##### Crystal Facets _(advanced)_
 
 - **Facet Scale** (`facetScale`) — slider
 - **Animate Facets** (`facetAnimate`) — boolean
 - **Animation Speed** (`facetSpeed`) — slider
 - **Facet Softness** (`facetSoftness`) — slider
 
-##### Camera Parallax *(advanced)*
+##### Camera Parallax _(advanced)_
 
 - **Parallax Strength** (`parallaxStrength`) — slider
 
-##### Surface Glint *(advanced)*
+##### Surface Glint _(advanced)_
 
 - **Glint Strength** (`glintStrength`) — slider
 - **Glint Sharpness** (`glintThreshold`) — slider
@@ -1880,7 +1899,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _bush mask status
+- \_bush mask status
 
 #### Parameter groups
 
@@ -1909,7 +1928,7 @@ These groups render under another top-level category but persist under this effe
 - **Flutter speed** (`flutterSpeed`) — slider
 - **Flutter scale** (`flutterScale`) — slider
 
-##### Response curves *(advanced)*
+##### Response curves _(advanced)_
 
 - **Ambient motion** (`ambientMotion`) — slider
 - **Rustle floor scale** (`rustleFloorScale`) — slider
@@ -1932,38 +1951,38 @@ These groups render under another top-level category but persist under this effe
 - **Temperature** (`temperature`) — slider
 - **Green/magenta** (`tint`) — slider
 
-##### Canopy shadow *(advanced)*
+##### Canopy shadow _(advanced)_
 
 - **Shadow strength** (`shadowOpacity`) — slider
 - **Shadow offset** (`shadowLength`) — slider
 - **Shadow softness** (`shadowSoftness`) — slider
 
-##### Cloud shadows *(advanced)*
+##### Cloud shadows _(advanced)_
 
 - **cloudShadowEnabled** (`cloudShadowEnabled`)
 - **cloudShadowDarkenStrength** (`cloudShadowDarkenStrength`)
 - **cloudShadowDarkenCurve** (`cloudShadowDarkenCurve`)
 
-##### Building shadows *(advanced)*
+##### Building shadows _(advanced)_
 
 - **buildingShadowEnabled** (`buildingShadowEnabled`)
 - **Shadow strength** (`buildingShadowDarkenStrength`) — slider
 - **Shadow curve** (`buildingShadowDarkenCurve`) — slider
 
-##### Painted shadows *(advanced)*
+##### Painted shadows _(advanced)_
 
 - **paintedShadowEnabled** (`paintedShadowEnabled`)
 - **paintedShadowDarkenStrength** (`paintedShadowDarkenStrength`)
 - **paintedShadowDarkenCurve** (`paintedShadowDarkenCurve`)
 
-##### Atmospheric flash lighting *(advanced)*
+##### Atmospheric flash lighting _(advanced)_
 
 - **lightningVegetationEnabled** (`lightningVegetationEnabled`)
 - **lightningVegetationBrightnessBoost** (`lightningVegetationBrightnessBoost`)
 - **lightningVegetationContrastBoost** (`lightningVegetationContrastBoost`)
 - **lightningVegetationTintStrength** (`lightningVegetationTintStrength`)
 
-##### Edge safety *(advanced)*
+##### Edge safety _(advanced)_
 
 - **Edge fade start** (`edgeFadeStart`) — slider
 - **Edge fade end** (`edgeFadeEnd`) — slider
@@ -1984,7 +2003,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _tree mask status
+- \_tree mask status
 
 #### Parameter groups
 
@@ -2015,7 +2034,7 @@ These groups render under another top-level category but persist under this effe
 - **Flutter speed** (`flutterSpeed`) — slider
 - **Flutter scale** (`flutterScale`) — slider
 
-##### Response curves *(advanced)*
+##### Response curves _(advanced)_
 
 - **Ambient motion** (`ambientMotion`) — slider
 - **Rustle floor scale** (`rustleFloorScale`) — slider
@@ -2038,38 +2057,38 @@ These groups render under another top-level category but persist under this effe
 - **Temperature** (`temperature`) — slider
 - **Green/magenta** (`tint`) — slider
 
-##### Canopy shadow *(advanced)*
+##### Canopy shadow _(advanced)_
 
 - **Shadow strength** (`shadowOpacity`) — slider
 - **Shadow offset** (`shadowLength`) — slider
 - **Shadow softness** (`shadowSoftness`) — slider
 
-##### Cloud shadows *(advanced)*
+##### Cloud shadows _(advanced)_
 
 - **cloudShadowEnabled** (`cloudShadowEnabled`)
 - **cloudShadowDarkenStrength** (`cloudShadowDarkenStrength`)
 - **cloudShadowDarkenCurve** (`cloudShadowDarkenCurve`)
 
-##### Building shadows *(advanced)*
+##### Building shadows _(advanced)_
 
 - **buildingShadowEnabled** (`buildingShadowEnabled`)
 - **buildingShadowDarkenStrength** (`buildingShadowDarkenStrength`)
 - **buildingShadowDarkenCurve** (`buildingShadowDarkenCurve`)
 
-##### Painted shadows *(advanced)*
+##### Painted shadows _(advanced)_
 
 - **paintedShadowEnabled** (`paintedShadowEnabled`)
 - **paintedShadowDarkenStrength** (`paintedShadowDarkenStrength`)
 - **paintedShadowDarkenCurve** (`paintedShadowDarkenCurve`)
 
-##### Atmospheric flash lighting *(advanced)*
+##### Atmospheric flash lighting _(advanced)_
 
 - **lightningVegetationEnabled** (`lightningVegetationEnabled`)
 - **lightningVegetationBrightnessBoost** (`lightningVegetationBrightnessBoost`)
 - **lightningVegetationContrastBoost** (`lightningVegetationContrastBoost`)
 - **lightningVegetationTintStrength** (`lightningVegetationTintStrength`)
 
-##### Edge safety *(advanced)*
+##### Edge safety _(advanced)_
 
 - **Edge fade start** (`edgeFadeStart`) — slider
 - **Edge fade end** (`edgeFadeEnd`) — slider
@@ -2088,11 +2107,11 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _water mask status
+- \_water mask status
 
 #### Parameter groups
 
-##### Water Appearance & Depth *(advanced)*
+##### Water Appearance & Depth _(advanced)_
 
 - **Tint Color** (`tintColor`) — color
 - **Tint Strength** (`tintStrength`) — slider
@@ -2100,7 +2119,7 @@ These groups render under another top-level category but persist under this effe
 - **Debug View** (`debugView`) — advanced, dropdown
 - **Debug Wind Arrow** (`debugWindArrow`) — advanced, boolean
 
-##### Waves & Wind *(advanced)*
+##### Waves & Wind _(advanced)_
 
 - **Wave Scale** (`waveScale`) — slider
 - **Wave speed scale** (`waveSpeed`) — slider
@@ -2110,7 +2129,7 @@ These groups render under another top-level category but persist under this effe
 - **Wave travel heading (deg)** (`waveDirOffsetDeg`) — slider
 - **Normals vs travel (deg)** (`waveAppearanceRotDeg`) — slider
 
-##### Surface Lighting *(advanced)*
+##### Surface Lighting _(advanced)_
 
 - **Strength** (`specStrength`) — slider
 - **Power** (`specPower`) — slider
@@ -2141,7 +2160,7 @@ These groups render under another top-level category but persist under this effe
 - **Anisotropy** (`specAnisotropy`) — slider
 - **Aniso Ratio** (`specAnisoRatio`) — slider
 
-##### Foam & Detail *(advanced)*
+##### Foam & Detail _(advanced)_
 
 - **Enabled** (`shoreFoamEnabled`) — boolean
 - **Strength** (`shoreFoamStrength`) — slider
@@ -2193,7 +2212,7 @@ These groups render under another top-level category but persist under this effe
 - **Flecks Enabled** (`foamFlecksEnabled`) — boolean
 - **Flecks Intensity** (`foamFlecksIntensity`) — slider
 
-##### Murk & Refraction *(advanced)*
+##### Murk & Refraction _(advanced)_
 
 - **Multi-Tap Refraction** (`refractionMultiTapEnabled`) — boolean
 - **Distortion Edge Center** (`distortionEdgeCenter`) — slider
@@ -2404,7 +2423,7 @@ These groups render under another top-level category but persist under this effe
 - **Intensity** (`intensity`) — slider
 - **Tint (Multiply)** (`tintColor`) — color
 
-##### Ink AO (from scene) *(advanced)*
+##### Ink AO (from scene) _(advanced)_
 
 - **Enabled** (`inkAoEnabled`) — boolean
 - **Strength** (`inkAoStrength`) — slider
@@ -2414,17 +2433,16 @@ These groups render under another top-level category but persist under this effe
 - **Edge Power** (`inkEdgePower`) — slider
 - **Spread (px)** (`inkSpreadPx`) — slider
 - **Spread Blur (px)** (`inkBlurPx`) — slider
-- **Only _Outdoors Dark Regions** (`inkOutdoorsDarkOnly`) — boolean
+- **Only \_Outdoors Dark Regions** (`inkOutdoorsDarkOnly`) — boolean
 - **AO Tint** (`inkTintColor`) — color
 
-##### Advanced: legacy multiply vignette *(advanced)*
+##### Advanced: legacy multiply vignette _(advanced)_
 
 - **Enabled (legacy)** (`vignetteEnabled`) — boolean
 - **Strength** (`vignetteStrength`) — slider
 - **Inner** (`vignetteInner`) — slider
 - **Outer** (`vignetteOuter`) — slider
 - **Tint** (`vignetteTintColor`) — color
-
 
 ## Particles & VFX
 
@@ -2443,11 +2461,11 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _fire mask status
+- \_fire mask status
 
 #### Parameter groups
 
-##### Flames *(advanced)*
+##### Flames _(advanced)_
 
 - **Global Intensity** (`globalFireRate`) — slider
 - **Height** (`fireHeight`) — slider
@@ -2458,7 +2476,7 @@ These groups render under another top-level category but persist under this effe
 - **Curl Strength** (`fireCurlStrength`) — slider
 - **Anchored Flames** (`flameStationaryFraction`) — slider
 
-##### Embers & Smoke *(advanced)*
+##### Embers & Smoke _(advanced)_
 
 - **Enable smoke** (`smokeEnabled`) — checkbox
 - **Emission Density** (`smokeRatio`) — slider
@@ -2468,13 +2486,13 @@ These groups render under another top-level category but persist under this effe
 - **Updraft** (`emberUpdraft`) — slider
 - **Curl Strength** (`emberCurlStrength`) — slider
 
-##### Coal Bed *(advanced)*
+##### Coal Bed _(advanced)_
 
 - **Enable coal bed** (`coalBedEnabled`) — checkbox
 - **Intensity** (`coalBedIntensity`) — slider
 - **Opacity** (`coalBedOpacity`) — slider
 
-##### Fire Glow *(advanced)*
+##### Fire Glow _(advanced)_
 
 - **Enable glow** (`fireGlowEnabled`) — checkbox
 - **Follow HDR Brightness Slider** (`fireGlowFollowLightIntensity`) — checkbox
@@ -2482,7 +2500,7 @@ These groups render under another top-level category but persist under this effe
 - **Night scale** (`fireGlowNightIntensityScale`) — slider
 - **Night Cancel Boost** (`fireGlowDarknessNightBoost`) — slider
 
-##### Mask Pickup *(advanced)*
+##### Mask Pickup _(advanced)_
 
 - **Min Mask White** (`fireMaskMinBrightness`) — slider
 - **Min Mask Alpha** (`fireMaskMinAlpha`) — slider
@@ -2490,7 +2508,7 @@ These groups render under another top-level category but persist under this effe
 - **Min Tile Alpha** (`fireAlbedoMinAlpha`) — slider
 - **Min Neighbour Distance (px)** (`fireMaskIsolationPx`) — slider
 
-##### Heat Distortion *(advanced)*
+##### Heat Distortion _(advanced)_
 
 - **Enable Heat Haze** (`heatDistortionEnabled`) — checkbox
 - **Intensity** (`heatDistortionIntensity`) — slider
@@ -2498,7 +2516,7 @@ These groups render under another top-level category but persist under this effe
 - **Speed** (`heatDistortionSpeed`) — slider
 - **Edge Softness** (`heatDistortionEdgeSoftness`) — slider
 
-##### Environment *(advanced)*
+##### Environment _(advanced)_
 
 - **Visual Speed** (`fireVisualSpeed`) — slider
 - **Time Scale** (`timeScale`) — slider
@@ -2508,7 +2526,7 @@ These groups render under another top-level category but persist under this effe
 - **Indoor Time Scale** (`indoorTimeScale`) — slider
 - **Rain Kill Strength** (`weatherPrecipKill`) — slider
 
-##### Performance *(advanced)*
+##### Performance _(advanced)_
 
 - **Simulation Rate (Hz)** (`fireSimHz`) — slider
 - **Max Spatial Buckets / Floor** (`fireMaxSpatialBuckets`) — slider
@@ -2564,7 +2582,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _ash mask status
+- \_ash mask status
 
 #### Parameter groups
 
@@ -2584,7 +2602,7 @@ These groups render under another top-level category but persist under this effe
 - **Opacity Start** (`opacityStart`) — slider
 - **Opacity End** (`opacityEnd`) — slider
 
-##### Motion *(advanced)*
+##### Motion _(advanced)_
 
 - **Wind Influence** (`windInfluence`) — slider
 - **Curl Strength** (`curlStrength`) — advanced, slider
@@ -2605,7 +2623,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _dust mask status
+- \_dust mask status
 
 #### Parameter groups
 
@@ -2621,26 +2639,26 @@ These groups render under another top-level category but persist under this effe
 - **Sky Tint Dust** (`skyTintEnabled`) — advanced, boolean
 - **Sky Tint Strength** (`skyTintStrength`) — advanced, slider
 
-##### Glitter *(advanced)*
+##### Glitter _(advanced)_
 
 - **Enable Glitter** (`glitterEnabled`) — boolean
 - **Glitter Strength** (`glitterStrength`) — slider
 - **Glitter Rate Min (Hz)** (`glitterRateMin`) — slider
 - **Glitter Rate Max (Hz)** (`glitterRateMax`) — slider
 
-##### Lifetime & Size *(advanced)*
+##### Lifetime & Size _(advanced)_
 
 - **Life Min (s)** (`lifeMin`) — slider
 - **Life Max (s)** (`lifeMax`) — slider
 - **Size Min** (`sizeMin`) — slider
 - **Size Max** (`sizeMax`) — slider
 
-##### Volume *(advanced)*
+##### Volume _(advanced)_
 
 - **Z Min** (`zMin`) — slider
 - **Z Max** (`zMax`) — slider
 
-##### Motion *(advanced)*
+##### Motion _(advanced)_
 
 - **Drift** (`motionDrift`) — slider
 - **Curl Strength** (`motionCurlStrength`) — slider
@@ -2661,11 +2679,11 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _water mask status
+- \_water mask status
 
 #### Parameter groups
 
-##### Tint (Jitter) *(advanced)*
+##### Tint (Jitter) _(advanced)_
 
 - **Strength** (`tintStrength`) — slider
 - **Jitter** (`tintJitter`) — slider
@@ -2701,7 +2719,7 @@ These groups render under another top-level category but persist under this effe
 - **Size Max** (`splashSizeMax`) — advanced, slider
 - **Splash Wind Drift** (`splashWindDriftScale`) — advanced, slider
 
-##### Mask Scan / Density *(advanced)*
+##### Mask Scan / Density _(advanced)_
 
 - **Water Threshold** (`maskThreshold`) — slider
 - **Edge Stride** (`edgeScanStride`) — slider
@@ -2722,11 +2740,11 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _water mask status
+- \_water mask status
 
 #### Parameter groups
 
-##### Tint (Jitter) *(advanced)*
+##### Tint (Jitter) _(advanced)_
 
 - **Strength** (`tintStrength`) — slider
 - **Jitter** (`tintJitter`) — slider
@@ -2812,14 +2830,14 @@ These groups render under another top-level category but persist under this effe
 - **Wind Influence (Outdoor)** (`outdoorWindInfluence`) — slider
 - **Outdoor Sway** (`outdoorSway`) — slider
 
-##### Day / Night (Flames) *(advanced)*
+##### Day / Night (Flames) _(advanced)_
 
 - **Auto Day/Night** (`autoDayNightBalance`) — boolean
 - **Day Scale** (`dayIntensityScale`) — slider
 - **Night Scale** (`nightIntensityScale`) — slider
 - **Darkness Curve** (`dayNightCurve`) — slider
 
-##### Glow (Gameplay Light) *(advanced)*
+##### Glow (Gameplay Light) _(advanced)_
 
 - **Enabled** (`glowEnabled`) — boolean
 - **Follow Point Light Gain** (`glowFollowLightIntensity`) — boolean
@@ -2832,7 +2850,7 @@ These groups render under another top-level category but persist under this effe
 - **Wall Clip** (`wallClipEnabled`) — boolean
 - **Clip Radius Scale** (`wallClipRadiusScale`) — slider
 
-##### Glow — Indoor Balance *(advanced)*
+##### Glow — Indoor Balance _(advanced)_
 
 - **Intensity Scale** (`glowIndoorIntensityScale`) — slider
 - **Cancel Scale** (`glowIndoorCancelScale`) — slider
@@ -2877,7 +2895,7 @@ These groups render under another top-level category but persist under this effe
 - **Falloff Exponent** (`glowFalloffExponent`) — slider
 - **Pool Edge Softness** (`glowEdgeSoftness`) — slider
 
-##### Glow — Night Pool *(advanced)*
+##### Glow — Night Pool _(advanced)_
 
 - **Pool Warmth** (`glowNightWarmth`) — slider
 - **Pool Intensity** (`glowNightIntensity`) — slider
@@ -2910,7 +2928,7 @@ These groups render under another top-level category but persist under this effe
 - **Intensity Scale** (`ashIntensityScale`) — slider
 - **Emission Rate** (`ashEmissionRate`) — slider
 
-##### Ash Appearance *(advanced)*
+##### Ash Appearance _(advanced)_
 
 - **Size Min** (`ashSizeMin`) — slider
 - **Size Max** (`ashSizeMax`) — slider
@@ -2928,7 +2946,7 @@ These groups render under another top-level category but persist under this effe
 - **Life Brighten** (`ashLifeBrighten`) — slider
 - **Life Alpha Fade** (`ashLifeAlphaFade`) — slider
 
-##### Ash Motion *(advanced)*
+##### Ash Motion _(advanced)_
 
 - **Gravity Scale** (`ashGravityScale`) — slider
 - **Wind Influence** (`ashWindInfluence`) — slider
@@ -2937,7 +2955,7 @@ These groups render under another top-level category but persist under this effe
 - **Curl Noise Scale** (`ashCurlNoiseScale`) — slider
 - **Curl Time Scale** (`ashCurlTimeScale`) — slider
 
-##### Embers *(advanced)*
+##### Embers _(advanced)_
 
 - **Ember Rate** (`emberEmissionRate`) — slider
 - **Ember Size Min** (`emberSizeMin`) — slider
@@ -2959,7 +2977,6 @@ These groups render under another top-level category but persist under this effe
 - **Ember Curl Noise Scale** (`emberCurlNoiseScale`) — slider
 - **Ember Curl Time Scale** (`emberCurlTimeScale`) — slider
 
-
 ## Camera & Post
 
 ### Camera Grade (HDR → LDR)
@@ -2979,7 +2996,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Mask status (under Enabled)
 
-- _outdoors mask status
+- \_outdoors mask status
 
 #### Parameter groups
 
@@ -3031,7 +3048,7 @@ These groups render under another top-level category but persist under this effe
 - **Haze Lift** (`hazeLift`) — slider
 - **Haze Contrast** (`hazeContrastLoss`) — slider
 
-##### HDR tone mapping *(advanced)*
+##### HDR tone mapping _(advanced)_
 
 - **Tone mapping** (`toneMapping`) — list
 - **Lift** (`liftColor`) — color
@@ -3039,13 +3056,13 @@ These groups render under another top-level category but persist under this effe
 - **Gain** (`gainColor`) — color
 - **Master gamma** (`masterGamma`) — slider
 
-##### Vignette & grain *(advanced)*
+##### Vignette & grain _(advanced)_
 
 - **Vignette strength** (`vignetteStrength`) — slider
 - **Vignette softness (reserved)** (`vignetteSoftness`) — slider
 - **Grain strength** (`grainStrength`) — slider
 
-##### Time-of-day camera timeline *(advanced)*
+##### Time-of-day camera timeline _(advanced)_
 
 - **todTimelineEnabled** (`todTimelineEnabled`)
 - **localWarmLightPreserve** (`localWarmLightPreserve`)
@@ -3088,7 +3105,7 @@ These groups render under another top-level category but persist under this effe
 
 #### Parameter groups
 
-##### Autofocus & motion *(advanced)*
+##### Autofocus & motion _(advanced)_
 
 - **Enable Camera Motion Blur** (`motionBlurEnabled`) — boolean
 - **Motion Blur Strength** (`motionBlurStrength`) — slider
@@ -3096,7 +3113,7 @@ These groups render under another top-level category but persist under this effe
 - **Zoom Blur Strength** (`motionBlurZoomStrength`) — slider
 - **Motion Blur Smoothing (s)** (`motionBlurSmoothingSeconds`) — slider
 
-##### Overlays *(advanced)*
+##### Overlays _(advanced)_
 
 - **Enable Viewfinder Overlay** (`viewfinderEnabled`) — boolean
 - **Viewfinder Texture** (`viewfinderSelection`) — string
@@ -3217,7 +3234,7 @@ These groups render under another top-level category but persist under this effe
 - **Scale** (`scale`) — slider
 - **Angle (rad)** (`angle`) — slider
 
-##### Center *(advanced)*
+##### Center _(advanced)_
 
 - **Center X** (`centerX`) — slider
 - **Center Y** (`centerY`) — slider
@@ -3243,12 +3260,12 @@ These groups render under another top-level category but persist under this effe
 - **Radius** (`radius`) — slider
 - **Shape** (`shape`) — select
 
-##### Mix *(advanced)*
+##### Mix _(advanced)_
 
 - **Blend mode** (`blendingMode`) — select
 - **Scatter** (`scatter`) — slider
 
-##### Output *(advanced)*
+##### Output _(advanced)_
 
 - **Greyscale** (`greyscale`) — boolean
 
@@ -3273,12 +3290,12 @@ These groups render under another top-level category but persist under this effe
 - **Row height** (`lineHeight`) — slider
 - **Effect strength** (`opacity`) — slider
 
-##### Letter shape *(advanced)*
+##### Letter shape _(advanced)_
 
 - **Letter width** (`glyphScaleX`) — slider
 - **Letter height** (`glyphScaleY`) — slider
 
-##### Spacing *(advanced)*
+##### Spacing _(advanced)_
 
 - **Side padding** (`cellPaddingX`) — slider
 - **Top/bottom padding** (`cellPaddingY`) — slider
@@ -3291,12 +3308,12 @@ These groups render under another top-level category but persist under this effe
 - **Letter shuffle** (`churn`) — advanced, slider
 - **Shuffle speed** (`churnSpeed`) — advanced, slider
 
-##### Hybrid mode *(advanced)*
+##### Hybrid mode _(advanced)_
 
 - **Block strength** (`blockOpacity`) — slider
 - **Letter strength** (`textOpacity`) — slider
 
-##### Brightness & contrast *(advanced)*
+##### Brightness & contrast _(advanced)_
 
 - **Shadow depth** (`blackPoint`) — slider
 - **Highlight point** (`whitePoint`) — slider
@@ -3363,7 +3380,6 @@ These groups render under another top-level category but persist under this effe
 ##### Look
 
 - **Strength** (`strength`) — slider
-
 
 ---
 

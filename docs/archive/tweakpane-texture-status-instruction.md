@@ -14,12 +14,12 @@ All effect sections in the **main Tweakpane config** (`TweakpaneManager.register
 
 Add texture status rows when an effect **depends on authored suffixed textures** from the asset loader (`EFFECT_MASKS` in `scripts/assets/loader.js`) or equivalent per-tile / per-background discovery.
 
-| Situation | Action |
-|-----------|--------|
-| Effect requires one mask (e.g. `_Water`) | One `mask-status` group |
-| Effect can use several masks (e.g. `_Bush` + `_Tree` overlays) | One row per mask |
-| Effect has no authored mask dependency | No texture rows |
-| Legacy `textureStatus` string in schema | Remove when migrating; use `mask-status` groups instead |
+| Situation                                                      | Action                                                  |
+| -------------------------------------------------------------- | ------------------------------------------------------- |
+| Effect requires one mask (e.g. `_Water`)                       | One `mask-status` group                                 |
+| Effect can use several masks (e.g. `_Bush` + `_Tree` overlays) | One row per mask                                        |
+| Effect has no authored mask dependency                         | No texture rows                                         |
+| Legacy `textureStatus` string in schema                        | Remove when migrating; use `mask-status` groups instead |
 
 ---
 
@@ -27,19 +27,19 @@ Add texture status rows when an effect **depends on authored suffixed textures**
 
 Each required texture is a **single horizontal row** placed **directly under the effect’s Enabled checkbox** (not at the top or bottom of the folder). Layout:
 
-| Column | Content |
-|--------|---------|
-| Label | `Texture` when the effect has **one** mask; otherwise the **suffix** (e.g. `_Bush`, `_Tree`) |
-| Status chip | Short state text (see below) |
-| Help | Square **`?`** button opening a Foundry dialog with full setup guidance |
+| Column      | Content                                                                                      |
+| ----------- | -------------------------------------------------------------------------------------------- |
+| Label       | `Texture` when the effect has **one** mask; otherwise the **suffix** (e.g. `_Bush`, `_Tree`) |
+| Status chip | Short state text (see below)                                                                 |
+| Help        | Square **`?`** button opening a Foundry dialog with full setup guidance                      |
 
 **Status chip text** (use `formatTextureStatusMessage()` — do not invent new wording):
 
-| Phase | Example (`_Water`) |
-|-------|-------------------|
-| Loaded (runtime after `populate()`) | `_Water Texture Loaded` |
-| Missing, effect disabled | `No _Water Texture Found` — grey (`missing-muted`) |
-| Missing, effect enabled | `No _Water Texture Found` — red (`missing-alert`) |
+| Phase                               | Example (`_Water`)                                 |
+| ----------------------------------- | -------------------------------------------------- |
+| Loaded (runtime after `populate()`) | `_Water Texture Loaded`                            |
+| Missing, effect disabled            | `No _Water Texture Found` — grey (`missing-muted`) |
+| Missing, effect enabled             | `No _Water Texture Found` — red (`missing-alert`)  |
 
 Do **not** use Searching, manifest-only “found”, or `maskManager` shortcuts in the Tweakpane chip. Status comes from **runtime populate state only** (`resolvePopulatedMaskStatus` in `effect-mask-status.js`). Toggling **Enabled** must call `refreshEffectMaskStatus(effectId)` so missing grey/red updates immediately.
 
@@ -134,14 +134,14 @@ Optionally set `_maskDiscoveryPhase` to `found` | `missing` at the **end** of `p
 
 ## Files to touch
 
-| File | Role |
-|------|------|
-| `scripts/ui/effect-mask-status.js` | Templates, messages, probes, `createMaskStatusSchemaGroup(s)` |
-| `scripts/ui/mask-status-ui.js` | DOM row, placement, `?` dialog |
-| `scripts/ui/tweakpane-manager.js` | Injection under Enabled (avoid editing unless fixing shared behavior) |
-| `styles/module.css` | Row + square help button |
-| `scripts/compositor-v2/effects/*EffectV2.js` | Schema + populate refresh |
-| `scripts/assets/loader.js` | `EFFECT_MASKS` suffix registry (reference only) |
+| File                                         | Role                                                                  |
+| -------------------------------------------- | --------------------------------------------------------------------- |
+| `scripts/ui/effect-mask-status.js`           | Templates, messages, probes, `createMaskStatusSchemaGroup(s)`         |
+| `scripts/ui/mask-status-ui.js`               | DOM row, placement, `?` dialog                                        |
+| `scripts/ui/tweakpane-manager.js`            | Injection under Enabled (avoid editing unless fixing shared behavior) |
+| `styles/module.css`                          | Row + square help button                                              |
+| `scripts/compositor-v2/effects/*EffectV2.js` | Schema + populate refresh                                             |
+| `scripts/assets/loader.js`                   | `EFFECT_MASKS` suffix registry (reference only)                       |
 
 ---
 
@@ -149,12 +149,12 @@ Optionally set `_maskDiscoveryPhase` to `found` | `missing` at the **end** of `p
 
 Replace these patterns when touching an effect:
 
-| Legacy | Replacement |
-|--------|-------------|
-| `textureStatus: 'Searching...'` param + Status folder | `createMaskStatusSchemaGroup(maskId)` |
-| `this.params.textureStatus = 'Ready...'` | `refreshEffectMaskStatus` + probe in `effect-mask-status.js` |
-| Custom `_buildMaskStatusSection` / red-green X UI | Shared template only |
-| `Mask status` label | `Texture` (single mask) or suffix (multi) |
+| Legacy                                                | Replacement                                                  |
+| ----------------------------------------------------- | ------------------------------------------------------------ |
+| `textureStatus: 'Searching...'` param + Status folder | `createMaskStatusSchemaGroup(maskId)`                        |
+| `this.params.textureStatus = 'Ready...'`              | `refreshEffectMaskStatus` + probe in `effect-mask-status.js` |
+| Custom `_buildMaskStatusSection` / red-green X UI     | Shared template only                                         |
+| `Mask status` label                                   | `Texture` (single mask) or suffix (multi)                    |
 
 **Migrated:** Water, Bush, Tree, Iridescence, Prism, Fluid, Specular (`_Outdoors` + `_Specular`), Window Light (`_Outdoors` + dynamic `_Windows`/`_Structural` row), Painted Shadows (`_Shadow`), Building Shadows (`_Outdoors`), Camera Grade (`_Outdoors`), Fire (`_Fire`), Ash (`_Ash`), Dust (`_Dust`), Water Splashes + Underwater Bubbles (both `_Water`). **Still to migrate:** any remaining legacy `textureStatus` effects.
 
@@ -167,7 +167,7 @@ When multiple `mask-status` groups appear in one effect folder, their **DOM orde
 Always use:
 
 ```js
-createMaskStatusSchemaGroups(['windows', 'specular', 'outdoors']) // auto-sorted
+createMaskStatusSchemaGroups(['windows', 'specular', 'outdoors']); // auto-sorted
 ```
 
 rather than manual ordering in the schema array.
@@ -178,13 +178,13 @@ rather than manual ordering in the schema array.
 
 **Purpose:** Scene-wide diagnostics — one status row for **every** key in `EFFECT_MASKS` (`scripts/assets/loader.js`), sorted A→Z by suffix. Not tied to any effect’s **Enabled** checkbox.
 
-| Piece | Location |
-|-------|----------|
-| Category order / title | `scripts/ui/effect-categories.js` (`textureAssets` → “Texture Assets”, before Developer Tools) |
-| Panel build + refresh | `scripts/ui/texture-assets-panel.js` |
-| Scene probe | `resolveTextureAssetMaskStatus()` / `sceneMaskLoadedCount()` in `scripts/ui/effect-mask-status.js` |
-| DOM rows | `createStandaloneMaskStatusRow()` in `scripts/ui/mask-status-ui.js` |
-| Wiring | `TweakpaneManager.buildTextureAssetsSection()`; `refreshTextureAssetsStatuses()` inside `refreshAllEffectMaskStatuses()` (post-populate) |
+| Piece                  | Location                                                                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Category order / title | `scripts/ui/effect-categories.js` (`textureAssets` → “Texture Assets”, before Developer Tools)                                           |
+| Panel build + refresh  | `scripts/ui/texture-assets-panel.js`                                                                                                     |
+| Scene probe            | `resolveTextureAssetMaskStatus()` / `sceneMaskLoadedCount()` in `scripts/ui/effect-mask-status.js`                                       |
+| DOM rows               | `createStandaloneMaskStatusRow()` in `scripts/ui/mask-status-ui.js`                                                                      |
+| Wiring                 | `TweakpaneManager.buildTextureAssetsSection()`; `refreshTextureAssetsStatuses()` inside `refreshAllEffectMaskStatuses()` (post-populate) |
 
 **UI contract:** Each row label is the **suffix** (e.g. `_Water`). Missing rows always use **`missing-muted`** (grey) — no red alert. Chip still uses `formatTextureStatusMessage`. **`?`** uses the same templates as effect panels.
 

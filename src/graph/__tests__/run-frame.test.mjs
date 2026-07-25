@@ -85,8 +85,8 @@ export function run(t) {
   {
     const { ids } = planFrame(PASSES, { fromStage: 'masks', toStage: 'present' });
     ok(
-      `today's real masks..present plan is exactly [masks.occlusion, geometry.world, light.accumulate, present.composite] (got: ${ids.join(',')})`,
-      ids.join(',') === 'masks.occlusion,geometry.world,light.accumulate,present.composite'
+      `today's real masks..present plan is exactly [masks.occlusion, geometry.world, light.accumulate, surface.particles, post.bloom, present.composite] (got: ${ids.join(',')})`,
+      ids.join(',') === 'masks.occlusion,geometry.world,light.accumulate,surface.particles,post.bloom,present.composite'
     );
   }
 

@@ -60,16 +60,61 @@ export function chooseTextureLimit(adapterMax, desired = DESIRED_TEXTURE_DIM) {
   return Math.min(supported, want);
 }
 
+/** WebGPU's spec-guaranteed floor for `maxStorageBuffersPerShaderStage` — every
+ * adapter supports at least this (it is also the DEFAULT the renderer already
+ * requests implicitly, hence "8" being the number in a real, live error: "The
+ * number of storage buffers (9) in the Compute stage exceeds the maximum
+ * per-stage limit (8)", 2026-07-22 — the wind-gust compute kernel's arena
+ * buffers + trail history + wall-structure/exposure/door-chaos grids added up
+ * to 9, one over this floor). We never request below it, never assume above. */
+export const WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE = 8;
+
+/** The cap we AIM for — double the spec floor, the same "widely-supported next
+ * tier" reasoning as `DESIRED_TEXTURE_DIM`'s own 2×. The adapter that hit the
+ * live error above reported supporting 16 (the error message states this
+ * itself); more particle/wind-field storage buffers are a plausible future
+ * ask (this codebase already has two compute-heavy effects sharing the arena
+ * + up to three optional wind grids each), so targeting real headroom now
+ * avoids re-diagnosing the identical error again after the next one lands. */
+export const DESIRED_STORAGE_BUFFERS_PER_STAGE = 16;
+
 /**
- * Browser glue around {@link chooseTextureLimit}: query the WebGPU adapter and
- * build the `requiredLimits` object to hand `new THREE.WebGPURenderer({...})`,
- * so its device is created with the raised texture cap. Query the adapter for
- * its real max FIRST and clamp to it — requesting more than the adapter
- * supports makes `requestDevice` throw (a self-inflicted device-creation
- * failure), whereas clamping degrades gracefully (weak hardware just keeps
- * 8192, and the loader tiles to fit).
+ * Choose the `maxStorageBuffersPerShaderStage` to request from the WebGPU
+ * device. Pure — same shape and same safety discipline as
+ * {@link chooseTextureLimit}: never ask for more than the adapter reports
+ * (that makes `requestDevice` throw), never ask for less than the 8-buffer
+ * spec floor every adapter grants, otherwise target `desired` (16).
  *
- * Returns `undefined` when there's no adapter (WebGL2 path, or WebGPU
+ * @param {number} adapterMax - `adapter.limits.maxStorageBuffersPerShaderStage`.
+ * @param {number} [desired=DESIRED_STORAGE_BUFFERS_PER_STAGE]
+ * @returns {number} the value to pass as `requiredLimits.maxStorageBuffersPerShaderStage`.
+ */
+export function chooseStorageBufferLimit(adapterMax, desired = DESIRED_STORAGE_BUFFERS_PER_STAGE) {
+  const supported =
+    Number.isFinite(adapterMax) && adapterMax > WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE
+      ? adapterMax
+      : WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE;
+  const want =
+    Number.isFinite(desired) && desired > WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE
+      ? desired
+      : WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE;
+  return Math.min(supported, want);
+}
+
+/**
+ * Browser glue around {@link chooseTextureLimit} + {@link chooseStorageBufferLimit}:
+ * query the WebGPU adapter and build the `requiredLimits` object to hand
+ * `new THREE.WebGPURenderer({...})`, so its device is created with BOTH raised
+ * caps. Query the adapter for its real max FIRST and clamp to each
+ * independently — requesting more than the adapter supports makes
+ * `requestDevice` throw (a self-inflicted device-creation failure), whereas
+ * clamping degrades gracefully (weak hardware just keeps the spec floor, and
+ * the loader/particle engines degrade to fit — see each limit's own doc).
+ * The two limits are resolved INDEPENDENTLY (one query failing/reporting
+ * falsy never skips the other) — a compute-shader storage-buffer ceiling and
+ * a texture-size ceiling are unrelated GPU resources.
+ *
+ * Returns `undefined` when there's no adapter at all (WebGL2 path, or WebGPU
  * unavailable) — pass that straight through and three keeps its defaults.
  *
  * MUST be applied to EVERY WebGPURenderer whose device we care about — both the
@@ -77,15 +122,29 @@ export function chooseTextureLimit(adapterMax, desired = DESIRED_TEXTURE_DIM) {
  * actually draws the map) — or the two disagree and the report lies.
  *
  * Not unit-tested (it touches `navigator.gpu`); the arithmetic it delegates to
- * (`chooseTextureLimit`) is the part with the Node tests.
+ * (`chooseTextureLimit`/`chooseStorageBufferLimit`) is the part with the Node
+ * tests.
  *
- * @returns {Promise<{maxTextureDimension2D:number}|undefined>}
+ * @returns {Promise<{maxTextureDimension2D?:number, maxStorageBuffersPerShaderStage?:number}|undefined>}
  */
 export async function resolveRendererRequiredLimits() {
   try {
     const adapter = await globalThis.navigator?.gpu?.requestAdapter?.();
-    const adapterMax = adapter?.limits?.maxTextureDimension2D;
-    if (adapterMax) return { maxTextureDimension2D: chooseTextureLimit(adapterMax) };
+    if (!adapter) return undefined;
+    const limits = {};
+    const adapterMaxTexture = adapter.limits?.maxTextureDimension2D;
+    if (adapterMaxTexture) limits.maxTextureDimension2D = chooseTextureLimit(adapterMaxTexture);
+    // STORAGE BUFFERS (2026-07-22, a live "9 exceeds limit 8" GPUValidationError
+    // — see WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE's own doc for the exact
+    // error). A compute-heavy effect (Wind Gusts: 5 arena buffers + trail
+    // history + up to 3 optional wind grids) can genuinely need more than the
+    // WebGPU default's 8-per-stage floor; raise it the SAME safe, adapter-
+    // clamped way as the texture cap above.
+    const adapterMaxStorageBuffers = adapter.limits?.maxStorageBuffersPerShaderStage;
+    if (adapterMaxStorageBuffers) {
+      limits.maxStorageBuffersPerShaderStage = chooseStorageBufferLimit(adapterMaxStorageBuffers);
+    }
+    return Object.keys(limits).length > 0 ? limits : undefined;
   } catch (_) {
     // No adapter / WebGPU unavailable / query threw — let three pick its
     // default limits; a device that genuinely can't be created trips the

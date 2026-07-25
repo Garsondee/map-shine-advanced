@@ -10,192 +10,192 @@
 
 ### General
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Mode | `mode` | list | Torch / Flashlight / Night Vision / Low-light Vision / Infravision / Active Infravision | flashlight | hidden |
-| Torch Max Dist (u) | `torchMaxDistanceUnits` | slider | 1 … 200 | 10 |  |
-| Flashlight Max Dist (u) | `flashlightMaxDistanceUnits` | slider | 1 … 200 | 60 |  |
-| Fade Band (u) | `fadeOutDistanceUnits` | slider | 0 … 100 | 7 |  |
-| Wall Block | `wallBlockEnabled` | boolean |  | true |  |
-| Debug Readout | `debugReadoutEnabled` | boolean |  | false |  |
+| Control                 | id                           | Type    | Range                                                                                   | Default    | Notes  |
+| ----------------------- | ---------------------------- | ------- | --------------------------------------------------------------------------------------- | ---------- | ------ |
+| Mode                    | `mode`                       | list    | Torch / Flashlight / Night Vision / Low-light Vision / Infravision / Active Infravision | flashlight | hidden |
+| Torch Max Dist (u)      | `torchMaxDistanceUnits`      | slider  | 1 … 200                                                                                 | 10         |        |
+| Flashlight Max Dist (u) | `flashlightMaxDistanceUnits` | slider  | 1 … 200                                                                                 | 60         |        |
+| Fade Band (u)           | `fadeOutDistanceUnits`       | slider  | 0 … 100                                                                                 | 7          |        |
+| Wall Block              | `wallBlockEnabled`           | boolean |                                                                                         | true       |        |
+| Debug Readout           | `debugReadoutEnabled`        | boolean |                                                                                         | false      |        |
 
 ### Day / Night
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Auto Day/Night | `autoDayNightBalance` | boolean |  | true |  |
-| | | | | | _Scales torch + flashlight VFX and dynamic lights with scene darkness so player lights stay subtle by day and readable at night after Color Correction._ |
-| Day Scale | `dayIntensityScale` | slider | 0 … 1.5 | 0.28 |  |
-| | | | | | _Multiplier at full daylight (master darkness ≈ 0)._ |
-| Night Scale | `nightIntensityScale` | slider | 0.25 … 4 | 1.65 |  |
-| | | | | | _Multiplier at full night (master darkness ≈ 1)._ |
-| Darkness Curve | `dayNightCurve` | slider | 0.25 … 3 | 1.15 |  |
-| | | | | | _Above 1 = lights stay dim longer into dusk; below 1 = ramp up earlier._ |
-| Darkness Cancel | `lightDarknessCancel` | slider | 0 … 8 | 3 |  |
-| | | | | | _HDR punch into the light buffer (alpha). Higher = torch/flash erase Foundry darkness and CC tint more aggressively. Matches candle glow behaviour._ |
-| Night Cancel Boost | `lightDarknessNightBoost` | slider | 1 … 4 | 2 |  |
-| | | | | | _Extra darkness-cancel strength at full night (master darkness ≈ 1)._ |
-| Follow Point Light Gain | `lightFollowLightIntensity` | boolean |  | true |  |
-| | | | | | _Multiply cancel strength by Lighting → Point light gain so player pools track scene lamp brightness._ |
+| Control                 | id                          | Type    | Range    | Default | Notes                                                                                                                                                    |
+| ----------------------- | --------------------------- | ------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auto Day/Night          | `autoDayNightBalance`       | boolean |          | true    |                                                                                                                                                          |
+|                         |                             |         |          |         | _Scales torch + flashlight VFX and dynamic lights with scene darkness so player lights stay subtle by day and readable at night after Color Correction._ |
+| Day Scale               | `dayIntensityScale`         | slider  | 0 … 1.5  | 0.28    |                                                                                                                                                          |
+|                         |                             |         |          |         | _Multiplier at full daylight (master darkness ≈ 0)._                                                                                                     |
+| Night Scale             | `nightIntensityScale`       | slider  | 0.25 … 4 | 1.65    |                                                                                                                                                          |
+|                         |                             |         |          |         | _Multiplier at full night (master darkness ≈ 1)._                                                                                                        |
+| Darkness Curve          | `dayNightCurve`             | slider  | 0.25 … 3 | 1.15    |                                                                                                                                                          |
+|                         |                             |         |          |         | _Above 1 = lights stay dim longer into dusk; below 1 = ramp up earlier._                                                                                 |
+| Darkness Cancel         | `lightDarknessCancel`       | slider  | 0 … 8    | 3       |                                                                                                                                                          |
+|                         |                             |         |          |         | _HDR punch into the light buffer (alpha). Higher = torch/flash erase Foundry darkness and CC tint more aggressively. Matches candle glow behaviour._     |
+| Night Cancel Boost      | `lightDarknessNightBoost`   | slider  | 1 … 4    | 2       |                                                                                                                                                          |
+|                         |                             |         |          |         | _Extra darkness-cancel strength at full night (master darkness ≈ 1)._                                                                                    |
+| Follow Point Light Gain | `lightFollowLightIntensity` | boolean |          | true    |                                                                                                                                                          |
+|                         |                             |         |          |         | _Multiply cancel strength by Lighting → Point light gain so player pools track scene lamp brightness._                                                   |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | true |  |
-| Spring Stiffness | `springStiffness` | slider | 1 … 300 | 55 |  |
-| Spring Damping | `springDamping` | slider | 0 … 90 | 16 |  |
-| Base Intensity | `torchBaseIntensity` | slider | 0 … 6 | 0.66 |  |
-| Ember Intensity | `emberIntensity` | slider | 0 … 3 | 0.85 |  |
-| Gutter: Disable Light | `torchGutterDisableLight` | boolean |  | true |  |
-| Gutter: Life Scale | `torchGutterLifeScale` | slider | 0.05 … 1 | 0.3 |  |
-| Reignite Requires Touch | `torchReigniteRequiresTouch` | boolean |  | true |  |
-| Reignite Touch Extra (u) | `torchReigniteTouchExtraUnits` | slider | 0 … 10 | 0.25 |  |
-| Rise Speed | `intensityRiseSpeed` | slider | 0.1 … 60 | 55.5 |  |
-| Fall Speed | `intensityFallSpeed` | slider | 0.1 … 80 | 2.8 |  |
-| Flicker Amount | `flickerIntensity` | slider | 0 … 2.5 | 0.33 |  |
-| Flicker Speed | `flickerSpeed` | slider | 0.1 … 40 | 10.1 |  |
-| Wander (px) | `wanderPixels` | slider | 0 … 140 | 28 |  |
-| Wander Speed | `wanderSpeed` | slider | 0.1 … 20 | 2.3 |  |
-| Legacy Cone Angle (deg) | `flashlightAngleDeg` | slider | 5 … 140 | 38 |  |
-| Legacy Cone Length (u) | `flashlightLengthUnits` | slider | 1 … 160 | 18 |  |
-| Intensity | `flashlightIntensity` | slider | 0 … 6 | 0.09 |  |
-| Brokenness | `flashlightBrokenness` | slider | 0 … 1 | 0 | hidden |
-| Wobble | `flashlightWobble` | slider | 0 … 1 | 0 | hidden |
-| Angle (deg) | `flashlightBeamAngleDeg` | slider | 1 … 160 | 38 |  |
-| Length (u) | `flashlightBeamLengthUnits` | slider | 0.5 … 240 | 18 |  |
-| Width Scale | `flashlightBeamWidthScale` | slider | 0.05 … 3 | 1.25 |  |
-| Near Width | `flashlightBeamNearWidth` | slider | 0.01 … 1.5 | 0.01 |  |
-| Far Width | `flashlightBeamFarWidth` | slider | 0.05 … 3 | 1.28 |  |
-| Width Curve | `flashlightBeamWidthCurve` | slider | 0.25 … 4 | 0.96 |  |
-| Edge Softness | `flashlightBeamEdgeSoftness` | slider | 0.01 … 0.95 | 0.8 |  |
-| | | | | | _Feather width at the beam edge as a fraction of beam radius (0.01 = hard, 0.95 = very soft)._ |
-| Core Intensity | `flashlightBeamCoreIntensity` | slider | 0 … 4 | 4 |  |
-| Core Sharpness | `flashlightBeamCoreSharpness` | slider | 0.1 … 40 | 0.1 |  |
-| Mid Intensity | `flashlightBeamMidIntensity` | slider | 0 … 2 | 0.25 |  |
-| Mid Sharpness | `flashlightBeamMidSharpness` | slider | 0.1 … 20 | 2.2 |  |
-| Rim Intensity | `flashlightBeamRimIntensity` | slider | 0 … 4 | 0.6 |  |
-| Rim Sharpness | `flashlightBeamRimSharpness` | slider | 0.1 … 60 | 14 |  |
-| Near Boost | `flashlightBeamNearBoost` | slider | 0 … 6 | 6 |  |
-| Near Boost Curve | `flashlightBeamNearBoostCurve` | slider | 0.1 … 6 | 0.1 |  |
-| Long Falloff | `flashlightBeamLongFalloffExp` | slider | 0.1 … 6 | 4.35 |  |
-| Noise Amount | `flashlightBeamNoiseIntensity` | slider | 0 … 0.6 | 0.06 |  |
-| Noise Scale | `flashlightBeamNoiseScale` | slider | 0.1 … 30 | 7 |  |
-| Noise Speed | `flashlightBeamNoiseSpeed` | slider | 0 … 10 | 1.2 |  |
-| Cookie | `flashlightCookieTexture` | list | Light 1 / Light 2 / Light 3 | light_01 |  |
-| Rotate Cookie | `flashlightCookieRotation` | boolean |  | true |  |
-| Rotation Speed | `flashlightCookieRotationSpeed` | slider | 0 … 4 | 0.3 |  |
-| Intensity Mult | `flashlightCookieIntensity` | slider | 0 … 6 | 6 |  |
-| Size (px) | `flashlightCookieSizePx` | slider | 1 … 600 | 338 |  |
-| Size From Beam | `flashlightCookieSizeFromBeam` | slider | 0 … 3 | 0.48 |  |
-| Mask Radius | `flashlightCookieMaskRadius` | slider | 0.1 … 1 | 0.92 |  |
-| Mask Softness | `flashlightCookieMaskSoftness` | slider | 0 … 0.8 | 0.1 |  |
-| Core Intensity | `flashlightCookieCoreIntensity` | slider | 0 … 6 | 1.25 |  |
-| Core Sharpness | `flashlightCookieCoreSharpness` | slider | 0.1 … 40 | 8 |  |
-| Rim Intensity | `flashlightCookieRimIntensity` | slider | 0 … 6 | 0.55 |  |
-| Rim Radius | `flashlightCookieRimRadius` | slider | 0 … 1 | 0.78 |  |
-| Rim Width | `flashlightCookieRimWidth` | slider | 0.01 … 1 | 0.22 |  |
-| Perspective | `flashlightCookiePerspectiveEnabled` | boolean |  | true |  |
-| Perspective Near | `flashlightCookiePerspectiveNearScale` | slider | 0.1 … 2 | 0.3 |  |
-| Perspective Far | `flashlightCookiePerspectiveFarScale` | slider | 0.1 … 4 | 4 |  |
-| Perspective Curve | `flashlightCookiePerspectiveCurve` | slider | 0.1 … 4 | 2.34 |  |
-| Perspective Stretch | `flashlightCookiePerspectiveAnamorphic` | slider | 0.1 … 6 | 1.49 |  |
-| Enabled | `torchLightEnabled` | boolean |  | true |  |
-| Color | `torchLightColor` | color |  | {"r":1,"g":0.42,"b":0.12} |  |
-| Dim Radius (u) | `torchLightDim` | slider | 0 … 160 | 19.5 |  |
-| Bright Radius (u) | `torchLightBright` | slider | 0 … 120 | 3 |  |
-| Alpha | `torchLightAlpha` | slider | 0 … 2 | 0.18 |  |
-| Attenuation | `torchLightAttenuation` | slider | 0 … 1 | 1 |  |
-| Luminosity | `torchLightLuminosity` | slider | 0 … 3 | 2.2 |  |
-| Animation | `torchLightAnimType` | list | None / Torch / Flame / Pulse | none |  |
-| Anim Speed | `torchLightAnimSpeed` | slider | 0 … 40 | 2.7 |  |
-| Anim Intensity | `torchLightAnimIntensity` | slider | 0 … 25 | 1.7 |  |
-| Scale With Torch | `torchLightScaleWithIntensity` | boolean |  | false |  |
-| Size Min (px) | `torchFlameSizeMin` | slider | 1 … 120 | 32 |  |
-| Size Max (px) | `torchFlameSizeMax` | slider | 1 … 180 | 65 |  |
-| Rate Min | `torchFlameRateMin` | slider | 0 … 600 | 90 |  |
-| Rate Max | `torchFlameRateMax` | slider | 0 … 1000 | 170 |  |
-| Updraft | `torchFlameUpdraft` | slider | 0 … 40 | 6 |  |
-| Wind Influence | `torchFlameWindInfluence` | slider | 0 … 2 | 0.25 |  |
-| Enabled | `torchSparksEnabled` | boolean |  | true |  |
-| Rate | `torchSparksRate` | slider | 0 … 400 | 28 |  |
-| Size Min (px) | `torchSparksSizeMin` | slider | 1 … 60 | 3 |  |
-| Size Max (px) | `torchSparksSizeMax` | slider | 1 … 120 | 10 |  |
-| Life Min (s) | `torchSparksLifeMin` | slider | 0.05 … 3 | 0.25 |  |
-| Life Max (s) | `torchSparksLifeMax` | slider | 0.05 … 4 | 0.7 |  |
-| Updraft | `torchSparksUpdraft` | slider | 0 … 120 | 24 |  |
-| Wind Influence | `torchSparksWindInfluence` | slider | 0 … 3 | 0.45 |  |
-| Streak Factor | `torchSparksSpeedFactor` | slider | 0 … 0.15 | 0.03 |  |
-| Enabled | `flashlightLightEnabled` | boolean |  | true |  |
-| Color | `flashlightLightColor` | color |  | {"r":1,"g":0.9460786716550282,"b":0.8201783163066584} |  |
-| Dim Radius (u) | `flashlightLightDim` | slider | 0 … 240 | 14 |  |
-| Bright Radius (u) | `flashlightLightBright` | slider | 0 … 200 | 5 |  |
-| Alpha | `flashlightLightAlpha` | slider | 0 … 2 | 0.25 |  |
-| Attenuation | `flashlightLightAttenuation` | slider | 0 … 1 | 1 |  |
-| Luminosity | `flashlightLightLuminosity` | slider | 0 … 3 | 0.6 |  |
-| Animation | `flashlightLightAnimType` | list | None / Flame / Pulse / Torch | torch |  |
-| Anim Speed | `flashlightLightAnimSpeed` | slider | 0 … 40 | 5 |  |
-| Anim Intensity | `flashlightLightAnimIntensity` | slider | 0 … 25 | 5 |  |
-| Use Cookie Pos | `flashlightLightUseCookiePosition` | boolean |  | true |  |
-| Distance Scaling | `flashlightLightDistanceScaleEnabled` | boolean |  | true |  |
-| Near Scale | `flashlightLightDistanceScaleNear` | slider | 0.1 … 3 | 0.28 |  |
-| Far Scale | `flashlightLightDistanceScaleFar` | slider | 0.1 … 3 | 3 |  |
-| Tint | `nightVisionTint` | color |  | {"r":0,"g":0.5501958510499996,"b":0.17193620345312488} |  |
-| Tint Strength | `nightVisionTintStrength` | slider | 0 … 1 | 1 |  |
-| Saturation | `nightVisionSaturation` | slider | 0 … 1 | 0 |  |
-| Brightness | `nightVisionBrightness` | slider | 0 … 2 | 2 |  |
-| Purkinje Strength | `nightVisionPurkinjeStrength` | slider | 0 … 1 | 0 |  |
-| | | | | | _Biological rod/cone crossover. Dark pre-gain areas desaturate to monochrome; brighter ambient areas keep color. Enabled automatically in Low-light Vision mode._ |
-| Purkinje Dark Start | `nightVisionPurkinjeDarkStart` | slider | 0.001 … 0.2 | 0.021 |  |
-| | | | | | _Pre-gain HDR luma below which color is fully suppressed (rod-dominated)._ |
-| Purkinje Bright End | `nightVisionPurkinjeBrightEnd` | slider | 0.02 … 1 | 0.23 |  |
-| | | | | | _Pre-gain HDR luma above which full saturation is restored (cone-dominated)._ |
-| Purkinje Curve | `nightVisionPurkinjeCurve` | slider | 0.2 … 4 | 1.4 |  |
-| | | | | | _Crossover sharpness between rod and cone vision retention._ |
-| Gain (× linear) | `nightVisionGain` | slider | 1 … 10 | 10 |  |
-| | | | | | _Linear gain on the graded display image (4× is a strong night-vision boost)._ |
-| Shadow Lift Curve | `nightVisionGamma` | slider | 0.3 … 2 | 0.86 |  |
-| | | | | | _Lower values lift dark areas more aggressively before the gain cap._ |
-| Peak Luma (soft knee) | `nightVisionMaxLuma` | slider | 0.5 … 4 | 4 |  |
-| | | | | | _Soft highlight ceiling after amplification. HDR scenes often need 2–3+ vs the old 0–1 display-referred clamp._ |
-| Black Level (linear) | `nightVisionDarkLift` | slider | 0 … 0.25 | 0.016 |  |
-| | | | | | _Linear offset added to HDR luma before log gain (smaller than pre-HDR defaults)._ |
-| Eyepiece Style | `nightVisionEyepieceStyle` | list | Single / Binocular | single |  |
-| Eyepiece Radius | `nightVisionEyepieceRadius` | slider | 0.05 … 0.95 | 0.68 |  |
-| Eyepiece Softness | `nightVisionEyepieceSoftness` | slider | 0.01 … 0.5 | 0.22 |  |
-| Eyepiece Intensity | `nightVisionEyepieceIntensity` | slider | 0 … 1 | 1 |  |
-| Eyepiece Edge Color | `nightVisionEyepieceColor` | color |  | {"r":0,"g":0,"b":0} |  |
-| Binocular Separation | `nightVisionEyepieceSeparation` | slider | 0 … 0.5 | 0.26 |  |
-| Scanlines | `nightVisionScanlinesEnabled` | boolean |  | true |  |
-| Scanline Intensity | `nightVisionScanlinesIntensity` | slider | 0 … 1 | 0.3 |  |
-| Scanline Density | `nightVisionScanlinesDensity` | slider | 60 … 1200 | 300 |  |
-| Scanline Speed | `nightVisionScanlinesSpeed` | slider | -3 … 3 | 1.4 |  |
-| Scanline Thickness | `nightVisionScanlinesThickness` | slider | 0 … 1 | 0.4 |  |
-| Noise Amount | `nightVisionNoiseAmount` | slider | 0 … 1 | 0.11 |  |
-| Noise Low-Light Boost | `nightVisionNoiseLowLightBoost` | slider | 0 … 3 | 0.55 |  |
-| Noise Speed | `nightVisionNoiseSpeed` | slider | 0 … 12 | 0.1 |  |
-| Noise Scale | `nightVisionNoiseScale` | slider | 0.5 … 6 | 6 |  |
-| Phosphor Flicker | `nightVisionPhosphorFlickerAmount` | slider | 0 … 1 | 0.09 |  |
-| Phosphor Flicker Speed | `nightVisionPhosphorFlickerSpeed` | slider | 0.5 … 30 | 4.1 |  |
-| Phosphor Size | `nightVisionPhosphorSize` | slider | 0.2 … 3 | 1.39 |  |
-| Phosphor Density | `nightVisionPhosphorDensity` | slider | 0.1 … 3 | 0.51 |  |
-| Phosphor Intensity | `nightVisionPhosphorIntensity` | slider | 0 … 4 | 1.05 |  |
-| Bloom / Burn-In | `nightVisionBloomEnabled` | boolean |  | true |  |
-| Bloom Threshold (linear) | `nightVisionBloomThreshold` | slider | 0 … 4 | 1.44 |  |
-| | | | | | _Linear HDR brightness floor for tube bloom burn-in (matches post-merge bloom scale)._ |
-| Threshold Softness | `nightVisionBloomThresholdSoftness` | slider | 0.01 … 0.5 | 0.5 |  |
-| Bloom Intensity | `nightVisionBloomIntensity` | slider | 0 … 3 | 3 |  |
-| Bloom Blur (px) | `nightVisionBloomBlurPx` | slider | 0 … 16 | 9.8 |  |
-| Burn Persistence (s) | `nightVisionBloomPersistenceSeconds` | slider | 0 … 3 | 0.2 |  |
-| Bloom Response | `nightVisionBloomResponse` | slider | 0.1 … 3 | 0.5 |  |
-| Distortion | `nightVisionDistortionAmount` | slider | -0.3 … 0.3 | -0.18 |  |
-| Chromatic Aberration (px) | `nightVisionCAAmount` | slider | 0 … 6 | 6 |  |
-| CA Edge Power | `nightVisionCAEdgePower` | slider | 0.1 … 4 | 4 |  |
-| Warm-up (s) | `nightVisionWarmupSeconds` | slider | 0 … 3 | 0.6 |  |
-| Shutdown (s) | `nightVisionShutdownSeconds` | slider | 0 … 3 | 0.4 |  |
-| Warm-up Power Flicker | `nightVisionPowerFlickerEnabled` | boolean |  | true |  |
-| Power Flicker Intensity | `nightVisionPowerFlickerIntensity` | slider | 0 … 1 | 0.5 |  |
-| Auto-Dim by Scene Darkness | `nightVisionDarknessGateEnabled` | boolean |  | true |  |
-| Darkness Gate Start | `nightVisionDarknessStart` | slider | 0 … 1 | 0.25 |  |
-| Darkness Gate End | `nightVisionDarknessEnd` | slider | 0 … 1 | 0.6 |  |
-| Darkness Influence | `nightVisionDarknessInfluence` | slider | 0 … 1 | 1 |  |
+| Control                    | id                                      | Type    | Range                        | Default                                                | Notes                                                                                                                                                             |
+| -------------------------- | --------------------------------------- | ------- | ---------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| enabled                    | `enabled`                               | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Spring Stiffness           | `springStiffness`                       | slider  | 1 … 300                      | 55                                                     |                                                                                                                                                                   |
+| Spring Damping             | `springDamping`                         | slider  | 0 … 90                       | 16                                                     |                                                                                                                                                                   |
+| Base Intensity             | `torchBaseIntensity`                    | slider  | 0 … 6                        | 0.66                                                   |                                                                                                                                                                   |
+| Ember Intensity            | `emberIntensity`                        | slider  | 0 … 3                        | 0.85                                                   |                                                                                                                                                                   |
+| Gutter: Disable Light      | `torchGutterDisableLight`               | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Gutter: Life Scale         | `torchGutterLifeScale`                  | slider  | 0.05 … 1                     | 0.3                                                    |                                                                                                                                                                   |
+| Reignite Requires Touch    | `torchReigniteRequiresTouch`            | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Reignite Touch Extra (u)   | `torchReigniteTouchExtraUnits`          | slider  | 0 … 10                       | 0.25                                                   |                                                                                                                                                                   |
+| Rise Speed                 | `intensityRiseSpeed`                    | slider  | 0.1 … 60                     | 55.5                                                   |                                                                                                                                                                   |
+| Fall Speed                 | `intensityFallSpeed`                    | slider  | 0.1 … 80                     | 2.8                                                    |                                                                                                                                                                   |
+| Flicker Amount             | `flickerIntensity`                      | slider  | 0 … 2.5                      | 0.33                                                   |                                                                                                                                                                   |
+| Flicker Speed              | `flickerSpeed`                          | slider  | 0.1 … 40                     | 10.1                                                   |                                                                                                                                                                   |
+| Wander (px)                | `wanderPixels`                          | slider  | 0 … 140                      | 28                                                     |                                                                                                                                                                   |
+| Wander Speed               | `wanderSpeed`                           | slider  | 0.1 … 20                     | 2.3                                                    |                                                                                                                                                                   |
+| Legacy Cone Angle (deg)    | `flashlightAngleDeg`                    | slider  | 5 … 140                      | 38                                                     |                                                                                                                                                                   |
+| Legacy Cone Length (u)     | `flashlightLengthUnits`                 | slider  | 1 … 160                      | 18                                                     |                                                                                                                                                                   |
+| Intensity                  | `flashlightIntensity`                   | slider  | 0 … 6                        | 0.09                                                   |                                                                                                                                                                   |
+| Brokenness                 | `flashlightBrokenness`                  | slider  | 0 … 1                        | 0                                                      | hidden                                                                                                                                                            |
+| Wobble                     | `flashlightWobble`                      | slider  | 0 … 1                        | 0                                                      | hidden                                                                                                                                                            |
+| Angle (deg)                | `flashlightBeamAngleDeg`                | slider  | 1 … 160                      | 38                                                     |                                                                                                                                                                   |
+| Length (u)                 | `flashlightBeamLengthUnits`             | slider  | 0.5 … 240                    | 18                                                     |                                                                                                                                                                   |
+| Width Scale                | `flashlightBeamWidthScale`              | slider  | 0.05 … 3                     | 1.25                                                   |                                                                                                                                                                   |
+| Near Width                 | `flashlightBeamNearWidth`               | slider  | 0.01 … 1.5                   | 0.01                                                   |                                                                                                                                                                   |
+| Far Width                  | `flashlightBeamFarWidth`                | slider  | 0.05 … 3                     | 1.28                                                   |                                                                                                                                                                   |
+| Width Curve                | `flashlightBeamWidthCurve`              | slider  | 0.25 … 4                     | 0.96                                                   |                                                                                                                                                                   |
+| Edge Softness              | `flashlightBeamEdgeSoftness`            | slider  | 0.01 … 0.95                  | 0.8                                                    |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Feather width at the beam edge as a fraction of beam radius (0.01 = hard, 0.95 = very soft)._                                                                    |
+| Core Intensity             | `flashlightBeamCoreIntensity`           | slider  | 0 … 4                        | 4                                                      |                                                                                                                                                                   |
+| Core Sharpness             | `flashlightBeamCoreSharpness`           | slider  | 0.1 … 40                     | 0.1                                                    |                                                                                                                                                                   |
+| Mid Intensity              | `flashlightBeamMidIntensity`            | slider  | 0 … 2                        | 0.25                                                   |                                                                                                                                                                   |
+| Mid Sharpness              | `flashlightBeamMidSharpness`            | slider  | 0.1 … 20                     | 2.2                                                    |                                                                                                                                                                   |
+| Rim Intensity              | `flashlightBeamRimIntensity`            | slider  | 0 … 4                        | 0.6                                                    |                                                                                                                                                                   |
+| Rim Sharpness              | `flashlightBeamRimSharpness`            | slider  | 0.1 … 60                     | 14                                                     |                                                                                                                                                                   |
+| Near Boost                 | `flashlightBeamNearBoost`               | slider  | 0 … 6                        | 6                                                      |                                                                                                                                                                   |
+| Near Boost Curve           | `flashlightBeamNearBoostCurve`          | slider  | 0.1 … 6                      | 0.1                                                    |                                                                                                                                                                   |
+| Long Falloff               | `flashlightBeamLongFalloffExp`          | slider  | 0.1 … 6                      | 4.35                                                   |                                                                                                                                                                   |
+| Noise Amount               | `flashlightBeamNoiseIntensity`          | slider  | 0 … 0.6                      | 0.06                                                   |                                                                                                                                                                   |
+| Noise Scale                | `flashlightBeamNoiseScale`              | slider  | 0.1 … 30                     | 7                                                      |                                                                                                                                                                   |
+| Noise Speed                | `flashlightBeamNoiseSpeed`              | slider  | 0 … 10                       | 1.2                                                    |                                                                                                                                                                   |
+| Cookie                     | `flashlightCookieTexture`               | list    | Light 1 / Light 2 / Light 3  | light_01                                               |                                                                                                                                                                   |
+| Rotate Cookie              | `flashlightCookieRotation`              | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Rotation Speed             | `flashlightCookieRotationSpeed`         | slider  | 0 … 4                        | 0.3                                                    |                                                                                                                                                                   |
+| Intensity Mult             | `flashlightCookieIntensity`             | slider  | 0 … 6                        | 6                                                      |                                                                                                                                                                   |
+| Size (px)                  | `flashlightCookieSizePx`                | slider  | 1 … 600                      | 338                                                    |                                                                                                                                                                   |
+| Size From Beam             | `flashlightCookieSizeFromBeam`          | slider  | 0 … 3                        | 0.48                                                   |                                                                                                                                                                   |
+| Mask Radius                | `flashlightCookieMaskRadius`            | slider  | 0.1 … 1                      | 0.92                                                   |                                                                                                                                                                   |
+| Mask Softness              | `flashlightCookieMaskSoftness`          | slider  | 0 … 0.8                      | 0.1                                                    |                                                                                                                                                                   |
+| Core Intensity             | `flashlightCookieCoreIntensity`         | slider  | 0 … 6                        | 1.25                                                   |                                                                                                                                                                   |
+| Core Sharpness             | `flashlightCookieCoreSharpness`         | slider  | 0.1 … 40                     | 8                                                      |                                                                                                                                                                   |
+| Rim Intensity              | `flashlightCookieRimIntensity`          | slider  | 0 … 6                        | 0.55                                                   |                                                                                                                                                                   |
+| Rim Radius                 | `flashlightCookieRimRadius`             | slider  | 0 … 1                        | 0.78                                                   |                                                                                                                                                                   |
+| Rim Width                  | `flashlightCookieRimWidth`              | slider  | 0.01 … 1                     | 0.22                                                   |                                                                                                                                                                   |
+| Perspective                | `flashlightCookiePerspectiveEnabled`    | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Perspective Near           | `flashlightCookiePerspectiveNearScale`  | slider  | 0.1 … 2                      | 0.3                                                    |                                                                                                                                                                   |
+| Perspective Far            | `flashlightCookiePerspectiveFarScale`   | slider  | 0.1 … 4                      | 4                                                      |                                                                                                                                                                   |
+| Perspective Curve          | `flashlightCookiePerspectiveCurve`      | slider  | 0.1 … 4                      | 2.34                                                   |                                                                                                                                                                   |
+| Perspective Stretch        | `flashlightCookiePerspectiveAnamorphic` | slider  | 0.1 … 6                      | 1.49                                                   |                                                                                                                                                                   |
+| Enabled                    | `torchLightEnabled`                     | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Color                      | `torchLightColor`                       | color   |                              | {"r":1,"g":0.42,"b":0.12}                              |                                                                                                                                                                   |
+| Dim Radius (u)             | `torchLightDim`                         | slider  | 0 … 160                      | 19.5                                                   |                                                                                                                                                                   |
+| Bright Radius (u)          | `torchLightBright`                      | slider  | 0 … 120                      | 3                                                      |                                                                                                                                                                   |
+| Alpha                      | `torchLightAlpha`                       | slider  | 0 … 2                        | 0.18                                                   |                                                                                                                                                                   |
+| Attenuation                | `torchLightAttenuation`                 | slider  | 0 … 1                        | 1                                                      |                                                                                                                                                                   |
+| Luminosity                 | `torchLightLuminosity`                  | slider  | 0 … 3                        | 2.2                                                    |                                                                                                                                                                   |
+| Animation                  | `torchLightAnimType`                    | list    | None / Torch / Flame / Pulse | none                                                   |                                                                                                                                                                   |
+| Anim Speed                 | `torchLightAnimSpeed`                   | slider  | 0 … 40                       | 2.7                                                    |                                                                                                                                                                   |
+| Anim Intensity             | `torchLightAnimIntensity`               | slider  | 0 … 25                       | 1.7                                                    |                                                                                                                                                                   |
+| Scale With Torch           | `torchLightScaleWithIntensity`          | boolean |                              | false                                                  |                                                                                                                                                                   |
+| Size Min (px)              | `torchFlameSizeMin`                     | slider  | 1 … 120                      | 32                                                     |                                                                                                                                                                   |
+| Size Max (px)              | `torchFlameSizeMax`                     | slider  | 1 … 180                      | 65                                                     |                                                                                                                                                                   |
+| Rate Min                   | `torchFlameRateMin`                     | slider  | 0 … 600                      | 90                                                     |                                                                                                                                                                   |
+| Rate Max                   | `torchFlameRateMax`                     | slider  | 0 … 1000                     | 170                                                    |                                                                                                                                                                   |
+| Updraft                    | `torchFlameUpdraft`                     | slider  | 0 … 40                       | 6                                                      |                                                                                                                                                                   |
+| Wind Influence             | `torchFlameWindInfluence`               | slider  | 0 … 2                        | 0.25                                                   |                                                                                                                                                                   |
+| Enabled                    | `torchSparksEnabled`                    | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Rate                       | `torchSparksRate`                       | slider  | 0 … 400                      | 28                                                     |                                                                                                                                                                   |
+| Size Min (px)              | `torchSparksSizeMin`                    | slider  | 1 … 60                       | 3                                                      |                                                                                                                                                                   |
+| Size Max (px)              | `torchSparksSizeMax`                    | slider  | 1 … 120                      | 10                                                     |                                                                                                                                                                   |
+| Life Min (s)               | `torchSparksLifeMin`                    | slider  | 0.05 … 3                     | 0.25                                                   |                                                                                                                                                                   |
+| Life Max (s)               | `torchSparksLifeMax`                    | slider  | 0.05 … 4                     | 0.7                                                    |                                                                                                                                                                   |
+| Updraft                    | `torchSparksUpdraft`                    | slider  | 0 … 120                      | 24                                                     |                                                                                                                                                                   |
+| Wind Influence             | `torchSparksWindInfluence`              | slider  | 0 … 3                        | 0.45                                                   |                                                                                                                                                                   |
+| Streak Factor              | `torchSparksSpeedFactor`                | slider  | 0 … 0.15                     | 0.03                                                   |                                                                                                                                                                   |
+| Enabled                    | `flashlightLightEnabled`                | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Color                      | `flashlightLightColor`                  | color   |                              | {"r":1,"g":0.9460786716550282,"b":0.8201783163066584}  |                                                                                                                                                                   |
+| Dim Radius (u)             | `flashlightLightDim`                    | slider  | 0 … 240                      | 14                                                     |                                                                                                                                                                   |
+| Bright Radius (u)          | `flashlightLightBright`                 | slider  | 0 … 200                      | 5                                                      |                                                                                                                                                                   |
+| Alpha                      | `flashlightLightAlpha`                  | slider  | 0 … 2                        | 0.25                                                   |                                                                                                                                                                   |
+| Attenuation                | `flashlightLightAttenuation`            | slider  | 0 … 1                        | 1                                                      |                                                                                                                                                                   |
+| Luminosity                 | `flashlightLightLuminosity`             | slider  | 0 … 3                        | 0.6                                                    |                                                                                                                                                                   |
+| Animation                  | `flashlightLightAnimType`               | list    | None / Flame / Pulse / Torch | torch                                                  |                                                                                                                                                                   |
+| Anim Speed                 | `flashlightLightAnimSpeed`              | slider  | 0 … 40                       | 5                                                      |                                                                                                                                                                   |
+| Anim Intensity             | `flashlightLightAnimIntensity`          | slider  | 0 … 25                       | 5                                                      |                                                                                                                                                                   |
+| Use Cookie Pos             | `flashlightLightUseCookiePosition`      | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Distance Scaling           | `flashlightLightDistanceScaleEnabled`   | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Near Scale                 | `flashlightLightDistanceScaleNear`      | slider  | 0.1 … 3                      | 0.28                                                   |                                                                                                                                                                   |
+| Far Scale                  | `flashlightLightDistanceScaleFar`       | slider  | 0.1 … 3                      | 3                                                      |                                                                                                                                                                   |
+| Tint                       | `nightVisionTint`                       | color   |                              | {"r":0,"g":0.5501958510499996,"b":0.17193620345312488} |                                                                                                                                                                   |
+| Tint Strength              | `nightVisionTintStrength`               | slider  | 0 … 1                        | 1                                                      |                                                                                                                                                                   |
+| Saturation                 | `nightVisionSaturation`                 | slider  | 0 … 1                        | 0                                                      |                                                                                                                                                                   |
+| Brightness                 | `nightVisionBrightness`                 | slider  | 0 … 2                        | 2                                                      |                                                                                                                                                                   |
+| Purkinje Strength          | `nightVisionPurkinjeStrength`           | slider  | 0 … 1                        | 0                                                      |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Biological rod/cone crossover. Dark pre-gain areas desaturate to monochrome; brighter ambient areas keep color. Enabled automatically in Low-light Vision mode._ |
+| Purkinje Dark Start        | `nightVisionPurkinjeDarkStart`          | slider  | 0.001 … 0.2                  | 0.021                                                  |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Pre-gain HDR luma below which color is fully suppressed (rod-dominated)._                                                                                        |
+| Purkinje Bright End        | `nightVisionPurkinjeBrightEnd`          | slider  | 0.02 … 1                     | 0.23                                                   |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Pre-gain HDR luma above which full saturation is restored (cone-dominated)._                                                                                     |
+| Purkinje Curve             | `nightVisionPurkinjeCurve`              | slider  | 0.2 … 4                      | 1.4                                                    |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Crossover sharpness between rod and cone vision retention._                                                                                                      |
+| Gain (× linear)            | `nightVisionGain`                       | slider  | 1 … 10                       | 10                                                     |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Linear gain on the graded display image (4× is a strong night-vision boost)._                                                                                    |
+| Shadow Lift Curve          | `nightVisionGamma`                      | slider  | 0.3 … 2                      | 0.86                                                   |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Lower values lift dark areas more aggressively before the gain cap._                                                                                             |
+| Peak Luma (soft knee)      | `nightVisionMaxLuma`                    | slider  | 0.5 … 4                      | 4                                                      |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Soft highlight ceiling after amplification. HDR scenes often need 2–3+ vs the old 0–1 display-referred clamp._                                                   |
+| Black Level (linear)       | `nightVisionDarkLift`                   | slider  | 0 … 0.25                     | 0.016                                                  |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Linear offset added to HDR luma before log gain (smaller than pre-HDR defaults)._                                                                                |
+| Eyepiece Style             | `nightVisionEyepieceStyle`              | list    | Single / Binocular           | single                                                 |                                                                                                                                                                   |
+| Eyepiece Radius            | `nightVisionEyepieceRadius`             | slider  | 0.05 … 0.95                  | 0.68                                                   |                                                                                                                                                                   |
+| Eyepiece Softness          | `nightVisionEyepieceSoftness`           | slider  | 0.01 … 0.5                   | 0.22                                                   |                                                                                                                                                                   |
+| Eyepiece Intensity         | `nightVisionEyepieceIntensity`          | slider  | 0 … 1                        | 1                                                      |                                                                                                                                                                   |
+| Eyepiece Edge Color        | `nightVisionEyepieceColor`              | color   |                              | {"r":0,"g":0,"b":0}                                    |                                                                                                                                                                   |
+| Binocular Separation       | `nightVisionEyepieceSeparation`         | slider  | 0 … 0.5                      | 0.26                                                   |                                                                                                                                                                   |
+| Scanlines                  | `nightVisionScanlinesEnabled`           | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Scanline Intensity         | `nightVisionScanlinesIntensity`         | slider  | 0 … 1                        | 0.3                                                    |                                                                                                                                                                   |
+| Scanline Density           | `nightVisionScanlinesDensity`           | slider  | 60 … 1200                    | 300                                                    |                                                                                                                                                                   |
+| Scanline Speed             | `nightVisionScanlinesSpeed`             | slider  | -3 … 3                       | 1.4                                                    |                                                                                                                                                                   |
+| Scanline Thickness         | `nightVisionScanlinesThickness`         | slider  | 0 … 1                        | 0.4                                                    |                                                                                                                                                                   |
+| Noise Amount               | `nightVisionNoiseAmount`                | slider  | 0 … 1                        | 0.11                                                   |                                                                                                                                                                   |
+| Noise Low-Light Boost      | `nightVisionNoiseLowLightBoost`         | slider  | 0 … 3                        | 0.55                                                   |                                                                                                                                                                   |
+| Noise Speed                | `nightVisionNoiseSpeed`                 | slider  | 0 … 12                       | 0.1                                                    |                                                                                                                                                                   |
+| Noise Scale                | `nightVisionNoiseScale`                 | slider  | 0.5 … 6                      | 6                                                      |                                                                                                                                                                   |
+| Phosphor Flicker           | `nightVisionPhosphorFlickerAmount`      | slider  | 0 … 1                        | 0.09                                                   |                                                                                                                                                                   |
+| Phosphor Flicker Speed     | `nightVisionPhosphorFlickerSpeed`       | slider  | 0.5 … 30                     | 4.1                                                    |                                                                                                                                                                   |
+| Phosphor Size              | `nightVisionPhosphorSize`               | slider  | 0.2 … 3                      | 1.39                                                   |                                                                                                                                                                   |
+| Phosphor Density           | `nightVisionPhosphorDensity`            | slider  | 0.1 … 3                      | 0.51                                                   |                                                                                                                                                                   |
+| Phosphor Intensity         | `nightVisionPhosphorIntensity`          | slider  | 0 … 4                        | 1.05                                                   |                                                                                                                                                                   |
+| Bloom / Burn-In            | `nightVisionBloomEnabled`               | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Bloom Threshold (linear)   | `nightVisionBloomThreshold`             | slider  | 0 … 4                        | 1.44                                                   |                                                                                                                                                                   |
+|                            |                                         |         |                              |                                                        | _Linear HDR brightness floor for tube bloom burn-in (matches post-merge bloom scale)._                                                                            |
+| Threshold Softness         | `nightVisionBloomThresholdSoftness`     | slider  | 0.01 … 0.5                   | 0.5                                                    |                                                                                                                                                                   |
+| Bloom Intensity            | `nightVisionBloomIntensity`             | slider  | 0 … 3                        | 3                                                      |                                                                                                                                                                   |
+| Bloom Blur (px)            | `nightVisionBloomBlurPx`                | slider  | 0 … 16                       | 9.8                                                    |                                                                                                                                                                   |
+| Burn Persistence (s)       | `nightVisionBloomPersistenceSeconds`    | slider  | 0 … 3                        | 0.2                                                    |                                                                                                                                                                   |
+| Bloom Response             | `nightVisionBloomResponse`              | slider  | 0.1 … 3                      | 0.5                                                    |                                                                                                                                                                   |
+| Distortion                 | `nightVisionDistortionAmount`           | slider  | -0.3 … 0.3                   | -0.18                                                  |                                                                                                                                                                   |
+| Chromatic Aberration (px)  | `nightVisionCAAmount`                   | slider  | 0 … 6                        | 6                                                      |                                                                                                                                                                   |
+| CA Edge Power              | `nightVisionCAEdgePower`                | slider  | 0.1 … 4                      | 4                                                      |                                                                                                                                                                   |
+| Warm-up (s)                | `nightVisionWarmupSeconds`              | slider  | 0 … 3                        | 0.6                                                    |                                                                                                                                                                   |
+| Shutdown (s)               | `nightVisionShutdownSeconds`            | slider  | 0 … 3                        | 0.4                                                    |                                                                                                                                                                   |
+| Warm-up Power Flicker      | `nightVisionPowerFlickerEnabled`        | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Power Flicker Intensity    | `nightVisionPowerFlickerIntensity`      | slider  | 0 … 1                        | 0.5                                                    |                                                                                                                                                                   |
+| Auto-Dim by Scene Darkness | `nightVisionDarknessGateEnabled`        | boolean |                              | true                                                   |                                                                                                                                                                   |
+| Darkness Gate Start        | `nightVisionDarknessStart`              | slider  | 0 … 1                        | 0.25                                                   |                                                                                                                                                                   |
+| Darkness Gate End          | `nightVisionDarknessEnd`                | slider  | 0 … 1                        | 0.6                                                    |                                                                                                                                                                   |
+| Darkness Influence         | `nightVisionDarknessInfluence`          | slider  | 0 … 1                        | 1                                                      |                                                                                                                                                                   |

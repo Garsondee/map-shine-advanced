@@ -11,6 +11,7 @@ import { run as runPointLightIllumination } from './point-light-illumination.tes
 import { run as runPointLightColoration } from './point-light-coloration.test.mjs';
 import { run as runRegionGeometry } from './region-geometry.test.mjs';
 import { run as runLightVisibility } from './light-visibility.test.mjs';
+import { run as runSunOcclusion } from './sun-occlusion.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -45,6 +46,7 @@ const suites = [
   ['point-light-coloration', runPointLightColoration],
   ['region-geometry', runRegionGeometry],
   ['light-visibility', runLightVisibility],
+  ['sun-occlusion', runSunOcclusion],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

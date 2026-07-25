@@ -1,8 +1,8 @@
 # Foundry VTT v14 — Light & Darkness Animation Systems Audit
 
-**Purpose:** a formula-exact companion to `foundry-v14-lighting-audit.md`. That doc covers the *base* light system (radius, falloff, colour channels, occlusion) at file:line rigor; its own §13 summarizes the 29-animation-shaped table as a one-line-per-type map. This doc goes one level deeper: the **exact CPU driver formula and exact fragment-shader body for every registered animation type**, quoted verbatim with citations, so a TSL port is a literal, mechanical translation — never a re-derivation.
+**Purpose:** a formula-exact companion to `foundry-v14-lighting-audit.md`. That doc covers the _base_ light system (radius, falloff, colour channels, occlusion) at file:line rigor; its own §13 summarizes the 29-animation-shaped table as a one-line-per-type map. This doc goes one level deeper: the **exact CPU driver formula and exact fragment-shader body for every registered animation type**, quoted verbatim with citations, so a TSL port is a literal, mechanical translation — never a re-derivation.
 
-**Correction to the existing audit, stated plainly up front:** the base audit's §13 header reads "Full animation catalogue (light — 25)" and its closing summary refers to "29 animation types" (25 light + 4 darkness). Both are off. The actual registered total, verified three independent ways (a full read of the registry, a `grep -c` count of every `label: "LIGHT.ANIMATION...."` line in `client/config.mjs`, and a class-by-class reconciliation against all 26 shader-effect files), is **27 — 23 light + 4 darkness**. The base doc's own *table* beneath that header already lists the correct 23 light rows; only the header's count text (and the "29" framing repeated elsewhere) is wrong. This doc uses 27 throughout and treats that as the corrected figure.
+**Correction to the existing audit, stated plainly up front:** the base audit's §13 header reads "Full animation catalogue (light — 25)" and its closing summary refers to "29 animation types" (25 light + 4 darkness). Both are off. The actual registered total, verified three independent ways (a full read of the registry, a `grep -c` count of every `label: "LIGHT.ANIMATION...."` line in `client/config.mjs`, and a class-by-class reconciliation against all 26 shader-effect files), is **27 — 23 light + 4 darkness**. The base doc's own _table_ beneath that header already lists the correct 23 light rows; only the header's count text (and the "29" framing repeated elsewhere) is wrong. This doc uses 27 throughout and treats that as the corrected figure.
 
 **Source of record:** `foundryvttsourcecode_v14/resources/app/` (vendored). Every claim below is grepped/read from that tree; file paths are given so you can re-open the exact code. Where something could not be confirmed — most notably, one uniform that appears to never be assigned at runtime — that is stated as an open finding, not smoothed into a guess.
 
@@ -14,7 +14,7 @@
 
 ## 1. The animation framework
 
-### 1.1 What an animation *is*
+### 1.1 What an animation _is_
 
 Exactly as the base audit's §13 states: an animation is **a CPU update function** (mutates shader uniforms every frame) **+ optional replacement shader classes** per channel (illumination/coloration/darkness — never background, see §1.3). On source init, the source deep-clones the matching registry entry into `this.animation` (`base-light-source.mjs:127`, quoted below); `RenderedEffectSource#_configureShaders` swaps in the replacement shader classes (falling back to the channel's plain default shader when the entry doesn't specify one); and every frame `RenderedEffectSource#animate(dt)` calls the driver function.
 
@@ -35,6 +35,7 @@ static get ANIMATIONS() {
   return CONFIG.Canvas.lightAnimations;
 }
 ```
+
 ```js
 // point-darkness-source.mjs:27-30
 static get ANIMATIONS() {
@@ -74,7 +75,7 @@ Assigned once, at source initialization, and never touched again:
 ```js
 // rendered-effect-source.mjs:213-214
 const seed = this.data.seed ?? this.animation.seed ?? Math.floor(Math.random() * 100000);
-this.animation = this.data.animation = {seed, ...this.data.animation};
+this.animation = this.data.animation = { seed, ...this.data.animation };
 ```
 
 The seed is an **additive offset on the animation clock**, not a multiplier or a hash of anything — see `animateTime` below. A GM-set `LightData.seed` (or a value already present on `animation.seed`, e.g. imported/copied data) wins; otherwise it's `Math.floor(Math.random()*100000)`. Two lights created in the same frame with no explicit seed get independently-random seeds (JS `Math.random()` is called once per source), which is what desyncs otherwise-identical torches. **For a TSL/MSA port:** this is a plain per-light CPU float uniform (`uSeed` or folded straight into a per-light `uTimeOffset`) — no GPU-side randomness needed, and no reason to derive it from anything cleverer than `Math.random()` at light-creation time, matching Foundry exactly.
@@ -102,6 +103,7 @@ animateTime(dt, {speed=5, intensity=5, reverse=false}={}) {
   }
 }
 ```
+
 Formula: **`time = (speed × ticker.lastTime) / 5000 + seed`** (sign of the ticker time flips first if `reverse`), written to `u.time` and `u.intensity` on **every** active layer of the source (not just the ones an animation entry overrides — e.g. a darkness source's single `darkness` layer, or a light source's `background`/`illumination`/`coloration` even where only 1–2 have replacement shaders). `speed` is the raw `[0,10]` LightData animation-speed slider used directly as a linear multiplier; there is no additional easing curve on speed (unlike `attenuation`, §7 of the base audit).
 
 #### `animateTorch` → `animateFlickering` (used by `flame`, `torch`, `siren`)
@@ -112,6 +114,7 @@ animateTorch(dt, {speed=5, intensity=5, reverse=false} = {}) {
   this.animateFlickering(dt, {speed, intensity, reverse, amplification: intensity / 5});
 }
 ```
+
 ```js
 // base-light-source.mjs:269-288
 animateFlickering(dt, {speed=5, intensity=5, reverse=false, amplification=1} = {}) {
@@ -135,7 +138,9 @@ animateFlickering(dt, {speed=5, intensity=5, reverse=false, amplification=1} = {
   co.uniforms.ratio = il.uniforms.ratio = (this.ratio * 0.9) + (n * 0.222);// Range [ratio * 0.9, ratio * ~1.0 <* amplification>]
 }
 ```
+
 This **calls `animateTime` first** (so `time`/`intensity` are also updated on every layer per §1.3's `animateTime` entry), then layers CPU-side 1D noise on top. `SmoothNoise` (`client/canvas/animation/smooth-noise.mjs`, not read in full for this doc — out of GLSL/TSL scope, it's a pure-JS smoothed-noise generator keyed by amplitude/scale/maxReferences) is sampled once per frame at `this.animation.time`, producing `n ∈ [0, amplitude]` where `amplitude = (intensity/5) × 0.45` for the `torch`/`siren` entries (both call `animateTorch`, i.e. `amplification = intensity/5`). Two uniforms are written **directly on `coloration`+`illumination` shaders only** (not background, not darkness):
+
 - `brightnessPulse = 0.55 + n` — range `[0.55, 1.0]` at default intensity(5)/amplification(1), wider at higher intensity.
 - `ratio = ratio₀ × 0.9 + n × 0.222` — jitters the light's own bright/dim ratio (§5c of the base audit) around `0.9×ratio₀`.
 
@@ -170,9 +175,10 @@ animatePulse(dt, {speed=5, intensity=5, reverse=false}={}) {
   il.uniforms.ratio = wave(this.ratio, this.ratio * i, w);
 }
 ```
-Note this **duplicates** `animateTime`'s clock formula inline rather than calling it (`time = (speed×t)/5000 + seed`, same formula, same variable name) — and it writes `time`/`intensity` **only to `coloration`+`illumination`** (not `background`), unlike `animateTime` which loops every layer. `i = (10-intensity)×0.1` is the *low* end of the wave (an inverted-intensity floor, range `[0,1]` for `intensity∈[0,10]`); `w` is a `[0,1]` cosine breathing wave at angular rate `2.5`; `wave(a,b,w) = (a-b)×w + b` is a plain lerp from `b` (at `w=0`) to `a` (at `w=1`). Coloration's `pulse` breathes between `i` and `1.2`; illumination's `ratio` breathes between `ratio₀×i` and `ratio₀`.
 
-#### `animateSoundPulse` (used by `reactivepulse`, driving the *same* `Pulse*Shader` classes as `pulse`)
+Note this **duplicates** `animateTime`'s clock formula inline rather than calling it (`time = (speed×t)/5000 + seed`, same formula, same variable name) — and it writes `time`/`intensity` **only to `coloration`+`illumination`** (not `background`), unlike `animateTime` which loops every layer. `i = (10-intensity)×0.1` is the _low_ end of the wave (an inverted-intensity floor, range `[0,1]` for `intensity∈[0,10]`); `w` is a `[0,1]` cosine breathing wave at angular rate `2.5`; `wave(a,b,w) = (a-b)×w + b` is a plain lerp from `b` (at `w=0`) to `a` (at `w=1`). Coloration's `pulse` breathes between `i` and `1.2`; illumination's `ratio` breathes between `ratio₀×i` and `ratio₀`.
+
+#### `animateSoundPulse` (used by `reactivepulse`, driving the _same_ `Pulse*Shader` classes as `pulse`)
 
 ```js
 // base-light-source.mjs:339-371
@@ -210,41 +216,42 @@ animateSoundPulse(dt, {speed=5, intensity=5, reverse=false}={}) {
   il.uniforms.ratio = Math.clamp(amplitude * 1.11, 0, 1);
 }
 ```
+
 No `time`/`ratio`-breathing-wave here at all — **this driver never touches `u.time`**, so `reactivepulse` lights render `PulseColorationShader`/`PulseIlluminationShader` (§4's `pulse` entry) with a frozen `time` uniform (whatever it last held) and instead drives `pulse`/`ratio` from live audio: bass/mid/treble band levels (`game.audio.getMaxBandLevel`, `^1.5` power curve) blended by `intensity` (0=bass, 10=treble, crossfading through mid at 5), exponentially smoothed toward that target at a `dt`-and-`speed`-scaled rate (`smoothing = 1-exp(-speed×dt×0.085)`), optionally inverted (`reverse`), then scaled by `this.ratio` before feeding `pulse` (coloration) and `ratio×1.11` clamped `[0,1]` (illumination). **For a TSL/MSA port:** this is the one driver that cannot be reduced to a pure-GPU time function — it needs a live audio-analysis input (Web Audio `AnalyserNode` bands) on the CPU/JS side feeding a per-light uniform, exactly like Foundry's own `game.audio` dependency. Worth keeping as an explicit "needs an audio source" TODO rather than silently dropping to `animateTime`-style behavior.
 
 ### 1.4 The registry — all 27, verified against `client/config.mjs:828-980`
 
 Light animations at `client/config.mjs:828-956` (23 entries); darkness animations at `client/config.mjs:959-980` (4 entries). `ill`/`col`/`dark` = channel replaced. `fDC` = `forceDefaultColor` set true on the coloration class (see §3.4 for what this gates) — n/a for entries with no coloration shader.
 
-| key | label | CPU driver | ill | col | dark | fDC | shader source file |
-|---|---|---|:-:|:-:|:-:|:-:|---|
-| `flame` | LIGHT.ANIMATION.Flame | `animateFlickering` | ✓ | ✓ | | | `effects/flame.mjs` |
-| `torch` | LIGHT.ANIMATION.Torch | `animateTorch` | ✓ | ✓ | | | `effects/torch.mjs` |
-| `revolving` | LIGHT.ANIMATION.Revolving | `animateTime` | | ✓ | | ✓ | `effects/revolving-light.mjs` |
-| `siren` | LIGHT.ANIMATION.Siren | `animateTorch` | ✓ | ✓ | | | `effects/siren-light.mjs` |
-| `pulse` | LIGHT.ANIMATION.Pulse | `animatePulse` | ✓ | ✓ | | | `effects/pulse.mjs` |
-| `reactivepulse` | LIGHT.ANIMATION.ReactivePulse | `animateSoundPulse` | ✓ | ✓ | | | `effects/pulse.mjs` (shared class) |
-| `chroma` | LIGHT.ANIMATION.Chroma | `animateTime` | | ✓ | | ✓ | `effects/chroma.mjs` |
-| `wave` | LIGHT.ANIMATION.Wave | `animateTime` | ✓ | ✓ | | | `effects/wave.mjs` |
-| `fog` | LIGHT.ANIMATION.Fog | `animateTime` | | ✓ | | ✓ | `effects/fog.mjs` |
-| `sunburst` | LIGHT.ANIMATION.Sunburst | `animateTime` | ✓ | ✓ | | | `effects/sunburst.mjs` |
-| `dome` | LIGHT.ANIMATION.LightDome | `animateTime` | | ✓ | | ✓ | `effects/light-dome.mjs` |
-| `emanation` | LIGHT.ANIMATION.Emanation | `animateTime` | | ✓ | | ✓ | `effects/emanation.mjs` |
-| `hexa` | LIGHT.ANIMATION.HexaDome | `animateTime` | | ✓ | | ✓ | `effects/hexa-dome.mjs` |
-| `ghost` | LIGHT.ANIMATION.GhostLight | `animateTime` | ✓ | ✓ | | | `effects/ghost-light.mjs` |
-| `energy` | LIGHT.ANIMATION.EnergyField | `animateTime` | | ✓ | | ✓ | `effects/energy-field.mjs` |
-| `vortex` | LIGHT.ANIMATION.Vortex | `animateTime` | ✓* | ✓ | | | `effects/vortex.mjs` |
-| `witchwave` | LIGHT.ANIMATION.BewitchingWave | `animateTime` | ✓ | ✓ | | | `effects/bewitching-wave.mjs` |
-| `rainbowswirl` | LIGHT.ANIMATION.SwirlingRainbow | `animateTime` | | ✓ | | ✓ | `effects/swirling-rainbow.mjs` |
-| `radialrainbow` | LIGHT.ANIMATION.RadialRainbow | `animateTime` | | ✓ | | ✓ | `effects/radial-rainbow.mjs` |
-| `fairy` | LIGHT.ANIMATION.FairyLight | `animateTime` | ✓ | ✓ | | ✓ | `effects/fairy-light.mjs` |
-| `grid` | LIGHT.ANIMATION.ForceGrid | `animateTime` | | ✓ | | ✓ | `effects/force-grid.mjs` |
-| `starlight` | LIGHT.ANIMATION.StarLight | `animateTime` | | ✓ | | ✓ | `effects/star-light.mjs` |
-| `smokepatch` | LIGHT.ANIMATION.SmokePatch | `animateTime` | ✓ | ✓ | | | `effects/smoke-patch.mjs` |
-| `magicalGloom` | LIGHT.ANIMATION.MagicalGloom | `animateTime` | | | ✓ | — | `effects/magical-gloom.mjs` |
-| `roiling` | LIGHT.ANIMATION.RoilingMass | `animateTime` | | | ✓ | — | `effects/roiling-mass.mjs` |
-| `hole` | LIGHT.ANIMATION.BlackHole | `animateTime` | | | ✓ | — | `effects/black-hole.mjs` |
-| `denseSmoke` | LIGHT.ANIMATION.DenseSmoke | `animateTime` | | | ✓ | — | `effects/dense-smoke.mjs` |
+| key             | label                           | CPU driver          | ill | col | dark | fDC | shader source file                 |
+| --------------- | ------------------------------- | ------------------- | :-: | :-: | :--: | :-: | ---------------------------------- |
+| `flame`         | LIGHT.ANIMATION.Flame           | `animateFlickering` |  ✓  |  ✓  |      |     | `effects/flame.mjs`                |
+| `torch`         | LIGHT.ANIMATION.Torch           | `animateTorch`      |  ✓  |  ✓  |      |     | `effects/torch.mjs`                |
+| `revolving`     | LIGHT.ANIMATION.Revolving       | `animateTime`       |     |  ✓  |      |  ✓  | `effects/revolving-light.mjs`      |
+| `siren`         | LIGHT.ANIMATION.Siren           | `animateTorch`      |  ✓  |  ✓  |      |     | `effects/siren-light.mjs`          |
+| `pulse`         | LIGHT.ANIMATION.Pulse           | `animatePulse`      |  ✓  |  ✓  |      |     | `effects/pulse.mjs`                |
+| `reactivepulse` | LIGHT.ANIMATION.ReactivePulse   | `animateSoundPulse` |  ✓  |  ✓  |      |     | `effects/pulse.mjs` (shared class) |
+| `chroma`        | LIGHT.ANIMATION.Chroma          | `animateTime`       |     |  ✓  |      |  ✓  | `effects/chroma.mjs`               |
+| `wave`          | LIGHT.ANIMATION.Wave            | `animateTime`       |  ✓  |  ✓  |      |     | `effects/wave.mjs`                 |
+| `fog`           | LIGHT.ANIMATION.Fog             | `animateTime`       |     |  ✓  |      |  ✓  | `effects/fog.mjs`                  |
+| `sunburst`      | LIGHT.ANIMATION.Sunburst        | `animateTime`       |  ✓  |  ✓  |      |     | `effects/sunburst.mjs`             |
+| `dome`          | LIGHT.ANIMATION.LightDome       | `animateTime`       |     |  ✓  |      |  ✓  | `effects/light-dome.mjs`           |
+| `emanation`     | LIGHT.ANIMATION.Emanation       | `animateTime`       |     |  ✓  |      |  ✓  | `effects/emanation.mjs`            |
+| `hexa`          | LIGHT.ANIMATION.HexaDome        | `animateTime`       |     |  ✓  |      |  ✓  | `effects/hexa-dome.mjs`            |
+| `ghost`         | LIGHT.ANIMATION.GhostLight      | `animateTime`       |  ✓  |  ✓  |      |     | `effects/ghost-light.mjs`          |
+| `energy`        | LIGHT.ANIMATION.EnergyField     | `animateTime`       |     |  ✓  |      |  ✓  | `effects/energy-field.mjs`         |
+| `vortex`        | LIGHT.ANIMATION.Vortex          | `animateTime`       | ✓\* |  ✓  |      |     | `effects/vortex.mjs`               |
+| `witchwave`     | LIGHT.ANIMATION.BewitchingWave  | `animateTime`       |  ✓  |  ✓  |      |     | `effects/bewitching-wave.mjs`      |
+| `rainbowswirl`  | LIGHT.ANIMATION.SwirlingRainbow | `animateTime`       |     |  ✓  |      |  ✓  | `effects/swirling-rainbow.mjs`     |
+| `radialrainbow` | LIGHT.ANIMATION.RadialRainbow   | `animateTime`       |     |  ✓  |      |  ✓  | `effects/radial-rainbow.mjs`       |
+| `fairy`         | LIGHT.ANIMATION.FairyLight      | `animateTime`       |  ✓  |  ✓  |      |  ✓  | `effects/fairy-light.mjs`          |
+| `grid`          | LIGHT.ANIMATION.ForceGrid       | `animateTime`       |     |  ✓  |      |  ✓  | `effects/force-grid.mjs`           |
+| `starlight`     | LIGHT.ANIMATION.StarLight       | `animateTime`       |     |  ✓  |      |  ✓  | `effects/star-light.mjs`           |
+| `smokepatch`    | LIGHT.ANIMATION.SmokePatch      | `animateTime`       |  ✓  |  ✓  |      |     | `effects/smoke-patch.mjs`          |
+| `magicalGloom`  | LIGHT.ANIMATION.MagicalGloom    | `animateTime`       |     |     |  ✓   |  —  | `effects/magical-gloom.mjs`        |
+| `roiling`       | LIGHT.ANIMATION.RoilingMass     | `animateTime`       |     |     |  ✓   |  —  | `effects/roiling-mass.mjs`         |
+| `hole`          | LIGHT.ANIMATION.BlackHole       | `animateTime`       |     |     |  ✓   |  —  | `effects/black-hole.mjs`           |
+| `denseSmoke`    | LIGHT.ANIMATION.DenseSmoke      | `animateTime`       |     |     |  ✓   |  —  | `effects/dense-smoke.mjs`          |
 
 \* `vortex`'s illumination shader class exists and is registered, but its fragment body is textually the unmodified default scaffold — see its §4 entry, this is flagged, not an error in this table.
 
@@ -259,6 +266,7 @@ Light animations at `client/config.mjs:828-956` (23 entries); darkness animation
 All of the following live on `BaseShaderMixin` (`client/canvas/rendering/mixins/base-shader-mixin.mjs`) as static string/function members, mixed into every shader class via `AbstractBaseShader extends BaseShaderMixin(PIXI.Shader)` (`base-shader.mjs:11`). Per-animation sections below reference these by name ("uses `FBM(4,1.0)`") rather than re-quoting the body each time.
 
 ### `CONSTANTS` (base-shader-mixin.mjs:65-75, extended by `AdaptiveLightingShader.CONSTANTS` at base-lighting.mjs:170-175)
+
 ```glsl
 const float PI = 3.141592653589793;
 const float TWOPI = 6.283185307179586;
@@ -270,7 +278,9 @@ const float SQRT3 = 1.7320508075688772;
 const float SQRT1_3 = 0.5773502691896257;
 const vec3 BT709 = vec3(0.2126, 0.7152, 0.0722);
 ```
+
 Lighting shaders additionally get (`base-lighting.mjs:170-175`):
+
 ```glsl
 const float INVTHREE = 1.0 / 3.0;
 const vec2 PIVOT = vec2(0.5);
@@ -278,6 +288,7 @@ const vec4 ALLONES = vec4(1.0);
 ```
 
 ### `PERCEIVED_BRIGHTNESS` (base-shader-mixin.mjs:84-89) — used by nearly every animation
+
 ```glsl
 float perceivedBrightness(in vec3 color) { return sqrt(dot(BT709, color * color)); }
 float perceivedBrightness(in vec4 color) { return perceivedBrightness(color.rgb); }
@@ -286,7 +297,9 @@ float reversePerceivedBrightness(in vec4 color) { return 1.0 - perceivedBrightne
 ```
 
 ### `SIMPLEX_3D` (`snoise`, base-shader-mixin.mjs:97-156) — used only by `dense-smoke.mjs`
+
 The classic Ashima/McEwan simplex-noise-3D GLSL (permute/taylorInvSqrt gradient hash, `snoise(vec3 v) -> float`). Quoted in full since it's the one primitive only one animation needs (not worth re-deriving from memory for a port — copy verbatim):
+
 ```glsl
 vec4 permute(in vec4 x) {
   return mod(((x * 34.0) + 1.0) * x, 289.0);
@@ -349,12 +362,14 @@ float snoise(in vec3 v) {
 ```
 
 ### `PRNG` families (base-shader-mixin.mjs:273-317) — hash-based pseudo-random, no trig-driver dependency
+
 ```glsl
 // PRNG_LEGACY (uses cos — some drivers have precision bugs here; PRNG below replaced it as the default)
 float random(in vec2 uv) {
   return fract(cos(dot(uv, vec2(12.9898, 4.1414))) * 43758.5453);
 }
 ```
+
 ```glsl
 // PRNG — the one actually used by every 2D-noise animation in this doc
 float random(in vec2 uv) {
@@ -364,6 +379,7 @@ float random(in vec2 uv) {
                              * 251.19)) * 551.83);
 }
 ```
+
 ```glsl
 // PRNG2D
 vec2 random(in vec2 uv) {
@@ -372,6 +388,7 @@ vec2 random(in vec2 uv) {
   return fract((uvf.x + uvf.y) * uvf);
 }
 ```
+
 ```glsl
 // PRNG3D — used by energy-field.mjs's hand-rolled voronoi3d
 vec3 random(in vec3 uv) {
@@ -382,6 +399,7 @@ vec3 random(in vec3 uv) {
 ```
 
 ### `NOISE` (base-shader-mixin.mjs:325-335) — 2D value noise, built on `PRNG`'s `random(vec2)`
+
 ```glsl
 float noise(in vec2 uv) {
   const vec2 d = vec2(0.0, 1.0);
@@ -396,6 +414,7 @@ float noise(in vec2 uv) {
 ```
 
 ### `FBM(octaves=4, amp=1.0)` (base-shader-mixin.mjs:211-221) — a **function**, not a fixed string; per-call octave/amplitude baked into the generated GLSL text
+
 ```glsl
 float fbm(in vec2 uv) {
   float total = 0.0, amp = ${amp};
@@ -407,9 +426,11 @@ float fbm(in vec2 uv) {
   return total;
 }
 ```
-Requires `NOISE` (hence `PRNG`) already declared. Called across the 27 animations with varying `(octaves, amp)`: `FBM(4,1.0)` (bewitching-wave, fog, vortex), `FBM(3,1.0)` (fairy-light, ghost-light, star-light uses `FBM(2,1.0)`), `FBM(2)` (light-dome, default amp 1.0), `FBM(3)` (roiling-mass, default amp 1.0). **Port note:** since this is octave-parametrized at shader-*build* time (a JS template literal producing a fixed unrolled `for`), a TSL port needs either a fixed-octave `Loop` per call site (matching each animation's own chosen octave count) or a single generic `Fn` taking octaves as a JS-side constant baked at material-build time — not a runtime-variable loop bound.
+
+Requires `NOISE` (hence `PRNG`) already declared. Called across the 27 animations with varying `(octaves, amp)`: `FBM(4,1.0)` (bewitching-wave, fog, vortex), `FBM(3,1.0)` (fairy-light, ghost-light, star-light uses `FBM(2,1.0)`), `FBM(2)` (light-dome, default amp 1.0), `FBM(3)` (roiling-mass, default amp 1.0). **Port note:** since this is octave-parametrized at shader-_build_ time (a JS template literal producing a fixed unrolled `for`), a TSL port needs either a fixed-octave `Loop` per call site (matching each animation's own chosen octave count) or a single generic `Fn` taking octaves as a JS-side constant baked at material-build time — not a runtime-variable loop bound.
 
 ### `FBMHQ(octaves=3, fbmFuncName="fbm", noiseFuncName="noise", vecType="vec2")` (base-shader-mixin.mjs:233-246) — the higher-quality variant, also parametrized, and **reusable over `vec3` inputs** (this is how `dense-smoke.mjs` builds a 3D fbm over `snoise` instead of 2D `noise`)
+
 ```glsl
 float ${fbmFuncName}(in ${vecType} uv, in float smoothness) {
   float s = exp2(-smoothness);
@@ -424,9 +445,11 @@ float ${fbmFuncName}(in ${vecType} uv, in float smoothness) {
   return t;
 }
 ```
-Note the **call signature differs from `FBM`'s**: `FBMHQ`'s generated `fbm(uv, smoothness)` takes a *second runtime argument* (`smoothness`, consumed per-call, not baked at generation time) — every call site passes its own `smoothness` float (e.g. flame.mjs passes `1.0` and `2.0` at different call sites of the *same* generated function). Used by: `black-hole` (`FBMHQ()` — all defaults, 2D), `dense-smoke` (`FBMHQ(5,"fbm","snoise","vec3")` — 3D, keyed to simplex not value-noise), `flame` (`FBMHQ(3)`), `magical-gloom` (`FBMHQ()`), `smoke-patch` (`FBMHQ(3)`, ×2 call sites, illumination+coloration).
+
+Note the **call signature differs from `FBM`'s**: `FBMHQ`'s generated `fbm(uv, smoothness)` takes a _second runtime argument_ (`smoothness`, consumed per-call, not baked at generation time) — every call site passes its own `smoothness` float (e.g. flame.mjs passes `1.0` and `2.0` at different call sites of the _same_ generated function). Used by: `black-hole` (`FBMHQ()` — all defaults, 2D), `dense-smoke` (`FBMHQ(5,"fbm","snoise","vec3")` — 3D, keyed to simplex not value-noise), `flame` (`FBMHQ(3)`), `magical-gloom` (`FBMHQ()`), `smoke-patch` (`FBMHQ(3)`, ×2 call sites, illumination+coloration).
 
 ### `PIE` (base-shader-mixin.mjs:258-265) — used by `revolving-light.mjs`, `siren-light.mjs`
+
 ```glsl
 float pie(in vec2 coord, in float angle, in float smoothness, in float l) {
   coord.x = abs(coord.x);
@@ -436,9 +459,11 @@ float pie(in vec2 coord, in float angle, in float smoothness, in float l) {
   return smoothstep(0.0, smoothness, max(lg, clg * sign(va.y * coord.x - va.x * coord.y)));
 }
 ```
+
 An angular-wedge SDF-ish mask: `coord` in `[-1,1]` space, `angle` = half-aperture in radians, `l` = beam length, `smoothness` = edge softness. Returns ~0 inside the wedge, ~1 outside.
 
 ### `ROTATION` (base-shader-mixin.mjs:372-378) — used by `revolving-light.mjs`, `siren-light.mjs`
+
 ```glsl
 mat2 rot(in float a) {
   float s = sin(a);
@@ -448,6 +473,7 @@ mat2 rot(in float a) {
 ```
 
 ### `HSB2RGB` (base-shader-mixin.mjs:343-348) — used by `chroma`, `fairy-light`, `radial-rainbow`, `swirling-rainbow`
+
 ```glsl
 vec3 hsb2rgb(in vec3 c) {
   vec3 rgb = clamp(abs(mod(c.x*6.0+vec3(0.0,4.0,2.0), 6.0)-3.0)-1.0, 0.0, 1.0 );
@@ -455,9 +481,11 @@ vec3 hsb2rgb(in vec3 c) {
   return c.z * mix(vec3(1.0), rgb, c.y);
 }
 ```
+
 Standard polar HSB→RGB (`c.x`=hue `[0,1]`, `c.y`=saturation, `c.z`=brightness). All four call sites use `hsb2rgb(vec3(hueExpr, 1.0, 1.0))` — full saturation/brightness, only hue animated.
 
 ### `WAVE(func="cos")` (base-shader-mixin.mjs:358-364) — **declared in the toolkit but not called by name in any of the 27 animation files** (each animation that wants a sine/cosine wave hand-writes its own `0.5*(sin(...)+1.0)` inline instead — see e.g. `sunburst.mjs`'s `cosTime`, `force-grid.mjs`'s `wave()`, both hand-rolled, not this primitive). Quoted for completeness since the base audit's §13 table lists it as toolkit; flagged here as **effectively unused** by the shipped animation set.
+
 ```glsl
 float w${func}(in float v1, in float v2, in float a, in float speed) {
   float w = ${func}( speed + a ) + 1.0;
@@ -466,6 +494,7 @@ float w${func}(in float v1, in float v2, in float a, in float speed) {
 ```
 
 ### `VORONOI` (base-shader-mixin.mjs:388-432) — **declared in the toolkit but not called by name in any of the 27 animation files either.** `energy-field.mjs` (the one animation that visibly does cellular/Worley-style noise) hand-rolls its own `voronoi3d()` using `PRNG3D`'s `random(vec3)` directly (see §4's `energy` entry) rather than calling this shared 2D `voronoi(uv,t,zd)`. Quoted here since it's real, shipped, toolkit-declared GLSL a port might reasonably assume is load-bearing — it is not, for the current 27 animations.
+
 ```glsl
 vec3 voronoi(in vec2 uv, in float t, in float zd) {
   vec2 uvi = floor(uv);
@@ -508,6 +537,7 @@ vec3 voronoi(vec3 vuv, float zd) { return voronoi(vuv.xy, vuv.z, zd); }
 ```
 
 ### `COLOR_SPACES` (base-shader-mixin.mjs:164-201) — bonus, not called by any of the 27 animations, but load-bearing elsewhere in Foundry's pipeline and worth having on hand for the port (sRGB⇄linear, `tintColor`):
+
 ```glsl
 float luminance(in vec3 c) { return dot(BT709, c); }
 vec3 linear2grey(in vec3 c) { return vec3(luminance(c)); }
@@ -537,6 +567,7 @@ vec3 linear2srgbFast(in vec3 c) { return sqrt(c); }
 Every channel shader assembles as **`SHADER_HEADER` + toolkit primitives it needs + `main()`**, where `main()` is `FRAGMENT_BEGIN` + (an animated or default body) + `FRAGMENT_END`, per `AdaptiveLightingShader`'s architecture (`base-lighting.mjs`). This section quotes the parts every one of the 27 animations either inherits unchanged or overrides — §4 then shows, per animation, only the delta.
 
 ### 3.1 `SHADER_HEADER` (identical shape for illumination/coloration/background; darkness omits `SWITCH_COLOR`)
+
 ```js
 // illumination-lighting.mjs:49-55 (coloration-lighting.mjs:41-47, background-lighting.mjs:14-20 — identical shape)
 static SHADER_HEADER = `
@@ -547,6 +578,7 @@ ${this.CONSTANTS}
 ${this.SWITCH_COLOR}
 `;
 ```
+
 ```js
 // darkness-lighting.mjs:101-106 — no SWITCH_COLOR (darkness never cross-fades bright/dim; there is no ratio concept for darkness, base audit §12)
 static SHADER_HEADER = `
@@ -558,6 +590,7 @@ ${this.CONSTANTS}
 ```
 
 `FRAGMENT_UNIFORMS` (base-lighting.mjs:79-135) — full text, since every animation's extra uniforms (`brightnessPulse`, `pulse`, `angle`, `gradientFade`, `beamLength`) either draw from this list or extend it:
+
 ```glsl
 uniform int technique;
 uniform bool useSampler;
@@ -615,11 +648,13 @@ uniform vec3 dimensions;
 uniform mat3 translationMatrix;
 uniform mat3 projectionMatrix;
 ```
-Note `brightnessPulse`, `pulse`, `intensity`, `ratio`, `time` are **already declared here, in the shared block, at their generic default** (`0.0` for floats not otherwise set) — animation shaders never need to `uniform float pulse;` themselves; they only add genuinely *new* names not already in this list (`gradientFade`, `beamLength` — both `revolving`/`siren` only).
+
+Note `brightnessPulse`, `pulse`, `intensity`, `ratio`, `time` are **already declared here, in the shared block, at their generic default** (`0.0` for floats not otherwise set) — animation shaders never need to `uniform float pulse;` themselves; they only add genuinely _new_ names not already in this list (`gradientFade`, `beamLength` — both `revolving`/`siren` only).
 
 ### 3.2 `FRAGMENT_BEGIN` / `FRAGMENT_END` — light channels (illumination/coloration/background share the base; darkness overrides both)
 
 Base (`base-lighting.mjs:392-407`), used verbatim by illumination and coloration (background too — none of the 26 files override `FRAGMENT_BEGIN`/`FRAGMENT_END` on the background channel since no animation touches background at all):
+
 ```glsl
 // FRAGMENT_BEGIN
 ${this.COMPUTE_ILLUMINATION}
@@ -629,24 +664,29 @@ float depth = smoothstep(0.0, 1.0, vDepth) * (globalLight ? 1.0 : step(depthColo
 vec4 baseColor = useSampler ? texture2D(primaryTexture, vSamplerUvs) : vec4(1.0);
 vec3 finalColor = baseColor.rgb;
 ```
+
 ```glsl
 // FRAGMENT_END (base — used by coloration verbatim via its own identical override, and by background which never overrides it)
 gl_FragColor = vec4(finalColor, 1.0) * depth;
 ```
 
 Illumination overrides `FRAGMENT_END` only (`illumination-lighting.mjs:11-13`):
+
 ```glsl
 gl_FragColor = vec4(mix(computedBackgroundColor, finalColor, depth), 1.0);
 ```
-**Alpha-channel asymmetry, worth stating plainly for a TSL port:** illumination's alpha is **hardcoded to `1.0`**, independent of `depth`/falloff. Coloration's (and background's, and the base default's) alpha is **`1.0 * depth`** — i.e. `depth` *is* the alpha, so it fades toward 0 at the light's edge and wherever `FALLOFF` shrinks `depth`. This matters for any downstream compositor reading the alpha channel of these render targets. (MSA's own `point-light-illumination.js` already matches this — `vec4(outputColor, float(1))`, alpha hardcoded 1. MSA's `point-light-coloration.js` currently also hardcodes alpha to `1` — `vec4(outputColor, float(1))` — which is a **pre-existing, animation-independent deviation** from Foundry's coloration alpha-equals-depth contract; noted here since it surfaced while cross-referencing, see §5.)
+
+**Alpha-channel asymmetry, worth stating plainly for a TSL port:** illumination's alpha is **hardcoded to `1.0`**, independent of `depth`/falloff. Coloration's (and background's, and the base default's) alpha is **`1.0 * depth`** — i.e. `depth` _is_ the alpha, so it fades toward 0 at the light's edge and wherever `FALLOFF` shrinks `depth`. This matters for any downstream compositor reading the alpha channel of these render targets. (MSA's own `point-light-illumination.js` already matches this — `vec4(outputColor, float(1))`, alpha hardcoded 1. MSA's `point-light-coloration.js` currently also hardcodes alpha to `1` — `vec4(outputColor, float(1))` — which is a **pre-existing, animation-independent deviation** from Foundry's coloration alpha-equals-depth contract; noted here since it surfaced while cross-referencing, see §5.)
 
 Coloration overrides `FRAGMENT_END` (identically to the base — `coloration-lighting.mjs:11-13`, textually the same as §3.2's base block above, re-declared rather than inherited).
 
 ### 3.3 `FRAGMENT_BEGIN` / `FRAGMENT_END` — darkness channel (both overridden, `darkness-lighting.mjs:72-93`)
+
 ```glsl
 // FRAGMENT_END — textually identical to the base default (redeclared, not substantively different)
 gl_FragColor = vec4(finalColor, 1.0) * depth;
 ```
+
 ```glsl
 // FRAGMENT_BEGIN — genuinely different from the light-channel version
 ${this.COMPUTE_ILLUMINATION}
@@ -660,11 +700,13 @@ float depth = smoothstep(0.0, 1.0, vDepth) *
 vec4 baseColor = texture2D(primaryTexture, vSamplerUvs);
 vec3 finalColor = baseColor.rgb;
 ```
+
 Differences from the light-channel `FRAGMENT_BEGIN`: no `globalLight` bypass (darkness sources are never global), elevation `step()` tests always apply, an extra vision-masking factor, and an extra `borderDistance` radial fade (the visual-padding mechanic, base audit §12) baked directly into `depth` rather than left to a separate `FALLOFF` block. **Darkness has no `FALLOFF`/`ADJUSTMENTS`/`COLORATION_TECHNIQUES` concept at all** — none of the 4 darkness animation files call any of those three macros; the entire look is `FRAGMENT_BEGIN` → one-or-more hand-written `finalColor` lines → `FRAGMENT_END`.
 
 ### 3.4 Per-channel `main()` assembly (the exact scaffold each of §4's animations patches)
 
 **Illumination** (`illumination-lighting.mjs:58-70`):
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -675,9 +717,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 where `TRANSITION` (base-lighting.mjs:342-343) is exactly `finalColor = switchColor(computedBrightColor, computedDimColor, dist);` and `ILLUMINATION_TECHNIQUES` is near-always empty text — of the 13 coloration techniques (base audit §6), only **100 (Natural Attenuation)** and **101 (Adaptive Attenuation)** contribute an `illumination:` fragment at all (the exponential-falloff `depth *= max(0.095, fall)` block, base audit §7c); every other technique id contributes nothing to the illumination channel, so at the LightData-schema default (technique 1) this macro expands to an empty string.
 
 **Coloration** (`coloration-lighting.mjs:50-62`):
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -688,16 +732,20 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-**This is the scaffold every one of the 22 unique coloration-animation classes patches — and every single one of them keeps `${this.COLORATION_TECHNIQUES}` running immediately after its own custom `finalColor =` line.** None of the 27 animation shaders skip or replace the technique block; they only replace the *seed* value technique reads. At the schema default (technique 1, "Adaptive Luminance"), `COLORATION_TECHNIQUES` expands to exactly:
+
+**This is the scaffold every one of the 22 unique coloration-animation classes patches — and every single one of them keeps `${this.COLORATION_TECHNIQUES}` running immediately after its own custom `finalColor =` line.** None of the 27 animation shaders skip or replace the technique block; they only replace the _seed_ value technique reads. At the schema default (technique 1, "Adaptive Luminance"), `COLORATION_TECHNIQUES` expands to exactly:
+
 ```glsl
 if ( technique == 1 ) {
   float reflection = perceivedBrightness(baseColor);
   finalColor *= reflection;
 }
 ```
+
 So e.g. Torch's animated line `finalColor = color * brightnessPulse * colorationAlpha;` is **still followed by `finalColor *= reflection`** at default settings — the animated seed and the technique compose, they don't compete. **This is the single most important fact for the MSA port**: `point-light-coloration.js`'s existing `reflection` term (its own technique-1 implementation) should be **reused unchanged** by every animated coloration port; only the `finalColor = ...` seed line before it needs replacing per animation.
 
 `forceDefaultColor` (declared `false` on the base `AdaptiveLightingShader`, base-lighting.mjs:21) is read only by `AdaptiveColorationShader#isRequired` (coloration-lighting.mjs:101-112):
+
 ```js
 get isRequired() {
   const vs = canvas.visibility.lightingVisibility;
@@ -706,6 +754,7 @@ get isRequired() {
   return this.constructor.forceDefaultColor || this.uniforms.hasColor;
 }
 ```
+
 i.e. a coloration **layer** (the whole mesh, CPU-side, per `RenderedEffectSource#hasActiveLayer`/`#updateVisibleLayers`) is skipped entirely for a colourless light (`LightData.color === null`) **unless** the animation's coloration class sets `forceDefaultColor = true` — meaning that animation invents its own colour (a rainbow hue cycle, a white-default force-field) and must render even with no author-picked tint. §1.4's table carries this per-row; the full roster, reconciled class-by-class:
 
 - **`forceDefaultColor = true`** (13): Chroma, Emanation, EnergyField, FairyLight, ForceGrid, Fog, HexaDome, LightDome, RadialRainbow, Revolving, StarLight, SwirlingRainbow, Vortex.
@@ -714,6 +763,7 @@ i.e. a coloration **layer** (the whole mesh, CPU-side, per `RenderedEffectSource
 For MSA: `point-light-coloration.js` currently sets `uColorationAlpha = 0` for a colourless light as its equivalent gate (per that file's own header comment). **Any of the 13 `forceDefaultColor` animations must bypass that gate** — the coloration mesh needs to draw (and needs its own colour value, defaulting to white `[1,1,1]` the way Foundry's `color` uniform default does, base-lighting default `color: [1,1,1]`) even when the light itself carries no author colour.
 
 **Background** (`background-lighting.mjs:23-34`) — quoted for completeness; **no animation ever reaches this scaffold**:
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -725,6 +775,7 @@ void main() {
 ```
 
 **Darkness** (`darkness-lighting.mjs:111-120`) — the default (unanimated) body, which `roiling-mass.mjs` extends almost verbatim and the other three darkness animations replace wholesale:
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -734,6 +785,7 @@ void main() {
 ```
 
 ### 3.5 The reusable operator blocks (already fully quoted in the base audit §5c/§7/§8/§10 — cited, not re-quoted here)
+
 `SWITCH_COLOR`, `FALLOFF`, `CONTRAST`, `SATURATION`, `EXPOSURE` (illumination has its own ¼-strength override, `illumination-lighting.mjs:29-43`; coloration has none — coloration's `ADJUSTMENTS` is SATURATION+SHADOW only, no EXPOSURE, `coloration-lighting.mjs:19-25`), `SHADOW` (coloration's own override samples `baseColor.rgb` at a `[0.25,0.35]` band instead of the base's `changedColor` at `[0.50,0.80]`, `coloration-lighting.mjs:28-35`) — see base audit §5c, §7, §8, §10 for exact text; nothing about any of these operator blocks is animation-specific, they run identically whether or not an animation is active.
 
 ---
@@ -743,9 +795,11 @@ void main() {
 Each entry: what it demonstrates, the exact channel body/bodies (only the lines that differ from §3.4's scaffold — everything else is the scaffold, unchanged), toolkit primitives it calls into, and an MSA port note keyed to the actual current variable/uniform names in `point-light-illumination.js`/`point-light-coloration.js`. Light animations first (registry order), then the 4 darkness animations.
 
 ### `flame` — Flame
+
 **Demonstrates:** FBM-driven flame "tongues" radiating from center, layered on top of the standard flicker (this is the richer, harder-to-port sibling of `torch`, which uses the same CPU driver but a flat unshaped pulse).
 
-*Illumination* (`effects/flame.mjs:7-27`) — toolkit: `PERCEIVED_BRIGHTNESS` only.
+_Illumination_ (`effects/flame.mjs:7-27`) — toolkit: `PERCEIVED_BRIGHTNESS` only.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -756,9 +810,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `defaultUniforms` adds `brightnessPulse: 1` (flame.mjs:26).
 
-*Coloration* (`effects/flame.mjs:34-93`) — toolkit: `PRNG`, `NOISE`, `FBMHQ(3)`, `PERCEIVED_BRIGHTNESS`.
+_Coloration_ (`effects/flame.mjs:34-93`) — toolkit: `PRNG`, `NOISE`, `FBMHQ(3)`, `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 vec2 scale(in vec2 uv, in float scale) {
   mat2 scalemat = mat2(scale, 0.0, 0.0, scale);
@@ -804,16 +860,19 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `defaultUniforms` adds `brightnessPulse: 1` (flame.mjs:92). Note `color * 8.0` — the flame's hot core deliberately blows past `[0,1]`, relying on downstream clamping/blend to tame it; keep this over-bright core if HDR is available (see §5's "where MSA can do better" note).
 
-**MSA port:** illumination — insert `.mul(uBrightnessPulse)` between the existing `finalColor` (switchColor result) and the `EXPOSURE` block in `point-light-illumination.js`; needs a new `uBrightnessPulse` uniform (CPU-fed from `animateFlickering`'s formula, §1.3). Coloration — replace the `finalColor = uLightColor.mul(uColorationAlpha).mul(reflection)` line's *seed* (keep `reflection`, multiply the whole flame expression by it exactly as Foundry's `COLORATION_TECHNIQUES` does); the `fbm`/`scale`/flame-distance math is new TSL, `ratio`/`time`/`intensity`/`color` are all already-available uniforms on the coloration material.
+**MSA port:** illumination — insert `.mul(uBrightnessPulse)` between the existing `finalColor` (switchColor result) and the `EXPOSURE` block in `point-light-illumination.js`; needs a new `uBrightnessPulse` uniform (CPU-fed from `animateFlickering`'s formula, §1.3). Coloration — replace the `finalColor = uLightColor.mul(uColorationAlpha).mul(reflection)` line's _seed_ (keep `reflection`, multiply the whole flame expression by it exactly as Foundry's `COLORATION_TECHNIQUES` does); the `fbm`/`scale`/flame-distance math is new TSL, `ratio`/`time`/`intensity`/`color` are all already-available uniforms on the coloration material.
 
 ---
 
 ### `torch` — Torch
-**Demonstrates:** the "pure CPU-uniform" animation case — same driver family as `flame` (`animateTorch`→`animateFlickering`), but the **illumination shader body is textually the unmodified default scaffold**. The flicker still visibly animates illumination because `animateFlickering` jitters the shared `ratio` uniform that `TRANSITION`/`switchColor` already reads — no shader-side change needed. Contrast this with `vortex` below, which *looks* similarly "default" but for a different, more concerning reason (dead code, not CPU-sufficiency).
 
-*Illumination* (`effects/torch.mjs:7-23`) — toolkit: `PERCEIVED_BRIGHTNESS` (unused by name in the body, declared per the shared header pattern).
+**Demonstrates:** the "pure CPU-uniform" animation case — same driver family as `flame` (`animateTorch`→`animateFlickering`), but the **illumination shader body is textually the unmodified default scaffold**. The flicker still visibly animates illumination because `animateFlickering` jitters the shared `ratio` uniform that `TRANSITION`/`switchColor` already reads — no shader-side change needed. Contrast this with `vortex` below, which _looks_ similarly "default" but for a different, more concerning reason (dead code, not CPU-sufficiency).
+
+_Illumination_ (`effects/torch.mjs:7-23`) — toolkit: `PERCEIVED_BRIGHTNESS` (unused by name in the body, declared per the shared header pattern).
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -823,9 +882,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Textually identical to §3.4's illumination scaffold — zero lines added.
 
-*Coloration* (`effects/torch.mjs:30-51`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+_Coloration_ (`effects/torch.mjs:30-51`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -836,6 +897,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `defaultUniforms` adds `ratio: 0, brightnessPulse: 1` (torch.mjs:50) — note `ratio` defaults to `0` here specifically (unlike Flame's coloration, which doesn't override `ratio`'s shared default of `0.5`); harmless since this shader's own body never reads `ratio`.
 
 **MSA port:** illumination needs **no new shader code at all** — reusing `point-light-illumination.js`'s existing `uRatio` uniform and feeding it the CPU-jittered value from `animateFlickering` (§1.3's `ratio = ratio₀×0.9 + n×0.222`) reproduces Torch's illumination animation exactly, because the existing `switchColor`-equivalent block already consumes `uRatio` every frame. Coloration: same pattern as `flame` — replace the seed line with `uLightColor.mul(uBrightnessPulse).mul(uColorationAlpha)`, still followed by `.mul(reflection)`.
@@ -843,9 +905,11 @@ void main() {
 ---
 
 ### `revolving` — Revolving
+
 **Demonstrates:** a rotating beam, coloration-only, via the `PIE`/`ROTATION` toolkit. **The one animation whose rotation-driving `angle` uniform could not be confirmed as ever being assigned from live light data — see the flagged finding below.**
 
-*Coloration* (`effects/revolving-light.mjs:6-44`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PIE`, `ROTATION`. `forceDefaultColor = true`.
+_Coloration_ (`effects/revolving-light.mjs:6-44`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PIE`, `ROTATION`. `forceDefaultColor = true`.
+
 ```glsl
 uniform float gradientFade;
 uniform float beamLength;
@@ -863,9 +927,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `defaultUniforms` adds `angle: 0, gradientFade: 0.15, beamLength: 1` (revolving-light.mjs:38-43).
 
 **Flagged finding — the `angle` uniform appears to be dead/always-0 at runtime.** `angle`/`rotation` are declared in the shared `FRAGMENT_UNIFORMS`/`VERTEX_UNIFORMS` block (§3.1, "shared uniforms with vertex shader") and this shader's own `defaultUniforms` sets `angle: 0`. I traced every plausible place `mesh.shader.uniforms.angle` could be written from the light's actual `LightData.rotation`/cone `angle` fields and found none:
+
 - `point-effect-source.mjs:137` sets `angle: this.data.angle` — but that's the **polygon-shape config** object passed to `_createShapes()`, never a shader uniform.
 - `rendered-effect-source.mjs` (`_updateCommonUniforms`'s caller chain, `#updateUniforms`) — no `u.angle =` anywhere.
 - `base-light-source.mjs`'s `_updateCommonUniforms` override (base audit §5d/§7's `exposure`/`attenuation` wiring) — no `u.angle =`.
@@ -881,9 +947,11 @@ If this trace is complete, `angle` sits fixed at its `defaultUniforms` value (`0
 ---
 
 ### `siren` — Siren
-**Demonstrates:** the same rotating-beam idea as Revolving, but on the `animateTorch` driver (so it *also* gets `brightnessPulse`/jittered `ratio`) and touching **both** illumination and coloration. Shares Revolving's `angle`-uniform ambiguity.
 
-*Coloration* (`effects/siren-light.mjs:7-44`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PIE`, `ROTATION`. `forceDefaultColor` **not set** (false) — unlike Revolving, a Siren light with no author colour renders no coloration mesh at all.
+**Demonstrates:** the same rotating-beam idea as Revolving, but on the `animateTorch` driver (so it _also_ gets `brightnessPulse`/jittered `ratio`) and touching **both** illumination and coloration. Shares Revolving's `angle`-uniform ambiguity.
+
+_Coloration_ (`effects/siren-light.mjs:7-44`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PIE`, `ROTATION`. `forceDefaultColor` **not set** (false) — unlike Revolving, a Siren light with no author colour renders no coloration mesh at all.
+
 ```glsl
 uniform float gradientFade;
 uniform float beamLength;
@@ -901,9 +969,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `defaultUniforms` adds `ratio: 0, brightnessPulse: 1, angle: 0, gradientFade: 0.15, beamLength: 1` (siren-light.mjs:36-43). Note the rotation rate is `time * 50.0` — much faster than Revolving's bare `time` — and `gradientFade` is applied as `gradientFade * dist` (distance-scaled) here, vs. Revolving's flat `gradientFade`.
 
-*Illumination* (`effects/siren-light.mjs:51-85`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PIE`, `ROTATION`.
+_Illumination_ (`effects/siren-light.mjs:51-85`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PIE`, `ROTATION`.
+
 ```glsl
 uniform float gradientFade;
 uniform float beamLength;
@@ -921,6 +991,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `defaultUniforms` adds `angle: 0, gradientFade: 0.45, beamLength: 1` (siren-light.mjs:79-84) — note illumination's own `gradientFade` default (`0.45`) differs from coloration's (`0.15`); these are two independently-configured uniforms on two separate shader instances despite sharing a name, not a shared value. Also note illumination's `angularCorrection` is **half-strength** (`mix(1.0, pie(...), 0.5)` — blends 50/50 with "no beam at all"), so the illumination beam is always a softer wash than the coloration beam even at identical angular math.
 
 **MSA port:** illumination — insert the `angularCorrection` multiply between `TRANSITION`'s result and `EXPOSURE`, reusing `uRatio`-driven switchColor unchanged underneath, plus the CPU-jittered `ratio`/`brightnessPulse` from `animateTorch` (same driver as Torch/Flame — this needs those two uniforms wired regardless of the beam). Coloration — same pattern as Revolving, plus the `brightnessPulse` multiply. Same open `angle`-uniform question as Revolving.
@@ -928,9 +999,11 @@ void main() {
 ---
 
 ### `pulse` — Pulse
+
 **Demonstrates:** a plain radial breathing pulse, cosine-driven entirely on the CPU (`animatePulse`, §1.3) — the shader side barely does anything beyond consuming `pulse`/`ratio`. **Illumination skips `${this.ADJUSTMENTS}` entirely** — the one animation, of all 27, whose illumination channel is immune to the light's contrast/saturation/shadow/exposure sliders.
 
-*Illumination* (`effects/pulse.mjs:7-24`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+_Illumination_ (`effects/pulse.mjs:7-24`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -941,9 +1014,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Note: **no `${this.ADJUSTMENTS}` call** — confirmed by direct comparison against every other illumination body in this doc, all of which include it.
 
-*Coloration* (`effects/pulse.mjs:31-55`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+_Coloration_ (`effects/pulse.mjs:31-55`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 float pfade(in float dist, in float pulse) {
     return 1.0 - smoothstep(pulse * 0.5, 1.0, dist);
@@ -958,13 +1033,15 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-(Coloration *does* include `ADJUSTMENTS` — only the illumination twin skips it.) `defaultUniforms` adds `pulse: 0` (pulse.mjs:54).
+
+(Coloration _does_ include `ADJUSTMENTS` — only the illumination twin skips it.) `defaultUniforms` adds `pulse: 0` (pulse.mjs:54).
 
 **MSA port:** illumination — a genuinely different assembly order than every other animated illumination material: `fading` computed from `dist`/`ratio` BEFORE the switchColor-equivalent runs, then multiplied in, then **no** exposure/saturation/shadow stage, straight to falloff. If porting via a shared "insert here" hook point in `point-light-illumination.js`, this one needs the hook to also suppress the EXPOSURE block, not just add a term. Coloration — standard seed-replacement pattern, needs a `uPulse` uniform (CPU-fed from `animatePulse`'s cosine-wave formula).
 
 ---
 
 ### `reactivepulse` — Reactive Pulse
+
 **Demonstrates:** identical shaders to `pulse` (same `PulseIlluminationShader`/`PulseColorationShader` classes, §1.4) — the only difference is the CPU driver, `animateSoundPulse` (§1.3), which feeds `pulse`/`ratio` from live audio bands instead of a cosine wave, and **never writes `u.time`**. Fragment bodies: identical to `pulse` above, not re-quoted.
 
 **MSA port:** same shader as `pulse` — the only new work is the CPU-side audio-reactive driver (Web Audio `AnalyserNode` bass/mid/treble band extraction + the `^1.5` power curve + the `intensity`-blended crossfade + the `1-exp(-speed·dt·0.085)` exponential smoothing, §1.3). No new GLSL/TSL beyond what `pulse` already needs.
@@ -972,9 +1049,11 @@ void main() {
 ---
 
 ### `chroma` — Chroma
+
 **Demonstrates:** a straightforward hue-cycling coloration, `HSB2RGB`-driven. Simplest coloration-only animation in the set (no fbm/noise/prng at all).
 
-*Coloration* (`effects/chroma.mjs:6-29`) — toolkit: `HSB2RGB`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/chroma.mjs:6-29`) — toolkit: `HSB2RGB`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -987,6 +1066,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Standard order (`FRAGMENT_BEGIN → finalColor(hue mix) → COLORATION_TECHNIQUES → ADJUSTMENTS → FALLOFF → FRAGMENT_END`), single `FALLOFF` call. `intensity*0.1` (`∈[0,1]` for the `[0,10]` slider) is a **linear blend weight** between the light's own `color` and the cycling hue — at `intensity=0` Chroma renders as a plain static-coloured light (technique still applies afterward).
 
 **MSA port:** replace the coloration seed line with `mix(uLightColor, hsb2rgbTsl(vec3(uTime.mul(0.25), 1, 1)), uIntensity.mul(0.1))`, still `.mul(uColorationAlpha)`, still followed by `.mul(reflection)`. `HSB2RGB` has no existing MSA equivalent — needs a fresh `Fn()`, trivial to port (4 lines, no loops, no branches beyond `clamp`/`abs`/`mod`).
@@ -994,9 +1074,11 @@ Standard order (`FRAGMENT_BEGIN → finalColor(hue mix) → COLORATION_TECHNIQUE
 ---
 
 ### `wave` — Wave
+
 **Demonstrates:** a simple radial sine-ring pulse, both channels, no fbm/noise.
 
-*Illumination* (`effects/wave.mjs:7-29`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+_Illumination_ (`effects/wave.mjs:7-29`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 float wave(in float dist) {
   float sinWave = 0.5 * (sin(-time * 6.0 + dist * 10.0 * intensity) + 1.0);
@@ -1012,9 +1094,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Output range of the multiplier: `[0.8, 1.1]` (a gentle ±15%-ish pulse around 1).
 
-*Coloration* (`effects/wave.mjs:36-58`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+_Coloration_ (`effects/wave.mjs:36-58`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 float wave(in float dist) {
   float sinWave = 0.5 * (sin(-time * 6.0 + dist * 10.0 * intensity) + 1.0);
@@ -1030,6 +1114,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Coloration's `wave()` uses coefficient `0.55` (not illumination's `0.3`) — output range `[0.8, 1.35]`, a stronger pulse. **The two `wave()` functions are near-identical but genuinely different constants** — a port that shares one function between channels needs a coefficient parameter, not a single hardcoded copy.
 
 **MSA port:** both channels need a small `wave(dist)` `Fn()` (pure arithmetic, no loop, trivial). Illumination inserts `.mul(waveIll(dist))` before `EXPOSURE`; coloration replaces the seed with `uLightColor.mul(waveCol(dist)).mul(uColorationAlpha)`, still `.mul(reflection)` after.
@@ -1037,9 +1122,11 @@ Coloration's `wave()` uses coefficient `0.55` (not illumination's `0.3`) — out
 ---
 
 ### `fog` — Fog
+
 **Demonstrates:** drifting FBM-warped colour-palette fog, coloration-only, the first of several "palette + domain-warp" animations in this set (compare `light-dome`, `vortex`'s coloration — same structural idea: a hand-built ramp of `color`-derived swatches mixed by two layers of fbm-warp).
 
-*Coloration* (`effects/fog.mjs:6-57`) — toolkit: `PRNG`, `NOISE`, `FBM(4,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/fog.mjs:6-57`) — toolkit: `PRNG`, `NOISE`, `FBM(4,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 vec3 fog() {
   // constructing the palette
@@ -1076,6 +1163,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 This "domain-warped palette" pattern (`q = fbm(p - t)`, `r = vec2(fbm(p+q-...), fbm(p+q-...))`, final `mix` chain against a `color`-derived swatch set) is the classic Inigo-Quilez-style FBM palette technique — recurs, with different constants, in `light-dome` and `vortex`'s coloration below; worth building **one** generic TSL helper (`domainWarpPalette(uv, time, swatches[6])`) rather than three near-duplicate ports.
 
 **MSA port:** entirely new coloration seed (`fog()`), 3 fbm calls per pixel (`q`, `r.x`, `r.y`, plus the final `fbm(p+r)` — 4 total). Needs `FBM`'s `Loop`-wrapped TSL equivalent (§5) at 4 octaves.
@@ -1083,9 +1171,11 @@ This "domain-warped palette" pattern (`q = fbm(p - t)`, `r = vec2(fbm(p+q-...), 
 ---
 
 ### `sunburst` — Sunburst
-**Demonstrates:** angular ray-burst (the `fract(angle*16+time)` beam pattern also seen conceptually in `emanation`/`revolving`, but radial-ray-count-based here rather than wedge-based) plus a central pulsing core. **The one illumination body in this set that runs `${this.ADJUSTMENTS}` *before* its animated multiply — every other illumination animation with both a multiply and ADJUSTMENTS does the multiply first.**
 
-*Illumination* (`effects/sunburst.mjs:7-50`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+**Demonstrates:** angular ray-burst (the `fract(angle*16+time)` beam pattern also seen conceptually in `emanation`/`revolving`, but radial-ray-count-based here rather than wedge-based) plus a central pulsing core. **The one illumination body in this set that runs `${this.ADJUSTMENTS}` _before_ its animated multiply — every other illumination animation with both a multiply and ADJUSTMENTS does the multiply first.**
+
+_Illumination_ (`effects/sunburst.mjs:7-50`) — toolkit: `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 float cosTime(in float a, in float b) {
   return (a - b) * ((cos(time) + 1.0) * 0.5) + b;
@@ -1111,9 +1201,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-Note `finalColor = switchColor(computedBrightColor, computedDimColor, dist);` is the `${this.TRANSITION}` macro's exact text, inlined by hand rather than referencing the macro — functionally identical either way, but the **order is real**: `ADJUSTMENTS` (saturation/exposure/shadow) applies to the plain bright/dim value, then `sunBurst()` multiplies the ray pattern in *afterward*. A mechanical "insert the animated line where `${TRANSITION}` normally sits, before ADJUSTMENTS" port template — the pattern every other illumination animation in this set follows — would get Sunburst's visual result subtly wrong (adjustments would apply to the rayed result instead of the plain transition result).
 
-*Coloration* (`effects/sunburst.mjs:55-98`) — toolkit: `PERCEIVED_BRIGHTNESS`. Standard order here (unlike its illumination twin):
+Note `finalColor = switchColor(computedBrightColor, computedDimColor, dist);` is the `${this.TRANSITION}` macro's exact text, inlined by hand rather than referencing the macro — functionally identical either way, but the **order is real**: `ADJUSTMENTS` (saturation/exposure/shadow) applies to the plain bright/dim value, then `sunBurst()` multiplies the ray pattern in _afterward_. A mechanical "insert the animated line where `${TRANSITION}` normally sits, before ADJUSTMENTS" port template — the pattern every other illumination animation in this set follows — would get Sunburst's visual result subtly wrong (adjustments would apply to the rayed result instead of the plain transition result).
+
+_Coloration_ (`effects/sunburst.mjs:55-98`) — toolkit: `PERCEIVED_BRIGHTNESS`. Standard order here (unlike its illumination twin):
+
 ```glsl
 float cosTime(in float a, in float b) {
   return (a - b) * ((cos(time) + 1.0) * 0.5) + b;
@@ -1139,6 +1231,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Note the illumination and coloration `sunBurst()` functions are near-identical but not byte-identical: illumination's `cosTime(1.3*intensityMod, ...)` vs coloration's `cosTime(1.1*intensityMod, ...)`, and coloration's takes `color` as an external uniform rather than a parameter (illumination's takes the already-transitioned colour as its first arg since it needs to multiply the ray pattern onto the bright/dim result, not the raw light colour).
 
 **MSA port:** illumination needs a genuinely different insertion point than the "standard" template (ADJUSTMENTS before the animated term, not after) — flag this explicitly in whatever shared builder function/parameter scheme replaces Foundry's string-concatenation scaffold, so it doesn't get silently normalized to the common order. Coloration follows the standard pattern.
@@ -1146,9 +1239,11 @@ Note the illumination and coloration `sunBurst()` functions are near-identical b
 ---
 
 ### `dome` — Light Dome
+
 **Demonstrates:** a hemispherized (`(1-sqrt(1-dist))/dist` fisheye remap), rotating, FBM-palette ripple pattern — coloration only. Second occurrence of the "domain-warped palette" technique (compare `fog` above).
 
-*Coloration* (`effects/light-dome.mjs:6-61`) — toolkit: `PRNG`, `NOISE`, `FBM(2)` (2 octaves, default amp 1.0), `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/light-dome.mjs:6-61`) — toolkit: `PRNG`, `NOISE`, `FBM(2)` (2 octaves, default amp 1.0), `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 vec2 transform(in vec2 uv, in float dist) {
   float hspherize = (1.0 - sqrt(1.0 - dist)) / dist;
@@ -1186,6 +1281,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 The `hspherize = (1-sqrt(1-dist))/dist` remap recurs verbatim in `force-grid` and `hexa-dome` below — a shared "make the radial falloff read as a dome/hemisphere" trick, worth its own named TSL helper.
 
 **MSA port:** new coloration seed; needs the `hspherize` helper (trivial, no loop) + `FBM(2)` (2-octave `Loop`) × 3 call sites.
@@ -1193,9 +1289,11 @@ The `hspherize = (1-sqrt(1-dist))/dist` remap recurs verbatim in `force-grid` an
 ---
 
 ### `emanation` — Emanation
+
 **Demonstrates:** radiating angular beams via `atan`-based angle + `fract`, no fbm at all — the simplest of the three angular-beam animations (compare `revolving`'s wedge-based `PIE` and `black-hole`'s fbm-warped version of the same idea).
 
-*Coloration* (`effects/emanation.mjs:6-42`) — toolkit: `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/emanation.mjs:6-42`) — toolkit: `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 vec3 beamsEmanation(in vec2 uv, in float dist) {
   float angle = atan(uv.x, uv.y) * INVTWOPI;
@@ -1214,6 +1312,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `intensity` here directly sets **beam count** (not a 0-1 blend weight like most other animations' use of `intensity`) — `angle * intensity` means higher intensity literally packs more beam cycles around the circle. `beams = max(beams, 1-beams)` is the standard "mirror a sawtooth into a symmetric triangle wave" trick used by every angular-beam animation in this set (also in `black-hole`, `sunburst`) — worth one shared helper.
 
 **MSA port:** trivial, no loops — `atan`, `fract`, `sin`, `smoothstep` only. Good first animation to port as a smoke-test of the "replace the seed line" pattern before tackling the fbm-heavy ones.
@@ -1221,9 +1320,11 @@ void main() {
 ---
 
 ### `hexa` — Hexa Dome
+
 **Demonstrates:** a hex-grid tiling pattern (adapted classic hex-distance-field algorithm), hemispherized/rotated like `dome`. No fbm/noise/prng — purely analytic.
 
-*Coloration* (`effects/hexa-dome.mjs:6-87`) — toolkit: `PERCEIVED_BRIGHTNESS` only. `forceDefaultColor = true`.
+_Coloration_ (`effects/hexa-dome.mjs:6-87`) — toolkit: `PERCEIVED_BRIGHTNESS` only. `forceDefaultColor = true`.
+
 ```glsl
 vec2 transform(in vec2 uv, in float dist) {
   float hspherize = (1.0 - sqrt(1.0 - dist)) / dist;
@@ -1289,6 +1390,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 `hexUvs` uses GLSL's ternary (`? :`) operator on a `vec2` condition (`dot(a,a) < dot(b,b) ? a : b`) — a plain scalar-boolean ternary, no TSL translation surprise expected (TSL's `select()` is the function-form equivalent).
 
 **MSA port:** entirely analytic, no loops — straightforward `Fn()` translation once `hspherize` (shared with `dome`) exists. `mat2(c,-s,s,c)` 2D-rotation-matrix construction recurs across many animations — worth one shared `rotMat2(angle)` TSL helper alongside the toolkit's own `ROTATION`/`rot()`.
@@ -1296,9 +1398,11 @@ void main() {
 ---
 
 ### `ghost` — Ghost Light
+
 **Demonstrates:** a wandering, fbm-distorted glow — both channels, no fixed shape (unlike the angular/hex/dome animations, this one just warps a soft blob).
 
-*Illumination* (`effects/ghost-light.mjs:7-43`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBM(3,1.0)`.
+_Illumination_ (`effects/ghost-light.mjs:7-43`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBM(3,1.0)`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -1323,7 +1427,8 @@ void main() {
 }
 ```
 
-*Coloration* (`effects/ghost-light.mjs:50-97`) — toolkit: `PRNG`, `NOISE`, `FBM(3,1.0)`, `PERCEIVED_BRIGHTNESS`.
+_Coloration_ (`effects/ghost-light.mjs:50-97`) — toolkit: `PRNG`, `NOISE`, `FBM(3,1.0)`, `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -1357,6 +1462,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Note illumination and coloration use **different `fbm` domain-warp constants** for `distortion1`/`distortion2` (illumination: `×5.0`/`-time*0.5`; coloration: `×3.0`/`+time*0.5`) — despite the near-identical code shape, they're independently tuned, not shared logic factored into one function. Coloration's `uv` variable is computed but its `x`/`y` components only feed the final `mix(...)` term — worth double-checking against a live render when porting since `uv` is mutated through 4 sequential `*=`/`+=` steps that are easy to mis-transcribe. `fbm` is called **7 times per pixel** in coloration alone (2× for `distortion1`, 2× for `distortion2`, 1× for the final `uv` scale term = 5, plus each outer `fbm(vec2(inner_fbm, inner_fbm))` counts its two inner calls — total nested calls: `distortion1`=2 inner+1 outer=3, `distortion2`=3, final uv-scale fbm=1 → 7) — one of the more expensive animations in the set.
 
 **MSA port:** straightforward but call-count-heavy `FBM(3,1.0)` port (3-octave `Loop`), 7 calls/pixel for coloration, 6 for illumination (same structure minus the final uv-scale fbm). Both channels: insert before `EXPOSURE`(ill)/keep technique after(col), standard hook points.
@@ -1364,9 +1470,11 @@ Note illumination and coloration use **different `fbm` domain-warp constants** f
 ---
 
 ### `energy` — Energy Field
+
 **Demonstrates:** a 3D Worley/cellular ("voronoi") sphere, hemispherized, coloration-only. **Does not use the shared toolkit `VORONOI` primitive** — hand-rolls its own classic 3×3×3 3D-voronoi search using `PRNG3D`.
 
-*Coloration* (`effects/energy-field.mjs:6-81`) — toolkit: `PRNG3D`, `PERCEIVED_BRIGHTNESS` (explicitly **not** the shared `VORONOI` block — see §2's note). `forceDefaultColor = true`.
+_Coloration_ (`effects/energy-field.mjs:6-81`) — toolkit: `PRNG3D`, `PERCEIVED_BRIGHTNESS` (explicitly **not** the shared `VORONOI` block — see §2's note). `forceDefaultColor = true`.
+
 ```glsl
 // classic 3d voronoi (with some bug fixes)
 vec3 voronoi3d(const in vec3 x) {
@@ -1427,6 +1535,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 The `max(sign(...), 0.0)`/`cond`/`nCond` branchless-min pattern is a deliberate GPU-friendly way to track "closest" and "second-closest" cell distances without an `if`; note the comment at the return line ("bug fixes... artifacts") — this is Foundry's own author acknowledging a numerical workaround, not something to "clean up" during a port; keep `pow(abs(id+10.0), 0.01)` exactly, don't simplify it to `abs(id)`.
 
 **MSA port:** the highest structural-complexity animation in the set — a 27-iteration (3×3×3) triple-nested loop per pixel. Per `point-light-illumination.js`'s own established precedent (`makeSdPolygonEdgeDistance`'s single `Loop`), this needs either three nested `Loop`s or one flattened 27-iteration `Loop` with `i/9`, `(i/3)%3`, `i%3` index decomposition — flatten it; TSL's `Loop` is verified in-project to work for loop-carried mutable state (`.toVar()`/`.assign()`) but nested `Loop`s specifically haven't been proven in this codebase yet (only `point-light-illumination.js`'s single-level polygon-edge loop is proven), so flattening to one loop is the lower-risk port path. `PRNG3D`'s `random(vec3)` is a new, trivial (no-loop) `Fn()`.
@@ -1434,9 +1543,11 @@ The `max(sign(...), 0.0)`/`cond`/`nCond` branchless-min pattern is a deliberate 
 ---
 
 ### `vortex` — Vortex
+
 **Demonstrates:** an FBM-palette swirl (third occurrence of the domain-warp-palette technique) with an actual pixel-space vortex-twist pre-warp. **Its illumination shader is the most significant dead-code finding in this entire audit — see below.**
 
-*Coloration* (`effects/vortex.mjs:7-91`) — toolkit: `PRNG`, `NOISE`, `FBM(4,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/vortex.mjs:7-91`) — toolkit: `PRNG`, `NOISE`, `FBM(4,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 vec2 vortex(in vec2 uv, in float dist, in float radius, in mat2 rotmat) {
   float intens = intensity * 0.2;
@@ -1499,7 +1610,8 @@ void main() {
 }
 ```
 
-*Illumination* (`effects/vortex.mjs:97-163`) — **defines but never calls its helper functions**:
+_Illumination_ (`effects/vortex.mjs:97-163`) — **defines but never calls its helper functions**:
+
 ```glsl
 vec2 vortex(in vec2 uv, in float dist, in float radius, in float angle, in mat2 rotmat) {
   vec2 uvs = uv - PIVOT;
@@ -1552,16 +1664,19 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-**Flagged finding, the most significant in this doc: `VortexIlluminationShader.main()` is byte-for-byte the unmodified default illumination scaffold** (§3.4) — `FRAGMENT_BEGIN → TRANSITION → ADJUSTMENTS → FALLOFF → FRAGMENT_END`, nothing else. The three helper functions declared above it — `vortex(vec2,float,float,float,mat2)`, `spice(vec2,mat2)`, and `convertToDarknessColors(vec3,float)` (this last one's very name/signature suggests it was written for a coloration-under-darkness use case that doesn't exist in the current architecture — darkness sources have their own separate, unrelated shader family entirely, §3.3) — are **compiled into the shader program but never invoked from `main()`**. This is confirmed dead code in Foundry v14's shipped source, not a porting gap: **`vortex`'s illumination channel does not animate at all**; it behaves exactly like an unanimated light's illumination channel, full stop. Contrast this with `torch`'s illumination (also textually close to the default scaffold, §4's `torch` entry) — Torch's case is different in kind: Torch's illumination *does* animate, entirely via the CPU-jittered `ratio` uniform that the (unmodified) `TRANSITION` macro consumes; Vortex's `ratio` is never touched by `animateTime` (§1.3 — `animateTime` only ever writes `u.time`/`u.intensity`), so there is no hidden CPU-side animation either. **Recommendation for the port: implement `vortex`'s illumination channel as a plain, unanimated `AdaptiveIlluminationShader` instance — do not port the dead `vortex()`/`spice()`/`convertToDarknessColors()` functions at all**, unless the porting team specifically wants to *improve* on Foundry here (a legitimate Type-B, MSA-native option — see the project's own two-light-type doctrine — since this is clearly unfinished/abandoned functionality in the source, not an intentional design).
+
+**Flagged finding, the most significant in this doc: `VortexIlluminationShader.main()` is byte-for-byte the unmodified default illumination scaffold** (§3.4) — `FRAGMENT_BEGIN → TRANSITION → ADJUSTMENTS → FALLOFF → FRAGMENT_END`, nothing else. The three helper functions declared above it — `vortex(vec2,float,float,float,mat2)`, `spice(vec2,mat2)`, and `convertToDarknessColors(vec3,float)` (this last one's very name/signature suggests it was written for a coloration-under-darkness use case that doesn't exist in the current architecture — darkness sources have their own separate, unrelated shader family entirely, §3.3) — are **compiled into the shader program but never invoked from `main()`**. This is confirmed dead code in Foundry v14's shipped source, not a porting gap: **`vortex`'s illumination channel does not animate at all**; it behaves exactly like an unanimated light's illumination channel, full stop. Contrast this with `torch`'s illumination (also textually close to the default scaffold, §4's `torch` entry) — Torch's case is different in kind: Torch's illumination _does_ animate, entirely via the CPU-jittered `ratio` uniform that the (unmodified) `TRANSITION` macro consumes; Vortex's `ratio` is never touched by `animateTime` (§1.3 — `animateTime` only ever writes `u.time`/`u.intensity`), so there is no hidden CPU-side animation either. **Recommendation for the port: implement `vortex`'s illumination channel as a plain, unanimated `AdaptiveIlluminationShader` instance — do not port the dead `vortex()`/`spice()`/`convertToDarknessColors()` functions at all**, unless the porting team specifically wants to _improve_ on Foundry here (a legitimate Type-B, MSA-native option — see the project's own two-light-type doctrine — since this is clearly unfinished/abandoned functionality in the source, not an intentional design).
 
 **MSA port:** coloration — standard palette-swirl seed replacement (shares the domain-warp-palette pattern with `fog`/`dome`, plus its own pre-warp `vortex()` twist function, a genuine `if (dist<radius)` branch — TSL's function-form `select()`/conditional node, not a GLSL `if`). Illumination — **do nothing beyond the existing unanimated default** (see finding above).
 
 ---
 
 ### `witchwave` — Bewitching Wave
+
 **Demonstrates:** an FBM-distorted version of the plain sine-ring pulse (`wave`'s more elaborate sibling) — both channels, same `bwave()` shape function with different coefficients per channel (matching `wave`'s own illumination/coloration coefficient split).
 
-*Illumination* (`effects/bewitching-wave.mjs:7-46`) — toolkit: `PRNG`, `NOISE`, `FBM(4,1.0)`, `PERCEIVED_BRIGHTNESS`.
+_Illumination_ (`effects/bewitching-wave.mjs:7-46`) — toolkit: `PRNG`, `NOISE`, `FBM(4,1.0)`, `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 vec2 transform(in vec2 uv, in float dist) {
   float t = time * 0.25;
@@ -1591,7 +1706,8 @@ void main() {
 }
 ```
 
-*Coloration* (`effects/bewitching-wave.mjs:53-92`) — same toolkit set. `bwave()`'s final line uses `0.55` (matching `wave`'s own illumination-`0.3`/coloration-`0.55` split exactly):
+_Coloration_ (`effects/bewitching-wave.mjs:53-92`) — same toolkit set. `bwave()`'s final line uses `0.55` (matching `wave`'s own illumination-`0.3`/coloration-`0.55` split exactly):
+
 ```glsl
 float bwave(in float dist) {
   vec2 uv = transform(vUvs, dist);
@@ -1610,6 +1726,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Effectively `wave` plus one extra `fbm`-driven `distortion` term modulating the sine's phase — the two animations are directly comparable, and a port could reasonably build `witchwave` as `wave` + a distortion multiply rather than as a fully separate implementation.
 
 **MSA port:** needs `FBM(4,1.0)` (4-octave `Loop`), one call per pixel per channel. Standard hook points both channels.
@@ -1617,9 +1734,11 @@ Effectively `wave` plus one extra `fbm`-driven `distortion` term modulating the 
 ---
 
 ### `rainbowswirl` — Swirling Rainbow
+
 **Demonstrates:** a polar-coordinate rainbow (angle+radius → hue), coloration-only. **Skips the `colorationAlpha` multiply** — one of only two animations in the set that do (see `radialrainbow` below, nearly identical code).
 
-*Coloration* (`effects/swirling-rainbow.mjs:6-33`) — toolkit: `HSB2RGB`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/swirling-rainbow.mjs:6-33`) — toolkit: `HSB2RGB`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -1636,6 +1755,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 **Flagged finding: no `* colorationAlpha` anywhere in the `finalColor` line.** Confirmed by direct re-inspection — every other coloration animation in this set multiplies its seed by `colorationAlpha` (`base-lighting.mjs`'s per-technique alpha remap, base audit §6); this one and `radialrainbow` do not, meaning the LightData `alpha` slider has **zero effect** on SwirlingRainbow's/RadialRainbow's brightness (though `alpha` still affects `useSampler`'s technique gating elsewhere and, of course, the illumination channel independently). This is either a deliberate design choice (a rainbow effect that always reads at full strength regardless of the alpha slider) or an oversight in Foundry's own source — either way, a port that assumes "every coloration animation multiplies by `colorationAlpha`" as a universal rule would silently introduce a behavior Foundry itself doesn't have for these two.
 
 `puv.x + puv.y` — hue is driven by **both** angle (`puv.x`) and radius (`puv.y`), producing a spiral rainbow (hence "swirling"), vs. `radialrainbow` below which uses radius only.
@@ -1645,9 +1765,11 @@ void main() {
 ---
 
 ### `radialrainbow` — Radial Rainbow
+
 **Demonstrates:** the same polar-rainbow idea as `rainbowswirl`, with hue driven by radius only (no angle term) — a plain concentric rainbow-ring pattern. Shares the `colorationAlpha`-omission finding above.
 
-*Coloration* (`effects/radial-rainbow.mjs:6-34`) — toolkit: `HSB2RGB`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/radial-rainbow.mjs:6-34`) — toolkit: `HSB2RGB`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -1665,6 +1787,7 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Note `puv.x` (the angle term) is computed but **unused** in the final `hsb2rgb(vec3(puv.y - time*0.2, ...))` call — a harmless dead local read (the `atan`/`+0.5` work still executes on the GPU even though only `puv.y` feeds the result). Not worth porting the wasted `puv.x` computation at all if hue truly only needs radius — but flagged rather than silently "optimized away" in case there's a reason (there doesn't appear to be one from the code alone).
 
 **MSA port:** same as `rainbowswirl`, drop the angle term entirely (it's provably unused), omit `colorationAlpha`.
@@ -1672,9 +1795,11 @@ Note `puv.x` (the angle term) is computed but **unused** in the final `hsb2rgb(v
 ---
 
 ### `fairy` — Fairy Light
+
 **Demonstrates:** the most visually complex coloration animation in the set — layered FBM domain-warp distortion **plus** a polar rainbow blended on top, both channels (illumination is the FBM-distortion-only half, without the rainbow).
 
-*Coloration* (`effects/fairy-light.mjs:7-65`) — toolkit: `HSB2RGB`, `PRNG`, `NOISE`, `FBM(3,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/fairy-light.mjs:7-65`) — toolkit: `HSB2RGB`, `PRNG`, `NOISE`, `FBM(3,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -1715,9 +1840,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 This is textually `ghost-light`'s coloration body (same `distortion1`/`distortion2`/`uv` warp sequence, same constants) **plus** `rainbowswirl`'s rainbow block, fused together — worth treating as "GhostLight-coloration ⊕ SwirlingRainbow" when porting rather than a wholly new derivation, but note FairyLight's version **does** include `colorationAlpha` (unlike the two pure-rainbow animations above) — the omission is specific to `rainbowswirl`/`radialrainbow`, not a general "rainbow animations skip alpha" rule.
 
-*Illumination* (`effects/fairy-light.mjs:72-104`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBM(3,1.0)`. This half is exactly `ghost-light`'s illumination shape (own distortion constants, not shared):
+_Illumination_ (`effects/fairy-light.mjs:72-104`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBM(3,1.0)`. This half is exactly `ghost-light`'s illumination shape (own distortion constants, not shared):
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -1744,9 +1871,11 @@ void main() {
 ---
 
 ### `grid` — Force Grid
+
 **Demonstrates:** a "futuristic" repeating grid-line pattern via a hand-rolled iterative fold (5-iteration `for` loop doing a fractal-subdivision-style grid), no fbm/noise. Coloration-only.
 
-*Coloration* (`effects/force-grid.mjs:6-91`) — toolkit: `PERCEIVED_BRIGHTNESS` only. `forceDefaultColor = true`.
+_Coloration_ (`effects/force-grid.mjs:6-91`) — toolkit: `PERCEIVED_BRIGHTNESS` only. `forceDefaultColor = true`.
+
 ```glsl
 const float MAX_INTENSITY = 1.2;
 const float MIN_INTENSITY = 0.8;
@@ -1821,16 +1950,19 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-`forcegrid()`'s 5-iteration loop **swaps `uv.x`/`uv.y` every iteration** (`uv = uv.yx`) and **conditionally rescales** `uv.x` (`if (e>0.0) uv.x = (uv.x-r)/(2.0-r)`) — a genuine loop-carried, data-dependent mutation (not just an accumulator), structurally the same *shape* of problem `point-light-illumination.js`'s `makeSdPolygonEdgeDistance` already solves in this codebase (loop-carried `.toVar()`/`.assign()` state, plus a conditional `select()` inside the loop body for the `if`). This is the cleanest in-project precedent to copy for this specific animation.
+
+`forcegrid()`'s 5-iteration loop **swaps `uv.x`/`uv.y` every iteration** (`uv = uv.yx`) and **conditionally rescales** `uv.x` (`if (e>0.0) uv.x = (uv.x-r)/(2.0-r)`) — a genuine loop-carried, data-dependent mutation (not just an accumulator), structurally the same _shape_ of problem `point-light-illumination.js`'s `makeSdPolygonEdgeDistance` already solves in this codebase (loop-carried `.toVar()`/`.assign()` state, plus a conditional `select()` inside the loop body for the `if`). This is the cleanest in-project precedent to copy for this specific animation.
 
 **MSA port:** a fixed 5-iteration `Loop`, `select()` for the conditional rescale, swizzle-swap via reassigning a `.toVar()` pair each iteration. No fbm/noise dependency at all — self-contained once the loop pattern is right.
 
 ---
 
 ### `starlight` — Star Light
+
 **Demonstrates:** rotating "disco" light-ray pattern via `tan(fbm(...))` (an unusual choice — `tan` rather than the more common `sin`/`fract` ray techniques used elsewhere in this set). Coloration-only.
 
-*Coloration* (`effects/star-light.mjs:6-53`) — toolkit: `PRNG`, `NOISE`, `FBM(2,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+_Coloration_ (`effects/star-light.mjs:6-53`) — toolkit: `PRNG`, `NOISE`, `FBM(2,1.0)`, `PERCEIVED_BRIGHTNESS`. `forceDefaultColor = true`.
+
 ```glsl
 vec2 transform(in vec2 uv, in float dist) {
   float t = time * 0.20;
@@ -1864,16 +1996,19 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-`normalize(uv * (uv + t))` — componentwise multiply, *then* normalize the resulting 2-vector; easy to mis-port as `normalize(uv) * (uv+t)` (a different, wrong expression) — flagged explicitly since operator precedence/parenthesization traps are exactly the kind of thing a mechanical line-by-line port can silently invert. The outer `clamp(..., 0.0, 1.0)` around the whole `finalColor` expression is unique to this animation among the ones surveyed.
+
+`normalize(uv * (uv + t))` — componentwise multiply, _then_ normalize the resulting 2-vector; easy to mis-port as `normalize(uv) * (uv+t)` (a different, wrong expression) — flagged explicitly since operator precedence/parenthesization traps are exactly the kind of thing a mechanical line-by-line port can silently invert. The outer `clamp(..., 0.0, 1.0)` around the whole `finalColor` expression is unique to this animation among the ones surveyed.
 
 **MSA port:** `FBM(2,1.0)` (2-octave `Loop`), 2 calls per pixel. `tan()` is unbounded near `π/2` — the `clamp(...,0.0,2.25)` calls exist specifically to tame that, keep them.
 
 ---
 
 ### `smokepatch` — Smoke Patch
+
 **Demonstrates:** drifting FBM smoke via a rotate+shear transform (note the `scalemat` below is **not** a pure scale — it has off-diagonal terms derived from `uv` itself, a shear coupled to position), both channels, identical `smokefading()` function shared verbatim between illumination and coloration (the only animation in this set where the two channels' helper function bodies are byte-identical, not just structurally similar).
 
-*Coloration* (`effects/smoke-patch.mjs:7-51`) — toolkit: `PRNG`, `NOISE`, `FBMHQ(3)`, `PERCEIVED_BRIGHTNESS`.
+_Coloration_ (`effects/smoke-patch.mjs:7-51`) — toolkit: `PRNG`, `NOISE`, `FBMHQ(3)`, `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 vec2 transform(in vec2 uv, in float dist) {
   float t = time * 0.1;
@@ -1907,9 +2042,11 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-Note `mat2(10.0, uv.x, uv.y, 10.0)` — column-major GLSL `mat2` construction, so this matrix is `[[10, uv.y], [uv.x, 10]]` in row terms (`mat2(m00,m01,m10,m11)` fills column-major: column0=(m00,m01), column1=(m10,m11)) — worth being precise about GLSL's column-major `matN()` constructor convention specifically here since `uv.x`/`uv.y` land in the *off-diagonal* slots, i.e. this is genuinely a position-coupled shear, not a typo-for-scale.
 
-*Illumination* (`effects/smoke-patch.mjs:58-102`) — same toolkit, **byte-identical `transform()`/`smokefading()`** to the coloration version above (re-quoted in full in source, not re-quoted here — literally the same text):
+Note `mat2(10.0, uv.x, uv.y, 10.0)` — column-major GLSL `mat2` construction, so this matrix is `[[10, uv.y], [uv.x, 10]]` in row terms (`mat2(m00,m01,m10,m11)` fills column-major: column0=(m00,m01), column1=(m10,m11)) — worth being precise about GLSL's column-major `matN()` constructor convention specifically here since `uv.x`/`uv.y` land in the _off-diagonal_ slots, i.e. this is genuinely a position-coupled shear, not a typo-for-scale.
+
+_Illumination_ (`effects/smoke-patch.mjs:58-102`) — same toolkit, **byte-identical `transform()`/`smokefading()`** to the coloration version above (re-quoted in full in source, not re-quoted here — literally the same text):
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -1926,9 +2063,11 @@ void main() {
 ---
 
 ### `magicalGloom` — Magical Gloom (darkness)
+
 **Demonstrates:** a radial-projection interference ring — the most analytically elaborate of the 4 darkness animations. Single channel (`darkness`), no `COLORATION_TECHNIQUES`/`ADJUSTMENTS`/`FALLOFF` concept at all (§3.3).
 
-*Darkness* (`effects/magical-gloom.mjs:6-101`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBMHQ()` (all defaults: 3 octaves, `fbm`/`noise`/`vec2`).
+_Darkness_ (`effects/magical-gloom.mjs:6-101`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBMHQ()` (all defaults: 3 octaves, `fbm`/`noise`/`vec2`).
+
 ```glsl
 vec3 colorScale(in float t) {
   return vec3(1.0 + 0.8 * t) * t;
@@ -1992,16 +2131,19 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
+
 Note `voidHalf`'s parameter `intensity` **shadows** the shared `intensity` uniform (a local-scope float parameter with the same name as the global) — GLSL allows this and it's unambiguous within `voidHalf`'s body, but a mechanical name-preserving port into a single-scope TSL graph (where node names are typically hoisted/shared, not block-scoped the way GLSL locals are) needs to rename one of them to avoid an actual collision. `minThreshold` (line inside `voidHalf`) is declared and **never used** — confirmed dead local, safe to drop when porting. `lum` (in `main()`) is computed and **also never used** afterward — a second dead-local instance in the same file; `finalColor`'s actual formula only reads `voidRingFinal`/`lumBase`/`colorationAlpha`, never `lum`.
 
-**MSA port:** `0.33` darkness-level-mix coefficient here matches the *default* `AdaptiveDarknessShader` body's own constant (`base-lighting.mjs`'s darkness default, §3.4's last block) — contrast with `hole` below, which uses a different constant. No loops beyond `FBMHQ`'s internal 3-octave one; otherwise pure analytic trig/noise composition.
+**MSA port:** `0.33` darkness-level-mix coefficient here matches the _default_ `AdaptiveDarknessShader` body's own constant (`base-lighting.mjs`'s darkness default, §3.4's last block) — contrast with `hole` below, which uses a different constant. No loops beyond `FBMHQ`'s internal 3-octave one; otherwise pure analytic trig/noise composition.
 
 ---
 
 ### `roiling` — Roiling Mass (darkness)
+
 **Demonstrates:** an FBM-domain-warped "membrane" boundary — the darkness-channel sibling of the illumination/coloration distortion animations (`ghost`, `fairy`), built the same way (`fbm(vec2(fbm(...), fbm(...)))` nested warp) but shaped into a hard-edged membrane rather than a soft glow.
 
-*Darkness* (`effects/roiling-mass.mjs:6-70`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBM(3)` (default amp 1.0).
+_Darkness_ (`effects/roiling-mass.mjs:6-70`) — toolkit: `PERCEIVED_BRIGHTNESS`, `PRNG`, `NOISE`, `FBM(3)` (default amp 1.0).
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -2048,16 +2190,19 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-`smooth` as a GLSL identifier — legal in GLSL (not a reserved word there), but **is** a reserved TSL/JS function name (`THREE.TSL.smoothstep`, and `smooth` itself may collide with local scope conventions) — rename on port (e.g. `smoothT`/`edgeT`). This body keeps the base `AdaptiveDarknessShader`'s own default line (`finalColor *= (mix(color, color * 0.33, darknessLevel) * colorationAlpha);`, §3.4) verbatim as its *first* darkness-mix step, then layers two more transformations on top — of the 4 darkness animations, this is the only one that visibly *extends* the default line rather than replacing it outright.
 
-**MSA port:** `FBM(3)` × 4 calls (2 nested pairs for `distortion1`/`distortion2`). Confirm the `0.33` coefficient (matches the shared default, unlike `hole`'s `0.66`, see next entry) — worth a shared constant/uniform rather than a hardcoded literal duplicated per animation, precisely because `hole` needs a *different* value.
+`smooth` as a GLSL identifier — legal in GLSL (not a reserved word there), but **is** a reserved TSL/JS function name (`THREE.TSL.smoothstep`, and `smooth` itself may collide with local scope conventions) — rename on port (e.g. `smoothT`/`edgeT`). This body keeps the base `AdaptiveDarknessShader`'s own default line (`finalColor *= (mix(color, color * 0.33, darknessLevel) * colorationAlpha);`, §3.4) verbatim as its _first_ darkness-mix step, then layers two more transformations on top — of the 4 darkness animations, this is the only one that visibly _extends_ the default line rather than replacing it outright.
+
+**MSA port:** `FBM(3)` × 4 calls (2 nested pairs for `distortion1`/`distortion2`). Confirm the `0.33` coefficient (matches the shared default, unlike `hole`'s `0.66`, see next entry) — worth a shared constant/uniform rather than a hardcoded literal duplicated per animation, precisely because `hole` needs a _different_ value.
 
 ---
 
 ### `hole` — Black Hole (darkness)
+
 **Demonstrates:** a beam-emanation swallowing-beams effect (structurally the darkness-channel cousin of `emanation`'s angular-beam technique) radially compressed toward the center (`pow(1-dist, 3.0)`). **Uses a different darkness-mix coefficient than the shared default.**
 
-*Darkness* (`effects/black-hole.mjs:6-41`) — toolkit: `PRNG`, `NOISE`, `FBMHQ()` (defaults), `PERCEIVED_BRIGHTNESS`.
+_Darkness_ (`effects/black-hole.mjs:6-41`) — toolkit: `PRNG`, `NOISE`, `FBMHQ()` (defaults), `PERCEIVED_BRIGHTNESS`.
+
 ```glsl
 vec3 beamsEmanation(in vec2 uv, in float dist, in vec3 pCol) {
   float angle = atan(uv.x, uv.y) * INVTWOPI;
@@ -2076,16 +2221,19 @@ void main() {
   ${this.FRAGMENT_END}
 }
 ```
-**Flagged finding: `0.66`, not `0.33`.** Every other darkness body that includes the "mix toward a dimmed colour by darkness level" line (the default scaffold itself, plus `roiling`'s extension of it) uses `mix(color, color * 0.33, darknessLevel)`. Black Hole's is `mix(color, color * 0.66, darknessLevel)` — a **deliberate, doubled** dim-floor (at full scene darkness, Black Hole's colour only dims to 66% of itself, vs. the default/Roiling's 33%), making Black Hole read noticeably less "swallowed by ambient darkness" than the other three. This is exactly the kind of single-constant deviation a copy-paste port (working from the "default darkness body" template) would silently miss. `beamsEmanation` here takes a third argument (`pCol`, the already-dimmed `finalColor`) and multiplies it into the beam pattern, unlike `emanation.mjs`'s 2-argument version which multiplies the *raw* `color` uniform — same function name, genuinely different signature and role, confirmed not a copy-paste duplicate to dedupe.
+
+**Flagged finding: `0.66`, not `0.33`.** Every other darkness body that includes the "mix toward a dimmed colour by darkness level" line (the default scaffold itself, plus `roiling`'s extension of it) uses `mix(color, color * 0.33, darknessLevel)`. Black Hole's is `mix(color, color * 0.66, darknessLevel)` — a **deliberate, doubled** dim-floor (at full scene darkness, Black Hole's colour only dims to 66% of itself, vs. the default/Roiling's 33%), making Black Hole read noticeably less "swallowed by ambient darkness" than the other three. This is exactly the kind of single-constant deviation a copy-paste port (working from the "default darkness body" template) would silently miss. `beamsEmanation` here takes a third argument (`pCol`, the already-dimmed `finalColor`) and multiplies it into the beam pattern, unlike `emanation.mjs`'s 2-argument version which multiplies the _raw_ `color` uniform — same function name, genuinely different signature and role, confirmed not a copy-paste duplicate to dedupe.
 
 **MSA port:** `FBMHQ()` (3-octave default) × 1 call. Keep the `0.66` constant distinct from `roiling`'s `0.33` — do not factor them into one "the" darkness-dim constant.
 
 ---
 
 ### `denseSmoke` — Dense Smoke (darkness)
+
 **Demonstrates:** volumetric-looking layered-fbm smoke. **The one animation in this entire set of 27 that bypasses `${this.FRAGMENT_END}` and writes `gl_FragColor` directly**, producing a non-constant alpha channel (smoke density) instead of the `depth`-derived alpha every other shader in this doc emits.
 
-*Darkness* (`effects/dense-smoke.mjs:6-45`) — toolkit: `SIMPLEX_3D` (`snoise`, the *only* animation using 3D simplex rather than 2D value-noise), `FBMHQ(5,"fbm","snoise","vec3")`.
+_Darkness_ (`effects/dense-smoke.mjs:6-45`) — toolkit: `SIMPLEX_3D` (`snoise`, the _only_ animation using 3D simplex rather than 2D value-noise), `FBMHQ(5,"fbm","snoise","vec3")`.
+
 ```glsl
 void main() {
   ${this.FRAGMENT_BEGIN}
@@ -2111,9 +2259,11 @@ void main() {
   gl_FragColor = vec4(finalColor * color, t) * depth * bda * colorationAlpha;
 }
 ```
+
 **Flagged finding: no `${this.FRAGMENT_END}` call at all** — confirmed by direct re-inspection of the file, the closing `}` of `main()` follows the manual `gl_FragColor` line directly. Consequences for a port:
+
 1. **Alpha is `t` (the smoke-density scalar), not `1.0`.** Every other darkness/coloration shader's output alpha is `1.0 × depth[× falloff]` (§3.2's alpha-asymmetry note); DenseSmoke's is `t × depth × bda × colorationAlpha` — a genuinely different alpha contract. Since darkness sources blend `MAX_COLOR` on **both** RGB and alpha (base audit §3, §18.2), overlapping DenseSmoke sources (or DenseSmoke overlapping a differently-alpha'd darkness type, though only one darkness animation applies per source) will MAX-blend on this density-driven alpha too — almost certainly intentional (denser smoke patches "win" the alpha channel the same way they'd visually dominate), but worth confirming live before assuming it's incidental.
-2. **`bda` (a second, independent border-fade term) is folded in on top of `depth`**, which *already* includes darkness's own `borderDistance` fade inside `FRAGMENT_BEGIN` (§3.3) — meaning DenseSmoke applies the `borderDistance` falloff **twice**, once via the inherited `depth` and once explicitly via `bda` using the identical formula (`1.0 - smoothstep(borderDistance, 1.0, dist)` vs. `FRAGMENT_BEGIN`'s `(1.0 - smoothstep(borderDistance, 1.0, dist))` — textually the same expression, computed twice). Whether this doubled fade (effectively squaring the border falloff curve) is deliberate (a tighter, more contained smoke edge than other darkness types) or an oversight, it's a real, verifiable, reproducible behavior — port it as-is (`depth × bda`, both terms present) rather than "deduplicating" it to a single fade.
+2. **`bda` (a second, independent border-fade term) is folded in on top of `depth`**, which _already_ includes darkness's own `borderDistance` fade inside `FRAGMENT_BEGIN` (§3.3) — meaning DenseSmoke applies the `borderDistance` falloff **twice**, once via the inherited `depth` and once explicitly via `bda` using the identical formula (`1.0 - smoothstep(borderDistance, 1.0, dist)` vs. `FRAGMENT_BEGIN`'s `(1.0 - smoothstep(borderDistance, 1.0, dist))` — textually the same expression, computed twice). Whether this doubled fade (effectively squaring the border falloff curve) is deliberate (a tighter, more contained smoke edge than other darkness types) or an oversight, it's a real, verifiable, reproducible behavior — port it as-is (`depth × bda`, both terms present) rather than "deduplicating" it to a single fade.
 3. `fbm(vec3(...), smoothness)` here is the **3D `FBMHQ` variant keyed to `snoise`** (`FBMHQ(5,"fbm","snoise","vec3")` — 5 octaves, 3D input, simplex-hashed) — genuinely different both in dimensionality and hash family from every other `fbm`/`noise` call in this doc (all 2D, value-noise/`PRNG`-hashed). A TSL port needs a **separate** 3D-fractal-noise `Fn()` (or `THREE.TSL.mx_fractal_noise_float(vec3, octaves, lacunarity, diminish)`, §5, keyed to Perlin rather than simplex — a real hash-family mismatch to weigh) distinct from the 2D one every other animation in this set shares.
 
 **MSA port:** the highest-friction single animation to port cleanly, purely because of point 1 above — whatever "insert the animated line" scaffold hook the porting team builds for the other 26 animations needs an escape hatch for this one (a full custom `fragmentNode` output, not a slot-in seed replacement), since it changes the alpha formula, not just the RGB formula.
@@ -2123,9 +2273,11 @@ void main() {
 ## 5. TSL port considerations
 
 ### 5.1 Existing MSA TSL primitives — reuse, don't rebuild
+
 Grepped `src/` for `simplex`, `voronoi`, `fbm`, `noise`, `hsb`/`hsv2rgb`: **zero hand-written matches** — none of these primitives currently exist anywhere in this codebase (the incidental "noise" hits in `src/diag/flight-recorder.js`, `src/diag/perf-lab.js`, `src/effects/particles/particle-system-schema.js`, `src/foundry/__tests__/scene-tokens.test.mjs` are unrelated uses of the word, not shader noise). **`src/effects/candle-flame.js`'s `deferredRungs` explicitly lists `animated-flicker` ("TSL-noise flicker driven by the frame clock") as unbuilt** — confirmed by reading both `candle-flame.js` and `candle-flame-render.js` in full; Tier 0 is a static teardrop marker with zero noise code. No prior-art collision; this doc is the natural reference when that rung is picked up.
 
 However, the **vendored Three build already ships MaterialX noise nodes on the public `THREE.TSL` surface** — confirmed by tracing the export chain in `src/vendor/three/three.webgpu.js` (e.g. `mx_fractal_noise_float: () => mx_fractal_noise_float2` / `var mx_fractal_noise_float2 = TSL.mx_fractal_noise_float`, same pattern for the others):
+
 - `mx_perlin_noise_float(position, ...)` / `mx_perlin_noise_vec3(...)` — Perlin gradient noise.
 - `mx_cell_noise_float(...)` / `mx_cell_noise_vec3(...)` — cellular/Worley-style noise (a plausible stand-in for the toolkit's `VORONOI`/energy-field's hand-rolled `voronoi3d`, though not the same hash).
 - `mx_fractal_noise_float(position, octaves=3, lacunarity=2, diminish=0.5, amplitude=1)` / `..._vec2`/`..._vec3`/`..._vec4` — an FBM analog, already octave-parametrized much like Foundry's own `FBM(octaves,amp)`.
@@ -2135,29 +2287,38 @@ All reachable via this project's existing `const { ... } = THREE.TSL` destructur
 **Primitives with no Three equivalent, needing fresh TSL either way:** `HSB2RGB` (4 animations depend on it: `chroma`, `fairy`, `radialrainbow`, `swirlingrainbow` — trivial, ~4 lines, no loop), `PIE`/`ROTATION` (2 animations: `revolving`, `siren` — trivial, no loop), and Foundry's own exact `PRNG`/`PRNG2D`/`PRNG3D`/`NOISE`/`snoise` hash functions (only needed if pixel-parity with Foundry's specific noise pattern is a goal, per the caveat above).
 
 ### 5.2 The `Loop`/`.toVar()`/`.assign()` convention — already proven in this codebase, extend it, don't reinvent it
+
 `point-light-illumination.js`'s `makeSdPolygonEdgeDistance` (that file's own header, lines 260-264) is this project's **only existing precedent** for a TSL `Loop` with loop-carried mutable state, and it's a single-level loop. Animations needing this pattern, ranked by loop complexity:
+
 - **Single-level, fixed-count:** every `FBM(octaves,...)`/`FBMHQ(...)` call (14 of the 27 animations use one or both) — octave count is known at JS/material-build time, so a fixed-bound `Loop` per call site (matching `makeSdPolygonEdgeDistance`'s own shape) is a direct, low-risk translation.
 - **Single-level, fixed-count, with a data-dependent conditional inside:** `grid` (Force Grid)'s 5-iteration fold, which swaps `uv.x`/`uv.y` and conditionally rescales — needs `select()` inside the loop body, same combination of primitives `makeSdPolygonEdgeDistance` already uses (`Loop` + `select` + `.assign()`), just applied to a different problem shape.
 - **Triple-nested, fixed-count (27 total iterations):** `energy` (Energy Field)'s hand-rolled 3D voronoi — the one animation in this set with a genuinely untested-in-this-codebase loop shape. Recommend flattening to one 27-iteration `Loop` with index decomposition (`i/9`, `(i/3)%3`, `i%3`) rather than three nested `Loop`s, since only single-level loops are proven working here so far.
 
 ### 5.3 The `.mix()`-as-method trap — directly relevant, repeat it
+
 Both existing lighting files self-document `reference_tsl_method_chaining_trap`: `.mix()` (and `.smoothstep()`, `.clamp()`, etc.) called as a **method** takes the receiver as the interpolant/last argument, not the first — silently produces the wrong blend. **Every one of the 27 animations is `mix()`-heavy** (the domain-warp-palette animations — `fog`, `dome`, `vortex` — alone average 4-6 `mix()` calls each). Use the **function form** throughout (`mix(a, b, t)`, matching how `point-light-illumination.js`/`point-light-coloration.js` already call `mix`/`clamp`/`smoothstep`/`length`/`dot`/`max` as functions, never methods) — this is the single highest-frequency translation trap across the whole animation set, purely by volume of `mix()` call sites.
 
 ### 5.4 `forceDefaultColor` needs a new per-animation gate in MSA
+
 `point-light-coloration.js` currently sets `uColorationAlpha = 0` for any light with no author-picked colour, as its equivalent of Foundry's `hasColor` gate (that file's own header). Per §3.4's roster, **13 of the 22 unique coloration animations must render regardless of `hasColor`**, inventing their own colour (rainbow hue, forced white default, etc.) exactly the way `forceDefaultColor=true` makes Foundry's own `AdaptiveColorationShader#isRequired` ignore `hasColor`. Porting any of those 13 needs this gate threaded through explicitly — a colourless-light early-out that's correct for the 9 non-forcing animations (and every unanimated default light) will silently blank out Chroma/Emanation/EnergyField/FairyLight/ForceGrid/Fog/HexaDome/LightDome/RadialRainbow/Revolving/StarLight/SwirlingRainbow/Vortex on a colourless light where real Foundry would still show them.
 
 ### 5.5 The `angle`-uniform open question (§4's `revolving`/`siren` entries)
+
 Restated here since it's a cross-cutting port decision, not just a curiosity: if the porting team cannot independently confirm Foundry ever assigns `u.angle` from live light data (this doc's own exhaustive trace found nothing across 7 files), the defensible port is `rot(time × k)` with no `angle` term, for both `revolving` and `siren`. If a live Foundry test later shows the beam's phase does track the light's placed rotation, that finding should get folded back into this doc before the port ships.
 
 ### 5.6 Two pre-existing (animation-independent) observations surfaced while cross-referencing
+
 Neither is an animation-specific finding, both are worth a look since precision was the ask:
+
 - **`point-light-coloration.js` currently hardcodes output alpha to `1`** (`vec4(outputColor, float(1))`) where real Foundry's coloration alpha is `depth`-after-falloff, not a constant (§3.2). This predates any animation work — flagged here because §4's per-animation alpha notes (especially `denseSmoke`'s) only make sense against the correct baseline.
 - **Foundry's illumination alpha is unconditionally `1.0`** (§3.2) — MSA's `point-light-illumination.js` already matches this correctly; noted as a confirmation, not a gap.
 
 ### 5.7 Naming/testing conventions to follow for new port files (`src/CONVENTIONS.md`)
+
 kebab-case filenames (`effects/lighting/animations/torch.js`, not `Torch.js`), camelCase functions, `UPPER_SNAKE_CASE` for true module-level constants (e.g. per-animation magic numbers worth naming, like Black Hole's `0.66` vs the shared `0.33`), one `__tests__/` per module directory. Per CONVENTIONS.md §4's own split: the **pure math** (CPU driver formulas — `easeAttenuation`-style functions, the `animateFlickering`/`animatePulse`/`animateSoundPulse` formulas of §1.3) should get real Node tests exactly like `point-light-illumination.js`'s `easeAttenuation`/`computeExposure` already do; the **GPU/TSL material bodies** should get verified live via the debug panel, matching how this project already treats `buildPointLightIlluminationMaterial` itself (not Node-tested, browser-verified).
 
 ### 5.8 Where MSA can go further than Foundry (per the base audit's own closing note, §15)
+
 Two animation-specific opportunities beyond the base audit's general list: (a) Flame's coloration deliberately writes `color * 8.0` at its hottest point (§4's `flame` entry) — in Foundry's clamped SDR pipeline this just blows to white; in MSA's HDR-capable stack (per the two-light-type doctrine's Type-B track) this over-bright core could feed bloom directly instead of clipping. (b) `vortex`'s illumination channel is confirmed dead in Foundry (§4's `vortex` entry, the `convertToDarknessColors` dead function in particular) — a legitimate, clearly-scoped Type-B opportunity to build something Foundry itself never finished, rather than porting nothing.
 
 ---
@@ -2165,6 +2326,7 @@ Two animation-specific opportunities beyond the base audit's general list: (a) F
 ## 6. File index
 
 **Sources** `client/canvas/sources/`
+
 - `rendered-effect-source.mjs` — `animate`, `animateTime`, `seed` assignment, shader-swap machinery (`_configureShaders`, `#initializeShaders`)
 - `base-light-source.mjs` — `animateTorch`, `animateFlickering`, `animatePulse`, `animateSoundPulse`, `ANIMATIONS` getter, `_updateCommonUniforms`
 - `point-light-source.mjs` — `ratio` computation, light-specific `ANIMATIONS` parentage
@@ -2173,22 +2335,27 @@ Two animation-specific opportunities beyond the base audit's general list: (a) F
 - `base-effect-source.mjs` — grepped for `angle` (no hits, part of the same trace)
 
 **Containers** `client/canvas/containers/elements/`
+
 - `point-source-mesh.mjs` — read in full, ruled out as an angle-uniform source
 
 **Registry**
+
 - `client/config.mjs:828-980` — `lightAnimations` (828-956, 23 entries), `darknessAnimations` (959-980, 4 entries)
 
 **GLSL toolkit**
+
 - `client/canvas/rendering/mixins/base-shader-mixin.mjs` — **path-corrected** from the base audit's file index (no `shaders/` segment); every primitive in this doc's §2
 - `client/canvas/rendering/shaders/base-shader.mjs` — `AbstractBaseShader`, `create()` factory (ruled out as an angle-uniform source)
 
 **Channel scaffolds** `client/canvas/rendering/shaders/lighting/`
+
 - `base-lighting.mjs` — `FRAGMENT_BEGIN`/`FRAGMENT_END`/`TRANSITION`/`FALLOFF`/`SWITCH_COLOR`/`COMPUTE_ILLUMINATION`/`ADJUSTMENTS`, all 13 `SHADER_TECHNIQUES`, full `FRAGMENT_UNIFORMS`
 - `illumination-lighting.mjs`, `coloration-lighting.mjs`, `background-lighting.mjs`, `darkness-lighting.mjs` — each channel's `_createFragmentShader()` assembly, `FRAGMENT_END`/`ADJUSTMENTS`/`EXPOSURE`/`SHADOW` overrides, `defaultUniforms`, `isRequired`
 
 **All 26 animation shader files** `client/canvas/rendering/shaders/lighting/effects/` — every one read and quoted in full: `bewitching-wave.mjs`, `black-hole.mjs`, `chroma.mjs`, `dense-smoke.mjs`, `emanation.mjs`, `energy-field.mjs`, `fairy-light.mjs`, `flame.mjs`, `fog.mjs`, `force-grid.mjs`, `ghost-light.mjs`, `hexa-dome.mjs`, `light-dome.mjs`, `magical-gloom.mjs`, `pulse.mjs`, `radial-rainbow.mjs`, `revolving-light.mjs`, `roiling-mass.mjs`, `siren-light.mjs`, `smoke-patch.mjs`, `star-light.mjs`, `sunburst.mjs`, `swirling-rainbow.mjs`, `torch.mjs`, `vortex.mjs`, `wave.mjs`
 
 **This project (`map-shine-advanced/src/`)**
+
 - `src/effects/lighting/point-light-illumination.js` — read in full; current TSL terms (`uRatio`, `uAttenuationEased`, `uExposure`, `dist`, switchColor-equivalent, `falloff`, `combinedFalloff`, `outputColor`) every illumination animation's port note is keyed to
 - `src/effects/lighting/point-light-coloration.js` — read in full; current TSL terms (`uAttenuationEased`, `uColorationAlpha`, `uLightColor`, `dist`, `falloff`, `mapColor`, `reflection`, `finalColor`, `outputColor`) every coloration animation's port note is keyed to; also the source of the §5.6 alpha=1 observation
 - `src/effects/candle-flame.js`, `src/effects/candle-flame-render.js` — read in full; confirms the "animated-flicker" rung is deferred, unbuilt, no prior-art collision
@@ -2198,4 +2365,4 @@ Two animation-specific opportunities beyond the base audit's general list: (a) F
 
 ---
 
-*Audit performed against the vendored v14 tree. Cross-reference the base `foundry-v14-lighting-audit.md` for the non-animated mechanics (radius, falloff, colour channels, occlusion, the parity contract §17-19) every animation in this doc builds on top of. All 27 registered animation types (23 light + 4 darkness) are documented above with exact fragment bodies and file:line citations; six distinct source-level irregularities were found and flagged rather than smoothed over (Vortex's dead illumination code, Pulse's ADJUSTMENTS-skip, Sunburst's adjustment-order inversion, the RadialRainbow/SwirlingRainbow colorationAlpha omission, DenseSmoke's manual FRAGMENT_END/alpha contract, and Black Hole's divergent darkness-mix constant) plus one open, unresolved question (the `angle` uniform's apparent dead assignment for Revolving/Siren).*
+_Audit performed against the vendored v14 tree. Cross-reference the base `foundry-v14-lighting-audit.md` for the non-animated mechanics (radius, falloff, colour channels, occlusion, the parity contract §17-19) every animation in this doc builds on top of. All 27 registered animation types (23 light + 4 darkness) are documented above with exact fragment bodies and file:line citations; six distinct source-level irregularities were found and flagged rather than smoothed over (Vortex's dead illumination code, Pulse's ADJUSTMENTS-skip, Sunburst's adjustment-order inversion, the RadialRainbow/SwirlingRainbow colorationAlpha omission, DenseSmoke's manual FRAGMENT_END/alpha contract, and Black Hole's divergent darkness-mix constant) plus one open, unresolved question (the `angle` uniform's apparent dead assignment for Revolving/Siren)._

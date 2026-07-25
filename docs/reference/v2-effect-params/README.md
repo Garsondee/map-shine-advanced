@@ -2,7 +2,7 @@
 
 Machine-harvested from `legacy/` by `tools/harvest-params.mjs` on 2026-07-17: **45 effects, 2240 controls, 25 carrying the author's own prose.**
 
-> **Do not port these values.** Every effect is being rebuilt from scratch in TSL (author, 2026-07-17: *"it's very likely that even using the exact same settings wouldn't give us the result we want"*). These numbers were tuned against V2's GLSL math, which is being deleted with `legacy/` at Stage 7. What survives a rewrite is **which knobs existed, what they were for, and what they were called** — a feature wishlist and a design vocabulary, in the author's own voice. That is the whole value here.
+> **Do not port these values.** Every effect is being rebuilt from scratch in TSL (author, 2026-07-17: _"it's very likely that even using the exact same settings wouldn't give us the result we want"_). These numbers were tuned against V2's GLSL math, which is being deleted with `legacy/` at Stage 7. What survives a rewrite is **which knobs existed, what they were for, and what they were called** — a feature wishlist and a design vocabulary, in the author's own voice. That is the whole value here.
 
 ## By the V3 pass that replaces them
 
@@ -15,8 +15,8 @@ Cross-referenced against `src/graph/passes.js`'s `absorbs` declarations.
 
 ### `geometry.world`
 
-- [Bush canopy (_Bush masks)](bush-effect.md) — `BushEffectV2`, 56 controls
-- [Tree canopy (_Tree masks)](tree-effect.md) — `TreeEffectV2`, 58 controls
+- [Bush canopy (\_Bush masks)](bush-effect.md) — `BushEffectV2`, 56 controls
+- [Tree canopy (\_Tree masks)](tree-effect.md) — `TreeEffectV2`, 58 controls
 
 ### `light.accumulate`
 
@@ -84,7 +84,7 @@ Cross-referenced against `src/graph/passes.js`'s `absorbs` declarations.
 
 ### `surface.response`
 
-- [Iridescence (_Iridescence masks)](iridescence-effect.md) — `IridescenceEffectV2`, 13 controls
+- [Iridescence (\_Iridescence masks)](iridescence-effect.md) — `IridescenceEffectV2`, 13 controls
 - [PrismEffectV2](prism-effect.md) — `PrismEffectV2`, 12 controls
 - [Metallic / specular (tile overlays)](specular-effect.md) — `SpecularEffectV2`, 67 controls
 

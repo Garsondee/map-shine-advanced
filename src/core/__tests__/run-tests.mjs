@@ -1,5 +1,6 @@
 /** src/core/ verification — the shared contracts (params, frame clock, seams). */
 import { run as runParams } from './params-schema.test.mjs';
+import { run as runFrameClock } from './frame-clock.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -15,7 +16,10 @@ const t = {
   },
 };
 
-const suites = [['params-schema', runParams]];
+const suites = [
+  ['params-schema', runParams],
+  ['frame-clock', runFrameClock],
+];
 for (const [name, fn] of suites) {
   const before = failed;
   fn(t);

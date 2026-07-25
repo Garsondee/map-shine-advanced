@@ -33,33 +33,33 @@ Persistence: settings save with the scene (not World Based).
 
 ### Look
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Strength | `strength` | slider | 0 … 1 | 0.47 |  |
-| | | | | | _Intensity of the halftone treatment (0 leaves the image unchanged in the shader)._ |
-| Radius | `radius` | slider | 1 … 16 | 6.3 |  |
-| | | | | | _Cell size in pixels (coarser halftone as this increases)._ |
-| Shape | `shape` | select | Dot / Ellipse / Line / Square | 1 |  |
-| | | | | | _Geometry of each halftone spot._ |
+| Control  | id         | Type   | Range                         | Default | Notes                                                                               |
+| -------- | ---------- | ------ | ----------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| Strength | `strength` | slider | 0 … 1                         | 0.47    |                                                                                     |
+|          |            |        |                               |         | _Intensity of the halftone treatment (0 leaves the image unchanged in the shader)._ |
+| Radius   | `radius`   | slider | 1 … 16                        | 6.3     |                                                                                     |
+|          |            |        |                               |         | _Cell size in pixels (coarser halftone as this increases)._                         |
+| Shape    | `shape`    | select | Dot / Ellipse / Line / Square | 1       |                                                                                     |
+|          |            |        |                               |         | _Geometry of each halftone spot._                                                   |
 
 ### Mix _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Blend mode | `blendingMode` | select | Linear / Multiply / Add / Lighter / Darker | 1 |  |
-| | | | | | _Compositing mode between source and halftone._ |
-| Scatter | `scatter` | slider | 0 … 2 | 0 |  |
-| | | | | | _Random displacement of the halftone grid for an imperfect print feel._ |
+| Control    | id             | Type   | Range                                      | Default | Notes                                                                   |
+| ---------- | -------------- | ------ | ------------------------------------------ | ------- | ----------------------------------------------------------------------- |
+| Blend mode | `blendingMode` | select | Linear / Multiply / Add / Lighter / Darker | 1       |                                                                         |
+|            |                |        |                                            |         | _Compositing mode between source and halftone._                         |
+| Scatter    | `scatter`      | slider | 0 … 2                                      | 0       |                                                                         |
+|            |                |        |                                            |         | _Random displacement of the halftone grid for an imperfect print feel._ |
 
 ### Output _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Greyscale | `greyscale` | boolean |  | false |  |
-| | | | | | _Halftone from luminance only (monochrome output)._ |
+| Control   | id          | Type    | Range | Default | Notes                                               |
+| --------- | ----------- | ------- | ----- | ------- | --------------------------------------------------- |
+| Greyscale | `greyscale` | boolean |       | false   |                                                     |
+|           |             |         |       |         | _Halftone from luminance only (monochrome output)._ |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | false | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | false   | hidden |

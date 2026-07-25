@@ -10,21 +10,21 @@
 
 ### Fog of War
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Unexplored | `unexploredColor` | color |  | #000000 |  |
-| Explored Tint | `exploredColor` | color |  | #000000 |  |
-| Explored Opacity | `exploredOpacity` | slider | 0 … 1 | 0.5 |  |
-| Edge Softness | `softness` | slider | 0 … 12 | 3 |  |
-| Edge Distortion (px) | `noiseStrength` | slider | 0 … 12 | 2 |  |
-| Distortion Speed | `noiseSpeed` | slider | 0 … 2 | 0.2 |  |
-| Reveal Token Bubbles | `revealTokenInFogEnabled` | boolean |  | false |  |
-| Door Sync | `doorFogSyncEnabled` | boolean |  | true |  |
-| Door Sync Thickness | `doorFogSyncThickness` | slider | 0.01 … 0.5 | 0.08 |  |
-| Door Sync Duration (ms) | `doorFogSyncDefaultDurationMs` | slider | 50 … 2500 | 500 |  |
+| Control                 | id                             | Type    | Range      | Default | Notes |
+| ----------------------- | ------------------------------ | ------- | ---------- | ------- | ----- |
+| Unexplored              | `unexploredColor`              | color   |            | #000000 |       |
+| Explored Tint           | `exploredColor`                | color   |            | #000000 |       |
+| Explored Opacity        | `exploredOpacity`              | slider  | 0 … 1      | 0.5     |       |
+| Edge Softness           | `softness`                     | slider  | 0 … 12     | 3       |       |
+| Edge Distortion (px)    | `noiseStrength`                | slider  | 0 … 12     | 2       |       |
+| Distortion Speed        | `noiseSpeed`                   | slider  | 0 … 2      | 0.2     |       |
+| Reveal Token Bubbles    | `revealTokenInFogEnabled`      | boolean |            | false   |       |
+| Door Sync               | `doorFogSyncEnabled`           | boolean |            | true    |       |
+| Door Sync Thickness     | `doorFogSyncThickness`         | slider  | 0.01 … 0.5 | 0.08    |       |
+| Door Sync Duration (ms) | `doorFogSyncDefaultDurationMs` | slider  | 50 … 2500  | 500     |       |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | true |  |
+| Control | id        | Type    | Range | Default | Notes |
+| ------- | --------- | ------- | ----- | ------- | ----- |
+| enabled | `enabled` | boolean |       | true    |       |

@@ -1,0 +1,217 @@
+/**
+ * perf-lab.test.mjs — the sweep's config sequence, the per-effect delta math, and the
+ * two-phase orchestration (felt: natural cadence; GPU: throttled + polled), with an
+ * injected fake harness + immediate frame-waiter, incl. the always-restore-on-error
+ * guarantee. The DOM panel is browser-verified (CONVENTIONS §4).
+ */
+import { buildSweepConfigs, summarizeSweep, formatMs, formatOther, runSweep, waitForGpuSamples } from '../perf-lab.js';
+
+const EFFECTS = [
+  { id: 'candleFlame', label: 'Candle flames' },
+  { id: 'uiWindowShadow', label: 'UI window shadows' },
+];
+
+/**
+ * A harness that scripts felt + GPU readings per config (keyed by sweep order) and
+ * records every call. Mirrors the REAL harness's semantics precisely, since that's
+ * exactly what caught the original bug:
+ *   - `resetFrameStats()` marks "now entering config N" (called once per config, right
+ *     before its felt phase) — advances `ci`.
+ *   - `setGpuProbe(true)` clears accumulated GPU samples (the real probe's OFF→ON edge).
+ *   - Each `readCost()` while armed simulates ONE more completed sample landing, up to
+ *     the config's scripted `samplesNeeded` (so `waitForGpuSamples` needs exactly that
+ *     many polls) — and, like the real probe, GPU stats PERSIST after disarming until
+ *     the next arm (never silently reset to null just because armed→false).
+ */
+function fakeHarness(effects, script, { throwOnConfigKey } = {}) {
+  const calls = { forced: [], probe: [], reset: 0 };
+  const orderedKeys = buildSweepConfigs(effects).map((c) => c.key);
+  let ci = -1;
+  let pollsSinceArm = 0;
+  let gpuCount = 0;
+  return {
+    calls,
+    listEffects: () => effects,
+    setForcedEnabled: (id, en) => calls.forced.push([id, en]),
+    setGpuProbe: (on) => {
+      calls.probe.push(on);
+      if (on) {
+        pollsSinceArm = 0;
+        gpuCount = 0; // rising-edge clear, mirrors gpu-probe.js
+      }
+    },
+    resetFrameStats: () => {
+      calls.reset += 1;
+      ci += 1;
+    },
+    readCost: () => {
+      const key = orderedKeys[ci];
+      if (throwOnConfigKey && key === throwOnConfigKey) throw new Error('boom');
+      const s = script[key] ?? {};
+      pollsSinceArm += 1;
+      gpuCount = Math.min(pollsSinceArm, s.samplesNeeded ?? 1);
+      return {
+        gpuProbe: {
+          gpuMsMedian: gpuCount > 0 ? (s.gpuMs ?? null) : null,
+          gpuMsP95: gpuCount > 0 ? (s.gpuP95 ?? null) : null,
+          sampleCount: gpuCount,
+        },
+        hitchStats: {
+          frameGapP50Ms: s.feltP50 ?? null,
+          frameGapP95Ms: s.feltP95 ?? null,
+          hitchCount: s.hitchCount ?? null,
+        },
+      };
+    },
+  };
+}
+
+const immediate = () => Promise.resolve();
+
+export async function run(t) {
+  const { ok } = t;
+
+  // --- buildSweepConfigs ---------------------------------------------------
+  {
+    ok('no effects → just the baseline', buildSweepConfigs([]).length === 1);
+    const one = buildSweepConfigs([{ id: 'candleFlame', label: 'Candle' }]);
+    ok('one effect → baseline + solo, NO redundant all-on', one.length === 2 && one[1].key === 'candleFlame');
+    const two = buildSweepConfigs(EFFECTS);
+    ok('two effects → baseline + each solo + all-on', two.length === 4);
+    ok('baseline turns everything off', two[0].on.length === 0);
+    ok('a solo config turns on exactly its one effect', two[1].on.length === 1 && two[1].on[0] === 'candleFlame');
+    ok('the all-on config lists every effect', two[3].on.length === 2);
+    ok('garbage entries are dropped', buildSweepConfigs([null, { label: 'no id' }, { id: 5 }]).length === 1);
+  }
+
+  // --- summarizeSweep — the delta math -------------------------------------
+  {
+    const raw = {
+      __baseline__: { gpuMs: 5, gpuSampleCount: 20 },
+      candleFlame: { gpuMs: 17, gpuP95: 22, gpuSampleCount: 20 },
+      uiWindowShadow: { gpuMs: 6, gpuP95: 7, gpuSampleCount: 20 },
+      __all__: { gpuMs: 18, gpuSampleCount: 20, feltP50: 25, feltP95: 40, hitchCount: 3 },
+    };
+    const s = summarizeSweep(raw, EFFECTS);
+    ok('effect cost = solo − baseline (candle 17−5=12)', s.perEffect[0].costMs === 12);
+    ok('the fat effect sorts first', s.perEffect[0].id === 'candleFlame');
+    ok('the cheap effect is second (shadow 6−5=1)', s.perEffect[1].costMs === 1);
+    ok('% of the effect stack (12/13 ≈ 92.3%)', s.perEffect[0].pctOfEffects === 92.3);
+    ok('effect stack total = all − baseline (18−5=13)', s.totalEffectGpuMs === 13);
+    ok('implied Foundry/other = felt − MSA gpu (25−18=7)', s.impliedOtherMs === 7);
+    ok('per-effect P95 carried through', s.perEffect[0].gpuP95 === 22);
+    ok('sample counts carried through', s.perEffect[0].gpuSampleCount === 20 && s.all.gpuSampleCount === 20);
+  }
+
+  // --- summarizeSweep — honest nulls, never a lying 0 ----------------------
+  {
+    const s = summarizeSweep({ candleFlame: { gpuMs: 9 } }, EFFECTS); // no baseline, no all
+    ok(
+      'missing baseline → cost is null, not 0',
+      s.perEffect.every((e) => e.costMs === null)
+    );
+    ok('missing all-on → implied other is null', s.impliedOtherMs === null);
+    ok('empty raw does not throw', typeof summarizeSweep(null, EFFECTS) === 'object');
+    ok(
+      'a config with no reading defaults sample count to 0',
+      s.perEffect.find((e) => e.id === 'uiWindowShadow').gpuSampleCount === 0
+    );
+  }
+
+  // --- formatMs / formatOther ------------------------------------------------------------
+  {
+    ok('null → em dash (not 0)', formatMs(null) === '—' && formatMs(undefined) === '—');
+    ok('rounds to 2dp with unit', formatMs(8.334) === '8.33 ms');
+    ok('formatOther null → em dash', formatOther(null) === '—');
+    ok(
+      'a small negative reads as noise, not an impossible negative cost',
+      formatOther(-0.3) === '≈0 ms (within noise)'
+    );
+    ok('a large negative is shown plainly, not hidden', formatOther(-33.5) === '-33.50 ms');
+    ok('a real positive formats normally', formatOther(5.1) === '5.10 ms');
+  }
+
+  // --- waitForGpuSamples — polls until the target lands, never hangs -------
+  {
+    let calls = 0;
+    const h = { readCost: () => ({ gpuProbe: { sampleCount: Math.min(++calls, 3) } }) };
+    const count = await waitForGpuSamples(h, 3, { waitFrames: immediate, pollFrames: 1, maxPolls: 50 });
+    ok('stops as soon as the target is reached', count === 3 && calls === 3);
+
+    let stuckCalls = 0;
+    const stuck = { readCost: () => ({ gpuProbe: { sampleCount: (stuckCalls++, 0) } }) };
+    const gaveUp = await waitForGpuSamples(stuck, 10, { waitFrames: immediate, pollFrames: 1, maxPolls: 5 });
+    // maxPolls loop iterations + one final re-check after the last wait (a real chance
+    // for a late sample to land, not a redundant call) = maxPolls + 1 reads.
+    ok('a probe that never yields samples gives up after maxPolls, does not hang', gaveUp === 0 && stuckCalls === 6);
+  }
+
+  // --- runSweep — two-phase read order, probe arming, raw assembly ---------
+  {
+    const script = {
+      __baseline__: { feltP50: 8.3, feltP95: 9, hitchCount: 0, gpuMs: 5, gpuP95: 6, samplesNeeded: 3 },
+      candleFlame: { feltP50: 8.3, feltP95: 9, hitchCount: 0, gpuMs: 17, gpuP95: 20, samplesNeeded: 3 },
+      uiWindowShadow: { feltP50: 8.3, feltP95: 9, hitchCount: 0, gpuMs: 6, gpuP95: 7, samplesNeeded: 3 },
+      __all__: { feltP50: 25, feltP95: 40, hitchCount: 3, gpuMs: 18, gpuP95: 21, samplesNeeded: 3 },
+    };
+    const h = fakeHarness(EFFECTS, script);
+    const out = await runSweep(h, {
+      settleFrames: 0,
+      feltFrames: 0,
+      gpuSampleTarget: 3,
+      pollFrames: 0,
+      waitFrames: immediate,
+    });
+    ok('raw captured every config', Object.keys(out.raw).length === 4);
+    ok('baseline GPU + felt both recorded', out.raw.__baseline__.gpuMs === 5 && out.raw.__baseline__.feltP50 === 8.3);
+    ok('a config reaches its scripted sample count', out.raw.candleFlame.gpuSampleCount === 3);
+    ok('summary computed from the run (candle cost 12)', out.summary.perEffect[0].costMs === 12);
+    // once per config (4) + once more in the sweep's finally cleanup (5 total).
+    ok('resetFrameStats called once per config, before its felt phase', h.calls.reset === 5);
+    ok('probe armed once per config (4 configs → 4 trues)', h.calls.probe.filter((x) => x === true).length === 4);
+    // restore: the LAST setForcedEnabled for each effect is null
+    const lastCandle = [...h.calls.forced].reverse().find((f) => f[0] === 'candleFlame');
+    const lastShadow = [...h.calls.forced].reverse().find((f) => f[0] === 'uiWindowShadow');
+    ok('every effect restored to the real cascade (null) at the end', lastCandle[1] === null && lastShadow[1] === null);
+  }
+
+  // --- runSweep — onProgress reports both sub-phases ------------------------
+  {
+    const script = {
+      __baseline__: { samplesNeeded: 1 },
+      candleFlame: { samplesNeeded: 1 },
+      uiWindowShadow: { samplesNeeded: 1 },
+      __all__: { samplesNeeded: 1 },
+    };
+    const h = fakeHarness(EFFECTS, script);
+    const phases = [];
+    await runSweep(h, {
+      settleFrames: 0,
+      feltFrames: 0,
+      gpuSampleTarget: 1,
+      pollFrames: 0,
+      waitFrames: immediate,
+      onProgress: (pr) => phases.push(pr.phase),
+    });
+    ok('every config reports a felt phase then a gpu phase', phases.includes('felt') && phases.includes('gpu'));
+    ok('felt is reported before gpu for the same config', phases.indexOf('felt') < phases.indexOf('gpu'));
+  }
+
+  // --- runSweep — ALWAYS restores, even when a read throws -----------------
+  {
+    const script = { __baseline__: { samplesNeeded: 1, gpuMs: 5 }, candleFlame: { samplesNeeded: 1, gpuMs: 17 } };
+    const h = fakeHarness(EFFECTS, script, { throwOnConfigKey: 'uiWindowShadow' }); // throw mid-sweep
+    let threw = false;
+    try {
+      await runSweep(h, { settleFrames: 0, feltFrames: 0, gpuSampleTarget: 1, pollFrames: 0, waitFrames: immediate });
+    } catch {
+      threw = true;
+    }
+    ok('a mid-sweep error propagates', threw === true);
+    const lastCandle = [...h.calls.forced].reverse().find((f) => f[0] === 'candleFlame');
+    const lastShadow = [...h.calls.forced].reverse().find((f) => f[0] === 'uiWindowShadow');
+    ok('the scene is STILL restored after an error (finally)', lastCandle[1] === null && lastShadow[1] === null);
+    ok('the probe is disarmed after an error', h.calls.probe[h.calls.probe.length - 1] === false);
+    ok('frame stats reset one final time on the way out', h.calls.reset > 0);
+  }
+}

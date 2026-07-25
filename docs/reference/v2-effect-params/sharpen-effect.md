@@ -30,17 +30,17 @@ Persistence: settings save with the scene (not World Based).
 
 ### Look
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Amount | `amount` | slider | 0 … 2 | 0.5 |  |
-| | | | | | _Strength of the sharpen blend (0 = no effect)._ |
-| Radius (px) | `radiusPx` | slider | 0 … 6 | 2 |  |
-| | | | | | _Blur radius in pixels used for the unsharp mask._ |
-| Threshold | `threshold` | slider | 0 … 0.25 | 0 |  |
-| | | | | | _Ignore weak edges below this luma delta to limit noise sharpening._ |
+| Control     | id          | Type   | Range    | Default | Notes                                                                |
+| ----------- | ----------- | ------ | -------- | ------- | -------------------------------------------------------------------- |
+| Amount      | `amount`    | slider | 0 … 2    | 0.5     |                                                                      |
+|             |             |        |          |         | _Strength of the sharpen blend (0 = no effect)._                     |
+| Radius (px) | `radiusPx`  | slider | 0 … 6    | 2       |                                                                      |
+|             |             |        |          |         | _Blur radius in pixels used for the unsharp mask._                   |
+| Threshold   | `threshold` | slider | 0 … 0.25 | 0       |                                                                      |
+|             |             |        |          |         | _Ignore weak edges below this luma delta to limit noise sharpening._ |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | false | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | false   | hidden |

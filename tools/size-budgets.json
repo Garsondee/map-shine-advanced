@@ -1,7 +1,7 @@
 {
   "src/boot.js": {
-    "file": 4082,
-    "fn": 3467
+    "file": 4115,
+    "fn": 3500
   },
   "src/diag/debug-panel.js": {
     "file": 1072,
@@ -15,10 +15,10 @@
     "fn": 1066
   },
   "src/scene/mask-authority.js": {
-    "fn": 596
+    "fn": 607
   },
   "src/vt/vt-pan-viewer.js": {
-    "file": 11870,
-    "fn": 10395
+    "file": 11957,
+    "fn": 10484
   }
 }

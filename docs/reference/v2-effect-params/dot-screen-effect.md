@@ -31,26 +31,26 @@ Persistence: settings save with the scene (not World Based).
 
 ### Look
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Strength | `strength` | slider | 0 … 1 | 1 |  |
-| | | | | | _How much of the dot pattern is mixed in (0 = bypass)._ |
-| Scale | `scale` | slider | 0.1 … 10 | 10 |  |
-| | | | | | _Fineness of the dot grid (higher = smaller / denser dots)._ |
-| Angle (rad) | `angle` | slider | 0 … 6.283185307179586 | 1.57 |  |
-| | | | | | _Rotation of the halftone grid in radians._ |
+| Control     | id         | Type   | Range                 | Default | Notes                                                        |
+| ----------- | ---------- | ------ | --------------------- | ------- | ------------------------------------------------------------ |
+| Strength    | `strength` | slider | 0 … 1                 | 1       |                                                              |
+|             |            |        |                       |         | _How much of the dot pattern is mixed in (0 = bypass)._      |
+| Scale       | `scale`    | slider | 0.1 … 10              | 10      |                                                              |
+|             |            |        |                       |         | _Fineness of the dot grid (higher = smaller / denser dots)._ |
+| Angle (rad) | `angle`    | slider | 0 … 6.283185307179586 | 1.57    |                                                              |
+|             |            |        |                       |         | _Rotation of the halftone grid in radians._                  |
 
 ### Center _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Center X | `centerX` | slider | 0 … 1 | 0.56 |  |
-| | | | | | _Horizontal pattern origin in UV space (0 = left, 1 = right)._ |
-| Center Y | `centerY` | slider | 0 … 1 | 0.5 |  |
-| | | | | | _Vertical pattern origin in UV space (0 = bottom, 1 = top)._ |
+| Control  | id        | Type   | Range | Default | Notes                                                          |
+| -------- | --------- | ------ | ----- | ------- | -------------------------------------------------------------- |
+| Center X | `centerX` | slider | 0 … 1 | 0.56    |                                                                |
+|          |           |        |       |         | _Horizontal pattern origin in UV space (0 = left, 1 = right)._ |
+| Center Y | `centerY` | slider | 0 … 1 | 0.5     |                                                                |
+|          |           |        |       |         | _Vertical pattern origin in UV space (0 = bottom, 1 = top)._   |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | false | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | false   | hidden |

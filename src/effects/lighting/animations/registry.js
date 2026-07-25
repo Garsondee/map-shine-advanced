@@ -61,11 +61,29 @@
  * @module effects/lighting/animations/registry
  */
 
-import { buildTorchColorationSeed } from './torch.js';
+import { buildTorchIlluminationSeed, buildTorchColorationSeed } from './torch.js';
 import { buildPulseIlluminationSeed, buildPulseColorationSeed } from './pulse.js';
 import { buildChromaColorationSeed } from './chroma.js';
 import { buildFlameIlluminationSeed, buildFlameColorationSeed } from './flame.js';
 import { buildEnergyColorationSeed } from './energy.js';
+import { buildRevolvingColorationSeed } from './revolving.js';
+import { buildSirenIlluminationSeed, buildSirenColorationSeed } from './siren.js';
+import { buildWaveIlluminationSeed, buildWaveColorationSeed } from './wave.js';
+import { buildFogColorationSeed } from './fog.js';
+import { buildSunburstIlluminationSeed, buildSunburstColorationSeed } from './sunburst.js';
+import { buildDomeColorationSeed } from './dome.js';
+import { buildEmanationColorationSeed } from './emanation.js';
+import { buildHexaColorationSeed } from './hexa.js';
+import { buildGhostIlluminationSeed, buildGhostColorationSeed } from './ghost.js';
+import { buildVortexColorationSeed } from './vortex.js';
+import { buildWitchwaveIlluminationSeed, buildWitchwaveColorationSeed } from './witchwave.js';
+import { buildRainbowswirlColorationSeed } from './rainbowswirl.js';
+import { buildRadialrainbowColorationSeed } from './radialrainbow.js';
+import { buildFairyIlluminationSeed, buildFairyColorationSeed } from './fairy.js';
+import { buildGridColorationSeed } from './grid.js';
+import { buildStarlightColorationSeed } from './starlight.js';
+import { buildSmokepatchIlluminationSeed, buildSmokepatchColorationSeed } from './smokepatch.js';
+import { buildCandleFlickerIlluminationSeed, buildCandleFlickerColorationSeed } from './candle-flicker.js';
 
 /**
  * Real, Foundry-valid animation keys this project has deliberately not
@@ -73,15 +91,21 @@ import { buildEnergyColorationSeed } from './energy.js';
  * "known, deferred" instead of "unrecognized", and so nobody re-discovers
  * these gaps by surprise. Not a technical gate (an absent registry key
  * already safety-slides correctly on its own) — a documentation aid.
+ *
+ * EXPLICITLY LOW-PRIORITY, NOT FORGOTTEN (author's own direction,
+ * 2026-07-20): all 5 of these are real TODOs, tracked here on purpose,
+ * deliberately skipped for now rather than silently dropped. Pick this
+ * doc entry back up before considering the animated-lights rung "done" —
+ * it isn't, these 5 are the honest remainder.
  */
 export const KNOWN_DEFERRED_ANIMATIONS = Object.freeze({
   reactivepulse:
-    'needs live game.audio band-level data — a separate foundry/-adapter rung, not the intensity/speed sliders this feature is about',
+    'TODO, LOW PRIORITY: needs live game.audio band-level data — a separate foundry/-adapter rung, not the intensity/speed sliders this feature is about',
   magicalGloom:
-    'darkness animation — blocked on MSA having no negative/darkness-light channel yet (Light-Parity.md §5 sequences that above animations)',
-  roiling: 'darkness animation — same blocker as magicalGloom',
-  hole: 'darkness animation — same blocker as magicalGloom',
-  denseSmoke: 'darkness animation — same blocker as magicalGloom',
+    'TODO, LOW PRIORITY: darkness animation — blocked on MSA having no negative/darkness-light channel yet (Light-Parity.md §5 sequences that above animations)',
+  roiling: 'TODO, LOW PRIORITY: darkness animation — same blocker as magicalGloom',
+  hole: 'TODO, LOW PRIORITY: darkness animation — same blocker as magicalGloom',
+  denseSmoke: 'TODO, LOW PRIORITY: darkness animation — same blocker as magicalGloom',
 });
 
 /**
@@ -105,7 +129,10 @@ export const LIGHT_ANIMATIONS = {
     // (light-animation-clock.js#computeFlickerUniforms's own header).
     flickerAmplification: (intensityRaw) => intensityRaw / 5,
     forceDefaultColor: false,
-    buildIlluminationSeed: null, // needs no shader change at all — torch.js's own header
+    // GPU-ONLY REWRITE (2026-07-20): now a REAL builder — see torch.js's own
+    // header for why the old "needs no shader change" trick no longer
+    // applies once ratio-jitter itself moved onto the GPU.
+    buildIlluminationSeed: buildTorchIlluminationSeed,
     buildColorationSeed: buildTorchColorationSeed,
   },
   pulse: {
@@ -138,6 +165,149 @@ export const LIGHT_ANIMATIONS = {
     forceDefaultColor: true,
     buildIlluminationSeed: null, // coloration-only
     buildColorationSeed: buildEnergyColorationSeed,
+  },
+
+  // TIER 1 (2026-07-20) — the remaining 17 light animations, same proven
+  // pattern as Tier 0. `siren` is the one Tier-1 entry sharing torch's
+  // flicker driver (animateTorch, amplification=intensity/5 — see
+  // light-animation-clock.js's own header on why this must be explicit
+  // per-entry, not derived).
+  revolving: {
+    label: 'Revolving',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildRevolvingColorationSeed,
+  },
+  siren: {
+    label: 'Siren',
+    cpuDriver: 'flicker',
+    flickerAmplification: (intensityRaw) => intensityRaw / 5,
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildSirenIlluminationSeed,
+    buildColorationSeed: buildSirenColorationSeed,
+  },
+  wave: {
+    label: 'Wave',
+    cpuDriver: 'time',
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildWaveIlluminationSeed,
+    buildColorationSeed: buildWaveColorationSeed,
+  },
+  fog: {
+    label: 'Fog',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildFogColorationSeed,
+  },
+  sunburst: {
+    label: 'Sunburst',
+    cpuDriver: 'time',
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildSunburstIlluminationSeed,
+    buildColorationSeed: buildSunburstColorationSeed,
+  },
+  dome: {
+    label: 'Light Dome',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildDomeColorationSeed,
+  },
+  emanation: {
+    label: 'Emanation',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildEmanationColorationSeed,
+  },
+  hexa: {
+    label: 'Hexa Dome',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildHexaColorationSeed,
+  },
+  ghost: {
+    label: 'Ghost Light',
+    cpuDriver: 'time',
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildGhostIlluminationSeed,
+    buildColorationSeed: buildGhostColorationSeed,
+  },
+  vortex: {
+    label: 'Vortex',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    // Illumination is CONFIRMED DEAD CODE in Foundry itself (vortex.js's
+    // own header) — null, not a stub, matching torch's own "needs no
+    // shader change" pattern for the SAME reason a real Foundry light
+    // there would look unanimated.
+    buildIlluminationSeed: null,
+    buildColorationSeed: buildVortexColorationSeed,
+  },
+  witchwave: {
+    label: 'Bewitching Wave',
+    cpuDriver: 'time',
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildWitchwaveIlluminationSeed,
+    buildColorationSeed: buildWitchwaveColorationSeed,
+  },
+  rainbowswirl: {
+    label: 'Swirling Rainbow',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildRainbowswirlColorationSeed,
+  },
+  radialrainbow: {
+    label: 'Radial Rainbow',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildRadialrainbowColorationSeed,
+  },
+  fairy: {
+    label: 'Fairy Light',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: buildFairyIlluminationSeed,
+    buildColorationSeed: buildFairyColorationSeed,
+  },
+  grid: {
+    label: 'Force Grid',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildGridColorationSeed,
+  },
+  starlight: {
+    label: 'Star Light',
+    cpuDriver: 'time',
+    forceDefaultColor: true,
+    buildIlluminationSeed: null, // coloration-only
+    buildColorationSeed: buildStarlightColorationSeed,
+  },
+  smokepatch: {
+    label: 'Smoke Patch',
+    cpuDriver: 'time',
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildSmokepatchIlluminationSeed,
+    buildColorationSeed: buildSmokepatchColorationSeed,
+  },
+
+  // MSA-NATIVE (not a Foundry key) — see candle-flicker.js's own header.
+  // A distinct type from `torch` on purpose: candles are meant to be
+  // enhanced independently later without dragging Foundry's own Torch
+  // along for the ride.
+  candleFlicker: {
+    label: 'Candle Flicker (MSA)',
+    cpuDriver: 'flicker',
+    flickerAmplification: (intensityRaw) => intensityRaw / 5,
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildCandleFlickerIlluminationSeed,
+    buildColorationSeed: buildCandleFlickerColorationSeed,
   },
 };
 

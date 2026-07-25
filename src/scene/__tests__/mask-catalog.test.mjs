@@ -33,6 +33,33 @@ export async function run(t) {
   );
   t.ok('outdoors defaults to fully-outdoors when absent', maskKindById('outdoors').absentValue === 1);
   t.ok('shadow defaults to fully-lit when absent', maskKindById('shadow').absentValue === 1);
+  t.ok(
+    'outdoors is REQUIRED (2026-07-21 author directive) — absence throws rather than silently serving absentValue',
+    maskKindById('outdoors').required === true
+  );
+  t.ok(
+    'no OTHER kind is required — outdoors is a deliberately narrow exception, not a blanket policy',
+    MASK_KINDS.filter((k) => k.id !== 'outdoors').every((k) => !k.required)
+  );
+
+  const badRequired = validateMaskCatalog(
+    [
+      {
+        id: 'alpha',
+        suffixes: ['_A'],
+        channels: 'gray',
+        packChannel: null,
+        absentValue: 0,
+        required: 'yes', // must be a boolean
+        meaning: 'x'.repeat(20),
+      },
+    ],
+    []
+  );
+  t.ok(
+    'a non-boolean required flag is rejected',
+    !badRequired.ok && badRequired.errors.some((e) => e.includes('required must be a boolean'))
+  );
 
   // --- validation actually bites ------------------------------------------
   const dupSuffix = validateMaskCatalog(

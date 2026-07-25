@@ -7,6 +7,13 @@
 import { run as runOrientationProbe } from './orientation-probe.test.mjs';
 import { run as runFlightRecorder } from './flight-recorder.test.mjs';
 import { run as runPixelProbe } from './pixel-probe.test.mjs';
+import { run as runMarkerOverlay } from './marker-overlay.test.mjs';
+import { run as runGpuProbe } from './gpu-probe.test.mjs';
+import { run as runPerfLab } from './perf-lab.test.mjs';
+import { run as runWindFieldOverlay } from './wind-field-overlay.test.mjs';
+import { run as runComputeSpike } from './compute-spike.test.mjs';
+import { run as runWindProbe } from './wind-probe.test.mjs';
+import { run as runEffectControls } from './effect-controls.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -28,6 +35,13 @@ const suites = [
   ['orientation-probe', runOrientationProbe],
   ['flight-recorder', runFlightRecorder],
   ['pixel-probe', runPixelProbe],
+  ['marker-overlay', runMarkerOverlay],
+  ['gpu-probe', runGpuProbe],
+  ['perf-lab', runPerfLab],
+  ['wind-field-overlay', runWindFieldOverlay],
+  ['compute-spike', runComputeSpike],
+  ['wind-probe', runWindProbe],
+  ['effect-controls', runEffectControls],
 ];
 
 for (const [name, fn] of suites) {

@@ -8,4 +8,7 @@
  * (`[structure-change]`) and update the governing UI docs (docs/planning/UI.md,
  * Effects-UI.md, Authoring-and-Distribution.md).
  */
+export { createAstrolabe } from './astrolabe.js';
 export { installPainter } from './paint-mode.js';
+export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialog.js';
+export { installAnchorMode } from './anchor-mode.js';

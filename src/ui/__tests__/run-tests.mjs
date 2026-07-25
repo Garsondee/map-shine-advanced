@@ -9,6 +9,7 @@
  *   node ./node_modules/esbuild/bin/esbuild src/ui/__tests__/run-tests.mjs \
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
+import { run as runAstrolabe } from './astrolabe.test.mjs';
 import { run as runLoadProgress } from './load-progress.test.mjs';
 
 let passed = 0;
@@ -44,7 +45,10 @@ const t = {
   },
 };
 
-const suites = [['load-progress', runLoadProgress]];
+const suites = [
+  ['astrolabe', runAstrolabe],
+  ['load-progress', runLoadProgress],
+];
 
 for (const [name, fn] of suites) {
   const before = failed;

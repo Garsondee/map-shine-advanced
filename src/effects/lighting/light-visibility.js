@@ -221,9 +221,19 @@ export function shadowOffsetDirection(azimuthDeg) {
  * @param {number} [args.maxOffsetPx=512] - cap on the FINAL (post-scale) offset length.
  * @param {number} [args.offsetScale=1] - cosmetic multiplier on the raw offset length.
  *   Non-finite or ≤0 falls back to 1 (never inverts or zeros the shadow).
+ * @param {boolean} [args.softKnee=false] - see {@link softenThrowPx}. OFF by
+ *   default so the UI-shadow's hand-tuned behaviour is bit-identical; the world
+ *   casters (`effects/shadow-access.js`) turn it ON.
  * @returns {{x:number, y:number, length:number}} the offset vector and its length (px).
  */
-export function projectShadowOffset({ azimuthDeg, elevationDeg, heightPx, maxOffsetPx = 512, offsetScale = 1 }) {
+export function projectShadowOffset({
+  azimuthDeg,
+  elevationDeg,
+  heightPx,
+  maxOffsetPx = 512,
+  offsetScale = 1,
+  softKnee = false,
+}) {
   const h = Number.isFinite(heightPx) && heightPx > 0 ? heightPx : 0;
   const maxLen = Number.isFinite(maxOffsetPx) && maxOffsetPx > 0 ? maxOffsetPx : 0;
   const scale = Number.isFinite(offsetScale) && offsetScale > 0 ? offsetScale : 1;
@@ -234,9 +244,43 @@ export function projectShadowOffset({ azimuthDeg, elevationDeg, heightPx, maxOff
   // tan(90°) is enormous (→ length 0); tan(0°) is 0 (→ division saturates). Both
   // ends are handled by the clamp below, so no special-casing / Infinity leaks.
   const rawLen = t > 1e-6 ? h / t : maxLen;
-  const length = Math.min(maxLen, Math.max(0, rawLen * scale));
+  const scaled = Math.max(0, rawLen * scale);
+  const length = softKnee ? softenThrowPx(scaled, maxLen) : Math.min(maxLen, scaled);
   const dir = shadowOffsetDirection(azimuthDeg);
   return { x: dir.x * length, y: dir.y * length, length };
+}
+
+/**
+ * SOFTEN A SHADOW'S THROW toward a ceiling instead of chopping it there.
+ *
+ * Author, 2026-07-24, live report: *"the offset means that the tree shadows are
+ * already too far away from their producers at dawn and dusk… we need to lower
+ * the offset so that shadows don't become too detached from their producers."*
+ *
+ * The cause is `height / tan(elevation)` doing exactly what physics says: as the
+ * sun approaches the horizon the tangent approaches zero and the throw runs
+ * away. That is TRUE and it is also unusable on a top-down battlemap, where a
+ * tree's shadow crossing half the map reads as a rendering fault rather than as
+ * dusk. A hard `min()` does not fix it either — it makes every tall caster's
+ * shadow land at the SAME distance for the last hour of daylight, so the whole
+ * scene's shadows visibly snap into a line and then stop moving.
+ *
+ * This is the standard saturating knee: `raw · max / (raw + max)`. It is
+ * essentially `raw` while raw ≪ max, bends over smoothly, and asymptotes to
+ * `max` without ever reaching it — so shadows keep growing all the way to
+ * sunset, just ever more slowly, and no two casters ever collapse onto the same
+ * distance. Monotonic, branchless, and `f(0) = 0`.
+ *
+ * @param {number} rawPx - the physical throw.
+ * @param {number} maxPx - the distance the throw asymptotes to. ≤0 disables (returns raw).
+ * @returns {number} the compressed throw, in [0, maxPx).
+ */
+export function softenThrowPx(rawPx, maxPx) {
+  const raw = Number.isFinite(rawPx) && rawPx > 0 ? rawPx : 0;
+  const max = Number.isFinite(maxPx) && maxPx > 0 ? maxPx : 0;
+  if (max === 0) return raw;
+  if (raw === 0) return 0;
+  return (raw * max) / (raw + max);
 }
 
 /**

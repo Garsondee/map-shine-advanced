@@ -8,16 +8,16 @@
 
 ## Controls
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Style (Override) | `style` | (inferred) | Solid Lines / Dashed Lines / Dotted Lines / Square Points / Diamond Points / Round Points | dashedLines |  |
-| Override Style | `useStyleOverride` | (inferred) |  | true |  |
-| Thickness (Override) | `thickness` | (inferred) | 1 … 10 | 2 |  |
-| Override Thickness | `useThicknessOverride` | (inferred) |  | true |  |
-| Color (Override) | `colorOverride` | (inferred) |  | #000000 |  |
-| Override Color | `useColorOverride` | (inferred) |  | true |  |
-| Opacity (Override) | `alphaOverride` | (inferred) | 0 … 1 | 0.15 |  |
-| Override Opacity | `useAlphaOverride` | (inferred) |  | true |  |
-| Show Adjacent Floor Grids | `ghostGridEnabled` | (inferred) |  | true |  |
-| Adjacent Grid Opacity Scale | `ghostGridAlphaScale` | (inferred) | 0 … 1 | 0.22 |  |
-| Floor Color Tinting | `floorTintPresetsEnabled` | (inferred) |  | true |  |
+| Control                     | id                        | Type       | Range                                                                                     | Default     | Notes |
+| --------------------------- | ------------------------- | ---------- | ----------------------------------------------------------------------------------------- | ----------- | ----- |
+| Style (Override)            | `style`                   | (inferred) | Solid Lines / Dashed Lines / Dotted Lines / Square Points / Diamond Points / Round Points | dashedLines |       |
+| Override Style              | `useStyleOverride`        | (inferred) |                                                                                           | true        |       |
+| Thickness (Override)        | `thickness`               | (inferred) | 1 … 10                                                                                    | 2           |       |
+| Override Thickness          | `useThicknessOverride`    | (inferred) |                                                                                           | true        |       |
+| Color (Override)            | `colorOverride`           | (inferred) |                                                                                           | #000000     |       |
+| Override Color              | `useColorOverride`        | (inferred) |                                                                                           | true        |       |
+| Opacity (Override)          | `alphaOverride`           | (inferred) | 0 … 1                                                                                     | 0.15        |       |
+| Override Opacity            | `useAlphaOverride`        | (inferred) |                                                                                           | true        |       |
+| Show Adjacent Floor Grids   | `ghostGridEnabled`        | (inferred) |                                                                                           | true        |       |
+| Adjacent Grid Opacity Scale | `ghostGridAlphaScale`     | (inferred) | 0 … 1                                                                                     | 0.22        |       |
+| Floor Color Tinting         | `floorTintPresetsEnabled` | (inferred) |                                                                                           | true        |       |

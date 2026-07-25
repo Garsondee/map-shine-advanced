@@ -10,20 +10,20 @@
 
 ### Global Settings
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Global Intensity | `globalIntensity` | slider | 0 … 2 | 2 |  |
+| Control          | id                | Type   | Range | Default | Notes |
+| ---------------- | ----------------- | ------ | ----- | ------- | ----- |
+| Global Intensity | `globalIntensity` | slider | 0 … 2 | 2       |       |
 
 ### Debug _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Debug Mode | `debugMode` | boolean |  | false |  |
-| Show Distortion Mask | `debugShowMask` | boolean |  | false |  |
-| Show Water Shore Band | `debugShowWaterShoreBand` | boolean |  | false |  |
+| Control               | id                        | Type    | Range | Default | Notes |
+| --------------------- | ------------------------- | ------- | ----- | ------- | ----- |
+| Debug Mode            | `debugMode`               | boolean |       | false   |       |
+| Show Distortion Mask  | `debugShowMask`           | boolean |       | false   |       |
+| Show Water Shore Band | `debugShowWaterShoreBand` | boolean |       | false   |       |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | true | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | true    | hidden |

@@ -8,6 +8,6 @@
 
 ## Controls
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | true | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | true    | hidden |

@@ -46,6 +46,8 @@
  * @module effects/lighting/environmental-light
  */
 
+import { buildSunVisibilityNode } from './sun-occlusion-render.js';
+
 /**
  * Linear-interpolate two rgb triples, clamping t to [0,1].
  * @param {readonly number[]} a @param {readonly number[]} b @param {number} t
@@ -260,10 +262,17 @@ export function maxRgb(rgb, floor) {
  * @param {*} [args.uiShadowVisNode] - optional scalar TSL node, 1..0, the
  *   UI-window-shadow visibility term (see essay above). Multiplies the illum
  *   sample before it combines with albedo; omitted = untouched (no-op).
+ * @param {*} [args.outdoorsTexture] - THE SKY LIGHT's gate (2026-07-23): the
+ *   `_Outdoors` mask as a texture covering `outdoorsRect` in world space, R
+ *   channel 0..1. Omitted → the sky terms are compiled out entirely and every
+ *   material below is byte-identical to what it was before the sky existed.
  * @returns {{
  *   illumMaterial: *, compositeMaterial: *,
  *   uBackgroundSrgb: *, albedoTexNode: *, illumTexNode: *, colorationTexNode: *,
  *   setAmbient: (bgSrgb: number[]) => void,
+ *   setSky: (multiplierRgb: number[]) => void,
+ *   setViewRect: (rect: object) => void,
+ *   setOutdoorsRect: (rect: object) => void,
  * }}
  */
 export function buildEnvironmentalLightMaterials({
@@ -272,15 +281,106 @@ export function buildEnvironmentalLightMaterials({
   illumTexture,
   colorationTexture,
   uiShadowVisNode,
+  outdoorsTexture,
+  sunShadowTexture,
 }) {
-  const { uniform, texture, vec3, vec4, float, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+  const { uniform, texture, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
-  // --- illum pass: constant ambient fill (per-pixel in 1b) -----------------
+  // ═══════════════════════════════════════════════════════════════════════
+  // THE SKY LIGHT (docs/planning/Sky.md) — atmosphere as LIGHT, not a grade.
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // `effects/sky-access.js` produces exactly two numbers-per-frame for this
+  // pass, and this is where they land:
+  //
+  //   ambientMultiplierRgb → multiplies the ambient fill (chroma only)
+  //   veilAddRgb           → adds into the coloration sum (the desaturator)
+  //
+  // BOTH ARE MASK-GATED, and gating is the entire reason this belongs in the
+  // light rather than in `post.grade`. V2 had to teach its colour corrector
+  // about `_Outdoors` ("procedural weather/golden-hour offsets on sky-eligible
+  // outdoor pixels") because a full-screen grade is global by nature. As a
+  // light, "indoors is not lit by the sky" needs no special case — the mask IS
+  // where the light reaches, and it interpolates for free at a doorway.
+  //
+  // ⚠️ ORIENTATION — the screen→world mapping below is `scene/world-quad.js`'s
+  // `quadUvToWorld`, transcribed into TSL. It has NO flip, and that is derived
+  // rather than hoped: `QuadGeometry` puts v=0 at the screen TOP and
+  // `computeCameraFrustum` puts `top = worldRect.minY`, so uv and world run the
+  // same direction. The mask grid agrees independently (`MaskGrid.data` is
+  // "row 0 = minY", and a `DataTexture` defaults to `flipY:false`, so uv.v=0
+  // samples row 0 = minY). Three spaces, one direction, nothing negated.
+  // Asserted in `scene/__tests__/world-quad.test.mjs`, chained to the
+  // already-proven `worldToNdc` rather than re-derived.
+  const uSkyMultiplier = uniform(vec3(1, 1, 1));
+  /** The camera's world rect THIS frame: (minX, minY, maxX, maxY). */
+  const uViewRect = uniform(vec4(0, 0, 1, 1));
+  /** The world rect the outdoors texture covers: (minX, minY, maxX, maxY). */
+  const uOutdoorsRect = uniform(vec4(0, 0, 1, 1));
+
+  const outdoorsTexNode = outdoorsTexture ? texture(outdoorsTexture) : null;
+
+  /**
+   * `1` outdoors, `0` indoors, smoothly between — evaluated at the world
+   * position under this screen pixel. A JS-time branch, not a uniform gate
+   * (`tsl/no-uniform-gates`): with no mask ingested yet the whole lookup is
+   * absent from the compiled shader rather than multiplied by a zero.
+   *
+   * Delegates to the shared `buildOutdoorsGate` (exported below) so the sky
+   * light HERE and the environmental grade in the PRESENT pass compute the
+   * gate from byte-identical maths — a second inline copy is how the two would
+   * drift and gate different halves of the map.
+   */
+  const outdoorsAt = () => buildOutdoorsGate(THREE.TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // THE SUN'S OWN SHADOW (docs/planning/Sun-Shadows.md) — building, overhead
+  // and sky-reach, baked into ONE scene-space visibility field.
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ⚠️ IT MULTIPLIES THE AMBIENT FILL, BEFORE THE POINT LIGHTS. That placement
+  // is the doctrine, not a detail:
+  //
+  //     illum = max( ambient x sunVisibility , pointLights )
+  //
+  // The sun is a PASSIVE light — it is what casts these shadows, so it can
+  // never overpower them. A torch is an ACTIVE light brought in afterwards; it
+  // MAX-blends on top and lights the shadowed ground straight back up, with no
+  // lift, no override strength, and no shadow shader reading a light buffer.
+  // (Author's own statement of the model, 2026-07-24; `composeSunTermWithMaxLight`
+  // is its Node-tested scalar form.)
+  //
+  // The UI-window shadow multiplies in the COMPOSITE instead — AFTER the lights
+  // — because it is decorative chrome over the whole picture rather than one
+  // light's own occlusion. Do NOT "unify" the two: moving this one after the
+  // lights would make a torch inside a building's shadow read dimmer than the
+  // same torch outside it, which is `DynamicLightShadowLift` rebuilt backwards.
+  const uSunShadowRect = uniform(vec4(0, 0, 1, 1));
+  const sunShadowTexNode = sunShadowTexture ? texture(sunShadowTexture) : null;
+
+  // --- illum pass: ambient fill, tinted by the sky where it is open --------
   const uBackgroundSrgb = uniform(vec3(0.93, 0.93, 0.93));
   const illumMaterial = new THREE.NodeMaterial();
   illumMaterial.depthTest = false;
   illumMaterial.depthWrite = false;
-  illumMaterial.fragmentNode = vec4(uBackgroundSrgb, float(1));
+  {
+    const outdoors = outdoorsAt();
+    // `mix(1, skyMultiplier, outdoors)` — indoors keeps the untouched Foundry
+    // ambient, outdoors gets the sky's hue. At `realism01 = 0` the multiplier
+    // IS `[1,1,1]`, so this is a provable no-op and the pixel-identical-to-
+    // Foundry parity check this module's header describes still holds exactly.
+    const skyTint = outdoors ? mix(vec3(1, 1, 1), uSkyMultiplier, outdoors) : null;
+    const ambient = skyTint ? uBackgroundSrgb.mul(skyTint) : uBackgroundSrgb;
+    // A JS-time branch, so a scene with no baked field compiles to byte-identical
+    // shader code — and a freshly-baked all-white field is a provable no-op even
+    // when it IS compiled in.
+    const sunVis = buildSunVisibilityNode(THREE.TSL, {
+      uViewRect,
+      uShadowRect: uSunShadowRect,
+      shadowTexNode: sunShadowTexNode,
+    });
+    illumMaterial.fragmentNode = vec4(sunVis ? ambient.mul(sunVis) : ambient, float(1));
+  }
 
   // --- composite pass: lit = EOTF( OETF(albedo) × illum × uiShadowVis + coloration ) ------
   const albedoTexNode = texture(albedoTexture);
@@ -289,6 +389,9 @@ export function buildEnvironmentalLightMaterials({
   const mapSrgb = sRGBTransferOETF(albedoTexNode.rgb);
   const illumWithUiShadow = uiShadowVisNode ? illumTexNode.rgb.mul(uiShadowVisNode) : illumTexNode.rgb;
   const litSrgb = mapSrgb.mul(illumWithUiShadow);
+  // (The sky "veil" that used to add a neutral desaturating term here is GONE,
+  // 2026-07-23 — it was the wrong mechanism, a light cannot drain chroma. The
+  // environmental GRADE does it correctly in the present pass; see Grade.md §2.)
   const finalSrgb = litSrgb.add(colorationTexNode.rgb); // gamma-space ADD, Foundry parity (see essay above)
   const litLinear = sRGBTransferEOTF(finalSrgb);
   const compositeMaterial = new THREE.NodeMaterial();
@@ -303,6 +406,33 @@ export function buildEnvironmentalLightMaterials({
     uBackgroundSrgb.value.set(bgSrgb[0], bgSrgb[1], bgSrgb[2]);
   }
 
+  /**
+   * Push this frame's sky multiplier (`effects/sky-access.js`). One vector, no
+   * per-frame allocation — the same mutate-in-place discipline `setAmbient`
+   * uses. A caller that never calls this leaves the pass a provable no-op.
+   * @param {readonly number[]} multiplierRgb
+   */
+  function setSky(multiplierRgb) {
+    uSkyMultiplier.value.set(multiplierRgb[0], multiplierRgb[1], multiplierRgb[2]);
+  }
+
+  /** The camera's world rect this frame — the screen→world half of the gate. */
+  function setViewRect(rect) {
+    uViewRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  }
+
+  /** The world rect the outdoors texture covers — the world→mask half. */
+  function setOutdoorsRect(rect) {
+    uOutdoorsRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  }
+
+  /** The world rect the baked sun-shadow field covers. Same shape, and set from
+   * the same place, as `setOutdoorsRect` — the two rects are independent because
+   * the shadow field is allocated at its own resolution, not the mask's. */
+  function setSunShadowRect(rect) {
+    uSunShadowRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  }
+
   return {
     illumMaterial,
     compositeMaterial,
@@ -311,5 +441,65 @@ export function buildEnvironmentalLightMaterials({
     illumTexNode,
     colorationTexNode,
     setAmbient,
+    setSky,
+    setViewRect,
+    setOutdoorsRect,
+    setSunShadowRect,
+    /** The sun-shadow field's rect uniform — SHARED with every point light's
+     * own material (`point-light-illumination.js`), which samples the same
+     * field per-fragment so its background floor matches the shadowed ambient
+     * at THAT pixel rather than one scalar for the whole light. Same
+     * share-the-uniform pattern `uViewRect`/`uOutdoorsRect` already use for
+     * bloom: one owner, one update, no second copy to drift. */
+    uSunShadowRect,
+    /** True when a shadow field was supplied and the sun-occlusion term is
+     * actually compiled into the ambient fill — reported by the diagnostics so
+     * "there are no cast shadows" is answerable without guessing whether the
+     * feature is even in the shader. */
+    sunShadowCompiled: !!sunShadowTexNode,
+    /** The ONE shared outdoors sampler — the illum fill reads it, AND the
+     * environmental grade in the present pass reads THE SAME node, so a mask
+     * bake (`.value = newTexture`) updates both. Rebind-not-rebuild, the pattern
+     * the present pass uses for a resize. */
+    outdoorsTexNode,
+    /** The gate's two rect uniforms — shared with the present-pass grade so both
+     * compute the same screen→world→mask mapping (see `buildOutdoorsGate`). */
+    uViewRect,
+    uOutdoorsRect,
+    /** True when a mask was supplied and the sky terms are actually compiled
+     * in — reported by the diagnostics so "the sky does nothing" is always
+     * answerable (feedback_instruments_must_not_lie). */
+    skyGateCompiled: !!outdoorsTexNode,
   };
+}
+
+/**
+ * THE OUTDOORS GATE — `1` outdoors, `0` indoors, at the world position under a
+ * fullscreen quad's pixel. The ONE definition of the screen→world→mask mapping,
+ * shared by the sky light (this file's composite) and the environmental grade
+ * (the present pass). A second inline copy is exactly how the two would drift
+ * and gate different halves of the map.
+ *
+ * Returns `null` when no mask node is supplied — a JS-time branch, so the whole
+ * lookup is compiled OUT rather than multiplied by a zero (`tsl/no-uniform-gates`).
+ * The orientation has no flip and that is derived, not hoped — see this file's
+ * own `outdoorsAt` note and `scene/world-quad.js#quadUvToWorld`.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.uViewRect - vec4 uniform, the camera world rect (minX,minY,maxX,maxY).
+ * @param {*} args.uOutdoorsRect - vec4 uniform, the rect the mask covers.
+ * @param {*} args.outdoorsTexNode - the `_Outdoors` texture node, or null.
+ * @returns {*|null} a scalar 0..1 node, or null if no mask.
+ */
+export function buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode }) {
+  if (!outdoorsTexNode) return null;
+  const { uv, vec2, mix } = TSL;
+  const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
+  const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
+  const outU = worldX.sub(uOutdoorsRect.x).div(uOutdoorsRect.z.sub(uOutdoorsRect.x));
+  const outV = worldY.sub(uOutdoorsRect.y).div(uOutdoorsRect.w.sub(uOutdoorsRect.y));
+  // Clamped rather than wrapped: a pixel off the map's edge gets the nearest
+  // edge value, never a wrapped sample from the opposite side of the scene.
+  return outdoorsTexNode.sample(vec2(outU.clamp(0, 1), outV.clamp(0, 1))).r;
 }

@@ -15,6 +15,8 @@ import {
   computeCameraFrustum,
   worldToNdc,
   ndcToWorld,
+  quadUvToWorld,
+  ndcToQuadUv,
   clientToNdc,
   ndcToPixel,
   QUAD_UVS,
@@ -127,6 +129,46 @@ export function run(t) {
         return p.x === 199 && p.y === 99;
       })()
     );
+  }
+
+  // --- quadUvToWorld: the SKY LIGHT's screen→world mapping ------------------
+  // Proven as a round trip through the already-trusted worldToNdc, so it is
+  // never independently re-derived — this project has put the map upside-down
+  // once already and the cure is that a new mapping must be CHAINED to the
+  // proven one, not asserted beside it.
+  {
+    const rect = { minX: 100, minY: 200, maxX: 1100, maxY: 700 };
+    const points = [
+      { x: 100, y: 200 },
+      { x: 1100, y: 700 },
+      { x: 600, y: 450 },
+      { x: 350, y: 625 },
+    ];
+    let mismatches = 0;
+    for (const p of points) {
+      const { u, v } = ndcToQuadUv(worldToNdc(p, rect));
+      const back = quadUvToWorld(u, v, rect);
+      if (!near(back.x, p.x) || !near(back.y, p.y)) mismatches++;
+    }
+    ok('quadUvToWorld round-trips through worldToNdc for every point', mismatches === 0);
+
+    // The orientation itself, stated the way a human would check it on screen.
+    // If either of these inverts, the sky light gates the wrong half of the map
+    // and "outdoors is lit" becomes "indoors is lit" — a silent, plausible-
+    // looking wrong picture, which is the worst kind.
+    const topLeft = quadUvToWorld(0, 0, rect);
+    ok('uv (0,0) is the SCREEN TOP-LEFT → world minX,minY', near(topLeft.x, 100) && near(topLeft.y, 200));
+    const bottomRight = quadUvToWorld(1, 1, rect);
+    ok('uv (1,1) is the SCREEN BOTTOM-RIGHT → world maxX,maxY', near(bottomRight.x, 1100) && near(bottomRight.y, 700));
+    ok(
+      'and there is NO flip: v grows the same way world Y does',
+      quadUvToWorld(0, 0.25, rect).y < quadUvToWorld(0, 0.75, rect).y
+    );
+
+    // Agreement with the camera, so the two can never drift apart.
+    const f = computeCameraFrustum(rect);
+    ok('v=0 agrees with the camera frustum top', near(quadUvToWorld(0, 0, rect).y, f.top));
+    ok('v=1 agrees with the camera frustum bottom', near(quadUvToWorld(0, 1, rect).y, f.bottom));
   }
 
   // --- ndcToWorld: the exact inverse of worldToNdc — the interactive pixel

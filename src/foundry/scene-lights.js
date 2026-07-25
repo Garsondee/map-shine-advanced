@@ -70,7 +70,7 @@ function clamp01(v) {
  * @returns {{sourceId: string, x: number, y: number, radius: number,
  *   ratio: number, attenuation01: number, luminosity01: number,
  *   alpha01: number, color: [number,number,number], hasColor: boolean,
- *   animation: ReturnType<typeof deriveAnimationSnapshot>,
+ *   shadows01: number, animation: ReturnType<typeof deriveAnimationSnapshot>,
  *   shapePoints: number[]}|null}
  */
 export function deriveLightSnapshot(raw, darkness01) {
@@ -138,6 +138,16 @@ export function deriveLightSnapshot(raw, darkness01) {
     // onto the scene, unconditionally.
     color: colorRgb ?? [1, 1, 1],
     hasColor: colorRgb !== null,
+    // LightData.shadows default 0 (common/data/data.mjs) — the coloration
+    // channel's own "protect dark map areas from the light's hue" knob
+    // (coloration-lighting.mjs's SHADOW block: `mix(1, smoothstep(0.25, 0.35,
+    // perceivedBrightness(baseColor.rgb)), shadows)`, verified against the
+    // vendored source). A GM raises this on a light to keep ink-dark linework
+    // from reading tinted under a saturated torch/candle — the artist-facing
+    // fix for "coloured light bleaches black line art" that Foundry itself
+    // already ships, previously unread here (see effects/lighting/point-
+    // light-coloration.js's own header). 0 = today's unchanged behaviour.
+    shadows01: clamp01(Number.isFinite(raw.shadows) ? raw.shadows : 0),
     animation: deriveAnimationSnapshot(raw.animation),
     shapePoints: points,
   };
@@ -253,6 +263,7 @@ export function readActiveLightSources(darkness01) {
           // turns a null/invalid colour into hasColor:false, matching the
           // `_flags.hasColor = data.color !== null` on the same source lines).
           color: source.colorRGB,
+          shadows: source.data?.shadows,
           darknessMin: source.data?.darkness?.min,
           darknessMax: source.data?.darkness?.max,
           // See deriveAnimationSnapshot's own header for why `source.animation`

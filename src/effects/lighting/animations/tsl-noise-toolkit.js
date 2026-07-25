@@ -6,10 +6,14 @@
  *
  * MOST of Foundry's noise toolkit (SIMPLEX_3D/NOISE/FBM/FBMHQ/VORONOI) has a
  * ready-made TSL equivalent already vendored in this project's own Three
- * build (r185, `src/vendor/three/three.webgpu.js` — verified present:
- * `mx_perlin_noise_float/vec3`, `mx_fractal_noise_float/vec2/vec3/vec4`,
- * `mx_worley_noise_float/vec2/vec3`, `mx_hsvtorgb`, all reachable off
- * `THREE.TSL.*`). These are MaterialX nodes — well-tested, GPU-native. This
+ * build (r185, `src/vendor/three/three.webgpu.js` — reachable off
+ * `THREE.TSL.*`: `mx_noise_float` (Perlin), `mx_fractal_noise_float/vec2/
+ * vec3/vec4`, `mx_worley_noise_float/vec2/vec3`, `mx_hsvtorgb`). NOTE the
+ * plain-Perlin node is `mx_noise_float`, NOT `mx_perlin_noise_float` — the
+ * latter exists inside the build but is NOT exported on the TSL namespace
+ * (a live `perlinNoise is not a function` crash proved this, 2026-07-20;
+ * `mx_noise_float` is `mx_perlin_noise_float(p)` at amplitude=1/pivot=0, the
+ * exported wrapper). These are MaterialX nodes — well-tested, GPU-native. This
  * module wraps them under Foundry-toolkit-recognizable names rather than
  * hand-porting Foundry's own bespoke GLSL hash/simplex/voronoi from scratch.
  *
@@ -82,7 +86,11 @@ export function voronoiVec3(TSL, p, jitter = 1) {
  * @returns {*} a float TSL node, roughly in [-1, 1].
  */
 export function simplexFloat(TSL, p) {
-  return TSL.mx_perlin_noise_float(p);
+  // mx_noise_float, NOT mx_perlin_noise_float: the vendored three build
+  // exports the former (Perlin at amplitude=1/pivot=0) but keeps the latter
+  // internal-only — see light-animation-clock.js#buildFlickerNode's own note
+  // (a live crash proved the earlier "verified present" audit was wrong).
+  return TSL.mx_noise_float(p);
 }
 
 /**
@@ -100,24 +108,35 @@ export function hsb2rgb(TSL, h, s, v) {
 }
 
 /**
- * Foundry's `PIE` toolkit function — a hard angular wedge mask: 1 inside a
- * `slice`-wide sector centred on `rotationAngle`, 0 outside. Used by the
- * beam-shaped animations (Revolving/Siren). Hand-written: `atan`-based angle
- * (TSL's two-argument `atan(y,x)` form, verified present in the vendored
- * build as an alias of `atan2`) + a `step`-bounded wedge, wrapped through
- * `mod` so the wedge doesn't tear at the +/-PI seam.
+ * A soft angular wedge mask — Revolving/Siren's own beam shape. NOT a
+ * captured verbatim port of Foundry's toolkit `PIE` function: this doc's
+ * research pass captured the ANIMATION bodies' own call sites
+ * (`pie(ncoord, angularIntensity, gradientFade, beamLength)`,
+ * `revolving-light.mjs`/`siren-light.mjs`) but not `PIE`'s own GLSL text
+ * from `base-shader-mixin.mjs`. Per the author's own direction (favour
+ * idiomatic TSL / close visual parity over a slavish translation where the
+ * exact source isn't in hand), this is a reconstruction matching the call
+ * site's own parameter shape: a wedge of angular half-width
+ * `angularWidth/2` centred on `p`'s own angle (`p` is already rotated by
+ * the caller before this runs — see revolving.js/siren.js), softened at
+ * its edges by `gradientFade`, scaled by `beamLength`. Revolving/Siren are
+ * both cosmetic rotating-beam animations, not core to the common case —
+ * worth a live A/B once seen, not worth blocking the rest of the set on.
  *
  * @param {*} TSL
- * @param {*} p - a vec2 TSL node, position relative to the light's centre.
- * @param {*} rotationAngle - TSL float node, radians, the beam's current heading.
- * @param {*} slice - TSL float node, radians, the wedge's total angular width.
- * @returns {*} a float TSL node, 1 inside the wedge, 0 outside.
+ * @param {*} p - a vec2 TSL node, position relative to the light's centre,
+ *   ALREADY rotated by the caller's own current heading.
+ * @param {*} angularWidth - TSL float node, radians, the wedge's total angular width.
+ * @param {*} gradientFade - TSL float node, radians, edge softness.
+ * @param {*} beamLength - TSL float node, a [0,1]-ish intensity scale.
+ * @returns {*} a float TSL node, ~`beamLength` inside the wedge, fading to 0 outside.
  */
-export function pie(TSL, p, rotationAngle, slice) {
-  const { atan, step, abs, mod, float } = TSL;
-  const angle = atan(p.y, p.x).sub(rotationAngle);
-  const wrapped = mod(angle.add(float(Math.PI)), float(Math.PI * 2)).sub(float(Math.PI));
-  return step(abs(wrapped), slice.mul(float(0.5)));
+export function pie(TSL, p, angularWidth, gradientFade, beamLength) {
+  const { atan, abs, smoothstep, float } = TSL;
+  const angle = atan(p.y, p.x);
+  const halfWidth = angularWidth.mul(float(0.5));
+  const mask = smoothstep(halfWidth.add(gradientFade), halfWidth.sub(gradientFade), abs(angle));
+  return mask.mul(beamLength);
 }
 
 /**
@@ -130,4 +149,37 @@ export function rotate2d(TSL, p, angle) {
   const c = cos(angle);
   const s = sin(angle);
   return vec2(p.x.mul(c).sub(p.y.mul(s)), p.x.mul(s).add(p.y.mul(c)));
+}
+
+/**
+ * The "hemispherize" fisheye remap — `(1 - sqrt(1-dist)) / dist` — recurs
+ * verbatim (own constants aside) across `dome`/`hexa`/`grid` (docs/
+ * reference/foundry-v14-light-animations-audit.md's own note: "a shared
+ * 'make the radial falloff read as a dome/hemisphere' trick, worth its own
+ * named TSL helper"). At `dist=0` this is a genuine 0/0 in Foundry's own
+ * literal formula too (not guarded there either — matches this project's
+ * own `energy.js` precedent for the identical situation).
+ * @param {*} TSL @param {*} dist - normalized radial distance (this
+ *   project's own `dist`, matching Foundry's).
+ * @returns {*} a float TSL node.
+ */
+export function hspherize(TSL, dist) {
+  const { float, sqrt } = TSL;
+  return float(1)
+    .sub(sqrt(float(1).sub(dist)))
+    .div(dist);
+}
+
+/**
+ * The "mirror a sawtooth into a symmetric triangle wave" trick —
+ * `max(x, 1-x)` — used by every angular-beam animation in this set
+ * (`emanation`, `sunburst`, and darkness's `hole`/Black Hole) to turn a
+ * `fract()` ramp into a beam that reads the same whether you're
+ * approaching or leaving its center.
+ * @param {*} TSL @param {*} x - a float TSL node, typically a `fract()` result.
+ * @returns {*} a float TSL node.
+ */
+export function mirrorTriangle(TSL, x) {
+  const { float, max } = TSL;
+  return max(x, float(1).sub(x));
 }

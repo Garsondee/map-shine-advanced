@@ -1,9 +1,10 @@
 # Map Shine Advanced — Architecture Summary (V3 / Keyhole)
 
 > ## ⚠️ CONCISENESS MANDATE — read before editing this file
+>
 > **This summary is kept short ON PURPOSE.** The V2 architecture summary grew to ~1,500 lines and went stale the moment the code moved (it now lives at `docs/archive/ARCHITECTURE-SUMMARY-v2.md`). The failure mode was **duplication**: it restated details that live in code, so every code change silently falsified it.
 >
-> **This file is a MAP, not a MIRROR.** It names *where the truth lives* and states only what changes slowly (the laws, the zones, the division of labour). If you find yourself copying a pass list, a param, a file's internals, or a line count into this file — **stop.** Link to the authoritative source instead. The authority table (§7) is the point of the document.
+> **This file is a MAP, not a MIRROR.** It names _where the truth lives_ and states only what changes slowly (the laws, the zones, the division of labour). If you find yourself copying a pass list, a param, a file's internals, or a line count into this file — **stop.** Link to the authoritative source instead. The authority table (§7) is the point of the document.
 >
 > Rule of thumb: if a sentence here would be wrong after a normal code change, it does not belong here.
 
@@ -19,15 +20,15 @@ Why it exists and why V2 was abandoned: `Keyhole.md` (the plan) and `v2-postmort
 
 ## 2. The load-bearing laws (each enforced by an artifact, not by memory)
 
-| Law | Enforced by |
-|---|---|
-| Nothing is allocated at world resolution; the VT page cache is the only large texture path | `src/graph/three-allocator.js` (throws >2048px); `src/vt/` |
-| One flat sort law for every drawable: `elevation → sortLayer → sort → zIndex` | `src/scene/layer-order.js` (parity-fuzzed vs. Foundry's own comparator) |
-| Foundry owns ALL input; MSA mirrors `canvas.stage`, `pointer-events:none` | `Keyhole.md` §4.7 (LOCKED); `keyhole-input-model-decision` |
-| MSA owns `primary`+`effects` (art); PIXI keeps `interface`+`visibility` (chrome, fog) | `src/foundry/canvas-compositing.js`; `keyhole-interface-seam` |
-| One source of truth for authored + derived masks | `src/scene/mask-authority.js`; `keyhole-mask-authority` |
-| The bad path fails a build; the good path is the fast path | `tools/verify-structure.mjs` + `tools/reachability.mjs` (in `npm run verify`); `Skeleton.md` |
-| Safety slide: renderer failure hands rendering back to Foundry, loudly | `src/diag/render-fallback.js`; `feedback_safety_slide_outranks_doctrine` |
+| Law                                                                                        | Enforced by                                                                                  |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Nothing is allocated at world resolution; the VT page cache is the only large texture path | `src/graph/three-allocator.js` (throws >2048px); `src/vt/`                                   |
+| One flat sort law for every drawable: `elevation → sortLayer → sort → zIndex`              | `src/scene/layer-order.js` (parity-fuzzed vs. Foundry's own comparator)                      |
+| Foundry owns ALL input; MSA mirrors `canvas.stage`, `pointer-events:none`                  | `Keyhole.md` §4.7 (LOCKED); `keyhole-input-model-decision`                                   |
+| MSA owns `primary`+`effects` (art); PIXI keeps `interface`+`visibility` (chrome, fog)      | `src/foundry/canvas-compositing.js`; `keyhole-interface-seam`                                |
+| One source of truth for authored + derived masks                                           | `src/scene/mask-authority.js`; `keyhole-mask-authority`                                      |
+| The bad path fails a build; the good path is the fast path                                 | `tools/verify-structure.mjs` + `tools/reachability.mjs` (in `npm run verify`); `Skeleton.md` |
+| Safety slide: renderer failure hands rendering back to Foundry, loudly                     | `src/diag/render-fallback.js`; `feedback_safety_slide_outranks_doctrine`                     |
 
 ## 3. Zones — one public door each (`index.js`)
 
@@ -51,17 +52,17 @@ The render is a declared DAG of passes (status `live`/`seam`/`future`), run in a
 
 ## 7. Where the truth actually lives (use this instead of restating it here)
 
-| You want… | Authority (never duplicated into this file) |
-|---|---|
-| The build plan + current stage/status | `docs/planning/Keyhole.md` + `keyhole-stage-status` (memory) |
-| Why V2 failed / what not to repeat | `v2-postmortem-the-failure-modes` (memory) + `docs/planning/Engine-Postmortem.md` |
-| The enforcement doctrine (walls) | `docs/planning/Skeleton.md` + `tools/verify-structure.mjs` |
-| The live render pipeline | `src/graph/passes.js` |
-| Parity / UX-regressions / module cross-compat | `docs/planning/Parity-and-Compatibility.md` |
-| A subsystem's design (effects, water, particles, light, environment, params, UI, health) | `docs/planning/*.md` (one doc per subsystem) |
-| What a V2 effect did (for a Stage-6 rebuild) | `docs/reference/v2-effect-params/` |
-| Foundry v14 behaviour (schema, layering, lighting) | `docs/reference/` + the vendored source at `foundryvttsourcecode_v14/` |
-| The V2 architecture (historical) | `docs/archive/ARCHITECTURE-SUMMARY-v2.md` |
+| You want…                                                                                | Authority (never duplicated into this file)                                       |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| The build plan + current stage/status                                                    | `docs/planning/Keyhole.md` + `keyhole-stage-status` (memory)                      |
+| Why V2 failed / what not to repeat                                                       | `v2-postmortem-the-failure-modes` (memory) + `docs/planning/Engine-Postmortem.md` |
+| The enforcement doctrine (walls)                                                         | `docs/planning/Skeleton.md` + `tools/verify-structure.mjs`                        |
+| The live render pipeline                                                                 | `src/graph/passes.js`                                                             |
+| Parity / UX-regressions / module cross-compat                                            | `docs/planning/Parity-and-Compatibility.md`                                       |
+| A subsystem's design (effects, water, particles, light, environment, params, UI, health) | `docs/planning/*.md` (one doc per subsystem)                                      |
+| What a V2 effect did (for a Stage-6 rebuild)                                             | `docs/reference/v2-effect-params/`                                                |
+| Foundry v14 behaviour (schema, layering, lighting)                                       | `docs/reference/` + the vendored source at `foundryvttsourcecode_v14/`            |
+| The V2 architecture (historical)                                                         | `docs/archive/ARCHITECTURE-SUMMARY-v2.md`                                         |
 
 ## 8. Status (pointer, not a snapshot)
 

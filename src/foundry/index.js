@@ -53,7 +53,13 @@ export {
 // They are exported because boot.js derives its CRUD-hook list from them rather
 // than remembering one — a document type read but not watched renders once and
 // then ignores every later change (2026-07-17: that was Tile).
-export { collectSceneLayers, computeItemPlacement, SCENE_LAYER_DOCUMENTS, floorCeilings } from './scene-layers.js';
+export {
+  collectSceneLayers,
+  computeItemPlacement,
+  SCENE_LAYER_DOCUMENTS,
+  floorCeilings,
+  floorElevationBands,
+} from './scene-layers.js';
 
 // Authored-mask file discovery (listing-first, probe fallback) — feeds the
 // mask authority (scene/mask-authority.js#setDiscovery); nothing else reads it.
@@ -91,6 +97,33 @@ export {
   FOUNDRY_FALLBACK_AMBIENT,
 } from './scene-environment.js';
 
+// THE GAME-TIME READER — feeds world/day-clock.js (the world clock, in `synced`
+// mode) and core/frame-clock.js's pause ramp. READ-ONLY BY DESIGN: it exposes no
+// way to write `game.time`, because V2's write-back-plus-listen pair was a
+// feedback loop held together by a guard flag. See that module's own header.
+export {
+  readWorldTimeOfDay,
+  readGamePaused,
+  watchGamePaused,
+  watchWorldTimeOfDay,
+  deriveHourFromComponents,
+  DEFAULT_CALENDAR_UNITS,
+} from './game-time.js';
+
+// SKY PERSISTENCE — where the world sky and a scene's own sky are STORED.
+// Per-world by default; a scene opts in to its own. `world/sky-settings.js`
+// decides which one wins (purely, Node-tested); this only reads and writes.
+export {
+  registerSkySettings,
+  readWorldSky,
+  writeWorldSky,
+  readSceneSky,
+  writeSceneSky,
+  setSceneSkyOverride,
+  watchSceneSky,
+  SKY_NAMESPACE,
+} from './sky-persistence.js';
+
 // THE LIGHT-SOURCE READER — feeds light.accumulate's point-light illumination
 // rung; the one place canvas.effects.lightSources is read. Also the scene's
 // own Global Illumination config (canvas.scene.environment.globalLight) —
@@ -112,6 +145,22 @@ export {
 // algorithm — see scene-wall-clip.js's own header for the `level`
 // requirement (a real Level document, never `canvas.level`).
 export { buildCandleWallClipConfig, computeCandleWallClippedShape } from './scene-wall-clip.js';
+
+// WALL SEGMENTS — the one place `canvas.scene.walls` is read as flat
+// segments (as opposed to scene-wall-clip.js's per-point visibility sweep).
+// Feeds Wind.md Tier 1's structure bake (world/wind-bake.js): a wall or a
+// closed door blocks the wind field, an open door doesn't. `watchSceneWallStructure`
+// is the matching write-side signal — the one place Wall CRUD hooks are
+// subscribed, so a door toggling open/closed can trigger a rebake.
+export { readSceneWallSegments, deriveWallSolid, watchSceneWallStructure, watchDoorOpenings } from './scene-walls.js';
+
+// THE DOOR READER — the one place a wall's DOOR GRAPHIC fields (texture,
+// animation type/double/direction/strength/flip, open state) are read, for the
+// door-graphics effect (effects/door-graphics.js). Distinct from the wind
+// segment read above: that throws the texture/animation away, this keeps
+// exactly it. `watchDoorGraphics` is the door-specific CRUD signal the runtime
+// animates from.
+export { readSceneDoors, deriveDoorSnapshot, normalizeDoorAnimationType, watchDoorGraphics } from './scene-doors.js';
 
 // THE REGION READER — feeds effects/lighting/region-darkness.js's per-point
 // darkness adjustment; the one place canvas.scene.regions (+ each region's
@@ -141,3 +190,39 @@ export { registerSettings, readSetting, writeSetting } from './settings-adapter.
 // scene/anchor-authority.js. A leaf: it knows no anchor kinds — boot injects the
 // V2 effectTarget → kind mapping (dependency inversion, like the mask authority).
 export { importV2Anchors, detectV2MapPoints, V2_IMPORT_SENTINEL } from './v2-anchor-import.js';
+
+// AUTHORED ANCHORS — the write side of the same story: added/edited/removed
+// anchors (candles today), persisted as a small diff on the scene, the same
+// embed-in-flag pattern paint-adapter.js uses for masks. Boot merges this with
+// a fresh V2 import every scene load (scene/anchor-authority.js#mergeAnchorSources).
+export { saveAuthoredAnchors, loadAuthoredAnchors } from './anchor-adapter.js';
+
+// THE CAMERA-PATH TOOL (2026-07-21, author request) — the revived V2
+// camera-pass recorder, rebuilt to sequence Foundry's OWN `canvas.animatePan`
+// rather than reimplementing an interpolator. `camera-path.js` is the pure
+// timeline/easing half (Node-tested); these are the live glue.
+export {
+  captureCurrentView,
+  previewCameraKeyframe,
+  saveCameraPath,
+  loadCameraPathRaw,
+  playCameraPath,
+  stopCameraPath,
+  isCameraPathPlaying,
+  generatePresetKeyframes,
+} from './camera-path-player.js';
+export {
+  normalizeCameraPath,
+  normalizeKeyframe,
+  buildCameraTimeline,
+  totalTimelineDurationMs,
+  CAMERA_PATH_PRESETS,
+  DEFAULT_SETTINGS as CAMERA_PATH_DEFAULT_SETTINGS,
+} from './camera-path.js';
+
+// THE SCENE-CONTROLS (left palette) TOGGLE — the ONE button that opens the
+// control panel (docs/planning/Control-Panel.md), for both GM and player;
+// which zones it shows is a permission filter INSIDE the panel, not a second
+// button. `syncControlPanelButtonState` re-syncs the toolbar highlight when
+// the panel's visibility changes for a reason other than this exact button.
+export { registerControlPanelButton, syncControlPanelButtonState } from './scene-controls-button.js';

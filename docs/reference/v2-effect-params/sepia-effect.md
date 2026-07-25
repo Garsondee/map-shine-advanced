@@ -28,13 +28,13 @@ Persistence: settings save with the scene (not World Based).
 
 ### Look
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Strength | `strength` | slider | 0 … 1 | 0.6 |  |
-| | | | | | _How much sepia is mixed in (0 leaves the image unchanged)._ |
+| Control  | id         | Type   | Range | Default | Notes                                                        |
+| -------- | ---------- | ------ | ----- | ------- | ------------------------------------------------------------ |
+| Strength | `strength` | slider | 0 … 1 | 0.6     |                                                              |
+|          |            |        |       |         | _How much sepia is mixed in (0 leaves the image unchanged)._ |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | true | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | true    | hidden |

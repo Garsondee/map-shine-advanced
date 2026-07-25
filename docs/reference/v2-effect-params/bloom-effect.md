@@ -47,7 +47,7 @@ Persistence: these controls save with the scene (not World Based).
 - **Lightning blend mul** — Overall bloom mix multiplier at full strike intensity.
 - **Lightning passthrough peak** — Above this strike weight, bloom is skipped for one frame path (flash already reads as glow).
 - **Lightning map-point weight** — How much localized arc flashes contribute to adaptation (lower keeps arc bloom).
-- **Outdoor spill suppress** — Stops window-light bloom halos from washing onto dark outdoor ground around buildings (_Outdoors mask).
+- **Outdoor spill suppress** — Stops window-light bloom halos from washing onto dark outdoor ground around buildings (\_Outdoors mask).
 - **Outdoor spill lum lo** — Outdoor pixels darker than threshold × this keep no spill bloom.
 - **Outdoor spill lum hi** — Full outdoor bloom returns when base HDR exceeds threshold × this.
 - **Fog clip** — Zeros HDR bloom input outside token line-of-sight before the blur runs, so in-fog lights cannot bleed into visible areas.
@@ -60,91 +60,91 @@ Persistence: these controls save with the scene (not World Based).
 
 ### Surface
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Surface strength | `strength` | slider | 0 … 3 | 1.08 |  |
-| | | | | | _Tight surface glow on bright pixels (hot source / specular)._ |
-| Surface radius | `radius` | slider | 0 … 2 | 1 |  |
-| | | | | | _Spread of the tight surface halo (0–2)._ |
-| Threshold | `threshold` | slider | 0 … 4 | 3.01 |  |
-| | | | | | _Linear brightness floor; only brighter pixels bloom. With the Linear HDR pipeline the merged scene can exceed 1.0, so this range was extended — 1.0 means "only true highlights bloom"._ |
+| Control          | id          | Type   | Range | Default | Notes                                                                                                                                                                                     |
+| ---------------- | ----------- | ------ | ----- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Surface strength | `strength`  | slider | 0 … 3 | 1.08    |                                                                                                                                                                                           |
+|                  |             |        |       |         | _Tight surface glow on bright pixels (hot source / specular)._                                                                                                                            |
+| Surface radius   | `radius`    | slider | 0 … 2 | 1       |                                                                                                                                                                                           |
+|                  |             |        |       |         | _Spread of the tight surface halo (0–2)._                                                                                                                                                 |
+| Threshold        | `threshold` | slider | 0 … 4 | 3.01    |                                                                                                                                                                                           |
+|                  |             |        |       |         | _Linear brightness floor; only brighter pixels bloom. With the Linear HDR pipeline the merged scene can exceed 1.0, so this range was extended — 1.0 means "only true highlights bloom"._ |
 
 ### Atmosphere
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Atmosphere enabled | `atmoEnabled` | boolean |  | true |  |
-| | | | | | _Wide secondary bloom from the same bright pixels — air catching surface light._ |
-| Atmosphere strength | `atmoStrength` | slider | 0 … 3 | 0.42 |  |
-| | | | | | _Intensity of the wide atmospheric scatter._ |
-| Atmosphere radius | `atmoRadius` | slider | 0 … 12 | 3.5 |  |
-| | | | | | _Atmospheric spread (0–12). Much wider than surface — haze and air glow._ |
-| Atmosphere tint | `atmoTintColor` | color |  | {"r":1,"g":0.92,"b":0.78} |  |
-| | | | | | _Tint on the atmospheric layer (warm haze by default)._ |
-| Atmosphere blend | `atmoBlendOpacity` | slider | 0 … 1 | 0.72 |  |
-| | | | | | _Mix for the atmospheric bloom layer._ |
+| Control             | id                 | Type    | Range  | Default                   | Notes                                                                            |
+| ------------------- | ------------------ | ------- | ------ | ------------------------- | -------------------------------------------------------------------------------- |
+| Atmosphere enabled  | `atmoEnabled`      | boolean |        | true                      |                                                                                  |
+|                     |                    |         |        |                           | _Wide secondary bloom from the same bright pixels — air catching surface light._ |
+| Atmosphere strength | `atmoStrength`     | slider  | 0 … 3  | 0.42                      |                                                                                  |
+|                     |                    |         |        |                           | _Intensity of the wide atmospheric scatter._                                     |
+| Atmosphere radius   | `atmoRadius`       | slider  | 0 … 12 | 3.5                       |                                                                                  |
+|                     |                    |         |        |                           | _Atmospheric spread (0–12). Much wider than surface — haze and air glow._        |
+| Atmosphere tint     | `atmoTintColor`    | color   |        | {"r":1,"g":0.92,"b":0.78} |                                                                                  |
+|                     |                    |         |        |                           | _Tint on the atmospheric layer (warm haze by default)._                          |
+| Atmosphere blend    | `atmoBlendOpacity` | slider  | 0 … 1  | 0.72                      |                                                                                  |
+|                     |                    |         |        |                           | _Mix for the atmospheric bloom layer._                                           |
 
 ### Water specular (bloom) _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Link water specular | `waterSpecularBloomEnabled` | boolean |  | true |  |
-| | | | | | _When on (and water renders a mask), add water specular energy into the bloom input before threshold._ |
-| Water bloom strength | `waterSpecularBloomStrength` | slider | 0 … 8 | 8 |  |
-| | | | | | _Linear HDR added from the water specular mask. Push high for aggressive sun glints._ |
-| Water bloom gamma | `waterSpecularBloomGamma` | slider | 0.35 … 3 | 0.81 |  |
-| | | | | | _Shapes the injected mask before bloom (1 = linear). Lower emphasizes peaks._ |
+| Control              | id                           | Type    | Range    | Default | Notes                                                                                                  |
+| -------------------- | ---------------------------- | ------- | -------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| Link water specular  | `waterSpecularBloomEnabled`  | boolean |          | true    |                                                                                                        |
+|                      |                              |         |          |         | _When on (and water renders a mask), add water specular energy into the bloom input before threshold._ |
+| Water bloom strength | `waterSpecularBloomStrength` | slider  | 0 … 8    | 8       |                                                                                                        |
+|                      |                              |         |          |         | _Linear HDR added from the water specular mask. Push high for aggressive sun glints._                  |
+| Water bloom gamma    | `waterSpecularBloomGamma`    | slider  | 0.35 … 3 | 0.81    |                                                                                                        |
+|                      |                              |         |          |         | _Shapes the injected mask before bloom (1 = linear). Lower emphasizes peaks._                          |
 
 ### Surface grade
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Surface tint | `tintColor` | color |  | {"r":1,"g":1,"b":1} |  |
-| | | | | | _Tint on the tight surface bloom._ |
-| Surface blend | `blendOpacity` | slider | 0 … 1 | 1 |  |
-| | | | | | _Mix for the surface bloom layer._ |
+| Control       | id             | Type   | Range | Default             | Notes                              |
+| ------------- | -------------- | ------ | ----- | ------------------- | ---------------------------------- |
+| Surface tint  | `tintColor`    | color  |       | {"r":1,"g":1,"b":1} |                                    |
+|               |                |        |       |                     | _Tint on the tight surface bloom._ |
+| Surface blend | `blendOpacity` | slider | 0 … 1 | 1                   |                                    |
+|               |                |        |       |                     | _Mix for the surface bloom layer._ |
 
 ### Lightning strike _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Adapt during strikes | `lightningBloomAdaptEnabled` | boolean |  | true |  |
-| | | | | | _Raise bloom cutoff and soften the high-pass knee while lightning flashes are active to avoid banded halos._ |
-| Strike threshold boost | `lightningBloomThresholdBoost` | slider | 0 … 4 | 2 |  |
-| | | | | | _Added to the linear threshold at full strike intensity — keeps broad flash wash out of bloom._ |
-| Strike strength mul | `lightningBloomStrengthMul` | slider | 0 … 1 | 0.3 |  |
-| | | | | | _Bloom strength multiplier when a strike is at peak (flash already adds glow)._ |
-| Strike radius mul | `lightningBloomRadiusMul` | slider | 0 … 1 | 0.55 |  |
-| | | | | | _Bloom spread multiplier at full strike intensity — tighter blur reduces banding._ |
-| Strike smooth width | `lightningBloomSmoothWidth` | slider | 0.05 … 1.5 | 0.45 |  |
-| | | | | | _High-pass knee width during strikes (wider = softer cutoff, fewer bands)._ |
-| Strike blend mul | `lightningBloomBlendMul` | slider | 0 … 1 | 0.65 |  |
-| | | | | | _Blend opacity multiplier at full strike intensity._ |
-| Passthrough peak | `lightningBloomPassthroughPeak` | slider | 0.5 … 1 | 0.88 |  |
-| | | | | | _Skip bloom entirely above this strike weight — useful for the brightest flash peak._ |
-| Map-point adapt weight | `lightningBloomMapPointWeight` | slider | 0 … 1 | 0.15 |  |
-| | | | | | _How much localized arc flashes affect adaptation (lower preserves arc bloom)._ |
+| Control                | id                              | Type    | Range      | Default | Notes                                                                                                        |
+| ---------------------- | ------------------------------- | ------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| Adapt during strikes   | `lightningBloomAdaptEnabled`    | boolean |            | true    |                                                                                                              |
+|                        |                                 |         |            |         | _Raise bloom cutoff and soften the high-pass knee while lightning flashes are active to avoid banded halos._ |
+| Strike threshold boost | `lightningBloomThresholdBoost`  | slider  | 0 … 4      | 2       |                                                                                                              |
+|                        |                                 |         |            |         | _Added to the linear threshold at full strike intensity — keeps broad flash wash out of bloom._              |
+| Strike strength mul    | `lightningBloomStrengthMul`     | slider  | 0 … 1      | 0.3     |                                                                                                              |
+|                        |                                 |         |            |         | _Bloom strength multiplier when a strike is at peak (flash already adds glow)._                              |
+| Strike radius mul      | `lightningBloomRadiusMul`       | slider  | 0 … 1      | 0.55    |                                                                                                              |
+|                        |                                 |         |            |         | _Bloom spread multiplier at full strike intensity — tighter blur reduces banding._                           |
+| Strike smooth width    | `lightningBloomSmoothWidth`     | slider  | 0.05 … 1.5 | 0.45    |                                                                                                              |
+|                        |                                 |         |            |         | _High-pass knee width during strikes (wider = softer cutoff, fewer bands)._                                  |
+| Strike blend mul       | `lightningBloomBlendMul`        | slider  | 0 … 1      | 0.65    |                                                                                                              |
+|                        |                                 |         |            |         | _Blend opacity multiplier at full strike intensity._                                                         |
+| Passthrough peak       | `lightningBloomPassthroughPeak` | slider  | 0.5 … 1    | 0.88    |                                                                                                              |
+|                        |                                 |         |            |         | _Skip bloom entirely above this strike weight — useful for the brightest flash peak._                        |
+| Map-point adapt weight | `lightningBloomMapPointWeight`  | slider  | 0 … 1      | 0.15    |                                                                                                              |
+|                        |                                 |         |            |         | _How much localized arc flashes affect adaptation (lower preserves arc bloom)._                              |
 
 ### Outdoor spill (window glow) _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Suppress outdoor spill | `outdoorSpillSuppressEnabled` | boolean |  | true |  |
-| | | | | | _Remove bloom on dark outdoor pixels (_Outdoors) so indoor window glow does not halo onto surrounding ground._ |
-| Spill lum lo (× threshold) | `outdoorSpillLumLoMul` | slider | 0.05 … 1.5 | 0.42 |  |
-| | | | | | _Outdoor pixels below threshold × this lose spilled bloom entirely._ |
-| Spill lum hi (× threshold) | `outdoorSpillLumHiMul` | slider | 0.1 … 2 | 0.92 |  |
-| | | | | | _Outdoor pixels above threshold × this keep full bloom (sun, torches, water glints)._ |
+| Control                    | id                            | Type    | Range      | Default | Notes                                                                                                           |
+| -------------------------- | ----------------------------- | ------- | ---------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| Suppress outdoor spill     | `outdoorSpillSuppressEnabled` | boolean |            | true    |                                                                                                                 |
+|                            |                               |         |            |         | _Remove bloom on dark outdoor pixels (\_Outdoors) so indoor window glow does not halo onto surrounding ground._ |
+| Spill lum lo (× threshold) | `outdoorSpillLumLoMul`        | slider  | 0.05 … 1.5 | 0.42    |                                                                                                                 |
+|                            |                               |         |            |         | _Outdoor pixels below threshold × this lose spilled bloom entirely._                                            |
+| Spill lum hi (× threshold) | `outdoorSpillLumHiMul`        | slider  | 0.1 … 2    | 0.92    |                                                                                                                 |
+|                            |                               |         |            |         | _Outdoor pixels above threshold × this keep full bloom (sun, torches, water glints)._                           |
 
 ### Fog clip (vision) _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Clip to vision (FoW) | `fogClipEnabled` | boolean |  | true |  |
-| | | | | | _Mask bloom source pixels to current token LOS before blur — stops distant in-fog glow from leaking into seen areas._ |
+| Control              | id               | Type    | Range | Default | Notes                                                                                                                 |
+| -------------------- | ---------------- | ------- | ----- | ------- | --------------------------------------------------------------------------------------------------------------------- |
+| Clip to vision (FoW) | `fogClipEnabled` | boolean |       | true    |                                                                                                                       |
+|                      |                  |         |       |         | _Mask bloom source pixels to current token LOS before blur — stops distant in-fog glow from leaking into seen areas._ |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | true | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | true    | hidden |

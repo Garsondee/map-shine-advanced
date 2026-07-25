@@ -7,16 +7,12 @@
  * header, and this is the animation that most needs the caveat stated
  * plainly): Foundry hand-rolls its own classic 3x3x3 (27-iteration) 3D
  * Worley/cellular search here (`energy-field.mjs`'s own `voronoi3d`, built
- * on a bespoke `PRNG3D` hash) rather than calling its shared toolkit
- * `VORONOI` block. The audit's own port note flags this as "the highest
- * structural-complexity animation in the set" and recommends flattening to
- * a single 27-iteration `Loop` IF porting the literal algorithm, since this
- * project's only existing TSL-loop precedent (point-light-illumination.js's
- * `makeSdPolygonEdgeDistance`) is single-level — a genuinely untested
- * nested-loop shape here. This port instead uses `voronoiVec3`
+ * on a bespoke `PRNG3D` hash). This port uses `voronoiVec3`
  * (`THREE.TSL.mx_worley_noise_vec3`, a well-tested built-in) for the same
- * cellular/Worley noise FAMILY, at lower risk and less code, per the
- * documented Type-A-parity-is-about-the-light-math-not-the-PRNG reasoning.
+ * cellular/Worley noise FAMILY, at lower risk and less code.
+ *
+ * GPU-ONLY REWRITE (2026-07-20): `time`/`uIntensityRaw` are now the
+ * scaffold-supplied params (no longer self-created uniforms).
  *
  * @module effects/lighting/animations/energy
  */
@@ -30,27 +26,25 @@ import { voronoiVec3 } from './tsl-noise-toolkit.js';
  * f = (1 - sqrt(1-dist)) / dist                          // radial warp
  * uv = (vUvs - 0.5) * f*4*intensity + 0.5
  * t = time*0.4
- * uvx=cos(uv.x-t); uvy=cos(uv.y+t); uvxt=cos(uv.x+sin(t)); uvyt=sin(uv.y+cos(t))
+ * uvx=cos(uv.x-t); uvxt=cos(uv.x+sin(t)); uvyt=sin(uv.y+cos(t))
  * c = voronoi3d(vec3(uv.x-uvx+uvyt, mix(uv.x,uv.y,0.5)+uvxt-uvyt+uvx, uv.y+uvxt-uvx))
  * finalColor = c.x^3 * color * colorationAlpha
  * ```
  * (`uvy` is computed in Foundry's own source but never actually used in the
  * final expression — kept out entirely here rather than ported as dead
- * code, matching this project's own "no unused locals" convention; verified
- * by re-reading the quoted body, not assumed.)
+ * code.)
  *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.uLightColor
  * @param {*} args.uColorationAlpha
  * @param {*} args.dist
- * @returns {{finalColor: *, uniforms: {uTime: *, uIntensityRaw: *}}}
+ * @param {*} args.time
+ * @param {*} args.uIntensityRaw
+ * @returns {{finalColor: *}}
  */
-export function buildEnergyColorationSeed({ THREE, uLightColor, uColorationAlpha, dist }) {
-  const { uniform, float, vec2, vec3, cos, sin, sqrt, mix, positionLocal } = THREE.TSL;
-
-  const uTime = uniform(float(0));
-  const uIntensityRaw = uniform(float(5));
+export function buildEnergyColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
+  const { float, vec2, vec3, cos, sin, sqrt, mix, positionLocal } = THREE.TSL;
 
   // Foundry's vUvs — see flame.js's own header for the derivation this
   // project already establishes (positionLocal.xy, unit-radius/origin-
@@ -59,8 +53,7 @@ export function buildEnergyColorationSeed({ THREE, uLightColor, uColorationAlpha
 
   // f = (1-sqrt(1-dist))/dist. At dist=0 (the light's exact center) this is
   // a genuine 0/0 in Foundry's own literal formula too, not guarded there
-  // either — matched, not "fixed", for the same single-fragment-edge-case
-  // reasoning as this module's own header.
+  // either — matched, not "fixed".
   const f = float(1)
     .sub(sqrt(float(1).sub(dist)))
     .div(dist);
@@ -71,7 +64,7 @@ export function buildEnergyColorationSeed({ THREE, uLightColor, uColorationAlpha
     .mul(f.mul(float(4)).mul(uIntensityRaw))
     .add(half);
 
-  const t = uTime.mul(float(0.4));
+  const t = time.mul(float(0.4));
   const uvx = cos(uv.x.sub(t));
   const uvxt = cos(uv.x.add(sin(t)));
   const uvyt = sin(uv.y.add(cos(t)));
@@ -87,5 +80,5 @@ export function buildEnergyColorationSeed({ THREE, uLightColor, uColorationAlpha
   const energyGlow = c.mul(c).mul(c);
 
   const finalColor = energyGlow.mul(uLightColor).mul(uColorationAlpha);
-  return { finalColor, uniforms: { uTime, uIntensityRaw } };
+  return { finalColor };
 }

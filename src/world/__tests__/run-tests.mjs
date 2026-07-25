@@ -1,5 +1,9 @@
 /**
- * src/world/ + core/frame-clock verification — the env snapshot's pure core.
+ * src/world/ verification — the env snapshot's pure core.
+ *
+ * (The frame clock's own suite moved to `src/core/__tests__/` in 2026-07-23,
+ * where the module actually lives — it was tested from here for historical
+ * reasons and had grown a second, duplicate suite.)
  *
  * Run:
  *   node ./node_modules/esbuild/bin/esbuild src/world/__tests__/run-tests.mjs \
@@ -7,7 +11,13 @@
  */
 import { run as runSun } from './sun.test.mjs';
 import { run as runEnvironment } from './environment.test.mjs';
-import { run as runFrameClock } from './frame-clock.test.mjs';
+import { run as runDayClock } from './day-clock.test.mjs';
+import { run as runSkySettings } from './sky-settings.test.mjs';
+import { run as runWindField } from './wind-field.test.mjs';
+import { run as runWindBake } from './wind-bake.test.mjs';
+import { run as runWindSim } from './wind-sim.test.mjs';
+import { run as runWindEnclosure } from './wind-enclosure.test.mjs';
+import { run as runWindAccess } from './wind-access.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -39,7 +49,13 @@ const t = {
 const suites = [
   ['sun', runSun],
   ['environment', runEnvironment],
-  ['frame-clock', runFrameClock],
+  ['day-clock', runDayClock],
+  ['sky-settings', runSkySettings],
+  ['wind-field', runWindField],
+  ['wind-bake', runWindBake],
+  ['wind-sim', runWindSim],
+  ['wind-enclosure', runWindEnclosure],
+  ['wind-access', runWindAccess],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

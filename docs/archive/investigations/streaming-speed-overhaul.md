@@ -44,11 +44,13 @@ Streaming minimap dashboard and `buildTileStreamingReport()` show decode pool qu
 ## WebGL context loss fix (2026-06)
 
 Initial worker rollout caused GPU/VRAM exhaustion from:
+
 - `Promise.all` on 144+ coarse fallback cells uploading textures simultaneously
 - `warmPyramid` on mount baking all LODs and leaking ImageBitmaps on main thread
 - Full 12k master bitmap held in worker + 4 parallel workers on huge scenes
 
 Mitigations applied:
+
 - Lazy coarse fallback restored for grids > 36 cells; batched eager mount (4–6 concurrency) for smaller grids
 - Idle warm is IDB-only (`bake-tile-idb`) — no GPU upload during background bake
 - Coarse LOD only during idle warm; worker source released after warm

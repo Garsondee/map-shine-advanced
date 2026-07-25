@@ -27,15 +27,15 @@ Lowering render resolution to **800×450** and pinning **8 GB VRAM preset** help
 
 ## Hardware and configuration
 
-| Item | Laptop (failing) | Desktop (working) |
-|------|------------------|-------------------|
-| GPU | RTX 3070, 8 GB VRAM | AMD, 16 GB VRAM |
-| System RAM | 16 GB | (not specified) |
-| Render preset at test | 800×450 (safe mode) | native / higher |
-| GPU VRAM preset | 8 GB (pinned) | likely auto → 16 GB inferred |
-| Drawing buffer | ~781×450 | larger |
-| Browser | Chrome 150, Windows 10 | — |
-| Foundry | V14.364 | V14 |
+| Item                  | Laptop (failing)       | Desktop (working)            |
+| --------------------- | ---------------------- | ---------------------------- |
+| GPU                   | RTX 3070, 8 GB VRAM    | AMD, 16 GB VRAM              |
+| System RAM            | 16 GB                  | (not specified)              |
+| Render preset at test | 800×450 (safe mode)    | native / higher              |
+| GPU VRAM preset       | 8 GB (pinned)          | likely auto → 16 GB inferred |
+| Drawing buffer        | ~781×450               | larger                       |
+| Browser               | Chrome 150, Windows 10 | —                            |
+| Foundry               | V14.364                | V14                          |
 
 **Safe mode** is active for this scene/user (`storageKey`: `map-shine-advanced.graphicsOverrides.AgEdsalWg2JMzpLR.SLWaa0HoVxjFAQZN`), pinning conservative graphics after repeated crashes.
 
@@ -43,14 +43,14 @@ Lowering render resolution to **800×450** and pinning **8 GB VRAM preset** help
 
 ## Scene characteristics
 
-| Property | Value |
-|----------|-------|
-| Scene size | 12000 × 12000 (144 MP) |
-| Floors | ~11 visible during load |
-| Tiles | 6 |
-| Tokens | 1 |
-| Lights | 20 |
-| Walls | 1002 |
+| Property                    | Value                           |
+| --------------------------- | ------------------------------- |
+| Scene size                  | 12000 × 12000 (144 MP)          |
+| Floors                      | ~11 visible during load         |
+| Tiles                       | 6                               |
+| Tokens                      | 1                               |
+| Lights                      | 20                              |
+| Walls                       | 1002                            |
 | Outdoors mask bake estimate | 2458×2458 ≈ **23 MB per floor** |
 
 ---
@@ -95,11 +95,11 @@ After load-slim compositor shipped:
 
 ## What is NOT the cause
 
-| Ruled out | Evidence |
-|-----------|----------|
-| Texture leak | `primaryLeakId: "none"`, low orphan estimates |
-| Software budget alone | `overBudget: false`, 640 MB policy cap ≠ physical VRAM |
-| Resolution alone | Still crashes at 800×450 + 8 GB preset |
+| Ruled out              | Evidence                                                           |
+| ---------------------- | ------------------------------------------------------------------ |
+| Texture leak           | `primaryLeakId: "none"`, low orphan estimates                      |
+| Software budget alone  | `overBudget: false`, 640 MB policy cap ≠ physical VRAM             |
+| Resolution alone       | Still crashes at 800×450 + 8 GB preset                             |
 | Single bad effect leak | Texture leak probe shows bounded allocations, not runaway GC leaks |
 
 ---
@@ -200,28 +200,28 @@ Also:
 
 Use these when triaging new reports:
 
-| Field | Meaning |
-|-------|---------|
-| `load.phase` | Last progress label (may lag coordinator state) |
-| `graphics.loadSlimCompositorActive` | Load-slim was engaged at compositor init |
-| `graphics.loadSlimPendingEffects` | Effects still waiting for GPU init (13 = not yet past prewarm) |
-| `graphics.loadSlimDeferredCount` | Steps queued (same as pending until finish runs) |
-| `textureLeakProbe.topSites` | Allocation stack traces — **best pointer to immediate cause** |
-| `memory.usedJSHeapMB` | JS heap — latest report showed **2146 MB** (investigate) |
-| `tileStreaming.backgroundGrids` | Whether 144 MP pyramid mounted |
-| `module.versionMismatch` | Hard refresh (Ctrl+F5) required after deploy |
+| Field                               | Meaning                                                        |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `load.phase`                        | Last progress label (may lag coordinator state)                |
+| `graphics.loadSlimCompositorActive` | Load-slim was engaged at compositor init                       |
+| `graphics.loadSlimPendingEffects`   | Effects still waiting for GPU init (13 = not yet past prewarm) |
+| `graphics.loadSlimDeferredCount`    | Steps queued (same as pending until finish runs)               |
+| `textureLeakProbe.topSites`         | Allocation stack traces — **best pointer to immediate cause**  |
+| `memory.usedJSHeapMB`               | JS heap — latest report showed **2146 MB** (investigate)       |
+| `tileStreaming.backgroundGrids`     | Whether 144 MP pyramid mounted                                 |
+| `module.versionMismatch`            | Hard refresh (Ctrl+F5) required after deploy                   |
 
 ---
 
 ## Crash history summary (2026-07-06 session)
 
-| Time (UTC) | Phase | Textures | Notes |
-|------------|-------|----------|-------|
-| 14:24:15 | gpu.textureWarmup | 19 | Pre load-slim / compositor RT spike |
-| 14:24:30 | cinematicCamera.init | 13 | Outdoors repair path |
-| 14:32:03 | initializeUI | 9 | Load-slim active; onResize RT leak suspected |
-| 14:33:16 | fadeIn | **256** | Streaming burst; 96 resident cells, 11 inflight |
-| 14:40:42 | initializeUI | 9 | All 13 effects still pending; mask/tile upload spike; JS heap 2.1 GB |
+| Time (UTC) | Phase                | Textures | Notes                                                                |
+| ---------- | -------------------- | -------- | -------------------------------------------------------------------- |
+| 14:24:15   | gpu.textureWarmup    | 19       | Pre load-slim / compositor RT spike                                  |
+| 14:24:30   | cinematicCamera.init | 13       | Outdoors repair path                                                 |
+| 14:32:03   | initializeUI         | 9        | Load-slim active; onResize RT leak suspected                         |
+| 14:33:16   | fadeIn               | **256**  | Streaming burst; 96 resident cells, 11 inflight                      |
+| 14:40:42   | initializeUI         | 9        | All 13 effects still pending; mask/tile upload spike; JS heap 2.1 GB |
 
 ---
 
@@ -230,6 +230,7 @@ Use these when triaging new reports:
 1. **Load-slim onResize guard appears partially effective** — no OverheadStamp/BuildingShadows in latest topSites; `loadSlimPendingEffects: 13` confirms deferred effects were not materialized.
 
 2. **Crash at `initializeUI` before `finishLoadSlimEffectInit`** — heavy compositor stack not yet allocated; pressure likely from:
+
    - **`loadTextureAsync`** — mask bundle GPU uploads (12 allocations)
    - **TileManager / FloorRenderBus** tile albedo loads
    - **Foundry PIXI** + **Chrome** sharing 8 GB with Map Shine
@@ -243,12 +244,12 @@ Use these when triaging new reports:
 
 ## Workarounds
 
-| Workaround | Effect |
-|------------|--------|
-| **Native Foundry Rendering** (Configure Settings → Map Shine) | Bypasses Three.js entirely |
-| **800×450 + 8 GB VRAM preset** | Reduces compositor RT size; not sufficient alone |
-| Close other GPU tabs/apps | Reduces shared VRAM contention |
-| Hard refresh Ctrl+F5 after module update | Ensures latest JS is running |
+| Workaround                                                    | Effect                                           |
+| ------------------------------------------------------------- | ------------------------------------------------ |
+| **Native Foundry Rendering** (Configure Settings → Map Shine) | Bypasses Three.js entirely                       |
+| **800×450 + 8 GB VRAM preset**                                | Reduces compositor RT size; not sufficient alone |
+| Close other GPU tabs/apps                                     | Reduces shared VRAM contention                   |
+| Hard refresh Ctrl+F5 after module update                      | Ensures latest JS is running                     |
 
 ---
 
@@ -277,17 +278,17 @@ Use these when triaging new reports:
 
 ## Key source files
 
-| Path | Role |
-|------|------|
-| `scripts/foundry/canvas-replacement.js` | Master load pipeline, resize handler, finishLoadSlim timing |
-| `scripts/compositor-v2/FloorCompositor.js` | Compositor init, load-slim, onResize, outdoors defer |
-| `scripts/compositor-v2/load-slim-compositor.js` | Load-slim policy |
-| `scripts/core/webgl-crash-recovery.js` | Crash capture, safe mode, diagnosis |
-| `scripts/masks/GpuSceneMaskCompositor.js` | Outdoors mask GPU baking |
-| `scripts/foundry/camera-follower.js` | Level context hook deferral |
-| `scripts/streaming/streamed-background-grid.js` | Pyramid streaming, inflight caps |
-| `scripts/assets/loader.js` | `loadTextureAsync`, mask warmup |
-| `scripts/scene/tile-manager.js` | Tile texture loading during UI phase |
+| Path                                            | Role                                                        |
+| ----------------------------------------------- | ----------------------------------------------------------- |
+| `scripts/foundry/canvas-replacement.js`         | Master load pipeline, resize handler, finishLoadSlim timing |
+| `scripts/compositor-v2/FloorCompositor.js`      | Compositor init, load-slim, onResize, outdoors defer        |
+| `scripts/compositor-v2/load-slim-compositor.js` | Load-slim policy                                            |
+| `scripts/core/webgl-crash-recovery.js`          | Crash capture, safe mode, diagnosis                         |
+| `scripts/masks/GpuSceneMaskCompositor.js`       | Outdoors mask GPU baking                                    |
+| `scripts/foundry/camera-follower.js`            | Level context hook deferral                                 |
+| `scripts/streaming/streamed-background-grid.js` | Pyramid streaming, inflight caps                            |
+| `scripts/assets/loader.js`                      | `loadTextureAsync`, mask warmup                             |
+| `scripts/scene/tile-manager.js`                 | Tile texture loading during UI phase                        |
 
 ---
 
@@ -311,4 +312,4 @@ Full conversation history: agent transcript `92a45c0a-82f0-417f-9e34-6059dbb2422
 
 ---
 
-*This document should be updated when the scene loads successfully on 8 GB hardware or when the root cause is confirmed and fixed.*
+_This document should be updated when the scene loads successfully on 8 GB hardware or when the root cause is confirmed and fixed._

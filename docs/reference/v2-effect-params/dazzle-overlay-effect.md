@@ -10,18 +10,18 @@
 
 ### Look
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Intensity | `intensity` | slider | 0 … 2 | 2 |  |
-| Exposure Lift | `exposureLift` | slider | 0 … 3 | 0.9 |  |
-| White Add | `whiteAdd` | slider | 0 … 2 | 0.65 |  |
-| Desaturate | `desaturate` | slider | 0 … 1 | 0.35 |  |
-| Glare Strength | `glareStrength` | slider | 0 … 2 | 0.55 |  |
-| Glare Power | `glarePower` | slider | 0.1 … 8 | 2 |  |
-| RGB Shift (px) | `rgbShiftPx` | slider | 0 … 8 | 1.35 |  |
+| Control        | id              | Type   | Range   | Default | Notes |
+| -------------- | --------------- | ------ | ------- | ------- | ----- |
+| Intensity      | `intensity`     | slider | 0 … 2   | 2       |       |
+| Exposure Lift  | `exposureLift`  | slider | 0 … 3   | 0.9     |       |
+| White Add      | `whiteAdd`      | slider | 0 … 2   | 0.65    |       |
+| Desaturate     | `desaturate`    | slider | 0 … 1   | 0.35    |       |
+| Glare Strength | `glareStrength` | slider | 0 … 2   | 0.55    |       |
+| Glare Power    | `glarePower`    | slider | 0.1 … 8 | 2       |       |
+| RGB Shift (px) | `rgbShiftPx`    | slider | 0 … 8   | 1.35    |       |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | false | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | false   | hidden |

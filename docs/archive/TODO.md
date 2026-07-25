@@ -6,11 +6,11 @@ Items that should be considered at the end of a successfully resolved task. Add 
 
 ### Section 0: HIGHEST PRIORITY
 
-00. Small bug found. When copying a door wall it will also duplicate a normal wall when I paste. So I'm trying to just copy a door, I select the door wall section, I copy, then I paste and when I do I've pasted a normal wall and also pasted a door of the correct data.
+0. Small bug found. When copying a door wall it will also duplicate a normal wall when I paste. So I'm trying to just copy a door, I select the door wall section, I copy, then I paste and when I do I've pasted a normal wall and also pasted a door of the correct data.
 
-0. **Fire particles are broken on higher floors than the ground floor**
+1. **Fire particles are broken on higher floors than the ground floor**
 
-0b. **Water thinks it's indoors** - When I start on a map with a lot of water but I start on a higher floor than the ground floor (where the valid _Water mask is) then all the water believe it's indoors rather than outdoors.
+0b. **Water thinks it's indoors** - When I start on a map with a lot of water but I start on a higher floor than the ground floor (where the valid \_Water mask is) then all the water believe it's indoors rather than outdoors.
 
 0c. **Consider some of the ideas in this document** - @ideas.md
 
@@ -18,51 +18,48 @@ Items that should be considered at the end of a successfully resolved task. Add 
 
 0e. **Specular Revamp** - Consider how to create the best looking, most interesting or fun effect for specular. Consider bringing in reflection map colours or other concepts. How do we make the richest most satisfying, evolving and passively animating effect?
 
-
-
-
-
-
-
-
-
-
-
 ### Section 1: Workspace & Development Environment
+
 1. **Foundry VTT Install Directory (INGRAM HIGHEST PRIORITY):** You must add the Foundry VTT install location as a folder for this workspace. This will allow the use of the most recent, up-to-date version of Foundry and all modules. This is a user task, not an LLM task.
 
 ### Section 2: Multi-Level & Elevation Issues
-2. **Light Floor Bleeding & Elevation:** Lights configured/created on one floor are bleeding into others. Specifically, lights on floors ABOVE sometimes appear on levels/floors below, and lights with visibility set to only one floor still appear on the floor below. Lights created on basement floors do *not* appear on upper floors. 
-    *   *Context:* Ground floor is elevation 0 to 20; basement is -20 to 0. Lights default to elevation 0 (registering to both). We are currently ignoring the dropdown list used to assign lights to specific floors. Strangely, this is only happening on one map.
-3. **Floor Transition Performance:** Improve the speed and efficiency of moving between floors/levels in a scene. This is a CRITICAL usability improvement. 
-    *   *Questions/Fixes:* Do we actually need to recompile shaders between floors? What can be done to speed this up? It sometimes gets stuck on "Warming Up" — can we make this autorecovering? Also, fix the timer meant to show how long the loading process takes, as it currently doesn't work.
+
+2. **Light Floor Bleeding & Elevation:** Lights configured/created on one floor are bleeding into others. Specifically, lights on floors ABOVE sometimes appear on levels/floors below, and lights with visibility set to only one floor still appear on the floor below. Lights created on basement floors do _not_ appear on upper floors.
+   - _Context:_ Ground floor is elevation 0 to 20; basement is -20 to 0. Lights default to elevation 0 (registering to both). We are currently ignoring the dropdown list used to assign lights to specific floors. Strangely, this is only happening on one map.
+3. **Floor Transition Performance:** Improve the speed and efficiency of moving between floors/levels in a scene. This is a CRITICAL usability improvement.
+   - _Questions/Fixes:_ Do we actually need to recompile shaders between floors? What can be done to speed this up? It sometimes gets stuck on "Warming Up" — can we make this autorecovering? Also, fix the timer meant to show how long the loading process takes, as it currently doesn't work.
 
 ### Section 3: Core Lighting Mechanics & Config
-4. **Scene Darkness Automation:** Lights designed to turn on/off based on scene darkness are failing. A light set to turn on between 0 and 0.9 darkness is always off, but between 0 and 1 it stays on. 
-    *   *Action:* Conduct a full audit of 'Scene Darkness' and its interactions. Make this system more robust. (Theory: scene darkness 1 might be occurring a long time before midnight).
+
+4. **Scene Darkness Automation:** Lights designed to turn on/off based on scene darkness are failing. A light set to turn on between 0 and 0.9 darkness is always off, but between 0 and 1 it stays on.
+   - _Action:_ Conduct a full audit of 'Scene Darkness' and its interactions. Make this system more robust. (Theory: scene darkness 1 might be occurring a long time before midnight).
 5. **Copy-Pasted Light Rendering:** Lights copied and pasted into a scene do not render with their true final config immediately. They look different (and BETTER) only after refreshing Foundry. Ensure lights render correctly upon pasting.
 6. **Token 'Player Light' Persistence:** Tokens are currently failing to remember their 'Player Light' settings between play sessions.
 
 ### Section 4: Fog of War (FoW)
-8. **FoW State Saving:** Fog of War is not saving correctly. Explored regions not currently in view are completely black and obscured, so tokens lose the record of where they've been. 
-    *   *Action:* Reintroduce the 500ms cadence Foundry VTT system that saved the FoW state, or build a custom FoW saving machine. Either way we need to be mindful of performance.
+
+8. **FoW State Saving:** Fog of War is not saving correctly. Explored regions not currently in view are completely black and obscured, so tokens lose the record of where they've been.
+   - _Action:_ Reintroduce the 500ms cadence Foundry VTT system that saved the FoW state, or build a custom FoW saving machine. Either way we need to be mindful of performance.
 9. **FoW Layering with Foliage:** Bushes and trees are rendering incorrectly above the Fog of War. When walking a token past a one-way terrain wall, the bushes remain visible in the solid FoW behind the token. Unselecting and reselecting the token fixes it. Check foliage layering/timing interactions with FoW.
 
 ### Section 5: Map Points (Fires/Candles) & UI
-10. **Map Point Optimization (No Global Refresh):** Using the Map Point Control to turn off a single candle causes *all* candles and fires to pause and rebuild. Find a way to toggle a single part of this effect without forcing a global refresh.
-11. **Map Point Ring UI Bugs & Size:** ~~Fix Map Point creation/editing bugs: If you create a map point group and hit Enter, the rings disappear. If you *edit* a group, add a point, and hit Enter, the rings stay visible. Additionally, make the map point ring symbols smaller and simpler, as clustered candles cause overlapping rings that make placing the next point difficult.~~ *(2026-06: smaller shared marker geometry + Enter-on-create now restores visual helpers.)*
+
+10. **Map Point Optimization (No Global Refresh):** Using the Map Point Control to turn off a single candle causes _all_ candles and fires to pause and rebuild. Find a way to toggle a single part of this effect without forcing a global refresh.
+11. **Map Point Ring UI Bugs & Size:** ~~Fix Map Point creation/editing bugs: If you create a map point group and hit Enter, the rings disappear. If you _edit_ a group, add a point, and hit Enter, the rings stay visible. Additionally, make the map point ring symbols smaller and simpler, as clustered candles cause overlapping rings that make placing the next point difficult.~~ _(2026-06: smaller shared marker geometry + Enter-on-create now restores visual helpers.)_
 
 ### Section 6: Foliage, Weather, Environment & Sky
+
 13. **Cloud Scene-Swap Bug:** Swapping from one scene to another via activation turns clouds into black meshes with no texture. Resetting clouds to default doesn't fix it; only a full refresh of the Foundry web page resolves it.
 14. **Cloud Performance / Indoors Culling:** If a scene level is entirely black for the `_Outdoors` mask (meaning the whole level is indoors or underground), stop rendering cloud tops and stop simulating clouds entirely to save performance.
 15. **Tree/Bush Wind Physics & Distortion:** Foliage looks too "liquid". They look good at full wind but suffer from too high-frequency distortion at lower wind values. There is also a "boiling" animation bug: changing the vertical wind slider causes bushes/trees to rapidly distort before finally settling down.
 16. **Foliage Lighting Physics:** The 'Light Physics: Day Ambient - Outdoors' setting is not currently affecting trees and bushes as expected.
 17. **Weather Fragment Shaders:** Foundry VTT has native fragment shader approaches for blizzard, snow, and rain. Include copies of these that run when these effects are toggled on to provide cheap, efficient weather effects.
-19. **Dust Particle Optimization:** Optimize dust spawns by focusing spawning heavily where the camera is currently looking, and cull dust particles that are off-screen.
+18. **Dust Particle Optimization:** Optimize dust spawns by focusing spawning heavily where the camera is currently looking, and cull dust particles that are off-screen.
 
 ### Section 7: Masking & Layers
+
 20. **Fire Glow Overhead Masking:** Fire glows are currently appearing ABOVE overhead tiles incorrectly. This is also true of heat distortion from flames, they appear to be effecting rooftops above the fire which isn't correct.
-    *   *Action:* If the `_Fire` mask is on an overhead layer, it should appear above. However, if the `_Fire` texture is on a ground/background image/tile (not set to overhead), ensure the glow is properly masked by the objects/tiles above it.
+    - _Action:_ If the `_Fire` mask is on an overhead layer, it should appear above. However, if the `_Fire` texture is on a ground/background image/tile (not set to overhead), ensure the glow is properly masked by the objects/tiles above it.
 
 ### Section 8: PIXI Graphics
 
@@ -78,7 +75,7 @@ Items that should be considered at the end of a successfully resolved task. Add 
 
 There is a WEBGL_Crash.md report which shows a failure of the rendering in a very large scene. We needs to make the system more robust. Memory is almost exhausted currently.
 
-water.postMerge.occluderBuild - This system is causing a HUGE performance drop on a map with no _Water textures.
+water.postMerge.occluderBuild - This system is causing a HUGE performance drop on a map with no \_Water textures.
 
 Roof drips is painfully performance destroying.
 
@@ -94,7 +91,7 @@ Add a 'mini-map' during develop of this texture streaming system. The goal is to
 
 We'd also need a system for intelligently lowering the resolution of textures once you zoom the camera out to accomodate for zoomed out performance. This would have to happen in a way that didn't look bad or didn't visibly lower the scene resolution.
 
-Also investigate 'Channel Packing' for more efficient mask use. Remember that things like window light needs RGB for it to work but _Fire and things like that are just black, white and transparency pixels.
+Also investigate 'Channel Packing' for more efficient mask use. Remember that things like window light needs RGB for it to work but \_Fire and things like that are just black, white and transparency pixels.
 
 KTX2/Basis - Investigate this for producing GPU compressed textures. Investigate ETC1S for masks.
 
@@ -116,9 +113,7 @@ Detect renderer.capabilities.maxTextureSize and GPU tier, then choose tile size 
 
 27. **Vegetation streaming cell overlays (Tree/Bush):** Per-cell background overlays were attempted but `upgradeWindDisplacedGeometry` rebuilds UVs 0–1 against the full 12k mask, duplicating canopies on every tile. Future approach: either crop clump/mask bake per cell before wind mesh upgrade, or shader discard by streaming cell world bounds — keep single full-scene overlay + streaming gate until then.
 
-
 28. **Loading screen stage labels:** Audit `createThreeCanvas` overlay messages and stage lozenges — user reports confusing text (`Loading Animated Tree Canopy`, `loading FireEffectV2`, `effect / wiring skipped`) that may reflect stale V1 init order rather than actual V2 load phases. See `Docs/investigations/module-loading-investigation.md` Part 4 pending list.
-
 
 ### Section 9: Default Settings
 

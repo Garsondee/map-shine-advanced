@@ -4,6 +4,9 @@
  * first, implementation second).
  */
 import { run as runSchema } from './particle-system-schema.test.mjs';
+import { run as runArena } from './particle-arena.test.mjs';
+import { run as runWindDiagnosticParticles } from './wind-diagnostic-particles.test.mjs';
+import { run as runWindGusts } from './wind-gusts.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -33,6 +36,9 @@ const t = {
 };
 
 runSchema(t);
+runArena(t);
+runWindDiagnosticParticles(t);
+runWindGusts(t);
 console.log(`\nsrc/effects/particles verification: ${passed} passed, ${failed} failed`);
 if (failed) {
   console.error('Failures:', fails);

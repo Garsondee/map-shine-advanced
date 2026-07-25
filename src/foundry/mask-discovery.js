@@ -51,7 +51,8 @@ const PROBE_EXTENSIONS = ['webp', 'png'];
  * @typedef {object} MaskDiscoveryResult
  * @property {Map<string, Map<string, string>>} byLevelId - levelId -> (kindId -> URL).
  * @property {'listing'|'probe'|'mixed'|'none'} method - how the run discovered overall.
- * @property {Array<{levelId:string, method:string, found:number, aliasesUsed:string[]}>} perFloor
+ * @property {Array<{levelId:string, method:string, found:number, aliasesUsed:string[],
+ *   baseFallbacksUsed?:string[]}>} perFloor
  * @property {Array<{levelId:string, stage:string, detail:string}>} failures
  * @property {number} probesAttempted
  */
@@ -84,7 +85,10 @@ export function splitArtUrl(url) {
  * @param {string[]} listedFiles - full paths as `FilePicker.browse().files` returns them.
  * @param {string} artBase - the art file's base name (no extension).
  * @param {string} artExt - the art file's extension (preferred on ties).
- * @returns {{found: Map<string, string>, aliasesUsed: string[]}} kindId -> the LISTED path (still encoded, fetchable as returned).
+ * @returns {{found: Map<string, string>, aliasesUsed: string[], baseFallbacksUsed: string[]}}
+ *   kindId -> the LISTED path (still encoded, fetchable as returned).
+ *   `baseFallbacksUsed` names any mask matched against a SHORTENED art base
+ *   (see the art-variant fallback below) so a looser match is always visible.
  */
 export function matchMaskFiles(listedFiles, artBase, artExt) {
   const byBasename = new Map(); // decoded lowercase basename -> listed path
@@ -108,30 +112,58 @@ export function matchMaskFiles(listedFiles, artBase, artExt) {
 
   const found = new Map();
   const aliasesUsed = [];
+  const baseFallbacksUsed = [];
+  // ART-VARIANT FALLBACK (2026-07-25) — the art may be a VARIANT of the name
+  // the masks were authored against, and then an exact-base match finds
+  // nothing. Real case, from the author's own bridge map: the ground floor's
+  // art is `Tower_Bridge_Underground_WaterHard.webp` while its masks are
+  // `Tower_Bridge_Underground_Outdoors.webp` etc. Discovery reported the
+  // REQUIRED outdoors mask missing, which (before this) silently disabled every
+  // sun shadow on the scene — for a file sitting right next to the art.
+  //
+  // The bases are tried LONGEST FIRST and the first that matches wins, so an
+  // exact match ALWAYS beats a shortened one and this can only ever find masks
+  // that strict matching would have left on the floor. Every use is recorded in
+  // `baseFallbacksUsed` and surfaced by the caller — a mask found by a looser
+  // rule must never look identical to one found by the strict rule.
+  const artBaseCandidates = [artBase];
+  {
+    const parts = String(artBase).split('_');
+    // Keep at least two segments: a bare first token is too weak a claim to
+    // attach a mask to (`Tower` should never adopt `Tower_Outdoors`).
+    for (let cut = parts.length - 1; cut >= 2; cut--) artBaseCandidates.push(parts.slice(0, cut).join('_'));
+  }
+
   for (const kind of MASK_KINDS) {
     let best = null; // {path, suffixRank, extRank}
-    for (let s = 0; s < kind.suffixes.length; s++) {
-      const wantPrefix = `${artBase}${kind.suffixes[s]}.`.toLowerCase();
-      for (const [basename, path] of byBasename) {
-        if (!basename.startsWith(wantPrefix)) continue;
-        const ext = basename.slice(wantPrefix.length);
-        if (!EXTENSION_PREFERENCE.includes(ext)) continue;
-        const candidate = { path, suffixRank: s, extRank: extRank(ext) };
-        if (
-          !best ||
-          candidate.suffixRank < best.suffixRank ||
-          (candidate.suffixRank === best.suffixRank && candidate.extRank < best.extRank)
-        ) {
-          best = candidate;
+    let bestBaseIndex = 0;
+    for (let b = 0; b < artBaseCandidates.length && !best; b++) {
+      const candidateBase = artBaseCandidates[b];
+      for (let s = 0; s < kind.suffixes.length; s++) {
+        const wantPrefix = `${candidateBase}${kind.suffixes[s]}.`.toLowerCase();
+        for (const [basename, path] of byBasename) {
+          if (!basename.startsWith(wantPrefix)) continue;
+          const ext = basename.slice(wantPrefix.length);
+          if (!EXTENSION_PREFERENCE.includes(ext)) continue;
+          const candidate = { path, suffixRank: s, extRank: extRank(ext) };
+          if (
+            !best ||
+            candidate.suffixRank < best.suffixRank ||
+            (candidate.suffixRank === best.suffixRank && candidate.extRank < best.extRank)
+          ) {
+            best = candidate;
+            bestBaseIndex = b;
+          }
         }
       }
     }
     if (best) {
       found.set(kind.id, best.path);
       if (best.suffixRank > 0) aliasesUsed.push(`${kind.id}←${kind.suffixes[best.suffixRank]}`);
+      if (bestBaseIndex > 0) baseFallbacksUsed.push(`${kind.id}←base:${artBaseCandidates[bestBaseIndex]}`);
     }
   }
-  return { found, aliasesUsed };
+  return { found, aliasesUsed, baseFallbacksUsed };
 }
 
 /**
@@ -222,6 +254,7 @@ export async function discoverAuthoredMasks({
 
     let found = null;
     let aliasesUsed = [];
+    let baseFallbacksUsed = [];
     let method = 'none';
 
     if (!isAbsoluteUrl(floor.url)) {
@@ -238,6 +271,7 @@ export async function discoverAuthoredMasks({
         const match = matchMaskFiles(listed, art.base, art.ext);
         found = match.found;
         aliasesUsed = match.aliasesUsed;
+        baseFallbacksUsed = match.baseFallbacksUsed ?? [];
         method = 'listing';
       } else if (!failures.some((f) => f.levelId === floor.id && f.stage === 'listing')) {
         failures.push({ levelId: floor.id, stage: 'listing', detail: 'FilePicker browse unavailable or denied' });
@@ -273,7 +307,7 @@ export async function discoverAuthoredMasks({
     }
 
     if (found.size > 0) byLevelId.set(floor.id, found);
-    advance({ levelId: floor.id, method, found: found.size, aliasesUsed }, floor);
+    advance({ levelId: floor.id, method, found: found.size, aliasesUsed, baseFallbacksUsed }, floor);
   }
 
   const methods = new Set(perFloor.map((f) => f.method).filter((m) => m !== 'none'));

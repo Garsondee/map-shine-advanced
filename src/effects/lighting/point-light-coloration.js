@@ -49,11 +49,26 @@
  * NOT YET BUILT, this rung — documented, not silent:
  *   - the other 12 coloration techniques (burns/halos/absorption/natural
  *     light) — only the LightData default is reproduced.
- *   - CONTRAST/SATURATION/SHADOW adjustments (`ADJUSTMENTS`, audit §8) —
- *     these gate on non-default values Foundry itself skips by default (a
- *     per-fragment runtime check, NOT the layer-level `isRequired` above),
- *     so a light left at defaults is unaffected; a light with them tuned
- *     would currently show no effect from that tuning.
+ *   - CONTRAST/SATURATION adjustments (`ADJUSTMENTS`, audit §8) — these gate
+ *     on non-default values Foundry itself skips by default (a per-fragment
+ *     runtime check, NOT the layer-level `isRequired` above), so a light
+ *     left at defaults is unaffected; a light with them tuned would
+ *     currently show no effect from that tuning.
+ *   - SHADOW is now BUILT (2026-07-21 — "coloured light bleaches black line
+ *     art" author report). `coloration-lighting.mjs`'s own override (NOT the
+ *     base 0.50–0.80 one background/illumination inherit — coloration's is
+ *     its own, gated on `baseColor` = the raw MAP sample, not the light's
+ *     own result): `mix(1, smoothstep(0.25, 0.35, perceivedBrightness(
+ *     baseColor.rgb)), shadows)`. `baseColor` here is exactly this file's own
+ *     `mapColor` (same texture, same sample); `perceivedBrightness(baseColor)`
+ *     is exactly this file's own `reflection` — so the whole SHADOW term
+ *     reuses values already computed below, no new texture read. `shadows`
+ *     defaults to 0 (Foundry's own LightData default), so an un-tuned light
+ *     is bit-for-bit unchanged; a GM raising a light's real "Shadows" field
+ *     (already a native Light Config slider — MSA just wasn't reading it)
+ *     now genuinely protects sub-0.25-brightness map pixels — e.g. ink-dark
+ *     line art — from being additively tinted, same knob Foundry itself
+ *     ships for this exact problem.
  *   - the analytic SDF soft edge (point-light-illumination.js's own) — the
  *     attenuation-based `falloff` alone still softens the visible edge, just
  *     without the extra silhouette antialiasing; a smaller, cosmetic gap.
@@ -74,6 +89,15 @@
  *
  * @module effects/lighting/point-light-coloration
  */
+
+import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
+import { inverseSquareFalloff } from './point-light-illumination.js';
+import { createWindHandle } from '../../world/index.js';
+
+/** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
+ * rather than a wind-inert light — see candle-flame-render.js's own identical
+ * constant for the full reasoning. */
+const TIER0_WIND_HANDLE = createWindHandle();
 
 /**
  * Foundry's per-technique `colorationAlpha` derivation, verbatim
@@ -120,20 +144,75 @@ export function computeColorationAlpha(alpha01, technique) {
  * this: `${COLORATION_TECHNIQUES}` runs immediately after every animation's
  * seed line, never bypassed by it.
  *
+ * GPU-ONLY ANIMATION (2026-07-20 rewrite — see point-light-illumination.js's
+ * own header for the full "why", same reasoning applies here): `time` is
+ * computed in-shader from small per-light raw uniforms
+ * (`uSpeedRaw`/`uReverseSign`/`uSeed`) plus the ONE shared `uGlobalTimeMs`.
+ * `uRatio` here is the light's own BASE (unjittered) ratio — Foundry hands
+ * flicker-driven coloration shaders (torch/siren/flame/candleFlicker) the
+ * SAME jittered ratio illumination gets, but since coloration has no
+ * switchColor band to rebuild, those animations jitter it themselves
+ * in-shader from this base value (a small, deliberate per-material
+ * duplication of the same formula, matching this file's own existing
+ * `uAttenuationEased` precedent).
+ *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.albedoTexture - `buf:scene.color`'s texture.
- * @param {{buildColorationSeed: (function(object): {finalColor: *, uniforms: object})}} [args.animation] -
+ * @param {{buildColorationSeed: (function(object): {finalColor: *})}} [args.animation] -
  *   from effects/lighting/animations/registry.js's matched entry. When its
  *   `buildColorationSeed` is present it's called with `{THREE, uLightColor,
- *   uColorationAlpha, dist, defaultSeed}` (`defaultSeed` is the un-animated
- *   `uLightColor * uColorationAlpha` seed) and must return `{finalColor,
- *   uniforms}` — same contract as the illumination seam.
- * @returns {{material: *, uAttenuationEased: *, uColorationAlpha: *, uLightColor: *, animationUniforms: object}}
+ *   uColorationAlpha, dist, defaultSeed, time, uIntensityRaw, uRatio}`
+ *   (`defaultSeed` is the un-animated `uLightColor * uColorationAlpha`
+ *   seed; `uRatio` is the light's own base ratio) and must return
+ *   `{finalColor}`.
+ * @param {*} [args.uGlobalTimeMs] - the ONE shared time uniform — REQUIRED
+ *   when `animation` is present, unused otherwise.
+ * @param {*} [args.uRatio] - the light's own base ratio uniform (from the
+ *   illumination material's own `uRatio` — the caller's job to pass the
+ *   SAME one through, so both channels agree on the light's true ratio).
+ * @param {number} [args.animationQuality=0] - a graph-BUILD-time quality tier
+ *   forwarded to the seed builder as `quality` (see point-light-
+ *   illumination.js's own header for the no-uniform-gates rationale).
+ * @param {'foundry'|'inverseSquare'} [args.falloffModel='foundry'] - the radial
+ *   falloff curve (see point-light-illumination.js's own param). Must match
+ *   the illumination material's so both channels of a light fade together.
+ * @param {{x:number,y:number}} [args.windCenter] - see point-light-
+ *   illumination.js's own param of the same name (Wind.md Tier 0) — a SEPARATE
+ *   `sampleWind` call from that module's (two independent shader graphs, the
+ *   same small per-light duplication this file's own `uAttenuationEased`
+ *   already takes), same inputs, so both channels lean together.
+ * @param {number} [args.windExposure] - see point-light-illumination.js's own
+ *   param of the same name. OPT-IN, paired with `windCenter`.
+ * @param {object} [args.windHandle] - the wind handle (`world/wind-access.js`,
+ *   Wind.md §5.1) — the ambient bias, Tier 1's baked openness, the
+ *   wall-avoidance field and Tier 2's transient, as ONE object. Replaces the
+ *   four separate arguments this used to forward by hand into `sampleWind`;
+ *   this file and point-light-illumination.js are two of the four sites that
+ *   carried that block verbatim. Omit → Tier-0 organic wind only.
+ * @param {number} [args.windResponse] - see point-light-illumination.js's
+ *   own identical param — the SAME value both channels should receive.
+ * @returns {{material: *, uAttenuationEased: *, uColorationAlpha: *,
+ *   uLightColor: *, uShadows: *, uSpeedRaw: (*|null), uReverseSign: (*|null),
+ *   uSeed: (*|null), uIntensityRaw: (*|null), uWindCenter: (*|null),
+ *   uWindExposure: (*|null), uWindResponse: (*|null)}}
  */
-export function buildPointLightColorationMaterial({ THREE, albedoTexture, animation }) {
+export function buildPointLightColorationMaterial({
+  THREE,
+  albedoTexture,
+  animation,
+  uGlobalTimeMs,
+  uRatio,
+  animationQuality = 0,
+  falloffModel = 'foundry',
+  windCenter,
+  windExposure,
+  windResponse,
+  windHandle = TIER0_WIND_HANDLE,
+}) {
   const {
     uniform,
+    vec2,
     vec3,
     vec4,
     float,
@@ -145,19 +224,30 @@ export function buildPointLightColorationMaterial({ THREE, albedoTexture, animat
     dot,
     sqrt,
     sRGBTransferOETF,
+    // mix, — temporarily unused, see the diagnostic revert below
   } = THREE.TSL;
 
   const uAttenuationEased = uniform(float(0.5));
   const uColorationAlpha = uniform(float(1));
   const uLightColor = uniform(vec3(1, 1, 1));
+  const uShadows = uniform(float(0));
 
   // dist/FALLOFF — identical formula to point-light-illumination.js's own
   // (Foundry shares this term across illumination AND coloration verbatim).
   // No `uRatio` here — technique 1 ("Adaptive Luminance") never reads ratio;
   // that's an illumination-channel-only (switchColor bright/dim) concept.
   const dist = length(positionLocal.xy);
-  const attenForFalloff = uAttenuationEased.max(float(0.0001));
-  const falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  // FALLOFF MODEL — mirrors point-light-illumination.js's own branch (both
+  // channels must fade together, so the coloration glow tracks the same
+  // curve as the floor lift). `inverseSquare` is the candle's physical
+  // bright-centre/fast-drop curve; `foundry` is the attenuation corona.
+  let falloff;
+  if (falloffModel === 'inverseSquare') {
+    falloff = inverseSquareFalloff(THREE.TSL, dist);
+  } else {
+    const attenForFalloff = uAttenuationEased.max(float(0.0001));
+    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  }
 
   // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
   // scaled by the underlying MAP pixel's own perceived brightness — BT.709
@@ -181,15 +271,64 @@ export function buildPointLightColorationMaterial({ THREE, albedoTexture, animat
   // `animation`/`buildColorationSeed`: seedColor === defaultSeed, output is
   // unchanged from before this param existed.
   const defaultSeed = uLightColor.mul(uColorationAlpha);
-  const animationUniforms = {};
   let seedColor = defaultSeed;
+  let uSpeedRaw = null;
+  let uReverseSign = null;
+  let uSeed = null;
+  let uIntensityRaw = null;
+  let uWindCenter = null;
+  let uWindExposure = null;
+  let uWindResponse = null;
   if (animation?.buildColorationSeed) {
-    const seeded = animation.buildColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, defaultSeed });
+    uSpeedRaw = uniform(float(5));
+    uReverseSign = uniform(float(1));
+    uSeed = uniform(float(0));
+    uIntensityRaw = uniform(float(5));
+    const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
+    // SHARED WIND (Wind.md Tier 0) — see point-light-illumination.js's own
+    // identical block for the full "why"; OPT-IN on the same two params.
+    let wind;
+    if (Number.isFinite(windExposure)) {
+      uWindCenter = uniform(vec2(windCenter?.x ?? 0, windCenter?.y ?? 0));
+      uWindExposure = uniform(float(windExposure));
+      // A THIRD wind uniform, same opt-in gate — see point-light-
+      // illumination.js's own identical `windResponse` param doc.
+      uWindResponse = uniform(float(Number.isFinite(windResponse) ? windResponse : 1));
+      wind = windHandle.node(THREE.TSL, {
+        centerXY: uWindCenter,
+        time: uGlobalTimeMs,
+        exposure: uWindExposure,
+      });
+    }
+    const seeded = animation.buildColorationSeed({
+      THREE,
+      uLightColor,
+      uColorationAlpha,
+      dist,
+      defaultSeed,
+      time,
+      uIntensityRaw,
+      uRatio,
+      quality: animationQuality,
+      wind,
+      windResponse: uWindResponse,
+    });
     seedColor = seeded.finalColor;
-    Object.assign(animationUniforms, seeded.uniforms ?? {});
   }
 
-  const finalColor = seedColor.mul(reflection);
+  const techniqueColor = seedColor.mul(reflection);
+
+  // TEMPORARY DIAGNOSTIC REVERT (2026-07-21) — the SHADOW term below is
+  // suspected of causing a live "THREE.NodeBuilder: Uniform "null" not
+  // implemented" build-time failure on EVERY point light (75 identical
+  // errors, one per light, in a real mansion scene — `getForRender` catches
+  // it and silently falls back to a blank material per light, which is what
+  // "broke the lighting"). Isolating: this bypasses the shadow multiply
+  // entirely so the author can confirm whether the error clears. If it does,
+  // the bug is confirmed inside the block below and gets root-caused before
+  // re-enabling, not re-added blindly. See keyhole-coloration-shadow-fix.md.
+  // const shadowing = mix(float(1), smoothstep(float(0.25), float(0.35), reflection), uShadows);
+  const finalColor = techniqueColor;
   const outputColor = finalColor.mul(falloff);
 
   const material = new THREE.NodeMaterial();
@@ -224,7 +363,20 @@ export function buildPointLightColorationMaterial({ THREE, albedoTexture, animat
   // masking step) silently inherits the wrong contract.
   material.fragmentNode = vec4(outputColor, falloff);
 
-  return { material, uAttenuationEased, uColorationAlpha, uLightColor, animationUniforms };
+  return {
+    material,
+    uAttenuationEased,
+    uColorationAlpha,
+    uLightColor,
+    uShadows,
+    uSpeedRaw,
+    uReverseSign,
+    uSeed,
+    uIntensityRaw,
+    uWindCenter,
+    uWindExposure,
+    uWindResponse,
+  };
 }
 
 /*

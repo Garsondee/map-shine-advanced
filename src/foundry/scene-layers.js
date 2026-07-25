@@ -170,11 +170,36 @@ export function includedInLevel(doc, levelId) {
  * @returns {Map<string, number>} level id -> ceiling elevation.
  */
 export function floorCeilings(sceneDoc, floors) {
+  const byId = new Map();
+  for (const [id, band] of floorElevationBands(sceneDoc, floors)) byId.set(id, band.top);
+  return byId;
+}
+
+/**
+ * Each floor's FULL elevation band — `{bottom, top}` — read once.
+ *
+ * `floorCeilings` above answers only "what counts as overhead"; the cast-shadow
+ * height field (docs/planning/Sun-Shadows.md §3.1) also needs the GROUND, because
+ * a caster's height is `elevation − bottom` and a balcony 5 ft above floor 2 is
+ * not 5 ft above floor 0. Both come from the same `levelElevation` read, so this
+ * is the one traversal and `floorCeilings` is a projection of it — two
+ * independent loops over the same documents is how the two would eventually
+ * disagree about which level a floor is.
+ *
+ * A missing level yields `{bottom: -Infinity, top: Infinity}` — Foundry's own
+ * `Level#prepareBaseData` normalisation, meaning "unbounded", which the
+ * derivation reads as "no known ground" and REPORTS rather than treating as 0.
+ *
+ * @param {object|null} sceneDoc
+ * @param {Array<{id:string}>} floors
+ * @returns {Map<string, {bottom:number, top:number}>}
+ */
+export function floorElevationBands(sceneDoc, floors) {
   const levels = levelDocsOf(sceneDoc);
   const byId = new Map();
   for (const f of floors ?? []) {
     const level = levels.find((l) => l?.id === f.id);
-    byId.set(f.id, level ? levelElevation(level).top : Infinity);
+    byId.set(f.id, level ? levelElevation(level) : { bottom: -Infinity, top: Infinity });
   }
   return byId;
 }

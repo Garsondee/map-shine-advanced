@@ -5,9 +5,12 @@
  */
 import {
   chooseTextureLimit,
+  chooseStorageBufferLimit,
   planImageTiles,
   WEBGPU_SPEC_MIN_TEXTURE_DIM,
   DESIRED_TEXTURE_DIM,
+  WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE,
+  DESIRED_STORAGE_BUFFERS_PER_STAGE,
 } from '../texture-limits.js';
 
 export function run(t) {
@@ -69,6 +72,41 @@ export function run(t) {
   ok('desired below floor is ignored → 8192', chooseTextureLimit(16384, 4096) === 8192);
   ok('desired 12288 honored when adapter allows', chooseTextureLimit(16384, 12288) === 12288);
   ok('desired 12288 but adapter only 8192 → 8192', chooseTextureLimit(8192, 12288) === 8192);
+
+  // --- chooseStorageBufferLimit: same safety discipline, a different resource
+  // --- (2026-07-22, the live "9 exceeds limit 8" GPUValidationError this fixes) ---
+
+  ok(
+    'constants: storage-buffer spec floor is 8, desired is 16',
+    WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE === 8 && DESIRED_STORAGE_BUFFERS_PER_STAGE === 16
+  );
+
+  // The live case: the adapter that hit the real error reported supporting 16
+  // — a compute kernel needing 9 (Wind Gusts: 5 arena + trail history + 3
+  // optional wind grids) now fits comfortably under the raised cap.
+  ok('adapter 16 → 16 (a 9-buffer compute kernel fits)', chooseStorageBufferLimit(16) === 16);
+
+  // Adapter offers MORE than we target → clamp to the desired cap, keeping the
+  // device request conservative (same posture as the texture limit above).
+  ok('adapter 32 → clamps to the 16 target, not the adapter max', chooseStorageBufferLimit(32) === 16);
+
+  // Weak hardware capped at the 8-buffer spec floor → stays 8 (asking for more
+  // would make requestDevice throw); a kernel needing 9+ storage buffers on
+  // this hardware is a genuine "reduce buffer count" problem, not one this
+  // function can paper over.
+  ok('adapter 8 → stays 8 (never exceed what the adapter supports)', chooseStorageBufferLimit(8) === 8);
+
+  // Implausible/bogus adapter values never drag us under the 8-buffer floor
+  // every real adapter grants.
+  ok('adapter 4 (below floor) → clamped up to 8', chooseStorageBufferLimit(4) === 8);
+  ok('adapter undefined → 8 (safe default)', chooseStorageBufferLimit(undefined) === 8);
+  ok('adapter NaN → 8 (safe default)', chooseStorageBufferLimit(NaN) === 8);
+  ok('adapter 0 → 8 (safe default)', chooseStorageBufferLimit(0) === 8);
+
+  // A caller can lower the target, but never below the spec floor.
+  ok('desired below floor is ignored → 8', chooseStorageBufferLimit(16, 4) === 8);
+  ok('desired 12 honored when adapter allows', chooseStorageBufferLimit(16, 12) === 12);
+  ok('desired 12 but adapter only 8 → 8', chooseStorageBufferLimit(8, 12) === 8);
 
   // --- planImageTiles: the "quarter-split" (author's idea) generalized -------
 

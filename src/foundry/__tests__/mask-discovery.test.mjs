@@ -53,6 +53,41 @@ export async function run(t) {
   t.ok('non-image extensions are ignored', match.found.get('outdoors') !== 'floors/ground_Outdoors.txt');
   t.ok('absent kinds are simply absent', !match.found.has('tree') && !match.found.has('water'));
 
+  // ART-VARIANT FALLBACK (2026-07-25) — the author's own bridge map: the ground
+  // floor's art is a `_WaterHard` VARIANT while its masks are named for the
+  // shorter base. Strict matching reported the REQUIRED outdoors mask missing
+  // and silently disabled every sun shadow on the scene, for a file sitting
+  // right beside the art.
+  {
+    const bridgeFiles = [
+      'a/Tower_Bridge_Underground_Outdoors.webp',
+      'a/Tower_Bridge_Middle_Outdoors.webp',
+      'a/Tower_Bridge_Middle_Overhead_Outdoors.webp',
+    ];
+    const variant = matchMaskFiles(bridgeFiles, 'Tower_Bridge_Underground_WaterHard', 'webp');
+    t.ok(
+      'an art VARIANT still finds the mask named for its shorter base',
+      variant.found.get('outdoors') === 'a/Tower_Bridge_Underground_Outdoors.webp'
+    );
+    t.ok(
+      'and the looser match is REPORTED, never silently identical to a strict one',
+      variant.baseFallbacksUsed.some((s) => s.startsWith('outdoors←base:'))
+    );
+
+    // The load-bearing safety property: an EXACT match must always win, or
+    // `Tower_Bridge_Middle_Overhead` would wrongly adopt the deck's own mask.
+    const exact = matchMaskFiles(bridgeFiles, 'Tower_Bridge_Middle_Overhead', 'webp');
+    t.ok(
+      'an exact-base match still wins over any shortened one',
+      exact.found.get('outdoors') === 'a/Tower_Bridge_Middle_Overhead_Outdoors.webp'
+    );
+    t.ok('and reports no fallback when it matched exactly', exact.baseFallbacksUsed.length === 0);
+
+    // Never shorten to a single token — `Tower` must not adopt `Tower_Outdoors`.
+    const tooShort = matchMaskFiles(['a/Tower_Outdoors.webp'], 'Tower_Bridge_Underground', 'webp');
+    t.ok('shortening stops before a bare first token', !tooShort.found.has('outdoors'));
+  }
+
   const encoded = matchMaskFiles(['floors/old%20mill_Outdoors.webp'], 'old mill', 'webp');
   t.ok(
     'URL-encoded listings match decoded art base names',

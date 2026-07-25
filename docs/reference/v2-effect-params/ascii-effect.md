@@ -32,72 +32,72 @@ Settings save with the scene (not World Based).
 
 ### Picture
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Grid detail | `resolution` | slider | 0.05 … 0.5 | 0.12 |  |
-| | | | | | _How many letter columns across the screen. Higher means smaller letters and more detail._ |
-| Row height | `lineHeight` | slider | 0.5 … 4 | 1.5 |  |
-| | | | | | _How tall each row is. Higher spreads rows apart and changes the letter shapes._ |
-| Effect strength | `opacity` | slider | 0 … 1 | 0.95 |  |
-| | | | | | _How strong the letter picture is compared to the normal map underneath._ |
+| Control         | id           | Type   | Range      | Default | Notes                                                                                      |
+| --------------- | ------------ | ------ | ---------- | ------- | ------------------------------------------------------------------------------------------ |
+| Grid detail     | `resolution` | slider | 0.05 … 0.5 | 0.12    |                                                                                            |
+|                 |              |        |            |         | _How many letter columns across the screen. Higher means smaller letters and more detail._ |
+| Row height      | `lineHeight` | slider | 0.5 … 4    | 1.5     |                                                                                            |
+|                 |              |        |            |         | _How tall each row is. Higher spreads rows apart and changes the letter shapes._           |
+| Effect strength | `opacity`    | slider | 0 … 1      | 0.95    |                                                                                            |
+|                 |              |        |            |         | _How strong the letter picture is compared to the normal map underneath._                  |
 
 ### Letter shape _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Letter width | `glyphScaleX` | slider | 0.25 … 1.5 | 1.15 |  |
-| | | | | | _Stretch letters wider or narrower inside each cell._ |
-| Letter height | `glyphScaleY` | slider | 0.25 … 1.5 | 0.95 |  |
-| | | | | | _Stretch letters taller or shorter inside each cell._ |
+| Control       | id            | Type   | Range      | Default | Notes                                                 |
+| ------------- | ------------- | ------ | ---------- | ------- | ----------------------------------------------------- |
+| Letter width  | `glyphScaleX` | slider | 0.25 … 1.5 | 1.15    |                                                       |
+|               |               |        |            |         | _Stretch letters wider or narrower inside each cell._ |
+| Letter height | `glyphScaleY` | slider | 0.25 … 1.5 | 0.95    |                                                       |
+|               |               |        |            |         | _Stretch letters taller or shorter inside each cell._ |
 
 ### Spacing _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Side padding | `cellPaddingX` | slider | 0 … 0.45 | 0.15 |  |
-| | | | | | _Empty space on the left and right inside each letter box._ |
-| Top/bottom padding | `cellPaddingY` | slider | 0 … 0.45 | 0.15 |  |
-| | | | | | _Empty space above and below inside each letter box._ |
+| Control            | id             | Type   | Range    | Default | Notes                                                       |
+| ------------------ | -------------- | ------ | -------- | ------- | ----------------------------------------------------------- |
+| Side padding       | `cellPaddingX` | slider | 0 … 0.45 | 0.15    |                                                             |
+|                    |                |        |          |         | _Empty space on the left and right inside each letter box._ |
+| Top/bottom padding | `cellPaddingY` | slider | 0 … 0.45 | 0.15    |                                                             |
+|                    |                |        |          |         | _Empty space above and below inside each letter box._       |
 
 ### Look & motion
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Character style | `charSet` | list | Simple / Detailed / Matrix / Blocks / Hybrid (Block+Simple) | detailed |  |
-| | | | | | _Which symbols are used to draw the picture. Hybrid mixes blocks and simple letters._ |
-| Keep map colors | `color` | boolean |  | true |  |
-| | | | | | _On: letters keep your map’s colors. Off: gray shades only._ |
-| Invert light/dark | `invert` | boolean |  | false |  |
-| | | | | | _Swap bright and dark areas, like a photo negative._ |
-| Letter shuffle | `churn` | slider | 0 … 1 | 0.72 |  |
-| | | | | | _How much letters keep changing. Zero keeps a steady picture._ |
-| Shuffle speed | `churnSpeed` | slider | 0.25 … 30 | 0.75 |  |
-| | | | | | _How fast letters change when shuffle is turned up._ |
+| Control           | id           | Type    | Range                                                       | Default  | Notes                                                                                 |
+| ----------------- | ------------ | ------- | ----------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------- |
+| Character style   | `charSet`    | list    | Simple / Detailed / Matrix / Blocks / Hybrid (Block+Simple) | detailed |                                                                                       |
+|                   |              |         |                                                             |          | _Which symbols are used to draw the picture. Hybrid mixes blocks and simple letters._ |
+| Keep map colors   | `color`      | boolean |                                                             | true     |                                                                                       |
+|                   |              |         |                                                             |          | _On: letters keep your map’s colors. Off: gray shades only._                          |
+| Invert light/dark | `invert`     | boolean |                                                             | false    |                                                                                       |
+|                   |              |         |                                                             |          | _Swap bright and dark areas, like a photo negative._                                  |
+| Letter shuffle    | `churn`      | slider  | 0 … 1                                                       | 0.72     |                                                                                       |
+|                   |              |         |                                                             |          | _How much letters keep changing. Zero keeps a steady picture._                        |
+| Shuffle speed     | `churnSpeed` | slider  | 0.25 … 30                                                   | 0.75     |                                                                                       |
+|                   |              |         |                                                             |          | _How fast letters change when shuffle is turned up._                                  |
 
 ### Hybrid mode _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Block strength | `blockOpacity` | slider | 0 … 1 | 0.4 |  |
-| | | | | | _For Hybrid style: how strong the shaded block layer is behind the letters._ |
-| Letter strength | `textOpacity` | slider | 0 … 1 | 1 |  |
-| | | | | | _For Hybrid style: how strong the letters are on top of the blocks._ |
+| Control         | id             | Type   | Range | Default | Notes                                                                        |
+| --------------- | -------------- | ------ | ----- | ------- | ---------------------------------------------------------------------------- |
+| Block strength  | `blockOpacity` | slider | 0 … 1 | 0.4     |                                                                              |
+|                 |                |        |       |         | _For Hybrid style: how strong the shaded block layer is behind the letters._ |
+| Letter strength | `textOpacity`  | slider | 0 … 1 | 1       |                                                                              |
+|                 |                |        |       |         | _For Hybrid style: how strong the letters are on top of the blocks._         |
 
 ### Brightness & contrast _(advanced)_
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Shadow depth | `blackPoint` | slider | 0 … 1 | 0 |  |
-| | | | | | _Treat more of the dark areas as “fully black” before picking letters._ |
-| Highlight point | `whitePoint` | slider | 0 … 1 | 0.82 |  |
-| | | | | | _How bright something must be before it counts as a full highlight._ |
-| Contrast | `contrast` | slider | 0 … 2 | 1.66 |  |
-| | | | | | _More contrast: shadows and lights look farther apart. Less: flatter, softer._ |
-| Brightness | `brightness` | slider | -0.5 … 0.5 | 0.18 |  |
-| | | | | | _Lighten or darken the whole picture before it becomes letters._ |
+| Control         | id           | Type   | Range      | Default | Notes                                                                          |
+| --------------- | ------------ | ------ | ---------- | ------- | ------------------------------------------------------------------------------ |
+| Shadow depth    | `blackPoint` | slider | 0 … 1      | 0       |                                                                                |
+|                 |              |        |            |         | _Treat more of the dark areas as “fully black” before picking letters._        |
+| Highlight point | `whitePoint` | slider | 0 … 1      | 0.82    |                                                                                |
+|                 |              |        |            |         | _How bright something must be before it counts as a full highlight._           |
+| Contrast        | `contrast`   | slider | 0 … 2      | 1.66    |                                                                                |
+|                 |              |        |            |         | _More contrast: shadows and lights look farther apart. Less: flatter, softer._ |
+| Brightness      | `brightness` | slider | -0.5 … 0.5 | 0.18    |                                                                                |
+|                 |              |        |            |         | _Lighten or darken the whole picture before it becomes letters._               |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | false | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | false   | hidden |

@@ -57,10 +57,21 @@
  * @property {'r'|'g'|'b'|null} packChannel - which channel of the packed trio
  *   this kind rides in, or null for unpacked kinds.
  * @property {number} absentValue - 0..1: the uniform value consumers read
- *   where a floor has NO authored file. This is the catalog owning ABSENCE
- *   semantics — V2 left "no mask" to each consumer's guess, which is why a
- *   missing `_Outdoors` meant "fully outdoors" to some effects and "fully
- *   indoors" to others depending on shader defaults.
+ *   where a floor has NO authored file AND `required` is not set. This is the
+ *   catalog owning ABSENCE semantics — V2 left "no mask" to each consumer's
+ *   guess, which is why a missing `_Outdoors` meant "fully outdoors" to some
+ *   effects and "fully indoors" to others depending on shader defaults.
+ * @property {boolean} [required] - author directive (2026-07-21, the wind
+ *   indoor/outdoor investigation): for a kind marked `required`, `absentValue`
+ *   is NEVER silently served when NO file was discovered for a level —
+ *   `sampleWorld`/`getDerived` THROW `RequiredMaskMissingError` instead (see
+ *   mask-authority.js). This is deliberately narrower than "the mask hasn't
+ *   decoded YET" (a transient streaming state, not a failure — see
+ *   `authoredStatus`'s own `source` field, which distinguishes "no file was
+ *   ever found" from "a file was found but its content isn't in yet"; only
+ *   the FORMER throws). Absent for every OTHER kind — an unpainted `_Fire` or
+ *   `_Water` mask staying a harmless default is still correct; only
+ *   `outdoors` has been declared a hard content requirement.
  * @property {string} meaning - the polarity, spelled out. White = ?
  */
 
@@ -84,9 +95,15 @@ export const MASK_KINDS = Object.freeze([
     channels: 'gray',
     packChannel: 'g',
     absentValue: 1,
+    required: true,
     meaning:
-      'white = outdoors, black = indoors. Absent = the whole floor is outdoors — the common ' +
-      'unmasked-wilderness-map case; the authority reports default-serving so this is never mistaken for authored data.',
+      'white = outdoors, black = indoors. REQUIRED (2026-07-21, author directive): a level with no ' +
+      'discovered `_Outdoors` file no longer silently serves `absentValue` — sampleWorld/getDerived THROW ' +
+      '(RequiredMaskMissingError) for `outdoors` and for anything derived from it (skyReach). This reverses ' +
+      'the earlier "the whole floor is outdoors" default: that silent fallback is exactly what let a stale ' +
+      'wind-exposure snapshot read a genuinely-indoors, correctly-painted room as fully outdoors without ' +
+      'anyone finding out. Painting the mask is not optional; a future guided in-app dialogue will walk a ' +
+      'GM through painting it when this is thrown (not built yet — fail loud is the interim behaviour).',
   },
   {
     id: 'fire',
@@ -190,7 +207,33 @@ export const DERIVED_KINDS = Object.freeze([
       'white = open sky reaches this texel on this floor: outdoors × (1 − coverAbove). ' +
       'Drives sun visibility, weather spawn, sky ambient. V2: SkyReachShadowsEffectV2, now a served product.',
   },
+  {
+    id: 'casterHeight',
+    inputs: ['outdoors', 'albedo'],
+    absentValue: 0,
+    meaning:
+      'THE OCCLUDER HEIGHT FIELD (docs/planning/Sun-Shadows.md): how tall the thing standing between ' +
+      'this texel and the sun is, in world px above THIS floor, packed as three independent producers — ' +
+      'R building (the dark of outdoors), G overhead (this floor’s raised tiles), B sky-reach (art above ' +
+      'this floor’s ceiling). Black = open to the sky. One field, one march; the three "shadow systems" ' +
+      'V2 kept separate are three channels here.',
+  },
 ]);
+
+/**
+ * `casterHeight` stores world pixels as a BYTE, so it needs a scale. Every
+ * consumer multiplies the 0..255 byte by (this / 255) to get world px.
+ *
+ * Chosen rather than probed: 2048 px is ~20 grid squares at a default 100px
+ * grid — taller than any building anyone paints on a battlemap, and a shadow
+ * whose caster is taller than that is off the map anyway. A single fixed
+ * constant beats a per-scene max because a per-scene max makes the SAME
+ * building quantise differently on two maps (memory:
+ * feedback_probed_constants_vs_derived — a voted-at-runtime constant is its own
+ * bug class). Quantisation at this scale is 8 px per step, well under the
+ * coarse grid's own ~31 px texel.
+ */
+export const CASTER_HEIGHT_SCALE_PX = 2048;
 
 /** Reserved derivation-input token: art opacity (not a mask file). */
 export const ALBEDO_INPUT = 'albedo';
@@ -237,6 +280,7 @@ export function validateMaskCatalog(kinds = MASK_KINDS, derived = DERIVED_KINDS)
       packChannels.set(k.packChannel, k.id);
     }
     if (!(k.absentValue >= 0 && k.absentValue <= 1)) fail(`${k.id}: absentValue must be 0..1`);
+    if (k.required !== undefined && typeof k.required !== 'boolean') fail(`${k.id}: required must be a boolean`);
     if (!k.meaning || k.meaning.length < 10) fail(`${k.id}: must state its polarity/meaning`);
   }
 

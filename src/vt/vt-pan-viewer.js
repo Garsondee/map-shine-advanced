@@ -53,7 +53,6 @@
 
 import { PageCache } from './page-cache.js';
 import { PageTable, computeIndirectionAtlasLayout } from './page-table.js';
-import { computeAtlasLayout, PageAtlas } from './atlas.js';
 import { resolveRendererRequiredLimits, planImageTiles, WEBGPU_SPEC_MIN_TEXTURE_DIM } from './texture-limits.js';
 // mipChainByteLength: exact GPU-resident sizes (level 0 + the full mip chain)
 // for the honest VRAM accounting below (the BC-compression fix for the
@@ -65,13 +64,12 @@ import { mipChainByteLength } from './block-compress.js';
 // back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
 // the raw texture. Intra-zone.
-import { requestCompressedTexture, getCompressedTextureStats } from './compressed-textures.js';
+import { requestCompressedTexture, requestCoarseAlphaGrid, getCompressedTextureStats } from './compressed-textures.js';
 import {
   acquirePages,
   acquirePackedPages,
   getSourceDimensions,
   getDecodeStats,
-  shouldYieldByTime,
   pageWorldRect,
   computePagePlacement,
 } from './decode-pool.js';
@@ -83,26 +81,20 @@ const ingestLog = createLogger('vt-ingest');
 /** Log door for new call sites in this file — the rest still calls
  * console.* directly (ratcheted debt, not this fix's job to migrate). */
 const log = createLogger('vt-pan-viewer');
-import { createVtSampler } from './vt-sample.tsl.js';
 import {
   createInitialViewState,
   applyKey,
   applyPanByPixels,
   applyZoomAtPixel,
   viewToWorldRect,
+  clampRectToBounds,
   clampHalfSpan,
   computeTargetPanVelocity,
   easeVelocityTowardTarget,
   integratePan,
   easedZoomFactor,
 } from './view-state.js';
-import {
-  planResidency,
-  coarsePinSet,
-  coarseTopMipsForCap,
-  diffResidency,
-  computeCoarsePinBudget,
-} from './residency.js';
+import { coarsePinSet, coarseTopMipsForCap, computeCoarsePinBudget } from './residency.js';
 import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
@@ -118,8 +110,6 @@ import {
   QUAD_UVS,
   QUAD_INDICES,
   computeTileSubPlacement,
-  viewRectToImageRect,
-  computeItemViewportPx,
   rectsOverlap,
 } from '../scene/world-quad.js';
 import {
@@ -129,6 +119,9 @@ import {
   tokenFootprint,
   readSceneDarkness,
   readSceneAmbient,
+  readGamePaused,
+  watchGamePaused,
+  watchWorldTimeOfDay,
   readActiveLightSources,
   readGlobalLightConfig,
   readActiveDarknessRegions,
@@ -137,6 +130,7 @@ import {
   computeTokenOcclusionRadiusPx,
   getActiveSceneFloors,
   computeCandleWallClippedShape,
+  readSceneWallSegments,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback, describeRenderMode } from '../diag/render-fallback.js';
 import {
@@ -146,7 +140,7 @@ import {
   mapElevation,
   buildElevationTable,
 } from '../scene/occlusion.js';
-import { buildEnvSnapshot } from '../world/index.js';
+import { buildEnvSnapshot, createDayClock } from '../world/index.js';
 import {
   buildEnvironmentalLightMaterials,
   computeAmbientColors,
@@ -182,15 +176,79 @@ import {
   buildCandleFlameMaterial,
   buildCandleFlameGeometry,
   buildCandleLightSources,
-  hexToRgb01,
+  candleAnimationQualityTier,
+  buildDoorMaterial,
+  doorLeafStyles,
+  computeDoorClosedSnapshot,
+  applyDoorAnimation,
+  doorSnapshotToPlacement,
+  doorEaseInOutCosine,
   resolveLightAnimation,
   KNOWN_DEFERRED_ANIMATIONS,
-  computeAnimationTime,
-  SmoothNoise,
-  computeFlickerUniforms,
-  computePulseUniforms,
+  createParticleEngine,
+  WIND_DIAGNOSTIC_PARTICLES,
+  createGustEngine,
+  WIND_GUSTS,
+  VEGETATION_KINDS,
+  detectSelfVegetationKind,
+  vegetationMeshSegments,
+  buildTessellatedQuadGeometry,
+  createVegetationShadowSubsystem,
+  padPlacement,
+  vegetationShadowPadPx,
+  VEG_SHADOW_RENDER_ORDER_MAGNITUDE,
+  VEG_SHADOW_SMEAR_TAPS,
+  createShadowHandle,
+  createSunShadowSubsystem,
+  // (maxThrowForHeightPx / shadowPenumbraPx / BASE_SOFTNESS_PX / edgeRamp01
+  // left with the vegetation-shadow code in extraction step 2 — this file has
+  // no remaining caller for any of them.)
+  createSkyHandle,
+  buildGradePresentMaterial,
+  buildBloomMaterials,
+  hexToRgb01,
+  resolveEnvGrade,
+  scaleGradeToIdentity,
+  identityCubeLut,
 } from '../effects/index.js';
-import { makeFrameClock } from '../core/frame-clock.js';
+import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC } from '../core/frame-clock.js';
+import {
+  computeWindOverlayGridFromBake,
+  buildWindOverlayGeometry,
+  buildWindArrowMaterial,
+  buildWindHeatmapMaterial,
+} from '../diag/wind-field-overlay.js';
+import { decomposeWindAt } from '../diag/wind-probe.js';
+import {
+  computeWindBakeGridSpec,
+  rasterizeWallsToGrid,
+  ambientVectorFromWind,
+  buildWindSimMaterials,
+  doorwayImpulseFromWallSegment,
+  gatherActiveImpulseSlots,
+  computeThawWindowMs,
+  floodFillOpenFromBoundary,
+  summarizeEnclosure,
+  downsampleMax,
+  cropGridMargin,
+  distanceFromDoorThreshold,
+  opennessFalloffFromDistance,
+  downsampleDistanceMin,
+  DOOR_FALLOFF_REACH_CELLS,
+  distanceFromNearestSolid,
+  wallAvoidanceDirectionFromDistance,
+  wallProximityFromDistance,
+  WALL_DEFLECT_REACH_CELLS,
+  WIND_SIM_DEFAULT_DECAY_PER_SECOND,
+  WIND_SIM_DEFAULT_RELAX_ITERATIONS,
+  WIND_SIM_RELAX_BLEND,
+  WIND_SIM_MAX_ACTIVE_IMPULSES,
+  createWindHandle,
+  // Shared with wind turbulence's own octaves — divergence-free, therefore
+  // area-preserving, which is what makes vegetation's leaf flutter a genuine
+  // "mass preserving" distortion rather than a stretch. See its own header.
+  curlNoise2D,
+} from '../world/index.js';
 
 /**
  * Which TSL material builder handles each region-shape "kind" (the SAME
@@ -230,32 +288,6 @@ function percentileMs(samples, p) {
   return Math.round(sorted[idx] * 10) / 10;
 }
 
-/** Wall-clock budget per GPU-upload chunk before yielding a real frame — see
- * requestDecodeUpload's Pass 3 for the live-hitch evidence this fixes. */
-const MAX_MS_PER_UPLOAD_CHUNK = 10;
-
-/**
- * GPU-COMPLETION BACKPRESSURE — bound how many page uploads can be in flight on
- * the GPU queue before the CPU waits for them to finish (2026-07-17, the THIRD
- * WebGPU device loss on the 12000² mansion). The prior throttle
- * (`MAX_MS_PER_UPLOAD_CHUNK`) bounds only main-thread TIME: in 10ms the loop can
- * enqueue HUNDREDS of `queue.copyExternalImageToTexture` calls without ever
- * waiting for one to complete, so under a full/thrashing cache the GPU queue
- * grows unbounded until Chrome's TDR watchdog kills the device ("A valid
- * external Instance reference no longer exists"). The device-lost snapshot's own
- * guide pointed straight here: `residentPages == capacityPages`, `pinnedView`
- * near cap, `heldSources: 0`, `mainThreadFallbackSourceDecodes: 0` = a pure
- * upload-burst TDR, not a leak or a main-thread decode. After every this-many
- * uploads we `await device.queue.onSubmittedWorkDone()` — draining the queue to
- * a bounded depth. When the GPU is healthy this returns in well under a
- * millisecond (48 pages ≈ 12 MB of copies); when the queue is backing up the
- * wait BALLOONS, which is exactly the signal `_uploadDrain` records for the next
- * crash report — so this is a principled fix AND a decisive instrument. WebGPU
- * backend only (WebGL2 has no equivalent per-page queue-submit cost — see
- * atlas.js). Tune down if a slower card still backs up; tune up if streaming
- * feels needlessly throttled. */
-const UPLOAD_PAGES_PER_DRAIN = 48;
-
 /** Whole-image mode: the largest tile dimension we will EVER upload as one
  * texture, INDEPENDENT of the hardware's `maxTextureDimension2D`. A 12000² floor
  * is a single 549MB texture at the 16384 cap, and allocating that in one shot on
@@ -281,32 +313,30 @@ const MAX_WHOLE_TILE_DIM = 8192;
  * in a worker-less environment (safety slide: degrade, never detonate). */
 const MAX_RAW_FALLBACK_DIM = 4096;
 
-/** Worst GPU-queue drain wait seen this session + how many drains ran — read in
- * the device-lost snapshot to tell an upload-burst TDR (maxMs balloons) apart
- * from something else (maxMs stays tiny). Reset when a viewer starts. */
-let _uploadDrain = { maxMs: 0, count: 0 };
-
 /**
  * WHOLE-IMAGE RENDER MODE (2026-07-17 — the "load images like PIXI" path the
- * author chose after the tile-streaming architecture kept losing the WebGPU
- * device to upload churn). When ON, each item's art is loaded WHOLE (one
- * texture when it fits the raised 16384 cap — the mansion's 12000² case; or the
- * smallest tile grid that fits, `planImageTiles`, on weaker hardware) and drawn
- * as plain quad(s), with the atlas/page-streaming SKIPPED entirely. The whole
- * streaming apparatus (atlas, cache, residency, decode worker, backpressure)
- * stays intact as the OFF path — the escape hatch if this is broken:
- * `MapShine.setWholeImageMode(false)` reverts to it live without a reload.
+ * author chose after the tile-streaming/virtual-texture architecture kept
+ * losing the WebGPU device to upload churn). Each item's art is loaded WHOLE
+ * (one texture when it fits the raised 16384 cap — the mansion's 12000² case;
+ * or the smallest tile grid that fits, `planImageTiles`, on weaker hardware)
+ * and drawn as plain quad(s) — no atlas, no page cache, no residency
+ * streaming, no upload churn, matching Foundry's own PIXI GPU footprint.
  *
- * Default ON (the author is testing it) — but the device-lost safety slide is
- * still underneath, and `getDiagnostics().wholeImage` reports exactly what each
- * item did (mode, tiles, decode status/errors, VRAM) so a breakage is visible
- * in a flight recorder, not a mystery.
+ * THE ONLY ENGINE (2026-07-22 — feedback_mode_forks_silently_drop_features):
+ * the old page-streaming/virtual-texture path (atlas.js, vt-sample.tsl.js,
+ * ensureItemMesh/streamPackResidency/bindMeshToPack) has been REMOVED
+ * entirely, not merely defaulted off. It was the architecture that kept
+ * losing the device — more machinery, not a better engine — and it had
+ * silently dropped two cross-cutting features (occlusion, masks) that were
+ * built only for it while this whole-image path shipped as the default.
+ * There is now exactly one loading/rendering path for every item; a future
+ * feature CANNOT be added to "the other mode" because there isn't one.
+ *
+ * The device-lost safety slide still sits underneath this, and
+ * `getDiagnostics().wholeImage` reports exactly what each item did (tiles,
+ * decode status/errors, VRAM) so a breakage is visible in a flight recorder,
+ * not a mystery.
  */
-let _wholeImageEnabled = true;
-/** @param {boolean} on */
-export function setWholeImageMode(on) {
-  _wholeImageEnabled = !!on;
-}
 
 /**
  * THE DARKNESS-REALISM LEVER (2026-07-19, author-requested). 0 = Foundry
@@ -412,50 +442,6 @@ export function getUiShadow() {
 }
 
 /**
- * How much of the page cache must remain unprotected before a pack is allowed to
- * pin its SPECULATIVE (prefetch) tier. Below this, prefetch is dropped and only
- * the pages the current view actually needs are pinned.
- *
- * THE BUG THIS FIXES (measured live, 2026-07-16, real 2-floor non-square scene —
- * 3 Level backgrounds + 2 foregrounds + 2 roof tiles = 7 packs):
- *
- *     cacheStats: { capacityPages: 2048, residentPages: 2048, freePages: 0,
- *                   pinnedCoarse: 574, pinnedView: 1320, misses: 215426 }
- *
- * Every pack reported `viewResident: 220` — which is EXACTLY its mip-1 grid
- * (22x10). With `mip.requested: 2` and `coarseTopMips: 5`, the coarse pins
- * already covered mips 2-6, so `plan.fine` (mip 2) and `plan.prefetchCoarser`
- * (mip 3) contributed ZERO new pages: **100% of the pinned view tier was
- * `prefetchFiner`** — insurance for a zoom-in that might never happen. Demand
- * was 7 x (82 + 220) = 2114 pages against a 2048 capacity, so the cache could
- * not satisfy it even in principle.
- *
- * It then never recovered, because of an interaction with the (correct) fix for
- * the "stuck view-miss" bug: a page whose request misses is deliberately NOT
- * recorded as resident, so it is retried on every residency update. Permanent
- * oversubscription therefore became permanent retry churn — the 215k misses.
- *
- * The principle that was violated: speculation was pinned at the same protection
- * level as necessity. `PageCache` never evicts ANY pinned slot ('coarse' and
- * 'view' are equally protected — page-cache.js's `_findLRUEvictable`), so a pack
- * pinning 220 speculative pages permanently denies those slots to pages some
- * other pack actually needs to render.
- *
- * Why admission control rather than simply leaving prefetch UNPINNED (which LRU
- * would then reclaim naturally, and was the first idea): an unpinned page can be
- * evicted by a LATER pack's request *within the same residency update*, after
- * this pack has already written its atlas slot into the indirection texture. The
- * indirection would then point at a slot holding a different page's pixels —
- * wrong content, not blur. Pinning is what makes the indirection trustworthy, so
- * the fix has to be "don't ask for what won't fit", not "ask and let it go".
- *
- * The check is per-pack and evaluated in draw order, so it self-limits: early
- * packs prefetch while there is room, later ones skip it. Order-dependent, but
- * BOUNDED and correct — and the fine tier is never the thing that loses.
- */
-const PREFETCH_MIN_HEADROOM_FRACTION = 0.15;
-
-/**
  * Where to mount the VT canvas so it BECOMES the scene display (author request,
  * 2026-07-15: "make this the only display... fill the scene viewing space so we
  * don't have PIXI and threejs alongside each other"). We mount into Foundry's
@@ -532,9 +518,6 @@ function disposeActive() {
   } catch (err) {
     log.error('live marker overlay stop failed — a stray rAF loop may leak:', err);
   }
-  try {
-    _active.atlas?.dispose(); // null in whole-image mode — the atlas is never allocated
-  } catch (_) {}
   for (const state of _active.itemStates.values()) {
     try {
       state.material?.dispose();
@@ -584,12 +567,43 @@ function disposeActive() {
   } catch (err) {
     log.error('lighting dispose failed — VRAM may be leaked:', err);
   }
+  // scene.sunShadow (a 1024² RGBA8 world-space target) + the bake material +
+  // the caster height DataTexture — found UNDISPOSED anywhere in this chain
+  // while extracting the subsystem (2026-07-25, VT-Pan-Viewer-Extraction.md
+  // step 1): every Stop/Restart cycle was leaking one target + one
+  // NodeMaterial. Same per-cycle VRAM-leak reasoning as the rest of this list.
+  try {
+    _active.disposeSunShadows?.();
+  } catch (err) {
+    log.error('sun shadow dispose failed — VRAM may be leaked:', err);
+  }
   // The candle flame billboard's own mesh/geometry/material (its lights are in
   // the shared pool, freed by disposePointLights below).
   try {
     _active.disposeCandleFlame?.();
   } catch (err) {
     log.error('candle flame dispose failed — VRAM may be leaked:', err);
+  }
+  // The door leaves' own meshes/geometries/materials + cached textures — same
+  // per-cycle VRAM-leak reasoning as the candle flame just above.
+  try {
+    _active.disposeDoorGraphics?.();
+  } catch (err) {
+    log.error('door graphics dispose failed — VRAM may be leaked:', err);
+  }
+  // The wind field debug overlay's own mesh/geometry/material — same per-
+  // cycle VRAM-leak reasoning as the candle flame just above.
+  try {
+    _active.disposeWindFieldOverlay?.();
+  } catch (err) {
+    log.error('wind overlay dispose failed — VRAM may be leaked:', err);
+  }
+  // Wind.md Tier 2's ping/pong/publish render targets + solid mask texture +
+  // sim materials — same per-cycle VRAM-leak reasoning.
+  try {
+    _active.disposeWindSim?.();
+  } catch (err) {
+    log.error('wind sim dispose failed — VRAM may be leaked:', err);
   }
   // Every point-light mesh/material/geometry — same per-cycle VRAM-leak
   // reasoning, a separate call mirroring disposeOcclusionMask's own split
@@ -604,6 +618,16 @@ function disposeActive() {
     _active.disposeRegionDarknessMeshes?.();
   } catch (err) {
     log.error('region-darkness dispose failed — VRAM may be leaked:', err);
+  }
+  // THE TIME HOOKS (`pauseGame`, `updateWorldTime`). Not VRAM, but the same
+  // class of leak: every scene switch builds a new viewer, and an un-removed
+  // hook keeps a dead closure alive and fires it forever. `installPauseWatch`
+  // is idempotent per viewer, so without this each switch would stack another
+  // listener writing a scale target into a frame clock nobody is ticking.
+  try {
+    _active.disposeTimeWatches?.();
+  } catch (err) {
+    log.error('time-hook teardown failed — a stale pause/world-time listener may persist:', err);
   }
   // THE RENDERER ITSELF (found in audit, 2026-07-17: teardown freed every
   // texture/material/geometry it OWNED but never the renderer's own backend —
@@ -707,6 +731,16 @@ export function stopVtPanViewer() {
  *   GPU readback, no cache pressure. Injected exactly like extraLayersForItem —
  *   the viewer stays authority-ignorant. A throwing callback is contained and
  *   loudly logged; it can never break streaming.
+ * @param {(info:{ownerId:string, grid:{w:number,h:number,data:Uint8Array},
+ *   imageWidth:number, imageHeight:number}) => void} [options.onItemAlpha] -
+ *   THE ART-OPACITY SEAM (2026-07-24, `scene/mask-authority.js#ingestItemAlpha`).
+ *   Called once per non-token item with its coarse alpha grid, for EVERY floor —
+ *   cover physics must not depend on which floor is being viewed, so this
+ *   deliberately does not wait for a floor to become visible. It exists because
+ *   `onPageDecoded` above can no longer deliver art opacity: that seam is fed by
+ *   PACKS, and whole-image mode has no albedo pack, so `coverAbove` (and with it
+ *   `skyReach`) had been uniformly zero on every scene since the streaming
+ *   engine was retired. See `vt/coarse-alpha.js`'s header.
  * @param {(info:object) => void} [options.onDeviceLost] - THE SAFETY SLIDE'S
  *   seam-restore hook. Called when the GPU device is lost UNEXPECTEDLY (never on
  *   our own teardown — that is filtered by reason:"destroyed"). The viewer has
@@ -726,12 +760,52 @@ export async function startVtPanViewer({
   getOcclusionInputs,
   onLoadProgress,
   onPageDecoded,
+  onItemAlpha,
   onDeviceLost,
   getCandleRenderState,
+  getDoorRenderState,
+  getVegetationRenderState,
+  getBloomRenderState,
+  getGradeLookState,
+  sampleWindExposureAt,
+  getMaskAuthorityVersion,
+  probeMaskAuthorityLiveAt,
+  getOutdoorsMaskGrid,
+  getCasterHeightField,
+  getSunShadowRenderState,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
   onPageDecoded ??= () => {};
+  onItemAlpha ??= () => {};
+  // WIND OVERLAY EXPOSURE (Wind.md) — same "absence = fully outdoors"
+  // default the candle geometry itself falls back to when un-sampled
+  // (computeCandleFlameArrays' own convention), so an un-wired caller (the
+  // torture fixture) still renders, just without indoor/outdoor contrast.
+  sampleWindExposureAt ??= () => 1;
+  // THE MASK-DRIVEN WIND REBAKE TRIGGER (2026-07-21 — see bakeWindField's own
+  // 'mask-change' reason for the full story). `null` = "no version to watch"
+  // (the torture fixture has no mask authority), which the poll below already
+  // treats as inert — never wired means never triggers, same posture as
+  // sampleWindExposureAt's own default just above.
+  getMaskAuthorityVersion ??= () => null;
+  // THE WIND PROBE's live mask-authority cross-check (2026-07-22) — see
+  // runWindProbeOnPoints' own header for the full reasoning. Default reports
+  // itself as unwired rather than pretending to have an answer.
+  probeMaskAuthorityLiveAt ??= () => ({ skipped: true, reason: 'not wired (no mask authority for this viewer)' });
+  // THE SKY LIGHT's gate (2026-07-23, docs/planning/Sky.md): the `_Outdoors`
+  // mask grid for a floor, uploaded to a texture so the illumination pass can
+  // ask "is this screen pixel outdoors" per-fragment. `null` = unwired (the
+  // torture fixture), which bakes a 1×1 fully-outdoors placeholder — and since
+  // the sky ships at `realism01 = 0` that is a no-op either way, so an unwired
+  // caller renders exactly as it did before the sky existed.
+  getOutdoorsMaskGrid ??= () => null;
+  // SUN SHADOWS' two seams. `null`/disabled leaves the shadow field baked white
+  // (a provable no-op) rather than leaving it unwritten — the ambient fill
+  // always samples it, so "off" has to be a written value. Un-wired callers
+  // (the torture fixture) therefore render exactly as they did before.
+  getCasterHeightField ??= () => null;
+  getSunShadowRenderState ??= () => ({ enabled: false, params: {} });
   // THE CANDLE EFFECT's data seam (effects/candle-flame-render.js): boot injects
   // `{ enabled, params: {sizePx, color, lightRadiusPx}, anchors: [{id,x,y}] }` for
   // the active floor. vt/ owns the GPU lifecycle (the flame billboard mesh + the
@@ -739,7 +813,30 @@ export async function startVtPanViewer({
   // authority or the settings cascade — same injection discipline as the mask
   // authority's closures. Default = the effect off, so an un-wired caller is inert.
   getCandleRenderState ??= () => ({ enabled: false, params: {}, anchors: [] });
-  _uploadDrain = { maxMs: 0, count: 0 }; // fresh GPU-backpressure stats per viewer session
+  // THE DOOR-GRAPHICS data seam (effects/door-graphics-render.js): boot injects
+  // `{ enabled, params: {animateMotion, motionDurationScale}, doors: [...] }`
+  // — the renderable door snapshots (foundry/scene-doors.js) for the active
+  // floor. vt/ owns the GPU lifecycle (the leaf meshes in doorScene, drawn into
+  // the lit scene albedo) and the per-frame open/close animation clock, but
+  // knows nothing about the Foundry read or the settings cascade — same
+  // injection discipline as the candle seam above. Default = the effect off, so
+  // an un-wired caller (the torture fixture) draws no doors.
+  getDoorRenderState ??= () => ({ enabled: false, params: {}, doors: [] });
+  // VEGETATION's data seam (effects/vegetation-render.js): boot injects
+  // `{ enabled, params: {windResponse, swayAmount, intensity}, urlByItemId }`
+  // — same injection discipline as the candle's seam just above. Default =
+  // the effect off with an empty lookup, so an un-wired caller (the torture
+  // fixture) renders every item through its ordinary, non-vegetation path.
+  getVegetationRenderState ??= () => ({ enabled: false, params: {}, urlByItemId: new Map() });
+  // BLOOM's data seam (effects/bloom-render.js): boot injects `{ enabled, params }`
+  // (the resolved BLOOM_PARAMS). vt/ owns the GPU pyramid (mip targets + the
+  // dual-filter passes) but knows nothing about the registry/cascade — same
+  // injection discipline as the candle/vegetation seams. Default = the effect
+  // off, so an un-wired caller (the torture fixture) runs no bloom pass at all.
+  getBloomRenderState ??= () => ({ enabled: false, params: {} });
+  // THE COLOUR GRADE (Look) effect's resolved state — same injection shape as
+  // bloom. Default disabled ⇒ the artistic grade is identity (parity holds).
+  getGradeLookState ??= () => ({ enabled: false, params: {} });
   // THE SAFETY SLIDE'S seam-restore hook (see the renderer.onDeviceLost handler
   // below). Injected exactly like the others so vt/ stays ignorant of the
   // interface seam: the composition root (boot.js) wires this to
@@ -774,8 +871,6 @@ export async function startVtPanViewer({
   // is what used to block the safety slide (diag/render-fallback.js).
   let canvas = null;
   try {
-    const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 }); // Keyhole Q2 default
-
     /**
      * THE DANGLING-INDIRECTION FIX (author-reported 2026-07-17, under a
      * zoom/floor thrash test: "tiles of textures at the wrong scale and in the
@@ -1048,9 +1143,6 @@ export async function startVtPanViewer({
       // proof (exactly the [[feedback_plausible_diagnosis_rots]] trap). These
       // are all plain-JS counters — no GPU access, safe on a dead device —
       // logged so they ride the flight-recorder export. What to read next time:
-      //   • cacheStats.residentPages == capacityPages with pinnedView near cap
-      //     -> the atlas/cache is SATURATED: a VRAM-pressure death. Shrink the
-      //        512MB atlas (computeAtlasLayout budgetBytes) or the view tier.
       //   • decodeStats.heldSources > 0, or mainThreadFallbackSourceDecodes
       //     climbing -> a full ~576MB source bitmap was mid-decode on the main
       //     thread when it died (the mask-404 retry path feeds this) -> a
@@ -1062,14 +1154,13 @@ export async function startVtPanViewer({
           view: view ? { halfSpanPx: view.halfSpanPx, floorIndex: view.floorIndex } : null,
           cacheStats: cache.stats(),
           decodeStats: getDecodeStats(),
-          atlasBytes: atlas ? layout.totalBytes : 0, // 0 in whole-image mode — atlas not allocated
           sceneColorBytes: sceneColor ? sceneColor.width * sceneColor.height * 8 : null,
           // WHOLE-IMAGE VRAM AT DEATH — the number this hunt kept missing. Sum of
           // every uploaded whole-image texture (w·h·4). Read estTextureVramMB
-          // (this + atlas + sceneColor) against a plausible WebGPU budget: if it
+          // (this + sceneColor) against a plausible WebGPU budget: if it
           // is multiple GB AND the frame-gap hitches spike right before this, it
           // is a VRAM-ceiling death and the fix is to hold FEWER full-res layers
-          // (free the atlas; drop off-floor occlusion layers) — not to sequence
+          // (drop off-floor occlusion layers) — not to sequence
           // uploads harder. loading > 0 means it died mid floor-load, so peak was
           // even higher than the tally shows.
           wholeImage: (() => {
@@ -1106,8 +1197,7 @@ export async function startVtPanViewer({
               else if (wi.status === 'loading') loading++;
               items.push({ id, status: wi.status, mb: +(b / (1024 * 1024)).toFixed(1), compressed: wi.compressed });
             }
-            const otherBytes =
-              (atlas ? layout.totalBytes : 0) + (sceneColor ? sceneColor.width * sceneColor.height * 8 : 0);
+            const otherBytes = sceneColor ? sceneColor.width * sceneColor.height * 8 : 0;
             return {
               totalMB: +(bytes / (1024 * 1024)).toFixed(1),
               estTextureVramMB: +((bytes + otherBytes) / (1024 * 1024)).toFixed(1),
@@ -1116,11 +1206,6 @@ export async function startVtPanViewer({
               items,
             };
           })(),
-          // GPU-queue backpressure (UPLOAD_PAGES_PER_DRAIN): maxMs BALLOONING (tens+
-          // of ms) confirms an upload-burst TDR — the queue could not drain. maxMs
-          // staying tiny (sub-ms) with count > 0 RULES OUT queue backup and points
-          // the next investigation elsewhere (a leak we haven't found, a driver bug).
-          uploadDrain: { ..._uploadDrain },
         });
       } catch (err) {
         log.error('device-lost snapshot failed (the slide below still runs):', err);
@@ -1245,17 +1330,219 @@ export async function startVtPanViewer({
     // _uiShadowState / setUiShadow.
     const uiShadow = buildUiShadowVisibility({ THREE });
 
+    // ── THE OUTDOORS MASK, ON THE GPU (2026-07-23, docs/planning/Sky.md) ──
+    // The `_Outdoors` grid as a single-channel-ish texture so the sky light can
+    // be gated per-fragment. Starts as a 1×1 "everything outdoors" placeholder
+    // so the sampler exists at material-build time (the materials are built
+    // ONCE, at startup, long before any mask has streamed in) and the real one
+    // is swapped in by `bakeOutdoorsTexture` via the shared texture node —
+    // exactly the `rebindPresent` pattern used for resize.
+    //
+    // A placeholder of "fully outdoors" is the safe default here specifically
+    // because the sky ships neutral: at `realism01 = 0` the multiplier is
+    // [1,1,1] and the veil [0,0,0], so "the whole map is outdoors" and "the
+    // whole map is indoors" render identically. The placeholder cannot be
+    // mistaken for real data because nothing it gates does anything yet.
+    let outdoorsTexture = makeOutdoorsPlaceholderTexture(THREE);
+    /** The world rect `outdoorsTexture` covers. The placeholder covers the whole
+     * scene so the uniform is never nonsense before the first real bake. */
+    let outdoorsRect = { ...dimensions.sceneRect };
+    /** The LAST thing `bakeOutdoorsTexture` actually did, success or failure —
+     * reported verbatim in getEnvSnapshotInfo() so "the sky does nothing" is
+     * always answerable from the Diagnostics report rather than the console
+     * (feedback_instruments_must_not_lie: a silently-swallowed
+     * RequiredMaskMissingError must not look identical to "working as
+     * intended"). `null` before the first attempt. */
+    let lastOutdoorsBakeResult = null;
+
+    // ── SUN SHADOWS (docs/planning/Sun-Shadows.md) ───────────────────────
+    // Extracted (2026-07-25, VT-Pan-Viewer-Extraction.md step 1) into its own
+    // module — `effects/lighting/sun-shadow-subsystem.js` — the first
+    // subsystem pulled out of this function's closure. `getShadowHandle` and
+    // `getEnvLight` are GETTERS, not values: `shadowHandle` is reassigned on
+    // every sky change, and `envLight` does not exist yet at this line (it is
+    // built two statements below, and itself needs `sunShadows.texture` as
+    // one of ITS OWN params — see the new module's own header for why that
+    // ordering is safe). Both closures are only ever invoked later, from the
+    // frame loop, by which point both bindings are long since initialized.
+    //
+    // `renderSunShadowPass`/`createSunShadowCasterTexture` stay HERE rather
+    // than moving into the subsystem: `renderer-state/graph-only` and
+    // `gpu/textures-in-vt-only` only allow `.setRenderTarget(`/`new
+    // ...Texture(` inside vt/graph/diag — moving them into effects/lighting/
+    // tripped both walls. The subsystem decides WHEN to bake; these two tiny
+    // functions are the ONLY code that actually touches the renderer/GPU
+    // memory for it, exactly where those walls already say that belongs.
+    function renderSunShadowPass(target, quad) {
+      const prev = renderer.getRenderTarget();
+      // `allocator.create()` returns the WebGLRenderTarget/RenderTarget itself
+      // (see sceneColor/sceneIllum/bloomMips' own call sites) — NOT a wrapper
+      // with a `.target` field. `.target` was undefined, so this bound the
+      // canvas's own render context instead of the shadow field's texture: the
+      // WebGPU backend's `_getDefaultRenderPassDescriptor` then read `.samples`
+      // off a context shape it did not expect and crashed (live, 2026-07-24).
+      renderer.setRenderTarget(target);
+      quad.render(renderer);
+      renderer.setRenderTarget(prev);
+    }
+    function createSunShadowCasterTexture(data, w, h) {
+      const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      // LINEAR so a silhouette edge is a ramp rather than a staircase of mask
+      // texels — the march's contact-hardening depends on a smooth height
+      // gradient to feather against.
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.needsUpdate = true;
+      return tex;
+    }
+    const sunShadows = createSunShadowSubsystem({
+      THREE,
+      allocator,
+      dimensions,
+      getCasterHeightField,
+      getSunShadowRenderState,
+      getMaskAuthorityVersion,
+      getShadowHandle: () => shadowHandle,
+      getEnvLight: () => envLight,
+      renderSunShadowPass,
+      createCasterTexture: createSunShadowCasterTexture,
+    });
+
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
       illumTexture: sceneIllum.texture,
       colorationTexture: sceneColoration.texture,
       uiShadowVisNode: uiShadow.visNode,
+      outdoorsTexture,
+      sunShadowTexture: sunShadows.texture,
     });
+    envLight.setOutdoorsRect(outdoorsRect);
+    // The one-time initial push (subsequent pushes happen internally, from
+    // the subsystem's own rebake, whenever the caster rect actually moves).
+    envLight.setSunShadowRect(sunShadows.getRect());
+
+    /**
+     * Rebuild the outdoors texture from the mask authority for `floorIndex`.
+     * Cheap and idempotent — called when the mask version moves (the same poll
+     * that already triggers a wind rebake) and on a floor change. Never throws:
+     * a floor with no discovered `_Outdoors` makes the mask authority throw
+     * `RequiredMaskMissingError`, which boot's own handler already turns into a
+     * loud, throttled warning; here that simply leaves the previous texture in
+     * place rather than tearing the frame down.
+     */
+    function bakeOutdoorsTexture(floorIndex) {
+      let grid = null;
+      try {
+        grid = getOutdoorsMaskGrid(floorIndex);
+      } catch (err) {
+        log.warn('sky: outdoors mask unavailable, keeping the previous gate —', err?.message ?? err);
+        lastOutdoorsBakeResult = { ok: false, floorIndex, reason: String(err?.message ?? err) };
+        return lastOutdoorsBakeResult;
+      }
+      if (!grid?.spec || !grid?.data) {
+        lastOutdoorsBakeResult = { ok: false, floorIndex, reason: 'no outdoors grid for this floor' };
+        return lastOutdoorsBakeResult;
+      }
+      const { w, h } = grid.spec;
+      if (!(w > 0 && h > 0)) {
+        lastOutdoorsBakeResult = { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
+        return lastOutdoorsBakeResult;
+      }
+
+      // R8 would do, but RGBA/UnsignedByte matches every other DataTexture in
+      // this file and avoids a per-backend format-support question for one
+      // channel's worth of memory. Row 0 = minY (MaskGrid's own documented
+      // convention), and DataTexture defaults to flipY:false, so uv.v=0 samples
+      // row 0 = minY — which is exactly what `quadUvToWorld` hands it. Three
+      // spaces, one direction (see environmental-light.js's own orientation note).
+      const data = new Uint8Array(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        const v = grid.data[i] ?? 255;
+        data[i * 4 + 0] = v;
+        data[i * 4 + 1] = v;
+        data[i * 4 + 2] = v;
+        data[i * 4 + 3] = 255;
+      }
+      const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      // LINEAR so a doorway reads as a soft transition rather than a stair-step
+      // of mask texels — the sky fading in at a threshold is the whole point.
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.needsUpdate = true;
+
+      outdoorsTexture?.dispose();
+      outdoorsTexture = tex;
+      envLight.outdoorsTexNode.value = tex;
+      outdoorsRect = {
+        minX: grid.spec.x,
+        minY: grid.spec.y,
+        maxX: grid.spec.x + grid.spec.width,
+        maxY: grid.spec.y + grid.spec.height,
+      };
+      envLight.setOutdoorsRect(outdoorsRect);
+      lastOutdoorsBakeResult = { ok: true, floorIndex, cols: w, rows: h, rect: outdoorsRect };
+      return lastOutdoorsBakeResult;
+    }
     // QuadMesh (never a hand-rolled quad — same Y-flip law the present pass
     // documents at length below): the vendor owns v=0-at-top on both backends.
     const illumQuad = new THREE.QuadMesh(envLight.illumMaterial);
     const compositeQuad = new THREE.QuadMesh(envLight.compositeMaterial);
+
+    // ========================================================================
+    // post.bloom — the dual-filter bloom pyramid (2026-07-23, docs/planning/Bloom.md)
+    // ========================================================================
+    // MSA's first POST effect and the first citizen of the `post` stage. Reads
+    // scene.lit, builds a 6-mip HALF-RES blur pyramid, and additively composites
+    // an independently-weighted tight CORE (mips 0..2) + wide ATMOSPHERE (mips
+    // 3..5) band back into scene.lit BEFORE present — so the grade grades the
+    // bloom together with the scene. Every mip goes through the allocator law
+    // (screenSized: they are fractions of the drawing buffer, O(screen)). The
+    // bright-pass input is clamped by the SHARED _Outdoors gate (the same nodes
+    // envLight/grade use, so a mask rebake reaches bloom too — never a private
+    // texture() that would freeze on the placeholder).
+    const BLOOM_MIP_COUNT = 6;
+    const BLOOM_ATMO_TOP = 3; // composite reads mips[0] (core) and mips[3] (atmosphere)
+    const bloomNum = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
+    // Map a 0..1 spread knob → the tent-filter UV reach (resolution-independent).
+    const bloomSpreadToRadius = (s) => 0.0015 + Math.max(0, Math.min(1, Number(s) || 0)) * 0.0085;
+    const describeBloomMip = (w, h) => ({
+      resolvedW: Math.max(1, w),
+      resolvedH: Math.max(1, h),
+      screenSized: true,
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false,
+    });
+    // Mip k covers ceil(drawBuf / 2^(k+1)): m0 = half-res, each step halves again.
+    const bloomMipW = (k) => Math.max(1, Math.ceil(drawBufW / 2 ** (k + 1)));
+    const bloomMipH = (k) => Math.max(1, Math.ceil(drawBufH / 2 ** (k + 1)));
+    const bloomMips = [];
+    for (let k = 0; k < BLOOM_MIP_COUNT; k++) {
+      bloomMips.push(allocator.create(`bloom.mip${k}`, describeBloomMip(bloomMipW(k), bloomMipH(k))));
+    }
+    const bloom = buildBloomMaterials({
+      THREE,
+      litTexture: sceneLit.texture,
+      coreTexture: bloomMips[0].texture,
+      atmoTexture: bloomMips[BLOOM_ATMO_TOP].texture,
+      // Share envLight's outdoor-gate nodes (mask texture + rect uniforms), so the
+      // clamp tracks a mask rebake and can never gate a different half of the map
+      // than the sky light / grade do.
+      outdoorsTexNode: envLight.outdoorsTexNode,
+      uViewRect: envLight.uViewRect,
+      uOutdoorsRect: envLight.uOutdoorsRect,
+    });
+    const bloomBrightQuad = new THREE.QuadMesh(bloom.brightMaterial);
+    const bloomDownKarisQuad = new THREE.QuadMesh(bloom.downsampleKaris.material);
+    const bloomDownQuad = new THREE.QuadMesh(bloom.downsample.material);
+    const bloomUpQuad = new THREE.QuadMesh(bloom.upsampleMaterial);
+    const bloomCompositeQuad = new THREE.QuadMesh(bloom.compositeMaterial);
 
     // THROTTLE (2026-07-20 v5; kept as a SECONDARY optimization after v6
     // removed the dominant cost — the extra render() call, see uiShadow's own
@@ -1498,7 +1785,21 @@ export async function startVtPanViewer({
       // region stays active) on any failure — fail open, never a black frame.
       let currentFloor = null;
       try {
-        const sceneDoc = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+        // `globalThis.canvas`, NOT the bare `canvas` identifier (2026-07-23,
+        // ROOT-CAUSE FIX): this file declares its OWN local `let canvas` for
+        // the WebGPU render surface's DOM element (this function's own
+        // enclosing scope, see that declaration's header) — every bare
+        // `canvas` reference inside this closure resolves to THAT DOM
+        // element, never Foundry's global, so `canvas?.scene` was silently
+        // always `undefined` and this lookup ALWAYS fell to "no floor
+        // identified" regardless of scene/floor state. The established fix
+        // for exactly this shadow already exists elsewhere in this SAME file
+        // (`followFoundryCamera`'s `globalThis.canvas?.stage`) — this
+        // function and bakeWindField's own floor lookup just predated/missed
+        // that convention. `globalThis.canvas` bypasses the local shadow
+        // entirely and needs no `typeof` guard (a property read, unlike a
+        // bare identifier, never throws when unset).
+        const sceneDoc = globalThis.canvas?.scene ?? null;
         const floorsResult = getActiveSceneFloors(sceneDoc);
         currentFloor = floorsResult.ok ? floorsResult.floors.find((f) => f.index === view.floorIndex) : null;
       } catch (err) {
@@ -1737,6 +2038,17 @@ export async function startVtPanViewer({
      * never a crash, never a vanished light. */
     const candleWallClipCache = new Map();
 
+    /** THE ONE SHARED ANIMATION-CLOCK UNIFORM (2026-07-20, WebGPU-performance
+     * rework: "let's not leave any CPU stuff in if we can avoid it" —
+     * light-animation-clock.js's own header has the full mechanism). Every
+     * animated light's illumination/coloration material reads THIS SAME
+     * uniform node (shared, like uBackgroundColor/uDimColor/uBrightColor
+     * already are — an established pattern, not a new one) to compute its
+     * OWN `time` in-shader; written ONCE per frame below, never per-light —
+     * replaces what used to be a `computeAnimationTime` JS call PER
+     * ANIMATED LIGHT PER FRAME. */
+    const uGlobalTimeMs = THREE.TSL.uniform(THREE.TSL.float(0));
+
     /** The last-applied ambient colours (background/dim/bright) — tracked
      * for getPointLightsInfo() so the diagnostic reports what was ACTUALLY
      * used, not a recomputed guess (feedback_instruments_must_not_lie). */
@@ -1796,6 +2108,11 @@ export async function startVtPanViewer({
      *   value `computeAmbientColors` already takes elsewhere this frame.
      */
     function updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01, currentFloor) {
+      // THE ONE SHARED ANIMATION-CLOCK WRITE — once per FRAME, not once per
+      // LIGHT (see uGlobalTimeMs's own declaration for the full mechanism).
+      // env.time.tMs is the ONE clock (time/one-clock wall) — no new
+      // performance.now() anywhere in this pass.
+      uGlobalTimeMs.value = env.time.tMs;
       // darkness01 gates each light's OWN activation window (LightData.darkness
       // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
       // header for why this lives in the reader, not here).
@@ -1810,6 +2127,8 @@ export async function startVtPanViewer({
         ? buildCandleLightSources(candleLightState.anchors, {
             lightRadiusPx: candleLightState.params?.lightRadiusPx,
             colorHex: candleLightState.params?.color,
+            animationQuality: candleLightState.params?.animationQuality,
+            windResponse: candleLightState.params?.windResponse,
           })
         : [];
       // WALL-CLIPPING candle lights (2026-07-20) — candleLights' own shapePoints
@@ -1864,7 +2183,23 @@ export async function startVtPanViewer({
         // both materials) — unlike the BufferAttribute leak this pool's own
         // header documents (reference_bufferattribute_no_dispose_trap
         // memory), NodeMaterial/BufferGeometry genuinely free GPU state here.
-        if (entry && entry.animationType !== light.animation.type) {
+        // Quality is a graph-BUILD-time tier baked into the node graph (see
+        // candle-flicker.js / point-light-illumination.js on the no-uniform-
+        // gates rule), so a live quality change needs the SAME tear-down-and-
+        // recreate as a type change — folded into one condition rather than a
+        // second parallel path.
+        const animationQuality = light.animation?.quality ?? 0;
+        // FALLOFF MODEL — a graph-build-time choice baked into the node graph
+        // (point-light-illumination.js), so a change needs the same rebuild as
+        // type/quality. In practice constant per source (Foundry → 'foundry',
+        // candles → 'inverseSquare'), but keyed here for correctness.
+        const falloffModel = light.falloffModel ?? 'foundry';
+        if (
+          entry &&
+          (entry.animationType !== light.animation.type ||
+            entry.animationQuality !== animationQuality ||
+            entry.falloffModel !== falloffModel)
+        ) {
           lightScene.remove(entry.mesh);
           colorationScene.remove(entry.colorationMesh);
           entry.material.dispose();
@@ -1902,13 +2237,40 @@ export async function startVtPanViewer({
             uEdgeCount,
             uEdgeSoftMargin,
             edgePoints,
-            animationUniforms: animIllumUniforms,
+            uSpeedRaw: uIllumSpeedRaw,
+            uReverseSign: uIllumReverseSign,
+            uSeed: uIllumSeed,
+            uIntensityRaw: uIllumIntensityRaw,
+            uWindCenter: uIllumWindCenter,
+            uWindExposure: uIllumWindExposure,
+            uWindResponse: uIllumWindResponse,
           } = buildPointLightIlluminationMaterial({
             THREE,
             uBackgroundColor,
             uDimColor,
             uBrightColor,
             animation: animationEntry,
+            uGlobalTimeMs,
+            animationQuality,
+            falloffModel,
+            // SHARED WIND (Wind.md Tier 0/1) — OPT-IN, keyed on the light
+            // descriptor actually carrying a windExposure (candle lights do,
+            // via buildCandleLightSources' cluster-averaged exposure; plain
+            // Foundry lights don't, so they build none of this machinery).
+            windCenter: { x: light.x, y: light.y },
+            windExposure: light.windExposure,
+            windResponse: light.windResponse,
+            windHandle,
+            // SUN SHADOWS, PER-FRAGMENT (2026-07-24) — the light samples the
+            // baked field itself, at each pixel's own world position, so its
+            // background floor matches the shadowed ambient exactly where the
+            // shadow is. Replaces two failed per-light-scalar attempts (see
+            // point-light-illumination.js's own header): a single sample at the
+            // light's ORIGIN is binary, so the whole light flipped between soft
+            // and hard-edged as the sun swept the shadow edge across that one
+            // point. Sharing envLight's OWN rect uniform, never a second copy.
+            sunShadowTexture: sunShadows.texture,
+            uSunShadowRect: envLight.uSunShadowRect,
           });
           const mesh = new THREE.Mesh(geometry, material);
           mesh.frustumCulled = false;
@@ -1916,11 +2278,26 @@ export async function startVtPanViewer({
           // COLORATION (increment 3, 2026-07-19) — a SECOND Mesh SHARING this
           // SAME geometry object (no duplicate triangulation/BufferAttribute
           // — see point-light-coloration.js's own header), added to the
-          // SEPARATE colorationScene.
+          // SEPARATE colorationScene. Shares illumination's OWN `uRatio` node
+          // (the light's base, unjittered ratio — flicker-driven coloration
+          // animations jitter it themselves in-shader from this same value,
+          // see point-light-coloration.js's own header) — an established
+          // sharing pattern, not a new one (uBackgroundColor/uDimColor/
+          // uBrightColor are already shared the identical way).
           const colorationBuilt = buildPointLightColorationMaterial({
             THREE,
             albedoTexture: sceneColor.texture,
             animation: animationEntry,
+            uGlobalTimeMs,
+            uRatio,
+            animationQuality,
+            falloffModel,
+            // SHARED WIND (Wind.md Tier 0/1) — see the illumination material's
+            // own identical call, just above.
+            windCenter: { x: light.x, y: light.y },
+            windExposure: light.windExposure,
+            windResponse: light.windResponse,
+            windHandle,
           });
           const colorationMesh = new THREE.Mesh(geometry, colorationBuilt.material);
           colorationMesh.frustumCulled = false;
@@ -1945,15 +2322,35 @@ export async function startVtPanViewer({
             uColorationAttenuationEased: colorationBuilt.uAttenuationEased,
             uColorationAlpha: colorationBuilt.uColorationAlpha,
             uLightColor: colorationBuilt.uLightColor,
-            // ANIMATED LIGHTS — see this block's own comments above.
+            uShadows: colorationBuilt.uShadows,
+            // ANIMATED LIGHTS — GPU-ONLY (2026-07-20): these four raw
+            // uniforms are the ENTIRE per-light animation-config surface
+            // left for the CPU to write (Foundry's own animation.speed/
+            // reverse/seed/intensity — genuinely unavoidable, this data
+            // only exists on the CPU side, per light-animation-clock.js's
+            // own header) — `null` on both when this light isn't animated,
+            // so the per-frame writer below can skip it entirely. Separate
+            // sets for illumination vs coloration (two independent shader
+            // graphs, per point-light-coloration.js's own "small deliberate
+            // duplication" precedent) but always written the SAME values.
             animationType: light.animation.type,
+            animationQuality,
+            falloffModel,
             animationEntry,
-            animIllumUniforms,
-            animColorUniforms: colorationBuilt.animationUniforms,
-            // Lazily created in the per-frame update below (only flicker-
-            // driven animations need it) — see light-animation-clock.js's
-            // own header for why it must be cached, never rebuilt per-frame.
-            smoothNoise: null,
+            uIllumSpeedRaw,
+            uIllumReverseSign,
+            uIllumSeed,
+            uIllumIntensityRaw,
+            uIllumWindCenter,
+            uIllumWindExposure,
+            uIllumWindResponse,
+            uColorSpeedRaw: colorationBuilt.uSpeedRaw,
+            uColorReverseSign: colorationBuilt.uReverseSign,
+            uColorSeed: colorationBuilt.uSeed,
+            uColorIntensityRaw: colorationBuilt.uIntensityRaw,
+            uColorWindCenter: colorationBuilt.uWindCenter,
+            uColorWindExposure: colorationBuilt.uWindExposure,
+            uColorWindResponse: colorationBuilt.uWindResponse,
           };
           lightMeshes.set(light.sourceId, entry);
         }
@@ -1997,71 +2394,39 @@ export async function startVtPanViewer({
         // instead of the raw scene darkness01.
         const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
         const localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
+        // SUN SHADOWS are NOT applied here — the light's own material samples
+        // the baked field per-FRAGMENT (see this pool's buildPointLight
+        // IlluminationMaterial call above). Two earlier attempts DID scale
+        // these uniforms by a per-light scalar and both failed the same way: a
+        // light's origin is one point, so the whole light flipped between soft
+        // and hard-edged as the shadow edge swept across it. Deliberately left
+        // un-shadowed here; the shader owns it.
         entry.uBackgroundColor.value.set(...localAmbient.background);
         entry.uDimColor.value.set(...localAmbient.dim);
         entry.uBrightColor.value.set(...localAmbient.bright);
-        // ANIMATED LIGHTS — per-frame CPU driver (effects/lighting/
-        // animations/light-animation-clock.js). Every function there is
-        // pure; env.time.tMs is the ONE clock (time/one-clock wall) — no new
-        // performance.now() anywhere in this pass. `animatedRatio` overrides
-        // `light.ratio` ONLY for flicker/pulse-driven lights — the shader
-        // never needs to know it's animated, it just reads uRatio like any
-        // other light (see light-animation-clock.js's own header for why).
-        let animatedRatio = light.ratio;
+        // ANIMATED LIGHTS — GPU-ONLY (2026-07-20). `uRatio` ALWAYS gets the
+        // light's real, unjittered ratio now — any flicker/pulse jitter
+        // happens entirely in-shader (point-light-illumination.js's
+        // `computeSwitchColorBand`, called with a GPU-computed ratio node
+        // for animations that need it). The only per-frame CPU work left
+        // for an animated light is writing its four RAW config scalars
+        // (Foundry's own animation.speed/reverse/seed/intensity — this data
+        // only exists on the CPU side, genuinely unavoidable) — cheap plain
+        // float writes, no function calls, no noise generation, no per-
+        // light JS math. A non-animated light (the common case) does none
+        // of this at all.
         if (entry.animationEntry) {
-          const animTime = computeAnimationTime({
-            speedRaw: light.animation.speedRaw,
-            reverse: light.animation.reverse,
-            tMs: env.time.tMs,
-            seed: light.animation.seed,
-          });
-          let driverResult = null;
-          if (entry.animationEntry.cpuDriver === 'flicker') {
-            // Foundry's own torch constants (base-light-source.mjs's
-            // animateFlickering: scale:3, maxReferences:2048) — created ONCE
-            // per light and cached; a fresh table every frame would turn
-            // "smooth flicker" into white noise (SmoothNoise's own header).
-            if (!entry.smoothNoise)
-              entry.smoothNoise = new SmoothNoise({ amplitude: 1, scale: 3, maxReferences: 2048 });
-            driverResult = computeFlickerUniforms({
-              time: animTime,
-              // Per-animation formula (torch/siren: intensity/5; flame: fixed
-              // 1) — see registry.js's own `flickerAmplification` field doc.
-              amplification: entry.animationEntry.flickerAmplification?.(light.animation.intensityRaw) ?? 1,
-              ratio: light.ratio,
-              noise: entry.smoothNoise,
-            });
-          } else if (entry.animationEntry.cpuDriver === 'pulse') {
-            driverResult = computePulseUniforms({
-              time: animTime,
-              intensityRaw: light.animation.intensityRaw,
-              ratio: light.ratio,
-            });
-          }
-          if (driverResult) animatedRatio = driverResult.ratio;
-          // The well-known animation-uniform vocabulary (registry.js's own
-          // header) — a generic write so this file never needs to learn a
-          // new animation's specific uniform names as more are ported.
-          // `uRatio` here is a SEPARATE uniform from the scaffold's own
-          // illumination uRatio (set just below, unconditionally) — only
-          // present when an animation's OWN coloration seed needs ratio
-          // directly (e.g. flame's `scale(vUvs, 10*ratio)` — coloration has
-          // no ratio concept by default, see point-light-coloration.js's own
-          // header), and always gets the SAME jittered value.
-          for (const animUniforms of [entry.animIllumUniforms, entry.animColorUniforms]) {
-            if (!animUniforms) continue;
-            if (animUniforms.uTime) animUniforms.uTime.value = animTime;
-            if (animUniforms.uIntensityRaw) animUniforms.uIntensityRaw.value = light.animation.intensityRaw;
-            if (animUniforms.uRatio) animUniforms.uRatio.value = animatedRatio;
-            if (driverResult && 'brightnessPulse' in driverResult && animUniforms.uBrightnessPulse) {
-              animUniforms.uBrightnessPulse.value = driverResult.brightnessPulse;
-            }
-            if (driverResult && 'pulse' in driverResult && animUniforms.uPulse) {
-              animUniforms.uPulse.value = driverResult.pulse;
-            }
-          }
+          const reverseSign = light.animation.reverse ? -1 : 1;
+          if (entry.uIllumSpeedRaw) entry.uIllumSpeedRaw.value = light.animation.speedRaw;
+          if (entry.uIllumReverseSign) entry.uIllumReverseSign.value = reverseSign;
+          if (entry.uIllumSeed) entry.uIllumSeed.value = light.animation.seed;
+          if (entry.uIllumIntensityRaw) entry.uIllumIntensityRaw.value = light.animation.intensityRaw;
+          if (entry.uColorSpeedRaw) entry.uColorSpeedRaw.value = light.animation.speedRaw;
+          if (entry.uColorReverseSign) entry.uColorReverseSign.value = reverseSign;
+          if (entry.uColorSeed) entry.uColorSeed.value = light.animation.seed;
+          if (entry.uColorIntensityRaw) entry.uColorIntensityRaw.value = light.animation.intensityRaw;
         }
-        entry.uRatio.value = animatedRatio;
+        entry.uRatio.value = light.ratio;
         // NOT floored (2026-07-19, reversed same day — see
         // keyhole-attenuation-floor-reverted memory). A same-day fix
         // here (computeMinAttenuationFloor) forced every light's corona to a
@@ -2076,6 +2441,19 @@ export async function startVtPanViewer({
         const attenuationEased = easeAttenuation(light.attenuation01);
         entry.uAttenuationEased.value = attenuationEased;
         entry.uExposure.value = computeExposure(light.luminosity01);
+        // SHARED WIND (Wind.md Tier 0) — written every frame like every other
+        // per-light uniform above; `null` for any light the wind machinery
+        // wasn't built for (an ordinary Foundry light), so this is a no-op
+        // there. A candle's position never moves, but its windExposure CAN
+        // (an outdoors mask streaming in later — the same real trigger the
+        // flame geometry's own signature already rebuilds on), so this reads
+        // the live value rather than trusting what build time saw.
+        if (entry.uIllumWindCenter) entry.uIllumWindCenter.value.set(light.x, light.y);
+        if (entry.uIllumWindExposure) entry.uIllumWindExposure.value = light.windExposure ?? 1;
+        if (entry.uIllumWindResponse) entry.uIllumWindResponse.value = light.windResponse ?? 1;
+        if (entry.uColorWindCenter) entry.uColorWindCenter.value.set(light.x, light.y);
+        if (entry.uColorWindExposure) entry.uColorWindExposure.value = light.windExposure ?? 1;
+        if (entry.uColorWindResponse) entry.uColorWindResponse.value = light.windResponse ?? 1;
         // SOFT EDGE (point-light-illumination.js's own header): the SAME
         // reuse discipline as scratchArray above, via TRUNCATION rather than
         // growth — writeLightEdgePoints mutates entry.edgePoints' existing
@@ -2127,6 +2505,10 @@ export async function startVtPanViewer({
         entry.uColorationAlpha.value =
           light.hasColor || forceDefaultColor ? computeColorationAlpha(light.alpha01, 1) : 0;
         entry.uLightColor.value.set(light.color[0], light.color[1], light.color[2]);
+        // SHADOW (2026-07-21) — Foundry's own per-light "protect dark map
+        // areas from this light's hue" field, previously unread. 0 (default)
+        // is a no-op; see point-light-coloration.js's own header.
+        entry.uShadows.value = light.shadows01;
         // DIAGNOSTIC ONLY — not read by any shader. Lets getPointLightsInfo
         // report the true coloured/colourless split (colorationSummary), the
         // number that proves the colour-read fix is working: it should now be
@@ -2138,6 +2520,929 @@ export async function startVtPanViewer({
           entry.mesh.visible = false;
           entry.colorationMesh.visible = false;
         }
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // THE WIND FIELD BAKE (2026-07-22, THE RETHINK — docs/planning/
+    // Wind-Rethink.md §4). world/wind-bake.js + world/wind-enclosure.js own
+    // the pure math (rasterize walls, flood-fill for openness) — this is
+    // just getting it real Foundry wall data and a real GPU destination.
+    // Baked ONCE (on the viewer starting, a wall/door change, or the manual
+    // "Rebake" debug action — NOT per frame; a flood-fill over a few
+    // thousand cells is cheap but still real CPU work no render frame should
+    // ever pay for). The live ambient DIRECTION/SPEED (uWindDirectionDeg/
+    // uWindSpeed01) is a SEPARATE, per-frame-cheap uniform pair the candle/
+    // overlay materials read directly — changing it updates the moving noise
+    // instantly; `openness` only changes when geometry does, via a rebake.
+    // ------------------------------------------------------------------
+    const uWindDirectionDeg = THREE.TSL.uniform(THREE.TSL.float(0));
+    const uWindSpeed01 = THREE.TSL.uniform(THREE.TSL.float(0));
+    /**
+     * THE WIND HANDLE (world/wind-access.js, Wind.md §5.1) — the ONE object
+     * every wind consumer receives. Rebuilt (never mutated) by `bakeWindField`
+     * below; see its construction site for what goes in.
+     *
+     * Starts as a BAKE-LESS handle rather than `null`: a consumer constructed
+     * before the first bake (or in a scene where the bake never runs) still
+     * gets the organic gust/flutter field, exactly as it did when every
+     * optional `sampleWind` argument was simply omitted — degrade to "no baked
+     * structure", never to "no wind" and never to a crash. That also means no
+     * consumer needs a null check of its own.
+     *
+     * This replaces three separate closure locals (`windBakedField`,
+     * `windWallAvoidField`, `windLiveField`) that four call sites each had to
+     * forward correctly and by hand. `wind/handle-only` (tools/verify-structure
+     * .mjs) now fails the build if anything outside world/ names them again.
+     */
+    let windHandle = createWindHandle();
+    /** Incremented on every bake — a consumer holding derived state (a built
+     * material, an uploaded storage buffer) compares against the version it
+     * built with. This is the mechanical fix for the class of bug where a mesh
+     * kept a material whose baked texture was frozen at the startup bake
+     * forever (see this file's own `updateWindFieldOverlay` for the hand-found
+     * instance that motivated it). */
+    let windHandleVersion = 0;
+    /** The two baked wind DataTextures, kept only so the NEXT bake can dispose
+     * them (the handle hands them out but does not own their lifetime — a
+     * frozen value object has no dispose step, and inventing one would give the
+     * handle a second responsibility it does not need). Null until the first
+     * bake. */
+    let bakedOpennessTexture = null;
+    let bakedWallAvoidTexture = null;
+    // NOTE — the raw per-cell arrays (`solid`/`openness`/wall-avoidance) used to
+    // live here as their own closure local, pushed to each consumer separately.
+    // They are now `windHandle.cells` (2026-07-23, Wind.md §5.1): ONE
+    // geometry-derived grid (2026-07-22, THE RETHINK, Wind-Rethink.md §4) that
+    // already replaced FIVE separate ones, finally travelling with the rest of
+    // the field instead of beside it. `openness` is
+    // `world/wind-enclosure.js#floodFillOpenFromBoundary`'s output downsampled
+    // to this resolution — 1 where a cell reaches the map's open exterior
+    // through open space (walls/doors only), 0 where sealed; `solid` is the
+    // coarse wall rasterization, kept for the wind+particle probe's display
+    // (Tier 2's `windSolidMaskTexture` below rasterizes its own, more
+    // conservative mask independently — untouched by that rethink). The
+    // particle engines read these as a STORAGE BUFFER rather than trusting a
+    // texture sample inside a compute shader, a path never verified in this
+    // renderer (the compute-spike proved storage buffers, not textures).
+
+    // THE MASK-DRIVEN WIND REBAKE TRIGGER (2026-07-21). Root cause of a real,
+    // author-reported bug: `bakeWindField('startup')` runs synchronously very
+    // early — before the outdoors mask has any realistic chance to have
+    // streamed in through the async VT page-decode pipeline (mask-authority's
+    // own header: "STALENESS IS LAZY, NOT SCHEDULED... products recompute on
+    // the NEXT READ" — a PULL model, no push notification exists to wire
+    // into). The four PRE-EXISTING rebake reasons ('startup'/'manual'/
+    // 'wall:*'/'ambient-change') never included "the mask data changed" —
+    // that dependency was simply never wired, so a wind-exposure snapshot
+    // baked before real mask content arrived stayed WRONG for the entire
+    // session, in a room that was correctly, unambiguously painted (memory:
+    // keyhole-wind-wake-turbulence's own addendum — this is the fix for the
+    // root cause it diagnosed). THROTTLED, not per-frame: mask-authority's
+    // own `version` bumps on every ingested page (there can be dozens during
+    // a scene's initial decode burst), and re-running the ~64-iteration
+    // relaxation on every single one would visibly cost real time during
+    // exactly the moment the app is already busiest. Polling a plain integer
+    // (`getMaskAuthorityVersion()`) is essentially free; the THROTTLE bounds
+    // how often a detected change actually triggers the (cheap-but-not-free)
+    // rebake, not how often it's checked.
+    const MASK_VERSION_POLL_INTERVAL_MS = 500;
+    let lastMaskVersionPollMs = -Infinity;
+    let lastSeenMaskVersion = null;
+
+    /**
+     * Called once per frame (see renderFrame): if enough wall-clock time has
+     * passed AND mask-authority's own version counter has moved since the
+     * last bake, rebake the wind field — the mask-driven analogue of the
+     * existing wall/door-change auto-rebake, closing the ONE gap that watcher
+     * never covered.
+     * @param {number} nowMs - the shared clock's own tMs (never a fresh
+     *   `performance.now()` — core/frame-clock.js is the one clock).
+     */
+    function pollMaskAuthorityForWindRebake(nowMs) {
+      if (nowMs - lastMaskVersionPollMs < MASK_VERSION_POLL_INTERVAL_MS) return;
+      lastMaskVersionPollMs = nowMs;
+      const v = getMaskAuthorityVersion();
+      if (v == null) return; // unwired (torture fixture) — inert, never bakes
+      if (lastSeenMaskVersion === null) {
+        lastSeenMaskVersion = v;
+        // FIRST OBSERVATION — nothing to compare for the WIND (which wants a
+        // change), but the SKY wants the mask itself, and this is the earliest
+        // moment one is known to exist. Baking here is what stops the sky gate
+        // sitting on its 1×1 placeholder until something unrelated happens to
+        // edit a mask. The wind's own "not a change, don't rebake" reasoning is
+        // unaffected and unchanged.
+        bakeOutdoorsTexture(view?.floorIndex ?? 0);
+        return;
+      }
+      if (v === lastSeenMaskVersion) return;
+      lastSeenMaskVersion = v;
+      bakeWindField('mask-change');
+      // The sky's gate is derived from the same masks, so it goes stale at
+      // exactly the same moments. One trigger, two bakes — never two polls that
+      // could drift into disagreeing about which mask version is current.
+      bakeOutdoorsTexture(view?.floorIndex ?? 0);
+    }
+
+    // ------------------------------------------------------------------
+    // WIND.MD TIER 2 — THE TRANSIENT SIM (world/wind-sim.js + wind-sim-gpu.js).
+    // D_live: ping-pong render targets holding the CURRENT transient, plus a
+    // THIRD, STABLE "published" target every consumer binds to ONCE (see
+    // wind-sim-gpu.js#buildWindPublishMaterial's own header for why a
+    // ping-pong texture identity cannot be baked into a dozen consumer
+    // shader graphs the way `bakedField` is). All (re)allocated together in
+    // bakeWindField()'s regrid branch — cols/rows only ever change with the
+    // scene/grid-size, the SAME rare event that already forces a Tier 1
+    // rebake, never per frame.
+    // ------------------------------------------------------------------
+    let windSolidMaskTexture = null; // R8-ish DataTexture, NEAREST filtered, 1=solid
+    let windSimGridKey = null; // `${cols}x${rows}` — when this changes, the RTs below get reallocated
+    let windPingRT = null;
+    let windPongRT = null;
+    let windPublishRT = null;
+    let windSimMaterials = null; // { advectDissipate, splat, relax, publish, dispose() } | null (rebuilt lazily)
+    let windPingIsCurrent = true; // which of ping/pong currently holds the LATEST D_live
+    let windThawUntilMs = 0; // sim ticks while nowMs < this; frozen otherwise
+    let windIsThawed = false; // tracked explicitly so the freeze<->thaw transition logs exactly once each way
+    let windForceThaw = false; // debug/perf-lab override — see setVtPanViewerWindForceThaw
+    /** @type {import('../world/index.js').WindContributor[]} */
+    let windActiveImpulses = []; // oneShot contributors (doors, test gusts), pruned each tick
+
+    /**
+     * Read walls, rasterize, relax, upload — see this block's own header.
+     * NOT per-floor scoped yet (`readSceneWallSegments(null)` reads every
+     * wall regardless of level) — a deliberate, honest simplification for
+     * this first cut (see `scene-wall-clip.js`'s own per-floor precedent
+     * for the natural follow-up), not a silent gap: most scenes have no
+     * per-floor wall scoping at all, and a wrongly-included wall from
+     * another floor just over-blocks the bake slightly, never crashes it.
+     * Never throws — a bake failure logs and leaves the PREVIOUS bake (or
+     * none) in place, exactly like every other "read live Foundry state"
+     * step in this file.
+     *
+     * @param {string} [reason] - WHY this bake ran ('manual' | 'ambient-change'
+     *   | 'wall:createWall' | 'wall:updateWall' | 'wall:deleteWall' |
+     *   'mask-change' — a mask-authority version bump, throttled via
+     *   `pollMaskAuthorityForWindRebake`; see that function's own header for
+     *   the bug this closes | 'floor-change' — `setFloorIndex` re-baking so
+     *   the per-floor wall scoping below never goes stale across a floor
+     *   switch, see that function's own header for the bug this closes)
+     *   — stamped into the log line only, so opening a
+     *   door in a live Foundry session shows up as its OWN log entry distinct
+     *   from a manual Rebake click or
+     *   an ambient-dial change. An instrument that only ever says "baked",
+     *   never "baked BECAUSE", can't prove the auto-invalidation hook (boot.js)
+     *   actually fired versus the author coincidentally having clicked Rebake
+     *   moments earlier (feedback_instruments_must_not_lie).
+     */
+    function bakeWindField(reason = 'manual') {
+      try {
+        const gridSizePixels = readGridSizePixels().gridSizePixels;
+        // CONSUMPTION-RESOLUTION grid — what the particle/gust storage
+        // buffers and the sampleWind texture actually sample.
+        //
+        // BOUNDED TO THE REAL SCENE RECT, NOT THE PADDED CANVAS (2026-07-23,
+        // author: "Don't render the wind particles or the overlay outside of
+        // the scene... We need the grid to align with the grid of the actual
+        // scene too"). This was previously `sceneX:0, sceneY:0, sceneWidth:
+        // dimensions.width, sceneHeight: dimensions.height` — `dimensions.
+        // width`/`.height` are `foundry/scene-geometry.js#computeSceneDimensions`'s
+        // PADDED canvas size (`sceneWidth + 2×gridSnappedPadding`, that
+        // module's own header: "the canvas is ~1.5× the art, and the art is
+        // *inset* at `sceneRect`, not at the origin"), and `0,0` is the
+        // padded rect's OWN corner, not the real map's. So the wind grid was
+        // computing openness across the padding margin surrounding the map
+        // too — walls/doors never exist out there, so it read as wide-open
+        // exterior, and particles/the overlay happily filled it. FIX: origin
+        // + extent now come from `dimensions.sceneX/sceneY/sceneWidth/
+        // sceneHeight` — the REAL playable rect (`Scene#getDimensions()`'s
+        // own `sceneRect`, replicated verbatim in `computeSceneDimensions`).
+        // Bonus: `sceneX`/`sceneY` are `Math.ceil(padding×sceneWidth/
+        // gridSize)×gridSize` minus `shiftX`/`shiftY` (that function's own
+        // doc) — an exact multiple of Foundry's OWN grid square size on any
+        // scene that hasn't been manually grid-shifted (`shiftX`/`shiftY`
+        // default 0), so this origin lands ON a real Foundry grid line, same
+        // phase as `cellSize` being an exact fraction of `gridSizePixels`
+        // below — the wind grid's cell boundaries now coincide with the
+        // map's own grid squares, not just its extent.
+        //
+        // RESOLUTION (2026-07-23, author: "make the wind resolution
+        // higher") — QUARTERED (was HALVED): `gridSizePixels/4` so each
+        // Foundry grid square gets a 4×4 sub-grid instead of 2×2, same
+        // "narrow corridor still gets a real open centreline cell" reasoning
+        // as the original halving, just finer. HONEST COST: this ~4×s the
+        // consumption grid's own cell count (both axes double, same 512-cell
+        // safety cap as before — a map whose long axis already exceeds ~128
+        // true grid squares was ALREADY hitting that cap at the old /2 and
+        // gets no finer here; the cap itself is intentionally untouched, a
+        // deliberate ceiling on worst-case bake cost, not a bug), and the
+        // FINE flood-fill grid below (OPENNESS_REFINE×) scales by the exact
+        // same ~4× on top of that — a real, one-time-per-bake CPU cost
+        // increase (wall/door/floor changes, never per-frame), traded
+        // deliberately for the finer wind detail that was asked for.
+        const gridSpec = computeWindBakeGridSpec({
+          sceneX: dimensions.sceneX,
+          sceneY: dimensions.sceneY,
+          sceneWidth: dimensions.sceneWidth,
+          sceneHeight: dimensions.sceneHeight,
+          gridSizePixels: gridSizePixels / 4,
+          maxAxisCells: 512,
+        });
+        // PER-FLOOR WALL SCOPING (2026-07-22, live author report: "reading
+        // the wall from the floor above"). `readSceneWallSegments(null)`
+        // used to read EVERY wall on the scene regardless of level — a
+        // known, previously-documented simplification. On a multi-floor
+        // scene, that means an UPPER floor's interior walls silently sealed
+        // the GROUND floor's own openness computation, even on a ground
+        // floor genuinely wall-free — exactly the "no walls at all, wind
+        // still dies" report, except this time the dead-end was real wall
+        // data from the wrong floor, not the painted mask. FIX: resolve the
+        // CURRENTLY VIEWED floor's own Level id the SAME way candle
+        // wall-clipping already does (`updatePointLightMeshes`'s own
+        // `currentFloor.id`, sourced from `getActiveSceneFloors` matched
+        // against `view.floorIndex` — `readElevationFilteredDarknessRegions`'s
+        // own header has the full precedent), and scope the wall read to
+        // it. `readSceneWallSegments`'s own `levelId` param already treats
+        // an EMPTY `wall.levels` set as "applies to every floor" (Foundry's
+        // own convention for an unscoped exterior/structural wall — those
+        // still count everywhere); only a wall an author explicitly scoped
+        // to ANOTHER floor is excluded now. Falls back to unscoped
+        // (byte-identical to the prior behaviour) if the floor can't be
+        // identified — never a harder failure than before this fix.
+        let currentLevelIdForWind = null;
+        // WHY the lookup landed where it did, not just what it returned —
+        // (2026-07-23, live: LIVE TEST #3 showed `currentLevelIdForWind`
+        // resolving to null on a FRESH LOAD, no floor switch involved, which
+        // the floor-switch fix above cannot explain — see that memory entry
+        // for the full trail). Every branch that can leave the id null now
+        // names itself, so the NEXT log line says which of "getActiveScene
+        // Floors failed", "view isn't set yet", or "no floor in the array
+        // matched view.floorIndex" (and if the last one, lists what indices
+        // WERE available) actually happened, instead of the caller having to
+        // re-derive it by reading code again.
+        let windLevelLookupDiag = 'resolved';
+        try {
+          // `globalThis.canvas`, NOT the bare `canvas` identifier — SAME
+          // root-cause shadow as `readElevationFilteredDarknessRegions`
+          // above (see that function's own comment for the full
+          // explanation): this file's local `let canvas` (the WebGPU render
+          // surface's DOM element) shadowed Foundry's global here too, which
+          // is EXACTLY why `windLevelLookupDiag` kept reporting
+          // "getActiveSceneFloors failed: no active scene" on a fresh load
+          // with a real, open scene — `canvas?.scene` was reading the DOM
+          // element's (nonexistent) `.scene`, never Foundry's actual scene.
+          const sceneDocForWind = globalThis.canvas?.scene ?? null;
+          const floorsResultForWind = getActiveSceneFloors(sceneDocForWind);
+          if (!floorsResultForWind.ok) {
+            windLevelLookupDiag = `getActiveSceneFloors failed: ${floorsResultForWind.error}`;
+          } else if (!view) {
+            windLevelLookupDiag = 'view is not set yet';
+          } else {
+            const currentFloorForWind = floorsResultForWind.floors.find((f) => f.index === view.floorIndex);
+            if (!currentFloorForWind) {
+              const available = floorsResultForWind.floors.map((f) => `${f.index}:${f.id}`).join(', ');
+              windLevelLookupDiag = `no floor matched view.floorIndex=${view.floorIndex} — available: [${available}]`;
+            } else {
+              currentLevelIdForWind = currentFloorForWind.id ?? null;
+            }
+          }
+        } catch (err) {
+          windLevelLookupDiag = `threw: ${err?.message ?? err}`;
+        }
+        const walls = readSceneWallSegments(currentLevelIdForWind);
+        // TOTAL (unscoped) wall count, purely for the diagnostics line below
+        // (2026-07-23 — this bake's own scoping was hard to trust from the
+        // log alone: "N wall segments" never said whether N was ALREADY the
+        // filtered count or the whole scene, so a scoping failure that
+        // silently fell back to unscoped was indistinguishable from correct
+        // scoping that simply found few walls on this floor. Reading
+        // `walls.length` next to the RAW `canvas.scene.walls.size` makes
+        // that distinction a one-line fact instead of a guess.
+        const totalWallCountForWind = globalThis.canvas?.scene?.walls?.size ?? null;
+        // A SECOND, independent question: even when `currentLevelIdForWind`
+        // resolves, is `wall.levels` actually the queryable `Set` `readScene
+        // WallSegments`'s own filter assumes (`typeof levels.has ===
+        // 'function'`)? A live document should always give a real Set
+        // (SceneLevelsSetField, verified in Foundry's own source), but this
+        // makes that assumption checkable instead of assumed — a Proxy or
+        // serialized wall shape that isn't a real Set would silently make
+        // EVERY wall read as "unscoped" (the filter's own guard clause
+        // quietly no-ops), independent of whether the level id above
+        // resolved correctly, and nothing about that would ever throw.
+        let wallLevelsShapeDiag = 'n/a';
+        try {
+          const rawWalls = globalThis.canvas?.scene?.walls;
+          if (rawWalls) {
+            let taggedCount = 0;
+            let sampleShape = null;
+            for (const w of rawWalls) {
+              const lv = w?.levels;
+              const size = typeof lv?.size === 'number' ? lv.size : Array.isArray(lv) ? lv.length : 0;
+              if (size > 0) {
+                taggedCount++;
+                if (!sampleShape) sampleShape = `${lv?.constructor?.name ?? typeof lv}, has() is ${typeof lv.has}`;
+              }
+            }
+            wallLevelsShapeDiag = `${taggedCount} walls carry a non-empty levels field (sample shape: ${sampleShape ?? 'none tagged'})`;
+          }
+        } catch (err) {
+          wallLevelsShapeDiag = `threw: ${err?.message ?? err}`;
+        }
+        const cols = gridSpec.cols;
+        const rows = gridSpec.rows;
+        // The COARSE solid mask — kept ONLY for Tier 2's windSolidMaskTexture
+        // (world/wind-sim-gpu.js's transient sim, untouched by this rethink)
+        // and the probe's diagnostic display. `superCover:true` (the
+        // conservative default) is fine for both; neither depends on fine
+        // openings surviving the way `openness` below does.
+        const solidMask = rasterizeWallsToGrid(walls, gridSpec);
+
+        // WALL-AVOIDANCE DEFLECTION (2026-07-23, author: "walls perpendicular
+        // to the wind aren't preventing the wind from penetrating... how can
+        // we prevent wind from crossing walls with confidence? How can we
+        // divert and diminish its strength so that it breaks around objects
+        // instead of just losing all its energy") — see `world/wind-
+        // enclosure.js`'s own "WALL-AVOIDANCE DEFLECTION" section header for
+        // the full reasoning; this is that module's three functions run
+        // straight off the COARSE `solidMask` above (no fine-grid pass
+        // needed here, unlike openness — see that header for why). One extra
+        // BFS per bake, same rare-event trigger as everything else in this
+        // block.
+        const wallDistance = distanceFromNearestSolid(solidMask, cols, rows);
+        const wallAvoidDir = wallAvoidanceDirectionFromDistance(wallDistance, cols, rows);
+        const wallProximity = wallProximityFromDistance(wallDistance, { reachCells: WALL_DEFLECT_REACH_CELLS });
+
+        // OPENNESS (2026-07-22, THE RETHINK — docs/planning/Wind-Rethink.md
+        // §4) — THE single geometry-derived answer to "how much outside wind
+        // reaches this cell," replacing what used to be five separate
+        // mechanisms. Computed on a grid OPENNESS_REFINE× finer than
+        // `gridSpec`, rasterized WITHOUT the diagonal over-seal guard
+        // (`superCover:false`) — at coarse, over-sealed resolution a curved
+        // or narrow real opening can fuse into one solid band
+        // (author-confirmed live: removing physical door walls did nothing,
+        // because the entrance GEOMETRY around them — not the doors
+        // themselves — had already sealed at that resolution). A leak in a
+        // fine, non-over-sealed CONNECTIVITY mask is harmless: there is no
+        // solve left for it to corrupt, it can only help wind find a real
+        // opening. `floodFillOpenFromBoundary` then answers "is this cell
+        // connected to the map's open EXTERIOR through open space" purely
+        // from walls/doors — the painted `_Outdoors` mask is NOT consulted
+        // anywhere in this block, by design: the author's decisive
+        // experiment deleted every wall in the scene and found wind still
+        // died at the painted mask's boundary, proving the mask — not
+        // geometry — had been deciding wind presence. This binary result
+        // (`fineOpen`) feeds the graded door-distance falloff just below,
+        // which produces the FINAL `opennessArray` — see that block's own
+        // header. `downsampleMax`/`downsampleDistanceMin` (any fine cell in
+        // a coarse cell's footprint reached/closest ⇒ the coarse cell
+        // reflects it — a door that only opens part of a coarse cell still
+        // admits wind) bring everything back to `gridSpec`'s own resolution
+        // for everything downstream.
+        const OPENNESS_REFINE = 4;
+        // MAP-EDGE OPENNESS MARGIN (2026-07-23, author: "a building, fully
+        // enclosed with walls, sits right on the edge of the map... wind
+        // just starts inside the building") — see `cropGridMargin`'s own
+        // header (world/wind-enclosure.js) for the full mechanism: the fine
+        // grid used for the flood-fill below is rasterized on a rect padded
+        // a few cells beyond the real scene rect on every side, so even an
+        // edge-flush wall gets a genuinely open neighbour to separate it
+        // from the grid's own outer border (which `floodFillOpenFromBoundary`
+        // otherwise treats as automatically "outside"). `fineCols`/`fineRows`
+        // below are the TRUE (unpadded) fine size — the margin is cropped
+        // back off immediately after each flood-fill and never reaches
+        // anything downstream, so the published grid's own extent is
+        // byte-identical to before this fix (still exactly the real scene
+        // rect — the earlier "don't leak into the padding margin" fix stays
+        // fully intact).
+        const OPENNESS_MARGIN_CELLS = OPENNESS_REFINE * 2;
+        const fineCellSize = gridSpec.cellSize / OPENNESS_REFINE;
+        const fineCols = cols * OPENNESS_REFINE;
+        const fineRows = rows * OPENNESS_REFINE;
+        const paddedFineSpec = {
+          minX: gridSpec.minX - OPENNESS_MARGIN_CELLS * fineCellSize,
+          minY: gridSpec.minY - OPENNESS_MARGIN_CELLS * fineCellSize,
+          cols: fineCols + OPENNESS_MARGIN_CELLS * 2,
+          rows: fineRows + OPENNESS_MARGIN_CELLS * 2,
+          cellSize: fineCellSize,
+        };
+        const paddedFineSolid = rasterizeWallsToGrid(walls, paddedFineSpec, { superCover: false });
+        const paddedFineOpen = floodFillOpenFromBoundary(paddedFineSolid, paddedFineSpec.cols, paddedFineSpec.rows);
+        const fineOpen = cropGridMargin(
+          paddedFineOpen,
+          paddedFineSpec.cols,
+          paddedFineSpec.rows,
+          OPENNESS_MARGIN_CELLS
+        );
+
+        // DOOR-DISTANCE PENETRATION FALLOFF (2026-07-22, same day as binary
+        // openness — author, immediately after confirming binary worked
+        // live: "opening a door now floods the interior with wind... the
+        // effect of the wind drops off as it travels further away from the
+        // nearest door that is open... we'd have something very subtle"). A
+        // SECOND fine flood-fill, on a mask where a door — open OR closed —
+        // ALWAYS counts as a barrier (`deriveWallBlocksExterior`,
+        // `foundry/scene-walls.js`), answers "is this cell reachable WITHOUT
+        // ever crossing a door at all" — the genuinely outdoor, in-the-open
+        // space the "looks amazing outside" look depends on; it never falls
+        // off. `distanceFromDoorThreshold` then measures how far a cell
+        // that's ONLY reachable via an open door has travelled from that
+        // door's own threshold, and `opennessFalloffFromDistance` turns both
+        // into the FINAL per-cell openness — 1 outdoors/at the door, fading
+        // over `DOOR_FALLOFF_REACH_CELLS`, 0 wherever binary openness was
+        // already 0. Same fine geometry, reused; only whether a door counts
+        // as passable differs between the two rasterizations.
+        const wallsExteriorView = walls.map((w) => ({ ...w, solid: w.blocksExterior }));
+        const paddedFineSolidExterior = rasterizeWallsToGrid(wallsExteriorView, paddedFineSpec, { superCover: false });
+        const paddedFineOpenExterior = floodFillOpenFromBoundary(
+          paddedFineSolidExterior,
+          paddedFineSpec.cols,
+          paddedFineSpec.rows
+        );
+        const fineOpenExterior = cropGridMargin(
+          paddedFineOpenExterior,
+          paddedFineSpec.cols,
+          paddedFineSpec.rows,
+          OPENNESS_MARGIN_CELLS
+        );
+        const fineDoorDistance = distanceFromDoorThreshold(fineOpen, fineOpenExterior, fineCols, fineRows);
+        const doorDistance = downsampleDistanceMin(fineDoorDistance, cols, rows, OPENNESS_REFINE);
+        const exteriorOpenness = downsampleMax(fineOpenExterior, cols, rows, OPENNESS_REFINE);
+        const opennessArray = opennessFalloffFromDistance(doorDistance, exteriorOpenness, {
+          reachCells: DOOR_FALLOFF_REACH_CELLS * OPENNESS_REFINE,
+        });
+
+        // RGBA — B carries openness (the SAME channel `windReach` used
+        // before the rethink, so nothing about the texture's shape moved).
+        // R/G are always written 0 — the now-deleted wall-relaxation used to
+        // carry dvx/dvy there; kept well-defined rather than repurposed
+        // because Tier 2's advect pass independently reads this SAME
+        // texture's `.xy` as a transport velocity (world/wind-sim-gpu.js) —
+        // see world/wind-field.js#sampleWind's own header for the full
+        // channel contract. A NOW CARRIES `exteriorOpenness` (2026-07-23,
+        // author: "turbulence indoors needs to be happening only when that
+        // section becomes exposed to an open door... rooms that have their
+        // doors shut are still nearly still") — was "unused, always 1" until
+        // now; `sampleWind` needs a way to tell "genuinely outdoors" apart
+        // from "indoor, reached only via an open door" (both can read
+        // `openness` near 1), and `exteriorOpenness` — already computed just
+        // above for the door-distance falloff, previously discarded after
+        // use — is exactly that distinction, already sitting right here.
+        // HalfFloatType matches this project's OWN established choice for
+        // float-ish render targets (sceneColor/sceneIllum/etc), not
+        // FloatType, which has patchier linear-filtering support across
+        // backends.
+        const n = cols * rows;
+        const data = new Uint16Array(n * 4);
+        const zeroHalf = THREE.DataUtils.toHalfFloat(0);
+        for (let i = 0; i < n; i++) {
+          data[i * 4 + 0] = zeroHalf;
+          data[i * 4 + 1] = zeroHalf;
+          data[i * 4 + 2] = THREE.DataUtils.toHalfFloat(opennessArray[i] ?? 1);
+          data[i * 4 + 3] = THREE.DataUtils.toHalfFloat(exteriorOpenness[i] ?? 1);
+        }
+        bakedOpennessTexture?.dispose();
+        const tex = new THREE.DataTexture(data, cols, rows, THREE.RGBAFormat, THREE.HalfFloatType);
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.needsUpdate = true;
+        bakedOpennessTexture = tex;
+
+        // THE WALL-AVOIDANCE TEXTURE — a SEPARATE texture from the openness one
+        // (no channel left to repurpose there: B carries openness, A carries
+        // exteriorOpenness, and R/G must stay well-defined zeros for Tier 2's
+        // independent `.xy` read). R=dirX, G=dirY, B=proximity; A always 1,
+        // unused — matching the openness texture's own "pad to RGBA, only some
+        // channels meaningful" convention. Same cols/rows/origin/cellSize, so
+        // the handle hands both to `sampleWind` with the IDENTICAL UV maths.
+        const wallAvoidData = new Uint16Array(n * 4);
+        const oneHalf = THREE.DataUtils.toHalfFloat(1);
+        for (let i = 0; i < n; i++) {
+          wallAvoidData[i * 4 + 0] = THREE.DataUtils.toHalfFloat(wallAvoidDir.dirX[i] ?? 0);
+          wallAvoidData[i * 4 + 1] = THREE.DataUtils.toHalfFloat(wallAvoidDir.dirY[i] ?? 0);
+          wallAvoidData[i * 4 + 2] = THREE.DataUtils.toHalfFloat(wallProximity[i] ?? 0);
+          wallAvoidData[i * 4 + 3] = oneHalf;
+        }
+        bakedWallAvoidTexture?.dispose();
+        const wallAvoidTex = new THREE.DataTexture(wallAvoidData, cols, rows, THREE.RGBAFormat, THREE.HalfFloatType);
+        wallAvoidTex.minFilter = THREE.LinearFilter;
+        wallAvoidTex.magFilter = THREE.LinearFilter;
+        wallAvoidTex.wrapS = THREE.ClampToEdgeWrapping;
+        wallAvoidTex.wrapT = THREE.ClampToEdgeWrapping;
+        wallAvoidTex.needsUpdate = true;
+        bakedWallAvoidTexture = wallAvoidTex;
+
+        // (The raw per-cell arrays every non-texture consumer reads — the two
+        // particle kernels' storage buffers and the wind probe — now ride into
+        // the handle below as its `cells`, rather than living in a second
+        // closure local that had to be pushed around separately.)
+
+        // TIER 2's OWN SOLID MASK — a plain 0/1 upload (NOT the dvx/dvy
+        // deviation above) so the sim's relax pass can tell which GPU texel
+        // neighbours are walls. RGBA8 (not R8 — same "universally supported"
+        // reasoning as the RGBA-not-RG choice just above) with NEAREST
+        // filtering — LINEAR would blur a wall/open boundary into a
+        // fractional "half solid" reading right where relax's into-wall
+        // cancellation needs a crisp 0 or 1 (world/wind-sim-gpu.js#
+        // buildWindRelaxMaterial reads this texture at exactly the cell
+        // boundary every neighbour sample).
+        windSolidMaskTexture?.dispose();
+        const solidData = new Uint8Array(n * 4);
+        for (let i = 0; i < n; i++) {
+          const v = solidMask[i] ? 255 : 0;
+          solidData[i * 4 + 0] = v;
+          solidData[i * 4 + 1] = v;
+          solidData[i * 4 + 2] = v;
+          solidData[i * 4 + 3] = 255;
+        }
+        const solidTex = new THREE.DataTexture(solidData, cols, rows, THREE.RGBAFormat, THREE.UnsignedByteType);
+        solidTex.minFilter = THREE.NearestFilter;
+        solidTex.magFilter = THREE.NearestFilter;
+        solidTex.wrapS = THREE.ClampToEdgeWrapping;
+        solidTex.wrapT = THREE.ClampToEdgeWrapping;
+        solidTex.needsUpdate = true;
+        windSolidMaskTexture = solidTex;
+
+        // TIER 2's PING/PONG/PUBLISH RENDER TARGETS — only reallocated on a
+        // genuine REGRID (cols/rows changed, or first bake ever). Neither
+        // `screenSized` nor `allowWorldScale`: cols/rows are ALWAYS <=256
+        // (Tier 1's own [64,256] clamp, computeWindBakeGridSpec), so this
+        // sails under the Keyhole law's plain 2048px cap with no exception
+        // needed — a genuinely tiny, fixed-size allocation regardless of map
+        // size (Wind.md §2's own "half a megabyte at the worst case" claim).
+        const gridKey = `${cols}x${rows}`;
+        if (gridKey !== windSimGridKey) {
+          allocator.dispose(windPingRT);
+          allocator.dispose(windPongRT);
+          allocator.dispose(windPublishRT);
+          const describeWindSimRT = () => ({
+            resolvedW: cols,
+            resolvedH: rows,
+            type: THREE.HalfFloatType,
+            format: THREE.RGBAFormat,
+            colorSpace: THREE.NoColorSpace,
+            filter: 'linear',
+            depth: false,
+          });
+          windPingRT = allocator.create('wind.sim.ping', describeWindSimRT());
+          windPongRT = allocator.create('wind.sim.pong', describeWindSimRT());
+          windPublishRT = allocator.create('wind.sim.publish', describeWindSimRT());
+          // A fresh regrid means fresh GPU memory of UNDEFINED content —
+          // clear all three explicitly so a NaN bit-pattern can never enter
+          // the sim (it would propagate through every multiply forever). A
+          // FRESH local Color, deliberately not the file's shared
+          // `_clearColorScratch` (declared further down, line ~3237) — this
+          // function has ALREADY bitten a temporal-dead-zone bug once (see
+          // this file's own "THE INITIAL WIND BAKE... must run here, not
+          // earlier" comment) from reaching for a `let`/`const` declared
+          // below it; a throwaway allocation here (rare — regrid only, never
+          // per frame) is cheaper than re-earning that lesson.
+          const prevRT = renderer.getRenderTarget();
+          const prevClearColor = renderer.getClearColor(new THREE.Color());
+          const prevClearAlpha = renderer.getClearAlpha();
+          renderer.setClearColor(0x000000, 0);
+          for (const rt of [windPingRT, windPongRT, windPublishRT]) {
+            renderer.setRenderTarget(rt);
+            renderer.clear(true, false, false);
+          }
+          renderer.setRenderTarget(prevRT);
+          renderer.setClearColor(prevClearColor, prevClearAlpha);
+          windSimGridKey = gridKey;
+          windPingIsCurrent = true;
+        }
+        // Tier 2's D_live rides into the handle below as `windPublishRT.texture`
+        // — a STABLE texture reference across ordinary (non-regrid) bakes even
+        // though its CONTENT changes every tick, which is exactly why consumers
+        // need no per-tick rebuild for it (see wind-sim-gpu.js#
+        // buildWindPublishMaterial's own header).
+        //
+        // D_rest (and the solid mask) changed — Tier 2's own materials read
+        // BOTH baked in at build time (unlike the ping-pong textures, which
+        // are re-pointed live), so they need the SAME "dispose, rebuild
+        // lazily on next tick" treatment as candleFlameMat below.
+        windSimMaterials?.dispose();
+        windSimMaterials = null;
+
+        // ── THE WIND HANDLE (world/wind-access.js, Wind.md §5.1) ────────────
+        // Assembled HERE and nowhere else: this is the only code that has all
+        // of it at once (the freshly-baked openness/wall-avoidance textures,
+        // the raw per-cell arrays, Tier 2's published target, the live ambient
+        // uniforms, and the CPU exposure query). Every consumer below receives
+        // this ONE object instead of hand-assembling four arguments — the
+        // `wind/handle-only` tripwire (tools/verify-structure.mjs) fails the
+        // build if any of them tries. `version` increments on every bake, so a
+        // consumer holding derived state (a built material, an uploaded storage
+        // buffer) can tell that it must refresh — see wind-access.js's own
+        // header for the two live bugs that arrangement replaces.
+        windHandleVersion += 1;
+        windHandle = createWindHandle({
+          version: windHandleVersion,
+          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01 },
+          grid: {
+            originX: gridSpec.minX,
+            originY: gridSpec.minY,
+            cellSize: gridSpec.cellSize,
+            cols,
+            rows,
+          },
+          opennessTexture: tex,
+          wallAvoidTexture: wallAvoidTex,
+          liveTexture: windPublishRT?.texture ?? null,
+          cells: {
+            solid: solidMask,
+            openness: opennessArray,
+            wallAvoidDirX: wallAvoidDir.dirX,
+            wallAvoidDirY: wallAvoidDir.dirY,
+            wallProximity,
+          },
+          cpuExposureAt: sampleWindExposureAt,
+        });
+
+        // `bakedField` is a graph-BUILD-time shape (a NEW texture object is a
+        // NEW uniform binding, and whether it's present/absent at all is a
+        // JS-time branch inside sampleWind — no-uniform-gates), so every
+        // consumer's material must be rebuilt to pick it up — the SAME
+        // "tear down, let the exists-check below recreate it" discipline an
+        // animation-type/quality change already uses, just applied to every
+        // sampleWind consumer at once instead of one. `liveField` does NOT
+        // need this (its texture reference is stable — see above); only
+        // `bakedField`'s own change forces this.
+        if (candleFlameMat) {
+          candleFlameMat.material?.dispose();
+          candleFlameMat = null;
+        }
+        for (const entry of lightMeshes.values()) entry.animationType = '__wind_rebake_pending__';
+        if (windOverlayMat) {
+          windOverlayMat.material?.dispose();
+          windOverlayMat = null;
+        }
+        if (windHeatMat) {
+          windHeatMat.material?.dispose();
+          windHeatMat = null;
+        }
+        // FORCE A GEOMETRY REBUILD TOO, NOT JUST THE MATERIAL (2026-07-23) —
+        // `updateWindFieldOverlay` now samples POSITIONS straight from THIS
+        // bake's own grid spec (`windHandle.grid`, see that function's own header), and
+        // its own per-point `windExposure` attribute is a CPU snapshot taken
+        // only when the geometry rebuilds. Without this, a rebake with the
+        // camera sitting still (e.g. a door opening while the author isn't
+        // panning/zooming) would rebuild the material but leave the OLD
+        // geometry — built from the PREVIOUS bake's grid — bound, so the
+        // overlay could show stale cell positions/exposure until the next
+        // view-triggered rebuild happened to also fire. Nulling this forces
+        // `windOverlayNeedsRebuild`'s own `!windOverlayLastView` branch next
+        // call, unconditionally.
+        windOverlayLastView = null;
+        // THE PARTICLE ENGINE'S OWN OPENNESS GRID (fix-13, author-reported:
+        // "still not fixed" after fix-12's texture→storage-buffer pivot — TWO
+        // different sampling mechanisms both read back EXACTLY the same
+        // stale data, not two independent bugs). ROOT CAUSE: the engine is
+        // constructed ONCE, right after `bakeWindField('startup')`, and its
+        // storage buffer was uploaded once and never touched again — it
+        // stayed frozen at that first bake's content forever, no matter how
+        // many times a LATER wall/door change produced a genuinely different
+        // grid (a rebake DOES fire via the wall-
+        // change watcher; the overlay/candle correctly showed it, the
+        // particle engine never got told). Every consumer above (candle/
+        // overlay/heat) is explicitly invalidated right here and rebuilds
+        // lazily on its next per-frame call, so it always shows the CURRENT
+        // bake. Unlike their "dispose + lazy rebuild" (their materials bake
+        // origin/cellSize/cols/rows in as graph-build-time constants), the
+        // particle engine's storage buffer can be refreshed IN PLACE —
+        // cols/rows are stable across an ordinary rebake (only a scene/grid-
+        // size change touches them, which the method below detects and
+        // refuses to hot-patch), so this is a data overwrite, not a rebuild.
+        // (openness itself is PURELY geometric — unlike the now-deleted
+        // wall-relaxation, it never depends on wind speed/direction at all,
+        // so even the very first 'startup' bake already carries real,
+        // position-varying data; this explicit push still matters because a
+        // LATER wall/door edit is the thing that changes it.)
+        particleEngine?.updateWind(windHandle);
+        // The gust engine reads the SAME handle; refresh it identically
+        // (a no-op until it has been constructed, same as the particle engine).
+        gustEngine?.updateWind(windHandle);
+
+        // DIAGNOSTICS — a direct INSTRUMENT, not a guess
+        // (feedback_instruments_must_not_lie): how much of the mapped area
+        // wind can actually reach, straight from the SAME grids every
+        // consumer reads (`world/wind-enclosure.js#summarizeEnclosure`), not
+        // a second computation that could itself drift from the real one.
+        const enclosure = summarizeEnclosure(solidMask, opennessArray);
+        log.info(
+          `wind field baked (${reason}): floor level "${currentLevelIdForWind ?? '(unscoped)'}" [${windLevelLookupDiag}], ` +
+            `${cols}x${rows} cells, ${walls.length}/${totalWallCountForWind ?? '?'} wall segments (scoped/total), ` +
+            `${wallLevelsShapeDiag}, ` +
+            `${enclosure.solidCells} solid, ${enclosure.openCells} open-to-exterior, ` +
+            `${enclosure.enclosedCells} sealed (${enclosure.enclosedPct}%)`
+        );
+        return {
+          ok: true,
+          reason,
+          cols,
+          rows,
+          levelId: currentLevelIdForWind,
+          levelLookupDiag: windLevelLookupDiag,
+          wallCount: walls.length,
+          totalWallCount: totalWallCountForWind,
+          wallLevelsShapeDiag,
+          ...enclosure,
+        };
+      } catch (err) {
+        log.error(`wind field bake failed (${reason}) — the previous bake (or none) stays in place:`, err);
+        return { ok: false, reason, error: err?.message ?? String(err) };
+      }
+    }
+
+    /** @param {number} directionDeg @param {number} speed01 */
+    function setWindAmbient(directionDeg, speed01) {
+      if (Number.isFinite(directionDeg)) uWindDirectionDeg.value = directionDeg;
+      if (Number.isFinite(speed01)) uWindSpeed01.value = Math.max(0, speed01);
+      // The bake depends on the SAME direction/speed it was last computed
+      // from — changing either without re-baking would leave the moving
+      // ambient and the static structure disagreeing about which way the
+      // "prevailing" wind blows, so re-run it immediately (cheap — see
+      // bakeWindField's own header).
+      bakeWindField('ambient-change');
+    }
+
+    // The initial bake fires further down (after candleFlameMat/windOverlayMat
+    // are actually declared — see the comment beside renderer.setAnimationLoop
+    // below for why it CANNOT run here: bakeWindField's own rebuild-trigger
+    // code reaches for those `let` bindings, and calling it this early hit
+    // their temporal dead zone — ReferenceError, caught live).
+
+    /**
+     * Register a Wind.md Tier 2 one-shot (a door gust, or a debug test gust)
+     * and extend the thaw window to cover it. Pure bookkeeping — the actual
+     * sim tick (below) is what turns this into a visible push.
+     *
+     * @param {import('../world/wind-field.js').WindContributor} contributor -
+     *   already-built and finite (callers use `doorwayImpulseFromWallSegment`,
+     *   itself Node-tested — see world/wind-sim.js).
+     */
+    function registerWindImpulse(contributor) {
+      windActiveImpulses.push(contributor);
+      const windowMs = computeThawWindowMs({
+        lifetimeMs: contributor.lifetimeMs,
+        decayPerSecond: WIND_SIM_DEFAULT_DECAY_PER_SECOND,
+      });
+      windThawUntilMs = Math.max(windThawUntilMs, contributor.startMs + windowMs);
+    }
+
+    /**
+     * A door just opened (Wind.md §4) — read from `foundry/scene-walls.js#
+     * watchDoorOpenings` via boot.js, or a debug "test gust" button. Builds
+     * the impulse from the CURRENT ambient (see `doorwayImpulseFromWallSegment`'s
+     * own header for why the impulse direction is DERIVED from the ambient,
+     * never guessed) and registers it. A no-op (never throws) if the sim
+     * hasn't baked at least once yet, or the segment is degenerate.
+     *
+     * @param {{x1:number,y1:number,x2:number,y2:number}} wallSegment
+     */
+    function triggerWindDoorImpulse(wallSegment) {
+      try {
+        const ambient = ambientVectorFromWind({
+          directionDeg: uWindDirectionDeg.value,
+          speed01: uWindSpeed01.value,
+        });
+        const nowMs = uGlobalTimeMs.value;
+        const contributor = doorwayImpulseFromWallSegment(wallSegment, {
+          ambientX: ambient.x,
+          ambientY: ambient.y,
+          nowMs,
+        });
+        if (!contributor) return { ok: false, reason: 'degenerate wall segment' };
+        registerWindImpulse(contributor);
+        log.info(
+          `wind door impulse registered: at (${Math.round(contributor.at.x)},${Math.round(contributor.at.y)}), ` +
+            `impulse (${contributor.impulse.x.toFixed(1)},${contributor.impulse.y.toFixed(1)}), thaw until +${Math.round(windThawUntilMs - nowMs)}ms`
+        );
+        return { ok: true, contributor, thawUntilMs: windThawUntilMs };
+      } catch (err) {
+        log.error('wind door impulse failed:', err);
+        return { ok: false, reason: err?.message ?? String(err) };
+      }
+    }
+
+    /** Perf-lab / debug override — force the sim to stay thawed regardless
+     * of active impulses, so its GPU cost is actually measurable through the
+     * SAME sweep mechanism every other effect uses (setForcedEnabled-style),
+     * per Wind.md §9's own "measured in the perf lab before defaulting on".
+     * @param {boolean} on */
+    function setWindForceThaw(on) {
+      windForceThaw = !!on;
+    }
+
+    /**
+     * THE TIER 2 TICK — advect+dissipate, splat, relax x N, publish. Called
+     * once per rendered frame (see renderFrame's own call site: inside the
+     * gpuProbe timing bracket, so the perf lab can actually see this cost),
+     * but does REAL WORK only while thawed — the frozen branch below is a
+     * handful of comparisons, not a skipped-but-still-compiled shader
+     * (Wind.md §3.1: "ZERO per-frame sim cost" while frozen).
+     *
+     * @param {number} nowMs @param {number} dtSec
+     */
+    function tickWindSim(nowMs, dtSec) {
+      if (windActiveImpulses.length > 0) {
+        windActiveImpulses = windActiveImpulses.filter((c) => nowMs < c.startMs + c.lifetimeMs);
+      }
+      const thawed = windForceThaw || nowMs < windThawUntilMs;
+      if (!thawed) {
+        if (windIsThawed) {
+          windIsThawed = false;
+          // A stale last-gust image must not sit frozen on screen forever —
+          // one cheap clear, then genuinely nothing until the next thaw
+          // (feedback_instruments_must_not_lie: refreezing must mean "gone",
+          // not "frozen mid-gust").
+          if (windPublishRT) {
+            const prevRT = renderer.getRenderTarget();
+            const prevClearColor = renderer.getClearColor(new THREE.Color());
+            const prevClearAlpha = renderer.getClearAlpha();
+            renderer.setClearColor(0x000000, 0);
+            renderer.setRenderTarget(windPublishRT);
+            renderer.clear(true, false, false);
+            renderer.setRenderTarget(prevRT);
+            renderer.setClearColor(prevClearColor, prevClearAlpha);
+          }
+          log.info('wind sim refroze');
+        }
+        return;
+      }
+      if (!windHandle.hasBake || !windSolidMaskTexture || !windPingRT || !windPongRT || !windPublishRT) return;
+      if (!windSimMaterials) {
+        windSimMaterials = buildWindSimMaterials({
+          THREE,
+          pingTexture: windPingRT.texture,
+          pongTexture: windPongRT.texture,
+          publishTexture: windPingRT.texture,
+          // Tier 2 is part of the wind SYSTEM, not a consumer of it: its advect
+          // pass transports ON the resting field, so it legitimately needs
+          // D_rest's texture rather than a sample of it. The handle exposes that
+          // under its own name (`restFieldTexture`) precisely so it stays
+          // distinct from the consumer-facing shapes.
+          restFieldTexture: windHandle.restFieldTexture,
+          solidMaskTexture: windSolidMaskTexture,
+          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01 },
+          cols: windHandle.grid.cols,
+          rows: windHandle.grid.rows,
+          cellSize: windHandle.grid.cellSize,
+          originX: windHandle.grid.originX,
+          originY: windHandle.grid.originY,
+          decayPerSecond: WIND_SIM_DEFAULT_DECAY_PER_SECOND,
+          relaxBlend: WIND_SIM_RELAX_BLEND,
+          maxImpulseSlots: WIND_SIM_MAX_ACTIVE_IMPULSES,
+        });
+      }
+
+      const { slots } = gatherActiveImpulseSlots(windActiveImpulses, nowMs, WIND_SIM_MAX_ACTIVE_IMPULSES);
+      for (let i = 0; i < windSimMaterials.splat.slots.length; i++) {
+        const slotUniforms = windSimMaterials.splat.slots[i];
+        const active = slots[i];
+        if (active) {
+          slotUniforms.uPos.value.set(active.x, active.y);
+          slotUniforms.uVec.value.set(active.vx, active.vy);
+          slotUniforms.uRadius.value = active.radius;
+          slotUniforms.uGain.value = active.gain;
+        } else {
+          slotUniforms.uGain.value = 0; // fully inert — see buildWindSplatMaterial's own doc
+        }
+      }
+
+      const prevRT = renderer.getRenderTarget();
+      let currentRT = windPingIsCurrent ? windPingRT : windPongRT;
+      let otherRT = windPingIsCurrent ? windPongRT : windPingRT;
+
+      windSimMaterials.advectDissipate.uDtSec.value = dtSec;
+      for (const n of windSimMaterials.advectDissipate.prevTexNodes) n.value = currentRT.texture;
+      renderer.setRenderTarget(otherRT);
+      windSimMaterials.advectDissipate.quad.render(renderer);
+      [currentRT, otherRT] = [otherRT, currentRT];
+
+      windSimMaterials.splat.uDtSec.value = dtSec;
+      for (const n of windSimMaterials.splat.prevTexNodes) n.value = currentRT.texture;
+      renderer.setRenderTarget(otherRT);
+      windSimMaterials.splat.quad.render(renderer);
+      [currentRT, otherRT] = [otherRT, currentRT];
+
+      for (let iter = 0; iter < WIND_SIM_DEFAULT_RELAX_ITERATIONS; iter++) {
+        for (const n of windSimMaterials.relax.prevTexNodes) n.value = currentRT.texture;
+        renderer.setRenderTarget(otherRT);
+        windSimMaterials.relax.quad.render(renderer);
+        [currentRT, otherRT] = [otherRT, currentRT];
+      }
+
+      windSimMaterials.publish.sourceTexNode.value = currentRT.texture;
+      renderer.setRenderTarget(windPublishRT);
+      windSimMaterials.publish.quad.render(renderer);
+
+      renderer.setRenderTarget(prevRT);
+      windPingIsCurrent = currentRT === windPingRT;
+
+      if (!windIsThawed) {
+        windIsThawed = true;
+        log.info(`wind sim thawed (${slots.length} active impulse(s))`);
       }
     }
 
@@ -2155,14 +3460,38 @@ export async function startVtPanViewer({
     // ------------------------------------------------------------------
     const candleFlameScene = new THREE.Scene();
     let candleFlameMesh = null;
-    let candleFlameMat = null; // { material, uColor, uIntensity }
+    let candleFlameMat = null; // { material, uIntensity, uLean, uWindResponse } — colour/per-candle brightness are baked geometry attributes, not uniforms
     let candleFlameKey = null; // checksum of the geometry currently on the GPU
+    let candleFlameQuality = null; // the quality tier the current material was BUILT at
 
-    /** Cheap change-detector over the anchor positions + size, so the geometry
-     * is rebuilt only on a real change (scene load, floor switch, size tweak). */
-    function candleFlameSignature(anchors, sizePx) {
+    /** Cheap string fold into an existing integer checksum — `candleFlameSignature`'s
+     * only way to fold a colour hex (a string) into its otherwise-numeric hash. */
+    function hashStrInto(h, s) {
+      const str = String(s ?? '');
+      for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+      return h;
+    }
+
+    /** Cheap change-detector over the anchor positions + size + wind exposure +
+     * colour, so the geometry (which BAKES center/windExposure/flameColor/
+     * flameIntensity as attributes) is rebuilt only on a real change (scene
+     * load, floor switch, a size/colour tweak — global OR per-candle — or the
+     * outdoors mask streaming in and changing a candle's exposure). */
+    function candleFlameSignature(anchors, sizePx, colorHex) {
       let h = (anchors.length * 1000003 + Math.round((sizePx || 0) * 100)) | 0;
-      for (const a of anchors) h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7) | 0;
+      h = hashStrInto(h, colorHex);
+      for (const a of anchors) {
+        h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7) | 0;
+        h = (h * 31 + Math.round((a.windExposure ?? 1) * 15)) | 0; // coarse — a real exposure change rebuilds
+        // PER-CANDLE OVERRIDES (2026-07-22) — colour/size/brightness are now
+        // baked per-vertex (candle-flame-render.js#computeCandleFlameArrays),
+        // so an edit to any of them must trigger the same rebuild a global
+        // change already does.
+        const p = a?.params;
+        h = (h * 31 + Math.round((p?.intensity ?? 1) * 100)) | 0;
+        if (p?.useCustomColor) h = hashStrInto(h, p.customColor);
+        if (p?.useCustomSize) h = (h * 31 + Math.round(Number(p.customSizePx) || 0)) | 0;
+      }
       return h;
     }
 
@@ -2174,23 +3503,47 @@ export async function startVtPanViewer({
         return;
       }
       const sizePx = Number(state.params?.sizePx) > 0 ? Number(state.params.sizePx) : 1;
-      if (!candleFlameMat) {
-        candleFlameMat = buildCandleFlameMaterial({ THREE });
-        candleFlameMesh = new THREE.Mesh(new THREE.BufferGeometry(), candleFlameMat.material);
-        candleFlameMesh.frustumCulled = false; // world-space, camera bounds vary per frame
-        candleFlameScene.add(candleFlameMesh);
+      // The flame's chaotic-life detail is a graph-BUILD-time tier (like the
+      // light pool's), so a live animationQuality change rebuilds the material.
+      const qualityTier = candleAnimationQualityTier(state.params?.animationQuality);
+      if (!candleFlameMat || candleFlameQuality !== qualityTier) {
+        // uGlobalTimeMs (the ONE clock, set fresh by updatePointLightMeshes
+        // just before this runs each frame) drives the flame's GPU wind.
+        const prev = candleFlameMat;
+        candleFlameMat = buildCandleFlameMaterial({
+          THREE,
+          uGlobalTimeMs,
+          quality: qualityTier,
+          windHandle,
+        });
+        candleFlameQuality = qualityTier;
+        if (!candleFlameMesh) {
+          candleFlameMesh = new THREE.Mesh(new THREE.BufferGeometry(), candleFlameMat.material);
+          candleFlameMesh.frustumCulled = false; // world-space, camera bounds vary per frame
+          candleFlameScene.add(candleFlameMesh);
+        } else {
+          candleFlameMesh.material = candleFlameMat.material;
+        }
+        prev?.material?.dispose(); // free the superseded material on a tier change
       }
-      const sig = candleFlameSignature(anchors, sizePx);
+      const colorHex = state.params?.color;
+      const sig = candleFlameSignature(anchors, sizePx, colorHex);
       if (sig !== candleFlameKey || !candleFlameMesh.geometry.getAttribute('position')) {
         const old = candleFlameMesh.geometry;
-        const { geometry } = buildCandleFlameGeometry(THREE, anchors, { sizePx });
+        // colorHex is the EFFECT-WIDE fallback baked onto every un-customised
+        // candle's vertices; a candle with its own useCustomColor bakes ITS
+        // colour instead (computeCandleFlameArrays' own header).
+        const { geometry } = buildCandleFlameGeometry(THREE, anchors, { sizePx, colorHex });
         candleFlameMesh.geometry = geometry;
         if (old) old.dispose(); // free the previous frame's GPU buffers, not per-frame (only on change)
         candleFlameKey = sig;
       }
-      const [r, g, b] = hexToRgb01(state.params?.color);
-      candleFlameMat.uColor.value.set(r, g, b);
       candleFlameMat.uIntensity.value = 1;
+      // WIND RESPONSE (Wind.md §8.1) — a live uniform like uIntensity above,
+      // not baked into geometry: a param change takes effect next frame, no
+      // material rebuild.
+      const windResponseParam = Number(state.params?.windResponse);
+      candleFlameMat.uWindResponse.value = Number.isFinite(windResponseParam) ? windResponseParam : 1;
       candleFlameMesh.visible = true;
     }
 
@@ -2206,6 +3559,537 @@ export async function startVtPanViewer({
       candleFlameMesh = null;
       candleFlameMat = null;
       candleFlameKey = null;
+    }
+
+    // ========================================================================
+    // DOOR GRAPHICS — the animated textured door leaf (effects/door-graphics.js).
+    // ========================================================================
+    // A door is an OPAQUE, LIT part of the map (a wooden leaf in a doorway), not
+    // an additive glow — so unlike the candle's own additive scene above, the
+    // leaves live in `doorScene` and are drawn INTO buf:scene.color right after
+    // the main scene (runGeometryWorldPass), so the lighting pass darkens a door
+    // at night and a torch pools on it for free, exactly like the tile beside it.
+    //
+    // They are NOT routed through buildItems/residency (which manages STATIC
+    // streamed tiles): a door's four vertices are re-derived every animating
+    // frame from the DoorMesh-parity math (effects/door-graphics-render.js), a
+    // motion the residency reconcile is not built for. So this is a small,
+    // fully-owned manager the same shape as the candle's — reconcile the set on
+    // change, animate open/close on the frame clock, dispose cleanly.
+    //
+    // ORDERING CAVEAT (door-graphics.js's `roof-occlusion` rung): drawn after
+    // the whole main scene, a door sits above tiles AND tokens (as Foundry's
+    // foreground DoorMesh does) — but also above overhead ROOF art, which
+    // Foundry hides it under. The common doorway has no separate roof over it,
+    // so this is correct there; the fix is to sort the leaf into the main draw
+    // list by a real LayerKey, deferred to that rung.
+    //
+    // FOG (door-graphics.js's HIGH-PRIORITY `fog-reveal-sync` rung): each leaf's
+    // `progress` IS the eased openFactor (0 closed .. 1 open) the incoming V3
+    // fog system will read to fade a doorway's reveal in — tracked here already
+    // for the leaf's own rendering. Nothing consumes it yet; when fog lands it
+    // reads this, no new door math.
+    const doorScene = new THREE.Scene();
+    /** url -> { texture, width, height } once loaded; 'pending'/'failed' while not. */
+    const doorTextureCache = new Map();
+    /** wallId -> Array<leaf state> (1 for a single door, 2 for a double). */
+    const doorLeaves = new Map();
+    let doorLastTimeMs = null;
+    /** px/square — stable per scene (foundry/scene-geometry.js#computeSceneDimensions). */
+    const DOOR_GRID_SIZE = dimensions?.size > 0 ? dimensions.size : 100;
+
+    /** Kick off (once) an async load of a door texture — sRGB + flipY:false to
+     * match the world-quad convention (v=0 = image top row) EXACTLY like a map
+     * tile (see setTileGeometry's own tex setup), so a door is never upside-down.
+     * Returns the cache entry once ready, or null while still loading/failed. */
+    function ensureDoorTexture(url) {
+      const cached = doorTextureCache.get(url);
+      if (cached === 'pending' || cached === 'failed') return null;
+      if (cached) return cached;
+      doorTextureCache.set(url, 'pending');
+      new THREE.TextureLoader().load(
+        url,
+        (tex) => {
+          tex.flipY = false; // v=0 = image top row — the world-quad convention
+          tex.colorSpace = THREE.SRGBColorSpace; // art is sRGB; sample decodes to linear
+          tex.generateMipmaps = true;
+          tex.minFilter = THREE.LinearMipmapLinearFilter;
+          const img = tex.image;
+          doorTextureCache.set(url, { texture: tex, width: img?.width || 100, height: img?.height || 100 });
+        },
+        undefined,
+        () => {
+          log.error(`door texture failed to load: ${url}`);
+          doorTextureCache.set(url, 'failed');
+        }
+      );
+      return null;
+    }
+
+    /** A stable signature of everything that changes a leaf's CLOSED placement
+     * (endpoints, the geometry-affecting animation config, grid size, texture
+     * size) — so the closed snapshot is recomputed only on a real change, never
+     * per frame. */
+    function doorClosedSignature(door, style, tex) {
+      return [
+        Math.round(door.x1),
+        Math.round(door.y1),
+        Math.round(door.x2),
+        Math.round(door.y2),
+        door.animation.type,
+        style,
+        door.animation.flip ? 1 : 0,
+        door.textureGridSize,
+        tex.width,
+        tex.height,
+        DOOR_GRID_SIZE,
+      ].join(':');
+    }
+
+    function destroyDoorLeaves(wallId) {
+      const leaves = doorLeaves.get(wallId);
+      if (!leaves) return;
+      for (const leaf of leaves) {
+        doorScene.remove(leaf.mesh);
+        leaf.geometry?.dispose();
+        leaf.mesh.material?.dispose();
+      }
+      doorLeaves.delete(wallId);
+    }
+
+    /** Build (or rebuild) the leaf meshes for one door, replacing any existing.
+     * Each leaf snaps to the door's CURRENT open state (progress 0 or 1) — a
+     * rebuild is not an animation, matching V2's recreate-then-snap. */
+    function buildDoorLeaves(door, tex) {
+      destroyDoorLeaves(door.wallId);
+      const leaves = [];
+      for (const style of doorLeafStyles(door.animation.double)) {
+        const mat = buildDoorMaterial({ THREE, texture: tex.texture });
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+        geometry.setIndex(Array.from(QUAD_INDICES));
+        const mesh = new THREE.Mesh(geometry, mat.material);
+        mesh.frustumCulled = false; // world-space, camera bounds vary per frame
+        doorScene.add(mesh);
+        leaves.push({
+          style,
+          texUrl: door.animation.texture,
+          texWidth: tex.width,
+          texHeight: tex.height,
+          mesh,
+          geometry,
+          uTint: mat.uTint,
+          uAlpha: mat.uAlpha,
+          closed: null,
+          closedSig: null,
+          // `progress` IS the eased openFactor the fog rung reads (0..1).
+          progress: door.open ? 1 : 0,
+          animating: false,
+          fromProgress: door.open ? 1 : 0,
+          toProgress: door.open ? 1 : 0,
+          elapsedS: 0,
+          durationS: 0,
+          lastOpen: door.open,
+        });
+      }
+      doorLeaves.set(door.wallId, leaves);
+      return leaves;
+    }
+
+    /** Per-frame: reconcile the door set, advance each leaf's open/close
+     * animation on the (wall-time) frame clock, and re-derive its four vertices.
+     * Runs before the pass plan (beside syncTokenPlacements) so the geometry is
+     * fresh when runGeometryWorldPass draws doorScene. */
+    function syncDoorGraphics(nowMs) {
+      const state = getDoorRenderState();
+      const doors = state.enabled && Array.isArray(state.doors) ? state.doors : [];
+
+      // dt for the animation clock — WALL time (a door swing is a real-world
+      // duration, not tied to the sim/ToD clock).
+      const dtS = doorLastTimeMs === null ? 0 : Math.max(0, (nowMs - doorLastTimeMs) / 1000);
+      doorLastTimeMs = nowMs;
+
+      // Reap doors that vanished (or the effect went off → doors empty).
+      const liveIds = new Set(doors.map((d) => d.wallId));
+      for (const wallId of [...doorLeaves.keys()]) if (!liveIds.has(wallId)) destroyDoorLeaves(wallId);
+      if (!doors.length) return;
+
+      const animate = state.params?.animateMotion !== false;
+      const durScaleRaw = Number(state.params?.motionDurationScale);
+      const durScale = Number.isFinite(durScaleRaw) && durScaleRaw > 0 ? durScaleRaw : 1;
+
+      for (const door of doors) {
+        const tex = ensureDoorTexture(door.animation.texture);
+        if (!tex) {
+          // Texture still loading (or failed) — drop any stale leaves so a
+          // half-updated door never lingers, and wait for the next frame.
+          destroyDoorLeaves(door.wallId);
+          continue;
+        }
+        let leaves = doorLeaves.get(door.wallId);
+        // Rebuild when the leaf COUNT (single<->double) or the texture changed —
+        // exactly the cases fresh geometry/material are needed (matches V2's
+        // needsRecreate on animation.texture/double).
+        const wantLeaves = door.animation.double ? 2 : 1;
+        if (!leaves || leaves.length !== wantLeaves || leaves[0].texUrl !== door.animation.texture) {
+          leaves = buildDoorLeaves(door, tex);
+        }
+
+        for (const leaf of leaves) {
+          // (Re)derive the CLOSED placement only when an input to it changed.
+          const sig = doorClosedSignature(door, leaf.style, tex);
+          if (sig !== leaf.closedSig) {
+            leaf.closed = computeDoorClosedSnapshot(door, leaf.style, {
+              gridSize: DOOR_GRID_SIZE,
+              texWidth: tex.width,
+            });
+            leaf.closedSig = sig;
+          }
+
+          // Detect an open/close toggle → start (or snap) the animation.
+          if (door.open !== leaf.lastOpen) {
+            leaf.lastOpen = door.open;
+            const target = door.open ? 1 : 0;
+            if (animate) {
+              leaf.animating = true;
+              leaf.fromProgress = leaf.progress;
+              leaf.toProgress = target;
+              leaf.elapsedS = 0;
+              leaf.durationS = Math.max(1 / 60, (door.animation.duration / 1000) * durScale);
+            } else {
+              leaf.progress = target;
+              leaf.animating = false;
+            }
+          }
+
+          // Advance the eased animation (matches V2's DoorMesh.update: ease the
+          // time fraction, lerp progress between the start and the target).
+          if (leaf.animating) {
+            leaf.elapsedS += dtS;
+            const raw = leaf.durationS > 0 ? leaf.elapsedS / leaf.durationS : 1;
+            if (raw >= 1) {
+              leaf.progress = leaf.toProgress;
+              leaf.animating = false;
+            } else {
+              const eased = doorEaseInOutCosine(raw);
+              leaf.progress = leaf.fromProgress + (leaf.toProgress - leaf.fromProgress) * eased;
+            }
+          }
+
+          // Re-derive the four world vertices + the tint/alpha for this progress.
+          const snap = applyDoorAnimation(leaf.closed, door, leaf.progress);
+          const placement = doorSnapshotToPlacement(snap, { texWidth: leaf.texWidth, texHeight: leaf.texHeight });
+          const positions = buildQuadPositions(computeQuadCorners(placement));
+          const posAttr = leaf.geometry.getAttribute('position');
+          if (posAttr && posAttr.array.length === positions.length) {
+            posAttr.array.set(positions);
+            posAttr.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
+          } else {
+            leaf.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          }
+          leaf.uTint.value.set(snap.tint[0], snap.tint[1], snap.tint[2]);
+          leaf.uAlpha.value = snap.alpha;
+          leaf.mesh.visible = true;
+        }
+      }
+    }
+
+    /** Draw the door leaves INTO the currently-bound target (buf:scene.color,
+     * bound by runGeometryWorldPass) WITHOUT clearing it, so they composite over
+     * the map and get lit downstream. No-op when nothing is built. */
+    function renderDoorGraphicsInto() {
+      if (!doorLeaves.size) return;
+      const prev = renderer.autoClearColor;
+      renderer.autoClearColor = false;
+      renderer.render(doorScene, camera);
+      renderer.autoClearColor = prev;
+    }
+
+    /** Free every door leaf + cached texture. Safe whether or not any was built. */
+    function disposeDoorGraphics() {
+      try {
+        for (const wallId of [...doorLeaves.keys()]) destroyDoorLeaves(wallId);
+        for (const entry of doorTextureCache.values()) {
+          if (entry && entry !== 'pending' && entry !== 'failed') entry.texture?.dispose();
+        }
+        doorTextureCache.clear();
+      } catch (err) {
+        log.error('door graphics dispose failed — GPU buffers may leak until renderer.dispose():', err);
+      }
+      doorLastTimeMs = null;
+    }
+
+    /** Constructed lazily, after the startup bake (see the construction site
+     * near bakeWindField('startup') for why) — see runSurfaceParticlesPass and
+     * renderFrame's particle step for the two readers; both tolerate `null`
+     * (nothing drawn/stepped) until construction actually runs. */
+    let particleEngine = null;
+    /** RELABELED + gated OFF by default (2026-07-22, author: "these aren't
+     * dust motes, they're wind diagnostic particles... this should be an
+     * optional debugging visualisation") — same idiom as windOverlayEnabled
+     * just below: a scene nobody has opened this toggle for allocates no
+     * arena, compiles no compute kernel, and draws nothing (particle-arena.js
+     * has no dispose path once built, so construction itself is deferred to
+     * first enable via setWindDiagnosticParticlesEnabled, not just gated
+     * per-frame — see constructParticleEngineIfNeeded's own call site). */
+    let windParticlesEnabled = false;
+
+    /** WIND GUSTS (effects/particles/gust-runtime.js) — a SEPARATE ribbon-trail
+     * effect from the diagnostic dots above; same deferred-construction /
+     * off-by-default discipline (its arena has no dispose path either), same two
+     * readers (runSurfaceParticlesPass draws it, renderFrame's sim block steps
+     * it), both tolerating `null` until constructGustEngineIfNeeded runs. */
+    let gustEngine = null;
+    let windGustsEnabled = false;
+
+    // ------------------------------------------------------------------
+    // THE WIND FIELD DEBUG OVERLAY (diag/wind-field-overlay.js, Wind.md Tier
+    // 0 — "a way to visualise the field early on"). A grid of arrows over
+    // the CURRENT VIEW, each sampling the EXACT SAME `sampleWind()` the
+    // candle flame/light already read — proof, not illustration, that the
+    // field is genuinely shared. OFF by default (a diagnostic, not a
+    // product feature); toggled via setWindFieldOverlayEnabled below.
+    // Mirrors the candle flame block immediately above: a Scene, a rebuilt-
+    // on-change geometry, a material whose only per-frame write is nothing
+    // at all (it reads uGlobalTimeMs directly, like the flame's own wind).
+    // ------------------------------------------------------------------
+    const windOverlayScene = new THREE.Scene();
+    let windOverlayMesh = null;
+    let windOverlayMat = null;
+    // THE FORCE HEATMAP (author's ask, 2026-07-21) — a sibling mesh in the
+    // SAME scene, drawn UNDER the arrows: full-cell quads coloured blue→red by
+    // wind magnitude (diag/wind-field-overlay.js#buildWindHeatmapMaterial),
+    // sharing the arrows' grid points and every rebuild/rebake trigger so the
+    // two can never disagree about where a cell is or how strong it is.
+    let windHeatMesh = null;
+    let windHeatMat = null;
+    let windOverlayEnabled = false;
+    /** How many REAL bake cells to skip per displayed arrow, minimum
+     * (2026-07-23, REPURPOSED — was "samples per grid square, up to 4x
+     * finer"; now the overlay shows the ACTUAL bake grid 1:1 by default, so
+     * "finer than the real cells" no longer means anything — there is no
+     * data to sample between them). 1 = every real cell (the accurate,
+     * default view); 2+ = a deliberately decluttered every-Nth-cell preview,
+     * still genuine cell centers, never a re-derived approximation — see
+     * `computeWindOverlayGridFromBake`'s own header. */
+    let windOverlayResolution = 1;
+    /** The last-built grid's own {cx,cy,w,h,spacing,resolution} — rebuilding
+     * on every sub-pixel pan would be pure churn (this is a debug tool, but
+     * the codebase's own rebuild-on-real-change discipline still applies,
+     * same reasoning as candleFlameSignature just above); rebuild only once
+     * the view has moved/zoomed enough that the old grid stops covering it
+     * well, OR the resolution lever changed. ALSO forced to `null` on every
+     * rebake (bakeWindField's own disposal block) — see that block's own
+     * comment for why a material-only invalidation isn't enough now that
+     * geometry itself is sourced from the bake's own grid. */
+    let windOverlayLastView = null;
+
+    function windOverlayNeedsRebuild(view_) {
+      if (!windOverlayLastView) return true;
+      if (view_.resolution !== windOverlayLastView.resolution) return true;
+      const dx = Math.abs(view_.cx - windOverlayLastView.cx);
+      const dy = Math.abs(view_.cy - windOverlayLastView.cy);
+      const dw = Math.abs(view_.w - windOverlayLastView.w) / Math.max(1, windOverlayLastView.w);
+      const dh = Math.abs(view_.h - windOverlayLastView.h) / Math.max(1, windOverlayLastView.h);
+      const moved = Math.max(dx, dy) > windOverlayLastView.spacing * 0.3;
+      const zoomed = dw > 0.15 || dh > 0.15;
+      return moved || zoomed;
+    }
+
+    function updateWindFieldOverlay() {
+      // Also bails (meshes stay hidden) before ANY bake has ever completed —
+      // this function's own point source is the bake's own grid (see below),
+      // which the handle only carries once a real bake has run, so there is
+      // genuinely nothing to show yet, not an error.
+      if (!windOverlayEnabled || !view || !windHandle.hasBake) {
+        if (windOverlayMesh) windOverlayMesh.visible = false;
+        if (windHeatMesh) windHeatMesh.visible = false;
+        return;
+      }
+      // CLAMPED TO THE REAL SCENE RECT (2026-07-23, author: "Don't render the
+      // wind particles or the overlay outside of the scene") — same
+      // `clampRectToBounds` used for particle/gust spawning (renderFrame's
+      // own sims.particles block has the full reasoning); the raw camera
+      // view can point at the padding margin or beyond, but the baked grid
+      // itself only covers the true `sceneRect` now, so drawing past it would
+      // show arrows/heatmap cells for area no wind was ever computed for.
+      const rect = clampRectToBounds(viewToWorldRect(view, canvasW / canvasH), dimensions.sceneRect);
+      const cx = (rect.minX + rect.maxX) / 2;
+      const cy = (rect.minY + rect.maxY) / 2;
+      const w = rect.maxX - rect.minX;
+      const h = rect.maxY - rect.minY;
+      const windInputs = { THREE, uGlobalTimeMs, windHandle };
+      if (!windOverlayMat) windOverlayMat = buildWindArrowMaterial(windInputs);
+      if (!windHeatMat) windHeatMat = buildWindHeatmapMaterial(windInputs);
+      if (windOverlayNeedsRebuild({ cx, cy, w, h, resolution: windOverlayResolution })) {
+        // THE REAL BAKE GRID, NOT AN INDEPENDENT LATTICE (2026-07-23, author:
+        // "make the overlay show the exact resolution accurately. I want to
+        // be able to picture it accurately") — see `computeWindOverlayGrid
+        // FromBake`'s own header for the full reasoning. `windHandle.grid`
+        // is the SAME grid spec `bakeWindField` computed openness into and
+        // every other consumer (particles, gusts, sampleWind) reads — the
+        // overlay can no longer show a cell that doesn't correspond to a
+        // real one, or silently coarsen without saying so.
+        const { points, spacingPx } = computeWindOverlayGridFromBake({
+          cols: windHandle.grid.cols,
+          rows: windHandle.grid.rows,
+          cellSize: windHandle.grid.cellSize,
+          originX: windHandle.grid.originX,
+          originY: windHandle.grid.originY,
+          minX: rect.minX,
+          minY: rect.minY,
+          maxX: rect.maxX,
+          maxY: rect.maxY,
+          stride: windOverlayResolution,
+        });
+        // REAL per-point exposure (2026-07-21, author-reported: the overlay
+        // read identically turbulent indoors and outdoors) — a CPU sample
+        // per grid point, ONCE per rebuild (not per frame), same cost class
+        // as sampling a handful of candle anchors, just a few thousand at
+        // 4x resolution over a big view. Shared by BOTH meshes (arrows +
+        // heatmap) — one sample, two consumers.
+        const pointsWithExposure = points.map((p) => ({ ...p, windExposure: sampleWindExposureAt(p.x, p.y) }));
+        // ARROWS — slightly inset (0.85) so neighbours read as distinct glyphs.
+        const oldArrow = windOverlayMesh?.geometry;
+        const { geometry: arrowGeom } = buildWindOverlayGeometry(THREE, pointsWithExposure, {
+          sizePx: spacingPx * 0.85,
+        });
+        if (!windOverlayMesh) {
+          windOverlayMesh = new THREE.Mesh(arrowGeom, windOverlayMat.material);
+          windOverlayMesh.frustumCulled = false;
+          windOverlayMesh.renderOrder = 1; // arrows draw OVER the heatmap wash
+          windOverlayScene.add(windOverlayMesh);
+        } else {
+          windOverlayMesh.geometry = arrowGeom;
+          // THE BUG (2026-07-21, author-reported: rebaking never visibly
+          // changed anything): a geometry rebuild alone does NOT pick up a
+          // material rebuild that happened in between — `windOverlayMat` can
+          // be a BRAND NEW object (bakeWindField nulls it on every rebake,
+          // see this function's own build-path above) while this MESH kept
+          // pointing at whatever material object it was constructed with,
+          // forever, because nothing ever told it otherwise. The candle
+          // flame's own rebuild (updateCandleFlame) already does this
+          // reassignment correctly — this path was missing its equivalent
+          // line. A stale material still reads LIVE uniform values correctly
+          // (uWindDirectionDeg/uWindSpeed01 mutate in place) and even live
+          // vertex attributes off whatever geometry is CURRENTLY bound
+          // (windExposure), which is why direction/speed changes and
+          // per-point exposure were never fully dead — but the baked WALL
+          // texture is a graph-BUILD-time binding, so it was frozen at
+          // whatever `windBakedField` existed the FIRST time this mesh's
+          // material was built (the initial, windless startup bake) —
+          // exactly matching "rebaking never changes the walls' effect".
+          windOverlayMesh.material = windOverlayMat.material;
+        }
+        if (oldArrow) oldArrow.dispose();
+        // HEATMAP — near-full-cell (0.94) quads so cells read as distinct
+        // coloured "grid spaces" (the author's word) with a hairline gap,
+        // not one seamless wash. Same points, same per-point exposure, its
+        // own geometry (a different quad size) and material. The material-
+        // reassignment on rebuild matters here for the SAME baked-texture
+        // reason spelled out for the arrows just above.
+        const oldHeat = windHeatMesh?.geometry;
+        const { geometry: heatGeom } = buildWindOverlayGeometry(THREE, pointsWithExposure, {
+          sizePx: spacingPx * 0.94,
+        });
+        if (!windHeatMesh) {
+          windHeatMesh = new THREE.Mesh(heatGeom, windHeatMat.material);
+          windHeatMesh.frustumCulled = false;
+          windHeatMesh.renderOrder = 0; // the wash sits beneath the arrows (renderOrder 1)
+          windOverlayScene.add(windHeatMesh);
+        } else {
+          windHeatMesh.geometry = heatGeom;
+          windHeatMesh.material = windHeatMat.material;
+        }
+        if (oldHeat) oldHeat.dispose();
+        windOverlayLastView = { cx, cy, w, h, spacing: spacingPx, resolution: windOverlayResolution };
+      }
+      windOverlayMesh.visible = true;
+      windHeatMesh.visible = true;
+    }
+
+    /** Free the overlay's own GPU resources. Safe whether or not anything was built. */
+    function disposeWindFieldOverlay() {
+      try {
+        windOverlayMesh?.geometry?.dispose();
+        windOverlayMat?.material?.dispose();
+        windHeatMesh?.geometry?.dispose();
+        windHeatMat?.material?.dispose();
+      } catch (err) {
+        log.error('wind overlay dispose failed — GPU buffers may leak until renderer.dispose():', err);
+      }
+      windOverlayMesh = null;
+      windOverlayMat = null;
+      windHeatMesh = null;
+      windHeatMat = null;
+      windOverlayLastView = null;
+    }
+
+    /** Tear down Wind.md Tier 2's own GPU resources (ping/pong/publish
+     * render targets + the solid mask texture + the sim materials) — same
+     * per-cycle VRAM-leak reasoning as disposeWindFieldOverlay just above.
+     * Tier 1's own baked textures are NOT touched here (disposed by the next
+     * bakeWindField call or the renderer's own final dispose — unchanged,
+     * pre-existing behaviour). */
+    function disposeWindSim() {
+      try {
+        windSimMaterials?.dispose();
+        allocator.dispose(windPingRT);
+        allocator.dispose(windPongRT);
+        allocator.dispose(windPublishRT);
+        windSolidMaskTexture?.dispose();
+      } catch (err) {
+        log.error('wind sim dispose failed — GPU buffers may leak until renderer.dispose():', err);
+      }
+      windSimMaterials = null;
+      windPingRT = null;
+      windPongRT = null;
+      windPublishRT = null;
+      windSolidMaskTexture = null;
+      windSimGridKey = null;
+      windActiveImpulses = [];
+      windThawUntilMs = 0;
+      windIsThawed = false;
+    }
+
+    /** @param {boolean} on */
+    function setWindFieldOverlayEnabled(on) {
+      windOverlayEnabled = !!on;
+    }
+
+    /** Debug-only wind visualization, off by default (see windParticlesEnabled's
+     * own comment) — enabling for the FIRST time in a session builds the
+     * engine (constructParticleEngineIfNeeded, defined near the original
+     * construction site further down, hoisted so this call site doesn't care
+     * about textual order); every enable after that just resumes step/draw,
+     * since there is no dispose path to rebuild from (particle-arena.js's own
+     * accepted limitation — reference_bufferattribute_no_dispose_trap).
+     * @param {boolean} on */
+    function setWindDiagnosticParticlesEnabled(on) {
+      windParticlesEnabled = !!on;
+      if (windParticlesEnabled) constructParticleEngineIfNeeded();
+    }
+
+    /** Wind Gusts (ribbon trails), off by default — same deferred-build idiom as
+     * the diagnostic particles: first enable builds the engine, later toggles
+     * just resume step/draw (no dispose path to rebuild from).
+     * @param {boolean} on */
+    function setWindGustsEnabled(on) {
+      windGustsEnabled = !!on;
+      if (windGustsEnabled) constructGustEngineIfNeeded();
+    }
+
+    /** @param {number} n - real bake cells to skip per displayed arrow,
+     * 1..4 (2026-07-23, REPURPOSED — was "sub-samples per grid square,
+     * finer than the real data"; the overlay now shows the actual bake grid,
+     * so 1 = every real cell, exact; 2..4 = a deliberately decluttered
+     * every-Nth-cell view, see `windOverlayResolution`'s own declaration).
+     * Clamped; takes effect on the next updateWindFieldOverlay (an immediate
+     * rebuild, not waiting for the pan/zoom threshold — a lever should feel
+     * responsive). */
+    function setWindFieldOverlayResolution(n) {
+      const clamped = Math.max(1, Math.min(4, Math.round(Number(n) || 1)));
+      windOverlayResolution = clamped;
     }
 
     // ------------------------------------------------------------------
@@ -2267,24 +4151,36 @@ export async function startVtPanViewer({
     //    both backends — and they must get it right, because every three user
     //    would notice if they didn't. `zones/no-handrolled-fullscreen-quad` in
     //    tools/verify-structure.mjs now fails the build on the mistake I made.
-    const presentMaterial = new THREE.NodeMaterial();
-    presentMaterial.depthTest = false;
-    presentMaterial.depthWrite = false;
-    // No uv argument: `texture()` defaults to the mesh's own uv attribute,
-    // which on a QuadMesh is QuadGeometry's — the one three guarantees against
-    // its own render-target convention. Passing `uv()` explicitly would be the
-    // same thing; passing anything else re-opens the bug.
-    // Reads scene.lit — the map AFTER light.accumulate multiplies in the
-    // ambient (2026-07-18). Before lighting landed this read scene.color
-    // directly; now the lit buffer is what reaches the canvas.
-    const presentTexNode = THREE.TSL.texture(sceneLit.texture);
-    presentMaterial.fragmentNode = presentTexNode;
+    // THE GRADE STACK, folded into present (docs/planning/Grade.md §5). Reads
+    // scene.lit — the map AFTER light.accumulate + particles + flames — applies
+    // the environmental grade (outdoor-gated) then the artistic grade, and hands
+    // the result to the canvas (which does the sRGB encode). Ships neutral: both
+    // grades at identity ⇒ this is `present(scene.lit)` unchanged, so the
+    // Foundry-parity check holds until a grade is dialled in.
+    //
+    // Shares envLight's outdoor-gate NODES (the same mask texture + rect
+    // uniforms), so a mask rebake reaches the grade too and the sky light and
+    // grade can never gate different halves of the map. QuadMesh, not a
+    // hand-rolled quad — the whole Y-flip essay above still applies (grade-
+    // present builds a NodeMaterial that a QuadMesh wraps below).
+    // A placeholder identity 3D LUT, so the LUT sampler always compiles (the
+    // Colour Grade effect's LUT strength gates it; a real .cube swaps in via
+    // gradePresent.setLut). 2³ is the smallest identity — plenty as a no-op.
+    const lutPlaceholder = makeIdentityLutTexture(THREE);
+    const gradePresent = buildGradePresentMaterial({
+      THREE,
+      litTexture: sceneLit.texture,
+      outdoorsTexNode: envLight.outdoorsTexNode,
+      uViewRect: envLight.uViewRect,
+      uOutdoorsRect: envLight.uOutdoorsRect,
+      lutTexture: lutPlaceholder,
+    });
+    const presentMaterial = gradePresent.material;
     const presentQuad = new THREE.QuadMesh(presentMaterial);
 
     /** Re-point the present material at a freshly-allocated target (resize). */
     function rebindPresent() {
-      presentTexNode.value = sceneLit.texture;
-      presentMaterial.needsUpdate = true;
+      gradePresent.rebindLit(sceneLit.texture);
     }
 
     // ========================================================================
@@ -2321,6 +4217,9 @@ export async function startVtPanViewer({
     function runGeometryWorldPass() {
       renderer.setRenderTarget(sceneColor);
       renderer.render(scene, camera);
+      // Door leaves composite over the map INTO the same target (not cleared),
+      // so the light.accumulate pass lights them like the tiles beneath them.
+      renderDoorGraphicsInto();
       renderer.setRenderTarget(null);
     }
     function runPresentCompositePass() {
@@ -2361,6 +4260,17 @@ export async function startVtPanViewer({
       const raisedBackground = maxRgb(background, lastGlobalLightFloor);
 
       envLight.setAmbient(raisedBackground);
+      // THE SKY LIGHT's screen→world gate needs THIS frame's camera rect. Pushed
+      // here, beside setAmbient, because the two are the same kind of thing —
+      // per-frame scalars the illumination pass reads — and separating them is
+      // how one of them ends up updated on a different cadence from the other.
+      if (view) envLight.setViewRect(viewToWorldRect(view, canvasW / canvasH));
+
+      // SUN SHADOWS — re-march ONLY if the quantised sun, the masks, the floor
+      // or a param moved. Almost every frame this is three comparisons and a
+      // return; the expensive path is a few times a minute at most. It runs
+      // BEFORE illumQuad below, because that fill samples the field this writes.
+      sunShadows.maybeBake(view?.floorIndex ?? 0);
 
       // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
       // RAW ambient endpoints (not the pre-mixed background: each region
@@ -2390,6 +4300,14 @@ export async function startVtPanViewer({
       // Reconcile the flame billboard from the same candle render state the
       // light merge above just read (drawn below, into scene.lit).
       updateCandleFlame();
+      // Every loaded vegetation mesh's live motion/shadow uniforms — SAME
+      // "every frame, not just on residency pass" placement as the candle
+      // call just above (see `syncAllVegetationMotionForFrame`'s own header
+      // for the live-test bug this fixes: a FOH/ROH slider drag "did nothing
+      // until I panned the camera").
+      syncAllVegetationMotionForFrame();
+      // The wind field debug overlay (a no-op grid rebuild check when disabled).
+      updateWindFieldOverlay();
 
       // THE "BLACK OUTSIDE THE LIGHT RADIUS" FIX (2026-07-19). buf:scene.illum
       // is built from THREE sequential render() calls to the SAME target
@@ -2476,6 +4394,122 @@ export async function startVtPanViewer({
         renderer.render(candleFlameScene, camera);
         renderer.autoClearColor = prevFlameAutoClear;
       }
+      // THE WIND FIELD DEBUG OVERLAY — same guarded-additive draw as the
+      // candle flame just above (same target, same camera, same "don't wipe
+      // what compositeQuad/the flame already drew" guard). OFF by default.
+      if (windOverlayMesh && windOverlayMesh.visible) {
+        const prevWindAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(windOverlayScene, camera);
+        renderer.autoClearColor = prevWindAutoClear;
+      }
+      renderer.setRenderTarget(null);
+    }
+
+    /**
+     * surface.particles (docs/planning/Particles.md §16) — draw the GPU particles
+     * additively over the fully-lit scene. light.accumulate ended with
+     * setRenderTarget(null), so re-bind sceneLit and GUARD the clear
+     * (autoClearColor=false) exactly like the candle flame above — an unguarded
+     * render() would wipe what the lighting pass composited. Positions were
+     * advanced by particleEngine.step() in renderFrame (sims.particles) before the
+     * plan runs; this only draws: ONE InstancedBufferGeometry, positions straight
+     * from the arena, never a scene object per particle.
+     */
+    function runSurfaceParticlesPass() {
+      const drawParticles = windParticlesEnabled && particleEngine?.scene;
+      const drawGusts = windGustsEnabled && gustEngine?.scene;
+      if (!drawParticles && !drawGusts) return;
+      // Bind sceneLit ONCE and guard the clear (light.accumulate ended with
+      // setRenderTarget(null)); draw whichever of the two additive effects are
+      // enabled — they are independent toggles sharing one guarded pass, so a
+      // scene running only one pays for only one render() but no extra bind.
+      const prevParticleAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      if (drawParticles) renderer.render(particleEngine.scene, camera);
+      if (drawGusts) renderer.render(gustEngine.scene, camera);
+      renderer.autoClearColor = prevParticleAutoClear;
+      renderer.setRenderTarget(null);
+    }
+
+    /**
+     * post.bloom (docs/planning/Bloom.md) — the dual-filter bloom pyramid, run
+     * AFTER surface.particles (scene.lit fully composited) and BEFORE
+     * present.composite (the grade). Reads scene.lit, builds the blur pyramid
+     * through the bloom mip targets, and additively composites the two-band
+     * result back into scene.lit. Skips ENTIRELY when disabled — a true JS
+     * early-return, zero GPU work (Effects.md: gating by uniform is not gating).
+     */
+    function runPostBloomPass() {
+      const st = getBloomRenderState();
+      if (!st.enabled) return;
+      const p = st.params || {};
+
+      // Push resolved params into the build-once uniforms.
+      const u = bloom.uniforms;
+      u.threshold.value = bloomNum(p.threshold, 1.0);
+      u.knee.value = bloomNum(p.knee, 0.5);
+      u.strength.value = bloomNum(p.strength, 1.0);
+      u.coreStrength.value = bloomNum(p.coreStrength, 1.0);
+      u.atmoStrength.value = bloomNum(p.atmoStrength, 0.5);
+      u.spillEnabled.value = p.outdoorSpillSuppress === false ? 0 : 1;
+      u.spillLo.value = bloomNum(p.spillLumLo, 0.42);
+      u.spillHi.value = bloomNum(p.spillLumHi, 0.92);
+      const ct = hexToRgb01(p.coreTint ?? '#ffffff');
+      const at = hexToRgb01(p.atmoTint ?? '#fff0dc');
+      u.coreTint.value.set(ct[0], ct[1], ct[2]);
+      u.atmoTint.value.set(at[0], at[1], at[2]);
+
+      const prevAutoClear = renderer.autoClearColor;
+
+      // 1) BRIGHT — masked soft-knee threshold of scene.lit → mip0 (full overwrite).
+      renderer.setRenderTarget(bloomMips[0]);
+      bloomBrightQuad.render(renderer);
+
+      // 2) DOWNSAMPLE — mip0→mip1 with the Karis average (firefly fix), then the
+      //    plain 13-tap down the rest of the chain. uInvTexel = 1/sourceRes.
+      for (let k = 0; k < BLOOM_MIP_COUNT - 1; k++) {
+        const src = bloomMips[k];
+        if (k === 0) {
+          bloom.downsampleKaris.inputNode.value = src.texture;
+          bloom.downsampleKaris.uInvTexel.value.set(1 / src.width, 1 / src.height);
+          renderer.setRenderTarget(bloomMips[k + 1]);
+          bloomDownKarisQuad.render(renderer);
+        } else {
+          bloom.downsample.inputNode.value = src.texture;
+          bloom.downsample.uInvTexel.value.set(1 / src.width, 1 / src.height);
+          renderer.setRenderTarget(bloomMips[k + 1]);
+          bloomDownQuad.render(renderer);
+        }
+      }
+
+      // 3) UPSAMPLE (additive tent) — two INDEPENDENT bands. Guard the clear so
+      //    the additive blend accumulates the coarser mip into the finer one
+      //    (an unguarded render would wipe the downsample content first).
+      renderer.autoClearColor = false;
+      // CORE band: mip2 → mip1 → mip0 (tight spread) ⇒ mip0 = smooth blur of 0..2.
+      bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.coreSpread, 0.4));
+      for (const k of [1, 0]) {
+        bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
+        renderer.setRenderTarget(bloomMips[k]);
+        bloomUpQuad.render(renderer);
+      }
+      // ATMOSPHERE band: mip5 → mip4 → mip3 (wide spread) ⇒ mip3 = smooth blur of 3..5.
+      bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.atmoSpread, 0.7));
+      for (const k of [4, 3]) {
+        bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
+        renderer.setRenderTarget(bloomMips[k]);
+        bloomUpQuad.render(renderer);
+      }
+
+      // 4) COMPOSITE — core (mip0) + atmosphere (mip3) additively into scene.lit.
+      //    autoClearColor is still false here — an unguarded clear would wipe the
+      //    whole composited scene, so it MUST stay off until after this draw.
+      renderer.setRenderTarget(sceneLit);
+      bloomCompositeQuad.render(renderer);
+
+      renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
     }
     // 'masks.occlusion'/'light.accumulate': the "add one line, widen fromStage"
@@ -2486,6 +4520,8 @@ export async function startVtPanViewer({
       'masks.occlusion': runMaskOcclusionPass,
       'geometry.world': runGeometryWorldPass,
       'light.accumulate': runLightAccumulatePass,
+      'surface.particles': runSurfaceParticlesPass,
+      'post.bloom': runPostBloomPass,
       'present.composite': runPresentCompositePass,
     };
     // Today this resolves to exactly ['masks.occlusion', 'geometry.world',
@@ -2524,41 +4560,322 @@ export async function startVtPanViewer({
     /** The env snapshot from the most recent frame, plus where darkness came
      * from — for getEnvSnapshotInfo() / the Diagnostics debug report. */
     let lastEnvSnapshot = null;
+
+    // ── THE SKY ────────────────────────────────────────────────────────────
+    // `todHour` HAS a real source as of 2026-07-23: the day clock
+    // (world/day-clock.js), driven by the astrolabe in `aesthetic` mode or by
+    // Foundry's own world clock in `synced` mode. It owns the hour; nothing
+    // else may. The long-standing "no calendar, no author-facing control" gap
+    // that every comment in this region used to acknowledge is CLOSED.
+    const dayClock = createDayClock();
+    /** Unsubscribe for the world-clock watcher — only live in `synced` mode. */
+    let worldTimeUnsub = null;
+    /** Cloud cover 0..1 — now a real authored value from the sky settings
+     * (world- or scene-scoped), not the debug lever it was. `null` = nothing
+     * has set it, so the DEFAULT_WEATHER clear sky answers. */
+    let cloudCoverOverride = null;
+    /** Who last set `cloudCoverOverride` — see `setCloudCover`'s own doc. */
+    let cloudCoverSource = 'default';
+    /** The sky-light lever, 0..1. 0 = exact Foundry parity (a mathematical
+     * no-op) — see effects/sky-access.js for why the default cannot be else. */
+    let skyRealism01 = 0;
+    /** THE ENVIRONMENTAL GRADE strength, 0..1 (docs/planning/Grade.md). 0 =
+     * neutral (the automatic ToD/weather look is off). This is the lever that
+     * carries the cloud desaturation the deleted sky veil couldn't. */
+    let gradeEnvStrength = 0;
+    // THE ARTISTIC GRADE — a first-class effect (`effects/grade/grade.js`). Its
+    // resolved {enabled, params} arrive via the injected `getGradeLookState`
+    // (like getBloomRenderState), read + pushed each frame below. Disabled ⇒
+    // identity ⇒ an un-authored scene is pixel-unchanged.
+    /** Bumped whenever the sky handle is rebuilt, same contract as
+     * `shadowHandleVersion`. */
+    let skyHandleVersion = 0;
+    /** THE SKY HANDLE (effects/sky-access.js) — the outdoor light described
+     * once. Starts neutral so a frame before the first env snapshot is a no-op. */
+    let skyHandle = createSkyHandle();
+    /** Bumped whenever the sky changes, so a consumer caching anything derived
+     * from `shadowHandle` can tell (the same contract windHandle.version has). */
+    let shadowHandleVersion = 0;
+    /** THE SHADOW HANDLE (effects/shadow-access.js) — the sky described ONCE.
+     * Starts neutral (overhead clear noon) so a caster built before the first
+     * env snapshot still gets a finite, sane answer rather than a null check. */
+    let shadowHandle = createShadowHandle();
+
     function updateEnvSnapshot() {
       const time = frameClock.tick();
+      // THE DAY CLOCK, ticked on the SIM delta — so time-of-day decelerates
+      // with everything else when Foundry pauses, rather than being the one
+      // system that carries on regardless. See world/day-clock.js#tick.
+      const todHour = dayClock.tick(time.dtSec);
       const darkness = readSceneDarkness();
       // The ambient palette Foundry itself renders from (canvas.colors) — read
       // through the ONE adapter so the light pass reproduces Foundry's ladder
       // rather than re-reading a global. `readSceneAmbient` never throws and
       // reports source/reason exactly like `readSceneDarkness`.
       const ambient = readSceneAmbient();
-      // todHour has NO real source yet — no calendar, no author-facing
-      // control exists in this session's scope. `world/sun.js#normalizeHour`
-      // already treats a non-finite hour as noon ("a broken input reads as
-      // noon, LOUDLY neutral — never NaN downstream"); this makes that choice
-      // EXPLICIT rather than an implicit fallthrough, so it reads as an
-      // acknowledged gap, not a bug, in getEnvSnapshotInfo() below.
+      // Weather was previously never passed AT ALL, so `cloudCover01` was
+      // permanently 0 and the atmospheric half of the shadow model could not
+      // be exercised. Same posture: a debug lever over an acknowledged gap.
+      const weather = cloudCoverOverride === null ? undefined : { cloudCover01: cloudCoverOverride };
       const env = buildEnvSnapshot({
         time,
-        todHour: 12,
+        todHour,
+        weather,
         darknessInput: darkness.darkness01,
         ambientInput: { daylight: ambient.daylight, darkness: ambient.darkness, brightest: ambient.brightest },
       });
-      lastEnvSnapshot = { env, darkness, ambient, todHourSource: 'default:no-calendar-input-yet' };
+      // THE SHADOW HANDLE — rebuilt only when the sky actually MOVED, not every
+      // frame: it is an immutable value object, and churning a new one per
+      // frame would defeat the version-compare its own consumers rely on.
+      const skyKey = `${env.sun.elevationDeg.toFixed(3)}|${env.sun.azimuthDeg.toFixed(3)}|${env.sun.dayFactor01.toFixed(4)}|${env.weather.cloudCover01.toFixed(4)}|${skyRealism01.toFixed(4)}`;
+      if (skyKey !== lastSkyKey) {
+        lastSkyKey = skyKey;
+        shadowHandleVersion += 1;
+        shadowHandle = createShadowHandle({
+          version: shadowHandleVersion,
+          sun: env.sun,
+          weather: env.weather,
+        });
+        // THE SKY HANDLE rides the SAME rebuild guard as the shadow handle, and
+        // deliberately so: they are two descriptions of one afternoon, and a
+        // frame where the shadows had moved on but the light had not would be
+        // exactly the "shadows answering to a different sky" construction
+        // `env/one-sun` exists to prevent — reintroduced one layer up.
+        skyHandleVersion += 1;
+        skyHandle = createSkyHandle({
+          version: skyHandleVersion,
+          sun: env.sun,
+          weather: env.weather,
+          realism01: skyRealism01,
+        });
+        envLight.setSky(skyHandle.ambientMultiplierRgb);
+      }
+
+      // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — resolved from THIS
+      // frame's env (ToD saturation + the weather desaturation that replaces the
+      // deleted sky veil), scaled by the strength lever so it ships neutral, and
+      // pushed to the present-pass grade. Cheap enough to do every frame (a
+      // handful of scalars); no rebuild-guard needed, unlike the handles above.
+      gradePresent.setEnvGrade(scaleGradeToIdentity(resolveEnvGrade(env), gradeEnvStrength));
+
+      // THE ARTISTIC (Look) GRADE — read the effect's resolved params and push.
+      // Converts the authored schema (split-tone COLOURS, a tone-map NAME, a LUT
+      // NAME) into the primitive's shape (lift/gain vectors) + the tail. Disabled
+      // ⇒ identity + no tone map, so parity holds. The LUT texture is swapped
+      // lazily when the name changes (loadNamedLut), not per frame.
+      pushGradeLook();
+
+      const clock = dayClock.read();
+      lastEnvSnapshot = {
+        env,
+        darkness,
+        ambient,
+        todHourSource: clock.mode === 'synced' ? 'foundry-world-clock' : 'day-clock:aesthetic',
+        dayClock: clock,
+        timeScale: time.timeScale,
+        paused: time.paused,
+        cloudSource:
+          cloudCoverOverride === null ? 'default:no-weather-owner-yet' : `${cloudCoverSource}:${cloudCoverOverride}`,
+        shadow: { version: shadowHandleVersion, ...shadowHandle.atmosphere },
+      };
       return env;
     }
+    /** Last sky signature — see updateEnvSnapshot's own rebuild guard. */
+    let lastSkyKey = '';
 
-    // PIXI PARITY: in whole-image mode we draw whole textures and NEVER sample
-    // the page atlas, so allocating its 512MB DataArrayTexture is pure dead
-    // weight — and it was sitting in exactly the VRAM headroom a floor switch
-    // needed, so we hit Chrome's WebGPU memory wall ~512MB sooner than Foundry's
-    // PIXI does (2026-07-18). Skip it entirely; carry only what PIXI carries.
-    const atlas = _wholeImageEnabled ? null : new PageAtlas({ THREE, layout, renderer });
+    // ── THE PAUSE RAMP ─────────────────────────────────────────────────────
+    // Foundry's pause eases the whole world to a standstill over five seconds
+    // and back (author-chosen, symmetric). ONE call into the frame clock does
+    // it for every effect at once: `uGlobalTimeMs` (animated lights, candle
+    // flames, the wind overlay) and `dtSec` (wind sim, particles, gusts) are
+    // all downstream of the clock's scale, so nothing here enumerates effects.
+    // That is the whole dividend of the `time/one-clock` wall.
+    //
+    // `watchGamePaused` fires once immediately, so a client loading into an
+    // already-paused world arrives stopped rather than running at full speed
+    // until someone toggles it. The FIRST application is instant (ramp 0) for
+    // the same reason: easing down from full speed on load would look like a
+    // five-second stutter at startup, not like a pause.
+    /** Unsubscribe for the pause watcher (canvas teardown). Declared BEFORE
+     * `installPauseWatch` so the hoisted function can never hit its TDZ. */
+    let pauseUnsub = null;
+    function installPauseWatch() {
+      if (pauseUnsub) return;
+      let first = true;
+      pauseUnsub = watchGamePaused((paused) => {
+        frameClock.setScaleTarget(paused ? 0 : 1, first ? 0 : DEFAULT_PAUSE_RAMP_SEC);
+        first = false;
+      });
+    }
+
+    /**
+     * THE DAY CLOCK's control surface — what the astrolabe drives. Every one of
+     * these is a READ of Foundry at most; none of them writes `game.time`. See
+     * world/day-clock.js's header for why that asymmetry is the design.
+     * @param {number} hour @returns {object}
+     */
+    function setTimeOfDay(hour) {
+      const accepted = dayClock.setHour(hour);
+      return { accepted, ...dayClock.read() };
+    }
+    /** @param {number} hour @returns {object} sweep to an hour rather than snapping. */
+    function sweepTimeOfDay(hour) {
+      dayClock.syncTo(hour);
+      return dayClock.read();
+    }
+    /** @param {number} hoursPerMinute @returns {object} */
+    function setTimeRate(hoursPerMinute) {
+      dayClock.setRate(hoursPerMinute);
+      return dayClock.read();
+    }
+    /**
+     * Switch time authority. Entering `synced` subscribes to Foundry's world
+     * clock and jumps to it at once (no sweep — arriving in a mode should show
+     * that mode's truth immediately); leaving it unsubscribes, so an aesthetic
+     * scene can never be nudged by a combat round.
+     * @param {string} mode - 'aesthetic' | 'synced'
+     * @returns {object}
+     */
+    function disposeTimeWatches() {
+      if (pauseUnsub) {
+        pauseUnsub();
+        pauseUnsub = null;
+      }
+      if (worldTimeUnsub) {
+        worldTimeUnsub();
+        worldTimeUnsub = null;
+      }
+    }
+
+    function setTimeMode(mode) {
+      const applied = dayClock.setMode(mode);
+      if (worldTimeUnsub) {
+        worldTimeUnsub();
+        worldTimeUnsub = null;
+      }
+      if (applied === 'synced') {
+        let first = true;
+        worldTimeUnsub = watchWorldTimeOfDay((hour) => {
+          if (first) dayClock.jumpTo(hour);
+          else dayClock.syncTo(hour);
+          first = false;
+        });
+      }
+      return dayClock.read();
+    }
+
+    /**
+     * `MapShine.setSunHour(h)` — kept as an alias for `setTimeOfDay` so every
+     * existing note, doc and habit still works. It is no longer a "debug lever
+     * over an acknowledged gap": the gap is closed, and this writes the real
+     * day clock. Returns `accepted: false` in `synced` mode, where the world
+     * clock is the only authority.
+     * @param {number|null} hour @returns {object}
+     */
+    function setSunHour(hour) {
+      if (hour === null || hour === undefined) {
+        dayClock.jumpTo(12);
+        return { accepted: true, ...dayClock.read(), note: 'reset to noon' };
+      }
+      return setTimeOfDay(hour);
+    }
+    /**
+     * Cloud cover 0..1, or `null` for the clear-sky default. No longer a debug
+     * lever: the sky settings (world- or scene-scoped) drive this for real, and
+     * it feeds BOTH the sky light's colour/veil and the shadow handle's
+     * softening from the same number.
+     *
+     * `source` is who is actually calling — `resolveAndApplySky` (boot.js)
+     * passes `'sky-settings'` on every real resolve; a bare console call
+     * (`MapShine.setCloudCover(0.5)`, still exported for exactly this) leaves it
+     * at the default. The env-diagnostics `cloudSource` field reports whichever
+     * one it was — calling every path "debug-override" (this function's OWN
+     * former label, from before sky-settings existed) would tell a GM reading a
+     * live scene's own authored weather that they are looking at a console poke
+     * nobody made (feedback_instruments_must_not_lie).
+     * @param {number|null} cover01 @param {string} [source]
+     * @returns {object}
+     */
+    function setCloudCover(cover01, source = 'console') {
+      cloudCoverOverride =
+        cover01 === null || cover01 === undefined ? null : Math.min(1, Math.max(0, Number(cover01) || 0));
+      cloudCoverSource = cloudCoverOverride === null ? 'default' : source;
+      return { cloudCoverOverride, source: cloudCoverSource };
+    }
+
+    /**
+     * THE SKY-LIGHT LEVER, 0..1 (docs/planning/Sky.md §8). `0` — the default —
+     * makes the sky light a mathematical no-op, preserving the
+     * pixel-identical-to-Foundry-at-noon parity check exactly. `1` is the full
+     * atmospheric model.
+     * @param {number} realism01 @returns {object}
+     */
+    function setSkyRealism(realism01) {
+      skyRealism01 = Math.min(1, Math.max(0, Number(realism01) || 0));
+      // Force the shared rebuild guard to fire so the change lands THIS frame
+      // rather than waiting for the sun to move — a lever whose effect appears
+      // some seconds later reads as broken.
+      lastSkyKey = '';
+      return { skyRealism01, note: skyRealism01 === 0 ? 'exact Foundry parity (the sky light is a no-op)' : null };
+    }
+
+    /**
+     * THE ENVIRONMENTAL GRADE strength, 0..1 (docs/planning/Grade.md). This is
+     * the automatic ToD/weather look — and the cloud desaturation the deleted
+     * sky veil couldn't do. The env grade itself is re-pushed every frame from
+     * env, so no rebuild-guard poke is needed here.
+     * @param {number} strength01 @returns {object}
+     */
+    function setGradeEnvStrength(strength01) {
+      gradeEnvStrength = Math.min(1, Math.max(0, Number(strength01) || 0));
+      return { gradeEnvStrength };
+    }
+
+    /**
+     * Read the Colour Grade effect's resolved params and push them to the
+     * present grade — the artistic scope. Converts the authored SCHEMA
+     * (`grade.js#GRADE_LOOK_PARAMS`: split-tone colours as hex, a tone-map name,
+     * a LUT name) into the primitive's shape (lift/gain vectors) + the tail.
+     * Disabled ⇒ identity + tone map 'none' ⇒ parity holds.
+     */
+    function pushGradeLook() {
+      const st = getGradeLookState();
+      if (!st?.enabled) {
+        gradePresent.setArtGrade({}, { toneMapping: 'none', lutStrength: 0 });
+        return;
+      }
+      const p = st.params || {};
+      // Split-tone colours → the primitive's lift (shadows) / gain (highlights).
+      // Scaled/mixed toward neutral so a picked colour is a TINT, not a full
+      // channel replacement: lift neutral is black (× a small amount), gain
+      // neutral is white (mix toward the tint). See Grade.md §14.
+      const shadowRgb = hexToRgb01(p.shadows ?? '#000000');
+      const highRgb = hexToRgb01(p.highlights ?? '#ffffff');
+      const lift = [shadowRgb[0] * 0.15, shadowRgb[1] * 0.15, shadowRgb[2] * 0.15];
+      const gain = [mix1(1, highRgb[0], 0.3), mix1(1, highRgb[1], 0.3), mix1(1, highRgb[2], 0.3)];
+      gradePresent.setArtGrade(
+        {
+          exposure: p.exposure,
+          contrast: p.contrast,
+          saturation: p.saturation,
+          vibrance: p.vibrance,
+          temperature: p.temperature,
+          tint: p.tint,
+          lift,
+          gamma: [1, 1, 1],
+          gain,
+        },
+        // LUT strength stays 0 for now: the LUT shader path + placeholder are
+        // wired, but bundled .cube loading is the next rung (grade.js's
+        // `bundled-lut-loading`), so there is no real LUT to blend toward yet.
+        { toneMapping: p.toneMapping ?? 'agx', lutStrength: 0 }
+      );
+    }
 
     // THE OCCLUSION MASK — a REAL render target as of 2026-07-18, RADIAL-only.
     //
     // scene/occlusion.js has the full model ported and Node-tested, and the
-    // shader in ensureItemMesh()/buildWholeImageMaterial() implements
+    // shader in buildWholeImageMaterial() implements
     // Foundry's algorithm for real. This is the PRODUCER: runMaskOcclusionPass()
     // below renders each occludable token's RADIAL disc into this screen-space
     // RGBA target with MIN blending, every frame (tokens already sync position
@@ -2900,11 +5217,12 @@ export async function startVtPanViewer({
       indirectionTexture.minFilter = THREE.NearestFilter;
       indirectionTexture.magFilter = THREE.NearestFilter;
 
-      // NO PER-MIP UNIFORM ARRAYS ANY MORE. The TSL sampler derives every mip's
-      // page grid and pyramid origin from `pages0` alone (two integers) — see
-      // vt-sample.tsl.js's header for why that is exact, and vt-core.test.mjs for
-      // the proof against this very PageTable. `indirectionLayout` still sizes the
-      // texture above; it just no longer has to be marshalled into the shader.
+      // This indirection texture is no longer sampled by any shader (the
+      // streaming/virtual-texture engine that read it via `pages0` was
+      // removed 2026-07-22 — see feedback_mode_forks_silently_drop_features;
+      // vt-core.test.mjs still proves the PageTable/layout math it was built
+      // against). `indirectionLayout` still sizes the buffer above for the
+      // coarse-pin bookkeeping masks use.
 
       // COARSE PINS (§4.1): the top few mip levels of THIS pack, pinned
       // permanently so the whole floor always renders (soft) and floor switches
@@ -2962,55 +5280,23 @@ export async function startVtPanViewer({
      * needs the texture's NATIVE size — which is why it happens here, after
      * buildPack has read the header, rather than in the pure collection step.
      */
-    async function ensureItemLoaded(item) {
-      const existing = itemStates.get(item.id);
-      if (existing) {
-        existing.item = item; // refresh (renderOrder/key change per update)
-        return existing;
-      }
-
-      // PIXI PARITY (whole-image mode): no packs, no atlas, no page streaming —
-      // build NONE of the streaming apparatus. All we need is the source's real
-      // dimensions (for placement + tile planning); ensureWholeImageMeshes does
-      // the actual decode/upload. `getSourceDimensions` reads only the image
-      // header (~30 bytes), not the 144-megapixel body. This is what makes our
-      // GPU footprint match Foundry's PIXI: only the floor textures, nothing
-      // else. `buildPack`'s coarse-pin decode+upload (and the 512MB atlas it
-      // fills) is skipped entirely.
-      if (_wholeImageEnabled) {
-        const dims = await getSourceDimensions(item.src);
-        const state = {
-          item,
-          packs: new Map(), // nothing streams
-          albedoPack: null,
-          layerErrors: [],
-          imageSize: { width: dims.width, height: dims.height },
-          placement: null,
-          placementKey: null,
-          worldBounds: null,
-          geometry: null,
-          material: null,
-          mesh: null,
-          hoverFade: createHoverFadeState(),
-          occluded: false,
-        };
-        refreshItemPlacement(state, item);
-        itemStates.set(item.id, state);
-        return state;
-      }
-
+    /**
+     * Load every EXTRA layer-pack (mask) an item declares, tolerating any
+     * single layer's failure without losing the rest. Factored out
+     * 2026-07-22: this used to run ONLY on the non-whole-image path — see
+     * `ensureItemLoaded`'s own header for the real bug that discovery
+     * (`layerErrors` shared with `getDiagnostics().layerLoadErrors`, per this
+     * function's own comment) found empty despite `mask-authority#
+     * getIngestStatus` reporting `outdoorsIngested:false`: whole-image mode
+     * returned BEFORE this loop ever ran, so no mask pack was EVER attempted,
+     * let alone failed — a structural gap, not a load error. Extracting this
+     * lets BOTH modes share the identical, already-correct logic instead of
+     * two copies drifting apart.
+     * @param {object} item
+     * @returns {Promise<{packs: Map<string,object>, layerErrors: Array<object>}>}
+     */
+    async function loadExtraLayerPacks(item) {
       const packs = new Map();
-      // The item's fair share of the SCENE-WIDE coarse budget (item 1b) — was
-      // uncapped (up to ~96 pages) before this, with nothing coordinating the
-      // total across however many packs the scene actually has.
-      const albedoPack = await buildPack(
-        item.id,
-        'albedo',
-        { url: item.src },
-        { coarsePinMaxPages: currentCoarseBudget.perPackMaxPages }
-      );
-      packs.set('albedo', albedoPack);
-
       // Per-pack load failures are collected here AND surfaced in diagnostics
       // (getDiagnostics.layerLoadErrors) — not just console — because the
       // author debugs by pasting reports, not reading the console
@@ -3042,14 +5328,38 @@ export async function startVtPanViewer({
           console.error(`[vt-pan-viewer] ${item.id}: layer "${name}" failed to load (${errorUrl}):`, err);
         }
       }
+      return { packs, layerErrors };
+    }
 
-      const imageSize = { width: albedoPack.table.worldWidthPx, height: albedoPack.table.worldHeightPx };
+    async function ensureItemLoaded(item) {
+      const existing = itemStates.get(item.id);
+      if (existing) {
+        existing.item = item; // refresh (renderOrder/key change per update)
+        return existing;
+      }
+
+      // No albedo atlas, no page streaming for the floor art —
+      // `ensureWholeImageMeshes` decodes/uploads that directly, matching
+      // Foundry's own PIXI GPU footprint (only the floor textures, nothing
+      // else). `getSourceDimensions` reads only the image header (~30 bytes),
+      // not the 144-megapixel body.
+      //
+      // MASKS still go through `loadExtraLayerPacks` (fixed 2026-07-22, real
+      // bug found live: this used to skip `extraLayersForItem` entirely,
+      // which silently meant NO mask, on ANY scene, could ever reach the mask
+      // authority — not a load failure, nothing ever threw, just never
+      // attempted). Masks are coarse-pinned data (a handful of ≤248² pages,
+      // `maskCoarsePinMaxPages()`) loaded through the small decode/pack
+      // machinery `buildPack` still provides; only the ALBEDO atlas/VT
+      // pipeline that used to sit alongside it (streaming mode, removed
+      // 2026-07-22 — see feedback_mode_forks_silently_drop_features) is gone.
+      const dims = await getSourceDimensions(item.src);
+      const { packs, layerErrors } = await loadExtraLayerPacks(item);
       const state = {
         item,
-        packs,
-        albedoPack,
+        packs, // masks only — there is no albedo pack any more
         layerErrors,
-        imageSize,
+        imageSize: { width: dims.width, height: dims.height },
         placement: null,
         placementKey: null,
         worldBounds: null,
@@ -3061,7 +5371,63 @@ export async function startVtPanViewer({
       };
       refreshItemPlacement(state, item);
       itemStates.set(item.id, state);
+      requestItemAlphaGrid(item, dims);
       return state;
+    }
+
+    /** Items whose coarse alpha has been asked for — one request per item per
+     * session (the worker's own IndexedDB cache handles across sessions). */
+    const alphaRequested = new Set();
+    /** Reported in diagnostics so "sky-reach has no casters" is always
+     * attributable: asked / arrived / refused, never inferred. */
+    const alphaGridStats = { requested: 0, delivered: 0, failed: 0, skippedTokens: 0 };
+
+    /**
+     * THE ART-OPACITY REQUEST (see `onItemAlpha`'s own doc, and
+     * `vt/coarse-alpha.js` for the defect this repairs).
+     *
+     * Fire-and-forget on purpose: `coverAbove` is a lazily-recomputed CPU
+     * product, so a grid that lands three seconds after the floor drew simply
+     * makes the next derivation better. Blocking the load on it would trade a
+     * visible stall for a shadow nobody is looking at yet.
+     *
+     * TOKENS ARE SKIPPED — the authority excludes them from cover physics
+     * anyway (they move constantly and are not architecture), so decoding their
+     * art would be pure waste. Counted, not silently dropped.
+     */
+    function requestItemAlphaGrid(item, dims) {
+      if (item?._placement?.kind === 'token') {
+        alphaGridStats.skippedTokens++;
+        return;
+      }
+      if (!item?.src || alphaRequested.has(item.id)) return;
+      alphaRequested.add(item.id);
+      alphaGridStats.requested++;
+      requestCoarseAlphaGrid(item.src)
+        .then((res) => {
+          if (!res?.grid) {
+            alphaGridStats.failed++;
+            return;
+          }
+          alphaGridStats.delivered++;
+          onItemAlpha({
+            ownerId: item.id,
+            grid: { w: res.gridW, h: res.gridH, data: res.grid },
+            // The SOURCE image's own size — placement resolves from the file's
+            // native dimensions, never from the reduced grid's (that would
+            // shrink every item to a 512px square).
+            imageWidth: res.width || dims?.width || 0,
+            imageHeight: res.height || dims?.height || 0,
+          });
+        })
+        .catch((err) => {
+          alphaGridStats.failed++;
+          // Through the ONE log door, so this lands in the flight-recorder
+          // bundle rather than only in a console nobody exports (log/one-door).
+          // A failure here is invisible on screen — the shadow is simply absent
+          // — so it MUST be recoverable from a report.
+          ingestLog.warn(`coarse alpha failed for "${item.id}":`, err);
+        });
     }
 
     /**
@@ -3134,6 +5500,32 @@ export async function startVtPanViewer({
 
     const scene = new THREE.Scene();
 
+    /**
+     * THE VEGETATION-SHADOW SUBSYSTEM (extraction step 2 of docs/planning/
+     * VT-Pan-Viewer-Extraction.md). Constructed HERE, immediately after
+     * `scene`, rather than beside the vegetation code it serves — deliberately,
+     * for trap #4: a `const` is in its temporal dead zone until its own line
+     * runs, so declaring it early makes it impossible for a load path to reach
+     * it too soon. Its two injected functions (`setTileGeometry`,
+     * `buildVegetationMaterial`) are `function` declarations further down and
+     * are therefore hoisted — already defined by the time this line executes.
+     *
+     * ⚠️ `getShadowHandle` is a GETTER, not `shadowHandle` itself: the handle
+     * is REASSIGNED whenever the sky changes (a handle is frozen at
+     * construction; a rebake mints a new one). Passing the value would freeze
+     * every vegetation shadow at the sky it booted under.
+     */
+    const vegShadows = createVegetationShadowSubsystem({
+      THREE,
+      scene,
+      dimensions,
+      getShadowHandle: () => shadowHandle,
+      setTileGeometry: (rec, placement, imageW, imageH, segments, padPx) =>
+        setTileGeometry(rec, placement, imageW, imageH, segments, padPx),
+      buildVegetationMaterial: (tex, item, kind, params, opts) =>
+        buildVegetationMaterial(tex, item, kind, params, opts),
+    });
+
     // THE WORLD-SPACE CAMERA. Frustum values are set per frame by updateCamera()
     // from the live view rect; the placeholder args just construct it.
     //
@@ -3169,162 +5561,25 @@ export async function startVtPanViewer({
       camera.updateProjectionMatrix();
     }
 
-    /**
-     * Create (once) the world-space quad + shader for ONE draw item.
-     *
-     * Geometry is the item's four REAL world corners (computeQuadCorners →
-     * buildQuadPositions), with static 0..1 UVs — no per-frame UV rewriting.
-     *
-     * `side: DoubleSide` is load-bearing, not defensive: Foundry flips a tile
-     * horizontally with a NEGATIVE texture.scaleX (see scene-geometry.js
-     * #computeTextureFit, which deliberately preserves the sign), and a mirrored
-     * quad has reversed winding. Back-face culling would make every flipped tile
-     * silently vanish.
-     *
-     * `transparent:true` + `depthTest/depthWrite:false` + explicit `renderOrder`
-     * (from sortByLayer — THE law, scene/layer-order.js) is what makes the whole
-     * composite work: a real ALPHA HOLE in an upper floor's art blends against
-     * whatever a lower floor already painted, and a roof paints over the tokens
-     * beneath it purely because its elevation sorts later.
-     */
-    function ensureItemMesh(state) {
-      if (state.mesh) return state;
-
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute(
-        'position',
-        new THREE.BufferAttribute(buildQuadPositions(computeQuadCorners(state.placement)), 3)
-      );
-      geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
-      geometry.setIndex(Array.from(QUAD_INDICES));
-
-      // ONE sampler graph per item — each drawable samples its own page table with
-      // its own image size, exactly as each had its own ShaderMaterial uniforms.
-      // The atlas is the one shared thing.
-      const vt = createVtSampler(THREE.TSL, {
-        atlasTexture: atlas.texture,
-        // THE PAGE TABLE'S REAL TEXTURE, not a placeholder — and this line was the
-        // black screen (2026-07-16). It used to pass `atlas.texture` "to be rebound
-        // later", which is wrong in a way GLSL uniforms are not: a TextureNode bakes
-        // its TYPE into the graph at build time. Seeded with the atlas (a
-        // DataArrayTexture) it compiles array-texture sampling; swapping `.value` to
-        // a 2D DataTexture afterwards cannot change the emitted shader, so the
-        // binding is invalid and WebGPU silently SKIPS THE DRAW. Hence: black,
-        // alpha 0, no error, a healthy cache — and a solid-colour test that drew
-        // perfectly, because it bound no textures at all.
-        //
-        // A node graph is not a uniform block. What a uniform lets you swap freely,
-        // a node bakes.
-        initialPageTable: state.albedoPack.indirectionTexture,
-        pagesPerAxis: layout.pagesPerAxis,
-        pagesPerLayer: layout.pagesPerLayer,
-        pageSizePx: layout.pageSizePx,
-        borderPx: 4,
-        atlasSizePx: layout.atlasSizePx,
-      });
-      const { Fn, uniform, vec3, float, vec2, uv } = THREE.TSL;
-
-      // Per-item appearance + occlusion, as live uniform handles.
-      const uTint = uniform(vec3(1, 1, 1));
-      const uAlpha = uniform(float(1));
-      const uOcclusionElevation = uniform(float(0));
-      const uOcclusionWeights = uniform(THREE.TSL.vec4(0, 0, 0, 0));
-      const uUnoccludedAlpha = uniform(float(1));
-      const uOccludedAlpha = uniform(float(0));
-
-      const material = new THREE.NodeMaterial();
-      material.transparent = true;
-      material.depthTest = false;
-      material.depthWrite = false;
-      material.side = THREE.DoubleSide; // see this function's doc — negative scaleX flips winding
-
-      // THE OCCLUSION CHAIN, factored out so a debug stage can feed it a CONSTANT
-      // mask instead of the texture. That is the whole experiment: the diagnostics
-      // print occlusionWeights [0,0,0,0], occlusionElevation 1, unoccludedAlpha 1,
-      // occludedAlpha 0 -- with those numbers this block provably multiplies alpha by
-      // exactly 1 and does nothing. Yet removing it un-blacks the screen. So it was
-      // never the arithmetic, and the only non-arithmetic thing here is the TEXTURE
-      // BINDING itself.
-      //
-      // @param {any} maskSample - vec4 node: the mask's four elevation indices.
-      const occlusionAlphaFactor = (maskSample) => {
-        // Foundry's algorithm (occlusion.mjs:16): each channel holds an ELEVATION
-        // INDEX (R=Fade G=Radial B=Vision A=Surface), and a channel says "occlude me"
-        // where the occluder recorded there sits BELOW my own elevation.
-        const occluded = float(1).sub(THREE.TSL.step(uOcclusionElevation, maskSample));
-        const amounts = occluded.mul(uOcclusionWeights);
-        const occ = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
-        // mix(a, b, t) -- the FUNCTION form. See the warning in vt-sample.tsl.js: the
-        // .mix() METHOD takes its receiver as the INTERPOLANT, and this exact line,
-        // written as uUnoccludedAlpha.mix(uOccludedAlpha, occ), compiled to
-        // mix(0, occ, 1) == 0 and blacked out the entire map for a whole session.
-        return { occ, factor: THREE.TSL.mix(uUnoccludedAlpha, uOccludedAlpha, occ) };
-      };
-      // SCREEN-space UV (2026-07-18) — the ONE-LINE bug Keyhole.md's "THE
-      // REMAINING PIECE" named: this used to be positionGeometry.xy (WORLD
-      // coords), sampling the mask at the wrong space entirely. The mask
-      // target is screen-sized and drawn by runMaskOcclusionPass() through
-      // the SAME `camera` this material's own quad is drawn with — so
-      // screenUV (THREE's own backend-normalized fragment-position node,
-      // three.webgpu.js:37914; matches the v=0-is-top convention already
-      // proven by the orientation self-test) lines up by construction,
-      // without hand-deriving a new world→screen transform.
-      const maskUV = () => THREE.TSL.screenUV;
-      const sampleMask = () => THREE.TSL.texture(occlusionMask.texture, maskUV());
-
-      const realChain = (maskSample) =>
-        Fn(() => {
-          const c = vt.sample(uv()).toVar();
-          c.rgb.mulAssign(uTint);
-          c.a.mulAssign(uAlpha);
-          c.a.mulAssign(occlusionAlphaFactor(maskSample()).factor);
-          return c;
-        })();
-
-      material.colorNode = realChain(sampleMask);
-
-      // Stash the live uniform handles on the item state: bindMeshToPack writes
-      // through these every update, and getDiagnostics reads them back. Losing these
-      // two lines is what threw "Cannot read properties of undefined (reading
-      // 'uniforms')" and tripped the fallback (2026-07-16) -- a factoring edit ate
-      // them along with the code they sat next to.
-      state.vt = vt;
-      state.appearance = { uTint, uAlpha, uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha };
-
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.frustumCulled = false; // we cull explicitly against worldBounds; Three's sphere test is redundant here
-      mesh.visible = false;
-      scene.add(mesh);
-
-      state.geometry = geometry;
-      state.material = material;
-      state.mesh = mesh;
-      return state;
-    }
-
     // ======================================================================
-    // WHOLE-IMAGE MODE (see the _wholeImageEnabled flag's doc). Loads an item's
-    // art WHOLE — one texture per tile of planImageTiles, drawn as plain quad(s)
-    // — instead of streaming 256px pages through the atlas. No atlas, no cache,
-    // no residency, no upload churn: the fix for the WebGPU device loss.
+    // WHOLE-IMAGE MODE — every item's art loads WHOLE, one texture per tile
+    // of planImageTiles, drawn as plain quad(s). No atlas, no page cache, no
+    // residency, no upload churn: the fix for the WebGPU device loss, and now
+    // the ONLY loading/rendering path (the streaming/virtual-texture engine
+    // this replaced was removed 2026-07-22 — see
+    // feedback_mode_forks_silently_drop_features).
     // ======================================================================
 
-    /** A NodeMaterial that samples ONE whole texture with the same tint/alpha/
-     * occlusion chain the streaming path uses. uTint/uAlpha/occlusion are live
-     * uniform handles.
+    /** A NodeMaterial that samples ONE whole texture with the full tint/alpha/
+     * occlusion chain (uTint/uAlpha/occlusion are live uniform handles).
      *
-     * OCCLUSION HERE IS NEW (2026-07-18) — whole-image mode is the DEFAULT
-     * active path for real scenes (see `_wholeImageEnabled`'s own doc), so
-     * wiring occlusion into ONLY the streaming material (ensureItemMesh)
-     * would make masks.occlusion real but INVISIBLE on every deployed scene.
-     * Written fresh rather than sharing a helper with the streaming path's
-     * `occlusionAlphaFactor`/`realChain` closures on purpose: that is
-     * proven, live-render-affecting code (Rounds 1-9's history), and
-     * touching it to extract a shared abstraction is a strictly bigger risk
-     * than the small duplication below. Math is IDENTICAL by inspection —
-     * both are the direct expression of scene/occlusion.js's
-     * `computeOcclusionAlpha`, and if they ever need to change, they change
-     * together, on purpose, not by accident of a shared function. */
+     * OCCLUSION HERE WAS NEW (2026-07-18) — whole-image mode was already the
+     * DEFAULT active path for real scenes at the time, so wiring occlusion
+     * into ONLY the old streaming path's material (`ensureItemMesh`, removed
+     * 2026-07-22 along with the rest of that engine — see
+     * feedback_mode_forks_silently_drop_features) would have made
+     * masks.occlusion real but INVISIBLE on every deployed scene. Math is the
+     * direct expression of scene/occlusion.js's `computeOcclusionAlpha`. */
     // uvScale defaults to [1,1] (raw path: texture IS the image). The BC1 path
     // passes [w/padW, h/padH] < 1: a block-compressed texture's dimensions MUST
     // be a multiple of 4 (WebGPU rejects e.g. 1050×1050 as BC1 — the device-loss
@@ -3332,18 +5587,19 @@ export async function startVtPanViewer({
     // samples only the logical [0..w/padW, 0..h/padH] sub-rect. The padding lives
     // at the bottom/right (v→1, u→1) as edge-clamped replication (see gatherBlock),
     // so clamping the UV max there hides it with no image squash or shift.
-    function buildWholeImageMaterial(tex, item, uvScale = [1, 1]) {
-      const { Fn, uniform, vec2, vec3, vec4, float, uv, texture, screenUV, step, mix } = THREE.TSL;
-      const uTint = uniform(vec3(1, 1, 1));
-      const uAlpha = uniform(float(1));
-      const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
-
-      // Occlusion uniforms — see this function's own header. uOcclusionWeights/
-      // uUnoccludedAlpha/uOccludedAlpha are STATIC for this item's lifetime
-      // (item.occlusion.modes never changes at runtime, and state.occluded/
-      // hoverFade are not wired this cut — see runMaskOcclusionPass's header
-      // for the RADIAL-only scope), computed ONCE here. uOcclusionElevation is
-      // a live uniform, refreshed every frame by refreshItemOcclusionElevation().
+    /**
+     * The occlusion uniforms shared by every whole-image-style material
+     * (this function was the ONLY caller until `buildVegetationMaterial`
+     * below became the second — extracted 2026-07-23 rather than copied, so
+     * this ~10-line concern can't quietly drift between two call sites the
+     * way duplicated logic always eventually does). `uOcclusionElevation` is
+     * the one LIVE member (refreshed per-frame elsewhere, by
+     * `refreshItemOcclusionElevation()`); the rest are fixed for the item's
+     * lifetime (`item.occlusion.modes` never changes at runtime).
+     * @param {object} item
+     */
+    function buildOcclusionUniforms(item) {
+      const { uniform, float, vec4 } = THREE.TSL;
       const uOcclusionElevation = uniform(float(1)); // 1 = "above every real elevation" — inert until refreshed
       const uOcclusionWeights = uniform(vec4(0, 0, 0, 0));
       const uUnoccludedAlpha = uniform(float(1));
@@ -3357,6 +5613,36 @@ export async function startVtPanViewer({
       });
       uOcclusionWeights.value.set(st.fade, st.radial, st.vision, st.surface);
       uOccludedAlpha.value = item?.occlusion?.alpha ?? 0;
+      return { uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha };
+    }
+
+    /**
+     * The occlusion SAMPLE + blend factor — same shape as
+     * scene/occlusion.js#computeOcclusionAlpha (step(edge,x) is 0 when
+     * x<edge; 1-step therefore means "the occluder recorded here sits BELOW
+     * me"). screenUV is the correct space here (same camera, same target
+     * size) — occlusionMask is rendered screen-sized. Returns the 0..1 factor
+     * a caller mixes its own unoccluded/occluded alpha through — FUNCTION
+     * form only (`.mix()` as a METHOD takes its receiver as the interpolant,
+     * not the first value, and cost a whole session the one time this
+     * project used it by mistake — reference_tsl_method_chaining_trap).
+     * @param {ReturnType<typeof buildOcclusionUniforms>} occ
+     */
+    function occlusionAlphaFactor(occ) {
+      const { float, step, mix, texture, screenUV } = THREE.TSL;
+      const maskSample = texture(occlusionMask.texture, screenUV);
+      const gate = float(1).sub(step(occ.uOcclusionElevation, maskSample));
+      const amounts = gate.mul(occ.uOcclusionWeights);
+      const amount = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
+      return mix(occ.uUnoccludedAlpha, occ.uOccludedAlpha, amount);
+    }
+
+    function buildWholeImageMaterial(tex, item, uvScale = [1, 1]) {
+      const { Fn, uniform, vec2, vec3, float, uv, texture } = THREE.TSL;
+      const uTint = uniform(vec3(1, 1, 1));
+      const uAlpha = uniform(float(1));
+      const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
+      const occ = buildOcclusionUniforms(item);
 
       const material = new THREE.NodeMaterial();
       material.transparent = true;
@@ -3367,41 +5653,709 @@ export async function startVtPanViewer({
         const c = texture(tex, uv().mul(uUvScale)).toVar();
         c.rgb.mulAssign(uTint);
         c.a.mulAssign(uAlpha);
-        // Same shape as scene/occlusion.js#computeOcclusionAlpha (and the
-        // streaming path's occlusionAlphaFactor): step(edge,x) is 0 when
-        // x<edge; 1-step therefore means "the occluder recorded here sits
-        // BELOW me". screenUV — see the streaming path's maskUV fix for why
-        // this is the correct space (same camera, same target size).
-        const maskSample = texture(occlusionMask.texture, screenUV);
-        const occ = float(1).sub(step(uOcclusionElevation, maskSample));
-        const amounts = occ.mul(uOcclusionWeights);
-        const amount = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
-        // FUNCTION form only — see vt-sample.tsl.js's header: the .mix()
-        // METHOD takes its receiver as the interpolant, not the first value,
-        // and cost a whole session the one time this project used it by
-        // mistake (reference_tsl_method_chaining_trap).
-        c.a.mulAssign(mix(uUnoccludedAlpha, uOccludedAlpha, amount));
+        c.a.mulAssign(occlusionAlphaFactor(occ));
         return c;
       })();
       return {
         material,
-        appearance: { uTint, uAlpha, uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha },
+        appearance: {
+          uTint,
+          uAlpha,
+          uOcclusionElevation: occ.uOcclusionElevation,
+          uOcclusionWeights: occ.uOcclusionWeights,
+          uUnoccludedAlpha: occ.uUnoccludedAlpha,
+          uOccludedAlpha: occ.uOccludedAlpha,
+        },
       };
     }
 
-    /** Rebuild a tile mesh's world quad from the item's CURRENT placement (called
-     * on load and on any placement change). Geometry only — texture is untouched. */
-    function setTileGeometry(t, placement, imageW, imageH) {
+    // ── VEGETATION MOTION TUNING (2026-07-23, author: "All trees/bushes sway
+    // ── in the exact same direction the exact same amount at the exact same
+    // ── time... At gale the trees look and act very much like they do at a
+    // ── light breeze. We have a wonderfully complex nuanced wind simulation,
+    // ── let's make that visible.") EVERY tuning constant this comment used to
+    // ── list here (clump cell size/spread, gale bend/rate gain, sway curve/
+    // ── rate, flutter rate/amplitude) is now a LIVE param instead — see
+    // ── `effects/vegetation.js#VEGETATION_PARAMS` — after the SAME-DAY
+    // ── follow-up ("distortions are very very strong... the more controls the
+    // ── better") asked for exactly that: direct author control over frequency/
+    // ── rate/amplitude, not code constants only a rebuild can retune. Only the
+    // ── render-order bookkeeping magnitude below is still a plain constant —
+    // ── it is plumbing (which mesh paints over which), never a "look" knob.
+    // (`VEG_SHADOW_RENDER_ORDER_MAGNITUDE` — and the four smear/pad constants
+    // that used to sit below — now live in
+    // `effects/vegetation-shadow-subsystem.js` with the code that owns them;
+    // extraction step 2 of docs/planning/VT-Pan-Viewer-Extraction.md. They are
+    // imported at the top of this file because call sites here still read
+    // them.)
+
+    // ── GALE-STRENGTH SAFETY NET (2026-07-23, SAME DAY, live-test author
+    // ── report: "at gale strength the trees can self intersect... a
+    // ── distorted dissolved blob... we have to be careful to get leaf
+    // ── flutter and sway without them becoming a blender of nonsense at
+    // ── gale strength"). All four constants below were reverse-engineered
+    // ── from the OLD V2 vegetation shaders (legacy/compositor-v2/effects/
+    // ── vegetation-bulk-wind.js), which never exhibited this failure —
+    // ── V2 hard-capped both displacement channels AND actively DAMPED
+    // ── flutter (not just left it unscaled) as wind approached its max,
+    // ── while only the RIGID bulk term was allowed to grow. None of these
+    // ── are authored params, matching V2's own posture: they are structural
+    // ── "never exceed" backstops (the same idiom `deflectAroundWalls`'s wall
+    // ── energy cap and `computeWindTurbulence`'s energy cap already use),
+    // ── not creative dials — the creative dials are `swayAmount`/`swayCurve`/
+    // ── `flutterAmount`/etc. above, which choose a look WITHIN these limits.
+
+    /** Hard ceiling on `windHandle.node()`'s OWN magnitude before it drives
+     * bend/oscillate amplitude. `sampleWind`'s own JSDoc warns its result is
+     * "no longer bounded to [-1,1] once wind/bakedField/liveField contribute
+     * a real prevailing speed" — Tier 2's transient door-gust sim is exactly
+     * such a contributor. Rescales the WHOLE vector (never distorts
+     * direction) down to this ceiling if exceeded. */
+    const VEG_MAX_LOCAL_SPEED = 2.5;
+    /** Hard ceiling on the FINAL bend+oscillate displacement, world px, AFTER
+     * every multiplier (swayAmount/windResponse/kind/curve) is applied — the
+     * backstop for several independent sliders being cranked to their own
+     * maxima at once, which would otherwise compound into a multi-thousand-
+     * pixel throw. Generous: normal tuning never approaches it. */
+    const VEG_MAX_DISPLACE_PX = 320;
+    /** Hard ceiling on the flutter UV shuffle. Slightly tighter than V2's own
+     * proven `flutterCap` (0.006, vegetation-bulk-wind.js) — V2 never stacks
+     * a Wind-response/intensity family on top the way this project's live
+     * param set does, so a little extra headroom below V2's own number. */
+    const VEG_FLUTTER_UV_CAP = 0.005;
+    /** Asymmetric gale damping for flutter ONLY — V2's own approach: fine
+     * per-pixel flutter is DAMPED as wind approaches gale, opposite of
+     * scaling it up alongside everything else. `flutterGaleFrequency` (the
+     * author's own live dial, above) still speeds the pattern's EVOLUTION up
+     * at gale; this independently keeps its AMPLITUDE from following it
+     * there. `mix(1, FLOOR, smoothstep(START, END, galeness))`. Floor
+     * lowered further 2026-07-23 (was 0.45; live-test author: "a lot less
+     * strong during a gale... otherwise leaf flutter turns into a distortion
+     * which makes trees turn into alien blobs") — flutter at full gale now
+     * survives at barely a quarter of its own undamped ceiling. */
+    const VEG_FLUTTER_GALE_DAMP_FLOOR = 0.3;
+    const VEG_FLUTTER_GALE_DAMP_START = 0.4;
+    const VEG_FLUTTER_GALE_DAMP_END = 0.95;
+    /** Power curve on the LOCAL wind speed driving flutter (2026-07-23,
+     * SAME live-test round: "should be nearly zero at windless... just the
+     * smallest touch"). Flutter's own `localSpeed` was scaling LINEARLY —
+     * so the small always-on organic jitter `sampleWind` carries even at
+     * zero ambient wind (a sealed room's air still stirs a little, by
+     * design) was still visibly moving leaves. A steep exponent leaves that
+     * baseline reading as barely a whisper while the top of the range (a
+     * genuine gale, `localSpeed` near its own 1.0 ceiling) is UNCHANGED —
+     * `pow(1, x) = 1` regardless of the exponent — so this reshapes the ramp
+     * without lowering the peak (the peak is brought down separately, by
+     * `VEG_FLUTTER_GALE_DAMP_FLOOR` and `VEG_FLUTTER_UV_CAP` above). */
+    const VEG_FLUTTER_SPEED_CURVE = 2.2;
+
+    /**
+     * A stable 0..1 hash of a QUANTIZED world position — the per-clump
+     * decorrelation source. `fract(sin(dot))` is the same idiom the particle
+     * kernels already use for their own per-particle randomness.
+     * @param {*} cell - vec2 node, already quantized to clump cells.
+     * @param {number} salt - decorrelates independent draws from one cell.
+     */
+    function vegClumpHash(cell, salt) {
+      const { float, vec2, dot, sin, fract } = THREE.TSL;
+      return fract(sin(dot(cell, vec2(float(127.1), float(311.7))).add(float(salt))).mul(float(43758.5453)));
+    }
+
+    /**
+     * VEGETATION — the same whole-image sample + occlusion chain as
+     * `buildWholeImageMaterial` above (shared via `buildOcclusionUniforms`/
+     * `occlusionAlphaFactor`, not copied), plus everything that makes a plant
+     * look wind-driven. See `docs/planning/Vegetation.md` for the design and
+     * `effects/vegetation.js`'s own header for why this contains no wind maths
+     * of its own — every lean comes from `windHandle.node()`.
+     *
+     * ============================================================================
+     * WIND IS SAMPLED PER-CLUMP-CELL (not per vertex) — RIGIDITY, 2026-07-23
+     * ============================================================================
+     *
+     * The first cut sampled ONCE per mesh at a uniform centre, which is exactly
+     * why the author reported every plant swaying identically: a `_Tree` mask
+     * painted across a whole map is ONE mesh, so the entire forest shared one
+     * wind vector. Tessellation fixed THAT — but the very next live test
+     * ("at gale strength the trees can self intersect... a distorted
+     * dissolved blob") exposed the opposite mistake: sampling wind at each
+     * vertex's OWN exact position lets a single visual clump straddle a real
+     * spatial gradient in the field (or simply a clump-cell boundary), so its
+     * OWN vertices could move in different-enough directions to visibly
+     * shear or fold. Read against the OLD V2 vegetation shader (legacy/
+     * compositor-v2/effects/vegetation-bulk-wind.js), which never exhibited
+     * this: V2's islands are genuinely RIGID BODIES — `computeVegetationBulk
+     * WindOffset` depends only on the island's shared anchor, never on an
+     * individual vertex's position, so an island translates as one piece and
+     * cannot internally self-intersect no matter how dense its mesh is.
+     *
+     * The fix here is the same principle adapted to this cheap grid-cell
+     * stand-in for true connected-component islands (`true-clump-
+     * differentiation` remains the deferred, more faithful version): wind is
+     * now sampled ONCE per clump cell, at the CELL'S OWN CENTRE, and every
+     * vertex inside that cell reads the IDENTICAL vector. A cell can only
+     * translate/rotate as a whole — never shear — while DIFFERENT cells still
+     * read different wind (so the original lockstep bug stays fixed).
+     * `positionLocal.xy` is still used for the cell lookup itself and for
+     * per-fragment flutter (see layer 4 below), since `computeQuadCorners`
+     * emits world-space corners with no mesh transform.
+     *
+     * FOUR LAYERS, in order of scale:
+     *   1. PER-CLUMP DECORRELATION — quantized-cell hash → phase, amplitude and
+     *      direction jitter, so neighbouring plants differ even under a locally
+     *      uniform field. All vertices in a cell share it, so a plant moves as a
+     *      plant instead of shearing.
+     *   2. PERSISTENT BEND — a DC lean downwind growing with wind², so a gale
+     *      leaves the canopy bent OVER. The single biggest reason a gale
+     *      previously read like a breeze: only the oscillation was scaling.
+     *   3. OSCILLATING SWAY — amplitude on a >1 power curve, and RATE rising
+     *      with wind. Fast thrash vs slow undulation. UNLIKE Tier 2, there is
+     *      no longer a root-pinned/tip-swaying height weight here at all —
+     *      the SAME live-test round reported "trees at the top of the map
+     *      move a lot... trees near the bottom hardly move at all", and V2
+     *      (grepped for confirmation) has NO such weighting anywhere: it
+     *      simply doesn't need one, because a rigid island already moves as
+     *      one piece. The old weight used the TEXTURE's own v-coordinate as a
+     *      root/tip proxy, which is only meaningful for a single-plant sprite
+     *      (Case 1) — for a scene-wide painted mask (Case 2, the overwhelming
+     *      common case) it has no "root vs crown" meaning at all and was
+     *      producing exactly the reported map-wide gradient.
+     *   4. LEAF FLUTTER (fragment) — a curl-noise UV shuffle. Divergence-free
+     *      ⇒ AREA-PRESERVING, which is precisely the author's "mass preserving
+     *      distortions": leaves move without the canopy stretching or thinning.
+     *      Shares `world/wind-field.js#curlNoise2D` with wind turbulence rather
+     *      than inventing private noise (`wind/sample-through-the-door`). Still
+     *      sampled per-FRAGMENT (not per-cell) — flutter is a texture-space
+     *      shuffle, not a geometry displacement, so it cannot self-intersect
+     *      the mesh; its own risk is pure amplitude, guarded by
+     *      `VEG_FLUTTER_UV_CAP` and the gale-damping curve below instead.
+     *
+     * ⚠ EXPOSURE is passed as a constant `float(1)` ("no shelter data" —
+     * `sampleWind`'s own documented fallback), not a per-vertex mask sample.
+     * This damps only the ORGANIC gust/flutter term; the courtyard-vs-open
+     * payoff comes from the COHERENT term, which `windHandle.node()` gates
+     * INTERNALLY from `centerXY` via `openness` and is unaffected — see
+     * `world/wind-field.js#sampleWind`'s own param doc for why the two are
+     * separate inputs.
+     *
+     * EVERY DISPLACEMENT CHANNEL IS NOW HARD-CAPPED — see this function's
+     * enclosing scope for `VEG_MAX_LOCAL_SPEED`/`VEG_MAX_DISPLACE_PX`/
+     * `VEG_FLUTTER_UV_CAP`/`VEG_FLUTTER_GALE_DAMP_*`, all reverse-engineered
+     * from V2's own proven ceilings — plus SCENE-EDGE-FADE pinning (author:
+     * "pin the edges to the edge of the map by having a fading zone which
+     * lowers the amount of movement/distortion as it approaches the scene
+     * edge"), mirroring V2's own `vegetationSceneEdgeFade`.
+     *
+     * @param {*} tex - the loaded whole-image texture.
+     * @param {object} item - the owning item (occlusion + look defaults).
+     * @param {import('../effects/vegetation.js').VegetationKind} kind
+     * @param {object} initialParams - current resolved params; the returned
+     *   uniforms are live handles the caller refreshes each frame.
+     * @param {object} [opts]
+     * @param {boolean} [opts.asShadow=false] - build the SHADOW variant: the same
+     *   wind motion (a moving plant's shadow moves with it) on a PADDED,
+     *   un-translated quad, sweeping the silhouette along the sun's throw and
+     *   emitting flat darkness instead of canopy colour.
+     * @param {[number,number]} [opts.uvScale]
+     * @param {[number,number]} [opts.shadowPadUv] - how much of the shadow quad
+     *   is padding, as a fraction of the ART's size, per axis. The fragment
+     *   undoes exactly this to map itself back onto the plant. Must match the
+     *   geometry `vegShadows.attachTileShadow` built or the shadow lands off its
+     *   plant — which is why both come from the ONE `vegetationShadowPadPx`.
+     * @returns {{material:*, appearance:object, motion:object, shadow:object|null, windHandleVersion:number}}
+     */
+    function buildVegetationMaterial(
+      tex,
+      item,
+      kind,
+      initialParams,
+      { asShadow = false, uvScale = [1, 1], shadowPadUv = [0, 0] } = {}
+    ) {
+      const {
+        Fn,
+        uniform,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        uv,
+        texture,
+        clamp,
+        positionLocal,
+        sin,
+        cos,
+        length,
+        pow,
+        max,
+        min,
+        smoothstep,
+        step,
+        mix,
+      } = THREE.TSL;
+      const uTint = uniform(vec3(1, 1, 1));
+      const uAlpha = uniform(float(1));
+      const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
+      const occ = buildOcclusionUniforms(item);
+
+      // SCENE-EDGE-FADE PINNING (2026-07-23, author: "pin the edges to the
+      // edge of the map by having a fading zone which lowers the amount of
+      // movement/distortion as it approaches the scene edge"). `uSceneMin`/
+      // `uSceneSize` are build-time constants from the REAL scene rect
+      // (`dimensions.sceneRect`, the same bounds every other wind/particle
+      // system is already clamped to — see `bakeWindField`'s own note) —
+      // never the mesh's own placement, so a canopy tile that happens to sit
+      // AT the boundary pins there too, and never changes without a whole
+      // scene reload. `uEdgeFadeWidthPx` is the one LIVE part (width, in
+      // world px — human-friendly, matches every other px-scale param in this
+      // file) — normalised against `uSceneSize` PER AXIS, in-shader, every
+      // frame, so an authored PX width reads as the SAME physical distance on
+      // both axes even when the scene isn't square (unlike V2's own single
+      // combined normalised width, which this deliberately improves on).
+      const sceneRect = dimensions.sceneRect;
+      const uSceneMin = uniform(vec2(sceneRect.x, sceneRect.y));
+      const uSceneSize = uniform(vec2(Math.max(1, sceneRect.width), Math.max(1, sceneRect.height)));
+      const uEdgeFadeWidthPx = uniform(float(initialParams?.edgeFadeWidthPx ?? 0));
+
+      const uIntensity = uniform(float(initialParams?.intensity ?? 1));
+      const uWindResponse = uniform(float(initialParams?.windResponse ?? 1));
+      const uSwayAmount = uniform(float(initialParams?.swayAmount ?? 0));
+      // SWAY CHARACTER — was VEG_SWAY_BASE_RATE/VEG_SWAY_CURVE/VEG_GALE_BEND_
+      // GAIN/VEG_GALE_RATE_GAIN (code constants) until the author's follow-up
+      // ("frequency, evolution rate, amplitude... the more controls the
+      // better") asked for direct, live access to exactly this family.
+      const uSwayFrequency = uniform(float(initialParams?.swayFrequency ?? 1));
+      const uSwayCurve = uniform(float(initialParams?.swayCurve ?? 1));
+      const uGaleBendAmount = uniform(float(initialParams?.galeBendAmount ?? 0));
+      const uGaleRateGain = uniform(float(initialParams?.galeRateGain ?? 0));
+      const uFlutterAmount = uniform(float(initialParams?.flutterAmount ?? 0));
+      // FLUTTER CHARACTER — was VEG_FLUTTER_BASE_RATE/VEG_FLUTTER_GALE_RATE/
+      // VEG_FLUTTER_UV_AMPLITUDE, plus a per-kind-only spatial scale. `uFlutter
+      // Scale` multiplies `kind.flutterSpaceFreq` (still the per-kind BASE —
+      // trees and bushes keep their own relative chatter fineness) rather than
+      // replacing it, the same "shared param × per-kind code constant" shape
+      // `swayMultiplier` already uses.
+      const uFlutterFrequency = uniform(float(initialParams?.flutterFrequency ?? 1));
+      const uFlutterGaleFrequency = uniform(float(initialParams?.flutterGaleFrequency ?? 0));
+      const uFlutterUvScale = uniform(float(initialParams?.flutterUvScale ?? 0));
+      const uFlutterScale = uniform(float(initialParams?.flutterScale ?? 1));
+      // CLUMP DECORRELATION — was VEG_CLUMP_CELL_PX/_PHASE_SPREAD_SEC/_AMP_
+      // SPREAD/_DIR_SPREAD_RAD. Direction is authored in DEGREES (human-
+      // friendly, matches ui-window-shadow.js's own `azimuthDeg` precedent)
+      // and converted to radians once here, at construction — the conversion
+      // itself never changes frame to frame, only the degree value does.
+      const uClumpSizePx = uniform(float(initialParams?.clumpSizePx ?? 150));
+      const uClumpPhaseSpread = uniform(float(initialParams?.clumpPhaseSpread ?? 0));
+      const uClumpAmpSpread = uniform(float(initialParams?.clumpAmpSpread ?? 0));
+      const uClumpDirSpreadRad = uniform(float(((initialParams?.clumpDirSpread ?? 0) * Math.PI) / 180));
+      const uKindSwayMul = uniform(float(kind.swayMultiplier));
+      // The prevailing strength dial (0..1) — drives the CHARACTER terms (bend,
+      // rate) that must respond to "how windy is the scene" rather than to the
+      // local vector's own magnitude alone.
+      const uGaleness = windHandle.ambient ? windHandle.ambient.speed01 : float(0);
+
+      // SHADOW-ONLY uniforms. Written per-frame by the caller from
+      // `shadowHandle.forCaster()` — the sky changes far slower than a frame,
+      // so these are CPU-resolved and pushed, never recomputed per-vertex.
+      const uShadowPenumbraUv = uniform(vec2(0, 0));
+      const uShadowStrength = uniform(float(0));
+      // THE SMEAR (2026-07-24, author live report: *"at the moment the shadows
+      // move but they don't smear"*). The full throw, expressed in this tile's
+      // UV space; the fragment sweeps from 0 to this and MAX-combines, so the
+      // shadow is the union of the silhouette all the way from the plant's feet
+      // to the tip. Zero (sun overhead) collapses the sweep to a single tap
+      // under the plant, which is the correct noon shadow.
+      const uShadowSmearUv = uniform(vec2(0, 0));
+      const uShadowSmearTaper = uniform(float(0));
+      /** Mip level for the FURTHEST smear station (interior stations scale
+       * toward it) — sized so a station's texel footprint covers the gap to the
+       * next one. See `alphaAt`'s own doc for the ladder this removes. */
+      const uShadowSmearLod = uniform(float(0));
+
+      const material = new THREE.NodeMaterial();
+      material.transparent = true;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.side = THREE.DoubleSide;
+
+      material.positionNode = Fn(() => {
+        // THE WORLD POSITION OF THIS VERTEX — the cell lookup below still
+        // needs it, even though the WIND SAMPLE itself no longer uses it
+        // directly (see this function's own "WIND IS SAMPLED PER-CLUMP-CELL"
+        // header for why).
+        const worldXY = vec2(positionLocal.x, positionLocal.y);
+        const tSec = uGlobalTimeMs.mul(float(0.001));
+
+        // (1) PER-CLUMP DECORRELATION — one quantized cell, three independent
+        // draws. Shared by every vertex in the cell, so a plant stays coherent.
+        const cell = worldXY.div(uClumpSizePx).floor();
+        const phase = vegClumpHash(cell, 0).mul(uClumpPhaseSpread);
+        const ampJitter = float(1)
+          .sub(uClumpAmpSpread)
+          .add(vegClumpHash(cell, 37.7).mul(uClumpAmpSpread.mul(float(2))));
+        const dirJitter = vegClumpHash(cell, 91.3)
+          .sub(float(0.5))
+          .mul(uClumpDirSpreadRad.mul(float(2)));
+
+        // THE FIELD — sampled at the CLUMP CELL'S OWN CENTRE, not this
+        // vertex's exact position. Every vertex sharing a cell now reads the
+        // IDENTICAL wind vector, so a cell can only translate/rotate as a
+        // whole, never shear internally (the gale-blob/self-intersection fix
+        // — see this function's own header).
+        const cellCenterXY = cell.add(vec2(float(0.5), float(0.5))).mul(uClumpSizePx);
+        const rawWindLean = windHandle.node(THREE.TSL, {
+          centerXY: cellCenterXY,
+          time: uGlobalTimeMs,
+          exposure: float(1), // see this function's own "⚠ EXPOSURE" note
+        });
+        // HARD CAP on the sample's OWN magnitude (`VEG_MAX_LOCAL_SPEED`) —
+        // rescales the WHOLE vector, never distorts its direction, so
+        // `leanDir` below stays properly unit-length regardless.
+        const rawSpeed = length(rawWindLean);
+        const speedCapScale = min(float(1), float(VEG_MAX_LOCAL_SPEED).div(max(rawSpeed, float(1e-4))));
+        const windLean = rawWindLean.mul(speedCapScale);
+        const localSpeed = length(windLean);
+        // Rotate the local wind by this clump's own jitter — a stand of trees
+        // leans broadly together but never as one rigid sheet.
+        const ca = cos(dirJitter);
+        const sa = sin(dirJitter);
+        const leanX = windLean.x.mul(ca).sub(windLean.y.mul(sa));
+        const leanY = windLean.x.mul(sa).add(windLean.y.mul(ca));
+        const leanDir = vec2(leanX, leanY).div(max(localSpeed, float(1e-4))); // unit-ish
+
+        // (2) PERSISTENT BEND — the gale's defining pose. Grows with the SQUARE
+        // of prevailing strength so it stays negligible in a breeze and
+        // dominant in a gale, and rides `localSpeed` so a sheltered courtyard
+        // does not bend at all however hard it blows outside.
+        const galeness = clamp(uGaleness, float(0), float(1));
+        const bend = leanDir.mul(localSpeed).mul(galeness).mul(galeness).mul(uGaleBendAmount);
+
+        // (3) OSCILLATING SWAY — amplitude on a >1 curve, rate rising with wind.
+        // NO root-pinned/tip-swaying weight here (Tier 2 had one; removed —
+        // see this function's own header for why it was actually the top-vs-
+        // bottom-of-map bug, not a real "canopy" concept for a scene-wide mask).
+        const rate = uSwayFrequency.mul(float(1).add(galeness.mul(uGaleRateGain)));
+        const swing = sin(tSec.add(phase).mul(rate).mul(float(6.2831853)));
+        const amplitude = pow(max(localSpeed, float(0)), uSwayCurve).mul(ampJitter);
+        const oscillate = leanDir.mul(amplitude).mul(swing);
+
+        // SCENE-EDGE-FADE — computed from the REST position (never the
+        // displaced one, which would make the fade depend on the very
+        // displacement it is supposed to gate). See this function's own
+        // header + the uniform block above.
+        const sceneUv = worldXY.sub(uSceneMin).div(uSceneSize);
+        const edgeDistX = min(sceneUv.x, float(1).sub(sceneUv.x));
+        const edgeDistY = min(sceneUv.y, float(1).sub(sceneUv.y));
+        const edgeFadeWidthNormX = uEdgeFadeWidthPx.div(uSceneSize.x);
+        const edgeFadeWidthNormY = uEdgeFadeWidthPx.div(uSceneSize.y);
+        const edgeFade = smoothstep(float(0), max(edgeFadeWidthNormX, float(1e-5)), edgeDistX).mul(
+          smoothstep(float(0), max(edgeFadeWidthNormY, float(1e-5)), edgeDistY)
+        );
+
+        const rawDisplace = bend.add(oscillate).mul(uSwayAmount).mul(uWindResponse).mul(uKindSwayMul).mul(edgeFade);
+        // FINAL HARD CAP (`VEG_MAX_DISPLACE_PX`) — the backstop for several
+        // independent sliders maxed out simultaneously. Rescales, never
+        // distorts direction.
+        const rawDisplaceLen = length(rawDisplace);
+        const displaceCapScale = min(float(1), float(VEG_MAX_DISPLACE_PX).div(max(rawDisplaceLen, float(1e-4))));
+        const displace = rawDisplace.mul(displaceCapScale);
+
+        // The shadow variant rides the IDENTICAL displacement and is NOT
+        // translated (2026-07-24). It used to be pushed bodily by the sun's
+        // throw, which is what made it a detached copy sliding around rather
+        // than a shadow: a real shadow occupies EVERY position between the
+        // caster's foot and its tip, so its quad has to span both ends and the
+        // throw has to happen in the fragment (see the smear loop in
+        // colorNode). The quad is pre-padded by the caster's maximum possible
+        // throw, so this stays a build-time-constant geometry that never
+        // rebuilds as the sun moves.
+        return positionLocal.add(vec3(displace.x, displace.y, float(0)));
+      })();
+
+      material.colorNode = Fn(() => {
+        // (4) LEAF FLUTTER — a curl-noise UV shuffle. Divergence-free ⇒ area
+        // preserving ⇒ "mass preserving": leaves move, the canopy neither
+        // stretches nor thins. Skipped entirely for the shadow (a blurred
+        // silhouette gains nothing from per-leaf detail, and it would double
+        // the fragment noise cost for something nobody can resolve).
+        let sampleUv = uv().mul(uUvScale);
+        if (!asShadow) {
+          const galeness = clamp(uGaleness, float(0), float(1));
+          // `rate`/`spaceFreq` are LIVE uniform nodes here, not the plain JS
+          // numbers curlNoise2D's own JSDoc describes — safe (verified against
+          // the vendored TSL `ConvertType`/`float()`: a node passed to `float()`
+          // is cast/passed through, never re-wrapped as a NEW constant), and it
+          // is what makes "Flutter frequency" a live, per-frame-tunable rate
+          // rather than a number only a material rebuild could change.
+          const flutterRate = uFlutterFrequency.add(galeness.mul(uFlutterGaleFrequency));
+          // ONE octave — the stated fragment-cost ceiling (4 noise evals).
+          const flutterVec = curlNoise2D(THREE.TSL, {
+            p: vec2(positionLocal.x, positionLocal.y),
+            timeSec: uGlobalTimeMs.mul(float(0.001)),
+            spaceFreq: float(kind.flutterSpaceFreq).mul(uFlutterScale),
+            rate: flutterRate,
+            phaseX: 613,
+            phaseY: -157,
+          });
+          // Strength rises with the LOCAL wind, so sheltered foliage is still
+          // and exposed foliage shimmers — the same locality the sway obeys.
+          // Already clamped to [0,1] below, independent of `VEG_MAX_LOCAL_
+          // SPEED` (the sway cap) — flutter never needed the higher ceiling.
+          const localSpeed = clamp(
+            length(
+              windHandle.node(THREE.TSL, {
+                centerXY: vec2(positionLocal.x, positionLocal.y),
+                time: uGlobalTimeMs,
+                exposure: float(1),
+              })
+            ),
+            float(0),
+            float(1)
+          );
+          // ASYMMETRIC GALE DAMPING (2026-07-23, live-test author report: "we
+          // have to be careful to get leaf flutter and sway without them
+          // becoming a blender of nonsense at gale strength") — reverse-
+          // engineered from V2's own proven curve (legacy/compositor-v2/
+          // effects/vegetation-bulk-wind.js): fine per-pixel flutter is
+          // ACTIVELY DAMPED as wind approaches gale, the opposite of scaling
+          // it up alongside the rate term. `flutterGaleFrequency` still
+          // speeds the pattern's EVOLUTION up at gale (the author's own live
+          // dial); this independently keeps AMPLITUDE from following it.
+          const flutterGaleDamp = mix(
+            float(1),
+            float(VEG_FLUTTER_GALE_DAMP_FLOOR),
+            smoothstep(float(VEG_FLUTTER_GALE_DAMP_START), float(VEG_FLUTTER_GALE_DAMP_END), galeness)
+          );
+          // SCENE-EDGE-FADE — same mechanism and same uniforms as the sway
+          // displacement above (positionNode's own local `edgeFade` cannot be
+          // shared across Fn() scopes, so it is recomputed here from the SAME
+          // uniforms — the existing `galeness`/`localSpeed` split between the
+          // two stages is the same established pattern in this function).
+          const worldXY = vec2(positionLocal.x, positionLocal.y);
+          const sceneUv = worldXY.sub(uSceneMin).div(uSceneSize);
+          const edgeDistX = min(sceneUv.x, float(1).sub(sceneUv.x));
+          const edgeDistY = min(sceneUv.y, float(1).sub(sceneUv.y));
+          const edgeFadeWidthNormX = uEdgeFadeWidthPx.div(uSceneSize.x);
+          const edgeFadeWidthNormY = uEdgeFadeWidthPx.div(uSceneSize.y);
+          const edgeFade = smoothstep(float(0), max(edgeFadeWidthNormX, float(1e-5)), edgeDistX).mul(
+            smoothstep(float(0), max(edgeFadeWidthNormY, float(1e-5)), edgeDistY)
+          );
+          // STEEP RESPONSE CURVE (2026-07-23, live-test author: "nearly zero
+          // at windless... just the smallest touch") — see `VEG_FLUTTER_
+          // SPEED_CURVE`'s own header. `pow(1, x) = 1`, so the gale ceiling
+          // is untouched here; only the ramp up to it steepens.
+          const localSpeedCurved = pow(localSpeed, float(VEG_FLUTTER_SPEED_CURVE));
+          // Normalised against the LIVE base frequency (not a fixed constant)
+          // so the ratio still reads 1 at calm even after the author retunes
+          // "Flutter frequency" itself — only the gale ADD-ON should ever move
+          // the ratio away from 1.
+          const flutterStrength = localSpeedCurved
+            .mul(uFlutterAmount)
+            .mul(uFlutterUvScale)
+            .mul(flutterRate.div(max(uFlutterFrequency, float(1e-4))))
+            .mul(flutterGaleDamp)
+            .mul(edgeFade);
+          const rawFlutterDisplacement = flutterVec.mul(flutterStrength);
+          // HARD CAP (`VEG_FLUTTER_UV_CAP`, matches V2's own proven ceiling
+          // almost exactly) — rescales, never distorts direction.
+          const flutterMag = length(rawFlutterDisplacement);
+          const flutterCapScale = min(float(1), float(VEG_FLUTTER_UV_CAP).div(max(flutterMag, float(1e-5))));
+          sampleUv = sampleUv.add(rawFlutterDisplacement.mul(flutterCapScale));
+        }
+
+        if (asShadow) {
+          // ═══════════════════════════════════════════════════════════════
+          // THE SMEARED SILHOUETTE (2026-07-24 — author: *"at the moment the
+          // shadows move but they don't smear"*, and *"the tree shadows are
+          // already too far away from their producers at dawn and dusk"*).
+          // ═══════════════════════════════════════════════════════════════
+          //
+          // A shadow is not the caster translated by the throw. It is the
+          // caster's silhouette swept along the throw, from the ground contact
+          // (t=0, directly under the plant) to the tip (t=1, the full offset).
+          // A single translated copy is the ONLY thing the old code drew, which
+          // is exactly why it read as a detached duplicate sliding around at
+          // dawn — the plant's own feet were never in shadow at all.
+          //
+          // THE GEOMETRY THAT MAKES THIS POSSIBLE: this quad is PADDED by the
+          // caster's maximum possible throw (`shadowPadUv` below) and is NOT
+          // translated, so it spans both ends of the sweep. `artUv` undoes the
+          // padding, mapping this fragment back onto the plant's own texture;
+          // everything outside the art reads alpha 0 (never a clamped edge
+          // column smeared across the pad, which would paint a black bar).
+          //
+          // A ground point is shadowed if ANY t along the sweep finds opaque
+          // art, so the taps MAX-combine — a union, not an average, which is
+          // what keeps a long streak solid instead of ghosting.
+          // Undo the pad, per axis (the pad is a fixed fraction of each axis, so
+          // the two differ on a non-square tile): meshUv 0..1 → artUv -pad..1+pad.
+          const base = vec2(
+            sampleUv.x.mul(float(1 + 2 * shadowPadUv[0])).sub(float(shadowPadUv[0])),
+            sampleUv.y.mul(float(1 + 2 * shadowPadUv[1])).sub(float(shadowPadUv[1]))
+          );
+          const p = uShadowPenumbraUv;
+          /** Alpha of the plant at an art UV, with everything outside the art
+           * reading 0 — the pad is empty ground, not a stretched edge pixel.
+           *
+           * `lod` is THE LADDER FIX (2026-07-25, author's dawn screenshot: "a
+           * series of shadows which are detached from each other"). The sweep
+           * has a FIXED station count, so a longer throw means wider gaps
+           * between stations — and a caster thinner than that gap lands as its
+           * own separate copy: a ladder, worst at dawn/dusk when the throw is
+           * longest. Sampling each station from a MIP level whose texels are as
+           * wide as the gap makes consecutive stations OVERLAP, so the streak is
+           * continuous at any length, and a thin caster melts into the single
+           * faint smooth smudge the author said they'd accept — for ONE fetch
+           * per station, not a wider multi-tap. */
+          const alphaAt = (at, lod) => {
+            const inX = step(float(0), at.x).mul(step(at.x, float(1)));
+            const inY = step(float(0), at.y).mul(step(at.y, float(1)));
+            const uvc = vec2(at.x.clamp(0, 1), at.y.clamp(0, 1));
+            const s = lod ? texture(tex).sample(uvc).level(lod) : texture(tex, uvc);
+            return s.a.mul(inX).mul(inY);
+          };
+          /** The feathered 5-tap cross — the penumbra, applied only at the two
+           * ENDS of the sweep. The interior of a streak has no edge to feather,
+           * so paying 5 fetches per station there would buy nothing. */
+          const crossAt = (at, lod) =>
+            alphaAt(at, lod)
+              .add(alphaAt(at.add(vec2(p.x.negate(), float(0))), lod))
+              .add(alphaAt(at.add(vec2(p.x, float(0))), lod))
+              .add(alphaAt(at.add(vec2(float(0), p.y.negate())), lod))
+              .add(alphaAt(at.add(vec2(float(0), p.y)), lod))
+              .div(float(5));
+
+          // t = 0 — the ground contact, always solid AND sharp (lod 0): this is
+          // what stops the shadow ever fully detaching from the plant, and the
+          // one place the silhouette should stay crisp.
+          let smeared = crossAt(base);
+          for (let s = 1; s <= VEG_SHADOW_SMEAR_TAPS; s++) {
+            const t = s / VEG_SHADOW_SMEAR_TAPS;
+            const at = base.sub(uShadowSmearUv.mul(float(t)));
+            // Blur grows along the sweep: the foot stays sharp, the tip
+            // dissolves — the same contact-hardening the sun march does, and
+            // what makes the stations merge instead of laddering.
+            const tapLod = uShadowSmearLod.mul(float(t));
+            const tapAlpha = s === VEG_SHADOW_SMEAR_TAPS ? crossAt(at, tapLod) : alphaAt(at, tapLod);
+            // Taper the TIP (t→1), never the foot. A shadow fades out at its far
+            // end as the penumbra swallows it; it does not fade where it meets
+            // the thing casting it.
+            const faded = tapAlpha.mul(float(1).sub(uShadowSmearTaper.mul(float(t))));
+            smeared = max(smeared, faded);
+          }
+          const shadowAlpha = smeared.mul(uShadowStrength).mul(occlusionAlphaFactor(occ));
+          // Flat black with alpha — under ordinary alpha blending this IS a
+          // multiply-darken of whatever ground is beneath it.
+          return vec4(float(0), float(0), float(0), shadowAlpha);
+        }
+
+        const c = texture(tex, sampleUv).toVar();
+        c.rgb.mulAssign(uTint);
+        c.a.mulAssign(uAlpha);
+        c.a.mulAssign(uIntensity);
+        c.a.mulAssign(occlusionAlphaFactor(occ));
+        return c;
+      })();
+
+      return {
+        material,
+        appearance: {
+          uTint,
+          uAlpha,
+          uOcclusionElevation: occ.uOcclusionElevation,
+          uOcclusionWeights: occ.uOcclusionWeights,
+          uUnoccludedAlpha: occ.uUnoccludedAlpha,
+          uOccludedAlpha: occ.uOccludedAlpha,
+        },
+        motion: {
+          uIntensity,
+          uWindResponse,
+          uSwayAmount,
+          uSwayFrequency,
+          uSwayCurve,
+          uGaleBendAmount,
+          uGaleRateGain,
+          uFlutterAmount,
+          uFlutterFrequency,
+          uFlutterGaleFrequency,
+          uFlutterUvScale,
+          uFlutterScale,
+          uClumpSizePx,
+          uClumpPhaseSpread,
+          uClumpAmpSpread,
+          uClumpDirSpreadRad,
+          uEdgeFadeWidthPx,
+        },
+        shadow: asShadow
+          ? { uShadowPenumbraUv, uShadowStrength, uShadowSmearUv, uShadowSmearTaper, uShadowSmearLod }
+          : null,
+        windHandleVersion: windHandle.version,
+      };
+    }
+
+    /**
+     * Rebuild a tile mesh's world quad from the item's CURRENT placement (called
+     * on load and on any placement change). Geometry only — texture is untouched.
+     *
+     * `segments > 1` builds a TESSELLATED grid instead of the plain 4-vertex
+     * quad — used only by vegetation, so each vertex can sample the wind at its
+     * own world position (see `buildVegetationMaterial`'s own header). The
+     * segment count is stored on `t` so a later placement change can tell a
+     * cheap in-place buffer rewrite (same size — the common case) from a genuine
+     * RESIZE that changed the count and needs fresh, differently-sized
+     * attributes. Getting that wrong would silently write past the end of the
+     * old array, so it is checked rather than assumed.
+     */
+    // (`attachVegetationTileShadow`, `padPlacement` and
+    // `vegetationShadowPadPx` moved to `effects/vegetation-shadow-subsystem.js`
+    // — extraction step 2. The first is now `vegShadows.attachTileShadow`; the
+    // other two are pure and imported directly, because `setTileGeometry` just
+    // below and the Case-2 overlay build both still call them.)
+
+    /**
+     * @param {object} t - the tile record.
+     * @param {object} placement
+     * @param {number} imageW @param {number} imageH
+     * @param {number} [segments]
+     * @param {number} [padPx=0] - grow this tile's world quad outward by this
+     *   much on every side WITHOUT moving its art (the material's
+     *   `shadowPadUv` undoes it). Used by the vegetation shadow so a swept
+     *   shadow has somewhere to land; 0 for every ordinary drawable.
+     */
+    function setTileGeometry(t, placement, imageW, imageH, segments = 1, padPx = 0) {
       t.sub = computeTileSubPlacement(placement, imageW, imageH, t.tile);
-      const positions = buildQuadPositions(computeQuadCorners(t.sub));
-      if (t.geometry.getAttribute('position')) {
-        t.geometry.getAttribute('position').array.set(positions);
-        t.geometry.getAttribute('position').needsUpdate = true;
-      } else {
-        t.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        t.geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
-        t.geometry.setIndex(Array.from(QUAD_INDICES));
+      // Grow in the item's LOCAL frame (width/height, pre-rotation) so a rotated
+      // tile's pad rotates with it — the same reason `computeQuadCorners` is the
+      // one place rotation is applied.
+      if (padPx > 0) t.sub = padPlacement(t.sub, padPx);
+      const n = Math.max(1, Math.floor(segments));
+      const corners = computeQuadCorners(t.sub);
+      const positionAttr = t.geometry.getAttribute('position');
+      if (n <= 1) {
+        const positions = buildQuadPositions(corners);
+        if (positionAttr && t.segments === 1) {
+          positionAttr.array.set(positions);
+          positionAttr.needsUpdate = true;
+        } else {
+          t.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          t.geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+          t.geometry.setIndex(Array.from(QUAD_INDICES));
+        }
+        t.segments = 1;
+        return;
       }
+      const grid = buildTessellatedQuadGeometry(corners, n);
+      if (positionAttr && t.segments === n) {
+        // Same tessellation, moved — reuse the array (BufferAttribute has no
+        // dispose(); reallocating per placement change is the leak-shaped
+        // mistake reference_bufferattribute_no_dispose_trap names).
+        positionAttr.array.set(grid.positions);
+        positionAttr.needsUpdate = true;
+      } else {
+        t.geometry.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
+        t.geometry.setAttribute('uv', new THREE.BufferAttribute(grid.uvs, 2));
+        t.geometry.setIndex(new THREE.BufferAttribute(grid.indices, 1));
+      }
+      t.segments = n;
     }
 
     // Serialize whole-image loads so only ONE giant image is ever in flight
@@ -3421,6 +6375,43 @@ export async function startVtPanViewer({
       if (state.wholeImage) return state.wholeImage;
       const imageW = state.imageSize.width;
       const imageH = state.imageSize.height;
+
+      // VEGETATION CASE 1 (Vegetation.md) — the item's OWN texture is itself
+      // `_Tree`/`_Bush`-suffixed (an artist dropped e.g. `oak-cluster_Tree.webp`
+      // directly onto the map as a tile — the file IS the vegetation, no
+      // separate albedo). Detected here, ONCE, from the item's own src — a pure
+      // string match, no discovery involved (see effects/vegetation-render.js's
+      // own header for why this case needs none). When detected AND the effect
+      // is enabled, this item's material becomes `buildVegetationMaterial`
+      // instead of the ordinary `buildWholeImageMaterial` at BOTH load paths
+      // below — same texture, same quad, same occlusion handling, just a
+      // wind-driven positionNode added. When the effect is disabled, the tile
+      // still renders normally (static) rather than disappearing — a GM's
+      // placed content must never vanish just because a look toggle is off
+      // (the safety-slide doctrine).
+      const vegKind = detectSelfVegetationKind(item.src, VEGETATION_KINDS);
+      const vegState = vegKind ? getVegetationRenderState() : null;
+      const vegActive = !!(vegKind && vegState?.enabled);
+      // TESSELLATION (2026-07-23) — a vegetation tile subdivides so each vertex
+      // can sample the wind at its OWN world position; everything else stays
+      // the plain 4-vertex quad it always was. See
+      // `effects/vegetation-render.js#vegetationMeshSegments` for why this is
+      // the fix for "everything sways identically".
+      const vegSegments = vegActive
+        ? vegetationMeshSegments(state.placement?.width ?? 0, state.placement?.height ?? 0)
+        : 1;
+      // ⚠ ACCEPTED LIMITATION, stated rather than hidden: `ensureWholeImageMeshes`
+      // is idempotent FOREVER (the guard at this function's own top) — the
+      // material choice made here is a ONE-TIME, construction-time decision,
+      // never revisited. Toggling the effect off AFTER this tile already loaded
+      // will not stop it swaying until the next scene load/reload. This is the
+      // SAME tradeoff Wind.md §9 already documents for the candle flame's own
+      // material (a later wind rebake doesn't reach an already-built kernel
+      // either) — not a new gap, the established one, extended to a second
+      // consumer. Live per-frame motion-uniform muting (zeroing uSwayAmount/
+      // uWindResponse without a rebuild) is the cheap fix, deferred rather than
+      // built blind into an already-large pass.
+
       // Cap tile size for MEMORY safety, not just the HW limit: a single 12000²
       // upload TDR'd the device on a floor switch. See MAX_WHOLE_TILE_DIM.
       const plan = planImageTiles(imageW, imageH, Math.min(textureLimit, MAX_WHOLE_TILE_DIM));
@@ -3538,16 +6529,32 @@ export async function startVtPanViewer({
                 // on first render. Correct, just not forced.
               }
               const wholeTile = { sx: 0, sy: 0, sw: c.width, sh: c.height, col: 0, row: 0 };
-              const { material, appearance } = buildWholeImageMaterial(tex, item, [c.width / padW, c.height / padH]);
+              const compressedUvScale = [c.width / padW, c.height / padH];
+              const { material, appearance, motion } = vegActive
+                ? buildVegetationMaterial(tex, item, vegKind, vegState.params, { uvScale: compressedUvScale })
+                : buildWholeImageMaterial(tex, item, compressedUvScale);
               const geometry = new THREE.BufferGeometry();
-              const t = { tile: wholeTile, sub: null, tex, geometry, material, appearance, mesh: null };
-              setTileGeometry(t, state.placement, imageW, imageH);
+              const t = { tile: wholeTile, sub: null, tex, geometry, material, appearance, motion, mesh: null };
+              setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
               const mesh = new THREE.Mesh(geometry, material);
               mesh.frustumCulled = false;
               mesh.visible = false; // the refresh loop decides visibility + renderOrder
               mesh.renderOrder = wi.renderOrder;
               t.mesh = mesh;
               scene.add(mesh);
+              if (vegActive) {
+                vegShadows.attachTileShadow(
+                  t,
+                  item,
+                  vegKind,
+                  vegState.params,
+                  state,
+                  imageW,
+                  imageH,
+                  vegSegments,
+                  compressedUvScale
+                );
+              }
               wi.tiles.push(t);
               wi.compressed = c.cached ? `${c.format}(cached)` : c.format;
               wi.alphaStats = c.alphaStats ?? null;
@@ -3634,16 +6641,21 @@ export async function startVtPanViewer({
                 // recovery, so there is nothing to do here but stop waiting.
               }
             }
-            const { material, appearance } = buildWholeImageMaterial(tex, item);
+            const { material, appearance, motion } = vegActive
+              ? buildVegetationMaterial(tex, item, vegKind, vegState.params)
+              : buildWholeImageMaterial(tex, item);
             const geometry = new THREE.BufferGeometry();
-            const t = { tile, sub: null, tex, geometry, material, appearance, mesh: null };
-            setTileGeometry(t, state.placement, imageW, imageH);
+            const t = { tile, sub: null, tex, geometry, material, appearance, motion, mesh: null };
+            setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
             const mesh = new THREE.Mesh(geometry, material);
             mesh.frustumCulled = false;
             mesh.visible = false; // the refresh loop decides visibility + renderOrder
             mesh.renderOrder = wi.renderOrder;
             t.mesh = mesh;
             scene.add(mesh);
+            if (vegActive) {
+              vegShadows.attachTileShadow(t, item, vegKind, vegState.params, state, imageW, imageH, vegSegments);
+            }
             wi.tiles.push(t);
           }
           wi.status = 'ready';
@@ -3674,10 +6686,443 @@ export async function startVtPanViewer({
       const wi = state.wholeImage;
       if (!wi) return;
       wi.renderOrder = item.renderOrder;
+      // Read the vegetation state ONCE per item, and only when this item
+      // actually carries a shadow — the overwhelming majority of items are not
+      // vegetation and must pay nothing for this. NOTE: uniform SYNC (motion/
+      // shadow) does NOT happen here any more — see `syncAllVegetationMotion
+      // ForFrame`'s own header for why it moved to the per-frame render loop.
+      // This function only decides visibility, which legitimately does only
+      // need to change on a residency pass (placement/screen-visibility).
+      let vegState = null;
       for (const t of wi.tiles) {
-        if (placementChanged) setTileGeometry(t, state.placement, wi.imageSize.width, wi.imageSize.height);
+        if (t.shadow) {
+          vegState = getVegetationRenderState();
+          break;
+        }
+      }
+      for (const t of wi.tiles) {
+        if (placementChanged)
+          setTileGeometry(t, state.placement, wi.imageSize.width, wi.imageSize.height, t.segments ?? 1);
         t.mesh.visible = show;
         t.mesh.renderOrder = item.renderOrder;
+        // A Case-1 self-vegetation tile's own ground shadow (see
+        // `vegShadows.attachTileShadow`): same placement, same wind motion.
+        if (t.shadow) {
+          if (placementChanged) {
+            // The SAME pad the material was built with — a shadow quad rebuilt
+            // without it would silently drop the pad and re-clip every swept
+            // shadow at the plant's own edge, which is the bug this padding
+            // exists to fix, reintroduced by a refresh.
+            setTileGeometry(
+              t.shadow.rec,
+              state.placement,
+              wi.imageSize.width,
+              wi.imageSize.height,
+              t.segments ?? 1,
+              t.shadow.padPx ?? 0
+            );
+          }
+          // UNLIKE the tile itself — which is real placed content and keeps
+          // rendering when the effect is off — the shadow is purely this
+          // effect's output, so it hides the moment the effect is disabled.
+          t.shadow.mesh.visible = show && !!vegState?.enabled;
+          // CASE 1: `item` is the canopy tile itself — see
+          // VEG_SHADOW_RENDER_ORDER_MAGNITUDE's own header for the sign.
+          t.shadow.mesh.renderOrder = item.renderOrder - VEG_SHADOW_RENDER_ORDER_MAGNITUDE;
+        }
+      }
+    }
+
+    // ======================================================================
+    // VEGETATION CASE 2 (Vegetation.md) — a plain albedo with a DISCOVERED
+    // SIBLING `_Tree`/`_Bush` file (V2's original convention). Unlike Case 1
+    // (effects/vegetation-render.js's own header), which swaps the OWNING
+    // item's OWN material, this builds a genuinely SEPARATE overlay mesh
+    // drawn just above the item's own art — the item's normal albedo
+    // rendering is completely untouched. A background painted with BOTH
+    // `_Tree` and `_Bush` gets TWO overlays, one per kind (canopy above
+    // undergrowth via each kind's own `renderOrderNudge`).
+    // ======================================================================
+
+    /**
+     * Load ONE image URL as a standalone THREE texture — the compressed-
+     * first, raw-fallback dance `ensureWholeImageMeshes` already uses,
+     * DELIBERATELY NOT refactored out of that function: touching the
+     * device-loss-hardened whole-image loader (the fix for two confirmed,
+     * hard-won device-loss incidents) for a second caller's convenience is
+     * real risk for a small textual saving. Vegetation sibling masks are
+     * companion assets, never a 12000px hero floor, so this deliberately
+     * skips `ensureWholeImageMeshes`' own multi-tile SPLIT (`planImageTiles`)
+     * — one texture, one tile, always; the risk that split exists to manage
+     * does not apply here. Shares the SAME `wholeImageLoadChain` queue (this
+     * closure's own serialization gate) so the total number of giant-image
+     * operations in flight stays bounded across BOTH systems — a second,
+     * unlinked queue would silently reopen the exact risk the shared one
+     * exists to close.
+     *
+     * @param {string} url
+     * @returns {Promise<{tex: *, width: number, height: number, compressed: string|null}|null>}
+     *   null on total failure — the caller must tolerate this; one broken
+     *   sibling mask must never take the owning item's own art down with it.
+     */
+    async function loadVegetationOverlayTexture(url) {
+      const priorLoad = wholeImageLoadChain;
+      let releaseLoad;
+      wholeImageLoadChain = new Promise((res) => {
+        releaseLoad = res;
+      });
+      const gpuQueue = renderer.backend?.isWebGPUBackend ? renderer.backend.device?.queue : null;
+      try {
+        await priorLoad;
+        await renderer.init();
+
+        try {
+          const c = await requestCompressedTexture(url);
+          if (c && (c.format === 'bc1' || c.format === 'bc7') && c.levels?.length) {
+            const threeFormat = c.format === 'bc7' ? THREE.RGBA_BPTC_Format : THREE.RGBA_S3TC_DXT1_Format;
+            const mipmaps = c.levels.map((lvl) => ({ data: lvl.blocks, width: lvl.width, height: lvl.height }));
+            const padW = mipmaps[0].width;
+            const padH = mipmaps[0].height;
+            const tex = new THREE.CompressedTexture(mipmaps, padW, padH, threeFormat);
+            tex.flipY = false; // v=0 = image top row — the world-quad convention
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.generateMipmaps = false;
+            tex.minFilter = THREE.LinearMipmapLinearFilter;
+            tex.magFilter = THREE.LinearFilter;
+            tex.needsUpdate = true;
+            try {
+              renderer.initTexture(tex);
+            } catch (_) {
+              // Backend not up yet — Three uploads the CompressedTexture lazily on first render.
+            }
+            return {
+              tex,
+              width: c.width,
+              height: c.height,
+              compressed: c.cached ? `${c.format}(cached)` : c.format,
+            };
+          }
+        } catch (err) {
+          log.warn(`vegetation overlay: BC1/BC7 path failed for "${url}", using raw:`, err);
+        }
+
+        // RAW FALLBACK — same MAX_RAW_FALLBACK_DIM safety cap as the albedo path.
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+        const blob = await res.blob();
+        const bitmap = await createImageBitmap(blob);
+        const rawScale = Math.min(1, MAX_RAW_FALLBACK_DIM / Math.max(bitmap.width, bitmap.height));
+        let finalBitmap = bitmap;
+        if (rawScale < 1) {
+          finalBitmap = await createImageBitmap(blob, 0, 0, bitmap.width, bitmap.height, {
+            resizeWidth: Math.max(1, Math.round(bitmap.width * rawScale)),
+            resizeHeight: Math.max(1, Math.round(bitmap.height * rawScale)),
+            resizeQuality: 'high',
+          });
+          bitmap.close();
+        }
+        const tex = new THREE.Texture(finalBitmap);
+        tex.flipY = false;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.generateMipmaps = true;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.needsUpdate = true;
+        try {
+          renderer.initTexture(tex);
+          finalBitmap.close();
+        } catch (_) {
+          // Upload could not be forced — leave the bitmap for Three's own lazy upload.
+        }
+        if (gpuQueue) {
+          try {
+            await gpuQueue.onSubmittedWorkDone();
+          } catch (_) {
+            // A lost/dying device rejects this; the device-lost handler owns recovery.
+          }
+        }
+        return {
+          tex,
+          width: finalBitmap.width,
+          height: finalBitmap.height,
+          compressed: rawScale < 1 ? 'raw:capped' : null,
+        };
+      } catch (err) {
+        log.error(`vegetation overlay texture load failed for "${url}":`, err);
+        return null;
+      } finally {
+        releaseLoad();
+      }
+    }
+
+    /**
+     * Build (once per detected kind) this item's Case-2 overlay mesh(es).
+     * Idempotent per kind (mirrors `ensureWholeImageMeshes`' own "already
+     * built" guard) — safe to call every residency pass; async loads fill in
+     * `state.vegetationOverlays[kindId]` as they complete, tolerating this
+     * item never having had a placement resolved yet (falls back to {0,0} —
+     * `refreshVegetationOverlay`'s own placement-changed geometry rewrite
+     * corrects it the moment a real placement exists).
+     * @param {object} state @param {object} item
+     */
+    function ensureVegetationOverlay(state, item) {
+      const vegState = getVegetationRenderState();
+      if (!vegState.enabled) return;
+      const found = vegState.urlByItemId.get(item.id);
+      if (!found) return;
+      state.vegetationOverlays ??= {};
+      for (const kind of VEGETATION_KINDS) {
+        const url = found[kind.id];
+        if (!url) continue;
+        if (state.vegetationOverlays[kind.id]) continue; // already built or building
+        const entry = { status: 'loading', mesh: null, material: null, geometry: null, tex: null, shadow: null };
+        state.vegetationOverlays[kind.id] = entry;
+        loadVegetationOverlayTexture(url)
+          .then((loaded) => {
+            if (!loaded) {
+              entry.status = 'error';
+              return;
+            }
+            // FRESH params (not the ones read above) — params legitimately
+            // change while a giant texture is still decoding/uploading.
+            const freshParams = getVegetationRenderState().params;
+            // TESSELLATED (2026-07-23) — one vertex per ~160 world px so the
+            // canopy can sample the wind at many real positions instead of one.
+            const segments = vegetationMeshSegments(state.placement?.width ?? 0, state.placement?.height ?? 0);
+            const corners = computeQuadCorners(state.placement);
+
+            /** Both meshes share this grid SHAPE; each gets its OWN buffers
+             * (a BufferAttribute cannot be shared between two geometries that
+             * are updated independently). `padPx` grows the quad outward
+             * without moving the art — the shadow's sweep needs somewhere to
+             * land (see `vegetationShadowPadPx`). */
+            const makeGeometry = (padPx = 0) => {
+              const c = padPx > 0 ? computeQuadCorners(padPlacement(state.placement, padPx)) : corners;
+              const grid = buildTessellatedQuadGeometry(c, segments);
+              const g = new THREE.BufferGeometry();
+              g.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
+              g.setAttribute('uv', new THREE.BufferAttribute(grid.uvs, 2));
+              g.setIndex(new THREE.BufferAttribute(grid.indices, 1));
+              return g;
+            };
+
+            // THE SHADOW, built FIRST so it is added to the scene before the
+            // canopy — its renderOrder puts it underneath regardless, but
+            // keeping construction order and draw order aligned makes the
+            // intent readable.
+            const shadowPadPx = vegetationShadowPadPx(kind);
+            const shadowBuilt = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
+              asShadow: true,
+              shadowPadUv: [
+                shadowPadPx / Math.max(1, Math.abs(state.placement?.width ?? 1)),
+                shadowPadPx / Math.max(1, Math.abs(state.placement?.height ?? 1)),
+              ],
+            });
+            // The smear LOD's scale factor — see the Case-1 site's own note.
+            // `loaded.tex.image` carries the decoded art's true pixel width.
+            shadowBuilt.shadow.artTexelsPerWorldPx =
+              (loaded.tex?.image?.width ?? 1) / Math.max(1, Math.abs(state.placement?.width ?? 1));
+            const shadowGeometry = makeGeometry(shadowPadPx);
+            const shadowMesh = new THREE.Mesh(shadowGeometry, shadowBuilt.material);
+            shadowMesh.frustumCulled = false;
+            shadowMesh.visible = false;
+            // ABOVE the owning item's own renderOrder — `item` here IS the
+            // ground (a background/tile with a discovered sibling mask), and
+            // the shadow must draw AFTER it or the ground's own (typically
+            // opaque) art paints straight over the shadow and erases it. See
+            // VEG_SHADOW_RENDER_ORDER_MAGNITUDE's own header — this was a
+            // real, silent bug (nothing rendered wrong, nothing rendered).
+            // Still comfortably BELOW the canopy's own renderOrderNudge.
+            shadowMesh.renderOrder = item.renderOrder + VEG_SHADOW_RENDER_ORDER_MAGNITUDE;
+            scene.add(shadowMesh);
+
+            const { material, appearance, motion } = buildVegetationMaterial(loaded.tex, item, kind, freshParams);
+            const geometry = makeGeometry();
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.frustumCulled = false;
+            mesh.visible = false; // the refresh loop decides visibility + renderOrder
+            mesh.renderOrder = item.renderOrder + kind.renderOrderNudge;
+            scene.add(mesh);
+
+            entry.status = 'ready';
+            entry.mesh = mesh;
+            entry.geometry = geometry;
+            entry.material = material;
+            entry.appearance = appearance;
+            entry.motion = motion;
+            entry.segments = segments;
+            entry.tex = loaded.tex;
+            entry.compressed = loaded.compressed;
+            entry.shadow = {
+              mesh: shadowMesh,
+              geometry: shadowGeometry,
+              material: shadowBuilt.material,
+              uniforms: shadowBuilt.shadow,
+              // Its own independent motion uniform set — see
+              // syncVegetationMotionUniforms's own header for why this must
+              // be synced separately from the canopy's `entry.motion` above.
+              motion: shadowBuilt.motion,
+            };
+          })
+          .catch((err) => {
+            entry.status = 'error';
+            log.error(`vegetation overlay build failed for item "${item.id}" kind "${kind.id}":`, err);
+          });
+      }
+    }
+
+    // (`syncVegetationShadowUniforms` moved to
+    // `effects/vegetation-shadow-subsystem.js` as `vegShadows.syncUniforms` —
+    // extraction step 2. It reads the shadow handle through a GETTER there,
+    // because `shadowHandle` below is reassigned every time the sky changes.)
+
+    /**
+     * Push the CURRENT resolved vegetation params into one mesh's live sway/
+     * flutter/clump uniforms — mirrors `vegShadows.syncUniforms`'s own
+     * shape exactly (same "take the uniforms object directly" discipline, for
+     * the same reason). Called once per mesh per frame for EVERY vegetation
+     * mesh that exists (a canopy AND its shadow each carry their own
+     * independent motion uniform set — `buildVegetationMaterial` builds
+     * `positionNode` unconditionally, not gated by `asShadow` — so both need
+     * their own sync call or a live retune would visibly desync a plant from
+     * its own shadow). This is what makes every `VEGETATION_PARAMS` motion
+     * knob (2026-07-23 follow-up: "frequency, evolution rate, amplitude...
+     * the more controls the better") a genuine LIVE control rather than a
+     * value only baked in once at mesh construction.
+     *
+     * Fallbacks below are the SAME "safe if params is momentarily absent"
+     * values `buildVegetationMaterial`'s own uniform construction uses — 0
+     * for every additive amount/spread (a missing param degrades to "no
+     * effect", never a guessed look), 1 for multiplicative gains/curves and
+     * `clumpSizePx` (0 there would be a divide-by-zero in the shader, not
+     * merely a duller look).
+     *
+     * @param {object|null} motion - a `buildVegetationMaterial(...).motion` object.
+     * @param {object} params - the live resolved vegetation params.
+     */
+    function syncVegetationMotionUniforms(motion, params) {
+      if (!motion) return;
+      const p = params ?? {};
+      motion.uIntensity.value = p.intensity ?? 1;
+      motion.uWindResponse.value = p.windResponse ?? 1;
+      motion.uSwayAmount.value = p.swayAmount ?? 0;
+      motion.uSwayFrequency.value = p.swayFrequency ?? 1;
+      motion.uSwayCurve.value = p.swayCurve ?? 1;
+      motion.uGaleBendAmount.value = p.galeBendAmount ?? 0;
+      motion.uGaleRateGain.value = p.galeRateGain ?? 0;
+      motion.uFlutterAmount.value = p.flutterAmount ?? 0;
+      motion.uFlutterFrequency.value = p.flutterFrequency ?? 1;
+      motion.uFlutterGaleFrequency.value = p.flutterGaleFrequency ?? 0;
+      motion.uFlutterUvScale.value = p.flutterUvScale ?? 0;
+      motion.uFlutterScale.value = p.flutterScale ?? 1;
+      motion.uClumpSizePx.value = Math.max(1, p.clumpSizePx ?? 150);
+      motion.uClumpPhaseSpread.value = p.clumpPhaseSpread ?? 0;
+      motion.uClumpAmpSpread.value = p.clumpAmpSpread ?? 0;
+      motion.uClumpDirSpreadRad.value = ((p.clumpDirSpread ?? 0) * Math.PI) / 180;
+      motion.uEdgeFadeWidthPx.value = Math.max(0, p.edgeFadeWidthPx ?? 0);
+    }
+
+    /**
+     * Push EVERY loaded vegetation mesh's live motion/shadow uniforms, once
+     * per rendered frame — called from `renderFrame`, right alongside
+     * `updateCandleFlame()`.
+     *
+     * WHY THIS EXISTS (2026-07-23, SAME DAY, author-reported): "I tried
+     * changing the FOH controls for vegetation and it didn't do anything...
+     * Correction. It didn't do anything until I panned the camera." The sync
+     * calls used to live inside `refreshWholeImageItem`/`refreshVegetation
+     * Overlay` — which sounds like "every frame" from their own (now
+     * corrected) comments, but those two functions are ONLY called from
+     * `updateResidencyUnguarded`, which itself only runs on a residency pass
+     * (pan/zoom/placement change), never from the render loop. Candles never
+     * had this gap because `updateCandleFlame()` was already wired into
+     * `renderFrame` directly. This function is vegetation's equivalent,
+     * iterating the SAME persistent `itemStates` map `updateResidencyUnguarded`
+     * populates rather than requiring a residency pass to reach every mesh.
+     *
+     * Deliberately touches ONLY uniform values — never geometry, visibility or
+     * renderOrder, which legitimately still belong on the residency pass
+     * (they only need to change when placement or on-screen-ness changes, not
+     * every frame).
+     */
+    function syncAllVegetationMotionForFrame() {
+      const vegState = getVegetationRenderState();
+      for (const state of itemStates.values()) {
+        if (state.wholeImage) {
+          for (const t of state.wholeImage.tiles) {
+            if (t.motion) syncVegetationMotionUniforms(t.motion, vegState.params);
+            if (t.shadow) {
+              vegShadows.syncUniforms(t.shadow.uniforms, t.shadow.kind, state.placement, vegState.params);
+              syncVegetationMotionUniforms(t.shadow.motion, vegState.params);
+            }
+          }
+        }
+        if (state.vegetationOverlays) {
+          for (const kind of VEGETATION_KINDS) {
+            const entry = state.vegetationOverlays[kind.id];
+            if (!entry || entry.status !== 'ready') continue;
+            syncVegetationMotionUniforms(entry.motion, vegState.params);
+            if (entry.shadow) {
+              vegShadows.syncUniforms(entry.shadow.uniforms, kind, state.placement, vegState.params);
+              syncVegetationMotionUniforms(entry.shadow.motion, vegState.params);
+            }
+          }
+        }
+      }
+    }
+
+    /** Per-frame refresh — geometry-on-placement-change + visibility +
+     * renderOrder, mirroring `refreshWholeImageItem`'s own shape exactly. A
+     * kind still `loading`/`error` is simply skipped (nothing to show yet, or
+     * ever, for that one kind — the OTHER kind and the item's own art are
+     * unaffected either way).
+     *
+     * UNLIKE Case 1 (a real tile that keeps its own legitimate content when
+     * the effect is disabled — see `ensureWholeImageMeshes`'s own vegetation
+     * branch), an overlay has no non-vegetation content of its own: "disabled"
+     * MUST mean invisible, not "keeps showing whatever was already built".
+     * Re-checked every frame (cheap — one boolean read) rather than only at
+     * build time, so toggling the setting OFF hides an ALREADY-BUILT overlay
+     * immediately, not just suppresses building new ones. */
+    function refreshVegetationOverlay(state, item, show, placementChanged) {
+      if (!state.vegetationOverlays) return;
+      const vegState = getVegetationRenderState();
+      const enabled = vegState.enabled;
+      for (const kind of VEGETATION_KINDS) {
+        const entry = state.vegetationOverlays[kind.id];
+        if (!entry || entry.status !== 'ready') continue;
+        if (placementChanged) {
+          // Rewrite BOTH meshes' vertex buffers in place — same tessellation,
+          // new corners. (BufferAttribute has no dispose(); reusing the array
+          // is the rule, not an optimisation — reference_bufferattribute_no_
+          // dispose_trap.) A genuine RESIZE that changes the segment count is
+          // not hot-patched: `entry.segments` is baked into these buffers'
+          // lengths, so the rebuilt grid must match it exactly.
+          const grid = buildTessellatedQuadGeometry(computeQuadCorners(state.placement), entry.segments ?? 1);
+          for (const g of [entry.geometry, entry.shadow?.geometry]) {
+            if (!g) continue;
+            const attr = g.getAttribute('position');
+            if (attr && attr.array.length === grid.positions.length) {
+              attr.array.set(grid.positions);
+              attr.needsUpdate = true;
+            }
+          }
+        }
+        // NOTE: uniform SYNC (sky + motion) does NOT happen here — this
+        // function only runs on a residency pass (pan/zoom/placement change),
+        // not every frame, which is exactly why a live slider drag used to
+        // look like it "did nothing" until the camera moved (author-reported
+        // 2026-07-23). See `syncAllVegetationMotionForFrame`'s own header —
+        // it now owns every vegetation uniform push, called every frame from
+        // `renderFrame`, mirroring `updateCandleFlame`'s own placement.
+        entry.mesh.visible = show && enabled;
+        entry.mesh.renderOrder = item.renderOrder + kind.renderOrderNudge;
+        if (entry.shadow?.mesh) {
+          entry.shadow.mesh.visible = show && enabled;
+          // CASE 2: `item` IS the ground — see
+          // VEG_SHADOW_RENDER_ORDER_MAGNITUDE's own header for the sign.
+          entry.shadow.mesh.renderOrder = item.renderOrder + VEG_SHADOW_RENDER_ORDER_MAGNITUDE;
+        }
       }
     }
 
@@ -3787,14 +7232,74 @@ export async function startVtPanViewer({
       // the comment above it. See syncTokenPlacements' own header for why this
       // runs every frame rather than only on a document hook.
       syncTokenPlacements();
+      // Reconcile + animate the door leaves BEFORE the pass plan, so their fresh
+      // geometry is on the GPU when runGeometryWorldPass draws doorScene into the
+      // lit target. Same CPU-only, kept-out-of-t0 posture as syncTokenPlacements.
+      syncDoorGraphics(now);
       // frame.snapshot's res:env third — see its own header above. Also a
       // small per-frame CPU-only cost, kept OUT of the t0 GPU-render window
       // for the same reason as updateContinuousInputs/syncTokenPlacements.
+      // Idempotent, so calling it per frame is free — and it means the pause
+      // watch installs itself the moment a real `game` exists, without needing
+      // a lifecycle hook of its own or a guess about boot ordering.
+      installPauseWatch();
       updateEnvSnapshot();
       const t0 = performance.now();
       // GPU probe (perf lab only; inert otherwise) — mark the render start so
       // endFrame below can time to GPU completion. See diag/gpu-probe.js.
       gpuProbe.beginFrame();
+      // The mask-driven rebake check (see pollMaskAuthorityForWindRebake's own
+      // header) — BEFORE tickWindSim, so a mask-triggered rebake this frame is
+      // reflected in this SAME frame's wind sim/sampling, not one frame late.
+      // WALL time, deliberately (2026-07-23). This is a THROTTLE on a
+      // housekeeping poll ("check the mask version at most every N ms"), not a
+      // simulation step — and `tMs` now stops dead while Foundry is paused. Fed
+      // sim time, the throttle would never elapse again during a pause, so a
+      // mask edit made while paused would not trigger its rebake until someone
+      // un-paused. The rest of this frame block genuinely wants sim time and
+      // keeps it; this one line is the deliberate opt-out.
+      pollMaskAuthorityForWindRebake(lastEnvSnapshot?.env?.time?.realMs ?? 0);
+      // Wind.md Tier 2 — INSIDE the gpuProbe bracket (not before it) so its
+      // own render passes are actually visible to the perf lab's sweep, per
+      // Wind.md §9's "measured before defaulting on". Before updateCamera/
+      // runPassPlan so windLiveField's published texture is fresh BEFORE
+      // anything downstream (candle flame, lights, the debug overlay)
+      // samples it this frame.
+      tickWindSim(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
+      // sims.particles — advance the GPU particle sim right after the wind field
+      // it samples, before the draw (surface.particles, in the plan below) reads
+      // its positions. A DIRECT renderer.compute(): the sims stage is out of
+      // framePlan's range, exactly like tickWindSim above. World rect = the live
+      // view, so motes wrap inside what's on screen and stay present as you pan
+      // — CLAMPED to the scene's own `sceneRect` (2026-07-23, author: "We
+      // shouldn't spawn particles outside of the scene"). Unclamped, a mote
+      // respawning "anywhere in the current view" (this function's own prior
+      // comment) meant panning/zooming out past the map's edge — into the
+      // padded margin, or further — happily reseeded motes out there too,
+      // since `viewToWorldRect` itself is deliberately NOT clamped to world
+      // bounds (that function's own doc: page-residency math needs the raw
+      // rect). `clampRectToBounds` (view-state.js) intersects it against
+      // `dimensions.sceneRect` — the SAME real-scene bounds `bakeWindField`
+      // now computes openness within, so a mote can never exist somewhere
+      // wind was never even calculated for. Computed ONCE and shared by both
+      // engines below — identical expression, one clamp, not two.
+      const windSpawnRect = clampRectToBounds(viewToWorldRect(view, canvasW / canvasH), dimensions.sceneRect);
+      if (windParticlesEnabled && view && particleEngine) {
+        particleEngine.step(renderer, {
+          dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
+          tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          worldRect: windSpawnRect,
+        });
+      }
+      // sims.particles — the gust ribbons ride the same wind field; step them in
+      // the same spot, right after the wind sim and before their draw.
+      if (windGustsEnabled && view && gustEngine) {
+        gustEngine.step(renderer, {
+          dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
+          tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          worldRect: windSpawnRect,
+        });
+      }
       // Re-derive the camera from the live view EVERY frame: this is what makes
       // a drag track the cursor at display rate without waiting on streaming,
       // and it is the single place the Y-flip is applied (see updateCamera).
@@ -3918,100 +7423,17 @@ export async function startVtPanViewer({
         return;
       }
 
-      // Pass 3: upload everything decoded, in TIME-BUDGETED CHUNKS (2026-07-16
-      // — the worker-decode fix moved the SOURCE-DECODE freeze off the main
-      // thread, but a live zoom-thrash-test report then showed a NEW dominant
-      // hitch (500ms) whose own snapshot had decode ALREADY FINISHED
-      // (sourcesDecoded/idbSlices at their final values right at the hitch) —
-      // pointing squarely at THIS loop instead: it used to upload an ENTIRE
-      // batch (up to ~120 pages in that report) in one uninterrupted stretch
-      // with the render loop explicitly paused for the whole duration. Each
-      // individual GPU upload is cheap; 120 of them back-to-back at real
-      // driver-call overhead is not. Fixed the same way the decode loop was —
-      // yield by TIME BUDGET, not batch-or-nothing — except a chunk boundary
-      // here means RESUMING the render loop briefly (a real frame paints)
-      // before re-pausing for the next chunk, rather than just awaiting a
-      // microtask. `atlas.prepareForUploadBatch()` is safe to call again at
-      // the start of every chunk (it only resets the binding-cache staleness
-      // the pause/resume dance itself protects against — see that function's
-      // own doc); the pause/resume cost itself is cheap and already proven
-      // safe (this is the exact same pause the code always did, just more of
-      // them instead of one giant one).
-      if (decodedForUpload.length > 0) {
-        const wasActive = loopActive;
-        let lastYieldMs = performance.now();
-        // GPU-completion backpressure handle (WebGPU only) — see UPLOAD_PAGES_PER_DRAIN.
-        const gpuQueue = renderer.backend?.isWebGPUBackend ? renderer.backend.device?.queue : null;
-        let uploadsSinceDrain = 0;
-        renderer.setAnimationLoop(null);
-        atlas.prepareForUploadBatch();
-        for (const { slot, decoded } of decodedForUpload) {
-          const srcTex = new THREE.Texture(decoded);
-          srcTex.flipY = false;
-          srcTex.generateMipmaps = false;
-          srcTex.needsUpdate = true;
-          atlas.uploadPage(slot, srcTex);
-          srcTex.dispose();
-          decoded.close?.();
-
-          // Bound the GPU queue depth: after UPLOAD_PAGES_PER_DRAIN uploads, wait
-          // for the GPU to actually finish them before enqueuing more (this is the
-          // REAL backpressure — the time budget below bounds only MAIN-THREAD time,
-          // never queue depth). `drained` defers the timing to the existing `now`
-          // read below so this takes NO new wall-clock sample (time/one-clock wall).
-          let drained = false;
-          if (gpuQueue && ++uploadsSinceDrain >= UPLOAD_PAGES_PER_DRAIN) {
-            uploadsSinceDrain = 0;
-            try {
-              await gpuQueue.onSubmittedWorkDone();
-            } catch (_) {
-              // A lost/dying device can reject this; the device-lost handler owns
-              // the slide. Never let backpressure itself throw out of the loop.
-            }
-            drained = true;
-          }
-
-          const now = performance.now();
-          if (drained) {
-            // now - lastYieldMs ≈ the drain wait (enqueuing ≤48 pages is ~free CPU),
-            // so a BALLOONING value is the GPU failing to keep up — the upload-burst
-            // TDR signal the device-lost snapshot reads. Reset the yield clock too:
-            // the drain already handed the main thread its breather.
-            const drainMs = now - lastYieldMs;
-            _uploadDrain.count++;
-            if (drainMs > _uploadDrain.maxMs) _uploadDrain.maxMs = drainMs;
-            lastYieldMs = now;
-          }
-          if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_UPLOAD_CHUNK)) {
-            if (wasActive) renderer.setAnimationLoop(renderFrame); // let a REAL frame paint between chunks
-            await nextAnimationFrame();
-            renderer.setAnimationLoop(null); // re-pause for the next upload chunk
-            atlas.prepareForUploadBatch(); // re-prime the binding cache before resuming uploads
-            lastYieldMs = performance.now();
-          }
-        }
-        if (wasActive) renderer.setAnimationLoop(renderFrame); // final restore (never start prematurely at first load)
-      }
-    }
-
-    /** Write one page's current cache slot into a pack's flattened-pyramid indirection buffer. */
-    function writeIndirection(pack, page) {
-      const slot = cache.slotOf(page.key);
-      if (slot === null) return;
-      const o = pack.indirectionLayout.origins[page.mip];
-      const x = o.x + page.px;
-      const y = o.y + page.py;
-      const i = (y * pack.width + x) * 4;
-      pack.buf[i] = slot & 0xff;
-      pack.buf[i + 1] = (slot >> 8) & 0xff;
-      pack.buf[i + 2] = 0;
-      pack.buf[i + 3] = 255;
-      // This texel now points at `page.key`'s slot. Record it so the cache's
-      // onEvict can find and clear THIS texel the instant that slot is
-      // reassigned — see clearIndirectionForKey. Registering HERE (rather than
-      // at request time) is what keeps the map honest: it maps exactly the
-      // texels that actually exist, never the ones we merely asked for.
-      pageOwners.set(page.key, { pack, page });
+      // Pass 3 (was: chunked GPU atlas upload — removed 2026-07-22 along with
+      // the streaming/virtual-texture engine, see
+      // feedback_mode_forks_silently_drop_features). Masks are the only thing
+      // that still calls this function, and they are consumed purely
+      // CPU-side via the onPageDecoded ingest seam above (Pass 2, already
+      // fired, bitmap already read) — nothing ever samples a pack's
+      // indirection/atlas texture in a shader any more
+      // (`ensureWholeImageMeshes`/`buildWholeImageMaterial` only ever bind an
+      // item's OWN whole texture). Just release the decoded bitmaps so they
+      // don't leak.
+      for (const { decoded } of decodedForUpload) decoded.close?.();
     }
 
     // Which layer-pack is DISPLAYED (albedo by default). Every pack STREAMS
@@ -4040,183 +7462,6 @@ export async function startVtPanViewer({
      * isolating cannot itself change what the pager does and mask the bug.
      */
     let isolateItemId = '';
-
-    /**
-     * Plan + stream one pack's view residency for the current worldRect, then
-     * rebuild its indirection buffer fresh from the cache's own slot mapping.
-     * This is the per-pack half of the old updateResidency, run for EVERY pack
-     * of every visible floor — albedo and each mask alike — so the whole layer
-     * stack pages through the one shared cache together (the pile-up proof).
-     *
-     * worldRect is in the shared (albedo) world units; packs are assumed to
-     * share worldSizePx (see buildPack's note), so the same rect plans every
-     * pack correctly.
-     */
-    /**
-     * Plan + stream ONE pack's view residency, then rebuild its indirection
-     * buffer fresh from the cache's own slot mapping.
-     *
-     * THE CHANGE THAT MATTERS: residency is planned in this pack's OWN IMAGE
-     * space, not in world space. Those used to be the same thing (a floor's art
-     * WAS the world), and they are not any more — a tile's texture covers a
-     * small patch of canvas, and a Level's art is inset inside the padded rect.
-     * `viewRectToImageRect` does the conversion (exactly inverting the item's
-     * placement, so it stays correct for a rotated tile).
-     *
-     * `computeItemViewportPx` supplies the mip selector's screen extent. Passing
-     * the canvas size here — the obvious-looking thing — would tell the planner
-     * that a 1024px tile drawn 100px wide needs mip 0, i.e. every small tile
-     * streams its full resolution: O(tiles) instead of O(screen), which is the
-     * exact cost model this whole architecture exists to destroy.
-     */
-    async function streamPackResidency(pack, state, worldRect) {
-      const imageSize = { width: pack.table.worldWidthPx, height: pack.table.worldHeightPx };
-      const imageRect = viewRectToImageRect(worldRect, state.placement, imageSize);
-      if (!imageRect) {
-        // The view doesn't touch this item at all — release its view tier and
-        // leave it on coarse pins (which are never evicted, so it stays instantly
-        // available, soft, if the camera comes back).
-        for (const key of pack.residentViewKeys) cache.unpin(key);
-        pack.residentViewKeys = new Set();
-        return;
-      }
-
-      const quadWorldSize = {
-        width: state.worldBounds.maxX - state.worldBounds.minX,
-        height: state.worldBounds.maxY - state.worldBounds.minY,
-      };
-      // Device pixels, not canvasW/H — mip selection should target the actual
-      // rendered pixel density (the pixel-ratio-parity fix), same reasoning
-      // as describeSceneColor's resolvedW/H, so the streaming path (OFF by
-      // default) doesn't quietly stay CSS-pixel-scoped after the default
-      // whole-image path was corrected.
-      const viewportPx = computeItemViewportPx(worldRect, { width: drawBufW, height: drawBufH }, quadWorldSize);
-
-      // Analytic mip selection (§4.1 — top-down camera, no GPU feedback): the
-      // finest mip that resolves at this size, plus BOTH neighbour mips as a
-      // prefetch — coarser (zoom-out insurance) AND finer (zoom-in insurance).
-      const plan = planResidency(pack.table, imageRect, viewportPx, { guardPages: 1 });
-      pack.lastRequestedMip = plan.mip;
-      pack.lastRequestedMipFraction = plan.mipFraction; // drives the shader's smooth mip blend
-
-      // RELEASE → MEASURE → REQUEST. The order is the whole point.
-      //
-      // THE BUG THIS FIXES (live evidence, 2026-07-16, real 2-floor scene, 7 packs):
-      // this used to request (and therefore PIN) the new page set and only THEN
-      // unpin the pages it no longer wanted. In a static view that is harmless —
-      // both sets are identical. But any view change that shifts the page set (a
-      // pan, or a zoom that crosses a mip boundary) pinned the OLD set and the NEW
-      // set SIMULTANEOUSLY: peak ≈ 2x steady state per pack, ≈3000 pages against a
-      // 2048 capacity. And because PageCache never evicts a PINNED slot, nothing
-      // could be reclaimed to satisfy the shortfall — so the requests missed, and
-      // the (correct) "stuck view-miss" retry re-asked for them on every single
-      // update. That is the 215426-misses report: 67s of panning. The report taken
-      // at a static default view showed misses: 0 with the identical pin counts
-      // (574 coarse + 1320 view = 1894, comfortably inside 2048) — the steady
-      // state was never oversubscribed at all, only the TRANSITIONS were.
-      //
-      // `cache.unpin()` merely clears the pin flag; it does NOT evict (page-cache.js
-      // :119). So releasing first is strictly safe — the pages stay resident and
-      // merely become LRU-eligible — and it caps peak pinned at max(old, new)
-      // instead of old + new.
-      const candidates = [...plan.fine, ...plan.prefetchCoarser, ...plan.prefetchFiner].filter(
-        (pg) => !pack.coarseKeySet.has(pg.key)
-      );
-      const candidateKeys = new Set(candidates.map((pg) => pg.key));
-      for (const key of pack.residentViewKeys) if (!candidateKeys.has(key)) cache.unpin(key);
-
-      // ADMISSION CONTROL for the speculative tiers. `plan.fine` is what the
-      // CURRENT view needs and is always admitted; the prefetch tiers are
-      // insurance against a future zoom and are admitted only while the cache can
-      // afford to pin them (see PREFETCH_MIN_HEADROOM_FRACTION). Measured AFTER
-      // the release above, so pages this pack is already dropping cannot count
-      // against its own budget. Headroom counts unprotected slots — PageCache
-      // never evicts a pinned slot of either class, so PINNED pages are the real
-      // budget, not `residentPages`.
-      const cacheStats = cache.stats();
-      const headroomPages = cache.capacityPages - (cacheStats.pinnedCoarse + cacheStats.pinnedView);
-      const admitPrefetch = headroomPages > cache.capacityPages * PREFETCH_MIN_HEADROOM_FRACTION;
-      if (!admitPrefetch) prefetchSkippedPacks++;
-
-      const neededViewPages = admitPrefetch ? candidates : plan.fine.filter((pg) => !pack.coarseKeySet.has(pg.key));
-      if (!admitPrefetch) {
-        // Declining prefetch also means releasing any speculative pages still held
-        // from a previous update — otherwise "declined" would only apply to new
-        // ones and the pack would keep hoarding what it can no longer justify.
-        const keep = new Set(neededViewPages.map((pg) => pg.key));
-        for (const key of pack.residentViewKeys) if (!keep.has(key)) cache.unpin(key);
-      }
-
-      // `diff.toUnpin` is deliberately unused: the release above already covers it
-      // (prevKeys not in the final needed set), and doing it here would be too late.
-      const diff = diffResidency(pack.residentViewKeys, neededViewPages);
-      await requestDecodeUpload(pack, diff.toRequest, 'view');
-      // GROUND TRUTH, not intent (the "stuck view-miss" bug, 2026-07-16): a page
-      // whose request MISSED (cache full, nothing evictable — a normal outcome
-      // under pressure) must stay eligible for retry, so only keys that are
-      // ACTUALLY resident are recorded. Tracking the ASK instead left a missed
-      // page permanently stuck on its coarse-fallback blur even after pressure
-      // relieved, self-healing only if you happened to pan away and back.
-      pack.residentViewKeys = new Set([...diff.nextKeys].filter((key) => cache.isResident(key)));
-
-      // Rebuild the indirection buffer FRESH from the cache's own current slot
-      // mapping every time (never a separately-tracked copy) — this keeps it
-      // correct across evictions: an evicted-and-reassigned page must never
-      // leave a stale pointer. Both the always-resident coarse pins AND the
-      // current view pages are written, so the shader's coarse-fallback walk
-      // always finds SOMETHING resident (blur, never magenta).
-      pack.buf.fill(0);
-      for (const page of pack.coarsePages) writeIndirection(pack, page);
-      for (const page of neededViewPages) writeIndirection(pack, page);
-      pack.indirectionTexture.needsUpdate = true;
-    }
-
-    /**
-     * Point one item's shader at a specific pack (its albedo, or a mask when the
-     * display layer is switched for visual verification), and push its per-item
-     * appearance + occlusion uniforms.
-     */
-    function bindMeshToPack(state, pack) {
-      const u = state.vt.uniforms;
-      // NO page-table swap. The texture is baked into the node graph at build time
-      // (see vt-sample.tsl.js) — a TextureNode is not a uniform handle, which is
-      // the mistake that produced the 2026-07-16 black screen. Switching the
-      // displayed pack now requires rebuilding the material; setDisplayLayer is a
-      // debug-only mask view, so it is a tracked gap rather than a hot path.
-      u.worldSizePx.value.set(pack.table.worldWidthPx, pack.table.worldHeightPx);
-      // Only the albedo pack is a PICTURE; every other pack is a mask, i.e. data that
-      // must reach the shader byte-exact. See the sampler's srgbDecode.
-      u.srgbDecode.value = pack.name === 'albedo' ? 1 : 0;
-      // THE WHOLE MIP LAYOUT, in two integers. The shader derives every level's
-      // grid and origin from these (vt-sample.tsl.js's header explains why that is
-      // exact, and vt-core.test.mjs proves it against the real PageTable).
-      u.pages0.value.set(pack.table.pagesX(0), pack.table.pagesY(0));
-      u.maxMip.value = pack.table.maxMip;
-      u.requestedMip.value = pack.lastRequestedMip; // re-read every update (mip changes with zoom)
-      u.requestedMipFrac.value = pack.lastRequestedMipFraction;
-
-      const a = state.appearance;
-      const item = state.item;
-      const tint = item.tint ?? 0xffffff;
-      a.uTint.value.set(((tint >> 16) & 0xff) / 255, ((tint >> 8) & 0xff) / 255, (tint & 0xff) / 255);
-      a.uAlpha.value = item.alpha ?? 1;
-
-      // OCCLUSION weights (scene/occlusion.js — the ported model, with citations).
-      // `occluded` stays false until the mask producer exists to identify which
-      // items a token actually stands under; the weights are still computed from
-      // real document data, so wiring the producer in is purely additive.
-      const modes = item.occlusion?.modes ?? OCCLUSION_MODES.NONE;
-      const st = computeOcclusionState({
-        occlusionMode: modes,
-        occluded: state.occluded,
-        visionActive: occlusionMask.visionActive,
-        hoverFadeAmount: state.hoverFade.occlusion,
-      });
-      a.uOcclusionWeights.value.set(st.fade, st.radial, st.vision, st.surface);
-      a.uOcclusionElevation.value = mapElevation(occlusionMask.elevationTable, item.key.elevation);
-      a.uUnoccludedAlpha.value = 1;
-      a.uOccludedAlpha.value = item.occlusion?.alpha ?? 0;
-    }
 
     let lastItems = []; // exposed in diagnostics — the current sorted draw list
     // How many packs had their speculative tier declined this update (see
@@ -4476,36 +7721,18 @@ export async function startVtPanViewer({
         const onScreen = rectsOverlap(state.worldBounds, worldRect);
         const show = onScreen && (isolateItemId === '' || item.id === isolateItemId);
 
-        if (_wholeImageEnabled) {
-          // WHOLE-IMAGE PATH: load the art whole and draw it — NO page streaming
-          // at all (skipping the pack loop is the entire point: it is the upload
-          // churn that lost the device). displayLayer switching is a streaming-
-          // path debug feature; whole-image draws the albedo (item.src).
-          ensureWholeImageMeshes(state, item);
-          refreshWholeImageItem(state, item, show, changed);
-        } else {
-          // STREAMING PATH (the OFF fallback — MapShine.setWholeImageMode(false)).
-          // Stream EVERY pack — albedo AND every mask — through the ONE shared
-          // cache: all of an item's layers resident at once, each costing only
-          // its visible pages, never a world-resolution texture.
-          for (const pack of state.packs.values()) {
-            if (onScreen) {
-              await streamPackResidency(pack, state, worldRect);
-            } else {
-              for (const key of pack.residentViewKeys) cache.unpin(key);
-              pack.residentViewKeys = new Set();
-            }
-          }
-
-          ensureItemMesh(state);
-          const displayPack = state.packs.get(displayLayerName) ?? state.albedoPack;
-          bindMeshToPack(state, displayPack);
-          // Isolation is applied HERE, after every streaming decision above, so a
-          // hidden item still pages exactly as it would normally — see
-          // isolateItemId. `''` is the normal case and costs one string compare.
-          state.mesh.visible = show;
-          state.mesh.renderOrder = item.renderOrder; // from sortByLayer — THE law
-        }
+        // Load the art whole and draw it — no page streaming, no atlas upload
+        // churn (the fix for the WebGPU device loss). Masks still page through
+        // `state.packs`/the shared cache for their own coarse-pin decode
+        // (loadExtraLayerPacks), independent of this draw step.
+        ensureWholeImageMeshes(state, item);
+        refreshWholeImageItem(state, item, show, changed);
+        // VEGETATION CASE 2 — a separate overlay, alongside whatever the item's
+        // own art just did above. Cheap no-op for the overwhelming majority of
+        // items (a Map lookup that finds nothing — see ensureVegetationOverlay's
+        // own header) so this costs nothing on a scene with no sibling masks.
+        ensureVegetationOverlay(state, item);
+        refreshVegetationOverlay(state, item, show, changed);
       }
 
       lastItems = items;
@@ -4907,6 +8134,34 @@ export async function startVtPanViewer({
     async function setFloorIndex(floorIndex) {
       if (!view || view.floorIndex === floorIndex) return false;
       view = { ...view, floorIndex };
+      // WIND REBAKE ON FLOOR SWITCH (2026-07-23, live author report: on a
+      // real two-floor map, the floor BELOW kept reading the floor ABOVE's
+      // wall layout for wind purposes). `bakeWindField`'s per-floor wall
+      // scoping (see that function's own header) resolves `currentLevelIdFor
+      // Wind` fresh every time it runs — but nothing was ever calling it
+      // AGAIN when the floor itself changed. Its five pre-existing triggers
+      // ('startup'/'manual'/'wall:*'/'ambient-change'/'mask-change') all
+      // answer "did the WALLS or MASK change", never "did the VIEWED FLOOR
+      // change" — so the baked grid simply kept whatever the previous
+      // floor's bake left behind until one of those unrelated events
+      // happened to fire, which is exactly why this stayed invisible on
+      // every single-floor test (there is no other floor for it to go stale
+      // against) and only surfaced on the real multi-floor scene. This is
+      // the ONE place `view.floorIndex` changes after startup (verified: no
+      // other call site reassigns it), so it is the correct, complete
+      // chokepoint — every floor switch, whichever UI path triggered it
+      // (keyboard/digit key, debug panel, or boot.js's `canvasReady`
+      // same-scene sync), now re-derives the wall scoping. Synchronous and
+      // cheap enough to run unconditionally (same cost as any other rebake);
+      // `bakeWindField` never throws (catches and logs internally), so this
+      // cannot turn a floor switch into a hard failure.
+      bakeWindField('floor-change');
+      // The SKY's `_Outdoors` gate is per-floor for exactly the same reason the
+      // wind bake is: a cellar and the street above it have entirely different
+      // ideas about what is open sky. Leaving it stale would light the floor
+      // below through the floor above's windows — the same class of bug the
+      // wind rebake above was added to fix, and the same chokepoint fixes it.
+      bakeOutdoorsTexture(floorIndex);
       await scheduleResidencyUpdate();
       return true;
     }
@@ -5006,6 +8261,13 @@ export async function startVtPanViewer({
         allocator.resize(sceneIllum, drawBufW, drawBufH, describeSceneColor());
         allocator.resize(sceneLit, drawBufW, drawBufH, describeSceneColor());
         allocator.resize(sceneColoration, drawBufW, drawBufH, describeSceneColor());
+        // post.bloom's mip chain tracks the drawing buffer too — each mip a
+        // fixed fraction of it. setSize mutates the SAME texture object in place
+        // (as for scene.color above), so the composite material's baked
+        // texture(bloomMips[0/3].texture) nodes stay valid — no rebind needed.
+        for (let k = 0; k < BLOOM_MIP_COUNT; k++) {
+          allocator.resize(bloomMips[k], bloomMipW(k), bloomMipH(k), describeBloomMip(bloomMipW(k), bloomMipH(k)));
+        }
         rebindPresent();
         rebindLighting();
         // buf:occlusion tracks the drawing buffer too — same reasoning. No
@@ -5036,6 +8298,14 @@ export async function startVtPanViewer({
       halfSpanPx: Math.max(world.width, world.height) * 0.25,
     });
     targetHalfSpanPx = view.halfSpanPx; // eased-zoom target starts equal to the actual value — no zoom-on-load
+
+    // THE SKY'S GATE, baked NOW rather than waiting for the mask-version poll's
+    // "first observation" tick (pollMaskAuthorityForWindRebake, throttled to
+    // MASK_VERSION_POLL_INTERVAL_MS). That poll exists to catch a LIVE EDIT, not
+    // to discover a scene's masks in the first place — waiting on it here would
+    // leave the sky reading the fully-outdoors placeholder for up to that
+    // interval on every fresh load, for no reason.
+    bakeOutdoorsTexture(clampedInitialFloor);
 
     // THE INITIAL LOAD, walked explicitly so it can be REPORTED.
     //
@@ -5091,17 +8361,15 @@ export async function startVtPanViewer({
     // opens floor 0 this session. Other floors are prewarmed in the
     // background further below (non-blocking) so a later floor switch is
     // fast without holding up THIS floor's curtain.
-    if (_wholeImageEnabled) {
-      const compressing = initialItems
-        .map((item) => ({ item, wi: itemStates.get(item.id)?.wholeImage }))
-        .filter(({ wi }) => wi?.loadPromise);
-      if (compressing.length) {
-        onLoadProgress?.({ done: 0, total: compressing.length, detail: 'Compressing textures' });
-        for (let i = 0; i < compressing.length; i++) {
-          const { item, wi } = compressing[i];
-          await wi.loadPromise; // always resolves — see wi.loadPromise's own doc
-          onLoadProgress?.({ done: i + 1, total: compressing.length, detail: item.kind });
-        }
+    const compressing = initialItems
+      .map((item) => ({ item, wi: itemStates.get(item.id)?.wholeImage }))
+      .filter(({ wi }) => wi?.loadPromise);
+    if (compressing.length) {
+      onLoadProgress?.({ done: 0, total: compressing.length, detail: 'Compressing textures' });
+      for (let i = 0; i < compressing.length; i++) {
+        const { item, wi } = compressing[i];
+        await wi.loadPromise; // always resolves — see wi.loadPromise's own doc
+        onLoadProgress?.({ done: i + 1, total: compressing.length, detail: item.kind });
       }
     }
 
@@ -5135,6 +8403,117 @@ export async function startVtPanViewer({
       console.warn('[vt-pan-viewer] shader precompile failed — falling back to lazy compile:', err);
       shaderCompileMs = null;
     }
+
+    // THE INITIAL WIND BAKE (Wind.md Tier 1) — must run here, not earlier:
+    // bakeWindField's own rebuild-trigger code reaches for candleFlameMat/
+    // windOverlayMat (both declared with `let` further up, but AFTER the
+    // function itself is defined) — calling it before those declarations
+    // execute hits their temporal dead zone (a live ReferenceError, caught
+    // from an actual scene load). Windless by default (uWindDirectionDeg/
+    // uWindSpeed01 start at 0/0, matching DEFAULT_WIND), so a scene nobody
+    // has dialled wind into still bakes correctly to "no correction
+    // anywhere" — every candle/light/overlay material built from here on
+    // already has a bake to read, never a stale or missing one.
+    bakeWindField('startup');
+
+    // ------------------------------------------------------------------
+    // WIND DIAGNOSTIC PARTICLES (RENAMED from "ambient dust" 2026-07-22 —
+    // this is a debug-only wind visualization, off by default; see
+    // windParticlesEnabled/constructParticleEngineIfNeeded above) — the FIRST
+    // particle system built in this codebase (docs/planning/Particles.md
+    // §23). A real ambient-dust dressing effect is a separate, later feature
+    // that will reuse this same engine. createParticleEngine
+    // (effects/particles/particle-runtime.js) owns the arena
+    // + the TSL compute kernels + the ONE instanced billboard draw; here we only
+    // construct it, step it each frame (sims.particles — a direct renderer.compute,
+    // like tickWindSim), and draw its scene additively into scene.lit
+    // (surface.particles — runSurfaceParticlesPass). The world rect is set each
+    // frame from the live view; a mote that drifts outside it respawns at a
+    // fresh random point within it (an exit test, NOT a toroidal wrap — the
+    // first version used modulo-wrap and it clustered visibly on every zoom;
+    // see particle-runtime.js's own header, fix-6).
+    //
+    // CONSTRUCTED HERE, NOT EARLIER (fix-9, live-reported 2026-07-21) — the
+    // SAME reason bakeWindField itself had to move to this exact spot (see its
+    // own comment just above): a build-time input that "becomes real later"
+    // must be read AFTER it becomes real, or the reader is stuck with `null`
+    // forever. `bakedField`'s numeric constants (origin/cellSize/cols/rows) are
+    // baked into the compute kernel's graph as literal JS-time values, and
+    // `sampleWind`'s `if (bakedField)` branch is a JS-time check executed ONCE
+    // while the kernel is being BUILT — never a runtime GPU branch. The engine
+    // used to construct far earlier (near the candle-flame block), well BEFORE
+    // this line — so it captured `windBakedField` while it was STILL `null`,
+    // and the compiled kernel therefore never included wall-redirection AT
+    // ALL, for the entire session, no matter how many times the field was
+    // rebaked afterward. That is the actual root cause of "particles aren't
+    // using the wind correctly at all... same speed in high and low wind grid
+    // spaces" — the field's per-cell magnitude/direction variance (what makes
+    // one grid square differ from its neighbour) comes almost entirely from
+    // THIS baked correction, not from the (spatially uniform, by design)
+    // ambient bias term. Moving construction to here — after the startup bake,
+    // exactly where the comment above says every OTHER wind-reading material
+    // is safe to build — is the fix; a LATER rebake (a wall edit, an ambient
+    // change) still won't reach this already-built kernel, the same accepted
+    // limitation candle's own material lives with (Wind.md §9).
+    //
+    // fix-9's construction-ORDER lesson stayed true; the MECHANISM changed
+    // after it (fix-12, particle-runtime.js's own header): `bakedField`'s
+    // texture-sampling path turned out to read back as exactly zero from
+    // inside a compute shader in this renderer (proven only from fragment/
+    // vertex before), so the kernel now reads the handle's own raw cell arrays
+    // via a storage buffer instead — same construction-order requirement, no
+    // texture involved anymore.
+    // ------------------------------------------------------------------
+    // RELABELED + DEFERRED (2026-07-22, author request): this used to run
+    // unconditionally right here. It is now wrapped in a named function so
+    // setWindDiagnosticParticlesEnabled can call it LATER too, the first time
+    // a user actually opens the debug toggle — a scene where nobody ever
+    // does allocates no arena and compiles no kernel for this at all.
+    function constructParticleEngineIfNeeded() {
+      if (particleEngine) return; // already built — see particleEngine's own comment on why re-enabling never rebuilds.
+      particleEngine = createParticleEngine({
+        THREE,
+        system: WIND_DIAGNOSTIC_PARTICLES,
+        worldRect: { minX: 0, minY: 0, maxX: 1, maxY: 1 }, // placeholder; real rect set per frame in step()
+        zDepth: 0,
+        // THE SAME HANDLE the candle flame, the lights and the overlay read
+        // (Wind.md §5.1) — genuinely populated, because the startup bake just
+        // above already ran. It carries both halves this kernel needs: the live
+        // ambient uniform NODES (by reference, so a `setWindAmbient` change
+        // reaches the kernel next frame with no resync) and the RAW plain-array
+        // per-cell grid it uploads as a storage buffer to do its own
+        // nearest-cell lookup — rather than depending on texture sampling
+        // inside a compute shader, a path never exercised elsewhere in this
+        // codebase (the compute-spike proved storage buffers, not textures).
+        windHandle,
+        // GALE-FORCE CALIBRATION (author request) — Foundry's own real
+        // px-per-grid-distance-unit (e.g. "1 grid square = 1 meter" makes
+        // this literally px-per-meter), read ONCE at construction, same
+        // discipline as `runMaskOcclusionPass`/the light-mesh pass's own
+        // `readGridDistancePixels` calls (a scene's grid never changes
+        // mid-session). particle-runtime.js's own GALE_MPS uses this to turn
+        // windSpeed01 into an actual, physically-real world-px/sec ceiling.
+        pxPerMeter: readGridDistancePixels().distancePixels,
+      });
+    }
+    if (windParticlesEnabled) constructParticleEngineIfNeeded();
+
+    // WIND GUSTS — the ribbon-trail sibling of the diagnostic particles above,
+    // built the SAME way (after the startup bake, so its kernel captures a real
+    // baked grid, not the empty one it would see earlier). Reads the SAME
+    // handle, so the ribbons and the motes cannot end up in different winds.
+    function constructGustEngineIfNeeded() {
+      if (gustEngine) return; // already built — no dispose path to rebuild from.
+      gustEngine = createGustEngine({
+        THREE,
+        system: WIND_GUSTS,
+        worldRect: { minX: 0, minY: 0, maxX: 1, maxY: 1 }, // placeholder; real rect set per frame in step()
+        zDepth: 0,
+        windHandle,
+        pxPerMeter: readGridDistancePixels().distancePixels,
+      });
+    }
+    if (windGustsEnabled) constructGustEngineIfNeeded();
 
     loopActive = true;
     renderer.setAnimationLoop(renderFrame);
@@ -5177,7 +8556,7 @@ export async function startVtPanViewer({
         .then(async () => {
           for (const item of buildItems(f)) {
             const state = await ensureItemLoaded(item);
-            if (_wholeImageEnabled && adjacent) ensureWholeImageMeshes(state, item);
+            if (adjacent) ensureWholeImageMeshes(state, item);
           }
         })
         .catch((err) => console.warn(`[vt-pan-viewer] prewarm floor ${f} failed:`, err));
@@ -5259,6 +8638,31 @@ export async function startVtPanViewer({
 
     /** One distinct, high-contrast colour per probe point — index 1..3, wraps if ever called with more. */
     const PROBE_MARKER_COLORS = ['#ff3b30', '#34c759', '#0a84ff'];
+
+    // LIVE PROBE MARKER TRACKING (2026-07-22, author-reported: "old points
+    // become visible when using the tool... we don't need to track old
+    // points indefinitely"). Every container drawProbeMarkers creates is
+    // tracked here so a NEW probe session can wipe whatever the LAST one
+    // left on screen immediately, instead of waiting out its own 30s timer —
+    // without this, running the pixel/wind probe more than once inside 30s
+    // (routine during an actual debugging session) leaves stale markers from
+    // an earlier round visually overlapping the current one. Cleared at the
+    // START of every top-level probe entry point (armInteractivePixelProbe,
+    // runProbeOnPoints, armInteractiveWindProbe, runWindProbeOnPoints) — a
+    // NEW session always starts from a clean slate; markers still accumulate
+    // normally WITHIN one session (each interactive click adds one, via its
+    // own drawProbeMarkers call, same as before).
+    let liveProbeMarkerContainers = [];
+    function clearProbeMarkers() {
+      for (const el of liveProbeMarkerContainers) {
+        try {
+          el.remove();
+        } catch (err) {
+          log.error('probe marker cleanup failed — a stray DOM node may linger until its own 30s timeout:', err);
+        }
+      }
+      liveProbeMarkerContainers = [];
+    }
 
     /**
      * Draw numbered probe markers over the canvas for 30s — thin crosshair +
@@ -5357,7 +8761,15 @@ export async function startVtPanViewer({
         container.appendChild(wrap);
       }
       mount.host.appendChild(container);
-      setTimeout(() => container.remove(), 30000);
+      liveProbeMarkerContainers.push(container);
+      setTimeout(() => {
+        container.remove();
+        // Drop it from the tracking array too — clearProbeMarkers() would
+        // otherwise try to .remove() an already-removed node forever
+        // (harmless, since .remove() on a detached node is a no-op, but the
+        // array would grow unbounded over a long session).
+        liveProbeMarkerContainers = liveProbeMarkerContainers.filter((el) => el !== container);
+      }, 30000);
     }
 
     /**
@@ -5564,6 +8976,7 @@ export async function startVtPanViewer({
      * @param {Array<{x:number, y:number}>} points
      */
     async function runProbeOnPoints(points) {
+      clearProbeMarkers(); // a NEW probe session starts clean — see this file's own doc on liveProbeMarkerContainers
       const list = (Array.isArray(points) ? points : []).slice(0, PROBE_MARKER_COLORS.length);
       const results = [];
       const markers = [];
@@ -5618,6 +9031,7 @@ export async function startVtPanViewer({
      * @returns {Promise<Array<{x:number, y:number}>>}
      */
     function armInteractivePixelProbe(maxPoints = 3) {
+      clearProbeMarkers(); // a NEW probe session starts clean — see liveProbeMarkerContainers' own doc
       return new Promise((resolve) => {
         const points = [];
         let settled = false;
@@ -5654,16 +9068,196 @@ export async function startVtPanViewer({
       });
     }
 
+    /**
+     * THE WIND + PARTICLE PROBE (2026-07-21) — the pixel-probe's own pattern
+     * (`diag/pixel-probe.js`'s header: "the load-bearing instrument for 'the
+     * math is right but the picture is wrong'") applied to wind. Born from a
+     * live report this exact investigation could not settle by reasoning
+     * alone: interior rooms reading "awash with energy" right after Wind.md
+     * Tier 1.5 (wake turbulence) shipped, while exterior particles still
+     * glued to a windward wall. For each of up to `PROBE_MARKER_COLORS.length`
+     * world points, this reports BOTH ground truths side by side:
+     *   - the CPU-side bake's own decomposition (`diag/wind-probe.js#
+     *     decomposeWindAt`) — `openness` (0/1, geometry-only) and the
+     *     resulting `coherentTotal`, plus `paintedExposureForReference` (see
+     *     that function's own header for why this does NOT influence wind
+     *     — it is shown purely to contrast against `openness`) —
+     *     synchronous, no GPU round-trip, always "what SHOULD be true here."
+     *   - the ACTUAL nearest live particles' GPU state
+     *     (`effects/particles/particle-runtime.js#readbackNearestParticles`)
+     *     — "what the kernel ACTUALLY computed nearby," anchored to the
+     *     clicked point instead of a semi-random strided sample.
+     * A mismatch between the two is the same species of smoking gun that
+     * found fix-12/13 in the particle engine's own history — two independent
+     * sources of truth disagreeing points at a WIRING bug, not a tuning
+     * question.
+     *
+     * `maskLive` (2026-07-22, pre-rethink) — added after a live report showed
+     * a sealed room reading full painted exposure at the SAME point, even
+     * after the mask-driven rebake trigger (`pollMaskAuthorityForWindRebake`)
+     * landed. STALE POST-RETHINK: this cross-check no longer matters for WIND
+     * (the painted mask has zero influence on it now — that was the whole
+     * point), but it still answers a genuinely useful, separate question —
+     * "is the mask-authority cache fresh" — for shading/rain-occlusion, the
+     * mask's remaining real jobs. `maskLive` bypasses mask-authority's own
+     * cache entirely — a FRESH `mask-authority.sampleWorld('outdoors', ...)`
+     * call made right now, plus which floor was actually queried and whether
+     * THAT floor's mask was ever discovered at all.
+     *
+     * `layerLoadErrors` (2026-07-22) — added after `maskLive` itself showed
+     * `outdoorsIngested:false` despite a real discovered URL: discovery
+     * (finding a file) and a pack actually LOADING (fetch + decode) are
+     * separate steps, and `buildPack`'s own catch already records exactly
+     * this failure mode (`_active.getDiagnostics().layerLoadErrors`, the
+     * SAME data the "vt-pan-viewer-layers" debug report shows) — folded in
+     * here so the answer to "why didn't it ingest" doesn't need a second
+     * report. Global (not per-point) — the SAME array on every point.
+     *
+     * @param {Array<{x:number, y:number}>} points - world positions.
+     * @returns {Promise<Array<object>>}
+     */
+    async function runWindProbeOnPoints(points) {
+      clearProbeMarkers(); // a NEW probe session starts clean — see liveProbeMarkerContainers' own doc
+      const list = (Array.isArray(points) ? points : []).slice(0, PROBE_MARKER_COLORS.length);
+      const results = [];
+      const markers = [];
+      // PACK LOAD FAILURES (2026-07-22) — a live report showed a mask file
+      // genuinely discovered (a real URL) but never ingested (`maskLive.
+      // outdoorsIngested:false`). `_active.getDiagnostics().layerLoadErrors`
+      // is the EXISTING mechanism (vt-pan-viewer.js's own `buildPack` catch,
+      // already surfaced in the "vt-pan-viewer-layers" debug report) that
+      // records exactly this — a mask layer that threw while loading, with
+      // the real error message, per item. Folding it in here means the
+      // answer to "why didn't it ingest" is in the SAME pasteable report,
+      // not a second button to click. Called ONCE (not per point) —
+      // getDiagnostics() does a real GPU readback (gl.readPixels + a full
+      // indirection-buffer scan per its own doc), the same cost the
+      // existing debug button already pays, but it must never run per-point.
+      const layerLoadErrors = _active?.getDiagnostics ? (_active.getDiagnostics().layerLoadErrors ?? []) : [];
+      for (let i = 0; i < list.length; i++) {
+        const p = list[i] ?? {};
+        const index = i + 1;
+        let wind;
+        if (windHandle.hasBake) {
+          const ambient = ambientVectorFromWind({
+            directionDeg: uWindDirectionDeg.value,
+            speed01: uWindSpeed01.value,
+          });
+          wind = decomposeWindAt({
+            x: p.x,
+            y: p.y,
+            ambientX: ambient.x,
+            ambientY: ambient.y,
+            // The grid spec + the raw per-cell arrays, from the ONE handle —
+            // `decomposeWindAt` wants them as one flat object, which is a
+            // shape concern of the probe's own report, not a second copy of
+            // the data (there is only one array here, borrowed, never cloned).
+            openness: { ...windHandle.grid, ...windHandle.cells },
+            // Reference-only cross-check (2026-07-22, THE RETHINK) — the
+            // painted mask no longer influences wind AT ALL; this is here
+            // purely so a report can show "the paint says X but geometry
+            // says Y, and Y is what the wind actually does" side by side,
+            // the exact confusion the rethink exists to end.
+            paintedExposure: sampleWindExposureAt(p.x, p.y),
+          });
+        } else {
+          wind = { ok: false, reason: 'no wind bake has run yet' };
+        }
+        const particles = particleEngine
+          ? await particleEngine.readbackNearestParticles(renderer, p.x, p.y, 12)
+          : { ok: false, reason: 'particle engine not constructed yet (scene not loaded far enough)' };
+        // LIVE cross-check (2026-07-22) — see this function's own header for
+        // why: `wind.exposure` above is wind's CACHED snapshot; this is a
+        // FRESH mask-authority query made right now, at this exact point, so
+        // a report can tell "the cache is stale" apart from "the live value
+        // is ALSO this, so the cache isn't the problem" in one paste.
+        const maskLive = probeMaskAuthorityLiveAt(p.x, p.y);
+        results.push({ index, world: { x: p.x, y: p.y }, wind, particles, maskLive, layerLoadErrors });
+        const proj = worldToScreenPercent(p.x, p.y);
+        if (proj.onScreen) markers.push({ index, xPercent: proj.xPercent, yPercent: proj.yPercent });
+      }
+      drawProbeMarkers(markers);
+      return results;
+    }
+
+    /**
+     * THE INTERACTIVE WIND+PARTICLE PROBE — click-to-set points, mirroring
+     * `armInteractivePixelProbe` above STRUCTURALLY (same click-capture/
+     * timeout/marker-feedback shape) but kept as its OWN, separate function
+     * rather than a shared helper: that function is live, author-confirmed,
+     * working code this session cannot re-verify in a browser, and the
+     * duplication here is small and self-contained (CONVENTIONS.md §4 — do
+     * not refactor working GPU/DOM code you cannot test live for a marginal
+     * DRY gain). Same "never steals a click from Foundry" discipline: no
+     * `preventDefault`/`stopPropagation`, no touching `canvas.style.
+     * pointerEvents` (keyhole-input-model-decision).
+     *
+     * @param {number} [maxPoints=3]
+     * @returns {Promise<Array<{x:number, y:number}>>}
+     */
+    function armInteractiveWindProbe(maxPoints = 3) {
+      clearProbeMarkers(); // a NEW probe session starts clean — see liveProbeMarkerContainers' own doc
+      return new Promise((resolve) => {
+        const points = [];
+        let settled = false;
+        let timeoutId = null;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          window.removeEventListener('pointerdown', onPointerDown, true);
+          if (timeoutId) clearTimeout(timeoutId);
+          resolve(points);
+        };
+        const onPointerDown = (e) => {
+          const rect = canvas.getBoundingClientRect();
+          const worldRect = viewToWorldRect(view, canvasW / canvasH);
+          const ndc = clientToNdc(e.clientX, e.clientY, rect);
+          const world = ndcToWorld(ndc, worldRect);
+          const index = points.length + 1;
+          points.push(world);
+          drawProbeMarkers([
+            {
+              index,
+              xPercent: ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100,
+              yPercent: ((e.clientY - rect.top) / Math.max(1, rect.height)) * 100,
+            },
+          ]);
+          if (points.length >= maxPoints) finish();
+        };
+        window.addEventListener('pointerdown', onPointerDown, true);
+        timeoutId = setTimeout(finish, 90000);
+      });
+    }
+
     _active = {
       THREE,
       renderer,
-      atlas,
       canvas,
       onResize,
       itemStates,
       occlusionMask,
       cache,
-      layout,
+      /** GROUND TRUTH for particle-wind debugging: read the ACTUAL GPU particle
+       * velocities back and report whether they vary per-cell (the field is
+       * reaching the kernel) or are uniform (it is not). See
+       * particle-runtime.js#readbackVelocities. Async (a GPU readback). */
+      async getParticleReadback(n = 32) {
+        if (!particleEngine)
+          return { skipped: true, reason: 'particle engine not constructed (scene not loaded far enough)' };
+        return { ...particleEngine.debugState(), ...(await particleEngine.readbackVelocities(renderer, n)) };
+      },
+      /** Console-callable: probe the wind field + nearest particles at explicit
+       * world points (no click). See `runWindProbeOnPoints`'s own header. */
+      async probeWindAndParticles(points) {
+        return runWindProbeOnPoints(points);
+      },
+      /** Debug-panel/console-callable: arm click-to-set-point mode, then run the
+       * SAME wind+particle probe on whatever was clicked. See
+       * `armInteractiveWindProbe`'s own header. */
+      async runInteractiveWindProbe(maxPoints = 3) {
+        const points = await armInteractiveWindProbe(maxPoints);
+        return runWindProbeOnPoints(points);
+      },
       /** Perf lab: arm/disarm the gated GPU-completion probe (diag/gpu-probe.js). */
       setGpuProbe(on) {
         gpuProbe.setActive(on);
@@ -5697,12 +9291,97 @@ export async function startVtPanViewer({
         allocator.dispose(sceneIllum);
         allocator.dispose(sceneLit);
         allocator.dispose(sceneColoration);
+        for (const mip of bloomMips) allocator.dispose(mip);
         envLight.illumMaterial.dispose();
+        // THE SKY GATE - a real DataTexture (up to one texel per mask cell), so
+        // it leaks VRAM per scene switch if it is not freed with its materials.
+        outdoorsTexture?.dispose();
+        outdoorsTexture = null;
+        // The grade's identity LUT placeholder (a real Data3DTexture).
+        lutPlaceholder?.dispose?.();
+        presentMaterial.dispose?.();
         envLight.compositeMaterial.dispose();
+      },
+      /** Tear down scene.sunShadow + the bake material + the caster height
+       * texture (sun-shadow-subsystem.js's own dispose). */
+      disposeSunShadows() {
+        sunShadows.dispose();
       },
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,
+      /** Tear down every door leaf mesh + cached door texture (door-graphics.js). */
+      disposeDoorGraphics,
+      /** Wind field debug overlay (diag/wind-field-overlay.js, Wind.md Tier 0):
+       * arm/disarm the live arrow grid. Off by default. */
+      setWindFieldOverlayEnabled,
+      /** Wind DIAGNOSTIC particles (particle-runtime.js, relabeled from "ambient
+       * dust" 2026-07-22) — arm/disarm the mote cloud. Off by default; the
+       * companion visualization to the arrow overlay just above. */
+      setWindDiagnosticParticlesEnabled,
+      /** Wind Gusts (gust-runtime.js) — arm/disarm the ribbon-trail effect that
+       * whooshes through the windiest parts of the map. Off by default. */
+      setWindGustsEnabled,
+      /** 1..4 samples per grid square, per axis — a stress-testable preview
+       * of Wind.md's real fieldResolution knob. */
+      setWindFieldOverlayResolution,
+      /** Tear down the wind overlay's own mesh/material/geometry. */
+      disposeWindFieldOverlay,
+      /** Wind.md Tier 1 — set the live ambient direction/speed AND re-bake
+       * the structure correction to match (see setWindAmbient's own header). */
+      setWindAmbient,
+      /** THE DAY CLOCK (world/day-clock.js) — the astrolabe's control surface.
+       * `setTimeOfDay` snaps, `sweepTimeOfDay` walks there; `setTimeRate` is
+       * game-hours per real minute (0 = frozen, the default); `setTimeMode`
+       * picks 'aesthetic' (MSA owns the hour) or 'synced' (Foundry's world
+       * clock owns it). NONE of them writes `game.time` — see day-clock.js. */
+      setTimeOfDay,
+      sweepTimeOfDay,
+      setTimeRate,
+      setTimeMode,
+      /** Remove the `pauseGame`/`updateWorldTime` listeners — teardown only. */
+      disposeTimeWatches,
+      /** Alias for setTimeOfDay, kept so existing notes/habits still work. */
+      setSunHour,
+      /** Cloud cover 0..1 — a real authored value now (sky settings), feeding
+       * BOTH the sky light and the shadow handle from one number. */
+      setCloudCover,
+      /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
+      setSkyRealism,
+      /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
+       * desaturation). 0 = neutral. docs/planning/Grade.md. */
+      setGradeEnvStrength,
+      /** Rebuild the sky's `_Outdoors` gate for a floor (floor switch). */
+      bakeOutdoorsTexture,
+      /** Re-read walls/doors and re-bake without touching direction/speed —
+       * for after a live wall/door edit (no auto-invalidation hook yet). */
+      bakeWindField,
+      /** Wind.md Tier 2 — register a door-gust impulse from a wall segment
+       * (world px). See triggerWindDoorImpulse's own header. */
+      triggerWindDoorImpulse,
+      /** Perf-lab / debug override — force the transient sim to keep
+       * ticking regardless of active impulses, so its GPU cost is
+       * measurable through the normal sweep mechanism. */
+      setWindForceThaw,
+      /** A live status readout — thawed/frozen, active impulse count, and
+       * how much longer the sim will keep ticking — for the debug panel's
+       * own report action (feedback_instruments_must_not_lie: this must be
+       * a real read of the state above, never a guess). */
+      getWindSimStatus() {
+        const nowMs = uGlobalTimeMs.value;
+        return {
+          thawed: windForceThaw || nowMs < windThawUntilMs,
+          forcedThaw: windForceThaw,
+          activeImpulseCount: windActiveImpulses.length,
+          thawRemainingMs: Math.max(0, Math.round(windThawUntilMs - nowMs)),
+          gridCols: windHandle.grid?.cols ?? null,
+          gridRows: windHandle.grid?.rows ?? null,
+          windHandleVersion,
+          simMaterialsBuilt: !!windSimMaterials,
+        };
+      },
+      /** Tear down Tier 2's own ping/pong/publish RTs + solid mask + materials. */
+      disposeWindSim,
       /** Tear down every point-light mesh/material/geometry (see
        * disposeActive). Each light owns its OWN geometry (unlike occlusion
        * discs' shared circle), so geometry disposal happens here too. The
@@ -5977,6 +9656,31 @@ export async function startVtPanViewer({
         ranLastFrame: lastFramePlanRan,
       }),
 
+      /**
+       * THE DIAL STATE — a lean, per-frame read for the astrolabe, kept
+       * separate from `getEnvSnapshotInfo` below on purpose: that one assembles
+       * the whole Diagnostics blob (fresh Foundry reads, the shadow atmosphere,
+       * source/reason strings) and the dial repaints every frame. Nine numbers,
+       * all already computed, no allocation beyond the literal.
+       * `null` before the first frame — the caller simply skips a repaint.
+       */
+      getTimeDialState: () => {
+        if (!lastEnvSnapshot) return null;
+        const { env, dayClock: clock } = lastEnvSnapshot;
+        return {
+          todHour: env.time.todHour,
+          phase: env.sun.phase,
+          rising: env.sun.rising,
+          mode: clock?.mode ?? 'aesthetic',
+          canSetHour: clock?.canSetHour !== false,
+          rateHoursPerMinute: clock?.rateHoursPerMinute ?? 0,
+          windDirectionDeg: env.wind.directionDeg,
+          windSpeed01: env.wind.speed01,
+          timeScale: lastEnvSnapshot.timeScale ?? 1,
+          paused: lastEnvSnapshot.paused === true,
+        };
+      },
+
       /** frame.snapshot's real res:env third, live — for the Diagnostics
        * report. `status:'future'` here mirrors graph/passes.js's own status
        * for this pass: res:view/res:scene are not built, so the pass as
@@ -5992,6 +9696,64 @@ export async function startVtPanViewer({
           ambientSource: lastEnvSnapshot.ambient?.source ?? null,
           ambientReason: lastEnvSnapshot.ambient?.reason ?? null,
           todHourSource: lastEnvSnapshot.todHourSource,
+          // THE DAY CLOCK + THE PAUSE RAMP — reported so "why is nothing
+          // moving" and "why is the sun there" are answerable from one report.
+          // `foundryPaused` is read fresh rather than remembered: if it and
+          // `timeScale` ever disagree for longer than the ramp, the watch has
+          // come unhooked, and a report that could not show that would be a
+          // lying instrument.
+          dayClock: lastEnvSnapshot.dayClock ?? null,
+          timeScale: lastEnvSnapshot.timeScale ?? null,
+          simPaused: lastEnvSnapshot.paused ?? null,
+          foundryPaused: readGamePaused(),
+          pauseRampSeconds: DEFAULT_PAUSE_RAMP_SEC,
+          // THE SKY THE SHADOW HANDLE RESOLVED (2026-07-23) — the SAME
+          // atmosphere every caster reads, surfaced so "why is that shadow so
+          // soft" is answerable from one report instead of by guessing. The
+          // source fields name whether a value is a real input or a debug lever,
+          // so a lever can never be mistaken for a real source.
+          cloudSource: lastEnvSnapshot.cloudSource ?? null,
+          shadowAtmosphere: lastEnvSnapshot.shadow ?? null,
+          // THE SKY LIGHT (docs/planning/Sky.md), reported in full because "is
+          // it doing anything" was previously answerable only by eyeballing the
+          // rendered map — and a report that cannot show a mis-wired feature is
+          // indistinguishable from one confirming it works
+          // (feedback_instruments_must_not_lie). Four independent questions,
+          // each of which can fail alone:
+          //   1. is the gate even COMPILED into the shader (skyGateCompiled) —
+          //      false only if the viewer started with no outdoorsTexture at
+          //      all, which never happens today (always at least the placeholder).
+          //   2. did a REAL mask ever load, or is it still the 1×1 fully-
+          //      outdoors placeholder (outdoorsBake — `null` = never attempted,
+          //      `ok:false` = the mask authority threw or returned nothing,
+          //      `ok:true` = a real grid is bound, with its cols/rows/rect).
+          //   3. what NUMBER the handle currently computes
+          //      (ambientMultiplierRgb) — at realism 0 it MUST read exactly
+          //      [1,1,1]; if realism is >0 and it still reads that, the lever
+          //      never reached the handle.
+          //   4. what the lever/weather inputs actually WERE this frame.
+          sky: {
+            realism01: skyRealism01,
+            cloudCover01: lastEnvSnapshot.env.weather.cloudCover01,
+            ambientMultiplierRgb: skyHandle.ambientMultiplierRgb,
+            neutral: skyHandle.neutral,
+            gateCompiled: envLight.skyGateCompiled,
+            outdoorsBake: lastOutdoorsBakeResult,
+          },
+          // THE GRADE (docs/planning/Grade.md) — the env grade RESOLVED this
+          // frame (so "is the cloud desaturation actually happening" is one
+          // read: saturation<1 under cloud means yes), its strength lever, the
+          // artistic look, and whether the outdoor gate compiled. Same
+          // instruments-must-not-lie bar as the sky block above.
+          grade: {
+            envStrength: gradeEnvStrength,
+            envResolved: scaleGradeToIdentity(resolveEnvGrade(lastEnvSnapshot.env), gradeEnvStrength),
+            // The artistic (Look) grade effect: on/off + its tone-map curve, so
+            // "is a film response active" is answerable from the report.
+            artEnabled: getGradeLookState()?.enabled === true,
+            artToneMapping: getGradeLookState()?.params?.toneMapping ?? null,
+            gateCompiled: gradePresent.gateCompiled,
+          },
           notYetBuilt: ['res:view', 'res:scene'],
         };
       },
@@ -6085,6 +9847,11 @@ export async function startVtPanViewer({
               uColorationAlpha: entry.uColorationAlpha.value,
               uLightColor: [entry.uLightColor.value.x, entry.uLightColor.value.y, entry.uLightColor.value.z],
               hasColor: entry.lastHasColor,
+              // SHADOW (2026-07-21) — this light's real LightData `shadows`
+              // field, now actually reaching the shader. 0 = untouched; a GM
+              // raising it should show up here matching what they set in
+              // Foundry's own Light Config, proving the plumbing (not a guess).
+              uShadows: entry.uShadows.value,
               // PER-LIGHT region-aware ambient (2026-07-19) — what THIS
               // light's own uBackgroundColor/uDim/uBright ACTUALLY read this
               // frame, not a recomputed guess. If a light sits inside a
@@ -6105,15 +9872,24 @@ export async function startVtPanViewer({
               // is still just "the first active light this pass"), so a
               // caller checking a SPECIFIC animation should read
               // animationSummary.builtByType below instead.
+              //
+              // GPU-ONLY (2026-07-20): `time`/flicker-noise/pulse-wave are
+              // now computed ENTIRELY in-shader — there is no CPU `.value`
+              // left to report for them (this is the whole point of the
+              // rework: less CPU work, not just moved reporting). What's
+              // still CPU-visible is exactly the raw config this pool DOES
+              // write: uGlobalTimeMs (the shared clock — confirms it's
+              // ticking) and this light's own speed/seed/intensity.
               animation:
                 entry.animationType && entry.animationEntry
                   ? {
                       type: entry.animationType,
-                      cpuDriver: entry.animationEntry.cpuDriver,
+                      quality: entry.animationQuality ?? 0,
                       forceDefaultColor: entry.animationEntry.forceDefaultColor,
-                      uTime: entry.animIllumUniforms?.uTime?.value ?? entry.animColorUniforms?.uTime?.value ?? null,
-                      uBrightnessPulse: entry.animIllumUniforms?.uBrightnessPulse?.value ?? null,
-                      uPulse: entry.animColorUniforms?.uPulse?.value ?? null,
+                      uGlobalTimeMs: uGlobalTimeMs.value,
+                      uSpeedRaw: entry.uIllumSpeedRaw?.value ?? entry.uColorSpeedRaw?.value ?? null,
+                      uSeed: entry.uIllumSeed?.value ?? entry.uColorSeed?.value ?? null,
+                      uIntensityRaw: entry.uIllumIntensityRaw?.value ?? entry.uColorIntensityRaw?.value ?? null,
                     }
                   : null,
             };
@@ -6628,7 +10404,6 @@ export async function startVtPanViewer({
 
         return {
           view,
-          layout,
           // buf:scene.color — the first real render target, and the proof that
           // Keyhole's law is IN THE PATH rather than merely imported. If
           // `throughAllocator` is ever false, the law has been routed around.
@@ -6783,7 +10558,6 @@ export async function startVtPanViewer({
               });
             }
             return {
-              enabled: _wholeImageEnabled,
               textureLimit,
               itemCount: perItem.length,
               ready,
@@ -6791,8 +10565,7 @@ export async function startVtPanViewer({
               approxVramMB: +(totalBytes / (1024 * 1024)).toFixed(1),
               bitmapsFreed: freed,
               bitmapsRetained: retained,
-              atlasStillAllocatedMB: atlas ? +(layout.totalBytes / (1024 * 1024)).toFixed(1) : 0,
-              estTextureVramMB: +((totalBytes + (atlas ? layout.totalBytes : 0)) / (1024 * 1024)).toFixed(1),
+              estTextureVramMB: +(totalBytes / (1024 * 1024)).toFixed(1),
               // PROJECTION (not yet applied): what these exact floors would occupy
               // as GPU-compressed textures. The device dies ~2.5GB uncompressed
               // (estTextureVramMB); compressed, both floors fit well under 1GB —
@@ -6807,25 +10580,38 @@ export async function startVtPanViewer({
                 appliedItems: appliedCount,
                 worker: getCompressedTextureStats(), // requests/bc1/bc7/failed/cached
               },
+              // THE ART-OPACITY SEAM (2026-07-24). `delivered` is the number
+              // that matters: it is the count of items the mask authority can
+              // derive cover from, and it was structurally ZERO from the
+              // streaming engine's retirement until this landed. If sky-reach
+              // shadows or rain-under-a-bridge look wrong, read this FIRST —
+              // requested-but-not-delivered is a load problem, never-requested
+              // is a wiring problem, and they need different fixes.
+              coarseAlpha: { ...alphaGridStats },
+              // SUN SHADOWS (docs/planning/Sun-Shadows.md) — the caster field
+              // and the last march, verbatim. Read by boot's `sun-shadows`
+              // report, which is where the interpretation lives.
+              sunShadows: {
+                compiled: envLight.sunShadowCompiled,
+                ...sunShadows.getStatus(),
+              },
               interpretation:
-                'Whole-image mode draws each item as plain texture(s) with NO page streaming — the fix ' +
-                'for the upload-churn device loss. Per item, status is loading|ready|error (error names ' +
+                'Every item draws as plain whole texture(s) with NO page streaming — the fix ' +
+                'for the upload-churn device loss (the streaming/virtual-texture engine this replaced ' +
+                'was removed 2026-07-22 — see feedback_mode_forks_silently_drop_features; there is no ' +
+                'other mode any more). Per item, status is loading|ready|error (error names ' +
                 'the failed src). grid "1×1 (whole)" = one texture (a 12000² floor at the 16384 cap); ' +
                 '"2×2" = the quarter-split fallback on a smaller texture limit. tilesDecoded < ' +
                 'tilesPlanned mid-load is normal; staying below it, or status:error, is a LOAD failure ' +
-                '(check src/error). enabled:false = reverted to streaming via ' +
-                'MapShine.setWholeImageMode(false). CRUCIAL: if the screen is BLACK yet every item is ' +
+                '(check src/error). CRUCIAL: if the screen is BLACK yet every item is ' +
                 'status:ready + visible:true, it is NOT a load failure — the quads are drawing wrong ' +
                 '(offscreen placement, a Y-flip, or a colorSpace/sample bug); that is a geometry/shader ' +
-                'issue, not a decode one. errors>0 with the streaming path idle means those items show ' +
-                'nothing at all. MEMORY (the floor-switch device-loss hunt, 2026-07-18): bitmapsFreed ' +
+                'issue, not a decode one. MEMORY (the floor-switch device-loss hunt, 2026-07-18): bitmapsFreed ' +
                 'is decoded CPU bitmaps closed right after GPU upload; bitmapsRetained MUST stay 0 — a ' +
                 'nonzero value means a ~w·h·4 bitmap (576 MB for a 12000² tile) is still held alongside ' +
                 'its GPU copy, the exact doubling that blew the memory ceiling. estTextureVramMB is the ' +
-                'honest texture bill: whole-image textures PLUS atlasStillAllocatedMB. As of 2026-07-18 ' +
-                'the 512MB streaming atlas is NO LONGER allocated in whole-image mode (atlasStillAllocatedMB ' +
-                'should read 0) — we now carry ONLY the floor textures, matching Foundry PIXI. estTextureVramMB ' +
-                'is now honest PER FORMAT: opaque items are BC1 (8× smaller), alpha items BC7 (4×), raw only ' +
+                'honest whole-image texture bill (no atlas exists any more to add on top). It is honest ' +
+                'PER FORMAT: opaque items are BC1 (8× smaller), alpha items BC7 (4×), raw only ' +
                 'if compression was unavailable. Uncompressed, both floors full-res is ~2.75 GB (the old ' +
                 'device-loss trigger); with BC1+BC7 the same scene is ~0.5 GB — the `compressed` block shows ' +
                 'the reference projections. If estTextureVramMB still climbs toward ~2.5 GB, compression is ' +
@@ -7067,6 +10853,17 @@ export async function runOrientationSelfTest() {
   return _active.runOrientationSelfTest();
 }
 
+/**
+ * GROUND TRUTH for particle-wind debugging (docs/planning/Particles.md §23) —
+ * reads the ACTUAL GPU particle velocities back and reports whether they vary
+ * per-cell (the wind field is reaching the compute kernel) or are uniform (it
+ * is not, only the ambient bias is). The answer that ends the guessing.
+ */
+export async function getParticleReadback(n = 32) {
+  if (!_active) return { skipped: true, reason: 'viewer not started — start it, then run this' };
+  return _active.getParticleReadback(n);
+}
+
 export async function setVtPanViewerFloor(floorIndex) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   const changed = await _active.setFloorIndex(floorIndex);
@@ -7087,6 +10884,265 @@ export function setVtPanViewerGpuProbe(on) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   _active.setGpuProbe(on);
   return { gpuProbe: getVtPanViewerDiagnostics().gpuProbe };
+}
+
+/**
+ * Arm/disarm the wind field debug overlay (diag/wind-field-overlay.js,
+ * Wind.md Tier 0) — a live grid of arrows over the current view, each
+ * sampling the SAME `sampleWind()` the candle flame/light already read. Off
+ * by default. No-op `{skipped:true}` if nothing is running.
+ * @param {boolean} on
+ */
+export function setVtPanViewerWindOverlay(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setWindFieldOverlayEnabled(on);
+  return { enabled: !!on };
+}
+
+/**
+ * Arm/disarm the wind DIAGNOSTIC particle cloud (particle-runtime.js,
+ * relabeled from "ambient dust" 2026-07-22 — this is a debug visualization,
+ * not the mansion's future ambient-dust dressing effect). Off by default;
+ * the companion to setVtPanViewerWindOverlay just above. No-op
+ * `{skipped:true}` if nothing is running.
+ * @param {boolean} on
+ */
+export function setVtPanViewerWindDiagnosticParticles(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setWindDiagnosticParticlesEnabled(on);
+  return { enabled: !!on };
+}
+
+/**
+ * Arm/disarm WIND GUSTS (effects/particles/gust-runtime.js) — a small population
+ * of ribbon-trail "wind snakes" that appear only where the wind flow is genuinely
+ * fast (open gales + funnel pinch-points), more and stronger as the wind rises.
+ * A real atmospheric dressing effect, distinct from the diagnostic particle
+ * cloud. Off by default. No-op `{skipped:true}` if nothing is running.
+ * @param {boolean} on
+ */
+export function setVtPanViewerWindGusts(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setWindGustsEnabled(on);
+  return { enabled: !!on };
+}
+
+/**
+ * Set the wind overlay's real-cell stride — 1..4 (2026-07-23, REPURPOSED:
+ * the overlay now samples the ACTUAL wind-bake grid directly, so 1 shows
+ * every real cell exactly and 2..4 deliberately declutters by skipping
+ * cells, rather than sub-sampling FINER than the real data ever was).
+ * No-op `{skipped:true}` if nothing is running.
+ * @param {number} multiplier
+ */
+export function setVtPanViewerWindOverlayResolution(multiplier) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setWindFieldOverlayResolution(multiplier);
+  return { resolution: multiplier };
+}
+
+/**
+ * Set Wind.md Tier 1's live ambient direction/speed and re-bake the
+ * structure correction to match. No-op `{skipped:true}` if nothing is running.
+ * @param {number} directionDeg @param {number} speed01
+ */
+export function setVtPanViewerWindAmbient(directionDeg, speed01) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setWindAmbient(directionDeg, speed01);
+  return { directionDeg, speed01 };
+}
+
+/**
+ * Set the hour of day (0..24), or `null` to reset to noon. Since 2026-07-23
+ * this drives the REAL day clock (`world/day-clock.js`), not a debug lever over
+ * an acknowledged gap — the sun, every shadow's direction and softness, the
+ * ambient palette and the scene darkness all follow it.
+ *
+ * Returns `accepted: false` in `synced` mode, where Foundry's world clock is
+ * the sole authority. Failing visibly beats moving a number that the next
+ * `updateWorldTime` would silently overwrite.
+ * @param {number|null} hour
+ */
+export function setVtPanViewerSunHour(hour) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setSunHour(hour);
+}
+
+/**
+ * A 1×1 fully-outdoors texture — the sky light's gate before any real mask has
+ * streamed in. Module scope rather than inline so the "why a placeholder at
+ * all" reasoning has one home (see its call site: the materials are built once,
+ * at startup, long before a mask exists).
+ * @param {*} THREE @returns {*}
+ */
+function makeOutdoorsPlaceholderTexture(THREE) {
+  const tex = new THREE.DataTexture(
+    new Uint8Array([255, 255, 255, 255]),
+    1,
+    1,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType
+  );
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * A 2³ identity 3D LUT texture — the placeholder the Colour Grade's LUT sampler
+ * always compiles against, so `setLut` can later swap in a real `.cube` without
+ * a shader rebuild. An identity LUT is a mathematical no-op, so it is invisible
+ * until a real look is bound. `FloatType` + `LinearFilter` relies on the
+ * `float32-filterable` WebGPU feature (present per the env diagnostics).
+ * @param {*} THREE @returns {*}
+ */
+function makeIdentityLutTexture(THREE) {
+  const { size, data } = identityCubeLut(2);
+  const tex = new THREE.Data3DTexture(data, size, size, size);
+  tex.format = THREE.RGBAFormat;
+  tex.type = THREE.FloatType;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.wrapR = THREE.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** Scalar lerp — for tinting a grade channel toward a picked colour. */
+function mix1(a, b, t) {
+  return a + (b - a) * t;
+}
+
+/**
+ * The astrolabe's per-frame read: hour, sky phase, clock mode, wind, and the
+ * pause ramp. `null` before the first frame. Cheap by design — see
+ * `getTimeDialState`'s own note for why it is not `getEnvSnapshotInfo`.
+ */
+export function getVtPanViewerTimeDialState() {
+  return _active?.getTimeDialState?.() ?? null;
+}
+
+/**
+ * THE SKY-LIGHT LEVER, 0..1 (docs/planning/Sky.md §8). `0` — the default — makes
+ * the outdoor light a mathematical no-op, so the pixel-identical-to-Foundry
+ * parity check holds exactly. `1` is the full atmospheric model: the key/fill
+ * colour split and the time-of-day recolouring of the outdoor light. (The cloud
+ * DESATURATION is no longer here — a light cannot drain chroma; it is the
+ * environmental grade's job, `setVtPanViewerGradeEnvStrength`.) Same proven
+ * shape as `setDarknessRealism`.
+ * @param {number} realism01
+ */
+export function setVtPanViewerSkyRealism(realism01) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setSkyRealism(realism01);
+}
+
+/**
+ * THE ENVIRONMENTAL GRADE strength, 0..1 (docs/planning/Grade.md). The
+ * automatic ToD/weather look — and the cloud desaturation the sky light can't
+ * do (a grade drains chroma luminance-preservingly; a light cannot). `0` =
+ * neutral, the default.
+ * @param {number} strength01
+ */
+export function setVtPanViewerGradeEnvStrength(strength01) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setGradeEnvStrength(strength01);
+}
+
+/**
+ * Sweep to an hour rather than snapping — the astrolabe's time-stop buttons.
+ * @param {number} hour
+ */
+export function sweepVtPanViewerTimeOfDay(hour) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.sweepTimeOfDay(hour);
+}
+
+/**
+ * Set how fast time of day drifts, in game-hours per real minute. `0` (the
+ * default) freezes it. Aesthetic mode only — in `synced` mode Foundry's clock
+ * is the only thing that moves the hour.
+ * @param {number} hoursPerMinute
+ */
+export function setVtPanViewerTimeRate(hoursPerMinute) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setTimeRate(hoursPerMinute);
+}
+
+/**
+ * Choose which clock owns time of day: `'aesthetic'` (MSA's own, the dial
+ * drives it, Foundry's clock untouched and unread) or `'synced'` (Foundry's
+ * world clock drives it and the dial goes read-only). Neither mode ever WRITES
+ * `game.time` — see `world/day-clock.js`'s header for why that is structural.
+ * @param {string} mode
+ */
+export function setVtPanViewerTimeMode(mode) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setTimeMode(mode);
+}
+
+/**
+ * Cloud cover 0..1, or `null` for the clear-sky default. Since 2026-07-23 this
+ * is a real authored value (`world/sky-settings.js`, per-world or per-scene),
+ * not a debug lever over an acknowledged gap — it drives both the sky light's
+ * colour/veil and the shadow handle's softening/fading from one number.
+ * @param {number|null} cover01
+ * @param {string} [source] - who is calling; `'sky-settings'` from the real
+ *   pump (boot.js), left at the default for a direct console/test call. See
+ *   `setCloudCover`'s own doc for why the label matters.
+ */
+export function setVtPanViewerCloudCover(cover01, source) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setCloudCover(cover01, source);
+}
+
+/**
+ * Re-read walls/doors and re-bake Wind.md Tier 1's structure correction,
+ * WITHOUT touching the live direction/speed — for the manual debug "Rebake"
+ * action AND for boot.js's automatic wall/door-change watcher
+ * (`foundry/scene-walls.js#watchSceneWallStructure`). No-op `{skipped:true}`
+ * if nothing is running.
+ *
+ * @param {string} [triggerReason] - stamped into the resulting log line as
+ *   WHY this bake ran (`bakeWindField`'s own `reason` param) — defaults to
+ *   'manual' (the debug button's own case) so every OTHER caller must name
+ *   itself explicitly rather than silently reusing that label.
+ */
+export function rebakeVtPanViewerWindField(triggerReason = 'manual') {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.bakeWindField(triggerReason);
+}
+
+/**
+ * Wind.md Tier 2 — register a door-gust impulse from a wall segment (world
+ * px). No-op `{skipped:true}` if nothing is running.
+ * @param {{x1:number,y1:number,x2:number,y2:number}} wallSegment
+ */
+export function triggerVtPanViewerWindDoorImpulse(wallSegment) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.triggerWindDoorImpulse(wallSegment);
+}
+
+/**
+ * Perf-lab / debug override — force Tier 2's sim to keep ticking regardless
+ * of active impulses. No-op `{skipped:true}` if nothing is running.
+ * @param {boolean} on
+ */
+export function setVtPanViewerWindForceThaw(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setWindForceThaw(on);
+  return { forcedThaw: !!on };
+}
+
+/**
+ * Wind.md Tier 2's live status — thawed/frozen, active impulse count, thaw
+ * time remaining. `{skipped:true}` if nothing is running (never a guessed
+ * "frozen").
+ */
+export function getVtPanViewerWindSimStatus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getWindSimStatus();
 }
 
 /**
@@ -7156,6 +11212,32 @@ export async function probeVtPanViewerPixels(points) {
 export async function runInteractiveVtPanViewerPixelProbe(maxPoints = 3) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.runInteractivePixelProbe(maxPoints);
+}
+
+/**
+ * Console-callable wrapper for `_active.probeWindAndParticles` — the
+ * wind+particle probe's own header (`runWindProbeOnPoints` inside
+ * startVtPanViewer) has the full reasoning. Call as
+ * `await MapShine.probeWindAndParticles([{x, y}, ...])`.
+ * @param {Array<{x:number, y:number}>} points - up to 3 world positions.
+ */
+export async function probeVtPanViewerWindAndParticles(points) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.probeWindAndParticles(points);
+}
+
+/**
+ * Console/debug-panel-callable wrapper for `_active.runInteractiveWindProbe`
+ * — arms click-to-set-point mode (`armInteractiveWindProbe`'s own header)
+ * and resolves with, for each clicked point, BOTH the CPU-side wind-field
+ * decomposition (ambient/structure/wake/exposure/enclosed) AND the nearest
+ * real particles' actual GPU state — the click-to-probe cousin of
+ * `MapShine.armPixelProbe`, built for wind/particle debugging specifically.
+ * @param {number} [maxPoints=3]
+ */
+export async function runInteractiveVtPanViewerWindProbe(maxPoints = 3) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.runInteractiveWindProbe(maxPoints);
 }
 
 /**

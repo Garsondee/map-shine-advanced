@@ -138,4 +138,40 @@ export const PASS_IMPLS = Object.freeze({
       'graph/fullscreen-present.js (GLSL, unusable under WebGPURenderer). Same invocability caveat ' +
       'as geometry.world.',
   },
+  'sims.particles': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-07-21 (first slice: ambient dust): createParticleEngine (effects/particles/' +
+      'particle-runtime.js) dispatches the TSL update kernel via a DIRECT renderer.compute() in ' +
+      "renderFrame, right after tickWindSim — the sims stage is out of framePlan's range, so this is " +
+      'driven like the wind sim, not by runPassPlan. Not separately invocable: the loop lives inside ' +
+      'startVtPanViewer, same caveat as geometry.world.',
+  },
+  'surface.particles': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-07-21 (first slice: ambient dust): runSurfaceParticlesPass (a closure inside ' +
+      'startVtPanViewer, in the local passImpls map runPassPlan walks) draws the engine scene — one ' +
+      'InstancedBufferGeometry, positions straight from the arena — additively into scene.lit, guarding ' +
+      'the clear like the candle flame. Same invocability caveat as geometry.world.',
+  },
+  'post.bloom': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-07-23: runPostBloomPass (a closure inside startVtPanViewer, in the local ' +
+      'passImpls map runPassPlan walks) reads scene.lit, runs the dual-filter bloom pyramid through ' +
+      'allocator-owned mip targets (effects/bloom-render.js builds the TSL), and additively composites ' +
+      'the two-band result back into scene.lit before present. Skips entirely (JS early-return, no GPU ' +
+      'work) when the effect is disabled. Same invocability caveat as geometry.world — the loop lives ' +
+      'inside startVtPanViewer.',
+  },
 });

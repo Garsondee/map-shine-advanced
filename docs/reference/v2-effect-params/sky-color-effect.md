@@ -22,13 +22,13 @@ Use the controls here for downstream light tinting and exported environment stre
 
 ### Sky exports
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Tint Sun Lights | `skyTintDarknessLightsEnabled` | boolean |  | true |  |
-| Sun Light Tint Intensity | `skyTintDarknessLightsIntensity` | slider | 0 … 5 | 4.27 |  |
+| Control                  | id                               | Type    | Range | Default | Notes |
+| ------------------------ | -------------------------------- | ------- | ----- | ------- | ----- |
+| Tint Sun Lights          | `skyTintDarknessLightsEnabled`   | boolean |       | true    |       |
+| Sun Light Tint Intensity | `skyTintDarknessLightsIntensity` | slider  | 0 … 5 | 4.27    |       |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | true | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | true    | hidden |

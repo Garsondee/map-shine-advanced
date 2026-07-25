@@ -2,8 +2,18 @@
  * THE DOOR to effects/ — every pass door and (eventually) every effect
  * declaration crosses this threshold or does not cross at all.
  */
-export { registerParticleSystem, buildParticlePass, stepParticles } from './particles/particle-engine.js';
 export { validateParticleSystem, EMITTER_SHAPES, BEHAVIORS, SPAWN_KINDS } from './particles/particle-system-schema.js';
+export {
+  ParticleArena,
+  describeParticleArena,
+  PARTICLE_ATTRIBUTES,
+  BYTES_PER_PARTICLE,
+  DEFAULT_BUDGET_BYTES,
+} from './particles/particle-arena.js';
+export { createParticleEngine } from './particles/particle-engine.js';
+export { WIND_DIAGNOSTIC_PARTICLES } from './particles/wind-diagnostic-particles.js';
+export { createGustEngine } from './particles/particle-engine.js';
+export { WIND_GUSTS } from './particles/wind-gusts.js';
 export { buildLightVisibilityPass } from './lighting/lighting-pass.js';
 export {
   SUN_VISIBILITY_LIT,
@@ -20,7 +30,33 @@ export {
   mapWindowRectToStamp,
   buildUiShadowVisibility,
   MAX_UI_SHADOW_STAMPS,
+  softenThrowPx,
 } from './lighting/light-visibility.js';
+// SUN OCCLUSION (docs/planning/Sun-Shadows.md) — building, overhead and
+// sky-reach shadows as ONE occluder height field read by ONE march. The pure
+// maths; `sun-occlusion-render.js` is its TSL transcription.
+export {
+  marchDirectionToSun,
+  marchVisibility,
+  marchStepPx,
+  marchPenumbraPx,
+  maxThrowPx,
+  sunNeedsRebake,
+  angleDeltaDeg,
+  edgeRamp01,
+  resolveSunMarch,
+  sharpenReceiverGate01,
+  DEFAULT_MARCH_STEPS,
+  PENUMBRA_PER_PX,
+  GATE_SHARPEN_LOW,
+  GATE_SHARPEN_HIGH,
+} from './lighting/sun-occlusion.js';
+export { buildSunShadowBakeMaterial, buildSunVisibilityNode } from './lighting/sun-occlusion-render.js';
+export {
+  createSunShadowSubsystem,
+  SUN_SHADOW_FIELD_DIM,
+  SUN_SHADOW_MARCH_STEPS,
+} from './lighting/sun-shadow-subsystem.js';
 export {
   buildEnvironmentalLightMaterials,
   computeAmbientBackground,
@@ -44,10 +80,10 @@ export { buildPointLightColorationMaterial, computeColorationAlpha } from './lig
 // docs/reference/foundry-v14-light-animations-audit.md) ─────────────────────
 export { LIGHT_ANIMATIONS, KNOWN_DEFERRED_ANIMATIONS, resolveLightAnimation } from './lighting/animations/registry.js';
 export {
-  computeAnimationTime,
-  SmoothNoise,
-  computeFlickerUniforms,
-  computePulseUniforms,
+  buildAnimationTimeNode,
+  buildFlickerNode,
+  buildFlickerRatioNode,
+  buildPulseNode,
 } from './lighting/animations/light-animation-clock.js';
 export {
   fbmFloat,
@@ -58,6 +94,8 @@ export {
   hsb2rgb,
   pie,
   rotate2d,
+  hspherize,
+  mirrorTriangle,
 } from './lighting/animations/tsl-noise-toolkit.js';
 // Region darkness split 2026-07-25 (size-ratchet god-object reversal): pure CPU
 // geometry/darkness math in region-geometry.js, TSL material builders in
@@ -109,6 +147,86 @@ export {
 } from './effect-cascade.js';
 export { UI_WINDOW_SHADOW, UI_SHADOW_PARAMS } from './ui-window-shadow.js';
 export { CANDLE_FLAME, CANDLE_FLAME_PARAMS } from './candle-flame.js';
+export { DOOR_GRAPHICS, DOOR_GRAPHICS_PARAMS } from './door-graphics.js';
+export { VEGETATION, VEGETATION_PARAMS, VEGETATION_KINDS } from './vegetation.js';
+// The vegetation RUNTIME's pure half (vegetation-render.js's own header
+// explains the split): Case-1 self-vegetation-tile detection + the
+// vertex-displacement curve. THREE/TSL glue lives in vt/vt-pan-viewer.js.
+export {
+  detectSelfVegetationKind,
+  heightWeight01,
+  validateVegetationKinds,
+  vegetationMeshSegments,
+  buildTessellatedQuadGeometry,
+} from './vegetation-render.js';
+// The vegetation SHADOW subsystem — extraction step 2 of docs/planning/
+// VT-Pan-Viewer-Extraction.md. The padded quad, the per-kind pad, and the
+// per-frame sky sync, with their dependencies named instead of reached for.
+// `padPlacement`/`vegetationShadowPadPx`/the two constants are exported
+// standalone because call sites that legitimately STAY in the viewer (the
+// Case-2 overlay build, `setTileGeometry`, `buildVegetationMaterial`,
+// `refreshWholeImageItem`) still need them — one home, several readers.
+export {
+  createVegetationShadowSubsystem,
+  padPlacement,
+  vegetationShadowPadPx,
+  VEG_SHADOW_RENDER_ORDER_MAGNITUDE,
+  VEG_SHADOW_SMEAR_TAPS,
+} from './vegetation-shadow-subsystem.js';
+// THE SHADOW HANDLE (effects/shadow-access.js's header is the map) — the sky
+// described ONCE; a caster declares only a height and an offset scale. The
+// atmospheric half (cloud softening, night fading) is derived there and shared
+// by every caster, which is what replaces V2's per-aspect slider explosion.
+export {
+  createShadowHandle,
+  shadowAtmosphere,
+  maxThrowForHeightPx,
+  MAX_THROW_HEIGHT_RATIO,
+  BASE_SOFTNESS_PX,
+  CLOUD_SOFTEN,
+  NIGHT_SOFTEN,
+} from './shadow-access.js';
+
+// THE SKY HANDLE (effects/sky-access.js's header is the map; docs/planning/Sky.md
+// is the design) — the OUTDOOR LIGHT described once. Atmosphere comes from the
+// light, never from a colour-correction pass: V2 needed a whole second system
+// to cancel its own grade inside torch pools, and that compensator was the cost
+// of grading after lighting. Ships neutral (`realism01 = 0` is a mathematical
+// no-op) so Foundry parity is intact until the author dials it in.
+export { createSkyHandle, luminance, saturation } from './sky-access.js';
+
+// THE GRADE ENGINE (effects/grade/, docs/planning/Grade.md) — ONE grade
+// primitive at TWO scopes. The desaturation a light CANNOT do
+// (luminance-preserving), the ToD/weather look, and the authored artistic look.
+// The `post.grade` seam, folded into present. Absorbs V2's 112 grade uniforms
+// across three parallel families.
+export {
+  applyGrade,
+  resolveEnvGrade,
+  scaleGradeToIdentity,
+  gradePreset,
+  GRADE_PRESETS,
+  IDENTITY_GRADE,
+  buildGradeNode,
+  TONE_MAP_FNS,
+  TONE_MAP_NAMES,
+} from './grade/grade-ops.js';
+export { buildGradePresentMaterial } from './grade/grade-present.js';
+export { parseCubeLut, identityCubeLut } from './grade/lut-cube.js';
+// THE GOD CC — the fully-featured artistic "Look" grade as a first-class
+// effect (schema + manifest), plumbed through the same cascade + generated
+// FOH/ROH card as bloom. docs/planning/Grade.md §14.
+export { GRADE, GRADE_LOOK_PARAMS, BUNDLED_LUT_NAMES } from './grade/grade.js';
+// BLOOM (docs/planning/Bloom.md) — the first `post` stage effect. The declaration
+// (schema + manifest + presets) and the TSL pyramid builders, imported through
+// this door exactly as grade/candle are.
+export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset } from './bloom.js';
+// SUN SHADOWS (docs/planning/Sun-Shadows.md) — the effect DECLARATION; its
+// runtime is lighting/sun-occlusion*.js plus lighting/sun-shadow-subsystem.js
+// (the bake + the decision-to-rebake; the viewer only supplies the two
+// GPU-touching callbacks — see that module's own §3).
+export { SUN_SHADOWS, SUN_SHADOW_PARAMS } from './sun-shadows.js';
+export { buildBloomMaterials } from './bloom-render.js';
 // The candle RUNTIME (candle-flame-render.js's header explains why a candle is
 // a billboard + a light, not a particle): pure geometry/colour/light-source math
 // (candle-flame-geometry.js, split out 2026-07-25) + the TSL flame material
@@ -127,6 +245,22 @@ export {
   resolveAnchorLightRadiusPx,
 } from './candle-flame-geometry.js';
 export { buildCandleFlameMaterial, buildCandleFlameGeometry } from './candle-flame-render.js';
+// The door-graphics RUNTIME (door-graphics-render.js's header explains why a
+// door needs no Y-flip here): pure DoorMesh-parity math (closed placement,
+// per-type open animation, the computeQuadCorners bridge) + the textured-quad
+// material. The viewer imports these through this door exactly as it imports
+// the candle builders.
+export {
+  DOOR_STYLES,
+  DOOR_ANIMATION_TYPES,
+  doorLeafStyles,
+  isMidpointAnimation,
+  easeInOutCosine as doorEaseInOutCosine,
+  computeDoorClosedSnapshot,
+  applyDoorAnimation,
+  doorSnapshotToPlacement,
+  buildDoorMaterial,
+} from './door-graphics-render.js';
 export {
   describeEffectSettings,
   deriveEffectLayers,

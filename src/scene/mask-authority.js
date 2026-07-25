@@ -56,6 +56,7 @@ import {
   MASK_KINDS,
   DERIVED_KINDS,
   ALBEDO_INPUT,
+  CASTER_HEIGHT_SCALE_PX,
   validateMaskCatalog,
   maskKindById,
   derivedKindById,
@@ -75,6 +76,56 @@ const EXTRACT_ERROR_LOG_MAX = 10;
 /** Item kinds that participate in cover derivation (never tokens — they move
  * constantly and are not architecture). */
 const COVER_ITEM_KINDS = new Set(['levelBackground', 'levelForeground', 'tile']);
+
+/**
+ * Thrown by `getDerived`/`sampleWorld` for a `required` mask kind (currently
+ * only `outdoors`) when NO file was ever discovered for a level — never for
+ * "discovered but not yet decoded" (that is a normal, transient streaming
+ * state; see `authoredStatus`'s own `source` field, which is what this check
+ * reads). 2026-07-21, author directive: "the outdoors mask is a requirement
+ * not an option... if no outdoors mask is discovered then you need to just
+ * fail." Before this, absence silently served `absentValue` (1 = fully
+ * outdoors) — which is EXACTLY what let a stale wind-exposure snapshot read a
+ * genuinely-indoors, correctly-painted room as fully outdoors without
+ * anyone finding out (memory: keyhole-wind-wake-turbulence's own addendum).
+ * A silent numeric default that can masquerade as real data is the bug class
+ * this error exists to kill — callers MUST catch this specifically (never a
+ * bare catch-all) and degrade LOUDLY (the safety-slide doctrine: announce
+ * always, never silently, never crash the whole viewer over one missing
+ * content file) rather than let it vanish into a generic error handler.
+ */
+export class RequiredMaskMissingError extends Error {
+  /**
+   * @param {string} kindId - the required authored kind that is missing (e.g. 'outdoors').
+   * @param {string} levelId
+   * @param {string} floorName
+   * @param {string} requestedId - the id actually being queried (may be `kindId` itself,
+   *   or a DERIVED id that transitively depends on it, e.g. 'skyReach').
+   */
+  constructor(kindId, levelId, floorName, requestedId) {
+    const kind = maskKindById(kindId);
+    const suffix = kind?.suffixes?.[0] ?? `_${kindId}`;
+    const lines = [
+      `REQUIRED MASK MISSING: '${kindId}' has no authored '${suffix}' file for floor '${floorName}' (level '${levelId}').`,
+      requestedId !== kindId ? `('${requestedId}' was requested, which is DERIVED from '${kindId}'.)` : '',
+      '',
+      `This is a CONTENT gap, not a code default — the catalog (scene/mask-catalog.js) declares '${kindId}' ` +
+        'as a hard requirement, so absence is refused rather than silently served as a guessed value.',
+      `Paint a '${suffix}' file for this level's background art before relying on indoor/outdoor behaviour here.`,
+      '(A guided in-app painting dialogue is planned but not built yet — this loud failure is the interim behaviour.)',
+    ].filter(Boolean);
+    super(lines.join('\n'));
+    this.name = 'RequiredMaskMissingError';
+    /** @type {string} */
+    this.kindId = kindId;
+    /** @type {string} */
+    this.levelId = levelId;
+    /** @type {string} */
+    this.floorName = floorName;
+    /** @type {string} */
+    this.requestedId = requestedId;
+  }
+}
 
 /**
  * @param {object} options
@@ -101,8 +152,32 @@ export function createMaskAuthority({ readPageImageData, log }) {
   let products = []; // DerivedFloorProducts[], valid when !dirty
   let productsVersion = -1;
 
-  const counters = { pagesOffered: 0, pagesIngested: 0, pagesIgnored: 0, extractErrorCount: 0 };
+  const counters = {
+    pagesOffered: 0,
+    pagesIngested: 0,
+    pagesIgnored: 0,
+    extractErrorCount: 0,
+    // The art-opacity door (ingestItemAlpha) counts separately from the page
+    // ingest: they have different producers and different failure modes, and
+    // conflating them is how "coverAbove is zero" stayed unattributable.
+    alphaOffered: 0,
+    alphaIngested: 0,
+    alphaIgnored: 0,
+  };
   const extractErrors = [];
+
+  /**
+   * THE CASTER-HEIGHT INPUTS the derivation cannot know on its own — the scene's
+   * distance→pixel conversion, the one authored building height, and the ROH
+   * isolation toggles. Set by `setCasterHeightSpec`; until then `distancePixels`
+   * is 0, which makes the two art-driven bands empty ON PURPOSE (a height field
+   * built on a guessed grid scale would be wrong by a factor nobody could see).
+   */
+  const casterSpec = {
+    distancePixels: 0,
+    buildingHeightPx: 0,
+    include: { building: true, overhead: true, skyReach: true },
+  };
 
   function emptyScene() {
     return {
@@ -130,7 +205,11 @@ export function createMaskAuthority({ readPageImageData, log }) {
    * @param {object} args
    * @param {string} args.sceneKey - stable identity for reports.
    * @param {{sceneRect?: {x:number,y:number,width:number,height:number}, width: number, height: number}} args.dimensions
-   * @param {Array<{index:number, id:string, name:string, ceilingElevation:number}>} args.floors
+   * @param {Array<{index:number, id:string, name:string, ceilingElevation:number,
+   *   bottomElevation?:number}>} args.floors - `bottomElevation` is the floor's
+   *   GROUND (`elevation.bottom`); the caster-height derivation measures a
+   *   raised tile's height from it. Non-finite = "no ground declared", which
+   *   empties the overhead band rather than assuming zero.
    * @param {Array<object>} args.items - the UNFILTERED collector items (every
    *   floor visible) — cover physics must not depend on what the user is
    *   currently viewing.
@@ -249,6 +328,64 @@ export function createMaskAuthority({ readPageImageData, log }) {
     }
   }
 
+  /**
+   * THE ART-OPACITY DOOR (2026-07-24). The viewer calls this once per item with
+   * that item's coarse alpha grid (`vt/coarse-alpha.js` — decoded at grid
+   * resolution in the BC worker, never at world resolution).
+   *
+   * ⚠️ WHY THIS EXISTS AS ITS OWN DOOR rather than more `ingestDecodedPage`:
+   * art opacity used to arrive through the albedo PACK's coarsest page, and
+   * whole-image mode has no albedo pack — `ensureItemLoaded` says so in its own
+   * comment. So from 2026-07-22 until this door landed, `alpha` was `null` for
+   * EVERY item, `coverAbove` was uniformly zero on every floor, and `skyReach`
+   * was silently just a copy of `outdoors`. A page-shaped API could not be fed
+   * by a path that has no pages; pretending otherwise is how the gap survived a
+   * whole engine retirement unnoticed (see vt/coarse-alpha.js's header).
+   *
+   * Idempotent — a re-decode (cache hit on a later scene load) simply overwrites.
+   * A `null`/absent grid is NOT ingested: the derivation's own
+   * `completeness.missingItemIds` is the honest record of "we do not know what
+   * this item covers", and inventing a zero grid there would read as "it covers
+   * nothing", which is the silent-numeric-default class this project bans.
+   *
+   * @param {object} info
+   * @param {string} info.ownerId - the item this alpha belongs to.
+   * @param {{w:number, h:number, data:Uint8Array}} info.grid - the coarse alpha grid.
+   * @param {number} info.imageWidth - the SOURCE image's native width (placement
+   *   resolves from the file's own size, exactly as `ingestDecodedPage` does with
+   *   its pack table — the art's native size is what the renderer places by).
+   * @param {number} info.imageHeight
+   * @returns {boolean} true if it was stored.
+   */
+  function ingestItemAlpha({ ownerId, grid, imageWidth, imageHeight }) {
+    counters.alphaOffered++;
+    const item = scene.items.get(ownerId);
+    if (!item || !grid?.data || !(grid.w > 0 && grid.h > 0)) {
+      counters.alphaIgnored++;
+      return false;
+    }
+    if (!(imageWidth > 0 && imageHeight > 0)) {
+      counters.alphaIgnored++;
+      return false;
+    }
+    try {
+      const placement = scene.resolvePlacement(item, { width: imageWidth, height: imageHeight });
+      scene.ingests.set(`${ownerId}/${ALBEDO_INPUT}`, {
+        content: { w: grid.w, h: grid.h, data: grid.data },
+        placement,
+      });
+      counters.alphaIngested++;
+      touch();
+      return true;
+    } catch (err) {
+      counters.extractErrorCount++;
+      extractErrors.push({ ownerId, layerName: ALBEDO_INPUT, error: String(err?.message || err) });
+      if (extractErrors.length > EXTRACT_ERROR_LOG_MAX) extractErrors.shift();
+      log.error(`alpha ingest failed for ${ownerId}:`, err);
+      return false;
+    }
+  }
+
   /** The floor's background item (masks + outdoors content key off it). @param {{id:string}} floor */
   function backgroundItemOf(floor) {
     for (const item of scene.items.values()) {
@@ -279,6 +416,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
       return {
         index: floor.index,
         ceilingElevation: floor.ceilingElevation,
+        bottomElevation: floor.bottomElevation,
         outdoors: outdoors ? { placement: outdoors.placement, content: outdoors.content } : null,
       };
     });
@@ -288,37 +426,83 @@ export function createMaskAuthority({ readPageImageData, log }) {
       items,
       floors,
       outdoorsAbsentValue: outdoorsKind?.absentValue ?? 1,
+      casterHeights: {
+        scalePx: CASTER_HEIGHT_SCALE_PX,
+        distancePixels: casterSpec.distancePixels,
+        buildingHeightPx: casterSpec.buildingHeightPx,
+        include: casterSpec.include,
+      },
     });
     productsVersion = version;
     dirty = false;
   }
 
   /**
-   * A derived product for one floor: the grids + completeness, always fresh.
-   * @param {string} derivedId - 'coverAbove' | 'skyReach'
+   * A product for one floor: the grid + completeness, always fresh. Accepts
+   * EITHER a DERIVED id ('coverAbove'/'skyReach') or an AUTHORED kind id that
+   * `deriveFloorProducts` also rasterizes on its own (currently 'outdoors'
+   * only — see mask-derive.js's own `DerivedFloorProducts` typedef for why a
+   * raw authored value needs to be point-sampleable independent of any
+   * derived product built from it).
+   * @param {string} id - 'coverAbove' | 'skyReach' | 'outdoors'
    * @param {number} floorIndex
    * @returns {{grid: import('./mask-derive.js').MaskGrid, completeness: object, version: number}|null}
+   * @throws {RequiredMaskMissingError} for a `required` kind (or anything
+   *   derived from one) when NO file was ever discovered for this floor's
+   *   level — never for "discovered but not yet decoded" (see
+   *   `assertMaskAvailable`'s own doc). Never thrown for an unresolvable
+   *   `floorIndex` (falls through to the existing `return null` below,
+   *   unchanged) — a bogus floor index is a different caller-side question
+   *   than "this real floor has no painted mask."
    */
-  function getDerived(derivedId, floorIndex) {
-    if (!derivedKindById(derivedId))
-      throw new Error(`unknown derived mask '${derivedId}' — declare it in scene/mask-catalog.js`);
+  function getDerived(id, floorIndex, { acknowledgeMissingRequired = false } = {}) {
+    if (!derivedKindById(id) && !maskKindById(id)) {
+      throw new Error(`unknown mask/derived id '${id}' — declare it in scene/mask-catalog.js`);
+    }
     recomputeIfDirty();
     const floor = products.find((p) => p.index === floorIndex);
     if (!floor) return null;
-    return { grid: floor[derivedId], completeness: floor.completeness, version: productsVersion };
+    const floorMeta = scene.floors.find((f) => f.index === floorIndex);
+    // `acknowledgeMissingRequired` — a NARROW, NAMED opt-out (2026-07-25), not
+    // a weakening of the rule. The rule exists because a silent default can
+    // masquerade as data in a POINT query, where a wrong answer is invisible.
+    // Pass this ONLY when: `absentValue` is the honest degradation here, the
+    // degradation is REPORTED to the author, and you want grids for a
+    // whole-field render rather than a yes/no about a point. One caller today —
+    // the sun-shadow bake, where an unpainted floor genuinely has no known
+    // building footprints (that channel derives to zero: a fact, not a guess)
+    // while upper-floor art still blocks the sky. Refusing would mean a bridge
+    // casts no shadow on the river below it purely because a scene with no
+    // interiors never had a mask painted.
+    if (floorMeta && !acknowledgeMissingRequired) assertMaskAvailable(id, floorMeta.id, floorMeta.name);
+    return {
+      grid: floor[id],
+      // `casterHeight` alone also serves its three UNMERGED producer channels —
+      // the GPU bake packs them into RGB so the author's isolation toggles and
+      // the pixel probe can tell building from overhead from sky-reach. Every
+      // other id gets `null`, so a consumer can never accidentally read another
+      // product's channels.
+      channels: id === 'casterHeight' ? floor.casterChannels : null,
+      completeness: floor.completeness,
+      version: productsVersion,
+    };
   }
 
   /**
-   * CPU query: the derived value 0..1 at a world (canvas-space) position —
-   * "is this token under open sky?" costs one array read. Outside the scene
-   * rect (or before any scene is set) the catalog's absent value answers.
-   * @param {string} derivedId @param {number} floorIndex @param {number} wx @param {number} wy
+   * CPU query: the value 0..1 at a world (canvas-space) position — "is this
+   * token under open sky?" / "is this location outdoors?" — costs one array
+   * read. Outside the scene rect (or before any scene is set) the catalog's
+   * absent value answers. `id` may be a DERIVED product ('coverAbove'/
+   * 'skyReach') or the raw AUTHORED 'outdoors' value (see `getDerived`'s own
+   * doc) — both share this one entry point, same as everything else a
+   * consumer might want to sample per-point.
+   * @param {string} id @param {number} floorIndex @param {number} wx @param {number} wy
    * @returns {number}
    */
-  function sampleWorld(derivedId, floorIndex, wx, wy) {
-    const kind = derivedKindById(derivedId);
-    if (!kind) throw new Error(`unknown derived mask '${derivedId}' — declare it in scene/mask-catalog.js`);
-    const product = getDerived(derivedId, floorIndex);
+  function sampleWorld(id, floorIndex, wx, wy) {
+    const kind = derivedKindById(id) ?? maskKindById(id);
+    if (!kind) throw new Error(`unknown mask/derived id '${id}' — declare it in scene/mask-catalog.js`);
+    const product = getDerived(id, floorIndex);
     if (!product) return kind.absentValue;
     const byte = sampleMaskGridWorld(product.grid, wx, wy);
     return byte === null ? kind.absentValue : byte / 255;
@@ -335,6 +519,86 @@ export function createMaskAuthority({ readPageImageData, log }) {
     if (!kind) throw new Error(`unknown mask kind '${kindId}' — declare it in scene/mask-catalog.js`);
     const url = scene.discovery?.byLevelId?.get(levelId)?.get(kindId);
     return url ? { source: 'authored', url } : { source: 'default', value: kind.absentValue };
+  }
+
+  /**
+   * Which `required` AUTHORED kinds have no discovered file for this level —
+   * NEVER "discovered but not yet decoded" (that reads `source: 'authored'`
+   * from `authoredStatus`, a transient streaming state, not a gap). Cheap: a
+   * handful of Map lookups over the small, fixed `MASK_KINDS` array.
+   * @param {string} levelId
+   * @returns {Set<string>}
+   */
+  function requiredMissingAuthoredIds(levelId) {
+    const missing = new Set();
+    for (const kind of MASK_KINDS) {
+      if (!kind.required) continue;
+      if (authoredStatus(levelId, kind.id).source === 'default') missing.add(kind.id);
+    }
+    return missing;
+  }
+
+  /**
+   * `requiredMissingAuthoredIds` PLUS every DERIVED kind that transitively
+   * depends on one of them (e.g. `outdoors` missing blocks `skyReach` too,
+   * since `skyReach`'s own `inputs` include `outdoors`) — one linear pass
+   * over `DERIVED_KINDS` is enough because declaration order IS dependency
+   * order (`validateMaskCatalog` forbids a forward reference), so no
+   * recursion is needed to catch a chain more than one derived kind deep.
+   * @param {string} levelId
+   * @returns {Set<string>}
+   */
+  function blockedIdsForLevel(levelId) {
+    const blocked = requiredMissingAuthoredIds(levelId);
+    if (blocked.size === 0) return blocked;
+    for (const d of DERIVED_KINDS) {
+      if (d.inputs.some((input) => blocked.has(input))) blocked.add(d.id);
+    }
+    return blocked;
+  }
+
+  /**
+   * Throw `RequiredMaskMissingError` iff `id` (an authored OR derived kind)
+   * is blocked for this level — see `blockedIdsForLevel`'s own doc. A no-op
+   * (never throws) for a kind that isn't `required` and doesn't depend on
+   * one, which is every kind except `outdoors`/`skyReach` today.
+   * @param {string} id @param {string} levelId @param {string} floorName
+   */
+  function assertMaskAvailable(id, levelId, floorName) {
+    const blocked = blockedIdsForLevel(levelId);
+    if (!blocked.has(id)) return;
+    // Which ACTUAL required authored kind is the root cause — `id` itself if
+    // it IS one, otherwise whichever missing authored kind `id` depends on
+    // (there is exactly one today; MASK_KINDS' own uniqueness + the tiny
+    // DERIVED_KINDS graph make a first-match correct, not just convenient).
+    const rootKindId = maskKindById(id)?.required ? id : ([...blocked].find((b) => maskKindById(b)?.required) ?? id);
+    throw new RequiredMaskMissingError(rootKindId, levelId, floorName, id);
+  }
+
+  /**
+   * A THIRD provenance state, beyond `authoredStatus`'s authored/default —
+   * "was this floor's outdoors content ever actually DECODED and ingested",
+   * as opposed to merely discovered as a URL. Added 2026-07-22: a live report
+   * showed `authoredStatus(...).source === 'authored'` (a real `_Outdoors`
+   * file was found for the level) yet `sampleWorld('outdoors', ...)` still
+   * read the absent-value fallback everywhere on that floor — a state
+   * `authoredStatus` alone cannot distinguish, because discovery (finding a
+   * URL) and ingest (decoding that file's actual pixels) are two separate
+   * pipeline stages (this file's own header diagram: `setDiscovery` vs
+   * `ingestDecodedPage`), and nothing before this exposed whether the SECOND
+   * stage had ever actually run for a specific floor's specific content.
+   * @param {number} floorIndex
+   * @returns {{floorFound:boolean, backgroundItemId:string|null, outdoorsIngested:boolean}}
+   */
+  function getIngestStatus(floorIndex) {
+    const floor = scene.floors.find((f) => f.index === floorIndex);
+    if (!floor) return { floorFound: false, backgroundItemId: null, outdoorsIngested: false };
+    const bg = backgroundItemOf(floor);
+    return {
+      floorFound: true,
+      backgroundItemId: bg?.id ?? null,
+      outdoorsIngested: bg ? scene.ingests.has(`${bg.id}/outdoors`) : false,
+    };
   }
 
   /** The debug-panel report payload — the whole story, one click. */
@@ -357,6 +621,10 @@ export function createMaskAuthority({ readPageImageData, log }) {
       floors: scene.floors.map((floor) => {
         const found = scene.discovery?.byLevelId?.get(floor.id);
         const product = products.find((p) => p.index === floor.index);
+        // Required-and-missing, ONLY the authored kinds themselves (not the
+        // derived ids their absence also blocks) — the ACTIONABLE list: what
+        // needs painting, not everything that will throw as a consequence.
+        const requiredMasksMissing = [...requiredMissingAuthoredIds(floor.id)];
         return {
           index: floor.index,
           name: floor.name,
@@ -364,13 +632,39 @@ export function createMaskAuthority({ readPageImageData, log }) {
           authored: Object.fromEntries(
             MASK_KINDS.map((k) => {
               const url = found?.get(k.id);
-              return [k.id, url ? tail(url) : `default(${k.absentValue})`];
+              if (url) return [k.id, tail(url)];
+              // A required kind's absence is no longer "served as a default"
+              // (2026-07-21) — say so plainly rather than print a number
+              // (`default(1)`) that would misdescribe what actually happens now.
+              return [k.id, k.required ? 'MISSING — REQUIRED, sampling THROWS' : `default(${k.absentValue})`];
             })
           ),
+          // Empty array = nothing required is missing on this floor (the
+          // common, healthy case) — an explicit empty list, never absent,
+          // so a report reader never has to wonder whether this was checked.
+          requiredMasksMissing,
           derived: product
             ? {
                 coverAbovePct: Math.round(maskGridMean(product.coverAbove) * 100),
                 skyReachPct: Math.round(maskGridMean(product.skyReach) * 100),
+                // THE CASTER HEIGHT FIELD, per producer, in world px — the ONE
+                // block that answers "why is there no shadow" without a guess.
+                // A zero here with a non-empty `skyReachItemIds` means the art
+                // arrived but casts nothing (check the floor's elevation band);
+                // a zero WITH `missingItemIds` means the art never arrived.
+                casterHeightPx: {
+                  scalePx: CASTER_HEIGHT_SCALE_PX,
+                  building: Math.round(maskGridMean(product.casterChannels.building) * CASTER_HEIGHT_SCALE_PX),
+                  overhead: Math.round(maskGridMean(product.casterChannels.overhead) * CASTER_HEIGHT_SCALE_PX),
+                  skyReach: Math.round(maskGridMean(product.casterChannels.skyReach) * CASTER_HEIGHT_SCALE_PX),
+                  combinedMean: Math.round(maskGridMean(product.casterHeight) * CASTER_HEIGHT_SCALE_PX),
+                },
+                // The RAW outdoors mean (2026-07-21) — check THIS first when a
+                // shelter effect looks wrong: if it reads 100 with no authored
+                // outdoors art, nothing was painted for this floor at all, and
+                // that is a content gap, not a code bug (see this floor's own
+                // `authored.outdoors` field just above for provenance).
+                outdoorsPct: Math.round(maskGridMean(product.outdoors) * 100),
                 completeness: product.completeness,
               }
             : 'no products (floor unknown to derivation)',
@@ -388,9 +682,64 @@ export function createMaskAuthority({ readPageImageData, log }) {
     setDiscovery,
     layersForItem,
     ingestDecodedPage,
+    ingestItemAlpha,
+    /**
+     * Set the caster-height inputs (docs/planning/Sun-Shadows.md §3.1). Marks
+     * the products dirty only when something ACTUALLY changed — this is called
+     * from a param apply that fires on every cascade resolve, and rebuilding a
+     * 512² height field per slider tick is exactly the kind of hidden per-frame
+     * work this project keeps finding.
+     *
+     * @param {{distancePixels?: number, buildingHeightPx?: number,
+     *   include?: {building?: boolean, overhead?: boolean, skyReach?: boolean}}} spec
+     * @returns {boolean} true if anything changed (and a rebuild is now pending).
+     */
+    setCasterHeightSpec(spec = {}) {
+      const nextDistance = Number.isFinite(spec.distancePixels) && spec.distancePixels > 0 ? spec.distancePixels : 0;
+      const nextBuilding =
+        Number.isFinite(spec.buildingHeightPx) && spec.buildingHeightPx > 0 ? spec.buildingHeightPx : 0;
+      const nextInclude = {
+        building: spec.include?.building !== false,
+        overhead: spec.include?.overhead !== false,
+        skyReach: spec.include?.skyReach !== false,
+      };
+      const changed =
+        nextDistance !== casterSpec.distancePixels ||
+        nextBuilding !== casterSpec.buildingHeightPx ||
+        nextInclude.building !== casterSpec.include.building ||
+        nextInclude.overhead !== casterSpec.include.overhead ||
+        nextInclude.skyReach !== casterSpec.include.skyReach;
+      if (!changed) return false;
+      casterSpec.distancePixels = nextDistance;
+      casterSpec.buildingHeightPx = nextBuilding;
+      casterSpec.include = nextInclude;
+      touch();
+      return true;
+    },
+    /** World px a `casterHeight` byte of 255 represents — every consumer needs
+     * it to turn the served 0..1 value back into a height. */
+    casterHeightScalePx: CASTER_HEIGHT_SCALE_PX,
     getDerived,
     sampleWorld,
     authoredStatus,
     getReport,
+    getIngestStatus,
+    /**
+     * The DERIVED products' own version counter — bumps only when
+     * `recomputeIfDirty()` actually recomputes (a real content change),
+     * unlike `version` (bumps on every `touch()`, including plain item-list
+     * refreshes). A cheap O(1) integer read, safe to poll every frame — added
+     * 2026-07-21 specifically so a consumer that CACHES a derived value (Wind
+     * Tier 1's exposure grid) can detect "the underlying mask data changed"
+     * without needing mask-authority itself to grow a push-notification
+     * mechanism, which would contradict this file's own stated design
+     * ("STALENESS IS LAZY, NOT SCHEDULED" — see this module's header).
+     * Forces a recompute first (same as any other read) so the returned
+     * number is never stale relative to ingests that already happened.
+     */
+    getProductsVersion() {
+      recomputeIfDirty();
+      return productsVersion;
+    },
   };
 }

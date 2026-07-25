@@ -371,3 +371,42 @@ export function viewToWorldRect(view, aspect = 1) {
     maxY: view.centerYPx + halfY,
   };
 }
+
+/**
+ * Intersect a world rect (e.g. `viewToWorldRect`'s own output — the current
+ * camera view, which deliberately does NOT clamp to world bounds, see that
+ * function's own doc) against a bounds rect — for the wind system's own
+ * "never outside the scene" requirement (2026-07-23, author: "Don't render
+ * the wind particles or the overlay outside of the scene. We shouldn't spawn
+ * particles outside of the scene."). `world` (`{width, height}`, derived from
+ * `foundry/scene-geometry.js#computeSceneDimensions`) is deliberately the
+ * PADDED canvas rect — camera panning is allowed to wander into the padding
+ * margin around a scene's real art, a legitimate viewing choice untouched by
+ * this function. Wind is different: its own data (`bakeWindField`) only
+ * covers the scene's REAL `sceneRect` (see that function's own header), so
+ * any consumer sampling/spawning by a raw camera-view rect must be clamped to
+ * the SAME bounds the data actually exists within, or it reads/spawns past
+ * the edge of what was ever computed.
+ *
+ * A view rect entirely outside `bounds` collapses to a zero-area rect
+ * pinned at the nearest edge (never an inverted min>max rect, which would
+ * break a naive `for (x=minX;x<=maxX;...)` loop into either a no-op or an
+ * infinite one depending on the step's sign) — callers should treat a
+ * zero-area result as "nothing to draw/spawn here", not a special case.
+ *
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect
+ * @param {{x:number,y:number,width:number,height:number}} bounds - e.g.
+ *   `dimensions.sceneRect`.
+ * @returns {{minX:number,minY:number,maxX:number,maxY:number}}
+ */
+export function clampRectToBounds(rect, bounds) {
+  const boundsMinX = bounds.x;
+  const boundsMinY = bounds.y;
+  const boundsMaxX = bounds.x + bounds.width;
+  const boundsMaxY = bounds.y + bounds.height;
+  const minX = Math.min(Math.max(rect.minX, boundsMinX), boundsMaxX);
+  const minY = Math.min(Math.max(rect.minY, boundsMinY), boundsMaxY);
+  const maxX = Math.max(Math.min(rect.maxX, boundsMaxX), minX);
+  const maxY = Math.max(Math.min(rect.maxY, boundsMaxY), minY);
+  return { minX, minY, maxX, maxY };
+}

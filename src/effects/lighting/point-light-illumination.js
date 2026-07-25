@@ -61,6 +61,56 @@
  * deliberately out of scope here (this rung matches Foundry's INTENT for
  * silhouette softness, not a physically-lit-penumbra system).
  *
+ * ─────────────────────────────────────────────────────────────────────────
+ * SUN-SHADOW ATTENUATION (2026-07-24) — the background floor is sampled
+ * PER-PIXEL from the sun-shadow field, never once per light
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * A light's output is `mix(background, litColour, falloff)`. `background` is
+ * what it fades BACK TO at its own rim — and it must be the SAME ambient the
+ * rest of the scene has at that pixel, which (since cast shadows landed) means
+ * the SHADOWED ambient. Otherwise the light's mesh writes an un-shadowed floor
+ * across its whole footprint, the illum pass's `MaxEquation` blend picks that
+ * over the correctly-darker shadowed ambient EVERYWHERE inside the mesh, and
+ * the shadow is erased across the entire radius with a hard cut at the mesh
+ * boundary.
+ *
+ * ⚠️ TWO FAILED ATTEMPTS FIRST, BOTH FOR THE SAME REASON — worth recording,
+ * because both looked correct in isolation and the second actively made things
+ * worse in a way that took a screenshot to see:
+ *
+ *   1. Scale `uBackgroundColor` on the CPU by the sun-visibility AT THE
+ *      LIGHT'S ORIGIN. Fixed the rim, but a light's origin is ONE POINT: it is
+ *      either in shadow or not, so the entire light's appearance flipped as the
+ *      shadow edge swept across that single point. A few degrees of sun
+ *      rotation → the whole light snapped between "soft and attenuated" and
+ *      "hard-edged, shadow fully erased." Reported live as exactly that.
+ *   2. Blend toward a WIDER falloff curve proportionally to how deep in shadow
+ *      the light's origin sits. This inherited the same point-sample flip AND
+ *      additionally coupled the light's own CORONA SHAPE to the time of day —
+ *      a light visibly changing softness as the sun moved, which is not a thing
+ *      any light should do.
+ *
+ * THE LESSON: a per-light scalar cannot describe a quantity that varies ACROSS
+ * the light. The shadow does; so the sample must be per-fragment.
+ *
+ * WHAT IT DOES NOW: the light's material samples the baked sun-shadow field at
+ * `positionWorld.xy` (the real fragment world position — the same node and the
+ * same world-rect mapping `region-darkness.js` and `environmental-light.js`
+ * already use) and multiplies `uBackgroundColor` by it per-pixel. So the floor
+ * is correctly shadowed exactly where the shadow is, un-shadowed where it
+ * isn't, with a smooth gradient wherever `falloff < 1` — and the light's own
+ * corona shape is completely untouched by the sun. No popping, because nothing
+ * is decided per-light any more.
+ *
+ * Still, in every sense the doctrine cares about, `max(ambient×sunVis, light)`:
+ * `finalColorExposed` — the torch's OWN colour, everything `combinedFalloff`
+ * blends TOWARD — is never scaled by shadow. Only the ambient floor it fades
+ * back to is, which is just that floor agreeing with the rest of the scene.
+ * The torch was still never darkened. This is a LIGHT reading the sun's own
+ * visibility field (the same one the ambient fill reads), never a shadow
+ * reading a light buffer.
+ *
  * TIER-0 SCOPE, documented rather than silently absent:
  *   - no elevation/roof occlusion of light (needs the SURFACE half of
  *     masks.occlusion, Regions-driven — not built anywhere in this project
@@ -79,6 +129,14 @@
  * @module effects/lighting/point-light-illumination
  */
 
+import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
+import { createWindHandle } from '../../world/index.js';
+
+/** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
+ * rather than a wind-inert light — see candle-flame-render.js's own identical
+ * constant for the full reasoning. */
+const TIER0_WIND_HANDLE = createWindHandle();
+
 /**
  * Starting/default capacity, in POLYGON EDGES, for a light's soft-edge SDF
  * uniform array — see buildPointLightIlluminationMaterial's own header for
@@ -94,6 +152,39 @@
  * vt-pan-viewer.js is 3x this, i.e. the same edge-count assumption).
  */
 export const MAX_LIGHT_EDGES = 64;
+
+/**
+ * Steepness `K` of the windowed inverse-square falloff (see
+ * `inverseSquareFalloff`) — bigger = a tighter bright centre and a faster
+ * drop-off. Tuned for candles (the only current `falloffModel: 'inverseSquare'`
+ * caller): "right next to the candle is bright but the light quickly drops
+ * off" (the author's own ask). A module constant, not a uniform — the whole
+ * falloff-model choice is a graph-build-time JS branch (`no-uniform-gates`).
+ */
+export const INVERSE_SQUARE_STEEPNESS = 8;
+
+/**
+ * A physically-flavoured inverse-square falloff over the NORMALIZED radial
+ * distance `dist` (0 at the light's own centre, 1 at its edge). Foundry's
+ * default corona is a plain `smoothstep` — fine for a torch, but wrong for a
+ * candle, whose light should be bright right at the flame and fall off fast
+ * (the author's ask). This is the standard Karis/UE4 "windowed inverse
+ * square": a real `1/(1+K·d²)` core, multiplied by a `(1-d⁴)²` window that
+ * drives it cleanly to exactly 0 at the light's edge (a raw inverse square
+ * never reaches 0, which would leave a hard clip at the mesh boundary). At
+ * `dist=0` it is 1; the window and the reciprocal both only reduce it from
+ * there. `K` is `INVERSE_SQUARE_STEEPNESS`.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {*} dist - a float TSL node, the normalized radial distance.
+ * @returns {*} a float TSL node in [0,1].
+ */
+export function inverseSquareFalloff(TSL, dist) {
+  const { float, clamp } = TSL;
+  const d2 = dist.mul(dist);
+  const windowTerm = clamp(float(1).sub(d2.mul(d2)), float(0), float(1)); // 1 - dist⁴, → 0 at the edge
+  return windowTerm.mul(windowTerm).div(d2.mul(float(INVERSE_SQUARE_STEEPNESS)).add(float(1)));
+}
 
 /**
  * Ease Foundry's raw [0,1] attenuation slider into the value its shaders
@@ -359,29 +450,124 @@ function makeSdPolygonEdgeDistance(TSL) {
  * before this param existed (regression safety net for every light that
  * isn't animated, i.e. most lights).
  *
+ * GPU-ONLY ANIMATION (2026-07-20 rewrite, the author's own WebGPU-
+ * performance direction: "let's not leave any CPU stuff in if we can avoid
+ * it"). `time`/flicker-noise/pulse-wave used to be computed on the CPU
+ * every frame per light and written into per-animation uniforms; now the
+ * SCAFFOLD owns four small per-light "raw" uniforms
+ * (`uSpeedRaw`/`uReverseSign`/`uSeed`/`uIntensityRaw`, Foundry's own
+ * animation config, essentially static — CPU only writes them when they
+ * actually change) plus ONE SHARED `uGlobalTimeMs` (the caller's job,
+ * written ONCE per frame, not per light), and computes `time` in-shader via
+ * `light-animation-clock.js#buildAnimationTimeNode`. `computeSwitchColorBand`
+ * is exposed so a flicker/pulse-driven animation can rebuild the bright/dim
+ * band with a GPU-JITTERED ratio instead of the base one — this replaces
+ * the old trick where Torch's illumination needed "no shader code" because
+ * the CPU pre-wrote a jittered `uRatio`; now the ratio jitter itself is a
+ * GPU computation, so animations that need it call `computeSwitchColorBand`
+ * themselves with their own ratio node.
+ *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.uBackgroundColor - shared vec3 uniform (sRGB), env's `background`.
  * @param {*} args.uDimColor - shared vec3 uniform (sRGB), env's `dim`.
  * @param {*} args.uBrightColor - shared vec3 uniform (sRGB), env's `bright`.
- * @param {{buildIlluminationSeed: (function(object): {finalColor: *, uniforms: object, skipExposure: (boolean|undefined)})}} [args.animation] -
+ * @param {{buildIlluminationSeed: (function(object): {finalColor: *, skipExposure: (boolean|undefined)})}} [args.animation] -
  *   from effects/lighting/animations/registry.js's matched entry. When its
- *   `buildIlluminationSeed` is present it's called with `{THREE, uBrightColor,
- *   uDimColor, uRatio, dist, defaultSeed}` (`defaultSeed` is the un-animated
- *   `switchColor` result, offered in case an animation wants to blend with
- *   it rather than fully replace it) and must return `{finalColor, uniforms,
- *   skipExposure}` — `finalColor` replaces the seed; `uniforms` (a plain
- *   `{name: uniformNode}` map, e.g. `{uBrightnessPulse}`) is merged into this
- *   function's own returned uniforms so the caller can write into it every
- *   frame, same as `uRatio`/`uAttenuationEased` already are; `skipExposure`
- *   (rare — currently only Pulse, docs/reference/foundry-v14-light-
- *   animations-audit.md §4) omits the EXPOSURE stage entirely when true.
+ *   `buildIlluminationSeed` is present it's called with `{THREE,
+ *   uBrightColor, uDimColor, uRatio, uAttenuationEased, dist, defaultSeed,
+ *   time, uIntensityRaw, computeSwitchColorBand}` and must return
+ *   `{finalColor, skipExposure}` — `finalColor` replaces the seed;
+ *   `skipExposure` (rare — currently only Pulse) omits the EXPOSURE stage
+ *   entirely when true.
+ * @param {*} [args.uGlobalTimeMs] - the ONE shared time uniform (see this
+ *   function's own header) — REQUIRED when `animation` is present, unused
+ *   otherwise.
+ * @param {number} [args.animationQuality=0] - a graph-BUILD-time quality tier
+ *   forwarded to the seed builder as `quality`. A JS-time integer (never a
+ *   uniform), so a richer tier's extra nodes are only CONSTRUCTED at that
+ *   tier — the `tsl/no-uniform-gates` wall's own rule. Only MSA-native
+ *   animations that declare tiers (currently `candleFlicker`) read it;
+ *   every other seed builder ignores the extra arg harmlessly.
+ * @param {'foundry'|'inverseSquare'} [args.falloffModel='foundry'] - the radial
+ *   falloff curve, a graph-build-time choice (never a uniform). `foundry` =
+ *   the attenuation-slider corona (every real Foundry light); `inverseSquare`
+ *   = a physical bright-centre/fast-drop curve (candles). See
+ *   `inverseSquareFalloff`.
+ * @param {{x:number,y:number}} [args.windCenter] - this light's WORLD
+ *   position, for sampling the shared wind field (world/wind-field.js's
+ *   `sampleWind` — Wind.md Tier 0). OPT-IN: paired with `windExposure`, both
+ *   must be provided for the wind machinery to build at all — an ordinary
+ *   Foundry light (no wind semantics) supplies neither and pays nothing extra.
+ * @param {number} [args.windExposure] - 0..1 sky exposure at `windCenter`
+ *   (scene/mask-catalog.js's `outdoors` — NOT `skyReach`, a DIFFERENT, rain-
+ *   occlusion-specific product; see boot.js#getCandleRenderState's own note
+ *   for why — matching the candle FLAME's own `windExposure` geometry
+ *   attribute) — 1 = open to the wind, 0 = sheltered. Absent/non-finite =
+ *   wind sampling is skipped entirely for this light.
+ * @param {object} [args.windHandle] - the wind handle (`world/wind-access.js`,
+ *   Wind.md §5.1): the live ambient bias, Tier 1's baked openness, the
+ *   wall-avoidance deflection field and Tier 2's transient D_live, as ONE
+ *   object, read under the same `windExposure`-presence gate. Replaces the
+ *   four separate arguments this used to forward by hand — a block that was
+ *   copy-pasted verbatim across four call sites and, at one of them, silently
+ *   went stale for a whole session. Omit → Tier-0 organic wind only.
+ * @param {number} [args.windResponse] - Wind.md §8.1's per-effect gain (e.g.
+ *   `effects/candle-flame.js`'s `windResponse` param) — built into a THIRD
+ *   wind uniform under the SAME `windExposure`-presence gate, forwarded to
+ *   the animation seed builder as `windResponse` for it to scale lean/
+ *   gutter/snuff with (candle-flicker.js is the one consumer today). Absent
+ *   or non-finite → the seed builder's own default (1) applies.
+ * @param {*} [args.sunShadowTexture] - the baked sun-shadow visibility field
+ *   (`scene.sunShadow`). When supplied together with `uSunShadowRect`, this
+ *   light's background floor is sampled from it PER-FRAGMENT so it matches the
+ *   shadowed ambient at each pixel — see this module's "SUN-SHADOW
+ *   ATTENUATION" header for the two per-light attempts this replaced. Omitted
+ *   → the lookup is compiled out entirely and the material is unchanged.
+ * @param {*} [args.uSunShadowRect] - the vec4 world-rect uniform that field
+ *   covers, SHARED from `environmental-light.js` so the light and the ambient
+ *   fill can never disagree about where the field is.
  * @returns {{material: *, uRatio: *, uAttenuationEased: *, uExposure: *,
- *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[], animationUniforms: object}}
+ *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[],
+ *   uSpeedRaw: (*|null), uReverseSign: (*|null), uSeed: (*|null),
+ *   uIntensityRaw: (*|null), uWindCenter: (*|null), uWindExposure: (*|null),
+ *   uWindResponse: (*|null)}}
+ *   the four `u*` animation-config uniforms (and the three wind uniforms)
+ *   are `null` when `animation` (or `windCenter`/`windExposure`) is absent —
+ *   nothing for the caller to write.
  */
-export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, uDimColor, uBrightColor, animation }) {
-  const { uniform, uniformArray, float, int, vec2, vec4, mix, clamp, smoothstep, length, positionLocal, select } =
-    THREE.TSL;
+export function buildPointLightIlluminationMaterial({
+  THREE,
+  uBackgroundColor,
+  uDimColor,
+  uBrightColor,
+  animation,
+  uGlobalTimeMs,
+  animationQuality = 0,
+  falloffModel = 'foundry',
+  windCenter,
+  windExposure,
+  windResponse,
+  windHandle = TIER0_WIND_HANDLE,
+  sunShadowTexture,
+  uSunShadowRect,
+}) {
+  const {
+    uniform,
+    uniformArray,
+    texture,
+    float,
+    int,
+    vec2,
+    vec4,
+    mix,
+    clamp,
+    smoothstep,
+    length,
+    positionLocal,
+    positionWorld,
+    select,
+  } = THREE.TSL;
 
   const uRatio = uniform(float(0.5));
   const uAttenuationEased = uniform(float(0.5));
@@ -402,32 +588,84 @@ export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, u
   const localXY = positionLocal.xy;
   const dist = length(localXY);
 
-  // switchColor(bright, dim, dist) — TRANSITION, audit §5c.
-  const attenuationStrength = uAttenuationEased.mul(float(0.7));
-  const lowerEdge = uRatio.mul(float(0.99).sub(attenuationStrength));
-  const upperEdge = clamp(uRatio.mul(float(1.01).add(attenuationStrength)), float(0.0001), float(1.0));
-  const t = smoothstep(lowerEdge, upperEdge, dist);
-  const defaultSeed = mix(uBrightColor, uDimColor, t);
+  // switchColor(bright, dim, dist) — TRANSITION, audit §5c. Exposed as a
+  // reusable function of `ratio` (not just the default `uRatio`) so a
+  // flicker/pulse-driven animation can rebuild this SAME band with its own
+  // GPU-jittered ratio — see this function's own header.
+  const computeSwitchColorBand = (ratio) => {
+    const attenuationStrength = uAttenuationEased.mul(float(0.7));
+    const lowerEdge = ratio.mul(float(0.99).sub(attenuationStrength));
+    const upperEdge = clamp(ratio.mul(float(1.01).add(attenuationStrength)), float(0.0001), float(1.0));
+    const t = smoothstep(lowerEdge, upperEdge, dist);
+    return mix(uBrightColor, uDimColor, t);
+  };
+  const defaultSeed = computeSwitchColorBand(uRatio);
 
   // ANIMATION SEED INJECTION — see this function's own header. Absent
   // `animation`/`buildIlluminationSeed` (the overwhelming common case, and
   // every call site before this param existed): finalColor === defaultSeed,
-  // animationUniforms === {}, output is unchanged. `skipExposure` is a
-  // second, rarer escape hatch: docs/reference/foundry-v14-light-animations-
-  // audit.md's own §4 `pulse` entry is the ONE Foundry animation (of 27)
-  // whose illumination channel skips `${ADJUSTMENTS}` (== EXPOSURE here)
-  // entirely, verified against source — a JS-time decision (which nodes get
-  // BUILT), not a runtime one, per the `tsl/no-uniform-gates` wall ("tier
-  // selection is a JS `if` at graph-build time — the nodes are never
-  // constructed"; a runtime toggle would still pay for the compiled branch).
-  const animationUniforms = {};
+  // output is unchanged. `skipExposure` is a second, rarer escape hatch:
+  // docs/reference/foundry-v14-light-animations-audit.md's own §4 `pulse`
+  // entry is the ONE Foundry animation (of 27) whose illumination channel
+  // skips `${ADJUSTMENTS}` (== EXPOSURE here) entirely, verified against
+  // source — a JS-time decision (which nodes get BUILT), not a runtime one,
+  // per the `tsl/no-uniform-gates` wall ("tier selection is a JS `if` at
+  // graph-build time — the nodes are never constructed"; a runtime toggle
+  // would still pay for the compiled branch).
   let finalColor = defaultSeed;
   let skipExposure = false;
+  let uSpeedRaw = null;
+  let uReverseSign = null;
+  let uSeed = null;
+  let uIntensityRaw = null;
+  let uWindCenter = null;
+  let uWindExposure = null;
+  let uWindResponse = null;
   if (animation?.buildIlluminationSeed) {
-    const seeded = animation.buildIlluminationSeed({ THREE, uBrightColor, uDimColor, uRatio, dist, defaultSeed });
+    uSpeedRaw = uniform(float(5));
+    uReverseSign = uniform(float(1));
+    uSeed = uniform(float(0));
+    uIntensityRaw = uniform(float(5));
+    const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
+    // SHARED WIND (Wind.md Tier 0) — OPT-IN: built only when the caller
+    // supplies BOTH a world position and a finite exposure (an ordinary,
+    // non-wind-aware Foundry light supplies neither, so it builds nothing
+    // extra and pays nothing extra). `wind` is a vec2 node, sampled ONCE
+    // here — a seed builder wanting it reads `args.wind` directly rather
+    // than calling `sampleWind` itself, so there is exactly one call site
+    // per light, never a per-animation re-derivation of the same field.
+    let wind;
+    if (Number.isFinite(windExposure)) {
+      uWindCenter = uniform(vec2(windCenter?.x ?? 0, windCenter?.y ?? 0));
+      uWindExposure = uniform(float(windExposure));
+      // A THIRD wind uniform, same opt-in gate — see this function's own
+      // `windResponse` param doc. Defaults to 1 (the tuned reference) so a
+      // caller carrying wind machinery but not yet passing windResponse
+      // still gets today's look, never a silently wind-deaf light.
+      uWindResponse = uniform(float(Number.isFinite(windResponse) ? windResponse : 1));
+      wind = windHandle.node(THREE.TSL, {
+        centerXY: uWindCenter,
+        time: uGlobalTimeMs,
+        exposure: uWindExposure,
+      });
+    }
+    const seeded = animation.buildIlluminationSeed({
+      THREE,
+      uBrightColor,
+      uDimColor,
+      uRatio,
+      uAttenuationEased,
+      dist,
+      defaultSeed,
+      time,
+      uIntensityRaw,
+      computeSwitchColorBand,
+      quality: animationQuality,
+      wind,
+      windResponse: uWindResponse,
+    });
     finalColor = seeded.finalColor;
     skipExposure = seeded.skipExposure === true;
-    Object.assign(animationUniforms, seeded.uniforms ?? {});
   }
 
   // EXPOSURE, audit §8/§18 (`AdaptiveIlluminationShader.EXPOSURE`) — a
@@ -470,8 +708,19 @@ export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, u
   // becomes a razor-thin (not degenerate/undefined) transition instead —
   // numerically harmless, avoids relying on a shader backend's edge0==edge1
   // smoothstep behaviour being well-defined.
-  const attenForFalloff = uAttenuationEased.max(float(0.0001));
-  const falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  // FALLOFF MODEL (2026-07-20) — a graph-BUILD-time JS branch (never a
+  // uniform, per no-uniform-gates): `foundry` is the default attenuation-
+  // slider corona above; `inverseSquare` is a physical bright-centre/fast-
+  // drop-off curve (candles — see inverseSquareFalloff's own header). The
+  // attenuation slider does not apply to the inverse-square model (its
+  // steepness is INVERSE_SQUARE_STEEPNESS, not the slider).
+  let falloff;
+  if (falloffModel === 'inverseSquare') {
+    falloff = inverseSquareFalloff(THREE.TSL, dist);
+  } else {
+    const attenForFalloff = uAttenuationEased.max(float(0.0001));
+    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  }
 
   // THE SOFT-EDGE MARGIN — a SEPARATE, constant-width antialiasing term
   // (see this module's header): signedDist < 0 means inside the true
@@ -501,8 +750,28 @@ export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, u
   const combinedFalloff = falloff;
   void edgeSoftFactor;
 
+  // SUN-SHADOW ATTENUATION — see this module's own header for the two failed
+  // per-light attempts and why this has to be per-FRAGMENT. `positionWorld.xy`
+  // is the real fragment world position (the exact node + world-rect mapping
+  // `region-darkness.js` and `environmental-light.js#buildOutdoorsGate`
+  // already use), so the floor is shadowed precisely where the shadow is.
+  //
+  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
+  // field supplied the lookup is absent from the compiled shader entirely and
+  // this material is byte-identical to what it was before cast shadows existed.
+  let backgroundFloor = uBackgroundColor;
+  if (sunShadowTexture && uSunShadowRect) {
+    const shadowTexNode = texture(sunShadowTexture);
+    const u = positionWorld.x.sub(uSunShadowRect.x).div(uSunShadowRect.z.sub(uSunShadowRect.x));
+    const v = positionWorld.y.sub(uSunShadowRect.y).div(uSunShadowRect.w.sub(uSunShadowRect.y));
+    // Clamped, never wrapped — a light overhanging the field's edge reads the
+    // nearest edge value rather than a caster from the far side of the map.
+    const sunVis = shadowTexNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
+    backgroundFloor = uBackgroundColor.mul(sunVis);
+  }
+
   // FRAGMENT_END (illumination), audit §5c: mix(background, finalColor, depth).
-  const outputColor = mix(uBackgroundColor, finalColorExposed, combinedFalloff);
+  const outputColor = mix(backgroundFloor, finalColorExposed, combinedFalloff);
 
   const material = new THREE.NodeMaterial();
   material.transparent = false;
@@ -518,5 +787,20 @@ export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, u
   material.blendDstAlpha = THREE.OneFactor;
   material.fragmentNode = vec4(outputColor, float(1));
 
-  return { material, uRatio, uAttenuationEased, uExposure, uEdgeCount, uEdgeSoftMargin, edgePoints, animationUniforms };
+  return {
+    material,
+    uRatio,
+    uAttenuationEased,
+    uExposure,
+    uEdgeCount,
+    uEdgeSoftMargin,
+    edgePoints,
+    uSpeedRaw,
+    uReverseSign,
+    uSeed,
+    uIntensityRaw,
+    uWindCenter,
+    uWindExposure,
+    uWindResponse,
+  };
 }

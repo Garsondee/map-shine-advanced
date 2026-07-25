@@ -13,7 +13,10 @@ import { run as runWorldQuad } from './world-quad.test.mjs';
 import { run as runMaskCatalog } from './mask-catalog.test.mjs';
 import { run as runMaskDerive } from './mask-derive.test.mjs';
 import { run as runMaskAuthority } from './mask-authority.test.mjs';
+import { run as runSkyReachAccess } from './sky-reach-access.test.mjs';
 import { run as runPaintMask } from './paint-mask.test.mjs';
+import { run as runAnchorCatalog } from './anchor-catalog.test.mjs';
+import { run as runAnchorAuthority } from './anchor-authority.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -55,7 +58,10 @@ const suites = [
   ['mask-catalog', runMaskCatalog],
   ['mask-derive', runMaskDerive],
   ['mask-authority', runMaskAuthority],
+  ['sky-reach-access', runSkyReachAccess],
   ['paint-mask', runPaintMask],
+  ['anchor-catalog', runAnchorCatalog],
+  ['anchor-authority', runAnchorAuthority],
 ];
 
 for (const [name, fn] of suites) {

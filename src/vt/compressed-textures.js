@@ -22,20 +22,48 @@ const _pending = new Map();
 let _nextId = 1;
 /** Diagnostics counters — surfaced so a report can tell a cache hit from a fresh
  * BC1 encode from a BC7 encode, without guessing (memory: feedback_instruments_must_not_lie). */
-const _stats = { requests: 0, bc1: 0, bc7: 0, failed: 0, cached: 0, unavailable: 0 };
+const _stats = {
+  requests: 0,
+  bc1: 0,
+  bc7: 0,
+  failed: 0,
+  cached: 0,
+  unavailable: 0,
+  /** Coarse-alpha requests (the `coverAbove`/`skyReach` input — see
+   * requestCoarseAlphaGrid). Counted separately from `requests` so a report can
+   * tell "the shadow has no casters because nothing asked" apart from "…because
+   * every ask failed" (feedback_instruments_must_not_lie). */
+  alphaRequests: 0,
+  alphaOk: 0,
+  alphaFailed: 0,
+};
 
 function ensureWorker() {
   if (_worker || _unavailable) return _worker;
   try {
     _worker = new Worker(new URL('./bc-compress.worker.js', import.meta.url), { type: 'module' });
     _worker.onmessage = (e) => {
-      const { id, ok, format, levels, width, height, cached, alphaStats } = e.data || {};
+      const { id, ok, mode, format, levels, width, height, cached, alphaStats } = e.data || {};
       const p = _pending.get(id);
       if (!p) return;
       _pending.delete(id);
       if (!ok) {
-        _stats.failed++;
+        if (p.mode === 'alphaGrid') _stats.alphaFailed++;
+        else _stats.failed++;
         p.resolve(null); // resolve (not reject): the caller's contract is "null ⇒ use raw"
+        return;
+      }
+      if (mode === 'alphaGrid') {
+        _stats.alphaOk++;
+        if (cached) _stats.cached++;
+        p.resolve({
+          width,
+          height,
+          gridW: e.data.gridW,
+          gridH: e.data.gridH,
+          grid: new Uint8Array(e.data.grid),
+          cached: !!cached,
+        });
         return;
       }
       if (cached) _stats.cached++;
@@ -85,13 +113,48 @@ export function requestCompressedTexture(src) {
     return Promise.resolve(null);
   }
   const id = _nextId++;
-  const promise = new Promise((resolve) => _pending.set(id, { resolve }));
+  const promise = new Promise((resolve) => _pending.set(id, { resolve, mode: 'bc' }));
   try {
     w.postMessage({ id, src });
   } catch (_) {
     _pending.delete(id);
     _stats.failed++;
     return Promise.resolve(null); // not cloneable / worker gone — fall back to raw
+  }
+  return promise;
+}
+
+/**
+ * Ask the worker for `src`'s art opacity reduced to <=512 texels a side — the
+ * input `scene/mask-derive.js` needs to derive `coverAbove`/`skyReach`, and has
+ * been starved of since the streaming engine was retired (see
+ * `vt/coarse-alpha.js`'s header for the defect this repairs).
+ *
+ * DEGRADATION-FIRST, exactly like {@link requestCompressedTexture}: `null` means
+ * "no coverage data for this item". The caller must record that as MISSING —
+ * never as "nothing above me", which is a different and much more dangerous
+ * claim (it is the silent-numeric-default class that
+ * feedback_required_masks_fail_loud exists to kill).
+ *
+ * @param {string} src root-absolute asset URL (the same string the raw path fetches)
+ * @returns {Promise<{width:number, height:number, gridW:number, gridH:number,
+ *   grid:Uint8Array, cached:boolean} | null>}
+ */
+export function requestCoarseAlphaGrid(src) {
+  _stats.alphaRequests++;
+  const w = ensureWorker();
+  if (!w) {
+    _stats.unavailable++;
+    return Promise.resolve(null);
+  }
+  const id = _nextId++;
+  const promise = new Promise((resolve) => _pending.set(id, { resolve, mode: 'alphaGrid' }));
+  try {
+    w.postMessage({ id, src, mode: 'alphaGrid' });
+  } catch (_) {
+    _pending.delete(id);
+    _stats.alphaFailed++;
+    return Promise.resolve(null);
   }
   return promise;
 }

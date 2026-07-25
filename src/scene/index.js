@@ -38,7 +38,25 @@ export {
   assembleLayerDescriptors,
   extractionPlanForLayer,
 } from './mask-catalog.js';
-export { createMaskAuthority } from './mask-authority.js';
+export { createMaskAuthority, RequiredMaskMissingError } from './mask-authority.js';
+// THE SKY-REACH SERVICE (scene/sky-reach-access.js's header is the map) — the
+// ONE door for "what is between this point and the open sky?", shared by cast
+// shadows now and rain when it lands. Author's own instruction, 2026-07-24:
+// sky-reach has to be an API, not a grid five consumers each sample differently.
+export { createSkyReachAccess, COVERED_THRESHOLD } from './sky-reach-access.js';
+
+// THE ANCHOR CATALOG + AUTHORITY (scene/anchor-catalog.js's header is the map):
+// the "place" sibling of the mask authority's "paint" — discrete point effects
+// (a candle flame) as the successor to V2's Map Points. The catalog is the ONLY
+// home of the V2 effectTarget → anchor kind mapping the importer relies on.
+export {
+  ANCHOR_KINDS,
+  validateAnchorCatalog,
+  anchorKindById,
+  anchorKindsForEffect,
+  anchorKindByV2EffectTarget,
+} from './anchor-catalog.js';
+export { createAnchorAuthority, mergeAnchorSources, nearestAnchor } from './anchor-authority.js';
 export { MASK_GRID_MAX_DIM, computeMaskGridSpec, sampleMaskGridWorld, maskGridMean } from './mask-derive.js';
 export {
   createPaintLayer,

@@ -228,14 +228,14 @@ _None at this threshold._
 
 ## Scoring reference
 
-| Signal | Score impact |
-|--------|--------------|
-| NOT_IN_RUNTIME_PARAMS | +40 |
-| ZERO_CODE_REFS | +35 |
-| NOT_IN_UI_GROUP | +10 |
-| UI_BRIDGE_WIRED | −45 |
-| RUNTIME_RESOLVED | −35 |
-| PREFIX_WIRED | −20 |
-| SHADER_REF | −15 |
-| HIDDEN | −30 |
-| MARKED_UNUSED | −40 |
+| Signal                | Score impact |
+| --------------------- | ------------ |
+| NOT_IN_RUNTIME_PARAMS | +40          |
+| ZERO_CODE_REFS        | +35          |
+| NOT_IN_UI_GROUP       | +10          |
+| UI_BRIDGE_WIRED       | −45          |
+| RUNTIME_RESOLVED      | −35          |
+| PREFIX_WIRED          | −20          |
+| SHADER_REF            | −15          |
+| HIDDEN                | −30          |
+| MARKED_UNUSED         | −40          |

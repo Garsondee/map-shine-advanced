@@ -10,13 +10,13 @@
 
 ## Principles
 
-| Principle | Rule |
-|-----------|------|
-| **Zero parameter loss** | Reorganize labels and folders only; every `paramId` and persistence key stays stable unless explicitly migrated with a scene-flag bridge. |
-| **Progressive disclosure** | Default view = artist-facing folders. Power-user / sim / RT controls live in nested **Advanced** folders, not scattered `advanced: true` bindings. |
-| **Folder context strips prefixes** | Inside `Flame Texture`, use **Opacity** not **Flame Texture Opacity**. |
-| **One vocabulary** | Pick global terms (see Part 1) and apply across all effects. |
-| **GM vs dev separation** | GM transition / bounds / strike triggers near the top of weather & atmosphere; Hz, RT scale, stride scans in Advanced / Developer. |
+| Principle                          | Rule                                                                                                                                               |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Zero parameter loss**            | Reorganize labels and folders only; every `paramId` and persistence key stays stable unless explicitly migrated with a scene-flag bridge.          |
+| **Progressive disclosure**         | Default view = artist-facing folders. Power-user / sim / RT controls live in nested **Advanced** folders, not scattered `advanced: true` bindings. |
+| **Folder context strips prefixes** | Inside `Flame Texture`, use **Opacity** not **Flame Texture Opacity**.                                                                             |
+| **One vocabulary**                 | Pick global terms (see Part 1) and apply across all effects.                                                                                       |
+| **GM vs dev separation**           | GM transition / bounds / strike triggers near the top of weather & atmosphere; Hz, RT scale, stride scans in Advanced / Developer.                 |
 
 ---
 
@@ -36,25 +36,25 @@ If a folder is named **Flame Texture**, parameters inside should be:
 
 Use consistent suffixes in labels:
 
-| Unit | Suffix | Examples |
-|------|--------|----------|
-| Pixels | `(px)` | Pool Radius (px), Edge inflate (px) |
-| Seconds | `(s)` | Life Min (s), Warm-up (s) |
-| Milliseconds | `(ms)` | Hide Delay (ms) |
-| Degrees | `(deg)` | Heading (deg), Angle (deg) |
-| Grid / world units | `(u)` | Length (u), Beam length (u) |
-| Normalized 0–1 | *(none or "01")* | Intensity, Strength when already 0–1 sliders |
+| Unit               | Suffix           | Examples                                     |
+| ------------------ | ---------------- | -------------------------------------------- |
+| Pixels             | `(px)`           | Pool Radius (px), Edge inflate (px)          |
+| Seconds            | `(s)`            | Life Min (s), Warm-up (s)                    |
+| Milliseconds       | `(ms)`           | Hide Delay (ms)                              |
+| Degrees            | `(deg)`          | Heading (deg), Angle (deg)                   |
+| Grid / world units | `(u)`            | Length (u), Beam length (u)                  |
+| Normalized 0–1     | _(none or "01")_ | Intensity, Strength when already 0–1 sliders |
 
 Avoid mixing **Min Interval (s)** with **Fade in (ms)** in the same sibling group without reason — prefer one time unit per folder.
 
 ### 1.3 Standardize terminology
 
-| Concept | **Pick one** | Notes |
-|---------|--------------|-------|
-| Strength vs intensity | **Intensity** (recommended) | e.g. unify "Micro-Chop Intensity" and "Wave Strength" → Intensity in folder context |
-| Opacity vs alpha | **Opacity** | Artist-facing |
-| Color vs tint | **Color** = replacement; **Tint** = multiplier / grade | Camera Grade uses Tint correctly |
-| Scale vs size | **Scale** = multiplier; **Size** = absolute | Size Min/Max (px), UV Scale |
+| Concept               | **Pick one**                                           | Notes                                                                               |
+| --------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| Strength vs intensity | **Intensity** (recommended)                            | e.g. unify "Micro-Chop Intensity" and "Wave Strength" → Intensity in folder context |
+| Opacity vs alpha      | **Opacity**                                            | Artist-facing                                                                       |
+| Color vs tint         | **Color** = replacement; **Tint** = multiplier / grade | Camera Grade uses Tint correctly                                                    |
+| Scale vs size         | **Scale** = multiplier; **Size** = absolute            | Size Min/Max (px), UV Scale                                                         |
 
 Document the chosen glossary in `Docs/` and enforce in schema `label` strings.
 
@@ -82,11 +82,11 @@ Document the chosen glossary in `Docs/` and enforce in schema `label` strings.
 
 Avoid **folder title + Enabled** reading as redundant ("Glass Refraction: Enabled").
 
-| Pattern | Example |
-|---------|---------|
-| Folder + short toggle | Folder: **Glass Refraction** → toggle label: **On** |
-| Descriptive toggle | **Enable glass refraction** (no separate folder title duplication) |
-| Master enable | Keep effect-level **Enabled** under standard chrome (already global) |
+| Pattern               | Example                                                              |
+| --------------------- | -------------------------------------------------------------------- |
+| Folder + short toggle | Folder: **Glass Refraction** → toggle label: **On**                  |
+| Descriptive toggle    | **Enable glass refraction** (no separate folder title duplication)   |
+| Master enable         | Keep effect-level **Enabled** under standard chrome (already global) |
 
 For sub-features (`smokeEnabled`, `coalBedEnabled`), prefer **Enable smoke** inside the **Smoke** folder.
 
@@ -106,20 +106,20 @@ Reorganize `buildQuickActionsSection()` in `scripts/ui/tweakpane-manager.js` int
 
 - Defaults, Undo Defaults
 - Texture Manager, Effect Stack
-- Apply to All Scenes… *(GM)*
+- Apply to All Scenes… _(GM)_
 - Scene Recovery, Scene Reset
 
 #### Camera & Movement
 
 - Streaming Minimap, Tile Streaming Report
 - Token Movement, Tile Motion
-- Camera Path *(GM)*
-- Map Points *(GM)*, Levels Authoring *(GM)*
+- Camera Path _(GM)_
+- Map Points _(GM)_, Levels Authoring _(GM)_
 
-#### Developer & Diagnostics *(advanced group — entire block hidden until Advanced Mode)*
+#### Developer & Diagnostics _(advanced group — entire block hidden until Advanced Mode)_
 
 - Diagnostic Center, Pixel Probe, Breaker Box, Performance Recorder
-- Copy From Scene *(GM)*, Reset Effects… *(GM)*
+- Copy From Scene _(GM)_, Reset Effects… _(GM)_
 
 **Note:** Tile Streaming Report stays visible in Camera & Movement (not advanced) — it is user-facing diagnostics, not dev-only.
 
@@ -268,11 +268,11 @@ Optical distortions — Distortion amount, Vignette, Chromatic edge power, Digit
 
 **Options (no param loss):**
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **A. Category subfolder** | Register a Tweakpane folder **Stylized Filters** under `post`; move effect folders inside via `registerEffectUnderEffect` or display order | Still six expands |
-| **B. Single selector + dynamic schema** | One folder; dropdown picks active stylistic effect; show that effect's schema | Large refactor; persistence per effect must remain |
-| **C. Collapsed default** | Keep six folders; default `expanded: false`; add category separator label | Least engineering risk |
+| Approach                                | Pros                                                                                                                                       | Cons                                               |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| **A. Category subfolder**               | Register a Tweakpane folder **Stylized Filters** under `post`; move effect folders inside via `registerEffectUnderEffect` or display order | Still six expands                                  |
+| **B. Single selector + dynamic schema** | One folder; dropdown picks active stylistic effect; show that effect's schema                                                              | Large refactor; persistence per effect must remain |
+| **C. Collapsed default**                | Keep six folders; default `expanded: false`; add category separator label                                                                  | Least engineering risk                             |
 
 **Recommendation:** Start with **C**, then **A** if still too noisy. Avoid **B** until stylistic persistence rules are fully mapped (`isStylisticEffectId` gate in `canvas-replacement.js`).
 
@@ -286,12 +286,12 @@ Optical distortions — Distortion amount, Vignette, Chromatic edge power, Digit
 
 **Target:**
 
-| Folder | Contents |
-|--------|----------|
-| **Engine logic** | Probes, fades, adaptations |
-| **Environmental thresholds** | Storm, overcast, night, day logic |
-| **Token modifiers** | Canopy, window-lit, building shadows |
-| **Base packs (indoor/outdoor)** | Tight grid or readonly JSON blocks |
+| Folder                          | Contents                             |
+| ------------------------------- | ------------------------------------ |
+| **Engine logic**                | Probes, fades, adaptations           |
+| **Environmental thresholds**    | Storm, overcast, night, day logic    |
+| **Token modifiers**             | Canopy, window-lit, building shadows |
+| **Base packs (indoor/outdoor)** | Tight grid or readonly JSON blocks   |
 
 Keep live diagnostics button under standard chrome.
 
@@ -301,11 +301,11 @@ Keep live diagnostics button under standard chrome.
 
 **Target:** **Shadow caster systems** — one panel, four enable toggles, shared Length/Softness/Smear when unified, or per-caster subtabs.
 
-| Approach | Engineering impact |
-|----------|-------------------|
-| **UI-only wrapper** | New Tweakpane section that embeds/links to four `effectId`s; no merge | Low |
-| **Facade effect** | Single `shadow-casters` schema proxies to four compositor instances | Medium — persistence migration |
-| **Compositor merge** | One `ShadowCasterEffectV2` | High — rendering coupling |
+| Approach             | Engineering impact                                                    |
+| -------------------- | --------------------------------------------------------------------- | ------------------------------ |
+| **UI-only wrapper**  | New Tweakpane section that embeds/links to four `effectId`s; no merge | Low                            |
+| **Facade effect**    | Single `shadow-casters` schema proxies to four compositor instances   | Medium — persistence migration |
+| **Compositor merge** | One `ShadowCasterEffectV2`                                            | High — rendering coupling      |
 
 **Recommendation:** **UI-only wrapper** first (Part 4.2 phase 2). Do **not** merge compositor effects without explicit rendering sign-off.
 
@@ -313,12 +313,12 @@ Keep live diagnostics button under standard chrome.
 
 ### 4.3 Weather & atmosphere
 
-| Current | Proposed display name |
-|---------|---------------------|
-| Weather | **Precipitation & global weather** |
-| Lightning | **Overhead lightning bolts** (or similar — local strikes) |
-| Landscape Lightning | **Atmospheric flash lighting** (landscape / storm sync) |
-| Atmospheric Fog | Keep; add sub-area **Cloud systems** |
+| Current                          | Proposed display name                                                  |
+| -------------------------------- | ---------------------------------------------------------------------- |
+| Weather                          | **Precipitation & global weather**                                     |
+| Lightning                        | **Overhead lightning bolts** (or similar — local strikes)              |
+| Landscape Lightning              | **Atmospheric flash lighting** (landscape / storm sync)                |
+| Atmospheric Fog                  | Keep; add sub-area **Cloud systems**                                   |
 | Ash Ground Clouds, Sprite Clouds | Under **Cloud systems** heading or inside Fog & Air as sibling folders |
 
 **Wind** stays separate (scene-wide field — correct).
@@ -329,10 +329,10 @@ Keep live diagnostics button under standard chrome.
 
 **Problem:** Parallel parameters (wave mix, gust, sway, flutter, colors, shadows).
 
-| Approach | Notes |
-|----------|-------|
+| Approach                  | Notes                                                             |
+| ------------------------- | ----------------------------------------------------------------- | ------------------------------------------------ |
 | **Unified Foliage panel** | Dropdown: Target = Bush / Tree / Both; single schema with routing | Requires dual callback or shared param namespace |
-| **Mirrored layout** | Keep two `effectId`s; enforce 1:1 folder order and labels | Low risk — **recommended first** |
+| **Mirrored layout**       | Keep two `effectId`s; enforce 1:1 folder order and labels         | Low risk — **recommended first**                 |
 
 ---
 
@@ -387,15 +387,15 @@ Priority order by control count / user traffic:
 
 ## Technical Constraints (do not break)
 
-| Constraint | Source |
-|------------|--------|
-| **paramId stability** | Scene flags, world-based storage, presets, `applyCurrentEffectsToAllScenes` |
-| **Mask status rows** | `createMaskStatusSchemaGroup(s)` under **Enabled** — see `Docs/tweakpane-texture-status-instruction-concise.md` |
-| **World Based** | Only `lighting` and `colorCorrection` today — renaming display titles is fine |
-| **Stylistic effects** | ASCII, dot, halftone, etc. — special enabled/scene-flag gate; don't batch-enable blindly |
-| **GM-only params** | `gmOnly: true` — keep on bounds/transition controls |
-| **Weather external groups** | `categoryId: 'particle'` — rain/snow folders live under Particles category |
-| **module.json version** | Bump only after user confirms a phase works |
+| Constraint                  | Source                                                                                                          |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **paramId stability**       | Scene flags, world-based storage, presets, `applyCurrentEffectsToAllScenes`                                     |
+| **Mask status rows**        | `createMaskStatusSchemaGroup(s)` under **Enabled** — see `Docs/tweakpane-texture-status-instruction-concise.md` |
+| **World Based**             | Only `lighting` and `colorCorrection` today — renaming display titles is fine                                   |
+| **Stylistic effects**       | ASCII, dot, halftone, etc. — special enabled/scene-flag gate; don't batch-enable blindly                        |
+| **GM-only params**          | `gmOnly: true` — keep on bounds/transition controls                                                             |
+| **Weather external groups** | `categoryId: 'particle'` — rain/snow folders live under Particles category                                      |
+| **module.json version**     | Bump only after user confirms a phase works                                                                     |
 
 ---
 
@@ -410,14 +410,14 @@ Priority order by control count / user traffic:
 
 ## Related Files
 
-| File | Role |
-|------|------|
-| `scripts/ui/tweakpane-manager.js` | Quick Actions, tokens, sun/shadows, post integrations, `registerEffect`, Advanced Mode |
-| `scripts/ui/effect-categories.js` | Category order and titles |
-| `scripts/foundry/canvas-replacement.js` | Effect registration order and categories |
-| `scripts/compositor-v2/effects/*EffectV2.js` | Per-effect `getControlSchema()` |
-| `scripts/tools/audit-tweakpane-controls.mjs` | Regenerate inventory after changes |
+| File                                         | Role                                                                                   |
+| -------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `scripts/ui/tweakpane-manager.js`            | Quick Actions, tokens, sun/shadows, post integrations, `registerEffect`, Advanced Mode |
+| `scripts/ui/effect-categories.js`            | Category order and titles                                                              |
+| `scripts/foundry/canvas-replacement.js`      | Effect registration order and categories                                               |
+| `scripts/compositor-v2/effects/*EffectV2.js` | Per-effect `getControlSchema()`                                                        |
+| `scripts/tools/audit-tweakpane-controls.mjs` | Regenerate inventory after changes                                                     |
 
 ---
 
-*Last updated: 2026-06-24*
+_Last updated: 2026-06-24_

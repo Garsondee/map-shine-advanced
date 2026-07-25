@@ -11,6 +11,7 @@ import {
   applyPanByPixels,
   applyZoomAtPixel,
   viewToWorldRect,
+  clampRectToBounds,
   clampHalfSpan,
   smoothingAlpha,
   computeTargetPanVelocity,
@@ -110,6 +111,35 @@ export function run(t) {
     ok(
       'viewToWorldRect: correct rect from center+halfSpan',
       r.minX === 5500 && r.maxX === 6500 && r.minY === 5500 && r.maxY === 6500
+    );
+  }
+
+  // --- clampRectToBounds -------------------------------------------------
+  {
+    const bounds = { x: 1000, y: 2000, width: 500, height: 300 }; // [1000,1500] x [2000,2300]
+
+    const inside = clampRectToBounds({ minX: 1100, minY: 2050, maxX: 1400, maxY: 2250 }, bounds);
+    ok(
+      'clampRectToBounds: a rect fully inside bounds is untouched',
+      inside.minX === 1100 && inside.minY === 2050 && inside.maxX === 1400 && inside.maxY === 2250
+    );
+
+    const overhang = clampRectToBounds({ minX: 800, minY: 1900, maxX: 1600, maxY: 2400 }, bounds);
+    ok(
+      'clampRectToBounds: a rect straddling every edge clamps to bounds exactly',
+      overhang.minX === 1000 && overhang.minY === 2000 && overhang.maxX === 1500 && overhang.maxY === 2300
+    );
+
+    const outside = clampRectToBounds({ minX: -500, minY: -500, maxX: -100, maxY: -100 }, bounds);
+    ok(
+      'clampRectToBounds: a rect entirely outside bounds collapses to zero-area at the nearest edge, never inverted',
+      outside.minX === 1000 && outside.minY === 2000 && outside.maxX === 1000 && outside.maxY === 2000
+    );
+
+    const outsideFar = clampRectToBounds({ minX: 5000, minY: 5000, maxX: 6000, maxY: 6000 }, bounds);
+    ok(
+      'clampRectToBounds: also collapses cleanly on the far side (max edge), never inverted',
+      outsideFar.minX === 1500 && outsideFar.minY === 2300 && outsideFar.maxX === 1500 && outsideFar.maxY === 2300
     );
   }
 

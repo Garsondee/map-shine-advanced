@@ -27,6 +27,7 @@ const result = graph.execute(frameCtx); // topo-sort → allocate → run → ti
 ```
 
 Rules the implementation must keep:
+
 1. **Logical resources, physical pool.** A `writes` entry declares `{ size: 'screen' | [w,h], format, type, mrtCount? }` once, at registration. The scheduler allocates from a transient pool and **aliases** physical RTs whose logical lifetimes don't overlap — this replaces `postA/postB` ping-pong guesswork with computed correctness, and is where the RT-memory win comes from.
 2. **Execution order is derived** (topological, stable-sorted by registration order for ties), never authored. A cycle or a read-before-write is a **loud registration-time error** (§14.1 principle 4 — no silent fallbacks).
 3. **Every pass is timed** (CPU wall-clock always; `EXT_disjoint_timer_query_webgl2` GPU timings when available) into the same structure `_recordPassTiming` feeds today, so crash/perf reports name passes with zero extra work (§14.1 principle 6).
@@ -40,47 +41,53 @@ Non-goals (rejected complexity): multi-queue scheduling, automatic pass splittin
 Verified V2 sites in parentheses. **Bold** passes are new machinery; the rest wrap existing code.
 
 ### Imports (not passes)
+
 Sim textures (P0 `update()` products — fire/water/weather sims stay untouched, Forward+ §14.2), mask-compositor bundles (outdoors low-res per floor, authored masks), vision/fog RTs from `FogOfWarEffectV2`, Foundry document state.
 
 ### Producers (screen-sized only — §14.1 principle 1)
-| V3 pass | Wraps (V2 site) | Notes |
-|---|---|---|
-| `shadow.overhead` | `OverheadShadowsEffectV2.render` (:5417) + ceiling transmittance (:5428) | Producer P1 stays; *application* moves to the unified shader (B3) |
-| `shadow.structural` | building + skyReach + painted producers (:5446–5459, incl. lightning re-render loop) | Same |
-| `light.prepass` | `renderLightOverrideMasks` (:5403), `ShadowDriverState` publish (:5410) | Feeds cluster build |
-| **`light.clusterBuild`** | *new* (CPU) | Screen-tile light bins → DataTexture/UBO (Phase 4 proper; B2) |
-| `masks.screenOnce` | specular/iridescence/prism renders (:5317–5319) | Already once-per-frame; unchanged wiring, now declared |
-| `cloud.render` | cloud producer | Unchanged |
+
+| V3 pass                  | Wraps (V2 site)                                                                      | Notes                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| `shadow.overhead`        | `OverheadShadowsEffectV2.render` (:5417) + ceiling transmittance (:5428)             | Producer P1 stays; _application_ moves to the unified shader (B3) |
+| `shadow.structural`      | building + skyReach + painted producers (:5446–5459, incl. lightning re-render loop) | Same                                                              |
+| `light.prepass`          | `renderLightOverrideMasks` (:5403), `ShadowDriverState` publish (:5410)              | Feeds cluster build                                               |
+| **`light.clusterBuild`** | _new_ (CPU)                                                                          | Screen-tile light bins → DataTexture/UBO (Phase 4 proper; B2)     |
+| `masks.screenOnce`       | specular/iridescence/prism renders (:5317–5319)                                      | Already once-per-frame; unchanged wiring, now declared            |
+| `cloud.render`           | cloud producer                                                                       | Unchanged                                                         |
 
 ### The unified pass (B1 core)
-| V3 pass | Content |
-|---|---|
-| **`unified.geometry`** | ONE geometry pass over the already-Z-unified bus scene (Forward+ §12.1): all floors at real Z, hardware depth, alphaTest holes. MRT: `scene.hdr` + `attr` (B0-1). From B2 it also runs the clustered forward light loop per fragment; from B3, shadow application terms; B4 folds fire glow onto the shared primitive. |
-| **`unified.transparents`** | Class B set drawn after opaques, `depthTest:true / depthWrite:false`, painter's-order within floor bands (B0-3). Zero-writes `attr` (B0-1 §3.1). |
+
+| V3 pass                    | Content                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`unified.geometry`**     | ONE geometry pass over the already-Z-unified bus scene (Forward+ §12.1): all floors at real Z, hardware depth, alphaTest holes. MRT: `scene.hdr` + `attr` (B0-1). From B2 it also runs the clustered forward light loop per fragment; from B3, shadow application terms; B4 folds fire glow onto the shared primitive. |
+| **`unified.transparents`** | Class B set drawn after opaques, `depthTest:true / depthWrite:false`, painter's-order within floor bands (B0-3). Zero-writes `attr` (B0-1 §3.1).                                                                                                                                                                       |
 
 ### The Class D exception (kept explicitly — Forward+ §4.2/§12.3)
-| V3 pass | Wraps |
-|---|---|
+
+| V3 pass            | Wraps                                                                                                                                                                                                                                                             |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `water.seeThrough` | Post-merge water path: `setPostMergeWaterContext`, `_resolvePostMergeWaterOccluderRT`, bg-alpha-mask build, `WaterEffectV2.render` (:9454–9573). Unchanged through B1–B4; replaced by water-as-geometry at B5, at which point this pass shrinks to splash gating. |
 
 ### Post chain (once, on the single composite)
-| V3 pass | Wraps (V2 site) |
-|---|---|
-| `post.fog` | AtmosphericFog (:9613) — reads `attr.g` instead of stacked outdoors (B2+) |
-| `post.bloom` | Bloom (:9629) |
-| `overlay.splashes` | splash composite, layer 33 (:9653) — stays a separate composite until B4 |
-| `overlay.vegetation` | bush/tree composite, layer 32 (:9673) — same |
-| `post.colorCorrection` | CC (:9718) — the HDR→LDR boundary; reads `attr.g` for outdoors, keeps light-buffer bindings until B2 retires them |
-| `post.stylization` | `_runPostMergeStylizationPasses` chain (:1793): Filter→Sharpen→DotScreen→Halftone→Ascii→…, each becoming a gated pass so the feedback-loop hazard disappears |
-| `post.fogOfWar`, `post.floorDepthBlur`, presentation/upscale | The late chain that today runs after `render()` returns (`mergedFinalRT` → "late pass chain", :9819) — imported into the graph last, unchanged behavior |
+
+| V3 pass                                                      | Wraps (V2 site)                                                                                                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `post.fog`                                                   | AtmosphericFog (:9613) — reads `attr.g` instead of stacked outdoors (B2+)                                                                                    |
+| `post.bloom`                                                 | Bloom (:9629)                                                                                                                                                |
+| `overlay.splashes`                                           | splash composite, layer 33 (:9653) — stays a separate composite until B4                                                                                     |
+| `overlay.vegetation`                                         | bush/tree composite, layer 32 (:9673) — same                                                                                                                 |
+| `post.colorCorrection`                                       | CC (:9718) — the HDR→LDR boundary; reads `attr.g` for outdoors, keeps light-buffer bindings until B2 retires them                                            |
+| `post.stylization`                                           | `_runPostMergeStylizationPasses` chain (:1793): Filter→Sharpen→DotScreen→Halftone→Ascii→…, each becoming a gated pass so the feedback-loop hazard disappears |
+| `post.fogOfWar`, `post.floorDepthBlur`, presentation/upscale | The late chain that today runs after `render()` returns (`mergedFinalRT` → "late pass chain", :9819) — imported into the graph last, unchanged behavior      |
 
 ### What has no V3 pass (retired by design)
-Per-level `{sceneRT, postA, postB}` pool + prepass loop (:9112–9140), per-level lighting/window-light/fire-glow/shadow-lit applications (:9178–9263), per-level water (:9271), alpha-rebind pass (:9352 — its *invariant* moves into `attr.a`, B0-1 §2.1), `LevelCompositePass` (:9433), stacked lit snapshots (:9164/9391), stacked light buffer (:9154/9257), stacked outdoors build (:9605). These retire **at B7**, after parity — not before.
+
+Per-level `{sceneRT, postA, postB}` pool + prepass loop (:9112–9140), per-level lighting/window-light/fire-glow/shadow-lit applications (:9178–9263), per-level water (:9271), alpha-rebind pass (:9352 — its _invariant_ moves into `attr.a`, B0-1 §2.1), `LevelCompositePass` (:9433), stacked lit snapshots (:9164/9391), stacked light buffer (:9154/9257), stacked outdoors build (:9605). These retire **at B7**, after parity — not before.
 
 ## 4. Migration mechanics
 
 - **Flag:** `MapShine.__v3Pipeline` (world setting + URL override), default off. V2 path untouched while off — §14.1 principle 7 (shippable at every step).
-- **B1 scope:** graph + `unified.geometry` (albedo-only, lighting off) + `attr` + debug overlay. Exit: golden-scene *geometry* parity vs V2-with-lighting-off; attribute buffer visualizable.
+- **B1 scope:** graph + `unified.geometry` (albedo-only, lighting off) + `attr` + debug overlay. Exit: golden-scene _geometry_ parity vs V2-with-lighting-off; attribute buffer visualizable.
 - **A/B harness:** with the flag on, a debug command renders one frame through V2 and one through V3 and diffs the outputs (per-pixel abs-diff heat map to the diagnostics overlay). This is the per-milestone acceptance instrument for [B0-golden-scene-expectations.md](B0-golden-scene-expectations.md).
 - **Diagnostics from day one:** graph registers its pass list + last-frame timings + RT pool stats into the crash-report collector (`collectDiagnostics`) the same session B1 lands.
 

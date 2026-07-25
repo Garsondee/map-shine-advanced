@@ -6,8 +6,6 @@
  * corpse the schema refuses to let back in.
  */
 import { validateParticleSystem, EMITTER_SHAPES, BEHAVIORS, SPAWN_KINDS } from '../particle-system-schema.js';
-import { NotBuiltError } from '../../../core/not-built.js';
-import { registerParticleSystem, buildParticlePass, stepParticles } from '../particle-engine.js';
 
 /** A minimal VALID declaration — rain, roughly. */
 const validRain = () => ({
@@ -22,21 +20,6 @@ const validRain = () => ({
 });
 
 export function run(t) {
-  // ---- the engine is a locked door that TEACHES ----------------------------
-  {
-    let err;
-    try {
-      registerParticleSystem(validRain());
-    } catch (e) {
-      err = e;
-    }
-    t.ok('registerParticleSystem throws NotBuiltError', err instanceof NotBuiltError);
-    t.ok('the error cites its governing doc', /Particles\.md/.test(err.message));
-    t.ok('the error says what to do instead', /verify-structure|declaration/i.test(err.message));
-    t.throws('buildParticlePass throws', () => buildParticlePass({}), 'NOT BUILT');
-    t.throws('stepParticles throws', () => stepParticles(0.016), 'NOT BUILT');
-  }
-
   // ---- the happy path ------------------------------------------------------
   {
     const r = validateParticleSystem(validRain());

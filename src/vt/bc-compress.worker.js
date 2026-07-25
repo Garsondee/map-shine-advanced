@@ -48,8 +48,19 @@
  *   { id, ok:true, format:'bc1'|'bc7', levels:[{width,height,blocks:ArrayBuffer}], width, height, cached }
  *   { id, ok:false, error }                     (client falls back to raw)
  * `levels[0]` is the full-resolution level; every buffer is transferred, never copied.
+ *
+ * SECOND JOB (2026-07-24): main may instead post `{ id, src, mode:'alphaGrid' }`
+ * and get back `{ id, ok:true, mode:'alphaGrid', width, height, grid:ArrayBuffer,
+ * gridW, gridH, cached }` — an item's art opacity reduced to <=512 texels a side,
+ * the input `scene/mask-derive.js` needs for `coverAbove`/`skyReach` and has been
+ * starved of since the streaming engine was retired. See `vt/coarse-alpha.js`'s
+ * header for the defect and why this is a separate resized decode rather than a
+ * revived albedo pack. It shares this worker (not a third one) because it is the
+ * same kind of work — fetch, decode, reduce, cache — and a worker that is already
+ * warm costs nothing to reuse.
  */
 import { encodeStriped, computeMipChainDims } from './block-compress.js';
+import { coarseAlphaGridDims, extractAlphaGrid } from './coarse-alpha.js';
 
 // Band height for the memory-bounded encode: rows are pulled and encoded
 // STRIP_ROWS at a time (rounded to a multiple of 4 by encodeStriped). 512 rows of
@@ -69,6 +80,13 @@ const STORE = 'blocks';
 // to the consumer as a texture with no mip chain, silently reproducing the bug
 // this version exists to fix.
 const CACHE_VERSION = 4;
+
+/**
+ * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two
+ * records answer different questions, are produced by different requests, and
+ * bumping one must not throw away megabytes of the other. `alpha:v1:${src}`.
+ */
+const ALPHA_CACHE_VERSION = 1;
 
 let _dbPromise = null;
 function openDb() {
@@ -132,6 +150,68 @@ function encodeMipLevel(bmp, w, h, levelW, levelH, format) {
     return bandCtx.getImageData(0, 0, levelW, sh).data;
   };
   return encodeStriped(readStrip, levelW, levelH, format, STRIP_ROWS);
+}
+
+/**
+ * COARSE ALPHA (see this file's header + vt/coarse-alpha.js). Decode the image
+ * DIRECTLY at grid resolution and read back its alpha channel — no full-size
+ * bitmap, no encode, no GPU. `resizeQuality:'high'` box-averages, so a texel's
+ * value is the fraction of it that is opaque, which is precisely the soft
+ * coverage a cast shadow wants at its silhouette.
+ *
+ * `premultiplyAlpha:'none'` for the same reason the encode path uses it: we want
+ * the source alpha the file actually carries, not alpha already folded into RGB.
+ *
+ * @param {string} src
+ * @returns {Promise<{width:number, height:number, gridW:number, gridH:number,
+ *   grid:Uint8Array, cached:boolean}>}
+ */
+async function handleAlphaGrid(src) {
+  const key = `alpha:v${ALPHA_CACHE_VERSION}:${src}`;
+  const cached = await cacheGet(key).catch(() => null);
+  if (cached) {
+    return {
+      width: cached.width,
+      height: cached.height,
+      gridW: cached.gridW,
+      gridH: cached.gridH,
+      grid: cached.grid,
+      cached: true,
+    };
+  }
+
+  const resp = await fetch(src);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${src}`);
+  const blob = await resp.blob();
+  // Two decodes look wasteful next to `handle()`'s, but they are not the same
+  // image in memory: this one asks the DECODER for the reduced size, so the
+  // full-resolution buffer never exists here. The fetch above will normally be
+  // an HTTP cache hit (the encode path just asked for the same URL).
+  const probe = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+  const width = probe.width;
+  const height = probe.height;
+  const { w: gridW, h: gridH } = coarseAlphaGridDims(width, height);
+  probe.close();
+
+  const small = await createImageBitmap(blob, {
+    premultiplyAlpha: 'none',
+    colorSpaceConversion: 'none',
+    resizeWidth: gridW,
+    resizeHeight: gridH,
+    resizeQuality: 'high',
+  });
+  const canvas = new OffscreenCanvas(gridW, gridH);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.clearRect(0, 0, gridW, gridH);
+  ctx.drawImage(small, 0, 0);
+  small.close();
+  // vt/ decode-time readback (allowed; see no-gpu-readback) — gridW*gridH*4 is
+  // ~1 MB at the 512 cap, not a world-resolution buffer.
+  const imageData = ctx.getImageData(0, 0, gridW, gridH);
+  const grid = extractAlphaGrid(imageData).data;
+
+  await cachePut(key, { width, height, gridW, gridH, grid }).catch(() => {});
+  return { width, height, gridW, gridH, grid, cached: false };
 }
 
 async function handle(src) {
@@ -227,8 +307,29 @@ async function handle(src) {
 }
 
 self.onmessage = async (e) => {
-  const { id, src } = e.data || {};
+  const { id, src, mode } = e.data || {};
   try {
+    if (mode === 'alphaGrid') {
+      const a = await handleAlphaGrid(src);
+      // Transfer the grid's buffer. `a.grid` may be a Uint8Array we just built
+      // OR one structuredClone'd out of IndexedDB — either way its buffer is
+      // ours to give away, and the record in the DB is a separate copy.
+      self.postMessage(
+        {
+          id,
+          ok: true,
+          mode: 'alphaGrid',
+          width: a.width,
+          height: a.height,
+          gridW: a.gridW,
+          gridH: a.gridH,
+          grid: a.grid.buffer,
+          cached: a.cached,
+        },
+        [a.grid.buffer]
+      );
+      return;
+    }
     const r = await handle(src);
     self.postMessage(
       {

@@ -30,17 +30,17 @@ Settings save with the scene (not World Based).
 
 ### Look
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| Blur per level (px) | `blurRadiusPx` | slider | 1 … 30 | 6 |  |
-| | | | | | _How blurry each lower floor looks. Each floor down adds the same amount again._ |
-| Smoothness passes | `itersPerDepth` | slider | 1 … 4 | 2 |  |
-| | | | | | _More passes make the blur softer and less blocky; each pass is extra drawing work._ |
-| Work limit | `maxIters` | slider | 2 … 12 | 6 |  |
-| | | | | | _Stops the blur from running too many passes total, to protect frame rate._ |
+| Control             | id              | Type   | Range  | Default | Notes                                                                                |
+| ------------------- | --------------- | ------ | ------ | ------- | ------------------------------------------------------------------------------------ |
+| Blur per level (px) | `blurRadiusPx`  | slider | 1 … 30 | 6       |                                                                                      |
+|                     |                 |        |        |         | _How blurry each lower floor looks. Each floor down adds the same amount again._     |
+| Smoothness passes   | `itersPerDepth` | slider | 1 … 4  | 2       |                                                                                      |
+|                     |                 |        |        |         | _More passes make the blur softer and less blocky; each pass is extra drawing work._ |
+| Work limit          | `maxIters`      | slider | 2 … 12 | 6       |                                                                                      |
+|                     |                 |        |        |         | _Stops the blur from running too many passes total, to protect frame rate._          |
 
 ### Ungrouped
 
-| Control | id | Type | Range | Default | Notes |
-|---|---|---|---|---|---|
-| enabled | `enabled` | boolean |  | false | hidden |
+| Control | id        | Type    | Range | Default | Notes  |
+| ------- | --------- | ------- | ----- | ------- | ------ |
+| enabled | `enabled` | boolean |       | false   | hidden |

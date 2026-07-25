@@ -9,12 +9,13 @@
     "sourceType": "module"
   },
   "extends": ["eslint:recommended"],
-  "plugins": ["unicorn"],
+  "plugins": ["unicorn", "import"],
   "globals": {
     "Hooks": "readonly",
     "game": "readonly",
     "canvas": "readonly",
     "ui": "readonly",
+    "CanvasAnimation": "readonly",
     "CONFIG": "readonly",
     "CONST": "readonly",
     "foundry": "readonly",
@@ -61,7 +62,11 @@
         "case": "kebabCase",
         "ignore": ["^three\\.module\\.js$"]
       }
-    ]
+    ],
+    "import/named": "error",
+    "import/export": "error",
+    "import/no-unresolved": "error",
+    "import/default": "error"
   },
   "overrides": [
     {

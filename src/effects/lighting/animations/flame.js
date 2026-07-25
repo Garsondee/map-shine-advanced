@@ -3,45 +3,43 @@
  * animations-audit.md §4 `flame`). CPU driver: `animateFlickering` called
  * DIRECTLY (not via `animateTorch`) — its own `flickerAmplification` in
  * registry.js is a FIXED `1`, unlike torch/siren's `intensity/5`; verified
- * against source, not a guess (see light-animation-clock.js#
- * computeFlickerUniforms's own header for the full torch-vs-flame
- * divergence). The richer, harder-to-port sibling of `torch`: same CPU
- * driver family, but illumination ALSO gets a shader-side multiply (torch's
- * illumination needs none at all), and coloration is genuine FBM-driven
- * flame "tongues", not a flat tint.
+ * against source, not a guess. The richer, harder-to-port sibling of
+ * `torch`: illumination gets a shader-side multiply (no ratio-band rebuild
+ * needed — unlike torch, Flame's flicker never touches `ratio`), and
+ * coloration is genuine FBM-driven flame "tongues", not a flat tint.
  *
  * NOISE SUBSTITUTION (documented, not silent — tsl-noise-toolkit.js's own
  * header): Foundry's `fbm(vec2, seed)` is its own bespoke value-noise FBM
  * (`PRNG`+`NOISE`, base-shader-mixin.mjs). This port uses
  * `THREE.TSL.mx_fractal_noise_float` (this project's `fbmFloat` wrapper)
- * instead — a different noise algorithm, same FBM *character* (layered,
- * time-scrolled turbulence), which is what actually reads as "flame" to an
- * eye; Foundry's own two fbm() calls are already decorrelated purely by
- * using different time-scroll rates (8.01/10.72 vs 7.04/9.51), a property
- * this substitution preserves exactly since it uses the SAME two offset
- * sample positions.
+ * instead — a different noise algorithm, same FBM *character*.
+ *
+ * GPU-ONLY REWRITE (2026-07-20): `time`/`uIntensityRaw`/`uRatio` are now
+ * the scaffold-supplied params (no longer self-created uniforms) — see
+ * point-light-illumination.js / point-light-coloration.js's own headers.
  *
  * @module effects/lighting/animations/flame
  */
 
 import { fbmFloat } from './tsl-noise-toolkit.js';
+import { buildFlickerNode } from './light-animation-clock.js';
 
 /**
  * `finalColor = defaultSeed * brightnessPulse` — the ONLY animated line in
- * Flame's illumination body (`${this.TRANSITION}; finalColor *=
- * brightnessPulse; ${this.ADJUSTMENTS}; ...` — unlike Pulse, Flame's
- * illumination DOES run ADJUSTMENTS/EXPOSURE normally, no `skipExposure`).
+ * Flame's illumination body (unlike Pulse, Flame's illumination DOES run
+ * ADJUSTMENTS/EXPOSURE normally, no `skipExposure`).
  *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.defaultSeed - the un-animated switchColor(bright,dim,dist) result.
- * @returns {{finalColor: *, uniforms: {uBrightnessPulse: *}}}
+ * @param {*} args.time
+ * @returns {{finalColor: *}}
  */
-export function buildFlameIlluminationSeed({ THREE, defaultSeed }) {
-  const { uniform, float } = THREE.TSL;
-  const uBrightnessPulse = uniform(float(1));
-  const finalColor = defaultSeed.mul(uBrightnessPulse);
-  return { finalColor, uniforms: { uBrightnessPulse } };
+export function buildFlameIlluminationSeed({ THREE, defaultSeed, time }) {
+  const { float } = THREE.TSL;
+  const { brightnessPulse } = buildFlickerNode(THREE.TSL, { time, amplification: float(1) });
+  const finalColor = defaultSeed.mul(brightnessPulse);
+  return { finalColor };
 }
 
 /**
@@ -57,31 +55,28 @@ export function buildFlameIlluminationSeed({ THREE, defaultSeed }) {
  * flameDistInner = smoothstep(clamp(0.95-fratioOuter,0,1), clamp(1.05-fratioOuter,0,1), 1-fdist)
  * finalColor = mix(mix(color, color*1.2, flameDistInner), color*8, flameDist) * brightnessPulse * colorationAlpha
  * ```
- * `color*8.0` deliberately blows past [0,1] (Foundry's own hot-core choice,
- * audit's own note) — kept as-is; MSA's HDR-capable pipeline can let this
- * feed bloom directly rather than hard-clipping (a Type-B opportunity, not
- * built here — Tier-0 scope is a faithful Type-A port).
+ * `color*8.0` deliberately blows past [0,1] (Foundry's own hot-core choice)
+ * — kept as-is; MSA's HDR-capable pipeline can let this feed bloom directly
+ * rather than hard-clipping (a Type-B opportunity, not built here).
  *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.uLightColor
  * @param {*} args.uColorationAlpha
  * @param {*} args.dist
- * @returns {{finalColor: *, uniforms: {uBrightnessPulse: *, uRatio: *, uTime: *, uIntensityRaw: *}}}
+ * @param {*} args.time
+ * @param {*} args.uIntensityRaw
+ * @param {*} args.uRatio - the light's own base ratio uniform.
+ * @returns {{finalColor: *}}
  */
-export function buildFlameColorationSeed({ THREE, uLightColor, uColorationAlpha, dist }) {
-  const { uniform, float, vec2, mix, clamp, smoothstep, max, pow, positionLocal } = THREE.TSL;
+export function buildFlameColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw, uRatio }) {
+  const { float, vec2, mix, clamp, smoothstep, max, pow, positionLocal } = THREE.TSL;
 
-  const uBrightnessPulse = uniform(float(1));
-  const uRatio = uniform(float(0.5));
-  const uTime = uniform(float(0));
-  const uIntensityRaw = uniform(float(5));
+  const { brightnessPulse } = buildFlickerNode(THREE.TSL, { time, amplification: float(1) });
 
   // Foundry's vUvs (this project's own point-light-illumination.js already
   // establishes this equivalence): positionLocal.xy (unit-radius, centered
-  // at the origin) mapped to Foundry's [0,1]-space centered at 0.5 — verified
-  // distance(vUvs,0.5)*2 collapses to exactly length(positionLocal.xy), i.e.
-  // this project's own `dist` passed in above.
+  // at the origin) mapped to Foundry's [0,1]-space centered at 0.5.
   const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
 
   // scale(uv, s) = (uv - 0.5) * s + 0.5 — flame.mjs's own mat2-pivot helper,
@@ -95,8 +90,8 @@ export function buildFlameColorationSeed({ THREE, uLightColor, uColorationAlpha,
   const intensityScaled = uIntensityRaw.mul(float(0.1));
   const intens = pow(intensityScaled, float(2));
 
-  const noiseInner = fbmFloat(THREE.TSL, vec2(uv.x.add(uTime.mul(float(8.01))), uv.y.add(uTime.mul(float(10.72)))));
-  const noiseOuter = fbmFloat(THREE.TSL, vec2(uv.x.add(uTime.mul(float(7.04))), uv.y.add(uTime.mul(float(9.51)))));
+  const noiseInner = fbmFloat(THREE.TSL, vec2(uv.x.add(time.mul(float(8.01))), uv.y.add(time.mul(float(10.72)))));
+  const noiseOuter = fbmFloat(THREE.TSL, vec2(uv.x.add(time.mul(float(7.04))), uv.y.add(time.mul(float(9.51)))));
 
   const fratioInner = uRatio.mul(intens.mul(float(0.5))).sub(noiseInner.mul(float(0.005)));
   const fratioOuter = uRatio.sub(noiseOuter.mul(float(0.007)));
@@ -118,8 +113,8 @@ export function buildFlameColorationSeed({ THREE, uLightColor, uColorationAlpha,
   const flameFlickerColor = uLightColor.mul(float(1.2));
 
   const finalColor = mix(mix(uLightColor, flameFlickerColor, flameDistInner), flameColor, flameDist)
-    .mul(uBrightnessPulse)
+    .mul(brightnessPulse)
     .mul(uColorationAlpha);
 
-  return { finalColor, uniforms: { uBrightnessPulse, uRatio, uTime, uIntensityRaw } };
+  return { finalColor };
 }

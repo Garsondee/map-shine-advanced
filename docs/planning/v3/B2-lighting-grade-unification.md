@@ -2,7 +2,7 @@
 
 **Status:** design draft, 2026-07-11. Grounds the "reimagine the lighting model"
 decision (session 2026-07-11). Reproduces §14's illumination-priority principle
-against the *actual* V2 grade/lighting code, and defines how V3 absorbs the
+against the _actual_ V2 grade/lighting code, and defines how V3 absorbs the
 time-of-day / indoor-outdoor / per-effect day-night logic that today lives in the
 colour-correction stack. Companion to [B0-1 attribute buffer](B0-1-floor-attribute-buffer.md)
 and the Forward+ plan §14/§15.
@@ -11,8 +11,8 @@ and the Forward+ plan §14/§15.
 
 ## 0. The core insight
 
-The author's framing: *"a continual and never-ending unwanted battle to make the
-lighting look good and appropriate at all times of day."* The reason it's a battle
+The author's framing: _"a continual and never-ending unwanted battle to make the
+lighting look good and appropriate at all times of day."_ The reason it's a battle
 is structural — **three independent subsystems each re-derive "how dark is it" and
 "am I indoors," then fight over the final pixel:**
 
@@ -28,7 +28,7 @@ Plus every effect (`FireEffectV2`, `CandleFlamesEffectV2`, …) independently re
 one and the others no longer agree — hence the endless rebalancing.
 
 > **The reframing:** most of what the CC ToD timeline and the contextual grade do
-> is *compensating for lighting that isn't physically correct.* If the lighting
+> is _compensating for lighting that isn't physically correct._ If the lighting
 > model produces the right ambient (day/night **and** indoor/outdoor) as actual
 > light, the image is already "right" before grading — and CC collapses to a thin
 > aesthetic film-look instead of a per-context exposure hack. **One place encodes
@@ -39,6 +39,7 @@ one and the others no longer agree — hence the endless rebalancing.
 ## 1. Current state — the V2 "look" pipeline (verified)
 
 ### 1.1 The one good part: `LightingDirector` is already a single source of truth
+
 [core/LightingDirector.js](../../../scripts/core/LightingDirector.js) merges the
 three darkness inputs **once per frame** into a frozen state:
 
@@ -53,6 +54,7 @@ This is the right abstraction and V3 should build on it verbatim. **The problem 
 not the director; it's the three consumers below each doing their own thing on top.**
 
 ### 1.2 Grade layer 1 — CC time-of-day timeline
+
 [ColorCorrectionEffectV2.js](../../../scripts/compositor-v2/effects/ColorCorrectionEffectV2.js)
 (`_evaluateTodTimeline`, `_resolveTimelineHour` ~L2005–2040) keyframes **two tracks
 by hour** — `global` and `interior` — each carrying `{exposure, saturation, tintColor}`,
@@ -60,13 +62,14 @@ interpolated across the day. This is the literal "time of day CC": midday neutra
 warm dawn/dusk tint, cool night, applied as a post-grade to the merged image.
 
 ### 1.3 Grade layer 2 — contextual scene grade
+
 [core/context-grade/](../../../scripts/core/context-grade/) (~120 KB: engine, spec,
 probe-service, manager, resolvers, coherence) + the params in
 [ContextualSceneGradeEffectV2.js](../../../scripts/compositor-v2/effects/ContextualSceneGradeEffectV2.js).
 Probe-driven, it applies:
 
 - **Indoor vs outdoor grade packs** — full `{exposure, saturation, brightness,
-  contrast, vibrance, temperature, tint, vignette, gamma}` per context. Reference
+contrast, vibrance, temperature, tint, vignette, gamma}` per context. Reference
   values: outdoor `+0.34` exposure / warmer / `+0.1` vibrance; indoor `−0.52`
   exposure / `−0.16` saturation / `+0.32` vignette / `+0.1` gamma. Blended by the
   `_Outdoors` sample through a smooth band `computeOutdoorBlendWeight` (indoor ≤ 0.18,
@@ -78,6 +81,7 @@ Probe-driven, it applies:
   exposure on top.
 
 ### 1.4 Per-effect day/night
+
 `FireEffectV2` (nightBoost/nightMul — fire reads brighter at night), `CandleFlamesEffectV2`
 (hour-keyed), `LightningEffectV2`, `vegetation-ambient-light`, etc. all read
 `LightingDirector.get().masterDarkness` and scale themselves. Legitimate per-effect
@@ -85,6 +89,7 @@ behaviour — but note **much of it exists because the surrounding ambient wasn'
 physically dark**, so the effect had to fake the contrast.
 
 ### 1.5 The dependency picture
+
 ```
                        ┌─ LightingEffectV2 (per-floor dim by masterDarkness)
 LightingDirector ──────┼─ per-effect day/night (fire/candle/… read masterDarkness)
@@ -108,8 +113,8 @@ do not run at all**, and:
   `FloorCompositor.js:4953` (a V2-path method V3 bypasses), **MSA's calendar/weather
   darkness and the priority policy never reach V3** — V3 sees only Foundry's raw
   slider (or a stale mirror). Changing time-of-day through MSA controls has no
-  effect in V3. *This alone can explain "day and night look the same" and, by
-  extension, why the indoor/outdoor toggle looked inert.*
+  effect in V3. _This alone can explain "day and night look the same" and, by
+  extension, why the indoor/outdoor toggle looked inert._
 - **GAP B — indoor/outdoor mask not engaging.** `_syncOutdoorsUniforms` resolves
   `sceneComposer._sceneMaskCompositor` (correct handle) but `uHasOutdoors` stays 0
   in practice — either no `_Outdoors` authored on the tested scene, or the mask
@@ -124,8 +129,9 @@ do not run at all**, and:
 ## 3. The reimagined model (V3)
 
 ### 3.1 The illumination-priority contract (the tangle-resolver)
+
 One illumination buffer, fixed operators, fixed order. Everything that means
-"light or dark here" resolves *here*, not in post:
+"light or dark here" resolves _here_, not in post:
 
 ```
 illumination (linear HDR), built once per frame:
@@ -146,18 +152,20 @@ the operator decides** (MAX for lights, MIN for darkness, × for shadow, + for g
 Deterministic, order-independent within a stage, no dual code paths.
 
 ### 3.2 What absorbs what
-| Today (grade/CC) | V3 home | How |
-|---|---|---|
-| CC ToD `global` exposure/tint by hour | `ambient()` intensity + **light colour** | Ambient colour & level come from `hour`/`masterDarkness` (warm dawn/dusk, cool night). The image is lit that colour, not tinted after. |
-| CC `interior` track | the indoor branch of `ambient()` | Indoors is physically darker/cooler *as light*, not a post-exposure cut. |
-| Contextual **indoor/outdoor packs** (−0.52 / +0.34 exposure …) | `ambient()` indoor vs outdoor endpoints, blended by `outdoorsWeight` | The −0.52 indoor exposure becomes a darker indoor ambient; local lights/windows fill it. Same 0.18→0.82 blend. |
-| Contextual **cloud/building/canopy/painted shadow** modifiers | **shadow term** (B3) | These are shadows. `buildingShadow −0.4 exposure` is an actual occlusion multiply, not a graded region. |
-| Contextual **windowLit** modifier | window light (already a light) | Window light brightens `illum`; drop the separate "window-lit exposure" grade. |
-| Contextual **drama / eye-adaptation** | thin adaptive exposure before the rolloff | Auto-exposure is legit; keep a *simplified* version on the HDR buffer, not a per-context stack. |
-| Per-effect day/night (fire/candle) | keep — but reads correct `masterDarkness` via GAP-A fix | Some boosts become unnecessary once ambient is physically dark; re-tune, don't re-invent. |
-| Aesthetic film-look (contrast/sat/tint/vignette/LUT) | **the only surviving CC pass** | One artist grade applied last. Context-independent. |
+
+| Today (grade/CC)                                               | V3 home                                                              | How                                                                                                                                    |
+| -------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| CC ToD `global` exposure/tint by hour                          | `ambient()` intensity + **light colour**                             | Ambient colour & level come from `hour`/`masterDarkness` (warm dawn/dusk, cool night). The image is lit that colour, not tinted after. |
+| CC `interior` track                                            | the indoor branch of `ambient()`                                     | Indoors is physically darker/cooler _as light_, not a post-exposure cut.                                                               |
+| Contextual **indoor/outdoor packs** (−0.52 / +0.34 exposure …) | `ambient()` indoor vs outdoor endpoints, blended by `outdoorsWeight` | The −0.52 indoor exposure becomes a darker indoor ambient; local lights/windows fill it. Same 0.18→0.82 blend.                         |
+| Contextual **cloud/building/canopy/painted shadow** modifiers  | **shadow term** (B3)                                                 | These are shadows. `buildingShadow −0.4 exposure` is an actual occlusion multiply, not a graded region.                                |
+| Contextual **windowLit** modifier                              | window light (already a light)                                       | Window light brightens `illum`; drop the separate "window-lit exposure" grade.                                                         |
+| Contextual **drama / eye-adaptation**                          | thin adaptive exposure before the rolloff                            | Auto-exposure is legit; keep a _simplified_ version on the HDR buffer, not a per-context stack.                                        |
+| Per-effect day/night (fire/candle)                             | keep — but reads correct `masterDarkness` via GAP-A fix              | Some boosts become unnecessary once ambient is physically dark; re-tune, don't re-invent.                                              |
+| Aesthetic film-look (contrast/sat/tint/vignette/LUT)           | **the only surviving CC pass**                                       | One artist grade applied last. Context-independent.                                                                                    |
 
 ### 3.3 Consequence
+
 CC stops being a lighting mechanism and becomes a single aesthetic layer. Day/night
 and indoor/outdoor are computed **once**, as light. Per-effect code keeps its one
 `masterDarkness` read but against a correct, physically-dark surround.
@@ -172,13 +180,13 @@ mandatory here).
 
 - **B2-a — wire `LightingDirector` into V3 (GAP A).** V3 calls `LightingDirector.update()`
   once per frame and `ForwardLightingPass` reads `masterDarkness`/`hour`/`sun` from
-  it instead of raw `canvas.environment`. *Small, high-value, likely fixes the
-  day/night-looks-static symptom immediately.* No model change yet.
+  it instead of raw `canvas.environment`. _Small, high-value, likely fixes the
+  day/night-looks-static symptom immediately._ No model change yet.
 - **B2-b — indoor/outdoor as light (GAP B).** Fix mask resolution under V3; adopt the
   0.18→0.82 smooth blend; make the indoor/outdoor ambient endpoints match the intent
   of the contextual indoor/outdoor packs (start by porting their exposure deltas into
   ambient levels). Toggle `MapShine.v3.indoorOutdoor` becomes meaningful.
-- **B2-c — ambient colour by hour.** Port the CC ToD `global`/`interior` *colour* +
+- **B2-c — ambient colour by hour.** Port the CC ToD `global`/`interior` _colour_ +
   level intent into `ambient()` (warm dawn/dusk, cool night) so the map is lit that
   colour. V2 ToD timeline stays available under `?msaV3=0` for A/B.
 - **B2-d — adaptive exposure (optional, simplified).** A single eye-adaptation term on
@@ -191,8 +199,9 @@ mandatory here).
   the flag until then; delete after a soak.
 
 ## 5. Risks
+
 1. **Lost hand-tuning.** The preset values in §1.2/1.3 are hard-won. Port their
-   *intent* (ambient level/colour) and A/B every scene/time; do not eyeball-replace.
+   _intent_ (ambient level/colour) and A/B every scene/time; do not eyeball-replace.
 2. **ToD golden coverage.** Without day+night+dawn baselines, regressions hide. A2
    must grow a time-of-day axis before B2-c.
 3. **Effect re-tuning cascade.** Making ambient physically dark changes what
@@ -202,6 +211,10 @@ mandatory here).
    explicitly rather than chasing the old curve.
 
 ## 6. Immediate next step
+
 **B2-a (wire `LightingDirector` into V3)** — smallest, safest, and most likely to
 move the needle on the day/night symptom today. Everything else in §4 builds on it.
+
+```
+
 ```

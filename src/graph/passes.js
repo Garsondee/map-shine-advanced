@@ -117,10 +117,16 @@ export const PASSES = [
     id: 'sims.particles',
     stage: 'sims',
     kind: 'gpu',
-    status: 'seam',
-    owns: 'docs/planning/Particles.md §7 + keyhole-particles-tsl-decision',
+    status: 'live',
+    owns: 'docs/planning/Particles.md §7, §23 + keyhole-particles-tsl-decision',
     creates: ['res:particles'],
-    reads: ['res:env', 'res:view'],
+    // Narrowed to res:env (time/dt) — the only live-produced read the first-slice
+    // kernel needs, the same discipline light.accumulate takes. It samples the
+    // wind field via world/wind-field.js#sampleWind's TSL-analytic Tier-0 ambient
+    // (no res:wind resource yet); res:wind returns here when the baked/sim field
+    // is bound (Wind.md Tier 1+). res:view / buf:scene.attr return with view
+    // gating + the outdoors gate (higher rungs).
+    reads: ['res:env'],
     modifies: [],
     absorbs: [
       'WeatherParticles(sim)',
@@ -132,7 +138,11 @@ export const PASSES = [
     ],
     note:
       'ONE engine, TSL compute (transform feedback on WebGL2). A weather type is DATA. Coverage- and ' +
-      'zoom-gated (Effects.md Law 7). The door already throws; the walls already bite.',
+      'zoom-gated (Effects.md Law 7). LIVE as of 2026-07-21 (first slice: ambient dust): ' +
+      'createParticleEngine dispatches the update kernel via a DIRECT renderer.compute() in renderFrame, ' +
+      'right after tickWindSim — the sims stage is out of the plan range (framePlan fromStage:masks), so ' +
+      'this is driven like the wind sim, not via runPassPlan. `live` = the sim runs every frame, not ' +
+      'that every rung is built (curl/lifespan/gating are higher rungs — Particles.md §22).',
   },
   {
     id: 'sims.fluids',
@@ -213,7 +223,16 @@ export const PASSES = [
       "Per-light visibility terms. The sun's term min-combines producers that all MEAN the same " +
       'thing: the authored shadow mask (the paintbrush, promoted to canon — scene/mask-catalog.js) ' +
       '∧ building ∧ sky-reach ∧ cloud. Dynamic lights use Foundry wall-clipped LOS. NO ' +
-      'combined-shadow, NO lift — those words fail the build.',
+      'combined-shadow, NO lift — those words fail the build. ' +
+      "STILL A SEAM, and the reason is worth stating (2026-07-24): the sun's OWN term is now BUILT " +
+      'and live — building + overhead + sky-reach march one occluder height field into a scene-space ' +
+      'field that multiplies the ambient fill (docs/planning/Sun-Shadows.md, effects/lighting/' +
+      'sun-occlusion*.js). But it landed the same way the UI-shadow did: folded INSIDE ' +
+      'light.accumulate rather than as its own screen-space pass, because the field is WORLD-aligned ' +
+      'and camera-independent — a per-frame screen buffer would be strictly more work for an ' +
+      'identical picture. This pass earns its keep when a SECOND light needs its own visibility ' +
+      '(per-light tile occlusion), not before. A seam that names what exists beats a `live` that ' +
+      'describes a buffer nobody writes.',
   },
   {
     id: 'light.accumulate',
@@ -311,10 +330,13 @@ export const PASSES = [
     id: 'surface.particles',
     stage: 'surface',
     kind: 'gpu',
-    status: 'seam',
-    owns: 'docs/planning/Particles.md §7 (draw half — instanced, batched, never a scene object per particle)',
+    status: 'live',
+    owns: 'docs/planning/Particles.md §7, §16 (draw half — instanced, batched, never a scene object per particle)',
     creates: [],
-    reads: ['res:particles', 'buf:scene.attr', 'res:view'],
+    // Narrowed to res:particles (the sim output it draws, produced by
+    // sims.particles). buf:scene.attr returns when the per-pixel outdoors gate
+    // lands (a higher rung); res:view drops (no live producer).
+    reads: ['res:particles'],
     modifies: ['buf:scene.color'],
     absorbs: [
       'WeatherParticles(draw)',
@@ -326,7 +348,32 @@ export const PASSES = [
     ],
     note:
       'Instanced quads/streaks over the lit scene, gated per-pixel by the attribute buffer (rain ' +
-      'only outdoors). Draw half of the one engine; sim half ran in sims.particles.',
+      'only outdoors). Draw half of the one engine; sim half ran in sims.particles. LIVE as of ' +
+      '2026-07-21 (first slice: ambient dust): ONE InstancedBufferGeometry draw of the engine scene, ' +
+      'additively into scene.lit, as a viewer closure in the local passImpls map (mirrors the candle ' +
+      'flame). Per-pixel gating is a higher rung.',
+  },
+  {
+    id: 'post.bloom',
+    stage: 'post',
+    kind: 'gpu',
+    status: 'live',
+    owns: 'docs/planning/Bloom.md (the dual-filter pyramid + the two-band core/atmosphere model)',
+    creates: [],
+    reads: [],
+    modifies: ['buf:scene.color'],
+    absorbs: ['BloomEffectV2'],
+    note:
+      'THE FIRST POST-STAGE EFFECT — the template the next post effect (fog, distortion, stylizers) ' +
+      'copies. A Jimenez/COD dual-filter pyramid (13-tap downsample + Karis on the first step, ' +
+      'tent-filter upsample) split into an independently-weighted tight CORE and wide ATMOSPHERE ' +
+      "band out of ONE blur chain — V2's Surface/Atmosphere split for free. The bright-pass INPUT " +
+      'is darkened by a world-space mask (outdoor-spill clamp via the outdoors mask; the SAME hook takes a ' +
+      'native fog-of-war texture later) so bloom cannot leak where it is not visible. Additively ' +
+      'modifies scene.lit BEFORE present, so the grade grades the scene AND its bloom together. ' +
+      "Runtime: runPostBloomPass, a closure in the viewer's local passImpls (mirrors " +
+      'surface.particles); PASS_IMPLS names startVtPanViewer as the reachable door, same honest ' +
+      'invocability caveat as the other live passes.',
   },
   {
     id: 'post.grade',
@@ -340,7 +387,6 @@ export const PASSES = [
     absorbs: [
       'ColorCorrectionEffectV2',
       'ContextualSceneGradeEffectV2',
-      'BloomEffectV2',
       'AtmosphericFogEffectV2',
       'FloorDepthBlurEffect',
       'DistortionManager',
@@ -364,7 +410,8 @@ export const PASSES = [
     ],
     note:
       'THE GRADE STACK, in fixed node order: base → ToD (8-anchor timeline) → weather → context ' +
-      'gate (indoor/outdoor from attr) → manual trim — then bloom, fog, distortion, stylizers. Four ' +
+      'gate (indoor/outdoor from attr) → manual trim — then fog, distortion, stylizers (bloom is now ' +
+      'the separate post.bloom pass, just above). Four ' +
       'colorists become one node chain with labeled layers.',
   },
   {

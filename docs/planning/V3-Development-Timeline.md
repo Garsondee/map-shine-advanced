@@ -70,7 +70,7 @@ real and tested but not yet committed, so the commit log *understates* current p
 | **21 Jul** | **Wind Tiers 0/1/2** (ambient + relaxation + transient door-gust sim), candles wired to the whole wind field. *(uncommitted)* | The environment systems begin. |
 | **22 Jul** | **Candle FOH/ROH controls** — the generic effect-UI template every future effect copies; live anchor add/remove/edit. *(uncommitted)* | Authoring UI pattern established. |
 | **23–25 Jul** | Grade engine + God CC, bloom (author-confirmed live), sun shadows, door graphics, sky-as-light, astrolabe/day-clock, vegetation tiers. *(largely uncommitted)* | A week of effects built on the now-stable foundation. |
-| **25 Jul** | **This timeline + the god-object audit.** Built the **size ratchet** (the one missing wall), froze all 10 god-objects shrink-only, and began the reversal: `region-darkness.js` split into pure geometry + TSL materials. *(uncommitted)* | Maintenance turn — stop the god-object growth, start shrinking it. |
+| **25 Jul** | **This timeline + the god-object audit + FIVE reversals.** Built the **size ratchet** (the one missing wall), froze all 10 god-objects shrink-only, then shipped five splits: `region-darkness.js` → geometry + materials · `decode-pool.js` → 8 pure primitives + orchestration · `candle-flame-render.js` → pure candle math + TSL material · `paint-mode.js` → widgets/canvas/toolbar (`installPainter` **867 → 475**, under cap) · `debug-panel.js` → DOM vocabulary extracted (`installDebugPanel` **1,249 → 988**). The last two proved **giant closures are tractable** via the factory-wrapper technique (bodies move verbatim, only a wrapper is added). Size-budget list: 10 → **6**. Commits `e5c32ea`, `1c1257b`, `49b9249`, `c559a10`, `d38c392`. | Maintenance turn — stop the god-object growth, then start shrinking it. |
 
 ---
 
@@ -141,19 +141,32 @@ we never built a wall against.**
 
 ## 5. 🔴 The one real warning: the `vt-pan-viewer.js` monolith
 
-> **✅ UPDATE 2026-07-25 — the ceiling is now locked.** The size ratchet (§6.1)
-> freezes all 10 god-objects shrink-only, so the trajectory below is *reversed*: the
-> monolith can no longer grow, and decomposition is the only legal path forward. The
-> ratchet also found a **second god-function** — `boot.js` has a 3,467-line function.
-> First reversal shipped: `region-darkness.js` (1,416 lines) split into a pure Node-
-> tested `region-geometry.js` (660) + a slimmer `region-darkness.js` (776), one god-
-> object eliminated, 3,942 tests still green. The **frozen inventory** (`size-budgets.json`):
-> `vt-pan-viewer.js` file 11,870 / fn `startVtPanViewer` 10,395 · `boot.js` file 4,082
-> / fn 3,467 · `particle-runtime.js` file 1,824 / fn `createParticleEngine` 1,066 ·
-> `debug-panel.js` file 1,321 / fn `installDebugPanel` 1,249 · `decode-pool.js` 1,128 ·
-> `paint-mode.js` file 1,083 / fn `installPainter` 867 · `candle-flame-render.js` 1,010
-> · `mask-authority.js` fn `createMaskAuthority` 596 · `gust-runtime.js` fn
-> `createGustEngine` 590. The narrative below stands as the record of *why* this
+> **✅ UPDATE 2026-07-25 — the ceiling is locked AND three god-objects reversed.**
+> The size ratchet (§6.1) freezes every remaining god-object shrink-only, so the
+> trajectory below is *reversed*: nothing can grow, and decomposition is the only
+> legal path forward. The ratchet also found a **second god-function** — `boot.js`
+> has a 3,467-line function. **Three clean splits shipped same day** (commits
+> `e5c32ea`, `1c1257b`, `49b9249`): `region-darkness.js` (1,416) → pure
+> `region-geometry.js` (660) + a slimmer `region-darkness.js` (776);
+> `decode-pool.js` (1,128) → 8 fully-pure pieces in `decode-primitives.js` (298) +
+> a slimmer `decode-pool.js` (889, under cap); `candle-flame-render.js` (1,009) →
+> pure `candle-flame-geometry.js` (513) + a slimmer `candle-flame-render.js` (496).
+> All content-preserving (verified via diff-against-HEAD or, for the candle split,
+> a sorted-line diff since it also fixed one misplaced doc comment), zero behavior
+> change, 3,942 tests green throughout — the decode-pool split caught a real missed
+> re-export (`computePagePlacement`) via an actual eslint failure, not inspection;
+> the candle split turned out to be entangled with real uncommitted feature work
+> (wind-response + FOH/ROH overrides) that couldn't be cleanly separated, so it
+> shipped bundled into one honest commit by explicit author choice rather than a
+> guessed reconstruction. **Size-budget list: 10 → 9 → 8 → 7.** The remaining
+> **frozen inventory** (`size-budgets.json`) is now ALL giant FUNCTIONS, no more
+> safe whole-file splits identified: `vt-pan-viewer.js` file 11,870 / fn
+> `startVtPanViewer` 10,395 · `boot.js` file 4,082 / fn 3,467 ·
+> `particle-runtime.js` file 1,824 / fn `createParticleEngine` 1,066 ·
+> `debug-panel.js` file 1,321 / fn `installDebugPanel` 1,249 · `paint-mode.js` file
+> 1,083 / fn `installPainter` 867 · `mask-authority.js` fn `createMaskAuthority` 596
+> · `gust-runtime.js` fn `createGustEngine` 590 — every one needs the author's live
+> test, one slice at a time. The narrative below stands as the record of *why* this
 > mattered.
 
 This is the finding that matters most, and it is not subtle once you look.

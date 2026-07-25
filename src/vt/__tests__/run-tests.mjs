@@ -8,11 +8,11 @@
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
 import { run as runVtCore } from './vt-core.test.mjs';
-import { run as runAtlas } from './atlas.test.mjs';
 import { run as runDecodePrimitives } from './decode-primitives.test.mjs';
 import { run as runViewState } from './view-state.test.mjs';
 import { run as runTextureLimits } from './texture-limits.test.mjs';
 import { run as runBlockCompress } from './block-compress.test.mjs';
+import { run as runCoarseAlpha } from './coarse-alpha.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -49,11 +49,11 @@ const t = {
 
 const suites = [
   ['vt-core', runVtCore],
-  ['atlas', runAtlas],
   ['decode-primitives', runDecodePrimitives],
   ['view-state', runViewState],
   ['texture-limits', runTextureLimits],
   ['block-compress', runBlockCompress],
+  ['coarse-alpha', runCoarseAlpha],
 ];
 
 for (const [name, fn] of suites) {

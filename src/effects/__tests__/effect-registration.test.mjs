@@ -7,6 +7,7 @@
  */
 import { validateParamsSchema } from '../../core/params-schema.js';
 import { UI_SHADOW_PARAMS, UI_WINDOW_SHADOW } from '../ui-window-shadow.js';
+import { GRADE, GRADE_LOOK_PARAMS } from '../grade/grade.js';
 import { validateEffectManifest } from '../effect-manifest.js';
 import {
   resolveEffectEnabled,
@@ -36,6 +37,15 @@ export function run(t) {
   // ======================================================================
   ok('UI_SHADOW_PARAMS is a valid params schema', validateParamsSchema(UI_SHADOW_PARAMS).ok);
   ok('UI_WINDOW_SHADOW is a valid manifest', validateEffectManifest(UI_WINDOW_SHADOW).ok);
+
+  // THE GOD CC (docs/planning/Grade.md §14) — the Look grade is a real effect,
+  // so its schema and manifest must validate exactly like any other.
+  ok('GRADE_LOOK_PARAMS is a valid params schema', validateParamsSchema(GRADE_LOOK_PARAMS).ok);
+  ok('GRADE is a valid manifest', validateEffectManifest(GRADE).ok);
+  ok("the grade's id is grade", GRADE.id === 'grade');
+  ok('the grade ships enabled (AgX default film response)', GRADE.enabledFromProfile === 'low');
+  ok('toneMapping defaults to agx', GRADE_LOOK_PARAMS.toneMapping.default === 'agx');
+  ok("'enabled' is NOT a grade param (the cascade owns it)", !('enabled' in GRADE_LOOK_PARAMS));
   ok("the effect's id is uiWindowShadow", UI_WINDOW_SHADOW.id === 'uiWindowShadow');
   ok('the effect declares its a11y flag (photosensitive: false)', UI_WINDOW_SHADOW.a11y.photosensitive === false);
   ok('the effect is gated to Extreme by default (expensive)', UI_WINDOW_SHADOW.enabledFromProfile === 'extreme');

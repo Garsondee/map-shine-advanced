@@ -62,6 +62,47 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     label: 'Light radius',
     help: 'How far the candle casts light, in canvas pixels. 0 = a flame with no light. This is the point light we control.',
   },
+  // The candle LIGHT-POOL animation richness (effects/lighting/animations/
+  // candle-flicker.js's own quality ladder). A graph-BUILD-time tier, not a
+  // per-frame cost — 'low' is the original single-octave flicker; 'standard'
+  // adds a two-octave flicker + warm/cool temperature shift; 'lavish' adds a
+  // breathing core + angular edge turbulence. The governor drives this axis
+  // per performance profile later (Effects.md §6); default 'lavish' because a
+  // handful of candle lights is cheap and the richer look is the point
+  // (feedback_default_on_new_features — ship the best look, dial DOWN on
+  // request, never up).
+  animationQuality: {
+    type: 'enum',
+    values: ['low', 'standard', 'lavish'],
+    default: 'lavish',
+    category: 'Light',
+    label: 'Flicker richness',
+    help: 'How lively the cast light pool is. Low = a gentle flicker (cheapest); Standard adds a two-octave flicker and warm/cool colour shift; Lavish adds a breathing core and a wavering, non-circular edge.',
+  },
+  // WIND RESPONSE (Wind.md §8.1 — "each consuming effect declares a
+  // windResponse knob (the fixed Motion category literally lists 'wind
+  // response' as its example)"). ONE honest dial over everything the shared
+  // wind field (world/wind-field.js#sampleWind, Tiers 0-2) can move on a
+  // candle: the flame's own lean/curl, the cast light's lean/oval stretch,
+  // wind-triggered guttering, and a strong-gust snuff — see effects/candle-
+  // flame-render.js#buildCandleFlameMaterial and effects/lighting/
+  // animations/candle-flicker.js for exactly what each reads this for. 0 =
+  // a candle wind cannot touch at all (a warded flame, or simply "keep it
+  // decorative"); 1 = the tuned default; 2 = a candle that reacts twice as
+  // dramatically as the reference tuning, for a GM who wants the drama
+  // turned up. Default 1, matching "a scene nobody has dialled wind into
+  // looks and behaves exactly as it did before this Tier existed" — Tier 0's
+  // own promise, carried through here.
+  windResponse: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Motion',
+    label: 'Wind response',
+    help: 'How much this candle reacts to the shared wind field — its flame lean, its cast light sway, gusts that make it gutter, and a strong-enough draft that snuffs it out. 0 = wind cannot touch it; 2 = twice as dramatic as the tuned default.',
+  },
 });
 
 /**

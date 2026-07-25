@@ -1,6 +1,8 @@
 /**
- * Node verification for effects/lighting/region-darkness.js. All pure —
- * every function here is CPU geometry/arithmetic, fully Node-testable.
+ * Node verification for effects/lighting/region-geometry.js. All pure —
+ * every function here is CPU geometry/arithmetic, fully Node-testable. (Split
+ * out of region-darkness.js 2026-07-25; the TSL material builders that stayed
+ * behind are not Node-testable and have no suite, as before.)
  */
 import {
   pointInRectangle,
@@ -17,7 +19,7 @@ import {
   computeRegionAdjustedDarkness,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
-} from '../region-darkness.js';
+} from '../region-geometry.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 

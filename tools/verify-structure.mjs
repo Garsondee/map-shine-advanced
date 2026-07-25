@@ -63,6 +63,42 @@ import { computeReachability } from './reachability.mjs';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(ROOT, 'src');
 const RATCHET_FILE = join(ROOT, 'tools', 'structure-ratchets.json');
+const SIZE_BUDGET_FILE = join(ROOT, 'tools', 'size-budgets.json');
+
+/**
+ * THE GOD-OBJECT CAP — the one V2 disease every other rule in this file left
+ * uncovered, because every rule above polices COUPLING (imports, doors,
+ * globals, renderer ownership) and none measures BULK. V2 died of two 10,000+
+ * line files (FloorCompositor 10,063; token-movement 12,771) that no seam ever
+ * forced to split — and on 2026-07-25 the audit found src/vt/vt-pan-viewer.js
+ * already a 11,860-line file whose startVtPanViewer() is a single ~10,385-line
+ * function, LARGER than FloorCompositor, and `npm run verify` was green through
+ * all of it. A green gate with a god-object in the tree is the exact "the wall
+ * didn't look here" failure this repo exists to prevent.
+ *
+ * No file may exceed `file` lines, and no top-level function may exceed `fn`
+ * lines, UNLESS it is already over and registered in size-budgets.json — where
+ * it is frozen at its recorded size and may only SHRINK (the no-silent-catch
+ * ratchet, applied to bulk instead of a count). A NEW file/function crossing a
+ * cap FAILS THE BUILD: split it, or register the debt consciously with
+ * `npm run ratchets:update` (visible in the diff, never silent).
+ *
+ * The seeded number does not have to be precise — the same measurement is
+ * compared against itself over time, so a rare few-line miscount from a brace
+ * inside a string cannot break monotonicity, only shift an absolute already
+ * thousands of lines from any cap.
+ */
+export const SIZE_CAPS = { file: 1000, fn: 500 };
+const SIZE_WHY =
+  'V2 died of god-objects: FloorCompositor 10,063 lines, token-movement 12,771, FireEffectV2 6,861 — ' +
+  'each grown one locally-rational addition at a time because no seam forced a split. Every other rule ' +
+  'in this file polices coupling; none measured SIZE, so on 2026-07-25 vt-pan-viewer.js was a 11,860-line ' +
+  'file / 10,385-line function (bigger than FloorCompositor) with the gate green throughout.';
+const SIZE_INSTEAD =
+  'Split it into a sibling module behind a clean signature (a builder that takes inputs and returns an ' +
+  'object, a subsystem with its own file). If a large file is genuinely justified right now, register ' +
+  'the debt: `npm run ratchets:update` records its size as a frozen, shrink-only budget — loud in the ' +
+  'diff, and it can never grow again without another visible bump.';
 
 /**
  * The whole-graph reachability walk runs ONCE per `npm run verify`, memoized
@@ -123,6 +159,34 @@ export const RULES = [
       'Particles come from src/effects/particles/ and nowhere else. Declare a system with ' +
       'validateParticleSystem() (a declaration is data — it works today, months before the engine ' +
       'does). See docs/planning/Particles.md §7.',
+  },
+
+  // ===================================================================
+  // PARTICLE MEMORY HAS ONE DOOR — the sibling of gpu/allocator-only, for
+  // storage buffers instead of render targets. Built at ZERO with the arena
+  // (Particles.md §10, §20), the cheapest moment, which does not come twice.
+  // ===================================================================
+  {
+    id: 'particles/allocator-only',
+    // instancedArray() IS particle-memory allocation; so is constructing a
+    // Storage(Instanced)BufferAttribute. `Storage\w*BufferAttribute` catches
+    // both StorageBufferAttribute and StorageInstancedBufferAttribute.
+    pattern: /\binstancedArray\s*\(|new\s+(?:THREE\.)?\w*Storage\w*BufferAttribute\s*\(/,
+    allow: [`${sep}effects${sep}particles${sep}`],
+    why:
+      'Particle state is GPU storage (instancedArray / Storage*BufferAttribute), and it has NO safe ' +
+      'per-buffer dispose() — a StorageInstancedBufferAttribute inherits BufferAttribute, which cost a ' +
+      'live WebGPU device-loss in ~30s when one was replaced per frame ' +
+      '(reference_bufferattribute_no_dispose_trap). The particle arena allocates its whole budget ONCE ' +
+      'and never frees, so there is no disposal to get wrong — but only if allocation has ONE door. ' +
+      'graph/three-allocator.js guards render targets and NOT storage buffers, so without this wall ' +
+      'particle memory has no ceiling and no owner: the exact O(world x floors x masks) sprawl Keyhole ' +
+      '§1 died of, one resource class over.',
+    instead:
+      'Storage buffers come from src/effects/particles/particle-arena.js and nowhere else — it owns a ' +
+      'fixed, sub-ranged pool (Particles.md §10). A system RESERVES a slot range; it never calls ' +
+      'instancedArray itself. Need particle memory somewhere new? That is a conversation about the ' +
+      "arena's budget, had in the open, not a buffer at the call site.",
   },
 
   // ===================================================================
@@ -466,6 +530,150 @@ export const RULES = [
   },
 
   // ===================================================================
+  // ONE TIME-OF-DAY — Environment.md §3 has specified this tripwire since
+  // the audit ("`timeOfDay` defined in exactly one module"). It could not
+  // be built until a real day clock existed; it does now (2026-07-23,
+  // world/day-clock.js), so per covenant rule 4 the wall goes up WITH it.
+  //
+  // V2's clock lived INSIDE the weather controller
+  // (WeatherController.js:184, `this.timeOfDay = 12.0`) and TWENTY files
+  // ended up holding their own notion of the hour. Every one of them was
+  // added by someone reasonable who needed the hour and had no wall telling
+  // them where it lived.
+  // ===================================================================
+  {
+    id: 'time/one-tod',
+    // THIS BANS *KEEPING* A TIME OF DAY, NOT NAMING OR FORWARDING ONE.
+    //
+    // A first cut also matched `todHour:` object keys and `const todHour =`,
+    // and immediately fired on two lines that are the system working exactly as
+    // designed — `buildEnvSnapshot({ todHour })` forwarding the day clock's
+    // output, and a diagnostic reading `env.time.todHour` straight back off the
+    // snapshot. Forwarding a value you were handed is the OPPOSITE of the
+    // failure; banning it would have pushed callers into obfuscating the name,
+    // which makes the concept harder to find, not easier.
+    //
+    // What V2 actually did was STORE one: `this.timeOfDay = 12.0`
+    // (WeatherController.js:184), twenty times over. So the pattern matches a
+    // MUTABLE declaration (`let`/`var`) or an assignment to a PROPERTY — the
+    // two shapes that mean "this object now carries its own hour". A `const`
+    // local naming a value in flight cannot drift and is left alone.
+    pattern: /\b(?:let|var)\s+(?:todHour|timeOfDay)\b|\.(?:todHour|timeOfDay)\s*=(?!=)/,
+    allow: [
+      `${sep}world${sep}sun.js`,
+      `${sep}world${sep}environment.js`,
+      `${sep}world${sep}day-clock.js`,
+      `${sep}foundry${sep}game-time.js`,
+      `${sep}ui${sep}astrolabe.js`,
+      `${sep}diag${sep}`,
+    ],
+    why:
+      "V2's clock lived inside the weather controller, so time was a FIELD OF weather and the two " +
+      'systems that should have composed were hierarchically entangled. Twenty files grew their own ' +
+      'time-of-day and eight grew their own sun; a scene could have shadows answering to one hour ' +
+      'while the grade answered to another. (docs/planning/Environment.md §0.1)',
+    instead:
+      'ONE owner (world/day-clock.js) moves the hour; world/sun.js is a pure function OF it; every ' +
+      'other consumer READS `env.time.todHour` off the frame snapshot it was handed. If you need the ' +
+      'hour, take it as an input — never keep your own.',
+  },
+
+  // ===================================================================
+  // ONE ATMOSPHERE — V2 made the weather/time-of-day LOOK with a
+  // full-screen colour corrector, and paid for it twice (both documented
+  // in its own params reference, docs/reference/v2-effect-params/):
+  //
+  //   - the outdoor-only gate had to be bolted INSIDE the colourist,
+  //     because a full-screen grade is global by nature;
+  //   - it needed a WHOLE SECOND SYSTEM, the "Local ToD override", to
+  //     cancel its own midnight tint inside torch pools. The same
+  //     compensator shape as DynamicLightShadowLift.js — and the
+  //     compensator was the cost of grading AFTER lighting.
+  //
+  // Built WITH the sky light (2026-07-23), per covenant rule 4.
+  // ===================================================================
+  {
+    id: 'sky/one-atmosphere',
+    // Atmosphere terms as OWNED state. Same discipline as `time/one-tod`: this
+    // bans DECLARING an atmosphere knob, never reading `skyHandle.veil` or
+    // passing one along. A saturation/desaturation uniform is included on
+    // purpose — reaching for one is the exact move docs/planning/Sky.md §5
+    // exists to prevent (a multiply cannot desaturate; the additive veil is
+    // what does), and it belongs to `post.grade`'s creative stack if anywhere.
+    pattern:
+      /\b(?:let|var|const)\s+(?:skyTint|atmosphereStrength|veilStrength|todGrade|weatherGrade|saturationAmount)\b|\.(?:skyTint|atmosphereStrength|veilStrength|todGrade|weatherGrade)\s*=(?!=)/,
+    // THREE homes, each named on purpose:
+    //   sky-access.js               — DERIVES the atmosphere (the one owner).
+    //   lighting/environmental-light.js — APPLIES it, and is the only pass that
+    //     may: it owns `buf:scene.illum`'s fill and the composite's gamma-space
+    //     add, which are the two channels the sky light writes to. Naming it
+    //     here is the point — the wall's job is to keep the application site
+    //     SINGULAR, and a second pass reaching for these names is exactly the
+    //     drift to catch.
+    //   grade/                      — the creative LOOK, a different job (§7).
+    allow: [
+      `${sep}effects${sep}sky-access.js`,
+      `${sep}effects${sep}lighting${sep}environmental-light.js`,
+      `${sep}effects${sep}grade${sep}`,
+    ],
+    why:
+      'V2 built the weather/time-of-day look as a full-screen colour correction, so the outdoor-only ' +
+      'gate had to be taught to the colourist ("offsets on sky-eligible outdoor pixels... Requires ' +
+      '_Outdoors"), and a whole second system — the "Local ToD override" — existed purely to CANCEL ' +
+      'that grade inside lit pools, because a torch pool should not be blue at midnight. An entire ' +
+      'module to undo another module is the same corpse as DynamicLightShadowLift.js.',
+    instead:
+      'Atmosphere COLOUR comes from the LIGHT: effects/sky-access.js produces one multiplier, mask-gated ' +
+      'at the point of use, so indoors needs no special case and a torch needs no cancellation. ' +
+      'Atmosphere CHROMA/TONE (desaturation, contrast) comes from the grade — a light cannot drain ' +
+      'chroma. A creative LOOK is a third job, also the grade. (docs/planning/Sky.md, Grade.md)',
+  },
+
+  // ===================================================================
+  // ONE GRADE STACK — V2 had 112 grade uniforms across THREE parallel
+  // families (uCc*, uContext*, uAtmosphere*), each independently doing
+  // exposure/contrast/saturation/tint/gamma, plus the same knobs bleeding
+  // into water, foam, fog and distortion. Three colourists undoing each
+  // other. Built WITH the grade engine (2026-07-23), per covenant rule 4.
+  // ===================================================================
+  {
+    id: 'grade/one-stack',
+    // Bans a SECOND grade system reforming — the V2 uniform FAMILIES (`uCc`,
+    // `uContext`, `uAtmosphere`/`uAtmo`, `uGrade`) and any owned `*Grade` /
+    // `*Desaturation` identifier. NOT the common words exposure/contrast/
+    // saturation themselves: those are the grade primitive's own PARAMS
+    // (`applyGrade({exposure, contrast, …})`) and appear as destructures and
+    // function args all over legitimately — banning them would push callers to
+    // obfuscate, the same lesson `time/one-tod` learned. What is unambiguous is
+    // a grade-FAMILY uniform or a var literally named `…Grade`: those mean "a
+    // second grade engine is growing here", which is the disease.
+    //
+    // The property-assignment arm (`.…Grade =`) excludes a `set`-prefixed
+    // method — `MapShine.setGrade = fn`/`gradePresent.setEnvGrade = …` are the
+    // effect's public WRITE API (the same shape as `MapShine.setBloom`), NOT a
+    // `this.todGrade = …` stage-state assignment (V2's actual disease). A
+    // grade-stage noun never starts with "set"; a setter always does.
+    pattern:
+      /\bu(?:Cc|Context|Atmosphere|Atmo|Grade)[A-Z]\w*|\b(?:let|var|const)\s+\w*(?:Grade|Desaturation)\b|\.(?!set)\w*Grade\s*=(?!=)/,
+    // effects/grade/ DERIVES + APPLIES the grade (the one owner). diag/ is
+    // tooling. A `const envGrade =` in the viewer/boot that FORWARDS a resolved
+    // grade is fine — it is not a `*Grade` DECLARATION of owned knobs, it is a
+    // value in flight — but to keep the rule simple the two seam files that
+    // forward it are named rather than relying on the reader to see the
+    // difference.
+    allow: [`${sep}effects${sep}grade${sep}`, `${sep}diag${sep}`],
+    why:
+      'V2 had 112 distinct grade uniforms across three parallel families (uCc*, uContext*, ' +
+      'uAtmosphere*), each re-implementing exposure/contrast/saturation/tint/gamma and re-tweaking to ' +
+      'undo the others, with the knobs then bleeding into water/foam/fog/distortion. The same ' +
+      '"seven homes per value" disease as weather, in the colour domain.',
+    instead:
+      'ONE grade primitive (effects/grade/grade-ops.js#applyGrade), applied at two SCOPES (environmental ' +
+      'f(env), artistic authored). Every "CC" is that function with different DATA — never a new uniform ' +
+      'family, never a `*Grade` knob grown in an effect. (docs/planning/Grade.md)',
+  },
+
+  // ===================================================================
   // SHADOW IS NOT PAINT — the one wrong noun that caused the whole
   // light/shadow war. These identifiers are its fossils.
   // ===================================================================
@@ -710,6 +918,51 @@ export const RULES = [
       'is the one legal home of suffix knowledge), and serve/consume masks through the mask ' +
       'authority (scene/mask-authority.js). Adding a mask kind is ONE catalog entry.',
   },
+
+  // ===================================================================
+  // WIND HAS ONE HANDLE — the field's inputs are assembled in world/ and
+  // NOWHERE else. (Built 2026-07-23 with world/wind-access.js; the wall and
+  // the room land in the same commit, at zero — the masks/authority-only
+  // precedent directly above.)
+  // ===================================================================
+  {
+    id: 'wind/handle-only',
+    // The BAKED inputs `sampleWind` needs. Naming one outside world/ means
+    // somebody is hand-assembling the field again — which is the mechanism,
+    // not the symptom: every wind-access bug this project has had was a
+    // hand-assembly that forgot, froze, or diverged from an input, never a
+    // wrong formula. `(?![a-zA-Z])` keeps longer identifiers out (a future
+    // `bakedFieldCache` is a different thing and should say so).
+    //
+    // `ambientWind` is DELIBERATELY NOT in this list, and the rule fired on its
+    // own birth commit to establish that: the composition root must hand the
+    // live direction/speed uniforms to `createWindHandle` itself (it owns
+    // them), and Tier 2's sim materials — part of the wind system rather than a
+    // consumer of it — take the same pair. More to the point, none of the three
+    // bugs in `why` below involve the ambient at all: they are all about a
+    // BAKED, graph-build-time ref being forgotten, frozen, or duplicated. A
+    // rule should ban exactly the mechanism it can name, or it teaches people
+    // to route around it (`feedback_too_fussy_over_lenient` says choose the
+    // stricter option when a rule is in DOUBT — not when it is demonstrably
+    // wider than its own rationale).
+    pattern: /\b(?:bakedField|wallAvoidField|liveField|opennessGrid)(?![a-zA-Z])/,
+    allow: [`${sep}world${sep}`],
+    why:
+      'sampleWind needs FIVE inputs, and until the handle existed every consumer assembled them by ' +
+      'hand from vt-pan-viewer.js closure locals — the same four-line block copy-pasted at four call ' +
+      'sites, plus two compute kernels on an incompatible second shape. That arrangement produced ' +
+      'three real, separately-diagnosed bugs: particle-runtime.js silently omitted bakedField for a ' +
+      'whole phase (door turbulence never reached the visible dust at all); the debug overlay froze ' +
+      'its baked texture at the startup bake forever ("rebaking never visibly changes anything"); and ' +
+      'computeWindTurbulence had to be extracted only AFTER two divergent copies were already live. ' +
+      'Shared helpers did not stop this — the third bug IS a shared helper, arriving late. What stops ' +
+      'it is making the malformed call unwriteable.',
+    instead:
+      'Take a wind handle (world/wind-access.js#createWindHandle, exported from world/index.js) and ' +
+      'call handle.node() in a material, handle.kernel() in a compute kernel, or handle.cpuAt() on ' +
+      'the CPU. A consumer holding a handle cannot forget an input, because it never names one. ' +
+      'Only the bake site builds a handle. See docs/planning/Wind.md §5.1.',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -796,6 +1049,137 @@ function loadRatchets() {
   }
 }
 
+function loadSizeBudgets() {
+  try {
+    return JSON.parse(readFileSync(SIZE_BUDGET_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/** Strip line + block comments so braces inside them don't miscount. Naive by
+ *  design (does not track `//` or `/*` inside string/template literals) — see
+ *  SIZE_CAPS on why an occasional miscount is harmless to a shrink-only ratchet. */
+function stripBraceComments(line) {
+  return line.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '');
+}
+
+/**
+ * The line-span of the largest TOP-LEVEL function in a file. Top-level =
+ * column-0 `function NAME`, `const NAME = (…) =>`, or `const NAME = function`
+ * (Prettier keeps top-level declarations AND their closing brace at column 0;
+ * nested ones are indented, so a column-0 scan sees only the outermost). The
+ * body span is found by brace balance from the declaration to the line the
+ * balance returns to 0 — which correctly steps over a multi-line destructured
+ * parameter list (`function start({\n …\n}) {`, the real startVtPanViewer
+ * shape) because the param `{}` opens and closes before the body `{`.
+ *
+ * @param {string[]} lines
+ * @returns {{name: string|null, startLine: number, lines: number}}
+ */
+export function largestTopLevelFunction(lines) {
+  const DECL = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([\w$]+)/;
+  const CONST_FN = /^(?:export\s+)?const\s+([\w$]+)\s*=\s*(?:async\s+)?(?:function\b|\(|[\w$]+\s*=>)/;
+  let best = { name: null, startLine: 0, lines: 0 };
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw[0] === ' ' || raw[0] === '\t') continue; // top-level declarations sit at column 0
+    const m = DECL.exec(raw) || CONST_FN.exec(raw);
+    if (!m) continue;
+    let depth = 0;
+    let opened = false;
+    let end = lines.length - 1;
+    for (let j = i; j < lines.length; j++) {
+      const code = stripBraceComments(lines[j]);
+      for (let k = 0; k < code.length; k++) {
+        if (code[k] === '{') {
+          depth++;
+          opened = true;
+        } else if (code[k] === '}') {
+          depth--;
+        }
+      }
+      if (opened && depth <= 0) {
+        end = j;
+        break;
+      }
+      if (!opened && /;\s*$/.test(code)) {
+        end = j;
+        break; // an expression-bodied arrow / a non-function `const` — no block body
+      }
+    }
+    if (opened) {
+      const span = end - i + 1;
+      if (span > best.lines) best = { name: m[1], startLine: i + 1, lines: span };
+    }
+    i = end; // top level: never re-enter a body we just measured
+  }
+  return best;
+}
+
+/** @returns {{rel: string, fileLines: number, fnName: string|null, fnLines: number}[]} */
+function measureSizes(files) {
+  return files.map((file) => {
+    const rel = relative(ROOT, file).replace(/\\/g, '/');
+    const lines = readFileSync(file, 'utf8').split('\n');
+    const fn = largestTopLevelFunction(lines);
+    return { rel, fileLines: lines.length, fnName: fn.name, fnLines: fn.lines };
+  });
+}
+
+/**
+ * The size ratchet: compare each file's measured size to its frozen budget.
+ * Over cap with no budget → a NEW god-object (violation). Over its budget →
+ * grew (violation). Under its budget → tighten. Under cap → no budget needed.
+ * Same monotonic-improvement contract as the count ratchets in main().
+ *
+ * @param {{rel: string, fileLines: number, fnName: string|null, fnLines: number}[]} measurements
+ * @param {Record<string, {file?: number, fn?: number}>} budgets
+ * @param {{file: number, fn: number}} caps
+ */
+export function evaluateSizeBudgets(measurements, budgets, caps = SIZE_CAPS) {
+  const violations = [];
+  const tightened = [];
+  const newBudgets = {};
+  for (const rec of measurements) {
+    const prior = budgets[rec.rel] ?? {};
+    const entry = {};
+    const dims = [
+      { kind: 'file', current: rec.fileLines, cap: caps.file, budget: prior.file },
+      { kind: 'fn', current: rec.fnLines, cap: caps.fn, budget: prior.fn },
+    ];
+    for (const d of dims) {
+      if (d.current <= d.cap) continue; // under cap: free, no budget
+      if (d.budget == null) {
+        violations.push({
+          rel: rec.rel,
+          kind: d.kind,
+          current: d.current,
+          cap: d.cap,
+          budget: null,
+          fnName: rec.fnName,
+        });
+        entry[d.kind] = d.current; // so --update can adopt it consciously
+      } else if (d.current > d.budget) {
+        violations.push({
+          rel: rec.rel,
+          kind: d.kind,
+          current: d.current,
+          cap: d.cap,
+          budget: d.budget,
+          fnName: rec.fnName,
+        });
+        entry[d.kind] = d.budget;
+      } else {
+        if (d.current < d.budget) tightened.push({ rel: rec.rel, kind: d.kind, from: d.budget, to: d.current });
+        entry[d.kind] = Math.min(d.current, d.budget);
+      }
+    }
+    if (entry.file != null || entry.fn != null) newBudgets[rec.rel] = entry;
+  }
+  return { violations, tightened, newBudgets };
+}
+
 function scan() {
   const files = sourceFiles();
   /** @type {Map<string, {file: string, line: number, text: string}[]>} */
@@ -878,12 +1262,49 @@ function main() {
     if (found.length > 10) console.error(`     ... and ${found.length - 10} more`);
   }
 
+  // THE SIZE RATCHET — same monotonic-improvement contract as the count
+  // ratchets above, keyed per file/function instead of a global tally.
+  const sizeBudgets = loadSizeBudgets();
+  const measurements = measureSizes(sourceFiles());
+  const size = evaluateSizeBudgets(measurements, sizeBudgets, SIZE_CAPS);
+  for (const t of size.tightened) {
+    console.log(`✅ size/${t.kind} — ${t.rel}: budget tightened ${t.from} → ${t.to}`);
+  }
+  if (size.violations.length) {
+    failed = true;
+    console.error(`\n❌ size/bounded — ${size.violations.length} over-budget file(s)/function(s)`);
+    console.error(`\n   WHY THIS RULE EXISTS:\n   ${SIZE_WHY.replace(/\s+/g, ' ')}`);
+    console.error(`\n   DO THIS INSTEAD:\n   ${SIZE_INSTEAD.replace(/\s+/g, ' ')}`);
+    console.error('\n   Violations:');
+    for (const v of size.violations) {
+      const what =
+        v.kind === 'file'
+          ? `${v.current} lines (cap ${v.cap})`
+          : `function ${v.fnName || '?'}() is ${v.current} lines (cap ${v.cap})`;
+      const how =
+        v.budget == null
+          ? 'NEW over-cap — split it, or `npm run ratchets:update` to register the debt'
+          : `grew past its frozen budget of ${v.budget} — it may only SHRINK`;
+      console.error(`     ${v.rel}: ${what} — ${how}`);
+    }
+  }
+
   if (updating) {
     for (const rule of RULES) {
       if (rule.ratchet) newRatchets[rule.id] = hits.get(rule.id).length;
     }
     writeFileSync(RATCHET_FILE, JSON.stringify(newRatchets, null, 2) + '\n');
-    console.log(`\n📌 Ratchets written to ${relative(ROOT, RATCHET_FILE)}`);
+    // Seed/adopt size budgets at CURRENT sizes for every over-cap file — the
+    // tightest honest bound, the "tighten immediately" the ratchet is for.
+    const seeded = {};
+    for (const rec of measurements) {
+      const e = {};
+      if (rec.fileLines > SIZE_CAPS.file) e.file = rec.fileLines;
+      if (rec.fnLines > SIZE_CAPS.fn) e.fn = rec.fnLines;
+      if (e.file != null || e.fn != null) seeded[rec.rel] = e;
+    }
+    writeFileSync(SIZE_BUDGET_FILE, JSON.stringify(seeded, null, 2) + '\n');
+    console.log(`\n📌 Ratchets + size budgets written (${Object.keys(seeded).length} files budgeted)`);
     return;
   }
 
@@ -903,8 +1324,10 @@ function main() {
   }
 
   const tightened = Object.keys(newRatchets).length;
+  const budgeted = Object.keys(size.newBudgets).length;
   console.log(
-    `✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}${debtShown ? ` — ⏳ ${debtShown} declared debt(s) active` : ''}`
+    `✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}` +
+      `${budgeted ? `, ${budgeted} size budget(s)` : ''}${debtShown ? ` — ⏳ ${debtShown} declared debt(s) active` : ''}`
   );
 }
 

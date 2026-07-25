@@ -59,6 +59,9 @@ export {
   pie,
   rotate2d,
 } from './lighting/animations/tsl-noise-toolkit.js';
+// Region darkness split 2026-07-25 (size-ratchet god-object reversal): pure CPU
+// geometry/darkness math in region-geometry.js, TSL material builders in
+// region-darkness.js. Both re-exported here so the effects zone door is unchanged.
 export {
   pointInRectangle,
   pointInEllipse,
@@ -74,6 +77,8 @@ export {
   computeRegionAdjustedDarkness,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
+} from './lighting/region-geometry.js';
+export {
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,
   buildRegionPolygonMaterial,

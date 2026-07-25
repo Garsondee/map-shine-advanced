@@ -29,7 +29,13 @@ import { existsSync } from 'node:fs';
 import { sep, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { RULES, validateExceptions, applyExceptions } from './verify-structure.mjs';
+import {
+  RULES,
+  validateExceptions,
+  applyExceptions,
+  largestTopLevelFunction,
+  evaluateSizeBudgets,
+} from './verify-structure.mjs';
 import { computeReachability } from './reachability.mjs';
 
 // Same derivation tools/verify-structure.mjs itself uses — replicated here
@@ -55,6 +61,22 @@ const V2_CORPSES = [
     from: 'legacy/particles/WeatherParticles.js',
     code: "import { BatchedRenderer } from '../libs/three.quarks.module.js';",
     note: 'quarks cannot render under the node renderer at all (keyhole-particles-tsl-decision)',
+  },
+
+  // --- particle memory: storage allocation that must stay in the arena. A NEW
+  // invariant (like the log-door cases below), not a V2 line — the arena is
+  // built at zero, so the wall proves itself against synthetic offenders.
+  {
+    rule: 'particles/allocator-only',
+    from: 'the disposal-free arena (Particles.md §10) — the allocation that must have ONE owner',
+    code: "const positions = instancedArray(capacity, 'vec2');",
+    note: 'raw storage allocation outside effects/particles/ has no ceiling and no dispose()',
+  },
+  {
+    rule: 'particles/allocator-only',
+    from: 'the lower-level constructor the wall must also catch (both Storage*BufferAttribute spellings)',
+    code: 'this._buf = new THREE.StorageInstancedBufferAttribute(new Float32Array(n * 2), 2);',
+    note: 'StorageInstancedBufferAttribute inherits BufferAttribute — no dispose(); it belongs to the arena',
   },
 
   // --- the global bus: 479 reaches, and the Lighting<->Fire cycle it enabled
@@ -167,6 +189,54 @@ const V2_CORPSES = [
     from: 'legacy/compositor-v2/shadow-system/SunDirection.js + 7 others',
     code: 'const sunDirection = computeSunAngle(timeOfDay);',
     note: 'shadows and specular could disagree about the sky BY CONSTRUCTION',
+  },
+
+  // --- one time-of-day: THE original sin, verbatim
+  {
+    rule: 'time/one-tod',
+    from: 'legacy/core/WeatherController.js:184',
+    code: 'this.timeOfDay = 12.0; // Canonical fresh-scene default: clear noon.',
+    note: 'the clock lived INSIDE weather; twenty files then grew their own hour',
+  },
+  {
+    rule: 'time/one-tod',
+    from: 'legacy: any of the twenty files that kept their own',
+    code: 'let todHour = 12;',
+    note: 'a MUTABLE local hour is a second clock waiting to drift',
+  },
+
+  // --- one atmosphere: the grade that needed a second system to undo it
+  {
+    rule: 'sky/one-atmosphere',
+    from: 'legacy/compositor-v2/effects/ColorCorrectionEffectV2.js (the ToD timeline + outdoor atmosphere)',
+    code: 'const todGrade = evaluateTodTimeline(hour, anchors);',
+    note: 'atmosphere as a full-screen grade needed a "Local ToD override" to cancel itself in torch pools',
+  },
+  {
+    rule: 'sky/one-atmosphere',
+    from: 'legacy: the reach for a saturation knob',
+    code: 'const saturationAmount = 1 - cloudCover * 0.5;',
+    note: 'a multiply cannot desaturate — the additive veil is what does (Sky.md §5)',
+  },
+
+  // --- one grade stack: the 112-uniform, three-family sprawl
+  {
+    rule: 'grade/one-stack',
+    from: 'legacy/compositor-v2/effects/ColorCorrectionEffectV2.js (uCc* family, 13 uniforms)',
+    code: 'const uCcSaturation = uniform(1.0);',
+    note: 'one of THREE parallel grade families (uCc*/uContext*/uAtmosphere*) — 112 grade uniforms total',
+  },
+  {
+    rule: 'grade/one-stack',
+    from: 'legacy/core/context-grade/ContextualSceneGradeManager.js (uContext* family, 18 uniforms)',
+    code: 'const uContextGrade = new THREE.Vector3();',
+    note: 'the indoor/outdoor context grade that metastasized to 1165 lines + 6 helpers',
+  },
+  {
+    rule: 'grade/one-stack',
+    from: 'legacy: a second grade engine growing in an effect',
+    code: 'let weatherGrade = computeWeatherGrade();',
+    note: 'a `*Grade` owned identifier outside effects/grade/ = a rival grade stack forming',
   },
 
   // --- shadow is not paint: the fossils of the wrong noun
@@ -324,6 +394,33 @@ const V2_CORPSES = [
     code: "windows: { suffix: '_Windows', required: false, description: 'Window lighting mask' },",
     note: 'V2 alias suffixes are reserved too — they resolve through the catalog, never re-hardcode',
   },
+
+  // --- hand-assembled wind: the four-line block that was copy-pasted at four
+  // --- call sites, and the two kernels on an incompatible second shape
+  {
+    rule: 'wind/handle-only',
+    from: 'src/vt/vt-pan-viewer.js (the block, verbatim, at all four material call sites)',
+    code: 'bakedField: windBakedField,',
+    note: 'the input particle-runtime.js silently omitted for a whole phase — door turbulence never reached the dust',
+  },
+  {
+    rule: 'wind/handle-only',
+    from: 'src/effects/candle-flame-render.js (buildCandleFlameMaterial’s old signature)',
+    code: 'export function buildCandleFlameMaterial({ THREE, quality, bakedField, wallAvoidField, liveField }) {',
+    note: 'a consumer that can NAME the inputs is a consumer that can forget one; taking a handle removes the chance',
+  },
+  {
+    rule: 'wind/handle-only',
+    from: 'src/effects/particles/particle-runtime.js (the second, incompatible access shape)',
+    code: 'const { openness, cols, rows, originX, originY, cellSize } = opennessGrid;',
+    note: 'the compute kernels’ own raw-array shape — hand-unpacked in two files, with the index maths duplicated too',
+  },
+  {
+    rule: 'wind/handle-only',
+    from: 'src/diag/wind-field-overlay.js (the overlay that froze its bake for a whole session)',
+    code: 'export function buildWindHeatmapMaterial({ THREE, uGlobalTimeMs, ambientWind, liveField }) {',
+    note: 'bug #2: a stale material kept the startup bake’s texture forever — "rebaking never visibly changes anything"',
+  },
 ];
 
 /** Lines that must NOT trip a rule (guards against a wall crying wolf). */
@@ -347,6 +444,13 @@ const MUST_PASS = [
   },
   { code: 'const target = frame.renderTarget;', note: 'READING a renderTarget is not allocating one' },
   { code: 'if (tex.isDataArrayTexture) return tex.image.depth;', note: 'a type CHECK is not an allocation' },
+  // The particle-arena wall must bite on ALLOCATION only — reserving a slot range
+  // and reading a buffer are the sanctioned path and must never trip.
+  {
+    code: 'const region = arena.reserve(system.capacity);',
+    note: 'reserving a slot range is bookkeeping, not allocation',
+  },
+  { code: 'const positionBuffer = arena.buffers.position;', note: 'reading an arena buffer is not allocating one' },
   { code: 'const loader = new THREE.TextureLoader();', note: 'TextureLoader is not a texture' },
   { code: 'const proxy = new PIXI.Texture(baseTexture);', note: 'PIXI proxies are the §4.3 FIX, not the disease' },
   // The fullscreen-quad wall must bite ONLY on a screen-filling quad. A
@@ -369,6 +473,37 @@ const MUST_PASS = [
   },
   { code: 'this._FireballCache = new Map();', note: 'an identifier substring is not a mask suffix (_Fire + letter)' },
   { code: "const kind = maskKindById('outdoors');", note: 'catalog kind ids are the sanctioned vocabulary' },
+  // `time/one-tod` bans KEEPING an hour, never naming or forwarding one. Its
+  // first cut fired on all four of these, every one of which is the system
+  // working as designed — a wall that bans the sanctioned path teaches people
+  // to obfuscate the name, which hides the concept instead of centralising it.
+  {
+    code: 'buildEnvSnapshot({ time, todHour, weather });',
+    note: 'forwarding the hour you were handed is the sanctioned path',
+  },
+  { code: 'const h = env.time.todHour;', note: 'READING the hour off the frame snapshot is the whole design' },
+  { code: 'const todHour = dayClock.tick(dtSec);', note: 'a const local cannot drift — it is a name, not a clock' },
+  { code: 'if (a.todHour === b.todHour) return;', note: 'comparing is not assigning' },
+  // `sky/one-atmosphere` bans OWNING an atmosphere knob, never reading the
+  // handle that owns it — same distinction as time/one-tod.
+  { code: 'envLight.setSky(skyHandle.ambientMultiplierRgb, skyHandle.veilAddRgb);', note: 'reading the sky handle' },
+  { code: 'const veil = sky.veil.strength;', note: 'a const local naming the handle’s own value' },
+  // `grade/one-stack` bans a rival grade FAMILY/knob, not the primitive's own
+  // params, a method call, or a strength scalar. (A FORWARDED resolved grade is
+  // deliberately named without the `…Grade` suffix — `const envResolved = …` —
+  // so the wall catches "a grade STAGE is forming here" without a false alarm on
+  // a value in flight; the viewer/boot already follow this.)
+  { code: 'applyGrade(rgb, { exposure, contrast, saturation });', note: 'the grade primitive’s own params' },
+  {
+    code: 'const envResolved = scaleGradeToIdentity(resolveEnvGrade(env), s);',
+    note: 'a forwarded grade, named without the Grade suffix',
+  },
+  { code: 'gradePresent.setEnvGrade(params);', note: 'a method call, not an owned grade uniform' },
+  { code: 'let gradeEnvStrength = 0;', note: 'a strength scalar, not a grade knob family' },
+  {
+    code: 'MapShine.setGrade = (partial) => {};',
+    note: 'a set*Grade public API setter (like setBloom), not a stage assignment',
+  },
 ];
 
 export function run(t) {
@@ -542,6 +677,64 @@ export function run(t) {
     t.ok('...the covered one is the declared one', excepted[0].file.includes('fire'));
     const other = applyExceptions('no-silent-catch', hits, good);
     t.ok('an exception never bleeds across rules', other.excepted.length === 0);
+  }
+
+  // --- THE SIZE RATCHET: the god-object wall (added 2026-07-25) ---
+  // These prove the measurement is honest and the ratchet is monotonic, the
+  // same standard every other wall here is held to.
+  {
+    const bigFn = ['function huge() {', ...Array.from({ length: 500 }, () => '  work();'), '}'];
+    const measured = largestTopLevelFunction(bigFn);
+    t.ok('largestTopLevelFunction measures a 502-line function', measured.lines === 502 && measured.name === 'huge');
+
+    const nested = [
+      'function outer() {',
+      '  const inner = () => {',
+      '    deep();',
+      '  };',
+      '  return inner;',
+      '}',
+      'const small = (a) => a + 1;',
+    ];
+    t.ok('...counts the TOP-LEVEL span (6), not the nested arrow', largestTopLevelFunction(nested).lines === 6);
+
+    // The exact startVtPanViewer shape: a multi-line destructured param list
+    // whose own braces must not be mistaken for the body's close.
+    const destructured = ['export async function start({', '  a,', '  b,', '}) {', '  body();', '  more();', '}'];
+    t.ok('...steps over a multi-line destructured param list', largestTopLevelFunction(destructured).lines === 7);
+
+    const oneLiner = ['export const add = (a, b) => a + b;', 'function real() {', '  x();', '}'];
+    t.ok('...an expression-bodied arrow is not a block function', largestTopLevelFunction(oneLiner).name === 'real');
+
+    const caps = { file: 1000, fn: 300 };
+    const over = [{ rel: 'src/x.js', fileLines: 2000, fnName: 'f', fnLines: 50 }];
+    t.ok(
+      'a NEW file over the cap with no budget FAILS',
+      evaluateSizeBudgets(over, {}, caps).violations.some((v) => v.kind === 'file' && v.budget === null)
+    );
+    t.ok(
+      '...growth past a frozen budget FAILS',
+      evaluateSizeBudgets(over, { 'src/x.js': { file: 1500 } }, caps).violations.some((v) => v.budget === 1500)
+    );
+    const shrink = evaluateSizeBudgets(
+      [{ rel: 'src/x.js', fileLines: 1200, fnName: 'f', fnLines: 50 }],
+      { 'src/x.js': { file: 1500 } },
+      caps
+    );
+    t.ok(
+      '...shrinking tightens the budget with no violation',
+      shrink.violations.length === 0 && shrink.tightened.some((x) => x.to === 1200)
+    );
+    const under = evaluateSizeBudgets([{ rel: 'src/y.js', fileLines: 800, fnName: null, fnLines: 0 }], {}, caps);
+    t.ok(
+      'a file UNDER the cap needs no budget and never fails',
+      under.violations.length === 0 && Object.keys(under.newBudgets).length === 0
+    );
+    const fatFn = evaluateSizeBudgets([{ rel: 'src/z.js', fileLines: 500, fnName: 'god', fnLines: 900 }], {}, caps);
+    t.ok(
+      'a huge FUNCTION inside a small file is still caught',
+      fatFn.violations.some((v) => v.kind === 'fn' && v.current === 900)
+    );
   }
 
   // Every corpse in the list must map to a real rule (no orphan citations).

@@ -9,7 +9,7 @@
 import { run as runEnvironmentalLight } from './environmental-light.test.mjs';
 import { run as runPointLightIllumination } from './point-light-illumination.test.mjs';
 import { run as runPointLightColoration } from './point-light-coloration.test.mjs';
-import { run as runRegionDarkness } from './region-darkness.test.mjs';
+import { run as runRegionGeometry } from './region-geometry.test.mjs';
 import { run as runLightVisibility } from './light-visibility.test.mjs';
 
 let passed = 0;
@@ -43,7 +43,7 @@ const suites = [
   ['environmental-light', runEnvironmentalLight],
   ['point-light-illumination', runPointLightIllumination],
   ['point-light-coloration', runPointLightColoration],
-  ['region-darkness', runRegionDarkness],
+  ['region-geometry', runRegionGeometry],
   ['light-visibility', runLightVisibility],
 ];
 for (const [name, fn] of suites) {

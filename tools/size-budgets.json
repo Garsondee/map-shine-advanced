@@ -1,0 +1,34 @@
+{
+  "src/boot.js": {
+    "file": 4082,
+    "fn": 3467
+  },
+  "src/diag/debug-panel.js": {
+    "file": 1321,
+    "fn": 1249
+  },
+  "src/effects/candle-flame-render.js": {
+    "file": 1010
+  },
+  "src/effects/particles/gust-runtime.js": {
+    "fn": 590
+  },
+  "src/effects/particles/particle-runtime.js": {
+    "file": 1824,
+    "fn": 1066
+  },
+  "src/scene/mask-authority.js": {
+    "fn": 596
+  },
+  "src/ui/paint-mode.js": {
+    "file": 1083,
+    "fn": 867
+  },
+  "src/vt/decode-pool.js": {
+    "file": 1128
+  },
+  "src/vt/vt-pan-viewer.js": {
+    "file": 11870,
+    "fn": 10395
+  }
+}

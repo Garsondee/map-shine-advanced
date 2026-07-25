@@ -1,6 +1,7 @@
 # EXTRACTING `vt-pan-viewer.js` — the 11,957-line god-object, split safely
 
-**Status:** IN PROGRESS, 2026-07-25. Steps 1-3 (Sun shadows, Vegetation shadows, Point-light pool) DONE — see §7-9. Author-requested after the size ratchet was bumped three times in one session; steps 2-3 done as Phase 0a of the Water rebuild (`docs/planning/Water.md`), which cannot land until `startVtPanViewer()` has room to grow.
+**Status:** IN PROGRESS, 2026-07-26. Steps 1-3 (Sun shadows, Vegetation shadows, Point-light pool) DONE — see §7-9. Step 5 (Diagnostics) also DONE — see §10 — done OUT OF ORDER (§2's stated order runs 4 before 5); step 4 (whole-image loading) remains open. Author-requested after the size ratchet was bumped three times in one session; steps 2-3 done as Phase 0a of the Water rebuild, step 5 done as the unblock for Water Phase 2d, both `docs/planning/Water.md`.
+**Standing doctrine, renegotiated 2026-07-26:** memory `feedback_ratchet_proactive_not_reactive` — a frozen file/function must be split BEFORE a feature phase touches it, as planned prep, never discovered as a mid-task blocker and never fixed by loosening the cap.
 **Companions:** `Skeleton.md` (the enforcement doctrine), `Engine-Postmortem.md` §3, `Keyhole.md` §4.2, memory `keyhole-god-object-forming`.
 
 ---
@@ -26,8 +27,8 @@ Ordered so each step is independently shippable and independently live-testable.
 | 1 | **Sun shadows** (`bakeCasterTexture`, `bakeSunShadowField`, `maybeBakeSunShadow`, 6 constants) | ~250 | Newest, best-understood, already has its own pure core + render module + report. Its closure deps are few and already half-named. Lowest risk, and it is the code most likely to keep changing — getting it out first stops the bleeding. |
 | 2 | **Vegetation shadows** (`attachVegetationTileShadow`, `vegetationShadowPadPx`, `syncVegetationShadowUniforms`, `padPlacement`, smear constants) | ~400 | Self-contained, has its own tests, and is the other actively-churning area. Shares `setTileGeometry` — that stays behind as a viewer primitive and is passed in. |
 | 3 | **The point-light pool** (`updatePointLightMeshes` + entry lifecycle) | ~700 | Big, but its inputs are already an explicit list (`darkness01`, `activeRegions`, `env`, …) because it was written as a function, not inline. Mostly mechanical. |
-| 4 | **Whole-image loading** (`ensureWholeImageMeshes`, `refreshWholeImageItem`, the load chain) | ~900 | Large and gnarly (device-loss hardening, BC compression, the serialized chain). Do it once the pattern is proven three times. |
-| 5 | **Diagnostics assembly** (`getDiagnostics`'s body) | ~700 | Pure reporting; deferred deliberately because it READS everything, so it is easiest once the subsystems above already expose status objects. |
+| 4 | **Whole-image loading** (`ensureWholeImageMeshes`, `refreshWholeImageItem`, the load chain) | ~900 | Large and gnarly (device-loss hardening, BC compression, the serialized chain). Do it once the pattern is proven three times. STILL OPEN — step 5 landed first (§10) because it was the concrete Water Phase 2d blocker; this row's own reasoning (large, gnarly, wants the pattern proven first) is unaffected and still applies whenever it is picked up. |
+| 5 | **Diagnostics assembly** (`getDiagnostics`'s body) | ~700 est., 533 actual | ✅ DONE 2026-07-26 (§10), taken OUT OF ORDER — see §10's own note for why skipping step 4 was safe here specifically. |
 
 Stop after any step. There is no half-broken intermediate state — each is a complete move.
 
@@ -136,6 +137,32 @@ The first draft of `dispose()` replaced the original's per-resource `try { ... }
 ### 9.4 Live-verified
 
 2026-07-25, author loaded a real scene: nothing broke. Confirms steps 1-3 together — point lights, candles, wind response, and sun-shadow sampling all reconcile through this pool in the same pass as sun/vegetation shadows.
+
+## 10. Step 5 — DONE, 2026-07-26 (taken out of order)
+
+`vt/vt-pan-viewer-diagnostics.js` now owns `_active.getDiagnostics()`'s entire former body: `buildViewerDiagnostics(args)` (the orchestrator), plus three helpers it calls — `computeLayerResidency`, `buildDrawList`, `summarizeWholeImage` — each split out from what was already a self-contained loop or IIFE in the original, not a line cut arbitrarily to satisfy a count. `percentileMs` and `sampleDiagnostics` (two more viewer-closure functions with zero free variables of their own) moved wholesale alongside it and are now Node-tested (`vt/__tests__/vt-pan-viewer-diagnostics.test.mjs`) — the first real test coverage anything in this extraction has gotten, since the two are genuinely pure.
+
+**Ratchet went down, by a lot:** `vt-pan-viewer.js` file 11,085 → 10,559 lines, `startVtPanViewer()` fn 10,345 → 9,835 — **~510 lines of headroom**, comfortably enough for Water Phase 2d's ~20-line body-pack wiring, which is exactly what this step exists to unblock. `npm run verify` green (4,120 assertions, 17 suites, 28/28 structural rules) with **zero new debt registered** — the auto-tightened budgets moved down on their own (see the ratchet-persistence fix below).
+
+### 10.1 Why step 4 was skipped, and why that was safe specifically here
+
+§2's stated order runs whole-image loading (step 4) before diagnostics (step 5) — "easiest once the subsystems above expose status objects" assumed sun shadows/vegetation/point-lights would be the ONLY subsystems `getDiagnostics` reads. Reading the actual 533-line body found it also reads whole-image state (`s.wholeImage`, `wi.status`, `wi.tiles`, …) directly off `itemStates` — but only as PLAIN DATA already sitting in that Map, never through anything step 4 would have introduced (there is no whole-image "subsystem object" yet to call `.getStatus()` on; the loader is still inline). So step 5 had no real dependency on step 4 having landed first — it depends on `itemStates`' own shape, which step 4 will not change (an extraction is required to preserve exact behavior, per §6). Skipping was a genuine independent move, not a shortcut.
+
+### 10.2 A stale comment corrected in passing
+
+`getDiagnostics`'s own call site (§ the zoom-thrash test's cheap read) carried a comment claiming it "does a real GPU readback (gl.readPixels + a full indirection-buffer scan)". Reading the actual body top to bottom found no such call anywhere: `sampleDiagnostics` (the indirection-buffer scan) reads `pack.buf`, a plain JS-side array already in memory — genuinely synchronous, zero GPU touch. The real pixel-readback path (`readRenderTargetPixelsAsync`) lives in a SEPARATE, async, click-triggered tool (the pixel probe, `MapShine.probePixels`) that `getDiagnostics` never calls. The comment was stale from an earlier version of the file; not corrected in the moved code (extractions preserve text, per §6) but worth recording here so a future reader trusts the actual body over the old comment.
+
+### 10.3 The ratchet-persistence bug this step's own detour found
+
+Extracting `mask-authority-report.js` earlier the same session (Water Phase 2c prep) shrank `mask-authority.js` under its frozen function budget, and `verify-structure.mjs` printed `✅ size/fn — ... budget tightened 607 → 606` — but the next run printed the SAME line again. All three ratchet families (rule counts, size, uniform budgets) computed the tightened value correctly and simply never wrote it: persistence only happened under `--update-ratchets`, contradicting the tool's own header ("a DECREASE auto-tightens the bound... never claims virtue it does not have"). Fixed the same day, downward-only (loosening still requires the loud explicit path) — see memory `feedback_ratchet_proactive_not_reactive` for the full renegotiation this was part of. This step's own ~510-line shrink is the first extraction to have its tightening actually persist without a manual `ratchets:update` run.
+
+### 10.4 Trap #7, found while planning this step (not in the original six)
+
+Before touching a 533-line function inside an 11,000-line file, its free-variable set was mapped PRECISELY (name, declaration site, mutable-vs-stable) before writing a single line of the new module — using an Explore agent rather than hand-transcription, specifically because a body this dense with forensic comments has zero room for a silent copy error. The destructured parameter names in the new module are IDENTICAL to the original bare identifiers, so the 500-line body needed no internal rewrites at all, only a new signature line — the lower the textual diff, the lower the chance a transcription mistake survives review. **Add this as trap #7: before extracting a large, closure-heavy function, get an authoritative dependency table first (agent-assisted if the count is large), and keep the moved body's internal variable names unchanged — rename at the call site, never inside the body being moved.**
+
+### 10.5 NOT live-tested
+
+Unlike steps 1-3, this step has not yet been confirmed against a real Foundry scene — `npm run verify` is necessary, not sufficient (§5 rule 1), and diagnostics in particular has no meaningful Node coverage for its orchestrating function (`buildViewerDiagnostics` itself reads renderer/cache/subsystem state real mocking would not usefully approximate). The next live scene load should open the debug panel's full report and confirm every field still populates.
 
 ---
 

@@ -14,6 +14,7 @@ import { run as runTextureLimits } from './texture-limits.test.mjs';
 import { run as runBlockCompress } from './block-compress.test.mjs';
 import { run as runCoarseAlpha } from './coarse-alpha.test.mjs';
 import { run as runSceneAttr } from './scene-attr.test.mjs';
+import { run as runVtPanViewerDiagnostics } from './vt-pan-viewer-diagnostics.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -56,6 +57,7 @@ const suites = [
   ['block-compress', runBlockCompress],
   ['coarse-alpha', runCoarseAlpha],
   ['scene-attr', runSceneAttr],
+  ['vt-pan-viewer-diagnostics', runVtPanViewerDiagnostics],
 ];
 
 for (const [name, fn] of suites) {

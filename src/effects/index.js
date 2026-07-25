@@ -57,6 +57,10 @@ export {
   SUN_SHADOW_FIELD_DIM,
   SUN_SHADOW_MARCH_STEPS,
 } from './lighting/sun-shadow-subsystem.js';
+// THE POINT-LIGHT POOL — extraction step 3 of docs/planning/
+// VT-Pan-Viewer-Extraction.md. The mesh pool, its two dedicated scenes, the
+// candle wall-clip cache, and the per-frame reconcile.
+export { createPointLightPool } from './lighting/point-light-pool.js';
 export {
   buildEnvironmentalLightMaterials,
   computeAmbientBackground,

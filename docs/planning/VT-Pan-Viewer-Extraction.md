@@ -1,6 +1,6 @@
 # EXTRACTING `vt-pan-viewer.js` — the 11,957-line god-object, split safely
 
-**Status:** IN PROGRESS, 2026-07-25. Step 1 (Sun shadows) DONE — see §7. Author-requested after the size ratchet was bumped three times in one session.
+**Status:** IN PROGRESS, 2026-07-25. Steps 1-3 (Sun shadows, Vegetation shadows, Point-light pool) DONE — see §7-9. Author-requested after the size ratchet was bumped three times in one session; steps 2-3 done as Phase 0a of the Water rebuild (`docs/planning/Water.md`), which cannot land until `startVtPanViewer()` has room to grow.
 **Companions:** `Skeleton.md` (the enforcement doctrine), `Engine-Postmortem.md` §3, `Keyhole.md` §4.2, memory `keyhole-god-object-forming`.
 
 ---
@@ -104,6 +104,38 @@ Confirmed while extracting: neither `sunShadowRt` nor `sunShadowBake.material` h
 ### 7.3 Not yet done
 
 Live-scene verification — non-negotiable per §5.3, still outstanding. Two real crashes this feature already produced (the TDZ, the `.target` typo) were both invisible to the test suite; this extraction touches the exact same render-target wiring, so it needs the same check before being trusted.
+
+## 8. Step 2 — DONE, 2026-07-25
+
+`effects/vegetation-shadow-subsystem.js` (`createVegetationShadowSubsystem`) now owns: the 6 constants (`VEG_SHADOW_RENDER_ORDER_MAGNITUDE`, `VEG_SHADOW_SMEAR_TAPS`, and 4 more), `padPlacement`/`vegetationShadowPadPx` (pure, exported standalone — `setTileGeometry` and the Case-2 overlay build both still need them), and `attachTileShadow`/`syncUniforms` (the old `attachVegetationTileShadow`/`syncVegetationShadowUniforms`). Trap #1 confirmed live: `shadowHandle` is reassigned on every sky change (`vt-pan-viewer.js`), so it's taken as `getShadowHandle: () => shadowHandle`, not a value. Traps #2 (no new `uniform(` calls) and #5 (no `setRenderTarget`/`new *Texture`) both checked clean.
+
+This step's before/after numbers are folded into a single large checkpoint commit (`e092f6d`) alongside ~150 files of previously-uncommitted V3 work, so a clean isolated delta isn't recoverable from git history — the honest number is step 3's, below, measured against that checkpoint as the baseline.
+
+## 9. Step 3 — DONE, 2026-07-25
+
+`effects/lighting/point-light-pool.js` (`createPointLightPool`) now owns: `lightScene`/`colorationScene` (exposed properties, read directly by the render loop), `lightMeshes`/`candleWallClipCache` (exposed Maps, read by wind-rebake marking and by `getPointLightsInfo` diagnostics — deliberately untouched, see §2 row 5), `INITIAL_LIGHT_FAN_VERTICES`, and `update()`/`dispose()` (the old `updatePointLightMeshes`/`disposePointLights`).
+
+**Ratchet went down**, against the checkpoint baseline: `vt-pan-viewer.js` file 11,957 → 11,009, `startVtPanViewer()` 10,484 → 10,270 (well under its own frozen budget — no `ratchets:update` needed). `npm run verify` green (3,949 assertions, 28/28 structural rules).
+
+### 9.1 A deliberate non-move: `uGlobalTimeMs`
+
+The one shared animation-clock TSL uniform is written ONLY by this pool but read by roughly a dozen unrelated consumers (the wind sim's input bundle, vegetation motion sync, several TSL light-animation builders, diagnostics). Moving it into `point-light-pool.js` alongside its one writer would mean every unrelated caller reaching back into "the point-light module" for a general-purpose clock — the wrong owner, chosen only because that's where the one write happens to live. It stays a `vt-pan-viewer.js` primitive (like `dimensions`/`scene`), taken by this pool as a plain value.
+
+### 9.2 Trap #6, found live: nesting doesn't shrink the ratchet's measurement
+
+The first draft split the ~150-line "build a brand-new light entry" block into a function NESTED inside `createPointLightPool`'s own closure (so it could read `lightScene`/`envLight`/etc. for free). `verify-structure.mjs`'s `largestTopLevelFunction` measures the brace span of the outer, COLUMN-0 function only — a nested `function` declaration doesn't create a second measured span, it just adds lines to the one that already exists. The nested version made the violation WORSE (502 → 520 lines), not better.
+
+**The fix:** `createLightEntry` had to become a genuine top-level (column-0) function, which meant every value it used to close over — `THREE`, `envLight`, `sunShadows`, `sceneColor`, `uGlobalTimeMs`, `lightScene`, `colorationScene` — became an explicit parameter instead. More verbose at the call site, but this is arguably the correct shape anyway: `createLightEntry`'s full dependency list is now written down rather than implicit, which is the extraction plan's own §1 rule applied one level deeper than the plan's own examples show.
+
+**Add this as trap #6 for steps 4-5:** if a subsystem's own function is still over the 500-line cap after extraction, splitting a piece of it into a function nested INSIDE that same factory buys nothing — measure against the outer, column-0 span. The split must go all the way to top-level, with its dependencies named explicitly, same as the subsystem itself.
+
+### 9.3 A real behavior-change caught before it shipped
+
+The first draft of `dispose()` replaced the original's per-resource `try { ... } catch (err) { log.error(...) }` (log and continue to the next entry, always `.clear()` at the end) with `throw new Error(...)` on first failure. That is a real behavior change bundled into what was supposed to be a pure extraction — worse, on a real dispose failure it would now skip disposing every remaining entry AND skip the final `.clear()`. Caught by re-reading the diff against the original before running it, not by a test (a thrown dispose error has no test coverage either way). Restored to the original catch-log-continue shape, with `createLogger('PointLightPool')` replacing the viewer's own `log` reference.
+
+### 9.4 Not yet done
+
+Live-scene verification — non-negotiable per §5.3, still outstanding, same as step 1. Point lights + candles + wind response + sun-shadow sampling all reconcile in this one pool; a live session with real lights, at least one wind rebake, and a sun sweep is the check, not a green test suite.
 
 ---
 

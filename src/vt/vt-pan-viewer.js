@@ -122,14 +122,12 @@ import {
   readGamePaused,
   watchGamePaused,
   watchWorldTimeOfDay,
-  readActiveLightSources,
   readGlobalLightConfig,
   readActiveDarknessRegions,
   readGridDistancePixels,
   readGridSizePixels,
   computeTokenOcclusionRadiusPx,
   getActiveSceneFloors,
-  computeCandleWallClippedShape,
   readSceneWallSegments,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback, describeRenderMode } from '../diag/render-fallback.js';
@@ -147,18 +145,9 @@ import {
   computeGlobalLightFloor,
   maxRgb,
   mixRgb,
-  buildPointLightIlluminationMaterial,
-  easeAttenuation,
-  computeExposure,
-  buildPointLightColorationMaterial,
-  computeColorationAlpha,
-  triangulateLightFan,
-  writeLightEdgePoints,
-  computeEdgeSoftMarginNormalized,
   computeShapeMeshBounds,
   writeRegionPolygonPoints,
   applyDarknessAdjustment,
-  computeRegionAdjustedDarkness,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
   buildRegionRectangleMaterial,
@@ -175,7 +164,6 @@ import {
   DEFAULT_WORKSPACE_LIGHT,
   buildCandleFlameMaterial,
   buildCandleFlameGeometry,
-  buildCandleLightSources,
   candleAnimationQualityTier,
   buildDoorMaterial,
   doorLeafStyles,
@@ -183,7 +171,6 @@ import {
   applyDoorAnimation,
   doorSnapshotToPlacement,
   doorEaseInOutCosine,
-  resolveLightAnimation,
   KNOWN_DEFERRED_ANIMATIONS,
   createParticleEngine,
   WIND_DIAGNOSTIC_PARTICLES,
@@ -203,6 +190,7 @@ import {
   // (maxThrowForHeightPx / shadowPenumbraPx / BASE_SOFTNESS_PX / edgeRamp01
   // left with the vegetation-shadow code in extraction step 2 — this file has
   // no remaining caller for any of them.)
+  createPointLightPool,
   createSkyHandle,
   buildGradePresentMaterial,
   buildBloomMaterials,
@@ -1659,23 +1647,58 @@ export async function startVtPanViewer({
     // coloration/darkness/animations/global-light-window).
     // ========================================================================
 
-    /** A tiny dedicated Scene for point-light meshes — kept separate from
-     * the main `scene`, same reasoning as occlusionScene below. */
-    const lightScene = new THREE.Scene();
+    /** THE ONE SHARED ANIMATION-CLOCK UNIFORM (2026-07-20, WebGPU-performance
+     * rework: "let's not leave any CPU stuff in if we can avoid it" —
+     * light-animation-clock.js's own header has the full mechanism). Every
+     * animated light's illumination/coloration material reads THIS SAME
+     * uniform node (shared, like uBackgroundColor/uDimColor/uBrightColor
+     * already are — an established pattern, not a new one) to compute its
+     * OWN `time` in-shader; written ONCE per frame (inside `pointLights.
+     * update()` below), never per-light — replaces what used to be a
+     * `computeAnimationTime` JS call PER ANIMATED LIGHT PER FRAME.
+     *
+     * Declared here (rather than staying where it used to sit, deeper in this
+     * section) because `pointLights`, just below, needs it to already exist:
+     * it is taken as a plain VALUE (never reassigned — only `.value` is
+     * written), and this node is read by roughly a dozen OTHER consumers well
+     * beyond point lights (wind sim, vegetation motion, several TSL light-
+     * animation builders) — see `point-light-pool.js`'s own header for why it
+     * deliberately did NOT move into that module alongside its one writer. */
+    const uGlobalTimeMs = THREE.TSL.uniform(THREE.TSL.float(0));
 
-    /** A SEPARATE dedicated Scene for point-light COLORATION meshes
-     * (increment 3, 2026-07-19) — rendered into buf:scene.coloration, kept
-     * apart from lightScene/illumination for the same "one scene per
-     * render-target destination" reasoning as everywhere else in this file. */
-    const colorationScene = new THREE.Scene();
-
-    /** Starting capacity, in FAN VERTICES (not polygon vertices — see
-     * triangulateLightFan: a polygon of V vertices fans out to 3V mesh
-     * vertices), for a light's reusable scratch vertex buffer. Generous for
-     * a typical wall-clipped light shape; grows automatically (rare, not
-     * per-frame) the one time an actual light polygon exceeds it — see
-     * updatePointLightMeshes. */
-    const INITIAL_LIGHT_FAN_VERTICES = 192;
+    /**
+     * THE POINT-LIGHT POOL (extraction step 3 of docs/planning/VT-Pan-Viewer-
+     * Extraction.md) — the mesh pool, its two dedicated scenes, the candle
+     * wall-clip cache, and the per-frame reconcile, all in
+     * effects/lighting/point-light-pool.js. Constructed HERE because
+     * `envLight`/`sunShadows`/`sceneColor` already exist at this point in the
+     * file (all `const`, never reassigned — safe to pass as plain values;
+     * each subsystem reads `.texture`/`.uSunShadowRect` live at its own use
+     * point, same as the pre-extraction code did).
+     *
+     * ⚠️ `getWindHandle` is a GETTER, not `windHandle` itself: `windHandle`
+     * is declared with `let` FURTHER DOWN in this function and reassigned on
+     * every rebake. Referencing it here inside an arrow function is safe —
+     * the closure captures the BINDING, and the arrow function is not
+     * INVOKED until `pointLights.update()` runs from the frame loop, long
+     * after `let windHandle = createWindHandle();` has executed. The exact
+     * same TDZ-safe pattern `sun-shadow-subsystem.js`'s `getEnvLight` uses for
+     * the mirror-image case (constructed before `envLight` exists).
+     *
+     * `uGlobalTimeMs` is passed in as a plain value (declared just below,
+     * before `pointLights` is ever USED, only after it is CONSTRUCTED — see
+     * that uniform's own declaration for why it stays a viewer-level
+     * primitive rather than moving into this pool).
+     */
+    const pointLights = createPointLightPool({
+      THREE,
+      getWindHandle: () => windHandle,
+      envLight,
+      sunShadows,
+      sceneColor,
+      getCandleRenderState,
+      uGlobalTimeMs,
+    });
 
     // ------------------------------------------------------------------
     // Region-driven darkness ("Adjust Darkness Level" behavior, 2026-07-19)
@@ -1981,73 +2004,13 @@ export async function startVtPanViewer({
       }
     }
 
-    /** sourceId -> { mesh, material, geometry, positionAttribute,
-     * scratchArray, uRatio, uAttenuationEased }. Reconciled every frame in
-     * updatePointLightMeshes, mirroring occlusionDiscs' own add/remove/
-     * update shape and its documented lifecycle gap: an entry for a light
-     * that's genuinely DELETED is only hidden (mesh.visible:false), never
-     * removed — full cleanup needs a deleteAmbientLight hook wired from
-     * boot.js; not built this cut.
-     *
-     * UNLIKE occlusionDiscs (one shared geometry, scaled per instance), each
-     * light gets its OWN geometry — shapes differ per light and change
-     * frame to frame (walls/radius/position).
-     *
-     * ⚠️ THE DEVICE-LOST BUG THIS FIXES (2026-07-18, live-crashed within
-     * ~30s of point lights first rendering — flight recorder: "WebGPU
-     * Device Lost: A valid external Instance reference no longer exists").
-     * The first cut of this pool created a BRAND NEW `Float32Array` +
-     * `THREE.BufferAttribute` EVERY FRAME for EVERY active light (this
-     * comment used to claim that was "cheap CPU work with no GPU stall" —
-     * WRONG, and left uncorrected until this crash proved it). Verified
-     * against the vendored three.webgpu.js source: `BufferAttribute` has NO
-     * `dispose()` method at all, and `BufferGeometry#setAttribute` is a bare
-     * `this.attributes[name] = attribute` — nothing frees the OLD
-     * attribute's backend GPU buffer when it's replaced. Every active
-     * light, every frame, leaked one native GPU buffer, unbounded, until
-     * WebGPU's own device-loss watchdog killed the context — the same
-     * disease this file's own upload-backpressure/tile-size-cap fixes
-     * already named for OTHER unbounded-small-allocation causes (see
-     * UPLOAD_PAGES_PER_DRAIN / MAX_WHOLE_TILE_DIM above), this time from
-     * per-frame vertex-buffer churn instead of texture uploads.
-     *
-     * THE FIX: allocate the scratch array + BufferAttribute ONCE per light
-     * (on first appearance) and REUSE them every frame — mutate the SAME
-     * array's contents, flag `.needsUpdate = true` (the idiomatic three.js
-     * "the data changed, re-upload the SAME buffer" signal), and use
-     * `geometry.setDrawRange` to tell the renderer how many of the
-     * (possibly stale, possibly oversized) vertices are valid THIS frame.
-     * `triangulateLightFan`'s `outArray` parameter exists specifically to
-     * make this reuse possible; only grows (a new, bigger array/attribute)
-     * on the rare frame a light's polygon exceeds its previous high-water
-     * mark — an occasional reallocation, not a chronic per-frame one. */
-    const lightMeshes = new Map();
-
-    /** sourceId -> {floorId, radius, points, source, reason} — per-candle
-     * WALL-CLIPPED shape cache (2026-07-20, the "candle light bleeds through
-     * walls" fix — foundry/scene-wall-clip.js's own header has the full
-     * mechanism/why). Candles are static per anchor and Foundry's own
-     * ClockwiseSweepPolygon computation is unmeasured-but-presumed-nontrivial
-     * (no benchmark data exists anywhere, verified) — so this is recomputed
-     * ONLY when a candle's floor or radius actually changes (author retunes
-     * via MapShine.setCandle, or a floor switch), never every frame, mirroring
-     * lightMeshes' own "create once, reuse" discipline just above. A failed
-     * sweep (`points: null` — legacy scene, level not yet resolved, anything)
-     * caches the FAILURE too (so it doesn't retry every single frame) and the
-     * caller falls back to the light's own already-naive-circle shapePoints —
-     * never a crash, never a vanished light. */
-    const candleWallClipCache = new Map();
-
-    /** THE ONE SHARED ANIMATION-CLOCK UNIFORM (2026-07-20, WebGPU-performance
-     * rework: "let's not leave any CPU stuff in if we can avoid it" —
-     * light-animation-clock.js's own header has the full mechanism). Every
-     * animated light's illumination/coloration material reads THIS SAME
-     * uniform node (shared, like uBackgroundColor/uDimColor/uBrightColor
-     * already are — an established pattern, not a new one) to compute its
-     * OWN `time` in-shader; written ONCE per frame below, never per-light —
-     * replaces what used to be a `computeAnimationTime` JS call PER
-     * ANIMATED LIGHT PER FRAME. */
-    const uGlobalTimeMs = THREE.TSL.uniform(THREE.TSL.float(0));
+    // (lightMeshes/candleWallClipCache moved into point-light-pool.js
+    // alongside updatePointLightMeshes — see the pointer comment above
+    // `colorationScene`'s old declaration. Exposed as `pointLights.
+    // lightMeshes`/`.candleWallClipCache` for the external readers below.
+    // uGlobalTimeMs itself moved UP, before `pointLights`'s own construction
+    // — it must already be a real object at that point, since it is passed
+    // in as a plain VALUE there, not a lazy getter like windHandle.)
 
     /** The last-applied ambient colours (background/dim/bright) — tracked
      * for getPointLightsInfo() so the diagnostic reports what was ACTUALLY
@@ -2061,467 +2024,9 @@ export async function startVtPanViewer({
      * ACTUAL number feeding computeEdgeSoftMarginNormalized, not a guess. */
     let lastGridSizePixels = null;
 
-    /**
-     * Reconcile the point-light mesh pool against this frame's live Foundry
-     * light sources: add new, refresh every survivor's geometry/uniforms,
-     * hide stale (see lightMeshes' own doc for why "hide" not "dispose").
-     *
-     * PER-LIGHT REGION-AWARE AMBIENT (2026-07-19 — THE REAL "hard edge on a
-     * soft, attenuation:1 light" bug, found live via the pixel probe: a
-     * point just outside a light's mesh but INSIDE a darkening region read
-     * the region's correctly-darkened floor; a point just inside the SAME
-     * light's mesh read the GLOBAL, un-adjusted background — a step
-     * discontinuity at the light's own boundary, independent of how soft
-     * the light's OWN attenuation-driven corona is, because the corona
-     * blends toward the WRONG floor). Every light's illumination formula
-     * (`point-light-illumination.js`) is `mix(uBackgroundColor,
-     * finalColorExposed, falloff)` — `uBackgroundColor` used to be one
-     * SHARED, scene-wide uniform, identical for every light, with zero
-     * awareness of a region it might be sitting inside. Under MAX-blend
-     * (region draws first, opaque; light draws after, MAX) a light's own
-     * floor (always >= the raw scene background) can never lose to a
-     * DARKENED region's lower value — so the region's darkening was erased
-     * everywhere the light's mesh reached, with a hard seam exactly at the
-     * mesh boundary.
-     *
-     * Real Foundry avoids this because every light samples the SAME
-     * per-pixel `darknessLevelTexture` regions paint into (this file's own
-     * header cites the mechanism). MSA has no such texture yet — this is
-     * the CPU-side approximation: EACH light now gets its OWN
-     * `uBackgroundColor`/`uDimColor`/`uBrightColor` uniforms (not shared),
-     * recomputed every frame from `computeRegionAdjustedDarkness(light.x,
-     * light.y, darkness01, activeRegions)` — the SAME pure function/formula
-     * `updateRegionDarknessMeshes` uses, just evaluated at the light's own
-     * ORIGIN rather than per-fragment. Exact for a light entirely inside
-     * (or entirely outside) one region; an approximation — one uniform
-     * value for the WHOLE light — for a light whose radius straddles a
-     * region boundary, same class of tradeoff as this file's other
-     * per-floor-not-per-pixel approximations, not a new one.
-     *
-     * @param {number} darkness01
-     * @param {object[]} activeRegions - THIS frame's elevation-filtered
-     *   active darkness regions (`readElevationFilteredDarknessRegions()`),
-     *   passed in so this function and `updateRegionDarknessMeshes` always
-     *   agree on which regions are active.
-     * @param {object} env - this frame's env snapshot (for `ambient.*`).
-     * @param {number} darknessRealism01 - the darkness-realism lever, same
-     *   value `computeAmbientColors` already takes elsewhere this frame.
-     */
-    function updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01, currentFloor) {
-      // THE ONE SHARED ANIMATION-CLOCK WRITE — once per FRAME, not once per
-      // LIGHT (see uGlobalTimeMs's own declaration for the full mechanism).
-      // env.time.tMs is the ONE clock (time/one-clock wall) — no new
-      // performance.now() anywhere in this pass.
-      uGlobalTimeMs.value = env.time.tMs;
-      // darkness01 gates each light's OWN activation window (LightData.darkness
-      // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
-      // header for why this lives in the reader, not here).
-      const { lights: foundryLights } = readActiveLightSources(darkness01);
-      // CANDLE LIGHTS (effects/candle-flame-render.js) — authored by us from the
-      // anchor authority, shaped EXACTLY like a Foundry light source so they flow
-      // through this SAME pool: region-aware ambient, the soft edge, coloration
-      // and MAX-blending, all for free. This is the "point light we control": its
-      // radius/colour come from the candle effect's params, not a Foundry doc.
-      const candleLightState = getCandleRenderState();
-      const candleLights = candleLightState.enabled
-        ? buildCandleLightSources(candleLightState.anchors, {
-            lightRadiusPx: candleLightState.params?.lightRadiusPx,
-            colorHex: candleLightState.params?.color,
-            animationQuality: candleLightState.params?.animationQuality,
-            windResponse: candleLightState.params?.windResponse,
-          })
-        : [];
-      // WALL-CLIPPING candle lights (2026-07-20) — candleLights' own shapePoints
-      // (candleCirclePolygon) is a naive circle with ZERO wall awareness; this
-      // replaces it with Foundry's own ClockwiseSweepPolygon result wherever one
-      // is available, falling back to the naive circle otherwise (never a crash,
-      // never a light that vanishes — see foundry/scene-wall-clip.js's own
-      // header and candleWallClipCache's own doc just above `lightMeshes`).
-      // `currentFloor` is the SAME value region-darkness elevation-filtering
-      // already computed this frame (readElevationFilteredDarknessRegions, via
-      // runLightAccumulatePass) — reused, never re-derived, so a candle's wall-
-      // clip and the region-darkness pass can never disagree about which floor
-      // is active.
-      const currentFloorId = currentFloor?.id ?? null;
-      for (const candle of candleLights) {
-        let cached = candleWallClipCache.get(candle.sourceId);
-        if (!cached || cached.floorId !== currentFloorId || cached.radius !== candle.radius) {
-          const result = computeCandleWallClippedShape({
-            x: candle.x,
-            y: candle.y,
-            radius: candle.radius,
-            levelId: currentFloorId,
-          });
-          cached = { floorId: currentFloorId, radius: candle.radius, ...result };
-          candleWallClipCache.set(candle.sourceId, cached);
-        }
-        if (cached.points) candle.shapePoints = cached.points;
-        // cached.points === null: candle KEEPS buildCandleLightSources' own
-        // naive-circle shapePoints untouched — the pre-fix behaviour, not a gap
-        // this change introduces.
-      }
-      const lights = candleLights.length ? [...foundryLights, ...candleLights] : foundryLights;
-      // Read ONCE per frame, same precedent as runMaskOcclusionPass's own
-      // readGridDistancePixels call — a scene's grid size does not change
-      // light-to-light, only scene-to-scene.
-      const gridSizePixels = readGridSizePixels().gridSizePixels;
-      lastGridSizePixels = gridSizePixels;
-      const seen = new Set();
-      for (const light of lights) {
-        seen.add(light.sourceId);
-        let entry = lightMeshes.get(light.sourceId);
-        // ANIMATED LIGHTS — REBUILD ON LIVE CHANGE (2026-07-20, docs/planning/
-        // Light-Parity.md §5's last item). A light's materials are built ONCE
-        // per animation TYPE, baked into the node graph at construction time
-        // (mirrors Foundry's own _configureShaders shader-class swap) — if a
-        // GM edits the light's Animation tab mid-session, this pool entry's
-        // animationType goes stale. Rare event (a live config edit, not a
-        // per-frame cost), so the simplest correct fix is to tear this entry
-        // down and let the "entry doesn't exist" path below recreate it
-        // fresh, rather than a second, parallel in-place-patch code path.
-        // Dispose what THREE actually HAS a real dispose() for (geometry,
-        // both materials) — unlike the BufferAttribute leak this pool's own
-        // header documents (reference_bufferattribute_no_dispose_trap
-        // memory), NodeMaterial/BufferGeometry genuinely free GPU state here.
-        // Quality is a graph-BUILD-time tier baked into the node graph (see
-        // candle-flicker.js / point-light-illumination.js on the no-uniform-
-        // gates rule), so a live quality change needs the SAME tear-down-and-
-        // recreate as a type change — folded into one condition rather than a
-        // second parallel path.
-        const animationQuality = light.animation?.quality ?? 0;
-        // FALLOFF MODEL — a graph-build-time choice baked into the node graph
-        // (point-light-illumination.js), so a change needs the same rebuild as
-        // type/quality. In practice constant per source (Foundry → 'foundry',
-        // candles → 'inverseSquare'), but keyed here for correctness.
-        const falloffModel = light.falloffModel ?? 'foundry';
-        if (
-          entry &&
-          (entry.animationType !== light.animation.type ||
-            entry.animationQuality !== animationQuality ||
-            entry.falloffModel !== falloffModel)
-        ) {
-          lightScene.remove(entry.mesh);
-          colorationScene.remove(entry.colorationMesh);
-          entry.material.dispose();
-          entry.colorationMaterial.dispose();
-          entry.geometry.dispose();
-          lightMeshes.delete(light.sourceId);
-          entry = null;
-        }
-        if (!entry) {
-          const geometry = new THREE.BufferGeometry();
-          // Pre-allocate ONCE, sized generously — see INITIAL_LIGHT_FAN_VERTICES
-          // and lightMeshes' own doc for why this exists (the device-lost fix).
-          const scratchArray = new Float32Array(INITIAL_LIGHT_FAN_VERTICES * 3);
-          const positionAttribute = new THREE.BufferAttribute(scratchArray, 3);
-          positionAttribute.setUsage(THREE.DynamicDrawUsage); // hints the backend: this buffer's DATA changes often
-          geometry.setAttribute('position', positionAttribute);
-          // PER-LIGHT (not shared) ambient uniforms — see this function's
-          // own header for why. Defaults match the pre-fix shared uniforms'
-          // own starting values; overwritten every frame below regardless.
-          const uBackgroundColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
-          const uDimColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
-          const uBrightColor = THREE.TSL.uniform(THREE.TSL.vec3(1, 1, 1));
-          // ANIMATED LIGHTS — resolved ONCE at material-build time (not
-          // per-frame): the matched registry entry (or null for no/unbuilt
-          // animation) is baked into the node graph via the seed-injection
-          // seam (point-light-illumination.js's / point-light-coloration.js's
-          // own headers) — mirrors Foundry's own "swap the shader class at
-          // source init" approach exactly.
-          const animationEntry = resolveLightAnimation(light.animation.type);
-          const {
-            material,
-            uRatio,
-            uAttenuationEased,
-            uExposure,
-            uEdgeCount,
-            uEdgeSoftMargin,
-            edgePoints,
-            uSpeedRaw: uIllumSpeedRaw,
-            uReverseSign: uIllumReverseSign,
-            uSeed: uIllumSeed,
-            uIntensityRaw: uIllumIntensityRaw,
-            uWindCenter: uIllumWindCenter,
-            uWindExposure: uIllumWindExposure,
-            uWindResponse: uIllumWindResponse,
-          } = buildPointLightIlluminationMaterial({
-            THREE,
-            uBackgroundColor,
-            uDimColor,
-            uBrightColor,
-            animation: animationEntry,
-            uGlobalTimeMs,
-            animationQuality,
-            falloffModel,
-            // SHARED WIND (Wind.md Tier 0/1) — OPT-IN, keyed on the light
-            // descriptor actually carrying a windExposure (candle lights do,
-            // via buildCandleLightSources' cluster-averaged exposure; plain
-            // Foundry lights don't, so they build none of this machinery).
-            windCenter: { x: light.x, y: light.y },
-            windExposure: light.windExposure,
-            windResponse: light.windResponse,
-            windHandle,
-            // SUN SHADOWS, PER-FRAGMENT (2026-07-24) — the light samples the
-            // baked field itself, at each pixel's own world position, so its
-            // background floor matches the shadowed ambient exactly where the
-            // shadow is. Replaces two failed per-light-scalar attempts (see
-            // point-light-illumination.js's own header): a single sample at the
-            // light's ORIGIN is binary, so the whole light flipped between soft
-            // and hard-edged as the sun swept the shadow edge across that one
-            // point. Sharing envLight's OWN rect uniform, never a second copy.
-            sunShadowTexture: sunShadows.texture,
-            uSunShadowRect: envLight.uSunShadowRect,
-          });
-          const mesh = new THREE.Mesh(geometry, material);
-          mesh.frustumCulled = false;
-          lightScene.add(mesh);
-          // COLORATION (increment 3, 2026-07-19) — a SECOND Mesh SHARING this
-          // SAME geometry object (no duplicate triangulation/BufferAttribute
-          // — see point-light-coloration.js's own header), added to the
-          // SEPARATE colorationScene. Shares illumination's OWN `uRatio` node
-          // (the light's base, unjittered ratio — flicker-driven coloration
-          // animations jitter it themselves in-shader from this same value,
-          // see point-light-coloration.js's own header) — an established
-          // sharing pattern, not a new one (uBackgroundColor/uDimColor/
-          // uBrightColor are already shared the identical way).
-          const colorationBuilt = buildPointLightColorationMaterial({
-            THREE,
-            albedoTexture: sceneColor.texture,
-            animation: animationEntry,
-            uGlobalTimeMs,
-            uRatio,
-            animationQuality,
-            falloffModel,
-            // SHARED WIND (Wind.md Tier 0/1) — see the illumination material's
-            // own identical call, just above.
-            windCenter: { x: light.x, y: light.y },
-            windExposure: light.windExposure,
-            windResponse: light.windResponse,
-            windHandle,
-          });
-          const colorationMesh = new THREE.Mesh(geometry, colorationBuilt.material);
-          colorationMesh.frustumCulled = false;
-          colorationScene.add(colorationMesh);
-          entry = {
-            mesh,
-            material,
-            geometry,
-            positionAttribute,
-            scratchArray,
-            uRatio,
-            uAttenuationEased,
-            uExposure,
-            uEdgeCount,
-            uEdgeSoftMargin,
-            edgePoints,
-            uBackgroundColor,
-            uDimColor,
-            uBrightColor,
-            colorationMesh,
-            colorationMaterial: colorationBuilt.material,
-            uColorationAttenuationEased: colorationBuilt.uAttenuationEased,
-            uColorationAlpha: colorationBuilt.uColorationAlpha,
-            uLightColor: colorationBuilt.uLightColor,
-            uShadows: colorationBuilt.uShadows,
-            // ANIMATED LIGHTS — GPU-ONLY (2026-07-20): these four raw
-            // uniforms are the ENTIRE per-light animation-config surface
-            // left for the CPU to write (Foundry's own animation.speed/
-            // reverse/seed/intensity — genuinely unavoidable, this data
-            // only exists on the CPU side, per light-animation-clock.js's
-            // own header) — `null` on both when this light isn't animated,
-            // so the per-frame writer below can skip it entirely. Separate
-            // sets for illumination vs coloration (two independent shader
-            // graphs, per point-light-coloration.js's own "small deliberate
-            // duplication" precedent) but always written the SAME values.
-            animationType: light.animation.type,
-            animationQuality,
-            falloffModel,
-            animationEntry,
-            uIllumSpeedRaw,
-            uIllumReverseSign,
-            uIllumSeed,
-            uIllumIntensityRaw,
-            uIllumWindCenter,
-            uIllumWindExposure,
-            uIllumWindResponse,
-            uColorSpeedRaw: colorationBuilt.uSpeedRaw,
-            uColorReverseSign: colorationBuilt.uReverseSign,
-            uColorSeed: colorationBuilt.uSeed,
-            uColorIntensityRaw: colorationBuilt.uIntensityRaw,
-            uColorWindCenter: colorationBuilt.uWindCenter,
-            uColorWindExposure: colorationBuilt.uWindExposure,
-            uColorWindResponse: colorationBuilt.uWindResponse,
-          };
-          lightMeshes.set(light.sourceId, entry);
-        }
-        // REUSE, not reallocate (see lightMeshes' own doc — this is the
-        // device-lost fix, not an optimisation): triangulateLightFan writes
-        // into entry.scratchArray when it already has room. It returns a
-        // DIFFERENT array only on the rare frame this light's polygon
-        // outgrows its previous high-water mark, in which case (and ONLY
-        // then) a new BufferAttribute replaces the old one — an occasional
-        // reallocation, not a chronic per-frame one.
-        const { array, vertexCount } = triangulateLightFan(
-          light.shapePoints,
-          light.x,
-          light.y,
-          light.radius,
-          entry.scratchArray
-        );
-        if (array !== entry.scratchArray) {
-          entry.scratchArray = array;
-          entry.positionAttribute = new THREE.BufferAttribute(array, 3);
-          entry.positionAttribute.setUsage(THREE.DynamicDrawUsage);
-          entry.geometry.setAttribute('position', entry.positionAttribute);
-        } else {
-          entry.positionAttribute.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
-        }
-        // Only the first `vertexCount` vertices are valid THIS frame — the
-        // rest of a larger-than-needed scratch buffer is stale data from a
-        // previous, bigger frame (triangulateLightFan's own contract).
-        entry.geometry.setDrawRange(0, vertexCount);
-        // Mirrors Foundry's OWN mesh placement exactly (audit §2): geometry is
-        // normalized to local unit-radius space by triangulateLightFan, then
-        // positioned/scaled back out to world space here — the same
-        // position-then-scale composition PointEffectSourceMixin uses.
-        entry.mesh.position.set(light.x, light.y, 0);
-        entry.mesh.scale.set(light.radius, light.radius, 1);
-        entry.mesh.visible = true;
-        // PER-LIGHT REGION-AWARE AMBIENT — see this function's own header
-        // for the full "hard edge on a soft light" bug this fixes. Same
-        // formula computeAmbientColors already uses elsewhere this frame,
-        // just fed THIS light's own local (region-adjusted) darkness
-        // instead of the raw scene darkness01.
-        const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
-        const localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
-        // SUN SHADOWS are NOT applied here — the light's own material samples
-        // the baked field per-FRAGMENT (see this pool's buildPointLight
-        // IlluminationMaterial call above). Two earlier attempts DID scale
-        // these uniforms by a per-light scalar and both failed the same way: a
-        // light's origin is one point, so the whole light flipped between soft
-        // and hard-edged as the shadow edge swept across it. Deliberately left
-        // un-shadowed here; the shader owns it.
-        entry.uBackgroundColor.value.set(...localAmbient.background);
-        entry.uDimColor.value.set(...localAmbient.dim);
-        entry.uBrightColor.value.set(...localAmbient.bright);
-        // ANIMATED LIGHTS — GPU-ONLY (2026-07-20). `uRatio` ALWAYS gets the
-        // light's real, unjittered ratio now — any flicker/pulse jitter
-        // happens entirely in-shader (point-light-illumination.js's
-        // `computeSwitchColorBand`, called with a GPU-computed ratio node
-        // for animations that need it). The only per-frame CPU work left
-        // for an animated light is writing its four RAW config scalars
-        // (Foundry's own animation.speed/reverse/seed/intensity — this data
-        // only exists on the CPU side, genuinely unavoidable) — cheap plain
-        // float writes, no function calls, no noise generation, no per-
-        // light JS math. A non-animated light (the common case) does none
-        // of this at all.
-        if (entry.animationEntry) {
-          const reverseSign = light.animation.reverse ? -1 : 1;
-          if (entry.uIllumSpeedRaw) entry.uIllumSpeedRaw.value = light.animation.speedRaw;
-          if (entry.uIllumReverseSign) entry.uIllumReverseSign.value = reverseSign;
-          if (entry.uIllumSeed) entry.uIllumSeed.value = light.animation.seed;
-          if (entry.uIllumIntensityRaw) entry.uIllumIntensityRaw.value = light.animation.intensityRaw;
-          if (entry.uColorSpeedRaw) entry.uColorSpeedRaw.value = light.animation.speedRaw;
-          if (entry.uColorReverseSign) entry.uColorReverseSign.value = reverseSign;
-          if (entry.uColorSeed) entry.uColorSeed.value = light.animation.seed;
-          if (entry.uColorIntensityRaw) entry.uColorIntensityRaw.value = light.animation.intensityRaw;
-        }
-        entry.uRatio.value = light.ratio;
-        // NOT floored (2026-07-19, reversed same day — see
-        // keyhole-attenuation-floor-reverted memory). A same-day fix
-        // here (computeMinAttenuationFloor) forced every light's corona to a
-        // MINIMUM softness, on the theory that a hard edge was always a bug.
-        // A direct side-by-side against real Foundry (base-lighting.mjs's
-        // own switchColor/FALLOFF, verified in the vendored source) proved
-        // that theory wrong: Foundry renders a genuinely HARD edge for a
-        // light authored with LOW attenuation and only softens toward
-        // attenuation=1 — that contrast IS the parity target, not a defect.
-        // easeAttenuation is used unmodified, exactly like Foundry's own
-        // `attenuation` uniform.
-        const attenuationEased = easeAttenuation(light.attenuation01);
-        entry.uAttenuationEased.value = attenuationEased;
-        entry.uExposure.value = computeExposure(light.luminosity01);
-        // SHARED WIND (Wind.md Tier 0) — written every frame like every other
-        // per-light uniform above; `null` for any light the wind machinery
-        // wasn't built for (an ordinary Foundry light), so this is a no-op
-        // there. A candle's position never moves, but its windExposure CAN
-        // (an outdoors mask streaming in later — the same real trigger the
-        // flame geometry's own signature already rebuilds on), so this reads
-        // the live value rather than trusting what build time saw.
-        if (entry.uIllumWindCenter) entry.uIllumWindCenter.value.set(light.x, light.y);
-        if (entry.uIllumWindExposure) entry.uIllumWindExposure.value = light.windExposure ?? 1;
-        if (entry.uIllumWindResponse) entry.uIllumWindResponse.value = light.windResponse ?? 1;
-        if (entry.uColorWindCenter) entry.uColorWindCenter.value.set(light.x, light.y);
-        if (entry.uColorWindExposure) entry.uColorWindExposure.value = light.windExposure ?? 1;
-        if (entry.uColorWindResponse) entry.uColorWindResponse.value = light.windResponse ?? 1;
-        // SOFT EDGE (point-light-illumination.js's own header): the SAME
-        // reuse discipline as scratchArray above, via TRUNCATION rather than
-        // growth — writeLightEdgePoints mutates entry.edgePoints' existing
-        // Vector2 instances IN PLACE, never replacing them (a uniformArray's
-        // size is fixed forever after its first setup() call).
-        entry.uEdgeCount.value = writeLightEdgePoints(
-          light.shapePoints,
-          light.x,
-          light.y,
-          light.radius,
-          entry.edgePoints
-        );
-        entry.uEdgeSoftMargin.value = computeEdgeSoftMarginNormalized(gridSizePixels, light.radius);
-        // COLORATION — the SAME transform as the illumination mesh (shares
-        // geometry, but is a SEPARATE Object3D with its own transform).
-        // hasColor GATE, NOW SAFE + CORRECT (2026-07-19) — the earlier
-        // full-black scares from this gate had a ROOT CAUSE, now fixed
-        // upstream: foundry/scene-lights.js was reading every light's colour
-        // as `undefined` (`source.data.color?.rgb` on a value that is a bare
-        // integer, not a Color), so EVERY light looked colourless and the
-        // gate zeroed ALL 79 lights' coloration → dim illumination alone →
-        // black. With the colour read corrected to `source.colorRGB`, the
-        // coloured torches (the vast majority in a normal scene) now report
-        // hasColor:true and keep their coloration; ONLY genuinely colourless
-        // lights are gated — exactly Foundry's own `isRequired`/`hasColor`
-        // rule (coloration-lighting.mjs), and no longer load-bearing for the
-        // scene's overall brightness. Applied via the uniform (`uColoration
-        // Alpha=0`), NOT a mesh-visibility toggle — a plain per-frame uniform
-        // write, the same safe mechanism every other per-light value uses.
-        entry.colorationMesh.position.set(light.x, light.y, 0);
-        entry.colorationMesh.scale.set(light.radius, light.radius, 1);
-        entry.colorationMesh.visible = true;
-        // SAME unfloored value as the illumination mesh above — coloration's
-        // falloff uses the identical formula (both real Foundry source and
-        // this project's own), so both channels harden/soften together at
-        // the light's own authored attenuation, matching Foundry exactly.
-        entry.uColorationAttenuationEased.value = attenuationEased;
-        // A colourless light contributes ZERO coloration (Foundry parity —
-        // see the block comment above); a coloured light gets its normal
-        // technique-1 alpha and its REAL (now correctly-read) hue below.
-        // FORCE-DEFAULT-COLOR (2026-07-20, docs/reference/foundry-v14-light-
-        // animations-audit.md's own roster): 13 of 22 coloration animations
-        // set Foundry's `forceDefaultColor` true, meaning their coloration
-        // mesh draws even on a colourless light because the ANIMATION
-        // supplies its own colour (e.g. chroma's hue cycle needs no authored
-        // `color` at all) — this is Foundry's `isRequired` gate, verified
-        // against source, not a guess.
-        const forceDefaultColor = entry.animationEntry?.forceDefaultColor === true;
-        entry.uColorationAlpha.value =
-          light.hasColor || forceDefaultColor ? computeColorationAlpha(light.alpha01, 1) : 0;
-        entry.uLightColor.value.set(light.color[0], light.color[1], light.color[2]);
-        // SHADOW (2026-07-21) — Foundry's own per-light "protect dark map
-        // areas from this light's hue" field, previously unread. 0 (default)
-        // is a no-op; see point-light-coloration.js's own header.
-        entry.uShadows.value = light.shadows01;
-        // DIAGNOSTIC ONLY — not read by any shader. Lets getPointLightsInfo
-        // report the true coloured/colourless split (colorationSummary), the
-        // number that proves the colour-read fix is working: it should now be
-        // mostly `coloured`, where before the fix EVERY light was colourless.
-        entry.lastHasColor = light.hasColor;
-      }
-      for (const [id, entry] of lightMeshes) {
-        if (!seen.has(id)) {
-          entry.mesh.visible = false;
-          entry.colorationMesh.visible = false;
-        }
-      }
-    }
+    // (updatePointLightMeshes moved to effects/lighting/point-light-
+    // pool.js as `pointLights.update(...)` — extraction step 3. Called
+    // from the render loop below in the exact same spot.)
 
     // ------------------------------------------------------------------
     // THE WIND FIELD BAKE (2026-07-22, THE RETHINK — docs/planning/
@@ -3172,7 +2677,7 @@ export async function startVtPanViewer({
           candleFlameMat.material?.dispose();
           candleFlameMat = null;
         }
-        for (const entry of lightMeshes.values()) entry.animationType = '__wind_rebake_pending__';
+        for (const entry of pointLights.lightMeshes.values()) entry.animationType = '__wind_rebake_pending__';
         if (windOverlayMat) {
           windOverlayMat.material?.dispose();
           windOverlayMat = null;
@@ -4296,7 +3801,7 @@ export async function startVtPanViewer({
       const { regions: activeRegions, currentFloor } = readElevationFilteredDarknessRegions();
       updateRegionDarknessMeshes(darkness01, activeRegions);
 
-      updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01, currentFloor);
+      lastGridSizePixels = pointLights.update(darkness01, activeRegions, env, darknessRealism01, currentFloor);
       // Reconcile the flame billboard from the same candle render state the
       // light merge above just read (drawn below, into scene.lit).
       updateCandleFlame();
@@ -4366,7 +3871,7 @@ export async function startVtPanViewer({
       // MAX-blends every active point light on top of the (possibly region-
       // adjusted) ambient fill — same target, same camera as geometry.world/
       // occlusion (world-space).
-      renderer.render(lightScene, camera);
+      renderer.render(pointLights.lightScene, camera);
       renderer.autoClearColor = previousAutoClearColor;
       // COLORATION (increment 3, 2026-07-19) — its OWN target, a SINGLE
       // render() call (autoClearColor restored above), so the ordinary
@@ -4376,7 +3881,7 @@ export async function startVtPanViewer({
       // fresh per-frame clear is exactly what makes that true rather than
       // accumulating stale coloration from a previous frame.
       renderer.setRenderTarget(sceneColoration);
-      renderer.render(colorationScene, camera);
+      renderer.render(pointLights.colorationScene, camera);
       // scene.lit = EOTF(OETF(albedo) × illum + coloration) — the coloration
       // is ADDED inside the composite now, in GAMMA space (Foundry parity;
       // the old separate additive quad blended in LINEAR space and washed the
@@ -9382,30 +8887,12 @@ export async function startVtPanViewer({
       },
       /** Tear down Tier 2's own ping/pong/publish RTs + solid mask + materials. */
       disposeWindSim,
-      /** Tear down every point-light mesh/material/geometry (see
-       * disposeActive). Each light owns its OWN geometry (unlike occlusion
-       * discs' shared circle), so geometry disposal happens here too. The
-       * three shared ambient-colour uniforms need no disposal — plain JS
-       * objects, not GPU resources. */
+      /** Tear down every point-light mesh/material/geometry — now
+       * `pointLights.dispose()` (effects/lighting/point-light-pool.js,
+       * extraction step 3). Kept as a same-named method here so
+       * `disposeActive`'s own call site needs no change. */
       disposePointLights() {
-        for (const [id, entry] of lightMeshes) {
-          try {
-            entry.material.dispose();
-          } catch (err) {
-            log.error(`point-light material dispose failed for '${id}' — VRAM may be leaked:`, err);
-          }
-          try {
-            entry.colorationMaterial.dispose();
-          } catch (err) {
-            log.error(`point-light coloration material dispose failed for '${id}' — VRAM may be leaked:`, err);
-          }
-          try {
-            entry.geometry.dispose();
-          } catch (err) {
-            log.error(`point-light geometry dispose failed for '${id}' — VRAM may be leaked:`, err);
-          }
-        }
-        lightMeshes.clear();
+        pointLights.dispose();
       },
       /** Tear down every region-darkness mesh's OWN material (see
        * disposeActive). Unlike point lights, every region mesh SHARES
@@ -9822,7 +9309,7 @@ export async function startVtPanViewer({
         const builtByType = {};
         const deferredByType = {};
         const unrecognizedTypes = {};
-        for (const [id, entry] of lightMeshes) {
+        for (const [id, entry] of pointLights.lightMeshes) {
           if (!entry.mesh.visible) continue;
           activeCount++;
           if (entry.lastHasColor) coloredCount++;
@@ -9917,7 +9404,7 @@ export async function startVtPanViewer({
         // own, independent of anything candle-side.
         let candleLightCount = 0;
         let foundryLightCount = 0;
-        for (const id of lightMeshes.keys()) {
+        for (const id of pointLights.lightMeshes.keys()) {
           if (id.startsWith('candle:')) candleLightCount++;
           else foundryLightCount++;
         }
@@ -9934,7 +9421,7 @@ export async function startVtPanViewer({
         let candleWallClipSweepCount = 0;
         let candleWallClipFallbackCount = 0;
         let candleWallClipSampleReason = null;
-        for (const cached of candleWallClipCache.values()) {
+        for (const cached of pointLights.candleWallClipCache.values()) {
           if (cached.source === 'sweep') candleWallClipSweepCount++;
           else candleWallClipFallbackCount++;
           if (candleWallClipSampleReason === null) candleWallClipSampleReason = cached.reason;
@@ -9942,7 +9429,7 @@ export async function startVtPanViewer({
         const candleLightBreakdown = {
           candleLightCount,
           foundryLightCount,
-          totalPoolSize: lightMeshes.size,
+          totalPoolSize: pointLights.lightMeshes.size,
           wallClip: {
             sweepCount: candleWallClipSweepCount,
             fallbackCount: candleWallClipFallbackCount,
@@ -9962,8 +9449,8 @@ export async function startVtPanViewer({
             'no darkness sources, no elevation occlusion (docs/planning/Light-Parity.md §5). Animated lights: ' +
             'see animationSummary below for what is ACTUALLY registered right now (live, not a hardcoded ' +
             'claim here) — effects/lighting/animations/registry.js is the source of truth.',
-          poolSize: lightMeshes.size,
-          activeLights: [...lightMeshes.values()].filter((e) => e.mesh.visible).length,
+          poolSize: pointLights.lightMeshes.size,
+          activeLights: [...pointLights.lightMeshes.values()].filter((e) => e.mesh.visible).length,
           ambientColors: lastAmbientColors,
           globalLightFloor: lastGlobalLightFloor,
           gridSizePixels: lastGridSizePixels,

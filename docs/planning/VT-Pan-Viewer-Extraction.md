@@ -101,9 +101,9 @@ sunShadows.maybeBake(view?.floorIndex ?? 0);
 
 Confirmed while extracting: neither `sunShadowRt` nor `sunShadowBake.material` had ever been disposed anywhere in `vt-pan-viewer.js` — every Stop/Restart cycle leaked one 1024² RGBA8 render target and one NodeMaterial. The subsystem's new `dispose()` fixes it; wired into `disposeActive()`'s list as `disposeSunShadows()`, same one-method-per-subsystem pattern as `disposeSceneColor`/`disposeLighting`.
 
-### 7.3 Not yet done
+### 7.3 Live-verified
 
-Live-scene verification — non-negotiable per §5.3, still outstanding. Two real crashes this feature already produced (the TDZ, the `.target` typo) were both invisible to the test suite; this extraction touches the exact same render-target wiring, so it needs the same check before being trusted.
+2026-07-25, author loaded a real scene after steps 1-3 all landed: nothing broke. Sun shadows, vegetation shadows, and the point-light pool (candles, wind response, animated lights, sun-shadow sampling) all confirmed live in one pass — see §9.4.
 
 ## 8. Step 2 — DONE, 2026-07-25
 
@@ -133,9 +133,9 @@ The first draft split the ~150-line "build a brand-new light entry" block into a
 
 The first draft of `dispose()` replaced the original's per-resource `try { ... } catch (err) { log.error(...) }` (log and continue to the next entry, always `.clear()` at the end) with `throw new Error(...)` on first failure. That is a real behavior change bundled into what was supposed to be a pure extraction — worse, on a real dispose failure it would now skip disposing every remaining entry AND skip the final `.clear()`. Caught by re-reading the diff against the original before running it, not by a test (a thrown dispose error has no test coverage either way). Restored to the original catch-log-continue shape, with `createLogger('PointLightPool')` replacing the viewer's own `log` reference.
 
-### 9.4 Not yet done
+### 9.4 Live-verified
 
-Live-scene verification — non-negotiable per §5.3, still outstanding, same as step 1. Point lights + candles + wind response + sun-shadow sampling all reconcile in this one pool; a live session with real lights, at least one wind rebake, and a sun sweep is the check, not a green test suite.
+2026-07-25, author loaded a real scene: nothing broke. Confirms steps 1-3 together — point lights, candles, wind response, and sun-shadow sampling all reconcile through this pool in the same pass as sun/vegetation shadows.
 
 ---
 

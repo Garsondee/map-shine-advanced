@@ -95,6 +95,7 @@ import {
   easedZoomFactor,
 } from './view-state.js';
 import { coarsePinSet, coarseTopMipsForCap, computeCoarsePinBudget } from './residency.js';
+import { describeSceneAttrMrt, buildSceneAttrZeroMrt, buildRealFloorAttrMrtNode } from './scene-attr.js';
 import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
@@ -1273,7 +1274,19 @@ export async function startVtPanViewer({
       filter: 'linear',
       depth: false, // the draw list is already depth-sorted by the layering law
     });
-    const sceneColor = allocator.create('scene.color', describeSceneColor());
+    // `scene.color` is the ONE MRT target in this file — `buf:scene.attr`,
+    // B0-1's floor-attribute buffer, as a real second attachment (full
+    // mechanism + safe-default proof in vt/scene-attr.js's own header).
+    // `describeSceneColorMrt()` keeps attachment 0 IDENTICAL to plain
+    // `describeSceneColor()` (still used unchanged below); attachment 1 is
+    // B0-1 §2.1's RGBA8/Nearest/NoColorSpace, named 'attr' for `MRTNode`.
+    const describeSceneColorMrt = () => describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
+    const sceneColor = allocator.create('scene.color', describeSceneColorMrt());
+    // Renderer-global safe default: every material that doesn't declare its
+    // own `mrtNode` writes `attr = vec4(0,0,0,0)` for free — zero changes to
+    // existing transparent materials. `runGeometryWorldPass` scopes this to
+    // its own render() calls only; never left globally set (its own header).
+    const sceneAttrZeroMrt = buildSceneAttrZeroMrt(THREE);
 
     // ========================================================================
     // light.accumulate — buf:scene.illum + the lit composite (2026-07-18).
@@ -3720,12 +3733,19 @@ export async function startVtPanViewer({
     // it still honestly names `startVtPanViewer` as the reachable entry point,
     // because externally that is still the only door in.
     function runGeometryWorldPass() {
+      // MRT scoped, never left set (scene-attr.js's own header): a stale MRT
+      // node would silently empty light.accumulate's single-attachment
+      // targets right after this pass — save/set/restore.
+      const previousMRT = renderer.getMRT();
+      renderer.setMRT(sceneAttrZeroMrt);
       renderer.setRenderTarget(sceneColor);
       renderer.render(scene, camera);
       // Door leaves composite over the map INTO the same target (not cleared),
       // so the light.accumulate pass lights them like the tiles beneath them.
+      // Class-B overlay, same safe zero-default, no mrtNode override needed.
       renderDoorGraphicsInto();
       renderer.setRenderTarget(null);
+      renderer.setMRT(previousMRT);
     }
     function runPresentCompositePass() {
       presentQuad.render(renderer); // three's own fullscreen path — carries its own camera
@@ -5142,6 +5162,9 @@ export async function startVtPanViewer({
       return mix(occ.uUnoccludedAlpha, occ.uOccludedAlpha, amount);
     }
 
+    // (resolveItemFloorAttrUniforms moved to vt/scene-attr.js — same logic,
+    // new home, to stay under the size ratchet's per-function cap.)
+
     function buildWholeImageMaterial(tex, item, uvScale = [1, 1]) {
       const { Fn, uniform, vec2, vec3, float, uv, texture } = THREE.TSL;
       const uTint = uniform(vec3(1, 1, 1));
@@ -5154,13 +5177,27 @@ export async function startVtPanViewer({
       material.depthTest = false;
       material.depthWrite = false;
       material.side = THREE.DoubleSide; // negative scaleX flips winding — see world-quad.js
+      // buf:scene.attr REAL WRITER (scene-attr.js "THE REAL WRITERS") — base
+      // map art IS the floor. `finalAlpha` captures the `.toVar()`'d `c.a`
+      // for reuse below; a materialized node referenced twice evaluates once.
+      let finalAlpha = null;
       material.colorNode = Fn(() => {
         const c = texture(tex, uv().mul(uUvScale)).toVar();
         c.rgb.mulAssign(uTint);
         c.a.mulAssign(uAlpha);
         c.a.mulAssign(occlusionAlphaFactor(occ));
+        finalAlpha = c.a;
         return c;
       })();
+      material.mrtNode = buildRealFloorAttrMrtNode({
+        THREE,
+        item,
+        viewedFloorIndex: view.floorIndex,
+        sceneDoc: globalThis.canvas?.scene ?? null,
+        logError: log.error,
+        envLight,
+        solidityAlpha: finalAlpha,
+      });
       return {
         material,
         appearance: {
@@ -5374,7 +5411,11 @@ export async function startVtPanViewer({
       item,
       kind,
       initialParams,
-      { asShadow = false, uvScale = [1, 1], shadowPadUv = [0, 0] } = {}
+      // isFloorSurface (buf:scene.attr): true ONLY for Case-1 embedded
+      // vegetation (grass AS the ground) — a real attr writer, like base map
+      // art. Case-2 overlays (a tree ON existing ground) omit it and stay
+      // zero-writers. Ignored whenever asShadow is true either way.
+      { asShadow = false, uvScale = [1, 1], shadowPadUv = [0, 0], isFloorSurface = false } = {}
     ) {
       const {
         Fn,
@@ -5576,6 +5617,12 @@ export async function startVtPanViewer({
         return positionLocal.add(vec3(displace.x, displace.y, float(0)));
       })();
 
+      // buf:scene.attr REAL WRITER — captured from inside the SAME Fn as
+      // colorNode, but ONLY on the canopy return path (never the asShadow
+      // early-return, a JS-build-time `if`, not a runtime branch — see
+      // this function's own `isFloorSurface` doc above). Stays `null` for
+      // every asShadow build; the mrtNode wiring below checks for that.
+      let finalAlpha = null;
       material.colorNode = Fn(() => {
         // (4) LEAF FLUTTER — a curl-noise UV shuffle. Divergence-free ⇒ area
         // preserving ⇒ "mass preserving": leaves move, the canopy neither
@@ -5758,8 +5805,24 @@ export async function startVtPanViewer({
         c.a.mulAssign(uAlpha);
         c.a.mulAssign(uIntensity);
         c.a.mulAssign(occlusionAlphaFactor(occ));
+        finalAlpha = c.a;
         return c;
       })();
+
+      // buf:scene.attr REAL WRITER, Case-1 embedded vegetation only (see
+      // isFloorSurface's own doc above) — finalAlpha stays null for every
+      // asShadow build, so this can't fire for a shadow mesh by mistake.
+      if (isFloorSurface && finalAlpha) {
+        material.mrtNode = buildRealFloorAttrMrtNode({
+          THREE,
+          item,
+          viewedFloorIndex: view.floorIndex,
+          sceneDoc: globalThis.canvas?.scene ?? null,
+          logError: log.error,
+          envLight,
+          solidityAlpha: finalAlpha,
+        });
+      }
 
       return {
         material,
@@ -6036,7 +6099,10 @@ export async function startVtPanViewer({
               const wholeTile = { sx: 0, sy: 0, sw: c.width, sh: c.height, col: 0, row: 0 };
               const compressedUvScale = [c.width / padW, c.height / padH];
               const { material, appearance, motion } = vegActive
-                ? buildVegetationMaterial(tex, item, vegKind, vegState.params, { uvScale: compressedUvScale })
+                ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
+                    uvScale: compressedUvScale,
+                    isFloorSurface: true, // Case-1 embedded veg IS the floor here — see the function's own doc
+                  })
                 : buildWholeImageMaterial(tex, item, compressedUvScale);
               const geometry = new THREE.BufferGeometry();
               const t = { tile: wholeTile, sub: null, tex, geometry, material, appearance, motion, mesh: null };
@@ -6147,7 +6213,7 @@ export async function startVtPanViewer({
               }
             }
             const { material, appearance, motion } = vegActive
-              ? buildVegetationMaterial(tex, item, vegKind, vegState.params)
+              ? buildVegetationMaterial(tex, item, vegKind, vegState.params, { isFloorSurface: true })
               : buildWholeImageMaterial(tex, item);
             const geometry = new THREE.BufferGeometry();
             const t = { tile, sub: null, tex, geometry, material, appearance, motion, mesh: null };
@@ -7758,8 +7824,15 @@ export async function startVtPanViewer({
         // means. `allocator.resize()` re-enforces the law on the new size
         // (its own doc: "a resize storm can't smuggle a world-res target past
         // the law that create() already enforced"). Device pixels (drawBufW/H),
-        // matching describeSceneColor's own resolvedW/H — see its note.
-        allocator.resize(sceneColor, drawBufW, drawBufH, describeSceneColor());
+        // matching describeSceneColorMrt's own resolvedW/H — see its note.
+        // `RenderTarget.setSize()` only mutates width/height on the EXISTING
+        // texture array (verified against the vendored source) — it never
+        // reconstructs attachments or re-reads `desc.attachments`, so this
+        // resize keeps attachment 1's name/type/filter exactly as `create()`
+        // set them. The MRT descriptor is passed anyway (not the plain
+        // single-attachment one) so the keyhole-law check sees the SAME
+        // shape this target was actually created with.
+        allocator.resize(sceneColor, drawBufW, drawBufH, describeSceneColorMrt());
         // light.accumulate's targets track the drawing buffer too (same
         // screenSized law). setSize mutates textures in place, so the samplers
         // stay valid; rebind* only flag needsUpdate.
@@ -8988,7 +9061,11 @@ export async function startVtPanViewer({
           const mat = new THREE.NodeMaterial();
           mat.depthTest = false;
           mat.depthWrite = false;
-          mat.fragmentNode = THREE.TSL.vec4(c.rgb[0] / 255, c.rgb[1] / 255, c.rgb[2] / 255, 1);
+          // `colorNode`, NOT `fragmentNode` (scene.color's MRT build): a
+          // `fragmentNode` material bypasses the MRT branch entirely, leaving
+          // the new `attr` attachment's write undefined. Same visual result
+          // for a flat unlit quad, and it picks up the safe zero-default.
+          mat.colorNode = THREE.TSL.vec4(c.rgb[0] / 255, c.rgb[1] / 255, c.rgb[2] / 255, 1);
           probeMats.push(mat);
           // NDC mapping, stated so it can be checked: NDC y=+1 is the TOP of
           // this camera's frustum by definition (top param = 1). v=0 (this
@@ -9028,11 +9105,16 @@ export async function startVtPanViewer({
         }
 
         // 1. Draw the pattern into buf:scene.color — the geometry.world slot.
+        // Same MRT scoping discipline as runGeometryWorldPass (never leave
+        // it set) — scene.color is a real 2-attachment target now.
+        const probePreviousMRT = renderer.getMRT();
+        renderer.setMRT(sceneAttrZeroMrt);
         renderer.setRenderTarget(sceneColor);
         renderer.setClearColor(0x000000, 1);
         renderer.clear(true, true, true);
         renderer.render(probeScene, probeCamera);
         renderer.setRenderTarget(null);
+        renderer.setMRT(probePreviousMRT);
 
         // 2. Read the REAL pixels back out of it.
         const w = sceneColor.width;

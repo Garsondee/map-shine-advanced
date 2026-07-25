@@ -8,7 +8,14 @@
  * so proving the two agree on real data is the whole point — it's the only
  * thing that turns "we copied Foundry's law" from a claim into a fact.
  */
-import { SORT_LAYERS, makeLayerKey, compareLayerKeys, sortByLayer, isInForeground } from '../layer-order.js';
+import {
+  SORT_LAYERS,
+  makeLayerKey,
+  compareLayerKeys,
+  sortByLayer,
+  isInForeground,
+  resolveElevationFloorIndex,
+} from '../layer-order.js';
 
 /** Foundry's actual comparator, transcribed verbatim from the vendored v14 source. */
 function foundryReference(a, b) {
@@ -224,6 +231,48 @@ export function run(t) {
       isInForeground(99999, { top: Infinity }) === false
     );
     ok('isInForeground: Infinity top, Infinity elevation → true', isInForeground(Infinity, { top: Infinity }));
+  }
+
+  // --- resolveElevationFloorIndex --------------------------------------------
+  {
+    ok('resolveElevationFloorIndex: empty floors → null', resolveElevationFloorIndex([], 5) === null);
+    ok('resolveElevationFloorIndex: non-array → null', resolveElevationFloorIndex(null, 5) === null);
+
+    const floors = [
+      { index: 0, elevationBottom: null, elevationTop: 10 }, // null bottom = -Infinity
+      { index: 1, elevationBottom: 10, elevationTop: 20 },
+      { index: 2, elevationBottom: 20, elevationTop: null }, // null top = +Infinity, topmost
+    ];
+    ok(
+      'resolveElevationFloorIndex: deep basement (null bottom) → floor 0',
+      resolveElevationFloorIndex(floors, -9999)?.index === 0
+    );
+    ok('resolveElevationFloorIndex: mid floor 0 → index 0', resolveElevationFloorIndex(floors, 5)?.index === 0);
+    ok(
+      'resolveElevationFloorIndex: EXACTLY at a boundary belongs to the floor ABOVE it (bottom-inclusive, top-exclusive)',
+      resolveElevationFloorIndex(floors, 10)?.index === 1
+    );
+    ok('resolveElevationFloorIndex: mid floor 1 → index 1', resolveElevationFloorIndex(floors, 15)?.index === 1);
+    ok('resolveElevationFloorIndex: mid floor 2 → index 2', resolveElevationFloorIndex(floors, 25)?.index === 2);
+    ok(
+      'resolveElevationFloorIndex: topmost band is unbounded (null top) → +Infinity resolves there',
+      resolveElevationFloorIndex(floors, Infinity)?.index === 2
+    );
+    ok(
+      'resolveElevationFloorIndex: returns the matched floor object too',
+      resolveElevationFloorIndex(floors, 15)?.floor === floors[1]
+    );
+
+    // A non-topmost Level with a FINITE top, and a stray elevation above every
+    // band — the documented "highest floor wins, never the first" fallback.
+    const boundedFloors = [
+      { index: 0, elevationBottom: 0, elevationTop: 5 },
+      { index: 1, elevationBottom: 5, elevationTop: 10 },
+    ];
+    ok(
+      'resolveElevationFloorIndex: elevation above every finite band → highest floor, not the first',
+      resolveElevationFloorIndex(boundedFloors, 999)?.index === 1
+    );
   }
 
   // --- PARITY FUZZ vs Foundry's own comparator ------------------------------

@@ -13,6 +13,7 @@ import { run as runViewState } from './view-state.test.mjs';
 import { run as runTextureLimits } from './texture-limits.test.mjs';
 import { run as runBlockCompress } from './block-compress.test.mjs';
 import { run as runCoarseAlpha } from './coarse-alpha.test.mjs';
+import { run as runSceneAttr } from './scene-attr.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -54,6 +55,7 @@ const suites = [
   ['texture-limits', runTextureLimits],
   ['block-compress', runBlockCompress],
   ['coarse-alpha', runCoarseAlpha],
+  ['scene-attr', runSceneAttr],
 ];
 
 for (const [name, fn] of suites) {

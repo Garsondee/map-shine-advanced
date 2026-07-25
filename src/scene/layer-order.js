@@ -226,3 +226,50 @@ export function sortByLayer(items) {
 export function isInForeground(elevation, levelElevation) {
   return elevation >= levelElevation.top;
 }
+
+/**
+ * Which Level (by index) a drawable at `elevation` belongs to — the same
+ * question `isInForeground` answers for the foreground/background split
+ * within one Level, one step up: given every Level's own elevation band
+ * (`getActiveSceneFloors()`'s `{ index, elevationBottom, elevationTop }`
+ * entries), which entry does this elevation actually fall inside?
+ *
+ * This is `buf:scene.attr`'s R channel (`docs/planning/v3/B0-1-floor-
+ * attribute-buffer.md` §2.1) resolved at the ONE place a drawable's floor
+ * identity should be decided: once, from the same Level data every other
+ * floor-aware reader (`readElevationFilteredDarknessRegions`,
+ * `bakeWindField`) already reads via `getActiveSceneFloors` — never a second,
+ * private floor-index scheme.
+ *
+ * A Level's own band is `[elevationBottom, elevationTop)` — `elevationTop:
+ * null` reads as Foundry's own "+Infinity" convention (see
+ * `getActiveSceneFloors`'s own comment), so the TOPMOST Level's band is
+ * unbounded above by construction, never a special case here.
+ *
+ * `floors` is assumed sorted ascending by `elevationBottom` (the shape
+ * `getActiveSceneFloors` already returns — `withImages.sort(...)` in that
+ * module) — this function trusts that ordering rather than re-sorting, since
+ * re-deriving it here would be a second place that could disagree.
+ *
+ * @param {Array<{index: number, elevationBottom: number|null, elevationTop: number|null}>} floors
+ * @param {number} elevation
+ * @returns {{index: number, floor: object}|null} the matching floor, or
+ *   `null` if `floors` is empty (no active scene / no Levels — the caller's
+ *   own "no geometry" or "fall back to the viewed floor" call, never guessed
+ *   here).
+ */
+export function resolveElevationFloorIndex(floors, elevation) {
+  if (!Array.isArray(floors) || floors.length === 0) return null;
+  for (const floor of floors) {
+    const bottom = floor.elevationBottom ?? -Infinity;
+    const top = floor.elevationTop ?? Infinity;
+    if (elevation >= bottom && elevation < top) return { index: floor.index, floor };
+  }
+  // Elevation exceeds every band's top (e.g. sits above the topmost Level's
+  // own elevationTop, which is finite for a non-topmost Level "as if" band —
+  // rare, but real for a stray high-elevation drawable): the HIGHEST floor
+  // owns it, matching the painter's-algorithm intuition that nothing is ever
+  // "above the top floor" for attribution purposes. Never the FIRST floor —
+  // that would silently mis-attribute high art to the ground level.
+  return { index: floors[floors.length - 1].index, floor: floors[floors.length - 1] };
+}

@@ -111,6 +111,31 @@ export function run(t) {
     ok('create: name tagged', rt.name === 'v3:attr' && rt.textures[1].name === 'v3:attr:1');
   }
 
+  // create(): outputName wins outright — the exact string an `mrt({...})`
+  // TSL call's keys must match, never the `v3:` debug tag (B0-1's
+  // buf:scene.attr build; see three-allocator.js's own header).
+  {
+    const T = makeTHREE();
+    const alloc = new ThreeAllocator({ THREE: T });
+    const rt = alloc.create('scene.color', {
+      resolvedW: 100,
+      resolvedH: 100,
+      mrtCount: 2,
+      attachments: [{ outputName: 'output' }, { outputName: 'attr', filter: 'nearest', colorSpace: T.NoColorSpace }],
+    });
+    ok('outputName: attachment 0 named exactly "output"', rt.textures[0].name === 'output');
+    ok('outputName: attachment 1 named exactly "attr"', rt.textures[1].name === 'attr');
+    ok('outputName: other params still applied', rt.textures[1].minFilter === 'NEAREST');
+    // No outputName given -> unchanged debug-tag behavior (back-compat).
+    const rt2 = alloc.create('plain', {
+      resolvedW: 10,
+      resolvedH: 10,
+      mrtCount: 2,
+      attachments: [null, { filter: 'nearest' }],
+    });
+    ok('outputName: absent falls back to debug tag', rt2.textures[1].name === 'v3:plain:1');
+  }
+
   // resize()/dispose().
   {
     const T = makeTHREE();

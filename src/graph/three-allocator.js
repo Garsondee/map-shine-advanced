@@ -10,6 +10,15 @@
  * `NearestFilter` + `NoColorSpace` while the color attachment wants `LinearFilter`)
  * are applied to `rt.textures[i]` after construction.
  *
+ * `desc.attachments[i].outputName` (2026-07-25, added for `scene.color`'s real
+ * MRT build) is a THIRD kind of per-attachment field, distinct from the
+ * texture-parameter ones above: TSL's `MRTNode.setup()` (three.webgpu.js)
+ * matches an `mrt({ output, attr })` call's keys against the BOUND render
+ * target's `textures[i].name`, by exact string equality. Any attachment that
+ * wants to participate in an `mrt({...})` output must be named to match —
+ * `create()` sets `tex.name` to `outputName` verbatim when present (never the
+ * `v3:name:i` debug tag other attachments get), or MRT silently skips it.
+ *
  * The pure descriptor→params mapping ({@link ThreeAllocator.describe}) is a
  * static, THREE-free function so it can be unit-tested; `create/resize/dispose`
  * are the thin THREE-touching wrappers the graph calls.
@@ -206,7 +215,13 @@ export class ThreeAllocator {
     if (desc.colorSpace != null) options.colorSpace = desc.colorSpace;
 
     // Per-attachment overrides (index 0 is the primary color attachment).
-    // `desc.attachments[i]` may set { filter, type, colorSpace } for texture i.
+    // `desc.attachments[i]` may set { filter, type, colorSpace, outputName }
+    // for texture i. `outputName` (B0-1/MRTNode) is separate from the others:
+    // it is not a texture PARAMETER, it is the exact string a TSL `mrt({...})`
+    // call's keys are matched against (three.webgpu.js `MRTNode.setup()` does
+    // `textures[i].name === name` — see scene-attr.js's own header for the
+    // full mechanism). It must therefore land on `tex.name` VERBATIM, never
+    // prefixed with this allocator's own `v3:` debug tag.
     const attachments = [];
     const src = Array.isArray(desc.attachments) ? desc.attachments : [];
     for (let i = 0; i < count; i++) {
@@ -222,6 +237,7 @@ export class ThreeAllocator {
       }
       if (a.type != null) plan.type = a.type;
       if (a.colorSpace != null) plan.colorSpace = a.colorSpace;
+      if (a.outputName != null) plan.outputName = a.outputName;
       attachments.push(Object.keys(plan).length ? plan : null);
     }
     return { width, height, options, attachments };
@@ -258,7 +274,12 @@ export class ThreeAllocator {
       if (plan.magFilter != null) tex.magFilter = plan.magFilter;
       if (plan.type != null) tex.type = plan.type;
       if (plan.colorSpace != null) tex.colorSpace = plan.colorSpace;
-      tex.name = `v3:${name}:${i}`;
+      // `outputName` (MRT semantic name) wins outright when given — it must
+      // be the EXACT string an `mrt({...})` key is matched against, so the
+      // `v3:` debug tag would silently break that match. No override →
+      // unchanged debug-name behavior (every existing single/multi-target
+      // caller that doesn't opt in keeps its current tagging).
+      tex.name = plan.outputName != null ? plan.outputName : `v3:${name}:${i}`;
     }
 
     if (this._onCreate) {

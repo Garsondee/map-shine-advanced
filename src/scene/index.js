@@ -8,7 +8,14 @@
  * (RADIAL-only) producer lives in vt-pan-viewer.js now — see
  * graph/passes.js's masks.occlusion note for the honest scope.
  */
-export { SORT_LAYERS, makeLayerKey, compareLayerKeys, sortByLayer, isInForeground } from './layer-order.js';
+export {
+  SORT_LAYERS,
+  makeLayerKey,
+  compareLayerKeys,
+  sortByLayer,
+  isInForeground,
+  resolveElevationFloorIndex,
+} from './layer-order.js';
 export {
   OCCLUSION_MODES,
   packOcclusionModes,

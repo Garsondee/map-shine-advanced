@@ -69,6 +69,7 @@ export {
   maxRgb,
   FOUNDRY_LIGHT_WEIGHTS,
   mixRgb,
+  buildWorldSpaceOutdoorsGate,
 } from './lighting/environmental-light.js';
 export {
   buildPointLightIlluminationMaterial,

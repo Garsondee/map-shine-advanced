@@ -474,6 +474,31 @@ export function buildEnvironmentalLightMaterials({
 }
 
 /**
+ * THE SHARED CORE — sample the outdoors mask at a given WORLD position.
+ * Both {@link buildOutdoorsGate} (screen-space callers: a fullscreen quad's
+ * `uv()` remapped through the camera's view rect) and
+ * {@link buildWorldSpaceOutdoorsGate} (world-space callers: a real mesh's own
+ * `positionWorld`, e.g. `buf:scene.attr`'s G channel) resolve `worldX`/`worldY`
+ * their own way and hand them here — this is the ONE place "world XY → mask UV
+ * → sample" is written, so the two mappings can never independently drift on
+ * that shared half.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {*} uOutdoorsRect - vec4 uniform, the rect the mask covers.
+ * @param {*} outdoorsTexNode - the `_Outdoors` texture node (already checked non-null).
+ * @param {*} worldX @param {*} worldY
+ * @returns {*} a scalar 0..1 node.
+ */
+function sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY) {
+  const { vec2 } = TSL;
+  const outU = worldX.sub(uOutdoorsRect.x).div(uOutdoorsRect.z.sub(uOutdoorsRect.x));
+  const outV = worldY.sub(uOutdoorsRect.y).div(uOutdoorsRect.w.sub(uOutdoorsRect.y));
+  // Clamped rather than wrapped: a pixel off the map's edge gets the nearest
+  // edge value, never a wrapped sample from the opposite side of the scene.
+  return outdoorsTexNode.sample(vec2(outU.clamp(0, 1), outV.clamp(0, 1))).r;
+}
+
+/**
  * THE OUTDOORS GATE — `1` outdoors, `0` indoors, at the world position under a
  * fullscreen quad's pixel. The ONE definition of the screen→world→mask mapping,
  * shared by the sky light (this file's composite) and the environmental grade
@@ -494,12 +519,34 @@ export function buildEnvironmentalLightMaterials({
  */
 export function buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode }) {
   if (!outdoorsTexNode) return null;
-  const { uv, vec2, mix } = TSL;
+  const { uv, mix } = TSL;
   const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
   const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
-  const outU = worldX.sub(uOutdoorsRect.x).div(uOutdoorsRect.z.sub(uOutdoorsRect.x));
-  const outV = worldY.sub(uOutdoorsRect.y).div(uOutdoorsRect.w.sub(uOutdoorsRect.y));
-  // Clamped rather than wrapped: a pixel off the map's edge gets the nearest
-  // edge value, never a wrapped sample from the opposite side of the scene.
-  return outdoorsTexNode.sample(vec2(outU.clamp(0, 1), outV.clamp(0, 1))).r;
+  return sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY);
+}
+
+/**
+ * THE WORLD-SPACE OUTDOORS GATE — the sibling {@link buildOutdoorsGate} does
+ * NOT cover: a real world-space MESH (a map tile, a vegetation quad) whose
+ * OWN `uv()` is its local texture-sample coordinate, not a screen-spanning
+ * one. Remapping a tile's local UV through `uViewRect` (as the screen-space
+ * gate does) would silently sample the wrong world position — this reads
+ * `positionWorld.xy` instead, TSL's own per-fragment world-position varying,
+ * and needs no view rect at all.
+ *
+ * Added for `buf:scene.attr`'s G channel (`docs/planning/v3/B0-1-floor-
+ * attribute-buffer.md` §2.1 — "Sampled in the unified pass's fragment shader
+ * from the owning floor's low-res outdoors texture") — the first world-space
+ * caller of the outdoors mask.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.uOutdoorsRect - vec4 uniform, the rect the mask covers.
+ * @param {*} args.outdoorsTexNode - the `_Outdoors` texture node, or null.
+ * @returns {*|null} a scalar 0..1 node, or null if no mask.
+ */
+export function buildWorldSpaceOutdoorsGate(TSL, { uOutdoorsRect, outdoorsTexNode }) {
+  if (!outdoorsTexNode) return null;
+  const { positionWorld } = TSL;
+  return sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, positionWorld.x, positionWorld.y);
 }

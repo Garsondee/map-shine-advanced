@@ -196,9 +196,16 @@ export const PASSES = [
     ],
     note:
       'THE unified world draw: every drawable — level art, tiles, tokens, vegetation billboards — is ' +
-      'one flat list under elevation→sortLayer→sort→zIndex, MRT-writing color + the attribute buffer ' +
-      '(floorId/outdoors/coverage — the utility AOV every cheap trick reads). Live today as the ' +
-      'vt-pan-viewer; becomes this pass by rename.',
+      'one flat list under elevation→sortLayer→sort→zIndex. buf:scene.attr is REAL as of 2026-07-25 ' +
+      '(B0-1, vt/scene-attr.js) — base map/tile art and Case-1 embedded vegetation MRT-write floorId/' +
+      'outdoors/presence-bit0/solidity; every overlay (vegetation Case-2, doors, tokens) writes the ' +
+      'safe zero-default for free. TWO honest gaps, not silent ones: presence bit 1 (levelsHidden) is ' +
+      "not derived (needs the VIEWED floor, which changes at runtime, compared against an item's own " +
+      "floor, resolved once at build time); the clear value is the renderer's ordinary (0,0,0,0), not " +
+      "B0-1 §2.1's (255,0,0,0) sentinel (no per-attachment MRT clear found in the vendored three.js) — " +
+      'consumers should read attr.a>0 for "is anything drawn here", never trust R\'s zero as absence. ' +
+      'Live today as the vt-pan-viewer; becomes this pass by rename. Same honesty bar masks.occlusion ' +
+      'sets for its own partial claim.',
   },
   {
     id: 'light.visibility',

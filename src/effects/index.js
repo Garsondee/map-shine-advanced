@@ -134,6 +134,8 @@ export {
 } from './lighting/region-darkness.js';
 export { buildGradePass } from './grade/grade-pass.js';
 export { buildWaterPass, buildFluidSimPass } from './water/water-pass.js';
+export { WATER, WATER_PARAMS } from './water/water.js';
+export { resolveWaterFloor } from './water/water-floor.js';
 export { buildSurfaceResponsePass } from './surface-response.js';
 
 // ── EFFECT REGISTRATION (docs/planning/Effect-Registration.md) ──────────────

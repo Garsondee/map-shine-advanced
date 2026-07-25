@@ -64,6 +64,8 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(ROOT, 'src');
 const RATCHET_FILE = join(ROOT, 'tools', 'structure-ratchets.json');
 const SIZE_BUDGET_FILE = join(ROOT, 'tools', 'size-budgets.json');
+const UNIFORM_BUDGET_FILE = join(ROOT, 'tools', 'uniform-budgets.json');
+const EFFECTS_DIR = join(SRC, 'effects');
 
 /**
  * THE GOD-OBJECT CAP — the one V2 disease every other rule in this file left
@@ -89,6 +91,32 @@ const SIZE_BUDGET_FILE = join(ROOT, 'tools', 'size-budgets.json');
  * thousands of lines from any cap.
  */
 export const SIZE_CAPS = { file: 1000, fn: 500 };
+
+/**
+ * THE UNIFORM BUDGET — the same shrink-only ratchet as `SIZE_CAPS`, measuring
+ * a different disease: V2's water shader alone declared 324 `uniform`s (46
+ * of them provably inert while still shipping a live UI slider — a fully-
+ * labelled "Bathymetry (Volumetric)" folder with ZERO implementing GLSL
+ * behind it, `docs/planning/Water.md` §2). A file with hundreds of uniforms
+ * is compiled for its maximal self forever and pays for every binding on
+ * every pixel, whether or not the feature it drives is even on
+ * (`tsl/no-uniform-gates` catches the FEATURE-GATE half of that disease;
+ * this catches the RAW SCALE half — nothing stopped a single file from
+ * growing to 324 of them one knob at a time).
+ *
+ * Scoped to `src/effects/` — "per effect module" (`docs/planning/Water.md`
+ * §6.3), not the whole codebase: `src/vt/vt-pan-viewer.js` and `src/world/
+ * wind-sim-gpu.js` have their own real uniform counts, but neither is a
+ * single effect in the Effects.md sense, and the size ratchet already polices
+ * their bulk. No file under `src/effects/` may exceed `UNIFORM_CAP` calls to
+ * `uniform(`, UNLESS it is already over and registered in uniform-
+ * budgets.json, frozen at its recorded count, shrink-only — same contract as
+ * `SIZE_CAPS`, same escape hatch (`npm run ratchets:update`, loud in the
+ * diff), same reason the seeded number does not need to be exact (a rare
+ * miscount from a commented-out `uniform(` cannot break monotonicity, only
+ * shift an absolute already tens of calls from the cap).
+ */
+export const UNIFORM_CAP = 40;
 const SIZE_WHY =
   'V2 died of god-objects: FloorCompositor 10,063 lines, token-movement 12,771, FireEffectV2 6,861 — ' +
   'each grown one locally-rational addition at a time because no seam forced a split. Every other rule ' +
@@ -99,6 +127,16 @@ const SIZE_INSTEAD =
   'object, a subsystem with its own file). If a large file is genuinely justified right now, register ' +
   'the debt: `npm run ratchets:update` records its size as a frozen, shrink-only budget — loud in the ' +
   'diff, and it can never grow again without another visible bump.';
+const UNIFORM_WHY =
+  "V2's water shader alone declared 324 uniforms — 46 of them provably inert while still shipping a " +
+  'live UI slider, including a fully-labelled "Bathymetry (Volumetric)" folder with ZERO implementing ' +
+  'GLSL behind it. A shader compiled for its maximal self pays for every binding on every pixel, ' +
+  'whether or not the feature it drives is even on.';
+const UNIFORM_INSTEAD =
+  'Split the render module (a builder per concern — bloom/water already split colour vs body vs field). ' +
+  'If a file genuinely needs this many uniforms right now, register the debt: `npm run ratchets:update` ' +
+  'records its count as a frozen, shrink-only budget — loud in the diff, and it can never grow again ' +
+  'without another visible bump.';
 
 /**
  * The whole-graph reachability walk runs ONCE per `npm run verify`, memoized
@@ -116,7 +154,7 @@ function unreachableFromBoot() {
 const IGNORED = [`${sep}vendor${sep}`, `${sep}__tests__${sep}`];
 
 /** @returns {string[]} every .js/.mjs file under src/, excluding vendor + tests */
-function sourceFiles(dir = SRC, out = []) {
+export function sourceFiles(dir = SRC, out = []) {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name);
     if (statSync(full).isDirectory()) {
@@ -1057,6 +1095,14 @@ function loadSizeBudgets() {
   }
 }
 
+function loadUniformBudgets() {
+  try {
+    return JSON.parse(readFileSync(UNIFORM_BUDGET_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
 /** Strip line + block comments so braces inside them don't miscount. Naive by
  *  design (does not track `//` or `/*` inside string/template literals) — see
  *  SIZE_CAPS on why an occasional miscount is harmless to a shrink-only ratchet. */
@@ -1180,6 +1226,199 @@ export function evaluateSizeBudgets(measurements, budgets, caps = SIZE_CAPS) {
   return { violations, tightened, newBudgets };
 }
 
+/**
+ * Count real calls to `uniform(` in a file's lines — comment-stripped per
+ * line (the same naive-but-loud-not-silent posture `stripBraceComments`
+ * documents for the size ratchet), so a doc-comment quoting `uniform(...)`
+ * as an example does not inflate the count. `\buniform\s*\(` also matches
+ * `THREE.TSL.uniform(` / a destructured `{ uniform }` call — the word
+ * boundary is on the identifier, not the access path, which is the point:
+ * every real uniform allocation counts, however it is spelled.
+ *
+ * @param {string[]} lines
+ * @returns {number}
+ */
+function countUniformCalls(lines) {
+  let count = 0;
+  for (const line of lines) {
+    const code = stripBraceComments(line);
+    const m = code.match(/\buniform\s*\(/g);
+    if (m) count += m.length;
+  }
+  return count;
+}
+
+/** @returns {{rel: string, uniformCount: number}[]} */
+function measureUniformCounts(files) {
+  return files.map((file) => {
+    const rel = relative(ROOT, file).replace(/\\/g, '/');
+    const lines = readFileSync(file, 'utf8').split('\n');
+    return { rel, uniformCount: countUniformCalls(lines) };
+  });
+}
+
+/**
+ * The uniform-budget ratchet — a single-dimension version of
+ * `evaluateSizeBudgets`'s exact contract (over cap with no budget → a NEW
+ * violation; over budget → grew; under budget → tighten; under cap → free).
+ *
+ * @param {{rel: string, uniformCount: number}[]} measurements
+ * @param {Record<string, number>} budgets
+ * @param {number} cap
+ */
+export function evaluateUniformBudgets(measurements, budgets, cap = UNIFORM_CAP) {
+  const violations = [];
+  const tightened = [];
+  const newBudgets = {};
+  for (const rec of measurements) {
+    const current = rec.uniformCount;
+    if (current <= cap) continue; // under cap: free, no budget needed
+    const budget = budgets[rec.rel];
+    if (budget == null) {
+      violations.push({ rel: rec.rel, current, cap, budget: null });
+      newBudgets[rec.rel] = current; // so --update can adopt it consciously
+    } else if (current > budget) {
+      violations.push({ rel: rec.rel, current, cap, budget });
+      newBudgets[rec.rel] = budget;
+    } else {
+      if (current < budget) tightened.push({ rel: rec.rel, from: budget, to: current });
+      newBudgets[rec.rel] = Math.min(current, budget);
+    }
+  }
+  return { violations, tightened, newBudgets };
+}
+
+/**
+ * `params/no-dead-controls` — THE FIRST CROSS-FILE STRUCTURAL RULE in this
+ * tool. Every other rule here scans one file's lines in isolation; this one
+ * genuinely needs two files together: a `*_PARAMS` declaration, and every
+ * OTHER source file, to answer "does anything actually read this key?"
+ *
+ * V2's water shipped 46 uniforms with a live UI slider and ZERO consuming
+ * GLSL — including a fully-labelled "Bathymetry (Volumetric)" folder with
+ * two colour pickers and a documented Beer-Lambert model, entirely inert
+ * (`docs/planning/Water.md` §2). A control an author can move that changes
+ * NOTHING is worse than no control at all: it is a lie they tune against.
+ *
+ * ============================================================================
+ * WHY THE SEARCH SCOPE IS "ALL OF src/", NOT "src/effects/ only"
+ * ============================================================================
+ *
+ * The obvious first design is "does this key appear in the effect's own
+ * render/builder SIBLING files" — but `ui-window-shadow.js` (MSA's first
+ * registered effect) proves that wrong: its params are declared in
+ * `src/effects/`, and consumed entirely in `src/boot.js` + `src/vt/vt-pan-
+ * viewer.js` — NEITHER under `src/effects/`. A directory-scoped search would
+ * flag every one of its real, working params as dead. Scoping to the WHOLE
+ * `src/` tree (never `__tests__/` — a test asserting a key EXISTS does not
+ * prove it does anything) avoids that false positive while still catching
+ * the real disease: a key with ZERO occurrences ANYWHERE outside its own
+ * declaration is unambiguously dead, wherever its consumer would have lived.
+ *
+ * Known, accepted imprecision (documented, not engineered around — same
+ * posture `stripBraceComments` states for its own naive comment-stripping):
+ * a key COULD, in principle, be "saved" by an unrelated file that happens to
+ * contain the same identifier for a different reason (two effects both
+ * naming a param `strength`, say). Rare in practice — this codebase's own
+ * convention already favours distinctive names (`azimuthDeg`, `tintColor`,
+ * not bare `angle`/`color`) — and the failure direction is a missed
+ * violation, not a false alarm on real work.
+ */
+
+/**
+ * Extract every `export const X_PARAMS = {...}` (or `Object.freeze({...})`)
+ * declaration's own TOP-LEVEL keys from a file's lines, by brace depth — the
+ * same "column-0 declaration, then track braces" approach as
+ * `largestTopLevelFunction`, one level down (keys immediately inside the
+ * object, not the whole file's function span).
+ *
+ * @param {string[]} lines
+ * @returns {{paramsName: string, keys: string[], startLine: number}[]}
+ */
+export function extractParamsDeclarations(lines) {
+  const DECL = /^export const (\w+_PARAMS)\s*=\s*(?:Object\.freeze\()?\{/;
+  const KEY = /^\s{2}(\w+):\s*\{/;
+  const decls = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw[0] === ' ' || raw[0] === '\t') continue; // top-level only
+    const m = DECL.exec(stripBraceComments(raw));
+    if (!m) continue;
+    const keys = [];
+    let depth = 0;
+    let started = false;
+    for (let j = i; j < lines.length; j++) {
+      const code = stripBraceComments(lines[j]);
+      // Checked BEFORE this line's own braces are counted: a key line like
+      // `  threshold: {` must be seen while we are still "at depth 1" (only
+      // inside the outer PARAMS object), not after descending into its body.
+      if (started && depth === 1) {
+        const keyMatch = KEY.exec(code);
+        if (keyMatch) keys.push(keyMatch[1]);
+      }
+      for (const ch of code) {
+        if (ch === '{') {
+          depth++;
+          started = true;
+        } else if (ch === '}') depth--;
+      }
+      if (started && depth <= 0) break;
+    }
+    decls.push({ paramsName: m[1], keys, startLine: i + 1 });
+  }
+  return decls;
+}
+
+/**
+ * The pure half — given every file's own {rel, text}, which declared param
+ * keys have zero occurrences outside their own declaring file. Split from
+ * `findDeadControls` (the disk-reading wrapper) so the actual cross-
+ * referencing logic is testable with synthetic in-memory fixtures, same
+ * `measureSizes`/`evaluateSizeBudgets` split the size ratchet already uses.
+ *
+ * @param {{rel: string, text: string}[]} fileTexts
+ * @returns {{file: string, line: number, paramsName: string, key: string}[]}
+ */
+export function findDeadControlsInTexts(fileTexts) {
+  // Comment-stripped ONCE per file (not per key) — a key name merely
+  // MENTIONED in a comment must not count as "used". This is not a nicety:
+  // V2's own "Bathymetry (Volumetric)" folder is exactly the failure mode a
+  // comment-blind search would miss saving a genuinely dead param from
+  // detection just because some nearby prose happens to say its name.
+  const stripped = fileTexts.map(({ rel, text }) => ({
+    rel,
+    code: text.split('\n').map(stripBraceComments).join('\n'),
+  }));
+  const violations = [];
+  for (const { rel, text } of fileTexts) {
+    const decls = extractParamsDeclarations(text.split('\n'));
+    for (const { paramsName, keys, startLine } of decls) {
+      for (const key of keys) {
+        // String-concatenated, not a template literal: `\b` inside a
+        // template literal is the BACKSPACE escape, not the two-character
+        // word-boundary sequence a RegExp needs — confirmed live while
+        // prototyping this exact check.
+        const pattern = new RegExp('\\b' + key + '\\b');
+        const usedElsewhere = stripped.some((other) => other.rel !== rel && pattern.test(other.code));
+        if (!usedElsewhere) violations.push({ file: rel, line: startLine, paramsName, key });
+      }
+    }
+  }
+  return violations;
+}
+
+/**
+ * @param {string[]} files - absolute paths, from `sourceFiles()`.
+ * @returns {{file: string, line: number, paramsName: string, key: string}[]}
+ */
+function findDeadControls(files) {
+  const fileTexts = files.map((f) => ({
+    rel: relative(ROOT, f).replace(/\\/g, '/'),
+    text: readFileSync(f, 'utf8'),
+  }));
+  return findDeadControlsInTexts(fileTexts);
+}
+
 function scan() {
   const files = sourceFiles();
   /** @type {Map<string, {file: string, line: number, text: string}[]>} */
@@ -1289,6 +1528,60 @@ function main() {
     }
   }
 
+  // THE UNIFORM BUDGET (`effects/uniform-budget`) — same shrink-only ratchet
+  // as size, scoped to `src/effects/` (Water.md §6.3: "per effect module").
+  const uniformBudgets = loadUniformBudgets();
+  const uniformMeasurements = measureUniformCounts(sourceFiles(EFFECTS_DIR));
+  const uniformBudgetResult = evaluateUniformBudgets(uniformMeasurements, uniformBudgets, UNIFORM_CAP);
+  for (const t of uniformBudgetResult.tightened) {
+    console.log(`✅ effects/uniform-budget — ${t.rel}: budget tightened ${t.from} → ${t.to}`);
+  }
+  if (uniformBudgetResult.violations.length) {
+    failed = true;
+    console.error(`\n❌ effects/uniform-budget — ${uniformBudgetResult.violations.length} over-budget file(s)`);
+    console.error(`\n   WHY THIS RULE EXISTS:\n   ${UNIFORM_WHY.replace(/\s+/g, ' ')}`);
+    console.error(`\n   DO THIS INSTEAD:\n   ${UNIFORM_INSTEAD.replace(/\s+/g, ' ')}`);
+    console.error('\n   Violations:');
+    for (const v of uniformBudgetResult.violations) {
+      const how =
+        v.budget == null
+          ? 'NEW over-cap — split it, or `npm run ratchets:update` to register the debt'
+          : `grew past its frozen budget of ${v.budget} — it may only SHRINK`;
+      console.error(`     ${v.rel}: ${v.current} calls to uniform( (cap ${v.cap}) — ${how}`);
+    }
+  }
+
+  // `params/no-dead-controls` — no ratchet: zero violations exist today (the
+  // cheapest possible moment to build this wall), so it is built at zero and
+  // stays at zero, same posture as the other free walls in this file.
+  const deadControls = findDeadControls(sourceFiles());
+  if (deadControls.length) {
+    failed = true;
+    console.error(`\n❌ params/no-dead-controls — ${deadControls.length} inert param(s)`);
+    console.error(
+      '\n   WHY THIS RULE EXISTS:\n   ' +
+        (
+          "V2's water shipped 46 uniforms with a live UI slider and ZERO consuming GLSL — including a " +
+          'fully-labelled "Bathymetry (Volumetric)" folder with two colour pickers and a documented ' +
+          'Beer-Lambert model, entirely inert. A control an author can move that changes NOTHING is ' +
+          'worse than no control at all: it is a lie they tune against.'
+        ).replace(/\s+/g, ' ')
+    );
+    console.error(
+      '\n   DO THIS INSTEAD:\n   ' +
+        (
+          'Wire the param into its real consumer, or delete the declaration. If the feature is coming ' +
+          'in a later phase (same discipline `docs/planning/Water.md` uses for its own deferred tiers), ' +
+          'record it as a `deferredRungs` note instead of a param nobody reads yet.'
+        ).replace(/\s+/g, ' ')
+    );
+    console.error('\n   Violations:');
+    for (const v of deadControls.slice(0, 10)) {
+      console.error(`     ${v.file}:${v.line}  ${v.paramsName}.${v.key} — no consumer found anywhere in src/`);
+    }
+    if (deadControls.length > 10) console.error(`     ... and ${deadControls.length - 10} more`);
+  }
+
   if (updating) {
     for (const rule of RULES) {
       if (rule.ratchet) newRatchets[rule.id] = hits.get(rule.id).length;
@@ -1304,7 +1597,16 @@ function main() {
       if (e.file != null || e.fn != null) seeded[rec.rel] = e;
     }
     writeFileSync(SIZE_BUDGET_FILE, JSON.stringify(seeded, null, 2) + '\n');
-    console.log(`\n📌 Ratchets + size budgets written (${Object.keys(seeded).length} files budgeted)`);
+    // Same seed-at-current-value contract, for uniform counts.
+    const seededUniforms = {};
+    for (const rec of uniformMeasurements) {
+      if (rec.uniformCount > UNIFORM_CAP) seededUniforms[rec.rel] = rec.uniformCount;
+    }
+    writeFileSync(UNIFORM_BUDGET_FILE, JSON.stringify(seededUniforms, null, 2) + '\n');
+    console.log(
+      `\n📌 Ratchets + size budgets written (${Object.keys(seeded).length} files budgeted, ` +
+        `${Object.keys(seededUniforms).length} uniform-budgeted)`
+    );
     return;
   }
 
@@ -1325,9 +1627,12 @@ function main() {
 
   const tightened = Object.keys(newRatchets).length;
   const budgeted = Object.keys(size.newBudgets).length;
+  const uniformBudgeted = Object.keys(uniformBudgetResult.newBudgets).length;
   console.log(
     `✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}` +
-      `${budgeted ? `, ${budgeted} size budget(s)` : ''}${debtShown ? ` — ⏳ ${debtShown} declared debt(s) active` : ''}`
+      `${budgeted ? `, ${budgeted} size budget(s)` : ''}` +
+      `${uniformBudgeted ? `, ${uniformBudgeted} uniform budget(s)` : ''}` +
+      `${debtShown ? ` — ⏳ ${debtShown} declared debt(s) active` : ''}`
   );
 }
 

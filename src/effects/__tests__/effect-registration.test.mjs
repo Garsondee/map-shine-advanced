@@ -70,6 +70,65 @@ export function run(t) {
   ok('empty tiers are rejected', !validateEffectManifest({ ...UI_WINDOW_SHADOW, tiers: [] }).ok);
 
   // ======================================================================
+  // COST-CLASS MONOTONICITY (Effects.md Law 3) — rungs 1..N only, tier 0 is
+  // the admission price and is exempt from the chain. Water's own ladder
+  // (tier 0 = C4, tier 1 = C1) is why the exemption exists as CODE, not just
+  // prose: a naive "every tier >= the one before it, including tier 0" check
+  // would reject water's own real ladder.
+  // ======================================================================
+  ok(
+    'a tier missing cost.class is rejected',
+    !validateEffectManifest({ ...UI_WINDOW_SHADOW, tiers: [{ n: 0, adds: 'x' }] }).ok
+  );
+  ok(
+    'an unrecognised cost.class is rejected',
+    !validateEffectManifest({ ...UI_WINDOW_SHADOW, tiers: [{ n: 0, cost: { class: 'C9' }, adds: 'x' }] }).ok
+  );
+  ok(
+    'tier 0 -> tier 1 CHEAPER is allowed (tier 0 is exempt from the chain)',
+    validateEffectManifest({
+      ...UI_WINDOW_SHADOW,
+      tiers: [
+        { n: 0, cost: { class: 'C4' }, adds: 'placement' },
+        { n: 1, cost: { class: 'C1' }, adds: 'volume' },
+      ],
+    }).ok
+  );
+  ok(
+    'tier 1 -> tier 2 CHEAPER is rejected (the real ladder starts here)',
+    !validateEffectManifest({
+      ...UI_WINDOW_SHADOW,
+      tiers: [
+        { n: 0, cost: { class: 'C4' }, adds: 'placement' },
+        { n: 1, cost: { class: 'C3' }, adds: 'light' },
+        { n: 2, cost: { class: 'C1' }, adds: 'volume, out of order' },
+      ],
+    }).ok
+  );
+  ok(
+    'tier 1 -> tier 2 SAME class is allowed (non-decreasing, not strictly increasing)',
+    validateEffectManifest({
+      ...UI_WINDOW_SHADOW,
+      tiers: [
+        { n: 0, cost: { class: 'C4' }, adds: 'placement' },
+        { n: 1, cost: { class: 'C2' }, adds: 'motion' },
+        { n: 2, cost: { class: 'C2' }, adds: 'more motion, same class' },
+      ],
+    }).ok
+  );
+  ok(
+    "water's own real ladder (C4,C1,C2,C3,C4,C5,C6,C7,C8) validates end to end",
+    validateEffectManifest({
+      ...UI_WINDOW_SHADOW,
+      tiers: ['C4', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8'].map((cls, n) => ({
+        n,
+        cost: { class: cls },
+        adds: `rung ${n}`,
+      })),
+    }).ok
+  );
+
+  // ======================================================================
   // profileRank — order is rank; unknown falls to the default
   // ======================================================================
   ok('profiles are ordered low→extreme', profileRank('low') < profileRank('extreme'));

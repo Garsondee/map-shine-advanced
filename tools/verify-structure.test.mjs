@@ -25,8 +25,8 @@
  * @module tools/verify-structure.test
  */
 
-import { existsSync } from 'node:fs';
-import { sep, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { sep, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -35,6 +35,11 @@ import {
   applyExceptions,
   largestTopLevelFunction,
   evaluateSizeBudgets,
+  evaluateUniformBudgets,
+  UNIFORM_CAP,
+  extractParamsDeclarations,
+  findDeadControlsInTexts,
+  sourceFiles,
 } from './verify-structure.mjs';
 import { computeReachability } from './reachability.mjs';
 
@@ -734,6 +739,133 @@ export function run(t) {
     t.ok(
       'a huge FUNCTION inside a small file is still caught',
       fatFn.violations.some((v) => v.kind === 'fn' && v.current === 900)
+    );
+  }
+
+  // --- effects/uniform-budget — the single-dimension sibling of the size
+  // ratchet, scoped to src/effects/ (Water.md §6.3's "per effect module") ---
+  {
+    const cap = UNIFORM_CAP; // the REAL exported constant, not a local copy
+    const overUniform = [{ rel: 'src/effects/foo.js', uniformCount: cap + 20 }];
+    t.ok(
+      'a NEW file over the uniform cap with no budget FAILS',
+      evaluateUniformBudgets(overUniform, {}, cap).violations.some((v) => v.budget === null)
+    );
+    t.ok(
+      '...growth past a frozen uniform budget FAILS',
+      evaluateUniformBudgets(overUniform, { 'src/effects/foo.js': 50 }, cap).violations.some((v) => v.budget === 50)
+    );
+    const uniformShrink = evaluateUniformBudgets(
+      [{ rel: 'src/effects/foo.js', uniformCount: cap + 5 }],
+      { 'src/effects/foo.js': 50 },
+      cap
+    );
+    t.ok(
+      '...shrinking tightens the uniform budget with no violation',
+      uniformShrink.violations.length === 0 && uniformShrink.tightened.some((x) => x.to === cap + 5)
+    );
+    const underUniform = evaluateUniformBudgets([{ rel: 'src/effects/bar.js', uniformCount: 12 }], {}, cap);
+    t.ok(
+      'a file UNDER the uniform cap needs no budget and never fails',
+      underUniform.violations.length === 0 && Object.keys(underUniform.newBudgets).length === 0
+    );
+  }
+
+  // --- params/no-dead-controls — THE FIRST cross-file structural rule -----
+  {
+    // extractParamsDeclarations: brace-depth key extraction.
+    const decl = extractParamsDeclarations([
+      'export const FOO_PARAMS = Object.freeze({',
+      '  // a comment naming a fakeKey: { should not be mistaken for a real key',
+      '  tintColor: {',
+      "    type: 'color',",
+      "    space: 'srgb',",
+      '  },',
+      '  tintStrength: {',
+      "    type: 'float',",
+      '  },',
+      '});',
+    ]);
+    t.ok('extractParamsDeclarations finds the params name', decl.length === 1 && decl[0].paramsName === 'FOO_PARAMS');
+    t.ok(
+      'extractParamsDeclarations finds both real keys, in order',
+      decl[0].keys.length === 2 && decl[0].keys[0] === 'tintColor' && decl[0].keys[1] === 'tintStrength'
+    );
+    t.ok(
+      "extractParamsDeclarations does NOT mistake a comment's own text for a key",
+      !decl[0].keys.includes('fakeKey')
+    );
+
+    // An EMPTY schema (water.js's own current shape) — zero keys, not a parse
+    // failure.
+    const emptyDecl = extractParamsDeclarations(['export const EMPTY_PARAMS = Object.freeze({});']);
+    t.ok(
+      'an empty PARAMS object yields zero keys, not a crash',
+      emptyDecl.length === 1 && emptyDecl[0].keys.length === 0
+    );
+
+    // findDeadControlsInTexts: the actual V2 disease, reproduced —
+    // a param declared with NO consumer anywhere else in the tree.
+    const deadFixture = [
+      {
+        rel: 'src/effects/fake/fake.js',
+        text:
+          'export const FAKE_PARAMS = Object.freeze({\n' +
+          '  bathymetryEnabled: {\n' +
+          "    type: 'bool',\n" +
+          '  },\n' +
+          '});\n',
+      },
+      { rel: 'src/effects/fake/fake-render.js', text: '// nothing here reads bathymetryEnabled at all\n' },
+    ];
+    const deadHits = findDeadControlsInTexts(deadFixture);
+    t.ok(
+      'a param with NO consumer anywhere is caught (the V2 "Bathymetry" disease)',
+      deadHits.some((v) => v.key === 'bathymetryEnabled' && v.paramsName === 'FAKE_PARAMS')
+    );
+
+    // The SAME key, but genuinely consumed in a sibling file — not a
+    // violation. Proves the wall does not just flag every key on principle.
+    const liveFixture = [
+      {
+        rel: 'src/effects/fake/fake.js',
+        text: "export const FAKE_PARAMS = Object.freeze({\n  tintStrength: {\n    type: 'float',\n  },\n});\n",
+      },
+      // The REAL codebase's dominant consumption pattern is bare-key access
+      // on the resolved params object (verified: bloom's own `threshold` is
+      // read as `p.threshold` in vt-pan-viewer.js, not a `uThreshold`-
+      // prefixed local) — this fixture matches that, not an invented one.
+      { rel: 'src/effects/fake/fake-render.js', text: 'u.strength.value = fakeNum(p.tintStrength, 1.0);\n' },
+    ];
+    t.ok('a param genuinely referenced elsewhere is NOT flagged', findDeadControlsInTexts(liveFixture).length === 0);
+
+    // Consumption in an ENTIRELY different zone counts (ui-window-shadow.js's
+    // own real shape: declared in effects/, consumed in boot.js) — proves the
+    // whole-tree scope, not a directory-scoped one, which is the whole reason
+    // this design was chosen (see findDeadControls's own module comment).
+    const crossZoneFixture = [
+      {
+        rel: 'src/effects/ui-window-shadow.js',
+        text: "export const UI_SHADOW_PARAMS = Object.freeze({\n  strength01: {\n    type: 'float',\n  },\n});\n",
+      },
+      { rel: 'src/boot.js', text: 'const s = resolved.params.strength01; // consumed far from the declaration\n' },
+    ];
+    t.ok(
+      "cross-zone consumption counts (ui-window-shadow.js's real shape)",
+      findDeadControlsInTexts(crossZoneFixture).length === 0
+    );
+
+    // The REAL codebase, right now, has zero dead controls — this is the
+    // wall built at the cheapest possible moment (Skeleton.md's own phrase
+    // for a wall with no debt to grandfather). sourceFiles() with no args
+    // uses its own default (src/), the SAME set the real check scans.
+    const realFiles = sourceFiles().map((f) => ({
+      rel: relative(ROOT, f).replace(/\\/g, '/'),
+      text: readFileSync(f, 'utf8'),
+    }));
+    t.ok(
+      'the REAL codebase has zero dead controls today (no ratchet needed)',
+      findDeadControlsInTexts(realFiles).length === 0
     );
   }
 

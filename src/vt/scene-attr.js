@@ -81,14 +81,15 @@
  *   B = presence bit 0 (overhead/roof — `layer-order.js#isInForeground`,
  *       resolved at the SAME build-time site, same floors list); bit 1
  *       (levelsHidden) is NOT derived — see the KNOWN GAP note below
- *   A = the material's OWN alpha (the same value already driving its colour
- *       blend) — this is what makes the punch-through work for free: where
- *       the base art is opaque (alpha≈1), attr overwrites with real data
- *       (destination almost entirely replaced); where it has an authored
- *       hole (alpha=0), attr's blend leaves whatever drew before it —
- *       typically the floor below — untouched. The SAME alpha-as-blend-
- *       source mechanism the safe zero-default relies on, just with a real
- *       payload instead of zero.
+ *   A = the material's OWN alpha, read via `TSL.output.a` (see
+ *       `buildRealFloorAttrMrtNode`'s own doc for why it must be `output`,
+ *       never a JS-closure-captured node) — this is what makes the punch-
+ *       through work for free: where the base art is opaque (alpha≈1), attr
+ *       overwrites with real data (destination almost entirely replaced);
+ *       where it has an authored hole (alpha=0), attr's blend leaves
+ *       whatever drew before it — typically the floor below — untouched.
+ *       The SAME alpha-as-blend-source mechanism the safe zero-default
+ *       relies on, just with a real payload instead of zero.
  *
  * ============================================================================
  * KNOWN GAP, STATED HONESTLY (not silently deferred)
@@ -266,6 +267,25 @@ export function resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex, sc
  * `buildVegetationMaterial`'s Case-1 embedded form) were duplicating this
  * exact five-step sequence; factored here so there is ONE place it can drift.
  *
+ * ⚠️ SOLIDITY ALPHA COMES FROM `TSL.output`, NEVER A CALLER-SUPPLIED NODE
+ * (live crash, 2026-07-25): the first draft took `solidityAlpha` as a param,
+ * fed by the caller capturing its own `colorNode`'s final alpha via a JS
+ * closure variable set INSIDE that material's `Fn(() => {...})()` body.
+ * That is broken by construction — `Fn(cb)()` does NOT run `cb` synchronously;
+ * it returns a lazy call node (`FnNode.call` → `ShaderCallNodeInternal`), and
+ * `cb` only executes later, when the shader graph is actually walked at
+ * compile time. The closure variable was still `null` the instant this
+ * function ran (confirmed live: `packFloorAttr`'s `vec4(...)` received a
+ * literal `null` and TSL's `getConstNode` threw on it — every whole-image
+ * tile failed to load). `TSL.output` (a `PropertyNode` three itself populates
+ * via `output.assign(resultNode)` during THIS material's own fragment-stage
+ * build, BEFORE the MRT merge runs) is the sanctioned way to reference "this
+ * material's own computed result" — reusing the same JS object across every
+ * material's graph resolves correctly per material, by design (this module's
+ * own header, "THE MRT MECHANISM"). Swizzling `.a` off it works regardless of
+ * its declared node-type string ("output", not "vec4") — TSL swizzle access
+ * is generic, resolved at codegen, not gated on the declared type.
+ *
  * @param {object} args
  * @param {*} args.THREE
  * @param {object} args.item
@@ -273,21 +293,11 @@ export function resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex, sc
  * @param {object|null} args.sceneDoc
  * @param {Function} [args.logError]
  * @param {object} args.envLight - needs `.uOutdoorsRect`/`.outdoorsTexNode`.
- * @param {*} args.solidityAlpha - the material's OWN alpha node (never a
- *   second, independently-computed one — see `packFloorAttr`'s own doc).
  * @returns {*} the built `mrt({...})` node — assign directly to
  *   `material.mrtNode`.
  */
-export function buildRealFloorAttrMrtNode({
-  THREE,
-  item,
-  viewedFloorIndex,
-  sceneDoc,
-  logError,
-  envLight,
-  solidityAlpha,
-}) {
-  const { mrt } = THREE.TSL;
+export function buildRealFloorAttrMrtNode({ THREE, item, viewedFloorIndex, sceneDoc, logError, envLight }) {
+  const { mrt, output } = THREE.TSL;
   const { uFloorIndex01, uPresenceBits01 } = resolveItemFloorAttrUniforms({
     THREE,
     item,
@@ -304,7 +314,7 @@ export function buildRealFloorAttrMrtNode({
       floorIndex01: uFloorIndex01,
       outdoors01,
       presenceBits01: uPresenceBits01,
-      solidityAlpha,
+      solidityAlpha: output.a,
     }),
   });
 }

@@ -5178,15 +5178,16 @@ export async function startVtPanViewer({
       material.depthWrite = false;
       material.side = THREE.DoubleSide; // negative scaleX flips winding — see world-quad.js
       // buf:scene.attr REAL WRITER (scene-attr.js "THE REAL WRITERS") — base
-      // map art IS the floor. `finalAlpha` captures the `.toVar()`'d `c.a`
-      // for reuse below; a materialized node referenced twice evaluates once.
-      let finalAlpha = null;
+      // map art IS the floor. Reads its own alpha via TSL.output, NOT a
+      // closure variable (see buildRealFloorAttrMrtNode's own doc for the
+      // live crash that class of trick caused: Fn()'s callback is deferred,
+      // so a variable set inside it is still unset the instant Fn(...)()
+      // returns).
       material.colorNode = Fn(() => {
         const c = texture(tex, uv().mul(uUvScale)).toVar();
         c.rgb.mulAssign(uTint);
         c.a.mulAssign(uAlpha);
         c.a.mulAssign(occlusionAlphaFactor(occ));
-        finalAlpha = c.a;
         return c;
       })();
       material.mrtNode = buildRealFloorAttrMrtNode({
@@ -5196,7 +5197,6 @@ export async function startVtPanViewer({
         sceneDoc: globalThis.canvas?.scene ?? null,
         logError: log.error,
         envLight,
-        solidityAlpha: finalAlpha,
       });
       return {
         material,
@@ -5617,12 +5617,6 @@ export async function startVtPanViewer({
         return positionLocal.add(vec3(displace.x, displace.y, float(0)));
       })();
 
-      // buf:scene.attr REAL WRITER — captured from inside the SAME Fn as
-      // colorNode, but ONLY on the canopy return path (never the asShadow
-      // early-return, a JS-build-time `if`, not a runtime branch — see
-      // this function's own `isFloorSurface` doc above). Stays `null` for
-      // every asShadow build; the mrtNode wiring below checks for that.
-      let finalAlpha = null;
       material.colorNode = Fn(() => {
         // (4) LEAF FLUTTER — a curl-noise UV shuffle. Divergence-free ⇒ area
         // preserving ⇒ "mass preserving": leaves move, the canopy neither
@@ -5805,14 +5799,15 @@ export async function startVtPanViewer({
         c.a.mulAssign(uAlpha);
         c.a.mulAssign(uIntensity);
         c.a.mulAssign(occlusionAlphaFactor(occ));
-        finalAlpha = c.a;
         return c;
       })();
 
       // buf:scene.attr REAL WRITER, Case-1 embedded vegetation only (see
-      // isFloorSurface's own doc above) — finalAlpha stays null for every
-      // asShadow build, so this can't fire for a shadow mesh by mistake.
-      if (isFloorSurface && finalAlpha) {
+      // isFloorSurface's own doc above — never true alongside asShadow, so
+      // no separate shadow-path guard is needed here). Reads its own alpha
+      // via TSL.output, not a closure variable (buildRealFloorAttrMrtNode's
+      // own doc has the live-crash story).
+      if (isFloorSurface) {
         material.mrtNode = buildRealFloorAttrMrtNode({
           THREE,
           item,
@@ -5820,7 +5815,6 @@ export async function startVtPanViewer({
           sceneDoc: globalThis.canvas?.scene ?? null,
           logError: log.error,
           envLight,
-          solidityAlpha: finalAlpha,
         });
       }
 

@@ -195,7 +195,8 @@ export const PASSES = [
       'BushEffectV2(billboards)',
     ],
     note:
-      'THE unified world draw: every drawable — level art, tiles, tokens, vegetation billboards — is ' +
+      'THE unified world draw: every drawable — level art, tiles, tokens, vegetation billboards, the ' +
+      'door leaves, and (2026-07-26) WATER`s tier-0 surface at renderOrder 0.5 — is ' +
       'one flat list under elevation→sortLayer→sort→zIndex. buf:scene.attr is REAL as of 2026-07-25 ' +
       '(B0-1, vt/scene-attr.js) — base map/tile art and Case-1 embedded vegetation MRT-write floorId/' +
       'outdoors/presence-bit0/solidity; every overlay (vegetation Case-2, doors, tokens) writes the ' +
@@ -323,15 +324,49 @@ export const PASSES = [
     id: 'surface.water',
     stage: 'surface',
     kind: 'gpu',
+    // STILL A SEAM — and that is the honest status even though TIER 0 SHIPPED
+    // AND RENDERS as of 2026-07-26. Water's surface is a DRAWABLE, not a pass:
+    // it is a bounded world quad inside geometry.world's own flat sort list
+    // (renderOrder 0.5, immediately above the floor background), exactly like
+    // the door leaves and for the same two dividends — the painter's-algorithm
+    // order occludes it under upper art for free (that IS "the punch", see
+    // effects/water/water-render.js), and the renderer-global zero-attr MRT
+    // gives it B0-3's `gAttr = vec4(0)` contract for free. Sun shadows sit the
+    // same way: real GPU work owned by a subsystem, not a declared pass.
+    //
+    // THIS PASS BECOMES REAL at the first rung that needs a DEPENDENT READ of
+    // buf:scene.color — tier 5, refraction — because that cannot be done from
+    // inside the pass that is still writing it. Tiers 1-4 (volume, motion,
+    // light, shore) all stay drawables. Flipping this to `live` before then
+    // would mean giving water its own scene and render call, which would cost
+    // exactly the two dividends above and buy nothing.
     status: 'seam',
     owns: 'docs/planning/Water.md (the full audit + ladder + cross-floor rule)',
     creates: [],
-    reads: ['vt:masks', 'buf:scene.illum', 'buf:scene.attr', 'res:env', 'res:fluidSim'],
+    // The aspirational list, kept for the rungs that will genuinely read them.
+    // `res:fluidSim` is gone: nothing produces it, and a LIVE pass declaring an
+    // unproduced read is precisely pass-health.js's STARVED — better removed
+    // now than the day this flips.
+    //
+    // `res:waterBody` is deliberately NOT listed. The body pack is a
+    // PRECOMPUTE, not a frame resource: it is baked on mask-version change by
+    // effects/water/water-body-subsystem.js, exactly as the sun-shadow height
+    // field is baked by its own subsystem — and the sun-shadow field appears
+    // nowhere in this file either. The graph declares the per-frame DAG; a
+    // resource whose producer is not a frame pass has no honest place in it,
+    // and inventing a producer entry to satisfy the reads-before-creates
+    // validator would be a declaration that describes nothing.
+    reads: ['vt:masks', 'buf:scene.illum', 'buf:scene.attr', 'res:env'],
     modifies: ['buf:scene.color'],
     absorbs: ['WaterEffectV2', 'water-shader.js(look, harvested)'],
     note:
-      'The tier ladder from blue-in-the-right-place to refraction. Carries the fifteen-line ' +
-      'cross-floor borrow rule at tier 0 — correctness never rides the ladder. First Stage 6 port.',
+      'TIER 0 IS LIVE (2026-07-26) but renders inside geometry.world — see the status comment above ' +
+      'for why this entry stays `seam` rather than lying in either direction. What ships: the mask, ' +
+      'tinted, in the right place on the right floor, with a soft shoreline derived from the body ' +
+      'pack`s signed distance, carrying the fifteen-line cross-floor borrow rule (correctness never ' +
+      'rides the ladder). res:waterBody is baked by effects/water/water-body-subsystem.js on mask ' +
+      'change, subsystem-owned like the sun-shadow field. Rungs 1-8 (volume, motion, light, shore, ' +
+      'refraction, reflection, sim, spray) remain. First Stage 6 port.',
   },
   {
     id: 'surface.particles',

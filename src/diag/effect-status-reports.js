@@ -132,6 +132,10 @@ export function buildWaterBodyReport({ floorIndex, viewer, maskAuthority, genera
       'authored water mask (a content gap, not a bug — cross-check authoredWaterFloors, which is ' +
       'keyed on provenance, not on the grid being non-empty). lastBake.skipped:true with a reason ' +
       'names a bake that was deliberately not run. grid "not allocated" means no bake has ever ' +
-      'happened, so the three render targets do not exist yet — correct on a scene with no water.',
+      'happened, so the three render targets do not exist yet — correct on a scene with no water. ' +
+      'FINALLY `surface` is tier 0`s own state: visible:false alongside a healthy bake means the ' +
+      'resolved floor`s mask holds no water at all (nothing to draw — not a failure), and `bounds` ' +
+      'is the measured world AABB the quad is cropped to. If bounds ever equals the whole mask ' +
+      'rect, the Law 6 crop is not working and water is paying fullscreen cost for a river.',
   };
 }

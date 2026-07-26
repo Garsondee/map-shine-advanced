@@ -141,6 +141,15 @@ export { resolveWaterFloor } from './water/water-floor.js';
 // poll; `water-body.js` is its TSL half plus the arithmetic the Node suite
 // pins (the flood is exact, and only a brute-force comparison can say so).
 export { createWaterBodySubsystem } from './water/water-body-subsystem.js';
+// TIER 0 — the surface itself: the mask, tinted, in the right place, with a
+// soft SDF-derived shoreline. Read its header for why "the punch" needs no
+// buf:scene.attr read (the painter's-algorithm draw order IS the punch).
+export {
+  buildWaterSurfaceMaterial,
+  WATER_TIER0_TINT,
+  WATER_TIER0_OPACITY,
+  WATER_TIER0_SHORE_SOFTNESS_PX,
+} from './water/water-render.js';
 // DOOR GRAPHICS as a self-owned subsystem (extracted 2026-07-26). Also the
 // template tier-0 water follows: an opaque, LIT map element drawn into
 // buf:scene.color BEFORE lighting, in its own scene.

@@ -76,6 +76,12 @@ import { resolveWaterFloor } from './water-floor.js';
 
 const log = createLogger('WaterBody');
 
+/** Padding on the measured water AABB, world px — comfortably wider than
+ * `WATER_TIER0_SHORE_SOFTNESS_PX` so the surface mesh never clips its own
+ * antialiased shoreline, and wider than one coarse mask texel so a shore that
+ * sits mid-texel is still fully covered. */
+const WATER_BOUNDS_PAD_PX = 64;
+
 /**
  * @param {object} args
  * @param {*} args.THREE
@@ -122,6 +128,9 @@ export function createWaterBodySubsystem({
   let maskTexture = createWaterMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, WATER_MASK_FILTER);
   let maskRect = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
 
+  /** The water's own world AABB (Law 6 — the surface mesh is cropped to THIS,
+   * never to the mask rect). `null` = this floor's mask holds no water. */
+  let waterBounds = null;
   let bodyRt = null;
   let jfaPingRt = null;
   let jfaPongRt = null;
@@ -244,13 +253,33 @@ export function createWaterBodySubsystem({
     // RGBA/UnsignedByte to match every other DataTexture in this renderer; R
     // is the only channel anything reads. NEAREST — see WATER_MASK_FILTER's
     // own doc for why a soft edge would make the seed pass meaningless.
+    //
+    // THE SAME PASS ALSO MEASURES THE WATER'S WORLD AABB, because Law 6 is
+    // about bounded GEOMETRY and the surface mesh has to be cropped to
+    // something. Water.md's own worked example for that law is "a water pass
+    // that runs fullscreen while water covers 2% of the view"; a quad over the
+    // whole mask rect would BE that. One min/max while the bytes are already
+    // being walked costs nothing and is the only measurement of "where the
+    // water actually is" anyone has.
     const data = new Uint8Array(w * h * 4);
+    let minTx = Infinity;
+    let minTy = Infinity;
+    let maxTx = -Infinity;
+    let maxTy = -Infinity;
     for (let i = 0; i < w * h; i++) {
       const v = grid.data[i] ?? 0;
       data[i * 4 + 0] = v;
       data[i * 4 + 1] = v;
       data[i * 4 + 2] = v;
       data[i * 4 + 3] = 255;
+      if (v > 0) {
+        const tx = i % w;
+        const ty = (i / w) | 0;
+        if (tx < minTx) minTx = tx;
+        if (tx > maxTx) maxTx = tx;
+        if (ty < minTy) minTy = ty;
+        if (ty > maxTy) maxTy = ty;
+      }
     }
     const tex = createWaterMaskTexture(data, w, h, WATER_MASK_FILTER);
 
@@ -271,7 +300,21 @@ export function createWaterBodySubsystem({
     // "No shore anywhere" must read as further away than the map is wide, so
     // every distance consumer degrades continuously instead of special-casing.
     materials.resolve.setFarDistance(Math.hypot(grid.spec.width, grid.spec.height));
-    return { ok: true, cols: w, rows: h };
+
+    // Texel AABB → WORLD AABB, padded by the shoreline's own soft reach so the
+    // mesh never clips its own antialiased edge. `null` when the mask holds no
+    // water at all, which the consumer reads as "draw nothing" — an empty
+    // bound, never a degenerate zero-size quad.
+    waterBounds =
+      maxTx >= minTx
+        ? {
+            minX: grid.spec.x + minTx * grid.spec.texelW - WATER_BOUNDS_PAD_PX,
+            minY: grid.spec.y + minTy * grid.spec.texelH - WATER_BOUNDS_PAD_PX,
+            maxX: grid.spec.x + (maxTx + 1) * grid.spec.texelW + WATER_BOUNDS_PAD_PX,
+            maxY: grid.spec.y + (maxTy + 1) * grid.spec.texelH + WATER_BOUNDS_PAD_PX,
+          }
+        : null;
+    return { ok: true, cols: w, rows: h, waterTexels: maxTx >= minTx ? 'present' : 'none' };
   }
 
   /**
@@ -379,6 +422,22 @@ export function createWaterBodySubsystem({
     /** The world rect the pack covers — the mask grid's own rect. */
     getRect() {
       return { ...maskRect };
+    },
+    /**
+     * The water's own world AABB, or `null` when this floor has no water at
+     * all. The surface mesh is cropped to THIS, never to `getRect()` — Law 6
+     * is about bounded geometry, and a quad over the whole mask rect is that
+     * law's own worked counter-example.
+     */
+    getWaterBounds() {
+      return waterBounds ? { ...waterBounds } : null;
+    },
+    /** Bumps on every completed flood. A consumer holding derived state (the
+     * surface mesh's geometry, sized from `getWaterBounds()`) caches this and
+     * rebuilds when it moves — the same version-cache discipline the wind and
+     * shadow handles use, rather than a push notification. */
+    get bakeGeneration() {
+      return bakes;
     },
     maybeBake,
     /**

@@ -277,7 +277,7 @@ Each phase ends green on `npm run verify` and is independently shippable.
 | **0b** | ✅ DONE, live-verified — **`buf:scene.attr`** — MRT, RGBA8/Nearest/NoColorSpace; opaques write; every transparent outputs `gAttr = vec4(0)` | a debug view shows floorId / outdoors / coverage / solidity; `geometry.world`'s partial-claim note is deleted (⚠️ bit 1/levelsHidden and the clear-value sentinel are the two honest gaps, see §12) |
 | **1** | ✅ DONE — Declaration + `resolveWaterFloor` + walls §8.1–8.3 | manifest + schema validate; `water-floor.test.mjs` green; the three walls sit at zero |
 | **2** | ✅ DONE — **LIVE-CONFIRMED 2026-07-26** — Body pack: JFA SDF, depth, tangent; version-polled rebake | ✅ **2 bakes / 3,070 polls** on a real scene — the exit criterion passed decisively |
-| **3** | **Tier 0** — placement, borrow, punch; registered, panelled, in the frame graph | S3: river visible through the planks, occluded by the planks |
+| **3** | ✅ BUILT (not live-tested) — **Tier 0**: placement, borrow, soft SDF shoreline. ⚠️ registration/panel deferred | S3: river visible through the planks, occluded by the planks |
 | **4** | **Tiers 1–3** — volume, motion, light | side-by-side vs 0.5.x reference, author sign-off |
 | **5** | **Tier 4** — shore + caustics | |
 | **6** | **Tiers 5–6** — refraction, reflection | |

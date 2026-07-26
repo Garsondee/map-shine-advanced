@@ -98,6 +98,23 @@
  * already neutral at the global default, and says so explicitly anyway.
  *
  * ============================================================================
+ * TIER 3 — SUN + SKY SPECULAR STAYS IN THIS PASS, AND THAT IS A DECISION
+ * ============================================================================
+ * The obvious move once a rung needs real lighting is to follow shine's own
+ * precedent exactly: a second scene, drawn after `light.accumulate`, reading
+ * `buf:scene.illum` for indoor lamp glints and `buf:scene.attr` for explicit
+ * occlusion. Tier 3's own ladder text says otherwise — "No new bandwidth" —
+ * and building it found that to be the right call, not a shortcut: everything
+ * it needs (the sky handle's plain values, and the world-space `_Outdoors`
+ * mask, a static authored texture with no pass-ordering constraint) is already
+ * available at THIS pass's time. Moving out would trade water's existing free
+ * occlusion (paint order — the same "the draw order IS the punch" reasoning
+ * tier 0 already established) for the explicit `buf:scene.attr` gate shine
+ * needs precisely because it gave that up. See `water-light.js`'s own header
+ * for the physics and for why it is a separate transcription of shine's proven
+ * GGX/Fresnel shape rather than an import of it.
+ *
+ * ============================================================================
  * ⚠️ THERE IS NO `buf:scene.attr` READ HERE, AND THAT IS A CORRECTION
  * ============================================================================
  * Water.md §6 and `graph/passes.js` both describe tier 0's occlusion — "the
@@ -135,6 +152,13 @@ import {
   WATER_TIER2_FLOW_ANGLE_DEG,
   WATER_TIER2_FOAM,
 } from './water-field.js';
+import {
+  buildWaterSpecular,
+  WATER_TIER3_SUN_GLINT,
+  WATER_TIER3_SKY_SHEEN,
+  WATER_TIER3_GLOSSINESS,
+  WATER_TIER3_VIEWER_HEIGHT,
+} from './water-light.js';
 
 /**
  * Tier 0's flat body colour. A muted blue-green with a deliberate green bias:
@@ -320,6 +344,12 @@ export const WATER_TIER1_WET_STRENGTH = 0.35;
  *   the world rect `maskTexture` covers.
  * @param {readonly number[]} [args.tint]
  * @param {number} [args.opacity]
+ * @param {*} [args.uViewRect] - envLight's shared view-rect uniform. Required
+ *   for tier 3's synthesised eye — see `water-light.js`.
+ * @param {*} [args.uOutdoorsRect] @param {*} [args.outdoorsTexNode] - envLight's
+ *   outdoors rect/texture, shared the same way.
+ * @param {Function} [args.buildOutdoorsGate] - injected world-space gate
+ *   builder; absent compiles tier 3's reflection to a safe zero.
  * @returns {{absorbMaterial:*, inscatterMaterial:*, maskTexNode:*, bodyTexNode:*,
  *   setMaskRect:(r:object)=>void, setTint:(rgb:readonly number[])=>void,
  *   setOpacity:(v:number)=>void}} TWO materials, for two meshes over the same
@@ -343,6 +373,15 @@ export function buildWaterSurfaceMaterial({
   timeMsNode = null,
   wetBandPx = WATER_TIER1_WET_BAND_PX,
   wetStrength = WATER_TIER1_WET_STRENGTH,
+  // ── TIER 3 ────────────────────────────────────────────────────────────────
+  uViewRect,
+  uOutdoorsRect,
+  outdoorsTexNode,
+  buildOutdoorsGate,
+  sunGlint = WATER_TIER3_SUN_GLINT,
+  skySheen = WATER_TIER3_SKY_SHEEN,
+  glossiness = WATER_TIER3_GLOSSINESS,
+  viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
 }) {
   const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, log, max, dot, mrt } =
     THREE.TSL;
@@ -482,6 +521,24 @@ export function buildWaterSurfaceMaterial({
   // where the blue-margin bug lived.
   const inscatter = uTint.mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3)))).mul(uInscatter);
 
+  // ── TIER 3: SUN + SKY SPECULAR ───────────────────────────────────────────
+  // See `water-light.js` for the physics and the header above for why this
+  // stays in THIS pass rather than following shine's own post-lighting scene.
+  // Never tinted by `uTint` — see that module's header on why a dielectric's
+  // mirror reflection takes its colour from the SKY, not the medium beneath.
+  const specular = buildWaterSpecular({
+    TSL: THREE.TSL,
+    positionWorld,
+    uViewRect,
+    uOutdoorsRect,
+    outdoorsTexNode,
+    buildOutdoorsGate,
+    sunGlint,
+    skySheen,
+    glossiness,
+    viewerHeight,
+  });
+
   // ── TIER 1b: THE WET BAND ────────────────────────────────────────────────
   // `1 − smoothstep(0, band, sdf)` on the POSITIVE (outside) side of the same
   // signed distance sampled above — a damp ground band of any width, from a
@@ -550,10 +607,24 @@ export function buildWaterSurfaceMaterial({
   // `src + dst`, premultiplied — the light the volume sends back. Zero outside
   // the water by construction (bedTransmit is 1 there), so it needs no gate.
   const inscatterMaterial = new THREE.NodeMaterial();
-  // The water's own returned light, itself occluded by foam, PLUS the foam.
-  // 0.85 rather than pure white: blown-out foam reads as a UI overlay, and the
-  // grade stack downstream has its own opinion about highlights.
-  inscatterMaterial.colorNode = vec4(inscatter.mul(foamHide).add(field.foam.mul(float(0.85))), 1);
+  // The reflection is gated by `inside` (no glint on dry land — the same
+  // antialiased shoreline every other term already uses) and by `foamHide`
+  // (broken, foamy water scatters light, it does not mirror it — reusing the
+  // exact factor that already suppresses the bed and the in-scatter, rather
+  // than adding a second foam interaction to reason about).
+  const reflection = specular.reflection.mul(inside).mul(foamHide);
+
+  // The water's own returned light, itself occluded by foam, PLUS the foam,
+  // PLUS the sun/sky reflection. 0.85 rather than pure white on the foam term:
+  // blown-out foam reads as a UI overlay, and the grade stack downstream has
+  // its own opinion about highlights.
+  inscatterMaterial.colorNode = vec4(
+    inscatter
+      .mul(foamHide)
+      .add(field.foam.mul(float(0.85)))
+      .add(reflection),
+    1
+  );
   configureShared(inscatterMaterial);
   inscatterMaterial.blendSrc = THREE.OneFactor;
   inscatterMaterial.blendDst = THREE.OneFactor;
@@ -601,6 +672,30 @@ export function buildWaterSurfaceMaterial({
     setWetStrength(v) {
       uWetStrength.value = v;
     },
+    // ── TIER 3 ────────────────────────────────────────────────────────────
+    /** The camera's world rect centre — pushed per frame, never gated. */
+    setViewCentre(cx, cy) {
+      specular.setViewCentre(cx, cy);
+    },
+    /** The whole sky, in one call — see `water-light.js#setSky`. */
+    setSky(sky) {
+      specular.setSky(sky);
+    },
+    setSunGlint(v) {
+      specular.setSunGlint(v);
+    },
+    setSkySheen(v) {
+      specular.setSkySheen(v);
+    },
+    setGlossiness(v) {
+      specular.setGlossiness(v);
+    },
+    setViewerHeight(v) {
+      specular.setViewerHeight(v);
+    },
+    /** For the debug report — whether the outdoors branch is real on this
+     * scene or compiled to the indoors constant. */
+    outdoorsGateCompiled: specular.outdoorsGateCompiled,
     setTint(rgb) {
       uTint.value.set(rgb[0], rgb[1], rgb[2]);
     },

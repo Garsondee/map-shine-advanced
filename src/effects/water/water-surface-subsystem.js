@@ -48,6 +48,7 @@
 
 import { createLogger } from '../../core/log.js';
 import { buildWaterSurfaceMaterial } from './water-render.js';
+import { waterKeyLightDirection } from './water-light.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 const log = createLogger('WaterSurface');
@@ -64,7 +65,19 @@ const log = createLogger('WaterSurface');
  *   the literal `new THREE.DataTexture(...)`, defined in `vt/` (trap #5).
  * @param {(url: string) => Promise<object|null>} args.loadMaskImage -
  *   `vt/mask-image.js`'s loader, injected for the same directory-wall reason.
- * @returns {{sync: (floorIndex: number) => void, getStatus: () => object, dispose: () => void}}
+ * @param {*} [args.uViewRect] - envLight's shared view-rect uniform, for tier
+ *   3's synthesised eye — the identical object `specular-surface-subsystem.js`
+ *   receives, so the two never disagree about where a world point lands.
+ * @param {*} [args.uOutdoorsRect] @param {*} [args.outdoorsTexNode] - envLight's
+ *   outdoors rect/texture, shared the same way.
+ * @param {Function} [args.buildOutdoorsGate] - the world-space gate builder
+ *   (`buildWorldSpaceOutdoorsGate`), injected so this module never re-writes
+ *   "world XY → mask UV → sample".
+ * @param {() => object|null} [args.getSkyHandle] - `effects/sky-access.js`'s
+ *   handle for THIS frame. The ONE description of the outdoor light; this
+ *   module never touches the hour (`env/one-sun`).
+ * @returns {{sync: (floorIndex: number, viewRect?: object|null) => void,
+ *   getStatus: () => object, dispose: () => void}}
  */
 export function createWaterSurfaceSubsystem({
   THREE,
@@ -75,10 +88,16 @@ export function createWaterSurfaceSubsystem({
   loadMaskImage,
   getWaterRenderState,
   timeMsNode,
+  uViewRect,
+  uOutdoorsRect,
+  outdoorsTexNode,
+  buildOutdoorsGate,
+  getSkyHandle,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
   getWaterRenderState ??= () => ({ enabled: true, params: {} });
+  getSkyHandle ??= () => null;
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
   geometry.setIndex(Array.from(QUAD_INDICES));
@@ -96,6 +115,10 @@ export function createWaterSurfaceSubsystem({
   /** The resolved-params signature last pushed, so a quiet frame is one string
    * compare rather than three uniform writes. */
   let lastParamsKey = '';
+  /** The sky signature last pushed — mirrors `specular-surface-subsystem.js`'s
+   * own `lastSkyKey`, and for the same reason: the sky only changes when the
+   * clock or the weather does, unlike the eye, which moves every pan. */
+  let lastSkyKey = '';
   let enabled = true;
 
   /** The ONE place visibility is decided, so the three conditions can never
@@ -123,6 +146,12 @@ export function createWaterSurfaceSubsystem({
     // V2 by reading `performance.now()` in eight independent places. A null
     // here (the torture fixture) yields a still surface, never a private clock.
     timeMsNode,
+    // TIER 3 — see `water-light.js`. All four are envLight's own shared state,
+    // the identical objects `specular-surface-subsystem.js` receives.
+    uViewRect,
+    uOutdoorsRect,
+    outdoorsTexNode,
+    buildOutdoorsGate,
   });
   // TWO meshes over ONE geometry — water is a multiply THEN an add, and blend
   // state is per-material (see `water-render.js`'s header for why one alpha
@@ -189,9 +218,39 @@ export function createWaterSurfaceSubsystem({
    * re-cropped only when the flood actually produced something new.
    * @param {number} floorIndex - the VIEWED floor; the body pack resolves the
    *   borrow itself, and `getWaterMaskUrl` is asked for the RESOLVED one.
+   * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} [viewRect] -
+   *   the camera's world rect, for tier 3's synthesised eye position. Optional:
+   *   a caller that never passes it just never moves the eye, which is a
+   *   correct (if static) tier-3 render rather than a crash.
    */
-  function sync(floorIndex) {
+  function sync(floorIndex, viewRect) {
     ensureMaskImage(floorIndex);
+
+    // THE EYE. Pushed every frame and NEVER gated on anything — mirrors
+    // `specular-surface-subsystem.js`'s identical reasoning: this is the whole
+    // reason the sun-glint moves when the author pans, so a cached-key skip
+    // here would silently make it static
+    // (`feedback_residency_sync_vs_render_loop`, the same class).
+    if (viewRect) {
+      surface.setViewCentre((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
+    }
+
+    // THE SKY, as ONE description of ONE afternoon. Cached on a key because it
+    // only changes when the clock or the weather does, unlike the eye.
+    const sky = getSkyHandle();
+    if (sky?.key) {
+      const skyKey = `${sky.version}|${sky.key.azimuthDeg}|${sky.key.elevationDeg}|${sky.key.strength}|${sky.fill?.strength}`;
+      if (skyKey !== lastSkyKey) {
+        lastSkyKey = skyKey;
+        surface.setSky({
+          keyDir: waterKeyLightDirection(sky.key),
+          keyColor: sky.key.colorRgb ?? [1, 1, 1],
+          keyStrength: sky.key.strength ?? 0,
+          fillColor: sky.fill?.colorRgb ?? [1, 1, 1],
+          fillStrength: sky.fill?.strength ?? 0,
+        });
+      }
+    }
 
     // THE LOOK PARAMS, pushed every frame. Cheap (three uniform writes against
     // a cached key) and it must NOT ride the bake gate below: a slider drag
@@ -216,6 +275,10 @@ export function createWaterSurfaceSubsystem({
       p.waveScalePx,
       p.wetBandPx,
       p.wetStrength,
+      p.sunGlint,
+      p.skySheen,
+      p.glossiness,
+      p.viewerHeight,
     ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
@@ -231,6 +294,10 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.waveScalePx)) surface.setWaveScalePx(p.waveScalePx);
       if (Number.isFinite(p.wetBandPx)) surface.setWetBandPx(p.wetBandPx);
       if (Number.isFinite(p.wetStrength)) surface.setWetStrength(p.wetStrength);
+      if (Number.isFinite(p.sunGlint)) surface.setSunGlint(p.sunGlint);
+      if (Number.isFinite(p.skySheen)) surface.setSkySheen(p.skySheen);
+      if (Number.isFinite(p.glossiness)) surface.setGlossiness(p.glossiness);
+      if (Number.isFinite(p.viewerHeight)) surface.setViewerHeight(p.viewerHeight);
       enabled = state.enabled !== false;
       refreshVisibility();
     }
@@ -279,6 +346,10 @@ export function createWaterSurfaceSubsystem({
         // reads about the same as the derivation grid (~512), the hi-res path
         // is not running and the old blocky look is back.
         maskImage: maskInfo ?? 'not loaded',
+        // `false` means every pixel takes tier 3's indoors path (zero sun/sky
+        // reflection) regardless of what the map looks like — silent on
+        // screen, never guessed at.
+        outdoorsGate: surface.outdoorsGateCompiled,
       };
     },
     dispose() {

@@ -72,6 +72,47 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Own colour',
     help: 'How much colour the water shows in its own right, as opposed to only tinting what lies beneath it. At 0 the water is a pure coloured filter — the ground shows through, shifted toward your water colour. Turn it up for silty, turbid or stylised water. Turn it up too far and the water reads as paint laid over the map rather than a body you can see into.',
   },
+  // ── Light ───────────────────────────────────────────────────────────────
+  sunGlint: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.02,
+    default: 1,
+    category: 'Light',
+    label: 'Sun glint',
+    help: 'The bright, tight sparkle where the sun catches the water directly. This is the highlight that sweeps as you pan the view — turn it up for a dazzling noon glare on open water, down for a duller, overcast look.',
+  },
+  skySheen: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.02,
+    default: 1,
+    category: 'Light',
+    label: 'Sky sheen',
+    help: 'A soft, broad reflection of the sky itself across the whole surface — the reason still water looks pale near the horizon and darker overhead. Subtler and steadier than the sun glint; turn it down for water that reads as its own colour rather than a mirror.',
+  },
+  glossiness: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.92,
+    category: 'Light',
+    label: 'Glossiness',
+    help: 'How mirror-like the surface is. High values give a tight, glassy sun sparkle; low values spread the same light into a duller, broader sheen. This is independent of how choppy the surface looks — a later rung, not this slider, is what makes water physically rougher.',
+  },
+  viewerHeight: {
+    type: 'float',
+    min: 0.3,
+    max: 6,
+    step: 0.05,
+    default: 1.5,
+    category: 'Light',
+    label: 'Reflection sensitivity',
+    help: 'How dramatically the sun glint sweeps as you pan or zoom, expressed as how high overhead the eye sits relative to what is on screen. Lower values sweep more; higher values hold a steadier, calmer highlight. Rarely needs touching — it is here to fix a scene where the glint feels either too twitchy or too static.',
+  },
   // ── Motion ──────────────────────────────────────────────────────────────
   foam: {
     type: 'float',
@@ -169,11 +210,12 @@ export const WATER_PARAMS = Object.freeze({
  * reasonable). `enabledFromProfile: 'low'` — tier 0 is a mask read + a tint,
  * nearly free, on by default at every profile (feedback_default_on_new_
  * features). `a11y.photosensitive: false` — tier 0 has no flicker of any
- * kind (a static tinted mask read); revisit once tiers 3–4 (specular glints,
- * caustics) exist for real, though ordinary rippling specular highlights at
- * normal frame rates are not the rapid high-contrast flashing WCAG/Foundry's
- * photosensitive concern targets (bloom's own header makes the same call for
- * "a soft glow, not a strobe").
+ * kind (a static tinted mask read); tier 3's sun-disc GGX lobe now exists for
+ * real and does not change this call — an ordinary specular highlight that
+ * sweeps as the camera pans is not the rapid, high-contrast, screen-filling
+ * flashing WCAG/Foundry's photosensitive concern targets (bloom's own header
+ * makes the same call for "a soft glow, not a strobe"). Revisit once tier 4
+ * (caustics) exists for real, which is closer to that concern's shape.
  *
  * @type {import('../effect-manifest.js').EffectManifest}
  */
@@ -218,15 +260,26 @@ export const WATER = Object.freeze({
         'without refraction (rung 5) or specular (rung 3), and a fake light here would fight the real ' +
         'one later. This is the rung where water stops being a decal.',
     }),
+    Object.freeze({
+      n: 3,
+      name: 'light',
+      cost: Object.freeze({ class: 'C3', estMsPerMp: 0.08 }),
+      adds:
+        'GGX specular + Fresnel-weighted sky reflection from the sky handle. A separate transcription ' +
+        'of the same synthesised-eye, flat-N approach `effects/specular/` proved (own F0 for water`s ' +
+        'own IOR, never tinted by the water`s own colour — a dielectric`s mirror reflection takes its ' +
+        'colour from the sky, not the medium beneath it). Stays inside tier 0-2`s own pass rather than ' +
+        'moving to a post-lighting scene the way shine has to: everything it needs (the sky handle, the ' +
+        'static authored outdoors mask) is already available there, so water keeps its free paint-order ' +
+        'occlusion instead of trading it for an explicit buf:scene.attr gate. No lamp glint at this rung ' +
+        '(the ladder`s own "no new bandwidth") and gated by the same shoreline mask and foam-hide factor ' +
+        'tiers 0-2 already compute — a channel of reads already paid for, not a new one.',
+    }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0), the full ladder
   // Water.md §6 designs. Each becomes a real `tiers` entry, with its own
   // cost class and its own phase's render code, in build order.
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'light',
-      note: 'GGX specular + Fresnel-weighted sky reflection from the sky handle. No new bandwidth.',
-    }),
     Object.freeze({
       name: 'shore',
       note:

@@ -14,6 +14,7 @@
 import { run as runWater } from './water.test.mjs';
 import { run as runWaterFloor } from './water-floor.test.mjs';
 import { run as runWaterBody } from './water-body.test.mjs';
+import { run as runWaterLight } from './water-light.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -46,6 +47,7 @@ const suites = [
   ['water', runWater],
   ['water-floor', runWaterFloor],
   ['water-body', runWaterBody],
+  ['water-light', runWaterLight],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

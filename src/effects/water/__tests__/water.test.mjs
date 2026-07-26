@@ -6,7 +6,8 @@
  * WATER_PARAMS grows one TIER at a time, never ahead of the code that reads
  * it — see water.js's own header. It was deliberately EMPTY through phases
  * 1-2 (params/no-dead-controls would have failed the build otherwise), gained
- * tier 0's three in phase 3, and tier 1's three in phase 4.
+ * tier 0's three in phase 3, tier 1's three in phase 4, tier 2's four the same
+ * session, and tier 3's four (sunGlint, skySheen, glossiness, viewerHeight).
  */
 import { validateParamsSchema } from '../../../core/params-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
@@ -61,6 +62,14 @@ export function run(t) {
   ok(
     'tier 1, once built, is C1 — the staircase starts cheap',
     WATER.tiers[1] === undefined || WATER.tiers[1].cost.class === 'C1'
+  );
+  ok(
+    'tier 2, once built, is C2 — the next rung of the staircase',
+    WATER.tiers[2] === undefined || WATER.tiers[2].cost.class === 'C2'
+  );
+  ok(
+    'tier 3, once built, is C3 — light is real now (2026-07-26)',
+    WATER.tiers[3] === undefined || WATER.tiers[3].cost.class === 'C3'
   );
   ok(
     "deferredRungs entries are named, not built (no n, no cost — bloom.js's own shape)",

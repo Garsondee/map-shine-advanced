@@ -128,6 +128,14 @@
  * @module effects/water/water-render
  */
 
+import {
+  buildWaterSurfaceField,
+  WATER_TIER2_WAVE_SCALE_PX,
+  WATER_TIER2_FLOW_SPEED_PX,
+  WATER_TIER2_FLOW_ANGLE_DEG,
+  WATER_TIER2_FOAM,
+} from './water-field.js';
+
 /**
  * Tier 0's flat body colour. A muted blue-green with a deliberate green bias:
  * a pure blue reads as swimming-pool, and the whole point of tier 0 is that a
@@ -247,6 +255,15 @@ export const WATER_TIER1_ABSORPTION = 3.0;
 export const WATER_TIER1_DEPTH_SCALE_PX = 256;
 
 /**
+ * TIER 2 — how strongly the surface field varies optical depth, as a fraction.
+ * Not a param: it is the rung's own internal strength, and the author already
+ * has three controls over how the water reads at depth (`tint`, `opacity`,
+ * `absorption`). 0.45 is enough to break the sheet-of-glass look without
+ * reading as blotches.
+ */
+export const WATER_TIER2_TURBIDITY = 0.45;
+
+/**
  * TIER 1 — THE WET BAND, world px. How far past the shoreline the ground reads
  * as damp.
  *
@@ -298,6 +315,11 @@ export function buildWaterSurfaceMaterial({
   opacity = WATER_TIER0_OPACITY,
   absorption = WATER_TIER1_ABSORPTION,
   depthScalePx = WATER_TIER1_DEPTH_SCALE_PX,
+  waveScalePx = WATER_TIER2_WAVE_SCALE_PX,
+  flowSpeedPx = WATER_TIER2_FLOW_SPEED_PX,
+  flowAngleDeg = WATER_TIER2_FLOW_ANGLE_DEG,
+  foam = WATER_TIER2_FOAM,
+  timeMsNode = null,
   wetBandPx = WATER_TIER1_WET_BAND_PX,
   wetStrength = WATER_TIER1_WET_STRENGTH,
 }) {
@@ -310,6 +332,11 @@ export function buildWaterSurfaceMaterial({
   const uOpacity = uniform(float(opacity));
   const uAbsorption = uniform(float(absorption));
   const uDepthScalePx = uniform(float(depthScalePx));
+  const uWaveScalePx = uniform(float(waveScalePx));
+  const uFlowSpeedPx = uniform(float(flowSpeedPx));
+  const uFlowAngleRad = uniform(float((flowAngleDeg * Math.PI) / 180));
+  const uFoam = uniform(float(foam));
+  const uTurbidity = uniform(float(WATER_TIER2_TURBIDITY));
   const uWetBandPx = uniform(float(wetBandPx));
   const uWetStrength = uniform(float(wetStrength));
   // The upper edge of the presence band is authorable (WATER_PARAMS
@@ -380,7 +407,29 @@ export function buildWaterSurfaceMaterial({
   // bought, so a half-opacity river went grey rather than pale-teal. Scaling
   // the exponent is what "less water" physically means and leaves the per-
   // channel RATIOS exactly intact at every setting.
-  const depth01 = maskTexNode.r.mul(depthRamp).mul(inside).mul(uOpacity);
+  // ── TIER 2: THE SURFACE FIELD ────────────────────────────────────────────
+  // See `water-field.js` for why this rung is foam + turbidity and NOT
+  // slope-shading: from directly above a slope is invisible without refraction
+  // (rung 5) or specular (rung 3), and faking a light here would fight the real
+  // one later. `timeMsNode` is the viewer's shared clock, handed in.
+  const field = buildWaterSurfaceField({
+    TSL: THREE.TSL,
+    worldXY: vec2(positionWorld.x, positionWorld.y),
+    timeMsNode: timeMsNode ?? float(0),
+    tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
+    shoreDist,
+    uWaveScalePx,
+    uFlowSpeedPx,
+    uFlowAngleRad,
+    uFoam,
+  });
+
+  // Turbidity rides the OPTICAL DEPTH, which is what makes it visible with no
+  // lighting at all: it varies a quantity the absorption already renders,
+  // rather than adding one that needs a light to be seen. Clamped positive so
+  // a trough can thin the water but never invert it into a brightener.
+  const turbid = max(float(1).add(field.turbidity.mul(uTurbidity)), float(0));
+  const depth01 = maskTexNode.r.mul(depthRamp).mul(inside).mul(uOpacity).mul(turbid);
   // Outside the water `depth01` is 0, so this is exactly 1 — the identity of
   // the multiply blend. The pass provably cannot darken dry land.
   const bedTransmit = exp(sigma.negate().mul(depth01));
@@ -437,8 +486,14 @@ export function buildWaterSurfaceMaterial({
   // ── MESH 1: ABSORPTION ───────────────────────────────────────────────────
   // `dst · src` — the bed, multiplied per channel. The wet band rides here and
   // ONLY here, as a neutral darkening with no colour of its own.
+  // FOAM OCCLUDES, so it appears in BOTH passes and as the complement in each:
+  // it hides the bed (a further multiply by `1 − foam`) and it emits white
+  // (an add). Splitting it any other way would let foam brighten the bed it is
+  // supposed to be covering.
+  const foamHide = float(1).sub(field.foam);
+
   const absorbMaterial = new THREE.NodeMaterial();
-  absorbMaterial.colorNode = vec4(bedTransmit.mul(float(1).sub(wetBand)), 1);
+  absorbMaterial.colorNode = vec4(bedTransmit.mul(float(1).sub(wetBand)).mul(foamHide), 1);
   configureShared(absorbMaterial);
   absorbMaterial.blendSrc = THREE.ZeroFactor;
   absorbMaterial.blendDst = THREE.SrcColorFactor;
@@ -451,7 +506,10 @@ export function buildWaterSurfaceMaterial({
   // `src + dst`, premultiplied — the light the volume sends back. Zero outside
   // the water by construction (bedTransmit is 1 there), so it needs no gate.
   const inscatterMaterial = new THREE.NodeMaterial();
-  inscatterMaterial.colorNode = vec4(inscatter, 1);
+  // The water's own returned light, itself occluded by foam, PLUS the foam.
+  // 0.85 rather than pure white: blown-out foam reads as a UI overlay, and the
+  // grade stack downstream has its own opinion about highlights.
+  inscatterMaterial.colorNode = vec4(inscatter.mul(foamHide).add(field.foam.mul(float(0.85))), 1);
   configureShared(inscatterMaterial);
   inscatterMaterial.blendSrc = THREE.OneFactor;
   inscatterMaterial.blendDst = THREE.OneFactor;
@@ -477,6 +535,18 @@ export function buildWaterSurfaceMaterial({
     },
     setDepthScalePx(v) {
       uDepthScalePx.value = v;
+    },
+    setWaveScalePx(v) {
+      uWaveScalePx.value = v;
+    },
+    setFlowSpeedPx(v) {
+      uFlowSpeedPx.value = v;
+    },
+    setFlowAngleDeg(v) {
+      uFlowAngleRad.value = (v * Math.PI) / 180;
+    },
+    setFoam(v) {
+      uFoam.value = v;
     },
     setWetBandPx(v) {
       uWetBandPx.value = v;

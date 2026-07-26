@@ -3627,7 +3627,7 @@ export async function startVtPanViewer({
       waterBody.maybeBake(view?.floorIndex ?? 0);
       // Re-crop the tier-0 surface quad to the water's AABB — gated on the same
       // bake generation, so a quiet frame costs one integer compare.
-      syncWaterSurface(view?.floorIndex ?? 0);
+      waterSurface.sync(view?.floorIndex ?? 0);
 
       // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
       // RAW ambient endpoints (not the pre-mixed background: each region
@@ -4869,8 +4869,8 @@ export async function startVtPanViewer({
       createMaskTexture: createMaskDataTexture,
       loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
       getWaterRenderState,
+      timeMsNode: uGlobalTimeMs, // tier 2's field travels on THE shared clock
     });
-    const syncWaterSurface = waterSurface.sync;
 
     /**
      * THE VEGETATION-SHADOW SUBSYSTEM (extraction step 2 of docs/planning/

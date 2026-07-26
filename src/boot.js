@@ -1817,14 +1817,14 @@ function install() {
       const readout = water.getReadout();
       return buildEffectCard({
         title: 'Water',
-        subtitle: 'tiers 0–1 — placement · volume',
+        subtitle: 'tiers 0–2 — placement · volume · motion',
         schema: WATER_PARAMS,
         // FOH is a strict, SMALL subset, never the whole schema
         // (feedback_foh_roh_must_differ). These three are the mid-session
         // questions: what colour, how much shows through, how fast it hides
         // the bed. The other three are ROH — `shorelineDepth`'s minimum
         // visibly breaks the edge, and the wet-margin pair is set-once detail.
-        fohKeys: ['tint', 'opacity', 'absorption'],
+        fohKeys: ['tint', 'opacity', 'absorption', 'foam'],
         getValue: (id) => readout.params?.[id] ?? WATER_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
         enabled: readout.enabled,

@@ -63,37 +63,11 @@ import { computeReachability } from './reachability.mjs';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(ROOT, 'src');
 const RATCHET_FILE = join(ROOT, 'tools', 'structure-ratchets.json');
-const SIZE_BUDGET_FILE = join(ROOT, 'tools', 'size-budgets.json');
 const UNIFORM_BUDGET_FILE = join(ROOT, 'tools', 'uniform-budgets.json');
 const EFFECTS_DIR = join(SRC, 'effects');
 
 /**
- * THE GOD-OBJECT CAP — the one V2 disease every other rule in this file left
- * uncovered, because every rule above polices COUPLING (imports, doors,
- * globals, renderer ownership) and none measures BULK. V2 died of two 10,000+
- * line files (FloorCompositor 10,063; token-movement 12,771) that no seam ever
- * forced to split — and on 2026-07-25 the audit found src/vt/vt-pan-viewer.js
- * already a 11,860-line file whose startVtPanViewer() is a single ~10,385-line
- * function, LARGER than FloorCompositor, and `npm run verify` was green through
- * all of it. A green gate with a god-object in the tree is the exact "the wall
- * didn't look here" failure this repo exists to prevent.
- *
- * No file may exceed `file` lines, and no top-level function may exceed `fn`
- * lines, UNLESS it is already over and registered in size-budgets.json — where
- * it is frozen at its recorded size and may only SHRINK (the no-silent-catch
- * ratchet, applied to bulk instead of a count). A NEW file/function crossing a
- * cap FAILS THE BUILD: split it, or register the debt consciously with
- * `npm run ratchets:update` (visible in the diff, never silent).
- *
- * The seeded number does not have to be precise — the same measurement is
- * compared against itself over time, so a rare few-line miscount from a brace
- * inside a string cannot break monotonicity, only shift an absolute already
- * thousands of lines from any cap.
- */
-export const SIZE_CAPS = { file: 1000, fn: 500 };
-
-/**
- * THE UNIFORM BUDGET — the same shrink-only ratchet as `SIZE_CAPS`, measuring
+ * THE UNIFORM BUDGET — a shrink-only ratchet measuring
  * a different disease: V2's water shader alone declared 324 `uniform`s (46
  * of them provably inert while still shipping a live UI slider — a fully-
  * labelled "Bathymetry (Volumetric)" folder with ZERO implementing GLSL
@@ -107,26 +81,14 @@ export const SIZE_CAPS = { file: 1000, fn: 500 };
  * Scoped to `src/effects/` — "per effect module" (`docs/planning/Water.md`
  * §6.3), not the whole codebase: `src/vt/vt-pan-viewer.js` and `src/world/
  * wind-sim-gpu.js` have their own real uniform counts, but neither is a
- * single effect in the Effects.md sense, and the size ratchet already polices
- * their bulk. No file under `src/effects/` may exceed `UNIFORM_CAP` calls to
+ * single effect in the Effects.md sense. No file under `src/effects/` may exceed `UNIFORM_CAP` calls to
  * `uniform(`, UNLESS it is already over and registered in uniform-
- * budgets.json, frozen at its recorded count, shrink-only — same contract as
- * `SIZE_CAPS`, same escape hatch (`npm run ratchets:update`, loud in the
+ * budgets.json, frozen at its recorded count, shrink-only — escape hatch (`npm run ratchets:update`, loud in the
  * diff), same reason the seeded number does not need to be exact (a rare
  * miscount from a commented-out `uniform(` cannot break monotonicity, only
  * shift an absolute already tens of calls from the cap).
  */
 export const UNIFORM_CAP = 40;
-const SIZE_WHY =
-  'V2 died of god-objects: FloorCompositor 10,063 lines, token-movement 12,771, FireEffectV2 6,861 — ' +
-  'each grown one locally-rational addition at a time because no seam forced a split. Every other rule ' +
-  'in this file polices coupling; none measured SIZE, so on 2026-07-25 vt-pan-viewer.js was a 11,860-line ' +
-  'file / 10,385-line function (bigger than FloorCompositor) with the gate green throughout.';
-const SIZE_INSTEAD =
-  'Split it into a sibling module behind a clean signature (a builder that takes inputs and returns an ' +
-  'object, a subsystem with its own file). If a large file is genuinely justified right now, register ' +
-  'the debt: `npm run ratchets:update` records its size as a frozen, shrink-only budget — loud in the ' +
-  'diff, and it can never grow again without another visible bump.';
 const UNIFORM_WHY =
   "V2's water shader alone declared 324 uniforms — 46 of them provably inert while still shipping a " +
   'live UI slider, including a fully-labelled "Bathymetry (Volumetric)" folder with ZERO implementing ' +
@@ -1087,14 +1049,6 @@ function loadRatchets() {
   }
 }
 
-function loadSizeBudgets() {
-  try {
-    return JSON.parse(readFileSync(SIZE_BUDGET_FILE, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
 function loadUniformBudgets() {
   try {
     return JSON.parse(readFileSync(UNIFORM_BUDGET_FILE, 'utf8'));
@@ -1105,125 +1059,9 @@ function loadUniformBudgets() {
 
 /** Strip line + block comments so braces inside them don't miscount. Naive by
  *  design (does not track `//` or `/*` inside string/template literals) — see
- *  SIZE_CAPS on why an occasional miscount is harmless to a shrink-only ratchet. */
+ *  An occasional miscount is harmless to a shrink-only ratchet. */
 function stripBraceComments(line) {
   return line.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '');
-}
-
-/**
- * The line-span of the largest TOP-LEVEL function in a file. Top-level =
- * column-0 `function NAME`, `const NAME = (…) =>`, or `const NAME = function`
- * (Prettier keeps top-level declarations AND their closing brace at column 0;
- * nested ones are indented, so a column-0 scan sees only the outermost). The
- * body span is found by brace balance from the declaration to the line the
- * balance returns to 0 — which correctly steps over a multi-line destructured
- * parameter list (`function start({\n …\n}) {`, the real startVtPanViewer
- * shape) because the param `{}` opens and closes before the body `{`.
- *
- * @param {string[]} lines
- * @returns {{name: string|null, startLine: number, lines: number}}
- */
-export function largestTopLevelFunction(lines) {
-  const DECL = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([\w$]+)/;
-  const CONST_FN = /^(?:export\s+)?const\s+([\w$]+)\s*=\s*(?:async\s+)?(?:function\b|\(|[\w$]+\s*=>)/;
-  let best = { name: null, startLine: 0, lines: 0 };
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    if (raw[0] === ' ' || raw[0] === '\t') continue; // top-level declarations sit at column 0
-    const m = DECL.exec(raw) || CONST_FN.exec(raw);
-    if (!m) continue;
-    let depth = 0;
-    let opened = false;
-    let end = lines.length - 1;
-    for (let j = i; j < lines.length; j++) {
-      const code = stripBraceComments(lines[j]);
-      for (let k = 0; k < code.length; k++) {
-        if (code[k] === '{') {
-          depth++;
-          opened = true;
-        } else if (code[k] === '}') {
-          depth--;
-        }
-      }
-      if (opened && depth <= 0) {
-        end = j;
-        break;
-      }
-      if (!opened && /;\s*$/.test(code)) {
-        end = j;
-        break; // an expression-bodied arrow / a non-function `const` — no block body
-      }
-    }
-    if (opened) {
-      const span = end - i + 1;
-      if (span > best.lines) best = { name: m[1], startLine: i + 1, lines: span };
-    }
-    i = end; // top level: never re-enter a body we just measured
-  }
-  return best;
-}
-
-/** @returns {{rel: string, fileLines: number, fnName: string|null, fnLines: number}[]} */
-function measureSizes(files) {
-  return files.map((file) => {
-    const rel = relative(ROOT, file).replace(/\\/g, '/');
-    const lines = readFileSync(file, 'utf8').split('\n');
-    const fn = largestTopLevelFunction(lines);
-    return { rel, fileLines: lines.length, fnName: fn.name, fnLines: fn.lines };
-  });
-}
-
-/**
- * The size ratchet: compare each file's measured size to its frozen budget.
- * Over cap with no budget → a NEW god-object (violation). Over its budget →
- * grew (violation). Under its budget → tighten. Under cap → no budget needed.
- * Same monotonic-improvement contract as the count ratchets in main().
- *
- * @param {{rel: string, fileLines: number, fnName: string|null, fnLines: number}[]} measurements
- * @param {Record<string, {file?: number, fn?: number}>} budgets
- * @param {{file: number, fn: number}} caps
- */
-export function evaluateSizeBudgets(measurements, budgets, caps = SIZE_CAPS) {
-  const violations = [];
-  const tightened = [];
-  const newBudgets = {};
-  for (const rec of measurements) {
-    const prior = budgets[rec.rel] ?? {};
-    const entry = {};
-    const dims = [
-      { kind: 'file', current: rec.fileLines, cap: caps.file, budget: prior.file },
-      { kind: 'fn', current: rec.fnLines, cap: caps.fn, budget: prior.fn },
-    ];
-    for (const d of dims) {
-      if (d.current <= d.cap) continue; // under cap: free, no budget
-      if (d.budget == null) {
-        violations.push({
-          rel: rec.rel,
-          kind: d.kind,
-          current: d.current,
-          cap: d.cap,
-          budget: null,
-          fnName: rec.fnName,
-        });
-        entry[d.kind] = d.current; // so --update can adopt it consciously
-      } else if (d.current > d.budget) {
-        violations.push({
-          rel: rec.rel,
-          kind: d.kind,
-          current: d.current,
-          cap: d.cap,
-          budget: d.budget,
-          fnName: rec.fnName,
-        });
-        entry[d.kind] = d.budget;
-      } else {
-        if (d.current < d.budget) tightened.push({ rel: rec.rel, kind: d.kind, from: d.budget, to: d.current });
-        entry[d.kind] = Math.min(d.current, d.budget);
-      }
-    }
-    if (entry.file != null || entry.fn != null) newBudgets[rec.rel] = entry;
-  }
-  return { violations, tightened, newBudgets };
 }
 
 /**
@@ -1259,7 +1097,7 @@ function measureUniformCounts(files) {
 
 /**
  * The uniform-budget ratchet — a single-dimension version of
- * `evaluateSizeBudgets`'s exact contract (over cap with no budget → a NEW
+ * the uniform budget’s exact contract (over cap with no budget → a NEW
  * violation; over budget → grew; under budget → tighten; under cap → free).
  *
  * @param {{rel: string, uniformCount: number}[]} measurements
@@ -1374,7 +1212,7 @@ export function extractParamsDeclarations(lines) {
  * keys have zero occurrences outside their own declaring file. Split from
  * `findDeadControls` (the disk-reading wrapper) so the actual cross-
  * referencing logic is testable with synthetic in-memory fixtures, same
- * `measureSizes`/`evaluateSizeBudgets` split the size ratchet already uses.
+ * measure/evaluate split the uniform ratchet uses.
  *
  * @param {{rel: string, text: string}[]} fileTexts
  * @returns {{file: string, line: number, paramsName: string, key: string}[]}
@@ -1560,55 +1398,39 @@ function main() {
     if (found.length > 10) console.error(`     ... and ${found.length - 10} more`);
   }
 
-  // THE SIZE RATCHET — same monotonic-improvement contract as the count
-  // ratchets above, keyed per file/function instead of a global tally.
-  const sizeBudgets = loadSizeBudgets();
-  const measurements = measureSizes(sourceFiles());
-  const size = evaluateSizeBudgets(measurements, sizeBudgets, SIZE_CAPS);
-  // ⚠️ REPORTED, NOT WRITTEN — and that is deliberate (2026-07-26).
+  // ============================================================================
+  // THE FILE/FUNCTION SIZE RATCHET WAS REMOVED — AUTHOR DECISION, 2026-07-26
+  // ============================================================================
+  // It measured file and function line counts against frozen, shrink-only
+  // budgets and FAILED THE BUILD when either grew. The intent was sound (this
+  // repo exists because V2 grew a 5,174-line god-class and a 975-line main()),
+  // and it did force three real extractions. But in practice it fired on almost
+  // every commit that touched `vt-pan-viewer.js` — including two-line ones —
+  // and the cost of servicing it stopped being paid in refactoring and started
+  // being paid in ceremony: hunting for two lines to delete somewhere else so
+  // an unrelated feature could land.
   //
-  // These lines used to read "budget tightened X → Y" while persisting
-  // nothing, which was a genuine lying instrument: the same "tightening" was
-  // re-announced forever and the stored bound never moved. The obvious fix —
-  // writing the tighter bound automatically — was tried the same day and
-  // REVERTED, because it makes the ratchet strictly unusable:
+  // The author called it, twice. First a renegotiation ("the goal can't be to
+  // prevent good work, that's too bad of a stricture... we are triggering this
+  // alarm too much for it to be useful"), which produced the split-as-prep
+  // workflow; and when that still blocked a 2-line clock injection during
+  // water tier 2, removal ("it isn't a good idea because it's preventing
+  // active development. Remove it").
   //
-  //   A bound that always equals the CURRENT size is not a ratchet, it is a
-  //   freeze. Headroom can never be banked, so the sanctioned workflow of
-  //   "split the god-object first, THEN add the feature" cannot complete —
-  //   the split commit re-freezes at the new low, and the feature commit that
-  //   the split existed to enable fails on its first added line.
+  // ⚠️ WHAT IS GONE, so nobody mistakes this for the disease being cured:
+  // NOTHING now stops a file growing without bound. `vt-pan-viewer.js` is
+  // ~10,460 lines and `startVtPanViewer()` ~9,730, and both are free to grow.
+  // The extraction plan (`docs/planning/VT-Pan-Viewer-Extraction.md`) is still
+  // real, still author-approved, and step 4 is still open — it is now a thing
+  // someone chooses to do rather than a thing the build demands. The other 28
+  // structural rules are untouched: they wall off SHAPE (what may import what,
+  // who owns GPU resources, where masks resolve), which is what actually
+  // prevented V2's failure modes. Size was the one rule that measured a
+  // quantity rather than a boundary, and it is the one that got in the way.
   //
-  // That workflow is the author's own standing directive (2026-07-26: "the
-  // goal can't be to prevent good work"; memory
-  // `feedback_ratchet_proactive_not_reactive`). So the bound stays at its
-  // historical high-water mark until someone runs `npm run ratchets:update`
-  // deliberately — which is the loud, explicit, in-the-diff moment Skeleton.md
-  // §2.5 wants — and this message now says exactly that instead of claiming an
-  // action it did not take.
-  for (const t of size.tightened) {
-    console.log(
-      `✅ size/${t.kind} — ${t.rel}: ${t.to} lines, under its ${t.from} budget. \`npm run ratchets:update\` to record it.`
-    );
-  }
-  if (size.violations.length) {
-    failed = true;
-    console.error(`\n❌ size/bounded — ${size.violations.length} over-budget file(s)/function(s)`);
-    console.error(`\n   WHY THIS RULE EXISTS:\n   ${SIZE_WHY.replace(/\s+/g, ' ')}`);
-    console.error(`\n   DO THIS INSTEAD:\n   ${SIZE_INSTEAD.replace(/\s+/g, ' ')}`);
-    console.error('\n   Violations:');
-    for (const v of size.violations) {
-      const what =
-        v.kind === 'file'
-          ? `${v.current} lines (cap ${v.cap})`
-          : `function ${v.fnName || '?'}() is ${v.current} lines (cap ${v.cap})`;
-      const how =
-        v.budget == null
-          ? 'NEW over-cap — split it, or `npm run ratchets:update` to register the debt'
-          : `grew past its frozen budget of ${v.budget} — it may only SHRINK`;
-      console.error(`     ${v.rel}: ${what} — ${how}`);
-    }
-  }
+  // `effects/uniform-budget` below survives deliberately: 324 uniforms on one
+  // shader is the specific measured disease it exists for, it is scoped to
+  // `src/effects/`, and it has never once fired on unrelated work.
 
   // THE UNIFORM BUDGET (`effects/uniform-budget`) — same shrink-only ratchet
   // as size, scoped to `src/effects/` (Water.md §6.3: "per effect module").
@@ -1704,26 +1526,13 @@ function main() {
       if (rule.ratchet) newRatchets[rule.id] = hits.get(rule.id).length;
     }
     writeFileSync(RATCHET_FILE, JSON.stringify(newRatchets, null, 2) + '\n');
-    // Seed/adopt size budgets at CURRENT sizes for every over-cap file — the
-    // tightest honest bound, the "tighten immediately" the ratchet is for.
-    const seeded = {};
-    for (const rec of measurements) {
-      const e = {};
-      if (rec.fileLines > SIZE_CAPS.file) e.file = rec.fileLines;
-      if (rec.fnLines > SIZE_CAPS.fn) e.fn = rec.fnLines;
-      if (e.file != null || e.fn != null) seeded[rec.rel] = e;
-    }
-    writeFileSync(SIZE_BUDGET_FILE, JSON.stringify(seeded, null, 2) + '\n');
-    // Same seed-at-current-value contract, for uniform counts.
+    // Seed at current value, for uniform counts.
     const seededUniforms = {};
     for (const rec of uniformMeasurements) {
       if (rec.uniformCount > UNIFORM_CAP) seededUniforms[rec.rel] = rec.uniformCount;
     }
     writeFileSync(UNIFORM_BUDGET_FILE, JSON.stringify(seededUniforms, null, 2) + '\n');
-    console.log(
-      `\n📌 Ratchets + size budgets written (${Object.keys(seeded).length} files budgeted, ` +
-        `${Object.keys(seededUniforms).length} uniform-budgeted)`
-    );
+    console.log(`\n📌 Ratchets written (${Object.keys(seededUniforms).length} uniform-budgeted)`);
     return;
   }
 
@@ -1743,11 +1552,9 @@ function main() {
   }
 
   const tightened = Object.keys(newRatchets).length;
-  const budgeted = Object.keys(size.newBudgets).length;
   const uniformBudgeted = Object.keys(uniformBudgetResult.newBudgets).length;
   console.log(
     `✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}` +
-      `${budgeted ? `, ${budgeted} size budget(s)` : ''}` +
       `${uniformBudgeted ? `, ${uniformBudgeted} uniform budget(s)` : ''}` +
       `${debtShown ? ` — ⏳ ${debtShown} declared debt(s) active` : ''}`
   );

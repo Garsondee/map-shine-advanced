@@ -74,6 +74,7 @@ export function createWaterSurfaceSubsystem({
   createMaskTexture,
   loadMaskImage,
   getWaterRenderState,
+  timeMsNode,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
@@ -117,6 +118,11 @@ export function createWaterSurfaceSubsystem({
     // is never sampled. `sync` re-points it every bake regardless.
     bodyTexture: waterBody.texture,
     bodyRect: waterBody.getRect(),
+    // TIER 2's field travels with THE SHARED CLOCK, handed down rather than
+    // sampled — `time/one-clock` names water as the effect that broke this in
+    // V2 by reading `performance.now()` in eight independent places. A null
+    // here (the torture fixture) yields a still surface, never a private clock.
+    timeMsNode,
   });
   // TWO meshes over ONE geometry — water is a multiply THEN an add, and blend
   // state is per-material (see `water-render.js`'s header for why one alpha
@@ -203,6 +209,10 @@ export function createWaterSurfaceSubsystem({
       p.shorelineDepth,
       p.absorption,
       p.depthScalePx,
+      p.foam,
+      p.flowSpeedPx,
+      p.flowAngleDeg,
+      p.waveScalePx,
       p.wetBandPx,
       p.wetStrength,
     ].join('|');
@@ -213,6 +223,10 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.shorelineDepth)) surface.setShorelineDepth(p.shorelineDepth);
       if (Number.isFinite(p.absorption)) surface.setAbsorption(p.absorption);
       if (Number.isFinite(p.depthScalePx)) surface.setDepthScalePx(p.depthScalePx);
+      if (Number.isFinite(p.foam)) surface.setFoam(p.foam);
+      if (Number.isFinite(p.flowSpeedPx)) surface.setFlowSpeedPx(p.flowSpeedPx);
+      if (Number.isFinite(p.flowAngleDeg)) surface.setFlowAngleDeg(p.flowAngleDeg);
+      if (Number.isFinite(p.waveScalePx)) surface.setWaveScalePx(p.waveScalePx);
       if (Number.isFinite(p.wetBandPx)) surface.setWetBandPx(p.wetBandPx);
       if (Number.isFinite(p.wetStrength)) surface.setWetStrength(p.wetStrength);
       enabled = state.enabled !== false;

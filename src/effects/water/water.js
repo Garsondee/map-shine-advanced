@@ -62,6 +62,47 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Depth falloff',
     help: 'How quickly the water hides the riverbed as it deepens. Low = a clear stream you can see the bottom of everywhere; high = shallows read sandy and the deep channel reads solid water. This is the control that makes depth painted in the mask actually show.',
   },
+  // ── Motion ──────────────────────────────────────────────────────────────
+  foam: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Motion',
+    label: 'Foam',
+    help: 'White broken water where the surface crests, concentrated near the bank because that is where real water shoals and breaks. This is the strongest "that is a liquid, not a tinted sheet" cue available before the lighting rung lands — turn it to 0 for a glassy pond.',
+  },
+  flowSpeedPx: {
+    type: 'float',
+    min: 0,
+    max: 400,
+    step: 5,
+    default: 60,
+    category: 'Motion',
+    label: 'Flow speed',
+    help: 'How fast the surface travels downstream, in canvas pixels per second. 0 for a still pond or lake; a lazy river is around 40–80, rapids much higher.',
+  },
+  flowAngleDeg: {
+    type: 'float',
+    min: 0,
+    max: 360,
+    step: 5,
+    default: 0,
+    category: 'Motion',
+    label: 'Flow direction',
+    help: 'Which way the current runs, in degrees, 0 being to the right of the screen. The banks bend it automatically — you are setting the general downstream heading, not steering every bend of the river.',
+  },
+  waveScalePx: {
+    type: 'float',
+    min: 32,
+    max: 1024,
+    step: 8,
+    default: 220,
+    category: 'Motion',
+    label: 'Surface scale',
+    help: 'How big the surface structure is, in canvas pixels. Small values look like fine ripples or noise; large values like slow, broad swells. Scale it to your map — a value that reads well on a stream looks like stains on a lake.',
+  },
   // ── Shape ───────────────────────────────────────────────────────────────
   depthScalePx: {
     type: 'float',
@@ -154,17 +195,24 @@ export const WATER = Object.freeze({
         'wet band needs. C1 against tier 0`s C4 is the ladder`s own shape (Effects.md §4) — tier 0`s ' +
         'class is the admission price, monotonicity governs rungs 1..N upward from here.',
     }),
+    Object.freeze({
+      n: 2,
+      name: 'motion',
+      cost: Object.freeze({ class: 'C2', estMsPerMp: 0.06 }),
+      adds:
+        'The surface field — one fractal-noise fetch, scrolled along the flow vector (the body pack`s ' +
+        'tangent, PROJECTED onto a global current so the sign flip at the medial axis cancels), read ' +
+        'twice: as FOAM where it crests, gated toward the bank because that is where water shoals, and ' +
+        'as TURBIDITY modulating optical depth so the absorption varies across the surface instead of ' +
+        'being one flat number. Deliberately NOT slope-shading: from directly above a slope is invisible ' +
+        'without refraction (rung 5) or specular (rung 3), and a fake light here would fight the real ' +
+        'one later. This is the rung where water stops being a decal.',
+    }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0), the full ladder
   // Water.md §6 designs. Each becomes a real `tiers` entry, with its own
   // cost class and its own phase's render code, in build order.
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'motion',
-      note:
-        'A resident seamless tiling slope+foam texture, scrolled and blended along the flow vector. ' +
-        'Foam arrives here — a channel of a read already paid for, not a separate tier.',
-    }),
     Object.freeze({
       name: 'light',
       note: 'GGX specular + Fresnel-weighted sky reflection from the sky handle. No new bandwidth.',

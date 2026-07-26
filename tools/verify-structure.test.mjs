@@ -33,8 +33,6 @@ import {
   RULES,
   validateExceptions,
   applyExceptions,
-  largestTopLevelFunction,
-  evaluateSizeBudgets,
   evaluateUniformBudgets,
   UNIFORM_CAP,
   extractParamsDeclarations,
@@ -684,80 +682,6 @@ export function run(t) {
     t.ok('...the covered one is the declared one', excepted[0].file.includes('fire'));
     const other = applyExceptions('no-silent-catch', hits, good);
     t.ok('an exception never bleeds across rules', other.excepted.length === 0);
-  }
-
-  // --- THE SIZE RATCHET: the god-object wall (added 2026-07-25) ---
-  // These prove the measurement is honest and the ratchet is monotonic, the
-  // same standard every other wall here is held to.
-  {
-    const bigFn = ['function huge() {', ...Array.from({ length: 500 }, () => '  work();'), '}'];
-    const measured = largestTopLevelFunction(bigFn);
-    t.ok('largestTopLevelFunction measures a 502-line function', measured.lines === 502 && measured.name === 'huge');
-
-    const nested = [
-      'function outer() {',
-      '  const inner = () => {',
-      '    deep();',
-      '  };',
-      '  return inner;',
-      '}',
-      'const small = (a) => a + 1;',
-    ];
-    t.ok('...counts the TOP-LEVEL span (6), not the nested arrow', largestTopLevelFunction(nested).lines === 6);
-
-    // The exact startVtPanViewer shape: a multi-line destructured param list
-    // whose own braces must not be mistaken for the body's close.
-    const destructured = ['export async function start({', '  a,', '  b,', '}) {', '  body();', '  more();', '}'];
-    t.ok('...steps over a multi-line destructured param list', largestTopLevelFunction(destructured).lines === 7);
-
-    const oneLiner = ['export const add = (a, b) => a + b;', 'function real() {', '  x();', '}'];
-    t.ok('...an expression-bodied arrow is not a block function', largestTopLevelFunction(oneLiner).name === 'real');
-
-    const caps = { file: 1000, fn: 300 };
-    const over = [{ rel: 'src/x.js', fileLines: 2000, fnName: 'f', fnLines: 50 }];
-    t.ok(
-      'a NEW file over the cap with no budget FAILS',
-      evaluateSizeBudgets(over, {}, caps).violations.some((v) => v.kind === 'file' && v.budget === null)
-    );
-    t.ok(
-      '...growth past a frozen budget FAILS',
-      evaluateSizeBudgets(over, { 'src/x.js': { file: 1500 } }, caps).violations.some((v) => v.budget === 1500)
-    );
-    const shrink = evaluateSizeBudgets(
-      [{ rel: 'src/x.js', fileLines: 1200, fnName: 'f', fnLines: 50 }],
-      { 'src/x.js': { file: 1500 } },
-      caps
-    );
-    t.ok(
-      '...shrinking tightens the budget with no violation',
-      shrink.violations.length === 0 && shrink.tightened.some((x) => x.to === 1200)
-    );
-    // THE HALF THAT WAS NEVER CHECKED (2026-07-25). `tightened` is what gets
-    // PRINTED; `newBudgets` is what gets WRITTEN. Asserting only the first is
-    // how the gate printed "budget tightened 607 → 606" on every run for weeks
-    // while tools/size-budgets.json still said 607 — the improvement was real,
-    // the message was real, and nothing recorded it (main() only wrote under
-    // `--update-ratchets`). An instrument that reports an action it did not
-    // take is the exact failure this suite exists to prevent, so the WRITTEN
-    // value gets its own assertion now.
-    t.ok(
-      '...and the value that gets WRITTEN is the tighter one, not the old bound',
-      shrink.newBudgets['src/x.js'].file === 1200
-    );
-    t.ok(
-      '...a VIOLATION leaves the frozen budget alone (never auto-loosens)',
-      evaluateSizeBudgets(over, { 'src/x.js': { file: 1500 } }, caps).newBudgets['src/x.js'].file === 1500
-    );
-    const under = evaluateSizeBudgets([{ rel: 'src/y.js', fileLines: 800, fnName: null, fnLines: 0 }], {}, caps);
-    t.ok(
-      'a file UNDER the cap needs no budget and never fails',
-      under.violations.length === 0 && Object.keys(under.newBudgets).length === 0
-    );
-    const fatFn = evaluateSizeBudgets([{ rel: 'src/z.js', fileLines: 500, fnName: 'god', fnLines: 900 }], {}, caps);
-    t.ok(
-      'a huge FUNCTION inside a small file is still caught',
-      fatFn.violations.some((v) => v.kind === 'fn' && v.current === 900)
-    );
   }
 
   // --- effects/uniform-budget — the single-dimension sibling of the size

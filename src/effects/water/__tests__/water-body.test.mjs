@@ -19,6 +19,7 @@ import {
   flowFromTangent,
   WATER_PRESENCE_EPS,
   WATER_MASK_FILTER,
+  WATER_BODY_SUPERSAMPLE,
 } from '../water-body.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
@@ -265,7 +266,25 @@ export async function run(t) {
   // --- presence threshold: depth doubles as presence -----------------------
   t.ok('a shore painted at 4/255 is water, not land', 4 / 255 > WATER_PRESENCE_EPS);
   t.ok('exactly zero depth is land', !(0 > WATER_PRESENCE_EPS));
-  t.ok('the mask must be sampled NEAREST for the interface test to be unambiguous', WATER_MASK_FILTER === 'nearest');
+
+  // --- resolution: the flood runs FINER than the mask, on purpose ----------
+  // 2026-07-26: the mask must be LINEAR now, not nearest — the previous
+  // assertion here (`WATER_MASK_FILTER === 'nearest'`) pinned the reasoning
+  // that turned out to be wrong live: running the flood 1:1 with the mask's
+  // own coarse grid bakes the mask's own texel staircase into the SDF, and no
+  // downstream filtering of the RESOLVED field recovers it (see water-body-
+  // subsystem.js §3 for the full live-symptom account). Supersampling the
+  // flood over a LINEAR-sampled mask is what actually reconstructs a smoother
+  // boundary from the same, genuinely-all-there-is coarse source.
+  t.ok(
+    'the mask is sampled LINEAR — supersampling only helps if the source is reconstructed continuously',
+    WATER_MASK_FILTER === 'linear'
+  );
+  t.ok('the flood supersamples the mask — 1x would just re-bake the mask`s own staircase', WATER_BODY_SUPERSAMPLE > 1);
+  t.ok(
+    'the worst-case flood resolution (MASK_GRID_MAX_DIM=512 long side) stays under the Keyhole 2048px cap',
+    512 * WATER_BODY_SUPERSAMPLE < 2048
+  );
 
   // --- the flow model ------------------------------------------------------
   {

@@ -97,28 +97,73 @@
  * so the test is "any depth at all" — half a byte, not a mid-grey threshold. A
  * shore painted at 4/255 is genuinely shallow water and must not read as land.
  *
- * This is only unambiguous because the mask texture is uploaded NEAREST — see
- * {@link WATER_MASK_FILTER}.
+ * ⚠️ Because the mask is now sampled LINEAR at a resolution ABOVE its own
+ * (`WATER_BODY_SUPERSAMPLE`), a texel adjacent to the true painted edge reads
+ * a small nonzero BLEND, not a clean 0 — and this near-zero epsilon crosses
+ * that blend almost as soon as it is nonzero, close to the LAND side of the
+ * source texel rather than at its geometric midpoint. Named, not fixed: the
+ * bias is bounded by one SOURCE mask texel (get finer with a wider
+ * `WATER_BODY_SUPERSAMPLE`, never by moving this constant), tier 0 does not
+ * promise sub-texel shore placement, and a binarised-presence-channel fix (see
+ * `WATER_BODY_SUPERSAMPLE`'s own doc) is a recorded, not urgent, deferred rung.
  */
 export const WATER_PRESENCE_EPS = 1 / 510;
+
+/**
+ * How many FLOOD texels the seed/JFA/resolve passes run per MASK texel, in
+ * each dimension. The body pack's targets are `WATER_BODY_SUPERSAMPLE ×` the
+ * mask grid's own width/height (see `water-body-subsystem.js` §3 for the full
+ * reasoning and the live symptom that forced this).
+ *
+ * 3, chosen so the worst case (`MASK_GRID_MAX_DIM` = 512 on the long side)
+ * lands at 1,536 — comfortably under the Keyhole allocator's 2,048px world-res
+ * cap with no `allowWorldScale` exception, and close to the ORIGINAL Water.md
+ * §5.1 spec's fixed 1024² (a 512-long mask supersampled 3× is 1,536 — this
+ * walks back toward that number rather than away from it; Phase 2's "the pack
+ * is the size of its input" correction turned out to have gone one step too
+ * far, this is the missing step restored).
+ * @see WATER_MASK_FILTER for why this REQUIRES linear mask sampling to do anything.
+ */
+export const WATER_BODY_SUPERSAMPLE = 3;
 
 /**
  * The mask texture's filter, stated here because the seed pass's correctness
  * depends on it and the caller is what actually uploads the texture.
  *
- * NEAREST, for the same reason `world/wind-sim-gpu.js`'s solid mask is
- * NEAREST and deliberately unlike the `_Outdoors` gate (which is LINEAR so a
- * doorway reads as a soft threshold): LINEAR would smear the water/land
- * interface into a one-texel ramp, and the whole job of the seed pass is to
- * decide exactly which texels straddle that interface. A soft edge would put
- * the shore somewhere inside the ramp depending on an arbitrary threshold —
- * a quantity nobody could reason about and every consumer would inherit.
+ * ⚠️ LINEAR — CHANGED 2026-07-26, and the reasoning this replaces is worth
+ * keeping precisely because it was wrong in a specific, instructive way. The
+ * original argument for NEAREST was real: sampled AT THE MASK's OWN
+ * resolution, LINEAR would smear the interface into a one-texel ramp with an
+ * arbitrary threshold. That argument assumed the flood runs 1:1 with the mask
+ * — which Phase 2 chose ("the pack is the size of its input") and which
+ * turned out to look like a low-resolution mask baked in, because that is
+ * exactly what it was: a jump flood is provably EXACT at whatever resolution
+ * it runs at (Node-tested against brute force), but its SEEDS only exist at
+ * texel centres, so a shoreline crossing the grid at an angle gets a
+ * staircase of seed positions — no downstream filtering of the RESULT fixes
+ * data that was never captured. Live-reported 2026-07-26: "an extremely
+ * pixelated mask which has been blurred... the shoreline looks like a square
+ * wave in places" — textbook coarse-seed staircase, and correctly not fixed
+ * by the earlier NEAREST→LINEAR fix on the RESOLVED pack alone.
  *
- * The cost is that DEPTH quantises to mask texels. Under water, at ~23 world
- * px per texel, that is invisible; the SDF, which is what every consumer
- * actually reads, stays crisp.
+ * The actual fix is `WATER_BODY_SUPERSAMPLE`: run the flood at a resolution
+ * ABOVE the mask's own, so LINEAR sampling of the (still coarse) mask
+ * reconstructs a continuous water-fraction estimate at each of the FLOOD's
+ * finer texels, and the seed test operates on that finer, smoother signal —
+ * the same technique real-time SDF-from-low-res-coverage-mask generation
+ * always uses (the coarse source is genuinely all the information there is;
+ * supersampling with linear reconstruction is how you get the best available
+ * estimate of what happens BETWEEN its texels, not an invention of new data).
+ *
+ * Named, not solved: the presence test (`WATER_PRESENCE_EPS`, a near-zero
+ * threshold against a value that ramps from the painted depth down to 0) puts
+ * the reconstructed interface slightly toward the LAND side of the source
+ * texel rather than exactly at its midpoint — a binarised presence channel
+ * (threshold the SOURCE at 0/255 before upload, so the ramp is symmetric and a
+ * 0.5 threshold is unbiased) would remove this, and is a clean, contained,
+ * deferred improvement, not required for tier 0.
  */
-export const WATER_MASK_FILTER = 'nearest';
+export const WATER_MASK_FILTER = 'linear';
 
 /** Sentinel distance (texel units) for "this texel knows no seed". Larger than
  * any real offset on a grid this size, and far under half-float's ~65504 max
@@ -169,8 +214,11 @@ export function jfaStrideForStep(i, steps) {
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.maskTexture - the floor's water mask, R = depth (NEAREST).
- * @param {number} args.width @param {number} args.height - the grid, texels.
+ * @param {*} args.maskTexture - the floor's water mask, R = depth (LINEAR —
+ *   see `WATER_MASK_FILTER`). Its OWN resolution is the mask grid's; sampled
+ *   here via UV, so it is resolution-independent of `width`/`height` below.
+ * @param {number} args.width @param {number} args.height - the FLOOD's own
+ *   grid, texels — `WATER_BODY_SUPERSAMPLE ×` `maskTexture`'s native size.
  * @returns {{material:*, quad:*, maskTexNode:*}} `maskTexNode.value` is
  *   re-pointed when the mask rebakes; the material is NOT rebuilt.
  */

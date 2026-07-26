@@ -164,6 +164,7 @@ export {
   flowFromTangent,
   WATER_PRESENCE_EPS,
   WATER_MASK_FILTER,
+  WATER_BODY_SUPERSAMPLE,
 } from './water/water-body.js';
 export { buildSurfaceResponsePass } from './surface-response.js';
 

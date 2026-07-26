@@ -38,27 +38,47 @@
  * file's own header if this is the first time you are meeting the pattern.
  *
  * ============================================================================
- * §3 — RESOLUTION: THE BODY PACK IS THE SIZE OF ITS INPUT
+ * §3 — RESOLUTION: SUPERSAMPLED OVER THE MASK'S OWN GRID, AND WHY THIS
+ * SECTION USED TO ARGUE THE OPPOSITE
  * ============================================================================
- * Water.md §5.1 specified a fixed 1024². Building it exposed that as a number
- * with nothing behind it: the mask arrives as the authority's own per-floor
- * grid, which `computeMaskGridSpec` caps at `MASK_GRID_MAX_DIM` (512) on the
- * long side, and a flood run at 2× its input's resolution stores interpolation
- * rather than information. So the pack is allocated AT THE GRID'S OWN
- * DIMENSIONS, which is both honest and 4× cheaper — 3 targets × 512² × RGBA16F
- * ≈ 6 MB instead of ≈ 24 MB, comfortably inside Keyhole §4.2's water/fog
- * reservation with room for the tier-7 field on top.
+ * Water.md §5.1 specified a fixed 1024². This section originally corrected
+ * that to "the pack is the size of its input" — the mask arrives at
+ * `MASK_GRID_MAX_DIM` (512) on the long side, and ran the flood at exactly
+ * that resolution, reasoning that a flood run finer than its input "stores
+ * interpolation rather than information."
  *
- * It also removes a constant that would need keeping in sync: if the mask grid
- * ever gets finer (`PAINT_GRID_MAX_DIM` is already 4096 for painted layers),
- * the body pack follows automatically. The allocator's own 2048px law is the
- * backstop if that day comes with a number too big.
+ * That reasoning was WRONG, live-confirmed 2026-07-26 ("an extremely
+ * pixelated mask which has been blurred... the shoreline looks like a square
+ * wave"): a jump flood is provably EXACT at whatever resolution it runs (this
+ * file's own Node suite proves it against brute force), but its SEEDS exist
+ * only at texel centres — so a shoreline crossing a 512-wide grid at an angle
+ * gets a real staircase of seed POSITIONS, not a filtering artefact, and no
+ * amount of downstream blur on the finished field can recover data the seed
+ * pass never captured. "Interpolation rather than information" was the wrong
+ * frame: the mask IS all the information there is, and reconstructing what
+ * plausibly happens between its texels via linear sampling at a finer flood
+ * resolution is the standard, correct technique for exactly this class of
+ * problem (real-time SDF-from-low-res-coverage-mask generation always does
+ * this) — not an invention.
+ *
+ * The fix, `WATER_BODY_SUPERSAMPLE = 3` (`water-body.js`): the flood's own
+ * targets are `3×` the mask grid's width/height in EACH dimension — worst
+ * case `512 × 3 = 1,536`, comfortably under the Keyhole allocator's 2,048px
+ * cap with no exception, and 3 targets × 1,536×714 × RGBA16F ≈ 25 MB,
+ * comfortably inside Keyhole §4.2's water/fog reservation with room for the
+ * tier-7 field on top. (Read as a happy accident, not a coincidence: this
+ * lands close to the ORIGINAL 1024² spec's own cost — Phase 2's correction
+ * had gone one step too far, and this restores the missing step rather than
+ * re-litigating the whole decision.) `WATER_MASK_FILTER` moved to `'linear'`
+ * in the same fix — supersampling without it would sample the SAME coarse,
+ * blocky mask more densely, which changes nothing.
  *
  * ⚠️ The grid's dimensions change when the SCENE RECT's aspect changes, so the
- * targets are keyed by `WxH` and reallocated only on a genuine change — the
- * same `gridKey` discipline `vt-pan-viewer.js` already uses for the wind sim's
- * ping/pong pair, and for the same reason (a per-bake realloc of megabytes is
- * how a floor switch turns into a device loss).
+ * targets are keyed by `WxH` (the FLOOD's own, post-supersample, dimensions)
+ * and reallocated only on a genuine change — the same `gridKey` discipline
+ * `vt-pan-viewer.js` already uses for the wind sim's ping/pong pair, and for
+ * the same reason (a per-bake realloc of megabytes is how a floor switch
+ * turns into a device loss).
  *
  * @module effects/water/water-body-subsystem
  */
@@ -71,6 +91,7 @@ import {
   jfaStepCount,
   jfaStrideForStep,
   WATER_MASK_FILTER,
+  WATER_BODY_SUPERSAMPLE,
 } from './water-body.js';
 import { resolveWaterFloor } from './water-floor.js';
 
@@ -311,11 +332,25 @@ export function createWaterBodySubsystem({
       maxY: grid.spec.y + grid.spec.height,
     };
 
-    ensureTargets(w, h);
-    ensureMaterials(w, h);
+    // THE FLOOD runs at `WATER_BODY_SUPERSAMPLE ×` the MASK's own grid — see
+    // §3. `maskTexture` above stays at the mask's native w×h; only the flood's
+    // own targets/materials are sized up, and the mask is sampled through them
+    // via UV (resolution-independent), never assumed to match 1:1.
+    const floodW = w * WATER_BODY_SUPERSAMPLE;
+    const floodH = h * WATER_BODY_SUPERSAMPLE;
+    ensureTargets(floodW, floodH);
+    ensureMaterials(floodW, floodH);
     materials.seed.maskTexNode.value = tex;
     materials.resolve.maskTexNode.value = tex;
-    materials.resolve.setTexelWorld(grid.spec.texelW, grid.spec.texelH);
+    // ONE FLOOD TEXEL is `1/WATER_BODY_SUPERSAMPLE` of a MASK texel in world
+    // px — the resolve pass converts the flood's own internal offsets (in
+    // FLOOD-texel units) to world px, so it must use the FLOOD's texel size,
+    // not the mask's, or every reported distance would be wrong by exactly
+    // this factor.
+    materials.resolve.setTexelWorld(
+      grid.spec.texelW / WATER_BODY_SUPERSAMPLE,
+      grid.spec.texelH / WATER_BODY_SUPERSAMPLE
+    );
     // "No shore anywhere" must read as further away than the map is wide, so
     // every distance consumer degrades continuously instead of special-casing.
     materials.resolve.setFarDistance(Math.hypot(grid.spec.width, grid.spec.height));
@@ -470,6 +505,10 @@ export function createWaterBodySubsystem({
         bakes,
         polls,
         pollsSinceLastBake,
+        // The FLOOD's own resolution — `WATER_BODY_SUPERSAMPLE ×` whatever
+        // `lastBake.cols`×`lastBake.rows` (the MASK's native grid) reports.
+        // The two are deliberately different numbers; seeing 3x here vs the
+        // mask's own cols/rows is the supersample working, not a mismatch.
         grid: gridKey || 'not allocated',
         jfaSteps,
         rect: maskRect,

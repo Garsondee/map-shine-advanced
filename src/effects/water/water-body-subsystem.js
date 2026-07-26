@@ -157,8 +157,23 @@ export function createWaterBodySubsystem({
    * interpolate the flood's seed OFFSETS between texels, and averaging two
    * different seeds' offsets yields a vector pointing at neither — which is
    * meaningless mid-flood and would put a false crease down every medial axis.
-   * The RESOLVED pack could safely be linear, but it shares the format for one
-   * describe() and the body pack is read at its own resolution anyway.
+   *
+   * ⚠️ THE RESOLVED PACK (`bodyRt`) MUST BE LINEAR, AND SHARING NEAREST WITH
+   * THE PING-PONG PAIR WAS A REAL BUG, LIVE-CONFIRMED 2026-07-26. `bodyRt`
+   * holds this bake's FINISHED output — a signed distance, a depth, a
+   * tangent — three smoothly-varying scalars with none of the ping-pong
+   * pair's "these are mid-flood offset vectors" hazard. The surface material
+   * samples it over a world-space UV spanning the whole water rect (10,650 ×
+   * 4,950 world units in the reported case), at whatever zoom the camera
+   * happens to be — nothing like "read at its own resolution", the excuse
+   * this comment used to make for sharing NEAREST. The visible result was
+   * exactly what NEAREST-sampling a 512×238 grid stretched over that rect
+   * predicts: a blocky, low-res, "tiny mask stretched across the whole map"
+   * look — the shoreline's own smoothstep transition (§ water-render.js,
+   * ~26 world px wide, close to one texel at this grid's density) is the
+   * first thing to go blocky, because a hard-edged NEAREST step right where
+   * a soft transition was supposed to be is the most visible place a texel
+   * boundary can land.
    * @param {number} w @param {number} h
    */
   function ensureTargets(w, h) {
@@ -171,7 +186,7 @@ export function createWaterBodySubsystem({
     materials?.dispose?.();
     materials = null;
 
-    const describe = () => ({
+    const describe = (filter) => ({
       resolvedW: w,
       resolvedH: h,
       // Neither `screenSized` nor `allowWorldScale`: the mask grid is capped at
@@ -182,12 +197,16 @@ export function createWaterBodySubsystem({
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
       colorSpace: THREE.NoColorSpace,
-      filter: 'nearest',
+      filter,
       depth: false,
     });
-    bodyRt = allocator.create('water.body', describe());
-    jfaPingRt = allocator.create('water.jfa.ping', describe());
-    jfaPongRt = allocator.create('water.jfa.pong', describe());
+    // LINEAR — this is the finished, smoothly-varying field every consumer
+    // reads (see the header note just above).
+    bodyRt = allocator.create('water.body', describe('linear'));
+    // NEAREST — mid-flood offset VECTORS; interpolating them is meaningless
+    // (see this function's own doc, first paragraph).
+    jfaPingRt = allocator.create('water.jfa.ping', describe('nearest'));
+    jfaPongRt = allocator.create('water.jfa.pong', describe('nearest'));
     gridKey = key;
     jfaSteps = jfaStepCount(w, h);
   }

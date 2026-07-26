@@ -137,6 +137,15 @@ export function buildWaterSurfaceMaterial({
   // water must never occlude anything by depth, only by paint order.
   material.depthTest = false;
   material.depthWrite = false;
+  // EVERY world-space quad in this renderer sets this (scene/world-quad.js's
+  // own QUAD_INDICES doc): a negative scale (Foundry's horizontal-flip
+  // convention) mirrors the mesh's corners and reverses the effective
+  // winding, and FrontSide would cull the water quad as a backface — visible
+  // in every JS-side status field (mesh.visible, the measured bounds) and
+  // invisible on screen, because face culling is a GPU-side fact bookkeeping
+  // cannot see. Water's own bounds come from `buildQuadPositions` the same
+  // way every tile's do, so it inherits the identical risk.
+  material.side = THREE.DoubleSide;
 
   return {
     material,

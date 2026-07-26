@@ -543,6 +543,12 @@ export function buildViewerDiagnostics({
     // note. `activeRegions` should be > 0 whenever a darkness-
     // adjusting region is on screen.
     regionDarkness: _active?.getRegionDarknessInfo?.() ?? { available: false },
+    // THE WATER BODY PACK (2026-07-26, docs/planning/Water.md §5.1) — the
+    // jump-flood distance field. Read `bakes` against `polls` FIRST: they
+    // must NOT track each other (see getWaterBodyInfo's own doc for why that
+    // comparison is this phase's whole exit criterion). `resolve.floorIndex:
+    // null` means no floor has an authored water mask — not an error.
+    waterBody: _active?.getWaterBodyInfo?.() ?? { available: false },
     // SHADERS (docs/planning/Shaders.md).  is the fork
     // in the road, not a detail: WITH it, compileAsync hands work to driver
     // threads; WITHOUT it, compileAsync resolves instantly having done

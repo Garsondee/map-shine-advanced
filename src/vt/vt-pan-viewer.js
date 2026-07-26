@@ -192,6 +192,7 @@ import {
   // left with the vegetation-shadow code in extraction step 2 — this file has
   // no remaining caller for any of them.)
   createPointLightPool,
+  createWaterBodySubsystem,
   createSkyHandle,
   buildGradePresentMaterial,
   buildBloomMaterials,
@@ -550,6 +551,13 @@ function disposeActive() {
   } catch (err) {
     log.error('sun shadow dispose failed — VRAM may be leaked:', err);
   }
+  // water.body + its two jump-flood ping-pong targets (three RGBA16F
+  // world-space targets) + three bake materials + the mask DataTexture.
+  try {
+    _active.disposeWaterBody?.();
+  } catch (err) {
+    log.error('water body dispose failed — VRAM may be leaked:', err);
+  }
   // The candle flame billboard's own mesh/geometry/material (its lights are in
   // the shared pool, freed by disposePointLights below).
   try {
@@ -746,6 +754,8 @@ export async function startVtPanViewer({
   getOutdoorsMaskGrid,
   getCasterHeightField,
   getSunShadowRenderState,
+  getWaterMaskGrid,
+  getFloorsWithWater,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
@@ -779,6 +789,15 @@ export async function startVtPanViewer({
   // (the torture fixture) therefore render exactly as they did before.
   getCasterHeightField ??= () => null;
   getSunShadowRenderState ??= () => ({ enabled: false, params: {} });
+  // THE WATER BODY PACK's two seams (docs/planning/Water.md §5.1, Phase 2d).
+  // `getWaterMaskGrid` is boot's door onto `maskAuthority.getDerived('water',
+  // floorIndex)`; `getFloorsWithWater` onto `floorsWithAuthored('water')`,
+  // which is the cross-floor rule's own input (§4). Unwired (the torture
+  // fixture) means "no floor has water", so `resolveWaterFloor` returns
+  // `floorIndex: null` and the subsystem never bakes at all — inert by
+  // construction, not by a flag, exactly like the sun-shadow seams above.
+  getWaterMaskGrid ??= () => null;
+  getFloorsWithWater ??= () => [];
   // THE CANDLE EFFECT's data seam (effects/candle-flame-render.js): boot injects
   // `{ enabled, params: {sizePx, color, lightRadiusPx}, anchors: [{id,x,y}] }` for
   // the active floor. vt/ owns the GPU lifecycle (the flame billboard mesh + the
@@ -1370,13 +1389,28 @@ export async function startVtPanViewer({
       quad.render(renderer);
       renderer.setRenderTarget(prev);
     }
-    function createSunShadowCasterTexture(data, w, h) {
+    /**
+     * The ONE `new THREE.DataTexture(...)` door for a subsystem's baked mask
+     * grid — shared by sun shadows and the water body pack (2026-07-26,
+     * generalized from `createSunShadowCasterTexture` when water needed the
+     * same upload with a different filter).
+     *
+     * THE FILTER IS THE CALLER'S CHOICE AND IT IS LOAD-BEARING BOTH WAYS:
+     *   LINEAR  — sun shadows. A silhouette edge must be a ramp, not a
+     *             staircase of mask texels; the march's contact-hardening
+     *             feathers against that gradient.
+     *   NEAREST — the water body pack. Its seed pass decides which texels
+     *             straddle the water/land interface, and LINEAR would smear
+     *             that interface into a one-texel ramp with no defensible
+     *             threshold (see water-body.js's `WATER_MASK_FILTER`).
+     * Passing the wrong one is silent in both directions, which is why each
+     * caller states its own and neither inherits a default.
+     */
+    function createMaskDataTexture(data, w, h, filter = 'linear') {
       const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
-      // LINEAR so a silhouette edge is a ramp rather than a staircase of mask
-      // texels — the march's contact-hardening depends on a smooth height
-      // gradient to feather against.
-      tex.minFilter = THREE.LinearFilter;
-      tex.magFilter = THREE.LinearFilter;
+      const f = filter === 'nearest' ? THREE.NearestFilter : THREE.LinearFilter;
+      tex.minFilter = f;
+      tex.magFilter = f;
       tex.wrapS = THREE.ClampToEdgeWrapping;
       tex.wrapT = THREE.ClampToEdgeWrapping;
       tex.needsUpdate = true;
@@ -1392,7 +1426,33 @@ export async function startVtPanViewer({
       getShadowHandle: () => shadowHandle,
       getEnvLight: () => envLight,
       renderSunShadowPass,
-      createCasterTexture: createSunShadowCasterTexture,
+      // LINEAR — see createMaskDataTexture's own doc for why each caller
+      // states its filter rather than inheriting one.
+      createCasterTexture: (data, w, h) => createMaskDataTexture(data, w, h, 'linear'),
+    });
+
+    // ── THE WATER BODY PACK (docs/planning/Water.md §5.1, Phase 2d) ──────
+    // `res:waterBody`: R signed distance to shore (world px, negative inside),
+    // G depth01, BA the unit shore tangent — baked by a GPU jump flood ON MASK
+    // VERSION CHANGE, never per frame. The subsystem owns its three render
+    // targets and the version poll; the two GPU-touching callbacks stay HERE
+    // for the same directory-scoped-wall reason the sun-shadow pair does
+    // (`renderer-state/graph-only`, `gpu/textures-in-vt-only`).
+    //
+    // `renderSunShadowPass` is reused VERBATIM rather than copied: it is a
+    // plain save/bind/render/restore triplet with nothing sun-specific in it,
+    // and a second identical copy is exactly the kind of fork that made V2's
+    // water a 15k-line family (Water.md §2.4). Only its NAME reads as
+    // sun-specific, which the alias below fixes at the call site.
+    const waterBody = createWaterBodySubsystem({
+      THREE,
+      allocator,
+      getWaterMaskGrid,
+      getFloorsWithWater,
+      getMaskAuthorityVersion,
+      renderWaterPass: renderSunShadowPass,
+      // NEAREST — the seed pass needs a crisp water/land interface.
+      createWaterMaskTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
     });
 
     const envLight = buildEnvironmentalLightMaterials({
@@ -3780,6 +3840,17 @@ export async function startVtPanViewer({
       // return; the expensive path is a few times a minute at most. It runs
       // BEFORE illumQuad below, because that fill samples the field this writes.
       sunShadows.maybeBake(view?.floorIndex ?? 0);
+
+      // THE WATER BODY PACK — same posture, same reason it lives in the FRAME
+      // LOOP rather than a residency pass: a mask repaint is not a camera
+      // event, so a camera-gated rebake would leave the author's brushstrokes
+      // invisible until they panned (`feedback_residency_sync_vs_render_loop`,
+      // and the trap Water.md §5.1 names in advance). Almost every frame this
+      // is one integer compare and a return; the jump flood itself runs only
+      // when the mask version or the resolved floor actually moves — which
+      // `waterBody.getStatus()` reports as `bakes` vs `polls` so the two can
+      // be seen NOT to track each other.
+      waterBody.maybeBake(view?.floorIndex ?? 0);
 
       // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
       // RAW ambient endpoints (not the pre-mixed background: each region
@@ -8840,6 +8911,14 @@ export async function startVtPanViewer({
       disposeSunShadows() {
         sunShadows.dispose();
       },
+      /** Tear down water.body + the two jump-flood ping-pong targets + the
+       * three bake materials + the mask DataTexture (water-body-subsystem.js's
+       * own dispose). Same per-Stop/Restart VRAM-leak reasoning as every other
+       * entry in this list — three RGBA16F world-space targets is the largest
+       * single allocation water makes. */
+      disposeWaterBody() {
+        waterBody.dispose();
+      },
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,
@@ -9507,6 +9586,24 @@ export async function startVtPanViewer({
           animationSummary: { ...animationSummary, deferredKnownReasons: KNOWN_DEFERRED_ANIMATIONS },
         };
       },
+      /**
+       * THE WATER BODY PACK's own state — for the Diagnostics report and
+       * boot's `water-body` report (docs/planning/Water.md §5.1, Phase 2).
+       *
+       * READ `bakes` AGAINST `polls` FIRST. That comparison IS this phase's
+       * exit criterion: a healthy session shows single-digit bakes against
+       * thousands of polls, because the jump flood runs only when the mask
+       * version or the resolved floor moves. If the two track each other, the
+       * version poll is broken and every frame is paying for a full flood —
+       * the exact "bake count is not frame count" failure Water.md §5.1 names
+       * in advance (`feedback_residency_sync_vs_render_loop` is the precedent).
+       *
+       * `resolve` is the cross-floor rule's own answer WITH its reason string
+       * (§4) — a derived READOUT, never a param. `floorIndex: null` there is
+       * not an error: it means no floor in this scene has an authored water
+       * mask, so nothing is baked and nothing should be drawn.
+       */
+      getWaterBodyInfo: () => waterBody.getStatus(),
       /** region-darkness's own pool state — for the Diagnostics report.
        * `activeRegions` should be > 0 whenever the scene has a visible,
        * non-hidden, elevation-band-matching region with an active "Adjust

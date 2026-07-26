@@ -276,7 +276,7 @@ Each phase ends green on `npm run verify` and is independently shippable.
 | **0a** | ✅ DONE, live-verified — `vt-pan-viewer` extraction steps 2–3 (vegetation shadows, point-light pool) | the size ratchet goes **down** twice |
 | **0b** | ✅ DONE, live-verified — **`buf:scene.attr`** — MRT, RGBA8/Nearest/NoColorSpace; opaques write; every transparent outputs `gAttr = vec4(0)` | a debug view shows floorId / outdoors / coverage / solidity; `geometry.world`'s partial-claim note is deleted (⚠️ bit 1/levelsHidden and the clear-value sentinel are the two honest gaps, see §12) |
 | **1** | ✅ DONE — Declaration + `resolveWaterFloor` + walls §8.1–8.3 | manifest + schema validate; `water-floor.test.mjs` green; the three walls sit at zero |
-| **2** | 🔶 BUILT, NOT WIRED — Body pack: JFA SDF, depth, tangent; version-polled rebake | debug views of SDF/depth/flow; **bake count is not frame count** |
+| **2** | ✅ BUILT + WIRED (not live-tested) — Body pack: JFA SDF, depth, tangent; version-polled rebake | `water-body` debug report shows **bakes vs polls** — the exit criterion is that they do NOT track each other |
 | **3** | **Tier 0** — placement, borrow, punch; registered, panelled, in the frame graph | S3: river visible through the planks, occluded by the planks |
 | **4** | **Tiers 1–3** — volume, motion, light | side-by-side vs 0.5.x reference, author sign-off |
 | **5** | **Tier 4** — shore + caustics | |
@@ -286,9 +286,11 @@ Each phase ends green on `npm run verify` and is independently shippable.
 
 **Phase 0a is not optional.** `src/vt/vt-pan-viewer.js` is 11,957 lines with a 10,484-line function, frozen shrink-only by `tools/size-budgets.json`. Attr MRT and water wiring will grow it, and that fails the build — by design. `VT-Pan-Viewer-Extraction.md` is written, author-approved, and step 1 is done. Water is the forcing function for work already agreed.
 
-> ⛔ **Phase 2's remaining half is blocked on that same forcing function, and this is the honest record of it.** The body pack is built, exported and Node-green, but it is **not wired into the viewer**: `startVtPanViewer()` sits at its frozen budget with zero headroom, and the ~20 lines of construction + `maybeBake()` + teardown fail the build. That is the ratchet working, not an obstacle to route around. The unblock is **extraction step 5** (`getDiagnostics`, 533 lines) — deferred in the extraction plan precisely until the subsystems it reports on exposed `getStatus()`, which they now all do. Water's own report is one more thing that body of code has to grow, so extracting it first is the cheaper order regardless.
+> ✅ **Phase 2 is wired, and the size wall is what made that affordable rather than what blocked it.** Wiring the body pack needed room in two frozen god-objects, so both got a real split first, as prep — `getDiagnostics` (533 lines) out of `vt-pan-viewer.js` (extraction step 5), and the two "why is this effect not showing" report bodies out of `boot.js` into `diag/effect-status-reports.js`. Net result including all of water's new code: **`vt-pan-viewer.js` −429 lines / `startVtPanViewer()` −421**, with zero debt registered. That order — split as prep, then build — is now standing doctrine (`feedback_ratchet_proactive_not_reactive`), replacing the previous pattern of discovering the blockage mid-task.
 >
 > An input-side note worth keeping: **the water mask had no route to the GPU at all** before Phase 2a. `extractionPlanForLayer` extracted a kind only if some `DerivedKind` named it as an input, so `outdoors` rode along by accident (because `skyReach` consumes it) and `water` — whose only consumer is a GPU bake — was never extracted. `MaskKind.rasterize` now declares that property instead of leaving it implicit, and `floorsWithAuthored('water')` gives the cross-floor rule its real input.
+>
+> ⚠️ **Live-test still owed.** Everything above is verify-green and Node-proven; none of it has rendered in a real Foundry scene. The one thing to check first is the `water-body` report's **bakes vs polls** — see §11.
 
 Phases 3–8 each carry a **live-confirmed** line, not just verify-green. Too much of the tree currently reads *"verify-green, NOT live-tested"*; `V3-Development-Timeline.md` §6 asks for exactly this ledger.
 

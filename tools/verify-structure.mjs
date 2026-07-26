@@ -1484,7 +1484,9 @@ function main() {
         failed = true;
         console.error(`\n❌ ${rule.id} — RATCHET BROKEN: ${count} violations, bound is ${bound}`);
       } else if (count < bound) {
-        console.log(`✅ ${rule.id} — ratchet tightened: ${bound} → ${count}`);
+        console.log(
+          `✅ ${rule.id} — ${count} violations, under the bound of ${bound}. \`npm run ratchets:update\` to record it.`
+        );
       }
       if (count <= bound) continue;
     } else if (count === 0) {
@@ -1506,8 +1508,31 @@ function main() {
   const sizeBudgets = loadSizeBudgets();
   const measurements = measureSizes(sourceFiles());
   const size = evaluateSizeBudgets(measurements, sizeBudgets, SIZE_CAPS);
+  // ⚠️ REPORTED, NOT WRITTEN — and that is deliberate (2026-07-26).
+  //
+  // These lines used to read "budget tightened X → Y" while persisting
+  // nothing, which was a genuine lying instrument: the same "tightening" was
+  // re-announced forever and the stored bound never moved. The obvious fix —
+  // writing the tighter bound automatically — was tried the same day and
+  // REVERTED, because it makes the ratchet strictly unusable:
+  //
+  //   A bound that always equals the CURRENT size is not a ratchet, it is a
+  //   freeze. Headroom can never be banked, so the sanctioned workflow of
+  //   "split the god-object first, THEN add the feature" cannot complete —
+  //   the split commit re-freezes at the new low, and the feature commit that
+  //   the split existed to enable fails on its first added line.
+  //
+  // That workflow is the author's own standing directive (2026-07-26: "the
+  // goal can't be to prevent good work"; memory
+  // `feedback_ratchet_proactive_not_reactive`). So the bound stays at its
+  // historical high-water mark until someone runs `npm run ratchets:update`
+  // deliberately — which is the loud, explicit, in-the-diff moment Skeleton.md
+  // §2.5 wants — and this message now says exactly that instead of claiming an
+  // action it did not take.
   for (const t of size.tightened) {
-    console.log(`✅ size/${t.kind} — ${t.rel}: budget tightened ${t.from} → ${t.to}`);
+    console.log(
+      `✅ size/${t.kind} — ${t.rel}: ${t.to} lines, under its ${t.from} budget. \`npm run ratchets:update\` to record it.`
+    );
   }
   if (size.violations.length) {
     failed = true;
@@ -1533,8 +1558,11 @@ function main() {
   const uniformBudgets = loadUniformBudgets();
   const uniformMeasurements = measureUniformCounts(sourceFiles(EFFECTS_DIR));
   const uniformBudgetResult = evaluateUniformBudgets(uniformMeasurements, uniformBudgets, UNIFORM_CAP);
+  // Reported, not written — see the size ratchet's own note just above.
   for (const t of uniformBudgetResult.tightened) {
-    console.log(`✅ effects/uniform-budget — ${t.rel}: budget tightened ${t.from} → ${t.to}`);
+    console.log(
+      `✅ effects/uniform-budget — ${t.rel}: ${t.to} calls, under its ${t.from} budget. \`npm run ratchets:update\` to record it.`
+    );
   }
   if (uniformBudgetResult.violations.length) {
     failed = true;
@@ -1580,60 +1608,6 @@ function main() {
       console.error(`     ${v.file}:${v.line}  ${v.paramsName}.${v.key} — no consumer found anywhere in src/`);
     }
     if (deadControls.length > 10) console.error(`     ... and ${deadControls.length - 10} more`);
-  }
-
-  // ── AUTO-TIGHTEN, FOR REAL ───────────────────────────────────────────────
-  //
-  // All three ratchet families above have ALWAYS printed `✅ … tightened X → Y`
-  // on an ordinary run, and until 2026-07-25 not one of them wrote anything:
-  // the new bound was persisted only under `--update-ratchets`, so the next
-  // run printed the identical "tightened" line again, forever, while the
-  // frozen bound never actually moved.
-  //
-  // That is this file's own doctrine turned against itself. Its header
-  // promises *"a DECREASE auto-tightens the bound. This suite never claims
-  // virtue it does not have"*, and `feedback_instruments_must_not_lie` is a
-  // standing rule of this project — a gate that reports an improvement it did
-  // not record is precisely the failure it exists to catch, in the one file
-  // whose whole job is catching it. Found while extracting
-  // `mask-authority-report.js`: the shrink was real, the message was real, and
-  // `tools/size-budgets.json` still said the old number afterwards.
-  //
-  // DOWNWARD ONLY. A tightening can only make the next run stricter, so
-  // recording it unattended is always safe; every LOOSENING still requires the
-  // explicit, loud `npm run ratchets:update`, unchanged. Writing it here also
-  // means the improvement shows up as a diff in `tools/*.json`, which is what
-  // Skeleton.md §2.5 wants shrinkage to look like — loud, not silent.
-  if (!updating) {
-    let wroteFiles = 0;
-    // Rule ratchets: `newRatchets` was built as `min(count, bound)` for every
-    // ratcheted rule, so it is already the tightened set; merge it over the
-    // loaded object rather than replacing, so a bound for a rule that no
-    // longer exists is left alone instead of being silently dropped (that is a
-    // deletion, and deletions go through the loud path).
-    const nextRatchets = { ...ratchets };
-    let ratchetTightened = false;
-    for (const [id, value] of Object.entries(newRatchets)) {
-      if (ratchets[id] != null && value < ratchets[id]) {
-        nextRatchets[id] = value;
-        ratchetTightened = true;
-      }
-    }
-    if (ratchetTightened) {
-      writeFileSync(RATCHET_FILE, JSON.stringify(nextRatchets, null, 2) + '\n');
-      wroteFiles++;
-    }
-    if (size.tightened.length) {
-      writeFileSync(SIZE_BUDGET_FILE, JSON.stringify(size.newBudgets, null, 2) + '\n');
-      wroteFiles++;
-    }
-    if (uniformBudgetResult.tightened.length) {
-      writeFileSync(UNIFORM_BUDGET_FILE, JSON.stringify(uniformBudgetResult.newBudgets, null, 2) + '\n');
-      wroteFiles++;
-    }
-    if (wroteFiles) {
-      console.log(`📌 ${wroteFiles} budget file(s) rewritten with the tighter bounds — commit the diff.`);
-    }
   }
 
   if (updating) {

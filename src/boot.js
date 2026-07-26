@@ -183,6 +183,7 @@ import {
   assembleLayerDescriptors,
 } from './scene/index.js';
 import { buildEffectCard, buildParamControl, buildInheritableRangeRow } from './diag/effect-controls.js';
+import { buildSunShadowsReport, buildWaterBodyReport } from './diag/effect-status-reports.js';
 
 const MODULE_ID = 'map-shine-advanced';
 
@@ -1352,6 +1353,17 @@ function install() {
   // (feedback_required_masks_fail_loud).
   const getOutdoorsMaskGrid = (floorIndex) => maskAuthority.getDerived('outdoors', floorIndex)?.grid ?? null;
 
+  // THE WATER BODY PACK's two seams (2026-07-26, docs/planning/Water.md §5.1).
+  // vt/ owns the jump-flood bake and its targets; it never reaches the mask
+  // authority itself. Unlike the outdoors seam above, `water` is NOT a
+  // `required` kind, so this cannot throw — an unpainted floor serves an
+  // absent-filled grid, which floods to "no shore anywhere".
+  const getWaterMaskGrid = (floorIndex) => maskAuthority.getDerived('water', floorIndex) ?? null;
+  // The cross-floor rule's input (Water.md §4) — keyed on PROVENANCE, not on
+  // the grid being non-empty; see `floorsWithAuthored`'s own doc for why those
+  // two are the same all-zero grid and different facts.
+  const getFloorsWithWater = () => maskAuthority.floorsWithAuthored('water');
+
   // LIVE MASK-AUTHORITY CROSS-CHECK (2026-07-22, the wind+particle probe's
   // own next question): the probe's `wind.exposure` field reads wind's own
   // CACHED snapshot (`windExposureGrid`, refreshed by bakeWindField — see
@@ -1781,46 +1793,29 @@ function install() {
 
   MapShine.debug.registerPanel('sun-shadows-panel', 'Sun shadows', buildSunShadowsPanel, { zone: 'workshop' });
 
-  /**
-   * THE SUN-SHADOW STATUS REPORT — "why is there no shadow?", answerable from a
-   * pasted report instead of a guess.
-   *
-   * This is not optional garnish. Sky-reach's entire V2 history is a system that
-   * failed silently through five stages nobody could inspect, and its MSA
-   * history until 2026-07-24 was a derivation quietly starved of its input. The
-   * three numbers that matter — did the art arrive, does the field have height
-   * in it, did the march run — each distinguish a different failure, and none of
-   * them can be inferred from looking at the screen.
-   */
+  // The two "why is this effect not showing" report BODIES live in
+  // diag/effect-status-reports.js (see its header); registration stays here so
+  // the id/title list is visible where someone looks for "what reports exist".
   MapShine.debug.registerReport('sun-shadows', 'Sun shadows (building · overhead · sky-reach)', () => {
     const floorIndex = activeFloorContext?.floorIndex ?? 0;
-    const status = skyReachAccess.status(floorIndex);
-    const viewer = getVtPanViewerDiagnostics?.() ?? null;
-    return {
-      report: 'sun-shadows',
+    return buildSunShadowsReport({
+      floorIndex,
+      status: skyReachAccess.status(floorIndex),
+      viewer: getVtPanViewerDiagnostics?.() ?? null,
+      readout: sunShadowReadout,
+      degradedFloors: sunShadowDegradedFloors,
       generatedAt: new Date().toISOString(),
-      effect: { enabled: sunShadowReadout.enabled, params: sunShadowReadout.params ?? null },
-      floor: status,
-      // Loud, top-level, never buried: a floor running without its outdoors
-      // mask still casts sky-reach/overhead shadows but NO building shadows.
-      outdoorsMaskDegraded: sunShadowDegradedFloors.has(floorIndex) ? sunShadowDegradedFloors.get(floorIndex) : false,
-      // The art-opacity seam. `delivered: 0` with `requested > 0` is a LOAD
-      // problem; `requested: 0` is a WIRING problem; they need different fixes,
-      // and before 2026-07-24 the answer was structurally the second one.
-      coarseAlpha: viewer?.wholeImage?.coarseAlpha ?? 'viewer not started',
-      casterField: viewer?.wholeImage?.sunShadows?.caster ?? 'viewer not started',
-      lastBake: viewer?.wholeImage?.sunShadows?.lastBake ?? 'viewer not started',
-      interpretation:
-        'Read top-down. floor.missingItemCount > 0 means art has not been ingested for items that ' +
-        'would cast — check coarseAlpha next. casterField.maxCasterHeightPx === 0 means the field is ' +
-        'EMPTY: nothing can cast a shadow, so an absent shadow is correct and the fault is upstream ' +
-        '(nothing painted indoors for building, no raised tiles for overhead, no upper-floor art for ' +
-        'sky-reach — floor.overheadItemCount / skyReachItemCount say which). lastBake.active:false ' +
-        'means the march deliberately wrote a white (no-shadow) field. lastBake.reason names what ' +
-        'triggered the most recent march; if it stays "first" while the sun moves, the rebake trigger ' +
-        'is not firing.',
-    };
+    });
   });
+
+  MapShine.debug.registerReport('water-body', 'Water body pack (SDF · depth · tangent)', () =>
+    buildWaterBodyReport({
+      floorIndex: activeFloorContext?.floorIndex ?? 0,
+      viewer: getVtPanViewerDiagnostics?.() ?? null,
+      maskAuthority,
+      generatedAt: new Date().toISOString(),
+    })
+  );
 
   // COLOUR GRADE (the god CC, docs/planning/Grade.md §14) — the same schema-
   // driven card as bloom, with a named-preset picker. The artistic "Look" grade:
@@ -2904,6 +2899,11 @@ function install() {
         // torture fixture's default (`() => null`) bakes a fully-outdoors
         // placeholder, which is a no-op while the sky ships neutral.
         getOutdoorsMaskGrid,
+        // THE WATER BODY PACK's mask + cross-floor seams (Water.md §5.1) —
+        // same real-scene-only reasoning; unwired means no floor has water, so
+        // the jump flood never runs (inert by construction, not by a flag).
+        getWaterMaskGrid,
+        getFloorsWithWater,
       })),
     };
   }

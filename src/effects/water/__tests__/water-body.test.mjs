@@ -267,22 +267,29 @@ export async function run(t) {
   t.ok('a shore painted at 4/255 is water, not land', 4 / 255 > WATER_PRESENCE_EPS);
   t.ok('exactly zero depth is land', !(0 > WATER_PRESENCE_EPS));
 
-  // --- resolution: the flood runs FINER than the mask, on purpose ----------
-  // 2026-07-26: the mask must be LINEAR now, not nearest — the previous
-  // assertion here (`WATER_MASK_FILTER === 'nearest'`) pinned the reasoning
-  // that turned out to be wrong live: running the flood 1:1 with the mask's
-  // own coarse grid bakes the mask's own texel staircase into the SDF, and no
-  // downstream filtering of the RESOLVED field recovers it (see water-body-
-  // subsystem.js §3 for the full live-symptom account). Supersampling the
-  // flood over a LINEAR-sampled mask is what actually reconstructs a smoother
-  // boundary from the same, genuinely-all-there-is coarse source.
+  // --- resolution: the SDF is NOT what draws the shoreline -----------------
+  // This block has now pinned three different beliefs, and the churn is the
+  // point. It first asserted `WATER_MASK_FILTER === 'nearest'` (the flood runs
+  // 1:1, so a crisp interface test needs an unfiltered mask). Then, after the
+  // shoreline came out blocky, `SUPERSAMPLE > 1` (flood finer, reconstruct the
+  // coarse mask continuously). That did not work either — and could not,
+  // because the derivation grid is POINT-sampled, so there is no sub-texel
+  // coverage between its texels to reconstruct however densely you sample.
+  //
+  // The resolution: tier 0's edge does not come from the SDF at all. It comes
+  // from the mask FILE at its authored resolution (vt/mask-image.js), and the
+  // SDF keeps only distance-derived, genuinely low-frequency work. So the
+  // supersample went back to 1 and the assertions below pin the CURRENT
+  // contract — deliberately including the one that would fail if someone
+  // "fixed" blockiness by turning it up again.
+  t.ok('the mask is sampled LINEAR (the flood reads it via UV, at any resolution)', WATER_MASK_FILTER === 'linear');
   t.ok(
-    'the mask is sampled LINEAR — supersampling only helps if the source is reconstructed continuously',
-    WATER_MASK_FILTER === 'linear'
+    'the flood runs 1:1 with the mask grid — a finer distance field does NOT sharpen an edge, ' +
+      'and the edge is not the SDF`s job (water-render.js)',
+    WATER_BODY_SUPERSAMPLE === 1
   );
-  t.ok('the flood supersamples the mask — 1x would just re-bake the mask`s own staircase', WATER_BODY_SUPERSAMPLE > 1);
   t.ok(
-    'the worst-case flood resolution (MASK_GRID_MAX_DIM=512 long side) stays under the Keyhole 2048px cap',
+    'whatever the supersample, the worst case (MASK_GRID_MAX_DIM=512) stays under the Keyhole 2048px cap',
     512 * WATER_BODY_SUPERSAMPLE < 2048
   );
 

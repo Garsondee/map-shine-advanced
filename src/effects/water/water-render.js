@@ -7,20 +7,40 @@
  * thing that is genuinely water-shaped and genuinely in the right place.
  *
  * ============================================================================
- * THE SHORELINE IS THE ONE PLACE TIER 0 SPENDS ANYTHING
+ * ⚠️ THE EDGE COMES FROM THE MASK, NOT THE SDF — CORRECTED 2026-07-26
  * ============================================================================
- * A hard `depth > 0` test would give a stair-stepped edge at the mask's own
- * texel resolution (~23 world px on a 12K map) — the thing that reads as
- * "programmer water" before any other quality is even in play. The body pack
- * stores a signed DISTANCE, so a soft edge of any width is one `smoothstep`
- * over a value that is already there:
+ * This file originally derived alpha from the body pack's signed distance
+ * (`alpha = 1 − smoothstep(−soft, +soft, sdf)`), on the reasoning that an SDF
+ * gives a soft edge of any width for free. That reasoning is sound and the
+ * result was still wrong on screen, three fixes running, because it asks the
+ * SDF for the one thing our SDF cannot supply.
  *
- *   alpha = 1 − smoothstep(−soft, +soft, sdf)
+ * **An SDF renders crisply far below its source resolution only because it was
+ * BUILT from a high-resolution source.** That is the entire Valve-SDF-text
+ * result: a 64² field renders sharp glyphs at 500px because each texel stores
+ * a continuous distance encoding where the edge sits BETWEEN texels. Our flood
+ * is seeded from the mask authority's 512-long derivation grid — POINT-sampled,
+ * so a texel is water or not with no coverage fraction — and seeds therefore
+ * land on texel centres. There is no sub-texel information in the field to
+ * render crisply from, and no downstream filtering, supersampling or blur can
+ * invent it. Author, after the third attempt: *"extremely pixelated... the
+ * shoreline looks like a square wave in places."* Correct diagnosis, wrong
+ * layer, three times.
  *
- * Zero extra fetches, zero extra state, and the softness is in WORLD px so it
- * is stable under zoom. This is the first dividend of §5.1's "store distance,
- * not a blurred gradient" — V2's bake-time `shoreWidthPx` could not do it at
- * all.
+ * So the two jobs are SPLIT, which is what should have happened from the start:
+ *
+ *   THE SILHOUETTE  → the mask file itself, at real resolution, linearly
+ *                     filtered (`vt/mask-image.js`). Exactly as crisp as the
+ *                     map art beside it, at any zoom, forever.
+ *   DISTANCE EFFECTS → the SDF, unchanged. Depth ramp (tier 1), foam band
+ *                     width and shoaling (tiers 2/4), flow tangent — all
+ *                     inherently low-frequency, all genuinely fine at 512.
+ *
+ * The SDF was never the wrong tool; using it as the OUTLINE was. Tier 0 no
+ * longer samples it at all — which is honest rather than wasteful: the body
+ * pack still earns its place (it decides the cross-floor borrow, it measures
+ * the water's own AABB for the Law 6 crop, and every rung from 1 up reads it),
+ * it simply is not what draws the line between water and land.
  *
  * ============================================================================
  * ⚠️ THERE IS NO `buf:scene.attr` READ HERE, AND THAT IS A CORRECTION
@@ -69,64 +89,75 @@ export const WATER_TIER0_TINT = Object.freeze([0.09, 0.24, 0.28]);
 export const WATER_TIER0_OPACITY = 0.62;
 
 /**
- * Shoreline softness, WORLD px. ~1/4 of a default 100px grid square: wide
- * enough to kill the mask's texel staircase, narrow enough that the shore
- * still reads as an edge rather than a fade. World px (not texels, not
- * screen px) so it is invariant under zoom AND under a change of mask
- * resolution — the two things that would otherwise silently retune it.
+ * Where the mask's RED channel is thresholded into presence, and over how wide
+ * a ramp — both in mask VALUE (0..1), not distance.
+ *
+ * The mask carries DEPTH and PRESENCE in the same channel, so alpha cannot be
+ * the value itself: a shallow shelf painted at 40/255 is fully-present water
+ * that happens to be shallow, not 16%-opaque water. It has to be a threshold.
+ *
+ * The ramp is deliberately narrow and sits just above zero, so the file's OWN
+ * antialiased edge does the work — a painted boundary crossing 0 → any depth
+ * over a texel or two produces a smooth alpha ramp, and the LINEAR-filtered
+ * high-res mask keeps that smooth at every zoom. Nothing here is measured in
+ * texels or world px, so it is invariant to mask resolution: raising
+ * `MASK_IMAGE_SCALE` sharpens the shoreline without retuning this.
+ *
+ * Named limitation: water painted at a depth BELOW `EDGE1` (≈2/255) reads as
+ * partially transparent rather than shallow. That is indistinguishable from an
+ * antialiasing fringe by construction, and a mask that dark is already at the
+ * quantisation floor of an 8-bit channel.
  */
-export const WATER_TIER0_SHORE_SOFTNESS_PX = 26;
+export const WATER_PRESENCE_EDGE0 = 0.0;
+export const WATER_PRESENCE_EDGE1 = 2 / 255;
 
 /**
  * The tier-0 surface material.
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.bodyTexture - `res:waterBody` (R signed distance world px,
- *   negative inside; G depth01; BA shore tangent).
- * @param {{minX:number,minY:number,maxX:number,maxY:number}} args.bodyRect -
- *   the world rect `bodyTexture` covers.
+ * @param {*} args.maskTexture - THE HIGH-RES MASK (`vt/mask-image.js`), R =
+ *   depth-and-presence. This, not the SDF, is what draws the shoreline — see
+ *   the header. A 1×1 all-zero placeholder is fine at construction: the caller
+ *   keeps the mesh hidden until the real one arrives, so there is no shader
+ *   gate and no fallback path.
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} args.maskRect -
+ *   the world rect `maskTexture` covers.
  * @param {readonly number[]} [args.tint]
  * @param {number} [args.opacity]
- * @param {number} [args.shoreSoftnessPx]
- * @returns {{material:*, bodyTexNode:*, setBodyRect:(r:object)=>void,
- *   setTint:(rgb:readonly number[])=>void, setOpacity:(v:number)=>void,
- *   setShoreSoftnessPx:(v:number)=>void}}
+ * @returns {{material:*, maskTexNode:*, setMaskRect:(r:object)=>void,
+ *   setTint:(rgb:readonly number[])=>void, setOpacity:(v:number)=>void}}
  */
 export function buildWaterSurfaceMaterial({
   THREE,
-  bodyTexture,
-  bodyRect,
+  maskTexture,
+  maskRect,
   tint = WATER_TIER0_TINT,
   opacity = WATER_TIER0_OPACITY,
-  shoreSoftnessPx = WATER_TIER0_SHORE_SOFTNESS_PX,
 }) {
   const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp } = THREE.TSL;
 
-  const uBodyRect = uniform(vec4(bodyRect.minX, bodyRect.minY, bodyRect.maxX, bodyRect.maxY));
+  const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uOpacity = uniform(float(opacity));
-  const uShoreSoftnessPx = uniform(float(shoreSoftnessPx));
 
-  // WORLD → body UV. `positionWorld` (not `uv()`): the quad's own UVs would
-  // only be right if the mesh exactly covered the body rect, and it does not —
+  // WORLD → mask UV. `positionWorld` (not `uv()`): the quad's own UVs would
+  // only be right if the mesh exactly covered the mask rect, and it does not —
   // the mesh is cropped to the water's AABB (Law 6, bounded geometry) while the
-  // body pack always covers the whole mask rect. Deriving from world position
-  // makes the two independent, so the mesh can shrink to the water without the
-  // sampling silently shifting.
-  const rectMinX = uBodyRect.x;
-  const rectMinY = uBodyRect.y;
-  const spanX = uBodyRect.z.sub(uBodyRect.x);
-  const spanY = uBodyRect.w.sub(uBodyRect.y);
-  const bodyU = positionWorld.x.sub(rectMinX).div(spanX);
-  const bodyV = positionWorld.y.sub(rectMinY).div(spanY);
-  const bodyTexNode = texture(bodyTexture, vec2(clamp(bodyU, 0, 1), clamp(bodyV, 0, 1)));
+  // mask always covers the whole level-background rect. Deriving from world
+  // position makes the two independent, so the mesh can shrink to the water
+  // without the sampling silently shifting.
+  const spanX = uMaskRect.z.sub(uMaskRect.x);
+  const spanY = uMaskRect.w.sub(uMaskRect.y);
+  const maskU = positionWorld.x.sub(uMaskRect.x).div(spanX);
+  const maskV = positionWorld.y.sub(uMaskRect.y).div(spanY);
+  const maskTexNode = texture(maskTexture, vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1)));
 
-  // R is the signed distance to shore in world px, negative INSIDE the water.
-  // One smoothstep turns it into a soft, zoom-stable shoreline (see header).
-  const sdf = bodyTexNode.r;
-  const soft = uShoreSoftnessPx;
-  const inside = float(1).sub(smoothstep(soft.negate(), soft, sdf));
+  // THE SHORELINE. A narrow threshold on the LINEAR-filtered high-res mask, so
+  // the crispness is the file's own and the ramp is whatever the author
+  // painted — see WATER_PRESENCE_EDGE0/1 for why this is a threshold rather
+  // than using the value directly.
+  const inside = smoothstep(float(WATER_PRESENCE_EDGE0), float(WATER_PRESENCE_EDGE1), maskTexNode.r);
 
   const material = new THREE.NodeMaterial();
   material.colorNode = vec4(uTint, inside.mul(uOpacity));
@@ -149,18 +180,15 @@ export function buildWaterSurfaceMaterial({
 
   return {
     material,
-    bodyTexNode,
-    setBodyRect(r) {
-      uBodyRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
+    maskTexNode,
+    setMaskRect(r) {
+      uMaskRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
     },
     setTint(rgb) {
       uTint.value.set(rgb[0], rgb[1], rgb[2]);
     },
     setOpacity(v) {
       uOpacity.value = v;
-    },
-    setShoreSoftnessPx(v) {
-      uShoreSoftnessPx.value = v;
     },
   };
 }

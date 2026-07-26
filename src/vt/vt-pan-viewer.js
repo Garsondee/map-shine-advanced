@@ -75,6 +75,7 @@ import {
 } from './decode-pool.js';
 import { createLogger } from '../core/log.js';
 import { buildViewerDiagnostics } from './vt-pan-viewer-diagnostics.js';
+import { loadMaskImageTexture } from './mask-image.js';
 
 /** Log door for the onPageDecoded ingest seam's containment guard — the one
  * place this file reports a CONSUMER's failure rather than its own. */
@@ -188,7 +189,7 @@ import {
   // no remaining caller for any of them.)
   createPointLightPool,
   createWaterBodySubsystem,
-  buildWaterSurfaceMaterial,
+  createWaterSurfaceSubsystem,
   createSkyHandle,
   buildGradePresentMaterial,
   buildBloomMaterials,
@@ -752,6 +753,7 @@ export async function startVtPanViewer({
   getSunShadowRenderState,
   getWaterMaskGrid,
   getFloorsWithWater,
+  getWaterMaskUrl,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
@@ -794,6 +796,11 @@ export async function startVtPanViewer({
   // construction, not by a flag, exactly like the sun-shadow seams above.
   getWaterMaskGrid ??= () => null;
   getFloorsWithWater ??= () => [];
+  // THE HIGH-RES SHORELINE's source (2026-07-26): the resolved floor's own
+  // `_Water` file URL. Unwired means no hi-res mask, which keeps the surface
+  // hidden entirely rather than falling back to the blocky SDF-thresholded
+  // edge this change exists to stop drawing (water-render.js's header).
+  getWaterMaskUrl ??= () => null;
   // THE CANDLE EFFECT's data seam (effects/candle-flame-render.js): boot injects
   // `{ enabled, params: {sizePx, color, lightRadiusPx}, anchors: [{id,x,y}] }` for
   // the active floor. vt/ owns the GPU lifecycle (the flame billboard mesh + the
@@ -3615,7 +3622,7 @@ export async function startVtPanViewer({
       waterBody.maybeBake(view?.floorIndex ?? 0);
       // Re-crop the tier-0 surface quad to the water's AABB — gated on the same
       // bake generation, so a quiet frame costs one integer compare.
-      syncWaterSurface();
+      syncWaterSurface(view?.floorIndex ?? 0);
 
       // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
       // RAW ambient endpoints (not the pre-mixed background: each region
@@ -4845,89 +4852,19 @@ export async function startVtPanViewer({
 
     const scene = new THREE.Scene();
 
-    // ── WATER TIER 0: the surface (Water.md §6) ───────────────────────────
-    //
-    // ⚠️ CONSTRUCTED HERE, AFTER `scene`, AND IT MUST STAY HERE. The first
-    // draft built this beside the water BODY subsystem ~3,400 lines up (where
-    // the rest of water's wiring lives, and where it reads better) and threw
-    // `Cannot access 'scene' before initialization` on every load: `scene` is
-    // a `const` in its temporal dead zone until its own line runs. Trap #4 of
-    // VT-Pan-Viewer-Extraction.md, hit twice now by the same move — `vegShadows`
-    // below carries the same warning. Anything touching `scene` at CONSTRUCTION
-    // time belongs in this block, not with its own subsystem. `npm run verify`
-    // was green throughout: Node cannot execute this closure (§5 rule 1), so
-    // only a real scene load catches this class.
-    //
-    // The mesh goes into the MAIN `scene`, not a private one, and that choice
-    // carries three things at once:
-    //
-    //  1. OCCLUSION FOR FREE. This renderer paints by scene/layer-order.js's
-    //     painter's algorithm, so upper-floor art, decks and roofs draw OVER
-    //     water with their own alpha and their holes let it through. That IS
-    //     "the punch" — see water-render.js's header for why the planned
-    //     buf:scene.attr read is both unnecessary and unsafe here.
-    //  2. THE `gAttr = vec4(0)` CONTRACT FOR FREE. `runGeometryWorldPass`
-    //     renders `scene` under the renderer-global zero-attr MRT, which is
-    //     exactly what B0-3 requires of a transparent: water READS attributes,
-    //     never writes them.
-    //  3. No extra render call, no extra target, no extra pass wiring.
-    //
-    // RENDER ORDER 0.5 puts it immediately above the floor background (always
-    // index 0 of the sorted list — it is the bottom of the elevation/sortLayer
-    // sort) and below every token, tile and roof, which are 1..N-1. Fractional
-    // on purpose: sortByLayer owns the integers, so water claims no index and
-    // cannot collide with one. A real LayerKey for water is the honest fix and
-    // is a deferred rung, the same caveat the door leaves carry.
-    const waterSurfaceGeometry = new THREE.BufferGeometry();
-    waterSurfaceGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
-    waterSurfaceGeometry.setIndex(Array.from(QUAD_INDICES));
-    const waterSurface = buildWaterSurfaceMaterial({
+    // ── WATER TIER 0: the surface (effects/water/water-surface-subsystem.js)
+    // Constructed HERE, after `scene` — that module owns the mesh, the
+    // AABB crop and the high-res mask load, and its header explains why the
+    // ordering is a caller requirement (trap #4, hit three times).
+    const waterSurface = createWaterSurfaceSubsystem({
       THREE,
-      bodyTexture: waterBody.texture,
-      bodyRect: waterBody.getRect(),
+      scene,
+      waterBody,
+      getWaterMaskUrl,
+      createMaskTexture: createMaskDataTexture,
+      loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
     });
-    const waterSurfaceMesh = new THREE.Mesh(waterSurfaceGeometry, waterSurface.material);
-    waterSurfaceMesh.frustumCulled = false; // world-space; the camera rect moves every frame
-    waterSurfaceMesh.renderOrder = 0.5;
-    waterSurfaceMesh.visible = false; // until a bake proves there is water to draw
-    scene.add(waterSurfaceMesh);
-    /** The bake generation the mesh's geometry was built for (-1 = never). */
-    let waterSurfaceGeneration = -1;
-
-    /**
-     * Re-crop the surface quad to the water's own AABB, once per bake.
-     *
-     * Called from the frame loop right after `waterBody.maybeBake`, and gated
-     * on the SAME generation counter that gates the bake itself — so on a
-     * quiet frame this is one integer compare, and the geometry is rebuilt
-     * only when the flood actually produced something new.
-     */
-    function syncWaterSurface() {
-      if (waterSurfaceGeneration === waterBody.bakeGeneration) return;
-      waterSurfaceGeneration = waterBody.bakeGeneration;
-      const bounds = waterBody.getWaterBounds();
-      // No water on the resolved floor (or no floor resolved at all) — hide
-      // the mesh outright rather than drawing a degenerate quad.
-      waterSurfaceMesh.visible = !!bounds;
-      if (!bounds) return;
-      // The body texture is re-created on a REGRID, so re-point the sampler
-      // and the rect every bake rather than assuming the first one holds.
-      if (waterBody.texture) waterSurface.bodyTexNode.value = waterBody.texture;
-      waterSurface.setBodyRect(waterBody.getRect());
-      const positions = buildQuadPositions([
-        { x: bounds.minX, y: bounds.minY },
-        { x: bounds.maxX, y: bounds.minY },
-        { x: bounds.maxX, y: bounds.maxY },
-        { x: bounds.minX, y: bounds.maxY },
-      ]);
-      const posAttr = waterSurfaceGeometry.getAttribute('position');
-      if (posAttr && posAttr.array.length === positions.length) {
-        posAttr.array.set(positions);
-        posAttr.needsUpdate = true; // same buffer, new contents (BufferAttribute has no dispose)
-      } else {
-        waterSurfaceGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      }
-    }
+    const syncWaterSurface = waterSurface.sync;
 
     /**
      * THE VEGETATION-SHADOW SUBSYSTEM (extraction step 2 of docs/planning/
@@ -8766,9 +8703,7 @@ export async function startVtPanViewer({
        * entry in this list — three RGBA16F world-space targets is the largest
        * single allocation water makes. */
       disposeWaterBody() {
-        scene.remove(waterSurfaceMesh);
-        waterSurfaceGeometry.dispose();
-        waterSurface.material?.dispose?.();
+        waterSurface.dispose();
         waterBody.dispose();
       },
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
@@ -9463,12 +9398,7 @@ export async function startVtPanViewer({
         // is the water's measured world AABB, which the quad is cropped to
         // (Law 6); if it ever reads as the whole mask rect, the crop is not
         // working and water is paying fullscreen cost for a river.
-        surface: {
-          visible: waterSurfaceMesh.visible,
-          renderOrder: waterSurfaceMesh.renderOrder,
-          builtForBake: waterSurfaceGeneration,
-          bounds: waterBody.getWaterBounds(),
-        },
+        surface: waterSurface.getStatus(),
       }),
       /** region-darkness's own pool state — for the Diagnostics report.
        * `activeRegions` should be > 0 whenever the scene has a visible,

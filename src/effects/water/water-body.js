@@ -111,20 +111,28 @@ export const WATER_PRESENCE_EPS = 1 / 510;
 
 /**
  * How many FLOOD texels the seed/JFA/resolve passes run per MASK texel, in
- * each dimension. The body pack's targets are `WATER_BODY_SUPERSAMPLE ×` the
- * mask grid's own width/height (see `water-body-subsystem.js` §3 for the full
- * reasoning and the live symptom that forced this).
+ * each dimension.
  *
- * 3, chosen so the worst case (`MASK_GRID_MAX_DIM` = 512 on the long side)
- * lands at 1,536 — comfortably under the Keyhole allocator's 2,048px world-res
- * cap with no `allowWorldScale` exception, and close to the ORIGINAL Water.md
- * §5.1 spec's fixed 1024² (a 512-long mask supersampled 3× is 1,536 — this
- * walks back toward that number rather than away from it; Phase 2's "the pack
- * is the size of its input" correction turned out to have gone one step too
- * far, this is the missing step restored).
- * @see WATER_MASK_FILTER for why this REQUIRES linear mask sampling to do anything.
+ * **BACK TO 1 (2026-07-26), and the round trip is the lesson.** This was
+ * briefly 3, as an attempt to fix a blocky shoreline by flooding the coarse
+ * derivation grid more densely. It did not work, and could not have: the grid
+ * is POINT-sampled, so there is no sub-texel coverage between its texels to
+ * find, however finely you sample it.
+ *
+ * The real fix was to stop asking the SDF for the shoreline at all — tier 0's
+ * edge now comes from the mask file at its authored resolution
+ * (`vt/mask-image.js`), and the SDF keeps only the DISTANCE-derived work it
+ * was always good at: the depth ramp (tier 1), foam band width and shoaling
+ * (tiers 2/4), the flow tangent. Every one of those is inherently
+ * low-frequency, so the mask grid's own resolution is genuinely sufficient and
+ * the supersample buys nothing but VRAM (3× is 9× the texels — ~25 MB against
+ * ~3 MB) and bake time.
+ *
+ * Kept as a named constant rather than deleted: if a future rung ever wants a
+ * finer distance field, this is the one number, and its own history is the
+ * warning that a finer field will NOT sharpen an edge.
  */
-export const WATER_BODY_SUPERSAMPLE = 3;
+export const WATER_BODY_SUPERSAMPLE = 1;
 
 /**
  * The mask texture's filter, stated here because the seed pass's correctness

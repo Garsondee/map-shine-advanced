@@ -183,6 +183,7 @@ import {
   assembleLayerDescriptors,
 } from './scene/index.js';
 import { buildEffectCard, buildParamControl, buildInheritableRangeRow } from './diag/effect-controls.js';
+import { createWaterSeams } from './effects/index.js';
 import { buildSunShadowsReport, buildWaterBodyReport } from './diag/effect-status-reports.js';
 
 const MODULE_ID = 'map-shine-advanced';
@@ -600,6 +601,10 @@ function install() {
    * show its candles, not hide them silently). Updated on scene load + floor
    * switch, where boot already has the floor list in hand (no new Foundry read). */
   let activeFloorContext = null;
+  /** The scene's floor list — the one way to map a floorIndex to a level id for
+   * a floor OTHER than the active one, which water's cross-floor borrow needs
+   * (it resolves to a LOWER floor than the one being viewed). */
+  let lastKnownFloors = null;
 
   /** Resolve the active floor's elevation MIDPOINT (a point interior to its
    * band, so an anchor bound to an adjacent floor's band never matches at a
@@ -607,6 +612,7 @@ function install() {
    * lookup (vt-pan-viewer.js#readElevationFilteredDarknessRegions: find by
    * `f.index`), falling back to array position, then fail-open to null. */
   function updateActiveFloorContext(floors, floorIndex) {
+    lastKnownFloors = Array.isArray(floors) ? floors : null;
     const floor =
       (Array.isArray(floors) ? floors.find((f) => f.index === floorIndex) : null) ?? floors?.[floorIndex] ?? null;
     if (!floor) {
@@ -1353,16 +1359,12 @@ function install() {
   // (feedback_required_masks_fail_loud).
   const getOutdoorsMaskGrid = (floorIndex) => maskAuthority.getDerived('outdoors', floorIndex)?.grid ?? null;
 
-  // THE WATER BODY PACK's two seams (2026-07-26, docs/planning/Water.md §5.1).
-  // vt/ owns the jump-flood bake and its targets; it never reaches the mask
-  // authority itself. Unlike the outdoors seam above, `water` is NOT a
-  // `required` kind, so this cannot throw — an unpainted floor serves an
-  // absent-filled grid, which floods to "no shore anywhere".
-  const getWaterMaskGrid = (floorIndex) => maskAuthority.getDerived('water', floorIndex) ?? null;
-  // The cross-floor rule's input (Water.md §4) — keyed on PROVENANCE, not on
-  // the grid being non-empty; see `floorsWithAuthored`'s own doc for why those
-  // two are the same all-zero grid and different facts.
-  const getFloorsWithWater = () => maskAuthority.floorsWithAuthored('water');
+  // WATER's three mask-authority seams — see effects/water/water-seams.js for
+  // why they ask different questions at deliberately different resolutions.
+  const { getWaterMaskGrid, getFloorsWithWater, getWaterMaskUrl } = createWaterSeams({
+    maskAuthority,
+    getFloors: () => lastKnownFloors,
+  });
 
   // LIVE MASK-AUTHORITY CROSS-CHECK (2026-07-22, the wind+particle probe's
   // own next question): the probe's `wind.exposure` field reads wind's own
@@ -2904,6 +2906,7 @@ function install() {
         // the jump flood never runs (inert by construction, not by a flag).
         getWaterMaskGrid,
         getFloorsWithWater,
+        getWaterMaskUrl,
       })),
     };
   }

@@ -1,0 +1,195 @@
+/**
+ * WATER TIER 0's SURFACE — the mesh, its material, and the high-resolution
+ * mask that actually draws its shoreline (`docs/planning/Water.md` §6).
+ *
+ * `water-render.js` builds the material; this owns the mesh's lifetime, crops
+ * it to the water's AABB, and loads the mask image. Extracted from
+ * `vt-pan-viewer.js` 2026-07-26 the moment it crossed that file's frozen
+ * budget — the standing directive is to split as prep, never to loosen the cap
+ * (`feedback_ratchet_proactive_not_reactive`). It follows the door-graphics
+ * subsystem's shape exactly, which is not a coincidence: a door and a water
+ * surface are the same KIND of thing, an opaque-ish lit map element drawn into
+ * `buf:scene.color` before lighting.
+ *
+ * ============================================================================
+ * THE MESH GOES INTO THE MAIN `scene`, AND THAT BUYS THREE THINGS
+ * ============================================================================
+ *  1. OCCLUSION FOR FREE. This renderer paints by `scene/layer-order.js`'s
+ *     painter's algorithm, so upper-floor art, decks and roofs draw OVER water
+ *     with their own alpha and their holes let it through. That IS "the punch"
+ *     — see `water-render.js` for why the planned `buf:scene.attr` read is both
+ *     unnecessary and unsafe.
+ *  2. THE `gAttr = vec4(0)` CONTRACT FOR FREE. `runGeometryWorldPass` renders
+ *     `scene` under the renderer-global zero-attr MRT, which is exactly what
+ *     B0-3 requires of a transparent: water READS attributes, never writes them.
+ *  3. No extra render call, no extra target, no extra pass wiring.
+ *
+ * RENDER ORDER 0.5 puts it immediately above the floor background (always index
+ * 0 of the sorted list — the bottom of the elevation/sortLayer sort) and below
+ * every token, tile and roof, which are 1..N-1. Fractional on purpose:
+ * `sortByLayer` owns the integers, so water claims no index and cannot collide
+ * with one. A real LayerKey for water is the honest fix and is a deferred rung,
+ * the same caveat the door leaves carry.
+ *
+ * ============================================================================
+ * ⚠️ CONSTRUCT THIS AFTER `scene` EXISTS — TRAP #4
+ * ============================================================================
+ * The caller must build this where `scene` is already initialized. A first
+ * draft built the mesh beside water's OTHER wiring ~3,400 lines earlier in
+ * `startVtPanViewer()` and threw `Cannot access 'scene' before initialization`
+ * on every load — `scene` is a `const` in its temporal dead zone until its own
+ * line runs. That is trap #4 of `VT-Pan-Viewer-Extraction.md`, hit three times
+ * now by the same instinct ("put the code next to its siblings"). Taking
+ * `scene` as an explicit argument is what makes the ordering a caller-visible
+ * requirement instead of an invisible one.
+ *
+ * @module effects/water/water-surface-subsystem
+ */
+
+import { createLogger } from '../../core/log.js';
+import { buildWaterSurfaceMaterial } from './water-render.js';
+import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
+
+const log = createLogger('WaterSurface');
+
+/**
+ * @param {object} args
+ * @param {*} args.THREE - injected, never imported.
+ * @param {*} args.scene - the MAIN scene. Must already exist (see header).
+ * @param {object} args.waterBody - `createWaterBodySubsystem()`'s handle.
+ * @param {(floorIndex: number) => string|null} args.getWaterMaskUrl - boot's
+ *   seam onto the RESOLVED floor's `_Water` file. Null = no hi-res mask, which
+ *   keeps the surface hidden rather than falling back to a blocky SDF edge.
+ * @param {(data: Uint8Array, w: number, h: number, filter: string) => *} args.createMaskTexture -
+ *   the literal `new THREE.DataTexture(...)`, defined in `vt/` (trap #5).
+ * @param {(url: string) => Promise<object|null>} args.loadMaskImage -
+ *   `vt/mask-image.js`'s loader, injected for the same directory-wall reason.
+ * @returns {{sync: (floorIndex: number) => void, getStatus: () => object, dispose: () => void}}
+ */
+export function createWaterSurfaceSubsystem({
+  THREE,
+  scene,
+  waterBody,
+  getWaterMaskUrl,
+  createMaskTexture,
+  loadMaskImage,
+}) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+  geometry.setIndex(Array.from(QUAD_INDICES));
+
+  /** A 1×1 all-zero (no water) placeholder until the real mask decodes. The
+   * mesh stays hidden until then, so this is never actually sampled — which is
+   * why the shader needs no "do I have a mask yet" uniform gate
+   * (`tsl/no-uniform-gates`): `mesh.visible` is the gate, JS-side. */
+  let maskTexture = createMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 'linear');
+  let maskInfo = null;
+  let loadedUrl = null;
+  let loading = false;
+  /** The bake generation the geometry was cropped for (-1 = never). */
+  let builtForBake = -1;
+
+  const surface = buildWaterSurfaceMaterial({ THREE, maskTexture, maskRect: waterBody.getRect() });
+  const mesh = new THREE.Mesh(geometry, surface.material);
+  mesh.frustumCulled = false; // world-space; the camera rect moves every frame
+  mesh.renderOrder = 0.5;
+  mesh.visible = false; // until BOTH a bake and the hi-res mask land
+  scene.add(mesh);
+
+  /**
+   * THE SHORELINE'S ACTUAL SOURCE. Loads the resolved floor's `_Water` file at
+   * `MASK_IMAGE_SCALE` and hands it to the material.
+   *
+   * This replaced thresholding the SDF — see `water-render.js`'s header for why
+   * three earlier fixes at the SDF layer could not work. Async and idempotent:
+   * the mesh stays hidden until the texture lands, a fraction of a second after
+   * the bake, which needs no shader-side fallback path.
+   */
+  function ensureMaskImage(floorIndex) {
+    const url = getWaterMaskUrl(floorIndex);
+    if (!url || url === loadedUrl || loading) return;
+    loading = true;
+    loadMaskImage(url)
+      .then((loaded) => {
+        loading = false;
+        if (!loaded) return; // already logged loudly by the loader
+        maskTexture?.dispose?.();
+        maskTexture = loaded.texture;
+        maskInfo = {
+          url,
+          uploaded: `${loaded.width}x${loaded.height}`,
+          native: `${loaded.nativeWidth}x${loaded.nativeHeight}`,
+          mb: +(loaded.bytes / (1024 * 1024)).toFixed(1),
+        };
+        loadedUrl = url;
+        surface.maskTexNode.value = loaded.texture;
+        // The mask file is placed exactly like the level background it rides
+        // with, which is the same rect the derivation grid covers — verified
+        // live (both read 2700,1350→13350,6300 on the author's scene).
+        surface.setMaskRect(waterBody.getRect());
+        mesh.visible = !!waterBody.getWaterBounds();
+      })
+      .catch((err) => {
+        loading = false;
+        log.error('water mask image load rejected —', err);
+      });
+  }
+
+  /**
+   * Per-frame, called right after `waterBody.maybeBake`. Gated on the SAME bake
+   * generation, so a quiet frame is one integer compare and the geometry is
+   * re-cropped only when the flood actually produced something new.
+   * @param {number} floorIndex - the VIEWED floor; the body pack resolves the
+   *   borrow itself, and `getWaterMaskUrl` is asked for the RESOLVED one.
+   */
+  function sync(floorIndex) {
+    ensureMaskImage(floorIndex);
+    if (builtForBake === waterBody.bakeGeneration) return;
+    builtForBake = waterBody.bakeGeneration;
+    const bounds = waterBody.getWaterBounds();
+    // Hidden unless there is water AND a real mask to draw its edge from — the
+    // body pack alone cannot draw a shoreline (water-render.js's header).
+    mesh.visible = !!bounds && !!loadedUrl;
+    if (!bounds) return;
+    surface.setMaskRect(waterBody.getRect());
+    const positions = buildQuadPositions([
+      { x: bounds.minX, y: bounds.minY },
+      { x: bounds.maxX, y: bounds.minY },
+      { x: bounds.maxX, y: bounds.maxY },
+      { x: bounds.minX, y: bounds.maxY },
+    ]);
+    const posAttr = geometry.getAttribute('position');
+    if (posAttr && posAttr.array.length === positions.length) {
+      posAttr.array.set(positions);
+      posAttr.needsUpdate = true; // same buffer, new contents (BufferAttribute has no dispose)
+    } else {
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    }
+  }
+
+  return {
+    sync,
+    /** For the `water-body` report — merged into the body pack's own status. */
+    getStatus() {
+      return {
+        visible: mesh.visible,
+        renderOrder: mesh.renderOrder,
+        builtForBake,
+        bounds: waterBody.getWaterBounds(),
+        // `null` means the hi-res mask has not loaded, and the surface is
+        // therefore hidden BY DESIGN — the SDF is not asked to draw the edge
+        // any more, so there is nothing to fall back to. `uploaded` vs
+        // `native` shows MASK_IMAGE_SCALE actually applied; if `uploaded` ever
+        // reads about the same as the derivation grid (~512), the hi-res path
+        // is not running and the old blocky look is back.
+        maskImage: maskInfo ?? 'not loaded',
+      };
+    },
+    dispose() {
+      scene.remove(mesh);
+      geometry.dispose();
+      surface.material?.dispose?.();
+      maskTexture?.dispose?.();
+    },
+  };
+}

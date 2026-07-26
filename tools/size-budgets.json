@@ -1,7 +1,7 @@
 {
   "src/boot.js": {
-    "file": 4115,
-    "fn": 3499
+    "file": 4118,
+    "fn": 3501
   },
   "src/diag/debug-panel.js": {
     "file": 1072,
@@ -18,7 +18,7 @@
     "fn": 606
   },
   "src/vt/vt-pan-viewer.js": {
-    "file": 10522,
-    "fn": 9794
+    "file": 10452,
+    "fn": 9723
   }
 }

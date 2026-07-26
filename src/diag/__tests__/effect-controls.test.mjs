@@ -4,7 +4,7 @@
  * Technical" rule (Effects-UI.md §2). The DOM widget builders + buildEffectCard
  * are browser-verified live (no DOM mock — CONVENTIONS §4).
  */
-import { CATEGORY_ORDER, groupParamsByCategory } from '../effect-controls.js';
+import { CATEGORY_ORDER, groupParamsByCategory, rohGroups } from '../effect-controls.js';
 
 export function run(t) {
   const { ok } = t;
@@ -56,4 +56,31 @@ export function run(t) {
     'a category with zero params is OMITTED, not an empty entry',
     groupParamsByCategory({}).every((g) => g.keys.length > 0)
   );
+
+  // --- rohGroups: FOH and ROH PARTITION the schema, never overlap -----------
+  // The regression this pins shipped live: the card rendered the full schema
+  // under Advanced regardless of what FOH promoted, so a promoted param had TWO
+  // independent controls and they disagreed on screen (water, 2026-07-26).
+  {
+    const roh = rohGroups(schema, ['sizePx', 'lightRadiusPx']);
+    const rohKeys = roh.flatMap((g) => g.keys);
+    ok('a promoted key does NOT reappear under Advanced', !rohKeys.includes('sizePx'));
+    ok('...nor does a promoted key from another category', !rohKeys.includes('lightRadiusPx'));
+    ok('an unpromoted key in a partly-promoted category survives', rohKeys.includes('color'));
+    ok(
+      'FOH ∪ ROH is the WHOLE schema — promotion moves a control, never deletes it',
+      new Set([...rohKeys, 'sizePx', 'lightRadiusPx']).size === Object.keys(schema).length
+    );
+    ok('...and the two halves share nothing', rohKeys.length + 2 === Object.keys(schema).length);
+    ok('ROH keeps CATEGORY_ORDER', roh.map((g) => g.category).join(',') === 'Look,Light,Motion,Technical');
+  }
+  ok(
+    'a FULLY promoted category leaves no bare heading behind',
+    rohGroups({ a: { type: 'float', category: 'Look' } }, ['a']).length === 0
+  );
+  ok(
+    'no fohKeys → ROH is the whole schema (an effect without a strip keeps every control)',
+    rohGroups(schema, undefined).flatMap((g) => g.keys).length === Object.keys(schema).length
+  );
+  ok('an empty schema yields zero ROH groups (never throws)', rohGroups(undefined, ['x']).length === 0);
 }

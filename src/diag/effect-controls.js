@@ -289,11 +289,51 @@ function sectionLabel(text) {
 }
 
 /**
+ * THE ROH HALF OF THE SPLIT: every category group MINUS whatever FOH promoted.
+ *
+ * ⚠️ ROH IS THE COMPLEMENT OF FOH, NOT THE WHOLE SCHEMA. `buildEffectCard`
+ * originally walked every key here, so a promoted key rendered TWICE — once in
+ * the strip and again under Advanced — as two independent DOM controls over one
+ * param, neither of which re-rendered when the other moved. That is how it was
+ * caught: the author's water panel showed Opacity 0.62 in the strip and 1 under
+ * Advanced, on the same frame (2026-07-26), with the last-dragged one silently
+ * winning. It also defeated the point of the split, which the standing FOH/ROH
+ * rule puts as *"why are you using the same controls for both?"* — a curated
+ * strip means nothing if everything appears in both halves.
+ *
+ * Pure and exported so that rule is a Node test rather than something a future
+ * card refactor can quietly undo: `buildEffectCard` itself is DOM and therefore
+ * only browser-verified (CONVENTIONS §4), which is exactly why the part with
+ * the invariant in it lives out here.
+ *
+ * @param {Record<string, object>} schema
+ * @param {string[]} [fohKeys] - the promoted subset. Absent/empty → ROH is the
+ *   whole schema, which is the correct degenerate case: an effect with no
+ *   curated strip keeps every control, it does not lose them.
+ * @returns {{category: string, keys: string[]}[]} Groups in CATEGORY_ORDER,
+ *   never containing an empty one — a category whose every key was promoted
+ *   yields no group at all rather than a bare heading.
+ */
+export function rohGroups(schema, fohKeys) {
+  const promoted = new Set(fohKeys ?? []);
+  const out = [];
+  for (const { category, keys } of groupParamsByCategory(schema)) {
+    const rest = keys.filter((id) => !promoted.has(id));
+    if (rest.length > 0) out.push({ category, keys: rest });
+  }
+  return out;
+}
+
+/**
  * Build one effect's FOH + ROH card — the reusable unit every registered
  * effect gets by declaring a params schema + a curated FOH key list, nothing
  * else. Structure: title + enable toggle → a short plain-language FOH strip
  * (`fohKeys`, hand-picked, ≤6 per Effects-UI.md §3.2) → an "Advanced ▾"
- * disclosure holding the FULL schema, categorised (`groupParamsByCategory`).
+ * disclosure holding EVERYTHING FOH DID NOT PROMOTE, categorised
+ * (`groupParamsByCategory`). The two halves partition the schema; they do not
+ * overlap. A key appears in exactly one of them, so there is exactly one live
+ * control per param and the halves cannot show different values for the same
+ * thing — see the note at the ROH loop for the bug that established this.
  *
  * `getValue`/`onChange` are keyed by param id and are the ONLY write path —
  * this module never touches an effect's state directly, so a caller can
@@ -389,7 +429,7 @@ export function buildEffectCard({
   summary.textContent = 'Advanced ▾';
   details.append(summary);
   const rohBody = styled('div', { display: 'flex', flexDirection: 'column', padding: '2px 8px 8px' });
-  for (const { category, keys } of groupParamsByCategory(schema)) {
+  for (const { category, keys } of rohGroups(schema, fohKeys)) {
     rohBody.append(sectionLabel(category));
     const groupWrap = styled('div', { display: 'flex', flexWrap: 'wrap', gap: '4px' });
     for (const id of keys) {

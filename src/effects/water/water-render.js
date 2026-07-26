@@ -43,6 +43,61 @@
  * it simply is not what draws the line between water and land.
  *
  * ============================================================================
+ * ⚠️ WATER IS TWO BLENDS, NOT ONE — CORRECTED 2026-07-26
+ * ============================================================================
+ * Tier 1 first shipped as ONE alpha-blended draw, on the reasoning (spelled out
+ * at length under WATER_TIER1_ABSORPTION, and still true as far as it goes) that
+ * `src·a + dst·(1−a)` IS Beer–Lambert when `a = 1 − exp(−σd)`. Author's verdict:
+ * *"Water looks like paint or mist not water, blending mode makes it look like
+ * colour added on top of the background."* Correct, and the maths says why.
+ *
+ * With a SCALAR alpha, `lerp(bed, tint, a)` moves every channel of the bed the
+ * same fraction toward one flat colour. That is what a wash of paint does. Real
+ * water does two physically DIFFERENT things at once:
+ *
+ *   ABSORPTION — the bed is seen THROUGH a coloured medium, so it is
+ *                MULTIPLIED, per channel, by `exp(−σ_rgb·d)`. Multiplication
+ *                darkens and re-hues while PRESERVING the bed's own contrast;
+ *                that preserved detail is the entire visual difference between
+ *                "riverbed under water" and "riverbed under a blue film".
+ *                σ is per-channel because it must be: water absorbs red first,
+ *                and that is *why* deep water goes blue-green rather than
+ *                merely dark. A single alpha cannot express a per-channel
+ *                destination attenuation — which is exactly the deferral this
+ *                file recorded a rung ago, now cashed in as the actual cause.
+ *   IN-SCATTER — light bounced back out of the volume before it ever reached
+ *                the bed. This one genuinely IS added on top, and it is what
+ *                makes deep water read as the author's colour rather than as
+ *                black.
+ *
+ * So the surface draws TWICE, with the blend each term actually needs:
+ *
+ *   MESH 1  multiply   dst · exp(−σ_rgb·d)         CustomBlending Zero/SrcColor
+ *   MESH 2  add        + tint · (1 − mean T)       CustomBlending One/One
+ *
+ * Two bounded draws over the water's AABB, no dependent read, no extra target.
+ * The sum is the volume-rendering equation `bed·T + W·(1−T)`, which at `d → 0`
+ * leaves the bed untouched and at `d → ∞` converges on the author's colour.
+ *
+ * ⚠️ **THE WET BAND BELONGS TO THE MULTIPLY, AND ONLY THE MULTIPLY.** It first
+ * shipped as `uTint` at low alpha, on the theory that wet sand takes the colour
+ * of what soaked it. Author: *"Wet margin isn't darker, it's blue so it looks
+ * like paint."* Damp ground is not tinted, it is DARKER — a water film cuts
+ * diffuse back-scatter, which is a neutral multiply, and the saturation that
+ * comes with wetness falls out of that multiply on its own. It therefore rides
+ * mesh 1 with no colour of its own and contributes NOTHING to mesh 2.
+ *
+ * ⚠️ **THE MULTIPLY PASS MUST OVERRIDE ITS `attr` MRT OUTPUT TO WHITE.**
+ * `vt/scene-attr.js`'s renderer-global default writes `attr = vec4(0)`, which
+ * is the do-not-touch value *for NormalBlending* — its own header derives it as
+ * `dst·(1−0) + 0·0 = dst`. Blend state is not per-attachment on WebGL2, so the
+ * multiply pass applies `dst · src` to attachment 1 as well, and `attr · 0`
+ * would silently ZERO the floor attributes under every water pixel. The neutral
+ * element of a blend is a property of the BLEND, not a constant: white for a
+ * multiply, black for an add. Mesh 1 overrides to `vec4(1)`; mesh 2's add is
+ * already neutral at the global default, and says so explicitly anyway.
+ *
+ * ============================================================================
  * ⚠️ THERE IS NO `buf:scene.attr` READ HERE, AND THAT IS A CORRECTION
  * ============================================================================
  * Water.md §6 and `graph/passes.js` both describe tier 0's occlusion — "the
@@ -129,31 +184,30 @@ export const WATER_PRESENCE_EDGE1 = 48 / 255;
  * in units of "per unit of mask depth", since the mask's 0..1 R IS the depth
  * axis).
  *
- * ⚠️ THE WHOLE RUNG IS ONE LINE, BECAUSE ALPHA BLENDING **IS** BEER–LAMBERT.
- * Looking into water of depth `d` over a bed, the classic model is
+ * This is the MEAN of a per-channel σ, not σ itself. The header explains why
+ * the channels must differ; this constant sets how strong the absorption is
+ * overall, and the tint sets how it is split between them:
  *
- *     result = bed·T + waterColour·(1 − T),   T = exp(−σ·d)
+ *     σ_rgb = absorption · (1 − tint) / mean(1 − tint)
  *
- * and normal alpha blending computes `src·a + dst·(1 − a)` — where `dst` is
- * already the riverbed art, because water draws INTO `buf:scene.color` over
- * the map. Set `a = 1 − T` and the two expressions are identical. No second
- * pass, no dependent read, no framebuffer fetch: the physics falls out of the
- * blend the surface was always using. Tier 0's flat `opacity` was the
- * degenerate case of this with `T` held constant.
+ * Dividing by the mean is what keeps the two controls ORTHOGONAL, and that is
+ * worth stating because the obvious formulation (`σ = absorption · (1 − tint)`)
+ * is not: there, picking a darker water colour would silently also make the
+ * water murkier, and the author would be fighting two effects with one slider.
+ * Normalised, the tint decides only the HUE of the absorption and this decides
+ * only its DEPTH, which is how the panel already describes them.
  *
- * That is also the honest answer to the author's *"water colour doesn't blend
- * correctly"* on tier 0: a constant alpha means a shallow puddle and a deep
- * channel tint the bed by exactly the same amount, which never looks like
- * water. With this, shallows read sandy (bed dominates) and deeps read deep
- * (water colour dominates) from the SAME painted mask.
+ * The direction is the physical one and falls out for free: `1 − tint` means a
+ * blue-green water colour absorbs RED hardest, so a sandy bed loses its warmth
+ * first and shifts toward the water's own hue as it deepens. That hue shift is
+ * the thing a scalar alpha could never produce, and it is most of what makes
+ * the result read as depth rather than as coverage.
  *
- * 3.0 default: at the mask's full depth (1.0) transmittance is exp(−3) ≈ 5%,
- * so deep water is nearly opaque; at 0.2 depth it is ≈55%, so shallows still
- * read as riverbed. A physically-real σ would be per-channel (water absorbs
- * red first, which is *why* deep water goes blue-green) — that needs
- * per-channel destination attenuation, which one scalar alpha cannot express.
- * Recorded as a tier-1 deferred rung rather than faked: the author picks the
- * water colour, and the depth ramp modulates how much of it lands.
+ * 3.0 default: at the mask's full depth (1.0) mean transmittance is exp(−3)
+ * ≈ 5%, so deep water is nearly opaque and dominated by in-scatter; at 0.2
+ * depth it is ≈55%, so shallows still read as riverbed. Those numbers are
+ * unchanged from the single-blend version on purpose — the rung's response
+ * curve was never the problem, only how it was composited.
  */
 export const WATER_TIER1_ABSORPTION = 3.0;
 
@@ -175,7 +229,8 @@ export const WATER_TIER1_ABSORPTION = 3.0;
  */
 export const WATER_TIER1_WET_BAND_PX = 34;
 
-/** TIER 1 — how dark the wet band goes at the waterline, 0..1. Subtle on
+/** TIER 1 — how dark the wet band goes at the waterline, 0..1. A NEUTRAL
+ * multiply (`dst · (1 − wet)`), never a tint — see the header. Subtle on
  * purpose: damp sand is a shade darker, not a painted outline. */
 export const WATER_TIER1_WET_STRENGTH = 0.35;
 
@@ -193,8 +248,10 @@ export const WATER_TIER1_WET_STRENGTH = 0.35;
  *   the world rect `maskTexture` covers.
  * @param {readonly number[]} [args.tint]
  * @param {number} [args.opacity]
- * @returns {{material:*, maskTexNode:*, setMaskRect:(r:object)=>void,
- *   setTint:(rgb:readonly number[])=>void, setOpacity:(v:number)=>void}}
+ * @returns {{absorbMaterial:*, inscatterMaterial:*, maskTexNode:*, bodyTexNode:*,
+ *   setMaskRect:(r:object)=>void, setTint:(rgb:readonly number[])=>void,
+ *   setOpacity:(v:number)=>void}} TWO materials, for two meshes over the same
+ *   geometry — see the header. The caller draws `absorbMaterial` first.
  */
 export function buildWaterSurfaceMaterial({
   THREE,
@@ -208,7 +265,8 @@ export function buildWaterSurfaceMaterial({
   wetBandPx = WATER_TIER1_WET_BAND_PX,
   wetStrength = WATER_TIER1_WET_STRENGTH,
 }) {
-  const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, max } = THREE.TSL;
+  const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, max, mix, dot, mrt } =
+    THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
   const uBodyRect = uniform(vec4(bodyRect.minX, bodyRect.minY, bodyRect.maxX, bodyRect.maxY));
@@ -241,14 +299,31 @@ export function buildWaterSurfaceMaterial({
   // than using the value directly.
   const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r);
 
-  // ── TIER 1a: BEER–LAMBERT ────────────────────────────────────────────────
-  // `1 − exp(−σd)` as the alpha, which makes the blend itself the absorption
-  // integral (see WATER_TIER1_ABSORPTION). `opacity` survives as an overall
-  // scale so the author can pull the whole effect back without flattening the
-  // depth response — it multiplies the RESULT, it does not replace it.
+  // ── TIER 1a: BEER–LAMBERT, PER CHANNEL ───────────────────────────────────
+  // σ_rgb = absorption · (1 − tint) / mean(1 − tint). The normalisation is what
+  // keeps "how deep it reads" and "what colour it is" independent controls —
+  // see WATER_TIER1_ABSORPTION. The floor on the mean is not decoration: pure
+  // white water (tint = 1) makes `1 − tint` the zero vector, and without it the
+  // divide is 0/0 and every water pixel goes NaN.
+  const absorbHue = vec3(1).sub(uTint);
+  const absorbMean = max(dot(absorbHue, vec3(1 / 3, 1 / 3, 1 / 3)), float(1e-4));
+  const sigma = absorbHue.div(absorbMean).mul(uAbsorption);
+
+  // `opacity` scales HOW MUCH WATER IS THERE, so it belongs inside the mix,
+  // alongside presence: at 0 the medium vanishes and the bed is untouched by
+  // both terms at once. Applying it to the output of either term separately
+  // would let the two halves disagree — a half-opacity surface that still
+  // in-scatters at full strength is the "mist" look all over again.
   const depth01 = maskTexNode.r;
-  const transmittance = exp(uAbsorption.negate().mul(depth01));
-  const waterAlpha = float(1).sub(transmittance).mul(uOpacity).mul(inside);
+  const presence = inside.mul(uOpacity);
+  // TRANSMITTANCE OF THE BED, per channel. `mix(1, T, presence)` rather than a
+  // multiply so that OUTSIDE the water this is exactly 1 — the identity of the
+  // multiply blend — and the pass provably cannot darken dry land.
+  const bedTransmit = mix(vec3(1, 1, 1), exp(sigma.negate().mul(depth01)), presence);
+  // IN-SCATTER. Keyed off the transmittance BEFORE the wet band touches it, so
+  // damp ground (which has no volume above it) can never in-scatter: that is
+  // the precise line where the blue-margin bug lived.
+  const inscatter = uTint.mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3))));
 
   // ── TIER 1b: THE WET BAND ────────────────────────────────────────────────
   // The body pack's R is the SIGNED distance to shore in world px, POSITIVE
@@ -270,31 +345,67 @@ export function buildWaterSurfaceMaterial({
     .mul(float(1).sub(inside))
     .mul(uWetStrength);
 
-  // ONE draw, two contributions. Damp ground is the water's own colour at low
-  // alpha rather than a separate grey: wet sand takes on the colour of what
-  // soaked it, so a green river leaves a green-tinged margin and a blue one
-  // does not — which is free here and would need its own param anywhere else.
-  const material = new THREE.NodeMaterial();
-  material.colorNode = vec4(uTint, max(waterAlpha, wetBand));
-  material.transparent = true;
-  // The painter's-algorithm contract every drawable in this renderer shares
-  // (scene/layer-order.js): ascending renderOrder IS the layering, so depth
-  // testing would only fight it. `depthWrite: false` for the same reason —
-  // water must never occlude anything by depth, only by paint order.
-  material.depthTest = false;
-  material.depthWrite = false;
-  // EVERY world-space quad in this renderer sets this (scene/world-quad.js's
-  // own QUAD_INDICES doc): a negative scale (Foundry's horizontal-flip
-  // convention) mirrors the mesh's corners and reverses the effective
-  // winding, and FrontSide would cull the water quad as a backface — visible
-  // in every JS-side status field (mesh.visible, the measured bounds) and
-  // invisible on screen, because face culling is a GPU-side fact bookkeeping
-  // cannot see. Water's own bounds come from `buildQuadPositions` the same
-  // way every tile's do, so it inherits the identical risk.
-  material.side = THREE.DoubleSide;
+  // Shared by both meshes. Split out so the two materials cannot drift apart on
+  // the settings that make them agree about WHERE they are, which is every
+  // setting except the blend.
+  function configureShared(material) {
+    material.transparent = true;
+    // The painter's-algorithm contract every drawable in this renderer shares
+    // (scene/layer-order.js): ascending renderOrder IS the layering, so depth
+    // testing would only fight it. `depthWrite: false` for the same reason —
+    // water must never occlude anything by depth, only by paint order.
+    material.depthTest = false;
+    material.depthWrite = false;
+    // EVERY world-space quad in this renderer sets this (scene/world-quad.js's
+    // own QUAD_INDICES doc): a negative scale (Foundry's horizontal-flip
+    // convention) mirrors the mesh's corners and reverses the effective
+    // winding, and FrontSide would cull the water quad as a backface — visible
+    // in every JS-side status field (mesh.visible, the measured bounds) and
+    // invisible on screen, because face culling is a GPU-side fact bookkeeping
+    // cannot see. Water's own bounds come from `buildQuadPositions` the same
+    // way every tile's do, so it inherits the identical risk.
+    material.side = THREE.DoubleSide;
+    material.blending = THREE.CustomBlending;
+    material.blendEquation = THREE.AddEquation;
+    material.blendEquationAlpha = THREE.AddEquation;
+    // DESTINATION ALPHA IS LEFT ALONE BY BOTH PASSES. `buf:scene.color`'s alpha
+    // is the level-composite coverage the floor stack is assembled with, and
+    // neither "the bed is seen through water" nor "the water glows" is a
+    // statement about coverage. `Zero·src + One·dst` is the identity on it.
+    material.blendSrcAlpha = THREE.ZeroFactor;
+    material.blendDstAlpha = THREE.OneFactor;
+  }
+
+  // ── MESH 1: ABSORPTION ───────────────────────────────────────────────────
+  // `dst · src` — the bed, multiplied per channel. The wet band rides here and
+  // ONLY here, as a neutral darkening with no colour of its own.
+  const absorbMaterial = new THREE.NodeMaterial();
+  absorbMaterial.colorNode = vec4(bedTransmit.mul(float(1).sub(wetBand)), 1);
+  configureShared(absorbMaterial);
+  absorbMaterial.blendSrc = THREE.ZeroFactor;
+  absorbMaterial.blendDst = THREE.SrcColorFactor;
+  // WHITE, not the global zero — the multiplicative identity. See the header:
+  // `attr · 0` would erase the floor attributes under every water pixel, and
+  // blend state is not per-attachment on WebGL2.
+  absorbMaterial.mrtNode = mrt({ attr: vec4(1, 1, 1, 1) });
+
+  // ── MESH 2: IN-SCATTER ───────────────────────────────────────────────────
+  // `src + dst`, premultiplied — the light the volume sends back. Zero outside
+  // the water by construction (bedTransmit is 1 there), so it needs no gate.
+  const inscatterMaterial = new THREE.NodeMaterial();
+  inscatterMaterial.colorNode = vec4(inscatter, 1);
+  configureShared(inscatterMaterial);
+  inscatterMaterial.blendSrc = THREE.OneFactor;
+  inscatterMaterial.blendDst = THREE.OneFactor;
+  // Additive's identity IS the renderer-global default, so this changes
+  // nothing — it is stated because the pass beside it is a counter-example to
+  // "vec4(0) always means don't touch it", and the next reader needs to see
+  // that this one was checked rather than left to luck.
+  inscatterMaterial.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
 
   return {
-    material,
+    absorbMaterial,
+    inscatterMaterial,
     maskTexNode,
     bodyTexNode,
     setMaskRect(r) {

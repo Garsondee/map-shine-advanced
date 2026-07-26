@@ -97,10 +97,14 @@ export function createWaterSurfaceSubsystem({
   let lastParamsKey = '';
   let enabled = true;
 
-  /** The ONE place `mesh.visible` is decided, so the three conditions can never
-   * drift apart across the call sites that each learn about one of them. */
+  /** The ONE place visibility is decided, so the three conditions can never
+   * drift apart across the call sites that each learn about one of them —
+   * and, since tier 1, so the two meshes can never drift apart either. Half a
+   * water surface (absorption with no in-scatter, or the reverse) is a far
+   * worse failure than none, and it would look like a shader bug. */
   function refreshVisibility() {
-    mesh.visible = enabled && !!waterBody.getWaterBounds() && !!loadedUrl;
+    const show = enabled && !!waterBody.getWaterBounds() && !!loadedUrl;
+    for (const m of meshes) m.visible = show;
   }
 
   const surface = buildWaterSurfaceMaterial({
@@ -114,11 +118,25 @@ export function createWaterSurfaceSubsystem({
     bodyTexture: waterBody.texture,
     bodyRect: waterBody.getRect(),
   });
-  const mesh = new THREE.Mesh(geometry, surface.material);
-  mesh.frustumCulled = false; // world-space; the camera rect moves every frame
-  mesh.renderOrder = 0.5;
-  mesh.visible = false; // until BOTH a bake and the hi-res mask land
-  scene.add(mesh);
+  // TWO meshes over ONE geometry — water is a multiply THEN an add, and blend
+  // state is per-material (see `water-render.js`'s header for why one alpha
+  // blend cannot be both). They share the geometry object, so the AABB crop
+  // below still writes exactly one position buffer.
+  //
+  // 0.5 / 0.51 — fractional on purpose, since `sortByLayer` owns the integers:
+  // both sit above the floor background (0) and below every token and roof
+  // (1..N-1), and absorption strictly precedes in-scatter. The order matters
+  // less than it looks (multiply and add commute over a bed) but it is the
+  // physical order and it costs nothing to be right.
+  const meshes = [
+    Object.assign(new THREE.Mesh(geometry, surface.absorbMaterial), { renderOrder: 0.5 }),
+    Object.assign(new THREE.Mesh(geometry, surface.inscatterMaterial), { renderOrder: 0.51 }),
+  ];
+  for (const m of meshes) {
+    m.frustumCulled = false; // world-space; the camera rect moves every frame
+    m.visible = false; // until BOTH a bake and the hi-res mask land
+    scene.add(m);
+  }
 
   /**
    * THE SHORELINE'S ACTUAL SOURCE. Loads the resolved floor's `_Water` file at
@@ -229,8 +247,11 @@ export function createWaterSurfaceSubsystem({
     /** For the `water-body` report — merged into the body pack's own status. */
     getStatus() {
       return {
-        visible: mesh.visible,
-        renderOrder: mesh.renderOrder,
+        visible: meshes[0].visible,
+        // Both, listed: tier 1 made water two draws, and "the multiply is
+        // showing but the add is not" is a state the old single number could
+        // not have reported.
+        renderOrder: meshes.map((m) => m.renderOrder).join(' + '),
         builtForBake,
         bounds: waterBody.getWaterBounds(),
         // `null` means the hi-res mask has not loaded, and the surface is
@@ -243,9 +264,10 @@ export function createWaterSurfaceSubsystem({
       };
     },
     dispose() {
-      scene.remove(mesh);
-      geometry.dispose();
-      surface.material?.dispose?.();
+      for (const m of meshes) scene.remove(m);
+      geometry.dispose(); // shared by both meshes — disposed once, not per mesh
+      surface.absorbMaterial?.dispose?.();
+      surface.inscatterMaterial?.dispose?.();
       maskTexture?.dispose?.();
     },
   };

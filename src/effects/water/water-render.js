@@ -153,6 +153,11 @@ export function buildWaterSurfaceMaterial({
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uOpacity = uniform(float(opacity));
+  // The upper edge of the presence band is authorable (WATER_PARAMS
+  // `shorelineDepth`); the lower edge is not — it is the "is anything painted
+  // here at all" floor, and exposing a knob that can be raised above the upper
+  // edge would let the author invert the ramp into a hard edge by accident.
+  const uPresenceEdge1 = uniform(float(WATER_PRESENCE_EDGE1));
 
   // WORLD → mask UV. `positionWorld` (not `uv()`): the quad's own UVs would
   // only be right if the mesh exactly covered the mask rect, and it does not —
@@ -170,7 +175,7 @@ export function buildWaterSurfaceMaterial({
   // the crispness is the file's own and the ramp is whatever the author
   // painted — see WATER_PRESENCE_EDGE0/1 for why this is a threshold rather
   // than using the value directly.
-  const inside = smoothstep(float(WATER_PRESENCE_EDGE0), float(WATER_PRESENCE_EDGE1), maskTexNode.r);
+  const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r);
 
   const material = new THREE.NodeMaterial();
   material.colorNode = vec4(uTint, inside.mul(uOpacity));
@@ -202,6 +207,16 @@ export function buildWaterSurfaceMaterial({
     },
     setOpacity(v) {
       uOpacity.value = v;
+    },
+    /** WATER_PARAMS `shorelineDepth`. Clamped ABOVE the fixed lower edge: the
+     * two define a band, and a band whose top sits at or below its bottom
+     * turns `smoothstep` back into the step function that made the shoreline
+     * jagged in the first place. The schema's own `min` already prevents this,
+     * so the clamp is the belt to that braces — a live override layer or a
+     * stale saved setting is not bound by the schema. */
+    setShorelineDepth(v) {
+      const safe = Number.isFinite(v) ? v : WATER_PRESENCE_EDGE1;
+      uPresenceEdge1.value = Math.max(WATER_PRESENCE_EDGE0 * 2, safe);
     },
   };
 }

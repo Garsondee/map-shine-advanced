@@ -56,7 +56,22 @@ export function run(t) {
     ok('register returns the water id', id === 'water');
     const resolved = reg.resolveAndApply('water', { profile: 'standard' });
     ok('resolveAndApply drives the water apply', applied !== null && applied.enabled === true);
-    ok('resolved params are the (currently empty) schema defaults', Object.keys(resolved.params).length === 0);
+    // Phase 3 gave water its first real params (tier 0's three), so this
+    // asserts the DEFAULTS flow through the cascade rather than the schema
+    // being empty — which is what it checked while the schema deliberately
+    // was (see water.js's header on why params arrive with their consumer).
+    ok(
+      'resolved params carry every schema default',
+      Object.keys(resolved.params).length === Object.keys(WATER_PARAMS).length
+    );
+    ok(
+      '...including the tint, decoded later by the registration seam',
+      resolved.params.tint === WATER_PARAMS.tint.default
+    );
+    ok(
+      '...and the shoreline threshold that antialiases the edge',
+      resolved.params.shorelineDepth === WATER_PARAMS.shorelineDepth.default
+    );
     throws('a duplicate water registration throws', () => reg.register(WATER, () => {}), 'already registered');
   }
 }

@@ -754,6 +754,7 @@ export async function startVtPanViewer({
   getWaterMaskGrid,
   getFloorsWithWater,
   getWaterMaskUrl,
+  getWaterRenderState,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
@@ -801,6 +802,10 @@ export async function startVtPanViewer({
   // hidden entirely rather than falling back to the blocky SDF-thresholded
   // edge this change exists to stop drawing (water-render.js's header).
   getWaterMaskUrl ??= () => null;
+  // WATER's look/enable seam — default-ON, matching the manifest's own
+  // `enabledFromProfile: 'low'`: tier 0 is a mask read and a tint, so an
+  // un-wired caller still gets water rather than a silently-disabled effect.
+  getWaterRenderState ??= () => ({ enabled: true, params: {} });
   // THE CANDLE EFFECT's data seam (effects/candle-flame-render.js): boot injects
   // `{ enabled, params: {sizePx, color, lightRadiusPx}, anchors: [{id,x,y}] }` for
   // the active floor. vt/ owns the GPU lifecycle (the flame billboard mesh + the
@@ -4863,6 +4868,7 @@ export async function startVtPanViewer({
       getWaterMaskUrl,
       createMaskTexture: createMaskDataTexture,
       loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
+      getWaterRenderState,
     });
     const syncWaterSurface = waterSurface.sync;
 

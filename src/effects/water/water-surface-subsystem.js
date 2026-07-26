@@ -73,7 +73,11 @@ export function createWaterSurfaceSubsystem({
   getWaterMaskUrl,
   createMaskTexture,
   loadMaskImage,
+  getWaterRenderState,
 }) {
+  // Default-off shape matching every other effect seam: an un-wired caller
+  // (the torture fixture) renders exactly as it did before water existed.
+  getWaterRenderState ??= () => ({ enabled: true, params: {} });
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
   geometry.setIndex(Array.from(QUAD_INDICES));
@@ -88,6 +92,16 @@ export function createWaterSurfaceSubsystem({
   let loading = false;
   /** The bake generation the geometry was cropped for (-1 = never). */
   let builtForBake = -1;
+  /** The resolved-params signature last pushed, so a quiet frame is one string
+   * compare rather than three uniform writes. */
+  let lastParamsKey = '';
+  let enabled = true;
+
+  /** The ONE place `mesh.visible` is decided, so the three conditions can never
+   * drift apart across the call sites that each learn about one of them. */
+  function refreshVisibility() {
+    mesh.visible = enabled && !!waterBody.getWaterBounds() && !!loadedUrl;
+  }
 
   const surface = buildWaterSurfaceMaterial({ THREE, maskTexture, maskRect: waterBody.getRect() });
   const mesh = new THREE.Mesh(geometry, surface.material);
@@ -127,7 +141,7 @@ export function createWaterSurfaceSubsystem({
         // with, which is the same rect the derivation grid covers — verified
         // live (both read 2700,1350→13350,6300 on the author's scene).
         surface.setMaskRect(waterBody.getRect());
-        mesh.visible = !!waterBody.getWaterBounds();
+        refreshVisibility();
       })
       .catch((err) => {
         loading = false;
@@ -144,12 +158,30 @@ export function createWaterSurfaceSubsystem({
    */
   function sync(floorIndex) {
     ensureMaskImage(floorIndex);
+
+    // THE LOOK PARAMS, pushed every frame. Cheap (three uniform writes against
+    // a cached key) and it must NOT ride the bake gate below: a slider drag
+    // changes no geometry and produces no new bake, so gating these on the
+    // bake generation would make every control in the panel do nothing until
+    // the mask happened to change — which is exactly the residency-sync bug
+    // class this codebase has already paid for once
+    // (`feedback_residency_sync_vs_render_loop`).
+    const state = getWaterRenderState();
+    const p = state.params ?? {};
+    const key = `${state.enabled ? 1 : 0}|${p.tint}|${p.opacity}|${p.shorelineDepth}`;
+    if (key !== lastParamsKey) {
+      lastParamsKey = key;
+      if (Array.isArray(p.tint)) surface.setTint(p.tint);
+      if (Number.isFinite(p.opacity)) surface.setOpacity(p.opacity);
+      if (Number.isFinite(p.shorelineDepth)) surface.setShorelineDepth(p.shorelineDepth);
+      enabled = state.enabled !== false;
+      refreshVisibility();
+    }
+
     if (builtForBake === waterBody.bakeGeneration) return;
     builtForBake = waterBody.bakeGeneration;
     const bounds = waterBody.getWaterBounds();
-    // Hidden unless there is water AND a real mask to draw its edge from — the
-    // body pack alone cannot draw a shoreline (water-render.js's header).
-    mesh.visible = !!bounds && !!loadedUrl;
+    refreshVisibility();
     if (!bounds) return;
     surface.setMaskRect(waterBody.getRect());
     const positions = buildQuadPositions([

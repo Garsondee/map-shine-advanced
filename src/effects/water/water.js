@@ -6,34 +6,64 @@
  * lands — see `docs/planning/Water.md` §7 for the full module layout).
  *
  * ============================================================================
- * WHY `WATER_PARAMS` IS EMPTY RIGHT NOW — declaration first, implementation
- * second, taken literally
+ * PARAMS ARRIVE WITH THEIR CONSUMER, ONE TIER AT A TIME
  * ============================================================================
  *
- * Every other effect in this codebase (bloom, candle, door-graphics) shipped
- * its declaration and its render module in the SAME change — so their params
- * schemas already had real consumers the moment they existed. Water's build
- * order (`docs/planning/Water.md` §10) deliberately splits differently: this
- * phase (1) is the manifest shape + the cross-floor rule + three new
- * structural walls; tier 0's actual render code (and its first real params —
- * tint colour, tint strength) lands in phase 3, one phase later, after the
- * body pack (phase 2).
+ * `WATER_PARAMS` was deliberately EMPTY through phases 1–2, and that was not
+ * an oversight: `params/no-dead-controls` (built in the same phase as this
+ * file) fails the build the moment a param key exists with no consuming
+ * source. Declaring tier-0's knobs before `water-render.js` existed to read
+ * them would have tripped, on day one, the very wall built to prevent exactly
+ * this — V2's water shipped 46 inert uniforms with live UI sliders, including
+ * a fully-labelled "Bathymetry (Volumetric)" folder with zero implementing
+ * GLSL.
  *
- * `params/no-dead-controls` (built alongside this file, same phase) fails the
- * build the moment a param key exists with no consuming render module —
- * exactly the disease V2's water shipped at scale (46 inert uniforms with
- * live UI sliders, including a whole "Bathymetry (Volumetric)" folder with
- * zero implementing GLSL). Declaring tier-0 params here, before
- * `water-render.js` exists to consume them, would trip that wall on day one
- * of building the wall meant to prevent exactly this. Params arrive
- * incrementally, tier by tier, each in the SAME phase as the code that reads
- * them — never ahead of it.
+ * The three keys below arrived in PHASE 3, the same phase as the tier-0
+ * surface that reads every one of them. Tiers 1–8 add theirs the same way,
+ * each alongside the code that consumes it, never ahead of it.
  *
  * @module effects/water/water
  */
 
-/** No authorable knobs yet — see the module header. Grows one tier at a time. */
-export const WATER_PARAMS = Object.freeze({});
+/**
+ * TIER 0's knobs — and only tier 0's. Each is read by
+ * `effects/water/water-render.js`; the defaults there are the single source of
+ * truth for the values, so a change lands in both places or in neither.
+ */
+export const WATER_PARAMS = Object.freeze({
+  // ── Look ────────────────────────────────────────────────────────────────
+  tint: {
+    type: 'color',
+    space: 'srgb',
+    // A muted blue-green with a deliberate green bias: pure blue reads as
+    // swimming-pool. Matches WATER_TIER0_TINT in water-render.js.
+    default: '#173d47',
+    category: 'Look',
+    label: 'Water colour',
+    help: 'The flat body colour of the water. Deliberately flat at this tier — depth-dependent colour (deep reading deep, shallows reading sandy) is a later rung and must not be faked with a hand-tuned gradient here.',
+  },
+  opacity: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.62,
+    category: 'Look',
+    label: 'Opacity',
+    help: 'How much of the riverbed painted underneath still reads through. Below 1 on purpose: the map art beneath is doing the work a proper volume/absorption rung will do later.',
+  },
+  // ── Shape ───────────────────────────────────────────────────────────────
+  shorelineDepth: {
+    type: 'float',
+    min: 0.004,
+    max: 0.5,
+    step: 0.004,
+    default: 48 / 255,
+    category: 'Shape',
+    label: 'Shoreline threshold',
+    help: 'How deep the painted mask must be before water is fully opaque. Everything shallower fades out, which is what antialiases the shoreline — turning this to its minimum gives a hard, jagged edge, and very high values erase shallow water entirely. Raise it if your mask paints shallows you would rather not see.',
+  },
+});
 
 /**
  * The manifest — the effect as data (Effects.md §2 shape). `tiers` lists only
@@ -70,7 +100,8 @@ export const WATER = Object.freeze({
       cost: Object.freeze({ class: 'C4', estMsPerMp: 0.1 }),
       adds:
         'The water mask, tinted, in the right place on the right floor — the cross-floor borrow ' +
-        '(resolveWaterFloor) and the buf:scene.attr punch under opaque upper geometry. Never gated.',
+        '(resolveWaterFloor), a shoreline drawn from the mask file at its authored resolution, and ' +
+        'occlusion under upper geometry from the painter`s-algorithm draw order. Never gated.',
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0), the full ladder

@@ -154,6 +154,7 @@ export {
 } from './water/water-render.js';
 export { createWaterSurfaceSubsystem } from './water/water-surface-subsystem.js';
 export { createWaterSeams } from './water/water-seams.js';
+export { createWaterRegistration } from './water/water-registration.js';
 // DOOR GRAPHICS as a self-owned subsystem (extracted 2026-07-26). Also the
 // template tier-0 water follows: an opaque, LIT map element drawn into
 // buf:scene.color BEFORE lighting, in its own scene.

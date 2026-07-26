@@ -183,7 +183,7 @@ import {
   assembleLayerDescriptors,
 } from './scene/index.js';
 import { buildEffectCard, buildParamControl, buildInheritableRangeRow } from './diag/effect-controls.js';
-import { createWaterSeams } from './effects/index.js';
+import { createWaterSeams, createWaterRegistration, WATER_PARAMS } from './effects/index.js';
 import { buildSunShadowsReport, buildWaterBodyReport } from './diag/effect-status-reports.js';
 
 const MODULE_ID = 'map-shine-advanced';
@@ -1365,6 +1365,15 @@ function install() {
     maskAuthority,
     getFloors: () => lastKnownFloors,
   });
+  const water = createWaterRegistration({
+    effectRegistry,
+    deriveEffectLayers,
+    readSetting: (key) => readSetting(MODULE_ID, key),
+    writeSetting,
+    moduleId: MODULE_ID,
+    effectEnableKey,
+    log,
+  });
 
   // LIVE MASK-AUTHORITY CROSS-CHECK (2026-07-22, the wind+particle probe's
   // own next question): the probe's `wind.exposure` field reads wind's own
@@ -1428,6 +1437,7 @@ function install() {
     bloom: reapplyBloom,
     grade: reapplyGradeLook,
     doorGraphics: reapplyDoors,
+    water: water.reapply,
   };
   function forceEffectEnabled(id, enabled) {
     if (enabled == null) {
@@ -1794,6 +1804,30 @@ function install() {
   }
 
   MapShine.debug.registerPanel('sun-shadows-panel', 'Sun shadows', buildSunShadowsPanel, { zone: 'workshop' });
+
+  // WATER (docs/planning/Water.md §9) — the cascade layer, live override,
+  // console setter and card all live in effects/water/water-registration.js;
+  // see its header for why this one is a module while the other four effects
+  // still inline the identical block.
+  MapShine.setWater = water.setWater;
+  MapShine.debug.registerPanel(
+    'water-panel',
+    'Water',
+    () => {
+      const readout = water.getReadout();
+      return buildEffectCard({
+        title: 'Water',
+        subtitle: 'tier 0 — placement',
+        schema: WATER_PARAMS,
+        fohKeys: ['tint', 'opacity', 'shorelineDepth'],
+        getValue: (id) => readout.params?.[id] ?? WATER_PARAMS[id]?.default,
+        onChange: (id, value) => MapShine.setWater({ [id]: value }),
+        enabled: readout.enabled,
+        onToggleEnabled: (next) => MapShine.setWater({ enabled: next }),
+      });
+    },
+    { zone: 'workshop' }
+  );
 
   // The two "why is this effect not showing" report BODIES live in
   // diag/effect-status-reports.js (see its header); registration stays here so
@@ -2776,6 +2810,11 @@ function install() {
       refreshDoors();
     } catch (err) {
       log.error('door graphics reapply/refresh (scene load) failed:', err);
+    }
+    try {
+      water.reapply();
+    } catch (err) {
+      log.error('water reapply (scene load) failed:', err);
     }
     try {
       reapplyGradeLook();

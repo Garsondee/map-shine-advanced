@@ -1817,16 +1817,14 @@ function install() {
       const readout = water.getReadout();
       return buildEffectCard({
         title: 'Water',
-        subtitle: 'tier 0 — placement',
+        subtitle: 'tiers 0–1 — placement · volume',
         schema: WATER_PARAMS,
-        // FOH is a strict, SMALL subset — never the whole schema, or the
-        // split does nothing but draw every control twice (author, 2026-07-26;
-        // feedback_foh_roh_must_differ). Colour and opacity are what someone
-        // reaches for mid-session: obvious, safe to drag, no explanation
-        // needed. `shorelineDepth` stays ROH — it is a mask-value threshold
-        // whose help text runs three sentences and whose minimum produces a
-        // visibly broken hard-edged shoreline.
-        fohKeys: ['tint', 'opacity'],
+        // FOH is a strict, SMALL subset, never the whole schema
+        // (feedback_foh_roh_must_differ). These three are the mid-session
+        // questions: what colour, how much shows through, how fast it hides
+        // the bed. The other three are ROH — `shorelineDepth`'s minimum
+        // visibly breaks the edge, and the wet-margin pair is set-once detail.
+        fohKeys: ['tint', 'opacity', 'absorption'],
         getValue: (id) => readout.params?.[id] ?? WATER_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
         enabled: readout.enabled,

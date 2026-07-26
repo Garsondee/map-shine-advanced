@@ -52,7 +52,37 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Opacity',
     help: 'How much of the riverbed painted underneath still reads through. Below 1 on purpose: the map art beneath is doing the work a proper volume/absorption rung will do later.',
   },
+  absorption: {
+    type: 'float',
+    min: 0.2,
+    max: 8,
+    step: 0.1,
+    default: 3.0,
+    category: 'Look',
+    label: 'Depth falloff',
+    help: 'How quickly the water hides the riverbed as it deepens. Low = a clear stream you can see the bottom of everywhere; high = shallows read sandy and the deep channel reads solid water. This is the control that makes depth painted in the mask actually show.',
+  },
   // ── Shape ───────────────────────────────────────────────────────────────
+  wetBandPx: {
+    type: 'float',
+    min: 0,
+    max: 200,
+    step: 2,
+    default: 34,
+    category: 'Shape',
+    label: 'Wet margin width',
+    help: 'How far past the waterline the ground reads as damp, in canvas pixels. Set to 0 for a dry, hard-edged bank.',
+  },
+  wetStrength: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Shape',
+    label: 'Wet margin strength',
+    help: 'How strongly the damp margin tints the ground at the waterline. Subtle by default — damp sand is a shade darker, not a painted outline.',
+  },
   shorelineDepth: {
     type: 'float',
     min: 0.004,
@@ -103,17 +133,22 @@ export const WATER = Object.freeze({
         '(resolveWaterFloor), a shoreline drawn from the mask file at its authored resolution, and ' +
         'occlusion under upper geometry from the painter`s-algorithm draw order. Never gated.',
     }),
+    Object.freeze({
+      n: 1,
+      name: 'volume',
+      cost: Object.freeze({ class: 'C1', estMsPerMp: 0.02 }),
+      adds:
+        'Beer-Lambert absorption over depth — shallows read sandy, deeps read solid water — plus the ' +
+        'wet-ground band OUTSIDE the shoreline, free from the body pack being signed. Pure ALU on ' +
+        'reads tier 0 already paid for: one exp(), one smoothstep, no new fetch beyond the SDF the ' +
+        'wet band needs. C1 against tier 0`s C4 is the ladder`s own shape (Effects.md §4) — tier 0`s ' +
+        'class is the admission price, monotonicity governs rungs 1..N upward from here.',
+    }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0), the full ladder
   // Water.md §6 designs. Each becomes a real `tiers` entry, with its own
   // cost class and its own phase's render code, in build order.
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'volume',
-      note:
-        'Beer-Lambert absorption over depth so deep reads deep and shallow reads sandy, plus the ' +
-        'wet-ground band outside the shoreline (free from the body pack SDF being signed). Pure ALU.',
-    }),
     Object.freeze({
       name: 'motion',
       note:

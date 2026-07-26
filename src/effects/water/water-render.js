@@ -125,6 +125,61 @@ export const WATER_PRESENCE_EDGE0 = 2 / 255;
 export const WATER_PRESENCE_EDGE1 = 48 / 255;
 
 /**
+ * TIER 1 — ABSORPTION. How fast light is lost with depth (Beer–Lambert's σ,
+ * in units of "per unit of mask depth", since the mask's 0..1 R IS the depth
+ * axis).
+ *
+ * ⚠️ THE WHOLE RUNG IS ONE LINE, BECAUSE ALPHA BLENDING **IS** BEER–LAMBERT.
+ * Looking into water of depth `d` over a bed, the classic model is
+ *
+ *     result = bed·T + waterColour·(1 − T),   T = exp(−σ·d)
+ *
+ * and normal alpha blending computes `src·a + dst·(1 − a)` — where `dst` is
+ * already the riverbed art, because water draws INTO `buf:scene.color` over
+ * the map. Set `a = 1 − T` and the two expressions are identical. No second
+ * pass, no dependent read, no framebuffer fetch: the physics falls out of the
+ * blend the surface was always using. Tier 0's flat `opacity` was the
+ * degenerate case of this with `T` held constant.
+ *
+ * That is also the honest answer to the author's *"water colour doesn't blend
+ * correctly"* on tier 0: a constant alpha means a shallow puddle and a deep
+ * channel tint the bed by exactly the same amount, which never looks like
+ * water. With this, shallows read sandy (bed dominates) and deeps read deep
+ * (water colour dominates) from the SAME painted mask.
+ *
+ * 3.0 default: at the mask's full depth (1.0) transmittance is exp(−3) ≈ 5%,
+ * so deep water is nearly opaque; at 0.2 depth it is ≈55%, so shallows still
+ * read as riverbed. A physically-real σ would be per-channel (water absorbs
+ * red first, which is *why* deep water goes blue-green) — that needs
+ * per-channel destination attenuation, which one scalar alpha cannot express.
+ * Recorded as a tier-1 deferred rung rather than faked: the author picks the
+ * water colour, and the depth ramp modulates how much of it lands.
+ */
+export const WATER_TIER1_ABSORPTION = 3.0;
+
+/**
+ * TIER 1 — THE WET BAND, world px. How far past the shoreline the ground reads
+ * as damp.
+ *
+ * **This is the first thing the body pack visibly does.** Every earlier use of
+ * the SDF was either internal or (in tier 0's case) actively wrong. Here it is
+ * exactly right: the field is SIGNED, so the ground OUTSIDE the water is just
+ * the positive side of a value already fetched — a band of any width, for
+ * free, with no second mask, no dilation pass, and no authoring. V2 had no wet
+ * ground at all; `Water.md` §5.1 calls this out as one of the four systems the
+ * one signed field replaces.
+ *
+ * Low-frequency by nature, which is precisely the work a coarse distance field
+ * is good at — the same reasoning that says the SDF must NOT draw the edge
+ * says it SHOULD draw this.
+ */
+export const WATER_TIER1_WET_BAND_PX = 34;
+
+/** TIER 1 — how dark the wet band goes at the waterline, 0..1. Subtle on
+ * purpose: damp sand is a shade darker, not a painted outline. */
+export const WATER_TIER1_WET_STRENGTH = 0.35;
+
+/**
  * The tier-0 surface material.
  *
  * @param {object} args
@@ -145,14 +200,23 @@ export function buildWaterSurfaceMaterial({
   THREE,
   maskTexture,
   maskRect,
+  bodyTexture,
+  bodyRect,
   tint = WATER_TIER0_TINT,
   opacity = WATER_TIER0_OPACITY,
+  absorption = WATER_TIER1_ABSORPTION,
+  wetBandPx = WATER_TIER1_WET_BAND_PX,
+  wetStrength = WATER_TIER1_WET_STRENGTH,
 }) {
-  const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp } = THREE.TSL;
+  const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, max } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
+  const uBodyRect = uniform(vec4(bodyRect.minX, bodyRect.minY, bodyRect.maxX, bodyRect.maxY));
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uOpacity = uniform(float(opacity));
+  const uAbsorption = uniform(float(absorption));
+  const uWetBandPx = uniform(float(wetBandPx));
+  const uWetStrength = uniform(float(wetStrength));
   // The upper edge of the presence band is authorable (WATER_PARAMS
   // `shorelineDepth`); the lower edge is not — it is the "is anything painted
   // here at all" floor, and exposing a knob that can be raised above the upper
@@ -177,8 +241,41 @@ export function buildWaterSurfaceMaterial({
   // than using the value directly.
   const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r);
 
+  // ── TIER 1a: BEER–LAMBERT ────────────────────────────────────────────────
+  // `1 − exp(−σd)` as the alpha, which makes the blend itself the absorption
+  // integral (see WATER_TIER1_ABSORPTION). `opacity` survives as an overall
+  // scale so the author can pull the whole effect back without flattening the
+  // depth response — it multiplies the RESULT, it does not replace it.
+  const depth01 = maskTexNode.r;
+  const transmittance = exp(uAbsorption.negate().mul(depth01));
+  const waterAlpha = float(1).sub(transmittance).mul(uOpacity).mul(inside);
+
+  // ── TIER 1b: THE WET BAND ────────────────────────────────────────────────
+  // The body pack's R is the SIGNED distance to shore in world px, POSITIVE
+  // outside the water. `1 − smoothstep(0, band, sdf)` is therefore a damp
+  // ground band of any width, from a value already stored — the dividend
+  // §5.1 promised for making the field signed.
+  //
+  // Multiplied by `1 − inside` so it exists only OUTSIDE the water: without
+  // that the band would also darken the first few px of water itself, which
+  // reads as a dirty rim rather than a wet shore.
+  const bodyU = positionWorld.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
+  const bodyV = positionWorld.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
+  // The NODE is kept, not just its `.r` — the caller re-points `.value` when a
+  // regrid recreates the target, and a swizzle cannot be re-pointed.
+  const bodyTexNode = texture(bodyTexture, vec2(clamp(bodyU, 0, 1), clamp(bodyV, 0, 1)));
+  const sdf = bodyTexNode.r;
+  const wetBand = float(1)
+    .sub(smoothstep(float(0), max(uWetBandPx, float(1)), sdf))
+    .mul(float(1).sub(inside))
+    .mul(uWetStrength);
+
+  // ONE draw, two contributions. Damp ground is the water's own colour at low
+  // alpha rather than a separate grey: wet sand takes on the colour of what
+  // soaked it, so a green river leaves a green-tinged margin and a blue one
+  // does not — which is free here and would need its own param anywhere else.
   const material = new THREE.NodeMaterial();
-  material.colorNode = vec4(uTint, inside.mul(uOpacity));
+  material.colorNode = vec4(uTint, max(waterAlpha, wetBand));
   material.transparent = true;
   // The painter's-algorithm contract every drawable in this renderer shares
   // (scene/layer-order.js): ascending renderOrder IS the layering, so depth
@@ -199,8 +296,21 @@ export function buildWaterSurfaceMaterial({
   return {
     material,
     maskTexNode,
+    bodyTexNode,
     setMaskRect(r) {
       uMaskRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
+    },
+    setBodyRect(r) {
+      uBodyRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
+    },
+    setAbsorption(v) {
+      uAbsorption.value = v;
+    },
+    setWetBandPx(v) {
+      uWetBandPx.value = v;
+    },
+    setWetStrength(v) {
+      uWetStrength.value = v;
     },
     setTint(rgb) {
       uTint.value.set(rgb[0], rgb[1], rgb[2]);

@@ -3,10 +3,10 @@
  * Registration MACHINERY is proven in effect-registration.test.mjs; this
  * pins water's own shape and that it flows through the one door.
  *
- * WATER_PARAMS is deliberately empty right now — see water.js's own header
- * for why (declaration first, implementation second, taken literally: tier
- * 0's actual params arrive in phase 3, alongside the render code that reads
- * them, never ahead of it).
+ * WATER_PARAMS grows one TIER at a time, never ahead of the code that reads
+ * it — see water.js's own header. It was deliberately EMPTY through phases
+ * 1-2 (params/no-dead-controls would have failed the build otherwise), gained
+ * tier 0's three in phase 3, and tier 1's three in phase 4.
  */
 import { validateParamsSchema } from '../../../core/params-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
@@ -18,7 +18,7 @@ export function run(t) {
   const { ok, throws } = t;
 
   // --- the declaration validates ------------------------------------------
-  ok('WATER_PARAMS is a valid params schema (even though empty)', validateParamsSchema(WATER_PARAMS).ok);
+  ok('WATER_PARAMS is a valid params schema', validateParamsSchema(WATER_PARAMS).ok);
   ok('WATER is a valid manifest', validateEffectManifest(WATER).ok);
   ok("the effect's id is water", WATER.id === 'water');
   ok(
@@ -35,12 +35,32 @@ export function run(t) {
     resolveEffectEnabled(WATER, { profile: 'low', playerEnable: 'off' }) === false
   );
 
-  // --- the ladder: only tier 0 is real, 1-8 are honestly deferred ---------
-  ok('tiers has exactly one rung (tier 0) — nothing claimed that is not built', WATER.tiers.length === 1);
-  ok('tier 0 is n=0', WATER.tiers[0].n === 0);
-  ok('tier 0 has a cost class', WATER.tiers[0].cost.class === 'C4');
-  ok('tier 0 has a one-line adds', typeof WATER.tiers[0].adds === 'string' && WATER.tiers[0].adds.length > 0);
-  ok('deferredRungs records the full remaining ladder (tiers 1-8)', WATER.deferredRungs.length === 8);
+  // --- the ladder: BUILT rungs in `tiers`, the rest honestly deferred -----
+  // The counts are asserted RELATIVE to each other rather than pinned to
+  // literals: this block previously hardcoded "exactly one rung" and "8
+  // deferred", which is the correct invariant expressed in a way that has to
+  // be edited every time a rung actually lands. What matters is that the two
+  // together always describe the whole 9-rung ladder with nothing claimed
+  // twice and nothing dropped — that holds at every phase.
+  ok(
+    'every built rung is numbered contiguously from 0',
+    WATER.tiers.every((t, i) => t.n === i)
+  );
+  ok(
+    'built + deferred always account for the whole 0-8 ladder, no gaps, no double-claims',
+    WATER.tiers.length + WATER.deferredRungs.length === 9
+  );
+  ok('tier 0 is the admission price, C4', WATER.tiers[0].cost.class === 'C4');
+  ok(
+    'every built rung carries a cost class and a one-line adds',
+    WATER.tiers.every((t) => typeof t.cost?.class === 'string' && typeof t.adds === 'string' && t.adds.length > 0)
+  );
+  // Tier 1 is the first rung of the C1→C8 staircase proper (Effects.md §4):
+  // tier 0's class is the admission price and is exempt from monotonicity.
+  ok(
+    'tier 1, once built, is C1 — the staircase starts cheap',
+    WATER.tiers[1] === undefined || WATER.tiers[1].cost.class === 'C1'
+  );
   ok(
     "deferredRungs entries are named, not built (no n, no cost — bloom.js's own shape)",
     WATER.deferredRungs.every((r) => typeof r.name === 'string' && typeof r.note === 'string' && r.n === undefined)

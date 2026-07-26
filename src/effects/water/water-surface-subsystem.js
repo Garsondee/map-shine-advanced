@@ -103,7 +103,17 @@ export function createWaterSurfaceSubsystem({
     mesh.visible = enabled && !!waterBody.getWaterBounds() && !!loadedUrl;
   }
 
-  const surface = buildWaterSurfaceMaterial({ THREE, maskTexture, maskRect: waterBody.getRect() });
+  const surface = buildWaterSurfaceMaterial({
+    THREE,
+    maskTexture,
+    maskRect: waterBody.getRect(),
+    // TIER 1's wet band reads the SDF. The body texture is null until the
+    // first bake allocates the targets, and the material only samples it once
+    // the mesh is visible — which requires a completed bake — so a null here
+    // is never sampled. `sync` re-points it every bake regardless.
+    bodyTexture: waterBody.texture,
+    bodyRect: waterBody.getRect(),
+  });
   const mesh = new THREE.Mesh(geometry, surface.material);
   mesh.frustumCulled = false; // world-space; the camera rect moves every frame
   mesh.renderOrder = 0.5;
@@ -168,12 +178,23 @@ export function createWaterSurfaceSubsystem({
     // (`feedback_residency_sync_vs_render_loop`).
     const state = getWaterRenderState();
     const p = state.params ?? {};
-    const key = `${state.enabled ? 1 : 0}|${p.tint}|${p.opacity}|${p.shorelineDepth}`;
+    const key = [
+      state.enabled ? 1 : 0,
+      p.tint,
+      p.opacity,
+      p.shorelineDepth,
+      p.absorption,
+      p.wetBandPx,
+      p.wetStrength,
+    ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
       if (Array.isArray(p.tint)) surface.setTint(p.tint);
       if (Number.isFinite(p.opacity)) surface.setOpacity(p.opacity);
       if (Number.isFinite(p.shorelineDepth)) surface.setShorelineDepth(p.shorelineDepth);
+      if (Number.isFinite(p.absorption)) surface.setAbsorption(p.absorption);
+      if (Number.isFinite(p.wetBandPx)) surface.setWetBandPx(p.wetBandPx);
+      if (Number.isFinite(p.wetStrength)) surface.setWetStrength(p.wetStrength);
       enabled = state.enabled !== false;
       refreshVisibility();
     }
@@ -184,6 +205,10 @@ export function createWaterSurfaceSubsystem({
     refreshVisibility();
     if (!bounds) return;
     surface.setMaskRect(waterBody.getRect());
+    // TIER 1's wet band samples the SDF — re-point it every bake, since a
+    // regrid recreates the target and the old texture would go stale.
+    if (waterBody.texture) surface.bodyTexNode.value = waterBody.texture;
+    surface.setBodyRect(waterBody.getRect());
     const positions = buildQuadPositions([
       { x: bounds.minX, y: bounds.minY },
       { x: bounds.maxX, y: bounds.minY },

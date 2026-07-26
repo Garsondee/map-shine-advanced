@@ -1451,78 +1451,6 @@ export async function startVtPanViewer({
       createWaterMaskTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
     });
 
-    // ── WATER TIER 0: the surface (Water.md §6) ───────────────────────────
-    // The mesh goes into the MAIN `scene`, not a private one, and that choice
-    // carries three things at once:
-    //
-    //  1. OCCLUSION FOR FREE. This renderer paints by scene/layer-order.js's
-    //     painter's algorithm, so upper-floor art, decks and roofs draw OVER
-    //     water with their own alpha and their holes let it through. That IS
-    //     "the punch" — see water-render.js's header for why the planned
-    //     buf:scene.attr read is both unnecessary and unsafe here.
-    //  2. THE `gAttr = vec4(0)` CONTRACT FOR FREE. `runGeometryWorldPass`
-    //     renders `scene` under the renderer-global zero-attr MRT, which is
-    //     exactly what B0-3 requires of a transparent: water READS attributes,
-    //     never writes them.
-    //  3. No extra render call, no extra target, no extra pass wiring.
-    //
-    // RENDER ORDER 0.5 puts it immediately above the floor background (always
-    // index 0 of the sorted list — it is the bottom of the elevation/sortLayer
-    // sort) and below every token, tile and roof, which are 1..N-1. Fractional
-    // on purpose: sortByLayer owns the integers, so water claims no index and
-    // cannot collide with one. A real LayerKey for water is the honest fix and
-    // is a deferred rung, the same caveat the door leaves carry.
-    const waterSurfaceGeometry = new THREE.BufferGeometry();
-    waterSurfaceGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
-    waterSurfaceGeometry.setIndex(Array.from(QUAD_INDICES));
-    const waterSurface = buildWaterSurfaceMaterial({
-      THREE,
-      bodyTexture: waterBody.texture,
-      bodyRect: waterBody.getRect(),
-    });
-    const waterSurfaceMesh = new THREE.Mesh(waterSurfaceGeometry, waterSurface.material);
-    waterSurfaceMesh.frustumCulled = false; // world-space; the camera rect moves every frame
-    waterSurfaceMesh.renderOrder = 0.5;
-    waterSurfaceMesh.visible = false; // until a bake proves there is water to draw
-    scene.add(waterSurfaceMesh);
-    /** The bake generation the mesh's geometry was built for (-1 = never). */
-    let waterSurfaceGeneration = -1;
-
-    /**
-     * Re-crop the surface quad to the water's own AABB, once per bake.
-     *
-     * Called from the frame loop right after `waterBody.maybeBake`, and gated
-     * on the SAME generation counter that gates the bake itself — so on a
-     * quiet frame this is one integer compare, and the geometry is rebuilt
-     * only when the flood actually produced something new.
-     */
-    function syncWaterSurface() {
-      if (waterSurfaceGeneration === waterBody.bakeGeneration) return;
-      waterSurfaceGeneration = waterBody.bakeGeneration;
-      const bounds = waterBody.getWaterBounds();
-      // No water on the resolved floor (or no floor resolved at all) — hide
-      // the mesh outright rather than drawing a degenerate quad.
-      waterSurfaceMesh.visible = !!bounds;
-      if (!bounds) return;
-      // The body texture is re-created on a REGRID, so re-point the sampler
-      // and the rect every bake rather than assuming the first one holds.
-      if (waterBody.texture) waterSurface.bodyTexNode.value = waterBody.texture;
-      waterSurface.setBodyRect(waterBody.getRect());
-      const positions = buildQuadPositions([
-        { x: bounds.minX, y: bounds.minY },
-        { x: bounds.maxX, y: bounds.minY },
-        { x: bounds.maxX, y: bounds.maxY },
-        { x: bounds.minX, y: bounds.maxY },
-      ]);
-      const posAttr = waterSurfaceGeometry.getAttribute('position');
-      if (posAttr && posAttr.array.length === positions.length) {
-        posAttr.array.set(positions);
-        posAttr.needsUpdate = true; // same buffer, new contents (BufferAttribute has no dispose)
-      } else {
-        waterSurfaceGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      }
-    }
-
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
@@ -4916,6 +4844,90 @@ export async function startVtPanViewer({
     }
 
     const scene = new THREE.Scene();
+
+    // ── WATER TIER 0: the surface (Water.md §6) ───────────────────────────
+    //
+    // ⚠️ CONSTRUCTED HERE, AFTER `scene`, AND IT MUST STAY HERE. The first
+    // draft built this beside the water BODY subsystem ~3,400 lines up (where
+    // the rest of water's wiring lives, and where it reads better) and threw
+    // `Cannot access 'scene' before initialization` on every load: `scene` is
+    // a `const` in its temporal dead zone until its own line runs. Trap #4 of
+    // VT-Pan-Viewer-Extraction.md, hit twice now by the same move — `vegShadows`
+    // below carries the same warning. Anything touching `scene` at CONSTRUCTION
+    // time belongs in this block, not with its own subsystem. `npm run verify`
+    // was green throughout: Node cannot execute this closure (§5 rule 1), so
+    // only a real scene load catches this class.
+    //
+    // The mesh goes into the MAIN `scene`, not a private one, and that choice
+    // carries three things at once:
+    //
+    //  1. OCCLUSION FOR FREE. This renderer paints by scene/layer-order.js's
+    //     painter's algorithm, so upper-floor art, decks and roofs draw OVER
+    //     water with their own alpha and their holes let it through. That IS
+    //     "the punch" — see water-render.js's header for why the planned
+    //     buf:scene.attr read is both unnecessary and unsafe here.
+    //  2. THE `gAttr = vec4(0)` CONTRACT FOR FREE. `runGeometryWorldPass`
+    //     renders `scene` under the renderer-global zero-attr MRT, which is
+    //     exactly what B0-3 requires of a transparent: water READS attributes,
+    //     never writes them.
+    //  3. No extra render call, no extra target, no extra pass wiring.
+    //
+    // RENDER ORDER 0.5 puts it immediately above the floor background (always
+    // index 0 of the sorted list — it is the bottom of the elevation/sortLayer
+    // sort) and below every token, tile and roof, which are 1..N-1. Fractional
+    // on purpose: sortByLayer owns the integers, so water claims no index and
+    // cannot collide with one. A real LayerKey for water is the honest fix and
+    // is a deferred rung, the same caveat the door leaves carry.
+    const waterSurfaceGeometry = new THREE.BufferGeometry();
+    waterSurfaceGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+    waterSurfaceGeometry.setIndex(Array.from(QUAD_INDICES));
+    const waterSurface = buildWaterSurfaceMaterial({
+      THREE,
+      bodyTexture: waterBody.texture,
+      bodyRect: waterBody.getRect(),
+    });
+    const waterSurfaceMesh = new THREE.Mesh(waterSurfaceGeometry, waterSurface.material);
+    waterSurfaceMesh.frustumCulled = false; // world-space; the camera rect moves every frame
+    waterSurfaceMesh.renderOrder = 0.5;
+    waterSurfaceMesh.visible = false; // until a bake proves there is water to draw
+    scene.add(waterSurfaceMesh);
+    /** The bake generation the mesh's geometry was built for (-1 = never). */
+    let waterSurfaceGeneration = -1;
+
+    /**
+     * Re-crop the surface quad to the water's own AABB, once per bake.
+     *
+     * Called from the frame loop right after `waterBody.maybeBake`, and gated
+     * on the SAME generation counter that gates the bake itself — so on a
+     * quiet frame this is one integer compare, and the geometry is rebuilt
+     * only when the flood actually produced something new.
+     */
+    function syncWaterSurface() {
+      if (waterSurfaceGeneration === waterBody.bakeGeneration) return;
+      waterSurfaceGeneration = waterBody.bakeGeneration;
+      const bounds = waterBody.getWaterBounds();
+      // No water on the resolved floor (or no floor resolved at all) — hide
+      // the mesh outright rather than drawing a degenerate quad.
+      waterSurfaceMesh.visible = !!bounds;
+      if (!bounds) return;
+      // The body texture is re-created on a REGRID, so re-point the sampler
+      // and the rect every bake rather than assuming the first one holds.
+      if (waterBody.texture) waterSurface.bodyTexNode.value = waterBody.texture;
+      waterSurface.setBodyRect(waterBody.getRect());
+      const positions = buildQuadPositions([
+        { x: bounds.minX, y: bounds.minY },
+        { x: bounds.maxX, y: bounds.minY },
+        { x: bounds.maxX, y: bounds.maxY },
+        { x: bounds.minX, y: bounds.maxY },
+      ]);
+      const posAttr = waterSurfaceGeometry.getAttribute('position');
+      if (posAttr && posAttr.array.length === positions.length) {
+        posAttr.array.set(positions);
+        posAttr.needsUpdate = true; // same buffer, new contents (BufferAttribute has no dispose)
+      } else {
+        waterSurfaceGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      }
+    }
 
     /**
      * THE VEGETATION-SHADOW SUBSYSTEM (extraction step 2 of docs/planning/

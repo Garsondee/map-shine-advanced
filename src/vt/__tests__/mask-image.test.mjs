@@ -10,16 +10,21 @@
 import { maskImageTargetSize, MASK_IMAGE_SCALE, MASK_IMAGE_MAX_DIM } from '../mask-image.js';
 
 export async function run(t) {
-  // --- the agreed default: half the file's own resolution ------------------
+  // --- the shipped default: FULL native resolution -------------------------
+  // Half was tried first (2026-07-26) and the author could still clearly make
+  // out pixelation, so this went to 1 — and the cap went to 16384 in the same
+  // change, because at scale 1 an 8192 cap would have silently held a 10,650px
+  // mask at ~77% of native and quietly re-created the problem.
   {
     // The author's real scene: a 10650x4950 map-sized mask.
     const { width, height } = maskImageTargetSize(10650, 4950);
-    t.ok('a 10650x4950 mask uploads at half res', width === 5325 && height === 2475);
-    // ONE byte per texel (RedFormat) — this is the number quoted to the author
-    // when agreeing half res, so it is asserted rather than left to drift.
-    t.ok('...which is ~13 MB single-channel, not ~53', Math.round((width * height) / (1024 * 1024)) === 13);
+    t.ok('a 10650x4950 mask uploads at NATIVE resolution', width === 10650 && height === 4950);
+    // ONE byte per texel (RedFormat). ~53 MB against a scene already holding
+    // ~265 MB of texture — asserted rather than left to drift, because it is
+    // the number the resolution decision was made against.
+    t.ok('...which is ~50 MB single-channel, not ~200', Math.round((width * height) / (1024 * 1024)) === 50);
   }
-  t.ok('the shipped default is half', MASK_IMAGE_SCALE === 0.5);
+  t.ok('the shipped default is full native resolution', MASK_IMAGE_SCALE === 1);
 
   // --- aspect is preserved (a stretched mask would misplace every shore) ----
   {
@@ -29,39 +34,38 @@ export async function run(t) {
 
   // --- never upscales past native -----------------------------------------
   {
-    const small = maskImageTargetSize(800, 600);
-    t.ok('a small mask scales DOWN, never up to the cap', small.width === 400 && small.height === 300);
+    const small = maskImageTargetSize(800, 600, 0.5);
+    t.ok('an explicit half scale still scales DOWN, never up to the cap', small.width === 400 && small.height === 300);
+    const native = maskImageTargetSize(800, 600);
+    t.ok('a small mask at the default scale stays exactly native', native.width === 800 && native.height === 600);
   }
 
   // --- the cap is a backstop against a pathological source, not a knob -----
   {
-    // 40000px wide: half is 20000, well past any texture limit.
     const huge = maskImageTargetSize(40000, 20000);
     t.ok('the long side is capped', Math.max(huge.width, huge.height) === MASK_IMAGE_MAX_DIM);
     t.ok('...and the cap preserves aspect too', Math.abs(huge.width / huge.height - 2) < 1e-6);
-    t.ok('the cap is under a conservative 8192 texture limit', MASK_IMAGE_MAX_DIM <= 8192);
+    // 16384 is what real hardware here reports as `textureLimit`, and what the
+    // whole-image map art already uploads against — a mask is never bigger
+    // than the map it masks, so anything that loads as art loads here.
+    t.ok('the cap matches the reported hardware texture limit', MASK_IMAGE_MAX_DIM === 16384);
+    t.ok(
+      'a real map-sized mask is nowhere near the cap — it is a backstop, not a limit in practice',
+      10650 < MASK_IMAGE_MAX_DIM
+    );
   }
 
   // --- degenerate inputs never produce a zero-sized texture ----------------
   {
-    const tiny = maskImageTargetSize(1, 1);
-    t.ok('a 1x1 source stays at least 1x1 (scale 0.5 would floor to 0)', tiny.width === 1 && tiny.height === 1);
-    const thin = maskImageTargetSize(3, 1);
+    const tiny = maskImageTargetSize(1, 1, 0.5);
+    t.ok('a 1x1 source at half stays at least 1x1 (0.5 would floor to 0)', tiny.width === 1 && tiny.height === 1);
+    const thin = maskImageTargetSize(3, 1, 0.5);
     t.ok('an extremely thin source keeps both dimensions >= 1', thin.width >= 1 && thin.height >= 1);
   }
 
-  // --- the full-res escape hatch, and what it ACTUALLY gives ---------------
-  // Worth pinning because it is mildly surprising and it is the number to
-  // quote if the half-vs-full question ever comes back: on the author's
-  // 10,650px map, scale 1 does NOT reach native — the 8192 cap takes it to
-  // ~77% of native (1.3 world px/texel, still far beyond what any zoom can
-  // resolve). So "full res" is really "capped res", and the honest gap
-  // between the shipped half and the maximum is 5,325 → 8,192, not → 10,650.
+  // --- the half-res escape hatch still works (it was the shipped default) --
   {
-    const full = maskImageTargetSize(10650, 4950, 1);
-    t.ok('scale 1 on an oversized mask is capped, not native', full.width === MASK_IMAGE_MAX_DIM);
-    t.ok('...and still preserves aspect', Math.abs(full.width / full.height - 10650 / 4950) < 1e-3);
-    const modest = maskImageTargetSize(4000, 2000, 1);
-    t.ok('scale 1 under the cap DOES reach native', modest.width === 4000 && modest.height === 2000);
+    const half = maskImageTargetSize(10650, 4950, 0.5);
+    t.ok('an explicit 0.5 still halves', half.width === 5325 && half.height === 2475);
   }
 }

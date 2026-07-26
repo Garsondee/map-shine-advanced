@@ -78,15 +78,20 @@ const log = createLogger('MaskImage');
  * play zoom (~1.7 world px per screen px) that is well under one screen pixel,
  * so the shoreline's crispness is bounded by the display, not by this.
  */
-export const MASK_IMAGE_SCALE = 0.5;
+export const MASK_IMAGE_SCALE = 1;
 
 /**
  * Hard ceiling on the uploaded long side, INDEPENDENT of the scale above — a
  * backstop against a pathologically large source file, not a tuning knob.
- * Comfortably under the 16,384 texture limit real hardware reports, and under
- * the 8,192 a conservative device might.
+ *
+ * 16,384 matches what real hardware reports here (`textureLimit` in the
+ * viewer's own diagnostics) and what the whole-image map art already uploads
+ * against — a mask is never larger than the map it masks, so a source that
+ * loads as art loads here too. Raised from 8,192 alongside the scale, since at
+ * scale 1 that cap would have silently held a 10,650px mask at ~77% of native
+ * and quietly re-created the problem the scale change exists to fix.
  */
-export const MASK_IMAGE_MAX_DIM = 8192;
+export const MASK_IMAGE_MAX_DIM = 16384;
 
 /**
  * The uploaded dimensions for a source of this size: scaled, capped, and never

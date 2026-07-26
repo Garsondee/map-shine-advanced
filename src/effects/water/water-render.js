@@ -92,24 +92,37 @@ export const WATER_TIER0_OPACITY = 0.62;
  * Where the mask's RED channel is thresholded into presence, and over how wide
  * a ramp — both in mask VALUE (0..1), not distance.
  *
- * The mask carries DEPTH and PRESENCE in the same channel, so alpha cannot be
- * the value itself: a shallow shelf painted at 40/255 is fully-present water
- * that happens to be shallow, not 16%-opaque water. It has to be a threshold.
+ * ⚠️ **THE RAMP MUST BE WIDE ENOUGH TO ANTIALIAS. Narrowing it was a real bug
+ * (2026-07-26).** The first version used `0 → 2/255`, reasoning that a
+ * near-zero threshold preserves even the shallowest painted water. It does —
+ * and it also makes the test a STEP FUNCTION: every interpolated value above
+ * 2/255 reads fully opaque, so the LINEAR filter's whole contribution is
+ * discarded and the edge lands hard on a texel boundary. That is jagged at any
+ * resolution, which is why the shoreline still read as pixelated after the
+ * mask went high-res — a second, independent cause with the same symptom.
  *
- * The ramp is deliberately narrow and sits just above zero, so the file's OWN
- * antialiased edge does the work — a painted boundary crossing 0 → any depth
- * over a texel or two produces a smooth alpha ramp, and the LINEAR-filtered
- * high-res mask keeps that smooth at every zoom. Nothing here is measured in
- * texels or world px, so it is invariant to mask resolution: raising
- * `MASK_IMAGE_SCALE` sharpens the shoreline without retuning this.
+ * The mask carries DEPTH and PRESENCE in the same channel, so alpha cannot
+ * simply BE the value (a shelf painted at 0.4 is fully-present water that
+ * happens to be shallow, not 40%-opaque water). The ramp is the compromise:
+ * anything at or above `EDGE1` is fully opaque, and the band below it is where
+ * the file's own antialiased boundary gets turned into a smooth alpha
+ * gradient. On a boundary ramping 0 → 0.5 across one texel, crossing this band
+ * spends ~36% of that texel fading — real sub-pixel antialiasing at full
+ * resolution.
  *
- * Named limitation: water painted at a depth BELOW `EDGE1` (≈2/255) reads as
- * partially transparent rather than shallow. That is indistinguishable from an
- * antialiasing fringe by construction, and a mask that dark is already at the
- * quantisation floor of an 8-bit channel.
+ * The band is in mask VALUE, not texels or world px, so it is invariant to
+ * `MASK_IMAGE_SCALE`: changing the upload resolution sharpens the shoreline
+ * without retuning anything here.
+ *
+ * Named consequence, and it is arguably correct rather than a limitation:
+ * water painted shallower than `EDGE1` renders partly transparent. Very
+ * shallow water genuinely IS more transparent, so tier 0 gets a free hint of
+ * the Beer–Lambert behaviour tier 1 will do properly. Only a mask painted
+ * almost black throughout would look wrong, and that is indistinguishable from
+ * "no water painted" at 8-bit quantisation anyway.
  */
-export const WATER_PRESENCE_EDGE0 = 0.0;
-export const WATER_PRESENCE_EDGE1 = 2 / 255;
+export const WATER_PRESENCE_EDGE0 = 2 / 255;
+export const WATER_PRESENCE_EDGE1 = 48 / 255;
 
 /**
  * The tier-0 surface material.

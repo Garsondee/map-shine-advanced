@@ -212,6 +212,41 @@ export const WATER_PRESENCE_EDGE1 = 48 / 255;
 export const WATER_TIER1_ABSORPTION = 3.0;
 
 /**
+ * TIER 1 — HOW FAR FROM THE BANK THE WATER REACHES FULL DEPTH, world px.
+ *
+ * ⚠️ **THIS IS THE CONTROL THAT MAKES WATER STOP LOOKING LIKE PAINT, AND ITS
+ * ABSENCE — NOT THE BLEND — IS WHY IT DID (2026-07-26).**
+ *
+ * Tier 1 first derived depth from the mask's R channel alone, which is what
+ * `water-body.js` still packs into the body pack's G. That is correct *if the
+ * mask authors a depth gradient*. Real `_Water` masks are SILHOUETTES — you
+ * paint where water is, not how deep it is — so R is ~1 across the entire
+ * river, `exp(−σd)` is therefore a CONSTANT, and a constant absorption over a
+ * constant depth is a flat wash of colour. That is paint, and no choice of
+ * blend equation can rescue it: there is simply no variation in the input.
+ * Author, twice, correctly: *"Water looks like paint."*
+ *
+ * `Water.md` §2a specified the answer from the start — "G — depth01. Authored
+ * where painted (mask channel), **else derived from `|SDF|`**" — and only the
+ * first half was ever built. This is the second half. Inside the water the body
+ * pack's signed distance IS distance-from-the-bank, so depth ramps 0 at the
+ * shoreline to 1 this far in, and the river gets the shape it always had:
+ * clear sandy shallows at the edges, deep colour in the channel.
+ *
+ * The two sources MULTIPLY (`maskR · ramp`) rather than one winning, which
+ * makes the degenerate cases fall out right with no mode flag: a flat white
+ * silhouette yields the pure geometric ramp, a painted gradient modulates it
+ * proportionally, and both agree on zero at the bank.
+ *
+ * This is exactly the work a coarse distance field is good at (low-frequency,
+ * far below the mask's own resolution) and is the same division of labour
+ * correction #1 established: SILHOUETTE from the mask file, DISTANCE from the
+ * SDF. 256 px default suits a river a few hundred px wide; a wide lake wants
+ * more, a stream less.
+ */
+export const WATER_TIER1_DEPTH_SCALE_PX = 256;
+
+/**
  * TIER 1 — THE WET BAND, world px. How far past the shoreline the ground reads
  * as damp.
  *
@@ -262,10 +297,11 @@ export function buildWaterSurfaceMaterial({
   tint = WATER_TIER0_TINT,
   opacity = WATER_TIER0_OPACITY,
   absorption = WATER_TIER1_ABSORPTION,
+  depthScalePx = WATER_TIER1_DEPTH_SCALE_PX,
   wetBandPx = WATER_TIER1_WET_BAND_PX,
   wetStrength = WATER_TIER1_WET_STRENGTH,
 }) {
-  const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, max, mix, dot, mrt } =
+  const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, log, max, dot, mrt } =
     THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
@@ -273,6 +309,7 @@ export function buildWaterSurfaceMaterial({
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uOpacity = uniform(float(opacity));
   const uAbsorption = uniform(float(absorption));
+  const uDepthScalePx = uniform(float(depthScalePx));
   const uWetBandPx = uniform(float(wetBandPx));
   const uWetStrength = uniform(float(wetStrength));
   // The upper edge of the presence band is authorable (WATER_PARAMS
@@ -299,47 +336,68 @@ export function buildWaterSurfaceMaterial({
   // than using the value directly.
   const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r);
 
-  // ── TIER 1a: BEER–LAMBERT, PER CHANNEL ───────────────────────────────────
-  // σ_rgb = absorption · (1 − tint) / mean(1 − tint). The normalisation is what
-  // keeps "how deep it reads" and "what colour it is" independent controls —
-  // see WATER_TIER1_ABSORPTION. The floor on the mean is not decoration: pure
-  // white water (tint = 1) makes `1 − tint` the zero vector, and without it the
-  // divide is 0/0 and every water pixel goes NaN.
-  const absorbHue = vec3(1).sub(uTint);
-  const absorbMean = max(dot(absorbHue, vec3(1 / 3, 1 / 3, 1 / 3)), float(1e-4));
-  const sigma = absorbHue.div(absorbMean).mul(uAbsorption);
-
-  // `opacity` scales HOW MUCH WATER IS THERE, so it belongs inside the mix,
-  // alongside presence: at 0 the medium vanishes and the bed is untouched by
-  // both terms at once. Applying it to the output of either term separately
-  // would let the two halves disagree — a half-opacity surface that still
-  // in-scatters at full strength is the "mist" look all over again.
-  const depth01 = maskTexNode.r;
-  const presence = inside.mul(uOpacity);
-  // TRANSMITTANCE OF THE BED, per channel. `mix(1, T, presence)` rather than a
-  // multiply so that OUTSIDE the water this is exactly 1 — the identity of the
-  // multiply blend — and the pass provably cannot darken dry land.
-  const bedTransmit = mix(vec3(1, 1, 1), exp(sigma.negate().mul(depth01)), presence);
-  // IN-SCATTER. Keyed off the transmittance BEFORE the wet band touches it, so
-  // damp ground (which has no volume above it) can never in-scatter: that is
-  // the precise line where the blue-margin bug lived.
-  const inscatter = uTint.mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3))));
-
-  // ── TIER 1b: THE WET BAND ────────────────────────────────────────────────
-  // The body pack's R is the SIGNED distance to shore in world px, POSITIVE
-  // outside the water. `1 − smoothstep(0, band, sdf)` is therefore a damp
-  // ground band of any width, from a value already stored — the dividend
-  // §5.1 promised for making the field signed.
-  //
-  // Multiplied by `1 − inside` so it exists only OUTSIDE the water: without
-  // that the band would also darken the first few px of water itself, which
-  // reads as a dirty rim rather than a wet shore.
+  // WORLD → body-pack UV, and the ONE fetch of it. The body pack's R is the
+  // SIGNED distance to shore in world px — negative INSIDE the water, positive
+  // outside — and tier 1 reads both signs: the inside for the depth ramp (1a)
+  // and the outside for the wet band (1b). Sampled once, above both, because
+  // they are two readings of one value and a second fetch would be pure cost.
   const bodyU = positionWorld.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
   const bodyV = positionWorld.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
   // The NODE is kept, not just its `.r` — the caller re-points `.value` when a
   // regrid recreates the target, and a swizzle cannot be re-pointed.
   const bodyTexNode = texture(bodyTexture, vec2(clamp(bodyU, 0, 1), clamp(bodyV, 0, 1)));
   const sdf = bodyTexNode.r;
+
+  // ── TIER 1a: BEER–LAMBERT, PER CHANNEL ───────────────────────────────────
+  // σ_rgb = absorption · −log(tint) / mean(−log tint), i.e. THE TINT IS READ AS
+  // A TRANSMITTANCE COLOUR. The first version used `1 − tint`, which is the
+  // same idea and far too weak to see: on the default tint it spreads the
+  // channels only ±14%, and `exp()` then flattens what little spread there was,
+  // making the per-channel result numerically indistinguishable from the scalar
+  // one it replaced. `−log` is the relationship Beer–Lambert actually inverts
+  // and it nearly doubles the spread (red:blue 1.9× against 1.27×), which is
+  // the difference between a hue shift you can see and one only the maths knows
+  // about.
+  //
+  // Normalising by the mean keeps "how deep it reads" and "what colour it is"
+  // independent controls — see WATER_TIER1_ABSORPTION. Both floors are load
+  // bearing: the inner one stops `log(0)` on a pure black tint, and the outer
+  // one stops a 0/0 on a pure WHITE tint, which correctly yields σ = 0 —
+  // colourless water that absorbs nothing and is simply invisible.
+  const absorbHue = log(max(uTint, vec3(2e-3, 2e-3, 2e-3))).negate();
+  const absorbMean = max(dot(absorbHue, vec3(1 / 3, 1 / 3, 1 / 3)), float(1e-4));
+  const sigma = absorbHue.div(absorbMean).mul(uAbsorption);
+
+  // THE DEPTH AXIS — the mask's painted depth TIMES the geometric ramp away
+  // from the bank. See WATER_TIER1_DEPTH_SCALE_PX: on a silhouette mask the
+  // first factor is constant, and without the second the whole rung has no
+  // variation to render and can only ever produce a flat wash.
+  const shoreDist = max(sdf.negate(), float(0)); // sdf is negative INSIDE the water
+  const depthRamp = smoothstep(float(0), max(uDepthScalePx, float(1)), shoreDist);
+  // `opacity` scales the OPTICAL DEPTH, not the finished colour. That matters:
+  // lerping the transmittance toward 1 (the first attempt) drags every channel
+  // toward each other and destroys the hue separation the line above just
+  // bought, so a half-opacity river went grey rather than pale-teal. Scaling
+  // the exponent is what "less water" physically means and leaves the per-
+  // channel RATIOS exactly intact at every setting.
+  const depth01 = maskTexNode.r.mul(depthRamp).mul(inside).mul(uOpacity);
+  // Outside the water `depth01` is 0, so this is exactly 1 — the identity of
+  // the multiply blend. The pass provably cannot darken dry land.
+  const bedTransmit = exp(sigma.negate().mul(depth01));
+  // IN-SCATTER. Keyed off the transmittance BEFORE the wet band touches it, so
+  // damp ground (which has no volume above it) can never in-scatter: that is
+  // the precise line where the blue-margin bug lived.
+  const inscatter = uTint.mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3))));
+
+  // ── TIER 1b: THE WET BAND ────────────────────────────────────────────────
+  // `1 − smoothstep(0, band, sdf)` on the POSITIVE (outside) side of the same
+  // signed distance sampled above — a damp ground band of any width, from a
+  // value already fetched, the dividend §5.1 promised for making the field
+  // signed.
+  //
+  // Multiplied by `1 − inside` so it exists only OUTSIDE the water: without
+  // that the band would also darken the first few px of water itself, which
+  // reads as a dirty rim rather than a wet shore.
   const wetBand = float(1)
     .sub(smoothstep(float(0), max(uWetBandPx, float(1)), sdf))
     .mul(float(1).sub(inside))
@@ -416,6 +474,9 @@ export function buildWaterSurfaceMaterial({
     },
     setAbsorption(v) {
       uAbsorption.value = v;
+    },
+    setDepthScalePx(v) {
+      uDepthScalePx.value = v;
     },
     setWetBandPx(v) {
       uWetBandPx.value = v;

@@ -63,6 +63,16 @@ export const WATER_PARAMS = Object.freeze({
     help: 'How quickly the water hides the riverbed as it deepens. Low = a clear stream you can see the bottom of everywhere; high = shallows read sandy and the deep channel reads solid water. This is the control that makes depth painted in the mask actually show.',
   },
   // ── Shape ───────────────────────────────────────────────────────────────
+  depthScalePx: {
+    type: 'float',
+    min: 16,
+    max: 1200,
+    step: 8,
+    default: 256,
+    category: 'Shape',
+    label: 'Depth reach',
+    help: 'How far in from the bank the water reaches its full depth, in canvas pixels. This is what gives a river shallow, sandy edges and a deep middle WITHOUT the mask having to paint a depth gradient — set it to roughly half the width of your widest channel. Small values make a narrow shelf and a deep body; very large values make the whole thing read as shallow.',
+  },
   wetBandPx: {
     type: 'float',
     min: 0,

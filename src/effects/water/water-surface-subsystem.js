@@ -202,6 +202,7 @@ export function createWaterSurfaceSubsystem({
       p.opacity,
       p.shorelineDepth,
       p.absorption,
+      p.depthScalePx,
       p.wetBandPx,
       p.wetStrength,
     ].join('|');
@@ -211,6 +212,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.opacity)) surface.setOpacity(p.opacity);
       if (Number.isFinite(p.shorelineDepth)) surface.setShorelineDepth(p.shorelineDepth);
       if (Number.isFinite(p.absorption)) surface.setAbsorption(p.absorption);
+      if (Number.isFinite(p.depthScalePx)) surface.setDepthScalePx(p.depthScalePx);
       if (Number.isFinite(p.wetBandPx)) surface.setWetBandPx(p.wetBandPx);
       if (Number.isFinite(p.wetStrength)) surface.setWetStrength(p.wetStrength);
       enabled = state.enabled !== false;

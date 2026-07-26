@@ -1819,7 +1819,14 @@ function install() {
         title: 'Water',
         subtitle: 'tier 0 — placement',
         schema: WATER_PARAMS,
-        fohKeys: ['tint', 'opacity', 'shorelineDepth'],
+        // FOH is a strict, SMALL subset — never the whole schema, or the
+        // split does nothing but draw every control twice (author, 2026-07-26;
+        // feedback_foh_roh_must_differ). Colour and opacity are what someone
+        // reaches for mid-session: obvious, safe to drag, no explanation
+        // needed. `shorelineDepth` stays ROH — it is a mask-value threshold
+        // whose help text runs three sentences and whose minimum produces a
+        // visibly broken hard-edged shoreline.
+        fohKeys: ['tint', 'opacity'],
         getValue: (id) => readout.params?.[id] ?? WATER_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
         enabled: readout.enabled,
@@ -2946,6 +2953,12 @@ function install() {
         getWaterMaskGrid,
         getFloorsWithWater,
         getWaterMaskUrl,
+        // WATER's look/enable seam. ⚠️ Its ABSENCE is invisible: the viewer's
+        // own default is `{enabled: true, params: {}}`, so water renders
+        // perfectly at its hardcoded defaults while every panel control does
+        // nothing — which is exactly how this shipped once (2026-07-26). A
+        // default-on seam cannot announce that it was never wired.
+        getWaterRenderState: water.getRenderState,
       })),
     };
   }

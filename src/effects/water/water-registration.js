@@ -48,7 +48,19 @@ export function createWaterRegistration({
   effectEnableKey,
   log,
 }) {
-  let readout = { enabled: false, params: null };
+  /**
+   * ⚠️ `enabled: true` PRE-RESOLVE, deliberately unlike bloom's `false`.
+   *
+   * This is the state between construction and the first cascade resolve. For
+   * bloom, "not resolved yet" → no bloom, which is invisible and therefore
+   * safe. For water it would mean the surface is HIDDEN for that window, and
+   * a hidden river reads as a bug rather than as a pending resolve — so the
+   * honest initial value is what the manifest already declares
+   * (`enabledFromProfile: 'low'`, i.e. on everywhere). `params: null` still
+   * means "no authored values yet", so the render module keeps its own
+   * defaults until the real resolve lands.
+   */
+  let readout = { enabled: true, params: null };
 
   /** Transient, in-memory tuning (the console setter / the FOH-ROH card) — the
    * highest-precedence param layer, so live tweaks show at once without being

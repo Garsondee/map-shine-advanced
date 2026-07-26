@@ -1379,6 +1379,63 @@ export function extractParamsDeclarations(lines) {
  * @param {{rel: string, text: string}[]} fileTexts
  * @returns {{file: string, line: number, paramsName: string, key: string}[]}
  */
+/**
+ * Seams the viewer declares that `boot.js` genuinely does not supply yet,
+ * because the feature behind them is unbuilt — not because someone forgot.
+ * Each entry is a claim that must stay true; adding one is a decision, and it
+ * belongs in the same commit as the reason.
+ */
+export const UNWIRED_VIEWER_SEAMS = Object.freeze({
+  // masks.occlusion runs, but nothing computes occluders: boot has no
+  // `occluders` anywhere. RADIAL-only scope, FADE/VISION inert — see
+  // graph/passes.js's own note. Genuinely deferred, not a wiring slip.
+  getOcclusionInputs: 'occlusion inputs are unbuilt — boot computes no occluders at all (graph/passes.js note)',
+});
+
+/**
+ * EVERY SEAM `startVtPanViewer()` DECLARES MUST ACTUALLY BE PASSED BY BOOT.
+ *
+ * Built 2026-07-26, the day water's `getWaterRenderState` shipped declared,
+ * defaulted, consumed — and never handed over. The result was invisible to
+ * everything: water rendered perfectly (the viewer's own default is
+ * `{enabled: true, params: {}}`), the debug report was healthy, all 4,137
+ * tests passed. The only symptom was that every control in the panel did
+ * nothing, and the only instrument that found it was the author dragging a
+ * slider.
+ *
+ * That is the shape of the whole class: **a seam with a sane default cannot
+ * announce that it was never wired.** The default exists so the torture
+ * fixture can run without Foundry, which is correct — and it is exactly what
+ * makes the omission silent. A regex cannot see this (both files are
+ * individually well-formed), so it needs the same cross-file treatment
+ * `params/no-dead-controls` gets.
+ *
+ * "Passed" means appearing as a key in an object literal — `name,` shorthand
+ * or `name: value`. A local variable of the same name does NOT count, which is
+ * the precise distinction that was missed: `water.getRenderState` existed and
+ * worked, it just never reached the call.
+ *
+ * @param {string} viewerText @param {string} bootText
+ * @returns {string[]} seam names declared but not passed (excluding the
+ *   documented unwired set).
+ */
+export function findUnwiredSeams(viewerText, bootText) {
+  const m = /export async function startVtPanViewer\(\{([\s\S]*?)\n\}\)/.exec(viewerText);
+  if (!m) return [];
+  const seams = m[1]
+    .split('\n')
+    .map((s) => stripBraceComments(s).trim().replace(/,$/, ''))
+    .filter((s) => /^[a-zA-Z][a-zA-Z0-9]*$/.test(s));
+  const bad = [];
+  for (const s of seams) {
+    if (Object.prototype.hasOwnProperty.call(UNWIRED_VIEWER_SEAMS, s)) continue;
+    const shorthand = new RegExp('^\\s*' + s + ',\\s*$', 'm').test(bootText);
+    const explicit = new RegExp('^\\s*' + s + ':\\s', 'm').test(bootText);
+    if (!shorthand && !explicit) bad.push(s);
+  }
+  return bad;
+}
+
 export function findDeadControlsInTexts(fileTexts) {
   // Comment-stripped ONCE per file (not per key) — a key name merely
   // MENTIONED in a comment must not count as "used". This is not a nicety:
@@ -1608,6 +1665,38 @@ function main() {
       console.error(`     ${v.file}:${v.line}  ${v.paramsName}.${v.key} — no consumer found anywhere in src/`);
     }
     if (deadControls.length > 10) console.error(`     ... and ${deadControls.length - 10} more`);
+  }
+
+  // `seams/viewer-wired` — also built at zero, the day the class was found.
+  const unwired = findUnwiredSeams(
+    readFileSync(join(SRC, 'vt', 'vt-pan-viewer.js'), 'utf8'),
+    readFileSync(join(SRC, 'boot.js'), 'utf8')
+  );
+  if (unwired.length) {
+    failed = true;
+    console.error(`\n❌ seams/viewer-wired — ${unwired.length} declared-but-unwired seam(s)`);
+    console.error(
+      '\n   WHY THIS RULE EXISTS:\n   ' +
+        (
+          "Water's getWaterRenderState shipped declared, defaulted, consumed — and never passed by boot " +
+          '(2026-07-26). Nothing could see it: water rendered perfectly on the viewer-side default, the ' +
+          'debug report was healthy, 4,137 tests passed. The only symptom was that every control in the ' +
+          'panel silently did nothing. A seam with a sane default CANNOT announce that it was never ' +
+          'wired — the default is there so the torture fixture runs without Foundry, which is correct, ' +
+          'and is exactly what makes the omission invisible.'
+        ).replace(/\s+/g, ' ')
+    );
+    console.error(
+      '\n   DO THIS INSTEAD:\n   ' +
+        (
+          'Pass the seam in the startVtPanViewer({...}) call in boot.js. A local of the same name is NOT ' +
+          'enough — that is precisely the bug (water.getRenderState existed and worked, it just never ' +
+          'reached the call). If the feature behind it is genuinely unbuilt, add it to ' +
+          'UNWIRED_VIEWER_SEAMS with the reason, in the same commit as that reason.'
+        ).replace(/\s+/g, ' ')
+    );
+    console.error('\n   Violations:');
+    for (const s of unwired) console.error(`     startVtPanViewer declares '${s}' — boot.js never passes it`);
   }
 
   if (updating) {

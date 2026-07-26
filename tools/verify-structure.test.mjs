@@ -39,6 +39,8 @@ import {
   UNIFORM_CAP,
   extractParamsDeclarations,
   findDeadControlsInTexts,
+  findUnwiredSeams,
+  UNWIRED_VIEWER_SEAMS,
   sourceFiles,
 } from './verify-structure.mjs';
 import { computeReachability } from './reachability.mjs';
@@ -794,6 +796,48 @@ export function run(t) {
     t.ok(
       'a file UNDER the uniform cap needs no budget and never fails',
       underUniform.violations.length === 0 && Object.keys(underUniform.newBudgets).length === 0
+    );
+  }
+
+  // --- seams/viewer-wired — the SECOND cross-file rule, built the day a
+  // declared-and-defaulted seam shipped without ever being passed ----------
+  {
+    const viewer = 'export async function startVtPanViewer({\n  renderer,\n  getThing,\n  getOther,\n}) {';
+
+    t.ok(
+      'a seam passed as shorthand is wired',
+      findUnwiredSeams(viewer, 'start({\n  renderer,\n  getThing,\n  getOther,\n})').length === 0
+    );
+    t.ok(
+      'a seam passed explicitly (name: value) is wired',
+      findUnwiredSeams(viewer, 'start({\n  renderer,\n  getThing: x.y,\n  getOther,\n})').length === 0
+    );
+
+    // THE ACTUAL BUG, as a test. `water.getRenderState` existed, worked, and
+    // was never handed over; a substring search for the seam name would have
+    // found the local declaration and called it wired.
+    t.ok(
+      'a LOCAL of the seam`s name does NOT count as wired — the exact 2026-07-26 miss',
+      findUnwiredSeams(viewer, 'const getOther = () => 1;\nstart({\n  renderer,\n  getThing,\n})').join(',') ===
+        'getOther'
+    );
+    t.ok(
+      'a seam merely MENTIONED in prose does not count either',
+      findUnwiredSeams(viewer, '// getOther hands the viewer its state\nstart({\n  renderer,\n  getThing,\n})').join(
+        ','
+      ) === 'getOther'
+    );
+    t.ok(
+      'a documented-unwired seam is exempt, so the rule sits at zero honestly',
+      Object.prototype.hasOwnProperty.call(UNWIRED_VIEWER_SEAMS, 'getOcclusionInputs')
+    );
+    // The real files, checked for real — this is what keeps the rule at zero.
+    t.ok(
+      'the SHIPPED viewer/boot pair has no unwired seams',
+      findUnwiredSeams(
+        readFileSync(join(ROOT, 'src/vt/vt-pan-viewer.js'), 'utf8'),
+        readFileSync(join(ROOT, 'src/boot.js'), 'utf8')
+      ).length === 0
     );
   }
 

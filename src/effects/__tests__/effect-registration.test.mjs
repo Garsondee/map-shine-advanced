@@ -43,8 +43,8 @@ export function run(t) {
   ok('GRADE_LOOK_PARAMS is a valid params schema', validateParamsSchema(GRADE_LOOK_PARAMS).ok);
   ok('GRADE is a valid manifest', validateEffectManifest(GRADE).ok);
   ok("the grade's id is grade", GRADE.id === 'grade');
-  ok('the grade ships enabled (AgX default film response)', GRADE.enabledFromProfile === 'low');
-  ok('toneMapping defaults to agx', GRADE_LOOK_PARAMS.toneMapping.default === 'agx');
+  ok('the grade ships enabled (Neutral default film response)', GRADE.enabledFromProfile === 'low');
+  ok('toneMapping defaults to neutral', GRADE_LOOK_PARAMS.toneMapping.default === 'neutral');
   ok("'enabled' is NOT a grade param (the cascade owns it)", !('enabled' in GRADE_LOOK_PARAMS));
   ok("the effect's id is uiWindowShadow", UI_WINDOW_SHADOW.id === 'uiWindowShadow');
   ok('the effect declares its a11y flag (photosensitive: false)', UI_WINDOW_SHADOW.a11y.photosensitive === false);

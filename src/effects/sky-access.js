@@ -71,6 +71,10 @@
  */
 
 import { shadowAtmosphere } from './shadow-access.js';
+// The ONE azimuth→XY convention in this codebase, and it already has the exact
+// name of the thing wanted here. See `key.dirX`'s own note below for why this
+// is an import rather than two lines of trigonometry that looked right.
+import { marchDirectionToSun } from './lighting/sun-occlusion.js';
 
 // ---------------------------------------------------------------------------
 // THE COLOUR ENDPOINTS — a cinematic ramp, not an ephemeris.
@@ -233,11 +237,32 @@ export function createSkyHandle({ version = 0, sun = null, weather = null, reali
 
     /** The sun disc: where it is, what colour, how strong. */
     key: Object.freeze({
-      /** Unit vector the key light travels along, screen/world axes. Derived
-       * from the SAME azimuth the shadow handle throws shadows along, so a
-       * highlight can never point away from its own shadow. */
-      dirX: Math.cos((azimuthDeg * Math.PI) / 180),
-      dirY: Math.sin((azimuthDeg * Math.PI) / 180),
+      /**
+       * THE HORIZONTAL UNIT VECTOR FROM A SURFACE **TOWARD** THE KEY LIGHT,
+       * in world/screen axes. Pair it with `elevationDeg` for the 3-vector.
+       *
+       * ⚠️ **THIS WAS `(cos az, sin az)` UNTIL 2026-07-26, AND THAT WAS WRONG
+       * — the comment above it was already making the claim the code did not
+       * keep.** It said "derived from the SAME azimuth the shadow handle
+       * throws shadows along, so a highlight can never point away from its own
+       * shadow", while `shadowOffsetDirection` (the live, Node-tested, on-screen
+       * -verified one) is `(−sin az, cos az)` — Foundry's compass convention,
+       * clockwise from up. The two differ by a 90° rotation AND a reflection,
+       * so a consumer of this field would have put every highlight roughly
+       * perpendicular to the shadow cast by the same sun.
+       *
+       * It never rendered wrong because it never had a consumer: `grep dirX`
+       * across `src/` found this declaration, one finiteness assertion in
+       * `__tests__/sky-access.test.mjs`, and nothing else. The first real
+       * consumer (`effects/specular`, the sun glint) is what surfaced it —
+       * which is `env/one-sun`'s whole thesis arriving on schedule: a term
+       * derived twice is N−1 needless chances to disagree, and prose asserting
+       * they agree is not a mechanism. Delegating removes the second
+       * derivation entirely, so the claim is now true BY CONSTRUCTION rather
+       * than by comment.
+       */
+      dirX: marchDirectionToSun(azimuthDeg).x,
+      dirY: marchDirectionToSun(azimuthDeg).y,
       colorRgb: Object.freeze(key),
       strength: keyStrength,
       elevationDeg,

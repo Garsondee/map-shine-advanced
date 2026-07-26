@@ -1,8 +1,21 @@
 /**
- * MASK DISCOVERY — finds which authored mask FILES exist for each floor's
+ * MASK DISCOVERY — finds which authored mask FILES exist for a floor's
  * background art, per the catalog's suffix convention (`path/base.webp` →
  * `path/base_Outdoors.webp` …). The result feeds the mask authority
- * (`scene/mask-authority.js#setDiscovery`); nothing else consumes it.
+ * (`scene/mask-authority.js#setDiscovery`); nothing else consumes it directly
+ * (boot.js's own lightweight scene-summary report reads a size/method
+ * snapshot of it too, but nothing treats the raw result as its own source of
+ * truth the way the authority does).
+ *
+ * ⚠️ NOT floor-exclusive, despite the name of its own result map surviving
+ * from when it was: `args.floors` accepts ANY `{id, url}` target, and boot.js
+ * already feeds it every Tile alongside every floor (Vegetation.md Case 2,
+ * 2026-07-26) so a Tile's own `_Tree`/`_Bush` sibling is found the same way a
+ * floor's `_Outdoors` is — same suffix matching, same directory-listing cache,
+ * zero changes needed here. `scene/mask-authority.js#authoredStatusForItem`
+ * is the formal per-ITEM door onto this same result; `#authoredStatus` stays
+ * the per-LEVEL one. Both read the one map below (`byTargetId`) — see its own
+ * doc for why the key is "level id OR item id" rather than picking one.
  *
  * ============================================================================
  * DISCOVERY STRATEGY (and the V2 scars it is shaped by)
@@ -49,11 +62,18 @@ const PROBE_EXTENSIONS = ['webp', 'png'];
 
 /**
  * @typedef {object} MaskDiscoveryResult
- * @property {Map<string, Map<string, string>>} byLevelId - levelId -> (kindId -> URL).
+ * @property {Map<string, Map<string, string>>} byTargetId - targetId -> (kindId -> URL).
+ *   `targetId` is whatever id the caller's `floors` entry carried — a level id
+ *   for a floor's own background/foreground art, or an ITEM id for a Tile
+ *   discovered alongside it. One shared map for both, deliberately: the
+ *   matching logic neither knows nor cares which kind of id it was handed
+ *   (this module's own header), so a second map would only invite the two to
+ *   drift. Callers that need to tell them apart already know which one they
+ *   asked for by construction (mask-authority.js's two query methods).
  * @property {'listing'|'probe'|'mixed'|'none'} method - how the run discovered overall.
- * @property {Array<{levelId:string, method:string, found:number, aliasesUsed:string[],
+ * @property {Array<{targetId:string, method:string, found:number, aliasesUsed:string[],
  *   baseFallbacksUsed?:string[]}>} perFloor
- * @property {Array<{levelId:string, stage:string, detail:string}>} failures
+ * @property {Array<{targetId:string, stage:string, detail:string}>} failures
  * @property {number} probesAttempted
  */
 
@@ -211,8 +231,11 @@ async function defaultProbeUrl(url) {
  * Discover authored masks for every floor of a scene.
  *
  * @param {object} args
- * @param {Array<{index:number, id:string, url:string, name?:string}>} args.floors -
- *   `getActiveSceneFloors().floors` (the RESOLVED background art URLs).
+ * @param {Array<{index?:number, id:string, url:string, name?:string}>} args.floors -
+ *   `getActiveSceneFloors().floors` (the RESOLVED background art URLs) PLUS,
+ *   from any caller that wants item-keyed masks too, a `{id, url, name}` entry
+ *   per Tile (boot.js appends these; `index` is a floor-only field and stays
+ *   absent on a Tile entry — nothing here reads it).
  * @param {(dir:string) => Promise<string[]|null>} [args.listDirectory] - injected for tests.
  * @param {(url:string) => Promise<boolean>} [args.probeUrl] - injected for tests.
  * @param {(p:{done:number, total:number, detail:string}) => void} [args.onProgress] -
@@ -230,7 +253,7 @@ export async function discoverAuthoredMasks({
   probeUrl = defaultProbeUrl,
   onProgress,
 }) {
-  const byLevelId = new Map();
+  const byTargetId = new Map();
   const perFloor = [];
   const failures = [];
   let probesAttempted = 0;
@@ -247,8 +270,8 @@ export async function discoverAuthoredMasks({
   for (const floor of floorList) {
     const art = splitArtUrl(floor.url);
     if (!art) {
-      failures.push({ levelId: floor.id, stage: 'parse', detail: `unparseable art URL "${floor.url}"` });
-      advance({ levelId: floor.id, method: 'none', found: 0, aliasesUsed: [] }, floor);
+      failures.push({ targetId: floor.id, stage: 'parse', detail: `unparseable art URL "${floor.url}"` });
+      advance({ targetId: floor.id, method: 'none', found: 0, aliasesUsed: [] }, floor);
       continue;
     }
 
@@ -263,7 +286,7 @@ export async function discoverAuthoredMasks({
           listingCache.set(art.dir, await listDirectory(art.dir));
         } catch (err) {
           listingCache.set(art.dir, null);
-          failures.push({ levelId: floor.id, stage: 'listing', detail: String(err?.message || err) });
+          failures.push({ targetId: floor.id, stage: 'listing', detail: String(err?.message || err) });
         }
       }
       const listed = listingCache.get(art.dir);
@@ -273,8 +296,8 @@ export async function discoverAuthoredMasks({
         aliasesUsed = match.aliasesUsed;
         baseFallbacksUsed = match.baseFallbacksUsed ?? [];
         method = 'listing';
-      } else if (!failures.some((f) => f.levelId === floor.id && f.stage === 'listing')) {
-        failures.push({ levelId: floor.id, stage: 'listing', detail: 'FilePicker browse unavailable or denied' });
+      } else if (!failures.some((f) => f.targetId === floor.id && f.stage === 'listing')) {
+        failures.push({ targetId: floor.id, stage: 'listing', detail: 'FilePicker browse unavailable or denied' });
       }
     }
 
@@ -292,7 +315,7 @@ export async function discoverAuthoredMasks({
               exists = await probeUrl(url);
             } catch (err) {
               exists = false;
-              failures.push({ levelId: floor.id, stage: 'probe', detail: `${url}: ${String(err?.message || err)}` });
+              failures.push({ targetId: floor.id, stage: 'probe', detail: `${url}: ${String(err?.message || err)}` });
             }
             probeMemo.set(url, exists);
           }
@@ -306,11 +329,11 @@ export async function discoverAuthoredMasks({
       }
     }
 
-    if (found.size > 0) byLevelId.set(floor.id, found);
-    advance({ levelId: floor.id, method, found: found.size, aliasesUsed, baseFallbacksUsed }, floor);
+    if (found.size > 0) byTargetId.set(floor.id, found);
+    advance({ targetId: floor.id, method, found: found.size, aliasesUsed, baseFallbacksUsed }, floor);
   }
 
   const methods = new Set(perFloor.map((f) => f.method).filter((m) => m !== 'none'));
   const method = methods.size === 0 ? 'none' : methods.size === 1 ? [...methods][0] : 'mixed';
-  return { byLevelId, method, perFloor, failures, probesAttempted };
+  return { byTargetId, method, perFloor, failures, probesAttempted };
 }

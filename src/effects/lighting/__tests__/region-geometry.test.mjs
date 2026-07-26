@@ -361,9 +361,37 @@ export function run(t) {
     'partially overlapping bands overlap (region straddles the floor boundary)',
     regionOverlapsElevationBand(5, 15, 0, 10)
   );
+  // ⚠️ THIS ASSERTION IS INVERTED FROM WHAT IT SAID BEFORE 2026-07-26. It used to
+  // read "touching at exactly one point counts as overlapping (inclusive
+  // boundary)" and pin `regionOverlapsElevationBand(10, 20, 0, 10) === true`.
+  // That was wrong, and the author's bridge map is the proof: adjacent floors
+  // SHARE a boundary by construction (floor 0 is [0,10], floor 1 is [10,20]), so
+  // an inclusive test put every boundary-touching region on BOTH floors. A
+  // Middle-floor darkness Region painted five building-shaped rectangles of
+  // lighter ground onto the river below, looking exactly like holes punched in
+  // the sky-reach shadow. Half-open gives the shared boundary to the UPPER floor
+  // alone — the same convention mask-derive.js uses for level art.
   ok(
-    'touching at exactly one point counts as overlapping (inclusive boundary)',
-    regionOverlapsElevationBand(10, 20, 0, 10)
+    'a region on the floor ABOVE, touching only at the shared boundary, does NOT overlap',
+    !regionOverlapsElevationBand(10, 20, 0, 10)
+  );
+  ok('and that same region DOES belong to the floor it actually sits on', regionOverlapsElevationBand(10, 20, 10, 20));
+  ok(
+    'a region spanning exactly one floor band does not leak UP into the next',
+    regionOverlapsElevationBand(0, 10, 0, 10) && !regionOverlapsElevationBand(0, 10, 10, 20)
+  );
+  // A GM pinning ONE elevation authors a zero-height range. That is a POINT, and
+  // a half-open interval test would reject it against its own floor's ground —
+  // so it gets `fBottom <= p < fTop` rather than being silently dropped.
+  ok(
+    'a ZERO-HEIGHT region at the floor’s own ground still applies to that floor',
+    regionOverlapsElevationBand(0, 0, 0, 10)
+  );
+  ok(
+    'a ZERO-HEIGHT region mid-band applies; one at the shared boundary belongs upstairs',
+    regionOverlapsElevationBand(5, 5, 0, 10) &&
+      !regionOverlapsElevationBand(10, 10, 0, 10) &&
+      regionOverlapsElevationBand(10, 10, 10, 20)
   );
   ok('a region entirely ABOVE the floor band does not overlap', !regionOverlapsElevationBand(11, 20, 0, 10));
   ok('a region entirely BELOW the floor band does not overlap', !regionOverlapsElevationBand(-20, -1, 0, 10));

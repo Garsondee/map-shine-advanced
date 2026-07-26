@@ -134,6 +134,7 @@
 
 import { buildSunShadowBakeMaterial } from './sun-occlusion-render.js';
 import { resolveSunMarch, sunNeedsRebake } from './sun-occlusion.js';
+import { buildSunShadowDebugMaterial, sunShadowDebugPaints } from './sun-shadow-debug.js';
 
 /**
  * The baked shadow field's resolution. A fixed square in WORLD space, so its
@@ -259,6 +260,32 @@ export function createSunShadowSubsystem({
   });
   const sunShadowQuad = new THREE.QuadMesh(sunShadowBake.material);
 
+  // THE DEBUG VIEW, built LAZILY on first use (sun-shadow-debug.js). Two
+  // reasons, both load-bearing: it needs `envLight`'s uniforms, which do not
+  // exist while this factory runs (see §2), and a player who never opens the
+  // dropdown should never compile a second fullscreen material for it.
+  /** @type {{material: *, setView: Function, setCasterTexture: Function}|null} */
+  let debug = null;
+  let debugQuad = null;
+  let debugViewId = 'off';
+  function ensureDebug() {
+    if (debug) return debug;
+    const env = getEnvLight();
+    debug = buildSunShadowDebugMaterial({
+      THREE,
+      shadowTexture: sunShadowRt.texture,
+      casterTexture,
+      // SHARED uniforms, never copies — the debug view must frame the picture
+      // exactly as the render it is diagnosing does, or it is diagnosing
+      // something else (Extraction plan trap #2).
+      uViewRect: env.uViewRect,
+      uShadowRect: env.uSunShadowRect,
+    });
+    debugQuad = new THREE.QuadMesh(debug.material);
+    debug.setView(debugViewId);
+    return debug;
+  }
+
   /**
    * Upload a floor's occluder height field as one RGBA texture.
    *
@@ -281,28 +308,39 @@ export function createSunShadowSubsystem({
     }
     const channels = field?.channels;
     const gateGrid = field?.outdoors;
-    if (!channels?.building?.spec || !gateGrid?.data) {
+    if (!channels?.height?.spec || !gateGrid?.data) {
       return { ok: false, floorIndex, reason: 'no caster height field for this floor' };
     }
-    const spec = channels.building.spec;
+    const spec = channels.height.spec;
     const { w, h } = spec;
     if (!(w > 0 && h > 0)) return { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
 
-    const coverGrid = field.coverAbove;
     const data = new Uint8Array(w * h * 4);
     let maxByte = 0;
+    let coveredTexels = 0;
     for (let i = 0; i < w * h; i++) {
-      const g = channels.overhead.data[i] ?? 0;
-      const b = channels.skyReach.data[i] ?? 0;
-      data[i * 4 + 0] = coverGrid?.data?.[i] ?? 0;
-      data[i * 4 + 1] = g;
-      data[i * 4 + 2] = b;
+      const height = channels.height.data[i] ?? 0;
+      const overhead = channels.coverOverhead?.data[i] ?? 0;
+      const building = channels.coverBuilding.data[i] ?? 0;
+      // ⚠️ R IS SKY-REACH ONLY (2026-07-26) — NOT `coverFloating`, which also
+      // folded in this FLOOR'S OWN overhead items. `d = 0` reads R raw, with no
+      // march, as "something solid stands directly over THIS PIXEL" — genuinely
+      // true for an upper FLOOR's structure (that art is not drawn at this
+      // pixel; the ground beneath it stays visible and honestly darkened). For
+      // an overhead item on the SAME floor, this pixel's only visible content
+      // IS the item's own opaque art — there is no separate, visible "ground
+      // beneath" to darken, so a same-floor item shading itself was pure
+      // self-shadowing: a lantern-on-a-plinth prop read its own footprint as
+      // "something floating overhead" and painted a false, self-inflicted
+      // shadow through its own sprite (docs/planning/Sun-Shadows-Rethink.md §4b).
+      // Overhead's coverage/height still march-cast normally below via B/G —
+      // only the zero-distance self-check excludes it.
+      data[i * 4 + 0] = channels.coverSkyReach?.data[i] ?? 0;
+      data[i * 4 + 1] = height;
+      data[i * 4 + 2] = building > overhead ? building : overhead;
       data[i * 4 + 3] = gateGrid.data[i] ?? 255;
-      // The march's reach is sized from the ART-driven channels plus the
-      // authored building height (added below) — R is coverage now, not a
-      // height, so it must NOT feed this maximum.
-      const tallest = g > b ? g : b;
-      if (tallest > maxByte) maxByte = tallest;
+      if (height > maxByte) maxByte = height;
+      if (data[i * 4 + 0] > 0 || data[i * 4 + 2] > 0) coveredTexels++;
     }
 
     // `createCasterTexture` is the caller's callback (see §3) — LINEAR
@@ -313,15 +351,13 @@ export function createSunShadowSubsystem({
     casterTexture?.dispose();
     casterTexture = tex;
     sunShadowBake.casterTexNode.value = tex;
+    debug?.setCasterTexture(tex);
     casterRect = { x: spec.x, y: spec.y, width: spec.width, height: spec.height };
-    // The march must reach the tallest of the ART casters OR the authored
-    // building height (recomputed in-shader from A, so it is not in
-    // `maxByte`) — otherwise a scene whose only casters are painted walls
-    // would size its march at zero and cast nothing.
-    casterMaxHeightPx = Math.max(
-      (maxByte / 255) * (field.scalePx ?? 0),
-      getSunShadowRenderState().params?.buildingHeightPx ?? 0
-    );
+    // The G channel now carries EVERY producer's height including the authored
+    // building one (mask-derive.js merges them), so this is the whole field's
+    // reach in one read — no second `Math.max` against a param that the field
+    // may or may not have actually used.
+    casterMaxHeightPx = (maxByte / 255) * (field.scalePx ?? 0);
     const rect = {
       minX: casterRect.x,
       minY: casterRect.y,
@@ -333,7 +369,22 @@ export function createSunShadowSubsystem({
     getEnvLight().setSunShadowRect(rect);
     // A new field invalidates whatever was marched from the old one.
     bakedSun = null;
-    return { ok: true, floorIndex, cols: w, rows: h, maxCasterHeightPx: Math.round(casterMaxHeightPx), rect };
+    return {
+      ok: true,
+      floorIndex,
+      cols: w,
+      rows: h,
+      maxCasterHeightPx: Math.round(casterMaxHeightPx),
+      // ⚠️ READ THESE TWO TOGETHER. Casters present with a max height of ZERO is
+      // the silent failure that hid sky-reach: a floor with no declared
+      // `bottomElevation` gives every caster height 0, and every count stays
+      // healthy while the field casts nothing. `caster-coverage` vs
+      // `caster-height` in the debug dropdown is the same test, by eye.
+      coveredTexels,
+      coveredPct: +((coveredTexels / (w * h)) * 100).toFixed(1),
+      completeness: field.completeness ?? null,
+      rect,
+    };
   }
 
   /**
@@ -370,13 +421,6 @@ export function createSunShadowSubsystem({
       basePx: SUN_SHADOW_BASE_PENUMBRA_PX,
     });
     sunShadowBake.setEdgeBandPx(params.edgeBandPx ?? SUN_SHADOW_EDGE_BAND_PX);
-    // The building height (recomputed in-shader from the gate) and the
-    // sky-occlusion strength — "under a bridge is dark", the term the
-    // directional march structurally cannot provide at a high sun.
-    sunShadowBake.setSkyOcclusion({
-      buildingHeightPx: active ? (params.buildingHeightPx ?? 0) : 0,
-      skyOcclusion01: active ? (params.skyOcclusion ?? 0) * atmosphere.strengthMul : 0,
-    });
 
     // The literal save/bind/render/restore triplet lives in `vt/` (§3) — this
     // module only decides WHEN it needs to run.
@@ -444,6 +488,22 @@ export function createSunShadowSubsystem({
       };
     },
     maybeBake,
+    /**
+     * The fullscreen debug quad to draw INSTEAD of the present pass, or null
+     * when the view is `off` (the normal case, and the only cost is this
+     * comparison). The viewer draws it — this module never touches the
+     * renderer (§3).
+     * @param {string} viewId - the `debugView` param's current value.
+     */
+    getDebugQuad(viewId) {
+      if (!sunShadowDebugPaints(viewId)) return null;
+      ensureDebug();
+      if (viewId !== debugViewId) {
+        debugViewId = viewId;
+        debug.setView(viewId);
+      }
+      return debugQuad;
+    },
     /** For `boot.js`'s "Sun shadows" report. `compiled` is NOT included — it
      * is a property of `envLight`'s own shader graph, not this subsystem; the
      * caller merges it in (see this module's own USAGE example). */
@@ -467,6 +527,7 @@ export function createSunShadowSubsystem({
     dispose() {
       allocator.dispose(sunShadowRt);
       sunShadowBake.material?.dispose?.();
+      debug?.material?.dispose?.();
       casterTexture?.dispose?.();
     },
   };

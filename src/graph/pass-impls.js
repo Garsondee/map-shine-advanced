@@ -161,6 +161,20 @@ export const PASS_IMPLS = Object.freeze({
       'InstancedBufferGeometry, positions straight from the arena — additively into scene.lit, guarding ' +
       'the clear like the candle flame. Same invocability caveat as geometry.world.',
   },
+  'surface.response': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-07-26 (tiers 0-2, docs/planning/Specular.md): runSurfaceResponsePass (a closure ' +
+      'inside startVtPanViewer, in the local passImpls map runPassPlan walks) draws the specular ' +
+      "subsystem's OWN dedicated scene into scene.lit — two meshes over one AABB-cropped quad, a " +
+      'MULTIPLY for the diffuse a conductor replaces and an ADD for the highlights. Unlike water this ' +
+      'genuinely needed to be a pass rather than a drawable: it reads buf:scene.illum, which does not ' +
+      'exist until light.accumulate has run. Skips entirely (JS early-return, no GPU work) when the ' +
+      'effect is off or no specular mask has loaded. Same invocability caveat as geometry.world.',
+  },
   'post.bloom': {
     fn: startVtPanViewer,
     module: 'vt/index.js',

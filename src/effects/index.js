@@ -57,6 +57,14 @@ export {
   SUN_SHADOW_FIELD_DIM,
   SUN_SHADOW_MARCH_STEPS,
 } from './lighting/sun-shadow-subsystem.js';
+// THE DEBUG VIEW's own vocabulary — boot reads it to drive the derivation
+// includes from the picked view, so "sky-reach only" isolates for real.
+export {
+  SUN_SHADOW_DEBUG_VIEWS,
+  sunShadowDebugInclude,
+  sunShadowDebugPaints,
+  sunShadowDebugView,
+} from './lighting/sun-shadow-debug.js';
 // THE POINT-LIGHT POOL — extraction step 3 of docs/planning/
 // VT-Pan-Viewer-Extraction.md. The mesh pool, its two dedicated scenes, the
 // candle wall-clip cache, and the per-frame reconcile.
@@ -155,6 +163,74 @@ export {
 export { createWaterSurfaceSubsystem } from './water/water-surface-subsystem.js';
 export { createWaterSeams } from './water/water-seams.js';
 export { createWaterRegistration } from './water/water-registration.js';
+// SHINE (docs/planning/Specular.md) — `surface.response`, tiers 0-2. The
+// `_Specular` mask read as a MATERIAL (hue→F0, saturation→metalness,
+// value→smoothness) instead of as V2's single luminance plus a global tint,
+// and the indoor/outdoor split made physical: outdoors reflects the sky handle's
+// two analytic lobes, indoors reflects the lamps, whose DIRECTION comes from
+// the gradient of `buf:scene.illum` rather than from a light list.
+export {
+  decodeSpecularMaterial,
+  keyLightDirection,
+  ggxDistribution,
+  smithVisibility,
+  schlickFresnel,
+  srgbToLinear01,
+  SPECULAR_PRESENCE_EDGE0,
+  SPECULAR_PRESENCE_EDGE1,
+  DIELECTRIC_F0,
+  MIN_ROUGHNESS,
+} from './specular/specular-material.js';
+export { SPECULAR, SPECULAR_PARAMS } from './specular/specular.js';
+export { buildSpecularSurfaceMaterial, SPECULAR_MASK_IMAGE_SCALE } from './specular/specular-render.js';
+export { createSpecularSurfaceSubsystem } from './specular/specular-surface-subsystem.js';
+export { createSpecularSeams } from './specular/specular-seams.js';
+export { createSpecularRegistration } from './specular/specular-registration.js';
+// FLUID — goo in thin glass tubes (docs/planning/Fluid.md). Phase 1 only: the
+// declaration and the CPU tube-net extractor. NOTHING RENDERS YET — there is no
+// pack bake, no sim, no material and no registration, so `FLUID` is exported
+// for the Node suite and for the registry to find later, not because a viewer
+// consumes it today. `fluid.js`'s header says the same thing at more length,
+// because a manifest cannot tell "declared" from "built" on its own.
+//
+// `extractTubeNet` is the whole of the CPU side: connected components, the
+// GEODESIC arc length (derived from the tube's shape — never differenced out of
+// the painted ramp, which is the V2 mistake `feedback_sdf_does_not_draw_the_
+// edge` names), the area/radius profiles, and the hint-vs-geodesic correlation
+// that decides which end the goo flows from without trusting antialiased edge
+// texels.
+// Phase 2 added the PACK (the tube net as one uploadable RGBA buffer) and the
+// BAKE (the version poll). There is still no GPU pass: three of the pack's four
+// channels are CPU-only quantities, so a jump flood would recompute the fourth
+// into a separate target for no visible difference (Fluid.md correction #3).
+// The whole bake is therefore a pure function plus one upload — and Node-tested
+// end to end, including the exit criterion that bakes do not track frames.
+export { FLUID, FLUID_PARAMS } from './fluid/fluid.js';
+export {
+  buildFluidPack,
+  packToHalfFloat,
+  toHalfFloat,
+  fromHalfFloat,
+  FLUID_PACK_MAX_DIM,
+  FLUID_PACK_CHANNELS,
+} from './fluid/fluid-pack.js';
+export { buildFluidSurfaceMaterial } from './fluid/fluid-render.js';
+export { createFluidSurfaceSubsystem } from './fluid/fluid-surface-subsystem.js';
+export { createFluidRegistration, createFluidSeams } from './fluid/fluid-registration.js';
+export {
+  extractTubeNet,
+  geodesicFrom,
+  labelComponents,
+  chamferRadius,
+  interiorness,
+  weightedCorrelation,
+  fillEmptyBins,
+  FLUID_PRESENCE_MIN_BYTE,
+  FLUID_MIN_TUBE_TEXELS,
+  FLUID_PROFILE_SAMPLES,
+  FLUID_MAX_TUBES,
+  FLUID_HINT_MIN_CORRELATION,
+} from './fluid/fluid-net.js';
 // DOOR GRAPHICS as a self-owned subsystem (extracted 2026-07-26). Also the
 // template tier-0 water follows: an opaque, LIT map element drawn into
 // buf:scene.color BEFORE lighting, in its own scene.
@@ -171,7 +247,9 @@ export {
   WATER_MASK_FILTER,
   WATER_BODY_SUPERSAMPLE,
 } from './water/water-body.js';
-export { buildSurfaceResponsePass } from './surface-response.js';
+// `buildSurfaceResponsePass` is GONE (2026-07-26) — surface.response is live
+// (tiers 0-2, docs/planning/Specular.md) and its NotBuilt door was deleted with
+// the seam it stood for. The real exports are the specular/ block above.
 
 // ── EFFECT REGISTRATION (docs/planning/Effect-Registration.md) ──────────────
 // The ONE door for an effect's enable/params/tier. UI-shadow is the first

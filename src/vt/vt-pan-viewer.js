@@ -190,6 +190,12 @@ import {
   createPointLightPool,
   createWaterBodySubsystem,
   createWaterSurfaceSubsystem,
+  createFluidSurfaceSubsystem,
+  createSpecularSurfaceSubsystem,
+  // `surface.response`'s outdoor/indoor split reads the SAME world-space
+  // outdoors gate `buf:scene.attr`'s G channel does — injected rather than
+  // re-derived, so "world XY → mask UV → sample" still exists exactly once.
+  buildWorldSpaceOutdoorsGate,
   createSkyHandle,
   buildGradePresentMaterial,
   buildBloomMaterials,
@@ -555,6 +561,15 @@ function disposeActive() {
   } catch (err) {
     log.error('water body dispose failed — VRAM may be leaked:', err);
   }
+  // SHINE's two meshes + shared geometry + two NodeMaterials + the uploaded
+  // `_Specular` DataTexture (~13 MB RGBA on a 10k map — the largest single
+  // allocation the effect makes). Same per-cycle VRAM-leak reasoning as the
+  // rest of this list.
+  try {
+    _active.disposeSpecular?.();
+  } catch (err) {
+    log.error('specular dispose failed — VRAM may be leaked:', err);
+  }
   // The candle flame billboard's own mesh/geometry/material (its lights are in
   // the shared pool, freed by disposePointLights below).
   try {
@@ -739,6 +754,7 @@ export async function startVtPanViewer({
   onLoadProgress,
   onPageDecoded,
   onItemAlpha,
+  getCoverItems,
   onDeviceLost,
   getCandleRenderState,
   getDoorRenderState,
@@ -755,11 +771,23 @@ export async function startVtPanViewer({
   getFloorsWithWater,
   getWaterMaskUrl,
   getWaterRenderState,
+  getSpecularMaskUrl,
+  getSpecularMaskRect,
+  getSpecularRenderState,
+  getFluidMaskUrl,
+  getFluidRenderState,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
   onPageDecoded ??= () => {};
   onItemAlpha ??= () => {};
+  // EVERY floor's cover art, unfiltered by visibility — see
+  // `primeCoverAlphaGrids`. A getter, not an array: the scene's item set
+  // changes as documents are created/deleted, and a captured array would
+  // freeze cover physics at load (the trap the extraction plan names first).
+  // Defaulting to empty means an un-wired caller (the torture fixture) simply
+  // primes nothing rather than throwing.
+  getCoverItems ??= () => [];
   // WIND OVERLAY EXPOSURE (Wind.md) — same "absence = fully outdoors"
   // default the candle geometry itself falls back to when un-sampled
   // (computeCandleFlameArrays' own convention), so an un-wired caller (the
@@ -806,6 +834,33 @@ export async function startVtPanViewer({
   // `enabledFromProfile: 'low'`: tier 0 is a mask read and a tint, so an
   // un-wired caller still gets water rather than a silently-disabled effect.
   getWaterRenderState ??= () => ({ enabled: true, params: {} });
+  // SHINE's three seams (docs/planning/Specular.md). `getSpecularMaskUrl` is
+  // boot's door onto the floor's authored `_Specular` file — the ONLY thing
+  // that carries the mask's COLOUR, and therefore the whole material, since the
+  // authority's own grid is extracted R-only and for a colour mask R is not
+  // presence. `getSpecularMaskRect` is the world rect that file covers. Unwired
+  // (the torture fixture) means no mask at all, so both meshes stay hidden and
+  // the pass takes a true JS early-return — inert by construction, not by a
+  // flag, exactly like the water and sun-shadow seams above.
+  getSpecularMaskUrl ??= () => null;
+  getSpecularMaskRect ??= () => null;
+  // Default-ON, matching the manifest's `enabledFromProfile: 'low'`. Safe to
+  // default on in a way water's is not even quite: with no `_Specular` file the
+  // effect renders literally nothing, so a scene that never opted in cannot be
+  // surprised by it.
+  getSpecularRenderState ??= () => ({ enabled: true, params: {} });
+  // FLUID's seams (docs/planning/Fluid.md). `getFluidMaskUrl` is the authored
+  // file at its own resolution — fluid has NO coarse-grid consumer, because
+  // connected components and geodesic arc length are high-frequency questions
+  // and the ≤512 derivation grid merges tubes a tube's width apart (correction
+  // #2). Unwired means no mask, so the mesh never becomes visible and the whole
+  // effect is inert by construction rather than by a flag.
+  getFluidMaskUrl ??= () => null;
+  // Deliberately NOT defaulted. `feedback_seam_default_hides_unwired`: water
+  // shipped its render-state seam declared, defaulted and never passed, and the
+  // only symptom was that every control silently did nothing while every test
+  // passed. The subsystem reports the absence loudly instead.
+
   // THE CANDLE EFFECT's data seam (effects/candle-flame-render.js): boot injects
   // `{ enabled, params: {sizePx, color, lightRadiusPx}, anchors: [{id,x,y}] }` for
   // the active floor. vt/ owns the GPU lifecycle (the flame billboard mesh + the
@@ -1424,6 +1479,34 @@ export async function startVtPanViewer({
       tex.needsUpdate = true;
       return tex;
     }
+    /**
+     * FLUID's pack (`effects/fluid/fluid-pack.js`) — RGBA **float**, not bytes.
+     * Its channels are an arc-length coordinate, a cross-section coordinate, a
+     * tube id and a radius in world px; quantising any of them to 8 bits would
+     * turn the arc length into ~1/255 steps, which on a 3,000 px tube is a
+     * 12 px staircase in the one value the slug pattern scrolls along.
+     *
+     * `FloatType` rather than `HalfFloatType` because the pack is authored as a
+     * `Float32Array` and half would need a conversion whose only benefit is
+     * VRAM — 8.8 MB against 17.6 MB at full pack size. `packToHalfFloat` exists
+     * and is tested for the day that trade is worth making; it is not yet.
+     */
+    function createFluidPackTexture(data, w, h) {
+      const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
+      // LINEAR: the pack is a smooth field (arc length, distance-from-centre),
+      // so interpolating between texels is exactly right and is what lets a
+      // ~6-texel-wide tube shade as a smooth cylinder rather than as 6 bands.
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      // flipY:false — v=0 is the image's TOP row, matching the world-quad
+      // convention every tile uses and the row order `downsample` produces.
+      // feedback_y_flip_recurring_risk: verify orientation at every NEW mapping.
+      tex.flipY = false;
+      tex.needsUpdate = true;
+      return tex;
+    }
     const sunShadows = createSunShadowSubsystem({
       THREE,
       allocator,
@@ -1902,8 +1985,32 @@ export async function startVtPanViewer({
       const filtered = regions.filter((region) =>
         regionOverlapsElevationBand(region.elevationBottom, region.elevationTop, floorBottom, floorTop)
       );
+      // ⚠️ THE GATING DECISION, RECORDED (2026-07-26). "15 of 15 regions active"
+      // reads identically whether every region genuinely belongs to this floor's
+      // band or the floor lookup returned null and the filter FAILED OPEN — and
+      // fail-open is exactly how an upper floor's building-shaped darkness ends
+      // up painted on the ground floor, looking for all the world like a shadow
+      // bug. Two states, one number, no way to tell them apart: the same
+      // instrument gap that hid sky-reach for three rounds
+      // (feedback_instruments_must_not_lie).
+      lastRegionGating = {
+        floorIndex: view?.floorIndex ?? null,
+        floorBand: { bottom: floorBottom, top: floorTop },
+        failedOpen: floorBottom === null && floorTop === null,
+        total: regions.length,
+        kept: filtered.length,
+        dropped: regions.length - filtered.length,
+        bands: regions.map((r) => ({
+          key: r.key,
+          bottom: r.elevationBottom ?? null,
+          top: r.elevationTop ?? null,
+          kept: regionOverlapsElevationBand(r.elevationBottom, r.elevationTop, floorBottom, floorTop),
+        })),
+      };
       return { regions: filtered, currentFloor };
     }
+    /** The last elevation-gating decision, verbatim — see its assignment above. */
+    let lastRegionGating = null;
 
     function updateRegionDarknessMeshes(darkness01, activeRegions) {
       const sortedByBrightestLast = activeRegions
@@ -3566,7 +3673,13 @@ export async function startVtPanViewer({
       renderer.setMRT(previousMRT);
     }
     function runPresentCompositePass() {
-      presentQuad.render(renderer); // three's own fullscreen path — carries its own camera
+      // THE SUN-SHADOW DEBUG VIEW (author, 2026-07-26) — when a view is picked
+      // it REPLACES the present entirely rather than blending over it: the
+      // point is to see the shadow field alone, on white, with nothing else in
+      // the frame to mistake it for. `off` (the default, and the only thing a
+      // player ever has) returns null and costs one comparison.
+      const debugQuad = sunShadows.getDebugQuad(getSunShadowRenderState().params?.debugView ?? 'off');
+      (debugQuad ?? presentQuad).render(renderer); // three's own fullscreen path — carries its own camera
     }
     // light.accumulate — ambient/exterior light PLUS point-light illumination
     // as of 2026-07-18 (coloration, darkness sources, animations, the global
@@ -3626,8 +3739,13 @@ export async function startVtPanViewer({
       // be seen NOT to track each other.
       waterBody.maybeBake(view?.floorIndex ?? 0);
       // Re-crop the tier-0 surface quad to the water's AABB — gated on the same
-      // bake generation, so a quiet frame costs one integer compare.
-      waterSurface.sync(view?.floorIndex ?? 0);
+      // bake generation, so a quiet frame costs one integer compare. The
+      // viewRect is for tier 3's synthesised eye ONLY and is never gated —
+      // same call specular makes below, for the same reason.
+      waterSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
+      // FLUID: same cadence, same shape — cheap to call, one string compare when
+      // nothing changed, and it owns its own mask-url change detection.
+      fluidSurface.sync(view?.floorIndex ?? 0);
 
       // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
       // RAW ambient endpoints (not the pre-mixed background: each region
@@ -3764,6 +3882,44 @@ export async function startVtPanViewer({
     }
 
     /**
+     * surface.response (docs/planning/Specular.md) — SHINE, tiers 0-2.
+     *
+     * Draws the specular subsystem's own dedicated scene into scene.lit: a
+     * MULTIPLY mesh that lets a real conductor suppress the diffuse it replaces,
+     * then an ADD mesh for the highlights. Same guarded-clear discipline as the
+     * candle flame and the particles above — `light.accumulate` ended with
+     * `setRenderTarget(null)`, so re-bind and turn `autoClearColor` OFF or the
+     * first `render()` wipes the whole composited scene.
+     *
+     * ⚠️ NO MRT SCOPING HERE, and that is checked rather than skipped:
+     * `runGeometryWorldPass` saves/sets/RESTORES the renderer-global attr MRT,
+     * so by the time this runs there is no attr attachment bound and scene.lit
+     * is single-attachment. Setting an `mrtNode` on these materials would be
+     * actively harmful — `MRTNode` matches its keys against the bound target's
+     * TEXTURE NAMES, and a key with no match yields an empty output struct, i.e.
+     * no fragment output at all (vt/scene-attr.js's own header).
+     *
+     * Skips ENTIRELY when the effect is off or no `_Specular` mask has loaded —
+     * a true JS early-return, zero GPU work, not a uniform set to zero
+     * (Effects.md Law 4).
+     */
+    function runSurfaceResponsePass() {
+      // The per-frame push happens BEFORE the visibility check, never inside
+      // it: `sync` is what SETS visibility (it learns the mask arrived and the
+      // params resolved), so gating it on `hasContent()` would mean the meshes
+      // could never become visible in the first place — a deadlock that would
+      // read on screen as "the effect does nothing", with every test green.
+      specularSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
+      if (!specularSurface.hasContent()) return;
+      const previousAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      renderer.render(specularSurface.scene, camera);
+      renderer.autoClearColor = previousAutoClear;
+      renderer.setRenderTarget(null);
+    }
+
+    /**
      * surface.particles (docs/planning/Particles.md §16) — draw the GPU particles
      * additively over the fully-lit scene. light.accumulate ended with
      * setRenderTarget(null), so re-bind sceneLit and GUARD the clear
@@ -3877,6 +4033,7 @@ export async function startVtPanViewer({
       'masks.occlusion': runMaskOcclusionPass,
       'geometry.world': runGeometryWorldPass,
       'light.accumulate': runLightAccumulatePass,
+      'surface.response': runSurfaceResponsePass,
       'surface.particles': runSurfaceParticlesPass,
       'post.bloom': runPostBloomPass,
       'present.composite': runPresentCompositePass,
@@ -4225,7 +4382,7 @@ export async function startVtPanViewer({
         // LUT strength stays 0 for now: the LUT shader path + placeholder are
         // wired, but bundled .cube loading is the next rung (grade.js's
         // `bundled-lut-loading`), so there is no real LUT to blend toward yet.
-        { toneMapping: p.toneMapping ?? 'agx', lutStrength: 0 }
+        { toneMapping: p.toneMapping ?? 'neutral', lutStrength: 0 }
       );
     }
 
@@ -4752,6 +4909,31 @@ export async function startVtPanViewer({
      * anyway (they move constantly and are not architecture), so decoding their
      * art would be pure waste. Counted, not silently dropped.
      */
+    /**
+     * Ask for the coarse alpha of EVERY cover item in the scene — every floor's
+     * background, foreground and tiles, whether or not the viewed floor can see
+     * them.
+     *
+     * THE BUG THIS FIXES (author, 2026-07-26: *"it shows only the shadow for
+     * overhead elements on the floor above… the actual background image covers a
+     * huge amount of space"*). `boot.js` deliberately hands the mask authority an
+     * UNFILTERED item list — its own comment says "cover physics must not depend
+     * on what the user is currently viewing" — but the ALPHA, without which an
+     * item contributes nothing at all, was only ever requested from
+     * `ensureItemLoaded`, i.e. only for items on the DRAW list. So the authority
+     * knew about the floor above's background and had `alpha: null` for it
+     * forever. The one class that worked was tiles, because a tile with an empty
+     * levels set is "present on every floor" and is therefore always drawn.
+     *
+     * NO `getSourceDimensions` CALL for these: that is a ranged header fetch per
+     * item, and the alpha worker already returns the source's true dimensions.
+     * Passing `null` skips a network round-trip per off-screen item and loses
+     * nothing (`requestItemAlphaGrid` only uses `dims` as a fallback).
+     */
+    function primeCoverAlphaGrids() {
+      for (const item of getCoverItems()) requestItemAlphaGrid(item, null);
+    }
+
     function requestItemAlphaGrid(item, dims) {
       if (item?._placement?.kind === 'token') {
         alphaGridStats.skippedTokens++;
@@ -4870,6 +5052,77 @@ export async function startVtPanViewer({
       loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
       getWaterRenderState,
       timeMsNode: uGlobalTimeMs, // tier 2's field travels on THE shared clock
+      // TIER 3 — envLight's OWN uniforms, shared rather than duplicated: two
+      // view rects updated on different cadences is exactly how two consumers
+      // of one frame end up disagreeing about where a world point is. The
+      // identical objects `specularSurface` below receives.
+      uViewRect: envLight.uViewRect,
+      uOutdoorsRect: envLight.uOutdoorsRect,
+      outdoorsTexNode: envLight.outdoorsTexNode,
+      buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+      getSkyHandle: () => skyHandle,
+    });
+
+    // ── FLUID, tiers 0-3 (docs/planning/Fluid.md) ──────────────────────────
+    // Beside water's surface for the same trap-#4 reason: it takes `scene`, so
+    // it must be constructed after `scene` exists. It owns the whole chain —
+    // mask fetch, tube-net extraction, pack bake, mesh crop — because unlike
+    // water there is no GPU flood to schedule (correction #3: three of the
+    // pack's four channels are CPU-only, so the bake is a pure function plus
+    // one upload).
+    const fluidSurface = createFluidSurfaceSubsystem({
+      THREE,
+      scene,
+      getFluidMaskUrl,
+      loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
+      createPackTexture: createFluidPackTexture,
+      getSceneRect: () => ({
+        minX: dimensions.sceneRect.x,
+        minY: dimensions.sceneRect.y,
+        maxX: dimensions.sceneRect.x + dimensions.sceneRect.width,
+        maxY: dimensions.sceneRect.y + dimensions.sceneRect.height,
+      }),
+      getFluidRenderState,
+      timeMsNode: uGlobalTimeMs, // THE shared clock — never a private one
+    });
+
+    // ── SHINE, tiers 0-2 (effects/specular/specular-surface-subsystem.js) ──
+    // Constructed beside water's surface for the same trap-#4 reason, but it
+    // does NOT take `scene`: it owns its own, because it reads buf:scene.illum
+    // and therefore cannot draw inside geometry.world the way water's surface
+    // does. See `runSurfaceResponsePass` below and the module's own header.
+    //
+    // `sceneColor.textures[1]` is buf:scene.attr — MRT attachment 1, and this
+    // is its FIRST consumer anywhere in the renderer (post.grade is still a
+    // seam). A missing attachment compiles the floor gate OUT rather than
+    // crashing, and `getStatus().floorGate` reports which happened, because
+    // "metal draws over upper-floor roofs" is silent on screen.
+    const specularSurface = createSpecularSurfaceSubsystem({
+      THREE,
+      getSpecularMaskUrl,
+      getSpecularMaskRect,
+      loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
+      createMaskTexture: createMaskDataTexture,
+      illumTexture: sceneIllum.texture,
+      // buf:scene.color's COLOUR attachment — the UN-LIT composite. Tier 3
+      // (`relief`) reads its luminance gradient as the map art's own painted
+      // surface slope, which is what gives the highlight something to break
+      // across. Un-lit on purpose: sampling scene.lit would fold this pass's
+      // own output back into its own normal estimate.
+      albedoTexture: sceneColor.texture,
+      attrTexture: sceneColor.textures?.[1] ?? null,
+      // envLight's OWN uniforms, shared rather than duplicated: two view rects
+      // updated on different cadences is exactly how two consumers of one frame
+      // end up disagreeing about where a world point is.
+      uViewRect: envLight.uViewRect,
+      uOutdoorsRect: envLight.uOutdoorsRect,
+      outdoorsTexNode: envLight.outdoorsTexNode,
+      buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+      getSpecularRenderState,
+      // THE SKY HANDLE, as a getter — it is REBUILT (not mutated) whenever the
+      // sun moves, so capturing the value here would pin the neutral handle the
+      // viewer starts with and the sun glint would never move.
+      getSkyHandle: () => skyHandle,
     });
 
     /**
@@ -6999,6 +7252,16 @@ export async function startVtPanViewer({
       // own header for why staleness here is the exact bug class this exists
       // to prevent.
       refreshCoarsePinBudget();
+      // ⚠️ COVER ALPHA IS PRIMED FOR EVERY FLOOR, NOT THE DRAW LIST (2026-07-26).
+      // The draw list is filtered by what the viewed floor can SEE; cover
+      // physics must not be. Before this, an upper floor's background art was
+      // only ever decoded if that floor happened to be visible, so on the
+      // author's bridge map the entire deck cast nothing while the crates
+      // sitting on it cast fine — tiles default to an EMPTY levels set, which
+      // means "present on every floor", so they were always drawn and always
+      // had alpha. `alphaRequested` dedupes, so this is one decode per item per
+      // session no matter how often residency runs.
+      primeCoverAlphaGrids();
       // sortByLayer stamps `renderOrder` on each item — THE law
       // (scene/layer-order.js). Rebuilt every update because the draw list
       // itself changes with the viewed floor.
@@ -8710,8 +8973,25 @@ export async function startVtPanViewer({
        * single allocation water makes. */
       disposeWaterBody() {
         waterSurface.dispose();
+        fluidSurface.dispose();
         waterBody.dispose();
       },
+      /** Tear down SHINE's two meshes, their shared geometry, both
+       * NodeMaterials and the uploaded `_Specular` DataTexture. That texture is
+       * the largest single allocation this effect makes (~13 MB RGBA at
+       * `SPECULAR_MASK_IMAGE_SCALE` on a 10k map), so a missed dispose here is a
+       * per-Stop/Restart leak of exactly the size the mask-image module's own
+       * header budgets for. */
+      disposeSpecular() {
+        specularSurface.dispose();
+      },
+      /** SHINE's own state — for the debug report. `visible: false` with a
+       * loaded mask means the resolved floor has no painted metal (the honest
+       * "nothing to draw"); `maskImage: 'not loaded'` means no `_Specular` file
+       * exists for it at all, which is inert BY DESIGN. `outdoorsGate`/
+       * `floorGate` report which branches actually COMPILED — both are silent
+       * on screen if they did not, which is precisely why they are reported. */
+      getSpecularInfo: () => specularSurface.getStatus(),
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,
@@ -9488,6 +9768,13 @@ export async function startVtPanViewer({
             "live checks — region-darkness.js's own header has the full citations.",
           poolSize: regionMeshes.size,
           activeRegions: regions.length,
+          // ⚠️ READ THIS BEFORE `regions`. `failedOpen: true` means the viewed
+          // floor's elevation band could not be resolved, so EVERY region in the
+          // scene is active regardless of which floor it belongs to — an upper
+          // floor's darkness lands on the one you are looking at, in building-
+          // shaped patches that read exactly like a broken shadow. `dropped: 0`
+          // with `failedOpen: false` is the healthy single-floor answer.
+          elevationGating: lastRegionGating ?? 'not yet evaluated',
           // The shared uniforms EVERY region's material actually reads —
           // if either of these is near [0,0,0], that alone is the bug
           // (a region overwrites its footprint with mix(daylight,darkness,

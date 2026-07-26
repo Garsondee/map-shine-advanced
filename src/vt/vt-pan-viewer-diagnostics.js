@@ -549,6 +549,12 @@ export function buildViewerDiagnostics({
     // comparison is this phase's whole exit criterion). `resolve.floorIndex:
     // null` means no floor has an authored water mask — not an error.
     waterBody: _active?.getWaterBodyInfo?.() ?? { available: false },
+    // SHINE (2026-07-26, docs/planning/Specular.md) — tiers 0-3. Read
+    // `maskImage` FIRST: 'not loaded' means the viewed floor has no authored
+    // specular file at all, so the effect is inert BY DESIGN and nothing below
+    // it matters. `outdoorsGate`/`floorGate` report which branches actually
+    // COMPILED, and both are silent on screen if they did not.
+    specular: _active?.getSpecularInfo?.() ?? { available: false },
     // SHADERS (docs/planning/Shaders.md).  is the fork
     // in the road, not a detail: WITH it, compileAsync hands work to driver
     // threads; WITHOUT it, compileAsync resolves instantly having done

@@ -88,10 +88,10 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
   toneMapping: {
     type: 'enum',
     values: [...TONE_MAP_NAMES],
-    default: 'agx',
+    default: 'neutral',
     category: 'Look',
     label: 'Film response',
-    help: 'The HDR→display curve. AgX (default) handles bright coloured light gracefully; ACES is punchier/contrastier; Neutral is the subtlest; None keeps the raw rolloff. This is what makes the image read cinematic instead of clipped.',
+    help: 'The HDR→display curve. Neutral (default) keeps colour and contrast close to the source; AgX compresses highlights hardest but reads flatter/desaturated without extra contrast; ACES is punchier/contrastier; None keeps the raw rolloff.',
   },
 
   // ── Technical (behind Advanced) ──────────────────────────────────────────
@@ -133,7 +133,9 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
 /**
  * The manifest — the effect as data (Effects.md §2 shape). Ships ENABLED (like
  * bloom) because a film response curve is a KEY part of "the environment looks
- * right", and the author chose AgX as the default. `toneMapping: 'none'`
+ * right", and the author chose Neutral as the default (AgX's base curve reads
+ * flat/desaturated on this content without an added contrast pass — Grade.md
+ * fork). `toneMapping: 'none'`
  * restores raw/parity for anyone who wants it. `a11y.photosensitive: false` —
  * a static colour transform, no motion.
  * @type {import('../effect-manifest.js').EffectManifest}

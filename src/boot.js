@@ -105,6 +105,7 @@ import {
   BLOOM_PRESETS,
   bloomPreset,
   SUN_SHADOWS,
+  sunShadowDebugInclude,
   SUN_SHADOW_PARAMS,
   describeEffectSettings,
   deriveEffectLayers,
@@ -183,8 +184,18 @@ import {
   assembleLayerDescriptors,
 } from './scene/index.js';
 import { buildEffectCard, buildParamControl, buildInheritableRangeRow } from './diag/effect-controls.js';
-import { createWaterSeams, createWaterRegistration, WATER_PARAMS } from './effects/index.js';
-import { buildSunShadowsReport, buildWaterBodyReport } from './diag/effect-status-reports.js';
+import {
+  createWaterSeams,
+  createWaterRegistration,
+  WATER_PARAMS,
+  createFluidSeams,
+  createFluidRegistration,
+  FLUID_PARAMS,
+  createSpecularSeams,
+  createSpecularRegistration,
+  SPECULAR_PARAMS,
+} from './effects/index.js';
+import { buildSunShadowsReport, buildWaterBodyReport, buildSpecularReport } from './diag/effect-status-reports.js';
 
 const MODULE_ID = 'map-shine-advanced';
 
@@ -585,12 +596,16 @@ function install() {
    * inside `startRealSceneViewer` (see its own construction site) — a
    * module-level `let` so `getVegetationRenderState` below can read the
    * CURRENT scene's map by closure reference, the same relationship
-   * `activeFloorContext` already has with its own updater. Deliberately built
-   * OUTSIDE `scene/mask-authority.js`: that authority's job is CPU-derived
-   * scalar products (coverAbove/skyReach) sampled point-wise; vegetation only
-   * ever needs a URL to load as its own whole-image texture, so routing this
-   * through the authority's ingest/derivation machinery would be a needless,
-   * unrelated coupling (see effects/vegetation-render.js's own header). */
+   * `activeFloorContext` already has with its own updater. Deliberately its
+   * OWN map rather than a `scene/mask-authority.js`-DERIVED product: that
+   * authority's derivation machinery builds CPU scalar products (coverAbove/
+   * skyReach) sampled point-wise, and vegetation only ever needs a URL to
+   * load as its own whole-image texture — routing THAT through ingest/
+   * derivation would be needless, unrelated coupling (see
+   * effects/vegetation-render.js's own header). It DOES now read through the
+   * authority's own query doors (`authoredStatus`/`authoredStatusForItem`,
+   * 2026-07-26) rather than reaching into discovery's raw result directly —
+   * only the STORAGE stays separate here, not the read path. */
   let vegetationUrlByItemId = new Map();
 
   /** The floor the user is currently viewing, as an anchor-authority floor
@@ -605,6 +620,14 @@ function install() {
    * a floor OTHER than the active one, which water's cross-floor borrow needs
    * (it resolves to a LOWER floor than the one being viewed). */
   let lastKnownFloors = null;
+  /** EVERY floor's cover art (backgrounds, foregrounds, tiles), unfiltered by
+   * visibility — the SAME list handed to the mask authority, kept here so the
+   * viewer can decode each item's coarse alpha regardless of whether the viewed
+   * floor happens to draw it. Before 2026-07-26 only the DRAW list was decoded,
+   * so an upper floor's background silently contributed no cover at all
+   * ([[feedback_membership_beats_derived_threshold]]'s sibling defect: the
+   * authority knew the item existed and had `alpha: null` for it forever). */
+  let coverItems = [];
 
   /** Resolve the active floor's elevation MIDPOINT (a point interior to its
    * band, so an anchor bound to an adjacent floor's band never matches at a
@@ -675,13 +698,20 @@ function install() {
   // because this effect's params split across two owners:
   //   - the LOOK (strength, softness, edge band) rides the readout the viewer's
   //     bake reads, like bloom's;
-  //   - the CASTER SET (building height, the three isolation toggles) is an
+  //   - the CASTER SET (building height, which producers are included) is an
   //     input to the mask authority's DERIVATION, so it is pushed there. That
   //     call is change-detecting, so a cascade resolve that alters nothing
   //     costs one comparison and does not dirty a 512² field.
   effectRegistry.register(SUN_SHADOWS, (resolved) => {
     sunShadowReadout = { enabled: resolved.enabled, params: resolved.params };
     const p = resolved.params ?? {};
+    // THE ISOLATION IS REAL, NOT A SHADER MULTIPLY. An isolating debug view
+    // ("sky-reach only") restricts what the DERIVATION writes, so the excluded
+    // producers' channels are genuinely absent from the field rather than
+    // multiplied by zero (`tsl/no-uniform-gates`). One dropdown drives it —
+    // it replaced three bools that could disagree with it and each other
+    // (effects/lighting/sun-shadow-debug.js's own header).
+    const isolate = sunShadowDebugInclude(p.debugView ?? 'off');
     maskAuthority.setCasterHeightSpec({
       distancePixels: readGridDistancePixels().distancePixels,
       // A disabled effect contributes no casters at all — the height field goes
@@ -689,9 +719,9 @@ function install() {
       // nothing downstream either.
       buildingHeightPx: resolved.enabled ? (p.buildingHeightPx ?? 0) : 0,
       include: {
-        building: resolved.enabled && p.showBuilding !== false,
-        overhead: resolved.enabled && p.showOverhead !== false,
-        skyReach: resolved.enabled && p.showSkyReach !== false,
+        building: resolved.enabled && isolate.building,
+        overhead: resolved.enabled && isolate.overhead,
+        skyReach: resolved.enabled && isolate.skyReach,
       },
     });
   });
@@ -1037,14 +1067,11 @@ function install() {
     for (const k of [
       'strength01',
       'buildingHeightPx',
-      'skyOcclusion',
       'dawnDuskLength',
       'lengthScale',
       'softnessBias',
       'edgeBandPx',
-      'showBuilding',
-      'showOverhead',
-      'showSkyReach',
+      'debugView',
     ]) {
       if (k in p) {
         sunShadowLiveOverride[k] = p[k];
@@ -1251,16 +1278,13 @@ function install() {
           `shadow. Upper-floor (sky-reach) and overhead shadows still work. ${degraded}`
       );
     }
-    // `coverAbove` is what makes UNDER a bridge dark at ANY sun angle — the
-    // sky-occlusion term (author: "block light from getting to bits of the
-    // scene below that point", "not able to see the sky from that space").
-    // Its own inputs are art alpha only, so it never trips the required-mask
-    // check; the acknowledge flag is passed for symmetry with the reads above.
-    const coverAbove =
-      maskAuthority.getDerived('coverAbove', floorIndex, { acknowledgeMissingRequired: true })?.grid ?? null;
+    // NOTE: `coverAbove` is no longer read here. It fed the separate
+    // `skyOcclusion` multiply, which was deleted on 2026-07-26 — "under a
+    // bridge is dark" is now what the march itself returns once it samples
+    // `d = 0`, at the one shared strength (Sun-Shadows-Rethink.md §3). The
+    // product still exists and is still served; rain will want it.
     return {
       channels: field.channels,
-      coverAbove,
       outdoors,
       scalePx: field.scalePx,
       completeness: field.completeness,
@@ -1375,6 +1399,35 @@ function install() {
     log,
   });
 
+  // SHINE's two mask-authority seams (docs/planning/Specular.md) — see
+  // effects/specular/specular-seams.js for why the RECT comes from the coarse
+  // grid and the COLOUR can only come from the authored file.
+  const { getSpecularMaskRect, getSpecularMaskUrl } = createSpecularSeams({
+    maskAuthority,
+    getFloors: () => lastKnownFloors,
+  });
+  // FLUID (docs/planning/Fluid.md) — one seam (the authored file; there is no
+  // coarse-grid consumer, correction #2) plus the same registration shape.
+  const { getFluidMaskUrl } = createFluidSeams({ maskAuthority, getFloors: () => lastKnownFloors });
+  const fluid = createFluidRegistration({
+    effectRegistry,
+    deriveEffectLayers,
+    readSetting: (key) => readSetting(MODULE_ID, key),
+    writeSetting,
+    moduleId: MODULE_ID,
+    effectEnableKey,
+    log,
+  });
+  const specular = createSpecularRegistration({
+    effectRegistry,
+    deriveEffectLayers,
+    readSetting: (key) => readSetting(MODULE_ID, key),
+    writeSetting,
+    moduleId: MODULE_ID,
+    effectEnableKey,
+    log,
+  });
+
   // LIVE MASK-AUTHORITY CROSS-CHECK (2026-07-22, the wind+particle probe's
   // own next question): the probe's `wind.exposure` field reads wind's own
   // CACHED snapshot (`windExposureGrid`, refreshed by bakeWindField — see
@@ -1438,6 +1491,8 @@ function install() {
     grade: reapplyGradeLook,
     doorGraphics: reapplyDoors,
     water: water.reapply,
+    fluid: fluid.reapply,
+    specular: specular.reapply,
   };
   function forceEffectEnabled(id, enabled) {
     if (enabled == null) {
@@ -1780,11 +1835,13 @@ function install() {
   // button: it is a whole-scene physical system, not an authored instance, and
   // its only "presets" would be the height of a building, which is one slider.
   //
-  // The three isolation toggles live under Advanced (Technical) because they are
-  // DIAGNOSTIC, not aesthetic — but they are three independent toggles rather
-  // than one "isolate" dropdown on purpose: the author asked to be able to check
-  // any one of the three producers, and a dropdown can only ever show one at a
-  // time (feedback_debug_ui_one_action_one_control).
+  // The DEBUG VIEW dropdown lives under Advanced (Technical) because it is
+  // diagnostic, not aesthetic — and it is deliberately ONE dropdown rather than
+  // the three isolation toggles it replaced on 2026-07-26. Seeing one shadow at
+  // a time is the whole request ("allowing me to see just a single shadow at a
+  // time out of the whole system"), so a control that can only show one IS the
+  // right shape here; three bools that could be set to any of eight
+  // combinations was the wrong one (feedback_debug_ui_one_action_one_control).
   function buildSunShadowsPanel() {
     const schema = SUN_SHADOW_PARAMS;
     const getValue = (id) => {
@@ -1795,7 +1852,7 @@ function install() {
       title: 'Sun shadows',
       subtitle: 'buildings · overhead · sky-reach',
       schema,
-      fohKeys: ['strength01', 'skyOcclusion', 'dawnDuskLength', 'lengthScale', 'buildingHeightPx'],
+      fohKeys: ['strength01', 'dawnDuskLength', 'lengthScale', 'buildingHeightPx'],
       getValue,
       onChange: (id, value) => MapShine.setSunShadows({ [id]: value }),
       enabled: sunShadowReadout.enabled,
@@ -1810,6 +1867,7 @@ function install() {
   // see its header for why this one is a module while the other four effects
   // still inline the identical block.
   MapShine.setWater = water.setWater;
+  MapShine.setFluid = fluid.setFluid;
   MapShine.debug.registerPanel(
     'water-panel',
     'Water',
@@ -1817,7 +1875,7 @@ function install() {
       const readout = water.getReadout();
       return buildEffectCard({
         title: 'Water',
-        subtitle: 'tiers 0–2 — placement · volume · motion',
+        subtitle: 'tiers 0–3 — placement · volume · motion · light',
         schema: WATER_PARAMS,
         // FOH is a strict, SMALL subset, never the whole schema
         // (feedback_foh_roh_must_differ). These three are the mid-session
@@ -1829,6 +1887,72 @@ function install() {
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
         enabled: readout.enabled,
         onToggleEnabled: (next) => MapShine.setWater({ enabled: next }),
+      });
+    },
+    { zone: 'workshop' }
+  );
+
+  // FLUID (docs/planning/Fluid.md) — goo in glass tubes.
+  MapShine.debug.registerPanel(
+    'fluid-panel',
+    'Fluid',
+    () => {
+      const readout = fluid.getReadout();
+      return buildEffectCard({
+        title: 'Fluid',
+        subtitle: 'tiers 0–3 — placement · tube · flow · film',
+        schema: FLUID_PARAMS,
+        // FOH is a strict, SMALL subset (feedback_foh_roh_must_differ). The
+        // test is "would they change it mid-session, or only while tuning?" —
+        // colour, brightness and speed are things a GM reaches for while
+        // players are watching; blob geometry and overall strength are
+        // set-once tuning and stay rear-of-house.
+        fohKeys: ['tint', 'glow', 'speedPx', 'iridescence'],
+        getValue: (id) => readout.params?.[id] ?? FLUID_PARAMS[id]?.default,
+        onChange: (id, value) => MapShine.setFluid({ [id]: value }),
+        enabled: readout.enabled,
+        onToggleEnabled: (next) => MapShine.setFluid({ enabled: next }),
+      });
+    },
+    { zone: 'workshop' }
+  );
+
+  // SHINE (docs/planning/Specular.md) — same module shape as water's, for the
+  // same reason (`install()` is a frozen god-object; the fifth inlined copy of
+  // this block would have pushed it over).
+  MapShine.setSpecular = specular.setSpecular;
+  MapShine.debug.registerPanel(
+    'specular-panel',
+    'Metal & shine',
+    () => {
+      const readout = specular.getReadout();
+      return buildEffectCard({
+        title: 'Metal & shine',
+        subtitle: 'tiers 0–2 — material · sky · lamps',
+        schema: SPECULAR_PARAMS,
+        // FOH is a strict, SMALL subset, never the whole schema
+        // (feedback_foh_roh_must_differ). Chosen against the question an author
+        // actually arrives with — "why does the metal not read?" — which is what
+        // the first live report WAS: `strength` (is it on at all), `relief` (the
+        // single control that decides whether a highlight breaks across texture
+        // or sits as a flat sheen), and every STRENGTH a GM reaches for when one
+        // room or one time of day feels wrong, indoors or out.
+        //
+        // ⚠️ `ambientSheen` is FOH and its outdoor twin `skySheen` is NOT, and
+        // that asymmetry is deliberate rather than an oversight: outdoor scenes
+        // already show a strong sun+dome response at every default, so skySheen
+        // is rarely the first thing to touch. `ambientSheen` is the OPPOSITE
+        // case — it is the fix for the exact bug an interior full of metal with
+        // no torch pointed at it in particular used to hit (a room lit only by
+        // ambient fill measured to EXACTLY 0 before this landed, 2026-07-26), so
+        // it is the single most useful indoor troubleshooting lever there is.
+        // `viewerHeight`, `polish`, `metalResponse`, `skySheen` and `lampHeight`
+        // are all set-once look decisions — ROH.
+        fohKeys: ['strength', 'relief', 'sunGlint', 'ambientSheen', 'lampGlint'],
+        getValue: (id) => readout.params?.[id] ?? SPECULAR_PARAMS[id]?.default,
+        onChange: (id, value) => MapShine.setSpecular({ [id]: value }),
+        enabled: readout.enabled,
+        onToggleEnabled: (next) => MapShine.setSpecular({ enabled: next }),
       });
     },
     { zone: 'workshop' }
@@ -1848,6 +1972,16 @@ function install() {
       generatedAt: new Date().toISOString(),
     });
   });
+
+  MapShine.debug.registerReport('specular', 'Metal & shine (why is it not visible?)', () =>
+    buildSpecularReport({
+      floorIndex: activeFloorContext?.floorIndex ?? 0,
+      viewer: getVtPanViewerDiagnostics?.() ?? null,
+      maskAuthority,
+      readout: specular.getReadout(),
+      generatedAt: new Date().toISOString(),
+    })
+  );
 
   MapShine.debug.registerReport('water-body', 'Water body pack (SDF · depth · tangent)', () =>
     buildWaterBodyReport({
@@ -2659,38 +2793,48 @@ function install() {
       skipped: [...(layers.skipped ?? []), ...tokens.skipped],
     };
 
-    // VEGETATION CASE 2 (Vegetation.md) — a tile with a PLAIN albedo plus a
-    // separate sibling `_Tree`/`_Bush` file next to it (V2's original
-    // convention). `discoverAuthoredMasks` is already item-agnostic — it
-    // takes a plain `{id,url,name}[]` and does not care what "floor" means
-    // (foundry/mask-discovery.js's own header) — so tiles ride the SAME call
-    // as backgrounds below with ZERO changes to that file. The ORIGINAL
-    // `floors` array is left untouched (it drives allLevelIds/
-    // updateActiveFloorContext/buildItems below, none of which may ever see a
-    // synthetic tile "floor").
-    const vegetationTileTargets = layers.items
-      .filter((it) => it.kind === 'tile')
+    // MASK DISCOVERY TARGETS — every drawable that can host its own mask: a
+    // Level's background, a Level's foreground, and every Tile, ALL keyed
+    // UNIFORMLY by the item's own id (2026-07-26, `keyhole-mask-any-item-
+    // decision`, LOCKED — author: *"all effects can happen on tiles,
+    // background images of scenes and foreground images of scenes... if
+    // someone makes a map by just using tiles instead of background image
+    // and foreground image then we want to account for that"*). One id
+    // namespace for all three means `scene/mask-authority.js`'s query doors
+    // (`authoredStatus` for a level's own background, `authoredStatusForItem`
+    // for anything by its own item id) read the exact SAME underlying map —
+    // there is no second, tile-specific key space that could drift from it.
+    //
+    // `discoverAuthoredMasks` is already item-agnostic — it takes a plain
+    // `{id,url,name}[]` and does not care what "floor" means (foundry/
+    // mask-discovery.js's own header) — so this needs ZERO changes to that
+    // file. The ORIGINAL `floors` array (level-id-keyed, used by
+    // allLevelIds/updateActiveFloorContext/buildItems below) stays untouched;
+    // discovery now reads `layers.items` directly instead, so a floor with NO
+    // background or foreground art at all — an all-Tile floor — contributes
+    // no floor-level target and still gets full mask support from its tiles.
+    const discoveryTargets = layers.items
+      .filter((it) => it.kind === 'levelBackground' || it.kind === 'levelForeground' || it.kind === 'tile')
       .map((it) => ({ id: it.id, url: it.src, name: it.id }));
-    const discoveryTargets = [...floors, ...vegetationTileTargets];
 
     // MASK DISCOVERY + AUTHORITY RESET — before the viewer starts, so
     // `layersForItem` is a sync manifest lookup by the time packs build.
     // Discovery is one directory listing per unique art directory (bounded
     // probes only as the announced fallback — see foundry/mask-discovery.js);
     // a total failure serves absence defaults and says so, never blocks the
-    // scene (the safety-slide stance: masks degrade, sessions don't). Tiles
-    // sharing a directory with an already-listed background cost NOTHING
-    // extra (the listing cache is per-directory, inside discoverAuthoredMasks
-    // itself); only a genuinely new directory costs one more browse call.
+    // scene (the safety-slide stance: masks degrade, sessions don't). Several
+    // targets sharing a directory cost NOTHING extra (the listing cache is
+    // per-directory, inside discoverAuthoredMasks itself); only a genuinely
+    // new directory costs one more browse call.
     //
     // OWN LOADING-SCREEN PHASE (2026-07-17): this await used to sit silently
     // inside LOAD_PHASES.SCENE — invisible on the listing happy path, but the
     // probe fallback is a real bounded sequence of network round trips that
     // must never sit unlabeled behind an earlier phase's title (exactly the
     // "silent stall" shape Keyhole.md §7's kill list forbids). `total` is
-    // `discoveryTargets.length` (floors + tiles now, not floors alone — a
-    // total that undercounted would make this phase's own progress bar lie
-    // about how much work is left); `onProgress` advances it per target.
+    // `discoveryTargets.length` (every mask-hosting item now, not floors
+    // alone — a total that undercounted would make this phase's own progress
+    // bar lie about how much work is left); `onProgress` advances it per target.
     beginSceneLoadPhase(LOAD_PHASES.MASKS, { total: discoveryTargets.length });
     let maskDiscovery = null;
     try {
@@ -2702,26 +2846,6 @@ function install() {
       log.error('mask discovery failed outright — this scene serves absence defaults:', err);
     }
 
-    // VEGETATION'S OWN URL LOOKUP — built directly from discovery's raw
-    // result, deliberately bypassing scene/mask-authority.js (see
-    // `vegetationUrlByItemId`'s own declaration for why). Keyed by levelId for
-    // backgrounds (discovery's own key for those, unchanged) and by item id
-    // for tiles (the key `vegetationTileTargets` just registered them under).
-    // Foregrounds/roofs are excluded — V2's own TreeEffectV2/BushEffectV2
-    // never populated from foreground art either, and "a canopy overlay on a
-    // roof texture" has no obvious meaning to preserve accidentally.
-    vegetationUrlByItemId = new Map();
-    if (maskDiscovery) {
-      for (const item of layers.items) {
-        if (item.kind !== 'levelBackground' && item.kind !== 'tile') continue;
-        const key = item.kind === 'levelBackground' ? item.levelId : item.id;
-        const found = maskDiscovery.byLevelId.get(key);
-        if (!found) continue;
-        const tree = found.get('tree') ?? null;
-        const bush = found.get('bush') ?? null;
-        if (tree || bush) vegetationUrlByItemId.set(item.id, { tree, bush });
-      }
-    }
     // The authority's item set is UNFILTERED (every level visible, GM view):
     // cover physics must not depend on what the current user happens to be
     // viewing. Hidden tiles are collected WITH their flag — the authority
@@ -2746,14 +2870,43 @@ function install() {
           };
         });
       })(),
-      items: collectSceneLayers(sceneDoc, {
+      items: (coverItems = collectSceneLayers(sceneDoc, {
         viewedLevelId: floors[initialFloorIndex]?.id,
         visibleLevelIds: allLevelIds,
         isGM: true,
-      }).items,
+      }).items),
       resolvePlacement: (item, size) => computeItemPlacement(item, size, dimensions),
     });
     if (maskDiscovery) maskAuthority.setDiscovery(maskDiscovery);
+
+    // VEGETATION'S URL LOOKUP — through the mask authority's own two query
+    // doors now (2026-07-26): `authoredStatus` for a floor's background,
+    // `authoredStatusForItem` for a Tile's own file (see
+    // `vegetationUrlByItemId`'s own declaration for why this stays a separate
+    // MAP rather than becoming an authority-derived product — only the READ
+    // path changed here, not the storage). Both doors degrade to
+    // `source: 'default'` safely whether discovery found nothing for that
+    // target or never ran at all, so — unlike reading `maskDiscovery.
+    // byTargetId` raw — no `if (maskDiscovery)` guard is needed. Must run
+    // AFTER `setDiscovery` just above: these doors read `scene.discovery`.
+    // Foregrounds/roofs are excluded — V2's own TreeEffectV2/BushEffectV2
+    // never populated from foreground art either, and "a canopy overlay on a
+    // roof texture" has no obvious meaning to preserve accidentally.
+    vegetationUrlByItemId = new Map();
+    for (const item of layers.items) {
+      if (item.kind !== 'levelBackground' && item.kind !== 'tile') continue;
+      const treeStatus =
+        item.kind === 'levelBackground'
+          ? maskAuthority.authoredStatus(item.levelId, 'tree')
+          : maskAuthority.authoredStatusForItem(item.id, 'tree');
+      const bushStatus =
+        item.kind === 'levelBackground'
+          ? maskAuthority.authoredStatus(item.levelId, 'bush')
+          : maskAuthority.authoredStatusForItem(item.id, 'bush');
+      const tree = treeStatus.source === 'authored' ? treeStatus.url : null;
+      const bush = bushStatus.source === 'authored' ? bushStatus.url : null;
+      if (tree || bush) vegetationUrlByItemId.set(item.id, { tree, bush });
+    }
     // A new scene deserves its own fresh required-mask warnings — otherwise a
     // floor index that happened to warn in a PREVIOUS scene would stay
     // silently suppressed in this one (safeSampleOutdoors' own throttle).
@@ -2818,8 +2971,14 @@ function install() {
     }
     try {
       water.reapply();
+      fluid.reapply();
     } catch (err) {
       log.error('water reapply (scene load) failed:', err);
+    }
+    try {
+      specular.reapply();
+    } catch (err) {
+      log.error('specular reapply (scene load) failed:', err);
     }
     try {
       reapplyGradeLook();
@@ -2853,7 +3012,7 @@ function install() {
       maskDiscovery: maskDiscovery
         ? {
             method: maskDiscovery.method,
-            floorsWithMasks: maskDiscovery.byLevelId.size,
+            targetsWithMasks: maskDiscovery.byTargetId.size,
             probesAttempted: maskDiscovery.probesAttempted,
             failures: maskDiscovery.failures,
           }
@@ -2879,6 +3038,11 @@ function install() {
         // reason sky-reach has never been seen working. See
         // `vt/coarse-alpha.js`'s header for the full chain.
         onItemAlpha: (info) => maskAuthority.ingestItemAlpha(info),
+        // Cover physics must not depend on what the user is currently viewing —
+        // the same rule the authority's own item set already follows. A getter,
+        // so a document change that rebuilds `coverItems` is picked up without
+        // re-wiring.
+        getCoverItems: () => coverItems,
         // Feeds the curtain, when there is one. A floor switch never reaches this
         // function at all (see the canvasReady handler), and these calls no-op
         // when nothing is loading — so the reporting path needs no knowledge of
@@ -2957,6 +3121,18 @@ function install() {
         // nothing — which is exactly how this shipped once (2026-07-26). A
         // default-on seam cannot announce that it was never wired.
         getWaterRenderState: water.getRenderState,
+        // SHINE's three seams (Specular.md). Same real-scene-only reasoning:
+        // `getSpecularMaskUrl` needs the mask authority's authored-status
+        // lookup and `getSpecularMaskRect` its grid spec, neither of which the
+        // torture fixture has. Unwired, both return null and the effect renders
+        // literally nothing — and `getSpecularRenderState` carries the SAME
+        // ⚠️ default-on hazard water's does, which is why it is passed here in
+        // the same commit as the code that consumes it rather than "later".
+        getFluidMaskUrl,
+        getFluidRenderState: fluid.getRenderState,
+        getSpecularMaskUrl,
+        getSpecularMaskRect,
+        getSpecularRenderState: specular.getRenderState,
       })),
     };
   }
@@ -3614,12 +3790,15 @@ function install() {
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) return;
         const levelIds = floorsResult.floors.map((f) => f.id).filter(Boolean);
+        // Kept in `coverItems` too, so the viewer's cover-alpha priming
+        // (`getCoverItems`) sees a newly-created upper-floor background at the
+        // same moment the authority does — one list, one refresh, no drift.
         maskAuthority.setItems(
-          collectSceneLayers(sceneDoc, {
+          (coverItems = collectSceneLayers(sceneDoc, {
             viewedLevelId: levelIds[0],
             visibleLevelIds: levelIds,
             isGM: true,
-          }).items
+          }).items)
         );
       } catch (err) {
         log.error(`mask-authority item refresh failed on ${hook}:`, err);

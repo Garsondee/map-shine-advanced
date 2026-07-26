@@ -187,6 +187,13 @@ export function createSkyReachAccess({ maskAuthority, onRequiredMaskMissing = nu
       skyReachItemIds: c?.skyReachItemIds ?? [],
       overheadItemIds: c?.overheadItemIds ?? [],
       missingItemIds: c?.missingItemIds ?? [],
+      // ⚠️ THE PER-ITEM VERDICT TABLE (2026-07-26). Counts and id lists say
+      // WHAT was included; only this says WHY something was not. The bug it
+      // was added for — an upper floor's background art classified as "not
+      // above" because a level's background sits at its own `elevation.bottom`
+      // — is invisible in every aggregate above and obvious in one row here.
+      itemBands: c?.itemBands ?? [],
+      maxCasterHeightPx: c?.maxCasterHeightPx ?? 0,
       ceilingElevation: c?.ceilingElevation ?? null,
       bottomElevation: c?.bottomElevation ?? null,
       outdoorsSource: c?.outdoorsSource ?? null,

@@ -161,7 +161,11 @@ function buildEnumRow(id, decl, { value, onChange }) {
   for (const v of decl.values ?? []) {
     const opt = document.createElement('option');
     opt.value = v;
-    opt.textContent = v;
+    // OPTIONAL `valueLabels` (2026-07-26): a param whose enum ids are machine
+    // strings ('shadow-skyreach') can hand over readable ones ("Shadows —
+    // sky-reach only") without the id itself having to be prose. Falls back to
+    // the id, so every existing enum renders exactly as before.
+    opt.textContent = decl.valueLabels?.[v] ?? v;
     select.append(opt);
   }
   select.value = value;

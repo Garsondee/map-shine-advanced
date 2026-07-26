@@ -64,9 +64,13 @@ export async function run(t) {
 
   // --- discovery → assembled descriptors through the ONE catalog policy ----
   authority.setDiscovery({
-    byLevelId: new Map([
+    byTargetId: new Map([
+      // Keyed by the BACKGROUND ITEM's own id, not the raw level id 'L0' —
+      // discovery is now uniform across all three item kinds (2026-07-26,
+      // keyhole-mask-any-item-decision); `authoredStatus('L0', ...)` resolves
+      // this same key internally by finding the level's background item.
       [
-        'L0',
+        'level:L0:background',
         new Map([
           ['shadow', 'art/base_Shadow.png'],
           ['outdoors', 'art/base_Outdoors.png'],
@@ -74,6 +78,10 @@ export async function run(t) {
           ['specular', 'art/base_Specular.png'],
         ]),
       ],
+      // A Tile's OWN discovered masks ride the SAME result, keyed by its own
+      // item id — this is what boot.js's real discovery run already produces
+      // once a Tile is included as a discovery target.
+      ['tile:T1', new Map([['specular', 'art/tile_Specular.png']])],
     ]),
     method: 'listing',
     failures: [],
@@ -87,11 +95,48 @@ export async function run(t) {
       l0Layers.some((d) => d.name === 'specular')
   );
   t.ok('floors without discovery results stream albedo alone', authority.layersForItem(items[1]).length === 0);
-  t.ok('non-levelBackground items never get mask layers', authority.layersForItem(items[2]).length === 0);
+  t.ok(
+    'a Tile with its own discovered mask streams it too now (2026-07-26, keyhole-mask-any-item-decision) — ' +
+      'layersForItem is no longer background-only',
+    authority.layersForItem(items[2]).some((d) => d.name === 'specular' && d.url === 'art/tile_Specular.png')
+  );
+  t.ok('a token, never a discovery target, still streams albedo alone', authority.layersForItem(items[3]).length === 0);
   const postStatus = authority.authoredStatus('L0', 'outdoors');
   t.ok(
     'authored outdoors serves its URL with provenance',
     postStatus.source === 'authored' && postStatus.url === 'art/base_Outdoors.png'
+  );
+
+  // --- authoredStatusForItem: the ITEM-keyed discovery-URL door ------------
+  // (docs/planning/Specular.md §9 / keyhole-mask-any-item-decision — a Tile
+  // can carry its own mask file beside its own art, discovered the same way
+  // as a floor's. This block tests ONLY the discovery-URL query itself —
+  // "which file, if any, did discovery find beside THIS item's art". The
+  // composited GRID (getDerived/sampleWorld) is a separate question, tested
+  // in the "ANY ITEM IS A MASK HOST" block below: that grid DOES merge every
+  // host's paint together now, but this query never did and still doesn't —
+  // it just answers for one specific item at a time.)
+  const tileSpecular = authority.authoredStatusForItem('tile:T1', 'specular');
+  t.ok(
+    "a Tile with its own discovered mask serves its OWN url, independent of any floor's",
+    tileSpecular.source === 'authored' && tileSpecular.url === 'art/tile_Specular.png'
+  );
+  t.ok(
+    "the floor's own specular mask is queried independently and returns its own url",
+    authority.authoredStatus('L0', 'specular').url === 'art/base_Specular.png'
+  );
+  t.ok(
+    'a kind never discovered for that item serves the default, same shape as the floor door',
+    authority.authoredStatusForItem('tile:T1', 'water').source === 'default'
+  );
+  t.ok(
+    'an item with no discovery entry at all serves the default too, never throws',
+    authority.authoredStatusForItem('tile:unknown', 'specular').source === 'default'
+  );
+  t.throws(
+    'unknown authored kind throws toward the catalog, same as authoredStatus',
+    () => authority.authoredStatusForItem('tile:T1', 'nonsense'),
+    'mask-catalog'
   );
 
   // --- derivation before any ingest: soft, complete-ly reported ------------
@@ -334,9 +379,9 @@ export async function run(t) {
     );
 
     authority.setDiscovery({
-      byLevelId: new Map([
+      byTargetId: new Map([
         [
-          'L0',
+          'level:L0:background',
           new Map([
             ['shadow', 'art/base_Shadow.png'],
             ['outdoors', 'art/base_Outdoors.png'],
@@ -413,6 +458,148 @@ export async function run(t) {
     // product to serve — null, not `{grid: undefined}` (an instrument that
     // says "I have nothing" beats one that hands back a broken object).
     t.ok('a legal but unrasterized kind serves null from getDerived', authority.getDerived('bush', 0) === null);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ANY ITEM IS A MASK HOST, COMPOSITED IN DRAW ORDER (2026-07-26,
+  // `keyhole-mask-any-item-decision`, LOCKED) — a Tile's own mask now
+  // composites into the SAME floor grid as the background's, in draw order,
+  // OVERWRITING within its own footprint (never a MAX — a later item must be
+  // able to paint something DARKER too). A Level's own foreground is a host
+  // too, symmetric with its background. A floor with NO background or
+  // foreground at all gets full support entirely from its own tiles.
+  //
+  // A fresh, independent authority + fixture — the shared `authority`/`items`
+  // above stay untouched so this doesn't perturb any assertion above or
+  // below it.
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const compAuthority = createMaskAuthority({ readPageImageData: (bitmap) => bitmap, log });
+    const compPlacements = {
+      'level:C0:background': { x: 50, y: 50, width: 100, height: 100 }, // whole floor
+      'tile:hole': { x: 25, y: 50, width: 50, height: 100 }, // left half — punches a hole
+      'level:C1:foreground': { x: 50, y: 50, width: 100, height: 100 },
+      'tile:onlyTile': { x: 50, y: 50, width: 100, height: 100 }, // C2's ENTIRE mask
+    };
+    const compItems = [
+      {
+        id: 'level:C0:background',
+        kind: 'levelBackground',
+        levelId: 'C0',
+        hidden: false,
+        key: { elevation: 0, sortLayer: 0, sort: 0, zIndex: 0 },
+      },
+      // Higher elevation than the background — draws AFTER it, so it must
+      // WIN wherever its own footprint reaches.
+      {
+        id: 'tile:hole',
+        kind: 'tile',
+        levelId: '',
+        hidden: false,
+        visibleOnLevelIds: ['C0'],
+        key: { elevation: 5, sortLayer: 500, sort: 0, zIndex: 0 },
+      },
+      {
+        id: 'level:C1:foreground',
+        kind: 'levelForeground',
+        levelId: 'C1',
+        hidden: false,
+        key: { elevation: 10, sortLayer: 0, sort: 0, zIndex: 1 },
+      },
+      // C2 has NO background/foreground item at all — a tiles-only floor.
+      {
+        id: 'tile:onlyTile',
+        kind: 'tile',
+        levelId: '',
+        hidden: false,
+        visibleOnLevelIds: ['C2'],
+        key: { elevation: 0, sortLayer: 500, sort: 0, zIndex: 0 },
+      },
+    ];
+    compAuthority.reset({
+      sceneKey: 'composite-test',
+      dimensions: { width: 100, height: 100, sceneRect: { x: 0, y: 0, width: 100, height: 100 } },
+      floors: [
+        { index: 0, id: 'C0', name: 'Ground', ceilingElevation: 10 },
+        { index: 1, id: 'C1', name: 'Roofed', ceilingElevation: 20 },
+        { index: 2, id: 'C2', name: 'TilesOnly', ceilingElevation: 10 },
+      ],
+      items: compItems,
+      resolvePlacement: (item) => compPlacements[item.id],
+    });
+    compAuthority.setDiscovery({
+      byTargetId: new Map([
+        ['level:C0:background', new Map([['outdoors', 'art/c0_Outdoors.webp']])],
+        ['tile:hole', new Map([['outdoors', 'art/hole_Outdoors.webp']])],
+        ['level:C1:foreground', new Map([['outdoors', 'art/c1fg_Outdoors.webp']])],
+        ['tile:onlyTile', new Map([['outdoors', 'art/only_Outdoors.webp']])],
+      ]),
+      method: 'listing',
+      failures: [],
+      probesAttempted: 0,
+    });
+    const ctable = { worldWidthPx: 100, worldHeightPx: 100, maxMip: 3 };
+    compAuthority.ingestDecodedPage({
+      ownerId: 'level:C0:background',
+      layerName: 'outdoors',
+      table: ctable,
+      page: { mip: 3, px: 0, py: 0 },
+      contentWindow: fullWindow(8),
+      bitmap: syntheticPage(8, { r: 255 }), // fully OUTDOORS
+    });
+    compAuthority.ingestDecodedPage({
+      ownerId: 'tile:hole',
+      layerName: 'outdoors',
+      table: ctable,
+      page: { mip: 3, px: 0, py: 0 },
+      contentWindow: fullWindow(8),
+      bitmap: syntheticPage(8, { r: 0 }), // fully INDOORS — punches the hole
+    });
+
+    t.ok(
+      "a Tile's own mask OVERWRITES the background's within its own footprint (left half now INDOORS)",
+      compAuthority.sampleWorld('outdoors', 0, 25, 50) === 0
+    );
+    t.ok(
+      "outside the Tile's own footprint, the background's own paint survives (right half stays OUTDOORS)",
+      compAuthority.sampleWorld('outdoors', 0, 75, 50) === 1
+    );
+    t.ok(
+      'the floor no longer reports outdoors as required-and-missing — the background alone already authors it',
+      !compAuthority.getReport().floors[0].requiredMasksMissing.includes('outdoors')
+    );
+
+    compAuthority.ingestDecodedPage({
+      ownerId: 'level:C1:foreground',
+      layerName: 'outdoors',
+      table: ctable,
+      page: { mip: 3, px: 0, py: 0 },
+      contentWindow: fullWindow(8),
+      bitmap: syntheticPage(8, { r: 255 }),
+    });
+    t.ok(
+      "a Level's own FOREGROUND is a mask host too, symmetric with its background",
+      compAuthority.sampleWorld('outdoors', 1, 50, 50) === 1
+    );
+
+    // A tiles-only floor (C2): no background, no foreground — its ENTIRE
+    // outdoors comes from its one Tile.
+    compAuthority.ingestDecodedPage({
+      ownerId: 'tile:onlyTile',
+      layerName: 'outdoors',
+      table: ctable,
+      page: { mip: 3, px: 0, py: 0 },
+      contentWindow: fullWindow(8),
+      bitmap: syntheticPage(8, { r: 255 }),
+    });
+    t.ok(
+      'a tiles-only floor gets its outdoors mask entirely from its own tile',
+      compAuthority.sampleWorld('outdoors', 2, 50, 50) === 1
+    );
+    t.ok(
+      'and is correctly NOT flagged as missing its required mask, despite having no background at all',
+      !compAuthority.getReport().floors[2].requiredMasksMissing.includes('outdoors')
+    );
   }
 
   // --- versioning: reads are always fresh ----------------------------------

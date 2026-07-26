@@ -13,6 +13,7 @@ import {
   worldToItemUv,
   itemWorldCorners,
   compositeItemMax,
+  compositeItemOverwrite,
   deriveFloorProducts,
   rasterizeAuthored,
   makeUniformContent,
@@ -55,15 +56,23 @@ export async function run(t) {
 
   // --- rasterize orientation: X, Y, and rotation, each asymmetric ----------
   const gspec = computeMaskGridSpec({ x: 0, y: 0, width: 100, height: 100 }, 10); // 10x10, texel 10
+  // ⚠️ THESE ASSERT ORIENTATION AS A COMPARISON, NOT AS A LITERAL. They used to
+  // pin `=== 255` / `=== 0`, which was only ever true because `compositeItemMax`
+  // NEAREST-sampled; it is bilinear since 2026-07-26 (the "blocky, square-edged"
+  // fix), so a 2-texel-wide fixture legitimately interpolates across its whole
+  // width. The INVARIANT under test is which way round the content lands, and
+  // `left > right` states that far more directly than a magic number did — it
+  // cannot be satisfied by a flipped mapping, and it survives any future change
+  // to the reconstruction filter.
   {
     const grid = createMaskGrid(gspec);
     // Item over x∈[0,50), y∈[0,50): content 2x1 = [opaque, transparent].
     const content = { w: 2, h: 1, data: new Uint8Array([255, 0]) };
     compositeItemMax(grid, content, { x: 25, y: 25, width: 50, height: 50, anchorX: 0.5, anchorY: 0.5, rotation: 0 });
-    // Texel (2,2) would sit at the item's EXACT center (u=0.5 → right half by
-    // floor rule), so the left-half probe is texel (1,2), u=0.3.
-    t.ok('left content half lands on the LEFT (texel 1,2 covered)', grid.data[2 * 10 + 1] === 255);
-    t.ok('right content half stays empty (texel 4,2 clear)', grid.data[2 * 10 + 4] === 0);
+    const left = grid.data[2 * 10 + 1];
+    const right = grid.data[2 * 10 + 4];
+    t.ok('left content half lands on the LEFT (texel 1,2 brightest)', left > 200);
+    t.ok('right content half is the DARK end (texel 4,2 < left)', right < 64 && right < left);
     t.ok('outside the item stays clear (texel 7,2)', grid.data[2 * 10 + 7] === 0);
   }
   {
@@ -71,8 +80,28 @@ export async function run(t) {
     // Content 1x2 = [opaque TOP, transparent bottom]. Row 0 must land at minY.
     const content = { w: 1, h: 2, data: new Uint8Array([255, 0]) };
     compositeItemMax(grid, content, { x: 25, y: 25, width: 50, height: 50, anchorX: 0.5, anchorY: 0.5, rotation: 0 });
-    t.ok('content row 0 lands at world minY (texel 2,0 covered)', grid.data[0 * 10 + 2] === 255);
-    t.ok('content bottom row stays empty toward maxY (texel 2,4 clear)', grid.data[4 * 10 + 2] === 0);
+    const top = grid.data[0 * 10 + 2];
+    const bottom = grid.data[4 * 10 + 2];
+    t.ok('content row 0 lands at world minY (texel 2,0 brightest)', top > 200);
+    t.ok('content bottom row is the DARK end toward maxY', bottom < 64 && bottom < top);
+  }
+  {
+    // THE ANTI-BLOCKINESS PROPERTY ITSELF, pinned so a revert to nearest is a
+    // test failure rather than a slow visual regression: a coarse content grid
+    // sampled onto a finer scene grid must produce a RAMP, not a staircase.
+    // Nearest would give exactly two distinct values across this row.
+    const fine = computeMaskGridSpec({ x: 0, y: 0, width: 100, height: 100 }, 20); // texel 5
+    const grid = createMaskGrid(fine);
+    const content = { w: 2, h: 1, data: new Uint8Array([255, 0]) };
+    compositeItemMax(grid, content, { x: 50, y: 50, width: 100, height: 100, anchorX: 0.5, anchorY: 0.5, rotation: 0 });
+    const row = [];
+    for (let gx = 0; gx < 20; gx++) row.push(grid.data[10 * 20 + gx]);
+    const distinct = new Set(row).size;
+    t.ok('a coarse content grid reconstructs as a RAMP, not 2 hard blocks', distinct > 6);
+    t.ok(
+      'the ramp is monotonically non-increasing left→right',
+      row.every((v, i) => i === 0 || v <= row[i - 1])
+    );
   }
   {
     // 90° clockwise: a 40x20 item at (50,50) occupies x∈[40,60], y∈[30,70].
@@ -88,6 +117,27 @@ export async function run(t) {
     });
     t.ok('rotated footprint covers its true texels (5,3)', grid.data[3 * 10 + 5] === 255);
     t.ok('rotated footprint does NOT cover the unrotated AABB (3,5 clear)', grid.data[5 * 10 + 3] === 0);
+  }
+
+  // --- compositeItemOverwrite: unlike compositeItemMax, it can DARKEN too --
+  // (2026-07-26, `keyhole-mask-any-item-decision` — a Tile's own mask must be
+  // able to wall a hole back up, not just open one; MAX can only ever raise
+  // a value, never lower it, so it cannot express that.)
+  {
+    const grid = createMaskGrid(gspec);
+    compositeItemMax(grid, makeUniformContent(1, 255), { x: 50, y: 50, width: 100, height: 100, rotation: 0 });
+    t.ok(
+      'setup: the whole grid starts bright',
+      grid.data.every((v) => v === 255)
+    );
+    compositeItemMax(grid, makeUniformContent(1, 0), { x: 25, y: 50, width: 50, height: 100, rotation: 0 });
+    t.ok('compositeItemMax alone can never darken — it only ever raises a value', grid.data[5 * 10 + 2] === 255);
+    compositeItemOverwrite(grid, makeUniformContent(1, 0), { x: 25, y: 50, width: 50, height: 100, rotation: 0 });
+    t.ok(
+      'compositeItemOverwrite REPLACES within its own footprint, even to something darker',
+      grid.data[5 * 10 + 2] === 0
+    );
+    t.ok('and leaves texels outside its own footprint untouched', grid.data[5 * 10 + 7] === 255);
   }
 
   // --- floor derivation: threshold, hidden, missing, sky math --------------
@@ -122,8 +172,8 @@ export async function run(t) {
     },
   ];
   const floors = [
-    { index: 0, ceilingElevation: 10, outdoors: null },
-    { index: 1, ceilingElevation: 20, outdoors: null },
+    { index: 0, ceilingElevation: 10, outdoors: [] },
+    { index: 1, ceilingElevation: 20, outdoors: [] },
   ];
   const products = deriveFloorProducts({ gridSpec: gspec, items, floors, outdoorsAbsentValue: 1 });
 
@@ -163,7 +213,7 @@ export async function run(t) {
       index: 0,
       ceilingElevation: 10,
       // Outdoors art covers only the LEFT half; painted fully indoors (0).
-      outdoors: { placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) },
+      outdoors: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) }],
     },
   ];
   const authored = deriveFloorProducts({ gridSpec: gspec, items: [], floors: authoredFloors, outdoorsAbsentValue: 1 });
@@ -190,29 +240,81 @@ export async function run(t) {
 
   // --- rasterizeAuthored: the shared helper the outdoors block became -------
   // (2026-07-25, Water.md Phase 2a — `water` is the second `rasterize: true`
-  // kind, so the outdoors block was extracted rather than copied.)
+  // kind, so the outdoors block was extracted rather than copied. Generalized
+  // 2026-07-26 from ONE source to an ORDERED LIST — `keyhole-mask-any-item-
+  // decision` — so this now also proves the "reach vs painted-black" and
+  // "multiple sources" distinctions together.)
   {
     const placed = {
       placement: { x: 25, y: 50, width: 50, height: 100 },
       content: makeUniformContent(1, 40),
     };
-    const g = rasterizeAuthored(gspec, placed, 0);
+    const g = rasterizeAuthored(gspec, [placed], 0);
     t.ok('rasterizeAuthored writes the painted value where the art reaches', g.data[5 * 10 + 2] === 40);
     t.ok('rasterizeAuthored writes the ABSENT value outside the art', g.data[5 * 10 + 7] === 0);
 
-    // The distinction the `covered` pass exists for, stated as a test: a mask
-    // painted BLACK inside its own reach must read 0, while a texel the art
-    // never reaches reads absentValue. With absentValue 1 the two are visibly
-    // different numbers; a plain compositeItemMax would give 0 for both.
-    const black = rasterizeAuthored(gspec, { ...placed, content: makeUniformContent(1, 0) }, 1);
+    // A mask painted BLACK inside its own reach must read 0, while a texel
+    // the art never reaches reads absentValue. With absentValue 1 the two are
+    // visibly different numbers; a plain compositeItemMax would give 0 for
+    // both — `compositeItemOverwrite` doesn't have that ambiguity: a never-
+    // reached texel is simply never written, full stop.
+    const black = rasterizeAuthored(gspec, [{ ...placed, content: makeUniformContent(1, 0) }], 1);
     t.ok('painted-black inside the art reads 0, not the absent value', black.data[5 * 10 + 2] === 0);
     t.ok('unreached texels read the absent value, not 0', black.data[5 * 10 + 7] === 255);
 
-    const none = rasterizeAuthored(gspec, null, 0.5);
+    const none = rasterizeAuthored(gspec, [], 0.5);
     t.ok(
-      'no authored content at all fills the whole grid with the absent value',
+      'no authored content at all (an empty source list) fills the whole grid with the absent value',
       none.data.every((v) => v === 128)
     );
+  }
+
+  // --- rasterizeAuthored: MULTIPLE ordered sources composite together ------
+  // (2026-07-26, `keyhole-mask-any-item-decision`, LOCKED — a Tile's own mask
+  // now composites into the SAME grid as its floor's background, in draw
+  // order, OVERWRITING rather than MAX-ing: the author's own worked example
+  // needs a later source to be able to paint something DARKER, not just
+  // brighter — *"a tile... automatically overwrites the `_Outdoors` so that
+  // suddenly the corner of the building is outside where previously it was
+  // inside"* — and the reverse, walling a hole back up, must work too.)
+  {
+    const wholeFloor = { placement: { x: 50, y: 50, width: 100, height: 100 }, content: makeUniformContent(1, 255) };
+    // A SECOND source, painted BLACK (0), covering only the left half — a
+    // Tile walling up part of an otherwise fully-outdoor floor.
+    const leftHalfDark = { placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) };
+
+    const laterWins = rasterizeAuthored(gspec, [wholeFloor, leftHalfDark], 0.5);
+    t.ok(
+      'a LATER source overwrites an EARLIER one within their shared footprint, even DARKER',
+      laterWins.data[5 * 10 + 2] === 0
+    );
+    t.ok(
+      "outside the later source's own footprint, the earlier source's paint survives",
+      laterWins.data[5 * 10 + 7] === 255
+    );
+
+    // Order reversed: whichever source is listed LAST wins — there is no
+    // hidden precedence rule here, only the order the caller hands in
+    // (mask-authority.js resolves that from scene/layer-order.js).
+    const earlierWins = rasterizeAuthored(gspec, [leftHalfDark, wholeFloor], 0.5);
+    t.ok(
+      "draw order is entirely the CALLER's doing, not a fixed precedence — reversing the list reverses who wins",
+      earlierWins.data[5 * 10 + 2] === 255
+    );
+
+    // A texel NEITHER source's own placement ever reaches keeps the absent
+    // value — "authored by something" and "never painted by anything on this
+    // floor" stay two different, honestly-reported facts, generalized from
+    // one source to N.
+    const neitherReaches = rasterizeAuthored(
+      gspec,
+      [
+        { placement: { x: 10, y: 10, width: 10, height: 10 }, content: makeUniformContent(1, 255) },
+        { placement: { x: 10, y: 90, width: 10, height: 10 }, content: makeUniformContent(1, 0) },
+      ],
+      0.5
+    );
+    t.ok('a texel no source reaches keeps the absent value', neitherReaches.data[5 * 10 + 5] === 128);
   }
 
   // --- the `authored` product bag: water rides here, not on a top-level key -
@@ -221,16 +323,15 @@ export async function run(t) {
       {
         index: 0,
         ceilingElevation: 10,
-        outdoors: null,
+        outdoors: [],
         authored: {
           water: {
-            placement: { x: 25, y: 50, width: 50, height: 100 },
-            content: makeUniformContent(1, 200),
+            sources: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 200) }],
             absentValue: 0,
           },
         },
       },
-      { index: 1, ceilingElevation: 20, outdoors: null, authored: { water: { absentValue: 0 } } },
+      { index: 1, ceilingElevation: 20, outdoors: [], authored: { water: { sources: [], absentValue: 0 } } },
     ];
     const wp = deriveFloorProducts({ gridSpec: gspec, items: [], floors: waterFloors, outdoorsAbsentValue: 1 });
     t.ok(
@@ -296,9 +397,9 @@ export async function run(t) {
     const casterFloors = [
       // A floor whose GROUND is at 0 and CEILING at 10 — so a tile at 5 is
       // overhead (a balcony) and the roof at 10 is sky-reach.
-      { index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: null },
+      { index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] },
       // Upstairs: ground 10, no declared ceiling.
-      { index: 1, ceilingElevation: Infinity, bottomElevation: 10, outdoors: null },
+      { index: 1, ceilingElevation: Infinity, bottomElevation: 10, outdoors: [] },
     ];
     const casterItems = [
       {
@@ -393,7 +494,7 @@ export async function run(t) {
           alpha: makeUniformContent(1, 255),
         },
       ],
-      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: undefined, outdoors: null }],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: undefined, outdoors: [] }],
       outdoorsAbsentValue: 1,
       casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 0 },
     });
@@ -413,7 +514,7 @@ export async function run(t) {
           ceilingElevation: 10,
           bottomElevation: 0,
           // Left half painted INDOORS (0) — that is the building footprint.
-          outdoors: { placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) },
+          outdoors: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) }],
         },
       ],
       outdoorsAbsentValue: 1,
@@ -426,6 +527,261 @@ export async function run(t) {
       'at the authored height (256 px over a 2048 px scale = 32/255)',
       near((b.data[5 * 10 + 2] / 255) * 2048, 256, 12)
     );
+    t.ok(
+      'the building has its own COVERAGE channel (indoor-ness), separate from its height',
+      built[0].casterChannels.coverBuilding.data[5 * 10 + 2] > 200 &&
+        built[0].casterChannels.coverBuilding.data[5 * 10 + 7] === 0
+    );
+    t.ok(
+      'a GROUNDED wall contributes no SKY-REACH coverage — nothing feeds the march`s d=0 self-check',
+      maskGridMean(built[0].casterChannels.coverSkyReach) === 0
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE 2026-07-26 RETHINK — COVERAGE AND HEIGHT ARE TWO FACTS, NOT ONE BYTE
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // The field used to store `alpha × height` in a single byte, so a
+  // half-transparent caster read as a HALF-HEIGHT one: a shorter shadow, and
+  // (because the march derived darkness from how far a caster overtopped the
+  // ray) a fainter one too. That single packing decision produced every symptom
+  // the author reported — smeared silhouettes, "different opacities", and a
+  // sky-reach shadow that never appeared. These pin the split.
+  {
+    const SCALE = 2048;
+    const halfAlpha = makeUniformContent(1, 128);
+    const split = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [
+        {
+          id: 'ghostDeck',
+          elevation: 10,
+          hidden: false,
+          placement: { x: 50, y: 50, width: 100, height: 100 },
+          alpha: halfAlpha,
+        },
+      ],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] }],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: SCALE, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    const s = split[0];
+    const AT = 5 * 10 + 5;
+    t.ok(
+      'a HALF-transparent caster keeps its FULL height (10 units x 20 px = 200 px)',
+      near((s.casterChannels.skyReach.data[AT] / 255) * SCALE, 200, 12)
+    );
+    t.ok('and records its opacity as COVERAGE instead', near(s.casterChannels.coverSkyReach.data[AT], 128, 2));
+
+    // THE SMOKING GUN, made reportable. Casters present + max height ZERO is
+    // exactly what a floor with no declared `bottomElevation` produces, and it
+    // is why "sky reach isn't working" was undiagnosable: every item COUNT
+    // looked healthy while the field cast nothing (feedback_instruments_must_not_lie).
+    // ±8 px: one byte step over a 2048 px scale. Stated as a tolerance rather
+    // than a magic literal so the number reads as "a quantised height" and not
+    // as an exact measurement it can never be.
+    t.ok('a healthy field reports its tallest caster in world px', near(s.completeness.maxCasterHeightPx, 200, 8));
+    const noGround = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [
+        {
+          id: 'deck',
+          elevation: 10,
+          hidden: false,
+          placement: { x: 50, y: 50, width: 100, height: 100 },
+          alpha: makeUniformContent(1, 255),
+        },
+      ],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: undefined, outdoors: [] }],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: SCALE, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    t.ok(
+      'casters counted but ZERO tall is a REPORTED state, not a silent blank',
+      noGround[0].completeness.skyReachItemIds.includes('deck') && noGround[0].completeness.maxCasterHeightPx === 0
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // A TILE'S OWN FLOOR VISIBILITY OUTRANKS ITS ELEVATION (2026-07-26, round 2)
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // THE BUG, author-caught LIVE: a standing prop on a raised tile still
+  // rendered its shadow through its own sprite AFTER the overhead-vs-
+  // sky-reach split (§ above). Cause: the prop is a TILE with a SPECIFIC
+  // `levels` set naming THIS floor, but its elevation ALSO happens to cross
+  // this floor's own ceiling — so the elevation-only test classified it as
+  // "sky-reach" (a different floor's structure) even though it is drawn
+  // right here. `visibleFloorIndices` is the fix: floor membership beats the
+  // elevation number, exactly the same shape as `ownerFloorIndex` for level
+  // art, just for tiles.
+  {
+    const lantern = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [
+        {
+          id: 'lanternPlinth',
+          elevation: 12, // ABOVE this floor's own ceiling (10) — the trap
+          hidden: false,
+          placement: { x: 50, y: 50, width: 100, height: 100 },
+          alpha: makeUniformContent(1, 255),
+          visibleFloorIndices: [0], // but CONFIRMED drawn on THIS floor
+        },
+      ],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] }],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    const c = lantern[0].completeness;
+    t.ok(
+      'a tile confirmed visible HERE is never sky-reach for this floor, whatever its elevation says',
+      !c.skyReachItemIds.includes('lanternPlinth')
+    );
+    t.ok(
+      'it is overhead instead — uncapped by the ceiling, since it is confirmed drawn here',
+      c.overheadItemIds.includes('lanternPlinth')
+    );
+    t.ok(
+      "and its own footprint is excluded from the self-shadow channel, matching the 'never self-shadow' fix",
+      lantern[0].casterChannels.coverSkyReach.data[5 * 10 + 5] === 0
+    );
+
+    // The control: an IDENTICAL item with UNKNOWN visibility (no
+    // `visibleFloorIndices` at all) falls back to the ORIGINAL elevation-only
+    // test, unchanged — this is a strictly additive fix, not a behaviour swap.
+    const unknown = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [
+        {
+          id: 'legacyItem',
+          elevation: 12,
+          hidden: false,
+          placement: { x: 50, y: 50, width: 100, height: 100 },
+          alpha: makeUniformContent(1, 255),
+        },
+      ],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] }],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    t.ok(
+      'unknown visibility (no visibleFloorIndices) is unchanged: elevation alone still decides',
+      unknown[0].completeness.skyReachItemIds.includes('legacyItem')
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // AN OVERHEAD ITEM MUST NEVER SELF-SHADOW (2026-07-26)
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // THE BUG (author, screenshot): a standing prop on a raised tile rendered
+  // with its shadow painted THROUGH its own sprite. Root cause: the march's
+  // zero-distance self-check ("is something solid directly over ME") read
+  // `max(coverOverhead, coverSkyReach)` — but an overhead item lives on THIS
+  // SAME floor. Foundry elevation is a draw-order key, not a spatial offset:
+  // a raised tile's own sprite occupies the IDENTICAL (x,y) as whatever it
+  // would "shade" beneath it, so there is no separate, visible ground there
+  // to darken — only the item's own opaque art. Sky-reach is different: a
+  // genuinely other floor, whose art this floor never draws at that pixel, so
+  // darkening it darkens real, still-visible ground. `coverSkyReach` is what
+  // the subsystem now packs into the self-check channel — this pins that
+  // overhead's own coverage never reaches it, while still reaching
+  // `coverOverhead` (which marches normally, casting onto NEARBY ground).
+  {
+    const SCALE = 2048;
+    const balcony = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [
+        {
+          id: 'lanternPlinth',
+          elevation: 5,
+          hidden: false,
+          placement: { x: 50, y: 50, width: 100, height: 100 },
+          alpha: makeUniformContent(1, 255),
+        },
+      ],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] }],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: SCALE, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    const AT = 5 * 10 + 5;
+    t.ok(
+      "an overhead item's own footprint contributes ZERO to the self-shadow channel",
+      balcony[0].casterChannels.coverSkyReach.data[AT] === 0
+    );
+    t.ok(
+      'the SAME footprint still carries full coverage for the march to find NEARBY (via coverOverhead)',
+      balcony[0].casterChannels.coverOverhead.data[AT] > 200
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // A LEVEL'S OWN ART IS CLASSIFIED BY FLOOR MEMBERSHIP, NOT BY ELEVATION
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // THE BUG (author, 2026-07-26): *"When I change to sky reach only it only
+  // shows the overhead parts of the upper floors… we're not including
+  // 'background image' and 'foreground image' from upper floors."*
+  //
+  // A level's BACKGROUND sits at its own `elevation.bottom`; its FOREGROUND at
+  // `elevation.top`. The old test was `elevation >= ceilingElevation`, which
+  // holds for a background ONLY while the scene's bands abut exactly. These
+  // bands OVERLAP by 5 — floor 1 starts at 5 while floor 0 runs to 10 — which
+  // is ordinary authoring and used to silently drop floor 1's entire
+  // background while keeping its foreground. Both must cast.
+  {
+    const overlapping = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [
+        {
+          id: 'level:f1:background',
+          elevation: 5, // BELOW floor 0's ceiling of 10 — the whole point
+          ownerFloorIndex: 1,
+          hidden: false,
+          placement: { x: 25, y: 50, width: 50, height: 100 },
+          alpha: makeUniformContent(1, 255),
+        },
+        {
+          id: 'level:f1:foreground',
+          elevation: 15,
+          ownerFloorIndex: 1,
+          hidden: false,
+          placement: { x: 75, y: 50, width: 50, height: 100 },
+          alpha: makeUniformContent(1, 255),
+        },
+        {
+          id: 'level:f0:background',
+          elevation: 0,
+          ownerFloorIndex: 0, // THIS floor's own ground — must never cast on itself
+          hidden: false,
+          placement: { x: 50, y: 50, width: 100, height: 100 },
+          alpha: makeUniformContent(1, 255),
+        },
+      ],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] }],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    const c = overlapping[0].completeness;
+    t.ok(
+      "an upper floor's BACKGROUND casts sky-reach even though its elevation is below this ceiling",
+      c.skyReachItemIds.includes('level:f1:background')
+    );
+    t.ok("an upper floor's FOREGROUND still casts too", c.skyReachItemIds.includes('level:f1:foreground'));
+    t.ok(
+      "THIS floor's own background never casts on itself",
+      !c.skyReachItemIds.includes('level:f0:background') && !c.overheadItemIds.includes('level:f0:background')
+    );
+    t.ok('a level’s own art is never reclassified as an overhead protrusion', c.overheadItemIds.length === 0);
+    // The per-item verdict table — the instrument that would have answered this
+    // in one paste instead of a screenshot plus a directory listing.
+    const row = c.itemBands.find((b) => b.id === 'level:f1:background');
+    t.ok(
+      'every item reports its own band, elevation and owner floor',
+      row?.band === 'skyReach' && row.ownerFloorIndex === 1
+    );
+    t.ok('and whether its art had actually arrived', row?.hasArt === true);
   }
 
   // OVERHEAD IS GATED TO EXTERIOR PROTRUSIONS (2026-07-24, author: "Overhead
@@ -465,7 +821,7 @@ export async function run(t) {
     const gated = deriveFloorProducts({
       gridSpec: gspec,
       items,
-      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: outdoorsArt }],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [outdoorsArt] }],
       outdoorsAbsentValue: 1,
       casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 0 },
     });
@@ -488,7 +844,7 @@ export async function run(t) {
           alpha: makeUniformContent(1, 255),
         },
       ],
-      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: null }],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] }],
       outdoorsAbsentValue: 1,
     };
     const on = deriveFloorProducts({
@@ -522,7 +878,7 @@ export async function run(t) {
           alpha: makeUniformContent(1, 255),
         },
       ],
-      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: null }],
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] }],
       outdoorsAbsentValue: 1,
     });
     t.ok('no caster spec → every channel is empty', maskGridMean(noSpec[0].casterHeight) === 0);

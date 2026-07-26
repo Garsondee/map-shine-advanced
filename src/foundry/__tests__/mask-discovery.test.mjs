@@ -124,7 +124,7 @@ export async function run(t) {
   });
   t.ok(
     'listing discovery finds per-floor kinds',
-    resultListing.byLevelId.get('L0')?.size === 3 && resultListing.byLevelId.get('L1')?.size === 1
+    resultListing.byTargetId.get('L0')?.size === 3 && resultListing.byTargetId.get('L1')?.size === 1
   );
   t.ok('one directory = one browse, however many floors share it', listingCalls.length === 1);
   t.ok(
@@ -147,7 +147,7 @@ export async function run(t) {
   t.ok('absolute-URL floors go straight to probing', resultProbe.method === 'probe');
   t.ok(
     'probing finds what exists',
-    resultProbe.byLevelId.get('L0')?.get('outdoors') === 'https://cdn.example/x/castle_Outdoors.webp'
+    resultProbe.byTargetId.get('L0')?.get('outdoors') === 'https://cdn.example/x/castle_Outdoors.webp'
   );
   t.ok('probe count is reported truthfully', resultProbe.probesAttempted === probed.length && probed.length > 0);
   t.ok('a found kind stops probing its remaining candidates', !probed.some((u) => u.endsWith('castle_Outdoors.png')));
@@ -164,7 +164,7 @@ export async function run(t) {
   );
   t.ok(
     'denied listing still discovers via probes',
-    resultDenied.byLevelId.get('L0')?.get('shadow') === 'maps/base_Shadow.webp'
+    resultDenied.byTargetId.get('L0')?.get('shadow') === 'maps/base_Shadow.webp'
   );
 
   // --- discoverAuthoredMasks: listing THROWS → failure + fallback ----------
@@ -179,7 +179,7 @@ export async function run(t) {
     'a throwing lister is recorded with its actual error',
     resultThrew.failures.some((f) => f.stage === 'listing' && f.detail.includes('EPERM synthetic'))
   );
-  t.ok('a floor with nothing found is an EMPTY result, not an entry of nulls', !resultThrew.byLevelId.has('L0'));
+  t.ok('a floor with nothing found is an EMPTY result, not an entry of nulls', !resultThrew.byTargetId.has('L0'));
 
   // --- unparseable art URLs ------------------------------------------------
   const resultBad = await discoverAuthoredMasks({

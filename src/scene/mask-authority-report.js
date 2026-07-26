@@ -30,6 +30,26 @@ function tailOf(u) {
 }
 
 /**
+ * The level's own background item's id, or null (a tiles-only floor has
+ * none). Discovery is keyed by item id UNIFORMLY now — background,
+ * foreground and Tile alike (2026-07-26, `keyhole-mask-any-item-decision`,
+ * LOCKED) — so `floor.id` (a raw level id) is no longer a valid lookup key
+ * into `scene.discovery.byTargetId` on its own; this resolves the one item
+ * that IS a valid key. Duplicated from `mask-authority.js`'s own
+ * `backgroundItemOf` (not imported) rather than shared: this module is a
+ * PURE function of whatever state it is handed, callable from a test with
+ * plain objects, and a 4-line linear search is cheaper to keep in sync by
+ * inspection than to introduce a shared module for.
+ * @param {object} scene @param {string} levelId @returns {string|null}
+ */
+function backgroundItemIdOf(scene, levelId) {
+  for (const item of scene.items.values()) {
+    if (item.kind === 'levelBackground' && item.levelId === levelId) return item.id;
+  }
+  return null;
+}
+
+/**
  * One floor's row: what was discovered, what is missing, and what the
  * derivation made of it.
  *
@@ -138,7 +158,7 @@ export function buildMaskAuthorityReport({
     floors: scene.floors.map((floor) =>
       floorRow({
         floor,
-        found: scene.discovery?.byLevelId?.get(floor.id),
+        found: scene.discovery?.byTargetId?.get(backgroundItemIdOf(scene, floor.id)),
         product: products.find((p) => p.index === floor.index),
         // Required-and-missing, ONLY the authored kinds themselves (not the
         // derived ids their absence also blocks) — the ACTIONABLE list: what

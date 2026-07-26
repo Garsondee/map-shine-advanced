@@ -1,9 +1,11 @@
 /**
  * THE MASK AUTHORITY — the single source of truth for SERVING world-space
- * content layers: which authored masks exist per floor (discovery's result),
- * what every consumer gets where none exists (the catalog's absence
- * defaults), and the derived products computed from what has streamed
- * (coverAbove, skyReach). One instance, owned by boot, reset per scene.
+ * content layers: which authored masks exist per floor, composited from
+ * EVERY item that hosts one (a Level's background, its foreground, or any
+ * Tile — discovery's result), what every consumer gets where NOTHING was
+ * authored at all (the catalog's absence defaults), and the derived
+ * products computed from what has streamed (coverAbove, skyReach). One
+ * instance, owned by boot, reset per scene.
  *
  * ============================================================================
  * WHERE IT SITS (two narrow seams, both injected — no new zone imports)
@@ -27,6 +29,31 @@
  * serving API carries its provenance (`source: 'authored' | 'default'`) so a
  * default can never masquerade as data.
  *
+ * ANY DRAWABLE IS A MASK HOST (2026-07-26, `keyhole-mask-any-item-decision`,
+ * LOCKED): a Level's background, a Level's foreground, and any Tile can ALL
+ * carry their own sibling mask file, and a floor's own mask grid is EVERY one
+ * of its hosts' paint, composited together in the SAME draw order the
+ * visible art itself paints in (`scene/layer-order.js#compareLayerKeys`) — a
+ * LATER host overwrites an EARLIER one wherever their own footprints overlap
+ * (`mask-derive.js#rasterizeAuthored`/`compositeItemOverwrite`; never a
+ * max-composite — the author's own worked example needs a Tile to be able to
+ * paint something DARKER too, not just brighter: *"I want to blow the corner
+ * of a building open... a tile with the corner blown off in the artwork AND
+ * with its own `_Outdoors` mask... automatically overwrites the `_Outdoors`
+ * so that suddenly the corner of the building is outside where previously it
+ * was inside."* This is also what lets a floor with NO background or
+ * foreground art at all — built entirely of Tiles — get full mask support
+ * exactly as a background-image-based floor does: it simply starts from the
+ * catalog's absent value and every Tile paints its own patch on top, the SAME
+ * mechanism, zero or more contributing sources instead of always exactly one.
+ *
+ * `hostsOfFloor` resolves one floor's ordered host list; `authoredStatusForItem`
+ * is the discovery-only door for a SPECIFIC item's own file (URL, no grid —
+ * Specular's tier-0 hi-res read and Vegetation's own texture load both use
+ * exactly this, never the composited grid); `authoredStatus` is a thin
+ * convenience wrapper over it for the single most common case, "this level's
+ * own background file".
+ *
  * INGEST (the derived products' input path): the pager already decodes every
  * pack's coarsest mip on its way to the coarse pin — one ≤248²-payload page
  * that IS the whole item. The viewer offers each such page here (bitmap alive
@@ -40,11 +67,15 @@
  * read, no frame hook — and a read always reflects every ingest before it.
  *
  * KNOWN LIMITS, recorded not hidden:
- *   - Masks attach to LEVEL BACKGROUND art only (V2's authoring convention:
- *     masks are siblings of the floor's art file). Tiles/foregrounds/tokens
- *     contribute art ALPHA to coverAbove but carry no mask files of their own.
- *   - A mid-session Level background URL change re-discovers only on scene
- *     restart (same limit as the viewer's own pack cache).
+ *   - Every mask-hosting item now streams its own extra pack layers
+ *     (`layersForItem` widened alongside the decision above) — a scene with
+ *     many masked Tiles issues more pack requests than it did before this
+ *     landed. This is the SAME per-kind fetch pattern a floor's own
+ *     background already had (nothing here newly over-fetches a KIND; more
+ *     ITEMS can now trigger the existing pattern), just now paid by more items.
+ *   - A mid-session Level background/foreground URL change, or a Tile's own
+ *     art URL change, re-discovers only on scene restart (same limit as the
+ *     viewer's own pack cache).
  *   - If a pack's coarsest page never decodes (hard load error), its item
  *     lands in `completeness.missingItemIds` — soft and reported, never
  *     guessed (§4.1: "not loaded yet means SOFT, not WRONG").
@@ -66,6 +97,7 @@ import {
 } from './mask-catalog.js';
 import { buildMaskAuthorityReport } from './mask-authority-report.js';
 import { computeMaskGridSpec, deriveFloorProducts, sampleMaskGridWorld, extractContentWindow } from './mask-derive.js';
+import { compareLayerKeys } from './layer-order.js';
 
 const EXTRACT_ERROR_LOG_MAX = 10;
 
@@ -183,7 +215,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
       items: new Map(), // itemId -> collector item
       resolvePlacement: null, // (item, {width,height}) -> placement
       discovery: null, // mask-discovery result
-      descriptorsByLevelId: new Map(), // levelId -> viewer layer descriptors
+      descriptorsByItemId: new Map(), // item.id (ANY kind) -> viewer layer descriptors
       ingests: new Map(), // `${itemId}/${contentId}` -> {content, placement}
     };
   }
@@ -252,21 +284,31 @@ export function createMaskAuthority({ readPageImageData, log }) {
    */
   function setDiscovery(result) {
     scene.discovery = result;
-    scene.descriptorsByLevelId = new Map();
-    for (const [levelId, urlByKindId] of result?.byLevelId ?? new Map()) {
-      scene.descriptorsByLevelId.set(levelId, assembleLayerDescriptors(urlByKindId));
+    scene.descriptorsByItemId = new Map();
+    // `result.byTargetId` is keyed by item id UNIFORMLY now — background,
+    // foreground AND tile alike (2026-07-26, `keyhole-mask-any-item-
+    // decision`, LOCKED; boot.js's own discovery-target list changed to
+    // match). Every discovered target's descriptors are assembled here,
+    // unconditionally: `layersForItem` now serves all three kinds, so there
+    // is no "nobody will ever look this up" case left to skip.
+    for (const [itemId, urlByKindId] of result?.byTargetId ?? new Map()) {
+      scene.descriptorsByItemId.set(itemId, assembleLayerDescriptors(urlByKindId));
     }
     touch();
   }
 
   /**
-   * The viewer's `extraLayersForItem`. Masks ride level BACKGROUND art only
-   * (see header); everything else streams albedo alone.
+   * The viewer's `extraLayersForItem`. A mask can ride ANY drawable's own art
+   * now — a Level's background OR foreground, or a Tile (2026-07-26,
+   * `keyhole-mask-any-item-decision`, LOCKED) — so this streams whatever
+   * discovery found beside THIS item's own art, uniformly. Tokens (the only
+   * OTHER item kind the viewer ever asks about) never reach `scene.
+   * descriptorsByItemId` at all, since discovery is never fed a token, so
+   * this falls through to `[]` for them without needing its own kind check.
    * @param {object} item @returns {Array<object>}
    */
   function layersForItem(item) {
-    if (item?.kind !== 'levelBackground') return [];
-    return scene.descriptorsByLevelId.get(item.levelId) ?? [];
+    return scene.descriptorsByItemId.get(item?.id) ?? [];
   }
 
   /**
@@ -382,7 +424,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
     }
   }
 
-  /** The floor's background item (masks + outdoors content key off it). @param {{id:string}} floor */
+  /** The floor's background item, specifically. @param {{id:string}} floor */
   function backgroundItemOf(floor) {
     for (const item of scene.items.values()) {
       if (item.kind === 'levelBackground' && item.levelId === floor.id) return item;
@@ -390,19 +432,79 @@ export function createMaskAuthority({ readPageImageData, log }) {
     return null;
   }
 
+  /**
+   * EVERY item that can host this floor's OWN mask paint — background,
+   * foreground (neither assumed — a tiles-only floor has NEITHER and gets
+   * its masks entirely from its own tiles) and every visible, non-hidden
+   * Tile — in ASCENDING draw order (`scene/layer-order.js#compareLayerKeys`,
+   * the SAME comparator the visible art itself paints by). 2026-07-26,
+   * `keyhole-mask-any-item-decision` (LOCKED): a floor's mask is no longer
+   * "the one background item's file"; it is whatever every one of these
+   * items painted, composited in this exact order
+   * (`mask-derive.js#rasterizeAuthored`).
+   *
+   * A hidden (GM-only) item is excluded — same reasoning `coverAbove`
+   * already applies elsewhere in this file: players' sky is canon, so a
+   * GM-only prop must not silently change what a player experiences as
+   * indoor/outdoor.
+   *
+   * @param {{id:string}} floor
+   * @returns {object[]}
+   */
+  function hostsOfFloor(floor) {
+    const hosts = [];
+    for (const item of scene.items.values()) {
+      if (item.hidden) continue;
+      if (item.kind === 'levelBackground' || item.kind === 'levelForeground') {
+        if (item.levelId === floor.id) hosts.push(item);
+      } else if (item.kind === 'tile') {
+        if (Array.isArray(item.visibleOnLevelIds) && item.visibleOnLevelIds.includes(floor.id)) hosts.push(item);
+      }
+    }
+    hosts.sort((a, b) => compareLayerKeys(a.key, b.key));
+    return hosts;
+  }
+
   function recomputeIfDirty() {
     if (!dirty || !scene.gridSpec) return;
     const outdoorsKind = maskKindById('outdoors');
 
+    // A LEVEL'S OWN ART BELONGS TO EXACTLY ONE FLOOR, and that is a stronger
+    // fact than its elevation number (2026-07-26). See `DeriveItemInput.
+    // ownerFloorIndex` for the bug this fixes — a level background sits at its
+    // level's `elevation.bottom`, so the moment a scene's bands overlap even
+    // slightly, an upper floor's whole background stops counting as "above"
+    // while its foreground still does. Tiles get NO owner index on purpose:
+    // a tile's level set says which floors it APPEARS on, not which one it
+    // belongs to (an empty set means every floor), so only its elevation can
+    // answer whether it is a rug or a roof.
+    const floorIndexByLevelId = new Map(scene.floors.map((f) => [f.id, f.index]));
     const items = [];
     for (const item of scene.items.values()) {
       const ingest = scene.ingests.get(`${item.id}/${ALBEDO_INPUT}`);
+      const ownsLevel = item.kind === 'levelBackground' || item.kind === 'levelForeground';
+      // ⚠️ A TILE'S OWN FLOOR VISIBILITY OUTRANKS ITS ELEVATION NUMBER, same
+      // reasoning as `ownerFloorIndex` for level art (2026-07-26, round two —
+      // see `DeriveItemInput.visibleFloorIndices`). Author-confirmed live:
+      // a raised prop with a SPECIFIC, non-empty `levels` set naming this
+      // floor was still crossing this floor's own ceiling elevation and
+      // reading as sky-reach — "art from a different floor" — for the SAME
+      // floor it is drawn on. `scene-layers.js#collectTiles` already computes
+      // exactly which floors a tile is visible on (`visibleOnLevelIds`); this
+      // was previously discarded here on the stated (and wrong) theory that
+      // "an empty set means every floor, so only elevation can answer" — true
+      // for the EMPTY-set case, false the moment a tile names specific floors.
+      const visibleFloorIndices = Array.isArray(item.visibleOnLevelIds)
+        ? item.visibleOnLevelIds.map((id) => floorIndexByLevelId.get(id)).filter((i) => i !== undefined)
+        : null;
       items.push({
         id: item.id,
         elevation: item.key?.elevation ?? 0,
         hidden: !!item.hidden,
         placement: ingest?.placement ?? null,
         alpha: ingest?.content ?? null,
+        ownerFloorIndex: ownsLevel ? (floorIndexByLevelId.get(item.levelId) ?? null) : null,
+        visibleFloorIndices: ownsLevel ? null : visibleFloorIndices,
       });
     }
 
@@ -411,28 +513,32 @@ export function createMaskAuthority({ readPageImageData, log }) {
     const extraRasterized = rasterizedKinds().filter((k) => k.id !== 'outdoors');
 
     const floors = scene.floors.map((floor) => {
-      const bgItem = backgroundItemOf(floor);
-      const outdoors = bgItem ? (scene.ingests.get(`${bgItem.id}/outdoors`) ?? null) : null;
+      const hosts = hostsOfFloor(floor);
+      // Every host's own ingest for a kind, in the SAME draw order `hosts`
+      // is already sorted in — `rasterizeAuthored` composites them in that
+      // order, a LATER host overwriting an earlier one within their shared
+      // footprint (never a MAX — see that function's own doc). A host with
+      // no ingest for this particular kind simply contributes nothing to
+      // it; it may still contribute to a DIFFERENT kind.
+      const sourcesFor = (kindId) =>
+        hosts
+          .map((item) => scene.ingests.get(`${item.id}/${kindId}`))
+          .filter((ingest) => ingest?.content && ingest?.placement);
       const authored = {};
       for (const kind of extraRasterized) {
-        const ingest = bgItem ? (scene.ingests.get(`${bgItem.id}/${kind.id}`) ?? null) : null;
-        // `absentValue` rides even when there is NO ingest — the entry must
-        // still be present so the rasterizer fills with the KIND's absent
-        // value rather than a positional default. (Dropping the entry to
-        // `null` would make every unauthored kind fill 0 regardless of what
-        // the catalog declares — correct for `water`, silently wrong for the
-        // next kind with `absentValue: 1`.)
-        authored[kind.id] = {
-          placement: ingest?.placement ?? null,
-          content: ingest?.content ?? null,
-          absentValue: kind.absentValue,
-        };
+        // `absentValue` rides even when NOTHING authored this kind — the
+        // entry must still be present so the rasterizer fills with the
+        // KIND's absent value rather than a positional default. (Dropping
+        // the entry to `null` would make every unauthored kind fill 0
+        // regardless of what the catalog declares — correct for `water`,
+        // silently wrong for the next kind with `absentValue: 1`.)
+        authored[kind.id] = { sources: sourcesFor(kind.id), absentValue: kind.absentValue };
       }
       return {
         index: floor.index,
         ceilingElevation: floor.ceilingElevation,
         bottomElevation: floor.bottomElevation,
-        outdoors: outdoors ? { placement: outdoors.placement, content: outdoors.content } : null,
+        outdoors: sourcesFor('outdoors'),
         authored,
       };
     });
@@ -538,31 +644,73 @@ export function createMaskAuthority({ readPageImageData, log }) {
   }
 
   /**
-   * Serving status for an AUTHORED kind on one floor — provenance made
-   * explicit, so a default can never be mistaken for authored data.
+   * Serving status for an AUTHORED kind on ONE ITEM — provenance made
+   * explicit, so a default can never be mistaken for authored data. Works
+   * identically for a Level's background, a Level's foreground, OR a Tile
+   * (2026-07-26, `keyhole-mask-any-item-decision`, LOCKED — the three item
+   * kinds `foundry/scene-layers.js#collectSceneLayers` produces are ALL
+   * first-class mask hosts, symmetrically; nothing here special-cases one).
+   *
+   * URL-only: this reads discovery's own verdict, never the ingest/
+   * rasterization pipeline. For the FLOOR's own composited grid — which now
+   * DOES merge every host's own paint together, in draw order, a later host
+   * overwriting an earlier one within its own footprint — read
+   * `getDerived`/`sampleWorld` instead (see `hostsOfFloor`'s own doc).
+   *
+   * @param {string} itemId @param {string} kindId
+   * @returns {{source: 'authored', url: string}|{source: 'default', value: number}}
+   */
+  function authoredStatusForItem(itemId, kindId) {
+    const kind = maskKindById(kindId);
+    if (!kind) throw new Error(`unknown mask kind '${kindId}' — declare it in scene/mask-catalog.js`);
+    const url = scene.discovery?.byTargetId?.get(itemId)?.get(kindId);
+    return url ? { source: 'authored', url } : { source: 'default', value: kind.absentValue };
+  }
+
+  /**
+   * `authoredStatusForItem`'s convenience wrapper for the single most common
+   * case: "this LEVEL's own background file". A thin resolve-then-delegate,
+   * reading the exact SAME underlying map — never a second, parallel lookup
+   * (2026-07-26: this used to BE the only door, keyed by level id straight
+   * into discovery's own map; now that discovery is keyed uniformly by item
+   * id — see `foundry/mask-discovery.js`'s own header — this resolves the
+   * level's background item first). A level with no background item at all
+   * (a tiles-only floor) correctly serves the default here — its OWN masks
+   * still exist, just not reachable through this specific, background-only
+   * door; see `hostsOfFloor` for the floor-wide question.
    * @param {string} levelId @param {string} kindId
    * @returns {{source: 'authored', url: string}|{source: 'default', value: number}}
    */
   function authoredStatus(levelId, kindId) {
     const kind = maskKindById(kindId);
     if (!kind) throw new Error(`unknown mask kind '${kindId}' — declare it in scene/mask-catalog.js`);
-    const url = scene.discovery?.byLevelId?.get(levelId)?.get(kindId);
-    return url ? { source: 'authored', url } : { source: 'default', value: kind.absentValue };
+    const bgItem = backgroundItemOf({ id: levelId });
+    if (!bgItem) return { source: 'default', value: kind.absentValue };
+    return authoredStatusForItem(bgItem.id, kindId);
   }
 
   /**
-   * Which `required` AUTHORED kinds have no discovered file for this level —
-   * NEVER "discovered but not yet decoded" (that reads `source: 'authored'`
-   * from `authoredStatus`, a transient streaming state, not a gap). Cheap: a
-   * handful of Map lookups over the small, fixed `MASK_KINDS` array.
+   * Which `required` AUTHORED kinds have NO discovered file from ANY host of
+   * this floor — background, foreground, or any visible Tile (2026-07-26,
+   * `keyhole-mask-any-item-decision`, LOCKED: a tiles-only floor whose
+   * outdoors comes entirely from a Tile must not be flagged as missing it
+   * just because it has no background item to check). NEVER "discovered but
+   * not yet decoded" (that reads `source: 'authored'` from
+   * `authoredStatusForItem`, a transient streaming state, not a gap). Cheap:
+   * a handful of Map lookups over the small, fixed `MASK_KINDS` array, per
+   * host of one floor.
    * @param {string} levelId
    * @returns {Set<string>}
    */
   function requiredMissingAuthoredIds(levelId) {
     const missing = new Set();
+    const floor = scene.floors.find((f) => f.id === levelId);
+    if (!floor) return missing;
+    const hosts = hostsOfFloor(floor);
     for (const kind of MASK_KINDS) {
       if (!kind.required) continue;
-      if (authoredStatus(levelId, kind.id).source === 'default') missing.add(kind.id);
+      const anyAuthored = hosts.some((item) => authoredStatusForItem(item.id, kind.id).source === 'authored');
+      if (!anyAuthored) missing.add(kind.id);
     }
     return missing;
   }
@@ -616,6 +764,11 @@ export function createMaskAuthority({ readPageImageData, log }) {
    * pipeline stages (this file's own header diagram: `setDiscovery` vs
    * `ingestDecodedPage`), and nothing before this exposed whether the SECOND
    * stage had ever actually run for a specific floor's specific content.
+   * `outdoorsIngested` now asks across EVERY host of the floor (2026-07-26,
+   * `keyhole-mask-any-item-decision`), not just the background — a tiles-
+   * only floor whose outdoors comes entirely from a Tile must not report
+   * `false` here just because it has no background item at all.
+   *
    * @param {number} floorIndex
    * @returns {{floorFound:boolean, backgroundItemId:string|null, outdoorsIngested:boolean}}
    */
@@ -626,7 +779,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
     return {
       floorFound: true,
       backgroundItemId: bg?.id ?? null,
-      outdoorsIngested: bg ? scene.ingests.has(`${bg.id}/outdoors`) : false,
+      outdoorsIngested: hostsOfFloor(floor).some((item) => scene.ingests.has(`${item.id}/outdoors`)),
     };
   }
 
@@ -691,6 +844,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
     getDerived,
     sampleWorld,
     authoredStatus,
+    authoredStatusForItem,
     getReport,
     getIngestStatus,
     /**

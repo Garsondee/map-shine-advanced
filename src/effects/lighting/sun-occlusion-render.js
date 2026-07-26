@@ -110,11 +110,6 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
   const uSun = uniform(vec4(0, -1, 1, 8));
   /** (heightScalePx, strength01, softnessMul, basePenumbraPx). */
   const uLook = uniform(vec4(2048, 1, 1, 2));
-  /** (buildingHeightPx, skyOcclusion01, _, _). `buildingHeightPx` is here
-   * rather than baked into a texture channel because building height is
-   * `height × (1 − outdoors)` and `outdoors` is already the A channel — see
-   * the packing note in `bakeCasterTexture`. */
-  const uLook2 = uniform(vec4(0, 0, 0, 0));
   /** The world rect this field covers: (minX, minY, maxX, maxY). */
   const uRect = uniform(vec4(0, 0, 1, 1));
   /** Width of the map-edge ramp, in world px. */
@@ -155,15 +150,38 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
     // why this targets the SHADOW's reading only, not the shared mask.
     const here = casterTexNode.sample(uv());
     const gate = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), here.a);
-    const buildingHeightPx = uLook2.x;
-    const skyOcclusion01 = uLook2.y;
-    /** Height of whatever stands at a texel: the tallest of the two ART-driven
-     * channels and the authored BUILDING height, the latter recomputed from the
-     * gate (`height × indoor-ness`) rather than stored — see uLook2. */
-    const heightAt = (packed) =>
-      max(max(packed.g, packed.b).mul(heightScalePx), float(1).sub(packed.a).mul(buildingHeightPx));
 
-    const occlusion = float(0).toVar();
+    // THE PACKING (2026-07-26 rethink, §3; R narrowed 2026-07-26 — §4b):
+    //   R = SKY-REACH coverage ONLY — a DIFFERENT floor's structure, art this
+    //       floor never draws at this pixel, so d=0 darkens a genuinely
+    //       separate, still-visible ground.
+    //   G = occluder HEIGHT, byte over `heightScalePx`, never alpha-scaled
+    //       (building ∪ overhead ∪ sky-reach, MAX-merged — still marches for
+    //       all three; only the d=0 self-check is narrowed to R).
+    //   B = THIS FLOOR'S OWN solid mass — building coverage (indoor-ness) ∪
+    //       overhead coverage (raised tiles). Marchable, never d=0-eligible.
+    //   A = the receiver gate (raw outdoors)
+    // Coverage and height used to share one byte, which made every antialiased
+    // silhouette edge read as a shorter, fainter caster than it is. They are
+    // now two channels and the march reads them as two facts.
+    const heightAt = (packed) => packed.g.mul(heightScalePx);
+    const coverageAt = (packed) => max(packed.r, packed.b);
+
+    // ⚠️ d = 0 — THE STATION THAT WAS MISSING, then OVER-WIDENED (both
+    // 2026-07-26). Starting the loop at i = 1 meant the field was never asked
+    // "is something standing over ME", which is the entire question under a
+    // bridge — fixed by reading R here, at zero march distance. But R first
+    // shipped as `max(overhead, skyReach)`, and an OVERHEAD item lives on
+    // THIS SAME floor: its own opaque art IS the only thing ever visible at
+    // its own footprint (Foundry elevation is a draw-order key, not a spatial
+    // offset — a raised tile's sprite and the floor "beneath" it occupy the
+    // identical (x,y)). So a balcony/lantern-plinth read its own footprint as
+    // "something floating overhead" and painted a shadow through its own
+    // sprite (docs/planning/Sun-Shadows-Rethink.md §4b). R is sky-reach only
+    // now — a genuinely different floor, whose art is NOT drawn here, so
+    // darkening this pixel darkens real, visible ground, never a caster's own
+    // surface. Overhead still marches normally via B.
+    const occlusion = here.r.toVar();
     for (let i = 1; i <= steps; i++) {
       const d = stepPx.mul(float(i));
       const at = world.add(dir.mul(d));
@@ -200,8 +218,13 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
         const packed = casterTexNode.sample(vec2(sampleUv.x.clamp(0, 1), sampleUv.y.clamp(0, 1)));
         const h = heightAt(packed);
         // A blocker must stand ABOVE the sun ray's height at this distance.
+        // The smoothstep is the TIP fade ONLY — how dark the shadow gets is
+        // the occluder's own coverage, so a low awning and a tall tower cast
+        // equally dark shadows of different lengths. (It used to be the
+        // smoothstep alone, which made darkness a function of height: the
+        // author's "the shadows have different opacities".)
         const over = h.sub(d.mul(tanElev));
-        stepOcclusion = stepOcclusion.add(smoothstep(float(0), feather, over));
+        stepOcclusion = stepOcclusion.add(coverageAt(packed).mul(smoothstep(float(0), feather, over)));
       }
       stepOcclusion = stepOcclusion.div(float(LATERAL_TAPS));
       // MAX, not accumulate, ACROSS STEPS: the deepest blocked station along
@@ -222,26 +245,14 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
     const dEdge = min(min(world.x.sub(uRect.x), uRect.z.sub(world.x)), min(world.y.sub(uRect.y), uRect.w.sub(world.y)));
     const ramp = smoothstep(float(0), max(uEdgeBandPx, float(1e-3)), dEdge);
 
-    // ═══════════════════════════════════════════════════════════════════
-    // SKY OCCLUSION — the term that makes UNDER a bridge dark (2026-07-25)
-    // ═══════════════════════════════════════════════════════════════════
-    //
-    // Author, twice: *"using their opaque sections to block light from getting
-    // to bits of the scene below THAT POINT"*, and *"underneath a bridge isn't
-    // 'indoors' it's outdoors and just not able to see the sky from that
-    // space."* That is NOT the directional march — it is how much SKY the point
-    // can see, and it is why the march alone read as "still not the desired
-    // effect": a 300px-tall bridge deck at a 60° noon sun throws its ray-shadow
-    // only ~86px past its own footprint, 0.8% of a 10,650px map. Physically
-    // right, visually nothing.
-    //
-    // `coverAbove` (R) answers the actual question — is anything solid directly
-    // overhead — so this darkens the whole area under the deck at ANY sun
-    // angle, and it is what a bridge, a roof or an upper floor should do. Gated
-    // by the receiver like everything else: a true interior is not lit by the
-    // sky in this model anyway, so it must not be darkened twice.
-    const skyBlocked = here.r.mul(skyOcclusion01).mul(gate);
-    const vis = float(1).sub(occlusion.mul(strength).mul(gate).mul(ramp)).mul(float(1).sub(skyBlocked));
+    // ⚠️ THE `skyOcclusion` TERM IS GONE (2026-07-26). It existed because the
+    // march skipped `d = 0` and therefore could never darken the ground under a
+    // bridge — so a whole second mechanism, with its OWN strength knob, was
+    // bolted on beside it. Two darkness scales for one shadow is precisely the
+    // author's "the shadows have different opacities", and the compounding of
+    // the two against a darkness Region is what made the result "a mess". The
+    // march now answers the question itself, once, at one strength.
+    const vis = float(1).sub(occlusion.mul(strength).mul(gate).mul(ramp));
     // Stored in RGB (not just R) so the field is readable as a greyscale image
     // in the debug layer cycler — a shadow field you can LOOK at is the
     // difference between "sky-reach is broken" and "sky-reach has no casters".
@@ -262,13 +273,6 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
     },
     setField({ heightScalePx }) {
       uLook.value.x = heightScalePx;
-    },
-    /** The two terms the texture no longer carries: the authored building
-     * height (recomputed in-shader from the gate) and the sky-occlusion
-     * strength (see the SKY OCCLUSION block). */
-    setSkyOcclusion({ buildingHeightPx, skyOcclusion01 }) {
-      uLook2.value.x = buildingHeightPx > 0 ? buildingHeightPx : 0;
-      uLook2.value.y = Math.max(0, Math.min(1, skyOcclusion01 ?? 0));
     },
     setLook({ strength01, softnessMul, basePx }) {
       uLook.value.y = strength01;

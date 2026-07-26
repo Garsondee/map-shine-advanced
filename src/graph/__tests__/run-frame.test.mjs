@@ -84,9 +84,17 @@ export function run(t) {
   // the point (not a silent extra id nobody wired).
   {
     const { ids } = planFrame(PASSES, { fromStage: 'masks', toStage: 'present' });
+    // `surface.response` joined 2026-07-26 (Specular.md tiers 0-2), between
+    // light.accumulate and surface.particles — which is not a detail: it MUST
+    // sit after the pass that writes buf:scene.illum, because reading the
+    // illumination is the whole reason it is a pass rather than a drawable in
+    // geometry.world the way water's surface is.
+    const expected =
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,post.bloom,present.composite';
+    ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
-      `today's real masks..present plan is exactly [masks.occlusion, geometry.world, light.accumulate, surface.particles, post.bloom, present.composite] (got: ${ids.join(',')})`,
-      ids.join(',') === 'masks.occlusion,geometry.world,light.accumulate,surface.particles,post.bloom,present.composite'
+      'surface.response is planned AFTER light.accumulate — it reads what that pass writes',
+      ids.indexOf('surface.response') > ids.indexOf('light.accumulate')
     );
   }
 

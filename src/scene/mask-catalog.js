@@ -38,10 +38,12 @@
  *
  * V2 suffixes deliberately NOT declared yet (Stage 6 rethink rule,
  * keyhole-stage6-effects-approach: audit + rethink per effect, never a
- * mechanical port): _Roughness/_Normal/_Iridescence/_Prism/_Fluid/_Dust/_Ash.
+ * mechanical port): _Roughness/_Normal/_Iridescence/_Prism/_Dust/_Ash.
  * The wall still reserves their literals — the day an effect needs one, its
  * declaration lands HERE (one line) or the build fails, which is the funnel
- * working as designed.
+ * working as designed. `_Fluid` came off that list on 2026-07-26, the funnel
+ * working exactly as designed: `docs/planning/Fluid.md` Phase 1 needed it, so
+ * its declaration landed here rather than as a literal somewhere in effects/.
  *
  * @module scene/mask-catalog
  */
@@ -138,7 +140,25 @@ export const MASK_KINDS = Object.freeze([
     channels: 'color',
     packChannel: null,
     absentValue: 0,
-    meaning: 'COLOURED metallic shine tint. Absent = no specular response.',
+    // A GPU consumer is a consumer — the case `rasterize` exists to declare.
+    // `effects/specular` needs the per-floor grid for its SPEC, not its data:
+    // `grid.spec` is the world rect the authored file covers, which is what
+    // maps `positionWorld` to a mask UV. Tier 5 (`grain`) then floods the same
+    // grid for the shape tangent, exactly as the water body pack does.
+    //
+    // ⚠️ The extraction serves R ONLY (`extractionPlanForLayer`), and for this
+    // kind R IS NOT PRESENCE — a blue-painted steel object has r = 0. Nothing
+    // reads this grid's DATA as presence today and nothing should; the
+    // silhouette comes from the authored file at full resolution
+    // (`vt/mask-image.js`, `channels: 'rgb'`), which is the same division of
+    // labour water arrived at the hard way (feedback_sdf_does_not_draw_the_edge).
+    rasterize: true,
+    meaning:
+      'COLOURED metal. Read as a MATERIAL, not a tint (docs/planning/Specular.md §2): HUE = the ' +
+      'reflectance colour F0 (gold reflects gold), SATURATION = metalness (a saturated reflectance is ' +
+      'what makes a conductor a conductor), VALUE = smoothness (bright paint is polished, dark paint ' +
+      'is rough dark iron). V2 collapsed all three to one luminance plus a global tint slider. ' +
+      'Absent = no specular response.',
   },
   {
     id: 'window',
@@ -182,6 +202,31 @@ export const MASK_KINDS = Object.freeze([
       'jump-flood seeds its shore from where R crosses zero and reads depth01 from the same fetch. ' +
       "G (authored shore band) is V2's idea and is deliberately NOT read — the SDF gives a shore band " +
       'of any width for free, which is the whole point of storing distance. Absent = no water.',
+  },
+  {
+    id: 'fluid',
+    suffixes: ['_Fluid'],
+    channels: 'rgba',
+    packChannel: null,
+    absentValue: 0,
+    // The tube net (docs/planning/Fluid.md §5.2) is extracted from this grid on
+    // the CPU at decode time — connected components, the geodesic arc length,
+    // and the area/radius profiles. Exactly the "some CONSUMER needs this
+    // authored grid directly" case `rasterize` exists to declare, and the same
+    // reason `water` carries it.
+    rasterize: true,
+    meaning:
+      'Fluid DATA mask (docs/planning/Fluid.md §5.1) — glass tubes with goo in them. R is read TWO ' +
+      'WAYS and this is deliberate: BY THRESHOLD it is PRESENCE (R>0 is tube interior, R=0 is not a ' +
+      'tube), and BY VALUE it is the FLOW HINT (the BRIGHTEST end of a tube is where the goo comes ' +
+      'FROM, matching V2`s bright→dark flow so existing _Fluid art keeps its direction). G, B and A ' +
+      'are ignored entirely. ⚠️ AUTHORING CONSTRAINT: do not paint the ramp down to pure black — 0 ' +
+      'reads as "not tube" and would cut the far end off. Paint 1/255→255/255 for the full range. ' +
+      'That is a THRESHOLD sharing a byte with a value, NOT V2`s `coverage = a·luma(rgb)` PRODUCT, ' +
+      'which made a dim ramp only partially present so the tube faded out exactly where the fluid was ' +
+      'oldest. The residual risk (feedback_one_byte_two_quantities) is that an ANTIALIASED EDGE texel ' +
+      'genuinely is coverage×ramp; fluid-net.js therefore reads the hint from INTERIOR texels only. ' +
+      'Absent = no tubes anywhere.',
   },
 ]);
 

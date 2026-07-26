@@ -602,8 +602,34 @@ export function applyDarknessAdjustment(darkness01, mode, modifier) {
  * for every floor, exactly matching the pre-this-fix (unconditional)
  * behaviour for every region that doesn't explicitly restrict elevation.
  *
- * Standard half-open-interval overlap (`aBottom <= bTop && bBottom <= aTop`)
- * — two ranges overlap unless one ends entirely before the other begins.
+ * ⚠️ BOTH RANGES ARE HALF-OPEN AT THE TOP — `[bottom, top)`. This was a CLOSED
+ * test (`rBottom <= fTop && fBottom <= rTop`) until 2026-07-26, and its own
+ * comment claimed "half-open" while the code was not. The bug that exposed it,
+ * author-reported: on the bridge map's GROUND floor (band `[0,10]`), a darkness
+ * Region belonging to the MIDDLE floor (band `[10,20]`) stayed active and painted
+ * five building-shaped rectangles of lighter ground onto the river below —
+ * indistinguishable, by eye, from holes punched in the new sky-reach shadow.
+ *
+ * Adjacent floors SHARE a boundary by construction: floor N's `top` IS floor
+ * N+1's `bottom`. A closed test therefore says every region touching that
+ * boundary belongs to BOTH floors, so any region authored to span exactly one
+ * floor's band leaks into its neighbour. Half-open makes the shared boundary
+ * belong to the UPPER floor alone, which is the same convention
+ * `scene/mask-derive.js` uses for level art and for exactly the same reason
+ * (memory: feedback_membership_beats_derived_threshold — this is that bug class
+ * a third time, in a third subsystem).
+ *
+ * A ZERO-HEIGHT region (`bottom === top`, a GM pinning one elevation) is a POINT,
+ * not an interval, and a half-open test would reject it against its own floor's
+ * ground. It gets `fBottom <= p < fTop` instead — the same rule, applied to a
+ * degenerate range rather than silently dropping it.
+ *
+ * `null` on either side still reads as Foundry's own convention
+ * (`common/documents/region.mjs`'s `elevation` field comment, verified): a null
+ * bottom is -Infinity, a null top is +Infinity. So an ordinary region — the
+ * overwhelming common case, elevation left untouched by the GM — is `(-∞, +∞)`
+ * and still overlaps every floor, exactly as before. Likewise an unresolvable
+ * floor band stays fail-open.
  *
  * @param {number|null} regionBottom @param {number|null} regionTop
  * @param {number|null} floorBottom @param {number|null} floorTop
@@ -614,7 +640,8 @@ export function regionOverlapsElevationBand(regionBottom, regionTop, floorBottom
   const rTop = Number.isFinite(regionTop) ? regionTop : Infinity;
   const fBottom = Number.isFinite(floorBottom) ? floorBottom : -Infinity;
   const fTop = Number.isFinite(floorTop) ? floorTop : Infinity;
-  return rBottom <= fTop && fBottom <= rTop;
+  if (rBottom === rTop) return rBottom >= fBottom && rBottom < fTop;
+  return rBottom < fTop && rTop > fBottom;
 }
 
 /**

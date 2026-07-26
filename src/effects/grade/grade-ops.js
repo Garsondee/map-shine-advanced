@@ -74,9 +74,10 @@ export const IDENTITY_GRADE = Object.freeze({
  * The selectable tone-mapping curves — the HDR→display response. All are
  * built-in TSL `Fn`s in the vendored three (three.webgpu.js), so this is an
  * enum → `THREE.TSL[fnName]` lookup, never a hand-rolled curve. `'none'` skips
- * it (the present pass's own hue-preserving rolloff stays in charge). `'agx'`
- * is the author's chosen default for the Look grade (best behaviour on the
- * bright saturated light this scene is full of — Grade.md §10 fork).
+ * it (the present pass's own hue-preserving rolloff stays in charge). `'neutral'`
+ * is the author's chosen default for the Look grade — AgX's base curve (no
+ * "punchy" look pass on top, unlike Blender's AgX) reads flat/desaturated on
+ * this content without an added contrast/saturation boost (Grade.md §10 fork).
  * @type {Readonly<Record<string,string|null>>}
  */
 export const TONE_MAP_FNS = Object.freeze({

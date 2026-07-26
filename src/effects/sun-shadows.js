@@ -39,6 +39,8 @@
  * @module effects/sun-shadows
  */
 
+import { SUN_SHADOW_DEBUG_VIEWS } from './lighting/sun-shadow-debug.js';
+
 /** @type {Record<string, object>} */
 export const SUN_SHADOW_PARAMS = Object.freeze({
   strength01: {
@@ -88,28 +90,6 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     label: 'Shadow length',
     help: 'Scales the length of every shadow at every time of day. 0.5 = half as long. Use the Dawn/dusk knob above to tame just the long evening ones.',
   },
-  skyOcclusion: {
-    // THE "UNDER A BRIDGE IS DARK" CONTROL (author, 2026-07-25: "using their
-    // opaque sections to block light from getting to bits of the scene below
-    // that point"). Independent of sun angle — this is how much SKY the ground
-    // can see, not where the sun happens to be. The directional march cannot
-    // supply it: a 10ft bridge at noon throws its ray-shadow barely past its
-    // own footprint.
-    // ⚠️ DEFAULT LOWERED 0.65 → 0.25 (2026-07-25, author: "still just a mess").
-    // It MULTIPLIES with whatever else darkens a pixel: on their bridge map the
-    // ground floor already sits under a 0.5 darkness Region, so 0.65 here gave
-    // 0.5 × 0.35 = ×0.17 ambient — effectively black, in hard blobs the shape of
-    // every crate and plank on the floor above. A term that compounds with
-    // other darkeners must start conservative and be dialled UP by eye.
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.05,
-    default: 0.25,
-    category: 'Look',
-    label: 'Under-cover shade',
-    help: 'How much darker a spot gets simply for having something solid overhead — under a bridge, a walkway, an upper floor. Independent of the time of day. Compounds with any darkness Region already covering the area, so raise it gently.',
-  },
   softnessBias: {
     type: 'float',
     min: 0.25,
@@ -130,26 +110,29 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     label: 'Map-edge fade',
     help: 'How wide a band at the edge of the map the shadows fade out over. Stops a hard line appearing where the scene ends and the shadows simply stop.',
   },
-  showBuilding: {
-    type: 'bool',
-    default: true,
+  debugView: {
+    // THE DIAGNOSIS CONTROL (author, 2026-07-26: "a dropdown in the ROH
+    // controls, allowing me to see just a single shadow at a time out of the
+    // whole system… on a white background… you can also put debug things into
+    // that list so that I can help tell you if an intermediate texture is
+    // actually broken").
+    //
+    // ⚠️ REPLACED the three `showBuilding`/`showOverhead`/`showSkyReach` bools.
+    // Their own help text already began "Diagnosis:", and two controls that
+    // isolate the same three producers is how they end up disagreeing about
+    // which one is on (feedback_debug_ui_one_action_one_control). The isolating
+    // views set the SAME derivation includes those bools set, so nothing was
+    // lost — one control now owns the whole question.
+    type: 'enum',
+    // DERIVED from the debug module, never re-typed: that file decides what
+    // each view actually shows, so a hand-copied list here could offer a view
+    // the renderer does not have (or hide one it does).
+    values: SUN_SHADOW_DEBUG_VIEWS.map((v) => v.id),
+    valueLabels: Object.fromEntries(SUN_SHADOW_DEBUG_VIEWS.map((v) => [v.id, v.label])),
+    default: 'off',
     category: 'Technical',
-    label: 'Include building shadows',
-    help: 'Diagnosis: turn off to see the scene without the shadows cast by the indoor (dark) parts of the outdoors mask.',
-  },
-  showOverhead: {
-    type: 'bool',
-    default: true,
-    category: 'Technical',
-    label: 'Include overhead shadows',
-    help: 'Diagnosis: turn off to see the scene without the shadows cast by raised tiles on this floor (balconies, awnings, walkways).',
-  },
-  showSkyReach: {
-    type: 'bool',
-    default: true,
-    category: 'Technical',
-    label: 'Include sky-reach shadows',
-    help: 'Diagnosis: turn off to see the scene without the shadows cast down from the floors above (a bridge deck, the roofs above it).',
+    label: 'Debug view',
+    help: 'Diagnosis. Shows one shadow at a time, or one of the raw data layers, as greyscale on white — white = lit or present, black = shadowed or absent. Compare "occluder coverage" against "occluder height": a shape visible in coverage but BLACK in height means the things overhead exist but have no height recorded, which is why they cast nothing.',
   },
 });
 

@@ -165,9 +165,9 @@ export function run(t) {
   // ---- tone-map selector: enum → three's TSL fn name ------------------------
   {
     t.ok("'none' maps to no fn (skipped)", TONE_MAP_FNS.none === null);
-    t.ok('agx is the author-chosen default option', TONE_MAP_FNS.agx === 'agxToneMapping');
+    t.ok('agx present', TONE_MAP_FNS.agx === 'agxToneMapping');
     t.ok('aces present', TONE_MAP_FNS.aces === 'acesFilmicToneMapping');
-    t.ok('neutral present', TONE_MAP_FNS.neutral === 'neutralToneMapping');
+    t.ok('neutral is the author-chosen default option', TONE_MAP_FNS.neutral === 'neutralToneMapping');
     t.ok(
       'every name resolves to a fn or null',
       TONE_MAP_NAMES.every((n) => n in TONE_MAP_FNS)

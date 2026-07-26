@@ -248,7 +248,16 @@ export const PASSES = [
     kind: 'gpu',
     status: 'live',
     owns: 'docs/planning/Light-and-Shadow.md §1 + Keyhole §4.2 (harvested ForwardLightingPass semantics) + docs/planning/Light-Parity.md',
-    creates: ['buf:scene.illum'],
+    // `buf:scene.coloration` was REAL and UNDECLARED until 2026-07-26 — really
+    // allocated (`vt-pan-viewer.js`), really rendered into from its own
+    // dedicated scene, really read by the composite, and named nowhere but this
+    // pass's own note below. Declaring it is not bookkeeping: an undeclared
+    // resource cannot be READ by a later pass without tripping
+    // `validatePassGraph`'s reads-before-creates check, so the graph was
+    // quietly unable to express a consumer for a buffer that has existed since
+    // increment 3. Found while designing `surface.response`'s tier-4 read of it
+    // (docs/planning/Specular.md §7.2).
+    creates: ['buf:scene.illum', 'buf:scene.coloration'],
     // `reads` stays narrowed to res:env even now that point lights are live
     // (2026-07-18): light DATA comes from a direct foundry/scene-lights.js
     // adapter read (canvas.effects.lightSources), the same shortcut
@@ -310,15 +319,50 @@ export const PASSES = [
     id: 'surface.response',
     stage: 'surface',
     kind: 'gpu',
-    status: 'seam',
-    owns: 'Effects-API.md §5 (the worked SPECULAR declaration) + Effects.md (the ladder)',
+    // LIVE as of 2026-07-26 (tiers 0-2), and unlike surface.water this genuinely
+    // IS a pass rather than a drawable — it is the first one in the renderer
+    // that had to be. Water's tier 0 draws inside geometry.world and buys
+    // occlusion from the painter's algorithm; shine cannot, because it reads
+    // buf:scene.illum, which does not exist until light.accumulate has run, and
+    // sampling a target the pass you are inside is still writing is undefined
+    // behaviour on both backends. So it owns a dedicated scene drawn into
+    // scene.lit in the surface stage, and pays for its own occlusion with the
+    // buf:scene.attr read below.
+    status: 'live',
+    owns: 'docs/planning/Specular.md (the material model + the indoor/outdoor split) + Effects.md (the ladder)',
     creates: [],
-    reads: ['vt:masks', 'buf:scene.illum', 'buf:scene.attr', 'res:env'],
+    // `vt:masks` is NOT read and its absence is deliberate rather than pending:
+    // the `_Specular` COLOUR is served by the authored file at its own
+    // resolution (vt/mask-image.js, channels:'rgb'), because the VT/derivation
+    // path is extracted R-only and for a colour mask R is not presence — a
+    // blue-painted steel object has r = 0. The authority still supplies the
+    // world RECT (scene/mask-catalog.js's `rasterize` flag on `specular`), the
+    // same split of labour water arrived at over four rounds. `res:env` returns
+    // when a rung reads weather directly; the sky comes in as a handle today.
+    // `buf:scene.coloration` returns at tier 4 (per-lamp highlight colour) —
+    // now declarable, since light.accumulate finally declares that it creates it.
+    reads: ['buf:scene.illum', 'buf:scene.attr'],
     modifies: ['buf:scene.color'],
     absorbs: ['SpecularEffectV2', 'IridescenceEffectV2', 'PrismEffectV2', 'RoughnessEffectV2', 'NormalEffectV2'],
     note:
-      'One material term: shine/iridescence/wetness reading the packed specular VT layer × illum × ' +
-      'weather wetness. Additive into color. Five V2 classes, one node with tiers.',
+      'TIERS 0-2 ARE LIVE (2026-07-26). The specular mask read as a MATERIAL — hue = F0 (gold ' +
+      'reflects gold), saturation = metalness, value = smoothness — where V2 collapsed all three ' +
+      'channels to one luminance plus a global tint slider and manufactured the rest from noise. ' +
+      'Two blends, not one add: a MULTIPLY that lets a real conductor suppress the diffuse it ' +
+      'replaces (gated on metalness, so a greyscale V2-era mask provably suppresses nothing) and an ' +
+      'ADD for the highlights. The angular variation an orthographic camera over a flat map deletes ' +
+      'is restored by synthesising a finite eye height, which is what makes a highlight SWEEP when ' +
+      'the author pans. Indoors and outdoors are two different physical situations, not a blend ' +
+      'weight: outdoors reflects the sky (two analytic lobes from effects/sky-access.js — a uniform ' +
+      'dome plus the sun disc, whose glint therefore tracks the clock), indoors reflects the lamps, ' +
+      'whose DIRECTION is the gradient of buf:scene.illum (it points at the source, needs no light ' +
+      'list, and correctly vanishes under uniform ambient). `live` means tiers 0-2 run every frame ' +
+      'against real data, NOT that the ladder is complete — glint, weather/coloration, SDF grain, ' +
+      'albedo-relief normals, iridescence and reflection are rungs 3-8 (Specular.md §6). TWO honest ' +
+      'gaps: tokens do not occlude the shine (buf:scene.attr is written by floor ART only, so an ' +
+      'overlay leaves the attributes under it untouched — V2 used a dedicated token mask, which MSA ' +
+      'has no equivalent of yet), and the surface normal is flat (+Z) until the relief rung lands. ' +
+      'Same honesty bar geometry.world/masks.occlusion set for their own partial claims.',
   },
   {
     id: 'surface.water',

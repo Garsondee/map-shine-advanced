@@ -183,6 +183,52 @@ export function run(t) {
       'visibility: no viewed level -> nothing at all',
       collectLevelTextures({ levels: [a] }, { viewedLevelId: 'nope' }).items.length === 0
     );
+
+    // ══════════════════════════════════════════════════════════════════
+    // THE CALLER'S DECLARED VISIBLE SET OVERRIDES THE DOCUMENT'S
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // THE BUG (author, 2026-07-26): the mask authority's cover physics is
+    // deliberately view-INDEPENDENT, so boot asks for every level. But
+    // `visibleLevelIds` was forwarded to the TILE collector only — level art
+    // stayed gated on the viewed level's own `visibility.levels`. Result: every
+    // floor's tiles came back and only the viewed floor's background/foreground
+    // did, so an upper floor's 8 MB bridge deck was never in the item list at
+    // all — not even as "missing". Four items where there should have been
+    // eight, and no instrument could show it because the item never existed.
+    // `b` gets a real FOREGROUND too — the bridge map's upper floor has both,
+    // and the whole point is that BOTH must come back.
+    const bBoth = { ...b, foreground: { src: 'b-fg.webp' } };
+    const all = collectLevelTextures(
+      { levels: [a, bBoth] },
+      { viewedLevelId: 'a', visibleLevelIds: ['a', 'b'], getRouteFn: noRoute }
+    );
+    ok(
+      'declared visibleLevelIds returns EVERY listed level’s art, whatever the document says',
+      all.items.some((i) => i.levelId === 'b' && i.kind === 'levelBackground') &&
+        all.items.some((i) => i.levelId === 'b' && i.kind === 'levelForeground')
+    );
+    ok(
+      'and still returns the viewed level’s own art alongside it',
+      all.items.some((i) => i.levelId === 'a' && i.kind === 'levelBackground')
+    );
+    // An EMPTY declared set must not resurrect the document fallback — "the
+    // caller says nothing is visible" and "the caller said nothing" are
+    // different statements, and only the second may fall back.
+    const declaredNone = collectLevelTextures(
+      { levels: [aSeesB, b] },
+      { viewedLevelId: 'a', visibleLevelIds: [], getRouteFn: noRoute }
+    );
+    ok(
+      'an EMPTY declared set is honoured, not treated as absent',
+      declaredNone.items.every((i) => i.levelId === 'a')
+    );
+    ok(
+      'omitting the option still falls back to the document (draw path unchanged)',
+      collectLevelTextures({ levels: [aSeesB, b] }, { viewedLevelId: 'a', getRouteFn: noRoute }).items.some(
+        (i) => i.levelId === 'b'
+      )
+    );
   }
 
   // --- collectLevelTextures: video art is reported, not silently dropped ----

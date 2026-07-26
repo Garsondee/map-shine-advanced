@@ -69,10 +69,20 @@ export function buildSunShadowsReport({ floorIndex, status, viewer, readout, deg
     lastBake: viewer?.wholeImage?.sunShadows?.lastBake ?? 'viewer not started',
     interpretation:
       'Read top-down. floor.missingItemCount > 0 means art has not been ingested for items that ' +
-      'would cast — check coarseAlpha next. casterField.maxCasterHeightPx === 0 means the field is ' +
-      'EMPTY: nothing can cast a shadow, so an absent shadow is correct and the fault is upstream ' +
-      '(nothing painted indoors for building, no raised tiles for overhead, no upper-floor art for ' +
-      'sky-reach — floor.overheadItemCount / skyReachItemCount say which). lastBake.active:false ' +
+      'would cast — check coarseAlpha next. ⚠️ THE DECISIVE PAIR is casterField.coveredPct against ' +
+      'casterField.maxCasterHeightPx: coverage PRESENT with a max height of ZERO means the casters ' +
+      'exist and are all zero-height, which is what a floor with no declared bottomElevation ' +
+      'produces — every item COUNT looks healthy while the field casts nothing, and that is exactly ' +
+      'how sky-reach stayed broken through four rounds of tuning. floor.bottomElevation === null is ' +
+      'the confirmation. Both zero instead means the field is genuinely EMPTY: an absent shadow is ' +
+      'correct and the fault is upstream (nothing painted indoors for building, no raised tiles for ' +
+      'overhead, no upper-floor art for sky-reach — floor.overheadItemCount / skyReachItemCount say ' +
+      'which). ⚠️ floor.itemBands is the per-item verdict table — band/elevation/ownerFloorIndex/' +
+      'hasArt for EVERY item, including the ones that cast nothing. An item you expect overhead ' +
+      'sitting at band:"none" is a CLASSIFICATION bug; band:"skyReach" with hasArt:false is an ' +
+      'INGEST one. Aggregate counts cannot tell those apart. To SEE any of this, set the effect`s ' +
+      '"Debug view" to "occluder coverage" and then ' +
+      '"occluder height": the same comparison, by eye, on a white background. lastBake.active:false ' +
       'means the march deliberately wrote a white (no-shadow) field. lastBake.reason names what ' +
       'triggered the most recent march; if it stays "first" while the sun moves, the rebake trigger ' +
       'is not firing.',
@@ -137,5 +147,50 @@ export function buildWaterBodyReport({ floorIndex, viewer, maskAuthority, genera
       'resolved floor`s mask holds no water at all (nothing to draw — not a failure), and `bounds` ' +
       'is the measured world AABB the quad is cropped to. If bounds ever equals the whole mask ' +
       'rect, the Law 6 crop is not working and water is paying fullscreen cost for a river.',
+  };
+}
+
+/**
+ * "Why can I barely see the shine?" — the report that answers it WITHOUT a
+ * screenshot (`keyhole-debug-panel`: name the report, never ask for console
+ * logs). Registered by `boot.js` as `specular`.
+ *
+ * The order of the fields is the order of the questions, and it is deliberate:
+ * every one of the four ways this effect can render nothing is silent on
+ * screen, and three of them look identical to "it works but is subtle".
+ *
+ * @param {object} args
+ * @param {number} args.floorIndex @param {object|null} args.viewer
+ * @param {object} args.maskAuthority @param {object} args.readout
+ * @param {string} args.generatedAt
+ * @returns {object}
+ */
+export function buildSpecularReport({ floorIndex, viewer, maskAuthority, readout, generatedAt }) {
+  return {
+    report: 'specular',
+    generatedAt,
+    viewedFloor: floorIndex,
+    // Provenance, straight from the authority. 'authored' vs 'default' is the
+    // difference between "painted no metal here" and "no file exists" — the
+    // same empty result, two completely different facts.
+    authoredSpecularFloors: maskAuthority.floorsWithAuthored('specular'),
+    enabled: readout?.enabled ?? 'unresolved',
+    params: readout?.params ?? 'not resolved yet',
+    surface: viewer?.specular ?? 'viewer not started',
+    interpretation:
+      'READ `surface.maskImage` FIRST. "not loaded" means this floor has no authored specular file, ' +
+      'so the pass draws literally nothing and every other field is irrelevant — cross-check ' +
+      'authoredSpecularFloors, which is keyed on provenance rather than on the mask being non-empty. ' +
+      'A loaded mask with `painted: "NOTHING PAINTED"` means the file exists and is entirely black. ' +
+      'NEXT `surface.visible`: false with a loaded, painted mask means the AABB crop or the enable ' +
+      'flag killed it. THEN the two gates, both of which are SILENT on screen: `outdoorsGate: false` ' +
+      'means every pixel takes the INDOOR path regardless of what the map looks like, and indoors ' +
+      'needs a lamp within reach — a daylit courtyard would render nothing at all; `floorGate: false` ' +
+      'means buf:scene.attr was unavailable, so metal will draw straight over upper-floor roofs. ' +
+      'FINALLY the params: `strength` 0 is off, `metalResponse` near 0 turns every metal into a 4% ' +
+      'dielectric (correct physics, nearly invisible from directly above — that reading is what made ' +
+      'the first build invisible), and `relief` 0 removes the per-pixel normal variation that is the ' +
+      'ONLY source of an actual highlight on a flat map. If everything above is healthy and it still ' +
+      'reads flat, that is the tier-3 relief rung being starved by low-contrast art, not a bug.',
   };
 }

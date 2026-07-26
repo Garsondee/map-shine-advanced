@@ -12,6 +12,10 @@ import { createSkyHandle, luminance } from '../sky-access.js';
 // The real sun, for the continuity sweep — a test is exempt from `zones/one-door`
 // and this is the ACTUAL input the handle receives in production.
 import { computeSun } from '../../world/sun.js';
+// The shadow system's OWN azimuth convention, imported so the agreement between
+// a highlight and the shadow cast by the same sun is a MEASUREMENT, not a
+// comment — see the block at the bottom of this file.
+import { shadowOffsetDirection } from '../lighting/light-visibility.js';
 
 /** A stand-in for `env.sun` at a given hour-ish position. */
 const sunAt = (elevationDeg, { dayFactor01, skyFactor01, twilight01 = 0, azimuthDeg = 180 } = {}) => ({
@@ -181,5 +185,34 @@ export function run(t) {
     // and darkness owns that, not this.
     const sky = createSkyHandle({ sun: NIGHT, weather: { cloudCover01: 0.5 }, realism01: 1 });
     t.ok('a lightless sky gives a neutral multiplier', close(luminance(sky.ambientMultiplierRgb), 1, 1e-6));
+  }
+
+  {
+    // ── A HIGHLIGHT MAY NEVER POINT AWAY FROM ITS OWN SHADOW ──────────────
+    //
+    // `key.dirX/dirY` carried that promise in a COMMENT from the day it was
+    // written, and broke it in the same breath: it was `(cos az, sin az)`
+    // while `shadowOffsetDirection` — the live, on-screen-verified one — is
+    // `(−sin az, cos az)`, a 90° rotation plus a reflection apart. It never
+    // rendered wrong because until `effects/specular`'s sun glint it had no
+    // consumer at all, which is exactly how a latent convention bug survives:
+    // nothing exercises it, so nothing contradicts the comment.
+    //
+    // These assertions are the mechanism the comment was standing in for. A
+    // future refactor that re-derives either side independently fails HERE,
+    // in Node, rather than on a map where the sun glints on the north face of
+    // a building whose shadow falls east.
+    let opposed = true;
+    let unit = true;
+    for (let az = 0; az < 360; az += 15) {
+      const k = createSkyHandle({ sun: sunAt(45, { azimuthDeg: az }) }).key;
+      const away = shadowOffsetDirection(az);
+      // Exactly antiparallel: the key direction points TOWARD the light, the
+      // shadow offset points AWAY from it. Dot product must be −1.
+      if (!close(k.dirX * away.x + k.dirY * away.y, -1, 1e-9)) opposed = false;
+      if (!close(Math.hypot(k.dirX, k.dirY), 1, 1e-9)) unit = false;
+    }
+    t.ok('the key direction is exactly OPPOSITE the shadow throw, at every azimuth', opposed);
+    t.ok('…and stays a unit vector all the way round', unit);
   }
 }

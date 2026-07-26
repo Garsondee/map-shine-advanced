@@ -20,13 +20,7 @@
 
 // Through the DOORS, exemplifying zones/one-door: the wiring registry imports
 // each zone's index.js, never its internals.
-import {
-  buildLightVisibilityPass,
-  buildGradePass,
-  buildWaterPass,
-  buildFluidSimPass,
-  buildSurfaceResponsePass,
-} from '../effects/index.js';
+import { buildLightVisibilityPass, buildGradePass, buildWaterPass, buildFluidSimPass } from '../effects/index.js';
 
 /**
  * Every 'seam'-status pass MUST appear here; every entry here MUST be a
@@ -42,6 +36,14 @@ import {
  * a real producer runs in vt-pan-viewer.js (effects/lighting/environmental-
  * light.js does the TSL). 'light.visibility' STAYS a seam — shadows aren't built.
  *
+ * 'surface.response' is NOT here either (2026-07-26): it flipped to 'live'
+ * (tiers 0-2 — docs/planning/Specular.md) and its throwing door,
+ * `effects/surface-response.js`, is DELETED rather than left beside the real
+ * code. That deletion is the point: a door that still exists next to a working
+ * implementation is a second, wrong answer to "how do I run this pass", which
+ * is exactly the shape `EffectComposer` died of (Effects-API.md §3). The real
+ * producer is a viewer closure — see graph/pass-impls.js.
+ *
  * 'sims.particles' + 'surface.particles' are NOT here either (2026-07-21): both
  * flipped to 'live' — see graph/pass-impls.js. The engine is real
  * (effects/particles/particle-runtime.js#createParticleEngine); the sim is
@@ -54,7 +56,6 @@ import {
 export const PASS_SEAMS = Object.freeze({
   'sims.fluids': buildFluidSimPass,
   'light.visibility': buildLightVisibilityPass,
-  'surface.response': buildSurfaceResponsePass,
   'surface.water': buildWaterPass,
   'post.grade': buildGradePass,
 });

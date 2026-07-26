@@ -68,11 +68,22 @@ export async function run(t) {
   // "whatever a DERIVED kind names", so `outdoors` rode along only because
   // `skyReach` consumes it — and `water`, whose only consumer is a GPU bake,
   // was never extracted at all.)
+  // `fluid` joined 2026-07-26 (Fluid.md Phase 1): its consumer is the CPU
+  // tube-net extractor, which is the same "some CONSUMER needs this authored
+  // grid directly" case — a GPU bake and a CPU extractor are both consumers,
+  // and neither is named by any DerivedKind.
+  // `specular` joined 2026-07-26 (Specular.md §7): a THIRD flavour of the same
+  // "some CONSUMER needs this authored grid directly" case, and the one that
+  // shows the flag is about consumers rather than about data. It needs the
+  // grid's SPEC (the world rect the authored file covers, which is what maps
+  // positionWorld to a mask UV), not the grid's contents — and its contents
+  // are in fact NOT usable as presence, since extraction serves R only and a
+  // blue-painted steel object has r = 0. See the kind's own comment.
   t.ok(
-    'outdoors and water are the rasterized kinds',
+    'outdoors, water, fluid and specular are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,water'
+      .join(',') === 'outdoors,specular,water,fluid'
   );
   t.ok(
     'water is NOT required — an unpainted _Water mask is a harmless default, unlike _Outdoors',
@@ -208,6 +219,15 @@ export async function run(t) {
   );
   const singleOutdoors = extractionPlanForLayer('outdoors');
   t.ok('unpacked outdoors extracts its r channel', singleOutdoors.length === 1 && singleOutdoors[0].channel === 'r');
-  t.ok('layers no derivation reads extract nothing', extractionPlanForLayer('specular').length === 0);
+  // `window` and `tree`/`bush` are the remaining kinds nothing consumes on the
+  // CPU: no DerivedKind names them and none is `rasterize`. (This assertion
+  // used `specular` until 2026-07-26, when specular became a rasterized kind —
+  // the claim being tested is about the EXTRACTION RULE, not about specular, so
+  // it moves to a kind that still exercises the zero case.)
+  t.ok('layers no derivation reads extract nothing', extractionPlanForLayer('window').length === 0);
+  t.ok(
+    'a rasterized COLOUR kind does get extracted (specular, added with its own consumer)',
+    extractionPlanForLayer('specular').length === 1 && extractionPlanForLayer('specular')[0].channel === 'r'
+  );
   t.ok('unknown layers extract nothing', extractionPlanForLayer('albedoX').length === 0);
 }

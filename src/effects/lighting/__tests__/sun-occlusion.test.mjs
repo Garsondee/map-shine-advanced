@@ -111,9 +111,17 @@ export function run(t) {
   // ── THE MARCH ITSELF ─────────────────────────────────────────────────
   {
     // A single 200px-tall blocker sitting 100px to the RIGHT of the origin.
-    const blockerAt = (bx, by, hPx) => (x, y) => (Math.hypot(x - bx, y - by) < 40 ? hPx : 0);
+    // GROUNDED by default (`floating: 0`) — a wall standing on the ground it
+    // would otherwise shade. See the `d = 0` block further down.
+    const blockerAt =
+      (bx, by, hPx, opts = {}) =>
+      (x, y) =>
+        Math.hypot(x - bx, y - by) < 40
+          ? { heightPx: hPx, coverage: opts.coverage ?? 1, floating: opts.floating ?? 0 }
+          : { heightPx: 0, coverage: 0, floating: 0 };
+    const empty = () => ({ heightPx: 0, coverage: 0, floating: 0 });
     const base = {
-      sampleHeightPx: blockerAt(100, 0, 200),
+      sampleField: blockerAt(100, 0, 200),
       elevationDeg: 45,
       maxCasterHeightPx: 200,
       steps: 64,
@@ -136,7 +144,7 @@ export function run(t) {
         y: 0,
         azimuthDeg: 90,
         ...base,
-        sampleHeightPx: blockerAt(300, 0, 800),
+        sampleField: blockerAt(300, 0, 800),
         maxCasterHeightPx: 800,
       }) <
         marchVisibility({
@@ -144,14 +152,14 @@ export function run(t) {
           y: 0,
           azimuthDeg: 90,
           ...base,
-          sampleHeightPx: blockerAt(300, 0, 60),
+          sampleField: blockerAt(300, 0, 60),
           maxCasterHeightPx: 60,
         })
     );
 
     t.ok(
       'an empty field casts nothing, whatever the sun is doing',
-      near(marchVisibility({ x: 0, y: 0, azimuthDeg: 90, ...base, sampleHeightPx: () => 0 }), 1, 1e-9)
+      near(marchVisibility({ x: 0, y: 0, azimuthDeg: 90, ...base, sampleField: empty }), 1, 1e-9)
     );
 
     t.ok(
@@ -184,6 +192,107 @@ export function run(t) {
         })
       )
     );
+
+    // ══════════════════════════════════════════════════════════════════
+    // THE 2026-07-26 RETHINK — the two invariants the old march broke
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // (1) COVERAGE SETS DARKNESS; HEIGHT SETS LENGTH. The old field packed
+    // `alpha × height` into one byte, so a half-transparent caster read as a
+    // HALF-HEIGHT one — a shorter shadow AND (because darkness came from how
+    // far the caster overtopped the ray) a fainter one. The author saw that as
+    // "the shadows have different opacities" and as smeared, blocky edges.
+    {
+      const solid = blockerAt(100, 0, 200, { coverage: 1 });
+      const half = blockerAt(100, 0, 200, { coverage: 0.5 });
+      const solidVis = marchVisibility({ x: 0, y: 0, azimuthDeg: 90, ...base, sampleField: solid });
+      const halfVis = marchVisibility({ x: 0, y: 0, azimuthDeg: 90, ...base, sampleField: half });
+      t.ok('half-covered caster casts a HALF-strength shadow', near(1 - halfVis, (1 - solidVis) * 0.5, 1e-6));
+
+      // THE REACH TEST — the one the old packing could never pass. A caster's
+      // opacity must not change WHERE its shadow ends, only how dark it is.
+      // Under `alpha × height` a 50%-alpha caster reached exactly half as far.
+      const reachOf = (field) => {
+        let last = 0;
+        for (let d = 10; d <= 400; d += 10) {
+          const v = marchVisibility({ x: -d, y: 0, azimuthDeg: 90, ...base, sampleField: field });
+          if (v < 1 - 1e-9) last = d;
+        }
+        return last;
+      };
+      t.ok('opacity does NOT change how far a shadow reaches', reachOf(solid) === reachOf(half));
+    }
+
+    // (2) `d = 0` — A FLOATING CASTER SHADES THE GROUND BENEATH IT. This is
+    // the whole of "sky reach", and the old loop started at i = 1 so it was
+    // never asked. A bridge deck overhead must darken the river at NOON, when
+    // the directional throw is nil, without any separate `skyOcclusion` term.
+    {
+      const overhead = () => ({ heightPx: 300, coverage: 1, floating: 1 });
+      const noonUnderBridge = marchVisibility({
+        x: 0,
+        y: 0,
+        azimuthDeg: 90,
+        elevationDeg: 90,
+        maxCasterHeightPx: 300,
+        sampleField: overhead,
+      });
+      t.ok('a bridge deck overhead shades the ground at NOON', noonUnderBridge < 0.01);
+      t.ok(
+        'and at every hour, without a second mechanism',
+        [5, 20, 45, 70, 89].every(
+          (el) =>
+            marchVisibility({
+              x: 0,
+              y: 0,
+              azimuthDeg: 90,
+              elevationDeg: el,
+              maxCasterHeightPx: 300,
+              sampleField: overhead,
+            }) < 0.01
+        )
+      );
+
+      // ⚠️ THE OTHER HALF, and the reason `floating` is its own channel: a
+      // GROUNDED wall occupies its own footprint, so there is no ground under
+      // it to shade. Reading `d = 0` off total coverage instead would ring
+      // every building with a dark fringe on all four sides, sun or no sun.
+      const groundedHere = () => ({ heightPx: 300, coverage: 1, floating: 0 });
+      t.ok(
+        'a GROUNDED caster does not shade the ground it stands on',
+        near(
+          marchVisibility({
+            x: 0,
+            y: 0,
+            azimuthDeg: 90,
+            elevationDeg: 90,
+            maxCasterHeightPx: 300,
+            sampleField: groundedHere,
+          }),
+          1,
+          1e-9
+        )
+      );
+
+      // The receiver gate still outranks everything — an indoor pixel takes no
+      // cast shadow, including the new d = 0 term.
+      t.ok(
+        'receiverGate 0 suppresses the overhead term too',
+        near(
+          marchVisibility({
+            x: 0,
+            y: 0,
+            azimuthDeg: 90,
+            elevationDeg: 90,
+            maxCasterHeightPx: 300,
+            sampleField: overhead,
+            receiverGate: 0,
+          }),
+          1,
+          1e-9
+        )
+      );
+    }
   }
 
   // ── CPU AND GPU MUST AGREE ABOUT THE SKY ─────────────────────────────

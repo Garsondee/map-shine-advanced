@@ -170,10 +170,27 @@ export function marchPenumbraPx({ distancePx, basePx = 2, softnessMul = 1 }) {
  * darkness (the same fail-safe `combineVisibility` states one level up).
  *
  * @param {object} args
+ * ============================================================================
+ * COVERAGE DECIDES DARKNESS; HEIGHT DECIDES LENGTH (2026-07-26 rethink)
+ * ============================================================================
+ *
+ * This used to return `smoothstep(0, feather, casterHeight − rayHeight)` — so
+ * how DARK a shadow came out depended on how far the caster overtopped the ray,
+ * and a low awning was permanently fainter than a tall wall. That is not what
+ * shadows do: height sets a shadow's LENGTH, never its darkness. Now the
+ * blocked-ness at a station is the occluder's own COVERAGE (the art's
+ * antialiased alpha, a genuinely soft silhouette) and the height comparison is a
+ * near-binary "is the ray under it", softened only enough to fade the shadow's
+ * TIP. See docs/planning/Sun-Shadows-Rethink.md §2b.
+ *
  * @param {number} args.x - world position, +y down (Foundry canvas space).
  * @param {number} args.y
- * @param {(x: number, y: number) => number} args.sampleHeightPx - the height
- *   field at a world point, in px above THIS floor. Out of bounds should read 0.
+ * @param {(x: number, y: number) => {heightPx: number, coverage: number, floating: number}} args.sampleField -
+ *   the caster field at a world point. `heightPx` is px above THIS floor;
+ *   `coverage` and `floating` are 0..1. `floating` is narrower than
+ *   `coverage`: it is ONLY a structure on a genuinely DIFFERENT floor (sky-
+ *   reach) — see the `d = 0` note below for why this floor's own overhead
+ *   items must never appear here. Out of bounds reads zero.
  * @param {number} args.azimuthDeg - the sun's compass azimuth.
  * @param {number} args.elevationDeg - the sun's elevation above the horizon.
  * @param {number} args.maxCasterHeightPx - the field's tallest caster (sizes the march).
@@ -187,7 +204,7 @@ export function marchPenumbraPx({ distancePx, basePx = 2, softnessMul = 1 }) {
 export function marchVisibility({
   x,
   y,
-  sampleHeightPx,
+  sampleField,
   azimuthDeg,
   elevationDeg,
   maxCasterHeightPx,
@@ -198,34 +215,58 @@ export function marchVisibility({
 }) {
   const gate = clamp01(receiverGate);
   if (gate <= 0) return 1;
-  const span = maxThrowPx({ maxCasterHeightPx, elevationDeg });
-  if (span < MIN_THROW_PX) return 1; // sun overhead (or no casters): nothing to march
-  const elev = Math.min(90, Math.max(0, Number.isFinite(elevationDeg) ? elevationDeg : 90));
-  const tanElev = Math.tan((elev * Math.PI) / 180);
-  const dir = marchDirectionToSun(azimuthDeg);
-  const n = Math.max(1, Math.floor(steps));
-  const step = span / n;
   const s = clamp01(strength) * gate;
 
-  let occlusion = 0;
-  for (let i = 1; i <= n; i++) {
-    const d = i * step;
-    // The sun ray's height above the ground plane at this distance. A blocker
-    // must be TALLER than this to be between the pixel and the sun.
-    const rayHeight = d * tanElev;
-    const h = sampleHeightPx(x + dir.x * d, y + dir.y * d);
-    if (!(h > 0)) continue;
-    const over = h - rayHeight;
-    if (over <= 0) continue;
-    const feather = marchPenumbraPx({ distancePx: d, softnessMul });
-    // smoothstep(0, feather, over): a blocker only just clearing the ray casts
-    // a faint edge; one well clear of it casts full shadow.
-    const t = feather > 0 ? Math.min(1, over / feather) : 1;
-    const soft = t * t * (3 - 2 * t);
-    if (soft > occlusion) occlusion = soft; // MAX: the deepest blocker wins, once
-    if (occlusion >= 1) break;
+  // ⚠️ d = 0 — THE STATION THAT WAS MISSING, then OVER-WIDENED (both
+  // 2026-07-26). Missing: the loop used to start at i = 1, so the field was
+  // never asked the one question that matters directly beneath a bridge, a
+  // walkway or an upper floor: *is something standing over ME?* ("sky reach
+  // shadows were always damn near impossible to get working.") Everything the
+  // old code did to compensate — a whole separate `skyOcclusion` term with its
+  // own strength — was papering over a loop bound.
+  //
+  // Over-widened: `floating` first shipped as "overhead ∪ sky-reach", but an
+  // OVERHEAD item lives on THIS SAME floor — Foundry elevation is a draw-order
+  // key, not a spatial offset, so a raised tile's own sprite occupies the
+  // IDENTICAL (x,y) as whatever it would "shade" beneath it. There is no
+  // separate, visible ground there to darken — only the item's own opaque art
+  // — so a balcony or a lantern-on-a-plinth read its own footprint as
+  // "something floating overhead" and shadowed ITSELF. `floating` is sky-reach
+  // ONLY now: a genuinely different floor, whose art this floor never draws,
+  // so darkening this pixel darkens real ground, never a caster's own surface
+  // (docs/planning/Sun-Shadows-Rethink.md §4b). Overhead's own coverage still
+  // marches normally through `coverage` below — only the zero-distance
+  // self-check excludes it.
+  let occlusion = clamp01(sampleField(x, y).floating ?? 0);
+
+  const span = maxThrowPx({ maxCasterHeightPx, elevationDeg });
+  if (span >= MIN_THROW_PX) {
+    const elev = Math.min(90, Math.max(0, Number.isFinite(elevationDeg) ? elevationDeg : 90));
+    const tanElev = Math.tan((elev * Math.PI) / 180);
+    const dir = marchDirectionToSun(azimuthDeg);
+    const n = Math.max(1, Math.floor(steps));
+    const step = span / n;
+
+    for (let i = 1; i <= n && occlusion < 1; i++) {
+      const d = i * step;
+      // The sun ray's height above the ground plane at this distance. A blocker
+      // must be TALLER than this to be between the pixel and the sun.
+      const rayHeight = d * tanElev;
+      const at = sampleField(x + dir.x * d, y + dir.y * d);
+      const coverage = clamp01(at.coverage ?? 0);
+      if (coverage <= 0) continue;
+      const over = (at.heightPx ?? 0) - rayHeight;
+      if (over <= 0) continue;
+      const feather = marchPenumbraPx({ distancePx: d, softnessMul });
+      // The TIP fade only: a caster whose top is level with the ray casts
+      // nothing, one clearly above it casts its full coverage. The silhouette's
+      // softness comes from `coverage`, not from this curve.
+      const t = feather > 0 ? Math.min(1, over / feather) : 1;
+      const blocked = coverage * t * t * (3 - 2 * t);
+      if (blocked > occlusion) occlusion = blocked; // MAX: the deepest blocker wins, once
+    }
   }
-  return 1 - occlusion * s;
+  return 1 - clamp01(occlusion) * s;
 }
 
 /**

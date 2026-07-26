@@ -244,20 +244,36 @@ export function floorElevationBands(sceneDoc, floors) {
  * @param {object|null} sceneDoc
  * @param {object} [options]
  * @param {string} [options.viewedLevelId] - the level being viewed (`scene._view`).
+ * @param {string[]} [options.visibleLevelIds] - THE CALLER'S declared visible
+ *   set, overriding the viewed level's own `visibility.levels`.
+ *
+ *   ⚠️ THIS PARAMETER USED NOT TO EXIST HERE, AND THAT WAS THE SKY-REACH BUG
+ *   (2026-07-26). `collectSceneLayers` accepted `visibleLevelIds` and forwarded
+ *   it to `collectTiles` ONLY — level art was filtered purely by
+ *   `isLevelVisible`, which reads the *document*. So `boot.js` asking for every
+ *   level (`visibleLevelIds: allLevelIds`) to feed the mask authority's
+ *   view-independent cover physics silently returned just the viewed floor's own
+ *   background and foreground, while its tiles came back for every floor. The
+ *   author's bridge deck — an 8 MB background covering most of the map — was
+ *   never in the item list at all, so it could not appear as missing either: the
+ *   report showed four items where it should have shown eight.
+ *
+ *   Omitted → falls back to `isLevelVisible`, so the DRAW path is unchanged.
  * @param {(p:string)=>string} [options.getRouteFn] - injected for testability.
  * @returns {{items: SceneLayerItem[], skipped: Array<{name:string, reason:string}>}}
  */
-export function collectLevelTextures(sceneDoc, { viewedLevelId, getRouteFn } = {}) {
+export function collectLevelTextures(sceneDoc, { viewedLevelId, visibleLevelIds, getRouteFn } = {}) {
   const items = [];
   const skipped = [];
   const levels = sortedLevels(sceneDoc);
   const viewedLevel = levels.find(({ level }) => level.id === viewedLevelId)?.level;
   if (!viewedLevel) return { items, skipped };
   const viewedBottom = levelElevation(viewedLevel).bottom;
+  const declared = Array.isArray(visibleLevelIds) ? new Set(visibleLevelIds) : null;
 
   for (const { level, index } of levels) {
     const isView = level.id === viewedLevel.id;
-    const isVisible = isLevelVisible(level, viewedLevel);
+    const isVisible = declared ? declared.has(level.id) : isLevelVisible(level, viewedLevel);
     const elevation = levelElevation(level);
 
     /** @param {'background'|'foreground'} which */
@@ -430,7 +446,21 @@ export const SCENE_LAYER_DOCUMENTS = Object.freeze(['Level', 'Tile']);
 export function collectSceneLayers(sceneDoc, options = {}) {
   const { viewedLevelId, getRouteFn, isGM } = options;
   const visibleLevelIds = options.visibleLevelIds ?? (viewedLevelId ? [viewedLevelId] : []);
-  const levelResult = collectLevelTextures(sceneDoc, { viewedLevelId, getRouteFn });
+  // `visibleLevelIds` reaches BOTH collectors. It used to reach only the tile
+  // one, which meant a caller asking for every level (the mask authority's
+  // view-independent cover set) got every level's TILES and only the viewed
+  // level's own background/foreground — see collectLevelTextures' own note.
+  // ⚠️ `options.visibleLevelIds` RAW, not the defaulted `visibleLevelIds` above.
+  // That default (`[viewedLevelId]`) exists for the TILE collector, which has no
+  // other notion of visibility. Handing it to the level collector would make a
+  // caller who passes no list at all see only the viewed floor's own art, where
+  // today it correctly falls back to `isLevelVisible` and also gets whatever
+  // that floor's `visibility.levels` declares. Undefined must stay undefined.
+  const levelResult = collectLevelTextures(sceneDoc, {
+    viewedLevelId,
+    visibleLevelIds: options.visibleLevelIds,
+    getRouteFn,
+  });
   const tileResult = collectTiles(sceneDoc, { visibleLevelIds, getRouteFn, isGM });
   return {
     items: [...levelResult.items, ...tileResult.items],

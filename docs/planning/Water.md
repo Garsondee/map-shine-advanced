@@ -276,7 +276,7 @@ Each phase ends green on `npm run verify` and is independently shippable.
 | **0a** | ✅ DONE, live-verified — `vt-pan-viewer` extraction steps 2–3 (vegetation shadows, point-light pool) | the size ratchet goes **down** twice |
 | **0b** | ✅ DONE, live-verified — **`buf:scene.attr`** — MRT, RGBA8/Nearest/NoColorSpace; opaques write; every transparent outputs `gAttr = vec4(0)` | a debug view shows floorId / outdoors / coverage / solidity; `geometry.world`'s partial-claim note is deleted (⚠️ bit 1/levelsHidden and the clear-value sentinel are the two honest gaps, see §12) |
 | **1** | ✅ DONE — Declaration + `resolveWaterFloor` + walls §8.1–8.3 | manifest + schema validate; `water-floor.test.mjs` green; the three walls sit at zero |
-| **2** | ✅ BUILT + WIRED (not live-tested) — Body pack: JFA SDF, depth, tangent; version-polled rebake | `water-body` debug report shows **bakes vs polls** — the exit criterion is that they do NOT track each other |
+| **2** | ✅ DONE — **LIVE-CONFIRMED 2026-07-26** — Body pack: JFA SDF, depth, tangent; version-polled rebake | ✅ **2 bakes / 3,070 polls** on a real scene — the exit criterion passed decisively |
 | **3** | **Tier 0** — placement, borrow, punch; registered, panelled, in the frame graph | S3: river visible through the planks, occluded by the planks |
 | **4** | **Tiers 1–3** — volume, motion, light | side-by-side vs 0.5.x reference, author sign-off |
 | **5** | **Tier 4** — shore + caustics | |
@@ -290,7 +290,20 @@ Each phase ends green on `npm run verify` and is independently shippable.
 >
 > An input-side note worth keeping: **the water mask had no route to the GPU at all** before Phase 2a. `extractionPlanForLayer` extracted a kind only if some `DerivedKind` named it as an input, so `outdoors` rode along by accident (because `skyReach` consumes it) and `water` — whose only consumer is a GPU bake — was never extracted. `MaskKind.rasterize` now declares that property instead of leaving it implicit, and `floorsWithAuthored('water')` gives the cross-floor rule its real input.
 >
-> ⚠️ **Live-test still owed.** Everything above is verify-green and Node-proven; none of it has rendered in a real Foundry scene. The one thing to check first is the `water-body` report's **bakes vs polls** — see §11.
+> ✅ **LIVE-CONFIRMED, 2026-07-26.** Author loaded a real multi-floor scene (the Tower Bridge map, 10,650 × 4,950 rect over a 16,050 × 7,650 world). Measured:
+>
+> | What | Reading | Verdict |
+> | --- | --- | --- |
+> | **bakes vs polls** | **2 bakes / 3,070 polls**, `pollsSinceLastBake: 3,067` | ✅ the exit criterion. They do not track each other, by three orders of magnitude. |
+> | body grid | `512×238`, `jfaSteps: 9` | ✅ aspect-preserved from the scene rect (§5.1's "the pack is the size of its input"); 9 = ceil(log2 512). |
+> | the two bakes | both at poll ≤ 3, `reason: "mask or floor changed"` | ✅ one on the empty grid at startup, one when the real mask ingested. Nothing rebakes after load. |
+> | cross-floor rule | `floorIndex: 0, borrowed: false, "the viewed floor has its own water"` | ✅ resolved correctly on a scene whose water is on the viewed floor. The BORROW path is still unexercised — it needs a scene with water only on a lower floor. |
+> | **the mask actually arrived** | `layerResidency` shows `layer: "water", coarsePinned: 9/9`; `maskProvenance: "authored"` | ✅ **Phase 2a's whole point.** Before this session the water mask was never extracted at all, on any scene. |
+> | frame cost | `renderMsAvgLast120: 1.12 ms`, frame gap P99 **8.5 ms** | ✅ no measurable cost — as designed, the flood is not on the frame budget. |
+>
+> The full viewer diagnostics report also populates every field, which live-confirms extraction step 5 (`getDiagnostics` moved wholesale out of `vt-pan-viewer.js`) in the same pass.
+>
+> ⚠️ **One honest note for later:** the rebake triggers on the mask authority's GLOBAL `productsVersion`, so water rebakes when ANY mask changes, not only `water`. Measured at 2 bakes across a full session with 13 packs loading, so it is not a practical problem — but if a future scene ever shows bakes climbing, this is the first place to look, and the fix is a per-kind version rather than anything about the flood itself.
 
 Phases 3–8 each carry a **live-confirmed** line, not just verify-green. Too much of the tree currently reads *"verify-green, NOT live-tested"*; `V3-Development-Timeline.md` §6 asks for exactly this ledger.
 

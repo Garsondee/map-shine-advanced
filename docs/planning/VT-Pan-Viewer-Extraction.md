@@ -160,9 +160,11 @@ Extracting `mask-authority-report.js` earlier the same session (Water Phase 2c p
 
 Before touching a 533-line function inside an 11,000-line file, its free-variable set was mapped PRECISELY (name, declaration site, mutable-vs-stable) before writing a single line of the new module — using an Explore agent rather than hand-transcription, specifically because a body this dense with forensic comments has zero room for a silent copy error. The destructured parameter names in the new module are IDENTICAL to the original bare identifiers, so the 500-line body needed no internal rewrites at all, only a new signature line — the lower the textual diff, the lower the chance a transcription mistake survives review. **Add this as trap #7: before extracting a large, closure-heavy function, get an authoritative dependency table first (agent-assisted if the count is large), and keep the moved body's internal variable names unchanged — rename at the call site, never inside the body being moved.**
 
-### 10.5 NOT live-tested
+### 10.5 Live-verified
 
-Unlike steps 1-3, this step has not yet been confirmed against a real Foundry scene — `npm run verify` is necessary, not sufficient (§5 rule 1), and diagnostics in particular has no meaningful Node coverage for its orchestrating function (`buildViewerDiagnostics` itself reads renderer/cache/subsystem state real mocking would not usefully approximate). The next live scene load should open the debug panel's full report and confirm every field still populates.
+2026-07-26, author loaded a real scene and pasted the full diagnostics report: **every field populates**, including all three extracted helpers' outputs (`layerResidency`/`layerResidencyTotals`, `drawList` with live-vs-rendered token deltas all at 0, `wholeImage` with per-item compression and the sun-shadow block). `lastError: null`, `renderMsAvgLast120: 1.12 ms`, frame gap P99 8.5 ms. This was the same pass that live-confirmed Water Phase 2, since water's own report reads through this function.
+
+Which closes §5's verification list for this step: verify green ✅, ratchet down ✅ (−526 file / −510 fn at the time of the move), real scene ✅, no new `uniform(` calls ✅.
 
 ---
 

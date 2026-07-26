@@ -100,6 +100,10 @@ export const WATER_FOAM_SHORE_PX = 140;
  *   tangent. Bent, not followed — see the header.
  * @param {*} args.shoreDist - a float node: distance INSIDE the water from the
  *   bank, world px (already `max(−sdf, 0)` at the call site).
+ * @param {*} args.insideWater - a float node, 1 inside the body and 0 outside.
+ *   REQUIRED, not a nicety — see the foam block for the live bug its absence
+ *   caused. `shoreDist` alone cannot tell inside from outside, because the
+ *   clamp that makes it a distance also erases the sign that carried that fact.
  * @param {*} args.uWaveScalePx - float uniform node.
  * @param {*} args.uFlowSpeedPx - float uniform node.
  * @param {*} args.uFlowAngleRad - float uniform node.
@@ -113,6 +117,7 @@ export function buildWaterSurfaceField({
   timeMsNode,
   tangentXY,
   shoreDist,
+  insideWater,
   uWaveScalePx,
   uFlowSpeedPx,
   uFlowAngleRad,
@@ -143,9 +148,20 @@ export function buildWaterSurfaceField({
   // FOAM — the upper tail of a DIFFERENT channel of the same fetch, so the two
   // readings are not the same pattern at two contrasts. Gated toward the bank
   // (shoaling) and scaled by the author's amount.
+  //
+  // ⚠️ `insideWater` IS NOT OPTIONAL. Without it foam renders at FULL STRENGTH
+  // OVER THE ENTIRE MAP and is INVISIBLE ON THE WATER — the exact inverse of
+  // what it is for, shipped live 2026-07-26 (author: *"The foam appears
+  // everywhere, isn't very visible where the water is"*, with white streaks
+  // across sand, tents and rooftops). The cause is worth naming because it is
+  // a trap any consumer of a SIGNED field can fall into: outside the water the
+  // sdf is POSITIVE, so `shoreDist = max(−sdf, 0)` CLAMPS TO ZERO, and zero
+  // distance is indistinguishable from "right at the waterline" — which is
+  // precisely where the shore gate is strongest. The gate is not wrong; it is
+  // simply undefined outside the body, and the sign test is what defines it.
   const crest = smoothstep(float(0.18), float(0.55), n.y);
   const shoreGate = float(1).sub(smoothstep(float(0), float(WATER_FOAM_SHORE_PX), shoreDist));
-  const foam = min(crest.mul(shoreGate).mul(uFoam), float(1));
+  const foam = min(crest.mul(shoreGate).mul(insideWater).mul(uFoam), float(1));
 
   return { foam, turbidity };
 }

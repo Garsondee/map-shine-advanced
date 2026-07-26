@@ -57,10 +57,20 @@ export const WATER_PARAMS = Object.freeze({
     min: 0.2,
     max: 8,
     step: 0.1,
-    default: 3.0,
+    default: 1.4,
     category: 'Look',
     label: 'Depth falloff',
-    help: 'How quickly the water hides the riverbed as it deepens. Low = a clear stream you can see the bottom of everywhere; high = shallows read sandy and the deep channel reads solid water. This is the control that makes depth painted in the mask actually show.',
+    help: 'How quickly the water hides the riverbed as it deepens. Low = a clear stream you can see the bottom of everywhere; high = shallows read sandy and the deep channel reads solid water. Push this too high and the bed disappears entirely, at which point the water stops looking like water and starts looking like a flat wash of colour — if that happens, this is the slider to bring back down.',
+  },
+  inscatter: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.3,
+    category: 'Look',
+    label: 'Own colour',
+    help: 'How much colour the water shows in its own right, as opposed to only tinting what lies beneath it. At 0 the water is a pure coloured filter — the ground shows through, shifted toward your water colour. Turn it up for silty, turbid or stylised water. Turn it up too far and the water reads as paint laid over the map rather than a body you can see into.',
   },
   // ── Motion ──────────────────────────────────────────────────────────────
   foam: {

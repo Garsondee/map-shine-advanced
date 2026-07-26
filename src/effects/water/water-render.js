@@ -211,13 +211,33 @@ export const WATER_PRESENCE_EDGE1 = 48 / 255;
  * the thing a scalar alpha could never produce, and it is most of what makes
  * the result read as depth rather than as coverage.
  *
- * 3.0 default: at the mask's full depth (1.0) mean transmittance is exp(−3)
- * ≈ 5%, so deep water is nearly opaque and dominated by in-scatter; at 0.2
- * depth it is ≈55%, so shallows still read as riverbed. Those numbers are
- * unchanged from the single-blend version on purpose — the rung's response
- * curve was never the problem, only how it was composited.
+ * ⚠️ **1.4, DOWN FROM 3.0 — AND THE OLD DEFAULT IS MOST OF WHY WATER LOOKED
+ * LIKE PAINT.** At 3.0 the mean transmittance at full depth is exp(−3) ≈ 5%:
+ * the riverbed is 95% GONE, so the multiply has nothing left to tint and the
+ * picture is whatever in-scatter adds — a flat colour over everything. The
+ * equation was right and the parameter put it in the regime where the equation
+ * says "you cannot see the bottom". At 1.4 full depth transmits ≈25% and the
+ * shallows 60–80%, so the bed survives everywhere and the water reads as
+ * something the ground is visible THROUGH. That is the entire ask.
+ *
+ * Deep, opaque water is still one slider away for authors who want a lightless
+ * tarn — it is just no longer the default for a shallow ford.
  */
-export const WATER_TIER1_ABSORPTION = 3.0;
+export const WATER_TIER1_ABSORPTION = 1.4;
+
+/**
+ * TIER 1 — how much light the water sends back toward the viewer, 0..1, on top
+ * of what it lets through. This is the ADDITIVE half of the composite, and the
+ * one that reads as "paint" when it dominates.
+ *
+ * 0.3 default. Water directly below a viewer returns very little — most of what
+ * you see looking straight down into a shallow river is the bed, filtered. A
+ * full-strength term is a deep-ocean look applied to a ford, which is exactly
+ * what shipped at 1.0 and exactly what the author kept rejecting. Raise it for
+ * turbid, silty, or deliberately stylised water; drop it to 0 for water that is
+ * purely a coloured filter over whatever is underneath.
+ */
+export const WATER_TIER1_INSCATTER = 0.3;
 
 /**
  * TIER 1 — HOW FAR FROM THE BANK THE WATER REACHES FULL DEPTH, world px.
@@ -315,6 +335,7 @@ export function buildWaterSurfaceMaterial({
   opacity = WATER_TIER0_OPACITY,
   absorption = WATER_TIER1_ABSORPTION,
   depthScalePx = WATER_TIER1_DEPTH_SCALE_PX,
+  inscatterAmount = WATER_TIER1_INSCATTER,
   waveScalePx = WATER_TIER2_WAVE_SCALE_PX,
   flowSpeedPx = WATER_TIER2_FLOW_SPEED_PX,
   flowAngleDeg = WATER_TIER2_FLOW_ANGLE_DEG,
@@ -332,6 +353,7 @@ export function buildWaterSurfaceMaterial({
   const uOpacity = uniform(float(opacity));
   const uAbsorption = uniform(float(absorption));
   const uDepthScalePx = uniform(float(depthScalePx));
+  const uInscatter = uniform(float(inscatterAmount));
   const uWaveScalePx = uniform(float(waveScalePx));
   const uFlowSpeedPx = uniform(float(flowSpeedPx));
   const uFlowAngleRad = uniform(float((flowAngleDeg * Math.PI) / 180));
@@ -418,6 +440,7 @@ export function buildWaterSurfaceMaterial({
     timeMsNode: timeMsNode ?? float(0),
     tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
     shoreDist,
+    insideWater: inside,
     uWaveScalePx,
     uFlowSpeedPx,
     uFlowAngleRad,
@@ -433,10 +456,31 @@ export function buildWaterSurfaceMaterial({
   // Outside the water `depth01` is 0, so this is exactly 1 — the identity of
   // the multiply blend. The pass provably cannot darken dry land.
   const bedTransmit = exp(sigma.negate().mul(depth01));
-  // IN-SCATTER. Keyed off the transmittance BEFORE the wet band touches it, so
-  // damp ground (which has no volume above it) can never in-scatter: that is
-  // the precise line where the blue-margin bug lived.
-  const inscatter = uTint.mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3))));
+  // IN-SCATTER — and ⚠️ **THIS TERM, NOT THE BLEND, IS WHAT MADE WATER LOOK
+  // LIKE PAINT** (author, three times; finally diagnosed 2026-07-26).
+  //
+  // The multiply pass was correct and working the whole time. The problem is
+  // what it left behind. At the shipped defaults (absorption 3, opacity 0.62)
+  // the bed came through the multiply at `(0.032, 0.084, 0.087)` — 99% ABSORBED
+  // — and then this term added a flat `(0.074, 0.198, 0.230)` on top. So the
+  // final picture was almost entirely a CONSTANT COLOUR added over everything,
+  // with no bed left in it. That is paint, by any definition, and it is what
+  // you get from a physically-honest volume model driven past the point where
+  // the volume is opaque. Being right about the equation does not help if the
+  // parameters put you in the regime where the equation says "you cannot see
+  // the bottom".
+  //
+  // Two changes keep it honest AND keep it water:
+  //   · `absorption` now defaults to a value that leaves the bed VISIBLE, which
+  //     is what makes the multiply mean anything (see WATER_TIER1_ABSORPTION).
+  //   · in-scatter is scaled by its own control, defaulting well below 1. Real
+  //     shallow water returns very little light toward a viewer directly above
+  //     it; a full-strength term is a deep-ocean look applied to a ford.
+  //
+  // Keyed off the transmittance BEFORE the wet band touches it, so damp ground
+  // (which has no volume above it) can never in-scatter — the precise line
+  // where the blue-margin bug lived.
+  const inscatter = uTint.mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3)))).mul(uInscatter);
 
   // ── TIER 1b: THE WET BAND ────────────────────────────────────────────────
   // `1 − smoothstep(0, band, sdf)` on the POSITIVE (outside) side of the same
@@ -535,6 +579,9 @@ export function buildWaterSurfaceMaterial({
     },
     setDepthScalePx(v) {
       uDepthScalePx.value = v;
+    },
+    setInscatter(v) {
+      uInscatter.value = v;
     },
     setWaveScalePx(v) {
       uWaveScalePx.value = v;

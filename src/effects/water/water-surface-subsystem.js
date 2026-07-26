@@ -209,6 +209,7 @@ export function createWaterSurfaceSubsystem({
       p.shorelineDepth,
       p.absorption,
       p.depthScalePx,
+      p.inscatter,
       p.foam,
       p.flowSpeedPx,
       p.flowAngleDeg,
@@ -223,6 +224,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.shorelineDepth)) surface.setShorelineDepth(p.shorelineDepth);
       if (Number.isFinite(p.absorption)) surface.setAbsorption(p.absorption);
       if (Number.isFinite(p.depthScalePx)) surface.setDepthScalePx(p.depthScalePx);
+      if (Number.isFinite(p.inscatter)) surface.setInscatter(p.inscatter);
       if (Number.isFinite(p.foam)) surface.setFoam(p.foam);
       if (Number.isFinite(p.flowSpeedPx)) surface.setFlowSpeedPx(p.flowSpeedPx);
       if (Number.isFinite(p.flowAngleDeg)) surface.setFlowAngleDeg(p.flowAngleDeg);

@@ -42,15 +42,24 @@
  * mean something.
  *
  * ============================================================================
- * FLOW: THE TANGENT IS BENT BY THE BANK, NEVER FOLLOWED BLINDLY
+ * FLOW: TRAVEL IS GLOBAL, THE BANK ONLY WARPS — AND THAT SPLIT IS LOAD-BEARING
  * ============================================================================
- * The body pack's BA is the bare shore TANGENT, and correction #4 of this
- * effect's design is that a consumer must apply the PROJECTION
- * `mix(current, t·dot(current, t), bankInfluence)` rather than using `t`
- * directly. That is not a style preference: the tangent's sign flips across a
- * river's medial axis, so scrolling along `t` would run the two halves of the
- * river in opposite directions and seam visibly down the middle. The
- * projection is invariant under `t → −t`, so the flip cancels.
+ * The surface TRAVELS by one global vector, identical for every pixel, and the
+ * shore tangent only WARPS the noise domain by a bounded fraction of a cell.
+ * Two separate roles, and only the bounded one is allowed to vary per pixel.
+ *
+ * This is not the obvious design and it replaced the obvious one, which shipped
+ * broken: scrolling along a per-pixel flow direction (`drift = flowDir·speed·t`)
+ * tears the surface into hard rays radiating from every dock and wall, worse
+ * the longer the scene runs, because an unbounded amplifier turns a fractional
+ * difference in direction into thousands of pixels of separation in the noise
+ * domain. The full mechanism is written out at the flow block below — read it
+ * before "fixing" this back into a single advection term.
+ *
+ * Correction #4 of this effect's design still governs the warp: use the
+ * PROJECTION `t·dot(current, t)`, never the bare tangent. The tangent's sign
+ * flips across a river's medial axis, and the projection is invariant under
+ * `t → −t`, so the flip cancels instead of seaming the river down the middle.
  *
  * THREE is INJECTED, never imported.
  *
@@ -73,13 +82,20 @@ export const WATER_TIER2_FLOW_ANGLE_DEG = 0;
 export const WATER_TIER2_FOAM = 0.35;
 
 /**
- * How strongly the bank's tangent bends the global current, 0..1. Not a param:
- * it is a statement about how rivers work rather than a look control, and
- * exposing it would mostly offer authors a way to make water flow into their
- * own banks. 0.85 keeps a little of the raw current so a pond with no
- * meaningful tangent still drifts.
+ * How far the bank's tangent may warp the noise domain, as a FRACTION OF ONE
+ * NOISE CELL. Not a param: it is a statement about how rivers work rather than
+ * a look control, and exposing it would mostly offer authors a way to shear
+ * their own surface apart.
+ *
+ * ⚠️ **THE FACT THAT IT IS A FRACTION IS THE WHOLE SAFETY PROPERTY.** A domain
+ * offset bounded at a third of a cell can separate two neighbouring pixels by
+ * at most that, whatever the tangent does between them and however long the
+ * scene has been running. The version of this constant that scaled a per-pixel
+ * direction by elapsed TIME had no such bound and shipped radial streaks off
+ * every surface — see the flow block below. Keep any future bank influence
+ * bounded by the cell size, never by the clock.
  */
-export const WATER_BANK_INFLUENCE = 0.85;
+export const WATER_BANK_INFLUENCE = 0.35;
 
 /** How far from the bank foam has fully died away, world px. Foam is a
  * shoaling phenomenon — it breaks where the water shallows — so it is strongest
@@ -127,17 +143,53 @@ export function buildWaterSurfaceField({
 
   const tSec = timeMsNode.mul(float(1 / 1000));
 
-  // THE FLOW VECTOR — correction #4's projection, so the tangent's sign flip
-  // at the medial axis cancels instead of seaming the river down the middle.
+  // ============================================================================
+  // ⚠️ NEVER MULTIPLY A PER-PIXEL DIRECTION BY UNBOUNDED TIME
+  // ============================================================================
+  // The first version computed `drift = flowDir · speed · t` with `flowDir`
+  // derived per-pixel from the shore tangent. That ships a fan of hard rays
+  // radiating from every dock, pier and wall, growing worse the longer the
+  // scene stays open (author, with the streaks traced in red: *"lines which
+  // radiate outwards forming very strong and obvious barcodes heading out from
+  // all surfaces"* — and their instinct that the SDF was involved was right,
+  // just one derivative further along than it looked).
+  //
+  // The mechanism is worth stating because it will recur anywhere a field is
+  // "scrolled along" a spatially varying direction: around a convex feature the
+  // tangent FANS OUT, so two adjacent pixels hold flow directions differing by
+  // a fraction of a degree. Multiply both by `speed · t` — ~3,600 world px
+  // after one minute, unbounded thereafter — and that fraction of a degree
+  // becomes a separation of thousands of pixels in the noise domain. Adjacent
+  // pixels sample unrelated noise, and unrelated noise along a smoothly
+  // rotating direction IS a fan of rays. The bug is not in the tangent, the
+  // SDF, or the noise; it is in an amplifier with no upper bound.
+  //
+  // So the two roles are separated, and only the BOUNDED one is allowed to vary
+  // per pixel:
+  //   TRAVEL     a single global vector, identical for every pixel, so the
+  //              whole surface translates and NO relative shear can exist at
+  //              any t. Unbounded in magnitude, which is fine precisely because
+  //              it is spatially constant.
+  //   BANK WARP  the tangent, as a static domain offset capped at a fraction of
+  //              one noise cell. It bends the pattern to run along the bank —
+  //              which is what correction #4's projection was reaching for —
+  //              but a bounded offset cannot separate neighbours by more than
+  //              that cap, so it cannot streak however long the scene runs.
   const current = vec2(cos(uFlowAngleRad), sin(uFlowAngleRad));
-  const projected = tangentXY.mul(dot(current, tangentXY));
-  const flowDir = current.add(projected.sub(current).mul(float(WATER_BANK_INFLUENCE)));
-  const drift = flowDir.mul(uFlowSpeedPx.mul(tSec));
+  const drift = current.mul(uFlowSpeedPx.mul(tSec));
+  // Correction #4's PROJECTION is still what shapes the warp — invariant under
+  // `t → −t`, so the tangent's sign flip at the river's medial axis cancels
+  // rather than seaming the two halves against each other.
+  const alongBank = tangentXY.mul(dot(current, tangentXY));
+  const bankWarp = alongBank.mul(uWaveScalePx.mul(float(WATER_BANK_INFLUENCE)));
 
   // ONE fetch. `mx_fractal_noise_vec3` is three's own MaterialX fractal noise —
   // vendored, backend-neutral, and identical on WebGPU and WebGL2, which is why
   // it is used instead of a hand-rolled hash (Law 8: no hand-written twin).
-  const cell = worldXY.add(drift).div(max(uWaveScalePx, float(1)));
+  const cell = worldXY
+    .add(drift)
+    .add(bankWarp)
+    .div(max(uWaveScalePx, float(1)));
   const n = mx_fractal_noise_vec3(vec3(cell.x, cell.y, tSec.mul(float(0.15))), 3, 2.0, 0.5);
 
   // TURBIDITY — the field as a modulation of optical depth. Centred on zero so

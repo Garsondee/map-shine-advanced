@@ -13,6 +13,7 @@ import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
 import { WATER, WATER_PARAMS } from '../water.js';
+import { WATER_BANK_INFLUENCE } from '../water-field.js';
 
 export function run(t) {
   const { ok, throws } = t;
@@ -94,4 +95,18 @@ export function run(t) {
     );
     throws('a duplicate water registration throws', () => reg.register(WATER, () => {}), 'already registered');
   }
+
+  // --- tier 2: the bank influence must stay BOUNDED BY THE CELL, not the clock
+  // The shipped bug (2026-07-26) scaled a per-pixel direction by elapsed TIME:
+  // `drift = flowDir · speed · t`. Around a convex feature the shore tangent
+  // fans out, so neighbouring pixels held directions differing by a fraction of
+  // a degree — harmless until multiplied by an unbounded amplifier, at which
+  // point they sampled noise thousands of px apart and the surface tore into a
+  // fan of rays off every dock and wall, worsening the longer the scene ran.
+  // A fraction-of-a-cell bound is the property that makes that impossible, so
+  // it is asserted rather than left to the constant's docstring.
+  ok(
+    'the bank warp is a FRACTION of one noise cell (a value ≥ 1 can shear the surface)',
+    WATER_BANK_INFLUENCE > 0 && WATER_BANK_INFLUENCE < 1
+  );
 }

@@ -141,6 +141,10 @@ export { resolveWaterFloor } from './water/water-floor.js';
 // poll; `water-body.js` is its TSL half plus the arithmetic the Node suite
 // pins (the flood is exact, and only a brute-force comparison can say so).
 export { createWaterBodySubsystem } from './water/water-body-subsystem.js';
+// DOOR GRAPHICS as a self-owned subsystem (extracted 2026-07-26). Also the
+// template tier-0 water follows: an opaque, LIT map element drawn into
+// buf:scene.color BEFORE lighting, in its own scene.
+export { createDoorGraphicsSubsystem } from './door-graphics-subsystem.js';
 export {
   buildWaterSeedMaterial,
   buildWaterJfaStepMaterial,

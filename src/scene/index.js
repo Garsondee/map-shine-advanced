@@ -30,6 +30,16 @@ export {
   clientToNdc,
   ndcToPixel,
   computeItemViewportPx,
+  // The world-quad vertex vocabulary. Added to this door 2026-07-26
+  // [structure-change] when the door-graphics subsystem left `vt/` and became
+  // the first CROSS-ZONE consumer — it builds real world-space quads for its
+  // leaves, so it needs the same UV/index/position helpers every tile uses.
+  // Keeping these vt/-only would have meant either a second copy of the quad
+  // convention (the Y-flip bug class this repo has paid for three times) or
+  // half the door logic stranded in the viewer.
+  QUAD_UVS,
+  QUAD_INDICES,
+  buildQuadPositions,
 } from './world-quad.js';
 
 // THE MASK AUTHORITY (scene/mask-authority.js's header is the map). The

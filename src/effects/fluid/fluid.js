@@ -6,20 +6,26 @@
  * water/bloom/candle split.
  *
  * ============================================================================
- * WHAT EXISTS TODAY (Phase 3) — read this before trusting the manifest
+ * WHAT EXISTS TODAY (Phase 6) — read this before trusting the manifest
  * ============================================================================
  *
- * Tiers 0–3 RENDER: `fluid-net.js` extracts the tube net, `fluid-pack.js` bakes
- * it, `fluid-surface-subsystem.js` owns the whole chain and the mesh,
- * `fluid-render.js` draws the ADD half of the two-blend split, and
- * `fluid-registration.js` gives it a card and a console setter. The four
- * `tiers` entries below are real code.
+ * Tiers 0–5 RENDER, as BOTH halves of the two-blend split, the real 1-D sim,
+ * AND the material coordinate: `fluid-net.js` extracts the tube net,
+ * `fluid-pack.js` bakes it, `fluid-pump.js` decides what each tube's
+ * apparatus is doing, `fluid-sim.js` transports it (a genuine semi-Lagrangian
+ * ping-pong, not the old analytic scroll), `fluid-surface-subsystem.js` owns
+ * the whole chain and builds TWO meshes per masked item (sharing one
+ * geometry), `fluid-render.js` builds the MULTIPLY (absorb) and ADD (emit)
+ * materials — reading the SIM's state (superseding tier `flow`'s original
+ * analytic windowing the same phase it was built, see that tier's own `adds`
+ * text) and sampling ONE noise fetch at τ for tier `structure`'s marbling and
+ * grain — and `fluid-registration.js` gives it a card and a console setter.
+ * The six `tiers` entries below are real code.
  *
- * **Still NOT built, so the manifest must not be read as claiming them:** the
- * MULTIPLY half (absorption under the map art — `Fluid.md` §5.6), the 1-D sim
- * (§5.3; the slugs today are the PRESCRIBE mode, an analytic scroll), bubbles,
- * optics, emission-as-a-light and spray. Those are the `deferredRungs` below,
- * named and ordered, and none of them has a line of code.
+ * **Still NOT built, so the manifest must not be read as claiming them:**
+ * bubbles, optics, emission-as-a-light and spray. Those are the
+ * `deferredRungs` below, named and ordered, and none of them has a line of
+ * code.
  *
  * @module effects/fluid/fluid
  */
@@ -75,35 +81,34 @@ export const FLUID_PARAMS = Object.freeze({
     help: 'Overall strength of the whole effect. The quick way to dial it back without retuning everything else.',
   },
   // ── Motion ──────────────────────────────────────────────────────────────
-  speedPx: {
+  // `slugCount`/`slugWidth` (the analytic scroll's blob-count and blob-width
+  // knobs) are GONE, not renamed: tier `fill`'s real sim decides how chunky
+  // the flow reads per tube, from each tube's own pump personality
+  // (`fluid-pump.js#fluidPumpPersonality`'s `dutyFraction`/`gulpPeriodS`) —
+  // there is no single global count or width left to tune, and no consumer
+  // for either key once `fluid-render.js` stopped reading them
+  // (`params/no-dead-controls`). Exposing the pump's per-tube personality as
+  // a live control is a real future rung, not this one.
+  flowSpeed: {
     type: 'float',
     min: 0,
-    max: 400,
-    step: 5,
-    default: 90,
+    max: 3,
+    step: 0.05,
+    default: 1,
     category: 'Motion',
     label: 'Flow speed',
-    help: 'How fast the goo travels along its tube. 0 stops it dead, which is useful for a dormant apparatus. Direction is decided by the mask: the goo flows away from the BRIGHTEST end of each tube.',
+    help: 'Scales how fast the pump drives goo through every tube. 1 is the pump`s own natural pace; 0 stops it dead, which is useful for a dormant apparatus. Each tube keeps its own rhythm of surges and gaps — this only speeds all of them up or down together, uniformly. Also sets how fast the marbling pattern (Structure) drifts, so slowing the flow slows the pattern with it.',
   },
-  slugCount: {
+  // ── Detail ──────────────────────────────────────────────────────────────
+  structure: {
     type: 'float',
-    min: 1,
-    max: 24,
-    step: 0.5,
-    default: 6,
-    category: 'Motion',
-    label: 'Blobs per tube',
-    help: 'How many separate blobs of liquid are in flight down one tube at a time. Low numbers read as slow, deliberate pulses; high numbers as a fast, busy circulation.',
-  },
-  slugWidth: {
-    type: 'float',
-    min: 0.05,
-    max: 0.95,
+    min: 0,
+    max: 1,
     step: 0.01,
-    default: 0.55,
-    category: 'Motion',
-    label: 'Blob length',
-    help: 'How much of each blob-and-gap cycle is liquid. Near 1 the tube is almost continuously full with small breaks; near 0 you get short darts with long empty stretches between them.',
+    default: 0.5,
+    category: 'Detail',
+    label: 'Structure',
+    help: 'Marbling and grain that ride WITH the flow rather than sitting still on top of it — driven by the material coordinate τ, not the mask`s own fixed position. At 0 the goo is a flat colour with no visible texture; higher values read as a more mottled, organic liquid.',
   },
 });
 
@@ -141,6 +146,9 @@ export const FLUID = Object.freeze({
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
   params: FLUID_PARAMS,
+  // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
+  // brush already loaded with this mask (validateAuthoring, effect-manifest.js).
+  authoring: Object.freeze({ paint: 'fluid' }),
   tiers: Object.freeze([
     Object.freeze({
       n: 0,
@@ -153,8 +161,9 @@ export const FLUID = Object.freeze({
         // and it is right not to: V2's suffix knowledge spread by exactly this
         // kind of harmless-looking copy). The kind is `fluid`; the catalog owns
         // what file that means.
-        'The fluid mask, tinted and emissive, in the right place on the right floor. The tube has ' +
-        'glowing goo in it. Never gated.',
+        'The fluid mask, in the right place on the right floor, as TWO passes (never one alpha): a ' +
+        'MULTIPLY that tints whatever is beneath the goo, and an ADD that is the goo`s own glow. The ' +
+        'tube has translucent, glowing goo in it. Never gated.',
     }),
     Object.freeze({
       n: 1,
@@ -171,10 +180,15 @@ export const FLUID = Object.freeze({
       name: 'flow',
       cost: Object.freeze({ class: 'C4', estMsPerMp: 0.04 }),
       adds:
-        'The pack read: slugs scrolling in GEODESIC arc length (so speed means the same thing on a ' +
-        'long tube and a short one, unlike V2`s hand-painted ramp), and the meniscus driven by where ' +
-        'the fill CHANGES along the tube — the right axis, where V2`s was a function of distance to ' +
-        'the WALL and defaulted to 0 because it could never have looked right.',
+        'The pack read: `s`, the GEODESIC arc-length coordinate (so position along a tube means the ' +
+        'same thing on a long one and a short one, unlike V2`s hand-painted ramp), and the fill-change ' +
+        'axis the meniscus reads — the right axis, where V2`s was a function of distance to the WALL ' +
+        'and defaulted to 0 because it could never have looked right. ⚠️ This rung`s ORIGINAL windowing ' +
+        'technique — an analytic `fract(s·count − t·speed)` scroll — was SUPERSEDED by tier `fill`' +
+        '`s real transport the same phase it was built, matching this codebase`s own established ' +
+        'precedent (no shipped effect keeps a live per-tier code switch; the governor that would need ' +
+        'one is unbuilt — Effects.md §6). What tier `flow` still owns is `s` itself and the meniscus ' +
+        'axis; the WINDOW now comes from `fill`.',
     }),
     Object.freeze({
       n: 3,
@@ -185,30 +199,65 @@ export const FLUID = Object.freeze({
         'the cross-section and shifts at every slug front instead of being an unrelated noise field. ' +
         'V2 spent 13 parameters here; grounding it in a real thickness leaves 1.',
     }),
+    Object.freeze({
+      n: 4,
+      name: 'fill',
+      cost: Object.freeze({ class: 'C5', estMsPerMp: 0.08 }),
+      adds:
+        'THE SIM (`fluid-sim.js`, `fluid-pump.js`): a semi-Lagrangian ping-pong per masked item, ' +
+        '`v = Q/A` so the goo genuinely speeds up through a constriction, slugs with real IDENTITY ' +
+        '(they stretch, compress, merge, arrive — never redrawn from a formula), a pump that never ' +
+        'quite repeats. C5, not the C4 first guessed at design time (`Fluid.md` §7`s original table): ' +
+        'reading the SIM STATE needs the pack`s own `(s, tubeId)` output as the NEXT read`s coordinate ' +
+        '— a genuine dependent read, Effects.md`s own C5 definition exactly. Estimates are wrong; this ' +
+        'is the correction, made once the real thing was built rather than left stale in the manifest.',
+    }),
+    Object.freeze({
+      n: 5,
+      name: 'structure',
+      // ⚠️ C5, NOT the C2 `Fluid.md` §7's original design-time sketch guessed
+      // — the SAME correction tier `fill` above already had to make, for the
+      // SAME reason: `cost.class` in this manifest is the CEILING the rung
+      // runs within, not its own marginal operation type (`validateEffect
+      // Manifest`'s own enforced rule, Law 3: "must be non-decreasing" —
+      // mechanically checked, not prose). Tier 3 (`film`, pure ALU on values
+      // already read) is ALREADY listed C4 for the identical reason: it
+      // stands on tier 0's own C4 admission price and inherits that floor.
+      // `structure`'s OWN new work — one resident `mx_fractal_noise_vec3`
+      // fetch, ALU besides that — genuinely IS C2-shaped in isolation
+      // (`estMsPerMp` below reflects that cheap marginal cost honestly), but
+      // it reads `s` (tier 2, C4) and `tinted` (tier 3, C4) and sits after
+      // `fill`'s own genuine C5 dependent read, so the CEILING it inherits is
+      // C5. Reclassifying was the honest move once this was actually built —
+      // NOT a hand-wave that the mechanical check somehow doesn't apply here.
+      cost: Object.freeze({ class: 'C5', estMsPerMp: 0.02 }),
+      adds:
+        'THE MATERIAL COORDINATE τ (`fluid-render.js`): ONE `mx_fractal_noise_vec3` fetch at `(τ, ' +
+        'across)`, reading two of its three channels as marbling (tint) and grain (brightness). ' +
+        '`τ = s − v̄·t` is analytic at this rung, exactly as `Fluid.md` §7`s original sketch called ' +
+        'for — a SPATIALLY CONSTANT per-tube time shift, never a per-pixel one (the safe half of ' +
+        '`water-field.js`\'s own "never multiply a per-pixel direction by unbounded time" trap, not ' +
+        "the dangerous half). `v̄` reuses `computeFluidLengthQScale`'s own calibration (`fluid-sim.js`) " +
+        'so τ`s drift rate stays consistent with how fast the fill actually moves, scaled live by the ' +
+        'same `flowSpeed` control that scales the pump`s `Q`. This is the one channel that fixes all ' +
+        "eight of the decoration families V2 shipped switched off (`deferredRungs`' own former note " +
+        'for this tier) — they failed because they sampled noise in screen space, never riding with ' +
+        'the flow.',
+    }),
   ]),
   /**
-   * Recorded, NOT built — the honest rungs (`Effects.md` §0), matching
-   * `Fluid.md` §7's ladder in full. Each becomes a real `tiers` entry, with its
-   * own cost class and its own phase's render code, in build order. The full
-   * ladder is `C4 → C1 → C1 → C2 → C4 → C4 → C5 → C6 → C8`.
+   * Recorded, NOT built — the honest rungs (`Effects.md` §0). Each becomes a
+   * real `tiers` entry, with its own cost class and its own phase's render
+   * code, in build order.
+   *
+   * Built ladder so far: `placement C4 → tube C1 → flow C4 → film C4 → fill
+   * C5 → structure C5`. Non-decreasing, as Law 3 requires. `structure`'s OWN
+   * marginal cost (`estMsPerMp: 0.02`) is genuinely tiny — the C5 CLASS
+   * records what it runs on TOP OF (tier 4's dependent read), not what it
+   * itself newly costs; see that tier's own comment for why `cost.class` is
+   * a ceiling, not a marginal-operation label, in this manifest's convention.
    */
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'structure',
-      note:
-        'C2. One resident tiling noise fetch in the MATERIAL COORDINATE τ (analytic at this rung: ' +
-        'τ = s − v̄t). Marbling, striation and grain that ride WITH the fluid instead of past it. ' +
-        'First motion. This one channel is what fixes all eight of the decoration families V2 shipped ' +
-        'switched OFF — they failed for one shared reason, that they were screen-space noise.',
-    }),
-    Object.freeze({
-      name: 'fill',
-      note:
-        'THE SIM. Tier 2 draws slugs from an ANALYTIC scroll (the PRESCRIBE mode); this replaces the ' +
-        'source of that same φ with a transported one, changing nothing downstream. Slugs gain ' +
-        'IDENTITY — they stretch, compress, merge and arrive; dye marbles; bulbs fill and drain; and ' +
-        'v = Q/A makes the goo genuinely speed up through a constriction.',
-    }),
     Object.freeze({
       name: 'bubbles',
       note:

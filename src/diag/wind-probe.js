@@ -56,6 +56,55 @@ function round2(x) {
  * @returns {{col:number, row:number, index:number}|null} null only for a
  *   degenerate (zero-size) grid.
  */
+/**
+ * One human line describing what a wind-field bake actually produced.
+ *
+ * ⚠️ THIS EXISTS BECAUSE THE BUTTON THAT USED IT WAS LYING, FOR MONTHS. The
+ * "Rebake wind structure" action formatted its note from `result.exposure.min`,
+ * `.max` and `.varies` — fields `bakeWindField` stopped returning when the Wind
+ * rethink deleted the exposure machinery. `undefined` is falsy, so EVERY click
+ * printed the failure branch: a confident sentence claiming the outdoors mask was
+ * being read as the same value everywhere and naming three things to go check.
+ * A permanent false alarm about a mask wind no longer consults at all.
+ *
+ * Pure and Node-tested against the bake's REAL return shape, so the next time
+ * that shape changes a test goes red instead of a button inventing a diagnosis
+ * (`feedback_instruments_must_not_lie`). If a field it wants is missing, it says
+ * the field is missing — it never infers a fault from an absent number.
+ *
+ * @param {object|null} result - `bakeWindField`'s return value.
+ * @returns {string}
+ */
+export function describeWindBake(result) {
+  if (!result || typeof result !== 'object') return 'no bake result at all — the viewer is probably not running.';
+  if (!result.ok) return `bake failed (${result.reason ?? 'no reason given'}): ${result.error ?? 'no error given'}`;
+
+  const parts = [];
+  const has = (k) => Number.isFinite(result[k]);
+  if (has('cols') && has('rows')) parts.push(`${result.cols}x${result.rows} cells`);
+  if (has('wallCount')) {
+    parts.push(
+      has('totalWallCount')
+        ? `${result.wallCount}/${result.totalWallCount} wall segments (this floor / whole scene)`
+        : `${result.wallCount} wall segments`
+    );
+  }
+  if (has('solidCells')) parts.push(`${result.solidCells} solid`);
+  if (has('openCells')) parts.push(`${result.openCells} open to the exterior`);
+  if (has('enclosedCells')) {
+    parts.push(`${result.enclosedCells} sealed${has('enclosedPct') ? ` (${result.enclosedPct}%)` : ''}`);
+  }
+  if (parts.length === 0) return `baked (${result.reason ?? 'no reason given'}) — but it reported no cell counts.`;
+
+  const head = `baked (${result.reason ?? 'no reason given'}): ${parts.join(', ')}.`;
+  // The one genuinely actionable reading: no open cells means wind cannot get in
+  // anywhere, which is what "the map is sealed" looks like from the bake's side.
+  if (has('openCells') && result.openCells === 0 && has('cols')) {
+    return `${head} NOTHING is open to the exterior, so ambient wind reaches nowhere on this floor.`;
+  }
+  return head;
+}
+
 export function nearestCell(x, y, grid) {
   const cols = Math.max(0, Math.floor(grid?.cols) || 0);
   const rows = Math.max(0, Math.floor(grid?.rows) || 0);

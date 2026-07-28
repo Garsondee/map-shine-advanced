@@ -1,23 +1,36 @@
 /**
  * src/diag/debug-panel.js — the Map Shine Advanced control panel (Tier 0 shell).
  *
- * WHAT THIS IS NOW (2026-07-20): the single control surface from
- * docs/planning/Control-Panel.md — a SHELL with a five-zone icon rail:
- * Bridge · Workshop · Toolbox · Lab · Settings. Only the LAB is fully built —
- * it is the debug registry described below, unchanged. The other four zones show
- * their few already-working controls beside 🚧 stubs: the scaffold for working
- * out the final arrangement before the real (Effects-UI / astrolabe) renderers
- * land. The public API (registerReport/registerAction/registerSelect) is
- * unchanged; an entry is routed to a zone by the ZONES map (default: Lab), so
- * every existing registration keeps working with no change at the call site.
- * A FOURTH primitive, `registerPanel` (2026-07-22), renders a rich composite
- * DOM block instead of a button/dropdown — an effect's whole FOH/ROH config
- * card (`diag/effect-controls.js`), so registering one is still one call.
+ * WHAT THIS IS NOW: the single control surface from docs/planning/
+ * Control-Panel.md — a SHELL with a four-zone icon rail:
+ * Bridge · Make · Lab · Settings.
+ *
+ *   🧭 Bridge   the astrolabe + the handful of live world levers
+ *   🔥 Make     one collapsed accordion per effect; everything about an effect
+ *               — params, its ＋ add affordance, its probes — is in ITS card
+ *   🔬 Lab      diagnostics belonging to no single effect, in folders
+ *   ⚙️ Setup    graphics & performance; the only zone a player sees
+ *
+ * Four primitives feed it: `registerReport`/`registerAction`/`registerSelect`
+ * render as buttons and dropdowns, and `registerPanel` (2026-07-22) renders a
+ * rich composite DOM block — an effect's whole FOH/ROH card
+ * (`diag/effect-controls.js`). Routing is `routeEntry`: an entry declaring
+ * `{ effect }` renders inside that effect's card, otherwise it goes to its
+ * `{ zone }` (or the ZONES map, or the Lab).
+ *
+ * REBUILT 2026-07-27, author's brief: "the UI is starting to become a bit of a
+ * mess." Three things went, and each was a named failure rather than a matter of
+ * taste — 21 inert 🚧 placeholders (two of which had drifted into duplicating the
+ * live controls rendered a few pixels above them), the per-zone blurb paragraphs,
+ * and the Toolbox zone, which after the placeholders left held two buttons.
+ * Effect cards fold shut by default so ten of them can be scanned at once, and
+ * every per-effect diagnostic moved out of the Lab's catch-all drawer into the
+ * card it describes.
  *
  * PERMISSION IS A FILTER, NOT A FORK (Control-Panel.md §2, landed 2026-07-20):
  * `isGM()` below reads the one live fact (`game.user.isGM`); a non-GM sees only
  * the Settings icon (the whole rail hides itself when there is nothing to
- * choose between) and the panel opens straight into it. A GM sees all five —
+ * choose between) and the panel opens straight into it. A GM sees all of them —
  * this file has exactly ONE render path for both, never a duplicated layout.
  * Opening/closing is driven by the scene-controls toolbar button
  * (foundry/scene-controls-button.js) via `showPanel`/`hidePanel`/`togglePanel`;
@@ -28,7 +41,7 @@
  * Lives in the same corner box as the boot heartbeat. A growing set of
  * buttons, one per registered "report" — click one and its output is copied
  * to the clipboard as text, ready to paste back into chat. This is the
- * standing debugging protocol for the rest of the Keyhole build: when
+ * standing debugging protocol for the rest of the build: when
  * something breaks, the fix comes with "run report X (and Y)" instead of "can
  * you paste your console" — structured, consistent, and it survives across
  * stages because any future module can register its own report.
@@ -71,12 +84,15 @@ import { createLogger } from '../core/log.js';
 // The panel's reusable DOM vocabulary (drag, stylesheet, the shared control
 // builders, the Tier-0 zone scaffold), split out 2026-07-25 — the size-ratchet
 // god-object reversal; this file was 1,321 lines / a 1,249-line closure.
+// (`sectionLabel` is no longer imported here: the "Working now" / "Planned"
+// captions it drew were deleted with the stub scaffold. It stays exported from
+// the vocabulary because effect-controls.js has its own use for the same look.)
 import {
   makeDraggable,
   ensurePanelStyle,
-  sectionLabel,
-  zoneIntro,
   createControlBuilders,
+  routeEntry,
+  sortPanelsForZone,
   REPORT_SKIN,
   ACTION_SKIN,
 } from './debug-panel-controls.js';
@@ -100,7 +116,6 @@ export function installDebugPanel(MapShine) {
       report: id,
       generatedAt: new Date().toISOString(),
       msaVersion: MapShine.version,
-      codename: MapShine.codename,
       ...payload,
     };
   }
@@ -134,7 +149,16 @@ export function installDebugPanel(MapShine) {
    * @param {(value: string) => any} onChange
    */
   function registerSelect(id, label, options, getValue, onChange, opts = {}) {
-    controls.set(id, { label, options, getValue, onChange, group: opts.group });
+    controls.set(id, {
+      label,
+      options,
+      getValue,
+      onChange,
+      group: opts.group,
+      primary: opts.primary,
+      zone: opts.zone,
+      effect: opts.effect,
+    });
     if (bodyEl) renderBody();
   }
 
@@ -180,10 +204,27 @@ export function installDebugPanel(MapShine) {
    *
    * @param {string} id
    * @param {string} label - shown nowhere yet (panels render unlabelled, full-width); kept for parity with the other three registries and future use (e.g. an index/search).
-   * @param {() => HTMLElement} buildFn
+   * @param {(ctx: {attachments: HTMLElement[]}) => HTMLElement} buildFn - receives
+   *   every report/action/select that declared `{ effect: <this panel's effect> }`,
+   *   already built as buttons, for the panel to mount wherever it likes. JS ignores
+   *   extra arguments, so a `buildFn` written as `() => …` keeps working untouched.
+   * @param {object} [opts]
+   * @param {string} [opts.zone]
+   * @param {string} [opts.effect] - WHICH EFFECT THIS PANEL IS. Not where it goes —
+   *   that is `zone`. This is what lets a probe registered anywhere in boot.js find
+   *   its way into the right card without this file importing the card renderer.
+   * @param {number} [opts.order] - sort key within the zone; default 0, negatives pin
+   *   to the top. Panel order used to be Map-insertion order.
    */
   function registerPanel(id, label, buildFn, opts = {}) {
-    panels.set(id, { label, buildFn, group: opts.group, zone: opts.zone });
+    panels.set(id, {
+      label,
+      buildFn,
+      group: opts.group,
+      zone: opts.zone,
+      effect: opts.effect,
+      order: opts.order ?? 0,
+    });
     if (bodyEl) renderBody();
   }
 
@@ -205,7 +246,14 @@ export function installDebugPanel(MapShine) {
    *   Return an object (auto-JSON-formatted) or a preformatted string.
    */
   function registerReport(id, label, fn, opts = {}) {
-    reports.set(id, { label, fn, group: opts.group, primary: opts.primary });
+    reports.set(id, {
+      label,
+      fn,
+      group: opts.group,
+      primary: opts.primary,
+      zone: opts.zone,
+      effect: opts.effect,
+    });
     if (bodyEl) renderBody();
   }
 
@@ -220,7 +268,14 @@ export function installDebugPanel(MapShine) {
    * @param {() => (object|string|Promise<object|string>)} fn
    */
   function registerAction(id, label, fn, opts = {}) {
-    actions.set(id, { label, fn, group: opts.group, primary: opts.primary });
+    actions.set(id, {
+      label,
+      fn,
+      group: opts.group,
+      primary: opts.primary,
+      zone: opts.zone,
+      effect: opts.effect,
+    });
     if (bodyEl) renderBody();
   }
 
@@ -332,14 +387,15 @@ export function installDebugPanel(MapShine) {
   // table that fails SILENTLY). A registration MAY self-declare `{ group }` /
   // `{ primary }` to override these defaults; unlisted ids fall into "More",
   // never a wrong folder. Array order here IS the on-screen folder order.
-  const PRIMARY = new Set(['pixel-probe']); // quick-reach; "Export everything" is primary by construction
+  // ("Export everything" is primary by construction; every other quick-reach
+  // entry self-declares `{ primary: true }` at its registration site.)
   const FOLDERS = [
     { id: 'levers', title: 'Levers', icon: '🎚️', ids: [] }, // live selects default here
     {
       id: 'health',
       title: 'Health & baseline',
       icon: '📊',
-      ids: ['stage-gate-baseline', 'pass-graph-health', 'environment', 'boot', 'console', 'loading-screen-state'],
+      ids: ['stage-gate-baseline', 'pass-graph-health', 'environment', 'boot', 'console'],
     },
     {
       id: 'scene',
@@ -372,40 +428,59 @@ export function installDebugPanel(MapShine) {
         'soak',
       ],
     },
+    {
+      // The old Tools zone, folded in here 2026-07-27. It held exactly two real
+      // controls and six 🚧 placeholders; once the placeholders went, a whole rail
+      // click led to a pair of buttons. These are GM utilities rather than dev
+      // diagnostics, so they keep their own folder rather than dissolving into one.
+      id: 'utilities',
+      title: 'Scene utilities',
+      icon: '🧰',
+      ids: ['loading-screen-arm', 'loading-screen-state'],
+    },
   ];
   const openFolders = new Set(); // folder ids the author has expanded; preserved across re-renders
 
-  // ---- THE FIVE ZONES (docs/planning/Control-Panel.md) ---------------------
-  // The rail switches between them; every registered report/action/select is
-  // routed to exactly ONE zone. This is presentation-only config, exactly like
-  // FOLDERS above — a mis-routed id still works, it just shows in the wrong
-  // zone. The DEFAULT zone is 'lab' (the dev suite = the debug registry), so a
-  // newly-registered diagnostic needs no entry here. Only the Lab is fully
-  // built; the four product zones are 🚧-stubbed scaffolds for now.
-  const ZONE_ORDER = ['bridge', 'workshop', 'toolbox', 'lab', 'settings'];
+  // ---- THE ZONES (docs/planning/Control-Panel.md) ---------------------------
+  // The rail switches between them. An entry that declares `{ effect }` renders
+  // in that effect's card and in NO zone (see routeEntry); everything else is
+  // routed to exactly one zone here. Presentation-only config, exactly like
+  // FOLDERS above — a mis-routed id still works, it just shows in the wrong zone.
+  //
+  // 'toolbox' WAS DELETED 2026-07-27, author's call. It housed two working
+  // controls and six 🚧 placeholders; deleting the placeholders left a rail icon
+  // leading to a pair of buttons. Its contents moved to the Lab's new "Scene
+  // utilities" folder. Four zones, each with a reason to be clicked.
+  const ZONE_ORDER = ['bridge', 'workshop', 'lab', 'settings'];
   const ZONE_META = {
     bridge: { icon: '🧭', tag: 'Bridge', title: 'The Bridge', sub: 'live world control' },
     workshop: { icon: '🔥', tag: 'Make', title: 'The Workshop', sub: 'add & author effects' },
-    toolbox: { icon: '🧰', tag: 'Tools', title: 'The Toolbox', sub: 'occasional utilities' },
     lab: { icon: '🔬', tag: 'Lab', title: 'The Lab', sub: 'diagnostics & dev tools', dev: true },
     settings: { icon: '⚙️', tag: 'Setup', title: 'Settings', sub: 'graphics & performance' },
   };
-  /** The permission filter (Control-Panel.md §2): a GM gets all five zones; a
+  /** The permission filter (Control-Panel.md §2): a GM gets every zone; a
    * player gets exactly one. Everything downstream (the rail, the default
    * zone, whether the rail even renders) reads THIS, never `isGM()` directly —
    * one seam if the player's set ever grows past Settings alone. */
   const visibleZones = () => (isGM() ? ZONE_ORDER : ['settings']);
-  // id → zone override; unlisted ids default to 'lab'. These are the handful of
-  // already-working controls that belong in a product zone, not the dev suite —
-  // so each product zone shows at least one real control beside its stubs.
+  // id → zone override, for the handful of controls that belong in a product
+  // zone rather than the dev suite. A registration's own `{ zone }` beats this
+  // table; `{ effect }` beats both and sends the entry into that effect's card.
+  //
+  // ⚠️ THIS TABLE IS NOT WHAT MADE THE LAB A JUNK DRAWER — the DEFAULT was. Every
+  // diagnostic that declared nothing fell to 'lab', so the catch-all "More" drawer
+  // grew to twelve entries, eight of which belonged to a named effect. Those eight
+  // now declare `{ effect }` at their own registration site and the drawer is gone.
+  // The fallback stays 'lab' deliberately: a control that lands somewhere
+  // unexpected is recoverable, one that renders nowhere is invisible.
+  //
+  // ('anchors'/'live-markers-toggle' left for the candle card; 'candle-markers-once'
+  // was deleted; the loading-screen pair came here from the retired Tools zone.)
   const ZONES = {
     'darkness-realism': 'bridge',
     'render-compare': 'bridge',
     'camera-path-open': 'bridge',
     paint: 'workshop',
-    anchors: 'workshop',
-    'live-markers-toggle': 'workshop',
-    'candle-markers-once': 'workshop',
     'wind-overlay-toggle': 'workshop',
     'wind-overlay-resolution': 'workshop',
     'wind-particles-toggle': 'workshop',
@@ -416,45 +491,25 @@ export function installDebugPanel(MapShine) {
     'wind-test-gust': 'workshop',
     'wind-force-thaw': 'workshop',
     'wind-sim-status': 'workshop',
-    'loading-screen-arm': 'toolbox',
-    'loading-screen-state': 'toolbox',
+    'loading-screen-arm': 'lab',
+    'loading-screen-state': 'lab',
     'ui-shadow': 'settings',
     'ui-shadow-status': 'settings',
   };
-  const zoneOf = (id, entry) => entry.zone ?? ZONES[id] ?? 'lab';
+  /** Which zone body an entry renders in, or `null` when it renders inside an
+   * effect's card instead. Delegates to the pure `routeEntry` so the rule that
+   * turned the Lab into a junk drawer is Node-tested rather than inline here. */
+  const zoneOf = (id, entry) => {
+    const r = routeEntry(id, entry, ZONES);
+    return r.kind === 'zone' ? r.zone : null;
+  };
 
-  const ZONE_INTRO = {
-    bridge:
-      'Steer the world live. The <b style="color:#cfe0f5">astrolabe</b> (time &amp; wind) is the hero here; a couple of real world levers work today.',
-    workshop:
-      'Add an effect and paint it where it belongs. <b style="color:#cfe0f5">Painting masks works today</b>; the effect gallery + “need fire” flow are planned.',
-    toolbox:
-      'Occasional GM utilities. The loading-screen tools work today; the rest are planned (confirm-first where heavy).',
-    settings:
-      'Graphics &amp; performance — the player-facing face. <b style="color:#cfe0f5">Window shadows work today</b>; the profile + per-effect rows are planned.',
-  };
-  // The 🚧 stub scaffold per product zone — labels the author is arranging, not
-  // wired to anything. See renderProductZone.
-  const STUBS = {
-    bridge: { quick: ['Toggle darkness', 'Recall camera', 'Floor ▸', 'Streaming minimap'] },
-    // Candles graduated from stub to a real registered panel (boot.js) — no
-    // longer listed here; every other entry is still 🚧 planned.
-    workshop: { gallery: ['Fire', 'Water', 'Fog', 'Dust', 'Lightning', 'Smoke', 'Puddles', 'Glow'] },
-    toolbox: {
-      items: [
-        'Texture Manager',
-        'Effect Stack',
-        'Apply look to all scenes…',
-        'Package-readiness check',
-        'Scene Reset',
-        'Scene Recovery',
-      ],
-    },
-    settings: {
-      profile: ['Low', 'Performance', 'Standard', 'Quality', 'Extreme'],
-      effects: ['Fire', 'Water', 'Lightning'],
-    },
-  };
+  // ZONE_INTRO (a blurb paragraph per zone) and STUBS (21 inert 🚧 placeholders)
+  // WERE DELETED 2026-07-27. The blurbs described which controls were real,
+  // which is a fact the controls themselves now carry by simply existing; the
+  // stubs advertised features that live in docs/planning, and two of them had
+  // drifted into duplicating the working controls rendered immediately above
+  // them. Both cost vertical space in a panel that has ten effect cards to fit.
 
   /**
    * Make `handle` drag whatever `getHost()` returns.
@@ -476,14 +531,12 @@ export function installDebugPanel(MapShine) {
    */
   // The shared control builders, bound to this panel's registries. `statusEl`
   // is passed as a GETTER, not a value: it does not exist until buildUI runs.
-  const { makeButton, makeRunnable, makeControl, folderOf, stubRow, stubGallery, stubSegmented } =
-    createControlBuilders({
-      runReport,
-      copyToClipboard,
-      getStatusEl: () => statusEl,
-      PRIMARY,
-      FOLDERS,
-    });
+  const { makeButton, makeRunnable, makeControl, folderOf } = createControlBuilders({
+    runReport,
+    copyToClipboard,
+    getStatusEl: () => statusEl,
+    FOLDERS,
+  });
 
   function buildFooter() {
     const foot = document.createElement('div');
@@ -511,7 +564,7 @@ export function installDebugPanel(MapShine) {
     foot.appendChild(link('https://www.patreon.com/c/MythicaMachina', '❤ Patreon', '#ff6b74'));
     foot.appendChild(link('https://github.com/Garsondee/map-shine-advanced/issues', '🐛 Report a bug', '#8fd6ff'));
     const cred = document.createElement('span');
-    cred.textContent = MapShine.codename ? `“${MapShine.codename}”` : 'Mythica Machina';
+    cred.textContent = 'Mythica Machina';
     Object.assign(cred.style, { marginLeft: 'auto', opacity: '0.4' });
     foot.appendChild(cred);
     return foot;
@@ -650,7 +703,7 @@ export function installDebugPanel(MapShine) {
       fontSize: '10px',
       wordBreak: 'break-word',
     });
-    statusEl.textContent = 'Pick a tool — its output copies to your clipboard, ready to paste back.';
+    statusEl.textContent = 'Output copies to your clipboard.';
 
     footerEl = buildFooter();
     footerEl.style.margin = '6px 12px 8px';
@@ -750,6 +803,7 @@ export function installDebugPanel(MapShine) {
     if (!bodyEl) return;
     bodyEl.innerHTML = '';
     updateRail();
+    warnOrphanedAttachments();
     if (activeZone === 'lab') renderLab();
     else renderProductZone(activeZone);
   }
@@ -803,16 +857,66 @@ export function installDebugPanel(MapShine) {
    */
   function buildRoutedPanels(zone) {
     const out = [];
-    for (const [id, entry] of panels) {
-      if (zoneOf(id, entry) !== zone) continue;
+    for (const [id, entry] of sortPanelsForZone(panels, zone, ZONES)) {
       try {
-        const built = entry.buildFn();
+        const built = entry.buildFn({ attachments: attachmentsFor(entry.effect) });
         if (built instanceof HTMLElement) out.push(built);
       } catch (err) {
         log.error(`panel "${id}" failed to build:`, err);
       }
     }
     return out;
+  }
+
+  /**
+   * Every report/action/select that declared `{ effect: effectId }`, built as
+   * buttons ready for that effect's card to mount.
+   *
+   * ⚠️ THIS IS WHAT KEEPS THE TWO MODULES APART. `debug-panel.js` does not import
+   * `effect-controls.js`, and `effect-controls.js` does not import this file —
+   * boot.js imports both, because boot.js is the composition root. So the panel
+   * builds the DOM it knows how to build (skinned buttons, live selects) and hands
+   * them over as opaque elements; the card mounts them without knowing what they
+   * are. Exactly the contract `extra[]` already had.
+   *
+   * ⚠️ AND THE REPORTS/ACTIONS SPLIT KEEPS ITS TEETH. `{ effect }` changes only
+   * WHERE a button is drawn. The entry stays in the same `reports`/`actions` Map,
+   * so the flight recorder still runs every report on export and still never runs
+   * an action. Moving a probe into a card must not make an export able to restart
+   * the author's scene.
+   *
+   * @param {string|undefined} effectId
+   * @returns {HTMLElement[]}
+   */
+  function attachmentsFor(effectId) {
+    if (!effectId) return [];
+    const out = [];
+    for (const [id, e] of controls) if (e.effect === effectId) out.push(makeControl(id, e));
+    for (const [id, e] of actions) if (e.effect === effectId) out.push(makeRunnable(id, e.label, ACTION_SKIN));
+    for (const [id, e] of reports) if (e.effect === effectId) out.push(makeRunnable(id, e.label, REPORT_SKIN));
+    return out;
+  }
+
+  /**
+   * Announce any diagnostic that declared an `{ effect }` no card claims — its
+   * button is drawn nowhere. It is still reachable (`MapShine.debug.runReport(id)`,
+   * and every report is still in the export bundle), but a control that silently
+   * vanished from the UI is this project's own named bug class, so it says so.
+   */
+  const warnedOrphans = new Set();
+  function warnOrphanedAttachments() {
+    const cardEffects = new Set([...panels.values()].map((e) => e.effect).filter(Boolean));
+    const orphans = [];
+    for (const map of [reports, actions, controls]) {
+      for (const [id, e] of map) {
+        if (!e.effect || cardEffects.has(e.effect) || warnedOrphans.has(id)) continue;
+        warnedOrphans.add(id); // once per id, not once per render — renderBody runs constantly
+        orphans.push(`${id} → ${e.effect}`);
+      }
+    }
+    if (orphans.length > 0) {
+      log.warn(`${orphans.length} diagnostic(s) declare an effect with no card to render in: ${orphans.join(', ')}`);
+    }
   }
 
   // ---- THE LAB — today's debug registry, behaviour unchanged ---------------
@@ -894,14 +998,13 @@ export function installDebugPanel(MapShine) {
   // here is load-bearing; it is the skeleton of docs/planning/Control-Panel.md.
 
   function renderProductZone(z) {
-    bodyEl.appendChild(zoneIntro(ZONE_INTRO[z]));
-
-    // (a) real controls routed to this zone
+    // (a) real controls routed to this zone, in one compact row. No "Working
+    // now" caption: everything drawn here works, so the label distinguished
+    // nothing once the 🚧 half below it was deleted.
     const realReports = [...reports].filter(([id, e]) => zoneOf(id, e) === z);
     const realActions = [...actions].filter(([id, e]) => zoneOf(id, e) === z);
     const realControls = [...controls].filter(([id, e]) => zoneOf(id, e) === z);
     if (realReports.length || realActions.length || realControls.length) {
-      bodyEl.appendChild(sectionLabel('Working now'));
       const real = document.createElement('div');
       Object.assign(real.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
       for (const [id, e] of realControls) real.appendChild(makeControl(id, e));
@@ -913,25 +1016,6 @@ export function installDebugPanel(MapShine) {
     // (b) rich panels routed to this zone (Effects-UI.md FOH/ROH cards) — each
     // is its own full-width block, never squeezed into the small-control row.
     for (const el of buildRoutedPanels(z)) bodyEl.appendChild(el);
-
-    // (c) the planned scaffold, per zone
-    bodyEl.appendChild(sectionLabel('Planned'));
-    if (z === 'bridge') {
-      // The dashed "🧭 Astrolabe — time & wind hero dial" placeholder that
-      // stood here is GONE (2026-07-23): the real dial is a registered panel
-      // (`ui/astrolabe.js`, boot.js) and renders above, via buildRoutedPanels.
-      // A stub left beside the thing it was standing in for is a dead control.
-      bodyEl.appendChild(stubRow(STUBS.bridge.quick));
-    } else if (z === 'workshop') {
-      bodyEl.appendChild(stubGallery(STUBS.workshop.gallery));
-    } else if (z === 'toolbox') {
-      bodyEl.appendChild(stubRow(STUBS.toolbox.items));
-    } else if (z === 'settings') {
-      bodyEl.appendChild(sectionLabel('Performance profile'));
-      bodyEl.appendChild(stubSegmented(STUBS.settings.profile));
-      bodyEl.appendChild(sectionLabel('Per-effect enable'));
-      bodyEl.appendChild(stubRow(STUBS.settings.effects.map((e) => `${e} · enable`)));
-    }
   }
 
   /** Call once the boot heartbeat box exists in the DOM. Idempotent. */

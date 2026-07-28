@@ -14,6 +14,9 @@ import { run as runFluid } from './fluid.test.mjs';
 import { run as runFluidNet } from './fluid-net.test.mjs';
 import { run as runFluidPack } from './fluid-pack.test.mjs';
 import { run as runFluidSurface } from './fluid-surface.test.mjs';
+import { run as runFluidPump } from './fluid-pump.test.mjs';
+import { run as runFluidSim } from './fluid-sim.test.mjs';
+import { run as runFluidSimRender } from './fluid-sim-render.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -47,6 +50,9 @@ const suites = [
   ['fluid-net', runFluidNet],
   ['fluid-pack', runFluidPack],
   ['fluid-surface', runFluidSurface],
+  ['fluid-pump', runFluidPump],
+  ['fluid-sim', runFluidSim],
+  ['fluid-sim-render', runFluidSimRender],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

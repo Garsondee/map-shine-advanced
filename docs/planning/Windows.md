@@ -1,349 +1,290 @@
-# WINDOWS — light through an aperture (`light.accumulate`)
+# WINDOWS — the painted light cookie, driven by the sky (`light.accumulate`)
 
-**Status:** DESIGN SPEC, nothing built. Authored from a direct read of `legacy/compositor-v2/effects/WindowLightEffectV2.js` (3,667 lines), its consumption inside `LightingEffectV2.js`'s compose (the half that actually decided what the effect looked like), and the harvested control schema (`docs/reference/v2-effect-params/window-light-effect.md`, **98 authored controls**).
-**Owns:** no new pass. `graph/passes.js` already assigns `WindowLightEffectV2` to **`light.accumulate`**, and that assignment is correct for a reason this document is largely about: a window is a light, so it belongs in the light system rather than beside it.
-**Companion:** `Specular.md` (the port pattern this follows — the autopsy → reframe → ladder shape, and its two shipped-invisible corrections) · `Light-and-Shadow.md` §1 (*"Window light is a light."*) · `Light-MSA-Ideas.md` §C (**gobo projection**, 🟢 C4, the author's own recommendation #2 of three) · `Sun-Shadows.md` (the throw formula this delegates to) · `Effects.md` (the ladder laws).
+**Status:** **Tier 0 BUILT (unverified) 2026-07-27** — the mask read as light, added onto `buf:scene.illum`, floor-gated, cropped to its own AABB, wired end to end (seams → registration → panel → debug channels → status report) and Node-tested (120 assertions across the cookie decode, the highlight shoulder, the TSL graph construction, and the surface subsystem's visibility/debug-swap contract). ⚠️ **Seen once, live** — a real scene (an observatory tower with a large gold-and-blue mosaic skylight room) showed the room washed out to a flat white disc, the painted tracery gone. §11 records the cause (an unbounded additive contribution meeting `lit = EOTF(OETF(albedo)×illum)`, traced to the real formula, not guessed) and the fix (a hue-preserving highlight shoulder on the cookie's own contribution). **Not yet RE-seen with the fix applied** — this codebase has a measured record of fully-green test suites meaning nothing about whether an effect draws correctly (`keyhole-current-state`); only the author's own eyes promote this to LIVE. Everything past tier 0 (sky-drive, drift, moon, cloud, occlude, stretch, bounce, shaft, motes, the point-light-conversion idea) is `deferredRungs` in `src/effects/window/window.js` — designed, ordered, not built. Authored from a direct read of `legacy/compositor-v2/effects/WindowLightEffectV2.js` (3,667 lines), its consumption inside `LightingEffectV2.js`'s compose (the half that actually decided what the effect looked like), `CloudEffectV2.js` (2,728 lines, the shadow producer), and the harvested control schema (`docs/reference/v2-effect-params/window-light-effect.md`, **98 authored controls**).
+**Owns:** no new pass. `graph/passes.js` already assigns `WindowLightEffectV2` to **`light.accumulate`**, and that is the right home: this is a light, so it belongs in the light system.
+**Forces one shared prerequisite:** `world/cloud-field.js` — a spatial cloud-shadow field, for tier 4. It does not exist yet; tier 0 ships a WIRED SEAM instead (`window-render.js#cloudFactorNode`, defaults to a constant 1 — see §4.4 and the module's own header). Windows will be its first consumer, and **it must not be owned by this effect**.
+
+**Author directive, 2026-07-27** — the sentence the whole design turns on:
+
+> _"All `_Windows` and `_Structural` masks are light applied only to the interior of buildings, so you can safely assume that any bright pixel in `_Windows` is where a bright light would fall on the interior of the building at day. Imagine that you are looking down on the gobo lighting cookie shapes of window lights spilling into rooms. **A cloud travels across the sky and the window light inside dims and dies.** That's the goal."_
 
 ---
 
 ## 0. The thesis, in one paragraph
 
-V2 made the **window glow**. A window does not glow; a window is a **hole**. Light arrives at one side of it and leaves from the other, and which way it flows is decided by which side is brighter — the sky, or the lamps in the room. Get that one noun right and almost everything V2 hand-built falls out for free: the eight time-of-day anchors become the sun we already compute, the cloud dimming becomes the sky handle we already build, the lightning coupling becomes "the sky got bright for 100 ms", and the single most beautiful thing a top-down map can do — **a shaped, coloured patch of sunlight lying on the flagstones, sliding across the floor as the day advances** — becomes possible at all, which under V2's architecture it was not.
-
-No new mask. The `_Window` file the author already paints, read as **glass** rather than as a glow: hue is what colour the light becomes, value is how much gets through, and the paint's own shape is the pattern it throws.
+**The mask is not a window. The mask is the light.** The author has already painted the cookie — the shape daylight makes on the interior floor, with its own falloff and its own colour, in exactly the right place. That deletes the entire geometry problem: there is nothing to project, no aperture to locate, no wall to face, no beam to trace. What the painting *cannot* carry is **time** — how bright it is at this hour, what colour the sun is right now, and what happens when a cloud goes over. V2 answered that with fifty-six hand-keyframed sliders and a 2,728-line sprite simulator feeding a screen-space render target. The answer is one function of the sky we already compute, plus one analytic noise field drifting on the wind we already compute. **The mask supplies the shape; the sky supplies the life.**
 
 ---
 
-## 1. THE AUTOPSY — what V2 actually computed
+## 1. WHAT THE DIRECTIVE DELETES
 
-### 1.1 The whole effect, distilled
+Worth stating plainly, because it removes most of what would otherwise be hard:
 
-3,667 lines of JS and ~300 lines of GLSL reduce to this, evaluated at **the pixel the mask is painted on**:
+| Problem a "window light" effect normally has | Status under the painted-cookie semantic |
+| --- | --- |
+| Where does the light land? | **Answered by the paint.** Not inferred, not projected, not marched. |
+| Which side of the wall is outside? | **Does not arise.** There is no wall in this effect; there is a patch on a floor. |
+| How wide/soft is the beam's penumbra? | **Painted.** The cookie's own value falloff *is* the penumbra, at whatever softness the artist wanted. |
+| Where is the sill, how tall is the window? | **Not needed.** Those existed to compute the throw, and the throw is painted. |
+| Do interior walls clip the beam? | **Yes, already** — the artist did not paint light through a wall. |
+| Is this a wall window or a skylight? | **Irrelevant to the shape.** Both are cookies on the floor. |
 
-```
-emit = luma(windowMask)^falloff                    // one scalar from a colour file
-     × prismaticRgbSplit(mask, angle, wobble)      // 3 more mask taps at an offset
-     × color × intensity × 0.22                    // WINDOW_ILLUM_SCALE, a magic number
-     × (1 + specularMask × specularBoost)          // reaches into ANOTHER effect's mask
-     + sparkleField(cameraViewCells, time)         // procedural glints
-     × todGrade(hour → 8 anchors × 6 params)       // a hand-keyframed timeline
-     × cloudDim × cloudShadow
-     ; emit /= (1 + emit × 0.14)                   // its own tone shoulder
-```
+Everything that survives is **radiometric and temporal**: strength, colour, spectral character, and motion. That is a much smaller and much better-conditioned problem than the one a procedural window system has to solve, and it is a genuine authoring advantage rather than a shortcut — the artist's cookie will beat anything derived, because it is the light they *intended*.
 
-written into a **scene-sized render target** (`SCENE_MASK_EMIT_MAX = 4096`, sized to the scene rect), which `LightingEffectV2`'s compose then samples at *the same scene UV as the pixel being lit* and folds in as `totalIllumination += winIllum`.
+**The one thing the paint cannot know is what time it is.** That is the whole remaining job.
 
-That last sentence is the whole finding, so it is worth isolating:
+---
 
-> **The window's light is sampled at the pixel the window is painted on, and nowhere else. Light never travels. There is no patch on the floor and no pool on the street, because there is no mechanism by which anything could appear anywhere but on the mask itself.**
+## 2. THE AUTOPSY — what V2 did with a mask that was already the answer
 
-Every apparent "spill" in a V2 screenshot is `BloomEffectV2` smearing a bright decal. The effect is an **emissive sticker with a weather-aware colour grade**.
+### 2.1 It hand-keyframed a quantity the engine derives
 
-### 1.2 …and the exterior half was multiplied by zero
+**Fifty-six of the ninety-eight controls** are eight time-of-day anchors × (hour, intensity scale, exposure, saturation, tint R, tint G, tint B). Every one of them is describing what the sun is doing — and none of them is *connected* to the sun. `effects/sky-access.js` computes the outdoor light's colour and strength from `world/sun.js` as one continuous curve; V2's timeline is a second, independent, hand-drawn copy of the same curve that can disagree with it and has no way to be told it has.
 
-`legacy/compositor-v2/effects/LightingEffectV2.js:3351`:
+This is `env/one-sun`'s thesis with a human in the loop: a term derived twice is N−1 needless chances to disagree, and here the second derivation is a person with a mouse and eight keyframes. It is also unfalsifiable — nothing can be wrong with a curve whose only specification is "whatever the author dragged it to", which is why the effect accumulated a 506-line overexposure probe.
+
+Fifty-six sliders is the price of not having modelled the mechanism. §3 is the mechanism.
+
+### 2.2 The additive wash — the paint, not the blend
+
+V2 folds the emit buffer into compose **twice**:
 
 ```glsl
-winLights *= (1.0 - isOutdoorForInteriorDimSafe);
+totalIllumination += winIllum;              // :3829  — correct: light multiplies the albedo
+vec3 litColor = baseColor.rgb * totalIllumination;
+litColor += winHueLit * spillAmt;           // :3854  — a paint-over on the finished pixel
+litColor += winChromaLit * fringeSpill;     // :3860
 ```
 
-Window light is **zeroed on outdoor pixels.** So the single most recognisable use of the effect — *a town at night, warm lit windows* — was structurally unreachable, by an explicit line of code, in the consumer rather than in the effect.
+The first is right — a light scales what it falls on, so a sunlit flagstone shows *more of its own colour*, not less. The second (`uWindowScreenSpill`) is an additive haze on the already-lit result, which **flattens the art it is supposed to be lighting**: it lifts blacks, crushes the albedo's own contrast, and makes a bright patch read as fog rather than as sun.
 
-The gate is not stupid; it is the least-bad patch available. Because the only thing the effect could produce was a bright decal *at the mask*, and a window's mask paint sits on the boundary between roofed and open sky, the decal leaked onto the sky. Clipping it to indoors was the only way to stop that. **The clip is the price of the wrong noun** — the same shape `Light-and-Shadow.md` §0 identifies in `DynamicLightShadowLift.js` (a whole module to un-darken shadows near lights, because shadow had been made to darken everything). A compensator is a receipt.
+`keyhole-water-tsl-design` records the identical correction at the cost of three rejected builds — *"the IN-SCATTER term was the paint, not the blend."* And `sky-access.js`'s own header records it a third time, in the sky's deleted veil: *"an additive term lifts blacks, so it read as 'the scene just got brighter and greyish'."* **Three effects, one mistake.** A light multiplies. If a term must add, it is not the light.
 
-And it lands the effect on the exact hazard `feedback_membership_beats_derived_threshold` names: a window is *painted on the wall*, and the wall is the shared boundary of the `_Outdoors` mask, so whether a given window texel reads indoors or outdoors is decided by how the author feathered a brush stroke.
+### 2.3 Seventeen fetches per pixel re-deriving a hand-painted picture
 
-### 1.3 The keyframes were standing in for the physics
+The shader spends most of its bandwidth discovering geometry:
 
-Eight time-of-day anchors × (hour, intensity scale, exposure, saturation, tint R, tint G, tint B) = **56 of the 98 controls.** They exist because nothing in the effect knew what the sun was doing, so the look had to be drawn by hand, hour by hour.
-
-They also got it backwards, and the way they got it backwards is diagnostic:
-
-| Anchor | V2 `intensityScale` | What a **vertical** window actually admits |
+| Function | Taps | Deriving |
 | --- | --- | --- |
-| Noon (12:00) | **3.0 — the highest of all eight** | The **least** of the whole day. A vertical aperture at a sun elevation of 70–80° admits almost nothing; the light goes past it, not through it. |
-| Dusk (18:00) | 0.5 | The **most**, and the longest — a low sun drives a long stretched beam deep into the room. |
+| `wlMaskEdge` | **5** | where the patch's edge is |
+| `wlRainFlowDir` | **4** on `_Outdoors` | which way the wall faces — at a **user-tunable 1…160 px radius** (`rainGlassSlopeSamplePx`) |
+| prismatic RGB split | 3 | |
+| mask + softened mask + floor id + `_Specular` + cloud shadow | 5 | |
 
-The timeline is describing *how bright the pane looks*, not *how much light gets through* — which is exactly right, because the pane looking bright was the only thing the effect had. Fifty-six sliders is what it costs to keyframe a quantity by hand instead of deriving it, and `env/one-sun`'s thesis is that a term derived twice is N−1 needless chances to disagree. Here the second derivation is a human with a mouse.
+**Seventeen fetches per pixel**, through **11 samplers** and **94 uniforms**, over a target up to 4096² — to re-discover the outline and softness of a picture an artist already drew. The cookie's edge *is* the mask; its softness *is* the mask's value ramp. None of it needed deriving, and a slider whose job is tuning how far to look while guessing a static fact is the tell.
 
-### 1.4 Static geometry, re-derived per pixel, per frame
+### 2.4 A cloud system that cost 2,728 lines and drifted with the camera
 
-The shader needs two geometric facts about each window: **where its edge is** and **which way its wall faces.** Both are properties of a file that changes when the author repaints it, i.e. approximately never. V2 recomputed both, per pixel, every frame:
+The goal in the directive was **attempted** in V2, and the machinery is the finding:
 
-| Function | Taps | What it was deriving |
-| --- | --- | --- |
-| `wlMaskEdge` | **5** mask samples | the aperture's edge |
-| `wlRainFlowDir` | **4** samples of `_Outdoors` | the wall's facing direction — at a **user-tunable radius, 1…160 px** (`rainGlassSlopeSamplePx`, default 42) |
-| the prismatic split | 3 mask samples | |
-| mask + soft mask + floor id + specular + cloud shadow | 5 | |
+- `CloudEffectV2.js` simulates cloud **sprites** — spawn arcs, downwind recycling (`_hasExitedDownwind`), drift orbit strength, drift responsiveness, drift deceleration, max speed — and renders them into `_shadowRT`.
+- `WindowLightEffectV2` samples that RT through `wlSampleCloudShadowFactor`, converting scene UV → world → **screen UV**, because the buffer is screen-space.
+- Being screen-space, it moves when the camera moves, so a bespoke motion-compensation cache (`_shadowCacheMotionRef`, coarse drift buckets) exists to hide the swim.
+- Four controls (`cloudShadowContrast/Bias/Gamma/MinLight`) reshape the result after the fact.
 
-**Seventeen texture fetches per pixel**, over a target up to 4096², through **11 samplers** and **94 uniforms**, with every mask read routed through a four-way `if/else if` chain on a floor index decoded from a byte texture.
+**A cloud shadow is a scalar field over the world at a time.** In TSL that is one `mx_fractal_noise_float` at `worldXY + wind·t` — ~10 ALU ops, no sprites, no render target, no camera dependence, no motion cache, and correct while panning by construction. V2 built a particle simulator because GLSL-era thinking says *"a field must be a texture"*, and then paid for the texture being in the wrong space forever.
 
-A slider whose job is to tune how far to look when guessing a static geometric fact is the tell. The fact should have been measured once.
+### 2.5 A precondition that can only subtract
 
-### 1.5 The cache that could not cache
+`LightingEffectV2.js:3351`: `winLights *= (1.0 - isOutdoorForInteriorDimSafe);`
 
-`_buildFullEmitCacheKey()` is a 28-field string built to let a per-floor emit target survive across frames. Two of those fields are:
+Given the interior-only semantic this is *approximately correct* — but it is redundant, and redundant in the direction that costs pixels. **The author has already asserted "indoors" by only painting indoors.** Re-testing that assertion against a derived, feathered, `smoothstep(0.18, 0.82)`-laddered `_Outdoors` mask can only ever remove light the artist deliberately put there — and it removes it precisely at thresholds, doorways, arcades and window reveals, which is exactly where these patches live and exactly where the `_Outdoors` boundary is feathered.
 
-```js
-rgbShiftAnimate !== false ? Math.floor(uTime * 8) : 0,   // 8 invalidations per second
-rainActive      ? Math.floor(uTime * 12) : 0,            // 12 more when it rains
-```
+`feedback_count_silent_preconditions`: **delete a precondition rather than repair one.** Trust the paint.
 
-`rgbShiftAnimate` **defaults to `true`.** So the cross-frame cache, in the shipping configuration, invalidates eight times a second by construction, and the effect re-renders a scene-sized RGBA16F target at ~17 fetches per pixel eight times a second forever. The optimization was defeated by the default it shipped with.
+### 2.6 The rest of the ledger
 
-### 1.6 The VRAM, and the device it has already lost
+- **VRAM.** A 4096² RGBA16F emit target is **134 MB**. `_floorEmitCache` holds one *per floor* (up to four); `_shadowLiftEmitRT` is a fifth. Worst case is over half a gigabyte for one effect, on an engine with two logged device losses (`keyhole-device-loss-large-map`, `keyhole-floor-switch-canvas-redraw-collision`). `windowLightUseHalfFloat` and `setEmitResolutionScale(0.25…1)` are the architecture apologising for itself.
+- **A cache that cannot cache.** The 28-field key includes `Math.floor(uTime * 8)` whenever `rgbShiftAnimate` is on — and it **defaults to `true`**. Eight invalidations per second, by construction, in the shipping configuration.
+- **Two consumers, two definitions.** Compose gates the emit buffer at `smoothstep(0.008, 0.055)`; the shadow-lift blit gates the *same buffer* at `smoothstep(0.10, 0.24)`. A twelve-fold disagreement about "is there window light here", possible only because the buffer's units were never defined — same symptom as the `WINDOW_ILLUM_SCALE = 0.22` constant, whose comment cites a compose formula the compose no longer uses.
+- **Its own tone shoulder and its own colourist.** `emit /= (1 + emit × 0.14)` plus a full exposure/saturation/tint stack, inside an effect, in a renderer with one grade engine.
+- **`specularBoost` reaches into `_Specular`** — four more samplers, so this effect's output depends on another effect's mask through no declared edge. The `window.MapShine` free-for-all `graph/passes.js` exists to make impossible.
+- **Rain-on-glass (9 controls) warps the cookie's UVs.** Under the true semantic this is unambiguous: it wobbles *the shape of the light on the floor* with procedural droplets. Rain does not move a sunbeam. Wrong effect, wrong place — it belongs to `surface.response` (a wet clear coat) or to the particle engine.
+- **Sparkle density is measured in camera-view units.** `wlSparklePointField` derives cell size from `viewUvMax − viewUvMin`, so zooming re-lays out the lattice — on a feature whose own author note says *"Glints do not drift on the map."* Same aliasing failure `Specular.md` §3.5 names.
+- **Ten independent `flipY` uniforms** (`uWindow0…3FlipY`, `uSpecular0…3FlipY`, `uOutdoorsMaskFlipY`, `uFloorIdFlipY`) — ten separate chances at `feedback_y_flip_recurring_risk`, each with its own push site.
+- **Dead instrumentation.** `windowLightDraw.outdoorsClip` (`:5499`) and `lightOverride.windowDraw.outdoorsClip` (`:5275`) are perf spans that begin and immediately end, bracketing nothing. `feedback_instruments_must_not_lie`.
 
-A 4096² RGBA16F target is **134 MB**. `_floorEmitCache` holds **one per floor** (up to four), and `_shadowLiftEmitRT` is a fifth, independent one. Worst case for this one effect is **over half a gigabyte** — on a codebase whose logged history includes a large-map device loss (`keyhole-device-loss-large-map`) and a second, differently-caused one on floor switch (`keyhole-floor-switch-canvas-redraw-collision`). `windowLightUseHalfFloat` and `setEmitResolutionScale(0.25…1)` exist as escape hatches, which is the shape of an architecture apologising for itself.
-
-### 1.7 Two consumers, two disagreeing definitions
-
-The same emit buffer is thresholded twice, differently:
-
-| Consumer | Gate |
-| --- | --- |
-| compose (`LightingEffectV2.js:3345`) | `smoothstep(0.008, 0.055, winLuma)` |
-| the shadow-lift blit (`:191`) | `smoothstep(0.10, 0.24, winL)` |
-
-A twelve-fold disagreement about what counts as "there is window light here". Neither is wrong given the other does not exist; both existing is the problem, and it is only possible because the buffer's units were never defined. The `WINDOW_ILLUM_SCALE = 0.22` constant — commented *"Scale emit RT values for compose `litColor *= (1 + win)`"* against a compose that no longer does `litColor *= (1 + win)` — is the same symptom.
-
-### 1.8 The rest of the ledger
-
-- **Ten independent `flipY` uniforms** (`uWindow0…3FlipY`, `uSpecular0…3FlipY`, `uOutdoorsMaskFlipY`, `uFloorIdFlipY`) — ten separate chances to get `feedback_y_flip_recurring_risk` wrong, each with its own JS push site.
-- **`specularBoost` reaches into `_Specular`** — four more samplers, so the window effect's output depends on another effect's mask with no declared edge. Precisely the `window.MapShine` free-for-all `graph/passes.js` exists to make impossible.
-- **Rain-on-glass (9 controls) is the wrong effect in the wrong place.** It warps the **window mask's UVs** with procedural droplets. The mask is a region marker, not the glass surface, so warping it wobbles *the aperture* — the hole moves. Water on glass is a wet-clear-coat question for `surface.response` or a particle question; it is not the aperture's business.
-- **Sparkle density is measured in units of the camera view.** `wlSparklePointField` derives its cell size from `viewUvMax − viewUvMin`, so zooming re-lays out the glint lattice — on a feature whose own author note says *"Glints do not drift on the map."* Same failure mode `Specular.md` §3.5 names for V2's sparkle: a fixed-frequency lattice that aliases instead of resolving.
-- **Dead instrumentation.** `windowLightDraw.outdoorsClip` (`:5499`) and `lightOverride.windowDraw.outdoorsClip` (`:5275`) are perf spans that begin and immediately end, bracketing **nothing** — the clip moved into compose and the timers stayed. `feedback_instruments_must_not_lie`.
-- **Diagnostics as a symptom.** A 506-line overexposure probe console snippet, a 77-line health-utils module, RT read-back luma scanners, `uDebugForceMagenta`. That is what an effect with undefined output units costs to debug.
-
-### 1.9 What is worth harvesting
-
-The code, almost none. The instincts, several, and every one of them gets *cheaper* under the reframe rather than being ported:
+### 2.7 What is worth harvesting
 
 | V2 instinct | Verdict |
 | --- | --- |
-| **`_Windows` / `_Structural` as aliases** | Already preserved — `scene/mask-catalog.js` accepts both as discovery aliases of `window`. V2-authored map folders keep working. Nothing to do. |
-| **Lightning should blast through windows** (4 controls) | **Correct, and free.** `Light-and-Shadow.md`: *"Lightning is a light — same caster geometry, different direction/time — free."* Once the window is an aperture, a lightning flash is "the sky got very bright for 100 ms" and the valve (§3) does the rest. 4 controls → 0. |
-| **Cloud dimming** (1 control) | **Correct, and free.** `effects/sky-access.js` already collapses the key light under `cloudCover01` and raises the dome's share. 1 control → 0. |
-| **The prismatic fringe** (8 controls) | The *instinct* — light dispersing through glass — is real, and `_Prism` is already a reserved suffix. But it belongs on the **transmitted beam's edge**, not as an RGB texture-offset on the mask. Returns as tier 8, at a fraction of the controls. |
-| **The `_Outdoors` gradient as wall direction** | **Right fact, wrong lifetime.** Bake it (§4.1) instead of guessing it 17 taps at a time. |
-| **A window's light takes the glass's colour** | Right, and V2 could only apply it as one global colour picker for the whole map. §2 makes it per-brushstroke for free. |
+| **`_Windows` / `_Structural` aliases** | Already preserved in `scene/mask-catalog.js`. V2 map folders keep working. Nothing to do. |
+| **Cloud shadows dim the window light** | **The goal, and correct.** Rebuilt as an analytic world-space field (§4) instead of a sprite sim feeding a screen-space RT. 4 reshaping controls → 0 (the field is shaped where it is defined). |
+| **Cloud dimming as a global scalar** (1 control) | Free — `sky-access.js` already collapses the key under `cloudCover01` and raises the dome's share. 1 control → 0. |
+| **Lightning blasts through windows** (4 controls) | **Free.** `Light-and-Shadow.md`: *"Lightning is a light — same caster geometry, different direction/time."* A flash is "the sky spiked for 100 ms", and §3 already reads the sky. 4 controls → 0. |
+| **The patch takes the light's colour** | Right. V2 could only apply one global colour picker for the whole map; §3 gives the sun's own hour-by-hour ramp, and the paint's own hue on top of it, for free. |
+| **A gamma on the patch's falloff** (`falloff`) | Keep exactly one, as a thumb on an authored quantity — §3.3 gives it a second job worth having. |
+| **The prismatic fringe** (8 controls) | The instinct (light dispersing through coloured glass) is real; the mechanism (RGB texture-offset on the mask) is not. Returns at the top of the ladder as an edge treatment on the patch, at one control. |
 
 ---
 
-## 2. THE REFRAME — the mask is GLASS
+## 3. THE DRIVE — one sun, two lobes
 
-`_Window` is declared `channels: 'color'` in `scene/mask-catalog.js`. V2 read `luma()` out of it and multiplied by a global colour. Read all three axes instead, the same move `Specular.md` §2 makes for `_Specular`:
+### 3.1 The cookie, read as light
 
-| Axis of the painted colour | Reads as | Because |
+```
+c      = mask.rgb (linear)
+v      = max(c.r, c.g, c.b)
+p      = smoothstep(EDGE0, EDGE1, v)              // presence, antialiased from the file
+level  = pow(v, contrast)                          // HOW MUCH light lands here — the painted falloff
+tint   = (v > 0) ? c / v : vec3(1)                 // WHAT COLOUR the glass made it
+```
+
+Three axes, three meanings, and unlike `_Specular` this needs no argument — the author is painting light directly, so hue is the light's colour, value is its strength, and the bottom of value is presence. Stained glass works because the artist paints the reds and blues where they fall.
+
+> ⚠️ `level` and `tint` stay **two numbers**. `feedback_one_byte_two_quantities` is the four-round bug class here: V2 collapsed both into one luma × one global picker, which is why a dim red patch and a bright grey one were indistinguishable. Presence keys off the very bottom of value (a threshold); level uses the whole range (a value). Same split `_Fluid` uses, same authoring caveat: **do not paint the falloff down to pure black**, or the faintest edge of every cookie reads as "no light".
+
+### 3.2 It MULTIPLIES. It never adds.
+
+```
+buf:scene.illum  +=  level × tint × skyDrive       // an illumination term, MAX/ADD'd with the lamps
+```
+
+and then `litColor = albedo × illum` as it already does for every other light. **No `litColor +=` anywhere in this effect.** §2.2 is the reason, and it has been paid for three times in this codebase.
+
+The visible consequence is the point: a sunlit flagstone shows *more of its own colour and texture*, not a white film over it. That is the difference between a room with sun in it and a room with a lens flare on it.
+
+### 3.3 Two lobes, and this is what makes the cloud read
+
+The single most important structural decision in the document. The drive is **not one number**:
+
+```
+KEY   = sky.key.colorRgb  × sky.key.strength  × cloudField(worldXY, t) × keyGain
+FILL  = sky.fill.colorRgb × sky.fill.strength                          × fillGain
+
+drive = KEY × pow(v, contrast)          // sharp: the painted falloff at full contrast
+      + FILL × pow(v, contrast × soft)  // soft:  the same fetch, flattened   (soft < 1)
+```
+
+`effects/sky-access.js` already hands both halves over, already split, already cloud-aware:
+
+| | `key` — the sun disc | `fill` — the sky dome |
 | --- | --- | --- |
-| **Hue** | **Transmission colour** | This is literally what stained glass does. Paint the rose window red and blue; red and blue light lands on the flagstones. `Light-MSA-Ideas.md` §C calls this *"one of the most atmospheric shots a VTT can produce."* |
-| **Saturation** | **How much the glass tints** | Bright and colourless = clear glass. Bright and saturated = stained. This is the one axis that is genuinely about the glass rather than about the hole. |
-| **Value** | **Openness / transmittance** | Near-white = an open arch or clean glass, full light through. Mid = leaded, dirty, horn, shuttered. Dark = a slit. |
-| **Value near zero** | **Presence** | The bottom of the range is "is anything painted here", antialiased from the file's own edge exactly as `water-render.js` does it. |
+| Colour | warm at the horizon (1900 K), neutral overhead | day blue → twilight blue → night blue |
+| Strength | `dayFactor01 × (1 − cloud01)` — **cloud is its first casualty** | `skyFactor01 × 0.42 × (1 + 0.6 × cloud01)` — **cloud makes it stronger** |
+| Character here | sharp-edged, follows the painted falloff exactly | flattened, broad, no hard edge |
 
-```
-v      = max(m.r, m.g, m.b)
-p      = smoothstep(EDGE0, EDGE1, v)        // presence, antialiased from the file
-open   = clamp(v, 0, 1) × opennessBias      // how much light gets through
-tint   = mix(vec3(1), m / v, tintStrength)  // hue+saturation as a transmission filter
-```
+**So when a cloud crosses, the patch does not fade uniformly — it changes character.** The warm sharp term dies; the cool soft term stays and slightly grows. A room goes from *sunbeam* to *grey daylight through a window*, which is exactly what happens in a real room, and it is the whole difference between an effect that reads as light and one that reads as an opacity slider.
 
-> ⚠️ **`open` and `tint` are two quantities and must stay in two numbers.** `feedback_one_byte_two_quantities` is the four-round bug class in this repo: `alpha × height` in one byte could not be tuned into correctness. V2 collapsed *how open* and *what colour* into one luma × one global picker, which is why a dim stained pane and a bright dirty one were indistinguishable. Presence keys off the very bottom of value (a threshold), openness off the whole range (a value) — the same split `_Fluid` uses, with the same authoring caveat: **do not paint the ramp down to pure black**, or the darkest glass reads as "no window".
+The softening costs **zero extra fetches**: it is a second `pow()` on the value already in a register. (Tier 7 upgrades the fill to a genuinely blurred cookie — see §6.)
 
-**It is backwards compatible by construction.** A V2-era mask — greyscale, mid-to-bright — decomposes to `tint ≈ white`, `open ≈ 0.6`: a plain, uncoloured aperture admitting most of the light. Which is what V2 drew. Nothing is reinterpreted against its old meaning; two thirds of the signal is being un-discarded.
+> ⚠️ **The fill is NOT gated on the key.** `feedback_environment_term_gates_wrong_thing` cost this project a shipped-invisible specular build for precisely this shape: an ambient floor gated on its directional partner's own trigger measured **exactly zero** in the commonest case, and the wrongness was invisible because the effect merely looked "subtle". The two lobes are always both computed and always both added. A build where the fill sits behind the key's test is that bug in a new costume, and it will present as *"the cloud makes the light vanish completely"* rather than as a crash.
 
-**And the mask doubles as the gobo.** Whatever the author painted — mullions, tracery, the leading between panes, the rose window's whole pattern — *is* the shape that gets projected onto the floor (§5, tier 3). One file is simultaneously where the aperture is, what colour its light is, and the picture it throws. That is the authoring story, and it needs no tutorial: **paint the window; get its light.**
+### 3.4 Night is not a special case
+
+At night `dayFactor01 → 0`, so KEY → 0. `fill` becomes `FILL_NIGHT_RGB`, a cold near-colourless blue. Left alone, the same cookie becomes **a faint cold pool of moonlight on the same flagstones** — free, one multiplier, and the reason the window never simply switches off. That is tier 3 and it is deliberately not zero by default (`feedback_default_on_new_features`).
 
 ---
 
-## 3. THE VALVE — which way does the light flow?
+## 4. THE CLOUD — the named goal
 
-This is the mechanism the 56 anchor sliders were standing in for.
+### 4.1 What it has to be
 
-A window is a two-way aperture. Both sides are lit, and the net flow is set by the ratio — which the engine already knows both halves of:
+*"A cloud travels across the sky and the window light inside dims and dies."*
 
-```
-outside = skyIrradiance(env.sun, env.weather)   // effects/sky-access.js — key + fill, cloud already folded in
-inside  = illumInside(aperture)                 // buf:scene.illum, reduced over the aperture's own footprint
-flow01  = outside / (outside + inside + EPS)    // 1 = light goes IN, 0 = light comes OUT
-```
+Three requirements fall out, and each one rules something out:
 
-| Condition | `flow01` | What you see |
-| --- | --- | --- |
-| Noon, clear | → 1 | Light flows **in**. A short bright sliver near the wall (a vertical aperture admits little at high sun). |
-| Late afternoon | → 1 | A **long stretched patch** reaching deep into the room. The golden-hour shot. |
-| Dusk, lamps just lit | ≈ 0.5 | **Both at once** — a fading patch inside and a strengthening glow outside. Which is exactly what dusk looks like, and it falls out rather than being keyframed. |
-| Night, lamps lit | → 0 | Light flows **out**. A pool on the ground outside, and the pane reads bright from the exterior. **The thing V2 multiplied by zero.** |
-| Night, dark room | → 0, both terms ~0 | Nothing. Correct: an unlit room behind a window is a dark hole. |
-| Lightning flash | → 1, hard | The sky spikes; the patch blazes for 100 ms. **Free** — no coupling controls. |
+1. **Spatial, not scalar.** `env.weather.cloudCover01` is one number for the whole map — a global dimmer, not a travelling shadow. **There is no spatial cloud field anywhere in `src/` today** (verified: every consumer — `shadow-access.js`, `sky-access.js`, `sun-occlusion.js` — reads the scalar). This is the one genuinely new thing the design needs.
+2. **World-space, not screen-space.** V2's was screen-space and needed a motion-compensation cache to stop it swimming under the camera (§2.4). A cloud shadow lies on the ground; it must be a function of world position.
+3. **Progressive.** "Travels across" means the leading edge dims first. Sampled per-pixel, not per-patch — a patch half in shadow is the shot.
 
-> ⚠️ **The inward and outward terms are TWO TERMS, and neither may gate the other.** `feedback_environment_term_gates_wrong_thing` cost this project a shipped-invisible specular build: an ambient floor gated on its directional partner's trigger measured *exactly zero* in the commonest case. `flow01` is a **mix weight between two additive contributions**, never an `if`. Both are always computed; both are always added; at `flow01 = 0.5` both are half-strength. A build where one of them is behind the other's test is the same bug in a new costume.
-
-### 3.1 The ordering problem, and its answer
-
-The valve reads `buf:scene.illum` — which is the buffer `light.accumulate` is in the middle of writing. Sampling a target the current pass is still writing is undefined on both backends (the constraint that made `surface.response` a real pass, `Specular.md` §status).
-
-The answer here is **ordering inside the pass**, not a new pass:
+### 4.2 The field
 
 ```
-light.accumulate:
-  1. ambient / darkness / regions       →  buf:scene.illum
-  2. point lights (MAX-blended)         →  buf:scene.illum
-  3. REDUCE illum over each aperture    →  the per-window `inside` scalar   ← reads a finished buffer
-  4. window contributions (pane, patch, pool) → buf:scene.illum
-  5. UI window shadow (multiply)
+drift    = windDirXY × (CLOUD_BASE_SPEED + wind.speed01 × CLOUD_WIND_GAIN) × t
+n        = mx_fractal_noise_float(vec3((worldXY + drift) / cloudScalePx, 0), octaves)   // ≈ −1..1
+coverage = smoothstep(edge0(cover01), edge1(cover01), n)
+shadow   = 1 − coverage × depth(cover01)
 ```
 
-Step 3 reads what steps 1–2 finished. Step 4 writes. No cycle, no extra pass, no new declared resource. The window's contribution then rides the rest of `light.accumulate`'s existing machinery — the darkness ladder, coloration, `post.bloom`, and one grade — for free.
+`mx_fractal_noise_float` is **present** (`three.webgpu.js:53739`) and backend-identical, so there is no hand-rolled hash and no WebGL2 twin (Law 8). No render target, no sprites, no cache, no bandwidth. **C2 at worst, and arguably C1.**
 
-**And the reduction is per-aperture, not per-pixel.** "How bright is this room" is one number per window, so a stray torch under one pane cannot make its neighbour flicker. §4.2 is how that reduction becomes cheap.
+Four properties are load-bearing:
+
+- **It is a mathematical no-op at clear sky.** At `cover01 = 0` the threshold sits above the noise's range, `coverage = 0`, and the field returns exactly `1.0`. A clear-sky frame is bit-identical to one with the feature absent — the same discipline `sky-access.js`'s `realism01 = 0` and the darkness-realism lever both take, and the reason this can default on.
+- **Contrast peaks at broken cloud, not at overcast.** `depth(c) = CLOUD_SHADOW_DEPTH × 4c(1 − c)` — maximum at `c = 0.5`, zero at both ends. That is physically true (overcast has no cloud *shadows*; it is all shadow, which is why the sky's own `fill` gain handles it) and it is the behaviour that makes a partly-cloudy afternoon the most alive weather on the map. Nobody tunes this; it is a parabola.
+- **It drifts on the wind the engine already has.** `env.wind.directionDeg` / `speed01`, via the same handle `world/wind-field.js` serves — so clouds and wind-blown foliage move together, and there is one wind. `CLOUD_BASE_SPEED > 0` keeps clouds drifting on a still day (they are at a different altitude); one optional angular offset covers the different-altitude-different-direction case.
+- **Two scales.** A large slow octave (cloud masses) plus a smaller faster one (wisps and edges). One `octaves` parameter on the same call. That is the difference between "the light dims" and "a cloud went over".
+
+### 4.3 What it looks like, in order
+
+A cloud arrives:
+
+1. The **key** dies progressively across the patch — leading edge first, over a second or two.
+2. As it dies, the patch's *sharpness* goes with it, because only the flattened fill term remains (§3.3).
+3. The colour cools: the warm 1900–5500 K key is replaced by the blue dome.
+4. The patch **does not vanish.** A soft cool presence remains, and slightly strengthens, because `fill.strength` rises with cover.
+5. The cloud passes; all four reverse.
+
+And free, from the same field, the moment it exists: **the building shadows outside soften and fade in step**, because `shadow-access.js` is the second consumer (§4.4). The whole map breathes together.
+
+### 4.4 ⚠️ THE FIELD IS NOT THIS EFFECT'S PROPERTY
+
+A cloud shadow is a fact about the world, and at least five things want it:
+
+| Consumer | What it gets |
+| --- | --- |
+| **windows** (first) | the patch dims and dies |
+| `effects/shadow-access.js` | its scalar `cloudStrength`/`cloudSoften` become **spatial** — building shadows fade under the same cloud |
+| `effects/lighting/environmental-light.js` | outdoor ambient dips as the cloud passes |
+| `effects/water/water-light.js` | the sun glint on water dies under the same cloud |
+| `effects/specular` (tier 5 `context`) | the metal's sun lobe, likewise |
+
+If windows owns it, MSA acquires a second weather system the day the second consumer arrives — the eight-suns failure (`env/one-sun`) re-run in a new domain, and this codebase has already paid for that twice (`sky-access.js`'s `dirX`, the two wind fields).
+
+So: **`world/cloud-field.js`** — pure, TSL-analytic, Node-testable core, sibling to `world/wind-field.js` and `world/sun.js`, surfaced through the existing handle pattern. Windows is its **forcing function and first consumer**, not its owner. That is a prerequisite of tier 4, and it should be built as one — small, shared, and correct once.
 
 ---
 
-## 4. WHAT PING-PONG AND COMPUTE BUY — the part V2 could not have written
+## 5. MOTION — the patch slides with the day
 
-This is the section the question was really about, so it is concrete and each row is verified against the vendored build or against code already in production here.
+The cookie is painted at *some* hour. The sun does not stay there.
 
-### 4.1 Ping-pong: the aperture pack (jump flood)
+### 5.1 Drift is one global offset, and that is not an approximation
 
-`effects/water/water-body-subsystem.js` already bakes a jump-flood pack from a mask on **mask-version change** — log₂(dim) ping-pong fullscreen passes, ten of them over a ≤512 px grid, not on the frame budget at all. Run the identical machinery on `_Window`:
-
-- **R** — signed distance to the aperture boundary, world px
-- **G** — aperture **id** (the label from §4.2), so a pixel knows *which* window it belongs to
-- **BA** — the boundary **normal**: the direction light travels through the aperture
-
-Water stores the *tangent* (along the bank); a window wants the *normal* (through the wall). Same JFA offset, unrotated — the flood already stores the vector to the nearest boundary point, and *that offset, normalised, IS the gradient*. Exact, one fetch, **no finite differences** — so none of `dFdx`'s divergent-flow undefined behaviour and none of the quantisation noise a half-float 4-tap derivative carries.
-
-This one bake deletes `wlMaskEdge` (5 taps/pixel/frame), `wlRainFlowDir` (4 taps/pixel/frame), and `rainGlassSlopeSamplePx` (the slider for tuning a guess at a static fact).
-
-> ⚠️ `feedback_sdf_does_not_draw_the_edge` — four rounds lost on water. **The silhouette comes from the mask file at full resolution** (`vt/mask-image.js`, `channels: 'rgb'` + `contentBounds`, the fork `_Specular` already added); the SDF supplies **distance only**. A coarse point-sampled field has no sub-texel information and can never draw a clean window frame.
-
-### 4.2 Compute: apertures are a LIST, not a texture — and this is the big one
-
-V2 only ever knew *"is there window paint at this pixel."* It never knew *"there are fourteen windows on this map; #7 is at (2100, 880), is 120 px wide, faces east-north-east, is stained deep blue, and sits on floor 1."*
-
-That is not a shader limitation, it is a **data-structure** limitation. A fragment shader can only read textures; it cannot build a list. So every geometric question had to be answered by re-deriving geometry from the mask, per pixel, per frame — which is literally what §1.4 measured.
-
-Connected-component labelling turns the paint into **records**:
+All patches move **the same direction and the same distance** — because there is one sun, at one azimuth, and every wall window on the map sits at roughly one sill height. So:
 
 ```
-Aperture { id, floorId, itemId, centroidWorld, widthPx, axis, outwardNormal, meanTintRgb, meanOpenness, aabb }
+dir     = −marchDirectionToSun(env.sun.azimuthDeg)      // the ONE azimuth→XY convention here
+throw   = sillHeightPx / tan(elevationDeg)              // verbatim the sun shadow's own formula
+offset  = (throw(now) − throw(referenceHour)) × dir  ×  driftAmount
+uv      = maskUv − offset / maskWorldSize
 ```
 
-Two viable routes, and **neither requires WebGPU** (Law 5: tier follows measured performance, never the backend):
+Six ALU ops on the UV before an existing fetch. **C1.** One authored number — *what hour was this painted for* — as a scene-level parameter, with `driftAmount = 0` available for authors who want the patch to stay exactly where they put it.
 
-- **CPU at decode time** — exactly how `effects/fluid/fluid-net.js` extracts its tube net from `_Fluid` (connected components, arc length, radius profiles). Precedent in this repo, works everywhere, runs on mask change.
-- **GPU label-propagation flood** — a second ping-pong pass sharing the JFA's own machinery, then a small parallel reduction per label for the centroid/axis/mean colour.
+> `marchDirectionToSun` and `heightPx / tan(elevation)` are **delegated, never re-derived** — the second is verbatim `projectShadowOffset` from the sun shadow. The dividend is that a building's shadow outside and the sunbeam inside its window travel the same way *by construction*. `feedback_unconsumed_api_rots_silently` is the reason to then **assert that relationship in a test**: `sky-access.js`'s key direction was 90°-and-mirrored wrong for its entire life under a comment claiming exactly this agreement, and nothing caught it because nothing consumed it.
 
-**What the list buys is the entire cost model of the effect.** Once a window is a record, it is *a spotlight with a rectangular gobo* — and the effect becomes **one small instanced quad per aperture** instead of a 4096² fullscreen pass. That is `Effects.md` Law 6 (cost scales with covered pixels, not screen pixels) satisfied by construction, and it is the difference between 16.7 M pixel invocations and a few tens of thousands.
+### 5.2 Stretch needs a pivot, and that is the only thing left that needs a list
 
-It is also what makes §3's per-aperture reduction cheap: with a list, "reduce illum over window #7's footprint" is a bounded loop over a known AABB. Without one, it is a mip pyramid per window.
+A low sun also **elongates** the patch by `tan(refEl)/tan(el)` along `dir`. Scaling needs an origin, and scaling every patch about the map origin would fling distant ones off the map. Each patch must pivot on **its own centroid** — which means knowing that patches are *things*.
 
-### 4.3 Scatter vs gather — the mechanical reason V2 was a decal
+Connected-component labelling on the mask gives it: a small table of `{ id, floorId, centroidWorld, aabb }`, extracted **on the CPU at decode time**, exactly as `effects/fluid/fluid-net.js` already extracts its tube net from `_Fluid`. Precedent in the repo, works on both backends, runs on mask change. The per-pixel lookup is the label written into the coarse derived grid (`scene/mask-derive.js`, ≤512² per floor — `window` needs `rasterize: true`, one line in the catalog).
 
-Fragment shading is a **gather**: each pixel asks *"what is at me?"* Compute can **scatter**: each source says *"here is where my light goes."*
-
-The natural formulation of "light leaves this aperture and lands over there" is a scatter. V2 had only gather, so every pixel could ask *"is there window paint here?"* and never *"is there a window somewhere that shines on me?"* — and answering the second question by gathering means every pixel searching for every window, which is the O(pixels × windows) shape nobody can afford.
-
-**This is the mechanical reason V2's window light could only ever be a sticker.** Not an oversight; the available primitive.
-
-(The projected-quad formulation of §5 tier 2 is a *third* answer, and the cheapest: let the rasteriser do the scatter. That is what a shadow map is, and what a light cookie is. Compute is not required for it — but it took having the list to see it.)
-
-### 4.4 The verified capability table
-
-| Capability | Status | What it is worth here |
-| --- | --- | --- |
-| Fragment ping-pong JFA | **In production** — `water-body-subsystem.js` | The aperture pack (§4.1). Both backends. |
-| CPU component extraction at decode | **In production** — `fluid-net.js` | The aperture table (§4.2). Both backends. |
-| `renderer.compute()` | **Proven on BOTH backends** — `diag/compute-spike.js`, then `effects/particles/particle-runtime.js` in production | The GPU route for §4.2's labelling + reduction, and the motes in the beam (tier 9). |
-| `texture(t, uv).gather(c)` | **Present** — `three.webgpu.js:63424` (`tsl_textureGather` WebGL2 emulation; native `textureGather` on WebGPU) | 2×2 in one instruction for the mask edge and the illum reduction. |
-| MRT via `material.mrtNode` | **In production** — `vt/scene-attr.js` | The pane's composite without clobbering `buf:scene.attr`. |
-| `ClockwiseSweepPolygon` for an arbitrary position | **In production** — `src/foundry/scene-wall-clip.js` (built for candles, `keyhole-candle-wall-clip-fix`) | **The beam clipped by interior walls, for free** (tier 6). An aperture becomes a light source and inherits exactly the wall handling every `AmbientLight` gets. |
-| `mx_*` noise | **Present** | Backend-identical dust/haze structure in the shaft, no hand-rolled hash, no WebGL2 twin (Law 8). |
-| Storage buffers | Available, **budget-constrained** | ⚠️ `keyhole-storage-buffer-limit-fix`: WebGPU caps 8 per stage and this project has already hit it. The aperture table is **one** small buffer — and since N is tens, it can be a small `DataTexture` instead if that one is one too many. Design for either. |
-| Temporal ping-pong accumulation | Available | Integrate the shaft's moving haze across frames instead of N taps per frame (tier 7). |
-
----
-
-## 5. THE GEOMETRY — where the light actually lands
-
-The heart of the effect, and it is arithmetic on numbers `src/` already computes.
-
-### 5.1 The projection
-
-A wall window is a hole between sill height `h₀` and lintel height `h₁`. A ray entering at height `y` travels horizontally `y / tan(el)` before meeting the floor. So for sun elevation `el` and azimuth `az`:
-
-```
-dir     = −marchDirectionToSun(az)          // the ONE azimuth→XY convention in this codebase
-offset  = h₀ / tan(el)  ·  dir              // where the patch STARTS
-length  = (h₁ − h₀) / tan(el)               // how far along `dir` it reaches
-width   = the aperture's own width
-penumbra= marchPenumbraPx({ distancePx: offset })
-```
-
-**Every term on the right already exists and is already tested.** `marchDirectionToSun` is `effects/lighting/sun-occlusion.js`'s single azimuth convention; `heightPx / tan(elevation)` is verbatim the sun shadow's own `projectShadowOffset`; `marchPenumbraPx` is the shadow's own contact-hardening curve. Nothing is re-derived.
-
-That matters beyond tidiness:
-
-> **A wall's shadow and the light through that wall's window travel in the same direction, by the same formula.** They cannot disagree, because they are one derivation with two consumers. `feedback_unconsumed_api_rots_silently` is the memory here — `sky-access.js`'s key direction was 90°-and-mirrored wrong for its entire life under a comment claiming it agreed with the shadows, because nothing read it. **Delegate, then assert the relationship in a test.**
-
-### 5.2 What that produces, hour by hour
-
-| Sun elevation | `tan(el)` | Patch length (window height 110 cm ≈ 1.1 grid) | Displacement (sill 90 cm) | Reads as |
-| --- | --- | --- | --- | --- |
-| 75° (noon) | 3.7 | **0.3 squares** | 0.25 squares | A short bright sliver hugging the wall |
-| 45° | 1.0 | 1.1 squares | 0.9 squares | A clean parallelogram on the floor |
-| 15° (evening) | 0.27 | **4.1 squares** | 3.3 squares | A long dramatic streak reaching across the hall |
-| → 90° (overhead) | → ∞ | → 0 | → 0 | Nothing. **Correct** — a vertical window admits almost nothing at zenith |
-
-The last row is the emergent behaviour that proves the model: it is precisely the case V2's hand-keyframed timeline made the **brightest** (§1.3). Nobody tuned this table; it is `1/tan`.
-
-### 5.3 Skylights fall out of the LOCKED any-item rule
-
-`keyhole-mask-any-item-decision` (LOCKED) requires every mask to attach to **any** item — tile, level background, or level foreground — symmetrically. For windows that is not a chore; it is a feature:
-
-- `_Window` on the **level background** = a hole in a *vertical* wall. Longest beam at low sun, nothing at noon.
-- `_Window` on an **overhead tile or level foreground** = a hole in a *horizontal* roof — **a skylight.** Which behaves the *opposite* way: brightest and most nearly overhead at noon, throwing a long displaced patch at low sun, with the throw set by ceiling height rather than sill height.
-
-Same projection, one differing input (the aperture's plane). A cathedral with clerestory windows *and* an oculus gets both, correctly, from one mechanism — and the orientation is read off **which item the mask was found beside**, not from a slider.
-
-> This is the one place this effect must not repeat the shared narrowing `Specular.md` §9 logged for itself, water, and fluid (all three quietly dropped V2's per-tile mask case). A skylight is a tile-attached mask by nature, and it is one of the two best-looking things in the whole design. `scene/mask-authority.js#layersForItem` currently refuses anything but `'levelBackground'`; that is the work, and `mask-discovery.js`'s matchers are already item-agnostic, so it is wiring rather than redesign.
-
-### 5.4 ⚠️ OPEN DECISION — which side of the wall is outside?
-
-The mask says *where* the window is. It does not say *which side of it is outdoors*, and the beam's direction depends on knowing. Three candidates:
-
-| Option | How | Fails when |
-| --- | --- | --- |
-| **(a)** Sample `_Outdoors`' gradient at the aperture | Zero new authoring; works for any exterior wall | An **interior** window (a window onto a courtyard, an internal light well, a window between two rooms) has outdoors on neither side, or both |
-| **(b)** The aperture pack's own baked normal (§4.1) | Same information as (a), measured once instead of guessed per-pixel, and available per-aperture in the table | Same blind spot as (a), but cheaper and stabler |
-| **(c)** Let the author paint it — a value ramp across the wall's thickness, bright side = outside | Unambiguous, and precedent exists (`_Fluid`'s R channel is read *both* as presence by threshold and as flow direction by value) | Costs an authoring rule, and conflicts with §2's use of value for openness |
-
-**Recommendation: (b) as the default, (c) available as an override on the apertures that need it** — but this is a genuine fork the author should settle, because (c) changes what §2's value axis means and therefore what the painting instruction says. Flagged rather than assumed.
+This is a **tier 6 C4 rung**, not the foundation. The v1 draft of this document built an entire jump-flood aperture pack for geometry the author paints; the true semantic reduces that to one centroid per patch, and only for the stretch.
 
 ---
 
 ## 6. THE LADDER
 
-Ordered by **cost class** per `Effects.md` Law 3 — not by prettiness. Monotonic upward from tier 0's admission price.
+Ordered by **cost class** per `Effects.md` Law 3 — not by prettiness. Tier 0's C4 is the admission price; monotonicity governs 1..N upward from there, the same shape `water.js` and `specular.js` established.
 
 | Tier | Name | Class | Adds |
 | --- | --- | --- | --- |
-| **0** | `aperture` | C4 | The mask read as glass (§2) — the pane itself, lit by whichever side is brighter, on the right floor, cropped to the aperture AABB. Carries the **correctness gate** (floor + item, §7.1); never gated off. **The window reads as glass instead of as a lamp.** |
-| **1** | `valve` | C3 | The two-way flow ratio from the sky handle vs. the per-aperture illum reduction (§3). Both terms additive, neither gating the other. **Night windows glow outward; day windows brighten inward; dusk does both. Fifty-six sliders deleted.** |
-| **2** | `patch` | C8 | One small instanced quad per aperture, projected by §5.1's offset/length/shear. **THE HEADLINE: a shaped patch of sunlight lies on the interior floor and slides with the clock.** C8 because it is geometry — but it is a handful of bounded quads, which is exactly how it replaces a 4096² pass. |
-| **3** | `gobo` | C4 | The patch samples the mask **as its own pattern**. Mullions, tracery, leading, a rose window in full colour, thrown on the flagstones. `Light-MSA-Ideas.md` §C's 🟢 recommendation, and it costs one texture read on geometry already drawn. |
-| **4** | `pool` | C3 | The outward half made real: a soft ground pool outside a lit window at night, penumbra from the same distance term. **A town at night.** The thing `LightingEffectV2.js:3351` multiplied by zero. |
-| **5** | `pack` | C4 | The JFA distance+normal bake (§4.1). The beam exits perpendicular to the **actual** wall (diagonal and curved walls stop guessing), the sill depth reads from the mask's own thickness, and the pane gains an inner-reveal falloff. One baked read replaces nine per-pixel taps. |
-| **6** | `occlude` | C3 | The beam clipped by walls. **Interior partitions come free from `foundry/scene-wall-clip.js`** — the aperture is a light source, so it gets `ClockwiseSweepPolygon` exactly as every `AmbientLight` does. Exterior blocking (a neighbouring building shadowing the window itself) comes from the caster-height field `sun-occlusion.js` already marches. |
-| **7** | `shaft` | C6 | The visible fan of light in the air between aperture and patch — the god ray. Half-res, additive, temporally accumulated (§4.4). Honest 2D fake per `Light-MSA-Ideas.md` §D. Coverage- and zoom-gated (Law 7). |
-| **8** | `dispersion` | C5 | Spectral spread on the transmitted beam's **edge** — V2's prismatic instinct, applied to the light instead of to the mask. Rides tier 2's geometry. |
-| **9** | `motes` | C2+C7 | Dust in the beam, through the particle engine that already exists, brightest where the shaft passes. `Light-MSA-Ideas.md` §D: *"Compute-particles (WebGPU) make this cheap."* Ticks whether seen or not → coverage- and zoom-gated. |
+| **0** ✅ | `cookie` | C4 | The painted cookie read as light (§3.1): level × tint, hue-preserving highlight shoulder (§11), **ADDED onto** `buf:scene.illum`, floor-gated by `buf:scene.attr.r`, cropped to the mask's own AABB. No `_Outdoors` re-test (§2.5). Never gated off; carries the correctness gate. **BUILT (unverified) 2026-07-27** — `src/effects/window/`, Node-tested (120 assertions), seen once live, washout found and corrected (§11), not yet re-confirmed. |
+| **1** | `sky-driven` | C1 | The key/fill split from `sky-access.js` (§3.3), each with its own gamma on the same fetch. **Dawn is orange, noon is white, overcast is flat grey — and fifty-six sliders are gone.** Pure ALU on tier 0's fetch. |
+| **2** | `drift` | C1 | The patch slides along the sun's own throw as the hour changes (§5.1). Six ALU ops. **The light moves across the room as the day passes.** |
+| **3** | `moon` | C1 | The same cookie at night on the night dome's colour (§3.4). One multiplier. **A cold faint pool instead of an off switch.** |
+| **4** | `cloud` | **C2** | `world/cloud-field.js` (§4): a two-octave analytic field drifting on the wind, sampled at world position, killing the key and leaving the fill. **THE NAMED GOAL — a cloud crosses, the leading edge dims first, the warmth and the sharpness go, a cool presence lingers, and it comes back.** One noise call. No render target. |
+| **5** | `occlude` | C3 | The patch cut by what blocks the sun *outside*: a neighbouring building's shadow lying across the window kills its beam. Reads the caster-height field `effects/lighting/sun-occlusion.js` already marches — the same field, one more consumer. |
+| **6** | `stretch` | C4 | Per-patch elongation at low sun, pivoting on each cookie's own centroid (§5.2). The connected-component table + the coarse derived grid. **Evening light stretches long across the floor.** |
+| **7** | `bounce` | C4 | The fill lobe upgraded from a gamma-flattened copy to the **genuinely blurred** cookie (the ≤512² derived grid *is* that blur, already rasterized), plus a soft warm indirect wash into the room around each patch. **Rooms with sun in them feel sunlit, not spotlit.** |
+| **8** | `shaft` | C6 | The visible fan of light in the air above the patch. Half-res, temporally accumulated via ping-pong, additive. An honest 2D fake (`Light-MSA-Ideas.md` §D). Coverage- and zoom-gated (Law 7). |
+| **9** | `motes` | C2+C7 | Dust in the beam through the particle engine that already exists, brightest where the shaft passes. Ticks whether seen or not → gated hard. |
 
-**Read it as a story.** Tiers 0–2 are one mask read, one buffer reduction, and a few small quads — and they buy the material, the day/night direction, and *the sunbeam on the floor*. A weak machine gets the effect's entire identity. Everything from 5 up is the expensive half, and it is the half noticed when present rather than when absent. That asymmetry is Law 3 working.
+**Read it as a story.** Tiers 0–4 are **one mask read, one analytic noise, and arithmetic** — no new buffers, no new bandwidth, nothing above C2 — and they buy the whole identity of the effect including the named goal. They ship as one increment. A weak machine gets the sunbeam, the hour, the drift, the moonlight and the cloud. Everything from 5 up is the expensive half, and it is the half noticed when present rather than when absent. That asymmetry is Law 3 working, not luck.
 
-**Thirteen controls replace ninety-eight.** The 56 anchor sliders become one sun. The 9 rain-on-glass controls leave the effect. The 8 prismatic controls become one dispersion knob at tier 8. The 4 lightning and 1 cloud controls become zero, because the sky handle already answers both.
+**Fourteen controls replace ninety-eight.** The 56 anchors become one sun. The 9 rain-on-glass go to another effect. The 4 lightning and 1 cloud-dim controls become zero. The 4 cloud-shadow reshaping controls become zero, because the field is shaped where it is defined rather than corrected after the fact.
 
 ---
 
@@ -351,91 +292,177 @@ Ordered by **cost class** per `Effects.md` Law 3 — not by prettiness. Monotoni
 
 ### 7.1 The correctness gate — and it does not ride the ladder
 
-Per `Effects.md`, correctness never rides the ladder. Two gates live in tier 0 and are never compiled out:
+Two things live in tier 0 and are never compiled out:
 
-- **Floor + coverage.** `buf:scene.attr.r` is the floor index of whatever art is topmost at a pixel; `attr.r == myFloor` is the "is this window actually visible" test, and `attr.a` (solidity) handles partial transparency. Same gate `surface.response` uses, and subject to the same honest caveat: `buf:scene.attr` is written by floor **art** only, so an overlay leaves the attributes beneath it untouched.
-- **The patch must land indoors.** A beam projected from an aperture must be clipped to `_Outdoors == black` on the receiving side, or a window in an exterior wall throws its patch onto the street. This is the *correct* use of the outdoors mask here — clipping the **destination**, not the source, which is where V2 put it and why the exterior half died.
+- **Floor.** `attr.r == myFloor` is the "is this cookie actually visible" test. Same gate `surface.response` uses, and the SAME caveat travels with it: `attr`'s alpha lane is confirmed broken (specular's own measured note), so tier 0 reads R only and does not attempt a partial-transparency test off alpha — and `buf:scene.attr` is written by floor **art** only, so an overlay leaves the attributes beneath it untouched.
+- **Nothing else.** In particular **no `_Outdoors` re-test** (§2.5) — the paint already asserts it, and the derived mask can only subtract.
 
-### 7.2 Module layout — the established split
+### 7.2 Ordering inside `light.accumulate`
 
-Mirrors `water` / `specular` / `fluid`: a pure, Node-validatable declaration; THREE **injected**, never imported, in the render siblings.
+No new pass; `passes.js` already absorbs `WindowLightEffectV2` here. The window terms are a sub-render sibling to region-darkness and the UI shadow, the shape sun-occlusion already took:
+
+```
+light.accumulate:
+  1. ambient / darkness / regions      → buf:scene.illum
+  2. point lights (MAX-blended)        → buf:scene.illum
+  3. WINDOW COOKIES (add)              → buf:scene.illum     ← new
+  4. UI window shadow (multiply)
+  … then scene.color ×= illum, as today
+```
+
+Adding rather than MAX-ing is deliberate: a torch standing *in* a sunbeam should be brighter than either alone. Nothing here reads `buf:scene.illum`, so there is no read-while-writing hazard and no ordering subtlety — a direct consequence of §3 replacing the v1 draft's two-way valve, which did have one.
+
+### 7.3 Module layout — the established split
 
 ```
 src/effects/window/
-  window.js                 WINDOW_PARAMS + the WINDOW manifest. Pure data, no THREE.
-  window-glass.js           mask RGB → (transmission, openness, presence). Pure TSL fn + CPU twin.
-  window-valve.js           sky irradiance vs. interior illum → flow01, and the two additive terms. Pure + CPU twin.
-  window-beam.js            aperture + sun → the patch quad transform. Pure + CPU twin. DELEGATES to
-                            marchDirectionToSun / the shadow throw formula / marchPenumbraPx.
-  window-apertures.js       connected components → the aperture table. Pure, CPU, at decode (fluid-net.js precedent).
-  window-render.js          the TSL materials, the instanced patch quads, the MRT overrides. THREE injected.
-  window-pack-subsystem.js  the JFA distance+normal bake (tier 5). Mirrors water-body-subsystem.js.
-  window-registration.js    the panel; FOH/ROH split.
+  window.js                    WINDOW_PARAMS + the WINDOW manifest + debug channels. Pure data, no THREE. ✅ BUILT
+  window-cookie.js             mask RGB → (level, tint, presence). Pure fn + CPU twin, Node-tested. ✅ BUILT
+  window-render.js             the TSL material, the bounded quad, the ADD-onto-illum blend, the
+                                cloud-factor SEAM (constant-1 default). THREE injected. ✅ BUILT (tier 0 only)
+  window-surface-subsystem.js  the mesh, its own scene, mask load/crop/sync/status/dispose — mirrors
+                                specular-surface-subsystem.js. ✅ BUILT
+  window-seams.js              getWindowMaskRect / getWindowMaskUrl onto the mask authority. ✅ BUILT
+  window-registration.js       the cascade layer, the live override, the console setter, the FOH card. ✅ BUILT
+  window-drive.js              sky handle + cloud field → the key/fill pair (tier 1). Pure + CPU twin.
+                                ← THE MEASURED MODULE. NOT BUILT.
+  window-motion.js             sun + reference hour → the UV offset (tier 2) and tier 6's stretch. Pure +
+                                CPU twin. DELEGATES to marchDirectionToSun / the shadow throw formula.
+                                NOT BUILT.
+  window-patches.js            connected components → the patch table (tier 6). Pure, CPU, at decode.
+                                NOT BUILT.
+
+src/world/
+  cloud-field.js                THE SHARED PREREQUISITE (§4.4), for tier 4. Pure, TSL-analytic + CPU twin.
+                                 NOT owned by windows. NOT BUILT — tier 0 ships the SEAM
+                                 (window-render.js#cloudFactorNode) that plugs it in the day it exists.
 ```
 
-### 7.3 What changes outside the folder
+### 7.4 What changes outside the folder
 
-1. **`scene/mask-catalog.js`** — `window` gains `rasterize: true` (one line). The aperture table needs the per-floor grid and, more importantly, its **world rect**, which is what maps `positionWorld` to a mask UV. Exactly the case the flag exists to declare, and the third kind to use it after `water` and `fluid`.
-2. **`scene/mask-authority.js`** — `layersForItem` must stop refusing anything but `'levelBackground'` (§5.3). This is the LOCKED any-item work, and windows are the effect with the strongest reason to want it: **skylights are tile-attached by nature.**
-3. **`graph/passes.js`** — `light.accumulate`'s note gains the window terms; its `reads` gains nothing yet (the sky arrives as a handle, as it does for specular). No new pass entry. `absorbs` already lists `WindowLightEffectV2`.
-4. **Nothing in `LightingEffectV2`'s shape survives.** No emit RT, no shadow-lift RT, no `_floorEmitCache`, no blit, no `WINDOW_ILLUM_SCALE`, no two-threshold disagreement, no `outdoorsClip` timer, no per-effect tone shoulder.
+1. **`scene/mask-catalog.js`** — `window` gains `rasterize: true`, one line. **DONE.** Tier 0 needs the per-floor grid for its **world rect** — what maps `positionWorld` to a mask UV, the same reason `specular` carries the flag; tier 6 will additionally want it for the patch labels. Fourth kind to use the flag after `water`, `fluid` and `specular`.
+2. **`world/cloud-field.js`** — new, shared, and the only genuinely new subsystem tier 4 needs. Not built yet; tier 0 ships the seam it plugs into instead (§4.4, `window-render.js`'s own header). `shadow-access.js` should become its second consumer immediately once it lands (its scalar `cloudStrength` gains a spatial query), which is how it proves it is not a window feature.
+3. **`scene/mask-authority.js`** — `layersForItem` should stop refusing anything but `'levelBackground'` (`keyhole-mask-any-item-decision`, LOCKED), for the future tile-attached case (§7.4 item 3 in the original draft — a placed building tile carrying its own light cookies). Not needed by tier 0, which only reads level-background floors, same as specular's own current scope.
+4. **`graph/passes.js`** — `light.accumulate`'s note should gain the window terms (prose only — the pass was already `live` and already absorbs `WindowLightEffectV2`; no new pass entry, no new declared resource).
+5. **`src/vt/vt-pan-viewer.js` / `src/boot.js` / `src/diag/effect-status-reports.js`** — wired **DONE**: the two mask seams, the render-state seam, the subsystem construction, the `runLightAccumulatePass` render call (ADD, right after the point-light MAX-blend), dispose, the diagnostics getter, the debug panel, the status report. Same touch points specular's own tier 0 landing used.
+6. **Nothing of V2's shape survives.** No emit RT, no shadow-lift RT, no `_floorEmitCache`, no blit, no `WINDOW_ILLUM_SCALE`, no two-threshold disagreement, no `outdoorsClip` timers, no per-effect tone shoulder, no per-effect grade.
 
-### 7.4 The params, in the author's language
+### 7.5 The params, in the author's language
 
-Thirteen against ninety-eight. Each arrives **with its consumer** — `params/no-dead-controls` fails the build on a key nothing reads, and it has already fired on exactly that during the specular build. FOH/ROH split per `feedback_foh_roh_must_differ`: FOH is critical-and-plain (would they touch it mid-session?), ROH is technical.
+**Two shipped for tier 0**, against V2's ninety-eight. Each arrives **with its consumer** — `params/no-dead-controls` fails the build on a key nothing reads, and it fired on exactly that during the specular build; the rest of this table is the FULL fourteen-control target once every rung lands, not what exists today. FOH/ROH per `feedback_foh_roh_must_differ` (would they touch it mid-session, or only while tuning?).
 
-| Control | Category | FOH? | Tier | What it is |
-| --- | --- | --- | --- | --- |
-| Window light | Look | **✓** | 0 | Master strength of everything this effect draws. |
-| Sunbeams | Daylight | **✓** | 2 | Strength of the patch of daylight on the floor. The headline knob. |
-| Lit windows | Night | **✓** | 1 | Strength of the outward glow when the room is brighter than the sky. |
-| Glass colour | Look | **✓** | 0 | How strongly the paint's own colour tints the light passing through. 0 = every window throws white light regardless of what you painted. |
-| Sill height | Daylight | | 2 | How high the window sits above the floor, in grid squares. **Sets how far the beam reaches into the room** — the one geometric knob, same shape as specular's `lampHeight`. |
-| Ceiling height | Daylight | | 2 | The same number for **skylights** (§5.3) — how far below the roof the floor is. |
-| Beam softness | Daylight | | 2 | How fast the patch's edge blurs with distance. Sharp at the wall, soft far away, always. |
-| Openness | Look | | 0 | Global thumb on how much light the painted glass lets through. |
-| Beam reach limit | Daylight | | 2 | Clamps the low-sun stretch before a 5° sun throws a patch across the whole map. |
-| Shaft strength | Atmosphere | | 7 | The visible fan of light in the air. |
-| Shaft reach | Atmosphere | | 7 | How far the fan carries before it fades. |
-| Dispersion | Atmosphere | | 8 | Spectral fringing at the beam's edge. |
-| Motes | Atmosphere | | 9 | Density of dust floating in the beam. |
+| Control | Category | FOH? | Status | Tier | What it is |
+| --- | --- | --- | --- | --- | --- |
+| Window light | Look | **✓** | ✅ | 0 | Master strength of every cookie on the map. |
+| Patch contrast | Look | **✓** | ✅ | 0 | Gamma on the painted falloff — how hard-edged the cookies read. |
+| Sunlight | Daylight | **✓** | | 1 | Strength of the sharp warm patch — the direct sun coming through. |
+| Skylight | Daylight | **✓** | | 1 | Strength of the soft cool patch that **survives cloud**. Deliberately front-of-house and deliberately not zero: this is the term whose absence is invisible until you know to look for it (`Specular.md` §10.8 cost a whole build to that exact lesson). |
+| Cloud shadows | Weather | **✓** | | 4 | How deeply a passing cloud kills the sunlight. 0 = clear skies always. |
+| Cloud size | Weather | | | 4 | How big the cloud masses are, in grid squares. |
+| Cloud speed | Weather | | | 4 | How fast they cross. Adds to the scene's own wind. |
+| Softness split | Look | | | 1 | How much flatter the skylight term reads than the sunlight term. This is what makes a cloud change the light's *character* and not just its level. |
+| Painted for hour | Daylight | | | 2 | What time of day the cookies were painted for. The patch sits exactly where you drew it at this hour. |
+| Drift | Daylight | | | 2 | How far the patch slides as the hours pass. 0 = never moves. |
+| Moonlight | Night | | | 3 | Strength of the cold pool the same cookie makes at night. |
+| Stretch | Daylight | | | 6 | How much a low sun elongates each patch. |
+| Bounce | Look | | | 7 | Soft warm indirect spill into the room around each patch. |
+| Shaft | Atmosphere | | | 8 | The visible fan of light in the air. |
 
 ---
 
-## 8. THE TRAPS — named up front, from the ledger
+## 8. THE TRAPS
 
 | Trap | Where it bites here |
 | --- | --- |
-| `feedback_measure_the_output_not_the_equation` | **The one that has already cost this project twice** (water's flat wash, specular's 0.016 — and specular shipped invisible *twice*). Twin the **composition**, not the formula: assert brightness **bands** for pane / patch / pool at noon, dusk, midnight, and — the assertion no static test would think to make — **assert the patch MOVES**: monotonic displacement vs. sun elevation, and antiparallel to nothing but its own wall's shadow. A beautiful still frame is exactly the output that hides a beam that never travels. |
-| `feedback_environment_term_gates_wrong_thing` | §3's two flow terms. Both additive, always both computed, `flow01` is a mix weight and never an `if`. This is the shape that zeroed specular's whole indoor branch. |
-| `feedback_one_byte_two_quantities` | §2: openness (value) and tint (hue/sat) stay separate numbers. Presence is a threshold at the bottom of value, not a product with it. |
-| `feedback_y_flip_recurring_risk` | **Three new mappings**, and one of them is the dangerous kind: world→mask UV, world→aperture-pack UV, and **the beam projection itself**. A Y-flipped beam does not look broken — it looks like a plausible sunbeam pointing the wrong way, which nobody catches from a screenshot. Assert against the sun shadow's own throw: same sun, same direction, one derivation. |
-| `feedback_unconsumed_api_rots_silently` | §5.1 delegates the throw, the direction and the penumbra rather than re-deriving them — and then a test asserts the relationship, because prose claiming two derivations agree is not a mechanism. `sky-access.js`'s `dirX` was wrong for its whole life under exactly such a comment. |
-| `keyhole-mask-any-item-decision` (LOCKED) | §5.3. Do not repeat the levelBackground-only narrowing that water, fluid **and** specular all shipped. A skylight is a tile mask. |
-| `feedback_sdf_does_not_draw_the_edge` | Silhouette from `vt/mask-image.js` at full res; distance from the SDF. Never the reverse. |
-| `feedback_blend_neutral_element_is_per_blend` | If dirty glass ever **multiplies** (darkening what shows through it), that mesh must write `attr = vec4(1)`, not `vec4(0)`. White is multiply's identity; black is add's. Water shipped this wrong once. |
-| `feedback_doubleside_invisible_to_status_reports` | Every patch quad needs `side: DoubleSide` or it culls silently while every JS field reports healthy. |
-| `keyhole-tsl-constructs-in-node` | **Call the builders in the Node suite.** A TDZ crash shipped with 4,460 green assertions because nothing ever invoked the builder. `three.webgpu.js` imports under plain Node; there is no excuse. |
-| `reference_tsl_method_chaining_trap` | `a.mix(b, t)` compiles to `mix(b, t, a)` **silently**. Function form only. §3's valve is nothing but mixes. |
+| `feedback_measure_the_output_not_the_equation` | **The one that has already cost this project twice**, and specular shipped invisible *twice* on it. `window-drive.js` gets a CPU twin and a Node suite asserting **brightness bands in the units the screen uses**, at clear noon / clear dusk / broken cloud / overcast / night — plus the two assertions no static test thinks to make: **the patch must MOVE** (monotonic displacement vs. sun elevation) and **the cloud must actually cross** (the field's value at a fixed world point must change monotonically as `t` advances along the wind). A gorgeous still frame is exactly the output that hides a beam that never travels. |
+| `feedback_environment_term_gates_wrong_thing` | §3.3. The fill lobe must never sit behind the key's trigger. Symptom if it does: *"the cloud makes the light disappear completely"*, which reads as a tuning problem and is not one. |
+| The additive-wash class (`keyhole-water-tsl-design`, `sky-access.js`'s deleted veil) | §3.2. This effect **multiplies**. If a term must add, it is not the light. Three effects have made this mistake in this repo. |
+| `feedback_count_silent_preconditions` | §2.5. Do not re-gate the cookie on `_Outdoors`. Specular reached thirteen silent preconditions before anyone counted; this one starts with two (floor, presence) and should stay there. |
+| `feedback_one_byte_two_quantities` | §3.1. Level (value) and tint (hue/sat) stay separate. Presence is a threshold at the bottom of value, never a product with it. |
+| `feedback_y_flip_recurring_risk` | Two new mappings, and the dangerous one is **the drift offset** — a Y-flipped drift does not look broken, it looks like a plausible sunbeam moving the wrong way through the day, which nobody catches from a screenshot. Assert against the sun shadow's own throw: same sun, same direction, one derivation. |
+| `feedback_unconsumed_api_rots_silently` | §5.1 delegates direction and throw rather than re-deriving them, **and then a test asserts the relationship** — because prose claiming two derivations agree is not a mechanism, which is exactly how `sky-access.js`'s `dirX` stayed 90° wrong for its whole life. |
+| `env/one-sun` | §4.4. The cloud field is shared or it is a second weather system. |
+| `feedback_probed_constants_vs_derived` | §4.2's `depth(c) = 4c(1−c)` is **derived**, not voted on at runtime, and the clear-sky no-op is exact rather than epsilon-close. |
+| `keyhole-tsl-constructs-in-node` | **Call the builders in the Node suite.** `three.webgpu.js` imports under plain Node; a TDZ crash shipped once with 4,460 green assertions because nothing invoked the builder. |
+| `reference_tsl_method_chaining_trap` | `a.mix(b, t)` compiles to `mix(b, t, a)` **silently**. Function form only. §3.3 is nothing but mixes. |
 | `reference_tsl_fn_deferred_execution_trap` | `Fn(cb)()` is deferred; a closure var set inside is unset on the next line. Use `TSL.output`. |
-| `keyhole-storage-buffer-limit-fix` | WebGPU caps 8 storage buffers per stage and this project has hit it. The aperture table is one small buffer, and must be able to be a `DataTexture` instead. |
+| `feedback_doubleside_invisible_to_status_reports` | Every cookie quad needs `side: DoubleSide` or it culls silently while every JS field reports healthy. |
+| `keyhole-mask-any-item-decision` (LOCKED) | §7.4 item 3. Do not repeat the levelBackground-only narrowing water, fluid and specular all shipped. |
 | Law 4 | Tiers are JS `if`s at graph-build time. A `uniform(0)` is not off. |
-| Law 6 | Bounded quads per aperture. V2's 4096² emit target **is** the violation this design exists to delete. |
-| Law 5 | Nothing above tier 0 may require WebGPU. Both routes for §4.2 work on both backends; that is not an accident, it is the constraint. |
+| Law 6 | Bounded quads cropped to the cookie AABB. V2's 4096² emit target **is** the violation this design deletes. |
+| Law 8 | `mx_fractal_noise_float` for the cloud field — one TSL source, no hand-rolled hash, no WebGL2 twin. |
 
 ---
 
 ## 9. WHAT THIS DELIBERATELY DOES NOT DO
 
-- **No new mask.** `_Window` supplies the aperture, the colour, and the gobo pattern. Three jobs, one file the author already paints.
-- **No second light system.** The window **is** a light, inside `light.accumulate`, MAX/ADD-ing into `buf:scene.illum` alongside the point lights. It never enumerates lights, never builds its own shadow system, and gets wall clipping, coloration, bloom and the grade for free.
-- **No per-effect tonemap and no per-effect grade.** V2's `emit / (1 + emit × 0.14)` shoulder and its 8-anchor exposure/saturation/tint stack both go. One sun, one grade — and the compensator this refunds is the same shape `sky-access.js`'s header describes for the ToD override.
-- **No rain-on-glass.** Nine controls, and it belongs to `surface.response` (a wet clear coat) or to the particle engine. Warping the aperture mask moves the hole.
+- **No procedural window geometry.** No aperture detection, no jump flood, no beam projection, no sill heights, no "which side is outside". The author paints the light; deriving what they already drew would be strictly worse and it is the bulk of what §10 removed.
+- **No new mask.** `_Window` carries the shape, the colour and the falloff.
+- **No second light system.** The window is a light inside `light.accumulate`, and gets shadows, coloration, bloom and the grade for free.
+- **No per-effect COLOUR GRADE, no time-of-day anchors.** One sun, one grade — exposure/saturation/tint and V2's 8-anchor stack both go, and stay gone. ⚠️ This is narrower than it first reads: it rules out re-grading the SCENE, not shaping this ONE light's own energy curve. §11 records why a bounded curve on the cookie's own contribution turned out to be necessary, and why that is not the same thing.
+- **No rain-on-glass.** Nine controls, and it would wobble the shape of sunlight on a floor. `surface.response` or particles.
 - **No `_Specular` read.** Cross-effect mask reach with no declared edge; four samplers deleted.
-- **No screen-space emit target.** The 4096² RGBA16F buffer is **deleted**, not resized. Its resolution-scale and half-float escape hatches go with it.
-- **No real volumetrics.** Tier 7's shaft is a 2D fake and says so (`Light-MSA-Ideas.md` §D). There is no third axis to march.
-- **No decision on the `_Window` VT pack format.** Tier 0 reads the hi-res mask image (water's and specular's route). Whether it also becomes a VT layer is the Stage 4 mask-audit question; nothing above depends on the answer.
+- **No screen-space emit target.** The 4096² buffer is **deleted**, not resized, and its half-float / resolution-scale escape hatches go with it.
+- **No cloud DRAWING.** §4 produces the shadow on the ground, which is what the goal asks for. Clouds visible overhead are a separate effect, and when it arrives it must read the same field (§4.4) rather than growing a second one.
+- **No real volumetrics.** Tier 8's shaft is an honest 2D fake; there is no third axis to march.
 
 ---
 
-_V2 painted the pane bright because a hole is invisible. Model the hole and the light comes through it._
+## 10. WHAT THE FIRST DRAFT OF THIS DOCUMENT GOT WRONG
+
+Recorded rather than quietly overwritten, because the error is instructive and its shape recurs.
+
+The v1 draft read `_Window` as **an aperture** — a hole in a wall — and built accordingly: a jump-flood distance-and-normal pack, a connected-component aperture table with outward normals, a projected patch quad per window (`sillHeight/tan(el)`, sheared and stretched), a two-way valve deciding whether light flowed in or out, an exterior night-time glow pool, and an open question about which side of each wall faced outdoors. Ten rungs, most of them geometry.
+
+**Every one of those exists to compute where the light lands — and the author paints where the light lands.** The design was solving, at considerable expense, a problem that had already been solved upstream by a human with better judgement than any derivation would have.
+
+Two claims in v1 were also simply wrong under the true semantic, and both are corrected above rather than deleted:
+
+1. **"The outdoors clip killed the exterior half."** With an interior-only mask, `winLights *= (1 − isOutdoor)` is approximately correct. It is redundant and can only subtract (§2.5) — a real but far smaller finding than the one claimed.
+2. **"V2's noon anchor is physically inverted."** That depended on reading the mask as a vertical aperture, where `1/tan(el) → 0` at zenith. For a painted floor cookie, maximum sun at noon is defensible. The anchors' actual fault is that they are a hand-drawn second copy of a curve the engine computes (§2.1), which is the stronger objection anyway.
+
+The lesson generalises past this effect, and it is worth carrying into the next Stage 6 port: **read the mask's authored MEANING before designing what reads it.** `keyhole-stage6-effects-approach` says redesign rather than mechanically port — and a redesign aimed at the wrong noun is more expensive than the port would have been, because it looks principled all the way down.
+
+---
+
+## 11. WHAT SHIPPED WASHED OUT, AND WHAT THE FORMULA SAID
+
+Found live, on a real scene, from a screenshot: an observatory tower, a large round skylight room floored in a gold-and-blue astronomical mosaic. The whole room read as a flat, textureless white disc — the mosaic's own wagon-wheel tracery gone entirely, not merely brightened. Reported directly: the result was "milky white" / "washed out," not "a bit too bright."
+
+### 11.1 The cause, traced through the real formula rather than guessed
+
+`effects/lighting/environmental-light.js`'s composite is, verbatim:
+
+```
+litSrgb  = OETF(albedo) × illum
+litLinear = EOTF(litSrgb)
+```
+
+(`feedback_gamma_space_composite_arithmetic`). Illum **multiplies** the gamma-encoded albedo, so any channel where `OETF(albedo) × illum` crosses 1.0 clips to flat white — and it clips **flatly**: two texels whose painted brightness differed (a tracery spoke vs. its neighbouring pane) both land on the identical white once both cross the ceiling, so the relative detail that makes the shape *readable* is exactly what is lost, not just its peak brightness.
+
+Tier 0 shipped with **no ceiling at all** on the cookie's own contribution: `illum += level × tint × strength × coverage`, unbounded, capable of adding up to `strength` (default 1, slider range 0–3) on top of whatever ambient the room already had. Bright architectural art — pale stone, gold trim, a parchment-coloured mosaic — commonly sits at `OETF(albedo) ≈ 0.8–0.95`, which leaves almost no headroom: **an unbounded add blows out the instant the pre-existing ambient is anywhere above "quite dark."** A large cookie covering an entire domed room (as this one did — the whole floor was one painted skylight, not a small beam) pushes that outcome from "possible" to "certain."
+
+### 11.2 The fix, and why it lives in this effect rather than in the shared composite
+
+The shared composite (`environmental-light.js`) is load-bearing for every light in the renderer and carries a "byte-identical to Foundry at noon" invariant; changing IT to add general highlight compression would be a much larger, riskier edit than this effect's own scope, and was not asked for. Instead, `window-cookie.js#shoulderedContribution` shapes **this light's own energy curve** before it ever reaches the shared buffer — a Reinhard-style soft shoulder (`x / (1 + x·K)`, `K = 0.8`, `window-cookie.js#WINDOW_SHOULDER_K`) applied to the contribution's **peak channel**, with all three channels rescaled by the same ratio so hue and saturation survive compression (shaping each channel independently would desaturate a saturated cookie exactly where it is brightest — the compression curve's slope shrinks as its input grows, and unevenly-saturated channels sit at different points on that shrinking slope).
+
+⚠️ **This is not the "no per-effect tonemap" rule from §9 being broken** — that rule forbids re-implementing exposure/saturation/tint/time-of-day on the whole scene a second time. A bounded curve on one light's own maximum output is the same category of thing `point-light-illumination.js` already does to its own falloff (`easeAttenuation`, its presence envelope) — an energy shape belonging to the light, not a grade belonging to the picture. It is also, not coincidentally, the same INSTINCT V2's own window effect had (`emit / (1 + emit × 0.14)`) — V2's mistake was never having a shoulder at all conceptually wrong, it was applying it *after* an additive spill onto already-composed scene colour (§2.2), the wrong place, not the wrong idea.
+
+### 11.3 What it does and does not guarantee — measured, not assumed
+
+A fully-painted, default-strength cookie (`raw = 1`) now contributes `≈0.556` rather than `1.0` — bright enough to read clearly, with real headroom left before a typical dim-to-moderate interior pushes the total past 1.0. Measured against the actual composite formula (`__tests__/window-cookie.test.mjs`):
+
+| Case | Ambient before this effect | Cookie's own contribution | Composite result |
+| --- | --- | --- | --- |
+| Typical dim interior, default cookie, pale albedo (0.88) | 0.3 | ≈0.556 (shouldered) | **0.756 — no clip** |
+| Bright daylight interior, MAXED strength (3), pale albedo | 0.9 | ≈0.882 (shouldered) vs. 3.0 (unshouldered) | Shouldered overshoots by less than **half** of what the unshouldered version would have |
+
+**The honest limit, stated rather than buried:** this shoulder cannot see how much headroom `buf:scene.illum` already has, because reading the buffer this pass is simultaneously rendering *into* is the exact read-while-write hazard that made `surface.response` a separate, later pass instead of a draw inside `light.accumulate` (`Specular.md`'s own status note). So a cookie sitting on top of an *already* near-maximum ambient can still clip somewhat. The claim is "the overshoot is bounded and the loss of relative detail is far smaller," never "clipping is now impossible here." A headroom-aware version — reading the accumulated illum before adding, the way tier 5 (`occlude`) will eventually need geometry-aware occlusion anyway — is a real future rung, not a same-day fix.
+
+### 11.4 The diagnostic this bought
+
+Channel 7 (`rawLight`) and channel 8 (`final`) are a deliberate pair on the debug picker: the pre-shoulder and post-shoulder contribution, both boosted ×8. If they look nearly identical, the shoulder was never close to engaging. If channel 7 reads much whiter/brighter than channel 8 over a large area, the shoulder is doing real work — which is the picture version of the table above, and the fast way to confirm this fix is actually landing on a given scene rather than trusting the formula a second time (`feedback_measure_the_output_not_the_equation`).
+
+---
+
+_The artist already drew the light. The engine's job is to tell it what time it is, and when the cloud arrives._

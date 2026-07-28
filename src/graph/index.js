@@ -14,11 +14,21 @@
  * `new *RenderTarget(` anywhere else — so this door is the law's front door,
  * not a convenience.
  *
- * STILL not exported on purpose: `frame-graph.js`, `gpu-pass-timer.js`,
- * `v3-perf.js`. Real, tested, harvested V3 machinery with ZERO callers.
- * Exporting them would not make them reachable (nothing consumes them yet);
- * it would just make the museum easier to browse. They stay internal until
- * something real calls them.
+ * STILL not exported on purpose: `frame-graph.js`. Real, tested, harvested V3
+ * machinery with ZERO callers. Exporting it would not make it reachable
+ * (nothing consumes it yet); it would just make the museum easier to browse.
+ * It stays internal until something real calls it.
+ *
+ * `gpu-pass-timer.js` and `v3-perf.js` sat beside it until 2026-07-27 and are
+ * now DELETED (docs/planning/Performance.md). The first was a hand-rolled
+ * `EXT_disjoint_timer_query_webgl2` timer: WebGL2-only, so structurally unable
+ * to measure the WebGPU backend this renderer actually runs, and duplicating
+ * what vendored three already implements internally
+ * (vendor/three/three.webgpu.js:67928). The second's `PASS_BUDGETS_MS` was keyed
+ * to stage names (`streaming`, `unifiedGeometry`, `effects`) matching nothing in
+ * this zone's own `STAGES`, plus a closed-loop auto-downscaler nobody asked for.
+ * Per-pass timing now rides `runPassPlan`'s hooks out into `diag/`, which is
+ * where `time/one-clock` allows a clock to be read.
  *
  * `fullscreen-present.js` is NOT exported and cannot be: it is GLSL
  * (`ShaderMaterial`, `gl_Position`) in an all-TSL codebase — the last GLSL in

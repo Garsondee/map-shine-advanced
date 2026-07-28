@@ -226,6 +226,9 @@ export const WATER = Object.freeze({
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
   params: WATER_PARAMS,
+  // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
+  // brush already loaded with this mask (validateAuthoring, effect-manifest.js).
+  authoring: Object.freeze({ paint: 'water' }),
   tiers: Object.freeze([
     Object.freeze({
       n: 0,

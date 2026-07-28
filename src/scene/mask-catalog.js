@@ -166,9 +166,20 @@ export const MASK_KINDS = Object.freeze([
     channels: 'color',
     packChannel: null,
     absentValue: 0,
+    // A GPU consumer is a consumer — the case `rasterize` exists to declare
+    // (see `specular`'s identical note). `effects/window` needs the per-floor
+    // grid for its SPEC only: the world rect an authored file covers, which is
+    // what maps `positionWorld` to a mask UV for the bounded quad. The COLOUR
+    // comes from the authored file at full resolution (`vt/mask-image.js`,
+    // `channels: 'rgb'`) exactly as it does for `specular` — this grid's own
+    // extracted R is not read by anything here.
+    rasterize: true,
     meaning:
-      'COLOURED window-light regions. `_Windows`/`_Structural` are V2 aliases accepted by discovery ' +
-      'only — everything downstream knows this kind solely as `window`.',
+      'Author-confirmed (2026-07-27): a hand-painted INTERIOR light cookie — where a bright light ' +
+      'would fall on the room behind this wall, already shaped and coloured by the artist. Read as ' +
+      'GLASS: value = how much light lands here, hue+saturation = what colour it becomes. NOT an ' +
+      'aperture to project through — the mask already IS the light. `_Windows`/`_Structural` are V2 ' +
+      'aliases accepted by discovery only — everything downstream knows this kind solely as `window`.',
   },
   {
     id: 'tree',

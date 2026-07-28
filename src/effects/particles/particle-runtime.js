@@ -3,7 +3,7 @@
  *
  * `createParticleEngine(...)` turns a {@link ParticleSystemDecl} into GPU-resident
  * particles: it allocates the arena (§10), compiles a seed kernel + an update
- * kernel (TSL compute, proven live by diag/compute-spike.js), and builds ONE
+ * kernel (TSL compute, first proven live by the since-retired compute spike), and builds ONE
  * instanced draw — never a scene object per particle (§16, the particles/one-
  * engine wall). Simulation state lives only in storage buffers; there is no JS
  * object per particle, by construction (§11).
@@ -140,8 +140,8 @@
  *      `bakedField`/`liveField` args sample a TEXTURE. That path is proven to
  *      work from the FRAGMENT/VERTEX stage (the candle, the light, the
  *      overlay all use it successfully) — it was NEVER proven from a COMPUTE
- *      shader in this renderer. diag/compute-spike.js proved storage buffers
- *      work in compute; it never touched a texture. Reading THREE's WGSL
+ *      shader in this renderer. The compute spike (retired 2026-07-27) proved
+ *      storage buffers work in compute; it never touched a texture. Reading THREE's WGSL
  *      codegen (three.webgpu.js:72056) only proved the STRING GENERATION for
  *      a non-fragment texture sample exists — not that the higher-level
  *      pipeline correctly binds a texture+sampler to a COMPUTE bind-group

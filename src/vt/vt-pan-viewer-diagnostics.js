@@ -555,6 +555,26 @@ export function buildViewerDiagnostics({
     // it matters. `outdoorsGate`/`floorGate` report which branches actually
     // COMPILED, and both are silent on screen if they did not.
     specular: _active?.getSpecularInfo?.() ?? { available: false },
+    // WINDOW LIGHT (2026-07-27, docs/planning/Windows.md) — tier 0. Read
+    // `maskImage` FIRST: 'not loaded' means the viewed floor has no authored
+    // `_Window` file at all, so the effect is inert BY DESIGN. `floorGate`
+    // reports whether that branch actually COMPILED — silent on screen if it
+    // did not.
+    windowLight: _active?.getWindowLightInfo?.() ?? { available: false },
+    // FLUID (2026-07-27, docs/planning/Fluid.md) — one entry per masked ITEM
+    // (a tile, not a floor — see `fluid-registration.js`'s own header for the
+    // bug that cost two rounds). `maskedItemCount: 0` alongside a nonzero
+    // authored-mask count in boot's `fluid` report means the FLOOR FILTER
+    // rejected the item; `tubeCount: 0` on an item that DID bake means the
+    // mask's red channel produced no components.
+    //
+    // ⚠️ This field was ABSENT for the effect's first live test — `getFluid
+    // Status` existed on `_active` (vt-pan-viewer.js) but nothing here called
+    // it, so `boot.js`'s report read `surface: null` even while the tubes
+    // rendered correctly on screen. The instrument was silently disconnected
+    // from the thing it was reporting on, one link short of the pattern
+    // `waterBody`/`specular` both already establish immediately above.
+    fluid: _active?.getFluidStatus?.() ?? { available: false },
     // SHADERS (docs/planning/Shaders.md).  is the fork
     // in the road, not a detail: WITH it, compileAsync hands work to driver
     // threads; WITHOUT it, compileAsync resolves instantly having done

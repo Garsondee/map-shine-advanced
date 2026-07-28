@@ -79,11 +79,15 @@ export async function run(t) {
   // positionWorld to a mask UV), not the grid's contents — and its contents
   // are in fact NOT usable as presence, since extraction serves R only and a
   // blue-painted steel object has r = 0. See the kind's own comment.
+  // `window` joined 2026-07-27 (Windows.md §7.4), for the IDENTICAL reason as
+  // specular: the surface subsystem needs the grid's SPEC only, to crop a
+  // bounded quad to the mask's world rect — the COLOUR (what makes this a
+  // light cookie at all) comes from the authored file, not from this grid.
   t.ok(
-    'outdoors, water, fluid and specular are the rasterized kinds',
+    'outdoors, specular, window, water and fluid are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,specular,water,fluid'
+      .join(',') === 'outdoors,specular,window,water,fluid'
   );
   t.ok(
     'water is NOT required — an unpainted _Water mask is a harmless default, unlike _Outdoors',
@@ -219,15 +223,20 @@ export async function run(t) {
   );
   const singleOutdoors = extractionPlanForLayer('outdoors');
   t.ok('unpacked outdoors extracts its r channel', singleOutdoors.length === 1 && singleOutdoors[0].channel === 'r');
-  // `window` and `tree`/`bush` are the remaining kinds nothing consumes on the
-  // CPU: no DerivedKind names them and none is `rasterize`. (This assertion
-  // used `specular` until 2026-07-26, when specular became a rasterized kind —
-  // the claim being tested is about the EXTRACTION RULE, not about specular, so
-  // it moves to a kind that still exercises the zero case.)
-  t.ok('layers no derivation reads extract nothing', extractionPlanForLayer('window').length === 0);
+  // `tree`/`bush` are the remaining kinds nothing consumes on the CPU: no
+  // DerivedKind names them and neither is `rasterize`. (This assertion used
+  // `specular` until 2026-07-26 and `window` until 2026-07-27 — each in turn
+  // became a rasterized kind. The claim being tested is about the EXTRACTION
+  // RULE, not about any one kind, so it keeps moving to whichever kind still
+  // exercises the zero case.)
+  t.ok('layers no derivation reads extract nothing', extractionPlanForLayer('tree').length === 0);
   t.ok(
     'a rasterized COLOUR kind does get extracted (specular, added with its own consumer)',
     extractionPlanForLayer('specular').length === 1 && extractionPlanForLayer('specular')[0].channel === 'r'
+  );
+  t.ok(
+    'window is the SAME shape as specular: rasterized for its SPEC, extracted anyway (R, unused)',
+    extractionPlanForLayer('window').length === 1 && extractionPlanForLayer('window')[0].channel === 'r'
   );
   t.ok('unknown layers extract nothing', extractionPlanForLayer('albedoX').length === 0);
 }

@@ -49,16 +49,21 @@ export function createWaterRegistration({
   log,
 }) {
   /**
-   * ⚠️ `enabled: true` PRE-RESOLVE, deliberately unlike bloom's `false`.
+   * ⚠️ `enabled: true` PRE-RESOLVE.
    *
-   * This is the state between construction and the first cascade resolve. For
-   * bloom, "not resolved yet" → no bloom, which is invisible and therefore
-   * safe. For water it would mean the surface is HIDDEN for that window, and
-   * a hidden river reads as a bug rather than as a pending resolve — so the
-   * honest initial value is what the manifest already declares
-   * (`enabledFromProfile: 'low'`, i.e. on everywhere). `params: null` still
-   * means "no authored values yet", so the render module keeps its own
-   * defaults until the real resolve lands.
+   * This is the state between construction and the first cascade resolve.
+   * `false` would mean the surface is HIDDEN for that window, and a hidden river
+   * reads as a bug rather than as a pending resolve — so the honest initial value
+   * is what the manifest already declares (`enabledFromProfile: 'low'`, i.e. on
+   * everywhere). `params: null` still means "no authored values yet", so the
+   * render module keeps its own defaults until the real resolve lands.
+   *
+   * Bloom seeded `false` here until 2026-07-27, and it was not the harmless
+   * choice it looked like: nothing ever called `reapplyBloom` outside
+   * `MapShine.setBloom`, so the "brief" pre-resolve window lasted the whole
+   * session and bloom was off in every scene. Both halves are fixed —
+   * `EFFECT_REAPPLIERS` in boot.js runs every effect at ready/settings/scene
+   * load, and bloom's seed now matches its manifest like this one does.
    */
   let readout = { enabled: true, params: null };
 

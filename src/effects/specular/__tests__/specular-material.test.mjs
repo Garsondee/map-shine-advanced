@@ -1,204 +1,129 @@
 /**
- * specular-material.test.mjs — THE DECODE IS ASSERTED, NOT EYEBALLED.
+ * specular-material.test.mjs — the mask decode.
  *
- * `feedback_smooth_output_hides_ported_bugs` is the whole reason this file
- * exists. A shine effect renders a smooth, plausible highlight from almost any
- * decode: gold that comes out slightly green, or a neutral grey that comes out
- * 30% metallic and quietly suppresses the map art beneath it, looks *fine* on
- * screen. The authoring model would be wrong and nobody would find out, because
- * the instrument (a screenshot) cannot see it.
+ * "The darker the pixels in the specular mask, the less shiny the surface is"
+ * is the authoring contract the whole effect rests on, and it is one function.
+ * These assertions pin it, plus the two things about it non-obvious enough that
+ * a future reader could "correct" them into a bug.
  *
- * So the claims `specular-material.js`'s header makes in prose are each a named
- * assertion here — above all the ONE that the whole compatibility story rests
- * on: **a V2-era greyscale mask must decode to exactly zero metalness**, so it
- * provably suppresses nothing and behaves as the pure additive dielectric V2
- * drew.
+ * The PBR decode this replaces (F0, metalness, roughness, GGX, Smith, Schlick)
+ * is gone — see `specular-pattern.js`'s header for why a 2D top-down map has no
+ * angles for any of it to act on, and `specular.js`'s for the doctrine that
+ * went with it.
  */
 import {
-  decodeSpecularMaterial,
-  srgbToLinear01,
-  ggxDistribution,
-  smithVisibility,
-  schlickFresnel,
+  decodeSpecularMask,
+  describeSpecularMapping,
   keyLightDirection,
   smoothstep,
-  DIELECTRIC_F0,
-  MIN_ROUGHNESS,
   SPECULAR_PRESENCE_EDGE0,
   SPECULAR_PRESENCE_EDGE1,
+  SPECULAR_ALPHA_EPSILON,
+  LUMA_601,
+  LUMA_709,
 } from '../specular-material.js';
 
-const near = (a, b, eps = 1e-4) => Math.abs(a - b) <= eps;
+/** Rec.709 luma of a tint — the quantity the decode promises to preserve.
+ * @param {number[]} c @returns {number} */
+function luma709(c) {
+  return c[0] * LUMA_709[0] + c[1] * LUMA_709[1] + c[2] * LUMA_709[2];
+}
 
+/** @param {{ok: Function}} t */
 export function run(t) {
   const { ok } = t;
 
-  // ── GREY IS A METAL — the correction that made the effect visible ───────
-  // The first decode read HSV saturation as metalness, so every grey metal —
-  // steel, iron, pewter, silver, chrome, the commonest metals anyone paints on
-  // a battlemap — landed at F0 = 0.04 and vanished. These assertions pin the
-  // corrected claim, and the FIRST one is the whole bug in one line.
-  const steel = decodeSpecularMaterial(0.75, 0.76, 0.8);
-  ok('GREY STEEL IS A METAL — a neutral mask is not a 4% dielectric', steel.metalness > 0.5);
-  ok('…so its F0 is a real conductor’s, not 0.04', steel.f0[1] > 0.5);
-  ok('…and stays essentially neutral, because that is what steel looks like', near(steel.f0[0], steel.f0[2], 0.12));
-  ok('…and it is fully present', near(steel.presence, 1));
+  // ── STRENGTH: darker paint is less shiny ────────────────────────────────
+  const dark = decodeSpecularMask(0.2, 0.2, 0.2, 1);
+  const mid = decodeSpecularMask(0.5, 0.5, 0.5, 1);
+  const bright = decodeSpecularMask(1, 1, 1, 1);
+  ok('darker paint decodes to less strength', dark.strength < mid.strength && mid.strength < bright.strength);
+  ok('white at full alpha is full strength', Math.abs(bright.strength - 1) < 1e-9);
+  ok('black is zero strength', decodeSpecularMask(0, 0, 0, 1).strength === 0);
+  ok('alpha scales strength', Math.abs(decodeSpecularMask(1, 1, 1, 0.5).strength - 0.5) < 1e-9);
 
-  // Metalness is a SCENE choice now, so it must actually be reachable.
-  const asGlaze = decodeSpecularMaterial(0.75, 0.76, 0.8, 0);
-  ok('metalness 0 turns the same paint into a dielectric — the glass/glaze map', near(asGlaze.f0[1], DIELECTRIC_F0));
-  ok('…which is a real, reachable setting rather than a documented intention', asGlaze.metalness === 0);
-  const midway = decodeSpecularMaterial(0.75, 0.76, 0.8, 0.5);
-  ok('…and it interpolates monotonically in between', midway.f0[1] > asGlaze.f0[1] && midway.f0[1] < steel.f0[1]);
-
-  // Lossy encodes put a few percent of chroma into painted neutral. Under the
-  // OLD decode that noise became metalness; now it can only tint F0 slightly,
-  // which is both harmless and correct.
-  const noisyGrey = decodeSpecularMaterial(0.62, 0.6, 0.59);
+  // ⚠️ THE ALPHA-MISSING FALLBACK, and it is load-bearing rather than
+  // defensive. A greyscale mask with no alpha channel is the common authoring
+  // case; without this branch every such map decodes to `luma × 0` and renders
+  // pure black, which is indistinguishable from "the effect is broken". V2
+  // carried it, and shipping without it would silently break existing maps.
+  const noAlpha = decodeSpecularMask(0.5, 0.5, 0.5, 0);
+  ok('a mask with NO alpha channel falls back to luminance alone', Math.abs(noAlpha.strength - 0.5) < 1e-9);
   ok(
-    'compression-noise chroma barely tints F0 and cannot change metalness',
-    near(noisyGrey.f0[0], noisyGrey.f0[2], 0.1)
-  );
-
-  const v2grey = decodeSpecularMaterial(0.6, 0.6, 0.6);
-  ok('a V2-era mid-grey still reads its VALUE as polish, unchanged', near(v2grey.roughness, 0.4));
-
-  // ── GOLD: hue → F0 ──────────────────────────────────────────────────────
-  const gold = decodeSpecularMaterial(1.0, 0.77, 0.34);
-  ok('saturated gold reads as a conductor', gold.metalness > 0.7);
-  ok(
-    'gold F0 is warm — R > G > B, the ordering that MAKES it gold',
-    gold.f0[0] > gold.f0[1] && gold.f0[1] > gold.f0[2]
-  );
-  ok('gold F0 red is near-total reflectance', gold.f0[0] > 0.8);
-  ok('gold F0 blue is far below its red — the hue survives the decode', gold.f0[2] < 0.3);
-  // THE glTF STEP, asserted as the CLAIM rather than as a number: F0 is built
-  // from the LINEARISED hue, not from the sRGB value as painted. Comparing
-  // against a literal would be wrong here anyway — F0 is `mix(0.04, hueLinear,
-  // metalness)` and gold's metalness is 0.95, not 1, so the exact value is a
-  // few percent below the pure linearised hue by design. What must hold is the
-  // direction, and it holds by an order of magnitude.
-  const goldLinearErr = Math.abs(gold.f0[1] - srgbToLinear01(0.77));
-  const goldSrgbErr = Math.abs(gold.f0[1] - 0.77);
-  ok('gold F0 green is built from the LINEARISED 0.77, not from 0.77 itself', goldLinearErr * 2 < goldSrgbErr);
-
-  // ── VALUE DRIVES POLISH, NOT HUE ────────────────────────────────────────
-  // The `1/value` normalisation before linearising is what stops a dark copper
-  // being penalised twice — once by a dark F0, once by a high roughness.
-  const brightCopper = decodeSpecularMaterial(0.95, 0.6, 0.4);
-  const darkCopper = decodeSpecularMaterial(0.475, 0.3, 0.2);
-  // ⚠️ THE CLAIM HERE CHANGED with the metalness correction, and the change is
-  // the point. It used to be "halving brightness does not touch F0 at all" —
-  // which produced the inversion where dark paint out-shone polished paint five
-  // to one, because a dark surface kept a full conductor's F0 while gaining a
-  // broad lobe. Now darkness lowers F0 too (a dark metal is dark because it is
-  // TARNISHED, and oxide is a dielectric), while the HUE it was painted still
-  // survives intact. Both halves are asserted, because keeping the hue is what
-  // stops this being a plain brightness slider.
-  ok(
-    'halving a metal’s brightness lowers its F0 — a dark metal is a tarnished one',
-    darkCopper.f0[0] < brightCopper.f0[0] * 0.75
+    '…and the fallback triggers below the documented epsilon, not at exactly 0',
+    Math.abs(decodeSpecularMask(1, 1, 1, SPECULAR_ALPHA_EPSILON / 2).strength - 1) < 1e-9
   );
   ok(
-    '…but the HUE survives: the red:blue ratio is essentially unchanged',
-    near(brightCopper.f0[0] / brightCopper.f0[2], darkCopper.f0[0] / darkCopper.f0[2], 1.5)
+    '…while a genuinely near-zero alpha above it still dims',
+    decodeSpecularMask(1, 1, 1, SPECULAR_ALPHA_EPSILON * 10).strength < 0.01
   );
-  ok('…and it also reads rougher', darkCopper.roughness > brightCopper.roughness + 0.4);
-  ok('bright paint is smoother than dark paint', brightCopper.roughness < darkCopper.roughness);
-  const chrome = decodeSpecularMaterial(1, 1, 1);
-  ok('pure white paint floors at MIN_ROUGHNESS, never 0', chrome.roughness === MIN_ROUGHNESS);
-  ok('…which is the fp16 floor (0.089), not the fp32 one (0.045)', MIN_ROUGHNESS === 0.089);
-  ok('alpha is roughness squared', near(chrome.alpha, MIN_ROUGHNESS * MIN_ROUGHNESS));
 
-  // ── ABSENCE ─────────────────────────────────────────────────────────────
-  const black = decodeSpecularMaterial(0, 0, 0);
-  ok('unpainted (black) has zero presence', black.presence === 0);
-  ok('…and reports no metal rather than NaN (the 0/0 guard)', black.metalness === 0);
+  // ⚠️ RAW VALUES, NO TRANSFER CURVE. V2 uploaded the mask `NoColorSpace` and
+  // every existing map was painted against that, so "50% grey" must mean 0.5
+  // and not sRGB's 0.21. An sRGB decode here silently re-exposes every map that
+  // has ever been authored.
+  ok('a 50% grey texel decodes to 0.5, not to sRGB-linear 0.21', Math.abs(mid.strength - 0.5) < 1e-9);
+
+  // ── TINT: hue without a second brightness penalty ───────────────────────
+  const gold = decodeSpecularMask(1, 0.766, 0.336, 1);
+  ok('gold keeps its hue', gold.tint[0] > gold.tint[1] && gold.tint[1] > gold.tint[2]);
+  // THE CENTRAL PROPERTY. A naive `rgb × strength` darkens saturated paint
+  // twice — once for being dark, once for being coloured — so gold painted as
+  // brightly as grey would return LESS light than the grey. Re-normalising the
+  // tint to carry `strength` as its own luma is what makes "which metal" a
+  // statement about colour rather than about brightness.
+  ok('the tint carries strength as its own luma', Math.abs(luma709(gold.tint) - gold.strength) < 1e-6);
+  ok('…for a neutral too', Math.abs(luma709(mid.tint) - mid.strength) < 1e-6);
+  const blue = decodeSpecularMask(0.1, 0.15, 0.9, 1);
+  ok('…and for a deeply saturated blue', Math.abs(luma709(blue.tint) - blue.strength) < 1e-6);
+
+  const neutral = decodeSpecularMask(1, 0.766, 0.336, 1, 0);
+  ok('saturation 0 gives a neutral white shine', Math.abs(neutral.tint[0] - neutral.tint[1]) < 1e-9);
+  ok('…at the same strength — colour is dropped, brightness is not', Math.abs(neutral.strength - gold.strength) < 1e-9);
+  ok('saturation is clamped rather than exploding', decodeSpecularMask(1, 0.5, 0.2, 1, 99).tint.every(Number.isFinite));
+
+  // A black texel has no hue to preserve and the normalisation would divide by
+  // zero. Its strength is 0 so the tint is never seen, but a NaN reaching an
+  // additive blend paints a permanent black hole that no parameter explains.
+  ok('a black texel produces no NaN', decodeSpecularMask(0, 0, 0, 1).tint.every(Number.isFinite));
+
+  // ── THE PRESENCE EDGE ───────────────────────────────────────────────────
+  ok('the presence band starts near zero', SPECULAR_PRESENCE_EDGE0 < SPECULAR_PRESENCE_EDGE1);
+  ok('an unpainted texel has no presence', smoothstep(SPECULAR_PRESENCE_EDGE0, SPECULAR_PRESENCE_EDGE1, 0) === 0);
+  ok('a fully painted texel has full presence', smoothstep(SPECULAR_PRESENCE_EDGE0, SPECULAR_PRESENCE_EDGE1, 1) === 1);
+  ok('the band is narrow — it antialiases an edge, it does not fade dark metal', SPECULAR_PRESENCE_EDGE1 < 0.1);
+
+  // ── THE LUMA WEIGHTINGS ─────────────────────────────────────────────────
+  // Two different weightings in one decode looks like an oversight. It is not:
+  // 601 is what V2 measured strength with, so every existing file keeps the
+  // brightness its author saw; 709 is correct for re-normalising a colour.
+  // Unifying them would silently re-expose every painted map.
   ok(
-    '…and its F0 stays finite',
-    black.f0.every((c) => Number.isFinite(c))
+    'both weightings sum to 1',
+    Math.abs(LUMA_601.reduce((a, b) => a + b) - 1) < 1e-9 && Math.abs(LUMA_709.reduce((a, b) => a + b) - 1) < 1e-9
   );
+  ok('they are genuinely different weightings', LUMA_601[1] !== LUMA_709[1]);
+
+  // ── THE SUN VECTOR ──────────────────────────────────────────────────────
+  const horizon = keyLightDirection({ dirX: 0, dirY: 1, elevationDeg: 0 });
+  ok('a horizon sun points along its own azimuth', Math.abs(horizon[1] - 1) < 1e-6);
   ok(
-    'the presence ramp is a genuine BAND, not a step — the antialiasing bug water shipped',
-    SPECULAR_PRESENCE_EDGE1 > SPECULAR_PRESENCE_EDGE0 * 4
+    'the vector is unit length',
+    Math.abs(Math.hypot(...keyLightDirection({ dirX: 0.6, dirY: 0.8, elevationDeg: 30 })) - 1) < 1e-6
   );
-  const halfway = decodeSpecularMaterial(
-    (SPECULAR_PRESENCE_EDGE0 + SPECULAR_PRESENCE_EDGE1) / 2,
-    (SPECULAR_PRESENCE_EDGE0 + SPECULAR_PRESENCE_EDGE1) / 2,
-    (SPECULAR_PRESENCE_EDGE0 + SPECULAR_PRESENCE_EDGE1) / 2
-  );
+  ok('a degenerate key falls back to straight up rather than NaN', keyLightDirection({}).every(Number.isFinite));
+
+  // ── THE COORDINATE TWIN ─────────────────────────────────────────────────
+  const m = describeSpecularMapping({
+    maskRect: { minX: 0, minY: 0, maxX: 1000, maxY: 1000 },
+    quadWorld: { minX: 100, minY: 200, maxX: 900, maxY: 800 },
+    viewRect: { minX: 0, minY: 0, maxX: 2000, maxY: 2000 },
+  });
+  ok('the twin reports mask UV at the quad corners', m.maskUvAtQuadCorners.bottomLeft[0] === 0.1);
+  ok('…and at the far corner', m.maskUvAtQuadCorners.topRight[0] === 0.9);
+  ok('the twin reports the view span', m.viewSpanX === 2000);
   ok(
-    '…so a mid-band value is partially present (sub-pixel coverage)',
-    halfway.presence > 0.2 && halfway.presence < 0.8
+    'a missing rect reports null rather than throwing',
+    describeSpecularMapping({ maskRect: null, quadWorld: null, viewRect: null }).maskUvAtQuadCorners === null
   );
-  // Dark metal must survive: presence and roughness must not BOTH punish it.
-  const darkIron = decodeSpecularMaterial(0.15, 0.15, 0.15);
-  ok('dark iron (value 0.15) is FULLY present — not double-penalised', near(darkIron.presence, 1));
-  ok('…and reads as rough, which is the single place its darkness is spent', darkIron.roughness > 0.8);
-
-  // ── MONOTONICITY: the authoring model has to be predictable ─────────────
-  let monotone = true;
-  let prev = -1;
-  for (let i = 0; i <= 20; i++) {
-    const m = decodeSpecularMaterial(i / 20, i / 20, i / 20);
-    if (1 - m.roughness < prev - 1e-9) monotone = false;
-    prev = 1 - m.roughness;
-  }
-  ok('smoothness rises monotonically with painted value across the whole range', monotone);
-
-  // ⚠️ And the OPPOSITE of what this file used to assert: metalness must NOT
-  // move with saturation. Sweeping chroma at constant value changes WHICH metal
-  // it is, never WHETHER it is one — which is exactly the correction that made
-  // grey steel visible.
-  let satIndependent = true;
-  for (let i = 0; i <= 20; i++) {
-    const m = decodeSpecularMaterial(1, 1 - i / 20, 1 - i / 20);
-    if (Math.abs(m.metalness - decodeSpecularMaterial(1, 1, 1).metalness) > 1e-9) satIndependent = false;
-  }
-  ok('metalness is INDEPENDENT of painted saturation — grey is as metal as gold', satIndependent);
-  // …while the hue it carries genuinely does change.
-  const warm = decodeSpecularMaterial(1, 0.5, 0.2);
-  const neutral = decodeSpecularMaterial(1, 1, 1);
-  ok('…but the F0 HUE tracks it', warm.f0[0] / warm.f0[2] > (neutral.f0[0] / neutral.f0[2]) * 2);
-
-  // ── THE BRDF SCALARS ────────────────────────────────────────────────────
-  ok('GGX peaks at N·H = 1', ggxDistribution(1, 0.3) > ggxDistribution(0.9, 0.3));
-  ok('a smoother surface concentrates more energy at the peak', ggxDistribution(1, 0.05) > ggxDistribution(1, 0.5));
-  ok(
-    'GGX is finite at the roughness floor (the fp16 Inf/NaN trap)',
-    Number.isFinite(ggxDistribution(1, MIN_ROUGHNESS ** 2))
-  );
-  ok('GGX never returns a negative lobe', ggxDistribution(0.2, 0.4) > 0);
-  ok('Smith visibility is finite at grazing incidence', Number.isFinite(smithVisibility(0, 0, 0.2)));
-  ok('Smith visibility is positive', smithVisibility(0.5, 0.9, 0.3) > 0);
-
-  const f0 = [0.04, 0.04, 0.04];
-  ok('Fresnel at normal incidence IS F0 — top-down’s minimum', near(schlickFresnel(f0, 1)[0], 0.04));
-  ok('Fresnel at grazing incidence approaches 1', near(schlickFresnel(f0, 0)[0], 1));
-  ok('Fresnel rises monotonically toward grazing', schlickFresnel(f0, 0.3)[0] > schlickFresnel(f0, 0.9)[0]);
-  ok(
-    'a conductor’s Fresnel stays coloured at normal incidence (gold does not go white)',
-    schlickFresnel(gold.f0, 1)[0] > schlickFresnel(gold.f0, 1)[2] * 2
-  );
-
-  // ── THE KEY LIGHT LIFT ──────────────────────────────────────────────────
-  const noon = keyLightDirection({ dirX: 0, dirY: -1, elevationDeg: 60 });
-  ok('a lifted key direction is a unit vector', near(Math.hypot(noon[0], noon[1], noon[2]), 1));
-  ok('a high sun points mostly UP', noon[2] > 0.8);
-  const dusk = keyLightDirection({ dirX: 1, dirY: 0, elevationDeg: 2 });
-  ok('a low sun points mostly SIDEWAYS — the grazing streak', dusk[2] < 0.1 && dusk[0] > 0.9);
-  ok('…and it still normalises', near(Math.hypot(dusk[0], dusk[1], dusk[2]), 1));
-  const degenerate = keyLightDirection({ dirX: 0, dirY: 0, elevationDeg: 0 });
-  ok('a degenerate key falls back to straight up, never NaN', degenerate.every(Number.isFinite));
-
-  // ── smoothstep matches TSL's argument order ─────────────────────────────
-  ok('smoothstep(e0,e1,x) clamps below', smoothstep(0.2, 0.8, 0.1) === 0);
-  ok('smoothstep(e0,e1,x) clamps above', smoothstep(0.2, 0.8, 0.9) === 1);
-  ok('smoothstep is 0.5 at the midpoint', near(smoothstep(0.2, 0.8, 0.5), 0.5));
-  ok('a degenerate band does not divide by zero', Number.isFinite(smoothstep(0.5, 0.5, 0.7)));
-
-  // ── sRGB decode ─────────────────────────────────────────────────────────
-  ok('sRGB decode fixes both endpoints', srgbToLinear01(0) === 0 && near(srgbToLinear01(1), 1));
-  ok('mid grey decodes to ~0.216 (the reason V/S are NOT linearised)', near(srgbToLinear01(0.5), 0.214, 0.005));
-  ok('the linear toe is used below 0.04045', near(srgbToLinear01(0.02), 0.02 / 12.92));
 }

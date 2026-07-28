@@ -529,4 +529,57 @@ export function run(t) {
       return types.join(',') === 'sweep,cut,sweep,cut,sweep,cut,sweep';
     })()
   );
+
+  // ---- REGRESSION: the perf-benchmark N→S route (2026-07-28 live bug) -------
+  // The SAME bug class as the 2026-07-21 'full'-preset regression above, hit
+  // again by NEW code that consumed this module without re-checking its own
+  // rule: "boot.js perf-benchmark: the camera didn't start at the north, it
+  // just moved down and to the right and finished" — a north-to-south sweep
+  // spans nearly the map's full height, so with the DEFAULT settings (which
+  // boot.js built from scratch instead of reading `suggestedLongJumpFadeCut`
+  // off the preset, per feedback_read_the_producer_never_invent_its_shape)
+  // the ENTIRE 60-second sweep silently became a ~1-second fadecut: fade to
+  // black, INSTANT SNAP straight to the south end (skipping the north start),
+  // fade back in. This block proves the failure mode AND the fix, end to end
+  // through the real pure functions, so a future caller of `generateKeyframePreset`
+  // that forgets this cannot ship unnoticed.
+  ok(
+    "REGRESSION: n_to_s with DEFAULT settings and REAL map dims — what boot.js's first version actually built — " +
+      'wrongly becomes a fadecut, proving the live symptom',
+    (() => {
+      const kfs = generateKeyframePreset('n_to_s', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
+      const segs = buildCameraTimeline(
+        { keyframes: kfs, settings: { ...DEFAULT_SETTINGS, sweepMs: 60000, easing: 'linear' } },
+        { width: 4000, height: 4000 }
+      );
+      // A single fadecut segment, not a sweep — this IS "moved briefly, then
+      // finished" instead of a 60-second traverse.
+      return segs.length === 1 && segs[0].type === 'fadecut';
+    })()
+  );
+  ok(
+    "REGRESSION FIX: n_to_s with the preset's OWN suggested longJumpFadeCut is a real 60s sweep, start to finish",
+    (() => {
+      const result = generateKeyframePreset('n_to_s', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 });
+      const segs = buildCameraTimeline(
+        {
+          keyframes: result.keyframes,
+          settings: {
+            ...DEFAULT_SETTINGS,
+            sweepMs: 60000,
+            easing: 'linear',
+            longJumpFadeCut: result.suggestedLongJumpFadeCut,
+          },
+        },
+        { width: 4000, height: 4000 }
+      );
+      return (
+        segs.length === 1 &&
+        segs[0].type === 'sweep' &&
+        segs[0].durationMs === 60000 &&
+        // north (smaller y) -> south (larger y), matching the label.
+        segs[0].from.y < segs[0].to.y
+      );
+    })()
+  );
 }

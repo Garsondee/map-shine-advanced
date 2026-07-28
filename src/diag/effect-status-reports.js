@@ -178,7 +178,21 @@ export function buildSpecularReport({ floorIndex, viewer, maskAuthority, readout
     params: readout?.params ?? 'not resolved yet',
     surface: viewer?.specular ?? 'viewer not started',
     interpretation:
-      'READ `surface.maskImage` FIRST. "not loaded" means this floor has no authored specular file, ' +
+      'IF `surface.debugChannel` IS NOT 0, STOP — you are looking at a DIAGNOSTIC, not at the effect. ' +
+      'The Metal & shine card`s dropdown puts one shader intermediate on screen (see ' +
+      'effects/specular/specular.js#SPECULAR_DEBUG_CHANNELS); set it back to "Off" before judging ' +
+      'anything below. That dropdown is also the fastest answer to this whole report: the channels ' +
+      'walk the effect`s eight multiplicative factors left to right, and THE FIRST ONE THAT COMES UP ' +
+      'BLACK IS THE CULPRIT — a picture, where everything below is only what the JS side believes. ' +
+      'THEN READ `surface.mapping`, which is the NUMBER a picture cannot give: a UV ramp cannot tell ' +
+      '0.42 from 1.0 by eye. `mapping.maskUvAtQuadCorners` MUST equal `surface.contentBoundsUv` — the ' +
+      'mask rect algebraically CANCELS between the quad crop and the shader`s own lookup, so a ' +
+      'mismatch means those are not the same rect and is the sharpest single finding available here. ' +
+      '`mapping.screenUvAtQuadCorners` outside 0..1 means every illum/albedo/attr read is clamped to ' +
+      'an edge texel, which explains channels 6, 7 and the floor gate`s green at once. And a huge ' +
+      '`mapping.eyeHeightWorld` means the synthesised eye is effectively back at infinity, so no ' +
+      'highlight can sweep no matter what `viewerHeight` says. ' +
+      'THEN READ `surface.maskImage`. "not loaded" means this floor has no authored specular file, ' +
       'so the pass draws literally nothing and every other field is irrelevant — cross-check ' +
       'authoredSpecularFloors, which is keyed on provenance rather than on the mask being non-empty. ' +
       'A loaded mask with `painted: "NOTHING PAINTED"` means the file exists and is entirely black. ' +
@@ -192,5 +206,45 @@ export function buildSpecularReport({ floorIndex, viewer, maskAuthority, readout
       'the first build invisible), and `relief` 0 removes the per-pixel normal variation that is the ' +
       'ONLY source of an actual highlight on a flat map. If everything above is healthy and it still ' +
       'reads flat, that is the tier-3 relief rung being starved by low-contrast art, not a bug.',
+  };
+}
+
+/**
+ * @param {object} args
+ * @param {number} args.floorIndex
+ * @param {object} args.viewer
+ * @param {object} args.maskAuthority
+ * @param {object} args.readout
+ * @param {string} args.generatedAt
+ * @returns {object}
+ */
+export function buildWindowLightReport({ floorIndex, viewer, maskAuthority, readout, generatedAt }) {
+  return {
+    report: 'window-light',
+    generatedAt,
+    viewedFloor: floorIndex,
+    // Provenance, straight from the authority. 'authored' vs 'default' is the
+    // difference between "painted no window light here" and "no file exists"
+    // — the same empty result, two completely different facts.
+    authoredWindowFloors: maskAuthority.floorsWithAuthored('window'),
+    enabled: readout?.enabled ?? 'unresolved',
+    params: readout?.params ?? 'not resolved yet',
+    surface: viewer?.windowLight ?? 'viewer not started',
+    interpretation:
+      'IF `surface.debugChannel` IS NOT 0, STOP — you are looking at a DIAGNOSTIC, not at the effect. ' +
+      'The Window light card`s dropdown puts one shader intermediate on screen (see ' +
+      'effects/window/window.js#WINDOW_DEBUG_CHANNELS); set it back to "Off" before judging anything ' +
+      'below. THEN READ `surface.maskImage`. "not loaded" means this floor has no authored window ' +
+      'mask file (nor a V2-era alias of it), so the pass draws literally nothing and ' +
+      'every other field is irrelevant — cross-check `authoredWindowFloors`, which is keyed on ' +
+      'provenance rather than on the mask being non-empty. A loaded mask with `painted: "NOTHING ' +
+      'PAINTED"` means the file exists and is entirely black. NEXT `surface.visible`: false with a ' +
+      'loaded, painted mask means the AABB crop or the enable flag killed it. THEN `surface.floorGate`: ' +
+      'false means `buf:scene.attr` was unavailable, so window light will draw on every floor at once ' +
+      'rather than only the one it belongs to — silent on screen, which is why this is reported. ' +
+      'FINALLY the params: `strength` 0 is off; `contrast` far from 1 reshapes the painted falloff but ' +
+      'cannot make an unpainted file glow. This effect reads the mask AS the light — there is no sun, ' +
+      "no time of day and no cloud coupling yet (see `window.js`'s own `deferredRungs`), so a flat, " +
+      'unchanging cookie at every hour is the CURRENT design, not a bug to chase.',
   };
 }

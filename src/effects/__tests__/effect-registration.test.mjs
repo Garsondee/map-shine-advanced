@@ -8,7 +8,16 @@
 import { validateParamsSchema } from '../../core/params-schema.js';
 import { UI_SHADOW_PARAMS, UI_WINDOW_SHADOW } from '../ui-window-shadow.js';
 import { GRADE, GRADE_LOOK_PARAMS } from '../grade/grade.js';
-import { validateEffectManifest } from '../effect-manifest.js';
+import { BLOOM, BLOOM_PARAMS } from '../bloom.js';
+import { validateEffectManifest, validateAuthoring } from '../effect-manifest.js';
+import { MASK_KINDS } from '../../scene/mask-catalog.js';
+import { ANCHOR_KINDS } from '../../scene/anchor-catalog.js';
+import { SPECULAR } from '../specular/specular.js';
+import { WATER } from '../water/water.js';
+import { FLUID } from '../fluid/fluid.js';
+import { WINDOW } from '../window/window.js';
+import { VEGETATION } from '../vegetation.js';
+import { CANDLE_FLAME } from '../candle-flame.js';
 import {
   resolveEffectEnabled,
   resolveEffectParams,
@@ -46,11 +55,73 @@ export function run(t) {
   ok('the grade ships enabled (Neutral default film response)', GRADE.enabledFromProfile === 'low');
   ok('toneMapping defaults to neutral', GRADE_LOOK_PARAMS.toneMapping.default === 'neutral');
   ok("'enabled' is NOT a grade param (the cascade owns it)", !('enabled' in GRADE_LOOK_PARAMS));
+
+  // BLOOM — pinned because the declaration and the runtime disagreed for months.
+  // The manifest said 'low' (= on at every profile) the whole time; nothing ever
+  // ran the cascade for bloom outside `MapShine.setBloom`, so it was off at boot
+  // in every scene. boot.js's EFFECT_REAPPLIERS is the fix; these assertions pin
+  // the declaration half so a future "default it off" edit has to be deliberate.
+  ok('BLOOM_PARAMS is a valid params schema', validateParamsSchema(BLOOM_PARAMS).ok);
+  ok('BLOOM is a valid manifest', validateEffectManifest(BLOOM).ok);
+  ok("the bloom's id is bloom", BLOOM.id === 'bloom');
+  ok('bloom ships ON at every profile', BLOOM.enabledFromProfile === 'low');
+  ok('bloom resolves ON at Low by default', resolveEffectEnabled(BLOOM, { profile: 'low' }) === true);
+  ok('bloom resolves ON at Standard by default', resolveEffectEnabled(BLOOM, { profile: 'standard' }) === true);
+  ok(
+    'a player can still turn bloom OFF (final say)',
+    resolveEffectEnabled(BLOOM, { profile: 'low', playerEnable: 'off' }) === false
+  );
+  ok("'enabled' is NOT a bloom param (the cascade owns it)", !('enabled' in BLOOM_PARAMS));
   ok("the effect's id is uiWindowShadow", UI_WINDOW_SHADOW.id === 'uiWindowShadow');
   ok('the effect declares its a11y flag (photosensitive: false)', UI_WINDOW_SHADOW.a11y.photosensitive === false);
   ok('the effect is gated to Extreme by default (expensive)', UI_WINDOW_SHADOW.enabledFromProfile === 'extreme');
   ok("'enabled' is NOT a param (it is resolved by the cascade)", !('enabled' in UI_SHADOW_PARAMS));
   ok('readouts are NOT params (lastWindowCount stays a readout)', !('lastWindowCount' in UI_SHADOW_PARAMS));
+
+  // ======================================================================
+  // THE ＋ AFFORDANCE — `authoring.paint`, shape AND reference
+  // ======================================================================
+  // Shape is checked in effect-manifest.js; that a declared mask actually EXISTS
+  // and is actually PAINTABLE is checked here, because importing the mask catalog
+  // from effects/ would add an import edge for one lookup. A ＋ button pointing at
+  // a mask kind nobody can paint is a dead control shipped to the author's hand —
+  // this is the wall that stops it, in the same spirit as dials/valid-reference.
+  ok(
+    'an absent authoring block is fine (bloom has nowhere on the map to go)',
+    validateAuthoring(undefined).length === 0
+  );
+  ok('a non-object authoring block is rejected', validateAuthoring('specular').length > 0);
+  ok('an empty paint array is rejected', validateAuthoring({ paint: [] }).length > 0);
+  ok('a non-string mask id is rejected', validateAuthoring({ paint: [7] }).length > 0);
+  ok('an empty mask id is rejected', validateAuthoring({ paint: '' }).length > 0);
+  ok('a single mask id is allowed', validateAuthoring({ paint: 'specular' }).length === 0);
+  ok("vegetation's two-mask form is allowed", validateAuthoring({ paint: ['tree', 'bush'] }).length === 0);
+  ok(
+    'a manifest carrying a malformed authoring block fails validation as a whole',
+    !validateEffectManifest({ ...UI_WINDOW_SHADOW, authoring: { paint: [''] } }).ok
+  );
+
+  // Only kinds with suffixes are genuinely paintable — a derived product like
+  // skyReach has no file to paint into. paint-mode.js filters exactly this way.
+  const paintable = new Set(
+    MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.suffixes.length > 0).map((k) => k.id)
+  );
+  for (const m of [SPECULAR, WATER, FLUID, WINDOW, VEGETATION]) {
+    const declared = Array.isArray(m.authoring?.paint) ? m.authoring.paint : [m.authoring?.paint];
+    ok(`${m.id} declares how it is painted onto a map`, declared.length > 0 && declared.every(Boolean));
+    for (const k of declared) {
+      ok(`${m.id}'s ＋ points at a real, paintable mask kind ('${k}')`, paintable.has(k));
+    }
+  }
+  // Candles are PLACED, not painted, and that is already declared — ANCHOR_KINDS
+  // carry effectId, so a second declaration on the manifest would be a second
+  // thing to drift out of sync.
+  ok('candles declare no paint mask', CANDLE_FLAME.authoring?.paint === undefined);
+  ok(
+    'candles are placeable via the anchor catalog instead',
+    ANCHOR_KINDS.some((k) => k.effectId === CANDLE_FLAME.id)
+  );
+  ok('bloom has no ＋ — there is nowhere on a map to put a whole-image post effect', BLOOM.authoring === undefined);
 
   // ======================================================================
   // validateEffectManifest — catches the malformed

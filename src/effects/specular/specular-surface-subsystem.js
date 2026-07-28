@@ -1,37 +1,37 @@
 /**
- * SHINE'S SURFACE — the two meshes, their own scene, the high-resolution mask,
- * and the AABB crop (`docs/planning/Specular.md` §4.5, §6).
+ * SHINE'S SURFACE — the mesh, its own scene, the mask, the island pack and the
+ * AABB crop.
  *
  * `specular-render.js` builds the materials; this owns their lifetime and the
  * per-frame push. It follows `water-surface-subsystem.js`'s shape closely, and
- * the ONE place it deliberately does not is the important one:
+ * the two places it deliberately does not are both worth knowing.
  *
  * ============================================================================
  * ITS OWN SCENE, NOT THE MAIN ONE — AND THAT COSTS SOMETHING REAL
  * ============================================================================
- * Water's surface joins the main `scene` and gets three dividends for free:
+ * Water's surface joins the main `scene` and gets three dividends free:
  * occlusion by paint order, the zero-attr MRT contract, and no extra render
  * call. Shine cannot take any of them, because it reads `buf:scene.illum` and
  * that does not exist until `light.accumulate` has run. So it gets its own
  * `THREE.Scene`, drawn by `runSurfaceResponsePass` into `scene.lit` — the same
- * arrangement `point-light-pool.js` already uses for its two dedicated scenes,
- * and for the same reason (a pass whose draws must not be filtered out of, or
- * into, the world's flat sort list).
+ * arrangement `point-light-pool.js` uses for its two dedicated scenes, and for
+ * the same reason. The cost is that occlusion becomes explicit work.
  *
- * The cost is that occlusion becomes explicit work: the floor gate in
- * `specular-render.js` reads `buf:scene.attr` to answer "is my metal actually
- * visible here", and tokens — which never write attributes — remain a named
- * gap. See that module's header point 3.
+ * ============================================================================
+ * ONE MESH, NOT TWO (2026-07-27)
+ * ============================================================================
+ * A diffuse knock-down used to draw beside the shine, so a conductor could
+ * suppress the map art it replaces. It is gone. V2 had no such pass and looked
+ * right without one; the multiply cost a second material, a second draw and
+ * another way to half-fail — suppression drawing with no highlight reads as a
+ * shader bug rather than as a missing mask. Recorded as a deferred rung.
  *
  * ============================================================================
  * ⚠️ THE AABB COMES FROM THE FILE, NOT FROM A GRID
  * ============================================================================
  * Effects.md Law 6: cost scales with COVERED pixels, and metal covers a few
- * percent of a typical map. Water measures its AABB from the coarse derivation
- * grid because its jump flood already walks that grid. Nothing here floods
- * anything at tiers 0-2, so the bounds come from `vt/mask-image.js`'s own
- * single pass over the decoded file — measured while it is repacking the texels
- * it is already holding, by MAX of RGB rather than by red, because a
+ * percent of a typical map. The bounds come from `vt/mask-image.js`'s own pass
+ * over the decoded file, measured by MAX of RGB rather than by red — a
  * blue-painted steel object has `r = 0` and measuring by red would crop it out
  * of existence.
  *
@@ -40,42 +40,36 @@
 
 import { createLogger } from '../../core/log.js';
 import { buildSpecularSurfaceMaterial, SPECULAR_MASK_IMAGE_SCALE } from './specular-render.js';
-import { keyLightDirection } from './specular-material.js';
+import { keyLightDirection, describeSpecularMapping } from './specular-material.js';
+import { buildSpecularIslandPack } from './specular-islands.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 const log = createLogger('SpecularSurface');
 
-/** Padding on the measured AABB, world px. The mask is uploaded at
- * `SPECULAR_MASK_IMAGE_SCALE`, so the outermost painted texel covers up to a
- * couple of world px that the bounds arithmetic rounds off; a small pad means a
- * highlight can never be clipped by its own crop. Cheap — a few px on a bound
- * that is otherwise saving 95% of the screen. */
+/** Padding on the measured AABB, world px. The mask uploads at
+ * `SPECULAR_MASK_IMAGE_SCALE`, so the outermost painted texel covers a couple
+ * of world px the bounds arithmetic rounds off; a small pad means a highlight
+ * can never be clipped by its own crop. */
 const SPECULAR_BOUNDS_PAD_PX = 8;
 
 /**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
- * @param {(floorIndex: number) => string|null} args.getSpecularMaskUrl - boot's
- *   seam onto the floor's authored `_Specular` file. Null = no mask, which
- *   keeps the meshes hidden; there is nothing to fall back to and nothing that
- *   should be invented.
- * @param {(floorIndex: number) => object|null} args.getSpecularMaskRect - the
- *   world rect the authored file covers (the mask authority's grid spec).
- * @param {(opts: object) => Promise<object|null>} args.loadMaskImage -
- *   `vt/mask-image.js`'s loader, injected for the directory-wall reason every
- *   other effect injects it for (`gpu/textures-in-vt-only`).
+ * @param {(floorIndex: number) => string|null} args.getSpecularMaskUrl
+ * @param {(floorIndex: number) => object|null} args.getSpecularMaskRect
+ * @param {(opts: object) => Promise<object|null>} args.loadMaskImage
  * @param {(data: Uint8Array, w: number, h: number, filter: string) => *} args.createMaskTexture -
- *   the literal `new THREE.DataTexture(...)`, which may only be written in `vt/`.
+ *   the literal `new THREE.DataTexture(...)`, writable only in `vt/`.
+ * @param {(data: Float32Array, w: number, h: number) => *} args.createPackTexture -
+ *   the island pack's own uploader. ⚠️ MUST use NearestFilter — see `bakeIslandPack`.
  * @param {*} args.illumTexture - `buf:scene.illum`.
- * @param {*} args.albedoTexture - `buf:scene.color`, the UN-LIT composite. Tier
- *   3 reads its luminance gradient as the map art's own painted relief.
  * @param {*} [args.attrTexture] - `buf:scene.attr`; null compiles the floor gate out.
  * @param {*} args.uViewRect @param {*} args.uOutdoorsRect @param {*} args.outdoorsTexNode
  * @param {Function} args.buildOutdoorsGate
+ * @param {*} args.timeMsNode - THE shared clock (`uGlobalTimeMs`), never a private one.
  * @param {() => object} [args.getSpecularRenderState] - the look/enable seam.
- * @param {() => object|null} [args.getSkyHandle] - `effects/sky-access.js`'s
- *   handle for THIS frame. The ONE description of the outdoor light; this
- *   module never touches the hour (`env/one-sun`).
+ * @param {() => object|null} [args.getSkyHandle] - the sun's azimuth, for the
+ *   outdoor grain bias. The ONE description of the outdoor light.
  * @returns {{scene: *, sync: Function, getStatus: Function, dispose: Function}}
  */
 export function createSpecularSurfaceSubsystem({
@@ -84,18 +78,17 @@ export function createSpecularSurfaceSubsystem({
   getSpecularMaskRect,
   loadMaskImage,
   createMaskTexture,
+  createPackTexture,
   illumTexture,
-  albedoTexture,
   attrTexture = null,
   uViewRect,
   uOutdoorsRect,
   outdoorsTexNode,
   buildOutdoorsGate,
+  timeMsNode,
   getSpecularRenderState,
   getSkyHandle,
 }) {
-  // Default-off shape matching every other effect seam: an un-wired caller (the
-  // torture fixture) still renders, with the render module's own defaults.
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
   // DECLARED, defaulted, consumed and never passed — every control dead, every
   // test green (`feedback_seam_default_hides_unwired`).
@@ -109,12 +102,20 @@ export function createSpecularSurfaceSubsystem({
   geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
   geometry.setIndex(Array.from(QUAD_INDICES));
 
-  /** A 1×1 all-zero (no metal) placeholder until the real mask decodes. The
-   * meshes stay hidden until then, so this is never actually sampled — which is
-   * why the shader needs no "do I have a mask yet" uniform gate
-   * (`tsl/no-uniform-gates`): `mesh.visible` is the gate, JS-side. */
+  /** 1×1 placeholders until the real files decode. The mesh stays hidden until
+   * then, so neither is ever sampled — which is why the shader needs no "do I
+   * have a mask yet" uniform gate (`tsl/no-uniform-gates`): `mesh.visible` IS
+   * the gate, JS-side. The pack's placeholder is `(1, 0)` — the GLOBAL parallax
+   * — because a zero there would freeze the pattern solid, which looks exactly
+   * like the effect having died. */
   let maskTexture = createMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 'linear');
+  let islandPackTexture = createPackTexture(new Uint8Array([191, 128, 0, 0]), 1, 1);
   let maskInfo = null;
+  let islandInfo = null;
+  /** Mirrors the value last pushed to `surface.setIslandBakeStatus`, so the
+   * JS-side report can be cross-checked against what channel 6 is actually
+   * showing without needing GPU access. 0 = never baked. */
+  let islandBakeStatus = 0;
   let loadedUrl = null;
   let loadedFloor = -1;
   let loading = false;
@@ -123,61 +124,124 @@ export function createSpecularSurfaceSubsystem({
   let enabled = true;
   let lastParamsKey = '';
   let lastSkyKey = '';
+  /** Which debug intermediate is on screen — 0 = the effect as it ships. */
+  let debugChannel = 0;
+  let loadedMaskRect = null;
+  let loadedContentBoundsUv = null;
+  /** The crop's extent in mask-UV space — the ENTIRE mask lookup. */
+  let paddedBoundsUv = null;
+  let lastViewRect = null;
+  /** The decoded mask bytes, held only until the pack is baked from them.
+   * Released immediately after: a full-resolution RGBA buffer is tens of MB and
+   * nothing needs it once the labels are packed. */
+  let pendingBytes = null;
+  /** The author's island spread, so a slider change can rebake. */
+  let islandSpread = 1;
 
   const surface = buildSpecularSurfaceMaterial({
     THREE,
     maskTexture,
-    // A unit rect until the real one arrives with the mask; the meshes are
-    // hidden until then, so nothing samples through it.
-    maskRect: { minX: 0, minY: 0, maxX: 1, maxY: 1 },
+    islandPackTexture,
     illumTexture,
-    albedoTexture,
     attrTexture,
     uViewRect,
     uOutdoorsRect,
     outdoorsTexNode,
     buildOutdoorsGate,
+    timeMsNode,
   });
 
-  // TWO meshes over ONE geometry — the diffuse knock-down is a MULTIPLY and the
-  // highlights are an ADD, and blend state is per-material (see
-  // `specular-render.js`'s header for why one alpha cannot be both). They share
-  // the geometry object, so the AABB crop below writes exactly one position
-  // buffer. Suppression strictly precedes the highlight: that is the physical
-  // order (a conductor has no diffuse to begin with, THEN it reflects), and
-  // although multiply and add commute over a destination it costs nothing to
-  // be right.
-  const meshes = [
-    Object.assign(new THREE.Mesh(geometry, surface.suppressMaterial), { renderOrder: 0 }),
-    Object.assign(new THREE.Mesh(geometry, surface.specularMaterial), { renderOrder: 1 }),
-  ];
-  for (const m of meshes) {
-    m.frustumCulled = false; // world-space; the camera rect moves every frame
-    m.visible = false; // until the mask AND its rect land
-    scene.add(m);
-  }
+  // ONE MESH, ADDITIVE — see the header for why the multiply pass is gone.
+  const mesh = new THREE.Mesh(geometry, surface.specularMaterial);
+  mesh.frustumCulled = false; // world-space; the camera rect moves every frame
+  mesh.visible = false; // until the mask AND its rect land
+  scene.add(mesh);
 
-  /** The ONE place visibility is decided, so the conditions cannot drift apart
-   * across the call sites that each learn about one of them — and so the two
-   * meshes can never drift apart either. Half a shine pass (suppression with no
-   * highlight) is a far worse failure than none, and it would read as a shader
-   * bug rather than as a missing mask. */
+  /**
+   * The ONE place visibility is decided, so the conditions cannot drift apart
+   * across the call sites that each learn about one of them.
+   *
+   * It also owns the DEBUG SWAP: at a non-zero channel the mesh draws
+   * `debugMaterial` OPAQUE instead of the additive shine. At channel 0 that
+   * material is attached to nothing, which is what makes the instrument
+   * genuinely free rather than merely cheap.
+   */
   function refreshVisibility() {
-    const show = enabled && !!loadedUrl && !!contentBoundsWorld;
-    for (const m of meshes) m.visible = show;
+    mesh.visible = enabled && !!loadedUrl && !!contentBoundsWorld;
+    mesh.material = debugChannel > 0 ? surface.debugMaterial : surface.specularMaterial;
   }
 
   /**
-   * Load the floor's `_Specular` file at `SPECULAR_MASK_IMAGE_SCALE`, in RGB,
-   * and crop the quad to whatever is painted in it. Async and idempotent; the
-   * meshes stay hidden until it lands, which needs no shader-side fallback.
+   * Label the mask's connected regions and upload their parallax.
+   *
+   * ⚠️ **NearestFilter, and it is not a preference.** Interpolating parallax
+   * vectors across an island boundary produces a motion that belongs to neither
+   * island, in a band around every object — the same reasoning that makes
+   * water's jump-flood ping-pong targets nearest. `createPackTexture` owns that
+   * choice; this comment is here because the consequence is invisible until
+   * someone changes it.
+   *
+   * Baked from the bytes rather than re-fetched: `loadMaskImage` already
+   * decoded the file, and a second decode of a 10k-wide PNG to answer a
+   * question the first decode could have answered is pure latency.
+   *
+   * @param {number} spread
+   */
+  function bakeIslandPack(spread) {
+    if (!pendingBytes) return;
+    try {
+      const pack = buildSpecularIslandPack({
+        rgba: pendingBytes.data,
+        width: pendingBytes.width,
+        height: pendingBytes.height,
+        spread,
+      });
+      islandPackTexture?.dispose?.();
+      islandPackTexture = createPackTexture(pack.data, pack.w, pack.h);
+      surface.setIslandPackTexture(islandPackTexture);
+      // Debug channel 6's own status — set ONLY on a successful bake, so a
+      // THROW below (caught further down) leaves it at whatever it already
+      // was rather than claiming success: never-baked stays 0, a re-bake that
+      // fails after an earlier good one keeps reporting the LAST good state
+      // rather than silently reverting to "never baked".
+      islandBakeStatus = pack.islandCount > 0 ? 2 : 1;
+      surface.setIslandBakeStatus(islandBakeStatus);
+      islandInfo = {
+        grid: `${pack.w}x${pack.h}`,
+        islands: pack.islandCount,
+        droppedSmall: pack.droppedSmall,
+        // A file whose metal labels to ZERO islands still renders — every texel
+        // takes the global parallax — so this number is the difference between
+        // "per-object motion is working" and "it silently degraded to V2's
+        // one-frame-for-everything", which is invisible on screen.
+        labelledTexels: pack.labelledTexels,
+        // BEFORE the merge step ran — the gap between this and
+        // `islands + droppedSmall` is how many separate specks clustering
+        // joined together. Live-diagnosed 2026-07-27: a scatter of coin-sized
+        // detail a texel or two apart is individually sub-threshold and was
+        // being dropped in full, reporting `islands: 0` with no bake error at
+        // all — this number is what makes that distinguishable from "there
+        // really was nothing to find" without guessing.
+        preClusterComponents: pack.preClusterComponents,
+      };
+    } catch (err) {
+      // Loud, and the effect still draws: the pack's placeholder is the global
+      // parallax, so a failed bake costs per-object variety and nothing else.
+      log.error('specular island pack bake failed — falling back to global parallax:', err);
+    }
+  }
+
+  /**
+   * Load the floor's authored specular file, crop the quad to whatever is
+   * painted in it, and bake the island pack. Async and idempotent; the mesh
+   * stays hidden until it lands, which needs no shader-side fallback.
    * @param {number} floorIndex
    */
   function ensureMaskImage(floorIndex) {
     const url = getSpecularMaskUrl(floorIndex);
-    // Keyed on floor AS WELL AS url: two floors can legitimately share a
-    // `_Specular` file path in a scene built by duplication, and re-reading the
-    // rect on a floor switch is what keeps the mapping right when they do.
+    // Keyed on floor AS WELL AS url: two floors can legitimately share a file
+    // path in a scene built by duplication, and re-reading the rect on a floor
+    // switch is what keeps the mapping right when they do.
     if (!url || loading || (url === loadedUrl && floorIndex === loadedFloor)) return;
     loading = true;
     const requestedFloor = floorIndex;
@@ -192,21 +256,30 @@ export function createSpecularSurfaceSubsystem({
         }
         maskTexture?.dispose?.();
         maskTexture = loaded.texture;
-        surface.maskTexNode.value = loaded.texture;
-        surface.setMaskRect(rect);
+        surface.setMaskTexture(loaded.texture);
         surface.setFloorIndex(requestedFloor);
         loadedUrl = url;
         loadedFloor = requestedFloor;
+        loadedMaskRect = rect;
+        loadedContentBoundsUv = loaded.contentBounds ?? null;
         contentBoundsWorld = toWorldBounds(loaded.contentBounds, rect);
+        // THE MASK LOOKUP'S ONLY INPUT, derived from the SAME world bounds the
+        // quad is cropped to rather than from `contentBounds` directly — so the
+        // AABB pad is carried automatically and the two can never disagree
+        // about where the quad's edges are.
+        paddedBoundsUv = toUvBounds(contentBoundsWorld, rect);
+        if (paddedBoundsUv) surface.setMaskUvBounds(paddedBoundsUv);
+        pendingBytes = loaded.data ? { data: loaded.data, width: loaded.width, height: loaded.height } : null;
+        bakeIslandPack(islandSpread);
         maskInfo = {
           url,
           uploaded: `${loaded.width}x${loaded.height}`,
           native: `${loaded.nativeWidth}x${loaded.nativeHeight}`,
           mb: +(loaded.bytes / (1024 * 1024)).toFixed(1),
           // A file with metal painted edge to edge is legitimate and reports
-          // the full rect; a file that reports NOTHING painted is the case
-          // worth seeing in the report, because the meshes then stay hidden and
-          // "no shine" would otherwise look identical to "effect broken".
+          // the full rect; a file reporting NOTHING painted is the case worth
+          // seeing, because the mesh then stays hidden and "no shine" would
+          // otherwise look identical to "effect broken".
           painted: contentBoundsWorld ? 'yes' : 'NOTHING PAINTED',
         };
         cropGeometry();
@@ -216,6 +289,31 @@ export function createSpecularSurfaceSubsystem({
         loading = false;
         log.error('specular mask image load rejected —', err);
       });
+  }
+
+  /**
+   * The PADDED world AABB back into mask-UV space — the exact inverse of
+   * `toWorldBounds`, and the only thing the shader's mask lookup consumes.
+   *
+   * Taking the round trip rather than returning `contentBounds` unchanged is
+   * the point: `toWorldBounds` adds the pad, so the quad is slightly LARGER
+   * than the painted content, and handing the shader the unpadded bounds would
+   * sample the mask slightly zoomed-in — every glint shifted by a few world px,
+   * an error that looks like nothing and is impossible to unsee once found.
+   *
+   * @param {object|null} world @param {object} rect @returns {object|null}
+   */
+  function toUvBounds(world, rect) {
+    if (!world) return null;
+    const w = rect.maxX - rect.minX;
+    const h = rect.maxY - rect.minY;
+    if (!(Math.abs(w) > 1e-6 && Math.abs(h) > 1e-6)) return null;
+    return {
+      minU: (world.minX - rect.minX) / w,
+      minV: (world.minY - rect.minY) / h,
+      maxU: (world.maxX - rect.minX) / w,
+      maxV: (world.maxY - rect.minY) / h,
+    };
   }
 
   /** UV-space content bounds × the mask's world rect → a padded world AABB.
@@ -247,8 +345,7 @@ export function createSpecularSurfaceSubsystem({
       posAttr.array.set(positions);
       // Same buffer, new contents. ⚠️ `BufferAttribute` has NO `dispose()` and
       // `setAttribute` is a bare assignment, so replacing the attribute leaks
-      // its native GPU buffer — the exact device-loss bug the point-light pool
-      // paid for (`reference_bufferattribute_no_dispose_trap`).
+      // its native GPU buffer (`reference_bufferattribute_no_dispose_trap`).
       posAttr.needsUpdate = true;
     } else {
       geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -256,108 +353,154 @@ export function createSpecularSurfaceSubsystem({
   }
 
   /**
-   * Per-frame. Called from `runSurfaceResponsePass` BEFORE the draw.
-   *
+   * Per-frame, called from `runSurfaceResponsePass` BEFORE the draw.
    * @param {number} floorIndex - the VIEWED floor.
-   * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} viewRect -
-   *   the camera's world rect, for the synthesised eye position.
+   * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} viewRect
    */
   function sync(floorIndex, viewRect) {
     ensureMaskImage(floorIndex);
 
-    // THE EYE. Pushed every frame and NEVER gated on anything: this is the
-    // whole reason a highlight moves when the author pans, so a cached-key
-    // skip here would silently restore V2's static look
+    // THE CAMERA. Pushed every frame and NEVER gated on a cached key: this is
+    // the whole reason the shimmer moves when the author pans, so a skip here
+    // would silently restore a painted-on look
     // (`feedback_residency_sync_vs_render_loop`, the same class).
     if (viewRect) {
       surface.setViewCentre((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
+      lastViewRect = viewRect;
     }
 
-    // THE SKY, as ONE description of ONE afternoon. Cached on a key because it
-    // only changes when the clock or the weather does, unlike the eye.
+    // THE SUN'S AZIMUTH — one unit vector, the only route its direction has
+    // into this effect. Cached on a key because it moves with the clock, not
+    // with the camera.
     const sky = getSkyHandle();
     if (sky?.key) {
-      const skyKey = `${sky.version}|${sky.key.azimuthDeg}|${sky.key.elevationDeg}|${sky.key.strength}|${sky.fill?.strength}`;
+      const skyKey = `${sky.version}|${sky.key.azimuthDeg}|${sky.key.elevationDeg}`;
       if (skyKey !== lastSkyKey) {
         lastSkyKey = skyKey;
-        surface.setSky({
-          keyDir: keyLightDirection(sky.key),
-          keyColor: sky.key.colorRgb ?? [1, 1, 1],
-          keyStrength: sky.key.strength ?? 0,
-          fillColor: sky.fill?.colorRgb ?? [1, 1, 1],
-          fillStrength: sky.fill?.strength ?? 0,
-        });
+        const dir = keyLightDirection(sky.key);
+        surface.setSunDir(dir[0], dir[1]);
       }
     }
 
-    // THE LOOK PARAMS. Cheap (a string compare against cached uniform writes)
-    // and, like water's, NOT gated on any load generation: a slider drag
-    // changes no texture and produces no reload, so gating these on the mask
-    // would make every control in the panel do nothing.
+    // THE LOOK PARAMS. A string compare against cached uniform writes, and NOT
+    // gated on any load generation: a slider drag changes no texture and
+    // produces no reload, so gating these on the mask would make every control
+    // in the panel do nothing.
     const state = getSpecularRenderState();
     const p = state.params ?? {};
+    const layerParams = state.layers ?? [];
     const key = [
       state.enabled ? 1 : 0,
+      state.debugChannel ?? 0,
       p.strength,
-      p.polish,
-      p.metalResponse,
-      p.viewerHeight,
-      p.relief,
-      p.sunGlint,
-      p.skySheen,
-      p.lampGlint,
-      p.lampHeight,
-      p.ambientSheen,
+      p.saturation,
+      p.shimmerGain,
+      p.patternScalePx,
+      p.lightFloor,
+      p.parallaxStrength,
+      p.islandSpread,
+      p.driftSpeed,
+      p.pulse,
+      p.sunBias,
+      JSON.stringify(layerParams),
     ].join('|');
-    if (key !== lastParamsKey) {
-      lastParamsKey = key;
-      if (Number.isFinite(p.strength)) surface.setStrength(p.strength);
-      if (Number.isFinite(p.polish)) surface.setPolish(p.polish);
-      if (Number.isFinite(p.metalResponse)) surface.setMetalResponse(p.metalResponse);
-      if (Number.isFinite(p.viewerHeight)) surface.setViewerHeight(p.viewerHeight);
-      if (Number.isFinite(p.relief)) surface.setRelief(p.relief);
-      if (Number.isFinite(p.sunGlint)) surface.setSunGlint(p.sunGlint);
-      if (Number.isFinite(p.skySheen)) surface.setSkySheen(p.skySheen);
-      if (Number.isFinite(p.lampGlint)) surface.setLampGlint(p.lampGlint);
-      if (Number.isFinite(p.lampHeight)) surface.setLampHeight(p.lampHeight);
-      if (Number.isFinite(p.ambientSheen)) surface.setAmbientSheen(p.ambientSheen);
-      enabled = state.enabled !== false;
-      refreshVisibility();
+    if (key === lastParamsKey) return;
+    lastParamsKey = key;
+
+    if (Number.isFinite(p.strength)) surface.setStrength(p.strength);
+    if (Number.isFinite(p.saturation)) surface.setSaturation(p.saturation);
+    if (Number.isFinite(p.shimmerGain)) surface.setShimmerGain(p.shimmerGain);
+    if (Number.isFinite(p.patternScalePx)) surface.setPatternScale(p.patternScalePx);
+    if (Number.isFinite(p.lightFloor)) surface.setLightFloor(p.lightFloor);
+    if (Number.isFinite(p.parallaxStrength)) surface.setParallaxStrength(p.parallaxStrength);
+    if (Number.isFinite(p.driftSpeed)) surface.setDriftSpeed(p.driftSpeed);
+    if (Number.isFinite(p.pulse)) surface.setPulse(p.pulse);
+    if (Number.isFinite(p.sunBias)) surface.setSunBias(p.sunBias);
+
+    for (let i = 0; i < layerParams.length; i++) {
+      const L = layerParams[i] ?? {};
+      if (Number.isFinite(L.density)) surface.setLayerDensity(i, L.density);
+      if (Number.isFinite(L.grainAngleDeg)) surface.setLayerGrainAngle(i, L.grainAngleDeg);
+      if (Number.isFinite(L.streak)) surface.setLayerStreak(i, L.streak);
+      if (Number.isFinite(L.softness)) surface.setLayerSoftness(i, L.softness);
+      if (Number.isFinite(L.rowSpacing)) surface.setLayerRowSpacing(i, L.rowSpacing);
+      if (Number.isFinite(L.contrast)) surface.setLayerContrast(i, L.contrast);
+      if (Number.isFinite(L.strength)) surface.setLayerStrength(i, L.strength);
+      if (Number.isFinite(L.parallaxDepth)) surface.setLayerParallaxDepth(i, L.parallaxDepth);
     }
+
+    // ⚠️ `islandSpread` is the ONE param that costs a REBAKE rather than a
+    // uniform write — the hashed parallax is resolved on the CPU, per island,
+    // and lives in the pack. Guarded on an actual change so dragging any OTHER
+    // slider does not relabel the map: the params key above fires on all of
+    // them together.
+    if (Number.isFinite(p.islandSpread) && p.islandSpread !== islandSpread) {
+      islandSpread = p.islandSpread;
+      bakeIslandPack(islandSpread);
+    }
+
+    debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
+    surface.setDebugChannel(debugChannel);
+    enabled = state.enabled !== false;
+    refreshVisibility();
   }
 
   return {
     /** The dedicated scene `runSurfaceResponsePass` renders. */
     scene,
     sync,
+    /** Thin passthrough to `surface.setDarknessFloor` — see that setter's own
+     * doc. Called from `runLightAccumulatePass`, not from `sync`, because
+     * that is where the floor value is already computed for
+     * `uRegionDarknessColor`; a second derivation here would be how the two
+     * drift. @param {number} r @param {number} g @param {number} b */
+    setDarknessFloor: (r, g, b) => surface.setDarknessFloor(r, g, b),
     /** True when there is genuinely something to draw — lets the pass take a
-     * true JS early-return rather than issuing a render call for two hidden
-     * meshes (Effects.md Law 4: gating by uniform is not gating). */
-    hasContent: () => meshes[0].visible,
+     * true JS early-return rather than issuing a render call for a hidden mesh
+     * (Effects.md Law 4: gating by uniform is not gating). */
+    hasContent: () => mesh.visible,
     getStatus() {
       return {
-        visible: meshes[0].visible,
+        visible: mesh.visible,
+        // Non-zero means the author is looking at a DIAGNOSTIC, not at the
+        // effect — reported so a channel can never be silently left on and then
+        // mistaken for a rendering bug.
+        debugChannel,
         enabled,
         floor: loadedFloor,
         bounds: contentBoundsWorld,
-        // `null`/'not loaded' means no authored `_Specular` for this floor, so
-        // the effect is inert BY DESIGN rather than broken — the distinction
-        // the report exists to make.
         maskImage: maskInfo ?? 'not loaded',
-        // Which branches actually COMPILED. `outdoorsGate: false` means every
-        // pixel takes the indoor path regardless of what the map looks like,
-        // and `floorGate: false` means metal will draw over upper-floor roofs —
-        // both are silent on screen and neither should be guessed at.
+        /** The per-object motion's own report. `islands: 0` means every texel
+         * fell back to the global parallax — the effect still draws, and looks
+         * exactly like V2's one-frame-for-everything, which is invisible on
+         * screen and worth stating. */
+        islandPack: islandInfo ?? 'not baked',
+        /** Mirrors debug channel 6's own diagnostic exactly — 0 magenta
+         * (never baked), 1 amber (baked, zero islands), 2 (real islands, the
+         * hue-per-object picture). Cross-checkable against the shader without
+         * GPU access. */
+        islandBakeStatus,
         outdoorsGate: surface.outdoorsGateCompiled,
         floorGate: surface.floorGateCompiled,
+        contentBoundsUv: loadedContentBoundsUv,
+        maskUvBounds: paddedBoundsUv,
+        mapping: describeSpecularMapping({
+          maskRect: loadedMaskRect,
+          quadWorld: contentBoundsWorld,
+          viewRect: lastViewRect,
+        }),
       };
     },
     dispose() {
-      for (const m of meshes) scene.remove(m);
-      geometry.dispose(); // shared by both meshes — disposed once, not per mesh
-      surface.suppressMaterial?.dispose?.();
+      scene.remove(mesh);
+      geometry.dispose();
       surface.specularMaterial?.dispose?.();
+      // The debug material too — built eagerly whether or not a channel was
+      // ever picked, so "nobody used it" is not a reason to leave it.
+      surface.debugMaterial?.dispose?.();
       maskTexture?.dispose?.();
+      islandPackTexture?.dispose?.();
+      pendingBytes = null;
     },
   };
 }

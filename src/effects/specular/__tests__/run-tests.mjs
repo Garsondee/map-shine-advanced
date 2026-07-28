@@ -13,8 +13,10 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runSpecularMaterial } from './specular-material.test.mjs';
-import { run as runSpecularLobes } from './specular-lobes.test.mjs';
+import { run as runSpecularPattern } from './specular-pattern.test.mjs';
+import { run as runSpecularIslands } from './specular-islands.test.mjs';
 import { run as runSpecularRender } from './specular-render.test.mjs';
+import { run as runSpecularSubsystem } from './specular-surface-subsystem.test.mjs';
 import { run as runSpecular } from './specular.test.mjs';
 
 let passed = 0;
@@ -46,13 +48,21 @@ const t = {
 
 const suites = [
   ['specular-material', runSpecularMaterial],
-  ['specular-lobes', runSpecularLobes],
+  ['specular-pattern', runSpecularPattern],
+  ['specular-islands', runSpecularIslands],
   ['specular-render', runSpecularRender],
+  ['specular-surface-subsystem', runSpecularSubsystem],
   ['specular', runSpecular],
 ];
+// AWAITED, not called-and-dropped: `specular-surface-subsystem.test.mjs` has to
+// let the mask load settle (the subsystem's own `.then`) before it can assert
+// on visibility, and a dropped promise here would let its assertions run AFTER
+// the summary printed — reporting green on a suite that had not finished, which
+// is the exact shape of a lying instrument (`feedback_instruments_must_not_lie`).
+// Top-level await; sync suites await to `undefined` and are unaffected.
 for (const [name, fn] of suites) {
   const before = failed;
-  fn(t);
+  await fn(t);
   console.log(`  ${name}: ${failed === before ? 'ok' : 'FAILED'}`);
 }
 

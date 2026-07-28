@@ -163,26 +163,52 @@ export {
 export { createWaterSurfaceSubsystem } from './water/water-surface-subsystem.js';
 export { createWaterSeams } from './water/water-seams.js';
 export { createWaterRegistration } from './water/water-registration.js';
-// SHINE (docs/planning/Specular.md) — `surface.response`, tiers 0-2. The
-// `_Specular` mask read as a MATERIAL (hue→F0, saturation→metalness,
-// value→smoothness) instead of as V2's single luminance plus a global tint,
-// and the indoor/outdoor split made physical: outdoors reflects the sky handle's
-// two analytic lobes, indoors reflects the lamps, whose DIRECTION comes from
-// the gradient of `buf:scene.illum` rather than from a light list.
+// SHINE (docs/planning/Specular.md) — `surface.response`. An ANIMATED FIELD of
+// shimmers, gradients and patterns painted across the metal the specular mask
+// marks: sliding with the camera, evolving slowly, gated by the scene lighting
+// and by indoors/outdoors. The mask reads as STRENGTH + TINT (darker paint is
+// less shiny; its hue says which metal).
+//
+// ⚠️ THE PBR MODEL THAT USED TO BE HERE IS GONE (2026-07-27) — GGX, Smith,
+// Schlick, a split-sum environment BRDF and a synthesised eye height, all of it
+// manufacturing angular variation that an orthographic camera over a flat map
+// does not have. It shipped invisible four times. `specular-pattern.js`'s
+// header carries the full account; `specular.js`'s carries the doctrine that
+// went with it, including the rule it had to retract.
 export {
-  decodeSpecularMaterial,
+  decodeSpecularMask,
+  describeSpecularMapping,
   keyLightDirection,
-  ggxDistribution,
-  smithVisibility,
-  schlickFresnel,
-  srgbToLinear01,
   SPECULAR_PRESENCE_EDGE0,
   SPECULAR_PRESENCE_EDGE1,
-  DIELECTRIC_F0,
-  MIN_ROUGHNESS,
+  SPECULAR_ALPHA_EPSILON,
 } from './specular/specular-material.js';
-export { SPECULAR, SPECULAR_PARAMS } from './specular/specular.js';
-export { buildSpecularSurfaceMaterial, SPECULAR_MASK_IMAGE_SCALE } from './specular/specular-render.js';
+export {
+  anisotropicBlob,
+  shimmerLayer,
+  sunGrainBias,
+  cellScaleForStrength,
+  parallaxOffset,
+} from './specular/specular-pattern.js';
+export {
+  buildSpecularIslandPack,
+  presenceGridFromRgba,
+  islandParallax,
+  SPECULAR_ISLAND_MAX_DIM,
+} from './specular/specular-islands.js';
+export {
+  SPECULAR,
+  SPECULAR_PARAMS,
+  SPECULAR_LAYER_PARAMS,
+  SPECULAR_DEBUG_CHANNELS,
+  SPECULAR_DEBUG_BOOST,
+} from './specular/specular.js';
+export {
+  buildSpecularSurfaceMaterial,
+  SPECULAR_MASK_IMAGE_SCALE,
+  SPECULAR_LAYER_DEFAULTS,
+  SPECULAR_LAYER_COUNT,
+} from './specular/specular-render.js';
 export { createSpecularSurfaceSubsystem } from './specular/specular-surface-subsystem.js';
 export { createSpecularSeams } from './specular/specular-seams.js';
 export { createSpecularRegistration } from './specular/specular-registration.js';
@@ -214,7 +240,7 @@ export {
   FLUID_PACK_MAX_DIM,
   FLUID_PACK_CHANNELS,
 } from './fluid/fluid-pack.js';
-export { buildFluidSurfaceMaterial } from './fluid/fluid-render.js';
+export { buildFluidSurfaceMaterials, FLUID_ABSORPTION_STRENGTH } from './fluid/fluid-render.js';
 export { createFluidSurfaceSubsystem } from './fluid/fluid-surface-subsystem.js';
 export { createFluidRegistration, createFluidSeams } from './fluid/fluid-registration.js';
 export {
@@ -250,6 +276,30 @@ export {
 // `buildSurfaceResponsePass` is GONE (2026-07-26) — surface.response is live
 // (tiers 0-2, docs/planning/Specular.md) and its NotBuilt door was deleted with
 // the seam it stood for. The real exports are the specular/ block above.
+// WINDOW LIGHT (docs/planning/Windows.md) — `light.accumulate`. Tier 0 only:
+// author-confirmed 2026-07-27, `_Window` is a hand-painted INTERIOR light
+// cookie (value = level, hue+saturation = tint) — not an aperture to project
+// through. ADDS onto buf:scene.illum, never onto composed scene colour. Cloud
+// shadows are a WIRED SEAM (window-render.js#cloudFactorNode, defaults to a
+// constant 1) — world/cloud-field.js does not exist yet; see window.js's own
+// header and its `deferredRungs` entry for what plugs in there.
+export {
+  decodeWindowMask,
+  cookieRgb,
+  WINDOW_PRESENCE_EDGE0,
+  WINDOW_PRESENCE_EDGE1,
+  WINDOW_ALPHA_EPSILON,
+} from './window/window-cookie.js';
+export { WINDOW, WINDOW_PARAMS, WINDOW_DEBUG_CHANNELS, WINDOW_DEBUG_BOOST } from './window/window.js';
+export {
+  buildWindowSurfaceMaterial,
+  WINDOW_MASK_IMAGE_SCALE,
+  WINDOW_DEFAULT_STRENGTH,
+  WINDOW_DEFAULT_CONTRAST,
+} from './window/window-render.js';
+export { createWindowSurfaceSubsystem } from './window/window-surface-subsystem.js';
+export { createWindowSeams } from './window/window-seams.js';
+export { createWindowRegistration } from './window/window-registration.js';
 
 // ── EFFECT REGISTRATION (docs/planning/Effect-Registration.md) ──────────────
 // The ONE door for an effect's enable/params/tier. UI-shadow is the first

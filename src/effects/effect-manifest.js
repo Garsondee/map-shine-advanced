@@ -39,6 +39,50 @@ const COST_CLASS_ORDER = ['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8'];
  */
 
 /**
+ * HOW YOU PUT THIS EFFECT ON THE MAP — the declaration behind the ＋ button in
+ * every effect card's header (2026-07-27, author: "there should be a prominent ＋
+ * button… the idea being that we make it easy to see how you might add each
+ * effect and give it a prominent and reliable place").
+ *
+ * `{ paint }` is one `scene/mask-catalog.js` kind id, or an array of them for an
+ * effect painted through more than one mask (vegetation's tree/bush pair). Absent
+ * means the effect has no ＋ at all, which is the RIGHT answer for a whole-image
+ * post effect — there is nowhere on the map to put bloom. Sun shadows has none
+ * either: it derives its casters from walls and buildings, and the `shadow` mask
+ * belongs to the lighting pass, not to it.
+ *
+ * ⚠️ PLACEMENT IS NOT DECLARED HERE, DELIBERATELY. `scene/anchor-catalog.js`'s
+ * `ANCHOR_KINDS` already carry `effectId` and already have an `anchorsForEffect`
+ * lookup — a second declaration saying the same thing is a second thing to drift.
+ * Painting needs one because masks are SHARED (the `window` mask feeds both window
+ * light and structural shadows), so "which mask does this effect's ＋ paint" is a
+ * fact about the effect, not about the mask.
+ *
+ * Shape only — that `paint` names a mask kind which actually EXISTS and is
+ * actually paintable is checked by a Node test against MASK_KINDS, not here:
+ * importing the mask catalog from `effects/` would add an import edge for one
+ * lookup. A ghost reference fails the build either way.
+ *
+ * @param {{paint?: string|string[]}} [a]
+ * @returns {string[]} problems, empty when fine (an absent block is fine).
+ */
+export function validateAuthoring(a) {
+  if (a === undefined || a === null) return [];
+  const errors = [];
+  if (typeof a !== 'object' || Array.isArray(a)) return ['authoring must be an object when present'];
+  if ('paint' in a) {
+    const list = Array.isArray(a.paint) ? a.paint : [a.paint];
+    if (list.length === 0) errors.push('authoring.paint must name at least one mask kind when present');
+    for (const k of list) {
+      if (typeof k !== 'string' || k.length === 0) {
+        errors.push(`authoring.paint entry ${JSON.stringify(k)} must be a non-empty mask-kind id`);
+      }
+    }
+  }
+  return errors;
+}
+
+/**
  * Validate an effect manifest as data. Returns every problem at once (like the
  * sibling validators) so a bad declaration is fixed in one pass, not N.
  *
@@ -75,6 +119,8 @@ export function validateEffectManifest(m) {
 
   const ps = validateParamsSchema(m.params);
   if (!ps.ok) for (const e of ps.errors) fail(`params.${e}`);
+
+  for (const e of validateAuthoring(m.authoring)) fail(e);
 
   if (!Array.isArray(m.tiers) || m.tiers.length === 0) {
     fail('tiers must be a non-empty array (tier 0 is the coarse pin — Effects.md §1)');

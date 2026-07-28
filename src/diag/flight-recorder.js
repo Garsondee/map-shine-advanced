@@ -118,8 +118,14 @@ export const FRAME_SAMPLE_EVERY = 10;
  * Frame-time histogram buckets, in ms, as [upperBoundExclusive, label]. The
  * boundaries are the ones a person actually reasons in (fps bands), not even
  * powers of two — a report is read by a human before it is read by anything else.
+ *
+ * EXPORTED (2026-07-27) so `diag/perf-report.js` bins against these EXACT bands
+ * rather than declaring its own. Two instruments that disagree about where
+ * "60fps" ends produce two reports that cannot be read side by side — this
+ * file's own header makes that argument about `HITCH_THRESHOLD_MS`, and it
+ * applies identically here.
  */
-const HISTOGRAM_BUCKETS = Object.freeze([
+export const HISTOGRAM_BUCKETS = Object.freeze([
   [8.34, '>120fps'],
   [16.7, '60-120fps'],
   [33.4, '30-60fps'],
@@ -607,7 +613,6 @@ export function captureEnvironment(MapShine) {
 
   tryField('msa', () => ({
     version: MapShine?.version ?? null,
-    codename: MapShine?.codename ?? null,
     stage: MapShine?.__stage ?? null,
     booted: !!MapShine?.__keyholeBooted,
     threeRevision: MapShine?.THREE?.REVISION ?? null,

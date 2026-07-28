@@ -112,30 +112,73 @@ export function createFluidRegistration({
 }
 
 /**
- * How fluid asks the mask authority for its file.
+ * How fluid asks the mask authority for its files — PER ITEM, not per floor.
  *
- * One seam, not water's three: fluid needs only the AUTHORED FILE at its own
- * resolution. It has no coarse-grid consumer (correction #2 — the derivation
- * grid merges adjacent tubes, so the extractor reads the file) and no
- * cross-floor borrow (a tube on another floor is not visible through a hole the
- * way a river is; if that ever changes it is `resolveWaterFloor`'s shape and
- * belongs beside it, not reinvented).
+ * ============================================================================
+ * ⚠️ THIS SEAM IS THE BUG THAT MADE THE EFFECT RENDER NOTHING (2026-07-26)
+ * ============================================================================
+ * The first version asked `authoredStatus(levelId, 'fluid')`, copying
+ * `water-seams.js` and `specular-seams.js`. Those are right for THEM: a river
+ * and a metal floor are painted into a level's own background art, and that is
+ * exactly the case `authoredStatus`'s own doc says it covers — *"a convenience
+ * wrapper for the single most common case, this LEVEL's own BACKGROUND file"*.
+ *
+ * **Glass tubes are painted on TILES.** The author's map has them on an
+ * overhead tile; V2's `FluidEffectV2` walked `canvas.scene.tiles.contents` for
+ * exactly this reason. Through the background-only door a tile's mask is
+ * invisible, so the lookup returned null on every frame, the mesh never became
+ * visible, and NOTHING ANYWHERE ERRORED — the failure mode this project names
+ * `feedback_seam_default_hides_unwired`.
+ *
+ * `keyhole-mask-any-item-decision` already said so as standing doctrine:
+ * *every mask attaches to ANY item — tile, level background, or level
+ * foreground, symmetrically, for EVERY effect.* The door for that is
+ * `authoredStatusForItem`, and this seam now uses it for every item on the
+ * floor, background and tile alike.
  *
  * @param {object} args
- * @param {object} args.maskAuthority
- * @param {() => Array<{index:number, id:string}>|null} args.getFloors - a
- *   GETTER: the floor list is replaced on every scene load and floor switch,
- *   and capturing the array would pin the first scene's floors forever.
- * @returns {{getFluidMaskUrl: (floorIndex: number) => string|null}}
+ * @param {object} args.maskAuthority - `scene/mask-authority.js`'s instance.
+ * @param {() => Array<object>} args.getItems - the scene's current item list. A
+ *   GETTER: it is replaced on every scene load, and capturing the array would
+ *   pin the first scene's items forever.
+ * @param {() => Array<{index:number, id:string}>|null} args.getFloors
+ * @param {(item: object) => Array<{x:number,y:number}>|null} args.getItemCorners -
+ *   the item's world-space quad corners, resolved by the caller (which owns the
+ *   texture sizes the placement needs). Null when the item's art has not
+ *   resolved yet, which simply defers it to a later frame.
+ * @returns {{getFluidMaskItems: (floorIndex: number) => Array<{id:string,url:string,corners:Array}>}}
  */
-export function createFluidSeams({ maskAuthority, getFloors }) {
+export function createFluidSeams({ maskAuthority, getItems, getFloors, getItemCorners }) {
   return {
-    getFluidMaskUrl: (floorIndex) => {
+    getFluidMaskItems: (floorIndex) => {
       const floors = getFloors() ?? [];
       const floor = floors.find((f) => f.index === floorIndex) ?? floors[floorIndex] ?? null;
-      if (!floor?.id) return null;
-      const status = maskAuthority.authoredStatus(floor.id, 'fluid');
-      return status.source === 'authored' ? status.url : null;
+      if (!floor?.id) return [];
+
+      const out = [];
+      for (const item of getItems() ?? []) {
+        if (item.hidden) continue;
+        // Which items belong to this floor — the same test `hostsOfFloor` uses
+        // inside the authority. A tile declares the levels it is visible on; a
+        // level's own art declares its level directly.
+        const onFloor =
+          item.kind === 'tile'
+            ? Array.isArray(item.visibleOnLevelIds) && item.visibleOnLevelIds.includes(floor.id)
+            : (item.kind === 'levelBackground' || item.kind === 'levelForeground') && item.levelId === floor.id;
+        if (!onFloor) continue;
+
+        // ONE door for every kind of host. `authoredStatusForItem` is keyed by
+        // ITEM id and discovery is keyed the same way for backgrounds and tiles
+        // alike, so there is no per-kind branch here — which is the whole point
+        // of the mask-any-item decision.
+        const status = maskAuthority.authoredStatusForItem(item.id, 'fluid');
+        if (status.source !== 'authored') continue;
+
+        const corners = getItemCorners(item);
+        if (!corners) continue; // art not resolved yet — try again next frame
+        out.push({ id: item.id, url: status.url, corners });
+      }
+      return out;
     },
   };
 }

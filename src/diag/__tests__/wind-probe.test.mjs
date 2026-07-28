@@ -9,6 +9,7 @@
  * exercise separately.
  */
 import {
+  describeWindBake,
   nearestCell,
   nearestSolidDistanceCells,
   decomposeWindAt,
@@ -24,6 +25,60 @@ function approx(a, b, eps = 1e-4) {
 
 export function run(t) {
   const { ok } = t;
+
+  // ======================================================================
+  // describeWindBake — the antidote to a button that lied for months
+  // ======================================================================
+  // "Rebake wind structure" formatted its note from `result.exposure.min/.max/
+  // .varies`, fields bakeWindField stopped returning when the Wind rethink
+  // deleted the exposure machinery. undefined is falsy, so EVERY click took the
+  // failure branch and printed a confident diagnosis about the outdoors mask —
+  // a mask wind no longer consults at all. These assertions are pinned to the
+  // bake's REAL return shape so the next shape change goes red here instead.
+  {
+    const real = {
+      ok: true,
+      reason: 'walls changed',
+      cols: 64,
+      rows: 48,
+      levelId: 'ground',
+      wallCount: 120,
+      totalWallCount: 300,
+      solidCells: 400,
+      openCells: 2200,
+      enclosedCells: 472,
+      enclosedPct: 15,
+    };
+    const line = describeWindBake(real);
+    ok('it reports the grid it actually baked', line.includes('64x48 cells'));
+    ok('it reports scoped/total walls without implying a fault', line.includes('120/300 wall segments'));
+    ok('it reports the enclosure counts', line.includes('2200 open to the exterior'));
+    ok('it reports the sealed percentage', line.includes('472 sealed (15%)'));
+    ok('it names the trigger', line.includes('walls changed'));
+
+    // THE REGRESSION ITSELF: nothing in a healthy bake may read as a failure.
+    ok('a healthy bake never claims something is wrong', !/DOES NOT VARY|wrong floor|not yet streamed/i.test(line));
+    ok('it never prints the word undefined', !line.includes('undefined'));
+
+    // A field that is genuinely gone is OMITTED, never inferred as a fault —
+    // exactly the mistake the old note made.
+    const partial = describeWindBake({ ok: true, reason: 'scene load', cols: 8, rows: 8 });
+    ok('missing counts are simply absent', !partial.includes('undefined') && partial.includes('8x8 cells'));
+    ok(
+      'a bake with no counts at all says so plainly',
+      describeWindBake({ ok: true, reason: 'x' }).includes('no cell counts')
+    );
+
+    // The one reading that IS actionable.
+    ok('a fully sealed floor is called out', describeWindBake({ ...real, openCells: 0 }).includes('reaches nowhere'));
+
+    ok(
+      'a failed bake reports the failure, not a grid',
+      describeWindBake({ ok: false, reason: 'no viewer', error: 'boom' }).includes('boom')
+    );
+    ok('no result at all does not throw', describeWindBake(null).length > 0);
+    ok('a non-object does not throw', describeWindBake('nope').length > 0);
+  }
 
   // --- nearestCell — the SAME formula the particle kernel uses -------------
   {

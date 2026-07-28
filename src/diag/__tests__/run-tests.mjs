@@ -10,8 +10,14 @@ import { run as runPixelProbe } from './pixel-probe.test.mjs';
 import { run as runMarkerOverlay } from './marker-overlay.test.mjs';
 import { run as runGpuProbe } from './gpu-probe.test.mjs';
 import { run as runPerfLab } from './perf-lab.test.mjs';
+import { run as runPerfZones } from './perf-zones.test.mjs';
+import { run as runPerfReport } from './perf-report.test.mjs';
+import { run as runVramInventory } from './vram-inventory.test.mjs';
+import { run as runFrameProfiler } from './frame-profiler.test.mjs';
+import { run as runGpuZoneTimer } from './gpu-zone-timer.test.mjs';
+import { run as runPerfSession } from './perf-session.test.mjs';
+import { run as runPerfHud } from './perf-hud.test.mjs';
 import { run as runWindFieldOverlay } from './wind-field-overlay.test.mjs';
-import { run as runComputeSpike } from './compute-spike.test.mjs';
 import { run as runWindProbe } from './wind-probe.test.mjs';
 import { run as runEffectControls } from './effect-controls.test.mjs';
 
@@ -38,8 +44,14 @@ const suites = [
   ['marker-overlay', runMarkerOverlay],
   ['gpu-probe', runGpuProbe],
   ['perf-lab', runPerfLab],
+  ['perf-zones', runPerfZones],
+  ['perf-report', runPerfReport],
+  ['vram-inventory', runVramInventory],
+  ['frame-profiler', runFrameProfiler],
+  ['gpu-zone-timer', runGpuZoneTimer],
+  ['perf-session', runPerfSession],
+  ['perf-hud', runPerfHud],
   ['wind-field-overlay', runWindFieldOverlay],
-  ['compute-spike', runComputeSpike],
   ['wind-probe', runWindProbe],
   ['effect-controls', runEffectControls],
 ];

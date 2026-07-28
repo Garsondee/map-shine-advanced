@@ -18,6 +18,13 @@ export {
   getVtPanViewerDiagnostics,
   setVtPanViewerFloor,
   setVtPanViewerGpuProbe,
+  // PER-PASS GPU TIMING (docs/planning/Performance.md). Distinct from the probe
+  // above: that one measures the WHOLE frame and must throttle the loop to do
+  // it; this one reads the GPU's own timestamps per render pass and does not.
+  setVtPanViewerGpuZoneTimer,
+  getVtPanViewerGpuZoneStatus,
+  readVtPanViewerRenderInfo,
+  readVtPanViewerFrameSamples,
   setVtPanViewerWindOverlay,
   setVtPanViewerWindOverlayResolution,
   setVtPanViewerWindDiagnosticParticles,

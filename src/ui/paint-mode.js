@@ -411,13 +411,23 @@ export function installPainter(MapShine) {
   }
 
   // ---- lifecycle ---------------------------------------------------------
-  function enter() {
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.kind] - preselect a MASK_KINDS id, so an effect card's
+   *   ＋ button opens the brush already loaded with THAT effect's mask. Control-
+   *   Panel.md §5.2 step 2 verbatim: "No mask-picker detour; the button already
+   *   knew the mask." An unknown or non-paintable id is ignored rather than
+   *   throwing — the brush still opens, on whatever kind was last selected,
+   *   because a dead ＋ button is worse than a slightly wrong one.
+   */
+  function enter(opts = {}) {
     if (state.active) return;
     const ctx = readPaintContext();
     if (!ctx.ready) {
       notify('Map Shine: load a scene before painting.', 'warn');
       return;
     }
+    if (opts.kind && PAINTABLE_KINDS.some((k) => k.id === opts.kind)) state.kind = opts.kind;
     state.ctx = ctx;
     // Open on whatever floor Foundry is ALREADY showing, not always floor 0 —
     // the auto-follow this project deferred earlier, unlocked for free once
@@ -528,6 +538,10 @@ export function installPainter(MapShine) {
   );
 
   return {
+    /** Open the brush, optionally on a named mask kind — the door every effect
+     * card's ＋ button goes through. Private until 2026-07-27; a card that wants
+     * to send you straight to painting ITS mask needs to be able to say so. */
+    enter,
     /** Called from boot's canvasReady: pull any painted masks saved on this scene. */
     hydrateFromScene() {
       const ctx = readPaintContext();

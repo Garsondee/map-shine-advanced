@@ -77,12 +77,27 @@ export function planFrame(passes, { fromStage = STAGES[0], toStage = STAGES[STAG
  * screen (doctrine #5, "instruments must not lie" — a skip here would look
  * identical to a correctly-absent seam).
  *
+ * TIMING HOOKS (2026-07-27, docs/planning/Performance.md). `hooks` is the seam
+ * this file's own header reserved for per-pass timing — "built ON this, not
+ * folded in". It stays a pure callback pair on purpose: `time/one-clock`
+ * restricts `performance.now()` to `diag/` and `core/frame-clock.js`, so this
+ * file calls a function and the instrument on the other end reads the clock.
+ * `graph/` still samples no clock, and never will.
+ *
+ * The `finally` is load-bearing, not defensive habit: a pass that throws must
+ * still close its zone, or the profiler accumulates an unterminated bracket and
+ * every subsequent frame's number for that zone is garbage — a wrong number
+ * surviving a visible crash, which is the worse of the two failures.
+ *
  * @param {string[]} ids - from `planFrame(...).ids`
  * @param {Record<string, (ctx: object) => void>} impls - pass id -> real fn
  * @param {object} [ctx] - passed through to every pass, untouched
+ * @param {{onPassBegin?: (id: string) => void, onPassEnd?: (id: string) => void}} [hooks]
  * @returns {string[]} the ids that actually ran, in the order they ran
  */
-export function runPassPlan(ids, impls, ctx) {
+export function runPassPlan(ids, impls, ctx, hooks) {
+  const onBegin = typeof hooks?.onPassBegin === 'function' ? hooks.onPassBegin : null;
+  const onEnd = typeof hooks?.onPassEnd === 'function' ? hooks.onPassEnd : null;
   const ran = [];
   for (const id of ids) {
     const fn = impls[id];
@@ -93,7 +108,15 @@ export function runPassPlan(ids, impls, ctx) {
           `to catch — this is that check running against a live frame instead of the static registry.`
       );
     }
-    fn(ctx);
+    // The begin hook is deliberately INSIDE the loop and AFTER the impl check:
+    // a missing impl throws before any zone is opened, so the error cannot be
+    // mistaken for a pass that ran and cost nothing.
+    if (onBegin) onBegin(id);
+    try {
+      fn(ctx);
+    } finally {
+      if (onEnd) onEnd(id);
+    }
     ran.push(id);
   }
   return ran;

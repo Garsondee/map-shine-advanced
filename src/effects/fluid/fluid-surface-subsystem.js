@@ -1,121 +1,153 @@
 /**
- * FLUID's SURFACE — the mesh, its material, the high-resolution mask, and the
- * bake that turns one into the other.
- *
- * `fluid-render.js` builds the material; this owns the mesh's lifetime and the
- * chain that feeds it. It follows `water-surface-subsystem.js` exactly, for the
- * same three dividends its header lists: the mesh goes into the MAIN `scene`,
- * so painter's-algorithm occlusion, the `gAttr = vec4(0)` contract and the
- * absence of any extra render call all come for free.
+ * FLUID's SURFACE — one mesh PER MASKED ITEM, its material, its mask and its
+ * baked tube pack.
  *
  * ============================================================================
- * THE CHAIN, END TO END — THIS IS THE PART THAT WAS MISSING
+ * ⚠️ FLUID IS A PER-ITEM EFFECT. THIS IS THE BUG THAT MADE IT RENDER NOTHING.
  * ============================================================================
- * Phases 1–2 built every piece of this and connected none of them, which is
- * exactly the `feedback_seam_default_hides_unwired` shape: a seam declared,
- * defaulted, consumed and never passed renders perfectly, reports healthy and
- * does nothing. The chain now runs:
+ * The first two drafts asked the mask authority for a FLOOR's mask —
+ * `authoredStatus(levelId, 'fluid')` — because that is what `water-seams.js`
+ * and `specular-seams.js` do. Both of those are LEVEL-BACKGROUND effects: a
+ * river and a metal floor are painted into the level's own art, so the
+ * floor-keyed door is the right one for them.
  *
- *   the mask FILE  ──loadMaskImage──▶  bytes + a texture
- *          bytes   ──extractTubeNet──▶ components, geodesic arc length, profiles
- *            net   ──buildFluidPack──▶ one RGBA buffer
- *           pack   ──createPackTexture──▶ a texture the material samples
- *        texture   ──buildFluidSurfaceMaterial──▶ pixels
+ * **Glass tubes are not.** The author's map paints them on an **overhead
+ * tile**, and `authoredStatus`'s own doc says exactly what it is — *"a
+ * convenience wrapper for the single most common case, this LEVEL's own
+ * BACKGROUND file"*. A tile's mask is not reachable through it, so the seam
+ * returned null, the mesh never became visible, and nothing errored anywhere.
+ * V2 knew this: `FluidEffectV2` walked `canvas.scene.tiles.contents` and
+ * probed each tile's own art. So did the project's own standing decision —
+ * `keyhole-mask-any-item-decision`: *every mask attaches to ANY item — tile,
+ * level background, or level foreground, symmetrically, for EVERY effect.*
  *
- * The mask is fetched ONCE per url and its bytes are reused for the bake, so
- * there is no second decode: `vt/mask-image.js` already had the array in hand
- * and now returns it.
+ * The door for that is `authoredStatusForItem(itemId, kind)`. This subsystem
+ * therefore keeps a mesh PER MASKED ITEM rather than one per floor, and each
+ * mesh is the item's OWN QUAD — which is also why the material samples
+ * `uv()` instead of mapping a world rect: the mask covers exactly that quad,
+ * the same way the item's albedo does, and a ROTATED tile comes out right for
+ * free (a rect has no rotation, so the previous version could not have handled
+ * one at all, silently).
+ *
+ * ============================================================================
+ * THE CHAIN, END TO END
+ * ============================================================================
+ *   masked ITEMS  ──getFluidMaskItems──▶ [{id, url, placement}]
+ *   the mask FILE ──loadMaskImage──▶     bytes + a texture
+ *          bytes  ──extractTubeNet──▶    components, geodesic arc length, profiles
+ *            net  ──buildFluidPack──▶    one RGBA buffer
+ *           pack  ──createPackTexture──▶ a texture the materials sample
+ *            net  ──buildSim (below)──▶  a ping-pong SIM per item: the profile
+ *                                         texture (baked once), the pump
+ *                                         texture (rewritten every tick), the
+ *                                         advect material (`fluid-sim.js`)
+ *        texture  ──buildFluidSurfaceMaterials──▶ TWO meshes (absorb, emit),
+ *          + sim                                  reading the sim's CURRENT
+ *                                                  ping-pong half as `phi`
  *
  * ⚠️ **CONSTRUCT THIS AFTER `scene` EXISTS** — trap #4 of
- * `VT-Pan-Viewer-Extraction.md`, hit three times by the instinct to put code
- * next to its siblings. `scene` is a `const` in its temporal dead zone until
- * its own line runs; taking it as an explicit argument makes the ordering a
- * caller-visible requirement rather than an invisible one.
+ * `VT-Pan-Viewer-Extraction.md`. `scene` is a `const` in its temporal dead zone
+ * until its own line runs; taking it as an explicit argument makes the ordering
+ * a caller-visible requirement rather than an invisible one.
+ *
+ * THE BAKE TRIGGER IS THE MASK URL, and it is the only one. A previous draft
+ * also shipped a version-polling module; two triggers for one bake is
+ * `feedback_mode_forks_silently_drop_features`, so the loser was deleted. A url
+ * changes on a scene or item change and at no other time, so "bakes do not
+ * track frames" holds by construction — `getStatus()` reports `bakes` against
+ * `syncs` so it can be SEEN to hold.
  *
  * ============================================================================
- * WHY THE BAKE TRIGGER IS THE MASK **URL**, AND WHY THERE IS ONLY ONE
+ * WHY THE ACTUAL GPU RENDER CALLS ARE NOT IN THIS FILE
  * ============================================================================
- * A previous draft shipped a second module (`fluid-bake.js`) that polled the
- * mask authority's VERSION integer and rebaked on a change — the shape water's
- * body pack uses. Correction #2 then moved the extractor onto the mask FILE,
- * and a file has no version to poll; the two triggers coexisted for exactly one
- * commit before this header was written.
- *
- * That is `feedback_mode_forks_silently_drop_features`, which this project has
- * watched go wrong three times and resolved each time by DELETING THE LOSING
- * FORK. So the version-polling module is gone and the url is the only trigger.
- * It is also the stronger one: a url changes on a floor or scene change and at
- * no other time, so "bakes do not track frames" — Phase 2's exit criterion —
- * holds BY CONSTRUCTION rather than by a comparison that has to be got right.
- * `getStatus()` still reports `bakes` against `syncs` so it can be SEEN to hold.
+ * `renderer-state/graph-only` (`tools/verify-structure.mjs`) walls
+ * `.setRenderTarget(`/`.clear(` to `graph/`, `vt/`, `diag/` — this file lives
+ * under `effects/fluid/` and may not contain either call, on the same
+ * "V2: 452 setRenderTarget sites across 60 files" reasoning that wall exists
+ * for at all. `prepareSimTick(nowMs, dtSec)` therefore does every JS-side step
+ * (rewrite the pump texture, re-point `prevTexNodes`/`stateTexNodes`, decide
+ * what "current" means after this tick) and hands back a small, declarative
+ * job list — `{clears, advects}` — for `vt-pan-viewer.js`'s own `tickFluidSim`
+ * to actually render, mirroring `world/wind-sim-gpu.js`'s identical split
+ * (that file builds materials and takes textures as args; `vt-pan-viewer.js`'s
+ * `tickWindSim` does the `renderer.setRenderTarget`/`quad.render` calls).
  *
  * @module effects/fluid/fluid-surface-subsystem
  */
 
 import { createLogger } from '../../core/log.js';
-import { buildFluidSurfaceMaterial } from './fluid-render.js';
-import { extractTubeNet } from './fluid-net.js';
+import { buildFluidSurfaceMaterials } from './fluid-render.js';
+import { extractTubeNet, FLUID_PROFILE_SAMPLES } from './fluid-net.js';
 import { buildFluidPack, FLUID_PACK_MAX_DIM } from './fluid-pack.js';
+import {
+  buildFluidAdvectMaterial,
+  buildFluidProfileBuffer,
+  writeFluidTubeConstantsBuffer,
+  computeFluidLengthQScale,
+} from './fluid-sim.js';
+import { fluidPumpPersonality } from './fluid-pump.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 const log = createLogger('FluidSurface');
 
 /**
- * Render order. Above the floor background (always index 0 of the sorted list)
- * and below tokens, tiles and roofs.
+ * Render order — both fluid passes sit in the same reserved fractional band
+ * water and the candle flame already use: `scene/layer-order.js#sortByLayer`
+ * stamps the floor background at index 0 and every real item (a tile, a
+ * token) at an INTEGER index ≥ 1, so anything in the open interval `(0, 1)`
+ * is guaranteed, by construction, to draw after the background and before
+ * every item — no per-tile lookup needed. Both constants below stay well
+ * inside that band.
  *
- * ⚠️ **0.6, i.e. just ABOVE water's 0.5, and this is the ADD half only.** The
- * design's authored placement (`Fluid.md` §5.6) is that ABSORPTION goes UNDER
- * the tile albedo — V2's "under the texture" look, where the art carries the
- * glass and the effect carries what is inside it — while EMISSION goes OVER,
- * because a highlight on glass is physically on top of it. This module draws
- * only the emissive half today, so it sits above, which is correct for what it
- * is and NOT a quiet abandonment of the under-art rule. The multiply half is
- * the next rung and it draws below.
- *
- * Fractional on purpose: `sortByLayer` owns the integers, so fluid claims none
- * and cannot collide with one. A real LayerKey is the honest fix and is a
- * deferred rung, the same caveat water and the door leaves carry.
+ * ⚠️ **CORRECTED 2026-07-27.** This file's own comment used to claim the
+ * emissive pass draws "over" the masked tile's art. It does not — see
+ * `fluid-render.js`'s header for the full account of that mistake and why the
+ * actual number (< 1) was already correct despite the wrong story about it.
+ * ABSORB draws first (the lower value), EMIT second, so the emissive glow is
+ * never itself darkened by the absorption term it is paired with — that
+ * ordering is between the two fluid passes, not between fluid and the tile.
  */
-const FLUID_RENDER_ORDER = 0.6;
-
-/** Padding on the tubes' measured AABB, world px — enough that the mesh never
- * clips its own antialiased silhouette or the glow spilling past it. */
-const FLUID_BOUNDS_PAD_PX = 48;
+const FLUID_RENDER_ORDER_ABSORB = 0.59;
+const FLUID_RENDER_ORDER_EMIT = 0.6;
 
 /**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
  * @param {*} args.scene - the MAIN scene. Must already exist (see header).
- * @param {(floorIndex: number) => string|null} args.getFluidMaskUrl - the
- *   resolved floor's authored fluid file. Null = no mask, which keeps the
- *   surface hidden rather than drawing something invented.
+ * @param {(floorIndex: number) => Array<{id: string, url: string, corners: Array<{x:number,y:number}>}>} args.getFluidMaskItems -
+ *   every item VISIBLE ON THIS FLOOR that has its own authored fluid mask, with
+ *   the world-space corners of its quad. Empty array = nothing painted, which
+ *   is silently correct (fluid is not a `required` kind).
  * @param {(url: string) => Promise<object|null>} args.loadMaskImage -
  *   `vt/mask-image.js`'s loader, injected for the directory-wall reason.
- * @param {(data: Uint16Array|Float32Array, w: number, h: number) => *} args.createPackTexture -
- *   the literal `new THREE.DataTexture(...)`, defined in `vt/`
- *   (`gpu/textures-in-vt-only`).
- * @param {() => {minX:number,minY:number,maxX:number,maxY:number}} args.getSceneRect -
- *   the world rect the mask file covers.
+ * @param {(data: Float32Array, w: number, h: number) => *} args.createPackTexture -
+ *   the literal `new THREE.DataTexture(...)`, defined in `vt/`. Reused for the
+ *   sim's own profile/pump textures too (same shape: upload a Float32Array as
+ *   an RGBA float DataTexture) — no separate seam for what is the same recipe.
+ * @param {(name: string, width: number, height: number) => *} args.createSimRenderTarget -
+ *   the literal `allocator.create(name, desc)`, defined in `vt/` for the same
+ *   directory-wall reason as `createPackTexture` (`gpu/allocator-only`). One
+ *   call per ping/pong half, per masked item.
+ * @param {(rt: *) => void} args.disposeSimRenderTarget - `allocator.dispose(rt)`.
  * @param {() => {enabled: boolean, params: object}} [args.getFluidRenderState]
- * @param {*} args.timeMsNode - THE SHARED CLOCK, for the shader.
- * @returns {{sync: (floorIndex: number) => void, getStatus: () => object, dispose: () => void}}
+ * @param {*} args.timeMsNode - THE SHARED CLOCK.
+ * @returns {{sync: (floorIndex: number) => void, prepareSimTick: (nowMs: number, dtSec: number) => {clears: Array<*>, advects: Array<{quad: *, destRT: *}>}, getStatus: () => object, dispose: () => void}}
  */
 export function createFluidSurfaceSubsystem({
   THREE,
   scene,
-  getFluidMaskUrl,
+  getFluidMaskItems,
   loadMaskImage,
   createPackTexture,
-  getSceneRect,
+  createSimRenderTarget,
+  disposeSimRenderTarget,
   getFluidRenderState,
   timeMsNode,
 }) {
-  // ⚠️ NO DEFAULT that fakes a wired seam. `feedback_seam_default_hides_unwired`
-  // is the wall here: water shipped `getWaterRenderState` declared, defaulted
-  // and never passed, and the ONLY symptom was that every control silently did
-  // nothing while all 4,137 tests passed. An absent seam is reported, loudly,
-  // once — not papered over with a plausible default.
+  // ⚠️ NO DEFAULT that fakes a wired seam. `feedback_seam_default_hides_unwired`:
+  // water shipped its render-state seam declared, defaulted and never passed,
+  // and the ONLY symptom was that every control silently did nothing while all
+  // 4,137 tests passed. An absent seam is reported loudly, once.
   let seamWarned = false;
   function renderState() {
     if (typeof getFluidRenderState === 'function') return getFluidRenderState();
@@ -129,164 +161,267 @@ export function createFluidSurfaceSubsystem({
     return { enabled: true, params: {} };
   }
 
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
-  geometry.setIndex(Array.from(QUAD_INDICES));
-
-  /** A 1×1 empty pack until the real one bakes. Never sampled — `mesh.visible`
-   * is the gate, JS-side, so the shader needs no "do I have data yet" uniform
-   * (`tsl/no-uniform-gates`). */
-  let packTexture = createPackTexture(new Float32Array([0, 0, 0, 0]), 1, 1);
-  let maskTexture = null;
-  let loadedUrl = null;
-  let loading = false;
-  let bounds = null;
-  let net = null;
-  let pack = null;
-  let lastParamsKey = '';
+  /** One entry per masked item, keyed by item id. */
+  const entries = new Map();
   let enabled = true;
-  let built = null;
-  /** Accounting the deleted `fluid-bake.js` used to own — kept because the
-   * exit criterion has to be VISIBLE, not merely true. */
   let syncs = 0;
   let bakes = 0;
-  /** @type {any} */
-  let mesh = null;
+  let lastParamsKey = '';
+  /** Every url that failed, so a broken file is reported ONCE not every frame. */
+  const failedUrls = new Set();
 
   function refreshVisibility() {
-    if (mesh) mesh.visible = enabled && !!bounds && !!loadedUrl && !!net && net.tubeCount > 0;
+    for (const e of entries.values()) {
+      // Both meshes share one fate — they are the same liquid, two blend
+      // equations of it — so one flag drives both.
+      const visible = enabled && !!e.net && e.net.tubeCount > 0;
+      if (e.absorbMesh) e.absorbMesh.visible = visible;
+      if (e.emitMesh) e.emitMesh.visible = visible;
+    }
   }
 
   /**
-   * Fetch the mask, run the whole bake, and build (or re-point) the material.
-   * @param {string} url
+   * Load one item's mask, bake its tube net, and build its mesh.
+   * @param {{id: string, url: string, corners: Array<{x:number,y:number}>}} item
    */
-  async function loadAndBake(url) {
-    loading = true;
+  async function loadAndBake(item) {
+    const entry = entries.get(item.id);
+    if (!entry || entry.loading) return;
+    entry.loading = true;
     try {
-      const image = await loadMaskImage(url);
+      const image = await loadMaskImage(item.url);
       if (!image || !image.data) {
-        log.error(`fluid mask failed to load: ${url}`);
+        if (!failedUrls.has(item.url)) {
+          failedUrls.add(item.url);
+          log.error(`fluid mask failed to load for item ${item.id}: ${item.url}`);
+        }
         return;
       }
-      // Guard the await gap: a floor switch during the fetch would otherwise
-      // bake the old floor's mask over the new one's. `feedback_plausible_
-      // diagnosis_rots` names the await gap as where this class of bug lives.
-      if (url !== loadedUrl) return;
+      // Guard the await gap: a scene change during the fetch would otherwise
+      // bake a mask for an item that is no longer here.
+      if (entries.get(item.id) !== entry || entry.url !== item.url) return;
 
-      maskTexture = image.texture;
-      const rect = getSceneRect();
-      const rectW = rect.maxX - rect.minX;
-      const rectH = rect.maxY - rect.minY;
-
-      // The extractor runs on the FILE's pixels (Fluid.md correction #2 — the
+      // The extractor runs on the FILE's pixels (`Fluid.md` correction #2 — the
       // ≤512 derivation grid merges tubes a tube's width apart), capped at the
-      // pack resolution so the bake stays bounded on a huge mask.
+      // pack resolution so a huge mask stays bounded.
+      //
+      // The grid's `spec` carries the item's own world extent purely so texel
+      // sizes are in WORLD px — arc length, radius and cross-section are all
+      // world-space quantities and would otherwise be measured in texels, which
+      // would make flow speed depend on mask resolution.
       const scale = Math.min(1, FLUID_PACK_MAX_DIM / Math.max(image.width, image.height));
-      const grid = downsample(image.data, image.width, image.height, scale, rectW, rectH, rect);
+      const spanX = Math.max(...item.corners.map((c) => c.x)) - Math.min(...item.corners.map((c) => c.x));
+      const spanY = Math.max(...item.corners.map((c) => c.y)) - Math.min(...item.corners.map((c) => c.y));
+      const grid = downsample(image.data, image.width, image.height, scale, spanX, spanY);
 
-      // NOT TIMED HERE, deliberately. `time/one-clock` is a ratcheted rule and
-      // a wall-clock read inside an effect is exactly what it bans; the shared
-      // clock cannot substitute, because it only advances per FRAME and this
-      // bake is synchronous inside one callback, so it would report 0.0 ms
-      // forever — a lying instrument, which is worse than no instrument
-      // (`feedback_instruments_must_not_lie`). The cost IS known and recorded:
-      // ~365 ms for twelve tubes at full pack resolution, measured in Node in
-      // `fluid-net.js`'s own header. If it ever needs watching live, that is a
-      // profiler's job and `diag/` is where clock reads are permitted.
-      net = extractTubeNet({ grid });
-      pack = buildFluidPack({ net });
+      entry.net = extractTubeNet({ grid });
+      entry.pack = buildFluidPack({ net: entry.net });
       bakes++;
 
-      for (const w of net.warnings) log.warn(`bake: ${w}`);
-      if (net.tubeCount > 0 && pack.maxTubeWidthTexels < 4) {
+      for (const w of entry.net.warnings) log.warn(`bake (item ${item.id}): ${w}`);
+      if (entry.net.tubeCount === 0) {
         log.warn(
-          `widest tube is only ${pack.maxTubeWidthTexels.toFixed(1)} pack texels across. Below ~4 the ` +
-            'cross-section gradient collapses and tubes shade flat; below ~2 adjacent tubes merge into ' +
-            'one flow. Paint wider tubes or raise FLUID_PACK_MAX_DIM.'
+          `fluid mask for item ${item.id} produced NO tubes. The mask's RED channel is what counts — ` +
+            'presence is `r > 0` (see the `fluid` kind in scene/mask-catalog.js). A mask painted purely ' +
+            'in green or blue, or one whose tubes are thinner than a few texels, extracts to nothing.'
+        );
+        return;
+      }
+      if (entry.pack.maxTubeWidthTexels < 4) {
+        log.warn(
+          `item ${item.id}: widest tube is only ${entry.pack.maxTubeWidthTexels.toFixed(1)} pack texels ` +
+            'across. Below ~4 the cross-section gradient collapses and tubes shade flat; below ~2 ' +
+            'adjacent tubes merge into one flow.'
         );
       }
 
-      packTexture = createPackTexture(pack.data, pack.width, pack.height);
-
-      // Crop the mesh to the tubes' AABB — Law 6: cost scales with COVERED
-      // pixels, not screen pixels. A fullscreen quad for tubes covering 2% of
-      // the view is an O(screen) violation wearing a disguise.
-      bounds = tubeBounds(net, rect, FLUID_BOUNDS_PAD_PX);
-      if (!bounds) {
-        log.warn(`fluid mask has no tubes after extraction: ${url}`);
-        refreshVisibility();
-        return;
-      }
-
-      buildMesh(rect);
-      log.info(`fluid baked: ${net.tubeCount} tube(s), widest ${pack.maxTubeWidthTexels.toFixed(1)} pack texels`);
+      entry.packTexture = createPackTexture(entry.pack.data, entry.pack.width, entry.pack.height);
+      buildSim(entry);
+      buildMesh(entry, image.texture);
+      log.info(
+        `fluid baked item ${item.id}: ${entry.net.tubeCount} tube(s), widest ` +
+          `${entry.pack.maxTubeWidthTexels.toFixed(1)} pack texels`
+      );
     } finally {
-      loading = false;
+      entry.loading = false;
       refreshVisibility();
     }
   }
 
-  /** @param {{minX:number,minY:number,maxX:number,maxY:number}} rect */
-  function buildMesh(rect) {
-    if (mesh) {
-      scene.remove(mesh);
-      built?.material?.dispose?.();
-      mesh = null;
-    }
-    const p = renderState().params ?? {};
-    built = buildFluidSurfaceMaterial({
+  /**
+   * Build one item's SIM: the ping-pong state pair, the static profile
+   * texture, the per-tick pump texture, and the advect material — everything
+   * `fluid-render.js`'s dependent read needs a `stateTexture` for. Called
+   * BEFORE `buildMesh` (which passes `entry.simPingRT.texture` as that
+   * `stateTexture`), so a fresh bake never hands the render material a null.
+   *
+   * Sized `FLUID_PROFILE_SAMPLES x tubeCount` — the SAME resolution
+   * `extractTubeNet` baked every tube's own profile arrays at, `fluid-net.js`'s
+   * own default (this subsystem never overrides it), so the sim's bins line up
+   * with the profile 1:1 with no resampling.
+   */
+  function buildSim(entry) {
+    disposeSim(entry);
+    const tubeCount = entry.net.tubeCount;
+    if (tubeCount === 0) return; // nothing to transport — buildMesh hides it anyway
+
+    const w = FLUID_PROFILE_SAMPLES;
+    const h = tubeCount;
+    entry.simTubeCount = tubeCount;
+    entry.simPingRT = createSimRenderTarget(`fluid.sim.ping.${entry.id}`, w, h);
+    entry.simPongRT = createSimRenderTarget(`fluid.sim.pong.${entry.id}`, w, h);
+    entry.simPingIsCurrent = true;
+    // Fresh GPU memory is UNDEFINED content, and a NaN entering the sim would
+    // propagate through every subsequent multiply/interpolate forever — the
+    // exact reason wind's own regrid path clears its fresh RTs explicitly
+    // before the first tick ever samples them. The actual `renderer.clear()`
+    // call is walled to `vt/` (this file's own header), so this only RAISES
+    // the flag; `prepareSimTick` below is what turns it into a real clear.
+    entry.simNeedsClear = true;
+
+    entry.simProfileTexture = createPackTexture(buildFluidProfileBuffer(entry.net.tubes, w), w, h);
+    // Personalities are derived ONCE per bake from each tube's stable INDEX
+    // (`fluidPumpPersonality`'s own contract) — recomputing them every tick
+    // would be eight wasted `hash01` calls per tube per frame for an answer
+    // that cannot change until the next bake.
+    entry.simPersonalities = Array.from({ length: tubeCount }, (_, k) => fluidPumpPersonality(k));
+    // Per-tube flow-rate scale — baked once, same reuse discipline as
+    // personalities above. `computeFluidLengthQScale`'s own header names the
+    // bug this fixes: `FLUID_PUMP_BASE_Q` alone was validated only against
+    // small synthetic test tubes and read as over 1,200 seconds to cross a
+    // real author's actual (much wider, much longer) tube — this scale is
+    // what makes THIS tube's own traversal time land near
+    // `FLUID_TARGET_TRAVERSAL_SECONDS` regardless of its absolute size.
+    entry.simQScales = entry.net.tubes.map((t) => computeFluidLengthQScale(t));
+    // RGBA stride (see fluid-sim.js's own header for why): tick zero's content
+    // is never sampled (prepareSimTick always writes fresh values before the
+    // first render), so an all-zero initial buffer is fine.
+    entry.simPumpTexture = createPackTexture(new Float32Array(tubeCount * 4), 1, tubeCount);
+
+    entry.simAdvect = buildFluidAdvectMaterial({
+      THREE,
+      prevStateTexture: entry.simPingRT.texture,
+      profileTexture: entry.simProfileTexture,
+      pumpTexture: entry.simPumpTexture,
+    });
+  }
+
+  /** Tear down one item's sim resources — the render-target pair, the two
+   * upload textures, and the advect material. Called from `disposeMesh` (the
+   * two share a lifecycle: a rebake invalidates both, together) and does
+   * nothing if the sim was never built (a zero-tube mask). */
+  function disposeSim(entry) {
+    if (entry.simPingRT) disposeSimRenderTarget(entry.simPingRT);
+    if (entry.simPongRT) disposeSimRenderTarget(entry.simPongRT);
+    entry.simProfileTexture?.dispose?.();
+    entry.simPumpTexture?.dispose?.();
+    entry.simAdvect?.material?.dispose?.();
+    entry.simPingRT = null;
+    entry.simPongRT = null;
+    entry.simProfileTexture = null;
+    entry.simPumpTexture = null;
+    entry.simAdvect = null;
+    entry.simPersonalities = null;
+    entry.simQScales = null;
+    entry.simTubeCount = 0;
+    entry.simNeedsClear = false;
+    entry.simPingIsCurrent = true;
+  }
+
+  /**
+   * Build BOTH meshes for one item, sharing ONE geometry — they are the same
+   * quad, drawn twice with two different blend equations, never two different
+   * shapes that could drift apart.
+   */
+  function buildMesh(entry, maskTexture) {
+    disposeMesh(entry);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+    geometry.setIndex(Array.from(QUAD_INDICES));
+    // The ITEM'S OWN QUAD — four corners, in the item's own winding, exactly as
+    // its albedo mesh is built. `buildQuadPositions` takes a corner LIST and
+    // throws on anything else, which is what caught an earlier draft handing it
+    // an AABB rect.
+    geometry.setAttribute('position', new THREE.BufferAttribute(buildQuadPositions(entry.corners), 3));
+    geometry.computeBoundingSphere();
+
+    // `entry.simPingRT` always exists by the time this runs: `loadAndBake`
+    // calls `buildSim` immediately before `buildMesh` (never the reverse), and
+    // a zero-tube mask returns before ever reaching this function at all (see
+    // `loadAndBake`'s own `tubeCount === 0` early return).
+    entry.built = buildFluidSurfaceMaterials({
       THREE,
       maskTexture,
-      maskRect: rect,
-      packTexture,
-      packRect: rect,
+      packTexture: entry.packTexture,
+      stateTexture: entry.simPingRT.texture,
+      tubeCount: entry.simTubeCount,
       timeMsNode,
-      ...pickParams(p),
+      ...pickParams(renderState().params ?? {}),
     });
-    // FOUR CORNERS, counter-clockwise — `buildQuadPositions` takes a corner
-    // LIST and throws on anything else, which is what caught the first draft
-    // handing it the AABB rect directly. Same order water uses; the winding has
-    // to match `QUAD_INDICES` or the quad is inside-out (and `DoubleSide` on the
-    // material would hide that rather than fix it).
-    geometry.setAttribute(
-      'position',
-      new THREE.BufferAttribute(
-        buildQuadPositions([
-          { x: bounds.minX, y: bounds.minY },
-          { x: bounds.maxX, y: bounds.minY },
-          { x: bounds.maxX, y: bounds.maxY },
-          { x: bounds.minX, y: bounds.maxY },
-        ]),
-        3
-      )
-    );
-    geometry.attributes.position.needsUpdate = true;
-    geometry.computeBoundingSphere();
-    mesh = new THREE.Mesh(geometry, built.material);
-    mesh.name = 'FluidSurface';
-    mesh.renderOrder = FLUID_RENDER_ORDER;
-    mesh.frustumCulled = false;
-    scene.add(mesh);
+    entry.geometry = geometry;
+
+    entry.absorbMesh = new THREE.Mesh(geometry, entry.built.absorbMaterial);
+    entry.absorbMesh.name = `FluidAbsorb_${entry.id}`;
+    entry.absorbMesh.renderOrder = FLUID_RENDER_ORDER_ABSORB;
+    entry.absorbMesh.frustumCulled = false;
+
+    entry.emitMesh = new THREE.Mesh(geometry, entry.built.emitMaterial);
+    entry.emitMesh.name = `FluidEmit_${entry.id}`;
+    entry.emitMesh.renderOrder = FLUID_RENDER_ORDER_EMIT;
+    entry.emitMesh.frustumCulled = false;
+
+    scene.add(entry.absorbMesh);
+    scene.add(entry.emitMesh);
     lastParamsKey = '';
     refreshVisibility();
   }
 
-  /** Only the keys the material takes, so an unknown param cannot ride in. */
+  /** Mesh/material teardown ONLY — deliberately NOT the sim. `buildMesh` calls
+   * this on itself first (to clear a stale PREVIOUS mesh before building the
+   * new one), and by the time it runs, `buildSim` has usually already built
+   * the CURRENT sim moments earlier (`loadAndBake`'s own ordering) — disposing
+   * the sim here too would destroy resources `buildMesh` is about to read.
+   * External callers that mean "this item is really gone" want `disposeEntry`
+   * below, not this. */
+  function disposeMesh(entry) {
+    if (entry.absorbMesh) scene.remove(entry.absorbMesh);
+    if (entry.emitMesh) scene.remove(entry.emitMesh);
+    entry.built?.absorbMaterial?.dispose?.();
+    entry.built?.emitMaterial?.dispose?.();
+    entry.geometry?.dispose?.();
+    entry.absorbMesh = null;
+    entry.emitMesh = null;
+    entry.geometry = null;
+    entry.built = null;
+  }
+
+  /** The mesh AND the sim — a rebake or a departing item invalidates both
+   * together (the sim's profile/pump textures are baked from the SAME tube
+   * net the mesh's pack texture is). */
+  function disposeEntry(entry) {
+    disposeSim(entry);
+    disposeMesh(entry);
+  }
+
+  /** Only the keys the material takes, so an unknown param cannot ride in.
+   * `flowSpeed` IS here (tier `structure` reads it too, for τ's own drift
+   * rate — `fluid-render.js`'s own JSDoc explains why) as WELL AS being
+   * read separately in `prepareSimTick` below to scale the pump's `Q` — a
+   * genuinely dual-use param, not a duplicate seam. */
   function pickParams(p) {
     const out = {};
     if (Array.isArray(p.tint)) out.tint = p.tint;
     if (Number.isFinite(p.glow)) out.glow = p.glow;
-    if (Number.isFinite(p.speedPx)) out.speedPx = p.speedPx;
-    if (Number.isFinite(p.slugCount)) out.slugCount = p.slugCount;
-    if (Number.isFinite(p.slugWidth)) out.slugWidth = p.slugWidth;
     if (Number.isFinite(p.iridescence)) out.iridescence = p.iridescence;
     if (Number.isFinite(p.opacity)) out.opacity = p.opacity;
+    if (Number.isFinite(p.flowSpeed)) out.flowSpeed = p.flowSpeed;
+    if (Number.isFinite(p.structure)) out.structure = p.structure;
     return out;
   }
 
   /**
-   * Per-frame. Cheap to call: one string compare when nothing changed.
+   * Per-frame. Cheap to call: the common case is one array walk and one string
+   * compare.
    * @param {number} floorIndex
    */
   function sync(floorIndex) {
@@ -294,72 +429,232 @@ export function createFluidSurfaceSubsystem({
     const state = renderState();
     enabled = state.enabled !== false;
 
-    const url = getFluidMaskUrl(floorIndex);
-    if (url !== loadedUrl && !loading) {
-      loadedUrl = url;
-      net = null;
-      pack = null;
-      bounds = null;
-      refreshVisibility();
-      if (url) loadAndBake(url);
+    const items = getFluidMaskItems(floorIndex) ?? [];
+    const seen = new Set();
+    for (const item of items) {
+      seen.add(item.id);
+      let entry = entries.get(item.id);
+      if (!entry) {
+        entry = {
+          id: item.id,
+          url: null,
+          corners: item.corners,
+          net: null,
+          pack: null,
+          absorbMesh: null,
+          emitMesh: null,
+          loading: false,
+          // THE SIM — populated by buildSim, torn down by disposeSim. Listed
+          // explicitly here (rather than left to appear dynamically) so this
+          // object literal stays the one place a reader sees an entry's whole
+          // shape.
+          simPingRT: null,
+          simPongRT: null,
+          simPingIsCurrent: true,
+          simNeedsClear: false,
+          simProfileTexture: null,
+          simPumpTexture: null,
+          simPersonalities: null,
+          simQScales: null,
+          simAdvect: null,
+          simTubeCount: 0,
+        };
+        entries.set(item.id, entry);
+      }
+      if (entry.url !== item.url) {
+        entry.url = item.url;
+        entry.corners = item.corners;
+        entry.net = null;
+        entry.pack = null;
+        disposeEntry(entry);
+        loadAndBake(item);
+      } else if (entry.emitMesh && cornersMoved(entry.corners, item.corners)) {
+        // The tile was dragged, rotated or resized: move the quad rather than
+        // rebaking — the mask and its tube net are unchanged, only where they sit.
+        entry.corners = item.corners;
+        const pos = entry.geometry.getAttribute('position');
+        const buf = buildQuadPositions(item.corners);
+        for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
+        pos.needsUpdate = true;
+        entry.geometry.computeBoundingSphere();
+      }
+    }
+    // An item that left this floor (or the scene) takes its mesh with it.
+    for (const [id, entry] of entries) {
+      if (seen.has(id)) continue;
+      disposeEntry(entry);
+      entries.delete(id);
     }
 
-    if (!built) return;
     const p = state.params ?? {};
-    const key = JSON.stringify([p.tint, p.glow, p.speedPx, p.slugCount, p.slugWidth, p.iridescence, p.opacity]);
-    if (key === lastParamsKey) {
-      refreshVisibility();
-      return;
+    // `flowSpeed` IS in this key now (tier `structure`'s own `uFlowSpeed`
+    // uniform, `fluid-render.js`) — it is ALSO read fresh every tick in
+    // `prepareSimTick` below to scale the pump's `Q`, a genuinely separate
+    // JS-side use of the SAME param value, not a duplicate of this write.
+    const key = JSON.stringify([p.tint, p.glow, p.iridescence, p.opacity, p.flowSpeed, p.structure]);
+    if (key !== lastParamsKey) {
+      lastParamsKey = key;
+      for (const entry of entries.values()) {
+        if (!entry.built) continue;
+        // ONE uniforms set, shared by construction: `buildFluidSurfaceMaterials`
+        // builds both materials from the SAME uniform() nodes (mirrors water's
+        // absorbMaterial/inscatterMaterial, which also share theirs) — so a
+        // single write here already reaches both the absorb and emit passes.
+        // There is no second loop to keep in sync and nothing that can drift.
+        const u = entry.built.uniforms;
+        if (Array.isArray(p.tint)) u.uTint.value.set(p.tint[0], p.tint[1], p.tint[2]);
+        if (Number.isFinite(p.glow)) u.uGlow.value = p.glow;
+        if (Number.isFinite(p.iridescence)) u.uIridescence.value = p.iridescence;
+        if (Number.isFinite(p.opacity)) u.uOpacity.value = p.opacity;
+        if (Number.isFinite(p.flowSpeed)) u.uFlowSpeed.value = p.flowSpeed;
+        if (Number.isFinite(p.structure)) u.uStructure.value = p.structure;
+      }
     }
-    lastParamsKey = key;
-    const u = built.uniforms;
-    if (Array.isArray(p.tint)) u.uTint.value.set(p.tint[0], p.tint[1], p.tint[2]);
-    if (Number.isFinite(p.glow)) u.uGlow.value = p.glow;
-    if (Number.isFinite(p.speedPx)) u.uSpeedPx.value = p.speedPx;
-    if (Number.isFinite(p.slugCount)) u.uSlugCount.value = p.slugCount;
-    if (Number.isFinite(p.slugWidth)) u.uSlugWidth.value = p.slugWidth;
-    if (Number.isFinite(p.iridescence)) u.uIridescence.value = p.iridescence;
-    if (Number.isFinite(p.opacity)) u.uOpacity.value = p.opacity;
     refreshVisibility();
   }
 
+  /**
+   * ALL the JS-side sim work for one tick, for EVERY masked item at once —
+   * write each entry's pump texture, decide what "current" means after this
+   * tick, re-point every re-pointable node. Returns a small job list for
+   * `vt-pan-viewer.js`'s own `tickFluidSim` to actually RENDER (this file may
+   * not call `.setRenderTarget()` itself — see this module's own header).
+   *
+   * Skipped entirely while disabled: a hidden mesh has nothing to show for a
+   * tick's cost either way (mirrors `tickWindSim`'s own thaw/freeze early-out).
+   *
+   * @param {number} nowMs - THE SHARED sim clock, never a private one.
+   * @param {number} dtSec
+   * @returns {{clears: Array<*>, advects: Array<{quad: *, destRT: *}>}}
+   */
+  function prepareSimTick(nowMs, dtSec) {
+    const clears = [];
+    const advects = [];
+    if (!enabled) return { clears, advects };
+
+    const flowSpeedRaw = Number(renderState().params?.flowSpeed);
+    const flowSpeed = Number.isFinite(flowSpeedRaw) ? Math.max(0, flowSpeedRaw) : 1;
+
+    for (const entry of entries.values()) {
+      if (!entry.simAdvect || !entry.net || entry.net.tubeCount === 0) continue;
+
+      // The pump buffer is rewritten in place every tick — the SAME Float32Array
+      // the texture was built from, never a fresh allocation
+      // (`writeFluidTubeConstantsBuffer`'s own doc: "written in place so a
+      // caller can reuse the same typed array... without a fresh allocation").
+      // `simQScales` is the per-tube, bake-time fix for "this tube's own
+      // geometry is nothing like the fixture Q was tuned against"
+      // (`computeFluidLengthQScale`'s own header) — `flowSpeed` below is a
+      // SEPARATE, live, uniform-across-tubes multiplier on top of it.
+      writeFluidTubeConstantsBuffer(
+        entry.simPumpTexture.image.data,
+        nowMs,
+        entry.net.tubes,
+        entry.simPersonalities,
+        entry.simQScales
+      );
+      if (flowSpeed !== 1) {
+        // Scaling Q by the SAME factor `dtSec` would achieve is the smallest
+        // possible hook for a live "flow speed" control: `v = Q/A`, so
+        // multiplying Q here scales every tube's advection velocity uniformly
+        // without touching `fluid-pump.js`'s own already-tested arithmetic.
+        const data = entry.simPumpTexture.image.data;
+        for (let row = 0; row < entry.net.tubes.length; row++) data[row * 4] *= flowSpeed;
+      }
+      entry.simPumpTexture.needsUpdate = true;
+
+      if (entry.simNeedsClear) {
+        // Skip advection entirely THIS tick — both RTs are about to be zeroed,
+        // so there is nothing valid to backtrace INTO yet. The mesh reads a
+        // clean, empty tube for one tick (imperceptible) rather than risk any
+        // same-pass ordering assumption between "clear" and "render into".
+        clears.push(entry.simPingRT, entry.simPongRT);
+        entry.simNeedsClear = false;
+      } else {
+        const currentRT = entry.simPingIsCurrent ? entry.simPingRT : entry.simPongRT;
+        const otherRT = entry.simPingIsCurrent ? entry.simPongRT : entry.simPingRT;
+        entry.simAdvect.uDtSec.value = dtSec;
+        for (const n of entry.simAdvect.prevTexNodes) n.value = currentRT.texture;
+        advects.push({ quad: entry.simAdvect.quad, destRT: otherRT });
+        entry.simPingIsCurrent = otherRT === entry.simPingRT;
+      }
+
+      // Re-point the RENDER material's own reads to whichever RT will hold
+      // the CURRENT state once the caller actually performs the render(s)
+      // above — mirrors `fluid-sim.js`'s own `prevTexNodes` re-pointing
+      // exactly, and covers BOTH samples (`fill` and the meniscus's
+      // `fillAhead`), never just the first (see `fluid-render.js`'s own
+      // `stateTexNodes` doc for why a single node here would be a live bug).
+      if (entry.built?.stateTexNodes) {
+        const nextCurrentRT = entry.simPingIsCurrent ? entry.simPingRT : entry.simPongRT;
+        for (const n of entry.built.stateTexNodes) n.value = nextCurrentRT.texture;
+      }
+    }
+    return { clears, advects };
+  }
+
+  /**
+   * The report. Written to answer "why do I see nothing" WITHOUT another round
+   * trip — every link in the chain reports its own state, so the first null
+   * names itself (`keyhole-debug-panel`: tell the author which report to click).
+   */
   function getStatus() {
     return {
       enabled,
-      // THE EXIT CRITERION, as two numbers a reader can compare at a glance.
       syncs,
       bakes,
-      bakesPerThousandSyncs: syncs > 0 ? Number(((bakes / syncs) * 1000).toFixed(2)) : 0,
-      hasMask: !!loadedUrl,
-      maskUrl: loadedUrl,
-      loading,
-      meshVisible: !!mesh && mesh.visible,
-      tubeCount: net ? net.tubeCount : 0,
-      maxTubeWidthTexels: pack ? pack.maxTubeWidthTexels : 0,
-      packSize: pack ? `${pack.width}x${pack.height}` : null,
-      bounds,
-      warnings: net ? net.warnings : [],
-      tubes: net
-        ? net.tubes.map((t) => ({
-            id: t.id,
-            lengthPx: Math.round(t.lengthPx),
-            orientedBy: t.orientedBy,
-            hintCorrelation: Number(t.hintCorrelation.toFixed(3)),
-            maxRadiusPx: Math.round(t.maxRadiusPx),
-            offPathFraction: Number(t.offPathFraction.toFixed(3)),
-          }))
-        : [],
+      // Zero masked items with tubes painted on the map means the LOOKUP is
+      // wrong, not the shader. That distinction cost two rounds.
+      maskedItemCount: entries.size,
+      items: [...entries.values()].map((e) => ({
+        id: e.id,
+        url: e.url,
+        loading: e.loading,
+        // Both meshes are built/removed together (see buildMesh/disposeMesh),
+        // so checking one stands for both.
+        meshInScene: !!e.absorbMesh && !!e.emitMesh,
+        visible: !!e.emitMesh && e.emitMesh.visible,
+        tubeCount: e.net ? e.net.tubeCount : 0,
+        maxTubeWidthTexels: e.pack ? Number(e.pack.maxTubeWidthTexels.toFixed(2)) : 0,
+        packSize: e.pack ? `${e.pack.width}x${e.pack.height}` : null,
+        // THE SIM's own link in the chain — named separately from `meshInScene`
+        // on purpose: a mesh can be in-scene and visible while its sim failed
+        // to build (a zero-tube mask, or an allocator throw), which would
+        // otherwise read as "working" right up until someone asks why the
+        // goo never moves.
+        simBuilt: !!e.simAdvect,
+        simPingIsCurrent: e.simPingIsCurrent,
+        simAwaitingFirstClear: !!e.simNeedsClear,
+        warnings: e.net ? e.net.warnings : [],
+        tubes: e.net
+          ? e.net.tubes.map((t) => ({
+              id: t.id,
+              lengthPx: Math.round(t.lengthPx),
+              orientedBy: t.orientedBy,
+              hintCorrelation: Number(t.hintCorrelation.toFixed(3)),
+              maxRadiusPx: Math.round(t.maxRadiusPx),
+            }))
+          : [],
+      })),
+      failedUrls: [...failedUrls],
     };
   }
 
   function dispose() {
-    if (mesh) scene.remove(mesh);
-    built?.material?.dispose?.();
-    geometry.dispose();
-    mesh = null;
+    for (const entry of entries.values()) disposeEntry(entry);
+    entries.clear();
   }
 
-  return { sync, getStatus, dispose };
+  return { sync, prepareSimTick, getStatus, dispose };
+}
+
+/** Have any of the four corners actually moved? */
+function cornersMoved(a, b) {
+  if (!a || !b || a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].x !== b[i].x || a[i].y !== b[i].y) return true;
+  }
+  return false;
 }
 
 /**
@@ -369,16 +664,19 @@ export function createFluidSurfaceSubsystem({
  * ⚠️ **MAX, not mean.** A mean would let a thin tube fade below the presence
  * threshold as it is downsampled and vanish entirely; taking the max of the
  * source texels keeps a one-pixel-wide painted tube present at every scale,
- * which is the whole point of running the extractor here rather than on the
- * derivation grid.
+ * which is the whole point of running the extractor on the file rather than on
+ * the derivation grid.
  *
  * ⚠️ **Row 0 is the image's TOP** (`flipY: false`, the world-quad convention
- * every tile in this renderer uses), and the grid's V therefore runs the same
- * way as the texture's. Getting this wrong flips the tubes vertically —
- * `feedback_y_flip_recurring_risk`, this repo's named recurring bug class, and
- * the reason the mapping is stated here rather than assumed.
+ * every item in this renderer uses), so the grid's rows run the same way as the
+ * texture's and the pack lines up with the mask texel for texel. Getting this
+ * wrong flips the tubes — `feedback_y_flip_recurring_risk`, this repo's named
+ * recurring bug class, which is why the mapping is stated rather than assumed.
+ *
+ * `worldW`/`worldH` are the ITEM's extent, so every derived length is in world
+ * px rather than texels — otherwise flow speed would depend on mask resolution.
  */
-export function downsample(src, srcW, srcH, scale, rectW, rectH, rect) {
+export function downsample(src, srcW, srcH, scale, worldW, worldH) {
   const w = Math.max(1, Math.round(srcW * scale));
   const h = Math.max(1, Math.round(srcH * scale));
   const data = new Uint8Array(w * h);
@@ -401,34 +699,7 @@ export function downsample(src, srcW, srcH, scale, rectW, rectH, rect) {
     }
   }
   return {
-    spec: { x: rect.minX, y: rect.minY, width: rectW, height: rectH, w, h, texelW: rectW / w, texelH: rectH / h },
+    spec: { x: 0, y: 0, width: worldW, height: worldH, w, h, texelW: worldW / w, texelH: worldH / h },
     data,
-  };
-}
-
-/** The tubes' world AABB, padded — the crop that keeps this O(covered). */
-export function tubeBounds(net, rect, padPx) {
-  const { w, h } = net.spec;
-  let minX = w;
-  let minY = h;
-  let maxX = -1;
-  let maxY = -1;
-  for (let i = 0; i < net.tubeIdByTexel.length; i++) {
-    if (net.tubeIdByTexel[i] === 0) continue;
-    const x = i % w;
-    const y = (i - x) / w;
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  }
-  if (maxX < 0) return null;
-  const spanX = rect.maxX - rect.minX;
-  const spanY = rect.maxY - rect.minY;
-  return {
-    minX: rect.minX + (minX / w) * spanX - padPx,
-    maxX: rect.minX + ((maxX + 1) / w) * spanX + padPx,
-    minY: rect.minY + (minY / h) * spanY - padPx,
-    maxY: rect.minY + ((maxY + 1) / h) * spanY + padPx,
   };
 }

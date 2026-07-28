@@ -1,50 +1,52 @@
 /**
  * SPECULAR — the declaration (manifest + params schema), pure data, no THREE.
- * Same split as bloom/candle/door-graphics/water: this file is Node-validatable;
- * the TSL builders live in sibling render modules with THREE injected, never
- * imported. `docs/planning/Specular.md` is the design this implements.
+ * Same split as bloom/candle/water: this file is Node-validatable; the TSL
+ * builders live in sibling render modules with THREE injected, never imported.
  *
  * ============================================================================
- * ELEVEN CONTROLS REPLACE SIXTY-ONE, AND THAT IS THE HEADLINE
+ * ⚠️ THIS FILE USED TO ARGUE THE OPPOSITE. THE ARGUMENT WAS WRONG.
  * ============================================================================
- * V2's specular shipped 61 authored controls: 30 shimmer sliders across three
- * layers (density, speed, grain angle, cluster size, strength, parallax mix,
- * scatter, softness, elongation, on — each, three times), 11 wet-surface
- * controls, 4 sparkle, 4 frost, and the rest. Every one of them was global, so
- * a brass candlestick and a steel portcullis on the same map shared one grain
- * angle.
+ * Until 2026-07-27 this header claimed: *"A control survives here only if it is
+ * a property of a MATERIAL or of the WORLD. Anything that is a property of a
+ * noise generator is a symptom."* It justified that by asserting V2's thirty
+ * shimmer sliders existed only to hand-build the angular variation an
+ * orthographic camera deletes — *"restore the angles and every one becomes a
+ * property of the paint."*
  *
- * They are not ported, and not because of a line budget. They existed to
- * hand-build the angular variation an orthographic camera over a flat map
- * deletes (`specular-material.js`'s header proves why V2 had no other option).
- * Restore the angles — a synthesised finite eye height, a real half-vector, a
- * real Fresnel — and every one of those thirty becomes a property of the paint
- * instead of a slider:
+ * **There are no angles to restore.** This is a strictly 2D engine over a flat
+ * map: `N`, `V` and therefore `N·H` are one number for the entire screen, and
+ * no parameter can change that. The effect built on that premise — GGX, Smith,
+ * Schlick, a split-sum environment BRDF, a synthesised eye height — shipped
+ * invisible FOUR times, each round correctly locating one more zero in a chain
+ * of thirteen silent preconditions, and it was never going to converge.
  *
- *   V2's "grain angle / cluster size / elongation" → the mask's own hue+value.
- *   V2's 11 wet controls                          → `roughness × (1 − wetness)`.
- *   V2's 4 frost controls                         → three shifts on one lobe.
+ * So the rule's justification collapses, and pattern controls are legitimate
+ * here: **the pattern IS the deliverable.** What survives of the old rule is
+ * only its COUNT — V2 shipped 61 controls, most of them the same nine repeated
+ * three times with no way to tell which layer you were editing. This ships ten
+ * plus one repeated eight-control layer strip, each named for its mechanism.
  *
- * A control survives here only if it is a property of a MATERIAL or of the
- * WORLD. Anything that is a property of a noise generator is a symptom.
+ * This paragraph exists so a future session reads the correction before it
+ * reads the doctrine and helpfully undoes the fix
+ * (`feedback_plausible_diagnosis_rots`).
  *
  * ============================================================================
- * PARAMS ARRIVE WITH THEIR CONSUMER, ONE TIER AT A TIME
+ * WHAT THE EFFECT IS
  * ============================================================================
- * `params/no-dead-controls` fails the build the moment a key exists with no
- * consuming source — the wall that exists because V2's water shipped 46 live
- * sliders over zero implementing GLSL, and V2's specular shipped a
- * fully-labelled "Micro sparkle" folder whose `sparkleEnabled` defaulted to
- * `false`. Every key below is read by `specular-render.js` TODAY. Tiers 3-8
- * add theirs alongside the code that consumes them, never ahead of it.
+ * An animated field of shimmers, gradients and patterns painted across the
+ * metal the specular mask marks — sliding with the camera, evolving slowly in
+ * time, responding to the scene's lighting and to indoors/outdoors. The mask is
+ * read as **strength + tint**: darker paint is less shiny, and its hue says
+ * which metal. V2's structure, on WebGPU, plus the one capability V2 never had
+ * — per-island parallax, so each metal object feels like its own surface.
  *
  * @module effects/specular/specular
  */
 
 /**
- * Tiers 0-2's knobs — and only theirs. Each is read by
- * `effects/specular/specular-render.js`, whose exported defaults are the single
- * source of truth for the values, so a change lands in both places or neither.
+ * The knobs. Each is read by `effects/specular/specular-render.js` TODAY
+ * (`params/no-dead-controls` fails the build otherwise), and that module's
+ * exported defaults are the single source of truth for the values.
  */
 export const SPECULAR_PARAMS = Object.freeze({
   // ── Look ────────────────────────────────────────────────────────────────
@@ -56,124 +58,425 @@ export const SPECULAR_PARAMS = Object.freeze({
     default: 1,
     category: 'Look',
     label: 'Shine strength',
-    help: 'Master strength of every highlight this effect draws. Turn it down if metal reads as too hot against the rest of the map; turn it to 0 to see what the map looks like with no shine at all.',
+    help: 'Master strength of everything this effect draws. Turn it to 0 to see what the map looks like with no shine at all.',
   },
-  polish: {
+  saturation: {
     type: 'float',
-    min: -1,
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Look',
+    label: 'Metal colour',
+    help: 'How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it. This is the control that decides whether a map reads as treasure or as polished stone.',
+  },
+  shimmerGain: {
+    type: 'float',
+    min: 0,
+    max: 12,
+    step: 0.05,
+    // 5.5, not 4 — see `SPECULAR_DEFAULT_SHIMMER_GAIN`'s own header
+    // (2026-07-27): raised alongside a much lower sheen ceiling so the
+    // pattern's own contrast survives the global tonemap instead of being
+    // crushed by an always-on floor eating its headroom.
+    default: 5.5,
+    category: 'Look',
+    label: 'Shimmer contrast',
+    help: 'How far the moving patterns may brighten the metal above its resting shine. Low gives an even satin surface; high gives hard bright glints against darker metal, which is what reads as polished and slightly blown out. At 0 the metal still shines, it just stops moving.',
+  },
+  patternScalePx: {
+    type: 'float',
+    min: 512,
+    max: 32768,
+    step: 64,
+    default: 16384,
+    category: 'Look',
+    label: 'Pattern size',
+    help: 'How large the shimmer shapes are, measured across the MAP rather than the screen — so they stay the same physical size whether you are zoomed in or out. Large values give a few huge soft sweeps across the whole map; small values give many small busy ones. The fine glitter is not set here: that comes from how brightly you painted the mask.',
+  },
+  lightFloor: {
+    type: 'float',
+    min: 0,
     max: 1,
     step: 0.01,
     default: 0,
     category: 'Look',
-    label: 'Polish',
-    help: 'Shifts every painted surface toward duller (left) or more mirror-like (right), without repainting the mask. How polished each thing is comes from how BRIGHT you painted it — this is the global thumb on the scale when a whole map reads too glossy or too flat.',
+    label: 'Unlit shine',
+    help: 'How much metal still catches the eye in a completely unlit room, with no torch, no lamp and no window light reaching it. Defaults to 0 — metal with nothing shining on it should genuinely go dark, the same as everything else on the map — but you can raise this for a stylised look where treasure never quite vanishes. Real light still lights real metal either way: a nearby torch or window brightens it exactly as it should, this only controls the floor underneath that.',
   },
-  metalResponse: {
+  // ── Motion ──────────────────────────────────────────────────────────────
+  parallaxStrength: {
     type: 'float',
     min: 0,
-    max: 1,
+    max: 3,
     step: 0.01,
-    default: 0.85,
-    category: 'Look',
-    label: 'Metal response',
-    help: 'Whether the shiny things on this map are METAL or something clear like glass, glaze or wet stone. High = metal: bright, strongly reflective, and it takes over from the art underneath. Low = a clear coating: a faint sheen sitting on top of art that still shows through. This is one statement about a map rather than something you paint per-brushstroke, because what your mask already tells us is WHICH metal (from its colour), not whether it is one.',
+    default: 1,
+    category: 'Motion',
+    label: 'Parallax',
+    help: 'How much the shimmer slides across the metal as you pan the map. This is the single most important control for making the shine feel like a REFLECTION rather than a texture someone painted on. At 1 the patterns are nearly locked to your screen, sweeping over the map as you move, which is what light actually does. At 0 they are glued to the map and the illusion collapses.',
   },
-  viewerHeight: {
-    type: 'float',
-    min: 0.3,
-    max: 8,
-    step: 0.05,
-    default: 1.5,
-    category: 'Look',
-    label: 'Viewer height',
-    help: 'How far above the map your eye sits, measured against how much of the map is on screen. This is what makes highlights SWEEP as you scroll, the way a real shield glints when you lean over a table. Low = leaning right over it, a strong obvious sweep; high = standing well back, the flat static look where a highlight never moves. Measuring it against the view rather than in pixels is deliberate — it means the sweep behaves the same whether you are zoomed out on the whole map or in close on one blade.',
-  },
-  relief: {
+  islandSpread: {
     type: 'float',
     min: 0,
-    max: 4,
-    step: 0.05,
-    default: 1.2,
-    category: 'Look',
-    label: 'Relief',
-    help: 'How much the map art’s own painted detail shapes the highlights. Your artist already painted every cobble, plank and rivet with its light and shade, and this reads that back as surface shape — so a highlight breaks up across texture instead of sitting as one flat sheen. This is the control that makes metal look like metal rather than like a glow. Turn it to 0 for a perfectly smooth, glassy surface.',
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Motion',
+    label: 'Per-object variety',
+    help: 'How differently each separate piece of metal moves from its neighbours. The effect finds every connected metal shape on your map and gives it its own drift, so a brass door and a pile of coins never slide in lockstep. At 0 everything moves identically; higher values make each object feel more like its own surface.',
+  },
+  driftSpeed: {
+    type: 'float',
+    min: 0,
+    max: 0.05,
+    step: 0.0005,
+    default: 0.0025,
+    category: 'Motion',
+    label: 'Drift speed',
+    help: 'How fast the patterns evolve on their own when nobody is moving the camera. Deliberately slow — the camera is meant to be the main source of movement and this only stops a parked view from being frozen. At 0 the metal is perfectly still until you pan, which is how the original effect behaved.',
+  },
+  pulse: {
+    type: 'float',
+    min: 0,
+    max: 0.5,
+    step: 0.005,
+    default: 0.06,
+    category: 'Motion',
+    label: 'Breathing',
+    help: 'A gentle rise and fall in overall brightness over several seconds. Keep it small: a visible pulse reads as a shader effect, an almost imperceptible one reads as a living surface.',
   },
   // ── Outdoor ─────────────────────────────────────────────────────────────
-  sunGlint: {
-    type: 'float',
-    min: 0,
-    max: 4,
-    step: 0.01,
-    default: 1,
-    category: 'Outdoor',
-    label: 'Sun glint',
-    help: 'Strength of the single hard highlight the sun makes on outdoor metal. Its position follows the time of day, so it sweeps across the map as the hours pass and stretches into a long streak near sunrise and sunset.',
-  },
-  skySheen: {
-    type: 'float',
-    min: 0,
-    max: 3,
-    step: 0.01,
-    default: 1,
-    category: 'Outdoor',
-    label: 'Sky sheen',
-    help: 'Strength of the broad, even glow outdoor surfaces pick up from the open sky above them. This is the one that makes wet stone read blue-grey on a clear day and flat grey under cloud — the sky is a huge soft light source and metal underneath it can see all of it.',
-  },
-  // ── Indoor ──────────────────────────────────────────────────────────────
-  ambientSheen: {
-    type: 'float',
-    min: 0,
-    max: 3,
-    step: 0.01,
-    default: 1,
-    category: 'Indoor',
-    label: 'Ambient sheen',
-    help: 'The flat, everywhere-at-once shine metal picks up just from being in a lit room, with no torch pointed at it in particular — the indoor twin of Sky sheen. This is what lets a gold fixture read as gold in ordinary room light, not only under a torch. Turn it down for metal that should only catch light directly from a nearby source.',
-  },
-  lampGlint: {
-    type: 'float',
-    min: 0,
-    max: 4,
-    step: 0.01,
-    default: 1,
-    category: 'Indoor',
-    label: 'Lamp glint',
-    help: 'Strength of the SHARP highlight indoor metal picks up when a torch, lantern or other light sits close enough to catch it directly — on top of the ambient sheen above, not instead of it. This is the one that makes a candlestick glint as you carry a torch past it.',
-  },
-  lampHeight: {
+  sunBias: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.55,
-    category: 'Indoor',
-    label: 'Lamp height',
-    help: 'How high the lights hang above the floor. Low values make long grazing streaks across a flagstone hall; high values make tight pools of glint directly under each sconce.',
+    default: 1,
+    category: 'Outdoor',
+    label: 'Sun direction',
+    help: 'How strongly the sun favours metal whose grain runs across its light, outdoors. This is what makes brushed metal brighten and dim through the day as the sun swings round, and on a flat top-down map it is the only way the sun direction reaches this effect at all. Indoors it does nothing, because indoors there is no sun to be angled against.',
   },
 });
 
 /**
+ * The per-layer knobs. THREE layers, and the count is not decoration: the
+ * relative slide BETWEEN layers at different parallax depths is most of what
+ * sells "a highlight moving over a surface". Layer 3 defaults to a NEGATIVE
+ * depth so it counter-moves, exactly as V2's did.
+ *
+ * Held separately from `SPECULAR_PARAMS` so the panel can generate one strip
+ * per layer rather than twenty-four flat sliders with digits in their names —
+ * V2 shipped exactly that and nobody could tell which layer they were editing.
+ *
+ * ⚠️ THREE OF THESE NAMES ARE CORRECTIONS OF V2'S, NOT TRANSLATIONS. Its
+ * "Scatter" is `streak` (the per-cell rotation that actually makes streaks),
+ * its "Elongation" is `rowSpacing` (it elongates nothing — the algebra is in
+ * `specular-pattern.js`'s header), and its "Cluster size" is `contrast` (not a
+ * size). Porting the labels would have ported the confusion.
+ */
+export const SPECULAR_LAYER_PARAMS = Object.freeze({
+  density: {
+    type: 'float',
+    min: 0.25,
+    max: 64,
+    step: 0.25,
+    default: 11,
+    label: 'Density',
+    help: 'How many shimmer shapes fit across the pattern. Higher is finer and busier.',
+  },
+  grainAngleDeg: {
+    type: 'float',
+    min: 0,
+    max: 360,
+    step: 1,
+    default: 115,
+    label: 'Grain angle',
+    help: 'Which way this layer of brushing runs, in degrees. Outdoors this also decides how the sun favours it through the day.',
+  },
+  streak: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 1.7,
+    label: 'Streak',
+    help: 'Turns round glints into directional streaks, each at its own random angle. THE control for whether metal reads as brushed or as beaded — at 0 you get dots, and this is the first thing to reach for if a surface looks wrong.',
+  },
+  softness: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.31,
+    label: 'Softness',
+    help: 'How sharp each glint edge is, from a hard bright speck to a broad soft pool.',
+  },
+  rowSpacing: {
+    type: 'float',
+    min: 0.18,
+    max: 8,
+    step: 0.02,
+    default: 4,
+    label: 'Row spacing',
+    help: 'How far apart the rows of glints sit across the grain. High values give widely separated lines of shine; 1 gives an even scatter.',
+  },
+  contrast: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.59,
+    label: 'Coverage',
+    help: 'How much of the surface the glints cover, from sparse hard sparks to a broad connected sheen.',
+  },
+  strength: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 1,
+    label: 'Layer strength',
+    help: 'This layer contribution. 0 switches it off without disturbing the others.',
+  },
+  parallaxDepth: {
+    type: 'float',
+    min: -3,
+    max: 3,
+    step: 0.01,
+    default: 1,
+    label: 'Parallax depth',
+    help: 'How fast this layer slides as you pan, and which way. NEGATIVE values move it against the camera — having one layer counter-move is what makes the shine feel like it sits above the surface rather than in it.',
+  },
+});
+
+/**
+ * THE DEBUG CHANNELS — the instrument this effect shipped without, four live
+ * failures running.
+ *
+ * ============================================================================
+ * WHY THIS EXISTS, AND WHY IT IS NOT A `SPECULAR_PARAMS` ENTRY
+ * ============================================================================
+ * Selecting a channel makes the mesh draw ONE intermediate, opaque and flat,
+ * across the metal's own crop — so a black screen NAMES the term that is zero
+ * instead of leaving the whole chain alive as a suspect. Channels **1-16 are
+ * the CHAIN**, ordered to walk the composite left to right: **the first one
+ * that comes up black is the culprit.** (Channel 1 draws before anything is
+ * sampled, so a black 1 means the mesh itself is not there — a different
+ * investigation.) Channels **17+ are COORDINATE PROBES**, a second tier for the
+ * one thing the chain cannot distinguish: a texture reading black because it is
+ * empty versus one being sampled in the wrong place.
+ *
+ * It is deliberately NOT a param: a diagnostic view selector is not a property
+ * of the look, the FOH/ROH card is generated from the schema, and a GM must
+ * never find "show me the raw cellular noise" on a slider strip. It travels on
+ * the render state beside `enabled`, and `getStatus().debugChannel` reports it
+ * so it can never be silently left on.
+ *
+ * ⚠️ It costs NOTHING when off, structurally rather than by promise: the
+ * channels compile into their OWN THIRD MATERIAL, which no mesh draws until a
+ * channel is picked. This is not `tsl/no-uniform-gates`' "off" that still
+ * executes every pixel — at channel 0 the selector is not in a draw call.
+ */
+export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
+  Object.freeze({ n: 0, id: 'off', label: 'Off — normal render', reads: 'The effect as it ships.' }),
+  Object.freeze({
+    n: 1,
+    id: 'quad',
+    label: '1 · Quad (magenta)',
+    reads:
+      'Flat magenta over the metal AABB crop. BLACK/absent = the mesh is not drawing at all — bad mask URL, ' +
+      'nothing painted, hidden, or the pass never ran. Magenta in the WRONG PLACE = the mask rect the ' +
+      'authority served disagrees with where the metal actually is.',
+  }),
+  Object.freeze({
+    n: 2,
+    id: 'mask',
+    label: '2 · Mask RGB',
+    reads:
+      'The specular mask file as this shader samples it. You should see your painted metal, in its own ' +
+      'colours. Black = sampling off the painted area, or a genuinely empty file — channel 14 tells you which.',
+  }),
+  Object.freeze({
+    n: 3,
+    id: 'strength',
+    label: '3 · Strength',
+    reads:
+      'luma × alpha — the "how shiny is this" scalar the whole effect is built on. Grey where you painted ' +
+      'grey, bright where you painted bright. All-black with a healthy channel 2 means the alpha decode ' +
+      'is wrong, which is the greyscale-no-alpha authoring case.',
+  }),
+  Object.freeze({
+    n: 4,
+    id: 'presence',
+    label: '4 · Presence',
+    reads: 'The coverage gate — white wherever strength clears the presence edge. This is the mask silhouette.',
+  }),
+  Object.freeze({
+    n: 5,
+    id: 'tint',
+    label: '5 · Tint',
+    reads:
+      'The metal colour at its decoded strength. Gold should read gold. Neutral grey everywhere means ' +
+      'Metal colour is at 0, or the mask was painted greyscale.',
+  }),
+  Object.freeze({
+    n: 6,
+    id: 'islands',
+    label: '6 · Islands (a colour each)',
+    reads:
+      'THE PER-OBJECT MAP, and it names its own failure before showing you the picture. FLAT MAGENTA = ' +
+      'the pack never baked at all (the mask never loaded, or the bake threw — check the console and ' +
+      'the specular report`s islandPack field). FLAT AMBER = it baked, but found zero islands worth ' +
+      'keeping — not a bug, the mask genuinely has nothing that cleared the size floor even after ' +
+      'clustering nearby specks together; `preClusterComponents` in the report says whether there was ' +
+      'anything to cluster in the first place. Otherwise: every connected metal shape should be a FLAT ' +
+      'PATCH of its own VIVID colour (hashed from the island id, so forty objects spread right around ' +
+      'the wheel), BLACK wherever no island owns the texel. Speckle inside one object means the label ' +
+      'grid is too coarse for it.',
+  }),
+  Object.freeze({
+    n: 7,
+    id: 'islandMotion',
+    label: '7 · Island motion (R/G = parallax)',
+    reads:
+      'The decoded parallax VECTOR each island slides by, as red/green around a mid grey. Flat grey-ish ' +
+      'everywhere means every island shares one motion — check Per-object variety, then the pack. ' +
+      'Distinct colours here plus distinct colours on channel 6 is the feature working.',
+  }),
+  Object.freeze({
+    n: 8,
+    id: 'floorGate',
+    label: '8 · Floor gate (R=floor, G=drawn)',
+    reads:
+      'The scene-attribute verdict. RED = this quad floor matches; GREEN = the attribute buffer says art ' +
+      'was drawn here. Flat yellow with no structure = no attr texture, so the gate compiled OUT (open). ' +
+      'GREEN IS EXPECTED TO BE BLACK — that buffer alpha lane is a known live bug and is deliberately not ' +
+      'multiplied in.',
+  }),
+  Object.freeze({
+    n: 9,
+    id: 'outdoors',
+    label: '9 · Outdoors gate',
+    reads: 'White outdoors, black indoors. Decides whether the sun-direction bias applies. Not a failure either way.',
+  }),
+  Object.freeze({
+    n: 10,
+    id: 'illum',
+    label: '10 · Incident light (steepened)',
+    reads:
+      'The scene lighting this effect multiplies through, AFTER its floor AND its steepening curve — this ' +
+      'IS the number that decides "connection to lighting". Pan from a lit area into a dark one and this ' +
+      'should visibly darken, sharply — a room-lit reading near 1.0 should look BRIGHT here, a dim corner ' +
+      'should look decisively DARKER than channel 9`s own outdoors gate suggests. Flat/unchanging across a ' +
+      'room with real light/shadow variation means illum is not reaching this pass at all — a wiring bug, ' +
+      'not a tuning one.',
+  }),
+  Object.freeze({
+    n: 11,
+    id: 'cellular',
+    label: '11 · Cellular base',
+    reads:
+      'The irregular voronoi field that breaks up the layer lattice. Should be organic blotches whose size ' +
+      'follows how brightly you painted the mask. Flat = the noise is not varying, which means the pattern ' +
+      'coordinate is not varying either.',
+  }),
+  Object.freeze({
+    n: 12,
+    id: 'shimmer',
+    label: '12 · Shimmer',
+    reads:
+      'The full combined pattern before it modulates anything. THIS is the animated look — pan the map and ' +
+      'it should slide. Static while panning means parallax is 0 or the view centre is not being pushed.',
+  }),
+  Object.freeze({
+    n: 13,
+    id: 'sheen',
+    label: '13 · Sheen (base, no shimmer)',
+    reads:
+      'The always-on base alone — tint × incident × strength, no shimmer, gently ceiled. This should track ' +
+      'the room`s own lighting closely and never look dramatically bright on its own; it is what makes ' +
+      'painted gold read as gold at rest. If THIS looks blown out, the mask`s own colour or the strength ' +
+      'slider is too hot, independent of anything shimmer is doing.',
+  }),
+  Object.freeze({
+    n: 14,
+    id: 'glint',
+    label: '14 · Glint (shimmer only)',
+    reads:
+      'The shimmer`s own contribution alone, ceiled far higher than the sheen — this is allowed to blow out ' +
+      'toward white/bloom at genuine peaks, the same way a real specular highlight does. Should be SPARSE: ' +
+      'small bright patches on a mostly-dark field, not a broad wash. Broad and uniformly bright here is ' +
+      'the "washed out" bug — reach for Shimmer contrast or a layer`s own Streak/Coverage first.',
+  }),
+  Object.freeze({
+    n: 15,
+    id: 'final',
+    label: '15 · Final (sheen + glint)',
+    reads:
+      'Exactly what the mesh contributes — sheen plus glint, each already ceiled. Bright here while the map ' +
+      'looks flat means the bug is downstream of this pass (the tonemap, or a grade setting).',
+  }),
+  Object.freeze({
+    n: 16,
+    id: 'finalBoosted',
+    label: '16 · Final ×16',
+    reads: 'Channel 15 amplified — separates "exactly zero" from "non-zero but far too dim to see".',
+  }),
+  // ── COORDINATE PROBES (17+) — a second tier, not part of the chain ──────
+  Object.freeze({
+    n: 17,
+    id: 'maskUv',
+    label: '17 · Mask UV ramp (R=u, G=v)',
+    reads:
+      'The coordinate the mask is sampled through, unclamped. A smooth red/green gradient across the metal ' +
+      'means the lookup is sound and channel 2 black is the texture. Flat means the crop bounds never arrived.',
+  }),
+  Object.freeze({
+    n: 18,
+    id: 'patternUv',
+    label: '18 · Pattern UV (fractional)',
+    reads:
+      'The shimmer pattern coordinate, wrapped to 0..1 so it reads as repeating ramps. PAN THE MAP: these ' +
+      'should visibly slide. Frozen while panning is the parallax failing; frozen entirely is the world ' +
+      'position or the pattern scale.',
+  }),
+  // ── THE CONTROL CHANNEL (19) — keep it; it is how channel 12 stays honest ──
+  // The RAW light, before this effect does anything to it. Its whole value is
+  // the COMPARISON with channel 12: same texture, same coordinate, one of them
+  // untouched. 2026-07-27 that pair localised a live bug in one reading —
+  // 12 read 0 where 19 read 0.866 — after three rounds of theories had missed
+  // it. Any future "metal responds wrongly to light" starts by diffing these
+  // two, never by re-reading the shader.
+  Object.freeze({
+    n: 19,
+    id: 'illumDirect',
+    label: '19 · Illum, RAW (control for 12)',
+    reads:
+      'The same `buf:scene.illum` at the same screen UV as channel 12, sampled directly with NOTHING ' +
+      'applied. Compare the two: 12 darker than 19 is this effect shaping the light (expected — it ' +
+      'linearises through the engine transfer curve); 12 at ZERO while 19 is bright is a term in ' +
+      'between having collapsed, which is a bug every time. Note 19 is GREY (~0.19) in unlit rooms, not ' +
+      'black — Foundry bakes ambientDarkness into illum, and taking that grey as "some light" is exactly ' +
+      'what used to make metal glow in the dark.',
+  }),
+]);
+
+/** Channel 13's amplification. 16× turns a 0.02 contribution (invisible) into
+ * 0.32 (plainly visible) without saturating a healthy one into a white field. */
+export const SPECULAR_DEBUG_BOOST = 16;
+
+/**
  * The manifest — the effect as data (Effects.md §2 shape). `tiers` lists only
- * what is ACTUALLY BUILT (bloom and water set the same precedent); the rest of
- * the ladder `docs/planning/Specular.md` §6 designs is recorded in
- * `deferredRungs` — named, ordered, but not yet real code — so the manifest
- * never claims more exists than does.
+ * what is ACTUALLY BUILT; the rest is recorded in `deferredRungs`, named and
+ * ordered but not yet real code, so the manifest never claims more than exists.
  *
- * `visualWeight: 0.7` — a material read, defended below water's landscape-scale
- * 0.8 but above pure polish: metal that stops responding to light reads as a
- * lighting bug, not as a missing effect.
+ * `visualWeight: 0.7` — a material read: metal that stops responding to light
+ * reads as a lighting bug, not as a missing effect.
  *
- * `enabledFromProfile: 'low'` — tiers 0-2 are one mask read and arithmetic, and
- * the effect is inert on any scene with no `_Specular` file (`absentValue: 0`
- * in the catalog), so default-on cannot surprise a scene that never opted in.
- * That is what makes `feedback_default_on_new_features` the easy call here,
- * where the sky light had to take a logged exception.
- *
- * `a11y.photosensitive: false` — tiers 0-2 have no flicker of any kind. The
- * highlights move, but they move with the CAMERA and with the CLOCK, which is
- * ordinary parallax, not the rapid high-contrast flashing WCAG's photosensitive
- * criterion targets. ⚠️ **Revisit at tier 3**, which is the glint rung and the
- * first that twinkles.
+ * `a11y.photosensitive: false` — the motion is slow drift and camera parallax,
+ * ordinary parallax rather than the rapid high-contrast flashing WCAG's
+ * photosensitive criterion targets. ⚠️ Revisit if a sparkle rung ever lands;
+ * that one twinkles.
  *
  * @type {import('../effect-manifest.js').EffectManifest}
  */
@@ -184,84 +487,101 @@ export const SPECULAR = Object.freeze({
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
   params: SPECULAR_PARAMS,
+  // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
+  // brush already loaded with this mask (validateAuthoring, effect-manifest.js).
+  authoring: Object.freeze({ paint: 'specular' }),
   tiers: Object.freeze([
     Object.freeze({
       n: 0,
       name: 'presence',
       cost: Object.freeze({ class: 'C4', estMsPerMp: 0.08 }),
       adds:
-        'The specular mask, at its authored resolution, in the right place on the right floor, ' +
-        'responding to how lit it is — cropped to the metal`s own AABB (Law 6) and gated to the ' +
-        'visible floor by buf:scene.attr. Never gated; carries the correctness gate.',
+        'The mask read as STRENGTH and TINT, multiplied by the scene lighting and drawn where it is painted — ' +
+        'cropped to the metal own AABB (Law 6) and gated to the visible floor. The composite is ' +
+        'tint x (1 + shimmer) x light, so at this tier shimmer is 0 and metal simply shines: the term that ' +
+        'CANNOT be zero, which is what four invisible builds were missing.',
     }),
     Object.freeze({
       n: 1,
-      name: 'material',
-      cost: Object.freeze({ class: 'C1', estMsPerMp: 0.02 }),
+      name: 'shimmer',
+      cost: Object.freeze({ class: 'C1', estMsPerMp: 0.03 }),
       adds:
-        'The mask read as a MATERIAL rather than a tint — hue→F0, saturation→metalness, ' +
-        'value→smoothness — and the two-blend composite that lets real metal suppress the diffuse ' +
-        'it replaces. Pure ALU on tier 0`s fetch. Gold stops being a yellow glow.',
+        'Three anisotropic blob-lattice layers plus a voronoi cellular base whose cell size follows the mask ' +
+        'own brightness — bright gold breaks into fine glitter, dull pewter into broad soft shapes. Pure ALU ' +
+        'on tier 0 fetch. This is where it stops being a flat sheen.',
     }),
     Object.freeze({
       n: 2,
-      name: 'skyAndLamps',
-      cost: Object.freeze({ class: 'C3', estMsPerMp: 0.05 }),
+      name: 'parallax',
+      cost: Object.freeze({ class: 'C1', estMsPerMp: 0.01 }),
       adds:
-        'The synthesised finite eye height, Schlick Fresnel, and the indoor/outdoor split: two ' +
-        'analytic sky lobes outdoors (dome + sun disc, from the sky handle), TWO analogous terms ' +
-        'indoors (an ambient dome from illum`s own value, plus a directional lamp lobe from its ' +
-        'gradient), mixed per-pixel by the outdoors mask. THE rung where a highlight first MOVES. ' +
-        'The ambient-indoor half landed 2026-07-26 after shipping without it: a room lit only by ' +
-        'ambient/global fill, with no lamp close enough to create a gradient, measured to exactly 0.',
+        'The pattern slides with the camera at ~1:1, near screen-locked, with each layer at its own depth and ' +
+        'the third counter-moving. THE rung that makes it read as a reflection rather than as paint.',
     }),
     Object.freeze({
       n: 3,
-      name: 'relief',
-      cost: Object.freeze({ class: 'C3', estMsPerMp: 0.05 }),
+      name: 'life',
+      cost: Object.freeze({ class: 'C1', estMsPerMp: 0.005 }),
       adds:
-        'THE RUNG THAT MAKES THE OTHERS VISIBLE. Four taps of buf:scene.color give the map art`s own ' +
-        'painted luminance gradient, read as surface slope — so the normal varies per pixel and the ' +
-        'highlight breaks across texture instead of sitting as one flat wash. Measured: a flat normal ' +
-        'holds every pixel at 0.39 of scene brightness; tilting toward the mirror angle reaches 6.3. ' +
-        'Costed as a C4 VT read when it was designed as rung 6 — wrong, buf:scene.color is already in ' +
-        'the graph, so it is C3 and always belonged here. Fades out by itself when zoomed out.',
+        'A slow global drift and a gentle breathing pulse, so a parked view keeps evolving over ~20s without ' +
+        'ever looking like it is scrolling. The camera still leads by an order of magnitude — this only stops ' +
+        'a still frame from being frozen. Pure ALU: one spatially-constant vector times the shared clock.',
+    }),
+    Object.freeze({
+      n: 4,
+      name: 'islands',
+      cost: Object.freeze({ class: 'C3', estMsPerMp: 0.02 }),
+      adds:
+        'Connected metal regions labelled on the CPU and packed to a texture, each with its own parallax ' +
+        'vector — so a brass door and a pile of coins never slide in lockstep. THE capability V2 never had: ' +
+        'every overlay it drew shared one global pattern frame, so two identical shields behaved identically ' +
+        'wherever they sat. One extra texture read, hence C3.',
+    }),
+    Object.freeze({
+      n: 5,
+      name: 'sunAndSky',
+      cost: Object.freeze({ class: 'C3', estMsPerMp: 0.02 }),
+      adds:
+        'The outdoors mask gates a sun-azimuth grain bias: metal whose brushing runs across the light is ' +
+        'favoured over metal running along it, a 2.9x swing per layer over a day. On a flat top-down map this ' +
+        'is the only route the sun direction has into the effect.',
     }),
   ]),
-  // Recorded, NOT built — honest rungs (Effects.md §0), the ladder
-  // docs/planning/Specular.md §6 designs in full. Each becomes a real `tiers`
-  // entry, with its own cost class and its own phase's render code, in order.
   deferredRungs: Object.freeze([
     Object.freeze({
-      name: 'microsurface',
+      name: 'perIslandLook',
       note:
-        'Footprint-aware glint: count microfacets per pixel from fwidth(worldPos) and blend between ' +
-        'discrete twinkle (few) and roughness-widened smooth lobe (many), so sparkle RESOLVES with ' +
-        'zoom instead of aliasing the way V2`s fixed world lattice did.',
+        'Per-island pattern scale, phase and grain angle, on top of the parallax that landed at tier 3. The ' +
+        'author chose parallax alone first, deliberately — one property, the one that reads as separate ' +
+        'surfaces rather than as separate textures.',
     }),
     Object.freeze({
-      name: 'context',
+      name: 'sparkle',
       note:
-        'buf:scene.coloration for per-lamp highlight colour, sun-occlusion visibility on the glint, ' +
-        'and weather — wet as a smooth dielectric clear coat, frost as roughness-up + cool F0.',
+        'Footprint-aware glint: count microfacets per pixel from fwidth(worldPos) and blend between discrete ' +
+        'twinkle and a roughness-widened smooth lobe, so sparkle RESOLVES with zoom instead of aliasing the ' +
+        'way V2 fixed world lattice did (its own sparkle shipped defaulted OFF for exactly that reason).',
     }),
     Object.freeze({
-      name: 'grain',
+      name: 'weather',
       note:
-        'The specular SDF pack (the same jump flood water bakes): per-object anisotropy along the ' +
-        'shape`s own tangent, the edge bevel that traces each metal silhouette, distance-driven polish.',
+        'Wet as a smooth clear coat and frost as a cool-tinted crystal field, both outdoors-gated; plus wind ' +
+        'drift on the pattern from world/wind-access.js. V2 had all three and they are a large part of why ' +
+        'its outdoor maps felt alive.',
     }),
     Object.freeze({
-      name: 'dispersion',
+      name: 'lampColour',
       note:
-        'Thin-film iridescence and prism dispersion as a function of the now-varying cos θ and a ' +
-        'thickness from the distance field. Absorbs IridescenceEffectV2 + PrismEffectV2.',
+        'buf:scene.coloration for per-lamp highlight colour, so a torch throws a warm glint and a cold ' +
+        'crystal a blue one. V2 approximated this by tracking its brightest analytic disc; the real buffer ' +
+        'already exists here.',
     }),
     Object.freeze({
-      name: 'reflection',
+      name: 'tokenOcclusion',
       note:
-        'Roughness-indexed sample of the PREVIOUS frame`s bloom pyramid along the reflection vector — ' +
-        'a bright-pass pyramid holds exactly what a dark polished floor reflects. Coverage/zoom-gated.',
+        'Tokens do not occlude the shine — buf:scene.attr is written by floor art only, so a token standing ' +
+        'on a gold inlay leaves the attributes under it untouched. V2 solved this with a dedicated ' +
+        'screen-space token mask; MSA has no equivalent buffer yet.',
     }),
   ]),
 });

@@ -389,6 +389,9 @@ export const VEGETATION = Object.freeze({
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
   params: VEGETATION_PARAMS,
+  // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
+  // brush already loaded with this mask (validateAuthoring, effect-manifest.js).
+  authoring: Object.freeze({ paint: ['tree', 'bush'] }),
   tiers: Object.freeze([
     Object.freeze({
       n: 0,

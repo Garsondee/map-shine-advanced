@@ -9,8 +9,26 @@
  * `device.queue.onSubmittedWorkDone()`, which resolves only once the GPU has finished
  * the frame's submitted passes — the SAME primitive vt-pan-viewer already uses for
  * upload backpressure (vt-pan-viewer.js). No `trackTimestamp` device feature, no
- * constructor flag, nothing a cached module can silently disable: it works on any
- * WebGPU device where the last GPU timer reported `supported:false`.
+ * constructor flag, nothing a cached module can silently disable.
+ *
+ * ⚠️ CORRECTION (2026-07-27) — this header used to end that sentence with "...it
+ * works on any WebGPU device where the last GPU timer reported `supported:false`",
+ * which reads as "the hardware cannot do timestamp queries". It can. That
+ * `supported:false` was a flag NOBODY EVER PASSED:
+ *   - `Backend`'s constructor: `this.trackTimestamp = parameters.trackTimestamp === true`
+ *     (vendor/three/three.webgpu.js:64637) — CONSTRUCTOR-ONLY, defaults false.
+ *   - `WebGPUBackend.init` then does `trackTimestamp && hasFeature(TimestampQuery)`
+ *     (:75258), so a flag left false reports false on hardware that supports it fine.
+ *   - vt-pan-viewer.js constructed the renderer without the flag.
+ *   - three already requests EVERY feature the adapter reports (:75217-75228), so
+ *     `timestamp-query` is on the device wherever the adapter has it.
+ * Per-pass GPU timing therefore lives in diag/gpu-zone-timer.js. This probe stays
+ * the WHOLE-FRAME number and the honest fallback for when timestamps are genuinely
+ * unavailable — it is not superseded, it is the coarser of two real instruments.
+ * (feedback_plausible_diagnosis_rots: a theory written into a header and never
+ * checked against the line that would make it true becomes load-bearing fiction.
+ * This one steered every session away from the best available instrument for a
+ * week — written 2026-07-20, caught 2026-07-27.)
  *
  * Awaiting completion serializes CPU↔GPU (it slows rendering), so the probe is GATED —
  * active ONLY while the perf lab runs a measurement sweep, never in normal play.

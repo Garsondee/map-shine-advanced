@@ -13,7 +13,6 @@ import './setup-globals.mjs'; // MUST be first — shims window/etc for import-t
 import { run as runFrameGraph } from './frame-graph.test.mjs';
 import { run as runAllocator } from './three-allocator.test.mjs';
 import { run as runAllocatorLaw } from './three-allocator-law.test.mjs';
-import { run as runPerf } from './v3-perf.test.mjs';
 import { run as runPasses } from './pass-declarations.test.mjs';
 import { run as runPassHealth } from './pass-health.test.mjs';
 import { run as runPassImpls } from './pass-impls.test.mjs';
@@ -56,7 +55,6 @@ const suites = [
   ['FrameGraph', runFrameGraph],
   ['ThreeAllocator', runAllocator],
   ['ThreeAllocatorLaw', runAllocatorLaw],
-  ['v3-perf', runPerf],
   ['pass-declarations', runPasses],
   ['pass-health', runPassHealth],
   ['pass-impls', runPassImpls],

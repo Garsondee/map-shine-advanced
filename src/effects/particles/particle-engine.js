@@ -22,8 +22,9 @@
  *   • A system is DATA, never a class — {@link validateParticleSystem}. Rain and
  *     snow are two configs handed to one engine; adding hail is a file.
  *   • Storage buffers have ONE door (the arena) — `particles/allocator-only`.
- *   • Simulation is GPU compute (TSL), proven on both backends by the throwaway
- *     diag/compute-spike.js. There is NO per-particle JS object, by construction
+ *   • Simulation is GPU compute (TSL), first proven on both backends by a
+ *     throwaway spike (retired 2026-07-27 — the engine below IS the proof now).
+ *     There is NO per-particle JS object, by construction
  *     — that object was V2's actual bottleneck, present in 11 files.
  *
  * WHY NOT three.quarks (asked and answered — do not re-litigate): memory

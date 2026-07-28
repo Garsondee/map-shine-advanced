@@ -11,7 +11,14 @@ import { validateParamsSchema } from '../../../core/params-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
-import { SPECULAR, SPECULAR_PARAMS } from '../specular.js';
+import {
+  SPECULAR,
+  SPECULAR_PARAMS,
+  SPECULAR_LAYER_PARAMS,
+  SPECULAR_DEBUG_CHANNELS,
+  SPECULAR_DEBUG_BOOST,
+} from '../specular.js';
+import { SPECULAR_DEFAULT_SHIMMER_GAIN } from '../specular-render.js';
 
 export function run(t) {
   const { ok } = t;
@@ -21,7 +28,7 @@ export function run(t) {
   ok('SPECULAR is a valid manifest', validateEffectManifest(SPECULAR).ok);
   ok("the effect's id is specular", SPECULAR.id === 'specular');
   ok(
-    'tiers 0-2 do not flash (a11y photosensitive false) — the glint rung is 3',
+    'the shipped rungs do not flash (a11y photosensitive false) — slow drift and camera parallax only',
     SPECULAR.a11y.photosensitive === false
   );
 
@@ -42,7 +49,7 @@ export function run(t) {
   const deferred = SPECULAR.deferredRungs.length;
   ok('tier 0 exists — the coarse pin (Effects.md Law 1)', SPECULAR.tiers[0]?.n === 0);
   ok('tier 0 is named for what it does, not for a technique', SPECULAR.tiers[0]?.name === 'presence');
-  ok('built + deferred describe the whole 9-rung ladder', built + deferred === 9);
+  ok('built + deferred describe one whole ladder, nothing dropped', built + deferred === 11);
   const allNames = [...SPECULAR.tiers.map((x) => x.name), ...SPECULAR.deferredRungs.map((x) => x.name)];
   ok('no rung is claimed twice', new Set(allNames).size === allNames.length);
   ok(
@@ -54,14 +61,14 @@ export function run(t) {
   // exempt (see effect-manifest.js). The manifest validator proves this
   // generally; this pins the SHAPE the design argues for: the cheap rungs
   // cluster at the bottom and buy most of the look.
-  ok('tier 1 is pure ALU (C1) — free detail on tier 0’s fetch', SPECULAR.tiers[1]?.cost.class === 'C1');
-  ok('tier 2 is a graph read (C3) — no new bandwidth', SPECULAR.tiers[2]?.cost.class === 'C3');
+  ok('tier 1 is pure ALU (C1) — the shimmer rides tier 0’s fetch', SPECULAR.tiers[1]?.cost.class === 'C1');
+  ok('tier 2 is pure ALU too — parallax is an offset, not a fetch', SPECULAR.tiers[2]?.cost.class === 'C1');
 
   // --- every param is a MATERIAL or WORLD property, per the header --------
   // The V2 corpse this replaces had 30 shimmer sliders, each a property of a
   // noise generator. The count is the claim; assert it stays honest.
   const keys = Object.keys(SPECULAR_PARAMS);
-  ok('the whole schema is well under V2’s 61 controls', keys.length <= 12);
+  ok('the whole schema is well under V2’s 61 controls', keys.length + Object.keys(SPECULAR_LAYER_PARAMS).length <= 24);
   ok(
     'every param declares a help string an author can act on',
     keys.every((k) => (SPECULAR_PARAMS[k].help ?? '').length > 40)
@@ -70,17 +77,57 @@ export function run(t) {
     'every param declares a category, so the panel groups itself',
     keys.every((k) => typeof SPECULAR_PARAMS[k].category === 'string')
   );
+  // The indoor/outdoor split is real and lives in the shader's outdoors gate,
+  // but only ONE control is outdoor-specific — because indoors there is simply
+  // no sun to be angled against. An "Indoor" category would be an empty group
+  // asserting a symmetry that does not exist.
   ok(
-    'the indoor/outdoor split is visible in the SCHEMA, not just the shader',
-    keys.some((k) => SPECULAR_PARAMS[k].category === 'Indoor') &&
-      keys.some((k) => SPECULAR_PARAMS[k].category === 'Outdoor')
+    'the outdoor-only control is categorised as such',
+    keys.some((k) => SPECULAR_PARAMS[k].category === 'Outdoor')
   );
-  // The compatibility escape hatch is a real, reachable value, not prose.
   ok(
-    'metalResponse can be taken to 0 — the documented "give me V2 back" setting',
-    SPECULAR_PARAMS.metalResponse.min === 0
+    '…and it is the sun bias, whose help says it does nothing indoors',
+    SPECULAR_PARAMS.sunBias.category === 'Outdoor'
   );
-  ok('…and defaults ABOVE 0, so the new behaviour is what ships', SPECULAR_PARAMS.metalResponse.default > 0);
+  // The escape hatches are real, reachable values rather than prose.
+  ok('metal colour can be taken to 0 — a neutral white sheen', SPECULAR_PARAMS.saturation.min === 0);
+  ok('…and defaults ON, so a gold mask reads as gold', SPECULAR_PARAMS.saturation.default > 0);
+  // ⚠️ `islandSpread: 0` is the documented "give me V2 back" setting: every
+  // island moves identically, which is exactly what V2 did with its single
+  // global pattern frame. It must stay reachable.
+  ok('per-object variety can be taken to 0 — V2 parity', SPECULAR_PARAMS.islandSpread.min === 0);
+  ok('…and defaults ON, so the new capability is what ships', SPECULAR_PARAMS.islandSpread.default > 0);
+
+  // ── THE LIGHT FLOOR — CORRECTED DOWN TO 0, LIVE FEEDBACK (2026-07-27) ────
+  // ⚠️ This used to default ABOVE zero, on the reasoning that a zero floor
+  // reproduces the exact "silent precondition" shape that cost this effect
+  // four invisible rounds. That reasoning was WRONG: it treated "genuine
+  // darkness" and "a broken input" as the same failure, and a floor cannot
+  // tell them apart. The live report was metal reading as SELF-ILLUMINATING
+  // in dark rooms — "boosting those areas so they become brighter, which
+  // isn't physically correct" — which is precisely what a floor on a purely
+  // ADDITIVE composite does: it cannot ever compete for darkness, only add
+  // light. `buf:scene.illum` already carries point lights and window light
+  // (both MAX/ADD-composited into it before this pass runs) and Foundry's own
+  // day/night mix outdoors, so real local light already reaches this effect
+  // with NO floor at all — the floor was fighting that signal, not protecting it.
+  ok('a light floor exists — still an author escape hatch, not gone', !!SPECULAR_PARAMS.lightFloor);
+  ok(
+    '…but it now defaults to EXACTLY zero, so real darkness reads as real darkness',
+    SPECULAR_PARAMS.lightFloor.default === 0
+  );
+  ok('…raiseable for a stylised "never quite black" look, never required', SPECULAR_PARAMS.lightFloor.max > 0);
+
+  // ⚠️ TWO PLACES STORE THIS SAME NUMBER — the FOH schema default (what a new
+  // scene actually ships with) and `specular-render.js`'s own JS default (what
+  // a caller gets for free if it never touches this param). Nothing forces
+  // them to agree; only a test does. Raised 4→5.5 (2026-07-27) alongside the
+  // sheen-ceiling cut — a schema left at the OLD number would silently ship
+  // every scene with LESS contrast than the fix intends, green tests and all.
+  ok(
+    'the schema default and the render module default agree on shimmerGain',
+    SPECULAR_PARAMS.shimmerGain.default === SPECULAR_DEFAULT_SHIMMER_GAIN
+  );
 
   // --- it registers through the ONE door ----------------------------------
   const registry = createEffectRegistry();
@@ -94,6 +141,88 @@ export function run(t) {
   ok('…and the override layer winning over the default', applied?.params?.strength === 0.5);
   ok(
     '…while unset params fall back to their declared defaults',
-    applied?.params?.lampHeight === SPECULAR_PARAMS.lampHeight.default
+    applied?.params?.driftSpeed === SPECULAR_PARAMS.driftSpeed.default
+  );
+
+  // --- THE DEBUG CHANNELS -------------------------------------------------
+  // The channel list is shared data: `specular-render.js` builds the shader's
+  // selector FROM it (by id, throwing on any id with no node) and `boot.js`
+  // builds the picker FROM it. So its SHAPE is what keeps the two honest, and
+  // these assertions are what keep the shape honest.
+  const ns = SPECULAR_DEBUG_CHANNELS.map((c) => c.n);
+  const ids = SPECULAR_DEBUG_CHANNELS.map((c) => c.id);
+  ok('there are debug channels at all', SPECULAR_DEBUG_CHANNELS.length > 1);
+  ok(
+    'channel 0 is off — the effect as it ships',
+    SPECULAR_DEBUG_CHANNELS[0]?.n === 0 && SPECULAR_DEBUG_CHANNELS[0]?.id === 'off'
+  );
+  // Contiguous from 0: the picker sends a NUMBER and the shader compares it
+  // against `n`. A gap would be a selectable option that matches no branch and
+  // therefore renders the fallback black — the single most misleading thing
+  // this instrument could do, since black is also its failure ANSWER.
+  ok(
+    'the channel numbers are contiguous from 0',
+    ns.every((n, i) => n === i)
+  );
+  ok('every channel number is unique', new Set(ns).size === ns.length);
+  ok('every channel id is unique', new Set(ids).size === ids.length);
+  ok(
+    'every channel carries a label and a reading guide (the guide is the option tooltip)',
+    SPECULAR_DEBUG_CHANNELS.every(
+      (c) => typeof c.label === 'string' && c.label.length > 0 && typeof c.reads === 'string' && c.reads.length > 0
+    )
+  );
+  // ⚠️ NOT A PARAM, and this is the assertion that keeps it that way. A
+  // diagnostic view selector is neither a property of a material nor of the
+  // world (this effect's own rule for what earns a control), the FOH/ROH card
+  // is GENERATED from the schema, and a GM must never find "show me the raw
+  // relief normal" on a slider strip beside Shine strength.
+  ok(
+    'no channel leaked into SPECULAR_PARAMS as a look control',
+    !Object.prototype.hasOwnProperty.call(SPECULAR_PARAMS, 'debugChannel') &&
+      !Object.prototype.hasOwnProperty.call(SPECULAR_PARAMS, 'debug')
+  );
+  // The ladder walks the product left to right, so "the first BLACK one is the
+  // culprit" is a true instruction rather than a hopeful one. `quad` must come
+  // first: it draws before anything is sampled, so it separates "the mesh is
+  // not there" from "a factor is zero" — two different investigations.
+  ok('channel 1 is the quad — is the mesh drawing at all, and where', SPECULAR_DEBUG_CHANNELS[1]?.id === 'quad');
+  ok('the mask is read before the strength derived from it', ids.indexOf('mask') < ids.indexOf('strength'));
+  ok('strength is read before the presence derived from IT', ids.indexOf('strength') < ids.indexOf('presence'));
+  ok('the islands are read before the shimmer they steer', ids.indexOf('islands') < ids.indexOf('shimmer'));
+  ok('…and their motion sits beside them', ids.indexOf('islandMotion') === ids.indexOf('islands') + 1);
+  ok('presence is read before the gates that multiply it', ids.indexOf('presence') < ids.indexOf('floorGate'));
+  ok('the gates are read before the shimmer they gate', ids.indexOf('floorGate') < ids.indexOf('shimmer'));
+  ok('the shimmer is read before the sheen/glint it feeds', ids.indexOf('shimmer') < ids.indexOf('sheen'));
+  // ⚠️ SHEEN BEFORE GLINT, live-diagnosed 2026-07-27: the split exists because
+  // one shared ceiling flattened genuine glint peaks to the same modest level
+  // as the always-on base, which was the actual "washed out" bug. Sheen is the
+  // question "does painted metal read as its own colour at rest"; glint is
+  // "do genuine highlights still pop" — two different investigations, and the
+  // ordering keeps them from being read as one.
+  ok(
+    'sheen (the base) is read before glint (the shimmer`s own contribution)',
+    ids.indexOf('sheen') < ids.indexOf('glint')
+  );
+  ok('both feed into final, in order', ids.indexOf('glint') < ids.indexOf('final'));
+  ok(
+    'the boosted final closes the CHAIN — it only means anything once `final` reads black',
+    ids.indexOf('finalBoosted') === ids.indexOf('final') + 1
+  );
+  ok('the boost is a real amplification, not a no-op', SPECULAR_DEBUG_BOOST > 1);
+  // The coordinate probes are a SECOND TIER and must stay AFTER the chain: the
+  // whole instruction for using this thing is "the first black channel is the
+  // culprit", and that is only true while the chain is an unbroken prefix. A
+  // probe spliced into the middle would make a black one look like a verdict
+  // about the product when it is a statement about a coordinate.
+  const PROBES = ['maskUv', 'patternUv'];
+  const chainEnd = ids.indexOf('finalBoosted');
+  ok(
+    'every coordinate probe exists and sits after the whole chain',
+    PROBES.every((p) => ids.indexOf(p) > chainEnd)
+  );
+  ok(
+    'the chain is an unbroken prefix — no probe splices into it',
+    ids.slice(0, chainEnd + 1).every((id) => !PROBES.includes(id))
   );
 }

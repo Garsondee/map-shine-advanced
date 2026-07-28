@@ -102,6 +102,7 @@ import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.j
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
+import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
 import { sortByLayer } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
@@ -192,6 +193,7 @@ import {
   createWaterSurfaceSubsystem,
   createFluidSurfaceSubsystem,
   createSpecularSurfaceSubsystem,
+  createWindowSurfaceSubsystem,
   // `surface.response`'s outdoor/indoor split reads the SAME world-space
   // outdoors gate `buf:scene.attr`'s G channel does — injected rather than
   // re-derived, so "world XY → mask UV → sample" still exists exactly once.
@@ -570,6 +572,14 @@ function disposeActive() {
   } catch (err) {
     log.error('specular dispose failed — VRAM may be leaked:', err);
   }
+  // WINDOW LIGHT's mesh + geometry + two NodeMaterials + the uploaded
+  // `_Window` DataTexture. Same per-cycle VRAM-leak reasoning as the rest of
+  // this list.
+  try {
+    _active.disposeWindowLight?.();
+  } catch (err) {
+    log.error('window light dispose failed — VRAM may be leaked:', err);
+  }
   // The candle flame billboard's own mesh/geometry/material (its lights are in
   // the shared pool, freed by disposePointLights below).
   try {
@@ -745,6 +755,12 @@ export function stopVtPanViewer() {
 export async function startVtPanViewer({
   THREE,
   followFoundryCamera = false,
+  // PER-ZONE TIMING (docs/planning/Performance.md). Owned by boot.js and handed
+  // in, exactly like `gpuProbe` is constructed here: the clock lives in `diag/`
+  // because `time/one-clock` allows it there and nowhere near this file. Null on
+  // the torture fixture, which deliberately does not profile — so every call
+  // below is optional-chained rather than assuming a profiler exists.
+  profiler = null,
   buildItems,
   dimensions,
   floorCount,
@@ -774,8 +790,12 @@ export async function startVtPanViewer({
   getSpecularMaskUrl,
   getSpecularMaskRect,
   getSpecularRenderState,
-  getFluidMaskUrl,
+  getWindowMaskUrl,
+  getWindowMaskRect,
+  getWindowRenderState,
+  getFluidMaskItems,
   getFluidRenderState,
+  onFluidCornersResolver,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
@@ -849,13 +869,28 @@ export async function startVtPanViewer({
   // effect renders literally nothing, so a scene that never opted in cannot be
   // surprised by it.
   getSpecularRenderState ??= () => ({ enabled: true, params: {} });
-  // FLUID's seams (docs/planning/Fluid.md). `getFluidMaskUrl` is the authored
+  // WINDOW LIGHT's three seams (docs/planning/Windows.md). `getWindowMaskUrl`
+  // is boot's door onto the floor's authored `_Window` file (`_Windows`/
+  // `_Structural` V2 aliases resolve to it at discovery) — the ONLY thing
+  // that carries the mask's COLOUR, exactly as specular's does above.
+  // `getWindowMaskRect` is the world rect that file covers. Unwired (the
+  // torture fixture) means no mask at all, so the mesh stays hidden and the
+  // pass takes a true JS early-return — inert by construction, not by a flag,
+  // exactly like specular's seams just above.
+  getWindowMaskUrl ??= () => null;
+  getWindowMaskRect ??= () => null;
+  // Default-ON, matching the manifest's `enabledFromProfile: 'low'`. Safe in
+  // the same way specular's is: with no `_Window` file the effect renders
+  // literally nothing, so a scene that never opted in cannot be surprised.
+  getWindowRenderState ??= () => ({ enabled: true, params: {} });
+  // FLUID's seams (docs/planning/Fluid.md). `getFluidMaskItems` lists every
   // file at its own resolution — fluid has NO coarse-grid consumer, because
   // connected components and geodesic arc length are high-frequency questions
   // and the ≤512 derivation grid merges tubes a tube's width apart (correction
   // #2). Unwired means no mask, so the mesh never becomes visible and the whole
   // effect is inert by construction rather than by a flag.
-  getFluidMaskUrl ??= () => null;
+  getFluidMaskItems ??= () => [];
+  onFluidCornersResolver ??= () => {};
   // Deliberately NOT defaulted. `feedback_seam_default_hides_unwired`: water
   // shipped its render-state seam declared, defaulted and never passed, and the
   // only symptom was that every control silently did nothing while every test
@@ -1069,8 +1104,25 @@ export async function startVtPanViewer({
     // picks its defaults; a device that genuinely can't be created still trips
     // the safety slide below.
     const requiredLimits = await resolveRendererRequiredLimits();
-    const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits });
+    // `trackTimestamp: true` REQUESTS the per-render-pass GPU timer. It is a
+    // CONSTRUCTOR-ONLY flag (three.webgpu.js:64637) that three then ANDs with the
+    // adapter feature check during init() (:75258) — which is why the previous
+    // reading of "supported:false" proved nothing: the flag was never passed, so
+    // it reported false on hardware that supports timestamp queries perfectly
+    // well. Requesting it here does NOT turn measurement on; see the two lines
+    // after init().
+    const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits, trackTimestamp: true });
     await renderer.init(); // REQUIRED before any use — the backend is chosen here
+    // CAPTURE THE CAPABILITY, THEN PARK THE FLAG. Post-init the flag is
+    // `requested && hasFeature`, so this one read is the honest answer to "can
+    // this device time passes at all". Setting it back to false immediately means
+    // `initTimestampQuery` returns on its first line (:76493) and the query pool
+    // is never allocated — one boolean per pass in normal play, which is what
+    // makes the instrument free when it is not measuring.
+    if (renderer.backend) {
+      renderer.backend.__msaTimestampCapable = renderer.backend.trackTimestamp === true;
+      renderer.backend.trackTimestamp = false;
+    }
 
     // PIXEL-RATIO PARITY (2026-07-19 — "MSA mushes the artwork's pen outlines
     // away when zoomed out; PIXI keeps them crisp"). This used to hard-code
@@ -1491,6 +1543,44 @@ export async function startVtPanViewer({
      * VRAM — 8.8 MB against 17.6 MB at full pack size. `packToHalfFloat` exists
      * and is tested for the day that trade is worth making; it is not yet.
      */
+    /**
+     * SHINE'S ISLAND PACK — per-texel parallax for each connected metal region
+     * (`effects/specular/specular-islands.js`).
+     *
+     * ⚠️ **NEAREST, where the fluid pack beside it is LINEAR, and the
+     * difference is not a preference.** That pack carries smooth fields (arc
+     * length, distance-from-centre) and interpolating them is exactly right.
+     * This one carries a per-ISLAND constant, and interpolating across an
+     * island boundary produces a motion vector belonging to neither island — a
+     * band around every metal object sliding at a rate nothing authored. Same
+     * reasoning that makes water's jump-flood ping-pong targets nearest.
+     *
+     * ⚠️ **`UnsignedByteType`, NOT `FloatType`, and the difference was a live
+     * bug.** The first version packed `RGBAFormat` + `FloatType` and the shader
+     * read ZERO out of it while the identical CPU bake measured correct. This
+     * file's OWN wind-grid note (search `HalfFloatType matches this project`)
+     * already records why: FloatType has patchier filtering support, and WebGPU
+     * makes `rgba32float` filterable only behind an optional feature. The
+     * island pack's values are all bounded, so a byte is not a compromise --
+     * it is the format that removes the question. `createFluidPackTexture`
+     * above still uses FloatType.
+     *
+     * @param {Uint8Array} data @param {number} w @param {number} h @returns {*}
+     */
+    function createSpecularPackTexture(data, w, h) {
+      const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      tex.minFilter = THREE.NearestFilter;
+      tex.magFilter = THREE.NearestFilter;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.colorSpace = THREE.NoColorSpace;
+      tex.generateMipmaps = false;
+      // Row 0 is minY, matching MaskGrid and the pack builder's own convention.
+      tex.flipY = false;
+      tex.needsUpdate = true;
+      return tex;
+    }
+
     function createFluidPackTexture(data, w, h) {
       const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
       // LINEAR: the pack is a smooth field (arc length, distance-from-centre),
@@ -1507,6 +1597,31 @@ export async function startVtPanViewer({
       tex.needsUpdate = true;
       return tex;
     }
+
+    /**
+     * Fluid's per-item sim ping-pong half — `gpu/allocator-only` reasons this
+     * lives here rather than in `effects/fluid/fluid-surface-subsystem.js`
+     * (that file is walled from `new ...RenderTarget(` the same way it is
+     * from `renderer.setRenderTarget(`; see its own header for both). LINEAR
+     * so the advect pass's fractional backtrace interpolates smoothly — the
+     * SAME filter/format wind's own ping-pong RTs use, sized tiny per item
+     * (≤512×64) so it sails under the Keyhole 2048px cap with no exception.
+     */
+    function createFluidSimRenderTarget(name, width, height) {
+      return allocator.create(name, {
+        resolvedW: width,
+        resolvedH: height,
+        type: THREE.HalfFloatType,
+        format: THREE.RGBAFormat,
+        colorSpace: THREE.NoColorSpace,
+        filter: 'linear',
+        depth: false,
+      });
+    }
+    function disposeFluidSimRenderTarget(rt) {
+      allocator.dispose(rt);
+    }
+
     const sunShadows = createSunShadowSubsystem({
       THREE,
       allocator,
@@ -2261,7 +2376,7 @@ export async function startVtPanViewer({
     // conservative mask independently — untouched by that rethink). The
     // particle engines read these as a STORAGE BUFFER rather than trusting a
     // texture sample inside a compute shader, a path never verified in this
-    // renderer (the compute-spike proved storage buffers, not textures).
+    // renderer (the retired compute spike proved storage buffers, not textures).
 
     // THE MASK-DRIVEN WIND REBAKE TRIGGER (2026-07-21). Root cause of a real,
     // author-reported bug: `bakeWindField('startup')` runs synchronously very
@@ -3123,6 +3238,41 @@ export async function startVtPanViewer({
       }
     }
 
+    /**
+     * FLUID's per-item sim tick — the ONLY place `effects/fluid/
+     * fluid-surface-subsystem.js`'s ping-pong actually gets rendered.
+     * `prepareSimTick` (that file) does every JS-side step (rewrite each
+     * item's pump texture, decide what "current" means, re-point every
+     * re-pointed node) and hands back a declarative job list; this function's
+     * entire job is to run it, mirroring `tickWindSim`'s own split between
+     * "decide" (its own body, `world/wind-sim-gpu.js`) and "render" (the
+     * `renderer.setRenderTarget`/`quad.render` calls, walled to `vt/` —
+     * `renderer-state/graph-only`).
+     */
+    function tickFluidSim(nowMs, dtSec) {
+      const { clears, advects } = fluidSurface.prepareSimTick(nowMs, dtSec);
+      if (!clears.length && !advects.length) return;
+      const prevRT = renderer.getRenderTarget();
+      if (clears.length) {
+        // Fresh GPU memory is undefined content — a NaN entering the sim
+        // would propagate through every subsequent multiply/interpolate
+        // forever. Same posture as wind's own regrid clear above.
+        const prevClearColor = renderer.getClearColor(new THREE.Color());
+        const prevClearAlpha = renderer.getClearAlpha();
+        renderer.setClearColor(0x000000, 0);
+        for (const rt of clears) {
+          renderer.setRenderTarget(rt);
+          renderer.clear(true, false, false);
+        }
+        renderer.setClearColor(prevClearColor, prevClearAlpha);
+      }
+      for (const { quad, destRT } of advects) {
+        renderer.setRenderTarget(destRT);
+        quad.render(renderer);
+      }
+      renderer.setRenderTarget(prevRT);
+    }
+
     // ------------------------------------------------------------------
     // THE CANDLE FLAME BILLBOARD (effects/candle-flame-render.js). ONE batched
     // world-quad mesh holding every candle on the active floor (one geometry,
@@ -3663,12 +3813,16 @@ export async function startVtPanViewer({
       // targets right after this pass — save/set/restore.
       const previousMRT = renderer.getMRT();
       renderer.setMRT(sceneAttrZeroMrt);
+      profiler?.begin(Z.geomWorld);
       renderer.setRenderTarget(sceneColor);
       renderer.render(scene, camera);
+      profiler?.end(Z.geomWorld);
       // Door leaves composite over the map INTO the same target (not cleared),
       // so the light.accumulate pass lights them like the tiles beneath them.
       // Class-B overlay, same safe zero-default, no mrtNode override needed.
+      profiler?.begin(Z.geomDoors);
       renderDoorGraphicsInto();
+      profiler?.end(Z.geomDoors);
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
     }
@@ -3679,7 +3833,9 @@ export async function startVtPanViewer({
       // the frame to mistake it for. `off` (the default, and the only thing a
       // player ever has) returns null and costs one comparison.
       const debugQuad = sunShadows.getDebugQuad(getSunShadowRenderState().params?.debugView ?? 'off');
+      profiler?.begin(Z.presentBlit);
       (debugQuad ?? presentQuad).render(renderer); // three's own fullscreen path — carries its own camera
+      profiler?.end(Z.presentBlit);
     }
     // light.accumulate — ambient/exterior light PLUS point-light illumination
     // as of 2026-07-18 (coloration, darkness sources, animations, the global
@@ -3695,6 +3851,7 @@ export async function startVtPanViewer({
       // floor here and to the region-darkness endpoint below (same endpoint,
       // so a region that darkens to full also respects realistic mode).
       const darknessRealism01 = _darknessRealism01;
+      profiler?.begin(Z.lightAmbient);
       lastAmbientColors = computeAmbientColors(env, darknessRealism01);
       // dim/bright no longer read here directly — point lights now compute
       // their OWN local (region-aware) dim/bright per light, every frame,
@@ -3721,12 +3878,15 @@ export async function startVtPanViewer({
       // per-frame scalars the illumination pass reads — and separating them is
       // how one of them ends up updated on a different cadence from the other.
       if (view) envLight.setViewRect(viewToWorldRect(view, canvasW / canvasH));
+      profiler?.end(Z.lightAmbient);
 
       // SUN SHADOWS — re-march ONLY if the quantised sun, the masks, the floor
       // or a param moved. Almost every frame this is three comparisons and a
       // return; the expensive path is a few times a minute at most. It runs
       // BEFORE illumQuad below, because that fill samples the field this writes.
+      profiler?.begin(Z.lightSunBake);
       sunShadows.maybeBake(view?.floorIndex ?? 0);
+      profiler?.end(Z.lightSunBake);
 
       // THE WATER BODY PACK — same posture, same reason it lives in the FRAME
       // LOOP rather than a residency pass: a mask repaint is not a camera
@@ -3737,15 +3897,21 @@ export async function startVtPanViewer({
       // when the mask version or the resolved floor actually moves — which
       // `waterBody.getStatus()` reports as `bakes` vs `polls` so the two can
       // be seen NOT to track each other.
+      profiler?.begin(Z.lightWaterBake);
       waterBody.maybeBake(view?.floorIndex ?? 0);
+      profiler?.end(Z.lightWaterBake);
       // Re-crop the tier-0 surface quad to the water's AABB — gated on the same
       // bake generation, so a quiet frame costs one integer compare. The
       // viewRect is for tier 3's synthesised eye ONLY and is never gated —
       // same call specular makes below, for the same reason.
+      profiler?.begin(Z.lightWaterSync);
       waterSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
+      profiler?.end(Z.lightWaterSync);
       // FLUID: same cadence, same shape — cheap to call, one string compare when
       // nothing changed, and it owns its own mask-url change detection.
+      profiler?.begin(Z.lightFluidSync);
       fluidSurface.sync(view?.floorIndex ?? 0);
+      profiler?.end(Z.lightFluidSync);
 
       // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
       // RAW ambient endpoints (not the pre-mixed background: each region
@@ -3763,26 +3929,47 @@ export async function startVtPanViewer({
         rawDarkness[1] * realismScale,
         rawDarkness[2] * realismScale
       );
+      // SHINE's readability-floor subtraction (2026-07-27, author-diagnosed) —
+      // the IDENTICAL triple `uRegionDarknessColor` just received, one line up.
+      // Not a coincidence: both are "Foundry's darkness endpoint, pulled toward
+      // black by the SAME realism lever" — reusing rather than re-deriving it
+      // is what keeps specular's floor and the region system's floor from ever
+      // disagreeing about what "the floor" is.
+      specularSurface.setDarknessFloor(
+        rawDarkness[0] * realismScale,
+        rawDarkness[1] * realismScale,
+        rawDarkness[2] * realismScale
+      );
       // Read ONCE, shared by both — see readElevationFilteredDarknessRegions'
       // own header for why a light needs the SAME active-region set a
       // region-mesh draw uses (2026-07-19, the per-light-region-aware-
       // ambient fix), and (2026-07-20) the SAME currentFloor for candle
       // wall-clipping — never a second, potentially-drifting floor lookup.
+      profiler?.begin(Z.lightRegions);
       const { regions: activeRegions, currentFloor } = readElevationFilteredDarknessRegions();
       updateRegionDarknessMeshes(darkness01, activeRegions);
+      profiler?.end(Z.lightRegions);
 
+      profiler?.begin(Z.lightPointUpdate);
       lastGridSizePixels = pointLights.update(darkness01, activeRegions, env, darknessRealism01, currentFloor);
+      profiler?.end(Z.lightPointUpdate);
       // Reconcile the flame billboard from the same candle render state the
       // light merge above just read (drawn below, into scene.lit).
+      profiler?.begin(Z.lightCandleSync);
       updateCandleFlame();
+      profiler?.end(Z.lightCandleSync);
       // Every loaded vegetation mesh's live motion/shadow uniforms — SAME
       // "every frame, not just on residency pass" placement as the candle
       // call just above (see `syncAllVegetationMotionForFrame`'s own header
       // for the live-test bug this fixes: a FOH/ROH slider drag "did nothing
       // until I panned the camera").
+      profiler?.begin(Z.lightVegSync);
       syncAllVegetationMotionForFrame();
+      profiler?.end(Z.lightVegSync);
       // The wind field debug overlay (a no-op grid rebuild check when disabled).
+      profiler?.begin(Z.lightWindOverlaySync);
       updateWindFieldOverlay();
+      profiler?.end(Z.lightWindOverlaySync);
 
       // THE "BLACK OUTSIDE THE LIGHT RADIUS" FIX (2026-07-19). buf:scene.illum
       // is built from THREE sequential render() calls to the SAME target
@@ -3828,20 +4015,40 @@ export async function startVtPanViewer({
       // read — see buildUiShadowVisibility's header). With no windows open,
       // updateUiShadowStamps clears every uniform, visNode evaluates to a
       // uniform 1, and the composite's multiply is a provable no-op.
+      profiler?.begin(Z.lightUiShadow);
       updateUiShadowStamps();
+      profiler?.end(Z.lightUiShadow);
       const previousAutoClearColor = renderer.autoClearColor;
       renderer.autoClearColor = false;
+      profiler?.begin(Z.lightDrawIllum);
       renderer.setRenderTarget(sceneIllum);
       illumQuad.render(renderer); // buf:scene.illum = ambient background (sRGB), raised by global illumination if active
+      profiler?.end(Z.lightDrawIllum);
       // Darkness-region meshes OVERWRITE (discard outside their own shape,
       // no blending) the ambient fill within their own footprint — BEFORE
       // point lights, so a light sitting inside a darkened/brightened region
       // MAX-blends against the REGION-ADJUSTED floor, not the base one.
+      profiler?.begin(Z.lightDrawRegions);
       renderer.render(regionScene, camera);
+      profiler?.end(Z.lightDrawRegions);
       // MAX-blends every active point light on top of the (possibly region-
       // adjusted) ambient fill — same target, same camera as geometry.world/
       // occlusion (world-space).
+      profiler?.begin(Z.lightDrawPoints);
       renderer.render(pointLights.lightScene, camera);
+      profiler?.end(Z.lightDrawPoints);
+      // WINDOW LIGHT (docs/planning/Windows.md) — ADDS on top of everything
+      // above, same target, same camera, same guarded (autoClearColor=false)
+      // sequence: a torch standing in a sunbeam should be brighter than
+      // either alone, which is what ADD (rather than MAX) gives. `sync`
+      // BEFORE the visibility check, never inside it — same reasoning
+      // `runSurfaceResponsePass` states for specular: gating the load on
+      // `hasContent()` would mean the mesh could never become visible in the
+      // first place.
+      profiler?.begin(Z.lightDrawWindow);
+      windowSurface.sync(view?.floorIndex ?? 0);
+      if (windowSurface.hasContent()) renderer.render(windowSurface.scene, camera);
+      profiler?.end(Z.lightDrawWindow);
       renderer.autoClearColor = previousAutoClearColor;
       // COLORATION (increment 3, 2026-07-19) — its OWN target, a SINGLE
       // render() call (autoClearColor restored above), so the ordinary
@@ -3850,33 +4057,41 @@ export async function startVtPanViewer({
       // black/zero (no ambient floor to pre-fill, unlike illum's), and a
       // fresh per-frame clear is exactly what makes that true rather than
       // accumulating stale coloration from a previous frame.
+      profiler?.begin(Z.lightDrawColoration);
       renderer.setRenderTarget(sceneColoration);
       renderer.render(pointLights.colorationScene, camera);
+      profiler?.end(Z.lightDrawColoration);
       // scene.lit = EOTF(OETF(albedo) × illum + coloration) — the coloration
       // is ADDED inside the composite now, in GAMMA space (Foundry parity;
       // the old separate additive quad blended in LINEAR space and washed the
       // scene to one hue — see environmental-light.js's composite essay). The
       // coloration target above is fully rendered before this reads it.
+      profiler?.begin(Z.lightDrawComposite);
       renderer.setRenderTarget(sceneLit);
       compositeQuad.render(renderer);
+      profiler?.end(Z.lightDrawComposite);
       // CANDLE FLAMES — an additive glow on top of the fully-composited lit
       // scene. compositeQuad already filled sceneLit; an ordinary render() here
       // would WIPE it first (autoClearColor defaults true — the exact trap the
       // illum sequence above documents), so guard the clear for this one draw.
       if (candleFlameMesh && candleFlameMesh.visible) {
+        profiler?.begin(Z.lightDrawCandle);
         const prevFlameAutoClear = renderer.autoClearColor;
         renderer.autoClearColor = false;
         renderer.render(candleFlameScene, camera);
         renderer.autoClearColor = prevFlameAutoClear;
+        profiler?.end(Z.lightDrawCandle);
       }
       // THE WIND FIELD DEBUG OVERLAY — same guarded-additive draw as the
       // candle flame just above (same target, same camera, same "don't wipe
       // what compositeQuad/the flame already drew" guard). OFF by default.
       if (windOverlayMesh && windOverlayMesh.visible) {
+        profiler?.begin(Z.lightDrawWindOverlay);
         const prevWindAutoClear = renderer.autoClearColor;
         renderer.autoClearColor = false;
         renderer.render(windOverlayScene, camera);
         renderer.autoClearColor = prevWindAutoClear;
+        profiler?.end(Z.lightDrawWindOverlay);
       }
       renderer.setRenderTarget(null);
     }
@@ -3914,7 +4129,9 @@ export async function startVtPanViewer({
       const previousAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
+      profiler?.begin(Z.surfSpecular);
       renderer.render(specularSurface.scene, camera);
+      profiler?.end(Z.surfSpecular);
       renderer.autoClearColor = previousAutoClear;
       renderer.setRenderTarget(null);
     }
@@ -3940,8 +4157,16 @@ export async function startVtPanViewer({
       const prevParticleAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
-      if (drawParticles) renderer.render(particleEngine.scene, camera);
-      if (drawGusts) renderer.render(gustEngine.scene, camera);
+      if (drawParticles) {
+        profiler?.begin(Z.surfDust);
+        renderer.render(particleEngine.scene, camera);
+        profiler?.end(Z.surfDust);
+      }
+      if (drawGusts) {
+        profiler?.begin(Z.surfGusts);
+        renderer.render(gustEngine.scene, camera);
+        profiler?.end(Z.surfGusts);
+      }
       renderer.autoClearColor = prevParticleAutoClear;
       renderer.setRenderTarget(null);
     }
@@ -3960,6 +4185,7 @@ export async function startVtPanViewer({
       const p = st.params || {};
 
       // Push resolved params into the build-once uniforms.
+      profiler?.begin(Z.bloomUniforms);
       const u = bloom.uniforms;
       u.threshold.value = bloomNum(p.threshold, 1.0);
       u.knee.value = bloomNum(p.knee, 0.5);
@@ -3974,14 +4200,18 @@ export async function startVtPanViewer({
       u.coreTint.value.set(ct[0], ct[1], ct[2]);
       u.atmoTint.value.set(at[0], at[1], at[2]);
 
+      profiler?.end(Z.bloomUniforms);
       const prevAutoClear = renderer.autoClearColor;
 
       // 1) BRIGHT — masked soft-knee threshold of scene.lit → mip0 (full overwrite).
+      profiler?.begin(Z.bloomBright);
       renderer.setRenderTarget(bloomMips[0]);
       bloomBrightQuad.render(renderer);
+      profiler?.end(Z.bloomBright);
 
       // 2) DOWNSAMPLE — mip0→mip1 with the Karis average (firefly fix), then the
       //    plain 13-tap down the rest of the chain. uInvTexel = 1/sourceRes.
+      profiler?.begin(Z.bloomDown);
       for (let k = 0; k < BLOOM_MIP_COUNT - 1; k++) {
         const src = bloomMips[k];
         if (k === 0) {
@@ -4000,27 +4230,34 @@ export async function startVtPanViewer({
       // 3) UPSAMPLE (additive tent) — two INDEPENDENT bands. Guard the clear so
       //    the additive blend accumulates the coarser mip into the finer one
       //    (an unguarded render would wipe the downsample content first).
+      profiler?.end(Z.bloomDown);
       renderer.autoClearColor = false;
       // CORE band: mip2 → mip1 → mip0 (tight spread) ⇒ mip0 = smooth blur of 0..2.
+      profiler?.begin(Z.bloomUpCore);
       bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.coreSpread, 0.4));
       for (const k of [1, 0]) {
         bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
         renderer.setRenderTarget(bloomMips[k]);
         bloomUpQuad.render(renderer);
       }
+      profiler?.end(Z.bloomUpCore);
       // ATMOSPHERE band: mip5 → mip4 → mip3 (wide spread) ⇒ mip3 = smooth blur of 3..5.
+      profiler?.begin(Z.bloomUpAtmo);
       bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.atmoSpread, 0.7));
       for (const k of [4, 3]) {
         bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
         renderer.setRenderTarget(bloomMips[k]);
         bloomUpQuad.render(renderer);
       }
+      profiler?.end(Z.bloomUpAtmo);
 
       // 4) COMPOSITE — core (mip0) + atmosphere (mip3) additively into scene.lit.
       //    autoClearColor is still false here — an unguarded clear would wipe the
       //    whole composited scene, so it MUST stay off until after this draw.
+      profiler?.begin(Z.bloomComposite);
       renderer.setRenderTarget(sceneLit);
       bloomCompositeQuad.render(renderer);
+      profiler?.end(Z.bloomComposite);
 
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
@@ -4523,6 +4760,7 @@ export async function startVtPanViewer({
      * occludable radius contributes a disc, always.
      */
     function runMaskOcclusionPass() {
+      profiler?.begin(Z.masksSync);
       const distancePixels = readGridDistancePixels().distancePixels;
       const occluders = [];
       for (const it of lastItems) {
@@ -4569,6 +4807,8 @@ export async function startVtPanViewer({
       // the orientation self-test). Global clear colour is renderer state;
       // leaving it set to Foundry's cyan would corrupt the NEXT render call
       // (sceneColor's own clear) if not restored.
+      profiler?.end(Z.masksSync);
+      profiler?.begin(Z.masksDraw);
       const prevClearColor = renderer.getClearColor(_clearColorScratch); // writes into + returns the scratch object
       const prevClearAlpha = renderer.getClearAlpha();
       renderer.setRenderTarget(occlusionMask.rt);
@@ -4581,6 +4821,7 @@ export async function startVtPanViewer({
       renderer.render(occlusionScene, camera);
       renderer.setRenderTarget(null);
       renderer.setClearColor(prevClearColor, prevClearAlpha);
+      profiler?.end(Z.masksDraw);
 
       // uOcclusionElevation refresh — every drawn item, every frame (cheap: a
       // per-item float set, no shader rebuild). uOcclusionWeights is NOT
@@ -5063,27 +5304,44 @@ export async function startVtPanViewer({
       getSkyHandle: () => skyHandle,
     });
 
-    // ── FLUID, tiers 0-3 (docs/planning/Fluid.md) ──────────────────────────
+    // ── FLUID, tiers 0-4 (docs/planning/Fluid.md) ──────────────────────────
     // Beside water's surface for the same trap-#4 reason: it takes `scene`, so
     // it must be constructed after `scene` exists. It owns the whole chain —
-    // mask fetch, tube-net extraction, pack bake, mesh crop — because unlike
-    // water there is no GPU flood to schedule (correction #3: three of the
-    // pack's four channels are CPU-only, so the bake is a pure function plus
-    // one upload).
+    // mask fetch, tube-net extraction, pack bake, mesh crop, and (tier `fill`)
+    // a per-item semi-Lagrangian sim — because unlike water there is no GPU
+    // flood to schedule (correction #3: three of the pack's four channels are
+    // CPU-only, so the bake is a pure function plus one upload; the SIM is the
+    // one genuine per-tick GPU pass, driven by `tickFluidSim` below).
     const fluidSurface = createFluidSurfaceSubsystem({
       THREE,
       scene,
-      getFluidMaskUrl,
+      getFluidMaskItems,
       loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
       createPackTexture: createFluidPackTexture,
-      getSceneRect: () => ({
-        minX: dimensions.sceneRect.x,
-        minY: dimensions.sceneRect.y,
-        maxX: dimensions.sceneRect.x + dimensions.sceneRect.width,
-        maxY: dimensions.sceneRect.y + dimensions.sceneRect.height,
-      }),
+      createSimRenderTarget: createFluidSimRenderTarget,
+      disposeSimRenderTarget: disposeFluidSimRenderTarget,
       getFluidRenderState,
       timeMsNode: uGlobalTimeMs, // THE shared clock — never a private one
+    });
+
+    // THE ITEM → WORLD QUAD resolver, handed back to boot's fluid seam.
+    //
+    // It lives HERE because resolving a placement needs the item's TEXTURE
+    // SIZE, and only the viewer knows that — it is what `itemStates` tracks.
+    // Boot owns the mask lookup (it has the authority); the viewer owns the
+    // geometry. Passing the function back rather than moving either half is
+    // what keeps `vt/` from importing boot and boot from learning about
+    // texture sizes.
+    //
+    // Returns null while an item's art has not resolved yet, which simply
+    // defers that item to a later frame rather than baking a quad of the wrong
+    // size — a tile whose mask baked against a placeholder size would sit
+    // permanently misaligned with no error anywhere.
+    onFluidCornersResolver((item) => {
+      const state = itemStates.get(item.id);
+      const size = state?.imageSize;
+      if (!size || !(size.width > 0) || !(size.height > 0)) return null;
+      return computeQuadCorners(computeItemPlacement(item, size, dimensions));
     });
 
     // ── SHINE, tiers 0-2 (effects/specular/specular-surface-subsystem.js) ──
@@ -5104,13 +5362,12 @@ export async function startVtPanViewer({
       loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
       createMaskTexture: createMaskDataTexture,
       illumTexture: sceneIllum.texture,
-      // buf:scene.color's COLOUR attachment — the UN-LIT composite. Tier 3
-      // (`relief`) reads its luminance gradient as the map art's own painted
-      // surface slope, which is what gives the highlight something to break
-      // across. Un-lit on purpose: sampling scene.lit would fold this pass's
-      // own output back into its own normal estimate.
-      albedoTexture: sceneColor.texture,
       attrTexture: sceneColor.textures?.[1] ?? null,
+      // The island pack's own uploader — NEAREST, see its own header.
+      createPackTexture: createSpecularPackTexture,
+      // THE shared clock, never a private one: the shimmer's slow drift stops
+      // when Foundry pauses, like every other animation in this renderer.
+      timeMsNode: uGlobalTimeMs,
       // envLight's OWN uniforms, shared rather than duplicated: two view rects
       // updated on different cadences is exactly how two consumers of one frame
       // end up disagreeing about where a world point is.
@@ -5123,6 +5380,35 @@ export async function startVtPanViewer({
       // sun moves, so capturing the value here would pin the neutral handle the
       // viewer starts with and the sun glint would never move.
       getSkyHandle: () => skyHandle,
+    });
+
+    // ── WINDOW LIGHT, tier 0 (effects/window/window-surface-subsystem.js) ──
+    // Unlike SHINE, this draws INSIDE `light.accumulate`, not after it: the
+    // mask is read as LIGHT and ADDED onto `buf:scene.illum` itself (see
+    // `window-render.js`'s header for why that also means no `illumTexture`
+    // input here at all — this pass CONTRIBUTES to illum rather than reading
+    // it). It still needs its own scene, for the same reason the point-light
+    // pool and specular both do: `runLightAccumulatePass` renders it as an
+    // explicit `renderer.render(windowSurface.scene, camera)` call, right
+    // after the point-light MAX-blend.
+    //
+    // `sceneColor.textures[1]` is the SAME buf:scene.attr read specular takes
+    // above — the floor gate is identical in shape and identical in caveat
+    // (the alpha lane is confirmed broken; only R is trusted).
+    //
+    // `cloudFactorNode` is deliberately OMITTED — `world/cloud-field.js`
+    // (docs/planning/Windows.md §4) does not exist yet, so the builder's own
+    // constant-1 default is what ships. The day that field lands, this is a
+    // one-line addition here and nowhere else.
+    const windowSurface = createWindowSurfaceSubsystem({
+      THREE,
+      getWindowMaskUrl,
+      getWindowMaskRect,
+      loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
+      createMaskTexture: createMaskDataTexture,
+      attrTexture: sceneColor.textures?.[1] ?? null,
+      uViewRect: envLight.uViewRect,
+      getWindowRenderState,
     });
 
     /**
@@ -6816,13 +7102,87 @@ export async function startVtPanViewer({
     const HITCH_LOG_MAX = 200; // capped so a long thrash run can't grow this unboundedly
     const hitchLog = []; // {atMs, gapMs, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
 
-    // GPU PROBE (2026-07-20) — the Performance Lab's measurement engine, gated OFF
-    // in normal play. See diag/gpu-probe.js: it times real GPU work via
-    // `device.queue.onSubmittedWorkDone()` (robust where the earlier three
-    // `trackTimestamp` timer reported `supported:false`). The viewer only drives it
-    // (beginFrame/endFrame in renderFrame) and reports its stats; the perf lab flips
-    // it on for a sweep via setVtPanViewerGpuProbe().
+    // GPU PROBE (2026-07-20) — the Performance Lab's WHOLE-FRAME measurement
+    // engine, gated OFF in normal play. See diag/gpu-probe.js: it times real GPU
+    // work via `device.queue.onSubmittedWorkDone()`. The viewer only drives it
+    // (beginFrame/endFrame in renderFrame) and reports its stats; the perf lab
+    // flips it on for a sweep via setVtPanViewerGpuProbe().
+    //
+    // ⚠️ 2026-07-27: this comment used to justify the probe as "robust where the
+    // earlier three `trackTimestamp` timer reported `supported:false`". That
+    // reading was wrong — `trackTimestamp` is a CONSTRUCTOR-ONLY flag defaulting
+    // to false (three.webgpu.js:64637) that this file never passed, AND-ed with
+    // the feature check at :75258, so it reported false on hardware that supports
+    // timestamp queries perfectly well. Per-pass GPU timing lives in
+    // diag/gpu-zone-timer.js; this probe remains the coarse whole-frame number
+    // and the fallback when timestamps really are unavailable. See
+    // diag/gpu-probe.js's header for the full correction.
     const gpuProbe = createGpuProbe();
+
+    // PER-PASS GPU TIMING (docs/planning/Performance.md). Constructed here rather
+    // than in boot.js because it needs the `renderer` this closure owns; the
+    // profiler it feeds is injected from boot, so ownership of the DATA still
+    // sits outside the render loop. `THREE.InspectorBase` is handed in rather
+    // than imported so this file keeps its single THREE seam.
+    const gpuZoneTimer = profiler
+      ? createGpuZoneTimer({ renderer, InspectorBase: THREE.InspectorBase, profiler })
+      : null;
+
+    /**
+     * ZONE INDICES, RESOLVED ONCE. Every id below is declared in
+     * `diag/perf-zones.js` and cross-checked against the live pass graph by its
+     * Node suite, so a typo here becomes `-1` — which every begin/end treats as a
+     * no-op rather than writing into a neighbouring slot.
+     *
+     * Integers, not strings, and looked up OUT of the loop on purpose: the hot
+     * path must never hash a zone id 50 times a frame. With no profiler (the
+     * torture fixture) every entry is -1 and the whole thing is inert.
+     */
+    const Z = {
+      tickInputs: profiler?.indexOf('tick.continuousInputs') ?? -1,
+      tickTokens: profiler?.indexOf('tick.tokenSync') ?? -1,
+      tickDoors: profiler?.indexOf('tick.doorSync') ?? -1,
+      tickEnv: profiler?.indexOf('tick.envSnapshot') ?? -1,
+      tickWindPoll: profiler?.indexOf('tick.windRebakePoll') ?? -1,
+      tickCamera: profiler?.indexOf('tick.camera') ?? -1,
+      simsWind: profiler?.indexOf('sims.wind') ?? -1,
+      simsFluid: profiler?.indexOf('sims.fluid') ?? -1,
+      simsDust: profiler?.indexOf('sims.particlesDust') ?? -1,
+      simsGusts: profiler?.indexOf('sims.particlesGusts') ?? -1,
+      masksSync: profiler?.indexOf('masks.occlusionSync') ?? -1,
+      masksDraw: profiler?.indexOf('masks.occlusionDraw') ?? -1,
+      geomWorld: profiler?.indexOf('geometry.worldDraw') ?? -1,
+      geomDoors: profiler?.indexOf('geometry.doorDraw') ?? -1,
+      lightAmbient: profiler?.indexOf('light.ambient') ?? -1,
+      lightSunBake: profiler?.indexOf('light.sunShadowBake') ?? -1,
+      lightWaterBake: profiler?.indexOf('light.waterBodyBake') ?? -1,
+      lightWaterSync: profiler?.indexOf('light.waterSurfaceSync') ?? -1,
+      lightFluidSync: profiler?.indexOf('light.fluidSurfaceSync') ?? -1,
+      lightRegions: profiler?.indexOf('light.regionSetup') ?? -1,
+      lightPointUpdate: profiler?.indexOf('light.pointLightUpdate') ?? -1,
+      lightCandleSync: profiler?.indexOf('light.candleSync') ?? -1,
+      lightVegSync: profiler?.indexOf('light.vegetationSync') ?? -1,
+      lightWindOverlaySync: profiler?.indexOf('light.windOverlaySync') ?? -1,
+      lightUiShadow: profiler?.indexOf('light.uiShadowStamps') ?? -1,
+      lightDrawIllum: profiler?.indexOf('light.drawIllum') ?? -1,
+      lightDrawRegions: profiler?.indexOf('light.drawRegions') ?? -1,
+      lightDrawPoints: profiler?.indexOf('light.drawPointLights') ?? -1,
+      lightDrawWindow: profiler?.indexOf('light.drawWindowLight') ?? -1,
+      lightDrawColoration: profiler?.indexOf('light.drawColoration') ?? -1,
+      lightDrawComposite: profiler?.indexOf('light.drawComposite') ?? -1,
+      lightDrawCandle: profiler?.indexOf('light.drawCandleFlame') ?? -1,
+      lightDrawWindOverlay: profiler?.indexOf('light.drawWindOverlay') ?? -1,
+      surfSpecular: profiler?.indexOf('surface.specularDraw') ?? -1,
+      surfDust: profiler?.indexOf('surface.drawDust') ?? -1,
+      surfGusts: profiler?.indexOf('surface.drawGusts') ?? -1,
+      bloomUniforms: profiler?.indexOf('bloom.uniformPush') ?? -1,
+      bloomBright: profiler?.indexOf('bloom.bright') ?? -1,
+      bloomDown: profiler?.indexOf('bloom.downsample') ?? -1,
+      bloomUpCore: profiler?.indexOf('bloom.upsampleCore') ?? -1,
+      bloomUpAtmo: profiler?.indexOf('bloom.upsampleAtmo') ?? -1,
+      bloomComposite: profiler?.indexOf('bloom.composite') ?? -1,
+      presentBlit: profiler?.indexOf('present.blit') ?? -1,
+    };
 
     function renderFrame(nowMs) {
       // GPU PROBE THROTTLE (2026-07-21) — while a sample is awaiting GPU
@@ -6868,16 +7228,22 @@ export async function startVtPanViewer({
       // into renderMsAvgLast120 — that diagnostic stays a clean measurement
       // of pure GPU-render cost, exactly as it was before this existed
       // (needed as-is for the Stage 1 gate's "60fps" evidence).
+      profiler?.begin(Z.tickInputs);
       updateContinuousInputs(now);
+      profiler?.end(Z.tickInputs);
       // Also a small, per-frame CPU-only cost — kept OUT of the `t0` GPU-render
       // timing window below for the same reason updateContinuousInputs is, per
       // the comment above it. See syncTokenPlacements' own header for why this
       // runs every frame rather than only on a document hook.
+      profiler?.begin(Z.tickTokens);
       syncTokenPlacements();
+      profiler?.end(Z.tickTokens);
       // Reconcile + animate the door leaves BEFORE the pass plan, so their fresh
       // geometry is on the GPU when runGeometryWorldPass draws doorScene into the
       // lit target. Same CPU-only, kept-out-of-t0 posture as syncTokenPlacements.
+      profiler?.begin(Z.tickDoors);
       syncDoorGraphics(now);
+      profiler?.end(Z.tickDoors);
       // frame.snapshot's res:env third — see its own header above. Also a
       // small per-frame CPU-only cost, kept OUT of the t0 GPU-render window
       // for the same reason as updateContinuousInputs/syncTokenPlacements.
@@ -6885,11 +7251,18 @@ export async function startVtPanViewer({
       // watch installs itself the moment a real `game` exists, without needing
       // a lifecycle hook of its own or a guess about boot ordering.
       installPauseWatch();
+      profiler?.begin(Z.tickEnv);
       updateEnvSnapshot();
+      profiler?.end(Z.tickEnv);
       const t0 = performance.now();
       // GPU probe (perf lab only; inert otherwise) — mark the render start so
       // endFrame below can time to GPU completion. See diag/gpu-probe.js.
       gpuProbe.beginFrame();
+      // The profiler's frame opens here, inside the same bracket as the GPU
+      // probe, so the two instruments describe the SAME span of work rather than
+      // two subtly different ones. Fed the rAF timestamp already in hand — no new
+      // clock read (`time/one-clock` forbids one in this file anyway).
+      profiler?.beginFrame(now);
       // The mask-driven rebake check (see pollMaskAuthorityForWindRebake's own
       // header) — BEFORE tickWindSim, so a mask-triggered rebake this frame is
       // reflected in this SAME frame's wind sim/sampling, not one frame late.
@@ -6900,14 +7273,26 @@ export async function startVtPanViewer({
       // mask edit made while paused would not trigger its rebake until someone
       // un-paused. The rest of this frame block genuinely wants sim time and
       // keeps it; this one line is the deliberate opt-out.
+      profiler?.begin(Z.tickWindPoll);
       pollMaskAuthorityForWindRebake(lastEnvSnapshot?.env?.time?.realMs ?? 0);
+      profiler?.end(Z.tickWindPoll);
       // Wind.md Tier 2 — INSIDE the gpuProbe bracket (not before it) so its
       // own render passes are actually visible to the perf lab's sweep, per
       // Wind.md §9's "measured before defaulting on". Before updateCamera/
       // runPassPlan so windLiveField's published texture is fresh BEFORE
       // anything downstream (candle flame, lights, the debug overlay)
       // samples it this frame.
+      profiler?.begin(Z.simsWind);
       tickWindSim(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
+      profiler?.end(Z.simsWind);
+      // FLUID's own sim tick — same clock, same "inside the gpuProbe bracket"
+      // reasoning as tickWindSim above, and it must run AFTER this frame's own
+      // fluidSurface.sync() call (earlier in this same function, beside
+      // waterSurface.sync) so a mask-triggered rebake this frame already has
+      // its sim resources built by the time this looks for them.
+      profiler?.begin(Z.simsFluid);
+      tickFluidSim(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
+      profiler?.end(Z.simsFluid);
       // sims.particles — advance the GPU particle sim right after the wind field
       // it samples, before the draw (surface.particles, in the plan below) reads
       // its positions. A DIRECT renderer.compute(): the sims stage is out of
@@ -6927,25 +7312,31 @@ export async function startVtPanViewer({
       // engines below — identical expression, one clamp, not two.
       const windSpawnRect = clampRectToBounds(viewToWorldRect(view, canvasW / canvasH), dimensions.sceneRect);
       if (windParticlesEnabled && view && particleEngine) {
+        profiler?.begin(Z.simsDust);
         particleEngine.step(renderer, {
           dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           worldRect: windSpawnRect,
         });
+        profiler?.end(Z.simsDust);
       }
       // sims.particles — the gust ribbons ride the same wind field; step them in
       // the same spot, right after the wind sim and before their draw.
       if (windGustsEnabled && view && gustEngine) {
+        profiler?.begin(Z.simsGusts);
         gustEngine.step(renderer, {
           dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           worldRect: windSpawnRect,
         });
+        profiler?.end(Z.simsGusts);
       }
       // Re-derive the camera from the live view EVERY frame: this is what makes
       // a drag track the cursor at display rate without waiting on streaming,
       // and it is the single place the Y-flip is applied (see updateCamera).
+      profiler?.begin(Z.tickCamera);
       updateCamera();
+      profiler?.end(Z.tickCamera);
 
       // TWO PASSES, FOR REAL (2026-07-17), NOW GRAPH-DRIVEN (2026-07-18).
       // `graph/passes.js` has always declared these as separate nodes —
@@ -6963,10 +7354,25 @@ export async function startVtPanViewer({
       // The gap between geometry.world and present.composite is where every
       // effect goes. Nine seams in passes.js declare `modifies:
       // ['buf:scene.color']` — that buffer is a real thing they could modify.
-      lastFramePlanRan = runPassPlan(framePlan.ids, passImpls, {});
+      // `profiler.passHooks` is ONE object built once at profiler construction,
+      // not a closure pair allocated here per frame — see frame-profiler.js. It
+      // yields a `pass.<id>` zone for every live pass, so a pass going live later
+      // is instrumented for free and no second copy of the frame order exists.
+      lastFramePlanRan = runPassPlan(framePlan.ids, passImpls, {}, profiler?.passHooks);
 
       frameTimes.push(performance.now() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
+      // Closes the profiler's frame AFTER the pass plan, so a frame's zones are
+      // complete before it is counted. Called with no argument on purpose: the
+      // profiler reads its own clock in diag/, where `time/one-clock` permits it.
+      profiler?.endFrame();
+      // EVERY FRAME WHILE ARMED, not occasionally: `resolveQueriesAsync` is what
+      // resets three's query index, and the pool holds only 1024 passes (~40
+      // frames at this pass count). Skip it and measurement stops silently while
+      // rendering carries on. Fire-and-forget — awaiting here would serialise
+      // CPU and GPU and reproduce the exact "queue depth, not cost" mistake
+      // documented at the top of this function.
+      gpuZoneTimer?.collect();
 
       // GPU probe (perf lab only; inert otherwise) — the frame's passes are now
       // submitted, so await GPU completion to time the real work. See diag/gpu-probe.js.
@@ -8143,7 +8549,7 @@ export async function startVtPanViewer({
         // per-cell grid it uploads as a storage buffer to do its own
         // nearest-cell lookup — rather than depending on texture sampling
         // inside a compute shader, a path never exercised elsewhere in this
-        // codebase (the compute-spike proved storage buffers, not textures).
+        // codebase (the retired compute spike proved storage buffers, not textures).
         windHandle,
         // GALE-FORCE CALIBRATION (author request) — Foundry's own real
         // px-per-grid-distance-unit (e.g. "1 grid square = 1 meter" makes
@@ -8260,13 +8666,25 @@ export async function startVtPanViewer({
      * Shared core of `sampleIllumPixel`/`probePixels` — one world-position
      * readback across every screen-sized render target the compositor
      * carries: illum/lit/albedo/coloration (all `HalfFloatType`, decoded via
-     * `decodeHalfFloatRgba`) plus occlusion (`UnsignedByteType`, a different
-     * GPU format, decoded via `decodeByteRgba` — see that function's own
-     * header for why a byte target needs its own decode path). See
+     * `decodeHalfFloatRgba`) plus occlusion and attr (`UnsignedByteType`, a
+     * different GPU format, decoded via `decodeByteRgba` — see that function's
+     * own header for why a byte target needs its own decode path). See
      * `sampleIllumPixel`'s own header (below, on the returned API object)
      * for the full reasoning; factored out here so probing 1 point and
      * probing up to 3 run the EXACT same math, never two slightly-diverging
      * copies of it.
+     *
+     * ⚠️ `attr` IS `buf:scene.color`'s ATTACHMENT 1, NOT ITS OWN TARGET — hence
+     * the `textureIndex` argument, which every other read here leaves at the
+     * default 0. It was the ONE screen-sized buffer this probe could not see,
+     * and it was invisible for exactly as long as it had no consumer: it went
+     * live in increment 3 and `effects/specular`'s floor gate (2026-07-26) is
+     * still the only thing that has ever READ it. That gate is a plain
+     * multiply — `attr.a` near zero, or `attr.r` disagreeing with the quad's
+     * own floor, silently zeroes the entire shine pass, both meshes, with
+     * every JS-side status field reporting healthy. An unread buffer whose
+     * value silently gates a whole effect is `feedback_unconsumed_api_rots_
+     * silently` with a fuse attached; measuring it is four lines.
      *
      * @param {number} worldX @param {number} worldY
      * @returns {Promise<{worldX:number, worldY:number, pixel:{x:number,y:number}|null,
@@ -8281,18 +8699,22 @@ export async function startVtPanViewer({
       // pixels (the pixel-ratio-parity fix), and readRenderTargetPixelsAsync
       // indexes into the buffer's own pixel grid, not CSS pixels.
       const pixel = ndcToPixel(ndc, drawBufW, drawBufH);
-      const readOne = async (target, decode) => {
-        const raw = await renderer.readRenderTargetPixelsAsync(target, pixel.x, pixel.y, 1, 1);
+      const readOne = async (target, decode, textureIndex = 0) => {
+        const raw = await renderer.readRenderTargetPixelsAsync(target, pixel.x, pixel.y, 1, 1, textureIndex);
         return { raw: raw ? Array.from(raw) : null, rgba: decode(raw) };
       };
-      const [illum, lit, albedo, coloration, occlusion] = await Promise.all([
+      const [illum, lit, albedo, coloration, occlusion, attr] = await Promise.all([
         readOne(sceneIllum, decodeHalfFloatRgba),
         readOne(sceneLit, decodeHalfFloatRgba),
         readOne(sceneColor, decodeHalfFloatRgba),
         readOne(sceneColoration, decodeHalfFloatRgba),
         readOne(occlusionMaskRT, decodeByteRgba),
+        // Attachment 1 of scene.color — see the header. `rgba` decodes to
+        // [floorIndex/255, outdoors01, presenceBits/255, solidity]; multiply R
+        // by 255 to read the floor index back as an integer.
+        readOne(sceneColor, decodeByteRgba, 1),
       ]);
-      return { worldX, worldY, pixel, onScreen, buffers: { illum, lit, albedo, coloration, occlusion } };
+      return { worldX, worldY, pixel, onScreen, buffers: { illum, lit, albedo, coloration, occlusion, attr } };
     }
 
     /** One distinct, high-contrast colour per probe point — index 1..3, wraps if ever called with more. */
@@ -8921,6 +9343,55 @@ export async function startVtPanViewer({
       setGpuProbe(on) {
         gpuProbe.setActive(on);
       },
+      /**
+       * Perf profile: arm/disarm PER-PASS GPU timing (diag/gpu-zone-timer.js).
+       *
+       * Unlike `setGpuProbe`, this does NOT throttle the render loop — timestamp
+       * queries are recorded by the GPU itself and read back asynchronously, so
+       * the picture keeps moving at full rate while it measures. That is the
+       * whole reason it is worth having beside the coarse whole-frame probe.
+       */
+      setGpuZoneTimer(on) {
+        if (!gpuZoneTimer) return { skipped: true, reason: 'no profiler seam was passed to this viewer' };
+        if (on) return { armed: gpuZoneTimer.arm(), support: gpuZoneTimer.support };
+        gpuZoneTimer.disarm();
+        return { armed: false, support: gpuZoneTimer.support };
+      },
+      /** Perf profile: what the GPU zone timer can and did measure. */
+      getGpuZoneStatus() {
+        return gpuZoneTimer ? gpuZoneTimer.getStatus() : { method: 'none', capable: false, reason: 'no profiler seam' };
+      },
+      /** Perf profile: renderer.info counters, for per-zone draw-call deltas. */
+      readRenderInfo() {
+        const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+        return {
+          drawCalls: renderer.info?.render?.drawCalls ?? 0,
+          triangles: renderer.info?.render?.triangles ?? 0,
+          width: size.width,
+          height: size.height,
+          pixelRatio: renderer.getPixelRatio?.() ?? 1,
+        };
+      },
+      /**
+       * Perf profile: the RAW frame-gap series and hitch log for the current
+       * rolling window.
+       *
+       * The diagnostics object already exposes percentiles, but a histogram and
+       * the 60-bucket shape series need the population, not a summary of it —
+       * and re-deriving percentiles from a second, differently-sampled source
+       * would produce two numbers that disagree about the same session. One
+       * ring, read raw, summarised in exactly one place (diag/perf-report.js).
+       */
+      readFrameSamples() {
+        return {
+          gapSamples: frameGapTimes.slice(),
+          hitches: hitchLog.slice(),
+          hitchThresholdMs: HITCH_THRESHOLD_MS,
+          cpuEncodeMsAvgLast120: frameTimes.length
+            ? Math.round((frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length) * 100) / 100
+            : null,
+        };
+      },
       /** Perf lab: clear the FELT rolling windows (frameGapTimes/hitchLog). These
        * are a single shared window across the whole session, not per-config — a
        * sweep that read them without clearing would smear one config's felt
@@ -8992,6 +9463,19 @@ export async function startVtPanViewer({
        * `floorGate` report which branches actually COMPILED — both are silent
        * on screen if they did not, which is precisely why they are reported. */
       getSpecularInfo: () => specularSurface.getStatus(),
+      /** Tear down WINDOW LIGHT's mesh, its geometry, both NodeMaterials and
+       * the uploaded `_Window` DataTexture — same shape as `disposeSpecular`,
+       * same reason: a missed dispose here is a per-Stop/Restart texture leak. */
+      disposeWindowLight() {
+        windowSurface.dispose();
+      },
+      /** WINDOW LIGHT's own state — for the debug report. `visible: false`
+       * with a loaded mask means the resolved floor painted no window light
+       * (the honest "nothing to draw"); `maskImage: 'not loaded'` means no
+       * `_Window` file exists for it at all, inert BY DESIGN. `floorGate`
+       * reports whether that branch actually COMPILED — silent on screen if
+       * it did not, which is precisely why it is reported. */
+      getWindowLightInfo: () => windowSurface.getStatus(),
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,
@@ -9686,6 +10170,14 @@ export async function startVtPanViewer({
         // working and water is paying fullscreen cost for a river.
         surface: waterSurface.getStatus(),
       }),
+      /**
+       * FLUID's own chain state — every link, so "why do I see nothing" is
+       * answered by reading ONE report rather than by another round trip with
+       * the author. This exists because the effect shipped invisible twice:
+       * once unwired entirely, once looking for its mask on the wrong KIND of
+       * host (a floor, when the tubes were painted on a tile).
+       */
+      getFluidStatus: () => fluidSurface.getStatus(),
       /** region-darkness's own pool state — for the Diagnostics report.
        * `activeRegions` should be > 0 whenever the scene has a visible,
        * non-hidden, elevation-band-matching region with an active "Adjust
@@ -9796,7 +10288,7 @@ export async function startVtPanViewer({
       /**
        * PIXEL-READBACK DIAGNOSTIC (2026-07-19, the region-darkness rendering
        * audit) — reads the ACTUAL rendered value of EVERY screen-sized
-       * compositor buffer (illum/lit/albedo/coloration/occlusion) at ONE
+       * compositor buffer (illum/lit/albedo/coloration/occlusion/attr) at ONE
        * world position, straight off the GPU, bypassing every CPU-side
        * computation `getRegionDarknessInfo` reports. Built because that
        * function proved a region's MATH is correct (right shape, right
@@ -9814,11 +10306,15 @@ export async function startVtPanViewer({
        * `probePixels` for the multi-point, marker-drawing version.
        *
        * `buffers.{illum,lit,albedo,coloration}` are `HalfFloatType` targets
-       * decoded via `decodeHalfFloatRgba`; `buffers.occlusion` is the ONE
-       * `UnsignedByteType` target and is decoded via `decodeByteRgba` instead
-       * (see that function's own header — same 0..1-ish shape either way, so
-       * every buffer in the report reads uniformly regardless of its
-       * underlying GPU format).
+       * decoded via `decodeHalfFloatRgba`; `buffers.occlusion` and
+       * `buffers.attr` are the `UnsignedByteType` ones and are decoded via
+       * `decodeByteRgba` instead (see that function's own header — same
+       * 0..1-ish shape either way, so every buffer in the report reads
+       * uniformly regardless of its underlying GPU format). `attr` is
+       * `buf:scene.color`'s attachment 1, read with `textureIndex: 1`, and
+       * carries [floorIndex/255, outdoors01, presenceBits/255, solidity] —
+       * `attr.r × 255` is the floor index, `attr.a` is "was anything drawn
+       * here at all". Both gate `effects/specular` by plain multiply.
        *
        * @param {number} worldX @param {number} worldY
        * @returns {Promise<{worldX:number, worldY:number, pixel:{x:number,y:number}|null,
@@ -10107,6 +10603,40 @@ export function setVtPanViewerGpuProbe(on) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   _active.setGpuProbe(on);
   return { gpuProbe: getVtPanViewerDiagnostics().gpuProbe };
+}
+
+/**
+ * Arm/disarm PER-PASS GPU timing (diag/gpu-zone-timer.js) — the real one, via
+ * WebGPU timestamp queries, attributed to whichever profiler zone was open when
+ * each pass ran.
+ *
+ * This does NOT throttle the loop the way `setVtPanViewerGpuProbe` must: the GPU
+ * writes the timestamps itself and we read them back asynchronously, so the scene
+ * keeps moving at full rate while it measures. No-op `{skipped:true}` if nothing
+ * is running.
+ * @param {boolean} on
+ */
+export function setVtPanViewerGpuZoneTimer(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setGpuZoneTimer(on);
+}
+
+/** What the GPU zone timer can measure on this device, and what it actually did. */
+export function getVtPanViewerGpuZoneStatus() {
+  if (!_active) return { method: 'none', capable: false, reason: 'viewer not started' };
+  return _active.getGpuZoneStatus();
+}
+
+/** `renderer.info` draw-call/triangle counters + drawing-buffer size. */
+export function readVtPanViewerRenderInfo() {
+  if (!_active) return null;
+  return _active.readRenderInfo();
+}
+
+/** The RAW frame-gap series + hitch log, for the profile report's own binning. */
+export function readVtPanViewerFrameSamples() {
+  if (!_active) return null;
+  return _active.readFrameSamples();
 }
 
 /**

@@ -1,8 +1,8 @@
 /**
  * @fileoverview DEBUG PANEL — the reusable DOM vocabulary. Drag behaviour, the
  * injected stylesheet, the shared control builders every zone renders through
- * (buttons, runnable report/action rows, live selects, "planned" stubs), and
- * the Tier-0 product-zone scaffold pieces.
+ * (buttons, runnable report/action rows, live selects), and the pure routing
+ * functions that decide where a registered entry renders.
  *
  * Split out of debug-panel.js on 2026-07-25 (the size-ratchet god-object
  * reversal): that file was 1,321 lines with a 1,249-line `installDebugPanel`
@@ -12,10 +12,11 @@
  * `statusEl.textContent = …` writes below read it through a `getStatusEl()`
  * getter instead. Everything else is byte-identical.
  *
- * `makeDraggable`/`ensurePanelStyle`/`sectionLabel`/`zoneIntro` reference
- * nothing from the closure at all (verified before moving) and so are plain
- * module-scope exports; the rest take the panel's registries through
- * `createControlBuilders`.
+ * `makeDraggable`/`ensurePanelStyle`/`sectionLabel` and the two pure routers
+ * (`routeEntry`, `sortPanelsForZone`) reference nothing from the closure and so
+ * are plain module-scope exports; the rest take the panel's registries through
+ * `createControlBuilders`. (`zoneIntro` and the whole 🚧 stub vocabulary were
+ * deleted 2026-07-27 — see the note beside `folderOf`.)
  *
  * @module diag/debug-panel-controls
  */
@@ -83,8 +84,19 @@ function ensurePanelStyle() {
     '#msa-debug-panel summary::-webkit-details-marker{display:none}' +
     '#msa-debug-panel summary:hover{background:rgba(143,214,255,0.09)}' +
     '#msa-debug-panel .msa-chev{display:inline-block;transition:transform .12s ease;opacity:.55}' +
-    '#msa-debug-panel details[open] .msa-chev{transform:rotate(90deg)}' +
-    '#msa-debug-panel button:active{transform:translateY(1px)}';
+    // `> summary >` and not a descendant selector: effect cards are `<details>`
+    // containing a nested `<details>` for Advanced, and a descendant rule rotated
+    // the INNER chevron whenever the OUTER card was open — a closed section
+    // drawing itself as open.
+    '#msa-debug-panel details[open] > summary .msa-chev{transform:rotate(90deg)}' +
+    '#msa-debug-panel button:active{transform:translateY(1px)}' +
+    // The preset/debug-channel dropdowns on effect cards carried this class from
+    // birth with NO rule matching it anywhere in src/, styles/ or templates/, so
+    // they rendered as raw browser chrome in the middle of a themed panel.
+    '#msa-debug-panel .msa-effect-preset-select{' +
+    'background:rgba(10,18,30,0.92);color:#dbe9fb;border:1px solid rgba(143,214,255,0.28);' +
+    'border-radius:6px;padding:3px 6px;font-size:10px;font-family:inherit;outline:none}' +
+    '#msa-debug-panel .msa-effect-preset-select:hover{border-color:rgba(143,214,255,0.5)}';
   document.head.appendChild(s);
 }
 
@@ -104,14 +116,62 @@ function sectionLabel(text) {
   return d;
 }
 
-function zoneIntro(html) {
-  const d = document.createElement('div');
-  d.innerHTML = html;
-  Object.assign(d.style, { fontSize: '10.5px', color: '#9fb6d8', lineHeight: '1.5', marginBottom: '3px' });
-  return d;
+/**
+ * WHERE A REGISTERED ENTRY RENDERS — inside one effect's card, or in a zone body.
+ *
+ * ⚠️ THIS ONE LINE IS WHY THE LAB BECAME A JUNK DRAWER. Routing used to be
+ * `entry.zone ?? ZONES[id] ?? 'lab'`, so the Lab was the DEFAULT sink: every
+ * diagnostic registered without an explicit zone piled into it. By 2026-07-27 its
+ * catch-all "More" drawer held twelve entries, EIGHT of which belonged to a
+ * specific effect — which is exactly why the specular probe sat a rail click away
+ * from the specular card. The fix is not a better default, it is a second
+ * destination: an entry that declares `{ effect }` renders in that effect's own
+ * Advanced section and in no zone at all.
+ *
+ * `'lab'` remains the zone fallback deliberately — a control that lands somewhere
+ * unexpected is recoverable, one that renders nowhere is invisible. The build-time
+ * wall is what stops the drawer re-forming; the runtime never loses a control.
+ *
+ * Pure and exported so both halves are Node-tested: this file's DOM builders are
+ * browser-verified only (CONVENTIONS §4), and routing is the part with the bug in it.
+ *
+ * @param {string} id
+ * @param {{zone?: string, effect?: string}} [entry]
+ * @param {Record<string, string>} [zones] - legacy id→zone overrides, consulted
+ *   only when the entry declares no zone of its own.
+ * @returns {{kind: 'effect', effect: string} | {kind: 'zone', zone: string}}
+ */
+export function routeEntry(id, entry, zones = {}) {
+  const effect = entry?.effect;
+  if (typeof effect === 'string' && effect.length > 0) return { kind: 'effect', effect };
+  return { kind: 'zone', zone: entry?.zone ?? zones?.[id] ?? 'lab' };
 }
 
-export { makeDraggable, ensurePanelStyle, sectionLabel, zoneIntro };
+/**
+ * Panels for one zone, in declared order. `order` defaults to 0 and ties keep
+ * registration order (`Array.prototype.sort` is stable), so an un-ordered panel
+ * behaves exactly as it did before this existed. Negative numbers pin to the top —
+ * that is how the astrolabe stays the Bridge's hero no matter when it registers.
+ *
+ * Before this, panel order was Map-insertion order, i.e. whatever sequence
+ * `install()` happened to call `registerPanel` in. Silently fragile: moving a
+ * block of boot.js re-ordered the UI.
+ *
+ * @param {Iterable<[string, object]>} entries
+ * @param {string} zone
+ * @param {Record<string, string>} [zones]
+ * @returns {Array<[string, object]>}
+ */
+export function sortPanelsForZone(entries, zone, zones = {}) {
+  return [...entries]
+    .filter(([id, e]) => {
+      const r = routeEntry(id, e, zones);
+      return r.kind === 'zone' && r.zone === zone;
+    })
+    .sort(([, a], [, b]) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+export { makeDraggable, ensurePanelStyle, sectionLabel };
 
 // Readouts in blue, actions in amber — the colour is not decoration: a button
 // that restarts your scene must not look identical to one that reads a counter.
@@ -120,7 +180,6 @@ export { makeDraggable, ensurePanelStyle, sectionLabel, zoneIntro };
 // back in when placing rows.
 export const REPORT_SKIN = { rgb: '143,214,255' };
 export const ACTION_SKIN = { rgb: '255,196,120' };
-const STUB_SKIN = { rgb: '120,140,170' }; // muted grey: a control that isn't wired yet
 
 /**
  * Bind the shared control builders to the panel's registries.
@@ -128,12 +187,11 @@ const STUB_SKIN = { rgb: '120,140,170' }; // muted grey: a control that isn't wi
  * @param {Function} deps.runReport @param {Function} deps.copyToClipboard
  * @param {() => (HTMLElement|null)} deps.getStatusEl - reads the LIVE status
  *   element; it does not exist until buildUI has run, so this cannot be a value.
- * @param {Set<string>} deps.PRIMARY - ids that get quick-reach placement.
  * @param {Array<{id:string,title:string,icon:string,ids:string[]}>} deps.FOLDERS
  *   - the folder-routing table `folderOf` consults; it lives in debug-panel.js
  *   because that is where the panel's zone/folder layout is declared.
  */
-export function createControlBuilders({ runReport, copyToClipboard, getStatusEl, PRIMARY, FOLDERS }) {
+export function createControlBuilders({ runReport, copyToClipboard, getStatusEl, FOLDERS }) {
   // ---- shared control builders (used by EVERY zone) ------------------------
   // Hoisted out of the old renderButtons so the product zones can render real
   // controls with the same look/behaviour as the Lab.
@@ -250,77 +308,38 @@ export function createControlBuilders({ runReport, copyToClipboard, getStatusEl,
     return wrap;
   }
 
-  // REPORT_SKIN / ACTION_SKIN / STUB_SKIN moved to module scope above — both
-  // this factory and debug-panel.js's own renderers need them.
+  // REPORT_SKIN / ACTION_SKIN moved to module scope above — both this factory
+  // and debug-panel.js's own renderers need them.
+  //
+  // The 🚧 STUB VOCABULARY (`makeStub`, `stubRow`, `stubGallery`,
+  // `stubSegmented`, `STUB_SKIN`) WAS DELETED 2026-07-27, along with all 21
+  // placeholders it drew. It was scaffolding for judging the product zones'
+  // arrangement before real renderers existed, and it outlived that job: two of
+  // its buttons ended up duplicating live controls a few pixels above them
+  // ("Toggle darkness" beside the working darkness select, "Recall camera"
+  // beside the working camera-path button), and its "Water" tile sat directly
+  // under the real, working Water card. That is exactly the failure the panel's
+  // own astrolabe comment already named — "a stub left beside the thing it was
+  // standing in for is a dead control" — reproduced eight more times. Do not
+  // reintroduce it: a planned feature belongs in docs/planning, not on screen.
 
-  /**
-   * A "planned, not wired yet" placeholder (🚧). Deliberately inert — clicking it
-   * only says so. This is the scaffold that lets the four product zones' final
-   * arrangement be judged before the real renderers exist.
-   */
-  function makeStub(label) {
-    const btn = makeButton(`🚧 ${label}`, STUB_SKIN);
-    btn.style.opacity = '0.6';
-    btn.style.borderStyle = 'dashed';
-    btn.style.cursor = 'default';
-    btn.title = 'Planned — not wired yet';
-    btn.addEventListener('click', () => {
-      getStatusEl().textContent = `🚧 “${label}” is planned — not wired yet (Tier 0 scaffold).`;
-    });
-    return btn;
-  }
-
-  // Which Lab sub-folder an entry belongs to. A declared `{ group }`/`{ primary }`
+  // Which Lab sub-folder an entry belongs to. A declared `{ primary }`/`{ group }`
   // wins; else the FOLDERS membership map; else "More" (visible, never a guessed
-  // wrong folder).
+  // wrong folder). `primary` is now ONLY self-declared at the registration site —
+  // the panel's parallel `PRIMARY` id set was deleted 2026-07-27, because a
+  // hand-maintained list of "the important ones" living a file away from the
+  // things it named is the same drift the FOLDERS comment already warns about.
   const folderOf = (id, entry) => {
-    if (entry.primary || PRIMARY.has(id)) return '__primary__';
+    if (entry.primary) return '__primary__';
     if (entry.group) return entry.group;
     for (const f of FOLDERS) if (f.ids.includes(id)) return f.id;
     return '__more__';
   };
 
-  function stubRow(labels) {
-    const wrap = document.createElement('div');
-    Object.assign(wrap.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
-    for (const l of labels) {
-      const b = makeStub(l);
-      b.style.flex = '1 1 calc(50% - 3px)';
-      b.style.textAlign = 'left';
-      wrap.appendChild(b);
-    }
-    return wrap;
-  }
-
-  function stubGallery(labels) {
-    const grid = document.createElement('div');
-    Object.assign(grid.style, { display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '6px' });
-    for (const l of labels) grid.appendChild(makeStub(l));
-    return grid;
-  }
-
-  function stubSegmented(labels) {
-    const row = document.createElement('div');
-    Object.assign(row.style, { display: 'flex', gap: '3px' });
-    for (const o of labels) {
-      const b = makeStub(o);
-      b.textContent = o; // inside a segmented control the 🚧 prefix is dropped; the row sits under a "Planned" label
-      b.style.flex = '1';
-      b.style.padding = '5px 2px';
-      b.style.textAlign = 'center';
-      row.appendChild(b);
-    }
-    return row;
-  }
-
   return {
     makeButton,
     makeRunnable,
     makeControl,
-    makeStub,
     folderOf,
-    stubRow,
-    stubGallery,
-    stubSegmented,
   };
 }

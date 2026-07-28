@@ -1061,7 +1061,22 @@ function loadUniformBudgets() {
  *  design (does not track `//` or `/*` inside string/template literals) — see
  *  An occasional miscount is harmless to a shrink-only ratchet. */
 function stripBraceComments(line) {
-  return line.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '');
+  // ⚠️ THE `s` FLAG IS LOad-BEARING, AND ITS ABSENCE WAS A LATENT FALSE
+  // POSITIVE (found 2026-07-26). Files are read with `.split('\n')`, so on a
+  // CRLF working copy every line still ends with a `\r`. In JS `.` does NOT
+  // match `\r` (it is a line terminator), and `$` without `m` matches only at
+  // the very end of the string — so `//.*$` could not reach past the trailing
+  // `\r` and the comment was NEVER STRIPPED on any CRLF file.
+  //
+  // The symptom was a rule tripping on its own explanatory comment:
+  // `masks/authority-only` failed on three lines of `vt/decode-pool.js` that
+  // merely SAY `// _Shadow's intensity`. Git reported the file clean the whole
+  // time (autocrlf normalises on commit), so nothing pointed at line endings.
+  //
+  // With `s`, `.` matches the `\r` too and the comment strips as intended. This
+  // makes the walls MORE accurate, never weaker: it removes false positives
+  // only, and a false positive is how a wall gets muted.
+  return line.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/s, '');
 }
 
 /**
@@ -1339,7 +1354,9 @@ function scan() {
         // which is rare in this codebase and errs toward a false POSITIVE (loud),
         // never a false negative (silent) — the safe direction for a wall.
         if (t.startsWith('*') || t.startsWith('//')) return;
-        const code = text.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '');
+        // The `s` flag: see `stripBraceComments`, which carries the account.
+        // Without it a CRLF working copy never strips an inline comment at all.
+        const code = text.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/s, '');
         const matched = rule.test ? rule.test(code) : rule.pattern.test(code);
         if (matched) {
           hits.get(rule.id).push({ file: rel, line: i + 1, text: code.trim().slice(0, 100) });

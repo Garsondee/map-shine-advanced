@@ -290,7 +290,9 @@ export function run(t) {
     );
   }
 
-  // 14. GPU timer plumbing (injected duck-typed timer — see GpuPassTimer).
+  // 14. GPU timer plumbing (injected duck-typed timer). The concrete
+  //     GpuPassTimer that used to satisfy this shape was deleted 2026-07-27 —
+  //     see graph/index.js's header for why. The shape is still the contract.
   {
     const events = [];
     const results = new Map([['b', 2.5]]);

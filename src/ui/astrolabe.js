@@ -53,6 +53,9 @@
 
 /** Ring geometry, in the dial's own 0..300 coordinate space. */
 const FACE = 300;
+/** The dial's rendered size in CSS px — 236 until the 2026-07-27 Bridge
+ * compaction. Geometry is all in FACE space, so this is a display scale only. */
+const DIAL_PX = 200;
 const C = FACE / 2;
 const R_OUTER = 146;
 const R_INNER = 104;
@@ -191,8 +194,8 @@ export function createAstrolabe(opts) {
   });
 
   // ---- the dial ------------------------------------------------------------
-  const dialWrap = styled('div', { position: 'relative', alignSelf: 'center', touchAction: 'none' });
-  const svg = svgEl('svg', { viewBox: `0 0 ${FACE} ${FACE}`, width: 236, height: 236 });
+  const dialWrap = styled('div', { position: 'relative', flex: '0 0 auto', touchAction: 'none' });
+  const svg = svgEl('svg', { viewBox: `0 0 ${FACE} ${FACE}`, width: DIAL_PX, height: DIAL_PX });
   svg.style.display = 'block';
   svg.style.cursor = 'pointer';
   dialWrap.appendChild(svg);
@@ -266,7 +269,22 @@ export function createAstrolabe(opts) {
   const phaseText = styled('div', { fontSize: '9.5px', color: MUTED, letterSpacing: '0.6px' });
   readout.append(clockText, phaseText);
   dialWrap.appendChild(readout);
-  root.appendChild(dialWrap);
+
+  // THE TOP BLOCK — dial left, the two mid-session sliders stacked to its right.
+  // Compacted 2026-07-27 (author: "the bridge part is nice but it's a poor use of
+  // vertical space at the moment... compressed is good since eventually there
+  // will be a lot more controls here"). The dial stays the hero; what moved is
+  // everything that was stacked UNDER it in a single tall column.
+  const topRow = styled('div', { display: 'flex', alignItems: 'center', gap: '10px' });
+  const liveCol = styled('div', {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    flex: '1 1 auto',
+    minWidth: '0',
+  });
+  topRow.append(dialWrap, liveCol);
+  root.appendChild(topRow);
 
   // ---- the sliders ---------------------------------------------------------
   const windRow = sliderRow('Wind', 0, 1, 0.01, (v, committed) => opts.onWindSpeedChange?.(v, committed));
@@ -287,7 +305,55 @@ export function createAstrolabe(opts) {
   // ToD/weather LOOK, and the cloud desaturation the sky light can't do. This
   // is where the "overcast feels grey and subdued" the author wanted lives.
   const atmoRow = sliderRow('Atmosphere', 0, 1, 0.01, (v, committed) => opts.onGradeEnvChange?.(v, committed));
-  root.append(windRow.el, cloudRow.el, skyRow.el, atmoRow.el, rateRow.el);
+
+  // THE SPLIT is this project's own FOH test — "would a GM change this
+  // mid-session, or only while tuning?" (feedback_foh_roh_must_differ).
+  //
+  // Beside the dial: WIND, because the arrow is meaningless without a magnitude
+  // and the two are one gesture; and CLOUD, because weather changes during play.
+  liveCol.append(windRow.el, cloudRow.el);
+
+  // Folded away: sky light, atmosphere, time rate, the clock mode and the sky
+  // scope. All set-once tuning.
+  const tuning = document.createElement('details');
+  Object.assign(tuning.style, {
+    border: `1px solid rgba(${CYAN},0.14)`,
+    borderRadius: '7px',
+    background: `rgba(${CYAN},0.03)`,
+  });
+  const tuningSummary = styled('summary', {
+    cursor: 'pointer',
+    listStyle: 'none',
+    padding: '4px 8px',
+    fontSize: '10px',
+    fontWeight: '600',
+    color: MUTED,
+    userSelect: 'none',
+  });
+  const tuningBody = styled('div', {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    padding: '2px 8px 8px',
+  });
+  tuning.append(tuningSummary, tuningBody);
+  tuningBody.append(skyRow.el, atmoRow.el, rateRow.el);
+
+  /**
+   * ⚠️ THE COST OF FOLDING SKY LIGHT AWAY, PAID BACK IN THE SUMMARY.
+   *
+   * `Sky light` defaults to 0, and at 0 the outdoor light is a mathematical
+   * no-op — the scene renders pixel-identical to Foundry. That is exactly why the
+   * slider had to exist in the first place: it is the only way anyone discovers
+   * the feature. Hiding it behind a disclosure would have quietly undone that, so
+   * the disclosure ADVERTISES the one thing hiding it would have cost.
+   */
+  const syncTuningSummary = () => {
+    tuningSummary.innerHTML =
+      '<span class="msa-chev">▸</span> Sky &amp; light' +
+      (skyRow.value() > 0 ? '' : ' <span style="opacity:.6">· sky light off</span>');
+  };
+  syncTuningSummary();
 
   // ---- the mode toggle -----------------------------------------------------
   const modeRow = styled('div', { display: 'flex', alignItems: 'center', gap: '6px' });
@@ -319,7 +385,7 @@ export function createAstrolabe(opts) {
   // The astrolabe keeps only the ATMOSPHERE grade, which is "physically present
   // in the world" and belongs beside time + weather.)
   modeRow.append(modeLabel, modeSelect);
-  root.appendChild(modeRow);
+  tuningBody.appendChild(modeRow);
 
   // ── SCOPE: whose sky am I editing? ──────────────────────────────────────
   // Author, 2026-07-23: per world by default, per scene only if you enable it.
@@ -341,9 +407,17 @@ export function createAstrolabe(opts) {
   scopeText.textContent = 'This scene has its own sky';
   scopeBox.addEventListener('change', () => opts.onSceneOverrideChange?.(scopeBox.checked));
   scopeRow.append(scopeBox, scopeText);
-  root.appendChild(scopeRow);
+  tuningBody.appendChild(scopeRow);
+  root.appendChild(tuning);
 
-  const status = styled('div', { color: MUTED, fontSize: '9.5px', minHeight: '13px' });
+  // No reserved height: an empty status line was holding 13px open in a panel
+  // being compacted, and it is empty in the common case.
+  const status = styled('div', { color: MUTED, fontSize: '9.5px' });
+  const setStatus = (text) => {
+    status.textContent = text ?? '';
+    status.style.display = status.textContent ? 'block' : 'none';
+  };
+  setStatus('');
   root.appendChild(status);
 
   // ---- gestures ------------------------------------------------------------
@@ -405,10 +479,10 @@ export function createAstrolabe(opts) {
   let statusTimer = null;
   let stickyStatus = '';
   function flashStatus(text) {
-    status.textContent = text;
+    setStatus(text);
     if (statusTimer) clearTimeout(statusTimer);
     statusTimer = setTimeout(() => {
-      status.textContent = stickyStatus;
+      setStatus(stickyStatus);
       statusTimer = null;
     }, 4000);
   }
@@ -454,6 +528,7 @@ export function createAstrolabe(opts) {
     cloudRow.set(Math.max(0, Math.min(1, s.cloudCover01 ?? 0)));
     skyRow.set(Math.max(0, Math.min(1, s.skyRealism01 ?? 0)));
     skyRow.setReadout((s.skyRealism01 ?? 0) === 0 ? 'off' : `${Math.round((s.skyRealism01 ?? 0) * 100)}%`);
+    syncTuningSummary();
     atmoRow.set(Math.max(0, Math.min(1, s.gradeEnvStrength ?? 0)));
     atmoRow.setReadout((s.gradeEnvStrength ?? 0) === 0 ? 'off' : `${Math.round((s.gradeEnvStrength ?? 0) * 100)}%`);
     rateRow.set(nearestRateIndex(s.rateHoursPerMinute ?? 0));
@@ -478,7 +553,7 @@ export function createAstrolabe(opts) {
         : ringLocked
           ? "Time follows Foundry's world clock."
           : '';
-    if (!statusTimer) status.textContent = stickyStatus;
+    if (!statusTimer) setStatus(stickyStatus);
   }
 
   return { root, update };
@@ -577,6 +652,9 @@ function sliderRow(label, min, max, step, onChange) {
   el.append(name, input, out);
   return {
     el,
+    /** The knob's live value — read by the Sky & light summary so a folded-away
+     * control can still advertise that it is at its no-op default. */
+    value: () => Number(input.value),
     /** Mirror the engine's value — ignored mid-drag so the knob never fights
      * the finger holding it (the classic two-way-binding stutter). */
     set(v) {

@@ -13,7 +13,7 @@
  * @module effects/specular/specular-registration
  */
 
-import { SPECULAR, SPECULAR_PARAMS } from './specular.js';
+import { SPECULAR, SPECULAR_PARAMS, SPECULAR_LAYER_PARAMS, SPECULAR_DEBUG_CHANNELS } from './specular.js';
 
 /**
  * @param {object} args
@@ -25,7 +25,8 @@ import { SPECULAR, SPECULAR_PARAMS } from './specular.js';
  * @param {(effectId: string, scope: string) => string} args.effectEnableKey
  * @param {{error: Function}} args.log
  * @returns {{reapply: () => void, getRenderState: () => object,
- *   setSpecular: (partial?: object) => void, getReadout: () => object}}
+ *   setSpecular: (partial?: object) => void, setDebugChannel: (n: number) => object,
+ *   getDebugChannel: () => number, getReadout: () => object}}
  */
 export function createSpecularRegistration({
   effectRegistry,
@@ -54,6 +55,34 @@ export function createSpecularRegistration({
    * persisted. Mirrors `waterLiveOverride`. */
   const liveOverride = {};
 
+  /**
+   * WHICH DEBUG INTERMEDIATE IS ON SCREEN (`specular.js#SPECULAR_DEBUG_CHANNELS`).
+   *
+   * Deliberately NOT a param and NOT in `liveOverride`: it is not a property of
+   * a material or of the world, it must never be generated onto the FOH/ROH
+   * card as a look control, and it must never persist to a setting — a
+   * diagnostic that survived a reload would eventually be mistaken for the
+   * effect. It travels on the render state beside `enabled`, and dies with the
+   * session.
+   */
+  let debugChannel = 0;
+
+  /**
+   * THE PER-LAYER OVERRIDES — three shimmer layers, each with its own eight
+   * controls (`specular.js#SPECULAR_LAYER_PARAMS`).
+   *
+   * Held outside the cascade rather than flattened into it, and the reason is
+   * V2's own corpse: it shipped these as twenty-four separate settings with
+   * digits in their names (`stripe2Angle`, `stripe3Gaps`) and nobody could tell
+   * which layer a slider belonged to. One array of three objects keeps the
+   * panel able to draw one strip per layer, and keeps the schema at ten entries
+   * rather than thirty-four.
+   *
+   * Transient, like the live param override beside it: a layer tweak shows
+   * immediately and dies with the session.
+   */
+  const layerOverrides = [{}, {}, {}];
+
   effectRegistry.register(SPECULAR, (resolved) => {
     readout = { enabled: resolved.enabled, params: resolved.params };
   });
@@ -71,7 +100,7 @@ export function createSpecularRegistration({
    * authoring model showing up in the plumbing.
    */
   function getRenderState() {
-    return { enabled: readout.enabled, params: readout.params ?? {} };
+    return { enabled: readout.enabled, params: readout.params ?? {}, layers: layerOverrides, debugChannel };
   }
 
   /**
@@ -103,5 +132,63 @@ export function createSpecularRegistration({
     if (changed) reapply();
   }
 
-  return { reapply, getRenderState, setSpecular, getReadout: () => readout };
+  /**
+   * `MapShine.setSpecularDebug(4)` — show one shader intermediate instead of
+   * the effect. 0 restores the normal render. See
+   * `specular.js#SPECULAR_DEBUG_CHANNELS` for what each one answers.
+   *
+   * Needs no `reapply()`: it is not part of the cascade at all, and the viewer
+   * reads it off `getRenderState()` on its next `sync` — which happens every
+   * frame, before the draw.
+   *
+   * @param {number} n
+   * @returns {{debugChannel: number, channel: object|null}}
+   */
+  function setDebugChannel(n) {
+    const next = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+    const channel = SPECULAR_DEBUG_CHANNELS.find((c) => c.n === next) ?? null;
+    if (!channel) {
+      // Loud rather than clamped: silently snapping to the nearest valid
+      // channel would show the author a DIFFERENT intermediate than the one
+      // they asked for, and they would read the result as an answer about the
+      // one they named (`feedback_instruments_must_not_lie`).
+      log.error(`setSpecularDebug: no channel ${next} — valid: ${SPECULAR_DEBUG_CHANNELS.map((c) => c.n).join(', ')}`);
+      return { debugChannel, channel: SPECULAR_DEBUG_CHANNELS.find((c) => c.n === debugChannel) ?? null };
+    }
+    debugChannel = next;
+    return { debugChannel, channel };
+  }
+
+  /**
+   * `MapShine.setSpecularLayer(1, { streak: 0.4 })` — one shimmer layer's own
+   * controls. Validated against `SPECULAR_LAYER_PARAMS` for the same reason
+   * `setSpecular` validates against the main schema: silently accepting an
+   * unknown key is how a typo becomes a control that does nothing.
+   * @param {number} index @param {object} [partial]
+   */
+  function setSpecularLayer(index, partial = {}) {
+    const i = Number(index);
+    if (!Number.isInteger(i) || i < 0 || i >= layerOverrides.length) {
+      log.error(`setSpecularLayer: no layer ${index} — valid: 0..${layerOverrides.length - 1}`);
+      return;
+    }
+    for (const [key, value] of Object.entries(partial ?? {})) {
+      if (!Object.prototype.hasOwnProperty.call(SPECULAR_LAYER_PARAMS, key)) {
+        log.error(`setSpecularLayer: unknown key '${key}' — see SPECULAR_LAYER_PARAMS`);
+        continue;
+      }
+      layerOverrides[i][key] = value;
+    }
+  }
+
+  return {
+    reapply,
+    getRenderState,
+    setSpecular,
+    setSpecularLayer,
+    getLayers: () => layerOverrides,
+    setDebugChannel,
+    getDebugChannel: () => debugChannel,
+    getReadout: () => readout,
+  };
 }

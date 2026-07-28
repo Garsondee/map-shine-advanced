@@ -4,18 +4,129 @@
  * Technical" rule (Effects-UI.md §2). The DOM widget builders + buildEffectCard
  * are browser-verified live (no DOM mock — CONVENTIONS §4).
  */
-import { CATEGORY_ORDER, groupParamsByCategory, rohGroups } from '../effect-controls.js';
+import {
+  CATEGORY_ORDER,
+  groupParamsByCategory,
+  rohGroups,
+  createSectionStore,
+  collapsedStatusLine,
+} from '../effect-controls.js';
+
+import { routeEntry, sortPanelsForZone } from '../debug-panel-controls.js';
 
 export function run(t) {
   const { ok } = t;
+
+  // --- routeEntry: the line that turned the Lab into a junk drawer ----------
+  // `entry.zone ?? ZONES[id] ?? 'lab'` made the Lab the DEFAULT sink, so every
+  // diagnostic registered without a zone piled into it — twelve in its catch-all
+  // "More" drawer by 2026-07-27, eight of them belonging to a specific effect.
+  ok('an entry with no zone still lands somewhere visible', routeEntry('x', {}).zone === 'lab');
+  ok('an undefined entry does not throw', routeEntry('x', undefined).zone === 'lab');
+  ok('a declared zone wins', routeEntry('x', { zone: 'bridge' }).zone === 'bridge');
+  ok('a legacy id→zone override is honoured', routeEntry('x', {}, { x: 'settings' }).zone === 'settings');
+  ok(
+    'a declared zone beats the legacy table (the call site is the truth)',
+    routeEntry('x', { zone: 'bridge' }, { x: 'settings' }).zone === 'bridge'
+  );
+
+  // THE SECOND DESTINATION — an effect's own card, not a zone body at all.
+  ok('an effect-routed entry is not a zone entry', routeEntry('probe', { effect: 'specular' }).kind === 'effect');
+  ok('it names its effect', routeEntry('probe', { effect: 'specular' }).effect === 'specular');
+  ok(
+    'an effect beats both a declared zone and the legacy table',
+    routeEntry('probe', { effect: 'specular', zone: 'lab' }, { probe: 'bridge' }).kind === 'effect'
+  );
+  ok('an empty effect string is not an effect route', routeEntry('x', { effect: '' }).kind === 'zone');
+
+  // --- sortPanelsForZone: declared order, stable ties -----------------------
+  {
+    const panels = [
+      ['grade', { zone: 'workshop' }],
+      ['astrolabe', { zone: 'bridge', order: -1 }],
+      ['water', { zone: 'workshop' }],
+      ['camera', { zone: 'bridge' }],
+      ['probe-card', { effect: 'specular' }],
+    ];
+    const bridge = sortPanelsForZone(panels, 'bridge').map(([id]) => id);
+    ok('a negative order pins to the top of its zone', bridge.join(',') === 'astrolabe,camera');
+
+    const workshop = sortPanelsForZone(panels, 'workshop').map(([id]) => id);
+    ok('un-ordered panels keep registration order (stable sort)', workshop.join(',') === 'grade,water');
+    ok('an effect-routed panel appears in NO zone body', !workshop.includes('probe-card'));
+    ok('a zone with nothing routed to it is empty, not undefined', sortPanelsForZone(panels, 'settings').length === 0);
+  }
+
+  // --- createSectionStore: what survives the panel's full rebuild -----------
+  // debug-panel.js's renderBody() does `innerHTML = ''` on every registration and
+  // every refreshControls(), so a `<details open>` attribute cannot persist —
+  // opening Advanced and then picking a preset used to slam it shut. The store is
+  // module-scope precisely because module scope outlives the DOM.
+  {
+    const s = createSectionStore();
+    ok('a section starts closed', s.isOpen('specular') === false);
+    s.setOpen('specular', true);
+    ok('opening is remembered', s.isOpen('specular') === true);
+
+    // THE INVARIANT THAT MATTERS: one key per card. Two cards sharing an open
+    // state would look like a card opening itself, which is why buildEffectCard
+    // throws on a missing id rather than defaulting one.
+    ok('a different card is unaffected', s.isOpen('water') === false);
+    ok("a card's Advanced is independent of the card itself", s.isOpen('specular:advanced') === false);
+    s.setOpen('specular:advanced', true);
+    ok('both can be open at once', s.isOpen('specular') && s.isOpen('specular:advanced'));
+
+    s.setOpen('specular', false);
+    ok('closing the card leaves its Advanced state alone', s.isOpen('specular:advanced') === true);
+    ok('closing is remembered', s.isOpen('specular') === false);
+    ok('keys() reports exactly what is open, sorted', s.keys().join(',') === 'specular:advanced');
+
+    ok('two stores never share state', createSectionStore().isOpen('specular:advanced') === false);
+    ok('an unknown key is closed, never undefined', s.isOpen('never-registered') === false);
+  }
+
+  // --- collapsedStatusLine: the one line you read on a folded card ----------
+  // Formatting is where lying instruments are born: "0 candles" and "no candles
+  // placed yet" are different claims, and an absent value must produce SILENCE
+  // rather than the string "undefined" sitting in the header.
+  ok('no information at all yields an empty line', collapsedStatusLine() === '');
+  ok('an empty argument object yields an empty line', collapsedStatusLine({}) === '');
+  ok('disabled reads "off"', collapsedStatusLine({ enabled: false }) === 'off');
+  ok(
+    'disabled beats every other fact — an off effect has nothing else to say',
+    collapsedStatusLine({ enabled: false, count: 7, noun: 'candle', missing: 'mask' }) === 'off'
+  );
+  ok(
+    'a missing prerequisite is named',
+    collapsedStatusLine({ enabled: true, missing: '_Specular mask on this floor' }) ===
+      'no _Specular mask on this floor'
+  );
+  ok('one instance is singular', collapsedStatusLine({ enabled: true, count: 1, noun: 'candle' }) === '1 candle');
+  ok('many instances are plural', collapsedStatusLine({ enabled: true, count: 3, noun: 'candle' }) === '3 candles');
+  ok(
+    'zero instances reads as "none yet", not "0"',
+    collapsedStatusLine({ enabled: true, count: 0, noun: 'candle' }) === 'no candles placed yet'
+  );
+  ok('a count with no noun says nothing rather than guessing', collapsedStatusLine({ count: 3 }) === '');
+  ok('a noun with no count says nothing', collapsedStatusLine({ noun: 'candle' }) === '');
+  ok('a non-finite count is not rendered', collapsedStatusLine({ count: NaN, noun: 'candle' }) === '');
+  ok('an empty missing string is not rendered as "no "', collapsedStatusLine({ missing: '' }) === '');
+  ok('enabled true alone is silent — "on" is what the checkbox says', collapsedStatusLine({ enabled: true }) === '');
 
   // --- the fixed order is stable and Light is a first-class category -------
   ok('CATEGORY_ORDER is frozen (data, not mutable state)', Object.isFrozen(CATEGORY_ORDER));
   ok('Light rides alongside the Effects-UI.md set', CATEGORY_ORDER.includes('Light'));
   ok(
-    'the canonical order is Presence, Look, Light, Motion, Extent, Response, Technical',
-    CATEGORY_ORDER.join(',') === 'Presence,Look,Light,Motion,Extent,Response,Technical'
+    'the canonical order runs surface → emission → behaviour → size → couplings → machinery',
+    CATEGORY_ORDER.join(',') === 'Presence,Look,Detail,Light,Motion,Shape,Extent,Outdoor,Response,Technical'
   );
+  // Every category a shipped effect actually declares must be IN the list, or
+  // groupParamsByCategory silently sweeps those params into Technical and the
+  // panel contradicts the declaration — which is how Detail/Shape/Outdoor were
+  // being lost until 2026-07-27, with all their own tests still green.
+  for (const c of ['Detail', 'Shape', 'Outdoor']) {
+    ok(`${c} is a real category, not silently swept into Technical`, CATEGORY_ORDER.includes(c));
+  }
 
   // --- groupParamsByCategory: real candle-shaped schema ---------------------
   const schema = {

@@ -128,173 +128,27 @@ export const SPECULAR_PRESENCE_EDGE0 = 1 / 255;
 export const SPECULAR_PRESENCE_EDGE1 = 20 / 255;
 
 /**
- * Dielectric F0 — the ~4% every non-metal reflects at normal incidence. The
- * standard value for the whole dielectric range (water 0.02, glass 0.04, most
- * stone/plastic 0.04–0.05); a single constant is correct within the precision
- * anyone can paint.
+ * THE MASK IS A STRENGTH AND A TINT — V2's decode, and it is what the author
+ * paints against.
+ *
+ * ⚠️ **THE ALPHA-MISSING FALLBACK IS LOAD-BEARING, NOT DEFENSIVE.** A greyscale
+ * `_Specular` with no alpha channel is the common authoring case, and without
+ * this branch every such map renders pure black — `strength = luma × 0`. V2
+ * carried it (`specular-shader.js:247`) and so must this.
  */
-export const DIELECTRIC_F0 = 0.04;
+export const SPECULAR_ALPHA_EPSILON = 1e-4;
 
 /**
- * The roughness floor. **0.089, not 0 and not 0.045.**
+ * Rec.601 for STRENGTH, Rec.709 for the tint's own normalisation.
  *
- * At `roughness = 0` the GGX distribution's denominator collapses and `D → ∞`
- * at `N·H = 1`, which on a HALF-FLOAT target is not a bright highlight, it is
- * `Inf` — and `Inf × 0` downstream is `NaN`, which propagates to a black or
- * white pixel that no amount of parameter tuning explains. Filament's own
- * analysis gives 0.045 as the floor for fp32 and **0.089 for fp16**, and every
- * target in this renderer is `HalfFloatType` (`describeSceneColor`). Taking the
- * fp32 number on an fp16 pipeline is the exact kind of nearly-right constant
- * that produces sparkling white pixels on some hardware and not others.
+ * Two different luma weightings in one decode looks like an oversight and is
+ * not: 601 is what V2 measured strength with, so keeping it keeps every
+ * existing `_Specular` file reading at the brightness its author saw; 709 is
+ * the correct linear-light weighting for re-normalising a colour, which is what
+ * the tint step does. Unifying them would silently re-expose every painted map.
  */
-export const MIN_ROUGHNESS = 0.089;
-
-/**
- * Default metalness — how far a painted texel behaves like a conductor rather
- * than a dielectric. High, because **the file is a metal mask** (see
- * `scene/mask-catalog.js`'s own `meaning` for this kind) and because a top-down
- * view of a 4% dielectric returns almost nothing (§ the header's correction).
- *
- * Exposed to the author as `SPECULAR_PARAMS.metalResponse` so a map whose shiny
- * things are genuinely glaze, glass or wet stone can dial the whole scene toward
- * dielectric. At 0.85 a neutral grey texel reaches `F0 ≈ 0.87`, which sits
- * between real steel (0.56) and real silver (0.97) — a bright, believable metal.
- */
-export const DEFAULT_METALNESS = 0.85;
-
-/**
- * How much of the physically-implied diffuse suppression is actually applied.
- *
- * ⚠️ **DELIBERATELY UNDER-PHYSICAL, and this is a product decision stated as
- * one.** A conductor has essentially NO diffuse albedo, so a texel at
- * `metalness = 0.85` should have its underlying colour cut by ~85%. That is
- * correct and it is not what we want: the map art IS the product, a GM painted
- * that gold filigree by hand, and replacing it wholesale with a reflection of a
- * flat sky trades authored detail for physics nobody asked for. Worse, the
- * arithmetic goes the wrong way on a mid-tone — `0.5×0.15 + 0.2 = 0.35` is
- * DARKER than the 0.5 it replaced, so full suppression makes painting the mask
- * dim the map.
- *
- * At 0.35 the metal still visibly stops being flat paint (the underlying art
- * loses about a third of its contribution where the reflection takes over) while
- * the net effect of painting the mask is always brighter, never darker.
- * The physical link between the two is real and is why they share one param; the
- * discount is why they are not the same number.
- */
-export const METAL_DIFFUSE_SHARE = 0.35;
-
-/** sRGB transfer decode, one channel. The IEC 61966-2-1 curve, not the 2.2
- * approximation — the linear toe matters at the dark end, which is exactly
- * where dark metals live.
- * @param {number} c 0..1 @returns {number} */
-export function srgbToLinear01(c) {
-  const x = clamp01(c);
-  return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
-}
-
-/**
- * THE DECODE. One mask texel → one material.
- *
- * @param {number} r sRGB 0..1, as painted.
- * @param {number} g sRGB 0..1, as painted.
- * @param {number} b sRGB 0..1, as painted.
- * @param {number} [metalnessIn] - the SCENE's metalness, not a per-texel value.
- *   See {@link DEFAULT_METALNESS} and this module's own correction for why it
- *   is an argument rather than something read off the mask's saturation — that
- *   read is what made grey steel invisible.
- * @returns {{presence: number, metalness: number, roughness: number, alpha: number, f0: number[]}}
- *   `presence` 0..1 (antialiased coverage), `metalness` 0..1, `roughness`
- *   0..1 (already floored), `alpha` = roughness² (the GGX parameter), `f0`
- *   LINEAR RGB reflectance at normal incidence.
- */
-export function decodeSpecularMaterial(r, g, b, metalnessIn = DEFAULT_METALNESS) {
-  const rr = clamp01(r);
-  const gg = clamp01(g);
-  const bb = clamp01(b);
-
-  const value = Math.max(rr, gg, bb);
-
-  const presence = smoothstep(SPECULAR_PRESENCE_EDGE0, SPECULAR_PRESENCE_EDGE1, value);
-  const roughness = Math.min(1, Math.max(MIN_ROUGHNESS, 1 - value));
-
-  // ⚠️ **METALNESS IS SCALED BY VALUE, AND WITHOUT THAT THE AUTHORING MODEL
-  // INVERTS.** Measured on the first pass at a flat scene metalness: dark grey
-  // paint (value 0.3) came out at 1.06 of scene brightness while near-white
-  // polished paint came out at 0.217 — **darker paint producing a FIVE TIMES
-  // BRIGHTER result.** An author reaching for dark grey to say "dull, tarnished
-  // iron" would have painted the single hottest thing on the map.
-  //
-  // The mechanism is not a bug in either term: `roughness = 1 − value` gives
-  // dark paint a very BROAD lobe, and a broad lobe catches an off-mirror sun
-  // that a polished razor lobe misses entirely. Both halves are correct physics.
-  // What was missing is that a dark metal is dark BECAUSE it is tarnished or
-  // oxidised, and an oxide layer is a dielectric — so its F0 genuinely falls.
-  // Scaling metalness by value says exactly that, restores monotonicity with
-  // what the author meant, and costs one multiply.
-  const metalness = clamp01(metalnessIn) * value;
-
-  // THE HUE AT FULL BRIGHTNESS, then linearised — glTF's baseColor→F0 step.
-  // Dividing by `value` first is what separates hue from polish: without it a
-  // dark copper would get a dark F0 AND a high roughness, double-counting the
-  // same painted darkness. The author painted one thing; it means one thing.
-  const inv = value > 1e-5 ? 1 / value : 0;
-  const hueLinear = [srgbToLinear01(rr * inv), srgbToLinear01(gg * inv), srgbToLinear01(bb * inv)];
-
-  const f0 = [
-    DIELECTRIC_F0 + (hueLinear[0] - DIELECTRIC_F0) * metalness,
-    DIELECTRIC_F0 + (hueLinear[1] - DIELECTRIC_F0) * metalness,
-    DIELECTRIC_F0 + (hueLinear[2] - DIELECTRIC_F0) * metalness,
-  ];
-
-  return { presence, metalness, roughness, alpha: roughness * roughness, f0 };
-}
-
-/**
- * GGX / Trowbridge-Reitz normal distribution. The `α²` numerator form, so the
- * function is already normalised and needs no separate `1/π` bookkeeping at the
- * call site.
- * @param {number} nDotH @param {number} alpha roughness²
- * @returns {number}
- */
-export function ggxDistribution(nDotH, alpha) {
-  const a2 = Math.max(alpha * alpha, 1e-8);
-  const c = clamp01(nDotH);
-  const d = c * c * (a2 - 1) + 1;
-  return a2 / (Math.PI * d * d);
-}
-
-/**
- * Height-correlated Smith visibility (the `G / (4·N·L·N·V)` combination, so the
- * BRDF is `D · Vis · F` with no trailing division). Heitz 2014 via Filament.
- * @param {number} nDotL @param {number} nDotV @param {number} alpha roughness²
- * @returns {number}
- */
-export function smithVisibility(nDotL, nDotV, alpha) {
-  const l = Math.max(clamp01(nDotL), 1e-4);
-  const v = Math.max(clamp01(nDotV), 1e-4);
-  const a2 = alpha * alpha;
-  const gv = l * Math.sqrt(v * v * (1 - a2) + a2);
-  const gl = v * Math.sqrt(l * l * (1 - a2) + a2);
-  return 0.5 / Math.max(gv + gl, 1e-6);
-}
-
-/**
- * Schlick's Fresnel, per channel.
- *
- * ⚠️ **At normal incidence this returns F0 — the MINIMUM — and a top-down
- * camera looks at normal incidence everywhere.** That is not a flaw in the
- * approximation, it is the physics of the shot, and it is precisely why
- * `specular-render.js` synthesises a finite eye height: with a genuinely
- * orthographic V, `1 − N·V` is 0 across the entire screen and this term is a
- * constant. See `docs/planning/Specular.md` §3.2.
- *
- * @param {number[]} f0 @param {number} cosTheta @returns {number[]}
- */
-export function schlickFresnel(f0, cosTheta) {
-  const c = clamp01(1 - clamp01(cosTheta));
-  const c5 = c * c * c * c * c;
-  return [f0[0] + (1 - f0[0]) * c5, f0[1] + (1 - f0[1]) * c5, f0[2] + (1 - f0[2]) * c5];
-}
+export const LUMA_601 = Object.freeze([0.299, 0.587, 0.114]);
+export const LUMA_709 = Object.freeze([0.2126, 0.7152, 0.0722]);
 
 /**
  * THE KEY LIGHT'S 3D DIRECTION, from the sky handle's own published fields.
@@ -335,4 +189,131 @@ export function smoothstep(e0, e1, x) {
   if (Math.abs(d) < 1e-9) return x >= e1 ? 1 : 0;
   const t = clamp01((x - e0) / d);
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * THE COORDINATE TWIN — what `specular-render.js` computes for `maskU/maskV`
+ * and `screenU/screenV`, in plain JS, at the quad's four corners.
+ *
+ * ============================================================================
+ * WHY A TWIN AND NOT ANOTHER DEBUG CHANNEL
+ * ============================================================================
+ * The debug channels (`specular.js#SPECULAR_DEBUG_CHANNELS`) answer BINARY
+ * questions superbly — "is this texture live at all" was settled in one glance
+ * by channel 14. They are the wrong instrument for a MAGNITUDE: a UV ramp
+ * cannot distinguish `viewSpanX = 8000` from `viewSpanX = 20000`, because 0.42
+ * red and 1.0 red are the same impression on a screenshot, and a coordinate
+ * being subtly offset looks exactly like one that is right.
+ *
+ * That is `feedback_measure_the_output_not_the_equation` arriving one level up:
+ * having built a picture, the next thing needed was a NUMBER. This is the
+ * number — the same arithmetic the shader does, run on the CPU where it can be
+ * printed, diffed and asserted (`feedback_smooth_output_hides_ported_bugs`'s
+ * "write the CPU twin from the same primitives").
+ *
+ * ⚠️ **`maskU` spans EXACTLY the content bounds, and that is provable rather
+ * than hopeful — which is what makes a deviation diagnostic.** The subsystem
+ * crops the quad to `rect.min + contentBounds × rect.size` and the shader maps
+ * world back through the SAME rect, so the rect algebraically CANCELS: the
+ * quad's left edge is `minU` and its right edge is `maxU`, whatever the rect
+ * is. So a `maskUv` here that does NOT match `contentBoundsUv` (give or take
+ * the AABB pad) means the two rects are not the same rect — the only way that
+ * cancellation can fail — and that is a far sharper statement than "the mask
+ * samples black".
+ *
+ * @param {object} args
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} args.maskRect
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} args.quadWorld -
+ *   the cropped quad's own world AABB (`contentBoundsWorld`).
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} args.viewRect
+ * @returns {object} a printable mapping report.
+ */
+export function describeSpecularMapping({ maskRect, quadWorld, viewRect }) {
+  const round = (n) => (Number.isFinite(n) ? +n.toFixed(4) : n);
+  /** The shader's own two divisions, at one world point. @param {object} r
+   * @param {number} x @param {number} y @returns {number[]|null} */
+  const uvIn = (r, x, y) => {
+    if (!r) return null;
+    const w = r.maxX - r.minX;
+    const h = r.maxY - r.minY;
+    // Reported rather than guarded: a degenerate rect is exactly the failure
+    // worth SEEING, and `Infinity` in the report says so louder than a 0 would.
+    return [round((x - r.minX) / w), round((y - r.minY) / h)];
+  };
+  /** @param {object|null} r @param {object|null} q @returns {object|null} */
+  const cornersIn = (r, q) =>
+    r && q
+      ? {
+          bottomLeft: uvIn(r, q.minX, q.minY),
+          topRight: uvIn(r, q.maxX, q.maxY),
+        }
+      : null;
+
+  // `max(span, 1)` mirrors the shader's own floor on both spans — reporting the
+  // raw subtraction would describe a quantity the GPU never actually uses.
+  const viewSpanX = viewRect ? Math.max(viewRect.maxX - viewRect.minX, 1) : null;
+  const viewSpanY = viewRect ? Math.max(viewRect.maxY - viewRect.minY, 1) : null;
+  return {
+    maskRect,
+    quadWorld,
+    viewRect,
+    viewSpanX: round(viewSpanX),
+    viewSpanY: round(viewSpanY),
+    /** What the shader's `maskU/maskV` really are at the quad's corners. MUST
+     * equal `contentBoundsUv` (± the AABB pad) — see this function's header. */
+    maskUvAtQuadCorners: cornersIn(maskRect, quadWorld),
+    /** What `screenU/screenV` are there. Anything outside 0..1 is CLAMPED in
+     * the shader, which silently turns an off-screen read into a valid-looking
+     * edge fetch — the illum/albedo/attr reads all go through this. */
+    screenUvAtQuadCorners: cornersIn(viewRect, quadWorld),
+  };
+}
+
+/**
+ * THE MASK, DECODED — strength and tint, V2's algorithm.
+ *
+ * **"The darker the pixels in `_Specular`, the less shiny the surface is"** is
+ * the author's own statement of the authoring contract, and this is it in code.
+ * Nothing here is a material model: there is no F0, no metalness, no roughness.
+ * A 2D top-down map has no angles for those to act on, and computing them
+ * anyway is what made the previous version invisible four times over.
+ *
+ * The tint step is the part worth reading twice. A naive `rgb × strength` would
+ * darken saturated paint twice — once for being dark, once for being coloured —
+ * so instead the mask's RGB is **re-normalised to carry `strength` as its own
+ * luma**. Gold and grey painted at the same brightness therefore return the
+ * same amount of light, in different colours, which is exactly what "which
+ * metal" should mean.
+ *
+ * @param {number} r @param {number} g @param {number} b - 0..1, RAW authored
+ *   values. ⚠️ NOT sRGB-decoded: V2 uploaded this file `NoColorSpace` and every
+ *   existing map was painted against that, so a "50% grey" texel means 0.5 and
+ *   not 0.21. Applying a transfer curve here silently re-exposes every map.
+ * @param {number} a - 0..1 alpha, or 0 when the file has no alpha channel.
+ * @param {number} [saturation] - 0 = neutral white shine, 1 = the mask's own
+ *   colour at full.
+ * @returns {{strength: number, tint: number[]}}
+ */
+export function decodeSpecularMask(r, g, b, a, saturation = 1) {
+  const luma601 = clamp01(r * LUMA_601[0] + g * LUMA_601[1] + b * LUMA_601[2]);
+  const alpha = clamp01(a);
+  const strength = alpha < SPECULAR_ALPHA_EPSILON ? luma601 : luma601 * alpha;
+
+  const sat = Math.min(Math.max(saturation, 0), 2);
+  // Guarded: a pure black texel has no hue to preserve and the divide would be
+  // by zero. Its strength is 0 anyway, so the tint it returns is never seen —
+  // but a NaN here would propagate through an additive blend into a permanent
+  // black hole, which is the failure mode this codebase has paid for before.
+  const luma709 = Math.max(r * LUMA_709[0] + g * LUMA_709[1] + b * LUMA_709[2], 1e-4);
+  const k = strength / luma709;
+  const colored = [r * k, g * k, b * k];
+  const t = Math.min(sat, 1);
+  return {
+    strength,
+    tint: [
+      strength + (colored[0] - strength) * t,
+      strength + (colored[1] - strength) * t,
+      strength + (colored[2] - strength) * t,
+    ],
+  };
 }

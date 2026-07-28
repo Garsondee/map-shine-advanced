@@ -11,6 +11,7 @@ import { run as runCandleFlame } from './candle-flame.test.mjs';
 import { run as runCandleFlameGeometry } from './candle-flame-geometry.test.mjs';
 import { run as runVegetation } from './vegetation.test.mjs';
 import { run as runVegetationRender } from './vegetation-render.test.mjs';
+import { run as runVegetationShadow } from './vegetation-shadow-subsystem.test.mjs';
 import { run as runShadowAccess } from './shadow-access.test.mjs';
 import { run as runSkyAccess } from './sky-access.test.mjs';
 import { run as runDoorGraphics } from './door-graphics.test.mjs';
@@ -49,6 +50,7 @@ const suites = [
   ['candle-flame-geometry', runCandleFlameGeometry],
   ['vegetation', runVegetation],
   ['vegetation-render', runVegetationRender],
+  ['vegetation-shadow-subsystem', runVegetationShadow],
   ['shadow-access', runShadowAccess],
   ['sky-access', runSkyAccess],
   ['door-graphics', runDoorGraphics],

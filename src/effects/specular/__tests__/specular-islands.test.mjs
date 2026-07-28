@@ -201,6 +201,31 @@ export function run(t) {
   );
   ok('…and unlabelled texels carry no coverage', empty.data[3] === 0);
   ok('…and reports zero islands, so a silent degrade is visible in the status', empty.islandCount === 0);
+  ok(
+    'zero surviving islands means the per-island estimate is a REAL zero, not null — there is genuinely nothing to crop',
+    empty.estimatedPerIslandGridFraction === 0
+  );
+
+  // ── THE PER-ISLAND ESTIMATE (2026-07-28, the performance audit) ──────────
+  // Three solid, well-separated 12x12 squares (432 true texels total) on a
+  // 64x64 grid (4096 texels). Hand-verifiable: each square's own true-painted
+  // bounding box is EXACTLY itself (paint() fills solid, no gaps), so the
+  // union of three tight per-island boxes is exactly 432 texels — no slack,
+  // no approximation error, an exact fraction (432/4096 is exact in binary).
+  ok(
+    'the per-island estimate equals the TRUE painted area for solid, well-separated islands (no crop slack at all)',
+    Math.abs(pack.estimatedPerIslandGridFraction - 432 / 4096) < 1e-9
+  );
+  // A single COMBINED box spanning all three (x:[4,51], y:[4,51], 48x48=2304)
+  // would be 2304/4096 — 5.3x more texels than the 432 the three tight boxes
+  // need. This is the exact quantity `estimatedIslandWinRatio`
+  // (specular-surface-subsystem.js) computes from real mask data; verified
+  // here in isolation, by hand, on a fixture simple enough to check on paper.
+  const combinedBoxTexels = 48 * 48;
+  ok(
+    'a single combined AABB would need 5.3x more texels than three tight per-island boxes — the WIN this estimate exists to quantify',
+    Math.abs(combinedBoxTexels / (pack.estimatedPerIslandGridFraction * 4096) - 5.333) < 0.01
+  );
 
   // Two specks close enough to cluster, plus one real object far away. Their
   // COMBINED true area (2 texels) is still under the floor, so they merge into
@@ -239,6 +264,24 @@ export function run(t) {
   const coinPack = buildSpecularIslandPack({ rgba: coins, width: 64, height: 64, maxDim: 64 });
   ok('a scattered pile of realistic-sized coins clusters into ONE island', coinPack.islandCount === 1);
   ok('…none of it dropped', coinPack.droppedSmall === 0);
+  // ⚠️ THE CASE THE ESTIMATE EXISTS TO CATCH: 8 coins × 4 true texels = 32
+  // painted, but they cluster into ONE island whose bounding box spans the
+  // whole scatter (x:[3,15), y:[3,15) → 12x12 = 144 texels). The estimate must
+  // report the CLUSTER's bbox (144), not the true-paint count (32) — a per-
+  // island QUAD still has to cover the gaps between coins to render any of
+  // them, exactly like the combined AABB does today. Getting this wrong (e.g.
+  // reporting 32/4096) would overstate the win for scattered small objects,
+  // which is precisely the case clustering exists to handle correctly.
+  const coinTrueTexels = coinPositions.length * 2 * 2;
+  ok('the true-paint count is 32 texels (8 coins x 4)', coinTrueTexels === 32);
+  ok(
+    "a clustered island's estimate is its BOUNDING BOX, not its true-paint count — the estimate must not overstate the win for scattered objects",
+    Math.abs(coinPack.estimatedPerIslandGridFraction - 144 / 4096) < 1e-6
+  );
+  ok(
+    '…which is meaningfully larger than the true-paint fraction would have suggested',
+    coinPack.estimatedPerIslandGridFraction > coinTrueTexels / 4096
+  );
 
   // ⚠️ AND A TRULY ISOLATED SPECK MUST STILL DROP — the assertion that would
   // have caught the bug this whole section guards: an EARLY DRAFT filtered by

@@ -157,6 +157,38 @@ export function routeEntry(id, entry, zones = {}) {
  * `install()` happened to call `registerPanel` in. Silently fragile: moving a
  * block of boot.js re-ordered the UI.
  *
+ * ============================================================================
+ * ⚠️ DOES NOT DELEGATE TO `routeEntry` — AND MUST NOT, EVER AGAIN
+ * ============================================================================
+ * 2026-07-28 LIVE BUG (author: "the Make rail is broken, there are no effects
+ * in there"). This function used to be `routeEntry(id, e, zones).kind ===
+ * 'zone' && ...zone === zone`, reusing the SAME router `zoneOf` uses for
+ * `controls`/`actions`/`reports`. That router treats a truthy `entry.effect` as
+ * an unconditional override — correct for THOSE three registries, where
+ * `{ effect }` means "fold this button into that effect's card instead of
+ * drawing it in a zone body" (see `attachmentsFor`).
+ *
+ * `entry.effect` on a PANEL means something else entirely: `buildRoutedPanels`
+ * passes `attachmentsFor(entry.effect)` into every panel's own `buildFn`, so
+ * `effect` on a panel means "gather MY OWN attachments from this effect id" —
+ * it has nothing to do with where the panel itself renders. Every real effect
+ * panel (`boot.js`'s ~10 `registerPanel` calls for bloom/water/fluid/specular/
+ * etc.) legitimately declares BOTH `zone: 'workshop'` (so IT renders) AND
+ * `effect: '<id>'` (so it can gather ITS OWN adjunct reports/actions) — and the
+ * shared router's "effect beats zone" rule silently routed every one of them to
+ * `kind: 'effect'`, which `attachmentsFor` never even reads for `panels` (it
+ * only scans `controls`/`actions`/`reports`). The result was not "moved to the
+ * wrong place" — it was **rendered nowhere at all**, for every effect card at
+ * once, with `npm test` fully green throughout: the only test of this function
+ * modelled a panel as declaring EITHER `zone` OR `effect`, never both on the
+ * same entry, so it never exercised the shape every real call site actually
+ * uses. See `__tests__/effect-controls.test.mjs` for the regression.
+ *
+ * So: a panel's zone is `entry.zone ?? zones[id] ?? 'lab'`, full stop.
+ * `entry.effect` is read here NOT AT ALL — only by `attachmentsFor`, via the
+ * SAME opts object, for a completely different purpose. If you are tempted to
+ * make this "consistent" with `routeEntry` again, read this comment first.
+ *
  * @param {Iterable<[string, object]>} entries
  * @param {string} zone
  * @param {Record<string, string>} [zones]
@@ -164,10 +196,7 @@ export function routeEntry(id, entry, zones = {}) {
  */
 export function sortPanelsForZone(entries, zone, zones = {}) {
   return [...entries]
-    .filter(([id, e]) => {
-      const r = routeEntry(id, e, zones);
-      return r.kind === 'zone' && r.zone === zone;
-    })
+    .filter(([id, e]) => (e?.zone ?? zones?.[id] ?? 'lab') === zone)
     .sort(([, a], [, b]) => (a.order ?? 0) - (b.order ?? 0));
 }
 

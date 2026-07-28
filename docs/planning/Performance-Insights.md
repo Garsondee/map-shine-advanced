@@ -136,9 +136,129 @@ every frame." Worth a dedicated look — see §7.
 
 ---
 
-## 3. TARGET 1 — `surface.specularDraw`, 3.33 ms static / 2.96 ms sweep
+## 2B. ✅ FIX ROUND 1 — MEASURED (2026-07-28, same route, author-verified visuals)
 
-**Status: CAUSE IDENTIFIED by code reading. Confidence HIGH. Not yet fixed.**
+**Two presence gates shipped. Same benchmark route (`n_to_s:2kf/60000ms`), same 7.32 Mpx, same
+scene. 3,227 frames / 59.50s, coverage 0.980. Author confirmed on a live scene: "Metal and
+vegetation still work as they did before."**
+
+### The headline
+
+|                         | §2 sweep (before) | This sweep (after) |             Change |
+| ----------------------- | ----------------: | -----------------: | -----------------: |
+| **Frame GPU**           |          26.21 ms |       **17.83 ms** | **−8.38 (−32.0%)** |
+| **avgFps**              |              38.2 |           **54.2** |           **+42%** |
+| **median fps**          |                40 |           **59.9** |               +50% |
+| **worstFps**            |                20 |             **30** |               +50% |
+| **p1Low / p5Low**       |              29.9 |           **39.8** |               +33% |
+| **bestFps**             |                61 |          **126.6** |              +108% |
+| **worst single frame**  |             50 ms |        **33.3 ms** |               −33% |
+| **hangs (all 4 bands)** |                 0 |              **0** |         still zero |
+| frames in 59.5s         |             2,268 |          **3,227** |             +42.3% |
+
+Frame count rose **+42.3%** while `avgFps` rose **+41.9%** over the same ~59.5s window — two
+independently-computed numbers agreeing to within 0.4%, which is the run's own internal consistency
+check.
+
+### The two targeted zones, and nothing else, moved
+
+| Zone                       |   Before |         After |              Change |
+| -------------------------- | -------: | ------------: | ------------------: |
+| **`geometry.worldDraw`**   | 17.97 ms | **12.135 ms** | **−5.835 (−32.5%)** |
+| **`surface.specularDraw`** |  2.96 ms |  **0.675 ms** | **−2.285 (−77.2%)** |
+| `light.drawColoration`     |  1.47 ms |      1.534 ms |               +4% ᴺ |
+| `light.drawPointLights`    |  1.25 ms |      1.355 ms |               +8% ᴺ |
+| `present.blit`             |  0.67 ms |       0.71 ms |               +6% ᴺ |
+| bloom (all six)            |  0.48 ms |      0.492 ms |               +2% ᴺ |
+
+ᴺ = inside this document's own stated noise band (§0: back-to-back runs move zones by up to ~30%).
+Nothing untargeted moved outside noise, in either direction.
+
+**The instrument's own self-test passes.** The two targeted zones gave up **8.12 ms** between them;
+the whole frame fell by **8.38 ms**. The targeted savings account for **96.9%** of the total — the
+frame did not get faster for some other reason, and no cost silently relocated to a neighbouring
+zone.
+
+### Specular is now inside its own declared budget — for the first time
+
+| Metric               |         Before |        After |
+| -------------------- | -------------: | -----------: |
+| `measuredMsPerMp`    |          0.404 |    **0.092** |
+| vs declared max 0.08 |      **5.05×** |    **1.15×** |
+| verdict              | massively over | **`within`** |
+
+Two sessions had independently measured this effect at ~5× its manifest declaration. **The
+declaration was right all along; the implementation was wrong.** That is the manifest-vs-measurement
+loop (§1's original reason for existing) closing properly for the first time.
+
+### 🔴 THE MOST ACTIONABLE NEW FINDING: we are sitting exactly on a vsync step
+
+Frame gaps quantise to **~8.33 ms** — this is a **120 Hz display**, and every frame lands on a
+multiple of the refresh interval. Both runs show the same ladder:
+
+| Intervals | Frame time | fps | Before (§2) | After       |
+| --------- | ---------: | --: | ----------- | ----------- |
+| 1         |     8.3 ms | 120 | never       | best 7.9 ms |
+| 2         |    16.7 ms |  60 | best only   | **median**  |
+| 3         |    25.0 ms |  40 | **median**  | p90         |
+| 4         |    33.3 ms |  30 | p95         | worst       |
+| 6         |    50.0 ms |  20 | worst       | gone        |
+
+**The median frame moved up one whole vsync step, 40 → 60 fps.** That is the entire felt difference,
+and it is why +32% GPU bought +42% fps: crossing a step is worth more than the raw ms suggests.
+
+**And we are now straddling the next one.** Measured on every frame (not a subsample): gap
+`p50 = 16.7 ms` but `p90 = 25.0 ms` — roughly half the frames make the 60 fps deadline and half miss
+it and fall to the next interval. Frame GPU `p50` is **17.83 ms** against a **16.67 ms** deadline.
+
+⚠️ Stated honestly: the GPU figure is from a **735-frame subsample** (23% — only frames whose async
+timestamp resolve landed) while the gap distribution is every frame, so treat "~1.2 ms over" as
+approximate. The _qualitative_ conclusion needs no subsample: the gap distribution alone shows the
+run split across the 2- and 3-interval buckets.
+
+⇒ **The next ~1–2 ms of GPU is worth far more than the previous 8.** It converts a large mass of
+40 fps frames into 60 fps frames. Any target below is worth ranking by "does it get us under
+16.67 ms", not by raw ms saved.
+
+---
+
+## 3. TARGET 1 — `surface.specularDraw` — ✅ **FIXED** (2.96 → 0.675 ms)
+
+**Status: FIXED and MEASURED (2026-07-28). 4.4× cheaper, visually unchanged (author-confirmed).
+Kept in full below because the reasoning that got here was wrong twice and the corrections are the
+valuable part.**
+
+### The fix that landed
+
+`presence` (from the `_Specular` mask) was computed cheaply and multiplied in at the **end**, after
+the 27-cell 3D Worley, the 3D Perlin and three shimmer layers had already been paid for on every
+covered pixel. It now gates them.
+
+**The part that was NOT obvious, and would have silently failed:** wrapping the existing graph in
+`Fn()` + `If()` is not enough. The shimmer terms had to be **constructed inside the `If` callback** —
+leaving the `.toVar()` terms outside and merely wrapping the assignment hoists the maths straight
+back out of the branch. It would have compiled, rendered identically, measured identically, and
+looked exactly like a fix. The gated and debug paths share one `buildShimmerTerms()` builder so the
+two cannot drift (`feedback_mode_forks_silently_drop_features`).
+
+### ⚠️ CONSEQUENCE: the per-island quad plan is now OBSOLETE — do not build it
+
+This was the shelf-ready ~1.45 ms win. **The gate superseded it, and beat it.**
+
+| Approach                    |    Predicted / measured | What it skips                                                            |
+| --------------------------- | ----------------------: | ------------------------------------------------------------------------ |
+| Per-island quads (designed) |         ~1.45 ms (est.) | pixels outside every island's bbox                                       |
+| **Presence gate (shipped)** | **2.285 ms (measured)** | **every zero-presence pixel, including those _inside_ an island's bbox** |
+
+The gate is strictly the larger set — it delivered **1.6× more than per-island quads were predicted
+to**, for one `If()` instead of ~34 materials and a bounds-threading rewrite. What remains for
+per-island quads is only the rasterisation and the (already cheap) presence lookup on skipped
+pixels, bounded above by the pass's whole remaining 0.675 ms against a measured fixed floor of
+~0.31 ms. **Best case ~0.2 ms, for N materials. Not worth it. This lever is closed.**
+
+### The original analysis, kept
+
+**Status when written: CAUSE IDENTIFIED by code reading. Confidence HIGH. Not yet fixed.**
 
 ### Evidence
 
@@ -163,33 +283,342 @@ every frame." Worth a dedicated look — see §7.
 
 Then `presence` (derived from the `_Specular` mask) is multiplied in **at the end**.
 
-**There is no `If()`, no `discard`, and no early-out anywhere in the shader.** So all of the above
-runs on all 7.32 million pixels, and on the large majority of the map — everywhere there is no metal
-— the entire result is multiplied by zero. We are paying full price for work that is thrown away.
+### ⚠️ CORRECTION (2026-07-28 audit) — an earlier version of this section was WRONG
 
-### Fixes, cheapest-first
+This section previously claimed the shader "runs on all 7.32 million pixels" and proposed a TSL
+`If()` early-out as the fix. **Both were wrong, and reading the code rather than trusting the note is
+what found it.**
 
-1. **Early-out on `presence`.** Wrap the noise in a TSL `If(presence.greaterThan(0), …)`. GPUs
-   execute both sides of a divergent branch, so this only pays off when whole tiles agree — which is
-   exactly the case here, since painted metal is sparse and spatially clustered. **Expected: most of
-   the 3.33 ms on a typical map.** Cheapest change, biggest win, no visual difference whatsoever.
-2. **Drop the Worley from 3D to 2D.** The third coordinate is only `tSec * 0.02` — slow time. A 2D
-   Worley is 9 cells against 27. Animate instead by offsetting the 2D coordinate over time.
-   **Expected: ~3× cheaper on the dominant term.** Needs an eye on the result: 2D+offset drifts
-   rather than evolving, which may or may not read the same.
-3. **Render the pass at half resolution and upsample.** The module's own header says the tuned look
-   is _"HUGE SOFT SHAPES drifting over the metal, not micro-glitter"_ — a deliberately low-frequency
-   effect does not need 7.32 Mpx. **Expected: ~4×.** Highest risk to the look; try after 1 and 2.
+1. **An AABB crop already exists.** `specular-surface-subsystem.js#cropGeometry` rewrites the quad to
+   the mask's painted bounding box every time the mask loads, and that module's header already cites
+   _"Effects.md Law 6: cost scales with COVERED pixels"_. The pass does NOT draw fullscreen.
+2. **A TSL `If()` cannot be bolted on here anyway.** `specularMaterial.colorNode` is a **flat node
+   graph** — `colorNode = vec4(shine, 1)`, with no `Fn()` anywhere in the builder. Per this
+   project's own recorded trap (`keyhole-region-discard-noop-bug`), `If()`/`discard()` outside
+   `Fn()` is a **silent no-op** — it would have compiled, changed nothing, measured nothing, and
+   looked like a fix. Using control flow here means wrapping a ~500-line node graph in `Fn()` first.
 
-⚠️ Do 1 first and **re-measure before doing 2 or 3** — if the early-out lands the expected win, the
-other two may be unnecessary, and each carries visual risk that 1 does not.
+**So the real question is not "does it early-out" but "is the AABB tight?"** — and that depends
+entirely on how clustered the paint is:
+
+- A brass door alone → AABB is small, the crop works, and the per-pixel shader is the only remaining
+  cost.
+- A brass door in one corner + a coin pile in the opposite corner → **the AABB covers most of the
+  map** while actual metal is a few percent. Every pixel in between pays the full 27-cell Worley to
+  be multiplied by a `presence` of zero.
+
+Those two cases produce the **same measured cost** and need **opposite fixes**. Guessing between them
+is exactly what this instrument exists to prevent.
+
+### FIXED THIS AUDIT: the measurement that decides it
+
+`getStatus().coverage` reports, computed from numbers both producers already return (zero per-frame
+cost, derived only when the report is read):
+
+| Field                              | Meaning                                                                           |
+| ---------------------------------- | --------------------------------------------------------------------------------- |
+| `paintedFraction`                  | metal texels ÷ mask grid — how much metal there really is                         |
+| `aabbFractionOfItem`               | what the CURRENT single cropped quad actually shades                              |
+| `cropWasteRatio`                   | `aabbFractionOfItem ÷ paintedFraction` — the crude "is any of this wasted" signal |
+| `estimatedPerIslandFractionOfItem` | what N separate per-island quads WOULD shade instead (bake-time estimate)         |
+| `estimatedIslandWinRatio`          | `aabbFractionOfItem ÷` that — **the real, computed upper bound on the win**       |
+
+### MEASURED (2026-07-28, live, `wizards-lair-laboratory`, floor 0)
+
+`paintedFraction 0.1946` · `aabbFractionOfItem 0.6358` · `cropWasteRatio 3.3` · 35 islands, 1
+dropped-small. **This scene's metal is unusually dense** (a lab full of apparatus, not one door —
+~19% of the mask grid is metal, far more than "a few percent" this section originally assumed).
+
+⚠️ **`cropWasteRatio` sat BELOW the "~4" threshold this section originally proposed — and that
+threshold was a guess, made with zero real data, at the same time this section was wrong about the
+crop existing at all.** Rather than eyeball a round number against a real one, the instrument was
+extended to compute the actual achievable win instead of guessing at a cutoff.
+
+**`estimatedPerIslandFractionOfItem 0.2848`, `estimatedIslandWinRatio 2.2` — THE REAL MEASURED WIN.**
+Per-island quads would shade 28.5% of the item instead of the current 63.6%, a genuine 2.2× reduction
+in covered pixels. Naive proportional scaling gives 2.96 ms → ~1.35 ms (~1.6 ms saved) — **but §4's
+two-resolution test measured this pass's actual fixed/variable split** (fixed ≈ 0.31 ms, variable ≈
+0.44 ms/Mpx): only the VARIABLE part shrinks with covered pixels, so the real number is **2.96 ms →
+~1.51 ms, saving ~1.45 ms, ≈ 5.5% of the current 26.21 ms sweep frame.** Real, worth taking — and
+clearly secondary to §4 (68.6% of the frame, completely unaddressed) in priority order.
+
+Computed from a second bake-time pass already added (`specular-islands.js`, JS-only, zero render-time
+cost): the sum of each surviving island's OWN true-paint bounding box, using the exact same "true
+painted texels" criterion the combined AABB already uses (not the clustered or dilated footprints the
+same bake also produces — verified by two hand-checked test fixtures, including a worst-case
+scattered coin pile where the estimate correctly reports the CLUSTER's bbox rather than the smaller
+true-paint count, so it cannot overstate the win for scattered small objects).
+
+### Opportunities, with the ones NOT taken and why
+
+1. **Per-island quads — MEASURED at ~1.45 ms / ~5.5% of frame, real but secondary to §4.** The islands
+   module already computes connected components (`labelComponents`), so the labels needed to emit one
+   quad per metal object instead of one quad over their combined bbox already exist, and
+   `estimatedIslandWinRatio` (above, 2.2×) is the actual expected win, not a guess. **Zero visual
+   change** (outside an island `presence` is 0, and the pass is additive, so an undrawn pixel and a
+   drawn-but-zero pixel are identical).
+   - **The engineering approach, corrected 2026-07-28.** `maskUv` is derived from the mesh's LOCAL
+     `uv()` remapped through ONE uniform (`uMaskUvBounds`, `specular-render.js:314`) — an earlier
+     version of this note claimed N quads would need to "share one draw call" via a vertex attribute,
+     stated as fact without checking the alternative. **This codebase already has the proven, lower-
+     risk pattern**: `point-light-pool.js` gives every light its own dedicated material + mesh ("each
+     light gets its OWN geometry"). For ~34 islands, N small materials — zero shader changes, only JS-
+     side orchestration — is almost certainly the right model, not a shared-material rewrite. Verify
+     against the real per-light pattern before building either way.
+   - ⚠️ NOT TAKEN YET: the pack returns per-island BOUNDS _estimates_ for the report (bake-grid
+     resolution) but not the precise bounds themselves wired to render (would need re-deriving from
+     the full-resolution mask, same as the current single AABB, plus the existing edge padding). On a
+     file under active rework — worth doing, but sequence against §4 (68.6% of frame, ~11× bigger,
+     CONFIRMED not just suspected) rather than treating this as the priority.
+2. **3D → 2D Worley** — the third coordinate is only `tSec * 0.02`, so a 2D Worley (9 cells vs 27) on
+   a slowly-offset coordinate would be **~3× cheaper on the single dominant term**. ⚠️ NOT TAKEN:
+   this **changes the animation's character** — 3D Worley makes cells evolve and morph in place, 2D +
+   scroll makes the pattern slide. That is a visual trade, and the standing rule here is not to make
+   those silently.
+3. **Half-resolution pass + upsample** — the module's own header calls the tuned look _"HUGE SOFT
+   SHAPES drifting over the metal, not micro-glitter"_, and a deliberately low-frequency effect does
+   not need full resolution. **Expected ~4×.** ⚠️ NOT TAKEN: highest visual risk of the three.
+4. **Hoisting `sunGrainBias` to the CPU** — it is provably uniform-only (`L.uGrain`, `uSunDir`,
+   `SUN_BIAS_MIN` are all uniforms; only the final `mix` with `outdoors` is per-pixel), so ~15 ALU
+   ops × 3 layers are recomputed per pixel for a value that never varies. ⚠️ **DELIBERATELY NOT
+   TAKEN.** It would couple two independent setters (grain angle and sun direction) that must BOTH
+   recompute or the effect silently desyncs — a brand-new silent precondition
+   (`feedback_count_silent_preconditions`) traded for an uncertain win, since GPU scalar units
+   generally hoist uniform arithmetic already. Not worth it.
 
 ---
 
-## 4. TARGET 2 — `geometry.worldDraw`, 13.29 ms static / **17.97 ms under motion (68.6% of frame GPU)**
+## 4. TARGET 2 — `geometry.worldDraw` — ⚠️ **PARTLY FIXED** (17.97 → 12.135 ms). STILL THE WHALE.
 
-**Status: MEASURED, cause NOT yet established, PRIORITY RAISED by §2. Confidence in the number
-HIGH, in any cause LOW.**
+**Status: −32.5% shipped and measured. Still 68.1% of frame GPU — its SHARE barely moved
+(68.6% → 68.1%), because it was so dominant that a third off it barely dents its ranking.**
+
+### The fix that landed: a coarse-mip foliage-presence gate
+
+`buildVegetationMaterial`'s fragment stage ran `curlNoise2D` (4 noise evals) **plus a full wind-field
+sample** on every pixel of a full-screen layer, then folded the result into a UV offset that does
+nothing where there is no foliage. One extra fetch at **mip 6** now gates the whole block.
+
+**Lossless by construction, not by eyeball:** flutter displaces the UV by at most
+`VEG_FLUTTER_UV_CAP` (0.005). At mip 6 one texel spans 64 base texels — on a 3375 px tile that is
+~0.019 UV, **~4× the cap** — and the fetch is bilinear so it straddles two. A fragment the gate skips
+has no foliage within several times the furthest flutter could reach.
+
+### ❌ WHAT'S LEFT — the VEGETATION SHADOW was the prime suspect, and it is **REFUTED**
+
+**Status: HYPOTHESIS RAISED AND KILLED, same day, by the measurement it demanded. Measured cost
+0.644 ms raw / ~1.24 ms noise-normalised — not the ~4 ms that would have justified building the gate.
+Everything below the fold is kept because the traced facts are still true and the refutation is the
+valuable part.** Jump to "THE VERDICT" for what it cost and what it means.
+
+After the gate, the non-shadow vegetation path is down to roughly the trivial whole-image material —
+one texture fetch, a tint, three alpha multiplies — plus the gate's own coarse fetch. That cannot be
+12 ms. **But the gate deliberately skipped the `asShadow` branch, and that branch is the expensive
+one.** Traced 2026-07-28:
+
+| Fact                                                                                            | Where                                                         |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **15 texture fetches per fragment**, unrolled, no early-out, no discard                         | `vt-pan-viewer.js:6210-6235`                                  |
+| Draws in the **same `renderer.render()`** the zone brackets — charged here                      | `vegetation-shadow-subsystem.js:252`, `vt-pan-viewer.js:6947` |
+| **One mesh covering the WHOLE background**, never split into per-plant pieces                   | `vt-pan-viewer.js:6764-6767, 6935-6947`                       |
+| Quad is **padded 274 px per side** for trees ⇒ ~1.29× the background's fill area                | `vegetation-shadow-subsystem.js:186`                          |
+| **One shadow mesh per (item × kind)** — a background with both `_Tree` and `_Bush` gets **two** | `vt-pan-viewer.js:6884`                                       |
+| `depthTest:false`, `depthWrite:false`, `frustumCulled:false` — nothing rejects it               | `vt-pan-viewer.js:5946-5949`                                  |
+| On by default: `shadowStrength` default **0.45**, no separate enable flag                       | `effects/vegetation.js:364-373`                               |
+| **`shadowStrength = 0` does NOT stop the draw** — full quad, all 15 fetches, alpha 0            | `vegetation-shadow-subsystem.js:302`                          |
+
+Two padded full-screen quads at 15 fetches each ≈ **38 screen-blits of texture fetch per frame**.
+That is the right order of magnitude for the remaining 12 ms.
+
+⚠️ **That last sentence was the error, and it is instructive.** Counting _fetches_ is not counting
+_cost_ — 11 of those 15 taps read mip 3–5 (the ladder fix's own LOD), where the whole working set is
+a few hundred KB and every tap is a cache hit. The measurement below priced them at roughly a
+**twentieth** of what this estimate assumed. A fetch is not a unit of time.
+
+**Supporting evidence from the existing measurements:** §4's isolate test kept 204,316 of 204,376
+triangles while dropping 30 draw calls — i.e. the "one item = 97%" result **included the vegetation
+canopy and shadow overlays**, not just the background quad. And 204,366 ÷ 32,768 ≈ **6.2 tessellated
+full-quad overlays at the 128-segment cap**, consistent with `_Tree` + `_Bush` canopies _and_ their
+shadows all being live.
+
+### ⚠️ The counter-evidence, and why it is void
+
+§4 previously recorded "the vegetation effect's sweep reading fell inside the noise floor, bounding
+it under 1.1 ms" — which would contradict the above, since `vegState.enabled` **does** gate shadow
+mesh visibility. **That bound cannot be trusted.** The visibility assignments live in a residency
+pass (`vt-pan-viewer.js:6738`, `:7131`), and a residency pass only re-runs on pan/zoom — the exact
+bug class this project already has a name for (`feedback_residency_sync_vs_render_loop`). During a
+**static** sweep the meshes never change visibility, so the sweep measured the uniform sync and
+nothing else. It bounds vegetation's _sway_, as already stated, and says nothing about the draws.
+
+### ⚠️ The naive gate does NOT transfer here — the arithmetic says so
+
+The obvious move is to reuse the mip gate. **It is not safe at the radius the shadow needs**, and the
+reason is worth writing down before someone tries it:
+
+- Flutter reaches ≤ 20 art texels, so a **mip-6** gate (64-texel footprint) covers it with margin.
+- A **tree shadow** throws up to 175 px + penumbra ⇒ the gate must cover **~274 texels**, i.e. mip 8.
+- A blob of K×K opaque texels reads back as `K²/4ᴸᴼᴰ` from the coarse mip. To survive 8-bit
+  quantisation (≥ ~0.002) at mip 8 needs **K ≥ ~11 texels**. Below that the gate reads exactly zero
+  and **silently drops that plant's shadow entirely.**
+- Worse: throw is a per-KIND constant (`shadowHeightPx`), not per-blob — so a 6 px speck painted
+  `_Tree` casts a **175 px** streak the gate would delete.
+
+A workable version exists (per-kind LOD; 1 tap at mip 6 covers a bush's whole 69-texel throw, ~2 taps
+at mip 7 cover a tree's, with the eps derived from a **stated** minimum caster size rather than
+guessed) — but it is a real design with a real regression mode, and it should not be built on an
+unmeasured hypothesis. **Measure first.**
+
+⇒ **MOOT. The measurement came back at ~1 ms, so this design is not worth its regression mode and
+will not be built.** Kept only so the next person can see the arithmetic rather than re-derive it.
+
+### ✅ THE VERDICT — MEASURED 2026-07-28, hypothesis REFUTED
+
+The threshold was set in advance, in this document, before the run: _"above ~4 ms the per-kind gate is
+clearly worth its regression risk; near ~1 ms it is not, and the remaining 12 ms is somewhere else
+entirely and this section is wrong."_ **It came back near 1 ms. This section is wrong.**
+
+`shadowStrength === 0` now removes the mesh from the draw instead of drawing a fully transparent one,
+which turned the author's existing slider into the instrument. Same route, same 7.32 Mpx:
+
+|                      | Shadows 0.45 | Shadows 0 |                      Change |
+| -------------------- | -----------: | --------: | --------------------------: |
+| `geometry.worldDraw` |    12.135 ms | 11.491 ms |       **−0.644 ms (−5.3%)** |
+| draw calls           |         39.1 |      36.2 |                        −2.9 |
+| **triangles**        |      204,366 |   131,827 | **−72,539 (−2.2 overlays)** |
+| Frame GPU p50        |     17.83 ms |  17.83 ms |               **no change** |
+
+**The change unambiguously worked** — draw calls and triangles fell by exactly what the code
+predicted (72,539 ÷ 32,768 = 2.21 tessellated full-quad overlays at the 128-segment cap). This is not
+a case of "the toggle did nothing"; the meshes definitively stopped drawing, and removing them saved
+0.644 ms.
+
+⚠️ **Two honesty notes on the number:**
+
+1. **−5.3% is at this document's own noise floor** (§0: ~7% frame GPU between identical runs). Taken
+   alone it would not be conclusive. It is trusted here because the triangle and draw-call deltas
+   confirm the mechanism independently, which no amount of thermal noise can fake.
+2. **This run ran ~5% hotter across the board.** Every zone that could not possibly have changed rose
+   together: specular +5.5%, `present.blit` +5.5%, `drawPointLights` +5.7%, `drawComposite` +4.8%,
+   `drawColoration` +3.0%. Normalising `geometry.worldDraw` by that median (+4.9%) puts the true
+   saving nearer **1.24 ms**. Both figures are given; neither reaches 4 ms.
+
+**⚠️ A CONFOUND AT FRAME LEVEL, declared rather than buried.** Frame GPU did not move at all
+(17.83 → 17.83 ms), and the reason is a scene-side change, not the code: **`light.drawRegions` went
+from 0.000 ms / 0 draw calls to 0.515 ms / 2 draw calls** — a darkness region became active between
+runs (`light.regionSetup` CPU rose 3.2× too, 0.015 → 0.048 ms, corroborating it). That new 0.515 ms
+plus the ~5% thermal drift consumed the shadow saving exactly. Nothing in this change touches
+darkness regions. **The zone-level result stands; the frame-level "no change" is the confound's
+doing, and the two must not be read as one number.**
+
+### What this refutation actually bought
+
+**A session not spent building the per-kind gate** — and a correction to the model that produced the
+wrong estimate. The error was counting texture _fetches_ as if they were units of time. 11 of the
+shadow's 15 taps read mip 3–5, where the working set is small enough to stay in cache; they turn out
+to cost roughly a **twentieth** of a mip-0 tap.
+
+⇒ **The remaining ~11.5 ms is therefore NOT in the number of layers or the number of fetches.** If a
+full-screen 15-fetch overlay costs ~0.3 ms, then the four remaining tessellated canopy overlays
+(131,827 ÷ 32,768 = 4.02) — which do 2–3 fetches each — cannot be more than a few tenths between
+them. The cost has to be in the small number of taps that read **mip 0 of the 6750² BC7 atlas at
+arbitrary zoom**, where cache locality is poor, plus the per-fragment `buf:scene.attr` MRT write
+every layer pays. **That is branch (b) from this section's own original table — flagged at the start,
+never tested, and now the only branch left standing.**
+
+**Should the zero-strength skip be kept? Yes.** It is correct on its own merits and free when shadows
+are off. But it must not be logged as a default-config win: at the default `shadowStrength` of 0.45
+it changes nothing at all.
+
+**How it was built** (both traps in this document avoided by construction):
+
+- The verdict reads the shadow handle's **effective** strength, not `params.shadowStrength`, so
+  anything the handle zeroes (night, a future per-caster cutoff) stops costing fill for free.
+- Residency keeps owning "on screen AND effect enabled" (stored as `residentVisible`); the
+  **per-frame** sync ANDs in "has strength to draw with". Putting the whole decision on the residency
+  path would have made the slider look dead until the user pans — the same trap that voided the sweep
+  bound above.
+- The uniforms are still synced on the frames the verdict says "no", so raising the slider restores a
+  correct shadow on the very next frame rather than a stale one.
+
+Locked by 13 assertions in `src/effects/__tests__/vegetation-shadow-subsystem.test.mjs`, including
+the one that matters: a handle returning strength 0 must beat a raw param of 1.
+
+### The original analysis, kept
+
+**Status when written: MEASURED and CAUSE CONFIRMED (2026-07-28, two-resolution test). This is the
+single largest, best-understood lever in the whole audit, and it is still unfixed.**
+
+### ✅ CONFIRMED: 93% fill-rate, 7% fixed overhead, at native resolution
+
+Two live profiles at deliberately different window sizes, same scene/content (triangle counts
+204,376 vs 204,368 — confirms an apples-to-apples comparison, not less map in view):
+
+| Run   | Resolution     | Megapixels | `geometry.worldDraw` |
+| ----- | -------------- | ---------: | -------------------: |
+| Large | 3298×1906 @1.5 |       6.29 |            11.962 ms |
+| Small | 1669×1285 @1.5 |       2.14 |             4.622 ms |
+
+Fitting `cost = fixed + variable × megapixels` from these two points lands almost exactly on both:
+**fixed ≈ 0.84 ms, variable ≈ 1.77 ms/Mpx.** At native 6.29 Mpx that is **93% fill-rate cost, 7%
+fixed overhead** — not a rough correlation, a clean linear fit. **This zone is FILL-BOUND, confirmed.**
+
+⚠️ **Fill-bound is not the same as overdraw** — see "WHAT IS CONFIRMED vs WHAT IS STILL INFERRED"
+below before acting on the overdraw reading.
+
+**Specular cross-checked the same way, same runs**: 3.084 ms @ 6.29 Mpx / 1.253 ms @ 2.14 Mpx → fixed
+≈ 0.31 ms, variable ≈ 0.44 ms/Mpx — also fill-dominated, which **revises §3's per-island estimate
+down slightly**: accounting for this fixed floor, the real expected saving is **~1.45 ms** (not the
+naive ~1.6 ms that ignored it) — same conclusion, still secondary to this target.
+
+### 🔴 THE FINDING: it is not the shader, it is OVERDRAW
+
+The world tile material (`vt-pan-viewer.js`, the whole-image `NodeMaterial`) is **trivially cheap**:
+
+```js
+material.colorNode = Fn(() => {
+  const c = texture(tex, uv().mul(uUvScale)).toVar();
+  c.rgb.mulAssign(uTint);
+  c.a.mulAssign(uAlpha);
+  c.a.mulAssign(occlusionAlphaFactor(occ));
+  return c;
+})();
+```
+
+One texture fetch and three multiplies. At ~40 draw calls that cannot account for 18 ms — **unless
+each pixel is shaded many times over.** And it is, by construction:
+
+```js
+material.transparent = true;
+material.depthTest = false; // ← nothing is ever rejected
+material.depthWrite = false; // ← nothing ever occludes anything
+```
+
+**Every world quad is alpha-blended with depth testing and depth writes both disabled.** There is no
+early-Z, no occlusion culling, and no way for a layer to reject fragments that a later layer will
+completely paint over. Backgrounds, foregrounds, tiles, vegetation and water tier-0 all draw in
+painter's order, and **every one of them shades every pixel it covers, whether or not it survives to
+the final image.** Total fragment work is `screen area × number of overlapping layers`, and each of
+those fragments also writes the `scene.attr` MRT.
+
+That is a textbook fill-rate/overdraw profile, and it independently explains §2's other observation:
+**the zone's share GREW under motion (61.4% → 68.6%)**, because panning across the map changes how
+many layers overlap the visible region — a shader-bound cost would have scaled flat with pixels.
+
+### Why this is NOT simply "turn depth testing on"
+
+Recorded so the obvious fix is not attempted blind:
+
+- Alpha-blended content **must** draw back-to-front; depth rejection only helps genuinely opaque
+  layers, and `uAlpha` + occlusion mean few layers here are reliably opaque.
+- Flipping `transparent` changes three.js's render list and sort order, which would collide with
+  Foundry's layering law (`reference_foundry_v14_layering_law` — one flat sort law, occlusion as one
+  RGBA mask). Getting that wrong reorders the map's artwork.
+- A depth pre-pass for the opaque subset is the real technique, but it interacts with the MRT
+  attr-writing contract and needs its own design pass.
+
+**The measurement that confirms it** is still §4's two-resolution test — under this hypothesis
+`ms/Mpx` stays roughly constant while absolute ms scales with pixel count.
 
 ### What we know
 
@@ -214,19 +643,109 @@ the effect is on or off. So this rules out the _vertex/uniform_ work and vindica
 `vegetation-render.js:175`'s claim that 204k triangles is "trivial for a vertex stage". It says
 nothing about their fill cost.
 
-### The one measurement that would settle it
+### ✅✅ RESOLVED (2026-07-28) — NOT overdraw. ONE ITEM, and its FRAGMENT SHADER.
 
-**Profile at two clearly different window sizes and compare `geometry.worldDraw`'s ms/Mpx**
-(the report records `megapixels`; no code needed):
+The `Isolate draw item` test ran. **It killed the depth-pre-pass plan outright**, which is exactly
+what it was for:
 
-- **ms/Mpx roughly constant** ⇒ fill-rate bound. Then the cause is overdraw across layers or a heavy
-  per-fragment VT shader, and the fixes are real: reduce overlapping full-coverage layers, or cut
-  work in the tile fragment shader.
-- **absolute ms roughly constant** ⇒ NOT pixel-bound, and the cause is per-draw or per-vertex
-  instead. Different fixes entirely.
+|                      |  Baseline | Background only |                Change |
+| -------------------- | --------: | --------------: | --------------------: |
+| Draw calls           |        44 |              14 |        **−30 (−68%)** |
+| Triangles            |   204,376 |         204,316 |          −60 (−0.03%) |
+| `geometry.worldDraw` | 13.617 ms |       13.226 ms | **−0.391 ms (−2.9%)** |
 
-Until that runs, any specific fix here is guesswork. **Do not start optimising this zone before
-taking that measurement** — now 68.6% of the frame under real play, too much to attack blind.
+**Removing 68% of the draw calls saved 2.9% of the cost.** The 30 removed items carried 60 triangles
+between them (~0.013 ms each — noise). **One item is 97% of this zone**, and it retains essentially
+every triangle in the scene.
+
+⇒ **Branch (a), overdraw, is RULED OUT. A depth pre-pass would buy ≈ nothing.** Branch (b) confirmed:
+one full-screen item at **~1.81 ms/Mpx**, roughly 12–35× what a plain textured blit costs.
+
+### 🔴 THE CAUSE: a full-screen layer running per-fragment noise + a wind sample
+
+204k triangles in that one item means it is **tessellated**, which only happens for vegetation — so
+the map background carries painted `_Tree`/`_Bush` and draws through `buildVegetationMaterial`
+(`vt-pan-viewer.js`, `colorNode` at ~:6006), not the trivial whole-image material. Its **fragment**
+stage runs, per pixel:
+
+- **`curlNoise2D(...)`** — the leaf-flutter UV shuffle. Its own comment: _"ONE octave — the stated
+  fragment-cost ceiling (**4 noise evals**)"_.
+- **`windHandle.node(...)`** — a full wind-field sample, per fragment, for `localSpeed`.
+- plus `length()`, `clamp`, `smoothstep`, gale damping and a scene-edge fade.
+
+~4 noise evaluations plus a wind-field sample per pixel, **on a layer covering the whole screen** —
+and crucially **on every pixel of the item, including the overwhelming majority with no foliage on
+them at all.** That is the same shape as §3's specular problem: expensive per-pixel work gated only
+at the END, after it has already been paid for.
+
+⚠️ **Consistent with the earlier sweep result, not contradicting it.** The sweep bounded the
+vegetation EFFECT (its sway/motion) under 1.1 ms — that toggles wind response, it does not stop the
+tiles drawing through this material. The fragment cost stays whether the effect is "on" or not.
+
+### Fix directions (NOT yet designed — measure each, do not assume)
+
+1. **Gate the flutter/wind fragment work on actual foliage presence.** The `_Tree`/`_Bush` mask is
+   already sampled; if the per-fragment noise ran only where foliage exists, most of the screen would
+   skip it. Same structural fix as §3's per-island idea, different effect. ⚠️ Needs the same care:
+   check whether the material is a flat node graph (TSL `If()` is a silent no-op outside `Fn()`) —
+   **this one IS inside `Fn()`**, so control flow is genuinely available here, unlike specular.
+2. **Vertex-stage the wind sample.** `localSpeed` drives flutter amplitude; at 128-segment
+   tessellation there is already a dense vertex grid, and a per-vertex wind sample interpolated to
+   fragments may be visually indistinguishable at a fraction of the cost.
+3. **Skip flutter for non-vegetation tiles entirely** — if a tile carries no painted foliage it
+   should use the trivial whole-image material, not the vegetation one.
+
+**None of these are measured yet.** The next step is to confirm which of the three fragment terms
+dominates before changing any of them.
+
+### ⚠️ SUPERSEDED — the reasoning that led here (kept, it was nearly a costly mistake)
+
+The two-resolution test proves this zone is **FILL-RATE BOUND** (cost ∝ covered pixels, 93/7 split).
+It does **NOT** prove _overdraw_ specifically. Corrected 2026-07-28, when the design work below was
+about to start on the unproven half:
+
+**Two different causes fit the measurement equally well, and they need OPPOSITE fixes:**
+
+|         | Cause                                                                                                                                   | Fits fill-bound? | Fix                                                                          |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ---------------------------------------------------------------------------- |
+| **(a)** | **Overdraw** — ~40 layered draws, `depthTest:false`, nothing rejected                                                                   | ✅ yes           | depth pre-pass / fewer full-coverage layers                                  |
+| **(b)** | **One expensive layer** — 6750² BC7 sampled at arbitrary zoom (poor cache locality), plus per-fragment `scene.attr` MRT write bandwidth | ✅ **equally**   | mip bias, texture format, working-set reduction — _nothing to do with depth_ |
+
+The `depthTest:false` + ~40-draw evidence makes (a) plausible, but that is **code reading, not
+measurement**. Committing to a depth pre-pass — which is real architecture touching the Foundry
+layering law and the MRT contract — on an unmeasured sub-hypothesis is exactly the mistake this
+document exists to prevent.
+
+### THE DECISIVE MEASUREMENT — zero code, tool already exists
+
+**Lab → `Isolate draw item`** (a live select, `vt-isolate-item`). It hides every draw item except
+one (`vt-pan-viewer.js#isolateItemId`).
+
+1. 🔬 Profile (per-zone) with **All items (normal)** — baseline `geometry.worldDraw`.
+2. 🔬 Profile again with **one item isolated** (pick the base map background).
+3. Compare, **at the same window size** (the cost is pixel-proportional, so resolution must not vary):
+
+- **Cost drops roughly in proportion to the number of layers removed** ⇒ **(a) overdraw confirmed.**
+  Proceed to the depth-pre-pass design.
+- **Cost stays high with one layer** ⇒ **(b) confirmed** — a single layer is doing nearly all the
+  work, the depth pre-pass would buy almost nothing, and the real target is texture
+  sampling/bandwidth for that one item.
+
+Until that runs, the depth pre-pass is a fix for a cause that has not been isolated. **Do not start
+it.**
+
+### The design constraint already found (relevant to branch (a) only)
+
+Researching the pre-pass surfaced a hard constraint worth recording now, because it makes (a)'s fix
+substantially more involved than "enable depth testing":
+
+**`buf:scene.attr` depends on NormalBlending semantics.** `scene-attr.js`'s whole safe-default
+mechanism is that a fragment output of exact `vec4(0,0,0,0)` **leaves the attr attachment
+untouched**, because the blend equation reads that attachment's own alpha as its source factor
+(`dst*(1-0) + 0*0 = dst`). **Opaque rendering disables blending**, so the identical output would
+WRITE ZEROS instead of skipping — silently clearing floor attributes for every non-writer material
+moved into an opaque pass. Any opaque/transparent split has to handle the attr contract explicitly,
+not inherit it.
 
 ---
 
@@ -244,12 +763,31 @@ readings. Small but clean.**
 | static #2   |    1.41 ms | 1.18 ms |    +20% |
 | sweep (60s) |    1.47 ms | 1.25 ms |    +18% |
 
-Same meshes, same count, three separate sessions, the same ~18–20% premium every time. Worth one
-look at the difference in blend mode, target format, or whichever early-out the illumination path
-has and the coloration path does not.
+Same meshes, same count, three separate sessions, the same ~18–20% premium every time.
 
-Both are fill-bound rather than geometry-bound: 550 triangles is nothing, but each light mesh covers
-a large screen area and overlapping lights multiply that.
+### ✅ EXPLAINED (2026-07-28 audit) — CLOSE THIS TARGET, it is not a defect
+
+`point-light-pool.js` builds two materials over one shared geometry, and the coloration one takes an
+argument the illumination one does not:
+
+```js
+buildPointLightColorationMaterial({
+  THREE,
+  albedoTexture: sceneColor.texture,   // ← illumination has no equivalent
+  ...
+});
+```
+
+**The coloration pass does everything the illumination pass does, plus a full-resolution albedo
+fetch per pixel.** One extra dependent texture read over the light's covered area accounts for a
+consistent ~18–20% premium, and it is _necessary_ work — coloration tints by the art underneath it,
+which is the entire point of the pass. Both are fill-bound rather than geometry-bound (550 triangles
+is nothing; each light mesh covers a large screen area and overlapping lights multiply it).
+
+**There is no waste here to remove.** The asymmetry that looked like a smell is the feature. Anyone
+returning to this should spend their time on §3 or §4 instead — recorded precisely so the next person
+does not re-derive it. The only lever would be reducing light **coverage/overlap**, which is a
+scene-authoring question, not a code defect.
 
 ---
 
@@ -258,6 +796,12 @@ a large screen area and overlapping lights multiply that.
 Every GPU number above scales with pixel count. DPR 1.5 → 1.0 is ~55% fewer pixels: static
 **21.6 ms → ~9.6 ms** (roughly 40 → 85 fps); under real motion (§2) the starting point is **26.2 ms**,
 so the same 55% cut lands closer to **~11.8 ms, roughly 38 → ~85 fps** — with no code change at all.
+
+⚠️ **Updated after §2B:** the motion starting point is now **17.83 ms**, so the same 55% cut lands at
+**~8.0 ms**. More usefully — given §2B's vsync finding, DPR 1.5 → 1.0 would clear the 16.67 ms step
+with room to spare and pin the median at 60 fps, and on a 120 Hz panel it would put the 8.33 ms step
+(120 fps) genuinely in reach. This lever got _more_ attractive, not less, because the frame is now
+close enough to a step boundary for it to change which step you land on.
 
 **This was a deliberate decision, not an oversight** — `vt-pan-viewer.js:1103`, _"MSA mushes the
 artwork's pen outlines"_. Recorded here because it is by far the largest single lever available and
@@ -278,6 +822,15 @@ Carried here so they are not mistaken for facts about the renderer:
   needs either per-object passes or a different measurement technique.
 - **The sweep cannot resolve anything under ~1.1 ms** on this machine (self-measured from its own
   negative readings). It diffs two whole-frame medians. Use the zone timer for anything smaller.
+- 🔴 **NEW, and it invalidates past sweep readings: the effect sweep is BLIND to any effect whose
+  meshes are shown/hidden in a residency pass.** A residency pass only re-runs on pan/zoom, so during
+  a static sweep window the toggle flips the effect's `enabled` flag, the uniform sync notices, and
+  **the meshes keep drawing regardless** — the sweep then reports only the sync cost and calls the
+  effect cheap. Confirmed for vegetation (`vt-pan-viewer.js:6738`, `:7131`), which is exactly how
+  "vegetation is under 1.1 ms" survived as a fact next to "vegetation is 68% of the frame" (§4).
+  This is `feedback_residency_sync_vs_render_loop` wearing a new hat. **Any effect that owns meshes
+  should have its sweep number re-checked against this before it is trusted**, and the sweep should
+  arguably force a residency refresh on toggle rather than hoping the window contains a pan.
 - **~750 render passes per run are unattributed, and — new in §2 — this count did NOT scale with
   frame count** (750 at 600 frames, still 750 at 2,268 frames). That rules out "a small unbracketed
   render every frame" and points at a fixed, one-time source instead — most likely something in the
@@ -298,10 +851,67 @@ Carried here so they are not mistaken for facts about the renderer:
 
 ## 8. Ledger
 
-| Date       | Change                                                                   | Measured effect                                                               |
-| ---------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
-| 2026-07-27 | baseline established (600 frames, static, coverage 0.962)                | 21.63 ms GPU / 40 fps @ 7.32 Mpx                                              |
-| 2026-07-28 | benchmark route fixed (Performance.md #12/#13); first real 60s N→S sweep | 26.21 ms GPU / 38.2 fps avg, 20 fps worst, ZERO hangs @ 7.32 Mpx, 2268 frames |
+| Date       | Change                                                                                                                                                                                           | Measured effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-07-27 | baseline established (600 frames, static, coverage 0.962)                                                                                                                                        | 21.63 ms GPU / 40 fps @ 7.32 Mpx                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-07-28 | benchmark route fixed (Performance.md #12/#13); first real 60s N→S sweep                                                                                                                         | 26.21 ms GPU / 38.2 fps avg, 20 fps worst, ZERO hangs @ 7.32 Mpx, 2268 frames                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 2026-07-28 | **code audit** of the three targets; specular `coverage` instrumentation added                                                                                                                   | no perf change yet — §4 cause identified (overdraw), §5 closed as explained, §3's stated cause corrected and its deciding measurement now instrumented                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 2026-07-28 | first LIVE `coverage` read: `cropWasteRatio 3.3`; per-island estimate instrumentation added same day                                                                                             | real measurement replaced the guessed "~4" threshold                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 2026-07-28 | re-measured with the estimate live: `estimatedIslandWinRatio 2.2`                                                                                                                                | per-island quads ≈ **1.45 ms saved, ~5.5% of frame** — real, but ~11× smaller than §4's still-unaddressed 68.6%; sequence accordingly                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 2026-07-28 | **§4 two-resolution test run**: geometry.worldDraw fixed+variable fit                                                                                                                            | **CONFIRMED fill-bound: 93% / 7% fixed at native res.** ⚠️ Fill-bound ≠ overdraw — the `Isolate draw item` test is still needed to pick between the two opposite fixes                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 2026-07-28 | **§4 `Isolate draw item` test run**: 44→14 draws saved only 2.9%                                                                                                                                 | **Overdraw RULED OUT — depth pre-pass abandoned before any code was written.** ONE item = 97% of the zone; cause is `buildVegetationMaterial`'s per-fragment curl-noise + wind sample on a full-screen layer                                                                                                                                                                                                                                                                                                                                                                                   |
+| 2026-07-28 | **A zero-strength vegetation shadow no longer draws** (was: a fully transparent padded quad still paying 15 fetches/fragment). Verdict on effective strength, applied on the per-frame sync path | ✅ **MEASURED same day — and it REFUTED the hypothesis it was built to test.** `geometry.worldDraw` 12.135 → 11.491 ms (−0.644 raw, ~−1.24 noise-normalised), with −2.9 draws / −72,539 triangles confirming the mechanism independently. **Not the ~4 ms that would have justified the per-kind gate, so the gate will not be built.** Frame GPU unchanged (17.83 → 17.83) — a darkness region appeared between runs (`light.drawRegions` 0 → 0.515 ms) and ate the saving; declared as a confound, not a code effect. Keep the change (free when shadows are off), log NO default-config win |
+| 2026-07-28 | **FIX SHIPPED — presence gates on BOTH `_Tree`/`_Bush` and `_Specular`** (vegetation coarse-mip foliage gate; specular presence gate with the maths moved inside `Fn()`)                         | ✅ **MEASURED, same route: 26.21 → 17.83 ms GPU (−32.0%), 38.2 → 54.2 avgFps (+42%), worst 20 → 30 fps, still ZERO hangs.** `geometry.worldDraw` −5.835 ms, `surface.specularDraw` −2.285 ms; the two targets are **96.9%** of the total frame saving. Author confirmed visuals unchanged. See §2B                                                                                                                                                                                                                                                                                             |
+
+---
+
+## 9. Audit summary (2026-07-28) — what changed in our understanding
+
+**The frame is 32% cheaper and 42% smoother, measured on the same route, with the author confirming
+the picture is unchanged (§2B).** All three original targets are now measured facts, not guesses —
+two are closed and one is half-done.
+
+| Target          | Before this audit                      | After                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| §3 specular     | "no early-out, runs fullscreen"        | ✅ **FIXED, 2.96 → 0.675 ms (4.4×).** Both original claims were wrong; the real fix was gating `presence` with the maths built _inside_ `Fn()`. Now `within` its declared budget (5.05× → 1.15×)                                                                                                                                                                                           |
+| §4 world draw   | "cause unknown, do not optimise blind" | ⚠️ **PARTLY FIXED, 17.97 → 12.135 ms (−32.5%).** Overdraw RULED OUT; flutter gate shipped. Now 64.4% of the frame at 11.491 ms. Overdraw ruled out, flutter gate shipped, and the **vegetation-shadow hypothesis raised and REFUTED the same day (0.6–1.2 ms, not 4+)**. Only branch (b) survives: mip-0 fetches of the 6750² BC7 at arbitrary zoom, plus per-fragment MRT write bandwidth |
+| §5 point lights | "~18–20% asymmetry, worth a look"      | **Closed — explained, not a defect.** Coloration samples the albedo texture; illumination does not                                                                                                                                                                                                                                                                                         |
+
+**The single most valuable thing this round produced is not a millisecond, it is a target:** the
+frame now straddles the 16.67 ms vsync step (§2B). The next 1–2 ms is worth more than the last 8.
+
+**Three fixes were explicitly declined**, each recorded in §3 with its reason: the `sunGrainBias` CPU
+hoist (introduces a silent desync precondition), 3D→2D Worley (changes the animation's character),
+and the half-resolution pass (highest visual risk). **A fourth is now closed by obsolescence:
+per-island quads, the designed ~1.45 ms win, were superseded and out-performed by the presence gate
+(§3) — best remaining case ~0.2 ms for ~34 materials. Do not build it.**
+
+**§4's vegetation-shadow hypothesis was raised and killed on the same day, by the measurement it
+demanded — and that is the single most useful thing in this section.** It looked strong from code
+reading (15 fetches/fragment, padded full-screen quads, ungated, drawing inside the measured zone),
+and it was wrong: 0.6–1.2 ms, not the 4+ ms that would have justified the gate. The threshold was
+written down **before** the run, so the verdict was not negotiable after it.
+
+**The lesson is sharper than the result.** The estimate failed because it counted texture _fetches_
+as units of time; 11 of the shadow's 15 taps read mip 3–5 and cost roughly a twentieth of a mip-0
+tap. Which also collapses the follow-on theory before anyone builds it: if a 15-fetch full-screen
+overlay is ~0.3 ms, the four remaining canopy overlays at 2–3 fetches each cannot be the missing
+11.5 ms either. **Layer count and fetch count are both exonerated. What is left is mip-0 sampling of
+the 6750² BC7 atlas at arbitrary zoom plus per-fragment MRT write bandwidth** — branch (b), flagged
+in §4 from the start and still never directly tested.
+
+Two near-misses belong in the declined list. **The depth pre-pass design was started and stopped**
+on discovering the evidence supported only the fill-bound half. And `buf:scene.attr`'s safe default
+was believed to depend on NormalBlending — ⚠️ **that belief is now itself in doubt**: a read of the
+vendored three suggests the `attr` attachment is built with `blend: undefined` (no blending), which
+would mean `vec4(0,0,0,0)` **overwrites** rather than skips. Untraced to a consumer, flagged for its
+own investigation, and **not a performance question** — but it would change what an opaque pass
+costs to get right.
+
+**Method note worth keeping:** the specular section had been written from a plausible reading rather
+than from the code, and stated the opposite of the truth in two places. Both were caught by opening
+the file. A performance document is exactly as trustworthy as its least-verified claim
+(`feedback_plausible_diagnosis_rots`).
 
 _Add a row per landed change, with a before/after from the benchmark route. A change with no
 measurement is not a performance fix — it is a hope._

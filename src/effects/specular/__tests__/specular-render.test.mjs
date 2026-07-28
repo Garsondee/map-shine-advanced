@@ -107,6 +107,28 @@ export function run(t) {
   ok('it carries a colorNode — an empty material renders nothing, silently', !!built.specularMaterial.colorNode);
   ok('the multiply pass is GONE, not merely unused', built.suppressMaterial === undefined);
 
+  // ── THE PRESENCE GATE (2026-07-28 performance audit) ────────────────────
+  // This pass measured 3.4 ms, ~6x its declared budget, ~93% of it fill: the
+  // 27-cell 3D Worley, the 3D Perlin and three shimmer layers ran on EVERY
+  // covered pixel and were then multiplied by `coverage` (presence x
+  // visibility) at the very end — so ~70% of shaded pixels on the live scene
+  // paid full price to be multiplied by zero.
+  //
+  // ⚠️ WHAT THIS ASSERTS AND WHAT IT CANNOT. It proves the gated graph still
+  // CONSTRUCTS (the whole point of building TSL in Node —
+  // `keyhole-tsl-constructs-in-node`), which catches the realistic failure:
+  // `Fn`/`If` not destructured, or the maths left outside the callback where
+  // TSL control flow is a silent no-op (`keyhole-region-discard-noop-bug`).
+  // It proves NOTHING about the emitted WGSL or about the saving, which is why
+  // the fix ships alongside a re-measurement rather than a claim.
+  ok('the gated graph still constructs — Fn/If are wired, not silently absent', buildError === null);
+  ok('...and still produces a colorNode after the gate refactor', !!built.specularMaterial.colorNode);
+  // The debug material must survive the extraction too: `buildShimmerTerms` is
+  // built TWICE (gated for the real pass, ungated for the diagnostic) from ONE
+  // source, so a tuning change cannot land in one and not the other.
+  ok('the debug material still exists after the shimmer extraction', !!built.debugMaterial);
+  ok('...and carries its own colorNode', !!built.debugMaterial.colorNode);
+
   // ── THE BLEND CONTRACT ──────────────────────────────────────────────────
   // `dst × src` and `dst + src`. Getting either backwards is invisible in
   // review and catastrophic on screen.

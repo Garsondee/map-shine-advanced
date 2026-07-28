@@ -5651,6 +5651,44 @@ export async function startVtPanViewer({
      * a Wind-response/intensity family on top the way this project's live
      * param set does, so a little extra headroom below V2's own number. */
     const VEG_FLUTTER_UV_CAP = 0.005;
+    /**
+     * THE FOLIAGE-PRESENCE GATE — mip level, and why a COARSE mip is the whole
+     * trick (2026-07-28, the performance audit).
+     *
+     * MEASURED PROBLEM: `geometry.worldDraw` was 13.6 ms, 62% of frame GPU, and
+     * `Isolate draw item` proved ONE item is 97% of it — removing 68% of the
+     * draw calls saved 2.9%, so it was never overdraw. That one item is a
+     * vegetation-bearing tile, and its FRAGMENT stage runs `curlNoise2D`
+     * ("4 noise evals" by its own header) plus a full `windHandle.node()`
+     * wind-field sample **on every pixel it covers** — a layer that covers the
+     * whole screen — and then multiplies the result into a UV offset that does
+     * nothing wherever the art has no foliage. Full price, thrown away, on the
+     * overwhelming majority of the map. (`surface.specularDraw` has the exact
+     * same shape; see docs/planning/Performance-Insights.md §3/§4.)
+     *
+     * THE GATE: one extra fetch from a COARSE mip, whose alpha is the average
+     * over a large neighbourhood. Alpha 0 there means no foliage anywhere in
+     * that footprint, so the flutter provably cannot move any into this
+     * fragment and the whole noise+wind block is skipped.
+     *
+     * ⚠️ WHY THIS IS VISUALLY LOSSLESS AND NOT A "CLOSE ENOUGH". Flutter
+     * displaces the sample UV by at most `VEG_FLUTTER_UV_CAP` (0.005 UV). At
+     * mip 6 one texel spans 64 base texels — on a 3375px tile that is ~0.019 UV,
+     * nearly 4× the cap, and the fetch is bilinear so it straddles two of those.
+     * A fragment whose coarse alpha is 0 therefore has NO foliage within a
+     * radius several times the furthest flutter could ever reach. The gate can
+     * only skip work that could not have changed the pixel.
+     *
+     * Deliberately NOT a uniform gate (`tsl/no-uniform-gates`): this is a
+     * per-fragment data test on the art itself, which is exactly the kind that
+     * rule exists to encourage over "is the effect switched on" branching.
+     */
+    const VEG_FLUTTER_GATE_LOD = 6;
+    /** Above this coarse-mip alpha, assume foliage may reach this fragment.
+     * Small but non-zero: a bilinear fetch of an all-zero neighbourhood can
+     * return a denormal rather than exact 0, and treating that as "foliage"
+     * would silently disable the gate everywhere. */
+    const VEG_FLUTTER_GATE_ALPHA_EPS = 0.002;
     /** Asymmetric gale damping for flutter ONLY — V2's own approach: fine
      * per-pixel flutter is DAMPED as wind approaches gale, opposite of
      * scaling it up alongside everything else. `flutterGaleFrequency` (the
@@ -5805,6 +5843,7 @@ export async function startVtPanViewer({
     ) {
       const {
         Fn,
+        If,
         uniform,
         vec2,
         vec3,
@@ -6011,87 +6050,107 @@ export async function startVtPanViewer({
         // the fragment noise cost for something nobody can resolve).
         let sampleUv = uv().mul(uUvScale);
         if (!asShadow) {
-          const galeness = clamp(uGaleness, float(0), float(1));
-          // `rate`/`spaceFreq` are LIVE uniform nodes here, not the plain JS
-          // numbers curlNoise2D's own JSDoc describes — safe (verified against
-          // the vendored TSL `ConvertType`/`float()`: a node passed to `float()`
-          // is cast/passed through, never re-wrapped as a NEW constant), and it
-          // is what makes "Flutter frequency" a live, per-frame-tunable rate
-          // rather than a number only a material rebuild could change.
-          const flutterRate = uFlutterFrequency.add(galeness.mul(uFlutterGaleFrequency));
-          // ONE octave — the stated fragment-cost ceiling (4 noise evals).
-          const flutterVec = curlNoise2D(THREE.TSL, {
-            p: vec2(positionLocal.x, positionLocal.y),
-            timeSec: uGlobalTimeMs.mul(float(0.001)),
-            spaceFreq: float(kind.flutterSpaceFreq).mul(uFlutterScale),
-            rate: flutterRate,
-            phaseX: 613,
-            phaseY: -157,
+          // ── THE FOLIAGE-PRESENCE GATE ──────────────────────────────────
+          // See VEG_FLUTTER_GATE_LOD's own header for the measurement that
+          // motivated this and the proof it cannot change a pixel. Everything
+          // from here to the end of this block is skipped wherever the art has
+          // no foliage within reach — which is most of the map, and was the
+          // single largest GPU cost in the frame.
+          //
+          // `sampleUv` becomes a VAR because TSL's If() is a real branch in the
+          // emitted shader: a plain `let` reassignment inside the callback would
+          // rebind a JS variable at graph-BUILD time, not write a value at
+          // shader-RUN time, and the displacement would silently apply
+          // unconditionally (exactly the class of bug
+          // `reference_tsl_fn_deferred_execution_trap` records).
+          const gatedUv = sampleUv.toVar('vegSampleUv');
+          const coarseFoliageAlpha = texture(tex).sample(sampleUv).level(float(VEG_FLUTTER_GATE_LOD)).a;
+          If(coarseFoliageAlpha.greaterThan(float(VEG_FLUTTER_GATE_ALPHA_EPS)), () => {
+            const galeness = clamp(uGaleness, float(0), float(1));
+            // `rate`/`spaceFreq` are LIVE uniform nodes here, not the plain JS
+            // numbers curlNoise2D's own JSDoc describes — safe (verified against
+            // the vendored TSL `ConvertType`/`float()`: a node passed to `float()`
+            // is cast/passed through, never re-wrapped as a NEW constant), and it
+            // is what makes "Flutter frequency" a live, per-frame-tunable rate
+            // rather than a number only a material rebuild could change.
+            const flutterRate = uFlutterFrequency.add(galeness.mul(uFlutterGaleFrequency));
+            // ONE octave — the stated fragment-cost ceiling (4 noise evals).
+            const flutterVec = curlNoise2D(THREE.TSL, {
+              p: vec2(positionLocal.x, positionLocal.y),
+              timeSec: uGlobalTimeMs.mul(float(0.001)),
+              spaceFreq: float(kind.flutterSpaceFreq).mul(uFlutterScale),
+              rate: flutterRate,
+              phaseX: 613,
+              phaseY: -157,
+            });
+            // Strength rises with the LOCAL wind, so sheltered foliage is still
+            // and exposed foliage shimmers — the same locality the sway obeys.
+            // Already clamped to [0,1] below, independent of `VEG_MAX_LOCAL_
+            // SPEED` (the sway cap) — flutter never needed the higher ceiling.
+            const localSpeed = clamp(
+              length(
+                windHandle.node(THREE.TSL, {
+                  centerXY: vec2(positionLocal.x, positionLocal.y),
+                  time: uGlobalTimeMs,
+                  exposure: float(1),
+                })
+              ),
+              float(0),
+              float(1)
+            );
+            // ASYMMETRIC GALE DAMPING (2026-07-23, live-test author report: "we
+            // have to be careful to get leaf flutter and sway without them
+            // becoming a blender of nonsense at gale strength") — reverse-
+            // engineered from V2's own proven curve (legacy/compositor-v2/
+            // effects/vegetation-bulk-wind.js): fine per-pixel flutter is
+            // ACTIVELY DAMPED as wind approaches gale, the opposite of scaling
+            // it up alongside the rate term. `flutterGaleFrequency` still
+            // speeds the pattern's EVOLUTION up at gale (the author's own live
+            // dial); this independently keeps AMPLITUDE from following it.
+            const flutterGaleDamp = mix(
+              float(1),
+              float(VEG_FLUTTER_GALE_DAMP_FLOOR),
+              smoothstep(float(VEG_FLUTTER_GALE_DAMP_START), float(VEG_FLUTTER_GALE_DAMP_END), galeness)
+            );
+            // SCENE-EDGE-FADE — same mechanism and same uniforms as the sway
+            // displacement above (positionNode's own local `edgeFade` cannot be
+            // shared across Fn() scopes, so it is recomputed here from the SAME
+            // uniforms — the existing `galeness`/`localSpeed` split between the
+            // two stages is the same established pattern in this function).
+            const worldXY = vec2(positionLocal.x, positionLocal.y);
+            const sceneUv = worldXY.sub(uSceneMin).div(uSceneSize);
+            const edgeDistX = min(sceneUv.x, float(1).sub(sceneUv.x));
+            const edgeDistY = min(sceneUv.y, float(1).sub(sceneUv.y));
+            const edgeFadeWidthNormX = uEdgeFadeWidthPx.div(uSceneSize.x);
+            const edgeFadeWidthNormY = uEdgeFadeWidthPx.div(uSceneSize.y);
+            const edgeFade = smoothstep(float(0), max(edgeFadeWidthNormX, float(1e-5)), edgeDistX).mul(
+              smoothstep(float(0), max(edgeFadeWidthNormY, float(1e-5)), edgeDistY)
+            );
+            // STEEP RESPONSE CURVE (2026-07-23, live-test author: "nearly zero
+            // at windless... just the smallest touch") — see `VEG_FLUTTER_
+            // SPEED_CURVE`'s own header. `pow(1, x) = 1`, so the gale ceiling
+            // is untouched here; only the ramp up to it steepens.
+            const localSpeedCurved = pow(localSpeed, float(VEG_FLUTTER_SPEED_CURVE));
+            // Normalised against the LIVE base frequency (not a fixed constant)
+            // so the ratio still reads 1 at calm even after the author retunes
+            // "Flutter frequency" itself — only the gale ADD-ON should ever move
+            // the ratio away from 1.
+            const flutterStrength = localSpeedCurved
+              .mul(uFlutterAmount)
+              .mul(uFlutterUvScale)
+              .mul(flutterRate.div(max(uFlutterFrequency, float(1e-4))))
+              .mul(flutterGaleDamp)
+              .mul(edgeFade);
+            const rawFlutterDisplacement = flutterVec.mul(flutterStrength);
+            // HARD CAP (`VEG_FLUTTER_UV_CAP`, matches V2's own proven ceiling
+            // almost exactly) — rescales, never distorts direction.
+            const flutterMag = length(rawFlutterDisplacement);
+            const flutterCapScale = min(float(1), float(VEG_FLUTTER_UV_CAP).div(max(flutterMag, float(1e-5))));
+            // addAssign, not `sampleUv = ...`: a shader-run-time write into the
+            // var, so it happens only on the taken branch. See the gate header.
+            gatedUv.addAssign(rawFlutterDisplacement.mul(flutterCapScale));
           });
-          // Strength rises with the LOCAL wind, so sheltered foliage is still
-          // and exposed foliage shimmers — the same locality the sway obeys.
-          // Already clamped to [0,1] below, independent of `VEG_MAX_LOCAL_
-          // SPEED` (the sway cap) — flutter never needed the higher ceiling.
-          const localSpeed = clamp(
-            length(
-              windHandle.node(THREE.TSL, {
-                centerXY: vec2(positionLocal.x, positionLocal.y),
-                time: uGlobalTimeMs,
-                exposure: float(1),
-              })
-            ),
-            float(0),
-            float(1)
-          );
-          // ASYMMETRIC GALE DAMPING (2026-07-23, live-test author report: "we
-          // have to be careful to get leaf flutter and sway without them
-          // becoming a blender of nonsense at gale strength") — reverse-
-          // engineered from V2's own proven curve (legacy/compositor-v2/
-          // effects/vegetation-bulk-wind.js): fine per-pixel flutter is
-          // ACTIVELY DAMPED as wind approaches gale, the opposite of scaling
-          // it up alongside the rate term. `flutterGaleFrequency` still
-          // speeds the pattern's EVOLUTION up at gale (the author's own live
-          // dial); this independently keeps AMPLITUDE from following it.
-          const flutterGaleDamp = mix(
-            float(1),
-            float(VEG_FLUTTER_GALE_DAMP_FLOOR),
-            smoothstep(float(VEG_FLUTTER_GALE_DAMP_START), float(VEG_FLUTTER_GALE_DAMP_END), galeness)
-          );
-          // SCENE-EDGE-FADE — same mechanism and same uniforms as the sway
-          // displacement above (positionNode's own local `edgeFade` cannot be
-          // shared across Fn() scopes, so it is recomputed here from the SAME
-          // uniforms — the existing `galeness`/`localSpeed` split between the
-          // two stages is the same established pattern in this function).
-          const worldXY = vec2(positionLocal.x, positionLocal.y);
-          const sceneUv = worldXY.sub(uSceneMin).div(uSceneSize);
-          const edgeDistX = min(sceneUv.x, float(1).sub(sceneUv.x));
-          const edgeDistY = min(sceneUv.y, float(1).sub(sceneUv.y));
-          const edgeFadeWidthNormX = uEdgeFadeWidthPx.div(uSceneSize.x);
-          const edgeFadeWidthNormY = uEdgeFadeWidthPx.div(uSceneSize.y);
-          const edgeFade = smoothstep(float(0), max(edgeFadeWidthNormX, float(1e-5)), edgeDistX).mul(
-            smoothstep(float(0), max(edgeFadeWidthNormY, float(1e-5)), edgeDistY)
-          );
-          // STEEP RESPONSE CURVE (2026-07-23, live-test author: "nearly zero
-          // at windless... just the smallest touch") — see `VEG_FLUTTER_
-          // SPEED_CURVE`'s own header. `pow(1, x) = 1`, so the gale ceiling
-          // is untouched here; only the ramp up to it steepens.
-          const localSpeedCurved = pow(localSpeed, float(VEG_FLUTTER_SPEED_CURVE));
-          // Normalised against the LIVE base frequency (not a fixed constant)
-          // so the ratio still reads 1 at calm even after the author retunes
-          // "Flutter frequency" itself — only the gale ADD-ON should ever move
-          // the ratio away from 1.
-          const flutterStrength = localSpeedCurved
-            .mul(uFlutterAmount)
-            .mul(uFlutterUvScale)
-            .mul(flutterRate.div(max(uFlutterFrequency, float(1e-4))))
-            .mul(flutterGaleDamp)
-            .mul(edgeFade);
-          const rawFlutterDisplacement = flutterVec.mul(flutterStrength);
-          // HARD CAP (`VEG_FLUTTER_UV_CAP`, matches V2's own proven ceiling
-          // almost exactly) — rescales, never distorts direction.
-          const flutterMag = length(rawFlutterDisplacement);
-          const flutterCapScale = min(float(1), float(VEG_FLUTTER_UV_CAP).div(max(flutterMag, float(1e-5))));
-          sampleUv = sampleUv.add(rawFlutterDisplacement.mul(flutterCapScale));
+          sampleUv = gatedUv;
         }
 
         if (asShadow) {
@@ -6676,7 +6735,13 @@ export async function startVtPanViewer({
           // UNLIKE the tile itself — which is real placed content and keeps
           // rendering when the effect is off — the shadow is purely this
           // effect's output, so it hides the moment the effect is disabled.
-          t.shadow.mesh.visible = show && !!vegState?.enabled;
+          // Residency owns "on screen AND the effect is on". The per-frame sync
+          // ANDs in the third term it cannot know here — "has any strength left
+          // to draw with" — because that changes with a slider or the sky, not
+          // with placement. Stored so the two halves can be combined without
+          // either pass having to recompute the other's.
+          t.shadow.residentVisible = show && !!vegState?.enabled;
+          t.shadow.mesh.visible = t.shadow.residentVisible;
           // CASE 1: `item` is the canopy tile itself — see
           // VEG_SHADOW_RENDER_ORDER_MAGNITUDE's own header for the sign.
           t.shadow.mesh.renderOrder = item.renderOrder - VEG_SHADOW_RENDER_ORDER_MAGNITUDE;
@@ -7003,7 +7068,11 @@ export async function startVtPanViewer({
           for (const t of state.wholeImage.tiles) {
             if (t.motion) syncVegetationMotionUniforms(t.motion, vegState.params);
             if (t.shadow) {
-              vegShadows.syncUniforms(t.shadow.uniforms, t.shadow.kind, state.placement, vegState.params);
+              // A zero-strength shadow is a fully transparent quad padded to
+              // ~1.29x the item's area, paying 15 texture fetches per fragment
+              // to output nothing. Don't draw it.
+              const draws = vegShadows.syncUniforms(t.shadow.uniforms, t.shadow.kind, state.placement, vegState.params);
+              t.shadow.mesh.visible = !!t.shadow.residentVisible && draws;
               syncVegetationMotionUniforms(t.shadow.motion, vegState.params);
             }
           }
@@ -7014,7 +7083,9 @@ export async function startVtPanViewer({
             if (!entry || entry.status !== 'ready') continue;
             syncVegetationMotionUniforms(entry.motion, vegState.params);
             if (entry.shadow) {
-              vegShadows.syncUniforms(entry.shadow.uniforms, kind, state.placement, vegState.params);
+              // Same zero-strength skip as Case 1 above.
+              const draws = vegShadows.syncUniforms(entry.shadow.uniforms, kind, state.placement, vegState.params);
+              entry.shadow.mesh.visible = !!entry.shadow.residentVisible && draws;
               syncVegetationMotionUniforms(entry.shadow.motion, vegState.params);
             }
           }
@@ -7069,7 +7140,9 @@ export async function startVtPanViewer({
         entry.mesh.visible = show && enabled;
         entry.mesh.renderOrder = item.renderOrder + kind.renderOrderNudge;
         if (entry.shadow?.mesh) {
-          entry.shadow.mesh.visible = show && enabled;
+          // Same two-halves split as Case 1 above — see that comment.
+          entry.shadow.residentVisible = show && enabled;
+          entry.shadow.mesh.visible = entry.shadow.residentVisible;
           // CASE 2: `item` IS the ground — see
           // VEG_SHADOW_RENDER_ORDER_MAGNITUDE's own header for the sign.
           entry.shadow.mesh.renderOrder = item.renderOrder + VEG_SHADOW_RENDER_ORDER_MAGNITUDE;

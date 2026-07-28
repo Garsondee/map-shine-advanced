@@ -424,6 +424,58 @@ export function buildSpecularIslandPack({ rgba, width, height, spread = 1, maxDi
   const filtered = new Uint16Array(tubeId.length);
   for (let i = 0; i < tubeId.length; i++) filtered[i] = keep[tubeId[i]] ? tubeId[i] : 0;
 
+  // ============================================================================
+  // THE PER-ISLAND BOUNDS ESTIMATE (2026-07-28, the performance audit) —
+  // JS-ONLY, BAKE-TIME, ZERO RENDER-TIME COST.
+  // ============================================================================
+  // Not used for rendering — `specular-surface-subsystem.js` still crops ONE
+  // combined AABB. This answers a narrower question first: if it cropped to
+  // N per-island quads instead, how much would that actually save? Building
+  // real per-island geometry is a genuine lift (per-island bounds threaded
+  // through to render, the mask-UV mapping moved from a uniform into a vertex
+  // attribute so N quads share one draw call) on a file already mid-rework —
+  // worth doing only once the number says it pays.
+  //
+  // Uses the SAME criterion the combined AABB uses (`vt/mask-image.js`'s scan
+  // of the raw file for true painted texels) — TRUE paint, not the CLUSTERED
+  // footprint `filtered` above or the DILATED one `labels` below. Clustering
+  // exists to decide which specks merge into one island; dilation exists only
+  // to keep the PARALLAX PACK sample valid past an island's edge (this file's
+  // own header on `dilateLabels`). Neither is what a real render crop would
+  // need to cover — `presence` (the shader's final gate) is zero whether the
+  // pack is dilated there or not, since it comes from the mask, not the pack.
+  // Basing the estimate on either would overstate the achievable win.
+  let perIslandUnionTexels = 0;
+  if (sizes.length > droppedSmall) {
+    const minX = new Int32Array(sizes.length + 1).fill(w);
+    const minY = new Int32Array(sizes.length + 1).fill(h);
+    const maxX = new Int32Array(sizes.length + 1).fill(-1);
+    const maxY = new Int32Array(sizes.length + 1).fill(-1);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!present[i]) continue;
+        const label = tubeId[i];
+        if (!keep[label]) continue;
+        if (x < minX[label]) minX[label] = x;
+        if (x > maxX[label]) maxX[label] = x;
+        if (y < minY[label]) minY[label] = y;
+        if (y > maxY[label]) maxY[label] = y;
+      }
+    }
+    for (let label = 1; label <= sizes.length; label++) {
+      if (!keep[label] || maxX[label] < 0) continue;
+      perIslandUnionTexels += (maxX[label] - minX[label] + 1) * (maxY[label] - minY[label] + 1);
+    }
+  }
+  // Fraction of the LABEL GRID, directly comparable to `aabbFractionOfItem`
+  // (which is a fraction of the ITEM — the two are the same quantity, this one
+  // just measured at 512² resolution instead of the mask's full resolution).
+  // Coarser, but the rounding error is at most one grid cell per island edge —
+  // negligible for a go/no-go read, not precise enough to build render geometry
+  // from directly.
+  const estimatedPerIslandGridFraction = w * h > 0 ? perIslandUnionTexels / (w * h) : null;
+
   const labels = dilateLabels(filtered, w, h, SPECULAR_ISLAND_DILATE);
 
   // Parallax is memoised per label rather than hashed per texel -- two trig
@@ -467,5 +519,10 @@ export function buildSpecularIslandPack({ rgba, width, height, spread = 1, maxDi
     labelledTexels,
     droppedSmall,
     preClusterComponents,
+    // See the block above this function's return — a bake-time-only estimate,
+    // not used for rendering. Zero surviving islands genuinely IS zero covered
+    // pixels — a real measurement, not an absence — so this is only ever null
+    // in the defensive `w*h === 0` branch a real bake never reaches.
+    estimatedPerIslandGridFraction,
   };
 }

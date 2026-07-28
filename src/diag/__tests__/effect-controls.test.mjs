@@ -57,6 +57,38 @@ export function run(t) {
     ok('a zone with nothing routed to it is empty, not undefined', sortPanelsForZone(panels, 'settings').length === 0);
   }
 
+  // --- REGRESSION (2026-07-28): a panel declaring BOTH zone AND effect -------
+  // "the Make rail is broken, there are no effects in there" — every real
+  // `registerPanel` call for an actual effect (boot.js: bloom, water, fluid,
+  // specular, window, grade, vegetation, candles, sun-shadows, wind) declares
+  // BOTH `zone: 'workshop'` (so it renders) AND `effect: '<id>'` (so it can
+  // gather its OWN attachments via `attachmentsFor`) — a shape the block above
+  // never modelled, because it only ever put `zone` and `effect` on SEPARATE
+  // entries. `sortPanelsForZone` used to delegate to `routeEntry`, whose
+  // "effect beats zone" rule is correct for controls/actions/reports and wrong
+  // here — it silently routed every real effect panel to `kind:'effect'`,
+  // which `attachmentsFor` never reads for the `panels` map at all (it only
+  // scans controls/actions/reports). Net effect: every effect card in the
+  // product UI rendered NOWHERE, with this exact suite fully green throughout.
+  {
+    const realShapedPanels = [
+      ['bloom-panel', { zone: 'workshop', effect: 'bloom', order: 80 }],
+      ['water-panel', { zone: 'workshop', effect: 'water', order: 30 }],
+      ['astrolabe', { zone: 'bridge', order: -1 }], // the one panel with no `effect` — never broken
+    ];
+    const workshop = sortPanelsForZone(realShapedPanels, 'workshop').map(([id]) => id);
+    ok(
+      'a panel declaring BOTH zone and effect still renders in its zone — THE ACTUAL LIVE BUG',
+      workshop.join(',') === 'water-panel,bloom-panel'
+    );
+    ok(
+      'declaring `effect` does not evict a panel from its declared zone',
+      workshop.includes('bloom-panel') && workshop.includes('water-panel')
+    );
+    const bridge = sortPanelsForZone(realShapedPanels, 'bridge').map(([id]) => id);
+    ok('a panel with no effect at all is unaffected either way', bridge.join(',') === 'astrolabe');
+  }
+
   // --- createSectionStore: what survives the panel's full rebuild -----------
   // debug-panel.js's renderBody() does `innerHTML = ''` on every registration and
   // every refreshControls(), so a `<details open>` attribute cannot persist —

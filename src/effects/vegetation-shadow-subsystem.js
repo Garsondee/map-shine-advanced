@@ -281,10 +281,31 @@ export function createVegetationShadowSubsystem({
    * while the throw lives in world space (the throw is applied as a real
    * world-space vertex translation — see `buildVegetationMaterial`).
    *
+   * RETURNS whether this shadow can draw anything at all this frame — i.e.
+   * whether its EFFECTIVE strength (post-handle, not the raw param) is above
+   * zero. A zero-strength shadow emits `vec4(0,0,0,0)`, which under this
+   * material's NormalBlending cannot change a pixel, yet it still rasterises a
+   * quad padded to ~1.29x the item's area and pays all 15 texture fetches per
+   * fragment. The caller ANDs this with the residency pass's own on-screen
+   * decision so the mesh is simply not drawn instead
+   * (docs/planning/Performance-Insights.md §4).
+   *
+   * The effective value is used rather than `params.shadowStrength` on purpose:
+   * anything the shadow handle zeroes (night, a future per-caster cutoff) then
+   * stops costing fill for free, without this function learning why.
+   *
+   * ⚠️ One non-colour difference, stated rather than buried: while the mesh
+   * draws, its fragments also emit the renderer-global `attr` MRT default. If
+   * that attachment turns out to be unblended (an open question — see the
+   * `buf:scene.attr` investigation), not drawing would stop a zero-write that
+   * was never intended to land. That direction is the safe one, and it only
+   * applies at strength 0, which is not the default.
+   *
    * @param {object} uniforms - a `built.shadow` uniform set.
    * @param {import('./vegetation.js').VegetationKind} kind
    * @param {object} placement
    * @param {object} params - the live resolved vegetation params.
+   * @returns {boolean} true if the shadow has non-zero strength and is worth drawing.
    */
   function syncUniforms(uniforms, kind, placement, params) {
     // Takes the uniforms object DIRECTLY rather than an owner it unwraps
@@ -295,7 +316,7 @@ export function createVegetationShadowSubsystem({
     // build-time default of 0, so the shadow was correctly invisible — the
     // uniform genuinely never carried a non-zero value. Every call site now
     // passes the SAME shape (`something.uniforms`), so this cannot recur.
-    if (!uniforms) return;
+    if (!uniforms) return false;
     const shadowHandle = getShadowHandle();
     const cast = shadowHandle.forCaster({
       heightPx: kind.shadowHeightPx,
@@ -348,6 +369,8 @@ export function createVegetationShadowSubsystem({
     const artTexelsPerWorldPx = uniforms.artTexelsPerWorldPx ?? 1;
     const gapTexels = (cast.offsetPx / VEG_SHADOW_SMEAR_TAPS) * artTexelsPerWorldPx;
     uniforms.uShadowSmearLod.value = Math.max(0, Math.min(VEG_SHADOW_MAX_SMEAR_LOD, Math.log2(Math.max(1, gapTexels))));
+
+    return cast.strength01 > 0;
   }
 
   return Object.freeze({ attachTileShadow, syncUniforms });

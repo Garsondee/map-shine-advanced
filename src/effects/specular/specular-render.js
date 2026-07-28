@@ -258,6 +258,11 @@ export function buildSpecularSurfaceMaterial({
 }) {
   const TSL = THREE.TSL;
   const {
+    // `Fn`/`If` are the PRESENCE GATE's own requirement, not decoration: TSL
+    // control flow is a silent no-op outside `Fn()`, so the gate below both
+    // wraps AND constructs its maths inside one.
+    Fn,
+    If,
     texture,
     uv,
     vec2,
@@ -496,64 +501,123 @@ export function buildSpecularSurfaceMaterial({
   // noise texture had a wrap seam in the channel whose comment claimed it
   // tiled). The third coordinate is a slow time, the standard way to animate 2D
   // noise without a domain-warp fan.
-  const cellScale = mix(float(CELL_SCALE_DULL), float(CELL_SCALE_BRIGHT), clamp(strengthNode, 0, 1));
-  const basePos = vec3(
-    worldUv.x
-      .sub(parallaxBase.x.mul(float(0.35)))
-      .add(drift.x)
-      .mul(cellScale),
-    worldUv.y
-      .sub(parallaxBase.y.mul(float(0.35)))
-      .add(drift.y)
-      .mul(cellScale),
-    tSec.mul(float(0.02))
-  );
-  const cellular = smoothstep(
-    float(0.28),
-    float(0.72),
-    mx_worley_noise_float(basePos, 1).mul(mx_noise_float(basePos).mul(float(0.5)).add(float(0.5)))
-  ).toVar('specCellular');
-
-  // ── COMBINE ──────────────────────────────────────────────────────────────
-  // ⚠️ MAX, NOT SUM, ACROSS LAYERS — corrected 2026-07-27. A raw sum of three
-  // independently-firing layers STACKS wherever two or three happen to overlap
-  // (up to 3× the brightest single layer, right at the moment three patterns
-  // coincide), which is precisely where the composite is most likely to blow
-  // past what the shared tonemap can render without compressing — i.e. exactly
-  // the "washed out" hot spots the live report named. MAX takes the brightest
-  // contributor at each texel instead of stacking them, which is what makes
-  // three layers read as three DIFFERENT textures sharing one surface rather
-  // than three lights adding up on it. Non-overlapping regions (most of the
-  // area, since the layers sit at different parallax depths and grain angles)
-  // are UNCHANGED: `max(a, 0, 0) = a`, identical to what `sum` gave there.
-  let layered = shimmerLayer(layers[0]);
-  for (let i = 1; i < SPECULAR_LAYER_COUNT; i++) layered = max(layered, shimmerLayer(layers[i]));
-  const pulseNode = float(1)
-    .sub(uPulse)
-    .add(
-      uPulse.mul(
-        sin(tSec.mul(float(0.37)))
-          .mul(float(0.5))
-          .add(float(0.5))
-      )
+  /**
+   * EVERY EXPENSIVE PER-PIXEL TERM IN THIS EFFECT, IN ONE PLACE.
+   *
+   * Extracted 2026-07-28 (the performance audit) so it can be built TWICE from
+   * ONE source: once inside the presence gate below for the real material, and
+   * once ungated for the debug material's channels. Two hand-maintained copies
+   * of this maths would be a `feedback_mode_forks_silently_drop_features` in
+   * waiting — a tuning change landing in the shipped path but not the
+   * diagnostic would make the diagnostic lie about the very thing it exists to
+   * explain.
+   *
+   * Building it twice costs nothing at runtime: a node subgraph only emits into
+   * a shader that actually reaches it, so the ungated copy exists only in the
+   * debug material's WGSL.
+   * @returns {{cellular: *, layered: *, shimmer: *}}
+   */
+  function buildShimmerTerms() {
+    const cellScale = mix(float(CELL_SCALE_DULL), float(CELL_SCALE_BRIGHT), clamp(strengthNode, 0, 1));
+    const basePos = vec3(
+      worldUv.x
+        .sub(parallaxBase.x.mul(float(0.35)))
+        .add(drift.x)
+        .mul(cellScale),
+      worldUv.y
+        .sub(parallaxBase.y.mul(float(0.35)))
+        .add(drift.y)
+        .mul(cellScale),
+      tSec.mul(float(0.02))
     );
-  // ⚠️ THE UNCONDITIONAL TAIL SHRANK FROM 0.22 TO 0.05 — corrected 2026-07-27.
-  // `cellular` is a continuous field with genuine dark valleys (its own
-  // smoothstep already clips ~28% of its range to exactly 0), but wherever it
-  // IS nonzero this term used to add brightness regardless of whether any
-  // authored LAYER was actually present — a broad, low-level floor sitting
-  // UNDER the whole shimmer, independent of density/streak/contrast tuning.
-  // That is a second, quieter contributor to the same "everywhere glows a
-  // little" report the layer combine above targets. A small trace survives
-  // rather than deleting the term outright: it is what keeps the cellular
-  // TEXTURE faintly legible in the gaps between layer peaks, which is the
-  // whole reason it rides UNDER the layers in the first place.
-  const shimmer = layered
-    .mul(cellular.mul(float(0.45)).add(float(0.55)))
-    .add(cellular.mul(float(0.05)))
-    .mul(pulseNode)
-    .toVar('specShimmer');
+    // THE DOMINANT COST OF THE WHOLE EFFECT: a 3D Worley is a 3x3x3 = 27-cell
+    // neighbourhood search, and `mx_noise_float` adds a 3D Perlin on top.
+    const cellularTerm = smoothstep(
+      float(0.28),
+      float(0.72),
+      mx_worley_noise_float(basePos, 1).mul(mx_noise_float(basePos).mul(float(0.5)).add(float(0.5)))
+    ).toVar('specCellular');
 
+    // ── COMBINE ────────────────────────────────────────────────────────────
+    // ⚠️ MAX, NOT SUM, ACROSS LAYERS — corrected 2026-07-27. A raw sum of three
+    // independently-firing layers STACKS wherever two or three happen to
+    // overlap (up to 3× the brightest single layer, right at the moment three
+    // patterns coincide), which is precisely where the composite is most likely
+    // to blow past what the shared tonemap can render without compressing —
+    // i.e. exactly the "washed out" hot spots the live report named. MAX takes
+    // the brightest contributor at each texel instead of stacking them, which
+    // is what makes three layers read as three DIFFERENT textures sharing one
+    // surface rather than three lights adding up on it. Non-overlapping regions
+    // (most of the area, since the layers sit at different parallax depths and
+    // grain angles) are UNCHANGED: `max(a, 0, 0) = a`, identical to `sum`.
+    let layeredTerm = shimmerLayer(layers[0]);
+    for (let i = 1; i < SPECULAR_LAYER_COUNT; i++) layeredTerm = max(layeredTerm, shimmerLayer(layers[i]));
+    const pulseNode = float(1)
+      .sub(uPulse)
+      .add(
+        uPulse.mul(
+          sin(tSec.mul(float(0.37)))
+            .mul(float(0.5))
+            .add(float(0.5))
+        )
+      );
+    // ⚠️ THE UNCONDITIONAL TAIL SHRANK FROM 0.22 TO 0.05 — corrected
+    // 2026-07-27. `cellular` is a continuous field with genuine dark valleys
+    // (its own smoothstep already clips ~28% of its range to exactly 0), but
+    // wherever it IS nonzero this term used to add brightness regardless of
+    // whether any authored LAYER was actually present — a broad, low-level
+    // floor sitting UNDER the whole shimmer, independent of
+    // density/streak/contrast tuning. That is a second, quieter contributor to
+    // the same "everywhere glows a little" report the layer combine above
+    // targets. A small trace survives rather than deleting the term outright:
+    // it is what keeps the cellular TEXTURE faintly legible in the gaps between
+    // layer peaks, which is the whole reason it rides UNDER the layers.
+    const shimmerTerm = layeredTerm
+      .mul(cellularTerm.mul(float(0.45)).add(float(0.55)))
+      .add(cellularTerm.mul(float(0.05)))
+      .mul(pulseNode);
+    return { cellular: cellularTerm, layered: layeredTerm, shimmer: shimmerTerm };
+  }
+
+  // ── THE PRESENCE GATE ────────────────────────────────────────────────────
+  // MEASURED 2026-07-28: this pass cost 3.4 ms, ~6x its own declared budget,
+  // and its cost is ~93% fill (see docs/planning/Performance-Insights.md §3).
+  // Every term above ran on EVERY pixel the quad covers and was then multiplied
+  // by `coverage` (= `presence` x visibility) at the very end — so on this
+  // scene roughly 70% of shaded pixels paid a 27-cell Worley, a 3D Perlin and
+  // three shimmer layers to be multiplied by exactly zero.
+  //
+  // ⚠️ WHY THE GATE HAD TO MOVE THE MATHS INSIDE `Fn()`, NOT JUST WRAP IT.
+  // `specularMaterial.colorNode` is a FLAT node graph, and TSL's `If()` is a
+  // silent no-op outside `Fn()` (`keyhole-region-discard-noop-bug`) — an
+  // earlier plan to "just add an If()" would have compiled, changed nothing,
+  // measured nothing and looked like a fix. Equally, wrapping while leaving the
+  // `.toVar()` terms built in the outer scope would have hoisted them straight
+  // back out of the branch. The maths is CONSTRUCTED inside the callback, which
+  // is the only arrangement that actually skips it.
+  //
+  // Visually lossless by construction: the gated-off value is 0, and 0 is
+  // exactly what `shimmer * coverage` already produced there.
+  const shimmer = Fn(() => {
+    const out = float(0).toVar('specShimmerGated');
+    If(presence.greaterThan(float(0)), () => {
+      out.assign(buildShimmerTerms().shimmer);
+    });
+    return out;
+  })().toVar('specShimmer');
+
+  // UNGATED, for the debug material only — see buildShimmerTerms' own header.
+  // Deliberately ungated: channel 'cellular' exists to show whether the noise
+  // FIELD is alive at all, and gating it would black out everywhere the mask is
+  // unpainted — turning a "the field is dead" answer and a "there is no metal
+  // here" answer into the same picture, which is the exact failure
+  // `feedback_instruments_must_not_lie` names. The debug material is separate
+  // and only built for a picked channel, so its cost is irrelevant.
+  // (`layered` is returned by the builder but unused here — the debug channels
+  // read `cellular` and the GATED `shimmer`, which is what actually ships.)
+  const cellular = buildShimmerTerms().cellular;
+
+  // ── (combine moved into buildShimmerTerms above) ─────────────────────────
   // ── THE LIGHT ────────────────────────────────────────────────────────────
   // `buf:scene.illum` at this fragment's own screen position — the exact
   // inverse of `buildOutdoorsGate`'s screen→world mapping, so the two provably

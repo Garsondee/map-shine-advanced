@@ -184,6 +184,74 @@ export async function run(t) {
   // here means the shader is about to show a false failure on a working pack.
   ok('the bake reports status 2 — real islands, not a diagnostic colour', status.islandBakeStatus === 2);
 
+  // ── COVERAGE — the number the 2026-07-28 perf audit needs ────────────────
+  // This pass costs ~3 ms and its per-pixel shader is genuinely heavy (a 27-cell
+  // 3D Worley plus a 3D Perlin plus three shimmer layers), so TOTAL cost is
+  // decided by covered pixels. `cropWasteRatio` is what distinguishes "the AABB
+  // is tight and the shader is the problem" from "the AABB is loose and most
+  // shaded pixels have presence 0" — two cases that look identical from the
+  // cost alone and need opposite fixes.
+  //
+  // ⚠️ Pinned against the REAL producer because the first cut of this read
+  // `islandInfo.w`/`.h`, which DO NOT EXIST — the pack reports `grid` as a
+  // formatted string, so it would have silently returned null forever
+  // (`feedback_read_the_producer_never_invent_its_shape`).
+  ok(
+    'the raw grid dimensions are exposed, not just the display string',
+    status.islandPack.gridW > 0 && status.islandPack.gridH > 0
+  );
+  ok(
+    '...and agree with the formatted grid',
+    `${status.islandPack.gridW}x${status.islandPack.gridH}` === status.islandPack.grid
+  );
+
+  const cov = status.coverage;
+  ok('coverage is reported', !!cov);
+  ok('paintedFraction is a real fraction, not null', cov.paintedFraction > 0 && cov.paintedFraction <= 1);
+  ok('aabbFractionOfItem is a real fraction, not null', cov.aabbFractionOfItem > 0 && cov.aabbFractionOfItem <= 1);
+  // Two small objects in a large mask: the AABB spanning both MUST cover more
+  // of the item than the paint itself does, so the waste ratio exceeds 1. That
+  // is the whole signal — a ratio of 1 would mean the crop is perfectly tight.
+  ok('the AABB covers at least as much as the paint (ratio >= 1)', cov.cropWasteRatio >= 1);
+  ok(
+    '...and the ratio is the quotient of the two reported fractions',
+    Math.abs(cov.cropWasteRatio - cov.aabbFractionOfItem / cov.paintedFraction) < 0.15
+  );
+  ok('the note explains which way to read it', cov.note.includes('per-island'));
+
+  // ── THE PER-ISLAND ESTIMATE, THREADED END TO END (2026-07-28 audit) ───────
+  // `paintedRgba` is two solid, well-separated 8x8 boxes (64 true texels each)
+  // on a 32x32 grid — no gaps, no clustering merge (they are 10 texels apart,
+  // cluster radius is 3). Each box's own true-paint bounding box is exactly
+  // itself, so the estimate should land very close to (64+64)/(32*32) = 0.125 —
+  // proving `pack.estimatedPerIslandGridFraction` (specular-islands.js) reaches
+  // `getStatus().coverage` (specular-surface-subsystem.js) through BOTH hops
+  // (islandInfo, then the coverage closure) rather than getting dropped or
+  // recomputed wrong at either seam.
+  ok('estimatedPerIslandFractionOfItem is reported', cov.estimatedPerIslandFractionOfItem !== null);
+  ok(
+    '...and matches the hand-computed value for two solid separated boxes (128/1024 = 0.125)',
+    Math.abs(cov.estimatedPerIslandFractionOfItem - 0.125) < 0.02
+  );
+  ok(
+    'estimatedIslandWinRatio is reported and is a real ratio, not null',
+    cov.estimatedIslandWinRatio !== null && cov.estimatedIslandWinRatio > 0
+  );
+  ok(
+    '...and is exactly aabbFractionOfItem over the per-island estimate',
+    Math.abs(cov.estimatedIslandWinRatio - cov.aabbFractionOfItem / cov.estimatedPerIslandFractionOfItem) < 0.15
+  );
+
+  // An unbaked pack must report null, never a fabricated 0 — "we have not
+  // measured coverage" and "there is no metal" are different facts. The mask
+  // load is async, so a subsystem read before it resolves is deterministically
+  // pre-bake.
+  const unbaked = makeSubsystem({}).getStatus();
+  ok('an unbaked pack reports null coverage, never a fabricated 0', unbaked.coverage.paintedFraction === null);
+  ok('...and null waste ratio too', unbaked.coverage.cropWasteRatio === null);
+  ok('...and null for both new per-island fields too', unbaked.coverage.estimatedPerIslandFractionOfItem === null);
+  ok('...the win ratio too — nothing to divide by yet', unbaked.coverage.estimatedIslandWinRatio === null);
+
   // A mask with real presence but NOTHING that clusters past the size floor
   // (every speck isolated, far below `SPECULAR_MIN_ISLAND_TEXELS` even alone)
   // must report status 1 — AMBER, a data fact, never magenta ("never baked").

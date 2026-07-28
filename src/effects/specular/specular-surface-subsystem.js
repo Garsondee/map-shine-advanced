@@ -208,6 +208,14 @@ export function createSpecularSurfaceSubsystem({
       surface.setIslandBakeStatus(islandBakeStatus);
       islandInfo = {
         grid: `${pack.w}x${pack.h}`,
+        // The same two numbers UNFORMATTED, because `grid` is a display string
+        // and `getStatus().coverage` needs to divide by the real grid area.
+        // Added 2026-07-28 rather than parsing the string back out — a consumer
+        // that re-parses a formatted field is one rename away from silently
+        // reading null (`feedback_read_the_producer_never_invent_its_shape`,
+        // which this very field caught me committing again).
+        gridW: pack.w,
+        gridH: pack.h,
         islands: pack.islandCount,
         droppedSmall: pack.droppedSmall,
         // A file whose metal labels to ZERO islands still renders — every texel
@@ -223,6 +231,7 @@ export function createSpecularSurfaceSubsystem({
         // all — this number is what makes that distinguishable from "there
         // really was nothing to find" without guessing.
         preClusterComponents: pack.preClusterComponents,
+        estimatedPerIslandGridFraction: pack.estimatedPerIslandGridFraction,
       };
     } catch (err) {
       // Loud, and the effect still draws: the pack's placeholder is the global
@@ -480,6 +489,77 @@ export function createSpecularSurfaceSubsystem({
          * hue-per-object picture). Cross-checkable against the shader without
          * GPU access. */
         islandBakeStatus,
+        /**
+         * ⚠️ THE NUMBER THAT DECIDES WHETHER THE AABB CROP IS DOING ITS JOB
+         * (2026-07-28, the performance audit).
+         *
+         * This pass costs ~3 ms, ~5x its declared budget, and its per-pixel
+         * shader is genuinely heavy — a 3x3x3 = 27-cell 3D Worley plus a 3D
+         * Perlin plus three shimmer layers (9 hashes, 3 sin, 3 cos, 3 exp).
+         * With that per-pixel cost fixed, TOTAL cost is decided almost entirely
+         * by COVERED PIXELS, which is exactly what `cropGeometry` exists to
+         * minimise (this module's own header: "Effects.md Law 6: cost scales
+         * with COVERED pixels, and metal covers a few percent of a typical
+         * map").
+         *
+         * But an AABB is only as tight as the paint is CLUSTERED. A brass door
+         * alone crops beautifully. A brass door in one corner and a coin pile
+         * in the opposite corner produce an AABB covering most of the map while
+         * `paintedFraction` stays at a few percent — every pixel in between
+         * paying the full 27-cell shader to be multiplied by a `presence` of
+         * zero. Those two cases are INDISTINGUISHABLE from the cost alone and
+         * are told apart only by comparing these two numbers.
+         *
+         * READ IT AS: `paintedFraction` is how much metal there really is;
+         * `aabbFractionOfItem` is how much of the item the pass actually shades.
+         * They should be close. A large ratio between them (`cropWasteRatio`)
+         * is wasted fill, and is the case for per-island geometry rather than
+         * one AABB quad — the island labels needed to build it are already
+         * computed during the pack bake.
+         *
+         * Derived from numbers both producers already return, so this costs
+         * nothing per frame and is computed only when the report is read.
+         */
+        coverage: (() => {
+          const painted =
+            islandInfo && Number.isFinite(islandInfo.labelledTexels) && islandInfo.gridW > 0 && islandInfo.gridH > 0
+              ? islandInfo.labelledTexels / (islandInfo.gridW * islandInfo.gridH)
+              : null;
+          const b = loadedContentBoundsUv;
+          // UV bounds are a fraction of the ITEM, so their area IS the fraction
+          // of the item the cropped quad covers.
+          const aabb =
+            b && Number.isFinite(b.minU) ? Math.max(0, b.maxU - b.minU) * Math.max(0, b.maxV - b.minV) : null;
+          // The REAL answer to "is per-island geometry worth building", not a
+          // guessed threshold. See specular-islands.js's own header on
+          // `estimatedPerIslandGridFraction` for why it uses the true-painted
+          // criterion (matching how `aabb` above is computed) rather than the
+          // clustered or dilated footprints the same bake also produces.
+          const perIsland =
+            islandInfo && Number.isFinite(islandInfo.estimatedPerIslandGridFraction)
+              ? islandInfo.estimatedPerIslandGridFraction
+              : null;
+          const islandWinRatio =
+            perIsland !== null && aabb !== null && perIsland > 0 ? Math.round((aabb / perIsland) * 10) / 10 : null;
+          return {
+            paintedFraction: painted === null ? null : Math.round(painted * 10000) / 10000,
+            aabbFractionOfItem: aabb === null ? null : Math.round(aabb * 10000) / 10000,
+            cropWasteRatio:
+              painted !== null && aabb !== null && painted > 0 ? Math.round((aabb / painted) * 10) / 10 : null,
+            estimatedPerIslandFractionOfItem: perIsland === null ? null : Math.round(perIsland * 10000) / 10000,
+            estimatedIslandWinRatio: islandWinRatio,
+            note:
+              'paintedFraction = metal texels / mask grid; aabbFractionOfItem = what the CURRENT single cropped ' +
+              'quad actually shades; estimatedPerIslandFractionOfItem = what separate per-island quads would ' +
+              'shade instead (a bake-time estimate from the label grid — see docs/planning/Performance-Insights.md ' +
+              '§3 — NOT YET BUILT for rendering). estimatedIslandWinRatio (aabbFractionOfItem over that) is the ' +
+              'real, computed upper bound on the win from building it — ignores the small per-draw-call overhead ' +
+              'of N quads vs 1, which is cheap next to fill on this GPU-bound pass. cropWasteRatio ' +
+              '(aabbFractionOfItem / paintedFraction) is the CRUDER older signal, kept as a sanity check; ' +
+              'estimatedIslandWinRatio is the number that actually answers "is per-island worth it". A null ' +
+              'means the pack has not baked yet, not that coverage is zero.',
+          };
+        })(),
         outdoorsGate: surface.outdoorsGateCompiled,
         floorGate: surface.floorGateCompiled,
         contentBoundsUv: loadedContentBoundsUv,

@@ -115,6 +115,9 @@ import {
   resolveRendererRequiredLimits,
   setDarknessRealism,
   getDarknessRealism,
+  setAlbedoClarity,
+  getAlbedoClarity,
+  resetAlbedoClarity,
   setUiShadow,
   getUiShadow,
   sampleVtPanViewerIllumPixel,
@@ -306,6 +309,16 @@ MapShine.THREE = THREE; // single Three instance for the whole V3 tree
 // vt-pan-viewer.js#setDarknessRealism / environmental-light.js.
 MapShine.setDarknessRealism = setDarknessRealism;
 MapShine.getDarknessRealism = getDarknessRealism;
+// ALBEDO CLARITY (2026-07-28, author-requested tuning surface): the zoom-out
+// sharpness repair. `MapShine.setAlbedoClarity({ sharpness, gateLo, gateHi,
+// farLo, farHi, farFloor })` — every field optional, takes effect on the next
+// frame with no reload (the uniforms are shared across every item on screen).
+// `getAlbedoClarity()` reports the live values plus whether they are bound to a
+// built material yet; `resetAlbedoClarity()` restores the shipped defaults.
+// See buildAlbedoClarityNode's section header in vt-pan-viewer.js.
+MapShine.setAlbedoClarity = setAlbedoClarity;
+MapShine.getAlbedoClarity = getAlbedoClarity;
+MapShine.resetAlbedoClarity = resetAlbedoClarity;
 // UI-CAST WINDOW SHADOWS (2026-07-20): open character sheets / journals / context
 // menus cast a soft, offset shadow onto the map. As of Stage A it is MSA's first
 // REGISTERED effect — declared as data (effects/ui-window-shadow.js), driven

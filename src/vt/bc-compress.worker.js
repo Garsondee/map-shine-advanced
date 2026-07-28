@@ -35,14 +35,39 @@
  * `generateMipmaps` flag, and there is no compressed-format box-filter pass in
  * the backend) — a single-level BC texture sampled at minification is plain
  * aliasing, which is exactly the gap PIXI's own mipmapped textures don't show.
- * So every level below 0 is encoded here too, in `encodeMipLevel`: each level
- * is downsampled DIRECTLY from the original decoded bitmap (never from the
- * previous mip — one clean resize per level, no compounding blur, the same
- * `imageSmoothingQuality:'high'` technique the raw-fallback path already uses
- * for its own downscale), banded through the SAME memory-bounded strip driver
- * as level 0 so no level, however large, ever holds a full-resolution buffer.
- * Level sizes come from `computeMipChainDims` (block-compress.js) — pure,
- * Node-tested geometry proven to match what a real GPU allocates per level.
+ * So every level below 0 is encoded here too. Level sizes come from
+ * `computeMipChainDims` (block-compress.js) — pure, Node-tested geometry proven
+ * to match what a real GPU allocates per level.
+ *
+ * HOW THOSE LEVELS ARE REDUCED (2026-07-28, second author round: "large zoom out
+ * makes areas look a bit pixelated" AND "the edges of tiles, where the alpha
+ * might be less than 100% are very degraded when I zoom out"). This used to
+ * scale each level straight off the source bitmap with `drawImage` +
+ * `imageSmoothingQuality:'high'`. That is gone, for two independent reasons:
+ *
+ *  - QUALITY. `drawImage`'s kernel is unspecified, varies by Chrome version, and
+ *    for large reductions has historically degraded to mipmap+bilinear — i.e.
+ *    aliasing, which the clarity sharpen then amplifies into visible pixelation.
+ *    `mip-resample.js` does an explicit Lanczos-2 reduction instead: sharper
+ *    than the box filter PIXI's `gl.generateMipmap` uses, and deterministic and
+ *    Node-testable rather than a browser black box.
+ *
+ *  - ALPHA. A 2D canvas stores premultiplied and `getImageData`
+ *    un-premultiplies, so transparent texels came back as RGB 0 whatever the
+ *    artist painted — and since the GPU filters straight-alpha RGBA without
+ *    weighting by coverage, every soft tile edge was being dragged toward black,
+ *    worse the coarser the mip. The reducer filters in premultiplied space and
+ *    dilates recovered colour outward into the transparent region. See
+ *    mip-resample.js's header for the full mechanism.
+ *
+ * The chain now CASCADES (level i from level i-1) rather than re-reducing the
+ * source each time: an explicit direct 16x reduction would need a vertical
+ * kernel spanning the whole image (~182 MB held for a 6750² floor), while a
+ * halve always spans 8 source rows and stays banded. Level 1 reads the source
+ * through the same band canvas as level 0, widened to the padded level-0 grid so
+ * the art keeps a constant footprint fraction at every level — which is also
+ * what makes the material's single `uvScale` correct on levels below 0, where it
+ * previously drifted by about two texels at the far edge.
  *
  * PROTOCOL: main posts `{ id, src }`; this replies with one of
  *   { id, ok:true, format:'bc1'|'bc7', levels:[{width,height,blocks:ArrayBuffer}], width, height, cached }
@@ -61,6 +86,11 @@
  */
 import { encodeStriped, computeMipChainDims } from './block-compress.js';
 import { coarseAlphaGridDims, extractAlphaGrid } from './coarse-alpha.js';
+// The mip reducer (Lanczos-2, premultiplied, dilated). Replaced the
+// OffscreenCanvas `drawImage` resize this file used to rely on — see
+// mip-resample.js's header for the two author-reported defects that motivated
+// it ("pixelated at large zoom out", "tile edges very degraded when I zoom out").
+import { halveRGBA } from './mip-resample.js';
 
 // Band height for the memory-bounded encode: rows are pulled and encoded
 // STRIP_ROWS at a time (rounded to a multiple of 4 by encodeStriped). 512 rows of
@@ -79,7 +109,11 @@ const STORE = 'blocks';
 // a `levels` array — a v3 record has no `levels` and would otherwise be handed
 // to the consumer as a texture with no mip chain, silently reproducing the bug
 // this version exists to fix.
-const CACHE_VERSION = 4;
+// v5 (2026-07-28, the clarity round): the mip chain is now Lanczos-2 reduced in
+// PREMULTIPLIED space with dilated transparent RGB (mip-resample.js), not a
+// canvas `drawImage` resize. Every v4 record holds visibly different — softer,
+// and black-fringed at every alpha edge — mip data, so they must all miss.
+const CACHE_VERSION = 5;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two
@@ -123,33 +157,88 @@ async function cachePut(key, record) {
 }
 
 /**
- * Encode ONE mip level below level 0. Scales directly from the ORIGINAL
- * bitmap — never from a previously-encoded mip — to `levelW x levelH`, banded
- * through the same `encodeStriped` driver level 0 uses, so this level (however
- * large) never holds a full-resolution buffer either. See this file's header
- * for why "always from the source" beats progressive halving here.
- * @param {ImageBitmap} bmp - the full-resolution source, still open.
- * @param {number} w @param {number} h - bmp's own pixel size.
- * @param {number} levelW @param {number} levelH - this level's LOGICAL size
- *   (pre-block-padding — `computeMipChainDims`' logicalWidth/logicalHeight).
- * @param {'bc1'|'bc7'} format
- * @returns {Uint8Array} this level's encoded blocks, padded to the block grid.
+ * A band reader over the source bitmap WIDENED to the padded level-0 grid, for
+ * `halveRGBA` to cascade from.
+ *
+ * WHY PAD BEFORE REDUCING, rather than reducing the raw w×h and padding after:
+ * the GPU allocates mip level i as `padW0 >> i`, so the chain has to descend
+ * from the PADDED base or every level's size drifts from what was allocated.
+ * Reducing the padded grid also keeps the image's own footprint at a CONSTANT
+ * fraction of every level — level 0 holds the art in 6750 of 6752 texels, level
+ * 1 in 3375 of 3376, and those are the same ratio. That matters because the
+ * material applies ONE `uvScale` (computed from level 0) to every level: before
+ * this, levels 1+ held the art across their FULL width, so the uv crop was
+ * fractionally wrong on every level but the first — about two texels of drift at
+ * the far edge, ghosting between levels wherever trilinear blended them.
+ *
+ * Rows past the image are edge-clamped copies of the last real row, columns past
+ * it copies of the last real column — the same clamp `encodeStriped` already
+ * applies at the block grid, so padding introduces no new colour anywhere.
+ *
+ * @param {(y:number, sh:number)=>Uint8Array|Uint8ClampedArray} readStrip - the
+ *   caller's w-wide band reader (the shared band canvas).
+ * @param {number} w @param {number} h - the image's own size.
+ * @param {number} padW0 - the block-padded level-0 WIDTH. The padded HEIGHT is
+ *   not needed here: `halveRGBA` is told the padded height as its source height
+ *   and clamps row requests itself, so this reader only has to answer "what is
+ *   in row y", which for any y past `h` is the last real row.
+ * @returns {(y0:number, count:number)=>Uint8Array}
  */
-function encodeMipLevel(bmp, w, h, levelW, levelH, format) {
-  const bandH = Math.min(STRIP_ROWS, levelH);
-  const bandCanvas = new OffscreenCanvas(levelW, bandH);
-  const bandCtx = bandCanvas.getContext('2d', { willReadFrequently: true });
-  bandCtx.imageSmoothingEnabled = true;
-  bandCtx.imageSmoothingQuality = 'high';
-  const readStrip = (y, sh) => {
-    bandCtx.clearRect(0, 0, levelW, sh);
-    // The source rows that scale down to this level's rows [y, y+sh).
-    const srcY = (y / levelH) * h;
-    const srcH = (sh / levelH) * h;
-    bandCtx.drawImage(bmp, 0, srcY, w, srcH, 0, 0, levelW, sh);
-    return bandCtx.getImageData(0, 0, levelW, sh).data;
+function makePaddedRowReader(readStrip, w, h, padW0) {
+  // ONE scratch buffer, reused. halveRGBA holds the returned array only until it
+  // asks for the next band, so overwriting in place is safe and keeps this from
+  // churning ~14 MB per band through the GC.
+  let scratch = null;
+  return (y0, count) => {
+    const need = count * padW0 * 4;
+    if (scratch === null || scratch.length < need) scratch = new Uint8Array(need);
+    const realRows = Math.max(0, Math.min(count, h - y0));
+    if (realRows > 0) {
+      const band = readStrip(y0, realRows);
+      for (let r = 0; r < realRows; r++) {
+        const dstRow = r * padW0 * 4;
+        scratch.set(band.subarray(r * w * 4, (r + 1) * w * 4), dstRow);
+        const lastCol = dstRow + (w - 1) * 4;
+        for (let x = w; x < padW0; x++) {
+          const d = dstRow + x * 4;
+          scratch[d] = scratch[lastCol];
+          scratch[d + 1] = scratch[lastCol + 1];
+          scratch[d + 2] = scratch[lastCol + 2];
+          scratch[d + 3] = scratch[lastCol + 3];
+        }
+      }
+    }
+    if (realRows < count) {
+      // Rows past the image. Normally the band still contains real rows to clamp
+      // from (padH0 - h <= 3 while bands are STRIP_ROWS deep); the fallback
+      // re-reads the last real row for the degenerate tiny-image case.
+      let srcRow;
+      if (realRows > 0) {
+        srcRow = (realRows - 1) * padW0 * 4;
+      } else {
+        const tail = readStrip(h - 1, 1);
+        scratch.set(tail.subarray(0, w * 4), 0);
+        const lastCol = (w - 1) * 4;
+        for (let x = w; x < padW0; x++) {
+          const d = x * 4;
+          scratch[d] = scratch[lastCol];
+          scratch[d + 1] = scratch[lastCol + 1];
+          scratch[d + 2] = scratch[lastCol + 2];
+          scratch[d + 3] = scratch[lastCol + 3];
+        }
+        srcRow = 0;
+      }
+      for (let r = Math.max(realRows, 1); r < count; r++) {
+        scratch.copyWithin(r * padW0 * 4, srcRow, srcRow + padW0 * 4);
+      }
+    }
+    return scratch.subarray(0, need);
   };
-  return encodeStriped(readStrip, levelW, levelH, format, STRIP_ROWS);
+}
+
+/** A band reader over an already-resident level buffer. */
+function levelRowReader(level) {
+  return (y0, count) => level.data.subarray(y0 * level.width * 4, (y0 + count) * level.width * 4);
 }
 
 /**
@@ -293,9 +382,33 @@ async function handle(src) {
   const padH0 = Math.ceil(h / 4) * 4;
   const dims = computeMipChainDims(padW0, padH0);
   const levels = [{ width: dims[0].width, height: dims[0].height, blocks: level0Blocks.buffer }];
+
+  // CASCADE — level i reduced from level i-1, not re-reduced from the source.
+  // The old filter went back to the source every time to avoid compounding blur.
+  // That is a real concern for repeated BILINEAR halving; it is not one for a
+  // windowed sinc, and it is incompatible with an explicit kernel anyway: a
+  // direct 16x reduction needs a vertical kernel spanning the whole image, which
+  // for a 6750² floor means holding ~182 MB at once. A halve always spans 8
+  // source rows, so every step stays banded. Peak here is one held level (~46 MB
+  // for the first) plus one band (~14 MB) — well inside the memory discipline
+  // keyhole-device-loss-large-map exists to protect.
+  let prev = null;
   for (let i = 1; i < dims.length; i++) {
     const d = dims[i];
-    const levelBlocks = encodeMipLevel(bmp, w, h, d.logicalWidth, d.logicalHeight, format);
+    prev =
+      prev === null
+        ? halveRGBA(makePaddedRowReader(readStrip, w, h, padW0), padW0, padH0, { bandRows: STRIP_ROWS })
+        : halveRGBA(levelRowReader(prev), prev.width, prev.height, { bandRows: prev.height });
+    // FAIL LOUD on a size disagreement rather than shipping a chain the GPU will
+    // reinterpret at its own allocated sizes. Both sides descend by >>1 from
+    // padW0/padH0 so this cannot drift today — which is precisely why a silent
+    // future divergence would be so expensive to find.
+    if (prev.width !== d.logicalWidth || prev.height !== d.logicalHeight) {
+      throw new Error(
+        `mip level ${i} size drift: reduced ${prev.width}x${prev.height}, chain expects ${d.logicalWidth}x${d.logicalHeight}`
+      );
+    }
+    const levelBlocks = encodeStriped(levelRowReader(prev), d.logicalWidth, d.logicalHeight, format, STRIP_ROWS);
     levels.push({ width: d.width, height: d.height, blocks: levelBlocks.buffer });
   }
   bmp.close();

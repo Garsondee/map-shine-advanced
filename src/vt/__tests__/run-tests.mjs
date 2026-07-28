@@ -13,6 +13,7 @@ import { run as runViewState } from './view-state.test.mjs';
 import { run as runTextureLimits } from './texture-limits.test.mjs';
 import { run as runBlockCompress } from './block-compress.test.mjs';
 import { run as runCoarseAlpha } from './coarse-alpha.test.mjs';
+import { run as runMipResample } from './mip-resample.test.mjs';
 import { run as runSceneAttr } from './scene-attr.test.mjs';
 import { run as runMaskImage } from './mask-image.test.mjs';
 import { run as runVtPanViewerDiagnostics } from './vt-pan-viewer-diagnostics.test.mjs';
@@ -57,6 +58,7 @@ const suites = [
   ['texture-limits', runTextureLimits],
   ['block-compress', runBlockCompress],
   ['coarse-alpha', runCoarseAlpha],
+  ['mip-resample', runMipResample],
   ['scene-attr', runSceneAttr],
   ['mask-image', runMaskImage],
   ['vt-pan-viewer-diagnostics', runVtPanViewerDiagnostics],

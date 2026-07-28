@@ -64,6 +64,12 @@ export {
   soakZoomStep,
   setDarknessRealism,
   getDarknessRealism,
+  // ALBEDO CLARITY — the zoom-out sharpness repair (see buildAlbedoClarityNode's
+  // section header in vt-pan-viewer.js). Exposed so the look is tunable live
+  // rather than only at a rebuild.
+  setAlbedoClarity,
+  getAlbedoClarity,
+  resetAlbedoClarity,
   setUiShadow,
   getUiShadow,
 } from './vt-pan-viewer.js';

@@ -1566,11 +1566,14 @@ function install() {
   // (it owns the texture sizes a placement needs) and injected back in below.
   /* eslint-disable-next-line prefer-const -- reassigned by the viewer's resolver callback below */
   let fluidItemCorners = () => null;
+  /* eslint-disable-next-line prefer-const -- reassigned by the viewer's resolver callback below */
+  let fluidItemRenderOrder = () => null;
   const { getFluidMaskItems } = createFluidSeams({
     maskAuthority,
     getItems: () => coverItems,
     getFloors: () => lastKnownFloors,
     getItemCorners: (item) => fluidItemCorners(item),
+    getItemRenderOrder: (item) => fluidItemRenderOrder(item),
   });
   const fluid = createFluidRegistration({
     effectRegistry,
@@ -3944,6 +3947,12 @@ function install() {
         // texture sizes.
         onFluidCornersResolver: (fn) => {
           fluidItemCorners = fn;
+        },
+        // Same handback, for the item's CURRENT renderOrder — see
+        // `createFluidSeams`'s own `getItemRenderOrder` doc for why this can't
+        // simply read `item.renderOrder` off `coverItems` directly.
+        onFluidRenderOrderResolver: (fn) => {
+          fluidItemRenderOrder = fn;
         },
         getSpecularMaskUrl,
         getSpecularMaskRect,

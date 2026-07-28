@@ -796,6 +796,7 @@ export async function startVtPanViewer({
   getFluidMaskItems,
   getFluidRenderState,
   onFluidCornersResolver,
+  onFluidRenderOrderResolver,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
@@ -891,6 +892,7 @@ export async function startVtPanViewer({
   // effect is inert by construction rather than by a flag.
   getFluidMaskItems ??= () => [];
   onFluidCornersResolver ??= () => {};
+  onFluidRenderOrderResolver ??= () => {};
   // Deliberately NOT defaulted. `feedback_seam_default_hides_unwired`: water
   // shipped its render-state seam declared, defaulted and never passed, and the
   // only symptom was that every control silently did nothing while every test
@@ -1669,6 +1671,11 @@ export async function startVtPanViewer({
       uiShadowVisNode: uiShadow.visNode,
       outdoorsTexture,
       sunShadowTexture: sunShadows.texture,
+      // Same attachment specular/window already read — see their own
+      // `attrTexture:` call sites. Lets the ambient fill refuse to apply a
+      // shadow field to a floor it wasn't baked for (setSunShadowFloorIndex,
+      // pushed every frame right after sunShadows.maybeBake).
+      attrTexture: sceneColor.textures?.[1] ?? null,
     });
     envLight.setOutdoorsRect(outdoorsRect);
     // The one-time initial push (subsequent pushes happen internally, from
@@ -3886,6 +3893,11 @@ export async function startVtPanViewer({
       // BEFORE illumQuad below, because that fill samples the field this writes.
       profiler?.begin(Z.lightSunBake);
       sunShadows.maybeBake(view?.floorIndex ?? 0);
+      // Every frame, not just on a real rebake: the field's CONTENT only
+      // changes when maybeBake actually rebakes, but the floor it's attributed
+      // to must always match `getBakedFloorIndex()`'s current answer, and this
+      // push is cheap (one scalar uniform write) either way.
+      envLight.setSunShadowFloorIndex(sunShadows.getBakedFloorIndex());
       profiler?.end(Z.lightSunBake);
 
       // THE WATER BODY PACK — same posture, same reason it lives in the FRAME
@@ -5344,6 +5356,17 @@ export async function startVtPanViewer({
       return computeQuadCorners(computeItemPlacement(item, size, dimensions));
     });
 
+    // THE ITEM's OWN RENDER ORDER, same resolver shape as corners above and
+    // for the same reason: `sortByLayer`'s stamped integer lives on the
+    // viewer's own draw-list items (`refreshWholeImageItem` copies it onto
+    // `itemStates` each residency pass), never on boot's unfiltered
+    // `coverItems` fluid's seam otherwise reads. Null defers the item to a
+    // later frame exactly like a not-yet-resolved corner does.
+    onFluidRenderOrderResolver((item) => {
+      const state = itemStates.get(item.id);
+      return typeof state?.renderOrder === 'number' ? state.renderOrder : null;
+    });
+
     // ── SHINE, tiers 0-2 (effects/specular/specular-surface-subsystem.js) ──
     // Constructed beside water's surface for the same trap-#4 reason, but it
     // does NOT take `scene`: it owns its own, because it reads buf:scene.illum
@@ -6713,6 +6736,11 @@ export async function startVtPanViewer({
       const wi = state.wholeImage;
       if (!wi) return;
       wi.renderOrder = item.renderOrder;
+      // Persisted on the state object too (not just the mesh) so an item-agnostic
+      // effect attached to THIS item — fluid, currently — can look up "where does
+      // my host actually sort right now" via `itemStates` between residency
+      // passes, the same way `onFluidCornersResolver` already looks up placement.
+      state.renderOrder = item.renderOrder;
       // Read the vegetation state ONCE per item, and only when this item
       // actually carries a shadow — the overwhelming majority of items are not
       // vegetation and must pay nothing for this. NOTE: uniform SYNC (motion/

@@ -91,33 +91,48 @@ import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js
 const log = createLogger('FluidSurface');
 
 /**
- * Render order — both fluid passes sit in the same reserved fractional band
- * water and the candle flame already use: `scene/layer-order.js#sortByLayer`
- * stamps the floor background at index 0 and every real item (a tile, a
- * token) at an INTEGER index ≥ 1, so anything in the open interval `(0, 1)`
- * is guaranteed, by construction, to draw after the background and before
- * every item — no per-tile lookup needed. Both constants below stay well
- * inside that band.
+ * Render order — HOST-RELATIVE, not a fixed global band.
  *
- * ⚠️ **CORRECTED 2026-07-27.** This file's own comment used to claim the
- * emissive pass draws "over" the masked tile's art. It does not — see
- * `fluid-render.js`'s header for the full account of that mistake and why the
- * actual number (< 1) was already correct despite the wrong story about it.
- * ABSORB draws first (the lower value), EMIT second, so the emissive glow is
- * never itself darkened by the absorption term it is paired with — that
- * ordering is between the two fluid passes, not between fluid and the tile.
+ * ⚠️ **CORRECTED 2026-07-28.** Both passes used to sit in a fixed global
+ * constant (`0.59`/`0.6`), reasoning that since `scene/layer-order.js
+ * #sortByLayer` stamps the floor background at index 0 and every real item at
+ * an INTEGER index ≥ 1, anything in the open interval `(0, 1)` draws after the
+ * background and before EVERY item, "no per-tile lookup needed." That is true
+ * but answers the wrong question: it draws fluid before every item, full
+ * stop — not before its OWN host specifically. For a ground-level host with
+ * nothing else drawn ahead of it, those two are indistinguishable, which is
+ * why one test tile looked correct. For an OVERHEAD host (this floor's own
+ * high-elevation content — the exact case the author's map uses), every item
+ * that sorts BETWEEN the background and that host now sits between fluid and
+ * its host too, breaking the ordering the tile's own art depends on to reveal
+ * the glow through its glass. `effects/vegetation-shadow-subsystem.js
+ * #VEG_SHADOW_RENDER_ORDER_MAGNITUDE` already solves this correctly for an
+ * analogous "effect painted relative to the item it's ON" case — small
+ * MAGNITUDES added to (or subtracted from) the HOST's OWN `renderOrder`, not
+ * a constant. This mirrors that pattern.
+ *
+ * The sign: the pre-correction constants were already verified (author,
+ * 2026-07-27, "fluid moving around in pipes") to work correctly when BELOW
+ * (drawn before) their host — the host's own art has alpha cutouts at the
+ * tube shape, revealing the glow drawn beneath it. Preserved here as a LOCAL
+ * relationship instead of a global one: `hostRenderOrder - magnitude`, never
+ * `+`. ABSORB still draws first (the larger magnitude subtracted = the
+ * smaller renderOrder = drawn first), EMIT second, so the emissive glow is
+ * never itself darkened by the absorption term it is paired with — exactly
+ * as before, just anchored to the host instead of to the scene background.
  */
-const FLUID_RENDER_ORDER_ABSORB = 0.59;
-const FLUID_RENDER_ORDER_EMIT = 0.6;
+const FLUID_RENDER_ORDER_ABSORB_MAGNITUDE = 0.02;
+const FLUID_RENDER_ORDER_EMIT_MAGNITUDE = 0.01;
 
 /**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
  * @param {*} args.scene - the MAIN scene. Must already exist (see header).
- * @param {(floorIndex: number) => Array<{id: string, url: string, corners: Array<{x:number,y:number}>}>} args.getFluidMaskItems -
+ * @param {(floorIndex: number) => Array<{id: string, url: string, corners: Array<{x:number,y:number}>, renderOrder: number|null}>} args.getFluidMaskItems -
  *   every item VISIBLE ON THIS FLOOR that has its own authored fluid mask, with
- *   the world-space corners of its quad. Empty array = nothing painted, which
- *   is silently correct (fluid is not a `required` kind).
+ *   the world-space corners of its quad and its CURRENT `renderOrder` (null
+ *   while unresolved — see `createFluidSeams`'s own doc for why). Empty array =
+ *   nothing painted, which is silently correct (fluid is not a `required` kind).
  * @param {(url: string) => Promise<object|null>} args.loadMaskImage -
  *   `vt/mask-image.js`'s loader, injected for the directory-wall reason.
  * @param {(data: Float32Array, w: number, h: number) => *} args.createPackTexture -
@@ -360,14 +375,20 @@ export function createFluidSurfaceSubsystem({
     });
     entry.geometry = geometry;
 
+    // Host-relative, not a fixed global band — see FLUID_RENDER_ORDER_*
+    // _MAGNITUDE's own header. A null/unresolved host renderOrder falls back
+    // to 0 (the scene background's own slot), matching this file's prior
+    // fixed-band behavior for the one case that can't yet be positioned.
+    const hostRenderOrder = typeof entry.renderOrder === 'number' ? entry.renderOrder : 0;
+
     entry.absorbMesh = new THREE.Mesh(geometry, entry.built.absorbMaterial);
     entry.absorbMesh.name = `FluidAbsorb_${entry.id}`;
-    entry.absorbMesh.renderOrder = FLUID_RENDER_ORDER_ABSORB;
+    entry.absorbMesh.renderOrder = hostRenderOrder - FLUID_RENDER_ORDER_ABSORB_MAGNITUDE;
     entry.absorbMesh.frustumCulled = false;
 
     entry.emitMesh = new THREE.Mesh(geometry, entry.built.emitMaterial);
     entry.emitMesh.name = `FluidEmit_${entry.id}`;
-    entry.emitMesh.renderOrder = FLUID_RENDER_ORDER_EMIT;
+    entry.emitMesh.renderOrder = hostRenderOrder - FLUID_RENDER_ORDER_EMIT_MAGNITUDE;
     entry.emitMesh.frustumCulled = false;
 
     scene.add(entry.absorbMesh);
@@ -439,6 +460,7 @@ export function createFluidSurfaceSubsystem({
           id: item.id,
           url: null,
           corners: item.corners,
+          renderOrder: item.renderOrder,
           net: null,
           pack: null,
           absorbMesh: null,
@@ -460,6 +482,18 @@ export function createFluidSurfaceSubsystem({
           simTubeCount: 0,
         };
         entries.set(item.id, entry);
+      }
+      // The host's renderOrder can change without its url or corners doing so
+      // (a floor re-sort — e.g. another item's elevation changes). Refresh it,
+      // and the live meshes if they already exist, every sync — cheap (a
+      // couple of field writes), and mirrors `refreshWholeImageItem`'s own
+      // unconditional `mesh.renderOrder = item.renderOrder` for the same
+      // reason. A null this frame (host not yet resolved) never clobbers a
+      // previously-good value.
+      if (typeof item.renderOrder === 'number' && entry.renderOrder !== item.renderOrder) {
+        entry.renderOrder = item.renderOrder;
+        if (entry.absorbMesh) entry.absorbMesh.renderOrder = entry.renderOrder - FLUID_RENDER_ORDER_ABSORB_MAGNITUDE;
+        if (entry.emitMesh) entry.emitMesh.renderOrder = entry.renderOrder - FLUID_RENDER_ORDER_EMIT_MAGNITUDE;
       }
       if (entry.url !== item.url) {
         entry.url = item.url;

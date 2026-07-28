@@ -487,6 +487,19 @@ export function createSunShadowSubsystem({
         maxY: casterRect.y + casterRect.height,
       };
     },
+    /** Which floor `texture`'s field currently holds DATA for — set by the
+     * most recent `maybeBake`, even on a call that skipped an actual rebake
+     * (the field's existing content is still correctly attributed to this
+     * floor in that case). The caller pushes this into
+     * `envLight.setSunShadowFloorIndex` every frame, right after `maybeBake`,
+     * so the ambient fill can refuse to apply this field to a DIFFERENT
+     * floor's own content drawn in the same multi-floor frame (KNOWN-REMAINING
+     * gap in `Sun-Shadows-Rethink.md` §5 — this is that fix's data source). -1
+     * before the first bake ever runs, which correctly matches no real floor.
+     */
+    getBakedFloorIndex() {
+      return casterFieldFloor;
+    },
     maybeBake,
     /**
      * The fullscreen debug quad to draw INSTEAD of the present pass, or null

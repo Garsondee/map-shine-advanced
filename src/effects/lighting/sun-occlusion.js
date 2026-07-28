@@ -237,7 +237,32 @@ export function marchVisibility({
   // (docs/planning/Sun-Shadows-Rethink.md §4b). Overhead's own coverage still
   // marches normally through `coverage` below — only the zero-distance
   // self-check excludes it.
-  let occlusion = clamp01(sampleField(x, y).floating ?? 0);
+  const here0 = sampleField(x, y);
+  let occlusion = clamp01(here0.floating ?? 0);
+
+  // ⚠️ ROUND TWO (2026-07-28, author: building AND overhead shadows both
+  // render on top of the overhead tile producing them) — see the identical
+  // comment in sun-occlusion-render.js, the GPU transcription of this exact
+  // function. `occlusion`'s own d=0 seed above only ever excluded `floating`
+  // (sky-reach) at the exact starting point; `coverage`/`heightPx` below were
+  // never excluded, at ANY station, so a caster wider than a few march steps
+  // reads its own body again a few steps in and shadows its own downstream
+  // half out to its own natural throw distance. `height0` is this pixel's own
+  // height at d=0 — a later station only counts as a genuinely NEW blocker if
+  // it exceeds THAT, not just the ray height. Open ground has `height0 = 0`,
+  // so `Math.max(rayHeight, 0) === rayHeight` — unchanged from before.
+  //
+  // ⚠️ ROUND FOUR, SHARPENED (2026-07-28, author: the fix above closed the
+  // self-shadow but opened a visible GAP between a building and its own
+  // shadow) — see {@link SELF_HEIGHT_SHARPEN_LOW}'s own header for the full
+  // mechanism. Raw `heightPx` here can be a BLURRED, partial reading for a
+  // receiver that is genuinely separate ground near a wall's true edge, not
+  // actually "self" — sharpened by this same pixel's own coverage confidence
+  // ({@link sharpenSelfCoverage01}) so only a receiver CONFIDENTLY inside a
+  // caster's own footprint gets the floor; one just outside a real edge
+  // reads `coverage` well under 1 and gets `height0 = 0`, restoring full
+  // contact-hardening exactly where a shadow should be strongest.
+  const height0 = (here0.heightPx ?? 0) * sharpenSelfCoverage01(here0.coverage ?? 0);
 
   const span = maxThrowPx({ maxCasterHeightPx, elevationDeg });
   if (span >= MIN_THROW_PX) {
@@ -250,8 +275,9 @@ export function marchVisibility({
     for (let i = 1; i <= n && occlusion < 1; i++) {
       const d = i * step;
       // The sun ray's height above the ground plane at this distance. A blocker
-      // must be TALLER than this to be between the pixel and the sun.
-      const rayHeight = d * tanElev;
+      // must be TALLER than this — AND taller than this pixel's own height at
+      // d=0 (the self-shadow guard above) — to be between the pixel and the sun.
+      const rayHeight = Math.max(d * tanElev, height0);
       const at = sampleField(x + dir.x * d, y + dir.y * d);
       const coverage = clamp01(at.coverage ?? 0);
       if (coverage <= 0) continue;
@@ -397,6 +423,44 @@ export function angleDeltaDeg(a, b) {
 export const GATE_SHARPEN_LOW = 0.12;
 export const GATE_SHARPEN_HIGH = 0.35;
 
+/**
+ * THE SELF-SHADOW GUARD'S OWN SHARPENING (2026-07-28, ROUND FOUR — author:
+ * "no longer above the light fixture but now there is a noticeable gap
+ * between the building and the shadows that wasn't there before").
+ *
+ * The self-shadow guard ([[feedback_elevation_is_sort_key_not_offset]]'s
+ * "ROUND THREE") reads THIS pixel's own height at d=0 (`height0`) and floors
+ * every march station's blocker test with it, so a caster cannot shadow its
+ * own footprint. The caster texture is deliberately LINEAR-filtered
+ * (`bakeCasterTexture`'s own header: a silhouette edge must read as a soft
+ * RAMP, which the march's OTHER contact-hardening depends on) — so a
+ * receiver standing on genuinely SEPARATE ground, close enough to a wall's
+ * true edge to share a blurred texel with it, reads a PARTIAL, nonzero
+ * height0 that is not really "self" at all. Unsharpened, that partial floor
+ * weakens or erases the shadow exactly at the contact point — precisely the
+ * "gap between the building and its own shadow" this exists to close. This
+ * is the SAME coarse-grid-blur shape {@link GATE_SHARPEN_LOW}/
+ * {@link GATE_SHARPEN_HIGH} already collapse for the receiver gate, applied
+ * here to the self-shadow guard's own coverage read instead of copied wholesale
+ * — separate constants because the two fields' blur radii are not guaranteed
+ * to match (different source data, possibly different effective resolution).
+ *
+ * ⚠️ RETUNED (2026-07-28, same day, second live pass): first shipped at the
+ * SAME values as `GATE_SHARPEN_LOW`/`HIGH` (0.12/0.35) — author confirmed
+ * this helped (the gap got visibly smaller) but did not close it, meaning
+ * this field's own blur reaches further than the `_Outdoors` gate's does at
+ * those thresholds. Raised well above the receiver gate's own values: a
+ * caster's genuine, non-edge INTERIOR reads coverage close to 1.0, so there
+ * is wide margin above 0.75 for the confirmed self-shadow guard (the light
+ * fixture case) to keep working, while far more of the boundary-blurred
+ * range now discounts to zero. If a gap is still visible after this, the
+ * blur is wider still than even this — raise `HIGH` again rather than
+ * suspecting a different mechanism; the direction is confirmed correct, only
+ * the magnitude was short.
+ */
+export const SELF_HEIGHT_SHARPEN_LOW = 0.3;
+export const SELF_HEIGHT_SHARPEN_HIGH = 0.75;
+
 /** @param {number} e0 @param {number} e1 @param {number} x @returns {number} */
 function smoothstep01(e0, e1, x) {
   if (e0 === e1) return x < e0 ? 0 : 1;
@@ -411,6 +475,19 @@ function smoothstep01(e0, e1, x) {
  */
 export function sharpenReceiverGate01(rawGate01) {
   return smoothstep01(GATE_SHARPEN_LOW, GATE_SHARPEN_HIGH, clamp01(rawGate01));
+}
+
+/**
+ * Apply the self-shadow guard's own sharpening curve to a raw 0..1 coverage
+ * reading — see {@link SELF_HEIGHT_SHARPEN_LOW}'s own header for why this
+ * exists. Exported (mirrors {@link sharpenReceiverGate01}'s own shape)
+ * specifically so the CURVE can be asserted directly rather than only
+ * indirectly through a full march.
+ * @param {number} rawCoverage01
+ * @returns {number} 0..1 confidence that this reading is genuinely "self".
+ */
+export function sharpenSelfCoverage01(rawCoverage01) {
+  return smoothstep01(SELF_HEIGHT_SHARPEN_LOW, SELF_HEIGHT_SHARPEN_HIGH, clamp01(rawCoverage01));
 }
 
 /**

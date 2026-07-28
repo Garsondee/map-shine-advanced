@@ -113,14 +113,86 @@ const STORE = 'blocks';
 // PREMULTIPLIED space with dilated transparent RGB (mip-resample.js), not a
 // canvas `drawImage` resize. Every v4 record holds visibly different — softer,
 // and black-fringed at every alpha edge — mip data, so they must all miss.
-const CACHE_VERSION = 5;
+// v6 (2026-07-28, "I re-uploaded a graphic and the old one is still showing"):
+// the cache was keyed on the source URL ALONE, forever — a same-name re-upload
+// with different bytes (the author's own repro: repainted a sign onto a tile,
+// re-uploaded, the sign never appeared) returned the OLD encode until the end
+// of time, with nothing to distinguish "unchanged" from "edited ten minutes
+// ago". Records now carry the source's ETag/Last-Modified/Content-Length, and
+// a HIT is verified against a live HEAD before being trusted (`isSameResource`
+// below). v5 records carry none of these fields, so they always fail that
+// check once and re-encode — the correct behaviour for a record that can no
+// longer be vouched for, and exactly why this bump doesn't also need special-
+// casing the old shape.
+const CACHE_VERSION = 6;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two
  * records answer different questions, are produced by different requests, and
- * bumping one must not throw away megabytes of the other. `alpha:v1:${src}`.
+ * bumping one must not throw away megabytes of the other. `alpha:v2:${src}`.
+ * v2 (2026-07-28): same freshness fix and same reasoning as CACHE_VERSION.
  */
-const ALPHA_CACHE_VERSION = 1;
+const ALPHA_CACHE_VERSION = 2;
+
+/**
+ * A cheap HEAD request for `src`'s CURRENT identity on the server — whichever
+ * of ETag / Last-Modified / Content-Length it sends. Used to verify a cached
+ * record is still describing the SAME bytes before trusting it, without
+ * paying for a full download + decode + re-encode on every load — the whole
+ * point of the cache.
+ *
+ * DEGRADATION-FIRST, the same posture as every other network call in this
+ * file (this file's own header: compression must never break rendering). A
+ * failed HEAD (network hiccup, a server/proxy that rejects HEAD) returns
+ * `null` rather than throwing; the caller's fallback for `null` is to trust
+ * the existing cache record, which is no worse than this check not existing.
+ *
+ * @param {string} src
+ * @returns {Promise<{etag: string|null, lastModified: string|null, contentLength: string|null}|null>}
+ */
+async function headSource(src) {
+  try {
+    const resp = await fetch(src, { method: 'HEAD' });
+    if (!resp.ok) return null;
+    return {
+      etag: resp.headers.get('etag'),
+      lastModified: resp.headers.get('last-modified'),
+      contentLength: resp.headers.get('content-length'),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Does a cached record's stored identity still match what the server reports
+ * RIGHT NOW? ANY validator both sides carry that DISAGREES means the file
+ * changed — this errs toward a spurious re-encode over a stale texture, on
+ * purpose: re-encoding something that was actually unchanged costs a few CPU
+ * seconds once; serving stale bytes forever is invisible and is the exact bug
+ * this exists to kill.
+ *
+ * A record with NO stored validators at all (every pre-v6/v2 record, since
+ * they predate this field existing) always returns `false` — combined with
+ * this file's CACHE_VERSION/ALPHA_CACHE_VERSION bump, that means every old
+ * record re-encodes itself exactly once and never needs a special case here.
+ *
+ * `live === null` (the HEAD request itself couldn't be completed) trusts the
+ * cache rather than penalising a transient network failure for something
+ * unrelated to the file's own freshness.
+ *
+ * @param {{etag?:string|null, lastModified?:string|null, contentLength?:string|null}} cached
+ * @param {{etag: string|null, lastModified: string|null, contentLength: string|null}|null} live
+ * @returns {boolean}
+ */
+function isSameResource(cached, live) {
+  if (!live) return true;
+  if (!cached.etag && !cached.lastModified && !cached.contentLength) return false;
+  if (cached.contentLength && live.contentLength && cached.contentLength !== live.contentLength) return false;
+  if (cached.etag && live.etag && cached.etag !== live.etag) return false;
+  if (cached.lastModified && live.lastModified && cached.lastModified !== live.lastModified) return false;
+  return true;
+}
 
 let _dbPromise = null;
 function openDb() {
@@ -258,7 +330,7 @@ function levelRowReader(level) {
 async function handleAlphaGrid(src) {
   const key = `alpha:v${ALPHA_CACHE_VERSION}:${src}`;
   const cached = await cacheGet(key).catch(() => null);
-  if (cached) {
+  if (cached && isSameResource(cached, await headSource(src))) {
     return {
       width: cached.width,
       height: cached.height,
@@ -271,6 +343,9 @@ async function handleAlphaGrid(src) {
 
   const resp = await fetch(src);
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${src}`);
+  const etag = resp.headers.get('etag');
+  const lastModified = resp.headers.get('last-modified');
+  const contentLength = resp.headers.get('content-length');
   const blob = await resp.blob();
   // Two decodes look wasteful next to `handle()`'s, but they are not the same
   // image in memory: this one asks the DECODER for the reduced size, so the
@@ -299,14 +374,14 @@ async function handleAlphaGrid(src) {
   const imageData = ctx.getImageData(0, 0, gridW, gridH);
   const grid = extractAlphaGrid(imageData).data;
 
-  await cachePut(key, { width, height, gridW, gridH, grid }).catch(() => {});
+  await cachePut(key, { width, height, gridW, gridH, grid, etag, lastModified, contentLength }).catch(() => {});
   return { width, height, gridW, gridH, grid, cached: false };
 }
 
 async function handle(src) {
   const key = `bc:v${CACHE_VERSION}:${src}`;
   const cached = await cacheGet(key).catch(() => null);
-  if (cached) {
+  if (cached && isSameResource(cached, await headSource(src))) {
     return {
       format: cached.format,
       levels: cached.levels,
@@ -319,6 +394,9 @@ async function handle(src) {
 
   const resp = await fetch(src);
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${src}`);
+  const etag = resp.headers.get('etag');
+  const lastModified = resp.headers.get('last-modified');
+  const contentLength = resp.headers.get('content-length');
   const blob = await resp.blob();
   // premultiply/colour-space OFF so the band bytes are the exact sRGB pixels the
   // encoder and the GPU both expect (BC7 stores raw alpha + sRGB-byte RGB; the
@@ -415,7 +493,9 @@ async function handle(src) {
 
   // Store the levels (IndexedDB structuredClones every buffer, so the
   // originals stay valid to transfer to the main thread afterwards).
-  await cachePut(key, { format, width: w, height: h, levels, alphaStats }).catch(() => {});
+  await cachePut(key, { format, width: w, height: h, levels, alphaStats, etag, lastModified, contentLength }).catch(
+    () => {}
+  );
   return { format, levels, width: w, height: h, cached: false, alphaStats };
 }
 

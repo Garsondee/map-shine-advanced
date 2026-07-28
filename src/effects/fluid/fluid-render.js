@@ -23,25 +23,40 @@
  * its index in the painter's-algorithm sort — ascending order, later paints on
  * top. The level background is always index 0; every real item (a tile, a
  * token, a tree) gets an INTEGER index ≥ 1. Water and the candle flame both
- * reserve the open FRACTIONAL band `(0, 1)` for exactly this reason: a value
- * in that band is guaranteed, by construction, to draw AFTER the background
- * and BEFORE every real item — nowhere else, no lookup required. Fluid's
- * fixed `FLUID_RENDER_ORDER_EMIT = 0.6` (`fluid-surface-subsystem.js`) sits in
- * that same band, so it draws — like water, like the candle — **underneath
- * the masked tile's own art, not over it**. That is *why* the emissive glow
- * only becomes visible through whatever the artist painted as glass: the
- * tile's own semi-transparent texture composites over fluid's colour via
- * ordinary alpha blending, exactly V2's "under the texture" placement (the
- * account in `legacy/compositor-v2/effects/FluidEffectV2.js`'s own comment,
- * `Fluid.md` §1 item 6). The author's live report confirmed the tubes are
- * visible under this arrangement; the fix here is to the DOCUMENTATION and to
- * `depthTest`/blend-factor precision, not to the placement, which was already
- * correct by accident of the shared fractional band.
+ * reserve the open FRACTIONAL band `(0, 1)` for exactly this reason — but that
+ * band is a fixed GLOBAL constant, correct only for an effect meant to sit
+ * near the scene's own floor, before every item bar none.
  *
- * The two fluid meshes are sequenced RELATIVE TO EACH OTHER, not relative to
- * the tile: absorb (multiply) draws first, so it establishes a tinted base;
- * emit (add) draws second, so its glow is never itself darkened by the
- * absorption term it is paired with. Both stay comfortably inside `(0, 1)`.
+ * ⚠️ **CORRECTED AGAIN, 2026-07-28 — fluid is NOT one of those effects.**
+ * `fluid-surface-subsystem.js` used to reuse this same fixed `(0, 1)` band
+ * (`FLUID_RENDER_ORDER_EMIT = 0.6`), which draws before the scene background's
+ * NEXT item, not before fluid's OWN host specifically. For a ground-level
+ * host with nothing else drawn ahead of it those read the same, which is why
+ * the author's first live test ("fluid moving around in pipes") looked
+ * correct — not because the placement was right, but because that particular
+ * host happened to make the two questions indistinguishable. Reported broken
+ * 2026-07-28 for an OVERHEAD host (this floor's own high-elevation content):
+ * every item sorting between the background and that host now sits between
+ * fluid and its host too, which is wrong regardless of which of them the
+ * artist's glass cutout ends up revealing. Fluid now sequences HOST-RELATIVE
+ * (`fluid-surface-subsystem.js#FLUID_RENDER_ORDER_ABSORB_MAGNITUDE`/
+ * `_EMIT_MAGNITUDE`, small offsets SUBTRACTED from the host item's own
+ * `renderOrder`), mirroring `vegetation-shadow-subsystem.js
+ * #VEG_SHADOW_RENDER_ORDER_MAGNITUDE`'s identical "effect painted relative to
+ * the item it's ON" pattern — never a global band again.
+ *
+ * The relationship to the tile itself is unchanged and still the reason the
+ * glow is visible at all: drawing BEFORE (under) its own host means the
+ * host's own semi-transparent "glass" texture composites over fluid's colour
+ * via ordinary alpha blending, exactly V2's "under the texture" placement (the
+ * account in `legacy/compositor-v2/effects/FluidEffectV2.js`'s own comment,
+ * `Fluid.md` §1 item 6) — just anchored to THAT item now, not to the scene.
+ *
+ * The two fluid meshes are sequenced RELATIVE TO EACH OTHER too: absorb
+ * (multiply) draws first, so it establishes a tinted base; emit (add) draws
+ * second, so its glow is never itself darkened by the absorption term it is
+ * paired with. Both stay well within one renderOrder unit of their host, so
+ * neither can cross into a neighbouring item's own slot.
  *
  * ⚠️ **THE MULTIPLY IDENTITY IS WHITE, NOT ZERO** — the trap
  * `feedback_blend_neutral_element_is_per_blend` names, and water's own

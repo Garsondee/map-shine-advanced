@@ -63,7 +63,14 @@
  * @module effects/lighting/sun-occlusion-render
  */
 
-import { DEFAULT_MARCH_STEPS, PENUMBRA_PER_PX, GATE_SHARPEN_LOW, GATE_SHARPEN_HIGH } from './sun-occlusion.js';
+import {
+  DEFAULT_MARCH_STEPS,
+  PENUMBRA_PER_PX,
+  GATE_SHARPEN_LOW,
+  GATE_SHARPEN_HIGH,
+  SELF_HEIGHT_SHARPEN_LOW,
+  SELF_HEIGHT_SHARPEN_HIGH,
+} from './sun-occlusion.js';
 
 /**
  * Build the height-field march. Renders a fullscreen quad over a scene-space
@@ -182,6 +189,45 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
     // darkening this pixel darkens real, visible ground, never a caster's own
     // surface. Overhead still marches normally via B.
     const occlusion = here.r.toVar();
+
+    // ⚠️ ROUND TWO, 2026-07-28 (author: building AND overhead shadows both
+    // render on top of the very overhead tile producing them) — the d=0 fix
+    // above only ever excluded R at the EXACT starting texel. B (building ∪
+    // overhead) was never excluded at all, at ANY station — so a caster wider
+    // than a few march steps in the sun's direction reads its OWN body again
+    // at i=1, i=2… for as long as the ray is still crossing its own footprint,
+    // and it is (by definition) always at least as tall there as itself. A
+    // flat item shadows its own downstream half out to its own natural throw
+    // distance (height / tan(elevation)) — exactly self-shadowing, just not
+    // at d=0, so the earlier fix never touched it.
+    //
+    // Fix: a station only counts as a genuinely NEW blocker if its height
+    // exceeds not just the ray's height at that distance, but ALSO this
+    // pixel's OWN height at d=0. For open ground (height0 = 0, the ordinary
+    // case) this is unchanged from before — max(rayHeight, 0) = rayHeight —
+    // so a building correctly still shadows the ground for its whole length.
+    // Only where the RECEIVER is itself part of an overhead/building mass
+    // (height0 > 0) does this raise the bar: something merely as tall as what
+    // is already here cannot cast ADDITIONAL shadow onto it, only something
+    // genuinely taller can. That is the same "am I looking at a genuinely
+    // separate, still-visible thing, or my own footprint" question the R fix
+    // already asked — asked here for every station, not just d=0, because for
+    // B the caster and the receiver can be the same physical item at ANY
+    // distance the march still overlaps it, not only at zero.
+    //
+    // ⚠️ SHARPENED (2026-07-28, ROUND FOUR — author: the fix above closed the
+    // self-shadow but opened a visible GAP between a building and its own
+    // shadow). See SELF_HEIGHT_SHARPEN_LOW's own header (sun-occlusion.js)
+    // for the mechanism: the caster texture is deliberately LINEAR-filtered,
+    // so a receiver just outside a wall's TRUE edge can read a blurred,
+    // PARTIAL height0 that is not really "self" — unsharpened, that partial
+    // floor weakens the shadow exactly at the contact point. Gated by this
+    // same pixel's own coverage confidence, mirroring GATE_SHARPEN_LOW/HIGH's
+    // identical fix for the receiver gate's own coarse-grid blur.
+    const height0Raw = heightAt(here);
+    const selfMask = smoothstep(float(SELF_HEIGHT_SHARPEN_LOW), float(SELF_HEIGHT_SHARPEN_HIGH), coverageAt(here));
+    const height0 = height0Raw.mul(selfMask);
+
     for (let i = 1; i <= steps; i++) {
       const d = stepPx.mul(float(i));
       const at = world.add(dir.mul(d));
@@ -217,13 +263,14 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
         const sampleUv = tapAt.sub(vec2(uRect.x, uRect.y)).div(rectSize);
         const packed = casterTexNode.sample(vec2(sampleUv.x.clamp(0, 1), sampleUv.y.clamp(0, 1)));
         const h = heightAt(packed);
-        // A blocker must stand ABOVE the sun ray's height at this distance.
-        // The smoothstep is the TIP fade ONLY — how dark the shadow gets is
-        // the occluder's own coverage, so a low awning and a tall tower cast
-        // equally dark shadows of different lengths. (It used to be the
-        // smoothstep alone, which made darkness a function of height: the
-        // author's "the shadows have different opacities".)
-        const over = h.sub(d.mul(tanElev));
+        // A blocker must stand ABOVE the sun ray's height at this distance —
+        // AND above this pixel's own height at d=0 (the self-shadow guard
+        // above). The smoothstep is the TIP fade ONLY — how dark the shadow
+        // gets is the occluder's own coverage, so a low awning and a tall
+        // tower cast equally dark shadows of different lengths. (It used to
+        // be the smoothstep alone, which made darkness a function of height:
+        // the author's "the shadows have different opacities".)
+        const over = h.sub(max(d.mul(tanElev), height0));
         stepOcclusion = stepOcclusion.add(coverageAt(packed).mul(smoothstep(float(0), feather, over)));
       }
       stepOcclusion = stepOcclusion.div(float(LATERAL_TAPS));

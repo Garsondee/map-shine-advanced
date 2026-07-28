@@ -26,9 +26,12 @@ import {
   edgeRamp01,
   resolveSunMarch,
   sharpenReceiverGate01,
+  sharpenSelfCoverage01,
   DEFAULT_MARCH_STEPS,
   GATE_SHARPEN_LOW,
   GATE_SHARPEN_HIGH,
+  SELF_HEIGHT_SHARPEN_LOW,
+  SELF_HEIGHT_SHARPEN_HIGH,
 } from '../sun-occlusion.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -291,6 +294,120 @@ export function run(t) {
           1,
           1e-9
         )
+      );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // THE 2026-07-28 ROUND TWO — building/overhead had NO self-shadow guard
+    // AT ALL past d=0, unlike floating/sky-reach. Author's live report: both
+    // building and overhead shadows render on top of the very overhead tile
+    // producing them. The `groundedHere` case just above only exercises
+    // d=0 (elevationDeg 90 ⇒ the march never runs at all, span=0) — it never
+    // actually walked the loop this bug lives in.
+    // ══════════════════════════════════════════════════════════════════
+    {
+      // A WIDE, uniform, same-floor overhead/building mass — `floating: 0`
+      // (not a different floor's sky-reach structure, so the existing d=0
+      // guard does not apply here), `coverage`/`heightPx` constant EVERYWHERE
+      // (a caster far wider than the march's own span). A receiver standing
+      // ON it, off-noon so the march actually walks (elevationDeg 45, unlike
+      // the d=0-only test above).
+      const uniformOverhead = () => ({ heightPx: 300, coverage: 1, floating: 0 });
+      t.ok(
+        'a receiver ON a wide overhead/building item is not shadowed by that SAME item, off-noon',
+        near(
+          marchVisibility({
+            x: 0,
+            y: 0,
+            azimuthDeg: 90,
+            elevationDeg: 45,
+            maxCasterHeightPx: 300,
+            sampleField: uniformOverhead,
+          }),
+          1,
+          1e-9
+        )
+      );
+
+      // The fix must not blind the march to a GENUINELY taller, separate
+      // structure: a low item (height 50, within 40px of the origin) sitting
+      // near a much taller one (height 500, everywhere past that) — the tall
+      // one must still shadow a receiver standing on the low one.
+      const lowReceiverNearTallNeighbour = (x, y) =>
+        Math.hypot(x, y) < 40
+          ? { heightPx: 50, coverage: 1, floating: 0 }
+          : { heightPx: 500, coverage: 1, floating: 0 };
+      t.ok(
+        'a genuinely TALLER separate structure still shadows a receiver standing on its own shorter item',
+        marchVisibility({
+          x: 0,
+          y: 0,
+          azimuthDeg: 90,
+          elevationDeg: 45,
+          maxCasterHeightPx: 500,
+          sampleField: lowReceiverNearTallNeighbour,
+        }) < 1
+      );
+
+      // Open ground (height0 = 0) is BYTE-IDENTICAL to before this fix — the
+      // regression guard for every already-passing building-shadow-onto-
+      // ground case above.
+      t.ok(
+        'open ground (height0=0) is unaffected — same result as the pre-fix march',
+        near(marchVisibility({ x: 0, y: 0, azimuthDeg: 90, ...base }), shadowed, 1e-9)
+      );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // THE 2026-07-28 ROUND FOUR — the round-three fix closed the self-shadow
+    // but opened a visible GAP between a building and its own shadow (author,
+    // live). The caster texture is deliberately LINEAR-filtered, so a
+    // receiver just outside a wall's TRUE edge can read a blurred, partial
+    // height0 that is not really "self" — sharpened so only a CONFIDENT
+    // self-reading gets the round-three floor.
+    // ══════════════════════════════════════════════════════════════════
+    {
+      // THE CURVE ITSELF — same shape as sharpenReceiverGate01's own tests.
+      t.ok('a low-confidence (blurred) reading is treated as NOT self at all', sharpenSelfCoverage01(0.02) === 0);
+      t.ok('a confidently-covered reading is treated as fully self', sharpenSelfCoverage01(0.9) === 1);
+      t.ok(
+        'the curve is monotonic across the full range (no dip that would show as a second, wrong edge)',
+        [0, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1].every((v, i, arr) =>
+          i === 0 ? true : sharpenSelfCoverage01(v) >= sharpenSelfCoverage01(arr[i - 1])
+        )
+      );
+      t.ok(
+        'the declared thresholds are the ones actually used (not silently retuned)',
+        sharpenSelfCoverage01(SELF_HEIGHT_SHARPEN_LOW) === 0 && sharpenSelfCoverage01(SELF_HEIGHT_SHARPEN_HIGH) === 1
+      );
+
+      // THROUGH THE MARCH — a low-confidence height reading at the receiver's
+      // own d=0 must produce the IDENTICAL result to no self-reading at all,
+      // not merely a "somewhat weaker" floor. That is the actual claim the
+      // fix makes: an untrusted reading is discounted to ZERO, not partially.
+      const argsHere = { x: 0, y: 0, azimuthDeg: 90, elevationDeg: 45, maxCasterHeightPx: 300 };
+      const noSelfReading = (x, y) =>
+        Math.hypot(x, y) < 20 ? { heightPx: 0, coverage: 0, floating: 0 } : { heightPx: 300, coverage: 1, floating: 0 };
+      const blurredSelfReading = (x, y) =>
+        Math.hypot(x, y) < 20
+          ? { heightPx: 280, coverage: 0.05, floating: 0 } // the blur artifact: low confidence
+          : { heightPx: 300, coverage: 1, floating: 0 }; // the real wall, just past it
+      t.ok(
+        'a LOW-confidence blurred height reading produces the IDENTICAL result to no self-reading at all',
+        near(
+          marchVisibility({ ...argsHere, sampleField: blurredSelfReading }),
+          marchVisibility({ ...argsHere, sampleField: noSelfReading }),
+          1e-9
+        )
+      );
+
+      // The CONFIDENTLY-self case (round three's actual target) is unaffected
+      // by sharpening — a receiver genuinely standing ON a wide overhead item
+      // is still not shadowed by that same item.
+      const confidentlySelf = () => ({ heightPx: 300, coverage: 1, floating: 0 });
+      t.ok(
+        'a CONFIDENTLY self-covered receiver still gets the full round-three guard',
+        near(marchVisibility({ ...argsHere, sampleField: confidentlySelf }), 1, 1e-9)
       );
     }
   }

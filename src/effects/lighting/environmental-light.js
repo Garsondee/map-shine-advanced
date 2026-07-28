@@ -266,6 +266,12 @@ export function maxRgb(rgb, floor) {
  *   `_Outdoors` mask as a texture covering `outdoorsRect` in world space, R
  *   channel 0..1. Omitted → the sky terms are compiled out entirely and every
  *   material below is byte-identical to what it was before the sky existed.
+ * @param {*} [args.attrTexture] - `buf:scene.attr` (screen-space, same as
+ *   `albedoTexture`/`illumTexture` — `sceneColor.textures[1]`, see
+ *   `specular-render.js`'s identical param for precedent). R = the fragment's
+ *   OWN floor index / 255. Omitted → the sun-shadow floor gate below compiles
+ *   out entirely (JS-time branch, `tsl/no-uniform-gates`) and this pass is
+ *   byte-identical to before the gate existed.
  * @returns {{
  *   illumMaterial: *, compositeMaterial: *,
  *   uBackgroundSrgb: *, albedoTexNode: *, illumTexNode: *, colorationTexNode: *,
@@ -283,8 +289,9 @@ export function buildEnvironmentalLightMaterials({
   uiShadowVisNode,
   outdoorsTexture,
   sunShadowTexture,
+  attrTexture,
 }) {
-  const { uniform, texture, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+  const { uniform, texture, vec3, vec4, float, mix, abs, smoothstep, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SKY LIGHT (docs/planning/Sky.md) — atmosphere as LIGHT, not a grade.
@@ -358,6 +365,24 @@ export function buildEnvironmentalLightMaterials({
   const uSunShadowRect = uniform(vec4(0, 0, 1, 1));
   const sunShadowTexNode = sunShadowTexture ? texture(sunShadowTexture) : null;
 
+  // THE PER-FLOOR GATE (2026-07-28) — the field above is baked for exactly
+  // ONE floor (`sunShadows.maybeBake`'s own `floorIndex` arg), but a frame can
+  // legitimately draw SEVERAL floors at once (multi-floor viewing). Without
+  // this, a shadow baked for one floor darkens whatever OTHER floor's content
+  // happens to share the same screen pixel — reported as "sky-reach shadow
+  // draws over the very thing producing it" when the caster is itself an
+  // overhead item whose art belongs to a different floor attribution than the
+  // field currently baked. `attrTexNode.r` is the SAME per-pixel floor index
+  // `buf:scene.attr`'s real writers already pack (`vt/scene-attr.js
+  // #packFloorAttr`); the comparison formula below is copied verbatim from
+  // `specular-render.js`'s own existing floor gate (`floorMatch`) rather than
+  // re-derived, so there is exactly one tuned threshold for "same floor" in
+  // this codebase, not two that could disagree.
+  const attrTexNode = attrTexture ? texture(attrTexture) : null;
+  /** This frame's baked shadow field belongs to `index / 255` — pushed by
+   * `setSunShadowFloorIndex` every frame, right after `sunShadows.maybeBake`. */
+  const uSunShadowFloorIndex01 = uniform(float(0));
+
   // --- illum pass: ambient fill, tinted by the sky where it is open --------
   const uBackgroundSrgb = uniform(vec3(0.93, 0.93, 0.93));
   const illumMaterial = new THREE.NodeMaterial();
@@ -374,11 +399,27 @@ export function buildEnvironmentalLightMaterials({
     // A JS-time branch, so a scene with no baked field compiles to byte-identical
     // shader code — and a freshly-baked all-white field is a provable no-op even
     // when it IS compiled in.
-    const sunVis = buildSunVisibilityNode(THREE.TSL, {
+    const sunVisRaw = buildSunVisibilityNode(THREE.TSL, {
       uViewRect,
       uShadowRect: uSunShadowRect,
       shadowTexNode: sunShadowTexNode,
     });
+    // Gate by floor match — same formula as `specular-render.js`'s
+    // `floorMatch` (see the block above this material for why it's copied,
+    // not re-derived). `floorMatch` is 1 on the baked floor, 0 off it, with a
+    // narrow smoothstep ramp absorbing 8-bit quantization noise, never a
+    // spatial blur (this is a per-pixel exact value from the geometry pass).
+    // `mix(1, sunVisRaw, floorMatch)`: off the baked floor this evaluates to a
+    // provable `1` — full visibility, i.e. this field simply does not apply —
+    // rather than accidentally darkening content it was never computed from.
+    const sunVis =
+      sunVisRaw && attrTexNode
+        ? mix(
+            float(1),
+            sunVisRaw,
+            float(1).sub(smoothstep(float(0.4 / 255), float(0.9 / 255), abs(attrTexNode.r.sub(uSunShadowFloorIndex01))))
+          )
+        : sunVisRaw;
     illumMaterial.fragmentNode = vec4(sunVis ? ambient.mul(sunVis) : ambient, float(1));
   }
 
@@ -433,6 +474,17 @@ export function buildEnvironmentalLightMaterials({
     uSunShadowRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
   }
 
+  /** Which floor the CURRENTLY bound shadow field's data actually belongs to
+   * — the caller pushes `sunShadows.getBakedFloorIndex()` here every frame,
+   * right after `sunShadows.maybeBake(...)`. Same clamp-and-normalize formula
+   * as `specular-render.js`'s own `setFloorIndex`, so both effects agree on
+   * what `index / 255` means for the identical `buf:scene.attr` channel.
+   * @param {number} index
+   */
+  function setSunShadowFloorIndex(index) {
+    uSunShadowFloorIndex01.value = (Number.isFinite(index) ? Math.max(0, Math.min(255, index)) : 0) / 255;
+  }
+
   return {
     illumMaterial,
     compositeMaterial,
@@ -445,6 +497,11 @@ export function buildEnvironmentalLightMaterials({
     setViewRect,
     setOutdoorsRect,
     setSunShadowRect,
+    setSunShadowFloorIndex,
+    /** True when an attr texture was supplied and the per-floor shadow gate is
+     * actually compiled into the ambient fill — same diagnostic posture as
+     * `skyGateCompiled` below and `specular-render.js`'s `floorGateCompiled`. */
+    sunShadowFloorGateCompiled: !!attrTexNode,
     /** The sun-shadow field's rect uniform — SHARED with every point light's
      * own material (`point-light-illumination.js`), which samples the same
      * field per-fragment so its background floor matches the shadowed ambient

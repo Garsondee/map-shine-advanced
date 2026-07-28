@@ -146,9 +146,17 @@ export function createFluidRegistration({
  *   the item's world-space quad corners, resolved by the caller (which owns the
  *   texture sizes the placement needs). Null when the item's art has not
  *   resolved yet, which simply defers it to a later frame.
- * @returns {{getFluidMaskItems: (floorIndex: number) => Array<{id:string,url:string,corners:Array}>}}
+ * @param {(item: object) => number|null} args.getItemRenderOrder -
+ *   the item's CURRENT `renderOrder` (`scene/layer-order.js#sortByLayer`'s
+ *   stamped integer), resolved by the caller for the same reason corners are:
+ *   `getItems()` here is boot's own unfiltered `coverItems` list (cover physics
+ *   must see every level, not just the viewed one), which never goes through
+ *   `sortByLayer` and so never carries a real `renderOrder`. Only the VIEWER's
+ *   own draw-list items do. Null defers the item to a later frame, exactly
+ *   like a not-yet-resolved corner.
+ * @returns {{getFluidMaskItems: (floorIndex: number) => Array<{id:string,url:string,corners:Array,renderOrder:number|null}>}}
  */
-export function createFluidSeams({ maskAuthority, getItems, getFloors, getItemCorners }) {
+export function createFluidSeams({ maskAuthority, getItems, getFloors, getItemCorners, getItemRenderOrder }) {
   return {
     getFluidMaskItems: (floorIndex) => {
       const floors = getFloors() ?? [];
@@ -176,7 +184,7 @@ export function createFluidSeams({ maskAuthority, getItems, getFloors, getItemCo
 
         const corners = getItemCorners(item);
         if (!corners) continue; // art not resolved yet — try again next frame
-        out.push({ id: item.id, url: status.url, corners });
+        out.push({ id: item.id, url: status.url, corners, renderOrder: getItemRenderOrder(item) });
       }
       return out;
     },

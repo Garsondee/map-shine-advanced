@@ -2206,6 +2206,10 @@ export async function startVtPanViewer({
           entry.uRadii.value.set(radiusX ?? 0, radiusY ?? 0);
           entry.uRotationRad.value = ((shape.rotation ?? 0) * Math.PI) / 180;
         } else if (kind === 'polygon') {
+          // authoredPointCount (not a uniform — plain CPU diagnostic data)
+          // lets getRegionDarknessInfo report truncation against
+          // MAX_REGION_POLYGON_POINTS honestly instead of silently.
+          entry.authoredPointCount = Array.isArray(shape.points) ? Math.floor(shape.points.length / 2) : 0;
           entry.uPointCount.value = writeRegionPolygonPoints(shape.points, entry.points);
         } else if (kind === 'cone') {
           entry.uOrigin.value.set(shape.x ?? 0, shape.y ?? 0);
@@ -2252,6 +2256,8 @@ export async function startVtPanViewer({
           entry.uGrowRadius.value = Math.max(0, shape.radius ?? 0);
         } else if (kind === 'emanation-polygon') {
           const base = shape.base;
+          // See the 'polygon' branch above for why authoredPointCount is tracked.
+          entry.authoredPointCount = Array.isArray(base.points) ? Math.floor(base.points.length / 2) : 0;
           entry.uPointCount.value = writeRegionPolygonPoints(base.points, entry.points);
           entry.uGrowRadius.value = Math.max(0, shape.radius ?? 0);
         }
@@ -10341,6 +10347,11 @@ export async function startVtPanViewer({
         const uDaylight = [uRegionDaylightColor.value.x, uRegionDaylightColor.value.y, uRegionDaylightColor.value.z];
         const uDarkness = [uRegionDarknessColor.value.x, uRegionDarknessColor.value.y, uRegionDarknessColor.value.z];
         const regions = [];
+        // Counts a polygon/emanation-polygon shape whose AUTHORED vertex
+        // count exceeds MAX_REGION_POLYGON_POINTS (region-darkness.js) —
+        // its true shape is being silently truncated at render time. See
+        // the summary field's own comment below for why this matters.
+        let polygonPointsTruncated = 0;
         for (const [key, entry] of regionMeshes) {
           if (!entry.mesh.visible) continue;
           const mode = entry.uMode.value;
@@ -10357,6 +10368,15 @@ export async function startVtPanViewer({
             if (v == null) continue;
             geometry[uniformName] = typeof v === 'object' && 'x' in v && 'y' in v ? [v.x, v.y] : v;
           }
+          const isPolygonKind = entry.kind === 'polygon' || entry.kind === 'emanation-polygon';
+          const polygon = isPolygonKind
+            ? {
+                authoredPoints: entry.authoredPointCount ?? null,
+                renderedPoints: entry.uPointCount.value,
+                truncated: (entry.authoredPointCount ?? 0) > entry.uPointCount.value,
+              }
+            : null;
+          if (polygon?.truncated) polygonPointsTruncated++;
           regions.push({
             key,
             kind: entry.kind,
@@ -10368,6 +10388,7 @@ export async function startVtPanViewer({
             meshCenter: [entry.mesh.position.x, entry.mesh.position.y],
             meshScale: [entry.mesh.scale.x, entry.mesh.scale.y],
             geometry,
+            polygon,
           });
         }
         return {
@@ -10380,6 +10401,15 @@ export async function startVtPanViewer({
             "live checks — region-darkness.js's own header has the full citations.",
           poolSize: regionMeshes.size,
           activeRegions: regions.length,
+          // ⚠️ A nonzero count here means some polygon (or polygon-based
+          // emanation) region has MORE authored vertices than
+          // MAX_REGION_POLYGON_POINTS (region-darkness.js) and is being
+          // rendered with its tail vertices dropped — a corrupted hard
+          // shape boundary, not a cosmetic approximation (see that
+          // constant's own doc for why this is unlike the light-edge cap).
+          // 0 is the healthy answer. Check `regions[].polygon` for which
+          // region and by how much.
+          polygonPointsTruncated,
           // ⚠️ READ THIS BEFORE `regions`. `failedOpen: true` means the viewed
           // floor's elevation band could not be resolved, so EVERY region in the
           // scene is active regardless of which floor it belongs to — an upper

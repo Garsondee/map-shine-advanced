@@ -20,6 +20,10 @@ import {
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
 } from '../region-geometry.js';
+// MAX_REGION_POLYGON_POINTS is a plain number export — importing it does not
+// touch any THREE/TSL code in region-darkness.js (verified: that module only
+// ever receives THREE as a parameter, never imports it at module scope).
+import { MAX_REGION_POLYGON_POINTS } from '../region-darkness.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
@@ -509,4 +513,63 @@ export function run(t) {
     })()
   );
   ok('missing/non-array points writes nothing and returns 0', writeRegionPolygonPoints(null, [{ x: 9, y: 9 }]) === 0);
+
+  // ======================================================================
+  // REGRESSION (2026-07-29, author-reported: "polygon logic for darkening
+  // breaks when you use more complex shapes"): a region polygon with MORE
+  // vertices than MAX_REGION_POLYGON_POINTS must still classify correctly
+  // once written through writeRegionPolygonPoints — the real cap must be
+  // big enough for a genuinely complex, hand-traced building outline.
+  // Foundry's own PolygonShapeData schema has no vertex-count limit at all,
+  // so this must never regress back down to a cap a real building can beat.
+  // ======================================================================
+  {
+    // A 43-vertex "crenellated roofline" building footprint, spanning
+    // x:[0,2000] — authored the only way Foundry ever stores a polygon (a
+    // flat sequential boundary walk, PolygonShapeData.points), with small
+    // battlements near the top edge (y in [280,320]) so a y=150 query line
+    // is unambiguously INSIDE the true shape at every x, isolating the
+    // truncation bug from ordinary zigzag ambiguity.
+    function buildCrenellatedBuilding(teeth, width, lowY, highY) {
+      const points = [0, 0];
+      for (let i = 0; i <= teeth; i++) {
+        points.push((i * width) / teeth, i % 2 === 0 ? lowY : highY);
+      }
+      points.push(width, 0);
+      return points;
+    }
+    const building = buildCrenellatedBuilding(40, 2000, 280, 320);
+    const authoredVertexCount = building.length / 2;
+    ok('the test fixture itself has more vertices than the old 32-point cap', authoredVertexCount > 32);
+
+    const farRight = { x: 1900, y: 150 }; // needs vertices well past #32 to classify correctly
+    ok(
+      'ground truth: far side of the building is inside its own true outline',
+      pointInPolygon(farRight.x, farRight.y, building)
+    );
+
+    // Simulate the PRIOR, since-fixed cap of 32 — writeRegionPolygonPoints'
+    // own truncate-not-grow contract, exercised at the exact capacity that
+    // shipped invisible until this report.
+    const old32 = Array.from({ length: 32 }, () => ({ x: 0, y: 0 }));
+    const old32Count = writeRegionPolygonPoints(building, old32);
+    const old32Flat = old32.slice(0, old32Count).flatMap((p) => [p.x, p.y]);
+    ok(
+      'OLD 32-point cap (the shipped bug): the far side misclassifies as outside — this is the reported break',
+      pointInPolygon(farRight.x, farRight.y, old32Flat) === false
+    );
+
+    // The REAL, current cap — must classify the same point correctly.
+    const current = Array.from({ length: MAX_REGION_POLYGON_POINTS }, () => ({ x: 0, y: 0 }));
+    const currentCount = writeRegionPolygonPoints(building, current);
+    ok(
+      'the current cap keeps every authored vertex for this fixture, none dropped',
+      currentCount === authoredVertexCount
+    );
+    const currentFlat = current.slice(0, currentCount).flatMap((p) => [p.x, p.y]);
+    ok(
+      'FIXED: at the real MAX_REGION_POLYGON_POINTS cap, the far side of a complex building darkens correctly',
+      pointInPolygon(farRight.x, farRight.y, currentFlat) === true
+    );
+  }
 }

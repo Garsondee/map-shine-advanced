@@ -347,12 +347,32 @@ export function buildRegionEllipseMaterial({ THREE, uDaylightColor, uDarknessCol
   return { material, uOrigin, uRadii, uRotationRad, uMode, uModifier, uBaseDarkness01 };
 }
 
-/** Starting/default capacity, in polygon EDGES, for a region polygon's
- * fixed-capacity point uniformArray — same fixed-forever-after-setup
- * constraint as `point-light-illumination.js#MAX_LIGHT_EDGES`, same
- * truncate-gracefully contract. Regions are typically simple GM-drawn
- * shapes, not wall-clipped sweeps, so a smaller cap suffices. */
-export const MAX_REGION_POLYGON_POINTS = 32;
+/** Capacity, in polygon vertices, for a region polygon's fixed-capacity
+ * point uniformArray — same fixed-forever-after-setup constraint as
+ * `point-light-illumination.js#MAX_LIGHT_EDGES`, same truncate-gracefully
+ * contract (`writeRegionPolygonPoints`).
+ *
+ * ⚠️ RAISED 32 → 256 (2026-07-29, author-reported: "polygon logic for
+ * darkening breaks when you use more complex shapes"). The old value's own
+ * reasoning ("regions are typically simple GM-drawn shapes... a smaller cap
+ * suffices") assumed this cap degrades the way `MAX_LIGHT_EDGES` does —
+ * cosmetically. It does not: a light's soft edge is a cheap analytic term
+ * layered ON TOP OF real triangle geometry (exceeding the cap just softens
+ * the edge a bit less), but a region polygon's `discard()` boundary *is*
+ * these points — there is no separate hard geometry backing it. Past the
+ * cap, the dropped tail vertices silently reconnect vertex[cap-1] straight
+ * to vertex[0]; for any non-trivial outline that chord does not retrace the
+ * authored shape at all. A hand-traced "complex" building (or one converted
+ * from wall geometry) routinely has 40-100+ vertices — Foundry's own
+ * `PolygonShapeData` schema (`common/data/data.mjs`) has no upper bound —
+ * and 32 of them measurably misclassified interior points well inside the
+ * true shape as outside it (region-geometry.test.mjs's own regression case).
+ * 256 costs a few KB of uniform buffer; the per-fragment loop cost still
+ * scales with the SHAPE's own actual point count (`uPointCount`), not this
+ * capacity, so ordinary simple shapes pay nothing extra. If a scene ever
+ * exceeds even 256, `getRegionDarknessInfo`'s `polygonPointsTruncated`
+ * field (vt-pan-viewer.js) reports it — never silently again. */
+export const MAX_REGION_POLYGON_POINTS = 256;
 
 /**
  * The point-in-polygon crossing test, TSL side — the SAME algorithm as

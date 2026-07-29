@@ -54,6 +54,76 @@ function fromRgb565(v) {
   };
 }
 
+// ===========================================================================
+// THE SECOND ENDPOINT CANDIDATE — "diagonal parts of the black outline
+// disappear/are mushed" (author, 2026-07-28, cutout tile art zoomed out).
+//
+// MEASURED before touching anything: a 3px-wide black ink ring around a filled
+// disc, BC7-encoded with NO mip reduction and NO sharpening involved at all —
+// axis-aligned ink texels decoded EXACT (luma 10.0 of a source 10.0); diagonal
+// ink texels averaged luma 59.1 (max 78.8) and lost a third of their alpha. The
+// mechanism is pure block-endpoint selection, both BC1 and BC7's own encoders:
+// the two endpoints are chosen as the texels FARTHEST apart in colour(+alpha)
+// space, and every OTHER texel in the block is then index-snapped onto the
+// single line between them — a block containing a genuine THIRD cluster (ink
+// black, separate from both the interior fill and the transparent hole) has no
+// endpoint of its own for it, so it gets crushed toward whichever line was
+// actually chosen. In BC7 this is worse than it sounds: alpha's 0..255 swing
+// dominates the squared-distance metric so completely that the chosen pair is
+// almost always (some opaque texel, the transparent hole) — leaving black ink
+// and the coloured interior, both opaque, to fight over ONE shared endpoint.
+//
+// WHY DIAGONAL SPECIFICALLY: a diagonal silhouette sweeps its alpha cut across
+// every row of a 4×4 block (the classic staircase), so a block straddling it is
+// far likelier to contain all three clusters — interior, ink, hole — at once.
+// The SAME ring crossing a block along a horizontal/vertical run instead
+// repeats one row/column identically, so a given block usually holds only two.
+//
+// THE FIX, kept inside mode 6 / BC1's existing 2-endpoint format (no bitstream
+// change): score a SECOND candidate pair — the darkest vs lightest opaque
+// texel (`lumaExtremalPair`, below) — against the existing max-distance pair by
+// ACTUAL total reconstruction error, and keep whichever is lower. This cannot
+// regress a block the old heuristic already got right (the old pair is always
+// one of the two options actually scored), and directly recovers the exact
+// case above: a genuine second opaque cluster the distance pair swallowed now
+// gets a real chance at an endpoint of its own. Cost is ~2× today's per-block
+// work (one more quantize + 16-texel index search) — negligible next to the
+// existing O(120)-pair distance search, and this runs once per asset, off the
+// main thread, cached to IndexedDB.
+// ===========================================================================
+
+/**
+ * The darkest-vs-lightest texel among those with alpha ≥ 128 ("meaningfully
+ * opaque"), by standard luma weighting. Shared by both encoders: for BC1's
+ * always-fully-opaque input (BC1 is only ever chosen for a wholly opaque
+ * image — see bc-compress.worker.js) the alpha gate is a no-op and every texel
+ * qualifies; for BC7 it is what keeps this search from picking a transparent
+ * (or dilated, edge-adjacent) texel as a "dark" endpoint by accident. Returns
+ * `null` with fewer than 2 qualifying texels — the existing distance pair
+ * already handles a block with at most one opaque cluster just fine.
+ * @param {number[]} texels flat [r,g,b,a,…] length 64
+ * @returns {[number,number]|null} texel indices [darkest, lightest]
+ */
+function lumaExtremalPair(texels) {
+  let lo = -1,
+    hi = -1,
+    loL = Infinity,
+    hiL = -Infinity;
+  for (let i = 0; i < 16; i++) {
+    if (texels[i * 4 + 3] < 128) continue;
+    const l = 0.299 * texels[i * 4] + 0.587 * texels[i * 4 + 1] + 0.114 * texels[i * 4 + 2];
+    if (l < loL) {
+      loL = l;
+      lo = i;
+    }
+    if (l > hiL) {
+      hiL = l;
+      hi = i;
+    }
+  }
+  return lo >= 0 && hi >= 0 && lo !== hi ? [lo, hi] : null;
+}
+
 /** The 4×4 texels of block (bx,by), edge-clamped so a width/height that is not a
  * multiple of 4 replicates its border rather than reading out of bounds. Returns
  * a flat [r,g,b,a, …] length-64 array. */
@@ -100,6 +170,64 @@ export function encodeBC1(rgba, width, height) {
   return out;
 }
 
+/**
+ * Quantize a BC1 candidate endpoint pair (texel indices bi/bj into `texels`),
+ * build the palette the GPU will reconstruct, pick every texel's nearest entry,
+ * and return the block's total squared RGB error for this pair — the metric
+ * used to choose between competing candidates (see this file's "SECOND
+ * ENDPOINT CANDIDATE" section header).
+ */
+function scoreBC1Pair(texels, bi, bj) {
+  let c0 = toRgb565(texels[bi * 4], texels[bi * 4 + 1], texels[bi * 4 + 2]);
+  let c1 = toRgb565(texels[bj * 4], texels[bj * 4 + 1], texels[bj * 4 + 2]);
+  // 4-colour (fully opaque) mode requires c0 > c1. If they collapsed to equal
+  // (a solid block) we fall through to 3-colour mode, which is also opaque as
+  // long as we never pick index 3 (the transparent slot) — the nearest search
+  // below only ever considers the opaque palette entries, so it never does.
+  if (c0 < c1) {
+    const t = c0;
+    c0 = c1;
+    c1 = t;
+  }
+  const e0 = fromRgb565(c0);
+  const e1 = fromRgb565(c1);
+  let pal;
+  if (c0 > c1) {
+    pal = [
+      e0,
+      e1,
+      { r: (2 * e0.r + e1.r) / 3, g: (2 * e0.g + e1.g) / 3, b: (2 * e0.b + e1.b) / 3 },
+      { r: (e0.r + 2 * e1.r) / 3, g: (e0.g + 2 * e1.g) / 3, b: (e0.b + 2 * e1.b) / 3 },
+    ];
+  } else {
+    // 3-colour mode: index 3 is transparent black — deliberately excluded below.
+    pal = [e0, e1, { r: (e0.r + e1.r) / 2, g: (e0.g + e1.g) / 2, b: (e0.b + e1.b) / 2 }, null];
+  }
+  const usable = pal[3] === null ? 3 : 4;
+  const idx = new Array(16);
+  let total = 0;
+  for (let i = 0; i < 16; i++) {
+    const r = texels[i * 4],
+      g = texels[i * 4 + 1],
+      b = texels[i * 4 + 2];
+    let best = 0;
+    let bestD = Infinity;
+    for (let p = 0; p < usable; p++) {
+      const dr = r - pal[p].r,
+        dg = g - pal[p].g,
+        db = b - pal[p].b;
+      const d = dr * dr + dg * dg + db * db;
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    idx[i] = best;
+    total += bestD;
+  }
+  return { c0, c1, idx, total };
+}
+
 /** Encode one 4×4 block (flat rgba, length 64) into out[off..off+8). */
 function encodeBC1Block(texels, out, off) {
   // Endpoints = the two texels FARTHEST apart in RGB space. A bounding box is
@@ -124,33 +252,19 @@ function encodeBC1Block(texels, out, off) {
       }
     }
   }
-  let c0 = toRgb565(texels[bi * 4], texels[bi * 4 + 1], texels[bi * 4 + 2]);
-  let c1 = toRgb565(texels[bj * 4], texels[bj * 4 + 1], texels[bj * 4 + 2]);
-  // 4-colour (fully opaque) mode requires c0 > c1. If they collapsed to equal
-  // (a solid block) we fall through to 3-colour mode, which is also opaque as
-  // long as we never pick index 3 (the transparent slot) — the nearest search
-  // below only ever considers the opaque palette entries, so it never does.
-  if (c0 < c1) {
-    const t = c0;
-    c0 = c1;
-    c1 = t;
+
+  // THE SECOND CANDIDATE (this file's section header) — score it against the
+  // distance pair above and keep whichever reconstructs the block more
+  // faithfully. Structurally cannot regress: the distance pair is always one
+  // of the two options actually evaluated.
+  let winner = scoreBC1Pair(texels, bi, bj);
+  const lumaPair = lumaExtremalPair(texels);
+  if (lumaPair !== null) {
+    const candidate = scoreBC1Pair(texels, lumaPair[0], lumaPair[1]);
+    if (candidate.total < winner.total) winner = candidate;
   }
-  const e0 = fromRgb565(c0);
-  const e1 = fromRgb565(c1);
-  // Build the palette the GPU will reconstruct.
-  let pal;
-  if (c0 > c1) {
-    pal = [
-      e0,
-      e1,
-      { r: (2 * e0.r + e1.r) / 3, g: (2 * e0.g + e1.g) / 3, b: (2 * e0.b + e1.b) / 3 },
-      { r: (e0.r + 2 * e1.r) / 3, g: (e0.g + 2 * e1.g) / 3, b: (e0.b + 2 * e1.b) / 3 },
-    ];
-  } else {
-    // 3-colour mode: index 3 is transparent black — deliberately excluded below.
-    pal = [e0, e1, { r: (e0.r + e1.r) / 2, g: (e0.g + e1.g) / 2, b: (e0.b + e1.b) / 2 }, null];
-  }
-  const usable = pal[3] === null ? 3 : 4;
+  const { c0, c1, idx } = winner;
+
   // Little-endian: c0 then c1 as uint16.
   out[off] = c0 & 0xff;
   out[off + 1] = (c0 >> 8) & 0xff;
@@ -158,24 +272,7 @@ function encodeBC1Block(texels, out, off) {
   out[off + 3] = (c1 >> 8) & 0xff;
   // 16 × 2-bit indices, texel 0 in the low bits of byte 4.
   let idxBits = 0;
-  for (let i = 0; i < 16; i++) {
-    const r = texels[i * 4],
-      g = texels[i * 4 + 1],
-      b = texels[i * 4 + 2];
-    let best = 0;
-    let bestD = Infinity;
-    for (let p = 0; p < usable; p++) {
-      const dr = r - pal[p].r,
-        dg = g - pal[p].g,
-        db = b - pal[p].b;
-      const d = dr * dr + dg * dg + db * db;
-      if (d < bestD) {
-        bestD = d;
-        best = p;
-      }
-    }
-    idxBits |= best << (i * 2);
-  }
+  for (let i = 0; i < 16; i++) idxBits |= idx[i] << (i * 2);
   out[off + 4] = idxBits & 0xff;
   out[off + 5] = (idxBits >> 8) & 0xff;
   out[off + 6] = (idxBits >> 16) & 0xff;
@@ -295,27 +392,46 @@ function quantizeBC7Endpoint(e) {
   return best;
 }
 
-/** Nearest 4-bit index for one RGBA texel along the reconstructed endpoint line. */
-function bestBC7Index(r, g, b, a, e0, e1) {
-  let best = 0;
-  let bestD = Infinity;
+/**
+ * Quantize a BC7 candidate endpoint pair (texel indices bi/bj into `texels`),
+ * pick every texel's nearest index against the RECONSTRUCTED endpoints (what
+ * the GPU will actually interpolate — so the decode matches bit-for-bit), and
+ * return the block's total squared RGBA error for this pair — the metric used
+ * to choose between competing candidates (see this file's "SECOND ENDPOINT
+ * CANDIDATE" section header).
+ */
+function scoreBC7Pair(texels, bi, bj) {
+  const q0 = quantizeBC7Endpoint([texels[bi * 4], texels[bi * 4 + 1], texels[bi * 4 + 2], texels[bi * 4 + 3]]);
+  const q1 = quantizeBC7Endpoint([texels[bj * 4], texels[bj * 4 + 1], texels[bj * 4 + 2], texels[bj * 4 + 3]]);
+  const idx = new Array(16);
+  let total = 0;
   for (let i = 0; i < 16; i++) {
-    const w = BC7_WEIGHTS4[i];
-    const cr = (e0[0] * (64 - w) + e1[0] * w + 32) >> 6;
-    const cg = (e0[1] * (64 - w) + e1[1] * w + 32) >> 6;
-    const cb = (e0[2] * (64 - w) + e1[2] * w + 32) >> 6;
-    const ca = (e0[3] * (64 - w) + e1[3] * w + 32) >> 6;
-    const dr = r - cr,
-      dg = g - cg,
-      db = b - cb,
-      da = a - ca;
-    const d = dr * dr + dg * dg + db * db + da * da;
-    if (d < bestD) {
-      bestD = d;
-      best = i;
+    const r = texels[i * 4],
+      g = texels[i * 4 + 1],
+      b = texels[i * 4 + 2],
+      a = texels[i * 4 + 3];
+    let best = 0;
+    let bestD = Infinity;
+    for (let k = 0; k < 16; k++) {
+      const w = BC7_WEIGHTS4[k];
+      const cr = (q0.rec[0] * (64 - w) + q1.rec[0] * w + 32) >> 6;
+      const cg = (q0.rec[1] * (64 - w) + q1.rec[1] * w + 32) >> 6;
+      const cb = (q0.rec[2] * (64 - w) + q1.rec[2] * w + 32) >> 6;
+      const ca = (q0.rec[3] * (64 - w) + q1.rec[3] * w + 32) >> 6;
+      const dr = r - cr,
+        dg = g - cg,
+        db = b - cb,
+        da = a - ca;
+      const d = dr * dr + dg * dg + db * db + da * da;
+      if (d < bestD) {
+        bestD = d;
+        best = k;
+      }
     }
+    idx[i] = best;
+    total += bestD;
   }
-  return best;
+  return { q0, q1, idx, total };
 }
 
 /** Encode one 4×4 RGBA block (flat, length 64) into out[off..off+16) as BC7 mode 6. */
@@ -340,15 +456,20 @@ function encodeBC7Block(texels, out, off) {
       }
     }
   }
-  let q0 = quantizeBC7Endpoint([texels[bi * 4], texels[bi * 4 + 1], texels[bi * 4 + 2], texels[bi * 4 + 3]]);
-  let q1 = quantizeBC7Endpoint([texels[bj * 4], texels[bj * 4 + 1], texels[bj * 4 + 2], texels[bj * 4 + 3]]);
 
-  // Indices are chosen against the RECONSTRUCTED endpoints (what the GPU
-  // interpolates), so the decode matches bit-for-bit.
-  const idx = new Array(16);
-  for (let i = 0; i < 16; i++) {
-    idx[i] = bestBC7Index(texels[i * 4], texels[i * 4 + 1], texels[i * 4 + 2], texels[i * 4 + 3], q0.rec, q1.rec);
+  // THE SECOND CANDIDATE (this file's section header) — score it against the
+  // distance pair above and keep whichever reconstructs the block more
+  // faithfully. Structurally cannot regress: the distance pair is always one
+  // of the two options actually evaluated.
+  let winner = scoreBC7Pair(texels, bi, bj);
+  const lumaPair = lumaExtremalPair(texels);
+  if (lumaPair !== null) {
+    const candidate = scoreBC7Pair(texels, lumaPair[0], lumaPair[1]);
+    if (candidate.total < winner.total) winner = candidate;
   }
+  const { idx } = winner;
+  let { q0, q1 } = winner;
+
   // Anchor rule: texel 0's index stores only 3 bits, so its MSB must be 0. If it
   // isn't, swap the endpoints and invert every index (W[15−i] = 64−W[i] makes
   // that an exact equivalent) — after which idx[0] ≤ 7.

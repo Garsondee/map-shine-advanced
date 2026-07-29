@@ -124,7 +124,15 @@ const STORE = 'blocks';
 // check once and re-encode — the correct behaviour for a record that can no
 // longer be vouched for, and exactly why this bump doesn't also need special-
 // casing the old shape.
-const CACHE_VERSION = 6;
+// v7 (2026-07-28, same day: "diagonal parts of the black outline disappear/are
+// mushed" on cutout tile art zoomed out). encodeBC1Block/encodeBC7Block
+// (block-compress.js's "SECOND ENDPOINT CANDIDATE" section header) now score a
+// second candidate endpoint pair per 4×4 block — a v6 record was encoded
+// before that existed, so a thick ink outline crossing a diagonal silhouette
+// edge is measurably crushed (diagonal ink measured luma 59.1 avg / 78.8 max
+// against a source of 10, vs an EXACT match for the same ring's axis-aligned
+// texels) in every v6 record and must be re-encoded, not just re-served.
+const CACHE_VERSION = 7;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two

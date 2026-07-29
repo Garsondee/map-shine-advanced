@@ -411,4 +411,120 @@ export function run(t) {
     ok('mipChainByteLength(1050x1050) > level-0-only', total > level0Only);
     ok('mipChainByteLength(1050x1050) stays within the ~4/3 chain-overhead ballpark', total < level0Only * 1.5);
   }
+
+  // ══ THE SECOND ENDPOINT CANDIDATE (author, 2026-07-28) ══════════════════
+  // "every object in the overhead layer has a thick black outline... when I
+  // zoom out the diagonal parts of the black outline disappear/are mushed...
+  // it's happening in the outline of the tile graphics not preserving the
+  // black outline of the edge. This is where the alpha goes from 100% to 0%."
+  //
+  // MEASURED before the fix (Node scratchpad, no mip reduction, no sharpen
+  // involved — this is the RAW encoder alone): a 3px black ink ring around a
+  // filled disc. Axis-aligned ink texels decoded EXACT (luma 10.0 of a source
+  // 10.0). Diagonal ink texels averaged luma 59.1 (max 78.8) and lost a third
+  // of their alpha. Root cause: BC7 mode 6 (and BC1) choose their two block
+  // endpoints as the texels FARTHEST apart, and alpha's 0..255 swing dominates
+  // that distance so completely that the pair is almost always (some opaque
+  // texel, the transparent hole) — leaving black ink competing with the
+  // coloured interior, both opaque, for ONE shared endpoint. A diagonal
+  // silhouette sweeps its alpha cut across every row of a 4×4 block, so it is
+  // far likelier than an axis-aligned edge to pack all three clusters
+  // (interior, ink, hole) into one block.
+  const INK_INTERIOR = [200, 140, 60, 255];
+  const INK_BLACK = [10, 10, 10, 255];
+  const INK_HOLE = [0, 0, 0, 0];
+  const luma = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+  /** A filled disc with an ink ring [rInner,rOuter) around it, hard-edged (no
+   * AA — isolates the block-endpoint mechanism from any filtering question). */
+  function inkRing(N, rInner, rOuter) {
+    return makeImage(N, N, (x, y) => {
+      const d = Math.hypot(x - N / 2 + 0.5, y - N / 2 + 0.5);
+      return d < rInner ? INK_INTERIOR : d < rOuter ? INK_BLACK : INK_HOLE;
+    });
+  }
+
+  /** Ink-ring texels bucketed by whether they sit near an axis-aligned angle
+   * (0/90/180/270°) or a diagonal one (45/135/225/315°), each within ±12°. */
+  function bucketRingTexels(N, rInner, rOuter, decoded) {
+    const axis = [];
+    const diagonal = [];
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const dx = x - N / 2 + 0.5,
+          dy = y - N / 2 + 0.5;
+        const d = Math.hypot(dx, dy);
+        if (d < rInner || d >= rOuter) continue;
+        let ang = (Math.atan2(dy, dx) * 180) / Math.PI;
+        if (ang < 0) ang += 360;
+        const distToAxis = Math.min(...[0, 90, 180, 270, 360].map((a) => Math.abs(ang - a)));
+        const distToDiag = Math.min(...[45, 135, 225, 315].map((a) => Math.abs(ang - a)));
+        const i = (y * N + x) * 4;
+        const entry = { l: luma(decoded[i], decoded[i + 1], decoded[i + 2]), a: decoded[i + 3] };
+        if (distToAxis < 12) axis.push(entry);
+        else if (distToDiag < 12) diagonal.push(entry);
+      }
+    }
+    return { axis, diagonal };
+  }
+
+  {
+    const N = 32;
+    const rInner = 10,
+      rOuter = 13; // ~3px ring — the "thick outline" the author described
+    const src = inkRing(N, rInner, rOuter);
+    const dec = decodeBC7(encodeBC7(src, N, N), N, N);
+    const { axis, diagonal } = bucketRingTexels(N, rInner, rOuter, dec);
+    ok('ink-ring fixture actually sampled both bucket kinds', axis.length > 0 && diagonal.length > 0);
+
+    const maxLuma = (arr) => Math.max(...arr.map((v) => v.l));
+    const minAlpha = (arr) => Math.min(...arr.map((v) => v.a));
+    ok('axis-aligned ink stays near-black (BC7)', maxLuma(axis) < 20);
+    // THE REGRESSION THIS FIX CLOSES: before it, diagonal ink averaged luma
+    // 59.1 (max 78.8) against a source of 10 — nowhere near this bar.
+    ok('diagonal ink ALSO stays near-black (BC7) — the fixed case', maxLuma(diagonal) < 20);
+    ok('axis-aligned ink keeps its coverage (BC7)', minAlpha(axis) > 235);
+    ok('diagonal ink ALSO keeps its coverage (BC7) — the fixed case', minAlpha(diagonal) > 235);
+  }
+
+  {
+    // The same shape, opaque (BC1's own domain — a floor's painted ink
+    // linework, no alpha channel at all). Interior/ink/background are all
+    // fully opaque, so BC1's identical 2-endpoint mechanism is exercised
+    // purely on RGB clustering rather than alpha dominance.
+    const N = 32;
+    const rInner = 10,
+      rOuter = 13;
+    const BG = [230, 230, 220, 255]; // opaque "paper", not a transparent hole
+    const src = makeImage(N, N, (x, y) => {
+      const d = Math.hypot(x - N / 2 + 0.5, y - N / 2 + 0.5);
+      return d < rInner ? INK_INTERIOR : d < rOuter ? INK_BLACK : BG;
+    });
+    const dec = decodeBC1(encodeBC1(src, N, N), N, N);
+    const { axis, diagonal } = bucketRingTexels(N, rInner, rOuter, dec);
+    ok('ink-ring fixture (BC1) actually sampled both bucket kinds', axis.length > 0 && diagonal.length > 0);
+    const maxLuma = (arr) => Math.max(...arr.map((v) => v.l));
+    ok('axis-aligned ink stays near-black (BC1)', maxLuma(axis) < 20);
+    ok('diagonal ink ALSO stays near-black (BC1) — the fixed case', maxLuma(diagonal) < 20);
+  }
+
+  {
+    // A block with only ONE cluster (uniform colour) must be untouched by the
+    // second-candidate machinery — lumaExtremalPair legitimately finding a
+    // pair changes nothing when every texel already sits on one point.
+    const N = 8;
+    const src = makeImage(N, N, () => [77, 133, 201, 255]);
+    const dec = decodeBC7(encodeBC7(src, N, N), N, N);
+    ok('a flat block round-trips exactly regardless of the 2nd candidate', maxRgbaError(src, dec) === 0);
+  }
+
+  {
+    // A block with exactly two clusters (the common, non-edge-case majority of
+    // real content) must still round-trip at BC7's usual high fidelity — the
+    // extra candidate must never make an already-easy block WORSE.
+    const N = 8;
+    const src = makeImage(N, N, (x) => (x < N / 2 ? [40, 40, 40, 255] : [210, 90, 30, 180]));
+    const dec = decodeBC7(encodeBC7(src, N, N), N, N);
+    ok('a clean two-cluster block stays high fidelity', maxRgbaError(src, dec) <= 4);
+  }
 }

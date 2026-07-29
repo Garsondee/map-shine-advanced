@@ -93,6 +93,40 @@ export function buildCandleWallClipConfig(radius) {
 }
 
 /**
+ * The `ClockwiseSweepPolygonConfig` for a REAL Foundry light — everything
+ * EXCEPT `level` (the caller's job, same split as {@link buildCandleWallClipConfig}).
+ * UNLIKE a candle, a real light can be a cone (`angle`/`rotation` authored,
+ * not always 360/0), so those are taken as real inputs rather than hardcoded.
+ * Mirrors `PointLightSource#_getPolygonConfiguration` exactly (`client/canvas/
+ * sources/point-light-source.mjs`, verified against source): `useThreshold`
+ * + `surfaceExposure` on top of the base `PointEffectSource` config — the
+ * ONE difference from that live method is `radius` is never zeroed here (see
+ * `computeLightWallClippedShape`'s own header for why that matters).
+ *
+ * @param {number} radius - pixel radius (already resolved, not grid units).
+ * @param {object} [opts]
+ * @param {number} [opts.angle] - degrees; Foundry default 360 (omnidirectional).
+ * @param {number} [opts.rotation] - degrees; Foundry default 0.
+ * @param {boolean} [opts.walls] - Foundry default true (blocked by walls).
+ * @param {number} [opts.externalRadius] - Foundry default 0.
+ * @param {number} [opts.priority] - Foundry default 0.
+ * @returns {object} a config object, missing only `level`.
+ */
+export function buildLightWallClipConfig(radius, opts = {}) {
+  return {
+    type: 'light',
+    edgeTypes: { wall: opts.walls !== false },
+    radius,
+    externalRadius: Number.isFinite(opts.externalRadius) ? opts.externalRadius : 0,
+    angle: Number.isFinite(opts.angle) ? opts.angle : 360,
+    rotation: Number.isFinite(opts.rotation) ? opts.rotation : 0,
+    priority: Number.isFinite(opts.priority) ? opts.priority : 0,
+    useThreshold: true,
+    surfaceExposure: { threshold: typeof canvas !== 'undefined' ? canvas.grid.distance : 1 },
+  };
+}
+
+/**
  * Compute the flat `[x0,y0,x1,y1,...]` polygon points Foundry's own
  * `ClockwiseSweepPolygon` produces for a wall-clipped light-shaped area at
  * `(x,y,radius)` on a specific level — the SAME shape shape
@@ -180,5 +214,86 @@ export function computeCandleWallClippedShape({ x, y, radius, levelId }) {
     return { points, source: 'sweep', reason: `level via ${levelSource}` };
   } catch (err) {
     return { points: null, source: 'fallback', reason: `ClockwiseSweepPolygon.create threw: ${err?.message ?? err}` };
+  }
+}
+
+/**
+ * Compute the flat `[x0,y0,x1,y1,...]` wall-clipped polygon for a REAL
+ * Foundry light source, bypassing whatever `source.shape.points` currently
+ * holds. Exists for exactly one caller, `foundry/scene-lights.js#readActive
+ * LightSources`, and only for the light it cannot trust `source.shape`
+ * for: Foundry zeroes a disabled source's OWN computed polygon
+ * (`point-effect-source.mjs#_getPolygonConfiguration`: `radius: (data.
+ * disabled || suppressed) ? 0 : this.radius`) — including a light disabled
+ * for NO reason other than Foundry's own darkness-activation gate
+ * (`AmbientLight#_isLightSourceDisabled`) disagreeing with MSA's own
+ * `darkness01` (see `scene-lights.js`'s header for the full mechanism this
+ * routes around: Foundry's gate reads `canvas.darknessLevel`, which stays
+ * frozen while MSA's Aesthetic time mode is in effect — `world/day-clock.js`).
+ * `source.shape.points` is therefore genuinely degenerate in that state, not
+ * merely stale, and cannot be reused at any radius.
+ *
+ * UNLIKE `computeCandleWallClippedShape`, this takes a real `level` DOCUMENT
+ * directly rather than an id to resolve — the caller already has it
+ * (`source.level`, a real light's own live source resolves this correctly on
+ * every `initialize()`), so there is no id-lookup/fallback dance to do here.
+ *
+ * @param {object} args
+ * @param {number} args.x @param {number} args.y @param {number} args.radius
+ *   - the light's TRUE configured radius (`source.radius`, unaffected by
+ *   `disabled` — only the polygon config's own copy gets zeroed).
+ * @param {number} [args.angle] @param {number} [args.rotation]
+ * @param {boolean} [args.walls] @param {number} [args.externalRadius]
+ * @param {number} [args.priority] @param {object} args.level - a real Level document.
+ * @param {object} [args.source] - the live source, passed through to the
+ *   polygon config exactly like Foundry's own `_getPolygonConfiguration`
+ *   (some polygon backends read it back, e.g. threshold-wall distance checks).
+ * @returns {{points: number[]|null, reason: string}} `points === null` means
+ *   the caller must skip this light this frame — never a crash, never a
+ *   guessed shape (same "return null to skip" convention as `deriveLight
+ *   Snapshot`).
+ */
+export function computeLightWallClippedShape({
+  x,
+  y,
+  radius,
+  angle,
+  rotation,
+  walls,
+  externalRadius,
+  priority,
+  level,
+  source,
+}) {
+  try {
+    if (typeof canvas === 'undefined' || !canvas?.scene) {
+      return { points: null, reason: 'no active scene (canvas.scene is absent)' };
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !(radius > 0)) {
+      return { points: null, reason: 'non-finite position or non-positive radius' };
+    }
+    if (!level) {
+      return { points: null, reason: 'no real Level document available on the live source' };
+    }
+    const PolygonClass = CONFIG.Canvas?.polygonBackends?.light;
+    if (!PolygonClass) {
+      return { points: null, reason: 'CONFIG.Canvas.polygonBackends.light is unavailable' };
+    }
+    const config = {
+      ...buildLightWallClipConfig(radius, { angle, rotation, walls, externalRadius, priority }),
+      level,
+      source,
+    };
+    const polygon = PolygonClass.create({ x, y }, config);
+    const points = Array.isArray(polygon?.points) ? Array.from(polygon.points) : null;
+    if (!points || points.length < 6 || points.length % 2 !== 0 || !points.every(Number.isFinite)) {
+      return {
+        points: null,
+        reason: 'ClockwiseSweepPolygon returned a degenerate shape (<3 vertices, or non-finite)',
+      };
+    }
+    return { points, reason: null };
+  } catch (err) {
+    return { points: null, reason: `ClockwiseSweepPolygon.create threw: ${err?.message ?? err}` };
   }
 }

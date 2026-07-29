@@ -47,8 +47,76 @@
  * the testable validation logic, `readActiveLightSources`/
  * `readGlobalLightConfig` are the live, impure gatherers. Never throws.
  *
+ * ============================================================================
+ * WHY `source.active` IS NOT TRUSTED FOR THE DARKNESS WINDOW (2026-07-29 fix)
+ * ============================================================================
+ *
+ * Bug: a light with a NARROWED darkness window (e.g. "only after dusk") read
+ * as permanently off, including when the astrolabe was dragged to night.
+ * Root cause, verified against source: real Foundry ALSO gates each light on
+ * darkness, independently of this file — `AmbientLight#_isLightSourceDisabled`
+ * (`client/canvas/placeables/light.mjs`) reads `canvas.darknessLevel` (Foundry's
+ * OWN live darkness, sourced from the scene DOCUMENT) and bakes the verdict
+ * into the live source as `data.disabled`, which (a) makes `source.active`
+ * false and (b) forces `_getPolygonConfiguration()` to compute a ZERO-radius
+ * polygon (`point-effect-source.mjs`: `radius: disabled ? 0 : this.radius`) —
+ * so `source.shape.points` is genuinely degenerate, not just stale, whenever
+ * Foundry's OWN gate disagrees.
+ *
+ * MSA's Aesthetic time mode (the default — `world/day-clock.js`'s own header)
+ * deliberately NEVER writes to Foundry's scene darkness, by design (the exact
+ * two-months-expensive "read back what you wrote through a document other
+ * parties also write" feedback bus — `docs/planning/Environment.md` §2.2).
+ * So in Aesthetic mode Foundry's OWN darkness never moves, while MSA's own
+ * `darkness01` (`world/environment.js`: the darker of "what the night sky
+ * implies" and "what Foundry/GM asked for") correctly tracks the astrolabe —
+ * two authorities, two different values, and Foundry's `source.active` was
+ * vetoing the light BEFORE this file's own (correct) darkness-window re-check
+ * below ever got a chance to run.
+ *
+ * Fix: a light that is inactive ONLY because of Foundry's darkness verdict
+ * (not hidden, not suppressed, not zero radius/angle — see
+ * `isDarknessOnlyDisable`) has its TRUE wall-clipped shape recomputed
+ * independently (`scene-wall-clip.js#computeLightWallClippedShape`, the same
+ * technique already proven for candle lights), and `deriveLightSnapshot`'s
+ * OWN darkness-window check against MSA's `darkness01` becomes the sole
+ * authority for whether it draws. A light disabled for any OTHER reason is
+ * still skipped outright — Foundry's verdict is trusted for everything except
+ * the one axis MSA re-derives itself.
+ *
+ * ============================================================================
+ * A SECOND, STACKED BUG THE FIRST FIX EXPOSED: `darknessMin`/`darknessMax`
+ * WERE READ FROM A FIELD THAT NEVER EXISTED ON THE LIVE SOURCE
+ * ============================================================================
+ *
+ * Shipping the fix above made every previously-off narrowed-window light
+ * read as ALWAYS ON instead — at darkness 0 as much as darkness 1. Verified
+ * against source: `PointLightSource`'s OWN `defaultData` chain
+ * (`base-light-source.mjs` -> `rendered-effect-source.mjs` ->
+ * `point-effect-source.mjs` -> `base-effect-source.mjs`) never declares a
+ * `darkness` key AT ALL — only the UNRELATED `GlobalLightSource` class does
+ * (`darkness: {min:0,max:0}`, its own separate `defaultData`, used only for
+ * the scene's Global Illumination, not real placed lights).
+ * `BaseEffectSource#initialize(data)` copies an incoming key onto `this.data`
+ * ONLY `if (key in this.data)` — so `darkness`, present in `_getLightSourceData
+ * ()`'s merged object, was SILENTLY DROPPED for every real `PointLightSource`,
+ * every time. `source.data.darkness` has NEVER been anything but `undefined`
+ * on a live point light. `raw.darknessMin ?? 0` / `raw.darknessMax ?? 1` in
+ * `deriveLightSnapshot` therefore always defaulted to the schema's "always
+ * on" window {0,1}, regardless of what a GM actually configured.
+ *
+ * This was invisible for the project's ENTIRE prior history, because the
+ * OTHER bug (above) meant `source.active` — computed correctly from the
+ * DOCUMENT, not the live source — vetoed a narrowed-window light before this
+ * ever mattered. Fixing one exposed the other; both had to go. Fixed by
+ * reading the SAME place Foundry's OWN `AmbientLight#_isLightSourceDisabled`
+ * reads it: `source.object.document.config.darkness` (the placeable's
+ * document), never `source.data.darkness`.
+ *
  * @module foundry/scene-lights
  */
+
+import { computeLightWallClippedShape } from './scene-wall-clip.js';
 
 /** @param {*} v @returns {number} clamped to [0,1]; a non-finite input reads as 0 */
 function clamp01(v) {
@@ -206,6 +274,32 @@ function deriveAnimationSnapshot(raw) {
 }
 
 /**
+ * Would this Foundry-inactive light be inactive for a reason MSA must still
+ * respect, or is Foundry's own darkness-activation gate the ONLY thing
+ * holding it off? See this module's header ("WHY `source.active` IS NOT
+ * TRUSTED...") for the full mechanism. Pure and Node-testable by design —
+ * the live gatherer (`readActiveLightSources`) plucks these five facts off a
+ * live source and hands them here; this function makes the actual call.
+ *
+ * `radius`/`angle` are checked here (mirroring the first two conditions of
+ * `AmbientLight#_isLightSourceDisabled`) so a light that is ALSO genuinely
+ * degenerate never reaches the (comparatively expensive) wall-clip recompute
+ * — `deriveLightSnapshot` would reject a zero radius anyway, but there is no
+ * reason to pay for a `ClockwiseSweepPolygon.create()` call first.
+ *
+ * @param {{attached: boolean, suppressed: boolean, hidden: boolean,
+ *   radius: number, angle: number}} facts
+ * @returns {boolean} true when ONLY the darkness gate could explain the
+ *   inactivity — MSA's own `darkness01` check should get the final say.
+ */
+export function isDarknessOnlyDisable({ attached, suppressed, hidden, radius, angle }) {
+  if (!attached || suppressed || hidden) return false;
+  if (!(radius > 0)) return false;
+  if (Number.isFinite(angle) && angle <= 0) return false;
+  return true;
+}
+
+/**
  * Live read of every active, non-global point light source currently within
  * its own darkness activation window. Never throws — a Foundry API surprise
  * here must never take a render frame down with it (same reasoning as
@@ -231,7 +325,39 @@ export function readActiveLightSources(darkness01) {
     const lights = [];
     for (const source of collection) {
       if (!source || source.sourceId === 'globalLight') continue;
-      if (!source.active) continue; // attached && !disabled && !suppressed (BaseEffectSource#active)
+      // `source.active` bakes Foundry's OWN darkness-activation verdict in
+      // alongside hidden/zero-radius/suppressed (BaseEffectSource#active) —
+      // see this module's header for why that can't be trusted wholesale.
+      let shapePoints = source.shape?.points;
+      if (!source.active) {
+        const darknessOnly = isDarknessOnlyDisable({
+          attached: source.attached,
+          suppressed: source.suppressed,
+          hidden: source.object?.document?.hidden === true,
+          radius: source.radius, // the TRUE radius (data.radius) — unaffected by disabled
+          angle: source.data?.angle,
+        });
+        if (!darknessOnly) continue; // a real reason (hidden/suppressed/degenerate) — trust Foundry
+        // Foundry also zeroed the polygon it computed for this disabled
+        // source (point-effect-source.mjs#_getPolygonConfiguration), so
+        // source.shape.points is genuinely degenerate — recompute the TRUE
+        // wall-clipped shape ourselves, the same technique already proven
+        // for candle lights (scene-wall-clip.js).
+        const recomputed = computeLightWallClippedShape({
+          x: source.x,
+          y: source.y,
+          radius: source.radius,
+          angle: source.data?.angle,
+          rotation: source.data?.rotation,
+          walls: source.data?.walls,
+          externalRadius: source.data?.externalRadius,
+          priority: source.data?.priority,
+          level: source.level,
+          source,
+        });
+        if (!recomputed.points) continue; // could not safely recompute — safety-slide to "off", never guess
+        shapePoints = recomputed.points;
+      }
       const snap = deriveLightSnapshot(
         {
           sourceId: source.sourceId,
@@ -264,12 +390,33 @@ export function readActiveLightSources(darkness01) {
           // `_flags.hasColor = data.color !== null` on the same source lines).
           color: source.colorRGB,
           shadows: source.data?.shadows,
-          darknessMin: source.data?.darkness?.min,
-          darknessMax: source.data?.darkness?.max,
+          // NOT `source.data?.darkness` (2026-07-29 fix, second bug found
+          // stacked under the `source.active` one — see this module's own
+          // header, "WHY `source.active` IS NOT TRUSTED"). Verified against
+          // source: `PointLightSource`'s OWN `defaultData` chain
+          // (`base-light-source.mjs` -> `rendered-effect-source.mjs` ->
+          // `point-effect-source.mjs` -> `base-effect-source.mjs`) never
+          // declares a `darkness` key AT ALL — only the UNRELATED
+          // `GlobalLightSource` class does. `BaseEffectSource#initialize`
+          // copies an incoming data key onto `this.data` ONLY `if (key in
+          // this.data)` — so `darkness` from `_getLightSourceData()`'s
+          // merged object was SILENTLY DROPPED on every real light, every
+          // time, and `source.data.darkness` was ALWAYS `undefined`. This
+          // was invisible for the project's whole history because
+          // `source.active` (which correctly reads the window from the
+          // DOCUMENT) vetoed a narrowed-window light before this ever
+          // mattered — the moment that mask came off, every resurrected
+          // light defaulted to the {0,1} "always on" window, regardless of
+          // its real configured min/max. Read from the SAME place Foundry's
+          // OWN `AmbientLight#_isLightSourceDisabled` reads it:
+          // `document.config.darkness` — the placeable's document, not the
+          // live source's `.data`.
+          darknessMin: source.object?.document?.config?.darkness?.min,
+          darknessMax: source.object?.document?.config?.darkness?.max,
           // See deriveAnimationSnapshot's own header for why `source.animation`
           // (not `source.data.animation`) is the correct read — seed lives here.
           animation: source.animation,
-          shapePoints: source.shape?.points,
+          shapePoints,
         },
         darkness01
       );

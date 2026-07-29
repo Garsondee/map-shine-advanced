@@ -7,7 +7,7 @@
  * `canvas.scene.environment.globalLight` reads are browser-only (verified
  * via a debug report, not here).
  */
-import { deriveLightSnapshot, deriveGlobalLightConfig } from '../scene-lights.js';
+import { deriveLightSnapshot, deriveGlobalLightConfig, isDarknessOnlyDisable } from '../scene-lights.js';
 
 /** A valid triangle around the origin — 3 vertices, 6 numbers, even length. */
 const TRIANGLE = [-100, -100, 100, -100, 0, 100];
@@ -348,6 +348,39 @@ export function run(t) {
       shapePoints: TRIANGLE,
       animation: { type: 'torch', seed: NaN },
     }).animation.seed === 0
+  );
+
+  // ---- isDarknessOnlyDisable — the "resurrect a Foundry-disabled light for
+  // MSA's own darkness re-check" gate (2026-07-29 fix: darkness-activation
+  // windows read as permanently off because Foundry's OWN darkness gate,
+  // frozen under MSA's Aesthetic time mode, vetoed the light first). --------
+  const BASE_FACTS = { attached: true, suppressed: false, hidden: false, radius: 100, angle: 360 };
+  ok(
+    'the common case: attached, visible, real shape — darkness-only, MSA should re-check',
+    isDarknessOnlyDisable(BASE_FACTS) === true
+  );
+  ok('not attached at all is never darkness-only', isDarknessOnlyDisable({ ...BASE_FACTS, attached: false }) === false);
+  ok(
+    'region-suppressed is a real reason, not darkness — trust Foundry',
+    isDarknessOnlyDisable({ ...BASE_FACTS, suppressed: true }) === false
+  );
+  ok(
+    'GM-hidden is a real reason, not darkness — trust Foundry',
+    isDarknessOnlyDisable({ ...BASE_FACTS, hidden: true }) === false
+  );
+  ok('zero radius is degenerate regardless of darkness', isDarknessOnlyDisable({ ...BASE_FACTS, radius: 0 }) === false);
+  ok(
+    'negative/NaN radius is degenerate regardless of darkness',
+    isDarknessOnlyDisable({ ...BASE_FACTS, radius: NaN }) === false &&
+      isDarknessOnlyDisable({ ...BASE_FACTS, radius: -5 }) === false
+  );
+  ok(
+    'zero angle (a collapsed cone) is degenerate regardless of darkness',
+    isDarknessOnlyDisable({ ...BASE_FACTS, angle: 0 }) === false
+  );
+  ok(
+    'a non-finite angle does not itself disqualify (treated the same as "no angle authored")',
+    isDarknessOnlyDisable({ ...BASE_FACTS, angle: NaN }) === true
   );
 
   // ---- deriveGlobalLightConfig — the scene's Global Illumination gate.

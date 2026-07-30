@@ -392,6 +392,39 @@ export const VEGETATION = Object.freeze({
   // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
   // brush already loaded with this mask (validateAuthoring, effect-manifest.js).
   authoring: Object.freeze({ paint: ['tree', 'bush'] }),
+  // ============================================================================
+  // THE LADDER — BUILT 2026-07-29, one rung per PERFORMANCE_PROFILES entry.
+  // ============================================================================
+  //
+  // Until this pass every profile got the IDENTICAL effect — one rung, declared
+  // unconditional. That was honest (nothing above tier 0 existed), but it also
+  // meant the effect's two genuinely expensive parts — the per-fragment leaf
+  // flutter and the ground shadow's multi-tap smear — ran full-strength on every
+  // machine regardless of profile, which is exactly the `feedback_unconsumed_
+  // api_rots_silently` shape this project keeps re-discovering: a ladder with
+  // nowhere to climb is not a ladder.
+  //
+  // Both costs are real and measured (docs/planning/Performance-Insights.md §4):
+  // the flutter is a curl-noise UV shuffle plus a second full wind-field sample,
+  // per fragment, wherever the coarse-mip presence gate finds foliage; the ground
+  // shadow is a SECOND full mesh per (item × kind) — a padded, alpha-blended
+  // overlay that a weak machine pays draw-call and fill cost for whether or not
+  // its multi-station smear resolves as anything more than a blur.
+  //
+  // Ordered by COST CLASS (Law 3), each rung maps to a row of
+  // `VEGETATION_TIER_PLANS` (vegetation-render.js) — the prose here, the
+  // arithmetic there, index-aligned, exactly like the candle ladder's own split.
+  //
+  // 🔒 Tier 3 == today's shipped behaviour exactly (flutter on, shadow at its
+  // original 6-station smear), and the default `standard` profile resolves to
+  // tier 3 — switching this system on restyles nothing for anyone who has never
+  // touched the performance profile setting. Below `standard` the picture
+  // genuinely simplifies (no shadow below `performance`, no flutter below
+  // `low`); above it the shadow's smear gets progressively finer, ending at
+  // `extreme` — which is also this ladder's RESERVED SLOT: a future rung that
+  // should only ever run on the top profile (self-shadowing and true per-plant
+  // clump differentiation, both already named in `deferredRungs` below) extends
+  // tier 5 in place rather than requiring the ladder to be renumbered.
   tiers: Object.freeze([
     Object.freeze({
       n: 0,
@@ -401,7 +434,56 @@ export const VEGETATION = Object.freeze({
         'correct-placement canopy/foliage overlays (both a tile whose OWN texture IS the mask, and a ' +
         'plain albedo with a discovered sibling mask file) with real wind-driven sway — one wind ' +
         'sample per mesh, at its own world position, so a walled courtyard reads calmer than open ' +
-        'ground without any authored setup.',
+        'ground without any authored setup. The floor: never a static decal, never gated away.',
+    }),
+    Object.freeze({
+      n: 1,
+      name: 'shimmer',
+      fromProfile: 'low',
+      cost: Object.freeze({ class: 'C2', estMsPerMp: 0.02 }),
+      adds:
+        'leaves individually shimmer and shuffle in the wind — a per-fragment curl-noise UV shuffle, ' +
+        'already gated to only the pixels with foliage on them, so its true cost is far below a naive ' +
+        'per-pixel estimate. Below this rung the canopy sways as one coherent mass with no per-leaf detail.',
+    }),
+    Object.freeze({
+      n: 2,
+      name: 'shadow-coarse',
+      fromProfile: 'performance',
+      cost: Object.freeze({ class: 'C8', estMsPerMp: 0.08 }),
+      adds:
+        'the canopy casts a ground shadow that follows the sun — a coarse 3-station smear, enough to ' +
+        'read as a real shadow, with visible banding on the longest dawn/dusk throws. The first rung to ' +
+        'pay for a second mesh (extra draw call, extra overdraw), which is why it waits until here.',
+    }),
+    Object.freeze({
+      n: 3,
+      name: 'shadow-smooth',
+      fromProfile: 'standard',
+      cost: Object.freeze({ class: 'C8', estMsPerMp: 0.12 }),
+      adds:
+        "the shadow's smear reaches its ORIGINAL shipped resolution (6 stations) — the banding above is " +
+        'gone at any sun angle this scene can produce. Nobody who has not touched the performance ' +
+        'profile sees anything different from before this ladder existed.',
+    }),
+    Object.freeze({
+      n: 4,
+      name: 'shadow-finer',
+      fromProfile: 'quality',
+      cost: Object.freeze({ class: 'C8', estMsPerMp: 0.16 }),
+      adds:
+        'the shadow smear gets finer still (9 stations) — a visibly smoother streak on the longest ' +
+        'dawn/dusk throws, for machines with room to spare.',
+    }),
+    Object.freeze({
+      n: 5,
+      name: 'shadow-finest',
+      fromProfile: 'extreme',
+      cost: Object.freeze({ class: 'C8', estMsPerMp: 0.2 }),
+      adds:
+        'the finest shadow smear this effect draws (12 stations). Also the reserved top rung: the next ' +
+        'extreme-only addition to this effect (self-shadow, true clump differentiation — see ' +
+        'deferredRungs) extends this rung rather than needing a new one appended.',
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0), matching

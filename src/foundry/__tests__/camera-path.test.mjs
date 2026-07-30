@@ -12,6 +12,7 @@ import {
   LONG_JUMP_FADE_RATIO,
   FADE_CUT_HOLD_MS,
   SHOT_CUT_HOLD_MS,
+  INTRO_HOLD_MS,
   DEFAULT_SETTINGS,
 } from '../camera-path.js';
 
@@ -449,6 +450,10 @@ export function run(t) {
     })()
   );
   ok(`SHOT_CUT_HOLD_MS is V2's own 800ms segmentHoldMs`, SHOT_CUT_HOLD_MS === 800);
+  ok(
+    `INTRO_HOLD_MS is a one-second beat on black ("pause for a second", 2026-07-29 author spec)`,
+    INTRO_HOLD_MS === 1000
+  );
 
   // ---- the 'full' preset's shot structure — the actual bug report -----------
   ok(
@@ -476,10 +481,37 @@ export function run(t) {
     })()
   );
   ok(
-    'the "full" preset\'s east-edge shot runs north (top) to south (bottom)',
+    'the "full" preset\'s east-edge shot runs south (bottom) to north (top) — SAME direction as the west edge ' +
+      '(2026-07-29 author spec: "we do the same to the right side", not V2\'s mirrored north->south)',
     (() => {
       const kfs = generateKeyframePreset('full', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
-      return kfs[4].y < kfs[5].y; // E (top, smaller y) -> F (bottom, larger y)
+      return kfs[4].y > kfs[5].y; // E (bottom, larger y) -> F (top, smaller y)
+    })()
+  );
+  ok(
+    'the "full" preset\'s shot-4 cut (G) lands exactly back on shot-1\'s zoom-in (B) — "cut to the middle of the ' +
+      'map again", the SAME middle, before zooming back out',
+    (() => {
+      const kfs = generateKeyframePreset('full', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
+      return kfs[1].x === kfs[6].x && kfs[1].y === kfs[6].y && kfs[1].scale === kfs[6].scale;
+    })()
+  );
+  ok(
+    'the "full" preset\'s edge-sweep zoom frames roughly 50% of the map\'s WIDTH (author: "see roughly 50% of ' +
+      'the map based on zoom") — the west edge sits a quarter of the way in from the scene\'s left border',
+    (() => {
+      // viewW=1920, sceneWidth=4000 -> sweepZoom = 1920/2000 = 0.96 ->
+      // visibleWidth = 1920/0.96 = 2000 (exactly half of 4000) -> xL = 0 + 1000.
+      const kfs = generateKeyframePreset('full', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
+      return near(kfs[2].x, 1000, 1) && near(kfs[4].x, 3000, 1); // C (west) and E (east)
+    })()
+  );
+  ok(
+    'the "full" preset\'s shot-1 zoom-in (B) and the edge sweeps (C-F) all share ONE consistent ~50% zoom level',
+    (() => {
+      const kfs = generateKeyframePreset('full', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
+      const [b, c, d, e, f] = [kfs[1], kfs[2], kfs[3], kfs[4], kfs[5]];
+      return b.scale === c.scale && c.scale === d.scale && d.scale === e.scale && e.scale === f.scale;
     })()
   );
   ok(
@@ -507,20 +539,42 @@ export function run(t) {
     );
   }
   ok(
-    'REGRESSION: with the DEFAULT settings (longJumpFadeCut:true) and REAL mapDims — matching what the live player ' +
-      'always passes — the "full" preset\'s edge sweeps (shots 2 and 3) WOULD wrongly become fadecuts, proving why ' +
-      'the preset must override that setting',
+    'REGRESSION FIX (2026-07-29, 3rd occurrence — "the two side north-south sweeps aren\'t working, they cut to ' +
+      'position instead of moving"): even with the DEFAULT settings (longJumpFadeCut:true) and REAL mapDims — ' +
+      'matching a stale saved path or any caller that never reads suggestedLongJumpFadeCut — the "full" preset\'s ' +
+      'edge sweeps (shots 2 and 3) now correctly stay smooth sweeps, because each one immediately follows a ' +
+      'cutBefore keyframe (a shot that hard-cuts in is structurally immune to the long-jump heuristic now, not ' +
+      'just by convention)',
     (() => {
       const kfs = generateKeyframePreset('full', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
       const segs = buildCameraTimeline({ keyframes: kfs, settings: DEFAULT_SETTINGS }, { width: 4000, height: 4000 });
       const types = segs.map((s) => s.type);
       // shot 2 (index 2, C->D) and shot 3 (index 4, E->F) span most of the
-      // map's height -> long-jump heuristic fires -> 'fadecut', not 'sweep'.
-      return types[2] === 'fadecut' && types[4] === 'fadecut';
+      // map's height -> would have fired the long-jump heuristic under the
+      // OLD rules -> must now stay 'sweep', not 'fadecut'.
+      return types[2] === 'sweep' && types[4] === 'sweep';
     })()
   );
   ok(
-    "with the preset's OWN suggested settings (longJumpFadeCut:false), those same shots correctly stay smooth sweeps",
+    'the from.cutBefore exemption does NOT blanket-disable the long-jump heuristic for gaps that never followed a ' +
+      'hard cut — a genuinely accidental huge pan between two plain (non-cutBefore) keyframes still fadecuts',
+    (() => {
+      const segs = buildCameraTimeline(
+        {
+          keyframes: [
+            { x: 0, y: 0, scale: 1, holdMs: 0, cutBefore: false },
+            { x: 900, y: 0, scale: 1, holdMs: 0, cutBefore: false },
+          ],
+          settings: DEFAULT_SETTINGS,
+        },
+        { width: 1000, height: 1000 }
+      );
+      return segs.length === 1 && segs[0].type === 'fadecut';
+    })()
+  );
+  ok(
+    "with the preset's OWN suggested settings (longJumpFadeCut:false), those same shots ALSO correctly stay smooth " +
+      'sweeps (belt-and-suspenders with the from.cutBefore exemption above)',
     (() => {
       const result = generateKeyframePreset('full', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 });
       const settings = { ...DEFAULT_SETTINGS, longJumpFadeCut: result.suggestedLongJumpFadeCut };

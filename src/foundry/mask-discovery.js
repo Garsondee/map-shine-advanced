@@ -111,6 +111,22 @@ export function splitArtUrl(url) {
  *   (see the art-variant fallback below) so a looser match is always visible.
  */
 export function matchMaskFiles(listedFiles, artBase, artExt) {
+  // A file can never be its OWN mask — but the art-variant fallback below
+  // (which re-tries progressively SHORTER bases) can accidentally reconstruct
+  // the art's own name: an item whose art IS itself suffix-named (Vegetation's
+  // Case 1, e.g. `Big_Oak_Tree.webp` used directly as a tile's art, no
+  // separate mask file at all) has an `artBase` that already ends in a
+  // suffix's own word ("...Big_Oak_Tree"). Shortening it by one segment
+  // ("Big_Oak") and re-appending that SAME suffix ("_Tree") reproduces
+  // "Big_Oak_Tree" exactly — matching the art's own listed file as its
+  // "discovered" tree mask, with nothing else in the directory involved. That
+  // fed a self-vegetation tile's own texture into the discovered-sibling-
+  // overlay path (Case 2) ON TOP OF Case 1's own material swap — two
+  // independently-animated copies of the same canopy swaying under wind.
+  // Excluding the art's own filename from the candidate pool up front closes
+  // this for every kind and every fallback depth, not just the one shortening
+  // step that happened to reproduce it.
+  const ownBasename = `${artBase}.${artExt}`.toLowerCase();
   const byBasename = new Map(); // decoded lowercase basename -> listed path
   for (const path of listedFiles ?? []) {
     const clean = String(path).split('?')[0];
@@ -121,7 +137,9 @@ export function matchMaskFiles(listedFiles, artBase, artExt) {
     } catch (_) {
       // Not valid percent-encoding — compare the raw name instead.
     }
-    byBasename.set(decoded.toLowerCase(), path);
+    const key = decoded.toLowerCase();
+    if (key === ownBasename) continue; // never match the art's own file as its own mask
+    byBasename.set(key, path);
   }
 
   const extRank = (ext) => {

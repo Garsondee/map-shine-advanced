@@ -88,6 +88,32 @@ export async function run(t) {
     t.ok('shortening stops before a bare first token', !tooShort.found.has('outdoors'));
   }
 
+  // A FILE IS NEVER ITS OWN MASK (found live, 2026-07-29) — Vegetation Case 1
+  // places a tile whose own art IS `_Tree`/`_Bush`-suffixed (e.g.
+  // `Big_Oak_Tree.webp`, no separate mask file at all). Its own `artBase`
+  // ("Big_Oak_Tree") already ends in a suffix's own word, so the art-variant
+  // fallback above — which retries progressively SHORTER bases — shortens it
+  // to "Big_Oak" and re-appends "_Tree", reconstructing "Big_Oak_Tree" and
+  // matching the tile's OWN listed file as its "discovered" tree mask, with
+  // nothing else in the directory involved. That fed the self-vegetation
+  // tile's own texture into the discovered-sibling-overlay path on TOP of its
+  // own Case-1 material swap — two independently-animated copies of the same
+  // canopy visibly diverging under wind sway.
+  {
+    const selfOnly = matchMaskFiles(['assets/Big_Oak_Tree.webp', 'assets/Stone_Wall.webp'], 'Big_Oak_Tree', 'webp');
+    t.ok('a self-vegetation tile never discovers its own file as its own mask', !selfOnly.found.has('tree'));
+
+    // The fix must not be a blunt "no fallback for tree/bush" rule — a
+    // self-vegetation tile with a genuinely SEPARATE, real companion file for
+    // the OTHER kind (undergrowth painted around a self-contained tree tile)
+    // must still discover it.
+    const companion = matchMaskFiles(['assets/Big_Oak_Tree.webp', 'assets/Big_Oak_Bush.webp'], 'Big_Oak_Tree', 'webp');
+    t.ok(
+      'a genuinely separate companion mask for the OTHER kind still discovers',
+      companion.found.get('bush') === 'assets/Big_Oak_Bush.webp' && !companion.found.has('tree')
+    );
+  }
+
   const encoded = matchMaskFiles(['floors/old%20mill_Outdoors.webp'], 'old mill', 'webp');
   t.ok(
     'URL-encoded listings match decoded art base names',

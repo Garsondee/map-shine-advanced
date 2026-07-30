@@ -20,6 +20,7 @@ import { run as runPerfHud } from './perf-hud.test.mjs';
 import { run as runWindFieldOverlay } from './wind-field-overlay.test.mjs';
 import { run as runWindProbe } from './wind-probe.test.mjs';
 import { run as runEffectControls } from './effect-controls.test.mjs';
+import { run as runSettingsPanel } from './settings-panel.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -54,6 +55,7 @@ const suites = [
   ['wind-field-overlay', runWindFieldOverlay],
   ['wind-probe', runWindProbe],
   ['effect-controls', runEffectControls],
+  ['settings-panel', runSettingsPanel],
 ];
 
 for (const [name, fn] of suites) {

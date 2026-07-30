@@ -168,6 +168,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 1,
       name: 'tube',
+      fromProfile: 'low',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.01 }),
       adds:
         'Cross-section from the pack`s `across`: optical path length sqrt(1-across^2), longest down ' +
@@ -178,6 +179,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 2,
       name: 'flow',
+      fromProfile: 'standard',
       cost: Object.freeze({ class: 'C4', estMsPerMp: 0.04 }),
       adds:
         'The pack read: `s`, the GEODESIC arc-length coordinate (so position along a tube means the ' +
@@ -193,6 +195,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 3,
       name: 'film',
+      fromProfile: 'standard',
       cost: Object.freeze({ class: 'C4', estMsPerMp: 0.01 }),
       adds:
         'Thin-film iridescence driven by that same optical thickness, so the rainbow bands across ' +
@@ -202,6 +205,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 4,
       name: 'fill',
+      fromProfile: 'quality',
       cost: Object.freeze({ class: 'C5', estMsPerMp: 0.08 }),
       adds:
         'THE SIM (`fluid-sim.js`, `fluid-pump.js`): a semi-Lagrangian ping-pong per masked item, ' +
@@ -215,6 +219,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 5,
       name: 'structure',
+      fromProfile: 'quality',
       // ⚠️ C5, NOT the C2 `Fluid.md` §7's original design-time sketch guessed
       // — the SAME correction tier `fill` above already had to make, for the
       // SAME reason: `cost.class` in this manifest is the CEILING the rung

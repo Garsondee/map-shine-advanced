@@ -92,10 +92,16 @@ export function run(t) {
   }
 
   // ---- Quantization-limited cases: recovered within one 565 step ----------
+  // ⚠️ THESE BARS ARE DELIBERATELY TIGHT (2026-07-29, halved from ≤ 8 by the
+  // toRgb565 endpoint-bias fix — see that function's own doc). A bar set at
+  // twice the real error cannot fail, so it is not an instrument; these sit at
+  // the measured value so the bias CANNOT silently come back. If one of these
+  // starts failing, the endpoint quantizer moved — check its rounding before
+  // anything else.
   {
     const img = makeImage(4, 4, () => [130, 96, 200, 255]); // solid mid colour
     const { err } = roundTrip(img, 4, 4);
-    ok('solid colour recovers within 565 quantization (≤ 8)', err <= 8);
+    ok('solid colour recovers within 565 quantization (≤ 2)', err <= 2);
   }
   {
     // Two arbitrary opaque colours, both present in the block.
@@ -103,7 +109,27 @@ export function run(t) {
     const B = [30, 60, 210];
     const img = makeImage(4, 4, (x) => [...(x < 2 ? A : B), 255]);
     const { err } = roundTrip(img, 4, 4);
-    ok('two-colour block recovers within 565 quantization (≤ 8)', err <= 8);
+    ok('two-colour block recovers within 565 quantization (≤ 4)', err <= 4);
+  }
+  {
+    // THE BIAS ITSELF, asserted directly rather than only via the bars above:
+    // the old quantizer's error was ONE-DIRECTIONAL (every channel decoded
+    // brighter than authored, +4.08/255 mean over all inputs), which is what
+    // made it uncancellable downstream. A mid-grey ramp is the cleanest probe —
+    // its mean SIGNED error must now straddle zero, not sit above it.
+    const img = makeImage(16, 16, (x, y) => {
+      const v = 40 + ((x * 13 + y * 7) % 176);
+      return [v, v, v, 255];
+    });
+    const out = decodeBC1(encodeBC1(img, 16, 16), 16, 16);
+    let signed = 0;
+    let n = 0;
+    for (let i = 0; i < img.length; i += 4)
+      for (let c = 0; c < 3; c++) {
+        signed += out[i + c] - img[i + c];
+        n++;
+      }
+    ok('BC1 endpoints carry no systematic brightening bias (|mean signed| ≤ 1)', Math.abs(signed / n) <= 1);
   }
 
   // ---- Block ordering + gather coords across multiple blocks --------------
@@ -131,7 +157,10 @@ export function run(t) {
     ok('6×5 encodes to the padded-block byte count', blocks.length === bc1ByteLength(w, h));
     const out = decodeBC1(blocks, w, h);
     ok('6×5 decodes back to exactly w*h*4 bytes', out.length === w * h * 4);
-    ok('6×5 (1-D ramp) content is recovered (bounded error)', maxRgbError(img, out) <= 40);
+    // ≤ 40 was a placeholder bar an order of magnitude above the real error and
+    // could not have failed; the measured value is 4. See the tightening note
+    // on the quantization-limited cases above.
+    ok('6×5 (1-D ramp) content is recovered (bounded error)', maxRgbError(img, out) <= 4);
   }
 
   // ---- Determinism + input validation ------------------------------------
@@ -526,5 +555,89 @@ export function run(t) {
     const src = makeImage(N, N, (x) => (x < N / 2 ? [40, 40, 40, 255] : [210, 90, 30, 180]));
     const dec = decodeBC7(encodeBC7(src, N, N), N, N);
     ok('a clean two-cluster block stays high fidelity', maxRgbaError(src, dec) <= 4);
+  }
+
+  // ══ SHARED SCRATCH BUFFERS MUST NOT LEAK BETWEEN CALLS ══════════════════
+  // (2026-07-29, the allocation-free pass — see block-compress.js's
+  // "ALLOCATION-FREE INSIDE THE BLOCK LOOP" header.) The encoders now reuse
+  // module-level texel/palette/candidate buffers instead of allocating per
+  // block, which buys ~1.6× on BC7 and removes ~10⁸ short-lived objects per
+  // 12000² layer — and introduces exactly ONE new way to be wrong: state
+  // surviving from one block (or one CALL) into the next. A leak would not
+  // throw; it would quietly corrupt whichever image encoded second, which is
+  // the silent-drift class memory:feedback_instruments_must_not_lie exists for.
+  // So: encode A, encode a DIFFERENT image B in between, encode A again — the
+  // two A encodes must be byte-identical, and each must match a single-shot
+  // encode of A alone.
+  {
+    const N = 16;
+    const imgA = makeImage(N, N, (x, y) => {
+      const d = Math.hypot(x - N / 2, y - N / 2);
+      return d < 5 ? [200, 140, 60, 255] : d < 7 ? [10, 10, 10, 255] : [0, 0, 0, 0];
+    });
+    const imgB = makeImage(N, N, (x, y) => [(x * 17) & 255, (y * 29) & 255, (x * y) & 255, (x + y) & 255]);
+    for (const [label, enc] of [
+      ['bc1', encodeBC1],
+      ['bc7', encodeBC7],
+    ]) {
+      const a1 = enc(imgA, N, N);
+      enc(imgB, N, N); // a completely different image between the two A encodes
+      const a2 = enc(imgA, N, N);
+      ok(`${label}: interleaving another image leaves the encode unchanged`, bytesEqual(a1, a2));
+    }
+    // The same guarantee WITHIN one call: a single multi-block image whose
+    // blocks differ from each other reuses the scratch block-to-block, so a
+    // leak there shows up as the second half decoding like the first.
+    const wide = makeImage(32, 8, (x) => (x < 16 ? [240, 20, 20, 255] : [20, 20, 240, 255]));
+    const decWide = decodeBC1(encodeBC1(wide, 32, 8), 32, 8);
+    ok(
+      'bc1: block-to-block scratch reuse keeps each block its own colour',
+      decWide[(4 * 32 + 2) * 4] > 200 && decWide[(4 * 32 + 29) * 4 + 2] > 200
+    );
+  }
+
+  // ══ THE ENCODER-OUTPUT PIN ══════════════════════════════════════════════
+  // These bytes are cached in IndexedDB under bc-compress.worker.js's
+  // CACHE_VERSION, so an encoder change that alters output and does NOT bump
+  // that constant serves every existing user a stale texture forever — the
+  // exact failure memory:feedback_url_keyed_cache_needs_a_content_validator
+  // records, one layer up. Nothing else in this suite would notice: every
+  // other assertion here is a tolerance band, and a changed-but-still-good
+  // encode sails through all of them.
+  //
+  // So this pins the actual BYTES of a fixture holding all three clusters
+  // (interior / ink / transparent hole) plus a gradient — enough to exercise
+  // both candidate pairs, both BC1 palette modes and BC7's anchor swap.
+  //
+  // ⚠️ IF THIS FAILS: that is not automatically a bug. It means the encoder's
+  // output moved. Decide which happened, then do the matching thing:
+  //   • intentional quality change → update the hash below AND bump
+  //     CACHE_VERSION in bc-compress.worker.js (never one without the other);
+  //   • unintentional → you have a real regression; the round-trip bars above
+  //     will tell you whether quality went with it.
+  {
+    /** FNV-1a 32-bit — a stable, dependency-free fingerprint of the blocks. */
+    const fnv1a = (bytes) => {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < bytes.length; i++) {
+        h ^= bytes[i];
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      return h.toString(16).padStart(8, '0');
+    };
+    const N = 16;
+    const fixture = makeImage(N, N, (x, y) => {
+      const d = Math.hypot(x - N / 2 + 0.5, y - N / 2 + 0.5);
+      if (d < 4) return [200 + x, 140, 60 + y, 255];
+      if (d < 6) return [10, 10, 10, 255];
+      return [(x * 16) & 255, (y * 16) & 255, 128, d < 7 ? 128 : 0];
+    });
+    ok('BC1 encoder output is byte-stable (CACHE_VERSION 8)', fnv1a(encodeBC1(fixture, N, N)) === '94b1e28e');
+    // NOTE the BC7 hash did NOT move across the v7→v8 toRgb565 fix, and must
+    // not have: that function is BC1-only (BC7 mode 6 carries full 8-bit
+    // endpoints and never quantizes to 565). This pin is what PROVED that
+    // rather than assuming it — an unchanged hash here is the evidence the
+    // fix stayed in its own format.
+    ok('BC7 encoder output is byte-stable (CACHE_VERSION 8)', fnv1a(encodeBC7(fixture, N, N)) === 'f3ce221c');
   }
 }

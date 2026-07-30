@@ -33,12 +33,43 @@
  * so no transparency ever leaks.
  */
 
-/** RGB888 → packed RGB565 uint16 (the value the GPU stores and expands). */
+/**
+ * RGB888 → packed RGB565 uint16 (the value the GPU stores and expands).
+ *
+ * ⚠️ THIS ROUNDS ONCE, DELIBERATELY (2026-07-29). It used to read
+ * `Math.round((v * 31 + 127) / 255)`, which rounds TWICE: `+127` is already the
+ * rounding offset for a FLOOR division by 255, and applying `Math.round` on top
+ * of that turns the whole expression into an effective CEILING. The result was
+ * a systematic one-directional brightening of every BC1 endpoint — measured
+ * over all 256 inputs, mean signed reconstruction error +4.08/255 and a worst
+ * case of 8, against +0.0/4 for the plain `round(v * 31 / 255)` here now.
+ *
+ * WHY IT MATTERED, not just why it was untidy: the bias is one-directional, so
+ * nothing downstream can cancel it. Both endpoint candidates (see the SECOND
+ * ENDPOINT CANDIDATE header below) are quantized by THIS function, so the
+ * error-scored choice between them picks the better of two equally-brightened
+ * options, and the index search then snaps every texel onto a line that has
+ * already drifted light. Measured on 256² fixtures, whole-pipeline encode→decode:
+ *   dark ink linework on paper  mean |err| 3.43 → 2.00, bias +3.43 → +0.76, max 7 → 4
+ *   saturated colour field      mean |err| 2.69 → 1.44, bias +2.11 → +0.13, max 16 → 6
+ *   parchment gradient + noise  mean |err| 2.11 → 1.75, bias +0.45 → +0.03
+ * Ink linework is the load-bearing case: it is the SAME "black outline goes
+ * mushy" family the second-endpoint candidate was added for a day earlier, and
+ * BC1 is what every fully-opaque floor/background painting encodes as.
+ *
+ * A tempting-looking `(v * 31 + 127) >> 8` is NOT equivalent to either form —
+ * `>> 8` divides by 256, not 255, and differs from the old expression on 143 of
+ * 256 inputs. Verified exhaustively; do not "simplify" this to a shift.
+ *
+ * Changing this changed the encoder's output bytes, which is why
+ * bc-compress.worker.js's CACHE_VERSION went 7 → 8 in the same commit. The two
+ * move together, always — see the encoder-output pin in this module's tests.
+ */
 function toRgb565(r, g, b) {
-  const r5 = (r * 31 + 127) / 255;
-  const g6 = (g * 63 + 127) / 255;
-  const b5 = (b * 31 + 127) / 255;
-  return ((Math.round(r5) & 0x1f) << 11) | ((Math.round(g6) & 0x3f) << 5) | (Math.round(b5) & 0x1f);
+  const r5 = Math.round((r * 31) / 255);
+  const g6 = Math.round((g * 63) / 255);
+  const b5 = Math.round((b * 31) / 255);
+  return ((r5 & 0x1f) << 11) | ((g6 & 0x3f) << 5) | (b5 & 0x1f);
 }
 
 /** Packed RGB565 uint16 → {r,g,b} expanded to 8-bit EXACTLY as a GPU decodes it
@@ -101,7 +132,7 @@ function fromRgb565(v) {
  * (or dilated, edge-adjacent) texel as a "dark" endpoint by accident. Returns
  * `null` with fewer than 2 qualifying texels — the existing distance pair
  * already handles a block with at most one opaque cluster just fine.
- * @param {number[]} texels flat [r,g,b,a,…] length 64
+ * @param {Uint8Array} texels flat [r,g,b,a,…] length 64 (the shared gather buffer)
  * @returns {[number,number]|null} texel indices [darkest, lightest]
  */
 function lumaExtremalPair(texels) {
@@ -124,16 +155,44 @@ function lumaExtremalPair(texels) {
   return lo >= 0 && hi >= 0 && lo !== hi ? [lo, hi] : null;
 }
 
+// ===========================================================================
+// ALLOCATION-FREE INSIDE THE BLOCK LOOP (2026-07-29). Everything from here to
+// the end of the BC7 encoder writes into buffers allocated ONCE per module, not
+// per block. This is not premature tidiness: a 12000² layer is 9 MILLION blocks,
+// and the shapes being allocated were per-block `new Array(64)` texel gathers,
+// per-candidate `{r,g,b}` palette entries and per-endpoint `new Array(4)` pairs
+// — on the order of 10⁸ short-lived objects for ONE floor, all of it inside a
+// Web Worker that already fell over once on this exact image size (see the STRIP
+// DRIVER header below for that receipt). Scavenging that much garbage is pure
+// overhead on a job that is otherwise straight-line integer arithmetic.
+//
+// SAFE BECAUSE THE ENCODER IS SINGLE-THREADED AND NON-REENTRANT: a worker is one
+// thread, these buffers never outlive the `encodeBC*Block` call that fills them,
+// and nothing returned from this module aliases them (the block loops copy into
+// `out` before the next block reuses the scratch). If a future caller ever wants
+// to encode two blocks concurrently, THESE are the things that must be made
+// per-call — hence the shared `_scratch` prefix, so a grep finds all of them.
+//
+// Every change in this pass is BIT-IDENTICAL to what came before — proven in
+// __tests__/block-compress.test.mjs by re-asserting the same round-trip bars,
+// and (during development) by byte-diffing a corpus against the previous
+// encoder. Output bytes are cached in IndexedDB keyed by
+// bc-compress.worker.js's CACHE_VERSION; a change that ALTERED the bytes would
+// have to bump it. This one does not.
+// ===========================================================================
+
 /** The 4×4 texels of block (bx,by), edge-clamped so a width/height that is not a
- * multiple of 4 replicates its border rather than reading out of bounds. Returns
- * a flat [r,g,b,a, …] length-64 array. */
-function gatherBlock(rgba, width, height, bx, by) {
-  const out = new Array(64);
+ * multiple of 4 replicates its border rather than reading out of bounds. Writes
+ * a flat [r,g,b,a, …] into `out` (length 64) — the caller owns and REUSES that
+ * buffer across every block rather than taking a fresh array per block (see the
+ * allocation header above; this is the single biggest allocation in the file). */
+function gatherBlock(rgba, width, height, bx, by, out) {
   for (let ty = 0; ty < 4; ty++) {
     const sy = Math.min(by * 4 + ty, height - 1);
+    const rowOff = sy * width;
     for (let tx = 0; tx < 4; tx++) {
       const sx = Math.min(bx * 4 + tx, width - 1);
-      const si = (sy * width + sx) * 4;
+      const si = (rowOff + sx) * 4;
       const di = (ty * 4 + tx) * 4;
       out[di] = rgba[si];
       out[di + 1] = rgba[si + 1];
@@ -141,7 +200,23 @@ function gatherBlock(rgba, width, height, bx, by) {
       out[di + 3] = rgba[si + 3];
     }
   }
-  return out;
+}
+
+/** The one 4×4 texel gather both encoders fill and read, reused per block. */
+const _scratchTexels = new Uint8Array(64);
+
+/**
+ * Do two candidate texel indices name the SAME unordered pair? Both scorers are
+ * exactly symmetric under swapping their two endpoints — BC1 sorts c0/c1 into
+ * descending order before doing anything else, and BC7's weight table satisfies
+ * W[15−k] = 64−W[k], so a swapped pair produces the mirrored palette and the
+ * identical total error (it is the same identity the anchor rule below already
+ * relies on). Scoring it a second time therefore cannot beat the first (the
+ * winner comparison is a STRICT `<`, so an equal total never displaces), which
+ * makes skipping it bit-identical rather than an approximation.
+ */
+function isSamePair(a0, a1, b0, b1) {
+  return (a0 === b0 && a1 === b1) || (a0 === b1 && a1 === b0);
 }
 
 /**
@@ -163,7 +238,8 @@ export function encodeBC1(rgba, width, height) {
   let o = 0;
   for (let by = 0; by < blocksY; by++) {
     for (let bx = 0; bx < blocksX; bx++) {
-      encodeBC1Block(gatherBlock(rgba, width, height, bx, by), out, o);
+      gatherBlock(rgba, width, height, bx, by, _scratchTexels);
+      encodeBC1Block(_scratchTexels, out, o);
       o += 8;
     }
   }
@@ -171,13 +247,32 @@ export function encodeBC1(rgba, width, height) {
 }
 
 /**
+ * One scored BC1 candidate pair. TWO of these exist (one per candidate a block
+ * evaluates) and are reused for every block, so the second candidate's score
+ * never clobbers the first's while they are being compared — the reason this is
+ * two fixed slots rather than one buffer. The palette is held as three parallel
+ * FLOAT arrays because BC1's interpolated entries are genuinely fractional
+ * (`(2·e0 + e1)/3`) and the nearest search compares against them un-rounded,
+ * exactly as the `{r,g,b}` objects it replaces did.
+ */
+function makeBC1Candidate() {
+  return { c0: 0, c1: 0, idx: new Uint8Array(16), total: 0 };
+}
+const _scratchBC1A = makeBC1Candidate();
+const _scratchBC1B = makeBC1Candidate();
+const _scratchBC1PalR = new Float64Array(4);
+const _scratchBC1PalG = new Float64Array(4);
+const _scratchBC1PalB = new Float64Array(4);
+
+/**
  * Quantize a BC1 candidate endpoint pair (texel indices bi/bj into `texels`),
  * build the palette the GPU will reconstruct, pick every texel's nearest entry,
- * and return the block's total squared RGB error for this pair — the metric
+ * and record the block's total squared RGB error for this pair — the metric
  * used to choose between competing candidates (see this file's "SECOND
- * ENDPOINT CANDIDATE" section header).
+ * ENDPOINT CANDIDATE" section header). Writes into `out` (a `makeBC1Candidate`
+ * slot) instead of returning a fresh object; returns `out` for convenience.
  */
-function scoreBC1Pair(texels, bi, bj) {
+function scoreBC1Pair(texels, bi, bj, out) {
   let c0 = toRgb565(texels[bi * 4], texels[bi * 4 + 1], texels[bi * 4 + 2]);
   let c1 = toRgb565(texels[bj * 4], texels[bj * 4 + 1], texels[bj * 4 + 2]);
   // 4-colour (fully opaque) mode requires c0 > c1. If they collapsed to equal
@@ -189,22 +284,48 @@ function scoreBC1Pair(texels, bi, bj) {
     c0 = c1;
     c1 = t;
   }
-  const e0 = fromRgb565(c0);
-  const e1 = fromRgb565(c1);
-  let pal;
+  // The 565→888 expand, inlined rather than via fromRgb565, purely to avoid the
+  // `{r,g,b}` allocation per candidate — identical arithmetic, see that function.
+  const r0 = (c0 >> 11) & 0x1f,
+    g0 = (c0 >> 5) & 0x3f,
+    b0 = c0 & 0x1f;
+  const r1 = (c1 >> 11) & 0x1f,
+    g1 = (c1 >> 5) & 0x3f,
+    b1 = c1 & 0x1f;
+  const e0r = (r0 << 3) | (r0 >> 2),
+    e0g = (g0 << 2) | (g0 >> 4),
+    e0b = (b0 << 3) | (b0 >> 2);
+  const e1r = (r1 << 3) | (r1 >> 2),
+    e1g = (g1 << 2) | (g1 >> 4),
+    e1b = (b1 << 3) | (b1 >> 2);
+  const palR = _scratchBC1PalR,
+    palG = _scratchBC1PalG,
+    palB = _scratchBC1PalB;
+  palR[0] = e0r;
+  palG[0] = e0g;
+  palB[0] = e0b;
+  palR[1] = e1r;
+  palG[1] = e1g;
+  palB[1] = e1b;
+  let usable;
   if (c0 > c1) {
-    pal = [
-      e0,
-      e1,
-      { r: (2 * e0.r + e1.r) / 3, g: (2 * e0.g + e1.g) / 3, b: (2 * e0.b + e1.b) / 3 },
-      { r: (e0.r + 2 * e1.r) / 3, g: (e0.g + 2 * e1.g) / 3, b: (e0.b + 2 * e1.b) / 3 },
-    ];
+    palR[2] = (2 * e0r + e1r) / 3;
+    palG[2] = (2 * e0g + e1g) / 3;
+    palB[2] = (2 * e0b + e1b) / 3;
+    palR[3] = (e0r + 2 * e1r) / 3;
+    palG[3] = (e0g + 2 * e1g) / 3;
+    palB[3] = (e0b + 2 * e1b) / 3;
+    usable = 4;
   } else {
-    // 3-colour mode: index 3 is transparent black — deliberately excluded below.
-    pal = [e0, e1, { r: (e0.r + e1.r) / 2, g: (e0.g + e1.g) / 2, b: (e0.b + e1.b) / 2 }, null];
+    // 3-colour mode: index 3 is transparent black — deliberately never searched
+    // (usable = 3), which is what keeps transparency from leaking into an
+    // opaque BC1 image.
+    palR[2] = (e0r + e1r) / 2;
+    palG[2] = (e0g + e1g) / 2;
+    palB[2] = (e0b + e1b) / 2;
+    usable = 3;
   }
-  const usable = pal[3] === null ? 3 : 4;
-  const idx = new Array(16);
+  const idx = out.idx;
   let total = 0;
   for (let i = 0; i < 16; i++) {
     const r = texels[i * 4],
@@ -213,9 +334,9 @@ function scoreBC1Pair(texels, bi, bj) {
     let best = 0;
     let bestD = Infinity;
     for (let p = 0; p < usable; p++) {
-      const dr = r - pal[p].r,
-        dg = g - pal[p].g,
-        db = b - pal[p].b;
+      const dr = r - palR[p],
+        dg = g - palG[p],
+        db = b - palB[p];
       const d = dr * dr + dg * dg + db * db;
       if (d < bestD) {
         bestD = d;
@@ -225,7 +346,10 @@ function scoreBC1Pair(texels, bi, bj) {
     idx[i] = best;
     total += bestD;
   }
-  return { c0, c1, idx, total };
+  out.c0 = c0;
+  out.c1 = c1;
+  out.total = total;
+  return out;
 }
 
 /** Encode one 4×4 block (flat rgba, length 64) into out[off..off+8). */
@@ -256,11 +380,13 @@ function encodeBC1Block(texels, out, off) {
   // THE SECOND CANDIDATE (this file's section header) — score it against the
   // distance pair above and keep whichever reconstructs the block more
   // faithfully. Structurally cannot regress: the distance pair is always one
-  // of the two options actually evaluated.
-  let winner = scoreBC1Pair(texels, bi, bj);
+  // of the two options actually evaluated. Skipped outright when the two
+  // heuristics named the same pair (common on flat/two-tone map art), which
+  // `isSamePair`'s own doc proves is bit-identical, not an approximation.
+  let winner = scoreBC1Pair(texels, bi, bj, _scratchBC1A);
   const lumaPair = lumaExtremalPair(texels);
-  if (lumaPair !== null) {
-    const candidate = scoreBC1Pair(texels, lumaPair[0], lumaPair[1]);
+  if (lumaPair !== null && !isSamePair(lumaPair[0], lumaPair[1], bi, bj)) {
+    const candidate = scoreBC1Pair(texels, lumaPair[0], lumaPair[1], _scratchBC1B);
     if (candidate.total < winner.total) winner = candidate;
   }
   const { c0, c1, idx } = winner;
@@ -367,43 +493,114 @@ export function bc1ByteLength(width, height) {
  * the trick the anchor fix below relies on. */
 const BC7_WEIGHTS4 = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
 
-/** Quantize an 8-bit RGBA endpoint to mode 6's 7-bits-plus-shared-p-bit form.
- * The single p-bit is shared by all four channels, so we try p=0 and p=1 and
- * keep whichever reconstructs the four channels with least total error. Returns
- * the per-channel 7-bit values `q`, the chosen `p`, and the 8-bit `rec`onstructed
- * endpoint the GPU (and our index search, and our decoder) will actually use. */
-function quantizeBC7Endpoint(e) {
-  let best = null;
-  for (let p = 0; p <= 1; p++) {
-    const q = new Array(4);
-    const rec = new Array(4);
-    let err = 0;
-    for (let c = 0; c < 4; c++) {
-      let qc = Math.round((e[c] - p) / 2);
-      if (qc < 0) qc = 0;
-      if (qc > 127) qc = 127;
-      const r = (qc << 1) | p;
-      q[c] = qc;
-      rec[c] = r;
-      err += (e[c] - r) * (e[c] - r);
-    }
-    if (best === null || err < best.err) best = { q, p, rec, err };
-  }
-  return best;
+/**
+ * Quantize an 8-bit RGBA endpoint (four consecutive channels at `texels[base…]`)
+ * to mode 6's 7-bits-plus-shared-p-bit form, writing into `out` (a
+ * `makeBC7Endpoint` slot) rather than allocating. The single p-bit is shared by
+ * all four channels, so we cost p=0 and p=1 and keep whichever reconstructs the
+ * four channels with least total error — STRICTLY less, so p=0 wins a tie
+ * exactly as the "first candidate seen" rule it replaces did. Fills the
+ * per-channel 7-bit values `q`, the chosen `p`, and the 8-bit `rec`onstructed
+ * endpoint the GPU (and our index search, and our decoder) will actually use.
+ *
+ * The negative clamp the older shape carried is GONE, not overlooked: `e[c]` is
+ * 0..255 and `p` is 0..1, so the smallest possible `(e[c] − p) / 2` is −0.5, and
+ * `Math.round(-0.5)` is `-0` in JS — never below zero. Verified exhaustively
+ * over all 512 (channel, p) inputs; it was unreachable code that only made the
+ * hot loop look like it could branch.
+ */
+function makeBC7Endpoint() {
+  return { q: new Uint8Array(4), rec: new Uint8Array(4), p: 0, err: 0 };
 }
+function quantizeBC7Endpoint(texels, base, out) {
+  // Cost p=1 first WITHOUT writing anything, so the common p=0 answer is
+  // written exactly once instead of being written and then overwritten.
+  let err1 = 0;
+  for (let c = 0; c < 4; c++) {
+    const v = texels[base + c];
+    let qc = Math.round((v - 1) / 2);
+    if (qc > 127) qc = 127;
+    const d = v - ((qc << 1) | 1);
+    err1 += d * d;
+  }
+  let err0 = 0;
+  for (let c = 0; c < 4; c++) {
+    const v = texels[base + c];
+    let qc = Math.round(v / 2);
+    if (qc > 127) qc = 127;
+    const d = v - (qc << 1);
+    err0 += d * d;
+  }
+  const p = err1 < err0 ? 1 : 0;
+  const q = out.q,
+    rec = out.rec;
+  for (let c = 0; c < 4; c++) {
+    let qc = Math.round((texels[base + c] - p) / 2);
+    if (qc > 127) qc = 127;
+    q[c] = qc;
+    rec[c] = (qc << 1) | p;
+  }
+  out.p = p;
+  out.err = p === 1 ? err1 : err0;
+  return out;
+}
+
+/**
+ * One scored BC7 candidate pair — same two-fixed-slots reasoning as
+ * `makeBC1Candidate`: the second candidate must not clobber the first while the
+ * two totals are being compared.
+ */
+function makeBC7Candidate() {
+  return { q0: makeBC7Endpoint(), q1: makeBC7Endpoint(), idx: new Uint8Array(16), total: 0 };
+}
+const _scratchBC7A = makeBC7Candidate();
+const _scratchBC7B = makeBC7Candidate();
+/** The 16 interpolated palette entries, hoisted out of the per-texel search
+ * (see scoreBC7Pair). Uint8 is exact: every entry is `(x·(64−w) + y·w + 32) >> 6`
+ * over 8-bit endpoints, which cannot leave 0..255. */
+const _scratchBC7PalR = new Uint8Array(16);
+const _scratchBC7PalG = new Uint8Array(16);
+const _scratchBC7PalB = new Uint8Array(16);
+const _scratchBC7PalA = new Uint8Array(16);
 
 /**
  * Quantize a BC7 candidate endpoint pair (texel indices bi/bj into `texels`),
  * pick every texel's nearest index against the RECONSTRUCTED endpoints (what
  * the GPU will actually interpolate — so the decode matches bit-for-bit), and
- * return the block's total squared RGBA error for this pair — the metric used
+ * record the block's total squared RGBA error for this pair — the metric used
  * to choose between competing candidates (see this file's "SECOND ENDPOINT
- * CANDIDATE" section header).
+ * CANDIDATE" section header). Writes into `out` (a `makeBC7Candidate` slot).
+ *
+ * THE PALETTE IS BUILT ONCE PER PAIR, not once per texel. It depends only on the
+ * two endpoints, so the previous shape recomputed all 16 interpolated colours
+ * inside the 16-texel loop — 256 four-channel lerps per pair where 16 suffice,
+ * and this inner search is where essentially the whole BC7 encode budget goes.
+ * Same arithmetic, same tie-breaking (`<` keeps the lowest index), same bytes.
  */
-function scoreBC7Pair(texels, bi, bj) {
-  const q0 = quantizeBC7Endpoint([texels[bi * 4], texels[bi * 4 + 1], texels[bi * 4 + 2], texels[bi * 4 + 3]]);
-  const q1 = quantizeBC7Endpoint([texels[bj * 4], texels[bj * 4 + 1], texels[bj * 4 + 2], texels[bj * 4 + 3]]);
-  const idx = new Array(16);
+function scoreBC7Pair(texels, bi, bj, out) {
+  const q0 = quantizeBC7Endpoint(texels, bi * 4, out.q0);
+  const q1 = quantizeBC7Endpoint(texels, bj * 4, out.q1);
+  const palR = _scratchBC7PalR,
+    palG = _scratchBC7PalG,
+    palB = _scratchBC7PalB,
+    palA = _scratchBC7PalA;
+  const r0 = q0.rec[0],
+    g0 = q0.rec[1],
+    b0 = q0.rec[2],
+    a0 = q0.rec[3];
+  const r1 = q1.rec[0],
+    g1 = q1.rec[1],
+    b1 = q1.rec[2],
+    a1 = q1.rec[3];
+  for (let k = 0; k < 16; k++) {
+    const w = BC7_WEIGHTS4[k];
+    const iw = 64 - w;
+    palR[k] = (r0 * iw + r1 * w + 32) >> 6;
+    palG[k] = (g0 * iw + g1 * w + 32) >> 6;
+    palB[k] = (b0 * iw + b1 * w + 32) >> 6;
+    palA[k] = (a0 * iw + a1 * w + 32) >> 6;
+  }
+  const idx = out.idx;
   let total = 0;
   for (let i = 0; i < 16; i++) {
     const r = texels[i * 4],
@@ -413,15 +610,10 @@ function scoreBC7Pair(texels, bi, bj) {
     let best = 0;
     let bestD = Infinity;
     for (let k = 0; k < 16; k++) {
-      const w = BC7_WEIGHTS4[k];
-      const cr = (q0.rec[0] * (64 - w) + q1.rec[0] * w + 32) >> 6;
-      const cg = (q0.rec[1] * (64 - w) + q1.rec[1] * w + 32) >> 6;
-      const cb = (q0.rec[2] * (64 - w) + q1.rec[2] * w + 32) >> 6;
-      const ca = (q0.rec[3] * (64 - w) + q1.rec[3] * w + 32) >> 6;
-      const dr = r - cr,
-        dg = g - cg,
-        db = b - cb,
-        da = a - ca;
+      const dr = r - palR[k],
+        dg = g - palG[k],
+        db = b - palB[k],
+        da = a - palA[k];
       const d = dr * dr + dg * dg + db * db + da * da;
       if (d < bestD) {
         bestD = d;
@@ -431,7 +623,8 @@ function scoreBC7Pair(texels, bi, bj) {
     idx[i] = best;
     total += bestD;
   }
-  return { q0, q1, idx, total };
+  out.total = total;
+  return out;
 }
 
 /** Encode one 4×4 RGBA block (flat, length 64) into out[off..off+16) as BC7 mode 6. */
@@ -460,11 +653,13 @@ function encodeBC7Block(texels, out, off) {
   // THE SECOND CANDIDATE (this file's section header) — score it against the
   // distance pair above and keep whichever reconstructs the block more
   // faithfully. Structurally cannot regress: the distance pair is always one
-  // of the two options actually evaluated.
-  let winner = scoreBC7Pair(texels, bi, bj);
+  // of the two options actually evaluated. Skipped outright when the two
+  // heuristics named the same pair, which `isSamePair`'s own doc proves is
+  // bit-identical, not an approximation.
+  let winner = scoreBC7Pair(texels, bi, bj, _scratchBC7A);
   const lumaPair = lumaExtremalPair(texels);
-  if (lumaPair !== null) {
-    const candidate = scoreBC7Pair(texels, lumaPair[0], lumaPair[1]);
+  if (lumaPair !== null && !isSamePair(lumaPair[0], lumaPair[1], bi, bj)) {
+    const candidate = scoreBC7Pair(texels, lumaPair[0], lumaPair[1], _scratchBC7B);
     if (candidate.total < winner.total) winner = candidate;
   }
   const { idx } = winner;
@@ -521,7 +716,8 @@ export function encodeBC7(rgba, width, height) {
   let o = 0;
   for (let by = 0; by < blocksY; by++) {
     for (let bx = 0; bx < blocksX; bx++) {
-      encodeBC7Block(gatherBlock(rgba, width, height, bx, by), out, o);
+      gatherBlock(rgba, width, height, bx, by, _scratchTexels);
+      encodeBC7Block(_scratchTexels, out, o);
       o += 16;
     }
   }

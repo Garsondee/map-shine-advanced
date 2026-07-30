@@ -80,7 +80,15 @@
  *       the wrong world position here)
  *   B = presence bit 0 (overhead/roof — `layer-order.js#isInForeground`,
  *       resolved at the SAME build-time site, same floors list); bit 1
- *       (levelsHidden) is NOT derived — see the KNOWN GAP note below
+ *       (levelsHidden) is NOT derived — see the KNOWN GAP note below. Bit 2
+ *       (`PRESENCE_BIT_BACKGROUND_ART`, added 2026-07-29) is 1 ONLY for the
+ *       Level's own background image (`item.kind === 'levelBackground'`) —
+ *       see `backgroundArtPresenceBit`'s own doc for why the foreground/roof
+ *       is deliberately NOT included. This is what lets a consumer (today,
+ *       only `effects/specular`) tell "a Tile painted over my background"
+ *       apart from "still my own background, unoccluded" — a distinction the
+ *       floor-index channel alone cannot make, since a same-floor Tile
+ *       shares its background's floor index.
  *   A = the material's OWN alpha, read via `TSL.output.a` (see
  *       `buildRealFloorAttrMrtNode`'s own doc for why it must be `output`,
  *       never a JS-closure-captured node) — this is what makes the punch-
@@ -194,6 +202,82 @@ export function packFloorAttr(TSL, { floorIndex01, outdoors01, presenceBits01, s
   return vec4(floorIndex01, g, presenceBits01, solidityAlpha);
 }
 
+/** Presence-bitfield bit 0 — overhead/roof (`layer-order.js#isInForeground`). */
+export const PRESENCE_BIT_OVERHEAD = 1;
+/**
+ * Presence-bitfield bit 7 (THE TOP BIT, weight 128) — 1 ONLY for the Level's
+ * own background image (`item.kind === 'levelBackground'`), never for a
+ * Tile, a token, or the Level's OWN foreground/roof image. See
+ * `backgroundArtPresenceBit`'s own doc for the full reasoning, in particular
+ * why the foreground is deliberately excluded.
+ *
+ * ============================================================================
+ * ⚠️ WHY THE TOP BIT, NOT THE NEXT FREE LOW ONE — REGRESSION, 2026-07-29
+ * ============================================================================
+ * This shipped ONE DAY EARLIER at weight 4 (bit 2, decode threshold 3.5/255)
+ * and went completely invisible live, immediately — the author reported the
+ * shine gone entirely, unresponsive even to `strength` pushed to its max.
+ * Root cause: `buildWholeImageMaterial`'s attr write is NOT a hard overwrite.
+ * It rides ordinary NormalBlending, and THIS module's own header already
+ * hedges the true shape of that — "where the base art is opaque (alpha≈1),
+ * attr overwrites with real data (destination **almost entirely** replaced)"
+ * — ALMOST, not exactly: `attr_new = attr_old·(1−α) + attr_src·α`, where α is
+ * THIS material's own alpha (`output.a`, run through `buildAlbedoClarityNode`
+ * and `occlusionAlphaFactor` first). R (floor index) and G (outdoors) had
+ * NEVER actually exercised this — their correct values on an ordinary single-
+ * floor, indoors scene are BOTH 0, and 0 scaled by any α is still 0, so they
+ * read "correct" whether or not α was ever exactly 1. This bit was the FIRST
+ * genuinely non-zero value ever pushed through this write, and a weight-4
+ * value needs α ≥ 0.875 to still clear a 3.5-threshold — a deficiency far too
+ * small to be visible on the background's own colour can still fail that.
+ *
+ * The fix is the margin, not the mechanism: weight 128 with a 64/255 decode
+ * threshold (`SPECULAR_BACKGROUND_ART_THRESHOLD01`) tolerates the write
+ * surviving at only 50% of its nominal strength, while the "not background"
+ * case (the overhead bit alone, max raw value 1) can only ever be scaled
+ * SMALLER by the same blend, never larger — so it can't cross a threshold
+ * that high regardless of α. Generalises: any FUTURE non-zero presence bit
+ * added to this buffer needs the SAME wide margin, not the next free low bit.
+ *
+ * Bit 1 (weight 2, `levelsHidden`) stays reserved either way — it is
+ * documented but NOT YET DERIVED (see the KNOWN GAP section below).
+ */
+export const PRESENCE_BIT_BACKGROUND_ART = 128;
+
+/**
+ * The top bit of the presence bitfield for ONE item — see `PRESENCE_BIT_BACKGROUND_ART`.
+ *
+ * ============================================================================
+ * ⚠️ WHY THE LEVEL'S OWN FOREGROUND/ROOF IS *NOT* INCLUDED
+ * ============================================================================
+ * `effects/specular` — the one consumer today — reads its mask from
+ * `mask-authority.js#authoredStatus`, which resolves `backgroundItemOf`
+ * ONLY (`scene/mask-authority.js`), never the foreground. A roof drawn
+ * opaquely over the background is exactly the same kind of occlusion as a
+ * Tile: something else is now what the player actually sees at that pixel,
+ * so the background's own effects must stop showing through it too. If this
+ * bit is ever generalised to "any Level art", that occlusion breaks again —
+ * with a roof standing in for the Tile that first reported the bug.
+ *
+ * ============================================================================
+ * WHAT IT IS FOR
+ * ============================================================================
+ * `buf:scene.attr` records whichever item drew LAST (topmost, alpha ≈ 1) at
+ * each texel (this module's own "THE REAL WRITERS" section) — so reading
+ * this bit back answers "is my own background art still what is actually on
+ * screen here, or did something else paint over it". That is the per-pixel
+ * occlusion `effects/specular` was missing entirely: its existing floor-index
+ * gate (channel R) only tells two FLOORS apart, and a same-floor Tile shares
+ * its background's floor index — so a Tile drawn above the background still
+ * let the background's OWN shine glow through it (reported live, 2026-07-29).
+ *
+ * @param {{kind?: string}} [item] - the drawable's own item descriptor.
+ * @returns {number} `PRESENCE_BIT_BACKGROUND_ART` or 0.
+ */
+export function backgroundArtPresenceBit(item) {
+  return item?.kind === 'levelBackground' ? PRESENCE_BIT_BACKGROUND_ART : 0;
+}
+
 /**
  * `buf:scene.attr`'s R (floor index) and B-bit-0 (overhead/roof) for ONE
  * item, resolved ONCE at material-BUILD time — an item's own elevation is
@@ -226,7 +310,8 @@ export function packFloorAttr(TSL, { floorIndex01, outdoors01, presenceBits01, s
  * @param {object} args
  * @param {*} args.THREE - the injected THREE namespace.
  * @param {object} args.item - the drawable's own item descriptor (`item.key
- *   .elevation` is read).
+ *   .elevation` and `item.kind` are read — the latter for bit 2, see
+ *   `backgroundArtPresenceBit`).
  * @param {number} args.viewedFloorIndex - the CURRENTLY viewed floor
  *   (`view.floorIndex` in the viewer) — the fallback when the real lookup
  *   fails, never a fabricated sentinel.
@@ -242,8 +327,13 @@ export function packFloorAttr(TSL, { floorIndex01, outdoors01, presenceBits01, s
  */
 export function resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex, sceneDoc, logError }) {
   const { uniform, float } = THREE.TSL;
+  // Bit 2 depends only on `item.kind`, never on the floor lookup below, so it
+  // is folded in BEFORE the try block — every return path (early-return on no
+  // floors, on no resolved floor, or the catch below) carries it correctly,
+  // the same posture the overhead bit already has for its own success path.
+  const backgroundBit = backgroundArtPresenceBit(item);
   const uFloorIndex01 = uniform(float(viewedFloorIndex / 255));
-  const uPresenceBits01 = uniform(float(0));
+  const uPresenceBits01 = uniform(float(backgroundBit / 255));
   try {
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok || !floorsResult.floors.length) return { uFloorIndex01, uPresenceBits01 };
@@ -253,7 +343,7 @@ export function resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex, sc
     uFloorIndex01.value = resolved.index / 255;
     const top = resolved.floor.elevationTop ?? Infinity;
     const overhead = isInForeground(elevation, { top });
-    uPresenceBits01.value = overhead ? 1 / 255 : 0; // bit 0 only — see the gap note above
+    uPresenceBits01.value = (backgroundBit + (overhead ? PRESENCE_BIT_OVERHEAD : 0)) / 255;
   } catch (err) {
     logError?.('buf:scene.attr floor-index lookup (getActiveSceneFloors) failed — using the viewed floor:', err);
   }

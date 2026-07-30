@@ -52,6 +52,21 @@
  *    the other axis of the same physical phenomenon). This is what makes a
  *    silhouette's SIDE edges soften and widen with distance instead of staying
  *    pixel-perfect at the coarse field's own native resolution.
+ *
+ *    ⚠️ EACH TAP IS MIP-FILTERED, NOT A NAIVE POINT SAMPLE (2026-07-30 — see
+ *    §4 below). A point sample at a THIN caster (a wall-mounted lamp bracket)
+ *    either lands squarely on it (100% coverage) or entirely misses it (0%) —
+ *    there is no in-between, so a bracket a few world px wide reads as either
+ *    a full-strength shadow or none at all depending on exactly where each tap
+ *    happens to fall, never the honest, faint, partial shadow its own small
+ *    silhouette actually casts. `LATERAL_TAPS` widens the cone but does not fix
+ *    this: three OR seven point samples across a bracket narrower than the
+ *    gap between them still finds it in at most one of them. Each tap now
+ *    reads the caster field PRE-FILTERED (an explicit mip level sized to that
+ *    tap's own footprint), which is the correct box-average over whatever area
+ *    that tap actually represents — a thin object contributes its true,
+ *    small, partial coverage instead of an all-or-nothing coin flip, at ANY
+ *    distance, with no extra taps required to "get lucky" and land on it.
  * 3. **A point light's floor is no longer flat** — every point light's
  *    material samples THIS field per-fragment (`point-light-illumination.js`,
  *    "SUN-SHADOW ATTENUATION") so its background floor matches the shadowed
@@ -60,16 +75,72 @@
  *    light hard-edged as the sun swept the light's origin; the field is the
  *    only correct sample space.
  *
+ * ============================================================================
+ * §4 — THE MIP-BASED CONE (2026-07-30, author live: a wall-mounted lamp's
+ * thin overhead bracket cast a shadow "much darker much larger… than they
+ * actually deserve to be", and asked directly for a resolution-independent
+ * smearing model — big buildings reliably dark and long-throwing, small
+ * details softer, less noticeable, and naturally vanishing at low sun where
+ * a real object's shadow would be too diffuse to resolve)
+ * ============================================================================
+ *
+ * WHAT WAS WRONG WITH POINT-SAMPLING A CONE. §3's original fix widened the
+ * march into `LATERAL_TAPS` point samples spread across the cone's width —
+ * correct in SPIRIT (a wider cone should read more of the silhouette's true
+ * footprint), wrong in EXECUTION for anything narrower than the gap between
+ * taps: a point sample either lands inside the caster (reads its full byte)
+ * or outside it (reads zero), with nothing between. A 2000px wall is many
+ * taps wide at every station, so this never showed; a 20px bracket is
+ * narrower than a SINGLE tap's own footprint past a few march steps, so its
+ * occlusion quantised to whichever of {0%, 33%, 67%, 100%} happened to land
+ * on it — exactly the "much darker… than they deserve" the author reported,
+ * and unrelated to the self-shadow-guard inversion §3.5 (below) also fixes.
+ *
+ * THE FIX is what a real optical penumbra already does: average over the
+ * cone's actual footprint, not sample a few points inside it and hope one
+ * hits. A GPU's mip chain already computes exactly this average, at every
+ * power-of-two scale, once, when the texture is created — reading it at an
+ * EXPLICIT level sized to a tap's own footprint (`log2(footprintPx /
+ * texelPx)`) is one fetch that returns the correct box-filtered coverage over
+ * that whole footprint, at ANY width, with no quantisation and no extra
+ * samples. A church spire averages to ~1.0 at any reasonable mip (it is wide
+ * relative to a texel even at the field's own native resolution) and stays
+ * fully dark; a lamp bracket averages toward a small, genuinely partial value
+ * once the footprint being read is wider than the bracket itself — which
+ * happens naturally as `d` grows, exactly the "smaller elements soften and
+ * vanish with distance" behaviour asked for, and it falls out of one
+ * `log2` rather than a second, disagreeing size-based rule.
+ *
+ * WHY THIS ALSO EXPLAINS DAWN/DUSK FOR FREE. At low sun `PENUMBRA_PER_PX ×
+ * distance` grows large fast (the march reaches much further), so the cone's
+ * footprint at any given station is wide — the mip level requested climbs,
+ * and fine detail dissolves into the same box average a real, near-grazing
+ * sun's huge angular penumbra would produce. At noon the cone stays narrow
+ * for its whole (short) reach, the requested mip stays near native
+ * resolution, and the same bracket casts the sharp, present, "makes sense at
+ * noon" shadow the author asked for — one mechanism, both ends of the day,
+ * no separate dusk-specific knob.
+ *
+ * TWO FETCHES PER TAP, DELIBERATELY, NOT ONE AT A SHARED LOD. Mipping blurs
+ * EVERY channel of the packed RGBA texture together — height (G) included.
+ * Averaging height would let a tall, thin caster's own reach quietly shorten
+ * as its neighbourhood's mostly-zero surroundings pull the mip average down,
+ * which is a geometry error `over = h − rayHeight` must never absorb. So the
+ * height/self-match read stays pinned to `.level(0)` (bit-exact, as before);
+ * only the COVERAGE read that decides how dark the tap's contribution is
+ * takes the computed mip level. Twice the fetches of one shared-LOD read, but
+ * still fewer total texture instructions than adding taps would cost, and the
+ * one that must stay geometrically exact does.
+ *
  * @module effects/lighting/sun-occlusion-render
  */
 
 import {
   DEFAULT_MARCH_STEPS,
+  DEFAULT_LATERAL_TAPS,
   PENUMBRA_PER_PX,
   GATE_SHARPEN_LOW,
   GATE_SHARPEN_HIGH,
-  SELF_HEIGHT_SHARPEN_LOW,
-  SELF_HEIGHT_SHARPEN_HIGH,
 } from './sun-occlusion.js';
 
 /**
@@ -77,10 +148,24 @@ import {
  * target whose UV maps linearly onto `casterRect` (the world rect the height
  * field covers) — so `uv()` IS the world position, and no camera is involved.
  *
- * THE HEIGHT FIELD'S PACKING (scene/mask-derive.js): R = building, G = overhead,
- * B = sky-reach, each a byte over `uHeightScalePx`; A = the `_Outdoors` receiver
- * gate. The march reads `max(R,G,B)` — three producers of ONE physical quantity,
- * so the tallest wins rather than them summing into a triple-dark smear.
+ * THE HEIGHT FIELD'S PACKING (ROUND SEVEN, 2026-07-30 — sun-shadow-subsystem.js
+ * `bakeCasterTexture`'s own header has the repack, sun-occlusion.js's own
+ * header has the physics): R = sky-reach coverage ALONE, G = FLOATING height
+ * (overhead ∪ sky-reach, byte over `uHeightScalePx` — buildings EXCLUDED), B =
+ * FLOATING coverage (overhead ∪ sky-reach), A = the `_Outdoors` receiver gate.
+ *
+ * BUILDING IS NOT A CHANNEL. A building is a COLUMN with ONE scene-wide
+ * height (`uBuildingHeightPx`, a uniform, never sampled per texel); its
+ * per-texel COVERAGE (indoors-ness) is recomputed in-shader from A —
+ * `1 − outdoors` — rather than stored a second time. The march runs TWO
+ * independent tests per station now, not one: a COLUMN test for buildings
+ * (unchanged physics since the self-shadow-guard rounds) and a BAND test for
+ * everything floating (a thin caster blocks only near the one distance where
+ * the ray's own height crosses it, not everywhere beneath it — see
+ * sun-occlusion.js's own "BUILDINGS ARE COLUMNS; EVERYTHING ELSE IS A SLAB"
+ * header for the full physical argument and the measured bug it replaces: a
+ * thin overhead bracket modelled as a column cast a shadow measured at
+ * fourteen times its true length).
  *
  * THE ISOLATION TOGGLES ARE NOT HERE. They are applied when the field is BAKED
  * (the disabled producer's channel is never written), so turning one off removes
@@ -91,23 +176,40 @@ import {
  * @param {*} args.THREE - the renderer namespace (carries `.TSL`).
  * @param {*} args.casterTexture - the packed height field (RGBA8).
  * @param {number} [args.steps] - march sample count.
+ * @param {number} [args.lateralTaps] - how many samples spread PERPENDICULAR to
+ *   the sun at each station (the cone's width). Both this and `steps` come from
+ *   the performance profile's rung (`sun-occlusion.js#sunShadowTierPlan`), which
+ *   is why they are build-time arguments rather than uniforms: the two loops
+ *   below are unrolled, so changing either means a new material — the caller
+ *   rebuilds one, rarely, when the profile moves.
  * @returns {{
  *   material: *,
  *   setSun: (azimuthDeg: number, elevationDeg: number) => void,
- *   setField: (args: {heightScalePx: number, maxCasterHeightPx: number}) => void,
+ *   setField: (args: {heightScalePx: number, maxCasterHeightPx: number, casterGridDimPx?: number, buildingHeightPx?: number}) => void,
  *   setLook: (args: {strength01: number, softnessMul: number, basePx: number}) => void,
  *   setRect: (rect: {minX:number, minY:number, maxX:number, maxY:number}) => void,
  *   setEdgeBandPx: (px: number) => void,
  *   casterTexNode: *,
  * }}
  */
-export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAULT_MARCH_STEPS }) {
-  const { uniform, texture, uv, vec2, vec3, vec4, float, max, min, smoothstep, Fn } = THREE.TSL;
+export function buildSunShadowBakeMaterial({
+  THREE,
+  casterTexture,
+  steps = DEFAULT_MARCH_STEPS,
+  lateralTaps = DEFAULT_LATERAL_TAPS,
+}) {
+  const { uniform, texture, uv, vec2, vec3, vec4, float, max, min, abs, step, log2, smoothstep, Fn } = THREE.TSL;
 
-  // Fixed at shader-BUILD time, like `steps` — the loop is unrolled either way,
-  // so this is a real, deliberate cost decision, not a live-tunable knob. See
-  // this function's own header for the LATERAL_TAPS reasoning.
-  const LATERAL_TAPS = 3;
+  const LATERAL_TAPS = Number.isFinite(lateralTaps) ? Math.max(1, Math.floor(lateralTaps)) : DEFAULT_LATERAL_TAPS;
+  const MARCH_STEPS = Number.isFinite(steps) ? Math.max(1, Math.floor(steps)) : DEFAULT_MARCH_STEPS;
+  /** §4's per-tap footprint divisor — a single tap (LATERAL_TAPS===1) is
+   * responsible for the WHOLE cone width (divisor 1, footprint = 2×spread);
+   * N>1 taps are evenly spaced across it, so each is responsible for the GAP
+   * between neighbours (divisor N−1). Computing this from LATERAL_TAPS at
+   * shader-build time, not as a runtime node, is what keeps a higher-tier
+   * tap count meaningfully FINER instead of every tap converging on an
+   * identical, whole-cone-wide blur. */
+  const TAP_SPACING_DIVISOR = LATERAL_TAPS > 1 ? LATERAL_TAPS - 1 : 1;
 
   const casterTexNode = texture(casterTexture);
   /** (dirToSunX, dirToSunY, tanElevation, stepPx) — everything the loop needs
@@ -121,6 +223,47 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
   const uRect = uniform(vec4(0, 0, 1, 1));
   /** Width of the map-edge ramp, in world px. */
   const uEdgeBandPx = uniform(float(0));
+  /** ⚠️ THE CASTER TEXTURE'S OWN RESOLUTION — NOT the bake's output `fieldDim`
+   * (found live, 2026-07-30: a Quality-tier horizontal banding artefact plus an
+   * Extreme-tier shadow rendering in the visibly WRONG place, both traced back
+   * to this one uniform). §4's LOD math needs to know how many world px ONE
+   * TEXEL of the CASTER TEXTURE spans, to pick a mip level sized to a tap's
+   * footprint — and that texture's resolution is `casterGridDim`
+   * (`sun-occlusion.js`'s tier axis, `mask-derive.js#deriveFloorProducts`'s
+   * `casterGridSpec`), a SEPARATE, independently-tiered number from `fieldDim`
+   * (the OUTPUT bake target this material renders INTO). Before `casterGridDim`
+   * existed the two happened to sit in a roughly constant ratio (the caster
+   * grid was always the shared 512, `fieldDim` a clean multiple-ish of it), so
+   * feeding this uniform from `fieldDim` was a mild, constant one-mip-level
+   * error nobody noticed. Once a tier's `casterGridDim` and `fieldDim` stopped
+   * sharing a clean power-of-two ratio (Quality: 1024 vs 768; Extreme: 1280 vs
+   * 1024), the requested LOD became badly wrong instead of mildly wrong — a
+   * fractional, texture-chain-misaligned level rather than an off-by-one clean
+   * one, which is what produced the banding and the corrupted-looking sample.
+   * Kept as a uniform (not a shader-build constant) because it changes on
+   * every real bake (`sun-shadow-subsystem.js#bakeCasterTexture`), which
+   * uploads a brand new caster texture at whatever resolution the ACTIVE tier
+   * asked for. Defaults to today's shipped 512 (`casterGridDim` at
+   * `SUN_SHADOW_DEFAULT_TIER`), not `fieldDim`'s 1024 — this axis was ALWAYS
+   * conceptually distinct, the default now says so too. */
+  const uCasterGridDim = uniform(float(512));
+  /** ROUND SEVEN: the scene-wide building height, world px — the COLUMN test's
+   * only height input, since a building's height is never sampled per texel
+   * (see this function's own header). 0 = no buildings active this bake, which
+   * makes the column term compile-time-cheap to fall to nothing at every
+   * station (`buildingOver` saturates negative), never a guess. */
+  const uBuildingHeightPx = uniform(float(0));
+
+  /** Mip level requested when a footprint (in world px) is narrower than one
+   * field texel: 0, native resolution — there is nothing coarser to ask for
+   * that would still be a genuine average rather than upsampling noise. */
+  const MIN_LOD = 0;
+  /** Ceiling on the requested LOD — a texture's own mip chain tops out at
+   * `log2(dimension)`, and asking for anything past that either clamps
+   * silently (harmless) or is undefined on some backends (not worth risking
+   * for a value the math would otherwise never produce short of a request
+   * spanning the entire field several times over). */
+  const MAX_LOD = 11;
 
   const material = new THREE.NodeMaterial();
   material.depthTest = false;
@@ -158,21 +301,20 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
     const here = casterTexNode.sample(uv());
     const gate = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), here.a);
 
-    // THE PACKING (2026-07-26 rethink, §3; R narrowed 2026-07-26 — §4b):
+    // THE PACKING (ROUND SEVEN — this function's own header has the physics):
     //   R = SKY-REACH coverage ONLY — a DIFFERENT floor's structure, art this
     //       floor never draws at this pixel, so d=0 darkens a genuinely
     //       separate, still-visible ground.
-    //   G = occluder HEIGHT, byte over `heightScalePx`, never alpha-scaled
-    //       (building ∪ overhead ∪ sky-reach, MAX-merged — still marches for
-    //       all three; only the d=0 self-check is narrowed to R).
-    //   B = THIS FLOOR'S OWN solid mass — building coverage (indoor-ness) ∪
-    //       overhead coverage (raised tiles). Marchable, never d=0-eligible.
-    //   A = the receiver gate (raw outdoors)
-    // Coverage and height used to share one byte, which made every antialiased
-    // silhouette edge read as a shorter, fainter caster than it is. They are
-    // now two channels and the march reads them as two facts.
-    const heightAt = (packed) => packed.g.mul(heightScalePx);
-    const coverageAt = (packed) => max(packed.r, packed.b);
+    //   G = FLOATING height (overhead ∪ sky-reach), byte over `heightScalePx`,
+    //       never alpha-scaled. BUILDING EXCLUDED — a building's height is the
+    //       `uBuildingHeightPx` uniform below, never a sampled byte.
+    //   B = FLOATING coverage (overhead ∪ sky-reach). Building excluded here
+    //       too — its coverage is `1 − A`, read directly where needed.
+    //   A = the receiver gate (raw outdoors) — ALSO the per-texel building
+    //       coverage input (`1 − A`), so building needs no channel of its own.
+    const floatingHeightAt = (packed) => packed.g.mul(heightScalePx);
+    const floatingCoverageAt = (packed) => packed.b;
+    const buildingCoverageAt = (packed) => float(1).sub(packed.a);
 
     // ⚠️ d = 0 — THE STATION THAT WAS MISSING, then OVER-WIDENED (both
     // 2026-07-26). Starting the loop at i = 1 meant the field was never asked
@@ -192,8 +334,8 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
 
     // ⚠️ ROUND TWO, 2026-07-28 (author: building AND overhead shadows both
     // render on top of the very overhead tile producing them) — the d=0 fix
-    // above only ever excluded R at the EXACT starting texel. B (building ∪
-    // overhead) was never excluded at all, at ANY station — so a caster wider
+    // above only ever excluded R at the EXACT starting texel. Coverage
+    // elsewhere was never excluded at all, at ANY station — so a caster wider
     // than a few march steps in the sun's direction reads its OWN body again
     // at i=1, i=2… for as long as the ray is still crossing its own footprint,
     // and it is (by definition) always at least as tall there as itself. A
@@ -201,34 +343,29 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
     // distance (height / tan(elevation)) — exactly self-shadowing, just not
     // at d=0, so the earlier fix never touched it.
     //
-    // Fix: a station only counts as a genuinely NEW blocker if its height
-    // exceeds not just the ray's height at that distance, but ALSO this
-    // pixel's OWN height at d=0. For open ground (height0 = 0, the ordinary
-    // case) this is unchanged from before — max(rayHeight, 0) = rayHeight —
-    // so a building correctly still shadows the ground for its whole length.
-    // Only where the RECEIVER is itself part of an overhead/building mass
-    // (height0 > 0) does this raise the bar: something merely as tall as what
-    // is already here cannot cast ADDITIONAL shadow onto it, only something
-    // genuinely taller can. That is the same "am I looking at a genuinely
-    // separate, still-visible thing, or my own footprint" question the R fix
-    // already asked — asked here for every station, not just d=0, because for
-    // B the caster and the receiver can be the same physical item at ANY
-    // distance the march still overlaps it, not only at zero.
-    //
-    // ⚠️ SHARPENED (2026-07-28, ROUND FOUR — author: the fix above closed the
-    // self-shadow but opened a visible GAP between a building and its own
-    // shadow). See SELF_HEIGHT_SHARPEN_LOW's own header (sun-occlusion.js)
-    // for the mechanism: the caster texture is deliberately LINEAR-filtered,
-    // so a receiver just outside a wall's TRUE edge can read a blurred,
-    // PARTIAL height0 that is not really "self" — unsharpened, that partial
-    // floor weakens the shadow exactly at the contact point. Gated by this
-    // same pixel's own coverage confidence, mirroring GATE_SHARPEN_LOW/HIGH's
-    // identical fix for the receiver gate's own coarse-grid blur.
-    const height0Raw = heightAt(here);
-    const selfMask = smoothstep(float(SELF_HEIGHT_SHARPEN_LOW), float(SELF_HEIGHT_SHARPEN_HIGH), coverageAt(here));
-    const height0 = height0Raw.mul(selfMask);
+    // Fix (ROUND SIX, generalised by ROUND SEVEN into two independent floors —
+    // one per physical model): a station only counts as a genuinely NEW
+    // blocker if it clears not just the ray's height at that distance, but
+    // ALSO this RECEIVER's own height at d=0, read once here and reused by
+    // both sub-tests below. `receiverBuildingHeight` uses the SAME 0.5
+    // classification threshold the exterior gate uses (mask-derive.js
+    // `OVERHEAD_EXTERIOR_THRESHOLD`'s own precedent) — "indoors" is binary,
+    // there is no partial building floor to speak of; `step` returns exactly
+    // 0 or 1, never an in-between value `uBuildingHeightPx` would scale into
+    // a fictional partial-height floor.
+    const receiverFloatingHeight = floatingHeightAt(here);
+    const receiverBuildingHeight = step(float(0.5), buildingCoverageAt(here)).mul(uBuildingHeightPx);
 
-    for (let i = 1; i <= steps; i++) {
+    // §4's texel size, in world px — the one fact the LOD math needs beyond
+    // what `uRect` already gives it. `rectSize` is not generally square (a
+    // scene's own aspect ratio), so this takes the LARGER axis: a texel that
+    // is honestly bigger on one axis than the LOD assumes reads slightly too
+    // SHARP there, never blurs a caster it shouldn't — the safe direction to
+    // be wrong in, versus the alternative (the smaller axis) which would
+    // under-blur nothing but could over-blur the tighter axis.
+    const texelWorldPx = max(rectSize.x, rectSize.y).div(uCasterGridDim);
+
+    for (let i = 1; i <= MARCH_STEPS; i++) {
       const d = stepPx.mul(float(i));
       const at = world.add(dir.mul(d));
       // CONTACT HARDENING (front-back): the feather widens with distance
@@ -254,24 +391,86 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
       // asked for, from the SAME constant already governing front-back
       // softness, not a second, disagreeing blur radius.
       const spread = d.mul(float(PENUMBRA_PER_PX)).mul(softnessMul);
+      // §4 — ONE mip level per STATION, shared by every tap at this distance.
+      // A tap's own footprint is the GAP between adjacent taps (how much of
+      // the cone's width it alone is responsible for averaging), not the
+      // cone's full width — otherwise raising LATERAL_TAPS would stop buying
+      // anything (every tap would read the same fully-cone-wide blur and
+      // converge on an identical value). `TAP_SPACING_DIVISOR` is a shader-
+      // BUILD-time constant (LATERAL_TAPS is), so this is one multiply and one
+      // log2 per station, not per tap.
+      const tapFootprintPx = spread.mul(float(2 / TAP_SPACING_DIVISOR));
+      const tapLod = max(float(MIN_LOD), min(float(MAX_LOD), log2(max(tapFootprintPx.div(texelWorldPx), float(1)))));
+      const rayHeight = d.mul(tanElev);
+      // ⚠️ THE MARCH'S OWN RESOLUTION FLOORS EVERY FEATHER (Round Seven,
+      // sun-occlusion.js's own header has the full proof) — between two
+      // consecutive stations the ray's height changes by `stepPx·tanElev`, so
+      // a crossing/tip tolerance narrower than that can fall entirely in the
+      // gap between two samples and miss a real crossing outright (measured
+      // live: a dawn/dusk-shortened, steep effective sun over a thin overhead
+      // caster produced a shadow that vanished into the cracks almost
+      // everywhere). Flooring both sub-tests' tolerance at the march's own
+      // per-step height delta guarantees the two stations bracketing a true
+      // crossing/tip cannot both miss it. A no-op wherever the march is
+      // already fine relative to the sun angle.
+      const marchFeather = max(feather, stepPx.mul(tanElev));
       let stepOcclusion = float(0);
       for (let lt = 0; lt < LATERAL_TAPS; lt++) {
         const tapT = LATERAL_TAPS === 1 ? 0 : -1 + (2 * lt) / (LATERAL_TAPS - 1);
         const tapAt = tapT === 0 ? at : at.add(perp.mul(spread.mul(float(tapT))));
         // World → field UV, clamped: a sample off the map reads the nearest
         // edge rather than wrapping in a caster from the opposite side.
-        const sampleUv = tapAt.sub(vec2(uRect.x, uRect.y)).div(rectSize);
-        const packed = casterTexNode.sample(vec2(sampleUv.x.clamp(0, 1), sampleUv.y.clamp(0, 1)));
-        const h = heightAt(packed);
-        // A blocker must stand ABOVE the sun ray's height at this distance —
-        // AND above this pixel's own height at d=0 (the self-shadow guard
-        // above). The smoothstep is the TIP fade ONLY — how dark the shadow
-        // gets is the occluder's own coverage, so a low awning and a tall
-        // tower cast equally dark shadows of different lengths. (It used to
-        // be the smoothstep alone, which made darkness a function of height:
-        // the author's "the shadows have different opacities".)
-        const over = h.sub(max(d.mul(tanElev), height0));
-        stepOcclusion = stepOcclusion.add(coverageAt(packed).mul(smoothstep(float(0), feather, over)));
+        const tapUvRaw = tapAt.sub(vec2(uRect.x, uRect.y)).div(rectSize);
+        const sampleUv = vec2(tapUvRaw.x.clamp(0, 1), tapUvRaw.y.clamp(0, 1));
+        // TWO FETCHES, DELIBERATELY (§4's own header has the full reasoning):
+        // the SHARP one feeds the geometric height/self-match test, which
+        // must never absorb a thin caster's reach into its surroundings'
+        // average; the MIP'D one feeds only how dark this tap's contribution
+        // is, which is exactly what a pre-filtered box average should decide.
+        const packedSharp = casterTexNode.sample(sampleUv).level(float(0));
+        // TWO FETCHES, DELIBERATELY (§4's own header has the full reasoning):
+        // the SHARP one feeds the geometric height/self-match test, which
+        // must never absorb a thin caster's reach into its surroundings'
+        // average; the MIP'D one feeds only how dark this tap's contribution
+        // is, which is exactly what a pre-filtered box average should decide.
+        // ⚠️ RESTORED 2026-07-30 — a mip-bypass experiment (pin this to level 0
+        // too) was tried and made NO visible difference to either live symptom
+        // (Quality banding, Extreme ghosting), which RULES OUT the caster
+        // texture's own sampling/mip chain as the cause. Reverted rather than
+        // left in place, so this experiment (lateral-tap isolation, below)
+        // tests exactly one variable at a time.
+        const packedBlurred = casterTexNode.sample(sampleUv).level(tapLod);
+
+        // ---- BUILDING: COLUMN physics, unchanged since Round Six. ---------
+        // A blocker occupies EVERY height from 0 up to `uBuildingHeightPx`, so
+        // it blocks for every distance where the ray — floored at the
+        // receiver's own building height, so a building cannot shadow its own
+        // interior — hasn't yet climbed above it. Coverage (indoors-ness) is
+        // read from the BLURRED sample: it scales darkness the same way
+        // floating coverage does, never a geometric quantity that needs
+        // sharpness.
+        const buildingOver = uBuildingHeightPx.sub(max(rayHeight, receiverBuildingHeight));
+        const buildingBlocked = buildingCoverageAt(packedBlurred).mul(smoothstep(float(0), marchFeather, buildingOver));
+
+        // ---- FLOATING: BAND physics (Round Seven). -------------------------
+        // A thin caster occupies only a narrow band AT its own height, so it
+        // blocks only near the ONE distance where the ray's height crosses
+        // that band — not everywhere beneath it, the way a column does.
+        // `heightGate` is what keeps a wide slab from shadowing itself:
+        // nothing at the SAME height as the receiver's own floating surface is
+        // taller than it, so no part of a uniform canopy can ever count as "a
+        // new blocker" for a receiver standing on that same canopy — the
+        // bleed-ghost immunity Round Six found, generalised past a single
+        // unconditional floor. Height stays SHARP (geometric); coverage stays
+        // BLURRED (darkness).
+        const stationFloatingHeight = floatingHeightAt(packedSharp);
+        const heightGate = smoothstep(float(0), marchFeather, stationFloatingHeight.sub(receiverFloatingHeight));
+        const crossingOver = marchFeather.sub(abs(stationFloatingHeight.sub(rayHeight)));
+        const floatingBlocked = floatingCoverageAt(packedBlurred)
+          .mul(heightGate)
+          .mul(smoothstep(float(0), marchFeather, crossingOver));
+
+        stepOcclusion = stepOcclusion.add(max(buildingBlocked, floatingBlocked));
       }
       stepOcclusion = stepOcclusion.div(float(LATERAL_TAPS));
       // MAX, not accumulate, ACROSS STEPS: the deepest blocked station along
@@ -318,8 +517,20 @@ export function buildSunShadowBakeMaterial({ THREE, casterTexture, steps = DEFAU
     setSun(azimuthDeg, elevationDeg, resolved) {
       uSun.value.set(resolved.dirX, resolved.dirY, resolved.tanElev, resolved.stepPx);
     },
-    setField({ heightScalePx }) {
+    setField({ heightScalePx, casterGridDimPx, buildingHeightPx }) {
       uLook.value.x = heightScalePx;
+      // Optional — omitted by callers that haven't adopted §4's LOD math yet
+      // (none should exist, but this stays a no-op rather than writing NaN
+      // over a working uniform if one ever does). ⚠️ THIS IS THE CASTER
+      // TEXTURE'S OWN resolution (`uCasterGridDim`'s header has the full
+      // reasoning) — NOT the bake target's `fieldDim`. A caller that passes
+      // the wrong one silently mis-sizes every mip request, which is exactly
+      // the bug this parameter was renamed to stop being possible to make by
+      // accident.
+      if (Number.isFinite(casterGridDimPx) && casterGridDimPx > 0) uCasterGridDim.value = casterGridDimPx;
+      // Optional, same reason: 0/absent correctly compiles the column term to
+      // a no-op (`uBuildingHeightPx` defaults to 0) rather than writing NaN.
+      if (Number.isFinite(buildingHeightPx) && buildingHeightPx >= 0) uBuildingHeightPx.value = buildingHeightPx;
     },
     setLook({ strength01, softnessMul, basePx }) {
       uLook.value.y = strength01;

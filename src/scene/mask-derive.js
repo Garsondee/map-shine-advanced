@@ -283,6 +283,42 @@ export function compositeItemOverwrite(grid, content, placement) {
 export const HEIGHT_COVERAGE_THRESHOLD = 8;
 
 /**
+ * THE OVERHEAD/EXTERIOR GATE'S OWN THRESHOLD (2026-07-30, author live — a
+ * thin, wall-mounted overhead protrusion cast an asymmetrically faded shadow:
+ * strong at one end, "weak, blurred" at the other, in the RAW caster data
+ * itself, before any march ever ran).
+ *
+ * "Is this overhead texel over indoor or outdoor ground" is a BINARY
+ * question — a protrusion is either exterior (casts) or interior (must not
+ * leak a shadow outside the building, `deriveFloorProducts`'s own header). It
+ * was being answered with a CONTINUOUS multiply against the raw `_Outdoors`
+ * grid instead: `coverOverhead × outdoors ÷ 255`. That grid is the SAME
+ * coarse, box-blurred read the receiver gate needed its own sharpening for
+ * (`sun-occlusion.js#GATE_SHARPEN_LOW/HIGH`) — and a wall-mounted protrusion's
+ * OWN attachment point is exactly where that blur is worst, since it sits
+ * squarely on the indoor/outdoor boundary the mask draws. One end of the
+ * item reads confidently outdoor (multiplier ≈1, full coverage), the
+ * attachment end reads the blurred middle (multiplier partial), and — because
+ * a gated value under `HEIGHT_COVERAGE_THRESHOLD` also zeroes the HEIGHT, not
+ * just the coverage (line below) — that end can lose its height entirely.
+ * The result is not a soft gradient the item's own art would produce; it is
+ * an artefact of the classifying MASK's blur, baked permanently into the
+ * caster field before the shadow's own (correct) linear-filter softening ever
+ * gets a chance to run.
+ *
+ * The fix: decide the classification BINARILY, at the mask's own natural
+ * midpoint, before it ever multiplies anything. A texel is over exterior
+ * ground or it is not; there is no third state to preserve a fraction of. Any
+ * blur the `_Outdoors` mask carries is still exactly as soft as before by
+ * the time the shadow reaches the SCREEN — the caster texture is linear-
+ * filtered and the march's own contact-hardening already supplies that
+ * softening — this just stops applying it TWICE, asymmetrically, baked in
+ * ahead of time as an accident of which side of a coarse-grid transition a
+ * thin item's own footprint happens to straddle.
+ */
+export const OVERHEAD_EXTERIOR_THRESHOLD = 128;
+
+/**
  * MAX-composite one item's HEIGHT into a scene grid, wherever that item's alpha
  * clears {@link HEIGHT_COVERAGE_THRESHOLD}.
  *
@@ -525,9 +561,26 @@ export function rasterizeAuthored(gridSpec, sources, absentValue) {
  * @param {CasterHeightSpec} [args.casterHeights] - omit to leave the height
  *   field empty (every channel zero) — the honest state before a scene has told
  *   us its grid scale, not a guess.
+ * @param {MaskGridSpec} [args.casterGridSpec] - the resolution the CASTER
+ *   channels alone (`casterBuilding`/`casterOverhead`/`casterSkyReach`,
+ *   `coverBuilding`/`coverOverhead`/`coverSkyReach`, `casterHeight`) rasterize
+ *   at, independent of `gridSpec` — omit to reuse `gridSpec` (today's
+ *   behaviour, byte-for-byte). sun-occlusion.js's `casterGridDim` tier axis is
+ *   why this exists: raising a SUN-SHADOW-ONLY grid's resolution here costs
+ *   nothing for `coverAbove`/`skyReach`/`outdoors`/`water`/etc., which all stay
+ *   on `gridSpec` and share its (deliberately fixed) budget with every other
+ *   consumer of `MASK_GRID_MAX_DIM`.
  * @returns {DerivedFloorProducts[]}
  */
-export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentValue, casterHeights = null }) {
+export function deriveFloorProducts({
+  gridSpec,
+  items,
+  floors,
+  outdoorsAbsentValue,
+  casterHeights = null,
+  casterGridSpec = null,
+}) {
+  const casterSpecActive = casterGridSpec ?? gridSpec;
   const products = [];
   const heightScalePx = casterHeights?.scalePx > 0 ? casterHeights.scalePx : 0;
   const distancePixels = Number.isFinite(casterHeights?.distancePixels) ? casterHeights.distancePixels : 0;
@@ -552,11 +605,11 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
     // alpha) are separate grids per producer — the whole point of the
     // 2026-07-26 rethink. One byte cannot mean both without the art's soft edge
     // silently becoming a short caster (Sun-Shadows-Rethink.md §2c).
-    const casterBuilding = createMaskGrid(gridSpec);
-    const casterOverhead = createMaskGrid(gridSpec);
-    const casterSkyReach = createMaskGrid(gridSpec);
-    const coverOverhead = createMaskGrid(gridSpec);
-    const coverSkyReach = createMaskGrid(gridSpec);
+    const casterBuilding = createMaskGrid(casterSpecActive);
+    const casterOverhead = createMaskGrid(casterSpecActive);
+    const casterSkyReach = createMaskGrid(casterSpecActive);
+    const coverOverhead = createMaskGrid(casterSpecActive);
+    const coverSkyReach = createMaskGrid(casterSpecActive);
     /** Tallest caster written to this floor, in BYTES — reported so "there are
      * casters but they are all zero-height" is a readable state rather than an
      * invisible one. That exact condition (a floor with no declared
@@ -677,14 +730,29 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
     // half-covered texel casts a half-strength shadow, which is what a soft
     // threshold at a door should be. It used to scale the HEIGHT instead, which
     // made that same doorway a half-height wall casting a half-LENGTH shadow.
-    const coverBuilding = createMaskGrid(gridSpec);
+    const coverBuilding = createMaskGrid(casterSpecActive);
     if (wantBuilding && casterHeights.buildingHeightPx > 0) {
       const buildingByte = Math.min(255, Math.round((casterHeights.buildingHeightPx / heightScalePx) * 255));
       if (buildingByte > maxCasterByte) maxCasterByte = buildingByte;
-      for (let i = 0; i < coverBuilding.data.length; i++) {
-        const indoorness = 255 - outdoors.data[i];
-        coverBuilding.data[i] = indoorness;
-        casterBuilding.data[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
+      // ⚠️ WORLD-SAMPLED, NOT INDEX-ALIGNED (2026-07-30, casterGridDim). `outdoors`
+      // always rasterizes at the SHARED `gridSpec` — it serves water/wind/etc.
+      // too, and its own resolution is not this effect's to raise. Once
+      // `casterSpecActive` differs from `gridSpec` (a tier with its own,
+      // higher-res `casterGridDim`), `coverBuilding.data[i]` and `outdoors.data[i]`
+      // are DIFFERENT-SIZED grids — the same array index means a different world
+      // texel in each. `sampleMaskGridWorld` looks `outdoors` up by WORLD
+      // POSITION instead, which is correct at any relative resolution and a
+      // no-op in cost terms when the two happen to match (today's tiers 0-1).
+      for (let gy = 0; gy < casterSpecActive.h; gy++) {
+        const wy = casterSpecActive.y + (gy + 0.5) * casterSpecActive.texelH;
+        for (let gx = 0; gx < casterSpecActive.w; gx++) {
+          const wx = casterSpecActive.x + (gx + 0.5) * casterSpecActive.texelW;
+          const i = gy * casterSpecActive.w + gx;
+          const outdoorsByte = sampleMaskGridWorld(outdoors, wx, wy) ?? 255;
+          const indoorness = 255 - outdoorsByte;
+          coverBuilding.data[i] = indoorness;
+          casterBuilding.data[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
+        }
       }
     }
 
@@ -695,13 +763,34 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
     // cast a sun-shadow at all (and certainly not one that leaks out past the
     // wall onto the courtyard, which is what a receiver-gated-only shadow did).
     //
-    // Applied to the COVERAGE, with the height zeroed wherever the gated
-    // coverage vanishes — never to the height directly, which would re-create
-    // the alpha×height coupling this rethink exists to remove.
-    for (let i = 0; i < coverOverhead.data.length; i++) {
-      const gated = Math.round((coverOverhead.data[i] * outdoors.data[i]) / 255);
-      coverOverhead.data[i] = gated;
-      if (gated < HEIGHT_COVERAGE_THRESHOLD) casterOverhead.data[i] = 0;
+    // ⚠️ BINARY, NOT A CONTINUOUS MULTIPLY (2026-07-30 — see
+    // `OVERHEAD_EXTERIOR_THRESHOLD`'s own header for the asymmetric-fade bug
+    // this replaces). A wall-mounted protrusion's own attachment point sits
+    // exactly on the `_Outdoors` mask's blurriest boundary, and multiplying
+    // by that raw, partial value baked a fake, asymmetric taper into the
+    // caster field itself — permanently, before the shadow's own (correct)
+    // softening ever ran. Classifying exterior/interior at the mask's own
+    // midpoint, once, avoids manufacturing a gradient the source art never
+    // had.
+    //
+    // Applied to the COVERAGE, with the height zeroed wherever the gate
+    // fails — never to the height directly, which would re-create the
+    // alpha×height coupling this rethink exists to remove.
+    //
+    // ⚠️ WORLD-SAMPLED against `outdoors`, same reason as THE BUILDING CHANNEL
+    // just above: `coverOverhead` may now be a different resolution than the
+    // shared `outdoors` grid it is gated against (casterGridDim).
+    for (let gy = 0; gy < casterSpecActive.h; gy++) {
+      const wy = casterSpecActive.y + (gy + 0.5) * casterSpecActive.texelH;
+      for (let gx = 0; gx < casterSpecActive.w; gx++) {
+        const wx = casterSpecActive.x + (gx + 0.5) * casterSpecActive.texelW;
+        const i = gy * casterSpecActive.w + gx;
+        const outdoorsByte = sampleMaskGridWorld(outdoors, wx, wy) ?? 255;
+        const isExterior = outdoorsByte >= OVERHEAD_EXTERIOR_THRESHOLD;
+        const gated = isExterior ? coverOverhead.data[i] : 0;
+        coverOverhead.data[i] = gated;
+        if (gated < HEIGHT_COVERAGE_THRESHOLD) casterOverhead.data[i] = 0;
+      }
     }
 
     // MAX, not sum: three producers describing ONE physical quantity (how tall
@@ -709,7 +798,7 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
     // shadows stacked, it is the tallest of the three. This is the same
     // reasoning `combineVisibility` uses for min-combining visibility, one
     // level down.
-    const casterHeight = createMaskGrid(gridSpec);
+    const casterHeight = createMaskGrid(casterSpecActive);
     for (let i = 0; i < casterHeight.data.length; i++) {
       const b = casterBuilding.data[i];
       const o = casterOverhead.data[i];

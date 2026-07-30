@@ -146,17 +146,76 @@ export const SUN_SHADOWS = Object.freeze({
   // so this is one of the last things that should be dropped for frame budget.
   visualWeight: 0.85,
   a11y: Object.freeze({ photosensitive: false }),
-  // Default-on (feedback_default_on_new_features). It costs one texture fetch
-  // per frame in a pass that already runs; the expensive part is a bake that
-  // happens a few times a minute.
-  enabledFromProfile: 'low',
+  // ⚠️ `low` TURNS THIS OFF ENTIRELY (2026-07-29, author: "the lowest
+  // performance tier should turn shadows off and remove the performance
+  // cost"). This is the profile GATE — the WHETHER — and it is deliberately
+  // separate from the tier ladder below, which only ever answers HOW MUCH.
+  // Below `performance` the subsystem drops its caster field, collapses
+  // `scene.sunShadow` to 1×1 and stops marching altogether
+  // (`sun-shadow-subsystem.js`'s `dropCasterField`), so "off" is genuinely no
+  // work rather than a full-resolution march that writes white.
+  //
+  // Everything at `performance` and above is still default-on
+  // (feedback_default_on_new_features): the per-frame cost is one texture fetch
+  // in a pass that already runs, and the expensive part is a bake that happens
+  // a few times a minute.
+  enabledFromProfile: 'performance',
   params: SUN_SHADOW_PARAMS,
+  // ============================================================================
+  // THE LADDER (built 2026-07-29). The arithmetic is `sun-occlusion.js`'s
+  // `SUN_SHADOW_TIER_PLANS`, index-aligned with this list; THIS is the prose.
+  // ============================================================================
+  //
+  // Every rung buys the SAME picture drawn more finely — there is no rung that
+  // introduces a new visual feature, because this effect has exactly one
+  // (a marched height field) and three producers already feed it. So the rungs
+  // are the three build-time numbers the march is compiled from, plus how often
+  // it re-runs; `sun-occlusion.js`'s ladder header says what each one is for.
+  //
+  // ⚠️ `estMsPerMp` IS THE SAME AT EVERY RUNG, AND THAT IS NOT AN OVERSIGHT.
+  // It declares the STEADY per-megapixel cost, which for this effect is one
+  // texture fetch in the ambient fill — identical whether the field behind it is
+  // 512² or 1280². What the ladder actually spends is BAKE time, which is sparse
+  // and which `perf-report.js` correctly refuses to grade against a per-pixel
+  // budget ("an all-bake effect is not graded against a declared per-pixel
+  // budget"). The bake's cost gradient lives where it can be counted rather than
+  // guessed: `sunShadowBakeSamples`, reported live in the `sun-shadows` status.
   tiers: Object.freeze([
     Object.freeze({
       n: 0,
-      name: 'one-field-one-march',
+      name: 'coarse-march',
       cost: Object.freeze({ class: 'C3', estMsPerMp: 0.05 }),
-      adds: 'buildings, overhead tiles and upper floors all cast one set of smeared shadows onto the outdoors',
+      adds:
+        'buildings, overhead tiles and upper floors all cast one set of smeared shadows onto the ' +
+        'outdoors — marched 1:1 with the caster grid, as a single ray, so the shadows land correctly ' +
+        'but their side edges are as crisp as the mask underneath them',
+    }),
+    Object.freeze({
+      n: 1,
+      name: 'soft-cone',
+      fromProfile: 'standard',
+      cost: Object.freeze({ class: 'C5', estMsPerMp: 0.05 }),
+      adds:
+        "the march widens into a 3-tap cone and the field doubles — a silhouette's side edges now " +
+        'soften and spread with distance instead of staying pixel-perfect lines (the ORIGINAL shipped look)',
+    }),
+    Object.freeze({
+      n: 2,
+      name: 'wide-cone',
+      fromProfile: 'quality',
+      cost: Object.freeze({ class: 'C5', estMsPerMp: 0.05 }),
+      adds:
+        'a 5-tap cone and a finer march — visibly smoother silhouette edges and a cleaner fade at the ' +
+        'shadow tip, for roughly twice the bake',
+    }),
+    Object.freeze({
+      n: 3,
+      name: 'fine-cone',
+      fromProfile: 'extreme',
+      cost: Object.freeze({ class: 'C5', estMsPerMp: 0.05 }),
+      adds:
+        'the widest cone this system draws (7 taps) over a supersampled field, re-marched on a finer ' +
+        'sun step so the shadows SWEEP with the hour instead of stepping — roughly five times the bake',
     }),
   ]),
   deferredRungs: Object.freeze([

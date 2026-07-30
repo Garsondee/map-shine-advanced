@@ -132,7 +132,21 @@ const STORE = 'blocks';
 // edge is measurably crushed (diagonal ink measured luma 59.1 avg / 78.8 max
 // against a source of 10, vs an EXACT match for the same ring's axis-aligned
 // texels) in every v6 record and must be re-encoded, not just re-served.
-const CACHE_VERSION = 7;
+// v8 (2026-07-29, the BC1 endpoint-bias fix): block-compress.js's `toRgb565`
+// was rounding TWICE (`Math.round((v*31+127)/255)` — `+127` is already the
+// rounding offset for a floor division, so `Math.round` on top made it a
+// ceiling), giving every BC1 endpoint a one-directional brightening bias of
+// +4.08/255 mean, worst case 8. Nothing downstream could cancel it: BOTH
+// endpoint candidates were quantized through it, so the error-scored choice
+// between them just picked the better of two equally-brightened options.
+// Corrected to a single `round(v*31/255)`, which on 256² fixtures takes dark
+// ink linework from mean |err| 3.43 → 2.00 (bias +3.43 → +0.76) and saturated
+// colour from 2.69 → 1.44 (max 16 → 6). Every v7 BC1 record therefore holds
+// measurably lighter, flatter-contrast blocks than this encoder now produces
+// and must be re-encoded rather than re-served. BC7 is unaffected by the fix
+// (it never used toRgb565) but shares this key, so its records ride along —
+// the same all-or-nothing trade every bump here has made.
+const CACHE_VERSION = 8;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two

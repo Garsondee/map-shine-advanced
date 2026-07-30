@@ -26,12 +26,9 @@ import {
   edgeRamp01,
   resolveSunMarch,
   sharpenReceiverGate01,
-  sharpenSelfCoverage01,
   DEFAULT_MARCH_STEPS,
   GATE_SHARPEN_LOW,
   GATE_SHARPEN_HIGH,
-  SELF_HEIGHT_SHARPEN_LOW,
-  SELF_HEIGHT_SHARPEN_HIGH,
 } from '../sun-occlusion.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -111,22 +108,26 @@ export function run(t) {
     );
   }
 
-  // ── THE MARCH ITSELF ─────────────────────────────────────────────────
+  // ── THE MARCH ITSELF (BUILDING / COLUMN semantics) ───────────────────
   {
-    // A single 200px-tall blocker sitting 100px to the RIGHT of the origin.
-    // GROUNDED by default (`floating: 0`) — a wall standing on the ground it
-    // would otherwise shade. See the `d = 0` block further down.
+    // A single 200px-tall BUILDING footprint sitting 100px to the RIGHT of
+    // the origin. Round Seven makes building height a scene-wide UNIFORM,
+    // never sampled per texel, so `buildingHeightPx` travels alongside
+    // `maxCasterHeightPx` at every call site below rather than living in the
+    // fixture. See the `d = 0` block further down for the floating/sky-reach
+    // counterpart of "grounded here".
     const blockerAt =
-      (bx, by, hPx, opts = {}) =>
+      (bx, by, opts = {}) =>
       (x, y) =>
         Math.hypot(x - bx, y - by) < 40
-          ? { heightPx: hPx, coverage: opts.coverage ?? 1, floating: opts.floating ?? 0 }
-          : { heightPx: 0, coverage: 0, floating: 0 };
-    const empty = () => ({ heightPx: 0, coverage: 0, floating: 0 });
+          ? { buildingCoverage: opts.coverage ?? 1, floatingHeightPx: 0, floatingCoverage: 0, skyReachCoverage: 0 }
+          : { buildingCoverage: 0, floatingHeightPx: 0, floatingCoverage: 0, skyReachCoverage: 0 };
+    const empty = () => ({ buildingCoverage: 0, floatingHeightPx: 0, floatingCoverage: 0, skyReachCoverage: 0 });
     const base = {
-      sampleField: blockerAt(100, 0, 200),
+      sampleField: blockerAt(100, 0),
       elevationDeg: 45,
       maxCasterHeightPx: 200,
+      buildingHeightPx: 200,
       steps: 64,
     };
 
@@ -141,22 +142,24 @@ export function run(t) {
     t.ok('the SAME point with the sun on the other side is fully lit', near(lit, 1, 1e-9));
 
     t.ok(
-      'a taller blocker shadows a point the shorter one cannot reach',
+      'a taller building shadows a point the shorter one cannot reach',
       marchVisibility({
         x: 0,
         y: 0,
         azimuthDeg: 90,
         ...base,
-        sampleField: blockerAt(300, 0, 800),
+        sampleField: blockerAt(300, 0),
         maxCasterHeightPx: 800,
+        buildingHeightPx: 800,
       }) <
         marchVisibility({
           x: 0,
           y: 0,
           azimuthDeg: 90,
           ...base,
-          sampleField: blockerAt(300, 0, 60),
+          sampleField: blockerAt(300, 0),
           maxCasterHeightPx: 60,
+          buildingHeightPx: 60,
         })
     );
 
@@ -206,8 +209,8 @@ export function run(t) {
     // far the caster overtopped the ray) a fainter one. The author saw that as
     // "the shadows have different opacities" and as smeared, blocky edges.
     {
-      const solid = blockerAt(100, 0, 200, { coverage: 1 });
-      const half = blockerAt(100, 0, 200, { coverage: 0.5 });
+      const solid = blockerAt(100, 0, { coverage: 1 });
+      const half = blockerAt(100, 0, { coverage: 0.5 });
       const solidVis = marchVisibility({ x: 0, y: 0, azimuthDeg: 90, ...base, sampleField: solid });
       const halfVis = marchVisibility({ x: 0, y: 0, azimuthDeg: 90, ...base, sampleField: half });
       t.ok('half-covered caster casts a HALF-strength shadow', near(1 - halfVis, (1 - solidVis) * 0.5, 1e-6));
@@ -231,7 +234,12 @@ export function run(t) {
     // never asked. A bridge deck overhead must darken the river at NOON, when
     // the directional throw is nil, without any separate `skyOcclusion` term.
     {
-      const overhead = () => ({ heightPx: 300, coverage: 1, floating: 1 });
+      const overhead = () => ({
+        buildingCoverage: 0,
+        floatingHeightPx: 300,
+        floatingCoverage: 1,
+        skyReachCoverage: 1,
+      });
       const noonUnderBridge = marchVisibility({
         x: 0,
         y: 0,
@@ -256,13 +264,19 @@ export function run(t) {
         )
       );
 
-      // ⚠️ THE OTHER HALF, and the reason `floating` is its own channel: a
-      // GROUNDED wall occupies its own footprint, so there is no ground under
-      // it to shade. Reading `d = 0` off total coverage instead would ring
-      // every building with a dark fringe on all four sides, sun or no sun.
-      const groundedHere = () => ({ heightPx: 300, coverage: 1, floating: 0 });
+      // ⚠️ THE OTHER HALF, and the reason `skyReachCoverage` is its own,
+      // narrower channel: an OVERHEAD item occupies its own footprint on THIS
+      // floor, so there is no separate ground under it to shade. Reading
+      // `d = 0` off `floatingCoverage` instead would ring every balcony and
+      // lantern-on-a-plinth with a dark fringe on all four sides, sun or no sun.
+      const groundedHere = () => ({
+        buildingCoverage: 0,
+        floatingHeightPx: 300,
+        floatingCoverage: 1,
+        skyReachCoverage: 0,
+      });
       t.ok(
-        'a GROUNDED caster does not shade the ground it stands on',
+        'a same-floor overhead item does not shade the ground it stands on',
         near(
           marchVisibility({
             x: 0,
@@ -303,18 +317,27 @@ export function run(t) {
     // building and overhead shadows render on top of the very overhead tile
     // producing them. The `groundedHere` case just above only exercises
     // d=0 (elevationDeg 90 ⇒ the march never runs at all, span=0) — it never
-    // actually walked the loop this bug lives in.
+    // actually walked the loop this bug lives in. (Round Seven has since
+    // split this guard in two — a `receiverBuildingHeight` floor for the
+    // COLUMN test, a `heightGate` for the BAND test — so this block now pins
+    // the FLOATING half specifically; the building half is the "taller
+    // building" test up in THE MARCH ITSELF, above.)
     // ══════════════════════════════════════════════════════════════════
     {
-      // A WIDE, uniform, same-floor overhead/building mass — `floating: 0`
-      // (not a different floor's sky-reach structure, so the existing d=0
-      // guard does not apply here), `coverage`/`heightPx` constant EVERYWHERE
-      // (a caster far wider than the march's own span). A receiver standing
-      // ON it, off-noon so the march actually walks (elevationDeg 45, unlike
-      // the d=0-only test above).
-      const uniformOverhead = () => ({ heightPx: 300, coverage: 1, floating: 0 });
+      // A WIDE, uniform-height overhead item — `floatingHeightPx`/
+      // `floatingCoverage` constant EVERYWHERE (a caster far wider than the
+      // march's own span), `skyReachCoverage: 0` (this floor's own item, not
+      // a different floor's sky-reach structure, so the d=0 guard does not
+      // apply here). A receiver standing ON it, off-noon so the march
+      // actually walks (elevationDeg 45, unlike the d=0-only test above).
+      const uniformOverhead = () => ({
+        buildingCoverage: 0,
+        floatingHeightPx: 300,
+        floatingCoverage: 1,
+        skyReachCoverage: 0,
+      });
       t.ok(
-        'a receiver ON a wide overhead/building item is not shadowed by that SAME item, off-noon',
+        'a receiver ON a wide overhead item is not shadowed by that SAME item, off-noon',
         near(
           marchVisibility({
             x: 0,
@@ -332,11 +355,14 @@ export function run(t) {
       // The fix must not blind the march to a GENUINELY taller, separate
       // structure: a low item (height 50, within 40px of the origin) sitting
       // near a much taller one (height 500, everywhere past that) — the tall
-      // one must still shadow a receiver standing on the low one.
+      // one must still shadow a receiver standing on the low one. This is a
+      // FLOATING scenario now: a building's height is one scene-wide uniform
+      // (Round Seven), so "a taller building right next door" is no longer a
+      // per-texel concept — see "a taller building shadows..." above instead.
       const lowReceiverNearTallNeighbour = (x, y) =>
         Math.hypot(x, y) < 40
-          ? { heightPx: 50, coverage: 1, floating: 0 }
-          : { heightPx: 500, coverage: 1, floating: 0 };
+          ? { buildingCoverage: 0, floatingHeightPx: 50, floatingCoverage: 1, skyReachCoverage: 0 }
+          : { buildingCoverage: 0, floatingHeightPx: 500, floatingCoverage: 1, skyReachCoverage: 0 };
       t.ok(
         'a genuinely TALLER separate structure still shadows a receiver standing on its own shorter item',
         marchVisibility({
@@ -359,55 +385,164 @@ export function run(t) {
     }
 
     // ══════════════════════════════════════════════════════════════════
-    // THE 2026-07-28 ROUND FOUR — the round-three fix closed the self-shadow
-    // but opened a visible GAP between a building and its own shadow (author,
-    // live). The caster texture is deliberately LINEAR-filtered, so a
-    // receiver just outside a wall's TRUE edge can read a blurred, partial
-    // height0 that is not really "self" — sharpened so only a CONFIDENT
-    // self-reading gets the round-three floor.
+    // 🔒 THE SELF-SHADOW GUARD — ONE UNCONDITIONAL PHYSICAL RULE (round six,
+    // 2026-07-30). Rounds four and five each added a "is this station really
+    // part of me" CONFIDENCE test and each broke a real scene in the opposite
+    // direction; see sun-occlusion.js's own header. These pin the rule that
+    // replaced both, and the two live failures that motivated it. Every
+    // ORIGINAL live bug (the greenhouse roof, the wall-lamp) was an OVERHEAD
+    // item, so Round Seven's split makes each of these a FLOATING scenario
+    // except the last, which pins the BUILDING side of the same doctrine.
     // ══════════════════════════════════════════════════════════════════
     {
-      // THE CURVE ITSELF — same shape as sharpenReceiverGate01's own tests.
-      t.ok('a low-confidence (blurred) reading is treated as NOT self at all', sharpenSelfCoverage01(0.02) === 0);
-      t.ok('a confidently-covered reading is treated as fully self', sharpenSelfCoverage01(0.9) === 1);
-      t.ok(
-        'the curve is monotonic across the full range (no dip that would show as a second, wrong edge)',
-        [0, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1].every((v, i, arr) =>
-          i === 0 ? true : sharpenSelfCoverage01(v) >= sharpenSelfCoverage01(arr[i - 1])
-        )
-      );
-      t.ok(
-        'the declared thresholds are the ones actually used (not silently retuned)',
-        sharpenSelfCoverage01(SELF_HEIGHT_SHARPEN_LOW) === 0 && sharpenSelfCoverage01(SELF_HEIGHT_SHARPEN_HIGH) === 1
-      );
-
-      // THROUGH THE MARCH — a low-confidence height reading at the receiver's
-      // own d=0 must produce the IDENTICAL result to no self-reading at all,
-      // not merely a "somewhat weaker" floor. That is the actual claim the
-      // fix makes: an untrusted reading is discounted to ZERO, not partially.
       const argsHere = { x: 0, y: 0, azimuthDeg: 90, elevationDeg: 45, maxCasterHeightPx: 300 };
-      const noSelfReading = (x, y) =>
-        Math.hypot(x, y) < 20 ? { heightPx: 0, coverage: 0, floating: 0 } : { heightPx: 300, coverage: 1, floating: 0 };
-      const blurredSelfReading = (x, y) =>
-        Math.hypot(x, y) < 20
-          ? { heightPx: 280, coverage: 0.05, floating: 0 } // the blur artifact: low confidence
-          : { heightPx: 300, coverage: 1, floating: 0 }; // the real wall, just past it
+
+      // A receiver genuinely standing ON a wide, uniform-height overhead item
+      // is not shadowed by that same item (round three's original target).
+      const confidentlySelf = () => ({
+        buildingCoverage: 0,
+        floatingHeightPx: 300,
+        floatingCoverage: 1,
+        skyReachCoverage: 0,
+      });
       t.ok(
-        'a LOW-confidence blurred height reading produces the IDENTICAL result to no self-reading at all',
-        near(
-          marchVisibility({ ...argsHere, sampleField: blurredSelfReading }),
-          marchVisibility({ ...argsHere, sampleField: noSelfReading }),
-          1e-9
-        )
+        'a receiver on a uniform overhead item is not shadowed by that same item',
+        near(marchVisibility({ ...argsHere, sampleField: confidentlySelf }), 1, 1e-9)
       );
 
-      // The CONFIDENTLY-self case (round three's actual target) is unaffected
-      // by sharpening — a receiver genuinely standing ON a wide overhead item
-      // is still not shadowed by that same item.
-      const confidentlySelf = () => ({ heightPx: 300, coverage: 1, floating: 0 });
+      // 🔒 THE GREENHOUSE (live, 2026-07-30) — a receiver on a TRANSLUCENT
+      // part of a uniform-height item must not be shadowed by that item's own
+      // more-OPAQUE parts. Round four's coverage-confidence read the window
+      // pane's honest 0.4 alpha as "not really self" and let the roof's metal
+      // frame shadow its own glass: dark where transparent, absent where
+      // opaque. The height comparison never looks at alpha, so it cannot.
+      const greenhouseRoof = (x, y) =>
+        Math.hypot(x, y) < 5
+          ? { buildingCoverage: 0, floatingHeightPx: 300, floatingCoverage: 0.4, skyReachCoverage: 0 } // the glass pane, at the receiver
+          : { buildingCoverage: 0, floatingHeightPx: 300, floatingCoverage: 1, skyReachCoverage: 0 }; // the metal frame, SAME roof, elsewhere
       t.ok(
-        'a CONFIDENTLY self-covered receiver still gets the full round-three guard',
-        near(marchVisibility({ ...argsHere, sampleField: confidentlySelf }), 1, 1e-9)
+        'a receiver on a translucent pane is NOT shadowed by its own roof`s opaque frame',
+        near(marchVisibility({ ...argsHere, sampleField: greenhouseRoof }), 1, 1e-9)
+      );
+
+      // 🔒 THE BLEED GHOST (live, 2026-07-30 — the wall-mounted lamp, and the
+      // one a CPU-twin simulation finally caught). The caster texture is
+      // LINEAR-filtered, so one texel outside any caster reads a smeared
+      // HALF-HEIGHT copy of it. Round five's height-match read that ghost as a
+      // DIFFERENT object (285 ≠ 570), dropped the self-floor to zero, and let
+      // the ghost shadow the very caster that cast it — measured at 63%
+      // darkness across the lamp's own body while open ground beyond sat at
+      // 100%. Half is not taller than whole, so the unconditional floor is
+      // immune without needing to identify anything.
+      const lampWithBleedGhost = (x, y) =>
+        Math.hypot(x, y) < 20
+          ? { buildingCoverage: 0, floatingHeightPx: 570, floatingCoverage: 1, skyReachCoverage: 0 } // the lamp's own solid body
+          : { buildingCoverage: 0, floatingHeightPx: 285, floatingCoverage: 0.5, skyReachCoverage: 0 }; // its linear-filter ghost, all around it
+      t.ok(
+        'a caster is NOT shadowed by its own linear-filter bleed ghost (the inverted-lamp bug)',
+        near(marchVisibility({ ...argsHere, sampleField: lampWithBleedGhost, maxCasterHeightPx: 570 }), 1, 1e-9)
+      );
+
+      // The guard must not blind the march to a genuinely TALLER structure.
+      const lowReceiverNearTall = (x, y) =>
+        Math.hypot(x, y) < 40
+          ? { buildingCoverage: 0, floatingHeightPx: 50, floatingCoverage: 1, skyReachCoverage: 0 }
+          : { buildingCoverage: 0, floatingHeightPx: 500, floatingCoverage: 1, skyReachCoverage: 0 };
+      t.ok(
+        'a genuinely taller separate structure still shadows a receiver standing on a shorter item',
+        marchVisibility({ ...argsHere, sampleField: lowReceiverNearTall, maxCasterHeightPx: 500 }) < 1
+      );
+
+      // 🏢 THE BUILDING SIDE of the same doctrine. Buildings have NO per-texel
+      // height to bleed — `buildingHeightPx` is a scene-wide uniform (Round
+      // Seven), so the ghost failure mode above cannot occur for buildings by
+      // construction. What CAN still bleed is `buildingCoverage` itself, at an
+      // antialiased wall edge, so what is worth pinning here is that a
+      // partial/ambiguous coverage reading is classified as "not really
+      // inside" (below the 0.5 threshold, matching `mask-derive.js`'s own
+      // exterior-gate precedent) and the real wall past it still shadows the
+      // open ground — no contact gap.
+      const wallEdgeBleed = (x, y) =>
+        Math.hypot(x, y) < 20
+          ? { buildingCoverage: 0.3, floatingHeightPx: 0, floatingCoverage: 0, skyReachCoverage: 0 } // antialiased edge
+          : { buildingCoverage: 1, floatingHeightPx: 0, floatingCoverage: 0, skyReachCoverage: 0 }; // the solid wall just past it
+      t.ok(
+        'open ground just outside a wall`s antialiased edge is still shadowed by the wall (no contact gap)',
+        marchVisibility({ ...argsHere, sampleField: wallEdgeBleed, buildingHeightPx: 300 }) < 1
+      );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // 🆕 ROUND SEVEN (2026-07-30) — FLOATING IS A BAND, NOT A COLUMN.
+    // The author, live, on a wall-mounted lamp bracket: "it's a thin enough
+    // element that it reveals an issue with our shadow approach... this
+    // doesn't work for thin things because it turns them into much darker
+    // much larger shadows than they actually deserve to be." A CPU-twin
+    // audit of the real scenario (570px bracket, sun at 57°) measured the old
+    // column model's shadow at a SOLID 184px, opaque for all but its last 9px
+    // — fourteen times the true ~13px band. These pin the corrected shape.
+    // ══════════════════════════════════════════════════════════════════
+    {
+      // A thin, roughly lamp-bracket-sized floating object: a 40px-radius
+      // disc at world (300, 0), height 300. Sun at azimuth 90 (march walks
+      // +x) and elevation 45 (tanElev = 1), so the crossing distance — where
+      // the ray's own height equals the object's — is exactly 300px, i.e.
+      // world x = 300 − 300 = 0.
+      const thinFloatingObject = (x, y) =>
+        Math.hypot(x - 300, y) < 20
+          ? { buildingCoverage: 0, floatingHeightPx: 300, floatingCoverage: 1, skyReachCoverage: 0 }
+          : { buildingCoverage: 0, floatingHeightPx: 0, floatingCoverage: 0, skyReachCoverage: 0 };
+      const floatArgs = { azimuthDeg: 90, elevationDeg: 45, maxCasterHeightPx: 300, steps: 64 };
+      const visAt = (worldX) => marchVisibility({ x: worldX, y: 0, ...floatArgs, sampleField: thinFloatingObject });
+
+      t.ok(
+        'well short of the crossing distance, a thin floating object casts NOTHING — a column would already be dark here',
+        near(visAt(150), 1, 1e-6)
+      );
+      t.ok(
+        'the crossing distance (object height / tanElev) is fully dark — the band`s contact point',
+        near(visAt(0), 0, 1e-6)
+      );
+      t.ok(
+        'the crossing point is the darkest point of the band, not just A dark point within it',
+        1 - visAt(0) > 1 - visAt(30) && 1 - visAt(0) > 1 - visAt(-30)
+      );
+      t.ok(
+        'well PAST the crossing distance, fully lit again — the shadow is a BAND, not a ray to infinity',
+        near(visAt(-200), 1, 1e-6)
+      );
+
+      // 🌉 THE BRIDGE (author, live: "the bridge spans something like 40-50%
+      // of the total map... as long as it still produces a shadow, even if a
+      // smaller one, it isn't a problem... producing no shadow isn't good").
+      // A WIDE floating slab — much wider than the march's own span, so its
+      // far edge never enters the loop at all. `maxCasterHeightPx` is set by
+      // some OTHER, taller caster in the same field (a building), exactly as
+      // a real bake's field-wide max would be.
+      const bridgeHeight = 200;
+      const bridge = (x) =>
+        x >= -1000 && x <= 1000
+          ? { buildingCoverage: 0, floatingHeightPx: bridgeHeight, floatingCoverage: 1, skyReachCoverage: 1 }
+          : { buildingCoverage: 0, floatingHeightPx: 0, floatingCoverage: 0, skyReachCoverage: 0 };
+      const bridgeArgs = { azimuthDeg: 90, elevationDeg: 45, maxCasterHeightPx: 400, steps: 64 };
+      const bridgeVisAt = (worldX) =>
+        marchVisibility({ x: worldX, y: 0, ...bridgeArgs, sampleField: (x) => bridge(x) });
+
+      t.ok(
+        'directly under a wide bridge it is dark regardless of this redesign — the d=0 seed, untouched',
+        near(bridgeVisAt(0), 0, 1e-6)
+      );
+      t.ok(
+        'a WIDE bridge still casts a real shadow past its own edge — "smaller, not absent"',
+        bridgeVisAt(-1150) < 0.5
+      );
+      t.ok(
+        'but the shadow does not reach indefinitely far past a wide bridge`s edge — it is still a band',
+        near(bridgeVisAt(-1250), 1, 1e-6)
+      );
+      t.ok(
+        'the sun-facing side of the bridge (the wrong direction for a cast shadow) stays lit',
+        near(bridgeVisAt(1050), 1, 1e-6)
       );
     }
   }

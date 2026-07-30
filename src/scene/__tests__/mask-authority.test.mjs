@@ -7,7 +7,7 @@
  * reset → discovery → ingest → derive → sample → report — runs under Node.
  */
 import { createMaskAuthority, RequiredMaskMissingError } from '../mask-authority.js';
-import { PACKED_TRIO_LAYER_NAME } from '../mask-catalog.js';
+import { PACKED_TRIO_LAYER_NAME, CASTER_HEIGHT_SCALE_PX } from '../mask-catalog.js';
 
 /** Synthetic "bitmap": already ImageData-shaped; the injected reader is identity. */
 function syntheticPage(size, { r = 0, g = 0, b = 0, a = 255 } = {}) {
@@ -288,6 +288,30 @@ export async function run(t) {
           return e instanceof RequiredMaskMissingError;
         }
       })()
+    );
+
+    // ⚠️ THE REGRESSION THIS PINS (found 2026-07-30, live): `casterHeight`'s
+    // bytes are meaningless without `scalePx` to turn them back into world px.
+    // The degraded caller (`boot.js#getCasterHeightField`'s catch branch, a
+    // floor with no authored `_Outdoors`) has to call `getDerived` DIRECTLY —
+    // bypassing `scene/sky-reach-access.js#heightField`, which is the wrapper
+    // that used to be the ONLY place attaching `scalePx` (from its own
+    // closure). That left `scalePx` `undefined` on every degraded floor's
+    // caster-height read, which silently zeroed EVERY occluder's height on the
+    // way out — `(maxByte/255) * (undefined ?? 0)` is always 0 — while the
+    // coverage/count channels stayed healthy throughout (a floor could report
+    // real overhead items with real heights in its completeness AND bake a
+    // shadow field with `maxCasterHeightPx: 0`, indistinguishable from "no
+    // casters at all"). `scalePx` now rides on the SAME object `channels`
+    // does, so a caller that bypasses the wrapper for the required-mask
+    // opt-out still gets the number its bytes depend on.
+    t.ok(
+      'a degraded (required-mask-acknowledged) casterHeight read still carries its real scalePx',
+      authority.getDerived('casterHeight', 1, { acknowledgeMissingRequired: true })?.scalePx === CASTER_HEIGHT_SCALE_PX
+    );
+    t.ok(
+      'scalePx is NOT attached to a kind it has no meaning for (outdoors) — it is casterHeight-specific, not a blanket field',
+      authority.getDerived('outdoors', 1, { acknowledgeMissingRequired: true })?.scalePx == null
     );
   }
   // (an UNRESOLVABLE floor index, e.g. 99, still serves the absent value and

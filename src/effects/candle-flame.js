@@ -73,11 +73,21 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
   // request, never up).
   animationQuality: {
     type: 'enum',
-    values: ['low', 'standard', 'lavish'],
-    default: 'lavish',
+    values: ['auto', 'low', 'standard', 'lavish'],
+    // `auto` = FOLLOW THE PERFORMANCE PROFILE (2026-07-29). Previously `lavish`,
+    // whose own note reasoned "a handful of candle lights is cheap and the
+    // richer look is the point" — a measurement later contradicted the premise
+    // (candle lights: 13.1 ms of a 20.4 ms frame on a candle-heavy scene), and
+    // a hardcoded default cannot respond to a machine either way. `auto` is
+    // still default-ON in the sense that matters: at the default `standard`
+    // profile it resolves to exactly the old `lavish` behaviour
+    // (feedback_default_on_new_features — ship the best look, dial DOWN on
+    // request). Picking any explicit value pins it and beats the profile, per
+    // Effects.md Law 5 ("measurements AND explicit settings").
+    default: 'auto',
     category: 'Light',
     label: 'Flicker richness',
-    help: 'How lively the cast light pool is. Low = a gentle flicker (cheapest); Standard adds a two-octave flicker and warm/cool colour shift; Lavish adds a breathing core and a wavering, non-circular edge.',
+    help: 'How lively the cast light pool is. Auto follows your performance profile. Low = a gentle flicker (cheapest); Standard adds a two-octave flicker and warm/cool colour shift; Lavish adds a breathing core and a wavering, non-circular edge.',
   },
   // WIND RESPONSE (Wind.md §8.1 — "each consuming effect declares a
   // windResponse knob (the fixed Motion category literally lists 'wind
@@ -126,21 +136,70 @@ export const CANDLE_FLAME = Object.freeze({
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
   params: CANDLE_FLAME_PARAMS,
+  // ============================================================================
+  // THE LADDER — REWRITTEN 2026-07-29 against what this effect ACTUALLY does.
+  // ============================================================================
+  //
+  // ⚠️ The previous version declared ONE rung ("a simple teardrop marker at each
+  // imported candle anchor — placement proof, not a finished flame") and filed
+  // `animated-flicker` under `deferredRungs` as NOT BUILT. Both had been false
+  // for weeks: the shipped flame runs a nine-noise chaotic life envelope with
+  // wind lean, gutter and snuff, and every candle cluster emits a full
+  // Foundry-parity point light with a `lavish` flicker. The manifest described
+  // an effect that no longer existed — which is precisely what happens to a
+  // declaration nothing reads (feedback_unconsumed_api_rots_silently). It is
+  // read now, by effect-cascade.js#resolveEffectTier.
+  //
+  // Rungs are ordered by COST CLASS (Law 3), and each maps to a row of
+  // `CANDLE_TIER_PLANS` (candle-flame-geometry.js) — the prose here, the
+  // arithmetic there, index-aligned.
+  //
+  // 🔴 THE COST IS THE LIGHT, NOT THE FLAME, and that is measured rather than
+  // assumed: on a candle-heavy scene `light.drawCandleFlame` (every billboard in
+  // the scene) came in at 0.022 ms while the two point-light zones came to
+  // 13.1 ms of a 20.4 ms frame across 91 draw calls. So the rungs that move the
+  // needle are the ones changing light GRANULARITY, not flame prettiness.
+  //
+  // Tier 3 == today's shipped behaviour exactly, and the default `standard`
+  // profile resolves to tier 3, so switching this system on restyles nothing.
   tiers: Object.freeze([
     Object.freeze({
       n: 0,
-      name: 'teardrop-marker',
+      name: 'ember',
       cost: Object.freeze({ class: 'C0', estMsPerMp: 0.01 }),
-      adds: 'a simple teardrop marker at each imported candle anchor — placement proof, not a finished flame',
+      adds: 'a calm flame at every candle, and one merged warm pool per room — placement and mood, at the floor price',
+    }),
+    Object.freeze({
+      n: 1,
+      name: 'flicker',
+      fromProfile: 'low',
+      cost: Object.freeze({ class: 'C1', estMsPerMp: 0.01 }),
+      adds: 'the cast light gains a two-octave flicker and a warm/cool temperature shift — pure ALU inside light it already covers',
+    }),
+    Object.freeze({
+      n: 2,
+      name: 'life',
+      fromProfile: 'performance',
+      cost: Object.freeze({ class: 'C2', estMsPerMp: 0.02 }),
+      adds: 'the flame comes alive — chaotic per-candle guttering, wind lean, and a strong draft that snuffs it out',
+    }),
+    Object.freeze({
+      n: 3,
+      name: 'boil',
+      fromProfile: 'standard',
+      cost: Object.freeze({ class: 'C2', estMsPerMp: 0.03 }),
+      adds: 'the silhouette boils and curls, and each light gains a breathing core and a wavering, non-circular edge',
+    }),
+    Object.freeze({
+      n: 4,
+      name: 'perCandle',
+      fromProfile: 'extreme',
+      cost: Object.freeze({ class: 'C8', estMsPerMp: 0.3 }),
+      adds: 'candles stop sharing a light — nearly one full point light each, so a candelabra pools per flame',
     }),
   ]),
-  // Recorded, NOT built — the pretty flame, as honest rungs (Effects.md §0). The
-  // real draw is the surface.particles / sims.fluids path (graph/passes.js).
+  // Recorded, NOT built — still genuinely absent (Effects.md §0).
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'animated-flicker',
-      note: 'TSL-noise flicker driven by the frame clock — no per-flame CPU (particles/one-engine)',
-    }),
     Object.freeze({
       name: 'emissive-glow',
       note: 'flame writes emissive into buf:scene.illum + bloom instead of a separate composite (light.accumulate / post.grade)',

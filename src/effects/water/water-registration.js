@@ -64,8 +64,14 @@ export function createWaterRegistration({
    * session and bloom was off in every scene. Both halves are fixed —
    * `EFFECT_REAPPLIERS` in boot.js runs every effect at ready/settings/scene
    * load, and bloom's seed now matches its manifest like this one does.
+   *
+   * `perfTier: null` PRE-RESOLVE too, for the identical reason candle's own
+   * readout seeds it that way (`boot.js#candleReadout`): the CONSUMER
+   * (`water-surface-subsystem.js#sync`) already treats a non-finite tier as
+   * "use `WATER_DEFAULT_TIER`", so there is no second fallback to keep in
+   * sync here.
    */
-  let readout = { enabled: true, params: null };
+  let readout = { enabled: true, params: null, perfTier: null };
 
   /** Transient, in-memory tuning (the console setter / the FOH-ROH card) — the
    * highest-precedence param layer, so live tweaks show at once without being
@@ -73,7 +79,11 @@ export function createWaterRegistration({
   const liveOverride = {};
 
   effectRegistry.register(WATER, (resolved) => {
-    readout = { enabled: resolved.enabled, params: resolved.params };
+    // `perfTier` (effect-cascade.js#resolveEffectTier, resolved for EVERY
+    // effect at the registry door) is carried onto the readout the same way
+    // candle's own registration carries it onto `candleReadout` — the surface
+    // subsystem's material rebuild is what actually reads it.
+    readout = { enabled: resolved.enabled, params: resolved.params, perfTier: resolved.perfTier };
   });
 
   function reapply() {
@@ -93,6 +103,7 @@ export function createWaterRegistration({
     const p = readout.params ?? {};
     return {
       enabled: readout.enabled,
+      perfTier: readout.perfTier,
       params: {
         ...p,
         tint: typeof p.tint === 'string' ? hexToRgb01(p.tint) : undefined,

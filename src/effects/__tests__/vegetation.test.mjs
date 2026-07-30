@@ -27,6 +27,23 @@ export function run(t) {
     resolveEffectEnabled(VEGETATION, { profile: 'low', playerEnable: 'off' }) === false
   );
 
+  // --- THE TIER LADDER (2026-07-29) — one rung per performance profile ----
+  // The resolver/plan arithmetic itself is exercised in effect-tier.test.mjs's
+  // own anti-drift block; pinned here is just the manifest's own SHAPE, the
+  // same way this file already pins "exactly two kinds" below.
+  ok(
+    'the ladder has exactly 6 rungs — the floor plus one per PERFORMANCE_PROFILES entry',
+    VEGETATION.tiers.length === 6
+  );
+  ok('rung 0 is the unconditional floor (no fromProfile declared)', !('fromProfile' in VEGETATION.tiers[0]));
+  ok(
+    'every rung 1..5 names the performance profile that buys it, in ascending order',
+    VEGETATION.tiers
+      .slice(1)
+      .map((t) => t.fromProfile)
+      .join(',') === 'low,performance,standard,quality,extreme'
+  );
+
   // --- ONE shared param set, TWO kinds — the whole design's central claim -
   ok('exactly two kinds declared (tree, bush)', VEGETATION_KINDS.length === 2);
   // The load-bearing claim is NOT a fixed param count (that legitimately grows

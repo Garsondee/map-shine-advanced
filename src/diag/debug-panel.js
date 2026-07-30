@@ -493,8 +493,13 @@ export function installDebugPanel(MapShine) {
     'wind-sim-status': 'workshop',
     'loading-screen-arm': 'lab',
     'loading-screen-state': 'lab',
-    'ui-shadow': 'settings',
-    'ui-shadow-status': 'settings',
+    // 'ui-shadow' (the bespoke On/Off select) is GONE — subsumed by the generic
+    // per-effect row in the new graphics-settings panel (boot.js). Its status
+    // readout is a technical diagnostic (how many windows detected/casting),
+    // not a player option, so it belongs with the rest of the dev tools rather
+    // than in the player-facing Settings zone — re-routed 2026-07-29, the same
+    // day Settings became a real panel instead of two leftover controls.
+    'ui-shadow-status': 'lab',
   };
   /** Which zone body an entry renders in, or `null` when it renders inside an
    * effect's card instead. Delegates to the pure `routeEntry` so the rule that
@@ -1142,6 +1147,13 @@ export function installDebugPanel(MapShine) {
     togglePanel,
     isPanelVisible,
     onVisibilityChange,
+    // Exposed 2026-07-29 so a caller OUTSIDE diag/ (boot.js's graphics-settings
+    // panel registration) can ask "is this user a GM" without duplicating the
+    // `game.user.isGM` read itself — that read belongs to the two zones this
+    // wall exempts (`foundry/`, `diag/`), and boot.js is neither. One function,
+    // called through, rather than the same one-liner reappearing a second
+    // place and permanently widening the `foundry/adapter-only` ratchet.
+    isGM,
     /** Pure readouts. The flight recorder runs all of these on export. */
     get reports() {
       return reports;

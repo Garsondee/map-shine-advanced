@@ -17,8 +17,18 @@
 
 import { PERFORMANCE_PROFILES, ENABLE_OVERRIDES, DEFAULT_PERFORMANCE_PROFILE } from './effect-cascade.js';
 
-/** The two GLOBAL (not per-effect) setting keys. */
+/** The three GLOBAL (not per-effect) setting keys. */
 export const GLOBAL_SETTING_KEYS = Object.freeze({
+  /** THE MASTER OFF-SWITCH (client) — Keyhole.md §4.3's "one legitimate switch":
+   * MSA fully off, pure Foundry rendering, no proxies, no keyhole. Sits BEFORE
+   * the cascade below, not inside it — a player who cannot get MSA working at
+   * all has no use for a profile or a11y setting for an effect that isn't
+   * running. `requiresReload` (see describeEffectSettings) because flipping it
+   * live would mean tearing down or building the entire renderer on a settings
+   * write — the reload is what makes that safe. See boot.js#startRealSceneViewer's
+   * own read of this key, mirroring its existing "no art on this scene" branch.
+   */
+  msaEnabled: 'msaEnabled',
   /** The performance profile (client) — the games-industry front door (§2.1). */
   profile: 'performanceProfile',
   /** Accessibility: reduce photosensitive effects (client) — the hard override (§2). */
@@ -54,6 +64,11 @@ function titleCase(s) {
  * @property {boolean} config - whether it appears in Foundry's Settings dialog.
  * @property {string} name
  * @property {string} hint
+ * @property {boolean} [requiresReload] - Foundry prompts a reload when this commits
+ *   (native Settings dialog only — a custom control still has to offer its own
+ *   "reload to apply", see settings-panel.js). Reserved for settings a live
+ *   re-resolve cannot safely apply (the master off-switch: flipping it live would
+ *   mean tearing down or constructing the whole renderer mid-session).
  */
 
 /**
@@ -67,6 +82,18 @@ function titleCase(s) {
 export function describeEffectSettings(manifests = []) {
   /** @type {SettingDescriptor[]} */
   const out = [
+    {
+      key: GLOBAL_SETTING_KEYS.msaEnabled,
+      scope: 'client',
+      kind: 'bool',
+      default: true,
+      config: true,
+      requiresReload: true,
+      name: 'Map Shine Advanced — Enable',
+      hint:
+        "Turn this off to use Foundry's own map rendering instead of Map Shine Advanced. Useful if it " +
+        "isn't working well on your device — you always get a working game either way. Requires a reload.",
+    },
     {
       key: GLOBAL_SETTING_KEYS.profile,
       scope: 'client',

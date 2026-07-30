@@ -242,6 +242,7 @@ export const WATER = Object.freeze({
     Object.freeze({
       n: 1,
       name: 'volume',
+      fromProfile: 'low',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.02 }),
       adds:
         'Beer-Lambert absorption over depth — shallows read sandy, deeps read solid water — plus the ' +
@@ -253,6 +254,7 @@ export const WATER = Object.freeze({
     Object.freeze({
       n: 2,
       name: 'motion',
+      fromProfile: 'performance',
       cost: Object.freeze({ class: 'C2', estMsPerMp: 0.06 }),
       adds:
         'The surface field — one fractal-noise fetch, scrolled along the flow vector (the body pack`s ' +
@@ -266,6 +268,7 @@ export const WATER = Object.freeze({
     Object.freeze({
       n: 3,
       name: 'light',
+      fromProfile: 'standard',
       cost: Object.freeze({ class: 'C3', estMsPerMp: 0.08 }),
       adds:
         'GGX specular + Fresnel-weighted sky reflection from the sky handle. A separate transcription ' +

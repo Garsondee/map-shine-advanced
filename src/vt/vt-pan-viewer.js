@@ -168,6 +168,8 @@ import {
   buildCandleFlameMaterial,
   buildCandleFlameGeometry,
   candleAnimationQualityTier,
+  candleTierPlan,
+  createLightningSubsystem,
   createDoorGraphicsSubsystem,
   KNOWN_DEFERRED_ANIMATIONS,
   createParticleEngine,
@@ -178,6 +180,7 @@ import {
   detectSelfVegetationKind,
   vegetationMeshSegments,
   buildTessellatedQuadGeometry,
+  vegetationTierPlan,
   createVegetationShadowSubsystem,
   padPlacement,
   vegetationShadowPadPx,
@@ -773,6 +776,7 @@ export async function startVtPanViewer({
   getCoverItems,
   onDeviceLost,
   getCandleRenderState,
+  getLightningRenderState,
   getDoorRenderState,
   getVegetationRenderState,
   getBloomRenderState,
@@ -905,6 +909,14 @@ export async function startVtPanViewer({
   // authority or the settings cascade — same injection discipline as the mask
   // authority's closures. Default = the effect off, so an un-wired caller is inert.
   getCandleRenderState ??= () => ({ enabled: false, params: {}, anchors: [] });
+  // THE LIGHTNING data seam (effects/lightning-subsystem.js): boot injects
+  // `{ enabled, params: <resolved LIGHTNING_PARAMS>, perfTier, anchors: [{id,x,y,params}] }`
+  // for the active floor — the SAME shape as the candle seam above, since
+  // both are anchor-driven. vt/ owns the subsystem's GPU lifecycle (the
+  // batched strand mesh + the origin-flash lights merged into the light
+  // pool) but knows nothing about the anchor authority or the settings
+  // cascade. Default = the effect off, so an un-wired caller draws no bolts.
+  getLightningRenderState ??= () => ({ enabled: false, params: {}, anchors: [] });
   // THE DOOR-GRAPHICS data seam (effects/door-graphics-render.js): boot injects
   // `{ enabled, params: {animateMotion, motionDurationScale}, doors: [...] }`
   // — the renderable door snapshots (foundry/scene-doors.js) for the active
@@ -1522,12 +1534,31 @@ export async function startVtPanViewer({
      *             threshold (see water-body.js's `WATER_MASK_FILTER`).
      * Passing the wrong one is silent in both directions, which is why each
      * caller states its own and neither inherits a default.
+     *
+     * `mipmaps` is the SAME shape of decision, opt-in, defaulting to today's
+     * behaviour (none) so every EXISTING caller (water body, specular/window's
+     * per-floor grids) is byte-for-byte unaffected. Sun shadows is the one
+     * caller that opts in (2026-07-30, the mip-cone rework): the march needs a
+     * PRE-FILTERED, box-averaged read at an explicit LOD to represent a thin
+     * caster honestly at distance, not a naive point sample that flips between
+     * fully-hit and fully-missed as the sample position drifts by sub-texel
+     * amounts (`sun-occlusion-render.js`'s own header has the full mechanism).
+     * ⚠️ ASSUMES the WebGPU backend generates mips for a non-power-of-two
+     * `DataTexture` (the extreme tier's 1280² field is NOT a power of two) —
+     * unlike legacy WebGL1, WebGPU has no POT restriction on this, but this is
+     * the one place that assumption is load-bearing and worth re-checking live
+     * if the extreme tier's shadow ever looks wrong specifically at that rung.
      */
-    function createMaskDataTexture(data, w, h, filter = 'linear') {
+    function createMaskDataTexture(data, w, h, filter = 'linear', mipmaps = false) {
       const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
       const f = filter === 'nearest' ? THREE.NearestFilter : THREE.LinearFilter;
-      tex.minFilter = f;
       tex.magFilter = f;
+      if (mipmaps) {
+        tex.minFilter = filter === 'nearest' ? THREE.NearestMipmapNearestFilter : THREE.LinearMipmapLinearFilter;
+        tex.generateMipmaps = true;
+      } else {
+        tex.minFilter = f;
+      }
       tex.wrapS = THREE.ClampToEdgeWrapping;
       tex.wrapT = THREE.ClampToEdgeWrapping;
       tex.needsUpdate = true;
@@ -1634,9 +1665,25 @@ export async function startVtPanViewer({
       getShadowHandle: () => shadowHandle,
       getEnvLight: () => envLight,
       renderSunShadowPass,
-      // LINEAR — see createMaskDataTexture's own doc for why each caller
-      // states its filter rather than inheriting one.
-      createCasterTexture: (data, w, h) => createMaskDataTexture(data, w, h, 'linear'),
+      // LINEAR + MIPMAPPED — see createMaskDataTexture's own doc for why each
+      // caller states its filter rather than inheriting one, and why sun
+      // shadows is the one caller that opts into mips.
+      // ⚠️ DIAGNOSTIC (2026-07-30) — `mipmaps` forced to `false` here. The
+      // caster-grid derivation has been checksum-verified correct at 768/1024
+      // (see mask-authority.js#recomputeIfDirty's own log) and the march's
+      // OWN math has been proven irrelevant (Standard's exact steps/taps,
+      // hardcoded and confirmed live, still showed the same corruption at
+      // those resolutions) — the ONLY thing left that changes for a
+      // non-512-texel caster texture, and that an earlier "read only level 0"
+      // experiment did NOT actually rule out (that changed what the SHADER
+      // reads, never whether mip GENERATION runs at all on the texture), is
+      // whether generating the mip chain itself corrupts the upload — a
+      // GPU-side downsample pass with a bug specific to non-512 dimensions
+      // would show exactly this shape: correct data in, corrupted texture out,
+      // with no shader-side fix able to touch it. If turning generation off
+      // entirely fixes Quality/Extreme at their REAL resolutions, this is
+      // confirmed as the actual cause.
+      createCasterTexture: (data, w, h) => createMaskDataTexture(data, w, h, 'linear', true),
     });
 
     // ── THE WATER BODY PACK (docs/planning/Water.md §5.1, Phase 2d) ──────
@@ -1960,6 +2007,20 @@ export async function startVtPanViewer({
      * that uniform's own declaration for why it stays a viewer-level
      * primitive rather than moving into this pool).
      */
+    /**
+     * THE LIGHTNING SUBSYSTEM (effects/lightning-subsystem.js) — owns the
+     * batched strand mesh's own lifecycle (burst scheduling, spawn/reap,
+     * population-driven geometry rebuild). Constructed HERE, right before
+     * `pointLights`, because that pool reads its live strand snapshot for the
+     * origin-flash light (`getLightningActiveStrands` below) — same
+     * `uGlobalTimeMs` plain-value handoff as the pool itself.
+     */
+    const lightningSubsystem = createLightningSubsystem({
+      THREE,
+      uGlobalTimeMs,
+      getLightningRenderState,
+    });
+
     const pointLights = createPointLightPool({
       THREE,
       getWindHandle: () => windHandle,
@@ -1967,6 +2028,8 @@ export async function startVtPanViewer({
       sunShadows,
       sceneColor,
       getCandleRenderState,
+      getLightningRenderState,
+      getLightningActiveStrands: () => lightningSubsystem.activeStrands(),
       uGlobalTimeMs,
     });
 
@@ -3345,7 +3408,16 @@ export async function startVtPanViewer({
       const sizePx = Number(state.params?.sizePx) > 0 ? Number(state.params.sizePx) : 1;
       // The flame's chaotic-life detail is a graph-BUILD-time tier (like the
       // light pool's), so a live animationQuality change rebuilds the material.
-      const qualityTier = candleAnimationQualityTier(state.params?.animationQuality);
+      // `auto` (the default) follows the PERFORMANCE PROFILE via the resolved
+      // rung; any explicit value pins it and beats the profile (Effects.md Law
+      // 5). Rebuilding on change is what makes this a real tier rather than a
+      // uniform — Law 4: a tier that is off must not be CONSTRUCTED, because a
+      // uniform set to zero still executes every pixel.
+      const aq = state.params?.animationQuality;
+      const qualityTier =
+        aq === undefined || aq === null || aq === 'auto'
+          ? candleTierPlan(state.perfTier).flameQuality
+          : candleAnimationQualityTier(aq);
       if (!candleFlameMat || candleFlameQuality !== qualityTier) {
         // uGlobalTimeMs (the ONE clock, set fresh by updatePointLightMeshes
         // just before this runs each frame) drives the flame's GPU wind.
@@ -3968,6 +4040,13 @@ export async function startVtPanViewer({
       updateRegionDarknessMeshes(darkness01, activeRegions);
       profiler?.end(Z.lightRegions);
 
+      // LIGHTNING — spawn/reap scheduling + population-driven geometry
+      // rebuild, BEFORE pointLights.update() so its origin-flash light reads
+      // THIS frame's fresh strand snapshot, not last frame's.
+      profiler?.begin(Z.lightLightningSync);
+      lightningSubsystem.sync(env.time.tMs);
+      profiler?.end(Z.lightLightningSync);
+
       profiler?.begin(Z.lightPointUpdate);
       lastGridSizePixels = pointLights.update(darkness01, activeRegions, env, darknessRealism01, currentFloor);
       profiler?.end(Z.lightPointUpdate);
@@ -4099,6 +4178,19 @@ export async function startVtPanViewer({
         renderer.render(candleFlameScene, camera);
         renderer.autoClearColor = prevFlameAutoClear;
         profiler?.end(Z.lightDrawCandle);
+      }
+      // LIGHTNING — the SAME guarded-additive draw as the candle flame just
+      // above (same target, same camera, same "don't wipe what compositeQuad/
+      // the flame already drew" guard). lightningSubsystem.sync() (above)
+      // already decided this frame's strand population; drawing is a no-op
+      // scene-visibility check, never a rebuild.
+      if (lightningSubsystem.hasContent) {
+        profiler?.begin(Z.lightDrawLightning);
+        const prevLightningAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(lightningSubsystem.scene, camera);
+        renderer.autoClearColor = prevLightningAutoClear;
+        profiler?.end(Z.lightDrawLightning);
       }
       // THE WIND FIELD DEBUG OVERLAY — same guarded-additive draw as the
       // candle flame just above (same target, same camera, same "don't wipe
@@ -5292,7 +5384,21 @@ export async function startVtPanViewer({
     function syncTokenPlacements() {
       for (const state of itemStates.values()) {
         if (state.item?._placement?.kind !== 'token') continue;
-        refreshItemPlacement(state, state.item);
+        const changed = refreshItemPlacement(state, state.item);
+        // `refreshItemPlacement` only refreshes `state.placement`/`worldBounds`
+        // (and a dead `state.geometry` field nothing ever assigns — tokens
+        // render through the whole-image tile path's OWN `t.geometry`, built by
+        // `ensureWholeImageMeshes`/kept current by `refreshWholeImageItem`).
+        // Without this, the placement math was correct every frame but the
+        // mesh the GPU actually draws kept its stale quad corners until the
+        // next document-hook/pan-zoom-triggered residency pass — the token
+        // document moves, the rendered token doesn't. `show` is read off the
+        // tile's own current visibility rather than recomputed here: residency
+        // still owns on-screen/streaming decisions, this only pushes geometry.
+        if (changed && state.wholeImage) {
+          const show = state.wholeImage.tiles[0]?.mesh?.visible ?? false;
+          refreshWholeImageItem(state, state.item, show, true);
+        }
       }
     }
 
@@ -5883,7 +5989,22 @@ export async function startVtPanViewer({
       // vegetation (grass AS the ground) — a real attr writer, like base map
       // art. Case-2 overlays (a tree ON existing ground) omit it and stay
       // zero-writers. Ignored whenever asShadow is true either way.
-      { asShadow = false, uvScale = [1, 1], shadowPadUv = [0, 0], isFloorSurface = false } = {}
+      //
+      // flutterEnabled/smearTaps (2026-07-29) — the performance-tier gate
+      // (effects/vegetation-render.js#vegetationTierPlan). Both default to
+      // TODAY'S shipped behaviour (flutter on, the original 6-station smear)
+      // so a caller that has not been updated to resolve a tier changes
+      // nothing. `flutterEnabled` only matters when `!asShadow` (the shadow
+      // branch already skips flutter unconditionally — see colorNode below);
+      // `smearTaps` only matters when `asShadow` is true.
+      {
+        asShadow = false,
+        uvScale = [1, 1],
+        shadowPadUv = [0, 0],
+        isFloorSurface = false,
+        flutterEnabled = true,
+        smearTaps = VEG_SHADOW_SMEAR_TAPS,
+      } = {}
     ) {
       const {
         Fn,
@@ -6091,9 +6212,13 @@ export async function startVtPanViewer({
         // preserving ⇒ "mass preserving": leaves move, the canopy neither
         // stretches nor thins. Skipped entirely for the shadow (a blurred
         // silhouette gains nothing from per-leaf detail, and it would double
-        // the fragment noise cost for something nobody can resolve).
+        // the fragment noise cost for something nobody can resolve), AND
+        // skipped below the performance tier that buys it (`flutterEnabled`,
+        // Effects.md Law 4: the `If()` below and everything it gates —
+        // including the coarse-presence texture sample — is never
+        // CONSTRUCTED when this is false, not merely multiplied by zero).
         let sampleUv = uv().mul(uUvScale);
-        if (!asShadow) {
+        if (!asShadow && flutterEnabled) {
           // ── THE FOLIAGE-PRESENCE GATE ──────────────────────────────────
           // See VEG_FLUTTER_GATE_LOD's own header for the measurement that
           // motivated this and the proof it cannot change a pixel. Everything
@@ -6262,15 +6387,20 @@ export async function startVtPanViewer({
           // t = 0 — the ground contact, always solid AND sharp (lod 0): this is
           // what stops the shadow ever fully detaching from the plant, and the
           // one place the silhouette should stay crisp.
+          // STATION COUNT IS A BUILD-TIME (JS) LOOP BOUND, not a uniform — a
+          // different `smearTaps` unrolls a genuinely shorter/longer sequence
+          // of node-graph fetches, which is what makes the performance-tier
+          // gate on this real (Effects.md Law 4). See buildVegetationMaterial's
+          // own opts doc for where `smearTaps` comes from.
           let smeared = crossAt(base);
-          for (let s = 1; s <= VEG_SHADOW_SMEAR_TAPS; s++) {
-            const t = s / VEG_SHADOW_SMEAR_TAPS;
+          for (let s = 1; s <= smearTaps; s++) {
+            const t = s / smearTaps;
             const at = base.sub(uShadowSmearUv.mul(float(t)));
             // Blur grows along the sweep: the foot stays sharp, the tip
             // dissolves — the same contact-hardening the sun march does, and
             // what makes the stations merge instead of laddering.
             const tapLod = uShadowSmearLod.mul(float(t));
-            const tapAlpha = s === VEG_SHADOW_SMEAR_TAPS ? crossAt(at, tapLod) : alphaAt(at, tapLod);
+            const tapAlpha = s === smearTaps ? crossAt(at, tapLod) : alphaAt(at, tapLod);
             // Taper the TIP (t→1), never the foot. A shadow fades out at its far
             // end as the penumbra swallows it; it does not fade where it meets
             // the thing casting it.
@@ -6451,6 +6581,14 @@ export async function startVtPanViewer({
       const vegSegments = vegActive
         ? vegetationMeshSegments(state.placement?.width ?? 0, state.placement?.height ?? 0)
         : 1;
+      // THE RESOLVED PERFORMANCE-TIER PLAN (effects/vegetation-render.js#
+      // vegetationTierPlan) — resolved ONCE here and captured by both load-path
+      // closures below, the same "read once at construction" discipline
+      // `vegState`/`vegSegments` already have (see that function's own doc:
+      // a live tier change reaches an already-built tile only on its next
+      // scene load, never retroactively — the accepted limitation this whole
+      // material build already lives with).
+      const vegTier = vegActive ? vegetationTierPlan(vegState.perfTier) : null;
       // ⚠ ACCEPTED LIMITATION, stated rather than hidden: `ensureWholeImageMeshes`
       // is idempotent FOREVER (the guard at this function's own top) — the
       // material choice made here is a ONE-TIME, construction-time decision,
@@ -6586,6 +6724,7 @@ export async function startVtPanViewer({
                 ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
                     uvScale: compressedUvScale,
                     isFloorSurface: true, // Case-1 embedded veg IS the floor here — see the function's own doc
+                    flutterEnabled: vegTier.flutterEnabled,
                   })
                 : buildWholeImageMaterial(tex, item, compressedUvScale);
               const geometry = new THREE.BufferGeometry();
@@ -6597,7 +6736,7 @@ export async function startVtPanViewer({
               mesh.renderOrder = wi.renderOrder;
               t.mesh = mesh;
               scene.add(mesh);
-              if (vegActive) {
+              if (vegActive && vegTier.shadowEnabled) {
                 vegShadows.attachTileShadow(
                   t,
                   item,
@@ -6607,7 +6746,8 @@ export async function startVtPanViewer({
                   imageW,
                   imageH,
                   vegSegments,
-                  compressedUvScale
+                  compressedUvScale,
+                  vegTier.shadowSmearTaps
                 );
               }
               wi.tiles.push(t);
@@ -6698,7 +6838,10 @@ export async function startVtPanViewer({
               }
             }
             const { material, appearance, motion } = vegActive
-              ? buildVegetationMaterial(tex, item, vegKind, vegState.params, { isFloorSurface: true })
+              ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
+                  isFloorSurface: true,
+                  flutterEnabled: vegTier.flutterEnabled,
+                })
               : buildWholeImageMaterial(tex, item);
             const geometry = new THREE.BufferGeometry();
             const t = { tile, sub: null, tex, geometry, material, appearance, motion, mesh: null };
@@ -6709,8 +6852,19 @@ export async function startVtPanViewer({
             mesh.renderOrder = wi.renderOrder;
             t.mesh = mesh;
             scene.add(mesh);
-            if (vegActive) {
-              vegShadows.attachTileShadow(t, item, vegKind, vegState.params, state, imageW, imageH, vegSegments);
+            if (vegActive && vegTier.shadowEnabled) {
+              vegShadows.attachTileShadow(
+                t,
+                item,
+                vegKind,
+                vegState.params,
+                state,
+                imageW,
+                imageH,
+                vegSegments,
+                undefined,
+                vegTier.shadowSmearTaps
+              );
             }
             wi.tiles.push(t);
           }
@@ -6952,9 +7106,12 @@ export async function startVtPanViewer({
               entry.status = 'error';
               return;
             }
-            // FRESH params (not the ones read above) — params legitimately
-            // change while a giant texture is still decoding/uploading.
-            const freshParams = getVegetationRenderState().params;
+            // FRESH state (not the vegState read above) — both params and the
+            // resolved performance tier legitimately change while a giant
+            // texture is still decoding/uploading.
+            const freshState = getVegetationRenderState();
+            const freshParams = freshState.params;
+            const vegTier = vegetationTierPlan(freshState.perfTier);
             // TESSELLATED (2026-07-23) — one vertex per ~160 world px so the
             // canopy can sample the wind at many real positions instead of one.
             const segments = vegetationMeshSegments(state.placement?.width ?? 0, state.placement?.height ?? 0);
@@ -6975,37 +7132,51 @@ export async function startVtPanViewer({
               return g;
             };
 
-            // THE SHADOW, built FIRST so it is added to the scene before the
-            // canopy — its renderOrder puts it underneath regardless, but
-            // keeping construction order and draw order aligned makes the
-            // intent readable.
-            const shadowPadPx = vegetationShadowPadPx(kind);
-            const shadowBuilt = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
-              asShadow: true,
-              shadowPadUv: [
-                shadowPadPx / Math.max(1, Math.abs(state.placement?.width ?? 1)),
-                shadowPadPx / Math.max(1, Math.abs(state.placement?.height ?? 1)),
-              ],
-            });
-            // The smear LOD's scale factor — see the Case-1 site's own note.
-            // `loaded.tex.image` carries the decoded art's true pixel width.
-            shadowBuilt.shadow.artTexelsPerWorldPx =
-              (loaded.tex?.image?.width ?? 1) / Math.max(1, Math.abs(state.placement?.width ?? 1));
-            const shadowGeometry = makeGeometry(shadowPadPx);
-            const shadowMesh = new THREE.Mesh(shadowGeometry, shadowBuilt.material);
-            shadowMesh.frustumCulled = false;
-            shadowMesh.visible = false;
-            // ABOVE the owning item's own renderOrder — `item` here IS the
-            // ground (a background/tile with a discovered sibling mask), and
-            // the shadow must draw AFTER it or the ground's own (typically
-            // opaque) art paints straight over the shadow and erases it. See
-            // VEG_SHADOW_RENDER_ORDER_MAGNITUDE's own header — this was a
-            // real, silent bug (nothing rendered wrong, nothing rendered).
-            // Still comfortably BELOW the canopy's own renderOrderNudge.
-            shadowMesh.renderOrder = item.renderOrder + VEG_SHADOW_RENDER_ORDER_MAGNITUDE;
-            scene.add(shadowMesh);
+            // THE SHADOW, built FIRST (when this tier draws one at all) so it
+            // is added to the scene before the canopy — its renderOrder puts
+            // it underneath regardless, but keeping construction order and
+            // draw order aligned makes the intent readable. Below
+            // `performance` this tier builds no shadow mesh at all (see
+            // effects/vegetation-render.js#vegetationTierPlan) — the cheapest
+            // possible "off": no geometry, no material, no draw call, ever.
+            let shadowMesh = null;
+            let shadowGeometry = null;
+            let shadowBuilt = null;
+            if (vegTier.shadowEnabled) {
+              const shadowPadPx = vegetationShadowPadPx(kind);
+              shadowBuilt = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
+                asShadow: true,
+                shadowPadUv: [
+                  shadowPadPx / Math.max(1, Math.abs(state.placement?.width ?? 1)),
+                  shadowPadPx / Math.max(1, Math.abs(state.placement?.height ?? 1)),
+                ],
+                smearTaps: vegTier.shadowSmearTaps,
+              });
+              // The smear LOD's scale factor — see the Case-1 site's own note.
+              // `loaded.tex.image` carries the decoded art's true pixel width.
+              shadowBuilt.shadow.artTexelsPerWorldPx =
+                (loaded.tex?.image?.width ?? 1) / Math.max(1, Math.abs(state.placement?.width ?? 1));
+              // The SAME tap count the shader above unrolled — see
+              // effects/vegetation-shadow-subsystem.js#syncUniforms's own note.
+              shadowBuilt.shadow.smearTaps = vegTier.shadowSmearTaps;
+              shadowGeometry = makeGeometry(shadowPadPx);
+              shadowMesh = new THREE.Mesh(shadowGeometry, shadowBuilt.material);
+              shadowMesh.frustumCulled = false;
+              shadowMesh.visible = false;
+              // ABOVE the owning item's own renderOrder — `item` here IS the
+              // ground (a background/tile with a discovered sibling mask), and
+              // the shadow must draw AFTER it or the ground's own (typically
+              // opaque) art paints straight over the shadow and erases it. See
+              // VEG_SHADOW_RENDER_ORDER_MAGNITUDE's own header — this was a
+              // real, silent bug (nothing rendered wrong, nothing rendered).
+              // Still comfortably BELOW the canopy's own renderOrderNudge.
+              shadowMesh.renderOrder = item.renderOrder + VEG_SHADOW_RENDER_ORDER_MAGNITUDE;
+              scene.add(shadowMesh);
+            }
 
-            const { material, appearance, motion } = buildVegetationMaterial(loaded.tex, item, kind, freshParams);
+            const { material, appearance, motion } = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
+              flutterEnabled: vegTier.flutterEnabled,
+            });
             const geometry = makeGeometry();
             const mesh = new THREE.Mesh(geometry, material);
             mesh.frustumCulled = false;
@@ -7022,16 +7193,18 @@ export async function startVtPanViewer({
             entry.segments = segments;
             entry.tex = loaded.tex;
             entry.compressed = loaded.compressed;
-            entry.shadow = {
-              mesh: shadowMesh,
-              geometry: shadowGeometry,
-              material: shadowBuilt.material,
-              uniforms: shadowBuilt.shadow,
-              // Its own independent motion uniform set — see
-              // syncVegetationMotionUniforms's own header for why this must
-              // be synced separately from the canopy's `entry.motion` above.
-              motion: shadowBuilt.motion,
-            };
+            entry.shadow = shadowBuilt
+              ? {
+                  mesh: shadowMesh,
+                  geometry: shadowGeometry,
+                  material: shadowBuilt.material,
+                  uniforms: shadowBuilt.shadow,
+                  // Its own independent motion uniform set — see
+                  // syncVegetationMotionUniforms's own header for why this must
+                  // be synced separately from the canopy's `entry.motion` above.
+                  motion: shadowBuilt.motion,
+                }
+              : null; // this tier draws no shadow at all — see vegTier.shadowEnabled above
           })
           .catch((err) => {
             entry.status = 'error';
@@ -7287,6 +7460,7 @@ export async function startVtPanViewer({
       lightRegions: profiler?.indexOf('light.regionSetup') ?? -1,
       lightPointUpdate: profiler?.indexOf('light.pointLightUpdate') ?? -1,
       lightCandleSync: profiler?.indexOf('light.candleSync') ?? -1,
+      lightLightningSync: profiler?.indexOf('light.lightningSync') ?? -1,
       lightVegSync: profiler?.indexOf('light.vegetationSync') ?? -1,
       lightWindOverlaySync: profiler?.indexOf('light.windOverlaySync') ?? -1,
       lightUiShadow: profiler?.indexOf('light.uiShadowStamps') ?? -1,
@@ -7297,6 +7471,7 @@ export async function startVtPanViewer({
       lightDrawColoration: profiler?.indexOf('light.drawColoration') ?? -1,
       lightDrawComposite: profiler?.indexOf('light.drawComposite') ?? -1,
       lightDrawCandle: profiler?.indexOf('light.drawCandleFlame') ?? -1,
+      lightDrawLightning: profiler?.indexOf('light.drawLightning') ?? -1,
       lightDrawWindOverlay: profiler?.indexOf('light.drawWindOverlay') ?? -1,
       surfSpecular: profiler?.indexOf('surface.specularDraw') ?? -1,
       surfDust: profiler?.indexOf('surface.drawDust') ?? -1,
@@ -9605,6 +9780,10 @@ export async function startVtPanViewer({
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,
+      /** Tear down the lightning strand mesh's own mesh/material/geometry (its
+       * origin-flash lights live in the shared pool, freed by
+       * disposePointLights — same split as the candle flame just above). */
+      disposeLightning: lightningSubsystem.dispose,
       /** Tear down every door leaf mesh + cached door texture (door-graphics.js). */
       disposeDoorGraphics,
       /** Wind field debug overlay (diag/wind-field-overlay.js, Wind.md Tier 0):

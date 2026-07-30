@@ -178,12 +178,11 @@ function renderSettings() {
   easingSelect.addEventListener('change', () => (s.easing = easingSelect.value));
   wrap.appendChild(fieldRow('easing', easingSelect));
 
-  wrap.appendChild(
-    fieldRow(
-      'fade in (ms)',
-      numberInput(s.fadeInMs, 100, (v) => (s.fadeInMs = Math.max(0, v)))
-    )
-  );
+  const fadeInInput = numberInput(s.fadeInMs, 100, (v) => (s.fadeInMs = Math.max(0, v)));
+  fadeInInput.title =
+    'Also gates the intro: fade to black, snap to keyframe #1, a 1s pause, fade back up — THEN the path plays. ' +
+    '0 = skip the theater, jump straight to keyframe #1 as a hard cut.';
+  wrap.appendChild(fieldRow('fade in (ms)', fadeInInput));
   wrap.appendChild(
     fieldRow(
       'fade out (ms)',

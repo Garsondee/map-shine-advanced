@@ -115,6 +115,34 @@
  * GGX/Fresnel shape rather than an import of it.
  *
  * ============================================================================
+ * ⚠️ TIER GATING IS A JS `if`, NOT A UNIFORM (Effects.md Law 4, added 2026-07-29)
+ * ============================================================================
+ * Every rung from 1 up used to build unconditionally — every machine, at every
+ * performance profile, paid for the SDF fetch, the wet band, the surface field
+ * and the full GGX/Fresnel specular lobe, regardless of what the resolved tier
+ * (`effect-cascade.js#resolveEffectTier`) said it could afford. That is exactly
+ * the shape Law 4 names and rejects: a feature that is "off" only in the sense
+ * that its output happens not to matter still executes, still binds its
+ * textures, and still shrinks nothing.
+ *
+ * `buildWaterSurfaceMaterial` now takes `tier` and gates each rung's EXPENSIVE
+ * read with a plain JS `if` around its node construction — the body-pack
+ * texture fetch (tier 1's depth ramp + wet band), `buildWaterSurfaceField`
+ * (tier 2), `buildWaterSpecular` (tier 3). Below a rung's threshold the term it
+ * would have produced is a literal neutral default (`float(0)`, `float(1)`,
+ * `vec3(0,0,0)`) wired in instead — never computed, never sampled, never bound
+ * — so the compiled shader for a `low`-profile machine is genuinely smaller,
+ * not merely quieter (§7's own test: compare tier 0 and tier N shader length).
+ * A tier change therefore means a NEW node graph, which means new materials:
+ * the caller (`water-surface-subsystem.js`) rebuilds and disposes on a
+ * resolved-tier change, mirroring candle flame's own quality-tier material
+ * rebuild (`vt-pan-viewer.js#candleFlameMat`).
+ *
+ * TIERS 4-8 (`Water.md` §6, `WATER.deferredRungs` in `water.js`) are NOT built
+ * — see the scaffold comment beside `activeTier` below for where each one's
+ * `if (activeTier >= N)` block lands the day its own code does.
+ *
+ * ============================================================================
  * ⚠️ THERE IS NO `buf:scene.attr` READ HERE, AND THAT IS A CORRECTION
  * ============================================================================
  * Water.md §6 and `graph/passes.js` both describe tier 0's occlusion — "the
@@ -331,6 +359,21 @@ export const WATER_TIER1_WET_BAND_PX = 34;
 export const WATER_TIER1_WET_STRENGTH = 0.35;
 
 /**
+ * THE RUNG AN UNWIRED OR ABSENT `tier` FALLS BACK TO — today's shipped look
+ * (every built rung active), never the cheapest one. Matches
+ * `candle-flame-geometry.js#CANDLE_DEFAULT_TIER`'s identical reasoning: a
+ * caller that has not been updated to pass the resolved tier must see the
+ * scene exactly as it always has, not a silent downgrade to tier 0.
+ *
+ * ⚠️ NOT a hardcoded imagined value — `effect-tier.test.mjs` asserts this
+ * equals what `resolveEffectTier(WATER, {profile: DEFAULT_PERFORMANCE_PROFILE})`
+ * actually resolves to, so retuning a rung's `fromProfile` in `water.js`
+ * cannot leave this constant silently pointing at a different look
+ * (`feedback_shared_field_two_meanings_two_registries`).
+ */
+export const WATER_DEFAULT_TIER = 3;
+
+/**
  * The tier-0 surface material.
  *
  * @param {object} args
@@ -350,10 +393,17 @@ export const WATER_TIER1_WET_STRENGTH = 0.35;
  *   outdoors rect/texture, shared the same way.
  * @param {Function} [args.buildOutdoorsGate] - injected world-space gate
  *   builder; absent compiles tier 3's reflection to a safe zero.
- * @returns {{absorbMaterial:*, inscatterMaterial:*, maskTexNode:*, bodyTexNode:*,
+ * @param {number} [args.tier] - the resolved rung (effect-cascade.js#resolveEffectTier).
+ *   JS-`if` gates rungs 1-3's node construction (Effects.md Law 4) — see the
+ *   header's "TIER GATING" section. Absent/non-finite falls back to
+ *   {@link WATER_DEFAULT_TIER}, today's shipped look, never tier 0.
+ * @returns {{absorbMaterial:*, inscatterMaterial:*, maskTexNode:*, bodyTexNode:*|null,
  *   setMaskRect:(r:object)=>void, setTint:(rgb:readonly number[])=>void,
- *   setOpacity:(v:number)=>void}} TWO materials, for two meshes over the same
- *   geometry — see the header. The caller draws `absorbMaterial` first.
+ *   setOpacity:(v:number)=>void, tier:number}} TWO materials, for two meshes over the
+ *   same geometry — see the header. The caller draws `absorbMaterial` first.
+ *   `bodyTexNode` is `null` below tier 1 (never sampled, so nothing to re-point
+ *   on a bake regrid — callers must guard the same way `water-surface-
+ *   subsystem.js#sync` does).
  */
 export function buildWaterSurfaceMaterial({
   THREE,
@@ -382,7 +432,17 @@ export function buildWaterSurfaceMaterial({
   skySheen = WATER_TIER3_SKY_SHEEN,
   glossiness = WATER_TIER3_GLOSSINESS,
   viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
+  tier = WATER_DEFAULT_TIER,
 }) {
+  // THE GATE. Clamped/coerced ONCE, here, so every `if (activeTier >= N)`
+  // below reads a known-good integer regardless of what a caller passed —
+  // Effects.md Law 4 is a JS `if` at graph-BUILD time, and a NaN or negative
+  // tier reaching one would either throw mid-build or silently compile the
+  // wrong rung. Nested ifs (not independent ones) below make the ladder's own
+  // cumulative rule (Effects.md §2: a rung may not depend on one above it)
+  // true BY CONSTRUCTION rather than by trusting the resolver's contract a
+  // second time.
+  const activeTier = Number.isFinite(tier) ? Math.max(0, Math.floor(tier)) : WATER_DEFAULT_TIER;
   const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, log, max, dot, mrt } =
     THREE.TSL;
 
@@ -424,19 +484,64 @@ export function buildWaterSurfaceMaterial({
   // than using the value directly.
   const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r);
 
-  // WORLD → body-pack UV, and the ONE fetch of it. The body pack's R is the
-  // SIGNED distance to shore in world px — negative INSIDE the water, positive
-  // outside — and tier 1 reads both signs: the inside for the depth ramp (1a)
-  // and the outside for the wet band (1b). Sampled once, above both, because
-  // they are two readings of one value and a second fetch would be pure cost.
-  const bodyU = positionWorld.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
-  const bodyV = positionWorld.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
-  // The NODE is kept, not just its `.r` — the caller re-points `.value` when a
-  // regrid recreates the target, and a swizzle cannot be re-pointed.
-  const bodyTexNode = texture(bodyTexture, vec2(clamp(bodyU, 0, 1), clamp(bodyV, 0, 1)));
-  const sdf = bodyTexNode.r;
+  // WORLD → body-pack UV, and AT MOST one fetch of it (tier 1+ only, see
+  // below). The body pack's R is the SIGNED distance to shore in world px —
+  // negative INSIDE the water, positive outside — and tiers 1a/1b read both
+  // signs: the inside for the depth ramp (1a) and the outside for the wet band
+  // (1b). Sampled once, shared by both, because they are two readings of one
+  // value and a second fetch would be pure cost.
+  //
+  // ⚠️ BELOW TIER 1 THIS FETCH NEVER HAPPENS AT ALL (Effects.md Law 4, added
+  // 2026-07-29) — `bodyTexNode` stays `null` and `depthRamp`/`wetBand` stay at
+  // their NEUTRAL literals below. `depthRamp = 1` means `depth01` (below) rides
+  // the mask's own authored R with no geometric shoreline taper — still a
+  // genuine, correctly-placed tint, just without the extra texture read tier
+  // 1's depth ramp needs. `wetBand = 0` means no damp-ground band, which is
+  // honestly tier 1's own feature (water.js: "the wet-ground band OUTSIDE the
+  // shoreline" is listed under tier 1's `adds`, not tier 0's).
+  let bodyTexNode = null;
+  let shoreDist = float(0);
+  let depthRamp = float(1);
+  let wetBand = float(0);
 
-  // ── TIER 1a: BEER–LAMBERT, PER CHANNEL ───────────────────────────────────
+  if (activeTier >= 1) {
+    const bodyU = positionWorld.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
+    const bodyV = positionWorld.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
+    // The NODE is kept, not just its `.r` — the caller re-points `.value` when a
+    // regrid recreates the target, and a swizzle cannot be re-pointed.
+    bodyTexNode = texture(bodyTexture, vec2(clamp(bodyU, 0, 1), clamp(bodyV, 0, 1)));
+    // `sdf` is purely internal to this block: 1a/1b are its only two readers,
+    // and both live here.
+    const sdf = bodyTexNode.r;
+
+    // ── TIER 1a: THE DEPTH AXIS — the mask's painted depth TIMES the
+    // geometric ramp away from the bank. See WATER_TIER1_DEPTH_SCALE_PX: on a
+    // silhouette mask the first factor is constant, and without the second
+    // the whole rung has no variation to render and can only ever produce a
+    // flat wash.
+    shoreDist = max(sdf.negate(), float(0)); // sdf is negative INSIDE the water
+    depthRamp = smoothstep(float(0), max(uDepthScalePx, float(1)), shoreDist);
+
+    // ── TIER 1b: THE WET BAND ────────────────────────────────────────────
+    // `1 − smoothstep(0, band, sdf)` on the POSITIVE (outside) side of the
+    // same signed distance sampled above — a damp ground band of any width,
+    // from a value already fetched, the dividend §5.1 promised for making
+    // the field signed.
+    //
+    // Multiplied by `1 − inside` so it exists only OUTSIDE the water: without
+    // that the band would also darken the first few px of water itself,
+    // which reads as a dirty rim rather than a wet shore.
+    wetBand = float(1)
+      .sub(smoothstep(float(0), max(uWetBandPx, float(1)), sdf))
+      .mul(float(1).sub(inside))
+      .mul(uWetStrength);
+  }
+
+  // ── BEER–LAMBERT, PER CHANNEL — pure ALU on `uTint`/`uAbsorption` uniforms,
+  // never a texture read, so σ costs the same at every tier and stays outside
+  // the gate above. What the gate controls is `depthRamp`, which σ is about to
+  // be multiplied against via `depth01` below.
+  //
   // σ_rgb = absorption · −log(tint) / mean(−log tint), i.e. THE TINT IS READ AS
   // A TRANSMITTANCE COLOUR. The first version used `1 − tint`, which is the
   // same idea and far too weak to see: on the default tint it spreads the
@@ -455,36 +560,40 @@ export function buildWaterSurfaceMaterial({
   const absorbHue = log(max(uTint, vec3(2e-3, 2e-3, 2e-3))).negate();
   const absorbMean = max(dot(absorbHue, vec3(1 / 3, 1 / 3, 1 / 3)), float(1e-4));
   const sigma = absorbHue.div(absorbMean).mul(uAbsorption);
-
-  // THE DEPTH AXIS — the mask's painted depth TIMES the geometric ramp away
-  // from the bank. See WATER_TIER1_DEPTH_SCALE_PX: on a silhouette mask the
-  // first factor is constant, and without the second the whole rung has no
-  // variation to render and can only ever produce a flat wash.
-  const shoreDist = max(sdf.negate(), float(0)); // sdf is negative INSIDE the water
-  const depthRamp = smoothstep(float(0), max(uDepthScalePx, float(1)), shoreDist);
   // `opacity` scales the OPTICAL DEPTH, not the finished colour. That matters:
   // lerping the transmittance toward 1 (the first attempt) drags every channel
   // toward each other and destroys the hue separation the line above just
   // bought, so a half-opacity river went grey rather than pale-teal. Scaling
   // the exponent is what "less water" physically means and leaves the per-
   // channel RATIOS exactly intact at every setting.
+
   // ── TIER 2: THE SURFACE FIELD ────────────────────────────────────────────
   // See `water-field.js` for why this rung is foam + turbidity and NOT
   // slope-shading: from directly above a slope is invisible without refraction
   // (rung 5) or specular (rung 3), and faking a light here would fight the real
   // one later. `timeMsNode` is the viewer's shared clock, handed in.
-  const field = buildWaterSurfaceField({
-    TSL: THREE.TSL,
-    worldXY: vec2(positionWorld.x, positionWorld.y),
-    timeMsNode: timeMsNode ?? float(0),
-    tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
-    shoreDist,
-    insideWater: inside,
-    uWaveScalePx,
-    uFlowSpeedPx,
-    uFlowAngleRad,
-    uFoam,
-  });
+  //
+  // ⚠️ NEUTRAL below tier 2, and the fractal-noise fetch ITSELF never runs
+  // below it, not just its result: zero turbidity leaves the optical depth
+  // exactly what tier 1 computed, and zero foam hides nothing and adds
+  // nothing. `tangentXY` reads `bodyTexNode`, which is only non-null once
+  // `activeTier >= 2` (rungs are cumulative — tier 2 can never be reached
+  // without tier 1 already being affordable, effect-cascade.js#resolveEffectTier).
+  let field = { foam: float(0), turbidity: float(0) };
+  if (activeTier >= 2) {
+    field = buildWaterSurfaceField({
+      TSL: THREE.TSL,
+      worldXY: vec2(positionWorld.x, positionWorld.y),
+      timeMsNode: timeMsNode ?? float(0),
+      tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
+      shoreDist,
+      insideWater: inside,
+      uWaveScalePx,
+      uFlowSpeedPx,
+      uFlowAngleRad,
+      uFoam,
+    });
+  }
 
   // Turbidity rides the OPTICAL DEPTH, which is what makes it visible with no
   // lighting at all: it varies a quantity the absorption already renders,
@@ -526,32 +635,73 @@ export function buildWaterSurfaceMaterial({
   // stays in THIS pass rather than following shine's own post-lighting scene.
   // Never tinted by `uTint` — see that module's header on why a dielectric's
   // mirror reflection takes its colour from the SKY, not the medium beneath.
-  const specular = buildWaterSpecular({
-    TSL: THREE.TSL,
-    positionWorld,
-    uViewRect,
-    uOutdoorsRect,
-    outdoorsTexNode,
-    buildOutdoorsGate,
-    sunGlint,
-    skySheen,
-    glossiness,
-    viewerHeight,
-  });
-
-  // ── TIER 1b: THE WET BAND ────────────────────────────────────────────────
-  // `1 − smoothstep(0, band, sdf)` on the POSITIVE (outside) side of the same
-  // signed distance sampled above — a damp ground band of any width, from a
-  // value already fetched, the dividend §5.1 promised for making the field
-  // signed.
   //
-  // Multiplied by `1 − inside` so it exists only OUTSIDE the water: without
-  // that the band would also darken the first few px of water itself, which
-  // reads as a dirty rim rather than a wet shore.
-  const wetBand = float(1)
-    .sub(smoothstep(float(0), max(uWetBandPx, float(1)), sdf))
-    .mul(float(1).sub(inside))
-    .mul(uWetStrength);
+  // ⚠️ NEUTRAL below tier 3: a stub carrying the SAME method surface as the
+  // real handle (`setSky`, `setSunGlint`, ...) so every setter this function
+  // returns stays a plain, always-valid function — a caller never needs an
+  // "is tier 3 live" branch just to push a slider value (mirrors how a
+  // disabled `params/no-dead-controls` consumer still exists, just does
+  // nothing). `reflection` is a literal zero vec3: the GGX/Smith/Schlick lobe
+  // — two dot products, a sqrt, a division — never runs below this tier.
+  let specular = {
+    reflection: vec3(0, 0, 0),
+    setViewCentre() {},
+    setSky() {},
+    setSunGlint() {},
+    setSkySheen() {},
+    setGlossiness() {},
+    setViewerHeight() {},
+    outdoorsGateCompiled: false,
+  };
+  if (activeTier >= 3) {
+    specular = buildWaterSpecular({
+      TSL: THREE.TSL,
+      positionWorld,
+      uViewRect,
+      uOutdoorsRect,
+      outdoorsTexNode,
+      buildOutdoorsGate,
+      sunGlint,
+      skySheen,
+      glossiness,
+      viewerHeight,
+    });
+  }
+
+  // ============================================================================
+  // TIERS 4-8 — NOT YET BUILT. THIS IS WHERE THEY GO (Effects.md §0 / §2)
+  // ============================================================================
+  // Named, ordered and costed in `WATER.deferredRungs` (water.js) and
+  // `Water.md` §6; nothing below is code, only the landing strip a real rung
+  // gets the day its own module lands. Each becomes an
+  // `if (activeTier >= N) { ... }` block in this exact position, CUMULATIVE
+  // with everything above it — tiers 1-3 just established the pattern.
+  //
+  //   tier 4  shore       C4  SDF shoreline foam filaments + wave shoaling +
+  //                           caustics from the surface field's Jacobian
+  //   tier 5  refraction  C5  DEPENDENT read of buf:scene.color, offset by
+  //                           slope × thickness — the first rung whose
+  //                           coordinate comes from another read
+  //   tier 6  reflection  C6  short screen-space march along the wave normal
+  //                           for shoreline objects and tokens — the first
+  //                           rung with its own VRAM cost (Effects.md §4.6)
+  //   tier 7  sim         C7  spectral cascade + interactive ripple integrator,
+  //                           ADDED into tier 2's field, never substituted for
+  //                           it — ticks whether seen or not, so it needs a
+  //                           coverage/zoom gate too (Effects.md Law 7), tier
+  //                           alone is not enough
+  //   tier 8  spray       C8  splash/spray particles through the one particle
+  //                           engine — geometry, the top of the ladder
+  //
+  // None of the five has a `fromProfile` yet — that is a real design decision
+  // for whoever builds it, not a placeholder to guess at here. What IS already
+  // true: `quality` and `extreme` (effect-cascade.js#PERFORMANCE_PROFILES) buy
+  // NOTHING beyond tier 3 today (WATER.tiers tops out at `standard`), so the
+  // first of these five rungs to declare `fromProfile: 'quality'` or
+  // `'extreme'` is what finally gives those two profiles a water of their own
+  // — the same way candle flame's tier 4 (`perCandle`, `fromProfile: 'extreme'`)
+  // does for candles.
+  // ============================================================================
 
   // Shared by both meshes. Split out so the two materials cannot drift apart on
   // the settings that make them agree about WHERE they are, which is every
@@ -639,6 +789,10 @@ export function buildWaterSurfaceMaterial({
     inscatterMaterial,
     maskTexNode,
     bodyTexNode,
+    /** The rung this material graph was actually BUILT at (Effects.md Law 4) —
+     * for the debug report and for the caller's own rebuild-on-change check
+     * (`water-surface-subsystem.js`). */
+    tier: activeTier,
     setMaskRect(r) {
       uMaskRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
     },

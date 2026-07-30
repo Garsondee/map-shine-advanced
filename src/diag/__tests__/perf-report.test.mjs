@@ -39,6 +39,7 @@ import {
   statFrom,
   summariseFrameRate,
   summariseSamples,
+  summarizeTierComparison,
 } from '../perf-report.js';
 
 const acc = (sumMs, count, maxMs) => ({ sumMs, count, maxMs });
@@ -1090,5 +1091,147 @@ export function run(t) {
     const gpuZone = buildZoneRows({ zones: ZONES, frames: 100, zoneStats: [zs('light.drawIllum', {})] });
     ok('a gpu zone with no samples also has null GPU time', gpuZone[0].gpuMs === null);
     ok('...but does NOT claim the absence is by declaration', gpuZone[0].gpuAbsentByDeclaration === false);
+  }
+
+  // ======================================================================
+  // summarizeTierComparison — THE optimisation-priority tool (rewritten
+  // 2026-07-29 the same day, from the author's own first real run: ~300KB,
+  // and the effect that actually moved was invisible in it)
+  // ======================================================================
+  {
+    // A fixture shaped like the exact shape that caught the original gap:
+    // an effect (candleFlame) whose OWN zone barely moves, sitting beside an
+    // UNOWNED shared zone (light.drawPointLights) that grows hard with tier —
+    // and a second registered effect (bloom) that owns ITS OWN zone, so
+    // listing it AGAIN as a raw zone row would double-count it.
+    const reportFor = ({ worldDraw, pointLights, candleZone, bloomZone, avgFps }) => ({
+      window: { frames: 3000 },
+      attribution: { coverage: 0.95, verdict: 'good' },
+      frame: {
+        gpuMs: { p50: worldDraw + pointLights, p95: worldDraw + pointLights + 2, sampleCount: 600 },
+        fps: { avgFps, p1LowFps: avgFps - 5 },
+        hangs: { totalStalls: 1 },
+      },
+      effects: [
+        { id: 'candleFlame', label: 'Candle flames', zoneGpuMs: candleZone, costMs: candleZone },
+        { id: 'bloom', label: 'Bloom', zoneGpuMs: bloomZone, costMs: bloomZone },
+        // NEVER measured in either tier — must still appear, not vanish.
+        { id: 'grade', label: 'Colour Grade', zoneGpuMs: null, costMs: null },
+      ],
+      zones: [
+        {
+          id: 'geometry.worldDraw',
+          label: 'World scene draw',
+          ownerEffectId: null,
+          isPass: false,
+          gpuMs: { amortisedMsPerFrame: worldDraw },
+        },
+        {
+          id: 'light.drawPointLights',
+          label: 'Point light draw',
+          ownerEffectId: null,
+          isPass: false,
+          gpuMs: { amortisedMsPerFrame: pointLights },
+        },
+        // Owned by bloom already (rolled into its effects[] row above) — must
+        // NOT also appear as a standalone zone row, or bloom's cost doubles.
+        {
+          id: 'bloom.composite',
+          label: 'Bloom composite',
+          ownerEffectId: 'bloom',
+          isPass: false,
+          gpuMs: { amortisedMsPerFrame: bloomZone },
+        },
+        // A PASS container — the sum of children already in this list, so it
+        // must not ALSO be listed (that would double geometry.worldDraw too).
+        {
+          id: 'pass.geometry.world',
+          label: 'geometry.world',
+          ownerEffectId: null,
+          isPass: true,
+          gpuMs: { amortisedMsPerFrame: worldDraw },
+        },
+        // CPU-only — no GPU cost to rank by.
+        {
+          id: 'light.pointLightUpdate',
+          label: 'Point light pool update',
+          ownerEffectId: null,
+          isPass: false,
+          gpuMs: null,
+        },
+      ],
+    });
+
+    const cmp = summarizeTierComparison([
+      {
+        profile: 'low',
+        report: reportFor({ worldDraw: 10, pointLights: 1.5, candleZone: 0.007, bloomZone: 0.57, avgFps: 60 }),
+      },
+      {
+        profile: 'extreme',
+        report: reportFor({ worldDraw: 10.9, pointLights: 2.75, candleZone: 0.021, bloomZone: 0.57, avgFps: 50 }),
+      },
+    ]);
+
+    // --- frame + health, unchanged shape from v1 ----------------------------
+    ok('one frame row per tier, keyed by profile', 'low' in cmp.frame && 'extreme' in cmp.frame);
+    ok('frame GPU is read straight from frame.gpuMs.p50', cmp.frame.low.gpuMsP50 === 11.5);
+    ok('hitch count comes from hangs.totalStalls, not a label search over bands[]', cmp.frame.low.hitchCount === 1);
+    ok(
+      'perTierHealth carries the trust check WITHOUT the full report',
+      cmp.perTierHealth.low.coverage === 0.95 &&
+        cmp.perTierHealth.low.verdict === 'good' &&
+        cmp.perTierHealth.low.frames === 3000
+    );
+
+    // --- THE FIX: a shared, unowned zone shows up on its own ----------------
+    const byId = (id) => cmp.ranked.find((r) => r.id === id);
+    ok('an unowned zone with real GPU cost gets its own ranked row', !!byId('light.drawPointLights'));
+    ok('that row is tagged as a zone, not an effect', byId('light.drawPointLights').kind === 'zone');
+    ok(
+      "the unowned zone's cost is visibly different across tiers — this is the candle finding, generalised",
+      byId('light.drawPointLights').byProfile.low === 1.5 && byId('light.drawPointLights').byProfile.extreme === 2.75
+    );
+
+    // --- NOT double-counted: an owned zone is absent as its own row ---------
+    ok('a zone already rolled into an effect row is NOT also listed standalone', !byId('bloom.composite'));
+    ok('a pass container is NOT listed (it would double its own children)', !byId('pass.geometry.world'));
+    ok('a CPU-only zone with no GPU number is not a cost row', !byId('light.pointLightUpdate'));
+
+    // --- ranking: sorted by peak cost, effects and zones mixed in one list --
+    ok(
+      'the list is sorted by peak (max-across-tiers) cost, descending',
+      cmp.ranked.every((r, i) => i === 0 || (cmp.ranked[i - 1].maxGpuMs ?? -1) >= (r.maxGpuMs ?? -1))
+    );
+    ok(
+      'geometry.worldDraw outranks everything — it is the biggest number in the fixture',
+      cmp.ranked[0].id === 'geometry.worldDraw'
+    );
+
+    // --- honesty: an unmeasured effect still gets a row, sorted to the bottom, never a fabricated 0
+    const gradeRow = byId('grade');
+    ok('an effect never measured in any tier still appears', !!gradeRow);
+    ok('...marked NOT measured, not silently reading as cheap', gradeRow.measured === false);
+    ok('...with a null peak, never a fabricated 0', gradeRow.maxGpuMs === null);
+    ok('unmeasured rows sort to the very bottom', cmp.ranked[cmp.ranked.length - 1].id === 'grade');
+
+    // --- malformed / empty input: total, never throws -----------------------
+    ok('an empty list produces an empty table, not a throw', summarizeTierComparison([]).ranked.length === 0);
+    ok(
+      'a malformed (non-array) input produces an empty table, not a throw',
+      summarizeTierComparison(null).ranked.length === 0
+    );
+    ok(
+      'an entry missing its profile string is skipped, not crashed on',
+      Object.keys(
+        summarizeTierComparison([
+          { report: reportFor({ worldDraw: 1, pointLights: 1, candleZone: 1, bloomZone: 1, avgFps: 60 }) },
+        ]).frame
+      ).length === 0
+    );
+    ok(
+      'an entry missing its report is skipped, not crashed on',
+      Object.keys(summarizeTierComparison([{ profile: 'low' }]).frame).length === 0
+    );
   }
 }

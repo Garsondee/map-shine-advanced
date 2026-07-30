@@ -45,6 +45,7 @@
 
 import { maskKindById } from '../scene/index.js';
 import { VEGETATION_KINDS } from './vegetation.js';
+import { VEG_SHADOW_SMEAR_TAPS } from './vegetation-shadow-subsystem.js';
 
 /** Strip query/hash/directory/extension, case-preserved. Deliberately tiny and
  * local rather than importing `foundry/mask-discovery.js#splitArtUrl` — that
@@ -282,3 +283,79 @@ export function buildTessellatedQuadGeometry(corners, segments) {
 
   return { positions, uvs, indices, vertexCount };
 }
+
+/**
+ * THE PERFORMANCE-TIER PLAN — one vegetation rung translated into the two
+ * knobs that actually cost something. Pure, total, Node-tested (via
+ * `effect-tier.test.mjs`'s own anti-drift block — the same home
+ * `candleTierPlan`'s equivalent check lives in, not a local test here); the
+ * effect's ladder (`vegetation.js` `VEGETATION.tiers`) is the prose, this is
+ * the arithmetic, index-aligned.
+ *
+ * `flutterEnabled` gates the ENTIRE per-fragment curl-noise block in
+ * `buildVegetationMaterial` — built as a JS `if` around its construction
+ * (Effects.md Law 4: a tier that is off must not be CONSTRUCTED, because a
+ * uniform set to zero still executes every pixel). `shadowEnabled` gates
+ * whether a tile/overlay gets a ground-shadow mesh built AT ALL;
+ * `shadowSmearTaps` is how many smear stations THAT build unrolls into its
+ * shader loop when it does. All three are graph/mesh-BUILD-time decisions,
+ * resolved once when a tile or overlay loads — the same already-accepted
+ * limitation `vegetation.js`'s own `live-disable-for-self-vegetation-tiles`
+ * deferred rung documents for sway/wind response: a live performance-profile
+ * change reaches an already-built tile/overlay only on its next scene load,
+ * never retroactively.
+ *
+ * ⚠️ TIER 3 REPRODUCES TODAY'S SHIPPED BEHAVIOUR EXACTLY — flutter on, the
+ * shadow on at `VEG_SHADOW_SMEAR_TAPS` (6) stations — and tier 3 is what the
+ * DEFAULT profile (`standard`) resolves to. That is deliberate: turning this
+ * system on must not silently restyle every existing scene. Below `standard`
+ * the picture genuinely simplifies (no shadow at all below `performance`, no
+ * flutter below `low`); above it the shadow's smear gets finer than it has
+ * ever been.
+ *
+ * @param {number} tier - a resolved rung (effect-cascade.js#resolveEffectTier).
+ *   Clamped into the ladder, so a stale or malformed value degrades to a rung
+ *   that exists rather than producing an uncompilable quality.
+ * @returns {{flutterEnabled: boolean, shadowEnabled: boolean, shadowSmearTaps: number}}
+ */
+export function vegetationTierPlan(tier) {
+  const n = Number.isFinite(tier)
+    ? Math.max(0, Math.min(VEGETATION_TIER_PLANS.length - 1, Math.floor(tier)))
+    : VEGETATION_DEFAULT_TIER;
+  return VEGETATION_TIER_PLANS[n];
+}
+
+/**
+ * The rung an ABSENT or malformed tier falls back to — deliberately today's
+ * shipped look, never the cheapest one. Both alternatives are dangerous in
+ * opposite directions (candle-flame-geometry.js#CANDLE_DEFAULT_TIER's own doc
+ * has the full argument): falling back to 0 would silently strip flutter and
+ * shadows from every scene an unwired caller touches; falling back to the top
+ * would silently hand a weak machine the most expensive rung.
+ *
+ * NOT a hardcoded 3 in spirit, only in value: `effect-tier.test.mjs` asserts
+ * this equals what the DEFAULT performance profile resolves the real
+ * vegetation ladder to, so re-tuning a rung's `fromProfile` cannot leave this
+ * constant pointing at a different look than the ladder does.
+ */
+export const VEGETATION_DEFAULT_TIER = 3;
+
+/**
+ * The rungs, as data, index === tier. Kept beside `vegetationTierPlan` so the
+ * table and its clamp cannot disagree about how many rungs exist.
+ *
+ * `shadowSmearTaps` only matters when `shadowEnabled` is true — 0 marks "this
+ * tier never builds a shadow mesh at all", not a degenerate 0-station smear.
+ * `buildVegetationMaterial`'s own `smearTaps` option defaults to
+ * `VEG_SHADOW_SMEAR_TAPS` for exactly this reason: a call site that forgets to
+ * check `shadowEnabled` first still gets a sane, working shadow rather than a
+ * broken one — belt-and-braces, not a path this table means to exercise.
+ */
+const VEGETATION_TIER_PLANS = Object.freeze([
+  Object.freeze({ flutterEnabled: false, shadowEnabled: false, shadowSmearTaps: 0 }), // 0 placed-and-swaying
+  Object.freeze({ flutterEnabled: true, shadowEnabled: false, shadowSmearTaps: 0 }), // 1 shimmer
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 3 }), // 2 shadow-coarse
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: VEG_SHADOW_SMEAR_TAPS }), // 3 shadow-smooth — TODAY
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 9 }), // 4 shadow-finer
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 12 }), // 5 shadow-finest
+]);

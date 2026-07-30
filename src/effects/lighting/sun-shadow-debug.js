@@ -50,6 +50,27 @@
  * is the derivation restriction the view implies (absent = leave the field
  * whole); `shadow`/`caster` are the one-hot channel masks.
  *
+ * ⚠️ THE LABELS BELOW MATCH THE PACKING AS OF ROUND SEVEN, 2026-07-30
+ * (`sun-occlusion-render.js`'s own "THE PACKING" comment is the one true
+ * source — verify against IT, not this list, if the two ever disagree):
+ * R = sky-reach coverage ONLY (NOT overhead, NOT a general "occluder
+ * coverage"), G = FLOATING height (overhead ∪ sky-reach — BUILDING EXCLUDED;
+ * a building's height is a scene-wide uniform now, never a sampled byte), B =
+ * FLOATING coverage (overhead ∪ sky-reach — building excluded here too, its
+ * coverage is read straight from A where the march needs it). There is no
+ * per-texel building channel left to show AT ALL — `shadow-building` still
+ * isolates the DERIVATION (the mask authority stops writing overhead/
+ * sky-reach for this view), but the `caster-*` data views have nothing
+ * building-shaped to display. This is the SECOND time this comment has had to
+ * chase a repack (found stale once already, 2026-07-30, before Round Seven
+ * even landed: `caster-coverage` said "(R)" as if it meant every producer's
+ * coverage, and the id `caster-building` claimed B was building-only when it
+ * was already `building ∪ overhead`) — exactly the "instruments must not
+ * lie" trap, twice running. The id was renamed this round (`caster-building`
+ * → `caster-floating`) rather than relabeled a second time in place, since a
+ * name claiming "building" for data that has never once shown building alone
+ * is the same drift by another route.
+ *
  * ⚠️ `caster-height` IS THE SKY-REACH SMOKING GUN. Compare it against
  * `caster-coverage`: a silhouette in coverage with BLACK in the same place in
  * height means the casters exist and are all zero-height — which is what a floor
@@ -87,19 +108,19 @@ export const SUN_SHADOW_DEBUG_VIEWS = Object.freeze([
   }),
   Object.freeze({
     id: 'caster-coverage',
-    label: 'Data — occluder coverage (R)',
+    label: 'Data — sky-reach coverage (R)',
     shadow: null,
     caster: [1, 0, 0, 0],
   }),
   Object.freeze({
     id: 'caster-height',
-    label: 'Data — occluder height (G)',
+    label: 'Data — floating height, overhead ∪ sky-reach (G)',
     shadow: null,
     caster: [0, 1, 0, 0],
   }),
   Object.freeze({
-    id: 'caster-building',
-    label: 'Data — building footprint (B)',
+    id: 'caster-floating',
+    label: 'Data — floating coverage, overhead ∪ sky-reach (B)',
     shadow: null,
     caster: [0, 0, 1, 0],
   }),

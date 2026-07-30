@@ -71,6 +71,47 @@ import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
  */
 export const SPECULAR_MASK_IMAGE_SCALE = 0.5;
 
+/**
+ * Decode threshold for `buf:scene.attr`'s presence-bitfield TOP BIT
+ * (`vt/scene-attr.js#PRESENCE_BIT_BACKGROUND_ART`, weight 128/255) — 1 only
+ * where the Level's OWN background image is still the topmost opaque draw
+ * at this pixel, 0 the instant a Tile or the Level's own foreground/roof
+ * paints over it (see that constant's own doc for why the foreground is
+ * deliberately excluded).
+ *
+ * ⚠️ 64/255 — HALF the bit's own weight, not "halfway between the two raw
+ * byte values" — REGRESSION, 2026-07-29. The write this decodes is NOT a
+ * hard overwrite: it rides ordinary NormalBlending scaled by the background
+ * material's OWN alpha (`attr_new = attr_old·(1−α) + attr_src·α`), which this
+ * module's own header already hedges as "opaque (alpha≈1)... **almost**
+ * entirely replaced" — approximate, not exact. A weight-4 bit with a
+ * 3.5-threshold (this constant's first shipped value) needed the write to
+ * survive ≥87.5% of its strength, and a background's real alpha — after
+ * compression, mip/CAS processing and the occlusion-alpha multiply, all
+ * upstream of this write — is not always bit-exact 1.0 even when the art
+ * LOOKS fully opaque. That shipped live, invisible, immediately: the shine
+ * vanished entirely and did not respond to `strength` at any value, because
+ * `coverage` (which this bit gates) was zero everywhere, and multiplying
+ * zero by anything is still zero. R (floor index) and G (outdoors) never hit
+ * this: their correct values on an ordinary scene are both 0, and 0 scaled by
+ * any α is still 0 — this was the FIRST genuinely non-zero value ever pushed
+ * through this write.
+ *
+ * The fix is margin, not mechanism: weight 128 (`vt/scene-attr.js`'s own top
+ * bit) with THIS threshold at 64 tolerates the write surviving at only 50% of
+ * its nominal strength — nothing this small should ever be attenuated that
+ * far — while the "not background" case (the overhead bit alone, max raw
+ * value 1) can only ever be scaled SMALLER by the same blend, never larger,
+ * so it cannot cross a threshold this high regardless of α.
+ *
+ * ⚠️ TWO PLACES KNOW THIS RELATIONSHIP — this threshold and the encode side's
+ * bit weight in `vt/scene-attr.js`. `specular.test.mjs` pins them against
+ * each other so a future rename of one cannot silently desync from the other
+ * (the same shape as `SPECULAR_DEFAULT_SHIMMER_GAIN` vs
+ * `SPECULAR_PARAMS.shimmerGain.default`).
+ */
+export const SPECULAR_BACKGROUND_ART_THRESHOLD01 = 64 / 255;
+
 /** How many shimmer layers. THREE, matching V2 — and the count is not
  * arbitrary: the relative motion BETWEEN layers at different parallax depths is
  * most of what sells "a highlight sweeping over a surface" rather than "a
@@ -272,6 +313,7 @@ export function buildSpecularSurfaceMaterial({
     uniform,
     positionWorld,
     smoothstep,
+    step,
     clamp,
     max,
     min,
@@ -731,8 +773,26 @@ export function buildSpecularSurfaceMaterial({
     // computed and stays on debug channel 4's green, so the moment the alpha
     // lane is fixed the multiply comes back in one line — deleting it would
     // delete the evidence.
-    visibility01 = floorMatch;
-    debugFloorGate = vec3(floorMatch, anythingDrawn, float(0));
+    //
+    // ⚠️ TILES (AND THE LEVEL'S OWN FOREGROUND/ROOF) MUST PUNCH A HOLE HERE —
+    // reported live, 2026-07-29: a Tile drawn above the background still
+    // showed the BACKGROUND'S OWN shine glowing through it, because
+    // `floorMatch` alone only tells two FLOORS apart and cannot tell a
+    // same-floor Tile from its own background (both share one floor index).
+    // `buf:scene.attr`'s B channel records whichever item drew LAST (topmost,
+    // alpha≈1) at each texel (`scene-attr.js`'s own "THE REAL WRITERS"); the
+    // TOP bit is set ONLY by the Level's background art
+    // (`vt/scene-attr.js#backgroundArtPresenceBit` — read that constant's own
+    // doc before ever lowering this bit's weight again, it was tried once and
+    // shipped invisible), so it reads 1 exactly where the background is still
+    // what is actually on screen and 0 the instant a Tile — or the Level's
+    // OWN foreground/roof, which must NOT count as "still the background"
+    // either — draws opaquely over it.
+    const backgroundArtHere = step(float(SPECULAR_BACKGROUND_ART_THRESHOLD01), attrHere.b).toVar(
+      'specBackgroundArtHere'
+    );
+    visibility01 = floorMatch.mul(backgroundArtHere);
+    debugFloorGate = vec3(floorMatch, anythingDrawn, backgroundArtHere);
   }
 
   const coverage = presence.mul(visibility01).toVar('specCoverage');
@@ -905,6 +965,27 @@ export function buildSpecularSurfaceMaterial({
     // (`feedback_instruments_must_not_lie` — a fresh instance of it, invented
     // while hunting one.)
     illumDirect: texture(illumTexture, screenUv).rgb,
+    // ── CHANNEL 20 — attr, RAW, THROUGH A FRESH NODE ─────────────────────────
+    // ⚠️ ADDED 2026-07-29, ROUND 12's OWN UNRESOLVED WARNING: `illumDirect`
+    // above is the reason this exists at all — Round 7/8 (2026-07-27) found
+    // the DEBUG material can read STALE data for a texture-derived channel
+    // even when the REAL effect material reads the identical texture
+    // correctly, and closed with "do not trust a texture-derived specular
+    // debug channel until this is fixed" — the mechanism was never actually
+    // found, only worked around per-channel. `floorGate` (channel 8) reads
+    // `attrTexture` through the SAME shared `attrHere` node this material's
+    // OWN `visibility01` uses, so if that still-open bug is alive, channel 8
+    // could show "not background art here" even while the REAL pass reads it
+    // correctly — indistinguishable from my occlusion fix genuinely failing.
+    // This channel is the SAME control `illumDirect` already is for `illum`:
+    // a FRESH, UNSHARED `texture()` call, so a future report can diff this
+    // against `floorGate`'s implied R/B exactly the way channel 19 vs channel
+    // 12 localised the illum bug in one reading instead of a fourth guess.
+    // `attrTexture` is never re-pointed after construction (unlike
+    // `maskTexture`, which `setMaskTexture` DOES reassign) — so unlike the
+    // `maskDirect` mistake this shares no risk of capturing a build-time
+    // placeholder; a fresh node here reads the SAME real texture, always.
+    attrDirect: attrTexture ? texture(attrTexture, screenUv).rgb : vec3(0, 0, 0),
   };
   let debugColor = vec3(0, 0, 0);
   for (const ch of SPECULAR_DEBUG_CHANNELS) {

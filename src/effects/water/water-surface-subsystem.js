@@ -47,7 +47,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { buildWaterSurfaceMaterial } from './water-render.js';
+import { buildWaterSurfaceMaterial, WATER_DEFAULT_TIER } from './water-render.js';
 import { waterKeyLightDirection } from './water-light.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
@@ -120,6 +120,14 @@ export function createWaterSurfaceSubsystem({
    * clock or the weather does, unlike the eye, which moves every pan. */
   let lastSkyKey = '';
   let enabled = true;
+  /** THE PERFORMANCE TIER THE CURRENT MATERIALS WERE BUILT AT (Effects.md Law
+   * 4 — a tier is a JS `if` at graph-BUILD time, so a tier CHANGE means a new
+   * node graph, which means new materials, never a live uniform toggle on the
+   * existing ones). Mirrors candle flame's own `candleFlameQuality` +
+   * rebuild-on-change pattern (`vt-pan-viewer.js`). Seeded at the default so
+   * the FIRST build (below, before any `sync()` has resolved a real tier)
+   * shows today's shipped look, same reasoning as `WATER_DEFAULT_TIER` itself. */
+  let builtForTier = WATER_DEFAULT_TIER;
 
   /** The ONE place visibility is decided, so the three conditions can never
    * drift apart across the call sites that each learn about one of them —
@@ -131,28 +139,39 @@ export function createWaterSurfaceSubsystem({
     for (const m of meshes) m.visible = show;
   }
 
-  const surface = buildWaterSurfaceMaterial({
-    THREE,
-    maskTexture,
-    maskRect: waterBody.getRect(),
-    // TIER 1's wet band reads the SDF. The body texture is null until the
-    // first bake allocates the targets, and the material only samples it once
-    // the mesh is visible — which requires a completed bake — so a null here
-    // is never sampled. `sync` re-points it every bake regardless.
-    bodyTexture: waterBody.texture,
-    bodyRect: waterBody.getRect(),
-    // TIER 2's field travels with THE SHARED CLOCK, handed down rather than
-    // sampled — `time/one-clock` names water as the effect that broke this in
-    // V2 by reading `performance.now()` in eight independent places. A null
-    // here (the torture fixture) yields a still surface, never a private clock.
-    timeMsNode,
-    // TIER 3 — see `water-light.js`. All four are envLight's own shared state,
-    // the identical objects `specular-surface-subsystem.js` receives.
-    uViewRect,
-    uOutdoorsRect,
-    outdoorsTexNode,
-    buildOutdoorsGate,
-  });
+  /** Build (or, called again from `sync`, REBUILD) the two tier-gated
+   * materials. Reads `waterBody`/`maskTexture` live at call time rather than
+   * closing over a snapshot, so a rebuild triggered by a tier change always
+   * reflects the CURRENT bake and mask, not whatever was current when the
+   * subsystem was constructed. */
+  function buildSurfaceForTier(tier) {
+    return buildWaterSurfaceMaterial({
+      THREE,
+      maskTexture,
+      maskRect: waterBody.getRect(),
+      // TIER 1's wet band reads the SDF. The body texture is null until the
+      // first bake allocates the targets, and the material only samples it
+      // (from tier 1 up) once the mesh is visible — which requires a
+      // completed bake — so a null here is never sampled. `sync` re-points it
+      // every bake regardless.
+      bodyTexture: waterBody.texture,
+      bodyRect: waterBody.getRect(),
+      // TIER 2's field travels with THE SHARED CLOCK, handed down rather than
+      // sampled — `time/one-clock` names water as the effect that broke this in
+      // V2 by reading `performance.now()` in eight independent places. A null
+      // here (the torture fixture) yields a still surface, never a private clock.
+      timeMsNode,
+      // TIER 3 — see `water-light.js`. All four are envLight's own shared state,
+      // the identical objects `specular-surface-subsystem.js` receives.
+      uViewRect,
+      uOutdoorsRect,
+      outdoorsTexNode,
+      buildOutdoorsGate,
+      tier,
+    });
+  }
+
+  let surface = buildSurfaceForTier(builtForTier);
   // TWO meshes over ONE geometry — water is a multiply THEN an add, and blend
   // state is per-material (see `water-render.js`'s header for why one alpha
   // blend cannot be both). They share the geometry object, so the AABB crop
@@ -226,6 +245,36 @@ export function createWaterSurfaceSubsystem({
   function sync(floorIndex, viewRect) {
     ensureMaskImage(floorIndex);
 
+    // THE LOOK/TIER STATE — fetched ONCE, at the top, because the tier-rebuild
+    // check right below must run BEFORE anything calls a setter on `surface`:
+    // a rebuilt surface is a brand-new object, and every setter further down
+    // (setViewCentre, setSky, the param pushes) must land on IT, not on the
+    // one that is about to be disposed.
+    const state = getWaterRenderState();
+
+    // THE TIER GATE (Effects.md Law 4). A resolved tier different from what
+    // the CURRENT materials were built at means a DIFFERENT node graph —
+    // fewer (or more) texture fetches, a smaller (or larger) compiled shader.
+    // Rebuilding is the only way to actually change the compiled shader; a
+    // uniform cannot (Law 4's own test — water-render.js's header). Mirrors
+    // candle flame's material rebuild on a quality-tier change.
+    const resolvedTier = Number.isFinite(state.perfTier) ? state.perfTier : WATER_DEFAULT_TIER;
+    if (resolvedTier !== builtForTier) {
+      const prev = surface;
+      surface = buildSurfaceForTier(resolvedTier);
+      meshes[0].material = surface.absorbMaterial;
+      meshes[1].material = surface.inscatterMaterial;
+      prev.absorbMaterial?.dispose?.(); // free the superseded materials on a tier change
+      prev.inscatterMaterial?.dispose?.();
+      builtForTier = resolvedTier;
+      // Force every cached value below to re-push onto the FRESH material — it
+      // starts back at its constructor defaults, and the key-based caches
+      // below exist to skip REDUNDANT writes, not the first write to a new
+      // object.
+      lastParamsKey = '';
+      lastSkyKey = '';
+    }
+
     // THE EYE. Pushed every frame and NEVER gated on anything — mirrors
     // `specular-surface-subsystem.js`'s identical reasoning: this is the whole
     // reason the sun-glint moves when the author pans, so a cached-key skip
@@ -258,8 +307,8 @@ export function createWaterSurfaceSubsystem({
     // bake generation would make every control in the panel do nothing until
     // the mask happened to change — which is exactly the residency-sync bug
     // class this codebase has already paid for once
-    // (`feedback_residency_sync_vs_render_loop`).
-    const state = getWaterRenderState();
+    // (`feedback_residency_sync_vs_render_loop`). `state` was already fetched
+    // at the top of this function, ahead of the tier gate.
     const p = state.params ?? {};
     const key = [
       state.enabled ? 1 : 0,
@@ -310,7 +359,9 @@ export function createWaterSurfaceSubsystem({
     surface.setMaskRect(waterBody.getRect());
     // TIER 1's wet band samples the SDF — re-point it every bake, since a
     // regrid recreates the target and the old texture would go stale.
-    if (waterBody.texture) surface.bodyTexNode.value = waterBody.texture;
+    // `bodyTexNode` is `null` below tier 1 (never sampled there — see
+    // water-render.js's header), so this is guarded rather than assumed.
+    if (waterBody.texture && surface.bodyTexNode) surface.bodyTexNode.value = waterBody.texture;
     surface.setBodyRect(waterBody.getRect());
     const positions = buildQuadPositions([
       { x: bounds.minX, y: bounds.minY },
@@ -338,6 +389,13 @@ export function createWaterSurfaceSubsystem({
         // not have reported.
         renderOrder: meshes.map((m) => m.renderOrder).join(' + '),
         builtForBake,
+        // THE TIER GATE'S OWN HONESTY CHECK (`feedback_instruments_must_not_
+        // lie`) — `perfTier` is what the cascade RESOLVED; `builtForTier` is
+        // what the live materials actually compiled with `if (activeTier >=
+        // N)` (water-render.js). They can disagree for at most one `sync()`
+        // between a resolve and its rebuild; agreeing every other frame is
+        // the proof the rebuild-on-change wiring is actually running.
+        perfTier: builtForTier,
         bounds: waterBody.getWaterBounds(),
         // `null` means the hi-res mask has not loaded, and the surface is
         // therefore hidden BY DESIGN — the SDF is not asked to draw the edge

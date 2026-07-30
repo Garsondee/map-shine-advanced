@@ -1,7 +1,10 @@
 /**
  * src/effects/lighting/ verification — the pure ambient-ladder math of the
  * environmental-light pass and the point-light illumination math (attenuation
- * easing, fan triangulation). The TSL material builds are browser-only.
+ * easing, fan triangulation). Most TSL material builds are evaluated only in
+ * spirit here; `sun-occlusion-render.test.mjs` is the exception — it actually
+ * CONSTRUCTS its graph in Node (`keyhole-tsl-constructs-in-node`), the same
+ * doctrine `specular/__tests__/specular-render.test.mjs` established.
  *
  * Discovered and run by tools/run-tests.mjs (glob of __tests__/run-tests.mjs);
  * `npm test` / `npm run verify` picks it up for free.
@@ -12,6 +15,7 @@ import { run as runPointLightColoration } from './point-light-coloration.test.mj
 import { run as runRegionGeometry } from './region-geometry.test.mjs';
 import { run as runLightVisibility } from './light-visibility.test.mjs';
 import { run as runSunOcclusion } from './sun-occlusion.test.mjs';
+import { run as runSunOcclusionRender } from './sun-occlusion-render.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -47,6 +51,7 @@ const suites = [
   ['region-geometry', runRegionGeometry],
   ['light-visibility', runLightVisibility],
   ['sun-occlusion', runSunOcclusion],
+  ['sun-occlusion-render', runSunOcclusionRender],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

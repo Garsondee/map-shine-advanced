@@ -93,7 +93,7 @@ export function installAnchorMode(_MapShine) {
     opts: null,
     toolbar: null,
     popup: null,
-    selectedId: null,
+    selectedIds: new Set(), // ids currently selected — popup is open iff this is non-empty
     windowHandlers: null,
     markerLayer: null, // pointer-events:none container; each icon opts back in
     markers: new Map(), // id -> { el, anchor } — the icon + the anchor it currently represents
@@ -115,7 +115,7 @@ export function installAnchorMode(_MapShine) {
    * @param {(worldX: number, worldY: number) => void} opts.addAnchor
    * @param {(id: string, patch: object) => void} opts.updateAnchor - used for drag-to-move (`{x,y}`) and by the edit form.
    * @param {(id: string) => void} opts.removeAnchor
-   * @param {(anchor: object) => HTMLElement} opts.buildEditForm - the effect-specific fields for the popup; Delete/Close chrome is added by this file.
+   * @param {(anchor: object, targetIds: string[]) => HTMLElement} opts.buildEditForm - the effect-specific fields for the popup; Delete/Close chrome is added by this file. `anchor` is a representative selection member (whichever was selected last) to read display values from; every field's `onChange` must patch ALL of `targetIds` (multi-select edits every selected anchor at once), not just `anchor.id`.
    * @returns {{ok: boolean, reason?: string}}
    */
   function enter(opts) {
@@ -149,7 +149,7 @@ export function installAnchorMode(_MapShine) {
     state.active = false;
     state.ctx = null;
     state.opts = null;
-    state.selectedId = null;
+    state.selectedIds = new Set();
     state.draggingId = null;
   }
 
@@ -181,7 +181,9 @@ export function installAnchorMode(_MapShine) {
     const hint = styled('span', { opacity: '0.85' });
     hint.innerHTML =
       `Click the map to place a ${state.opts.kindLabel}. Click an existing ${state.opts.icon ?? FALLBACK_ICON} ` +
-      'to edit it, or drag it to move it. <span style="opacity:.55">(Right-drag still pans, wheel still zooms.)</span>';
+      'to edit it, or drag it to move it. Shift-click or drag a box over several to select them together — ' +
+      'edit all their settings at once, or press Delete to remove them. ' +
+      '<span style="opacity:.55">(Right-drag still pans, wheel still zooms.)</span>';
     bar.append(hint, button('Done', exit, '167,255,196'));
     document.body.appendChild(bar);
     state.toolbar = bar;
@@ -201,10 +203,10 @@ export function installAnchorMode(_MapShine) {
     el.style.top = `${Math.round(p.y)}px`;
   }
 
-  /** Visually mark which icon (if any) is currently selected — the popup's own presence is the source of truth; this only paints it. */
+  /** Visually mark which icons (if any) are currently selected — the popup's own presence is the source of truth; this only paints it. Supports any number selected, not just one. */
   function paintSelection() {
     for (const [id, { el }] of state.markers) {
-      const on = id === state.selectedId;
+      const on = state.selectedIds.has(id);
       el.style.outline = on ? `2px solid rgb(${CYAN})` : 'none';
       el.style.outlineOffset = on ? '2px' : '0';
       el.style.transform = on ? 'translate(-50%, -85%) scale(1.2)' : 'translate(-50%, -85%) scale(1)';
@@ -229,10 +231,11 @@ export function installAnchorMode(_MapShine) {
     el.title = 'Click to edit · drag to move';
     el.addEventListener('pointerdown', (e) => startDrag(e, id, el));
     el.addEventListener('pointerenter', () => {
-      if (state.draggingId !== id && state.selectedId !== id) el.style.transform = 'translate(-50%, -85%) scale(1.12)';
+      if (state.draggingId !== id && !state.selectedIds.has(id))
+        el.style.transform = 'translate(-50%, -85%) scale(1.12)';
     });
     el.addEventListener('pointerleave', () => {
-      if (state.draggingId !== id && state.selectedId !== id) el.style.transform = 'translate(-50%, -85%) scale(1)';
+      if (state.draggingId !== id && !state.selectedIds.has(id)) el.style.transform = 'translate(-50%, -85%) scale(1)';
     });
     return el;
   }
@@ -265,7 +268,20 @@ export function installAnchorMode(_MapShine) {
         state.markers.delete(id);
       }
     }
-    if (state.selectedId && !seen.has(state.selectedId)) closePopup(); // the selected anchor was removed elsewhere (e.g. Delete) — don't leave a popup pointing at nothing
+    // Any selected anchor removed elsewhere (e.g. a different edit, or this
+    // very Delete-key path) drops out of the selection so the popup never
+    // points at nothing — refreshes to the remaining selection, or closes.
+    let pruned = false;
+    for (const id of state.selectedIds) {
+      if (!seen.has(id)) {
+        state.selectedIds.delete(id);
+        pruned = true;
+      }
+    }
+    if (pruned) {
+      paintSelection();
+      openPopupForSelection();
+    }
   }
 
   function startMarkerLoop() {
@@ -311,7 +327,7 @@ export function installAnchorMode(_MapShine) {
       el.style.cursor = 'grab';
       state.draggingId = null;
       if (moved < DRAG_THRESHOLD_PX) {
-        openEditPopup(id);
+        selectIcon(id, ev.shiftKey || ev.ctrlKey || ev.metaKey);
       } else {
         const world = state.ctx.screenToWorld(ev.clientX, ev.clientY);
         state.opts.updateAnchor(id, { x: world.x, y: world.y });
@@ -322,28 +338,74 @@ export function installAnchorMode(_MapShine) {
     el.addEventListener('pointercancel', onUp);
   }
 
+  // ---- selection --------------------------------------------------------
+  // `state.selectedIds` is the one source of truth; the popup is open iff it
+  // is non-empty (both `selectIcon` below and the marquee gesture funnel
+  // through `openPopupForSelection`, which enforces that invariant).
+
+  /** Click (optionally modified) on one icon. Plain click replaces the whole
+   * selection with just this id — the original single-select behaviour.
+   * Shift/Ctrl/Cmd-click toggles this id into or out of whatever is already
+   * selected, so several candles can be built up one click at a time as an
+   * alternative to the marquee drag below. */
+  function selectIcon(id, additive) {
+    if (additive) {
+      if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+      else state.selectedIds.add(id);
+    } else {
+      state.selectedIds = new Set([id]);
+    }
+    paintSelection();
+    openPopupForSelection();
+  }
+
+  function isEditableTarget(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true;
+  }
+
+  /** Delete-key handler — removes every currently-selected anchor. Guarded at
+   * the call site against firing while the user is typing into a popup field
+   * (a custom-colour hex box, say), the same way a page-level Delete listener
+   * would misfire on a text input. */
+  function deleteSelected() {
+    const ids = Array.from(state.selectedIds);
+    if (!ids.length) return;
+    for (const id of ids) state.opts.removeAnchor(id);
+    closePopup();
+  }
+
   // ---- the edit popup ---------------------------------------------------
 
   function closePopup() {
     state.popup?.remove();
     state.popup = null;
-    if (state.selectedId) {
-      state.selectedId = null;
+    if (state.selectedIds.size) {
+      state.selectedIds.clear();
       paintSelection();
     }
   }
 
-  /** Open the edit popup for one anchor near its on-screen icon. Reads the
-   * CACHED anchor `reconcileMarkers` refreshed at most one frame ago — fresh
-   * enough (nobody clicks faster than 16ms), and avoids a second live query. */
-  function openEditPopup(id) {
-    const entry = state.markers.get(id);
-    if (!entry) return;
-    closePopup();
-    state.selectedId = id;
-    paintSelection();
+  /** Open (or refresh) the popup for the CURRENT `state.selectedIds`. One
+   * anchor → the familiar single edit form. More than one → the same form,
+   * built once against a representative anchor (the most recently selected)
+   * but wired so every field change patches ALL selected ids at once —
+   * `opts.buildEditForm`'s second argument. Reads markers' CACHED anchors
+   * (`reconcileMarkers` refreshed at most one frame ago — fresh enough,
+   * nobody selects faster than 16ms), avoiding a second live query. */
+  function openPopupForSelection() {
+    const ids = Array.from(state.selectedIds);
+    if (!ids.length) {
+      closePopup();
+      return;
+    }
+    const primary = state.markers.get(ids[ids.length - 1]) ?? state.markers.get(ids[0]);
+    if (!primary) return;
+    state.popup?.remove();
+    state.popup = null;
     const opts = state.opts;
-    const anchor = entry.anchor;
+    const anchor = primary.anchor;
     const client = state.ctx.worldToClient(anchor.x, anchor.y);
 
     const popup = styled('div', {
@@ -367,7 +429,11 @@ export function installAnchorMode(_MapShine) {
 
     const head = styled('div', { display: 'flex', alignItems: 'center', gap: '8px' });
     const title = styled('span', { fontWeight: '700', flex: '1' });
-    title.textContent = `${opts.icon ?? FALLBACK_ICON} ${opts.kindLabel[0].toUpperCase() + opts.kindLabel.slice(1)}`;
+    const kindTitle = opts.kindLabel[0].toUpperCase() + opts.kindLabel.slice(1);
+    title.textContent =
+      ids.length > 1
+        ? `${opts.icon ?? FALLBACK_ICON} ${ids.length} ${opts.kindLabel}s selected`
+        : `${opts.icon ?? FALLBACK_ICON} ${kindTitle}`;
     const closeBtn = styled('button', {
       pointerEvents: 'auto',
       background: 'transparent',
@@ -384,14 +450,20 @@ export function installAnchorMode(_MapShine) {
     head.append(title, closeBtn);
     popup.append(head);
 
-    popup.append(opts.buildEditForm(anchor));
+    if (ids.length > 1) {
+      const note = styled('div', { opacity: '0.7', fontSize: '9.5px' });
+      note.textContent = `Showing the last-selected ${opts.kindLabel}'s values — changes below apply to all ${ids.length}.`;
+      popup.append(note);
+    }
+
+    popup.append(opts.buildEditForm(anchor, ids));
 
     const footer = styled('div', { display: 'flex', justifyContent: 'flex-end' });
     footer.append(
       button(
-        '🗑 Delete',
+        ids.length > 1 ? `🗑 Delete ${ids.length}` : '🗑 Delete',
         () => {
-          opts.removeAnchor(id);
+          for (const id of ids) opts.removeAnchor(id);
           closePopup();
         },
         '255,140,140'
@@ -403,7 +475,81 @@ export function installAnchorMode(_MapShine) {
     state.popup = popup;
   }
 
-  // ---- input: window-capture, board-gated, LEFT only — PLACE only now ------
+  // ---- marquee: drag-select several icons at once on empty board ------------
+  // Mirrors `startDrag`'s own click-vs-drag distinction: a plain left-press on
+  // the board is a PLACE (unchanged); dragging past the same threshold instead
+  // rubber-bands a selection rectangle over the icons, so "select several" has
+  // an obvious, discoverable gesture alongside shift-click above.
+
+  function makeMarqueeEl() {
+    const el = styled('div', {
+      position: 'fixed',
+      zIndex: '99',
+      border: `1px solid rgba(${CYAN},0.9)`,
+      background: `rgba(${CYAN},0.12)`,
+      pointerEvents: 'none',
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function updateMarqueeRect(el, x0, y0, x1, y1) {
+    el.style.left = `${Math.min(x0, x1)}px`;
+    el.style.top = `${Math.min(y0, y1)}px`;
+    el.style.width = `${Math.abs(x1 - x0)}px`;
+    el.style.height = `${Math.abs(y1 - y0)}px`;
+  }
+
+  /** Icons whose current on-screen box (post-transform, via getBoundingClientRect
+   * so the icon's own centering transform is already accounted for) falls
+   * inside the rectangle spanned by the two corner points. */
+  function idsInRect(x0, y0, x1, y1) {
+    const left = Math.min(x0, x1);
+    const right = Math.max(x0, x1);
+    const top = Math.min(y0, y1);
+    const bottom = Math.max(y0, y1);
+    const ids = [];
+    for (const [id, { el }] of state.markers) {
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      if (cx >= left && cx <= right && cy >= top && cy <= bottom) ids.push(id);
+    }
+    return ids;
+  }
+
+  function startBoardGesture(e) {
+    const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let marqueeEl = null;
+    const onMove = (ev) => {
+      const dist = Math.max(Math.abs(ev.clientX - startX), Math.abs(ev.clientY - startY));
+      if (!marqueeEl && dist >= DRAG_THRESHOLD_PX) marqueeEl = makeMarqueeEl();
+      if (marqueeEl) updateMarqueeRect(marqueeEl, startX, startY, ev.clientX, ev.clientY);
+    };
+    const onUp = (ev) => {
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', onUp, true);
+      if (marqueeEl) {
+        const ids = idsInRect(startX, startY, ev.clientX, ev.clientY);
+        marqueeEl.remove();
+        if (!additive) state.selectedIds = new Set();
+        for (const id of ids) state.selectedIds.add(id);
+        paintSelection();
+        openPopupForSelection();
+      } else {
+        // Below the drag threshold — a plain click, unchanged PLACE behaviour.
+        closePopup();
+        const world = state.ctx.screenToWorld(ev.clientX, ev.clientY);
+        state.opts.addAnchor(world.x, world.y);
+      }
+    };
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+  }
+
+  // ---- input: window-capture, board-gated, LEFT only ------------------------
   // (select/edit/move are handled by each icon's own listeners above; a click
   // that lands on an icon never has `e.target === ctx.boardElement`, so it
   // never reaches this handler at all — no proximity math, no ambiguity.)
@@ -413,14 +559,18 @@ export function installAnchorMode(_MapShine) {
       if (e.button !== 0) return; // LEFT only — right-drag/wheel are never touched, Foundry owns them natively
       const ctx = state.ctx;
       if (!ctx?.ready || e.target !== ctx.boardElement) return; // positive match — never a hand-excluded panel/icon list
-      const world = ctx.screenToWorld(e.clientX, e.clientY);
-      closePopup();
-      state.opts.addAnchor(world.x, world.y);
+      startBoardGesture(e);
     };
     const onKeyDown = (e) => {
-      if (e.key !== 'Escape') return;
-      if (state.popup) closePopup();
-      else exit();
+      if (e.key === 'Escape') {
+        if (state.popup) closePopup();
+        else exit();
+        return;
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedIds.size > 0 && !isEditableTarget(e.target)) {
+        e.preventDefault();
+        deleteSelected();
+      }
     };
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKeyDown, true);

@@ -200,11 +200,20 @@ export function createMaskAuthority({ readPageImageData, log }) {
    * isolation toggles. Set by `setCasterHeightSpec`; until then `distancePixels`
    * is 0, which makes the two art-driven bands empty ON PURPOSE (a height field
    * built on a guessed grid scale would be wrong by a factor nobody could see).
+   *
+   * `gridMaxDim` (0 = "use the shared `gridSpec`", the pre-2026-07-30 default)
+   * is the ONE piece here that is not itself a caster-height fact — it is the
+   * sun-shadow performance tier's own `casterGridDim`, threaded through so a
+   * higher tier can rasterize a CRISPER caster silhouette without raising
+   * `MASK_GRID_MAX_DIM` for water/specular/wind too. See `mask-derive.js#
+   * deriveFloorProducts`'s own `casterGridSpec` doc for why this has to be a
+   * SEPARATE grid rather than a bigger shared one.
    */
   const casterSpec = {
     distancePixels: 0,
     buildingHeightPx: 0,
     include: { building: true, overhead: true, skyReach: true },
+    gridMaxDim: 0,
   };
 
   function emptyScene() {
@@ -545,6 +554,12 @@ export function createMaskAuthority({ readPageImageData, log }) {
 
     products = deriveFloorProducts({
       gridSpec: scene.gridSpec,
+      // `casterSpec.gridMaxDim > 0` (a sun-shadow tier's own `casterGridDim`)
+      // rasterizes the caster channels at a SECOND, independent resolution —
+      // see mask-derive.js#deriveFloorProducts's own `casterGridSpec` doc.
+      // `scene.gridSpec` doubles as the rect input here: `computeMaskGridSpec`
+      // only reads `.x/.y/.width/.height`, all of which it already carries.
+      casterGridSpec: casterSpec.gridMaxDim > 0 ? computeMaskGridSpec(scene.gridSpec, casterSpec.gridMaxDim) : null,
       items,
       floors,
       outdoorsAbsentValue: outdoorsKind?.absentValue ?? 1,
@@ -618,6 +633,20 @@ export function createMaskAuthority({ readPageImageData, log }) {
       // other id gets `null`, so a consumer can never accidentally read another
       // product's channels.
       channels: id === 'casterHeight' ? floor.casterChannels : null,
+      // ⚠️ MUST ride alongside `channels`, not be left for a wrapper to bolt on.
+      // `casterHeight`'s bytes are meaningless without the scale that turns them
+      // back into world px, and `scene/sky-reach-access.js#heightField` used to
+      // be the ONLY place that attached it (from `maskAuthority.casterHeightScalePx`,
+      // read at ITS OWN construction). A caller that needs `acknowledgeMissingRequired`
+      // (a floor with no authored `_Outdoors`) has to bypass that wrapper to pass
+      // the flag — `boot.js#getCasterHeightField`'s degraded branch is exactly
+      // this — and got back a `scalePx` of `undefined`, which silently zeroed
+      // every height byte on the way out: `(maxByte/255) * (undefined ?? 0)` is
+      // always `0`, no matter how tall the real casters are. The coverage/count
+      // channels stayed healthy throughout, which is what made this invisible —
+      // the exact shape `feedback_instruments_must_not_lie` names. Declared here,
+      // at the one producer, so no second caller can rediscover the same gap.
+      scalePx: id === 'casterHeight' ? CASTER_HEIGHT_SCALE_PX : null,
       completeness: floor.completeness,
       version: productsVersion,
     };
@@ -813,7 +842,11 @@ export function createMaskAuthority({ readPageImageData, log }) {
      * work this project keeps finding.
      *
      * @param {{distancePixels?: number, buildingHeightPx?: number,
-     *   include?: {building?: boolean, overhead?: boolean, skyReach?: boolean}}} spec
+     *   include?: {building?: boolean, overhead?: boolean, skyReach?: boolean},
+     *   gridMaxDim?: number}} spec - `gridMaxDim` 0/absent = share `gridSpec`
+     *   (today's behaviour); >0 = the caster channels rasterize at THIS
+     *   resolution instead (`sun-occlusion.js#sunShadowTierPlan`'s
+     *   `casterGridDim`, resolved by the caller before this call).
      * @returns {boolean} true if anything changed (and a rebuild is now pending).
      */
     setCasterHeightSpec(spec = {}) {
@@ -825,22 +858,38 @@ export function createMaskAuthority({ readPageImageData, log }) {
         overhead: spec.include?.overhead !== false,
         skyReach: spec.include?.skyReach !== false,
       };
+      const nextGridMaxDim = Number.isFinite(spec.gridMaxDim) && spec.gridMaxDim > 0 ? Math.floor(spec.gridMaxDim) : 0;
       const changed =
         nextDistance !== casterSpec.distancePixels ||
         nextBuilding !== casterSpec.buildingHeightPx ||
         nextInclude.building !== casterSpec.include.building ||
         nextInclude.overhead !== casterSpec.include.overhead ||
-        nextInclude.skyReach !== casterSpec.include.skyReach;
+        nextInclude.skyReach !== casterSpec.include.skyReach ||
+        nextGridMaxDim !== casterSpec.gridMaxDim;
       if (!changed) return false;
       casterSpec.distancePixels = nextDistance;
       casterSpec.buildingHeightPx = nextBuilding;
       casterSpec.include = nextInclude;
+      casterSpec.gridMaxDim = nextGridMaxDim;
       touch();
       return true;
     },
     /** World px a `casterHeight` byte of 255 represents — every consumer needs
      * it to turn the served 0..1 value back into a height. */
     casterHeightScalePx: CASTER_HEIGHT_SCALE_PX,
+    /**
+     * The scene-wide building height, world px, live (reads `casterSpec`
+     * directly rather than snapshotting — `setCasterHeightSpec` can change it
+     * after construction). ROUND SEVEN (sun-occlusion.js): building height is
+     * no longer baked into any PER-TEXEL caster channel — the march reads this
+     * ONE number as a uniform, combined with the per-texel `outdoors` byte
+     * already carried in the caster texture's own gate channel. A method, not
+     * a plain property, for exactly the reason `buildingHeightPx` itself is
+     * mutable and a snapshot would go stale the first time the slider moves.
+     */
+    getBuildingHeightPx() {
+      return casterSpec.buildingHeightPx;
+    },
     getDerived,
     sampleWorld,
     authoredStatus,

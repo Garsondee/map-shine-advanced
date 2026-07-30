@@ -76,6 +76,171 @@ export const MIN_THROW_PX = 1;
 export const PENUMBRA_PER_PX = 0.035;
 
 /**
+ * How many samples the march spreads PERPENDICULAR to the sun at each station —
+ * what turns the ray into a thin cone and lets a silhouette's SIDE edges soften
+ * with distance (`sun-occlusion-render.js`'s own "LATERAL SOFTENING" note has
+ * the physics). Fixed at shader-BUILD time, like the step count: the loop is
+ * unrolled either way, so this is a cost decision, never a live-tunable knob.
+ */
+export const DEFAULT_LATERAL_TAPS = 3;
+
+// ===========================================================================
+// THE PERFORMANCE LADDER — how MUCH sun shadow, per profile
+// ===========================================================================
+//
+// `sun-shadows.js`'s manifest declares WHICH profile buys which rung in prose;
+// this is the same ladder as arithmetic, index-aligned, and it lives HERE (the
+// pure module) rather than in the subsystem for the reason `vegetationTierPlan`
+// and `candleTierPlan` do: a rung table nothing can assert is a rung table that
+// drifts. Three of these four numbers are shader-BUILD-time or allocation-time
+// decisions, so they are exactly the kind of thing that silently stops matching
+// its own documentation.
+//
+// ⚠️ WHY THE BAKE IS THE ONLY THING THAT MOVES. The PER-FRAME cost of this
+// effect is one texture fetch in the ambient fill plus one per point light, and
+// that is the same single fetch at every rung — a 1280² field is not a more
+// expensive read than a 512² one. What the ladder actually buys and sells is
+// the BAKE, which runs a few times a minute (`sunNeedsRebake`) and costs
+// `fieldDim² × marchSteps × lateralTaps` texture samples. That product is what
+// {@link sunShadowBakeSamples} reports, and it is the only honest cost figure
+// this system has: the bakes have never fired inside a profiling window, so
+// there is no measured millisecond number for any rung (Performance-Insights.md
+// — "Bake costs are still unmeasured"), and inventing one here would be exactly
+// the instrument that lies.
+//
+// The four axes, and what each is actually for:
+//   fieldDim     — the marched field's resolution. Buys a smoother PENUMBRA
+//                  RAMP, NOT a crisper contact edge: the silhouette comes from
+//                  the caster grid, which `scene/mask-derive.js` caps at 512 a
+//                  side, so past ~1024 this is resolving the soft gradient
+//                  rather than finding new detail. Costs quadratically, which
+//                  is why it climbs the least.
+//   marchSteps   — samples along the ray. Fewer missed thin casters and a finer
+//                  tip fade, over the SAME distance (`marchStepPx` derives the
+//                  step from the span, so this is quality, never reach).
+//   lateralTaps  — the width of the cone. THE axis the author actually notices
+//                  ("the edges of a building shadow are currently pixel perfect
+//                  lines… blur the shadow to make it more diffuse the further
+//                  away from the building"), and the only one that can soften a
+//                  silhouette the coarse caster grid cannot describe.
+//   quantizeDeg  — how far the sun must move before re-marching. Smaller = the
+//                  shadow sweeps instead of stepping, and MORE bakes — so it
+//                  multiplies the per-bake cost above rather than adding to it.
+
+/**
+ * The rung an ABSENT or malformed tier falls back to — deliberately TODAY'S
+ * shipped look (1024² / 24 steps / 3 taps / 0.5°), never the cheapest rung and
+ * never the dearest. Both alternatives are dangerous in opposite directions:
+ * falling back to 0 would silently coarsen every existing scene the moment an
+ * unwired caller touched it, and falling back to the top would hand a weak
+ * machine a 5×-costlier bake it never asked for.
+ *
+ * NOT a hardcoded 1 in spirit, only in value: `effect-tier.test.mjs` asserts
+ * this equals what the DEFAULT performance profile resolves the real
+ * `SUN_SHADOWS` ladder to, so re-tuning a rung's `fromProfile` cannot leave this
+ * constant pointing at a different look than the ladder does.
+ */
+export const SUN_SHADOW_DEFAULT_TIER = 1;
+
+/**
+ * The rungs, as data, index === tier. Kept beside {@link sunShadowTierPlan} so
+ * the table and its clamp cannot disagree about how many rungs exist.
+ *
+ * Tier 0 is the coarse pin — a REAL shadow, in the right place, at the cheapest
+ * march this system draws (Effects.md Law 1: tier 0 is the admission price, not
+ * a step). It is what a player who forces the effect ON below the `performance`
+ * profile gets, which is why it is a working shadow rather than nothing: "I
+ * turned it on and nothing happened" is not a tier, it is a bug report. WHETHER
+ * the effect runs at all is the profile GATE's question
+ * (`SUN_SHADOWS.enabledFromProfile`), answered one layer up.
+ */
+const SUN_SHADOW_TIER_PLANS = Object.freeze([
+  // 0 coarse-march — 1:1 with the caster grid, a single ray, half the bakes.
+  //   ~4.2M samples: 1/18th of today's bake.
+  Object.freeze({ fieldDim: 512, marchSteps: 16, lateralTaps: 1, quantizeDeg: 1, casterGridDim: 512 }),
+  // 1 soft-cone — TODAY, EXACTLY. ~75.5M samples.
+  Object.freeze({
+    fieldDim: 1024,
+    marchSteps: 24,
+    lateralTaps: DEFAULT_LATERAL_TAPS,
+    quantizeDeg: 0.5,
+    casterGridDim: 512,
+  }),
+  // 2 wide-cone — a 5-tap cone and a finer tip fade. ~147M samples, ~1.9× today.
+  //   casterGridDim 768 (2.25× the shared grid's texel COUNT) is the first rung
+  //   that buys a genuinely crisper SILHOUETTE, not just a smoother penumbra —
+  //   see casterGridDim's own doc below for why fieldDim alone never could.
+  Object.freeze({ fieldDim: 1024, marchSteps: 28, lateralTaps: 5, quantizeDeg: 0.5, casterGridDim: 768 }),
+  // 3 fine-cone — the widest cone this system draws, over a supersampled field,
+  //   sweeping rather than stepping. ~367M samples, ~4.9× today. The ceiling is
+  //   deliberate: a bake is a HITCH, not a frame cost, so the top rung is
+  //   bounded by what a player will tolerate as a stutter a few times a minute.
+  Object.freeze({ fieldDim: 1280, marchSteps: 32, lateralTaps: 7, quantizeDeg: 0.4, casterGridDim: 1024 }),
+]);
+
+/**
+ * ⚠️ `casterGridDim` IS A DIFFERENT AXIS FROM `fieldDim`, ANSWERING A DIFFERENT
+ * QUESTION (found live, 2026-07-30 — author, on the `extreme` preset: *"shadows
+ * are still very low resolution... I asked for shadows to have different
+ * resolutions based on the graphics tier."*). `fieldDim` sizes the MARCH's own
+ * OUTPUT — a smoother penumbra ramp over whatever silhouette it is given, never
+ * a crisper one (this file's own tier-ladder header already said so: "past
+ * ~1024 this is resolving the soft gradient rather than finding new detail").
+ * The SILHOUETTE itself comes from a wholly different, upstream input: the
+ * coarse caster grid `scene/mask-derive.js#deriveFloorProducts` rasterizes art
+ * INTO, hard-capped at `MASK_GRID_MAX_DIM` (512) because that grid is SHARED
+ * with water/specular/coarse-alpha and was never meant to resolve fine
+ * architectural detail (crenellations, thin trim) at battlemap scale. Raising
+ * `fieldDim` alone — which is all the ladder did before this axis existed —
+ * cannot touch that ceiling; it just upsamples the same blocky silhouette more
+ * smoothly. `casterGridDim` sizes a SECOND, sun-shadow-ONLY grid, independent
+ * of the shared one (`mask-derive.js#deriveFloorProducts`'s own `casterGridSpec`
+ * param), so raising it here costs nothing extra for water/specular/wind and
+ * cannot destabilize their own 512-tuned budgets. Tiers 0-1 stay at the shared
+ * 512 deliberately — tier 1 must still reproduce today's exact shipped look,
+ * which today's silhouette comes from the shared grid.
+ */
+
+/**
+ * Resolve a rung into the numbers the bake is built from. PURE + TOTAL: a
+ * stale, absent or wildly out-of-range tier clamps into the ladder rather than
+ * returning `undefined` and building a field of `NaN`.
+ *
+ * @param {number} tier - a resolved rung (effect-cascade.js#resolveEffectTier).
+ * @returns {{fieldDim: number, marchSteps: number, lateralTaps: number, quantizeDeg: number, casterGridDim: number}}
+ */
+export function sunShadowTierPlan(tier) {
+  const n = Number.isFinite(tier)
+    ? Math.max(0, Math.min(SUN_SHADOW_TIER_PLANS.length - 1, Math.floor(tier)))
+    : SUN_SHADOW_DEFAULT_TIER;
+  return SUN_SHADOW_TIER_PLANS[n];
+}
+
+/** How many rungs the ladder has (so a status report can say "1 of 3"). */
+export const SUN_SHADOW_MAX_TIER = SUN_SHADOW_TIER_PLANS.length - 1;
+
+/**
+ * Texture samples ONE bake of this plan costs — `fieldDim² × marchSteps ×
+ * lateralTaps`, the whole cost model of this effect in one number.
+ *
+ * Reported rather than converted to milliseconds ON PURPOSE. It is a count, and
+ * counts are true on every GPU; a millisecond figure derived from it would be a
+ * guess dressed as a measurement, and this system's bakes have never once fired
+ * inside a profiling window (memory: feedback_instruments_must_not_lie). Ratio
+ * it against another rung's and the answer IS meaningful — that is the reading
+ * this number is for.
+ *
+ * @param {{fieldDim: number, marchSteps: number, lateralTaps: number}} plan
+ * @returns {number}
+ */
+export function sunShadowBakeSamples(plan) {
+  const dim = Number.isFinite(plan?.fieldDim) && plan.fieldDim > 0 ? plan.fieldDim : 0;
+  const steps = Number.isFinite(plan?.marchSteps) && plan.marchSteps > 0 ? plan.marchSteps : 0;
+  const taps = Number.isFinite(plan?.lateralTaps) && plan.lateralTaps > 0 ? plan.lateralTaps : 0;
+  return dim * dim * steps * taps;
+}
+
+/**
  * Convert a compass azimuth into the world-space unit vector pointing TOWARD
  * the light — the direction the march walks.
  *
@@ -161,39 +326,95 @@ export function marchPenumbraPx({ distancePx, basePx = 2, softnessMul = 1 }) {
 }
 
 /**
- * THE MARCH — walk from a lit point toward the sun and report how much of the
- * sun still reaches it.
+ * ============================================================================
+ * ROUND SEVEN (2026-07-30) — BUILDINGS ARE COLUMNS; EVERYTHING ELSE IS A SLAB
+ * ============================================================================
  *
- * Returns 1 (fully lit) when nothing is tall enough to block, falling toward
- * `1 - strength` as blockers rise above the ray. Absence of data reads as LIT,
- * never as shadow — a producer that fails to report must not manufacture
- * darkness (the same fail-safe `combineVisibility` states one level up).
+ * Every round before this one modelled EVERY caster the same way: a solid
+ * COLUMN standing on the ground, height h, blocking the ray for every distance
+ * where `d·tanElev < h`. That is exactly what a building is — a wall really
+ * does occupy every height from 0 to its own top. It is NOT what an overhead
+ * tile or a sky-reach structure is: a lamp bracket, a balcony floor, a bridge
+ * deck are THIN, ELEVATED things, occupying a narrow band of height around
+ * wherever they actually sit, with open air both above and below.
+ *
+ * Modelling them as columns anyway produced a shadow measured, with the
+ * author's own real numbers (a 570px-elevation lamp bracket, sun at 57°), to
+ * be a SOLID SMEAR 184px long and fully opaque for all but its last ~9px —
+ * fourteen times longer than the true, physically correct shadow (a ~13px
+ * translated band, offset ~171px from the bracket). That length is exactly
+ * "much darker, much larger than they deserve to be" (author, live) — the
+ * bracket's own THINNESS was never represented; only its (correct) height was.
+ *
+ * THE MODEL, per producer type:
+ *
+ *   BUILDING (column) — unchanged physics. A blocker at buildingHeightPx
+ *   blocks every distance where the ray hasn't yet risen above it:
+ *     over = buildingHeightPx − max(d·tanElev, receiverBuildingHeight)
+ *   `receiverBuildingHeight` is Round Six's unconditional floor (a receiver
+ *   who is ALSO indoors cannot be shadowed by something no taller than the
+ *   building it is already inside).
+ *
+ *   FLOATING (band) — overhead + sky-reach. A thin thing AT height h blocks
+ *   only near the ONE distance where the ray's own height crosses h — the
+ *   width of "near" is the SAME feather that already contact-hardens the
+ *   column case, so there is no second softness knob:
+ *     over = feather − |stationFloatingHeight − d·tanElev|
+ *   gated by a SMOOTH "must be taller than the receiver's own floating height"
+ *   term (Round Six's insight, generalised): a receiver standing ON a floating
+ *   slab cannot be shadowed by ANY part of that SAME slab, because no part of
+ *   a uniform-height object is taller than itself. This is what makes a wide
+ *   canopy immune to self-shadow without an identity test, and immune to the
+ *   linear-filter bleed ghost (Round Five's failure) for the same reason
+ *   Round Six was: the ghost reads roughly HALF the real height, and half is
+ *   never taller than whole.
+ *
+ * WHY THE BAND NEEDS NO AUTHORED THICKNESS. The band's WIDTH comes entirely
+ * from `feather`, which already grows with distance — a dusk sun (long march,
+ * wide feather) softens and can dissolve a thin caster's shadow on its own;
+ * a noon sun (short march, narrow feather) keeps it crisp. That is the
+ * "buildings reliably dark, small things soften and vanish at distance"
+ * behaviour asked for, falling out of the ONE existing softness curve rather
+ * than a second, per-item authored size nobody would paint correctly anyway.
+ *
+ * WHY "DARK UNDER A WIDE BRIDGE" SURVIVES UNTOUCHED. That guarantee has never
+ * come from the column/band choice at all — it is the `d = 0` seed below,
+ * asking "is something directly overhead, right here" before the march even
+ * starts. A bridge spanning half the map is dark under its own footprint via
+ * that seed regardless of this section; the band model only changes how FAR
+ * its shadow reaches BEYOND its own edge, which is exactly the "smaller,
+ * less noticeable, never absent" outcome asked for.
  *
  * @param {object} args
- * ============================================================================
- * COVERAGE DECIDES DARKNESS; HEIGHT DECIDES LENGTH (2026-07-26 rethink)
- * ============================================================================
- *
- * This used to return `smoothstep(0, feather, casterHeight − rayHeight)` — so
- * how DARK a shadow came out depended on how far the caster overtopped the ray,
- * and a low awning was permanently fainter than a tall wall. That is not what
- * shadows do: height sets a shadow's LENGTH, never its darkness. Now the
- * blocked-ness at a station is the occluder's own COVERAGE (the art's
- * antialiased alpha, a genuinely soft silhouette) and the height comparison is a
- * near-binary "is the ray under it", softened only enough to fade the shadow's
- * TIP. See docs/planning/Sun-Shadows-Rethink.md §2b.
- *
  * @param {number} args.x - world position, +y down (Foundry canvas space).
  * @param {number} args.y
- * @param {(x: number, y: number) => {heightPx: number, coverage: number, floating: number}} args.sampleField -
- *   the caster field at a world point. `heightPx` is px above THIS floor;
- *   `coverage` and `floating` are 0..1. `floating` is narrower than
- *   `coverage`: it is ONLY a structure on a genuinely DIFFERENT floor (sky-
- *   reach) — see the `d = 0` note below for why this floor's own overhead
- *   items must never appear here. Out of bounds reads zero.
+ * @param {(x: number, y: number) => {
+ *   buildingCoverage?: number,
+ *   floatingHeightPx?: number,
+ *   floatingCoverage?: number,
+ *   skyReachCoverage?: number,
+ * }} args.sampleField - the caster field at a world point, split by PHYSICAL
+ *   MODEL rather than by producer identity:
+ *     `buildingCoverage` (0..1) — indoors-ness; drives the COLUMN test at the
+ *       uniform `buildingHeightPx` below. There is no per-texel building
+ *       height — a building's height is one scene-wide number, never derived
+ *       per pixel (unlike overhead/sky-reach, whose height genuinely varies
+ *       item to item).
+ *     `floatingHeightPx` — this texel's own overhead-∪-sky-reach height
+ *       (world px above this floor). Drives the BAND test.
+ *     `floatingCoverage` (0..1) — overhead-∪-sky-reach coverage; how dark the
+ *       band's contribution is, away from d = 0.
+ *     `skyReachCoverage` (0..1) — sky-reach ALONE, narrower than
+ *       `floatingCoverage`: see the `d = 0` note below for why this floor's
+ *       own overhead items must never appear here.
+ *   Out-of-bounds / absent reads as zero for every field.
  * @param {number} args.azimuthDeg - the sun's compass azimuth.
  * @param {number} args.elevationDeg - the sun's elevation above the horizon.
- * @param {number} args.maxCasterHeightPx - the field's tallest caster (sizes the march).
+ * @param {number} args.maxCasterHeightPx - the field's tallest caster of
+ *   EITHER kind (sizes the march span so it reaches the longest possible
+ *   shadow from either model).
+ * @param {number} [args.buildingHeightPx=0] - the scene-wide building height
+ *   (0 = no buildings active this bake — the column term compiles to a no-op).
  * @param {number} [args.steps]
  * @param {number} [args.strength=1] - how dark a fully-blocked pixel goes, 0..1.
  * @param {number} [args.softnessMul=1] - `shadowAtmosphere().softnessMul`.
@@ -208,6 +429,7 @@ export function marchVisibility({
   azimuthDeg,
   elevationDeg,
   maxCasterHeightPx,
+  buildingHeightPx = 0,
   steps = DEFAULT_MARCH_STEPS,
   strength = 1,
   softnessMul = 1,
@@ -225,44 +447,48 @@ export function marchVisibility({
   // old code did to compensate — a whole separate `skyOcclusion` term with its
   // own strength — was papering over a loop bound.
   //
-  // Over-widened: `floating` first shipped as "overhead ∪ sky-reach", but an
-  // OVERHEAD item lives on THIS SAME floor — Foundry elevation is a draw-order
-  // key, not a spatial offset, so a raised tile's own sprite occupies the
-  // IDENTICAL (x,y) as whatever it would "shade" beneath it. There is no
-  // separate, visible ground there to darken — only the item's own opaque art
-  // — so a balcony or a lantern-on-a-plinth read its own footprint as
-  // "something floating overhead" and shadowed ITSELF. `floating` is sky-reach
-  // ONLY now: a genuinely different floor, whose art this floor never draws,
-  // so darkening this pixel darkens real ground, never a caster's own surface
+  // Over-widened: `skyReachCoverage` is narrower than `floatingCoverage` on
+  // purpose — an OVERHEAD item lives on THIS SAME floor — Foundry elevation is
+  // a draw-order key, not a spatial offset, so a raised tile's own sprite
+  // occupies the IDENTICAL (x,y) as whatever it would "shade" beneath it.
+  // There is no separate, visible ground there to darken — only the item's
+  // own opaque art — so a balcony or a lantern-on-a-plinth read its own
+  // footprint as "something floating overhead" and shadowed ITSELF. Sky-reach
+  // is a genuinely different floor, whose art this floor never draws, so
+  // darkening this pixel darkens real ground, never a caster's own surface
   // (docs/planning/Sun-Shadows-Rethink.md §4b). Overhead's own coverage still
-  // marches normally through `coverage` below — only the zero-distance
-  // self-check excludes it.
+  // marches normally through `floatingCoverage` below — only the
+  // zero-distance self-check excludes it.
   const here0 = sampleField(x, y);
-  let occlusion = clamp01(here0.floating ?? 0);
+  let occlusion = clamp01(here0.skyReachCoverage ?? 0);
 
-  // ⚠️ ROUND TWO (2026-07-28, author: building AND overhead shadows both
-  // render on top of the overhead tile producing them) — see the identical
-  // comment in sun-occlusion-render.js, the GPU transcription of this exact
-  // function. `occlusion`'s own d=0 seed above only ever excluded `floating`
-  // (sky-reach) at the exact starting point; `coverage`/`heightPx` below were
-  // never excluded, at ANY station, so a caster wider than a few march steps
-  // reads its own body again a few steps in and shadows its own downstream
-  // half out to its own natural throw distance. `height0` is this pixel's own
-  // height at d=0 — a later station only counts as a genuinely NEW blocker if
-  // it exceeds THAT, not just the ray height. Open ground has `height0 = 0`,
-  // so `Math.max(rayHeight, 0) === rayHeight` — unchanged from before.
+  // THE RECEIVER'S OWN STATE — read once, used by both sub-tests' self-guards.
   //
-  // ⚠️ ROUND FOUR, SHARPENED (2026-07-28, author: the fix above closed the
-  // self-shadow but opened a visible GAP between a building and its own
-  // shadow) — see {@link SELF_HEIGHT_SHARPEN_LOW}'s own header for the full
-  // mechanism. Raw `heightPx` here can be a BLURRED, partial reading for a
-  // receiver that is genuinely separate ground near a wall's true edge, not
-  // actually "self" — sharpened by this same pixel's own coverage confidence
-  // ({@link sharpenSelfCoverage01}) so only a receiver CONFIDENTLY inside a
-  // caster's own footprint gets the floor; one just outside a real edge
-  // reads `coverage` well under 1 and gets `height0 = 0`, restoring full
-  // contact-hardening exactly where a shadow should be strongest.
-  const height0 = (here0.heightPx ?? 0) * sharpenSelfCoverage01(here0.coverage ?? 0);
+  // ⚠️ ROUND TWO (2026-07-28, author: building AND overhead shadows both
+  // render on top of the overhead tile producing them) is WHY either of these
+  // exists at all — see the identical comment in sun-occlusion-render.js, the
+  // GPU transcription of this exact function. `occlusion`'s own d=0 seed above
+  // only ever excluded `skyReachCoverage` at the exact starting point; nothing
+  // else was excluded at ANY station, so a caster wider than a few march steps
+  // read its own body again a few steps in and shadowed its own downstream
+  // half out to its own natural throw distance. A later station only counts
+  // as a genuinely NEW blocker if it exceeds THIS pixel's OWN state at d=0,
+  // not just the ray height — open ground (both readings 0) is unaffected,
+  // `Math.max(rayHeight, 0) === rayHeight`.
+  //
+  // ⚠️ ROUND SIX (2026-07-30), GENERALISED BY ROUND SEVEN into two floors, one
+  // per physical model, applied as an UNCONDITIONAL bound at every station. No
+  // confidence test, no scaling: see the self-shadow guard's own header
+  // further down for why two successive attempts to decide "is that station
+  // really part of me" both failed on the linear-filter bleed ghost, and why
+  // the plain comparison never needed to ask.
+  //
+  // `buildingCoverage` is read as a BINARY (matching the exterior-gate's own
+  // precedent, mask-derive.js#OVERHEAD_EXTERIOR_THRESHOLD): "indoors" is a
+  // classification, not a continuous quantity, so there is no partial
+  // building-floor to speak of.
+  const receiverBuildingHeight = clamp01(here0.buildingCoverage ?? 0) >= 0.5 ? buildingHeightPx : 0;
+  const receiverFloatingHeight = here0.floatingHeightPx ?? 0;
 
   const span = maxThrowPx({ maxCasterHeightPx, elevationDeg });
   if (span >= MIN_THROW_PX) {
@@ -274,21 +500,80 @@ export function marchVisibility({
 
     for (let i = 1; i <= n && occlusion < 1; i++) {
       const d = i * step;
-      // The sun ray's height above the ground plane at this distance. A blocker
-      // must be TALLER than this — AND taller than this pixel's own height at
-      // d=0 (the self-shadow guard above) — to be between the pixel and the sun.
-      const rayHeight = Math.max(d * tanElev, height0);
       const at = sampleField(x + dir.x * d, y + dir.y * d);
-      const coverage = clamp01(at.coverage ?? 0);
-      if (coverage <= 0) continue;
-      const over = (at.heightPx ?? 0) - rayHeight;
-      if (over <= 0) continue;
+      const buildingCoverage = clamp01(at.buildingCoverage ?? 0);
+      const floatingCoverage = clamp01(at.floatingCoverage ?? 0);
+      if (buildingCoverage <= 0 && floatingCoverage <= 0) continue;
+
+      const rayHeight = d * tanElev;
       const feather = marchPenumbraPx({ distancePx: d, softnessMul });
-      // The TIP fade only: a caster whose top is level with the ray casts
-      // nothing, one clearly above it casts its full coverage. The silhouette's
-      // softness comes from `coverage`, not from this curve.
-      const t = feather > 0 ? Math.min(1, over / feather) : 1;
-      const blocked = coverage * t * t * (3 - 2 * t);
+
+      // ⚠️ THE MARCH'S OWN RESOLUTION FLOORS EVERY FEATHER (measured, live
+      // numbers: a dawn/dusk-shortened sun — `lengthScale`/`maxLengthMul`
+      // steepen the EFFECTIVE elevation well past the real one — combined
+      // with a thin overhead caster produced a shadow that vanished into the
+      // cracks between march stations almost everywhere, not merely a
+      // discretisation ripple: `crossingOver` needs `stationHeight` within one
+      // `feather` of `d·tanElev`, but between two consecutive stations the ray
+      // climbs by `step·tanElev`, and here that was ~33px against a feather of
+      // ~8px — the true crossing sat in the gap between samples far more often
+      // than it landed near one).
+      //
+      // PROOF the floor is sufficient, not just plausible: if the true
+      // crossing sits at distance d* between stations at d and d+step, the two
+      // stations' height-gaps to the ray are |d*−d|·tanElev and
+      // |d*−(d+step)|·tanElev, and those two distances along the ray sum to
+      // exactly `step`— so the SMALLER of the two gaps can never exceed half of
+      // `step·tanElev`. Flooring the tolerance at the full `step·tanElev`
+      // therefore guarantees at least one of the two bracketing stations
+      // registers the crossing, every time. Harmless wherever the march is
+      // already fine relative to the sun angle: `feather` already exceeds this
+      // floor there, so `Math.max` is a no-op (every existing clean-geometry
+      // test in this module's suite sits in that regime, unaffected).
+      //
+      // Applied to BOTH sub-tests below, not just the floating one — the same
+      // gap can turn a building's own TIP fade into a hard cliff instead of a
+      // smooth one when the march is coarse relative to the sun angle, and
+      // it's the identical resolution limit either way.
+      const marchFeather = Math.max(feather, step * tanElev);
+
+      // ---- BUILDING: COLUMN physics, unchanged since Round Six. -----------
+      // A blocker occupies EVERY height from 0 up to buildingHeightPx, so it
+      // blocks for every distance where the ray — floored at the receiver's
+      // own building height, so a building cannot shadow its own interior —
+      // hasn't yet climbed above it.
+      let buildingBlocked = 0;
+      if (buildingCoverage > 0 && buildingHeightPx > 0) {
+        const buildingOver = buildingHeightPx - Math.max(rayHeight, receiverBuildingHeight);
+        if (buildingOver > 0) {
+          const t = marchFeather > 0 ? Math.min(1, buildingOver / marchFeather) : 1;
+          buildingBlocked = buildingCoverage * t * t * (3 - 2 * t);
+        }
+      }
+
+      // ---- FLOATING: BAND physics (Round Seven). ---------------------------
+      // A thin caster occupies only a narrow band AT its own height, so it
+      // blocks only near the ONE distance where the ray's height crosses that
+      // band — not everywhere beneath it, the way a column does. `heightGate`
+      // is what keeps a wide slab from shadowing itself: nothing at the SAME
+      // height as the receiver's own floating surface is taller than it, so no
+      // part of a uniform canopy can ever count as "a new blocker" for a
+      // receiver standing on that same canopy — the bleed-ghost immunity
+      // Round Six found, generalised past a single unconditional floor.
+      let floatingBlocked = 0;
+      const stationFloatingHeight = at.floatingHeightPx ?? 0;
+      if (floatingCoverage > 0 && stationFloatingHeight > 0 && marchFeather > 0) {
+        const heightGate = smoothstep01(0, marchFeather, stationFloatingHeight - receiverFloatingHeight);
+        if (heightGate > 0) {
+          const crossingOver = marchFeather - Math.abs(stationFloatingHeight - rayHeight);
+          if (crossingOver > 0) {
+            const t = Math.min(1, crossingOver / marchFeather);
+            floatingBlocked = floatingCoverage * heightGate * t * t * (3 - 2 * t);
+          }
+        }
+      }
+
+      const blocked = Math.max(buildingBlocked, floatingBlocked);
       if (blocked > occlusion) occlusion = blocked; // MAX: the deepest blocker wins, once
     }
   }
@@ -423,44 +708,6 @@ export function angleDeltaDeg(a, b) {
 export const GATE_SHARPEN_LOW = 0.12;
 export const GATE_SHARPEN_HIGH = 0.35;
 
-/**
- * THE SELF-SHADOW GUARD'S OWN SHARPENING (2026-07-28, ROUND FOUR — author:
- * "no longer above the light fixture but now there is a noticeable gap
- * between the building and the shadows that wasn't there before").
- *
- * The self-shadow guard ([[feedback_elevation_is_sort_key_not_offset]]'s
- * "ROUND THREE") reads THIS pixel's own height at d=0 (`height0`) and floors
- * every march station's blocker test with it, so a caster cannot shadow its
- * own footprint. The caster texture is deliberately LINEAR-filtered
- * (`bakeCasterTexture`'s own header: a silhouette edge must read as a soft
- * RAMP, which the march's OTHER contact-hardening depends on) — so a
- * receiver standing on genuinely SEPARATE ground, close enough to a wall's
- * true edge to share a blurred texel with it, reads a PARTIAL, nonzero
- * height0 that is not really "self" at all. Unsharpened, that partial floor
- * weakens or erases the shadow exactly at the contact point — precisely the
- * "gap between the building and its own shadow" this exists to close. This
- * is the SAME coarse-grid-blur shape {@link GATE_SHARPEN_LOW}/
- * {@link GATE_SHARPEN_HIGH} already collapse for the receiver gate, applied
- * here to the self-shadow guard's own coverage read instead of copied wholesale
- * — separate constants because the two fields' blur radii are not guaranteed
- * to match (different source data, possibly different effective resolution).
- *
- * ⚠️ RETUNED (2026-07-28, same day, second live pass): first shipped at the
- * SAME values as `GATE_SHARPEN_LOW`/`HIGH` (0.12/0.35) — author confirmed
- * this helped (the gap got visibly smaller) but did not close it, meaning
- * this field's own blur reaches further than the `_Outdoors` gate's does at
- * those thresholds. Raised well above the receiver gate's own values: a
- * caster's genuine, non-edge INTERIOR reads coverage close to 1.0, so there
- * is wide margin above 0.75 for the confirmed self-shadow guard (the light
- * fixture case) to keep working, while far more of the boundary-blurred
- * range now discounts to zero. If a gap is still visible after this, the
- * blur is wider still than even this — raise `HIGH` again rather than
- * suspecting a different mechanism; the direction is confirmed correct, only
- * the magnitude was short.
- */
-export const SELF_HEIGHT_SHARPEN_LOW = 0.3;
-export const SELF_HEIGHT_SHARPEN_HIGH = 0.75;
-
 /** @param {number} e0 @param {number} e1 @param {number} x @returns {number} */
 function smoothstep01(e0, e1, x) {
   if (e0 === e1) return x < e0 ? 0 : 1;
@@ -478,17 +725,71 @@ export function sharpenReceiverGate01(rawGate01) {
 }
 
 /**
- * Apply the self-shadow guard's own sharpening curve to a raw 0..1 coverage
- * reading — see {@link SELF_HEIGHT_SHARPEN_LOW}'s own header for why this
- * exists. Exported (mirrors {@link sharpenReceiverGate01}'s own shape)
- * specifically so the CURVE can be asserted directly rather than only
- * indirectly through a full march.
- * @param {number} rawCoverage01
- * @returns {number} 0..1 confidence that this reading is genuinely "self".
+ * ============================================================================
+ * THE SELF-SHADOW GUARD — ONE PHYSICAL RULE, NO CONFIDENCE HEURISTICS
+ * (2026-07-30, ROUND SIX — and the round that finally MEASURED instead of
+ * reasoning. Rounds four and five each invented a "is this station really
+ * part of me" confidence test; a CPU-twin simulation of the author's own
+ * wall-mounted lamp, with the real reported sun/grid numbers, showed both
+ * were wrong in opposite directions and the truth needed neither.)
+ * ============================================================================
+ *
+ * THE RULE: **you cannot be shadowed by something that is not taller than you
+ * are.** That is not a heuristic, an approximation, or a tuned threshold — it
+ * is what "in shadow" means. A receiver standing on a 570px balcony is lit by
+ * any sun ray that clears 570px, whatever else the field happens to contain
+ * at that height or below it. So the ray's height at each station is floored
+ * by the RECEIVER's own height, unconditionally:
+ *
+ *     over = stationHeight − max(rayHeight, receiverHeight)
+ *
+ * WHAT THIS REPLACED, AND WHY BOTH ATTEMPTS FAILED. The problem both rounds
+ * were circling is real: the caster texture is deliberately LINEAR-filtered
+ * (a silhouette edge must read as a ramp — `bakeCasterTexture`'s own header),
+ * so one texel outside any caster there is a BLED reading: a smeared,
+ * half-height, half-coverage GHOST of that caster. It is not a separate
+ * object; it is the same object, blurred. Every attempt to identify "self" by
+ * measuring a CONFIDENCE and then scaling the floor by it got eaten by that
+ * ghost:
+ *
+ *   ROUND FOUR scaled the floor by the RECEIVER'S COVERAGE, reasoning that a
+ *   receiver truly inside a caster reads coverage ≈1. False for overhead and
+ *   sky-reach casters, whose coverage IS the art's own alpha
+ *   (`compositeItemMax(coverOverhead, item.alpha, …)`, mask-derive.js): a
+ *   greenhouse roof's semi-transparent window pane reads 0.4 and was demoted
+ *   to "not really self", so the roof's own opaque metal frame shadowed its
+ *   own glass — dark where the art is transparent, absent where it is opaque.
+ *   Exactly backwards, and reported live.
+ *
+ *   ROUND FIVE replaced coverage with a HEIGHT-MATCH (does this station read
+ *   the same height as me?), which fixes the greenhouse — but the bleed ghost
+ *   reads HALF the caster's height, so the match says "different object", the
+ *   floor drops to zero, and the ghost casts a real shadow back onto the very
+ *   caster that produced it. Measured: the lamp's own body sat at 63% darkness
+ *   while the ground beyond it sat at 100%, which is precisely the "lighter at
+ *   the end where the shadow is generated" the author reported twice.
+ *
+ * THE UNCONDITIONAL FLOOR IS IMMUNE TO THE GHOST BY CONSTRUCTION, because it
+ * never asks what the station IS. The ghost is half the caster's height, and
+ * half is not taller than whole, so it cannot shadow the caster — no identity
+ * test required. Walk the same cases:
+ *
+ *   lamp body (570) vs its own bleed ghost (285)  → 285 − 570 < 0, no shadow ✓
+ *   greenhouse glass (300) vs own frame (300)     → 300 − 300 = 0,  no shadow ✓
+ *   open ground (0) vs the lamp (570)             → 570 − ray,      shadow   ✓
+ *   low item (50) vs a taller neighbour (500)     → 500 − 50,       shadow   ✓
+ *   bleed ring (285) vs the solid wall (570)      → 570 − 285,      shadow   ✓
+ *
+ * That last row is round four's original complaint (a gap between a building
+ * and its own shadow) and it survives: the floor merely REDUCES `over` there
+ * from 570 to 285, and 285 still vastly exceeds the feather, so the contact
+ * point stays fully dark. The gap round four was chasing came from scaling the
+ * floor, not from having one.
+ *
+ * ⚠️ DO NOT REINTRODUCE A CONFIDENCE TEST HERE. Three rounds now have tried to
+ * decide "is this me?" from a blurred field that cannot answer it. The height
+ * comparison never needed to know.
  */
-export function sharpenSelfCoverage01(rawCoverage01) {
-  return smoothstep01(SELF_HEIGHT_SHARPEN_LOW, SELF_HEIGHT_SHARPEN_HIGH, clamp01(rawCoverage01));
-}
 
 /**
  * THE MAP-EDGE RAMP (author, 2026-07-24: *"we need to address how these shadows

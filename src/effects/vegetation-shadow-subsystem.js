@@ -112,6 +112,18 @@ export const VEG_SHADOW_RENDER_ORDER_MAGNITUDE = 0.2;
  * builds exactly this many taps: the tap count and the LOD that sizes each
  * tap's blur against the gap to the next one MUST be the same number, and one
  * home for it is what guarantees that.
+ *
+ * ⚠️ THIS IS THE `standard`-TIER VALUE, NOT ALWAYS THE LIVE ONE (2026-07-29).
+ * The performance-tier ladder (`vegetation-render.js#vegetationTierPlan`) now
+ * resolves a PER-TIER tap count — fewer at `performance`, more at `quality`/
+ * `extreme` — and `attachTileShadow`/the Case-2 inline build pass it into
+ * `buildVegetationMaterial` as `smearTaps`, stashed onto the returned uniform
+ * bag (`built.shadow.smearTaps`) so `syncUniforms`'s own gap/LOD math below
+ * reads the SAME number the shader actually unrolled instead of silently
+ * assuming this constant. This constant remains: the tier plan's own
+ * `standard` row (index 3, today's default) is defined AS this value — one
+ * value, one owner — and it is still the safe fallback wherever a resolved
+ * tap count is not yet known.
  */
 export const VEG_SHADOW_SMEAR_TAPS = 6;
 
@@ -225,8 +237,12 @@ export function createVegetationShadowSubsystem({
    * @param {object} item @param {object} kind @param {object} params
    * @param {object} state @param {number} imageW @param {number} imageH
    * @param {number} segments @param {[number,number]} [uvScale]
+   * @param {number} [smearTaps] - the resolved performance-tier smear-station
+   *   count (`vegetation-render.js#vegetationTierPlan`). Defaults to
+   *   `VEG_SHADOW_SMEAR_TAPS` (today's `standard`-tier value) so a caller that
+   *   has not been updated to resolve a tier still gets a correct shadow.
    */
-  function attachTileShadow(t, item, kind, params, state, imageW, imageH, segments, uvScale) {
+  function attachTileShadow(t, item, kind, params, state, imageW, imageH, segments, uvScale, smearTaps) {
     // THE PAD — how far outside the plant's own quad its shadow can ever
     // reach. Constant per KIND (the throw is bounded by
     // `maxThrowForHeightPx`, plus the penumbra at its softest), so the
@@ -237,13 +253,23 @@ export function createVegetationShadowSubsystem({
     const w = Math.max(1, Math.abs(state.placement?.width ?? 1));
     const h = Math.max(1, Math.abs(state.placement?.height ?? 1));
     const shadowPadUv = [padPx / w, padPx / h];
-    const built = buildVegetationMaterial(t.tex, item, kind, params, { asShadow: true, uvScale, shadowPadUv });
+    const taps = Number.isFinite(smearTaps) && smearTaps > 0 ? smearTaps : VEG_SHADOW_SMEAR_TAPS;
+    const built = buildVegetationMaterial(t.tex, item, kind, params, {
+      asShadow: true,
+      uvScale,
+      shadowPadUv,
+      smearTaps: taps,
+    });
     // How many ART TEXELS one world px covers — the smear LOD needs it to
     // size a station's blur against the gap to the next station (see
     // syncUniforms). Stashed on the uniforms object itself so the sync
     // signature stays "take the uniforms directly", the discipline that
     // function's own header insists on after a real desync bug.
     built.shadow.artTexelsPerWorldPx = imageW / w;
+    // The SAME tap count the shader above actually unrolled — syncUniforms'
+    // gap/LOD maths below must agree with it or the ladder-fix's "consecutive
+    // stations overlap" guarantee breaks (see VEG_SHADOW_SMEAR_TAPS's own doc).
+    built.shadow.smearTaps = taps;
     const shadowRec = { tile: t.tile, sub: null, geometry: new THREE.BufferGeometry(), segments: 0 };
     setTileGeometry(shadowRec, state.placement, imageW, imageH, segments, padPx);
     const mesh = new THREE.Mesh(shadowRec.geometry, built.material);
@@ -366,8 +392,16 @@ export function createVegetationShadowSubsystem({
     // sharpen past the base level) and at a sane ceiling (a mip that coarse
     // is a featureless blob already, and asking past the chain's end is
     // undefined).
+    //
+    // THE STATION COUNT MUST MATCH WHAT THE SHADER ACTUALLY UNROLLED, not
+    // always this module's own default — a resolved performance tier can build
+    // a DIFFERENT tap count (vegetation-render.js#vegetationTierPlan), stashed
+    // on this exact uniform bag as `smearTaps` by `attachTileShadow`/the Case-2
+    // inline build. Falling back to `VEG_SHADOW_SMEAR_TAPS` only covers a
+    // caller that predates the tier plan (or the Node test fixture below).
     const artTexelsPerWorldPx = uniforms.artTexelsPerWorldPx ?? 1;
-    const gapTexels = (cast.offsetPx / VEG_SHADOW_SMEAR_TAPS) * artTexelsPerWorldPx;
+    const taps = uniforms.smearTaps ?? VEG_SHADOW_SMEAR_TAPS;
+    const gapTexels = (cast.offsetPx / taps) * artTexelsPerWorldPx;
     uniforms.uShadowSmearLod.value = Math.max(0, Math.min(VEG_SHADOW_MAX_SMEAR_LOD, Math.log2(Math.max(1, gapTexels))));
 
     return cast.strength01 > 0;

@@ -222,6 +222,87 @@ run split across the 2- and 3-interval buckets.
 
 ---
 
+## 2C. 🔬 THE EFFECT SWEEP WAS PRESENTING NOISE AS A RANKING (2026-07-29) — INSTRUMENT FIXED
+
+**Two live sweeps, two different scenes, pasted by the author. Between them they contain ONE
+resolvable measurement and twenty-one unresolvable ones — and the tool printed all twenty-two to
+0.1 ms with a share-of-stack percentage beside each.** Fixed in `src/diag/perf-lab.js`; 6,059 tests
+green.
+
+### What the two reports actually said
+
+| Reading                                            | Scene A               | Scene B                    |
+| -------------------------------------------------- | --------------------- | -------------------------- |
+| baseline GPU                                       | 11.9 ms               | 10.8 ms                    |
+| all-effects GPU                                    | 18.4 ms               | 13.6 ms                    |
+| **effects reading NEGATIVE cost**                  | 4 of 11               | **7 of 11** (−1.3…−1.8 ms) |
+| solo configs reading _cheaper than the all-off_ run | 4                     | **9**                      |
+| `feltP50`, every single config                     | 8.4 ms                | 8.3–8.4 ms                 |
+| `impliedOtherMs` ("Foundry / other")               | **−10.0 ms**          | **−5.2 ms**                |
+| GPU samples per config                             | 20–21                 | 20–22                      |
+
+### Three defects, each now fixed
+
+**1. The baseline — the shared divisor on all eleven answers — was measured ONCE, FIRST.**
+That is the worst possible slot for it: the opening config is the only one that pays cold-pipeline
+costs (forced-toggle shader rebuilds, first residency pass, a cold thermal state), and whatever bias
+it carries is subtracted from **every** effect. Scene B is that shape exactly — nine of eleven solo
+configs read *lower* than the all-off baseline, seven clustered at −1.3…−1.8 ms. Random noise
+scatters both ways; a seven-strong one-sided cluster is a systematic offset.
+
+⇒ **The same all-off config is now re-measured at the END of the sweep.** The pair averages (the
+one-sided bias cancels instead of landing on all eleven effects), and — the part that matters more —
+their **difference is a measured noise floor**, `noiseFloorMs`. Two runs of a by-construction
+identical config can differ only by noise, so that gap is the smallest cost the run is entitled to
+claim. Derived from the run's own evidence, not a guessed threshold.
+
+**2. Nothing knew what the tool could resolve.** `perf-report.js` already had a floor estimator
+(`estimateSweepNoiseFloor`, "the worst negative reading is a lower bound on the noise") — but the
+perf-lab panel and its JSON never used it, and the estimator has a hole: it can only see noise that
+happened to land negative on an effect that happened to be cheap. Apply it to these two reports and
+the result is stark:
+
+| Scene | Floor from its own worst negative | What survives                                |
+| ----- | --------------------------------: | -------------------------------------------- |
+| A     |                            0.6 ms | candle flames (6.9 ms), fluid (1.0 ms)       |
+| B     |                        **1.8 ms** | **nothing — not even candles' own 1.0 ms**   |
+
+The floor differs 3× between two runs minutes apart, which is itself the argument for measuring it
+directly rather than inferring it from whichever effect got unlucky.
+
+⇒ Costs now carry `resolved`; a share-of-stack that would be **a percentage of noise** is
+suppressed (Scene B printed `−64.3% of effects`); unresolved rows are dimmed in the panel but keep
+their raw number, so nothing is hidden — only the false precision goes. `resolved: null` means no
+floor was measured, which reads as **unverified, not healthy**. The report's estimator now takes the
+larger of the derived and the measured floor, so the two authorities cannot disagree.
+
+**3. `impliedOtherMs` subtracted two clocks that do not commute.** `feltP50` is read
+**unthrottled** (frames pipeline freely); `gpuMs` is read **throttled** to one frame in flight. Once
+MSA's GPU frame exceeds the felt gap, that gap is no longer presentation — the queue is absorbing
+the overrun while the rAF cadence keeps ticking at the display's rate — so `felt − gpu` is negative
+**by construction**.
+
+🔴 **This is the same signature this file's own header records as the tell of the original
+queue-depth bug** (`-33.50 ms Foundry/other`, 2026-07-20). It came back at −10.0 and −5.2 and
+nothing flagged it, because `formatOther` only excused the band −2…0.
+
+⇒ Now returns `null` + `feltUnderstated`, and the panel states the useful conclusion outright
+instead: _"Felt P50 8.4 ms is SHORTER than MSA's own GPU frame (18.4 ms), so it is not presentation
+time — frames are pipelining. Real throughput is nearer 18.4 ms/frame (~54 fps)."_
+
+⚠️ **The consequence for `feltP50` generally: it is the rAF/display cadence, not the presented frame
+rate, and it reads 8.3–8.4 ms in twenty-six consecutive configs across two scenes because that is
+the 120 Hz refresh interval.** It is saturated and carries no signal in a GPU-bound regime — which
+is the only regime this project has ever measured. Do not quote it as fps. The benchmark route
+(§2/§2B) is unaffected: it reads the same gap distribution under real motion, where the numbers do
+move.
+
+**Also raised: `gpuSampleTarget` 20 → 40.** The median's error falls as ~1/√n, so this buys ~1.4×
+tighter costs for ~1 s more per config. `noiseFloorMs` is now the signal for whether even that is
+enough — if the floor comes back larger than the effect being chased, raise it rather than squint.
+
+---
+
 ## 3. TARGET 1 — `surface.specularDraw` — ✅ **FIXED** (2.96 → 0.675 ms)
 
 **Status: FIXED and MEASURED (2026-07-28). 4.4× cheaper, visually unchanged (author-confirmed).
@@ -791,6 +872,161 @@ scene-authoring question, not a code defect.
 
 ---
 
+## 5B. 🕯️ TARGET 4 — CANDLE FLAMES — ✅ **CAUSE CONFIRMED. It is the LIGHTS, not the flames.**
+
+**Status: MEASURED 2026-07-29, prediction upheld against the pre-registered threshold. The cost is
+`light.drawPointLights` + `light.drawColoration`, and the fix shipped as the first real rung of the
+performance-tier ladder (§5C), not as a hardcoded cheapening.**
+
+### The verdict, against a threshold written down BEFORE the run
+
+The threshold was: _"if `light.drawCandleFlame` accounts for more than 2 ms of the delta, the
+per-fragment noise hoist is worth building and the derivation is wrong. If under 0.5 ms, the flame
+shader is closed as a non-target."_
+
+| Zone                                       |     GPU ms | Draw calls | % of frame GPU |
+| ------------------------------------------ | ---------: | ---------: | -------------: |
+| **`light.drawPointLights`**                | **6.571**  |     **91** |      **32.2%** |
+| **`light.drawColoration`**                 | **6.541**  |     **91** |      **32.1%** |
+| `geometry.worldDraw`                       |      4.201 |         12 |          20.6% |
+| **`light.drawCandleFlame`** (every flame)  | **0.022**  |          2 |       **0.1%** |
+| Frame GPU total                            |      20.38 |            |                |
+
+**0.022 ms.** Twenty-three times under the "closed" threshold. Meanwhile the two light zones are
+**13.1 ms of a 20.4 ms frame — 64%.** The effect sweep, run separately and by a different method,
+put candles' marginal cost at **13.15 ms**: agreement to 0.3% with the two zones' sum.
+
+⚠️ **The report calls that a "method disagreement" (zone sum 0.022 vs sweep 13.15) and it is not
+one — both are right, and the gap between them is an ATTRIBUTION defect worth fixing.** The two
+light zones carry `ownerEffectId: null`, so candle lights are billed to nobody; the zone timer is
+measuring precisely what it brackets, and the sweep is measuring what disappears when candles are
+turned off. **An effect whose cost lands inside a shared pool cannot be zoned by bracketing alone.**
+Until that is fixed, `light.drawPointLights` should be read as "all lights, Foundry's and MSA's
+together" and never as a per-effect number.
+
+### Why the arithmetic beat the code-reading
+
+The flame shader **looks** far more expensive than the light: nine `mx_noise_float` evaluations plus
+a full wind-field sample per fragment, of which seven noises and the whole wind sample are per-candle
+constants being recomputed per pixel. It is a genuine inefficiency. **It is also completely
+irrelevant**, because a `sizePx` 24 billboard covers ~576 world px² and a `lightRadiusPx` 400
+(×1.25 boost ⇒ r = 500) light covers ~785,000 — **≈1,363×, drawn twice.**
+
+⇒ **This is §4's fetch-counting lesson a second time, and the area arithmetic caught it before a
+session was spent on the wrong file.** Shader complexity per pixel is worthless without the pixel
+count beside it. The per-fragment constant hoist stays recorded and unbuilt: bounded above by
+0.022 ms.
+
+### §5's closure was right about Foundry's lights and wrong about the scene
+
+§5 closed the point-light zones as "explained, not a defect — the only lever would be reducing light
+coverage/overlap, which is a scene-authoring question." That reasoning was reached on a scene with
+**17** lights. This scene has **91 draw calls** through the same pool, and the extra ones are not
+authored: **MSA generates a light per candle cluster**, at a code-default 400 px radius. Coverage is
+a code lever after all, wherever MSA is the one creating the lights.
+
+---
+
+## 5C. ⚙️ THE PERFORMANCE TIERS ARE NOW REAL (2026-07-29)
+
+**The author's directive, and the right frame for everything above:**
+
+> _"The goal isn't to remove expensive parts of effects, it's to make them into optional parts of the
+> effect enabled/disabled by selecting a performance profile… If I change my performance tier to low
+> I'd expect the candle flame to simplify, the light to cluster and so on."_
+
+### What was actually wrong: the ladders had no reader
+
+`Effects.md` §2 has specified tier ladders as manifest data for a long time, and **fourteen effects
+declared one. Nothing read them.** `PERFORMANCE_PROFILES`, `profileRank` and `enabledFromProfile`
+existed and were wired — but only to decide **whether** an effect runs, never **how much** of it.
+There was no `profile → rung` function anywhere in the codebase.
+
+Unread declarations rot, and this one had: **candle flames declared a single rung, _"a simple
+teardrop marker at each imported candle anchor — placement proof, not a finished flame"_, and listed
+`animated-flicker` under `deferredRungs` as NOT BUILT** — while the shipped effect ran a nine-noise
+chaotic life envelope with wind lean, gutter and snuff, and cast `lavish`-flicker point lights. The
+manifest described an effect that had not existed for weeks (`feedback_unconsumed_api_rots_silently`).
+
+### What shipped
+
+| Piece                                                        | Where                                                                       |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `resolveEffectTier(manifest, layers)` — profile → rung        | `effects/effect-cascade.js`, pure + total, beside its `enabled`/`params` siblings |
+| `tier.fromProfile` — **required** on rungs 1..N, Node-checked | `effects/effect-manifest.js` (+ profile monotonicity, + forbidden on rung 0) |
+| Resolved once, for EVERY effect, at the one door             | `effects/registry.js` → `resolved.perfTier` / `maxPerfTier` / `perfTierSource` |
+| The three shipped multi-rung ladders migrated                | water, specular, fluid — `fromProfile` derived from each rung's own declared cost class |
+| The candle ladder rewritten to match reality — 5 real rungs   | `effects/candle-flame.js`                                                   |
+| `candleTierPlan(tier)` → flame quality · light quality · **cluster factor** | `effects/candle-flame-geometry.js`                            |
+
+**Three rules, each taken from Effects.md rather than invented:** tier 0 is unconditional (§6 step 2
+— the weakest machine still gets the effect, correctly placed); rungs are **cumulative**, so the
+resolver takes the highest *contiguous* affordable rung and a mis-declared ladder degrades to a rung
+that exists rather than compiling a combination nobody has drawn; an explicit pin beats the profile
+(Law 5), which is also what §7's per-rung verification harness will need.
+
+**Law 4 is honoured** — every one of these is a graph-BUILD-time JS value that changes which nodes
+get constructed (or how many light meshes exist), never a uniform multiplied to zero.
+
+### The candle ladder, and the 13 ms dial
+
+| Rung | `fromProfile` | Class | Flame | Light | **Cluster ×** | What it adds                                          |
+| ---- | ------------- | ----- | ----- | ----- | ------------: | ----------------------------------------------------- |
+| 0 `ember`     | — (floor)   | C0    | calm  | plain |      **2.0**  | a flame at every candle, one merged pool per room     |
+| 1 `flicker`   | low         | C1    | calm  | 2-oct |      **1.5**  | two-octave flicker + warm/cool temperature shift      |
+| 2 `life`      | performance | C2    | life  | 2-oct |      **1.0**  | chaotic guttering, wind lean, snuff-out               |
+| 3 `boil`      | standard    | C2    | warp  | lavish|      **0.5**  | boiling silhouette, breathing core, wavering edge     |
+| 4 `perCandle` | extreme     | C8    | warp  | lavish|     **0.25**  | candles stop sharing a light                          |
+
+`clusterFactor` multiplies the light radius to get the merge cell, and **cell AREA goes as the
+factor squared** — so tier 0 covers **16×** tier 3's area and collapses a candle-lit room into one or
+two pools instead of dozens of full-cost Foundry-parity meshes. That is the dial that moves 13 ms.
+
+### 🔒 Turning this on changes nothing at the default — by test, not by hope
+
+**Tier 3 reproduces today's shipped behaviour exactly** (flame quality 2, `lavish` light, cluster
+0.5), and the default `standard` profile resolves to tier 3. A test asserts the fallback constant
+`CANDLE_DEFAULT_TIER` **equals what the default profile actually resolves the real ladder to**, so
+retuning a rung's `fromProfile` cannot leave the constant behind pointing at a different look — two
+authorities on one number is its own bug class. Further tests pin that cluster factor and both
+qualities are monotonic down the ladder (a better machine never merges more, or looks plainer).
+
+`animationQuality` gained an `auto` default meaning "follow the profile"; any explicit value still
+pins it and beats the profile (Law 5).
+
+⚠️ **NOT YET MEASURED: how much tier 1 actually saves on the candle-heavy scene.** The prediction is
+large — 91 light draw calls is the input, and cluster area scales quadratically — but this document's
+own standing rule is that a change with no before/after is a hope, not a fix. **The measurement is
+one profile run at `low` vs `standard`, and it belongs in the ledger before this entry is called
+done.**
+
+---
+
+## 5D. Appendix — the sweep signal that started §5B, and the shader lever it did NOT justify
+
+### The original sweep reading
+
+| Scene | candle solo | baseline | **cost**    | share of the whole effect stack |
+| ----- | ----------: | -------: | ----------: | ------------------------------: |
+| A     |     18.8 ms |  11.9 ms | **+6.9 ms** |            **106.2%** (of 6.5)  |
+| B     |     11.8 ms |  10.8 ms |     +1.0 ms |                           35.7% |
+
+In Scene A, candles cost **more than every other effect combined** — `__all__` (18.4 ms) is within
+0.4 ms of candles-alone (18.8 ms), so the other ten effects sum to approximately nothing. It is also
+the only effect to move the felt tail: `feltP95` 41.7 ms, identical to `__all__`'s, against 16.7 ms
+at baseline. Scene B's 1.0 ms is **inside that run's own noise floor** (§2C) and proves only that the
+cost scales with candle count, not that it is 1.0 ms.
+
+### Noted and deprioritised — the per-fragment constants in the flame shader
+
+Real, and recorded so nobody rediscovers it as a theory: seven of the nine noise evaluations and the
+whole wind-field sample in `buildCandleFlameMaterial` are per-candle constants computed per fragment,
+and TSL `varying()` would move them to the vertex stage **losslessly** (a value constant across the
+quad interpolates exactly). **Bounded above by the entire flame draw, MEASURED at 0.022 ms.** Do not
+build it for performance. It becomes relevant only if `sizePx` is ever raised dramatically.
+
+---
+
 ## 6. The meta-lever — 7.32 Mpx at DPR 1.5
 
 Every GPU number above scales with pixel count. DPR 1.5 → 1.0 is ~55% fewer pixels: static
@@ -820,8 +1056,20 @@ Carried here so they are not mistaken for facts about the renderer:
 
 - **`geometry.worldDraw` cannot be sub-zoned** — one `render()` call, one timestamp. Splitting it
   needs either per-object passes or a different measurement technique.
-- **The sweep cannot resolve anything under ~1.1 ms** on this machine (self-measured from its own
-  negative readings). It diffs two whole-frame medians. Use the zone timer for anything smaller.
+- ~~**The sweep cannot resolve anything under ~1.1 ms**~~ — ✅ **NO LONGER A GAP, it is now a
+  reported number.** The sweep re-runs its all-off baseline at the end and publishes the drift as
+  `summary.noiseFloorMs`; per-effect costs carry `resolved`, and a share-of-stack is suppressed
+  rather than printed as a percentage of noise (§2C). The floor is per-run, not a constant — two
+  runs minutes apart measured 0.6 ms and 1.8 ms. Still diff-of-two-medians, so still use the zone
+  timer for anything smaller than the floor it reports.
+- 🔴 **`feltP50` is the rAF/display cadence, NOT the presented frame rate.** It read 8.3–8.4 ms in
+  twenty-six consecutive sweep configs across two scenes — the 120 Hz refresh interval — while MSA's
+  own GPU frame was 10.8–18.8 ms. When GPU work exceeds the frame gap the queue absorbs the overrun
+  and rAF keeps ticking at the display's rate, so the metric saturates. **Never quote it as fps in a
+  GPU-bound regime**, which is the only regime this project has measured. The sweep now detects this
+  (`feltUnderstated`), says so, and suppresses the `felt − gpu` subtraction that it invalidates
+  (§2C). The 60 s benchmark route is unaffected — under real motion those gaps do move (§2B's vsync
+  ladder).
 - 🔴 **NEW, and it invalidates past sweep readings: the effect sweep is BLIND to any effect whose
   meshes are shown/hidden in a residency pass.** A residency pass only re-runs on pan/zoom, so during
   a static sweep window the toggle flips the effect's `enabled` flag, the uniform sync notices, and
@@ -862,6 +1110,12 @@ Carried here so they are not mistaken for facts about the renderer:
 | 2026-07-28 | **§4 `Isolate draw item` test run**: 44→14 draws saved only 2.9%                                                                                                                                 | **Overdraw RULED OUT — depth pre-pass abandoned before any code was written.** ONE item = 97% of the zone; cause is `buildVegetationMaterial`'s per-fragment curl-noise + wind sample on a full-screen layer                                                                                                                                                                                                                                                                                                                                                                                   |
 | 2026-07-28 | **A zero-strength vegetation shadow no longer draws** (was: a fully transparent padded quad still paying 15 fetches/fragment). Verdict on effective strength, applied on the per-frame sync path | ✅ **MEASURED same day — and it REFUTED the hypothesis it was built to test.** `geometry.worldDraw` 12.135 → 11.491 ms (−0.644 raw, ~−1.24 noise-normalised), with −2.9 draws / −72,539 triangles confirming the mechanism independently. **Not the ~4 ms that would have justified the per-kind gate, so the gate will not be built.** Frame GPU unchanged (17.83 → 17.83) — a darkness region appeared between runs (`light.drawRegions` 0 → 0.515 ms) and ate the saving; declared as a confound, not a code effect. Keep the change (free when shadows are off), log NO default-config win |
 | 2026-07-28 | **FIX SHIPPED — presence gates on BOTH `_Tree`/`_Bush` and `_Specular`** (vegetation coarse-mip foliage gate; specular presence gate with the maths moved inside `Fn()`)                         | ✅ **MEASURED, same route: 26.21 → 17.83 ms GPU (−32.0%), 38.2 → 54.2 avgFps (+42%), worst 20 → 30 fps, still ZERO hangs.** `geometry.worldDraw` −5.835 ms, `surface.specularDraw` −2.285 ms; the two targets are **96.9%** of the total frame saving. Author confirmed visuals unchanged. See §2B                                                                                                                                                                                                                                                                                             |
+
+| 2026-07-29 | **Effect-sweep instrument fixed** (`perf-lab.js`): baseline re-measured at the END of the sweep → costs use the averaged pair, and the pair's drift is published as a real `noiseFloorMs`; per-effect `resolved` flag; share-of-stack suppressed when it would be a percentage of noise; `impliedOtherMs` no longer differences the unthrottled felt gap against the throttled GPU median (returns `null` + `feltUnderstated` + a stated pipelining conclusion); `gpuSampleTarget` 20 → 40; `perf-report.js`'s own floor estimator now takes the larger of derived and measured | ✅ **No renderer change — the two pasted live sweeps contained ONE resolvable measurement and twenty-one unresolvable ones, all printed to 0.1 ms with percentages.** Scene B: 7 of 11 effects negative, 9 of 11 cheaper than the all-off baseline, `Foundry / other −5.2 ms` (Scene A: −10.0 ms) — the same signature the file's own header records as the 2026-07-20 queue-depth bug, unflagged because the excuse band was only −2…0. 6,059 tests green. See §2C |
+| 2026-07-29 | **Candle flames identified as the one resolvable target** (Scene A: +6.9 ms, 106.2% of the whole effect stack, the only effect to move `feltP95`: 41.7 ms vs 16.7 baseline)                                                                                                                                                                                                                                                                                                                                                                              | ⏳ **Cost CONFIRMED, cause DERIVED not measured.** Area arithmetic puts the point light at ~1,363× the flame billboard's covered pixels and drawn twice ⇒ the cost is predicted to be in `drawPointLights`/`drawColoration`, not `light.drawCandleFlame`. **Threshold pre-registered before the run** (§5B). Nothing built yet — deliberately                                                                                                                                                                             |
+
+| 2026-07-29 | **Candle prediction TESTED against its pre-registered threshold** — zone profile, candle-heavy scene                                                                                                                                                                                                                        | ✅ **UPHELD, decisively.** `light.drawCandleFlame` = **0.022 ms** (threshold for "flame shader is a real target" was 2 ms; for "closed" was 0.5 ms). `light.drawPointLights` 6.571 + `light.drawColoration` 6.541 = **13.1 ms of a 20.4 ms frame, 64%, 91 draw calls**; the sweep independently put candles' marginal cost at **13.15 ms** — agreement to 0.3%. The flame shader is CLOSED as a target; §5's "not a defect" closure held only for a 17-light scene. See §5B |
+| 2026-07-29 | **PERFORMANCE TIERS BUILT** — `resolveEffectTier` (profile → rung), `fromProfile` required + Node-validated per rung, resolved for every effect at the registry door, three shipped ladders migrated, candle ladder rewritten to 5 real rungs with clustering as its top dial                                                | ⏳ **BUILT + Node-tested (6,118 green), NOT yet live-measured.** Tier 3 reproduces today's look exactly and the default profile resolves to tier 3, pinned by a test tying the fallback constant to the ladder — **so the default is unchanged by construction.** The `low` ladder merges candle lights with a 16× larger cell. **The `low` vs `standard` profile run is the missing measurement and this entry is not done without it.** See §5C |
 
 ---
 

@@ -138,8 +138,49 @@ export function validateEffectManifest(m) {
               `${COST_CLASS_ORDER.join(', ')} (Effects.md §1's cost-class table, §2: required per rung)`
           );
         }
+        // WHEN DOES THIS RUNG GET BOUGHT — required on rungs 1..N, and the
+        // reason it is required rather than defaulted is that a ladder nothing
+        // reads is exactly how these ladders rotted in the first place
+        // (effect-cascade.js#resolveEffectTier's header). Rung 0 is the
+        // admission price and is bought unconditionally, so declaring a profile
+        // on it would be a promise the resolver deliberately ignores.
+        if (i === 0) {
+          if ('fromProfile' in t) {
+            fail(
+              `tiers[0].fromProfile is declared, but tier 0 is UNCONDITIONAL (Effects.md §6 step 2 / Law 1) — ` +
+                'the resolver ignores it, so declaring one is a promise that will not be kept. Remove it.'
+            );
+          }
+        } else if (!PERFORMANCE_PROFILES.includes(t.fromProfile)) {
+          fail(
+            `tiers[${i}].fromProfile is ${JSON.stringify(t.fromProfile)} — must be one of: ` +
+              `${PERFORMANCE_PROFILES.join(', ')}. Every rung above 0 must say the lowest performance ` +
+              'profile that buys it, or the profile selector cannot reach it (effect-cascade.js#resolveEffectTier).'
+          );
+        }
       }
     });
+
+    // PROFILE MONOTONICITY — a rung may not be bought at a LOWER profile than
+    // the rung beneath it. Rungs are cumulative (a rung may not depend on one
+    // above it, Effects.md §2), so the resolver takes the highest CONTIGUOUS
+    // affordable rung; a ladder that dips would leave a rung permanently
+    // unreachable — declared, paid for in code, and never once selected. That is
+    // the silent-rot failure this whole check exists to make loud.
+    for (let i = 2; i < m.tiers.length; i++) {
+      const prev = m.tiers[i - 1]?.fromProfile;
+      const cur = m.tiers[i]?.fromProfile;
+      const prevRank = PERFORMANCE_PROFILES.indexOf(prev);
+      const curRank = PERFORMANCE_PROFILES.indexOf(cur);
+      if (prevRank === -1 || curRank === -1) continue; // already reported above
+      if (curRank < prevRank) {
+        fail(
+          `tiers[${i}].fromProfile '${cur}' is a LOWER profile than tiers[${i - 1}]'s '${prev}' — rungs are ` +
+            'cumulative, so the resolver stops at the first unaffordable rung and this one could never be ' +
+            'reached. Raise it to at least the rung below.'
+        );
+      }
+    }
 
     // COST-CLASS MONOTONICITY (Effects.md Law 3: "a tier may only introduce a
     // cost class >= the tiers below it") — governs rungs 1..N ONLY. Tier 0 is

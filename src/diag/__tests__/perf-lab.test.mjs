@@ -4,7 +4,15 @@
  * injected fake harness + immediate frame-waiter, incl. the always-restore-on-error
  * guarantee. The DOM panel is browser-verified (CONVENTIONS §4).
  */
-import { buildSweepConfigs, summarizeSweep, formatMs, formatOther, runSweep, waitForGpuSamples } from '../perf-lab.js';
+import {
+  buildSweepConfigs,
+  summarizeSweep,
+  formatMs,
+  formatOther,
+  formatCost,
+  runSweep,
+  waitForGpuSamples,
+} from '../perf-lab.js';
 
 const EFFECTS = [
   { id: 'candleFlame', label: 'Candle flames' },
@@ -73,15 +81,23 @@ export async function run(t) {
 
   // --- buildSweepConfigs ---------------------------------------------------
   {
-    ok('no effects → just the baseline', buildSweepConfigs([]).length === 1);
+    ok('no effects → just the baseline, nothing to bracket', buildSweepConfigs([]).length === 1);
     const one = buildSweepConfigs([{ id: 'candleFlame', label: 'Candle' }]);
-    ok('one effect → baseline + solo, NO redundant all-on', one.length === 2 && one[1].key === 'candleFlame');
+    ok(
+      'one effect → baseline + solo + closing baseline, NO redundant all-on',
+      one.length === 3 && one[1].key === 'candleFlame'
+    );
     const two = buildSweepConfigs(EFFECTS);
-    ok('two effects → baseline + each solo + all-on', two.length === 4);
+    ok('two effects → baseline + each solo + all-on + closing baseline', two.length === 5);
     ok('baseline turns everything off', two[0].on.length === 0);
     ok('a solo config turns on exactly its one effect', two[1].on.length === 1 && two[1].on[0] === 'candleFlame');
     ok('the all-on config lists every effect', two[3].on.length === 2);
     ok('garbage entries are dropped', buildSweepConfigs([null, { label: 'no id' }, { id: 5 }]).length === 1);
+
+    // THE BRACKET — the closing config must be byte-identical in what it turns on, or
+    // its difference from the opening one is not a noise measurement at all.
+    ok('the closing baseline is LAST', two[two.length - 1].key === '__baseline2__');
+    ok('the closing baseline turns everything off, exactly like the opening one', two[4].on.length === 0);
   }
 
   // --- summarizeSweep — the delta math -------------------------------------
@@ -101,6 +117,68 @@ export async function run(t) {
     ok('implied Foundry/other = felt − MSA gpu (25−18=7)', s.impliedOtherMs === 7);
     ok('per-effect P95 carried through', s.perEffect[0].gpuP95 === 22);
     ok('sample counts carried through', s.perEffect[0].gpuSampleCount === 20 && s.all.gpuSampleCount === 20);
+    ok('no closing baseline → floor is null (unknown), not a fake 0', s.noiseFloorMs === null);
+    ok('no closing baseline → resolution is UNKNOWN, never a clean bill of health', s.perEffect[0].resolved === null);
+  }
+
+  // --- summarizeSweep — the bracketed baseline: bias removal + measured floor ---
+  {
+    // The closing baseline reads 2ms HIGHER than the opening one — the machine drifted
+    // over the run. Averaging is what stops that drift landing on every effect's cost.
+    const raw = {
+      __baseline__: { gpuMs: 10, gpuSampleCount: 40 },
+      candleFlame: { gpuMs: 18, gpuSampleCount: 40 },
+      uiWindowShadow: { gpuMs: 11.5, gpuSampleCount: 40 },
+      __all__: { gpuMs: 19, gpuSampleCount: 40, feltP50: 25 },
+      __baseline2__: { gpuMs: 12, gpuSampleCount: 40 },
+    };
+    const s = summarizeSweep(raw, EFFECTS);
+    ok('baseline is the MEAN of the bracketing pair ((10+12)/2 = 11)', s.baseline.gpuMs === 11);
+    ok('both ends stay visible for inspection', s.baselineOpenMs === 10 && s.baselineCloseMs === 12);
+    ok('drift keeps its SIGN (the machine got slower, +2)', s.baselineDriftMs === 2);
+    ok('the noise floor is the drift MAGNITUDE', s.noiseFloorMs === 2);
+    ok('costs are measured from the averaged baseline (candle 18−11=7)', s.perEffect[0].costMs === 7);
+    ok('a cost clear of the floor is resolved', s.perEffect[0].resolved === true);
+
+    // uiWindowShadow: 11.5 − 11 = 0.5 ms, inside a 2 ms floor. This is the row that used
+    // to print "0.50 ms / 6.3% of effects" as though it were a finding.
+    const shadow = s.perEffect.find((e) => e.id === 'uiWindowShadow');
+    ok('a cost inside the floor is NOT resolved', shadow.resolved === false);
+    ok('an unresolved cost keeps its raw number — nothing is hidden', shadow.costMs === 0.5);
+    ok('but its share of the stack is suppressed — no percentage of noise', shadow.pctOfEffects === null);
+    ok('a resolved effect still gets its share', s.perEffect[0].pctOfEffects === 87.5);
+  }
+
+  // --- summarizeSweep — a NEGATIVE cost is noise, and is caught by the floor ---
+  {
+    // The exact shape of the 2026-07-29 live report: nine of eleven effects reading
+    // BELOW an over-warm opening baseline, several of them negative.
+    const raw = {
+      __baseline__: { gpuMs: 10.8 },
+      candleFlame: { gpuMs: 11.8 },
+      uiWindowShadow: { gpuMs: 9.0 }, // −1.8ms: physically impossible as a cost
+      __all__: { gpuMs: 13.6, feltP50: 8.4 },
+      __baseline2__: { gpuMs: 9.4 },
+    };
+    const s = summarizeSweep(raw, EFFECTS);
+    const shadow = s.perEffect.find((e) => e.id === 'uiWindowShadow');
+    ok('a negative cost is flagged unresolved rather than ranked', shadow.resolved === false && shadow.costMs < 0);
+    ok('a negative cost gets NO percentage of the stack', shadow.pctOfEffects === null);
+    ok('averaging the bracket shrinks the impossible negative (−1.8 → −1.1)', shadow.costMs === -1.1);
+  }
+
+  // --- summarizeSweep — felt and GPU are different clocks, not subtractable ---
+  {
+    // 2026-07-29 live: felt P50 8.4ms beside 13.6ms of MSA GPU work. The old code
+    // reported "Foundry / other: −5.2 ms" — an impossible negative, unflagged.
+    const s = summarizeSweep({ __baseline__: { gpuMs: 9 }, __all__: { gpuMs: 13.6, feltP50: 8.4 } }, EFFECTS);
+    ok('GPU frame longer than the felt gap is FLAGGED, not differenced', s.feltUnderstated === true);
+    ok('and the meaningless subtraction is suppressed, not printed as a negative', s.impliedOtherMs === null);
+
+    // The regime where the subtraction IS valid: GPU fits inside the observed gap.
+    const okRegime = summarizeSweep({ __baseline__: { gpuMs: 4 }, __all__: { gpuMs: 6, feltP50: 25 } }, EFFECTS);
+    ok('when GPU fits inside the felt gap the difference is still reported', okRegime.impliedOtherMs === 19);
+    ok('and nothing is flagged', okRegime.feltUnderstated === false);
   }
 
   // --- summarizeSweep — honest nulls, never a lying 0 ----------------------
@@ -129,6 +207,16 @@ export async function run(t) {
     );
     ok('a large negative is shown plainly, not hidden', formatOther(-33.5) === '-33.50 ms');
     ok('a real positive formats normally', formatOther(5.1) === '5.10 ms');
+
+    ok('a resolved cost formats plainly', formatCost({ costMs: 6.9, resolved: true }) === '6.90 ms');
+    ok(
+      'an unresolved cost keeps its number but says it is noise',
+      formatCost({ costMs: -1.8, resolved: false }) === '< noise (-1.80 ms)'
+    );
+    ok(
+      'an unknown floor is stated as unverified, NOT silently accepted',
+      formatCost({ costMs: 0.5, resolved: null }) === '0.50 ms (unverified floor)'
+    );
   }
 
   // --- waitForGpuSamples — polls until the target lands, never hangs -------
@@ -153,6 +241,8 @@ export async function run(t) {
       candleFlame: { feltP50: 8.3, feltP95: 9, hitchCount: 0, gpuMs: 17, gpuP95: 20, samplesNeeded: 3 },
       uiWindowShadow: { feltP50: 8.3, feltP95: 9, hitchCount: 0, gpuMs: 6, gpuP95: 7, samplesNeeded: 3 },
       __all__: { feltP50: 25, feltP95: 40, hitchCount: 3, gpuMs: 18, gpuP95: 21, samplesNeeded: 3 },
+      // The closing baseline reads 1ms above the opening one — a run that warmed up.
+      __baseline2__: { feltP50: 8.3, feltP95: 9, hitchCount: 0, gpuMs: 6, gpuP95: 7, samplesNeeded: 3 },
     };
     const h = fakeHarness(EFFECTS, script);
     const out = await runSweep(h, {
@@ -162,13 +252,17 @@ export async function run(t) {
       pollFrames: 0,
       waitFrames: immediate,
     });
-    ok('raw captured every config', Object.keys(out.raw).length === 4);
+    ok('raw captured every config, incl. the closing baseline', Object.keys(out.raw).length === 5);
     ok('baseline GPU + felt both recorded', out.raw.__baseline__.gpuMs === 5 && out.raw.__baseline__.feltP50 === 8.3);
+    ok('the closing baseline is measured like any other config', out.raw.__baseline2__.gpuMs === 6);
     ok('a config reaches its scripted sample count', out.raw.candleFlame.gpuSampleCount === 3);
-    ok('summary computed from the run (candle cost 12)', out.summary.perEffect[0].costMs === 12);
-    // once per config (4) + once more in the sweep's finally cleanup (5 total).
-    ok('resetFrameStats called once per config, before its felt phase', h.calls.reset === 5);
-    ok('probe armed once per config (4 configs → 4 trues)', h.calls.probe.filter((x) => x === true).length === 4);
+    // Baseline averages to 5.5, so candle costs 11.5 — NOT the 12 a first-only baseline
+    // would have claimed. That 0.5ms is exactly the drift the bracket exists to remove.
+    ok('summary uses the averaged baseline (candle 17−5.5=11.5)', out.summary.perEffect[0].costMs === 11.5);
+    ok('and the run reports the floor it measured', out.summary.noiseFloorMs === 1);
+    // once per config (5) + once more in the sweep's finally cleanup (6 total).
+    ok('resetFrameStats called once per config, before its felt phase', h.calls.reset === 6);
+    ok('probe armed once per config (5 configs → 5 trues)', h.calls.probe.filter((x) => x === true).length === 5);
     // restore: the LAST setForcedEnabled for each effect is null
     const lastCandle = [...h.calls.forced].reverse().find((f) => f[0] === 'candleFlame');
     const lastShadow = [...h.calls.forced].reverse().find((f) => f[0] === 'uiWindowShadow');
@@ -182,6 +276,7 @@ export async function run(t) {
       candleFlame: { samplesNeeded: 1 },
       uiWindowShadow: { samplesNeeded: 1 },
       __all__: { samplesNeeded: 1 },
+      __baseline2__: { samplesNeeded: 1 },
     };
     const h = fakeHarness(EFFECTS, script);
     const phases = [];

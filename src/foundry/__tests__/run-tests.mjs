@@ -26,6 +26,7 @@ import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
 import { run as runSceneTokens } from './scene-tokens.test.mjs';
 import { run as runV2AnchorImport } from './v2-anchor-import.test.mjs';
+import { run as runSettingsAdapter } from './settings-adapter.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -80,6 +81,7 @@ const suites = [
   ['scene-layers', runSceneLayers],
   ['scene-tokens', runSceneTokens],
   ['v2-anchor-import', runV2AnchorImport],
+  ['settings-adapter', runSettingsAdapter],
 ];
 
 for (const [name, fn] of suites) {

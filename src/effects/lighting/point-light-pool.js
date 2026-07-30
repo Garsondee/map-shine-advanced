@@ -79,6 +79,7 @@
 
 import { createLogger } from '../../core/log.js';
 import { buildCandleLightSources } from '../candle-flame-geometry.js';
+import { buildLightningLightSources } from '../lightning-geometry.js';
 import { resolveLightAnimation } from './animations/registry.js';
 import { computeRegionAdjustedDarkness } from './region-geometry.js';
 import { computeAmbientColors } from './environmental-light.js';
@@ -288,13 +289,20 @@ function createLightEntry({
  *   `const`, never reassigned); `.texture` is read live per light.
  * @param {() => object} deps.getCandleRenderState - the boot.js-injected
  *   candle-state seam, passed straight through.
+ * @param {() => {enabled: boolean, params: object}} [deps.getLightningRenderState] -
+ *   the boot.js-injected lightning-state seam (enable + resolved
+ *   LIGHTNING_PARAMS). Optional: an un-wired caller casts no bolt light.
+ * @param {() => Array<object>} [deps.getLightningActiveStrands] - the
+ *   lightning subsystem's own live strand snapshot (effects/lightning-
+ *   subsystem.js#activeStrands) — read fresh every frame, same as
+ *   `getCandleRenderState`'s anchors.
  * @param {object} deps.uGlobalTimeMs - the ONE shared animation-clock TSL
  *   uniform node. NOT owned here — see the module header's "deliberately did
  *   not move" section. Written (`.value = env.time.tMs`) once per frame by
  *   `update()`, on the caller's behalf.
  * @returns {{
  *   lightScene: object, colorationScene: object,
- *   lightMeshes: Map, candleWallClipCache: Map,
+ *   lightMeshes: Map, candleWallClipCache: Map, lightningWallClipCache: Map,
  *   update: (darkness01: number, activeRegions: object[], env: object, darknessRealism01: number, currentFloor: object) => number,
  *   dispose: () => void,
  * }}
@@ -307,6 +315,8 @@ export function createPointLightPool({
   sunShadows,
   sceneColor,
   getCandleRenderState,
+  getLightningRenderState,
+  getLightningActiveStrands,
   uGlobalTimeMs,
 }) {
   /** A tiny dedicated Scene for point-light meshes — kept separate from the
@@ -355,6 +365,17 @@ export function createPointLightPool({
    * so this is recomputed ONLY when a candle's floor or radius actually
    * changes, never every frame. */
   const candleWallClipCache = new Map();
+
+  /** sourceId -> {floorId, radius, points, source, reason} — the SAME
+   * per-source wall-clipped shape cache as `candleWallClipCache`, keyed by
+   * lightning's own STABLE `wallClipRadiusPx` (never the fluctuating visual
+   * `radius` — see `lightning-geometry.js#buildLightningLightSources`'s own
+   * header for why the two are deliberately different fields: normalizing a
+   * cached shape by one frame's radius and rescaling the mesh by that SAME
+   * frame's radius is a lossless round-trip regardless of what the cached
+   * shape's own radius was, so a stable cache key costs nothing visually and
+   * avoids recomputing the wall sweep every single frame a bolt flickers). */
+  const lightningWallClipCache = new Map();
 
   /**
    * Reconcile the point-light mesh pool against this frame's live Foundry
@@ -427,6 +448,12 @@ export function createPointLightPool({
           colorHex: candleLightState.params?.color,
           animationQuality: candleLightState.params?.animationQuality,
           windResponse: candleLightState.params?.windResponse,
+          // THE PERFORMANCE RUNG — sets light flicker richness AND, far more
+          // expensively, how hard candles MERGE into shared lights. Measured
+          // 2026-07-29: the two point-light zones were 13.1ms of a 20.4ms frame
+          // across 91 draw calls, against 0.022ms for every candle FLAME in the
+          // scene. Light count is the dial; this is what turns it.
+          perfTier: candleLightState.perfTier,
         })
       : [];
     // WALL-CLIPPING candle lights (2026-07-20) — candleLights' own shapePoints
@@ -455,7 +482,56 @@ export function createPointLightPool({
       // naive-circle shapePoints untouched — the pre-fix behaviour, not a gap
       // this change introduces.
     }
-    const lights = candleLights.length ? [...foundryLights, ...candleLights] : foundryLights;
+
+    // LIGHTNING ORIGIN-FLASH LIGHTS (effects/lightning-geometry.js) — authored
+    // by us from the lightning subsystem's own live strand snapshot, shaped
+    // EXACTLY like a candle light so it flows through this SAME pool. Wall-
+    // clipped the same way, but keyed on lightning's own STABLE
+    // `wallClipRadiusPx` (never the visual `radius`, which jitters with
+    // strike intensity every frame — see buildLightningLightSources' own
+    // header for why the two are deliberately different fields and why plain
+    // exact-equality caching, unlike candle's, is safe here).
+    const lightningState = getLightningRenderState ? getLightningRenderState() : { enabled: false, params: {} };
+    const lightningStrands = getLightningActiveStrands ? getLightningActiveStrands() : [];
+    const lightningLights =
+      lightningState.enabled && lightningStrands.length
+        ? buildLightningLightSources(lightningStrands, env.time.tMs, lightningState.params ?? {})
+        : [];
+    // `originFlashWallClipEnabled` (default true) is a per-scene author
+    // choice, not per-strike — read once, same as V2's own `if (params.
+    // originFlashWallClipEnabled === false)` early return.
+    const lightningWallClipEnabled = lightningState.params?.originFlashWallClipEnabled !== false;
+    for (const strike of lightningLights) {
+      if (!lightningWallClipEnabled) continue; // KEEPS the naive-circle shapePoints untouched, unclipped by design
+      let cached = lightningWallClipCache.get(strike.sourceId);
+      if (!cached || cached.floorId !== currentFloorId || cached.radius !== strike.wallClipRadiusPx) {
+        const result = computeCandleWallClippedShape({
+          x: strike.x,
+          y: strike.y,
+          radius: strike.wallClipRadiusPx,
+          levelId: currentFloorId,
+        });
+        cached = { floorId: currentFloorId, radius: strike.wallClipRadiusPx, ...result };
+        lightningWallClipCache.set(strike.sourceId, cached);
+      }
+      if (cached.points) strike.shapePoints = cached.points;
+      // cached.points === null: the strike KEEPS its own naive-circle
+      // shapePoints (buildLightningLightSources' own fallback) untouched.
+    }
+    // Prune wall-clip cache entries for sources that no longer fire this
+    // frame (a bolt anchor pair edited/removed) — unlike lightMeshes' own
+    // "hide, never delete" Map (which needs stable identity for GPU mesh
+    // reuse), this cache holds no GPU resources, just cached JS arrays, so
+    // dropping a stale entry is free and keeps it from growing unbounded
+    // across a long session of edited bolt placements.
+    if (lightningWallClipCache.size) {
+      const liveLightningIds = new Set(lightningLights.map((s) => s.sourceId));
+      for (const id of lightningWallClipCache.keys()) {
+        if (!liveLightningIds.has(id)) lightningWallClipCache.delete(id);
+      }
+    }
+
+    const lights = [...foundryLights, ...candleLights, ...lightningLights];
     // Read ONCE per frame — a scene's grid size does not change light-to-light,
     // only scene-to-scene.
     const gridSizePixels = readGridSizePixels().gridSizePixels;
@@ -675,5 +751,13 @@ export function createPointLightPool({
     lightMeshes.clear();
   }
 
-  return Object.freeze({ lightScene, colorationScene, lightMeshes, candleWallClipCache, update, dispose });
+  return Object.freeze({
+    lightScene,
+    colorationScene,
+    lightMeshes,
+    candleWallClipCache,
+    lightningWallClipCache,
+    update,
+    dispose,
+  });
 }

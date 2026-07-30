@@ -161,7 +161,7 @@ export function run(t) {
       ...UI_WINDOW_SHADOW,
       tiers: [
         { n: 0, cost: { class: 'C4' }, adds: 'placement' },
-        { n: 1, cost: { class: 'C1' }, adds: 'volume' },
+        { n: 1, fromProfile: 'low', cost: { class: 'C1' }, adds: 'volume' },
       ],
     }).ok
   );
@@ -171,8 +171,8 @@ export function run(t) {
       ...UI_WINDOW_SHADOW,
       tiers: [
         { n: 0, cost: { class: 'C4' }, adds: 'placement' },
-        { n: 1, cost: { class: 'C3' }, adds: 'light' },
-        { n: 2, cost: { class: 'C1' }, adds: 'volume, out of order' },
+        { n: 1, fromProfile: 'low', cost: { class: 'C3' }, adds: 'light' },
+        { n: 2, fromProfile: 'low', cost: { class: 'C1' }, adds: 'volume, out of order' },
       ],
     }).ok
   );
@@ -182,8 +182,8 @@ export function run(t) {
       ...UI_WINDOW_SHADOW,
       tiers: [
         { n: 0, cost: { class: 'C4' }, adds: 'placement' },
-        { n: 1, cost: { class: 'C2' }, adds: 'motion' },
-        { n: 2, cost: { class: 'C2' }, adds: 'more motion, same class' },
+        { n: 1, fromProfile: 'low', cost: { class: 'C2' }, adds: 'motion' },
+        { n: 2, fromProfile: 'standard', cost: { class: 'C2' }, adds: 'more motion, same class' },
       ],
     }).ok
   );
@@ -193,6 +193,8 @@ export function run(t) {
       ...UI_WINDOW_SHADOW,
       tiers: ['C4', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8'].map((cls, n) => ({
         n,
+        // Rung 0 must NOT carry one (it is unconditional); every rung above it must.
+        ...(n === 0 ? {} : { fromProfile: 'low' }),
         cost: { class: cls },
         adds: `rung ${n}`,
       })),
@@ -354,7 +356,16 @@ export function run(t) {
     const descriptors = describeEffectSettings([UI_WINDOW_SHADOW]);
     const byKey = (k) => descriptors.find((d) => d.key === k);
 
-    ok('one effect → 2 global + 2 per-effect descriptors', descriptors.length === 4);
+    ok('one effect → 3 global + 2 per-effect descriptors', descriptors.length === 5);
+
+    const master = byKey(GLOBAL_SETTING_KEYS.msaEnabled);
+    ok(
+      'the master off-switch is a client bool defaulting ON, requiring a reload',
+      master?.scope === 'client' &&
+        master?.kind === 'bool' &&
+        master?.default === true &&
+        master?.requiresReload === true
+    );
 
     const profile = byKey(GLOBAL_SETTING_KEYS.profile);
     ok(
@@ -388,7 +399,11 @@ export function run(t) {
       'every descriptor is config:true (shows in Foundry Settings)',
       descriptors.every((d) => d.config === true)
     );
-    ok('no manifests → just the 2 global descriptors', describeEffectSettings([]).length === 2);
+    ok('no manifests → just the 3 global descriptors', describeEffectSettings([]).length === 3);
+    ok(
+      'the master off-switch exists even with zero effects registered — it gates BEFORE the cascade',
+      describeEffectSettings([]).some((d) => d.key === GLOBAL_SETTING_KEYS.msaEnabled)
+    );
 
     // deriveEffectLayers round-trips through a fake store — the shape the resolver eats.
     const store = {

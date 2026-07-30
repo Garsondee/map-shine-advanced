@@ -42,6 +42,25 @@
  *   harness.readCost(): { gpuProbe:{gpuMsMedian, gpuMsP95, gpuMsMax, sampleCount},
  *     hitchStats:{frameGapP50Ms, frameGapP95Ms, hitchCount}, renderMsAvgLast120 }
  *
+ * ⚠️ SECOND POST-MORTEM (2026-07-29, author-caught, from two pasted live reports): the
+ * throttle fix above was real and held — but the report it produced was still mostly
+ * unresolvable noise PRESENTED AS A RANKING. Three defects, all now fixed here:
+ *   1. THE BASELINE WAS MEASURED ONCE, FIRST — the single worst slot for the one number
+ *      every per-effect cost is subtracted from. See `buildSweepConfigs`. It is now
+ *      measured again at the END; the pair AVERAGES (killing the one-sided cold-start
+ *      bias) and its DIFFERENCE is `noiseFloorMs`, a real in-run resolution floor.
+ *   2. NOTHING KNEW WHAT THE TOOL COULD RESOLVE. Nine of eleven effects came back inside
+ *      the floor, seven of them NEGATIVE, each printed to 0.1 ms with a share of the
+ *      stack ("−64.3% of effects"). Costs now carry `resolved`, and a share that would be
+ *      a percentage of noise is suppressed (feedback_instruments_must_not_lie).
+ *   3. `impliedOtherMs` SUBTRACTED TWO INCOMMENSURABLE CLOCKS. `feltP50` is read
+ *      unthrottled, `gpuMs` throttled; once MSA's GPU frame exceeds the felt gap, that gap
+ *      is the display's cadence with the queue absorbing the overrun, not presentation.
+ *      The difference is then negative BY CONSTRUCTION — the reports showed −10.0 ms and
+ *      −5.2 ms, the same signature as the −33.50 ms above, and nothing flagged it because
+ *      `formatOther` only excused −2…0. It is now `null` + `feltUnderstated`, and the
+ *      panel states the pipelining conclusion outright, which is the useful reading.
+ *
  * The pure helpers (config list, per-effect delta math, formatting) are Node-tested;
  * runSweep/waitForGpuSamples are testable with an injected harness + frame-waiter; the DOM
  * panel is browser-verified (CONVENTIONS §4).
@@ -52,6 +71,12 @@ const log = createLogger('perf-lab');
 
 const BASELINE_KEY = '__baseline__';
 const ALL_KEY = '__all__';
+/**
+ * THE CLOSING BASELINE — the same all-off config, re-measured at the END of the sweep.
+ * See `buildSweepConfigs`/`summarizeSweep`: it exists to fix a systematic bias AND to
+ * hand back a MEASURED noise floor, from one extra config.
+ */
+const BASELINE2_KEY = '__baseline2__';
 
 // ---- pure helpers --------------------------------------------------------
 
@@ -68,8 +93,31 @@ function round1(v) {
 /**
  * The ordered configs a sweep runs: an all-OFF baseline (the scene's own cost), then
  * each effect ON alone (its marginal cost = solo − baseline), then all ON together (so
- * `all − baseline` is the whole effect stack and `felt − all` is Foundry/vsync/etc).
+ * `all − baseline` is the whole effect stack and `felt − all` is Foundry/vsync/etc),
+ * and finally THE SAME all-off baseline again.
  * The all-on row is omitted when there is only one effect (it would duplicate its solo).
+ *
+ * ⚠️ WHY THE BASELINE IS MEASURED TWICE (2026-07-29 — the fix for two live sweeps whose
+ * numbers were mostly noise being presented as precision):
+ *
+ * EVERY per-effect cost is `solo − baseline`, so the baseline is a shared divisor on
+ * eleven answers. Measuring it ONCE, FIRST, is the worst possible place for it: it is
+ * the only config that pays cold-pipeline costs (the forced-toggle shader rebuilds, the
+ * first residency pass, a cold thermal/clock state), and any drift it carries is
+ * subtracted from every effect in the run. A live sweep showed exactly that shape —
+ * baseline 10.8 ms against NINE of eleven solo configs reading LOWER than it, seven of
+ * them clustered at −1.3…−1.8 ms. Random noise scatters both ways; that is a systematic
+ * offset, and it made seven effects report a physically impossible negative cost.
+ *
+ * Re-measuring the identical config at the END fixes both halves at once:
+ *   - the two readings AVERAGE, so a one-sided cold-start/thermal bias cancels instead
+ *     of landing on all eleven effects;
+ *   - their DIFFERENCE is a genuine, in-run, same-machine, same-scene measurement of
+ *     this sweep's own repeatability — `noiseFloorMs`. Two runs of a config that is
+ *     BY CONSTRUCTION identical can only differ by noise, so anything smaller than that
+ *     gap is unresolvable BY THIS RUN'S OWN EVIDENCE, not by a guessed threshold
+ *     (feedback_probed_constants_vs_derived — derive the cutoff, never eyeball it).
+ *
  * @param {{id:string,label?:string}[]} effects
  * @returns {{key:string,label:string,on:string[]}[]}
  */
@@ -79,6 +127,9 @@ export function buildSweepConfigs(effects) {
   const configs = [{ key: BASELINE_KEY, label: 'Scene only (all effects off)', on: [] }];
   for (const e of list) configs.push({ key: e.id, label: e.label || e.id, on: [e.id] });
   if (ids.length > 1) configs.push({ key: ALL_KEY, label: 'All effects on', on: ids.slice() });
+  // The closing baseline is worth its ~2s only when it is actually bracketing something.
+  if (ids.length > 0)
+    configs.push({ key: BASELINE2_KEY, label: 'Scene only (repeat — measures this run’s noise)', on: [] });
   return configs;
 }
 
@@ -95,8 +146,18 @@ export function summarizeSweep(raw, effects) {
   const safeRaw = raw && typeof raw === 'object' ? raw : {};
   const list = Array.isArray(effects) ? effects.filter((e) => e && typeof e.id === 'string') : [];
   const base = safeRaw[BASELINE_KEY] ?? {};
+  const base2 = safeRaw[BASELINE2_KEY] ?? {};
   const allCfg = safeRaw[ALL_KEY] ?? (list.length === 1 ? (safeRaw[list[0].id] ?? {}) : {});
-  const baseGpu = num(base.gpuMs);
+  const baseGpuOpen = num(base.gpuMs);
+  const baseGpuClose = num(base2.gpuMs);
+  // AVERAGE the bracketing baselines (see buildSweepConfigs) so a one-sided cold-start or
+  // thermal drift cancels instead of biasing all N effect costs. One reading → use it.
+  const baseGpu =
+    baseGpuOpen != null && baseGpuClose != null ? (baseGpuOpen + baseGpuClose) / 2 : (baseGpuOpen ?? baseGpuClose);
+  // THE MEASURED RESOLUTION FLOOR. Two runs of a BY-CONSTRUCTION identical config can
+  // only differ by noise, so this gap is the smallest cost this run is entitled to claim.
+  const baselineDrift = baseGpuOpen != null && baseGpuClose != null ? baseGpuClose - baseGpuOpen : null;
+  const noiseFloor = baselineDrift == null ? null : Math.abs(baselineDrift);
   const allGpu = num(allCfg.gpuMs);
   const totalEffectGpu = baseGpu != null && allGpu != null ? allGpu - baseGpu : null;
 
@@ -105,12 +166,21 @@ export function summarizeSweep(raw, effects) {
       const r = safeRaw[e.id] ?? {};
       const solo = num(r.gpuMs);
       const cost = baseGpu != null && solo != null ? solo - baseGpu : null;
-      const pct = cost != null && totalEffectGpu ? round1((cost / totalEffectGpu) * 100) : null;
+      // `null` = no floor was measured (an old report, or a one-baseline sweep) — that is
+      // "unknown", NOT "resolved", and must not read as a clean bill of health.
+      const resolved = cost == null || noiseFloor == null ? null : Math.abs(cost) > noiseFloor;
+      // A PERCENTAGE OF NOISE IS NOT A PERCENTAGE. The live reports that prompted this
+      // printed "−64.3% of effects" for a −1.8 ms reading on an effect that cannot have a
+      // negative cost. Suppress the share when the underlying ms is unresolvable; keep the
+      // raw ms visible either way, so nothing is hidden — only the false precision goes
+      // (feedback_instruments_must_not_lie).
+      const pct = cost != null && totalEffectGpu && resolved !== false ? round1((cost / totalEffectGpu) * 100) : null;
       return {
         id: e.id,
         label: e.label || e.id,
         gpuMsSolo: round2(solo),
         costMs: round2(cost),
+        resolved,
         gpuP95: round2(num(r.gpuP95)),
         gpuSampleCount: r.gpuSampleCount ?? 0,
         pctOfEffects: pct,
@@ -120,7 +190,18 @@ export function summarizeSweep(raw, effects) {
     .sort((a, b) => (b.costMs ?? -Infinity) - (a.costMs ?? -Infinity));
 
   const allFelt = num(allCfg.feltP50);
-  const impliedOtherMs = allGpu != null && allFelt != null ? round2(allFelt - allGpu) : null;
+  // ⚠️ THE FELT AND GPU NUMBERS COME FROM TWO DIFFERENT EXECUTION REGIMES and may only be
+  // subtracted while one bounds the other. `feltP50` is read UNTHROTTLED (frames pipeline
+  // freely); `gpuMs` is read THROTTLED to one frame in flight. When MSA's own per-frame GPU
+  // work EXCEEDS the observed frame gap, that gap cannot be presentation — the queue is
+  // absorbing the overrun and the rAF cadence keeps ticking at the display's rate — so
+  // `felt − gpu` is not "Foundry + everything else", it is an artefact, and it always comes
+  // out negative. This file's own header records a "-33.50ms Foundry/other" as the tell of
+  // the original queue-depth bug; two live sweeps then quietly reported −10.0 and −5.2 with
+  // nothing flagging them, because `formatOther` only excuses −2…0. Report `null` and say
+  // why, rather than a number that cannot mean what its label claims.
+  const feltUnderstated = allGpu != null && allFelt != null && allGpu > allFelt;
+  const impliedOtherMs = allGpu != null && allFelt != null && !feltUnderstated ? round2(allFelt - allGpu) : null;
 
   return {
     perEffect,
@@ -139,7 +220,14 @@ export function summarizeSweep(raw, effects) {
       hitchCount: allCfg.hitchCount ?? null,
     },
     totalEffectGpuMs: round2(totalEffectGpu),
+    // The bracketing pair, kept visible: a large drift is itself a finding (the machine
+    // warmed up, or something leaked across the sweep), not just an error bar.
+    baselineOpenMs: round2(baseGpuOpen),
+    baselineCloseMs: round2(baseGpuClose),
+    baselineDriftMs: round2(baselineDrift),
+    noiseFloorMs: round2(noiseFloor),
     impliedOtherMs,
+    feltUnderstated,
   };
 }
 
@@ -152,15 +240,33 @@ export function formatMs(v) {
  * Display the implied "Foundry / other" line. A SMALL negative value is expected
  * measurement noise (felt frame-gap and throttled-GPU-median are not perfectly
  * commensurate clocks) and must not read as a scary, impossible negative cost — it is
- * clamped to a labelled "≈0". A LARGE negative is left as a real (if surprising) number:
- * it would mean MSA's own GPU work exceeds the observed frame gap, worth seeing plainly
- * rather than hiding.
+ * clamped to a labelled "≈0".
+ *
+ * ⚠️ The LARGE-negative case no longer reaches here from a real sweep: `summarizeSweep`
+ * now returns `null` when MSA's GPU work exceeds the felt gap, because in that regime the
+ * subtraction has no meaning at all (see its `feltUnderstated` note) — a number that big
+ * and that negative was never "surprising but real", it was two clocks being differenced.
+ * The branch stays as input validation for a hand-fed value.
  */
 export function formatOther(v) {
   const n = num(v);
   if (n == null) return '—';
   if (n < 0 && n > -2) return '≈0 ms (within noise)';
   return formatMs(n);
+}
+
+/**
+ * Display a per-effect GPU cost against the run's own measured floor. An unresolvable
+ * reading keeps its raw number (nothing is hidden) but is stated as being below the floor,
+ * so it can never be read as a ranked result. `resolved === null` means no floor was
+ * measured — "unknown", which is NOT the same as "fine".
+ * @param {{costMs:number|null, resolved:boolean|null}} e
+ */
+export function formatCost(e) {
+  const s = formatMs(e?.costMs);
+  if (e?.resolved === false) return `< noise (${s})`;
+  if (e?.resolved == null) return `${s} (unverified floor)`;
+  return s;
 }
 
 // ---- orchestration -------------------------------------------------------
@@ -218,7 +324,12 @@ export async function runSweep(harness, opts = {}) {
   const {
     settleFrames = 20,
     feltFrames = 60,
-    gpuSampleTarget = 20,
+    // 20 was not enough to resolve most effects: two live sweeps put nine of eleven
+    // readings inside their own noise, several of them negative. The median's error falls
+    // as ~1/√n, so doubling the target buys ~1.4× tighter costs for ~1s more per config.
+    // `summary.noiseFloorMs` is now the signal for whether even this is enough — if the
+    // floor comes back larger than the effect being chased, raise this, don't squint.
+    gpuSampleTarget = 40,
     pollFrames = 4,
     maxGpuPolls = 120,
     onProgress = () => {},
@@ -410,16 +521,27 @@ export function createPerfLab(harness) {
     table.appendChild(row(['Effect', 'GPU cost', '% of fx', 'P95'], true));
     if (summary.perEffect.length === 0) table.appendChild(row(['(no effects registered)', '', '', '']));
     for (const e of summary.perEffect) {
-      const tr = row([
-        e.label,
-        formatMs(e.costMs),
-        e.pctOfEffects == null ? '—' : `${e.pctOfEffects}%`,
-        formatMs(e.gpuP95),
-      ]);
+      const tr = row([e.label, formatCost(e), e.pctOfEffects == null ? '—' : `${e.pctOfEffects}%`, formatMs(e.gpuP95)]);
       tr.title = `n=${e.gpuSampleCount} GPU samples`; // low-confidence readings are visible on hover, not hidden
+      // An unresolvable row is DIMMED, not deleted — the number stays readable, it just
+      // stops competing for the eye with the ones the run can actually stand behind.
+      if (e.resolved === false) tr.style.opacity = '0.45';
       table.appendChild(tr);
     }
     container.appendChild(table);
+
+    const floor = num(summary.noiseFloorMs);
+    const unresolved = summary.perEffect.filter((e) => e.resolved === false).length;
+    container.appendChild(
+      el(
+        'div',
+        { opacity: '0.7', marginTop: '6px' },
+        floor == null
+          ? 'No repeat baseline in this run — the resolution floor is unknown, so treat every row above as unverified.'
+          : `Noise floor ${formatMs(floor)} (measured: the same all-off scene re-run at the end drifted by ` +
+              `${formatMs(summary.baselineDriftMs)}). ${unresolved} of ${summary.perEffect.length} effects are below it.`
+      )
+    );
 
     container.appendChild(el('div', { fontWeight: 'bold', margin: '12px 0 4px', color: '#8fd6ff' }, 'Scene'));
     const s = el('div', { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 10px' });
@@ -453,6 +575,24 @@ export function createPerfLab(harness) {
         verdict
       )
     );
+
+    // THE READING THAT WAS SILENTLY MISSING. When MSA's own GPU work exceeds the felt
+    // frame gap, that gap is the rAF/display cadence with the queue absorbing the
+    // overrun — NOT the rate frames actually reach the screen. Said plainly, because the
+    // old panel's answer was to print an impossible negative "Foundry / other" instead.
+    if (summary.feltUnderstated) {
+      const felt = num(summary.all.feltP50);
+      container.appendChild(
+        el(
+          'div',
+          { marginTop: '8px', padding: '8px', background: '#2a2118', borderRadius: '6px', color: '#ffd08a' },
+          `⚠️ Felt P50 (${formatMs(felt)}) is SHORTER than MSA's own GPU frame (${formatMs(allGpu)}), so it is not ` +
+            `presentation time — frames are pipelining and the felt figure is the display's own cadence. Real ` +
+            `throughput is nearer ${formatMs(allGpu)}/frame (~${Math.round(1000 / allGpu)} fps). "Foundry / other" ` +
+            `cannot be derived in this regime and is suppressed rather than shown as a negative.`
+        )
+      );
+    }
   }
 
   function row(cells, header) {

@@ -73,6 +73,15 @@ export const LONG_JUMP_FADE_RATIO = 0.33;
  * is a single full black hold, not two independently-scheduled clips. */
 export const FADE_CUT_HOLD_MS = 500;
 
+/** The black-screen beat playCameraPath's own intro holds for, between
+ * "snapped to the path's start" and "fading back up" — author request,
+ * 2026-07-29: "fade to black, move the camera, pause for a second, then
+ * fade back from black". Long enough to read as a deliberate beat, short
+ * enough not to stall. A fixed constant, not a per-path setting, matching
+ * this module's own SHOT_CUT_HOLD_MS/FADE_CUT_HOLD_MS (both also fixed) —
+ * every one of these is stage-direction timing, not creative framing. */
+export const INTRO_HOLD_MS = 1000;
+
 export const DEFAULT_SETTINGS = Object.freeze({
   sweepMs: 4000,
   easing: 'cosine',
@@ -180,10 +189,25 @@ export function buildCameraTimeline(path, mapDims) {
     const from = keyframes[i];
     const to = keyframes[i + 1];
     // `cutBefore` is an explicit authored choice — takes priority over the
-    // automatic long-jump heuristic (a short "new shot" cut across the room
-    // shouldn't accidentally read as a long-jump fade instead).
+    // automatic long-jump heuristic for THIS gap (a short "new shot" cut
+    // across the room shouldn't accidentally read as a long-jump fade
+    // instead). `!from.cutBefore` ALSO exempts the very NEXT gap — a shot's
+    // own first move right after landing via a hard cut — from the heuristic
+    // entirely: that hard cut already establishes "this is deliberate camera
+    // work," so a big sweep immediately following it can never be the
+    // ACCIDENTAL far-apart pair the heuristic exists to catch. Found live,
+    // 2026-07-29 — the THIRD time this exact failure mode hit the 'full'
+    // preset's own edge sweeps (2026-07-21, 2026-07-28's n_to_s analogue, now
+    // this): a per-path `longJumpFadeCut:false` override is too easy to lose
+    // (a stale saved path, a caller that never reads `suggestedLongJumpFadeCut`,
+    // hand-authored cutBefore keyframes with no preset involved at all) — a
+    // shot that hard-cuts in is now structurally immune, not just by
+    // convention. See the regression test below.
     const isLongJump =
-      settings.longJumpFadeCut && mapDims && computeTransitionDistanceRatio(from, to, mapDims) > LONG_JUMP_FADE_RATIO;
+      settings.longJumpFadeCut &&
+      mapDims &&
+      !from.cutBefore &&
+      computeTransitionDistanceRatio(from, to, mapDims) > LONG_JUMP_FADE_RATIO;
     if (to.cutBefore) {
       segments.push({ type: 'cut', to: pick(to), holdMs: SHOT_CUT_HOLD_MS });
     } else if (isLongJump) {
@@ -265,7 +289,10 @@ export function resolveEasingFn(easing, durationMs) {
 // own flat `CameraKeyframe[]` shape instead of V2's `points.{A..H}` record —
 // a generated preset is just a normal starting point the author can then
 // reorder/edit/insert holds into like any hand-placed keyframe, not a
-// separate "generated path" concept.
+// separate "generated path" concept. EXCEPTION: the 'full' preset's own
+// framing/direction numbers were revised 2026-07-21→2026-07-29 per direct
+// author spec (see its own branch below) and are no longer the raw V2 port;
+// s_to_n/n_to_s/w_to_e/e_to_w below remain the original V2 numbers untouched.
 // ===========================================================================
 
 /** Each letterbox bar's height as a fraction of viewport height (top+bottom
@@ -380,30 +407,37 @@ export function generateKeyframePreset(presetId, opts) {
 
   if (presetId === 'full') {
     const fitZoom = clampZoom(Math.min(viewW / dims.sceneWidth, viewH / dims.sceneHeight) * 0.95, 0.05, 2.0);
-    const sweepZoom = clampZoom(
-      Math.max(viewW / (dims.sceneWidth * 0.65), viewH / (dims.sceneHeight * 0.65)),
-      0.05,
-      2.0
-    );
-    const introZoom = clampZoom(sweepZoom * 1.15);
+    // "trying to frame the camera so that it can see roughly 50% of the map
+    // based on zoom" (author spec, 2026-07-29) — pure width-based, matching
+    // the simpler s_to_n/n_to_s presets' own formula (viewW / sceneWidth)
+    // rather than the old min/max-of-both-axes 0.65 fit: both edge sweeps
+    // below are vertical (south->north), so WIDTH is the dimension that
+    // actually reads as "half the map" while sweeping. Supersedes the
+    // original V2-ported formula for THIS preset only — see the section
+    // header above.
+    const sweepZoom = clampZoom(viewW / (dims.sceneWidth * 0.5), 0.05, 2.0);
     const b = getBoundsForZoom(dims, sweepZoom, viewW, viewH);
     // Four INDEPENDENT shots (V2's own A-B/C-D/E-F/G-H pairs), each its own
     // sweep — NOT one continuous pan through all 8 points. `cutBefore` marks
-    // where a new shot starts (C, E, G): shot 1 zooms in on the map's centre,
-    // shot 2 sweeps the WEST edge south→north, shot 3 sweeps the EAST edge
-    // north→south, shot 4 zooms back out — matching V2's actual playback
-    // (verified against camera-animator.js#animateTimeline: crossing a
-    // sweep-pair boundary is ALWAYS an instant snap + hold, never a pan).
+    // where a new shot starts (C, E, G). Revised 2026-07-29 per author spec:
+    // shot 1 zooms in on the map's centre to the SAME ~50% level the edge
+    // sweeps use (B); shot 2 sweeps the WEST edge south → north; shot 3
+    // sweeps the EAST edge south → north TOO — the SAME direction as shot 2,
+    // not V2's mirrored north→south ("we do the same to the right side");
+    // shot 4 cuts back to centre at that same ~50% level ("cut to the middle
+    // of the map again" — G is numerically identical to B, just cutBefore
+    // instead of panned-into) and THEN zooms back out to the wide fit ("zoom
+    // back out") as its own separate pure-scale sweep, not a pan.
     return {
       keyframes: [
         kf(b.centerX, b.centerY, fitZoom), // A — start zoomed out
-        kf(b.centerX, b.centerY, introZoom), // B — shot 1: zoom IN on centre
+        kf(b.centerX, b.centerY, sweepZoom), // B — shot 1: zoom IN to centre (~50%)
         kf(b.xL, b.yB, sweepZoom, true), // C — shot 2 starts: west edge, south
         kf(b.xL, b.yT, sweepZoom), //           shot 2: south → north
-        kf(b.xR, b.yT, sweepZoom, true), // E — shot 3 starts: east edge, north
-        kf(b.xR, b.yB, sweepZoom), //           shot 3: north → south
-        kf(b.centerX, b.yB, sweepZoom, true), // G — shot 4 starts: bottom-centre
-        kf(b.centerX, b.centerY, fitZoom), //           shot 4: zoom back OUT
+        kf(b.xR, b.yB, sweepZoom, true), // E — shot 3 starts: east edge, south
+        kf(b.xR, b.yT, sweepZoom), //           shot 3: south → north (same direction as shot 2)
+        kf(b.centerX, b.centerY, sweepZoom, true), // G — shot 4 starts: CUT back to centre (still ~50%, == B)
+        kf(b.centerX, b.centerY, fitZoom), //           shot 4: zoom back OUT to the wide fit
       ],
       suggestedSweepMs: PRESET_SUGGESTED_SWEEP_MS,
       // 2026-07-21 LIVE BUG (author): shots 2 and 3 (C→D, E→F) deliberately

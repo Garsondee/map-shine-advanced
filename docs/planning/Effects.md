@@ -119,11 +119,14 @@ export const WATER_EFFECT = {
 **Required per rung:**
 
 - `n` — its position. Contiguous from 0.
+- `fromProfile` — **the lowest performance profile that buys this rung.** Required on rungs 1..N, and **forbidden on rung 0**, which is unconditional (§6 step 2) — declaring one there is a promise the resolver deliberately ignores, so the validator rejects it. Must be ≥ the rung below's (see the second "may not" below). Same vocabulary as the manifest-level `enabledFromProfile`, so "when does this turn on" is answered one way for a whole effect and for one rung of one effect.
 - `cost.class` — its highest cost class. **Must be ≥ the rung below (Law 3).**
 - `cost.estMsPerMp` — the author's honest estimate at design time, replaced by the _measured_ value once `GpuPassTimer` has seen it. The estimate exists so a rung can be budgeted before it is written; the measurement exists because estimates are wrong.
 - `adds` — one line, in English, of what this rung buys. If it cannot be said in one line, it is probably two rungs.
 
-**A rung may not:** change a lower rung's output, introduce a cost class below its predecessor, or depend on a rung above it.
+**A rung may not:** change a lower rung's output, introduce a cost class below its predecessor, depend on a rung above it, or **declare a `fromProfile` lower than the rung beneath it** — rungs are cumulative, so the resolver stops at the first unaffordable one and a dipped rung could never be reached. All four are Node-checked (`effects/effect-manifest.js`).
+
+> **Why `fromProfile` is required rather than defaulted (added 2026-07-29):** these ladders existed for weeks with **no consumer at all** — fourteen manifests declaring rungs that nothing read. Candle flames declared a single rung, _"a simple teardrop marker… placement proof, not a finished flame"_, and filed `animated-flicker` under `deferredRungs` as unbuilt, while the shipped effect ran a nine-noise chaotic life envelope with wind, gutter and snuff. **A declaration nobody reads is a declaration that drifts** (`feedback_unconsumed_api_rots_silently`). A required field with a red test is what stops the next one rotting quietly; a defaulted one would not have.
 
 ---
 
@@ -177,7 +180,25 @@ Every tier of every effect is a distinct compiled pipeline. That is the price of
 
 ## 6. How the governor chooses
 
-Not built. The shape, so the manifests are right:
+**⚠️ STATUS, 2026-07-29: the EXPLICIT half is built; the MEASURING half is not.**
+
+Law 5 says tier comes from "the governor's measurements **and** explicit settings". Those are two
+separable things, and the explicit one shipped first because it needs no budget model:
+
+| Piece                                              | State                                                                                                                                                 |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| profile → rung, per effect                         | ✅ **`effects/effect-cascade.js#resolveEffectTier`**, resolved for every effect at the registry door and delivered as `resolved.perfTier`              |
+| step 2, the unconditional tier-0 floor             | ✅ enforced by the resolver; rung 0 ignores any declared profile                                                                                       |
+| an explicit per-effect pin beating the profile     | ✅ `layers.tierOverride`, clamped into the ladder — also what §7's per-rung verification harness needs                                                 |
+| step 1 (budget), 3 (spend by return/ms), 5 (damp)  | ❌ not built — these need measured per-rung costs, and the sweep that would supply them cannot resolve most effects (see `Performance-Insights.md` §2C) |
+| step 4 (coverage/zoom gate above C7)               | ❌ not built                                                                                                                                           |
+
+§8's gate for building the auto-governor — "≥2 tiered effects to arbitrate between" — is now met
+(fluid 6 rungs, specular 6, water 4, candle flames 5). It is still deliberately not built: an
+arbitration policy fed by numbers the instrument cannot yet resolve would be a confident allocator
+of noise. **Measure per-rung costs first.**
+
+The shape of the unbuilt half, so the manifests stay right:
 
 1. **Budget.** A frame's GPU time, minus the non-negotiables (geometry, lighting, present). What remains is the effect budget.
 2. **Floor.** Every effect gets tier 0. Unconditionally. Tier 0's total is part of the non-negotiable set, not the discretionary budget — Law 1.

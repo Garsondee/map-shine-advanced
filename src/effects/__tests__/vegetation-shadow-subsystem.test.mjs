@@ -128,4 +128,52 @@ export function run(t) {
     ok('an unknown kind pads by a finite amount rather than NaN', Number.isFinite(vegetationShadowPadPx(undefined)));
     ok('the smear tap count is the shared constant the material builds against', VEG_SHADOW_SMEAR_TAPS === 6);
   }
+
+  // ==========================================================================
+  // THE PERFORMANCE-TIER TAP COUNT (2026-07-29) — a resolved tier can build a
+  // DIFFERENT smear-station count (vegetation-render.js#vegetationTierPlan)
+  // than this module's own default. `syncUniforms`'s gap/LOD math MUST read
+  // whatever count the shader actually unrolled, stashed on the SAME uniform
+  // bag as `smearTaps` — never silently re-assume `VEG_SHADOW_SMEAR_TAPS`, or
+  // the ladder-fix's "consecutive stations overlap" guarantee breaks for
+  // every tier except `standard`.
+  // ==========================================================================
+  {
+    const sub = makeSubsystem({ castStrength: 0.45 });
+
+    const withoutOverride = fakeShadowUniforms();
+    sub.syncUniforms(withoutOverride, TREE, PLACEMENT, PARAMS);
+
+    const atTheDefault = fakeShadowUniforms();
+    atTheDefault.smearTaps = VEG_SHADOW_SMEAR_TAPS;
+    sub.syncUniforms(atTheDefault, TREE, PLACEMENT, PARAMS);
+
+    ok(
+      'an explicit smearTaps equal to the constant reproduces the no-override result exactly',
+      atTheDefault.uShadowSmearLod.value === withoutOverride.uShadowSmearLod.value
+    );
+
+    const coarser = fakeShadowUniforms();
+    coarser.smearTaps = 3; // performance tier's cheap 3-station smear
+    sub.syncUniforms(coarser, TREE, PLACEMENT, PARAMS);
+    ok(
+      'FEWER stations widen the gap between them, so the LOD reads coarser (higher)',
+      coarser.uShadowSmearLod.value > withoutOverride.uShadowSmearLod.value
+    );
+
+    const finer = fakeShadowUniforms();
+    finer.smearTaps = 12; // extreme tier's finest smear
+    sub.syncUniforms(finer, TREE, PLACEMENT, PARAMS);
+    ok(
+      'MORE stations narrow the gap between them, so the LOD reads finer (lower)',
+      finer.uShadowSmearLod.value < withoutOverride.uShadowSmearLod.value
+    );
+
+    // The exact formula this is standing in for (module header's own doc):
+    // gapTexels = (throw / stationCount) * artTexelsPerWorldPx; LOD = log2(gap),
+    // clamped to [0, 5]. Pinned once, numerically, so a future refactor of the
+    // clamp/log cannot silently change this without a red test.
+    const expectedLod = Math.max(0, Math.min(5, Math.log2((47 / 3) * 1)));
+    ok('the coarse-tier LOD matches the documented formula exactly', coarser.uShadowSmearLod.value === expectedLod);
+  }
 }

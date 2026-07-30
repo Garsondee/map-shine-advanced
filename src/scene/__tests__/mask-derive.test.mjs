@@ -539,6 +539,129 @@ export async function run(t) {
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // 🎚️ `casterGridDim` (2026-07-30) — the CASTER channels can rasterize at a
+  // DIFFERENT resolution from `gridSpec`, so a sun-shadow performance tier can
+  // buy a crisper SILHOUETTE without raising the shared 512-cap grid every
+  // OTHER consumer (water/specular/wind) budgets against. The load-bearing
+  // claim: `outdoors` (always at `gridSpec`) must still gate the caster
+  // channels CORRECTLY by WORLD POSITION even though the two grids no longer
+  // share an index space.
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const fineSpec = computeMaskGridSpec({ x: 0, y: 0, width: 100, height: 100 }, 20); // 20x20, texel 5 — 2x gspec
+    const split2x = deriveFloorProducts({
+      gridSpec: gspec,
+      casterGridSpec: fineSpec,
+      items: [],
+      floors: [
+        {
+          index: 0,
+          ceilingElevation: 10,
+          bottomElevation: 0,
+          // Same left-half-indoors painting as THE BUILDING CHANNEL test above.
+          outdoors: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) }],
+        },
+      ],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 256 },
+    });
+    const f = split2x[0];
+    t.ok(
+      'the SHARED channels stay at gridSpec`s own resolution (10x10 = 100), untouched',
+      f.coverAbove.data.length === 100 && f.outdoors.data.length === 100 && f.skyReach.data.length === 100
+    );
+    t.ok(
+      'the CASTER channels take on casterGridSpec`s resolution instead (20x20 = 400)',
+      f.casterChannels.building.data.length === 400 &&
+        f.casterChannels.coverBuilding.data.length === 400 &&
+        f.casterHeight.data.length === 400
+    );
+    // World x=22.5 (gx=4, well inside the painted-indoors left half) vs
+    // world x=77.5 (gx=15, well inside the untouched-outdoors right half),
+    // both at an arbitrary row (gy=10) — the SAME world-space boundary THE
+    // BUILDING CHANNEL test above already proved at gridSpec's own coarser
+    // resolution, now re-proved at DOUBLE it.
+    const bFine = f.casterChannels.building;
+    const idxIndoors = 10 * 20 + 4;
+    const idxOutdoors = 10 * 20 + 15;
+    t.ok('at 2x resolution, the indoors world position still stands up as a building', bFine.data[idxIndoors] > 0);
+    t.ok('and the outdoors world position still stands up as nothing', bFine.data[idxOutdoors] === 0);
+    t.ok(
+      'at the correct authored height, unaffected by the resolution change',
+      near((bFine.data[idxIndoors] / 255) * 2048, 256, 12)
+    );
+
+    // A caller that omits casterGridSpec gets BYTE-IDENTICAL behaviour to
+    // before this feature existed — the regression guard for every other test
+    // in this file that never passes it.
+    const noCasterSpec = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [],
+      floors: [
+        {
+          index: 0,
+          ceilingElevation: 10,
+          bottomElevation: 0,
+          outdoors: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) }],
+        },
+      ],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 256 },
+    });
+    t.ok(
+      'omitting casterGridSpec reuses gridSpec exactly, matching THE BUILDING CHANNEL test above',
+      noCasterSpec[0].casterChannels.building.data.length === 100 &&
+        near((noCasterSpec[0].casterChannels.building.data[5 * 10 + 2] / 255) * 2048, 256, 12)
+    );
+  }
+
+  // The OVERHEAD exterior gate must ALSO stay correct across a resolution
+  // split — it is the OTHER loop that reads `outdoors` beside the caster
+  // channels (mask-derive.js's own `OVERHEAD_EXTERIOR_THRESHOLD` gate).
+  {
+    const fineSpec = computeMaskGridSpec({ x: 0, y: 0, width: 100, height: 100 }, 20);
+    const gatedFine = deriveFloorProducts({
+      gridSpec: gspec,
+      casterGridSpec: fineSpec,
+      items: [
+        {
+          id: 'balcony',
+          elevation: 5,
+          hidden: false,
+          // Sits over the RIGHT (outdoors, exterior) half only.
+          placement: { x: 75, y: 50, width: 50, height: 100 },
+          alpha: makeUniformContent(1, 255),
+        },
+      ],
+      floors: [
+        {
+          index: 0,
+          ceilingElevation: 10,
+          bottomElevation: 0,
+          // Left half indoors, right half outdoors — same split as above.
+          outdoors: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 0) }],
+        },
+      ],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    const covOverheadFine = gatedFine[0].casterChannels.coverOverhead;
+    t.ok(
+      'the overhead exterior gate resolves at casterGridSpec`s own resolution too (20x20 = 400)',
+      covOverheadFine.data.length === 400
+    );
+    // The balcony spans world x=[50,100] (all exterior) — should read through
+    // the gate at ANY sampled point within its own footprint, at the FINE
+    // resolution, cross-checked by WORLD POSITION against the coarse
+    // `outdoors` grid rather than a shared index.
+    const idxOnBalconyExterior = 10 * 20 + 15; // world x=77.5, inside both the balcony and the exterior half
+    t.ok(
+      'an overhead item over EXTERIOR ground still casts at 2x resolution',
+      covOverheadFine.data[idxOnBalconyExterior] > 0
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
   // THE 2026-07-26 RETHINK — COVERAGE AND HEIGHT ARE TWO FACTS, NOT ONE BYTE
   // ══════════════════════════════════════════════════════════════════════
   //
@@ -828,6 +951,66 @@ export async function run(t) {
     const ov = gated[0].casterChannels.overhead;
     t.ok('an overhead tile over INDOOR ground casts nothing (no leak outside the building)', ov.data[5 * 10 + 2] === 0);
     t.ok('an overhead tile over OUTDOOR ground (an exterior balcony) still casts', ov.data[5 * 10 + 7] > 0);
+  }
+
+  // 🔒 THE ASYMMETRIC-FADE REGRESSION (2026-07-30, author live) — the SAME
+  // gate, but against a BLURRED `_Outdoors` transition (a ramp across several
+  // texels, not the hard step above) — exactly what a wall-mounted, thin
+  // overhead protrusion straddles at its own attachment point. Before this
+  // fix, the gate MULTIPLIED coverage by the raw ramp value, baking a fake,
+  // one-sided taper into the item's OWN coverage/height that the source art
+  // never had — strong at the confidently-outdoor end, fading to nothing at
+  // the indoor end, permanently, before the shadow's own softening ever ran.
+  {
+    // A GRADUAL ramp across the grid's width: indoors (0) on the left, a
+    // BLURRED middle band, confidently outdoors (255) on the right — the
+    // coarse-grid-blur shape a real `_Outdoors` mask has at a wall's edge.
+    const rampArt = {
+      placement: { x: 0, y: 0, width: 100, height: 100 },
+      content: (() => {
+        const w = 8;
+        const h = 8;
+        const data = new Uint8Array(w * h);
+        const ramp = [0, 0, 40, 100, 160, 220, 255, 255]; // strictly increasing, spans the midpoint
+        for (let gy = 0; gy < h; gy++) for (let gx = 0; gx < w; gx++) data[gy * w + gx] = ramp[gx];
+        return { w, h, data };
+      })(),
+    };
+    // ONE overhead item spanning the WHOLE floor width, so its own footprint
+    // straddles the entire ramp — the wall-mounted-protrusion shape: one
+    // continuous piece of art, not two separate tiles either side of a hard
+    // line.
+    const straddling = [
+      {
+        id: 'wallMountedBracket',
+        elevation: 5,
+        hidden: false,
+        placement: { x: 50, y: 50, width: 100, height: 100 },
+        alpha: makeUniformContent(1, 255),
+      },
+    ];
+    const faded = deriveFloorProducts({
+      gridSpec: gspec,
+      items: straddling,
+      floors: [{ index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [rampArt] }],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 0 },
+    });
+    const fadedOv = faded[0].casterChannels.coverOverhead;
+    const fadedOutdoors = faded[0].outdoors;
+    const row = 5 * 10;
+    // Read the item's OWN coverage where the item is fully outdoor-side, as
+    // the "what full, ungated coverage looks like" reference.
+    const fullCoverage = fadedOv.data[row + 9];
+    t.ok('sanity: the item genuinely covers this row at full strength once ungated', fullCoverage > 200);
+    for (let col = 0; col < 10; col++) {
+      const i = row + col;
+      const isExterior = fadedOutdoors.data[i] >= 128;
+      t.ok(
+        `col ${col}: gated coverage is BINARY, not a fraction of the raw outdoors ramp (outdoors=${fadedOutdoors.data[i]})`,
+        isExterior ? fadedOv.data[i] === fullCoverage : fadedOv.data[i] === 0
+      );
+    }
   }
 
   // THE ISOLATION TOGGLES — applied at DERIVATION, not as shader gates, so

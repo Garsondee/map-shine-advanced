@@ -124,6 +124,87 @@ export function resolveEffectEnabled(manifest, layers = {}) {
 }
 
 /**
+ * THE TIER RESOLVER — "how MUCH of this effect", the other half of the profile.
+ *
+ * ============================================================================
+ * THE GAP THIS CLOSES (2026-07-29)
+ * ============================================================================
+ *
+ * `resolveEffectEnabled` above answers ON or OFF. That is the coarse axis, and
+ * it was the only one wired: **fourteen effects declared a `tiers` ladder in
+ * their manifest and NOTHING read it.** Ladders that no consumer reads are the
+ * `feedback_unconsumed_api_rots_silently` shape — declared, plausible, never
+ * exercised, quietly drifting from the implementation. (Proof it had already
+ * started: candle flames declared ONE rung, "a simple teardrop marker…
+ * placement proof, not a finished flame", and listed `animated-flicker` under
+ * `deferredRungs` — while the shipped flame ran a nine-noise chaotic life
+ * envelope with wind, gutter and snuff, and its lights ran a `lavish` flicker.
+ * The manifest described an effect that had not existed for weeks.)
+ *
+ * THE MAPPING IS DATA, PER RUNG — `tier.fromProfile`, the lowest profile at
+ * which that rung is bought. Deliberately the SAME vocabulary and the SAME
+ * shape as the manifest-level `enabledFromProfile`, so "when does this turn on"
+ * is answered one way for a whole effect and for one rung of one effect. Per-
+ * effect behaviour stays DATA and never becomes an `if (id === …)` here — the
+ * rule effect-manifest.js's own header sets, and the `resolve-effect-enabled`
+ * corpse is why.
+ *
+ * THREE RULES, each from Effects.md rather than invented here:
+ *   1. **Tier 0 is unconditional** (§6 step 2, Law 1). It is the admission
+ *      price — the effect placed correctly — not a step on the ladder. The
+ *      lowest profile still gets it, and `fromProfile` on rung 0 is ignored
+ *      rather than obeyed, so no manifest can accidentally gate the floor away.
+ *   2. **Rungs are CUMULATIVE, so the answer is the highest CONTIGUOUS rung**
+ *      — the largest `n` where every rung `1..n` is affordable. A ladder is not
+ *      a menu: Effects.md §2 forbids a rung depending on one above it, so rung
+ *      3 without rung 2 is a state no effect's builder was written to render.
+ *      Scanning for contiguity (rather than trusting monotonic declarations)
+ *      means a mis-declared manifest degrades to a rung that EXISTS instead of
+ *      silently compiling a combination nobody has ever drawn.
+ *   3. **An explicit tier override beats the profile** (Law 5: "the governor's
+ *      measurements AND explicit settings"). Required anyway by §7's
+ *      verification harness, which must force each rung in turn to prove it
+ *      still renders. Clamped into the ladder, so a stale stored `7` on a
+ *      4-rung effect lands on the top rung instead of off the end.
+ *
+ * PURE + TOTAL, exactly like its siblings: a malformed ladder degrades to tier
+ * 0 (the effect still draws, in the right place) and never throws into a frame.
+ *
+ * @param {{tiers?: Array<{n: number, fromProfile?: string}>}} manifest
+ * @param {{profile?: string, tierOverride?: number|null}} [layers]
+ * @returns {{tier: number, maxTier: number, source: 'floor'|'profile'|'override'}}
+ *   `source` says WHY, so a report can distinguish "the profile bought this"
+ *   from "someone pinned it" — two states one integer cannot tell apart
+ *   (feedback_instruments_must_not_lie).
+ */
+export function resolveEffectTier(manifest, layers = {}) {
+  const tiers = Array.isArray(manifest?.tiers) ? manifest.tiers : [];
+  const maxTier = Math.max(0, tiers.length - 1);
+
+  // An explicit pin wins outright — but is clamped into the ladder that exists.
+  const override = layers?.tierOverride;
+  if (Number.isFinite(override)) {
+    return { tier: Math.max(0, Math.min(maxTier, Math.floor(override))), maxTier, source: 'override' };
+  }
+
+  const rank = profileRank(layers?.profile ?? DEFAULT_PERFORMANCE_PROFILE);
+  // Rule 2: walk UP from rung 1 and stop at the first unaffordable one. Rung 0
+  // is never consulted (rule 1) — it is already bought.
+  let tier = 0;
+  for (let n = 1; n <= maxTier; n++) {
+    const from = tiers[n]?.fromProfile;
+    // An undeclared rung is treated as requiring the TOP profile rather than
+    // being free: an effect that forgets to declare cannot silently hand the
+    // weakest machine its most expensive rung. The manifest validator reports
+    // it as an error too — this is the belt to that braces.
+    const needed = PERFORMANCE_PROFILES.includes(from) ? profileRank(from) : PERFORMANCE_PROFILES.length - 1;
+    if (rank < needed) break;
+    tier = n;
+  }
+  return { tier, maxTier, source: tier === 0 ? 'floor' : 'profile' };
+}
+
+/**
  * Resolve an effect's parameter VALUES through the cascade, on top of the
  * schema's declared defaults.
  *

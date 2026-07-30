@@ -7,8 +7,11 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runEffectRegistration } from './effect-registration.test.mjs';
+import { run as runEffectTier } from './effect-tier.test.mjs';
 import { run as runCandleFlame } from './candle-flame.test.mjs';
 import { run as runCandleFlameGeometry } from './candle-flame-geometry.test.mjs';
+import { run as runLightning } from './lightning.test.mjs';
+import { run as runLightningGeometry } from './lightning-geometry.test.mjs';
 import { run as runVegetation } from './vegetation.test.mjs';
 import { run as runVegetationRender } from './vegetation-render.test.mjs';
 import { run as runVegetationShadow } from './vegetation-shadow-subsystem.test.mjs';
@@ -46,8 +49,11 @@ const t = {
 
 const suites = [
   ['effect-registration', runEffectRegistration],
+  ['effect-tier', runEffectTier],
   ['candle-flame', runCandleFlame],
   ['candle-flame-geometry', runCandleFlameGeometry],
+  ['lightning', runLightning],
+  ['lightning-geometry', runLightningGeometry],
   ['vegetation', runVegetation],
   ['vegetation-render', runVegetationRender],
   ['vegetation-shadow-subsystem', runVegetationShadow],

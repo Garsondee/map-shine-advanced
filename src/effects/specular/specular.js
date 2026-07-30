@@ -346,12 +346,16 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
   Object.freeze({
     n: 8,
     id: 'floorGate',
-    label: '8 · Floor gate (R=floor, G=drawn)',
+    label: '8 · Floor gate (R=floor, G=drawn, B=background art)',
     reads:
       'The scene-attribute verdict. RED = this quad floor matches; GREEN = the attribute buffer says art ' +
-      'was drawn here. Flat yellow with no structure = no attr texture, so the gate compiled OUT (open). ' +
-      'GREEN IS EXPECTED TO BE BLACK — that buffer alpha lane is a known live bug and is deliberately not ' +
-      'multiplied in.',
+      'was drawn here; BLUE = the Level`s OWN background is still the topmost thing on screen (added ' +
+      '2026-07-29, the tile-occlusion fix — a Tile, or the Level`s own foreground/roof, drops this to ' +
+      'black). Flat yellow-ish with no structure = no attr texture, so the whole gate compiled OUT (open, ' +
+      'B reads as if unoccluded everywhere). GREEN IS EXPECTED TO BE BLACK — that buffer alpha lane is a ' +
+      'known live bug and is deliberately not multiplied in. BLUE going black under a Tile/roof and staying ' +
+      'lit on bare background is the gate working; BLUE flat black everywhere metal is painted means the ' +
+      'occlusion bit itself is not reaching this pass — check `buf:scene.attr` wiring before the mask.',
   }),
   Object.freeze({
     n: 9,
@@ -459,6 +463,18 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
       'black — Foundry bakes ambientDarkness into illum, and taking that grey as "some light" is exactly ' +
       'what used to make metal glow in the dark.',
   }),
+  Object.freeze({
+    n: 20,
+    id: 'attrDirect',
+    label: '20 · Attr, RAW (control for 8)',
+    reads:
+      'The same `buf:scene.attr` at the same screen UV as channel 8 (floor gate), sampled directly with ' +
+      'NOTHING applied — R=floor index, G=outdoors, B=the presence bitfield (bit 128 = background art). ' +
+      'Compare against 8: if 8 shows the gate closed (no blue) but THIS reads B clearly at or above 0.5, ' +
+      'the SHARED node 8 reads through is stale — the still-unresolved "debug material can read a ' +
+      'texture wrong where the real effect reads it correctly" class (2026-07-27, channel 19 vs 12`s own ' +
+      'history). If this ALSO reads B near zero, the write itself is the problem, not the instrument.',
+  }),
 ]);
 
 /** Channel 13's amplification. 16× turns a 0.02 contribution (invisible) into
@@ -497,13 +513,16 @@ export const SPECULAR = Object.freeze({
       cost: Object.freeze({ class: 'C4', estMsPerMp: 0.08 }),
       adds:
         'The mask read as STRENGTH and TINT, multiplied by the scene lighting and drawn where it is painted — ' +
-        'cropped to the metal own AABB (Law 6) and gated to the visible floor. The composite is ' +
+        'cropped to the metal own AABB (Law 6), gated to the visible floor, and gated to wherever the ' +
+        'background is still the topmost thing on screen (a Tile, or the Level own foreground/roof, punches ' +
+        'a real hole rather than letting the shine glow through it). The composite is ' +
         'tint x (1 + shimmer) x light, so at this tier shimmer is 0 and metal simply shines: the term that ' +
         'CANNOT be zero, which is what four invisible builds were missing.',
     }),
     Object.freeze({
       n: 1,
       name: 'shimmer',
+      fromProfile: 'low',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.03 }),
       adds:
         'Three anisotropic blob-lattice layers plus a voronoi cellular base whose cell size follows the mask ' +
@@ -513,6 +532,7 @@ export const SPECULAR = Object.freeze({
     Object.freeze({
       n: 2,
       name: 'parallax',
+      fromProfile: 'low',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.01 }),
       adds:
         'The pattern slides with the camera at ~1:1, near screen-locked, with each layer at its own depth and ' +
@@ -521,6 +541,7 @@ export const SPECULAR = Object.freeze({
     Object.freeze({
       n: 3,
       name: 'life',
+      fromProfile: 'low',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.005 }),
       adds:
         'A slow global drift and a gentle breathing pulse, so a parked view keeps evolving over ~20s without ' +
@@ -530,6 +551,7 @@ export const SPECULAR = Object.freeze({
     Object.freeze({
       n: 4,
       name: 'islands',
+      fromProfile: 'standard',
       cost: Object.freeze({ class: 'C3', estMsPerMp: 0.02 }),
       adds:
         'Connected metal regions labelled on the CPU and packed to a texture, each with its own parallax ' +
@@ -540,6 +562,7 @@ export const SPECULAR = Object.freeze({
     Object.freeze({
       n: 5,
       name: 'sunAndSky',
+      fromProfile: 'standard',
       cost: Object.freeze({ class: 'C3', estMsPerMp: 0.02 }),
       adds:
         'The outdoors mask gates a sun-azimuth grain bias: metal whose brushing runs across the light is ' +

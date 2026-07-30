@@ -200,6 +200,70 @@ export function importV2Anchors(scene, { resolveKind }) {
 
     const floorBinding = group.metadata?.levelBinding ?? null;
     const intensity = Number(group.emission?.intensity);
+    const commonParams = Number.isFinite(intensity) ? { intensity } : {};
+
+    // LINKED-ENDPOINTS KINDS (scene/anchor-catalog.js's own field, e.g.
+    // `lightning`) — a group is not flattened into N independent anchors;
+    // its FIRST and LAST finite point become one linked start/end pair
+    // (a V2 2-point group's only pair, or a 3+-point "wandering" group's
+    // outer two), and any INTERIOR points import as inert `role:'waypoint'`
+    // anchors on the same linkId — preserved data, not acted on by v1's
+    // runtime (effects/lightning.js's own `wandering-source` deferred rung).
+    if (kind.importStrategy === 'linkedEndpoints') {
+      const finite = [];
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        const x = Number(p?.x);
+        const y = Number(p?.y);
+        if (Number.isFinite(x) && Number.isFinite(y)) finite.push({ i, x, y: toV3Y(y) });
+      }
+      if (finite.length < 2) {
+        skipped.push({
+          groupId,
+          effectTarget,
+          pointCount: points.length,
+          reason: 'a linkedEndpoints kind needs at least 2 finite points',
+        });
+        continue;
+      }
+      const linkId = `v2:${groupId}`;
+      const first = finite[0];
+      const last = finite[finite.length - 1];
+      anchors.push({
+        id: `v2:${groupId}:${first.i}`,
+        kind: kind.id,
+        x: first.x,
+        y: first.y,
+        floorBinding,
+        enabled: true,
+        params: { ...commonParams, role: 'start', linkId },
+        provenance: 'importedFromV2',
+      });
+      anchors.push({
+        id: `v2:${groupId}:${last.i}`,
+        kind: kind.id,
+        x: last.x,
+        y: last.y,
+        floorBinding,
+        enabled: true,
+        params: { ...commonParams, role: 'end', linkId },
+        provenance: 'importedFromV2',
+      });
+      for (let w = 1; w < finite.length - 1; w++) {
+        anchors.push({
+          id: `v2:${groupId}:${finite[w].i}`,
+          kind: kind.id,
+          x: finite[w].x,
+          y: finite[w].y,
+          floorBinding,
+          enabled: true,
+          params: { ...commonParams, role: 'waypoint', linkId },
+          provenance: 'importedFromV2',
+        });
+      }
+      continue;
+    }
+
     let placed = 0;
     for (let i = 0; i < points.length; i++) {
       const p = points[i];
@@ -216,7 +280,7 @@ export function importV2Anchors(scene, { resolveKind }) {
         // V2's per-group emission.intensity → per-anchor param. If the value is
         // absent/invalid the authority's hydrateParams supplies the catalog
         // default (validate-at-write); we only forward a finite reading.
-        params: Number.isFinite(intensity) ? { intensity } : {},
+        params: commonParams,
         provenance: 'importedFromV2',
       });
       placed++;

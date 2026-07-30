@@ -39,13 +39,16 @@
  */
 
 import { validateEffectManifest } from './effect-manifest.js';
-import { resolveEffectEnabled, resolveEffectParams } from './effect-cascade.js';
+import { resolveEffectEnabled, resolveEffectParams, resolveEffectTier } from './effect-cascade.js';
 
 /**
  * @typedef {object} ResolvedEffect
  * @property {boolean} enabled
  * @property {Record<string, unknown>} params
  * @property {{key: string, reason: string}[]} rejected - stored values that failed validation (reported, never silently coerced).
+ * @property {number} perfTier - the resolved rung of this effect's ladder (effect-cascade.js#resolveEffectTier). 0 is the unconditional floor.
+ * @property {number} maxPerfTier - the top rung its manifest declares, so a UI can show "3 of 4" without re-reading the ladder.
+ * @property {'floor'|'profile'|'override'} perfTierSource - WHY that rung, so a report can tell "the profile bought this" from "someone pinned it".
  */
 
 /**
@@ -117,8 +120,22 @@ export function createEffectRegistry() {
       );
     }
     const enabled = resolveEffectEnabled(entry.manifest, layers);
+    // HOW MUCH, alongside WHETHER (2026-07-29). Resolved HERE, at the one door,
+    // for every effect at once — an effect that wants its rung reads
+    // `resolved.perfTier` and never learns what a profile is, and there is no
+    // per-effect wiring for a fourteenth effect to be forgotten from. Effects
+    // whose ladder is tier-0-only always get 0, which is exactly right: their
+    // manifest says they have nothing to spend a better machine on.
+    const { tier, maxTier, source } = resolveEffectTier(entry.manifest, layers);
     const { values, rejected } = resolveEffectParams(entry.manifest.params, layers?.paramLayers ?? []);
-    const resolved = { enabled, params: values, rejected };
+    const resolved = {
+      enabled,
+      params: values,
+      rejected,
+      perfTier: tier,
+      maxPerfTier: maxTier,
+      perfTierSource: source,
+    };
     entry.apply(resolved);
     return resolved;
   }

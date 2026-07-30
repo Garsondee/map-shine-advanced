@@ -25,7 +25,7 @@
  * changed.
  *
  * @param {string} namespace - the module id.
- * @param {Array<{key: string, scope: 'client'|'world', kind: 'enum'|'bool', choices?: Record<string,string>, default: unknown, config?: boolean, name?: string, hint?: string}>} descriptors
+ * @param {Array<{key: string, scope: 'client'|'world', kind: 'enum'|'bool', choices?: Record<string,string>, default: unknown, config?: boolean, name?: string, hint?: string, requiresReload?: boolean}>} descriptors
  * @param {{onChange?: (key: string) => void}} [options]
  * @returns {void}
  */
@@ -45,6 +45,13 @@ export function registerSettings(namespace, descriptors, options = {}) {
     if (d.kind === 'enum' && d.choices && typeof d.choices === 'object') {
       data.choices = d.choices;
     }
+    // Verified against the vendored v14 source (client-settings.mjs): Foundry's
+    // OWN Settings dialog prompts a reload when a `requiresReload` setting
+    // commits THROUGH ITS FORM. A write via `writeSetting` below (this module's
+    // other export) does not go through that form, so a custom control still
+    // has to offer its own "reload to apply" — this field only buys the free
+    // prompt for whoever opens Foundry's native dialog instead.
+    if (d.requiresReload === true) data.requiresReload = true;
     // Foundry fires this after the value is committed, so a read inside it sees
     // the new value — the caller re-resolves the cascade from truth, not a guess.
     if (onChange) data.onChange = () => onChange(d.key);

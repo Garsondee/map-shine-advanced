@@ -19,6 +19,7 @@ import {
   DOOR_GRAPHICS,
   FLUID,
   GRADE,
+  LIGHTNING,
   SPECULAR,
   SUN_SHADOWS,
   UI_WINDOW_SHADOW,
@@ -56,6 +57,7 @@ const MANIFESTS = [
   DOOR_GRAPHICS,
   VEGETATION,
   UI_WINDOW_SHADOW,
+  LIGHTNING,
 ];
 
 export function run(t) {

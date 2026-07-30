@@ -29,6 +29,7 @@ import {
   resolveEasingFn,
   generateKeyframePreset,
   LETTERBOX_BAR_HEIGHT_PCT,
+  INTRO_HOLD_MS,
 } from './camera-path.js';
 import { createLogger } from '../core/log.js';
 
@@ -286,9 +287,14 @@ function fadeTo(el, toOpacity, ms) {
 }
 
 /**
- * Play a camera path start to finish. Resolves when playback completes OR is
- * stopped early (`stopCameraPath()` / Escape / a scene teardown) — it never
- * rejects for a user-initiated stop, only logs+resolves.
+ * Play a camera path start to finish. Always lands on the path's OWN start
+ * (`keyframes[0]`) before anything else moves — behind a fade-to-black,
+ * brief pause, and fade-back-up when `fadeInMs > 0`; an instant snap
+ * otherwise — NEVER by panning in from whatever view the GM's camera
+ * happened to be left at (2026-07-29 author report: "the tool always just
+ * starts where the camera currently is"). Resolves when playback completes
+ * OR is stopped early (`stopCameraPath()` / Escape / a scene teardown) — it
+ * never rejects for a user-initiated stop, only logs+resolves.
  * @param {import('./camera-path.js').CameraPath} pathData - already normalized.
  * @param {{onSegment?: (index: number, total: number) => void}} [opts]
  * @returns {Promise<void>}
@@ -302,7 +308,7 @@ export async function playCameraPath(pathData, opts = {}) {
   injectHideUiStyle();
   ensureSafetyHooksRegistered();
 
-  const { settings } = pathData;
+  const { keyframes, settings } = pathData;
   const segments = buildCameraTimeline(pathData, getPaddedCanvasDimensions());
   const abort = new AbortController();
   let fadeEl = null;
@@ -350,14 +356,36 @@ export async function playCameraPath(pathData, opts = {}) {
     if (settings.letterbox) {
       letterboxEl = buildLetterboxOverlay();
     }
-    if (settings.darknessRamp.enabled) {
-      originalDarkness01 = readDarkness01();
-      await writeDarkness01(settings.darknessRamp.start01);
-    }
+    // INTRO: always land on the path's own start before anything plays — a
+    // camera path must never silently open from wherever the GM's live view
+    // happened to be left. The darkness ramp's OWN start value is set here
+    // too, at the same moment as the camera snap, so both land while hidden
+    // behind the fade instead of popping on the still-visible outgoing view.
+    const first = keyframes[0];
     if (settings.fadeInMs > 0) {
       fadeEl = buildFadeOverlay();
-      fadeEl.style.opacity = '1';
-      await fadeTo(fadeEl, 0, settings.fadeInMs);
+      await fadeTo(fadeEl, 1, settings.fadeInMs); // fade TO black
+      if (!abort.signal.aborted) {
+        if (first) previewCameraKeyframe(first);
+        if (settings.darknessRamp.enabled) {
+          originalDarkness01 = readDarkness01();
+          await writeDarkness01(settings.darknessRamp.start01);
+        }
+        if (first) await sleepAbortable(INTRO_HOLD_MS, abort.signal); // hold on black a beat
+      }
+      if (!abort.signal.aborted) {
+        await fadeTo(fadeEl, 0, settings.fadeInMs); // fade back FROM black
+      }
+    } else {
+      // fadeInMs:0 means "no fade theater", not "skip the correctness fix" —
+      // still jump straight to the path's own start, just as a hard cut (the
+      // perf-benchmark route in boot.js relies on exactly this: it zeroes
+      // both fades for measurement purity but still needs a real start).
+      if (first) previewCameraKeyframe(first);
+      if (settings.darknessRamp.enabled) {
+        originalDarkness01 = readDarkness01();
+        await writeDarkness01(settings.darknessRamp.start01);
+      }
     }
 
     if (settings.darknessRamp.enabled && !abort.signal.aborted) {

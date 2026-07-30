@@ -306,6 +306,17 @@ export const ZONES = Object.freeze(
       'updateCandleFlame'
     ),
     z(
+      'light.lightningSync',
+      'Lightning sync',
+      'lighting',
+      'light.accumulate',
+      'lightning',
+      'cpu',
+      'conditional',
+      true,
+      'lightningSubsystem.sync'
+    ),
+    z(
       'light.vegetationSync',
       'Vegetation motion sync',
       'lighting',
@@ -414,6 +425,17 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'candleFlameScene'
+    ),
+    z(
+      'light.drawLightning',
+      'Lightning bolt draw',
+      'lighting',
+      'light.accumulate',
+      'lightning',
+      'gpu',
+      'conditional',
+      false,
+      'lightningSubsystem.scene'
     ),
     z(
       'light.drawWindOverlay',

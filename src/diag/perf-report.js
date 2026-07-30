@@ -445,8 +445,9 @@ export function attributeZonesToEffects({
   const sweepById = new Map();
   const perEffect = sweep?.summary?.perEffect ?? sweep?.perEffect ?? [];
   for (const e of perEffect) if (e?.id) sweepById.set(e.id, e);
-  // Self-calibrated from this sweep's own negative readings. See the function.
-  const sweepNoiseFloorMs = estimateSweepNoiseFloor(perEffect);
+  // Self-calibrated: the larger of this sweep's own negative readings and its
+  // directly-measured bracketing-baseline drift. See the function.
+  const sweepNoiseFloorMs = estimateSweepNoiseFloor(perEffect, sweep?.summary?.noiseFloorMs ?? null);
 
   return manifests.map((manifest) => {
     const id = manifest.id;
@@ -599,18 +600,35 @@ export function attributeZonesToEffects({
  * (`feedback_probed_constants_vs_derived` — derive it once from the data, do not
  * hardcode a guess).
  *
+ * ⚠️ THIS IS A LOWER BOUND, AND IT HAS A HOLE: it can only see noise that happened
+ * to land on the negative side of an effect that happened to be cheap. A sweep where
+ * every effect read slightly POSITIVE returns `null` — "no evidence" — even though the
+ * noise obviously did not go away. `perf-lab.js` now measures the floor DIRECTLY (it
+ * re-runs the identical all-off baseline at the end of the sweep; two runs of the same
+ * config can differ only by noise), which has no such hole. Both are lower bounds on
+ * the same quantity, so the honest combination is the LARGER: a −1.8 ms reading is
+ * still proof the floor is at least 1.8 ms even if the bracketing pair drifted less.
+ * Passing the measured value is strongly preferred; the derivation stays as the
+ * fallback for reports produced before it existed.
+ *
  * @param {Array<{costMs?: number|null}>} perEffect
- * @returns {number|null} the floor in ms, or null when nothing went negative
- *   (in which case we have no evidence about the noise either way).
+ * @param {number|null} [measuredFloorMs] `summarizeSweep`'s `noiseFloorMs` — the
+ *   bracketing-baseline drift, when the sweep produced one.
+ * @returns {number|null} the floor in ms, or null when neither source has evidence
+ *   (in which case we know nothing about the noise either way).
  */
-export function estimateSweepNoiseFloor(perEffect) {
-  if (!Array.isArray(perEffect) || perEffect.length === 0) return null;
+export function estimateSweepNoiseFloor(perEffect, measuredFloorMs = null) {
+  const measured = Number.isFinite(measuredFloorMs) && measuredFloorMs > 0 ? measuredFloorMs : null;
+  if (!Array.isArray(perEffect) || perEffect.length === 0) return measured;
   let worstNegative = 0;
   for (const e of perEffect) {
     const c = e?.costMs;
     if (Number.isFinite(c) && c < worstNegative) worstNegative = c;
   }
-  return worstNegative < 0 ? Math.abs(worstNegative) : null;
+  const derived = worstNegative < 0 ? Math.abs(worstNegative) : null;
+  if (derived == null) return measured;
+  if (measured == null) return derived;
+  return Math.max(derived, measured);
 }
 
 /**
@@ -1157,6 +1175,135 @@ export function buildPerfReport({
       method: { ...method, cpuClockResolutionMs: method.cpuClockResolutionMs ?? null },
     }),
   };
+}
+
+/**
+ * THE TIER-COMPARISON TABLE (2026-07-29, rewritten same day) — THE tool for
+ * "where should optimisation effort go", across every performance tier at
+ * once. Two defects in the first version, both found from the author's own
+ * first real run, fixed here:
+ *
+ * 1. **~300KB, mostly duplication.** v1 nested five COMPLETE `buildPerfReport`
+ *    blobs under `tiers` — every zone's static prose (`declared.note`,
+ *    `whyNotZoned`, `interpretation`, `instrument.gpuTimer.note`…) repeated
+ *    five times verbatim, every near-flat CPU tick zone shown five times,
+ *    every hitch's near-identical `decodeStats`/`cacheStats` five times over.
+ *    None of that serves COMPARISON. Deleted: this function no longer returns
+ *    the full per-tier reports at all — the caller (boot.js) keeps them
+ *    reachable via a plain console getter for the rare full-forensic need,
+ *    never auto-included in what gets copied to the clipboard.
+ *
+ * 2. **The real cost of an effect can hide in a zone nobody owns, and v1's
+ *    `perEffect` table could not see it.** THE finding that started this
+ *    rewrite: candle flames' OWN zone (`light.drawCandleFlame`) read flat
+ *    (~0.02ms) across every tier, while the actual candle-tier effect —
+ *    fewer/more merged point lights as the profile changes — showed up as
+ *    real, GROWING GPU cost in `light.drawPointLights`/`drawColoration`,
+ *    zones with `ownerEffectId: null` that a per-effect-only table can never
+ *    surface (Performance-Insights.md §5B/§5C already found this once, by
+ *    hand, from a full report — this function now finds it automatically).
+ *
+ * THE FIX for (2): `ranked` is ONE list, sorted by peak GPU cost, mixing two
+ * kinds of row —
+ *   - **every registered effect** (`kind:'effect'`), cost from `zoneGpuMs`
+ *     (falling back to `costMs`) — already a rollup of every zone THAT
+ *     effect owns, so it is never double-counted against (b);
+ *   - **every zone with real GPU cost and NO owner** (`kind:'zone'`,
+ *     `ownerEffectId == null`, and not a `isPass` container — a pass is
+ *     already the sum of its own children, which would double it).
+ * A zone belonging to an effect is never listed a second time here — it is
+ * already inside that effect's row. An effect that could not be measured in
+ * any tier still gets a row (`measured:false`, sorted to the bottom) rather
+ * than silently vanishing — a hidden effect reads as "cheap", which is
+ * exactly the `feedback_instruments_must_not_lie` shape this project already
+ * has a name for.
+ *
+ * Pure, and still deliberately dumb about MEANING: it does not decide
+ * whether a difference matters (that is this file's own noise-floor/
+ * agreement machinery, already computed PER REPORT before this ever sees
+ * it) — it only ranks and lines the numbers up so a person's eye does the
+ * comparing. Reads `report.frame.hangs.totalStalls` for hitch count rather
+ * than searching `bands[]` by label text — the label is a caption on a
+ * threshold this file itself picked (`>50ms`), and matching prose that could
+ * be reworded is exactly the fragile-fixture failure this project keeps a
+ * name for.
+ *
+ * `perTierHealth` is the trust check that replaces reading the full report:
+ * frame count, attribution coverage/verdict and GPU sample count, so "was
+ * this tier's measurement solid" is answerable without the thing being
+ * measured against.
+ *
+ * @param {Array<{profile: string, report: object}>} tierResults - one entry
+ *   per tier actually run. A tier that threw and produced no report should be
+ *   OMITTED by the caller, not passed with `report: null` — this function has
+ *   no way to tell "didn't run" from "ran and returned nothing" apart, and the
+ *   caller already knows which one happened.
+ * @returns {{
+ *   frame: Record<string, {gpuMsP50: number|null, gpuMsP95: number|null, avgFps: number|null, p1LowFps: number|null, hitchCount: number|null}>,
+ *   perTierHealth: Record<string, {frames: number|null, coverage: number|null, verdict: string|null, gpuSampleCount: number|null}>,
+ *   ranked: Array<{id: string, label: string, kind: 'effect'|'zone', measured: boolean, maxGpuMs: number|null, byProfile: Record<string, number|null>}>
+ * }}
+ */
+export function summarizeTierComparison(tierResults) {
+  const list = Array.isArray(tierResults) ? tierResults : [];
+  const frame = {};
+  const perTierHealth = {};
+  /** @type {Map<string, {id: string, label: string, kind: 'effect'|'zone', byProfile: Record<string, number|null>}>} */
+  const rows = new Map();
+
+  for (const entry of list) {
+    const profile = entry?.profile;
+    const report = entry?.report;
+    if (typeof profile !== 'string' || !profile || !report || typeof report !== 'object') continue;
+
+    frame[profile] = {
+      gpuMsP50: numOrNull(report.frame?.gpuMs?.p50),
+      gpuMsP95: numOrNull(report.frame?.gpuMs?.p95),
+      avgFps: numOrNull(report.frame?.fps?.avgFps),
+      p1LowFps: numOrNull(report.frame?.fps?.p1LowFps),
+      hitchCount: numOrNull(report.frame?.hangs?.totalStalls),
+    };
+
+    perTierHealth[profile] = {
+      frames: numOrNull(report.window?.frames),
+      coverage: numOrNull(report.attribution?.coverage),
+      verdict: typeof report.attribution?.verdict === 'string' ? report.attribution.verdict : null,
+      gpuSampleCount: numOrNull(report.frame?.gpuMs?.sampleCount),
+    };
+
+    for (const e of Array.isArray(report.effects) ? report.effects : []) {
+      if (!e || typeof e.id !== 'string') continue;
+      const key = `effect:${e.id}`;
+      if (!rows.has(key)) rows.set(key, { id: e.id, label: e.label ?? e.id, kind: 'effect', byProfile: {} });
+      rows.get(key).byProfile[profile] = numOrNull(e.zoneGpuMs) ?? numOrNull(e.costMs);
+    }
+
+    for (const z of Array.isArray(report.zones) ? report.zones : []) {
+      if (!z || typeof z.id !== 'string' || z.ownerEffectId || z.isPass) continue;
+      const gpuMs = numOrNull(z.gpuMs?.amortisedMsPerFrame);
+      if (gpuMs === null) continue; // no real GPU number here (CPU-only, or genuinely absent) — not a cost row
+      const key = `zone:${z.id}`;
+      if (!rows.has(key)) rows.set(key, { id: z.id, label: z.label ?? z.id, kind: 'zone', byProfile: {} });
+      rows.get(key).byProfile[profile] = gpuMs;
+    }
+  }
+
+  const ranked = [...rows.values()]
+    .map((r) => {
+      const values = Object.values(r.byProfile).filter((v) => v !== null);
+      return { ...r, measured: values.length > 0, maxGpuMs: values.length ? Math.max(...values) : null };
+    })
+    // Biggest peak cost first — the whole point is "what should I optimise
+    // first". Unmeasured rows (`maxGpuMs: null`) sort last, distinguishable
+    // from "measured and merely cheap" via `measured`.
+    .sort((a, b) => (b.maxGpuMs ?? -1) - (a.maxGpuMs ?? -1));
+
+  return { frame, perTierHealth, ranked };
+}
+
+/** `v` if it is a finite number, else `null` — never `NaN`/`undefined` leaking into a report. */
+function numOrNull(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
 /** Budget for a pass id, falling back to the strict default. */

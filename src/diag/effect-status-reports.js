@@ -67,6 +67,13 @@ export function buildSunShadowsReport({ floorIndex, status, viewer, readout, deg
     coarseAlpha: viewer?.wholeImage?.coarseAlpha ?? 'viewer not started',
     casterField: viewer?.wholeImage?.sunShadows?.caster ?? 'viewer not started',
     lastBake: viewer?.wholeImage?.sunShadows?.lastBake ?? 'viewer not started',
+    // ⚠️ ADDED 2026-07-30 — `getStatus()` has always reported this (tier,
+    // fieldDim, casterGridDimPx, steps, lateralTaps, buildingHeightPx), but
+    // this report never pulled it out of `viewer.wholeImage.sunShadows`, so
+    // every prior report generated during the Round Seven investigation was
+    // silently missing the ONE block that would have shown fieldDim and
+    // casterGridDimPx side by side.
+    profile: viewer?.wholeImage?.sunShadows?.profile ?? 'viewer not started',
     interpretation:
       'Read top-down. floor.missingItemCount > 0 means art has not been ingested for items that ' +
       'would cast — check coarseAlpha next. ⚠️ THE DECISIVE PAIR is casterField.coveredPct against ' +

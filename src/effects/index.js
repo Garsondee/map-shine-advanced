@@ -47,16 +47,24 @@ export {
   resolveSunMarch,
   sharpenReceiverGate01,
   DEFAULT_MARCH_STEPS,
+  DEFAULT_LATERAL_TAPS,
   PENUMBRA_PER_PX,
   GATE_SHARPEN_LOW,
   GATE_SHARPEN_HIGH,
+  // THE PERFORMANCE LADDER (2026-07-29). `SUN_SHADOW_FIELD_DIM` and
+  // `SUN_SHADOW_MARCH_STEPS` used to be exported from the subsystem beside
+  // these; they are GONE rather than renamed, because they were fixed module
+  // constants and there is no longer one field resolution or one step count —
+  // both come from the resolved rung. Nothing outside the subsystem read them
+  // (an unconsumed API rots silently), so the honest move was to delete them
+  // and export the thing that IS consumed: the plan.
+  sunShadowTierPlan,
+  sunShadowBakeSamples,
+  SUN_SHADOW_DEFAULT_TIER,
+  SUN_SHADOW_MAX_TIER,
 } from './lighting/sun-occlusion.js';
 export { buildSunShadowBakeMaterial, buildSunVisibilityNode } from './lighting/sun-occlusion-render.js';
-export {
-  createSunShadowSubsystem,
-  SUN_SHADOW_FIELD_DIM,
-  SUN_SHADOW_MARCH_STEPS,
-} from './lighting/sun-shadow-subsystem.js';
+export { createSunShadowSubsystem, SUN_SHADOW_QUANTIZE_DEG } from './lighting/sun-shadow-subsystem.js';
 // THE DEBUG VIEW's own vocabulary — boot reads it to drive the derivation
 // includes from the picked view, so "sky-reach only" isolates for real.
 export {
@@ -159,6 +167,7 @@ export {
   WATER_TIER0_OPACITY,
   WATER_PRESENCE_EDGE0,
   WATER_PRESENCE_EDGE1,
+  WATER_DEFAULT_TIER,
 } from './water/water-render.js';
 export { createWaterSurfaceSubsystem } from './water/water-surface-subsystem.js';
 export { createWaterSeams } from './water/water-seams.js';
@@ -311,6 +320,7 @@ export {
   resolveEffectEnabled,
   resolveEffectParams,
   profileRank,
+  resolveEffectTier,
   PERFORMANCE_PROFILES,
   DEFAULT_PERFORMANCE_PROFILE,
   ENABLE_OVERRIDES,
@@ -328,6 +338,8 @@ export {
   validateVegetationKinds,
   vegetationMeshSegments,
   buildTessellatedQuadGeometry,
+  vegetationTierPlan,
+  VEGETATION_DEFAULT_TIER,
 } from './vegetation-render.js';
 // The vegetation SHADOW subsystem — extraction step 2 of docs/planning/
 // VT-Pan-Viewer-Extraction.md. The padded quad, the per-kind pad, and the
@@ -407,6 +419,8 @@ export {
   computeCandleFlameArrays,
   candleCirclePolygon,
   candleAnimationQualityTier,
+  candleTierPlan,
+  CANDLE_DEFAULT_TIER,
   candleClusterLightParams,
   deriveCandleSeed,
   hexToRgb01,
@@ -438,3 +452,27 @@ export {
   choiceLabels,
   GLOBAL_SETTING_KEYS,
 } from './effect-settings.js';
+
+// LIGHTNING (docs/planning/Lightning.md) — the forked-bolt strike effect
+// (V2's `LightningEffectV2`; the weather/landscape flash sibling is out of
+// scope). Declaration + pure geometry/math + TSL render, the SAME three-way
+// split candle/door already use.
+export { LIGHTNING, LIGHTNING_PARAMS } from './lightning.js';
+export {
+  hashStringToSeed,
+  mixSeed,
+  createRng,
+  randFloat,
+  randFloatRange,
+  randInt,
+  generateBoltPath,
+  nextBurstDelayMs,
+  generateBurst,
+  computeStrandEnvelope,
+  groupLightningAnchorsIntoSources,
+  buildLightningLightSources,
+  computeLightningStrandArrays,
+  hexToRgb01 as lightningHexToRgb01,
+} from './lightning-geometry.js';
+export { buildLightningGeometry, refillLightningGeometry, buildLightningMaterial } from './lightning-render.js';
+export { createLightningSubsystem } from './lightning-subsystem.js';

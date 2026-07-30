@@ -146,6 +146,91 @@ export function candleAnimationQualityTier(name) {
 }
 
 /**
+ * THE PERFORMANCE-TIER PLAN — one candle rung translated into the three knobs
+ * that actually cost something. Pure, total, Node-tested; the effect's ladder
+ * (candle-flame.js `CANDLE_FLAME.tiers`) is the prose, this is the arithmetic.
+ *
+ * ============================================================================
+ * WHY CLUSTERING IS THE HEADLINE KNOB (measured 2026-07-29, not assumed)
+ * ============================================================================
+ *
+ * A zone profile on a candle-heavy scene put `light.drawCandleFlame` — every
+ * flame billboard in the scene — at **0.022 ms**, while `light.drawPointLights`
+ * (6.57 ms) + `light.drawColoration` (6.54 ms) came to **13.1 ms of a 20.4 ms
+ * frame, from 91 draw calls**; the effect sweep independently measured candles'
+ * marginal cost at 13.15 ms, agreeing to 0.3%. **A candle costs what its LIGHT
+ * costs — its flame is free**, because a `sizePx` 24 billboard covers ~576
+ * world px² against a `lightRadiusPx` 400 (×1.25 boost ⇒ r=500) light's
+ * ~785,000, drawn twice. Roughly 1,363× the area.
+ *
+ * So the lever that matters is the light COUNT, and the existing clustering
+ * (candle-flame-geometry's own comment: "each light is a full Foundry-parity
+ * mesh, so COUNT is what costs") is exactly the right dial. Cell size is
+ * `radius × factor`, so a LARGER factor merges harder: quadrupling the factor
+ * covers ~16× the area per cell.
+ *
+ * ⚠️ **TIER 3 REPRODUCES TODAY'S SHIPPED BEHAVIOUR EXACTLY** — flame quality 2,
+ * light quality 2 (`lavish`), cluster factor 0.5 — and tier 3 is what the
+ * DEFAULT profile (`standard`) resolves to. That is deliberate: turning this
+ * system on must not silently restyle every existing scene. Below `standard`
+ * the picture genuinely simplifies; at `extreme` it gets finer than it has ever
+ * been. Nobody who never touches the setting sees any change at all.
+ *
+ * @param {number} tier - a resolved rung (effect-cascade.js#resolveEffectTier).
+ *   Clamped into the ladder, so a stale or malformed value degrades to a rung
+ *   that exists rather than producing an uncompilable quality.
+ * @returns {{flameQuality: number, lightQuality: number, clusterFactor: number}}
+ */
+export function candleTierPlan(tier) {
+  const n = Number.isFinite(tier)
+    ? Math.max(0, Math.min(CANDLE_TIER_PLANS.length - 1, Math.floor(tier)))
+    : CANDLE_DEFAULT_TIER;
+  return CANDLE_TIER_PLANS[n];
+}
+
+/**
+ * The rung an ABSENT or malformed tier falls back to — deliberately today's
+ * shipped look, never the cheapest one.
+ *
+ * ⚠️ Both possible defaults are dangerous if the seam is ever left unwired, and
+ * they fail in opposite directions: fall back to 0 and an unwired caller
+ * silently downgrades every candle in the game; fall back to the top and a weak
+ * machine silently gets the most expensive rung. This picks "today's look"
+ * (matching `candleAnimationQualityTier`'s own stated choice — a corrupt stored
+ * value shows the intended look, never a silent downgrade) and then defends the
+ * seam with a TEST instead of a hope, because a default that is merely correct
+ * is exactly how `feedback_seam_default_hides_unwired` happens: declared,
+ * defaulted, consumed, never passed, renders perfectly, control dead, tests
+ * green.
+ *
+ * It is NOT a hardcoded 3: the test suite asserts this equals what the DEFAULT
+ * performance profile resolves the real candle ladder to, so re-tuning a rung's
+ * `fromProfile` cannot leave this constant behind pointing at a different look.
+ */
+export const CANDLE_DEFAULT_TIER = 3;
+
+/**
+ * The rungs, as data, index === tier. Kept beside `candleTierPlan` so the table
+ * and its clamp cannot disagree about how many rungs exist.
+ *
+ * `clusterFactor` is a multiplier on the light radius to get the merge cell:
+ * 2.0 turns a room of candles into one or two pools; 0.25 is very nearly one
+ * light per candle. `flameQuality` feeds `buildCandleFlameMaterial`'s
+ * build-time `quality` (0 calm · 1 life+wind+gutter+snuff · 2 + domain warp);
+ * `lightQuality` feeds candle-flicker.js's own ladder (0 single-octave ·
+ * 1 two-octave + temperature shift · 2 breathing core + edge turbulence).
+ * All three are graph-BUILD-time — Effects.md Law 4: a tier that is off must
+ * never be constructed, because a uniform set to zero still executes.
+ */
+const CANDLE_TIER_PLANS = Object.freeze([
+  Object.freeze({ flameQuality: 0, lightQuality: 0, clusterFactor: 2.0 }), // 0 ember
+  Object.freeze({ flameQuality: 0, lightQuality: 1, clusterFactor: 1.5 }), // 1 flicker
+  Object.freeze({ flameQuality: 1, lightQuality: 1, clusterFactor: 1.0 }), // 2 life
+  Object.freeze({ flameQuality: 2, lightQuality: 2, clusterFactor: 0.5 }), // 3 boil — TODAY
+  Object.freeze({ flameQuality: 2, lightQuality: 2, clusterFactor: 0.25 }), // 4 perCandle
+]);
+
+/**
  * Map a candle cluster's aggregate STRENGTH (Σ per-anchor intensity, jittered
  * per-position so identical imports still vary — see buildCandleLightSources)
  * to the point-light params that carry brightness/reach. PURE + total, Node-
@@ -213,7 +298,13 @@ const CANDLE_RADIUS_MAX_FACTOR = 1.6;
  * this merge into ONE light — a chandelier's 8 flames become one warm pool
  * instead of 8 overlapping full-cost lights (the perf lever: each light is a
  * full Foundry-parity mesh, so COUNT is what costs). Flames stay per-candle. */
-const CANDLE_LIGHT_CLUSTER_FACTOR = 0.5;
+// ⚠️ MOVED, not deleted (2026-07-29). The cluster factor used to be this one
+// constant at 0.5; it is now PER TIER, in `CANDLE_TIER_PLANS` above, because it
+// is the single biggest performance dial this effect has (measured: 13.1 ms of
+// a 20.4 ms frame lives in the candle LIGHTS, ~0.02 ms in their flames). Tier 3
+// still carries 0.5 exactly, and tier 3 is what the default profile resolves
+// to, so the shipped look is unchanged. One value, one owner — leaving a stale
+// duplicate here is how two authorities on one number start disagreeing.
 
 /**
  * Build the point-light SOURCE descriptors for a set of candle anchors — the
@@ -231,8 +322,21 @@ const CANDLE_LIGHT_CLUSTER_FACTOR = 0.5;
  * @param {{lightRadiusPx:number, colorHex:string}} params
  * @returns {Array<object>} light source descriptors.
  */
-export function buildCandleLightSources(anchors, { lightRadiusPx, colorHex, animationQuality, windResponse }) {
-  const qualityTier = candleAnimationQualityTier(animationQuality);
+export function buildCandleLightSources(
+  anchors,
+  { lightRadiusPx, colorHex, animationQuality, windResponse, perfTier }
+) {
+  // THE PERFORMANCE TIER SETS THE BASELINE; AN EXPLICIT PARAM STILL WINS.
+  // `animationQuality` defaults to `'auto'` = "follow the profile" (candle-flame.js).
+  // Any other value is the author saying so out loud, and Effects.md Law 5 is
+  // explicit that tier comes from measurements AND explicit settings — so a
+  // scene pinned to `lavish` keeps its look on a Low machine rather than being
+  // silently overruled by a global slider it never opted into.
+  const plan = candleTierPlan(perfTier);
+  const qualityTier =
+    animationQuality === undefined || animationQuality === null || animationQuality === 'auto'
+      ? plan.lightQuality
+      : candleAnimationQualityTier(animationQuality);
   const list = Array.isArray(anchors) ? anchors : [];
   const globalRadius = Number(lightRadiusPx);
 
@@ -261,7 +365,11 @@ export function buildCandleLightSources(anchors, { lightRadiusPx, colorHex, anim
   // promises this).
   if (globalRadius > 0 && plain.length) {
     const color = hexToRgb01(colorHex);
-    const clusters = clusterCandleAnchors(plain, globalRadius * CANDLE_LIGHT_CLUSTER_FACTOR);
+    // THE 13 ms LEVER (see candleTierPlan's header for the measurement). A
+    // larger factor merges harder: cell AREA goes as the factor squared, so
+    // tier 0's 2.0 covers 16× tier 3's 0.5 and collapses a candle-lit room into
+    // one or two pools instead of dozens of full-cost Foundry-parity meshes.
+    const clusters = clusterCandleAnchors(plain, globalRadius * plan.clusterFactor);
     for (const c of clusters) out.push(buildOneLightSource(c, globalRadius, color, qualityTier, windResponse));
   }
 

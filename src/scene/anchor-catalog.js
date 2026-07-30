@@ -30,11 +30,22 @@
  * not import `scene/`) receives the translation from boot rather than knowing
  * the strings itself.
  *
- * TAXONOMY, TIER 0: exactly one kind — `candleFlame`. It is the canonical
- * discrete anchor (one spot, one flame) and the first V2 effect being brought
- * across (author directive, 2026-07-20). Lightning points, rope spans and the
- * rest land as one entry each here the day their effect is ported — or the
- * importer cannot map them, which is the funnel working as designed.
+ * TAXONOMY, TIER 0: `candleFlame` — the canonical discrete anchor (one spot,
+ * one flame) and the first V2 effect brought across (author directive,
+ * 2026-07-20). Rope spans and the rest land as one entry each here the day
+ * their effect is ported — or the importer cannot map them, which is the
+ * funnel working as designed.
+ *
+ * TIER 1: `lightning` — a forked-bolt SOURCE is two LINKED anchors (one
+ * `role:'start'`, one `role:'end'`, sharing a `params.linkId`), not a single
+ * point. The core anchor schema (scene/anchor-authority.js) stays untouched
+ * on purpose — `ui/anchor-mode.js`'s own header promises a future lightning
+ * tool "reuses this file verbatim, with its own icon," which only holds if a
+ * bolt endpoint is an ordinary single-point anchor like any other. Pairing
+ * is done ENTIRELY above this layer (boot.js's two-click placement wrapper;
+ * effects/lightning-geometry.js#groupLightningAnchorsIntoSources on the read
+ * side) — this catalog only adds the `role`/`linkId` per-anchor params a
+ * `lightning` anchor carries.
  *
  * @module scene/anchor-catalog
  */
@@ -55,6 +66,16 @@ import { validateParamsSchema } from '../core/params-schema.js';
  * @property {string[]} v2EffectTargets - the V2 map-point `effectTarget`
  *   strings that import INTO this kind. THE only place the old strings live;
  *   a target string belongs to exactly one kind (checked below).
+ * @property {string} [importStrategy] - how `foundry/v2-anchor-import.js`
+ *   turns one V2 map-point GROUP into anchors of this kind. Absent (the
+ *   default) flattens every point in the group into its own independent
+ *   anchor (candle's own behaviour). `'linkedEndpoints'` instead emits a
+ *   `role:'start'`/`role:'end'` pair sharing one `linkId` from the group's
+ *   first/last point (a `lightning` bolt's two endpoints); any interior
+ *   points import as inert `role:'waypoint'` anchors on the same `linkId` —
+ *   preserved, not acted on (the deferred `wandering-source` rung,
+ *   effects/lightning.js). Per-kind DATA, not a shared-code branch — see
+ *   this file's own header for why that split matters.
  * @property {Record<string, object>} params - the per-anchor param schema
  *   (core/params-schema.js): what a single placed instance carries BEYOND its
  *   position. Validated at ingest, so nothing invalid is ever served — the
@@ -141,6 +162,42 @@ export const ANCHOR_KINDS = Object.freeze([
       },
     },
     meaning: 'A single placed candle flame — the canonical discrete anchor, successor to a V2 candleFlame map point.',
+  },
+  {
+    id: 'lightning',
+    effectId: 'lightning',
+    label: 'Lightning bolt',
+    icon: '⚡',
+    // V2's EFFECT_SOURCE_OPTIONS key (legacy/scene/map-points-manager.js:49).
+    v2EffectTargets: ['lightning'],
+    importStrategy: 'linkedEndpoints',
+    params: {
+      role: {
+        type: 'enum',
+        values: ['start', 'end', 'waypoint'],
+        default: 'start',
+        label: 'Endpoint role',
+        help: 'Which end of the bolt this point is. Two endpoints sharing the same link id form one lightning source.',
+      },
+      linkId: {
+        type: 'text',
+        default: '',
+        maxLength: 128,
+        label: 'Bolt link id',
+        help: 'Ties this point to its partner endpoint. Set automatically when you place a bolt.',
+      },
+      intensity: {
+        type: 'float',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: 1,
+        label: 'Strike intensity',
+        help: 'How strongly this source strikes (0 = never fires, 1 = full). Imported from a V2 group’s emission.intensity.',
+      },
+    },
+    meaning:
+      'One endpoint of a forked-lightning bolt source; two linked endpoints sharing a link id form one bolt, successor to a V2 lightning map-point group.',
   },
 ]);
 

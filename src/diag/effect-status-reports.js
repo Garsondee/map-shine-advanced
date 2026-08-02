@@ -53,6 +53,22 @@
  * @returns {object}
  */
 export function buildSunShadowsReport({ floorIndex, status, viewer, readout, degradedFloors, generatedAt }) {
+  // ⚠️ MULTI-FLOOR (2026-08-02) — `sunShadows.getStatus()` reports one entry
+  // per RESIDENT floor slot (`floors: [...]`, `sun-shadow-subsystem.js`'s own
+  // §5), not one singular `{caster, lastBake, profile}` any more: every floor
+  // Foundry might show this frame now bakes its own independent field. The
+  // top-level `casterField`/`lastBake`/`profile` keys below keep their OLD
+  // shape and meaning — "the floor I am currently looking at" — by picking
+  // THAT floor's own entry out of the array; `allFloors` is the NEW thing,
+  // a one-line-per-floor summary so a report from ONE refresh can answer "is
+  // floor 0's shadow actually resident" while standing on floor 2, instead of
+  // requiring a separate report pulled from each floor in turn (which is
+  // exactly the back-and-forth that made diagnosing the cross-floor
+  // occlusion gap slow before this existed).
+  const allFloors = viewer?.wholeImage?.sunShadows?.floors ?? null;
+  const currentFloorStatus = Array.isArray(allFloors)
+    ? (allFloors.find((f) => f.floorIndex === floorIndex) ?? null)
+    : null;
   return {
     report: 'sun-shadows',
     generatedAt,
@@ -65,15 +81,36 @@ export function buildSunShadowsReport({ floorIndex, status, viewer, readout, deg
     // problem; `requested: 0` is a WIRING problem; they need different fixes,
     // and before 2026-07-24 the answer was structurally the second one.
     coarseAlpha: viewer?.wholeImage?.coarseAlpha ?? 'viewer not started',
-    casterField: viewer?.wholeImage?.sunShadows?.caster ?? 'viewer not started',
-    lastBake: viewer?.wholeImage?.sunShadows?.lastBake ?? 'viewer not started',
+    casterField: currentFloorStatus?.caster ?? (viewer ? 'this floor has no resident slot yet' : 'viewer not started'),
+    lastBake: currentFloorStatus?.lastBake ?? (viewer ? 'this floor has no resident slot yet' : 'viewer not started'),
     // ⚠️ ADDED 2026-07-30 — `getStatus()` has always reported this (tier,
     // fieldDim, casterGridDimPx, steps, lateralTaps, buildingHeightPx), but
     // this report never pulled it out of `viewer.wholeImage.sunShadows`, so
     // every prior report generated during the Round Seven investigation was
     // silently missing the ONE block that would have shown fieldDim and
     // casterGridDimPx side by side.
-    profile: viewer?.wholeImage?.sunShadows?.profile ?? 'viewer not started',
+    profile: currentFloorStatus?.profile ?? (viewer ? 'this floor has no resident slot yet' : 'viewer not started'),
+    // ⚠️ EVERY OTHER FLOOR, IN ONE GLANCE (2026-08-02) — see this function's
+    // own header. `null` fields mean a slot exists but hasn't baked yet
+    // (matches `caster`/`lastBake`'s own "never baked" convention one level
+    // up); an ABSENT floorIndex here entirely (compare against
+    // `slotsUsed`/`slotsTotal`) means that floor has never been asked for at
+    // all — check `vt-pan-viewer.js`'s own per-frame bake loop and
+    // `getActiveSceneFloors` before suspecting this subsystem.
+    allFloors: Array.isArray(allFloors)
+      ? allFloors.map((f) => ({
+          floorIndex: f.floorIndex,
+          coveredPct: f.caster?.coveredPct ?? null,
+          outdoorsMeanByte: f.caster?.outdoorsGrid?.meanByte ?? null,
+          wallsCoveredPct: f.caster?.channelStats?.walls?.coveredPct ?? null,
+          bakeActive: f.lastBake?.active ?? null,
+          fieldDim: f.profile?.fieldDim ?? null,
+        }))
+      : viewer
+        ? []
+        : 'viewer not started',
+    slotsUsed: viewer?.wholeImage?.sunShadows?.slotsUsed ?? null,
+    slotsTotal: viewer?.wholeImage?.sunShadows?.slotsTotal ?? null,
     interpretation:
       'Read top-down. floor.missingItemCount > 0 means art has not been ingested for items that ' +
       'would cast — check coarseAlpha next. ⚠️ THE DECISIVE PAIR is casterField.coveredPct against ' +
@@ -92,7 +129,12 @@ export function buildSunShadowsReport({ floorIndex, status, viewer, readout, deg
       '"occluder height": the same comparison, by eye, on a white background. lastBake.active:false ' +
       'means the march deliberately wrote a white (no-shadow) field. lastBake.reason names what ' +
       'triggered the most recent march; if it stays "first" while the sun moves, the rebake trigger ' +
-      'is not firing.',
+      'is not firing. ⚠️ MULTI-FLOOR (2026-08-02): casterField/lastBake/profile above describe ONLY ' +
+      'the currently-viewed floor (`floor.floorIndex`) — allFloors lists every OTHER resident floor`s ' +
+      'headline numbers in one place, so "does floor 0`s shadow exist at all" is answerable without ' +
+      'switching floors. slotsUsed reaching slotsTotal (6) means a scene has MORE floors than this ' +
+      'subsystem can shadow at once — the overflow floors get no shadow, logged once to the console, ' +
+      'never silently.',
   };
 }
 

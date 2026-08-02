@@ -46,12 +46,15 @@
  * value would freeze every light's wind response at whatever bake existed
  * when this pool was constructed.
  *
- * `envLight`, `sunShadows`, `sceneColor` are taken as plain VALUES: none of
- * the three is ever reassigned as a variable in the viewer (only their
- * internal fields/textures are updated in place — `rebindLighting()` re-
- * pushes `sceneColor.texture` after a resize, for instance), so the object
- * reference stays valid for this pool's whole lifetime, and `.texture`/
- * `.uSunShadowRect` are read live at each use, same as the original code.
+ * `envLight`, `sceneColor` are taken as plain VALUES: neither is ever
+ * reassigned as a variable in the viewer (only their internal fields/textures
+ * are updated in place — `rebindLighting()` re-pushes `sceneColor.texture`
+ * after a resize, for instance), so the object reference stays valid for this
+ * pool's whole lifetime, and `.texture`/`.sunShadowSlotNodes`/`.attrTexNode`
+ * are read live at each use, same as the original code.
+ * `blendSunVisibilityAcrossFloors` is a plain function reference (an import
+ * this module cannot hold itself — see the module header above), injected the
+ * same way.
  *
  * `getCandleRenderState` is already a getter-shaped seam injected into
  * `startVtPanViewer` from `boot.js` (the same "vt/ never imports boot.js"
@@ -119,7 +122,13 @@ const log = createLogger('PointLightPool');
  *   caller already read it through `getWindHandle()`; passed as a plain
  *   value here since a single call never spans a rebake).
  * @param {object} deps.THREE @param {object} deps.envLight
- * @param {object} deps.sunShadows @param {object} deps.sceneColor
+ * @param {(TSL: *, args: object) => *} deps.blendSunVisibilityAcrossFloors -
+ *   `environmental-light.js`'s own export, injected (not imported — see the
+ *   module header's "no explicit parameter list = it did not happen" rule),
+ *   forwarded into `buildPointLightIlluminationMaterial` so a light's
+ *   background floor blends by floor attribution the SAME way the ambient
+ *   fill's own does.
+ * @param {object} deps.sceneColor
  * @param {object} deps.uGlobalTimeMs @param {object} deps.lightScene
  * @param {object} deps.colorationScene
  * @returns {object} a new `lightMeshes` entry (not yet stored — the caller
@@ -132,7 +141,7 @@ function createLightEntry({
   windHandle,
   THREE,
   envLight,
-  sunShadows,
+  blendSunVisibilityAcrossFloors,
   sceneColor,
   uGlobalTimeMs,
   lightScene,
@@ -188,15 +197,18 @@ function createLightEntry({
     windExposure: light.windExposure,
     windResponse: light.windResponse,
     windHandle,
-    // SUN SHADOWS, PER-FRAGMENT (2026-07-24) — the light samples the baked
-    // field itself, at each pixel's own world position, so its background
-    // floor matches the shadowed ambient exactly where the shadow is. A
-    // single sample at the light's ORIGIN is binary, so the whole light
-    // flipped between soft and hard-edged as the sun swept the shadow edge
-    // across that one point. Sharing envLight's OWN rect uniform, never a
-    // second copy.
-    sunShadowTexture: sunShadows.texture,
-    uSunShadowRect: envLight.uSunShadowRect,
+    // SUN SHADOWS, PER-FRAGMENT AND PER-FLOOR (2026-07-24; per-floor added
+    // 2026-08-02) — the light samples every resident floor's baked field
+    // itself, at each pixel's own world position, so its background floor
+    // matches the shadowed ambient exactly where the shadow is AND belongs to
+    // the same floor that pixel is actually on. A single sample at the
+    // light's ORIGIN is binary, so the whole light flipped between soft and
+    // hard-edged as the sun swept the shadow edge across that one point.
+    // Sharing envLight's OWN slot nodes + attr sampler + blend function,
+    // never a second copy of any of the three.
+    sunShadowSlotNodes: envLight.sunShadowSlotNodes,
+    attrTexNode: envLight.attrTexNode,
+    blendSunVisibilityAcrossFloors,
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
@@ -282,9 +294,11 @@ function createLightEntry({
  * @param {() => object} deps.getWindHandle - ⚠️ A GETTER. `windHandle` is
  *   reassigned on every rebake; see the module header.
  * @param {object} deps.envLight - the environmental-light materials bundle
- *   (a `const`, never reassigned); `.uSunShadowRect` is read live per light.
- * @param {object} deps.sunShadows - the sun-shadow subsystem (a `const`,
- *   never reassigned); `.texture` is read live per light.
+ *   (a `const`, never reassigned); `.sunShadowSlotNodes`/`.attrTexNode` are
+ *   read live per light.
+ * @param {(TSL: *, args: object) => *} deps.blendSunVisibilityAcrossFloors -
+ *   `environmental-light.js`'s own export — see `createLightEntry`'s own doc
+ *   for why this is INJECTED rather than imported.
  * @param {object} deps.sceneColor - the `scene.color` render target (a
  *   `const`, never reassigned); `.texture` is read live per light.
  * @param {() => object} deps.getCandleRenderState - the boot.js-injected
@@ -312,7 +326,7 @@ export function createPointLightPool({
   THREE,
   getWindHandle,
   envLight,
-  sunShadows,
+  blendSunVisibilityAcrossFloors,
   sceneColor,
   getCandleRenderState,
   getLightningRenderState,
@@ -586,7 +600,7 @@ export function createPointLightPool({
           windHandle,
           THREE,
           envLight,
-          sunShadows,
+          blendSunVisibilityAcrossFloors,
           sceneColor,
           uGlobalTimeMs,
           lightScene,

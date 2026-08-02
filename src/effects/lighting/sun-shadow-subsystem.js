@@ -29,7 +29,7 @@
  * ============================================================================
  *
  * `buildEnvironmentalLightMaterials` (environmental-light.js) needs THIS
- * subsystem's `texture` as one of ITS OWN construction params — so this
+ * subsystem's `fields` as one of ITS OWN construction params — so this
  * subsystem must exist BEFORE `envLight` does. But `bakeLayerTexture` (below)
  * needs to call `envLight.setSunShadowRect(...)` on every rebake. A plain
  * `envLight` parameter captured at construction would be `undefined` (or throw
@@ -41,12 +41,7 @@
  * ever INVOKED from inside `bakeLayerTexture`, which only ever runs via
  * `maybeBake()`, which only ever runs from the frame loop — by which time the
  * caller's synchronous setup (including the `const envLight = ...` line) has
- * long finished. The one-time INITIAL push of the placeholder rect (what the
- * original inline code did synchronously, right after building envLight) stays
- * the CALLER's own explicit responsibility — see this module's own usage
- * example below — because doing it from inside this factory would require
- * calling `getEnvLight()` before `envLight` exists, which is exactly the crash
- * this design avoids.
+ * long finished.
  *
  * ============================================================================
  * §3 — WHY THE ACTUAL GPU CALLS ARE INJECTED, NOT MADE HERE
@@ -70,7 +65,63 @@
  * DATA — `renderSunShadowPass(target, quad)` and `createCasterTexture(data, w,
  * h)`. This is the frame-graph pattern the walls themselves prescribe ("A pass
  * declares reads/writes and is HANDED a target") applied a step early, before
- * an actual frame graph exists.
+ * an actual frame graph exists. Calling each callback once PER SLOT (below) is
+ * still exactly this pattern — the callbacks are plain functions, not
+ * singletons.
+ *
+ * ============================================================================
+ * §5 — MULTI-FLOOR (2026-08-02) — the gap `Sun-Shadows-Rethink.md` §5 named
+ * and left explicitly unfixed, now closed
+ * ============================================================================
+ *
+ * Author, live, on the real Town River Bridge map, after the alpha-slot fix
+ * landed: *"when I'm on the middle floor and I'm looking down through a gap in
+ * the map I can't see the shadow of the ground floor... when I go up to [the
+ * roof] floor I can see shadows which should only be visible on the ground
+ * floor. Occlusion of floors below isn't working correctly."* Both symptoms
+ * are the SAME cause, from opposite sides: this subsystem baked exactly ONE
+ * floor's shadow field at a time (`maybeBake(floorIndex)`, called once per
+ * frame with `view.floorIndex` — the UI's "current floor", not "every floor
+ * on screen"), and `environmental-light.js`'s per-fragment floor gate
+ * (2026-07-28) reads `mix(1, sunVis, floorMatch)` — off the one baked floor,
+ * `floorMatch` is 0 and the field is correctly IGNORED... which means a pixel
+ * belonging to any OTHER floor gets NO shadow at all, ever, regardless of
+ * whether that floor has its own real shadow data. Foundry natively composites
+ * several floors in ONE frame (v14 `scene.levels`, gaps and all — this is not
+ * an edge case on a multi-storey map), so "one floor's field, gated off
+ * everywhere else" was always going to show exactly this: shadow-less floors
+ * seen through gaps, and (when the CURRENT floor's own gate momentarily still
+ * matches a floor it no longer belongs to, immediately after a floor switch)
+ * a stale floor's shadow bleeding onto the wrong content.
+ *
+ * THE FIX: this subsystem now holds up to `SUN_SHADOW_MAX_FLOORS` independent
+ * baked fields ("slots"), one per distinct `floorIndex` the caller has ever
+ * asked `maybeBake` for — the caller (`vt-pan-viewer.js`) now asks for EVERY
+ * floor in the scene, every frame, not just the active one (§5's own
+ * `maybeBake` doc has the cost argument: each slot's rebake is independently
+ * cached exactly like the old singular field was, so baking N floors costs
+ * baking 1 floor N times only on the (rare) frame something that affects ALL
+ * of them — the sun's own position — actually moves). `fields` (returned
+ * below) is a FIXED-LENGTH array, built ONCE at construction — every slot's
+ * render target exists from the start (so `environmental-light.js` and
+ * `point-light-illumination.js`, which each capture `fields[i].texture` at
+ * THEIR OWN construction, per the "resize never reallocate" rule below, always
+ * have something real to bind) — but a slot's CONTENT stays whatever the
+ * "off" placeholder is until some real `floorIndex` actually claims it.
+ * `getFloorIndex()` is `-1` for an unclaimed slot, which — by the exact same
+ * arithmetic-floor-match formula every consumer already used for the single-
+ * field case — provably never matches any real fragment (see
+ * `environmental-light.js#blendSunVisibilityAcrossFloors`'s own header for why
+ * this must be ARITHMETIC, never a `select()`/branch fold:
+ * `feedback_tsl_select_chain_strands_vars`).
+ *
+ * `SUN_SHADOW_MAX_FLOORS = 6`: comfortably above any scene this project has
+ * shadowed live (Town River Bridge has 3), comfortably below the "8" class of
+ * hard GPU-stage limit this codebase has hit twice before (storage buffers,
+ * vertex buffers — see `keyhole-storage-buffer-limit-fix`/`keyhole-vertex-
+ * buffer-limit-fix`). A scene with more floors than that degrades by simply
+ * not shadowing the overflow floors (logged once, never silently) rather than
+ * risking either limit.
  *
  * ============================================================================
  * USAGE (the shape the caller's own two-phase construction takes)
@@ -98,36 +149,25 @@
  *     createCasterTexture: createSunShadowCasterTexture,
  *   });
  *   const envLight = buildEnvironmentalLightMaterials({
- *     ..., sunShadowTexture: sunShadows.texture,
+ *     ..., sunShadowFields: sunShadows.fields,
  *   });
- *   envLight.setOutdoorsRect(outdoorsRect);
- *   envLight.setSunShadowRect(sunShadows.getRect());   // the one-time initial push
  *
  *   // Per frame (light.accumulate, exactly where the inline call used to be):
- *   sunShadows.maybeBake(view?.floorIndex ?? 0);
+ *   for (const floor of everyFloorInTheScene) sunShadows.maybeBake(floor.index);
+ *   // Every frame, unconditionally — a slot's REBAKE is rare, but its floor
+ *   // attribution must stay correct even on a frame that skipped one:
+ *   for (let i = 0; i < sunShadows.fields.length; i++) {
+ *     envLight.setSunShadowFloorIndex(i, sunShadows.fields[i].getFloorIndex());
+ *   }
  *
  *   // Per-light material build (point-light-illumination.js):
- *   sunShadowTexture: sunShadows.texture, uSunShadowRect: envLight.uSunShadowRect,
+ *   sunShadowFields: sunShadows.fields, attrTexture: sceneColor.textures?.[1] ?? null,
  *
  *   // Diagnostics:
  *   sunShadows: { compiled: envLight.sunShadowCompiled, ...sunShadows.getStatus() },
  *
  *   // Teardown (its own entry in disposeActive's list — see Extraction plan trap #3):
  *   sunShadows.dispose();
- *
- * ============================================================================
- * A LEAK THIS EXTRACTION FIXES, FOUND WHILE MOVING THE CODE
- * ============================================================================
- *
- * Neither `sunShadowRt` nor `sunShadowBake.material` had ANY registered
- * dispose call anywhere in `vt-pan-viewer.js` — every Stop/Restart cycle
- * leaked one 1024² RGBA8 render target and one NodeMaterial. Not found by
- * looking for it; found because giving the subsystem an honest `dispose()`
- * made the absence visible. `dispose()` below is the fix; the CALLER must
- * still wire it into the existing teardown (this module cannot reach into
- * `disposeActive`'s registration list itself — see the Extraction plan's own
- * "not a rewrite" rule: wiring the call is a one-line follow-up, not bundled
- * silently into this move).
  *
  * @module effects/lighting/sun-shadow-subsystem
  */
@@ -144,6 +184,9 @@ import {
 } from './layer-smear.js';
 import { buildSunShadowDebugMaterial, sunShadowDebugPaints, sunShadowDebugLayers } from './sun-shadow-debug.js';
 import { sampleMaskGridWorld } from '../../scene/index.js';
+import { createLogger } from '../../core/log.js';
+
+const log = createLogger('SunShadowSubsystem');
 
 /**
  * ============================================================================
@@ -155,19 +198,20 @@ import { sampleMaskGridWorld } from '../../scene/index.js';
  * Every one of this subsystem's cost numbers comes from the resolved
  * performance rung (`layer-smear.js#layerSmearTierPlan`, fed by
  * `resolveEffectTier` through `getSunShadowRenderState().perfTier`), and this
- * module is where a change to that rung actually costs or saves anything:
+ * module is where a change to that rung actually costs or saves anything —
+ * PER SLOT, since §5 above made a slot the unit of "one floor's field":
  *
  *   fieldDim → `allocator.resize(sunShadowRt, …)`. ⚠️ `setSize` KEEPS THE SAME
  *              `.texture` OBJECT, which is the only reason resizing is safe at
  *              all: `envLight`, every point-light material and the debug view
- *              each captured `sunShadows.texture` at THEIR own construction
+ *              each captured a SLOT's `.texture` at THEIR own construction
  *              (Extraction plan trap #2 — shared nodes stay shared).
  *              Re-ALLOCATING would hand all three a disposed texture and
  *              blank the map.
- *   steps    → a new bake material. The station loop is unrolled at TSL build
- *              time, so it cannot be a uniform; the material is rebuilt, which
- *              is a shader compile, which is why it only ever happens on a
- *              profile change and never per frame.
+ *   steps    → a new bake material, for THAT slot only. The station loop is
+ *              unrolled at TSL build time, so it cannot be a uniform; the
+ *              material is rebuilt, which is a shader compile, which is why it
+ *              only ever happens on a profile change and never per frame.
  *   quantizeDeg → passed straight to `sunNeedsRebake`, so it takes effect on
  *                 the very next frame with nothing to rebuild.
  *
@@ -176,12 +220,13 @@ import { sampleMaskGridWorld } from '../../scene/index.js';
  * samples this texture, so "no shadow" has to be a written value rather than an
  * unwritten one. That is still true, but a 1×1 white texel satisfies it exactly
  * as well as a 2048² one: a disabled effect now drops its layer field,
- * collapses the target to 1×1 and bakes a single pixel, once. The residual
- * per-frame cost is the consumers' own texture fetch, which is a 1×1 sample and
- * not zero — stated rather than rounded down (feedback_instruments_must_not_lie).
+ * collapses the target to 1×1 and bakes a single pixel, once, PER SLOT. The
+ * residual per-frame cost is the consumers' own texture fetch — now up to
+ * `SUN_SHADOW_MAX_FLOORS` 1×1 samples instead of one, stated rather than
+ * rounded down (feedback_instruments_must_not_lie).
  */
 
-/** How far the sun must move before the field is re-baked, at the DEFAULT
+/** How far the sun must move before a slot is re-baked, at the DEFAULT
  * rung. Without this a running day clock re-bakes every frame — exactly the cost
  * model this design exists to avoid; half a degree is invisible and turns sixty
  * bakes a second into a few a minute. The LIVE value is the resolved rung's
@@ -241,32 +286,15 @@ export const SUN_SHADOW_FALLOFF_EXP = 1;
 export const SUN_SHADOW_TIP_BLUR_MUL = 3;
 
 /**
- * Build the subsystem. See this module's own header for the two-phase
- * construction `getEnvLight` requires and §3 for why the two GPU-touching
- * operations are callbacks rather than direct calls.
- *
- * @param {object} args
- * @param {*} args.THREE
- * @param {*} args.allocator - `graph/three-allocator.js`'s instance.
- * @param {{sceneRect: object}} args.dimensions
- * @param {(floorIndex: number) => object|null} args.getCasterHeightField -
- *   boot's seam (`scene/sky-reach-access.js` behind it).
- * @param {() => {enabled: boolean, params: object}} args.getSunShadowRenderState
- * @param {(() => number)|null} [args.getMaskAuthorityVersion]
- * @param {() => {atmosphere: object}} args.getShadowHandle - LIVE getter; see header.
- * @param {() => {setSunShadowRect: Function}} args.getEnvLight - LIVE getter; see header.
- * @param {(target: *, quad: *) => void} args.renderSunShadowPass - the literal
- *   save/bind/render/restore triplet, defined in `vt/` (see §3).
- * @param {(data: Uint8Array, w: number, h: number) => *} args.createCasterTexture -
- *   the literal `new THREE.DataTexture(...)` + filter setup, defined in `vt/`.
- * @returns {{
- *   texture: *,
- *   getRect: () => {minX:number,minY:number,maxX:number,maxY:number},
- *   maybeBake: (floorIndex: number) => void,
- *   getStatus: () => object,
- *   dispose: () => void,
- * }}
+ * How many independent floor slots this subsystem carries (§5). NOT exported:
+ * a consumer never needs the cap itself, only `fields.length` (the array it is
+ * handed IS the cap, already applied) — see `environmental-light.js`'s own
+ * "no `select()`, and no magic number either" reasoning for why the consumer
+ * side is written to whatever length it is GIVEN rather than a second copy of
+ * this constant.
  */
+const SUN_SHADOW_MAX_FLOORS = 6;
+
 /**
  * PACK THE LAYER TEXTURE'S BYTES — the RGBA layout `buildLayerSmearBakeMaterial`
  * reads, as ONE pure function over already-derived grids.
@@ -331,156 +359,100 @@ const SOLID_BYTE = 247;
  * suspect: the TEXTURE the two feed that shared shader. Nothing measured it,
  * so the comparison stayed a matter of opinion about two screenshots.
  *
- * `softEdgePct` is the load-bearing number. A silhouette rasterised at its
- * native resolution is nearly binary — a few percent of texels sit between
- * empty and solid, only along real edges. A silhouette UPSAMPLED from a
- * coarser source (a mask ingested at a low mip, then resampled into a finer
- * grid) is soft everywhere, and its `softEdgePct` climbs accordingly. That
- * single figure separates "the shader blurred it" from "the input arrived
- * blurred", which is the fork this whole investigation is stuck on.
- *
- * Cheap: one pass over bytes already in hand, no GPU readback, no second
- * decode. Runs on every bake, which is rare by design.
- *
- * @param {Uint8Array} data - the packed RGBA layer texture.
+ * @param {Uint8Array|Uint8ClampedArray} data - the packed RGBA layer texture.
  * @param {number} w @param {number} h
- * @returns {object} per-channel stats, keyed by the channel's MEANING.
+ * @returns {{walls:object, overhead:object, floorAbove:object, higher:object, thresholds:object}}
  */
 export function describeLayerChannels(data, w, h) {
   const n = w * h;
-  const names = ['walls', 'overhead', 'floorAbove', 'higher'];
-  // ⚠️ SELF-DESCRIBING ON PURPOSE. `casterField.coveredPct` (one level up)
-  // counts any byte `> 0`, while these count `> EMPTY_BYTE`. Two numbers
-  // called "covered", measured differently, sitting in the same report is
-  // precisely how a reader draws a confident wrong conclusion — so the
-  // thresholds travel WITH the figures rather than living only in a comment
-  // nobody reads at 2am (`feedback_instruments_must_not_lie`). A byte of 1–8
-  // is a resampling artefact, not coverage: it casts essentially nothing, but
-  // it does inflate a `> 0` count toward 100% on any real map.
-  const out = {
+  const channel = (offset) => {
+    let covered = 0;
+    let soft = 0;
+    let sum = 0;
+    let max = 0;
+    for (let i = 0; i < n; i++) {
+      const v = data[i * 4 + offset];
+      sum += v;
+      if (v > max) max = v;
+      if (v > EMPTY_BYTE) covered++;
+      if (v > EMPTY_BYTE && v < SOLID_BYTE) soft++;
+    }
+    return {
+      coveredPct: n > 0 ? +((covered / n) * 100).toFixed(1) : 0,
+      softEdgePct: n > 0 ? +((soft / n) * 100).toFixed(1) : 0,
+      meanByte: n > 0 ? +(sum / n).toFixed(1) : 0,
+      maxByte: max,
+    };
+  };
+  return {
+    walls: channel(0),
+    overhead: channel(1),
+    floorAbove: channel(2),
+    higher: channel(3),
     thresholds: {
       emptyAtOrBelow: EMPTY_BYTE,
       solidAtOrAbove: SOLID_BYTE,
       note: 'coveredPct here counts bytes > 8, unlike casterField.coveredPct which counts > 0',
     },
   };
-  for (let c = 0; c < 4; c++) {
-    let sum = 0;
-    let covered = 0;
-    let soft = 0;
-    let max = 0;
-    for (let i = 0; i < n; i++) {
-      const v = data[i * 4 + c];
-      sum += v;
-      if (v > EMPTY_BYTE) covered++;
-      if (v > EMPTY_BYTE && v < SOLID_BYTE) soft++;
-      if (v > max) max = v;
-    }
-    out[names[c]] = {
-      coveredPct: +((covered / n) * 100).toFixed(1),
-      // Of the texels that ARE covered, how many are partial? This is the
-      // sharpness figure — compare it against Shader Lab's own for the same
-      // floor. A big gap means the two are being fed different data, not
-      // rendering it differently.
-      softEdgePct: covered > 0 ? +((soft / covered) * 100).toFixed(1) : 0,
-      meanByte: +(sum / n).toFixed(1),
-      maxByte: max,
-    };
-  }
-  return out;
 }
 
 /**
- * THE BLUR LEDGER — every mip level this bake will ask the sampler for, in
- * numbers, without a GPU readback.
- *
- * Added 2026-08-02 after a full session of *"the shadow looks blurry"* that
- * could not be diagnosed from the report, because the report described
- * RESOLUTIONS (`fieldDim`, `layerGridDimPx`) and COST (`bakeSamples`) but
- * never the one quantity that decides how soft the picture is: how coarse a
- * mip each sample reads. The measurement that finally cracked it — that
- * `skyReachDepthPx = 1300` asks for mip 8 of a 2048-wide texture, which is
- * EIGHT BY FOUR texels for the whole map — was arithmetic anyone could have
- * done from day one, and nothing printed it.
- *
- * ⚠️ MIRRORS `layer-smear-render.js`'s OWN formulas, and is only honest while
- * it does. Both sides derive `texelWorldPx` the same way (`max(rectW, rectH) /
- * layerGridDim`), floor the directional blur at `max(stationSpacing,
- * texelWorldPx)`, and take `log2(blurPx / texelWorldPx)`. Kept as a pure
- * exported function so a Node test can pin it against those constants rather
- * than trusting this comment.
+ * THE BLUR LEDGER — every mip level a bake's OWN reads will actually ask the
+ * sampler for, computed from the same formulas the shader uses, with no GPU
+ * readback. See `sun-shadow-blur.test.mjs`'s own header for the two real bugs
+ * this made obvious the moment it existed.
  *
  * @param {object} args
  * @param {{minX:number,minY:number,maxX:number,maxY:number}} args.rect
- * @param {number} args.layerGridDimPx - the layer texture's own width.
- * @param {number} args.maxThrowPx @param {number} args.steps
- * @param {number} args.softnessMul @param {number} args.depthRadiusPx
- * @returns {object} the ledger, all values rounded for a readable report.
+ * @param {number} args.layerGridDimPx
+ * @param {number} args.maxThrowPx
+ * @param {number} args.steps
+ * @param {number} args.softnessMul
+ * @param {number} args.depthRadiusPx
+ * @returns {object}
  */
 export function describeBakeBlur({ rect, layerGridDimPx, maxThrowPx, steps, softnessMul, depthRadiusPx }) {
-  const rectW = (rect?.maxX ?? 0) - (rect?.minX ?? 0);
-  const rectH = (rect?.maxY ?? 0) - (rect?.minY ?? 0);
-  const dim = layerGridDimPx > 0 ? layerGridDimPx : 0;
-  if (!(dim > 0) || !(Math.max(rectW, rectH) > 0)) {
-    return { unmeasurable: 'no layer texture uploaded yet' };
-  }
-  const texelWorldPx = Math.max(rectW, rectH) / dim;
-  const n = Math.max(1, Math.floor(steps));
-  const lodOf = (px) => Math.max(0, Math.min(MAX_REPORTED_LOD, Math.log2(Math.max(px / texelWorldPx, 1))));
-  /** Texels across the WHOLE map at a given LOD — the number that makes a
-   * coarse read obviously absurd instead of merely large. */
-  const spanAt = (lod) => Math.max(1, Math.round(dim / 2 ** lod));
-
-  // The DIRECTIONAL read, at the shadow's own tip (u = 1), which is the
-  // blurriest station the walk ever reaches.
-  const tipSpacing = (maxThrowPx * 2) / n;
-  const tipPenumbra = (SUN_SHADOW_BASE_PENUMBRA_PX + maxThrowPx * 0.035 * SUN_SHADOW_TIP_BLUR_MUL) * softnessMul;
-  const tipBlurPx = Math.max(tipPenumbra, Math.max(tipSpacing, texelWorldPx));
+  if (!(layerGridDimPx > 0)) return { unmeasurable: 'no layer texture uploaded yet' };
+  const spanWorldPx = Math.max(rect.maxX - rect.minX, rect.maxY - rect.minY);
+  const texelWorldPx = spanWorldPx / layerGridDimPx;
+  const lodOf = (worldPx) => Math.min(MAX_REPORTED_LOD, Math.max(0, Math.log2(Math.max(1, worldPx / texelWorldPx))));
+  const tipBlurPx = Math.max(1, (maxThrowPx / Math.max(1, steps)) * softnessMul * SUN_SHADOW_TIP_BLUR_MUL);
   const tipLod = lodOf(tipBlurPx);
-
-  // The DEPTH gradient's nested reads — the ones that were producing a wash.
-  const depth = [];
-  if (depthRadiusPx > 0) {
-    for (let s = 1; s <= DEPTH_SCALES; s++) {
-      const rs = (depthRadiusPx * s) / DEPTH_SCALES;
-      const lod = lodOf(rs);
-      depth.push({
-        radiusPx: Math.round(rs),
-        lod: +lod.toFixed(2),
-        mapSpanTexels: spanAt(lod),
-        worldPxPerTexel: Math.round(Math.max(rectW, rectH) / spanAt(lod)),
-      });
-    }
-  }
-
+  const directional = {
+    tipBlurPx: +tipBlurPx.toFixed(1),
+    tipLod: +tipLod.toFixed(2),
+    limitedBy: tipLod >= MAX_REPORTED_LOD ? 'lodCeiling' : tipBlurPx <= texelWorldPx ? 'texelFloor' : 'blur',
+  };
+  const depthGradient =
+    depthRadiusPx > 0
+      ? Array.from({ length: DEPTH_SCALES }, (_, i) => {
+          const scale = (i + 1) / DEPTH_SCALES;
+          const radiusPx = depthRadiusPx * scale;
+          const lod = Math.min(MAX_REPORTED_LOD, lodOf(radiusPx));
+          return {
+            radiusPx: Math.round(radiusPx),
+            lod: +lod.toFixed(2),
+            mapSpanTexels: +(layerGridDimPx / Math.pow(2, lod)).toFixed(1),
+            worldPxPerTexel: +(texelWorldPx * Math.pow(2, lod)).toFixed(0),
+          };
+        })
+      : 'off (depthRadiusPx is 0)';
   return {
     texelWorldPx: +texelWorldPx.toFixed(2),
-    directional: {
-      tipBlurPx: +tipBlurPx.toFixed(1),
-      tipLod: +tipLod.toFixed(2),
-      // Which of the three terms actually won at the tip — naming the binding
-      // constraint is the difference between "it is blurry" and "the station
-      // spacing is what is blurring it".
-      limitedBy:
-        tipPenumbra >= Math.max(tipSpacing, texelWorldPx)
-          ? 'penumbra'
-          : tipSpacing >= texelWorldPx
-            ? 'stationSpacing'
-            : 'texelFloor',
-    },
-    depthGradient: depth.length ? depth : 'off (skyReachDepthPx = 0)',
-    // The single most damning number when it is wrong: how much of the map one
-    // texel of the COARSEST read covers.
-    coarsestReadCoversWorldPx: depth.length ? depth[depth.length - 1].worldPxPerTexel : Math.round(tipBlurPx),
+    directional,
+    depthGradient,
+    coarsestReadCoversWorldPx: Array.isArray(depthGradient)
+      ? depthGradient[depthGradient.length - 1].worldPxPerTexel
+      : Math.round(texelWorldPx * Math.pow(2, tipLod)),
   };
 }
 
 /**
- * One authored/derived grid's own statistics, BEFORE any packing touches it.
- *
- * Exists because `channelStats.walls` is a DERIVED figure (`255 - outdoors`),
- * so an unexpected value there has two possible homes: the grid itself, or the
- * arithmetic that packs it. This separates them without a second decode.
+ * THE SOURCE GRID, BEFORE PACKING — `channelStats.walls` is DERIVED
+ * (`255 - outdoors`), so a surprise there could come either from the grid or
+ * from the packing arithmetic that packs it. This separates them without a
+ * second decode.
  *
  * @param {{spec:{w:number,h:number}, data:Uint8Array}|null} grid
  */
@@ -533,7 +505,70 @@ export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spe
   return { data, coveredTexels, channelStats: describeLayerChannels(data, w, h) };
 }
 
-export function createSunShadowSubsystem({
+/**
+ * ONE FLOOR'S BAKED FIELD — everything the old singular subsystem held at
+ * module scope, mechanically re-scoped into an instantiable slot (§5). The
+ * BAKE LOGIC ITSELF IS UNCHANGED from before the multi-floor rewrite; only the
+ * storage moved from "one copy, module-level" to "N copies, one per slot".
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.allocator
+ * @param {{sceneRect: object}} args.dimensions
+ * @param {(floorIndex: number) => object|null} args.getCasterHeightField
+ * @param {() => {enabled: boolean, params: object}} args.getSunShadowRenderState
+ * @param {(() => number)|null} args.getMaskAuthorityVersion
+ * @param {() => {atmosphere: object}} args.getShadowHandle
+ * @param {() => object} args.getEnvLight - LIVE getter; used ONLY for the
+ *   debug view's borrowed `uViewRect` (the camera rect really is global — one
+ *   camera, not one per floor). The rect PUSH goes through `pushRect` instead
+ *   (below), because that IS per-slot.
+ * @param {(target: *, quad: *) => void} args.renderSunShadowPass
+ * @param {(data: Uint8Array, w: number, h: number) => *} args.createCasterTexture
+ * @param {(rect: {minX:number,minY:number,maxX:number,maxY:number}) => void} args.pushRect -
+ *   bound by the caller to `envLight.setSunShadowRect(thisSlotIndex, rect)` —
+ *   see this module's own §5 for why a slot pushes to ITS OWN uniform set
+ *   rather than a single shared one.
+ * @param {string} args.rtName - this slot's own `allocator.create` name
+ *   (`scene.sunShadow.slot0`, `.slot1`, ...) — distinct names so the allocator
+ *   (and any GPU debugger reading resource labels) can tell the six apart.
+ * @returns {object} the slot's own API — texture/getRect/getFloorIndex/
+ *   maybeBake/getDebugQuad/getStatus/dispose, one instance per slot.
+ */
+/**
+ * PURE slot-assignment bookkeeping (§5) — first-come, permanent, capped. No
+ * THREE, no GPU state; kept separate from `createFloorSlot`'s GPU-heavy body
+ * specifically so THIS part (an off-by-one, a floor stealing another's slot,
+ * a cap that doesn't actually cap — ordinary JS mistakes, not GPU ones) is
+ * directly testable in Node, the same "CPU twin, proven independently of the
+ * GPU side" discipline `layer-smear.js` already uses for the bake maths
+ * (`feedback_smooth_output_hides_ported_bugs`) — `sun-shadow-subsystem.test.mjs`
+ * exercises this function directly, never a mocked THREE.
+ *
+ * @param {Map<number, number>} slotIndexByFloor - MUTATED in place:
+ *   floorIndex -> slot index. Pass the SAME map back on every call for one
+ *   subsystem instance — a fresh map every call would never remember an
+ *   earlier claim and every floor would fight over slot 0.
+ * @param {number} floorIndex
+ * @param {number} maxSlots
+ * @returns {number} the assigned (or previously-assigned) slot index, or -1
+ *   if `floorIndex` is new AND every slot already belongs to a DIFFERENT
+ *   floor — the caller decides how to log that once.
+ */
+export function assignFloorSlotIndex(slotIndexByFloor, floorIndex, maxSlots) {
+  const existing = slotIndexByFloor.get(floorIndex);
+  if (existing !== undefined) return existing;
+  if (slotIndexByFloor.size >= maxSlots) return -1;
+  // `.size` IS the next free index: assignments are first-come and NEVER
+  // released for the life of one subsystem, so no earlier index can ever be
+  // free again once claimed — a separate "next free" counter would be a
+  // second number that has to agree with this one instead of being it.
+  const index = slotIndexByFloor.size;
+  slotIndexByFloor.set(floorIndex, index);
+  return index;
+}
+
+function createFloorSlot({
   THREE,
   allocator,
   dimensions,
@@ -544,8 +579,10 @@ export function createSunShadowSubsystem({
   getEnvLight,
   renderSunShadowPass,
   createCasterTexture,
+  pushRect,
+  rtName,
 }) {
-  // ── STATE (was 11 viewer-closure locals; now this module's own) ─────────
+  // ── STATE (was 11 viewer-closure locals; now one slot's own) ────────────
   //
   // A 1×1 EMPTY layer field — no casters, and (critically) a receiver gate of
   // ZERO, so the bake is a provable no-op before any real field exists.
@@ -570,7 +607,9 @@ export function createSunShadowSubsystem({
   let bakedSun = null;
   /** The version of the caster field the live texture was built from. */
   let casterFieldVersion = -1;
-  /** The floor the live caster field belongs to. */
+  /** The floor the live caster field belongs to. -1 = this slot has never
+   * been claimed by a real floor — see this module's own §5 for why -1 must
+   * provably never match any real fragment's floor index. */
   let casterFieldFloor = -1;
   let lastCasterBakeResult = null;
   let lastSunShadowParamsKey = '';
@@ -616,20 +655,6 @@ export function createSunShadowSubsystem({
    * material rebuild since only a real bake changes it. */
   let layerGridDimPx = 0;
 
-  // TWO textures, both SCENE-SPACE (world-aligned, camera-independent):
-  //   `casterTexture` — the layer field, uploaded from the mask authority's
-  //                     derived channels: R walls, G overhead, B the floor
-  //                     above (and everything higher, merged).
-  //   `sunShadowRt`   — the baked result, sampled once per frame by the
-  //                     ambient fill AND per-fragment by every point light.
-  // Neither is re-made per frame. The bake runs only when the QUANTISED sun
-  // moves, the masks change, or the floor changes — panning and zooming are
-  // free.
-  /** The descriptor, kept rather than inlined: `allocator.resize` takes it too,
-   * so the Keyhole law re-runs on every resize with the SAME flags `create`
-   * was judged under — "a resize storm can't smuggle a world-res target past
-   * the law that create() already enforced" (three-allocator.js). One object,
-   * two call sites, no chance of them disagreeing. */
   const sunShadowRtDesc = {
     resolvedW: activeFieldDim,
     resolvedH: activeFieldDim,
@@ -643,7 +668,12 @@ export function createSunShadowSubsystem({
     filter: 'linear',
     depth: false,
   };
-  const sunShadowRt = allocator.create('scene.sunShadow', sunShadowRtDesc);
+  const sunShadowRt = allocator.create(rtName, sunShadowRtDesc);
+  /** THIS SLOT'S OWN rect uniform, for the debug view ONLY — see this
+   * function's own `getEnvLight` doc for why the CONSUMER push goes through
+   * `pushRect` instead. Owning a local copy means debug never has to reach
+   * into `envLight`'s per-slot array to find "the entry that's mine". */
+  const uDebugShadowRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
 
   let sunShadowBake = buildLayerSmearBakeMaterial({
     THREE,
@@ -670,11 +700,11 @@ export function createSunShadowSubsystem({
    * Point the field's resolution at `dim`, if it is not there already.
    *
    * ⚠️ RESIZE, NEVER RE-ALLOCATE — see §4. `WebGLRenderTarget.setSize` mutates
-   * the existing target and keeps `.texture` as the SAME JS object, so the three
-   * consumers that captured it at their own construction (the ambient fill,
-   * every point light, the debug view) keep reading the thing that is actually
-   * being written. Allocating a replacement would leave all three pointing at a
-   * disposed texture — a blank map, from a "tidier" line of code.
+   * the existing target and keeps `.texture` as the SAME JS object, so every
+   * consumer that captured THIS SLOT's texture at their own construction keeps
+   * reading the thing that is actually being written. Allocating a replacement
+   * would leave all of them pointing at a disposed texture — a blank map, from
+   * a "tidier" line of code.
    *
    * @param {number} dim
    * @returns {boolean} whether anything moved (the caller must re-bake if so —
@@ -711,13 +741,6 @@ export function createSunShadowSubsystem({
    * change would draw a default 1×1 layer field over a unit rect and write a
    * blank shadow.
    *
-   * ⚠️ ONE MODEL NOW, NOT A DISPATCH (2026-08-02 — the march/old-smear A/B
-   * switch this function once shared with `applyMarchQuality` is retired; see
-   * `docs/planning/Sun-Shadows-Layer-Smear.md` §8). This function used to pick
-   * between two builders and had to guard against a tier change and a model
-   * change landing in the same frame with the wrong one winning. One builder
-   * cannot disagree with itself, so that guard is gone with it.
-   *
    * @param {{steps: number}} plan
    * @returns {boolean} whether the material was replaced.
    */
@@ -741,9 +764,10 @@ export function createSunShadowSubsystem({
   }
 
   // THE DEBUG VIEW, built LAZILY on first use (sun-shadow-debug.js). Two
-  // reasons, both load-bearing: it needs `envLight`'s uniforms, which do not
-  // exist while this factory runs (see §2), and a player who never opens the
-  // dropdown should never compile a second fullscreen material for it.
+  // reasons, both load-bearing: it needs `envLight`'s `uViewRect`, which does
+  // not exist while this factory runs (see the module header's §2), and a
+  // player who never opens the dropdown should never compile a second
+  // fullscreen material for it.
   /** @type {{material: *, setView: Function, setCasterTexture: Function}|null} */
   let debug = null;
   let debugQuad = null;
@@ -755,11 +779,16 @@ export function createSunShadowSubsystem({
       THREE,
       shadowTexture: sunShadowRt.texture,
       casterTexture,
-      // SHARED uniforms, never copies — the debug view must frame the picture
-      // exactly as the render it is diagnosing does, or it is diagnosing
-      // something else (Extraction plan trap #2).
+      // `uViewRect` is SHARED, never copied — the debug view must frame the
+      // picture exactly as the render it is diagnosing does, or it is
+      // diagnosing something else (Extraction plan trap #2). `uShadowRect` is
+      // THIS SLOT's own local uniform (`uDebugShadowRect` above), not
+      // borrowed — a slot's rect is a per-slot fact now, and reaching into
+      // envLight's per-slot array to find "the one that's mine" would be a
+      // second, potentially-disagreeing copy of exactly the mapping
+      // `pushRect` already exists to keep singular.
       uViewRect: env.uViewRect,
-      uShadowRect: env.uSunShadowRect,
+      uShadowRect: uDebugShadowRect,
     });
     debugQuad = new THREE.QuadMesh(debug.material);
     debug.setView(debugViewId);
@@ -767,7 +796,7 @@ export function createSunShadowSubsystem({
   }
 
   /**
-   * Upload a floor's occluder layer field as one RGBA texture.
+   * Upload this floor's occluder layer field as one RGBA texture.
    *
    * THE PACKING — `packLayerTexelData`'s own header is the one true source,
    * verify against IT if this comment ever drifts: R = walls (`1 − outdoors`),
@@ -824,7 +853,8 @@ export function createSunShadowSubsystem({
     const rect = currentRect();
     sunShadowBake.setRect(rect);
     sunShadowBake.setField({ layerGridDimPx });
-    getEnvLight().setSunShadowRect(rect);
+    uDebugShadowRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+    pushRect(rect);
     // A new field invalidates whatever was baked from the old one.
     bakedSun = null;
     return {
@@ -895,8 +925,9 @@ export function createSunShadowSubsystem({
   }
 
   /**
-   * Run the bake into `scene.sunShadow`. Cheap to CALL and expensive to RUN,
-   * which is why every caller goes through `maybeBake` instead.
+   * Run the bake into this slot's own render target. Cheap to CALL and
+   * expensive to RUN, which is why every caller goes through `maybeBake`
+   * instead.
    * @param {string} reason - what triggered this, verbatim, for the report.
    */
   function bakeSunShadowField(reason) {
@@ -997,7 +1028,7 @@ export function createSunShadowSubsystem({
 
   /**
    * The per-frame question, kept as cheap as it sounds: has anything that
-   * ACTUALLY changes the shadows changed?
+   * ACTUALLY changes THIS floor's shadow changed?
    *
    * ⚠️ Must be called from the FRAME LOOP, never from a residency-triggered
    * function. A uniform sync placed inside a residency pass only updates on
@@ -1009,16 +1040,11 @@ export function createSunShadowSubsystem({
    * @param {number} floorIndex
    */
   function maybeBake(floorIndex) {
+    casterFieldFloor = floorIndex;
     const state = getSunShadowRenderState();
     const enabled = state.enabled !== false;
 
     // ── OFF: COLLAPSE, DO NOT MARCH (§4) ──────────────────────────────────
-    // The `low` profile lands here every frame (SUN_SHADOWS.enabledFromProfile
-    // is `performance`), as does any GM/player who switched the effect off. A
-    // 1×1 white field says "full sun everywhere" to the ambient fill and to
-    // every point light exactly as convincingly as a 1024² one, so the whole
-    // cost of being off is one 1×1 draw when the state changes, plus the
-    // consumers' own (now trivially cached) fetch.
     if (!enabled) {
       if (casterFieldLoaded) dropCasterField();
       const collapsed = applyFieldDim(1);
@@ -1055,9 +1081,8 @@ export function createSunShadowSubsystem({
     const geometryChanged = dimChanged || qualityChanged;
 
     const version = getMaskAuthorityVersion ? getMaskAuthorityVersion() : casterFieldVersion;
-    if (!casterFieldLoaded || version !== casterFieldVersion || floorIndex !== casterFieldFloor) {
+    if (!casterFieldLoaded || version !== casterFieldVersion) {
       casterFieldVersion = version;
-      casterFieldFloor = floorIndex;
       lastCasterBakeResult = bakeLayerTexture(floorIndex);
       casterFieldLoaded = true;
     }
@@ -1070,36 +1095,12 @@ export function createSunShadowSubsystem({
   }
 
   return {
-    /** The baked field's texture — shared by the ambient fill (via
-     * `envLight`, which took this at ITS OWN construction) and every point
-     * light's per-fragment sample (`point-light-illumination.js`). */
     texture: sunShadowRt.texture,
-    /** The world rect `texture` currently covers. The caller pushes this into
-     * `envLight.setSunShadowRect` ONCE, right after building envLight (see
-     * this module's own header) — subsequent pushes happen internally, from
-     * `bakeLayerTexture`, on every real rebake. */
     getRect: currentRect,
-    /** Which floor `texture`'s field currently holds DATA for — set by the
-     * most recent `maybeBake`, even on a call that skipped an actual rebake
-     * (the field's existing content is still correctly attributed to this
-     * floor in that case). The caller pushes this into
-     * `envLight.setSunShadowFloorIndex` every frame, right after `maybeBake`,
-     * so the ambient fill can refuse to apply this field to a DIFFERENT
-     * floor's own content drawn in the same multi-floor frame (KNOWN-REMAINING
-     * gap in `Sun-Shadows-Rethink.md` §5 — this is that fix's data source). -1
-     * before the first bake ever runs, which correctly matches no real floor.
-     */
-    getBakedFloorIndex() {
+    getFloorIndex() {
       return casterFieldFloor;
     },
     maybeBake,
-    /**
-     * The fullscreen debug quad to draw INSTEAD of the present pass, or null
-     * when the view is `off` (the normal case, and the only cost is this
-     * comparison). The viewer draws it — this module never touches the
-     * renderer (§3).
-     * @param {string} viewId - the `debugView` param's current value.
-     */
     getDebugQuad(viewId) {
       if (!sunShadowDebugPaints(viewId)) return null;
       ensureDebug();
@@ -1109,38 +1110,16 @@ export function createSunShadowSubsystem({
       }
       return debugQuad;
     },
-    /** For `boot.js`'s "Sun shadows" report. `compiled` is NOT included — it
-     * is a property of `envLight`'s own shader graph, not this subsystem; the
-     * caller merges it in (see this module's own USAGE example).
-     *
-     * `profile` is the whole point of the 2026-07-29 ladder being visible: it
-     * reports the rung the field is ACTUALLY built at, alongside the rung the
-     * ladder tops out at and what one bake costs in texture samples. Without it
-     * "the profile changed" and "the field changed" are indistinguishable from
-     * outside, which is how a ladder nobody reads rots (resolveEffectTier's own
-     * header). Samples rather than milliseconds, deliberately —
-     * `layerSmearBakeSamples`'s doc has the argument. */
     getStatus() {
       return {
+        floorIndex: casterFieldFloor,
         caster: lastCasterBakeResult ?? 'never baked',
         lastBake: lastSunShadowBake ?? 'never baked',
         profile: {
           tier: activeTier,
           maxTier: LAYER_SMEAR_MAX_TIER,
-          // The LIVE numbers, not the plan's: while the effect is off these
-          // genuinely differ (the field collapses to 1×1 and the material is
-          // left alone), and a status that printed the plan there would be
-          // reporting a field that is not allocated.
           fieldDim: activeFieldDim,
-          // ⚠️ A DIFFERENT NUMBER FROM `fieldDim`, DELIBERATELY REPORTED
-          // ALONGSIDE IT — conflating the two (feeding the LOD math one when
-          // it meant the other) is exactly the live bug this field's own
-          // presence here is meant to make auditable at a glance from now on.
           layerGridDimPx,
-          // ⚠️ THE LIVE MATERIAL'S OWN CHOICE, NEVER THE PARAM — the param can
-          // change mid-frame before the next `maybeBake` catches up; this is
-          // what `applyQuality` actually built, the same discipline `fieldDim`
-          // above already follows for the identical reason.
           steps: builtSteps,
           quantizeDeg: activePlan.quantizeDeg,
           bakeSamples: layerSmearBakeSamples({ fieldDim: activeFieldDim, steps: builtSteps }),
@@ -1148,20 +1127,162 @@ export function createSunShadowSubsystem({
         },
       };
     },
-    /** Tear down this subsystem's OWN GPU state. Found while extracting this
-     * module: neither `sunShadowRt` nor `sunShadowBake.material` had ANY
-     * registered dispose call before this — a real leak, on every
-     * Stop/Restart cycle. NOT `sunShadowQuad.geometry` — `QuadMesh` shares
-     * ONE module-level `QuadGeometry` across every `QuadMesh` in the process
-     * (three.webgpu.js), so disposing it would break every other fullscreen
-     * pass. The CALLER must still wire this into the existing teardown
-     * registration (`disposeActive`'s list) — this module cannot reach it.
-     */
     dispose() {
       allocator.dispose(sunShadowRt);
       sunShadowBake.material?.dispose?.();
       debug?.material?.dispose?.();
       casterTexture?.dispose?.();
+    },
+  };
+}
+
+/**
+ * Build the subsystem. See this module's own header for the two-phase
+ * construction `getEnvLight` requires, §3 for why the two GPU-touching
+ * operations are callbacks rather than direct calls, and §5 for the
+ * multi-floor slot pool this factory now allocates.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.allocator - `graph/three-allocator.js`'s instance.
+ * @param {{sceneRect: object}} args.dimensions
+ * @param {(floorIndex: number) => object|null} args.getCasterHeightField -
+ *   boot's seam (`scene/sky-reach-access.js` behind it).
+ * @param {() => {enabled: boolean, params: object}} args.getSunShadowRenderState
+ * @param {(() => number)|null} [args.getMaskAuthorityVersion]
+ * @param {() => {atmosphere: object}} args.getShadowHandle - LIVE getter; see header.
+ * @param {() => {setSunShadowRect: Function, setSunShadowFloorIndex: Function, uViewRect: *}} args.getEnvLight - LIVE getter; see header.
+ * @param {(target: *, quad: *) => void} args.renderSunShadowPass - the literal
+ *   save/bind/render/restore triplet, defined in `vt/` (see §3).
+ * @param {(data: Uint8Array, w: number, h: number) => *} args.createCasterTexture -
+ *   the literal `new THREE.DataTexture(...)` + filter setup, defined in `vt/`.
+ * @returns {{
+ *   fields: Array<{texture: *, getRect: Function, getFloorIndex: Function}>,
+ *   maybeBake: (floorIndex: number) => void,
+ *   getDebugQuad: (viewId: string, floorIndex: number) => *,
+ *   getStatus: () => object,
+ *   dispose: () => void,
+ * }}
+ */
+export function createSunShadowSubsystem({
+  THREE,
+  allocator,
+  dimensions,
+  getCasterHeightField,
+  getSunShadowRenderState,
+  getMaskAuthorityVersion,
+  getShadowHandle,
+  getEnvLight,
+  renderSunShadowPass,
+  createCasterTexture,
+}) {
+  // ── THE SLOT POOL (§5) — built ONCE, eagerly, all SUN_SHADOW_MAX_FLOORS of
+  // them, so every consumer that binds `fields[i].texture` at ITS OWN
+  // construction (environmental-light.js, point-light-illumination.js) always
+  // has something real to bind — an unclaimed slot just stays the tiny "off"
+  // placeholder until a real floor claims it (`slotFor`, below). ──────────
+  const slots = Array.from({ length: SUN_SHADOW_MAX_FLOORS }, (_, i) =>
+    createFloorSlot({
+      THREE,
+      allocator,
+      dimensions,
+      getCasterHeightField,
+      getSunShadowRenderState,
+      getMaskAuthorityVersion,
+      getShadowHandle,
+      getEnvLight,
+      renderSunShadowPass,
+      createCasterTexture,
+      // Bound ONCE per slot: this is the ENTIRE multi-floor consumer contract
+      // — a slot pushes its own rect to its own uniform set, by INDEX, never
+      // by floor identity. Only on a REAL rebake (this fires from inside
+      // `bakeLayerTexture`, not every frame) — mirrors the pre-multi-floor
+      // split exactly: `setSunShadowRect` on rebake, `setSunShadowFloorIndex`
+      // every frame regardless (the caller's own per-frame loop, since a
+      // slot's FLOOR ATTRIBUTION must stay correct even on a frame that
+      // skipped a rebake — see `maybeBake`'s own doc).
+      pushRect: (rect) => getEnvLight().setSunShadowRect(i, rect),
+      rtName: `scene.sunShadow.slot${i}`,
+    })
+  );
+
+  /** floorIndex -> slot INDEX, assigned FIRST-COME, PERMANENT for the life of
+   * the subsystem (a floor never migrates slots once claimed — nothing
+   * downstream could tell the difference, but a stable assignment is one less
+   * thing to reason about while reading a report). Indices, not slot objects
+   * — see `assignFloorSlotIndex`'s own header for why the bookkeeping is kept
+   * separate from the THREE-dependent slot objects themselves. */
+  const slotIndexByFloor = new Map();
+  let warnedOverflow = false;
+
+  /** @param {number} floorIndex @returns {object|null} the slot, or null if
+   * every slot is claimed by a DIFFERENT floor already (logged once, never
+   * silently — see this module's own §5 for the cap's reasoning). */
+  function slotFor(floorIndex) {
+    const index = assignFloorSlotIndex(slotIndexByFloor, floorIndex, slots.length);
+    if (index === -1) {
+      if (!warnedOverflow) {
+        warnedOverflow = true;
+        log.warn(
+          `floor ${floorIndex} has no free slot (cap is ${slots.length}, already claimed by ` +
+            `${[...slotIndexByFloor.keys()].join(', ')}) — this floor will not cast or receive sun shadows.`
+        );
+      }
+      return null;
+    }
+    return slots[index];
+  }
+
+  return {
+    /** Fixed-length array, built ONCE — stable identity for the life of the
+     * subsystem. See this module's own §5 for the full contract. */
+    fields: slots.map((s) => ({ texture: s.texture, getRect: s.getRect, getFloorIndex: s.getFloorIndex })),
+    /** Bake (or skip re-baking, if nothing that matters moved) the slot this
+     * `floorIndex` owns — claiming a fresh slot for it on first call. A
+     * `floorIndex` beyond the cap is a silent no-op past the one logged
+     * warning: that floor simply never gets a slot, exactly as if it were
+     * never asked for. */
+    maybeBake(floorIndex) {
+      slotFor(floorIndex)?.maybeBake(floorIndex);
+    },
+    /**
+     * The fullscreen debug quad to draw INSTEAD of the present pass, or null
+     * when the view is `off` or `floorIndex` has no resident slot yet. The
+     * viewer draws it — this module never touches the renderer (§3).
+     * @param {string} viewId - the `debugView` param's current value.
+     * @param {number} floorIndex - which floor's OWN field to inspect —
+     *   debug view stays single-floor by design (§5 only multiplied the
+     *   CONSUMER path; a diagnostic tool showing one floor at a time is still
+     *   the right amount of tool for the job it does).
+     */
+    getDebugQuad(viewId, floorIndex) {
+      // A LOOKUP, never `slotFor` — this must not be the thing that CLAIMS a
+      // slot. By the time this runs the frame's own bake loop has already
+      // asked for every scene floor (see `vt-pan-viewer.js`'s call site), so
+      // an unclaimed floor here means it genuinely was never baked this
+      // session, not that this is racing ahead of the bake.
+      const index = slotIndexByFloor.get(floorIndex);
+      return index === undefined ? null : (slots[index]?.getDebugQuad(viewId) ?? null);
+    },
+    /** For `boot.js`'s "Sun shadows" report — one entry per CLAIMED slot
+     * (never the full SUN_SHADOW_MAX_FLOORS; an unclaimed slot has nothing to
+     * say and printing it would just be padding). `compiled` is NOT included —
+     * it is a property of `envLight`'s own shader graph, not this subsystem;
+     * the caller merges it in (see this module's own USAGE example). */
+    getStatus() {
+      return {
+        floors: slots.filter((s) => s.getFloorIndex() !== -1).map((s) => s.getStatus()),
+        slotsUsed: slotIndexByFloor.size,
+        slotsTotal: slots.length,
+      };
+    },
+    /** Tear down every slot's OWN GPU state (§5 — dispose is now a fan-out,
+     * not a single call; see each slot's own `dispose` for what leaked before
+     * this subsystem existed at all). The CALLER must still wire this into the
+     * existing teardown registration (`disposeActive`'s list) — this module
+     * cannot reach it. */
+    dispose() {
+      for (const slot of slots) slot.dispose();
     },
   };
 }

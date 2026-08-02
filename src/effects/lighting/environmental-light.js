@@ -272,6 +272,15 @@ export function maxRgb(rgb, floor) {
  *   OWN floor index / 255. Omitted → the sun-shadow floor gate below compiles
  *   out entirely (JS-time branch, `tsl/no-uniform-gates`) and this pass is
  *   byte-identical to before the gate existed.
+ * @param {Array<{texture: *}>} [args.sunShadowFields] - `sunShadows.fields`
+ *   (`sun-shadow-subsystem.js` §5) — ONE baked field per resident floor slot,
+ *   fixed-length, built once at the subsystem's own construction. Each slot
+ *   gets its OWN rect + floor-index uniform pair here (`setSunShadowRect`/
+ *   `setSunShadowFloorIndex`, both now indexed) and every slot is blended in
+ *   ARITHMETICALLY (`blendSunVisibilityAcrossFloors`, exported below) — never
+ *   a `select()`/branch fold over the array, which would strand every branch
+ *   but the last (`feedback_tsl_select_chain_strands_vars`). Omitted or empty
+ *   → the whole block compiles out, byte-identical to before shadows existed.
  * @returns {{
  *   illumMaterial: *, compositeMaterial: *,
  *   uBackgroundSrgb: *, albedoTexNode: *, illumTexNode: *, colorationTexNode: *,
@@ -288,10 +297,10 @@ export function buildEnvironmentalLightMaterials({
   colorationTexture,
   uiShadowVisNode,
   outdoorsTexture,
-  sunShadowTexture,
+  sunShadowFields,
   attrTexture,
 }) {
-  const { uniform, texture, vec3, vec4, float, mix, abs, smoothstep, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+  const { uniform, texture, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SKY LIGHT (docs/planning/Sky.md) — atmosphere as LIGHT, not a grade.
@@ -362,26 +371,41 @@ export function buildEnvironmentalLightMaterials({
   // light's own occlusion. Do NOT "unify" the two: moving this one after the
   // lights would make a torch inside a building's shadow read dimmer than the
   // same torch outside it, which is `DynamicLightShadowLift` rebuilt backwards.
-  const uSunShadowRect = uniform(vec4(0, 0, 1, 1));
-  const sunShadowTexNode = sunShadowTexture ? texture(sunShadowTexture) : null;
+  // ── PER-SLOT SUN-SHADOW FIELDS (2026-08-02, §5 of sun-shadow-subsystem.js)
+  // ─────────────────────────────────────────────────────────────────────────
+  // `sunShadowFields` is FIXED-LENGTH (built once by the subsystem — one
+  // entry per resident floor slot). One rect + one floor-index uniform PER
+  // SLOT, built once here and SHARED (never copied) with every point light's
+  // own material via this module's own `sunShadowSlotNodes`/`attrTexNode`
+  // return values — the same "one owner, one update" discipline `uViewRect`/
+  // `uOutdoorsRect` already use for bloom, generalized from one field to N.
+  const sunShadowSlots = (sunShadowFields ?? []).map((field) => ({
+    texNode: texture(field.texture),
+    uRect: uniform(vec4(0, 0, 1, 1)),
+    // -1/255, NOT 0 — see sun-shadow-subsystem.js's own §5: a real floor index
+    // is always >= 0, so -1/255 is PROVABLY unreachable by any real fragment,
+    // where a clamped 0 would silently read as "floor 0" for an unclaimed
+    // slot (Extraction plan trap avoided, not merely worked around).
+    uFloorIndex01: uniform(float(-1 / 255)),
+  }));
 
-  // THE PER-FLOOR GATE (2026-07-28) — the field above is baked for exactly
-  // ONE floor (`sunShadows.maybeBake`'s own `floorIndex` arg), but a frame can
-  // legitimately draw SEVERAL floors at once (multi-floor viewing). Without
-  // this, a shadow baked for one floor darkens whatever OTHER floor's content
-  // happens to share the same screen pixel — reported as "sky-reach shadow
-  // draws over the very thing producing it" when the caster is itself an
-  // overhead item whose art belongs to a different floor attribution than the
-  // field currently baked. `attrTexNode.r` is the SAME per-pixel floor index
-  // `buf:scene.attr`'s real writers already pack (`vt/scene-attr.js
-  // #packFloorAttr`); the comparison formula below is copied verbatim from
-  // `specular-render.js`'s own existing floor gate (`floorMatch`) rather than
-  // re-derived, so there is exactly one tuned threshold for "same floor" in
-  // this codebase, not two that could disagree.
+  // THE PER-FLOOR GATE (2026-07-28, generalized to N floors 2026-08-02) — a
+  // frame legitimately draws SEVERAL floors at once (Foundry v14's native
+  // multi-floor `scene.levels`, gaps and all — not an edge case on a
+  // multi-storey map). Without this, one floor's shadow either darkens every
+  // OTHER floor's content sharing the same screen pixel (pre-2026-07-28), or
+  // — the single-slot gate's own remaining gap, reported live 2026-08-02 —
+  // every floor OTHER than the one currently baked gets no shadow at all,
+  // because there was nowhere else for its data to live. `attrTexNode.r` is
+  // the SAME per-pixel floor index `buf:scene.attr`'s real writers already
+  // pack (`vt/scene-attr.js#packFloorAttr`); the per-slot comparison formula
+  // (`blendSunVisibilityAcrossFloors`, exported below) is the SAME tuned
+  // threshold `specular-render.js`'s own `floorMatch` uses, applied once per
+  // slot and combined ARITHMETICALLY — never a `select()`/branch fold, which
+  // would strand every branch's shared subgraph but the last
+  // (`feedback_tsl_select_chain_strands_vars` — the specular effect lost 12 of
+  // 20 debug channels to exactly that mistake).
   const attrTexNode = attrTexture ? texture(attrTexture) : null;
-  /** This frame's baked shadow field belongs to `index / 255` — pushed by
-   * `setSunShadowFloorIndex` every frame, right after `sunShadows.maybeBake`. */
-  const uSunShadowFloorIndex01 = uniform(float(0));
 
   // --- illum pass: ambient fill, tinted by the sky where it is open --------
   const uBackgroundSrgb = uniform(vec3(0.93, 0.93, 0.93));
@@ -396,30 +420,32 @@ export function buildEnvironmentalLightMaterials({
     // Foundry parity check this module's header describes still holds exactly.
     const skyTint = outdoors ? mix(vec3(1, 1, 1), uSkyMultiplier, outdoors) : null;
     const ambient = skyTint ? uBackgroundSrgb.mul(skyTint) : uBackgroundSrgb;
-    // A JS-time branch, so a scene with no baked field compiles to byte-identical
-    // shader code — and a freshly-baked all-white field is a provable no-op even
-    // when it IS compiled in.
-    const sunVisRaw = buildSunVisibilityNode(THREE.TSL, {
-      uViewRect,
-      uShadowRect: uSunShadowRect,
-      shadowTexNode: sunShadowTexNode,
-    });
-    // Gate by floor match — same formula as `specular-render.js`'s
-    // `floorMatch` (see the block above this material for why it's copied,
-    // not re-derived). `floorMatch` is 1 on the baked floor, 0 off it, with a
-    // narrow smoothstep ramp absorbing 8-bit quantization noise, never a
-    // spatial blur (this is a per-pixel exact value from the geometry pass).
-    // `mix(1, sunVisRaw, floorMatch)`: off the baked floor this evaluates to a
-    // provable `1` — full visibility, i.e. this field simply does not apply —
-    // rather than accidentally darkening content it was never computed from.
+    // A JS-time branch, so a scene with no baked fields compiles to byte-
+    // identical shader code — and a freshly-baked all-white slot is a
+    // provable no-op even when it IS compiled in.
     const sunVis =
-      sunVisRaw && attrTexNode
-        ? mix(
-            float(1),
-            sunVisRaw,
-            float(1).sub(smoothstep(float(0.4 / 255), float(0.9 / 255), abs(attrTexNode.r.sub(uSunShadowFloorIndex01))))
-          )
-        : sunVisRaw;
+      sunShadowSlots.length === 0
+        ? null
+        : attrTexNode
+          ? blendSunVisibilityAcrossFloors(THREE.TSL, {
+              attrFloorIndex01: attrTexNode.r,
+              slots: sunShadowSlots.map((slot) => ({
+                sunVis: buildSunVisibilityNode(THREE.TSL, {
+                  uViewRect,
+                  uShadowRect: slot.uRect,
+                  shadowTexNode: slot.texNode,
+                }),
+                floorIndex01: slot.uFloorIndex01,
+              })),
+            })
+          : // No attr texture to gate by floor — fall back to slot 0 alone,
+            // the exact single-field, no-gating behaviour this had before the
+            // per-floor gate existed at all (pre-2026-07-28).
+            buildSunVisibilityNode(THREE.TSL, {
+              uViewRect,
+              uShadowRect: sunShadowSlots[0].uRect,
+              shadowTexNode: sunShadowSlots[0].texNode,
+            });
     illumMaterial.fragmentNode = vec4(sunVis ? ambient.mul(sunVis) : ambient, float(1));
   }
 
@@ -467,22 +493,37 @@ export function buildEnvironmentalLightMaterials({
     uOutdoorsRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
   }
 
-  /** The world rect the baked sun-shadow field covers. Same shape, and set from
-   * the same place, as `setOutdoorsRect` — the two rects are independent because
-   * the shadow field is allocated at its own resolution, not the mask's. */
-  function setSunShadowRect(rect) {
-    uSunShadowRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  /** The world rect ONE slot's baked field covers. Same shape, and set from
+   * the same place, as `setOutdoorsRect` — pushed only on that slot's REAL
+   * rebake (`sun-shadow-subsystem.js`'s own `pushRect`), not every frame.
+   * Silently a no-op past the resident slot count — a caller that races ahead
+   * of `fields.length` (there is no such caller today) drops the write rather
+   * than throwing mid-frame.
+   * @param {number} slotIndex @param {{minX:number,minY:number,maxX:number,maxY:number}} rect
+   */
+  function setSunShadowRect(slotIndex, rect) {
+    const slot = sunShadowSlots[slotIndex];
+    if (!slot) return;
+    slot.uRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
   }
 
-  /** Which floor the CURRENTLY bound shadow field's data actually belongs to
-   * — the caller pushes `sunShadows.getBakedFloorIndex()` here every frame,
-   * right after `sunShadows.maybeBake(...)`. Same clamp-and-normalize formula
-   * as `specular-render.js`'s own `setFloorIndex`, so both effects agree on
-   * what `index / 255` means for the identical `buf:scene.attr` channel.
-   * @param {number} index
+  /** Which floor slot `slotIndex`'s CURRENTLY bound field data actually
+   * belongs to — the caller pushes this for EVERY slot, EVERY frame,
+   * unconditionally, right after `sunShadows.maybeBake(...)` for every floor
+   * (a slot's rebake is rare; its floor attribution must still read correctly
+   * on every frame that skipped one). A non-finite/negative index (an
+   * unclaimed slot, `getFloorIndex() === -1`) maps to the SAME `-1/255`
+   * sentinel the slot's uniform already starts at — see this module's own
+   * §5-referencing comment above for why that must NOT clamp to 0. Same
+   * clamp-and-normalize formula as `specular-render.js`'s own `setFloorIndex`
+   * for a REAL index, so both effects agree on what `index / 255` means for
+   * the identical `buf:scene.attr` channel.
+   * @param {number} slotIndex @param {number} index
    */
-  function setSunShadowFloorIndex(index) {
-    uSunShadowFloorIndex01.value = (Number.isFinite(index) ? Math.max(0, Math.min(255, index)) : 0) / 255;
+  function setSunShadowFloorIndex(slotIndex, index) {
+    const slot = sunShadowSlots[slotIndex];
+    if (!slot) return;
+    slot.uFloorIndex01.value = Number.isFinite(index) && index >= 0 ? Math.min(255, index) / 255 : -1 / 255;
   }
 
   return {
@@ -502,18 +543,24 @@ export function buildEnvironmentalLightMaterials({
      * actually compiled into the ambient fill — same diagnostic posture as
      * `skyGateCompiled` below and `specular-render.js`'s `floorGateCompiled`. */
     sunShadowFloorGateCompiled: !!attrTexNode,
-    /** The sun-shadow field's rect uniform — SHARED with every point light's
-     * own material (`point-light-illumination.js`), which samples the same
-     * field per-fragment so its background floor matches the shadowed ambient
-     * at THAT pixel rather than one scalar for the whole light. Same
+    /** Per-slot `{texNode, uRect, uFloorIndex01}` — SHARED with every point
+     * light's own material (`point-light-illumination.js`), which samples the
+     * SAME fields per-fragment so its background floor matches the shadowed
+     * ambient at THAT pixel rather than one scalar for the whole light. Same
      * share-the-uniform pattern `uViewRect`/`uOutdoorsRect` already use for
-     * bloom: one owner, one update, no second copy to drift. */
-    uSunShadowRect,
-    /** True when a shadow field was supplied and the sun-occlusion term is
-     * actually compiled into the ambient fill — reported by the diagnostics so
-     * "there are no cast shadows" is answerable without guessing whether the
-     * feature is even in the shader. */
-    sunShadowCompiled: !!sunShadowTexNode,
+     * bloom, generalized from one field to N: one owner, one update per slot,
+     * no second copy to drift. */
+    sunShadowSlotNodes: sunShadowSlots,
+    /** The SAME `buf:scene.attr` sampler this module reads for its own floor
+     * gate, shared with point lights for theirs — see `sunShadowSlotNodes`'
+     * own doc for why a second `texture(attrTexture)` node is not built there
+     * instead. */
+    attrTexNode,
+    /** True when at least one shadow field was supplied and the sun-occlusion
+     * term is actually compiled into the ambient fill — reported by the
+     * diagnostics so "there are no cast shadows" is answerable without
+     * guessing whether the feature is even in the shader. */
+    sunShadowCompiled: sunShadowSlots.length > 0,
     /** The ONE shared outdoors sampler — the illum fill reads it, AND the
      * environmental grade in the present pass reads THE SAME node, so a mask
      * bake (`.value = newTexture`) updates both. Rebind-not-rebuild, the pattern
@@ -546,6 +593,59 @@ export function buildEnvironmentalLightMaterials({
  * @param {*} worldX @param {*} worldY
  * @returns {*} a scalar 0..1 node.
  */
+/**
+ * ⚠️⚠️ THE PER-FLOOR SUN-VISIBILITY BLEND — ARITHMETIC, NEVER `select()`
+ * (2026-08-02, `feedback_tsl_select_chain_strands_vars`: a `select()`/branch
+ * fold over a shared subgraph strands every branch's OWN variable assignment
+ * but the last one the graph walk reaches — the specular effect lost 12 of 20
+ * debug channels to exactly this, silently, reading a plausible-looking `0`
+ * instead of throwing). Each `slots[i].sunVis` is already its OWN fully
+ * independent node graph (a fresh `texture(...).sample(...)` per slot, never
+ * shared across slots), so there is nothing here FOR a branch to strand — but
+ * the combination step is written arithmetically anyway, on principle, so a
+ * future edit that adds shared state to a slot's own graph cannot silently
+ * reintroduce the trap by changing how this file combines them.
+ *
+ * The formula, per slot: `weight_i = 1 − smoothstep(0.4/255, 0.9/255,
+ * |attrFloorIndex01 − slots[i].floorIndex01|)` — the SAME tuned "same floor"
+ * threshold `specular-render.js`'s own `floorMatch` uses (one threshold in
+ * this codebase, not a second copy that could disagree). Floor indices are
+ * mutually exclusive by construction (`vt/scene-attr.js#packFloorAttr` writes
+ * exactly one per fragment), so at most one `weight_i` is ever meaningfully
+ * non-zero; the result is `Σ(sunVis_i × weight_i) + (1 − Σweight_i)` — every
+ * matched slot contributes its OWN sampled visibility, and whatever fraction
+ * of weight matched NOTHING (no resident slot for this fragment's floor)
+ * defaults to `1`, i.e. fully lit, never accidentally darkened by a field
+ * that was never computed for it. At `slots.length === 1` this is
+ * byte-identical to the pre-multi-floor formula, `mix(1, sunVis, weight)` —
+ * the single-slot case this generalizes, not a new behaviour for it.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.attrFloorIndex01 - this FRAGMENT's own floor index / 255
+ *   (`attrTexNode.r`).
+ * @param {Array<{sunVis: *, floorIndex01: *}>} args.slots - one entry per
+ *   resident field slot: `sunVis` is that slot's ALREADY-SAMPLED scalar node
+ *   (`buildSunVisibilityNode`'s return, called once per slot by the caller —
+ *   HOW a slot samples its own field differs between a screen-space quad and
+ *   a world-space mesh, which is exactly why that step stays the caller's,
+ *   not this function's); `floorIndex01` is that slot's own uniform.
+ * @returns {*} a scalar 0..1 node.
+ */
+export function blendSunVisibilityAcrossFloors(TSL, { attrFloorIndex01, slots }) {
+  const { float, smoothstep, abs } = TSL;
+  let totalWeight = float(0);
+  let blended = float(0);
+  for (const slot of slots) {
+    const weight = float(1).sub(
+      smoothstep(float(0.4 / 255), float(0.9 / 255), abs(attrFloorIndex01.sub(slot.floorIndex01)))
+    );
+    blended = blended.add(slot.sunVis.mul(weight));
+    totalWeight = totalWeight.add(weight);
+  }
+  return blended.add(float(1).sub(totalWeight));
+}
+
 function sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY) {
   const { vec2 } = TSL;
   const outU = worldX.sub(uOutdoorsRect.x).div(uOutdoorsRect.z.sub(uOutdoorsRect.x));

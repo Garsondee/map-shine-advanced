@@ -144,6 +144,7 @@ import {
 import { buildEnvSnapshot, createDayClock } from '../world/index.js';
 import {
   buildEnvironmentalLightMaterials,
+  blendSunVisibilityAcrossFloors,
   computeAmbientColors,
   computeGlobalLightFloor,
   maxRgb,
@@ -1497,7 +1498,7 @@ export async function startVtPanViewer({
     // subsystem pulled out of this function's closure. `getShadowHandle` and
     // `getEnvLight` are GETTERS, not values: `shadowHandle` is reassigned on
     // every sky change, and `envLight` does not exist yet at this line (it is
-    // built two statements below, and itself needs `sunShadows.texture` as
+    // built two statements below, and itself needs `sunShadows.fields` as
     // one of ITS OWN params — see the new module's own header for why that
     // ordering is safe). Both closures are only ever invoked later, from the
     // frame loop, by which point both bindings are long since initialized.
@@ -1720,17 +1721,24 @@ export async function startVtPanViewer({
       colorationTexture: sceneColoration.texture,
       uiShadowVisNode: uiShadow.visNode,
       outdoorsTexture,
-      sunShadowTexture: sunShadows.texture,
+      // `sunShadows.fields` is FIXED-LENGTH (one entry per resident floor
+      // slot — `sun-shadow-subsystem.js` §5), built once at `sunShadows`'
+      // OWN construction just above, so every slot's texture identity is
+      // already stable by the time this material graph embeds it.
+      sunShadowFields: sunShadows.fields,
       // Same attachment specular/window already read — see their own
       // `attrTexture:` call sites. Lets the ambient fill refuse to apply a
-      // shadow field to a floor it wasn't baked for (setSunShadowFloorIndex,
-      // pushed every frame right after sunShadows.maybeBake).
+      // floor's shadow slot to a DIFFERENT floor's own content
+      // (setSunShadowFloorIndex, pushed for every slot every frame right
+      // after sunShadows.maybeBake).
       attrTexture: sceneColor.textures?.[1] ?? null,
     });
     envLight.setOutdoorsRect(outdoorsRect);
-    // The one-time initial push (subsequent pushes happen internally, from
-    // the subsystem's own rebake, whenever the caster rect actually moves).
-    envLight.setSunShadowRect(sunShadows.getRect());
+    // No one-time initial rect push needed any more (2026-08-02): each slot's
+    // OWN `uRect` uniform already starts at the same (0,0,1,1) placeholder the
+    // single field used to, and gets its real rect the moment ITS OWN first
+    // bake runs (`sun-shadow-subsystem.js`'s own `pushRect`) — there is no
+    // longer one shared rect for the caller to seed up front.
 
     /**
      * Rebuild the outdoors texture from the mask authority for `floorIndex`.
@@ -2028,7 +2036,7 @@ export async function startVtPanViewer({
       THREE,
       getWindHandle: () => windHandle,
       envLight,
-      sunShadows,
+      blendSunVisibilityAcrossFloors,
       sceneColor,
       getCandleRenderState,
       getLightningRenderState,
@@ -3946,7 +3954,14 @@ export async function startVtPanViewer({
       // point is to see the shadow field alone, on white, with nothing else in
       // the frame to mistake it for. `off` (the default, and the only thing a
       // player ever has) returns null and costs one comparison.
-      const debugQuad = sunShadows.getDebugQuad(getSunShadowRenderState().params?.debugView ?? 'off');
+      // The debug view stays single-floor by design (§5 of sun-shadow-
+      // subsystem.js only multiplied the CONSUMER path) — it always shows
+      // the floor the UI calls "current", the same floor `maybeBake` used to
+      // be called with exclusively before this file baked every floor.
+      const debugQuad = sunShadows.getDebugQuad(
+        getSunShadowRenderState().params?.debugView ?? 'off',
+        view?.floorIndex ?? 0
+      );
       profiler?.begin(Z.presentBlit);
       (debugQuad ?? presentQuad).render(renderer); // three's own fullscreen path — carries its own camera
       profiler?.end(Z.presentBlit);
@@ -3994,17 +4009,56 @@ export async function startVtPanViewer({
       if (view) envLight.setViewRect(viewToWorldRect(view, canvasW / canvasH));
       profiler?.end(Z.lightAmbient);
 
-      // SUN SHADOWS — re-march ONLY if the quantised sun, the masks, the floor
-      // or a param moved. Almost every frame this is three comparisons and a
-      // return; the expensive path is a few times a minute at most. It runs
-      // BEFORE illumQuad below, because that fill samples the field this writes.
+      // SUN SHADOWS — re-march ONLY if the quantised sun, the masks, a floor
+      // or a param moved.
+      //
+      // ⚠️ EVERY FLOOR, NOT JUST THE ACTIVE ONE (2026-08-02) — Foundry v14
+      // natively composites several floors in ONE frame (`scene.levels`, gaps
+      // and all), but this used to bake only `view.floorIndex` — the UI's
+      // "current floor" concept, not "every floor on screen". The per-floor
+      // gate (`environmental-light.js`) correctly REFUSED to apply that one
+      // field to any other floor's content, which is honest but starves every
+      // OTHER floor of shadows entirely: reported live as "looking down
+      // through a gap I can't see the shadow of the floor below" (no field
+      // for that floor existed anywhere) and, the opposite symptom, "I can
+      // see shadows which should only be visible on the ground floor" from
+      // the roof (a stale single field's gate briefly matching content it was
+      // never baked for, immediately after a floor switch). See sun-shadow-
+      // subsystem.js's own §5 for the full mechanism and the fix: each floor
+      // now gets its OWN independently-cached slot, so baking N floors costs
+      // baking 1 floor N times only on the rare frame something scene-wide —
+      // the sun's own position — actually moves.
+      //
+      // Almost every frame this whole block is a few comparisons PER FLOOR
+      // and a return; the expensive path is a few times a minute at most,
+      // per floor. Runs BEFORE illumQuad below, because that fill samples the
+      // fields this writes.
       profiler?.begin(Z.lightSunBake);
-      sunShadows.maybeBake(view?.floorIndex ?? 0);
-      // Every frame, not just on a real rebake: the field's CONTENT only
-      // changes when maybeBake actually rebakes, but the floor it's attributed
-      // to must always match `getBakedFloorIndex()`'s current answer, and this
-      // push is cheap (one scalar uniform write) either way.
-      envLight.setSunShadowFloorIndex(sunShadows.getBakedFloorIndex());
+      {
+        // Same lookup, same fail-open posture, as `readElevationFilteredDarknessRegions`'s
+        // own `floorsResult` a few hundred lines up — `getActiveSceneFloors`
+        // was designed for boot's own scene-load/floor-switch call sites, not
+        // a per-frame hot path, but two OTHER per-frame call sites already
+        // accept that cost (wind's level lookup, darkness regions'), so a
+        // third matching them is the established convention here, not a new
+        // one. A lookup failure must not silently stop casting shadows on the
+        // one floor the viewer definitely knows about.
+        const sceneDocForSunShadows = globalThis.canvas?.scene ?? null;
+        const floorsResultForSunShadows = getActiveSceneFloors(sceneDocForSunShadows);
+        if (floorsResultForSunShadows.ok && floorsResultForSunShadows.floors.length > 0) {
+          for (const floor of floorsResultForSunShadows.floors) sunShadows.maybeBake(floor.index);
+        } else {
+          sunShadows.maybeBake(view?.floorIndex ?? 0);
+        }
+      }
+      // Every frame, for every SLOT, not just on a real rebake: a slot's
+      // CONTENT only changes when maybeBake actually rebakes it, but the
+      // floor it's attributed to must always match its own live
+      // `getFloorIndex()` answer, and this push is cheap (one scalar uniform
+      // write per slot) either way.
+      for (let slotIndex = 0; slotIndex < sunShadows.fields.length; slotIndex++) {
+        envLight.setSunShadowFloorIndex(slotIndex, sunShadows.fields[slotIndex].getFloorIndex());
+      }
       profiler?.end(Z.lightSunBake);
 
       // THE WATER BODY PACK — same posture, same reason it lives in the FRAME

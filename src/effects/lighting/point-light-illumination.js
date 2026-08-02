@@ -518,15 +518,26 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   the animation seed builder as `windResponse` for it to scale lean/
  *   gutter/snuff with (candle-flicker.js is the one consumer today). Absent
  *   or non-finite → the seed builder's own default (1) applies.
- * @param {*} [args.sunShadowTexture] - the baked sun-shadow visibility field
- *   (`scene.sunShadow`). When supplied together with `uSunShadowRect`, this
- *   light's background floor is sampled from it PER-FRAGMENT so it matches the
- *   shadowed ambient at each pixel — see this module's "SUN-SHADOW
- *   ATTENUATION" header for the two per-light attempts this replaced. Omitted
- *   → the lookup is compiled out entirely and the material is unchanged.
- * @param {*} [args.uSunShadowRect] - the vec4 world-rect uniform that field
- *   covers, SHARED from `environmental-light.js` so the light and the ambient
- *   fill can never disagree about where the field is.
+ * @param {Array<{texNode:*, uRect:*, uFloorIndex01:*}>} [args.sunShadowSlotNodes] -
+ *   `environmental-light.js`'s own `sunShadowSlotNodes` — the SAME per-slot
+ *   nodes the ambient fill reads, SHARED (not rebuilt here) so the light and
+ *   the ambient fill can never disagree about where a floor's field is or
+ *   what it currently contains. When supplied, this light's background floor
+ *   is sampled from EVERY resident slot PER-FRAGMENT and blended by floor
+ *   attribution (see this module's "SUN-SHADOW ATTENUATION" header for the
+ *   two per-light attempts this replaced, and for why per-fragment, not
+ *   per-light, was always the right unit). Omitted/empty → the lookup is
+ *   compiled out entirely and the material is unchanged.
+ * @param {*} [args.attrTexNode] - `environmental-light.js`'s own `attrTexNode`
+ *   (`buf:scene.attr`, R = this fragment's floor index / 255), SHARED for the
+ *   same reason `sunShadowSlotNodes` is. Omitted with multiple slots present
+ *   → falls back to slot 0 alone (no floor gating), the pre-multi-floor
+ *   behaviour, rather than guessing which slot is "this light's own floor".
+ * @param {(TSL: *, args: object) => *} [args.blendSunVisibilityAcrossFloors] -
+ *   injected from `environmental-light.js` (same DI convention specular/water
+ *   already use for `buildOutdoorsGate`) — the ARITHMETIC per-slot blend; see
+ *   its own header for why this must never be a `select()`/branch fold
+ *   (`feedback_tsl_select_chain_strands_vars`).
  * @returns {{material: *, uRatio: *, uAttenuationEased: *, uExposure: *,
  *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[],
  *   uSpeedRaw: (*|null), uReverseSign: (*|null), uSeed: (*|null),
@@ -549,13 +560,13 @@ export function buildPointLightIlluminationMaterial({
   windExposure,
   windResponse,
   windHandle = TIER0_WIND_HANDLE,
-  sunShadowTexture,
-  uSunShadowRect,
+  sunShadowSlotNodes,
+  attrTexNode,
+  blendSunVisibilityAcrossFloors,
 }) {
   const {
     uniform,
     uniformArray,
-    texture,
     float,
     int,
     vec2,
@@ -756,17 +767,37 @@ export function buildPointLightIlluminationMaterial({
   // `region-darkness.js` and `environmental-light.js#buildOutdoorsGate`
   // already use), so the floor is shadowed precisely where the shadow is.
   //
+  // ⚠️ PER-FLOOR, NOT JUST PER-FRAGMENT (2026-08-02) — a light's own footprint
+  // can straddle a floor gap exactly the same way any other content can (a
+  // torch near a stairwell, or one floor below a hole in the floor above), so
+  // "which slot's field applies" is ALSO a per-fragment question, answered by
+  // the SAME arithmetic blend `environmental-light.js`'s own ambient fill
+  // uses — never a `select()`/branch fold (`feedback_tsl_select_chain_strands_vars`).
+  // Before this a light had NO floor gate at all (unlike the ambient fill,
+  // which has had one since 2026-07-28): every light sampled whichever ONE
+  // field happened to be resident, on every floor, all the time.
+  //
   // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
-  // field supplied the lookup is absent from the compiled shader entirely and
+  // slots supplied the lookup is absent from the compiled shader entirely and
   // this material is byte-identical to what it was before cast shadows existed.
   let backgroundFloor = uBackgroundColor;
-  if (sunShadowTexture && uSunShadowRect) {
-    const shadowTexNode = texture(sunShadowTexture);
-    const u = positionWorld.x.sub(uSunShadowRect.x).div(uSunShadowRect.z.sub(uSunShadowRect.x));
-    const v = positionWorld.y.sub(uSunShadowRect.y).div(uSunShadowRect.w.sub(uSunShadowRect.y));
-    // Clamped, never wrapped — a light overhanging the field's edge reads the
+  if (sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
+    // Clamped, never wrapped — a light overhanging a field's edge reads the
     // nearest edge value rather than a caster from the far side of the map.
-    const sunVis = shadowTexNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
+    const sampleSlot = (slot) => {
+      const u = positionWorld.x.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
+      const v = positionWorld.y.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
+      return slot.texNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
+    };
+    const sunVis =
+      attrTexNode && blendSunVisibilityAcrossFloors
+        ? blendSunVisibilityAcrossFloors(THREE.TSL, {
+            attrFloorIndex01: attrTexNode.r,
+            slots: sunShadowSlotNodes.map((slot) => ({ sunVis: sampleSlot(slot), floorIndex01: slot.uFloorIndex01 })),
+          })
+        : // No attr texture (or no injected blend fn) to gate by floor — fall
+          // back to slot 0 alone, the pre-multi-floor behaviour.
+          sampleSlot(sunShadowSlotNodes[0]);
     backgroundFloor = uBackgroundColor.mul(sunVis);
   }
 

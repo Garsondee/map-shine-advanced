@@ -19,6 +19,7 @@ import { run as runSunOcclusionRender } from './sun-occlusion-render.test.mjs';
 import { run as runCasterPack } from './caster-pack.test.mjs';
 import { run as runSunShadowDebug } from './sun-shadow-debug.test.mjs';
 import { run as runSunShadowBlur } from './sun-shadow-blur.test.mjs';
+import { run as runSunShadowMultiFloor } from './sun-shadow-multi-floor.test.mjs';
 import { run as runLayerSmear } from './layer-smear.test.mjs';
 import { run as runLayerSmearRender } from './layer-smear-render.test.mjs';
 
@@ -60,6 +61,7 @@ const suites = [
   ['caster-pack', runCasterPack],
   ['sun-shadow-debug', runSunShadowDebug],
   ['sun-shadow-blur', runSunShadowBlur],
+  ['sun-shadow-multi-floor', runSunShadowMultiFloor],
   ['layer-smear', runLayerSmear],
   ['layer-smear-render', runLayerSmearRender],
 ];

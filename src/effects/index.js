@@ -66,6 +66,7 @@ export { SUN_SHADOW_DEBUG_VIEWS, sunShadowDebugPaints, sunShadowDebugView } from
 export { createPointLightPool } from './lighting/point-light-pool.js';
 export {
   buildEnvironmentalLightMaterials,
+  blendSunVisibilityAcrossFloors,
   computeAmbientBackground,
   computeAmbientColors,
   computeGlobalLightFloor,

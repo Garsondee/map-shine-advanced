@@ -140,6 +140,92 @@ export async function run(t) {
     t.ok('and leaves texels outside its own footprint untouched', grid.data[5 * 10 + 7] === 255);
   }
 
+  // ══════════════════════════════════════════════════════════════════
+  // 🖌️ TRANSPARENT MEANS UNPAINTED, NOT A PAINTED ZERO (author's ruling,
+  // 2026-08-02, live: shadows appeared to be thrown by the empty edges of a
+  // mask image — *"Why would an 'edge' at 0 alpha cause a shadow to appear?"*).
+  //
+  // A transparent pixel's colour channel is 0, and for `_Outdoors` a 0 means
+  // INDOORS — so writing the whole placement RECTANGLE turned every unpainted
+  // corner of a mask file into a solid, shadow-casting wall.
+  // ══════════════════════════════════════════════════════════════════
+  {
+    const opaque = makeUniformContent(1, 255);
+
+    // A fully TRANSPARENT source must change nothing at all, even though its
+    // colour channel is 0 and its rectangle covers everything.
+    const clear = createMaskGrid(gspec);
+    clear.data.fill(255); // the outdoors absent value
+    compositeItemOverwrite(
+      clear,
+      makeUniformContent(1, 0),
+      { x: 50, y: 50, width: 100, height: 100, rotation: 0 },
+      makeUniformContent(1, 0) // alpha 0 everywhere — unpainted
+    );
+    t.ok(
+      'a fully transparent mask paints NOTHING — an unpainted texel keeps the absent value, never a wall',
+      clear.data.every((v) => v === 255)
+    );
+
+    // An OPAQUE black mask must still mean indoors — the author still authors
+    // exactly that for an entirely-underground scene, so "treat 0 as absent"
+    // would have been the wrong fix.
+    const painted = createMaskGrid(gspec);
+    painted.data.fill(255);
+    compositeItemOverwrite(
+      painted,
+      makeUniformContent(1, 0),
+      { x: 50, y: 50, width: 100, height: 100, rotation: 0 },
+      opaque
+    );
+    t.ok(
+      'an OPAQUE black mask still means indoors — a deliberately black mask is real data',
+      painted.data.every((v) => v === 0)
+    );
+
+    // Half alpha blends against what is already there rather than snapping.
+    const half = createMaskGrid(gspec);
+    half.data.fill(255);
+    compositeItemOverwrite(
+      half,
+      makeUniformContent(1, 0),
+      { x: 50, y: 50, width: 100, height: 100, rotation: 0 },
+      makeUniformContent(1, 128)
+    );
+    t.ok(
+      "a mask's antialiased edge blends instead of snapping to painted-0",
+      half.data.every((v) => v > 120 && v < 135)
+    );
+
+    // OMITTING alpha is byte-identical to the old behaviour — every caller
+    // that has no alpha to give must be unaffected.
+    const noAlpha = createMaskGrid(gspec);
+    noAlpha.data.fill(255);
+    compositeItemOverwrite(noAlpha, makeUniformContent(1, 0), { x: 50, y: 50, width: 100, height: 100, rotation: 0 });
+    t.ok(
+      'omitting alpha composites fully opaque (unchanged for callers with none)',
+      noAlpha.data.every((v) => v === 0)
+    );
+
+    // And through the real entry point, so the wiring is pinned too, not just
+    // the primitive: `rasterizeAuthored` must forward `source.alpha`.
+    const viaRasterize = rasterizeAuthored(
+      gspec,
+      [
+        {
+          placement: { x: 50, y: 50, width: 100, height: 100, rotation: 0 },
+          content: makeUniformContent(1, 0),
+          alpha: makeUniformContent(1, 0),
+        },
+      ],
+      1 // outdoors' own absentValue
+    );
+    t.ok(
+      'rasterizeAuthored forwards alpha — a transparent source leaves the absent fill intact',
+      viaRasterize.data.every((v) => v === 255)
+    );
+  }
+
   // --- floor derivation: threshold, hidden, missing, sky math --------------
   const items = [
     {

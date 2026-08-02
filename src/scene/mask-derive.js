@@ -240,11 +240,33 @@ export function compositeItemMax(grid, content, placement, valueScale = 1) {
  * caller (`rasterizeAuthored`) relies on that to tell "nothing was ever
  * painted here" apart from "something was painted here and it was 0".
  *
+ * ⚠️ TRANSPARENT MEANS UNPAINTED, NOT ZERO (2026-08-02, author's ruling, live:
+ * *"Transparent means unpainted — composite by alpha. Transparent also means
+ * not inside a building. For entirely underground scenes I still provide an
+ * entirely black `_Outdoors` mask."*).
+ *
+ * This used to write a value for every texel inside the item's placement
+ * RECTANGLE. A mask's transparent pixels have a colour channel of 0, and for
+ * `_Outdoors` a 0 means INDOORS — so every unpainted corner of a mask file
+ * became a solid, shadow-casting wall, and shadows appeared to be thrown by
+ * the mask image's own empty edges. Blending by the mask's own alpha makes
+ * "painted 0" and "not painted" two different facts again, which is the SAME
+ * distinction `rasterizeAuthored`'s absent-value fill already draws one level
+ * up (a texel no placement reaches). That the author still authors a fully
+ * BLACK mask for an all-indoor scene is exactly why this had to be alpha and
+ * not "treat 0 as absent": an opaque black pixel is a real, meant indoors.
+ *
+ * `alpha` is optional — omitted (or null) composites fully opaque, which is
+ * byte-identical to the pre-2026-08-02 behaviour for any caller that has no
+ * alpha to give.
+ *
  * @param {MaskGrid} grid
  * @param {ContentGrid} content
  * @param {Parameters<typeof worldToItemUv>[0]} placement
+ * @param {ContentGrid|null} [alpha] - the mask image's OWN alpha, same
+ *   geometry as `content` (both come from one `extractContentWindow` pass).
  */
-export function compositeItemOverwrite(grid, content, placement) {
+export function compositeItemOverwrite(grid, content, placement, alpha = null) {
   const { spec, data } = grid;
   const corners = itemWorldCorners(placement);
   const minX = Math.min(...corners.map((c) => c.x));
@@ -264,7 +286,18 @@ export function compositeItemOverwrite(grid, content, placement) {
       const { u, v } = worldToItemUv(placement, wx, wy);
       if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
       const raw = sampleContentBilinear(content, u, v);
-      data[gy * spec.w + gx] = Math.min(255, Math.round(raw));
+      const i = gy * spec.w + gx;
+      if (!alpha) {
+        data[i] = Math.min(255, Math.round(raw));
+        continue;
+      }
+      // SOURCE-OVER by the mask's own alpha: a=1 overwrites (the old
+      // behaviour), a=0 leaves whatever was already there (the absent-value
+      // fill, or an earlier source in draw order), and the antialiased edge
+      // in between blends — so a mask's own soft edge stays soft instead of
+      // snapping to "painted 0".
+      const a = Math.max(0, Math.min(1, sampleContentBilinear(alpha, u, v) / 255));
+      data[i] = Math.min(255, Math.round(data[i] * (1 - a) + raw * a));
     }
   }
 }
@@ -514,8 +547,11 @@ export function compositeItemHeightMax(grid, content, placement, heightByte) {
  * exactly the old behaviour.
  *
  * @param {MaskGridSpec} gridSpec
- * @param {Array<{placement: Parameters<typeof worldToItemUv>[0], content: ContentGrid}>} sources -
- *   already filtered to real content+placement, already sorted ascending by draw order.
+ * @param {Array<{placement: Parameters<typeof worldToItemUv>[0], content: ContentGrid,
+ *   alpha?: ContentGrid|null}>} sources - already filtered to real
+ *   content+placement, already sorted ascending by draw order. `alpha` is the
+ *   mask file's own opacity; see {@link compositeItemOverwrite} for why a
+ *   transparent texel must not be written as a painted 0.
  * @param {number} absentValue - 0..1, the catalog's own.
  * @returns {MaskGrid}
  */
@@ -525,7 +561,10 @@ export function rasterizeAuthored(gridSpec, sources, absentValue) {
   grid.data.fill(absentByte);
   for (const source of sources ?? []) {
     if (!source?.content || !source?.placement) continue;
-    compositeItemOverwrite(grid, source.content, source.placement);
+    // `source.alpha` is the mask file's OWN alpha, carried from
+    // `mask-authority.js#ingestDecodedPage`. Absent (an older/synthetic
+    // source) composites fully opaque — the pre-2026-08-02 behaviour.
+    compositeItemOverwrite(grid, source.content, source.placement, source.alpha ?? null);
   }
   return grid;
 }

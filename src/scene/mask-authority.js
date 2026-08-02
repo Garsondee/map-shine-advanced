@@ -361,9 +361,24 @@ export function createMaskAuthority({ readPageImageData, log }) {
         width: table.worldWidthPx,
         height: table.worldHeightPx,
       });
+      // ⚠️ THE MASK FILE'S OWN ALPHA RIDES ALONGSIDE ITS CHANNEL (2026-08-02).
+      // Author's ruling, live: *"Transparent means unpainted — composite by
+      // alpha. Transparent also means not inside a building."* Without this,
+      // `compositeItemOverwrite` writes a value for EVERY texel inside the
+      // mask's placement RECTANGLE, and a transparent pixel's colour channel
+      // is 0 — which for `_Outdoors` reads as INDOORS, i.e. a solid,
+      // shadow-casting wall wherever the author simply did not paint. That is
+      // the phantom "shadow cast by a 0-alpha edge" they reported.
+      //
+      // Extracted ONCE per page, not once per channel: every `contentId` in
+      // this plan comes from the SAME image, so they share one alpha grid.
+      // A fully-opaque mask (the entirely-black `_Outdoors` an underground
+      // scene is authored with) composites exactly as it did before — alpha
+      // is 255 everywhere, so the blend below is a provable no-op there.
+      const alpha = extractContentWindow(imageData, contentWindow, 'a');
       for (const { contentId, channel } of plan) {
         const content = extractContentWindow(imageData, contentWindow, channel);
-        scene.ingests.set(`${ownerId}/${contentId}`, { content, placement });
+        scene.ingests.set(`${ownerId}/${contentId}`, { content, placement, alpha });
       }
       counters.pagesIngested++;
       touch();

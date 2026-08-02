@@ -103,6 +103,18 @@ export function buildSunShadowsReport({ floorIndex, status, viewer, readout, deg
           coveredPct: f.caster?.coveredPct ?? null,
           outdoorsMeanByte: f.caster?.outdoorsGrid?.meanByte ?? null,
           wallsCoveredPct: f.caster?.channelStats?.walls?.coveredPct ?? null,
+          // ⚠️ SKY-REACH, PER FLOOR (2026-08-02) — added because `allFloors`
+          // could confirm walls were correctly DISTINCT per floor but had
+          // nothing to say about "what's above me": `coverAboveMeanByte` is
+          // the SOURCE grid (`getCasterHeightField(floorIndex).coverAbove`,
+          // BEFORE packing — 255 = nothing above, darker = more covered);
+          // `floorAboveCoveredPct` is the PACKED B channel the shader actually
+          // samples. Both near-zero/255 (i.e. no coverage) on a floor that
+          // SHOULD have something above it (compare against `floor.itemBands`
+          // for that specific floor) is a DERIVATION gap; a healthy source
+          // with a zero packed value would instead point at `packLayerTexelData`.
+          coverAboveMeanByte: f.caster?.coverAboveGrid?.meanByte ?? null,
+          floorAboveCoveredPct: f.caster?.channelStats?.floorAbove?.coveredPct ?? null,
           bakeActive: f.lastBake?.active ?? null,
           fieldDim: f.profile?.fieldDim ?? null,
         }))

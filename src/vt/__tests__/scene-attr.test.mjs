@@ -18,6 +18,9 @@ import {
   PRESENCE_BIT_OCCLUDES_BACKGROUND,
 } from '../scene-attr.js';
 import { SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 } from '../../effects/specular/specular-render.js';
+// The elevation-only lookup the floor-ownership fix replaced — imported so the
+// regression block below can prove it genuinely disagrees (a non-vacuous test).
+import { resolveElevationFloorIndex } from '../../scene/layer-order.js';
 
 // A real (not swizzle-capable) plain object standing in for `output.a` —
 // distinct identity from the bare `output` symbol so a test can tell whether
@@ -219,6 +222,96 @@ export function run(t) {
       logError: () => {},
     });
     ok('a levelBackground item carries NO occluder bit', bg.uPresenceBits01.value === 0);
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 🏢 A LEVEL'S FOREGROUND BELONGS TO ITS OWN LEVEL (live bug, 2026-08-02:
+  // the author's River Town Bridge map rendered NO sun shadow at all while
+  // Shader Lab, on the same data, rendered a near-black one).
+  //
+  // A Level's foreground sits AT that Level's `elevation.top` — which is
+  // precisely `isInForeground`'s own definition of "this Level's foreground"
+  // (`elevation >= top`). But `resolveElevationFloorIndex`'s band is
+  // half-open `[bottom, top)`, so resolving by elevation ALONE pushed every
+  // Level's own foreground into the Level above. `buf:scene.attr`.R then
+  // disagreed with the shadow bake about which floor that art was on, and
+  // `environmental-light.js`'s floor gate erased the shadow entirely —
+  // silently, at any strength.
+  //
+  // These bands are the real map's (floor 0 = [0,10), foreground at 10),
+  // because the bug only fires when a foreground's elevation lands exactly
+  // on a boundary — a synthetic scene with roomier bands would pass while
+  // the shipped one failed.
+  // ══════════════════════════════════════════════════════════════════
+  {
+    const THREE = makeTHREE();
+    const sceneDoc = {
+      levels: [
+        { id: 'lvl0', name: 'Underground', background: { src: 'a.webp' }, elevation: { bottom: 0, top: 10 } },
+        { id: 'lvl1', name: 'Middle', background: { src: 'b.webp' }, elevation: { bottom: 10, top: 20 } },
+        { id: 'lvl2', name: 'Roof', background: { src: 'c.webp' }, elevation: { bottom: 20, top: 30 } },
+      ],
+    };
+    const floorOf = (item) =>
+      Math.round(
+        resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex: 0, sceneDoc, logError: () => {} }).uFloorIndex01
+          .value * 255
+      );
+
+    ok(
+      "a Level's BACKGROUND resolves to its own floor (this never broke — the regression guard)",
+      floorOf({ kind: 'levelBackground', levelId: 'lvl0', key: { elevation: 0 } }) === 0
+    );
+    ok(
+      "🔒 a Level's FOREGROUND resolves to ITS OWN floor, not the one above — the shipped bug",
+      floorOf({ kind: 'levelForeground', levelId: 'lvl0', key: { elevation: 10 } }) === 0
+    );
+    ok(
+      'the same holds one floor up (the bug repeated at every boundary, not just the ground one)',
+      floorOf({ kind: 'levelForeground', levelId: 'lvl1', key: { elevation: 20 } }) === 1
+    );
+    ok(
+      "the TOPMOST level's foreground stays on its own floor too",
+      floorOf({ kind: 'levelForeground', levelId: 'lvl2', key: { elevation: 30 } }) === 2
+    );
+
+    // THE DETECTOR IS NOT VACUOUS: the elevation-only lookup this replaced
+    // must genuinely disagree, or the assertions above prove nothing.
+    const byElevationAlone = resolveElevationFloorIndex(
+      [
+        { index: 0, elevationBottom: 0, elevationTop: 10 },
+        { index: 1, elevationBottom: 10, elevationTop: 20 },
+        { index: 2, elevationBottom: 20, elevationTop: 30 },
+      ],
+      10
+    );
+    ok(
+      'the elevation-only lookup really does answer "floor 1" for floor 0\'s foreground — so the fix above is load-bearing',
+      byElevationAlone?.index === 1
+    );
+
+    // A drawable with NO owning Level (a loose tile — `scene-layers.js` gives
+    // those `levelId: ''`) must still fall through to the elevation lookup:
+    // that IS the right answer for something no Level claims.
+    ok(
+      'a loose tile (no levelId) still resolves by elevation',
+      floorOf({ kind: 'tile', levelId: '', key: { elevation: 25 } }) === 2
+    );
+
+    // The overhead presence bit was ALSO wrong for every Level foreground:
+    // it was tested against the WRONG floor's `top`, so a Level's own
+    // foreground reported "not overhead". Fixing the ownership fixes it.
+    const fgBits = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'levelForeground', levelId: 'lvl0', key: { elevation: 10 } },
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    ok(
+      "a Level's foreground now reports the OVERHEAD bit (it is that Level's roof layer, by isInForeground's own definition)",
+      Math.round(fgBits * 255) === PRESENCE_BIT_OCCLUDES_BACKGROUND + PRESENCE_BIT_OVERHEAD
+    );
   }
 
   // THE CROSS-FILE PIN — `effects/specular`'s decode threshold must sit

@@ -434,6 +434,75 @@ export function createSunShadowBench({ THREE, log }) {
     };
   }
 
+  /**
+   * 🚪 DOES THIS SHADOW SURVIVE THE LIVE FLOOR GATE?
+   *
+   * THE GAP THIS CLOSES (author, live, 2026-08-02: the River Town Bridge map
+   * showed *"basically no shadow"* while THIS BENCH rendered the picture they
+   * called "damn near perfect", on the same data): this bench renders the
+   * BAKED FIELD, whole. The real composite does not. `environmental-light.js`
+   * multiplies the field by a FLOOR-MATCH gate —
+   * `mix(1, sunVis, floorMatch)`, where `floorMatch` is 1 only where
+   * `buf:scene.attr`'s R (each drawn item's OWN floor index,
+   * `vt/scene-attr.js`) equals the floor this field was baked for. A pixel
+   * that draws a DIFFERENT floor's art gets a provable 1 — no shadow at all.
+   *
+   * That gate is correct in itself (it stops floor 0's field darkening floor
+   * 1's rooftops). But it interacts badly with the sky-reach layer in a way
+   * neither this bench nor any Node test could see: `coverAbove` is nonzero
+   * exactly where an upper floor HAS art — and that is exactly where that
+   * upper floor's art gets DRAWN, so `attr.r != bakedFloor` there. The
+   * darkest part of a sky-reach shadow — the whole depth gradient, which
+   * lives under the covering mass by construction — can land entirely on
+   * pixels the gate then blanks.
+   *
+   * So this measures the OVERLAP, not the field: of all the darkness this
+   * bake produces, how much falls on texels the live gate will reject? A high
+   * number means the lab picture is honest about the FIELD and dishonest
+   * about the SCREEN, which is the exact failure mode
+   * `feedback_instruments_must_not_lie` names.
+   *
+   * ⚠️ `coverAbove > 0.5` is a PROXY for "the gate will reject here", not the
+   * gate itself — the real gate reads `buf:scene.attr`, which only exists in
+   * the live geometry pass. It is a good proxy (upper-floor art present ⇒
+   * that art is what draws there) and a deliberately conservative one: it
+   * cannot see partial alpha, so it under-counts rejection rather than
+   * inventing it.
+   */
+  function measureFloorGateSurvival(bytes, dim, field) {
+    const flip = yFlip === true;
+    const { w: W, h: H } = field;
+    let dark = 0;
+    let darkGatedOut = 0;
+    let darkSurvives = 0;
+    let worstSurvivingVis = 1;
+    for (let py = 0; py < dim; py++) {
+      for (let px = 0; px < dim; px++) {
+        const vis = bytes[((flip ? dim - 1 - py : py) * dim + px) * 4] / 255;
+        if (vis >= 0.5) continue; // not meaningfully shadowed
+        // Output pixel → field texel (both span the identical world rect).
+        const tx = Math.min(W - 1, Math.round((px / (dim - 1)) * (W - 1)));
+        const ty = Math.min(H - 1, Math.round((py / (dim - 1)) * (H - 1)));
+        const coverAbove = field.data[(ty * W + tx) * 4 + 2] / 255;
+        dark++;
+        if (coverAbove > 0.5) darkGatedOut++;
+        else {
+          darkSurvives++;
+          if (vis < worstSurvivingVis) worstSurvivingVis = vis;
+        }
+      }
+    }
+    return {
+      darkTexels: dark,
+      gatedOut: darkGatedOut,
+      survives: darkSurvives,
+      gatedOutPct: dark > 0 ? +((darkGatedOut / dark) * 100).toFixed(1) : 0,
+      // The darkest shadow the author can ACTUALLY see in the game, as opposed
+      // to the darkest this bench paints. 1.0 = they see nothing at all.
+      darkestVisibleOnScreen: +worstSurvivingVis.toFixed(3),
+    };
+  }
+
   const scenarios = new Map();
 
   scenarios.set('layer-smear-real-floor', {
@@ -528,6 +597,7 @@ export function createSunShadowBench({ THREE, log }) {
 
       const law = measureTheLaw(bytes, plan.fieldDim, field, azimuthDeg, resolved.maxThrowPx);
       const holes = findHoles(bytes, plan.fieldDim, field.rect);
+      const gate = measureFloorGateSurvival(bytes, plan.fieldDim, field);
 
       return {
         calibration,
@@ -559,6 +629,18 @@ export function createSunShadowBench({ THREE, log }) {
             expected: 0,
             note: `worst: ${JSON.stringify(holes.samples[0] ?? null)}`,
           })),
+          evaluate('survives-the-live-floor-gate', () => ({
+            // See `measureFloorGateSurvival`'s own header. This is the ONLY
+            // check here that asks about the SCREEN rather than the FIELD —
+            // everything above can pass on a picture the player never sees.
+            ok: gate.gatedOutPct < 60 && gate.darkestVisibleOnScreen < 0.7,
+            measured: `${gate.gatedOutPct}% of this shadow lands under upper-floor art; darkest SURVIVING = ${gate.darkestVisibleOnScreen}`,
+            expected: '< 60% gated out, and something genuinely dark left on screen',
+            note:
+              'environmental-light.js gates this field to pixels whose buf:scene.attr floor index matches the ' +
+              'baked floor. Darkness landing where an upper floor draws its own art is erased before the ' +
+              'author ever sees it — the field can be perfect and the map still look unshadowed.',
+          })),
         ],
         inputs: {
           floorId,
@@ -571,7 +653,7 @@ export function createSunShadowBench({ THREE, log }) {
           strengths,
           depthRadiusPx,
         },
-        stats: { law, holes: holes.count, layerGrid: `${field.w}x${field.h}`, fieldDim: plan.fieldDim },
+        stats: { law, holes: holes.count, gate, layerGrid: `${field.w}x${field.h}`, fieldDim: plan.fieldDim },
       };
     },
   });

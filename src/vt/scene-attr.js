@@ -70,9 +70,15 @@
  * `buildWholeImageMaterial` (the base map/tile art) and `buildVegetationMaterial`'s
  * Case-1 embedded form (a self-vegetation TILE — grass drawn AS the ground,
  * not a tree drawn ON it) both get a real `packFloorAttr(...)` output:
- *   R = this item's own floor index (`scene/layer-order.js#resolveElevationFloorIndex`,
- *       resolved ONCE at item-build time from the item's static elevation — never
- *       re-derived per frame, since an item's elevation doesn't change live)
+ *   R = this item's own floor index — its OWNING Level (`item.levelId`) when it
+ *       has one, falling back to `scene/layer-order.js#resolveElevationFloorIndex`
+ *       for a drawable with no owner (a loose tile). Resolved ONCE at item-build
+ *       time — never re-derived per frame, since neither an item's elevation nor
+ *       its owning Level changes live. ⚠️ The ownership half is load-bearing, not
+ *       an optimisation: a Level's foreground sits AT its own `elevation.top`,
+ *       and the elevation lookup's band is top-EXCLUSIVE, so resolving purely by
+ *       elevation attributed every Level's foreground to the floor above it —
+ *       see `resolveItemFloorAttrUniforms` for the live bug that caused.
  *   G = the outdoors value AT THIS FRAGMENT'S WORLD POSITION
  *       (`buildWorldSpaceOutdoorsGate` — NOT the screen-space `buildOutdoorsGate`
  *       bloom/grade use; a tile's own `uv()` is local sample space, not a
@@ -361,7 +367,41 @@ export function resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex, sc
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok || !floorsResult.floors.length) return { uFloorIndex01, uPresenceBits01 };
     const elevation = item?.key?.elevation ?? 0;
-    const resolved = resolveElevationFloorIndex(floorsResult.floors, elevation);
+    // ⚠️ MEMBERSHIP FIRST, THRESHOLD ONLY AS FALLBACK (memory:
+    // feedback_membership_beats_derived_threshold). Live bug, 2026-08-02: the
+    // author's River Town Bridge map showed NO sun shadow at all while the
+    // identical data rendered a near-black shadow in Shader Lab.
+    //
+    // ROOT CAUSE, and it is a straight two-authorities-disagree: a Level's
+    // FOREGROUND art sits at that Level's own `elevation.top` — that is
+    // exactly what `isInForeground` (same module as the resolver below)
+    // DEFINES as "this Level's foreground", `elevation >= top`. But
+    // `resolveElevationFloorIndex`'s band is half-open, `[bottom, top)`, so
+    // `elevation === top` falls OUT of the owning Level and INTO the one
+    // above. Every Level's own foreground was therefore stamped into
+    // `buf:scene.attr`.R as the floor ABOVE it. On the bridge map floor 0's
+    // band is [0, 10) and its foreground sits at 10, so the water surface —
+    // most of the visible map — claimed to be floor 1.
+    //
+    // `environmental-light.js` then gates the baked sun-shadow field to
+    // pixels whose `attr.r` matches the BAKED floor, and `mix(1, sunVis,
+    // floorMatch)` returns a provable 1 on a mismatch: no shadow, at any
+    // strength, with nothing logged. (The mirror image is the long-standing
+    // "shadow overlaid on the upper floor" report — same single cause.)
+    //
+    // The fix is not to widen the band (that would hand a genuine
+    // next-floor-bottom drawable to the floor below — the two Levels really
+    // do share that number). A Level's background/foreground are AUTHORED
+    // members of that Level; `item.levelId` states it outright
+    // (`foundry/scene-layers.js` — the owning level id for level art, `''`
+    // for tiles, so a loose tile still falls through to the elevation
+    // lookup, which is the right answer for something with no owner).
+    // `vt-pan-viewer.js`'s own floor-id lookup already prefers `levelId`
+    // this way; this call site was the one place that did not.
+    const owned = item?.levelId ? floorsResult.floors.find((f) => f.id === item.levelId) : null;
+    const resolved = owned
+      ? { index: owned.index, floor: owned }
+      : resolveElevationFloorIndex(floorsResult.floors, elevation);
     if (!resolved) return { uFloorIndex01, uPresenceBits01 };
     uFloorIndex01.value = resolved.index / 255;
     const top = resolved.floor.elevationTop ?? Infinity;

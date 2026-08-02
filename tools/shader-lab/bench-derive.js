@@ -219,7 +219,9 @@ export function createDeriveBench({ THREE, log }) {
     res.texture?.dispose?.();
     const content = { w: res.width, h: res.height, data };
     cache.set(key, content);
-    log?.(`DERIVE: ${url.split('/').pop()} [${channel}] ${res.width}x${res.height} in ${Math.round(performance.now() - t0)}ms`);
+    log?.(
+      `DERIVE: ${url.split('/').pop()} [${channel}] ${res.width}x${res.height} in ${Math.round(performance.now() - t0)}ms`
+    );
     return content;
   }
 
@@ -330,7 +332,23 @@ export function createDeriveBench({ THREE, log }) {
       if (!entry) continue;
       const content = await loadContent(entry.url, ART_ALPHA_SCALE, 'r');
       if (!content) continue;
-      const sources = [{ placement, content }];
+      // ⚠️ THE MASK'S OWN ALPHA RIDES ALONGSIDE ITS `r` CHANNEL — production
+      // parity, and it was MISSING here until 2026-08-02.
+      // `mask-authority.js#ingestDecodedPage` extracts both from one decoded
+      // page and `rasterizeAuthored` composites source-over
+      // (`compositeItemOverwrite`'s own header has the author's ruling:
+      // *"Transparent means unpainted... Transparent also means not inside a
+      // building"*). This bench built its sources with `content` ALONE, so
+      // `source.alpha` was `undefined` and the composite silently fell back
+      // to fully-opaque — writing a transparent texel's `r` of 0 as a real,
+      // shadow-casting WALL. The lab therefore never once exercised the alpha
+      // fix it was supposed to be validating, and showed phantom building
+      // shadows off every unpainted edge while production (correctly) did
+      // not. Same class as the `casterGridDim` divergence one commit earlier:
+      // a bench that builds its own inputs differently from production is
+      // measuring a different picture (feedback_instruments_must_not_lie).
+      const alpha = await loadContent(entry.url, ART_ALPHA_SCALE, 'alpha');
+      const sources = [{ placement, content, alpha }];
       // ⚠️ THE SECOND HOST, off by default because the author's ruling is that
       // overhead content should resolve against the floor's OWN mask
       // (`OUTDOORS_RESOLUTION_RULING`). Turning it on appends the overhead
@@ -338,7 +356,9 @@ export function createDeriveBench({ THREE, log }) {
       // overwrites with inside its footprint — the whole point of the
       // `overhead-outdoors-composition` scenario is to show what that costs.
       if (opts.includeOverheadOutdoors) {
-        const extra = FIXTURE.nonMaskFiles.find((f) => f.floorId === fx.id && f.kind === 'outdoors' && f.layer === 'overhead');
+        const extra = FIXTURE.nonMaskFiles.find(
+          (f) => f.floorId === fx.id && f.kind === 'outdoors' && f.layer === 'overhead'
+        );
         if (extra) {
           const oc = await loadContent(`${FIXTURE.dir}/${extra.file}`, ART_ALPHA_SCALE, 'r');
           if (oc) {
@@ -421,8 +441,7 @@ export function createDeriveBench({ THREE, log }) {
       // `maskGridMean` returns 0..1, not a byte — reported as both so neither
       // reading can be mistaken for the other.
       const mean01 = maskGridMean(grid);
-      el.textContent =
-        `${label}\ngrid ${dims.w}x${dims.h}  mean=${mean01.toFixed(4)} (${Math.round(mean01 * 255)}/255)  max=${maxByte(grid)}`;
+      el.textContent = `${label}\ngrid ${dims.w}x${dims.h}  mean=${mean01.toFixed(4)} (${Math.round(mean01 * 255)}/255)  max=${maxByte(grid)}`;
     }
   }
 
@@ -547,7 +566,10 @@ export function createDeriveBench({ THREE, log }) {
       );
       checks.push(
         evaluate('cover-above-decreases-with-height', () => {
-          const means = products.slice().sort((a, b) => a.index - b.index).map((p) => maskGridMean(p.coverAbove));
+          const means = products
+            .slice()
+            .sort((a, b) => a.index - b.index)
+            .map((p) => maskGridMean(p.coverAbove));
           let monotonic = true;
           for (let i = 1; i < means.length; i++) if (means[i] > means[i - 1] + 1e-6) monotonic = false;
           return {
@@ -590,7 +612,9 @@ export function createDeriveBench({ THREE, log }) {
       );
       checks.push(
         evaluate('every-item-classified', () => {
-          const banded = new Set(products.flatMap((p) => [...p.completeness.skyReachItemIds, ...p.completeness.overheadItemIds]));
+          const banded = new Set(
+            products.flatMap((p) => [...p.completeness.skyReachItemIds, ...p.completeness.overheadItemIds])
+          );
           return {
             ok: banded.size > 0,
             measured: `${banded.size} of ${items.length} items landed in a caster band somewhere`,
@@ -755,7 +779,7 @@ export function createDeriveBench({ THREE, log }) {
           measured: Number(spread.toFixed(4)),
           expected: `<= ${DERIVE.casterDimCoverageSpreadMax}`,
           note:
-            'the 2026-07-30 bug read a 512-stride buffer with the caster grid\'s stride: at 1024 every row ' +
+            "the 2026-07-30 bug read a 512-stride buffer with the caster grid's stride: at 1024 every row " +
             'doubled, at 768 it sheared. Both move this number a long way.',
         }))
       );
@@ -797,7 +821,7 @@ export function createDeriveBench({ THREE, log }) {
             ok: !anyOverhead,
             measured: byType.levelForeground.map((r) => `${r.floor}:[${r.overheadItemIds}]`),
             expected: 'empty on every floor',
-            note: "mask-derive.js gates isOverhead on owner === null; level art is above or it is ground",
+            note: 'mask-derive.js gates isOverhead on owner === null; level art is above or it is ground',
           };
         })
       );

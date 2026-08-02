@@ -44,9 +44,17 @@ function readRange(id) {
 async function runSelected() {
   const floorId = document.getElementById('sunShadowFloor').value;
   const tier = Number(document.getElementById('sunShadowTier').value);
+  const layerIsolate = document.getElementById('sunShadowLayerIsolate')?.value ?? 'all';
+  // `floorId: 'all'` is the ALL-FLOORS STACK — a different scenario, not a
+  // different parameter, because it renders N fields into one canvas rather
+  // than one. Chosen from the SAME dropdown so there is still exactly one
+  // "which floor am I looking at" control (author: one viewing panel, and by
+  // extension one place to say what it shows).
+  const scenario = floorId === 'all' ? 'all-floors-stack' : 'layer-smear-real-floor';
   const params = {
     floorId,
     tier,
+    layerIsolate,
     azimuthDeg: readRange('sunShadowAzimuth'),
     elevationDeg: readRange('sunShadowElevation'),
     wallHeightPx: readRange('sunShadowWallHeight'),
@@ -65,9 +73,9 @@ async function runSelected() {
     tipBlurMul: readRange('sunShadowTipBlur'),
   };
   log(
-    `running layer-smear-real-floor on '${floorId}' (tier ${tier}, az=${params.azimuthDeg} el=${params.elevationDeg})…`
+    `running ${scenario} on '${floorId}' [${layerIsolate}] (tier ${tier}, az=${params.azimuthDeg} el=${params.elevationDeg})…`
   );
-  const report = await contract.run('sun-shadow', 'layer-smear-real-floor', { params });
+  const report = await contract.run('sun-shadow', scenario, { params });
   const s = report.summary ?? {};
   log(
     `REPORT ${report.runId}\n` +
@@ -76,11 +84,18 @@ async function runSelected() {
   );
   const legend = document.getElementById('sunShadowLegend');
   if (legend && report.stats) {
-    const law = report.stats.law ?? {};
-    legend.textContent =
-      `layer smear — ${report.inputs?.floorId ?? floorId} floor, tier ${tier}, ${report.stats.fieldDim ?? '?'}px field   ` +
-      `holes: ${report.stats.holes}   THE LAW worst rise: ${law.worstRise ?? '?'}` +
-      (law.worstAt ? ` at world(${law.worstAt.wx}, ${law.worstAt.wy})` : '');
+    if (report.stats.perFloor) {
+      legend.textContent =
+        `ALL FLOORS — layer '${layerIsolate}', tier ${tier}, ${report.stats.fieldDim ?? '?'}px field   ` +
+        report.stats.perFloor.map((f) => `${f.floorId}: mean vis ${f.meanVis}`).join('   ');
+    } else {
+      const law = report.stats.law ?? {};
+      legend.textContent =
+        `layer smear — ${report.inputs?.floorId ?? floorId} floor, layer '${layerIsolate}', tier ${tier}, ` +
+        `${report.stats.fieldDim ?? '?'}px field   holes: ${report.stats.holes}   ` +
+        `THE LAW worst rise: ${law.worstRise ?? '?'}` +
+        (law.worstAt ? ` at world(${law.worstAt.wx}, ${law.worstAt.wy})` : '');
+    }
   }
   return report;
 }
@@ -93,6 +108,15 @@ function wire() {
     opt.textContent = `${f.label} (index ${f.index})`;
     floorSel.appendChild(opt);
   }
+  // THE ALL-FLOORS STACK, in the SAME dropdown (author, 2026-08-02: *"a debug
+  // view of all three floors composited together so that I can check if the
+  // whole scene's three floor structure shadows mix together correctly"*).
+  // `runSelected` maps this one value to a different SCENARIO rather than a
+  // parameter, because it renders N fields into the single canvas.
+  const allOpt = document.createElement('option');
+  allOpt.value = 'all';
+  allOpt.textContent = `▼ ALL ${FIXTURE.floors.length} FLOORS, stacked`;
+  floorSel.appendChild(allOpt);
   // Lowest floor first — the one the author is actively looking at.
   floorSel.value = FIXTURE.floors[0]?.id ?? 'underground';
 

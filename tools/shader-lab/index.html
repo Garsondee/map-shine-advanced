@@ -551,6 +551,22 @@
           /></label>
         </fieldset>
         <fieldset>
+          <legend>Isolate one layer</legend>
+          <label
+            >Show
+            <select id="sunShadowLayerIsolate">
+              <option value="all" selected>All layers combined</option>
+              <option value="walls">Building shadows only (R — _Outdoors dark)</option>
+              <option value="overhead">Overhead only (G — this floor's raised tiles)</option>
+              <option value="skyReach">Sky reach only (B — the floors above)</option>
+            </select>
+          </label>
+          <!-- No "AO" entry: the layer-smear model has no ambient-occlusion
+               term (the retired smear model did). Offering one would render a
+               blank frame and read as "AO is broken" rather than "AO does not
+               exist here" — see LAYER_ISOLATION in bench-sun-shadow.js. -->
+        </fieldset>
+        <fieldset>
           <legend>Layer strengths (0..1)</legend>
           <label
             >Wall <span id="sunShadowWallStrengthVal"></span

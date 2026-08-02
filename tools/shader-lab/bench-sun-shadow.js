@@ -249,8 +249,32 @@ export function createSunShadowBench({ THREE, log }) {
    * `p.outdoors`/`p.coverAbove` — so this bench and production request, and
    * read, the identical thing.
    */
-  async function buildLayerField(floorIndex, dim, casterGridDim) {
-    const { products } = await deriveBench.derive(casterGridDim > 0 ? { casterGridDim } : {});
+  async function buildLayerField(floorIndex, dim, casterGridDim, overheadHostType = 'tile') {
+    const { products } = await deriveBench.derive({
+      ...(casterGridDim > 0 ? { casterGridDim } : {}),
+      // ⚠️ `tile`, NOT `bench-derive.js`'s own `levelForeground` DEFAULT
+      // (2026-08-02 — found the moment the new layer-isolation view was first
+      // pointed at the OVERHEAD layer, which came back a flat 1.000 "no shadow
+      // anywhere" on ALL THREE floors).
+      //
+      // `deriveFloorProducts`'s overhead band requires `owner === null` — a
+      // level's OWN art is never an overhead protrusion, it is either the
+      // floor itself or (for a lower floor) sky-reach. So hosting the
+      // `_Overhead` art as a `levelForeground` leaves `coverOverhead`
+      // PERMANENTLY EMPTY, and the bench could never show an overhead shadow
+      // at all. The fixture's own `OVERHEAD_HOST_TYPES` doc already warned
+      // that "modelling only the first left the OVERHEAD caster band
+      // permanently empty" — the warning was there, the bench just never took
+      // the other branch.
+      //
+      // The author's REAL scene hosts it as a tile (their own sun-shadows
+      // report: `tile:dt8vGcvc2BbGD4vo`, `"band": "overhead"`), so `tile` is
+      // both the production-matching choice and the only one where the layer
+      // the author asked to inspect actually exists. Overridable, because the
+      // author uses BOTH shapes across their maps ("I use tiles or the
+      // foreground image for that scene's level").
+      overheadHostType,
+    });
     const p = products.find((x) => x.index === floorIndex);
     if (!p) throw new Error(`no derived products for floor index ${floorIndex}`);
     // The OUTPUT spec is `coverOverhead`'s own — matching `bakeLayerTexture`'s
@@ -510,6 +534,145 @@ export function createSunShadowBench({ THREE, log }) {
     };
   }
 
+  /**
+   * 🔬 ONE LAYER AT A TIME (author, 2026-08-02: *"We need to accurately see the
+   * shadows for the overhead layers, building shadows, AO and sky reach all
+   * separatable for easy comparison."*).
+   *
+   * A multiplier over the per-layer strengths, so isolating a layer costs
+   * nothing new in the shader — the model already has a per-layer strength
+   * vector, and zeroing three of four is exactly "show me only that one".
+   *
+   * ⚠️ THERE IS NO `ao` ENTRY, AND THAT IS NOT AN OVERSIGHT. The author asked
+   * for AO as a fourth separable layer, but the layer-smear model HAS no
+   * ambient-occlusion term — the retired softmax-mean smear had a dedicated
+   * contact-AO accumulator (`accContact`, a lee-gated wide-mip read at the
+   * receiver), and the layer-smear redesign deliberately dropped it: contact
+   * darkening now falls out of station 0's own near-field read rather than
+   * being a separate term with its own strength. Adding an `ao: [0,0,0,0]`
+   * key would render a blank frame and read as "AO is broken" rather than
+   * "AO does not exist here" — the exact lie `feedback_instruments_must_not_lie`
+   * is about. If a real AO term is ever wanted back, it gets a real
+   * accumulator first and an entry here second.
+   */
+  const LAYER_ISOLATION = Object.freeze({
+    all: [1, 1, 1, 1],
+    walls: [1, 0, 0, 0],
+    overhead: [0, 1, 0, 0],
+    // B and A together: `packLayerTexelData` merges "the floor directly above"
+    // and "everything higher" into B today (A is the documented empty slot),
+    // so sky-reach is honestly ONE isolation, not two.
+    skyReach: [0, 0, 1, 1],
+  });
+
+  /** Every look/geometry input one render needs, resolved from `ctx.params`
+   * ONCE so the single-floor and all-floors scenarios cannot drift apart in
+   * what they actually feed the material. */
+  function resolveShadowParams(params) {
+    const isolateKey = params.layerIsolate ?? 'all';
+    const isolate = LAYER_ISOLATION[isolateKey] ?? LAYER_ISOLATION.all;
+    const baseStrengths = params.strengths ?? [0.95, 0.95, 0.95, 0.95];
+    return {
+      isolateKey,
+      azimuthDeg: params.azimuthDeg ?? 220,
+      elevationDeg: params.elevationDeg ?? 30,
+      tier: params.tier ?? 3,
+      heightsPx: [params.wallHeightPx ?? 300, params.overheadHeightPx ?? 220, params.aboveHeightPx ?? 400, 0],
+      strengths: baseStrengths.map((s, i) => s * isolate[i]),
+      // See `buildLayerField` for why this defaults to `tile` rather than the
+      // derive bench's own `levelForeground`.
+      overheadHostType: params.overheadHostType ?? 'tile',
+      depthRadiusPx: params.depthRadiusPx ?? [0, 0, 1300, 1340],
+      softnessMul: params.softnessMul ?? 0.2,
+      basePx: params.basePx ?? 1,
+      falloffExp: params.falloffExp ?? 1,
+      tipBlurMul: params.tipBlurMul ?? 3,
+    };
+  }
+
+  /** Build + upload + render ONE floor's field. Returns the raw bytes plus the
+   * field itself, so a caller can measure it as well as look at it. */
+  async function renderOneFloor(floorIndex, plan, p) {
+    const field = await buildLayerField(floorIndex, plan.fieldDim, plan.layerGridDim, p.overheadHostType);
+    const resolved = resolveLayerSmear({
+      azimuthDeg: p.azimuthDeg,
+      elevationDeg: p.elevationDeg,
+      heightsPx: p.heightsPx,
+    });
+    layerSmear.layerTexNode.value = uploadLayers(field);
+    layerSmear.setRect(field.rect);
+    layerSmear.setField({ layerGridDimPx: field.w });
+    layerSmear.setSun(resolved);
+    layerSmear.setLayers({ strengths: p.strengths });
+    layerSmear.setDepth({ radiiPx: p.depthRadiusPx });
+    layerSmear.setLook({
+      strength01: 1,
+      softnessMul: p.softnessMul,
+      basePx: p.basePx,
+      falloffExp: p.falloffExp,
+      tipBlurMul: p.tipBlurMul,
+    });
+    layerSmear.setEdgeBandPx(0);
+    const bytes = await renderTo(layerSmear, layerSmearQuad, plan.fieldDim);
+    return { bytes, field, resolved };
+  }
+
+  /**
+   * Paint several floors into the ONE canvas, stacked, each at its TRUE world
+   * aspect (author, 2026-08-02: *"a debug view of all three floors composited
+   * together so that I can check if the whole scene's three floor structure
+   * shadows mix together correctly"* — and, earlier and emphatically, that
+   * there be exactly one viewing panel).
+   *
+   * ⚠️ ASPECT-CORRECTED, unlike `paintTo`. The bake target is SQUARE
+   * (`fieldDim²`) while the world rect is not (this scene is 10650×4950), so
+   * painting the square buffer straight to the canvas — which is what the
+   * single-floor view does — stretches everything vertically by ~2.15×. That
+   * is tolerable when you are looking at one frame and know it; it is not when
+   * the whole point is comparing three frames against each other and against
+   * a screenshot of the real map.
+   */
+  function paintStack(canvasId, frames, dim, rect) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const worldAspect = (rect.maxX - rect.minX) / (rect.maxY - rect.minY);
+    const outW = dim;
+    const frameH = Math.max(1, Math.round(outW / worldAspect));
+    const labelH = 28;
+    const gap = 10;
+    canvas.width = outW;
+    canvas.height = frames.length * (frameH + labelH + gap);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#101014';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // One reusable scratch canvas holding a frame at its NATIVE square size;
+    // `drawImage` then does the aspect correction and scaling in one step.
+    const scratch = document.createElement('canvas');
+    scratch.width = dim;
+    scratch.height = dim;
+    const sctx = scratch.getContext('2d');
+    const flip = yFlip === true;
+
+    let y = 0;
+    for (const f of frames) {
+      const out = new Uint8ClampedArray(dim * dim * 4);
+      for (let row = 0; row < dim; row++) {
+        const srcRow = flip ? dim - 1 - row : row;
+        out.set(f.bytes.subarray(srcRow * dim * 4, (srcRow + 1) * dim * 4), row * dim * 4);
+      }
+      sctx.putImageData(new ImageData(out, dim, dim), 0, 0);
+
+      ctx.fillStyle = '#e8e8ee';
+      ctx.font = '16px ui-monospace, monospace';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(f.label, 8, y + labelH / 2);
+      y += labelH;
+      ctx.drawImage(scratch, 0, 0, dim, dim, 0, y, outW, frameH);
+      y += frameH + gap;
+    }
+  }
+
   const scenarios = new Map();
 
   scenarios.set('layer-smear-real-floor', {
@@ -549,56 +712,15 @@ export function createSunShadowBench({ THREE, log }) {
         };
       }
 
-      const field = await buildLayerField(fx.index, plan.fieldDim, plan.layerGridDim);
-      // Heights, world px. Wall height is the one authored slider; the layers
-      // above take the fixture's own floor bands. Exposed as params because they
-      // are LOOK, and the author dials look.
-      const heightsPx = [
-        ctx.params.wallHeightPx ?? 300,
-        ctx.params.overheadHeightPx ?? 220,
-        ctx.params.aboveHeightPx ?? 400,
-        0,
-      ];
-      // Author, 2026-08-02: "Small tweaks now just to get the darkest part of
-      // the shadow darker." Re-tuned to a uniform 0.95 the same day — the
-      // author's own "preferred default" pass, live against this exact real
-      // floor, superseding the earlier per-layer [1, 0.85, 0.88] split.
-      // Deliberately still below 1 so "a little bit of light should leak
-      // through" survives at the most enclosed point.
-      const strengths = ctx.params.strengths ?? [0.95, 0.95, 0.95, 0.95];
-      // THE SKY-REACH GRADIENT (author, 2026-08-02: "a soft gradient for the
-      // sky reach so that it gets darker as it gets further in ... the most
-      // middle section of the bridge even darker but still a little bit of
-      // light should leak through"). 0 for walls/overhead (unchanged from
-      // before this existed); real radii for the floor-above/higher layers,
-      // where a wide solid span is exactly the "middle of the bridge" case.
-      // ⚠️ SIZE THIS TO ~HALF THE WIDEST COVERED SPAN, not to a small "soft
-      // edge" value. The multi-scale read saturates at its widest radius
-      // (`layer-smear.js#DEPTH_SCALES`), so a radius well under half the deck
-      // width leaves the CENTRE — the exact point the author asked to be
-      // darkest — on a flat saturated plateau. 700 (~half the ~1500px deck)
-      // was the first working guess; the author's own "preferred default"
-      // pass the same day pushed it further, to 1300/1340, live against the
-      // real render.
-      const depthRadiusPx = ctx.params.depthRadiusPx ?? [0, 0, 1300, 1340];
-      const resolved = resolveLayerSmear({ azimuthDeg, elevationDeg, heightsPx });
-
-      layerSmear.layerTexNode.value = uploadLayers(field);
-      layerSmear.setRect(field.rect);
-      layerSmear.setField({ layerGridDimPx: field.w });
-      layerSmear.setSun(resolved);
-      layerSmear.setLayers({ strengths });
-      layerSmear.setDepth({ radiiPx: depthRadiusPx });
-      layerSmear.setLook({
-        strength01: 1,
-        softnessMul: ctx.params.softnessMul ?? 0.2,
-        basePx: ctx.params.basePx ?? 1,
-        falloffExp: ctx.params.falloffExp ?? 1,
-        tipBlurMul: ctx.params.tipBlurMul ?? 3,
-      });
-      layerSmear.setEdgeBandPx(0);
-
-      const bytes = await renderTo(layerSmear, layerSmearQuad, plan.fieldDim);
+      // Heights, strengths, the sky-reach gradient and the layer isolation all
+      // resolve through `resolveShadowParams` — ONE place, shared with the
+      // all-floors scenario, so the two views cannot silently disagree about
+      // what they are rendering. See that function (and `LAYER_ISOLATION`) for
+      // each default's own story, including why the author's requested "AO"
+      // isolation deliberately does not exist.
+      const p = resolveShadowParams(ctx.params);
+      const { heightsPx, strengths, depthRadiusPx } = p;
+      const { bytes, field, resolved } = await renderOneFloor(fx.index, plan, p);
       lastRender = { bytes, dim: plan.fieldDim, rect: field.rect, yFlip };
       paintTo('sunShadowView', bytes, plan.fieldDim);
 
@@ -659,8 +781,105 @@ export function createSunShadowBench({ THREE, log }) {
           heightsPx,
           strengths,
           depthRadiusPx,
+          layerIsolate: p.isolateKey,
         },
         stats: { law, holes: holes.count, gate, layerGrid: `${field.w}x${field.h}`, fieldDim: plan.fieldDim },
+      };
+    },
+  });
+
+  scenarios.set('all-floors-stack', {
+    name: 'all-floors-stack',
+    summary:
+      'EVERY floor of the real Tower Bridge stack, rendered through the same real material and painted ' +
+      'into the ONE canvas at true world aspect, newest floor last. Built to answer the author`s own ' +
+      'question: is a lower floor`s shadow CONSISTENT as you move up the stack — identical except for ' +
+      'the higher floors occluding what is below them? Combine with `layerIsolate` ' +
+      '(all | walls | overhead | skyReach) to compare one layer at a time across all three.',
+    async run(ctx) {
+      await ensureRenderer();
+      const p = resolveShadowParams(ctx.params);
+      const plan = layerSmearTierPlan(p.tier);
+      ensureLayerSmear(plan.steps);
+      let calibration = 'OK';
+      try {
+        await selfTest(plan.fieldDim);
+        if (yFlip === null) calibration = 'FAILED';
+      } catch {
+        calibration = 'FAILED';
+      }
+      if (calibration === 'FAILED') {
+        return {
+          calibration,
+          checks: [
+            check({
+              id: 'orientation-calibrated',
+              status: 'UNMEASURED',
+              note: 'selfTest could not establish row order',
+            }),
+          ],
+        };
+      }
+
+      const frames = [];
+      const perFloor = [];
+      for (const fx of FIXTURE.floors) {
+        const { bytes, field } = await renderOneFloor(fx.index, plan, p);
+        const gate = measureFloorGateSurvival(bytes, plan.fieldDim, field);
+        // Mean darkness over the WHOLE frame — the one number that says "this
+        // floor got more/less shadow than that one" at a glance, next to the
+        // picture that says where.
+        let sum = 0;
+        for (let i = 0; i < bytes.length; i += 4) sum += bytes[i];
+        const meanVis = sum / (bytes.length / 4) / 255;
+        frames.push({
+          bytes,
+          label: `floor ${fx.index} — ${fx.id}   [${p.isolateKey}]   mean vis ${meanVis.toFixed(3)}`,
+        });
+        perFloor.push({
+          floorId: fx.id,
+          floorIndex: fx.index,
+          meanVis: +meanVis.toFixed(4),
+          gatedOutPct: gate.gatedOutPct,
+        });
+        // Keep the LAST floor probeable, matching the single-floor scenario's
+        // own contract rather than leaving `lastRender` stale from a prior run.
+        lastRender = { bytes, dim: plan.fieldDim, rect: field.rect, yFlip };
+      }
+      paintStack('sunShadowView', frames, plan.fieldDim, lastRender.rect);
+
+      return {
+        calibration,
+        checks: [
+          check({ id: 'orientation-calibrated', status: 'pass', measured: yFlip ? 'flipped' : 'unflipped' }),
+          evaluate('every-floor-rendered', () => ({
+            ok: frames.length === FIXTURE.floors.length,
+            measured: frames.length,
+            expected: FIXTURE.floors.length,
+          })),
+          evaluate('no-floor-is-blank', () => ({
+            // A blank (mean vis 1.0) floor is the failure this view exists to
+            // make visible — it is exactly what "the sky reach isn't picking up
+            // the roof floor" looked like. An isolation that legitimately has
+            // no casters on some floor will trip this; that is the point, and
+            // the note says which.
+            ok: perFloor.every((f) => f.meanVis < 0.999),
+            measured: perFloor.map((f) => `${f.floorId}=${f.meanVis}`).join(' '),
+            expected: 'every floor shows SOME shadow',
+            note: 'a floor at exactly 1.000 cast nothing at all — with layerIsolate set, that may be honest (that layer has no casters on that floor) rather than a defect.',
+          })),
+        ],
+        inputs: {
+          floors: FIXTURE.floors.map((f) => f.id),
+          tier: p.tier,
+          layerIsolate: p.isolateKey,
+          azimuthDeg: p.azimuthDeg,
+          elevationDeg: p.elevationDeg,
+          heightsPx: p.heightsPx,
+          strengths: p.strengths,
+          depthRadiusPx: p.depthRadiusPx,
+        },
+        stats: { perFloor, fieldDim: plan.fieldDim },
       };
     },
   });
@@ -691,17 +910,27 @@ export function createSunShadowBench({ THREE, log }) {
       'reported live on real geometry.',
     scenarios,
     params: {
-      floorId: 'underground | middle | roof (default middle)',
+      floorId: 'underground | middle | roof (default middle) — single-floor scenario only',
+      layerIsolate:
+        'all | walls | overhead | skyReach (default all). NO `ao` — the layer-smear model has no AO term; see LAYER_ISOLATION.',
       azimuthDeg: 'default 220',
       elevationDeg: 'default 30',
       tier: 'default 3 (Extreme)',
       wallHeightPx: 'default 300',
       overheadHeightPx: 'default 220',
       aboveHeightPx: 'default 400',
-      strengths: 'per-layer 0..1, default [1, 0.85, 0.88, 0.88]',
-      depthRadiusPx: 'per-layer world px, THE SKY-REACH GRADIENT, default [0, 0, 700, 700]',
+      strengths: 'per-layer 0..1, default [0.95, 0.95, 0.95, 0.95]',
+      depthRadiusPx: 'per-layer world px, THE SKY-REACH GRADIENT, default [0, 0, 1300, 1340]',
     },
-    checkIds: ['the-law-never-darkens-with-distance', 'the-law-sweep-is-not-vacuous', 'no-holes-or-halos'],
+    checkIds: [
+      'the-law-never-darkens-with-distance',
+      'the-law-sweep-is-not-vacuous',
+      'no-holes-or-halos',
+      'survives-the-live-floor-gate',
+      'orientation-calibrated',
+      'every-floor-rendered',
+      'no-floor-is-blank',
+    ],
     ready: () => true,
     runScenario,
   });

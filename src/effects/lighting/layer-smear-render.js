@@ -161,24 +161,36 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     const basePx = uLook.z;
     const falloffExp = uLook.w;
 
-    const here = layerTexNode.sample(uv());
+    // ⚠️⚠️ READ AT `GATE_AA_LOD` (0, SHARP) — NOT A BARE `.sample(uv())`
+    // (2026-08-03, author: an overhead item darkened by its OWN cast shadow —
+    // "the shadow needs to be occluded by the actual thing that is casting
+    // it"). A plain `.sample()` on a fullscreen bake quad picks an IMPLICIT
+    // mip from screen-space derivatives — the exact thing `GATE_AA_LOD`'s own
+    // header already names as untrustworthy here (it blurred the wall gate 21
+    // world px when it was briefly non-zero). `here` used to be sampled bare,
+    // and it now backs TWO receiver-position reads that both need the item's
+    // TRUE edge, not a softened one:
+    //
+    //   - `here.g` (below) — an item's own self-shadow exclusion. A blurry
+    //     read means the item's silhouette, as THIS lookup sees it, is
+    //     slightly SMALLER than what actually rendered — so at the item's own
+    //     boundary `selfCoverage < 1`, `occ[LAYER_OVERHEAD]` is not fully
+    //     zeroed, and a thin rim of the item's own shadow survives ONTO the
+    //     item — precisely "occluded by the thing casting it" failing at
+    //     the one place it is asked to hold hardest: the caster's own edge.
+    //   - `here.a` (THE CASCADE, below) — a blurry read smears the fall-
+    //     through transition past a floor's real boundary, the identical
+    //     "moves the edge, does not soften it" failure `GATE_AA_LOD`'s own
+    //     header describes for the wall gate.
+    //
+    // One sample, one constant — `wallAA` no longer needs its own copy.
+    const here = layerTexNode.sample(uv()).level(float(GATE_AA_LOD));
 
     // THE RECEIVER GATE — the sharpened `_Outdoors` read, from the WALL channel
     // (R): `1 − walls` is how outdoors this texel is. Same sharpening curve the
     // previous model used, so "indoors takes no sun shadow" behaves identically
     // across the change.
-    //
-    // ⚠️ READ AT `GATE_AA_LOD`, WHICH IS 0 — i.e. SHARP. That constant's own
-    // header has the full story: it was briefly log2(4), to anti-alias a
-    // stair-stepped diagonal roofline, and that blurred the gate over 21 world
-    // px on the author's real scene — which does not soften an edge, it MOVES
-    // it, starting the shadow weak at the wall and reaching full strength only
-    // well away from it. Contact hardening outranks edge smoothness here.
-    //
-    // The explicit `.level()` stays rather than reverting to a plain
-    // `here.r`, so the trade remains one named constant rather than a code
-    // change to rediscover.
-    const wallAA = layerTexNode.sample(uv()).level(float(GATE_AA_LOD)).r;
+    const wallAA = here.r;
     const gate = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), float(1).sub(wallAA));
 
     const texelWorldPx = max(rectSize.x, rectSize.y).div(uLayerGridDim);

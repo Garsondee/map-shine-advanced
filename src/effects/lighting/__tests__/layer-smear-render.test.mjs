@@ -94,4 +94,65 @@ export function run(t) {
     rebuildError = err;
   }
   t.ok(`it rebuilds at 8, 32 and 64 steps${rebuildError ? ` — ${rebuildError.message}` : ''}`, rebuildError === null);
+
+  // ── THE CASCADE'S SECOND INPUT, AND THE SHARP-`here` FIX (2026-08-03) ────
+  // Author, live: an overhead item darkened by its OWN cast shadow — "the
+  // shadow needs to be occluded by the actual thing that is casting it."
+  // `here` (the receiver's own texel — now backing BOTH the self-shadow
+  // exclusion `here.g` and the cascade blend `here.a`) used to be a bare
+  // `.sample(uv())`, an IMPLICIT mip Node builds from screen-space
+  // derivatives — the exact thing `GATE_AA_LOD`'s own header already named
+  // untrustworthy for a fullscreen bake quad. Fixed to `.level(GATE_AA_LOD)`,
+  // matching the wall gate's own precedent exactly. Construction cannot prove
+  // WGSL codegen (Shader Lab's job), but it proves `lowerFieldTexture` is a
+  // real accepted param and that both the presence and the (default) absence
+  // of a lower floor build cleanly — a floor 0 slot has no lower field, and a
+  // builder that only worked WITH one would fail live on the very first scene.
+  {
+    let withLower = null;
+    let withLowerError = null;
+    try {
+      withLower = buildLayerSmearBakeMaterial({
+        THREE,
+        layerTexture: stubTexture,
+        lowerFieldTexture: stubTexture,
+        steps: 24,
+      });
+    } catch (err) {
+      withLowerError = err;
+    }
+    t.ok(
+      `a slot WITH a lower field (any floor above the ground) constructs${withLowerError ? ` — threw: ${withLowerError.message}` : ''}`,
+      withLowerError === null && !!withLower
+    );
+
+    let withoutLower = null;
+    let withoutLowerError = null;
+    try {
+      withoutLower = buildLayerSmearBakeMaterial({
+        THREE,
+        layerTexture: stubTexture,
+        lowerFieldTexture: null,
+        steps: 24,
+      });
+    } catch (err) {
+      withoutLowerError = err;
+    }
+    t.ok(
+      `a slot with NO lower field (the ground floor) still constructs${withoutLowerError ? ` — threw: ${withoutLowerError.message}` : ''}`,
+      withoutLowerError === null && !!withoutLower
+    );
+    t.ok(
+      'omitting lowerFieldTexture entirely defaults to the same no-cascade shape',
+      (() => {
+        let err = null;
+        try {
+          buildLayerSmearBakeMaterial({ THREE, layerTexture: stubTexture, steps: 24 });
+        } catch (e) {
+          err = e;
+        }
+        return err === null;
+      })()
+    );
+  }
 }

@@ -20,6 +20,7 @@ import {
   sampleMaskGridWorld,
   maskGridMean,
   extractContentWindow,
+  describeAuthoredSources,
 } from '../mask-derive.js';
 import { computeQuadCorners } from '../../foundry/scene-geometry.js';
 
@@ -1221,5 +1222,74 @@ export async function run(t) {
       outdoorsAbsentValue: 1,
     });
     t.ok('no caster spec → every channel is empty', maskGridMean(noSpec[0].casterHeight) === 0);
+  }
+
+  // --- describeAuthoredSources: the per-source ledger -------------------
+  // ⚠️ WHY THIS EXISTS. A live floor's `outdoors` grid read meanByte 75.4 while
+  // the same map's files, run through the real production path, measured 220.6.
+  // Three theories died against that gap, because a grid MEAN cannot say which
+  // of a floor's sources darkened it. This can.
+  {
+    const opaque = { w: 2, h: 2, data: new Uint8Array([255, 255, 255, 255]) };
+    const paintsNothing = { w: 2, h: 2, data: new Uint8Array([0, 0, 0, 0]) };
+    const partialAlpha = { w: 2, h: 2, data: new Uint8Array([255, 255, 0, 0]) };
+    const placement = { x: 0, y: 0, width: 100, height: 100, rotation: 0 };
+
+    const ledger = describeAuthoredSources([
+      { ownerId: 'level.bg', ownerKind: 'levelBackground', content: opaque, alpha: opaque, placement },
+      { ownerId: 'tile.7', ownerKind: 'tile', content: paintsNothing, alpha: partialAlpha, placement },
+      { ownerId: 'tile.9', ownerKind: 'tile', content: opaque, alpha: null, placement },
+    ]);
+
+    t.ok('one row per source', ledger.length === 3);
+    t.ok('rows carry draw order, so an overwrite can be reasoned about', ledger.map((r) => r.order).join() === '0,1,2');
+    t.ok(
+      'each row NAMES its owner rather than being anonymous',
+      ledger[0].owner === 'level.bg' && ledger[1].owner === 'tile.7'
+    );
+    t.ok('content dimensions are reported, so a mis-sized ingest is visible', ledger[0].content === '2x2');
+    t.ok('a healthy source reports a high content mean', ledger[0].contentMeanByte === 255);
+    // THE SIGNATURE this ledger was built to catch: a source that paints
+    // nothing but is composited anyway collapses the grid to 255 x (1 - alpha).
+    t.ok(
+      `a source that paints NOTHING reports contentMeanByte 0 beside a live alpha (${ledger[1].contentMeanByte}/${ledger[1].alphaMeanByte})`,
+      ledger[1].contentMeanByte === 0 && ledger[1].alphaMeanByte > 0
+    );
+    t.ok(
+      'a source with no alpha says so explicitly rather than reporting 0',
+      ledger[2].hasAlpha === false && ledger[2].alphaMeanByte === null
+    );
+    t.ok(
+      'the rectangle each source claims is reported',
+      ledger[0].placement.w === 100 && ledger[0].placement.h === 100
+    );
+
+    // It must never be the thing that throws while diagnosing a broken floor.
+    t.ok('an empty list is an empty ledger, not a crash', describeAuthoredSources([]).length === 0);
+    t.ok('a null list is an empty ledger', describeAuthoredSources(null).length === 0);
+    const junk = describeAuthoredSources([{}]);
+    t.ok(
+      'a source with no content reports MISSING rather than throwing',
+      junk[0].content === 'MISSING' && junk[0].contentMeanByte === null
+    );
+
+    // And it must ride on the products, not be something a caller bolts on.
+    const products = deriveFloorProducts({
+      gridSpec: computeMaskGridSpec({ x: 0, y: 0, width: 100, height: 100 }, 8),
+      items: [],
+      floors: [
+        {
+          index: 0,
+          ceilingElevation: 10,
+          bottomElevation: 0,
+          outdoors: [{ ownerId: 'level.bg', content: opaque, alpha: opaque, placement }],
+        },
+      ],
+      outdoorsAbsentValue: 1,
+    });
+    t.ok(
+      'deriveFloorProducts emits the ledger alongside the grid it explains',
+      products[0].outdoorsLedger?.[0]?.owner === 'level.bg'
+    );
   }
 }

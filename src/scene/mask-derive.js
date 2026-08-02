@@ -567,6 +567,59 @@ export function compositeItemHeightMax(grid, content, placement, heightByte) {
  * @param {number} absentValue - 0..1, the catalog's own.
  * @returns {MaskGrid}
  */
+/**
+ * ONE LINE PER SOURCE THAT FED A GRID — what `rasterizeAuthored` was actually
+ * handed, in draw order, before it composited anything.
+ *
+ * ⚠️ WHY THIS EXISTS (2026-08-02). The author's live `outdoors` grid read
+ * meanByte 75.4 / nearBlack 67.2% while the same map's `_Outdoors` files, run
+ * through the REAL production path (real packer, real page table, real content
+ * window, real extraction) measured 220.6 / 9.9% — and every other floor's
+ * measured light too, so no overwrite composite of them could reach 67% black.
+ * Three separate theories died against that gap, each one a plausible reading
+ * of a grid-level aggregate. A grid mean cannot say WHICH source darkened it;
+ * this can, and it costs one pass over content grids that are ~166×77.
+ *
+ * `contentMeanByte ≈ 0` with a healthy `alphaMeanByte` is the specific
+ * signature that started this: the composite reduces to `absent × (1 − a)`, so
+ * the grid's mean lands at exactly `255 × transparentFraction` no matter what
+ * the author painted.
+ *
+ * @param {Array<{placement?: object, content?: ContentGrid, alpha?: ContentGrid|null}>} sources
+ * @param {(source: object) => string} [labelOf] - names the owner, if known.
+ * @returns {Array<object>}
+ */
+export function describeAuthoredSources(sources, labelOf) {
+  const meanOf = (g) => {
+    if (!g?.data?.length) return null;
+    let s = 0;
+    for (let i = 0; i < g.data.length; i++) s += g.data[i];
+    return +(s / g.data.length).toFixed(1);
+  };
+  return (sources ?? []).map((source, i) => {
+    const p = source?.placement ?? null;
+    return {
+      order: i,
+      owner: labelOf?.(source) ?? source?.ownerId ?? null,
+      content: source?.content ? `${source.content.w}x${source.content.h}` : 'MISSING',
+      contentMeanByte: meanOf(source?.content),
+      hasAlpha: !!source?.alpha,
+      alphaMeanByte: meanOf(source?.alpha),
+      // The rectangle it claims on the map. A source that covers the whole
+      // canvas overwrites every earlier one; a mis-placed one writes the wrong
+      // half of the map and reads as "the mask is wrong".
+      placement: p
+        ? {
+            x: Math.round(p.x ?? 0),
+            y: Math.round(p.y ?? 0),
+            w: Math.round(p.width ?? 0),
+            h: Math.round(p.height ?? 0),
+          }
+        : null,
+    };
+  });
+}
+
 export function rasterizeAuthored(gridSpec, sources, absentValue) {
   const grid = createMaskGrid(gridSpec);
   const absentByte = Math.round(Math.max(0, Math.min(1, absentValue)) * 255);
@@ -904,6 +957,10 @@ export function deriveFloorProducts({
         outdoors: outdoorsCaster,
         coverAbove: coverCaster,
       },
+      // ⚠️ WHAT ACTUALLY FED `outdoors`, per source. `outdoorsSource` below says
+      // only "authored vs default"; when a floor's grid comes out wrong this
+      // says WHICH of its sources did it. See `describeAuthoredSources`.
+      outdoorsLedger: describeAuthoredSources(floor.outdoors),
       completeness: {
         expectedItemIds: expected,
         missingItemIds: missing,

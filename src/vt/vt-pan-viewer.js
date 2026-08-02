@@ -5134,7 +5134,15 @@ export async function startVtPanViewer({
         // synthetic IndexedDB identity for a packed pack's COMPOSITED result
         // (distinct from any individual channel source URL).
         source: isPacked
-          ? { kind: 'packed', channelUrls: source.channelUrls, packId: `packed://${ownerId}/${name}` }
+          ? {
+              kind: 'packed',
+              channelUrls: source.channelUrls,
+              // Which channel keeps its transparency (see decode-pool.js's
+              // `compositePackedTexels`). The descriptor's author decides; the
+              // viewer only relays it, and null means the legacy bytes.
+              channelPolicy: source.channelPolicy ?? null,
+              packId: `packed://${ownerId}/${name}`,
+            }
           : { kind: 'single', url: source.url },
         indirectionTexture,
         buf,
@@ -5203,7 +5211,9 @@ export async function startVtPanViewer({
         // CHANNEL-PACKING: a layer descriptor is either { name, url } (single
         // source — the normal case) or { name, channelUrls: {r,g,b} } (packed
         // — see buildPack's header). errorUrl is just for a legible error log.
-        const source = layerDesc.channelUrls ? { channelUrls: layerDesc.channelUrls } : { url: layerDesc.url };
+        const source = layerDesc.channelUrls
+          ? { channelUrls: layerDesc.channelUrls, channelPolicy: layerDesc.channelPolicy ?? null }
+          : { url: layerDesc.url };
         const errorUrl = layerDesc.channelUrls
           ? `r:${layerDesc.channelUrls.r} g:${layerDesc.channelUrls.g} b:${layerDesc.channelUrls.b}`
           : layerDesc.url;
@@ -7944,7 +7954,9 @@ export async function startVtPanViewer({
         // below doesn't know or care which path produced a page.
         const acquired =
           pack.source.kind === 'packed'
-            ? await acquirePackedPages(pack.source.packId, pack.source.channelUrls, pack.table, requestedPages, {})
+            ? await acquirePackedPages(pack.source.packId, pack.source.channelUrls, pack.table, requestedPages, {
+                channelPolicy: pack.source.channelPolicy ?? undefined,
+              })
             : await acquirePages(pack.source.url, pack.table, requestedPages, {});
         decodedForUpload = acquired
           .map((a) => ({ slot: slotByKey.get(a.page.key), decoded: a.bitmap }))

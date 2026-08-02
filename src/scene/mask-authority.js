@@ -380,8 +380,21 @@ export function createMaskAuthority({ readPageImageData, log }) {
       // shadow-casting wall wherever the author simply did not paint. That is
       // the phantom "shadow cast by a 0-alpha edge" they reported.
       //
+      // ⚠️ THIS ONLY BECAME TRUE WHEN THE PACKER STOPPED OVERWRITING IT.
+      // `_Outdoors` does not arrive as its own image: it is the G channel of a
+      // packed RGBA trio, and the packer used to write `_Shadow`'s alpha into
+      // the slot under the comment "identical across the trio by design" — an
+      // invariant that holds for the synthetic torture world and for nothing an
+      // author ever painted. So this read returned the WRONG file's
+      // transparency from the day it landed. `vt/decode-pool.js#
+      // compositePackedTexels` now hands the alpha slot to the one trio member
+      // that composites by alpha, which is this one.
+      //
       // Extracted ONCE per page, not once per channel: every `contentId` in
       // this plan comes from the SAME image, so they share one alpha grid.
+      // (`extractionPlanForLayer` only ever yields RASTERIZED kinds, and the
+      // trio has exactly one — enforced in `validateCatalog` — so "the page's
+      // alpha" and "this content's alpha" cannot diverge here.)
       // A fully-opaque mask (the entirely-black `_Outdoors` an underground
       // scene is authored with) composites exactly as it did before — alpha
       // is 255 everywhere, so the blend below is a provable no-op there.
@@ -570,7 +583,14 @@ export function createMaskAuthority({ readPageImageData, log }) {
       // it; it may still contribute to a DIFFERENT kind.
       const sourcesFor = (kindId) =>
         hosts
-          .map((item) => scene.ingests.get(`${item.id}/${kindId}`))
+          // `ownerId`/`kind` ride along so `mask-derive.js#describeAuthoredSources`
+          // can NAME a source in the report. A ledger of anonymous rows answers
+          // "one of these is wrong" and not "this one is" — which is the
+          // difference between a diagnosis and another round of guessing.
+          .map((item) => {
+            const ingest = scene.ingests.get(`${item.id}/${kindId}`);
+            return ingest ? { ...ingest, ownerId: item.id, ownerKind: item.kind } : null;
+          })
           .filter((ingest) => ingest?.content && ingest?.placement);
       const authored = {};
       for (const kind of extraRasterized) {
@@ -686,6 +706,9 @@ export function createMaskAuthority({ readPageImageData, log }) {
       // the exact shape `feedback_instruments_must_not_lie` names. Declared here,
       // at the one producer, so no second caller can rediscover the same gap.
       scalePx: id === 'casterHeight' ? CASTER_HEIGHT_SCALE_PX : null,
+      // Rides with the grid, not bolted on by a wrapper — the same discipline
+      // `scalePx` above had to learn the hard way.
+      outdoorsLedger: floor.outdoorsLedger ?? null,
       completeness: floor.completeness,
       version: productsVersion,
     };

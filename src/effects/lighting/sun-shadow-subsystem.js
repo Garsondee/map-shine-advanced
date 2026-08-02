@@ -847,6 +847,14 @@ export function createSunShadowSubsystem({
       // the same map, and this says whether `outdoors` itself arrived that
       // dark or the packing made it so.
       outdoorsGrid: describeSourceGrid(outdoorsGrid),
+      // ⚠️ AND WHICH SOURCES BUILT IT. The grid mean above says a floor is dark;
+      // it cannot say WHY, and three plausible theories died on that distinction
+      // (2026-08-02). Every `_Outdoors` source feeding this floor, in draw
+      // order, with its own content/alpha means — so "the mask is wrong" becomes
+      // "THIS source is wrong". `contentMeanByte ≈ 0` beside a healthy
+      // `alphaMeanByte` means the composite collapsed to `255 × (1 − alpha)`,
+      // i.e. a source that paints nothing is deciding the whole floor.
+      outdoorsSources: field?.outdoorsLedger ?? null,
       coverAboveGrid: describeSourceGrid(field?.coverAbove ?? null),
       // ⚠️ PER-CHANNEL, AND `softEdgePct` IS THE ONE THAT MATTERS. See
       // `describeLayerChannels`: with the shader, the model, the packing and

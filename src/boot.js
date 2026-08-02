@@ -1697,6 +1697,10 @@ function install() {
       channels: field.channels,
       outdoors,
       coverAbove,
+      // Per-source ledger for the grid above (`mask-derive.js#describeAuthoredSources`)
+      // — the sun-shadow report prints it, because a grid MEAN cannot say which
+      // source made it wrong and three theories died learning that.
+      outdoorsLedger: field.outdoorsLedger ?? null,
       scalePx: field.scalePx,
       // ROUND SEVEN (sun-occlusion.js): the scene-wide building height, live —
       // the march's COLUMN test reads this as a uniform rather than a

@@ -16,6 +16,7 @@ import { run as runCoarseAlpha } from './coarse-alpha.test.mjs';
 import { run as runMipResample } from './mip-resample.test.mjs';
 import { run as runSceneAttr } from './scene-attr.test.mjs';
 import { run as runMaskImage } from './mask-image.test.mjs';
+import { run as runPackedTrioAlpha } from './packed-trio-alpha.test.mjs';
 import { run as runVtPanViewerDiagnostics } from './vt-pan-viewer-diagnostics.test.mjs';
 
 let passed = 0;
@@ -61,6 +62,7 @@ const suites = [
   ['mip-resample', runMipResample],
   ['scene-attr', runSceneAttr],
   ['mask-image', runMaskImage],
+  ['packed-trio-alpha', runPackedTrioAlpha],
   ['vt-pan-viewer-diagnostics', runVtPanViewerDiagnostics],
 ];
 

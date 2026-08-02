@@ -720,6 +720,89 @@ export async function acquirePages(url, table, pages, opts = {}) {
 }
 
 /**
+ * ⚠️⚠️ THE PACKED TRIO HAS ONE ALPHA SLOT AND THREE SEPARATELY-AUTHORED
+ * SOURCES (2026-08-02, the cause of "Foundry's shadows look nothing like the
+ * Shader Lab's").
+ *
+ * The original packer wrote `out[a] = rPix[a]` under a comment reading *"shared
+ * structural-hole alpha (identical across the trio by design)"*. That invariant
+ * is REAL — for `tools/make-torture-world.mjs`, whose `fillHoleAlpha` paints the
+ * same hole into all three synthetic masks. It is FALSE for authored art: on the
+ * real Town River Bridge map `_Shadow` and `_Outdoors` are different paintings
+ * with different transparency, and `_Outdoors`' own alpha never survived packing.
+ *
+ * What that cost: `mask-derive.js#compositeItemOverwrite` composites a floor's
+ * `_Outdoors` sources by alpha, because the author's ruling is *"transparent
+ * means unpainted — composite by alpha. Transparent also means not inside a
+ * building."* Fed `_Shadow`'s alpha instead (opaque wherever the shadow mask is
+ * painted), every transparent `_Outdoors` texel wrote its colour byte — which is
+ * 0 — i.e. INDOORS. `Tower_Bridge_Middle_Overhead_Outdoors.webp` is 98.1%
+ * transparent and contains ZERO opaque-dark pixels, yet it was blackening the
+ * map: the floor's wall channel measured 73.8% covered live against 14.4% in the
+ * bench off the same file. Near-total wall coverage is what the author saw as a
+ * blurred, detached shadow — the receiver gate blanked most of the floor and
+ * every surviving outdoor sliver sat inside overlapping smears from all sides.
+ *
+ * THE RULE: the alpha slot belongs to the ONE kind that composites by alpha
+ * (`MaskKind.rasterize`); the other two are resolved against their own
+ * `absentValue` AT PACK TIME, where their alpha still exists. Afterwards every
+ * channel means what it says with no alpha needed — except the owner, whose
+ * alpha is exactly the "did the author paint here" bit its rasterizer wants.
+ *
+ * Passing no policy reproduces the old bytes exactly, so the torture world (whose
+ * shared-hole invariant is genuine) is unaffected.
+ *
+ * @typedef {{alphaOwner:'r'|'g'|'b', absentByte:{r:number|null,g:number|null,b:number|null}}} PackChannelPolicy
+ */
+export const LEGACY_PACK_CHANNEL_POLICY = /** @type {PackChannelPolicy} */ (
+  Object.freeze({ alphaOwner: 'r', absentByte: Object.freeze({ r: null, g: null, b: null }) })
+);
+
+/**
+ * Bumped whenever the recipe above changes. It rides in the IndexedDB page-store
+ * key, because a packed page is persisted by `packId` and a stale composite is
+ * indistinguishable from a fresh one — the [[feedback_url_keyed_cache_needs_a_content_validator]]
+ * class, where a same-name re-upload served the OLD encode. Without this bump
+ * every returning session would keep serving pages packed under the broken rule
+ * and the fix would look like it did nothing.
+ */
+export const PACK_RECIPE_VERSION = 2;
+
+/**
+ * Composite one packed RGBA page from its three channel sources, in place.
+ * SHARED by the main-thread fallback and the worker so the two can never drift
+ * (they were two hand-written copies of the same four lines until this landed).
+ *
+ * @param {Uint8ClampedArray} out - destination RGBA bytes.
+ * @param {Uint8ClampedArray} rPix @param {Uint8ClampedArray} gPix @param {Uint8ClampedArray} bPix
+ * @param {PackChannelPolicy} [policy]
+ */
+export function compositePackedTexels(out, rPix, gPix, bPix, policy) {
+  const { alphaOwner, absentByte } = policy ?? LEGACY_PACK_CHANNEL_POLICY;
+  const src = { r: rPix, g: gPix, b: bPix };
+  const ownerPix = src[alphaOwner] ?? rPix;
+  const offsetOf = { r: 0, g: 1, b: 2 };
+  for (let j = 0; j < out.length; j += 4) {
+    for (const ch of /** @type {const} */ (['r', 'g', 'b'])) {
+      const pix = src[ch];
+      const raw = pix[j];
+      const absent = absentByte?.[ch];
+      // The owner keeps its RAW byte: its consumer has the alpha and does the
+      // source-over itself, so pre-resolving here would apply it twice on the
+      // antialiased edge texels. A channel with no absent byte declared keeps
+      // the legacy behaviour rather than guessing one.
+      if (ch === alphaOwner || absent == null) {
+        out[j + offsetOf[ch]] = raw;
+      } else {
+        const a = pix[j + 3] / 255;
+        out[j + offsetOf[ch]] = Math.round(raw * a + absent * (1 - a));
+      }
+    }
+    out[j + 3] = ownerPix[j + 3];
+  }
+}
+
+/**
  * CHANNEL-PACKING (Keyhole §4.1, 2026-07-16 — author-confirmed mask taxonomy:
  * single-channel masks — `_Shadow`/`_Outdoors`/`_Fire` — are the only ones that
  * pack; coloured masks (`_Specular`/`_Window`) and RGBA masks (`_Tree`/`_Bush`)
@@ -747,12 +830,13 @@ export async function acquirePages(url, table, pages, opts = {}) {
  *   persistence key prefix so a packed page, once composited, is never
  *   re-composited. Distinct from any of the 3 channel source URLs.
  * @param {{r:string, g:string, b:string}} channelUrls - the 3 single-channel
- *   mask source URLs. Alpha is read from the `r` source (guaranteed identical
- *   across all 3 by the shared-hole-alpha invariant — see
- *   `tools/make-torture-world.mjs`'s `fillHoleAlpha`).
+ *   mask source URLs.
  * @param {import('./page-table.js').PageTable} table
  * @param {Array<{mip:number, px:number, py:number}>} pages
  * @param {object} [opts] @param {number} [opts.borderPx] @param {number} [opts.pageSizePx]
+ * @param {PackChannelPolicy} [opts.channelPolicy] - who owns the alpha slot and
+ *   what the other two resolve to where they are transparent. See
+ *   `compositePackedTexels`. Omitted = the legacy shared-hole-alpha bytes.
  * @returns {Promise<Array<{page:{mip:number,px:number,py:number}, bitmap: ImageBitmap}>>}
  */
 export async function acquirePackedPages(packId, channelUrls, table, pages, opts = {}) {
@@ -763,6 +847,11 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
     g: toRootAbsoluteAssetUrl(channelUrls.g),
     b: toRootAbsoluteAssetUrl(channelUrls.b),
   };
+  const channelPolicy = opts.channelPolicy ?? null;
+  // ONE place stamps the recipe onto the persistence identity, so the main
+  // thread, the worker's `persist()`, and the IndexedDB lookup below can never
+  // disagree about which recipe a stored page was baked under.
+  packId = `${packId}#pack${PACK_RECIPE_VERSION}`;
   const borderPx = opts.borderPx ?? DEFAULT_BORDER_PX;
   const pageSizePx = opts.pageSizePx ?? 256;
   const results = [];
@@ -801,6 +890,7 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
       payloadPx: table.payloadPx,
       borderPx,
       pageSizePx,
+      channelPolicy,
     });
     if (worker) {
       results.push(...foldWorkerResults(worker, misses, 3)); // 3 channel sources decoded
@@ -808,8 +898,8 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
       // FALLBACK — the original main-thread packed compositing path.
       // Slice each channel source ONCE for the whole miss batch, extracting
       // the raw RGBA ImageData per missed page (R=G=B for these grayscale
-      // masks, so reading the red byte is the mask's intensity; alpha is only
-      // kept from 'r').
+      // masks, so reading the red byte is the mask's intensity; which source's
+      // alpha survives is `channelPolicy`'s call — see compositePackedTexels).
       const channelPixels = {}; // 'r'|'g'|'b' -> Map<pageKey, Uint8ClampedArray>
       for (const ch of /** @type {const} */ (['r', 'g', 'b'])) {
         const { source, done } = await acquireSliceSource(channelUrls[ch]);
@@ -840,12 +930,7 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
         const rPix = channelPixels.r.get(page.key);
         const gPix = channelPixels.g.get(page.key);
         const bPix = channelPixels.b.get(page.key);
-        for (let j = 0; j < out.data.length; j += 4) {
-          out.data[j] = rPix[j]; // _Shadow's intensity (its red byte; grayscale source)
-          out.data[j + 1] = gPix[j]; // _Outdoors' intensity
-          out.data[j + 2] = bPix[j]; // _Fire's intensity
-          out.data[j + 3] = rPix[j + 3]; // shared structural-hole alpha (identical across all 3 by design)
-        }
+        compositePackedTexels(out.data, rPix, gPix, bPix, channelPolicy);
         ctx.putImageData(out, 0, 0);
         results.push({ page, bitmap: await createImageBitmap(canvas) });
         _decodeStats.idbSlices++;

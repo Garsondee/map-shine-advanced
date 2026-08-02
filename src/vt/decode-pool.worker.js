@@ -34,7 +34,7 @@
  * @module vt/decode-pool.worker
  */
 
-import { pageWorldRect, decodePageToCanvas, DEFAULT_BORDER_PX } from './decode-pool.js';
+import { pageWorldRect, decodePageToCanvas, DEFAULT_BORDER_PX, compositePackedTexels } from './decode-pool.js';
 import { pageStoreKey, putPageBlob } from './pyramid-store.js';
 
 /** Fetch + fully decode one source image. This is the expensive op we moved off the main thread. */
@@ -100,11 +100,17 @@ async function handleSlice(msg) {
 
 /**
  * Handle a channel-packed slice request: decode all 3 channel sources, and for
- * each page composite R/G/B (+ shared hole alpha from 'r') into one RGBA page.
+ * each page composite R/G/B + one alpha into one RGBA page — via the SHARED
+ * `compositePackedTexels`, so this and the main-thread fallback cannot drift
+ * (the alpha rule was two hand-written copies, and both were wrong the same way).
  * Same shape as decode-pool.js's main-thread `acquirePackedPages`, off-thread.
+ *
+ * `packId` already carries `PACK_RECIPE_VERSION` — `acquirePackedPages` stamps
+ * it before sending, so `persist()` below writes under the same key the caller
+ * will look up.
  */
 async function handleSlicePacked(msg) {
-  const { packId, channelUrls, pages, worldWidthPx, worldHeightPx, payloadPx, pageSizePx } = msg;
+  const { packId, channelUrls, pages, worldWidthPx, worldHeightPx, payloadPx, pageSizePx, channelPolicy } = msg;
   const borderPx = msg.borderPx ?? DEFAULT_BORDER_PX;
   const table = { payloadPx, worldWidthPx, worldHeightPx };
 
@@ -143,12 +149,7 @@ async function handleSlicePacked(msg) {
     const canvas = new OffscreenCanvas(pageSizePx, pageSizePx);
     const ctx = canvas.getContext('2d');
     const out = ctx.createImageData(pageSizePx, pageSizePx);
-    for (let j = 0; j < out.data.length; j += 4) {
-      out.data[j] = rPix[j];
-      out.data[j + 1] = gPix[j];
-      out.data[j + 2] = bPix[j];
-      out.data[j + 3] = rPix[j + 3]; // shared structural-hole alpha (identical across the trio by design)
-    }
+    compositePackedTexels(out.data, rPix, gPix, bPix, channelPolicy);
     ctx.putImageData(out, 0, 0);
     const bitmap = await createImageBitmap(canvas);
     maxSinglePageMs = Math.max(maxSinglePageMs, performance.now() - p0);

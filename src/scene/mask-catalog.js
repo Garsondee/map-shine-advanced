@@ -375,6 +375,22 @@ export function validateMaskCatalog(kinds = MASK_KINDS, derived = DERIVED_KINDS)
     fail(`packed trio incomplete: channels declared = [${[...packChannels.keys()].join(',')}] — need r,g,b or none`);
   }
 
+  // ⚠️ ONE PACKED RGBA PAGE HAS ONE ALPHA SLOT. It goes to the trio member the
+  // authority composites BY ALPHA (`rasterize`) — see `packedTrioChannelPolicy`.
+  // Two rasterized members would need two alphas and one would silently lose
+  // its transparency, which is exactly the bug this rule was written after; zero
+  // means nobody needs it and the declaration has drifted from the consumers.
+  if (packChannels.size === 3) {
+    const packedRasterized = [...packChannels.values()].filter((id) => kinds.find((k) => k.id === id)?.rasterize);
+    if (packedRasterized.length !== 1) {
+      fail(
+        `the packed trio must have EXACTLY ONE rasterized member to own the page's single alpha slot — ` +
+          `found ${packedRasterized.length} [${packedRasterized.join(',')}]. One RGBA page cannot carry two ` +
+          `sources' transparency; unpack one of them (packChannel: null) or drop its rasterize flag.`
+      );
+    }
+  }
+
   const known = new Set([ALBEDO_INPUT, ...ids]);
   for (const d of derived) {
     if (!/^[a-z][a-zA-Z0-9]*$/.test(d.id ?? '')) fail(`derived id '${d.id}' must be camelCase`);
@@ -413,6 +429,39 @@ export function packedTrioKinds() {
 }
 
 /**
+ * ⚠️ WHO OWNS THE PACKED PAGE'S SINGLE ALPHA SLOT (2026-08-02).
+ *
+ * Three separately-painted files composite into one RGBA page, so exactly one
+ * of them can keep its transparency. It goes to the kind the AUTHORITY
+ * composites by alpha — `rasterize: true`, i.e. the one whose grid is built by
+ * `mask-derive.js#compositeItemOverwrite` and therefore needs to know "did the
+ * author paint this texel". The other two are resolved against their own
+ * `absentValue` at pack time, while their alpha still exists, so afterwards
+ * their byte means what it says with no alpha required.
+ *
+ * See `vt/decode-pool.js#compositePackedTexels` for what this cost when the
+ * slot was hardcoded to `r`. If the trio ever has zero or two rasterized kinds
+ * this returns null and the packer falls back to the legacy bytes — a silent
+ * wrong answer is not on the menu, so `validateCatalog` fails that case first.
+ *
+ * @returns {import('../vt/decode-pool.js').PackChannelPolicy|null}
+ */
+export function packedTrioChannelPolicy() {
+  const trio = packedTrioKinds();
+  if (!trio) return null;
+  const channels = /** @type {const} */ (['r', 'g', 'b']);
+  const owners = channels.filter((ch) => trio[ch].rasterize === true);
+  if (owners.length !== 1) return null;
+  const absentByte = { r: null, g: null, b: null };
+  for (const ch of channels) {
+    absentByte[ch] = ch === owners[0] ? null : Math.round(clamp01(trio[ch].absentValue) * 255);
+  }
+  return Object.freeze({ alphaOwner: owners[0], absentByte: Object.freeze(absentByte) });
+}
+
+const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+
+/**
  * Assemble the renderer's extra-layer descriptors for one floor from "which
  * kinds were found, at which URL" — THE one assembly both the torture fixture
  * and real-scene discovery go through, so packing policy exists exactly once.
@@ -444,7 +493,13 @@ export function assembleLayerDescriptors(urlByKindId) {
     const g = get(trio.g.id);
     const b = get(trio.b.id);
     if (r && g && b) {
-      descriptors.push({ name: PACKED_TRIO_LAYER_NAME, channelUrls: { r, g, b } });
+      // The policy travels WITH the urls, so a consumer physically cannot
+      // acquire the pack without the rule for reading it back apart.
+      descriptors.push({
+        name: PACKED_TRIO_LAYER_NAME,
+        channelUrls: { r, g, b },
+        channelPolicy: packedTrioChannelPolicy(),
+      });
       packedIds.add(trio.r.id).add(trio.g.id).add(trio.b.id);
     }
   }

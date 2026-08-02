@@ -495,7 +495,8 @@ export function compositeItemHeightMax(grid, content, placement, heightByte) {
  *   consumer samples ("how high is the bridge over my head?"); the GPU march
  *   reads `casterChannels` instead so the three can be told apart.
  * @property {{building: MaskGrid, overhead: MaskGrid, skyReach: MaskGrid, height: MaskGrid,
- *   coverBuilding: MaskGrid, coverOverhead: MaskGrid, coverSkyReach: MaskGrid}} casterChannels -
+ *   coverBuilding: MaskGrid, coverOverhead: MaskGrid, coverSkyReach: MaskGrid,
+ *   outdoors: MaskGrid, coverAbove: MaskGrid}} casterChannels -
  *   the field's HEIGHT (`height`, MAX-merged, byte over `CasterHeightSpec.scalePx`)
  *   plus each producer's own COVERAGE, unmerged (2026-07-26 rethink — coverage
  *   and height are two facts per producer, never one byte; Sun-Shadows-
@@ -509,6 +510,17 @@ export function compositeItemHeightMax(grid, content, placement, heightByte) {
  *   different floor's structure, whose art this floor never draws at that
  *   pixel (docs/planning/Sun-Shadows-Rethink.md §4b).
  *   "the shadow looks wrong".
+ *   ⚠️ `outdoors`/`coverAbove` (2026-08-02) are CASTER-RESOLUTION TWINS of the
+ *   top-level `outdoors`/`coverAbove` properties of THIS SAME product (below) —
+ *   NOT the same object, aliased to it only when no caster-specific resolution
+ *   was requested. The top-level pair stays pinned at the SHARED `gridSpec`
+ *   resolution every other effect (water/wind) also budgets against; these
+ *   scale with `casterGridSpec` exactly like `coverOverhead`/`coverSkyReach`
+ *   already did. Before this pair existed, the layer-smear model's walls (R)
+ *   and floor-above (B) channels — read from the top-level pair — were pinned
+ *   to the shared, low-res grid at every performance tier, which is what made
+ *   a real scene's walls and sky-reach layer visibly pixelated regardless of
+ *   how high the tier ladder's own `layerGridDim` went.
  * @property {Record<string, MaskGrid>} authored - every OTHER `rasterize: true`
  *   kind's raw grid (`water` today), keyed by kind id. No derivation on top:
  *   these exist because a GPU consumer bakes from the authored value directly.
@@ -630,6 +642,19 @@ export function deriveFloorProducts({
 
   for (const floor of floors) {
     const cover = createMaskGrid(gridSpec);
+    // ⚠️ A CASTER-RESOLUTION TWIN OF `cover`, aliased (not duplicated) when no
+    // caster-specific resolution was requested — same "off costs nothing"
+    // discipline `wantBuilding`/`wantOverhead` already follow. See
+    // `DerivedFloorProducts.casterChannels`'s own doc for why this exists:
+    // `cover` (and `outdoors`, below) stayed pinned to the SHARED `gridSpec`
+    // resolution while `coverOverhead`/`coverSkyReach` already scaled with
+    // `casterGridSpec` — found 2026-08-02, author live: a real scene's walls
+    // and sky-reach layer were visibly pixelated at every performance tier,
+    // because the two most visually dominant channels were silently capped at
+    // the shared, low-res budget every OTHER effect (water/wind) also shares,
+    // while the tier ladder's own `layerGridDim` (2048 at Extreme) only ever
+    // reached the overhead channel.
+    const coverCaster = casterGridSpec ? createMaskGrid(casterSpecActive) : cover;
     const expected = [];
     const missing = [];
     const hiddenExcluded = [];
@@ -727,6 +752,7 @@ export function deriveFloorProducts({
       }
       if (isAbove) {
         compositeItemMax(cover, item.alpha, item.placement);
+        if (coverCaster !== cover) compositeItemMax(coverCaster, item.alpha, item.placement);
         if (wantSkyReach) {
           skyReachIds.push(item.id);
           compositeItemMax(coverSkyReach, item.alpha, item.placement);
@@ -741,6 +767,14 @@ export function deriveFloorProducts({
 
     const sky = createMaskGrid(gridSpec);
     const outdoors = rasterizeAuthored(gridSpec, floor.outdoors, outdoorsAbsentValue);
+    // The same caster-resolution-twin discipline as `coverCaster`, above —
+    // `sky` (skyReach) does not need one: it is derived FROM `outdoors`+`cover`
+    // right below at whichever resolution THEY were built at, and nothing
+    // downstream reads it at caster resolution the way the layer-smear pack
+    // reads `outdoors` and `coverAbove` directly.
+    const outdoorsCaster = casterGridSpec
+      ? rasterizeAuthored(casterSpecActive, floor.outdoors, outdoorsAbsentValue)
+      : outdoors;
     for (let i = 0; i < sky.data.length; i++) {
       sky.data[i] = Math.round((outdoors.data[i] * (255 - cover.data[i])) / 255);
     }
@@ -863,6 +897,12 @@ export function deriveFloorProducts({
         coverBuilding,
         coverOverhead,
         coverSkyReach,
+        // CASTER-RESOLUTION TWINS of the shared-resolution `outdoors`/`coverAbove`
+        // above (2026-08-02) — see `coverCaster`'s own comment, up in the item
+        // loop, for the full story. `layer-smear`'s R (walls) and B (floor-
+        // above) channels read THESE, not the shared-resolution products.
+        outdoors: outdoorsCaster,
+        coverAbove: coverCaster,
       },
       completeness: {
         expectedItemIds: expected,

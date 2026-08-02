@@ -30,6 +30,18 @@ import { SHADOW_LAYER_COUNT, DEPTH_SCALES, LAYER_OVERHEAD } from './layer-smear.
  * `log2(dimension)`, and asking past it is undefined on some backends. */
 const MAX_LOD = 12;
 
+/** The receiver gate's own fixed anti-aliasing radius, in TEXELS — see
+ * `gate`'s own comment below for the measured problem this fixes. `log2(2)`
+ * is a compile-time constant (no uniform, no per-frame division): a mip
+ * level of 1 samples roughly a 2×2 texel box, which was enough to turn a
+ * measured single-texel staircase back into a visible multi-texel gradient
+ * on a real diagonal roofline without materially softening the "reaches full
+ * strength within about a texel or two" contact-hardening the sharpening
+ * curve below still provides. Tuned once, by eye, against real geometry, the
+ * same discipline `SUN_SHADOW_LAYER_STRENGTH`'s own doctrine states — not
+ * exposed as a param. */
+const GATE_AA_LOD = Math.log2(4);
+
 /**
  * Build the layer-smear bake material.
  *
@@ -104,12 +116,42 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, steps = 32 })
     const basePx = uLook.z;
     const falloffExp = uLook.w;
 
-    // THE RECEIVER GATE — the sharpened `_Outdoors` read, from the WALL channel
-    // (R): `1 − walls` is how outdoors this texel is. Same sharpening constants
-    // the previous model used, so "indoors takes no sun shadow" behaves
-    // identically across the change.
     const here = layerTexNode.sample(uv());
-    const gate = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), float(1).sub(here.r));
+
+    // THE RECEIVER GATE — the sharpened `_Outdoors` read, from the WALL channel
+    // (R): `1 − walls` is how outdoors this texel is. Same sharpening curve the
+    // previous model used, so "indoors takes no sun shadow" behaves identically
+    // across the change.
+    //
+    // ⚠️ THE INPUT IS PRE-BLURRED, THE RAW READ (`here.r`) IS NOT (2026-08-02,
+    // author live: a stone roofline's shadow edge stair-stepped far coarser
+    // than the art's own crenellation). MEASURED, not guessed: the real
+    // `_Outdoors` art's own anti-aliased edge is a smooth ~3–4 texel ramp —
+    // sampling it raw and feeding a `smoothstep` with a NARROW window
+    // (`GATE_SHARPEN_LOW`..`HIGH`, 0.12..0.35) collapses that whole ramp into
+    // under ONE texel of real transition (a real boundary measured live: byte
+    // values 255,189,106,24,0 across four texels sharpen to 1,1,1,0,0 — three
+    // of the four intermediate values vanish). A single-texel-wide transition
+    // on a DIAGONAL boundary is exactly a staircase at the grid's own
+    // resolution, one step per row.
+    //
+    // The fix pre-blurs the WALL channel over `GATE_AA_RADIUS_TEXELS` before
+    // sharpening — same "blur, then threshold" edge-antialiasing every
+    // rasterizer does, applied here because a scene-space bake has no screen
+    // derivatives (`fwidth`) to reach for instead. `GATE_SHARPEN_LOW/HIGH`
+    // themselves are UNCHANGED — they still exist to fix the same "brighter
+    // strip hugging the wall" bug they always did, at the SAME real-world
+    // window; only what feeds them is smoother now, which is what turns a
+    // coarse binary staircase back into the ramp's own natural gradient
+    // without giving up "reaches full strength within about a texel or two".
+    //
+    // The walls channel (R) alone is blurred here — `GATE_AA_LOD` is defined
+    // IN TEXELS, not world px: a diagonal boundary's own step size is always
+    // ~1 texel, at every tier's own resolution, so a texel-relative blur is
+    // the geometrically correct one, not a fixed world-px radius that would
+    // over- or under-blur depending on which tier is active.
+    const wallAA = layerTexNode.sample(uv()).level(float(GATE_AA_LOD)).r;
+    const gate = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), float(1).sub(wallAA));
 
     const texelWorldPx = max(rectSize.x, rectSize.y).div(uLayerGridDim);
     const sampleUvAt = (at) => {

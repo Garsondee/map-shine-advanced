@@ -69,15 +69,14 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     type: 'float',
     min: 0,
     max: 1,
-    // ⚠️ 0.005, not 0.01 — the default below is 0.075, which a 0.01 grid
-    // cannot represent, so the slider would silently snap the shipped default
-    // to a value nobody chose the moment it was touched.
-    step: 0.005,
-    // 0.55 → 0.075 (author, 2026-08-02, live on the River Town Bridge map once
-    // the floor-attribution fix made the shadow visible at all). The layer
-    // smear lands MUCH darker than the model it replaced — the same slider
-    // position is a different picture now — so the default came down with it.
-    default: 0.075,
+    step: 0.01,
+    // 0.55 → 0.85 (author, 2026-08-02, live on the River Town Bridge map once
+    // the floor-attribution fix made the shadow visible at all — corrected
+    // same day from an initial 0.075, the author's own typo, "that was my
+    // bad"). The layer smear lands much darker than the model it replaced, so
+    // the shipped default moved with it rather than staying at the old
+    // model's tuning.
+    default: 0.85,
     category: 'Look',
     label: 'Shadow strength',
     help: 'How dark a fully-shadowed patch of ground goes. Torches and other lights still light it back up — the sun is the only thing this darkens.',

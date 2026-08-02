@@ -191,7 +191,11 @@ export function createSunShadowBench({ THREE, log }) {
     ensureLayerSmear(plan.steps);
     await selfTest(plan.fieldDim);
     const s = { azimuthDeg: 220, elevationDeg: 30, heightsPx: [300, 220, 400, 0], ...sun };
-    const resolved = resolveLayerSmear({ azimuthDeg: s.azimuthDeg, elevationDeg: s.elevationDeg, heightsPx: s.heightsPx });
+    const resolved = resolveLayerSmear({
+      azimuthDeg: s.azimuthDeg,
+      elevationDeg: s.elevationDeg,
+      heightsPx: s.heightsPx,
+    });
     layerSmear.layerTexNode.value = uploadLayers(field);
     layerSmear.setRect(field.rect);
     layerSmear.setField({ layerGridDimPx: field.w });
@@ -228,22 +232,25 @@ export function createSunShadowBench({ THREE, log }) {
    * nothing here is a hand-rolled transcription, which is the whole reason
    * this bench exists.
    *
-   * ⚠️ `gridMaxDim` — WITHOUT this, `derive()` rasterizes `outdoors`/
-   * `coverAbove` at the SHARED, low-res grid every OTHER effect (water/wind/
-   * specular too) also uses, regardless of tier (only `casterChannels.overhead`
-   * scales with a `casterGridDim` request — `deriveFloorProducts`'s own doc on
-   * `casterGridSpec`). Found 2026-08-02 chasing "as high resolution as
-   * possible": the tier ladder's own `layerGridDim` (2048 at Extreme) was
-   * being silently ignored for walls and the sky-reach layer, the two most
-   * visually dominant channels. Passed here rather than raised globally —
-   * this is a LAB-ONLY, per-call `derive()` invocation with its own isolated
-   * cache, so raising it costs nothing for any other consumer. Production
-   * wiring (giving `outdoors`/`coverAbove` their own caster-resolution
-   * copies in `mask-derive.js`, matching `casterChannels.overhead`'s own
-   * precedent) is a follow-up, not needed to explore the look here.
+   * ⚠️ `casterGridDim`, NOT `gridMaxDim` (2026-08-02, corrected same day as
+   * first found — see `mask-derive.js`'s own doc on `casterChannels.outdoors`/
+   * `.coverAbove` for the full story). The first version of this fix passed
+   * `gridMaxDim`, which raises `derive()`'s SHARED `gridSpec` globally — every
+   * consumer, not just the caster channels — which happened to make Shader
+   * Lab's own picture crisp while leaving PRODUCTION's real `outdoors`/
+   * `coverAbove` still pinned to the shared, low-res grid (only
+   * `casterChannels.overhead` scaled with the tier there). The two benches
+   * were measuring two DIFFERENT pictures without either side knowing it —
+   * exactly what the author caught comparing a real scene against this same
+   * bench's own render of the identical floor. `casterGridDim` requests the
+   * SAME narrower, caster-only resolution bump `boot.js`'s real
+   * `casterSpec.gridMaxDim` does, and this now reads the resulting
+   * `casterChannels.outdoors`/`.coverAbove` twins — not the shared-resolution
+   * `p.outdoors`/`p.coverAbove` — so this bench and production request, and
+   * read, the identical thing.
    */
-  async function buildLayerField(floorIndex, dim, gridMaxDim) {
-    const { products } = await deriveBench.derive(gridMaxDim > 0 ? { gridMaxDim } : {});
+  async function buildLayerField(floorIndex, dim, casterGridDim) {
+    const { products } = await deriveBench.derive(casterGridDim > 0 ? { casterGridDim } : {});
     const p = products.find((x) => x.index === floorIndex);
     if (!p) throw new Error(`no derived products for floor index ${floorIndex}`);
     // The OUTPUT spec is `coverOverhead`'s own — matching `bakeLayerTexture`'s
@@ -253,8 +260,8 @@ export function createSunShadowBench({ THREE, log }) {
     const spec = p.casterChannels.coverOverhead.spec;
     const { data } = packLayerTexelData({
       channels: p.casterChannels,
-      outdoorsGrid: p.outdoors,
-      coverAboveGrid: p.coverAbove ?? null,
+      outdoorsGrid: p.casterChannels.outdoors,
+      coverAboveGrid: p.casterChannels.coverAbove ?? null,
       spec,
     });
     return {

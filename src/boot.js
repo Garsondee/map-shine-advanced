@@ -1669,6 +1669,22 @@ function install() {
         maskAuthority.getDerived('coverAbove', floorIndex, { acknowledgeMissingRequired: true })?.grid ?? null;
     }
     if (!field?.channels || !outdoors) return null;
+    // ⚠️ PREFER THE CASTER-RESOLUTION TWINS (2026-08-02, author live: a real
+    // scene's walls and sky-reach layer were visibly pixelated on the middle
+    // floor, and didn't match Shader Lab's own render of the same data at
+    // all). `outdoors`/`coverAbove` above are the SHARED, low-res products
+    // every other effect (water/wind) also budgets against, fetched here only
+    // for their `RequiredMaskMissingError` side effect (the degraded-mode
+    // detection this function's own header describes — `field.channels`
+    // itself never throws, see `sky-reach-access.js#heightField`'s own
+    // `guarded()` wrapper). `field.channels.outdoors`/`.coverAbove`
+    // (`mask-derive.js`'s own doc on `casterChannels` has the full story) are
+    // caster-resolution copies of the SAME two grids, scaling with whatever
+    // `gridMaxDim` the active performance tier actually requested — exactly
+    // like `coverOverhead` already did. Falls back to the shared-resolution
+    // pair only if a stale/older product genuinely lacks them.
+    outdoors = field.channels.outdoors ?? outdoors;
+    coverAbove = field.channels.coverAbove ?? coverAbove;
     if (degraded && !sunShadowDegradedFloors.has(floorIndex)) {
       sunShadowDegradedFloors.set(floorIndex, degraded);
       log.warn(

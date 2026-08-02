@@ -701,6 +701,76 @@ export async function run(t) {
     );
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // 🧱🌉 `casterChannels.outdoors`/`.coverAbove` (2026-08-02) — the SAME split
+  // as above, for the TWO channels that used to be left out of it entirely.
+  // Author, live, comparing a real scene against Shader Lab's own render of
+  // the identical data: walls and the sky-reach (floor-above) layer were
+  // visibly pixelated at every tier, because `outdoors` and `coverAbove`
+  // stayed pinned to `gridSpec` while `coverOverhead` already scaled with
+  // `casterGridSpec`.
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const fineSpec = computeMaskGridSpec({ x: 0, y: 0, width: 100, height: 100 }, 20); // 20x20, texel 5 — 2x gspec
+    const upstairsBackground = {
+      id: 'floor1-bg',
+      elevation: 20,
+      hidden: false,
+      placement: { x: 25, y: 50, width: 50, height: 100 },
+      alpha: makeUniformContent(1, 255),
+      ownerFloorIndex: 1,
+    };
+    const split = deriveFloorProducts({
+      gridSpec: gspec,
+      casterGridSpec: fineSpec,
+      items: [upstairsBackground],
+      floors: [
+        { index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] },
+        { index: 1, ceilingElevation: 30, bottomElevation: 20, outdoors: [] },
+      ],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 256 },
+    });
+    const f0 = split[0];
+    t.ok(
+      'the SHARED outdoors/coverAbove stay at gridSpec`s own resolution (10x10 = 100)',
+      f0.outdoors.data.length === 100 && f0.coverAbove.data.length === 100
+    );
+    t.ok(
+      'the CASTER twins take on casterGridSpec`s resolution instead (20x20 = 400)',
+      f0.casterChannels.outdoors.data.length === 400 && f0.casterChannels.coverAbove.data.length === 400
+    );
+    // World x=22.5 (gx=4 @ 20-wide, inside the upper floor's painted footprint)
+    // vs x=77.5 (gx=15, outside it) — same world-space boundary, read at the
+    // caster twin's own higher resolution.
+    const idxInside = 10 * 20 + 4;
+    const idxOutside = 10 * 20 + 15;
+    t.ok(
+      'coverAbove`s caster twin sees the upper floor`s real footprint at 2x resolution',
+      f0.casterChannels.coverAbove.data[idxInside] > 200 && f0.casterChannels.coverAbove.data[idxOutside] === 0
+    );
+
+    // A caller that omits casterGridSpec must get the EXACT SAME OBJECT back
+    // (aliased, not a redundant duplicate composite pass) — the "off costs
+    // nothing" regression guard for this pair, matching the caster-height
+    // channels` own precedent just above.
+    const noCasterSpec = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [upstairsBackground],
+      floors: [
+        { index: 0, ceilingElevation: 10, bottomElevation: 0, outdoors: [] },
+        { index: 1, ceilingElevation: 30, bottomElevation: 20, outdoors: [] },
+      ],
+      outdoorsAbsentValue: 1,
+      casterHeights: { scalePx: 2048, distancePixels: 20, buildingHeightPx: 256 },
+    });
+    t.ok(
+      'omitting casterGridSpec ALIASES the caster twin to the shared object — the identical instance, not a copy',
+      noCasterSpec[0].casterChannels.outdoors === noCasterSpec[0].outdoors &&
+        noCasterSpec[0].casterChannels.coverAbove === noCasterSpec[0].coverAbove
+    );
+  }
+
   // The OVERHEAD exterior gate must ALSO stay correct across a resolution
   // split — it is the OTHER loop that reads `outdoors` beside the caster
   // channels (mask-derive.js's own `OVERHEAD_EXTERIOR_THRESHOLD` gate).

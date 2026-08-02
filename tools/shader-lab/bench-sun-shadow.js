@@ -36,7 +36,15 @@
 import { marchDirectionToSun } from '../../src/effects/lighting/sun-occlusion.js';
 import { buildLayerSmearBakeMaterial } from '../../src/effects/lighting/layer-smear-render.js';
 import { resolveLayerSmear, layerSmearTierPlan } from '../../src/effects/lighting/layer-smear.js';
-import { packLayerTexelData } from '../../src/effects/lighting/sun-shadow-subsystem.js';
+import {
+  packLayerTexelData,
+  SUN_SHADOW_LAYER_STRENGTH,
+  SUN_SHADOW_FALLOFF_EXP,
+  SUN_SHADOW_TIP_BLUR_MUL,
+  SUN_SHADOW_BASE_PENUMBRA_PX,
+  SUN_SHADOW_EDGE_BAND_PX,
+} from '../../src/effects/lighting/sun-shadow-subsystem.js';
+import { SUN_SHADOW_PARAMS } from '../../src/effects/sun-shadows.js';
 import { createDeriveBench } from './bench-derive.js';
 import FIXTURE from './fixtures/tower-bridge.js';
 import { check, evaluate, registerBench, saveCanvasPng } from './contract.js';
@@ -605,25 +613,68 @@ export function createSunShadowBench({ THREE, log }) {
   /** Every look/geometry input one render needs, resolved from `ctx.params`
    * ONCE so the single-floor and all-floors scenarios cannot drift apart in
    * what they actually feed the material. */
+  /** A shipped param's own default, read from the REAL schema. */
+  const shipped = (key) => SUN_SHADOW_PARAMS[key]?.default;
+
+  /**
+   * ⚠️ EVERY DEFAULT COMES FROM PRODUCTION, NOT FROM A NUMBER TYPED HERE
+   * (2026-08-02 — author, comparing the two side by side: *"The shader lab
+   * looks fantastic. It doesn't actually look like the render I get in Foundry
+   * VTT though, which is the issue."*).
+   *
+   * Root cause of that mismatch, and it was never the model: this bench kept
+   * its OWN look numbers and silently DROPPED four inputs production always
+   * passes —
+   *
+   *   `lengthScale`    production ships 0.5, the author's scene had 0.35; the
+   *                    bench passed nothing, i.e. 1. Shadows here were roughly
+   *                    THREE TIMES longer than the real scene's.
+   *   `dawnDuskLength` the low-sun cap. Bench passed nothing — uncapped.
+   *   `strength01`     bench hardcoded 1; production ships 0.85 × the
+   *                    atmosphere's own strength multiplier.
+   *   `edgeBandPx`     bench hardcoded 0; production ships 384, fading every
+   *                    shadow near the map border.
+   *
+   * So the two were never rendering the same picture, and no amount of looking
+   * at them side by side could have converged. Reading `SUN_SHADOW_PARAMS` and
+   * the exported LOOK CONSTANTS means a future change to production's defaults
+   * reaches this bench automatically instead of quietly desyncing it again
+   * (memory: feedback_bench_must_build_inputs_like_production).
+   */
   function resolveShadowParams(params) {
     const isolateKey = params.layerIsolate ?? 'all';
     const isolate = LAYER_ISOLATION[isolateKey] ?? LAYER_ISOLATION.all;
-    const baseStrengths = params.strengths ?? [0.95, 0.95, 0.95, 0.95];
+    // Production's own per-layer LOOK CONSTANT, not a restatement of it.
+    const baseStrengths = params.strengths ?? SUN_SHADOW_LAYER_STRENGTH;
     return {
       isolateKey,
       azimuthDeg: params.azimuthDeg ?? 220,
       elevationDeg: params.elevationDeg ?? 30,
       tier: params.tier ?? 3,
-      heightsPx: [params.wallHeightPx ?? 300, params.overheadHeightPx ?? 220, params.aboveHeightPx ?? 400, 0],
+      heightsPx: [
+        params.wallHeightPx ?? shipped('wallHeightPx'),
+        params.overheadHeightPx ?? shipped('overheadHeightPx'),
+        params.aboveHeightPx ?? shipped('aboveHeightPx'),
+        0,
+      ],
       strengths: baseStrengths.map((s, i) => s * isolate[i]),
       // See `buildLayerField` for why this defaults to `tile` rather than the
       // derive bench's own `levelForeground`.
       overheadHostType: params.overheadHostType ?? 'tile',
-      depthRadiusPx: params.depthRadiusPx ?? [0, 0, 1300, 1340],
-      softnessMul: params.softnessMul ?? 0.2,
-      basePx: params.basePx ?? 1,
-      falloffExp: params.falloffExp ?? 1,
-      tipBlurMul: params.tipBlurMul ?? 3,
+      depthRadiusPx: params.depthRadiusPx ?? [0, 0, shipped('skyReachDepthPx'), shipped('skyReachDepthPx')],
+      // ⚠️ THE FOUR THAT USED TO BE MISSING ALTOGETHER — see this function's
+      // own header for what each one's absence did to the picture.
+      lengthScale: params.lengthScale ?? shipped('lengthScale'),
+      maxLengthMul: params.maxLengthMul ?? shipped('dawnDuskLength'),
+      strength01: params.strength01 ?? shipped('strength01'),
+      edgeBandPx: params.edgeBandPx ?? shipped('edgeBandPx') ?? SUN_SHADOW_EDGE_BAND_PX,
+      // Production's FINAL softness (its atmosphere multiplier × `softnessBias`),
+      // which its own report prints as `lastBake.softnessMul` — so a real
+      // scene's value pastes straight in rather than being rebuilt from halves.
+      softnessMul: params.softnessMul ?? shipped('softnessBias'),
+      basePx: params.basePx ?? SUN_SHADOW_BASE_PENUMBRA_PX,
+      falloffExp: params.falloffExp ?? SUN_SHADOW_FALLOFF_EXP,
+      tipBlurMul: params.tipBlurMul ?? SUN_SHADOW_TIP_BLUR_MUL,
     };
   }
 
@@ -631,10 +682,15 @@ export function createSunShadowBench({ THREE, log }) {
    * field itself, so a caller can measure it as well as look at it. */
   async function renderOneFloor(floorIndex, plan, p) {
     const field = await buildLayerField(floorIndex, plan.fieldDim, plan.layerGridDim, p.overheadHostType);
+    // ⚠️ `lengthScale`/`maxLengthMul` PASSED, as production does — omitting
+    // them was the single biggest reason this bench's picture and the real
+    // scene's stopped resembling each other (see `resolveShadowParams`).
     const resolved = resolveLayerSmear({
       azimuthDeg: p.azimuthDeg,
       elevationDeg: p.elevationDeg,
       heightsPx: p.heightsPx,
+      lengthScale: p.lengthScale,
+      maxLengthMul: p.maxLengthMul,
     });
     layerSmear.layerTexNode.value = uploadLayers(field);
     layerSmear.setRect(field.rect);
@@ -643,13 +699,13 @@ export function createSunShadowBench({ THREE, log }) {
     layerSmear.setLayers({ strengths: p.strengths });
     layerSmear.setDepth({ radiiPx: p.depthRadiusPx });
     layerSmear.setLook({
-      strength01: 1,
+      strength01: p.strength01,
       softnessMul: p.softnessMul,
       basePx: p.basePx,
       falloffExp: p.falloffExp,
       tipBlurMul: p.tipBlurMul,
     });
-    layerSmear.setEdgeBandPx(0);
+    layerSmear.setEdgeBandPx(p.edgeBandPx);
     const bytes = await renderTo(layerSmear, layerSmearQuad, plan.fieldDim);
     return { bytes, field, resolved };
   }

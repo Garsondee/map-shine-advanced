@@ -225,12 +225,19 @@ export const SUN_SHADOW_EDGE_BAND_PX = 384;
  * [1, 0.85, 0.88] to a uniform 0.95 the same day — the author's own
  * "preferred default" pass in Shader Lab, live against real Tower Bridge
  * data, superseding the earlier per-layer split. */
-const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.95, 0.95, 0.95, 0]);
+// ⚠️ EXPORTED SO SHADER LAB CAN RENDER THE SAME PICTURE (2026-08-02). These
+// three were module-private, so `bench-sun-shadow.js` had its OWN hardcoded
+// copies — and they drifted, which is one reason the lab's render stopped
+// resembling the author's real scene. Exporting them makes the bench read the
+// producer instead of restating it (memory:
+// feedback_bench_must_build_inputs_like_production). They remain LOOK
+// CONSTANTS, not params: nothing outside this module may WRITE them.
+export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.95, 0.95, 0.95, 0]);
 /** Shape of the distance falloff — higher hugs the caster more tightly.
  * 1.6→1 2026-08-02 (author, live — the tuned "preferred default" pass). */
-const SUN_SHADOW_FALLOFF_EXP = 1;
+export const SUN_SHADOW_FALLOFF_EXP = 1;
 /** How fast the penumbra widens with distance from its caster. */
-const SUN_SHADOW_TIP_BLUR_MUL = 3;
+export const SUN_SHADOW_TIP_BLUR_MUL = 3;
 
 /**
  * Build the subsystem. See this module's own header for the two-phase

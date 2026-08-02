@@ -45,12 +45,21 @@ async function runSelected() {
   const floorId = document.getElementById('sunShadowFloor').value;
   const tier = Number(document.getElementById('sunShadowTier').value);
   const layerIsolate = document.getElementById('sunShadowLayerIsolate')?.value ?? 'all';
-  // `floorId: 'all'` is the ALL-FLOORS STACK — a different scenario, not a
-  // different parameter, because it renders N fields into one canvas rather
-  // than one. Chosen from the SAME dropdown so there is still exactly one
-  // "which floor am I looking at" control (author: one viewing panel, and by
-  // extension one place to say what it shows).
-  const scenario = floorId === 'all' ? 'all-floors-stack' : 'layer-smear-real-floor';
+  // Two ALL-FLOORS modes, both chosen from the SAME dropdown so there is still
+  // exactly one "what am I looking at" control (author: one viewing panel, and
+  // by extension one place to say what it shows):
+  //   'all'      — THE COMPOSITE, the author's actual ask: one top-down image,
+  //                floors occluding what is below, a gap showing the shadows
+  //                beneath it.
+  //   'allPanels'— three separate panels, one per floor. Useful for judging a
+  //                floor on its own, which the author called out as worth
+  //                keeping, but explicitly NOT what they asked for.
+  const scenario =
+    floorId === 'all'
+      ? 'all-floors-composite'
+      : floorId === 'allPanels'
+        ? 'all-floors-stack'
+        : 'layer-smear-real-floor';
   const params = {
     floorId,
     tier,
@@ -84,9 +93,14 @@ async function runSelected() {
   );
   const legend = document.getElementById('sunShadowLegend');
   if (legend && report.stats) {
-    if (report.stats.perFloor) {
+    if (report.stats.seeThroughPct !== undefined) {
       legend.textContent =
-        `ALL FLOORS — layer '${layerIsolate}', tier ${tier}, ${report.stats.fieldDim ?? '?'}px field   ` +
+        `ALL FLOORS COMPOSITE (looking down) — layer '${layerIsolate}', tier ${tier}, ` +
+        `${report.stats.fieldDim ?? '?'}px field   mean vis ${report.stats.meanVis}   ` +
+        `${report.stats.seeThroughPct}% of frame sees a floor below the top one`;
+    } else if (report.stats.perFloor) {
+      legend.textContent =
+        `ALL FLOORS, separate panels — layer '${layerIsolate}', tier ${tier}, ${report.stats.fieldDim ?? '?'}px field   ` +
         report.stats.perFloor.map((f) => `${f.floorId}: mean vis ${f.meanVis}`).join('   ');
     } else {
       const law = report.stats.law ?? {};
@@ -115,8 +129,12 @@ function wire() {
   // parameter, because it renders N fields into the single canvas.
   const allOpt = document.createElement('option');
   allOpt.value = 'all';
-  allOpt.textContent = `▼ ALL ${FIXTURE.floors.length} FLOORS, stacked`;
+  allOpt.textContent = `★ ALL FLOORS — COMPOSITE (looking down, floors occlude below)`;
   floorSel.appendChild(allOpt);
+  const panelsOpt = document.createElement('option');
+  panelsOpt.value = 'allPanels';
+  panelsOpt.textContent = `▤ ALL ${FIXTURE.floors.length} FLOORS — separate panels`;
+  floorSel.appendChild(panelsOpt);
   // Lowest floor first — the one the author is actively looking at.
   floorSel.value = FIXTURE.floors[0]?.id ?? 'underground';
 

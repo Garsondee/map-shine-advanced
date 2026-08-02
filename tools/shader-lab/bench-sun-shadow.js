@@ -88,12 +88,13 @@ export function createSunShadowBench({ THREE, log }) {
    * dedicated march-only calibration path retired with the march model) — the
    * caller must have already called `ensureLayerSmear` for whatever `dim` it
    * is about to render at, exactly as the retired version required
-   * `ensureMaterials` first. The synthetic field puts coverage on the
-   * OVERHEAD layer (G), not the wall layer (R): a wall texel's own gate would
-   * suppress its d≈0 self-read (`here.r` feeds the receiver gate as well as
-   * layer 0's coverage), where overhead has no such self-cancellation — this
-   * is the layer-smear analogue of the retired march's dedicated
-   * R/sky-reach d=0 seed. */
+   * `ensureMaterials` first.
+   *
+   * The synthetic field puts coverage on the FLOOR-ABOVE layer (B) — NOT the
+   * wall layer (R), whose own receiver gate would suppress its d≈0 self-read,
+   * and NOT the overhead layer (G), whose self-shadow exclusion cancels it
+   * outright. See the channel choice's own comment inside for the afternoon
+   * that cost. */
   async function selfTest(dim) {
     if (yFlip !== null) return yFlip;
     const w = 8;
@@ -101,26 +102,62 @@ export function createSunShadowBench({ THREE, log }) {
     for (let y = 0; y < w; y++)
       for (let x = 0; x < w; x++) {
         const i = (y * w + x) * 4;
-        // G = overhead coverage: covered in the top half of the SOURCE, open
-        // in the bottom half. At elevationDeg 90 the sun throws nothing
-        // (every station collapses to ~d=0), so a covered texel self-darkens
-        // directly off its own station-0 read.
-        data[i + 1] = y < w / 2 ? 255 : 0;
+        // ⚠️ B (THE FLOOR-ABOVE LAYER), NOT G (OVERHEAD) — and the difference
+        // silently corrupted EVERY measurement and every painted image in this
+        // bench for one afternoon (2026-08-02; author caught it by eye:
+        // *"currently layers are y-flipped"*).
+        //
+        // This probe used to write G. Then `layer-smear-render.js` gained the
+        // OVERHEAD SELF-SHADOW EXCLUSION (`occ[G] *= 1 − here.g`, added the
+        // same day so a raised tile stops shadowing its own footprint), which
+        // is EXACTLY zero wherever G is 1 — so this probe's fully-covered
+        // half cancelled itself out and the frame came back uniformly WHITE.
+        // `straightTop > 128` then read 255 and reported a confident
+        // "FLIPPED" derived from an image with no signal in it at all.
+        // `feedback_instruments_must_not_lie`, in its purest form: the
+        // calibration did not fail, it lied, and everything downstream
+        // inherited a bogus flip.
+        //
+        // B is the floor-ABOVE layer, which is deliberately NOT self-excluded
+        // (a receiver under an upper floor genuinely IS beneath it), so it
+        // cannot cancel the way G does. The uniform-frame guard below is the
+        // second half of the fix: never conclude anything from a frame with
+        // no contrast, whatever channel a future edit picks.
+        data[i + 2] = y < w / 2 ? 255 : 0;
       }
     const field = { data, w, h: w, rect: { minX: 0, minY: 0, maxX: 100, maxY: 100 } };
     layerSmear.layerTexNode.value = uploadLayers(field);
     layerSmear.setRect(field.rect);
     layerSmear.setField({ layerGridDimPx: field.w });
-    layerSmear.setSun(resolveLayerSmear({ azimuthDeg: 0, elevationDeg: 90, heightsPx: [0, 300, 0, 0] }));
+    layerSmear.setSun(resolveLayerSmear({ azimuthDeg: 0, elevationDeg: 90, heightsPx: [0, 0, 300, 0] }));
     layerSmear.setLayers({ strengths: [1, 1, 1, 1] });
     layerSmear.setDepth({ radiiPx: [0, 0, 0, 0] });
     layerSmear.setLook({ strength01: 1, softnessMul: 1, basePx: 2, falloffExp: 1.6, tipBlurMul: 3 });
     layerSmear.setEdgeBandPx(0);
     const bytes = await renderTo(layerSmear, layerSmearQuad, dim);
-    const at = (x, y, flip) => bytes[((flip ? dim - 1 - y : y) * dim + x) * 4];
-    const straightTop = at(dim >> 1, 4, false);
-    yFlip = straightTop > 128; // covered (dark, low value) expected near y=0 without a flip
-    log?.(`SUN-SHADOW: selfTest orientation ${yFlip ? 'FLIPPED' : 'OK'} (top-row sample=${straightTop})`);
+    const at = (x, y) => bytes[(y * dim + x) * 4];
+    const nearRow0 = at(dim >> 1, 4);
+    const nearRowLast = at(dim >> 1, dim - 5);
+    // ⚠️ NO CONTRAST, NO VERDICT. The probe paints one half dark and one half
+    // light; if those two samples agree, the render produced no usable signal
+    // and ANY answer here would be a coin flip dressed as a measurement.
+    if (Math.abs(nearRow0 - nearRowLast) < 64) {
+      log?.(
+        `SUN-SHADOW: selfTest UNMEASURABLE — probe frame has no contrast ` +
+          `(row4=${nearRow0}, row${dim - 5}=${nearRowLast}). Orientation NOT established.`
+      );
+      throw new Error(
+        `sun-shadow selfTest: probe frame is uniform (${nearRow0} vs ${nearRowLast}) — cannot establish row order`
+      );
+    }
+    // The probe covers rows 0..3 of the SOURCE, and source row 0 is the rect's
+    // minY (`MaskGrid`'s own convention, and the shader's `uv().y = 0`). So
+    // WITHOUT a flip, a readback row near 0 should be the COVERED (dark) half.
+    yFlip = nearRow0 > nearRowLast;
+    log?.(
+      `SUN-SHADOW: selfTest orientation ${yFlip ? 'FLIPPED' : 'OK'} ` +
+        `(row4=${nearRow0}, row${dim - 5}=${nearRowLast})`
+    );
     return yFlip;
   }
 
@@ -673,6 +710,75 @@ export function createSunShadowBench({ THREE, log }) {
     }
   }
 
+  /**
+   * ↕️ ONE CANONICAL ORIENTATION, ESTABLISHED ONCE (memory:
+   * feedback_y_flip_recurring_risk — this project has shipped a mirrored
+   * shadow four times, and the author flagged the lab for it again on
+   * 2026-08-02).
+   *
+   * Un-flips a GPU readback into a plain top-down buffer where **row 0 is the
+   * world rect's minY**, matching `MaskGrid`'s own "row 0 = minY" convention
+   * and the shader's `uv().y = 0 → uRect.y`. Every compositing step below
+   * works in THIS space and nothing downstream touches `yFlip` again, so the
+   * flip is applied exactly once, in one place, instead of being re-derived
+   * (and possibly re-applied) by each consumer.
+   *
+   * @returns {Uint8Array} `dim*dim` single-channel visibility, row 0 = minY.
+   */
+  function toTopDownVis(bytes, dim) {
+    const flip = yFlip === true;
+    const out = new Uint8Array(dim * dim);
+    for (let row = 0; row < dim; row++) {
+      const srcRow = flip ? dim - 1 - row : row;
+      for (let col = 0; col < dim; col++) out[row * dim + col] = bytes[(srcRow * dim + col) * 4];
+    }
+    return out;
+  }
+
+  /**
+   * How much of its OWN art a floor draws, per texel, in the same top-down
+   * space as {@link toTopDownVis}. This is the OCCLUDER in the composite: where
+   * a floor's art is opaque, that floor is what you see, and everything below
+   * it is hidden.
+   *
+   * Reads the derive bench's own `items` (their `alpha` ContentGrids and
+   * placements) rather than re-deriving coverage, so the composite occludes by
+   * exactly the art the derivation itself banded.
+   */
+  function buildFloorArtAlpha(items, floorIndex, dim) {
+    const mine = items.filter(
+      (it) =>
+        it.alpha &&
+        (it.ownerFloorIndex === floorIndex ||
+          (Array.isArray(it.visibleFloorIndices) && it.visibleFloorIndices.includes(floorIndex)))
+    );
+    const out = new Uint8Array(dim * dim);
+    if (mine.length === 0) return out;
+    for (let row = 0; row < dim; row++) {
+      // Row 0 = minY, matching `toTopDownVis`.
+      const v = (row + 0.5) / dim;
+      for (let col = 0; col < dim; col++) {
+        const u = (col + 0.5) / dim;
+        let best = 0;
+        for (const it of mine) {
+          // The fixture places art over the WHOLE world rect, so item UV is
+          // the normalised world position directly. `worldToItemUv` would be
+          // the general form; this bench's own `wholeWorldPlacement` makes it
+          // an identity, and asserting that here rather than assuming it is
+          // what keeps a future rotated/cropped item from reading silently
+          // wrong (see `no-art-alpha-is-vacuous` below).
+          const a = it.alpha;
+          const ax = Math.min(a.w - 1, Math.max(0, Math.floor(u * a.w)));
+          const ay = Math.min(a.h - 1, Math.max(0, Math.floor(v * a.h)));
+          const val = a.data[ay * a.w + ax];
+          if (val > best) best = val;
+        }
+        out[row * dim + col] = best;
+      }
+    }
+    return out;
+  }
+
   const scenarios = new Map();
 
   scenarios.set('layer-smear-real-floor', {
@@ -784,6 +890,144 @@ export function createSunShadowBench({ THREE, log }) {
           layerIsolate: p.isolateKey,
         },
         stats: { law, holes: holes.count, gate, layerGrid: `${field.w}x${field.h}`, fieldDim: plan.fieldDim },
+      };
+    },
+  });
+
+  scenarios.set('all-floors-composite', {
+    name: 'all-floors-composite',
+    summary:
+      'THE ONE PICTURE: every floor`s shadow composited into a SINGLE top-down image, as seen looking ' +
+      'down from above — each floor`s own art occluding whatever is below it, and a GAP in a floor ' +
+      'showing the shadows of the floor beneath. This is the view for judging whether the three-floor ' +
+      'stack reads correctly as one scene; `all-floors-stack` (three panels) is for judging one floor ' +
+      'at a time.',
+    async run(ctx) {
+      await ensureRenderer();
+      const p = resolveShadowParams(ctx.params);
+      const plan = layerSmearTierPlan(p.tier);
+      ensureLayerSmear(plan.steps);
+      let calibration = 'OK';
+      try {
+        await selfTest(plan.fieldDim);
+        if (yFlip === null) calibration = 'FAILED';
+      } catch {
+        calibration = 'FAILED';
+      }
+      if (calibration === 'FAILED') {
+        return {
+          calibration,
+          checks: [
+            check({
+              id: 'orientation-calibrated',
+              status: 'UNMEASURED',
+              note: 'selfTest could not establish row order',
+            }),
+          ],
+        };
+      }
+
+      // Every floor's own field + its own art coverage, BOTTOM-UP so the
+      // composite below can simply paint each floor over the one beneath.
+      const dim = plan.fieldDim;
+      const { items } = await deriveBench.derive({
+        casterGridDim: plan.layerGridDim,
+        overheadHostType: p.overheadHostType,
+      });
+      const ordered = [...FIXTURE.floors].sort((a, b) => a.index - b.index);
+      const layers = [];
+      let rect = null;
+      for (const fx of ordered) {
+        const { bytes, field } = await renderOneFloor(fx.index, plan, p);
+        rect = field.rect;
+        layers.push({
+          fx,
+          vis: toTopDownVis(bytes, dim),
+          art: buildFloorArtAlpha(items, fx.index, dim),
+        });
+      }
+
+      // THE COMPOSITE. Start at the bottom floor, then paint each floor above
+      // over it weighted by that floor's OWN art alpha — so an opaque upper
+      // floor hides the one below (you see the upper floor's shadow), and a
+      // hole in it lets the lower floor's shadow through, which is exactly the
+      // behaviour the author asked to be able to check.
+      const composite = new Uint8Array(dim * dim);
+      composite.set(layers[0].vis);
+      let visibleFromAbove = 0;
+      for (let li = 1; li < layers.length; li++) {
+        const { vis, art } = layers[li];
+        for (let i = 0; i < composite.length; i++) {
+          const a = art[i] / 255;
+          if (a > 0) composite[i] = Math.round(composite[i] * (1 - a) + vis[i] * a);
+        }
+      }
+      // How much of the frame is showing something OTHER than the top floor —
+      // i.e. how much "looking down through a gap" this picture actually
+      // contains. A composite where the top floor covers everything would be
+      // indistinguishable from a single-floor render, and this check says so
+      // rather than letting the view look richer than it is.
+      const topArt = layers[layers.length - 1].art;
+      for (let i = 0; i < topArt.length; i++) if (topArt[i] < 128) visibleFromAbove++;
+      const seeThroughPct = +((visibleFromAbove / topArt.length) * 100).toFixed(1);
+
+      // Paint the ONE image, aspect-corrected. Already top-down, so no flip.
+      const canvas = document.getElementById('sunShadowView');
+      if (canvas) {
+        const worldAspect = (rect.maxX - rect.minX) / (rect.maxY - rect.minY);
+        const outH = Math.max(1, Math.round(dim / worldAspect));
+        canvas.width = dim;
+        canvas.height = outH;
+        const rgba = new Uint8ClampedArray(dim * dim * 4);
+        for (let i = 0; i < composite.length; i++) {
+          const v = composite[i];
+          rgba[i * 4] = v;
+          rgba[i * 4 + 1] = v;
+          rgba[i * 4 + 2] = v;
+          rgba[i * 4 + 3] = 255;
+        }
+        const scratch = document.createElement('canvas');
+        scratch.width = dim;
+        scratch.height = dim;
+        scratch.getContext('2d').putImageData(new ImageData(rgba, dim, dim), 0, 0);
+        canvas.getContext('2d').drawImage(scratch, 0, 0, dim, dim, 0, 0, dim, outH);
+      }
+
+      let sum = 0;
+      for (let i = 0; i < composite.length; i++) sum += composite[i];
+      const meanVis = sum / composite.length / 255;
+
+      return {
+        calibration,
+        checks: [
+          check({ id: 'orientation-calibrated', status: 'pass', measured: yFlip ? 'flipped' : 'unflipped' }),
+          evaluate('composite-sees-through-the-top-floor', () => ({
+            // The whole point of the composite is the see-through. If the top
+            // floor's art covered everything, this picture would carry no more
+            // information than a single-floor render — and would silently look
+            // like it did.
+            ok: seeThroughPct > 5,
+            measured: `${seeThroughPct}% of the frame shows a floor below the top one`,
+            expected: '> 5%',
+          })),
+          evaluate('no-art-alpha-is-vacuous', () => ({
+            // `buildFloorArtAlpha` assumes the fixture's whole-world placement
+            // makes item UV an identity on world position. If a future item
+            // were placed differently, every floor's art would read as EMPTY
+            // and the composite would silently degrade to "bottom floor only".
+            ok: layers.every((l) => l.art.some((v) => v > 0)),
+            measured: layers.map((l) => `${l.fx.id}:${l.art.some((v) => v > 0) ? 'has art' : 'EMPTY'}`).join(' '),
+            expected: 'every floor contributes real art coverage',
+          })),
+        ],
+        inputs: {
+          floors: ordered.map((f) => f.id),
+          tier: p.tier,
+          layerIsolate: p.isolateKey,
+          azimuthDeg: p.azimuthDeg,
+          elevationDeg: p.elevationDeg,
+        },
+        stats: { meanVis: +meanVis.toFixed(4), seeThroughPct, fieldDim: dim },
       };
     },
   });

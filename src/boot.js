@@ -3138,11 +3138,15 @@ function install() {
       maskStack: Number.isFinite(p?.worldX) ? maskAuthority.probeStackAt(p.worldX, p.worldY) : null,
     }));
   };
-  // One-click from the debug panel, same affordance the pixel/wind probes
-  // already have — `feedback_debug_ui_one_action_one_control`: this arms the
-  // click capture AND returns the merged result, never "now press the other
-  // button".
-  MapShine.debug.registerReport('mask-stack', 'Mask stack — every floor, every mask, at a clicked point', async () => ({
+  // ⚠️ `registerAction`, NEVER `registerReport` — this ARMS A CLICK CAPTURE and
+  // blocks on the author clicking, which is the exact split `debug-panel.js`
+  // documents with teeth: reports are PURE readouts the flight recorder
+  // auto-runs on one "export everything" click, actions are side-effecting and
+  // never exported. Registered as a report first (2026-08-02) and it did not
+  // work at all — the same shape as the ten fake "reports" that would have
+  // restarted the author's scene before that split existed. Precedent one
+  // screen down: `specular-channel-probe`, which is click-driven the same way.
+  MapShine.debug.registerAction('mask-stack-probe', '🔬🏢 Mask stack probe (click 3 pts)', async () => ({
     report: 'mask-stack',
     generatedAt: new Date().toISOString(),
     points: await MapShine.armMaskProbe(3),

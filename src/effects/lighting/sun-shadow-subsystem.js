@@ -475,6 +475,32 @@ export function describeBakeBlur({ rect, layerGridDimPx, maxThrowPx, steps, soft
   };
 }
 
+/**
+ * One authored/derived grid's own statistics, BEFORE any packing touches it.
+ *
+ * Exists because `channelStats.walls` is a DERIVED figure (`255 - outdoors`),
+ * so an unexpected value there has two possible homes: the grid itself, or the
+ * arithmetic that packs it. This separates them without a second decode.
+ *
+ * @param {{spec:{w:number,h:number}, data:Uint8Array}|null} grid
+ */
+export function describeSourceGrid(grid) {
+  if (!grid?.data?.length) return null;
+  const d = grid.data;
+  let sum = 0;
+  let dark = 0;
+  for (let i = 0; i < d.length; i++) {
+    sum += d[i];
+    if (d[i] <= EMPTY_BYTE) dark++;
+  }
+  return {
+    w: grid.spec?.w ?? 0,
+    h: grid.spec?.h ?? 0,
+    meanByte: +(sum / d.length).toFixed(1),
+    nearBlackPct: +((dark / d.length) * 100).toFixed(1),
+  };
+}
+
 export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec }) {
   const { w, h } = spec;
   const data = new Uint8Array(w * h * 4);
@@ -814,6 +840,14 @@ export function createSunShadowSubsystem({
       // same class of lie apart from a genuinely empty floor.
       coveredTexels,
       coveredPct: +((coveredTexels / (w * h)) * 100).toFixed(1),
+      // ⚠️ THE SOURCE GRID, BEFORE PACKING. `channelStats.walls` is derived
+      // (`255 - outdoors`), so a surprise there could come either from the
+      // GRID or from the packing arithmetic. Reporting the grid's own mean
+      // splits those in one number: production's walls read 5x the bench's on
+      // the same map, and this says whether `outdoors` itself arrived that
+      // dark or the packing made it so.
+      outdoorsGrid: describeSourceGrid(outdoorsGrid),
+      coverAboveGrid: describeSourceGrid(field?.coverAbove ?? null),
       // ⚠️ PER-CHANNEL, AND `softEdgePct` IS THE ONE THAT MATTERS. See
       // `describeLayerChannels`: with the shader, the model, the packing and
       // every look param now provably shared with Shader Lab, the layer

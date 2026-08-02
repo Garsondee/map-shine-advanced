@@ -191,6 +191,16 @@ export function createMaskAuthority({ readPageImageData, log }) {
     alphaOffered: 0,
     alphaIngested: 0,
     alphaIgnored: 0,
+    // ⚠️ DID THE MASK'S OWN ALPHA SURVIVE THE DECODE? (2026-08-02). The
+    // "transparent means unpainted" fix composites `_Outdoors` source-over by
+    // the mask file's own alpha — which silently does NOTHING if the decode
+    // path hands back an all-opaque alpha channel (a block-compressed or
+    // flattened page would). Shader Lab reads the file directly and sees real
+    // transparency; production reads a VT page. If these two counts disagree
+    // with the file's real content, that is the divergence, and without them
+    // the fix is unfalsifiable from a report.
+    maskPagesWithRealAlpha: 0,
+    maskPagesFullyOpaque: 0,
   };
   const extractErrors = [];
 
@@ -376,6 +386,20 @@ export function createMaskAuthority({ readPageImageData, log }) {
       // scene is authored with) composites exactly as it did before — alpha
       // is 255 everywhere, so the blend below is a provable no-op there.
       const alpha = extractContentWindow(imageData, contentWindow, 'a');
+      // Is this alpha REAL, or did the decode hand back a flattened page? One
+      // pass over bytes already in hand. "Real" means at least one texel is
+      // meaningfully transparent — an all-opaque page makes the source-over
+      // composite a no-op, which is correct for a genuinely opaque mask and a
+      // silent failure for one the author painted with transparency.
+      let anyTransparent = false;
+      for (let i = 0; i < alpha.data.length; i++) {
+        if (alpha.data[i] < 247) {
+          anyTransparent = true;
+          break;
+        }
+      }
+      if (anyTransparent) counters.maskPagesWithRealAlpha++;
+      else counters.maskPagesFullyOpaque++;
       for (const { contentId, channel } of plan) {
         const content = extractContentWindow(imageData, contentWindow, channel);
         scene.ingests.set(`${ownerId}/${contentId}`, { content, placement, alpha });

@@ -532,4 +532,74 @@ export function run(t) {
       }
     }
   }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 🪵 A LAYER NEVER SHADOWS ITS OWN FOOTPRINT (author, live 2026-08-02:
+  // *"a shadow which is created by a tile with elevation is being composited
+  // on top of the thing that is creating it. It should be underneath."*)
+  //
+  // Foundry elevation is a SORT KEY, not a spatial offset — a raised tile's
+  // sprite sits at the very same (x,y) as the ground it is "above" — so
+  // station 0 handed an overhead tile its own coverage as a full-strength
+  // shadow and it darkened itself.
+  //
+  // The ASYMMETRY is the load-bearing part, and both halves are pinned: the
+  // overhead layer self-excludes, the floor-above layer must NOT (excluding
+  // it would delete the bridge-deck-over-water shadow, which is the one
+  // picture this whole model exists to draw).
+  // ══════════════════════════════════════════════════════════════════
+  {
+    const HALF = 300;
+    // One square slab, present in whichever layer the caller names.
+    const slabInLayer = (layerIndex) => (sx, sy) => {
+      const out = new Array(SHADOW_LAYER_COUNT).fill(0);
+      if (Math.abs(sx) <= HALF && Math.abs(sy) <= HALF) out[layerIndex] = 1;
+      return out;
+    };
+    // Layer heights: only the layer under test throws anything.
+    const heightsFor = (layerIndex) => {
+      const h = [0, 0, 0, 0];
+      h[layerIndex] = 400;
+      return h;
+    };
+    const visAt = (layerIndex, x, y) =>
+      layerSmearVisibility({
+        x,
+        y,
+        sampleLayers: slabInLayer(layerIndex),
+        resolved: resolveLayerSmear({ azimuthDeg: 220, elevationDeg: 30, heightsPx: heightsFor(layerIndex) }),
+        steps: 32,
+      });
+
+    // ON the slab itself.
+    const onOverhead = visAt(1, 0, 0);
+    const onAbove = visAt(2, 0, 0);
+    t.ok(
+      `🔒 a receiver standing ON an overhead tile is NOT shadowed by that tile (got ${onOverhead.toFixed(3)})`,
+      onOverhead > 0.99
+    );
+    t.ok(
+      `the floor-ABOVE layer still darkens the ground beneath it — the asymmetry, not a blanket rule ` +
+        `(got ${onAbove.toFixed(3)})`,
+      onAbove < 0.2
+    );
+
+    // The overhead tile must still cast onto the ground BESIDE it — the fix
+    // must not switch the layer off, only stop it darkening itself.
+    // ⚠️ `HALF * Math.SQRT2`, NOT `HALF` — a square's DIAGONAL half-extent is
+    // wider than its edge-on one, and azimuth 220° is not axis-aligned, so
+    // `HALF + 60` is still INSIDE the slab. Caught by the non-vacuity
+    // assertion below reading exactly 1.000 (this suite's retired smear block
+    // documented the identical trap; it is easy to walk into twice).
+    const toSun = marchDirectionToSun(220);
+    const outside = HALF * Math.SQRT2 + 60;
+    const beside = { x: -toSun.x * outside, y: -toSun.y * outside };
+    const besideVis = visAt(1, beside.x, beside.y);
+    t.ok(`an overhead tile still casts onto the open ground beside it (got ${besideVis.toFixed(3)})`, besideVis < 0.9);
+
+    // NON-VACUITY: without the exclusion the on-tile reading would be dark.
+    // Its own cast shadow just outside proves the layer is genuinely active,
+    // so "1.0 on the tile" cannot be passing merely because nothing casts.
+    t.ok('the overhead self-exclusion test is not vacuous — that same layer demonstrably casts', besideVis < 0.9);
+  }
 }

@@ -24,7 +24,7 @@
  * @module effects/lighting/layer-smear-render
  */
 import { PENUMBRA_PER_PX, GATE_SHARPEN_LOW, GATE_SHARPEN_HIGH } from './sun-occlusion.js';
-import { SHADOW_LAYER_COUNT, DEPTH_SCALES } from './layer-smear.js';
+import { SHADOW_LAYER_COUNT, DEPTH_SCALES, LAYER_OVERHEAD } from './layer-smear.js';
 
 /** Ceiling on a requested mip level — a texture's chain tops out at
  * `log2(dimension)`, and asking past it is undefined on some backends. */
@@ -198,6 +198,19 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, steps = 32 })
         occ[i].assign(max(occ[i], coverage.mul(fall)));
       }
     }
+
+    // ⚠️ A LAYER NEVER SHADOWS ITS OWN FOOTPRINT — the TSL twin of
+    // `layer-smear.js#layerSmearVisibility`'s own block; read THAT for the
+    // full argument and why ONLY the overhead layer is excluded (walls are
+    // already removed by `gate`; the floor-above layers must NOT be excluded
+    // or the bridge-deck-over-water shadow disappears entirely).
+    //
+    // `here` is the receiver's own texel, already sampled for the gate above,
+    // so this costs no extra fetch (memory:
+    // feedback_composite_only_terms_miss_shared_buffers — reuse the node a
+    // consumer already reads, never re-sample it).
+    const selfCoverage = [here.r, here.g, here.b, here.a][LAYER_OVERHEAD];
+    occ[LAYER_OVERHEAD].assign(occ[LAYER_OVERHEAD].mul(float(1).sub(selfCoverage)));
 
     // Map-edge ramp, unchanged from the previous model.
     const dEdge = min(min(world.x.sub(uRect.x), uRect.z.sub(world.x)), min(world.y.sub(uRect.y), uRect.w.sub(world.y)));

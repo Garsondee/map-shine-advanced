@@ -76,6 +76,18 @@ import { marchDirectionToSun } from './sun-occlusion.js';
 export const SHADOW_LAYER_COUNT = 4;
 
 /**
+ * Named indices into that packing. Only the ones something actually branches
+ * on are declared — a full set of four would be three unused constants, and
+ * this file's own doctrine is that an unconsumed API rots silently.
+ *
+ * `LAYER_OVERHEAD` exists because it is the ONE layer whose coverage means
+ * "the receiver IS this caster" rather than "the receiver is beneath it", and
+ * {@link layerSmearVisibility} has to treat it differently for exactly that
+ * reason. Naming it keeps that asymmetry legible instead of a bare `occ[1]`.
+ */
+export const LAYER_OVERHEAD = 1;
+
+/**
  * THE TIER LADDER. Author, 2026-08-02: *"Ideally, it'll be nice and smooth and
  * reasonable in terms of resolution. I'd rather we had it too high resolution on
  * extreme profile tier so that we can tune from there."* — so Extreme is set
@@ -440,6 +452,28 @@ export function layerSmearVisibility({
       if (term > occ[i]) occ[i] = term;
     }
   }
+
+  // ⚠️ A LAYER NEVER SHADOWS ITS OWN FOOTPRINT (author, live 2026-08-02: *"a
+  // shadow which is created by a tile with elevation is being composited on
+  // top of the thing that is creating it. It should be underneath."*).
+  //
+  // Foundry elevation is a SORT KEY, not a spatial offset (memory:
+  // feedback_elevation_is_sort_key_not_offset) — a raised tile's sprite
+  // occupies the very same (x,y) as the ground it is "above". So at a texel
+  // where {@link LAYER_OVERHEAD}'s coverage is 1, the pixel you can SEE *is*
+  // that tile, and station 0 (`d = 0`, `fall = 1`) hands it its own coverage
+  // as a full-strength shadow. It darkens itself.
+  //
+  // ONLY the overhead layer is excluded, and the asymmetry is the whole point:
+  //   - walls — the receiver IS the wall, and `gate` (the sharpened
+  //     `_Outdoors` read) already removes it, so nothing more is needed.
+  //   - overhead — the receiver IS the caster. Exclude.
+  //   - the floor above / higher — the receiver is genuinely BENEATH the
+  //     caster, on different art. Excluding those would delete the sky-reach
+  //     shadow (the bridge deck darkening the water) outright, which is the
+  //     one thing this model most exists to draw.
+  const selfCoverage = clamp01(sampleLayers(x, y)?.[LAYER_OVERHEAD] ?? 0);
+  occ[LAYER_OVERHEAD] *= 1 - selfCoverage;
 
   // Transmittances multiply. `strength · gate` scales each factor rather than
   // the product, so a strength of 0 returns exactly 1 no matter how many layers

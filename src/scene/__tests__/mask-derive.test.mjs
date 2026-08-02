@@ -21,6 +21,7 @@ import {
   maskGridMean,
   extractContentWindow,
   describeAuthoredSources,
+  sampleAuthoredSourcesAt,
 } from '../mask-derive.js';
 import { computeQuadCorners } from '../../foundry/scene-geometry.js';
 
@@ -1291,5 +1292,115 @@ export async function run(t) {
       'deriveFloorProducts emits the ledger alongside the grid it explains',
       products[0].outdoorsLedger?.[0]?.owner === 'level.bg'
     );
+  }
+
+  // --- sampleAuthoredSourcesAt: the ledger AT ONE POINT ------------------
+  // ⚠️ WHY (2026-08-02, author-commissioned): whole-grid means say WHICH
+  // source is wrong; they cannot say what happened at the pixel being looked
+  // at. Three rounds of cross-floor shadow diagnosis each cost a live report
+  // because of that gap.
+  {
+    const placement = { x: 50, y: 50, width: 100, height: 100, rotation: 0 };
+    const solid = (v) => ({ w: 2, h: 2, data: new Uint8Array([v, v, v, v]) });
+
+    // A source that PAINTS (alpha 255) over the absent value.
+    {
+      const r = sampleAuthoredSourcesAt(
+        [{ ownerId: 'a', content: solid(0), alpha: solid(255), placement }],
+        1, // absentValue 1 => absentByte 255 (outdoors)
+        50,
+        50
+      );
+      t.ok('the replay starts from the kind`s own absent byte', r.rows[0].before === 255);
+      t.ok('an opaque source overwrites it', r.value === 0 && r.rows[0].after === 0);
+      t.ok('and is marked as having changed the running value', r.rows[0].changed === true);
+      t.ok('reporting its own raw byte and alpha separately', r.rows[0].rawByte === 0 && r.rows[0].alphaByte === 255);
+    }
+
+    // THE CASE THAT MATTERS: fully TRANSPARENT source. Its raw byte is 0,
+    // which for `outdoors` would read as INDOORS if alpha were ignored — the
+    // exact bug class the author ruled on ("transparent means unpainted").
+    {
+      const r = sampleAuthoredSourcesAt(
+        [{ ownerId: 'ghost', content: solid(0), alpha: solid(0), placement }],
+        1,
+        50,
+        50
+      );
+      t.ok('a fully TRANSPARENT source leaves the running value untouched', r.value === 255);
+      t.ok('and says so explicitly rather than looking like it painted', r.rows[0].changed === false);
+      t.ok('while still reporting the raw byte it WOULD have painted', r.rows[0].rawByte === 0);
+    }
+
+    // Partial alpha blends — the author asked for this by name ("be sure to
+    // account for partially transparent layers and their alphas").
+    {
+      const r = sampleAuthoredSourcesAt(
+        [{ ownerId: 'half', content: solid(0), alpha: solid(128), placement }],
+        1,
+        50,
+        50
+      );
+      t.ok(`a half-transparent source blends toward its own value (got ${r.value})`, Math.abs(r.value - 127) <= 2);
+    }
+
+    // DRAW ORDER: a later source overwrites an earlier one, and the row where
+    // `changed` is last true is the one that actually decided the pixel.
+    {
+      const r = sampleAuthoredSourcesAt(
+        [
+          { ownerId: 'first', content: solid(0), alpha: solid(255), placement },
+          { ownerId: 'second', content: solid(200), alpha: solid(255), placement },
+        ],
+        1,
+        50,
+        50
+      );
+      t.ok('the LAST opaque source wins', r.value === 200);
+      t.ok('and the chain is inspectable step by step', r.rows[0].after === 0 && r.rows[1].before === 0);
+      const decider = [...r.rows].reverse().find((row) => row.changed);
+      t.ok('the deciding source is identifiable by name', decider.owner === 'second');
+    }
+
+    // A source whose footprint MISSES the point contributes nothing — and is
+    // still reported, so "this source is not here" and "this source is absent
+    // from the list entirely" stay different, readable facts.
+    {
+      const far = { x: 5000, y: 5000, width: 10, height: 10, rotation: 0 };
+      const r = sampleAuthoredSourcesAt(
+        [{ ownerId: 'elsewhere', content: solid(0), alpha: solid(255), placement: far }],
+        1,
+        50,
+        50
+      );
+      t.ok('a source whose footprint misses the point does not change the value', r.value === 255);
+      t.ok(
+        'but still appears in the ledger, marked out-of-footprint',
+        r.rows.length === 1 && r.rows[0].inFootprint === false
+      );
+      t.ok(
+        'with null readings rather than misleading zeros',
+        r.rows[0].rawByte === null && r.rows[0].alphaByte === null
+      );
+    }
+
+    // No sources at all: the absent value, not a crash and not a zero.
+    {
+      const r = sampleAuthoredSourcesAt([], 1, 50, 50);
+      t.ok('no sources yields the absent byte', r.value === 255 && r.rows.length === 0);
+      t.ok('a null source list is the same', sampleAuthoredSourcesAt(null, 0, 50, 50).value === 0);
+    }
+
+    // A source with NO alpha grid composites fully opaque — matching
+    // `compositeItemOverwrite`'s own `?? null` rule, not a silent skip.
+    {
+      const r = sampleAuthoredSourcesAt(
+        [{ ownerId: 'noAlpha', content: solid(10), alpha: null, placement }],
+        1,
+        50,
+        50
+      );
+      t.ok('a source with no alpha grid composites fully opaque', r.value === 10 && r.rows[0].alphaByte === 255);
+    }
   }
 }

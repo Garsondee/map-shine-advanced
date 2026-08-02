@@ -96,8 +96,14 @@ import {
   rasterizedKinds,
 } from './mask-catalog.js';
 import { buildMaskAuthorityReport } from './mask-authority-report.js';
-import { computeMaskGridSpec, deriveFloorProducts, sampleMaskGridWorld, extractContentWindow } from './mask-derive.js';
-import { compareLayerKeys } from './layer-order.js';
+import {
+  computeMaskGridSpec,
+  deriveFloorProducts,
+  sampleMaskGridWorld,
+  extractContentWindow,
+  sampleAuthoredSourcesAt,
+} from './mask-derive.js';
+import { compareLayerKeys, maskHostFloorIndices } from './layer-order.js';
 
 const EXTRACT_ERROR_LOG_MAX = 10;
 
@@ -512,15 +518,38 @@ export function createMaskAuthority({ readPageImageData, log }) {
    * @param {{id:string}} floor
    * @returns {object[]}
    */
+  /**
+   * `scene.floors`' own vocabulary (`bottomElevation`/`ceilingElevation`)
+   * translated into the elevation-band shape `scene/layer-order.js` speaks
+   * (`elevationBottom`/`elevationTop`, `getActiveSceneFloors`'s own field
+   * names). Adapted HERE, at the one boundary between them, rather than
+   * teaching the shared membership rule two vocabularies — a second name for
+   * the same number is how the two drift.
+   */
+  function floorBands() {
+    return scene.floors.map((f) => ({
+      index: f.index,
+      id: f.id,
+      elevationBottom: Number.isFinite(f.bottomElevation) ? f.bottomElevation : null,
+      elevationTop: Number.isFinite(f.ceilingElevation) ? f.ceilingElevation : null,
+    }));
+  }
+
   function hostsOfFloor(floor) {
+    // ⚠️ MEMBERSHIP, NOT VISIBILITY (2026-08-02). This used to ask
+    // `visibleOnLevelIds.includes(floor.id)` — Foundry's `includedInLevel`
+    // DRAW rule, whose default (an empty `levels` set) means "present on every
+    // level". That made an ordinary ground-floor prop with a blank `levels`
+    // field a wall-source for EVERY floor, so the roof cast the ground floor's
+    // buildings. `maskHostFloorIndices` is the same sentence this file's own
+    // `recomputeIfDirty` has carried in a comment since 2026-07-26 ("a tile's
+    // level set says which floors it APPEARS on, not which one it BELONGS
+    // to"), finally executable and shared with the derivation path.
+    const bands = floorBands();
     const hosts = [];
     for (const item of scene.items.values()) {
       if (item.hidden) continue;
-      if (item.kind === 'levelBackground' || item.kind === 'levelForeground') {
-        if (item.levelId === floor.id) hosts.push(item);
-      } else if (item.kind === 'tile') {
-        if (Array.isArray(item.visibleOnLevelIds) && item.visibleOnLevelIds.includes(floor.id)) hosts.push(item);
-      }
+      if (maskHostFloorIndices(item, bands).includes(floor.index)) hosts.push(item);
     }
     hosts.sort((a, b) => compareLayerKeys(a.key, b.key));
     return hosts;
@@ -732,6 +761,124 @@ export function createMaskAuthority({ readPageImageData, log }) {
     if (!product) return kind.absentValue;
     const byte = sampleMaskGridWorld(product.grid, wx, wy);
     return byte === null ? kind.absentValue : byte / 255;
+  }
+
+  /**
+   * ⚠️🔬 THE CROSS-FLOOR MASK STACK AT ONE WORLD POINT — every floor, every
+   * mask kind, every contributing source, with alphas.
+   *
+   * Author's own commission, 2026-08-02, after three rounds of cross-floor
+   * shadow diagnosis each costing a live report: *"I could click in one place
+   * and it'll probe the values for all floors at once and even directly tell
+   * you the _Outside values for each floor... you should make it give the
+   * exact colour values for every point, for every floor and for every mask.
+   * That's some real data baby! It should pick up tiles too and give their
+   * exact values. Be sure to account for partially transparent layers and
+   * their alphas."*
+   *
+   * WHY THIS BEATS THE REPORTS IT SUPPLEMENTS: `getReport`/the sun-shadow
+   * report describe ONE floor's WHOLE grid in aggregate. Neither can answer
+   * "why is this exact pixel dark on floor 2 but light on floor 1", which is
+   * the question every cross-floor bug actually poses — and an aggregate
+   * provably cannot name a contributor (`feedback_aggregate_cannot_name_the_source`).
+   * This returns the per-SOURCE arithmetic at one point, per floor, so the two
+   * floors' stacks sit side by side and the divergence is read off, not
+   * theorised.
+   *
+   * PURE READ — recomputes derived products if stale (the same lazy contract
+   * every other reader here has) and touches nothing else. Safe from a
+   * console at any time.
+   *
+   * @param {number} worldX @param {number} worldY
+   * @returns {object} `{ worldX, worldY, floors: [...] }`, one entry per floor.
+   */
+  function probeStackAt(worldX, worldY) {
+    recomputeIfDirty();
+    const bands = floorBands();
+    const byteOf = (grid) => (grid ? sampleMaskGridWorld(grid, worldX, worldY) : null);
+
+    return {
+      worldX,
+      worldY,
+      // Stated so a reader never has to guess whether a byte is 0..1 or 0..255.
+      units: 'every *Byte is 0..255 as stored; alphaByte 255 = fully opaque, 0 = unpainted',
+      floors: scene.floors.map((floor) => {
+        const product = products?.find((p) => p.index === floor.index) ?? null;
+        const hosts = hostsOfFloor(floor);
+
+        // WHICH ITEMS HOST THIS FLOOR AT ALL, and why — the answer to "should
+        // this tile even be here", which is the bug class this probe was
+        // commissioned for (an unrestricted ground-floor prop hosting the roof).
+        const hostRows = hosts.map((item) => ({
+          id: item.id,
+          kind: item.kind,
+          elevation: item.key?.elevation ?? null,
+          levelId: item.levelId || null,
+          levelsRestricted: item.levelsRestricted ?? null,
+          visibleOnLevelIds: item.visibleOnLevelIds ?? null,
+          // Which mask kinds this host actually ingested content for — an
+          // item can host a floor and contribute to only some kinds.
+          ingestedKinds: MASK_KINDS.filter((k) => scene.ingests.has(`${item.id}/${k.id}`)).map((k) => k.id),
+        }));
+
+        // EVERY AUTHORED KIND, composited, plus the per-source arithmetic that
+        // produced it. `outdoors` keeps its own top-level product field; every
+        // other rasterized kind lives under `authored` (see `getDerived`).
+        const masks = {};
+        for (const kind of MASK_KINDS) {
+          const grid = kind.id === 'outdoors' ? product?.outdoors : (product?.authored?.[kind.id] ?? null);
+          const sources = hosts
+            .map((item) => {
+              const ingest = scene.ingests.get(`${item.id}/${kind.id}`);
+              return ingest ? { ...ingest, ownerId: item.id } : null;
+            })
+            .filter((s) => s?.content && s?.placement);
+          const replay = sampleAuthoredSourcesAt(sources, kind.absentValue, worldX, worldY);
+          masks[kind.id] = {
+            // The grid's own answer and the replay's must agree; when they do
+            // not, the packing/rasterization diverged from the sources and
+            // THAT is the finding (they are computed independently on purpose).
+            compositedByte: byteOf(grid),
+            replayedByte: sources.length > 0 ? replay.value : null,
+            absentByte: Math.round(kind.absentValue * 255),
+            sourceCount: sources.length,
+            sources: replay.rows,
+          };
+        }
+
+        // THE DERIVED PRODUCTS, which no source list explains — they are
+        // computed FROM the above (plus item art alpha), so a healthy
+        // `outdoors` beside a wrong `skyReach` localises the fault to the
+        // derivation rather than the masks.
+        const derived = {};
+        for (const d of DERIVED_KINDS) derived[d.id] = byteOf(product?.[d.id] ?? null);
+
+        // THE LAYER-SMEAR CHANNELS, in the shader's own vocabulary, so this
+        // probe and `casterField.channelStats` can be compared term for term
+        // (`effects/lighting/sun-shadow-subsystem.js#packLayerTexelData`).
+        const outdoorsByte = byteOf(product?.outdoors ?? null);
+        const layerSmear = {
+          wallsByte: outdoorsByte === null ? null : 255 - outdoorsByte,
+          overheadByte: byteOf(product?.casterChannels?.coverOverhead ?? null),
+          floorAboveByte: byteOf(product?.coverAbove ?? null),
+          receiverGateByte: outdoorsByte,
+          note: 'walls = 255 - outdoors; receiverGate IS outdoors (a pixel only receives shadow where it is outdoors)',
+        };
+
+        return {
+          floorIndex: floor.index,
+          id: floor.id,
+          name: floor.name ?? null,
+          bottomElevation: floor.bottomElevation ?? null,
+          ceilingElevation: floor.ceilingElevation ?? null,
+          band: bands.find((b) => b.index === floor.index) ?? null,
+          hosts: hostRows,
+          masks,
+          derived,
+          layerSmear,
+        };
+      }),
+    };
   }
 
   /**
@@ -968,6 +1115,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
     },
     getDerived,
     sampleWorld,
+    probeStackAt,
     authoredStatus,
     authoredStatusForItem,
     getReport,

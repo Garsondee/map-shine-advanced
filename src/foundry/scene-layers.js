@@ -388,6 +388,17 @@ export function collectTiles(sceneDoc, { visibleLevelIds = [], getRouteFn, isGM 
       src: resolveAssetUrl(src, getRouteFn),
       levelId: '',
       visibleOnLevelIds: on,
+      // ⚠️ DID THE AUTHOR NAME LEVELS, OR LEAVE IT BLANK? `visibleOnLevelIds`
+      // alone cannot say: `includedInLevel` returns true for EVERY level when
+      // the set is empty (Foundry's documented default — see its own doc
+      // above), so "named all three floors" and "named none, therefore drawn
+      // on all three" produce the identical array. They mean opposite things
+      // to `scene/layer-order.js#maskHostFloorIndices`, which needs to know
+      // whether a tile has stated its own membership or said nothing at all.
+      // Recorded at the ONE place that still has the raw document
+      // (2026-08-02 — a blank field on a ground-floor prop was making it a
+      // wall-source for the roof).
+      levelsRestricted: ((s) => (typeof s?.size === 'number' ? s.size : Array.from(s ?? []).length) > 0)(tile.levels),
       // Foundry dims a hidden tile to 0.5 for the GM (Tile#_refreshState).
       alpha: (tile.alpha ?? 1) * (tile.hidden ? 0.5 : 1),
       tint: normalizeTint(tile.texture?.tint),

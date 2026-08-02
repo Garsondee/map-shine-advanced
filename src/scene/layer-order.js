@@ -258,6 +258,88 @@ export function isInForeground(elevation, levelElevation) {
  *   own "no geometry" or "fall back to the viewed floor" call, never guessed
  *   here).
  */
+/**
+ * ⚠️⚠️ WHICH FLOORS AN ITEM HOSTS *MASKS* FOR — a different question from
+ * "which floors is it DRAWN on", and conflating the two is a live bug
+ * (2026-08-02).
+ *
+ * Author, on the real Town River Bridge map: standing on the ROOF, ground-floor
+ * building shadows were visible as if standing on the ground floor. The
+ * mask authority's `hostsOfFloor` decided a tile hosts a floor's masks by
+ * `visibleOnLevelIds.includes(floor.id)` — i.e. by Foundry's own
+ * `includedInLevel` DRAW rule, whose documented default is that **an empty
+ * `levels` set means present on EVERY level** (`foundry/scene-layers.js
+ * #includedInLevel`, faithfully replicating core). So an ordinary ground-floor
+ * prop with its `levels` field left blank — the default, and correct
+ * authoring — became a wall-source for every floor in the scene. Its
+ * `_Outdoors` sibling is the ground floor's own building footprints, painted
+ * full-canvas and fully opaque, so it OVERWROTE the roof's own (all-outdoors)
+ * mask and made the roof cast the ground floor's buildings.
+ *
+ * The rule this implements is not new — `mask-authority.js#recomputeIfDirty`
+ * has stated it in a comment since 2026-07-26, for the *derivation* path only:
+ * *"a tile's level set says which floors it APPEARS on, not which one it
+ * BELONGS to (an empty set means every floor), so only its elevation can
+ * answer whether it is a rug or a roof."* This is that sentence, executable,
+ * now also reachable by the mask-source path that never got it.
+ *
+ *   - LEVEL ART (`levelId` set) belongs to exactly its own Level. Authored
+ *     membership, and stronger than any elevation arithmetic — see
+ *     `feedback_membership_beats_derived_threshold`, and
+ *     `feedback_half_open_band_excludes_its_own_member` for the live bug that
+ *     came from resolving a Level's own foreground by elevation instead.
+ *   - A TILE THAT NAMES SPECIFIC LEVELS states the author's intent outright;
+ *     honour it verbatim, on every floor named.
+ *   - A TILE THAT NAMES NONE has said nothing about membership (it said
+ *     something about DRAWING), so its elevation is the only authority —
+ *     exactly one floor, via `resolveElevationFloorIndex` above, so there is
+ *     one elevation-band rule in this codebase rather than two.
+ *
+ * This preserves the locked "🧩 EVERY MASK ATTACHES TO ANY ITEM" decision and
+ * its worked example (*"a tile with the corner blown off... automatically
+ * overwrites the `_Outdoors`"*) unchanged: that tile sits at its building's own
+ * floor elevation, or names that floor explicitly, and hosts it either way.
+ *
+ * @param {{kind?: string, levelId?: string, visibleOnLevelIds?: string[],
+ *   levelsRestricted?: boolean, key?: {elevation?: number}, elevation?: number}} item
+ * @param {Array<{index:number, id:string, elevationBottom:number|null, elevationTop:number|null}>} floors
+ * @returns {number[]} floor INDICES this item hosts masks for (possibly empty).
+ */
+export function maskHostFloorIndices(item, floors) {
+  if (!Array.isArray(floors) || floors.length === 0) return [];
+  const indexById = new Map(floors.map((f) => [f.id, f.index]));
+
+  // A Level's own background/foreground: authored membership, full stop.
+  if (item?.levelId) {
+    const own = indexById.get(item.levelId);
+    return own === undefined ? [] : [own];
+  }
+
+  // A tile that named specific Levels: the author said which floors. Note
+  // `levelsRestricted` is the LOAD-BEARING flag — `visibleOnLevelIds` alone
+  // cannot tell "named all three" from "named none, so drawn on all three",
+  // and those two mean opposite things here.
+  //
+  // ⚠️ `!== false`, NOT `=== true`. An ABSENT flag means the producer did not
+  // tell us — a fixture, the torture world, any caller predating this rule —
+  // and the safe reading of "I don't know" is the PRE-EXISTING behaviour
+  // (honour the list), never the new elevation fallback. Only
+  // `foundry/scene-layers.js#collectTiles`, which holds the raw Tile document
+  // and can actually see a blank `levels` field, ever says `false`. Getting
+  // this backwards silently re-attributed a tiles-only floor's ONLY mask
+  // source to a different floor — caught by `mask-authority.test.mjs`'s own
+  // tiles-only scenario, which is the locked "a floor built entirely of Tiles
+  // gets full mask support" case.
+  if (item?.levelsRestricted !== false && Array.isArray(item?.visibleOnLevelIds)) {
+    return item.visibleOnLevelIds.map((id) => indexById.get(id)).filter((i) => i !== undefined);
+  }
+
+  // A tile that named nothing: elevation alone decides, one floor.
+  const elevation = item?.key?.elevation ?? item?.elevation ?? 0;
+  const resolved = resolveElevationFloorIndex(floors, elevation);
+  return resolved ? [resolved.index] : [];
+}
+
 export function resolveElevationFloorIndex(floors, elevation) {
   if (!Array.isArray(floors) || floors.length === 0) return null;
   for (const floor of floors) {

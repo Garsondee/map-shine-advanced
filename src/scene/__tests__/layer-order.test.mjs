@@ -15,6 +15,7 @@ import {
   sortByLayer,
   isInForeground,
   resolveElevationFloorIndex,
+  maskHostFloorIndices,
 } from '../layer-order.js';
 
 /** Foundry's actual comparator, transcribed verbatim from the vendored v14 source. */
@@ -340,5 +341,123 @@ export function run(t) {
       if (sign(compareLayerKeys(a, b)) !== sign(foundryReference(a, b))) infMismatches++;
     }
     ok("PARITY: 2000 keys including ±Infinity — ours agrees with Foundry's comparator exactly", infMismatches === 0);
+  }
+
+  // ── maskHostFloorIndices: WHICH FLOORS AN ITEM HOSTS MASKS FOR ─────────
+  // ⚠️ THE LIVE BUG (2026-08-02): standing on the ROOF, ground-floor building
+  // shadows were visible. `mask-authority.js#hostsOfFloor` decided mask
+  // hosting by Foundry's `includedInLevel` DRAW rule, whose documented
+  // default is that an EMPTY `levels` set means "present on every level" — so
+  // an ordinary ground-floor prop with a blank `levels` field became a
+  // wall-source for every floor, and its `_Outdoors` (the ground floor's own
+  // building footprints, full-canvas and fully opaque) overwrote the roof's.
+  {
+    // The author's real Town River Bridge bands.
+    const FLOORS = [
+      { index: 0, id: 'ground', elevationBottom: 0, elevationTop: 10 },
+      { index: 1, id: 'middle', elevationBottom: 10, elevationTop: 20 },
+      { index: 2, id: 'roof', elevationBottom: 20, elevationTop: null },
+    ];
+
+    // --- level art: authored membership, never elevation -------------------
+    // A Level's own FOREGROUND sits at its `elevation.top`, which the
+    // half-open band `[bottom, top)` would throw to the floor ABOVE — the
+    // exact `feedback_half_open_band_excludes_its_own_member` bug. `levelId`
+    // outranks the arithmetic, so it cannot come back through this door.
+    ok(
+      "a Level's background hosts its OWN floor",
+      String(maskHostFloorIndices({ levelId: 'middle', key: { elevation: 10 } }, FLOORS)) === '1'
+    );
+    ok(
+      "a Level's FOREGROUND at its own elevationTop still hosts its own floor, not the one above",
+      String(maskHostFloorIndices({ levelId: 'middle', key: { elevation: 20 } }, FLOORS)) === '1'
+    );
+    ok(
+      'a Level whose id is not in this scene hosts nothing, rather than defaulting to floor 0',
+      maskHostFloorIndices({ levelId: 'deleted', key: { elevation: 0 } }, FLOORS).length === 0
+    );
+
+    // --- THE REGRESSION: an unrestricted tile ------------------------------
+    // `levelsRestricted: false` is Foundry's default (a blank `levels` field),
+    // and `visibleOnLevelIds` correctly lists every floor because it is DRAWN
+    // on every floor. It must still host masks for its own floor ONLY.
+    const groundProp = {
+      levelId: '',
+      levelsRestricted: false,
+      visibleOnLevelIds: ['ground', 'middle', 'roof'],
+      key: { elevation: 8 },
+    };
+    ok(
+      'an UNRESTRICTED ground-floor prop (drawn on every floor) hosts masks for its OWN floor only — the roof bug',
+      String(maskHostFloorIndices(groundProp, FLOORS)) === '0'
+    );
+    ok(
+      'and specifically NOT the roof, whose own mask it would otherwise overwrite',
+      !maskHostFloorIndices(groundProp, FLOORS).includes(2)
+    );
+
+    // --- a tile that NAMES levels: the author stated intent, honour it ------
+    // This is the locked "🧩 EVERY MASK ATTACHES TO ANY ITEM" case: a tile
+    // deliberately carrying a mask for a floor it is not physically inside.
+    const namedTile = {
+      levelId: '',
+      levelsRestricted: true,
+      visibleOnLevelIds: ['middle', 'roof'],
+      key: { elevation: 8 },
+    };
+    ok(
+      'a tile that NAMES levels hosts exactly those, even against its own elevation',
+      String(maskHostFloorIndices(namedTile, FLOORS)) === '1,2'
+    );
+    ok(
+      'the "blow the corner off a building" tile still overwrites its own floor',
+      maskHostFloorIndices(
+        { levelId: '', levelsRestricted: true, visibleOnLevelIds: ['ground'], key: { elevation: 0 } },
+        FLOORS
+      ).includes(0)
+    );
+
+    // --- elevation resolution for unrestricted tiles ------------------------
+    const atElev = (e) =>
+      maskHostFloorIndices(
+        {
+          levelId: '',
+          levelsRestricted: false,
+          visibleOnLevelIds: ['ground', 'middle', 'roof'],
+          key: { elevation: e },
+        },
+        FLOORS
+      );
+    ok('an unrestricted tile at 10 hosts the middle floor (band is [10, 20))', String(atElev(10)) === '1');
+    ok('at 19 still the middle floor', String(atElev(19)) === '1');
+    ok('at 20 the roof', String(atElev(20)) === '2');
+    ok('at 999 the TOP floor, never floor 0', String(atElev(999)) === '2');
+    ok('exactly one floor, always — an unrestricted tile is not a member of several', atElev(8).length === 1);
+
+    // --- ⚠️ AN ABSENT `levelsRestricted` MEANS "NOT TOLD", NOT "UNRESTRICTED"
+    // Every caller predating this rule (fixtures, the torture world) omits the
+    // flag while still naming real levels in `visibleOnLevelIds`. Reading that
+    // as unrestricted would send them through the elevation fallback and
+    // silently re-attribute their masks — it re-pointed a tiles-only floor's
+    // ONLY source at a different floor, which `mask-authority.test.mjs` caught.
+    {
+      const legacyNamed = { levelId: '', visibleOnLevelIds: ['roof'], key: { elevation: 0 } };
+      ok(
+        'a tile with NO levelsRestricted flag honours its named levels (pre-existing behaviour preserved)',
+        String(maskHostFloorIndices(legacyNamed, FLOORS)) === '2'
+      );
+      ok(
+        'and specifically does NOT fall through to its elevation (which would say floor 0)',
+        !maskHostFloorIndices(legacyNamed, FLOORS).includes(0)
+      );
+    }
+
+    // --- degenerate inputs must not throw mid-recompute ---------------------
+    ok('no floors yields no hosts rather than throwing', maskHostFloorIndices({ levelId: 'x' }, []).length === 0);
+    ok('a null item yields no hosts', maskHostFloorIndices(null, FLOORS).length >= 0);
+    ok(
+      'an unrestricted tile with no elevation info at all falls to the lowest band, not a crash',
+      String(maskHostFloorIndices({ levelId: '', levelsRestricted: false }, FLOORS)) === '0'
+    );
   }
 }

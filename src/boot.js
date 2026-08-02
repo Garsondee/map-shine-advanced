@@ -459,6 +459,26 @@ MapShine.armPixelProbe = runInteractiveVtPanViewerPixelProbe;
 // / diag/wind-probe.js for the full reasoning.
 MapShine.probeWindAndParticles = probeVtPanViewerWindAndParticles;
 MapShine.armWindProbe = runInteractiveVtPanViewerWindProbe;
+// ⚠️🔬 THE CROSS-FLOOR MASK STACK PROBE (2026-08-02, author-commissioned:
+// *"I could click in one place and it'll probe the values for all floors at
+// once... the exact colour values for every point, for every floor and for
+// every mask. That's some real data baby!"*). The pixel probe above reads
+// what the SCREEN got, at the ONE floor being viewed; this reads what the
+// MASK AUTHORITY holds, at EVERY floor at once, down to each contributing
+// source's own byte and alpha. The two answer different halves of every
+// cross-floor question ("is this pixel's shadow wrong" vs "which floor's
+// which mask's which source made it wrong"), which is why both exist.
+//
+//   MapShine.probeMasks(worldX, worldY)   — one point, no click, no markers
+//   MapShine.armMaskProbe(3)              — click up to 3 spots; each point
+//                                           carries BOTH the GPU buffers and
+//                                           the full per-floor mask stack
+//
+// See scene/mask-authority.js#probeStackAt for the shape and the reasoning.
+// ⚠️ REGISTERED INSIDE `install()`, not here: both need `maskAuthority`, which
+// is a `const` created there. Assigning at module scope would be a TDZ
+// ReferenceError at import time — the same trap `sun-shadow-subsystem.js`'s
+// own `getEnvLight` header documents for `envLight`.
 
 // THE SKY'S DEBUG LEVERS (2026-07-23) — `MapShine.setSunHour(6.5)` /
 // `MapShine.setCloudCover(0.9)`, and `null` on either to restore the default.
@@ -3103,6 +3123,39 @@ function install() {
     },
     { zone: 'workshop', effect: 'specular', order: 50 }
   );
+
+  // ⚠️🔬 THE CROSS-FLOOR MASK STACK PROBE — see the `MapShine.probeMasks`
+  // comment near the other probes for the full commission. Registered HERE
+  // rather than at module scope because `maskAuthority` is an `install()`-local
+  // `const`; touching it from module scope is a TDZ ReferenceError at import.
+  MapShine.probeMasks = (worldX, worldY) => maskAuthority.probeStackAt(worldX, worldY);
+  MapShine.armMaskProbe = async (maxPoints = 3) => {
+    const points = await MapShine.armPixelProbe(maxPoints);
+    // Merged, not returned side by side: the whole point is reading the
+    // RENDERED pixel and the MASKS that should explain it on the same row.
+    return (points ?? []).map((p) => ({
+      ...p,
+      maskStack: Number.isFinite(p?.worldX) ? maskAuthority.probeStackAt(p.worldX, p.worldY) : null,
+    }));
+  };
+  // One-click from the debug panel, same affordance the pixel/wind probes
+  // already have — `feedback_debug_ui_one_action_one_control`: this arms the
+  // click capture AND returns the merged result, never "now press the other
+  // button".
+  MapShine.debug.registerReport('mask-stack', 'Mask stack — every floor, every mask, at a clicked point', async () => ({
+    report: 'mask-stack',
+    generatedAt: new Date().toISOString(),
+    points: await MapShine.armMaskProbe(3),
+    interpretation:
+      'One row per FLOOR per point. `masks.<kind>.sources` replays the composite in draw order: each source`s ' +
+      '`rawByte` (what it paints) and `alphaByte` (whether it paints at all here) with the running `before`→`after`, ' +
+      'so the source that actually decided the pixel is the row where `changed` is true LAST. ⚠️ `hosts` is the ' +
+      'other half: an item listed there for a floor it does not belong to is a HOSTING bug (check its ' +
+      '`levelsRestricted`/`elevation` against the floor`s own band) — that is exactly how a ground-floor prop ended ' +
+      'up defining the roof`s walls. `compositedByte` vs `replayedByte` are computed INDEPENDENTLY; if they ' +
+      'disagree the rasterizer diverged from its own sources. `layerSmear` restates the same numbers in the ' +
+      'shader`s vocabulary so this and the sun-shadows report`s `channelStats` compare term for term.',
+  }));
 
   // The two "why is this effect not showing" report BODIES live in
   // diag/effect-status-reports.js (see its header); registration stays here so

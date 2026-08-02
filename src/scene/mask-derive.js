@@ -589,6 +589,70 @@ export function compositeItemHeightMax(grid, content, placement, heightByte) {
  * @param {(source: object) => string} [labelOf] - names the owner, if known.
  * @returns {Array<object>}
  */
+/**
+ * THE SAME LEDGER, AT ONE WORLD POINT — every source that reaches (worldX,
+ * worldY), what it contributed there, and the running composite after it.
+ *
+ * `describeAuthoredSources` (below) reports each source's WHOLE-GRID means,
+ * which answers "which source is wrong" but not "what happened at the pixel I
+ * am looking at". Author, 2026-08-02, after three rounds of cross-floor
+ * shadow diagnosis: *"you should make it give the exact colour values for
+ * every point, for every floor and for every mask... Be sure to account for
+ * partially transparent layers and their alphas."* This is that, for one
+ * kind on one floor; `mask-authority.js#probeStackAt` fans it across every
+ * floor and every kind.
+ *
+ * The `after` column is the load-bearing one: it replays
+ * `compositeItemOverwrite`'s own source-over arithmetic step by step, so a
+ * source that LOOKS harmless (a low `rawByte`) but lands with alpha 255 over
+ * everything is visible as the moment the running value jumps.
+ *
+ * @param {Array<{placement?: object, content?: ContentGrid, alpha?: ContentGrid|null, ownerId?: string}>} sources
+ * @param {number} absentValue - 0..1, the kind's own (the starting value).
+ * @param {number} worldX @param {number} worldY
+ * @returns {{value: number, rows: Array<object>}} `value` is the final
+ *   composited byte at this point — the same number `sampleMaskGridWorld`
+ *   would return from the rasterized grid, reached the long way so each
+ *   step is inspectable.
+ */
+export function sampleAuthoredSourcesAt(sources, absentValue, worldX, worldY) {
+  const absentByte = Math.round(Math.max(0, Math.min(1, absentValue)) * 255);
+  let running = absentByte;
+  const rows = [];
+  for (const [order, source] of (sources ?? []).entries()) {
+    if (!source?.content || !source?.placement) continue;
+    const { u, v } = worldToItemUv(source.placement, worldX, worldY);
+    const inFootprint = u >= 0 && u < 1 && v >= 0 && v < 1;
+    const before = running;
+    let rawByte = null;
+    let alphaByte = null;
+    if (inFootprint) {
+      rawByte = Math.round(sampleContentBilinear(source.content, u, v));
+      // A source with no alpha grid composites fully opaque — the same
+      // `?? null` → "treat as 255" rule `compositeItemOverwrite` applies.
+      alphaByte = source.alpha ? Math.round(sampleContentBilinear(source.alpha, u, v)) : 255;
+      const a = Math.max(0, Math.min(1, alphaByte / 255));
+      running = Math.min(255, Math.round(before * (1 - a) + rawByte * a));
+    }
+    rows.push({
+      order,
+      owner: source.ownerId ?? null,
+      inFootprint,
+      // u/v rounded: enough to see WHERE in the source this landed (a
+      // near-0 or near-1 reading is the tell for an off-by-one placement)
+      // without pretending to more precision than a bilinear read has.
+      u: inFootprint ? +u.toFixed(4) : null,
+      v: inFootprint ? +v.toFixed(4) : null,
+      rawByte,
+      alphaByte,
+      before,
+      after: running,
+      changed: running !== before,
+    });
+  }
+  return { value: running, rows };
+}
+
 export function describeAuthoredSources(sources, labelOf) {
   const meanOf = (g) => {
     if (!g?.data?.length) return null;

@@ -157,6 +157,17 @@ export function createSkyReachAccess({ maskAuthority, onRequiredMaskMissing = nu
       scalePx,
       version: product.version,
       completeness: product.completeness,
+      // ⚠️ MUST RIDE ALONGSIDE THE REST, NOT BE LEFT FOR THIS WRAPPER TO DROP
+      // (2026-08-02 — the exact trap `getDerived`'s own `scalePx` comment,
+      // three lines up in that function, already names by example: a wrapper
+      // that reshapes the derived product into a narrower object is exactly
+      // where a field silently stops existing). `boot.js#getCasterHeightField`
+      // reads `field.outdoorsLedger` on EVERY non-degraded floor — this was the
+      // one field this wrapper forgot, so `casterField.outdoorsSources` in the
+      // sun-shadows report reported `null` for every floor that reached this
+      // (the common) path, and the one instrument built to show WHICH source
+      // feeds a floor's walls had nothing to show.
+      outdoorsLedger: product.outdoorsLedger ?? null,
     };
   }
 

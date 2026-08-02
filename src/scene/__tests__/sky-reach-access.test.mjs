@@ -42,6 +42,9 @@ function fakeAuthority({ sky = 1, caster = 0, missing = [], throwOn = null } = {
         channels: id === 'casterHeight' ? { building: {}, overhead: {}, skyReach: {} } : null,
         completeness,
         version: 7,
+        // `mask-derive.js` attaches this to EVERY product, regardless of `id`
+        // — the fake must too, or a wrapper that drops it would pass anyway.
+        outdoorsLedger: [{ order: 0, owner: 'level:fake:background', contentMeanByte: 220 }],
       };
     },
   };
@@ -112,6 +115,17 @@ export function run(t) {
     t.ok('the height field serves its three unmerged producer channels', !!field.channels?.skyReach);
     t.ok('and the px scale a byte represents', field.scalePx === 2048);
     t.ok('the service exposes a version a consumer can cache against', svc.version === 7);
+    // ⚠️ REGRESSION GUARD (2026-08-02): this wrapper reshapes `getDerived`'s
+    // product into a narrower object, and `outdoorsLedger` — attached to
+    // EVERY product unconditionally by `mask-derive.js` — was silently left
+    // off the reshape. `boot.js#getCasterHeightField` reads it on every
+    // floor that reaches this (non-degraded) path, so the sun-shadows
+    // report's `casterField.outdoorsSources` read `null` for every floor
+    // regardless of how many real sources actually fed it.
+    t.ok(
+      'heightField forwards outdoorsLedger — the field a wrapper reshape previously dropped',
+      Array.isArray(field.outdoorsLedger) && field.outdoorsLedger[0]?.owner === 'level:fake:background'
+    );
     t.ok(
       'the status block carries the floor’s elevation band',
       svc.status(0).bottomElevation === 0 && svc.status(0).ceilingElevation === 10

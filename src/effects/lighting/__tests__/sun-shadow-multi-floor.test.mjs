@@ -31,7 +31,7 @@
  *      unmatched fragment defaults to fully lit.
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
-import { assignFloorSlotIndex } from '../sun-shadow-subsystem.js';
+import { assignFloorSlotIndex, SUN_SHADOW_LAYER_STRENGTH } from '../sun-shadow-subsystem.js';
 import { blendSunVisibilityAcrossFloors } from '../environmental-light.js';
 
 /**
@@ -60,54 +60,45 @@ function blendSunVisibilityCpuTwin(attrFloorIndex01, slots) {
 export function run(t) {
   const { ok } = t;
 
-  // ── assignFloorSlotIndex: first-come, permanent, capped ──────────────
+  // ── assignFloorSlotIndex: SLOT INDEX *IS* FLOOR INDEX ────────────────
+  // ⚠️ REWRITTEN 2026-08-02, from a first-come allocator. THE CASCADE wires
+  // slot N's bake material to read slot N-1's render target at CONSTRUCTION
+  // time, so "the slot below me holds the floor below me" must be
+  // structurally true. First-come made it an unenforced invariant that one
+  // reordered caller loop would break — and a wrong cascade renders as a
+  // plausible shadow, not as a crash.
   {
     const map = new Map();
-    const a = assignFloorSlotIndex(map, 2, 6); // roof asked for first, live sequence
-    const b = assignFloorSlotIndex(map, 0, 6);
-    const c = assignFloorSlotIndex(map, 1, 6);
-    ok('the first NEW floor asked for claims slot 0, regardless of its own floorIndex', a === 0);
-    ok('the second NEW floor claims slot 1', b === 1);
-    ok('the third NEW floor claims slot 2', c === 2);
+    ok('floor 0 takes slot 0', assignFloorSlotIndex(map, 0, 6) === 0);
+    ok('floor 2 takes slot 2, NOT the next free one', assignFloorSlotIndex(map, 2, 6) === 2);
+    ok('floor 1 still takes slot 1 even though it was asked for last', assignFloorSlotIndex(map, 1, 6) === 1);
+    ok('re-asking is stable', assignFloorSlotIndex(map, 2, 6) === 2);
+    ok('and the map records which floors were actually asked for', map.size === 3);
 
-    // ── RE-ASKING FOR AN ALREADY-CLAIMED FLOOR RETURNS THE SAME SLOT ──
-    // This is the property the per-frame bake loop depends on: floor 2 (the
-    // roof) is asked for every frame, and it must land in the SAME texture
-    // every time or the consumer's per-slot uniforms would be pointing at a
-    // moving target.
-    ok('re-asking for floor 2 returns its ORIGINAL slot 0, not a new one', assignFloorSlotIndex(map, 2, 6) === 0);
-    ok('re-asking for floor 0 returns 1', assignFloorSlotIndex(map, 0, 6) === 1);
-
-    // ── THE CAP IS REAL ──────────────────────────────────────────────
-    assignFloorSlotIndex(map, 3, 6);
-    assignFloorSlotIndex(map, 4, 6);
-    assignFloorSlotIndex(map, 5, 6);
-    ok('six floors exactly fill a 6-slot pool', map.size === 6);
-    const overflow = assignFloorSlotIndex(map, 6, 6);
-    ok(`a 7th NEW floor gets -1, not a 7th slot that does not exist (got ${overflow})`, overflow === -1);
-    ok('the overflow floor is NOT recorded as claiming anything', !map.has(6));
+    // THE PROPERTY THE CASCADE DEPENDS ON, stated directly: for any floor N
+    // above the ground, the slot below it belongs to floor N-1.
     ok(
-      'an EXISTING floor can still be re-asked-for even while the pool is full (no accidental eviction)',
-      assignFloorSlotIndex(map, 2, 6) === 0
+      'for every floor, slot(N) - 1 === slot(N-1) — the cascade chain, by construction',
+      [1, 2, 3, 4, 5].every((n) => assignFloorSlotIndex(map, n, 6) - 1 === assignFloorSlotIndex(map, n - 1, 6))
     );
   }
 
-  // ── assignFloorSlotIndex: independent maps never cross-contaminate ────
-  {
-    const mapA = new Map();
-    const mapB = new Map();
-    assignFloorSlotIndex(mapA, 0, 6);
-    ok(
-      'a SEPARATE slotIndexByFloor map (a second subsystem instance) starts fresh',
-      assignFloorSlotIndex(mapB, 0, 6) === 0 && mapA !== mapB
-    );
-  }
-
-  // ── assignFloorSlotIndex: a cap of 1 is a real, usable degenerate case ──
+  // ── the cap, and what falls outside it ────────────────────────────────
   {
     const map = new Map();
-    ok('a 1-slot pool assigns its only slot', assignFloorSlotIndex(map, 5, 1) === 0);
-    ok('a second floor against a 1-slot pool overflows immediately', assignFloorSlotIndex(map, 6, 1) === -1);
+    ok('a floor at the cap boundary is refused', assignFloorSlotIndex(map, 6, 6) === -1);
+    ok('and is NOT recorded as claiming anything', !map.has(6));
+    ok('a floor well past the cap is refused too', assignFloorSlotIndex(map, 99, 6) === -1);
+    ok('floors below the cap are unaffected by a refused one', assignFloorSlotIndex(map, 5, 6) === 5);
+    ok('a 1-slot pool takes only floor 0', assignFloorSlotIndex(new Map(), 0, 1) === 0);
+    ok('and refuses floor 1', assignFloorSlotIndex(new Map(), 1, 1) === -1);
+
+    // Degenerate inputs must be refused, not silently coerced into slot 0 —
+    // a NaN floor index landing on the ground floor's slot would overwrite the
+    // one field every other floor cascades from.
+    ok('a negative floor index is refused', assignFloorSlotIndex(new Map(), -1, 6) === -1);
+    ok('a non-integer floor index is refused', assignFloorSlotIndex(new Map(), 1.5, 6) === -1);
+    ok('NaN is refused', assignFloorSlotIndex(new Map(), NaN, 6) === -1);
   }
 
   // ── THE ARITHMETIC BLEND: N=1 is BYTE-IDENTICAL to the pre-multi-floor
@@ -259,6 +250,74 @@ export function run(t) {
     ok(
       'plain JS numbers instead of TSL nodes throw (proves the function is really exercising the TSL API, not just adding JS numbers)',
       wrongShapeErr !== null
+    );
+  }
+
+  // ── THE CASCADE (2026-08-02) ──────────────────────────────────────────
+  // Author: *"If a shadow looks great on the ground floor I want to be able to
+  // see that same shadow through any holes in the middle or upper or ANY floor
+  // above that floor... Lots of maps involve large open spaces with no
+  // pixels/fully transparent, holes in the scene which allow the camera to
+  // peer down to lower floors."*
+  //
+  // The model: you see whatever surface is actually visible at this pixel,
+  // carrying THAT surface's shadow. `layer-smear-render.js` ends with
+  // `mix(lowerField, ownVis, blockage)` where blockage is the layer texture's
+  // A channel = the LOWER floor's `coverAbove`. Twinned here in plain numbers.
+  {
+    const cascade = (lower, own, blockage01) => lower * (1 - blockage01) + own * blockage01;
+
+    // The author's own two live probe points, as the acceptance criteria.
+    // Point 1: standing on the roof over the bridge — the middle floor is
+    // solidly between, so the ground floor's shadow must NOT show.
+    ok(
+      'BLOCKED (point 1: bridge between roof and ground) shows this floor`s own answer, not the one below',
+      Math.abs(cascade(0.1 /* ground is deep in shadow */, 1 /* roof is clear */, 1) - 1) < 1e-9
+    );
+    // Point 3: open water, nothing between — the ground floor's shadow must
+    // come through exactly as it looks on the ground floor.
+    ok(
+      'OPEN (point 3: open water) shows the floor below`s shadow unchanged',
+      Math.abs(cascade(0.1, 1, 0) - 0.1) < 1e-9
+    );
+
+    // A half-open walkway half-reveals what is under it — a gradient, never a
+    // threshold, or every railing would pop between two states.
+    ok('half-blocked blends the two', Math.abs(cascade(0.2, 1.0, 0.5) - 0.6) < 1e-9);
+
+    // ⚠️ THE BOTTOM FLOOR MUST BE UNTOUCHED. Floor 0 has no lower field, and
+    // its packed blockage is 255 (fully blocked) — so even if the cascade were
+    // wired up on it, the arithmetic returns its own answer exactly.
+    ok(
+      'blockage 1 is a provable identity for ANY lower value',
+      [0, 0.37, 1].every((l) => cascade(l, 0.42, 1) === 0.42)
+    );
+
+    // The recursion lives in the BAKE ORDER, not the shader: floor 2's "lower"
+    // input is floor 1's ALREADY-cascaded field, so a hole through two floors
+    // reaches the ground. Composed here to prove the chain, not just one link.
+    const groundShadow = 0.1;
+    const floor1Cascaded = cascade(groundShadow, 1, 0); // floor 1 is open over the ground
+    const floor2Cascaded = cascade(floor1Cascaded, 1, 0); // floor 2 is open over floor 1
+    ok(
+      'a hole through TWO floors reaches the ground floor`s shadow, unchanged',
+      Math.abs(floor2Cascaded - groundShadow) < 1e-9
+    );
+    // ...and one solid floor anywhere in the chain stops it.
+    const floor1Solid = cascade(groundShadow, 1, 1);
+    ok('one solid floor in the chain stops the cascade dead', Math.abs(cascade(floor1Solid, 1, 0) - 1) < 1e-9);
+  }
+
+  // ── A IS NO LONGER A SILHOUETTE CHANNEL, AND LAYER 3 MUST STAY INERT ──
+  // The cascade spends the layer texture's documented-empty 4th slot. The
+  // march still READS A as `cov[3]`, so this is safe ONLY while layer 3's
+  // strength is exactly 0 — `occ[3] × 0` contributes a transmittance factor of
+  // 1 by arithmetic, not by a branch. Giving layer 3 a real strength would
+  // silently turn the blockage grid into a fourth caster silhouette.
+  {
+    ok(
+      `SUN_SHADOW_LAYER_STRENGTH[3] is exactly 0, so the A channel cannot cast (is ${SUN_SHADOW_LAYER_STRENGTH[3]})`,
+      SUN_SHADOW_LAYER_STRENGTH[3] === 0
     );
   }
 }

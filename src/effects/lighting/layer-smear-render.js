@@ -81,12 +81,42 @@ export const GATE_AA_LOD = 0;
  *   setEdgeBandPx: (px: number) => void,
  * }}
  */
-export function buildLayerSmearBakeMaterial({ THREE, layerTexture, steps = 32 }) {
-  const { uniform, texture, uv, vec2, vec3, vec4, float, max, min, select, log2, smoothstep, pow, Fn } = THREE.TSL;
+export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTexture = null, steps = 32 }) {
+  const { uniform, texture, uv, vec2, vec3, vec4, float, max, min, mix, select, log2, smoothstep, pow, Fn } = THREE.TSL;
 
   const STEPS = Number.isFinite(steps) ? Math.max(4, Math.floor(steps)) : 32;
 
   const layerTexNode = texture(layerTexture);
+  /**
+   * ⚠️⚠️ THE CASCADE (2026-08-02) — the floor BELOW's already-baked field.
+   *
+   * Author, after four rounds on cross-floor shadows: *"If a shadow looks great
+   * on the ground floor I want to be able to see that same shadow through any
+   * holes in the middle or upper or ANY floor above that floor... Lots of maps
+   * involve large open spaces with no pixels/fully transparent, holes in the
+   * scene which allow the camera to peer down to lower floors."*
+   *
+   * THE MODEL, in one line: **you see whatever surface is actually visible at
+   * this pixel, carrying that surface's own shadow.** Where this floor's art is
+   * opaque you see this floor (and its own shadow); where it is transparent you
+   * are looking THROUGH to the floor below, so you must see the floor below's
+   * shadow — recursively, since that floor cascades too.
+   *
+   * The blend factor is the layer texture's A channel, which
+   * `packLayerTexelData` now fills with the LOWER floor's `coverAbove` — i.e.
+   * exactly "how much does this floor (and everything above it) block the view
+   * down to the floor below". 255 = solid, use this floor's own answer; 0 =
+   * open, fall through. That grid already existed and is already correct; this
+   * feature needed no new derivation, only a channel to carry it.
+   *
+   * Sampled at `uv()`, not re-projected: every slot's field covers the SAME
+   * world rect (all derived from `dimensions.sceneRect` through one caster
+   * spec), so the two are texel-aligned by construction. Null (floor 0, which
+   * has nothing below it) compiles the whole cascade OUT — a JS-time branch,
+   * `tsl/no-uniform-gates`, so the bottom floor's shader is byte-identical to
+   * what it was before this existed.
+   */
+  const lowerFieldTexNode = lowerFieldTexture ? texture(lowerFieldTexture) : null;
   /** (dirToSunX, dirToSunY, maxThrowPx, _) — resolved on the CPU once per bake
    * by `layer-smear.js#resolveLayerSmear`, so the twin and the shader cannot
    * disagree about where the sun is or how far the stack reaches. */
@@ -270,7 +300,25 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, steps = 32 })
     for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
       transmittance = transmittance.mul(float(1).sub(occ[i].mul(layerStrength[i]).mul(attenuate)));
     }
-    const vis = transmittance.clamp(0, 1);
+    const ownVis = transmittance.clamp(0, 1);
+
+    // ⚠️ THE CASCADE — see `lowerFieldTexNode`'s own header for the model and
+    // why A carries the blockage. A JS-time branch: floor 0 has no lower field
+    // and compiles this out entirely.
+    //
+    // `here.a` is the receiver's OWN texel, already fetched for the gate and
+    // the self-shadow term above, so the cascade costs one texture sample (the
+    // lower field) and one mix — not a second read of this floor's own data
+    // (memory: feedback_composite_only_terms_miss_shared_buffers).
+    //
+    // ⚠️ THE LOWER FIELD IS ALREADY CASCADED. Slots bake bottom-up, so by the
+    // time this runs, `lowerFieldTexNode` holds floor N-1's OWN shadow already
+    // blended with floor N-2's, and so on to the ground. That is what makes
+    // "see through a hole in the middle floor all the way down" work without
+    // this shader knowing how many floors exist — the recursion lives in the
+    // bake ORDER, not in the shader.
+    const vis = lowerFieldTexNode ? mix(lowerFieldTexNode.sample(uv()).r, ownVis, here.a) : ownVis;
+
     // RGB, not just R, so the field is readable as a greyscale image in the
     // debug layer cycler — a shadow field you can LOOK at is the difference
     // between "this is broken" and "this has no casters".

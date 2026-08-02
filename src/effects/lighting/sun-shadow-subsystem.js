@@ -473,10 +473,27 @@ export function describeSourceGrid(grid) {
   };
 }
 
-export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec }) {
+export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, lowerCoverAboveGrid = null, spec }) {
   const { w, h } = spec;
   const data = new Uint8Array(w * h * 4);
   let coveredTexels = 0;
+  // ⚠️⚠️ A IS NO LONGER "UNUSED" (2026-08-02) — it carries THE CASCADE's blend
+  // factor: the LOWER floor's `coverAbove`, i.e. "how much does THIS floor (and
+  // everything above it) block the view down to the floor below". 255 = solid,
+  // this floor's own shadow answers; 0 = a hole, fall through to the floor
+  // below. `layer-smear-render.js#lowerFieldTexNode` has the model.
+  //
+  // ⚠️ THIS IS SAFE ONLY BECAUSE LAYER 3 CASTS NOTHING. The march still reads
+  // A as `cov[3]`, but `SUN_SHADOW_LAYER_STRENGTH[3]` is 0 and its throw is 0,
+  // so `occ[3] × 0` contributes a transmittance factor of exactly 1 — inert by
+  // arithmetic, not by a branch. `sun-shadow-cascade.test.mjs` pins that zero;
+  // giving layer 3 a real strength would silently turn the blockage grid into
+  // a fourth silhouette. Splitting them needs a 5th channel (another texture),
+  // which is why the empty slot was worth spending here instead.
+  //
+  // Absent (floor 0, nothing below it) = 255 everywhere: fully blocked, so the
+  // cascade is a provable no-op on the bottom floor.
+  const absentBlockage = 255;
   // ⚠️ `outdoors` AND `coverAbove` MUST BE WORLD-SAMPLED, NEVER FLAT-INDEXED
   // BY `i` (2026-07-30 — the casterGridDim/Quality-Extreme corruption bug,
   // `packCasterTexelData`'s own header has the full post-mortem). Both live at
@@ -498,7 +515,11 @@ export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spe
       data[i * 4 + 0] = wallByte;
       data[i * 4 + 1] = overheadCoverage;
       data[i * 4 + 2] = aboveByte;
-      data[i * 4 + 3] = 0;
+      // World-sampled like its two neighbours, never flat-indexed — it is the
+      // LOWER floor's shared-resolution grid, same trap as `outdoors`/`coverAbove`.
+      data[i * 4 + 3] = lowerCoverAboveGrid
+        ? (sampleMaskGridWorld(lowerCoverAboveGrid, wx, wy) ?? absentBlockage)
+        : absentBlockage;
       if (wallByte > 0 || overheadCoverage > 0 || aboveByte > 0) coveredTexels++;
     }
   }
@@ -556,16 +577,22 @@ export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spe
  *   floor — the caller decides how to log that once.
  */
 export function assignFloorSlotIndex(slotIndexByFloor, floorIndex, maxSlots) {
-  const existing = slotIndexByFloor.get(floorIndex);
-  if (existing !== undefined) return existing;
-  if (slotIndexByFloor.size >= maxSlots) return -1;
-  // `.size` IS the next free index: assignments are first-come and NEVER
-  // released for the life of one subsystem, so no earlier index can ever be
-  // free again once claimed — a separate "next free" counter would be a
-  // second number that has to agree with this one instead of being it.
-  const index = slotIndexByFloor.size;
-  slotIndexByFloor.set(floorIndex, index);
-  return index;
+  // ⚠️ SLOT INDEX *IS* FLOOR INDEX (2026-08-02, rewritten from a first-come
+  // allocator). THE CASCADE made the old scheme unsafe: slot N's bake material
+  // is wired at CONSTRUCTION time to read slot N-1's render target, so "the
+  // slot below me holds the floor below me" has to be structurally true, not a
+  // consequence of the caller happening to ask for floors in ascending order.
+  // First-come allocation made that an unenforced invariant one reordered loop
+  // away from silently cascading the wrong floor's shadow — and a wrong
+  // cascade looks like a plausible shadow, not like a crash.
+  //
+  // Foundry's own floor indices are contiguous 0..N-1 (`getActiveSceneFloors`
+  // enumerates and numbers them itself), so identity costs nothing and deletes
+  // a whole class of question. The map is kept purely so `slotsUsed` and the
+  // overflow warning can still report which floors were actually asked for.
+  if (!Number.isInteger(floorIndex) || floorIndex < 0 || floorIndex >= maxSlots) return -1;
+  slotIndexByFloor.set(floorIndex, floorIndex);
+  return floorIndex;
 }
 
 function createFloorSlot({
@@ -581,6 +608,8 @@ function createFloorSlot({
   createCasterTexture,
   pushRect,
   rtName,
+  lowerField = null,
+  floorSlotIndex = 0,
 }) {
   // ── STATE (was 11 viewer-closure locals; now one slot's own) ────────────
   //
@@ -623,6 +652,16 @@ function createFloorSlot({
    * "off" spell, so being off costs one 1×1 draw in total rather than one per
    * frame. Cleared the moment the effect is enabled again. */
   let offFieldWritten = false;
+  /** ⚠️ THE CASCADE'S STALENESS LINK. Bumped on every real bake of THIS slot,
+   * and compared by the slot ABOVE — because this slot's content is an INPUT
+   * to that one now. Without it, a frame where floor 0 rebakes (the sun moved,
+   * a mask changed) but floor 1's own inputs did not would leave floor 1
+   * showing floor 0's PREVIOUS shadow through every hole: correct-looking,
+   * quietly one bake behind, and drifting further every time the two diverge.
+   * A counter rather than a dirty flag so a slot that skipped several of the
+   * floor below's bakes still detects it with one integer compare. */
+  let bakeSerial = 0;
+  let lastSeenLowerSerial = -1;
 
   // ── THE RESOLVED RUNG (§4) ───────────────────────────────────────────────
   // Constructed at the DEFAULT rung, not at the live one: `getSunShadowRenderState()`
@@ -678,6 +717,10 @@ function createFloorSlot({
   let sunShadowBake = buildLayerSmearBakeMaterial({
     THREE,
     layerTexture: casterTexture,
+    // THE CASCADE's second input — the floor below's own render target, whose
+    // `.texture` identity is stable for this subsystem's whole life (slots
+    // RESIZE, never reallocate), so binding it once here is safe forever.
+    lowerFieldTexture: lowerField?.texture ?? null,
     steps: activePlan.steps,
   });
   let sunShadowQuad = new THREE.QuadMesh(sunShadowBake.material);
@@ -747,7 +790,14 @@ function createFloorSlot({
   function applyQuality(plan) {
     if (plan.steps === builtSteps) return false;
     const previous = sunShadowBake;
-    sunShadowBake = buildLayerSmearBakeMaterial({ THREE, layerTexture: casterTexture, steps: plan.steps });
+    sunShadowBake = buildLayerSmearBakeMaterial({
+      THREE,
+      layerTexture: casterTexture,
+      // Re-bound on a rebuild, or a profile change would silently drop the
+      // cascade for every floor above the ground one.
+      lowerFieldTexture: lowerField?.texture ?? null,
+      steps: plan.steps,
+    });
     sunShadowQuad = new THREE.QuadMesh(sunShadowBake.material);
     builtSteps = plan.steps;
     // Restore the two pieces of state the new material was born without.
@@ -827,10 +877,24 @@ function createFloorSlot({
     const { w, h } = spec;
     if (!(w > 0 && h > 0)) return { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
 
+    // THE CASCADE's blend factor: the floor BELOW's `coverAbove` — "how much
+    // do I block the view down to it". Fetched through the SAME seam as this
+    // floor's own field so a degraded lower floor degrades identically; a
+    // throw or a missing floor yields null, which packs as "fully blocked"
+    // and makes the cascade a provable no-op rather than a hole.
+    let lowerCoverAboveGrid = null;
+    if (floorSlotIndex > 0) {
+      try {
+        lowerCoverAboveGrid = getCasterHeightField(floorIndex - 1)?.coverAbove ?? null;
+      } catch (err) {
+        lowerCoverAboveGrid = null;
+      }
+    }
     const { data, coveredTexels, channelStats } = packLayerTexelData({
       channels,
       outdoorsGrid,
       coverAboveGrid: field?.coverAbove ?? null,
+      lowerCoverAboveGrid,
       spec,
     });
 
@@ -989,6 +1053,8 @@ function createFloorSlot({
     renderSunShadowPass(sunShadowRt, sunShadowQuad);
 
     bakedSun = { azimuthDeg: atmosphere.azimuthDeg, elevationDeg: atmosphere.elevationDeg };
+    // THE CASCADE'S STALENESS LINK — see `bakeSerial`'s own declaration.
+    bakeSerial++;
     lastSunShadowBake = {
       reason,
       enabled: !!state.enabled,
@@ -1089,8 +1155,23 @@ function createFloorSlot({
     const paramsKey = JSON.stringify(state.params ?? {}) + `|on|t${activeTier}`;
     const paramsChanged = paramsKey !== lastSunShadowParamsKey;
     if (paramsChanged) lastSunShadowParamsKey = paramsKey;
-    if (paramsChanged || geometryChanged || sunNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg)) {
-      bakeSunShadowField(geometryChanged ? 'profile' : paramsChanged ? 'param' : bakedSun ? 'sun' : 'first');
+    // ⚠️ THE FLOOR BELOW IS AN INPUT NOW. Its field is sampled by this slot's
+    // own bake, so its rebake dirties this one exactly like a param change
+    // would. The caller iterates floors ASCENDING, so by the time this runs
+    // the floor below has already rebaked this frame and its serial is final —
+    // one frame of lag is impossible rather than merely unlikely.
+    const lowerSerial = lowerField ? lowerField.getBakeSerial() : -1;
+    const lowerChanged = lowerSerial !== lastSeenLowerSerial;
+    lastSeenLowerSerial = lowerSerial;
+    if (
+      paramsChanged ||
+      geometryChanged ||
+      lowerChanged ||
+      sunNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg)
+    ) {
+      bakeSunShadowField(
+        geometryChanged ? 'profile' : paramsChanged ? 'param' : lowerChanged ? 'cascade' : bakedSun ? 'sun' : 'first'
+      );
     }
   }
 
@@ -1099,6 +1180,10 @@ function createFloorSlot({
     getRect: currentRect,
     getFloorIndex() {
       return casterFieldFloor;
+    },
+    /** THE CASCADE's staleness link, read by the slot ABOVE this one. */
+    getBakeSerial() {
+      return bakeSerial;
     },
     maybeBake,
     getDebugQuad(viewId) {
@@ -1181,35 +1266,47 @@ export function createSunShadowSubsystem({
   // construction (environmental-light.js, point-light-illumination.js) always
   // has something real to bind — an unclaimed slot just stays the tiny "off"
   // placeholder until a real floor claims it (`slotFor`, below). ──────────
-  const slots = Array.from({ length: SUN_SHADOW_MAX_FLOORS }, (_, i) =>
-    createFloorSlot({
-      THREE,
-      allocator,
-      dimensions,
-      getCasterHeightField,
-      getSunShadowRenderState,
-      getMaskAuthorityVersion,
-      getShadowHandle,
-      getEnvLight,
-      renderSunShadowPass,
-      createCasterTexture,
-      // Bound ONCE per slot: this is the ENTIRE multi-floor consumer contract
-      // — a slot pushes its own rect to its own uniform set, by INDEX, never
-      // by floor identity. Only on a REAL rebake (this fires from inside
-      // `bakeLayerTexture`, not every frame) — mirrors the pre-multi-floor
-      // split exactly: `setSunShadowRect` on rebake, `setSunShadowFloorIndex`
-      // every frame regardless (the caller's own per-frame loop, since a
-      // slot's FLOOR ATTRIBUTION must stay correct even on a frame that
-      // skipped a rebake — see `maybeBake`'s own doc).
-      pushRect: (rect) => getEnvLight().setSunShadowRect(i, rect),
-      rtName: `scene.sunShadow.slot${i}`,
-    })
-  );
+  // ⚠️ BUILT SEQUENTIALLY, NOT WITH `Array.from`'s callback ALONE — slot i's
+  // bake material is wired at CONSTRUCTION time to read slot i-1's render
+  // target (THE CASCADE), so slot i-1 must already exist when slot i is built.
+  // Slot index IS floor index (`assignFloorSlotIndex`), so "the slot below me"
+  // and "the floor below me" are the same thing by construction.
+  const slots = [];
+  for (let i = 0; i < SUN_SHADOW_MAX_FLOORS; i++) {
+    slots.push(
+      createFloorSlot({
+        THREE,
+        allocator,
+        dimensions,
+        getCasterHeightField,
+        getSunShadowRenderState,
+        getMaskAuthorityVersion,
+        getShadowHandle,
+        getEnvLight,
+        renderSunShadowPass,
+        createCasterTexture,
+        // Floor 0 has nothing below it — null compiles the cascade out entirely
+        // and its shader stays byte-identical to the pre-cascade one.
+        lowerField: i === 0 ? null : slots[i - 1],
+        floorSlotIndex: i,
+        // Bound ONCE per slot: this is the ENTIRE multi-floor consumer contract
+        // — a slot pushes its own rect to its own uniform set, by INDEX, never
+        // by floor identity. Only on a REAL rebake (this fires from inside
+        // `bakeLayerTexture`, not every frame) — mirrors the pre-multi-floor
+        // split exactly: `setSunShadowRect` on rebake, `setSunShadowFloorIndex`
+        // every frame regardless (the caller's own per-frame loop, since a
+        // slot's FLOOR ATTRIBUTION must stay correct even on a frame that
+        // skipped a rebake — see `maybeBake`'s own doc).
+        pushRect: (rect) => getEnvLight().setSunShadowRect(i, rect),
+        rtName: `scene.sunShadow.slot${i}`,
+      })
+    );
+  }
 
-  /** floorIndex -> slot INDEX, assigned FIRST-COME, PERMANENT for the life of
-   * the subsystem (a floor never migrates slots once claimed — nothing
-   * downstream could tell the difference, but a stable assignment is one less
-   * thing to reason about while reading a report). Indices, not slot objects
+  /** floorIndex -> slot INDEX. IDENTITY since 2026-08-02 (see
+   * `assignFloorSlotIndex` for why THE CASCADE required that); kept as a map
+   * purely so `slotsUsed` and the overflow warning can report which floors
+   * were actually asked for. Indices, not slot objects
    * — see `assignFloorSlotIndex`'s own header for why the bookkeeping is kept
    * separate from the THREE-dependent slot objects themselves. */
   const slotIndexByFloor = new Map();

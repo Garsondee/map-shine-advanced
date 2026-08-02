@@ -96,19 +96,63 @@ export function run(t) {
     );
   }
 
-  // ── A IS THE DOCUMENTED, DELIBERATE GAP ──────────────────────────────
-  // `packLayerTexelData`'s own header: splitting "the floor directly above"
-  // from "everything higher" needs a per-floor cover grid that doesn't exist
-  // yet, so the 4th slot is left empty rather than quietly duplicated.
+  // ── A CARRIES THE CASCADE'S BLOCKAGE (2026-08-02) ────────────────────
+  // A was the documented empty 4th silhouette slot until the cascade needed a
+  // channel. It now holds the LOWER floor's `coverAbove` — "how much do I
+  // block the view down to the floor below" — which
+  // `layer-smear-render.js` mixes this floor's own shadow against the floor
+  // below's already-cascaded field with.
   {
     const channels = channelsAt(2, 2);
     channels.coverOverhead.data.fill(255);
     const outdoorsGrid = grid(2, 2, 1000, 1000, 0);
     const coverAboveGrid = grid(2, 2, 1000, 1000, 255);
-    const { data } = packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec: channels.coverOverhead.spec });
+
+    // ⚠️ ABSENT = FULLY BLOCKED, NEVER 0. Floor 0 has nothing below it, and a
+    // 0 here would read as "wide open", cascading a field that does not exist.
+    // The polarity has to fail CLOSED (memory: feedback_gate_polarity_must_fail_open
+    // — the same reasoning, opposite safe direction, because here "proceed"
+    // means "show something else's shadow").
+    const noLower = packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec: channels.coverOverhead.spec });
     t.ok(
-      'A stays 0 even when every other channel is maxed — the 4th slot is unused, not silently duplicated',
-      [0, 1, 2, 3].every((i) => data[i * 4 + 3] === 0)
+      'with no lower floor, A is 255 (fully blocked) — the cascade is a provable no-op on the bottom floor',
+      [0, 1, 2, 3].every((i) => noLower.data[i * 4 + 3] === 255)
+    );
+
+    // A hole in this floor: the lower floor's coverAbove is 0 there, so the
+    // view falls through and the shader must show the floor below's shadow.
+    const openBelow = grid(2, 2, 1000, 1000, 0);
+    const open = packLayerTexelData({
+      channels,
+      outdoorsGrid,
+      coverAboveGrid,
+      lowerCoverAboveGrid: openBelow,
+      spec: channels.coverOverhead.spec,
+    });
+    t.ok(
+      'a fully OPEN lower floor packs A = 0 — look straight through to the floor below',
+      [0, 1, 2, 3].every((i) => open.data[i * 4 + 3] === 0)
+    );
+
+    // Partial blockage must survive as a real gradient, not a threshold — a
+    // half-transparent walkway should half-reveal what is under it.
+    const halfBelow = grid(2, 2, 1000, 1000, 128);
+    const half = packLayerTexelData({
+      channels,
+      outdoorsGrid,
+      coverAboveGrid,
+      lowerCoverAboveGrid: halfBelow,
+      spec: channels.coverOverhead.spec,
+    });
+    t.ok(
+      'partial blockage survives as a gradient rather than snapping to 0/255',
+      [0, 1, 2, 3].every((i) => Math.abs(half.data[i * 4 + 3] - 128) <= 1)
+    );
+
+    // And the other three channels must be untouched by any of it.
+    t.ok(
+      'packing the blockage does not disturb walls/overhead/floorAbove',
+      open.data[0] === noLower.data[0] && open.data[1] === noLower.data[1] && open.data[2] === noLower.data[2]
     );
   }
 

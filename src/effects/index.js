@@ -32,38 +32,30 @@ export {
   MAX_UI_SHADOW_STAMPS,
   softenThrowPx,
 } from './lighting/light-visibility.js';
-// SUN OCCLUSION (docs/planning/Sun-Shadows.md) — building, overhead and
-// sky-reach shadows as ONE occluder height field read by ONE march. The pure
-// maths; `sun-occlusion-render.js` is its TSL transcription.
+// SUN GEOMETRY (docs/planning/Sun-Shadows.md) — the shared azimuth/rebake/
+// gate-sharpening/edge-fade utilities. Narrowed 2026-08-02: this file used to
+// also export the march and the averaged-mean smear (both retired — see
+// `sun-occlusion.js`'s own header); what remains is genuinely shared, not
+// shadow-model-specific.
 export {
   marchDirectionToSun,
-  marchVisibility,
-  marchStepPx,
-  marchPenumbraPx,
-  maxThrowPx,
   sunNeedsRebake,
-  angleDeltaDeg,
   edgeRamp01,
-  resolveSunMarch,
-  sharpenReceiverGate01,
-  DEFAULT_MARCH_STEPS,
-  DEFAULT_LATERAL_TAPS,
   PENUMBRA_PER_PX,
   GATE_SHARPEN_LOW,
   GATE_SHARPEN_HIGH,
-  // THE PERFORMANCE LADDER (2026-07-29). `SUN_SHADOW_FIELD_DIM` and
-  // `SUN_SHADOW_MARCH_STEPS` used to be exported from the subsystem beside
-  // these; they are GONE rather than renamed, because they were fixed module
-  // constants and there is no longer one field resolution or one step count —
-  // both come from the resolved rung. Nothing outside the subsystem read them
-  // (an unconsumed API rots silently), so the honest move was to delete them
-  // and export the thing that IS consumed: the plan.
-  sunShadowTierPlan,
-  sunShadowBakeSamples,
-  SUN_SHADOW_DEFAULT_TIER,
-  SUN_SHADOW_MAX_TIER,
 } from './lighting/sun-occlusion.js';
-export { buildSunShadowBakeMaterial, buildSunVisibilityNode } from './lighting/sun-occlusion-render.js';
+// THE LAYER SMEAR MODEL (docs/planning/Sun-Shadows-Layer-Smear.md) — the
+// current sun-shadow bake. `layerSmearTierPlan` is exported because
+// `boot.js` needs `.layerGridDim` to size the caster-specific derivation grid
+// (the ONE call site that does; see that call site's own comment for why it
+// matters). The rest of this model's surface (`resolveLayerSmear`,
+// `buildLayerSmearBakeMaterial`, `layerSmearBakeSamples`, …) is consumed
+// directly by `sun-shadow-subsystem.js`, not through this barrel — not
+// re-exported here for the same "unconsumed API rots silently" reason the
+// retired ladder's own comment (just above, in spirit) used to state.
+export { layerSmearTierPlan } from './lighting/layer-smear.js';
+export { buildSunVisibilityNode } from './lighting/sun-occlusion-render.js';
 export { createSunShadowSubsystem, SUN_SHADOW_QUANTIZE_DEG } from './lighting/sun-shadow-subsystem.js';
 // THE DEBUG VIEW's own vocabulary — boot reads it to drive the derivation
 // includes from the picked view, so "sky-reach only" isolates for real.
@@ -340,6 +332,10 @@ export {
   buildTessellatedQuadGeometry,
   vegetationTierPlan,
   VEGETATION_DEFAULT_TIER,
+  vegetationPassiveElevation,
+  vegetationOverlayRenderOrder,
+  flutterFoldFreeAmplitudePx,
+  VEG_FLUTTER_FOLD_SAFETY,
 } from './vegetation-render.js';
 // The vegetation SHADOW subsystem — extraction step 2 of docs/planning/
 // VT-Pan-Viewer-Extraction.md. The padded quad, the per-kind pad, and the

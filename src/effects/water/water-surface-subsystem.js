@@ -322,6 +322,7 @@ export function createWaterSurfaceSubsystem({
       p.flowSpeedPx,
       p.flowAngleDeg,
       p.waveScalePx,
+      p.chop,
       p.wetBandPx,
       p.wetStrength,
       p.sunGlint,
@@ -341,6 +342,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.flowSpeedPx)) surface.setFlowSpeedPx(p.flowSpeedPx);
       if (Number.isFinite(p.flowAngleDeg)) surface.setFlowAngleDeg(p.flowAngleDeg);
       if (Number.isFinite(p.waveScalePx)) surface.setWaveScalePx(p.waveScalePx);
+      if (Number.isFinite(p.chop)) surface.setChop(p.chop);
       if (Number.isFinite(p.wetBandPx)) surface.setWetBandPx(p.wetBandPx);
       if (Number.isFinite(p.wetStrength)) surface.setWetStrength(p.wetStrength);
       if (Number.isFinite(p.sunGlint)) surface.setSunGlint(p.sunGlint);
@@ -408,6 +410,11 @@ export function createWaterSurfaceSubsystem({
         // reflection) regardless of what the map looks like — silent on
         // screen, never guessed at.
         outdoorsGate: surface.outdoorsGateCompiled,
+        // `false` means tier 3 compiled its FLAT-normal fallback, which
+        // measured as an invisible 0.0084 wash for three days without anything
+        // reporting it (`water-light.js`'s header). Reported now precisely
+        // because that state looks healthy from every other field here.
+        waveNormal: surface.normalCompiled,
       };
     },
     dispose() {

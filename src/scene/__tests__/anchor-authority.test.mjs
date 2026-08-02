@@ -92,6 +92,94 @@ export function run(t) {
     atTower.includes('tower') && atTower.includes('everywhere') && !atTower.includes('ground')
   );
 
+  // ==========================================================================
+  // CROSS-FLOOR VISIBILITY (`floorVisibility`) — the fix for "candles attached
+  // to a ground-floor element stop rendering their light or shape the moment I
+  // move up a floor" (author, 2026-08-01), where a hole in the upper floor
+  // should have exposed them.
+  //
+  // The floor context's `elevation` is the MIDPOINT of the floor being viewed
+  // (boot.js#updateActiveFloorContext), so "standing on the floor above a 0..20
+  // ground floor" arrives here as an elevation well past that band's top.
+  // ==========================================================================
+  {
+    const band = { mode: 'locked', bottom: 0, top: 20 };
+    auth.reset({
+      sceneKey: 'S5b',
+      anchors: [
+        { id: 'default', kind: 'candleFlame', x: 0, y: 0, floorBinding: band },
+        {
+          id: 'above',
+          kind: 'candleFlame',
+          x: 0,
+          y: 0,
+          floorBinding: band,
+          params: { floorVisibility: 'own-and-above' },
+        },
+        {
+          id: 'always',
+          kind: 'candleFlame',
+          x: 0,
+          y: 0,
+          floorBinding: band,
+          params: { floorVisibility: 'all-floors' },
+        },
+      ],
+    });
+
+    t.ok(
+      'the param defaults to own-floor, so an untouched candle is unchanged',
+      auth.anchorsForEffect('candleFlame').find((a) => a.id === 'default')?.params.floorVisibility === 'own-floor'
+    );
+
+    // ON its own floor every setting shows — the feature may only ever WIDEN.
+    const onOwnFloor = auth.anchorsForEffect('candleFlame', { elevation: 10 }).map((a) => a.id);
+    t.ok('on its own floor all three are served regardless of setting', onOwnFloor.length === 3);
+
+    // THE REPORTED CASE: viewing from the floor above.
+    const fromAbove = auth.anchorsForEffect('candleFlame', { elevation: 30 }).map((a) => a.id);
+    t.ok(
+      'from the floor ABOVE, a default candle still hides (today’s behaviour, deliberately kept)',
+      !fromAbove.includes('default')
+    );
+    t.ok('from the floor ABOVE, an "own and above" candle is served — the bug, fixed', fromAbove.includes('above'));
+    t.ok('from the floor ABOVE, an "all floors" candle is served', fromAbove.includes('always'));
+
+    // BELOW the band stays hidden even for 'own-and-above': you cannot see a
+    // candle on the floor above through its own ceiling.
+    const fromBelow = auth.anchorsForEffect('candleFlame', { elevation: -50 }).map((a) => a.id);
+    t.ok('from BELOW, "own and above" stays hidden — it widens upward only', !fromBelow.includes('above'));
+    t.ok('from BELOW, "all floors" is still served', fromBelow.includes('always'));
+
+    // An unrecognised value must degrade to the safe, pre-existing behaviour
+    // rather than silently becoming "visible everywhere".
+    auth.reset({
+      sceneKey: 'S5c',
+      anchors: [
+        { id: 'junk', kind: 'candleFlame', x: 0, y: 0, floorBinding: band, params: { floorVisibility: 'wat' } },
+      ],
+    });
+    t.ok(
+      'an invalid floorVisibility falls back to the default and does NOT leak the candle across floors',
+      auth.anchorsForEffect('candleFlame', { elevation: 30 }).length === 0
+    );
+  }
+
+  // --- an anchor kind with NO floorVisibility param is untouched -----------
+  // Lightning declares no such param, so its locked bindings must behave
+  // exactly as they did before this feature existed.
+  {
+    auth.reset({
+      sceneKey: 'S5d',
+      anchors: [{ id: 'bolt', kind: 'lightning', x: 0, y: 0, floorBinding: { mode: 'locked', bottom: 0, top: 20 } }],
+    });
+    t.ok(
+      'a kind without the param is still floor-bound as before',
+      auth.anchorsForEffect('lightning', { elevation: 30 }).length === 0 &&
+        auth.anchorsForEffect('lightning', { elevation: 10 }).length === 1
+    );
+  }
+
   // --- reset is wholesale; a fresh scene forgets the last ------------------
   auth.reset({ sceneKey: 'S6', anchors: [] });
   t.ok('a reset to empty serves nothing', auth.anchorsForEffect('candleFlame').length === 0);

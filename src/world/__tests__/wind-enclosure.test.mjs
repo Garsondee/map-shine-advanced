@@ -15,6 +15,8 @@ import {
   distanceFromNearestSolid,
   wallAvoidanceDirectionFromDistance,
   wallProximityFromDistance,
+  upwindShelter,
+  WIND_SHADOW_REACH_CELLS,
 } from '../wind-enclosure.js';
 import { rasterizeWallsToGrid } from '../wind-bake.js';
 
@@ -523,5 +525,127 @@ export function run(t) {
       'cropGridMargin: mismatched-length input falls back to all-zero, never throws',
       Array.from(cropGridMargin(new Uint8Array(5), 4, 4, 1)).every((v) => v === 0)
     );
+  }
+
+  // ==========================================================================
+  // WIND SHADOW (upwindShelter) — the first DIRECTIONAL field in this module.
+  //
+  // The whole point is that it must give DIFFERENT answers on opposite sides of
+  // the same building, which no other field here can. So the tests are built
+  // around one solid block and four compass directions: whatever else is true,
+  // turning the wind around must move the shadow to the other side.
+  // ==========================================================================
+  {
+    // A 21×21 grid with a 3×3 solid block dead centre at (10,10).
+    const cols = 21;
+    const rows = 21;
+    const block = new Uint8Array(cols * rows);
+    for (let row = 9; row <= 11; row++) {
+      for (let col = 9; col <= 11; col++) block[idxOf(cols, col, row)] = 1;
+    }
+    // Four probes, one per side of the block, each 3 cells clear of it.
+    const west = idxOf(cols, 6, 10);
+    const east = idxOf(cols, 14, 10);
+    const north = idxOf(cols, 10, 6); // -Y is screen-north; +Y is DOWN in this space
+    const south = idxOf(cols, 10, 14);
+
+    // `directionDeg` is METEOROLOGICAL (blows FROM), clockwise from +X, +Y down
+    // — so the upwind vector is (cos, sin) with NO negation. These four are the
+    // exact bearings `wind-bake.js#ambientVectorFromWind`'s own header names.
+    const shelterFor = (deg) =>
+      upwindShelter(block, cols, rows, {
+        upwindX: Math.cos((deg * Math.PI) / 180),
+        upwindY: Math.sin((deg * Math.PI) / 180),
+      });
+
+    {
+      // 0° = "East" = an EAST wind: comes from +X, blows toward -X. So the
+      // sheltered side is WEST (the far side from the source), and the exposed
+      // side is EAST (facing into it). Getting this backwards is the exact
+      // shape of this project's recurring Y-flip/negation bug, which is why
+      // every cardinal is asserted separately instead of trusting one.
+      const s = shelterFor(0);
+      ok('east wind: the WEST (leeward) side of a building is sheltered', s[west] > 0.5);
+      ok('east wind: the EAST (windward) side is NOT sheltered', s[east] === 0);
+      ok('east wind: the crosswind sides are untouched', s[north] === 0 && s[south] === 0);
+    }
+    {
+      const s = shelterFor(180); // "West" — comes from -X, blows toward +X
+      ok('west wind: the shadow flips to the EAST side', s[east] > 0.5);
+      ok('west wind: the WEST side is now exposed', s[west] === 0);
+    }
+    {
+      // 90° = "South" — comes from +Y (screen-down) and blows toward -Y, so the
+      // sheltered side is the one at SMALLER y (screen-north).
+      const s = shelterFor(90);
+      ok('south wind: the shadow lands on the -Y (screen-north) side', s[north] > 0.5);
+      ok('south wind: the +Y side is exposed', s[south] === 0);
+    }
+    {
+      const s = shelterFor(270); // "North"
+      ok('north wind: the shadow flips to the +Y (screen-south) side', s[south] > 0.5);
+      ok('north wind: the -Y side is exposed', s[north] === 0);
+    }
+
+    {
+      // DEPTH FALLS OFF WITH DISTANCE — the wake recovers downwind. Asserted as
+      // a monotonic ordering across three distances rather than against exact
+      // values, so a reach/curve retune doesn't invalidate the test.
+      const s = shelterFor(0); // east wind, shadow to the west
+      const near = s[idxOf(cols, 8, 10)];
+      const mid = s[idxOf(cols, 5, 10)];
+      const far = s[idxOf(cols, 2, 10)];
+      ok('shelter is deepest right behind the building and recovers downwind', near > mid && mid > far);
+      ok('shelter never exceeds 1 or drops below 0', near <= 1 && far >= 0);
+    }
+
+    {
+      const s = shelterFor(0);
+      ok(
+        'a cell INSIDE a wall reads 0 — nothing samples wind there, and a linear filter would bleed it',
+        s[idxOf(cols, 10, 10)] === 0
+      );
+    }
+
+    // --- the degenerate inputs, none of which may throw or invent a shadow ---
+    ok(
+      'no walls anywhere ⇒ no shadow anywhere (delete every wall, get wind everywhere — the Rethink’s own decisive test)',
+      Array.from(upwindShelter(new Uint8Array(cols * rows), cols, rows, { upwindX: 1, upwindY: 0 })).every(
+        (v) => v === 0
+      )
+    );
+    ok(
+      'a zero-length wind direction (calm, or unset) yields no shadow rather than dividing by zero',
+      Array.from(upwindShelter(block, cols, rows, { upwindX: 0, upwindY: 0 })).every((v) => v === 0)
+    );
+    ok('an empty grid returns an empty array', upwindShelter(new Uint8Array(0), 0, 0, { upwindX: 1 }).length === 0);
+    ok(
+      'a mismatched-length solid mask falls back to no shadow, never throws',
+      Array.from(upwindShelter(new Uint8Array(5), cols, rows, { upwindX: 1 })).every((v) => v === 0)
+    );
+
+    {
+      // OFF-GRID IS OPEN SKY, NOT A WALL. If the march treated leaving the grid
+      // as an occlusion, every cell near the upwind edge would carry a phantom
+      // shadow and the whole map would darken at its rim.
+      const empty = new Uint8Array(cols * rows);
+      const s = upwindShelter(empty, cols, rows, { upwindX: 1, upwindY: 0 });
+      ok('marching off the grid edge does not manufacture a shadow', s[idxOf(cols, cols - 1, 10)] === 0);
+    }
+
+    {
+      // A ONE-CELL-THICK WALL, HIT DIAGONALLY — the sub-cell march step exists
+      // for exactly this. At a full-cell step an angled ray can straddle a thin
+      // wall and step clean over it, reporting a sheltered cell as fully
+      // exposed (this project's named "crossing test falls in the gap between
+      // march samples" failure). A diagonal wind onto a thin wall must still
+      // find it.
+      const thin = new Uint8Array(cols * rows);
+      for (let col = 0; col < cols; col++) thin[idxOf(cols, col, 10)] = 1; // a 1-cell horizontal wall
+      const s = upwindShelter(thin, cols, rows, { upwindX: Math.cos(Math.PI / 4), upwindY: Math.sin(Math.PI / 4) });
+      ok('a diagonal ray does not step over a one-cell-thick wall', s[idxOf(cols, 5, 7)] > 0);
+    }
+
+    ok('the reach constant is a sane positive number of cells', WIND_SHADOW_REACH_CELLS > 1);
   }
 }

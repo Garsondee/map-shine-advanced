@@ -86,6 +86,31 @@ export async function run(t) {
     // Never shorten to a single token — `Tower` must not adopt `Tower_Outdoors`.
     const tooShort = matchMaskFiles(['a/Tower_Outdoors.webp'], 'Tower_Bridge_Underground', 'webp');
     t.ok('shortening stops before a bare first token', !tooShort.found.has('outdoors'));
+
+    // ⚠️ THE OPPOSITE DIRECTION, AND IT IS NOT THE SAME TEST. Everything above
+    // uses `_WaterHard` as an art BASE. This asks whether that same file could
+    // be adopted as a `water` MASK for the plain base — i.e. can a longer
+    // filename leak into a shorter suffix.
+    //
+    // It cannot, and the reason is one character: `wantPrefix` ends in a DOT
+    // (`..._Water.`), so `..._WaterHard.webp` fails `startsWith` at the `h`.
+    // Author-confirmed 2026-08-01 that no `_WaterHard` mask kind was ever
+    // planned — which is exactly why this must stay impossible rather than
+    // merely unused. Simplifying the match to `includes('_Water')`, or dropping
+    // the dot, would silently bind 4.9 MB of background ART as a water mask.
+    const hardVariant = matchMaskFiles(
+      ['a/Tower_Bridge_Underground_WaterHard.webp', 'a/Tower_Bridge_Underground_Outdoors.webp'],
+      'Tower_Bridge_Underground',
+      'webp'
+    );
+    t.ok('a _WaterHard art variant is NEVER adopted as the _Water mask', !hardVariant.found.has('water'));
+    t.ok(
+      'and its presence does not disturb the masks that DO match',
+      hardVariant.found.get('outdoors') === 'a/Tower_Bridge_Underground_Outdoors.webp'
+    );
+    // The same guarantee, stated as the general rule rather than one filename.
+    const suffixLeak = matchMaskFiles(['a/base_OutdoorsExtra.webp'], 'base', 'webp');
+    t.ok('a suffix followed by more word characters never matches', !suffixLeak.found.has('outdoors'));
   }
 
   // A FILE IS NEVER ITS OWN MASK (found live, 2026-07-29) — Vegetation Case 1

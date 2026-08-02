@@ -15,3 +15,10 @@ assets/torture/
 
 # TSL spike build output — regenerate with: npm run build:three-webgpu
 src/vendor/three/.webgpu-entry.js
+
+# Shader Lab run evidence (reports, frame PNGs, generated WGSL) and the
+# content-keyed derived-mask cache. Both are reproducible by re-running a
+# scenario; a run worth keeping gets its SCENARIO committed, not its output.
+# See docs/planning/Shader-Lab-Proving-Ground.md §5.3.
+tools/shader-lab/runs/
+tools/shader-lab/cache/

@@ -77,39 +77,66 @@ const TIER0_WIND_HANDLE = createWindHandle();
  * @param {ReturnType<typeof import('./lightning-geometry.js').computeLightningStrandArrays>} arrays
  * @returns {*} a `THREE.BufferGeometry`.
  */
+const DIRECT_ATTRS = Object.freeze([
+  ['position', 'positions', 3],
+  ['prevPos', 'prevPos', 3],
+  ['nextPos', 'nextPos', 3],
+]);
+
+/**
+ * Packed groups — [attrName, itemSize, [sourceKeys...]]. Interleaving several
+ * separate per-vertex float fields into ONE vec-N attribute is the standard
+ * WebGPU technique for staying under the hardware-GUARANTEED
+ * `maxVertexBuffers` ceiling of 8.
+ *
+ * ⚠️ 2026-08-01, caught LIVE via Shader Lab (the exact class of catch that
+ * tool exists for — see docs/planning/Shader-Lab.md's own "first real use"):
+ * this file's original shape set 12 SEPARATE attributes (3 vec3 + 9 scalar).
+ * The real WebGPU render pipeline failed to COMPILE — "Vertex buffer count
+ * (12) exceeds the maximum number of vertex buffers (8)" — so the bolt mesh
+ * never drew a single pixel, on real hardware, despite every Node test
+ * (including the one that constructs this exact material via a real THREE,
+ * `lightning-subsystem.test.mjs`) passing green throughout. Graph
+ * CONSTRUCTION succeeds in Node; only pipeline COMPILATION, which needs a
+ * real adapter, fails — Node alone can never catch this class of bug.
+ *
+ * 6 buffers total today (3 direct + 3 packed) — real headroom under 8, but
+ * never add a 7th separate attribute here without folding it into one of
+ * these groups or opening a deliberate new one.
+ */
+const PACKED_ATTRS = Object.freeze([
+  ['sideUv', 2, ['side', 'uvOffset']],
+  ['strandBakeA', 4, ['spawnMs', 'durationMs', 'seed', 'leaderFrac']],
+  ['strandBakeB', 3, ['restrikeCount', 'baseIntensity', 'widthScale']],
+]);
+
+/** Interleave `keys.length` same-length source arrays into one packed
+ * Float32Array (stride `itemSize`) — reuses `existing` in place when it's
+ * already big enough (the same "mutate the same buffer, don't reallocate"
+ * discipline this file's whole refill path exists for), else allocates. */
+function interleaveInto(arrays, keys, itemSize, existing) {
+  const n = arrays[keys[0]].length;
+  const need = n * itemSize;
+  const dst = existing && existing.length >= need ? existing : new Float32Array(need);
+  for (let v = 0; v < n; v++) {
+    const base = v * itemSize;
+    for (let k = 0; k < itemSize; k++) dst[base + k] = arrays[keys[k]][v];
+  }
+  return dst;
+}
+
 export function buildLightningGeometry(THREE, arrays) {
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(arrays.positions, 3));
-  geometry.setAttribute('prevPos', new THREE.BufferAttribute(arrays.prevPos, 3));
-  geometry.setAttribute('nextPos', new THREE.BufferAttribute(arrays.nextPos, 3));
-  geometry.setAttribute('side', new THREE.BufferAttribute(arrays.side, 1));
-  geometry.setAttribute('uvOffset', new THREE.BufferAttribute(arrays.uvOffset, 1));
-  geometry.setAttribute('strandSpawnMs', new THREE.BufferAttribute(arrays.spawnMs, 1));
-  geometry.setAttribute('strandDurationMs', new THREE.BufferAttribute(arrays.durationMs, 1));
-  geometry.setAttribute('strandSeed', new THREE.BufferAttribute(arrays.seed, 1));
-  geometry.setAttribute('strandLeaderFrac', new THREE.BufferAttribute(arrays.leaderFrac, 1));
-  geometry.setAttribute('strandRestrikeCount', new THREE.BufferAttribute(arrays.restrikeCount, 1));
-  geometry.setAttribute('strandBaseIntensity', new THREE.BufferAttribute(arrays.baseIntensity, 1));
-  geometry.setAttribute('strandWidthScale', new THREE.BufferAttribute(arrays.widthScale, 1));
+  for (const [attrName, arrayKey, itemSize] of DIRECT_ATTRS) {
+    geometry.setAttribute(attrName, new THREE.BufferAttribute(arrays[arrayKey], itemSize));
+  }
+  for (const [attrName, itemSize, keys] of PACKED_ATTRS) {
+    geometry.setAttribute(attrName, new THREE.BufferAttribute(interleaveInto(arrays, keys, itemSize), itemSize));
+  }
   geometry.setIndex(new THREE.BufferAttribute(arrays.indices, 1));
   geometry.setDrawRange(0, arrays.indexCount);
   return geometry;
 }
-
-const REFILLABLE_ATTRS = Object.freeze([
-  ['position', 'positions', 3],
-  ['prevPos', 'prevPos', 3],
-  ['nextPos', 'nextPos', 3],
-  ['side', 'side', 1],
-  ['uvOffset', 'uvOffset', 1],
-  ['strandSpawnMs', 'spawnMs', 1],
-  ['strandDurationMs', 'durationMs', 1],
-  ['strandSeed', 'seed', 1],
-  ['strandLeaderFrac', 'leaderFrac', 1],
-  ['strandRestrikeCount', 'restrikeCount', 1],
-  ['strandBaseIntensity', 'baseIntensity', 1],
-  ['strandWidthScale', 'widthScale', 1],
-]);
 
 /**
  * Refill an EXISTING geometry's attributes/index in place (reuse discipline —
@@ -122,7 +149,7 @@ const REFILLABLE_ATTRS = Object.freeze([
  * @param {ReturnType<typeof import('./lightning-geometry.js').computeLightningStrandArrays>} arrays
  */
 export function refillLightningGeometry(THREE, geometry, arrays) {
-  for (const [attrName, arrayKey, itemSize] of REFILLABLE_ATTRS) {
+  for (const [attrName, arrayKey, itemSize] of DIRECT_ATTRS) {
     const array = arrays[arrayKey];
     const attr = geometry.getAttribute(attrName);
     if (attr && attr.array.length >= array.length) {
@@ -130,6 +157,15 @@ export function refillLightningGeometry(THREE, geometry, arrays) {
       attr.needsUpdate = true;
     } else {
       geometry.setAttribute(attrName, new THREE.BufferAttribute(array, itemSize));
+    }
+  }
+  for (const [attrName, itemSize, keys] of PACKED_ATTRS) {
+    const attr = geometry.getAttribute(attrName);
+    const packed = interleaveInto(arrays, keys, itemSize, attr ? attr.array : null);
+    if (attr && attr.array === packed) {
+      attr.needsUpdate = true; // reused in place
+    } else {
+      geometry.setAttribute(attrName, new THREE.BufferAttribute(packed, itemSize));
     }
   }
   const idx = geometry.getIndex();
@@ -191,15 +227,22 @@ export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, wind
 
   const prevPos = attribute('prevPos', 'vec3');
   const nextPos = attribute('nextPos', 'vec3');
-  const side = attribute('side', 'float');
-  const uvOffset = attribute('uvOffset', 'float');
-  const strandSpawnMs = attribute('strandSpawnMs', 'float');
-  const strandDurationMs = attribute('strandDurationMs', 'float');
-  const strandSeed = attribute('strandSeed', 'float');
-  const strandLeaderFrac = attribute('strandLeaderFrac', 'float');
-  const strandRestrikeCount = attribute('strandRestrikeCount', 'float');
-  const strandBaseIntensity = attribute('strandBaseIntensity', 'float');
-  const strandWidthScale = attribute('strandWidthScale', 'float');
+  // Packed vertex attributes (see lightning-render.js's own PACKED_ATTRS
+  // header — 3 vec3 + 3 packed groups stays under WebGPU's 8-vertex-buffer
+  // ceiling; 9 separate scalar attributes did not). Swizzled back out to the
+  // same names every downstream expression in this file already expects.
+  const sideUv = attribute('sideUv', 'vec2');
+  const side = sideUv.x;
+  const uvOffset = sideUv.y;
+  const strandBakeA = attribute('strandBakeA', 'vec4');
+  const strandSpawnMs = strandBakeA.x;
+  const strandDurationMs = strandBakeA.y;
+  const strandSeed = strandBakeA.z;
+  const strandLeaderFrac = strandBakeA.w;
+  const strandBakeB = attribute('strandBakeB', 'vec3');
+  const strandRestrikeCount = strandBakeB.x;
+  const strandBaseIntensity = strandBakeB.y;
+  const strandWidthScale = strandBakeB.z;
 
   /** Cubic smoothstep of an already-clamped-at-0 ratio — the shader twin of
    * lightning-geometry.js's own `smooth01`. */

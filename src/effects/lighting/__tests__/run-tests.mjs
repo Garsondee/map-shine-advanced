@@ -16,6 +16,9 @@ import { run as runRegionGeometry } from './region-geometry.test.mjs';
 import { run as runLightVisibility } from './light-visibility.test.mjs';
 import { run as runSunOcclusion } from './sun-occlusion.test.mjs';
 import { run as runSunOcclusionRender } from './sun-occlusion-render.test.mjs';
+import { run as runCasterPack } from './caster-pack.test.mjs';
+import { run as runLayerSmear } from './layer-smear.test.mjs';
+import { run as runLayerSmearRender } from './layer-smear-render.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -52,6 +55,9 @@ const suites = [
   ['light-visibility', runLightVisibility],
   ['sun-occlusion', runSunOcclusion],
   ['sun-occlusion-render', runSunOcclusionRender],
+  ['caster-pack', runCasterPack],
+  ['layer-smear', runLayerSmear],
+  ['layer-smear-render', runLayerSmearRender],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

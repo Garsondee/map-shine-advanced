@@ -25,7 +25,7 @@ export { resolveSky, applySkyEdit, normalizeSky, DEFAULT_SKY } from './sky-setti
 // more: it needs five hand-assembled inputs, and hand-assembling them is the
 // bug class `wind/handle-only` (tools/verify-structure.mjs) now fails the build
 // over. Consumers take a handle; only world/ builds one.
-export { createWindHandle, packWindCells } from './wind-access.js';
+export { createWindHandle, packWindCells, WIND_CELL_VEC4_STRIDE } from './wind-access.js';
 export {
   validateWindContributor,
   deflectAroundWalls,
@@ -37,6 +37,10 @@ export {
   WALL_MOMENTUM_GUARD_LOW,
   WALL_MOMENTUM_GUARD_HIGH,
   WALL_IMPACT_CHAOS_GAIN,
+  // Exported so the wind PROBE applies the identical shelter strength the
+  // renderer does — an instrument holding its own copy of this number is how it
+  // starts reporting a wind the scene isn't actually showing.
+  WIND_SHADOW_DEPTH,
 } from './wind-field.js';
 export { ambientVectorFromWind, computeWindBakeGridSpec, rasterizeWallsToGrid } from './wind-bake.js';
 export {
@@ -52,6 +56,8 @@ export {
   wallAvoidanceDirectionFromDistance,
   wallProximityFromDistance,
   WALL_DEFLECT_REACH_CELLS,
+  upwindShelter,
+  WIND_SHADOW_REACH_CELLS,
 } from './wind-enclosure.js';
 export {
   computeOneShotGain01,

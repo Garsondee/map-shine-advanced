@@ -35,11 +35,28 @@
  *              it is structure in a quantity that is already visible, rather
  *              than a new quantity that needs a light to be seen.
  *
- * Both ride ONE noise fetch. The slope itself is deliberately not computed —
- * it would be a uniform nothing reads, which is the exact disease
- * `params/no-dead-controls` exists to stop (V2 shipped `microChop*` fully
- * exposed and fully dead). It arrives in rung 3 with the shading that makes it
- * mean something.
+ * Both ride ONE noise fetch.
+ *
+ * ⚠️ **THE SLOPE ARRIVED 2026-07-29, THREE DAYS LATE, AND ITS ABSENCE WAS A
+ * MEASURED BUG.** This header used to end: *"The slope itself is deliberately
+ * not computed — it would be a uniform nothing reads... It arrives in rung 3
+ * with the shading that makes it mean something."* Rung 3 then shipped
+ * **without it**, hardcoding a flat `N = (0,0,1)` (`water-light.js`'s `.z`
+ * swizzles), and nothing noticed because nobody ever measured what tier 3 put
+ * on screen — only that its sun-direction trig was right.
+ *
+ * A CPU twin finally measured it: the sun term came out at **1e-6 … 1e-3**
+ * against an invisible-threshold of 0.008, and the sky term at a **spatially
+ * CONSTANT 0.0084**. The rung was a flat, invisible wash. The cause is that a
+ * flat normal and a near-mirror lobe are two DIFFERENT models bolted together
+ * — a BRDF's roughness IS a surface's statistical slope distribution, so
+ * claiming both "polished mirror" and "no slope" leaves the sun's mirror locus
+ * off-screen at every realistic elevation (measured: 1.7 to 11.2 screen
+ * half-widths away). See `water-light.js`'s own header for the numbers.
+ *
+ * So this rung now also returns `slope`, and it is FREE: the same
+ * `mx_fractal_noise_vec3` fetch already in flight returns three channels and
+ * only two were being read. `n.z` was dead. No extra sample, no extra pass.
  *
  * ============================================================================
  * FLOW: TRAVEL IS GLOBAL, THE BANK ONLY WARPS — AND THAT SPLIT IS LOAD-BEARING
@@ -82,6 +99,44 @@ export const WATER_TIER2_FLOW_ANGLE_DEG = 0;
 export const WATER_TIER2_FOAM = 0.35;
 
 /**
+ * TIER 3's WAVE STEEPNESS — the scale factor from the raw noise channels to a
+ * surface SLOPE (rise over run), and therefore the single control over how
+ * hard the water glitters.
+ *
+ * ⚠️ **THIS IS A PHYSICAL QUANTITY WITH MEASURED REAL-WORLD VALUES, NOT A
+ * TASTE KNOB.** Cox & Munk (1954) measured sea-surface slope statistics from
+ * sun-glitter photographs and got a result still used today:
+ *
+ *     sigma^2 = 0.003 + 0.00512 * W        (W = wind speed, m/s)
+ *
+ * so RMS slope runs ~0.055 (dead calm) to ~0.28 (15 m/s). The default here
+ * targets a light breeze, which is what almost every map's water is meant to
+ * be. An author who wants a mirror-flat tarn turns it toward 0.
+ *
+ * ⚠️ **MORE IS NOT BRIGHTER — THIS CONTROL HAS AN OPTIMUM, AND IT WAS MEASURED
+ * RATHER THAN ASSUMED.** The first version of this constant was 0.55, picked
+ * by reasoning from Cox-Munk alone. A brightness sweep
+ * (`__tests__/water-light.test.mjs`) then showed sparkle coverage PEAKS near
+ * 0.40 and falls away above it: past that steepness, most facets have tilted
+ * so far that they no longer point anywhere near the sun-view bisector at all,
+ * so the surface scatters light more widely and glitters LESS. Measured at sun
+ * 60°, the fraction of surface reaching the sheen band: 5.2% at chop 0.40,
+ * 4.1% at 0.55, 1.2% at 1.20. The slider still runs well past the optimum on
+ * purpose — a storm-tossed surface genuinely is duller and more uniform than a
+ * breeze-ruffled one, and that is a look an author may want.
+ *
+ * It is expressed as a multiplier on the noise rather than as an RMS directly,
+ * because the noise's own RMS is a property of `mx_fractal_noise_vec3`'s
+ * octave sum that this module cannot know in Node — the Shader Lab measures it
+ * on the real GPU (`tools/shader-lab/`). ⚠️ **So this number is CALIBRATED
+ * AGAINST AN ASSUMED noise distribution, not derived from the real one.** If
+ * the lab measures the true RMS and it differs, this is the constant to move —
+ * and the optimum's SHAPE (a peak, then decline) is the robust finding, not
+ * its exact location.
+ */
+export const WATER_TIER3_CHOP = 0.4;
+
+/**
  * How far the bank's tangent may warp the noise domain, as a FRACTION OF ONE
  * NOISE CELL. Not a param: it is a statement about how rivers work rather than
  * a look control, and exposing it would mostly offer authors a way to shear
@@ -103,7 +158,7 @@ export const WATER_BANK_INFLUENCE = 0.35;
 export const WATER_FOAM_SHORE_PX = 140;
 
 /**
- * Build tier 2's surface field. One fractal-noise fetch, two readings of it.
+ * Build tier 2's surface field. One fractal-noise fetch, THREE readings of it.
  *
  * @param {object} args
  * @param {*} args.TSL - `THREE.TSL`, injected by the caller that owns THREE.
@@ -124,8 +179,13 @@ export const WATER_FOAM_SHORE_PX = 140;
  * @param {*} args.uFlowSpeedPx - float uniform node.
  * @param {*} args.uFlowAngleRad - float uniform node.
  * @param {*} args.uFoam - float uniform node.
- * @returns {{foam: *, turbidity: *}} `foam` 0..1 (white surface coverage),
- *   `turbidity` roughly −1..1 (a MULTIPLIER offset on optical depth).
+ * @param {*} [args.uChop] - float uniform node: tier 3's wave steepness
+ *   ({@link WATER_TIER3_CHOP}). Absent yields a flat `slope` of exactly zero,
+ *   which reproduces the pre-2026-07-29 flat-normal behaviour bit for bit —
+ *   so a caller that has not been updated gets the OLD look, not a crash.
+ * @returns {{foam: *, turbidity: *, slope: *}} `foam` 0..1 (white surface
+ *   coverage), `turbidity` roughly −1..1 (a MULTIPLIER offset on optical
+ *   depth), `slope` a vec2 of surface gradient (rise/run) for tier 3's normal.
  */
 export function buildWaterSurfaceField({
   TSL,
@@ -138,6 +198,7 @@ export function buildWaterSurfaceField({
   uFlowSpeedPx,
   uFlowAngleRad,
   uFoam,
+  uChop = null,
 }) {
   const { vec2, vec3, float, max, min, dot, cos, sin, smoothstep, mx_fractal_noise_vec3 } = TSL;
 
@@ -215,5 +276,24 @@ export function buildWaterSurfaceField({
   const shoreGate = float(1).sub(smoothstep(float(0), float(WATER_FOAM_SHORE_PX), shoreDist));
   const foam = min(crest.mul(shoreGate).mul(insideWater).mul(uFoam), float(1));
 
-  return { foam, turbidity };
+  // SLOPE — the third reading of the same fetch, and the one this rung spent
+  // three days owing rung 3 (see the header). `n.z` was previously DEAD: the
+  // fetch returns a vec3 and only x and y were ever read.
+  //
+  // ⚠️ **THIS IS A NORMAL-PERTURBATION FIELD, NOT THE GRADIENT OF `n.y`.** Two
+  // independent smooth noise channels read as a 2-vector is exactly how a
+  // normal-map texture works, and it is what the shading needs: a smooth,
+  // correctly-correlated, zero-mean slope field. Finite-differencing the
+  // height would be the other honest option and costs two MORE fetches for a
+  // result no more useful here — from a top-down camera nothing reveals which
+  // of the two produced the highlight, only that the surface has slope at all.
+  //
+  // ⚠️ **PAIRED WITH `n.y`, THE FOAM CHANNEL, DELIBERATELY.** Slope and foam
+  // sharing a channel means the steepest water is also the foamiest, which is
+  // what a real crest does — they break BECAUSE they are steep. Re-rolling
+  // this onto an independent channel would decorrelate two things physics
+  // couples, for no saving.
+  const slope = uChop ? vec2(n.y, n.z).mul(uChop) : vec2(0, 0);
+
+  return { foam, turbidity, slope };
 }

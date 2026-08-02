@@ -15,6 +15,7 @@ import { run as runWater } from './water.test.mjs';
 import { run as runWaterFloor } from './water-floor.test.mjs';
 import { run as runWaterBody } from './water-body.test.mjs';
 import { run as runWaterLight } from './water-light.test.mjs';
+import { run as runWaterRender } from './water-render.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -48,6 +49,10 @@ const suites = [
   ['water-floor', runWaterFloor],
   ['water-body', runWaterBody],
   ['water-light', runWaterLight],
+  // LAST, because it is the only suite that imports the real THREE bundle —
+  // keeping it at the end means a failure in the pure-arithmetic suites is
+  // reported before the heavyweight one even loads.
+  ['water-render', runWaterRender],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

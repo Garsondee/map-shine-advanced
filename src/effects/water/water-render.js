@@ -179,6 +179,7 @@ import {
   WATER_TIER2_FLOW_SPEED_PX,
   WATER_TIER2_FLOW_ANGLE_DEG,
   WATER_TIER2_FOAM,
+  WATER_TIER3_CHOP,
 } from './water-field.js';
 import {
   buildWaterSpecular,
@@ -432,6 +433,7 @@ export function buildWaterSurfaceMaterial({
   skySheen = WATER_TIER3_SKY_SHEEN,
   glossiness = WATER_TIER3_GLOSSINESS,
   viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
+  chop = WATER_TIER3_CHOP,
   tier = WATER_DEFAULT_TIER,
 }) {
   // THE GATE. Clamped/coerced ONCE, here, so every `if (activeTier >= N)`
@@ -457,6 +459,7 @@ export function buildWaterSurfaceMaterial({
   const uFlowSpeedPx = uniform(float(flowSpeedPx));
   const uFlowAngleRad = uniform(float((flowAngleDeg * Math.PI) / 180));
   const uFoam = uniform(float(foam));
+  const uChop = uniform(float(chop));
   const uTurbidity = uniform(float(WATER_TIER2_TURBIDITY));
   const uWetBandPx = uniform(float(wetBandPx));
   const uWetStrength = uniform(float(wetStrength));
@@ -575,11 +578,12 @@ export function buildWaterSurfaceMaterial({
   //
   // ⚠️ NEUTRAL below tier 2, and the fractal-noise fetch ITSELF never runs
   // below it, not just its result: zero turbidity leaves the optical depth
-  // exactly what tier 1 computed, and zero foam hides nothing and adds
-  // nothing. `tangentXY` reads `bodyTexNode`, which is only non-null once
+  // exactly what tier 1 computed, zero foam hides nothing and adds nothing,
+  // and a zero slope leaves tier 3 (if it somehow ran) on the flat normal.
+  // `tangentXY` reads `bodyTexNode`, which is only non-null once
   // `activeTier >= 2` (rungs are cumulative — tier 2 can never be reached
   // without tier 1 already being affordable, effect-cascade.js#resolveEffectTier).
-  let field = { foam: float(0), turbidity: float(0) };
+  let field = { foam: float(0), turbidity: float(0), slope: null };
   if (activeTier >= 2) {
     field = buildWaterSurfaceField({
       TSL: THREE.TSL,
@@ -592,6 +596,11 @@ export function buildWaterSurfaceMaterial({
       uFlowSpeedPx,
       uFlowAngleRad,
       uFoam,
+      // TIER 3's WAVE NORMAL rides tier 2's fetch — see `water-light.js`'s
+      // header for why its absence made rung 3 measure invisible. Passed here
+      // rather than inside the tier-3 block below because the FETCH belongs to
+      // tier 2; only its third reading is tier 3's.
+      uChop,
     });
   }
 
@@ -652,6 +661,7 @@ export function buildWaterSurfaceMaterial({
     setGlossiness() {},
     setViewerHeight() {},
     outdoorsGateCompiled: false,
+    normalCompiled: false,
   };
   if (activeTier >= 3) {
     specular = buildWaterSpecular({
@@ -665,6 +675,11 @@ export function buildWaterSurfaceMaterial({
       skySheen,
       glossiness,
       viewerHeight,
+      // THE WAVE NORMAL. Non-null here by construction — rungs are cumulative,
+      // so reaching tier 3 means tier 2 built the field above. Passing it is
+      // what separates a visible rung from the flat 0.0084 wash this shipped
+      // as; `water-light.js`'s header carries the measurement.
+      slopeXY: field.slope,
     });
   }
 
@@ -820,6 +835,13 @@ export function buildWaterSurfaceMaterial({
     setFoam(v) {
       uFoam.value = v;
     },
+    /** WATER_PARAMS `chop` — tier 3's wave steepness. Floored at 0 (a mirror
+     * pond) rather than allowed negative: a negative slope scale would flip
+     * every wave normal's lean without changing its magnitude, which is not a
+     * calmer surface, just a differently-wrong one. */
+    setChop(v) {
+      uChop.value = Math.max(0, v);
+    },
     setWetBandPx(v) {
       uWetBandPx.value = v;
     },
@@ -850,6 +872,10 @@ export function buildWaterSurfaceMaterial({
     /** For the debug report — whether the outdoors branch is real on this
      * scene or compiled to the indoors constant. */
     outdoorsGateCompiled: specular.outdoorsGateCompiled,
+    /** For the debug report — whether tier 3 got a real wave normal. See
+     * `water-light.js#normalCompiled`: `false` is the measured-invisible
+     * configuration, and it fails silently. */
+    normalCompiled: specular.normalCompiled ?? false,
     setTint(rgb) {
       uTint.value.set(rgb[0], rgb[1], rgb[2]);
     },

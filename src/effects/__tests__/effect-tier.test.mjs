@@ -23,12 +23,11 @@ import {
 import { candleTierPlan, CANDLE_DEFAULT_TIER } from '../candle-flame-geometry.js';
 import { vegetationTierPlan, VEGETATION_DEFAULT_TIER } from '../vegetation-render.js';
 import {
-  sunShadowTierPlan,
-  sunShadowBakeSamples,
-  SUN_SHADOW_DEFAULT_TIER,
-  SUN_SHADOW_MAX_TIER,
-  DEFAULT_LATERAL_TAPS,
-} from '../lighting/sun-occlusion.js';
+  layerSmearTierPlan,
+  layerSmearBakeSamples,
+  LAYER_SMEAR_DEFAULT_TIER,
+  LAYER_SMEAR_MAX_TIER,
+} from '../lighting/layer-smear.js';
 import { UI_WINDOW_SHADOW } from '../ui-window-shadow.js';
 import { CANDLE_FLAME } from '../candle-flame.js';
 import { SPECULAR } from '../specular/specular.js';
@@ -359,7 +358,7 @@ export function run(t) {
   );
   ok(
     '...and what that player gets is a REAL shadow (the coarse pin), not an on-switch that draws nothing',
-    sunShadowTierPlan(resolveEffectTier(SUN_SHADOWS, { profile: 'low' }).tier).marchSteps > 0
+    layerSmearTierPlan(resolveEffectTier(SUN_SHADOWS, { profile: 'low' }).tier).steps > 0
   );
 
   // The ladder itself: one rung per profile from `performance` up.
@@ -369,95 +368,83 @@ export function run(t) {
   ok('extreme buys the top rung', resolveEffectTier(SUN_SHADOWS, { profile: 'extreme' }).tier === 3);
   ok(
     'the ladder`s height matches the plan table — one prose rung per arithmetic rung, no orphan on either side',
-    resolveEffectTier(SUN_SHADOWS, { profile: 'extreme' }).maxTier === SUN_SHADOW_MAX_TIER
+    resolveEffectTier(SUN_SHADOWS, { profile: 'extreme' }).maxTier === LAYER_SMEAR_MAX_TIER
   );
   ok(
     'the sun-shadow fallback tier IS what the default profile resolves to — no second authority',
-    resolveEffectTier(SUN_SHADOWS, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === SUN_SHADOW_DEFAULT_TIER
+    resolveEffectTier(SUN_SHADOWS, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === LAYER_SMEAR_DEFAULT_TIER
   );
 
-  // 🔒 THE "DO NOT RESTYLE EVERY EXISTING SCENE" PIN. These four numbers ARE
-  // the shipped 2026-07-28 look; the ladder was built around them, not over
+  // 🔒 THE "DO NOT RESTYLE EVERY EXISTING SCENE" PIN, re-based 2026-08-02 onto
+  // the layer-smear ladder (`layer-smear.js#LAYER_SMEAR_TIER_PLANS`) — these
+  // numbers ARE the shipped look; the ladder was built around them, not over
   // them. If a rung is ever retuned and this block goes red, the fix is to
   // move the rung back — not to update the numbers here.
-  const sunShipped = sunShadowTierPlan(SUN_SHADOW_DEFAULT_TIER);
+  const sunShipped = layerSmearTierPlan(LAYER_SMEAR_DEFAULT_TIER);
   ok(
-    'the default rung reproduces TODAY exactly — 1024² field, 24 march steps, a 3-tap cone, re-marched every 0.5°',
-    sunShipped.fieldDim === 1024 &&
-      sunShipped.marchSteps === 24 &&
-      sunShipped.lateralTaps === 3 &&
-      sunShipped.quantizeDeg === 0.5
+    'the default rung reproduces TODAY exactly — 1024² field, 24 stations, re-baked every 0.5°',
+    sunShipped.fieldDim === 1024 && sunShipped.steps === 24 && sunShipped.quantizeDeg === 0.5
   );
   ok(
-    'the default rung`s SILHOUETTE resolution is the shared 512 grid too — casterGridDim is a SEPARATE axis ' +
-      'from fieldDim (2026-07-30), and standard must not raise it past what every other consumer already budgets for',
-    sunShipped.casterGridDim === 512
-  );
-  ok(
-    'and the cone`s shipped width is the shader builder`s OWN default, so an unwired build matches the ladder',
-    sunShipped.lateralTaps === DEFAULT_LATERAL_TAPS
+    'the default rung`s layer-texture resolution now scales WITH fieldDim (1024²) — the 2026-08-02 fix that ' +
+      'stopped walls/overhead pinning to the shared 512 grid regardless of tier (found auditing every ' +
+      'sun-occlusion.js export before deleting the retired march)',
+    sunShipped.layerGridDim === 1024
   );
   ok(
     'an absent tier falls back to that same rung, so an unwired caller sees no change',
-    sunShadowTierPlan(undefined).fieldDim === sunShipped.fieldDim &&
-      sunShadowTierPlan(undefined).marchSteps === sunShipped.marchSteps
+    layerSmearTierPlan(undefined).fieldDim === sunShipped.fieldDim &&
+      layerSmearTierPlan(undefined).steps === sunShipped.steps
   );
 
-  // MONOTONICITY on all four axes — a better machine never gets a coarser
-  // field, a shorter march, a narrower cone, or a poppier sun.
-  const sunRungs = [0, 1, 2, 3].map(sunShadowTierPlan);
+  // MONOTONICITY — a better machine never gets a coarser field, a shorter
+  // bake, or a poppier sun. (No lateral-tap axis any more — the layer-smear
+  // model has no cone-width concept; each station reads the whole texel
+  // directly, unlike the retired march's per-tap sampling.)
+  const sunRungs = [0, 1, 2, 3].map(layerSmearTierPlan);
   ok(
     'field resolution never DROPS as the ladder climbs',
     sunRungs.every((p, i) => i === 0 || p.fieldDim >= sunRungs[i - 1].fieldDim)
   );
   ok(
-    'the CASTER SILHOUETTE resolution never drops either, and strictly climbs past standard — the ' +
-      'author`s "extreme should increase resolutions" ask, on the axis that actually sharpens a silhouette ' +
-      '(fieldDim alone never could — see casterGridDim`s own doc in sun-occlusion.js)',
-    sunRungs.every((p, i) => i === 0 || p.casterGridDim >= sunRungs[i - 1].casterGridDim) &&
-      sunRungs[2].casterGridDim > sunRungs[1].casterGridDim &&
-      sunRungs[3].casterGridDim > sunRungs[2].casterGridDim
+    'the layer texture`s own resolution strictly climbs at every rung too — it now scales WITH fieldDim, ' +
+      'unlike the retired model`s shared-grid silhouette axis that stayed pinned at 512 regardless of tier',
+    sunRungs.every((p, i) => i === 0 || p.layerGridDim > sunRungs[i - 1].layerGridDim)
   );
   ok(
-    'march steps strictly increase — every rung buys a finer march, none is a re-label',
-    sunRungs.every((p, i) => i === 0 || p.marchSteps > sunRungs[i - 1].marchSteps)
-  );
-  ok(
-    'the cone strictly widens — the axis the author actually notices (pixel-perfect silhouette edges)',
-    sunRungs.every((p, i) => i === 0 || p.lateralTaps > sunRungs[i - 1].lateralTaps)
+    'station count strictly increases — every rung buys a finer bake, none is a re-label',
+    sunRungs.every((p, i) => i === 0 || p.steps > sunRungs[i - 1].steps)
   );
   ok(
     'the sun-motion threshold never gets COARSER — a better machine never gets poppier shadows',
     sunRungs.every((p, i) => i === 0 || p.quantizeDeg <= sunRungs[i - 1].quantizeDeg)
   );
-  ok(
-    'every rung marches an ODD number of lateral taps, so the cone keeps a CENTRE ray — an even count ' +
-      'would sample only off-axis and shift the whole shadow sideways',
-    sunRungs.every((p) => p.lateralTaps % 2 === 1)
-  );
 
   // THE COST GRADIENT, in the only unit this system honestly has (bake texture
   // samples — the bakes have never fired inside a profiling window, so there is
   // no measured ms for any rung and inventing one would be an instrument that
-  // lies).
-  const sunSamples = sunRungs.map(sunShadowBakeSamples);
-  const shippedSamples = sunShadowBakeSamples(sunShipped);
+  // lies). Ratios differ from the retired march's own — this model's cost is
+  // `fieldDim² × (steps+1)` alone, with no lateral-tap multiplier — so the
+  // thresholds below are re-measured against the CURRENT ladder, not carried
+  // over from the model they replaced.
+  const sunSamples = sunRungs.map(layerSmearBakeSamples);
+  const shippedSamples = layerSmearBakeSamples(sunShipped);
   ok(
     'bake cost is strictly monotonic up the ladder',
     sunSamples.every((s, i) => i === 0 || s > sunSamples[i - 1])
   );
   ok(
-    'the coarse pin is DRAMATICALLY cheaper than today — a real saving, not a token one (>10× less)',
-    sunSamples[0] * 10 < shippedSamples
+    'the coarse pin is dramatically cheaper than today — a real saving, not a token one (>5× less)',
+    sunSamples[0] * 5 < shippedSamples
   );
   ok(
     'quality costs more than standard but stays inside 3× — a bake is a HITCH, not a frame cost',
     sunSamples[2] > shippedSamples && sunSamples[2] < shippedSamples * 3
   );
   ok(
-    'extreme is the dearest rung and still bounded at 5× the shipped bake — the ceiling is what a player ' +
+    'extreme is the dearest rung and still bounded at 8× the shipped bake — the ceiling is what a player ' +
       'will tolerate as a stutter a few times a minute, not what a GPU can survive',
-    sunSamples[3] > sunSamples[2] && sunSamples[3] <= shippedSamples * 5
+    sunSamples[3] > sunSamples[2] && sunSamples[3] <= shippedSamples * 8
   );
   ok(
     'no rung asks for a field above the Keyhole 2048 world-res cap (three-allocator.js would throw at ' +
@@ -465,24 +452,24 @@ export function run(t) {
     sunRungs.every((p) => p.fieldDim <= 2048)
   );
   ok(
-    'the caster grid stays under the SAME 2048 cap too — it is a second, independent allocation ' +
-      '(mask-derive.js#deriveFloorProducts`s casterGridSpec), not exempt from the ceiling that governs everything else',
-    sunRungs.every((p) => p.casterGridDim <= 2048)
+    'the layer texture stays under the SAME 2048 cap too — it is a second, independent allocation, not ' +
+      'exempt from the ceiling that governs everything else',
+    sunRungs.every((p) => p.layerGridDim <= 2048)
   );
 
   // TOTALITY — same posture as every other plan in this file.
   ok(
     'a wildly out-of-range tier clamps into the ladder rather than returning undefined',
-    sunShadowTierPlan(999).fieldDim === sunRungs[3].fieldDim &&
-      sunShadowTierPlan(999).casterGridDim === sunRungs[3].casterGridDim
+    layerSmearTierPlan(999).fieldDim === sunRungs[3].fieldDim &&
+      layerSmearTierPlan(999).layerGridDim === sunRungs[3].layerGridDim
   );
   ok(
     'a negative tier clamps to the coarse pin',
-    sunShadowTierPlan(-3).fieldDim === sunRungs[0].fieldDim &&
-      sunShadowTierPlan(-3).casterGridDim === sunRungs[0].casterGridDim
+    layerSmearTierPlan(-3).fieldDim === sunRungs[0].fieldDim &&
+      layerSmearTierPlan(-3).layerGridDim === sunRungs[0].layerGridDim
   );
   ok(
     'a malformed plan costs zero samples rather than NaN — a status report must never print NaN',
-    sunShadowBakeSamples(null) === 0 && sunShadowBakeSamples({ fieldDim: 8 }) === 0
+    layerSmearBakeSamples(null) === 0 && layerSmearBakeSamples({ steps: 5 }) === 0
   );
 }

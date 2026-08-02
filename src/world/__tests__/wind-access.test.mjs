@@ -25,6 +25,7 @@ function makeCells() {
   const wallAvoidDirX = new Float32Array(CELLS);
   const wallAvoidDirY = new Float32Array(CELLS);
   const wallProximity = new Float32Array(CELLS);
+  const windShadow = new Float32Array(CELLS);
   const solid = new Uint8Array(CELLS);
   for (let y = 0; y < GRID.rows; y++) {
     for (let x = 0; x < GRID.cols; x++) {
@@ -35,16 +36,25 @@ function makeCells() {
       wallProximity[i] = Math.max(0, 1 - Math.abs(x - 2) / 3);
       wallAvoidDirX[i] = wallProximity[i] > 0 ? 1 : 0;
       wallAvoidDirY[i] = 0;
+      // A non-uniform, deliberately NON-ZERO shadow that does not correlate with
+      // openness or proximity — a field that happened to be zero everywhere
+      // would let the two paths agree while both ignored it entirely.
+      windShadow[i] = ((x * 3 + y * 5) % 7) / 7;
     }
   }
-  return { openness, wallAvoidDirX, wallAvoidDirY, wallProximity, solid };
+  return { openness, wallAvoidDirX, wallAvoidDirY, wallProximity, windShadow, solid };
 }
 
-/** The same cells, packed the way both compute kernels pack their storage buffer. */
+/**
+ * The same cells, packed the way both compute kernels pack their storage buffer
+ * — WIND_CELL_VEC4_STRIDE vec4s per cell. Mirrors `packWindCells`' own layout;
+ * a drift between the two shows up as a parity failure, which is the point.
+ */
 function packVec4(cells) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
     out.push([cells.openness[i], cells.wallAvoidDirX[i], cells.wallAvoidDirY[i], cells.wallProximity[i]]);
+    out.push([cells.windShadow[i], 0, 0, 0]);
   }
   return out;
 }
@@ -56,11 +66,15 @@ function makeHandle(cells, { ambient = true } = {}) {
     grid: GRID,
     // B = openness, A = exteriorOpenness — the real channel contract.
     opennessTexture: gridTexture(GRID, (i) => [0, 0, cells.openness[i], cells.openness[i]]),
+    // R/G = wall-away direction, B = proximity, A = the wind shadow. A was a
+    // constant 1 here until 2026-08-01, when the shadow claimed that channel;
+    // the node path MUST read the same per-cell value the kernel's buffer
+    // carries or the parity test is comparing two different fields.
     wallAvoidTexture: gridTexture(GRID, (i) => [
       cells.wallAvoidDirX[i],
       cells.wallAvoidDirY[i],
       cells.wallProximity[i],
-      1,
+      cells.windShadow[i],
     ]),
     cells,
     cpuExposureAt: (x) => (x < 0 ? 0 : 1),
@@ -123,6 +137,34 @@ export function run(t) {
     ok(
       `node ↔ kernel coherent-term parity across all ${checked} cells (worst Δ ${worst.toExponential(2)})`,
       worst < 1e-9
+    );
+  }
+
+  // --- THE WIND SHADOW ACTUALLY BITES --------------------------------------
+  // The parity test above proves the two paths AGREE about the shadow. It would
+  // keep passing if the term were deleted from both of them, so this asserts
+  // separately that a shadowed cell genuinely loses coherent wind. Same cell,
+  // same everything, one field changed.
+  {
+    const lit = makeCells();
+    const shaded = makeCells();
+    lit.windShadow = new Float32Array(CELLS); // no shadow anywhere
+    shaded.windShadow = new Float32Array(CELLS).fill(1); // fully occluded everywhere
+
+    const speedAt = (cellsIn, cx, cy) => {
+      const h = makeHandle(cellsIn);
+      const buf = storageBuffer(packVec4(cellsIn));
+      const k = h.kernel(T, { centerXY: T.vec2(...cellCentre(cx, cy)), time: T.float(0), cellBuffer: buf });
+      return Math.hypot(...values(k.coherent));
+    };
+    // An OPEN cell well clear of the wall, so neither openness nor deflection
+    // is what moves the number.
+    const exposed = speedAt(lit, 7, 0);
+    const sheltered = speedAt(shaded, 7, 0);
+    ok('a fully shadowed cell carries less coherent wind than an exposed one', sheltered < exposed);
+    ok(
+      'the shadow attenuates but never fully kills the wind (a lee is slack air, not a vacuum)',
+      sheltered > 0 && sheltered < exposed * 0.5
     );
   }
 

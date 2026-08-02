@@ -12,8 +12,13 @@ import {
   buildTessellatedQuadGeometry,
   VEGETATION_MIN_SEGMENTS,
   VEGETATION_MAX_SEGMENTS,
+  vegetationPassiveElevation,
+  vegetationOverlayRenderOrder,
+  flutterFoldFreeAmplitudePx,
+  VEG_FLUTTER_FOLD_SAFETY,
 } from '../vegetation-render.js';
 import { VEGETATION_KINDS } from '../vegetation.js';
+import { makeLayerKey, sortByLayer, SORT_LAYERS } from '../../scene/layer-order.js';
 
 export function run(t) {
   const { ok } = t;
@@ -69,6 +74,188 @@ export function run(t) {
 
   // --- validateVegetationKinds against the REAL declared table -------------
   ok('the real VEGETATION_KINDS table validates', validateVegetationKinds(VEGETATION_KINDS).ok);
+  {
+    // A fraction outside 0..1 would sort the overlay into a DIFFERENT floor's
+    // art — always a typo, never a tuning choice.
+    const outOfBand = VEGETATION_KINDS.map((k) => ({ ...k, passiveElevationFraction: 1.4 }));
+    ok('a passiveElevationFraction above 1 fails validation', !validateVegetationKinds(outOfBand).ok);
+    const missing = VEGETATION_KINDS.map((k) => {
+      const copy = { ...k };
+      delete copy.passiveElevationFraction;
+      return copy;
+    });
+    ok('a MISSING passiveElevationFraction fails validation', !validateVegetationKinds(missing).ok);
+  }
+
+  // ==========================================================================
+  // PASSIVE ELEVATION — the fix for "a tile at elevation 0 / sort 1 draws over
+  // every bush and tree" (author-reported 2026-08-01).
+  //
+  // These assert the author's own stated OUTCOMES — which drawable ends up on
+  // top — NOT the arithmetic that produces them. The numbers are an
+  // implementation detail of `sortByLayer`'s dense indexing; the ORDER is the
+  // contract, and it is the thing that was actually wrong.
+  // ==========================================================================
+  {
+    const tree = VEGETATION_KINDS.find((k) => k.id === 'tree');
+    const bush = VEGETATION_KINDS.find((k) => k.id === 'bush');
+    const band = { bottom: 0, top: 20 }; // the author's own worked example
+
+    ok('bush sits halfway up its floor band', vegetationPassiveElevation(bush, band) === 10);
+    ok('tree sits at the top of its floor band', vegetationPassiveElevation(tree, band) === 20);
+    ok(
+      'a band with an undeclared (Infinite) ceiling yields null, never Infinity/NaN',
+      vegetationPassiveElevation(bush, { bottom: 0, top: Infinity }) === null &&
+        vegetationPassiveElevation(bush, { bottom: -Infinity, top: 20 }) === null
+    );
+    ok('a missing band yields null rather than throwing', vegetationPassiveElevation(bush, null) === null);
+    ok(
+      'a zero-height band is legitimate — every kind collapses onto that one elevation',
+      vegetationPassiveElevation(bush, { bottom: 7, top: 7 }) === 7 &&
+        vegetationPassiveElevation(tree, { bottom: 7, top: 7 }) === 7
+    );
+
+    // A realistic draw list on a 0..20 floor: ground art, four tiles at the
+    // author's exact test elevations, and the floor's roof art on top.
+    const mk = (id, elevation, sortLayer, zIndex = 0) => ({
+      id,
+      key: makeLayerKey({ elevation, sortLayer, sort: 0, zIndex }),
+    });
+    const items = sortByLayer([
+      mk('ground', 0, SORT_LAYERS.SCENE, 0),
+      mk('tile@9', 9, SORT_LAYERS.TILES),
+      mk('tile@10', 10, SORT_LAYERS.TILES),
+      mk('tile@19', 19, SORT_LAYERS.TILES),
+      mk('tile@20', 20, SORT_LAYERS.TILES),
+      mk('roof', 20, SORT_LAYERS.SCENE, 1),
+    ]);
+    const host = items.find((i) => i.id === 'ground');
+    const at = (id) => items.find((i) => i.id === id).renderOrder;
+    const bushOrder = vegetationOverlayRenderOrder(items, host, bush, band).renderOrder;
+    const treeOrder = vegetationOverlayRenderOrder(items, host, tree, band).renderOrder;
+
+    // THE BUG ITSELF: the host is the ground at renderOrder 0, and EVERY tile
+    // sorts above it. Under the old `host.renderOrder + nudge` this put both
+    // kinds below every single tile on the map.
+    ok('vegetation no longer sorts next to its host — it clears the low tiles', bushOrder > at('tile@9'));
+
+    ok("a tile BELOW the bush's half-height draws under it", at('tile@9') < bushOrder);
+    ok('a tile AT the half-height mark beats the bush (ties go to the tile)', at('tile@10') > bushOrder);
+    ok('a tile below the floor top draws under the tree', at('tile@19') < treeOrder);
+    ok('only a tile at the very top of the floor beats the tree', at('tile@20') > treeOrder);
+    ok('canopy still draws above undergrowth', treeOrder > bushOrder);
+    // The documented, deliberate consequence of SCENE_EFFECTS > SCENE: an
+    // author who wants roof art over a canopy puts it on a TILE at the top.
+    ok('a tree at the floor top draws over that floor’s roof art', treeOrder > at('roof'));
+
+    // The bush must land strictly BETWEEN two real drawables — never colliding
+    // with one, which would make the winner depend on THREE's own sort
+    // stability rather than on the law.
+    ok(
+      'the overlay lands strictly between two real slots, never tied with one',
+      !Number.isInteger(bushOrder) && !Number.isInteger(treeOrder)
+    );
+
+    // Unbounded band → the legacy host-relative nudge, and it SAYS so.
+    const fallback = vegetationOverlayRenderOrder(items, host, bush, { bottom: 0, top: Infinity });
+    ok(
+      'an unbounded floor band falls back to the host-relative nudge and reports it',
+      fallback.fellBack === true && fallback.renderOrder === host.renderOrder + bush.renderOrderNudge
+    );
+  }
+
+  // ==========================================================================
+  // THE FOLD-FREE FLUTTER BOUND — the fix for "at high wind speed it just
+  // liquifies" (author, 2026-08-01, with a 100%-wind screenshot).
+  //
+  // ⚠️ THIS TEST MEASURES THE PROPERTY, NOT THE FORMULA. Asserting
+  // `flutterFoldFreeAmplitudePx(f) === SAFETY / f` would just restate the
+  // implementation and pass forever, including on the day the bound is wrong.
+  // So it builds a CPU twin of the warp and checks the thing that actually
+  // matters: does `x → x + d(x)` stay INJECTIVE (no fold)? A fold is exactly
+  // what liquify is.
+  //
+  // HONEST SCOPE: the twin's curl noise is a representative smooth
+  // divergence-free field, NOT a port of TSL's `mx_noise_float`, so this proves
+  // the BOUND is the right shape and is applied with real margin — it does not
+  // pin the shader's exact peak gradient. The "5× the cap must fold" assertion
+  // below is what stops it degenerating into a test that cannot fail.
+  // ==========================================================================
+  {
+    // A smooth periodic potential; its curl is divergence-free by construction,
+    // the same property `curlNoise2D` provides in the shader.
+    const potential = (x, y) => Math.sin(x) * Math.cos(y * 1.3 + 0.7) + 0.5 * Math.sin(x * 0.6 + y);
+    const EPS = 1e-4;
+    /** curl(potential) at world (wx, wy), for a noise of frequency `f`. Unit-ish scale. */
+    const curl = (wx, wy, f) => {
+      const x = wx * f;
+      const y = wy * f;
+      const dPdy = (potential(x, y + EPS) - potential(x, y - EPS)) / (2 * EPS);
+      const dPdx = (potential(x + EPS, y) - potential(x - EPS, y)) / (2 * EPS);
+      return [dPdy, -dPdx];
+    };
+
+    /**
+     * Does `p → p + amplitude × curl(p)` fold anywhere on a sampled patch?
+     * Folding shows up as the Jacobian determinant going non-positive: the
+     * local area flips inside out, which is the map ceasing to be injective.
+     */
+    const foldsAnywhere = (f, amplitudePx) => {
+      const h = 0.35 / f; // sample far finer than one feature of the noise
+      for (let i = 0; i < 40; i++) {
+        for (let j = 0; j < 40; j++) {
+          const x = i * h;
+          const y = j * h;
+          const [dx0, dy0] = curl(x, y, f);
+          const [dxX, dyX] = curl(x + h, y, f);
+          const [dxY, dyY] = curl(x, y + h, f);
+          // Jacobian of the FULL map (identity + displacement gradient).
+          const j11 = 1 + (amplitudePx * (dxX - dx0)) / h;
+          const j21 = (amplitudePx * (dyX - dy0)) / h;
+          const j12 = (amplitudePx * (dxY - dx0)) / h;
+          const j22 = 1 + (amplitudePx * (dyY - dy0)) / h;
+          if (j11 * j22 - j12 * j21 <= 0) return true;
+        }
+      }
+      return false;
+    };
+
+    // Every frequency the dials can actually reach: both kinds' own
+    // `flutterSpaceFreq` across the full 0.2..4 `flutterScale` range.
+    const frequencies = [];
+    for (const kind of VEGETATION_KINDS) {
+      for (const scale of [0.2, 0.5, 1, 2, 4]) frequencies.push(kind.flutterSpaceFreq * scale);
+    }
+
+    ok(
+      'at the capped amplitude the warp never folds, at ANY reachable frequency',
+      frequencies.every((f) => !foldsAnywhere(f, flutterFoldFreeAmplitudePx(f)))
+    );
+    // THE TEST MUST BE ABLE TO FAIL. If a grossly over-cap amplitude did NOT
+    // fold, the detector is broken and the assertion above proves nothing.
+    // 10×, not 5×: the twin's potential is smoother than real curl noise, so
+    // its own folding threshold sits around 6-7× the cap — the margin between
+    // "capped, provably safe" and "detector definitely fires" is where the
+    // safety factor lives, and quoting it honestly is the point.
+    ok(
+      'the fold detector genuinely fires at 10× the cap (proving the check above is not vacuous)',
+      frequencies.every((f) => foldsAnywhere(f, flutterFoldFreeAmplitudePx(f) * 10))
+    );
+    ok(
+      'the cap tightens as frequency rises — finer chatter is allowed less throw, which is the whole coupling',
+      flutterFoldFreeAmplitudePx(0.02) > flutterFoldFreeAmplitudePx(0.08)
+    );
+    ok(
+      'the safety fraction sits below the 1/2π folding threshold with real margin',
+      VEG_FLUTTER_FOLD_SAFETY > 0 && VEG_FLUTTER_FOLD_SAFETY < 1 / (2 * Math.PI)
+    );
+    ok(
+      'a zero/degenerate frequency yields 0, never Infinity or NaN (a caller multiplies by this)',
+      flutterFoldFreeAmplitudePx(0) === 0 &&
+        flutterFoldFreeAmplitudePx(-1) === 0 &&
+        Number.isFinite(flutterFoldFreeAmplitudePx(NaN))
+    );
+  }
 
   // --- heightWeight01: pinned root, full tip, monotonic, quadratic ease-in --
   ok('the root (v=0) never moves', heightWeight01(0) === 0);

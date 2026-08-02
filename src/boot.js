@@ -150,7 +150,7 @@ import {
   bloomPreset,
   SUN_SHADOWS,
   sunShadowDebugInclude,
-  sunShadowTierPlan,
+  layerSmearTierPlan,
   SUN_SHADOW_PARAMS,
   describeEffectSettings,
   deriveEffectLayers,
@@ -857,10 +857,10 @@ function install() {
   effectRegistry.register(SUN_SHADOWS, (resolved) => {
     // `perfTier` rides the readout exactly as it does for candles and
     // vegetation — the resolved rung of this effect's ladder, turned into the
-    // march's field resolution, step count, cone width and rebake threshold by
-    // `sun-occlusion.js#sunShadowTierPlan` inside the subsystem. Below the
+    // bake's field resolution, station count and rebake threshold by
+    // `layer-smear.js#layerSmearTierPlan` inside the subsystem. Below the
     // `performance` profile `resolved.enabled` is already false (the manifest's
-    // own gate), and the subsystem then drops the caster field entirely.
+    // own gate), and the subsystem then drops the layer field entirely.
     sunShadowReadout = { enabled: resolved.enabled, params: resolved.params, perfTier: resolved.perfTier };
     const p = resolved.params ?? {};
     // THE ISOLATION IS REAL, NOT A SHADER MULTIPLY. An isolating debug view
@@ -869,13 +869,28 @@ function install() {
     // multiplied by zero (`tsl/no-uniform-gates`). One dropdown drives it —
     // it replaced three bools that could disagree with it and each other
     // (effects/lighting/sun-shadow-debug.js's own header).
+    //
+    // ⚠️ KNOWN STALE for the layer-smear model (2026-08-02): `include.building`
+    // restricted `casterChannels.coverBuilding`, which the layer-smear model
+    // does not read at all (its wall layer comes straight from `1 − outdoors`,
+    // packed in `sun-shadow-subsystem.js#packLayerTexelData`) — so the
+    // "Shadows — building only" / "Data — …" debug views built on it no
+    // longer isolate anything meaningful. Left wired rather than torn out:
+    // it does not crash, and `sun-shadow-debug.js`'s whole vocabulary needs a
+    // pass together, not a partial one here. Tracked, not silent.
     const isolate = sunShadowDebugInclude(p.debugView ?? 'off');
     maskAuthority.setCasterHeightSpec({
       distancePixels: readGridDistancePixels().distancePixels,
       // A disabled effect contributes no casters at all — the height field goes
       // empty rather than staying baked and merely unread, so "off" costs
-      // nothing downstream either.
-      buildingHeightPx: resolved.enabled ? (p.buildingHeightPx ?? 0) : 0,
+      // nothing downstream either. `p.wallHeightPx` (renamed 2026-08-02 from
+      // `buildingHeightPx` — `sun-shadows.js`'s own schema has the rename);
+      // this value is no longer CONSUMED by the layer-smear bake (which reads
+      // `wallHeightPx` straight from params, not from the derived field), but
+      // `maskAuthority.getBuildingHeightPx()` is still a served product
+      // (`boot.js#getCasterHeightField`'s own note: "rain will want it"), so
+      // it stays fed the CURRENT value rather than a permanently-stale one.
+      buildingHeightPx: resolved.enabled ? (p.wallHeightPx ?? 0) : 0,
       include: {
         building: resolved.enabled && isolate.building,
         overhead: resolved.enabled && isolate.overhead,
@@ -884,19 +899,22 @@ function install() {
       // THE SILHOUETTE RESOLUTION (2026-07-30, author: "shadows are still very
       // low resolution" on the extreme preset) — `fieldDim` alone (the bake's
       // OWN output resolution) can only smooth the penumbra, never sharpen the
-      // caster's own shape (sun-occlusion.js's `casterGridDim` doc has the
-      // full reasoning). A disabled effect asks for 0 (share the plain
+      // caster's own shape (`layer-smear.js`'s own `layerGridDim` doc has the
+      // full reasoning, carried over from `sun-occlusion.js`'s retired
+      // `casterGridDim`). A disabled effect asks for 0 (share the plain
       // `gridSpec`), same "off costs nothing extra" posture as the rest of
       // this call.
-      // ⚠️ DIAGNOSTIC (2026-07-30) — CONFIRMED as the cause (pinning this to
-      // 512 for every tier fixed the live positional corruption at Quality/
-      // Extreme; live evidence already proved march steps and lateral taps
-      // are NOT the cause). Reverted to the real per-tier value here so the
-      // NEXT diagnostic (a checksum of the derived caster grid, logged from
-      // `mask-authority.js#recomputeIfDirty`) can compare 768/1024's actual
-      // DATA against the known-working 512 baseline, rather than staying
-      // pinned to the one value already proven to work.
-      gridMaxDim: resolved.enabled ? (sunShadowTierPlan(resolved.perfTier).casterGridDim ?? 0) : 0,
+      //
+      // ⚠️ RE-POINTED 2026-08-02, layer-smear model. This is the ONLY call
+      // site that ever requests a caster-specific grid resolution — without
+      // it, `channels.coverOverhead` (the layer-smear model's own overhead
+      // channel) silently stays at the SHARED grid's resolution regardless of
+      // performance tier, which is the exact resolution ceiling
+      // `docs/planning/Sun-Shadows-Layer-Smear.md` was written to lift. Found
+      // by grepping every real (non-comment) consumer of the retired
+      // `sunShadowTierPlan` before deleting it, rather than assuming the
+      // subsystem rewrite alone was the whole story.
+      gridMaxDim: resolved.enabled ? (layerSmearTierPlan(resolved.perfTier).layerGridDim ?? 0) : 0,
     });
   });
 
@@ -1612,8 +1630,10 @@ function install() {
    * with `skyReach` vs `outdoors` in 2026-07-21.
    *
    * Returns the three unmerged producer channels PLUS the floor's raw
-   * `outdoors` grid (the receiver gate), because the viewer packs both into one
-   * RGBA texture and the march reads them in a single fetch.
+   * `outdoors` grid (the receiver gate) PLUS `coverAbove` (everything above
+   * this floor, merged — the layer-smear model's sky-reach layer), because the
+   * viewer packs all of it into one RGBA texture and the bake reads it in a
+   * single fetch.
    */
   /** Set for any floor whose sun-shadow field is running without an authored
    * outdoors mask — surfaced in the `sun-shadows` report so the degradation is
@@ -1627,15 +1647,26 @@ function install() {
     // sky-reach shadow at all, traceable only from a viewer-diagnostics subfield.
     let field = null;
     let outdoors = null;
+    let coverAbove = null;
     let degraded = null;
     try {
       field = skyReachAccess.heightField(floorIndex);
       outdoors = maskAuthority.getDerived('outdoors', floorIndex)?.grid ?? null;
+      // ⚠️ FETCHED IN THE SAME TRY, THE SAME WAY AS `outdoors` (2026-08-02 —
+      // the layer-smear model's SKY-REACH GRADIENT needs it back; see this
+      // grid's own comment below for why it was dropped and why it is
+      // restored). `getDerived` can throw `RequiredMaskMissingError` for ANY
+      // id on a degraded floor, not only `outdoors` — fetching it outside
+      // this try, unconditionally, would let a floor that only `outdoors`
+      // itself was known to degrade on throw UNCAUGHT here instead.
+      coverAbove = maskAuthority.getDerived('coverAbove', floorIndex)?.grid ?? null;
     } catch (err) {
       if (!(err instanceof RequiredMaskMissingError)) throw err;
       degraded = err.message;
       field = maskAuthority.getDerived('casterHeight', floorIndex, { acknowledgeMissingRequired: true });
       outdoors = maskAuthority.getDerived('outdoors', floorIndex, { acknowledgeMissingRequired: true })?.grid ?? null;
+      coverAbove =
+        maskAuthority.getDerived('coverAbove', floorIndex, { acknowledgeMissingRequired: true })?.grid ?? null;
     }
     if (!field?.channels || !outdoors) return null;
     if (degraded && !sunShadowDegradedFloors.has(floorIndex)) {
@@ -1646,14 +1677,10 @@ function install() {
           `shadow. Upper-floor (sky-reach) and overhead shadows still work. ${degraded}`
       );
     }
-    // NOTE: `coverAbove` is no longer read here. It fed the separate
-    // `skyOcclusion` multiply, which was deleted on 2026-07-26 — "under a
-    // bridge is dark" is now what the march itself returns once it samples
-    // `d = 0`, at the one shared strength (Sun-Shadows-Rethink.md §3). The
-    // product still exists and is still served; rain will want it.
     return {
       channels: field.channels,
       outdoors,
+      coverAbove,
       scalePx: field.scalePx,
       // ROUND SEVEN (sun-occlusion.js): the scene-wide building height, live —
       // the march's COLUMN test reads this as a uniform rather than a
@@ -2529,6 +2556,20 @@ function install() {
       buildParamControl('customColor', CANDLE_ANCHOR_PARAMS.customColor, {
         value: anchor.params?.customColor ?? CANDLE_ANCHOR_PARAMS.customColor.default,
         onChange: (v) => patch({ params: { useCustomColor: true, customColor: v } }),
+      })
+    );
+
+    // VISIBLE FROM (2026-08-01) — which floors this candle survives on. This
+    // form is hand-laid-out, NOT generated from the schema, so a new entry in
+    // `scene/anchor-catalog.js` reaches the author only if it is added here
+    // too: adding the param without this row would be a control that exists,
+    // validates, persists and is read by the authority, while being completely
+    // unreachable — the "declared, defaulted, consumed, never wired" shape this
+    // project has already shipped once.
+    wrap.append(
+      buildParamControl('floorVisibility', CANDLE_ANCHOR_PARAMS.floorVisibility, {
+        value: anchor.params?.floorVisibility ?? CANDLE_ANCHOR_PARAMS.floorVisibility.default,
+        onChange: (v) => patch({ params: { floorVisibility: v } }),
       })
     );
 

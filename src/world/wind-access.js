@@ -101,7 +101,7 @@
  * @module world/wind-access
  */
 
-import { sampleWind, computeWindTurbulence, deflectAroundWalls } from './wind-field.js';
+import { sampleWind, computeWindTurbulence, deflectAroundWalls, WIND_SHADOW_DEPTH } from './wind-field.js';
 
 /**
  * @typedef {object} WindGridSpec
@@ -121,6 +121,12 @@ import { sampleWind, computeWindTurbulence, deflectAroundWalls } from './wind-fi
  * @property {ArrayLike<number>} [wallAvoidDirX]
  * @property {ArrayLike<number>} [wallAvoidDirY]
  * @property {ArrayLike<number>} [wallProximity]
+ * @property {ArrayLike<number>} [windShadow] - 0..1 upwind occlusion
+ *   (`wind-enclosure.js#upwindShelter`), RAW — the geometry's own answer,
+ *   before `wind-field.js#WIND_SHADOW_DEPTH` scales it for looks. Unlike every
+ *   other array here this one is DIRECTION-DEPENDENT: it is only valid for the
+ *   wind direction the bake that produced it was run with, which is why
+ *   `setWindAmbient` re-bakes on a direction change.
  */
 
 /**
@@ -145,7 +151,9 @@ import { sampleWind, computeWindTurbulence, deflectAroundWalls } from './wind-fi
  *   `bakedField` param doc for the full channel contract — Tier 2's advect
  *   pass reads `.xy` as a transport velocity, so they must stay well-defined).
  * @param {*} [spec.wallAvoidTexture] - RGBA half-float; R/G = the "away from
- *   nearest wall" unit vector, B = proximity 0..1.
+ *   nearest wall" unit vector, B = proximity 0..1, A = the wind shadow (0..1
+ *   upwind occlusion, `wind-enclosure.js#upwindShelter` — A was an unused
+ *   constant 1 before 2026-08-01).
  * @param {*} [spec.liveTexture] - Tier 2's published D_live target texture.
  * @param {WindCellArrays} [spec.cells]
  * @param {(x: number, y: number) => number} [spec.cpuExposureAt] - the CPU
@@ -217,11 +225,11 @@ export function createWindHandle({
    * @param {*} args.centerXY - vec2 node, the world position (a particle's own).
    * @param {*} args.time - the shared clock node (ms).
    * @param {*} [args.cellBuffer] - the storage buffer node holding {@link
-   *   WindCellArrays} packed as vec4 per cell: x=openness, y/z=wall-away
-   *   direction, w=wall-proximity. Omitted → the whole lookup is skipped and
-   *   the field reads fully open with no wall nearby, which is the same "no
-   *   geometry data ⇒ behave like the open outdoors" convention `sampleWind`
-   *   itself uses.
+   *   WindCellArrays}, {@link WIND_CELL_VEC4_STRIDE} vec4s per cell — see
+   *   {@link packWindCells} for the exact layout. Omitted → the whole lookup is
+   *   skipped and the field reads fully open, with no wall nearby and no
+   *   shadow, which is the same "no geometry data ⇒ behave like the open
+   *   outdoors" convention `sampleWind` itself uses.
    * @returns {object} `{ openness, wallAwayDirX, wallAwayDirY, wallProximity,
    *   coherent, turbulence, organic }`. `coherent` is the ambient bias
    *   DEFLECTED off nearby walls but NOT yet gated by openness — gating is the
@@ -241,6 +249,7 @@ export function createWindHandle({
     let wallAwayDirX = float(0);
     let wallAwayDirY = float(0);
     let wallProximity = float(0);
+    let windShadow = float(0);
     if (cellBuffer && grid) {
       const cx = centerXY.x
         .sub(float(grid.originX))
@@ -252,11 +261,17 @@ export function createWindHandle({
         .div(float(grid.cellSize))
         .floor()
         .clamp(float(0), float(grid.rows - 1));
-      const cell = cellBuffer.element(int(cy.mul(float(grid.cols)).add(cx)));
+      // TWO vec4s per cell — see WIND_CELL_VEC4_STRIDE. The base index is built
+      // in FLOAT and converted once per element read (the same shape this line
+      // always had), rather than doing integer arithmetic on an int node, which
+      // is not uniformly supported across the two backends.
+      const flatIndex = cy.mul(float(grid.cols)).add(cx).mul(float(WIND_CELL_VEC4_STRIDE));
+      const cell = cellBuffer.element(int(flatIndex));
       openness = cell.x;
       wallAwayDirX = cell.y;
       wallAwayDirY = cell.z;
       wallProximity = cell.w;
+      windShadow = cellBuffer.element(int(flatIndex.add(float(1)))).x;
     }
 
     const memo = {};
@@ -268,24 +283,35 @@ export function createWindHandle({
       wallAwayDirY,
       wallProximity,
       /**
-       * The ambient bias, deflected off nearby walls, UNGATED by openness.
-       * The angle convention is METEOROLOGICAL (the direction the wind blows
-       * FROM, hence the negate) — the same one `sampleWind` and
-       * `world/wind-bake.js#ambientVectorFromWind` use. It exists here exactly
-       * ONCE now; the two kernels used to each carry their own copy of this
-       * arithmetic, guaranteed to match only by a comment saying so.
+       * The ambient bias, deflected off nearby walls and attenuated by the wind
+       * shadow, UNGATED by openness. The angle convention is METEOROLOGICAL
+       * (the direction the wind blows FROM, hence the negate) — the same one
+       * `sampleWind` and `world/wind-bake.js#ambientVectorFromWind` use. It
+       * exists here exactly ONCE now; the two kernels used to each carry their
+       * own copy of this arithmetic, guaranteed to match only by a comment
+       * saying so.
+       *
+       * THE SHADOW IS APPLIED HERE, NOT HANDED BACK SEPARATELY (2026-08-01).
+       * Openness gating is deliberately the caller's (the two kernels compose
+       * it differently and both are right to), but a shadow term returned as
+       * its own field would be one every caller had to remember to multiply in
+       * — and this project has watched an unconsumed API rot silently before.
+       * It is part of "how much directional wind is actually here", so it rides
+       * with the term it modifies. Kept in step with `sampleWind`'s own
+       * application by the node↔kernel parity test.
        */
       get coherent() {
         return once('coherent', () => {
           if (!ambientRef) return vec2(0, 0);
           const rad = ambientRef.directionDeg.mul(float(Math.PI / 180));
           const bias = vec2(cos(rad), sin(rad)).negate().mul(ambientRef.speed01);
-          return deflectAroundWalls(TSL, {
+          const deflected = deflectAroundWalls(TSL, {
             vector: bias,
             awayDirX: wallAwayDirX,
             awayDirY: wallAwayDirY,
             proximity: wallProximity,
           });
+          return deflected.mul(float(1).sub(windShadow.mul(float(WIND_SHADOW_DEPTH))));
         });
       },
       /** The curl-noise swirl alone (no drift/flutter, no ambient). */
@@ -387,26 +413,63 @@ export function createWindHandle({
 }
 
 /**
- * Pack a handle's cell arrays into the vec4 storage-buffer layout BOTH compute
- * kernels use (x=openness, y/z=wall-away direction, w=wall-proximity), in
- * place. Lives here, next to the `kernel()` shape that READS that layout, so
- * the writer and the reader of the packing can never drift — they used to be
- * two hand-written copies in two files, agreeing by coincidence.
+ * HOW MANY `vec4`s ONE CELL OCCUPIES in the compute kernels' storage buffer.
+ *
+ * WAS 1, WIDENED TO 2 (2026-08-01) when the wind shadow needed a home and all
+ * four original slots were already spoken for (x=openness, y/z=wall-away
+ * direction, w=wall-proximity). The alternatives were both worse: a SECOND
+ * storage buffer would spend one of the WebGPU 8-per-stage slots that both
+ * kernels are already close to (keyhole-storage-buffer-limit-fix), and folding
+ * the shadow into `openness` would pack two different quantities into one
+ * number — this project's own "one byte, two quantities" failure, which cannot
+ * be tuned back out afterwards.
+ *
+ * Widening costs buffer MEMORY (2× — ~8 MB at the 512×512 worst-case grid) but
+ * no buffer COUNT, which is the constraint that actually bites. Slots 5-7 are
+ * free; `computeWindTurbulence`'s own docs already record wanting one of them
+ * for a genuine `exteriorOpenness` (it currently passes `openness` twice).
+ *
+ * ⚠️ EVERY allocator of this buffer must multiply by this — `TSL.instancedArray(
+ * n * WIND_CELL_VEC4_STRIDE, 'vec4')`. Both particle runtimes do.
+ */
+export const WIND_CELL_VEC4_STRIDE = 2;
+
+/**
+ * Pack a handle's cell arrays into the storage-buffer layout BOTH compute
+ * kernels use, in place. Lives here, next to the `kernel()` shape that READS
+ * that layout, so the writer and the reader of the packing can never drift —
+ * they used to be two hand-written copies in two files, agreeing by
+ * coincidence.
+ *
+ * Layout, {@link WIND_CELL_VEC4_STRIDE} vec4s per cell:
+ *
+ *     vec4 0: x=openness  y=wallAwayDirX  z=wallAwayDirY  w=wallProximity
+ *     vec4 1: x=windShadow  y/z/w=reserved (written as 0)
  *
  * `?? 1` / `?? 0` — a missing sample defaults to "fully open" / "no wall
- * nearby", never a silent "everything is sealed" or an invented deflection.
+ * nearby" / "no shadow", never a silent "everything is sealed" or an invented
+ * deflection.
  *
  * @param {{array: Float32Array, needsUpdate: boolean}} attr - the buffer's own attribute.
  * @param {WindCellArrays} cells
  * @param {number} n - cell count (cols × rows).
  */
 export function packWindCells(attr, cells, n) {
-  const { openness, wallAvoidDirX, wallAvoidDirY, wallProximity } = cells ?? {};
+  const { openness, wallAvoidDirX, wallAvoidDirY, wallProximity, windShadow } = cells ?? {};
+  const stride = WIND_CELL_VEC4_STRIDE * 4;
   for (let i = 0; i < n; i++) {
-    attr.array[i * 4 + 0] = openness?.[i] ?? 1;
-    attr.array[i * 4 + 1] = wallAvoidDirX?.[i] ?? 0;
-    attr.array[i * 4 + 2] = wallAvoidDirY?.[i] ?? 0;
-    attr.array[i * 4 + 3] = wallProximity?.[i] ?? 0;
+    const o = i * stride;
+    attr.array[o + 0] = openness?.[i] ?? 1;
+    attr.array[o + 1] = wallAvoidDirX?.[i] ?? 0;
+    attr.array[o + 2] = wallAvoidDirY?.[i] ?? 0;
+    attr.array[o + 3] = wallProximity?.[i] ?? 0;
+    attr.array[o + 4] = windShadow?.[i] ?? 0;
+    // Slots 5-7 are RESERVED, explicitly zeroed rather than left as whatever
+    // the allocation happened to contain — an undefined value read by a future
+    // consumer is a bug that only shows up on one backend.
+    attr.array[o + 5] = 0;
+    attr.array[o + 6] = 0;
+    attr.array[o + 7] = 0;
   }
   attr.needsUpdate = true;
 }

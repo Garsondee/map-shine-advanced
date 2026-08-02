@@ -493,8 +493,16 @@ export function createPointLightPool({
     // exact-equality caching, unlike candle's, is safe here).
     const lightningState = getLightningRenderState ? getLightningRenderState() : { enabled: false, params: {} };
     const lightningStrands = getLightningActiveStrands ? getLightningActiveStrands() : [];
+    // TIER 3 ('originFlash') GATES THE ORIGIN-FLASH LIGHT ENTIRELY — below it,
+    // no light sources are built at all (not just visually suppressed), the
+    // same "a rung nothing reads rots" reasoning lightning-subsystem.js's own
+    // tier gates apply to branching/flash. Matches those gates' own posture:
+    // a non-finite tier compares false against `>= 3` and fails OFF, never a
+    // silent fallback to on — `enabled` is false in every real caller that
+    // omits perfTier anyway (vt-pan-viewer.js's own default seam), so this
+    // never needs to guess.
     const lightningLights =
-      lightningState.enabled && lightningStrands.length
+      lightningState.enabled && lightningStrands.length && Number(lightningState.perfTier) >= 3
         ? buildLightningLightSources(lightningStrands, env.time.tMs, lightningState.params ?? {})
         : [];
     // `originFlashWallClipEnabled` (default true) is a per-scene author

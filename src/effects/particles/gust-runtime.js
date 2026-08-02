@@ -129,6 +129,7 @@ import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
 import {
   createWindHandle,
   packWindCells,
+  WIND_CELL_VEC4_STRIDE,
   deflectAroundWalls,
   WALL_MOMENTUM_GUARD_LOW,
   WALL_MOMENTUM_GUARD_HIGH,
@@ -238,7 +239,10 @@ export function createGustEngine({
     opnCols = cols;
     opnRows = rows;
     const n = Math.max(1, cols * rows);
-    windOpennessBuffer = TSL.instancedArray(n, 'vec4');
+    // × WIND_CELL_VEC4_STRIDE — one cell is more than one vec4 (see that
+    // constant's own header). Allocating `n` here would silently truncate the
+    // grid to its first half.
+    windOpennessBuffer = TSL.instancedArray(n * WIND_CELL_VEC4_STRIDE, 'vec4');
     packWindCells(windOpennessBuffer.value, windHandle.cells, n);
   }
 

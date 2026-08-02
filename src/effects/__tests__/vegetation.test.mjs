@@ -135,7 +135,10 @@ export function run(t) {
     ok('resolveAndApply drives vegetation apply', applied !== null && applied.enabled === true);
     ok(
       'the resolved params carry the look defaults',
-      resolved.params.windResponse === 1 && resolved.params.swayAmount === 14 && resolved.params.intensity === 1.0
+      // swayAmount 14 → 34 (2026-08-01): the motion budget was rebalanced out
+      // of the per-pixel flutter warp (which was folding the art) and into bulk
+      // sway, on the author's own "a lot more sway" instruction.
+      resolved.params.windResponse === 1 && resolved.params.swayAmount === 34 && resolved.params.intensity === 1.0
     );
     throws(
       'a duplicate vegetation registration throws',

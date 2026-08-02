@@ -160,6 +160,32 @@ export const ANCHOR_KINDS = Object.freeze([
         label: 'This candle’s light reach',
         help: 'Only used when "Custom light reach" is on. Same units as the shared "Light reach" control.',
       },
+      // CROSS-FLOOR VISIBILITY (2026-08-01, author-reported: candles on a
+      // ground-floor element vanish entirely — light AND shape — the moment you
+      // move up a floor, even where a hole in the upper floor should expose
+      // them). The machinery to keep them was already here (`floorBinding`,
+      // ported from V2's LevelBinding) but NOTHING author-facing drove it: the
+      // binding arrives from the V2 importer and the edit UI only ever reached
+      // `params`. So a candle bound to the ground floor was unfixable by hand.
+      //
+      // ⚠️ WHY THIS IS A CONTROL AND NOT AUTOMATIC, IN THE AUTHOR'S OWN WORDS:
+      // *"we put the onus on getting this right into the user hand rather than
+      // complex code."* Deciding automatically would mean asking "is there a
+      // hole in the floor above this candle, and can it be seen through from
+      // here" — real occlusion geometry, for a handful of decorative flames.
+      // The flame also draws in its OWN scene (`candleFlameScene`), outside the
+      // draw list's sort law, so a candle shown from another floor is NOT
+      // occluded by that floor's art — it would shine straight through solid
+      // stone. That is precisely why the DEFAULT below must stay 'own-floor':
+      // any other default would trade a missing candle for a candle visible
+      // through a floor, on every existing scene, unasked.
+      floorVisibility: {
+        type: 'enum',
+        values: ['own-floor', 'own-and-above', 'all-floors'],
+        default: 'own-floor',
+        label: 'Visible from',
+        help: 'Which floors this candle can be seen from. "Own floor" shows it only on the floor it belongs to. "Own and above" also shows it when you are looking down from a higher floor — use this for a candle meant to be seen through a stairwell or a hole in the floor above. "All floors" always shows it. Note that a candle seen from another floor is not hidden by that floor\'s artwork, so only enable it where the candle really should be visible.',
+      },
     },
     meaning: 'A single placed candle flame — the canonical discrete anchor, successor to a V2 candleFlame map point.',
   },

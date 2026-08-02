@@ -179,6 +179,16 @@ export const WALL_IMPACT_CHAOS_GAIN = 0.7;
 export const WALL_MOMENTUM_GUARD_LOW = 0.75;
 export const WALL_MOMENTUM_GUARD_HIGH = 1.0;
 
+// WIND SHADOW DEPTH (2026-08-01) — how much of the coherent wind a FULLY
+// occluded cell loses. Deliberately below 1: a leeward wake is slack and
+// recirculating, not still, so leaving ~15% of the directional term keeps the
+// shadow reading as sheltered air rather than as a hole cut in the field. The
+// geometry (`world/wind-enclosure.js#upwindShelter`) bakes a raw 0..1
+// occlusion; this is the ONE place its visual strength is decided, so a
+// "shadows are too strong/weak" note is a one-number change here, never a
+// re-bake of the geometry.
+export const WIND_SHADOW_DEPTH = 0.85;
+
 /**
  * WALL-AVOIDANCE DEFLECTION (2026-07-23, author: "walls perpendicular to the
  * wind aren't preventing the wind from penetrating... the wind is pushing
@@ -722,6 +732,13 @@ export function sampleWind(
   let wallAwayDirX = float(0);
   let wallAwayDirY = float(0);
   let wallProximity = float(0);
+  // WIND SHADOW (2026-08-01) — the A channel, which was "always 1, unused" until
+  // now. See `world/wind-enclosure.js#upwindShelter` for what it measures and
+  // why it is emphatically NOT the deleted potential-flow relaxation returning.
+  // Absent field ⇒ 0 ⇒ no shelter anywhere, byte-identical to before it existed
+  // (the same "no geometry data ⇒ behave like the open outdoors" convention
+  // `openness` and the three channels above already use).
+  let windShadow = float(0);
   if (wallAvoidField) {
     const { texture: wallAvoidTexture, originX, originY, cellSize, cols, rows } = wallAvoidField;
     const uv = vec2(
@@ -733,6 +750,7 @@ export function sampleWind(
     wallAwayDirX = sample.x;
     wallAwayDirY = sample.y;
     wallProximity = sample.z;
+    windShadow = sample.w;
   }
 
   // TURBULENCE (2026-07-23 — see `computeWindTurbulence`'s own header for
@@ -811,7 +829,23 @@ export function sampleWind(
   // Gate the whole coherent term by openness (sampled earlier, above — see
   // that block's own header for why it moved and why R/G are read by
   // nothing here — Tier 2 still reads them), then fold it into the result.
-  result = result.add(coherent.mul(openness));
+  //
+  // TWO GATES, ONE PRODUCT, AND THEY ANSWER DIFFERENT QUESTIONS. `openness` is
+  // "does outside air reach here AT ALL" — isotropic connectivity, so a sealed
+  // room reads 0 whichever way the wind blows. `windShadow` is "is a building
+  // between me and the wind RIGHT NOW" — directional, so it flips to the other
+  // side of the same building the moment the author turns the compass.
+  // Multiplying is correct precisely BECAUSE they are independent: an outdoor
+  // cell behind a barn is openness 1 / shadow ~1, and a sealed cellar is
+  // openness 0 no matter where the barn is.
+  //
+  // SCALED, NOT GATED TO ZERO — a real leeward wake is a slack, recirculating
+  // pocket, not dead air, and a hard 0 would read as a suspiciously clean
+  // geometric cut-out punched through the wind field. The ORGANIC term
+  // (`result` above) is untouched by this for the same reason openness leaves
+  // it alone: sheltered air still stirs.
+  const shelterFactor = float(1).sub(windShadow.mul(float(WIND_SHADOW_DEPTH)));
+  result = result.add(coherent.mul(openness).mul(shelterFactor));
 
   // TRANSIENT (Tier 2, optional) — D_live, the same world->UV conversion as
   // bakedField (identical grid convention, a DELIBERATELY separate branch

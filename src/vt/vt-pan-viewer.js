@@ -103,7 +103,7 @@ import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orien
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
-import { sortByLayer } from '../scene/layer-order.js';
+import { sortByLayer, resolveElevationFloorIndex } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
   worldToNdc,
@@ -178,6 +178,8 @@ import {
   WIND_GUSTS,
   VEGETATION_KINDS,
   detectSelfVegetationKind,
+  vegetationOverlayRenderOrder,
+  VEG_FLUTTER_FOLD_SAFETY,
   vegetationMeshSegments,
   buildTessellatedQuadGeometry,
   vegetationTierPlan,
@@ -237,6 +239,7 @@ import {
   wallAvoidanceDirectionFromDistance,
   wallProximityFromDistance,
   WALL_DEFLECT_REACH_CELLS,
+  upwindShelter,
   WIND_SIM_DEFAULT_DECAY_PER_SECOND,
   WIND_SIM_DEFAULT_RELAX_ITERATIONS,
   WIND_SIM_RELAX_BLEND,
@@ -2877,20 +2880,41 @@ export async function startVtPanViewer({
         tex.needsUpdate = true;
         bakedOpennessTexture = tex;
 
+        // THE WIND SHADOW (2026-08-01, author: "Can we get wind shadows to
+        // appear on the opposite side of buildings?") — see
+        // `world/wind-enclosure.js#upwindShelter` for the full reasoning,
+        // including why this is NOT the deleted potential-flow relaxation.
+        //
+        // DIRECTION-DEPENDENT, which is why it lives in the BAKE rather than in
+        // the shader: `setWindAmbient` already re-bakes on every direction
+        // change (its own comment: "the bake depends on the SAME direction/speed
+        // it was last computed from"), so the one input that makes this term
+        // move is already a rebake trigger. `directionDeg` is meteorological —
+        // the direction wind blows FROM — so the upwind vector is (cos, sin)
+        // with NO negation; `ambientVectorFromWind` is the one that negates, to
+        // get the FLOW. Reading `uWindDirectionDeg.value` (not the uniform node)
+        // because this is plain CPU arithmetic.
+        const shelterRad = (uWindDirectionDeg.value * Math.PI) / 180;
+        const windShadow = upwindShelter(solidMask, cols, rows, {
+          upwindX: Math.cos(shelterRad),
+          upwindY: Math.sin(shelterRad),
+        });
+
         // THE WALL-AVOIDANCE TEXTURE — a SEPARATE texture from the openness one
         // (no channel left to repurpose there: B carries openness, A carries
         // exteriorOpenness, and R/G must stay well-defined zeros for Tier 2's
-        // independent `.xy` read). R=dirX, G=dirY, B=proximity; A always 1,
-        // unused — matching the openness texture's own "pad to RGBA, only some
-        // channels meaningful" convention. Same cols/rows/origin/cellSize, so
-        // the handle hands both to `sampleWind` with the IDENTICAL UV maths.
+        // independent `.xy` read). R=dirX, G=dirY, B=proximity. A CARRIES THE
+        // WIND SHADOW (2026-08-01) — it was "always 1, unused" until now, which
+        // is exactly the free channel this term needed: same grid, same origin,
+        // same cellSize, so it costs no new texture, no new binding and no
+        // storage-buffer slot (keyhole-storage-buffer-limit-fix's hard cap of 8
+        // per stage is why a new buffer would not have been free).
         const wallAvoidData = new Uint16Array(n * 4);
-        const oneHalf = THREE.DataUtils.toHalfFloat(1);
         for (let i = 0; i < n; i++) {
           wallAvoidData[i * 4 + 0] = THREE.DataUtils.toHalfFloat(wallAvoidDir.dirX[i] ?? 0);
           wallAvoidData[i * 4 + 1] = THREE.DataUtils.toHalfFloat(wallAvoidDir.dirY[i] ?? 0);
           wallAvoidData[i * 4 + 2] = THREE.DataUtils.toHalfFloat(wallProximity[i] ?? 0);
-          wallAvoidData[i * 4 + 3] = oneHalf;
+          wallAvoidData[i * 4 + 3] = THREE.DataUtils.toHalfFloat(windShadow[i] ?? 0);
         }
         bakedWallAvoidTexture?.dispose();
         const wallAvoidTex = new THREE.DataTexture(wallAvoidData, cols, rows, THREE.RGBAFormat, THREE.HalfFloatType);
@@ -3023,6 +3047,11 @@ export async function startVtPanViewer({
             wallAvoidDirX: wallAvoidDir.dirX,
             wallAvoidDirY: wallAvoidDir.dirY,
             wallProximity,
+            // The raw 0..1 occlusion, pre-WIND_SHADOW_DEPTH — so the wind probe
+            // reports the GEOMETRY's own answer, not the look-tuned one. A probe
+            // that silently folded the depth constant in could not tell "the
+            // shadow is too weak" from "the geometry found nothing".
+            windShadow,
           },
           cpuExposureAt: sampleWindExposureAt,
         });
@@ -5796,10 +5825,21 @@ export async function startVtPanViewer({
      * maxima at once, which would otherwise compound into a multi-thousand-
      * pixel throw. Generous: normal tuning never approaches it. */
     const VEG_MAX_DISPLACE_PX = 320;
-    /** Hard ceiling on the flutter UV shuffle. Slightly tighter than V2's own
-     * proven `flutterCap` (0.006, vegetation-bulk-wind.js) — V2 never stacks
-     * a Wind-response/intensity family on top the way this project's live
-     * param set does, so a little extra headroom below V2's own number. */
+    /** ABSOLUTE ceiling on the flutter UV shuffle. Slightly tighter than V2's
+     * own proven `flutterCap` (0.006, vegetation-bulk-wind.js) — V2 never
+     * stacks a Wind-response/intensity family on top the way this project's
+     * live param set does, so a little extra headroom below V2's own number.
+     *
+     * ⚠️ NO LONGER THE PRIMARY CAP (2026-08-01). It is a fixed number in UV
+     * while the flutter noise's wavelength is set in WORLD space, so on its own
+     * it could not stop the art folding — that units mismatch WAS the liquify
+     * the author reported at 100% wind. The primary limit is now derived from
+     * the live frequency (`VEG_FLUTTER_FOLD_SAFETY` /
+     * `effects/vegetation-render.js#flutterFoldFreeAmplitudePx`) and this
+     * survives as the backstop the two things below still need: the
+     * coarse-mip foliage gate's "visually lossless" proof, and the low end of
+     * the frequency dial, where the fold-free bound alone resolves to a large
+     * fraction of a small tile. Whichever is tighter wins. */
     const VEG_FLUTTER_UV_CAP = 0.005;
     /**
      * THE FOLIAGE-PRESENCE GATE — mip level, and why a COARSE mip is the whole
@@ -5997,6 +6037,12 @@ export async function startVtPanViewer({
       // nothing. `flutterEnabled` only matters when `!asShadow` (the shadow
       // branch already skips flutter unconditionally — see colorNode below);
       // `smearTaps` only matters when `asShadow` is true.
+      // `uvPerWorldBasis` (2026-08-01) — the item's own `{width, height}` in
+      // WORLD px (i.e. `state.placement`), the one factor tying the flutter's
+      // world-space noise frequency to the texture-space displacement it
+      // drives. Defaults to a 1:1 basis so an un-updated caller still builds;
+      // the fold-free cap then simply falls back to the absolute
+      // `VEG_FLUTTER_UV_CAP` backstop rather than misbehaving.
       {
         asShadow = false,
         uvScale = [1, 1],
@@ -6004,6 +6050,7 @@ export async function startVtPanViewer({
         isFloorSurface = false,
         flutterEnabled = true,
         smearTaps = VEG_SHADOW_SMEAR_TAPS,
+        uvPerWorldBasis = null,
       } = {}
     ) {
       const {
@@ -6051,6 +6098,23 @@ export async function startVtPanViewer({
       const uSceneMin = uniform(vec2(sceneRect.x, sceneRect.y));
       const uSceneSize = uniform(vec2(Math.max(1, sceneRect.width), Math.max(1, sceneRect.height)));
       const uEdgeFadeWidthPx = uniform(float(initialParams?.edgeFadeWidthPx ?? 0));
+
+      // THE ONE WORLD→UV FACTOR (2026-08-01) — the item's own UV span per world
+      // pixel, i.e. `1 / placement.width|height`. Needed because the flutter
+      // noise's frequency is set in WORLD space while its displacement is
+      // applied in TEXTURE space; without this the fold-free cap cannot be
+      // expressed at all (see the cap's own block in colorNode).
+      //
+      // Seeded from the caller's placement and re-pushed whenever the placement
+      // changes — the material is NOT rebuilt on a resize (only the geometry
+      // buffers are rewritten), so a build-time-only constant would go stale
+      // the first time an author scaled a vegetation tile.
+      const uUvPerWorldPx = uniform(
+        vec2(
+          1 / Math.max(1, Math.abs(uvPerWorldBasis?.width ?? 1)),
+          1 / Math.max(1, Math.abs(uvPerWorldBasis?.height ?? 1))
+        )
+      );
 
       const uIntensity = uniform(float(initialParams?.intensity ?? 1));
       const uWindResponse = uniform(float(initialParams?.windResponse ?? 1));
@@ -6311,10 +6375,37 @@ export async function startVtPanViewer({
               .mul(flutterGaleDamp)
               .mul(edgeFade);
             const rawFlutterDisplacement = flutterVec.mul(flutterStrength);
-            // HARD CAP (`VEG_FLUTTER_UV_CAP`, matches V2's own proven ceiling
-            // almost exactly) — rescales, never distorts direction.
+            // ═══════════════════════════════════════════════════════════════
+            // THE FOLD-FREE CAP (2026-08-01) — see
+            // `effects/vegetation-render.js#flutterFoldFreeAmplitudePx` for the
+            // full derivation. This REPLACED a fixed `VEG_FLUTTER_UV_CAP =
+            // 0.005`, which was a units mismatch rather than a mistuned number:
+            // the cap was in UV while the noise wavelength is set in WORLD px,
+            // so the real safety margin depended on the tile's own size and on
+            // the frequency dial, and at the author's 100% wind it sat several
+            // times past the folding threshold (the liquify).
+            //
+            // The ceiling is now DERIVED from the frequency actually in use —
+            // crank "Flutter frequency" and the amplitude tightens to match, so
+            // the warp stays injective at every setting rather than only at the
+            // one the default happened to be safe at.
+            // ═══════════════════════════════════════════════════════════════
+            const flutterSpaceFreqLive = float(kind.flutterSpaceFreq).mul(uFlutterScale);
+            // World px → UV, per axis. The art's own UV spans the item, so this
+            // is the ONE factor that ties the world-space noise to the
+            // texture-space displacement it drives.
+            const foldFreeWorldPx = float(VEG_FLUTTER_FOLD_SAFETY).div(max(flutterSpaceFreqLive, float(1e-6)));
+            // BOTH BOUNDS APPLY, whichever is tighter. The fold-free bound
+            // alone is not enough: at the lowest frequency the dial allows it
+            // resolves to ~16 world px, which on a SMALL tile is a large
+            // fraction of the whole texture — far past `VEG_FLUTTER_UV_CAP`,
+            // and past what the coarse-mip foliage gate's own
+            // "visually lossless" proof assumes. The old absolute cap survives
+            // as exactly that: the backstop the gate's correctness rests on.
+            const foldFreeUv = min(foldFreeWorldPx.mul(uUvPerWorldPx.x), foldFreeWorldPx.mul(uUvPerWorldPx.y));
+            const flutterLimitUv = min(foldFreeUv, float(VEG_FLUTTER_UV_CAP));
             const flutterMag = length(rawFlutterDisplacement);
-            const flutterCapScale = min(float(1), float(VEG_FLUTTER_UV_CAP).div(max(flutterMag, float(1e-5))));
+            const flutterCapScale = min(float(1), flutterLimitUv.div(max(flutterMag, float(1e-5))));
             // addAssign, not `sampleUv = ...`: a shader-run-time write into the
             // var, so it happens only on the taken branch. See the gate header.
             gatedUv.addAssign(rawFlutterDisplacement.mul(flutterCapScale));
@@ -6465,6 +6556,8 @@ export async function startVtPanViewer({
           uClumpAmpSpread,
           uClumpDirSpreadRad,
           uEdgeFadeWidthPx,
+          // Pushed on placement change, not per frame — see its own header.
+          uUvPerWorldPx,
         },
         shadow: asShadow
           ? { uShadowPenumbraUv, uShadowStrength, uShadowSmearUv, uShadowSmearTaper, uShadowSmearLod }
@@ -6725,6 +6818,7 @@ export async function startVtPanViewer({
                     uvScale: compressedUvScale,
                     isFloorSurface: true, // Case-1 embedded veg IS the floor here — see the function's own doc
                     flutterEnabled: vegTier.flutterEnabled,
+                    uvPerWorldBasis: state.placement,
                   })
                 : buildWholeImageMaterial(tex, item, compressedUvScale);
               const geometry = new THREE.BufferGeometry();
@@ -6841,6 +6935,7 @@ export async function startVtPanViewer({
               ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
                   isFloorSurface: true,
                   flutterEnabled: vegTier.flutterEnabled,
+                  uvPerWorldBasis: state.placement,
                 })
               : buildWholeImageMaterial(tex, item);
             const geometry = new THREE.BufferGeometry();
@@ -6916,8 +7011,13 @@ export async function startVtPanViewer({
         }
       }
       for (const t of wi.tiles) {
-        if (placementChanged)
+        if (placementChanged) {
           setTileGeometry(t, state.placement, wi.imageSize.width, wi.imageSize.height, t.segments ?? 1);
+          // Case-1 self-vegetation: the fold-free flutter cap is expressed per
+          // world px, so a resize moves it. No-ops on an ordinary (non-veg)
+          // tile, whose `motion` has no such uniform.
+          syncVegetationUvBasis(t.motion, state.placement);
+        }
         t.mesh.visible = show;
         t.mesh.renderOrder = item.renderOrder;
         // A Case-1 self-vegetation tile's own ground shadow (see
@@ -7151,6 +7251,7 @@ export async function startVtPanViewer({
                   shadowPadPx / Math.max(1, Math.abs(state.placement?.height ?? 1)),
                 ],
                 smearTaps: vegTier.shadowSmearTaps,
+                uvPerWorldBasis: state.placement,
               });
               // The smear LOD's scale factor — see the Case-1 site's own note.
               // `loaded.tex.image` carries the decoded art's true pixel width.
@@ -7176,12 +7277,20 @@ export async function startVtPanViewer({
 
             const { material, appearance, motion } = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
               flutterEnabled: vegTier.flutterEnabled,
+              // The world→UV basis the fold-free flutter cap needs; re-pushed
+              // by `syncVegetationUvBasis` whenever this placement changes.
+              uvPerWorldBasis: state.placement,
             });
             const geometry = makeGeometry();
             const mesh = new THREE.Mesh(geometry, material);
             mesh.frustumCulled = false;
             mesh.visible = false; // the refresh loop decides visibility + renderOrder
-            mesh.renderOrder = item.renderOrder + kind.renderOrderNudge;
+            // The overlay's own sort slot (stampVegetationRenderOrders); the
+            // host-relative nudge is the fallback for a floor with no bounded
+            // elevation band. An initial value only — the refresh loop below
+            // re-stamps it every pass, since the draw list is rebuilt whenever
+            // the viewed floor or any document changes.
+            mesh.renderOrder = item.vegetationRenderOrder?.[kind.id] ?? item.renderOrder + kind.renderOrderNudge;
             scene.add(mesh);
 
             entry.status = 'ready';
@@ -7265,6 +7374,27 @@ export async function startVtPanViewer({
     }
 
     /**
+     * Push the item's world→UV basis onto a built vegetation material — the one
+     * factor the fold-free flutter cap needs (see that cap's own block in
+     * `buildVegetationMaterial`'s colorNode).
+     *
+     * DELIBERATELY NOT part of `syncVegetationMotionUniforms` above: that runs
+     * EVERY FRAME for every plant, and this value changes only when a placement
+     * does. Folding it in would spend a per-frame write on something constant
+     * for the life of a tile's geometry.
+     *
+     * @param {object|null} motion - a `buildVegetationMaterial(...).motion`.
+     * @param {{width:number, height:number}|null} placement
+     */
+    function syncVegetationUvBasis(motion, placement) {
+      if (!motion?.uUvPerWorldPx || !placement) return;
+      motion.uUvPerWorldPx.value.set(
+        1 / Math.max(1, Math.abs(placement.width ?? 1)),
+        1 / Math.max(1, Math.abs(placement.height ?? 1))
+      );
+    }
+
+    /**
      * Push EVERY loaded vegetation mesh's live motion/shadow uniforms, once
      * per rendered frame — called from `renderFrame`, right alongside
      * `updateCandleFlame()`.
@@ -7319,6 +7449,86 @@ export async function startVtPanViewer({
       }
     }
 
+    /** Last unbounded-floor warning emitted, so the report below fires on a
+     * CHANGE rather than on every residency pass (which would bury it). */
+    let lastVegUnboundedWarning = '';
+
+    /**
+     * STAMP EVERY DRAWABLE WITH ITS VEGETATION OVERLAYS' SORT POSITIONS.
+     *
+     * Called once per draw-list rebuild, immediately after `sortByLayer` — the
+     * ONLY moment the sorted list and its stamped `renderOrder`s both exist.
+     * The result lands on `item.vegetationRenderOrder` (`{tree, bush}`, values
+     * `number|null`) and is read by both overlay sites below; `null` means
+     * "this floor has no usable elevation band", and the reader falls back to
+     * the legacy host-relative nudge.
+     *
+     * WHY NOT PER-ITEM: the answer depends only on (floor band, kind), never on
+     * WHICH item hosts the overlay — so it is solved once per pair and reused.
+     * A per-item solve would repeat the same O(items) scan for every tile on the
+     * map, turning a tens-of-items scan into a quadratic one on a big scene.
+     *
+     * @param {Array<object>} items - the draw list, already sorted + stamped.
+     */
+    function stampVegetationRenderOrders(items) {
+      let floors = [];
+      try {
+        // `globalThis.canvas`, never a bare `canvas` — this file declares its
+        // own local `canvas` for the WebGPU surface, and a bare reference
+        // silently resolves to THAT (see the region-darkness lookup's own
+        // header for the full write-up of that shadowing bug).
+        const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+        if (floorsResult.ok) floors = floorsResult.floors;
+      } catch (err) {
+        log.error('vegetation sort-elevation lookup (getActiveSceneFloors) failed — using host-relative order:', err);
+      }
+      const bandById = new Map();
+      for (const f of floors) {
+        bandById.set(f.id, { bottom: f.elevationBottom ?? -Infinity, top: f.elevationTop ?? Infinity });
+      }
+
+      const solved = new Map(); // `${floorId}:${kindId}` -> number|null
+      const unbounded = new Set();
+      for (const item of items) {
+        // Level art names its own floor; a tile does not — its floor is the
+        // band its own elevation falls inside, which is exactly the question
+        // `resolveElevationFloorIndex` exists to answer (and the same one
+        // `buf:scene.attr` asks), never a second private floor scheme here.
+        const floorId = item.levelId || resolveElevationFloorIndex(floors, item.key?.elevation ?? 0)?.floor?.id || '';
+        const band = bandById.get(floorId) ?? null;
+        const byKind = {};
+        for (const kind of VEGETATION_KINDS) {
+          const cacheKey = `${floorId}:${kind.id}`;
+          if (!solved.has(cacheKey)) {
+            const resolved = vegetationOverlayRenderOrder(items, item, kind, band);
+            solved.set(cacheKey, resolved.fellBack ? null : resolved.renderOrder);
+            if (resolved.fellBack) unbounded.add(floorId || '(no floor)');
+          }
+          byKind[kind.id] = solved.get(cacheKey);
+        }
+        item.vegetationRenderOrder = byKind;
+      }
+
+      // AN UNBOUNDED BAND IS REPORTED, NEVER SWALLOWED. Without a declared
+      // `elevation.top` the whole "a tile above this fraction wins" model has
+      // no scale to work against, so those floors keep the OLD host-relative
+      // behaviour — which is precisely the bug the author reported. Saying so
+      // is the difference between "set a band on your Level" and another round
+      // of chasing a silent wrong answer (the same posture `floorCeilings`
+      // takes toward an undeclared ceiling).
+      const warning = [...unbounded].sort().join(', ');
+      if (warning !== lastVegUnboundedWarning) {
+        lastVegUnboundedWarning = warning;
+        if (warning) {
+          log.warn(
+            `vegetation: floor(s) [${warning}] have no bounded elevation band (elevation.top is undeclared/Infinity), ` +
+              'so vegetation overlays there still sort relative to their host item and a tile can draw over them. ' +
+              'Set a bottom/top elevation on those Levels to place vegetation by elevation.'
+          );
+        }
+      }
+    }
+
     /** Per-frame refresh — geometry-on-placement-change + visibility +
      * renderOrder, mirroring `refreshWholeImageItem`'s own shape exactly. A
      * kind still `loading`/`error` is simply skipped (nothing to show yet, or
@@ -7355,6 +7565,11 @@ export async function startVtPanViewer({
               attr.needsUpdate = true;
             }
           }
+          // The fold-free flutter cap is expressed per world px, so a resize
+          // moves it. Pushed HERE, alongside the geometry rewrite, because the
+          // material is deliberately not rebuilt on a placement change.
+          syncVegetationUvBasis(entry.motion, state.placement);
+          syncVegetationUvBasis(entry.shadow?.motion, state.placement);
         }
         // NOTE: uniform SYNC (sky + motion) does NOT happen here — this
         // function only runs on a residency pass (pan/zoom/placement change),
@@ -7364,7 +7579,9 @@ export async function startVtPanViewer({
         // it now owns every vegetation uniform push, called every frame from
         // `renderFrame`, mirroring `updateCandleFlame`'s own placement.
         entry.mesh.visible = show && enabled;
-        entry.mesh.renderOrder = item.renderOrder + kind.renderOrderNudge;
+        // See the build site above — the overlay's own sort slot, with the
+        // legacy host-relative nudge as the unbounded-band fallback.
+        entry.mesh.renderOrder = item.vegetationRenderOrder?.[kind.id] ?? item.renderOrder + kind.renderOrderNudge;
         if (entry.shadow?.mesh) {
           // Same two-halves split as Case 1 above — see that comment.
           entry.shadow.residentVisible = show && enabled;
@@ -7973,6 +8190,12 @@ export async function startVtPanViewer({
       // (scene/layer-order.js). Rebuilt every update because the draw list
       // itself changes with the viewed floor.
       const items = sortByLayer(buildItems(view.floorIndex));
+      // Vegetation sorts at its OWN elevation inside the host floor's band, not
+      // at its host's — the author-ruled exception (see VegetationKind#
+      // passiveElevationFraction). Must run HERE, with the freshly sorted list:
+      // it resolves each overlay's slot through the same comparator, so it
+      // needs the stamped `renderOrder`s that only exist after the line above.
+      stampVegetationRenderOrders(items);
       const wantedIds = new Set(items.map((i) => i.id));
       prefetchSkippedPacks = 0;
       lastUpdate.placementChanges = 0;

@@ -54,6 +54,7 @@ import {
   WINDOW_SHOULDER_K,
 } from './window-cookie.js';
 import { WINDOW_DEBUG_CHANNELS, WINDOW_DEBUG_BOOST } from './window.js';
+import { buildDebugChannelColor } from '../debug-channel-select.js';
 
 /**
  * Fraction of the authored file's resolution to upload for this shader's own
@@ -227,17 +228,18 @@ export function buildWindowSurfaceMaterial({
     rawLight: rawLight.mul(float(WINDOW_DEBUG_BOOST)),
     final: cookieLight.mul(float(WINDOW_DEBUG_BOOST)),
   };
-  let debugColor = vec3(0, 0, 0);
-  for (const ch of WINDOW_DEBUG_CHANNELS) {
-    if (ch.n === 0) continue;
-    const node = debugNodes[ch.id];
-    // Loud at BUILD time, never a channel that quietly shows the one below it
-    // (`feedback_instruments_must_not_lie`).
-    if (!node) throw new Error(`window debug channel '${ch.id}' (n=${ch.n}) has no node in debugNodes`);
-    debugColor = abs(uDebugChannel.sub(float(ch.n)))
-      .lessThan(float(0.5))
-      .select(node, debugColor);
-  }
+  // ⚠️ ARITHMETIC, NOT `select()`. This shared the specular selector's exact
+  // shape and therefore its exact defect — every channel's maths inside its own
+  // WGSL branch, so a `.toVar()` assigned in one branch reads as zero in all the
+  // others. Window's channels have never been live-read, so this was caught
+  // before it cost anything rather than after; `effects/debug-channel-select.js`
+  // carries the dumped shader that proves the mechanism.
+  const debugColor = buildDebugChannelColor(TSL, {
+    channels: WINDOW_DEBUG_CHANNELS,
+    nodes: debugNodes,
+    uDebugChannel,
+    label: 'window',
+  });
   const debugMaterial = new THREE.NodeMaterial();
   debugMaterial.colorNode = vec4(debugColor, 1);
   configureShared(debugMaterial);

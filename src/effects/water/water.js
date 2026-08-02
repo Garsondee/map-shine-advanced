@@ -98,10 +98,14 @@ export const WATER_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.92,
+    // ⚠️ 0.755, NOT 0.92 — and this default is load-bearing, not taste. It
+    // must equal `WATER_TIER3_GLOSSINESS` (water-light.js), which carries the
+    // Cox-Munk grounding and the measurement showing 0.92 made the whole rung
+    // invisible. A Node test pins the two equal.
+    default: 0.755,
     category: 'Light',
     label: 'Glossiness',
-    help: 'How mirror-like the surface is. High values give a tight, glassy sun sparkle; low values spread the same light into a duller, broader sheen. This is independent of how choppy the surface looks — a later rung, not this slider, is what makes water physically rougher.',
+    help: 'How mirror-like the surface is, at scales too fine to see individually — the polish BETWEEN the wavelets. High values give a tight, hard sparkle; low values spread the same light into a duller, broader sheen. This is not the same as how choppy the water is: Surface chop sets how much the wavelets themselves lean, and that is what decides where the sparkles land.',
   },
   viewerHeight: {
     type: 'float',
@@ -153,6 +157,19 @@ export const WATER_PARAMS = Object.freeze({
     category: 'Motion',
     label: 'Surface scale',
     help: 'How big the surface structure is, in canvas pixels. Small values look like fine ripples or noise; large values like slow, broad swells. Scale it to your map — a value that reads well on a stream looks like stains on a lake.',
+  },
+  chop: {
+    type: 'float',
+    min: 0,
+    max: 1.5,
+    step: 0.01,
+    // Matches WATER_TIER3_CHOP (water-field.js), which carries the Cox-Munk
+    // sea-surface slope statistics this number is calibrated against AND the
+    // measured reason it is not higher.
+    default: 0.4,
+    category: 'Motion',
+    label: 'Surface chop',
+    help: 'How steeply the wavelets lean — and therefore how hard the water sparkles in sunlight. This is the control that decides whether a river glitters. At 0 the surface is mirror-flat and catches the sun in one place or not at all. The default is a light breeze, and is close to where sparkle is strongest: pushing it much higher does NOT keep adding sparkle, it tips the wavelets so far past the sun that the surface goes broad and dull again — which is a real look if you want a churned, storm-tossed river, but not a brighter one. If your water looks dead in daylight, start here.',
   },
   // ── Shape ───────────────────────────────────────────────────────────────
   depthScalePx: {

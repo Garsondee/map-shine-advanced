@@ -13,11 +13,11 @@ import {
   packFloorAttr,
   buildRealFloorAttrMrtNode,
   resolveItemFloorAttrUniforms,
-  backgroundArtPresenceBit,
+  occludesBackgroundPresenceBit,
   PRESENCE_BIT_OVERHEAD,
-  PRESENCE_BIT_BACKGROUND_ART,
+  PRESENCE_BIT_OCCLUDES_BACKGROUND,
 } from '../scene-attr.js';
-import { SPECULAR_BACKGROUND_ART_THRESHOLD01 } from '../../effects/specular/specular-render.js';
+import { SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 } from '../../effects/specular/specular-render.js';
 
 // A real (not swizzle-capable) plain object standing in for `output.a` —
 // distinct identity from the bare `output` symbol so a test can tell whether
@@ -144,48 +144,49 @@ export function run(t) {
     );
   }
 
-  // backgroundArtPresenceBit — the tile-occlusion fix's encode side (2026-07-29).
-  // `effects/specular` is the one consumer: it reads a Level's background
-  // mask ONLY (`mask-authority.js#authoredStatus` resolves `backgroundItemOf`
-  // and nothing else), so ONLY `levelBackground` may set this bit — a Tile
-  // AND the Level's own foreground/roof must both read as "occluding", or
-  // the exact bug this fixes (background shine glowing through whatever
-  // actually covers it) reopens for roofs instead of tiles.
+  // occludesBackgroundPresenceBit — the tile-occlusion fix's encode side
+  // (2026-07-29), POLARITY INVERTED 2026-08-01. `effects/specular` is the one
+  // consumer: it reads a Level's background mask ONLY
+  // (`mask-authority.js#authoredStatus` resolves `backgroundItemOf` and nothing
+  // else), so a Tile AND the Level's own foreground/roof must BOTH read as
+  // "occluding", or the exact bug this fixes (background shine glowing through
+  // whatever actually covers it) reopens for roofs instead of tiles.
   {
     ok(
-      'levelBackground sets the bit',
-      backgroundArtPresenceBit({ kind: 'levelBackground' }) === PRESENCE_BIT_BACKGROUND_ART
+      'a Tile sets the occluder bit',
+      occludesBackgroundPresenceBit({ kind: 'tile' }) === PRESENCE_BIT_OCCLUDES_BACKGROUND
     );
-    ok('a Tile does NOT set the bit', backgroundArtPresenceBit({ kind: 'tile' }) === 0);
     ok(
-      "the Level's OWN foreground/roof does NOT set the bit either — it must occlude like a Tile",
-      backgroundArtPresenceBit({ kind: 'levelForeground' }) === 0
+      "the Level's OWN foreground/roof sets it too — it must occlude exactly like a Tile",
+      occludesBackgroundPresenceBit({ kind: 'levelForeground' }) === PRESENCE_BIT_OCCLUDES_BACKGROUND
     );
-    ok('a token (or anything else) does not set the bit', backgroundArtPresenceBit({ kind: 'token' }) === 0);
-    ok('a missing item is treated as "not background", never throws', backgroundArtPresenceBit(null) === 0);
-    ok('a missing kind is treated as "not background"', backgroundArtPresenceBit({}) === 0);
+    ok(
+      'levelBackground does NOT set it — it is the thing being occluded',
+      occludesBackgroundPresenceBit({ kind: 'levelBackground' }) === 0
+    );
+    ok('a token (or anything else) does not set it', occludesBackgroundPresenceBit({ kind: 'token' }) === 0);
+    // ⚠️ THE POLARITY PIN. These three are the whole reason the bit was
+    // inverted: every "I could not tell what this is" input must land on
+    // NOT-OCCLUDED, so an unknown/missing writer can never switch a consumer
+    // off. Under the old polarity each of these meant "not background", which
+    // meant "hide the effect" — globally, silently, with every status field
+    // reporting healthy.
+    ok('a missing item is treated as NOT occluding, never throws', occludesBackgroundPresenceBit(null) === 0);
+    ok('a missing kind is treated as NOT occluding', occludesBackgroundPresenceBit({}) === 0);
+    ok(
+      'an unrecognised kind is treated as NOT occluding',
+      occludesBackgroundPresenceBit({ kind: 'somethingNew' }) === 0
+    );
   }
 
   // resolveItemFloorAttrUniforms — the bit must reach the REAL uniform, on
   // EVERY return path, not just the happy one. `sceneDoc: null` hits the
   // function's own real "no active scene" fail-open branch (see the
   // buildRealFloorAttrMrtNode block above for why no mock is needed for
-  // that half) — exactly the path this fix touched, since the background
-  // bit is now computed BEFORE the try block rather than only inside it.
+  // that half) — exactly the path this fix touched, since the occluder
+  // bit is computed BEFORE the try block rather than only inside it.
   {
     const THREE = makeTHREE();
-    const bg = resolveItemFloorAttrUniforms({
-      THREE,
-      item: { kind: 'levelBackground', key: { elevation: 0 } },
-      viewedFloorIndex: 0,
-      sceneDoc: null,
-      logError: () => {},
-    });
-    ok(
-      'a levelBackground item carries the background bit through the fail-open path',
-      bg.uPresenceBits01.value === PRESENCE_BIT_BACKGROUND_ART / 255
-    );
-
     const tile = resolveItemFloorAttrUniforms({
       THREE,
       item: { kind: 'tile', key: { elevation: 0 } },
@@ -193,7 +194,10 @@ export function run(t) {
       sceneDoc: null,
       logError: () => {},
     });
-    ok('a Tile carries NO background bit', tile.uPresenceBits01.value === 0);
+    ok(
+      'a Tile carries the occluder bit through the fail-open path',
+      tile.uPresenceBits01.value === PRESENCE_BIT_OCCLUDES_BACKGROUND / 255
+    );
 
     const fg = resolveItemFloorAttrUniforms({
       THREE,
@@ -202,47 +206,64 @@ export function run(t) {
       sceneDoc: null,
       logError: () => {},
     });
-    ok("the Level's own foreground carries NO background bit either", fg.uPresenceBits01.value === 0);
+    ok(
+      "the Level's own foreground carries it too",
+      fg.uPresenceBits01.value === PRESENCE_BIT_OCCLUDES_BACKGROUND / 255
+    );
+
+    const bg = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'levelBackground', key: { elevation: 0 } },
+      viewedFloorIndex: 0,
+      sceneDoc: null,
+      logError: () => {},
+    });
+    ok('a levelBackground item carries NO occluder bit', bg.uPresenceBits01.value === 0);
   }
 
   // THE CROSS-FILE PIN — `effects/specular`'s decode threshold must sit
-  // strictly between "background bit clear" (0, or the overhead bit alone —
-  // its max is PRESENCE_BIT_OVERHEAD) and "background bit set" (at minimum
-  // PRESENCE_BIT_BACKGROUND_ART, whether or not overhead is ALSO set).
+  // strictly between "occluder bit clear" (0, or the overhead bit alone — its
+  // max is PRESENCE_BIT_OVERHEAD) and "occluder bit set" (at minimum
+  // PRESENCE_BIT_OCCLUDES_BACKGROUND, whether or not overhead is ALSO set).
   // Nothing forces these two files to agree; only this test does — the same
   // shape as `SPECULAR_DEFAULT_SHIMMER_GAIN` vs
   // `SPECULAR_PARAMS.shimmerGain.default` in `specular.test.mjs`.
   {
     ok(
-      'the decode threshold clears every "background bit NOT set" byte value (0 or overhead alone)',
-      SPECULAR_BACKGROUND_ART_THRESHOLD01 > PRESENCE_BIT_OVERHEAD / 255
+      'the decode threshold clears every "occluder bit NOT set" byte value (0 or overhead alone)',
+      SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 > PRESENCE_BIT_OVERHEAD / 255
     );
     ok(
-      'the decode threshold sits BELOW every "background bit set" byte value, overhead or not',
-      SPECULAR_BACKGROUND_ART_THRESHOLD01 < PRESENCE_BIT_BACKGROUND_ART / 255 &&
-        SPECULAR_BACKGROUND_ART_THRESHOLD01 < (PRESENCE_BIT_BACKGROUND_ART + PRESENCE_BIT_OVERHEAD) / 255
+      'the decode threshold sits BELOW every "occluder bit set" byte value, overhead or not',
+      SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 < PRESENCE_BIT_OCCLUDES_BACKGROUND / 255 &&
+        SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 < (PRESENCE_BIT_OCCLUDES_BACKGROUND + PRESENCE_BIT_OVERHEAD) / 255
     );
 
-    // ⚠️ THE REGRESSION PIN, 2026-07-29 — this is the assertion that would
-    // have caught the live bug before it shipped. The first version of this
-    // bit (weight 4, threshold 3.5) went completely invisible live because
-    // `buildWholeImageMaterial`'s attr write is NOT a hard overwrite — it
-    // rides NormalBlending scaled by the material's OWN alpha
-    // (`attr_new = attr_old·(1−α) + attr_src·α`), and a background's real α
-    // is not always bit-exact 1.0 even when it looks fully opaque (see
-    // `PRESENCE_BIT_BACKGROUND_ART`'s own doc for the full account). A tight
-    // margin (needing ≥87.5% of the bit's strength to survive) failed on a
-    // deficiency too small to see. This pins the MARGIN itself, not just the
-    // three numbers' relative order above — a future edit that narrows it
-    // back down without noticing the reason should fail HERE.
+    // ⚠️ THE MARGIN PIN, 2026-07-29. `buildWholeImageMaterial`'s attr write is
+    // NOT a hard overwrite — it rides NormalBlending scaled by the material's
+    // OWN alpha (`attr_new = attr_old·(1−α) + attr_src·α`), and a real α is not
+    // always bit-exact 1.0 even when the art looks fully opaque. The bit's first
+    // shipped version (weight 4, threshold 3.5) needed ≥87.5% of its strength to
+    // survive and failed on a deficiency too small to see. Keep the margin wide
+    // even though the inverted polarity now makes the residual error harmless.
     ok(
       'the decode threshold tolerates the write surviving at only HALF its nominal strength',
-      SPECULAR_BACKGROUND_ART_THRESHOLD01 <= 0.5 * (PRESENCE_BIT_BACKGROUND_ART / 255)
+      SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 <= 0.5 * (PRESENCE_BIT_OCCLUDES_BACKGROUND / 255)
     );
     ok(
-      '…while the "not background" byte (overhead alone) cannot cross it even at FULL strength — ' +
+      '…while the overhead bit alone cannot cross it even at FULL strength — ' +
         'alpha-scaling only ever shrinks a value, never grows it',
-      PRESENCE_BIT_OVERHEAD / 255 < SPECULAR_BACKGROUND_ART_THRESHOLD01
+      PRESENCE_BIT_OVERHEAD / 255 < SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01
+    );
+
+    // ⚠️ THE FAIL-OPEN PIN — the assertion the ORIGINAL polarity could not have
+    // had, and the reason for the inversion. `buf:scene.attr` clears to
+    // (0,0,0,0) (this module's KNOWN GAP #2: "no geometry" and "floor 0, no
+    // flags" are the same bytes), so a cleared/never-written buffer MUST decode
+    // to "not occluded". A future edit that flips the polarity back fails here.
+    ok(
+      'an UNWRITTEN attr buffer (b = 0) decodes as NOT occluded — the effect must survive a missing write',
+      0 < SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01
     );
   }
 }

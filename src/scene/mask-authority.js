@@ -845,8 +845,8 @@ export function createMaskAuthority({ readPageImageData, log }) {
      *   include?: {building?: boolean, overhead?: boolean, skyReach?: boolean},
      *   gridMaxDim?: number}} spec - `gridMaxDim` 0/absent = share `gridSpec`
      *   (today's behaviour); >0 = the caster channels rasterize at THIS
-     *   resolution instead (`sun-occlusion.js#sunShadowTierPlan`'s
-     *   `casterGridDim`, resolved by the caller before this call).
+     *   resolution instead (`layer-smear.js#layerSmearTierPlan`'s
+     *   `layerGridDim`, resolved by the caller before this call).
      * @returns {boolean} true if anything changed (and a rebuild is now pending).
      */
     setCasterHeightSpec(spec = {}) {
@@ -886,9 +886,23 @@ export function createMaskAuthority({ readPageImageData, log }) {
      * already carried in the caster texture's own gate channel. A method, not
      * a plain property, for exactly the reason `buildingHeightPx` itself is
      * mutable and a snapshot would go stale the first time the slider moves.
+     *
+     * ⚠️ HONOURS `include.building` (2026-07-30 — the sun-shadow debug view's
+     * isolation was a lie for every mode except "building only"). The march's
+     * COLUMN test reads this uniform completely independently of any per-texel
+     * caster channel, so `include: {building: false}` — which correctly zeroes
+     * the PER-TEXEL `casterBuilding`/`coverBuilding` grids in
+     * `deriveFloorProducts` — left this scalar untouched. "Shadows — sky-reach
+     * only" and "— overhead only" therefore still ran the FULL column test on
+     * top of their own restricted band contribution: the same clean shape
+     * `shadow-building` shows on its own, unioned with a differently-edged
+     * band shadow for the same structure, which is exactly the doubled
+     * silhouette + bright seam the author found live. Zeroing here, at the
+     * one place every caller already reads through, fixes every caller at
+     * once rather than requiring each to remember to gate it separately.
      */
     getBuildingHeightPx() {
-      return casterSpec.buildingHeightPx;
+      return casterSpec.include.building ? casterSpec.buildingHeightPx : 0;
     },
     getDerived,
     sampleWorld,

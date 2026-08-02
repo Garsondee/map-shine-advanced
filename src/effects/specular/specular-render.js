@@ -61,6 +61,7 @@ import {
 } from './specular-pattern.js';
 import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
+import { buildDebugChannelColor, pickEquals } from '../debug-channel-select.js';
 
 /**
  * Fraction of the authored file's resolution to upload for the SHIMMER's own
@@ -73,44 +74,41 @@ export const SPECULAR_MASK_IMAGE_SCALE = 0.5;
 
 /**
  * Decode threshold for `buf:scene.attr`'s presence-bitfield TOP BIT
- * (`vt/scene-attr.js#PRESENCE_BIT_BACKGROUND_ART`, weight 128/255) — 1 only
- * where the Level's OWN background image is still the topmost opaque draw
- * at this pixel, 0 the instant a Tile or the Level's own foreground/roof
- * paints over it (see that constant's own doc for why the foreground is
- * deliberately excluded).
+ * (`vt/scene-attr.js#PRESENCE_BIT_OCCLUDES_BACKGROUND`, weight 128/255) — 1
+ * where a Tile, or the Level's own foreground/roof, has painted OVER the
+ * Level's background art, 0 where the background is still what is on screen.
+ *
+ * ⚠️ **THE BIT MEANS "OCCLUDED", NOT "BACKGROUND", AND THE SIGN IS THE FIX**
+ * (inverted 2026-08-01 — that constant's own doc carries the full account).
+ * It shipped 2026-07-29 the other way round, gating the whole effect on
+ * "1 = my background is still topmost", and `buf:scene.attr` clears to
+ * (0,0,0,0) — so an attr buffer that was never written was indistinguishable
+ * from one saying "a Tile is on top", and either way `coverage` went to zero
+ * EVERYWHERE and the effect vanished with no error anywhere. Reading it as
+ * OCCLUSION makes the unwritten case mean "nothing is covering me", so the
+ * worst an upstream failure can now do is let the shine draw where a tile
+ * should have hidden it — local and visible, instead of global and silent.
  *
  * ⚠️ 64/255 — HALF the bit's own weight, not "halfway between the two raw
- * byte values" — REGRESSION, 2026-07-29. The write this decodes is NOT a
- * hard overwrite: it rides ordinary NormalBlending scaled by the background
- * material's OWN alpha (`attr_new = attr_old·(1−α) + attr_src·α`), which this
- * module's own header already hedges as "opaque (alpha≈1)... **almost**
- * entirely replaced" — approximate, not exact. A weight-4 bit with a
- * 3.5-threshold (this constant's first shipped value) needed the write to
- * survive ≥87.5% of its strength, and a background's real alpha — after
- * compression, mip/CAS processing and the occlusion-alpha multiply, all
- * upstream of this write — is not always bit-exact 1.0 even when the art
- * LOOKS fully opaque. That shipped live, invisible, immediately: the shine
- * vanished entirely and did not respond to `strength` at any value, because
- * `coverage` (which this bit gates) was zero everywhere, and multiplying
- * zero by anything is still zero. R (floor index) and G (outdoors) never hit
- * this: their correct values on an ordinary scene are both 0, and 0 scaled by
- * any α is still 0 — this was the FIRST genuinely non-zero value ever pushed
- * through this write.
- *
- * The fix is margin, not mechanism: weight 128 (`vt/scene-attr.js`'s own top
- * bit) with THIS threshold at 64 tolerates the write surviving at only 50% of
- * its nominal strength — nothing this small should ever be attenuated that
- * far — while the "not background" case (the overhead bit alone, max raw
- * value 1) can only ever be scaled SMALLER by the same blend, never larger,
- * so it cannot cross a threshold this high regardless of α.
+ * byte values". The write this decodes is NOT a hard overwrite: it rides
+ * ordinary NormalBlending scaled by the drawing material's OWN alpha
+ * (`attr_new = attr_old·(1−α) + attr_src·α`), which `vt/scene-attr.js`'s
+ * header hedges as "opaque (alpha≈1)... **almost** entirely replaced" —
+ * approximate, not exact, since α passes through compression, mip/CAS
+ * processing and the occlusion-alpha multiply first. This threshold tolerates
+ * an occluder's write surviving at only 50% of its nominal strength, while
+ * the overhead bit alone (max raw value 1) can only ever be scaled SMALLER by
+ * the same blend, never larger, so it cannot be mistaken for this one at any α.
+ * Under the inverted polarity the residual error is in the safe direction: a
+ * badly-attenuated occluder under-reports occlusion, it does not delete the pass.
  *
  * ⚠️ TWO PLACES KNOW THIS RELATIONSHIP — this threshold and the encode side's
- * bit weight in `vt/scene-attr.js`. `specular.test.mjs` pins them against
+ * bit weight in `vt/scene-attr.js`. `scene-attr.test.mjs` pins them against
  * each other so a future rename of one cannot silently desync from the other
  * (the same shape as `SPECULAR_DEFAULT_SHIMMER_GAIN` vs
  * `SPECULAR_PARAMS.shimmerGain.default`).
  */
-export const SPECULAR_BACKGROUND_ART_THRESHOLD01 = 64 / 255;
+export const SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 = 64 / 255;
 
 /** How many shimmer layers. THREE, matching V2 — and the count is not
  * arbitrary: the relative motion BETWEEN layers at different parallax depths is
@@ -780,19 +778,21 @@ export function buildSpecularSurfaceMaterial({
     // `floorMatch` alone only tells two FLOORS apart and cannot tell a
     // same-floor Tile from its own background (both share one floor index).
     // `buf:scene.attr`'s B channel records whichever item drew LAST (topmost,
-    // alpha≈1) at each texel (`scene-attr.js`'s own "THE REAL WRITERS"); the
-    // TOP bit is set ONLY by the Level's background art
-    // (`vt/scene-attr.js#backgroundArtPresenceBit` — read that constant's own
-    // doc before ever lowering this bit's weight again, it was tried once and
-    // shipped invisible), so it reads 1 exactly where the background is still
-    // what is actually on screen and 0 the instant a Tile — or the Level's
-    // OWN foreground/roof, which must NOT count as "still the background"
-    // either — draws opaquely over it.
-    const backgroundArtHere = step(float(SPECULAR_BACKGROUND_ART_THRESHOLD01), attrHere.b).toVar(
-      'specBackgroundArtHere'
-    );
-    visibility01 = floorMatch.mul(backgroundArtHere);
-    debugFloorGate = vec3(floorMatch, anythingDrawn, backgroundArtHere);
+    // alpha≈1) at each texel (`scene-attr.js`'s own "THE REAL WRITERS"); its
+    // TOP bit is set by TILES AND FOREGROUND/ROOF ART
+    // (`vt/scene-attr.js#occludesBackgroundPresenceBit`), never by the
+    // background itself.
+    //
+    // ⚠️ THE SUBTRACTION IS LOAD-BEARING — the gate is "1 UNLESS something is
+    // covering me", not "1 WHERE my background is". Those differ on exactly
+    // one case and it is the one that matters: an attr buffer that was never
+    // written reads (0,0,0,0), which under the old polarity meant "not my
+    // background" and switched the ENTIRE effect off with no error anywhere.
+    // Read that constant's own doc before flipping this back.
+    const occludedHere = step(float(SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01), attrHere.b).toVar('specOccludedHere');
+    const backgroundVisible = float(1).sub(occludedHere).toVar('specBackgroundVisible');
+    visibility01 = floorMatch.mul(backgroundVisible);
+    debugFloorGate = vec3(floorMatch, anythingDrawn, backgroundVisible);
   }
 
   const coverage = presence.mul(visibility01).toVar('specCoverage');
@@ -905,21 +905,26 @@ export function buildSpecularSurfaceMaterial({
     // shader) answers which one BEFORE the hue-per-island picture is even
     // shown, so a black screen is either a diagnostic colour that NAMES the
     // failure, or it is trustworthy black because the bake is known-good.
-    islands: uIslandBakeStatus
-      .lessThan(float(0.5))
-      // STATUS 0 -- still the placeholder. Never baked at all: the mask never
-      // loaded, or `buildSpecularIslandPack` threw. Loud magenta -- the same
-      // "something is structurally wrong" colour channel 1 uses for a missing
-      // mesh, deliberately, so both read as the same class of problem.
-      .select(
-        vec3(1, 0, 1),
-        uIslandBakeStatus
-          .lessThan(float(1.5))
-          // STATUS 1 -- baked, zero islands survived. Not a bug: the mask
-          // genuinely has nothing that clustered past the size floor on THIS
-          // floor. Amber, not red -- a data fact, not a code failure.
-          .select(vec3(1, 0.6, 0), mx_hsvtorgb(vec3(packSample.b, float(0.9), packSample.a)))
-      ),
+    // ⚠️ ARITHMETIC, NOT NESTED `select()` — the SAME trap as the channel
+    // selector itself, one level down (`effects/debug-channel-select.js`).
+    // The `select()` version buried `mx_hsvtorgb(packSample…)` in its innermost
+    // else-branch, which is where `specPack`'s assignment would then be emitted
+    // — leaving channel 7 (`islandMotion`), which reads the same pack var from
+    // the main flow, staring at an unassigned zero. Three states, three 0/1
+    // pickers, one sum: no branch, so the pack sample is built exactly once, in
+    // the main flow, where both channels can see it.
+    //   STATUS 0 -- still the placeholder. Never baked at all: the mask never
+    //     loaded, or `buildSpecularIslandPack` threw. Loud magenta, the same
+    //     "something is structurally wrong" colour channel 1 uses for a missing
+    //     mesh, deliberately, so both read as the same class of problem.
+    //   STATUS 1 -- baked, zero islands survived. Not a bug: the mask genuinely
+    //     has nothing that clustered past the size floor on THIS floor. Amber,
+    //     not red -- a data fact, not a code failure.
+    //   STATUS 2 -- real islands: the hue-per-island picture.
+    islands: vec3(1, 0, 1)
+      .mul(pickEquals(TSL, uIslandBakeStatus, 0))
+      .add(vec3(1, 0.6, 0).mul(pickEquals(TSL, uIslandBakeStatus, 1)))
+      .add(mx_hsvtorgb(vec3(packSample.b, float(0.9), packSample.a)).mul(pickEquals(TSL, uIslandBakeStatus, 2))),
     // The motion itself, separately, because "distinct" and "moving correctly"
     // are two questions and one picture cannot answer both.
     islandMotion: vec3(
@@ -987,17 +992,20 @@ export function buildSpecularSurfaceMaterial({
     // placeholder; a fresh node here reads the SAME real texture, always.
     attrDirect: attrTexture ? texture(attrTexture, screenUv).rgb : vec3(0, 0, 0),
   };
-  let debugColor = vec3(0, 0, 0);
-  for (const ch of SPECULAR_DEBUG_CHANNELS) {
-    if (ch.n === 0) continue;
-    const node = debugNodes[ch.id];
-    // Loud at BUILD time, never a channel that quietly shows the one below it:
-    // a diagnostic that lies is worse than none (`feedback_instruments_must_not_lie`).
-    if (!node) throw new Error(`specular debug channel '${ch.id}' (n=${ch.n}) has no node in debugNodes`);
-    debugColor = abs(uDebugChannel.sub(float(ch.n)))
-      .lessThan(float(0.5))
-      .select(node, debugColor);
-  }
+  // ⚠️ ARITHMETIC, NOT `select()` — and this is not a style choice. The
+  // `select()` fold this replaces put every channel's maths inside its own
+  // branch of real WGSL control flow, so each shared `.toVar()` was ASSIGNED in
+  // whichever branch the graph walk reached first and read as an unassigned
+  // (zero) `var<private>` in every other one. Twelve rounds of this effect's
+  // history were spent re-diagnosing it off channel readings that were produced
+  // that way — see `effects/debug-channel-select.js` for the dumped WGSL that
+  // finally showed it, and channel 8's own note below for what it cost here.
+  const debugColor = buildDebugChannelColor(TSL, {
+    channels: SPECULAR_DEBUG_CHANNELS,
+    nodes: debugNodes,
+    uDebugChannel,
+    label: 'specular',
+  });
   const debugMaterial = new THREE.NodeMaterial();
   debugMaterial.colorNode = vec4(debugColor, 1);
   configureShared(debugMaterial);

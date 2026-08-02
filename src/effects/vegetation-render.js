@@ -43,7 +43,7 @@
  * @module effects/vegetation-render
  */
 
-import { maskKindById } from '../scene/index.js';
+import { maskKindById, makeLayerKey, compareLayerKeys, SORT_LAYERS } from '../scene/index.js';
 import { VEGETATION_KINDS } from './vegetation.js';
 import { VEG_SHADOW_SMEAR_TAPS } from './vegetation-shadow-subsystem.js';
 
@@ -126,8 +126,197 @@ export function validateVegetationKinds(kinds = VEGETATION_KINDS) {
     if (!Number.isFinite(kind.renderOrderNudge)) {
       errors.push(`kind '${kind.id}': renderOrderNudge must be a finite number`);
     }
+    // A fraction OUTSIDE 0..1 would place the overlay outside its own floor's
+    // band — i.e. sorted into a DIFFERENT floor's art. That is never a tuning
+    // choice, always a typo, and it fails as a RED TEST rather than as a
+    // baffling "my bushes render on the floor above" report.
+    if (
+      !(
+        Number.isFinite(kind.passiveElevationFraction) &&
+        kind.passiveElevationFraction >= 0 &&
+        kind.passiveElevationFraction <= 1
+      )
+    ) {
+      errors.push(`kind '${kind.id}': passiveElevationFraction must be a finite number within 0..1`);
+    }
   }
   return { ok: errors.length === 0, errors };
+}
+
+/* ============================================================================
+ * THE FOLD-FREE FLUTTER BOUND (2026-08-01)
+ * ============================================================================
+ * Author-reported, with a screenshot at 100% wind: *"when vegetation flutters
+ * at high wind speed it just liquifies"* — canopies stop reading as foliage and
+ * turn into flowing streaks with the ink linework stirred away.
+ *
+ * WHY IT LIQUIFIES, AND WHY "IT PRESERVES AREA" WAS NOT PROTECTION. Flutter is
+ * a domain warp: the fragment samples the art at `uv + d(uv)`. The displacement
+ * `d` comes from `curlNoise2D`, which is divergence-free — and that property is
+ * real but INFINITESIMAL. Divergence-free says the flow field conserves area
+ * under an instantaneous push; it says nothing about a FINITE displacement.
+ * Once the displacement's own gradient approaches 1, neighbouring samples cross
+ * over each other, the map `x → x + d(x)` stops being injective, and the image
+ * folds onto itself. Folding is exactly what "liquify" looks like, and no
+ * amount of divergence-freeness prevents it.
+ *
+ * THE ACTUAL BOUND. For a displacement of amplitude `A` built from noise whose
+ * features span a wavelength `λ`, the gradient is of order `2π·A/λ`, so the map
+ * stays injective while
+ *
+ *     A  <  λ / 2π       ( ≈ 0.159 λ )
+ *
+ * The bug is that the shipped cap was a FIXED number in UV space
+ * (`VEG_FLUTTER_UV_CAP = 0.005`) while the noise's wavelength is set in WORLD
+ * space by `flutterSpaceFreq × flutterScale`. The two were never coupled, so
+ * the safety margin silently depended on how big the tile happened to be and on
+ * whatever the author had done to the frequency dial — a units mismatch, not a
+ * mistuned number, which is why the previous round of retuning the amplitude
+ * down did not close it.
+ * ==========================================================================*/
+
+/**
+ * Fraction of a wavelength the flutter displacement may reach. Below the
+ * theoretical `1/2π ≈ 0.159` fold threshold with real margin, because the bound
+ * is an order-of-magnitude estimate: the true gradient of a curl-noise field
+ * has peaks above its RMS, and the amplitude is summed with the bulk sway that
+ * is displacing the same vertices.
+ */
+export const VEG_FLUTTER_FOLD_SAFETY = 0.11;
+
+/**
+ * The largest flutter displacement, in WORLD px, that provably cannot fold the
+ * art at a given noise frequency.
+ *
+ * This is the whole fix for the liquify: instead of a fixed cap that is safe at
+ * one tile size and one frequency setting, the ceiling is DERIVED from the
+ * frequency actually in use, so cranking "Flutter frequency" tightens the
+ * amplitude automatically and the warp stays injective at every setting. The
+ * shader mirrors this exact expression with `spaceFreq` as a live node — see
+ * `vt-pan-viewer.js#buildVegetationMaterial`.
+ *
+ * @param {number} spaceFreq - the noise's world→noise scale
+ *   (`kind.flutterSpaceFreq × flutterScale`); one feature spans `1/spaceFreq`
+ *   world px.
+ * @param {{safety?: number}} [opts]
+ * @returns {number} world px. `Infinity` is never returned — a zero/degenerate
+ *   frequency means "no spatial variation at all", which cannot fold anything,
+ *   but a caller multiplying by Infinity would get NaN, so it clamps to 0
+ *   (a constant offset carries no shimmer and is not worth drawing).
+ */
+export function flutterFoldFreeAmplitudePx(spaceFreq, { safety = VEG_FLUTTER_FOLD_SAFETY } = {}) {
+  const f = Number(spaceFreq);
+  if (!Number.isFinite(f) || f <= 1e-6) return 0;
+  return safety / f;
+}
+
+/**
+ * WHERE THIS KIND SORTS — its passive elevation inside the host floor's band.
+ *
+ * See `VegetationKind#passiveElevationFraction` for WHY vegetation sorts at its
+ * own elevation instead of its host's (the author-ruled exception to the
+ * host-relative render-order rule).
+ *
+ * Returns `null` — NOT a guessed number — when the band is unbounded or
+ * inverted. `top` is `+Infinity` for any Level with no declared ceiling
+ * (Foundry's own `Level#prepareBaseData` normalisation, which
+ * `foundry/scene-layers.js#levelElevation` replicates) and `bottom` is
+ * `-Infinity` for one with no declared floor, so "no usable band" is ORDINARY
+ * DATA, not an edge case: a scene whose author never set an elevation band on
+ * their Level hits this on every single item. `bottom + (top - bottom) * f`
+ * would return `Infinity` or `NaN` there and sort the overlay above (or
+ * nowhere near) the entire scene — so the caller falls back to the old
+ * host-relative nudge and REPORTS it, rather than rendering a scene-destroying
+ * number. That is the same posture `floorCeilings` already takes toward an
+ * undeclared ceiling: surface the +Infinity so the author can set a band,
+ * never chase a silent wrong answer.
+ *
+ * A ZERO-HEIGHT band (`bottom === top`, a legitimate Foundry Level) is fine and
+ * needs no special case — every fraction collapses onto that one elevation, so
+ * vegetation and its floor's art share it and `sortLayer` separates them.
+ *
+ * @param {import('./vegetation.js').VegetationKind} kind
+ * @param {{bottom: number, top: number}|null|undefined} band - the host floor's
+ *   elevation band (`foundry/scene-layers.js#floorElevationBands`, or a
+ *   `getActiveSceneFloors()` floor's `{elevationBottom, elevationTop}` mapped
+ *   onto this shape by the caller).
+ * @returns {number|null} the sort elevation, or null if the band is unusable.
+ */
+export function vegetationPassiveElevation(kind, band) {
+  const bottom = band?.bottom;
+  const top = band?.top;
+  if (!Number.isFinite(bottom) || !Number.isFinite(top)) return null;
+  if (top < bottom) return null; // an inverted band is malformed data, not a band
+  const fraction = kind?.passiveElevationFraction;
+  if (!Number.isFinite(fraction)) return null;
+  return bottom + (top - bottom) * fraction;
+}
+
+/**
+ * THE OVERLAY'S `renderOrder`, resolved through THE LAW rather than nudged.
+ *
+ * `sortByLayer` stamps every real drawable with `renderOrder = its index` — a
+ * DENSE integer sequence. That density is exactly why the old
+ * `host.renderOrder + kind.renderOrderNudge` could never work: the next
+ * drawable above the host is always `host + 1`, and every nudge is < 1, so ANY
+ * tile sorting above the host beat the vegetation by construction (the
+ * author's 2026-08-01 report: a tile at elevation 0 / sort 1 drawing over
+ * every bush and tree).
+ *
+ * So instead of inventing an offset, this asks the real comparator where the
+ * vegetation's OWN key belongs in the already-sorted list. If `n` real
+ * drawables sort below it they occupy `renderOrder` 0..n-1, so `n - 0.5` lands
+ * the overlay strictly between `n-1` and `n` — the correct slot, expressed in
+ * the same numbering everything else uses. No band, no capacity, no drift from
+ * the law: change the comparator and this follows it automatically.
+ *
+ * `SORT_LAYERS.SCENE_EFFECTS` (250 < `TILES` 500) is what makes a TIE go to the
+ * tile, which is the author's own rule — *"tiles at 10 would render above the
+ * _Bush because they beat the priority"*. It also means the overlay sits above
+ * level art (`SCENE` 0) at the same elevation, so a tree at its floor's top
+ * draws over that floor's foreground/roof art. That is a real behaviour change
+ * from the host-relative era and is deliberate: an author who wants roof art
+ * above a canopy puts it on a TILE at the floor top (`TILES` 500 > 250).
+ *
+ * @param {ReadonlyArray<{key: object, renderOrder: number}>} sortedItems - the
+ *   draw list AFTER `sortByLayer`, still in sorted order.
+ * @param {{key?: object, renderOrder: number}} hostItem - the drawable this
+ *   overlay is painted onto; used only for the fallback and the tiebreak.
+ * @param {import('./vegetation.js').VegetationKind} kind
+ * @param {{bottom: number, top: number}|null|undefined} band - host floor band.
+ * @returns {{renderOrder: number, elevation: number|null, fellBack: boolean}}
+ *   `fellBack` is true when the band was unusable and the legacy host-relative
+ *   nudge was used — the caller REPORTS that rather than swallowing it.
+ */
+export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) {
+  const elevation = vegetationPassiveElevation(kind, band);
+  if (elevation === null) {
+    return {
+      renderOrder: (hostItem?.renderOrder ?? 0) + (kind?.renderOrderNudge ?? 0),
+      elevation: null,
+      fellBack: true,
+    };
+  }
+  const key = makeLayerKey({
+    elevation,
+    sortLayer: SORT_LAYERS.SCENE_EFFECTS,
+    sort: 0,
+    zIndex: 0,
+    // Inherit the HOST's tiebreak so two overlays that somehow tie on all four
+    // real components still resolve deterministically (and identically on every
+    // machine, every frame) instead of depending on iteration luck.
+    tiebreak: hostItem?.key?.tiebreak ?? 0,
+  });
+  // The list is already sorted by this very comparator, so the count of
+  // strictly-below entries IS the insertion index. A linear scan is honest here
+  // — draw lists are tens of items, and a binary search would need the list's
+  // sortedness to be re-proven at every call site that ever passes a filtered
+  // copy.
+  let below = 0;
+  for (const it of sortedItems ?? []) {
+    if (it?.key && compareLayerKeys(it.key, key) < 0) below++;
+  }
+  return { renderOrder: below - 0.5, elevation, fellBack: false };
 }
 
 /**

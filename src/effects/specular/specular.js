@@ -346,16 +346,23 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
   Object.freeze({
     n: 8,
     id: 'floorGate',
-    label: '8 · Floor gate (R=floor, G=drawn, B=background art)',
+    label: '8 · Floor gate (R=floor, G=drawn, B=not occluded)',
     reads:
-      'The scene-attribute verdict. RED = this quad floor matches; GREEN = the attribute buffer says art ' +
-      'was drawn here; BLUE = the Level`s OWN background is still the topmost thing on screen (added ' +
-      '2026-07-29, the tile-occlusion fix — a Tile, or the Level`s own foreground/roof, drops this to ' +
-      'black). Flat yellow-ish with no structure = no attr texture, so the whole gate compiled OUT (open, ' +
-      'B reads as if unoccluded everywhere). GREEN IS EXPECTED TO BE BLACK — that buffer alpha lane is a ' +
-      'known live bug and is deliberately not multiplied in. BLUE going black under a Tile/roof and staying ' +
-      'lit on bare background is the gate working; BLUE flat black everywhere metal is painted means the ' +
-      'occlusion bit itself is not reaching this pass — check `buf:scene.attr` wiring before the mask.',
+      'The scene-attribute verdict, and BOTH lit channels must be lit for the pass to draw. RED = this ' +
+      'quad floor matches; GREEN = the attribute buffer says art was drawn here; BLUE = nothing is ' +
+      'covering the Level`s background at this pixel. BLUE going black under a Tile or a roof, and ' +
+      'staying lit on bare background, is the gate working. ' +
+      '⚠️ BLUE IS "NOT OCCLUDED", NOT "IS BACKGROUND" — inverted 2026-08-01. It used to mean the ' +
+      'opposite, which made a never-written attr buffer read identically to "a Tile is on top" and ' +
+      'switched the whole effect off; now an unwired buffer fails OPEN and the shine draws. ' +
+      'GREEN IS EXPECTED TO BE BLACK — that buffer alpha lane is a known live bug and is deliberately ' +
+      'not multiplied in. ' +
+      '⚠️ THIS CHANNEL LIED FOR THREE LIVE ROUNDS (2026-07-27 to 07-29) and was fixed 2026-08-01: the ' +
+      'debug material`s channel selector compiled to real WGSL branches, so B read an unassigned ' +
+      'variable and was structurally ALWAYS black regardless of the buffer`s real contents. Any ' +
+      'conclusion drawn from this channel before that date is void — see ' +
+      '`effects/debug-channel-select.js`. Cross-check against channel 20 (attr, raw) whenever they ' +
+      'disagree.',
   }),
   Object.freeze({
     n: 9,
@@ -469,11 +476,14 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
     label: '20 · Attr, RAW (control for 8)',
     reads:
       'The same `buf:scene.attr` at the same screen UV as channel 8 (floor gate), sampled directly with ' +
-      'NOTHING applied — R=floor index, G=outdoors, B=the presence bitfield (bit 128 = background art). ' +
-      'Compare against 8: if 8 shows the gate closed (no blue) but THIS reads B clearly at or above 0.5, ' +
-      'the SHARED node 8 reads through is stale — the still-unresolved "debug material can read a ' +
-      'texture wrong where the real effect reads it correctly" class (2026-07-27, channel 19 vs 12`s own ' +
-      'history). If this ALSO reads B near zero, the write itself is the problem, not the instrument.',
+      'NOTHING applied — R=floor index, G=outdoors, B=the presence bitfield (bit 128 = SOMETHING IS ' +
+      'COVERING the Level`s background here; bit 1 = overhead/roof). Reading it on bare background art, ' +
+      'B should be near ZERO and channel 8`s blue should be LIT — the two are complements, not copies. ' +
+      'B at or above 0.5 on bare background means a Tile/roof is claiming that pixel; B near zero under ' +
+      'a Tile means the occluder bit is not reaching this pass, so check `buf:scene.attr` wiring before ' +
+      'suspecting the mask. This channel is the CONTROL for channel 8 (a fresh, unshared texture node), ' +
+      'and it earned its keep: it is what proved 8`s blue was structurally black rather than measuring ' +
+      'anything (2026-08-01, `effects/debug-channel-select.js`).',
   }),
 ]);
 

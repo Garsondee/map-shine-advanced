@@ -164,7 +164,10 @@ export function createAnchorAuthority({ log }) {
     const out = [];
     for (const a of scene.anchors.values()) {
       if (!kinds.has(a.kind) || !a.enabled) continue;
-      if (!floorMatches(a.floorBinding, floorContext)) continue;
+      // The anchor's own cross-floor override, if its kind declares one — see
+      // `floorMatches`. Read off the hydrated params, so an anchor whose kind
+      // has no such param simply passes `undefined` and gets the old behaviour.
+      if (!floorMatches(a.floorBinding, floorContext, a.params?.floorVisibility)) continue;
       out.push(a);
     }
     return out;
@@ -364,15 +367,34 @@ function normalizeFloorBinding(b) {
  * (the report + floor-agnostic reads). Deliberately simple for Tier 0: the
  * full token-vision / active-floor context is the effect's concern later, not
  * this filter's.
+ *
+ * `visibility` (2026-08-01) is the anchor's OWN author-facing override of a
+ * locked binding — `scene/anchor-catalog.js`'s `floorVisibility` param, added
+ * because a candle bound to the ground floor vanished from the floor above with
+ * no way for an author to say "no, this one should be visible through the
+ * stairwell". It only ever WIDENS what a locked band admits; it can never hide
+ * an anchor the binding would have shown, so an anchor kind that has no such
+ * param (lightning, and every future kind until it asks for one) behaves
+ * exactly as before.
+ *
  * @param {{mode: string, bottom: number|null, top: number|null}} binding
  * @param {{elevation?: number}|null} context
+ * @param {'own-floor'|'own-and-above'|'all-floors'} [visibility] - absent or
+ *   unrecognised reads as 'own-floor', i.e. the pre-existing behaviour.
  * @returns {boolean}
  */
-function floorMatches(binding, context) {
+function floorMatches(binding, context, visibility = 'own-floor') {
   if (binding.mode !== 'locked') return true;
+  // Opted out of floor binding entirely — the author has taken responsibility
+  // for this one anchor (see the param's own help text).
+  if (visibility === 'all-floors') return true;
   if (!context || !Number.isFinite(Number(context.elevation))) return true;
   const e = Number(context.elevation);
   if (binding.bottom !== null && e < binding.bottom) return false;
-  if (binding.top !== null && e > binding.top) return false;
+  // LOOKING DOWN FROM ABOVE is the whole reported case: a viewer higher than
+  // this anchor's band still sees it. Below the band stays hidden either way —
+  // you cannot see a candle on the floor above through its own ceiling, and
+  // widening that direction too would have been a guess nobody asked for.
+  if (binding.top !== null && e > binding.top) return visibility === 'own-and-above';
   return true;
 }

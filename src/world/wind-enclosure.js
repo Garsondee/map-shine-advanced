@@ -674,3 +674,140 @@ export function wallProximityFromDistance(distance, { reachCells = WALL_DEFLECT_
   }
   return out;
 }
+
+/* ============================================================================
+ * WIND SHADOW — THE FIRST DIRECTIONAL TERM IN THIS MODULE (2026-08-01)
+ * ============================================================================
+ * Author-reported: *"Can we get wind shadows to appear on the opposite side of
+ * buildings?"* — and the honest answer was that it was not mistuned, it was
+ * UNREPRESENTABLE. Every other field in this module is ISOTROPIC: `openness`
+ * asks "is this cell connected to the exterior", `distanceFromNearestSolid`
+ * asks "how far to the nearest wall". Neither knows which way the wind blows,
+ * so a cell tucked behind a building and a cell in front of it got, by
+ * construction, identical answers. No amount of tuning reaches a leeward
+ * shadow from an isotropic field.
+ *
+ * ⚠️ THIS IS NOT THE DELETED POTENTIAL-FLOW RELAXATION COMING BACK. Read
+ * `docs/planning/Wind-Rethink.md` §2.3 before assuming it is. What made the old
+ * model wrong was that it was SEEDED FROM THE PAINTED `_Outdoors` MASK — the
+ * author proved it by deleting every wall in the scene and watching wind still
+ * die exactly where the painting went dark. This is seeded from
+ * `rasterizeWallsToGrid`'s own wall geometry and nothing else: delete every
+ * wall and every cell reads shelter 0, wind everywhere, by construction. It is
+ * also not a solve — no iteration, no convergence, no budget to run out of.
+ *
+ * SCOPE, DELIBERATELY: this is the "cheap shadow first" the author chose over a
+ * full flow solve. It answers ONE question — "is something solid between me and
+ * the incoming wind" — and nothing about wake vortices or streamline curvature.
+ * Routing wind AROUND obstacles is a separate, already-existing mechanism
+ * (`wallAvoidanceDirectionFromDistance` + `wind-field.js#deflectAroundWalls`).
+ * ==========================================================================*/
+
+/**
+ * How far downwind a building's shelter still reaches, in cells. A real wake
+ * recovers over roughly 5-10 obstacle heights; this is the same tune-by-eye
+ * guess every other reach constant in this module is, and expects another pass
+ * once the author has seen it on a real map.
+ */
+export const WIND_SHADOW_REACH_CELLS = 24;
+
+/**
+ * March step, in cells. DELIBERATELY BELOW 1: at a full-cell step a ray angled
+ * diagonally can straddle a one-cell-thick wall and step clean over it, so a
+ * genuinely sheltered cell reads fully exposed — not noisily, but completely.
+ * That is this project's own named failure (a crossing test falling in the gap
+ * between march samples); the fix there was to FLOOR the resolution rather than
+ * tune it, and this is the same fix. Halving the step doubles bake cost and
+ * makes a 1-cell wall impossible to miss.
+ */
+const SHADOW_MARCH_STEP_CELLS = 0.5;
+
+/**
+ * PER-CELL UPWIND OCCLUSION — "is something solid between me and the wind".
+ *
+ * For every open cell, march UPWIND (toward where the wind is coming FROM) and
+ * report how close the first solid cell is, as 0..1: `1` = a wall immediately
+ * upwind (deepest shadow), `0` = clear sky for the whole `reachCells` reach.
+ * Solid cells themselves read 0 — nothing samples wind inside a wall, and a
+ * nonzero value there would bleed outward under the texture's linear filter.
+ *
+ * ⚠️ DIRECTION CONVENTION — the recurring Y-flip trap, so it is spelled out and
+ * separately tested. `upwindX/upwindY` is the direction the wind BLOWS FROM,
+ * i.e. the NEGATION of the flow vector `wind-bake.js#ambientVectorFromWind`
+ * returns, in the same raw world space (+Y down). For `directionDeg` (which is
+ * meteorological — the direction wind comes from, measured clockwise from +X)
+ * that makes the upwind vector simply `(cos, sin)` with NO negation, precisely
+ * because `ambientVectorFromWind` already negates to get the flow. Worked
+ * example, 0° = "East" = an east wind: flow points toward -X, upwind is +X, so
+ * a building to a cell's EAST shelters it and one to its WEST does not.
+ *
+ * The falloff is LINEAR in distance, not eased. `wallProximityFromDistance`
+ * above deliberately squares its ramp because a REPULSION that is already at
+ * half strength halfway out reads as a wall-like reaction; a shelter is the
+ * opposite kind of quantity — a graded PRESENCE, like
+ * {@link opennessFalloffFromDistance}, whose shape it copies for the same
+ * reason: a wake recovers gradually across its whole length rather than
+ * releasing suddenly at the end.
+ *
+ * COST is `O(cells × reach / step)` — the one genuinely non-linear pass in this
+ * module. On the 512-cell-per-axis worst case that is ~12M trivial steps, tens
+ * of milliseconds, ONCE per bake (wall/door/floor/direction change), never per
+ * frame. Kept as a direct march rather than the O(n) downwind sweep that could
+ * replace it because the sweep chains each cell's answer off a ROUNDED
+ * upwind-neighbour lookup, which bends the effective ray over a long reach —
+ * cheap to write, much harder to prove right, and this runs rarely enough that
+ * the exact version wins.
+ *
+ * @param {Uint8Array} solid - from `rasterizeWallsToGrid`; 1 = wall, 0 = open.
+ * @param {number} cols @param {number} rows
+ * @param {object} [opts]
+ * @param {number} [opts.upwindX] @param {number} [opts.upwindY] - the direction
+ *   the wind comes FROM; normalized internally. A zero/degenerate vector (no
+ *   wind direction, or speed 0) yields an all-zero field — no direction, no
+ *   shadow — rather than a divide-by-zero.
+ * @param {number} [opts.reachCells]
+ * @returns {Float32Array} same length as `solid`, each value in [0,1].
+ */
+export function upwindShelter(
+  solid,
+  cols,
+  rows,
+  { upwindX = 0, upwindY = 0, reachCells = WIND_SHADOW_REACH_CELLS } = {}
+) {
+  const c = Math.max(0, Math.floor(cols) || 0);
+  const r = Math.max(0, Math.floor(rows) || 0);
+  const n = c * r;
+  const out = new Float32Array(n);
+  if (n === 0) return out;
+  const mask = solid instanceof Uint8Array && solid.length === n ? solid : null;
+  if (!mask) return out; // no geometry ⇒ no shadow, same posture as every other pass here
+
+  const len = Math.hypot(upwindX, upwindY);
+  if (!(len > 1e-6)) return out; // no direction ⇒ no shadow (calm, or an unset wind)
+  const ux = upwindX / len;
+  const uy = upwindY / len;
+  const reach = Math.max(1, Number(reachCells) || WIND_SHADOW_REACH_CELLS);
+  const step = SHADOW_MARCH_STEP_CELLS;
+
+  for (let row = 0; row < r; row++) {
+    for (let col = 0; col < c; col++) {
+      const i = row * c + col;
+      if (mask[i]) continue; // inside a wall — stays 0, see this function's header
+      // Start half a step out so a cell never occludes itself.
+      for (let d = step; d <= reach; d += step) {
+        const sc = Math.round(col + ux * d);
+        const sr = Math.round(row + uy * d);
+        // OFF-GRID IS OPEN SKY, not a wall — the same convention
+        // `rasterizeWallsToGrid`/`floodFillOpenFromBoundary` already use for
+        // everything outside the mapped rect. Treating it as solid would ring
+        // the entire map edge with a phantom wind shadow.
+        if (sc < 0 || sc >= c || sr < 0 || sr >= r) break;
+        if (mask[sr * c + sc]) {
+          out[i] = Math.max(0, 1 - d / reach);
+          break; // the FIRST hit is the nearest — nothing behind it can deepen this
+        }
+      }
+    }
+  }
+  return out;
+}

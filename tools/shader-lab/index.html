@@ -1,0 +1,611 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Shader Lab</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      /* ────────────────────────────────────────────────────────────────
+       * LAYOUT (2026-08-02, author): "A single view which takes up the
+       * entire width of the browser. All controls under that. Use only a
+       * single display for everything, this means that I can then share
+       * the images it generates with you at much higher resolution."
+       *
+       * Every bench's view canvas is now full-width with height:auto, so
+       * the browser scales it from the canvas's OWN backing resolution
+       * (its width/height ATTRIBUTES, set by each bench's own paint code) —
+       * a bench that renders at 2048x2048 is DISPLAYED at 2048px wide, not
+       * downscaled to fit a fixed box, which is the whole point: a
+       * screenshot of this page is a screenshot of the real resolution.
+       * ──────────────────────────────────────────────────────────────── */
+      body {
+        background: #1a1a1a;
+        color: #ddd;
+        font-family: monospace;
+        margin: 0;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        align-items: stretch;
+      }
+      #left {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: 100%;
+      }
+      #view,
+      #lightningView {
+        background: #000;
+        image-rendering: pixelated;
+        border: 1px solid #444;
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+      #profile {
+        background: #111;
+        border: 1px solid #444;
+        width: 100%;
+        height: 160px;
+      }
+      #legend {
+        font-size: 11px;
+        color: #8cf;
+        white-space: pre;
+      }
+      #status {
+        white-space: pre-wrap;
+        font-size: 11px;
+        max-height: 200px;
+        overflow: auto;
+        background: #111;
+        padding: 6px;
+        border: 1px solid #333;
+      }
+      /* CONTROLS sit BELOW the view now, so they get the full width back —
+       * wrap fieldsets into a row instead of stacking them one-per-line. */
+      #controls {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 10px;
+        width: 100%;
+      }
+      #controls > div {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 10px;
+        width: 100%;
+      }
+      fieldset {
+        border: 1px solid #444;
+        border-radius: 4px;
+        padding: 8px;
+        flex: 1 1 280px;
+      }
+      legend {
+        padding: 0 4px;
+        color: #8cf;
+      }
+      label {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        margin: 4px 0;
+      }
+      input[type='range'] {
+        flex: 1;
+      }
+      select {
+        background: #222;
+        color: #ddd;
+        border: 1px solid #444;
+        width: 100%;
+      }
+      button {
+        background: #2a2a2a;
+        color: #ddd;
+        border: 1px solid #555;
+        padding: 4px 8px;
+        cursor: pointer;
+        font-family: monospace;
+      }
+      button:hover {
+        background: #3a3a3a;
+      }
+      button.active {
+        background: #3a6;
+        color: #000;
+        border-color: #3a6;
+      }
+      .row {
+        display: flex;
+        gap: 6px;
+      }
+      .row button {
+        flex: 1;
+      }
+      #lightningView {
+        background: #05070c;
+      }
+      #lightningLegend {
+        font-size: 11px;
+        color: #8cf;
+        white-space: pre;
+      }
+      #lightningStatus {
+        white-space: pre-wrap;
+        font-size: 11px;
+        max-height: 140px;
+        overflow: auto;
+        background: #111;
+        padding: 6px;
+        border: 1px solid #333;
+      }
+      /* Every OTHER bench's view canvas — full width, height auto, same as
+       * #view/#lightningView above. One rule instead of six copies. */
+      #fixtureView,
+      #deriveView,
+      #compositeView,
+      #sunShadowView {
+        background: #000;
+        image-rendering: pixelated;
+        border: 1px solid #444;
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+      #fixtureStatus,
+      #deriveStatus,
+      #compositeStatus,
+      #blendStatus,
+      #sunShadowStatus {
+        white-space: pre-wrap;
+        font-size: 11px;
+        max-height: 200px;
+        overflow: auto;
+        background: #111;
+        padding: 6px;
+        border: 1px solid #333;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="left">
+      <!-- ⚠️ EVERY bench's view lives in its OWN *Left container, and exactly
+           ONE is visible at a time — owned by view-visibility.js, which is the
+           single source of truth. These four used to sit bare at the top of
+           #left with no wrapper, so they stayed on screen for EVERY effect and
+           you had to scroll past a dead 512px canvas to reach whichever bench
+           was actually running. -->
+      <div id="sunLeft" style="display: none">
+        <canvas id="view" width="512" height="512"></canvas>
+        <canvas id="profile" width="560" height="120"></canvas>
+        <div id="legend"></div>
+        <div id="status">loading…</div>
+      </div>
+      <div id="lightningLeft" style="display: none">
+        <canvas id="lightningView" width="560" height="560"></canvas>
+        <div id="lightningLegend"></div>
+        <div id="lightningStatus">loading…</div>
+      </div>
+      <div id="fixtureLeft" style="display: none">
+        <canvas id="fixtureView" width="1024" height="476"></canvas>
+        <div id="fixtureLegend">no mask loaded</div>
+        <div id="fixtureStatus">loading…</div>
+      </div>
+      <div id="deriveLeft" style="display: none">
+        <canvas id="deriveView" width="1024" height="476"></canvas>
+        <div id="deriveLegend">no grid derived</div>
+        <div id="deriveStatus">loading…</div>
+      </div>
+      <div id="blendLeft" style="display: none">
+        <div id="blendStatus" style="max-height: 420px">loading…</div>
+      </div>
+      <div id="compositeLeft" style="display: none">
+        <canvas id="compositeView" width="256" height="64"></canvas>
+        <div id="compositeLegend">no composite rendered</div>
+        <div id="compositeStatus">loading…</div>
+      </div>
+      <div id="sunShadowLeft">
+        <div id="sunShadowLegend">no scenario run yet</div>
+        <canvas id="sunShadowView" width="1024" height="1024"></canvas>
+        <div id="sunShadowStatus">loading…</div>
+      </div>
+    </div>
+    <div id="controls">
+      <fieldset>
+        <legend>Effect under test</legend>
+        <select id="effect">
+          <option value="sun-shadow" selected>Sun shadow — REAL derived data (rung 3)</option>
+          <option value="specular">Shine / _Specular</option>
+          <option value="lightning">Lightning bolt</option>
+          <option value="fixture">Fixture — real mask ingest (rung 2)</option>
+          <option value="derive">Derivation — real multi-floor bands (rung 2)</option>
+          <option value="composite">Composite — gamma-space light arithmetic (rung 3)</option>
+          <option value="blend">Blend neutrality + MRT (rung 3)</option>
+        </select>
+      </fieldset>
+      <div id="specPanel" style="display: none">
+        <fieldset>
+          <legend>_Specular mask scenario</legend>
+          <select id="specScenario">
+            <option value="goldPlate" selected>Gold plate</option>
+            <option value="greySteel">Grey steel plate</option>
+            <option value="noAlpha">Greyscale, NO alpha channel</option>
+            <option value="coins">Scattered coins (island clustering)</option>
+            <option value="mixed">Mixed metals (gold/steel/iron/chrome)</option>
+          </select>
+        </fieldset>
+        <fieldset>
+          <legend>buf:scene.attr — the floor/occlusion gate</legend>
+          <select id="specAttr">
+            <option value="background" selected>background art, α=1 (healthy)</option>
+            <option value="halfAlpha">background art at α=0.5 (margin test)</option>
+            <option value="oldWeight4">R11 weight-4 bit (shipped regression)</option>
+            <option value="tileOver">Tile / roof on top (gate should close)</option>
+            <option value="neverWritten">attr never written (cleared / zero-MRT)</option>
+          </select>
+        </fieldset>
+        <fieldset>
+          <legend>Scene</legend>
+          <label
+            >illum <span id="specIllumVal"></span
+            ><input type="range" id="specIllum" min="0" max="1" step="0.01" value="0.6"
+          /></label>
+          <label
+            >darkness floor <span id="specFloorVal"></span
+            ><input type="range" id="specFloor" min="0" max="0.4" step="0.01" value="0"
+          /></label>
+          <label
+            >outdoors <span id="specOutdoorsVal"></span
+            ><input type="range" id="specOutdoors" min="0" max="1" step="0.05" value="0"
+          /></label>
+          <label
+            >base scene lit <span id="specBaseVal"></span
+            ><input type="range" id="specBase" min="0" max="1" step="0.01" value="0.25"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Look</legend>
+          <label
+            >strength <span id="specStrengthVal"></span
+            ><input type="range" id="specStrength" min="0" max="4" step="0.05" value="1"
+          /></label>
+          <label
+            >shimmer gain <span id="specGainVal"></span
+            ><input type="range" id="specGain" min="0" max="20" step="0.5" value="5.5"
+          /></label>
+          <label
+            >saturation <span id="specSatVal"></span
+            ><input type="range" id="specSat" min="0" max="2" step="0.05" value="1"
+          /></label>
+          <label
+            >zoom <span id="specZoomVal"></span
+            ><input type="range" id="specZoom" min="0.1" max="1" step="0.05" value="1"
+          /></label>
+          <label
+            >time (s) <span id="specTimeVal"></span
+            ><input type="range" id="specTime" min="0" max="60" step="0.5" value="0"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Debug channel</legend>
+          <select id="specChannel"></select>
+        </fieldset>
+        <div class="row">
+          <button id="specLadder">Run gate ladder</button>
+          <button id="specVis">Visibility report</button>
+        </div>
+      </div>
+      <div id="lightningControls" style="display: none">
+        <fieldset>
+          <legend>Lifecycle</legend>
+          <label>Enabled <input type="checkbox" id="lightningEnabled" checked style="flex: 0" /></label>
+          <div class="row">
+            <button data-ltier="0">Strike</button>
+            <button data-ltier="1">Branching</button>
+            <button data-ltier="2">Flash</button>
+            <button data-ltier="3">Origin flash</button>
+          </div>
+          <button id="forceStrike">Force a strike now</button>
+        </fieldset>
+        <fieldset>
+          <legend>Bolt source (world px)</legend>
+          <label
+            >Start X <span id="boltStartXVal"></span
+            ><input type="range" id="boltStartX" min="0" max="1000" step="10" value="500"
+          /></label>
+          <label
+            >Start Y <span id="boltStartYVal"></span
+            ><input type="range" id="boltStartY" min="0" max="1000" step="10" value="800"
+          /></label>
+          <label
+            >End X <span id="boltEndXVal"></span
+            ><input type="range" id="boltEndX" min="0" max="1000" step="10" value="560"
+          /></label>
+          <label
+            >End Y <span id="boltEndYVal"></span
+            ><input type="range" id="boltEndY" min="0" max="1000" step="10" value="120"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Look</legend>
+          <label>Outer colour <input type="color" id="outerColor" value="#0037ff" style="flex: 0" /></label>
+          <label>Core colour <input type="color" id="coreColor" value="#ffffff" style="flex: 0" /></label>
+          <label
+            >Brightness <span id="brightnessVal"></span
+            ><input type="range" id="brightness" min="0" max="10" step="0.1" value="5"
+          /></label>
+          <label
+            >Width <span id="widthVal"></span><input type="range" id="width" min="1" max="120" step="1" value="30"
+          /></label>
+          <label
+            >Taper <span id="taperVal"></span><input type="range" id="taper" min="0" max="1" step="0.01" value="0.08"
+          /></label>
+          <label
+            >Glow strength <span id="glowStrengthVal"></span
+            ><input type="range" id="glowStrength" min="0" max="5" step="0.05" value="5"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Shape</legend>
+          <label
+            >Segments <span id="segmentsVal"></span
+            ><input type="range" id="segments" min="4" max="96" step="1" value="96"
+          /></label>
+          <label
+            >Curve amount <span id="curveAmountVal"></span
+            ><input type="range" id="curveAmount" min="0" max="1" step="0.01" value="0.57"
+          /></label>
+          <label
+            >Fractal chaos <span id="macroDisplacementVal"></span
+            ><input type="range" id="macroDisplacement" min="0" max="400" step="1" value="96"
+          /></label>
+          <label
+            >Micro jitter <span id="microJitterVal"></span
+            ><input type="range" id="microJitter" min="0" max="120" step="1" value="3"
+          /></label>
+          <label
+            >Branch chance <span id="branchChanceVal"></span
+            ><input type="range" id="branchChance" min="0" max="1" step="0.01" value="1"
+          /></label>
+          <label
+            >Branch max <span id="branchMaxVal"></span
+            ><input type="range" id="branchMax" min="0" max="6" step="1" value="6"
+          /></label>
+          <label
+            >Branch angle <span id="branchAngleDegVal"></span
+            ><input type="range" id="branchAngleDeg" min="15" max="60" step="1" value="45"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Response</legend>
+          <label
+            >Min delay ms <span id="minDelayMsVal"></span
+            ><input type="range" id="minDelayMs" min="0" max="5000" step="50" value="5000"
+          /></label>
+          <label
+            >Max delay ms <span id="maxDelayMsVal"></span
+            ><input type="range" id="maxDelayMs" min="0" max="10000" step="50" value="10000"
+          /></label>
+          <label
+            >Strike duration ms <span id="strikeDurationMsVal"></span
+            ><input type="range" id="strikeDurationMs" min="20" max="2400" step="10" value="1000"
+          /></label>
+          <label
+            >Leader phase <span id="leaderFractionVal"></span
+            ><input type="range" id="leaderFraction" min="0.1" max="0.35" step="0.01" value="0.15"
+          /></label>
+          <label
+            >Flicker chance <span id="flickerChanceVal"></span
+            ><input type="range" id="flickerChance" min="0" max="1" step="0.01" value="0.15"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Light (screen flash)</legend>
+          <label
+            >Screen flash gain <span id="outsideFlashGainVal"></span
+            ><input type="range" id="outsideFlashGain" min="0" max="5" step="0.01" value="1.09"
+          /></label>
+        </fieldset>
+      </div>
+      <div id="fixturePanel" style="display: none">
+        <fieldset>
+          <legend>Fixture — Tower Bridge (real authored masks)</legend>
+          <label
+            >Floor
+            <select id="fixtureFloor"></select
+          ></label>
+          <label
+            >Mask kind
+            <select id="fixtureKind"></select
+          ></label>
+          <label
+            >Upload scale
+            <select id="fixtureScale">
+              <option value="0.125">0.125 (fast)</option>
+              <option value="0.25" selected>0.25 (explore)</option>
+              <option value="0.5">0.5 (production _Specular)</option>
+              <option value="1">1.0 (PRODUCTION, ~53MB)</option>
+            </select>
+          </label>
+          <button id="fixtureLoad">Load &amp; show this mask</button>
+          <div id="fixtureHeld" style="font-size: 11px; color: #8cf">0 MB held</div>
+        </fieldset>
+        <fieldset>
+          <legend>Scenario (writes a report to runs/)</legend>
+          <select id="fixtureScenario"></select>
+          <button id="fixtureRun">Run scenario</button>
+        </fieldset>
+        <fieldset>
+          <legend>Memory</legend>
+          <button id="fixtureRelease">Release all decoded masks</button>
+        </fieldset>
+      </div>
+      <div id="derivePanel" style="display: none">
+        <fieldset>
+          <legend>Derivation — real deriveFloorProducts</legend>
+          <select id="deriveScenario"></select>
+          <button id="deriveRun">Run scenario</button>
+        </fieldset>
+        <fieldset>
+          <legend>Inspect a derived grid</legend>
+          <label
+            >Floor
+            <select id="deriveFloor"></select
+          ></label>
+          <label
+            >Channel
+            <select id="deriveChannel">
+              <option value="coverAbove">coverAbove</option>
+              <option value="skyReach">skyReach</option>
+              <option value="outdoors">outdoors</option>
+              <option value="casterHeight">casterHeight</option>
+              <option value="coverSkyReach">casterChannels.coverSkyReach</option>
+              <option value="coverOverhead">casterChannels.coverOverhead</option>
+              <option value="coverBuilding">casterChannels.coverBuilding</option>
+            </select>
+          </label>
+          <button id="deriveShow">Derive &amp; show</button>
+        </fieldset>
+      </div>
+      <div id="blendPanel" style="display: none">
+        <fieldset>
+          <legend>Blend scenario (rung 3)</legend>
+          <select id="blendScenario"></select>
+          <button id="blendRun">Run scenario</button>
+        </fieldset>
+      </div>
+      <div id="compositePanel" style="display: none">
+        <fieldset>
+          <legend>Composite scenario (rung 3)</legend>
+          <select id="compositeScenario"></select>
+          <button id="compositeRun">Run scenario</button>
+        </fieldset>
+        <fieldset>
+          <legend>Probe one pixel through the REAL composite</legend>
+          <label
+            >albedo (linear) <span id="compAlbedoVal"></span
+            ><input type="range" id="compAlbedo" min="0" max="1" step="0.005" value="0.214"
+          /></label>
+          <label
+            >illum (Foundry sRGB) <span id="compIllumVal"></span
+            ><input type="range" id="compIllum" min="0" max="1" step="0.005" value="1"
+          /></label>
+          <label
+            >coloration (sRGB) <span id="compColorationVal"></span
+            ><input type="range" id="compColoration" min="0" max="1" step="0.005" value="0"
+          /></label>
+          <button id="compositeProbe">Probe &amp; compare models</button>
+        </fieldset>
+      </div>
+      <div id="sunShadowPanel">
+        <fieldset>
+          <legend>Layer smear — real Tower Bridge data (CURRENT model)</legend>
+          <label
+            >Floor
+            <select id="sunShadowFloor"></select
+          ></label>
+          <label
+            >Tier
+            <select id="sunShadowTier">
+              <option value="0">0 — coarse</option>
+              <option value="1">1 — standard</option>
+              <option value="2">2 — quality</option>
+              <option value="3" selected>3 — extreme</option>
+            </select></label
+          >
+          <button id="sunShadowRun">Run — render the layer smear over real geometry</button>
+        </fieldset>
+        <fieldset>
+          <legend>Sun</legend>
+          <label
+            >Azimuth <span id="sunShadowAzimuthVal"></span
+            ><input type="range" id="sunShadowAzimuth" min="0" max="360" step="1" value="220"
+          /></label>
+          <label
+            >Elevation <span id="sunShadowElevationVal"></span
+            ><input type="range" id="sunShadowElevation" min="5" max="85" step="1" value="30"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Layer heights (world px)</legend>
+          <label
+            >Wall <span id="sunShadowWallHeightVal"></span
+            ><input type="range" id="sunShadowWallHeight" min="0" max="800" step="10" value="300"
+          /></label>
+          <label
+            >Overhead <span id="sunShadowOverheadHeightVal"></span
+            ><input type="range" id="sunShadowOverheadHeight" min="0" max="800" step="10" value="220"
+          /></label>
+          <label
+            >Floor above <span id="sunShadowAboveHeightVal"></span
+            ><input type="range" id="sunShadowAboveHeight" min="0" max="1200" step="10" value="400"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Layer strengths (0..1)</legend>
+          <label
+            >Wall <span id="sunShadowWallStrengthVal"></span
+            ><input type="range" id="sunShadowWallStrength" min="0" max="1" step="0.05" value="0.95"
+          /></label>
+          <label
+            >Overhead <span id="sunShadowOverheadStrengthVal"></span
+            ><input type="range" id="sunShadowOverheadStrength" min="0" max="1" step="0.05" value="0.95"
+          /></label>
+          <label
+            >Floor above <span id="sunShadowAboveStrengthVal"></span
+            ><input type="range" id="sunShadowAboveStrength" min="0" max="1" step="0.05" value="0.95"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Sky-reach gradient (px, 0 = off)</legend>
+          <label
+            >Floor above <span id="sunShadowAboveDepthVal"></span
+            ><input type="range" id="sunShadowAboveDepth" min="0" max="2000" step="20" value="1300"
+          /></label>
+          <label
+            >Higher <span id="sunShadowHigherDepthVal"></span
+            ><input type="range" id="sunShadowHigherDepth" min="0" max="2000" step="20" value="1340"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Look</legend>
+          <label
+            >Falloff exp <span id="sunShadowFalloffExpVal"></span
+            ><input type="range" id="sunShadowFalloffExp" min="0.5" max="4" step="0.1" value="1"
+          /></label>
+          <label
+            >Softness × <span id="sunShadowSoftnessVal"></span
+            ><input type="range" id="sunShadowSoftness" min="0.1" max="4" step="0.1" value="0.2"
+          /></label>
+          <label
+            >Base px <span id="sunShadowBaseVal"></span
+            ><input type="range" id="sunShadowBase" min="0" max="20" step="1" value="1"
+          /></label>
+          <label
+            >Tip blur × <span id="sunShadowTipBlurVal"></span
+            ><input type="range" id="sunShadowTipBlur" min="1" max="8" step="0.5" value="3"
+          /></label>
+        </fieldset>
+      </div>
+    </div>
+    <script type="module" src="/tools/shader-lab/lab.js"></script>
+    <script type="module" src="/tools/shader-lab/lightning-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/fixture-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/derive-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/composite-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/blend-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/sun-shadow-lab.js"></script>
+    <!-- LAST: owns the view column, so its answer wins over every bench's own
+         (see view-visibility.js's header for why that is one file's job). -->
+    <script type="module" src="/tools/shader-lab/view-visibility.js"></script>
+  </body>
+</html>

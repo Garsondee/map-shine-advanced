@@ -65,7 +65,7 @@ function qualityForTier(perfTier) {
  * @param {*} args.uGlobalTimeMs - the ONE shared animation-clock TSL uniform node.
  * @param {() => {enabled: boolean, params: object, perfTier?: number, anchors: Array<object>}} args.getLightningRenderState -
  *   boot's data seam. Default-off means an un-wired caller draws no bolts.
- * @returns {{scene:*, sync:(nowMs:number)=>void, dispose:()=>void, activeStrands:()=>Array<object>, droppedForCapacity:()=>number}}
+ * @returns {{scene:*, sync:(nowMs:number)=>void, dispose:()=>void, activeStrands:()=>Array<object>, droppedForCapacity:()=>number, forceStrike:()=>void}}
  */
 export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRenderState }) {
   const lightningScene = new THREE.Scene();
@@ -148,7 +148,7 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
    * due, dropping (and counting) spawns beyond the pool's fixed capacity —
    * matches V2's own `_allocStrike() === null` behaviour, plus a readout V2
    * never had. */
-  function advanceSchedulesAndSpawn(sources, nowMs, params) {
+  function advanceSchedulesAndSpawn(sources, nowMs, params, perfTier) {
     const liveLinkIds = new Set(sources.map((s) => s.linkId));
     for (const linkId of [...schedules.keys()]) {
       if (!liveLinkIds.has(linkId)) schedules.delete(linkId);
@@ -156,6 +156,15 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
 
     const minDelayMs = Math.max(0, num(params.minDelayMs, 0));
     const maxDelayMs = Math.max(0, num(params.maxDelayMs, 0));
+    // TIER 0 ('strike') IS BOLT-ONLY, NO BRANCHES — the manifest's own tier 1
+    // ('branching') promise, which nothing previously checked: `generateBurst`
+    // branches purely off `params.branchChance`/`branchMax`, with no tier
+    // awareness of its own (it's a pure function of source+burstIndex+params,
+    // deliberately — see lightning-geometry.js's own header). Below tier 1,
+    // branchMax is forced to 0 HERE, at the one call site, rather than teaching
+    // the pure generator about tiers (effect-cascade.js#resolveEffectTier's own
+    // header: an unread ladder rots exactly like this one just had).
+    const effectiveParams = perfTier < 1 ? { ...params, branchMax: 0 } : params;
 
     for (const source of sources) {
       let sched = schedules.get(source.linkId);
@@ -181,7 +190,7 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
           burstIndex: sched.burstIndex,
           spawnMs: nowMs,
           maxPointsPerStrand: LIGHTNING_MAX_POINTS_PER_STRAND,
-          params,
+          params: effectiveParams,
         });
         activeStrands.push(main);
         dirty = true;
@@ -199,6 +208,20 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
     }
   }
 
+  /** Fast-forward every currently-tracked source's schedule so the very next
+   * `sync(nowMs)` call spawns a burst immediately for each of them — reuses
+   * `advanceSchedulesAndSpawn`'s own due-check (`nowMs < sched.nextBurstAtMs`)
+   * rather than duplicating spawn logic here. Used by both the Shader Lab
+   * driver's "force a strike now" control and boot.js's debug action. A
+   * source with no schedule yet (nothing has synced since it was added) has
+   * nothing to fast-forward — it already fires on its own staggered
+   * first-burst timer the moment sync() first sees it. */
+  function forceStrike() {
+    for (const sched of schedules.values()) {
+      sched.nextBurstAtMs = -Infinity;
+    }
+  }
+
   function reapExpired(nowMs) {
     const before = activeStrands.length;
     if (!before) return;
@@ -209,7 +232,9 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
   /** Check every active main strand for a fresh return-stroke connect (each
    * fires at most once per lifetime — see checkReturnStrokeTrigger's own
    * header), feed the outside flash's attack/decay envelope, and recompute
-   * this frame's published value. */
+   * this frame's published value. Tier-gated at 2 ('flash') — below that,
+   * `resetOutsideFlash` (called by the caller) keeps the published value at 0
+   * rather than this function silently computing one nothing asked for. */
   function updateOutsideFlash(nowMs, params) {
     for (const strand of activeStrands) {
       const { triggered, intensity } = checkReturnStrokeTrigger(nowMs, strand);
@@ -262,9 +287,15 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
       return;
     }
 
-    advanceSchedulesAndSpawn(sources, nowMs, params);
+    const perfTier = num(state.perfTier, 0);
+    advanceSchedulesAndSpawn(sources, nowMs, params, perfTier);
     reapExpired(nowMs);
-    updateOutsideFlash(nowMs, params);
+    // TIER 2 ('flash') GATES THE OUTSIDE FLASH — below it, the signal stays
+    // at 0 (resetOutsideFlash), never silently computed for nobody. Checked
+    // every sync (not just on enable) so a live profile-drop mid-session
+    // stops the signal the same frame the tier actually drops, not next burst.
+    if (perfTier >= 2) updateOutsideFlash(nowMs, params);
+    else resetOutsideFlash();
 
     ensureMaterial(qualityForTier(state.perfTier));
     pushUniforms(params);
@@ -319,5 +350,8 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
      * pool slot — a debug-report readout V2 never had (it silently dropped
      * the same way, unreported). */
     droppedForCapacity: () => droppedForCapacity,
+    /** Fast-forward every tracked source to fire on the very next sync() —
+     * see forceStrike's own header for why this doesn't spawn directly. */
+    forceStrike,
   };
 }

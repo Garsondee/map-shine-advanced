@@ -1,10 +1,66 @@
 /**
  * WATER TIER 3 — SUN + SKY SPECULAR (`docs/planning/Water.md` §6, rung 3).
  *
+ * ============================================================================
+ * ⚠️ THIS RUNG SHIPPED INVISIBLE AND WAS MEASURED, NOT GUESSED — 2026-07-29
+ * ============================================================================
+ * Read this before touching anything below it, because the code was *correct
+ * physics producing nothing*, which is the hardest shape to spot by reading.
+ *
+ * A CPU twin (`waterTier3Cpu`, at the bottom of this file, and the brightness
+ * bands in `__tests__/water-light.test.mjs`) measured what this rung actually
+ * puts into `buf:scene.color`, in the units the screen uses. Against the same
+ * bands `Specular.md` §10 established — **0.008 invisible · 0.05 a sheen · 0.3
+ * unmistakable** — as shipped it measured:
+ *
+ *   · sun glint  1e-6 … 1e-3   (up to ten THOUSAND times below visible)
+ *   · sky sheen  0.0084, spatially CONSTANT (1.1x swing across the whole view)
+ *
+ * A flat, invisible wash. Two decisions caused it, and neither is wrong alone
+ * — they are wrong TOGETHER, because they belong to different models:
+ *
+ *   1. **`glossiness` 0.92** — `alpha = 0.0079`, thirty times tighter than
+ *      Cox & Munk's measured DEAD CALM sea surface. A polish real water never
+ *      reaches at any wind speed.
+ *   2. **A flat `N = (0,0,1)`**, spelled as `.z` swizzles rather than as a
+ *      vector, so it never looked like an assumption at all.
+ *
+ * A BRDF's roughness IS a surface's statistical slope distribution. Claiming
+ * "polished mirror" AND "perfectly flat" says the surface has no slope at any
+ * scale — so the sun's mirror locus collapses to one exact point, and measured,
+ * that point sits **1.7 to 11.2 screen half-widths outside the view** at every
+ * sun elevation below ~75°. There was nothing on screen to see, at any setting
+ * of any slider, and no amount of gain would have changed that: the pixels that
+ * could have been bright were not in the frame.
+ *
+ * **The fix is the split this rung always implied.** `water-field.js` already
+ * computed a wave field and threw its third channel away; its own header even
+ * promised the slope would *"arrive in rung 3 with the shading that makes it
+ * mean something."* It now does. So:
+ *
+ *   · the RESOLVED slope is a real per-pixel normal from the wave field, and
+ *   · `glossiness` carries only the UNRESOLVED microstructure below it
+ *     (capillary ripple), which is what a roughness is for.
+ *
+ * Measured at that pair, sun 60°: p99 brightness **0.0084 → 0.196**, with ~5%
+ * of the surface sparkling. Mostly-dark water with bright moving specks — what
+ * overhead sun glitter actually looks like, and a thing a flat plane cannot do.
+ *
+ * ⚠️ **DO NOT "SIMPLIFY" `dot(normalNode, x)` BACK TO `x.z`.** They are the
+ * same expression when `N = (0,0,1)` and that identity is precisely how this
+ * bug hid: every `.z` read as ordinary code while silently asserting the
+ * surface was flat.
+ *
+ * ============================================================================
+ *
  * The ladder's own words for this rung: "GGX specular + Fresnel-weighted sky
  * reflection from the sky handle. No new bandwidth." That last clause is load
  * bearing and shapes everything below: no lamp glint, no `buf:scene.illum`
- * read, no `buf:scene.attr` occlusion. Tiers 0-2 already draw as two meshes
+ * read, no `buf:scene.attr` occlusion. The wave normal keeps that promise — it
+ * rides the fetch `water-field.js` was already making, so the fix cost no new
+ * bandwidth either.
+ *
+ * Tiers 0-2 already draw as two meshes
  * inside `geometry.world`'s own flat paint-order sort (`water-render.js`'s
  * header), which is what makes them free to occlude and free to draw — tier 3
  * stays exactly there rather than moving to its own post-lighting scene, by
@@ -88,11 +144,37 @@ export const WATER_MIN_ROUGHNESS = 0.089;
 export const WATER_TIER3_SUN_GLINT = 1;
 export const WATER_TIER3_SKY_SHEEN = 1;
 
-/** 0 = a rough, scattered highlight; 1 = a tight mirror disc. Calm water
- * defaults near-mirror; a choppy sea is an author choice, not a forced one — a
- * later rung (tier 7, `sim`) is what makes the surface itself choppy, and this
- * dial stays independent of it. */
-export const WATER_TIER3_GLOSSINESS = 0.92;
+/**
+ * 0 = a rough, scattered highlight; 1 = a tight mirror disc.
+ *
+ * ⚠️ **0.755, DOWN FROM 0.92 — AND 0.92 IS MOST OF WHY THIS RUNG WAS INVISIBLE
+ * (measured 2026-07-29).** The old value was chosen as "calm water defaults
+ * near-mirror", which sounds right and is not: a BRDF's roughness is not a mood,
+ * it is the surface's own statistical SLOPE DISTRIBUTION. Against Cox & Munk's
+ * measured sea-surface statistics (`water-field.js#WATER_TIER3_CHOP` carries the
+ * formula), 0.92 implies `alpha = 0.0079` — **thirty times tighter than DEAD
+ * CALM water**, a polish real water does not reach at any wind speed.
+ *
+ * What that cost: a lobe that narrow only fires where the half-vector lands
+ * almost exactly on the normal, and with the flat normal this rung also shipped
+ * with, that locus sits **1.7 to 11.2 screen half-widths off the edge of the
+ * view** at every sun elevation below ~75°. The measured sun term was 1e-6 to
+ * 1e-3 against an invisible-threshold of 0.008 — three orders of magnitude of
+ * nothing, on a term that is supposed to be the rung's whole point.
+ *
+ * 0.755 gives `alpha = 0.06`, the microstructure BELOW the wave field's own
+ * scale (capillary ripple). That split is the point: the RESOLVED slope is now
+ * a real per-pixel normal from `water-field.js`, and this constant carries only
+ * what is too fine to resolve. Measured at that pair, sun 60°: p99 brightness
+ * 0.0084 → 0.196, with ~5% of the surface sparkling — mostly-dark water with
+ * bright moving specks, which is what overhead sun glitter actually looks like.
+ *
+ * ⚠️ TWO PLACES STORE THIS NUMBER — here and `WATER_PARAMS.glossiness.default`
+ * (`water.js`), which is what a scene actually ships with. A Node test pins
+ * them equal; specular shipped that exact drift once (`SPECULAR_DEFAULT_
+ * SHIMMER_GAIN`) and it is why the test exists.
+ */
+export const WATER_TIER3_GLOSSINESS = 0.755;
 
 /** THE EYE HEIGHT, as a multiple of the VISIBLE WIDTH — never world px. Same
  * quantity, same reasoning, and the same default as
@@ -152,10 +234,16 @@ export function waterKeyLightDirection(key) {
  * @param {number} [args.viewerHeight]
  * @param {number} [args.sunGlint]
  * @param {number} [args.skySheen]
+ * @param {*} [args.slopeXY] - a vec2 node: the surface's own gradient
+ *   (rise/run) from `water-field.js`. **This is what makes the rung visible at
+ *   all** — see the header. Absent yields the flat `N = (0,0,1)` this module
+ *   shipped with until 2026-07-29, kept ONLY so an un-wired caller degrades to
+ *   the old look rather than throwing.
  * @returns {{reflection:*, setViewCentre:(x:number,y:number)=>void,
  *   setSky:(sky:object)=>void, setGlossiness:(v:number)=>void,
  *   setViewerHeight:(v:number)=>void, setSunGlint:(v:number)=>void,
- *   setSkySheen:(v:number)=>void, outdoorsGateCompiled:boolean}}
+ *   setSkySheen:(v:number)=>void, outdoorsGateCompiled:boolean,
+ *   normalCompiled:boolean}}
  */
 export function buildWaterSpecular({
   TSL,
@@ -168,6 +256,7 @@ export function buildWaterSpecular({
   viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
   sunGlint = WATER_TIER3_SUN_GLINT,
   skySheen = WATER_TIER3_SKY_SHEEN,
+  slopeXY = null,
 }) {
   const { vec2, vec3, float, uniform, clamp, max, dot, normalize, sqrt, mix } = TSL;
 
@@ -191,7 +280,19 @@ export function buildWaterSpecular({
   const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
   const eye = vec3(uViewCentre.x, uViewCentre.y, viewSpanX.mul(uViewerHeight));
   const viewDir = normalize(eye.sub(vec3(positionWorld.x, positionWorld.y, float(0))));
-  const nDotV = clamp(viewDir.z, 0, 1);
+
+  // ── THE SURFACE NORMAL ───────────────────────────────────────────────────
+  // A slope `(dz/dx, dz/dy)` becomes the normal `normalize(-dz/dx, -dz/dy, 1)`
+  // — the standard height-field relation, negated because the normal leans
+  // AWAY from the direction the surface rises.
+  //
+  // ⚠️ EVERY `.z` SWIZZLE BELOW USED TO BE THIS VECTOR, HARDCODED TO (0,0,1).
+  // `viewDir.z` IS `dot(N, viewDir)` when `N = (0,0,1)`, and likewise for the
+  // half-vector and the light — which is why the flat version read as correct
+  // code and measured as an invisible rung. They are `dot()` calls now, so the
+  // normal is a real input rather than an assumption baked into a swizzle.
+  const normalNode = slopeXY ? normalize(vec3(slopeXY.x.negate(), slopeXY.y.negate(), float(1))) : vec3(0, 0, 1);
+  const nDotV = clamp(dot(normalNode, viewDir), 0, 1);
 
   // ROUGHNESS, from ONE global glossiness dial rather than a decoded material
   // channel — water has no per-texel material mask at this rung, only depth
@@ -235,9 +336,11 @@ export function buildWaterSpecular({
    * @param {*} radiance @returns {*} */
   function lobe(lightDir, radiance) {
     const halfVec = normalize(lightDir.add(viewDir));
-    const nDotL = clamp(lightDir.z, 0, 1);
+    // `dot(N, ·)`, not `·.z` — see `normalNode` above. At a flat normal these
+    // are the same expression, which is exactly why the bug survived review.
+    const nDotL = clamp(dot(normalNode, lightDir), 0, 1);
     const vDotH = clamp(dot(viewDir, halfVec), 0, 1);
-    const brdf = ggx(halfVec.z).mul(visibility(nDotL)).mul(nDotL);
+    const brdf = ggx(dot(normalNode, halfVec)).mul(visibility(nDotL)).mul(nDotL);
     return schlick(vDotH).mul(brdf).mul(radiance);
   }
 
@@ -247,12 +350,21 @@ export function buildWaterSpecular({
   // brightness (the exact finding `docs/planning/Specular.md` §4.1 records).
   const sunSpec = lobe(uKeyDir, uKeyColor.mul(uKeyStrength)).mul(uSunGlint);
 
-  // THE SKY DOME. `R.xy = −V.xy` exactly for a flat N, so `reflect()` is not
-  // called — it would be the same two negations under a different name. The
-  // dot is deliberately NOT normalised: near the screen centre the eye looks
-  // straight down, `R.xy → 0`, and the azimuthal preference genuinely
+  // THE SKY DOME. The reflection vector is `R = 2(N·V)N − V`.
+  //
+  // ⚠️ This used to be written `R.xy = −V.xy`, with a comment explaining that
+  // `reflect()` "would be the same two negations under a different name" — TRUE
+  // for a flat `N`, and one more place the flat-normal assumption had quietly
+  // hardened into an identity. With a real wave normal the two differ, and the
+  // shortcut would leave the sky reflection pointing somewhere the surface is
+  // not facing. Substituting `N = (0,0,1)` still collapses this to exactly the
+  // old two negations, so the flat case is unchanged bit for bit.
+  //
+  // The dot below is deliberately NOT normalised: near the screen centre the
+  // eye looks straight down, `R.xy → 0`, and the azimuthal preference genuinely
   // vanishes — normalising would manufacture a direction out of nothing there.
-  const reflectXY = vec2(viewDir.x.negate(), viewDir.y.negate());
+  const reflectFull = normalNode.mul(dot(normalNode, viewDir).mul(float(2))).sub(viewDir);
+  const reflectXY = vec2(reflectFull.x, reflectFull.y);
   const domeGradient = max(
     float(1).add(dot(reflectXY, vec2(uKeyDir.x, uKeyDir.y)).mul(float(SKY_DIRECTIONAL)).mul(uKeyStrength)),
     float(0)
@@ -307,5 +419,115 @@ export function buildWaterSpecular({
     /** For the debug report — whether the outdoors branch is real on this
      * scene or compiled to the indoors constant. */
     outdoorsGateCompiled: !!outdoorsNode,
+    /** For the debug report — whether a REAL wave normal reached this rung, or
+     * it compiled the flat `(0,0,1)` fallback. `false` here means the rung is
+     * back in its measured-invisible configuration, which is silent on screen
+     * (it does not fail, it just returns a flat 0.0084 wash) and is exactly the
+     * state that went unnoticed for three days. */
+    normalCompiled: !!slopeXY,
   };
+}
+
+/**
+ * ============================================================================
+ * THE CPU TWIN — the instrument whose absence let this rung ship invisible
+ * ============================================================================
+ *
+ * A line-for-line transcription of `buildWaterSpecular`'s maths above, in plain
+ * JS, so the one question that actually mattered — *what number does this put
+ * on the screen?* — is answerable in Node instead of only by an author
+ * reloading Foundry and squinting at a river.
+ *
+ * ⚠️ **THIS IS A DELIBERATE, MANAGED FORK, AND THE ONLY KIND THIS CODEBASE
+ * ALLOWS.** `feedback_mode_forks_silently_drop_features` says two
+ * implementations of one thing WILL drift. The mitigations, both real:
+ *   · it shares the module's OWN exported constants (`WATER_F0`,
+ *     `WATER_MIN_ROUGHNESS`, `SKY_DIRECTIONAL`) rather than copying values, so
+ *     a constant can only ever change in both places at once;
+ *   · `__tests__/water-light.test.mjs` asserts the flat-normal case reproduces
+ *     the exact measured pre-fix numbers, so if the TSL above is edited without
+ *     this following, the pinned regression values are what catch it.
+ *
+ * Why a twin at all, rather than trusting the shader: `feedback_smooth_output_
+ * hides_ported_bugs` — a wrong specular term does not render as an error, it
+ * renders as *slightly duller water*, forever. And `feedback_measure_the_output_
+ * not_the_equation`: every formula in this file was already correct when it
+ * measured 1e-6. Correctness of the equation was never the question.
+ *
+ * @param {object} a
+ * @param {number} a.px @param {number} a.py - world position of the fragment.
+ * @param {number} [a.viewCentreX] @param {number} [a.viewCentreY]
+ * @param {number} [a.viewSpanX] - the view's world width (sets the eye height).
+ * @param {number} [a.viewerHeight] - eye height as a MULTIPLE of viewSpanX.
+ * @param {number} [a.glossiness]
+ * @param {number} [a.sunGlint] @param {number} [a.skySheen]
+ * @param {number[]} a.keyDir - unit 3-vector toward the sun (`waterKeyLightDirection`).
+ * @param {number} a.keyStrength @param {number} [a.fillStrength]
+ * @param {number[]} [a.slope] - `[dz/dx, dz/dy]`. Omit for the flat-normal
+ *   (pre-fix) behaviour.
+ * @returns {{sun: number, sky: number, total: number, nDotV: number}} scene-
+ *   colour units, the same 0..1-ish scale `buf:scene.color` carries.
+ */
+export function waterTier3Cpu({
+  px,
+  py,
+  viewCentreX = 0,
+  viewCentreY = 0,
+  viewSpanX = 4000,
+  viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
+  glossiness = WATER_TIER3_GLOSSINESS,
+  sunGlint = WATER_TIER3_SUN_GLINT,
+  skySheen = WATER_TIER3_SKY_SHEEN,
+  keyDir,
+  keyStrength,
+  fillStrength = 0,
+  slope = null,
+}) {
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const unit = (v) => {
+    const l = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / l, v[1] / l, v[2] / l];
+  };
+  const dot3 = (a2, b) => a2[0] * b[0] + a2[1] * b[1] + a2[2] * b[2];
+
+  // The synthesised eye, and the normal — mirroring the two blocks above.
+  const eye = [viewCentreX, viewCentreY, Math.max(viewSpanX, 1) * viewerHeight];
+  const V = unit([eye[0] - px, eye[1] - py, eye[2]]);
+  const N = slope ? unit([-slope[0], -slope[1], 1]) : [0, 0, 1];
+  const nDotV = clamp01(dot3(N, V));
+
+  const roughness = Math.min(1, Math.max(WATER_MIN_ROUGHNESS, 1 - glossiness));
+  const alpha = roughness * roughness;
+  const alphaSq = Math.max(alpha * alpha, 1e-8);
+
+  const schlick = (cosTheta) => {
+    const c = clamp01(1 - cosTheta);
+    return WATER_F0 + (1 - WATER_F0) * c * c * c * c * c;
+  };
+  const ggx = (nDotH) => {
+    const c = clamp01(nDotH);
+    const d = c * c * (alphaSq - 1) + 1;
+    return alphaSq / Math.max(d * d * Math.PI, 1e-8);
+  };
+  const visibility = (nDotL) => {
+    const l = Math.max(clamp01(nDotL), 1e-4);
+    const v = Math.max(nDotV, 1e-4);
+    const one = 1 - alphaSq;
+    const gv = l * Math.sqrt(v * v * one + alphaSq);
+    const gl = v * Math.sqrt(l * l * one + alphaSq);
+    return 0.5 / Math.max(gv + gl, 1e-6);
+  };
+
+  const H = unit([keyDir[0] + V[0], keyDir[1] + V[1], keyDir[2] + V[2]]);
+  const nDotL = clamp01(dot3(N, keyDir));
+  const brdf = ggx(dot3(N, H)) * visibility(nDotL) * nDotL;
+  const sun = schlick(clamp01(dot3(V, H))) * brdf * keyStrength * sunGlint;
+
+  // `R = 2(N·V)N − V`, then the un-normalised azimuthal preference.
+  const nv2 = 2 * dot3(N, V);
+  const R = [N[0] * nv2 - V[0], N[1] * nv2 - V[1], N[2] * nv2 - V[2]];
+  const domeGradient = Math.max(1 + (R[0] * keyDir[0] + R[1] * keyDir[1]) * SKY_DIRECTIONAL * keyStrength, 0);
+  const sky = schlick(nDotV) * fillStrength * domeGradient * skySheen;
+
+  return { sun, sky, total: sun + sky, nDotV };
 }

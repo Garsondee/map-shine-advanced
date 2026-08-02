@@ -40,6 +40,11 @@ function round2(x) {
   return Math.round(x * 100) / 100;
 }
 
+// The ONE shelter-strength constant, imported rather than copied — see its own
+// header. A probe with a private duplicate of a look constant drifts silently
+// the first time the renderer's is retuned.
+import { WIND_SHADOW_DEPTH } from '../world/index.js';
+
 /**
  * Nearest-cell lookup — DELIBERATELY the exact same formula
  * `effects/particles/particle-runtime.js`'s update kernel uses for its own
@@ -186,10 +191,13 @@ export function nearestSolidDistanceCells({ col, row }, solid, cols, rows, searc
  * @param {number} args.x @param {number} args.y - world position to probe.
  * @param {number} args.ambientX @param {number} args.ambientY - the current
  *   ambient vector (`world/wind-bake.js#ambientVectorFromWind`'s own output).
- * @param {{solid:Uint8Array, openness:number[]|Float32Array, cols:number,
- *   rows:number, originX:number, originY:number, cellSize:number}} args.openness -
- *   `vt-pan-viewer.js`'s own `windOpennessGrid` — THE one geometry-derived
- *   grid every consumer (particles, gusts, sampleWind) now reads.
+ * @param {{solid:Uint8Array, openness:number[]|Float32Array,
+ *   windShadow?:number[]|Float32Array, cols:number, rows:number,
+ *   originX:number, originY:number, cellSize:number}} args.openness -
+ *   the wind handle's own grid spec + per-cell arrays — THE one geometry-derived
+ *   grid every consumer (particles, gusts, sampleWind) now reads. `windShadow`
+ *   is optional so a caller predating it still reports (as "no shadow") rather
+ *   than throwing.
  * @param {number|null} [args.paintedExposure] - REFERENCE ONLY, does NOT
  *   influence wind: the painted `_Outdoors` mask's raw value at this exact
  *   position (`world/index.js#sampleWindExposureAt`), included purely so a
@@ -220,9 +228,17 @@ export function decomposeWindAt({
   const { index } = cell;
   const isSolid = !!openness.solid?.[index];
   const opennessValue = Math.max(0, Math.min(1, openness.openness?.[index] ?? 1));
+  // THE WIND SHADOW (2026-08-01) — folded in here the same day it landed in
+  // `sampleWind`/`kernel()`, because a probe reporting `ambientBias × openness`
+  // while the renderer applies a third factor is an instrument that lies:
+  // "coherentTotal says 0.6 but the grass isn't moving" would send the next
+  // investigation somewhere there is no bug. Absent (a bake from before this
+  // existed, or a caller that doesn't pass it) reads 0 = no shadow.
+  const shadowValue = Math.max(0, Math.min(1, openness.windShadow?.[index] ?? 0));
+  const shelterFactor = 1 - shadowValue * WIND_SHADOW_DEPTH;
 
-  const coherentX = ax * opennessValue;
-  const coherentY = ay * opennessValue;
+  const coherentX = ax * opennessValue * shelterFactor;
+  const coherentY = ay * opennessValue * shelterFactor;
 
   return {
     ok: true,
@@ -233,6 +249,14 @@ export function decomposeWindAt({
     // (walls/doors only); 0 = sealed off. THE number for "why does this cell
     // have coherent wind" — with no walls at all this reads 1 everywhere.
     openness: round2(opennessValue),
+    // 0..1 RAW upwind occlusion — is a building between this cell and the
+    // incoming wind. DIRECTIONAL, unlike `openness`: turning the compass moves
+    // it to the other side of the same building. Reported raw, alongside the
+    // `shelterFactor` it becomes, so "the geometry found nothing" is
+    // distinguishable from "the geometry found it but the look constant is
+    // gentle".
+    windShadow: round2(shadowValue),
+    shelterFactor: round2(shelterFactor),
     nearestSolidDistanceCells: nearestSolidDistanceCells(
       cell,
       openness.solid,
@@ -243,16 +267,20 @@ export function decomposeWindAt({
     paintedExposureForReference: Number.isFinite(paintedExposure) ? round2(paintedExposure) : null,
     ambientBias: { x: round2(ax), y: round2(ay) },
     // THE coherent (direction-following) wind this cell ACTUALLY feels —
-    // ambientBias × openness. A sealed cell reads exactly {0,0} regardless
-    // of ambientBias's own strength; an open cell reads the full ambient.
+    // ambientBias × openness × shelterFactor. A sealed cell reads exactly
+    // {0,0} regardless of ambientBias's own strength; an open, unsheltered
+    // cell reads the full ambient.
     coherentTotal: { x: round2(coherentX), y: round2(coherentY), mag: round2(Math.hypot(coherentX, coherentY)) },
     note:
-      'POST-RETHINK (2026-07-22): coherentTotal = ambientBias × openness is what the particles/gusts ACTUALLY ' +
-      'feel — a sealed cell (openness=0) reads coherentTotal={0,0} always, by construction, regardless of ' +
-      "ambientBias strength. coherentTotal excludes sampleWind's GPU-only organic gust/flutter noise term " +
-      "(findNearestParticles' own live readback is the place to see that). paintedExposureForReference does " +
-      'NOT influence coherentTotal at all — it is shown purely to contrast against `openness` when cross-' +
-      'checking a report; if they disagree, that is expected and correct, not a bug.',
+      'coherentTotal = ambientBias × openness × shelterFactor is what the particles/gusts ACTUALLY feel. ' +
+      'The two geometry gates answer DIFFERENT questions and both apply: `openness` (post-Rethink 2026-07-22) ' +
+      'is isotropic "does outside air reach here at all" — a sealed cell reads 0 whichever way the wind blows; ' +
+      '`windShadow` (2026-08-01) is directional "is a building between me and the wind right now" — it moves to ' +
+      'the other side of the same building when the compass turns. A cell can be fully open AND fully shadowed. ' +
+      "coherentTotal excludes sampleWind's GPU-only organic gust/flutter noise term (findNearestParticles' own " +
+      'live readback is the place to see that), which is deliberately NOT shadowed — sheltered air still stirs. ' +
+      'paintedExposureForReference does NOT influence coherentTotal at all — it is shown purely to contrast ' +
+      'against `openness` when cross-checking a report; if they disagree, that is expected, not a bug.',
   };
 }
 

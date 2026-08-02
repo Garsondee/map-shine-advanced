@@ -1,8 +1,8 @@
 /**
  * SUN SHADOWS — building, overhead and sky-reach, declared as data.
  *
- * The runtime is `effects/lighting/sun-occlusion.js` (the march's maths),
- * `sun-occlusion-render.js` (its TSL) and `sun-shadow-subsystem.js` (the bake
+ * The runtime is `effects/lighting/layer-smear.js` (the model's maths),
+ * `layer-smear-render.js` (its TSL) and `sun-shadow-subsystem.js` (the bake
  * + the rebake decision + the ambient multiply's shared texture); THIS file
  * is the effect's DECLARATION — the params schema and
  * the manifest the registry, the settings cascade and the generated FOH/ROH card
@@ -11,30 +11,52 @@
  * special-case this effect by id (Effect-Registration.md §6).
  *
  * ============================================================================
- * NINE PARAMS, WHERE V2 HAD ABOUT THIRTY
+ * THE LAYER SMEAR MODEL (2026-08-02 — replaces the column march and the
+ * averaged-mean smear that briefly followed it; see
+ * `docs/planning/Sun-Shadows-Layer-Smear.md` for the full redesign and
+ * `docs/planning/Sun-Shadows-Redesign.md` for the two attempts it retired)
  * ============================================================================
  *
- * V2 shipped `BuildingShadowsEffectV2`, `SkyReachShadowsEffectV2` and
- * `OverheadStampEffectV2` — three systems, 7,763 lines, each with its own
- * `length`, `softness`, `smear`, `penumbra`, `shadowCurve`, `blurRadius`,
- * `resolutionScale` and per-source `opacity`, all tuned against one another
- * through a shared combine. Nothing in the scene agreed about where the sun was.
+ * A top-down shadow is a COMPOSITING problem, not a physics one (author,
+ * 2026-08-02, after two ray-marched models each shipped a real bug: a bright
+ * halo hugging every building, and a second shadow that could not compound
+ * with the first). Four occluder LAYERS — this floor's walls, its overhead
+ * tiles, the floor above and everything higher — each a flat silhouette
+ * smeared toward the sun, combined by MULTIPLYING their transmittances
+ * (independent occluders in series) rather than averaging them.
  *
- * There is no length knob here, no smear knob, no curve, no per-source opacity.
- * Those are not omissions:
+ * STILL TRUE, from the model this replaces:
  *
- *   LENGTH   is `height / tan(elevation)` — it comes out of the march.
- *   SMEAR    is what a march IS (the union of the silhouette along the ray).
+ *   LENGTH   is `height / tan(elevation)` — it comes out of the model, per layer.
  *   SOFTNESS contact-hardens with distance, and cloud/night scale it through the
  *            SHARED `effects/shadow-access.js` handle, which every other caster
  *            in the scene reads too.
- *   HEIGHT   for overhead tiles and upper floors comes from Foundry's own
- *            elevation data. Only the building height has no source in the
- *            document, so it is the only height with a slider.
  *
- * `softnessBias` is the one deliberate exception, and it is a BIAS on the shared
- * atmospheric model rather than a second model — the difference that keeps this
- * from being V2's first extra knob.
+ * NO LONGER TRUE, and named here rather than left for a reader to notice by
+ * absence: heights for overhead tiles and the floor above were meant to come
+ * from Foundry's own elevation data (the doctrine this file used to state
+ * for exactly `buildingHeightPx`, its one authored exception) — that
+ * derivation is not built yet, so `overheadHeightPx`/`aboveHeightPx` are
+ * AUTHORED SLIDERS too, for now. A named simplification, not a silent one;
+ * deriving them from real elevation data is a tracked follow-up.
+ *
+ * NEW: `skyReachDepthPx` — the one param the layer-smear model's own
+ * compositing needs that the march never did. A directional cast-shadow march
+ * has no notion of "how deep under this roof am I", only "how far have I
+ * walked from its edge" — so the middle of a wide span (the deck of a bridge)
+ * came out flat, same darkness as a texel one step in from the edge. This
+ * dials how far that gradient reaches inward before it settles at its
+ * darkest. See `layer-smear.js#isotropicDepthTerm`'s own header for the
+ * mechanism (author, live: *"I'd like the middle of this sky reach bit to be
+ * darkest and darker"*).
+ *
+ * Every OTHER number the layer-smear model needs (per-layer strength ratios,
+ * the falloff curve's shape, how fast the penumbra blurs with distance) is a
+ * LOOK CONSTANT in `sun-shadow-subsystem.js`, not a param here — the same
+ * "not a knob" doctrine this file has always applied to length/smear/softness,
+ * now applied to what the new model added. `softnessBias` remains the one
+ * deliberate exception: a BIAS on the shared atmospheric model, not a second
+ * one — the difference that keeps this from becoming V2's first extra knob.
  *
  * @module effects/sun-shadows
  */
@@ -53,15 +75,53 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     label: 'Shadow strength',
     help: 'How dark a fully-shadowed patch of ground goes. Torches and other lights still light it back up — the sun is the only thing this darkens.',
   },
-  buildingHeightPx: {
+  wallHeightPx: {
     type: 'float',
     min: 0,
     max: 1200,
     step: 10,
     default: 260,
     category: 'Look',
-    label: 'Building height',
+    label: 'Wall height',
     help: 'How tall the buildings are — the dark, indoor parts of your outdoors mask. The one height with no source in the scene data, so the one you set by hand.',
+  },
+  overheadHeightPx: {
+    type: 'float',
+    min: 0,
+    max: 800,
+    step: 10,
+    default: 220,
+    category: 'Look',
+    label: 'Overhead height',
+    help: 'How high overhead tiles on this floor sit above the ground — awnings, gates, walkways. Ideally this would come from each tile’s own Foundry elevation; until that lands, it is one height for all of them.',
+  },
+  aboveHeightPx: {
+    type: 'float',
+    min: 0,
+    max: 1200,
+    step: 10,
+    default: 400,
+    category: 'Look',
+    label: 'Floor-above height',
+    help: 'How far above this floor the next one up (and everything higher) sits. Ideally this would come from the scene’s own floor elevations; until that lands, it is one height for the whole stack above you.',
+  },
+  skyReachDepthPx: {
+    // THE SKY-REACH GRADIENT (author, 2026-08-02, live, on the first real-map
+    // render of this model: "a soft gradient for the sky reach so that it
+    // gets darker as it gets further in which should make the most middle
+    // section of the bridge even darker but still a little bit of light
+    // should leak through"). See this file's own header for why this is a
+    // real param rather than a look constant.
+    type: 'float',
+    min: 0,
+    max: 2000,
+    step: 20,
+    // 700→1300 2026-08-02 — the author's own "preferred default" pass in
+    // Shader Lab, live against the real Tower Bridge deck.
+    default: 1300,
+    category: 'Look',
+    label: 'Sky-reach depth',
+    help: 'How far in from the edge of whatever is above you the shadow keeps deepening before it settles at its darkest. Roughly HALF the width of your widest covered span (a bridge deck, a great hall’s roof) puts the darkest point at its middle.',
   },
   dawnDuskLength: {
     // THE DAWN/DUSK CONTROL (author, 2026-07-24: "the number one most important
@@ -95,7 +155,11 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     min: 0.25,
     max: 4,
     step: 0.05,
-    default: 1,
+    // 1→0.25 (the floor) 2026-08-02 — the author's own "preferred default"
+    // pass tuned Shader Lab's own softnessMul slider (no atmosphere
+    // multiplier there) down to ~0.2; 0.25 is the closest this param's own
+    // declared range allows.
+    default: 0.25,
     category: 'Look',
     label: 'Softness',
     help: 'Nudges every cast shadow softer or crisper. Cloud, night and the sun angle already drive this on their own; use it to taste, not to compensate.',
@@ -150,10 +214,10 @@ export const SUN_SHADOWS = Object.freeze({
   // performance tier should turn shadows off and remove the performance
   // cost"). This is the profile GATE — the WHETHER — and it is deliberately
   // separate from the tier ladder below, which only ever answers HOW MUCH.
-  // Below `performance` the subsystem drops its caster field, collapses
-  // `scene.sunShadow` to 1×1 and stops marching altogether
+  // Below `performance` the subsystem drops its layer field, collapses
+  // `scene.sunShadow` to 1×1 and stops baking altogether
   // (`sun-shadow-subsystem.js`'s `dropCasterField`), so "off" is genuinely no
-  // work rather than a full-resolution march that writes white.
+  // work rather than a full-resolution bake that writes white.
   //
   // Everything at `performance` and above is still default-on
   // (feedback_default_on_new_features): the per-frame cost is one texture fetch
@@ -162,60 +226,58 @@ export const SUN_SHADOWS = Object.freeze({
   enabledFromProfile: 'performance',
   params: SUN_SHADOW_PARAMS,
   // ============================================================================
-  // THE LADDER (built 2026-07-29). The arithmetic is `sun-occlusion.js`'s
-  // `SUN_SHADOW_TIER_PLANS`, index-aligned with this list; THIS is the prose.
+  // THE LADDER (built 2026-07-29, re-based 2026-08-02 onto the layer-smear
+  // model). The arithmetic is `layer-smear.js`'s `LAYER_SMEAR_TIER_PLANS`,
+  // index-aligned with this list; THIS is the prose.
   // ============================================================================
   //
   // Every rung buys the SAME picture drawn more finely — there is no rung that
-  // introduces a new visual feature, because this effect has exactly one
-  // (a marched height field) and three producers already feed it. So the rungs
-  // are the three build-time numbers the march is compiled from, plus how often
-  // it re-runs; `sun-occlusion.js`'s ladder header says what each one is for.
+  // introduces a new visual feature, because this effect has exactly one (a
+  // baked layer field) and four occluder layers already feed it. The rungs
+  // are the layer/field resolution (a resize) and the station count (the one
+  // number still compiled into the shader, so still a rebuild); `layer-smear.js`'s
+  // own ladder header says what each one is for.
   //
   // ⚠️ `estMsPerMp` IS THE SAME AT EVERY RUNG, AND THAT IS NOT AN OVERSIGHT.
   // It declares the STEADY per-megapixel cost, which for this effect is one
   // texture fetch in the ambient fill — identical whether the field behind it is
-  // 512² or 1280². What the ladder actually spends is BAKE time, which is sparse
+  // 512² or 2048². What the ladder actually spends is BAKE time, which is sparse
   // and which `perf-report.js` correctly refuses to grade against a per-pixel
   // budget ("an all-bake effect is not graded against a declared per-pixel
   // budget"). The bake's cost gradient lives where it can be counted rather than
-  // guessed: `sunShadowBakeSamples`, reported live in the `sun-shadows` status.
+  // guessed: `layerSmearBakeSamples`, reported live in the `sun-shadows` status.
   tiers: Object.freeze([
     Object.freeze({
       n: 0,
-      name: 'coarse-march',
+      name: 'coarse',
       cost: Object.freeze({ class: 'C3', estMsPerMp: 0.05 }),
       adds:
-        'buildings, overhead tiles and upper floors all cast one set of smeared shadows onto the ' +
-        'outdoors — marched 1:1 with the caster grid, as a single ray, so the shadows land correctly ' +
-        'but their side edges are as crisp as the mask underneath them',
+        'walls, overhead tiles and the floor above all cast one set of smeared, multiplied-together ' +
+        'shadows onto the outdoors — at the lowest silhouette resolution this system draws, so ' +
+        'rooflines and wall corners read as visibly blocky',
     }),
     Object.freeze({
       n: 1,
-      name: 'soft-cone',
+      name: 'standard',
       fromProfile: 'standard',
       cost: Object.freeze({ class: 'C5', estMsPerMp: 0.05 }),
-      adds:
-        "the march widens into a 3-tap cone and the field doubles — a silhouette's side edges now " +
-        'soften and spread with distance instead of staying pixel-perfect lines (the ORIGINAL shipped look)',
+      adds: 'the silhouette and the output field both double — noticeably sharper edges and a smoother falloff',
     }),
     Object.freeze({
       n: 2,
-      name: 'wide-cone',
+      name: 'quality',
       fromProfile: 'quality',
       cost: Object.freeze({ class: 'C5', estMsPerMp: 0.05 }),
-      adds:
-        'a 5-tap cone and a finer march — visibly smoother silhouette edges and a cleaner fade at the ' +
-        'shadow tip, for roughly twice the bake',
+      adds: 'sharper still — fine roofline detail (chimneys, thin trim) starts to resolve cleanly',
     }),
     Object.freeze({
       n: 3,
-      name: 'fine-cone',
+      name: 'extreme',
       fromProfile: 'extreme',
       cost: Object.freeze({ class: 'C5', estMsPerMp: 0.05 }),
       adds:
-        'the widest cone this system draws (7 taps) over a supersampled field, re-marched on a finer ' +
-        'sun step so the shadows SWEEP with the hour instead of stepping — roughly five times the bake',
+        'the sharpest silhouette and smoothest gradient this system draws, over the most march stations — ' +
+        'the sky-reach depth gradient in particular stays smooth even under a very wide roof',
     }),
   ]),
   deferredRungs: Object.freeze([
@@ -229,11 +291,28 @@ export const SUN_SHADOWS = Object.freeze({
     }),
     Object.freeze({
       name: 'cloud-shadows',
-      note: 'weather cloud cover as a fourth producer into the same height field, drifting with the wind',
+      // ⚠️ THE MECHANISM CHANGED (author-ruled 2026-08-01). This note used to say
+      // "a fourth producer into the same layer field", i.e. INTO THE BAKE. That
+      // is wrong, and wrong in a way that would have looked like a stutter bug
+      // rather than a design error: this subsystem re-bakes only when the sun
+      // has moved past `SUN_SHADOW_QUANTIZE_DEG` — a few times a minute — while
+      // clouds drift CONTINUOUSLY. Baked clouds would jump; the obvious fix
+      // (bake every frame) would multiply the bake cost by two orders of
+      // magnitude to carry a term that is ~10 ALU ops evaluated inline.
+      //
+      // The bake exists because GEOMETRY-derived occlusion is expensive to
+      // derive. A cloud is closed-form (`world/cloud-field.js`, analytic noise),
+      // so any shader can call it for free. ONE shadow authority is still the
+      // rule — it is preserved by combining in `effects/shadow-access.js`, the
+      // handle every caster already reads, not by putting clouds in the bake.
+      note:
+        'weather cloud cover drifting with the wind, combined at the READ site (`effects/shadow-access.js`) ' +
+        'rather than baked into the layer field — the bake is sparse and clouds are continuous. ' +
+        'See docs/planning/Clouds.md §4.1.',
     }),
     Object.freeze({
       name: 'lightning-reuse',
-      note: 'a lightning flash is the same field marched from a different direction for one frame — free, and the one thing V2 got right here',
+      note: 'a lightning flash is the same field baked from a different direction for one frame — free, and the one thing V2 got right here',
     }),
   ]),
 });

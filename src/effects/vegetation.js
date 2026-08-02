@@ -70,6 +70,40 @@
  *   overlay draws in a stable order relative to a SECOND kind's overlay on
  *   the same item (a background painted with both `_Tree` and `_Bush`) —
  *   canopy above undergrowth. Irrelevant when only one kind is present.
+ *
+ *   ⚠️ THIS IS NOW THE *FALLBACK* PATH ONLY. It applies when the host's floor
+ *   has no bounded elevation band (see `passiveElevationFraction` below), which
+ *   is the ONLY case left where an overlay still sorts relative to its host.
+ * @property {number} passiveElevationFraction - WHERE THIS KIND SITS INSIDE ITS
+ *   HOST FLOOR'S ELEVATION BAND, as a 0..1 fraction of `[bottom, top]`. The
+ *   overlay's sort elevation is `bottom + (top - bottom) * fraction`, and it
+ *   sorts through THE law (`scene/layer-order.js`) at that elevation like any
+ *   other drawable — NOT at its host's elevation.
+ *
+ *   THIS IS A DELIBERATE, AUTHOR-RULED EXCEPTION to "effect render order must
+ *   be host-relative" (author, 2026-08-01: *"vegetation is a good exception so
+ *   let's make an exception for it"*). The reasoning: a per-tile effect like
+ *   specular is a SURFACE PROPERTY of its host and must follow it, but a tree
+ *   canopy is a WORLD OBJECT WITH ITS OWN HEIGHT that merely happens to be
+ *   painted onto a host. Sorting it at its host's elevation is what made a
+ *   tile at elevation 0 / sort 1 draw straight over every bush and tree on the
+ *   map (author-reported, 2026-08-01) — the old `renderOrderNudge` is < 1 and
+ *   `renderOrder` is a DENSE INDEX, so a tile one slot above the host beat the
+ *   nudge by construction and no amount of tuning could fix it.
+ *
+ *   The fractions below are the author's own model: a tile BELOW a kind's
+ *   fraction goes under it, a tile AT OR ABOVE goes over it (ties break toward
+ *   the tile, because `SORT_LAYERS.SCENE_EFFECTS` < `SORT_LAYERS.TILES`). On a
+ *   floor spanning 0..20 that gives exactly the author's stated outcomes:
+ *
+ *       tile elev  9 → UNDER bush  │  tile elev 19 → UNDER tree
+ *       tile elev 10 → OVER  bush  │  tile elev 20 → OVER  tree
+ *
+ *   An UNBOUNDED band (`top` is +Infinity — Foundry's own normalisation for a
+ *   Level with no declared ceiling, and what the synthetic single-floor
+ *   fallback gets) has no meaningful midpoint, so the fraction cannot be
+ *   applied and `renderOrderNudge` above takes over. See
+ *   `vegetationPassiveElevation`.
  * @property {number} shadowHeightPx - HOW HIGH THIS KIND SITS ABOVE THE
  *   GROUND, in world px. The author's own shadow brief (2026-07-23) asked for
  *   exactly this and nothing more: *"only different offsets and the ability to
@@ -93,6 +127,10 @@ export const VEGETATION_KINDS = Object.freeze([
     label: 'Tree canopy',
     swayMultiplier: 1.3,
     renderOrderNudge: 0.6,
+    // THE TOP OF THE FLOOR. A tile only gets above a canopy by being at the
+    // very top of its floor's band — author, 2026-08-01: *"a tile on a floor
+    // can be above trees but only by being at the top of that floor"*.
+    passiveElevationFraction: 1,
     // A canopy sits well above head height — long, soft shadow.
     shadowHeightPx: 70,
     flutterSpaceFreq: 0.035,
@@ -103,6 +141,10 @@ export const VEGETATION_KINDS = Object.freeze([
     label: 'Bush foliage',
     swayMultiplier: 0.8,
     renderOrderNudge: 0.5,
+    // HALFWAY UP THE FLOOR — the author's own proposal, verbatim: *"set the
+    // passive elevation of _Bush to half way between the top and bottom of the
+    // level"*. Undergrowth stays below the canopy for free (0.5 < 1).
+    passiveElevationFraction: 0.5,
     // Waist-high — a tight, comparatively crisp shadow hugging its own base.
     shadowHeightPx: 16,
     flutterSpaceFreq: 0.06,
@@ -186,9 +228,16 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0,
     max: 120,
     step: 1,
-    // Was 20 — turned down alongside the internal gale terms below (see this
-    // file's own "WHY THIS GREW" note): "distortions are very very strong".
-    default: 14,
+    // 20 → 14 (2026-07-23, "distortions are very very strong") → 34
+    // (2026-08-01). The rise is NOT a reversal of that earlier cut: the
+    // complaint then was per-pixel flutter distortion, and this dial never
+    // drove it. The author's own framing this time — *"I'd rather we get a lot
+    // more sway from trees and bushes"* — is a deliberate REBALANCE of the
+    // motion budget away from the warp that was destroying the art and into the
+    // one that cannot: sway is a smooth per-VERTEX displacement of a tessellated
+    // mesh, pinned at the root by `heightWeight01`, so it moves the plant
+    // without ever folding its texture.
+    default: 34,
     category: 'Motion',
     label: 'Sway amount',
     help: 'World-pixel displacement at the canopy top under a full-strength wind sample (before the per-kind multiplier and Wind response). The root of the mesh never moves; the top moves this far.',
@@ -218,9 +267,11 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.05,
-    // Was 1.6 — the single biggest contributor to "very very strong" at
-    // gale, since it stacks additively with the oscillating sway below.
-    default: 1.0,
+    // 1.6 → 1.0 (2026-07-23) → 1.8 (2026-08-01, same rebalance as
+    // `swayAmount` above): a gale should visibly lay a canopy over, and the
+    // lean is a bulk mesh bend, not a texture warp — it was never what
+    // "liquified".
+    default: 1.8,
     category: 'Motion',
     label: 'Gale lean',
     help: 'How far the canopy holds a persistent downwind lean at full gale, relative to its own oscillating swing. 0 = it only oscillates about neutral and never bends over.',
@@ -251,7 +302,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     default: 0.55,
     category: 'Motion',
     label: 'Leaf flutter',
-    help: 'How much individual leaves shimmer and shuffle in the wind, on top of the whole-plant sway. Still at dead calm, more pronounced in a gale. The distortion preserves area, so foliage never visibly stretches or thins — it just moves. 0 = a perfectly rigid plant.',
+    help: 'How much individual leaves shimmer and shuffle in the wind, on top of the whole-plant sway. Still at dead calm, more pronounced in a gale. 0 = a perfectly rigid plant. The displacement is capped against the flutter pattern’s own feature size, so raising this brightens the shimmer rather than smearing the artwork.',
   },
   flutterFrequency: {
     type: 'float',

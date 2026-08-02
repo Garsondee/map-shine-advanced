@@ -30,7 +30,7 @@
  *
  * `buildEnvironmentalLightMaterials` (environmental-light.js) needs THIS
  * subsystem's `texture` as one of ITS OWN construction params — so this
- * subsystem must exist BEFORE `envLight` does. But `bakeCasterTexture` (below)
+ * subsystem must exist BEFORE `envLight` does. But `bakeLayerTexture` (below)
  * needs to call `envLight.setSunShadowRect(...)` on every rebake. A plain
  * `envLight` parameter captured at construction would be `undefined` (or throw
  * a TDZ ReferenceError for a `const` not yet initialized — the EXACT crash
@@ -38,7 +38,7 @@
  *
  * The fix: `getEnvLight: () => envLight`, a closure written in the CALLER's
  * own scope where `envLight` is a `const` declared moments later. It is only
- * ever INVOKED from inside `bakeCasterTexture`, which only ever runs via
+ * ever INVOKED from inside `bakeLayerTexture`, which only ever runs via
  * `maybeBake()`, which only ever runs from the frame loop — by which time the
  * caller's synchronous setup (including the `const envLight = ...` line) has
  * long finished. The one-time INITIAL push of the placeholder rect (what the
@@ -132,72 +132,105 @@
  * @module effects/lighting/sun-shadow-subsystem
  */
 
-import { buildSunShadowBakeMaterial } from './sun-occlusion-render.js';
+import { buildLayerSmearBakeMaterial } from './layer-smear-render.js';
+import { sunNeedsRebake } from './sun-occlusion.js';
 import {
-  resolveSunMarch,
-  sunNeedsRebake,
-  sunShadowTierPlan,
-  sunShadowBakeSamples,
-  SUN_SHADOW_DEFAULT_TIER,
-  SUN_SHADOW_MAX_TIER,
-} from './sun-occlusion.js';
+  resolveLayerSmear,
+  layerSmearTierPlan,
+  layerSmearBakeSamples,
+  LAYER_SMEAR_DEFAULT_TIER,
+  LAYER_SMEAR_MAX_TIER,
+} from './layer-smear.js';
 import { buildSunShadowDebugMaterial, sunShadowDebugPaints } from './sun-shadow-debug.js';
-import { sampleMaskGridWorld } from '../../scene/mask-derive.js';
+import { sampleMaskGridWorld } from '../../scene/index.js';
 
 /**
  * ============================================================================
  * §4 — THE PERFORMANCE LADDER, AND WHAT MOVES WHEN THE PROFILE DOES
  * ============================================================================
  *
- * Added 2026-07-29. Three of this subsystem's four cost numbers used to be
- * module constants — the field's resolution, the march's step count and the
- * cone's tap count — which meant a `low` machine and an `extreme` one marched
- * the identical 1024²×24×3 field. They now come from the resolved performance
- * rung (`sun-occlusion.js#sunShadowTierPlan`, fed by `resolveEffectTier`
- * through `getSunShadowRenderState().perfTier`), and this module is where a
- * change to that rung actually costs or saves anything:
+ * Added 2026-07-29 (and re-based 2026-08-02 onto the layer-smear model's own
+ * ladder — the SHAPE of this section is unchanged, only which numbers move).
+ * Every one of this subsystem's cost numbers comes from the resolved
+ * performance rung (`layer-smear.js#layerSmearTierPlan`, fed by
+ * `resolveEffectTier` through `getSunShadowRenderState().perfTier`), and this
+ * module is where a change to that rung actually costs or saves anything:
  *
- *   fieldDim    → `allocator.resize(sunShadowRt, …)`. ⚠️ `setSize` KEEPS THE
- *                 SAME `.texture` OBJECT, which is the only reason resizing is
- *                 safe at all: `envLight`, every point-light material and the
- *                 debug view each captured `sunShadows.texture` at THEIR own
- *                 construction (Extraction plan trap #2 — shared nodes stay
- *                 shared). Re-ALLOCATING would hand all three a disposed
- *                 texture and blank the map.
- *   marchSteps  → a new bake material. Both loops are unrolled at TSL build
- *   lateralTaps   time, so these cannot be uniforms; the material is rebuilt,
- *                 which is a shader compile, which is why it only ever happens
- *                 on a profile change and never per frame.
+ *   fieldDim → `allocator.resize(sunShadowRt, …)`. ⚠️ `setSize` KEEPS THE SAME
+ *              `.texture` OBJECT, which is the only reason resizing is safe at
+ *              all: `envLight`, every point-light material and the debug view
+ *              each captured `sunShadows.texture` at THEIR own construction
+ *              (Extraction plan trap #2 — shared nodes stay shared).
+ *              Re-ALLOCATING would hand all three a disposed texture and
+ *              blank the map.
+ *   steps    → a new bake material. The station loop is unrolled at TSL build
+ *              time, so it cannot be a uniform; the material is rebuilt, which
+ *              is a shader compile, which is why it only ever happens on a
+ *              profile change and never per frame.
  *   quantizeDeg → passed straight to `sunNeedsRebake`, so it takes effect on
  *                 the very next frame with nothing to rebuild.
  *
- * AND WHAT "OFF" NOW COSTS. It used to cost a FULL-RESOLUTION march that wrote
+ * AND WHAT "OFF" NOW COSTS. It used to cost a FULL-RESOLUTION bake that wrote
  * white — the pass could not simply be skipped, because the ambient fill always
  * samples this texture, so "no shadow" has to be a written value rather than an
  * unwritten one. That is still true, but a 1×1 white texel satisfies it exactly
- * as well as a 1024² one: a disabled effect now drops its caster field,
- * collapses the target to 1×1 and marches a single pixel, once. The residual
+ * as well as a 2048² one: a disabled effect now drops its layer field,
+ * collapses the target to 1×1 and bakes a single pixel, once. The residual
  * per-frame cost is the consumers' own texture fetch, which is a 1×1 sample and
  * not zero — stated rather than rounded down (feedback_instruments_must_not_lie).
  */
 
-/** How far the sun must move before the field is re-marched, at the DEFAULT
+/** How far the sun must move before the field is re-baked, at the DEFAULT
  * rung. Without this a running day clock re-bakes every frame — exactly the cost
  * model this design exists to avoid; half a degree is invisible and turns sixty
  * bakes a second into a few a minute. The LIVE value is the resolved rung's
- * (`sunShadowTierPlan(...).quantizeDeg`); this is what `standard` buys, exported
+ * (`layerSmearTierPlan(...).quantizeDeg`); this is what `standard` buys, exported
  * so a test can pin the two together. */
-export const SUN_SHADOW_QUANTIZE_DEG = sunShadowTierPlan(SUN_SHADOW_DEFAULT_TIER).quantizeDeg;
+export const SUN_SHADOW_QUANTIZE_DEG = layerSmearTierPlan(LAYER_SMEAR_DEFAULT_TIER).quantizeDeg;
 
 /** The minimum feather at the contact point, px — no shadow is a perfect
  * cutout, not even where it meets the wall casting it. Not tiered: it is a
  * LOOK constant, and softening a shadow's contact point on a slow machine
- * would be a different picture, not a cheaper one. */
-export const SUN_SHADOW_BASE_PENUMBRA_PX = 3;
+ * would be a different picture, not a cheaper one. Tightened 3→1 2026-08-02
+ * (author, live in Shader Lab — the tuned "preferred default" pass). */
+export const SUN_SHADOW_BASE_PENUMBRA_PX = 1;
 
 /** Default width of the map-edge ramp (the author's own suggested cure for the
- * shadow gap at the scene boundary — see `buildSunShadowBakeMaterial`). */
+ * shadow gap at the scene boundary — see `buildLayerSmearBakeMaterial`). */
 export const SUN_SHADOW_EDGE_BAND_PX = 384;
+
+/**
+ * ============================================================================
+ * LOOK CONSTANTS, NOT PARAMS — the same doctrine `sun-shadows.js`'s own header
+ * states for length/smear/softness, applied to what the layer-smear model adds.
+ * ============================================================================
+ *
+ * A layer's STRENGTH relative to the others, and the shape of its falloff
+ * curve, are properties of what "a shadow" IS in this model, not settings a
+ * per-scene author should need to balance — the same reasoning that kept this
+ * effect at nine-ish params instead of V2's thirty. Tuned once, in Shader Lab,
+ * against real geometry (`docs/planning/Sun-Shadows-Layer-Smear.md`); not
+ * exposed, so a future look pass changes one number here rather than asking
+ * every existing scene's author to re-discover it.
+ *
+ * `skyReachDepthPx` stays a REAL param (`SUN_SHADOW_PARAMS`) despite this
+ * doctrine — it is not "how a shadow looks", it is "how wide is the thing
+ * above you", which genuinely varies per map the way `wallHeightPx` already
+ * does, and the author asked for it by name.
+ */
+/** Wall, overhead, floor-above, (unused) — relative to the master
+ * `strength01` slider. All three sit just BELOW 1 (not exactly 1) so "a
+ * little bit of light should leak through" even at full depth (author,
+ * 2026-08-02) without needing a fourth slider to say so. Re-tuned from
+ * [1, 0.85, 0.88] to a uniform 0.95 the same day — the author's own
+ * "preferred default" pass in Shader Lab, live against real Tower Bridge
+ * data, superseding the earlier per-layer split. */
+const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.95, 0.95, 0.95, 0]);
+/** Shape of the distance falloff — higher hugs the caster more tightly.
+ * 1.6→1 2026-08-02 (author, live — the tuned "preferred default" pass). */
+const SUN_SHADOW_FALLOFF_EXP = 1;
+/** How fast the penumbra widens with distance from its caster. */
+const SUN_SHADOW_TIP_BLUR_MUL = 3;
 
 /**
  * Build the subsystem. See this module's own header for the two-phase
@@ -226,6 +259,78 @@ export const SUN_SHADOW_EDGE_BAND_PX = 384;
  *   dispose: () => void,
  * }}
  */
+/**
+ * PACK THE LAYER TEXTURE'S BYTES — the RGBA layout `buildLayerSmearBakeMaterial`
+ * reads, as ONE pure function over already-derived grids.
+ *
+ * Same extraction discipline as this function's predecessor
+ * (`packCasterTexelData`, retired 2026-08-02 with the model it packed for): a
+ * standalone pure function so a Node test can pack real grids without standing
+ * up the whole subsystem, and Shader Lab reads THIS same function rather than
+ * transcribing the rule (`tools/shader-lab/bench-sun-shadow.js`'s own
+ * `buildLayerField` is exactly that transcription, TODO'd to call this once
+ * this lands — see that function's own header).
+ *
+ * The channel meanings — `layer-smear-render.js`'s own module header is the one
+ * true source, verify against IT if the two ever disagree:
+ *
+ *   R = walls            (`1 − outdoors` — the `_Outdoors` dark)
+ *   G = overhead          (this floor's own overhead tiles' coverage)
+ *   B = the floor above, and everything higher, merged (`coverAbove`)
+ *   A = unused — `SHADOW_LAYER_COUNT` is 4 but this bake only has 3 REAL
+ *       silhouette sources today (walls, overhead, "above ∪ higher" already
+ *       merged by `coverAbove` itself); splitting "the floor directly above"
+ *       from "everything higher" into two channels needs a per-floor cover
+ *       grid `deriveFloorProducts` does not expose yet. Left EMPTY and said
+ *       out loud rather than quietly duplicated into B, so the gap stays
+ *       visible instead of looking finished (`layer-smear-render.js`'s own
+ *       header documents the same gap for Shader Lab's synthetic packing).
+ *
+ * @param {object} args
+ * @param {object} args.channels - `mask-derive.js`'s `casterChannels` (only
+ *   `coverOverhead` is read).
+ * @param {object} args.outdoorsGrid - the `outdoors` MaskGrid (its own,
+ *   SHARED resolution — see the world-sampling note below).
+ * @param {object|null} args.coverAboveGrid - the `coverAbove` MaskGrid, same
+ *   shared resolution as `outdoors`. `null` reads as "nothing above" rather
+ *   than throwing — a floor genuinely can have nothing above it (the roof).
+ * @param {object} args.spec - the OUTPUT grid's `MaskGridSpec` (today,
+ *   `channels.coverOverhead`'s own — see `bakeLayerTexture`'s call site for
+ *   why that one).
+ * @returns {{data: Uint8Array, coveredTexels: number}}
+ */
+export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec }) {
+  const { w, h } = spec;
+  const data = new Uint8Array(w * h * 4);
+  let coveredTexels = 0;
+  // ⚠️ `outdoors` AND `coverAbove` MUST BE WORLD-SAMPLED, NEVER FLAT-INDEXED
+  // BY `i` (2026-07-30 — the casterGridDim/Quality-Extreme corruption bug,
+  // `packCasterTexelData`'s own header has the full post-mortem). Both live at
+  // the SHARED grid resolution (every effect's shared budget — water/wind/
+  // specular too), independent of whatever resolution THIS output `spec`
+  // asks for; indexing them with this loop's flat `i` silently reinterprets
+  // one row stride as another the moment the two resolutions diverge.
+  // `channels.coverOverhead` is natively at `spec`'s own resolution (it is
+  // WHERE `spec` came from), so it alone is safe to flat-index.
+  for (let gy = 0; gy < h; gy++) {
+    const wy = spec.y + (gy + 0.5) * spec.texelH;
+    for (let gx = 0; gx < w; gx++) {
+      const wx = spec.x + (gx + 0.5) * spec.texelW;
+      const i = gy * w + gx;
+      const outdoorsByte = sampleMaskGridWorld(outdoorsGrid, wx, wy) ?? 255;
+      const overheadCoverage = channels.coverOverhead?.data[i] ?? 0;
+      const aboveByte = coverAboveGrid ? (sampleMaskGridWorld(coverAboveGrid, wx, wy) ?? 0) : 0;
+      const wallByte = 255 - outdoorsByte;
+      data[i * 4 + 0] = wallByte;
+      data[i * 4 + 1] = overheadCoverage;
+      data[i * 4 + 2] = aboveByte;
+      data[i * 4 + 3] = 0;
+      if (wallByte > 0 || overheadCoverage > 0 || aboveByte > 0) coveredTexels++;
+    }
+  }
+  return { data, coveredTexels };
+}
+
 export function createSunShadowSubsystem({
   THREE,
   allocator,
@@ -240,17 +345,23 @@ export function createSunShadowSubsystem({
 }) {
   // ── STATE (was 11 viewer-closure locals; now this module's own) ─────────
   //
-  // A 1×1 EMPTY caster height field — no casters, and (critically) a receiver
-  // gate of ZERO, so the march is a provable no-op before any real field is
-  // baked. Deliberately NOT white (which would read as "a 2048px building on
-  // every texel" — the whole map in shadow from frame one, the exact black-
-  // screen-by-construction class `keyhole-grade-engine-built` already named
-  // once for the LUT tail). A placeholder whose failure mode is invisible
-  // beats one whose failure mode is a black screen.
+  // A 1×1 EMPTY layer field — no casters, and (critically) a receiver gate of
+  // ZERO, so the bake is a provable no-op before any real field exists.
+  // Deliberately NOT white (which would read as "a 2048px building on every
+  // texel" — the whole map in shadow from frame one, the exact black-screen-
+  // by-construction class `keyhole-grade-engine-built` already named once for
+  // the LUT tail). A placeholder whose failure mode is invisible beats one
+  // whose failure mode is a black screen.
   let casterTexture = createCasterTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
   let casterRect = { ...dimensions.sceneRect };
-  /** The tallest caster in the current field, px — sizes the march's reach. */
-  let casterMaxHeightPx = 0;
+  /** Whether the live layer field has ANY coverage at all — the layer-smear
+   * model's replacement for the old `casterMaxHeightPx > 0` enable-check.
+   * `casterMaxHeightPx` sized the OLD model's march reach from the field's
+   * OWN tallest caster; this model's reach comes from AUTHORED heights
+   * (`SUN_SHADOW_PARAMS`), never measured from the field, so "how tall is the
+   * tallest thing" stopped being a question this subsystem needs answered —
+   * only "is there anything here at all" still is. */
+  let casterHasCoverage = false;
   /** The last bake's inputs + outcome, verbatim, for the status report. */
   let lastSunShadowBake = null;
   /** The sun the live field was baked for (null = never baked). */
@@ -279,51 +390,39 @@ export function createSunShadowSubsystem({
   // one resize and at most one material rebuild, at startup, on the frame the
   // profile is first known. That is strictly better than reading a value that
   // is not there yet and calling it the profile's answer.
-  let activeTier = SUN_SHADOW_DEFAULT_TIER;
-  let activePlan = sunShadowTierPlan(activeTier);
+  let activeTier = LAYER_SMEAR_DEFAULT_TIER;
+  let activePlan = layerSmearTierPlan(activeTier);
   /** The live field resolution — `activePlan.fieldDim` normally, 1 while the
    * effect is off. A separate variable rather than a derived one BECAUSE they
    * genuinely differ: the rung stays whatever the profile bought while the
    * effect is switched off, so turning it back on restores that rung rather
    * than the cheapest one. */
   let activeFieldDim = activePlan.fieldDim;
-  /** What the LIVE bake material was actually built with, so `applyMarchQuality`
+  /** What the LIVE bake material was actually built with, so `applyQuality`
    * can tell a real change from a re-resolve of the same rung. Declared HERE,
    * above every function that reads them, rather than beside the function that
    * writes them: Extraction plan trap #4 is a temporal-dead-zone crash this very
    * file already caused once. */
-  let builtMarchSteps = activePlan.marchSteps;
-  let builtLateralTaps = activePlan.lateralTaps;
-  /** The height scale the live caster field was uploaded with. Re-pushed into a
-   * rebuilt material, since only `bakeCasterTexture` ever sets it and that runs
-   * on mask changes, not on profile changes. */
-  let casterHeightScalePx = 0;
-  /** The scene-wide building height (world px) the live caster field was baked
-   * with — ROUND SEVEN's COLUMN test reads this as a uniform, not a per-texel
-   * channel, so it needs the same re-push-on-rebuild treatment as
-   * `casterHeightScalePx` just above, for the identical reason. */
-  let casterBuildingHeightPx = 0;
-  /** ⚠️ THE CASTER TEXTURE'S OWN RESOLUTION (texels a side), set ONLY from the
-   * texture `bakeCasterTexture` actually just uploaded (`spec.w`) — NEVER from
+  let builtSteps = activePlan.steps;
+  /** ⚠️ THE LAYER TEXTURE'S OWN RESOLUTION (texels a side), set ONLY from the
+   * texture `bakeLayerTexture` actually just uploaded (`spec.w`) — NEVER from
    * `activeFieldDim`/`plan.fieldDim`, which is a DIFFERENT number (the OUTPUT
    * bake target's own resolution). Conflating the two fed §4's mip-LOD math
-   * the wrong texel size the moment `casterGridDim` stopped moving in lockstep
-   * with `fieldDim` (2026-07-30, live: Quality-tier banding, Extreme-tier a
-   * visibly mispositioned shadow — sun-occlusion-render.js's `uCasterGridDim`
-   * has the full post-mortem). Re-pushed on a material rebuild for the same
-   * reason `casterHeightScalePx` is: only a real bake changes it. */
-  let casterGridDimPx = 0;
+   * the wrong texel size in the previous model (Quality-tier banding,
+   * Extreme-tier a visibly mispositioned shadow — `layer-smear-render.js`'s
+   * `setField`/its own header has the contract this repeats). Re-pushed on a
+   * material rebuild since only a real bake changes it. */
+  let layerGridDimPx = 0;
 
   // TWO textures, both SCENE-SPACE (world-aligned, camera-independent):
-  //   `casterTexture` — the height field, uploaded from the mask authority's
-  //                     derived channels (R coverAbove, G overhead, B
-  //                     sky-reach, A the `_Outdoors` receiver).
-  //   `sunShadowRt`   — the marched result, sampled once per frame by the
+  //   `casterTexture` — the layer field, uploaded from the mask authority's
+  //                     derived channels: R walls, G overhead, B the floor
+  //                     above (and everything higher, merged).
+  //   `sunShadowRt`   — the baked result, sampled once per frame by the
   //                     ambient fill AND per-fragment by every point light.
-  // Neither is re-made per frame. The march runs only when the QUANTISED sun
+  // Neither is re-made per frame. The bake runs only when the QUANTISED sun
   // moves, the masks change, or the floor changes — panning and zooming are
-  // free, which is why a 24-step march is affordable here and never was in V2
-  // (which re-marched a view-aligned target every frame).
+  // free.
   /** The descriptor, kept rather than inlined: `allocator.resize` takes it too,
    * so the Keyhole law re-runs on every resize with the SAME flags `create`
    * was judged under — "a resize storm can't smuggle a world-res target past
@@ -334,8 +433,8 @@ export function createSunShadowSubsystem({
     resolvedH: activeFieldDim,
     // NOT screenSized: a fixed square in WORLD space, O(1) in map size — a
     // 12000px map and a 2000px map both get exactly this. The whole ladder
-    // (512 → 1280) stays under the 2048 world-res cap, so no `allowWorldScale`
-    // exception is claimed at any rung.
+    // (512 → 2048) stays at or under the 2048 world-res cap, so no
+    // `allowWorldScale` exception is claimed at any rung.
     screenSized: false,
     type: THREE.UnsignedByteType,
     colorSpace: THREE.NoColorSpace,
@@ -344,18 +443,17 @@ export function createSunShadowSubsystem({
   };
   const sunShadowRt = allocator.create('scene.sunShadow', sunShadowRtDesc);
 
-  let sunShadowBake = buildSunShadowBakeMaterial({
+  let sunShadowBake = buildLayerSmearBakeMaterial({
     THREE,
-    casterTexture,
-    steps: activePlan.marchSteps,
-    lateralTaps: activePlan.lateralTaps,
+    layerTexture: casterTexture,
+    steps: activePlan.steps,
   });
   let sunShadowQuad = new THREE.QuadMesh(sunShadowBake.material);
 
-  /** The world rect the live caster field covers, as the (minX,minY,maxX,maxY)
+  /** The world rect the live layer field covers, as the (minX,minY,maxX,maxY)
    * shape both the bake material and `envLight` want. ONE derivation, three
-   * readers (`bakeCasterTexture`, `applyMarchQuality`, the public `getRect`) —
-   * a second copy of this arithmetic is how the shadow field and the gate that
+   * readers (`bakeLayerTexture`, `applyQuality`, the public `getRect`) — a
+   * second copy of this arithmetic is how the shadow field and the gate that
    * reads it end up covering different halves of the map. */
   function currentRect() {
     return {
@@ -387,59 +485,53 @@ export function createSunShadowSubsystem({
     sunShadowRtDesc.resolvedW = next;
     sunShadowRtDesc.resolvedH = next;
     allocator.resize(sunShadowRt, next, next, sunShadowRtDesc);
-    // Pushed HERE too, not left to `applyMarchQuality`/`bakeCasterTexture`
-    // alone: a resize never actually changes the CASTER texture's own
-    // resolution (`casterGridDimPx` — this call re-pushes the cached value,
-    // it does not derive a new one from `next`, which is the OUTPUT bake
-    // target's dimension and a genuinely different number — see
-    // `casterGridDimPx`'s own header for the live bug conflating the two
-    // caused). Harmless when a rebake follows immediately (it always does,
+    // Pushed HERE too, not left to `applyQuality`/`bakeLayerTexture` alone: a
+    // resize never actually changes the LAYER texture's own resolution
+    // (`layerGridDimPx` — this call re-pushes the cached value, it does not
+    // derive a new one from `next`, which is the OUTPUT bake target's
+    // dimension and a genuinely different number — see `layerGridDimPx`'s own
+    // header for the live bug conflating the two caused, in the previous
+    // model). Harmless when a rebake follows immediately (it always does,
     // here); the defensive value is covering the case a future caller calls
     // this in isolation.
-    sunShadowBake.setField({
-      heightScalePx: casterHeightScalePx,
-      casterGridDimPx,
-      buildingHeightPx: casterBuildingHeightPx,
-    });
+    sunShadowBake.setField({ layerGridDimPx });
     return true;
   }
 
   /**
-   * Rebuild the march for a new step/tap count, if it changed. Both are unrolled
-   * loops in the TSL graph (§4), so this is a shader compile — rare by design,
-   * and every uniform the old material carried has to be pushed into the new one
-   * before the next bake reads it. `bakeSunShadowField` re-pushes sun/look/edge
-   * on every run; the two that are NOT re-pushed per bake — the caster texture
-   * and the field rect/scale, both owned by `bakeCasterTexture` — are restored
-   * here, or the first bake after a profile change would march a default 1×1
-   * caster over a unit rect and write a blank field.
+   * Rebuild the bake material if the step count changed. An unrolled-loop TSL
+   * graph, so a step change is a shader compile — rare by design — and every
+   * uniform the old material carried has to be pushed into the new one before
+   * the next bake reads it. `bakeSunShadowField` re-pushes sun/layers/depth/
+   * look/edge on every run; the two that are NOT re-pushed per bake — the
+   * layer texture and the field rect/resolution, both owned by
+   * `bakeLayerTexture` — are restored here, or the first bake after a profile
+   * change would draw a default 1×1 layer field over a unit rect and write a
+   * blank shadow.
    *
-   * @param {{marchSteps: number, lateralTaps: number}} plan
+   * ⚠️ ONE MODEL NOW, NOT A DISPATCH (2026-08-02 — the march/old-smear A/B
+   * switch this function once shared with `applyMarchQuality` is retired; see
+   * `docs/planning/Sun-Shadows-Layer-Smear.md` §8). This function used to pick
+   * between two builders and had to guard against a tier change and a model
+   * change landing in the same frame with the wrong one winning. One builder
+   * cannot disagree with itself, so that guard is gone with it.
+   *
+   * @param {{steps: number}} plan
    * @returns {boolean} whether the material was replaced.
    */
-  function applyMarchQuality(plan) {
-    if (plan.marchSteps === builtMarchSteps && plan.lateralTaps === builtLateralTaps) return false;
+  function applyQuality(plan) {
+    if (plan.steps === builtSteps) return false;
     const previous = sunShadowBake;
-    sunShadowBake = buildSunShadowBakeMaterial({
-      THREE,
-      casterTexture,
-      steps: plan.marchSteps,
-      lateralTaps: plan.lateralTaps,
-    });
+    sunShadowBake = buildLayerSmearBakeMaterial({ THREE, layerTexture: casterTexture, steps: plan.steps });
     sunShadowQuad = new THREE.QuadMesh(sunShadowBake.material);
-    builtMarchSteps = plan.marchSteps;
-    builtLateralTaps = plan.lateralTaps;
+    builtSteps = plan.steps;
     // Restore the two pieces of state the new material was born without.
-    // ⚠️ `casterGridDimPx`, NEVER `activeFieldDim` — the fresh material's
-    // `uCasterGridDim` uniform otherwise starts at its own hardcoded default
-    // (512) rather than the LIVE caster texture's actual resolution, silently
+    // ⚠️ `layerGridDimPx`, NEVER `activeFieldDim` — the fresh material's
+    // `uLayerGridDim` uniform otherwise starts at its own hardcoded default
+    // rather than the LIVE layer texture's actual resolution, silently
     // mis-sizing every mip request until the next real bake happens to fire.
     sunShadowBake.setRect(currentRect());
-    sunShadowBake.setField({
-      heightScalePx: casterHeightScalePx,
-      casterGridDimPx,
-      buildingHeightPx: casterBuildingHeightPx,
-    });
+    sunShadowBake.setField({ layerGridDimPx });
     // NOT `sunShadowQuad.geometry` — `QuadMesh` shares ONE module-level
     // `QuadGeometry` process-wide (see `dispose` below for the same trap).
     previous.material?.dispose?.();
@@ -473,39 +565,18 @@ export function createSunShadowSubsystem({
   }
 
   /**
-   * Upload a floor's occluder height field as one RGBA texture.
+   * Upload a floor's occluder layer field as one RGBA texture.
    *
-   * THE PACKING (ROUND SEVEN, 2026-07-30 — sun-occlusion.js's own header has
-   * the physics): R = sky-reach coverage ALONE, G = FLOATING height
-   * (overhead ∪ sky-reach — buildings EXCLUDED, see below), B = FLOATING
-   * coverage (overhead ∪ sky-reach), A = the floor's raw `_Outdoors` (the
-   * receiver gate, so that test costs no second fetch).
-   *
-   * Building height is NOT a channel — a building is a COLUMN with ONE
-   * scene-wide height, so per-texel storage would be pure redundancy (every
-   * covered texel would carry the identical byte). The march reads
-   * `buildingHeightPx` as a uniform (`setField`, below) and derives per-texel
-   * building COVERAGE from A: `(255 − outdoors) / 255`, the same "indoors-ness"
-   * `mask-derive.js#coverBuilding` already computes.
-   *
-   * ⚠️ WHY G/B DROP BUILDING (this is the actual Round Seven repack, not just
-   * a rename). Before this round, G was `max(building, overhead, skyReach)`
-   * height and B was `max(building, overhead)` coverage — so wherever a
-   * texel was BOTH indoors (tall building) and also had a same-floor overhead
-   * item or an upper floor above it, the building's own (usually taller)
-   * height WON the max and hid the floating height that was also genuinely
-   * there. The COLUMN and BAND tests need to run on independent inputs — a
-   * receiver standing under a mezzanine inside a tall building needs its
-   * `floatingHeightPx` read, not the building's own height masquerading as it.
-   * `channels.overhead`/`channels.skyReach` already exist as UNMERGED
-   * per-producer grids (kept "for the isolation toggles and the pixel probe" —
-   * mask-derive.js's own `casterChannels` doc), so this is a repack, not a
-   * new derivation.
+   * THE PACKING — `packLayerTexelData`'s own header is the one true source,
+   * verify against IT if this comment ever drifts: R = walls (`1 − outdoors`),
+   * G = this floor's own overhead coverage, B = the floor above and everything
+   * higher (merged), A = unused (see that function's own note on why a 4th
+   * silhouette source is not split out yet).
    *
    * @param {number} floorIndex
    * @returns {object} the outcome, verbatim, for the status report.
    */
-  function bakeCasterTexture(floorIndex) {
+  function bakeLayerTexture(floorIndex) {
     let field = null;
     try {
       field = getCasterHeightField(floorIndex);
@@ -513,103 +584,58 @@ export function createSunShadowSubsystem({
       return { ok: false, floorIndex, reason: String(err?.message ?? err) };
     }
     const channels = field?.channels;
-    const gateGrid = field?.outdoors;
-    if (!channels?.height?.spec || !gateGrid?.data) {
-      return { ok: false, floorIndex, reason: 'no caster height field for this floor' };
+    const outdoorsGrid = field?.outdoors;
+    // `channels.coverOverhead` — NOT `channels.height` (the previous model's
+    // own output spec source, a channel this packing no longer reads at
+    // all) — is where THIS model's output resolution comes from, since it is
+    // the one caster-resolution channel `packLayerTexelData` actually indexes.
+    const spec = channels?.coverOverhead?.spec;
+    if (!spec || !outdoorsGrid?.data) {
+      return { ok: false, floorIndex, reason: 'no layer field for this floor' };
     }
-    const spec = channels.height.spec;
     const { w, h } = spec;
     if (!(w > 0 && h > 0)) return { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
 
-    const data = new Uint8Array(w * h * 4);
-    let coveredTexels = 0;
-    // ⚠️ THE GATE GRID (`outdoors`) LIVES AT A DIFFERENT, PERMANENTLY-512
-    // RESOLUTION (2026-07-30 — the casterGridDim/Quality-Extreme corruption
-    // bug). `outdoors` comes from `maskAuthority.getDerived('outdoors', ...)`,
-    // the SHARED grid every effect reads (water/specular/coarse-alpha too),
-    // sized by `MASK_GRID_MAX_DIM` — it never followed `casterGridDim` when
-    // that axis was split off from the old shared 512 cap. Reading it with
-    // THIS loop's flat index `i` silently REINTERPRETS a 512-row-stride
-    // buffer as if it had `w`'s row stride, which only happens to be correct
-    // when `w === 512` — the shipped resolution before this session. At any
-    // other `w` (Quality 768, Extreme 1024) every row shears against the
-    // wrong offset, producing exactly the reported "banding"/"squashed ghost
-    // copies", because 1024 = 512×2 doubles every real row into a repeat and
-    // 768 = 512×1.5 shears diagonally. World-SAMPLING it (mask-derive.js's own
-    // fix for the identical class of problem, `sampleMaskGridWorld`) reads the
-    // correct texel regardless of either grid's own resolution.
-    for (let gy = 0; gy < h; gy++) {
-      const wy = spec.y + (gy + 0.5) * spec.texelH;
-      for (let gx = 0; gx < w; gx++) {
-        const wx = spec.x + (gx + 0.5) * spec.texelW;
-        const i = gy * w + gx;
-        const overheadHeight = channels.overhead?.data[i] ?? 0;
-        const skyReachHeight = channels.skyReach?.data[i] ?? 0;
-        const overheadCoverage = channels.coverOverhead?.data[i] ?? 0;
-        const skyReachCoverage = channels.coverSkyReach?.data[i] ?? 0;
-        // ⚠️ R IS SKY-REACH ONLY (2026-07-26) — NOT the floating merge just
-        // below. `d = 0` reads R raw, with no march, as "something solid
-        // stands directly over THIS PIXEL" — genuinely true for an upper
-        // FLOOR's structure (that art is not drawn at this pixel; the ground
-        // beneath it stays visible and honestly darkened). For an overhead
-        // item on the SAME floor, this pixel's only visible content IS the
-        // item's own opaque art — there is no separate, visible "ground
-        // beneath" to darken, so a same-floor item shading itself was pure
-        // self-shadowing (docs/planning/Sun-Shadows-Rethink.md §4b).
-        // Overhead's own coverage/height still march-cast normally via G/B
-        // below — only the zero-distance self-check excludes it.
-        data[i * 4 + 0] = skyReachCoverage;
-        data[i * 4 + 1] = overheadHeight > skyReachHeight ? overheadHeight : skyReachHeight;
-        data[i * 4 + 2] = overheadCoverage > skyReachCoverage ? overheadCoverage : skyReachCoverage;
-        data[i * 4 + 3] = sampleMaskGridWorld(gateGrid, wx, wy) ?? 255;
-        if (data[i * 4 + 0] > 0 || data[i * 4 + 2] > 0) coveredTexels++;
-      }
-    }
+    const { data, coveredTexels } = packLayerTexelData({
+      channels,
+      outdoorsGrid,
+      coverAboveGrid: field?.coverAbove ?? null,
+      spec,
+    });
 
     // `createCasterTexture` is the caller's callback (see §3) — LINEAR
     // filtering so a silhouette edge is a ramp rather than a staircase of
-    // mask texels, which the march's contact-hardening depends on.
+    // mask texels, which the model's contact-hardening depends on.
     const tex = createCasterTexture(data, w, h);
 
     casterTexture?.dispose();
     casterTexture = tex;
-    sunShadowBake.casterTexNode.value = tex;
+    sunShadowBake.layerTexNode.value = tex;
     debug?.setCasterTexture(tex);
     casterRect = { x: spec.x, y: spec.y, width: spec.width, height: spec.height };
-    // `field.completeness.maxCasterHeightPx` is mask-derive.js's OWN max,
-    // computed across ALL three producers INCLUDING building — the single
-    // source of truth for "how far must the march reach", now that building
-    // height no longer shows up in any packed byte this function could
-    // re-derive a max from itself (Round Seven).
-    casterMaxHeightPx = field.completeness?.maxCasterHeightPx ?? 0;
-    casterHeightScalePx = field.scalePx ?? 0;
-    casterBuildingHeightPx = field.buildingHeightPx ?? 0;
+    casterHasCoverage = coveredTexels > 0;
     // ⚠️ `spec.w` — the texture JUST uploaded, in texels — NEVER `activeFieldDim`
     // (a different number: the OUTPUT bake target's own resolution). See
-    // `casterGridDimPx`'s own header for the live bug this is the fix for.
-    casterGridDimPx = spec.w;
+    // `layerGridDimPx`'s own header for the live bug this is the fix for
+    // (found in the previous model; the same trap applies here unchanged).
+    layerGridDimPx = spec.w;
     const rect = currentRect();
     sunShadowBake.setRect(rect);
-    sunShadowBake.setField({
-      heightScalePx: casterHeightScalePx,
-      casterGridDimPx,
-      buildingHeightPx: casterBuildingHeightPx,
-    });
+    sunShadowBake.setField({ layerGridDimPx });
     getEnvLight().setSunShadowRect(rect);
-    // A new field invalidates whatever was marched from the old one.
+    // A new field invalidates whatever was baked from the old one.
     bakedSun = null;
     return {
       ok: true,
       floorIndex,
       cols: w,
       rows: h,
-      maxCasterHeightPx: Math.round(casterMaxHeightPx),
-      buildingHeightPx: Math.round(casterBuildingHeightPx),
-      // ⚠️ READ THESE TWO TOGETHER. Casters present with a max height of ZERO is
-      // the silent failure that hid sky-reach: a floor with no declared
-      // `bottomElevation` gives every caster height 0, and every count stays
-      // healthy while the field casts nothing. `caster-coverage` vs
-      // `caster-height` in the debug dropdown is the same test, by eye.
+      // ⚠️ ZERO WITH A NON-EMPTY ITEM LIST would be the silent failure that hid
+      // sky-reach for months under the old model (a floor with no declared
+      // `bottomElevation` gave every caster height 0 while counts stayed
+      // healthy) — this model has no per-texel height byte to fall silent the
+      // same way, but `coveredTexels` is still the one number that tells the
+      // same class of lie apart from a genuinely empty floor.
       coveredTexels,
       coveredPct: +((coveredTexels / (w * h)) * 100).toFixed(1),
       completeness: field.completeness ?? null,
@@ -618,34 +644,32 @@ export function createSunShadowSubsystem({
   }
 
   /**
-   * Give back the uploaded caster field — the memory half of "off costs
+   * Give back the uploaded layer field — the memory half of "off costs
    * nothing" (§4). The full-resolution RGBA upload is one `w × h × 4` byte
-   * texture per floor (512² ⇒ 1 MB), and holding it while the effect is
-   * switched off is holding it for nobody.
+   * texture per floor, and holding it while the effect is switched off is
+   * holding it for nobody.
    *
-   * ⚠️ `casterMaxHeightPx = 0` IS THE LOAD-BEARING LINE, not the dispose.
-   * `bakeSunShadowField`'s `active` test is `enabled && casterMaxHeightPx > 0`,
+   * ⚠️ `casterHasCoverage = false` IS THE LOAD-BEARING LINE, not the dispose.
+   * `bakeSunShadowField`'s `active` test is `enabled && casterHasCoverage`,
    * and the 1×1 placeholder this restores has a receiver gate of ZERO — so
-   * even if something re-baked the field while off, the march is a provable
-   * no-op rather than a full-strength shadow over a stale height map.
+   * even if something re-baked the field while off, the bake is a provable
+   * no-op rather than a full-strength shadow over a stale layer map.
    */
   function dropCasterField() {
     const placeholder = createCasterTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
     casterTexture?.dispose?.();
     casterTexture = placeholder;
-    sunShadowBake.casterTexNode.value = placeholder;
+    sunShadowBake.layerTexNode.value = placeholder;
     debug?.setCasterTexture(placeholder);
-    casterMaxHeightPx = 0;
-    casterHeightScalePx = 0;
-    casterBuildingHeightPx = 0;
-    casterGridDimPx = 0;
+    casterHasCoverage = false;
+    layerGridDimPx = 0;
     casterFieldLoaded = false;
-    lastCasterBakeResult = { ok: false, reason: 'effect off — caster field released' };
+    lastCasterBakeResult = { ok: false, reason: 'effect off — layer field released' };
     bakedSun = null;
   }
 
   /**
-   * Run the march into `scene.sunShadow`. Cheap to CALL and expensive to RUN,
+   * Run the bake into `scene.sunShadow`. Cheap to CALL and expensive to RUN,
    * which is why every caller goes through `maybeBake` instead.
    * @param {string} reason - what triggered this, verbatim, for the report.
    */
@@ -659,28 +683,41 @@ export function createSunShadowSubsystem({
     // the ambient fill always samples this texture now, so "off" has to be a
     // written value, not an unwritten one — the same correctness gotcha the
     // UI-shadow hit when it stopped having a draw to skip.)
-    const active = state.enabled && casterMaxHeightPx > 0;
-    const resolved = resolveSunMarch({
+    const active = state.enabled && casterHasCoverage;
+    // ⚠️ ZEROED WHEN INACTIVE, not read raw — mirrors the previous model's own
+    // `active ? casterMaxHeightPx : 0`. Every height at 0 makes
+    // `resolveLayerSmear` return `maxThrowPx = 0`, which `layerSmearVisibility`
+    // already treats as a provable no-op (its own "no layer reaches anywhere"
+    // early return) — the same "off costs nothing, and cannot half-apply"
+    // guarantee, reached the model's own way rather than a caller-side branch.
+    const heightsPx = active
+      ? [params.wallHeightPx ?? 0, params.overheadHeightPx ?? 0, params.aboveHeightPx ?? 0, 0]
+      : [0, 0, 0, 0];
+    const resolved = resolveLayerSmear({
       azimuthDeg: atmosphere.azimuthDeg,
       elevationDeg: atmosphere.elevationDeg,
-      maxCasterHeightPx: active ? casterMaxHeightPx : 0,
-      // ⚠️ THE MATERIAL'S OWN STEP COUNT, not the rung's. The CPU's step LENGTH
-      // (`resolved.stepPx`) and the shader's unrolled loop must agree exactly or
-      // the march walks the wrong span — so this reads what the live material
-      // was BUILT with, which is the rung's value everywhere except the one
-      // frame a profile change is being applied.
-      steps: builtMarchSteps,
+      heightsPx,
       // THE LENGTH CONTROLS — global scale + dawn/dusk cap, both folded into
-      // the ONE effective tangent resolveSunMarch computes, so the shorter
-      // span also means smaller steps (finer, and cheaper).
+      // the ONE effective tangent `resolveLayerSmear` computes per layer, so
+      // the shorter span also means smaller steps (finer, and cheaper). Same
+      // contract the previous model's `resolveSunMarch` used.
       lengthScale: params.lengthScale ?? 1,
       maxLengthMul: params.dawnDuskLength ?? 0,
     });
-    sunShadowBake.setSun(atmosphere.azimuthDeg, atmosphere.elevationDeg, resolved);
+    sunShadowBake.setSun(resolved);
+    sunShadowBake.setLayers({ strengths: SUN_SHADOW_LAYER_STRENGTH });
+    // THE SKY-REACH GRADIENT — only the "above" layer (index 2) carries real
+    // data today (see `packLayerTexelData`'s own note on why index 3 is
+    // empty), so only it gets a real radius. Unlike the strengths/falloff
+    // above, this ONE stays a real param — see this file's own "LOOK
+    // CONSTANTS, NOT PARAMS" header for why it is the exception.
+    sunShadowBake.setDepth({ radiiPx: [0, 0, active ? (params.skyReachDepthPx ?? 0) : 0, 0] });
     sunShadowBake.setLook({
       strength01: active ? Math.max(0, Math.min(1, params.strength01 ?? 1)) * atmosphere.strengthMul : 0,
       softnessMul: atmosphere.softnessMul * Math.max(0.05, params.softnessBias ?? 1),
       basePx: SUN_SHADOW_BASE_PENUMBRA_PX,
+      falloffExp: SUN_SHADOW_FALLOFF_EXP,
+      tipBlurMul: SUN_SHADOW_TIP_BLUR_MUL,
     });
     sunShadowBake.setEdgeBandPx(params.edgeBandPx ?? SUN_SHADOW_EDGE_BAND_PX);
 
@@ -694,17 +731,16 @@ export function createSunShadowSubsystem({
       enabled: !!state.enabled,
       active,
       sun: { ...bakedSun },
-      maxCasterHeightPx: Math.round(casterMaxHeightPx),
+      heightsPx: heightsPx.slice(0, 3).map((v) => Math.round(v)),
       // WHAT THIS BAKE ACTUALLY COST, not what the ladder says it should have.
       // The rung is reported separately in `getStatus`; these are the numbers
       // the draw above was made of, so a report can never claim a resolution
       // the field is not at (feedback_instruments_must_not_lie).
       tier: activeTier,
-      steps: builtMarchSteps,
-      lateralTaps: builtLateralTaps,
+      steps: builtSteps,
       fieldDim: activeFieldDim,
-      bakeSamples: activeFieldDim * activeFieldDim * builtMarchSteps * builtLateralTaps,
-      marchSpanPx: Math.round(resolved.spanPx),
+      bakeSamples: layerSmearBakeSamples({ fieldDim: activeFieldDim, steps: builtSteps }),
+      maxThrowPx: Math.round(resolved.maxThrowPx),
       softnessMul: +(atmosphere.softnessMul * Math.max(0.05, params.softnessBias ?? 1)).toFixed(3),
     };
     return lastSunShadowBake;
@@ -745,14 +781,14 @@ export function createSunShadowSubsystem({
       return;
     }
 
-    // ── ON: the resolved rung decides how much field there is to march ────
+    // ── ON: the resolved rung decides how much field there is to bake ────
     // Read every frame and compared, never assumed: the performance profile is
     // a LIVE client setting with no reload behind it, so a player who drops
     // from Extreme to Standard mid-session must see the cheaper field on the
     // next bake, not on the next scene load.
     offFieldWritten = false;
-    const tier = Number.isFinite(state.perfTier) ? state.perfTier : SUN_SHADOW_DEFAULT_TIER;
-    const plan = sunShadowTierPlan(tier);
+    const tier = Number.isFinite(state.perfTier) ? state.perfTier : LAYER_SMEAR_DEFAULT_TIER;
+    const plan = layerSmearTierPlan(tier);
     activeTier = tier;
     activePlan = plan;
     // Both of these return "did anything move", and both invalidate the live
@@ -760,20 +796,20 @@ export function createSunShadowSubsystem({
     // rebuilt material has never drawn anything at all.
     //
     // ⚠️ BOTH ARE CALLED UNCONDITIONALLY — NOT `a() || b()`. A rung change can
-    // move `fieldDim` and `marchSteps`/`lateralTaps` at once (e.g. `performance`
-    // → `standard`), and `||` short-circuits the second call the moment the
-    // first returns `true`, silently stranding the OLD march quality forever —
-    // `fieldDim` never needs to change again once it matches, so the skipped
-    // rebuild would never get a second chance.
+    // move `fieldDim` and `steps` at once (e.g. `performance` → `standard`),
+    // and `||` short-circuits the second call the moment the first returns
+    // `true`, silently stranding the OLD quality forever — `fieldDim` never
+    // needs to change again once it matches, so the skipped rebuild would
+    // never get a second chance.
     const dimChanged = applyFieldDim(plan.fieldDim);
-    const qualityChanged = applyMarchQuality(plan);
+    const qualityChanged = applyQuality(plan);
     const geometryChanged = dimChanged || qualityChanged;
 
     const version = getMaskAuthorityVersion ? getMaskAuthorityVersion() : casterFieldVersion;
     if (!casterFieldLoaded || version !== casterFieldVersion || floorIndex !== casterFieldFloor) {
       casterFieldVersion = version;
       casterFieldFloor = floorIndex;
-      lastCasterBakeResult = bakeCasterTexture(floorIndex);
+      lastCasterBakeResult = bakeLayerTexture(floorIndex);
       casterFieldLoaded = true;
     }
     const paramsKey = JSON.stringify(state.params ?? {}) + `|on|t${activeTier}`;
@@ -785,14 +821,14 @@ export function createSunShadowSubsystem({
   }
 
   return {
-    /** The marched field's texture — shared by the ambient fill (via
+    /** The baked field's texture — shared by the ambient fill (via
      * `envLight`, which took this at ITS OWN construction) and every point
      * light's per-fragment sample (`point-light-illumination.js`). */
     texture: sunShadowRt.texture,
     /** The world rect `texture` currently covers. The caller pushes this into
      * `envLight.setSunShadowRect` ONCE, right after building envLight (see
      * this module's own header) — subsequent pushes happen internally, from
-     * `bakeCasterTexture`, on every real rebake. */
+     * `bakeLayerTexture`, on every real rebake. */
     getRect: currentRect,
     /** Which floor `texture`'s field currently holds DATA for — set by the
      * most recent `maybeBake`, even on a call that skipped an actual rebake
@@ -834,14 +870,14 @@ export function createSunShadowSubsystem({
      * "the profile changed" and "the field changed" are indistinguishable from
      * outside, which is how a ladder nobody reads rots (resolveEffectTier's own
      * header). Samples rather than milliseconds, deliberately —
-     * `sunShadowBakeSamples`'s doc has the argument. */
+     * `layerSmearBakeSamples`'s doc has the argument. */
     getStatus() {
       return {
         caster: lastCasterBakeResult ?? 'never baked',
-        lastBake: lastSunShadowBake ?? 'never marched',
+        lastBake: lastSunShadowBake ?? 'never baked',
         profile: {
           tier: activeTier,
-          maxTier: SUN_SHADOW_MAX_TIER,
+          maxTier: LAYER_SMEAR_MAX_TIER,
           // The LIVE numbers, not the plan's: while the effect is off these
           // genuinely differ (the field collapses to 1×1 and the material is
           // left alone), and a status that printed the plan there would be
@@ -851,15 +887,15 @@ export function createSunShadowSubsystem({
           // ALONGSIDE IT — conflating the two (feeding the LOD math one when
           // it meant the other) is exactly the live bug this field's own
           // presence here is meant to make auditable at a glance from now on.
-          casterGridDimPx,
-          steps: builtMarchSteps,
-          lateralTaps: builtLateralTaps,
+          layerGridDimPx,
+          // ⚠️ THE LIVE MATERIAL'S OWN CHOICE, NEVER THE PARAM — the param can
+          // change mid-frame before the next `maybeBake` catches up; this is
+          // what `applyQuality` actually built, the same discipline `fieldDim`
+          // above already follows for the identical reason.
+          steps: builtSteps,
           quantizeDeg: activePlan.quantizeDeg,
-          bakeSamples: activeFieldDim * activeFieldDim * builtMarchSteps * builtLateralTaps,
-          defaultTierSamples: sunShadowBakeSamples(sunShadowTierPlan(SUN_SHADOW_DEFAULT_TIER)),
-          // ROUND SEVEN: reported alongside the rest of the LIVE field state —
-          // the one number the COLUMN test uses that no packed byte carries.
-          buildingHeightPx: Math.round(casterBuildingHeightPx),
+          bakeSamples: layerSmearBakeSamples({ fieldDim: activeFieldDim, steps: builtSteps }),
+          defaultTierSamples: layerSmearBakeSamples(layerSmearTierPlan(LAYER_SMEAR_DEFAULT_TIER)),
         },
       };
     },

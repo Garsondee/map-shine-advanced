@@ -24,7 +24,7 @@
  * invisible in a report: it prints the LOD and the world-px footprint of every
  * read the bake makes, with no GPU readback.
  */
-import { describeBakeBlur } from '../sun-shadow-subsystem.js';
+import { describeBakeBlur, describeLayerChannels } from '../sun-shadow-subsystem.js';
 import { MAX_LOD, GATE_AA_LOD } from '../layer-smear-render.js';
 import { resolveLayerSmear, layerSmearVisibility, SHADOW_LAYER_COUNT, DEPTH_SCALES } from '../layer-smear.js';
 
@@ -117,6 +117,53 @@ export function run(t) {
       `GATE_AA_LOD is 0 — the receiver gate reads the wall channel SHARP (is ${GATE_AA_LOD}). ` +
         'Any non-zero value blurs the indoor/outdoor boundary and walks the shadow off its wall.',
       GATE_AA_LOD === 0
+    );
+  }
+
+  // ── THE CHANNEL LEDGER SEPARATES "BLURRED BY US" FROM "ARRIVED BLURRED" ──
+  {
+    const W = 64,
+      H = 32;
+    const mk = (fill) => {
+      const d = new Uint8Array(W * H * 4);
+      for (let i = 0; i < W * H; i++) d[i * 4] = fill(i % W, Math.floor(i / W));
+      return d;
+    };
+    // A CRISP silhouette: a hard-edged block, so only its boundary column is
+    // partial. Few soft texels relative to covered ones.
+    const crisp = describeLayerChannels(
+      mk((x) => (x < 32 ? 255 : 0)),
+      W,
+      H
+    );
+    // The SAME shape arriving pre-blurred — a long ramp instead of an edge.
+    const blurred = describeLayerChannels(
+      mk((x) => Math.max(0, Math.min(255, Math.round(255 * (1 - x / 63))))),
+      W,
+      H
+    );
+
+    ok(`a crisp silhouette reports a LOW softEdgePct (${crisp.walls.softEdgePct}%)`, crisp.walls.softEdgePct < 10);
+    ok(
+      `the same shape arriving pre-blurred reports a HIGH one (${blurred.walls.softEdgePct}%) — this is the ` +
+        'figure that tells "the shader blurred it" apart from "the input was already soft"',
+      blurred.walls.softEdgePct > 80
+    );
+    ok(
+      'both agree the channel is covered — softEdgePct is about SHARPNESS, not amount',
+      crisp.walls.coveredPct > 40 && blurred.walls.coveredPct > 40
+    );
+    ok(
+      'an empty channel reports zeros rather than NaN from a 0/0',
+      crisp.higher.coveredPct === 0 && crisp.higher.softEdgePct === 0
+    );
+    // ⚠️ The report carries its own thresholds, because `casterField.coveredPct`
+    // one level up counts `> 0` and these count `> 8`. Two differently-measured
+    // numbers both called "covered" is how a reader reaches a confident wrong
+    // conclusion.
+    ok(
+      'the channel ledger states the thresholds it used, in the report itself',
+      crisp.thresholds && crisp.thresholds.emptyAtOrBelow > 0 && crisp.thresholds.solidAtOrAbove < 255
     );
   }
 

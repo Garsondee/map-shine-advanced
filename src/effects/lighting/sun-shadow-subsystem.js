@@ -312,6 +312,84 @@ export const SUN_SHADOW_TIP_BLUR_MUL = 3;
  * Pinned against it by `sun-shadow-blur.test.mjs`. */
 const MAX_REPORTED_LOD = 12;
 
+/** A byte at or below this reads as "not covered"; at or above `SOLID_BYTE`,
+ * "fully covered". Anything between is a SOFT EDGE texel — the quantity that
+ * distinguishes a crisp silhouette from a blurred one. 8/247 is ~3%, wide
+ * enough to ignore encoder noise and narrow enough that a genuine
+ * anti-aliased edge still counts. */
+const EMPTY_BYTE = 8;
+const SOLID_BYTE = 247;
+
+/**
+ * WHAT THE LAYER TEXTURE ACTUALLY CONTAINS, per channel — the instrument for
+ * "why does the live scene not look like Shader Lab".
+ *
+ * Added 2026-08-02. By this point the SHADER, the model maths, the packing and
+ * every look parameter were provably identical between the bench and the game
+ * (all four imported from the same modules, defaults read from the same
+ * schema) — and the pictures still disagreed. That leaves exactly one
+ * suspect: the TEXTURE the two feed that shared shader. Nothing measured it,
+ * so the comparison stayed a matter of opinion about two screenshots.
+ *
+ * `softEdgePct` is the load-bearing number. A silhouette rasterised at its
+ * native resolution is nearly binary — a few percent of texels sit between
+ * empty and solid, only along real edges. A silhouette UPSAMPLED from a
+ * coarser source (a mask ingested at a low mip, then resampled into a finer
+ * grid) is soft everywhere, and its `softEdgePct` climbs accordingly. That
+ * single figure separates "the shader blurred it" from "the input arrived
+ * blurred", which is the fork this whole investigation is stuck on.
+ *
+ * Cheap: one pass over bytes already in hand, no GPU readback, no second
+ * decode. Runs on every bake, which is rare by design.
+ *
+ * @param {Uint8Array} data - the packed RGBA layer texture.
+ * @param {number} w @param {number} h
+ * @returns {object} per-channel stats, keyed by the channel's MEANING.
+ */
+export function describeLayerChannels(data, w, h) {
+  const n = w * h;
+  const names = ['walls', 'overhead', 'floorAbove', 'higher'];
+  // ⚠️ SELF-DESCRIBING ON PURPOSE. `casterField.coveredPct` (one level up)
+  // counts any byte `> 0`, while these count `> EMPTY_BYTE`. Two numbers
+  // called "covered", measured differently, sitting in the same report is
+  // precisely how a reader draws a confident wrong conclusion — so the
+  // thresholds travel WITH the figures rather than living only in a comment
+  // nobody reads at 2am (`feedback_instruments_must_not_lie`). A byte of 1–8
+  // is a resampling artefact, not coverage: it casts essentially nothing, but
+  // it does inflate a `> 0` count toward 100% on any real map.
+  const out = {
+    thresholds: {
+      emptyAtOrBelow: EMPTY_BYTE,
+      solidAtOrAbove: SOLID_BYTE,
+      note: 'coveredPct here counts bytes > 8, unlike casterField.coveredPct which counts > 0',
+    },
+  };
+  for (let c = 0; c < 4; c++) {
+    let sum = 0;
+    let covered = 0;
+    let soft = 0;
+    let max = 0;
+    for (let i = 0; i < n; i++) {
+      const v = data[i * 4 + c];
+      sum += v;
+      if (v > EMPTY_BYTE) covered++;
+      if (v > EMPTY_BYTE && v < SOLID_BYTE) soft++;
+      if (v > max) max = v;
+    }
+    out[names[c]] = {
+      coveredPct: +((covered / n) * 100).toFixed(1),
+      // Of the texels that ARE covered, how many are partial? This is the
+      // sharpness figure — compare it against Shader Lab's own for the same
+      // floor. A big gap means the two are being fed different data, not
+      // rendering it differently.
+      softEdgePct: covered > 0 ? +((soft / covered) * 100).toFixed(1) : 0,
+      meanByte: +(sum / n).toFixed(1),
+      maxByte: max,
+    };
+  }
+  return out;
+}
+
 /**
  * THE BLUR LEDGER — every mip level this bake will ask the sampler for, in
  * numbers, without a GPU readback.
@@ -426,7 +504,7 @@ export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spe
       if (wallByte > 0 || overheadCoverage > 0 || aboveByte > 0) coveredTexels++;
     }
   }
-  return { data, coveredTexels };
+  return { data, coveredTexels, channelStats: describeLayerChannels(data, w, h) };
 }
 
 export function createSunShadowSubsystem({
@@ -694,7 +772,7 @@ export function createSunShadowSubsystem({
     const { w, h } = spec;
     if (!(w > 0 && h > 0)) return { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
 
-    const { data, coveredTexels } = packLayerTexelData({
+    const { data, coveredTexels, channelStats } = packLayerTexelData({
       channels,
       outdoorsGrid,
       coverAboveGrid: field?.coverAbove ?? null,
@@ -736,6 +814,14 @@ export function createSunShadowSubsystem({
       // same class of lie apart from a genuinely empty floor.
       coveredTexels,
       coveredPct: +((coveredTexels / (w * h)) * 100).toFixed(1),
+      // ⚠️ PER-CHANNEL, AND `softEdgePct` IS THE ONE THAT MATTERS. See
+      // `describeLayerChannels`: with the shader, the model, the packing and
+      // every look param now provably shared with Shader Lab, the layer
+      // TEXTURE is the only remaining place the two can differ — and this
+      // says, in numbers, whether this floor's silhouettes arrived crisp or
+      // already blurred. Compare it directly against the bench's own figure
+      // for the same floor.
+      channelStats,
       completeness: field.completeness ?? null,
       rect,
     };

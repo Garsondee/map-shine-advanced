@@ -327,7 +327,7 @@ export function createSunShadowBench({ THREE, log }) {
     // world-sampled by `packLayerTexelData` itself precisely because they can
     // legitimately sit at a DIFFERENT resolution than this one.
     const spec = p.casterChannels.coverOverhead.spec;
-    const { data } = packLayerTexelData({
+    const { data, channelStats } = packLayerTexelData({
       channels: p.casterChannels,
       outdoorsGrid: p.casterChannels.outdoors,
       coverAboveGrid: p.casterChannels.coverAbove ?? null,
@@ -339,6 +339,11 @@ export function createSunShadowBench({ THREE, log }) {
       h: spec.h,
       rect: { minX: spec.x, minY: spec.y, maxX: spec.x + spec.width, maxY: spec.y + spec.height },
       dim,
+      // The SAME per-channel statistics the live game's own sun-shadows report
+      // prints, from the SAME function — so "does the bench get the same
+      // texture the game does" is answered by comparing numbers rather than
+      // two screenshots (`describeLayerChannels`'s own header has the why).
+      channelStats,
     };
   }
 
@@ -945,7 +950,20 @@ export function createSunShadowBench({ THREE, log }) {
           depthRadiusPx,
           layerIsolate: p.isolateKey,
         },
-        stats: { law, holes: holes.count, gate, layerGrid: `${field.w}x${field.h}`, fieldDim: plan.fieldDim },
+        stats: {
+          law,
+          holes: holes.count,
+          gate,
+          layerGrid: `${field.w}x${field.h}`,
+          fieldDim: plan.fieldDim,
+          // ⚠️ THE DIRECT COMPARISON POINT with the live game. The sun-shadows
+          // report prints this same block, from this same function, under
+          // `casterField.channelStats`. If the two disagree, the bench and the
+          // game are being fed DIFFERENT TEXTURES and no amount of comparing
+          // screenshots will explain why their pictures differ; if they agree,
+          // the input is exonerated and the difference is downstream.
+          channelStats: field.channelStats,
+        },
       };
     },
   });

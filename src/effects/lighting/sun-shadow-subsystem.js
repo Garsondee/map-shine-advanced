@@ -140,6 +140,7 @@ import {
   layerSmearBakeSamples,
   LAYER_SMEAR_DEFAULT_TIER,
   LAYER_SMEAR_MAX_TIER,
+  DEPTH_SCALES,
 } from './layer-smear.js';
 import { buildSunShadowDebugMaterial, sunShadowDebugPaints, sunShadowDebugLayers } from './sun-shadow-debug.js';
 import { sampleMaskGridWorld } from '../../scene/index.js';
@@ -306,6 +307,96 @@ export const SUN_SHADOW_TIP_BLUR_MUL = 3;
  *   why that one).
  * @returns {{data: Uint8Array, coveredTexels: number}}
  */
+/** The LOD ceiling the report clamps to — must match `layer-smear-render.js`'s
+ * own `MAX_LOD`, or the ledger would print a level the shader never requests.
+ * Pinned against it by `sun-shadow-blur.test.mjs`. */
+const MAX_REPORTED_LOD = 12;
+
+/**
+ * THE BLUR LEDGER — every mip level this bake will ask the sampler for, in
+ * numbers, without a GPU readback.
+ *
+ * Added 2026-08-02 after a full session of *"the shadow looks blurry"* that
+ * could not be diagnosed from the report, because the report described
+ * RESOLUTIONS (`fieldDim`, `layerGridDimPx`) and COST (`bakeSamples`) but
+ * never the one quantity that decides how soft the picture is: how coarse a
+ * mip each sample reads. The measurement that finally cracked it — that
+ * `skyReachDepthPx = 1300` asks for mip 8 of a 2048-wide texture, which is
+ * EIGHT BY FOUR texels for the whole map — was arithmetic anyone could have
+ * done from day one, and nothing printed it.
+ *
+ * ⚠️ MIRRORS `layer-smear-render.js`'s OWN formulas, and is only honest while
+ * it does. Both sides derive `texelWorldPx` the same way (`max(rectW, rectH) /
+ * layerGridDim`), floor the directional blur at `max(stationSpacing,
+ * texelWorldPx)`, and take `log2(blurPx / texelWorldPx)`. Kept as a pure
+ * exported function so a Node test can pin it against those constants rather
+ * than trusting this comment.
+ *
+ * @param {object} args
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} args.rect
+ * @param {number} args.layerGridDimPx - the layer texture's own width.
+ * @param {number} args.maxThrowPx @param {number} args.steps
+ * @param {number} args.softnessMul @param {number} args.depthRadiusPx
+ * @returns {object} the ledger, all values rounded for a readable report.
+ */
+export function describeBakeBlur({ rect, layerGridDimPx, maxThrowPx, steps, softnessMul, depthRadiusPx }) {
+  const rectW = (rect?.maxX ?? 0) - (rect?.minX ?? 0);
+  const rectH = (rect?.maxY ?? 0) - (rect?.minY ?? 0);
+  const dim = layerGridDimPx > 0 ? layerGridDimPx : 0;
+  if (!(dim > 0) || !(Math.max(rectW, rectH) > 0)) {
+    return { unmeasurable: 'no layer texture uploaded yet' };
+  }
+  const texelWorldPx = Math.max(rectW, rectH) / dim;
+  const n = Math.max(1, Math.floor(steps));
+  const lodOf = (px) => Math.max(0, Math.min(MAX_REPORTED_LOD, Math.log2(Math.max(px / texelWorldPx, 1))));
+  /** Texels across the WHOLE map at a given LOD — the number that makes a
+   * coarse read obviously absurd instead of merely large. */
+  const spanAt = (lod) => Math.max(1, Math.round(dim / 2 ** lod));
+
+  // The DIRECTIONAL read, at the shadow's own tip (u = 1), which is the
+  // blurriest station the walk ever reaches.
+  const tipSpacing = (maxThrowPx * 2) / n;
+  const tipPenumbra = (SUN_SHADOW_BASE_PENUMBRA_PX + maxThrowPx * 0.035 * SUN_SHADOW_TIP_BLUR_MUL) * softnessMul;
+  const tipBlurPx = Math.max(tipPenumbra, Math.max(tipSpacing, texelWorldPx));
+  const tipLod = lodOf(tipBlurPx);
+
+  // The DEPTH gradient's nested reads — the ones that were producing a wash.
+  const depth = [];
+  if (depthRadiusPx > 0) {
+    for (let s = 1; s <= DEPTH_SCALES; s++) {
+      const rs = (depthRadiusPx * s) / DEPTH_SCALES;
+      const lod = lodOf(rs);
+      depth.push({
+        radiusPx: Math.round(rs),
+        lod: +lod.toFixed(2),
+        mapSpanTexels: spanAt(lod),
+        worldPxPerTexel: Math.round(Math.max(rectW, rectH) / spanAt(lod)),
+      });
+    }
+  }
+
+  return {
+    texelWorldPx: +texelWorldPx.toFixed(2),
+    directional: {
+      tipBlurPx: +tipBlurPx.toFixed(1),
+      tipLod: +tipLod.toFixed(2),
+      // Which of the three terms actually won at the tip — naming the binding
+      // constraint is the difference between "it is blurry" and "the station
+      // spacing is what is blurring it".
+      limitedBy:
+        tipPenumbra >= Math.max(tipSpacing, texelWorldPx)
+          ? 'penumbra'
+          : tipSpacing >= texelWorldPx
+            ? 'stationSpacing'
+            : 'texelFloor',
+    },
+    depthGradient: depth.length ? depth : 'off (skyReachDepthPx = 0)',
+    // The single most damning number when it is wrong: how much of the map one
+    // texel of the COARSEST read covers.
+    coarsestReadCoversWorldPx: depth.length ? depth[depth.length - 1].worldPxPerTexel : Math.round(tipBlurPx),
+  };
+}
+
 export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec }) {
   const { w, h } = spec;
   const data = new Uint8Array(w * h * 4);
@@ -755,6 +846,23 @@ export function createSunShadowSubsystem({
       bakeSamples: layerSmearBakeSamples({ fieldDim: activeFieldDim, steps: builtSteps }),
       maxThrowPx: Math.round(resolved.maxThrowPx),
       softnessMul: +(atmosphere.softnessMul * Math.max(0.05, params.softnessBias ?? 1)).toFixed(3),
+      // ⚠️ THE BLUR LEDGER — every mip level this bake actually asks the
+      // sampler for, computed from the SAME formulas the shader uses (see
+      // `describeBakeBlur`). Added 2026-08-02 because "the shadow looks too
+      // blurry" was, for a whole session, un-diagnosable from a report that
+      // printed resolutions and sample counts but never once said HOW COARSE
+      // a read the shader was making. It answers that in numbers, with no GPU
+      // readback, and it is directly comparable against Shader Lab's own
+      // render of the same scene (`feedback_instruments_must_not_lie` —
+      // report the quantity that actually explains the picture).
+      blur: describeBakeBlur({
+        rect: currentRect(),
+        layerGridDimPx,
+        maxThrowPx: resolved.maxThrowPx,
+        steps: builtSteps,
+        softnessMul: atmosphere.softnessMul * Math.max(0.05, params.softnessBias ?? 1),
+        depthRadiusPx: active ? (params.skyReachDepthPx ?? 0) : 0,
+      }),
     };
     return lastSunShadowBake;
   }

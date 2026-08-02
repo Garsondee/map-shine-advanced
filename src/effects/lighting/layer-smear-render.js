@@ -28,19 +28,34 @@ import { SHADOW_LAYER_COUNT, DEPTH_SCALES, LAYER_OVERHEAD } from './layer-smear.
 
 /** Ceiling on a requested mip level — a texture's chain tops out at
  * `log2(dimension)`, and asking past it is undefined on some backends. */
-const MAX_LOD = 12;
+export const MAX_LOD = 12;
 
-/** The receiver gate's own fixed anti-aliasing radius, in TEXELS — see
- * `gate`'s own comment below for the measured problem this fixes. `log2(2)`
- * is a compile-time constant (no uniform, no per-frame division): a mip
- * level of 1 samples roughly a 2×2 texel box, which was enough to turn a
- * measured single-texel staircase back into a visible multi-texel gradient
- * on a real diagonal roofline without materially softening the "reaches full
- * strength within about a texel or two" contact-hardening the sharpening
- * curve below still provides. Tuned once, by eye, against real geometry, the
- * same discipline `SUN_SHADOW_LAYER_STRENGTH`'s own doctrine states — not
- * exposed as a param. */
-const GATE_AA_LOD = Math.log2(4);
+/**
+ * The receiver gate's anti-aliasing mip level, in LOD units. **Currently 0 —
+ * i.e. OFF, deliberately.**
+ *
+ * ⚠️ THIS WAS log2(4) FOR ONE AFTERNOON AND IT WAS A REGRESSION. It was added
+ * to fix a stair-stepped shadow edge on a diagonal roofline, and it did — by
+ * pre-blurring the wall channel over a 4×4 texel box before the sharpening
+ * curve. On the author's real scene that box is **21 world px**, and blurring
+ * the gate does not soften an edge, it MOVES it: the gate ramps up over 21px
+ * of open ground, so the shadow starts weak at the wall and only reaches full
+ * strength well away from it. The author saw exactly that and named it
+ * precisely — *"pulls the shadow away from building edges unrealistically"*.
+ *
+ * That is the SAME bright-strip-hugging-the-wall bug `GATE_SHARPEN_LOW/HIGH`
+ * was created to kill in the first place (2026-07-24), reintroduced from the
+ * other side. Contact hardening outranks edge smoothness: a shadow that is
+ * strongest against its caster is the thing the author has asked for
+ * repeatedly, and a slightly stepped edge on a diagonal is the cheaper defect.
+ *
+ * The staircase's real cause is the layer texture's own resolution (5.2 world
+ * px per texel here), so the honest fix for it is a finer `layerGridDim`, not
+ * a blur that trades one artifact for a worse one. Kept as a named constant
+ * rather than deleted so the trade stays discoverable — set it back and the
+ * halo comes back with it.
+ */
+export const GATE_AA_LOD = 0;
 
 /**
  * Build the layer-smear bake material.
@@ -123,33 +138,16 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, steps = 32 })
     // previous model used, so "indoors takes no sun shadow" behaves identically
     // across the change.
     //
-    // ⚠️ THE INPUT IS PRE-BLURRED, THE RAW READ (`here.r`) IS NOT (2026-08-02,
-    // author live: a stone roofline's shadow edge stair-stepped far coarser
-    // than the art's own crenellation). MEASURED, not guessed: the real
-    // `_Outdoors` art's own anti-aliased edge is a smooth ~3–4 texel ramp —
-    // sampling it raw and feeding a `smoothstep` with a NARROW window
-    // (`GATE_SHARPEN_LOW`..`HIGH`, 0.12..0.35) collapses that whole ramp into
-    // under ONE texel of real transition (a real boundary measured live: byte
-    // values 255,189,106,24,0 across four texels sharpen to 1,1,1,0,0 — three
-    // of the four intermediate values vanish). A single-texel-wide transition
-    // on a DIAGONAL boundary is exactly a staircase at the grid's own
-    // resolution, one step per row.
+    // ⚠️ READ AT `GATE_AA_LOD`, WHICH IS 0 — i.e. SHARP. That constant's own
+    // header has the full story: it was briefly log2(4), to anti-alias a
+    // stair-stepped diagonal roofline, and that blurred the gate over 21 world
+    // px on the author's real scene — which does not soften an edge, it MOVES
+    // it, starting the shadow weak at the wall and reaching full strength only
+    // well away from it. Contact hardening outranks edge smoothness here.
     //
-    // The fix pre-blurs the WALL channel over `GATE_AA_RADIUS_TEXELS` before
-    // sharpening — same "blur, then threshold" edge-antialiasing every
-    // rasterizer does, applied here because a scene-space bake has no screen
-    // derivatives (`fwidth`) to reach for instead. `GATE_SHARPEN_LOW/HIGH`
-    // themselves are UNCHANGED — they still exist to fix the same "brighter
-    // strip hugging the wall" bug they always did, at the SAME real-world
-    // window; only what feeds them is smoother now, which is what turns a
-    // coarse binary staircase back into the ramp's own natural gradient
-    // without giving up "reaches full strength within about a texel or two".
-    //
-    // The walls channel (R) alone is blurred here — `GATE_AA_LOD` is defined
-    // IN TEXELS, not world px: a diagonal boundary's own step size is always
-    // ~1 texel, at every tier's own resolution, so a texel-relative blur is
-    // the geometrically correct one, not a fixed world-px radius that would
-    // over- or under-blur depending on which tier is active.
+    // The explicit `.level()` stays rather than reverting to a plain
+    // `here.r`, so the trade remains one named constant rather than a code
+    // change to rediscover.
     const wallAA = layerTexNode.sample(uv()).level(float(GATE_AA_LOD)).r;
     const gate = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), float(1).sub(wallAA));
 
@@ -229,7 +227,12 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, steps = 32 })
         // channels did (memory: feedback_tsl_select_chain_strands_vars); each
         // `occ[i]` is written exactly once per station regardless of which
         // branch is taken.
-        const coverage = select(r.greaterThan(float(0)), depthCov, cov[i]);
+        // ⚠️ `depthCov.mul(cov[i])`, NOT `depthCov` ALONE — the TSL twin of
+        // `layer-smear.js#layerSmearVisibility`'s own `* sharp`; read THAT for
+        // the measurement (mip 8 of this texture is 8×4 texels for the whole
+        // map, so using the wash as the coverage outright MADE it the
+        // silhouette and detached every sky-reach shadow from its caster).
+        const coverage = select(r.greaterThan(float(0)), depthCov.mul(cov[i]), cov[i]);
         // `t > 1` (past this layer's throw) and `L <= 0` (this layer casts
         // nothing) both need to contribute ZERO. `max(L, 1e-3)` keeps the
         // divide finite and `clamp(0,1)` then pins `t` to 1, where the falloff

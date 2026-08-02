@@ -447,7 +447,26 @@ export function layerSmearVisibility({
       // itself", and the far-field stations still carry the normal dawn/dusk
       // elongation via the same `falloff(d/L)` every other layer uses.
       const r = depthRadiusPx[i] ?? 0;
-      const coverage = r > 0 ? isotropicDepthTerm(sampleLayers, sx, sy, i, r) : clamp01(at?.[i] ?? 0);
+      // ⚠️ THE DEPTH TERM MODULATES THE SILHOUETTE, IT DOES NOT REPLACE IT
+      // (2026-08-02, author live: *"Sky reach and building shadows both appear
+      // to be heavily blurred, so heavily that they detach from buildings."*).
+      //
+      // MEASURED, on the author's own real scene: at `skyReachDepthPx = 1300`
+      // and a 2048-wide layer texture (5.2 world px per texel), the three
+      // nested reads request mip 6.4 / 7.4 / 8.0 — and mip 8 of that texture
+      // is EIGHT BY FOUR TEXELS for the entire 10650×4950 map, one texel per
+      // 1300×1300 world px. Used as the coverage OUTRIGHT, that wash *was* the
+      // shadow's silhouette, so the sky-reach shadow spread ~1300px past any
+      // real edge and stopped resembling the thing casting it.
+      //
+      // Multiplying by the SHARP read restores the silhouette while keeping
+      // the gradient: inside the covered span `sharp` is 1 and the depth term
+      // still varies (darker the further in, which is the whole feature);
+      // outside it `sharp` is 0, so the wash contributes exactly nothing. The
+      // directional cast survives because both factors are sampled at the
+      // STATION, and stations reach into the caster.
+      const sharp = clamp01(at?.[i] ?? 0);
+      const coverage = r > 0 ? isotropicDepthTerm(sampleLayers, sx, sy, i, r) * sharp : sharp;
       const term = coverage * smearFalloff01(d / L, falloffExp);
       if (term > occ[i]) occ[i] = term;
     }

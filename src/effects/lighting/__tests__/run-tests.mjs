@@ -17,6 +17,7 @@ import { run as runLightVisibility } from './light-visibility.test.mjs';
 import { run as runSunOcclusion } from './sun-occlusion.test.mjs';
 import { run as runSunOcclusionRender } from './sun-occlusion-render.test.mjs';
 import { run as runCasterPack } from './caster-pack.test.mjs';
+import { run as runSunShadowDebug } from './sun-shadow-debug.test.mjs';
 import { run as runLayerSmear } from './layer-smear.test.mjs';
 import { run as runLayerSmearRender } from './layer-smear-render.test.mjs';
 
@@ -56,6 +57,7 @@ const suites = [
   ['sun-occlusion', runSunOcclusion],
   ['sun-occlusion-render', runSunOcclusionRender],
   ['caster-pack', runCasterPack],
+  ['sun-shadow-debug', runSunShadowDebug],
   ['layer-smear', runLayerSmear],
   ['layer-smear-render', runLayerSmearRender],
 ];

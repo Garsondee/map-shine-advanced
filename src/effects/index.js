@@ -59,12 +59,7 @@ export { buildSunVisibilityNode } from './lighting/sun-occlusion-render.js';
 export { createSunShadowSubsystem, SUN_SHADOW_QUANTIZE_DEG } from './lighting/sun-shadow-subsystem.js';
 // THE DEBUG VIEW's own vocabulary — boot reads it to drive the derivation
 // includes from the picked view, so "sky-reach only" isolates for real.
-export {
-  SUN_SHADOW_DEBUG_VIEWS,
-  sunShadowDebugInclude,
-  sunShadowDebugPaints,
-  sunShadowDebugView,
-} from './lighting/sun-shadow-debug.js';
+export { SUN_SHADOW_DEBUG_VIEWS, sunShadowDebugPaints, sunShadowDebugView } from './lighting/sun-shadow-debug.js';
 // THE POINT-LIGHT POOL — extraction step 3 of docs/planning/
 // VT-Pan-Viewer-Extraction.md. The mesh pool, its two dedicated scenes, the
 // candle wall-clip cache, and the per-frame reconcile.

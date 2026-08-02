@@ -141,7 +141,7 @@ import {
   LAYER_SMEAR_DEFAULT_TIER,
   LAYER_SMEAR_MAX_TIER,
 } from './layer-smear.js';
-import { buildSunShadowDebugMaterial, sunShadowDebugPaints } from './sun-shadow-debug.js';
+import { buildSunShadowDebugMaterial, sunShadowDebugPaints, sunShadowDebugLayers } from './sun-shadow-debug.js';
 import { sampleMaskGridWorld } from '../../scene/index.js';
 
 /**
@@ -712,7 +712,13 @@ export function createSunShadowSubsystem({
       maxLengthMul: params.dawnDuskLength ?? 0,
     });
     sunShadowBake.setSun(resolved);
-    sunShadowBake.setLayers({ strengths: SUN_SHADOW_LAYER_STRENGTH });
+    // THE DEBUG ISOLATION, applied here rather than in the derivation
+    // (`sun-shadow-debug.js#sunShadowDebugLayers` has the post-mortem on why
+    // the old `include`-based isolation silently stopped isolating). Zeroing a
+    // layer's STRENGTH is exactly what Shader Lab's `layerIsolate` does, so
+    // "sky-reach only" means the identical thing in both tools.
+    const isolate = sunShadowDebugLayers(params.debugView ?? 'off');
+    sunShadowBake.setLayers({ strengths: SUN_SHADOW_LAYER_STRENGTH.map((s, i) => s * (isolate[i] ?? 1)) });
     // THE SKY-REACH GRADIENT — only the "above" layer (index 2) carries real
     // data today (see `packLayerTexelData`'s own note on why index 3 is
     // empty), so only it gets a real radius. Unlike the strengths/falloff

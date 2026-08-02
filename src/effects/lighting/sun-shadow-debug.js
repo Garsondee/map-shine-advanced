@@ -85,24 +85,45 @@ export const SUN_SHADOW_DEBUG_VIEWS = Object.freeze([
     shadow: [1, 0, 0, 0],
     caster: null,
   }),
+  // ⚠️ THESE ISOLATE BY LAYER STRENGTH, NOT BY DERIVATION (rewired 2026-08-02
+  // — they were BROKEN, and the author had been using them to diagnose a real
+  // artifact for hours without knowing).
+  //
+  // They used to carry `include: {building, overhead, skyReach}`, which gates
+  // what `deriveFloorProducts` WRITES. That worked for the retired march
+  // model, whose caster texture packed `coverBuilding`/`coverSkyReach`
+  // directly. The layer-smear packing does not read either one:
+  // `packLayerTexelData` takes WALLS from `1 − outdoors` and SKY-REACH from
+  // `coverAbove`, neither of which any `include` flag touches. So
+  // "building only" and "sky-reach only" removed NOTHING and every isolation
+  // view rendered the same picture as "all" — an instrument answering a
+  // different question than its label (`feedback_instruments_must_not_lie`).
+  //
+  // `layers` multiplies `SUN_SHADOW_LAYER_STRENGTH` at bake time instead —
+  // the same mechanism Shader Lab's own `layerIsolate` uses, so the two tools
+  // now isolate identically and can be compared directly. Index order is the
+  // packing's: [walls, overhead, floor-above, everything-higher].
   Object.freeze({
     id: 'shadow-building',
-    label: 'Shadows — building only',
-    include: { building: true, overhead: false, skyReach: false },
+    label: 'Shadows — building/wall only',
+    layers: [1, 0, 0, 0],
     shadow: [1, 0, 0, 0],
     caster: null,
   }),
   Object.freeze({
     id: 'shadow-overhead',
     label: 'Shadows — overhead only',
-    include: { building: false, overhead: true, skyReach: false },
+    layers: [0, 1, 0, 0],
     shadow: [1, 0, 0, 0],
     caster: null,
   }),
   Object.freeze({
     id: 'shadow-skyreach',
     label: 'Shadows — sky-reach only',
-    include: { building: false, overhead: false, skyReach: true },
+    // B and A together: `packLayerTexelData` merges "the floor directly above"
+    // and "everything higher" into B today (A is the documented empty slot),
+    // so sky-reach is honestly ONE isolation, not two.
+    layers: [0, 0, 1, 1],
     shadow: [1, 0, 0, 0],
     caster: null,
   }),
@@ -144,8 +165,23 @@ export function sunShadowDebugView(id) {
  * @param {string} id
  * @returns {{building: boolean, overhead: boolean, skyReach: boolean}}
  */
-export function sunShadowDebugInclude(id) {
-  return sunShadowDebugView(id).include ?? { building: true, overhead: true, skyReach: true };
+/**
+ * The per-layer STRENGTH multiplier a view implies — `[walls, overhead,
+ * floor-above, higher]`, multiplied into `SUN_SHADOW_LAYER_STRENGTH` when the
+ * field is baked. Absent on most views = everything on.
+ *
+ * This replaced `sunShadowDebugInclude` (2026-08-02), which gated the
+ * DERIVATION and therefore isolated nothing under the layer-smear packing —
+ * see `SUN_SHADOW_DEBUG_VIEWS`'s own comment for the full post-mortem. The
+ * derivation now always produces every channel; isolation is purely a
+ * look-time concern, which is also what lets Shader Lab and the live game
+ * isolate the same way.
+ *
+ * @param {string} id
+ * @returns {number[]} four multipliers, all 1 unless the view narrows.
+ */
+export function sunShadowDebugLayers(id) {
+  return sunShadowDebugView(id).layers ?? [1, 1, 1, 1];
 }
 
 /** True when the view paints over the scene (i.e. anything but `off`). */

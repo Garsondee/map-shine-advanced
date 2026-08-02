@@ -149,7 +149,6 @@ import {
   BLOOM_PRESETS,
   bloomPreset,
   SUN_SHADOWS,
-  sunShadowDebugInclude,
   layerSmearTierPlan,
   SUN_SHADOW_PARAMS,
   describeEffectSettings,
@@ -863,22 +862,21 @@ function install() {
     // own gate), and the subsystem then drops the layer field entirely.
     sunShadowReadout = { enabled: resolved.enabled, params: resolved.params, perfTier: resolved.perfTier };
     const p = resolved.params ?? {};
-    // THE ISOLATION IS REAL, NOT A SHADER MULTIPLY. An isolating debug view
-    // ("sky-reach only") restricts what the DERIVATION writes, so the excluded
-    // producers' channels are genuinely absent from the field rather than
-    // multiplied by zero (`tsl/no-uniform-gates`). One dropdown drives it —
-    // it replaced three bools that could disagree with it and each other
-    // (effects/lighting/sun-shadow-debug.js's own header).
+    // ⚠️ THE DEBUG ISOLATION NO LONGER LIVES HERE (2026-08-02). It used to
+    // restrict what the DERIVATION writes, which was right for the retired
+    // march model — its caster texture packed `coverBuilding`/`coverSkyReach`
+    // directly, so withholding them genuinely removed a producer. The
+    // layer-smear packing reads NEITHER (walls come from `1 − outdoors`,
+    // sky-reach from `coverAbove`), so those flags stopped isolating anything
+    // and every "… only" view rendered the same picture as "all" — which the
+    // author then spent hours diagnosing a real artifact through.
     //
-    // ⚠️ KNOWN STALE for the layer-smear model (2026-08-02): `include.building`
-    // restricted `casterChannels.coverBuilding`, which the layer-smear model
-    // does not read at all (its wall layer comes straight from `1 − outdoors`,
-    // packed in `sun-shadow-subsystem.js#packLayerTexelData`) — so the
-    // "Shadows — building only" / "Data — …" debug views built on it no
-    // longer isolate anything meaningful. Left wired rather than torn out:
-    // it does not crash, and `sun-shadow-debug.js`'s whole vocabulary needs a
-    // pass together, not a partial one here. Tracked, not silent.
-    const isolate = sunShadowDebugInclude(p.debugView ?? 'off');
+    // Isolation is now a LOOK-time multiply on the per-layer strengths
+    // (`sun-shadow-debug.js#sunShadowDebugLayers`, applied in
+    // `sun-shadow-subsystem.js#bakeSunShadowField`), which is also exactly what
+    // Shader Lab's own `layerIsolate` does — so the bench and the live game
+    // isolate identically and their pictures can be compared directly. The
+    // derivation is therefore always asked for EVERY channel below.
     maskAuthority.setCasterHeightSpec({
       distancePixels: readGridDistancePixels().distancePixels,
       // A disabled effect contributes no casters at all — the height field goes
@@ -891,10 +889,12 @@ function install() {
       // (`boot.js#getCasterHeightField`'s own note: "rain will want it"), so
       // it stays fed the CURRENT value rather than a permanently-stale one.
       buildingHeightPx: resolved.enabled ? (p.wallHeightPx ?? 0) : 0,
+      // Every channel, always — a disabled effect still contributes nothing
+      // because `resolved.enabled` gates all three together.
       include: {
-        building: resolved.enabled && isolate.building,
-        overhead: resolved.enabled && isolate.overhead,
-        skyReach: resolved.enabled && isolate.skyReach,
+        building: resolved.enabled,
+        overhead: resolved.enabled,
+        skyReach: resolved.enabled,
       },
       // THE SILHOUETTE RESOLUTION (2026-07-30, author: "shadows are still very
       // low resolution" on the extreme preset) — `fieldDim` alone (the bake's

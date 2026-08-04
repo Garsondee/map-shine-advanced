@@ -43,7 +43,13 @@
  * @module effects/vegetation-render
  */
 
-import { maskKindById, makeLayerKey, compareLayerKeys, SORT_LAYERS } from '../scene/index.js';
+import {
+  maskKindById,
+  makeLayerKey,
+  compareLayerKeys,
+  SORT_LAYERS,
+  resolveElevationFloorIndex,
+} from '../scene/index.js';
 import { VEGETATION_KINDS } from './vegetation.js';
 import { VEG_SHADOW_SMEAR_TAPS } from './vegetation-shadow-subsystem.js';
 
@@ -352,6 +358,112 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
   const span = 1 - 2 * VEG_KIND_SLOT_MARGIN;
   const slot = VEG_KIND_SLOT_MARGIN + fraction * span;
   return { renderOrder: below - 1 + slot, elevation, fellBack: false };
+}
+
+/**
+ * ============================================================================
+ * VEGETATION JOINS THE DEPTH AUTHORITY (STAGE 2, 2026-08-04)
+ * ============================================================================
+ * A Case-2 tree/bush overlay (this module's own header, mode 2) has no `id`,
+ * no `key`, and no membership in `foundry/scene-layers.js`'s collection
+ * functions — it lives ONLY as `state.vegetationOverlays[kindId]` on its
+ * HOST item's own residency-state object (`vt-pan-viewer.js#
+ * ensureVegetationOverlay`). `scene/depth-authority.js#createDepthAuthority`
+ * therefore never sees it as a real member and cannot give it a rank —
+ * `docs/planning/Depth-Buffer.md` §9f names this the next planned consumer,
+ * the moment after point-light occlusion locked the depth authority in as
+ * "the only depth system allowed."
+ *
+ * This builds SYNTHETIC depth-authority items — one per (host, kind) pair
+ * that actually has a discovered overlay — for the CALLER to concatenate
+ * onto the real draw list before a SECOND `depthAuthority.rebuild(...)` call
+ * (`vt-pan-viewer.js#updateResidencyUnguarded`'s own comment at that call
+ * site has the exact reasoning for why it is a SECOND rebuild, not a
+ * replacement of the first: `stampVegetationRenderOrders`'s own "how many
+ * REAL items sort below" scan must never see these synthetic entries, or
+ * every existing overlay's THREE `renderOrder` — a working, already-shipped
+ * mechanism — would shift by however many vegetation items happen to
+ * precede it).
+ *
+ * ⚠️ WHY A REAL, DENSE RANK — NOT `depthAuthority.rankOfElevation`'s QUERY
+ * PATH. `rankOfElevation`/`rankOfKey` deliberately return an EXISTING real
+ * item's own rank (the nearest one at-or-below), never mint a new distinct
+ * integer (`depth-authority.js`'s own header: this is load-bearing for a
+ * QUERY, e.g. "is anything above this light"). Borrowing that path for a
+ * vegetation proxy MESH's own Z would draw it at the exact same Z as
+ * whatever real item it borrowed the rank from — and `buf:scene.depth`'s
+ * writer is `LessDepth` with NO blending, so an exact Z tie means only
+ * whichever mesh happens to render first actually writes; the other's write
+ * silently loses, order-dependent and unstable frame to frame. A real,
+ * distinct array member — sorted by the SAME comparator as everything else,
+ * `tiebreak` assigned by `sortByLayer` itself — has no such tie by
+ * construction, the same reason two ordinary tiles at the same elevation
+ * never collide either.
+ *
+ * ⚠️ `levelId` IS SET TO THE HOST'S OWN RESOLVED FLOOR, NEVER LEFT TO
+ * RE-DERIVE FROM THE SYNTHETIC ELEVATION. A tree's `passiveElevationFraction
+ * = 1` places its synthetic `key.elevation` EXACTLY at its floor's own
+ * `elevationTop` — precisely the case
+ * `[[feedback_half_open_band_excludes_its_own_member]]` names: `resolve
+ * ElevationFloorIndex`'s half-open `[bottom,top)` band would attribute that
+ * exact value to the FLOOR ABOVE, not the floor the canopy actually belongs
+ * to. `resolveSceneDepthFloorIndex`'s own "membership first" branch
+ * (`vt/scene-depth.js`) exists for exactly this — set `levelId` and the
+ * half-open lookup is never even attempted.
+ *
+ * An UNBOUNDED band (no declared `elevationTop`) is a NAMED gap, never a
+ * fabricated number: `vegetationPassiveElevation` already returns `null`
+ * there, and this function skips the pair entirely rather than guessing an
+ * elevation — the SAME posture `stampVegetationRenderOrders` already takes
+ * for its own, separate (THREE paint-order) concern.
+ *
+ * @param {ReadonlyArray<{id: string, key?: object, levelId?: string|null}>} items
+ *   - the REAL, already-collected draw list (`buildItems(floorIndex)`'s own
+ *   return, BEFORE `depthAuthority.rebuild` sorts it — order does not matter
+ *   here, only membership/floor lookup does).
+ * @param {ReadonlyArray<{id: string, elevationBottom?: number|null, elevationTop?: number|null}>} floors
+ *   - `getActiveSceneFloors(...).floors`, resolved by the CALLER (this stays
+ *   pure — no Foundry-global access of its own, matching every other
+ *   function in this module).
+ * @param {Map<string, {tree?: string|null, bush?: string|null}>|null|undefined} urlByItemId
+ *   - `boot.js`'s own vegetation-discovery map (`getVegetationRenderState().
+ *   urlByItemId`) — already scoped to `levelBackground`/`tile` hosts only
+ *   (foregrounds excluded there), so this function does not re-check `item.kind`.
+ * @returns {Array<{id: string, key: object, kind: 'vegetationOverlay', levelId: string|null, vegHostItemId: string, vegKindId: string}>}
+ *   one synthetic item per (host, kind) pair with a discovered URL AND a
+ *   bounded floor band — never a real item, never a guessed elevation.
+ */
+export function buildVegetationDepthItems(items, floors, urlByItemId) {
+  if (!(urlByItemId instanceof Map) || urlByItemId.size === 0) return [];
+  const bandById = new Map();
+  for (const f of floors ?? []) {
+    bandById.set(f.id, { bottom: f.elevationBottom ?? -Infinity, top: f.elevationTop ?? Infinity });
+  }
+  const out = [];
+  for (const item of items ?? []) {
+    const urls = urlByItemId.get(item?.id);
+    if (!urls) continue;
+    // Level art names its own floor; a tile does not — mirrors
+    // `stampVegetationRenderOrders`'s own identical resolution, verbatim, so
+    // the two consumers can never attribute one host to two different floors.
+    const floorId = item.levelId || resolveElevationFloorIndex(floors, item.key?.elevation ?? 0)?.floor?.id || '';
+    const band = bandById.get(floorId) ?? null;
+    for (const kind of VEGETATION_KINDS) {
+      const url = urls[kind.id];
+      if (!url) continue;
+      const elevation = vegetationPassiveElevation(kind, band);
+      if (elevation === null) continue; // unbounded band - a named gap, never a guess
+      out.push({
+        id: `veg:${item.id}:${kind.id}`,
+        key: makeLayerKey({ elevation, sortLayer: SORT_LAYERS.SCENE_EFFECTS, sort: 0, zIndex: 0 }),
+        kind: 'vegetationOverlay',
+        levelId: floorId || null,
+        vegHostItemId: item.id,
+        vegKindId: kind.id,
+      });
+    }
+  }
+  return out;
 }
 
 /**

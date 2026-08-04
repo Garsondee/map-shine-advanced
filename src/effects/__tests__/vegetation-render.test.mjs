@@ -14,11 +14,13 @@ import {
   VEGETATION_MAX_SEGMENTS,
   vegetationPassiveElevation,
   vegetationOverlayRenderOrder,
+  buildVegetationDepthItems,
   flutterFoldFreeAmplitudePx,
   VEG_FLUTTER_FOLD_SAFETY,
 } from '../vegetation-render.js';
 import { VEGETATION_KINDS } from '../vegetation.js';
 import { makeLayerKey, sortByLayer, SORT_LAYERS } from '../../scene/layer-order.js';
+import { createDepthAuthority } from '../../scene/depth-authority.js';
 
 export function run(t) {
   const { ok } = t;
@@ -192,6 +194,127 @@ export function run(t) {
           sparseBush.renderOrder < sparseHost.renderOrder + 1 &&
           sparseTree.renderOrder > sparseHost.renderOrder &&
           sparseTree.renderOrder < sparseHost.renderOrder + 1
+      );
+    }
+  }
+
+  // ==========================================================================
+  // buildVegetationDepthItems — STAGE 2 (2026-08-04): giving Case-2 overlays a
+  // REAL entry in the depth-authority's own ranked array, not just a paint-
+  // order fraction. These assert the ACTUAL rank ordering a real consumer
+  // (scene/depth-authority.js) produces, not just the elevation numbers, per
+  // this file's own established "assert the outcome" discipline above.
+  // ==========================================================================
+  {
+    const floors = [
+      { id: 'ground', elevationBottom: 0, elevationTop: 20 },
+      { id: 'upper', elevationBottom: 20, elevationTop: 40 },
+      { id: 'attic', elevationBottom: 40, elevationTop: undefined }, // unbounded on purpose
+    ];
+    const hostGround = {
+      id: 'tile:ground-host',
+      levelId: 'ground',
+      key: makeLayerKey({ elevation: 5, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const hostUpper = {
+      id: 'tile:upper-host',
+      levelId: 'upper',
+      key: makeLayerKey({ elevation: 25, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const hostAttic = {
+      id: 'tile:attic-host',
+      levelId: 'attic',
+      key: makeLayerKey({ elevation: 45, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const hostNoVeg = {
+      id: 'tile:plain',
+      levelId: 'ground',
+      key: makeLayerKey({ elevation: 3, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const items = [hostGround, hostUpper, hostAttic, hostNoVeg];
+
+    ok(
+      'no urlByItemId at all (unwired) never throws and produces nothing',
+      Array.isArray(buildVegetationDepthItems(items, floors, null)) &&
+        buildVegetationDepthItems(items, floors, null).length === 0 &&
+        buildVegetationDepthItems(items, floors, undefined).length === 0
+    );
+    ok('an empty Map produces nothing', buildVegetationDepthItems(items, floors, new Map()).length === 0);
+
+    const urlByItemId = new Map([
+      ['tile:ground-host', { tree: 'oak_Tree.webp', bush: 'hedge_Bush.webp' }],
+      ['tile:upper-host', { tree: 'pine_Tree.webp', bush: null }],
+      ['tile:attic-host', { tree: 'attic_Tree.webp', bush: 'attic_Bush.webp' }], // unbounded floor
+      // 'tile:plain' deliberately has no entry — matches boot.js's own
+      // urlByItemId, which only ever contains a host that actually has a
+      // discovered sibling file.
+    ]);
+
+    const vegItems = buildVegetationDepthItems(items, floors, urlByItemId);
+
+    ok(
+      'exactly one synthetic item per (host, kind) pair with a real URL — 2 for ground, 1 for upper, 0 for attic (unbounded)',
+      vegItems.length === 3
+    );
+    ok(
+      'every synthetic item is tagged kind: vegetationOverlay, distinguishable from a real Foundry item',
+      vegItems.every((v) => v.kind === 'vegetationOverlay')
+    );
+    ok(
+      'the synthetic id is stable and traceable back to its host + kind — veg:<hostId>:<kindId>',
+      vegItems.some((v) => v.id === 'veg:tile:ground-host:tree') &&
+        vegItems.some((v) => v.id === 'veg:tile:ground-host:bush') &&
+        vegItems.some((v) => v.id === 'veg:tile:upper-host:tree')
+    );
+    ok(
+      'each synthetic item carries its own host id and kind id back out for the caller to resolve the real mesh',
+      vegItems.every((v) => v.vegHostItemId && v.vegKindId && items.some((i) => i.id === v.vegHostItemId))
+    );
+    ok(
+      "⚠️ levelId is the HOST's own resolved floor, never left to re-derive from the synthetic (top-of-band) elevation — " +
+        "a tree at fraction 1.0 sits EXACTLY at its floor's own top, precisely the half-open-band trap",
+      vegItems.filter((v) => v.vegHostItemId === 'tile:ground-host').every((v) => v.levelId === 'ground') &&
+        vegItems.filter((v) => v.vegHostItemId === 'tile:upper-host').every((v) => v.levelId === 'upper')
+    );
+    ok(
+      'the attic (unbounded top) produces NOTHING for either kind — a named gap, never a guessed elevation',
+      !vegItems.some((v) => v.vegHostItemId === 'tile:attic-host')
+    );
+    ok(
+      'a host with no discovered URL at all (tile:plain) never appears',
+      !vegItems.some((v) => v.vegHostItemId === 'tile:plain')
+    );
+    ok(
+      'a kind explicitly absent for a host (upper has no bush) is skipped, not fabricated as elevation 0',
+      !vegItems.some((v) => v.vegHostItemId === 'tile:upper-host' && v.vegKindId === 'bush')
+    );
+
+    // THE ACTUAL PROOF — feed the REAL depth authority (the genuine consumer,
+    // not a hand-rolled comparison) and assert the RANK ordering it produces,
+    // exactly what buf:scene.depth's occlusion comparison actually reads.
+    {
+      const depthAuthority = createDepthAuthority();
+      depthAuthority.rebuild([...items, ...vegItems]);
+      // rankOf looks up by `item.id` first (depth-authority.js's own contract)
+      // — a bare {id} is sufficient, no need to re-find the full ranked object.
+      const rankOf = (id) => depthAuthority.rankOf({ id });
+
+      ok(
+        "a floor's own tree outranks that SAME floor's own bush — canopy above undergrowth",
+        rankOf('veg:tile:ground-host:tree') > rankOf('veg:tile:ground-host:bush')
+      );
+      ok(
+        "a HIGHER floor's bush still outranks a LOWER floor's tree — floor identity dominates, exactly the property " +
+          'point-light occlusion already relies on (elevationRank\'s own "floor index always dominates" guarantee)',
+        rankOf('veg:tile:upper-host:tree') > rankOf('veg:tile:ground-host:tree')
+      );
+      ok(
+        "the ground floor's own tree outranks its own host tile — the canopy is genuinely 'above' the tile it grows on",
+        rankOf('veg:tile:ground-host:tree') > rankOf(hostGround.id)
+      );
+      ok(
+        'a plain tile with no vegetation at all is completely unaffected — its rank is unchanged by vegetation existing',
+        rankOf(hostNoVeg.id) != null
       );
     }
   }

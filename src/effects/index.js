@@ -332,6 +332,7 @@ export {
   VEGETATION_DEFAULT_TIER,
   vegetationPassiveElevation,
   vegetationOverlayRenderOrder,
+  buildVegetationDepthItems,
   flutterFoldFreeAmplitudePx,
   VEG_FLUTTER_FOLD_SAFETY,
 } from './vegetation-render.js';

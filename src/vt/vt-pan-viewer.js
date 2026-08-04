@@ -207,6 +207,7 @@ import {
   VEGETATION_KINDS,
   detectSelfVegetationKind,
   vegetationOverlayRenderOrder,
+  buildVegetationDepthItems,
   VEG_FLUTTER_FOLD_SAFETY,
   vegetationMeshSegments,
   buildTessellatedQuadGeometry,
@@ -8683,14 +8684,15 @@ export async function startVtPanViewer({
      * `feedback_mode_forks_silently_drop_features` is the standing warning
      * against hoping to have found all of them).
      *
-     * Only items with a `state.wholeImage.tiles[]` entry participate — this
-     * is EXACTLY the set `depthAuthority.rebuild(items)` already ranks
-     * (Level backgrounds/foregrounds, tiles, tokens all funnel through
-     * `ensureWholeImageMeshes`, confirmed by reading that function's own
-     * body, not assumed). Vegetation Case 2 overlays (a tree/bush drawn ON a
-     * host tile, `state.vegetationOverlays`) are a NAMED gap, not a silent
-     * one: they are not part of `items`/`depthAuthority`'s own ranking today,
-     * and the design doc's own layer tables don't ask for them in v1 either.
+     * Only items with a `state.wholeImage.tiles[]` entry OR a synthetic
+     * `kind: 'vegetationOverlay'` entry participate — the former is EXACTLY
+     * the set `depthAuthority.rebuild(items)` already ranks for real Foundry
+     * documents (Level backgrounds/foregrounds, tiles, tokens all funnel
+     * through `ensureWholeImageMeshes`, confirmed by reading that function's
+     * own body, not assumed); the latter is `buildVegetationDepthItems`'s
+     * own synthetic entries (STAGE 2, 2026-08-04 — a Case-2 tree/bush overlay
+     * has no `id`/document of its own, so it cannot appear in `items` any
+     * other way — see that function's own header in `vegetation-render.js`).
      *
      * `t.mesh?.visible` is the SAME flag `refreshWholeImageItem` just set for
      * the colour pass a few lines up in `updateResidencyUnguarded` — a tile
@@ -8712,6 +8714,43 @@ export async function startVtPanViewer({
       const sceneDoc = globalThis.canvas?.scene ?? null;
       const viewedFloorIndex = view?.floorIndex ?? 0;
       for (const item of items) {
+        // VEGETATION CASE-2 OVERLAY (STAGE 2, 2026-08-04) — a synthetic item
+        // (`buildVegetationDepthItems`) with no `itemStates` entry of its
+        // own; the real mesh/geometry/texture live on its HOST's own
+        // `state.vegetationOverlays[kindId]`, built by `ensureVegetationOverlay`
+        // earlier in THIS SAME residency pass (see `updateResidencyUnguarded`'s
+        // own call order — the overlay is refreshed before this function runs).
+        // A SEPARATE branch, not a fold into the tile loop below: there is
+        // exactly ONE mesh per (host, kind), never an array of tiles.
+        if (item.kind === 'vegetationOverlay') {
+          const hostState = itemStates.get(item.vegHostItemId);
+          const overlay = hostState?.vegetationOverlays?.[item.vegKindId];
+          if (overlay?.status !== 'ready' || !overlay.mesh?.visible || !overlay.geometry) continue;
+          const rank = depthAuthority.rankOf(item);
+          if (rank == null) continue;
+          const z = rankToDepthZ(rank, maxRank);
+          const floorIndex = resolveSceneDepthFloorIndex({
+            item,
+            sceneDoc,
+            viewedFloorIndex,
+            logError: (msg, err) => log.error(msg, err),
+          });
+          // No flags: a canopy does not (yet) carry `restrictsLight` — a
+          // deliberately scoped, named deferral (this round is about
+          // vegetation's OWN rank, not vegetation-as-occluder), not an
+          // oversight. See `buildVegetationDepthItems`'s own header.
+          const material = buildSceneDepthWriterMaterial({
+            THREE,
+            tex: overlay.tex,
+            alphaThreshold: 0.75,
+            floorIndex,
+            flags: 0,
+          });
+          const mesh = buildSceneDepthProxyMesh({ THREE, geometry: overlay.geometry, material, z });
+          depthScene.add(mesh);
+          depthProxyEntries.push({ mesh, material });
+          continue;
+        }
         const state = itemStates.get(item.id);
         const tiles = state?.wholeImage?.tiles;
         if (!tiles?.length) continue;
@@ -8922,7 +8961,33 @@ export async function startVtPanViewer({
       // exactly the moment buf:scene.depth's own draw list must be re-derived
       // from (see rebuildSceneDepthProxies's own header for why wholesale,
       // not incremental).
-      rebuildSceneDepthProxies(items);
+      //
+      // VEGETATION JOINS THE DEPTH AUTHORITY (STAGE 2, 2026-08-04) — a SECOND
+      // `depthAuthority.rebuild(...)` call, deliberately not a mutation of the
+      // `items` reference `stampVegetationRenderOrders` and the per-item loop
+      // above already used. Those two consumers' own "how many REAL items
+      // sort below" logic (`vegetation-render.js#buildVegetationDepthItems`'s
+      // own header has the full reasoning) must never see these synthetic
+      // entries, or every overlay's already-shipped, working THREE
+      // `renderOrder` would shift by however many vegetation items happen to
+      // precede it — a regression in a system this round has no reason to
+      // touch. `state.vegetationOverlays` is fresh for THIS pass (the loop
+      // just above refreshed it), so this is the first point synthesis CAN
+      // run, and the last point before `rebuildSceneDepthProxies` needs the
+      // final table. `getActiveSceneFloors`, resolved here rather than
+      // threaded from `stampVegetationRenderOrders` (which does not expose
+      // its own copy) — the SAME established multi-reader pattern that
+      // function's own header already uses for the identical lookup.
+      let vegFloors = [];
+      try {
+        const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+        if (floorsResult.ok) vegFloors = floorsResult.floors;
+      } catch (err) {
+        log.error('vegetation depth-item lookup (getActiveSceneFloors) failed — vegetation stays unranked:', err);
+      }
+      const vegDepthItems = buildVegetationDepthItems(items, vegFloors, getVegetationRenderState().urlByItemId);
+      const itemsWithVegetation = vegDepthItems.length ? depthAuthority.rebuild([...items, ...vegDepthItems]) : items;
+      rebuildSceneDepthProxies(itemsWithVegetation);
 
       lastItems = items;
     }

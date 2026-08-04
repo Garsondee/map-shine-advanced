@@ -91,11 +91,7 @@
  */
 
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
-import {
-  inverseSquareFalloff,
-  buildHeightGateNode,
-  LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
-} from './point-light-illumination.js';
+import { inverseSquareFalloff, buildDepthHeightGateNode } from './point-light-illumination.js';
 import { buildApertureGoboTerm } from './aperture-gobo-render.js';
 import { createWindHandle } from '../../world/index.js';
 
@@ -197,15 +193,24 @@ export function computeColorationAlpha(alpha01, technique) {
  *   carried that block verbatim. Omit → Tier-0 organic wind only.
  * @param {number} [args.windResponse] - see point-light-illumination.js's
  *   own identical param — the SAME value both channels should receive.
+ * @param {*} [args.depthTexNode] - see point-light-illumination.js's own
+ *   identical param (`buf:scene.depth`'s DEPTH attachment) — the height/
+ *   elevation gate's primary input, STAGE 2 (2026-08-04). Omitted → that gate
+ *   compiles out entirely, byte-identical to before it existed.
+ * @param {*} [args.depthFlagsTexNode] - see point-light-illumination.js's own
+ *   identical param (`buf:scene.depth`'s COLOUR attachment) — the gate's
+ *   Tile-"Restrict Lighting" hard block. Omitted → that ONE block compiles
+ *   out; the rank comparison alone still applies.
  * @returns {{material: *, uAttenuationEased: *, uColorationAlpha: *,
- *   uLightColor: *, uShadows: *, uSpeedRaw: (*|null), uReverseSign: (*|null),
- *   uSeed: (*|null), uIntensityRaw: (*|null), uWindCenter: (*|null),
- *   uWindExposure: (*|null), uWindResponse: (*|null)}}
+ *   uLightColor: *, uShadows: *, uLightExpectedDepth: *, uSpeedRaw: (*|null),
+ *   uReverseSign: (*|null), uSeed: (*|null), uIntensityRaw: (*|null),
+ *   uWindCenter: (*|null), uWindExposure: (*|null), uWindResponse: (*|null)}}
  */
 export function buildPointLightColorationMaterial({
   THREE,
   albedoTexture,
-  attrTexNode,
+  depthTexNode,
+  depthFlagsTexNode,
   animation,
   uGlobalTimeMs,
   uRatio,
@@ -286,20 +291,29 @@ export function buildPointLightColorationMaterial({
   // "no contribution" is per-blend, and for MAX it is a genuine zero in every
   // channel that is read downstream).
   //
-  // ⚠️ `screenUV`, never the bare node — `buf:scene.attr` is a SCREEN-space
+  // ⚠️ `screenUV`, never the bare node — `buf:scene.depth` is a SCREEN-space
   // buffer and this is a WORLD-space fan mesh with no `uv` attribute at all.
   // This file already samples its albedo the same way, and calls it "this
   // project's own already-proven technique" (see `mapColor` below). Passing
-  // `attrTexNode` unsampled is the round-1-to-3 bug verbatim
+  // `depthTexNode` unsampled is the round-1-to-3 bug verbatim
   // (`feedback_shared_texture_node_carries_the_wrong_uv`).
   //
-  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no attr
-  // texture supplied this material is byte-identical to what it was before the
-  // gate existed.
-  const uLightElevationRank = uniform(float(LIGHT_ELEVATION_UNCONFIGURED_SENTINEL));
-  if (attrTexNode) {
+  // STAGE 2 (2026-08-04) — see point-light-illumination.js's own "STAGE 2 —
+  // THE DEPTH-AUTHORITY HEIGHT GATE" section for the full reasoning. No
+  // "unconfigured" sentinel: `point-light-pool.js`'s per-frame refresh
+  // overwrites this for every light, touched or not.
+  //
+  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
+  // depth texture supplied this material is byte-identical to what it was
+  // before the gate existed.
+  const uLightExpectedDepth = uniform(float(0));
+  if (depthTexNode) {
     falloff = falloff.mul(
-      buildHeightGateNode(THREE.TSL, { attrHere: attrTexNode.sample(screenUV), uLightElevationRank })
+      buildDepthHeightGateNode(THREE.TSL, {
+        depthHere: depthTexNode.sample(screenUV),
+        flagsHere: depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null,
+        uLightExpectedDepth,
+      })
     );
   }
 
@@ -465,8 +479,9 @@ export function buildPointLightColorationMaterial({
     uColorationAlpha,
     // The height gate's ONE per-light input — the SAME uniform name the
     // illumination twin exposes, so `point-light-pool.js` can push the one
-    // resolved rank into both materials without knowing which is which.
-    uLightElevationRank,
+    // resolved expected-depth into both materials without knowing which is
+    // which.
+    uLightExpectedDepth,
     uLightColor,
     uShadows,
     uSpeedRaw,

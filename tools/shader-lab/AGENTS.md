@@ -204,6 +204,30 @@ Two traps this bench fell into **in itself**, both worth copying the fix for:
   passed only because they also sat on the centre line. The footprint is now deliberately
   asymmetric in Y (250..650 of 0..1000) and the probe has two distinct predicted values.
 
+**Scenario `real-map-reproduces-the-live-bug` (2026-08-04, stage 0 of `docs/planning/Depth-
+Buffer.md`) is a SECOND, separate rig inside this same file** β€” the real tower-bridge map (three
+real Level backgrounds + two real `_Overhead` foregrounds), through the REAL `collectLevelTextures`
++ `sortByLayer` + the same real encoder/gate every other scenario here uses. It has its OWN camera,
+render targets, and orientation calibration (`realMap`/`realOrientation`, `ensureRealMapAssets`) β€”
+never reuse the synthetic bench's `attrRt`/`illumRt`/`camera`/`orientation`, they are sized for a
+1000Γ—1000 toy world, not a 10650Γ—4950 real one.
+
+⚠️ **This scenario is SUPPOSED to fail.** It exists to prove the live bug in an automated rig
+before touching any production code β€” an unconfigured light under the Roof floor's own ordinary
+background is occluded by NEITHER the sentinel-blocked fine gate NOR the overhead bit (which only
+fires for FOREGROUND content). If a future session sees this scenario suddenly reporting `ok:true`,
+that means the depth-buffer redesign landed and the bug is fixed β€” celebrate, then update this
+scenario's own header comment (it says "MUST FAIL, TODAY" for a reason) rather than being alarmed.
+
+Its four world-space test points are FOUND by scanning the REAL decoded art alpha
+(`findRealArtRegion`), never guessed β€” this project's own art content was unknown going in, so a
+hardcoded pixel coordinate would have been exactly the kind of invented producer-shape this lab
+exists to avoid. One control (`TOP_FLOOR_CONTROL`) needs no scan to succeed at all: nothing exists
+above the topmost floor in a 3-floor map, by construction, so it is the one check guaranteed to run
+even if the real art turns out to have zero genuine alpha holes anywhere (plausible β€” a Level
+background is usually painted edge-to-edge; `_Outdoors` masks, not alpha, carry this project's real
+indoor/outdoor signal).
+
 ## 11. Known-good smoke test
 
 ```js

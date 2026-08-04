@@ -214,6 +214,22 @@ export const ZONES = Object.freeze(
       false,
       'renderDoorGraphicsInto'
     ),
+    // buf:scene.depth (docs/planning/Depth-Buffer.md) — its own real scene,
+    // its own camera, one extra renderer.render() call every frame. §11's
+    // OWN named risk ("the all-floors draw list costs draws the colour pass
+    // does not pay… measure it, don't predict it") is exactly what this zone
+    // exists to answer, not assume.
+    z(
+      'geometry.depthDraw',
+      'Depth authority draw',
+      'geometry',
+      'geometry.world',
+      null,
+      'gpu',
+      'steady',
+      false,
+      'runSceneDepthPass'
+    ),
 
     // ---- light.accumulate: ten CPU syncs and seven draws in ONE plan pass -----
     // This is the whole reason pass-level timing alone is not enough.

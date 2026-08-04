@@ -89,3 +89,9 @@ export {
   PAINT_EMBED_BYTE_BUDGET,
   PAINT_GRID_MAX_DIM,
 } from './paint-mask.js';
+
+// THE DEPTH AUTHORITY (scene/depth-authority.js's header is the map,
+// docs/planning/Depth-Buffer.md the design doc) — stage 1 of the redesign
+// replacing vt/scene-attr.js's light-elevation gate. A rank is exactly
+// sortByLayer's existing ordinal, made queryable.
+export { createDepthAuthority, BELOW_EVERYTHING } from './depth-authority.js';

@@ -113,6 +113,7 @@ import {
   soakZoomStep,
   refreshVtPanViewerItems,
   runOrientationSelfTest,
+  runSceneDepthSelfTest,
   getParticleReadback,
   getSourceBitmap,
   readPageBitmapPixels,
@@ -615,6 +616,21 @@ function install() {
     report: 'orientation-self-test',
     generatedAt: new Date().toISOString(),
     ...(await runOrientationSelfTest()),
+  }));
+
+  // SCENE-DEPTH SELF-TEST (docs/planning/Depth-Buffer.md) — the same "real
+  // pixels, real chain" discipline as the orientation self-test above,
+  // aimed at vt/scene-depth.js instead: allocates a real depthTexture-
+  // backed target through ThreeAllocator, writes three known ranks through
+  // the real depth-writer material, and queries it back through the real
+  // formula a future light's own occlusion gate will use — with no drawn
+  // geometry of its own to sample a reference point from. This is what
+  // makes vt/scene-depth.js a genuinely reachable, genuinely exercised
+  // module rather than a file nothing calls.
+  MapShine.debug.registerAction('scene-depth-self-test', 'Scene-depth self-test', async () => ({
+    report: 'scene-depth-self-test',
+    generatedAt: new Date().toISOString(),
+    ...(await runSceneDepthSelfTest()),
   }));
 
   // (The COMPUTE SPIKE action and `diag/compute-spike.js` were RETIRED

@@ -272,6 +272,15 @@ export function maxRgb(rgb, floor) {
  *   OWN floor index / 255. Omitted → the sun-shadow floor gate below compiles
  *   out entirely (JS-time branch, `tsl/no-uniform-gates`) and this pass is
  *   byte-identical to before the gate existed.
+ * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment
+ *   (`vt/scene-depth.js`, screen-space, device px) — forwarded UNSAMPLED as
+ *   `depthTexNode` below, purely a pass-through hub for point lights' own
+ *   height/elevation gate (STAGE 2, 2026-08-04); this pass has no use for it
+ *   itself. Omitted → `depthTexNode` is `null` and every consumer's own gate
+ *   compiles out.
+ * @param {*} [args.depthFlagsTexture] - `buf:scene.depth`'s COLOUR attachment
+ *   (same target's B channel = flags byte) — the sibling pass-through,
+ *   forwarded as `depthFlagsTexNode`.
  * @param {Array<{texture: *}>} [args.sunShadowFields] - `sunShadows.fields`
  *   (`sun-shadow-subsystem.js` §5) — ONE baked field per resident floor slot,
  *   fixed-length, built once at the subsystem's own construction. Each slot
@@ -284,6 +293,7 @@ export function maxRgb(rgb, floor) {
  * @returns {{
  *   illumMaterial: *, compositeMaterial: *,
  *   uBackgroundSrgb: *, albedoTexNode: *, illumTexNode: *, colorationTexNode: *,
+ *   depthTexNode: (*|null), depthFlagsTexNode: (*|null),
  *   setAmbient: (bgSrgb: number[]) => void,
  *   setSky: (multiplierRgb: number[]) => void,
  *   setViewRect: (rect: object) => void,
@@ -299,6 +309,8 @@ export function buildEnvironmentalLightMaterials({
   outdoorsTexture,
   sunShadowFields,
   attrTexture,
+  depthTexture,
+  depthFlagsTexture,
 }) {
   const { uniform, texture, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
@@ -406,6 +418,14 @@ export function buildEnvironmentalLightMaterials({
   // (`feedback_tsl_select_chain_strands_vars` — the specular effect lost 12 of
   // 20 debug channels to exactly that mistake).
   const attrTexNode = attrTexture ? texture(attrTexture) : null;
+
+  // THE HEIGHT/ELEVATION GATE'S OWN HUB (STAGE 2, 2026-08-04) — a pure
+  // pass-through, same "one owner, one update" discipline as `attrTexNode`
+  // just above: this pass never reads either of these itself, it only holds
+  // them so every point light's own material can share ONE `texture(...)`
+  // node instead of building a second, independently-typed one.
+  const depthTexNode = depthTexture ? texture(depthTexture) : null;
+  const depthFlagsTexNode = depthFlagsTexture ? texture(depthFlagsTexture) : null;
 
   // --- illum pass: ambient fill, tinted by the sky where it is open --------
   const uBackgroundSrgb = uniform(vec3(0.93, 0.93, 0.93));
@@ -556,6 +576,15 @@ export function buildEnvironmentalLightMaterials({
      * own doc for why a second `texture(attrTexture)` node is not built there
      * instead. */
     attrTexNode,
+    /** `buf:scene.depth`'s DEPTH attachment, UNSAMPLED — every point light's
+     * own height/elevation gate shares this ONE node (STAGE 2, 2026-08-04).
+     * `null` when no `depthTexture` was supplied, same "compiles out" posture
+     * as `attrTexNode`. */
+    depthTexNode,
+    /** `buf:scene.depth`'s COLOUR attachment (B = flags byte), UNSAMPLED —
+     * the gate's Tile-"Restrict Lighting" hard-block input, `depthTexNode`'s
+     * sibling. */
+    depthFlagsTexNode,
     /** True when at least one shadow field was supplied and the sun-occlusion
      * term is actually compiled into the ambient fill — reported by the
      * diagnostics so "there are no cast shadows" is answerable without

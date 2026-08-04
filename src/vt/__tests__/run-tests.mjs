@@ -18,6 +18,7 @@ import { run as runSceneAttr } from './scene-attr.test.mjs';
 import { run as runMaskImage } from './mask-image.test.mjs';
 import { run as runPackedTrioAlpha } from './packed-trio-alpha.test.mjs';
 import { run as runVtPanViewerDiagnostics } from './vt-pan-viewer-diagnostics.test.mjs';
+import { run as runSceneDepth } from './scene-depth.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -64,6 +65,7 @@ const suites = [
   ['mask-image', runMaskImage],
   ['packed-trio-alpha', runPackedTrioAlpha],
   ['vt-pan-viewer-diagnostics', runVtPanViewerDiagnostics],
+  ['scene-depth', runSceneDepth],
 ];
 
 for (const [name, fn] of suites) {

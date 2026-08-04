@@ -57,6 +57,7 @@ export {
   stopVtPanViewerLiveMarkers,
   refreshVtPanViewerItems,
   runOrientationSelfTest,
+  runSceneDepthSelfTest,
   getParticleReadback,
   runZoomThrashTest,
   soakPanStep,

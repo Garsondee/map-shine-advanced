@@ -23,12 +23,21 @@ export function makeTHREE() {
       this.y = y;
     }
   };
+  T.DepthTexture = class {
+    constructor(w, h, type) {
+      this.width = w;
+      this.height = h;
+      this.type = type;
+      this.isDepthTexture = true;
+    }
+  };
   T.WebGLRenderTarget = class {
     constructor(w, h, opts = {}) {
       this.width = w;
       this.height = h;
       this.opts = opts;
       this.name = '';
+      this.depthTexture = opts.depthTexture ?? null;
       const count = opts.count || 1;
       const mk = (i) => ({
         minFilter: opts.minFilter,
@@ -73,6 +82,28 @@ export function run(t) {
     ok('single: default u8 rgba', d.options.type === 'U8' && d.options.format === 'RGBA');
     ok('single: no count key', d.options.count === undefined);
     ok('single: no depth', d.options.depthBuffer === false);
+    ok('single: no depth texture wanted by default', d.wantsDepthTexture === false);
+  }
+
+  // describe(): `depthTexture` is a DIFFERENT field from `depth`, and
+  // `depthTextureType` is a DIFFERENT field from the colour attachment's own
+  // `type` — docs/planning/Depth-Buffer.md §11's named gap, closed here.
+  {
+    const T = makeTHREE();
+    const d = ThreeAllocator.describe(T, {
+      resolvedW: 512,
+      resolvedH: 512,
+      type: T.UnsignedByteType, // the COLOUR attachment's type
+      depthTexture: true,
+      depthTextureType: T.FloatType, // a DIFFERENT, independent type
+    });
+    ok('depthTexture: requested', d.wantsDepthTexture === true);
+    ok('depthTexture: its own type field, not the colour attachment´s', d.depthTextureType === 'F32');
+    ok('depthTexture: colour attachment´s own type is untouched', d.options.type === 'U8');
+    // Omitted entirely -> false, never a truthy default that would silently
+    // start allocating a depth texture for every existing screen target.
+    const dOff = ThreeAllocator.describe(T, { resolvedW: 10, resolvedH: 10 });
+    ok('depthTexture: opt-in only, never on by accident', dOff.wantsDepthTexture === false);
   }
 
   // describe(): the attribute-buffer MRT shape.
@@ -109,6 +140,38 @@ export function run(t) {
     ok('create: color stays linear', rt.textures[0].minFilter === 'LINEAR');
     ok('create: attr nearest', rt.textures[1].minFilter === 'NEAREST');
     ok('create: name tagged', rt.name === 'v3:attr' && rt.textures[1].name === 'v3:attr:1');
+    ok('create: no depth texture unless requested', rt.depthTexture === null);
+  }
+
+  // create(): a REAL, samplable depth texture, wired into the render
+  // target's own `depthTexture` slot — the mechanism `bench-scene-depth.js`
+  // proved in the lab (scenario 5) before this landed. Built HERE, never at a
+  // call site (`gpu/allocator-only`, tools/verify-structure.mjs).
+  {
+    const T = makeTHREE();
+    const alloc = new ThreeAllocator({ THREE: T });
+    const rt = alloc.create('scene.depth', {
+      resolvedW: 256,
+      resolvedH: 128,
+      depthTexture: true,
+      depthTextureType: T.FloatType,
+    });
+    ok('depthTexture: a real DepthTexture instance is attached', rt.depthTexture instanceof T.DepthTexture);
+    ok(
+      'depthTexture: sized to match the colour attachment',
+      rt.depthTexture.width === 256 && rt.depthTexture.height === 128
+    );
+    ok('depthTexture: the requested type, not a hard-coded one', rt.depthTexture.type === 'F32');
+    ok('depthTexture: depthBuffer is forced on alongside it', rt.opts.depthBuffer === true);
+
+    // Omitted `depthTextureType` -> FloatType (depth32float), the format
+    // the design doc's own §4 specifies, not an implicit narrower default.
+    const rtDefaultType = alloc.create('scene.depth2', { resolvedW: 8, resolvedH: 8, depthTexture: true });
+    ok('depthTexture: default type is FloatType when omitted', rtDefaultType.depthTexture.type === 'F32');
+
+    // Not requested -> completely unaffected, same as every existing caller.
+    const rtPlain = alloc.create('plain2', { resolvedW: 8, resolvedH: 8 });
+    ok('depthTexture: not requested -> null, and depthBuffer left at its own default', rtPlain.depthTexture === null);
   }
 
   // create(): outputName wins outright — the exact string an `mrt({...})`

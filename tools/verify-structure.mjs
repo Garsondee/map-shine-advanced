@@ -268,7 +268,22 @@ export const RULES = [
     // allocation) — it does not, because `Texture` must be followed by `(`.
     // PIXI textures are deliberately out of scope: foundry/pixi-proxy-textures.js
     // exists precisely to hand PIXI a ≤1024px proxy, and that IS the fix (§4.3).
-    pattern: /new\s+(?:THREE\.)?\w*Texture\s*\(/,
+    //
+    // ⚠️ `DepthTexture` EXCLUDED (2026-08-04, docs/planning/Depth-Buffer.md) —
+    // narrowly, by name, not by exempting a whole file. Every OTHER name this
+    // pattern catches (Data/DataArray/Canvas/Video/Compressed/plain Texture) is
+    // a way to get SOURCE IMAGE DATA onto the GPU — the exact "world-sized art,
+    // uploaded outside vt/" crisis this rule's own `why` describes. A
+    // `DepthTexture` has no source image at all: it starts empty and is
+    // populated by RENDERING TO IT, sized from a `screenSized` render target
+    // (never world resolution) — categorically a render-TARGET ATTACHMENT, the
+    // thing `gpu/allocator-only`'s own `instead` text already directs here
+    // ("screen-sized buffers are render targets: use the allocator"), not
+    // image data this rule exists to keep out of `graph/`. Scoped to the NAME,
+    // not to `three-allocator.js`'s path, so a future `new DataTexture(...)`
+    // landing in this same file — a genuine instance of the thing this rule
+    // polices — is still caught.
+    pattern: /new\s+(?:THREE\.)?(?!DepthTexture\b)\w*Texture\s*\(/,
     // vt/ IS the paging system — creating textures is its whole job, and the
     // atlas is the ONE fixed >2048 allocation the plan sanctions (§4.1).
     allow: [`${sep}vt${sep}`],

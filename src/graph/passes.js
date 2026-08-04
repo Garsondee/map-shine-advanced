@@ -205,6 +205,14 @@ export const PASSES = [
       "floor, resolved once at build time); the clear value is the renderer's ordinary (0,0,0,0), not " +
       "B0-1 §2.1's (255,0,0,0) sentinel (no per-attachment MRT clear found in the vendored three.js) — " +
       'consumers should read attr.a>0 for "is anything drawn here", never trust R\'s zero as absence. ' +
+      'buf:scene.depth is ALSO REAL as of 2026-08-04 (docs/planning/Depth-Buffer.md, vt/scene-depth.js) — ' +
+      'its OWN scene/camera/depth32float target, rebuilt from the real draw list every residency pass ' +
+      '(rebuildSceneDepthProxies) and rendered every frame (runSceneDepthPass), covering Level ' +
+      'backgrounds/foregrounds, tiles and tokens (everything ensureWholeImageMeshes produces). ONE ' +
+      'honest gap: vegetation Case-2 overlays (a tree/bush drawn ON a host tile) do not participate yet ' +
+      '— they are not part of depthAuthority`s own ranked item list either. NO CONSUMER reads it yet ' +
+      '(that migration is stage 2, docs/planning/Depth-Buffer.md §9) — this pass only WRITES it, proven ' +
+      'live via the `scene-depth-self-test` debug action, not yet via any effect depending on it. ' +
       'Live today as the vt-pan-viewer; becomes this pass by rename. Same honesty bar masks.occlusion ' +
       'sets for its own partial claim.',
   },

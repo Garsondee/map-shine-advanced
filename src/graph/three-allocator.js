@@ -193,9 +193,22 @@ export class ThreeAllocator {
    * Pure mapping: resolved descriptor → the option object + per-attachment plan.
    * No THREE calls beyond enum lookups; separated so it is testable.
    *
+   * `desc.depthTexture === true` is a DIFFERENT thing from `desc.depth === true`
+   * (docs/planning/Depth-Buffer.md §11's own named gap, closed here): `depth`
+   * gives an ordinary, non-samplable depth/stencil RENDERBUFFER (fine for the
+   * unified world pass, which only ever depth-TESTS against it, never reads it
+   * back); `depthTexture` additionally builds a real `THREE.DepthTexture` and
+   * wires it into the target's own `depthTexture` slot, so a LATER, SEPARATE
+   * material can `texture(rt.depthTexture, someUV)` it — proven in the lab
+   * (`tools/shader-lab/bench-scene-depth.js`, scenario 5) before this landed.
+   * `desc.depthTextureType` is its OWN field, never `desc.type` (the colour
+   * attachment's type) — two independently-meaningful "what type is this
+   * attachment" questions sharing one field name is exactly the trap
+   * [[feedback_shared_field_two_meanings_two_registries]] names.
+   *
    * @param {any} THREE
    * @param {import('./frame-graph.js').ResolvedDescriptor} desc
-   * @returns {{ width: number, height: number, options: object, attachments: Array<object> }}
+   * @returns {{ width: number, height: number, options: object, attachments: Array<object>, wantsDepthTexture: boolean, depthTextureType: number|undefined }}
    */
   static describe(THREE, desc) {
     const width = Math.max(1, desc.resolvedW | 0);
@@ -240,7 +253,14 @@ export class ThreeAllocator {
       if (a.outputName != null) plan.outputName = a.outputName;
       attachments.push(Object.keys(plan).length ? plan : null);
     }
-    return { width, height, options, attachments };
+    return {
+      width,
+      height,
+      options,
+      attachments,
+      wantsDepthTexture: desc.depthTexture === true,
+      depthTextureType: desc.depthTextureType,
+    };
   }
 
   /**
@@ -258,8 +278,30 @@ export class ThreeAllocator {
           'verified against src/vendor/three/three.webgpu.js:5003 before this was wired.)'
       );
     }
-    const { width, height, options, attachments } = ThreeAllocator.describe(THREE, desc);
+    const { width, height, options, attachments, wantsDepthTexture, depthTextureType } = ThreeAllocator.describe(
+      THREE,
+      desc
+    );
     enforceKeyholeLaw(name, width, height, desc);
+    // A REAL, samplable depth texture — built HERE, never at a call site, for
+    // the SAME reason every other attachment is: `gpu/allocator-only`
+    // (tools/verify-structure.mjs) fails the build on a `new *RenderTarget(`
+    // outside this file, and a depth texture is only useful wired into the
+    // RenderTarget's OWN `depthTexture` constructor option (three.js reads it
+    // at construction, not by later assignment). `THREE.DepthTexture`'s own
+    // constructor already defaults to `NearestFilter` + no `compareFunction`
+    // (src/vendor/three/three.webgpu.js:16297) — exactly what an ordinary,
+    // non-shadow-style TSL sample needs, so nothing extra is set here.
+    if (wantsDepthTexture) {
+      if (typeof THREE.DepthTexture !== 'function') {
+        throw new Error(
+          `ThreeAllocator.create("${name}"): { depthTexture: true } was requested but the THREE ` +
+            'namespace handed to this allocator has no DepthTexture constructor.'
+        );
+      }
+      options.depthBuffer = true;
+      options.depthTexture = new THREE.DepthTexture(width, height, depthTextureType ?? THREE.FloatType);
+    }
     const rt = new THREE.WebGLRenderTarget(width, height, options);
     rt.name = `v3:${name}`;
 

@@ -99,6 +99,16 @@ import { buildLightningMaterial, buildLightningGeometry } from '../../src/effect
 import { computeLightningStrandArrays } from '../../src/effects/lightning-geometry.js';
 import { computeAmbientColors } from '../../src/effects/lighting/environmental-light.js';
 import { check, evaluate, registerBench, saveCanvasPng } from './contract.js';
+// STAGE 0 (docs/planning/Depth-Buffer.md Β§9) — the REAL map, through the REAL
+// collectors, never a hand-built item list. See this file's own "SCENARIO 7"
+// header, far below, for why each of these specific functions and not a
+// lab-local approximation.
+import { collectLevelTextures } from '../../src/foundry/scene-layers.js';
+import { sortByLayer } from '../../src/scene/layer-order.js';
+import { computeQuadCorners } from '../../src/foundry/scene-geometry.js';
+import { buildQuadPositions, QUAD_UVS, QUAD_INDICES } from '../../src/scene/world-quad.js';
+import { loadMaskImageTexture } from '../../src/vt/mask-image.js';
+import FIXTURE from './fixtures/tower-bridge.js';
 
 /** The world rect every floor, light and camera in this bench shares. */
 const WORLD = { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
@@ -182,6 +192,189 @@ function lightPolygon(light, segments = 32) {
     pts.push(light.x + Math.cos(a) * light.radius, light.y + Math.sin(a) * light.radius);
   }
   return pts;
+}
+
+// ============================================================================
+// STAGE 0 SUPPORT (docs/planning/Depth-Buffer.md Β§9) — loading and scanning
+// the REAL tower-bridge art. Pure/standalone, like `lightPolygon` above; the
+// scenario itself (far below) explains why this exists.
+// ============================================================================
+
+/**
+ * Load one real art layer at the fixture's own EXPLORE scale, through the
+ * REAL production loader (`vt/mask-image.js`) — never a lab-local `Image`/
+ * `fetch` shortcut, so a real decode bug (a wrong colour space, a resize
+ * artefact) shows up here exactly as it would in production.
+ *
+ * @param {*} THREE @param {string} dir @param {string} file @param {number} scale
+ * @param {(msg:string)=>void} [log]
+ * @returns {Promise<object>} `loadMaskImageTexture`'s own return shape.
+ */
+async function loadRealArtLayer(THREE, dir, file, scale, log) {
+  const res = await loadMaskImageTexture({ url: `${dir}/${file}`, THREE, scale, channels: 'rgb' });
+  if (!res) {
+    throw new Error(`real-map: failed to load ${file} — see the console for the underlying fetch/decode error`);
+  }
+  log?.(
+    `FLOOR-LIGHTING real-map: loaded ${file} at ${res.width}x${res.height} ` +
+      `(native ${res.nativeWidth}x${res.nativeHeight}, scale ${scale})`
+  );
+  return res;
+}
+
+/** The alpha byte at one decoded texel of a `loadMaskImageTexture` result. */
+function alphaAt(entry, px, py) {
+  return entry.data[(py * entry.width + px) * 4 + 3];
+}
+
+/**
+ * Find a world (x,y) whose small neighbourhood is robustly OPAQUE in every
+ * `mustBeOpaque` layer and robustly TRANSPARENT in every `mustBeTransparent`
+ * layer — i.e. an ACTUAL patch of real authored art matching the condition,
+ * never a guessed coordinate and never a single antialiased-edge texel
+ * mistaken for a real region (`feedback_read_the_producer_never_invent_its_
+ * shape` — the fixture's OWN discipline for its mask content, applied here to
+ * its art content instead).
+ *
+ * Scans on a STRIDE, not every texel: a real 0.25-scale layer is ~3.3M
+ * texels, and this function is called several times per bench run. A stride
+ * cannot miss a region wider than itself, and every candidate is validated
+ * against a `halfWin`-texel window (not a single sample), so a stride does
+ * not risk finding a false positive it would otherwise avoid.
+ *
+ * @param {object} args
+ * @param {number} args.width @param {number} args.height - shared decode
+ *   dimensions (every layer in this fixture shares one NATIVE size, so all
+ *   loads at one `scale` decode to the identical width/height — no per-layer
+ *   UV remapping needed).
+ * @param {number} args.worldW @param {number} args.worldH
+ * @param {object[]} [args.mustBeOpaque]
+ * @param {object[]} [args.mustBeTransparent]
+ * @param {number} [args.halfWin] - the validated window's half-size, in texels.
+ * @param {number} [args.stride]
+ * @param {number} [args.marginFrac] - fraction of width/height excluded from
+ *   every edge, so a hit can never sit on the canvas boundary.
+ * @param {boolean} [args.requireVerticalAsymmetry] - see this function's own
+ *   "CALIBRATION NEEDS A CONTRAST GUARD" note just below. When true, a
+ *   candidate is rejected if its OWN vertical mirror (`height-1-py`, same
+ *   `px`) ALSO satisfies every `mustBeOpaque` condition β€” i.e. only accept a
+ *   point that a straight-vs-flipped row mapping would actually disagree
+ *   about. Irrelevant to an ordinary content search; only set this for a
+ *   CALIBRATION anchor.
+ * @returns {{x:number, y:number, px:number, py:number}|null} world
+ *   coordinates of the FIRST qualifying region found, or `null` if none was
+ *   — a real, reportable outcome (`feedback_instruments_must_not_lie`), never
+ *   a fabricated fallback point.
+ */
+function findRealArtRegion({
+  width,
+  height,
+  worldW,
+  worldH,
+  mustBeOpaque = [],
+  mustBeTransparent = [],
+  halfWin = 5,
+  stride = 10,
+  marginFrac = 0.03,
+  requireVerticalAsymmetry = false,
+}) {
+  const OPAQUE_MIN = 235; // clearly painted, past ordinary WebP block-compression noise
+  const TRANSPARENT_MAX = 4; // clearly unpainted β€” mirrors mask-image.js's own MASK_CONTENT_EMPTY_BYTE posture
+  const marginX = Math.floor(width * marginFrac);
+  const marginY = Math.floor(height * marginFrac);
+  const regionOk = (entry, px, py, wantOpaque) => {
+    for (let dy = -halfWin; dy <= halfWin; dy++) {
+      for (let dx = -halfWin; dx <= halfWin; dx++) {
+        const x = px + dx;
+        const y = py + dy;
+        if (x < 0 || y < 0 || x >= entry.width || y >= entry.height) return false;
+        const a = alphaAt(entry, x, y);
+        if (wantOpaque && a < OPAQUE_MIN) return false;
+        if (!wantOpaque && a > TRANSPARENT_MAX) return false;
+      }
+    }
+    return true;
+  };
+  // ⚠️ CALIBRATION NEEDS A CONTRAST GUARD (`feedback_calibration_needs_a_
+  // contrast_guard`), and a SINGLE mirrored texel is not a strong enough
+  // guard. Measured live: a candidate at (px 79, py 127) had its OWN exact
+  // mirror (py 1109) genuinely transparent β€” yet the SAME column reads
+  // "opaque" across 76% of its total height, so a render/decode row-count
+  // discrepancy of barely a dozen texels (2662-wide decode vs a
+  // 64-rounded-up 2688-wide render target) was enough to land the ACTUAL
+  // sampled mirror row back inside a DIFFERENT opaque band a few rows away.
+  // A single coincidentally-transparent texel is not a discriminator; a
+  // WIDE band that is uniformly the opposite condition is. This checks every
+  // row in `Β±asymmetryBandTexels` around the mirror, not just the mirror
+  // itself β€” tolerant of exactly the kind of off-by-a-dozen slop that broke
+  // the single-texel version, and only accepts a candidate where NONE of
+  // that band could plausibly satisfy the SAME condition being searched for.
+  const ASYMMETRY_BAND_TEXELS = 30;
+  const bandHasNoMatch = (entry, px, centerPy, wantOpaque) => {
+    for (let dy = -ASYMMETRY_BAND_TEXELS; dy <= ASYMMETRY_BAND_TEXELS; dy++) {
+      const y = centerPy + dy;
+      if (y < 0 || y >= height) continue;
+      if (regionOk(entry, px, y, wantOpaque)) return false;
+    }
+    return true;
+  };
+  const isUsableForCalibration = (px, py) => {
+    if (!requireVerticalAsymmetry) return true;
+    const mirrorPy = height - 1 - py;
+    if (mustBeOpaque.some((e) => !bandHasNoMatch(e, px, mirrorPy, true))) return false;
+    if (mustBeTransparent.some((e) => !bandHasNoMatch(e, px, mirrorPy, false))) return false;
+    return true;
+  };
+  for (let py = marginY; py < height - marginY; py += stride) {
+    for (let px = marginX; px < width - marginX; px += stride) {
+      if (mustBeOpaque.some((e) => !regionOk(e, px, py, true))) continue;
+      if (mustBeTransparent.some((e) => !regionOk(e, px, py, false))) continue;
+      if (!isUsableForCalibration(px, py)) continue;
+      return { x: ((px + 0.5) / width) * worldW, y: ((py + 0.5) / height) * worldH, px, py };
+    }
+  }
+  return null;
+}
+
+/**
+ * A whole-canvas world quad, geometry-for-geometry identical to how
+ * production places Level background/foreground art (`bench-derive.js`'s own
+ * `wholeWorldPlacement()` — the SAME fixture, the SAME "this art covers the
+ * whole map" placement) β€” reused rather than a bare `PlaneGeometry`
+ * (`quadMesh` above) specifically BECAUSE this mesh must carry a REAL `uv`
+ * attribute: every earlier scenario in this file packs a constant/computed
+ * value and never samples a texture, so `PlaneGeometry`'s default UVs were
+ * never exercised. This one samples REAL art, so an incorrect UV winding
+ * would silently flip or mirror it β€” exactly the risk
+ * `feedback_y_flip_recurring_risk` exists to name. `computeQuadCorners` +
+ * `buildQuadPositions` + `QUAD_UVS` + `QUAD_INDICES` are the SAME functions
+ * `vt-pan-viewer.js`'s own whole-image materials build their geometry from,
+ * so this mesh's UV mapping is correct by construction, not by a
+ * lab-reasoned-through convention.
+ *
+ * @param {*} THREE @param {*} material @param {number} renderOrder
+ * @returns {*} a `THREE.Mesh`, not yet added to a scene.
+ */
+function buildWorldQuadMesh(THREE, material, renderOrder) {
+  const rect = FIXTURE.worldRect;
+  const placement = {
+    x: (rect.minX + rect.maxX) / 2,
+    y: (rect.minY + rect.maxY) / 2,
+    width: rect.maxX - rect.minX,
+    height: rect.maxY - rect.minY,
+    anchorX: 0.5,
+    anchorY: 0.5,
+    rotation: 0,
+  };
+  const corners = computeQuadCorners(placement);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(buildQuadPositions(corners), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+  geo.setIndex([...QUAD_INDICES]);
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.renderOrder = renderOrder;
+  mesh.frustumCulled = false;
+  return mesh;
 }
 
 export function createFloorLightingBench({ THREE, log }) {
@@ -502,6 +695,384 @@ export function createFloorLightingBench({ THREE, log }) {
     ctx.font = '12px monospace';
     ctx.fillText(label, 6, 16);
     return canvas;
+  }
+
+  // ==========================================================================
+  // STAGE 0 (docs/planning/Depth-Buffer.md Β§9) β€” THE REAL MAP.
+  // ==========================================================================
+  // Cached across repeated runs of scenario 7 (below), the same posture
+  // `ensureRenderer()` already takes for the shared device: loading 5 real
+  // ~9 MB images and scanning ~3.3M texels several times over is real work,
+  // and none of it changes between clicks of the same button.
+  let realMap = null;
+  /** Established empirically per THIS camera/RT pair β€” see `calibrateRealOrientation`. */
+  let realOrientation = null;
+
+  /**
+   * Load the real map's 5 art layers, collect its 5 real draw items through
+   * the REAL `collectLevelTextures` (never a hand-built item list β€” see this
+   * file's own "SCENARIO 7" header for why that matters here specifically),
+   * sort them with the REAL sort law, scan for the real test-light world
+   * positions, and build a camera/render-target pair sized for the fixture's
+   * OWN world rect (NOT the synthetic 1000x1000/DIM=256 pair `ensureRenderer`
+   * builds above β€” a real 10650x4950 map needs its own).
+   */
+  async function ensureRealMapAssets() {
+    if (realMap) return realMap;
+    const scale = FIXTURE.exploreScale; // 0.25 β€” STATED, not silent (AGENTS.md Β§7).
+    const findArt = (floorId, role) => FIXTURE.artLayers.find((a) => a.floorId === floorId && a.role === role);
+    const bgU = findArt('underground', 'background');
+    const fgU = findArt('underground', 'overhead');
+    const bgM = findArt('middle', 'background');
+    const fgM = findArt('middle', 'overhead');
+    const bgR = findArt('roof', 'background'); // roof has NO overhead layer β€” nothing sits above it
+    const [undergroundBg, undergroundFg, middleBg, middleFg, roofBg] = await Promise.all([
+      loadRealArtLayer(THREE, FIXTURE.dir, bgU.file, scale, log),
+      loadRealArtLayer(THREE, FIXTURE.dir, fgU.file, scale, log),
+      loadRealArtLayer(THREE, FIXTURE.dir, bgM.file, scale, log),
+      loadRealArtLayer(THREE, FIXTURE.dir, fgM.file, scale, log),
+      loadRealArtLayer(THREE, FIXTURE.dir, bgR.file, scale, log),
+    ]);
+
+    // THE REAL SCENE DOCUMENT β€” `getActiveSceneFloors`/`collectLevelTextures`
+    // both tolerate a plain array (`sortedLevels` uses each entry's own
+    // `.index`, declared explicitly below so that path is taken
+    // deterministically). Elevation bands are the FIXTURE's own,
+    // author-ratified numbers (Β§ "AUTHOR-GIVEN 2026-08-01" above) β€” never
+    // re-typed by hand a second time.
+    const sceneDoc = {
+      name: 'shader-lab real tower-bridge map (stage 0)',
+      levels: FIXTURE.floors.map((floor) => {
+        const bg = findArt(floor.id, 'background');
+        const fg = findArt(floor.id, 'overhead');
+        return {
+          id: floor.id,
+          index: floor.index,
+          name: floor.label,
+          elevation: floor.elevation,
+          background: bg ? { src: `${FIXTURE.dir}/${bg.file}` } : {},
+          foreground: fg ? { src: `${FIXTURE.dir}/${fg.file}` } : {},
+          visibility: { levels: [] },
+        };
+      }),
+    };
+
+    // ⚠️ `visibleLevelIds` IS NOT OPTIONAL. Every level's own
+    // `visibility.levels` is deliberately empty above, which under Foundry's
+    // real per-level visibility rule (`isLevelVisible`) would collapse the
+    // item list down to the VIEWED level's own art only β€” exactly the
+    // `collectLevelTextures` bug this parameter's own doc names ("an entire
+    // item list silently returned just the viewed floor's own background").
+    // This scenario needs every real floor drawn AT ONCE regardless of which
+    // one is "viewed", the same override `boot.js` uses to feed the mask
+    // authority's view-independent physics.
+    const { items: realItems, skipped } = collectLevelTextures(sceneDoc, {
+      viewedLevelId: 'roof',
+      visibleLevelIds: FIXTURE.floors.map((f) => f.id),
+    });
+    if (skipped.length) log?.(`FLOOR-LIGHTING real-map: collectLevelTextures skipped ${JSON.stringify(skipped)}`);
+    if (realItems.length !== 5) {
+      throw new Error(`real-map: expected 5 real draw items (3 backgrounds + 2 overheads), got ${realItems.length}`);
+    }
+    // THE REAL SORT LAW, not `item.floorIndex` β€” Underground's own overhead
+    // (elevation 20, ITS OWN floor's top) and Middle's own background
+    // (elevation 20, ITS OWN floor's bottom) TIE, and `compareLayerKeys`'s
+    // sortLayer/sort/zIndex tie-break is the ONLY thing that decides which
+    // one paints last (`scene/layer-order.js`'s own header has the worked
+    // example). `sortByLayer` itself, never re-implemented here.
+    sortByLayer(realItems);
+
+    const texByKey = new Map([
+      ['underground:levelBackground', undergroundBg.texture],
+      ['underground:levelForeground', undergroundFg.texture],
+      ['middle:levelBackground', middleBg.texture],
+      ['middle:levelForeground', middleFg.texture],
+      ['roof:levelBackground', roofBg.texture],
+    ]);
+
+    // THE FOUR TEST WORLD POSITIONS β€” FOUND in the real decoded alpha, never
+    // guessed (see `findRealArtRegion`'s own header). `roofBg`/`middleBg`/
+    // `middleFg` all decode to the SAME width/height at one `scale` (one
+    // NATIVE size for the whole fixture), so one `dims` object serves every
+    // search.
+    const dims = { width: roofBg.width, height: roofBg.height, worldW: FIXTURE.worldRect.maxX, worldH: FIXTURE.worldRect.maxY };
+    const solidRoof = findRealArtRegion({ ...dims, mustBeOpaque: [roofBg] });
+    // ⚠️ REQUIRES `middleBg` opaque too, not just roof+overhead transparent β€”
+    // otherwise a "nothing painted" hit outside the map's own canvas content
+    // would pass trivially. This makes the point a genuine "the middle floor
+    // is really here, and genuinely nothing is above it" location.
+    const openSky = findRealArtRegion({ ...dims, mustBeOpaque: [middleBg], mustBeTransparent: [roofBg, middleFg] });
+    const middleOverheadSolid = findRealArtRegion({ ...dims, mustBeOpaque: [middleFg] });
+    // THE CALIBRATION ANCHOR β€” a SEPARATE search from `solidRoof` above, and
+    // deliberately so: measured live, a column can be genuinely, robustly
+    // opaque-roof at BOTH its near-top and near-bottom rows (real roofline
+    // bands on either side of a gap), which makes a perfectly valid TEST
+    // point completely USELESS for telling a straight readback from a
+    // flipped one β€” both hypotheses predict the same "2" there. Calibration
+    // needs a point picked FOR contrast, not merely for content
+    // (`requireVerticalAsymmetry` β€” see `findRealArtRegion`'s own header).
+    const calibPoint = findRealArtRegion({ ...dims, mustBeOpaque: [roofBg], requireVerticalAsymmetry: true });
+    log?.(
+      `FLOOR-LIGHTING real-map: solidRoof=${JSON.stringify(solidRoof)} openSky=${JSON.stringify(openSky)} ` +
+        `middleOverheadSolid=${JSON.stringify(middleOverheadSolid)} calibPoint=${JSON.stringify(calibPoint)}`
+    );
+
+    const rect = FIXTURE.worldRect;
+    const realCamera = new THREE.OrthographicCamera(rect.minX, rect.maxX, rect.maxY, rect.minY, -1000, 1000);
+    realCamera.position.set(0, 0, 100);
+    realCamera.lookAt(0, 0, 0);
+    realCamera.updateProjectionMatrix();
+    // ⚠️ MATCHES THE DECODED ART RESOLUTION EXACTLY (2662x1237 at
+    // EXPLORE_SCALE), not a rounder/smaller number picked for looks. A
+    // coarser render target was tried first (1024 wide, ~2.6Γ— downsampled
+    // from the source) and produced a real, live-measured bug: a test point
+    // verified robust (Β±5 texels) at DECODE resolution can straddle or
+    // average away at a render target ~2.6Γ— coarser, so a genuinely
+    // asymmetric calibration point still read ambiguously once rendered.
+    // Every layer already decodes to `roofBg.width/height` (all 5 share one
+    // NATIVE size β€” see `dims`, above), so using that SAME number here isn't
+    // an arbitrary upsize, it removes an entire class of mismatch between
+    // "where a point was found" and "what got rendered there".
+    //
+    // ⚠️ ROUNDED UP TO A MULTIPLE OF 64, not `roofBg.width` verbatim β€” WebGPU
+    // requires a texture-to-buffer copy's bytes-per-row to be a multiple of
+    // 256, i.e. width a multiple of 64 at 4 bytes/texel. `1024` (the first
+    // version of this render target) satisfied this BY ACCIDENT; the decoded
+    // art's own `2662` does not (`2662*4=10648`, not a multiple of 256) and
+    // threw `RangeError: offset is out of bounds` the instant this target
+    // tried to read back β€” three's own readback wrapper leaks the padded
+    // stride through rather than silently stripping it. Rounding up costs at
+    // most 63px of slack, irrelevant at this scale.
+    const realDimW = Math.ceil(roofBg.width / 64) * 64;
+    const realDimH = Math.max(1, Math.round(realDimW * ((rect.maxY - rect.minY) / (rect.maxX - rect.minX))));
+    const realAttrRt = new THREE.RenderTarget(realDimW, realDimH, {
+      type: THREE.UnsignedByteType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      colorSpace: THREE.NoColorSpace,
+    });
+    const realIllumRt = new THREE.RenderTarget(realDimW, realDimH, {
+      type: THREE.UnsignedByteType,
+      format: THREE.RGBAFormat,
+      colorSpace: THREE.NoColorSpace,
+    });
+
+    realMap = {
+      scale,
+      realItems,
+      texByKey,
+      solidRoof,
+      openSky,
+      middleOverheadSolid,
+      calibPoint,
+      realCamera,
+      realDimW,
+      realDimH,
+      realAttrRt,
+      realIllumRt,
+      sceneDoc,
+      // The SAME floors table `resolveLightElevationRank` needs, DERIVED from
+      // the fixture's own bands β€” never re-typed a third time.
+      floorsForRank: FIXTURE.floors.map((f) => ({
+        index: f.index,
+        id: f.id,
+        elevationBottom: f.elevation.bottom,
+        elevationTop: f.elevation.top,
+      })),
+    };
+    return realMap;
+  }
+
+  /**
+   * RENDER `buf:scene.attr` FOR THE REAL MAP, all 5 real items at once
+   * (Β§5a's "all floors, not just the viewed one" β€” this is testing whether a
+   * light is occluded by content that EXISTS, independent of which floor a
+   * player happens to be looking at). Through the REAL encoder, exactly like
+   * `renderAttr` above β€” the only difference is `solidityAlpha` samples a
+   * REAL loaded texture instead of a constant `float(1)`.
+   */
+  async function renderRealAttr() {
+    const rm = realMap;
+    const scene = new THREE.Scene();
+    const disposables = [];
+    for (const item of rm.realItems) {
+      const tex = rm.texByKey.get(`${item.levelId}:${item.kind}`);
+      if (!tex) throw new Error(`real-map: no loaded texture for ${item.levelId}:${item.kind}`);
+      const { uFloorIndex01, uPresenceBits01 } = resolveItemFloorAttrUniforms({
+        THREE,
+        item,
+        viewedFloorIndex: 2,
+        sceneDoc: rm.sceneDoc,
+        logError: (m, e) => log?.(`FLOOR-LIGHTING real-map attr encode: ${m} ${e}`),
+      });
+      const mat = new THREE.NodeMaterial();
+      // ⚠️ `transparent = true`, NOT the synthetic scenarios' `false` above.
+      // Their `renderAttr()` gets away with an opaque material because ITS
+      // upper floors are smaller GEOMETRY (a footprint rect) β€” "outside the
+      // slab" is a hole because nothing is DRAWN there, never because
+      // something transparent was drawn and blended through. Every real item
+      // here is a FULL-CANVAS quad (matching real Foundry Level art exactly),
+      // so the ONLY thing that can let a lower floor show through is REAL
+      // alpha blending on `packFloorAttr`'s own blend-driving 4th component
+      // β€” which an opaque material never applies (it just overwrites,
+      // unconditionally, regardless of its own alpha). First run of this
+      // scenario copied the wrong sibling's setup and got exactly the
+      // failure mode `AGENTS.md` Β§10 already named for scenario 5's own
+      // trap #3: the WHOLE buffer read as Roof (2), literally 100% of
+      // texels, because Roof draws last and an opaque material's "alpha"
+      // is not meaningful output.
+      mat.transparent = true;
+      mat.depthTest = false;
+      mat.depthWrite = false;
+      mat.side = THREE.DoubleSide;
+      // THE SAME `.level(float(0))` PIN production has carried since round
+      // 10 β€” an implicitly-selected mip on a real, large texture reading
+      // alpha β‰ˆ 0 over visibly opaque paint is a bug this bench must not
+      // re-discover by skipping the fix that already exists for it.
+      const solidityAlpha = texture(tex).level(float(0)).a;
+      mat.fragmentNode = packFloorAttr(THREE.TSL, {
+        floorIndex01: uFloorIndex01,
+        outdoors01: float(1),
+        presenceBits01: uPresenceBits01,
+        solidityAlpha,
+      });
+      const mesh = buildWorldQuadMesh(THREE, mat, item.renderOrder);
+      scene.add(mesh);
+      disposables.push(mesh.geometry, mat);
+    }
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(rm.realAttrRt);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    await renderer.renderAsync(scene, rm.realCamera);
+    renderer.setRenderTarget(prev);
+    const buf = await renderer.readRenderTargetPixelsAsync(rm.realAttrRt, 0, 0, rm.realDimW, rm.realDimH);
+    for (const d of disposables) d.dispose?.();
+    return ArrayBuffer.isView(buf) ? buf : new Uint8Array(buf);
+  }
+
+  /** RENDER THE TEST LIGHTS against the real attr buffer, through the REAL material. */
+  async function renderRealIllum({ lights, ambientLevel = 0.12 }) {
+    const rm = realMap;
+    const scene = new THREE.Scene();
+    const disposables = [];
+    const attrTexNode = texture(rm.realAttrRt.texture);
+    const ambient = computeAmbientColors(
+      { darkness01: 1 - ambientLevel, sky: null, globalLight: null, darknessLevel: 1 - ambientLevel },
+      0
+    );
+    const bg = Array.isArray(ambient?.background) ? ambient.background : [ambientLevel, ambientLevel, ambientLevel];
+    const built = [];
+    for (const light of lights) {
+      const uBackgroundColor = uniform(vec3(...bg));
+      const uDimColor = uniform(vec3(0.55, 0.5, 0.42));
+      const uBrightColor = uniform(vec3(1, 0.96, 0.86));
+      const b = buildPointLightIlluminationMaterial({
+        THREE,
+        uBackgroundColor,
+        uDimColor,
+        uBrightColor,
+        animation: null,
+        uGlobalTimeMs: uniform(float(0)),
+        falloffModel: 'foundry',
+        sunShadowSlotNodes: null,
+        attrTexNode,
+        blendSunVisibilityAcrossFloors: null,
+      });
+      b.uRatio.value = 0.5;
+      b.uAttenuationEased.value = easeAttenuation(0.5);
+      b.uExposure.value = computeExposure(0.5);
+      b.uEdgeCount.value = 0;
+      b.uEdgeSoftMargin.value = 0;
+      const rank = resolveLightElevationRank(light, rm.floorsForRank);
+      b.uLightElevationRank.value = rank;
+      const { array, vertexCount } = triangulateLightFan(lightPolygon(light), light.x, light.y, light.radius);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(array, 3));
+      geo.setDrawRange(0, vertexCount);
+      const mesh = new THREE.Mesh(geo, b.material);
+      mesh.position.set(light.x, light.y, 0);
+      mesh.scale.set(light.radius, light.radius, 1);
+      mesh.frustumCulled = false;
+      scene.add(mesh);
+      disposables.push(geo, b.material);
+      built.push({ id: light.id, rank, elevation: light.elevation });
+    }
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(rm.realIllumRt);
+    renderer.setClearColor(new THREE.Color(bg[0], bg[1], bg[2]), 1);
+    renderer.clear();
+    await renderer.renderAsync(scene, rm.realCamera);
+    renderer.setRenderTarget(prev);
+    const buf = await renderer.readRenderTargetPixelsAsync(rm.realIllumRt, 0, 0, rm.realDimW, rm.realDimH);
+    for (const d of disposables) d.dispose?.();
+    return { bytes: ArrayBuffer.isView(buf) ? buf : new Uint8Array(buf), ambientByte: Math.round(bg[0] * 255), built };
+  }
+
+  /** World (x,y) β†’ readback index for the REAL map's OWN camera/RT pair, honouring its OWN calibrated orientation. */
+  function sampleRealAt(bytes, x, y) {
+    const { realDimW: w, realDimH: h } = realMap;
+    const rect = FIXTURE.worldRect;
+    const fx = (x - rect.minX) / (rect.maxX - rect.minX);
+    const fy = (y - rect.minY) / (rect.maxY - rect.minY);
+    const px = Math.min(w - 1, Math.max(0, Math.floor(fx * w)));
+    const rowFromBottom = Math.min(h - 1, Math.max(0, Math.floor(fy * h)));
+    const row = realOrientation === 'flipped' ? h - 1 - rowFromBottom : rowFromBottom;
+    const i = (row * w + px) * 4;
+    return { r: bytes[i], g: bytes[i + 1], b: bytes[i + 2], a: bytes[i + 3] };
+  }
+
+  /**
+   * ESTABLISH ROW ORDER EMPIRICALLY for the REAL camera/RT pair β€” its OWN
+   * calibration, never assumed to match the synthetic bench's `calibrate()`
+   * above (different world size, different render target, a fresh chance to
+   * be upside-down β€” `feedback_y_flip_recurring_risk`). Grounded in a REAL,
+   * independently-verified fact rather than a synthetic prediction: the
+   * `solidRoof` world point was found by scanning the Roof layer's OWN
+   * decoded alpha directly (no GPU involved), so it is known β€” independent of
+   * this camera entirely β€” to be a spot where the Roof floor (index 2) must
+   * be what `buf:scene.attr` reports. Whichever row mapping produces `2`
+   * there is correct; if BOTH or NEITHER do, this refuses to guess.
+   */
+  function calibrateRealOrientation(attrBytes) {
+    if (!realMap.calibPoint) {
+      throw new Error(
+        'real-map calibrate: no vertically-asymmetric roof point was found to calibrate against ' +
+          '(see findRealArtRegion´s requireVerticalAsymmetry)'
+      );
+    }
+    const { realDimW: w, realDimH: h } = realMap;
+    const rect = FIXTURE.worldRect;
+    const rowAt = (x, y, flip) => {
+      const fx = (x - rect.minX) / (rect.maxX - rect.minX);
+      const fy = (y - rect.minY) / (rect.maxY - rect.minY);
+      const px = Math.min(w - 1, Math.floor(fx * w));
+      const rowFromBottom = Math.min(h - 1, Math.floor(fy * h));
+      const row = flip ? h - 1 - rowFromBottom : rowFromBottom;
+      return attrBytes[(row * w + px) * 4];
+    };
+    // `calibPoint` (unlike `solidRoof`) is GUARANTEED, by construction, to
+    // have a DIFFERENT reading under its own vertical mirror β€” see this
+    // function's own guard above and `findRealArtRegion`'s
+    // `requireVerticalAsymmetry`. So exactly one of these two SHOULD read 2;
+    // anything else means the render-target/world mapping itself is broken
+    // in some way this simple flip test cannot name, and this correctly
+    // refuses to guess rather than picking an orientation on a coin flip.
+    const straight = rowAt(realMap.calibPoint.x, realMap.calibPoint.y, false);
+    const flipped = rowAt(realMap.calibPoint.x, realMap.calibPoint.y, true);
+    if (straight === 2 && flipped !== 2) {
+      realOrientation = 'straight';
+    } else if (flipped === 2 && straight !== 2) {
+      realOrientation = 'flipped';
+    } else {
+      throw new Error(
+        `real-map calibrate: ambiguous at a point CONSTRUCTED to be asymmetric (straight=${straight}, ` +
+          `flipped=${flipped}, expected exactly one to read 2) β€” the world/render-target mapping itself needs ` +
+          're-checking, not just the flip direction'
+      );
+    }
+    log?.(`FLOOR-LIGHTING real-map: orientation ${realOrientation} (straight=${straight}, flipped=${flipped})`);
   }
 
   const scenarios = new Map();
@@ -1384,6 +1955,374 @@ export function createFloorLightingBench({ THREE, log }) {
     },
   });
 
+  /**
+   * ============================================================================
+   * SCENARIO 7 β€” STAGE 0 OF THE DEPTH-BUFFER REDESIGN: THE REAL MAP
+   * REPRODUCES THE LIVE BUG (docs/planning/Depth-Buffer.md Β§9, stage 0)
+   * ============================================================================
+   * Author, 2026-08-04, after "no more fucking probes": build the fix's proof
+   * "IN THE SHADER LAB. Because you can automatically test things there. Not
+   * in Foundry. I already have the map in Foundry" (a live check already
+   * exists there β€” this bench's job is to be AUTOMATIC, not to replace it).
+   *
+   * Every scenario ABOVE this one draws a synthetic building out of
+   * rectangles. That is precisely the shape that let a real bug survive
+   * THREE lab-green rounds (`feedback_bench_must_build_inputs_like_
+   * production`) β€” a synthetic roof has no occlusion concept, no real alpha,
+   * no real silhouette. This scenario draws the REAL "town river bridge" map
+   * instead: `fixtures/tower-bridge.js`'s three real Level backgrounds
+   * (Underground/Middle/Roof, author-ratified elevation bands
+   * 0-20/20-40/40-∞) PLUS its two real `_Overhead` foreground layers β€”
+   * through the REAL `collectLevelTextures` (never a hand-built item list:
+   * this is the EXACT producer `vt-pan-viewer.js` calls, so a mis-elevated
+   * foreground or a wrong sort tie-break is a bug in THIS bench's inputs, not
+   * invented here), the REAL `resolveItemFloorAttrUniforms`/`packFloorAttr`
+   * encoder, and the REAL `buildPointLightIlluminationMaterial` gate.
+   *
+   * ⚠️ THIS SCENARIO MUST FAIL, TODAY. If it passes, either the bench is
+   * still lying (go find what synthetic shortcut crept back in) or the bug
+   * is already fixed and this comment is stale β€” it is NOT a bug in the
+   * scenario for `report.ok` to come back `false` here. That is the entire
+   * point of building it BEFORE touching any production code
+   * (Depth-Buffer.md's own "stage 0" table: "it should FAIL β€” reproducing
+   * the live bug in the lab for the first time. If it passes, the bench is
+   * still lying and nothing after this is trustworthy.").
+   *
+   * THE FAILING CASE, and why it is real, not invented: `resolveLightElevat
+   * ionRank` maps a light whose Foundry `elevation` reads as the schema
+   * default (0) to `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL` β€” the fine height
+   * gate can then never fire, BY DESIGN. The only other thing that can
+   * occlude such a light is `PRESENCE_BIT_OVERHEAD`, which fires for a
+   * Level's own FOREGROUND (it sits at its own floor's `elevation.top`, so
+   * `isInForeground` is true by construction) but does NOT fire for an
+   * ordinary Level BACKGROUND sitting on the floor ABOVE (its own elevation
+   * is THAT floor's `elevation.bottom`, never >= that floor's own top). So:
+   * an unconfigured light on the Middle floor, directly under a spot where
+   * the ROOF's own plain background art is opaque β€” a whole floor and its
+   * buildings β€” is occluded by NEITHER mechanism.
+   * `docs/planning/Light-Elevation-Occlusion-Failure.md`'s "symptom 1" and
+   * `docs/planning/Depth-Buffer.md` Β§0's source audit both name this exact
+   * gap from reading code; this scenario is that same gap, reproduced
+   * against real art instead of derived from reading source.
+   *
+   * FIVE LIGHTS, so the failure is attributable rather than a blanket
+   * "nothing works" (which would prove nothing β€” see `the-authors-three-
+   * lights` above for the identical discipline):
+   *   ROOF_OPAQUE_UNCONFIGURED β€” Middle floor, elevation 0 (never touched),
+   *     centred under a REAL opaque patch of Roof's plain background.
+   *     **EXPECTED TO FAIL under today's code.**
+   *   ROOF_OPAQUE_CONFIGURED β€” the SAME world position, elevation explicitly
+   *     authored (middle.bottom + 5). The ordinary floor-index-dominant rank
+   *     comparison (round 3's fix) already handles this correctly TODAY β€” a
+   *     control proving the cross-floor mechanism itself works; only the
+   *     SENTINEL path is broken.
+   *   MIDDLE_OVERHEAD_UNCONFIGURED β€” Middle floor, elevation 0, centred under
+   *     a REAL opaque patch of Middle's OWN `_Overhead` (same-floor roof).
+   *     The overhead bit fires for same-floor foreground content regardless
+   *     of numeric authoring (round 8's fix) β€” a control proving THAT
+   *     mechanism still works; the bug is specifically the CROSS-floor +
+   *     unconfigured combination.
+   *   TOP_FLOOR_CONTROL β€” the Roof floor's OWN band (elevation 45), anywhere.
+   *     Nothing exists above the topmost floor in a 3-floor map BY
+   *     CONSTRUCTION, so this must stay lit under every version of this
+   *     code, with no dependency on any alpha scan succeeding β€” the one
+   *     control guaranteed to run even if the real art turns out to have no
+   *     genuine alpha holes anywhere (plausible for a full background image;
+   *     `_Outdoors` masks, not alpha, are this project's real indoor/outdoor
+   *     signal β€” see the fixture's own `BLACK_MEANS_INDOORS` ruling).
+   *   OPEN_SKY_UNCONFIGURED β€” Middle floor, elevation 0, centred where the
+   *     Middle floor's OWN ground is real (`middleBg` opaque) AND both Roof's
+   *     background and Middle's own overhead are transparent. Best-effort:
+   *     `findRealArtRegion` may legitimately find nothing (see
+   *     TOP_FLOOR_CONTROL's own note) β€” its checks are skipped, not failed,
+   *     if so.
+   *
+   * All four SCANNED world positions are FOUND, not guessed β€” a scan of the
+   * REAL decoded alpha of the relevant layer(s), the same "measure the
+   * producer, never invent its shape" discipline `fixtures/tower-bridge.js`
+   * itself already enforces for mask content. A scan that finds nothing
+   * reports UNMEASURED (`evaluate`'s own contract), never a fabricated
+   * coordinate.
+   */
+  scenarios.set('real-map-reproduces-the-live-bug', {
+    name: 'real-map-reproduces-the-live-bug',
+    summary:
+      'STAGE 0 (docs/planning/Depth-Buffer.md): the REAL tower-bridge map, real _Overhead layers, real ' +
+      'encoder, real gate. Must FAIL today β€” an unconfigured light under an ordinary upper-floor background ' +
+      'is not occluded by anything.',
+    async run(ctx) {
+      await ensureRenderer();
+      const checks = [];
+      let calibration = 'OK';
+      let rm;
+      try {
+        rm = await ensureRealMapAssets();
+      } catch (err) {
+        return {
+          checks: [check({ id: 'real-map-assets-loaded', status: 'UNMEASURED', note: String(err?.message ?? err) })],
+          calibration: 'FAILED',
+          artifacts: [],
+          inputs: {},
+          stats: {},
+        };
+      }
+
+      if (!rm.solidRoof || !rm.middleOverheadSolid) {
+        checks.push(
+          check({
+            id: 'the-required-test-points-were-found-in-the-real-art',
+            status: 'UNMEASURED',
+            note:
+              `solidRoof=${!!rm.solidRoof} middleOverheadSolid=${!!rm.middleOverheadSolid} ` +
+              `openSky=${!!rm.openSky} calibPoint=${!!rm.calibPoint}`,
+          })
+        );
+      }
+
+      const attrBytes = await renderRealAttr();
+      try {
+        calibrateRealOrientation(attrBytes);
+      } catch (err) {
+        calibration = 'FAILED';
+        checks.push(check({ id: 'calibration', status: 'UNMEASURED', note: String(err?.message ?? err) }));
+      }
+
+      // --- the ENCODER, before anything reading it is judged β€” separates an
+      // encoder regression from a gate regression, same discipline scenario 6
+      // already established (`attrOverheadBitUnderCover`).
+      if (rm.solidRoof) {
+        checks.push(
+          evaluate('attr-solid-roof-point-reads-floor-2', () => {
+            const s = sampleRealAt(attrBytes, rm.solidRoof.x, rm.solidRoof.y);
+            return {
+              ok: s.r === 2,
+              measured: s.r,
+              expected: 2,
+              note: 'sanity: the scanned "opaque roof" point must actually encode as the roof floor',
+            };
+          })
+        );
+        checks.push(
+          evaluate('attr-solid-roof-point-has-NO-overhead-bit', () => {
+            const s = sampleRealAt(attrBytes, rm.solidRoof.x, rm.solidRoof.y);
+            return {
+              ok: decodeOverheadBit(s.b) === 0,
+              measured: decodeOverheadBit(s.b),
+              expected: 0,
+              note: "an ordinary Level BACKGROUND is never `isInForeground` β€” confirms WHY the overhead bit can't save this case",
+            };
+          })
+        );
+      }
+      if (rm.middleOverheadSolid) {
+        checks.push(
+          evaluate('attr-middle-overhead-point-HAS-the-overhead-bit', () => {
+            const s = sampleRealAt(attrBytes, rm.middleOverheadSolid.x, rm.middleOverheadSolid.y);
+            return {
+              ok: decodeOverheadBit(s.b) === 1,
+              measured: decodeOverheadBit(s.b),
+              expected: 1,
+              note: "Middle's own `_Overhead` sits at its floor's own top β€” isInForeground fires automatically",
+            };
+          })
+        );
+      }
+
+      // --- THE FIVE LIGHTS -----------------------------------------------
+      const middleBand = FIXTURE.floors.find((f) => f.id === 'middle').elevation;
+      const roofBand = FIXTURE.floors.find((f) => f.id === 'roof').elevation;
+      const lights = [];
+      if (rm.solidRoof) {
+        lights.push({ id: 'ROOF_OPAQUE_UNCONFIGURED', x: rm.solidRoof.x, y: rm.solidRoof.y, radius: 300, elevation: 0 });
+        lights.push({
+          id: 'ROOF_OPAQUE_CONFIGURED',
+          x: rm.solidRoof.x,
+          y: rm.solidRoof.y,
+          radius: 300,
+          elevation: middleBand.bottom + 5,
+        });
+        // Nothing exists above the topmost floor in this 3-floor map BY
+        // CONSTRUCTION β€” placed at the SAME (x,y) as the failing case purely
+        // so it shares a frame with it; its own elevation, not its position,
+        // is what makes it a control.
+        lights.push({
+          id: 'TOP_FLOOR_CONTROL',
+          x: rm.solidRoof.x,
+          y: rm.solidRoof.y,
+          radius: 300,
+          elevation: roofBand.bottom + 5,
+        });
+      }
+      if (rm.middleOverheadSolid) {
+        lights.push({
+          id: 'MIDDLE_OVERHEAD_UNCONFIGURED',
+          x: rm.middleOverheadSolid.x,
+          y: rm.middleOverheadSolid.y,
+          radius: 300,
+          elevation: 0,
+        });
+      }
+      if (rm.openSky) {
+        lights.push({ id: 'OPEN_SKY_UNCONFIGURED', x: rm.openSky.x, y: rm.openSky.y, radius: 300, elevation: 0 });
+      }
+
+      // ⚠️ EACH LIGHT IS RENDERED IN ISOLATION, one at a time β€” NOT all five
+      // together. `ROOF_OPAQUE_UNCONFIGURED`/`ROOF_OPAQUE_CONFIGURED`/
+      // `TOP_FLOOR_CONTROL` deliberately share the SAME (x,y) (the whole
+      // point is to compare their DIFFERENT elevations at the SAME receiver),
+      // and the illumination material MAX-blends: sampling a shared pixel
+      // from a combined render reports the BRIGHTEST of every overlapping
+      // light there, so one light's bug (fully bright, unoccluded) silently
+      // drowns out a co-located sibling's own, DIFFERENT, correct answer at
+      // that exact texel. First run of this scenario combined all five and
+      // reported `ROOF_OPAQUE_CONFIGURED` as bright/unoccluded even though
+      // its own arithmetic (rank 1.15625 vs receiver rank 2.0, comfortably
+      // past the fade band) says it must be dark β€” it wasn't wrong, it was
+      // being read through its own unoccluded sibling's glow. A combined
+      // render is still built afterward, purely for the human-facing
+      // artifact, where overlap is expected and fine to SEE β€” just never to
+      // sample a numeric check from.
+      const byId = {};
+      let ambientByte = 60;
+      const built = [];
+      for (const light of lights) {
+        const solo = await renderRealIllum({ lights: [light] });
+        ambientByte = solo.ambientByte;
+        built.push(...solo.built);
+        byId[light.id] = sampleRealAt(solo.bytes, light.x, light.y).r;
+      }
+      const combined = await renderRealIllum({ lights });
+      const bytes = combined.bytes;
+
+      // *** THE HEADLINE CHECK β€” THIS ONE MUST FAIL TODAY ***
+      if (rm.solidRoof) {
+        checks.push(
+          evaluate('THE-LIVE-BUG-unconfigured-light-under-real-roof-is-NOT-occluded', () => {
+            const v = byId.ROOF_OPAQUE_UNCONFIGURED;
+            return {
+              ok: v <= ambientByte + 8,
+              measured: { value: v, ambientByte },
+              expected:
+                `<= ${ambientByte + 8} (occluded) β€” TODAY this reads BRIGHT: neither the sentinel-blocked fine ` +
+                'gate nor the (unset) overhead bit can stop it. This is symptom 1, on the real map.',
+            };
+          })
+        );
+        checks.push(
+          evaluate('control-configured-elevation-IS-occluded-at-the-SAME-point', () => {
+            const v = byId.ROOF_OPAQUE_CONFIGURED;
+            return {
+              ok: v <= ambientByte + 8,
+              measured: { value: v, ambientByte },
+              expected: `<= ${ambientByte + 8} β€” the ordinary cross-floor rank comparison already works once elevation is authored`,
+            };
+          })
+        );
+        checks.push(
+          evaluate('control-a-light-on-the-top-floor-is-never-occluded', () => {
+            const v = byId.TOP_FLOOR_CONTROL;
+            return {
+              ok: v > ambientByte + 20,
+              measured: { value: v, ambientByte },
+              expected: `> ${ambientByte + 20} β€” nothing exists above the topmost floor in this map, ever`,
+            };
+          })
+        );
+      }
+      if (rm.middleOverheadSolid) {
+        checks.push(
+          evaluate('control-same-floor-overhead-occludes-even-unconfigured', () => {
+            const v = byId.MIDDLE_OVERHEAD_UNCONFIGURED;
+            return {
+              ok: v <= ambientByte + 8,
+              measured: { value: v, ambientByte },
+              expected: `<= ${ambientByte + 8} β€” round 8's overhead-bit fix already handles THIS case`,
+            };
+          })
+        );
+      }
+      if (rm.openSky) {
+        checks.push(
+          evaluate('control-open-sky-stays-lit', () => {
+            const v = byId.OPEN_SKY_UNCONFIGURED;
+            return {
+              ok: v > ambientByte + 20,
+              measured: { value: v, ambientByte },
+              expected: `> ${ambientByte + 20} β€” nothing genuinely overhead here, under any version of the gate`,
+            };
+          })
+        );
+      }
+
+      const artifacts = [];
+      const canvas = document.createElement('canvas');
+      canvas.width = rm.realDimW;
+      canvas.height = rm.realDimH;
+      const ctx2d = canvas.getContext('2d');
+      const paintLabel = (label) => {
+        ctx2d.fillStyle = 'white';
+        ctx2d.font = '14px monospace';
+        ctx2d.fillText(label, 8, 20);
+      };
+      // THE ILLUM BUFFER paints AS-IS β€” its raw RGBA bytes ARE the rendered
+      // scene's own colour, so there is nothing to remap; AGENTS.md Β§4's
+      // "look at the picture" applies directly here.
+      const paintIllum = (bytesToPaint, label) => {
+        const img = ctx2d.createImageData(rm.realDimW, rm.realDimH);
+        img.data.set(bytesToPaint);
+        ctx2d.putImageData(img, 0, 0);
+        paintLabel(label);
+      };
+      // ⚠️ THE ATTR BUFFER NEEDS REMAPPING TO BE READABLE AT ALL β€” its raw
+      // bytes are NOT meant as a colour: R is a floor index (0/1/2, i.e.
+      // pitch-black on a 0-255 scale), and this scenario's own `packFloorAttr`
+      // call hardcodes G (outdoors) to a constant 255 everywhere something is
+      // drawn. Painted with `img.data.set(...)` directly (this scenario's own
+      // first attempt) the result is a near-uniform saturated green field β€”
+      // technically correct data, completely illegible as a picture. Three
+      // distinct grey bands per floor index, plus BLUE for "nothing drawn
+      // here at all" (alpha=0), makes the actual floor structure visible at a
+      // glance β€” which is what caught this scenario's OWN worst bug (the
+      // whole buffer silently reading 100% floor 2) in about ten seconds,
+      // versus the several rounds of arithmetic that found nothing.
+      const paintAttr = (bytesToPaint, label) => {
+        const img = ctx2d.createImageData(rm.realDimW, rm.realDimH);
+        for (let i = 0; i < rm.realDimW * rm.realDimH; i++) {
+          const r = bytesToPaint[i * 4];
+          const a = bytesToPaint[i * 4 + 3];
+          const grey = r === 0 ? 60 : r === 1 ? 150 : 250;
+          img.data[i * 4] = a > 0 ? grey : 0;
+          img.data[i * 4 + 1] = a > 0 ? grey : 0;
+          img.data[i * 4 + 2] = a > 0 ? grey : 255;
+          img.data[i * 4 + 3] = 255;
+        }
+        ctx2d.putImageData(img, 0, 0);
+        paintLabel(label);
+      };
+      paintAttr(attrBytes, 'real map: buf:scene.attr β€” grey = floor 0/1/2 (dark→light), BLUE = nothing drawn');
+      const a1 = await saveCanvasPng(ctx.runId, 'real-map-attr.png', canvas);
+      if (a1) artifacts.push(a1);
+      paintIllum(bytes, 'real map: illum, five test lights (combined β€” see checks for isolated per-light values)');
+      const a2 = await saveCanvasPng(ctx.runId, 'real-map-illum.png', canvas);
+      if (a2) artifacts.push(a2);
+
+      return {
+        checks,
+        calibration,
+        artifacts,
+        inputs: {
+          scale: rm.scale,
+          worldRect: FIXTURE.worldRect,
+          dim: { w: rm.realDimW, h: rm.realDimH },
+          lights,
+          testPoints: { solidRoof: rm.solidRoof, openSky: rm.openSky, middleOverheadSolid: rm.middleOverheadSolid },
+          orientation: realOrientation,
+        },
+        stats: { ambientByte, ranks: built, byId },
+      };
+    },
+  });
+
   const bench = {
     name: 'floor-lighting',
     title: 'Multi-floor point-light occlusion',
@@ -1418,6 +2357,14 @@ export function createFloorLightingBench({ THREE, log }) {
       'deliberately-raised-tile-cover-occludes-the-unconfigured-light',
       'ordinary-unraised-tile-does-NOT-occlude-the-same-light',
       'the-light-still-reaches-normally-just-outside-every-cover',
+      'attr-solid-roof-point-reads-floor-2',
+      'attr-solid-roof-point-has-NO-overhead-bit',
+      'attr-middle-overhead-point-HAS-the-overhead-bit',
+      'THE-LIVE-BUG-unconfigured-light-under-real-roof-is-NOT-occluded',
+      'control-configured-elevation-IS-occluded-at-the-SAME-point',
+      'control-a-light-on-the-top-floor-is-never-occluded',
+      'control-same-floor-overhead-occludes-even-unconfigured',
+      'control-open-sky-stays-lit',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

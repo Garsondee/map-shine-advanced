@@ -102,7 +102,6 @@ import {
   readGridSizePixels,
   computeCandleWallClippedShape,
   readSceneWallSegments,
-  getActiveSceneFloors,
 } from '../../foundry/index.js';
 import { resolveElevationFloorIndex } from '../../scene/index.js';
 import {
@@ -314,7 +313,7 @@ function createLightEntry({
     uWindCenter: uIllumWindCenter,
     uWindExposure: uIllumWindExposure,
     uWindResponse: uIllumWindResponse,
-    uLightElevationRank,
+    uLightExpectedDepth,
     uApLampHeight,
     apApertures,
   } = buildPointLightIlluminationMaterial({
@@ -353,6 +352,12 @@ function createLightEntry({
     // never a second copy of any of the three.
     sunShadowSlotNodes: envLight.sunShadowSlotNodes,
     attrTexNode: envLight.attrTexNode,
+    // THE HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04). See point-light-
+    // illumination.js's own "STAGE 2" header. `attrTexNode` just above stays
+    // wired for the SEPARATE sun-shadow floor blend it also feeds; it no
+    // longer reaches the height gate at all.
+    depthTexNode: envLight.depthTexNode,
+    depthFlagsTexNode: envLight.depthFlagsTexNode,
     blendSunVisibilityAcrossFloors,
   });
   const mesh = new THREE.Mesh(geometry, material);
@@ -373,9 +378,10 @@ function createLightEntry({
     // and carries the visible coloured glow plus every animated light effect,
     // so leaving it un-gated left the author watching an animated light paint
     // straight through a floor while the illumination underneath it correctly
-    // went dark. Same node, same uniform name, one resolved rank pushed into
+    // went dark. Same node, same uniform name, one resolved value pushed into
     // both below.
-    attrTexNode: envLight.attrTexNode,
+    depthTexNode: envLight.depthTexNode,
+    depthFlagsTexNode: envLight.depthFlagsTexNode,
     animation: animationEntry,
     uGlobalTimeMs,
     uRatio,
@@ -470,7 +476,7 @@ function createLightEntry({
     uEdgeCount,
     uEdgeSoftMargin,
     edgePoints,
-    uLightElevationRank,
+    uLightExpectedDepth,
     uBackgroundColor,
     uDimColor,
     uBrightColor,
@@ -478,7 +484,7 @@ function createLightEntry({
     colorationMaterial: colorationBuilt.material,
     uColorationAttenuationEased: colorationBuilt.uAttenuationEased,
     uColorationAlpha: colorationBuilt.uColorationAlpha,
-    uColorationLightElevationRank: colorationBuilt.uLightElevationRank,
+    uColorationLightExpectedDepth: colorationBuilt.uLightExpectedDepth,
     uLightColor: colorationBuilt.uLightColor,
     uShadows: colorationBuilt.uShadows,
     // ANIMATED LIGHTS — GPU-ONLY (2026-07-20): these four raw uniforms are
@@ -570,6 +576,20 @@ function createLightEntry({
  *   uniform node. NOT owned here — see the module header's "deliberately did
  *   not move" section. Written (`.value = env.time.tMs`) once per frame by
  *   `update()`, on the caller's behalf.
+ * @param {(elevation: number) => number} deps.resolveExpectedDepth - THE
+ *   DEPTH-AUTHORITY HEIGHT GATE's own CPU resolver (STAGE 2, 2026-08-04),
+ *   INJECTED rather than imported for the SAME reason
+ *   `blendSunVisibilityAcrossFloors` is: `vt/scene-depth.js` (where
+ *   `computeLightExpectedDepth` and the depth authority's own `maxRank` live)
+ *   cannot be imported from `effects/` — `vt/` already imports FROM
+ *   `effects/`, and this codebase's layering is one-way. `vt-pan-viewer.js`
+ *   composes this from `depthAuthority.rankOfElevation(elevation)` +
+ *   `computeLightExpectedDepth(rank, depthAuthority.maxRank)`, called fresh
+ *   per light per frame by `update()`'s own refresh loop (replacing
+ *   `resolveLightElevationRank`/`resolveAnchorElevationRank` for ordinary
+ *   Foundry lights — candle/lightning still use the old resolvers, a
+ *   deliberate, named deferral, see `point-light-illumination.js`'s own
+ *   "STAGE 2" header).
  * @returns {{
  *   lightScene: object, colorationScene: object, apertureShadowScene: object,
  *   lightMeshes: Map, candleWallClipCache: Map, lightningWallClipCache: Map,
@@ -590,6 +610,7 @@ export function createPointLightPool({
   getLightningActiveStrands,
   getApertureGoboRenderState,
   uGlobalTimeMs,
+  resolveExpectedDepth,
 }) {
   /** A tiny dedicated Scene for point-light meshes — kept separate from the
    * world scene so a MAX-blended accumulate pass never has to filter out
@@ -738,19 +759,10 @@ export function createPointLightPool({
     // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
     // header for why this lives in the reader, not here).
     const { lights: foundryLights } = readActiveLightSources(darkness01);
-    // THE HEIGHT/ELEVATION GATE's ONE per-frame lookup (2026-08-03) — read
-    // once, reused per light below (`resolveLightElevationRank`),
-    // mirroring `stampVegetationRenderOrders`'s own "same Level data every
-    // floor-aware reader in the viewer already reads" posture. `globalThis.
-    // canvas`, never a bare `canvas` reference — this project's own
-    // recurring shadowing trap (see vt-pan-viewer.js's identical guard).
-    let floorsForLightHeight = [];
-    try {
-      const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
-      if (floorsResult.ok) floorsForLightHeight = floorsResult.floors;
-    } catch (err) {
-      log.error('point light height gate: getActiveSceneFloors failed — every light reaches everything:', err);
-    }
+    // THE HEIGHT/ELEVATION GATE's OWN per-frame floor lookup — RETIRED here
+    // (STAGE 2, 2026-08-04): `resolveExpectedDepth` (injected) resolves
+    // straight from `depthAuthority`'s already-rebuilt rank table, no
+    // separate `getActiveSceneFloors` call needed for this consumer any more.
     // CANDLE LIGHTS (effects/candle-flame-render.js) — authored by us from the
     // anchor authority, shaped EXACTLY like a Foundry light source so they flow
     // through this SAME pool: region-aware ambient, the soft edge, coloration
@@ -1217,23 +1229,34 @@ export function createPointLightPool({
         if (entry.uColorIntensityRaw) entry.uColorIntensityRaw.value = light.animation.intensityRaw;
       }
       entry.uRatio.value = light.ratio;
-      // HEIGHT/ELEVATION GATE (2026-08-03) — see `resolveLightElevationAbove
-      // Floor`'s own doc and `point-light-illumination.js`'s "HEIGHT/
-      // ELEVATION GATE" section. `light.elevation` is `undefined` for candle/
-      // lightning lights (built by `buildCandleLightSources`/
-      // `buildLightningLightSources`, neither of which carries the field) —
-      // `resolveLightElevationRank` reads that the same as an
-      // untouched Foundry light (raw 0) and returns the unconfigured
-      // sentinel, so those light types keep their pre-existing, ungated
-      // reach with no special-casing here.
-      if (entry.uLightElevationRank) {
-        const lightRank = resolveLightElevationRank(light, floorsForLightHeight);
-        entry.uLightElevationRank.value = lightRank;
+      // HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04). See point-light-
+      // illumination.js's own "STAGE 2 — THE DEPTH-AUTHORITY HEIGHT GATE"
+      // section. `light.elevation` is `undefined` for candle/lightning-CAST
+      // lights (built by `buildCandleLightSources`/`buildLightningLightSources`,
+      // neither of which carries the field — their own FLAME SPRITE/BOLT
+      // RIBBON visuals are a completely separate render path, still gated by
+      // the OLD `resolveAnchorElevationRank`, see that function's own doc);
+      // `resolveExpectedDepth` normalizes that the same way
+      // `resolveLightElevationRank` used to (undefined/non-finite → treated
+      // as elevation 0 — `depth-authority.js#rankOfElevation`'s own "no
+      // special-casing needed" design point), so those light types keep
+      // their pre-existing, ungated-by-default reach with no branch here.
+      if (entry.uLightExpectedDepth && resolveExpectedDepth) {
+        const expectedDepth = resolveExpectedDepth(light.elevation);
+        entry.uLightExpectedDepth.value = expectedDepth;
         // The coloration twin carries its OWN copy of this uniform (two
         // independently-built materials, same light) — it must be pushed too,
-        // or the animated glow gates against a stale sentinel and keeps
+        // or the animated glow gates against a stale value and keeps
         // drawing through solid floors.
-        if (entry.uColorationLightElevationRank) entry.uColorationLightElevationRank.value = lightRank;
+        if (entry.uColorationLightExpectedDepth) entry.uColorationLightExpectedDepth.value = expectedDepth;
+        // RAW elevation, stashed for the diagnostics ONLY (vt-pan-viewer.js's
+        // own height-gate report) — the ONE number an author can check
+        // straight against Foundry's own light sheet, unlike `expectedDepth`
+        // itself (an opaque depth-space float — feedback_aggregate_cannot_
+        // name_the_source). `null`, never `undefined`, for a candle/lightning
+        // -cast light that carries no elevation field at all — the report's
+        // own "was this ever a real Foundry elevation" question.
+        entry.lastElevationRaw = Number.isFinite(light.elevation) ? light.elevation : null;
       }
       // NOT floored (2026-07-19, reversed same day — see
       // keyhole-attenuation-floor-reverted memory). A direct side-by-side

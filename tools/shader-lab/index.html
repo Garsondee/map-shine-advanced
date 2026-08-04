@@ -207,6 +207,11 @@
         <div id="floorLightLegend">no frame rendered</div>
         <div id="floorLightStatus">loading…</div>
       </div>
+      <div id="sceneDepthLeft" style="display: none">
+        <canvas id="sceneDepthView" width="512" height="512"></canvas>
+        <div id="sceneDepthLegend">no frame rendered</div>
+        <div id="sceneDepthStatus">loading…</div>
+      </div>
       <div id="deriveLeft" style="display: none">
         <canvas id="deriveView" width="1024" height="476"></canvas>
         <div id="deriveLegend">no grid derived</div>
@@ -243,6 +248,7 @@
           <option value="blend">Blend neutrality + MRT (rung 3)</option>
           <option value="floor-lighting">Multi-floor light occlusion (rung 3)</option>
           <option value="aperture-gobo">Aperture gobo — wall/window/light (rung 3)</option>
+          <option value="scene-depth">Depth authority — order-independent occlusion (rung 4)</option>
         </select>
       </fieldset>
       <div id="specPanel" style="display: none">
@@ -469,6 +475,13 @@
           <button id="floorLightRun">Run scenario</button>
         </fieldset>
       </div>
+      <div id="sceneDepthPanel" style="display: none">
+        <fieldset>
+          <legend>Depth authority — order-independent occlusion (rung 4)</legend>
+          <select id="sceneDepthScenario"></select>
+          <button id="sceneDepthRun">Run scenario</button>
+        </fieldset>
+      </div>
       <div id="apertureGoboPanel" style="display: none">
         <fieldset>
           <legend>Aperture gobo — wall/window/light (rung 3)</legend>
@@ -649,6 +662,7 @@
     <script type="module" src="/tools/shader-lab/sun-shadow-lab.js"></script>
     <script type="module" src="/tools/shader-lab/floor-lighting-lab.js"></script>
     <script type="module" src="/tools/shader-lab/aperture-gobo-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/scene-depth-lab.js"></script>
     <!-- LAST: owns the view column, so its answer wins over every bench's own
          (see view-visibility.js's header for why that is one file's job). -->
     <script type="module" src="/tools/shader-lab/view-visibility.js"></script>

@@ -105,12 +105,32 @@ import {
   decodeOverheadBit,
   decodeReceiverElevationLevel,
 } from './scene-attr.js';
+import {
+  describeSceneDepthTarget,
+  rankToDepthZ,
+  computeExpectedStoredDepth,
+  computeLightExpectedDepth,
+  computeSceneDepthFlags,
+  resolveSceneDepthFloorIndex,
+  buildSceneDepthWriterMaterial,
+  buildSceneDepthProxyMesh,
+  querySceneDepth,
+  DEPTH_PASS_CAMERA_Z,
+  DEPTH_PASS_NEAR,
+  DEPTH_PASS_FAR,
+} from './scene-depth.js';
 import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
-import { sortByLayer, resolveElevationFloorIndex, compareLayerKeys } from '../scene/layer-order.js';
+import { resolveElevationFloorIndex, compareLayerKeys } from '../scene/layer-order.js';
+// THE ZONE'S ONE DOOR (zones/one-door) — unlike the layer-order/world-quad/
+// occlusion imports just above and below (pre-existing, tolerated debt at
+// this ratchet's current bound), this is a NEW import: it goes through
+// `scene/index.js` from the start rather than adding a further direct
+// reach-into-internals.
+import { createDepthAuthority } from '../scene/index.js';
 import {
   computeCameraFrustum,
   worldToNdc,
@@ -202,8 +222,6 @@ import {
   // left with the vegetation-shadow code in extraction step 2 — this file has
   // no remaining caller for any of them.)
   createPointLightPool,
-  LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
-  ELEVATION_RANK_FRACTION_DIVISOR,
   createWaterBodySubsystem,
   createWaterSurfaceSubsystem,
   createFluidSurfaceSubsystem,
@@ -553,6 +571,13 @@ function disposeActive() {
     _active.disposeSceneColor?.();
   } catch (err) {
     console.error('[vt-pan-viewer] scene.color dispose failed — VRAM may be leaked:', err);
+  }
+  // buf:scene.depth — the SAME per-cycle VRAM-leak reasoning as scene.color,
+  // plus every depth-proxy material this session's pass built.
+  try {
+    _active.disposeSceneDepth?.();
+  } catch (err) {
+    log.error('scene.depth dispose failed — VRAM may be leaked:', err);
   }
   // light.accumulate's scene.illum + scene.lit — same per-cycle VRAM-leak
   // reasoning as scene.color above. Uses the scoped logger (log/one-door), so
@@ -1438,6 +1463,14 @@ export async function startVtPanViewer({
     // B0-1 §2.1's RGBA8/Nearest/NoColorSpace, named 'attr' for `MRTNode`.
     const describeSceneColorMrt = () => describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
     const sceneColor = allocator.create('scene.color', describeSceneColorMrt());
+    // `buf:scene.depth` (docs/planning/Depth-Buffer.md) — finally real, not
+    // just reserved (`graph/passes.js:185` has named `geometry.world` as its
+    // creator since the pass graph was written). Its OWN screen-sized target,
+    // never sharing scene.color's attachments — see `runSceneDepthPass`'s own
+    // header for why this pass needs a REAL depth TEST, which the rest of
+    // this renderer deliberately runs with `depthTest:false` everywhere.
+    const describeSceneDepth = () => describeSceneDepthTarget({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
+    const sceneDepth = allocator.create('scene.depth', describeSceneDepth());
     // Renderer-global safe default: every material that doesn't declare its
     // own `mrtNode` writes `attr = vec4(0,0,0,0)` for free — zero changes to
     // existing transparent materials. `runGeometryWorldPass` scopes this to
@@ -1752,6 +1785,12 @@ export async function startVtPanViewer({
       // (setSunShadowFloorIndex, pushed for every slot every frame right
       // after sunShadows.maybeBake).
       attrTexture: sceneColor.textures?.[1] ?? null,
+      // THE HEIGHT/ELEVATION GATE's OWN HUB — STAGE 2 (2026-08-04). Same
+      // non-deferred, resize-stable pattern as `attrTexture` just above
+      // (`ThreeAllocator#resize` mutates `sceneDepth` in place, never
+      // reassigns it — see `scene-depth.js#describeSceneDepthTarget`).
+      depthTexture: sceneDepth.depthTexture ?? null,
+      depthFlagsTexture: sceneDepth.texture ?? null,
     });
     envLight.setOutdoorsRect(outdoorsRect);
     // No one-time initial rect push needed any more (2026-08-02): each slot's
@@ -2068,6 +2107,28 @@ export async function startVtPanViewer({
       getLightningActiveStrands: () => lightningSubsystem.activeStrands(),
       getApertureGoboRenderState,
       uGlobalTimeMs,
+      // THE HEIGHT/ELEVATION GATE's OWN CPU RESOLVER — STAGE 2 (2026-08-04).
+      // `effects/lighting/` cannot import `vt/scene-depth.js` directly (`vt/`
+      // already imports FROM `effects/` — `scene-attr.js`'s own
+      // `buildWorldSpaceOutdoorsGate` — and this codebase's layering is
+      // one-way), so this composes the two pieces and hands the pool a plain
+      // function, the SAME injection discipline `blendSunVisibilityAcrossFloors`
+      // already uses. `depthAuthority` is declared with `const` FURTHER DOWN
+      // this function — safe to close over here because this arrow function
+      // is not INVOKED until `pointLights.update()` runs from the frame loop,
+      // long after that declaration has executed (the exact same TDZ-safe
+      // pattern as `getWindHandle` just above — see this function's own
+      // header, "GETTERS VS VALUES").
+      resolveExpectedDepth: (elevation) => {
+        // `light.elevation` is `undefined` for candle/lightning-CAST lights
+        // (point-light-pool.js#update's own comment) — normalized to 0 here,
+        // mirroring the old `resolveLightElevationRank`'s identical guard,
+        // because `depthAuthority.rankOfElevation` feeds `scene/layer-
+        // order.js#makeLayerKey`, which THROWS on a non-number elevation.
+        const safeElevation = Number.isFinite(elevation) ? elevation : 0;
+        const rank = depthAuthority.rankOfElevation(safeElevation);
+        return computeLightExpectedDepth(rank, depthAuthority.maxRank);
+      },
     });
 
     // ------------------------------------------------------------------
@@ -3978,6 +4039,31 @@ export async function startVtPanViewer({
       profiler?.end(Z.geomDoors);
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
+      // buf:scene.depth — its OWN target, OWN camera, OWN scene; never shares
+      // sceneColor's MRT (no mrtNode/setMRT concern here at all: this pass's
+      // material uses `fragmentNode`, which bypasses MRT entirely regardless —
+      // see vt/scene-depth.js's own header). Runs every frame, same cadence
+      // as the world draw above, over whatever `rebuildSceneDepthProxies`
+      // last derived from residency — never rebuilt here.
+      profiler?.begin(Z.geomDepth);
+      runSceneDepthPass();
+      profiler?.end(Z.geomDepth);
+    }
+    function runSceneDepthPass() {
+      // clearDepth scoped, never left set — the rest of this renderer runs
+      // with depthTest:false everywhere (design doc §2: this pass is the ONE
+      // place a real Z exists), so a leaked value is harmless to every other
+      // draw today, but save/restore anyway, the same defensive discipline
+      // `runOrientationSelfTest` already established for exactly this class
+      // of stale GPU state.
+      const prevClearDepth = renderer.getClearDepth();
+      renderer.setRenderTarget(sceneDepth);
+      renderer.setClearColor(0x000000, 0);
+      renderer.setClearDepth(1); // LessDepth wins under this pass's own camera — see vt/scene-depth.js's header
+      renderer.clear(true, true, true);
+      renderer.render(depthScene, depthCamera);
+      renderer.setRenderTarget(null);
+      renderer.setClearDepth(prevClearDepth);
     }
     function runPresentCompositePass() {
       // THE SUN-SHADOW DEBUG VIEW (author, 2026-07-26) — when a view is picked
@@ -5096,6 +5182,17 @@ export async function startVtPanViewer({
     // different elevations on the same floor — the thing a per-floor model
     // structurally cannot express.
     const itemStates = new Map();
+    // THE DEPTH AUTHORITY (docs/planning/Depth-Buffer.md, stage 1) — ONE
+    // instance for this viewer's lifetime. `updateResidencyUnguarded`'s own
+    // `depthAuthority.rebuild(...)` call, below, replaces a bare
+    // `sortByLayer(...)` call with a drop-in that ALSO publishes a live rank
+    // table: real, running usage from the moment it lands (`tools/verify-
+    // structure.mjs`'s own `graph/reachable-from-boot` ratchet exists
+    // precisely to refuse a wall nothing calls). No consumer reads it yet —
+    // stage 1 is deliberately scoped to "the authority exists and is fed
+    // real data", nothing more. See `scene/depth-authority.js`'s own header
+    // for why a rank is exactly `sortByLayer`'s existing ordinal, nothing new.
+    const depthAuthority = createDepthAuthority();
     const itemLoadErrors = [];
     /**
      * Items whose source is permanently broken (404, undecodable) — never
@@ -5553,6 +5650,21 @@ export async function startVtPanViewer({
 
     const scene = new THREE.Scene();
 
+    // buf:scene.depth's OWN scene — proxy meshes, never the production meshes
+    // above ([[feedback_diagnostic_must_not_render_production_materials_elsewhere]]:
+    // rendering a production mesh through a second material PERMANENTLY
+    // corrupts its compiled GPU pipeline). Rebuilt wholesale on every
+    // residency pass (`rebuildSceneDepthProxies`, called from
+    // `updateResidencyUnguarded`) — cheap, since every proxy mesh SHARES an
+    // item's own tile geometry rather than allocating any of its own, and
+    // residency passes are already event-driven, never per-frame.
+    const depthScene = new THREE.Scene();
+    /** @type {Array<{mesh: *, material: *}>} the depth scene's OWN current
+     * children — tracked here (not read back off `depthScene.children`, which
+     * would also see anything else ever added to it) so a rebuild disposes
+     * EXACTLY what the last rebuild created, nothing more, nothing less. */
+    let depthProxyEntries = [];
+
     // ── WATER TIER 0: the surface (effects/water/water-surface-subsystem.js)
     // Constructed HERE, after `scene` — that module owns the mesh, the
     // AABB crop and the high-res mask load, and its header explains why the
@@ -5730,6 +5842,21 @@ export async function startVtPanViewer({
     // moment anything has to sit at a specific spot in a padded canvas.
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
 
+    // buf:scene.depth's OWN dedicated camera — NEVER the shared world camera
+    // above. `camera`'s near/far (-1,1) have never needed to mean anything
+    // precise (every existing drawable sits at world Z=0); this pass needs a
+    // real, meaningful Z range, so it gets its own, built from the EXACT
+    // parameters `tools/shader-lab/bench-scene-depth.js` already proved
+    // (position z=5, looking at the origin, `depthFunc:LessDepth`, clear
+    // depth 1) — see vt/scene-depth.js's own header, "WHY A DEDICATED CAMERA".
+    // Only X/Y framing is ever shared with `camera` (below, in `updateCamera`),
+    // via the SAME pure `computeCameraFrustum` call, never the camera object
+    // itself — that is what keeps `screenUV` indexing the same world position
+    // in both this pass and the main world draw without coupling their Z axes.
+    const depthCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, DEPTH_PASS_NEAR, DEPTH_PASS_FAR);
+    depthCamera.position.set(0, 0, DEPTH_PASS_CAMERA_Z);
+    depthCamera.lookAt(0, 0, 0);
+
     /**
      * Point the camera at the current view rect.
      *
@@ -5754,6 +5881,13 @@ export async function startVtPanViewer({
       camera.top = f.top;
       camera.bottom = f.bottom;
       camera.updateProjectionMatrix();
+      // depthCamera shares ONLY this X/Y framing — its OWN near/far/position
+      // (set once, above) are never touched here.
+      depthCamera.left = f.left;
+      depthCamera.right = f.right;
+      depthCamera.top = f.top;
+      depthCamera.bottom = f.bottom;
+      depthCamera.updateProjectionMatrix();
     }
 
     // ======================================================================
@@ -8031,6 +8165,7 @@ export async function startVtPanViewer({
       masksDraw: profiler?.indexOf('masks.occlusionDraw') ?? -1,
       geomWorld: profiler?.indexOf('geometry.worldDraw') ?? -1,
       geomDoors: profiler?.indexOf('geometry.doorDraw') ?? -1,
+      geomDepth: profiler?.indexOf('geometry.depthDraw') ?? -1,
       lightAmbient: profiler?.indexOf('light.ambient') ?? -1,
       lightSunBake: profiler?.indexOf('light.sunShadowBake') ?? -1,
       lightWaterBake: profiler?.indexOf('light.waterBodyBake') ?? -1,
@@ -8533,6 +8668,79 @@ export async function startVtPanViewer({
      * jam the cache (`misses: 1062`) so real requests get refused — which is
      * blur at best, and starves everything else at worst.
      */
+    /**
+     * REBUILD `buf:scene.depth`'s draw list — called once per residency pass
+     * (from `updateResidencyUnguarded`, after every item's placement/mesh/
+     * visibility is finalised for THIS pass), never per frame. Wholesale
+     * rebuild rather than incremental add/remove: residency already touches
+     * every item's `state.wholeImage.tiles[]` on its OWN cadence, and a
+     * proxy mesh is cheap (it shares an item's own tile geometry — see
+     * `buildSceneDepthProxyMesh`'s own doc — and the material is a handful of
+     * uniforms, no texture load) — so re-deriving the whole set from the
+     * CURRENT, authoritative `itemStates` is simpler and safer than trying to
+     * track every individual tile creation/removal site (three separate
+     * `scene.add(mesh)` call sites feed `state.wholeImage.tiles[]` today —
+     * `feedback_mode_forks_silently_drop_features` is the standing warning
+     * against hoping to have found all of them).
+     *
+     * Only items with a `state.wholeImage.tiles[]` entry participate — this
+     * is EXACTLY the set `depthAuthority.rebuild(items)` already ranks
+     * (Level backgrounds/foregrounds, tiles, tokens all funnel through
+     * `ensureWholeImageMeshes`, confirmed by reading that function's own
+     * body, not assumed). Vegetation Case 2 overlays (a tree/bush drawn ON a
+     * host tile, `state.vegetationOverlays`) are a NAMED gap, not a silent
+     * one: they are not part of `items`/`depthAuthority`'s own ranking today,
+     * and the design doc's own layer tables don't ask for them in v1 either.
+     *
+     * `t.mesh?.visible` is the SAME flag `refreshWholeImageItem` just set for
+     * the colour pass a few lines up in `updateResidencyUnguarded` — a tile
+     * still loading (no `t.mesh` yet) or hidden this pass (off-screen, an
+     * isolate-item filter, or dropped off the draw list on a floor switch)
+     * is excluded here exactly the way it is excluded from what the player
+     * sees, so this pass never ranks a surface nothing is actually drawing.
+     *
+     * @param {Array<object>} items - `depthAuthority.rebuild`'s own return
+     *   (already ranked; this function only READS ranks, never re-derives them).
+     */
+    function rebuildSceneDepthProxies(items) {
+      for (const entry of depthProxyEntries) {
+        depthScene.remove(entry.mesh);
+        entry.material.dispose();
+      }
+      depthProxyEntries = [];
+      const maxRank = depthAuthority.maxRank;
+      const sceneDoc = globalThis.canvas?.scene ?? null;
+      const viewedFloorIndex = view?.floorIndex ?? 0;
+      for (const item of items) {
+        const state = itemStates.get(item.id);
+        const tiles = state?.wholeImage?.tiles;
+        if (!tiles?.length) continue;
+        const rank = depthAuthority.rankOf(item);
+        if (rank == null) continue;
+        const z = rankToDepthZ(rank, maxRank);
+        const floorIndex = resolveSceneDepthFloorIndex({
+          item,
+          sceneDoc,
+          viewedFloorIndex,
+          logError: (msg, err) => log.error(msg, err),
+        });
+        const flags = computeSceneDepthFlags(item);
+        for (const t of tiles) {
+          if (!t.mesh?.visible) continue;
+          const material = buildSceneDepthWriterMaterial({
+            THREE,
+            tex: t.tex,
+            alphaThreshold: item.alphaThreshold ?? 0.75,
+            floorIndex,
+            flags,
+          });
+          const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
+          depthScene.add(mesh);
+          depthProxyEntries.push({ mesh, material });
+        }
+      }
+    }
+
     async function updateResidencyUnguarded() {
       // Refreshed every pass, not cached — the scene's total pack count
       // changes as documents are created/deleted, and a NEW item created since
@@ -8551,10 +8759,14 @@ export async function startVtPanViewer({
       // had alpha. `alphaRequested` dedupes, so this is one decode per item per
       // session no matter how often residency runs.
       primeCoverAlphaGrids();
-      // sortByLayer stamps `renderOrder` on each item — THE law
-      // (scene/layer-order.js). Rebuilt every update because the draw list
-      // itself changes with the viewed floor.
-      const items = sortByLayer(buildItems(view.floorIndex));
+      // depthAuthority.rebuild stamps `renderOrder` on each item via THE law
+      // (scene/layer-order.js#sortByLayer — this IS that sort, not a second
+      // one; see the depth authority's own doc for why it returns the sorted
+      // array as a drop-in) AND publishes a live rank table
+      // (docs/planning/Depth-Buffer.md, stage 1 — no consumer reads it yet).
+      // Rebuilt every update because the draw list itself changes with the
+      // viewed floor.
+      const items = depthAuthority.rebuild(buildItems(view.floorIndex));
       // Vegetation sorts at its OWN elevation inside the host floor's band, not
       // at its host's — the author-ruled exception (see VegetationKind#
       // passiveElevationFraction). Must run HERE, with the freshly sorted list:
@@ -8705,6 +8917,12 @@ export async function startVtPanViewer({
         ensureVegetationOverlay(state, item);
         refreshVegetationOverlay(state, item, show, changed);
       }
+
+      // Every item's placement/mesh/visibility for THIS pass is now final —
+      // exactly the moment buf:scene.depth's own draw list must be re-derived
+      // from (see rebuildSceneDepthProxies's own header for why wholesale,
+      // not incremental).
+      rebuildSceneDepthProxies(items);
 
       lastItems = items;
     }
@@ -9233,6 +9451,17 @@ export async function startVtPanViewer({
         // single-attachment one) so the keyhole-law check sees the SAME
         // shape this target was actually created with.
         allocator.resize(sceneColor, drawBufW, drawBufH, describeSceneColorMrt());
+        // buf:scene.depth tracks the drawing buffer too — same screenSized
+        // law. The depth TEXTURE's own dimensions are NOT touched by
+        // `RenderTarget#setSize()` directly (verified against the vendored
+        // source — it only mutates `this.textures[]`, never `this.depthTexture`),
+        // but the WebGPU backend re-reads the render target's OWN current
+        // width/height and re-syncs the depth texture's `.image` dimensions
+        // to match, lazily, the next time this target is actually rendered to
+        // (three.webgpu.js's own render-target-preparation code) — so this
+        // resize call is still sufficient, just via a different mechanism
+        // than the eager one the colour attachment gets.
+        allocator.resize(sceneDepth, drawBufW, drawBufH, describeSceneDepth());
         // light.accumulate's targets track the drawing buffer too (same
         // screenSized law). setSize mutates textures in place, so the samplers
         // stay valid; rebind* only flag needsUpdate.
@@ -10463,6 +10692,18 @@ export async function startVtPanViewer({
         // (three.webgpu.js:49456, `var _geometry2 = new QuadGeometry()`).
         // Disposing it would break every other fullscreen pass three runs.
       },
+      /** Tear down buf:scene.depth + every depth-proxy material this pass
+       * built. NOT the proxy meshes' geometry — every one of them SHARES an
+       * item's own tile geometry (`disposeActive`'s own `itemStates` loop
+       * disposes that), never a copy this pass owns. */
+      disposeSceneDepth() {
+        allocator.dispose(sceneDepth);
+        for (const entry of depthProxyEntries) {
+          depthScene.remove(entry.mesh);
+          entry.material.dispose();
+        }
+        depthProxyEntries = [];
+      },
       /** Tear down light.accumulate's targets + materials (see disposeActive).
        * Geometry is the shared QuadGeometry — never disposed, same as present. */
       disposeLighting() {
@@ -10843,6 +11084,176 @@ export async function startVtPanViewer({
         };
       },
 
+      /**
+       * SCENE-DEPTH SELF-TEST — the SAME "real pixels, through the real
+       * chain" discipline `runOrientationSelfTest` established, aimed at
+       * `vt/scene-depth.js` (docs/planning/Depth-Buffer.md) instead: this
+       * calls the REAL production module — `describeSceneDepthTarget`,
+       * `buildSceneDepthWriterMaterial`, `buildSceneDepthProxyMesh`,
+       * `querySceneDepth`, `computeExpectedStoredDepth` — never a lab-only
+       * stand-in, and it is what makes this file the FIRST real caller of
+       * that module (`graph/reachable-from-boot`'s own ratchet: a wall
+       * built and never wired is the failure this repo exists to prevent).
+       *
+       * Allocates its own small, temporary targets (through the
+       * newly-extended `ThreeAllocator`, which is what actually proves its
+       * real `depthTexture:true` support on a real device, not just in a
+       * mock) and disposes them when done — it never touches `sceneColor`,
+       * `camera`, or anything the live map depends on.
+       *
+       * Three known ranks (0,1,2 of 3), drawn as three world-space strips
+       * through the REAL depth-writer material and this pass's own
+       * dedicated camera (`DEPTH_PASS_CAMERA_Z/NEAR/FAR` — see
+       * `scene-depth.js`'s own header for why this pass never reuses the
+       * shared world camera). Then the QUERY half: a SEPARATE material
+       * samples the just-written depth texture and compares it against
+       * `computeExpectedStoredDepth(0, maxRank)` — rank 0's own expected
+       * depth, resolved on the CPU with NO drawn geometry of its own,
+       * exactly the shape a future light's occlusion gate needs. This is
+       * the empirical check that formula's own header promises
+       * ("verified against the GPU's own actual output, not trusted on the
+       * algebra alone") — done here, for real, on production code, rather
+       * than only in the lab.
+       *
+       * @returns {Promise<{ok:boolean, diagnosis:string, measured:object, note:string}>}
+       */
+      async runSceneDepthSelfTest() {
+        const W = 64;
+        const H = 64;
+        const rect = { minX: 0, minY: 0, maxX: 300, maxY: 100 };
+        const maxRank = 3;
+        const strips = [
+          { x0: 0, x1: 100, rank: 0 },
+          { x0: 100, x1: 200, rank: 1 },
+          { x0: 200, x1: 300, rank: 2 },
+        ];
+
+        const testTarget = allocator.create(
+          'scene.depth.selftest',
+          describeSceneDepthTarget({ THREE, resolvedW: W, resolvedH: H })
+        );
+        const frustum = computeCameraFrustum(rect);
+        // Named DISTINCTLY from the live per-frame pass's own persistent
+        // `depthCamera` (closure-scoped near `scene`/`camera`) — this one is
+        // local to the self-test, built and torn down every run; the shadow
+        // would be harmless (each is only ever read within its own scope)
+        // but confusing for a future reader, so it gets its own name.
+        const selfTestCamera = new THREE.OrthographicCamera(
+          frustum.left,
+          frustum.right,
+          frustum.top,
+          frustum.bottom,
+          DEPTH_PASS_NEAR,
+          DEPTH_PASS_FAR
+        );
+        selfTestCamera.position.set(0, 0, DEPTH_PASS_CAMERA_Z);
+        selfTestCamera.lookAt(0, 0, 0);
+        selfTestCamera.updateProjectionMatrix();
+
+        const writeScene = new THREE.Scene();
+        const disposables = [];
+        for (const s of strips) {
+          const placement = {
+            x: (s.x0 + s.x1) / 2,
+            y: (rect.minY + rect.maxY) / 2,
+            width: s.x1 - s.x0,
+            height: rect.maxY - rect.minY,
+            anchorX: 0.5,
+            anchorY: 0.5,
+            rotation: 0,
+          };
+          const corners = computeQuadCorners(placement);
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute('position', new THREE.BufferAttribute(buildQuadPositions(corners), 3));
+          geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+          geo.setIndex([...QUAD_INDICES]);
+          const mat = buildSceneDepthWriterMaterial({ THREE, floorIndex: s.rank, flags: 0 });
+          const mesh = buildSceneDepthProxyMesh({
+            THREE,
+            geometry: geo,
+            material: mat,
+            z: rankToDepthZ(s.rank, maxRank),
+          });
+          writeScene.add(mesh);
+          disposables.push(geo, mat);
+        }
+
+        const prevTarget = renderer.getRenderTarget();
+        const prevClearDepth = renderer.getClearDepth();
+        renderer.setRenderTarget(testTarget);
+        renderer.setClearColor(0x000000, 0);
+        renderer.setClearDepth(1);
+        renderer.clear(true, true, true);
+        await renderer.renderAsync(writeScene, selfTestCamera);
+        renderer.setRenderTarget(prevTarget);
+        renderer.setClearDepth(prevClearDepth);
+        for (const d of disposables) d.dispose?.();
+
+        // THE QUERY HALF — a SEPARATE material, no geometry of its own to
+        // sample a reference point from (see this method's own header).
+        const expectedDepthRank0 = computeExpectedStoredDepth(0, maxRank);
+        const { Fn, vec4, float, select } = THREE.TSL;
+        const queryMaterial = new THREE.NodeMaterial();
+        queryMaterial.depthTest = false;
+        queryMaterial.depthWrite = false;
+        const q = querySceneDepth(THREE.TSL, {
+          depthTexture: testTarget.depthTexture,
+          expectedDepth: float(expectedDepthRank0),
+        });
+        queryMaterial.fragmentNode = Fn(() =>
+          vec4(select(q.isAbove, float(1), float(0)), q.storedDepth, float(0), float(1))
+        )();
+        const queryTarget = allocator.create('scene.depth.selftest.query', {
+          resolvedW: W,
+          resolvedH: H,
+          screenSized: true,
+          type: THREE.UnsignedByteType,
+          colorSpace: THREE.NoColorSpace,
+          filter: 'nearest',
+        });
+        const queryQuad = new THREE.QuadMesh(queryMaterial);
+        renderer.setRenderTarget(queryTarget);
+        queryQuad.render(renderer);
+        renderer.setRenderTarget(prevTarget);
+
+        const sampleAt = async (worldX) => {
+          const px = Math.round(((worldX - rect.minX) / (rect.maxX - rect.minX)) * (W - 1));
+          const py = Math.round(0.5 * (H - 1));
+          const raw = await renderer.readRenderTargetPixelsAsync(queryTarget, px, py, 1, 1, 0, 0);
+          return { isAbove: raw[0] > 127, storedDepth01: raw[1] / 255 };
+        };
+        const atRank0 = await sampleAt(50);
+        const atRank1 = await sampleAt(150);
+        const atRank2 = await sampleAt(250);
+
+        allocator.dispose(testTarget);
+        allocator.dispose(queryTarget);
+        queryMaterial.dispose();
+
+        // Rank 0's own drawn geometry vs computeExpectedStoredDepth(0,...)'s
+        // CPU-resolved prediction for the SAME rank — the empirical check
+        // that formula's own header promises. 0.02 tolerance: comfortably
+        // above this 8-bit query target's own ~0.004 quantisation step,
+        // tight enough to catch a genuinely wrong formula (a sign error or
+        // wrong constant would miss by far more than this).
+        const depthMatchesFormula = Math.abs(atRank0.storedDepth01 - expectedDepthRank0) < 0.02;
+        const orderCorrect = atRank0.isAbove === false && atRank1.isAbove === true && atRank2.isAbove === true;
+        const ok = depthMatchesFormula && orderCorrect;
+        return {
+          ok,
+          diagnosis: ok
+            ? 'correct — the real depth-writer material, the allocator´s real depth texture, and the query formula all agree'
+            : !orderCorrect
+              ? `rank ordering wrong: expected [false,true,true] for [rank0,rank1,rank2] vs rank 0´s own expected depth, got [${atRank0.isAbove},${atRank1.isAbove},${atRank2.isAbove}]`
+              : `computeExpectedStoredDepth(0,${maxRank}) predicted ${expectedDepthRank0.toFixed(4)}, the GPU actually wrote ${atRank0.storedDepth01.toFixed(4)} at rank 0´s own drawn location`,
+          measured: { atRank0, atRank1, atRank2, expectedDepthRank0 },
+          note:
+            'Allocates a REAL depthTexture-backed target through ThreeAllocator, writes three known ranks through ' +
+            'the REAL buildSceneDepthWriterMaterial, and queries it back through the REAL querySceneDepth + ' +
+            'computeExpectedStoredDepth — the production module (vt/scene-depth.js), not a lab stand-in.',
+        };
+      },
+
       /** buf:scene.color's live shape — for the diagnostics report. */
       getSceneColorInfo: () => ({
         allocated: !!sceneColor,
@@ -11044,19 +11455,26 @@ export async function startVtPanViewer({
         let colorlessCount = 0; // hasColor === false
         let coloredCount = 0;
         let colorationAlphaSum = 0;
-        // HEIGHT/ELEVATION GATE (2026-08-03) — "the light itself is visible
-        // through its own cover, not being occluded". Reported PER LIGHT
-        // (never just the one sample) because the whole point is to let the
-        // author find THEIR specific lantern's own resolved value rather than
-        // guess from an arbitrary first-found light — a report that only
+        // HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04) — "the light itself is
+        // visible through its own cover, not being occluded". Reported PER
+        // LIGHT (never just the one sample) because the whole point is to let
+        // the author find THEIR specific lantern's own resolved value rather
+        // than guess from an arbitrary first-found light — a report that only
         // showed one sample would be exactly the kind of instrument that
         // cannot answer the question it exists for
-        // (`feedback_instruments_must_not_lie`). `configuredCount` answers
-        // the FIRST, cheapest question — "is ANY light's elevation actually
-        // reaching the shader as non-default" — before looking at any
-        // individual value.
+        // (`feedback_instruments_must_not_lie`). `elevationAuthoredCount`
+        // answers the FIRST, cheapest question — "is ANY light's elevation
+        // actually reaching the shader as non-default" — before looking at
+        // any individual value. Unlike the OLD (pre-2026-08-04) report, there
+        // is no "configured" boolean any more: `depthAuthority.rankOfElevation`
+        // gives EVERY light, touched or not, a real, comparable rank — the
+        // whole point of the redesign (`scene/depth-authority.js`'s own
+        // header). `elevation`, not the resolved `expectedDepth`, is what
+        // gets reported per-light — the RAW number is directly checkable
+        // against Foundry's own light sheet; the resolved depth is an opaque
+        // shader-space float (`feedback_aggregate_cannot_name_the_source`).
         const lightElevations = [];
-        let elevationConfiguredCount = 0;
+        let elevationAuthoredCount = 0;
         // ANIMATED LIGHTS (2026-07-20) — per-type counts, tallied in the SAME
         // pass (no second walk of lightMeshes). `builtByType` counts active
         // lights whose animation resolved to a real registry entry;
@@ -11076,20 +11494,21 @@ export async function startVtPanViewer({
           if (entry.lastHasColor) coloredCount++;
           else colorlessCount++;
           colorationAlphaSum += entry.uColorationAlpha.value;
-          if (entry.uLightElevationRank) {
-            const v = entry.uLightElevationRank.value;
-            const configured = v !== LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
-            if (configured) elevationConfiguredCount++;
-            // Report the rank SPLIT BACK into its two authored halves, not the
-            // packed float — "floor 0, 5ft up" is something the author can
-            // check against Foundry's own light sheet; "0.3125" is not
-            // (feedback_aggregate_cannot_name_the_source).
+          if (entry.uLightExpectedDepth) {
+            const elevation = entry.lastElevationRaw ?? null;
+            if (elevation !== null && elevation !== 0) elevationAuthoredCount++;
+            // `floorIndex`, re-derived here (not stashed at update() time) —
+            // a cheap, pure lookup (`depthAuthority`'s own bisect search,
+            // already paid every frame for the real draw list) the author can
+            // check straight against Foundry's own Levels config, unlike
+            // `expectedDepth` (an opaque shader-space float,
+            // `feedback_aggregate_cannot_name_the_source`).
+            const floorIndex = depthAuthority.floorOfRank(depthAuthority.rankOfElevation(elevation ?? 0));
             lightElevations.push({
               sourceId: id,
-              configured,
-              rank: configured ? v : null,
-              floorIndex: configured ? Math.floor(v) : null,
-              heightAboveFloorBottom: configured ? (v - Math.floor(v)) * ELEVATION_RANK_FRACTION_DIVISOR : null,
+              elevation,
+              floorIndex,
+              expectedDepth: entry.uLightExpectedDepth.value,
             });
           }
           const animType = entry.animationType ?? null;
@@ -11242,17 +11661,17 @@ export async function startVtPanViewer({
           sampleLight,
           colorationSummary,
           candleLightBreakdown,
-          // HEIGHT/ELEVATION GATE (2026-08-03) — PER LIGHT, deliberately not
-          // just one sample: the author needs to find THEIR specific light's
-          // own resolved value, not guess from an arbitrary first-found one.
-          // `configuredCount` answers the cheapest question first — is ANY
-          // light's elevation actually reaching the shader as non-default —
-          // before anyone looks at an individual value. `elevationAboveFloor`
-          // is `null` for an unconfigured light (the sentinel itself is an
-          // internal implementation constant, not a meaningful world height,
-          // so it is never surfaced as a number here).
+          // HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04) — PER LIGHT,
+          // deliberately not just one sample: the author needs to find THEIR
+          // specific light's own resolved value, not guess from an arbitrary
+          // first-found one. `elevationAuthoredCount` answers the cheapest
+          // question first — is ANY light's elevation actually authored
+          // non-default — before anyone looks at an individual value. `null`
+          // `elevation`/`floorIndex` mean a candle/lightning-CAST light (no
+          // Foundry elevation field at all), not "broken" — see
+          // `point-light-pool.js`'s own `lastElevationRaw` doc.
           heightGate: {
-            configuredCount: elevationConfiguredCount,
+            elevationAuthoredCount,
             totalActive: lightElevations.length,
             lights: lightElevations,
           },
@@ -11715,6 +12134,17 @@ export async function refreshVtPanViewerItems(hookName) {
 export async function runOrientationSelfTest() {
   if (!_active) return { skipped: true, reason: 'viewer not started — start it, then run this' };
   return _active.runOrientationSelfTest();
+}
+
+/**
+ * SCENE-DEPTH SELF-TEST — the depth authority's GPU half (docs/planning/
+ * Depth-Buffer.md), exercised for real: a real depthTexture-backed
+ * allocator target, the real depth-writer material, the real query formula.
+ * See `startVtPanViewer`'s own `runSceneDepthSelfTest` for the full mechanism.
+ */
+export async function runSceneDepthSelfTest() {
+  if (!_active) return { skipped: true, reason: 'viewer not started — start it, then run this' };
+  return _active.runSceneDepthSelfTest();
 }
 
 /**

@@ -618,6 +618,112 @@ export function buildHeightGateNode(TSL, { attrHere, uLightElevationRank }) {
 }
 
 /**
+ * MIRRORS `vt/scene-depth.js#DEPTH_FLAG_RESTRICTS_LIGHT`/`DEPTH_FLAG_IS_TILE`
+ * EXACTLY — same reason `RECEIVER_ELEVATION_LEVELS_MIRROR` is a duplicate
+ * rather than an import (this module's own header, just above
+ * `buildHeightGateNode`): `vt/scene-depth.js` cannot be imported from
+ * `effects/`, the same one-way layering `vt/scene-attr.js` already
+ * establishes by importing FROM `effects/`. Pinned against the real values in
+ * `point-light-illumination.test.mjs`.
+ */
+export const DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR = 1;
+export const DEPTH_FLAG_IS_TILE_MIRROR = 16;
+
+/**
+ * ============================================================================
+ * STAGE 2 (2026-08-04) — THE DEPTH-AUTHORITY HEIGHT GATE
+ * ============================================================================
+ * {@link buildHeightGateNode}'s replacement for an ORDINARY Foundry point
+ * light (illumination + coloration only — candle-flame-render.js and
+ * lightning-render.js still call the OLD gate above, a deliberately scoped,
+ * named deferral: those two bake their anchor's elevationRank per-VERTEX into
+ * a batched mesh, a materially different data path this pass did not touch).
+ *
+ * `docs/planning/Light-Elevation-Occlusion-Failure.md`'s whole investigation
+ * was chasing bugs in a system built on `buf:scene.attr` — a lossy,
+ * per-floor-relative, quantized-to-16-levels byte that a live pixel-probe
+ * (2026-08-04) caught reading alpha=0 at a pixel with real, visible,
+ * `meshVisible:true` floor art directly underneath. `buf:scene.depth`
+ * (`vt/scene-depth.js`) replaces the entire quantity this gate compares: no
+ * floor index, no within-floor height bucket, no tolerance band, no softness
+ * band, no unconfigured sentinel — just RANK, a real per-item ordinal
+ * (`scene/depth-authority.js`), compared directly. `uLightExpectedDepth` is
+ * already the CPU-resolved comparable value
+ * (`vt/scene-depth.js#computeLightExpectedDepth`, which ALSO bakes in the
+ * fail-open tie buffer — see that function's own doc for why a bare
+ * `computeExpectedStoredDepth` would risk a light occluding its own floor's
+ * ground on ordinary float noise); this function has no projection math left
+ * to do, unlike `buildHeightGateNode`'s own floor-index-plus-fraction
+ * reconstruction.
+ *
+ * The one piece of the OLD gate this does NOT drop: `PRESENCE_BIT_OVERHEAD`'s
+ * own "ROUND 9" fix (a Tile's explicit Foundry "Restrict Lighting" flag,
+ * elevation-BLIND by Foundry's own design — see `buildHeightGateNode`'s ROUND
+ * 9 header). Rank alone alone does not subsume it: a Tile ticked "Restrict
+ * Lighting" sitting at the SAME rank neighbourhood as the light (no elevation
+ * difference to rank-order it above) would otherwise read as unblocked.
+ * `vt/scene-depth.js#computeSceneDepthFlags` writes this SAME Foundry flag,
+ * UNSCOPED, into the depth pass's own colour payload (B channel) — scoped
+ * here to `IS_TILE` only, mirroring `scene-attr.js`'s own guard, because a
+ * Level's own background gets `restrictsLight:true` UNCONDITIONALLY and an
+ * unscoped check would black out every light on its own floor.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.depthHere - this fragment's own `buf:scene.depth` DEPTH
+ *   sample (`depthTexNode.sample(screenUV)`), a plain float.
+ * @param {*} [args.flagsHere] - this fragment's own `buf:scene.depth` COLOUR
+ *   sample (`depthFlagsTexNode.sample(screenUV)`), a vec4 (B = flags byte).
+ *   Omitted → the tile-restrict hard block compiles out; the rank gate alone
+ *   still applies.
+ * @param {*} args.uLightExpectedDepth - this light's
+ *   `computeLightExpectedDepth` result, pushed as a uniform every frame
+ *   (`point-light-pool.js`'s own refresh loop).
+ * @returns {*} a float node in [0,1] to multiply into a falloff.
+ */
+export function buildDepthHeightGateNode(TSL, { depthHere, flagsHere, uLightExpectedDepth }) {
+  const { float, floor, mod, select } = TSL;
+  // RANK — a bare ordinal comparison, no smoothstep: "above" is a fact about
+  // draw order, not a fuzzy quantity that needs a fade band. The fail-open
+  // buffer already lives inside `uLightExpectedDepth` itself (computed on the
+  // CPU), so this stays the same one-line shape `querySceneDepth` proved.
+  const rankGate = select(depthHere.lessThan(uLightExpectedDepth), float(0), float(1));
+  if (!flagsHere) return rankGate;
+  // See this function's own header for why this bit needs its own check
+  // alongside rank, and why it is scoped to IS_TILE.
+  const flagsByte = floor(flagsHere.b.mul(float(255)).add(float(0.5)));
+  const restrictsLightBit = mod(floor(flagsByte.div(float(DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR))), float(2));
+  const isTileBit = mod(floor(flagsByte.div(float(DEPTH_FLAG_IS_TILE_MIRROR))), float(2));
+  const tileRestrictsLight = restrictsLightBit.mul(isTileBit);
+  const flagsGate = float(1).sub(tileRestrictsLight);
+  return rankGate.mul(flagsGate);
+}
+
+/**
+ * THE CPU TWIN of {@link buildDepthHeightGateNode} — Node-testable so the bit
+ * arithmetic (a genuinely easy place to get a shift/mask subtly wrong; this
+ * exact function's own first draft did, `mod(byte, RESTRICTS_LIGHT*2)`
+ * instead of `mod(floor(byte/RESTRICTS_LIGHT), 2)` — numerically identical
+ * ONLY because `RESTRICTS_LIGHT` happens to be bit 0, caught before it ever
+ * reached a test) is verified before a live scene ever runs it
+ * (`feedback_smooth_output_hides_ported_bugs`).
+ *
+ * @param {object} args
+ * @param {number} args.storedDepth - a `buf:scene.depth` DEPTH sample.
+ * @param {number} args.expectedDepth - `computeLightExpectedDepth`'s result.
+ * @param {number} [args.flagsByte=0] - a raw 0-255 `buf:scene.depth` COLOUR
+ *   sample's B channel. Omitted → the tile-restrict block never fires.
+ * @returns {number} 0 or 1.
+ */
+export function computeDepthHeightGate({ storedDepth, expectedDepth, flagsByte = 0 }) {
+  const rankGate = storedDepth < expectedDepth ? 0 : 1;
+  const restrictsLightBit = Math.floor(flagsByte / DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR) % 2;
+  const isTileBit = Math.floor(flagsByte / DEPTH_FLAG_IS_TILE_MIRROR) % 2;
+  const flagsGate = restrictsLightBit && isTileBit ? 0 : 1;
+  return rankGate * flagsGate;
+}
+
+/**
  * THE CPU TWIN of the height/elevation gate (see `buildPointLightIllumination
  * Material`'s own "HEIGHT/ELEVATION GATE" section) — Node-testable so the
  * ARITHMETIC is verified before a live scene ever runs it
@@ -876,9 +982,18 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   same reason `sunShadowSlotNodes` is. Omitted with multiple slots present
  *   → falls back to slot 0 alone (no floor gating), the pre-multi-floor
  *   behaviour, rather than guessing which slot is "this light's own floor".
- *   ALSO the height/elevation gate's one input (its B channel, presence bits
- *   2-5 — see this module's own "HEIGHT/ELEVATION GATE" section): omitted →
- *   that gate compiles out entirely too, same posture as the sun-shadow read.
+ *   No longer feeds the height/elevation gate — see `depthTexNode` below
+ *   (STAGE 2, 2026-08-04).
+ * @param {*} [args.depthTexNode] - `environmental-light.js`'s own
+ *   `depthTexNode` (`buf:scene.depth`'s DEPTH attachment) — THE height/
+ *   elevation gate's primary input now (see this module's own "STAGE 2"
+ *   section, just above `buildDepthHeightGateNode`). Omitted → that gate
+ *   compiles out entirely, same posture the old `attrTexNode`-gated version had.
+ * @param {*} [args.depthFlagsTexNode] - `environmental-light.js`'s own
+ *   `depthFlagsTexNode` (`buf:scene.depth`'s COLOUR attachment, B = flags
+ *   byte) — the gate's secondary input, the Tile-"Restrict Lighting" hard
+ *   block. Omitted → that ONE block compiles out; the rank comparison alone
+ *   still applies.
  * @param {(TSL: *, args: object) => *} [args.blendSunVisibilityAcrossFloors] -
  *   injected from `environmental-light.js` (same DI convention specular/water
  *   already use for `buildOutdoorsGate`) — the ARITHMETIC per-slot blend; see
@@ -901,7 +1016,7 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[],
  *   uSpeedRaw: (*|null), uReverseSign: (*|null), uSeed: (*|null),
  *   uIntensityRaw: (*|null), uWindCenter: (*|null), uWindExposure: (*|null),
- *   uWindResponse: (*|null), uLightElevationRank: *, backgroundFloor: *,
+ *   uWindResponse: (*|null), uLightExpectedDepth: *, backgroundFloor: *,
  *   combinedFalloff: *, finalColorExposed: *,
  *   uApLampHeight: (*|null), apApertures: (Array|null)}}
  *   the four `u*` animation-config uniforms (and the three wind uniforms)
@@ -926,6 +1041,8 @@ export function buildPointLightIlluminationMaterial({
   windHandle = TIER0_WIND_HANDLE,
   sunShadowSlotNodes,
   attrTexNode,
+  depthTexNode,
+  depthFlagsTexNode,
   blendSunVisibilityAcrossFloors,
   apertureCount = 0,
   apGoboCols,
@@ -988,6 +1105,11 @@ export function buildPointLightIlluminationMaterial({
    * and no chance of the two disagreeing about where "here" is.
    */
   const attrHere = attrTexNode ? attrTexNode.sample(screenUV) : null;
+  // Same `screenUV`-not-bare rule as `attrHere` just above (this material's
+  // mesh carries no `uv` attribute) — see this file's own "STAGE 2" section
+  // for why these two feed the height/elevation gate now instead of `attrHere`.
+  const depthHere = depthTexNode ? depthTexNode.sample(screenUV) : null;
+  const depthFlagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
 
   const uRatio = uniform(float(0.5));
   const uAttenuationEased = uniform(float(0.5));
@@ -1186,40 +1308,21 @@ export function buildPointLightIlluminationMaterial({
   // to reach a receiver means (no contribution from THIS source, not
   // "actively dark").
   //
-  // `buf:scene.attr`'s presence bits 2-5 carry the TOPMOST drawable's own
-  // "how far above ITS OWN FLOOR's ground" it sits
-  // (`vt/scene-attr.js#RECEIVER_ELEVATION_LEVELS`/`RANGE_UNITS` — read that
-  // constant's own doc for the bit choice). Compiled out entirely with no
-  // `attrTexNode` (`tsl/no-uniform-gates`), same posture as the sun-shadow
-  // floor blend above.
-  //
-  // ⚠️ TWO PLACES DECODE THIS SAME PACKED VALUE. A direct import of
-  // `vt/scene-attr.js`'s constants would create a `vt/` <-> `effects/` CYCLE
-  // — `vt/scene-attr.js` already imports FROM `effects/` (`buildWorldSpace
-  // OutdoorsGate`), the one-way direction this codebase's layering relies
-  // on. So `RECEIVER_ELEVATION_LEVELS_MIRROR`/`_RANGE_UNITS_MIRROR` below are
-  // a deliberate duplicate, PINNED against the real constants in this
-  // module's own test — the same "two places store one number" shape as
-  // `SPECULAR_DEFAULT_SHIMMER_GAIN` vs `SPECULAR_PARAMS.shimmerGain.default`.
-  //
-  // ⚠️ THE SENTINEL LIVES IN THE VALUE, NOT A SEPARATE BRANCH. A first draft
-  // gated this arithmetically on "is the light's raw elevation exactly 0",
-  // but that conflates TWO different zeros: "the author never touched this
-  // light's elevation" and "the author deliberately placed it exactly at ITS
-  // OWN floor's ground" (real on any floor whose `elevationBottom` isn't 0 —
-  // a light legitimately AT elevation 20 on a floor spanning [20,30) has
-  // `elevationAboveFloor = 0`, same as an untouched one, and must NOT be
-  // silently un-gated). `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL` sidesteps the
-  // ambiguity entirely: the caller (`point-light-pool.js`) pushes it ONLY
-  // when the light's RAW elevation reads as Foundry's schema default, and it
-  // is far enough beyond any real receiver height that the ordinary
-  // smoothstep below saturates to 1 (full reach) on its own — no separate
-  // "is configured" test, no `mix`, no `select()` chain
-  // (`feedback_tsl_select_chain_strands_vars`), and 0 stays available as a
-  // genuine, distinct "at my own floor's ground" height.
-  const uLightElevationRank = uniform(float(LIGHT_ELEVATION_UNCONFIGURED_SENTINEL));
-  if (attrHere) {
-    combinedFalloff = combinedFalloff.mul(buildHeightGateNode(THREE.TSL, { attrHere, uLightElevationRank }));
+  // STAGE 2 (2026-08-04) — RANK, not a floor-relative byte. See this file's
+  // own "STAGE 2 — THE DEPTH-AUTHORITY HEIGHT GATE" section (just above
+  // `buildDepthHeightGateNode`) for the full reasoning and the live pixel-
+  // probe evidence that retired `buf:scene.attr` for this consumer.
+  // `uLightExpectedDepth` has no "unconfigured" sentinel to default to —
+  // `scene/depth-authority.js#rankOfElevation`'s own point is that elevation
+  // 0 (untouched) is already an ordinary, real, comparable rank, so this
+  // starts at 0 (harmless: `point-light-pool.js`'s per-frame refresh
+  // overwrites it before this material ever draws a real frame) rather than
+  // inheriting the old sentinel's meaning.
+  const uLightExpectedDepth = uniform(float(0));
+  if (depthHere) {
+    combinedFalloff = combinedFalloff.mul(
+      buildDepthHeightGateNode(THREE.TSL, { depthHere, flagsHere: depthFlagsHere, uLightExpectedDepth })
+    );
   }
 
   // APERTURE GOBO (docs/planning/Aperture-Gobo.md) used to multiply into
@@ -1377,11 +1480,13 @@ export function buildPointLightIlluminationMaterial({
     uEdgeCount,
     uEdgeSoftMargin,
     edgePoints,
-    // The height gate's ONE per-light input — see this module's own "HEIGHT/
-    // ELEVATION GATE" section. Always present (unlike the animation/wind
-    // uniforms), since the gate itself is cheap and its sentinel (0 = "no
-    // height authored") already makes an unset light a byte-identical no-op.
-    uLightElevationRank,
+    // The height gate's ONE per-light input — see this module's own "STAGE 2
+    // — THE DEPTH-AUTHORITY HEIGHT GATE" section. Always present (unlike the
+    // animation/wind uniforms); `point-light-pool.js`'s per-frame refresh
+    // overwrites it for every light, touched or not — there is no
+    // "unconfigured" case left to special-case (`scene/depth-authority.js#
+    // rankOfElevation`'s own point).
+    uLightExpectedDepth,
     uSpeedRaw,
     uReverseSign,
     uSeed,

@@ -28,6 +28,9 @@ import {
   RECEIVER_ELEVATION_LEVELS_MIRROR,
   RECEIVER_ELEVATION_RANGE_UNITS_MIRROR,
   LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
+  computeDepthHeightGate,
+  DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR,
+  DEPTH_FLAG_IS_TILE_MIRROR,
 } from '../point-light-illumination.js';
 import {
   RECEIVER_ELEVATION_LEVELS,
@@ -35,6 +38,12 @@ import {
   decodeReceiverElevationLevel,
   quantizeReceiverElevationAboveFloor,
 } from '../../../vt/scene-attr.js';
+import {
+  DEPTH_FLAG_RESTRICTS_LIGHT,
+  DEPTH_FLAG_IS_TILE,
+  computeLightExpectedDepth,
+  computeExpectedStoredDepth,
+} from '../../../vt/scene-depth.js';
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -467,9 +476,103 @@ export function run(t) {
   );
 
   // ======================================================================
+  // STAGE 2 (2026-08-04) — computeDepthHeightGate, the depth-authority gate's
+  // own CPU twin. RANK comparison is a bare "above or not", no tolerance/
+  // softness band (unlike computeHeightGate above) — see buildDepthHeightGateNode's
+  // own header for why that band is no longer needed.
+  // ======================================================================
+  ok(
+    "a receiver whose stored depth is SMALLER than the light's expected depth (higher rank, drawn ON TOP) is blocked",
+    computeDepthHeightGate({ storedDepth: 0.3, expectedDepth: 0.5 }) === 0
+  );
+  ok(
+    'a receiver at EXACTLY the light\'s own expected depth (the common "standing on my own floor" tie) passes',
+    computeDepthHeightGate({ storedDepth: 0.5, expectedDepth: 0.5 }) === 1
+  );
+  ok(
+    'a receiver whose stored depth is LARGER (lower rank, drawn BELOW the light) passes',
+    computeDepthHeightGate({ storedDepth: 0.7, expectedDepth: 0.5 }) === 1
+  );
+  ok(
+    'no flags byte at all (omitted) never blocks on the tile-restrict term, rank alone decides',
+    computeDepthHeightGate({ storedDepth: 0.7, expectedDepth: 0.5 }) === 1 &&
+      computeDepthHeightGate({ storedDepth: 0.3, expectedDepth: 0.5 }) === 0
+  );
+  ok(
+    'RESTRICTS_LIGHT set on a TILE hard-blocks even a receiver BELOW the light (rank alone would have passed it)',
+    computeDepthHeightGate({
+      storedDepth: 0.7,
+      expectedDepth: 0.5,
+      flagsByte: DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR | DEPTH_FLAG_IS_TILE_MIRROR,
+    }) === 0
+  );
+  ok(
+    "RESTRICTS_LIGHT WITHOUT the IS_TILE bit — a Level's own background gets restrictsLight UNCONDITIONALLY " +
+      "(vt/scene-depth.js#computeSceneDepthFlags's own doc) — must NOT self-block every light on its own floor",
+    computeDepthHeightGate({ storedDepth: 0.7, expectedDepth: 0.5, flagsByte: DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR }) === 1
+  );
+  ok(
+    'IS_TILE without RESTRICTS_LIGHT (an ordinary tile with the flag never ticked) never blocks',
+    computeDepthHeightGate({ storedDepth: 0.7, expectedDepth: 0.5, flagsByte: DEPTH_FLAG_IS_TILE_MIRROR }) === 1
+  );
+  ok(
+    'other bits in the same byte (e.g. IS_LEVEL_FOREGROUND, value 8) never trip the tile-restrict block on their own',
+    computeDepthHeightGate({ storedDepth: 0.7, expectedDepth: 0.5, flagsByte: 8 }) === 1
+  );
+
+  // The cross-file pin (`RECEIVER_ELEVATION_LEVELS_MIRROR`'s own precedent,
+  // just above) — these two small integers are DUPLICATED into this module
+  // (not imported, to avoid a `vt/` <-> `effects/` cycle — see
+  // DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR's own doc) and must never silently
+  // drift from vt/scene-depth.js's real values.
+  ok(
+    "DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR/DEPTH_FLAG_IS_TILE_MIRROR match vt/scene-depth.js's real flag values exactly",
+    DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR === DEPTH_FLAG_RESTRICTS_LIGHT && DEPTH_FLAG_IS_TILE_MIRROR === DEPTH_FLAG_IS_TILE
+  );
+
+  // ======================================================================
+  // computeLightExpectedDepth (vt/scene-depth.js) — the fail-open tie buffer.
+  // Exercised HERE, not just in vt/__tests__/scene-depth.test.mjs, because
+  // this is the exact seam computeDepthHeightGate consumes: a light resolved
+  // to the SAME rank as its own floor's ground must pass through THIS gate,
+  // not just satisfy the formula in isolation.
+  // ======================================================================
+  ok(
+    'computeLightExpectedDepth is STRICTLY SMALLER than the bare formula would give (the buffer subtracts, never adds)',
+    computeLightExpectedDepth(3, 10) < computeExpectedStoredDepth(3, 10)
+  );
+  ok(
+    "a receiver at the SAME rank as the light (computeExpectedStoredDepth's own bare value — what a real " +
+      'drawable AT this exact rank actually stores) still PASSES the gate through the buffered ' +
+      'uLightExpectedDepth — the tie case computeLightExpectedDepth exists to protect',
+    computeDepthHeightGate({
+      storedDepth: computeExpectedStoredDepth(3, 10),
+      expectedDepth: computeLightExpectedDepth(3, 10),
+    }) === 1
+  );
+  ok(
+    'the buffer can never bridge two DIFFERENT adjacent ranks into a false tie, at a realistic scene size',
+    (() => {
+      const maxRank = 500;
+      for (let rank = 0; rank < 20; rank++) {
+        const expectedAtRank = computeLightExpectedDepth(rank, maxRank);
+        const expectedAtNextRank = computeLightExpectedDepth(rank + 1, maxRank);
+        // The rank ABOVE must still read as "above" (blocked) against a light
+        // resolved to THIS rank — the whole ordinal property must survive
+        // the buffer.
+        if (computeDepthHeightGate({ storedDepth: expectedAtNextRank, expectedDepth: expectedAtRank }) !== 0) {
+          return false;
+        }
+      }
+      return true;
+    })()
+  );
+
+  // ======================================================================
   // buildPointLightIlluminationMaterial — the height gate compiles cleanly
-  // with a real attrTexNode (the vendored TSL, not a mock — construction-only,
-  // matching this file's own header on what is and is not Node-verifiable).
+  // with a real attrTexNode/depthTexNode/depthFlagsTexNode (the vendored TSL,
+  // not a mock — construction-only, matching this file's own header on what
+  // is and is not Node-verifiable).
   // ======================================================================
   {
     const { uniform: u3, vec3: v3, texture } = THREE.TSL;
@@ -481,6 +584,17 @@ export function run(t) {
       THREE.UnsignedByteType
     );
     attrTexture.needsUpdate = true;
+    // STAGE 2 (2026-08-04) — a real DEPTH texture (not a colour attachment)
+    // for the depth gate's own primary input, plus its COLOUR/flags sibling.
+    const depthTexture = new THREE.DepthTexture(1, 1, THREE.FloatType);
+    const depthFlagsTexture = new THREE.DataTexture(
+      new Uint8Array([0, 0, 0, 255]),
+      1,
+      1,
+      THREE.RGBAFormat,
+      THREE.UnsignedByteType
+    );
+    depthFlagsTexture.needsUpdate = true;
     let built = null;
     let err = null;
     try {
@@ -490,18 +604,24 @@ export function run(t) {
         uDimColor: u3(v3(0.9, 0.9, 0.9)),
         uBrightColor: u3(v3(1, 1, 1)),
         attrTexNode: texture(attrTexture),
+        depthTexNode: texture(depthTexture),
+        depthFlagsTexNode: texture(depthFlagsTexture),
       });
     } catch (e) {
       err = e;
     }
-    ok(`the height gate constructs cleanly with a real attrTexNode (${err ? err.message : 'clean'})`, err === null);
-    ok('...and returns uLightElevationRank as a real settable uniform', !!built?.uLightElevationRank);
     ok(
-      '...defaulting to the unconfigured sentinel — full reach, byte-identical to before this feature existed',
-      built.uLightElevationRank.value === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+      `the height gate constructs cleanly with a real depthTexNode/depthFlagsTexNode (${err ? err.message : 'clean'})`,
+      err === null
+    );
+    ok('...and returns uLightExpectedDepth as a real settable uniform', !!built?.uLightExpectedDepth);
+    ok(
+      "...defaulting to 0 — the lowest possible expected depth, full reach, until point-light-pool.js's " +
+        'per-frame refresh overwrites it (depth-authority.js#rankOfElevation has no "unconfigured" case left)',
+      built.uLightExpectedDepth.value === 0
     );
 
-    // Without attrTexNode at all, the gate must compile OUT entirely
+    // Without depthTexNode at all, the gate must compile OUT entirely
     // (`tsl/no-uniform-gates`) rather than throw on a missing texture read.
     let unwired = null;
     let unwiredErr = null;
@@ -516,12 +636,12 @@ export function run(t) {
       unwiredErr = e;
     }
     ok(
-      `omitting attrTexNode still constructs cleanly — the gate compiles out, not a missing-texture crash (${unwiredErr ? unwiredErr.message : 'clean'})`,
+      `omitting depthTexNode still constructs cleanly — the gate compiles out, not a missing-texture crash (${unwiredErr ? unwiredErr.message : 'clean'})`,
       unwiredErr === null
     );
     ok(
       '...and STILL returns the uniform (so a caller can set it without checking which branch built)',
-      !!unwired?.uLightElevationRank
+      !!unwired?.uLightExpectedDepth
     );
   }
 

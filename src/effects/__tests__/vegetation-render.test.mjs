@@ -320,6 +320,104 @@ export function run(t) {
   }
 
   // ==========================================================================
+  // 🐛 THE FLICKER REGRESSION — author-reported LIVE, 2026-08-05: "bushes
+  // flickering when I pan the camera". Two same-floor bushes tie EXACTLY on
+  // elevation/sortLayer/sort/zIndex (passiveElevationFraction is a per-KIND
+  // constant); `sortByLayer` (inside depthAuthority.rebuild) stamps
+  // `tiebreak = index` unconditionally from the CALLER's own array position
+  // — so their relative rank is decided ENTIRELY by whatever order
+  // buildVegetationDepthItems happened to emit them in. `items`' own order
+  // is residency-dependent (panning loads/unloads tiles), so a version that
+  // emits them in `items`-input order would flip their relative rank every
+  // time panning reshuffled that array — even though NEITHER bush actually
+  // moved. This is EXACTLY the class of bug a single fixed test ordering
+  // cannot catch (feedback_smooth_output_hides_ported_bugs): the fix is
+  // proven here by rebuilding the SAME two bushes behind TWO DIFFERENT,
+  // deliberately shuffled `items` arrays (one of them also missing an
+  // unrelated host entirely, the same shape a residency change produces) and
+  // asserting their RELATIVE rank is identical both times.
+  // ==========================================================================
+  {
+    const band = { bottom: 0, top: 20 };
+    const floors = [{ id: 'ground', elevationBottom: band.bottom, elevationTop: band.top }];
+    const hostA = {
+      id: 'tile:bush-host-A',
+      levelId: 'ground',
+      key: makeLayerKey({ elevation: 2, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const hostB = {
+      id: 'tile:bush-host-B',
+      levelId: 'ground',
+      key: makeLayerKey({ elevation: 4, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const hostC = {
+      id: 'tile:bush-host-C',
+      levelId: 'ground',
+      key: makeLayerKey({ elevation: 6, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const bystander1 = {
+      id: 'tile:bystander-1',
+      levelId: 'ground',
+      key: makeLayerKey({ elevation: 1, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const bystander2 = {
+      id: 'tile:bystander-2',
+      levelId: 'ground',
+      key: makeLayerKey({ elevation: 8, sortLayer: SORT_LAYERS.TILES }),
+    };
+    const urlByItemId = new Map([
+      ['tile:bush-host-A', { bush: 'shrub-a_Bush.webp' }],
+      ['tile:bush-host-B', { bush: 'shrub-b_Bush.webp' }],
+      ['tile:bush-host-C', { bush: 'shrub-c_Bush.webp' }],
+    ]);
+
+    // "Panning" #1 — one arbitrary order, `bystander2` present.
+    const orderingOne = [hostA, bystander1, hostB, hostC, bystander2];
+    // "Panning" #2 — a DIFFERENT order, `bystander2` gone (fell out of
+    // residency), `bystander1` moved — exactly the shape a real residency
+    // reorder produces. The three bush hosts are the SAME three items.
+    const orderingTwo = [hostC, hostB, bystander1, hostA];
+
+    const rankPairFor = (ordering) => {
+      const vegItems = buildVegetationDepthItems(ordering, floors, urlByItemId);
+      const depthAuthority = createDepthAuthority();
+      depthAuthority.rebuild([...ordering, ...vegItems]);
+      const rankOf = (id) => depthAuthority.rankOf({ id });
+      return [
+        rankOf('veg:tile:bush-host-A:bush'),
+        rankOf('veg:tile:bush-host-B:bush'),
+        rankOf('veg:tile:bush-host-C:bush'),
+      ];
+    };
+
+    const [aRank1, bRank1, cRank1] = rankPairFor(orderingOne);
+    const [aRank2, bRank2, cRank2] = rankPairFor(orderingTwo);
+
+    ok(
+      'THE BUG, reproduced directly: buildVegetationDepthItems emits the three same-floor bushes in a STABLE ' +
+        'relative order regardless of the input items array order (id-sorted output, not items-input order)',
+      buildVegetationDepthItems(orderingOne, floors, urlByItemId)
+        .map((v) => v.id)
+        .join(',') ===
+        buildVegetationDepthItems(orderingTwo, floors, urlByItemId)
+          .map((v) => v.id)
+          .join(',')
+    );
+    ok(
+      'THE FIX, proven against the REAL depth authority: A-vs-B relative rank is IDENTICAL across both ' +
+        '"panning" orderings — this is the exact comparison a nearby light\'s occlusion gate reads every frame',
+      aRank1 < bRank1 === aRank2 < bRank2
+    );
+    ok('B-vs-C relative rank is also identical across both orderings', bRank1 < cRank1 === bRank2 < cRank2);
+    ok('A-vs-C relative rank is also identical across both orderings', aRank1 < cRank1 === aRank2 < cRank2);
+    ok(
+      'the fix does not merely coincide — the three bushes really do land at three DISTINCT ranks, never a tie ' +
+        'a real GPU depth-buffer write would have to break arbitrarily',
+      new Set([aRank1, bRank1, cRank1]).size === 3 && new Set([aRank2, bRank2, cRank2]).size === 3
+    );
+  }
+
+  // ==========================================================================
   // THE FOLD-FREE FLUTTER BOUND — the fix for "at high wind speed it just
   // liquifies" (author, 2026-08-01, with a 100%-wind screenshot).
   //

@@ -395,10 +395,58 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
  * writer is `LessDepth` with NO blending, so an exact Z tie means only
  * whichever mesh happens to render first actually writes; the other's write
  * silently loses, order-dependent and unstable frame to frame. A real,
- * distinct array member — sorted by the SAME comparator as everything else,
- * `tiebreak` assigned by `sortByLayer` itself — has no such tie by
- * construction, the same reason two ordinary tiles at the same elevation
- * never collide either.
+ * distinct array member — sorted by the SAME comparator as everything else
+ * — has no such tie WITHIN one sort call.
+ *
+ * ============================================================================
+ * ⚠️ 🐛 FIXED 2026-08-05 — "WITHIN ONE SORT CALL" WAS NOT THE SAME GUARANTEE
+ * AS "BETWEEN TWO SORT CALLS", AND EVERY SAME-FLOOR, SAME-KIND BUSH TIES ON
+ * EVERY REAL FIELD. Author-reported, live: "bushes flickering when I pan
+ * the camera" (trees not mentioned — see below for why that asymmetry is
+ * itself a clue, not a coincidence).
+ * ============================================================================
+ * `scene/layer-order.js#sortByLayer` stamps `tiebreak = index` — the item's
+ * OWN POSITION IN THE INPUT ARRAY — UNCONDITIONALLY, on every call, for every
+ * item, discarding whatever `tiebreak` a caller pre-set on `key` (confirmed
+ * by reading the function body, not assumed: `item.key.tiebreak = index`).
+ * That is exactly right WITHIN one call — the resulting order is a genuine
+ * total order, no two items tie. It says NOTHING about whether two items'
+ * RELATIVE tiebreak stays the same ACROSS TWO DIFFERENT CALLS, and this
+ * function's own items are rebuilt fresh every residency pass, fed into a
+ * SECOND `rebuild()` call whose OWN input is `[...items, ...vegDepthItems]`
+ * — `items` itself being `buildItems(floorIndex)`'s raw, RESIDENCY-DEPENDENT
+ * order from the FIRST rebuild. Panning changes which tiles are resident,
+ * which reorders `items`, which reorders where each vegetation item lands in
+ * the array `sortByLayer` re-indexes — silently reshuffling tiebreak for
+ * every vegetation item, every pass, whether or not the SAME set of bushes
+ * is still present.
+ *
+ * This is invisible for an ORDINARY tile: two tiles tying on elevation/
+ * sortLayer/sort/zIndex is rare (each usually has its own authored
+ * elevation). It is UNAVOIDABLE for vegetation: `passiveElevationFraction`
+ * is a per-KIND constant, so EVERY bush on the SAME floor computes the
+ * IDENTICAL elevation, the IDENTICAL `sortLayer` (`SCENE_EFFECTS`), and the
+ * IDENTICAL `sort`/`zIndex` (both hardcoded 0 above) — an exact 4-way tie
+ * among every same-floor bush, resolved ENTIRELY by a tiebreak that this bug
+ * let drift with residency churn. Two bushes near the same light, tied and
+ * reordering every pan-triggered pass, take turns reading as "above" the
+ * light's own expected depth — the light's occlusion flickers on/off at
+ * that spot, which reads as "the bush is flickering". A typical scene has
+ * far more bushes sharing one floor than trees, which is why this news
+ * arrived as a bush report and not a tree one — not because the bug is
+ * bush-specific, it is a property of ANY same-kind, same-floor tie.
+ *
+ * THE FIX: sort the OUTPUT by its own stable `id` (`veg:<hostId>:<kindId>`,
+ * built from a Foundry document id that does not change between residency
+ * passes) before returning — see the end of this function. Two tied items'
+ * RELATIVE order within `vegDepthItems` is then fixed forever regardless of
+ * `items`'s own order or length, so `sortByLayer`'s re-indexing always
+ * assigns them the SAME relative tiebreak, pass after pass. Proven with a
+ * regression test that rebuilds the SAME two same-floor bushes behind two
+ * DIFFERENT, shuffled `items` orderings (simulating exactly what a pan-
+ * triggered residency reorder does) and asserts identical relative rank
+ * both times — the class of test [[feedback_smooth_output_hides_ported_bugs]]
+ * describes: a single fixed ordering could never have caught this.
  *
  * ⚠️ `levelId` IS SET TO THE HOST'S OWN RESOLVED FLOOR, NEVER LEFT TO
  * RE-DERIVE FROM THE SYNTHETIC ELEVATION. A tree's `passiveElevationFraction
@@ -432,6 +480,11 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
  * @returns {Array<{id: string, key: object, kind: 'vegetationOverlay', levelId: string|null, vegHostItemId: string, vegKindId: string}>}
  *   one synthetic item per (host, kind) pair with a discovered URL AND a
  *   bounded floor band — never a real item, never a guessed elevation.
+ *   SORTED BY `id` — see this function's own "FIXED 2026-08-05" header for
+ *   why a stable output order is load-bearing, not cosmetic: it is what
+ *   keeps two same-floor, same-kind items' RELATIVE tiebreak identical
+ *   across residency passes, regardless of `items`' own (residency-
+ *   dependent) order.
  */
 export function buildVegetationDepthItems(items, floors, urlByItemId) {
   if (!(urlByItemId instanceof Map) || urlByItemId.size === 0) return [];
@@ -463,6 +516,17 @@ export function buildVegetationDepthItems(items, floors, urlByItemId) {
       });
     }
   }
+  // ⚠️ LOAD-BEARING, NOT COSMETIC — see this function's own "FIXED 2026-08-05"
+  // header. `sortByLayer` (inside the caller's own `depthAuthority.rebuild`)
+  // stamps `tiebreak = index`, unconditionally, from THIS array's own
+  // position once concatenated onto the real items — so two same-floor,
+  // same-kind items (an exact tie on every other field) get a STABLE
+  // relative tiebreak, pass after pass, ONLY if THEY land in the same
+  // relative order every time. `items`' own order is residency-dependent
+  // (shifts as panning changes which tiles are resident) and therefore
+  // cannot be trusted to provide that; sorting by `id` — a Foundry document
+  // id, unchanged between passes — can.
+  out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return out;
 }
 

@@ -439,6 +439,20 @@ Author, same session, minutes after Β§9d landed, with a screenshot and a pixel
 
 ---
 
+### 9h. 🐛 Found live, same day the author tested it: bushes flickering while panning
+
+**The report:** *"The bushes are flickering when I pan the camera."* Trees not mentioned — a real clue, not a coincidence (see below).
+
+**Root cause, confirmed by reading `scene/layer-order.js#sortByLayer`'s actual body, not assumed:** `item.key.tiebreak = index` — the item's OWN POSITION IN THE INPUT ARRAY — stamped UNCONDITIONALLY on every call, discarding any tiebreak a caller pre-set. Correct WITHIN one call (a genuine total order, no two items tie); says nothing about whether two items' RELATIVE tiebreak survives BETWEEN two calls. `buildVegetationDepthItems` rebuilds its output fresh every residency pass and appends it to `items` — itself `buildItems(floorIndex)`'s raw, residency-dependent order — before the SECOND `depthAuthority.rebuild()` call §9g added. Panning changes which tiles are resident, reordering `items`, reordering where each vegetation item lands in the array `sortByLayer` re-indexes, silently reshuffling tiebreak every pass.
+
+**Why bushes and not trees:** `passiveElevationFraction` is a per-KIND constant — every bush on the SAME floor computes the IDENTICAL elevation, the IDENTICAL `sortLayer`/`sort`/`zIndex`, an exact 4-way tie resolved ENTIRELY by tiebreak. Two same-floor bushes near one light, reordering every pan-triggered pass, take turns reading as "above" the light's own expected depth — the light's occlusion flickers at that spot, which reads as "the bush is flickering." A typical scene has far more bushes sharing a floor than trees; the bug is not bush-specific, just far more OFTEN triggered there. Ordinary tiles are near-immune (each usually has its own authored elevation — a real tie is rare).
+
+**The fix — `buildVegetationDepthItems` sorts its OWN output by `id` (`veg:<hostId>:<kindId>`, a Foundry document id, unchanged between passes) before returning.** Two tied items' relative position within the array is then fixed forever regardless of `items`' own order or length, so `sortByLayer`'s re-indexing assigns them the SAME relative tiebreak every single pass.
+
+**Proof, not just patched and hoped:** a new regression test rebuilds the SAME three same-floor bushes behind TWO deliberately different, shuffled `items` orderings (one missing a bystander item entirely — the exact shape a residency reorder produces) and asserts identical relative rank both times, against the REAL `createDepthAuthority`. Confirmed to FAIL on the pre-fix code (4 assertions red, reproducing the exact reported symptom) and pass after — the discipline [[feedback_smooth_output_hides_ported_bugs]] names: a single fixed test ordering could never have caught this, because the bug only exists ACROSS two differently-ordered calls. Full suite: 7400 passed, 0 failed.
+
+---
+
 ## 10. Decisions — RESOLVED (author, 2026-08-04)
 
 1. **Level foregrounds block light.** ✅ *"Level foregrounds should block light from lights which are below their elevation… you know how when a light is behind an object in real life and you can't magically see through the object?"* Foundry's narrower rule is not followed — [[keyhole-parity-compat-doctrine]], MSA owns the picture. See §3a. This also **forced §3b**: because the author hosts the same `_Overhead` art as a foreground *or* as a tile, tiles at/above their own floor's top must block too, or one picture gets two behaviours depending on an authoring choice unrelated to light.

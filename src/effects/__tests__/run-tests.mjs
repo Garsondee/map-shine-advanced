@@ -21,6 +21,7 @@ import { run as runShadowAccess } from './shadow-access.test.mjs';
 import { run as runSkyAccess } from './sky-access.test.mjs';
 import { run as runDoorGraphics } from './door-graphics.test.mjs';
 import { run as runDoorGraphicsRender } from './door-graphics-render.test.mjs';
+import { run as runApertureGobo } from './aperture-gobo.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -65,6 +66,7 @@ const suites = [
   ['sky-access', runSkyAccess],
   ['door-graphics', runDoorGraphics],
   ['door-graphics-render', runDoorGraphicsRender],
+  ['aperture-gobo', runApertureGobo],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

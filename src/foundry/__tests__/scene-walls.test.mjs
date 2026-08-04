@@ -11,6 +11,7 @@
 import {
   deriveWallSolid,
   deriveWallBlocksExterior,
+  deriveWallAperture,
   watchSceneWallStructure,
   watchDoorOpenings,
 } from '../scene-walls.js';
@@ -73,6 +74,42 @@ export function run(t) {
   );
   ok('missing move falls back to the schema default (blocks), never throws', deriveWallBlocksExterior({}) === true);
   ok('no argument at all is also safe (never throws)', deriveWallBlocksExterior() === true);
+
+  // deriveWallAperture (2026-08-03, docs/planning/Aperture-Gobo.md §2.1) —
+  // move !== NONE && light === PROXIMITY(30). CORRECTED LIVE the same
+  // session (see scene-walls.js's own header): an initial `light === NONE`
+  // reading was schema-plausible and wrong — the author's own live test on a
+  // real map matched 317 walls, not a scene's actual handful of windows, and
+  // produced visible knock-on effects on ordinary terrain walls.
+  // `PROXIMITY` is Foundry's own real window convention: opaque beyond its
+  // `threshold.light` distance, passable within it.
+  ok('move:NORMAL + light:PROXIMITY (an authored window) IS an aperture', deriveWallAperture({ move: 20, light: 30 }));
+  ok(
+    'move:NORMAL + light:NONE is NOT an aperture — NONE is permanently transparent (terrain edges, dividers, ...), not Foundry’s window convention',
+    !deriveWallAperture({ move: 20, light: 0 })
+  );
+  ok(
+    'move:NORMAL + light:NORMAL (an ordinary, unedited wall) is NOT an aperture',
+    !deriveWallAperture({ move: 20, light: 20 })
+  );
+  ok(
+    'move:NORMAL + light:DISTANCE(40) is NOT an aperture either — the COMPLEMENTARY proximity sense, a different authored intent',
+    !deriveWallAperture({ move: 20, light: 40 })
+  );
+  ok(
+    'move:NONE + light:PROXIMITY is NOT an aperture — nothing for a window to be cut into',
+    !deriveWallAperture({ move: 0, light: 30 })
+  );
+  ok('move:NONE + light:NORMAL is NOT an aperture either', !deriveWallAperture({ move: 0, light: 20 }));
+  ok(
+    'a missing/malformed fixture reads as an ordinary wall (schema defaults), never an aperture, never throws',
+    !deriveWallAperture({})
+  );
+  ok('no argument at all is also safe (never throws)', deriveWallAperture() === false);
+  ok(
+    'a leaded-glass proximity wall (light:PROXIMITY, sight:NORMAL — blocks vision, passes light near it) IS still an aperture — sight is not read',
+    deriveWallAperture({ move: 20, light: 30, sight: 20 }) // sight is not a parameter at all — passing it is ignored
+  );
 
   // watchSceneWallStructure — Node has no `Hooks` global at all, so this
   // exercises the real guard clause, not a mock of one.

@@ -129,8 +129,8 @@ function clamp01(v) {
  * illumination pass consumes, or `null` if it should not be drawn this frame.
  *
  * @param {*} raw - `{sourceId, x, y, radius, ratio, attenuation, luminosity,
- *   darknessMin, darknessMax, shapePoints}`, already plucked from a live
- *   `PointLightSource` (or a Node-test stand-in with the same shape).
+ *   darknessMin, darknessMax, elevation, shapePoints}`, already plucked from a
+ *   live `PointLightSource` (or a Node-test stand-in with the same shape).
  * @param {number} [darkness01] - the scene's current darkness (0..1). Missing
  *   or non-finite reads as 0 (matches `deriveDarkness`'s own "could not read"
  *   floor) — a light with the schema-default window ({min:0,max:1}) still
@@ -139,7 +139,7 @@ function clamp01(v) {
  *   ratio: number, attenuation01: number, luminosity01: number,
  *   alpha01: number, color: [number,number,number], hasColor: boolean,
  *   shadows01: number, animation: ReturnType<typeof deriveAnimationSnapshot>,
- *   shapePoints: number[]}|null}
+ *   elevation: number, shapePoints: number[]}|null}
  */
 export function deriveLightSnapshot(raw, darkness01) {
   if (!raw || typeof raw.sourceId !== 'string' || raw.sourceId.length === 0) return null;
@@ -217,6 +217,19 @@ export function deriveLightSnapshot(raw, darkness01) {
     // light-coloration.js's own header). 0 = today's unchanged behaviour.
     shadows01: clamp01(Number.isFinite(raw.shadows) ? raw.shadows : 0),
     animation: deriveAnimationSnapshot(raw.animation),
+    // AmbientLightDocument.elevation (common/documents/ambient-light.mjs) — a
+    // required, non-nullable NumberField, `initial: 0`. NOT part of LightData
+    // (the rendering config Foundry's own shaders consume) and read by NO
+    // Foundry render code at all — verified by grep across
+    // client/canvas/sources/*.mjs, which never mention it. Foundry itself
+    // does not occlude light by elevation; this project is ADDING the
+    // capability, not catching up to parity. Kept as the document's raw
+    // world-elevation number (same units/axis as a Level's own
+    // elevation.bottom/top and a Tile's own elevation) — never fractionalised
+    // here, so a receiver's "how far above ITS OWN floor's ground" comparison
+    // (effects/lighting/point-light-illumination.js's height gate) stays a
+    // plain subtraction on both sides.
+    elevation: Number.isFinite(raw.elevation) ? raw.elevation : 0,
     shapePoints: points,
   };
 }
@@ -416,6 +429,12 @@ export function readActiveLightSources(darkness01) {
           // See deriveAnimationSnapshot's own header for why `source.animation`
           // (not `source.data.animation`) is the correct read — seed lives here.
           animation: source.animation,
+          // TOP-LEVEL on the AmbientLight document (a sibling of `x`/`y`, NOT
+          // nested under `config` the way LightData's own fields are — see
+          // deriveLightSnapshot's own doc). Same document-not-source read
+          // pattern as `hidden`/`darknessMin`/`darknessMax` above: the live
+          // rendering source never copies this onto itself.
+          elevation: source.object?.document?.elevation,
           shapePoints,
         },
         darkness01

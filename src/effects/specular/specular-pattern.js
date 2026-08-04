@@ -384,10 +384,125 @@ export function incidentFromIllumRgb(rgb) {
 }
 
 /**
+ * A SEPARATE, ARTISTIC gate on top of `incidentFromIllumRgb` — added ROUND 16
+ * (2026-08-03), live report: *"we only get a specular shine in the brighter
+ * areas of the map, near candles, point lights or outside at noon. Shadows
+ * and lack of light should suppress the specular shine."*
+ *
+ * ⚠️ **THIS IS NOT THE EXPONENT `incidentFromIllumRgb`'S OWN HEADER WARNS
+ * AGAINST.** That warning is about the PHYSICAL term itself: `incident` must
+ * equal `EOTF(illum)` exactly, or metal desynchronises from how the rest of
+ * the frame responds to the same light. This function never touches
+ * `incident` — it consumes the already-correct value and returns a SEPARATE
+ * multiplier, the same relationship `reinhardCeiling` above already has to
+ * the composite (a later, stylistic reshaping stage, not a correction to the
+ * physical term). Skipping this stage entirely reproduces the exact old
+ * behaviour, because `steepness = 1` is an identity.
+ *
+ * Anchored at `incident`'s OWN scale so "full brightness" keeps meaning what
+ * it means everywhere else in this effect: bounded input `[0, 1]` maps
+ * `0 -> 0` and `1 -> 1` for ANY steepness, so a torch's falloff still reads as
+ * a continuous gradient into its edge (no reintroduction of the Round 15
+ * "binary on/off" bug) — only the OPEN interval between is reshaped, pulled
+ * DOWN for `steepness > 1`. Anything already AT OR ABOVE full brightness
+ * (overlapping lights, a sunlit exterior) passes through completely
+ * unscaled — this only ever REMOVES shine from dim areas, never adds beyond
+ * what `incident` alone already would contribute.
+ *
+ * Luminance-scaled, not per-channel, for the same reason `reinhardCeilingRgb`
+ * is: an independent `pow()` per channel would shrink a coloured light's
+ * weakest channel hardest, oversaturating its tint as brightness falls — a
+ * second, self-inflicted version of the OTHER open complaint (colour
+ * fidelity), not a fix for this one.
+ *
+ * @param {number[]} rgb - `incidentFromIllumRgb`'s own output.
+ * @param {number[]} lumaWeights - e.g. `LUMA_709`.
+ * @param {number} steepness - `1` is an identity; higher pulls dim areas down
+ *   harder while leaving 0 and 1 fixed.
+ * @returns {number[]} the reshaped triple, same hue and saturation as input.
+ */
+export function steepenIncidentRgb(rgb, lumaWeights, steepness) {
+  const luma = Math.max(rgb[0] * lumaWeights[0] + rgb[1] * lumaWeights[1] + rgb[2] * lumaWeights[2], 1e-6);
+  const clamped01 = Math.min(luma, 1);
+  const excess = Math.max(luma - 1, 0);
+  const steepenedLuma = Math.pow(clamped01, steepness) + excess;
+  const scale = steepenedLuma / luma;
+  return [rgb[0] * scale, rgb[1] * scale, rgb[2] * scale];
+}
+
+/**
+ * Default steepness for `steepenIncidentRgb`. `3` (cubic): at half of full
+ * brightness the shine's own response falls to an eighth, at 70% it falls to
+ * ~34% — decisively darker through ordinary ambient light while a genuinely
+ * bright pixel (a candle, a point light, noon sun) is completely unaffected.
+ *
+ * ⚠️ **LIVE-ADJUSTABLE SINCE ROUND 17 (2026-08-03)** — this shipped as a
+ * fixed internal constant for one round, then the author's own channel probe
+ * showed it crushing an ORDINARILY lit point (illum ~0.56, nowhere near a
+ * dark room) to ~0.3% of its EOTF'd brightness: `illumDirect` luma 0.561 →
+ * `incident` (post-EOTF) ≈0.115 → this cubic → ≈0.0015, a ~375× cut from the
+ * raw light reading for a point that is not remotely in shadow. That is a
+ * very likely direct cause of a live "specular is barely visible any more"
+ * report. `specular-render.js` now turns this into `uIncidentSteepness`, a
+ * real uniform (`setIncidentSteepness()`), exposed on `SPECULAR_PARAMS` as
+ * `incidentSteepness` — `1` is a pass-through (no suppression beyond the
+ * EOTF itself), values below `1` actively BOOST dim areas above the linear
+ * reading (useful for "make it punch through everywhere" testing), values
+ * above `3` suppress harder still.
+ *
+ * ⚠️ LOWERED 3 → 2.85 (ROUND 18, 2026-08-03) — THE FIRST LIVE-CONFIRMED
+ * VALUE. The author dialled this down slightly from the Round 17 default on
+ * a real scene, alongside strength/saturation/parallax/shimmerGain/the
+ * ceilings, and reported "we have a basic specular effect working again."
+ * Barely moved from 3 — this control was already close to right, unlike
+ * several of its neighbours.
+ */
+export const SPECULAR_INCIDENT_STEEPNESS = 2.85;
+
+/**
  * How brightly the SHEEN (the always-on base, no shimmer) may peak before its
  * OWN ceiling reins it in.
  *
- * ⚠️ **DROPPED FROM 1.4 TO 0.15 (2026-07-27) — CONTRAST, not just brightness.**
+ * ⚠️ **ROUND 15 (2026-08-03): RAISING THIS WAS TRIED AND REVERTED — IT
+ * ATTACKS THE WRONG AXIS.** The author's next report after ROUND 14 (the
+ * floor-gate fix) was *"either entirely ON or entirely OFF... we want
+ * gradients of brighter shiny metal which pierce through."* The tempting read
+ * is "0.15 flattens too much dynamic range, raise it" — and in ISOLATION
+ * (`reinhardCeiling` fed a wide range of raw brightness values alone) that is
+ * true. But `sheen` does NOT depend on the shimmer pattern at all — it is the
+ * SAME value at a shimmer trough and a shimmer peak on the same metal. Raising
+ * its ceiling raises that SHARED floor under both, which SHRINKS their RATIO
+ * (`peak/trough → 1` as `sheen` grows relative to `glint`), i.e. LESS
+ * contrast in the shimmer pattern itself — the opposite of "pierce through."
+ * `specular-pattern.test.mjs`'s own ROUND-10 regression guard (peak > 1.8×
+ * trough, post-tonemap) caught this immediately when 0.4 was tried: contrast
+ * dropped, not rose. Reverted to 0.15 pending a properly-targeted fix — see
+ * [[keyhole-specular-built]]'s ROUND 15 for what was actually tried and the
+ * real candidates left (the shimmer LAYER's own smoothstep width/spatial
+ * sparsity is the more likely lever for "gradient" in the sense the author
+ * means, not this ceiling).
+ *
+ * ⚠️ **SEPARATELY: "gold boosts toward white instead of staying saturated" is
+ * a DIFFERENT, DEEPER finding, NOT fixable by any ceiling in this file.**
+ * Verified against the REAL transcribed `neutralToneMapping` formula
+ * (`specular-pattern.test.mjs`): the global "Neutral" tonemap has a
+ * DELIBERATE, BUILT-IN desaturation step once any channel's peak crosses
+ * `StartCompression` (0.76) — `desat = 1 − 1/(Desaturation·(peak−newPeak)+1)`,
+ * blending every channel TOWARD the compressed peak (an achromatic value) by
+ * an amount that GROWS with how much compression is happening. This is a
+ * genuine, documented characteristic of that tonemap operator, not a bug
+ * here: `reinhardCeilingRgb` below IS already hue-preserving (one luminance-
+ * derived scalar applied to all three channels, provably direction-
+ * preserving) — specular's OWN composite never desaturates anything on its
+ * own. The desaturation happens ONLY once the COMBINED pixel (base scene +
+ * shine) enters the global tonemap's compression zone — a real tension
+ * between "brighter" and "stays saturated" that no per-effect ceiling alone
+ * can resolve, since the tonemap acts on base+shine TOGETHER.
+ *
+ * ============================================================================
+ * ORIGINAL ROUND 10 REASONING BELOW, STILL THE SHIPPED VALUE
+ * ============================================================================
+ * **DROPPED FROM 1.4 TO 0.15 (2026-07-27) — CONTRAST, not just brightness.**
  * The author's report: *"the darker parts are being boosted in brightness
  * much like the brighter parts, which leads to a washed out ugly look instead
  * of a sharper, high contrast result."* 1.4 was "modest" only measured in
@@ -411,6 +526,29 @@ export function incidentFromIllumRgb(rgb) {
  * moderate light, 3.15→5.25 in a dim room), and the trough itself lands much
  * closer to the base scene's own tonemapped brightness — the "dark parts
  * stay dark" half of the ask.
+ *
+ * ⚠️ **LIVE-ADJUSTABLE SINCE ROUND 17 (2026-08-03)** — `specular-render.js`
+ * turns this into `uSheenCeiling`, a real uniform with `setSheenCeiling()`,
+ * exposed on `SPECULAR_PARAMS` with NO upper limit worth naming: this value
+ * is now the DEFAULT an unconfigured scene ships with, not the only value
+ * that can exist. Push it well past 1 and sheen stops being "gold looks like
+ * gold" and starts being "gold looks lit from within" — a legitimate,
+ * requested extreme for a scene where the shine is reading too faint to see
+ * at all, not a mistake to guard against.
+ *
+ * ⚠️ RAISED 0.15 → 1 (ROUND 18, 2026-08-03), THEN BACK DOWN TO 0.15
+ * (ROUND 19, same day) — the round-18 raise was live-confirmed for overall
+ * visibility, but Round 18's own honest measurement flagged the exact trade
+ * it made: raising this shrinks peak:trough shimmer contrast, and the
+ * measured combination landed back near the ORIGINAL pre-Round-10 "washed
+ * out" bug's own ratio. The author's next live look confirmed the concern
+ * directly — *"the base shine ceiling should be lower, make it very low"* —
+ * so this reverts to the exact value Round 10 originally measured and
+ * tuned (not a fresh guess): `specular-pattern.test.mjs`'s Round-10
+ * regression guard is restored to its ORIGINAL, stricter thresholds
+ * alongside this, since the realistic-incidentAmt fix from Round 18 means
+ * they now measure a genuinely representative scenario rather than a stale
+ * flat stand-in.
  */
 export const SPECULAR_SHEEN_CEILING = 0.15;
 
@@ -424,5 +562,13 @@ export const SPECULAR_SHEEN_CEILING = 0.15;
  * real specular highlight is SUPPOSED to blow out toward bloom; that is what
  * makes a glint read as metal catching hot, sharp light rather than as a
  * painted surface. See `specular-render.js`'s composite header.
+ *
+ * ⚠️ **LIVE-ADJUSTABLE SINCE ROUND 17** — same shape as the sheen ceiling
+ * above (`uGlintCeiling`/`setGlintCeiling()`), same reasoning for leaving it
+ * uncapped upward.
+ *
+ * ⚠️ RAISED 20 → 28 (ROUND 18, 2026-08-03) — live-confirmed; see
+ * `SPECULAR_SHEEN_CEILING`'s header for the full account of this round's
+ * standard and the contrast trade-off it measured.
  */
-export const SPECULAR_GLINT_CEILING = 20;
+export const SPECULAR_GLINT_CEILING = 28;

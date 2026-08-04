@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "shader-lab",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["tools/shader-lab/serve.mjs"],
+      "port": 8934,
+      "autoPort": true
+    }
+  ]
+}

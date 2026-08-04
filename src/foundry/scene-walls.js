@@ -36,6 +36,48 @@
  * physical intuition Wind.md §4 states plainly ("doors are walls with a
  * toggle").
  *
+ * APERTURE RULE (`deriveWallAperture`, 2026-08-03, `docs/planning/
+ * Aperture-Gobo.md`): a wall is an aperture — solid enough to stand in a
+ * doorway's frame, but a window for LIGHT — iff it blocks movement AND its
+ * `light` sense is `PROXIMITY`.
+ *
+ * ⚠️ CORRECTED LIVE, 2026-08-03, same session — the FIRST cut of this
+ * predicate used `light: NONE`, reasoned from the schema alone ("None" reads
+ * as the plain-English choice for "doesn't block"). The author corrected
+ * this directly, from actually authoring windows in Foundry, not from the
+ * spec: **`light: PROXIMITY` is Foundry's own real convention for a
+ * window** — a wall that stays opaque to light until a source sits within
+ * its own `threshold.light` distance, at which point light passes. `light:
+ * NONE` is a much blunter, rarer choice (permanently transparent to light,
+ * used for all kinds of things that are not windows — decorative dividers,
+ * terrain edges, whatever else a map author never meant this effect to
+ * touch). Matching on `NONE` MASSIVELY over-matched on a real map (317
+ * aperture candidates found across the scene, 189 dropped by the per-light
+ * cap) and produced visible knock-on effects on ordinary terrain walls that
+ * were never meant to be windows at all — exactly the class of bug
+ * `feedback_membership_beats_derived_threshold` warns about: `NONE` LOOKED
+ * like the right membership test without being the authored one.
+ *
+ * This is the SAME `move` half `deriveWallSolid` already reads, plus a THIRD
+ * field neither existing predicate touches: `light` (`common/documents/
+ * wall.mjs`, verified against source same as every other field here) is its
+ * own `EDGE_SENSE_TYPES` field, schema default `NORMAL` — meaning an
+ * ORDINARY, never-touched wall blocks light exactly like it blocks movement,
+ * and `light: PROXIMITY` is a real, deliberate authoring choice (a GM
+ * explicitly marking a window), never the resting state of an unedited wall.
+ * `sight` is deliberately not read here, same reasoning as `deriveWallSolid`'s
+ * own: a leaded-glass window that blocks SIGHT while passing LIGHT is a real
+ * thing an author can draw, and it is still an aperture for this module's
+ * purposes — light is the only sense this predicate answers for. The
+ * `threshold.light` DISTANCE itself is deliberately NOT re-read or
+ * re-enforced here — Foundry's own sweep already decides whether a given
+ * light source is close enough for light to actually cross this wall (that
+ * is what shapes `source.shape.points`, the SAME polygon this whole effect's
+ * mesh is built from); this predicate only answers "is this wall the KIND of
+ * wall a window pattern belongs on", never "is light passing through it
+ * right now" — that second question is Foundry's alone to answer, and it
+ * already has, by the time a light's mesh even exists to draw on.
+ *
  * @module foundry/scene-walls
  */
 
@@ -57,6 +99,15 @@ const WALL_MOVEMENT_NORMAL = 20; // CONST.WALL_MOVEMENT_TYPES.NORMAL === CONST.E
 const WALL_DOOR_NONE = 0; // CONST.WALL_DOOR_TYPES.NONE — the schema's own default
 const WALL_DOOR_STATE_CLOSED = 0; // CONST.WALL_DOOR_STATES.CLOSED — the schema's own default
 const WALL_DOOR_STATE_OPEN = 1; // CONST.WALL_DOOR_STATES.OPEN
+// `light` is its OWN EDGE_SENSE_TYPES field (common/documents/wall.mjs:58-60,
+// verified against source), kept as separate named constants from `move`'s
+// even though the numeric values coincide — same one-constant-per-field style
+// this file already uses for door/move. Schema default is NORMAL(20): an
+// unedited wall blocks light exactly like it blocks movement. PROXIMITY(30)
+// is Foundry's own real "window" sense — see deriveWallAperture's own header
+// for why this replaced an initial (wrong) NONE(0) reading.
+const WALL_LIGHT_NORMAL = 20; // CONST.EDGE_SENSE_TYPES.NORMAL — the schema's own default (blocks light)
+const WALL_LIGHT_PROXIMITY = 30; // CONST.EDGE_SENSE_TYPES.PROXIMITY — Foundry's own window convention: opaque beyond threshold.light, passable within it
 
 /**
  * Is this wall a barrier to wind right now? Pure — no Foundry, no canvas —
@@ -106,6 +157,35 @@ export function deriveWallBlocksExterior({ move } = {}) {
 }
 
 /**
+ * Is this wall an APERTURE — solid to movement, but a window for LIGHT?
+ * (`docs/planning/Aperture-Gobo.md` §2.1.) Pure — no Foundry, no canvas — so
+ * this is Node-tested the same way `deriveWallSolid` is.
+ *
+ * `move !== NONE && light === PROXIMITY`. This is Foundry's OWN convention
+ * for authoring a window — a wall that stops a token but lets light through
+ * once a source sits within the wall's own `threshold.light` distance — not
+ * a guess from the schema's field names (see this function's own module
+ * header for the live correction this replaced: an earlier `light === NONE`
+ * reading was plausible from the spec alone and wrong in practice, matching
+ * far more walls than a map's actual windows). A `move: NONE` decorative
+ * wall is never an aperture (there is nothing for a window to be cut INTO);
+ * a wall whose `light` was never touched (schema default `NORMAL`) is never
+ * an aperture either — an aperture is always a deliberate authored choice,
+ * never the resting state of an unedited wall.
+ *
+ * @param {{move?: number, light?: number}} [wall] - raw field values off a
+ *   WallDocument (or a plain test fixture). A missing field falls back to
+ *   the SCHEMA's own default (see this file's own header), same discipline
+ *   as `deriveWallSolid`/`deriveWallBlocksExterior`.
+ * @returns {boolean}
+ */
+export function deriveWallAperture({ move, light } = {}) {
+  const moveVal = Number.isFinite(move) ? move : WALL_MOVEMENT_NORMAL;
+  const lightVal = Number.isFinite(light) ? light : WALL_LIGHT_NORMAL;
+  return moveVal !== WALL_MOVEMENT_NONE && lightVal === WALL_LIGHT_PROXIMITY;
+}
+
+/**
  * Read every wall segment for the active scene, scoped to `levelId` the
  * SAME way `scene-wall-clip.js` already scopes candle light-clipping (an
  * empty `wall.levels` set means "every Level"). Never throws — a live
@@ -117,7 +197,7 @@ export function deriveWallBlocksExterior({ move } = {}) {
  *   (see `scene-wall-clip.js`'s header for why this is the preferred,
  *   NOT-`canvas.level`, source). `null`/absent reads every wall regardless
  *   of level scoping (the "no floor context yet" case).
- * @returns {Array<{x1:number, y1:number, x2:number, y2:number, solid:boolean, blocksExterior:boolean}>}
+ * @returns {Array<{x1:number, y1:number, x2:number, y2:number, solid:boolean, blocksExterior:boolean, aperture:boolean}>}
  */
 export function readSceneWallSegments(levelId = null) {
   try {
@@ -138,6 +218,12 @@ export function readSceneWallSegments(levelId = null) {
         y2: c[3],
         solid: deriveWallSolid({ move: wall.move, door: wall.door, ds: wall.ds }),
         blocksExterior: deriveWallBlocksExterior({ move: wall.move }),
+        // APERTURE (2026-08-03, docs/planning/Aperture-Gobo.md §2.1) — the
+        // ONE extra derived fact `effects/lighting/aperture-gobo.js` needs off
+        // a raw wall, added here rather than a second `canvas.scene.walls`
+        // reader (`foundry/adapter-only` — this file is already the one place
+        // that reads it).
+        aperture: deriveWallAperture({ move: wall.move, light: wall.light }),
       });
     }
     return out;

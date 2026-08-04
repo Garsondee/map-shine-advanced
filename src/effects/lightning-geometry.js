@@ -39,6 +39,8 @@
  * @module effects/lightning-geometry
  */
 
+import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL } from './lighting/point-light-illumination.js';
+
 // ============================================================================
 // SEEDED RNG — an exact port of V2's own hash + LCG (legacy/compositor-v2/
 // effects/LightningEffectV2.js `_hashStringToUint`/`_randFloat`/
@@ -329,6 +331,13 @@ export function generateBurst({ source, burstIndex, spawnMs, maxPointsPerStrand,
 
   const baseIntensity = Math.max(0.05, source.intensity ?? 1);
   const durationMs = Math.max(20, params.strikeDurationMs);
+  // THE STRIKE'S OWN HEIGHT-GATE INPUT — carried straight from `source`
+  // (see `groupLightningAnchorsIntoSources`' own doc). Branches inherit the
+  // SAME value below: a branch physically emanates from its parent strike,
+  // so it belongs to the same floor by construction, never a second lookup.
+  const elevationRank = Number.isFinite(source.elevationRank)
+    ? source.elevationRank
+    : LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
 
   const main = {
     isBranch: false,
@@ -343,6 +352,7 @@ export function generateBurst({ source, burstIndex, spawnMs, maxPointsPerStrand,
     parentDurationMs: null,
     parentLeaderFrac: null,
     baseIntensity,
+    elevationRank,
     widthScale: 1,
     xs: mainXs,
     ys: mainYs,
@@ -424,6 +434,7 @@ export function generateBurst({ source, burstIndex, spawnMs, maxPointsPerStrand,
         parentDurationMs: durationMs,
         parentLeaderFrac: leaderFrac,
         baseIntensity: Math.max(0.01, baseIntensity * Math.max(0.05, params.branchIntensityScale)),
+        elevationRank,
         widthScale: Math.max(0.05, params.branchWidthScale),
         xs: bxs,
         ys: bys,
@@ -579,9 +590,9 @@ export function computeOutsideFlashSignal(nowMs, flashState, params) {
 // ============================================================================
 
 /**
- * @param {Array<{id:string, x:number, y:number, params?:object}>} anchors
+ * @param {Array<{id:string, x:number, y:number, params?:object, elevationRank?:number}>} anchors
  * @returns {{
- *   sources: Array<{linkId:string, seed:number, startX:number, startY:number, endX:number, endY:number, intensity:number}>,
+ *   sources: Array<{linkId:string, seed:number, startX:number, startY:number, endX:number, endY:number, intensity:number, elevationRank:number}>,
  *   orphaned: Array<{id:string, linkId:string, role:string}>,
  * }}
  */
@@ -618,6 +629,15 @@ export function groupLightningAnchorsIntoSources(anchors) {
         : Number.isFinite(intensityEnd)
           ? intensityEnd
           : 1;
+      // THE BOLT'S OWN HEIGHT-GATE INPUT (2026-08-03) — the START anchor's own
+      // resolved rank (`boot.js#getLightningRenderState`). A bolt visually
+      // originates at its start point; using either anchor's own band would
+      // be defensible, but a strike genuinely does travel start→end, so the
+      // origin's own floor is the more honest single answer when the two
+      // anchors disagree. Defaults to the unconfigured sentinel (never 0) if
+      // absent — a hand-built test fixture predating this field gets the OLD
+      // "always fully reaches" behaviour, never a silently introduced gate.
+      const rankRaw = Number(bucket.start.elevationRank);
       sources.push({
         linkId,
         seed: hashStringToSeed(linkId),
@@ -626,6 +646,7 @@ export function groupLightningAnchorsIntoSources(anchors) {
         endX: bucket.end.x,
         endY: bucket.end.y,
         intensity,
+        elevationRank: Number.isFinite(rankRaw) ? rankRaw : LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
       });
     } else {
       if (bucket.start) orphaned.push({ id: bucket.start.id, linkId, role: 'start' });
@@ -840,7 +861,7 @@ export function buildLightningLightSources(activeStrands, nowMs, params) {
  * @returns {{
  *   positions: Float32Array, prevPos: Float32Array, nextPos: Float32Array, side: Float32Array, uvOffset: Float32Array,
  *   spawnMs: Float32Array, durationMs: Float32Array, seed: Float32Array, leaderFrac: Float32Array,
- *   restrikeCount: Float32Array, baseIntensity: Float32Array, widthScale: Float32Array, isBranch: Float32Array,
+ *   restrikeCount: Float32Array, baseIntensity: Float32Array, elevationRank: Float32Array, widthScale: Float32Array, isBranch: Float32Array,
  *   parentSpawnMs: Float32Array, parentDurationMs: Float32Array, parentLeaderFrac: Float32Array, growthSpeed: Float32Array,
  *   indices: Uint32Array, strandPointCounts: number[], vertexCount: number, indexCount: number,
  * }}
@@ -863,6 +884,12 @@ export function computeLightningStrandArrays(activeStrands, maxStrands, maxPoint
   const leaderFrac = new Float32Array(vertCapacity);
   const restrikeCount = new Float32Array(vertCapacity);
   const baseIntensity = new Float32Array(vertCapacity);
+  // THE STRIKE'S OWN HEIGHT-GATE INPUT — see `generateBurst`'s own doc. Packed
+  // alongside baseIntensity/widthScale into `strandBakeB` in lightning-
+  // render.js (widened vec3→vec4) rather than opened as a 7th separate
+  // vertex buffer — that file's own header explains why (WebGPU's 8-buffer
+  // ceiling, hit live once already).
+  const elevationRank = new Float32Array(vertCapacity);
   const widthScale = new Float32Array(vertCapacity);
   const isBranch = new Float32Array(vertCapacity);
   const parentSpawnMs = new Float32Array(vertCapacity);
@@ -908,6 +935,12 @@ export function computeLightningStrandArrays(activeStrands, maxStrands, maxPoint
         leaderFrac[v] = strand.leaderFrac;
         restrikeCount[v] = strand.restrikeCount;
         baseIntensity[v] = strand.baseIntensity;
+        // Defensive default, same posture as computeCandleFlameArrays' own
+        // rank fallback — a strand from an older/hand-built fixture without
+        // this field gets the OLD "always fully reaches" behaviour.
+        elevationRank[v] = Number.isFinite(strand.elevationRank)
+          ? strand.elevationRank
+          : LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
         widthScale[v] = strand.widthScale;
         isBranch[v] = strand.isBranch ? 1 : 0;
         parentSpawnMs[v] = hasParent ? strand.parentSpawnMs : 0;
@@ -963,6 +996,7 @@ export function computeLightningStrandArrays(activeStrands, maxStrands, maxPoint
     leaderFrac,
     restrikeCount,
     baseIntensity,
+    elevationRank,
     widthScale,
     isBranch,
     parentSpawnMs,

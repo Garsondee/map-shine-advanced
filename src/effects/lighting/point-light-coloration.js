@@ -91,7 +91,12 @@
  */
 
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
-import { inverseSquareFalloff } from './point-light-illumination.js';
+import {
+  inverseSquareFalloff,
+  buildHeightGateNode,
+  LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
+} from './point-light-illumination.js';
+import { buildApertureGoboTerm } from './aperture-gobo-render.js';
 import { createWindHandle } from '../../world/index.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
@@ -200,6 +205,7 @@ export function computeColorationAlpha(alpha01, technique) {
 export function buildPointLightColorationMaterial({
   THREE,
   albedoTexture,
+  attrTexNode,
   animation,
   uGlobalTimeMs,
   uRatio,
@@ -209,6 +215,10 @@ export function buildPointLightColorationMaterial({
   windExposure,
   windResponse,
   windHandle = TIER0_WIND_HANDLE,
+  apertureCount = 0,
+  apGoboCols,
+  apGoboRows,
+  apertureGoboShared,
 }) {
   const {
     uniform,
@@ -221,10 +231,16 @@ export function buildPointLightColorationMaterial({
     smoothstep,
     length,
     positionLocal,
+    positionWorld,
     dot,
     sqrt,
     sRGBTransferOETF,
-    // mix, — temporarily unused, see the diagnostic revert below
+    // RE-ENABLED (2026-08-04, round 18) — for the `uStrength` fix below,
+    // NOT the still-disabled SHADOW term (`uShadows`) further down this
+    // file, which stays commented out; that one's own suspected build
+    // failure was in ITS OWN term's construction, not in `mix` itself
+    // (already used safely elsewhere, e.g. point-light-illumination.js).
+    mix,
   } = THREE.TSL;
 
   const uAttenuationEased = uniform(float(0.5));
@@ -247,6 +263,86 @@ export function buildPointLightColorationMaterial({
   } else {
     const attenForFalloff = uAttenuationEased.max(float(0.0001));
     falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  }
+
+  // ============================================================================
+  // THE HEIGHT/ELEVATION GATE — the SAME node the illumination twin uses.
+  // ============================================================================
+  // A point light is drawn by TWO meshes sharing ONE geometry: the illumination
+  // mesh and THIS one, which carries the visible coloured glow and every
+  // ANIMATED light effect (torch, pulse, chroma — the whole animations
+  // registry). Gating only the illumination half is exactly the state the
+  // author reported live: *"You are now correctly occluding the light polygon.
+  // But you aren't correctly occluding the animated light source."* The floor
+  // lift went dark under a slab while the animated colour kept painting
+  // straight through it.
+  //
+  // Multiplied into `falloff` SPECIFICALLY, not into `outputColor`, because
+  // falloff feeds BOTH the colour (`finalColor.mul(falloff)`) and the material's
+  // ALPHA (`vec4(outputColor, falloff)`). One multiply therefore gates the glow
+  // AND its coverage together — and under this material's MAX blend an
+  // un-gated alpha would keep writing a lit depth value even with the colour
+  // zeroed (`feedback_blend_neutral_element_is_per_blend`: what counts as
+  // "no contribution" is per-blend, and for MAX it is a genuine zero in every
+  // channel that is read downstream).
+  //
+  // ⚠️ `screenUV`, never the bare node — `buf:scene.attr` is a SCREEN-space
+  // buffer and this is a WORLD-space fan mesh with no `uv` attribute at all.
+  // This file already samples its albedo the same way, and calls it "this
+  // project's own already-proven technique" (see `mapColor` below). Passing
+  // `attrTexNode` unsampled is the round-1-to-3 bug verbatim
+  // (`feedback_shared_texture_node_carries_the_wrong_uv`).
+  //
+  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no attr
+  // texture supplied this material is byte-identical to what it was before the
+  // gate existed.
+  const uLightElevationRank = uniform(float(LIGHT_ELEVATION_UNCONFIGURED_SENTINEL));
+  if (attrTexNode) {
+    falloff = falloff.mul(
+      buildHeightGateNode(THREE.TSL, { attrHere: attrTexNode.sample(screenUV), uLightElevationRank })
+    );
+  }
+
+  // APERTURE GOBO (round 10, 2026-08-04) — the SAME "multiply into `falloff`
+  // itself, not `outputColor`" discipline as the height gate immediately
+  // above, and for the identical reason spelled out in that gate's own
+  // comment: `falloff` feeds BOTH this material's colour AND its alpha
+  // (`vec4(outputColor, falloff)`, below), and this material MAX-blends —
+  // zeroing only the colour while leaving alpha positive would still MAX a
+  // lit depth value into the shared buffer with no colour behind it
+  // (`feedback_blend_neutral_element_is_per_blend`). `point-light-
+  // illumination.js`'s own header has the full round 1-10 history of why
+  // this lives INSIDE the light's own MAX-blend draw rather than a separate
+  // post-process pass — coloration needs the identical treatment for the
+  // identical reason: a colourless light already contributes zero here
+  // (`uColorationAlpha`), but a coloured or animated one draws real,
+  // additive brightness that must ALSO respect the gobo pattern, and MUST
+  // do so as part of THIS light's own MAX-blend contribution so an
+  // independently brighter source (another light's own coloration) is never
+  // dragged down by a pass that doesn't know it's there.
+  let uApColLampHeight = null;
+  let apColApertures = null;
+  if (apertureCount > 0) {
+    const goboResult = buildApertureGoboTerm({
+      THREE,
+      positionWorldXY: positionWorld.xy,
+      dist,
+      apertureCount,
+      cols: apGoboCols,
+      rows: apGoboRows,
+      shared: apertureGoboShared,
+    });
+    if (goboResult) {
+      // `uStrength` — the SAME real, live-found bug `point-light-
+      // illumination.js`'s own identical fix describes (documented since
+      // round 10 but never actually wired into either channel): `mix(1,
+      // node, uStrength)` — at uStrength=1 (default) byte-identical to
+      // before this fix, at 0 fully neutral (no aperture at all).
+      const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
+      falloff = falloff.mul(strengthedGobo);
+      uApColLampHeight = goboResult.uLampHeight;
+      apColApertures = goboResult.apertures;
+    }
   }
 
   // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
@@ -367,6 +463,10 @@ export function buildPointLightColorationMaterial({
     material,
     uAttenuationEased,
     uColorationAlpha,
+    // The height gate's ONE per-light input — the SAME uniform name the
+    // illumination twin exposes, so `point-light-pool.js` can push the one
+    // resolved rank into both materials without knowing which is which.
+    uLightElevationRank,
     uLightColor,
     uShadows,
     uSpeedRaw,
@@ -376,6 +476,14 @@ export function buildPointLightColorationMaterial({
     uWindCenter,
     uWindExposure,
     uWindResponse,
+    // APERTURE GOBO (round 10) — `null` when this light has no apertures.
+    // A SEPARATE uniform set from illumination's own `uApLampHeight`/
+    // `apApertures` (this mesh's own material, own uniforms) — `point-
+    // light-pool.js` writes the SAME per-frame aperture geometry into both,
+    // the same duplication-across-the-mesh-pair pattern `uAttenuationEased`/
+    // `uColorationAttenuationEased` already use.
+    uApColLampHeight,
+    apColApertures,
   };
 }
 

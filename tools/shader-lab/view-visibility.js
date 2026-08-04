@@ -48,6 +48,8 @@ const VIEW_BY_EFFECT = Object.freeze({
   composite: 'compositeLeft',
   blend: 'blendLeft',
   'sun-shadow': 'sunShadowLeft',
+  'floor-lighting': 'floorLightLeft',
+  'aperture-gobo': 'apertureGoboLeft',
 });
 
 const ALL_CONTAINERS = [...new Set(Object.values(VIEW_BY_EFFECT))];

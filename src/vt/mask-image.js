@@ -46,9 +46,11 @@
  * ============================================================================
  * COST, STATED HONESTLY
  * ============================================================================
- * `MASK_IMAGE_SCALE` (0.5) of a 10,650 × 4,950 mask is 5,325 × 2,475 ≈ 13.2 M
- * texels. Uploaded RED/UnsignedByte — ONE byte per texel — that is **~13 MB**,
- * against a scene already holding ~265 MB of texture. Full res would be ~53 MB.
+ * `MASK_IMAGE_SCALE` (1, full native res) of a 10,650 × 4,950 mask is
+ * ~52.7 M texels. Uploaded RED/UnsignedByte — ONE byte per texel — that is
+ * **~53 MB**, against a scene already holding ~265 MB of texture. Half res
+ * (the original default, until the author asked for the one-number raise
+ * once the shoreline softness became visible) would have been ~13 MB.
  *
  * RED, not the RGBA every other DataTexture in this renderer uses: those are
  * all ≤512² where the 4× waste is invisible, and their headers cite avoiding a
@@ -70,13 +72,15 @@ import { createLogger } from '../core/log.js';
 const log = createLogger('MaskImage');
 
 /**
- * Fraction of the mask file's NATIVE resolution to upload. Half, chosen with
- * the author 2026-07-26 on the explicit understanding that full res is a
- * one-number change if the difference is ever visible.
+ * Fraction of the mask file's NATIVE resolution to upload. Started at half,
+ * chosen with the author 2026-07-26 on the explicit understanding that full
+ * res was a one-number change if the difference was ever visible — it was,
+ * and this is that change, now shipping at native resolution.
  *
- * At half res on a 10,650px-wide map a texel is ~2 world px; at the reported
+ * At half res on a 10,650px-wide map a texel was ~2 world px; at the reported
  * play zoom (~1.7 world px per screen px) that is well under one screen pixel,
- * so the shoreline's crispness is bounded by the display, not by this.
+ * so in THEORY the shoreline's crispness was bounded by the display, not by
+ * this — in practice the author saw it, hence the raise.
  */
 export const MASK_IMAGE_SCALE = 1;
 

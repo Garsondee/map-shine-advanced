@@ -219,6 +219,66 @@ fix needs a bottom/top on the Level.
 On a live scene with a 0–20 floor: a tile at elevation 9 sits under the bush, a
 tile at 10 sits over it, and trees still draw above bushes.
 
+### Follow-up — 2026-08-04: the sparse-floor tie (a gap the live test above didn't cover)
+
+**Status of this specific gap:** `BUILT (unverified)` — code changed, `npm run
+verify` green (7230 tests), **not yet re-confirmed live.** The 2026-08-01 LIVE
+confirmation above still stands for what it actually tested (tiles vs.
+vegetation, with real drawables sitting between them); this is a narrower case
+that test never exercised.
+
+**Report:** a screenshot showing a `_Bush` overlay fully covering canopy that
+should read as `_Tree` above it — *"Currently the _Bush effect renders above
+the _Tree effect."*
+
+**Root cause — confirmed against the code, not a hypothesis.**
+`vegetationOverlayRenderOrder` (`vegetation-render.js`) places a kind by
+counting how many REAL (non-vegetation) drawables sort below its computed
+elevation, then landing at the exact midpoint of that gap, `below - 0.5`, for
+every kind. That count only ever compares a kind against real scene
+drawables — it never compares bush's slot against tree's. On a floor where
+nothing real sits strictly between bush's elevation (its band's midpoint) and
+tree's (its band's top) — **an ordinary floor: background art, a tree, a
+bush, nothing else at an in-between elevation** — both kinds count the
+identical number of real items below them and land on the identical
+`below - 0.5`. Two different meshes with numerically equal `renderOrder` have
+no defined winner in this renderer's own model (the entire point of sorting
+by the law instead of THREE's incidental tie-break), so whichever painted on
+top came down to scene-graph/creation order, not "trees are taller than
+bushes". The existing regression fixture never caught this because it always
+seeded a tile at elevation 19 — between bush's 10 and tree's 20 in the
+author's own 0–20 worked example — which broke the tie by accident; a floor
+with nothing between them (the more ordinary case, not the exception) was
+never exercised.
+
+**What was built.** `vegetationOverlayRenderOrder` no longer bisects every
+kind's gap at a fixed `-0.5`. It places each kind at a fixed point INSIDE the
+gap, ordered by that kind's own `passiveElevationFraction` — the same field
+that already says tree (1.0) belongs above bush (0.5) — so two kinds sharing
+one gap now get two distinct numbers in the correct relative order, margined
+away from both edges (`VEG_KIND_SLOT_MARGIN`) so neither can newly collide
+with a real drawable either. Kinds that don't share a gap are unaffected —
+still separated by whatever real drawables sit between them, exactly as
+before.
+
+**The other possible cause — rule this out first if the live check doesn't
+change.** This fix only touches **Case 2** (a plain tile with a discovered
+sibling `_Tree`/`_Bush` file — the swaying overlay mesh). **Case 1 — a tile
+whose OWN art file is `_Tree`/`_Bush`-suffixed — is untouched, by design**
+(see "Deliberately NOT changed" above): that tile's `renderOrder` is exactly
+its own author-set Foundry elevation/sort, same as any other tile. If the
+bush and tree in the screenshot are each their own tile (the PNG alpha IS the
+plant, not a mask painted onto a separate background), this fix changes
+nothing there — the fix is raising the tree tile's elevation/sort above the
+bush tile's in Foundry itself, the same as ordering any two ordinary tiles.
+
+### Fixed when (follow-up)
+
+On an ordinary floor with just background art — no tiles at elevations
+between the bush's midpoint and the tree's top — a `_Bush` and `_Tree`
+overlay painted so they visually overlap show the tree's canopy on top, every
+time, not incidentally.
+
 ---
 
 ## 3. Wind: no wind shadow, no routing around obstacles
@@ -532,6 +592,12 @@ them.
   merely a large amplitude; bug 5's guessed cause (anchors inherit host culling)
   was **wrong** — the floor filter was always there, the control for it was not.
   **All three await the author's live look.**
+- **2026-08-04** — Author screenshot: `_Bush` drawing over `_Tree`. Traced to a
+  real gap in bug 2's own fix — two vegetation kinds sharing a floor with no
+  real drawable between their elevations landed on the identical
+  `renderOrder` number (the regression fixture happened to always seed one).
+  Fixed in `vegetationOverlayRenderOrder`; `npm run verify` green (7230
+  tests). **Awaiting the author's live look** — see bug 2's follow-up section.
 
 ---
 

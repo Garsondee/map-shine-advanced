@@ -18,7 +18,16 @@ import {
   SPECULAR_DEBUG_CHANNELS,
   SPECULAR_DEBUG_BOOST,
 } from '../specular.js';
-import { SPECULAR_DEFAULT_SHIMMER_GAIN } from '../specular-render.js';
+import {
+  SPECULAR_DEFAULT_SHIMMER_GAIN,
+  SPECULAR_DEFAULT_SATURATION,
+  SPECULAR_DEFAULT_STRENGTH,
+  SPECULAR_DEFAULT_PATTERN_SCALE_PX,
+  SPECULAR_DEFAULT_PARALLAX_STRENGTH,
+  SPECULAR_DEFAULT_ISLAND_SPREAD,
+  SPECULAR_DEFAULT_DRIFT_SPEED,
+} from '../specular-render.js';
+import { SPECULAR_SHEEN_CEILING, SPECULAR_GLINT_CEILING, SPECULAR_INCIDENT_STEEPNESS } from '../specular-pattern.js';
 
 export function run(t) {
   const { ok } = t;
@@ -92,6 +101,24 @@ export function run(t) {
   // The escape hatches are real, reachable values rather than prose.
   ok('metal colour can be taken to 0 — a neutral white sheen', SPECULAR_PARAMS.saturation.min === 0);
   ok('…and defaults ON, so a gold mask reads as gold', SPECULAR_PARAMS.saturation.default > 0);
+  // ⚠️ ROUND 16 (2026-08-03): the default now sits ABOVE 1, a DELIBERATE
+  // oversaturation counteracting the global tonemap's own desaturation —
+  // see SPECULAR_DEFAULT_SATURATION's own doc. Pinned against the render
+  // module's default the same way shimmerGain already is below, so the two
+  // cannot silently drift apart the way `SPECULAR_DEFAULT_SHIMMER_GAIN` vs
+  // the OLD schema default once did.
+  ok(
+    "the schema default sits above 1 — the render module's own oversaturation compensation ships by default",
+    SPECULAR_PARAMS.saturation.default > 1
+  );
+  ok(
+    'the schema default and the render module default agree on saturation',
+    SPECULAR_PARAMS.saturation.default === SPECULAR_DEFAULT_SATURATION
+  );
+  ok(
+    "the default never exceeds the schema's own declared max — a future max cut must not silently orphan this",
+    SPECULAR_DEFAULT_SATURATION <= SPECULAR_PARAMS.saturation.max
+  );
   // ⚠️ `islandSpread: 0` is the documented "give me V2 back" setting: every
   // island moves identically, which is exactly what V2 did with its single
   // global pattern frame. It must stay reachable.
@@ -128,6 +155,79 @@ export function run(t) {
     'the schema default and the render module default agree on shimmerGain',
     SPECULAR_PARAMS.shimmerGain.default === SPECULAR_DEFAULT_SHIMMER_GAIN
   );
+
+  // ── ROUND 17 (2026-08-03) — three constants promoted to live params, on
+  // direct request for "very high ranges to boost the brightness... lots of
+  // controls, I'll fine tune it" after a channel probe suggested the
+  // steepening gate (added the previous round) was crushing an ordinarily
+  // lit point far more than intended. Same "two places store one number"
+  // shape as shimmerGain/saturation above, same reason to pin it.
+  ok(
+    'sheenCeiling exists, in Response, and agrees with the pattern module default',
+    SPECULAR_PARAMS.sheenCeiling.category === 'Response' &&
+      SPECULAR_PARAMS.sheenCeiling.default === SPECULAR_SHEEN_CEILING
+  );
+  ok(
+    'glintCeiling exists, in Response, and agrees with the pattern module default',
+    SPECULAR_PARAMS.glintCeiling.category === 'Response' &&
+      SPECULAR_PARAMS.glintCeiling.default === SPECULAR_GLINT_CEILING
+  );
+  ok(
+    'incidentSteepness exists, in Response, and agrees with the pattern module default',
+    SPECULAR_PARAMS.incidentSteepness.category === 'Response' &&
+      SPECULAR_PARAMS.incidentSteepness.default === SPECULAR_INCIDENT_STEEPNESS
+  );
+  // Headroom the author explicitly asked for — high enough to genuinely
+  // "brute-force punch through", not just a token bump.
+  ok('shine strength now reaches well past its old ceiling of 3', SPECULAR_PARAMS.strength.max >= 10);
+  ok('shimmer contrast now reaches well past its old ceiling of 12', SPECULAR_PARAMS.shimmerGain.max >= 20);
+  ok(
+    'light response can be pushed below 1 — a deliberate BOOST of dim areas, not just less suppression',
+    SPECULAR_PARAMS.incidentSteepness.min < 1
+  );
+  // `lightFloor` moved category (Look → Response) this round — pin it so a
+  // future edit does not silently drift it back without a reason.
+  ok(
+    'the unlit-shine floor now lives in Response, beside its light-answering siblings',
+    SPECULAR_PARAMS.lightFloor.category === 'Response'
+  );
+
+  // ── ROUND 18 (2026-08-03) — THE FIRST LIVE-CONFIRMED DEFAULTS. The author
+  // dialled every Round 17 control in on a real scene and reported back "we
+  // have a basic specular effect working again" — a screenshot of the panel,
+  // not a request to try something. These are the values shipped from that
+  // confirmation, pinned the same "two places store one number" way as
+  // shimmerGain/saturation above — several of these constants had NEVER been
+  // pinned before (strength/patternScalePx/parallaxStrength/driftSpeed/
+  // islandSpread), because nothing had contested their old, arbitrary
+  // defaults enough to justify one. A live-confirmed number is exactly the
+  // kind of number worth protecting from silent drift.
+  ok(
+    'strength: schema and render module agree, and it now defaults to its own max',
+    SPECULAR_PARAMS.strength.default === SPECULAR_DEFAULT_STRENGTH && SPECULAR_PARAMS.strength.default === 20
+  );
+  ok(
+    'patternScalePx: schema and render module agree on the live-confirmed (smaller) scale',
+    SPECULAR_PARAMS.patternScalePx.default === SPECULAR_DEFAULT_PATTERN_SCALE_PX
+  );
+  ok(
+    'parallaxStrength: schema and render module agree, and it now defaults to its own max',
+    SPECULAR_PARAMS.parallaxStrength.default === SPECULAR_DEFAULT_PARALLAX_STRENGTH &&
+      SPECULAR_PARAMS.parallaxStrength.default === SPECULAR_PARAMS.parallaxStrength.max
+  );
+  ok(
+    'islandSpread: schema and render module agree, and it now defaults to its own max',
+    SPECULAR_PARAMS.islandSpread.default === SPECULAR_DEFAULT_ISLAND_SPREAD &&
+      SPECULAR_PARAMS.islandSpread.default === SPECULAR_PARAMS.islandSpread.max
+  );
+  ok(
+    'driftSpeed: schema and render module agree the idle drift is now fully OFF by default',
+    SPECULAR_PARAMS.driftSpeed.default === SPECULAR_DEFAULT_DRIFT_SPEED && SPECULAR_PARAMS.driftSpeed.default === 0
+  );
+  // shimmerGain/saturation/sheenCeiling/glintCeiling/incidentSteepness are
+  // already pinned above/earlier — their NEW live-confirmed values (2.2, 2,
+  // 1, 28, 2.85) flow through those SAME assertions with no test changes,
+  // which is the entire point of pinning by equality rather than by literal.
 
   // --- it registers through the ONE door ----------------------------------
   const registry = createEffectRegistry();

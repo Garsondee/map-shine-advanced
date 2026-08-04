@@ -80,11 +80,13 @@ export const SHADOW_LAYER_COUNT = 4;
  * on are declared — a full set of four would be three unused constants, and
  * this file's own doctrine is that an unconsumed API rots silently.
  *
- * `LAYER_OVERHEAD` exists because it is the ONE layer whose coverage means
- * "the receiver IS this caster" rather than "the receiver is beneath it", and
- * {@link layerSmearVisibility} has to treat it differently for exactly that
- * reason. Naming it keeps that asymmetry legible instead of a bare `occ[1]`.
+ * `LAYER_WALLS` and `LAYER_OVERHEAD` both exist because they are the layers
+ * whose coverage can mean "the receiver IS this caster" rather than "the
+ * receiver is beneath it", and {@link layerSmearVisibility} has to treat
+ * both differently for exactly that reason. Naming them keeps that asymmetry
+ * legible instead of a bare `occ[0]`/`occ[1]`.
  */
+export const LAYER_WALLS = 0;
 export const LAYER_OVERHEAD = 1;
 
 /**
@@ -479,18 +481,37 @@ export function layerSmearVisibility({
   // Foundry elevation is a SORT KEY, not a spatial offset (memory:
   // feedback_elevation_is_sort_key_not_offset) — a raised tile's sprite
   // occupies the very same (x,y) as the ground it is "above". So at a texel
-  // where {@link LAYER_OVERHEAD}'s coverage is 1, the pixel you can SEE *is*
-  // that tile, and station 0 (`d = 0`, `fall = 1`) hands it its own coverage
-  // as a full-strength shadow. It darkens itself.
+  // where a layer's own coverage is 1, the pixel you can SEE *is* that
+  // layer's own caster, and station 0 (`d = 0`, `fall = 1`) hands it its own
+  // coverage as a full-strength shadow. It darkens itself.
   //
-  // ONLY the overhead layer is excluded, and the asymmetry is the whole point:
-  //   - walls — the receiver IS the wall, and `gate` (the sharpened
-  //     `_Outdoors` read) already removes it, so nothing more is needed.
+  // BOTH walls and overhead are excluded; the floor-above/higher layers are
+  // NOT, and THAT is the asymmetry that matters:
+  //   - walls — the receiver IS the wall. Exclude.
   //   - overhead — the receiver IS the caster. Exclude.
   //   - the floor above / higher — the receiver is genuinely BENEATH the
   //     caster, on different art. Excluding those would delete the sky-reach
   //     shadow (the bridge deck darkening the water) outright, which is the
   //     one thing this model most exists to draw.
+  //
+  // ⚠️ WALLS WAS ORIGINALLY LEFT OUT ON PURPOSE, and the reasoning was wrong.
+  // The original argument: "the receiver IS the wall, and `gate` (the
+  // sharpened `_Outdoors` read) already removes it, so nothing more is
+  // needed." That is true only for a texel `gate` actually shuts off — one
+  // that reads UNAMBIGUOUSLY indoors. Author, 2026-08-03, live, on a
+  // thatched roof: a dark band sat directly on the ridge line, self-cast.
+  // Measured with the mask-stack probe: the ridge is an ANTIALIASED edge in
+  // the roof's own `_Outdoors` art — walls-coverage ≈0.51, not 0 or 1.
+  // `1 − 0.51 = 0.49` clears `gate`'s own smoothstep threshold, so `gate`
+  // reads the texel as "outdoors enough" and lets its shadow through in
+  // full — while that SAME 0.51 walls-coverage still hands station 0 of the
+  // march a genuine, undischarged self-occlusion, because nothing was ever
+  // excluding it. `gate` and self-exclusion answer different questions —
+  // *is this texel outdoors at all* vs. *does this texel's own mass shadow
+  // itself* — and a partially-covered boundary texel is exactly the point
+  // where only one of the two was ever being asked.
+  const selfCoverageWalls = clamp01(sampleLayers(x, y)?.[LAYER_WALLS] ?? 0);
+  occ[LAYER_WALLS] *= 1 - selfCoverageWalls;
   const selfCoverage = clamp01(sampleLayers(x, y)?.[LAYER_OVERHEAD] ?? 0);
   occ[LAYER_OVERHEAD] *= 1 - selfCoverage;
 

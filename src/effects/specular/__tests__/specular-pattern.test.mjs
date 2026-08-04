@@ -24,11 +24,13 @@ import {
   reinhardCeiling,
   reinhardCeilingRgb,
   incidentFromIllumRgb,
+  steepenIncidentRgb,
   SUN_BIAS_MIN,
   CELL_SCALE_DULL,
   CELL_SCALE_BRIGHT,
   SPECULAR_SHEEN_CEILING,
   SPECULAR_GLINT_CEILING,
+  SPECULAR_INCIDENT_STEEPNESS,
 } from '../specular-pattern.js';
 // The composite's own default gain — imported, not hand-typed, so the
 // tonemap-survival test below tracks whatever `specular-render.js` actually
@@ -439,6 +441,62 @@ export function run(t) {
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // STEEPEN INCIDENT — the ROUND 16 (2026-08-03) darkness-suppression gate.
+  // ══════════════════════════════════════════════════════════════════════
+  // Author's report: "we only get a specular shine in the brighter areas of
+  // the map... Shadows and lack of light should suppress the specular
+  // shine." This is a SEPARATE stage from `incidentFromIllumRgb` above —
+  // that function must stay untouched (its own header explains why) — so
+  // these assertions are about a DIFFERENT set of claims: the two anchors
+  // hold for ANY steepness, the shape actually suppresses the middle of the
+  // range, hue survives, and anything at or above full brightness is a
+  // complete no-op.
+  ok(
+    'true black is still exactly black, for any steepness',
+    steepenIncidentRgb([0, 0, 0], LUMA_709, SPECULAR_INCIDENT_STEEPNESS).every((v) => v === 0)
+  );
+  ok(
+    'exactly full brightness is untouched, for any steepness',
+    steepenIncidentRgb([1, 1, 1], LUMA_709, SPECULAR_INCIDENT_STEEPNESS).every((v) => Math.abs(v - 1) < 1e-9)
+  );
+  ok(
+    'steepness = 1 is an identity — the old behaviour is a special case, not a separate code path',
+    steepenIncidentRgb([0.42, 0.31, 0.05], LUMA_709, 1).every((v, i) => Math.abs(v - [0.42, 0.31, 0.05][i]) < 1e-9)
+  );
+
+  // THE ACTUAL ASK: a mid-range reading (a dim, ordinarily-lit room) must end
+  // up MUCH smaller than it went in, at the shipped default.
+  const dimRoom = steepenIncidentRgb([0.5, 0.5, 0.5], LUMA_709, SPECULAR_INCIDENT_STEEPNESS)[0];
+  ok('a half-lit room is suppressed well below half', dimRoom < 0.25);
+  ok('…but not gated to a hard zero — this is a curve, not a step (no Round 15 regression)', dimRoom > 0);
+
+  // MONOTONIC: darker in stays darker out, across the whole suppressed range.
+  const a = steepenIncidentRgb([0.3, 0.3, 0.3], LUMA_709, SPECULAR_INCIDENT_STEEPNESS)[0];
+  const b = steepenIncidentRgb([0.6, 0.6, 0.6], LUMA_709, SPECULAR_INCIDENT_STEEPNESS)[0];
+  const c = steepenIncidentRgb([0.9, 0.9, 0.9], LUMA_709, SPECULAR_INCIDENT_STEEPNESS)[0];
+  ok('monotonic across the suppressed range', a < b && b < c);
+
+  // ABOVE 1.0 (overlapping lights, a sunlit exterior): the excess is a pure
+  // pass-through, never gated further — this only ever REMOVES shine from
+  // dim areas, it does not also dim already-bright ones.
+  const brightExterior = steepenIncidentRgb([1.4, 1.4, 1.4], LUMA_709, SPECULAR_INCIDENT_STEEPNESS)[0];
+  ok(
+    'above full brightness is untouched — the gate only ever suppresses dim areas',
+    Math.abs(brightExterior - 1.4) < 1e-9
+  );
+
+  // HUE-PRESERVING: a coloured light's channel RATIOS survive exactly, the
+  // same guarantee `reinhardCeilingRgb` makes and for the same reason — an
+  // independent pow() per channel would oversaturate the weakest channel as
+  // it dims, compounding the OTHER open complaint (colour fidelity) instead
+  // of leaving it alone.
+  const warmDim = steepenIncidentRgb([0.6, 0.4, 0.2], LUMA_709, SPECULAR_INCIDENT_STEEPNESS);
+  ok(
+    'channel ratios survive exactly — hue and saturation are untouched',
+    Math.abs(warmDim[0] / warmDim[1] - 0.6 / 0.4) < 1e-9 && Math.abs(warmDim[1] / warmDim[2] - 0.4 / 0.2) < 1e-9
+  );
+
+  // ══════════════════════════════════════════════════════════════════════
   // SHEEN/GLINT CONTRAST SURVIVES THE GLOBAL TONEMAP — 2026-07-27.
   // ══════════════════════════════════════════════════════════════════════
   // The author's report: *"the darker parts are being boosted in brightness
@@ -494,11 +552,39 @@ export function run(t) {
   // genuine PATTERN PEAK. This is exactly "the metal area's darker parts" vs
   // "brighter parts" the author described, isolated from scene lighting
   // (already covered above) and from the mask's own painted variation.
+  //
+  // ⚠️ `incidentAmt` COMPOSES THE REAL LIGHTING CHAIN — CHANGED ROUND 18
+  // (2026-08-03). This used to be a flat, hand-picked `0.8`, chosen back in
+  // Round 10 BEFORE `steepenIncidentRgb` existed, when `incidentAmt` WAS
+  // simply `incident` with no further curve — 0.8 was a fair stand-in for
+  // "a well-lit interior" at the time. It no longer is: feeding the SAME
+  // "well-lit" illum reading (0.866, the author's own Round 8 measurement,
+  // used elsewhere in this file) through the REAL current chain
+  // (`incidentFromIllumRgb` → `steepenIncidentRgb`) now yields `shineResponse
+  // ≈ 0.395`, not 0.8 — the flat stand-in was quietly testing a MUCH
+  // brighter point than "well-lit" now means. Composing the real chain
+  // keeps this test honest about what a realistic scene point actually
+  // produces, independent of whatever this file's OTHER constants do next.
   const goldBase = [0.35, 0.3, 0.15];
-  const troughLuma = litMetalLuma(0.7, 0.8, goldBase, 0.025);
-  const peakLuma = litMetalLuma(0.7, 0.8, goldBase, 0.8);
+  const wellLitIncidentAmt = steepenIncidentRgb(
+    incidentFromIllumRgb([0.866, 0.866, 0.866]),
+    LUMA_709,
+    SPECULAR_INCIDENT_STEEPNESS
+  )[0];
+  const troughLuma = litMetalLuma(0.7, wellLitIncidentAmt, goldBase, 0.025);
+  const peakLuma = litMetalLuma(0.7, wellLitIncidentAmt, goldBase, 0.8);
   const baseLumaAlone = luma3(neutralToneMap(goldBase));
 
+  // ⚠️ ROUND 18→19 (2026-08-03): thresholds sagged to 1.4x when `sheenCeiling`
+  // briefly shipped at 1 (Round 18's live-confirmed brightness fix traded away
+  // most of Round 10's contrast — see that round's own memory account). The
+  // author's next live look confirmed the concern directly: *"the base shine
+  // ceiling should be lower, make it very low."* Reverted to the ORIGINAL
+  // Round-10 value (0.15) — not a fresh guess — and thresholds restored to
+  // their original, stricter bar: measured on this composed scenario (Round
+  // 18's realistic-incidentAmt fix still applies), ratio is back to ≈2.00,
+  // clearing 1.8x comfortably, with `glintCeiling`/`shimmerGain` left at
+  // their Round 18 values (28/2.2) since only the sheen ceiling was named.
   ok(
     'the pattern survives to the SCREEN with real contrast (peak > 1.8x trough, post-tonemap)',
     peakLuma / troughLuma > 1.8
@@ -510,16 +596,17 @@ export function run(t) {
   ok('…while the peak is still allowed to shine well past the base', peakLuma > baseLumaAlone * 2.5);
 
   // THE REGRESSION THIS GUARDS: the OLD ceiling (1.4) measured on this exact
-  // scenario reached the screen at only a 1.31x ratio — barely distinguishable
-  // from flat. If a future change raises the ceiling back up without
-  // re-checking against the tonemap, this is the assertion that catches it.
+  // scenario reached the screen at a meaningfully lower ratio. If a future
+  // change raises `sheenCeiling` back up without re-checking against the
+  // tonemap, this is the assertion that catches it — same shape as Round 10's
+  // original guard, just composed against the realistic incidentAmt now.
   const oldSheenScale = (l) => (l > 1e-6 ? reinhardCeiling(l, 1.4) / l : 0);
   const oldTrough = (() => {
-    const l = 0.7 * 0.8;
-    const s = [0.7, 0.6, 0.16].map((c) => c * 0.8 * oldSheenScale(l));
-    const gl = 0.7 * 0.025 * 4 * 0.8;
+    const l = 0.7 * wellLitIncidentAmt;
+    const s = [0.7, 0.6, 0.16].map((c) => c * wellLitIncidentAmt * oldSheenScale(l));
+    const gl = 0.7 * 0.025 * 4 * wellLitIncidentAmt;
     const gScale = gl > 1e-6 ? reinhardCeiling(gl, 16) / gl : 0;
-    const g = [0.7, 0.6, 0.16].map((c) => c * 0.025 * 4 * 0.8 * gScale);
+    const g = [0.7, 0.6, 0.16].map((c) => c * 0.025 * 4 * wellLitIncidentAmt * gScale);
     return luma3(neutralToneMap(goldBase.map((c, i) => c + s[i] + g[i])));
   })();
   ok('the fix is a REAL improvement over the old ceiling on the same scenario', troughLuma < oldTrough);

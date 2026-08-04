@@ -539,6 +539,12 @@ export function buildViewerDiagnostics({
     // `activeLights` should be > 0 whenever the scene has torches/
     // lamps within the current view.
     pointLights: _active?.getPointLightsInfo?.() ?? { available: false },
+    // APERTURE GOBO (2026-08-03, docs/planning/Aperture-Gobo.md) — apertures
+    // found/dropped/lit-lights as of the point-light pool's last update().
+    // `available: false` means the viewer itself never started (there is no
+    // `_active` at all) — a genuinely running viewer always has this method,
+    // even when the effect is disabled or no light has a nearby window.
+    apertureGobo: _active?.getApertureGoboInfo?.() ?? { available: false },
     // region-driven darkness (2026-07-19) — see graph/passes.js's own
     // note. `activeRegions` should be > 0 whenever a darkness-
     // adjusting region is on screen.

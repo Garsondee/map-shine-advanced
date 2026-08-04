@@ -353,6 +353,83 @@ export async function run(t) {
     b.minU >= 0 && b.minV >= 0 && b.maxU <= 1 && b.maxV <= 1
   );
 
+  // ── SWITCHING TO A FLOOR WITH NO MASK CLEARS THE STALE QUAD ─────────────
+  // Live bug, 2026-08-03: the author clicked three genuinely-metal, genuinely
+  // on-screen spots and cranked strength to full with no visible change. The
+  // channel probe showed `mask`/`strength`/`presence`/`tint` all healthy and
+  // varying, but `floorGate`'s R channel (`floorMatch`) read exactly 0 at
+  // every point while its B channel (`backgroundVisible`) read exactly 1 —
+  // i.e. the pixel was genuinely plain, unoccluded Level background art, just
+  // not the SAME floor this subsystem's single quad was tracking. Root cause:
+  // `ensureMaskImage` only called `setFloorIndex` inside a NEW mask's load
+  // callback, so a floor with no `_Specular` of its own left the PREVIOUS
+  // floor's quad fully visible, still sampling real paint (floors share the
+  // same x,y footprint), gated by a floor index that no longer matches
+  // `buf:scene.attr` at those pixels — invisible no matter what `strength` is.
+  // Only floor 0 has an authored `_Specular` file — every other floor genuinely
+  // has none, mirroring the live report exactly (not a floor that HAS one but
+  // is momentarily unavailable).
+  const flip = createSpecularSurfaceSubsystem({
+    THREE,
+    getSpecularMaskUrl: (floorIndex) => (floorIndex === 0 ? 'stub://floor0_Specular.webp' : null),
+    getSpecularMaskRect: () => ({ minX: 0, minY: 0, maxX: 1000, maxY: 1000 }),
+    loadMaskImage: async () => ({
+      texture: stubTexture(),
+      contentBounds: { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
+      data: paintedRgba(32, 32),
+      width: 32,
+      height: 32,
+      nativeWidth: 64,
+      nativeHeight: 64,
+      bytes: 32 * 32 * 4,
+    }),
+    createMaskTexture: (data, w, h) => {
+      const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      t.needsUpdate = true;
+      return t;
+    },
+    createPackTexture: (data, w, h) => {
+      const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      t.needsUpdate = true;
+      return t;
+    },
+    illumTexture: stubTexture(),
+    attrTexture: stubTexture(),
+    timeMsNode: THREE.TSL.uniform(THREE.TSL.float(0)),
+    uViewRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
+    uOutdoorsRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
+    outdoorsTexNode: THREE.TSL.texture(stubTexture()),
+    buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+    getSpecularRenderState: () => ({ enabled: true, params: {}, debugChannel: 0 }),
+    getSkyHandle: () => null,
+  });
+  const flipMesh = meshesOf(flip)[0];
+
+  flip.sync(0, VIEW_RECT);
+  await Promise.resolve();
+  await Promise.resolve();
+  ok('floor 0 has a mask — the quad becomes visible', flipMesh.visible === true);
+  ok('…and getStatus reports floor 0 loaded', flip.getStatus().floor === 0);
+
+  // Move to a floor with NO specular of its own.
+  flip.sync(1, VIEW_RECT);
+  ok(
+    'a floor with no mask of its own HIDES the mesh, rather than leaving floor 0’s quad up',
+    flipMesh.visible === false
+  );
+  ok('…hasContent() agrees, so the pass early-returns', flip.hasContent() === false);
+  ok('…and the stale bounds are actually cleared, not just hidden', flip.getStatus().bounds === null);
+
+  // Moving back to floor 0 reloads it correctly rather than short-circuiting
+  // on a stale `loadedUrl === url` check (the guard now only applies once a
+  // URL is confirmed non-null).
+  flip.sync(0, VIEW_RECT);
+  await Promise.resolve();
+  await Promise.resolve();
+  ok('switching back to floor 0 reloads and shows it again', flipMesh.visible === true);
+  ok('…and getStatus reports floor 0 again', flip.getStatus().floor === 0);
+
+  flip.dispose();
   sub.dispose();
   unwired.dispose();
   layered.dispose();

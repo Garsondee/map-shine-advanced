@@ -17,6 +17,7 @@
  */
 import {
   SHADOW_LAYER_COUNT,
+  LAYER_WALLS,
   layerThrowPx,
   smearFalloff01,
   stationDistancePx,
@@ -113,6 +114,24 @@ export function run(t) {
     const CX = 2000;
     const CY = 2000;
     const box = (half) => ({ x0: CX - half, x1: CX + half, y0: CY - half, y1: CY + half });
+    // A profile must start OUTSIDE the caster's own footprint, never inside
+    // it. ⚠️ `BOX_HALF * Math.SQRT2`, NOT `BOX_HALF` — a square's DIAGONAL
+    // half-extent is wider than its edge-on one (the identical trap this
+    // file's own self-footprint block documents for the "beside" probe
+    // below). Before walls had a self-exclusion (2026-08-03) this never
+    // mattered: standing ON the wall and standing freshly IN its cast
+    // shadow were both undiscounted, equally-darkest — so a profile that
+    // technically started mid-caster still read as monotonically
+    // lightening by accident. Now that a wall's own top is correctly LIT
+    // (the roof-ridge fix), a profile starting mid-caster sees light (on
+    // the wall) fall to black (stepping off its edge into full contact-
+    // hard shadow) — a real cliff, but not a THE-LAW violation: THE LAW
+    // governs a receiver OUTSIDE a caster, not the relationship between a
+    // caster's own top and the ground beside it. The sweep must start past
+    // the box entirely, for every tested azimuth, or it is measuring that
+    // cliff instead of the thing it means to measure.
+    const BOX_HALF = 300;
+    const START_OUTSIDE_BOX = Math.ceil(BOX_HALF * Math.SQRT2) + 10;
 
     /** Walk outward from the caster along the direction a shadow is THROWN and
      * return the visibility profile. */
@@ -161,7 +180,7 @@ export function run(t) {
       for (const az of [0, 37, 90, 143, 180, 220, 270, 315]) {
         for (const el of [8, 20, 35, 55, 75]) {
           for (const steps of [16, 32, 64]) {
-            const p = profile(sample, [400, 0, 0, 0], az, el, steps, 305, 2200);
+            const p = profile(sample, [400, 0, 0, 0], az, el, steps, START_OUTSIDE_BOX, 2200);
             const { worst, at } = worstDrop(p);
             if (worst > worstEver) {
               worstEver = worst;
@@ -226,7 +245,7 @@ export function run(t) {
     // (memory: feedback_instruments_must_not_lie).
     {
       const sample = rects([box(300), null, null, null]);
-      const p = profile(sample, [400, 0, 0, 0], 220, 30, 32, 305, 2200);
+      const p = profile(sample, [400, 0, 0, 0], 220, 30, 32, START_OUTSIDE_BOX, 2200);
       const darkest = Math.min(...p.map((r) => r.v));
       const lightest = Math.max(...p.map((r) => r.v));
       t.ok('THE LAW sweep is not vacuous: it passes through real shadow', darkest < 0.35);
@@ -236,7 +255,7 @@ export function run(t) {
     // ── DARKEST AGAINST THE CASTER — the author's stated requirement ─────
     {
       const sample = rects([box(300), null, null, null]);
-      const p = profile(sample, [400, 0, 0, 0], 220, 30, 48, 302, 800, 60);
+      const p = profile(sample, [400, 0, 0, 0], 220, 30, 48, START_OUTSIDE_BOX, 800, 60);
       t.ok('the shadow is at its darkest right against the wall', p[0].v === Math.min(...p.map((r) => r.v)));
     }
 
@@ -601,5 +620,89 @@ export function run(t) {
     // Its own cast shadow just outside proves the layer is genuinely active,
     // so "1.0 on the tile" cannot be passing merely because nothing casts.
     t.ok('the overhead self-exclusion test is not vacuous — that same layer demonstrably casts', besideVis < 0.9);
+
+    // ── WALLS gets the identical exclusion, added a session later ────────
+    // (2026-08-03 — see layer-smear.js's own comment, in this same self-
+    // shadow block, for the field bug this closes: `gate` alone only
+    // protects a receiver that reads UNAMBIGUOUSLY indoors). Mirrors the
+    // overhead assertions above exactly, on a fully-covered texel.
+    const onWalls = visAt(LAYER_WALLS, 0, 0);
+    t.ok(
+      `🔒 a receiver on a FULLY wall-covered texel is not shadowed by that same wall (got ${onWalls.toFixed(3)})`,
+      onWalls > 0.99
+    );
+    const wallsBesideVis = visAt(LAYER_WALLS, beside.x, beside.y);
+    t.ok(`a wall still casts onto the open ground beside it (got ${wallsBesideVis.toFixed(3)})`, wallsBesideVis < 0.9);
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 🏚️ PARTIAL SELF-COVERAGE — THE ACTUAL FIELD BUG (2026-08-03)
+  //
+  // Author, live, on a thatched roof: a dark band sat directly on the
+  // ridge line, self-cast. Measured with the mask-stack probe: the ridge is
+  // an ANTIALIASED edge in the roof's own `_Outdoors` art — walls-coverage
+  // ≈0.51 there, not the clean 0/1 the block above exercises. The block
+  // above proves the exclusion kills a FULLY-covered self-read; this proves
+  // it also DISCOUNTS a PARTIALLY-covered one proportionally, rather than
+  // leaving it at full undischarged strength because it never reaches 1.0
+  // (which is exactly how this bug shipped: `gate` reads "outdoors enough"
+  // for a 0.51-covered texel and lets the shadow through in full, and
+  // nothing else was ever discounting the walls layer's own contribution).
+  // ══════════════════════════════════════════════════════════════════
+  {
+    const HALF = 300;
+    const partialCoverage = 0.51;
+    const partialWallSlab = (sx, sy) => {
+      const out = new Array(SHADOW_LAYER_COUNT).fill(0);
+      if (Math.abs(sx) <= HALF && Math.abs(sy) <= HALF) out[LAYER_WALLS] = partialCoverage;
+      return out;
+    };
+    const heights = [0, 0, 0, 0];
+    heights[LAYER_WALLS] = 400;
+    const resolved = resolveLayerSmear({ azimuthDeg: 220, elevationDeg: 30, heightsPx: heights });
+    const onPartialWall = layerSmearVisibility({ x: 0, y: 0, sampleLayers: partialWallSlab, resolved, steps: 32 });
+
+    // Station 0 (d=0, fall=1) reads this SAME partial coverage as the
+    // march's own worst (largest) term — inside a uniform box nothing later
+    // can exceed it, since `fall` only decreases with distance — so the
+    // discount is exactly `coverage · (1 − coverage)`, hand-derivable and
+    // asserted precisely (verified against the live module: 0.7501, exact)
+    // rather than with a loose bound that a partial fix could sneak past.
+    const expectedVis = 1 - partialCoverage * (1 - partialCoverage);
+    t.ok(
+      `a PARTIALLY (${Math.round(partialCoverage * 100)}%) wall-covered receiver has its self-shadow discounted ` +
+        `proportionally, not left at full strength (got ${onPartialWall.toFixed(4)}, expected ${expectedVis.toFixed(4)}) ` +
+        `— the exact roof-ridge field bug`,
+      near(onPartialWall, expectedVis, 1e-3)
+    );
+    // Without this fix the pre-existing code left this texel completely
+    // undischarged: exactly `1 - partialCoverage = 0.49`. Pinning that
+    // number too means a future edit that reintroduces the gap (e.g. an
+    // `if (coverage >= 1)` short-circuit added "for performance") fails
+    // LOUDLY against a known-wrong value, not just a vague inequality.
+    t.ok(
+      'the un-fixed reading (0.49) is NOT what this receiver gets — regression pin',
+      !near(onPartialWall, 1 - partialCoverage, 1e-3)
+    );
+
+    // NON-VACUITY, mirrored: the same partially-covered wall still casts a
+    // real shadow onto open ground beside it — proportionally weaker than
+    // the fully-covered case (0.215, computed above) but still substantial,
+    // confirming the fix discounts SELF-shadow only, never the wall's
+    // output onto anything else.
+    const toSun = marchDirectionToSun(220);
+    const outside = HALF * Math.SQRT2 + 60;
+    const beside = { x: -toSun.x * outside, y: -toSun.y * outside };
+    const partialBesideVis = layerSmearVisibility({
+      x: beside.x,
+      y: beside.y,
+      sampleLayers: partialWallSlab,
+      resolved,
+      steps: 32,
+    });
+    t.ok(
+      `the same partially-covered wall still casts a real shadow beside it (got ${partialBesideVis.toFixed(3)})`,
+      partialBesideVis < 0.9
+    );
   }
 }

@@ -12,6 +12,7 @@
 import { run as runEnvironmentalLight } from './environmental-light.test.mjs';
 import { run as runPointLightIllumination } from './point-light-illumination.test.mjs';
 import { run as runPointLightColoration } from './point-light-coloration.test.mjs';
+import { run as runPointLightPool } from './point-light-pool.test.mjs';
 import { run as runRegionGeometry } from './region-geometry.test.mjs';
 import { run as runLightVisibility } from './light-visibility.test.mjs';
 import { run as runSunOcclusion } from './sun-occlusion.test.mjs';
@@ -22,6 +23,8 @@ import { run as runSunShadowBlur } from './sun-shadow-blur.test.mjs';
 import { run as runSunShadowMultiFloor } from './sun-shadow-multi-floor.test.mjs';
 import { run as runLayerSmear } from './layer-smear.test.mjs';
 import { run as runLayerSmearRender } from './layer-smear-render.test.mjs';
+import { run as runApertureGobo } from './aperture-gobo.test.mjs';
+import { run as runApertureGoboRender } from './aperture-gobo-render.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -54,6 +57,7 @@ const suites = [
   ['environmental-light', runEnvironmentalLight],
   ['point-light-illumination', runPointLightIllumination],
   ['point-light-coloration', runPointLightColoration],
+  ['point-light-pool', runPointLightPool],
   ['region-geometry', runRegionGeometry],
   ['light-visibility', runLightVisibility],
   ['sun-occlusion', runSunOcclusion],
@@ -64,6 +68,8 @@ const suites = [
   ['sun-shadow-multi-floor', runSunShadowMultiFloor],
   ['layer-smear', runLayerSmear],
   ['layer-smear-render', runLayerSmearRender],
+  ['aperture-gobo', runApertureGobo],
+  ['aperture-gobo-render', runApertureGoboRender],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

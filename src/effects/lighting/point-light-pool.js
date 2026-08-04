@@ -93,9 +93,31 @@ import {
   triangulateLightFan,
   writeLightEdgePoints,
   computeEdgeSoftMarginNormalized,
+  LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
+  elevationRank,
 } from './point-light-illumination.js';
 import { buildPointLightColorationMaterial, computeColorationAlpha } from './point-light-coloration.js';
-import { readActiveLightSources, readGridSizePixels, computeCandleWallClippedShape } from '../../foundry/index.js';
+import {
+  readActiveLightSources,
+  readGridSizePixels,
+  computeCandleWallClippedShape,
+  readSceneWallSegments,
+  getActiveSceneFloors,
+} from '../../foundry/index.js';
+import { resolveElevationFloorIndex } from '../../scene/index.js';
+import {
+  APERTURE_GOBO_DEFAULTS,
+  SOFT_FAR_PX_BASE,
+  REACH_SOFT_FAR_PX_BASE,
+  findAperturesForLight,
+  resolveLampHeight,
+  deriveApertureGoboPaneCount,
+} from './aperture-gobo.js';
+import {
+  createApertureGoboSharedUniforms,
+  buildApertureGoboTerm,
+  MAX_APERTURES_PER_LIGHT,
+} from './aperture-gobo-render.js';
 
 /** Starting capacity, in FAN VERTICES (not polygon vertices — see the
  * device-lost fix in {@link createPointLightPool}'s own dispose-discipline
@@ -104,6 +126,91 @@ import { readActiveLightSources, readGridSizePixels, computeCandleWallClippedSha
 const INITIAL_LIGHT_FAN_VERTICES = 192;
 
 const log = createLogger('PointLightPool');
+
+/**
+ * Resolve ONE light's own `elevationRank` — its FLOOR INDEX plus its height
+ * inside that floor's band — for `point-light-illumination.js`'s height gate.
+ * Pure and Node-testable so the FLOOR-RESOLUTION half of this feature (not
+ * just the gate arithmetic, already tested in point-light-illumination
+ * .test.mjs) is verified without a live scene.
+ *
+ * ⚠️ **RETURNS A RANK, NOT A BARE HEIGHT (2026-08-03, round 3).** This used
+ * to return `raw - bottom` — a height relative to the light's OWN floor —
+ * which threw away the floor identity that is the entire point of the
+ * comparison. A -20ft basement light and a +5ft upper-storey floorboard both
+ * came back as "0 above my own floor" and the gate happily lit the storey.
+ * See `point-light-illumination.js#elevationRank` for the full postmortem and
+ * the arithmetic; this function is simply the LIGHT side of that same rank.
+ *
+ * ⚠️ THE SENTINEL CHECK IS ON THE RAW `light.elevation`, NEVER ON THE
+ * DERIVED "above floor bottom" VALUE. See `LIGHT_ELEVATION_UNCONFIGURED_
+ * SENTINEL`'s own doc for the bug this avoids: a light legitimately placed
+ * AT elevation 20 on a floor spanning [20,30) computes an "above floor"
+ * height of 0 — the SAME number an untouched light would also produce if
+ * the check ran on the derived value — and must NOT be treated as
+ * unconfigured just because its own floor's ground happens to be non-zero.
+ *
+ * @param {{elevation?: number}} light - `foundry/scene-lights.js#
+ *   deriveLightSnapshot`'s own `elevation` field (raw, Foundry-document
+ *   units; 0 = the schema default, "never touched").
+ * @param {Array<{index:number, elevationBottom:number|null, elevationTop:
+ *   number|null}>} floors - `getActiveSceneFloors(...).floors`, or an empty
+ *   array when no scene/floors are resolvable.
+ * @returns {number} this light's `elevationRank`, or
+ *   `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL` when the light was never
+ *   explicitly placed, or its own floor could not be resolved.
+ */
+export function resolveLightElevationRank(light, floors) {
+  const raw = Number.isFinite(light?.elevation) ? light.elevation : 0;
+  if (Math.abs(raw) < 0.0001) return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+  if (!Array.isArray(floors) || floors.length === 0) return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+  // A light carries no `levelId` (unlike Level art/tiles) — elevation-banding
+  // is the ONLY way to find its own floor, the identical fallback a loose
+  // tile with no owner already uses (`vt/scene-attr.js#
+  // resolveItemFloorAttrUniforms`).
+  const resolved = resolveElevationFloorIndex(floors, raw);
+  if (!resolved) return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+  const bottom = resolved.floor.elevationBottom ?? 0;
+  return elevationRank(resolved.index, raw - bottom);
+}
+
+/**
+ * Resolve an ANCHOR's (candle, lightning) own `elevationRank` from its
+ * `floorBinding` (`scene/anchor-authority.js#normalizeFloorBinding`'s own
+ * shape) — the sibling of {@link resolveLightElevationRank} for anything
+ * anchor-authored instead of a Foundry document, needed for the SAME reason:
+ * `candle-flame-render.js`/`lightning-render.js` share a light's own height/
+ * elevation gate (`point-light-illumination.js#buildHeightGateNode`), and
+ * that gate needs to know where the candle/bolt itself sits, not just where
+ * the receiving pixel sits.
+ *
+ * ⚠️ 'all-levels' (the author's own "show this everywhere" choice, or the
+ * kind's default) reads as the SENTINEL, never floor 0 or a guess — an
+ * anchor with no locked band has explicitly opted OUT of floor membership
+ * entirely (`scene/anchor-authority.js#floorMatches`: `mode !== 'locked'`
+ * always passes), so gating it by height would silently narrow a feature the
+ * author deliberately widened. Only a 'locked' binding, which already IS an
+ * elevation band matching a real Level's own, has anything to resolve.
+ *
+ * Height WITHIN the resolved floor is always 0 (its own floor's ground) — no
+ * anchor kind authors a z-height today (candles/lightning are `x,y` only),
+ * matching the honest "no finer value exists" default this project uses
+ * everywhere else this gap shows up (`vt/scene-attr.js#resolveItemFloorAttr
+ * Uniforms`'s own `elevation ?? 0` posture).
+ *
+ * @param {{mode?:string, bottom?:number|null, top?:number|null}|null|undefined} floorBinding
+ * @param {Array<{index:number, elevationBottom:number|null, elevationTop:number|null}>} floors
+ * @returns {number}
+ */
+export function resolveAnchorElevationRank(floorBinding, floors) {
+  if (!floorBinding || floorBinding.mode !== 'locked' || !Number.isFinite(floorBinding.bottom)) {
+    return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+  }
+  if (!Array.isArray(floors) || floors.length === 0) return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+  const resolved = resolveElevationFloorIndex(floors, floorBinding.bottom);
+  if (!resolved) return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+  return elevationRank(resolved.index, 0);
+}
 
 /**
  * Build a brand-new pool entry for a light seen for the first time (or
@@ -131,6 +238,28 @@ const log = createLogger('PointLightPool');
  * @param {object} deps.sceneColor
  * @param {object} deps.uGlobalTimeMs @param {object} deps.lightScene
  * @param {object} deps.colorationScene
+ * @param {object} deps.apertureShadowScene - the THIRD dedicated scene
+ *   (docs/planning/Aperture-Gobo.md). As of round 10 (2026-08-04) this holds
+ *   ONLY the standalone "pattern" debug mesh — the real effect is baked
+ *   directly into `material`/`colorationBuilt.material`'s own MAX-blend
+ *   draw (see `point-light-illumination.js`'s "THE GOBO IS PART OF THIS
+ *   LIGHT'S OWN FALLOFF" header), so this scene is usually empty.
+ * @param {number} deps.apertureCount - how many procedural window apertures
+ *   THIS light has this frame (`aperture-gobo.js#findAperturesForLight`) —
+ *   part of the material rebuild key, same status as `falloffModel`/
+ *   `animationType` (see `update()`'s own rebuild check).
+ * @param {number} deps.apGoboCols @param {number} deps.apGoboRows - THIS
+ *   light's own pane count, derived (round 11, 2026-08-04) from its real
+ *   aperture `wallLen` and `(headPx-sillPx)` divided by the "Pane target
+ *   width/height" params, rounded and clamped to `[1, MAX_MULLIONS_PER_AXIS]`
+ *   — see `update()`'s own "PROCEDURAL PANE COUNT" comment for the full
+ *   derivation, computed per-light, not read straight from a param. ALSO
+ *   part of the rebuild key (design 4, 2026-08-03) — they are graph-
+ *   build-time unroll counts baked into the aperture shadow material, not
+ *   shared uniforms (`aperture-gobo-render.js`'s own header).
+ * @param {object} deps.apertureGoboShared - `aperture-gobo-render.js#
+ *   createApertureGoboSharedUniforms`'s own return, ONE instance for the
+ *   whole pool (created once in `createPointLightPool`, never per-light).
  * @returns {object} a new `lightMeshes` entry (not yet stored — the caller
  *   does that, since only the caller knows the `sourceId` key).
  */
@@ -146,6 +275,11 @@ function createLightEntry({
   uGlobalTimeMs,
   lightScene,
   colorationScene,
+  apertureShadowScene,
+  apertureCount,
+  apGoboCols,
+  apGoboRows,
+  apertureGoboShared,
 }) {
   const geometry = new THREE.BufferGeometry();
   // Pre-allocate ONCE, sized generously — see INITIAL_LIGHT_FAN_VERTICES
@@ -180,6 +314,9 @@ function createLightEntry({
     uWindCenter: uIllumWindCenter,
     uWindExposure: uIllumWindExposure,
     uWindResponse: uIllumWindResponse,
+    uLightElevationRank,
+    uApLampHeight,
+    apApertures,
   } = buildPointLightIlluminationMaterial({
     THREE,
     uBackgroundColor,
@@ -189,6 +326,14 @@ function createLightEntry({
     uGlobalTimeMs,
     animationQuality,
     falloffModel,
+    // APERTURE GOBO (round 10, 2026-08-04) — baked into THIS light's own
+    // MAX-blend draw now, not a separate post-process pass. See point-
+    // light-illumination.js's own "THE GOBO IS PART OF THIS LIGHT'S OWN
+    // FALLOFF" header for the live-found reason.
+    apertureCount,
+    apGoboCols,
+    apGoboRows,
+    apertureGoboShared,
     // SHARED WIND (Wind.md Tier 0/1) — OPT-IN, keyed on the light
     // descriptor actually carrying a windExposure (candle lights do, via
     // buildCandleLightSources' cluster-averaged exposure; plain Foundry
@@ -223,6 +368,14 @@ function createLightEntry({
   const colorationBuilt = buildPointLightColorationMaterial({
     THREE,
     albedoTexture: sceneColor.texture,
+    // THE HEIGHT GATE, on the ANIMATED half of the light too (2026-08-03,
+    // round 5). This mesh shares `geometry` with the illumination mesh above
+    // and carries the visible coloured glow plus every animated light effect,
+    // so leaving it un-gated left the author watching an animated light paint
+    // straight through a floor while the illumination underneath it correctly
+    // went dark. Same node, same uniform name, one resolved rank pushed into
+    // both below.
+    attrTexNode: envLight.attrTexNode,
     animation: animationEntry,
     uGlobalTimeMs,
     uRatio,
@@ -234,10 +387,77 @@ function createLightEntry({
     windExposure: light.windExposure,
     windResponse: light.windResponse,
     windHandle,
+    // APERTURE GOBO (round 10) — see the illumination material's own
+    // identical call, just above, for why.
+    apertureCount,
+    apGoboCols,
+    apGoboRows,
+    apertureGoboShared,
   });
   const colorationMesh = new THREE.Mesh(geometry, colorationBuilt.material);
   colorationMesh.frustumCulled = false;
   colorationScene.add(colorationMesh);
+
+  // APERTURE SHADOW — round 10 (2026-08-04) RETIRED the separate post-
+  // process pass entirely (`apertureShadowScene`/`apertureColorationShadow
+  // Scene`, the visibility-gate machinery, `buildApertureShadowMaterial`'s
+  // own "material"/"visibilityDebugMaterial"/"gateInputsDebugMaterial").
+  // `docs/planning/Aperture-Gobo.md` §13's own designs 1-3 history plus
+  // `point-light-illumination.js`'s "THE GOBO IS PART OF THIS LIGHT'S OWN
+  // FALLOFF" header have the full nine-round story of why. The gobo pattern
+  // is now baked directly into `material` and `colorationBuilt.material`
+  // above (both builder calls got `apertureCount`/`apGoboCols`/`apGoboRows`/
+  // `apertureGoboShared` a few lines up) — no separate mesh, no separate
+  // scene, no separate render() call, and nothing left for the render-order/
+  // clear-state bug class that bit `apertureColorationShadowScene`'s own
+  // first day to repeat. `debugMaterial` (the raw pattern, black/white,
+  // useful for visually confirming mullion/frame geometry independent of
+  // brightness) is the one piece worth keeping as a standalone diagnostic —
+  // built directly from `buildApertureGoboTerm` below, not from the retired
+  // `buildApertureShadowMaterial`.
+  let apertureShadowDebugMesh = null;
+  let apertureShadowDebugMaterial = null;
+  if (apertureCount > 0) {
+    const { vec4, float, max, select } = THREE.TSL;
+    const debugGobo = buildApertureGoboTerm({
+      THREE,
+      positionWorldXY: THREE.TSL.positionWorld.xy,
+      dist: THREE.TSL.length(THREE.TSL.positionLocal.xy),
+      apertureCount,
+      cols: apGoboCols,
+      rows: apGoboRows,
+      shared: apertureGoboShared,
+    });
+    if (debugGobo) {
+      apertureShadowDebugMaterial = new THREE.NodeMaterial();
+      apertureShadowDebugMaterial.transparent = true;
+      apertureShadowDebugMaterial.depthTest = false;
+      apertureShadowDebugMaterial.depthWrite = false;
+      apertureShadowDebugMaterial.side = THREE.DoubleSide;
+      apertureShadowDebugMaterial.blending = THREE.CustomBlending;
+      // Ordinary alpha-over, masked by `anyApplicable` — the SAME masking
+      // `aperture-gobo-render.js`'s own (now-retired) debugMaterial used, so
+      // this overlay stays invisible outside the window's own throw instead
+      // of covering the light's ENTIRE radius as an opaque white disc.
+      apertureShadowDebugMaterial.blendEquation = THREE.AddEquation;
+      apertureShadowDebugMaterial.blendSrc = THREE.SrcAlphaFactor;
+      apertureShadowDebugMaterial.blendDst = THREE.OneMinusSrcAlphaFactor;
+      apertureShadowDebugMaterial.blendEquationAlpha = THREE.AddEquation;
+      apertureShadowDebugMaterial.blendSrcAlpha = THREE.OneFactor;
+      apertureShadowDebugMaterial.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+      // Alpha: 0 outside the window's own throw (`anyApplicable` false —
+      // fully transparent, the debug mesh's full light-radius footprint
+      // stays invisible there); inside it, AT LEAST a faint 0.15 tint (so an
+      // open pane's own boundary still reads) rising to a strong 1 at a
+      // fully-blocked mullion.
+      const debugAlpha = select(debugGobo.anyApplicable, max(float(1).sub(debugGobo.node), float(0.15)), float(0));
+      apertureShadowDebugMaterial.fragmentNode = vec4(debugGobo.node, debugGobo.node, debugGobo.node, debugAlpha);
+      apertureShadowDebugMesh = new THREE.Mesh(geometry, apertureShadowDebugMaterial);
+      apertureShadowDebugMesh.frustumCulled = false;
+      apertureShadowScene.add(apertureShadowDebugMesh);
+    }
+  }
+
   return {
     mesh,
     material,
@@ -250,6 +470,7 @@ function createLightEntry({
     uEdgeCount,
     uEdgeSoftMargin,
     edgePoints,
+    uLightElevationRank,
     uBackgroundColor,
     uDimColor,
     uBrightColor,
@@ -257,6 +478,7 @@ function createLightEntry({
     colorationMaterial: colorationBuilt.material,
     uColorationAttenuationEased: colorationBuilt.uAttenuationEased,
     uColorationAlpha: colorationBuilt.uColorationAlpha,
+    uColorationLightElevationRank: colorationBuilt.uLightElevationRank,
     uLightColor: colorationBuilt.uLightColor,
     uShadows: colorationBuilt.uShadows,
     // ANIMATED LIGHTS — GPU-ONLY (2026-07-20): these four raw uniforms are
@@ -285,6 +507,28 @@ function createLightEntry({
     uColorWindCenter: colorationBuilt.uWindCenter,
     uColorWindExposure: colorationBuilt.uWindExposure,
     uColorWindResponse: colorationBuilt.uWindResponse,
+    // APERTURE GOBO — round 10 (2026-08-04): baked into `material`/
+    // `colorationBuilt.material` above, no separate mesh for the real
+    // effect. `uApLampHeight`/`apApertures` (illumination) and
+    // `uApColLampHeight`/`apColApertures` (coloration) are each builder's
+    // OWN uniform set — `update()`'s per-frame writer pushes the SAME
+    // resolved aperture geometry into both, the same duplication-across-
+    // the-mesh-pair pattern `uAttenuationEased`/`uColorationAttenuationEased`
+    // already use. `null` on all four when this light has no apertures.
+    // `apertureCount`/`apGoboCols`/`apGoboRows` stay stored so `update()`'s
+    // rebuild-key check can compare against them without re-deriving from
+    // `apApertures?.length`. `apertureShadowDebugMesh`/`Material` are the
+    // ONE surviving standalone diagnostic (raw pattern, black/white,
+    // independent of brightness) — `null` on both with no apertures too.
+    apertureCount,
+    apGoboCols,
+    apGoboRows,
+    uApLampHeight,
+    apApertures,
+    uApColLampHeight: colorationBuilt.uApColLampHeight,
+    apColApertures: colorationBuilt.apColApertures,
+    apertureShadowDebugMesh,
+    apertureShadowDebugMaterial,
   };
 }
 
@@ -310,14 +554,27 @@ function createLightEntry({
  *   lightning subsystem's own live strand snapshot (effects/lightning-
  *   subsystem.js#activeStrands) — read fresh every frame, same as
  *   `getCandleRenderState`'s anchors.
+ * @param {() => {enabled: boolean, params: object, debug?: boolean}} deps.getApertureGoboRenderState -
+ *   the boot.js-injected APERTURE GOBO data seam (docs/planning/
+ *   Aperture-Gobo.md), same shape/injection discipline as
+ *   `getSpecularRenderState`/`getWindowRenderState`. REQUIRED, already
+ *   defaulted by `vt-pan-viewer.js`'s own top-level destructure (the SAME
+ *   single point of defaulting `getCandleRenderState`/`getLightningRenderState`
+ *   already use) — this module does not default it a second time, so there
+ *   is exactly one place an un-wired caller's safety net lives, not two
+ *   that could quietly drift apart. `enabled:false` (the default an un-wired
+ *   caller gets) makes `update()` skip the wall-segment read AND assign
+ *   every light zero apertures — inert by construction, not by a flag, same
+ *   posture as every other un-wired seam in this codebase.
  * @param {object} deps.uGlobalTimeMs - the ONE shared animation-clock TSL
  *   uniform node. NOT owned here — see the module header's "deliberately did
  *   not move" section. Written (`.value = env.time.tMs`) once per frame by
  *   `update()`, on the caller's behalf.
  * @returns {{
- *   lightScene: object, colorationScene: object,
+ *   lightScene: object, colorationScene: object, apertureShadowScene: object,
  *   lightMeshes: Map, candleWallClipCache: Map, lightningWallClipCache: Map,
  *   update: (darkness01: number, activeRegions: object[], env: object, darknessRealism01: number, currentFloor: object) => number,
+ *   getApertureGoboReadout: () => {totalFound: number, dropped: number, litLights: number, enabled: boolean},
  *   dispose: () => void,
  * }}
  */
@@ -331,6 +588,7 @@ export function createPointLightPool({
   getCandleRenderState,
   getLightningRenderState,
   getLightningActiveStrands,
+  getApertureGoboRenderState,
   uGlobalTimeMs,
 }) {
   /** A tiny dedicated Scene for point-light meshes — kept separate from the
@@ -341,6 +599,36 @@ export function createPointLightPool({
    * 3) — its own render() call, its own target, so a per-frame clear behaves
    * correctly for a channel that should read zero where no light reaches. */
   const colorationScene = new THREE.Scene();
+  /** A THIRD dedicated Scene for the APERTURE SHADOW "pattern" debug mesh
+   * ONLY (docs/planning/Aperture-Gobo.md). Rounds 1-9 (2026-08-03/04) used
+   * this scene for the real effect too — a separate post-process pass,
+   * blending/multiplying onto whatever `lightScene`/`colorationScene` had
+   * already accumulated. Round 10 retired that architecture entirely: the
+   * gobo pattern is now baked directly into `entry.material`/
+   * `entry.colorationMaterial`'s own MAX-blend draw (`point-light-
+   * illumination.js`'s "THE GOBO IS PART OF THIS LIGHT'S OWN FALLOFF"
+   * header has the live-found reason — a separate pass, no matter how it
+   * blends, can darken a fragment below what an independent source already
+   * legitimately provided there, since it operates on the ALREADY-combined
+   * buffer with no way to tell which source contributed what). This scene
+   * now holds only the standalone visualization mesh, usually empty. */
+  const apertureShadowScene = new THREE.Scene();
+
+  /** APERTURE GOBO's SHARED (one-per-pool, not one-per-light) generator +
+   * softness uniforms — created ONCE here, exactly like `uGlobalTimeMs`
+   * stays a single shared primitive rather than a per-light copy (see this
+   * module's own header). Written every frame in `update()` from the
+   * injected `getApertureGoboRenderState()`'s resolved params. */
+  const apertureGoboShared = createApertureGoboSharedUniforms(THREE);
+
+  /** THE READOUT — apertures found/dropped/lit-lights, aggregated across
+   * every light THIS frame, mutated in place (not reassigned) so the frozen
+   * return object below can expose a live view via a plain getter, same
+   * "expose a mutable object through a frozen wrapper" shape `lightMeshes`
+   * itself already uses. `feedback_silent_cap_corrupts_hard_boundary`: the
+   * whole reason this exists is so `findAperturesForLight`'s own per-light
+   * cap never drops something with no trace. */
+  const apertureGoboReadout = { totalFound: 0, dropped: 0, litLights: 0, enabled: false };
 
   /** sourceId -> { mesh, material, geometry, positionAttribute, scratchArray,
    * uRatio, uAttenuationEased, ... }. Reconciled every frame in `update()`.
@@ -450,6 +738,19 @@ export function createPointLightPool({
     // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
     // header for why this lives in the reader, not here).
     const { lights: foundryLights } = readActiveLightSources(darkness01);
+    // THE HEIGHT/ELEVATION GATE's ONE per-frame lookup (2026-08-03) — read
+    // once, reused per light below (`resolveLightElevationRank`),
+    // mirroring `stampVegetationRenderOrders`'s own "same Level data every
+    // floor-aware reader in the viewer already reads" posture. `globalThis.
+    // canvas`, never a bare `canvas` reference — this project's own
+    // recurring shadowing trap (see vt-pan-viewer.js's identical guard).
+    let floorsForLightHeight = [];
+    try {
+      const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+      if (floorsResult.ok) floorsForLightHeight = floorsResult.floors;
+    } catch (err) {
+      log.error('point light height gate: getActiveSceneFloors failed — every light reaches everything:', err);
+    }
     // CANDLE LIGHTS (effects/candle-flame-render.js) — authored by us from the
     // anchor authority, shaped EXACTLY like a Foundry light source so they flow
     // through this SAME pool: region-aware ambient, the soft edge, coloration
@@ -557,6 +858,144 @@ export function createPointLightPool({
     // Read ONCE per frame — a scene's grid size does not change light-to-light,
     // only scene-to-scene.
     const gridSizePixels = readGridSizePixels().gridSizePixels;
+
+    // APERTURE GOBO (docs/planning/Aperture-Gobo.md) — read ONCE per frame,
+    // shared by every light below, same "read once, use per-light" shape as
+    // `gridSizePixels` just above.
+    //
+    // "Disabled" reduces to EXACTLY "no wall segments to assign" rather than
+    // a separate branch per light: `findAperturesForLight` against an empty
+    // list always returns zero apertures, which is the SAME code path (and
+    // the SAME zero-cost material) a light with no nearby window takes —
+    // there is no second "is the effect on" gate anywhere below this line.
+    const apertureGoboState = getApertureGoboRenderState();
+    const apertureGoboParams = apertureGoboState.params ?? {};
+    const wallSegmentsForApertures = apertureGoboState.enabled ? readSceneWallSegments(currentFloorId) : [];
+    // Clamped against the SHADER's own hard cap (`aperture-gobo-render.js`'s
+    // `MAX_APERTURES_PER_LIGHT`, the unroll count its uniform sets are built
+    // to), not just the params schema's own declared `max` — belt and braces:
+    // if a future schema edit ever authored a looser range than the shader
+    // actually supports, this line is what keeps `findAperturesForLight` from
+    // handing back more apertures than `entry.apApertures` has slots for,
+    // rather than silently under-writing the tail of the CPU-assigned list.
+    const maxAperturesPerLight = Math.min(
+      Number.isFinite(apertureGoboParams.maxAperturesPerLight)
+        ? apertureGoboParams.maxAperturesPerLight
+        : APERTURE_GOBO_DEFAULTS.maxAperturesPerLight,
+      MAX_APERTURES_PER_LIGHT
+    );
+    // ROUND 14 (2026-08-04) — `findAperturesForLight`'s own new 4th param;
+    // see that function's own header for the live bug this closes (a large
+    // light's own radius alone let it sweep in far-away, unrelated
+    // `light:PROXIMITY` walls as if they were its own window).
+    const maxApertureDistancePx = Number.isFinite(apertureGoboParams.maxApertureDistancePx)
+      ? apertureGoboParams.maxApertureDistancePx
+      : APERTURE_GOBO_DEFAULTS.maxApertureDistancePx;
+
+    // THE SHARED UNIFORMS — one write each, read by EVERY light's material
+    // (see `createApertureGoboSharedUniforms`'s own header for why these are
+    // not per-light). Written even when disabled (to their honest defaults)
+    // rather than skipped — cheap, and means flipping the effect back on
+    // mid-session never resumes from a stale value.
+    apertureGoboShared.uSillPx.value = Number.isFinite(apertureGoboParams.sillPx)
+      ? apertureGoboParams.sillPx
+      : APERTURE_GOBO_DEFAULTS.sillPx;
+    apertureGoboShared.uHeadPx.value = Number.isFinite(apertureGoboParams.headPx)
+      ? apertureGoboParams.headPx
+      : APERTURE_GOBO_DEFAULTS.headPx;
+    // `cols`/`rows` — NOT shared uniforms (design 4, 2026-08-03): they are
+    // GRAPH-BUILD-TIME unroll counts, resolved as plain JS integers and
+    // compared against each entry's OWN cached value, alongside
+    // `apertureCount`, to decide whether that light's material needs
+    // rebuilding this frame (`aperture-gobo-render.js`'s own header explains
+    // why a live uniform can't safely control an unroll count).
+    //
+    // PROCEDURAL PANE COUNT (round 11, 2026-08-04) — cols/rows are no longer
+    // a single pool-wide pair read straight from a param: the author's own
+    // ask was a pane count that "keeps it looking logical" across different
+    // wall lengths, so each light now derives its OWN cols/rows from its OWN
+    // aperture's real `wallLen` (`aperture-gobo.js#findAperturesForLight`)
+    // divided by a TARGET pane size, via `deriveApertureGoboPaneCount` — see
+    // the per-light call below, right after `findAperturesForLight` returns
+    // (that function applies its own divide-by-zero floor, so only the
+    // param-vs-default resolution happens here). Only the target size
+    // (`paneWidthPx`/`paneHeightPx`) is resolved once, pool-wide; the derived
+    // counts are not.
+    const apertureGoboPaneWidthPx = Number.isFinite(apertureGoboParams.paneWidthPx)
+      ? apertureGoboParams.paneWidthPx
+      : APERTURE_GOBO_DEFAULTS.paneWidthPx;
+    const apertureGoboPaneHeightPx = Number.isFinite(apertureGoboParams.paneHeightPx)
+      ? apertureGoboParams.paneHeightPx
+      : APERTURE_GOBO_DEFAULTS.paneHeightPx;
+    apertureGoboShared.uFrame.value = Number.isFinite(apertureGoboParams.frame)
+      ? apertureGoboParams.frame
+      : APERTURE_GOBO_DEFAULTS.frame;
+    apertureGoboShared.uMullion.value = Number.isFinite(apertureGoboParams.mullion)
+      ? apertureGoboParams.mullion
+      : APERTURE_GOBO_DEFAULTS.mullion;
+    // THE REVEAL (round 12, 2026-08-04) — `computeApertureRevealNarrowing`'s
+    // own input; 0 disables it, byte-identical to the pre-round-12 symmetric
+    // frame gate.
+    apertureGoboShared.uWallThicknessPx.value = Number.isFinite(apertureGoboParams.wallThicknessPx)
+      ? apertureGoboParams.wallThicknessPx
+      : APERTURE_GOBO_DEFAULTS.wallThicknessPx;
+    // GLASS QUALITY & GRIME (round 13, 2026-08-04) —
+    // `computeApertureGlassWarpOffset`/`computeApertureGrimeFactor`'s own
+    // inputs; `uDistortionPx`/`uGrimeAmount` at 0 are each an exact no-op
+    // through their own formula.
+    apertureGoboShared.uGlassQuality.value = Number.isFinite(apertureGoboParams.glassQuality)
+      ? apertureGoboParams.glassQuality
+      : APERTURE_GOBO_DEFAULTS.glassQuality;
+    apertureGoboShared.uDistortionPx.value = Number.isFinite(apertureGoboParams.distortionPx)
+      ? apertureGoboParams.distortionPx
+      : APERTURE_GOBO_DEFAULTS.distortionPx;
+    apertureGoboShared.uGrimeAmount.value = Number.isFinite(apertureGoboParams.grimeAmount)
+      ? apertureGoboParams.grimeAmount
+      : APERTURE_GOBO_DEFAULTS.grimeAmount;
+    const apertureGoboSoftness = Number.isFinite(apertureGoboParams.softness)
+      ? apertureGoboParams.softness
+      : APERTURE_GOBO_DEFAULTS.softness;
+    apertureGoboShared.uSoftFarPx.value = SOFT_FAR_PX_BASE * apertureGoboSoftness;
+    // THE REACH BLUR (round 15) — same live `softness` dial, a much bigger
+    // far value (`aperture-gobo.js#REACH_SOFT_FAR_PX_BASE`'s own header) —
+    // see that constant's header for why this is a SEPARATE growth signal
+    // from `uSoftFarPx` above, not a duplicate of it.
+    apertureGoboShared.uReachSoftFarPx.value = REACH_SOFT_FAR_PX_BASE * apertureGoboSoftness;
+    // EDGE SUPPRESSION (round 17) — `aperture-gobo.js#APERTURE_GOBO_
+    // DEFAULTS`'s own header: a direct, guaranteed manual override, opt-in
+    // (0 = off).
+    apertureGoboShared.uEdgeSuppressPercent.value = Number.isFinite(apertureGoboParams.edgeSuppressPercent)
+      ? apertureGoboParams.edgeSuppressPercent
+      : APERTURE_GOBO_DEFAULTS.edgeSuppressPercent;
+    // DIM-RADIUS SUPPRESSION, round 18 — two independent percentage
+    // anchors, replacing round 17's single auto-anchored-to-the-edge
+    // fraction (`aperture-gobo.js#APERTURE_GOBO_DEFAULTS`'s own "DIM-RADIUS
+    // SUPPRESSION, ROUND 18" header).
+    apertureGoboShared.uDimRadiusFadeStartPercent.value = Number.isFinite(apertureGoboParams.dimRadiusFadeStartPercent)
+      ? apertureGoboParams.dimRadiusFadeStartPercent
+      : APERTURE_GOBO_DEFAULTS.dimRadiusFadeStartPercent;
+    apertureGoboShared.uDimRadiusFadeEndPercent.value = Number.isFinite(apertureGoboParams.dimRadiusFadeEndPercent)
+      ? apertureGoboParams.dimRadiusFadeEndPercent
+      : APERTURE_GOBO_DEFAULTS.dimRadiusFadeEndPercent;
+    // DEBUG CHANNEL — round 10 (2026-08-04) retired the 4-way picker back
+    // to 2: 'off' (the real effect, always baked into `entry.material`/
+    // `entry.colorationMaterial` now — nothing to toggle) and 'pattern'
+    // (the standalone raw-gobo debug mesh, `entry.apertureShadowDebugMesh`,
+    // useful for visually confirming mullion/frame geometry independent of
+    // brightness). 'visibility'/'gate-inputs' were the retired visibility
+    // gate's own instruments — see point-light-illumination.js's own "THE
+    // GOBO IS PART OF THIS LIGHT'S OWN FALLOFF" header for why that gate no
+    // longer exists to have inputs.
+    const apertureGoboDebugChannel = apertureGoboState.debugChannel ?? 'off';
+    apertureGoboShared.uStrength.value = Number.isFinite(apertureGoboParams.strength)
+      ? apertureGoboParams.strength
+      : APERTURE_GOBO_DEFAULTS.strength;
+
+    apertureGoboReadout.totalFound = 0;
+    apertureGoboReadout.dropped = 0;
+    apertureGoboReadout.litLights = 0;
+    apertureGoboReadout.enabled = apertureGoboState.enabled === true;
+
     const seen = new Set();
     for (const light of lights) {
       seen.add(light.sourceId);
@@ -578,16 +1017,78 @@ export function createPointLightPool({
       // type/quality. In practice constant per source (Foundry → 'foundry',
       // candles → 'inverseSquare'), but keyed here for correctness.
       const falloffModel = light.falloffModel ?? 'foundry';
+      // APERTURE GOBO ASSIGNMENT — a cheap CPU pass per light
+      // (`aperture-gobo.js#findAperturesForLight`), computed BEFORE the
+      // rebuild check below because `apertureCount` is itself part of that
+      // check: like `falloffModel`/`animationType`, the NUMBER of aperture
+      // uniform sets a light's material was built with is baked into its
+      // graph at construction time (`aperture-gobo-render.js`'s own header —
+      // deliberately no `Loop`/`uniformArray`, so the unroll count IS the
+      // shader). `wallSegmentsForApertures` is already `[]` when the effect
+      // is disabled, so this naturally resolves to zero for every light with
+      // no extra branch.
+      const {
+        apertures: lightApertures,
+        dropped,
+        totalFound,
+      } = findAperturesForLight(
+        { x: light.x, y: light.y, radius: light.radius },
+        wallSegmentsForApertures,
+        maxAperturesPerLight,
+        maxApertureDistancePx
+      );
+      const apertureCount = lightApertures.length;
+      apertureGoboReadout.totalFound += totalFound;
+      apertureGoboReadout.dropped += dropped;
+      if (apertureCount > 0) apertureGoboReadout.litLights += 1;
+
+      // PROCEDURAL PANE COUNT, per-light (round 11, 2026-08-04) — a wide
+      // window naturally gets more panes than a narrow one, instead of one
+      // pool-wide count stretched or squeezed to fit every wall length.
+      // `deriveApertureGoboPaneCount` (aperture-gobo.js) is the ONE shared
+      // derivation `bench-aperture-gobo.js` also imports, so production and
+      // the shader-lab bench can never quietly drift apart. Uses the FIRST
+      // aperture as the representative wall: sharing one pane count across
+      // more than one aperture on the SAME light is not a new simplification
+      // this round introduces — `cols`/`rows` were already one pair shared
+      // across every aperture on a light before this round; this only
+      // changes where the pair's VALUE comes from.
+      const { cols: apertureGoboCols, rows: apertureGoboRows } = deriveApertureGoboPaneCount({
+        wallLen: lightApertures[0]?.wallLen,
+        sillPx: apertureGoboShared.uSillPx.value,
+        headPx: apertureGoboShared.uHeadPx.value,
+        paneWidthPx: apertureGoboPaneWidthPx,
+        paneHeightPx: apertureGoboPaneHeightPx,
+      });
+
       if (
         entry &&
         (entry.animationType !== light.animation.type ||
           entry.animationQuality !== animationQuality ||
-          entry.falloffModel !== falloffModel)
+          entry.falloffModel !== falloffModel ||
+          entry.apertureCount !== apertureCount ||
+          // `cols`/`rows` join the rebuild key for the SAME reason
+          // `apertureCount` is already in it (design 4, 2026-08-03): both
+          // are graph-build-time unroll counts baked into the aperture
+          // shadow material, not shared uniforms — see aperture-gobo-
+          // render.js's own header. A change is GLOBAL (one param, every
+          // light), so every light's cached value goes stale on the same
+          // frame and all of them rebuild together.
+          entry.apGoboCols !== apertureGoboCols ||
+          entry.apGoboRows !== apertureGoboRows)
       ) {
         lightScene.remove(entry.mesh);
         colorationScene.remove(entry.colorationMesh);
         entry.material.dispose();
         entry.colorationMaterial.dispose();
+        // APERTURE SHADOW DEBUG — round 10: the ONE surviving standalone
+        // mesh, only present when the PREVIOUS apertureCount was > 0 (the
+        // real effect itself is baked into `entry.material`/
+        // `entry.colorationMaterial` above and needs no separate teardown).
+        if (entry.apertureShadowDebugMesh) {
+          apertureShadowScene.remove(entry.apertureShadowDebugMesh);
+          entry.apertureShadowDebugMaterial.dispose();
+        }
         entry.geometry.dispose();
         lightMeshes.delete(light.sourceId);
         entry = null;
@@ -605,8 +1106,45 @@ export function createPointLightPool({
           uGlobalTimeMs,
           lightScene,
           colorationScene,
+          apertureShadowScene,
+          apertureCount,
+          apGoboCols: apertureGoboCols,
+          apGoboRows: apertureGoboRows,
+          apertureGoboShared,
         });
         lightMeshes.set(light.sourceId, entry);
+      }
+      // THE PER-FRAME APERTURE UNIFORM WRITE — a wall's position doesn't
+      // change frame to frame, but a light standing near a door can SWING
+      // past one, so these are written every frame like every other
+      // per-light uniform in this loop, never just once at creation.
+      // `entry.apApertures` is `null` when `apertureCount` is 0 (this light
+      // has no windows at all this frame) — nothing to write. TWO uniform
+      // sets as of round 10 (illumination's own `apApertures` AND
+      // coloration's own `apColApertures` — see point-light-coloration.js's
+      // own header for why coloration needs the gobo baked in too) — both
+      // written from the SAME `lightApertures`, the same duplication-
+      // across-the-mesh-pair pattern this loop already uses for every other
+      // shared-value uniform pair.
+      if (entry.apApertures && entry.apApertures.length > 0) {
+        const lampHeightPx = resolveLampHeight(light, apertureGoboParams);
+        entry.uApLampHeight.value = lampHeightPx;
+        if (entry.uApColLampHeight) entry.uApColLampHeight.value = lampHeightPx;
+        for (let i = 0; i < entry.apApertures.length; i++) {
+          const src = lightApertures[i];
+          const dst = entry.apApertures[i];
+          dst.uA.value.set(src.A.x, src.A.y);
+          dst.uDir.value.set(src.dir.x, src.dir.y);
+          dst.uNrm.value.set(src.nrm.x, src.nrm.y);
+          dst.uSLAWallLen.value.set(src.sL, src.a, src.wallLen);
+          const dstCol = entry.apColApertures?.[i];
+          if (dstCol) {
+            dstCol.uA.value.set(src.A.x, src.A.y);
+            dstCol.uDir.value.set(src.dir.x, src.dir.y);
+            dstCol.uNrm.value.set(src.nrm.x, src.nrm.y);
+            dstCol.uSLAWallLen.value.set(src.sL, src.a, src.wallLen);
+          }
+        }
       }
       // REUSE, not reallocate (see lightMeshes' own doc — this is the
       // device-lost fix, not an optimisation): triangulateLightFan writes
@@ -637,6 +1175,18 @@ export function createPointLightPool({
       entry.mesh.position.set(light.x, light.y, 0);
       entry.mesh.scale.set(light.radius, light.radius, 1);
       entry.mesh.visible = true;
+      // APERTURE SHADOW DEBUG — round 10: the ONE surviving standalone
+      // Object3D (shares `geometry` with `entry.mesh` but needs its OWN
+      // transform sync, same as before). The real effect is baked into
+      // `entry.material`/`entry.colorationMaterial` now and needs no
+      // per-frame visibility toggle of its own — it's simply always part of
+      // whatever those two materials draw. Visible only in the 'pattern'
+      // debug channel; `null` when this light has no apertures.
+      if (entry.apertureShadowDebugMesh) {
+        entry.apertureShadowDebugMesh.position.set(light.x, light.y, 0);
+        entry.apertureShadowDebugMesh.scale.set(light.radius, light.radius, 1);
+        entry.apertureShadowDebugMesh.visible = apertureGoboDebugChannel === 'pattern';
+      }
       // PER-LIGHT REGION-AWARE AMBIENT — see this function's own header for
       // the full "hard edge on a soft light" bug this fixes.
       const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
@@ -667,6 +1217,24 @@ export function createPointLightPool({
         if (entry.uColorIntensityRaw) entry.uColorIntensityRaw.value = light.animation.intensityRaw;
       }
       entry.uRatio.value = light.ratio;
+      // HEIGHT/ELEVATION GATE (2026-08-03) — see `resolveLightElevationAbove
+      // Floor`'s own doc and `point-light-illumination.js`'s "HEIGHT/
+      // ELEVATION GATE" section. `light.elevation` is `undefined` for candle/
+      // lightning lights (built by `buildCandleLightSources`/
+      // `buildLightningLightSources`, neither of which carries the field) —
+      // `resolveLightElevationRank` reads that the same as an
+      // untouched Foundry light (raw 0) and returns the unconfigured
+      // sentinel, so those light types keep their pre-existing, ungated
+      // reach with no special-casing here.
+      if (entry.uLightElevationRank) {
+        const lightRank = resolveLightElevationRank(light, floorsForLightHeight);
+        entry.uLightElevationRank.value = lightRank;
+        // The coloration twin carries its OWN copy of this uniform (two
+        // independently-built materials, same light) — it must be pushed too,
+        // or the animated glow gates against a stale sentinel and keeps
+        // drawing through solid floors.
+        if (entry.uColorationLightElevationRank) entry.uColorationLightElevationRank.value = lightRank;
+      }
       // NOT floored (2026-07-19, reversed same day — see
       // keyhole-attenuation-floor-reverted memory). A direct side-by-side
       // against real Foundry proved a hard edge at low attenuation IS the
@@ -743,6 +1311,9 @@ export function createPointLightPool({
       if (!seen.has(id)) {
         entry.mesh.visible = false;
         entry.colorationMesh.visible = false;
+        if (entry.apertureShadowDebugMesh) {
+          entry.apertureShadowDebugMesh.visible = false;
+        }
       }
     }
     return gridSizePixels;
@@ -764,6 +1335,16 @@ export function createPointLightPool({
       } catch (err) {
         log.error(`point-light coloration material dispose failed for '${id}' — VRAM may be leaked:`, err);
       }
+      if (entry.apertureShadowMaterial) {
+        try {
+          entry.apertureShadowMaterial.dispose();
+          entry.apertureShadowDebugMaterial.dispose();
+          entry.apertureShadowVisibilityDebugMaterial.dispose();
+          entry.apertureShadowGateInputsDebugMaterial.dispose();
+        } catch (err) {
+          log.error(`point-light aperture-shadow material dispose failed for '${id}' — VRAM may be leaked:`, err);
+        }
+      }
       try {
         entry.geometry.dispose();
       } catch (err) {
@@ -773,13 +1354,24 @@ export function createPointLightPool({
     lightMeshes.clear();
   }
 
+  /** The aperture-gobo readout — apertures found/dropped/lit-lights as of
+   * the LAST `update()` call. A plain function reading the mutable object
+   * `update()` writes in place, mirroring `getPointLightsInfo`'s own posture
+   * elsewhere: a diagnostics consumer (the debug panel report) pulls this,
+   * nothing pushes it. */
+  function getApertureGoboReadout() {
+    return { ...apertureGoboReadout };
+  }
+
   return Object.freeze({
     lightScene,
     colorationScene,
+    apertureShadowScene,
     lightMeshes,
     candleWallClipCache,
     lightningWallClipCache,
     update,
+    getApertureGoboReadout,
     dispose,
   });
 }

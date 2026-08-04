@@ -142,14 +142,80 @@ justified *only* because the twin must be independent of the code under test —
 called the same function would be a tautology — and because sRGB is a fixed published spec, not
 project code that can drift. Do not take it as licence to transcribe anything else.
 
-## 10. Known-good smoke test
+## 10. The `floor-lighting` bench — rung 3, multi-floor light occlusion
+
+`bench-floor-lighting.js` builds a three-floor building out of primitives (ground = whole map;
+first + second = a slab over the footprint only), writes a real `buf:scene.attr` through the REAL
+`resolveItemFloorAttrUniforms` + `packFloorAttr`, and renders the REAL
+`buildPointLightIlluminationMaterial` MAX-blended into a real illum target.
+
+**It exists because three consecutive "fixed it" rounds on the light/elevation gate died on the
+author's live scene**, each after a by-hand trace whose arithmetic was genuinely correct. The
+arithmetic was never the problem: the material was sampling `buf:scene.attr` with a bare
+`texture(attrTexture)` node, whose default uv is `uv()` — **and a light's fan geometry has no `uv`
+attribute at all** (it sets only `position`). Every fragment of every light read the same constant
+texel. The fix is `screenUV`, the technique the sibling coloration material — sharing the very same
+geometry object — already used.
+
+Its `the-frame-changes-at-all-between-floors` check is the generic detector for that whole bug
+class: **hold every uniform fixed, vary only the buffer, and demand the frame change.** It read
+`0.00% of pixels differ` before the fix and ~13% after. Any future gate that reads a screen-space
+buffer from a world-space mesh should be checked the same way.
+
+**A light is drawn by TWO meshes sharing ONE geometry** — illumination and coloration (the coloured
+glow + every animated light effect). Fixing a gate in one leaves the other painting through solid
+floors, which is exactly what the author saw next. Scenario `animated-coloration-is-occluded-too`
+covers the second half; if you add a third light mesh, add a scenario for it too.
+
+**Candle flames and lightning bolts are SEPARATE batched meshes** (candle-flame-render.js /
+lightning-render.js), not point-light-pool meshes at all — one draw call can hold many
+anchors/strands on DIFFERENT floors, so their `elevationRank` is baked PER-VERTEX at geometry-build
+time, not a uniform (`boot.js#getCandleRenderState`/`getLightningRenderState`'s
+`resolveAnchorElevationRank`). Scenario `candle-and-lightning-sprites-are-occluded` covers both.
+⚠️ Its lightning fixture picks `uGlobalTimeMs` to land the envelope's `postT` around 0.2, NOT at
+`spawnMs + durationMs` — the envelope's own `decay`/`connectSpike` terms are BOTH ~0 by full
+duration (a bolt has genuinely finished by then), so t=1 renders nothing and looks exactly like an
+occlusion bug that isn't one. See that scenario's own comment for the arithmetic.
+
+**Occlusion fade and physical solidity are DIFFERENT questions — read
+`occlusion-fade-does-not-defeat-solidity` before touching `buf:scene.attr`'s alpha again.** Foundry's
+own roof-fade mechanic (`scene/occlusion.js`) fades a Tile's ON-SCREEN alpha so a player can see
+their token underneath; that fade must NEVER reach `buf:scene.attr`'s solidity channel, or a light
+under the roof stops being occluded the instant a token walks into the room. Building the MRT render
+this scenario needs surfaced THREE separate real traps, in order:
+1. **A raw pixel readback coordinate ignores the bench's own `orientation` flip.** Always route through
+   `sampleAt`, never a hand-picked `(x,y)`.
+2. **`renderer.setMRT(...)` is not optional.** In the vendored three.webgpu.js, when the renderer has no
+   global MRT set, `material.mrtNode` REPLACES the whole fragment output instead of extending it — a
+   `mrt({attr: ...})` with no `output` key writes NOTHING to slot 0. Wrap every MRT render in
+   `renderer.setMRT(mrt({output, attr: vec4(0,0,0,0)}))` / restore, matching
+   `vt/scene-attr.js#buildSceneAttrZeroMrt` exactly.
+3. **`material.transparent` must match production (`true`).** An opaque material's alpha output is not
+   meaningful — a low alpha written through `colorNode` reads back as flat 255 regardless of what the
+   shader computed, which looks exactly like a solidity bug and isn't one.
+
+Two traps this bench fell into **in itself**, both worth copying the fix for:
+
+- **`depthTest: false` means three sorts your quads FRONT-TO-BACK**, so the ground floor drew last
+  and overwrote every slab; the attr buffer came back all-floor-0 and looked exactly like a shader
+  bug. Use `renderOrder`, not z-position.
+- **A Y-CENTRED test feature cannot calibrate a Y-flip.** The footprint was centred, so every
+  orientation probe was invariant and `calibrate` passed while telling you nothing; three checks
+  passed only because they also sat on the centre line. The footprint is now deliberately
+  asymmetric in Y (250..650 of 0..1000) and the probe has two distinct predicted values.
+
+## 11. Known-good smoke test
 
 ```js
-window.lab.describe().benches.map(b => b.name)   // ['fixture', 'derive']
+window.lab.describe().benches.map(b => b.name)   // ['fixture', 'derive', …, 'floor-lighting']
 await window.lab.run('fixture', 'outdoors-all-floors', { params: { scale: 0.125 } })
 // expect: 21 pass, 0 fail, 2 UNMEASURED, ok:false (orientation + authored points are real gaps)
 await window.lab.run('derive', 'multi-floor-bands')
 // expect: 13 pass, 0 fail, ok:true
+await window.lab.run('floor-lighting', 'the-authors-three-lights')
+// expect: 4 pass, 0 fail, ok:true — outdoor light seen from every floor, sealed light
+// occluded from above, and ONE first-floor light both lit (outdoors) and dark (under the
+// slab) in the SAME frame. Artifacts show the building's edge bitten out of the light.
 await window.lab.run('derive', 'caster-grid-dim-independence')
 // expect: 8 pass — including `detector-is-not-vacuous`, which reproduces the 2026-07-30
 // stride bug on the real gate grid to prove the stability check can actually see it.

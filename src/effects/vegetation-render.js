@@ -265,10 +265,10 @@ export function vegetationPassiveElevation(kind, band) {
  *
  * So instead of inventing an offset, this asks the real comparator where the
  * vegetation's OWN key belongs in the already-sorted list. If `n` real
- * drawables sort below it they occupy `renderOrder` 0..n-1, so `n - 0.5` lands
- * the overlay strictly between `n-1` and `n` — the correct slot, expressed in
- * the same numbering everything else uses. No band, no capacity, no drift from
- * the law: change the comparator and this follows it automatically.
+ * drawables sort below it they occupy `renderOrder` 0..n-1, so the overlay
+ * lands somewhere strictly between `n-1` and `n` — the correct slot, expressed
+ * in the same numbering everything else uses. No band, no capacity, no drift
+ * from the law: change the comparator and this follows it automatically.
  *
  * `SORT_LAYERS.SCENE_EFFECTS` (250 < `TILES` 500) is what makes a TIE go to the
  * tile, which is the author's own rule — *"tiles at 10 would render above the
@@ -277,6 +277,32 @@ export function vegetationPassiveElevation(kind, band) {
  * draws over that floor's foreground/roof art. That is a real behaviour change
  * from the host-relative era and is deliberate: an author who wants roof art
  * above a canopy puts it on a TILE at the floor top (`TILES` 500 > 250).
+ *
+ * ⚠️ WHERE EXACTLY IN THAT GAP — NOT THE MIDPOINT, A PER-KIND SLOT (found
+ * 2026-08-04, chasing an author report of `_Bush` drawing over `_Tree` on an
+ * ordinary scene). `below` only counts REAL (non-vegetation) drawables — it
+ * never compares one vegetation kind against another, because they are never
+ * both members of `sortedItems`. So on a floor with no real drawable sitting
+ * strictly between bush's elevation (its band's midpoint) and tree's
+ * (its band's top) — a perfectly ordinary floor: just background art, no
+ * intermediate tiles — `below` comes out IDENTICAL for both kinds despite
+ * their different elevations, and a fixed `n - 0.5` would hand both meshes
+ * the exact same `renderOrder` number. THREE has no law for that tie (this
+ * module's whole point is to never depend on one); it falls to incidental
+ * scene-graph/creation order, which is why the symptom looked like "bush
+ * sometimes wins" rather than "always". The existing regression fixture never
+ * caught this because it always seeded a tile at elevation 19 — between
+ * bush's 10 and tree's 20 — which broke the tie by accident.
+ *
+ * Fix: instead of always bisecting the gap, place the kind AT a fixed point
+ * inside it that is itself ordered by `passiveElevationFraction` — the same
+ * field that already decided the two kinds' elevations are different in the
+ * first place. Two kinds sharing one gap now get two distinct numbers inside
+ * it, in the same relative order their elevations intend; two kinds NOT
+ * sharing a gap are unaffected (still strictly separated by whichever real
+ * drawables sit between them). `VEG_KIND_SLOT_MARGIN` keeps every kind's slot
+ * strictly inside `(n-1, n)` — never touching either boundary — so this can
+ * never newly collide with a REAL drawable's own integer `renderOrder`.
  *
  * @param {ReadonlyArray<{key: object, renderOrder: number}>} sortedItems - the
  *   draw list AFTER `sortByLayer`, still in sorted order.
@@ -288,6 +314,8 @@ export function vegetationPassiveElevation(kind, band) {
  *   `fellBack` is true when the band was unusable and the legacy host-relative
  *   nudge was used — the caller REPORTS that rather than swallowing it.
  */
+const VEG_KIND_SLOT_MARGIN = 0.02;
+
 export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) {
   const elevation = vegetationPassiveElevation(kind, band);
   if (elevation === null) {
@@ -316,7 +344,14 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
   for (const it of sortedItems ?? []) {
     if (it?.key && compareLayerKeys(it.key, key) < 0) below++;
   }
-  return { renderOrder: below - 0.5, elevation, fellBack: false };
+  // Placed at a per-kind point inside the (below-1, below) gap, ordered by
+  // this kind's own passiveElevationFraction — see the doc comment above for
+  // why the old fixed midpoint (`below - 0.5` for every kind) let two
+  // different kinds collide onto one number.
+  const fraction = Number.isFinite(kind?.passiveElevationFraction) ? kind.passiveElevationFraction : 0.5;
+  const span = 1 - 2 * VEG_KIND_SLOT_MARGIN;
+  const slot = VEG_KIND_SLOT_MARGIN + fraction * span;
+  return { renderOrder: below - 1 + slot, elevation, fellBack: false };
 }
 
 /**

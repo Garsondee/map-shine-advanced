@@ -235,6 +235,28 @@ export function run(t) {
     );
   }
 
+  // ---- elevation (AmbientLightDocument.elevation — NOT part of LightData,
+  // read via source.object.document.elevation, same as hidden/darknessMin/Max
+  // above) — added for effects/lighting/point-light-illumination.js's height
+  // gate (2026-08-03: "tiles above their own light source should be dark"). ---
+  ok(
+    'no elevation given reads as 0 (the schema default, and the "no height gate" sentinel)',
+    deriveLightSnapshot({ sourceId: 'a', x: 0, y: 0, radius: 1, shapePoints: TRIANGLE }).elevation === 0
+  );
+  ok(
+    'a real elevation passes through unchanged — never fractionalised here',
+    deriveLightSnapshot({ sourceId: 'a', x: 0, y: 0, radius: 1, elevation: 12.5, shapePoints: TRIANGLE }).elevation ===
+      12.5
+  );
+  ok(
+    'a negative elevation (a light placed below its floor´s nominal ground) passes through too',
+    deriveLightSnapshot({ sourceId: 'a', x: 0, y: 0, radius: 1, elevation: -4, shapePoints: TRIANGLE }).elevation === -4
+  );
+  ok(
+    'a non-finite elevation floors to 0, the same safe default as a missing one',
+    deriveLightSnapshot({ sourceId: 'a', x: 0, y: 0, radius: 1, elevation: NaN, shapePoints: TRIANGLE }).elevation === 0
+  );
+
   // ---- per-light darkness activation window ({min,max}, default {0,1}) -----
   ok(
     'no window given + no darkness given: still draws (defaults are {0,1} and 0)',

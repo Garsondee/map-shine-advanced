@@ -14,6 +14,7 @@
  */
 
 import { SPECULAR, SPECULAR_PARAMS, SPECULAR_LAYER_PARAMS, SPECULAR_DEBUG_CHANNELS } from './specular.js';
+import { SPECULAR_LAYER_COUNT } from './specular-render.js';
 
 /**
  * @param {object} args
@@ -68,20 +69,23 @@ export function createSpecularRegistration({
   let debugChannel = 0;
 
   /**
-   * THE PER-LAYER OVERRIDES — three shimmer layers, each with its own eight
+   * THE PER-LAYER OVERRIDES — `SPECULAR_LAYER_COUNT` shimmer layers (six since
+   * Round 19, 2026-08-03; three through Round 18), each with its own eight
    * controls (`specular.js#SPECULAR_LAYER_PARAMS`).
    *
    * Held outside the cascade rather than flattened into it, and the reason is
    * V2's own corpse: it shipped these as twenty-four separate settings with
    * digits in their names (`stripe2Angle`, `stripe3Gaps`) and nobody could tell
-   * which layer a slider belonged to. One array of three objects keeps the
-   * panel able to draw one strip per layer, and keeps the schema at ten entries
-   * rather than thirty-four.
+   * which layer a slider belonged to. One array of `SPECULAR_LAYER_COUNT`
+   * objects keeps the panel able to draw one strip per layer, and keeps the
+   * flat schema small regardless of how many layers exist — sized off the
+   * SAME constant the render module uses rather than a second hand-typed
+   * number, so the two can never silently disagree on how many layers exist.
    *
    * Transient, like the live param override beside it: a layer tweak shows
    * immediately and dies with the session.
    */
-  const layerOverrides = [{}, {}, {}];
+  const layerOverrides = Array.from({ length: SPECULAR_LAYER_COUNT }, () => ({}));
 
   effectRegistry.register(SPECULAR, (resolved) => {
     readout = { enabled: resolved.enabled, params: resolved.params };

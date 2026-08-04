@@ -153,7 +153,8 @@
       #fixtureView,
       #deriveView,
       #compositeView,
-      #sunShadowView {
+      #sunShadowView,
+      #apertureGoboView {
         background: #000;
         image-rendering: pixelated;
         border: 1px solid #444;
@@ -165,7 +166,8 @@
       #deriveStatus,
       #compositeStatus,
       #blendStatus,
-      #sunShadowStatus {
+      #sunShadowStatus,
+      #apertureGoboStatus {
         white-space: pre-wrap;
         font-size: 11px;
         max-height: 200px;
@@ -200,6 +202,11 @@
         <div id="fixtureLegend">no mask loaded</div>
         <div id="fixtureStatus">loading…</div>
       </div>
+      <div id="floorLightLeft" style="display: none">
+        <canvas id="floorLightView" width="512" height="512"></canvas>
+        <div id="floorLightLegend">no frame rendered</div>
+        <div id="floorLightStatus">loading…</div>
+      </div>
       <div id="deriveLeft" style="display: none">
         <canvas id="deriveView" width="1024" height="476"></canvas>
         <div id="deriveLegend">no grid derived</div>
@@ -218,6 +225,10 @@
         <canvas id="sunShadowView" width="1024" height="1024"></canvas>
         <div id="sunShadowStatus">loading…</div>
       </div>
+      <div id="apertureGoboLeft" style="display: none">
+        <canvas id="apertureGoboView" width="1024" height="1024"></canvas>
+        <div id="apertureGoboStatus">loading…</div>
+      </div>
     </div>
     <div id="controls">
       <fieldset>
@@ -230,6 +241,8 @@
           <option value="derive">Derivation — real multi-floor bands (rung 2)</option>
           <option value="composite">Composite — gamma-space light arithmetic (rung 3)</option>
           <option value="blend">Blend neutrality + MRT (rung 3)</option>
+          <option value="floor-lighting">Multi-floor light occlusion (rung 3)</option>
+          <option value="aperture-gobo">Aperture gobo — wall/window/light (rung 3)</option>
         </select>
       </fieldset>
       <div id="specPanel" style="display: none">
@@ -449,6 +462,20 @@
           <button id="fixtureRelease">Release all decoded masks</button>
         </fieldset>
       </div>
+      <div id="floorLightPanel" style="display: none">
+        <fieldset>
+          <legend>Multi-floor light occlusion (rung 3)</legend>
+          <select id="floorLightScenario"></select>
+          <button id="floorLightRun">Run scenario</button>
+        </fieldset>
+      </div>
+      <div id="apertureGoboPanel" style="display: none">
+        <fieldset>
+          <legend>Aperture gobo — wall/window/light (rung 3)</legend>
+          <select id="apertureGoboScenario"></select>
+          <button id="apertureGoboRun">Run scenario</button>
+        </fieldset>
+      </div>
       <div id="derivePanel" style="display: none">
         <fieldset>
           <legend>Derivation — real deriveFloorProducts</legend>
@@ -620,6 +647,8 @@
     <script type="module" src="/tools/shader-lab/composite-lab.js"></script>
     <script type="module" src="/tools/shader-lab/blend-lab.js"></script>
     <script type="module" src="/tools/shader-lab/sun-shadow-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/floor-lighting-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/aperture-gobo-lab.js"></script>
     <!-- LAST: owns the view column, so its answer wins over every bench's own
          (see view-visibility.js's header for why that is one file's job). -->
     <script type="module" src="/tools/shader-lab/view-visibility.js"></script>

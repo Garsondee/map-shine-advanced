@@ -22,6 +22,7 @@ import {
   computeLightningStrandArrays,
   hexToRgb01,
 } from '../lightning-geometry.js';
+import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL } from '../lighting/point-light-illumination.js';
 
 function approx(a, b, eps = 1e-6) {
   return Math.abs(a - b) <= eps;
@@ -209,6 +210,11 @@ export function run(t) {
       dist(main.endX, main.endY, source.endX, source.endY) <= PARAMS.endPointRandomnessPx * Math.SQRT2 + 1e-6
     );
     ok('the main strand has a positive baseIntensity floor', main.baseIntensity >= 0.05);
+    ok(
+      'a source with no elevationRank (every fixture above) bakes the SENTINEL, never 0/undefined/NaN — ' +
+        'the old "always fully reaches" behaviour for a caller predating the height gate',
+      main.elevationRank === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+    );
 
     ok('branches is an array within [0, branchMax]', Array.isArray(branches) && branches.length <= PARAMS.branchMax);
     for (const b of branches) {
@@ -224,7 +230,27 @@ export function run(t) {
         minDistToPath(b.xs[0], b.ys[0], main.xs, main.ys) < 20 // generous — microJitter is a few px at these lengths
       );
       ok('a branch is dimmer than its parent (branchIntensityScale<1)', b.baseIntensity < main.baseIntensity);
+      ok(
+        'a branch inherits its PARENT´s own elevationRank exactly — it belongs to the same floor by construction',
+        b.elevationRank === main.elevationRank
+      );
     }
+
+    // A source WITH a real elevationRank carries it straight through to both
+    // the main strand and every branch (the height gate's own floor input).
+    const sourceWithRank = { ...source, elevationRank: 2.15625 };
+    const rankedBurst = generateBurst({
+      source: sourceWithRank,
+      burstIndex: 0,
+      spawnMs: 1000,
+      maxPointsPerStrand: 96,
+      params: PARAMS,
+    });
+    ok('a source´s real elevationRank reaches the main strand unchanged', rankedBurst.main.elevationRank === 2.15625);
+    ok(
+      'and every branch of that same burst',
+      rankedBurst.branches.every((b) => b.elevationRank === 2.15625)
+    );
 
     // Determinism: the SAME (source, burstIndex) always yields the SAME bolt —
     // the whole point of deriving shape from a seed instead of mutable state.
@@ -357,6 +383,21 @@ export function run(t) {
     ok(
       'anchors with no linkId at all are ignored entirely',
       groupLightningAnchorsIntoSources([{ id: 'x', x: 0, y: 0, params: {} }]).sources.length === 0
+    );
+    ok(
+      'a source with no elevationRank on its START anchor reads as the sentinel',
+      sources[0].elevationRank === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+    );
+
+    // The bolt's own height-gate input comes from the START anchor specifically
+    // (generateBurst's own doc: "a strike genuinely does travel start→end").
+    const ranked = groupLightningAnchorsIntoSources([
+      { id: 'b1', x: 0, y: 0, params: { role: 'start', linkId: 'bolt-3' }, elevationRank: 1.5 },
+      { id: 'b2', x: 500, y: 0, params: { role: 'end', linkId: 'bolt-3' }, elevationRank: 9.9 },
+    ]);
+    ok(
+      'the resolved source carries the START anchor´s own rank, not the end´s',
+      ranked.sources[0].elevationRank === 1.5
     );
   }
 
@@ -509,6 +550,27 @@ export function run(t) {
     };
     const cappedPoints = computeLightningStrandArrays([longStrand], 24, 96);
     ok('per-strand point count is capped at maxPointsPerStrand', cappedPoints.strandPointCounts[0] === 96);
+
+    // THE HEIGHT-GATE INPUT — s1/s2 above carry no elevationRank (older-shaped
+    // fixtures), so this is also the defensive-default check: the sentinel,
+    // never 0/undefined/NaN.
+    ok(
+      'a strand with no elevationRank bakes the SENTINEL on every one of its vertices',
+      arrays.elevationRank.slice(0, arrays.vertexCount).every((r) => r === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL)
+    );
+    const ranked = computeLightningStrandArrays(
+      [
+        { ...s1, elevationRank: 0.15625 },
+        { ...s2, elevationRank: 2.15625 },
+      ],
+      24,
+      96
+    );
+    let rankBleed = false;
+    for (let v = 0; v < strand1VertCount; v++) if (ranked.elevationRank[v] !== 0.15625) rankBleed = true;
+    for (let v = strand1VertCount; v < ranked.vertexCount; v++)
+      if (ranked.elevationRank[v] !== 2.15625) rankBleed = true;
+    ok('a real elevationRank bakes per-strand with no cross-strand bleed, same pattern as seed', !rankBleed);
   }
 
   // --- hexToRgb01 ------------------------------------------------------------

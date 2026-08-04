@@ -39,7 +39,11 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { buildSpecularSurfaceMaterial, SPECULAR_MASK_IMAGE_SCALE } from './specular-render.js';
+import {
+  buildSpecularSurfaceMaterial,
+  SPECULAR_MASK_IMAGE_SCALE,
+  SPECULAR_DEFAULT_ISLAND_SPREAD,
+} from './specular-render.js';
 import { keyLightDirection, describeSpecularMapping } from './specular-material.js';
 import { buildSpecularIslandPack } from './specular-islands.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
@@ -135,8 +139,12 @@ export function createSpecularSurfaceSubsystem({
    * Released immediately after: a full-resolution RGBA buffer is tens of MB and
    * nothing needs it once the labels are packed. */
   let pendingBytes = null;
-  /** The author's island spread, so a slider change can rebake. */
-  let islandSpread = 1;
+  /** The author's island spread, so a slider change can rebake. Bootstrap
+   * value only — overwritten by the first real sync below; imported rather
+   * than hand-typed so it can never silently drift from the shipped default
+   * (found unwired to ANY consumer, ROUND 18, 2026-08-03 — declared,
+   * exported, and used by nothing until this line). */
+  let islandSpread = SPECULAR_DEFAULT_ISLAND_SPREAD;
 
   const surface = buildSpecularSurfaceMaterial({
     THREE,
@@ -248,10 +256,34 @@ export function createSpecularSurfaceSubsystem({
    */
   function ensureMaskImage(floorIndex) {
     const url = getSpecularMaskUrl(floorIndex);
+    // ⚠️ THE VIEWED FLOOR HAS NO MASK OF ITS OWN — clear whatever an EARLIER
+    // floor left behind, rather than leaving it up. Live bug, 2026-08-03: this
+    // subsystem tracks exactly ONE floor's quad (`uFloorIndex01`, its geometry,
+    // its mask), set only when a NEW mask successfully loads. Without this
+    // branch, switching to a floor with no `_Specular` authored left the
+    // PREVIOUS floor's quad fully intact — visible, still sampling its own
+    // real mask (so `mask`/`tint`/`presence` keep reading real, plausible
+    // values, since floors share the same x,y footprint), but gated by
+    // `uFloorIndex01` for a floor that is no longer what `buf:scene.attr`
+    // reports at those pixels. `specular-render.js`'s floor gate then
+    // correctly refuses to draw — `floorMatch` reads 0 — and `strength` at any
+    // value changes nothing, which is indistinguishable from the effect being
+    // dead. Hiding the mesh here is the honest state: no `_Specular` is
+    // authored for what is actually on screen via the background-image path.
+    if (!url) {
+      if (loadedUrl !== null || contentBoundsWorld !== null) {
+        loadedUrl = null;
+        loadedFloor = -1;
+        contentBoundsWorld = null;
+        paddedBoundsUv = null;
+        refreshVisibility();
+      }
+      return;
+    }
     // Keyed on floor AS WELL AS url: two floors can legitimately share a file
     // path in a scene built by duplication, and re-reading the rect on a floor
     // switch is what keeps the mapping right when they do.
-    if (!url || loading || (url === loadedUrl && floorIndex === loadedFloor)) return;
+    if (loading || (url === loadedUrl && floorIndex === loadedFloor)) return;
     loading = true;
     const requestedFloor = floorIndex;
     loadMaskImage({ url, scale: SPECULAR_MASK_IMAGE_SCALE, channels: 'rgb' })
@@ -411,6 +443,9 @@ export function createSpecularSurfaceSubsystem({
       p.driftSpeed,
       p.pulse,
       p.sunBias,
+      p.sheenCeiling,
+      p.glintCeiling,
+      p.incidentSteepness,
       JSON.stringify(layerParams),
     ].join('|');
     if (key === lastParamsKey) return;
@@ -423,6 +458,9 @@ export function createSpecularSurfaceSubsystem({
     if (Number.isFinite(p.lightFloor)) surface.setLightFloor(p.lightFloor);
     if (Number.isFinite(p.parallaxStrength)) surface.setParallaxStrength(p.parallaxStrength);
     if (Number.isFinite(p.driftSpeed)) surface.setDriftSpeed(p.driftSpeed);
+    if (Number.isFinite(p.sheenCeiling)) surface.setSheenCeiling(p.sheenCeiling);
+    if (Number.isFinite(p.glintCeiling)) surface.setGlintCeiling(p.glintCeiling);
+    if (Number.isFinite(p.incidentSteepness)) surface.setIncidentSteepness(p.incidentSteepness);
     if (Number.isFinite(p.pulse)) surface.setPulse(p.pulse);
     if (Number.isFinite(p.sunBias)) surface.setSunBias(p.sunBias);
 
@@ -496,6 +534,9 @@ export function createSpecularSurfaceSubsystem({
          * This pass costs ~3 ms, ~5x its declared budget, and its per-pixel
          * shader is genuinely heavy — a 3x3x3 = 27-cell 3D Worley plus a 3D
          * Perlin plus three shimmer layers (9 hashes, 3 sin, 3 cos, 3 exp).
+         * ⚠️ Measured at three layers (2026-07-28); doubled to six Round 19
+         * (2026-08-03) — the per-pixel cost is now heavier still (18 hashes,
+         * 6 sin, 6 cos, 6 exp for the layer lattice alone), not re-measured.
          * With that per-pixel cost fixed, TOTAL cost is decided almost entirely
          * by COVERED PIXELS, which is exactly what `cropGeometry` exists to
          * minimise (this module's own header: "Effects.md Law 6: cost scales

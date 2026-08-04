@@ -112,9 +112,15 @@
  * reading a light buffer.
  *
  * TIER-0 SCOPE, documented rather than silently absent:
- *   - no elevation/roof occlusion of light (needs the SURFACE half of
- *     masks.occlusion, Regions-driven — not built anywhere in this project
- *     yet; same accepted gap as masks.occlusion's own note in vt-pan-viewer.js).
+ *   - HEIGHT/ELEVATION OCCLUSION OF LIGHT LANDED 2026-08-03 — see this file's
+ *     own "HEIGHT/ELEVATION GATE" section, further down. A light whose OWN
+ *     elevation is explicitly authored (Foundry's per-light `elevation`
+ *     field) no longer brightens a receiver placed meaningfully ABOVE it —
+ *     an untouched light (elevation 0, the schema default) reaches
+ *     everything, unchanged from before. Still open: Regions' own SURFACE
+ *     occlusion (masks.occlusion's roof/overhead-mask half) — a DIFFERENT
+ *     mechanism (an authored mask polygon, not a numeric height comparison),
+ *     not built anywhere in this project yet.
  *   - no coloration channel, no non-default coloration techniques, no
  *     animations, no darkness/negative sources, no global light — each its
  *     own later rung (Light-Parity.md §5).
@@ -131,6 +137,7 @@
 
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { createWindHandle } from '../../world/index.js';
+import { buildApertureGoboTerm } from './aperture-gobo-render.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
  * rather than a wind-inert light — see candle-flame-render.js's own identical
@@ -152,6 +159,134 @@ const TIER0_WIND_HANDLE = createWindHandle();
  * vt-pan-viewer.js is 3x this, i.e. the same edge-count assumption).
  */
 export const MAX_LIGHT_EDGES = 64;
+
+/**
+ * MIRRORS `vt/scene-attr.js#RECEIVER_ELEVATION_LEVELS`/`RANGE_UNITS` EXACTLY
+ * — see this module's own "HEIGHT/ELEVATION GATE" section for why these are
+ * a deliberate duplicate (avoiding a `vt/`<->`effects/` import cycle) rather
+ * than a shared import, and `point-light-illumination.test.mjs` for the
+ * cross-file pin that keeps the two from silently drifting apart.
+ *
+ * ⚠️ RANGE CUT 100→15 (2026-08-03) — see `vt/scene-attr.js`'s own copy of
+ * this constant for the live-report evidence (a real 4-5 unit gap leaked
+ * ~26% of a light through under the old, 10×-too-coarse range). MUST be
+ * changed in lockstep with that file's own value — that is the whole reason
+ * the cross-file pin test exists.
+ */
+export const RECEIVER_ELEVATION_LEVELS_MIRROR = 16;
+export const RECEIVER_ELEVATION_RANGE_UNITS_MIRROR = 15;
+
+/**
+ * Pushed as `uLightElevationRank` for a light whose RAW Foundry
+ * elevation reads as the schema default (0 — `AmbientLightDocument.
+ * elevation`'s own `initial`), i.e. "the author never touched this field".
+ * Far enough beyond `RECEIVER_ELEVATION_RANGE_UNITS_MIRROR` (15) that the
+ * height gate's own smoothstep saturates to 1 (full reach) with no special
+ * case needed — see this module's "HEIGHT/ELEVATION GATE" section for why
+ * that is a real correctness requirement (0 must stay available as a
+ * genuine "at my own floor's ground" height), not just tidiness.
+ */
+export const LIGHT_ELEVATION_UNCONFIGURED_SENTINEL = 1e6;
+
+/**
+ * What one floor's worth of within-floor height divides down to in rank space
+ * (see `elevationRank`). **`RANGE_UNITS / DIVISOR` plus the gate's whole
+ * tolerance+softness band must stay strictly below 1.0**, or a light sitting
+ * near the top of its own floor's band could reach across into the floor
+ * above — precisely the cross-floor bleed this gate exists to stop.
+ *
+ * That is not hypothetical: it was caught by this module's own "no height
+ * within a lower floor can reach ANY height on a higher floor" test, which
+ * FAILED at the first-draft divisor of `LEVELS` (16). There a full-height
+ * receiver reached 15/16 = 0.9375 and the tolerance band pushed it over 1.0
+ * exactly. Doubling the divisor halves the fraction's span (max 15/32 ≈
+ * 0.47) and leaves the band (4/32 = 0.125) a wide, provable margin — total
+ * worst case ≈ 0.59, comfortably under a whole floor. Doubling BOTH the
+ * fraction and the band together means within-floor behaviour is completely
+ * unchanged; only the cross-floor headroom grows.
+ */
+export const ELEVATION_RANK_FRACTION_DIVISOR = RECEIVER_ELEVATION_LEVELS_MIRROR * 2;
+
+/**
+ * How far ABOVE a light a receiver may still sit and stay FULLY lit, in
+ * world-elevation units within one floor. Small on purpose: the whole point
+ * of the gate is that a lantern's own cover (4-5 units over its flame) goes
+ * dark, so anything approaching that gap defeats it.
+ *
+ * A first live-tunable guess, like every constant in this file's history —
+ * `feedback_margin_sized_to_gap_is_self_defeating` is the lesson that set it
+ * this low, and the author's own 4-5 unit lantern gap is the number it was
+ * checked against.
+ */
+export const HEIGHT_GATE_TOLERANCE_UNITS = 1;
+
+/**
+ * The width of the fade band above `HEIGHT_GATE_TOLERANCE_UNITS` — a receiver
+ * `tolerance + softness` units above the light is fully dark. A soft band, not
+ * a razor edge, so quantization noise (±0.5 unit) softens a transition rather
+ * than flickering a light on/off across a texel boundary.
+ */
+export const HEIGHT_GATE_SOFTNESS_UNITS = 3;
+
+/**
+ * ============================================================================
+ * ⚠️ THE COMPARISON IS ABSOLUTE (FLOOR-INDEX-DOMINANT), NEVER FLOOR-RELATIVE
+ * ============================================================================
+ * **This is the 2026-08-03 ROUND-3 fix, and it replaces the model the first
+ * two rounds were built on. Read this before touching the gate again.**
+ *
+ * The first design expressed BOTH sides of the height comparison as "units
+ * above MY OWN floor's `elevationBottom`", reasoning (in `vt/scene-attr.js`'s
+ * own constant doc) that a basement at -40 and a tower floor at +400 "must
+ * quantize on the same scale". That reasoning is correct for the question
+ * `VegetationKind#passiveElevationFraction` answers — *where inside my own
+ * band do I sit* — and catastrophically wrong for the question THIS gate
+ * asks, which is inherently cross-floor: *is this light underneath the
+ * surface I am looking at*. Normalizing both sides to their own floor's
+ * ground ERASES the floor identity that is the entire signal.
+ *
+ * The author's live report is the proof, and the arithmetic is exact. A light
+ * at elevation -20 sitting on a basement floor spanning [-20, 0) resolves to
+ * `elevationAboveFloor = 0`. The floorboards of an upper floor spanning
+ * [5, 15) at elevation 5 ALSO resolve to `0`. The old gate then computed
+ * `smoothstep(0-1, 0+1, 0) = 0.5` — half of a deliberately blown-out light,
+ * which is still blown out — and painted an entire upper storey white through
+ * two floors of solid geometry. Every light in the scene read as though it
+ * stood on the ground of whatever floor the receiver happened to be on.
+ *
+ * The fix is a RANK that keeps the floor identity: `floorIndex + heightWithin
+ * Floor/LEVELS`. The fractional part is strictly < 1 by construction (a level
+ * maxes at `LEVELS-1`, divided by `LEVELS`), so **the floor index always
+ * dominates**: every floor-N surface outranks every floor-(N-1) surface no
+ * matter how the heights inside those bands compare. Both facts are ALREADY
+ * in `buf:scene.attr` and already trustworthy — R is the floor index (the
+ * same channel the LIVE multi-floor sun-shadow cascade gates on) and B bits
+ * 2-5 are the height. No new bits, no new buffer, no new derivation.
+ *
+ * What it buys, in the author's own three cases:
+ *   - lantern cover (tile 4-5 units over its flame, same floor) → the
+ *     fractional parts differ by ~0.25 rank, past tolerance+softness → DARK.
+ *   - basement light under an upper storey → ranks differ by ≥ 1 whole floor,
+ *     far past the fade band → DARK, regardless of the two heights.
+ *   - light streaming OUT of a ground-floor window, seen from above → outside
+ *     the building there is no upper floor, so `buf:scene.attr` records the
+ *     GROUND's own low rank at those pixels and the light passes → LIT. The
+ *     hole-stack model falls out for free; it was never special-cased.
+ *
+ * @param {number} floorIndex - `buf:scene.attr`.R, the receiver's/light's own
+ *   resolved floor index.
+ * @param {number} unitsAboveFloorBottom - world-elevation units above THAT
+ *   floor's own `elevationBottom` (clamped into the quantizer's range, so a
+ *   receiver far above its band saturates at "high within my floor" instead
+ *   of wrapping into the floor above's rank).
+ * @returns {number} the comparable rank.
+ */
+export function elevationRank(floorIndex, unitsAboveFloorBottom) {
+  const fi = Number.isFinite(floorIndex) ? Math.max(0, floorIndex) : 0;
+  const raw = Number.isFinite(unitsAboveFloorBottom) ? unitsAboveFloorBottom : 0;
+  const clamped = Math.max(0, Math.min(RECEIVER_ELEVATION_RANGE_UNITS_MIRROR, raw));
+  return fi + clamped / ELEVATION_RANK_FRACTION_DIVISOR;
+}
 
 /**
  * Steepness `K` of the windowed inverse-square falloff (see
@@ -344,6 +479,214 @@ export function computeEdgeSoftMarginNormalized(gridSizePixels, radius, edgeOffs
 }
 
 /**
+ * THE HEIGHT GATE AS A TSL NODE — the ONE implementation, shared by every
+ * material that draws a light.
+ *
+ * ⚠️ **SHARED ON PURPOSE, AND THE REASON IS A LIVE BUG (2026-08-03, round 5).**
+ * This started life inline inside `buildPointLightIlluminationMaterial`, and
+ * the consequence was immediate: a point light is drawn by TWO meshes sharing
+ * ONE geometry — the illumination mesh and `point-light-coloration.js`'s
+ * coloration mesh (the visible coloured/ANIMATED glow: torch, pulse, chroma,
+ * every entry in the animations registry). Fixing the gate in one of them left
+ * the other drawing straight through solid floors, which is exactly what the
+ * author saw and reported: *"You are now correctly occluding the light
+ * polygon. But you aren't correctly occluding the animated light source."*
+ * A gate that lives inside one of two twin materials is a gate half the light
+ * ignores. Extracted here so there is one place it can be wrong.
+ *
+ * ⚠️ TAKES `attrHere` — AN ALREADY-SAMPLED VALUE, NEVER THE RAW TEXTURE NODE.
+ * That signature is deliberate and load-bearing. Passing the bare
+ * `attrTexNode` is what caused rounds 1-3 to fail: its default uv is `uv()`,
+ * the MESH's coordinate, and a light's fan geometry has no `uv` attribute at
+ * all, so every fragment read one constant texel. Demanding a sampled vec4
+ * forces each caller to state where "here" is — and on a world-space light
+ * mesh the only correct answer is `attrTexNode.sample(screenUV)`, because
+ * `buf:scene.attr` is a screen-space buffer. See
+ * [[feedback_shared_texture_node_carries_the_wrong_uv]].
+ *
+ * ============================================================================
+ * ⚠️ ROUND 8 — WHY AN UNCONFIGURED LIGHT IS NOT ACTUALLY UNGATEABLE
+ * ============================================================================
+ * `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL` pushes `lo`/`hi` to ~1e6, so the
+ * FINE, tolerance-based comparison below provably never fires for a light
+ * whose elevation was never touched — by design, so a scene that predates
+ * this feature never regresses. Three earlier rounds fixed real bugs in HOW
+ * that comparison samples/shares its inputs, but every one of them still
+ * required BOTH the light's AND the receiver's elevation to be explicitly,
+ * numerically authored before anything happened — which is precisely the
+ * authoring burden the fine comparison exists to spare an unconfigured scene
+ * from, and precisely why a lantern housing tile that had never had its own
+ * elevation touched either stayed invisible to the gate no matter how
+ * obviously, visually "on top of" the light it was drawn.
+ *
+ * The fix is NOT another elevation constant. It is a SECOND, INDEPENDENT
+ * signal that needs no per-pair numeric authoring at all:
+ * `PRESENCE_BIT_OVERHEAD` (`vt/scene-attr.js`, bit 0) — "is this pixel's
+ * content a Level's own FOREGROUND layer, or a Tile explicitly raised into
+ * foreground territory". Level foreground art gets this AUTOMATICALLY, with
+ * ZERO extra authoring: `foundry/scene-layers.js`'s own level-item builder
+ * sets a foreground item's `key.elevation` to `elevation.top` VERBATIM — the
+ * Level's own, already-mandatory elevation band, not something this feature
+ * asks an author to add. A roof/ceiling painted as a Level's foreground layer
+ * (the common case for "this room has a roof") therefore ALREADY reads as
+ * overhead today, for every scene, whether or not any light nearby has ever
+ * had its own elevation touched.
+ *
+ * `PRESENCE_BIT_OCCLUDES_BACKGROUND` (bit 7) was considered and REJECTED for
+ * this same role: it is set by ANY Tile or Level foreground, including
+ * ordinary ground-level furniture and vegetation's own Case-1 host tile —
+ * gating on it would have made a torch mounted on a table, or a bush grown on
+ * a decorative tile, permanently unlit. `PRESENCE_BIT_OVERHEAD` is narrower
+ * and correct: it is true only when something's OWN elevation genuinely
+ * crosses into foreground/roof territory, which ordinary same-floor content
+ * does not do by accident.
+ *
+ * Combined with a straight AND (multiply): the fine comparison still gates a
+ * CONFIGURED light with the graduated tolerance vegetation needs (a canopy
+ * near the top of its floor vs. one halfway up); the overhead bit ADDITIONALLY
+ * hard-blocks ANY light — configured or not — under genuine roof/foreground
+ * content, with no numeric authoring required on either side.
+ *
+ * ============================================================================
+ * ⚠️ ROUND 9 (2026-08-04) — THE OVERHEAD BIT ALSO CARRIES A TILE'S OWN
+ * "RESTRICT LIGHTING" FLAG NOW, AND THIS FUNCTION DID NOT CHANGE AT ALL
+ * ============================================================================
+ * Live report: a lantern's cover Tile, "Restrict Lighting" ticked in Foundry,
+ * elevation meaningfully above its own light — still glowed straight through.
+ * Round 8's own numeric arithmetic was already provably correct for that
+ * exact pair (pinned as `point-light-illumination.test.mjs`'s own "LIVE CASE
+ * 1"); the bug was that `PRESENCE_BIT_OVERHEAD` only ever fired for content
+ * crossing a FLOOR's declared ceiling, never for the author's own explicit,
+ * per-Tile flag — Foundry's `tile.restrictions.light`
+ * (`common/documents/tile.mjs` in the vendored v14 source), which
+ * `foundry/scene-layers.js#collectTiles` already reads into
+ * `item.restrictsLight` and which sat completely unconsumed until now (see
+ * [[feedback_unconsumed_api_rots_silently]]).
+ *
+ * The fix lives entirely in `vt/scene-attr.js#computeFloorAttrValues` — the
+ * SAME bit, written one OR wider (`isInForeground(...) || (kind==='tile' &&
+ * restrictsLight)`), scoped to Tiles only so a Level's own background (which
+ * gets `restrictsLight: true` UNCONDITIONALLY, mirroring real Foundry) can
+ * never set the overhead bit on itself and black out every light on its own
+ * floor. This function and `computeHeightGate` below are UNCHANGED — they
+ * already treated the overhead bit as a hard, unconditional block; they had
+ * no way to know WHY it was set, and still don't need to.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.attrHere - the fragment's OWN `buf:scene.attr` texel, already
+ *   sampled (`attrTexNode.sample(screenUV)`).
+ * @param {*} args.uLightElevationRank - this light's `elevationRank` uniform,
+ *   or `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL`, which saturates the FINE
+ *   comparison to 1 with no branch (the overhead bit still applies).
+ * @returns {*} a float node in [0,1] to multiply into a falloff.
+ */
+export function buildHeightGateNode(TSL, { attrHere, uLightElevationRank }) {
+  const { float, floor, mod, smoothstep } = TSL;
+  // ⚠️ THE FLOOR INDEX (R) IS HALF THE COMPARISON — see `elevationRank`'s own
+  // doc for the live proof of what happens without it (a -20ft basement light
+  // and a +5ft upper storey both normalized to "0 above my own floor", and the
+  // gate passed 50% of a blown-out light through two solid floors). R is
+  // written by every real attr writer and is the SAME channel the live
+  // multi-floor sun-shadow cascade already gates on, so it is trustworthy.
+  // `+0.5` then `floor` is a round, not a truncate: an RGBA8 texel stores
+  // `index/255` exactly, but the float the sampler returns is not guaranteed
+  // to land exactly on it.
+  const receiverFloorIndex = floor(attrHere.r.mul(float(255)).add(float(0.5)));
+  const rawByte = attrHere.b.mul(float(255));
+  // Mirrors vt/scene-attr.js#decodeReceiverElevationLevel exactly:
+  // floor(mod(byte, 64) / 4) — strips bit 7 (occludes-background) via the mod,
+  // then bits 0-1 (overhead/reserved) via the integer divide, regardless of
+  // whether either is set.
+  const level = floor(mod(rawByte, float(64)).div(float(4)));
+  // The fraction must stay strictly below 1 (with the gate's whole band on top
+  // of it) so a floor's own top surface can never outrank the floor above it —
+  // see `ELEVATION_RANK_FRACTION_DIVISOR`. Mirrors `elevationRank`'s CPU twin.
+  const receiverRank = receiverFloorIndex.add(level.div(float(ELEVATION_RANK_FRACTION_DIVISOR)));
+  // An UNWRITTEN texel clears to (0,0,0,0) → rank 0 → below every real light →
+  // fully lit. Fail-open by construction, the required polarity here
+  // (`feedback_gate_polarity_must_fail_open`).
+  const lo = uLightElevationRank.add(float(HEIGHT_GATE_TOLERANCE_UNITS / ELEVATION_RANK_FRACTION_DIVISOR));
+  const hi = lo.add(float(HEIGHT_GATE_SOFTNESS_UNITS / ELEVATION_RANK_FRACTION_DIVISOR));
+  const fineGate = float(1).sub(smoothstep(lo, hi, receiverRank));
+  // PRESENCE_BIT_OVERHEAD — bit 0, the LOW bit, no shift needed beyond mod 2.
+  // A straight AND with the fine gate: genuine foreground/roof content blocks
+  // ANY light, configured or not (see this function's own header).
+  const overheadBit = mod(rawByte, float(2));
+  const overheadGate = float(1).sub(overheadBit);
+  return fineGate.mul(overheadGate);
+}
+
+/**
+ * THE CPU TWIN of the height/elevation gate (see `buildPointLightIllumination
+ * Material`'s own "HEIGHT/ELEVATION GATE" section) — Node-testable so the
+ * ARITHMETIC is verified before a live scene ever runs it
+ * (`feedback_smooth_output_hides_ported_bugs`: a smooth gate looks like
+ * something is happening even when the formula is subtly wrong). A plain
+ * smoothstep, no special case: the CALLER encodes "this light was never
+ * configured" by passing `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL` rather than
+ * this function branching on it — see that constant's own doc for why a
+ * branch here would have conflated two different zeros.
+ *
+ * ⚠️ BOTH ARGUMENTS ARE **RANKS** (`elevationRank`), not raw heights — see
+ * that function's own doc for why a raw floor-relative height provably could
+ * not answer this question. The polarity also INVERTED with that change: this
+ * is now `1 - smoothstep(...)` over the RECEIVER, because the thing being
+ * asked is "how far above the light has this surface climbed", and the
+ * fail-open direction has to stay "a receiver at or below the light is fully
+ * lit" (`feedback_gate_polarity_must_fail_open` — an unwritten `buf:scene
+ * .attr` texel decodes to rank 0, the lowest possible, and must read as
+ * PROCEED).
+ *
+ * @param {number} receiverRank - the RECEIVER's `elevationRank`, decoded from
+ *   `buf:scene.attr` (R = floor index, B bits 2-5 = height within it).
+ * @param {number} lightRank - the LIGHT's own `elevationRank`, or
+ *   `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL` (which pushes the whole fade band
+ *   far above any real receiver, saturating this half to 1 with no branch —
+ *   `receiverOverhead` below still applies regardless).
+ * @param {number} [toleranceUnits=HEIGHT_GATE_TOLERANCE_UNITS] - how far above
+ *   the light a receiver stays fully lit, in world units within a floor.
+ * @param {number} [softnessUnits=HEIGHT_GATE_SOFTNESS_UNITS] - the fade width.
+ * @param {number} [receiverOverhead=0] - truthy/1 when the receiver's own
+ *   `PRESENCE_BIT_OVERHEAD` is set (genuine Level foreground/roof content, a
+ *   Tile explicitly raised into foreground territory, or a Tile with
+ *   Foundry's own "Restrict Lighting" ticked — see this function's sibling
+ *   `buildHeightGateNode`'s own "ROUND 8"/"ROUND 9" headers for the full
+ *   reasoning). A straight AND with the fine comparison: hard-blocks ANY
+ *   light, configured or not, needing NO numeric elevation authored on
+ *   either side — the gap that left an unconfigured light immune to every
+ *   cover drawn over it, however obviously, visually "on top" in the art.
+ * @returns {number} 0..1, the fraction of this light's own falloff that
+ *   survives the height gate.
+ */
+export function computeHeightGate(
+  receiverRank,
+  lightRank,
+  toleranceUnits = HEIGHT_GATE_TOLERANCE_UNITS,
+  softnessUnits = HEIGHT_GATE_SOFTNESS_UNITS,
+  receiverOverhead = 0
+) {
+  const light = Number.isFinite(lightRank) ? lightRank : 0;
+  const receiver = Number.isFinite(receiverRank) ? receiverRank : 0;
+  // Tolerance/softness are authored in world units for readability; the
+  // comparison happens in rank space, where one floor is 1.0 and one
+  // quantization level (1 world unit at RANGE=15) is 1/LEVELS.
+  const tolerance = (Number.isFinite(toleranceUnits) ? toleranceUnits : 0) / ELEVATION_RANK_FRACTION_DIVISOR;
+  const softness = (Number.isFinite(softnessUnits) ? softnessUnits : 0) / ELEVATION_RANK_FRACTION_DIVISOR;
+  const lo = light + tolerance;
+  const hi = lo + softness;
+  let fine;
+  if (Math.abs(hi - lo) < 1e-9) {
+    fine = receiver > lo ? 0 : 1; // degenerate (zero) softness — a razor edge, not undefined
+  } else {
+    const t = Math.min(1, Math.max(0, (receiver - lo) / (hi - lo)));
+    fine = 1 - t * t * (3 - 2 * t); // 1 - smoothstep
+  }
+  const overheadGate = receiverOverhead ? 0 : 1;
+  return fine * overheadGate;
+}
+
+/**
  * The analytic soft-edge SDF — exact signed distance from a LOCAL-space
  * point to the light's own polygon boundary (negative = inside, positive =
  * outside), via the standard point-in-polygon-ray-cast + min-distance-to-
@@ -533,19 +876,40 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   same reason `sunShadowSlotNodes` is. Omitted with multiple slots present
  *   → falls back to slot 0 alone (no floor gating), the pre-multi-floor
  *   behaviour, rather than guessing which slot is "this light's own floor".
+ *   ALSO the height/elevation gate's one input (its B channel, presence bits
+ *   2-5 — see this module's own "HEIGHT/ELEVATION GATE" section): omitted →
+ *   that gate compiles out entirely too, same posture as the sun-shadow read.
  * @param {(TSL: *, args: object) => *} [args.blendSunVisibilityAcrossFloors] -
  *   injected from `environmental-light.js` (same DI convention specular/water
  *   already use for `buildOutdoorsGate`) — the ARITHMETIC per-slot blend; see
  *   its own header for why this must never be a `select()`/branch fold
  *   (`feedback_tsl_select_chain_strands_vars`).
+ * @param {number} [args.apertureCount=0] - APERTURE GOBO (round 10,
+ *   2026-08-04, `docs/planning/Aperture-Gobo.md` — a real Foundry wall's
+ *   own `light:PROXIMITY` aperture casting a mullioned-window pattern).
+ *   Graph-BUILD-TIME, like `falloffModel` — 0 compiles the whole gobo term
+ *   out entirely, byte-identical to before this param existed. See "THE
+ *   GOBO IS PART OF THIS LIGHT'S OWN FALLOFF" below for why this moved
+ *   in here instead of staying a separate post-process pass.
+ * @param {number} [args.apGoboCols] @param {number} [args.apGoboRows] -
+ *   `aperture-gobo-render.js#buildApertureGoboTerm`'s own unroll counts,
+ *   forwarded verbatim.
+ * @param {object} [args.apertureGoboShared] - `aperture-gobo-render.js#
+ *   createApertureGoboSharedUniforms`'s own return, ONE instance for the
+ *   whole pool, forwarded verbatim.
  * @returns {{material: *, uRatio: *, uAttenuationEased: *, uExposure: *,
  *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[],
  *   uSpeedRaw: (*|null), uReverseSign: (*|null), uSeed: (*|null),
  *   uIntensityRaw: (*|null), uWindCenter: (*|null), uWindExposure: (*|null),
- *   uWindResponse: (*|null)}}
+ *   uWindResponse: (*|null), uLightElevationRank: *, backgroundFloor: *,
+ *   combinedFalloff: *, finalColorExposed: *,
+ *   uApLampHeight: (*|null), apApertures: (Array|null)}}
  *   the four `u*` animation-config uniforms (and the three wind uniforms)
  *   are `null` when `animation` (or `windCenter`/`windExposure`) is absent —
- *   nothing for the caller to write.
+ *   nothing for the caller to write. `backgroundFloor`, `combinedFalloff` and
+ *   `finalColorExposed` are always real nodes (never null) — see this
+ *   function's own return statement. `uApLampHeight`/`apApertures` are
+ *   `null` when `apertureCount` is 0.
  */
 export function buildPointLightIlluminationMaterial({
   THREE,
@@ -563,6 +927,10 @@ export function buildPointLightIlluminationMaterial({
   sunShadowSlotNodes,
   attrTexNode,
   blendSunVisibilityAcrossFloors,
+  apertureCount = 0,
+  apGoboCols,
+  apGoboRows,
+  apertureGoboShared,
 }) {
   const {
     uniform,
@@ -577,8 +945,49 @@ export function buildPointLightIlluminationMaterial({
     length,
     positionLocal,
     positionWorld,
+    screenUV,
     select,
   } = THREE.TSL;
+
+  /**
+   * ============================================================================
+   * ⚠️ `buf:scene.attr` MUST BE SAMPLED WITH `screenUV` HERE. NEVER BARE.
+   * ============================================================================
+   * **This is the 2026-08-03 ROUND-4 fix, and it is the reason rounds 1-3 all
+   * failed on a real scene while every arithmetic trace looked perfect.**
+   *
+   * `attrTexNode` arrives from `environmental-light.js` as a plain
+   * `texture(attrTexture)` — a node with NO uv of its own, so it defaults to
+   * `uv()`, the MESH's own texture coordinate. That is correct for the
+   * environmental pass, which is a FULLSCREEN QUAD where `uv()` spans the
+   * screen. It is meaningless here: a point light draws a WORLD-SPACE fan
+   * whose geometry (`point-light-pool.js#createLightEntry`) sets exactly ONE
+   * attribute, `position` — **there is no `uv` attribute on a light mesh at
+   * all.** Every `attrTexNode.r`/`.b` read in this material was therefore
+   * sampling a constant, identical for every fragment of every light.
+   *
+   * Measured, not reasoned: the `floor-lighting` bench renders this exact
+   * material over a real three-floor building and varies ONLY the attr
+   * buffer. Before this fix its `the-frame-changes-at-all-between-floors`
+   * check reported **0.00% of pixels differ** — a byte-identical frame whether
+   * the fragment sat under a solid slab or under open sky. A gate cannot be
+   * "tuned" out of reading the wrong texel, which is why three rounds of
+   * margin/range/rank corrections downstream all changed nothing visible.
+   *
+   * `buf:scene.attr` is a SCREEN-space buffer (an MRT attachment on
+   * `scene.color`, sized in device px — `vt/scene-attr.js#describeSceneAttrMrt`),
+   * so the fragment's own texel is at `screenUV`. This is the identical
+   * technique the sibling COLORATION material — which shares this very
+   * geometry object — already uses and documents as "this project's own
+   * already-proven technique" (`point-light-coloration.js`, `texture(albedo
+   * Texture, screenUV)`), and which `light-visibility.js` states outright:
+   * *"`screenUV` is target/viewport-relative (not mesh-UV-relative)"*.
+   *
+   * Sampled ONCE and shared by both consumers below (the height gate and the
+   * per-floor sun-shadow blend) rather than sampled twice — one texel fetch,
+   * and no chance of the two disagreeing about where "here" is.
+   */
+  const attrHere = attrTexNode ? attrTexNode.sample(screenUV) : null;
 
   const uRatio = uniform(float(0.5));
   const uAttenuationEased = uniform(float(0.5));
@@ -758,8 +1167,76 @@ export function buildPointLightIlluminationMaterial({
   // correct. Needs a live A/B (screenshot with/without this line) to find
   // the real defect before it's safe to re-enable. Do NOT flip this back to
   // `falloff.mul(edgeSoftFactor)` without that live verification first.
-  const combinedFalloff = falloff;
+  let combinedFalloff = falloff;
   void edgeSoftFactor;
+
+  // ── HEIGHT/ELEVATION GATE (2026-08-03) ───────────────────────────────────
+  // Author: "tiles for the covers of lanterns... should be dark because they
+  // are above the light sources that make them" — and the same question
+  // asked of vegetation (`vt-pan-viewer.js`'s tree/bush overlay, whose own
+  // canopy height rides the SAME channel via `VegetationKind#
+  // passiveElevationFraction`, not its host tile's elevation).
+  //
+  // SAME SHAPE AS `falloff`/`edgeSoftFactor`, NOT aperture-gobo's deleted
+  // first design (see this file's own note just above for why that one was
+  // removed): this multiplies INTO `combinedFalloff`, so gating it to 0 only
+  // ever fades THIS light's own contribution back to `backgroundFloor` — the
+  // ambient floor MAX-blending already agrees on. It can never darken a
+  // fragment BELOW that floor, which is exactly what a light being too low
+  // to reach a receiver means (no contribution from THIS source, not
+  // "actively dark").
+  //
+  // `buf:scene.attr`'s presence bits 2-5 carry the TOPMOST drawable's own
+  // "how far above ITS OWN FLOOR's ground" it sits
+  // (`vt/scene-attr.js#RECEIVER_ELEVATION_LEVELS`/`RANGE_UNITS` — read that
+  // constant's own doc for the bit choice). Compiled out entirely with no
+  // `attrTexNode` (`tsl/no-uniform-gates`), same posture as the sun-shadow
+  // floor blend above.
+  //
+  // ⚠️ TWO PLACES DECODE THIS SAME PACKED VALUE. A direct import of
+  // `vt/scene-attr.js`'s constants would create a `vt/` <-> `effects/` CYCLE
+  // — `vt/scene-attr.js` already imports FROM `effects/` (`buildWorldSpace
+  // OutdoorsGate`), the one-way direction this codebase's layering relies
+  // on. So `RECEIVER_ELEVATION_LEVELS_MIRROR`/`_RANGE_UNITS_MIRROR` below are
+  // a deliberate duplicate, PINNED against the real constants in this
+  // module's own test — the same "two places store one number" shape as
+  // `SPECULAR_DEFAULT_SHIMMER_GAIN` vs `SPECULAR_PARAMS.shimmerGain.default`.
+  //
+  // ⚠️ THE SENTINEL LIVES IN THE VALUE, NOT A SEPARATE BRANCH. A first draft
+  // gated this arithmetically on "is the light's raw elevation exactly 0",
+  // but that conflates TWO different zeros: "the author never touched this
+  // light's elevation" and "the author deliberately placed it exactly at ITS
+  // OWN floor's ground" (real on any floor whose `elevationBottom` isn't 0 —
+  // a light legitimately AT elevation 20 on a floor spanning [20,30) has
+  // `elevationAboveFloor = 0`, same as an untouched one, and must NOT be
+  // silently un-gated). `LIGHT_ELEVATION_UNCONFIGURED_SENTINEL` sidesteps the
+  // ambiguity entirely: the caller (`point-light-pool.js`) pushes it ONLY
+  // when the light's RAW elevation reads as Foundry's schema default, and it
+  // is far enough beyond any real receiver height that the ordinary
+  // smoothstep below saturates to 1 (full reach) on its own — no separate
+  // "is configured" test, no `mix`, no `select()` chain
+  // (`feedback_tsl_select_chain_strands_vars`), and 0 stays available as a
+  // genuine, distinct "at my own floor's ground" height.
+  const uLightElevationRank = uniform(float(LIGHT_ELEVATION_UNCONFIGURED_SENTINEL));
+  if (attrHere) {
+    combinedFalloff = combinedFalloff.mul(buildHeightGateNode(THREE.TSL, { attrHere, uLightElevationRank }));
+  }
+
+  // APERTURE GOBO (docs/planning/Aperture-Gobo.md) used to multiply into
+  // THIS falloff, same family as `edgeSoftFactor` above — REMOVED 2026-08-03,
+  // the same day it shipped, after the first live scene showed why that home
+  // was structurally wrong: this material MAX-blends into `buf:scene.illum`,
+  // and a MAX blend can only ever brighten a fragment above whatever is
+  // already there — a term living INSIDE one light's own falloff can never
+  // darken a spot BELOW ambient, no matter how it's tuned, which is exactly
+  // why the pattern was invisible in daylight and barely visible even at
+  // night. A window's mullion pattern needs to behave like a genuine SHADOW
+  // — darkening the SHARED illumination directly, the same way the sun-
+  // shadow field already does — so it now lives in its own dedicated
+  // MULTIPLY-blended pass (`aperture-gobo-render.js#buildApertureShadowMaterial`,
+  // `point-light-pool.js`'s own `apertureShadowScene`), drawn AFTER point
+  // lights accumulate, not folded into any one light's own material. This
+  // file is deliberately apertures-UNAWARE again.
 
   // SUN-SHADOW ATTENUATION — see this module's own header for the two failed
   // per-light attempts and why this has to be per-FRAGMENT. `positionWorld.xy`
@@ -790,9 +1267,9 @@ export function buildPointLightIlluminationMaterial({
       return slot.texNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
     };
     const sunVis =
-      attrTexNode && blendSunVisibilityAcrossFloors
+      attrHere && blendSunVisibilityAcrossFloors
         ? blendSunVisibilityAcrossFloors(THREE.TSL, {
-            attrFloorIndex01: attrTexNode.r,
+            attrFloorIndex01: attrHere.r,
             slots: sunShadowSlotNodes.map((slot) => ({ sunVis: sampleSlot(slot), floorIndex01: slot.uFloorIndex01 })),
           })
         : // No attr texture (or no injected blend fn) to gate by floor — fall
@@ -801,8 +1278,82 @@ export function buildPointLightIlluminationMaterial({
     backgroundFloor = uBackgroundColor.mul(sunVis);
   }
 
+  // THE GOBO IS PART OF THIS LIGHT'S OWN FALLOFF (round 10, 2026-08-04) —
+  // NOT a separate pass drawn after this material MAX-blends. Three earlier
+  // rounds this SAME session tried a separate pass (`aperture-gobo-
+  // render.js#buildApertureShadowMaterial`, blend-toward-`backgroundFloor`
+  // on the ALREADY-composited buffer, then a second MULTIPLY pass for
+  // coloration) and both shared the identical, live-confirmed flaw: a live
+  // screenshot with the effect toggled off showed a light's own wedge
+  // crossing a building's own cast shadow with NO extra darkening —
+  // ordinary MAX behaviour. With the separate pass on, the SAME wedge grew
+  // a visibly darker rim, because `mix(backgroundFloor, dst, strengthed)`
+  // at a blocked fragment collapses to EXACTLY `backgroundFloor`, no matter
+  // how `dst` (the ALREADY-fully-composited scene) got to be bright — it
+  // could have been daylight, or a completely unrelated second light, and
+  // this light's own shadow would drag it down regardless. Author, in
+  // response: "parts of the effect which darken should never be able to
+  // survive a direct illumination from any other source. The sun would
+  // remove it and point lights would also remove it... treat the effect as
+  // a type of illumination but carefully mix it into the existing
+  // illumination."
+  //
+  // The fix is exactly that: multiply the gobo term into THIS light's own
+  // `combinedFalloff` BEFORE the mix below, so the material's SINGLE
+  // MAX-blend draw already reflects the pattern — no separate pass, nothing
+  // to drag the shared buffer down after the fact. At a blocked fragment
+  // (goboTerm=0): `mix(backgroundFloor, finalColorExposed, 0) =
+  // backgroundFloor` exactly — THIS light's own "as if I weren't here"
+  // colour — which then MAX-blends against whatever the sun/other lights
+  // already drew. If they were already brighter, MAX keeps THEM, unchanged
+  // — the shadow is invisible there, correctly, with no extra logic. If
+  // nothing else reaches that fragment (a dark room, an alley's own
+  // shadow), `backgroundFloor` becomes the visible result — a real,
+  // correctly-bounded shadow. This is the SAME property the
+  // visibility-gate machinery (rounds 1/2/3/5/6/7/8, `aperture-gobo.js#
+  // computeApertureShadowVisibility`) spent seven rounds trying to
+  // approximate from OUTSIDE the MAX-blend hierarchy — MAX-blending
+  // correctly gives it for free, which is why that machinery is retired
+  // alongside this change (see aperture-gobo.js's own header).
+  //
+  // Graph-BUILD-TIME gate (`apertureCount` is a JS integer, part of the
+  // material rebuild key, never a uniform — `tsl/no-uniform-gates`): a
+  // light with no apertures compiles NONE of this, byte-identical to
+  // before `apertureCount` existed as a param.
+  let combinedFalloffGoboed = combinedFalloff;
+  let uApLampHeight = null;
+  let apApertures = null;
+  if (apertureCount > 0) {
+    const goboResult = buildApertureGoboTerm({
+      THREE,
+      positionWorldXY: positionWorld.xy,
+      dist,
+      apertureCount,
+      cols: apGoboCols,
+      rows: apGoboRows,
+      shared: apertureGoboShared,
+    });
+    if (goboResult) {
+      // `uStrength` — a REAL bug, found live (2026-08-04): this mix was
+      // documented (`aperture-gobo-render.js#createApertureGoboSharedUniforms`'s
+      // own header, "applied by the CALLER... mixes the combined node
+      // toward 1 by 1-uStrength") but never actually WRITTEN — the uniform
+      // was created and updated every frame by `point-light-pool.js`, and
+      // simply never multiplied into anything, so "Pattern strength" did
+      // nothing regardless of its own value. `mix(1, node, uStrength)`:
+      // at uStrength=1 (default), `goboResult.node` passes through
+      // unchanged (byte-identical to before this fix); at 0, the gobo term
+      // is fully neutral (this light renders exactly as if it had no
+      // aperture at all), matching the schema's own documented meaning.
+      const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
+      combinedFalloffGoboed = combinedFalloff.mul(strengthedGobo);
+      uApLampHeight = goboResult.uLampHeight;
+      apApertures = goboResult.apertures;
+    }
+  }
+
   // FRAGMENT_END (illumination), audit §5c: mix(background, finalColor, depth).
-  const outputColor = mix(backgroundFloor, finalColorExposed, combinedFalloff);
+  const outputColor = mix(backgroundFloor, finalColorExposed, combinedFalloffGoboed);
 
   const material = new THREE.NodeMaterial();
   material.transparent = false;
@@ -826,6 +1377,11 @@ export function buildPointLightIlluminationMaterial({
     uEdgeCount,
     uEdgeSoftMargin,
     edgePoints,
+    // The height gate's ONE per-light input — see this module's own "HEIGHT/
+    // ELEVATION GATE" section. Always present (unlike the animation/wind
+    // uniforms), since the gate itself is cheap and its sentinel (0 = "no
+    // height authored") already makes an unset light a byte-identical no-op.
+    uLightElevationRank,
     uSpeedRaw,
     uReverseSign,
     uSeed,
@@ -833,5 +1389,24 @@ export function buildPointLightIlluminationMaterial({
     uWindCenter,
     uWindExposure,
     uWindResponse,
+    // This light's OWN "no contribution here" colour — `uBackgroundColor`,
+    // already attenuated by per-fragment sun-shadow visibility when slots are
+    // supplied (see "SUN-SHADOW ATTENUATION" above). Also `point-light-
+    // coloration.js`'s own gobo term's blend target — see that module's
+    // header for why coloration needs this same node, not just illum.
+    backgroundFloor,
+    // This light's own radial reach (0 at the dim edge, 1 at full strength),
+    // UNMODULATED by the gobo pattern (that multiply happens locally, just
+    // above, into `combinedFalloffGoboed` — never mutating the value
+    // returned here), and its true unshadowed colour.
+    combinedFalloff,
+    finalColorExposed,
+    // APERTURE GOBO (round 10) — `null` when this light has no apertures.
+    // `point-light-pool.js` writes the real per-aperture geometry into
+    // `apApertures`' own uniforms every frame, the same way it always wrote
+    // `aperture-gobo-render.js#buildApertureShadowMaterial`'s return before
+    // that function stopped owning the main material.
+    uApLampHeight,
+    apApertures,
   };
 }

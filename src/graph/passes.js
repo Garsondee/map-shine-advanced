@@ -309,7 +309,11 @@ export const PASSES = [
       'free here; no separate visibility work needed for point lights, only for the SUN. `live` means ' +
       'these terms run every frame against real Foundry data, NOT that the pass is complete — the ' +
       'other 12 coloration techniques, contrast/saturation/shadow adjustments, darkness sources, and ' +
-      "animations are later rungs (Light-Parity.md §5); elevation occlusion, the region system's own " +
+      'animations are later rungs (Light-Parity.md §5). ELEVATION OCCLUSION OF LIGHT landed 2026-08-03 ' +
+      "(point-light-illumination.js's height/elevation gate: a light whose OWN elevation is explicitly " +
+      "authored below a receiver's own height — a tile, or a vegetation canopy via its passiveElevation" +
+      "Fraction — no longer brightens it; an untouched light, Foundry's own elevation=0 default, reaches " +
+      "everything, so this needs no authoring on scenes that predate it). The region system's own " +
       "Clipper-CSG/elevation gate, the global light's OWN (currently colourless) coloration, and the " +
       "interaction between Global Illumination's floor and a region's own overwrite (region-darkness." +
       "js's own header names this last one precisely) are documented, accepted simplifications, not " +

@@ -58,6 +58,7 @@ import {
   CELL_SCALE_BRIGHT,
   SPECULAR_SHEEN_CEILING,
   SPECULAR_GLINT_CEILING,
+  SPECULAR_INCIDENT_STEEPNESS,
 } from './specular-pattern.js';
 import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
@@ -65,12 +66,24 @@ import { buildDebugChannelColor, pickEquals } from '../debug-channel-select.js';
 
 /**
  * Fraction of the authored file's resolution to upload for the SHIMMER's own
- * mask read. Half: `vt/mask-image.js`'s `'rgb'` mode uploads RGBA, four bytes
- * per texel, so half resolution here costs the same memory full resolution
- * costs water at one byte (~13 MB on a 10,650 × 4,950 map). A texel is then ~2
- * world px, comfortably under one screen pixel at play zoom.
+ * mask read.
+ *
+ * ⚠️ **RAISED 0.5 → 0.75 2026-08-03 (ROUND 16) — live report: "lower
+ * resolution than the main texture it's based off which looks ugly."** At 0.5
+ * a texel was ~2 world px; the main map art (`MASK_IMAGE_SCALE = 1` in
+ * `vt/mask-image.js`) uploads at native res, so the shimmer mask was visibly
+ * blockier than the surface it sits on. 0.75 brings a texel down to ~1.33
+ * world px — not yet a full match, but a middle ground, NOT full native (1.0):
+ * this mask is `'rgb'` (RGBA, four bytes per texel — the shimmer HSV decode in
+ * `specular-material.js` genuinely needs all three colour channels, unlike
+ * water's scalar-depth R8 mask), so cost scales with the SQUARE of this
+ * fraction × 4 bytes. On a 10,650 × 4,950 map that is ~53 MB at 0.5, ~119 MB at
+ * 0.75, and ~211 MB at 1.0 — a 4× jump from today for the last quarter of
+ * sharpness, against this project's own device-loss history on large maps
+ * (`keyhole-device-loss-large-map`). If 0.75 still reads as soft against the
+ * albedo, raising this to 1.0 is a one-number change, same as water's.
  */
-export const SPECULAR_MASK_IMAGE_SCALE = 0.5;
+export const SPECULAR_MASK_IMAGE_SCALE = 0.75;
 
 /**
  * Decode threshold for `buf:scene.attr`'s presence-bitfield TOP BIT
@@ -110,16 +123,58 @@ export const SPECULAR_MASK_IMAGE_SCALE = 0.5;
  */
 export const SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 = 64 / 255;
 
-/** How many shimmer layers. THREE, matching V2 — and the count is not
- * arbitrary: the relative motion BETWEEN layers at different parallax depths is
- * most of what sells "a highlight sweeping over a surface" rather than "a
- * texture painted on the map". Two layers reads flat; one reads as wallpaper. */
-export const SPECULAR_LAYER_COUNT = 3;
+/**
+ * How many shimmer layers. Matched V2 at THREE through Round 18; DOUBLED to
+ * SIX (Round 19, 2026-08-03) on direct request: *"double the number of things
+ * that are causing the shines to appear... focus on producing lots more that
+ * are configured at a smaller size so they produce small but bright
+ * sparkling regions."* Layers 0-2 are the original "broad sweep" set,
+ * unchanged; layers 3-5 are new, tuned for a finer, denser field (see
+ * `SPECULAR_LAYER_DEFAULTS`'s own per-layer comments).
+ *
+ * Safe to raise structurally: layers combine via MAX, not SUM (`buildShimmer
+ * Terms` in `specular-render.js` — "corrected 2026-07-27" — its own header),
+ * so an additional layer can only ever ADD a new place the field might light
+ * up, never compound brightness where an existing layer already fires. The
+ * relative motion BETWEEN layers at different parallax depths is most of what
+ * sells "a highlight sweeping over a surface" rather than "a texture painted
+ * on the map" — one layer reads as wallpaper, two reads flat; six reads as a
+ * genuinely busier, richer field.
+ *
+ * The per-layer ALU cost is real (`shimmerLayer` calls `anisotropicBlob`,
+ * itself several trig/hash ops) but it is NOT the dominant cost of this
+ * effect — the 27-cell Worley + Perlin cellular base runs ONCE regardless of
+ * layer count (`buildShimmerTerms`'s own header: "THE DOMINANT COST OF THE
+ * WHOLE EFFECT"). Doubling layer count roughly doubles the cheap ALU part of
+ * a C1-class pass, not the expensive C3-class texture-adjacent one.
+ */
+export const SPECULAR_LAYER_COUNT = 6;
 
 /** Defaults, mirroring `SPECULAR_PARAMS` — the single source of truth for the
  * values; the schema quotes them. A change lands in both or neither. */
-export const SPECULAR_DEFAULT_STRENGTH = 1;
-export const SPECULAR_DEFAULT_SATURATION = 1;
+/**
+ * ⚠️ RAISED 1 → 20 (ROUND 18, 2026-08-03) — THE FIRST LIVE-CONFIRMED VALUE
+ * THIS EFFECT HAS EVER SHIPPED. The author dialled this to its OWN MAX on a
+ * real scene, alongside the other Round 17 controls, and reported back "we
+ * have a basic specular effect working again" — a screenshot of the actual
+ * panel, not a request to try something. Shipping what worked, not a
+ * conservative fraction of it: an author who never opens this panel should
+ * see the effect the author actually confirmed, not a fainter version of it.
+ */
+export const SPECULAR_DEFAULT_STRENGTH = 20;
+/**
+ * ⚠️ RAISED FROM 1 TO 1.3 (ROUND 16, 2026-08-03) — now that the shader
+ * actually honours values past 1 (see the tint mix's own comment), a MODEST
+ * default oversaturation counteracts the global tonemap's known, measured
+ * desaturation-under-compression WITHOUT touching anything — an author who
+ * has never opened the Look panel now gets gold that survives brightening
+ * without bleaching, matching the "brighter but still vibrant" ask directly.
+ *
+ * ⚠️ RAISED AGAIN, 1.3 → 2 = THE SCHEMA'S OWN MAX (ROUND 18, 2026-08-03) —
+ * live-confirmed alongside `SPECULAR_DEFAULT_STRENGTH` above; see that
+ * constant's header for the standard this round ships by.
+ */
+export const SPECULAR_DEFAULT_SATURATION = 2;
 /**
  * THE PATTERN'S WORLD SIZE, in px per pattern unit. **16384, V2's own default,
  * and it is much larger than it looks.**
@@ -129,18 +184,36 @@ export const SPECULAR_DEFAULT_SATURATION = 1;
  * micro-glitter — the fine detail comes from the cellular base's
  * strength-driven cell count, not from the layer lattice. Anyone reaching for
  * "more sparkle" should raise `density`, not lower this.
+ *
+ * ⚠️ LOWERED 16384 → 6528 (ROUND 18, 2026-08-03) — live-confirmed; see
+ * `SPECULAR_DEFAULT_STRENGTH`'s header. A smaller pattern scale means MORE
+ * cells across the same map, i.e. a busier, finer field — the opposite
+ * direction from every earlier round's reasoning, and shipped anyway because
+ * the author's own dialled-in scene is the standard, not the doc comment.
  */
-export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 16384;
+export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 6528;
 /**
  * The master parallax gain. **1 = V2's measured ≈1:1 world-space slide**, i.e.
  * the shimmer is very nearly SCREEN-LOCKED and sweeps across the map as the
  * author pans, which is what a real reflection does and what a painted texture
  * conspicuously does not.
+ *
+ * ⚠️ RAISED 1 → 3 = THE SCHEMA'S OWN MAX (ROUND 18, 2026-08-03) —
+ * live-confirmed; see `SPECULAR_DEFAULT_STRENGTH`'s header.
  */
-export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 1;
-/** How far islands' hashed parallax may diverge. 1 = the full hashed range,
- * 0 = every island moves identically (exactly V2's behaviour). */
-export const SPECULAR_DEFAULT_ISLAND_SPREAD = 1;
+export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 3;
+/**
+ * How far islands' hashed parallax may diverge. 1 = the full hashed range,
+ * 0 = every island moves identically (exactly V2's behaviour).
+ *
+ * ⚠️ RAISED 1 → 2 = THE SCHEMA'S OWN MAX (ROUND 18, 2026-08-03) —
+ * live-confirmed; see `SPECULAR_DEFAULT_STRENGTH`'s header. Values above 1
+ * push islands' hashed parallax BEYOND the ±1 range each island's own hash
+ * naturally lands in (`specular-islands.js`'s own header covers the ±2
+ * bound this was designed against) — more per-object divergence than V2's
+ * range ever offered, not merely "the full range V2 had."
+ */
+export const SPECULAR_DEFAULT_ISLAND_SPREAD = 2;
 /**
  * The independent evolution's speed, in pattern units per second.
  *
@@ -149,8 +222,14 @@ export const SPECULAR_DEFAULT_ISLAND_SPREAD = 1;
  * scrolling. This is the author's "alive, camera leads": the camera stays the
  * dominant motion by an order of magnitude, and this keeps the surface from
  * ever being frozen.
+ *
+ * ⚠️ LOWERED TO EXACTLY 0 (ROUND 18, 2026-08-03) — live-confirmed; see
+ * `SPECULAR_DEFAULT_STRENGTH`'s header. At `parallaxStrength` now defaulting
+ * to its own max (above), camera pan alone is a great deal of motion — the
+ * author's own working scene has the idle drift switched off entirely, not
+ * merely slowed.
  */
-export const SPECULAR_DEFAULT_DRIFT_SPEED = 0.0025;
+export const SPECULAR_DEFAULT_DRIFT_SPEED = 0;
 /** Global brightness breathing, ± this fraction. Small on purpose: a visible
  * pulse reads as a shader, an imperceptible one reads as a surface. */
 export const SPECULAR_DEFAULT_PULSE = 0.06;
@@ -163,8 +242,17 @@ export const SPECULAR_DEFAULT_PULSE = 0.06;
  * the author's contrast request (the "dark parts stay dark" half is the
  * lowered sheen ceiling). V2 ran to ~16× and blew out through bloom, which is
  * a look worth having but not one to default all the way to.
+ *
+ * ⚠️ LOWERED 5.5 → 2.2 (ROUND 18, 2026-08-03) — live-confirmed; see
+ * `SPECULAR_DEFAULT_STRENGTH`'s header. The one control in this round's
+ * whole confirmed set that moved DOWN rather than up: with `sheenCeiling`
+ * now defaulting to 1 (its own header) rather than 0.15, the base shine
+ * alone carries far more of the look than it used to, so less shimmer
+ * modulation on top reads as the right balance on the author's real scene —
+ * not a contradiction of the reasoning above, a different equilibrium once
+ * a NEIGHBOURING term moved this same round.
  */
-export const SPECULAR_DEFAULT_SHIMMER_GAIN = 5.5;
+export const SPECULAR_DEFAULT_SHIMMER_GAIN = 2.2;
 /**
  * THE LIGHT FLOOR. **0, corrected DOWN from 0.18 (2026-07-27) on direct live
  * feedback: metal was reading as SELF-ILLUMINATING in genuinely dark rooms —
@@ -217,6 +305,74 @@ export const SPECULAR_DEFAULT_SUN_BIAS = 1;
  * streak control. `rowSpacing` is V2's "Elongation", which elongates nothing.
  * `contrast` is V2's "Cluster size", which is not a size. See
  * `specular-pattern.js`'s header for the algebra behind all three.
+ *
+ * ⚠️ **`contrast` RAISED FROM ~0.5-0.6 TO 0.8 ON ALL THREE LAYERS (ROUND 15,
+ * 2026-08-03)** — the actual fix for "either entirely ON or entirely OFF...
+ * we want gradients of brighter shiny metal which pierce through" (the
+ * SHEEN ceiling was tried first and reverted — see `SPECULAR_SHEEN_CEILING`'s
+ * own doc for why that was the wrong axis). `contrast` sets `shimmerLayer`'s
+ * smoothstep window (`lo/hi` in `specular-pattern.js#shimmerLayer` — "0 = a
+ * narrow window (sparse hard glints), 1 = a wide one (broad connected
+ * sheen)"): at the old ~0.5-0.6 defaults the shimmer/glint field measured, on
+ * a real gold-plate bench (Shader Lab, `bench-specular.js#gateLadder`), a
+ * MEAN under 5% of its own MAX — i.e. a sparse field of isolated bright dots
+ * over an otherwise near-zero surface, which is what reads as "binary" (a
+ * point is either a dot or it's nothing, no gradient between). At 0.8, the
+ * SAME bench on the SAME gold plate measured the mean rise to ~9-10% of max
+ * — roughly DOUBLING the "fill factor" — while the max itself stayed flat
+ * (~0.61-0.74 before and after), i.e. the pattern genuinely covers more of
+ * the surface with SOME visible response instead of just isolated hotspots,
+ * without blowing out the peaks any harder. Confirmed via the REAL shader on
+ * real WebGPU, not hand arithmetic — but still a first, reasoned value (not
+ * a swept optimum): 0.9+ was not verified due to a bench-interaction issue
+ * this round, so there may be more headroom left in this same direction.
+ * **This does NOT touch the SEPARATE "gold washes toward white" finding** —
+ * see `SPECULAR_SHEEN_CEILING`'s doc for that one (a property of the global
+ * tonemap's own built-in desaturation-under-compression, not this file).
+ *
+ * ⚠️ **LAYERS 3-5 ADDED (ROUND 19, 2026-08-03)** — direct request: "double
+ * the number of things that are causing the shines to appear... focus on
+ * producing lots more that are configured at a smaller size so that they
+ * produce small but bright sparkling regions." Layers 0-2 above are
+ * UNCHANGED — the original "broad sweep" set. Layers 3-5 are a second,
+ * distinct set: higher `density` (more, smaller cells — density scales the
+ * pattern-space frequency directly, so a higher value shrinks each cell's
+ * real-world footprint), tighter `rowSpacing` (rows packed closer together,
+ * for a denser field rather than widely-spaced lines), moderate `softness`
+ * (NOT the tightest possible — see the warning below on why), and `contrast`
+ * raised to 0.85 (above the already-fixed 0.8, for extra transition-width
+ * margin — see the analysis below).
+ *
+ * ⚠️ **WHY DENSITY IS MODERATE, NOT EXTREME — THE SAME REQUEST ALSO SAID
+ * "STRICTLY... NEVER... SHARP CLEAN DEFINED EDGES... CUT OFF ANGLES."** A
+ * smaller blob is not more likely to have a HARDER edge in the maths — the
+ * smoothstep transition is exactly as continuous at any size — but it IS
+ * physically compressed into fewer screen pixels, and past a certain point a
+ * GPU fragment shader cannot resolve a transition that has become narrower
+ * than roughly one pixel's footprint: that is ALIASING, and it looks exactly
+ * like a hard, jagged edge even though the underlying function never stopped
+ * being smooth. This project's OWN manifest already names this exact risk —
+ * `SPECULAR.deferredRungs.sparkle`: *"footprint-aware glint: count
+ * microfacets per pixel from fwidth(worldPos)... so sparkle RESOLVES with
+ * zoom instead of aliasing the way V2's fixed world lattice did."* That
+ * footprint-aware system is NOT built here — this is a scope-appropriate
+ * response to "more, smaller, no hard edges" within the EXISTING
+ * architecture's safe range, not the specialised anti-aliased microfacet
+ * rung. Density was chosen high enough to read as genuinely finer than
+ * layers 0-2, deliberately short of the extreme end where aliasing becomes
+ * likely at typical play zoom.
+ *
+ * ⚠️ **THE CONTRAST-WIDTH ANALYSIS, DONE PROPERLY.** `shimmerLayer`'s window
+ * is `[mix(0.55,0.08,c), mix(0.95,0.45,c)]` — its WIDTH in blob-VALUE space is
+ * nearly constant (~0.40 → ~0.37) across the whole contrast range, so
+ * contrast is NOT primarily a "how wide is the gradient" knob, it is a
+ * coverage knob (where in the blob's own falloff the ramp sits). But the blob
+ * itself is `exp(-r²·k)`, so the SPATIAL width of that same value-window
+ * (∝ √(-ln(lo)) − √(-ln(hi))) DOES grow with contrast: ≈0.55 at contrast 0,
+ * ≈0.70 at contrast 1 — a real, ~27% wider spatial transition at higher
+ * contrast, for the SAME softness. Raising the shipped default to 0.85 (and
+ * the schema's own minimum — see `specular.js`) banks that margin on every
+ * layer, existing and new, rather than only reasoning about it in a comment.
  */
 export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
   Object.freeze({
@@ -225,7 +381,7 @@ export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
     streak: 1.7,
     softness: 0.31,
     rowSpacing: 4,
-    contrast: 0.59,
+    contrast: 0.85,
     strength: 1,
     parallaxDepth: 1,
   }),
@@ -235,7 +391,7 @@ export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
     streak: 1.6,
     softness: 0.5,
     rowSpacing: 4,
-    contrast: 0.49,
+    contrast: 0.85,
     strength: 0.8,
     parallaxDepth: 0.5,
   }),
@@ -245,9 +401,40 @@ export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
     streak: 0.4,
     softness: 0.37,
     rowSpacing: 4,
-    contrast: 0.61,
+    contrast: 0.85,
     strength: 0.6,
     parallaxDepth: -0.5,
+  }),
+  // ── NEW, ROUND 19 — the "small, bright, sparkling" set ───────────────────
+  Object.freeze({
+    density: 26,
+    grainAngleDeg: 40,
+    streak: 0.6,
+    softness: 0.42,
+    rowSpacing: 2.5,
+    contrast: 0.85,
+    strength: 0.65,
+    parallaxDepth: 0.3,
+  }),
+  Object.freeze({
+    density: 32,
+    grainAngleDeg: 195,
+    streak: 0.5,
+    softness: 0.4,
+    rowSpacing: 2,
+    contrast: 0.85,
+    strength: 0.6,
+    parallaxDepth: -0.25,
+  }),
+  Object.freeze({
+    density: 20,
+    grainAngleDeg: 300,
+    streak: 0.9,
+    softness: 0.44,
+    rowSpacing: 3,
+    contrast: 0.85,
+    strength: 0.55,
+    parallaxDepth: 0.15,
   }),
 ]);
 
@@ -294,6 +481,9 @@ export function buildSpecularSurfaceMaterial({
   shimmerGain = SPECULAR_DEFAULT_SHIMMER_GAIN,
   lightFloor = SPECULAR_DEFAULT_LIGHT_FLOOR,
   sunBias = SPECULAR_DEFAULT_SUN_BIAS,
+  sheenCeiling = SPECULAR_SHEEN_CEILING,
+  glintCeiling = SPECULAR_GLINT_CEILING,
+  incidentSteepness = SPECULAR_INCIDENT_STEEPNESS,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -321,6 +511,7 @@ export function buildSpecularSurfaceMaterial({
     cos,
     sin,
     exp,
+    pow,
     floor,
     fract,
     // The engine's OWN linearisation, the same one `environmental-light.js`'s
@@ -346,6 +537,18 @@ export function buildSpecularSurfaceMaterial({
   const uShimmerGain = uniform(float(shimmerGain));
   const uLightFloor = uniform(float(lightFloor));
   const uSunBias = uniform(float(sunBias));
+  // ⚠️ ROUND 17 (2026-08-03) — these three were fixed internal constants
+  // through ROUND 16; promoted to live uniforms on direct request ("give me
+  // very high ranges to boost the brightness of it... I'll fine tune it")
+  // after the channel probe showed the shipped defaults crushing an
+  // ordinarily-lit point to a few thousandths of its EOTF'd brightness (see
+  // `SPECULAR_INCIDENT_STEEPNESS`'s own doc in `specular-pattern.js` for the
+  // arithmetic). Defaulting to the SAME constants means an unwired/older
+  // caller renders byte-identical to before — only a caller that now passes
+  // these explicitly (the subsystem, once wired) can move them.
+  const uSheenCeiling = uniform(float(sheenCeiling));
+  const uGlintCeiling = uniform(float(glintCeiling));
+  const uIncidentSteepness = uniform(float(incidentSteepness));
   /** Foundry's OWN readability floor (`ambient.darkness`, pulled toward black
    * by `darknessRealism01`) — see `setDarknessFloor` below for the full
    * account. Defaults to (0,0,0): a caller that never wires this gets the
@@ -411,7 +614,24 @@ export function buildSpecularSurfaceMaterial({
   // twice, once for being dark and once for being coloured.
   const luma709 = max(dot(maskSample.rgb, vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2])), float(1e-4));
   const colored = maskSample.rgb.mul(strengthNode.div(luma709));
-  const tint = mix(vec3(strengthNode, strengthNode, strengthNode), colored, min(uSaturation, float(1))).toVar(
+  // ⚠️ CLAMPED AT 1, NOT 2 — FOUND AND FIXED 2026-08-03 (ROUND 16). The FOH
+  // schema (`specular.js#SPECULAR_PARAMS.saturation`) has ALWAYS declared
+  // `max: 2` with help text that ALREADY promised *"above 1 pushes the colour
+  // further than you painted it"* — but this line silently discarded anything
+  // past 1, so that documented control was dead on arrival: no author-facing
+  // value could ever reach it. `mix(grey, colored, t)` for `t` in (1,2]
+  // legitimately EXTRAPOLATES past `colored` (further from grey in the SAME
+  // direction, i.e. genuine oversaturation, not a new formula) — this is
+  // exactly the seam-declared-but-unwired shape
+  // (`feedback_seam_default_hides_unwired`), just one line deeper than usual.
+  // NOW LOAD-BEARING for a SEPARATE reason (ROUND 15's tonemap finding): the
+  // global "Neutral" tonemap desaturates any pixel that enters its own
+  // compression zone, pulling every channel toward the SAME achromatic value
+  // by an amount independent of how saturated the input was — so a MORE
+  // saturated input survives that pull with MORE residual saturation than a
+  // less-saturated one. Oversaturating here is the direct, principled
+  // countermeasure to a KNOWN, measured downstream effect, not a blind boost.
+  const tint = mix(vec3(strengthNode, strengthNode, strengthNode), colored, min(uSaturation, float(2))).toVar(
     'specTint'
   );
 
@@ -579,17 +799,22 @@ export function buildSpecularSurfaceMaterial({
     ).toVar('specCellular');
 
     // ── COMBINE ────────────────────────────────────────────────────────────
-    // ⚠️ MAX, NOT SUM, ACROSS LAYERS — corrected 2026-07-27. A raw sum of three
-    // independently-firing layers STACKS wherever two or three happen to
-    // overlap (up to 3× the brightest single layer, right at the moment three
-    // patterns coincide), which is precisely where the composite is most likely
-    // to blow past what the shared tonemap can render without compressing —
-    // i.e. exactly the "washed out" hot spots the live report named. MAX takes
-    // the brightest contributor at each texel instead of stacking them, which
-    // is what makes three layers read as three DIFFERENT textures sharing one
-    // surface rather than three lights adding up on it. Non-overlapping regions
-    // (most of the area, since the layers sit at different parallax depths and
-    // grain angles) are UNCHANGED: `max(a, 0, 0) = a`, identical to `sum`.
+    // ⚠️ MAX, NOT SUM, ACROSS LAYERS — corrected 2026-07-27 (three layers at
+    // the time; six since Round 19, 2026-08-03 — the mechanism did not need
+    // to change to accept more of them). A raw sum of independently-firing
+    // layers STACKS wherever several happen to overlap (up to N× the
+    // brightest single layer, right at the moment they all coincide), which
+    // is precisely where the composite is most likely to blow past what the
+    // shared tonemap can render without compressing — i.e. exactly the
+    // "washed out" hot spots the live report named. MAX takes the brightest
+    // contributor at each texel instead of stacking them, which is what
+    // makes each layer read as its OWN distinct texture sharing one surface
+    // rather than N lights adding up on it — the same property that made it
+    // safe to DOUBLE the layer count later purely for more variety, with no
+    // re-tuning of the ceilings this composite feeds into. Non-overlapping
+    // regions (most of the area, since the layers sit at different parallax
+    // depths and grain angles) are UNCHANGED: `max(a, 0, 0, ...) = a`,
+    // identical to `sum`.
     let layeredTerm = shimmerLayer(layers[0]);
     for (let i = 1; i < SPECULAR_LAYER_COUNT; i++) layeredTerm = max(layeredTerm, shimmerLayer(layers[i]));
     const pulseNode = float(1)
@@ -625,7 +850,11 @@ export function buildSpecularSurfaceMaterial({
   // Every term above ran on EVERY pixel the quad covers and was then multiplied
   // by `coverage` (= `presence` x visibility) at the very end — so on this
   // scene roughly 70% of shaded pixels paid a 27-cell Worley, a 3D Perlin and
-  // three shimmer layers to be multiplied by exactly zero.
+  // three shimmer layers to be multiplied by exactly zero. ⚠️ Measured at
+  // three layers (2026-07-28); the layer count doubled to six Round 19
+  // (2026-08-03) — the GATE below still skips the whole cost regardless of
+  // how many layers exist, but the absolute ms figure has not been
+  // re-measured against six.
   //
   // ⚠️ WHY THE GATE HAD TO MOVE THE MATHS INSIDE `Fn()`, NOT JUST WRAP IT.
   // `specularMaterial.colorNode` is a FLAT node graph, and TSL's `If()` is a
@@ -753,6 +982,34 @@ export function buildSpecularSurfaceMaterial({
   // deviation, not the safeguard.
   const incident = sRGBTransferEOTF(incidentRaw).toVar('specIncident');
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // ⚠️ A SEPARATE, ARTISTIC GATE — NOT ANOTHER EXPONENT ON `incident` ITSELF.
+  // ═══════════════════════════════════════════════════════════════════════
+  // ROUND 16 (2026-08-03), live report: "we only get a specular shine in the
+  // brighter areas of the map, near candles, point lights or outside at
+  // noon. Shadows and lack of light should suppress the specular shine."
+  //
+  // `incident` above MUST stay exactly `EOTF(illumAboveFloor)` — its own
+  // header explains why: that is the unique value that keeps metal's
+  // brightness response synchronised with how the REST of the frame renders
+  // under the same light, and "do not reintroduce a free exponent here"
+  // means exactly this term. This is a DIFFERENT thing: a later, stylistic
+  // multiplier — the same relationship the ceilings below already have to
+  // the composite — that reads `incident` and decides how much of the
+  // SHINE EFFECT's own highlight to let through, not how bright the pixel
+  // physically is. `steepenIncidentRgb`'s own header in `specular-pattern.js`
+  // has the full account, including why this is luminance-scaled rather than
+  // per-channel (a colour-fidelity guard, not a brightness one).
+  const incidentLuma = max(dot(incident, vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2])), float(1e-6)).toVar(
+    'specIncidentLuma'
+  );
+  const incidentLumaClamped01 = min(incidentLuma, float(1));
+  const incidentLumaExcess = max(incidentLuma.sub(float(1)), float(0));
+  const steepenedLuma = pow(incidentLumaClamped01, uIncidentSteepness)
+    .add(incidentLumaExcess)
+    .toVar('specSteepenedLuma');
+  const shineResponse = incident.mul(steepenedLuma.div(incidentLuma)).toVar('specShineResponse');
+
   // ── THE FLOOR GATE ───────────────────────────────────────────────────────
   // A JS-time branch: with no attr texture the whole lookup is compiled OUT
   // rather than multiplied by a one (`tsl/no-uniform-gates`).
@@ -836,11 +1093,16 @@ export function buildSpecularSurfaceMaterial({
   // the GLOBAL tonemap, invisibly to this pass. The split's shape (two
   // ceilings) was right; the sheen number alone wasn't low enough to leave
   // the glint any headroom.
-  const sheenRaw = tint.mul(incident).mul(uStrength).mul(coverage).toVar('specSheenRaw');
-  const sheen = ceilingCompress(sheenRaw, float(SPECULAR_SHEEN_CEILING)).toVar('specSheen');
+  const sheenRaw = tint.mul(shineResponse).mul(uStrength).mul(coverage).toVar('specSheenRaw');
+  const sheen = ceilingCompress(sheenRaw, uSheenCeiling).toVar('specSheen');
 
-  const glintRaw = tint.mul(shimmer.mul(uShimmerGain)).mul(incident).mul(uStrength).mul(coverage).toVar('specGlintRaw');
-  const glint = ceilingCompress(glintRaw, float(SPECULAR_GLINT_CEILING)).toVar('specGlint');
+  const glintRaw = tint
+    .mul(shimmer.mul(uShimmerGain))
+    .mul(shineResponse)
+    .mul(uStrength)
+    .mul(coverage)
+    .toVar('specGlintRaw');
+  const glint = ceilingCompress(glintRaw, uGlintCeiling).toVar('specGlint');
 
   const shine = sheen.add(glint).toVar('specShine');
 
@@ -934,7 +1196,7 @@ export function buildSpecularSurfaceMaterial({
     ),
     floorGate: debugFloorGate,
     outdoors: vec3(outdoors, outdoors, outdoors),
-    illum: incident,
+    illum: shineResponse,
     cellular: vec3(cellular, cellular, cellular),
     shimmer: vec3(shimmer, shimmer, shimmer),
     sheen,
@@ -949,8 +1211,9 @@ export function buildSpecularSurfaceMaterial({
     ),
     // ── THE ISOLATION CHANNEL (19) — a control, and it EARNED ITS KEEP ───────
     //
-    // ⚠️ WHAT IT PROVED (2026-07-27): channel 12 (`illum`, through the shared
-    // node chain) read exactly 0 at three points while THIS channel — the SAME
+    // ⚠️ WHAT IT PROVED (2026-07-27): channel 10 (`illum`, through the shared
+    // node chain — numbered 12 at the time, renumbered since) read exactly 0
+    // at three points while THIS channel — the SAME
     // texture, the SAME `screenUv`, through a FRESH unshared node — read 0.866
     // / 0.189 / 0.188, correct and varying. That single comparison killed the
     // "no texture reaches this pass" theory outright and localised the fault to
@@ -1098,6 +1361,28 @@ export function buildSpecularSurfaceMaterial({
     },
     setSunBias(v) {
       uSunBias.value = Math.min(1, Math.max(0, v));
+    },
+    /** How brightly the always-on base (no shimmer) may peak before
+     * `ceilingCompress` reins it in. No upper clamp: a caller pushing this
+     * far past the tonemap's own compression threshold gets exactly the
+     * blown-out, saturating look that implies — not a hidden second ceiling
+     * fighting the one just requested. @param {number} v */
+    setSheenCeiling(v) {
+      uSheenCeiling.value = Math.max(0, v);
+    },
+    /** How brightly the shimmer's own contribution may peak. @param {number} v */
+    setGlintCeiling(v) {
+      uGlintCeiling.value = Math.max(0, v);
+    },
+    /** How sharply the shine fades through dim/shadowed light before it
+     * reaches the composite (`steepenIncidentRgb`'s own header has the
+     * design). Floored well above 0, never at it: a `pow()` exponent at or
+     * below 0 either divides by a vanishing base (negative) or degenerates
+     * to a flat 1 regardless of how dark the pixel is (exactly 0) — both are
+     * a real blow-up, not a stylistic extreme, so this keeps the knob inside
+     * the region where the curve stays a curve. @param {number} v */
+    setIncidentSteepness(v) {
+      uIncidentSteepness.value = Math.max(0.05, v);
     },
     setLayerDensity(i, v) {
       eachLayer(i, (L) => (L.uDensity.value = Math.max(0.25, v)));

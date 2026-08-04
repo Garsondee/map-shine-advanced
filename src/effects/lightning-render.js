@@ -60,6 +60,7 @@
 
 import { createWindHandle } from '../world/index.js';
 import { simplexFloat } from './lighting/animations/tsl-noise-toolkit.js';
+import { buildHeightGateNode } from './lighting/point-light-illumination.js';
 
 /** Bake-less fallback handle — organic gust/flutter noise only, no baked
  * openness/wall-avoidance field. Mirrors candle-flame-render.js's own
@@ -92,6 +93,9 @@ const DIRECT_ATTRS = Object.freeze([
  * ⚠️ 2026-08-01, caught LIVE via Shader Lab (the exact class of catch that
  * tool exists for — see docs/planning/Shader-Lab.md's own "first real use"):
  * this file's original shape set 12 SEPARATE attributes (3 vec3 + 9 scalar).
+ * (`strandBakeB` was widened vec3→vec4 on 2026-08-03 to fold in the height
+ * gate's `elevationRank` — see `lightning-geometry.js#computeLightningStrand
+ * Arrays`'s own doc — staying at 6 total buffers rather than opening a 7th.)
  * The real WebGPU render pipeline failed to COMPILE — "Vertex buffer count
  * (12) exceeds the maximum number of vertex buffers (8)" — so the bolt mesh
  * never drew a single pixel, on real hardware, despite every Node test
@@ -107,7 +111,7 @@ const DIRECT_ATTRS = Object.freeze([
 const PACKED_ATTRS = Object.freeze([
   ['sideUv', 2, ['side', 'uvOffset']],
   ['strandBakeA', 4, ['spawnMs', 'durationMs', 'seed', 'leaderFrac']],
-  ['strandBakeB', 3, ['restrikeCount', 'baseIntensity', 'widthScale']],
+  ['strandBakeB', 4, ['restrikeCount', 'baseIntensity', 'widthScale', 'elevationRank']],
 ]);
 
 /** Interleave `keys.length` same-length source arrays into one packed
@@ -184,13 +188,23 @@ export function refillLightningGeometry(THREE, geometry, arrays) {
  * and returned for the caller to drive every frame — the same "uniforms out,
  * .value per frame" contract candle's `buildCandleFlameMaterial` uses.
  *
- * @param {{THREE:*, uGlobalTimeMs:*, quality?:number, windHandle?:object}} args
+ * @param {{THREE:*, uGlobalTimeMs:*, quality?:number, windHandle?:object, attrTexNode?:*}} args
  *   `quality` (default 2) graph-build-time gates the core-static crackle term
  *   (Effects.md Law 4: a tier that's off must never be constructed) — below 2
  *   skips constructing it entirely, never just multiplies it by zero.
+ *   `attrTexNode` — `buf:scene.attr`, UNSAMPLED — wires the SAME height/
+ *   elevation gate a point light and the candle flame use
+ *   (`point-light-illumination.js#buildHeightGateNode`); omit it for a bolt
+ *   that ignores floor occlusion entirely (byte-identical pre-gate behaviour).
  * @returns {{material:*, uniforms: Record<string, *>}}
  */
-export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, windHandle = TIER0_WIND_HANDLE }) {
+export function buildLightningMaterial({
+  THREE,
+  uGlobalTimeMs,
+  quality = 2,
+  windHandle = TIER0_WIND_HANDLE,
+  attrTexNode,
+}) {
   const {
     Fn,
     uniform,
@@ -211,6 +225,7 @@ export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, wind
     sin,
     exp,
     normalize,
+    screenUV,
   } = THREE.TSL;
 
   const uWidth = uniform(float(30));
@@ -239,10 +254,11 @@ export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, wind
   const strandDurationMs = strandBakeA.y;
   const strandSeed = strandBakeA.z;
   const strandLeaderFrac = strandBakeA.w;
-  const strandBakeB = attribute('strandBakeB', 'vec3');
+  const strandBakeB = attribute('strandBakeB', 'vec4');
   const strandRestrikeCount = strandBakeB.x;
   const strandBaseIntensity = strandBakeB.y;
   const strandWidthScale = strandBakeB.z;
+  const strandElevationRank = strandBakeB.w;
 
   /** Cubic smoothstep of an already-clamped-at-0 ratio — the shader twin of
    * lightning-geometry.js's own `smooth01`. */
@@ -264,6 +280,7 @@ export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, wind
   const vLeaderFrac = strandLeaderFrac.toVarying('vLightningLeaderFrac');
   const vRestrikeCount = strandRestrikeCount.toVarying('vLightningRestrikeCount');
   const vBaseIntensity = strandBaseIntensity.toVarying('vLightningBaseIntensity');
+  const vElevationRank = strandElevationRank.toVarying('vLightningElevationRank');
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -324,6 +341,31 @@ export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, wind
     const growth = smooth01(t.div(leaderFrac));
     const nowS = uGlobalTimeMs.mul(float(0.001));
 
+    // ⚠️ 2026-08-01, LIVE BUG (author: "a branch will appear entirely black,
+    // then fill in" / "Bloom blacks out the area in pure black squares") —
+    // ROOT CAUSE, reproduced directly against this exact `mx_noise_float`
+    // call: `vSeed` carries the strand's raw baked uint32 seed AS-IS (up to
+    // ~4.29e9 — lightning-geometry.js's own seeds are full-range hashes, no
+    // different from `hashStringToSeed`'s output anywhere else in this
+    // effect). Fed straight into a noise coordinate, that magnitude measurably
+    // breaks `mx_noise_float`: verified live, `mx_noise_float(vec2(3502423040
+    // + 0.618, 0.382))` returns NaN while the identical call with `12345.6`
+    // returns a real value. NaN then poisons the WHOLE additively-blended
+    // fragment (both flickerMul() calls below run for every fragment, in
+    // both envelope branches) — a strand's own seed decided, per burst,
+    // whether it rendered at all, which is exactly the "sometimes" the
+    // author reported. Independent of Bloom entirely: the NaN lands in
+    // scene.lit before Bloom ever reads it; Bloom's blur/downsample chain
+    // only SPREADS one already-NaN pixel into the visible blocky region
+    // ("pure black squares") — see keyhole-vertex-buffer-limit-fix.md's
+    // sibling memory note for the full mechanism.
+    //
+    // Fix: normalize to a SMALL, noise-safe magnitude before use — the exact
+    // same pattern lightning-geometry.js's own JS-side flicker already uses
+    // (`seedToUnitFloat(strand.seed) * 41.3`, computeOriginFlashVisualMul) —
+    // never feed a raw hash/seed integer into a trig-based noise coordinate.
+    const seedPhase = vSeed.mul(float(1 / 4294967296)).mul(float(100));
+
     /** Deterministic, continuous flicker approximation — see this file's own
      * header for why it is not bit-identical to lightning-geometry.js's
      * flickerMultiplier (an exact integer hash, not shader-friendly here). */
@@ -331,13 +373,13 @@ export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, wind
       const tick = nowS.mul(float(tickHz)).floor();
       const roll = simplexFloat(
         THREE.TSL,
-        vec2(vSeed.add(float(salt)).add(tick.mul(float(0.618))), tick.mul(float(0.382)))
+        vec2(seedPhase.add(float(salt)).add(tick.mul(float(0.618))), tick.mul(float(0.382)))
       )
         .mul(float(0.5))
         .add(float(0.5));
       const depth = simplexFloat(
         THREE.TSL,
-        vec2(vSeed.add(float(salt + 91.7)).add(tick.mul(float(0.382))), tick.mul(float(0.618)))
+        vec2(seedPhase.add(float(salt + 91.7)).add(tick.mul(float(0.382))), tick.mul(float(0.618)))
       )
         .mul(float(0.5))
         .add(float(0.5));
@@ -394,6 +436,31 @@ export function buildLightningMaterial({ THREE, uGlobalTimeMs, quality = 2, wind
     alpha = alpha.mul(vTipFade);
     alpha = alpha.mul(growthMask);
     alpha = alpha.mul(mix(float(0.45), float(1), growth));
+
+    // ============================================================================
+    // THE HEIGHT/ELEVATION GATE — the SAME node point-light and candle-flame
+    // materials use. Multiplied into ALPHA (not just rgb): this material is
+    // AdditiveBlending, so an un-gated alpha would keep punching a lit value
+    // into the scene even with colour zeroed elsewhere
+    // (`feedback_blend_neutral_element_is_per_blend`).
+    //
+    // ⚠️ `screenUV`, never the bare node — `buf:scene.attr` is SCREEN-space
+    // and this is a WORLD-space ribbon mesh with no meaningful mesh uv of its
+    // own (`feedback_shared_texture_node_carries_the_wrong_uv`).
+    //
+    // `vElevationRank` is a per-STRAND varying (`generateBurst`'s own doc for
+    // why: a branch inherits its parent's floor, a fresh strike gets its own),
+    // never a uniform — this mesh batches every active strand into one draw.
+    // A JS-time branch: with no `attrTexNode` this material is byte-identical
+    // to before the gate existed.
+    if (attrTexNode) {
+      alpha = alpha.mul(
+        buildHeightGateNode(THREE.TSL, {
+          attrHere: attrTexNode.sample(screenUV),
+          uLightElevationRank: vElevationRank,
+        })
+      );
+    }
 
     let col = mix(uOuterColor, uCoreColor, core);
     col = mix(col, vec3(1, 1, 1), smoothstep(float(0.55), float(1), intensity));

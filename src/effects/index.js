@@ -63,7 +63,7 @@ export { SUN_SHADOW_DEBUG_VIEWS, sunShadowDebugPaints, sunShadowDebugView } from
 // THE POINT-LIGHT POOL — extraction step 3 of docs/planning/
 // VT-Pan-Viewer-Extraction.md. The mesh pool, its two dedicated scenes, the
 // candle wall-clip cache, and the per-frame reconcile.
-export { createPointLightPool } from './lighting/point-light-pool.js';
+export { createPointLightPool, resolveAnchorElevationRank } from './lighting/point-light-pool.js';
 export {
   buildEnvironmentalLightMaterials,
   blendSunVisibilityAcrossFloors,
@@ -83,6 +83,8 @@ export {
   writeLightEdgePoints,
   computeEdgeSoftMarginNormalized,
   MAX_LIGHT_EDGES,
+  LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
+  ELEVATION_RANK_FRACTION_DIVISOR,
 } from './lighting/point-light-illumination.js';
 export { buildPointLightColorationMaterial, computeColorationAlpha } from './lighting/point-light-coloration.js';
 // ── ANIMATED LIGHTS (docs/planning/Light-Parity.md §5's last item;
@@ -400,6 +402,14 @@ export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset } from './bloom.js';
 // (the bake + the decision-to-rebake; the viewer only supplies the two
 // GPU-touching callbacks — see that module's own §3).
 export { SUN_SHADOWS, SUN_SHADOW_PARAMS } from './sun-shadows.js';
+// APERTURE GOBO (docs/planning/Aperture-Gobo.md) — the effect DECLARATION;
+// its runtime is lighting/aperture-gobo.js (the pure CPU projection math)
+// plus lighting/aperture-gobo-render.js (the TSL transcription), consumed
+// directly by lighting/point-light-pool.js — there is no separate subsystem
+// module the way sun-shadows has one, because this effect owns no bake, no
+// render target, and no rebake decision of its own.
+export { APERTURE_GOBO, APERTURE_GOBO_PARAMS, APERTURE_GOBO_DEBUG_CHANNELS } from './aperture-gobo.js';
+export { createApertureGoboRegistration } from './aperture-gobo-registration.js';
 export { buildBloomMaterials } from './bloom-render.js';
 // The candle RUNTIME (candle-flame-render.js's header explains why a candle is
 // a billboard + a light, not a particle): pure geometry/colour/light-source math

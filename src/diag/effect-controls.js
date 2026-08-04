@@ -493,6 +493,16 @@ function shieldFromSummary(el) {
  *   instance). Rendered in the collapsed header so it is reachable without
  *   opening anything.
  * @param {HTMLElement[]} [args.extra] - additional elements after the FOH strip.
+ * @param {HTMLElement[]} [args.extraAdvanced] - additional STRUCTURED content
+ *   mounted inside Advanced, after the categorised ROH groups and before
+ *   Diagnostics. Opaque elements — this module never inspects them, the same
+ *   contract `diagnostics` has. For content that is a real param (any
+ *   `schema` key) this is the WRONG door — it belongs in `schema`/`fohKeys`
+ *   like everything else, so it gets one live control rather than a
+ *   hand-built second one. This exists for content a flat params schema
+ *   cannot express at all — a REPEATED per-instance strip (specular's three
+ *   shimmer layers, `SPECULAR_LAYER_PARAMS` — one schema, three independent
+ *   sets of live values, which is not what one flat `schema` object holds).
  * @param {HTMLElement[]} [args.diagnostics] - this effect's probes and status
  *   reports, mounted inside Advanced. Opaque elements — this module never
  *   inspects them, the same contract `extra` has. The panel builds them and
@@ -514,6 +524,7 @@ export function buildEffectCard({
   onToggleEnabled,
   add,
   extra,
+  extraAdvanced,
   diagnostics,
 }) {
   if (typeof id !== 'string' || id.length === 0) {
@@ -639,10 +650,11 @@ export function buildEffectCard({
 
   const roh = rohGroups(schema, fohKeys);
   const diags = diagnostics ?? [];
+  const extraAdv = extraAdvanced ?? [];
   // An effect whose every param was promoted to FOH and which has no diagnostics
   // has nothing to disclose — window light rendered an EMPTY "Advanced ▾" for
   // exactly that reason from the day its 2-key schema landed.
-  if (roh.length > 0 || diags.length > 0) {
+  if (roh.length > 0 || diags.length > 0 || extraAdv.length > 0) {
     const advKey = `${id}:advanced`;
     const details = document.createElement('details');
     details.open = sections.isOpen(advKey);
@@ -673,6 +685,12 @@ export function buildEffectCard({
       }
       rohBody.append(groupWrap);
     }
+
+    // STRUCTURED CONTENT NO FLAT SCHEMA CAN HOLD — see this prop's own JSDoc.
+    // Appended as-is, one per element: unlike `roh`/`diags` this is not a
+    // uniform list of same-shaped controls, so there is no single wrapping
+    // row to build here — each element is responsible for its own layout.
+    for (const el of extraAdv) rohBody.append(el);
 
     // THIS EFFECT'S OWN INSTRUMENTS, in the effect's own card. They lived in the
     // Lab's catch-all "More" drawer until 2026-07-27 — a rail click away from the

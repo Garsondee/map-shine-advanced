@@ -46,7 +46,7 @@
  */
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { buildOutdoorsGate, buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
-import { buildSpecularSurfaceMaterial } from '../specular-render.js';
+import { buildSpecularSurfaceMaterial, SPECULAR_LAYER_COUNT } from '../specular-render.js';
 import { SPECULAR_DEBUG_CHANNELS } from '../specular.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
@@ -262,8 +262,8 @@ export function run(t) {
       built[name](0.5);
     }
     // EVERY layer, by index. A per-layer setter that silently ignored its index
-    // would leave two of the three layers permanently at their defaults, with
-    // every test green and the panel apparently working.
+    // would leave all but one layer permanently at their defaults, with every
+    // test green and the panel apparently working.
     for (let i = 0; i < built.layerCount; i++) {
       built.setLayerDensity(i, 9);
       built.setLayerGrainAngle(i, 40);
@@ -278,7 +278,7 @@ export function run(t) {
     setterError = err;
   }
   ok(`every setter runs against a real uniform (${setterError ? setterError.message : 'clean'})`, setterError === null);
-  ok('the builder reports how many layers it made', built.layerCount === 3);
+  ok('the builder reports how many layers it made', built.layerCount === SPECULAR_LAYER_COUNT);
 
   // Guards that exist because their absence produces a NaN, and a NaN on an
   // additive pass paints a permanent hole rather than nothing.

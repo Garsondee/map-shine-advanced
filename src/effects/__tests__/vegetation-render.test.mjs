@@ -162,6 +162,38 @@ export function run(t) {
       'an unbounded floor band falls back to the host-relative nudge and reports it',
       fallback.fellBack === true && fallback.renderOrder === host.renderOrder + bush.renderOrderNudge
     );
+
+    // ========================================================================
+    // THE SPARSE-FLOOR TIE — found 2026-08-04 chasing an author report of
+    // `_Bush` drawing over `_Tree` on an ordinary scene. `below` only ever
+    // counts REAL drawables; it never compares bush's key against tree's. The
+    // fixture above always had a tile at elevation 19 (between bush's 10 and
+    // tree's 20) that broke the tie BY ACCIDENT — a floor with nothing at all
+    // between them (just background art, no intermediate tiles: the ordinary
+    // case, not the exception) never got exercised, and that is exactly where
+    // a fixed `n - 0.5` handed both kinds the identical renderOrder number.
+    // ========================================================================
+    {
+      const sparseItems = sortByLayer([mk('ground', 0, SORT_LAYERS.SCENE, 0)]);
+      const sparseHost = sparseItems[0];
+      const sparseBush = vegetationOverlayRenderOrder(sparseItems, sparseHost, bush, band);
+      const sparseTree = vegetationOverlayRenderOrder(sparseItems, sparseHost, tree, band);
+      ok(
+        'on a floor with nothing between them, bush and tree do NOT collide onto one renderOrder',
+        sparseBush.renderOrder !== sparseTree.renderOrder
+      );
+      ok(
+        'canopy still draws above undergrowth when nothing else breaks the tie',
+        sparseTree.renderOrder > sparseBush.renderOrder
+      );
+      ok(
+        'both still land strictly inside the one real gap, never touching its boundary',
+        sparseBush.renderOrder > sparseHost.renderOrder &&
+          sparseBush.renderOrder < sparseHost.renderOrder + 1 &&
+          sparseTree.renderOrder > sparseHost.renderOrder &&
+          sparseTree.renderOrder < sparseHost.renderOrder + 1
+      );
+    }
   }
 
   // ==========================================================================

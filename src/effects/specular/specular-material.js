@@ -120,9 +120,10 @@
  * dark and should legitimately fade. Here a dark value already means "rough
  * dark iron" via `roughness` below — so a wide presence band would penalise
  * dark metal TWICE, once by fading it out and once by roughening it. 20/255
- * is enough to antialias an authored edge (the mask uploads at native
- * resolution, `MASK_IMAGE_SCALE = 1`) without eating the dark end of the
- * material range.
+ * is enough to antialias an authored edge (the mask uploads at
+ * `SPECULAR_MASK_IMAGE_SCALE`, see `specular-render.js` — NOT the general
+ * `MASK_IMAGE_SCALE`, this mask has its own) without eating the dark end of
+ * the material range.
  */
 export const SPECULAR_PRESENCE_EDGE0 = 1 / 255;
 export const SPECULAR_PRESENCE_EDGE1 = 20 / 255;

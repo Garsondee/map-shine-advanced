@@ -23,8 +23,11 @@
  * So the rule's justification collapses, and pattern controls are legitimate
  * here: **the pattern IS the deliverable.** What survives of the old rule is
  * only its COUNT — V2 shipped 61 controls, most of them the same nine repeated
- * three times with no way to tell which layer you were editing. This ships ten
- * plus one repeated eight-control layer strip, each named for its mechanism.
+ * three times with no way to tell which layer you were editing. This ships
+ * thirteen top-level controls plus one repeated eight-control layer strip
+ * (SIX layers since Round 19, 2026-08-03 — "double the number of things
+ * causing the shines to appear" — up from three), each named for its
+ * mechanism.
  *
  * This paragraph exists so a future session reads the correction before it
  * reads the doctrine and helpfully undoes the fix
@@ -49,37 +52,48 @@
  * exported defaults are the single source of truth for the values.
  */
 export const SPECULAR_PARAMS = Object.freeze({
-  // ── Look ────────────────────────────────────────────────────────────────
+  // ── Look — the pattern's own shape and colour ────────────────────────────
   strength: {
     type: 'float',
     min: 0,
-    max: 3,
+    max: 20,
     step: 0.01,
-    default: 1,
+    // RAISED 1 → 20 = THE SCHEMA'S OWN MAX (2026-08-03, ROUND 18) — THE
+    // FIRST LIVE-CONFIRMED DEFAULT this effect has ever shipped: the author
+    // dialled this to its max on a real scene, alongside every other Round
+    // 18 default below, and reported "we have a basic specular effect
+    // working again." See `SPECULAR_DEFAULT_STRENGTH`'s own header
+    // (specular-render.js) for the full account.
+    default: 20,
     category: 'Look',
     label: 'Shine strength',
-    help: 'Master strength of everything this effect draws. Turn it to 0 to see what the map looks like with no shine at all.',
+    help: 'Master strength of everything this effect draws. Turn it to 0 to see what the map looks like with no shine at all — turn it up past 5-10 to brute-force the shine through anything else that might be dimming it, as a diagnostic before reaching for the more targeted controls under Response.',
   },
   saturation: {
     type: 'float',
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1,
+    // RAISED 1.3 → 2 = THE SCHEMA'S OWN MAX (2026-08-03, ROUND 18) —
+    // live-confirmed; see `strength`'s own comment above and
+    // `SPECULAR_DEFAULT_SATURATION`'s header for the full account.
+    default: 2,
     category: 'Look',
     label: 'Metal colour',
-    help: 'How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it. This is the control that decides whether a map reads as treasure or as polished stone.',
+    help: "How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it — the default sits slightly above 1 to counteract the screen's own tonemap, which desaturates highlights as they brighten. This is the control that decides whether a map reads as treasure or as polished stone.",
   },
   shimmerGain: {
     type: 'float',
     min: 0,
-    max: 12,
+    max: 40,
     step: 0.05,
-    // 5.5, not 4 — see `SPECULAR_DEFAULT_SHIMMER_GAIN`'s own header
-    // (2026-07-27): raised alongside a much lower sheen ceiling so the
-    // pattern's own contrast survives the global tonemap instead of being
-    // crushed by an always-on floor eating its headroom.
-    default: 5.5,
+    // LOWERED 5.5 → 2.2 (2026-08-03, ROUND 18) — live-confirmed; the ONE
+    // control in this round's set that moved DOWN. See
+    // `SPECULAR_DEFAULT_SHIMMER_GAIN`'s own header (specular-render.js) for
+    // why: `sheenCeiling` below moved up a great deal this same round, so
+    // the base shine now carries more of the look and needs less shimmer
+    // modulation on top of it.
+    default: 2.2,
     category: 'Look',
     label: 'Shimmer contrast',
     help: 'How far the moving patterns may brighten the metal above its resting shine. Low gives an even satin surface; high gives hard bright glints against darker metal, which is what reads as polished and slightly blown out. At 0 the metal still shines, it just stops moving.',
@@ -89,20 +103,80 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 512,
     max: 32768,
     step: 64,
-    default: 16384,
+    // LOWERED 16384 → 6528 (2026-08-03, ROUND 18) — live-confirmed; a
+    // smaller scale means MORE cells across the same map, i.e. a busier,
+    // finer field. See `SPECULAR_DEFAULT_PATTERN_SCALE_PX`'s own header.
+    default: 6528,
     category: 'Look',
     label: 'Pattern size',
     help: 'How large the shimmer shapes are, measured across the MAP rather than the screen — so they stay the same physical size whether you are zoomed in or out. Large values give a few huge soft sweeps across the whole map; small values give many small busy ones. The fine glitter is not set here: that comes from how brightly you painted the mask.',
   },
+  // ── Response — how this effect answers to the SCENE'S OWN LIGHT ─────────
+  // Moved here from Look (2026-08-03, ROUND 17): `lightFloor` was always
+  // about the effect's relationship to ambient light, not to how the pattern
+  // itself looks — and it now has three siblings that answer the exact same
+  // question ("how much does darkness suppress this"), so grouping them is
+  // what "organised into sections" means here, not four scattered knobs that
+  // each happen to touch brightness.
   lightFloor: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.01,
     default: 0,
-    category: 'Look',
+    category: 'Response',
     label: 'Unlit shine',
     help: 'How much metal still catches the eye in a completely unlit room, with no torch, no lamp and no window light reaching it. Defaults to 0 — metal with nothing shining on it should genuinely go dark, the same as everything else on the map — but you can raise this for a stylised look where treasure never quite vanishes. Real light still lights real metal either way: a nearby torch or window brightens it exactly as it should, this only controls the floor underneath that.',
+  },
+  incidentSteepness: {
+    type: 'float',
+    min: 0.1,
+    max: 8,
+    step: 0.05,
+    // LOWERED 3 → 2.85 (2026-08-03, ROUND 18) — live-confirmed; barely
+    // moved from the Round 17 default, unlike several of its neighbours.
+    default: 2.85,
+    category: 'Response',
+    label: 'Light response',
+    // NEW (2026-08-03, ROUND 17) — exposes `SPECULAR_INCIDENT_STEEPNESS`
+    // (`specular-pattern.js#steepenIncidentRgb`'s own header has the full
+    // design and the arithmetic behind the shipped default). THE FIRST
+    // CONTROL TO REACH FOR if the shine reads as globally too faint: the
+    // channel probe that prompted this control showed the default (3)
+    // crushing an ordinarily-lit point to under 1% of its properly-exposed
+    // brightness — 1 removes that crush entirely (a pass-through, no
+    // suppression beyond the scene's own exposure curve), and anything below
+    // 1 goes further and BOOSTS dim areas above what the raw light alone
+    // would give, which is a legitimate way to force the shine to punch
+    // through while you diagnose what else might be dimming it.
+    help: "How sharply the shine fades through shadow and dim ambient light before it reaches the screen. At 1 the shine tracks the scene's own light exactly, with no extra fade. Above 1, dim areas lose their shine much faster than bright ones do — only candles, point lights and direct sun keep their full sparkle, and the default (3) is fairly aggressive about this. Below 1, dim areas are boosted ABOVE what the plain light level would give — turn this down toward 0.1 if the shine is barely visible anywhere and you want to confirm the effect is there at all before fine-tuning where it should and shouldn't show.",
+  },
+  sheenCeiling: {
+    type: 'float',
+    min: 0,
+    max: 10,
+    step: 0.05,
+    // RAISED 0.15 → 1 (ROUND 18), REVERTED BACK TO 0.15 (ROUND 19, same
+    // day) — direct author instruction: "the base shine ceiling should be
+    // lower, make it very low." This is the exact value Round 10 originally
+    // measured and tuned for shimmer contrast, not a fresh guess. See
+    // `SPECULAR_SHEEN_CEILING`'s own header (specular-pattern.js).
+    default: 0.15,
+    category: 'Response',
+    label: 'Base shine ceiling',
+    help: "How bright the metal's resting shine (no shimmer, just tint × light × strength) may get before this effect reins it in. The shipped default is deliberately low so the moving shimmer pattern keeps real contrast — pushed higher, the whole surface starts reading as an even, lit-from-within wash rather than a pattern of glints, trading contrast for raw visibility. Raise this only if the shine is present but reads too subtly to notice at all; the shimmer's own ceiling below is the one to raise if it is the moving GLINTS specifically that feel too dim.",
+  },
+  glintCeiling: {
+    type: 'float',
+    min: 0,
+    max: 200,
+    step: 1,
+    // RAISED 20 → 28 (2026-08-03, ROUND 18) — live-confirmed; see
+    // `sheenCeiling` above and `SPECULAR_GLINT_CEILING`'s own header.
+    default: 28,
+    category: 'Response',
+    label: 'Glint ceiling',
+    help: "How bright the moving shimmer's own contribution may peak, independent of the base shine above. Shipped high on purpose because a real specular highlight is supposed to blow out toward bloom — raise it further if peaks still read as dim dots rather than hot sparks; lower it if the glints are overpowering the metal's own base colour.",
   },
   // ── Motion ──────────────────────────────────────────────────────────────
   parallaxStrength: {
@@ -110,7 +184,9 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 1,
+    // RAISED 1 → 3 = THE SCHEMA'S OWN MAX (2026-08-03, ROUND 18) —
+    // live-confirmed; see `strength`'s own comment above.
+    default: 3,
     category: 'Motion',
     label: 'Parallax',
     help: 'How much the shimmer slides across the metal as you pan the map. This is the single most important control for making the shine feel like a REFLECTION rather than a texture someone painted on. At 1 the patterns are nearly locked to your screen, sweeping over the map as you move, which is what light actually does. At 0 they are glued to the map and the illusion collapses.',
@@ -120,7 +196,12 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1,
+    // RAISED 1 → 2 = THE SCHEMA'S OWN MAX (2026-08-03, ROUND 18) —
+    // live-confirmed; see `SPECULAR_DEFAULT_ISLAND_SPREAD`'s own header
+    // (specular-render.js) — the two are pinned equal by a Node test, not a
+    // shared import (this file → specular-render.js would be circular,
+    // since that file already imports FROM this one).
+    default: 2,
     category: 'Motion',
     label: 'Per-object variety',
     help: 'How differently each separate piece of metal moves from its neighbours. The effect finds every connected metal shape on your map and gives it its own drift, so a brass door and a pile of coins never slide in lockstep. At 0 everything moves identically; higher values make each object feel more like its own surface.',
@@ -130,7 +211,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 0.05,
     step: 0.0005,
-    default: 0.0025,
+    // LOWERED TO EXACTLY 0 (2026-08-03, ROUND 18) — live-confirmed; with
+    // `parallaxStrength` now at its own max, camera pan alone is a lot of
+    // motion. See `SPECULAR_DEFAULT_DRIFT_SPEED`'s own header.
+    default: 0,
     category: 'Motion',
     label: 'Drift speed',
     help: 'How fast the patterns evolve on their own when nobody is moving the camera. Deliberately slow — the camera is meant to be the main source of movement and this only stops a parked view from being frozen. At 0 the metal is perfectly still until you pan, which is how the original effect behaved.',
@@ -159,14 +243,18 @@ export const SPECULAR_PARAMS = Object.freeze({
 });
 
 /**
- * The per-layer knobs. THREE layers, and the count is not decoration: the
- * relative slide BETWEEN layers at different parallax depths is most of what
- * sells "a highlight moving over a surface". Layer 3 defaults to a NEGATIVE
- * depth so it counter-moves, exactly as V2's did.
+ * The per-layer knobs — ONE shared declaration, reused per layer (SIX of them
+ * since Round 19, 2026-08-03; three through Round 18). The count is not
+ * decoration: the relative slide BETWEEN layers at different parallax depths
+ * is most of what sells "a highlight moving over a surface". The third layer
+ * defaults to a NEGATIVE depth so it counter-moves, exactly as V2's did; see
+ * `SPECULAR_LAYER_DEFAULTS` (specular-render.js) for what each of the six
+ * layers is actually tuned for.
  *
  * Held separately from `SPECULAR_PARAMS` so the panel can generate one strip
- * per layer rather than twenty-four flat sliders with digits in their names —
- * V2 shipped exactly that and nobody could tell which layer they were editing.
+ * per layer rather than forty-eight flat sliders with digits in their names —
+ * V2 shipped exactly that (with thirty) and nobody could tell which layer
+ * they were editing.
  *
  * ⚠️ THREE OF THESE NAMES ARE CORRECTIONS OF V2'S, NOT TRANSLATIONS. Its
  * "Scatter" is `streak` (the per-cell rotation that actually makes streaks),
@@ -222,12 +310,23 @@ export const SPECULAR_LAYER_PARAMS = Object.freeze({
   },
   contrast: {
     type: 'float',
-    min: 0,
+    // ⚠️ FLOOR RAISED 0 → 0.5 (ROUND 19, 2026-08-03) — direct instruction:
+    // "strictly it needs to be gradients and never cut off angles or edges."
+    // Low `contrast` sits the shimmer's smoothstep window closer to the
+    // blob's peak, which is ALSO where the blob's own spatial falloff is
+    // narrowest (the transition's real-world width shrinks by ~27% from
+    // contrast 1 down to 0 — see `SPECULAR_LAYER_DEFAULTS`'s own analysis in
+    // specular-render.js) — the sparsest, most "isolated hard spark" end of
+    // this control's own range. Raising the floor makes that end
+    // structurally unreachable rather than merely discouraged by a good
+    // default: an author cannot drag this control into the regime this
+    // effect is no longer allowed to render.
+    min: 0.5,
     max: 1,
     step: 0.01,
-    default: 0.59,
+    default: 0.85,
     label: 'Coverage',
-    help: 'How much of the surface the glints cover, from sparse hard sparks to a broad connected sheen.',
+    help: 'How much of the surface the glints cover, from a scattering of soft, gradient-edged pools to a broad connected sheen. Never a hard spark — this control cannot go low enough to cut off cleanly.',
   },
   strength: {
     type: 'float',
@@ -461,11 +560,11 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
   Object.freeze({
     n: 19,
     id: 'illumDirect',
-    label: '19 · Illum, RAW (control for 12)',
+    label: '19 · Illum, RAW (control for 10)',
     reads:
-      'The same `buf:scene.illum` at the same screen UV as channel 12, sampled directly with NOTHING ' +
-      'applied. Compare the two: 12 darker than 19 is this effect shaping the light (expected — it ' +
-      'linearises through the engine transfer curve); 12 at ZERO while 19 is bright is a term in ' +
+      'The same `buf:scene.illum` at the same screen UV as channel 10, sampled directly with NOTHING ' +
+      'applied. Compare the two: 10 darker than 19 is this effect shaping the light (expected — it ' +
+      'linearises through the engine transfer curve and its own steepening curve); 10 at ZERO while 19 is bright is a term in ' +
       'between having collapsed, which is a bug every time. Note 19 is GREY (~0.19) in unlit rooms, not ' +
       'black — Foundry bakes ambientDarkness into illum, and taking that grey as "some light" is exactly ' +
       'what used to make metal glow in the dark.',
@@ -535,9 +634,9 @@ export const SPECULAR = Object.freeze({
       fromProfile: 'low',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.03 }),
       adds:
-        'Three anisotropic blob-lattice layers plus a voronoi cellular base whose cell size follows the mask ' +
-        'own brightness — bright gold breaks into fine glitter, dull pewter into broad soft shapes. Pure ALU ' +
-        'on tier 0 fetch. This is where it stops being a flat sheen.',
+        'Six anisotropic blob-lattice layers (three broad-sweep, three fine-sparkle) plus a voronoi cellular ' +
+        'base whose cell size follows the mask own brightness — bright gold breaks into fine glitter, dull ' +
+        'pewter into broad soft shapes. Pure ALU on tier 0 fetch. This is where it stops being a flat sheen.',
     }),
     Object.freeze({
       n: 2,

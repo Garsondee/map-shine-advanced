@@ -13,19 +13,49 @@ import {
   packFloorAttr,
   buildRealFloorAttrMrtNode,
   resolveItemFloorAttrUniforms,
+  refreshItemFloorAttrUniforms,
   occludesBackgroundPresenceBit,
   PRESENCE_BIT_OVERHEAD,
   PRESENCE_BIT_OCCLUDES_BACKGROUND,
+  quantizeReceiverElevationAboveFloor,
+  receiverElevationLevelToUnits,
+  decodeReceiverElevationLevel,
+  decodeOverheadBit,
+  RECEIVER_ELEVATION_LEVELS,
+  RECEIVER_ELEVATION_RANGE_UNITS,
+  ATTR_SOLIDITY_ALPHA_TEST_THRESHOLD,
 } from '../scene-attr.js';
 import { SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 } from '../../effects/specular/specular-render.js';
 // The elevation-only lookup the floor-ownership fix replaced — imported so the
 // regression block below can prove it genuinely disagrees (a non-vacuous test).
 import { resolveElevationFloorIndex } from '../../scene/layer-order.js';
 
+/**
+ * A minimal chainable node — supports exactly the TSL method chain
+ * `packFloorAttr` calls on its `solidityAlpha` argument since the ROUND 15
+ * alpha-test fix (`X.greaterThanEqual(threshold).select(whenTrue, whenFalse)`)
+ * — this file's own established "minimal mock, not the real vendored TSL"
+ * posture (see this file's own header). `subject` keeps the ORIGINAL node
+ * reachable off the chain's result so a test can still prove IDENTITY (the
+ * exact node passed in is the one being compared), the same thing a bare
+ * `===` check proved before this chain existed.
+ */
+function chainable(kind) {
+  const subject = { __kind: kind };
+  subject.greaterThanEqual = (threshold) => ({
+    __kind: 'greaterThanEqual',
+    subject,
+    threshold,
+    select: (whenTrue, whenFalse) => ({ __kind: 'select', subject, threshold, whenTrue, whenFalse }),
+  });
+  return subject;
+}
+
 // A real (not swizzle-capable) plain object standing in for `output.a` —
 // distinct identity from the bare `output` symbol so a test can tell whether
-// a node came from `output.a` specifically, not just "some node".
-const OUTPUT_ALPHA_SWIZZLE = { __kind: 'output-alpha-swizzle' };
+// a node came from `output.a` specifically, not just "some node". Chainable
+// (see `chainable` above) since it flows through `packFloorAttr`'s alpha-test.
+const OUTPUT_ALPHA_SWIZZLE = chainable('output-alpha-swizzle');
 
 function makeTSL() {
   return {
@@ -85,15 +115,37 @@ export function run(t) {
     const floorIndex01 = { __kind: 'uniform-floor' };
     const outdoors01 = { __kind: 'gate-result' };
     const presenceBits01 = { __kind: 'uniform-presence' };
-    const solidityAlpha = { __kind: 'material-alpha' };
+    const solidityAlpha = chainable('material-alpha');
     const packed = packFloorAttr(TSL, { floorIndex01, outdoors01, presenceBits01, solidityAlpha });
     ok('pack: returns a vec4', packed.__kind === 'vec4');
     ok(
-      'pack: channel order is R,G,B,A = floor,outdoors,presence,solidity',
-      packed.args[0] === floorIndex01 &&
-        packed.args[1] === outdoors01 &&
-        packed.args[2] === presenceBits01 &&
-        packed.args[3] === solidityAlpha
+      'pack: channel order is R,G,B = floor,outdoors,presence, unchanged by the alpha-test fix',
+      packed.args[0] === floorIndex01 && packed.args[1] === outdoors01 && packed.args[2] === presenceBits01
+    );
+    // ⚠️ ROUND 15 (2026-08-04) — A IS NO LONGER solidityAlpha VERBATIM. It is
+    // ALPHA-TESTED: `solidityAlpha.greaterThanEqual(THRESHOLD).select(1, 0)`
+    // — see `packFloorAttr`'s own "ALPHA-TEST, NOT A CONTINUOUS BLEND" header
+    // for the live bug this fixes (a translucent fragment's presence-bits
+    // byte scaling by its own raw alpha under MRT blending, corrupting the
+    // receiver-elevation VALUE field — a margin only protects a single
+    // boolean bit, never a multi-bit value). Pinning the ARITHMETIC, not just
+    // the shape: a smooth-looking select() call proves nothing about whether
+    // the threshold or the branch VALUES are actually right
+    // (`feedback_smooth_output_hides_ported_bugs`).
+    const a = packed.args[3];
+    ok('pack: A is a select() node, not solidityAlpha passed through raw', a.__kind === 'select');
+    ok('pack: the select is gated on THIS solidityAlpha, identity-checkable', a.subject === solidityAlpha);
+    ok(
+      'pack: the comparison is >= the real exported threshold constant, not a re-typed magic number',
+      a.threshold.__kind === 'float' && a.threshold.value === ATTR_SOLIDITY_ALPHA_TEST_THRESHOLD
+    );
+    ok('pack: the threshold is 0.5 — a WIDE margin, not a tight one', ATTR_SOLIDITY_ALPHA_TEST_THRESHOLD === 0.5);
+    ok(
+      'pack: at/above threshold writes fully solid (1), below writes fully transparent (0) — never a fraction',
+      a.whenTrue.__kind === 'float' &&
+        a.whenTrue.value === 1 &&
+        a.whenFalse.__kind === 'float' &&
+        a.whenFalse.value === 0
     );
 
     // No outdoors mask available (e.g. a floor with none authored) — G reads
@@ -126,7 +178,7 @@ export function run(t) {
     // deterministic "no active scene" branch (verified against foundry/
     // active-scene-source.js) — exercises resolveItemFloorAttrUniforms'
     // actual fail-open path for real, no mock needed for that half.
-    const node = buildRealFloorAttrMrtNode({
+    const { mrtNode, floorAttrUniforms } = buildRealFloorAttrMrtNode({
       THREE,
       item: { key: { elevation: 0 } },
       viewedFloorIndex: 0,
@@ -134,16 +186,78 @@ export function run(t) {
       logError: () => {},
       envLight: { uOutdoorsRect: null, outdoorsTexNode: null },
     });
-    ok('real-writer: built via mrt()', node.__kind === 'mrt');
-    const attr = node.outputs.attr;
+    ok('real-writer: built via mrt()', mrtNode.__kind === 'mrt');
+    const attr = mrtNode.outputs.attr;
     ok('real-writer: attr is a vec4', attr.__kind === 'vec4');
     ok(
-      'real-writer: solidity (arg 3) IS TSL.output.a — never a param, never null/undefined',
-      attr.args[3] === OUTPUT_ALPHA_SWIZZLE
+      'real-writer: solidity gate (arg 3) is ALPHA-TESTED against TSL.output.a — never a param, never null/undefined',
+      attr.args[3].__kind === 'select' && attr.args[3].subject === OUTPUT_ALPHA_SWIZZLE
     );
     ok(
-      'real-writer: solidity is not the bare output symbol either (it must be the .a swizzle)',
-      attr.args[3] !== THREE.TSL.output
+      'real-writer: solidity is not gated on the bare output symbol either (it must be the .a swizzle)',
+      attr.args[3].subject !== THREE.TSL.output
+    );
+    // ⚠️ NEW (2026-08-03) — the FIX for a real live bug (top floor's specular
+    // invisible: its floor-index was baked once, at build time, and never
+    // revisited). `floorAttrUniforms` is what a caller retains and refreshes
+    // every frame via `refreshItemFloorAttrUniforms` — proven real here, not
+    // just present by accident.
+    ok(
+      'real-writer: also returns the LIVE uniforms, not just the mrt node',
+      !!floorAttrUniforms?.uFloorIndex01 && !!floorAttrUniforms?.uPresenceBits01
+    );
+    ok(
+      'real-writer: those uniforms are exactly what packFloorAttr used to build the attr node',
+      attr.args[0] === floorAttrUniforms.uFloorIndex01 && attr.args[2] === floorAttrUniforms.uPresenceBits01
+    );
+  }
+
+  // buildRealFloorAttrMrtNode — THE OCCLUSION-FADE FIX (2026-08-03, live
+  // report): `output.a` is this material's FINAL on-screen alpha, which for
+  // an occludable Tile/roof already has `occlusionAlphaFactor(occ)` folded
+  // in — a fade meant PURELY so a player can see their own token standing
+  // under the roof (`scene/occlusion.js`). Using that as solidity made a
+  // light stop being occluded by its own roof the instant a token walked
+  // into the room the roof did not move; only its RENDERING did
+  // (`feedback_one_byte_two_quantities`). An explicit `solidityAlpha`
+  // override — a real, pre-built node, never a closure variable (the
+  // ORIGINAL, different trap the block above pins) — lets a caller supply
+  // the item's PHYSICAL presence instead.
+  {
+    const THREE = makeTHREE();
+    const physicalAlpha = chainable('physical-solidity-alpha');
+    const { mrtNode } = buildRealFloorAttrMrtNode({
+      THREE,
+      item: { key: { elevation: 0 } },
+      viewedFloorIndex: 0,
+      sceneDoc: null,
+      logError: () => {},
+      envLight: { uOutdoorsRect: null, outdoorsTexNode: null },
+      solidityAlpha: physicalAlpha,
+    });
+    const attr = mrtNode.outputs.attr;
+    ok(
+      'an explicit solidityAlpha REPLACES output.a — the caller´s own physical-presence node gates the alpha-test',
+      attr.args[3].__kind === 'select' && attr.args[3].subject === physicalAlpha
+    );
+    ok('and it is NOT gated on the output-alpha swizzle any more', attr.args[3].subject !== OUTPUT_ALPHA_SWIZZLE);
+  }
+  {
+    // Omitting it entirely must be BYTE-IDENTICAL to the pre-fix behaviour —
+    // every OTHER real-writer call site (no occlusion concept) must see no
+    // change at all.
+    const THREE = makeTHREE();
+    const { mrtNode } = buildRealFloorAttrMrtNode({
+      THREE,
+      item: { key: { elevation: 0 } },
+      viewedFloorIndex: 0,
+      sceneDoc: null,
+      logError: () => {},
+      envLight: { uOutdoorsRect: null, outdoorsTexNode: null },
+    });
+    ok(
+      'omitting solidityAlpha still falls back to output.a — every existing call site is unaffected',
+      mrtNode.outputs.attr.args[3].__kind === 'select' && mrtNode.outputs.attr.args[3].subject === OUTPUT_ALPHA_SWIZZLE
     );
   }
 
@@ -298,9 +412,61 @@ export function run(t) {
       floorOf({ kind: 'tile', levelId: '', key: { elevation: 25 } }) === 2
     );
 
+    // ══════════════════════════════════════════════════════════════════
+    // 🔒 ROUND 8 — THE SAME BOUNDARY BUG, RECURRING IN A LOOSE TILE (found
+    // writing THIS round's own Shader Lab proof, not a live report). The
+    // fix above (lines 320-330) only covers `levelId`-owned art; a Tile has
+    // NONE (confirmed: `levelId: ''`, always), so the ONE natural way to
+    // mark a discrete cover object as "this floor's own roof" — raise its
+    // elevation to match that floor's own `elevationTop` — falls straight
+    // into `resolveElevationFloorIndex`'s `[bottom, top)` band and gets
+    // attributed to the floor ABOVE, same as the original bug, one level
+    // down the call stack. `uFloorIndex01` staying "wrong floor" here is
+    // ACCEPTED (R is deliberately unchanged — see the fix's own doc); only
+    // the OVERHEAD bit is asked to get this right.
+    // ══════════════════════════════════════════════════════════════════
+    const looseTileAtBoundary = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'tile', levelId: '', key: { elevation: 10 } }, // EXACTLY lvl0's own top
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    const looseTileByte = Math.round(looseTileAtBoundary * 255);
+    ok(
+      "🔒 a loose Tile raised to EXACTLY its intended floor's own top still reports OVERHEAD — the " +
+        "author's one natural way to mark a discrete cover as a roof, without needing a levelId",
+      decodeOverheadBit(looseTileByte) === 1
+    );
+    ok(
+      '...and R (floor index) is DELIBERATELY left at whatever elevation-banding alone says (floor ABOVE, ' +
+        'the pre-existing, unchanged behaviour) — this fix is scoped to the overhead bit only',
+      floorOf({ kind: 'tile', levelId: '', key: { elevation: 10 } }) === 1
+    );
+    // A tile NOT raised to any boundary (ordinary furniture/decoration,
+    // sitting comfortably inside its own floor's band) must NOT read as
+    // overhead — the regression guard for the false-positive this whole
+    // design deliberately avoided (a torch on a table, a bush on a tile).
+    const ordinaryLooseTile = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'tile', levelId: '', key: { elevation: 3 } }, // well inside lvl0's [0,10) band
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    ok(
+      'an ORDINARY tile, nowhere near a floor boundary, does NOT report overhead',
+      decodeOverheadBit(Math.round(ordinaryLooseTile * 255)) === 0
+    );
+
     // The overhead presence bit was ALSO wrong for every Level foreground:
     // it was tested against the WRONG floor's `top`, so a Level's own
     // foreground reported "not overhead". Fixing the ownership fixes it.
+    // The raw byte ALSO now carries this item's receiver-elevation bits
+    // (2-5) — subtract them out (via the same decode the shader uses) before
+    // checking the overhead/occludes bits alone, rather than asserting a
+    // fragile exact sum that would drift the moment the elevation field's
+    // own quantization changes.
     const fgBits = resolveItemFloorAttrUniforms({
       THREE,
       item: { kind: 'levelForeground', levelId: 'lvl0', key: { elevation: 10 } },
@@ -308,9 +474,347 @@ export function run(t) {
       sceneDoc,
       logError: () => {},
     }).uPresenceBits01.value;
+    const fgByte = Math.round(fgBits * 255);
+    const fgElevationLevel = decodeReceiverElevationLevel(fgByte);
     ok(
       "a Level's foreground now reports the OVERHEAD bit (it is that Level's roof layer, by isInForeground's own definition)",
-      Math.round(fgBits * 255) === PRESENCE_BIT_OCCLUDES_BACKGROUND + PRESENCE_BIT_OVERHEAD
+      fgByte - fgElevationLevel * 4 === PRESENCE_BIT_OCCLUDES_BACKGROUND + PRESENCE_BIT_OVERHEAD
+    );
+    ok(
+      "...and its receiver-elevation level matches elevation(10) - this Level's own elevationBottom(0), quantized",
+      fgElevationLevel === quantizeReceiverElevationAboveFloor(10 - 0)
+    );
+
+    // ══════════════════════════════════════════════════════════════════
+    // 🔒 ROUND 9 (2026-08-04) — A TILE'S OWN `restrictsLight` IS A SECOND,
+    // ELEVATION-INDEPENDENT OVERHEAD SIGNAL. The live report: a lantern's
+    // cover Tile, Foundry's own "Restrict Lighting" ticked, elevation
+    // comfortably INSIDE its floor's band (nowhere near the ceiling
+    // `isInForeground` tests against) — the numeric height-gate arithmetic
+    // was already proven correct for this exact pair (see
+    // point-light-illumination.test.mjs's own "LIVE CASE 1"), but nothing
+    // ever asked the one flag the author actually set.
+    // ══════════════════════════════════════════════════════════════════
+    const flaggedTile = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'tile', levelId: '', key: { elevation: 3 }, restrictsLight: true }, // well inside lvl0's [0,10) band — NOT a boundary case
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    ok(
+      "🔒 a Tile with Foundry's own restrictsLight ticked reports OVERHEAD even nowhere near its floor's " +
+        'ceiling — the exact lantern-cover gap, closed with no elevation authoring required',
+      decodeOverheadBit(Math.round(flaggedTile * 255)) === 1
+    );
+
+    // The regression guard this whole fix hinges on: `restrictsLight` must
+    // stay SCOPED TO TILES. A Level's own BACKGROUND gets `restrictsLight:
+    // true` UNCONDITIONALLY in production (`collectLevelTextures`, mirroring
+    // real Foundry's own `primary.mjs#restrictsLight = true` for
+    // `isBackground`) — if this new clause were not kind-guarded, a floor's
+    // own ground would set the overhead bit on itself EVERYWHERE it draws,
+    // and `overheadGate` ANDs into every light's falloff
+    // (`point-light-illumination.js#buildHeightGateNode`), which would black
+    // out every light on every floor. This is the single most important
+    // assertion in this block.
+    const flaggedBackground = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'levelBackground', levelId: 'lvl0', key: { elevation: 0 }, restrictsLight: true },
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    ok(
+      "🔒🔒 a Level's own BACKGROUND — restrictsLight:true UNCONDITIONALLY in production — must NOT self-report " +
+        'overhead via this new path, or every light everywhere goes dark',
+      decodeOverheadBit(Math.round(flaggedBackground * 255)) === 0
+    );
+
+    // An ordinary tile with the flag left at its Foundry default (false/
+    // undefined) must be completely unaffected — the fix is additive, not a
+    // behaviour change for the overwhelming majority of tiles that never
+    // touch this checkbox.
+    const unflaggedTile = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'tile', levelId: '', key: { elevation: 3 } }, // no restrictsLight field at all
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    ok(
+      'an ordinary tile with no restrictsLight field at all still reads NOT overhead — no regression for ' +
+        'the overwhelming common case',
+      decodeOverheadBit(Math.round(unflaggedTile * 255)) === 0
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 🔧 refreshItemFloorAttrUniforms — THE FIX FOR A REAL LIVE BUG (2026-08-03):
+  // specular worked on the basement and ground floor but was completely
+  // invisible on a scene's newest, uppermost floor — the mask genuinely
+  // loaded (real, healthy mask/strength/tint/presence/islands readings) but
+  // the floor-match bit read exactly 0 at every point on that floor. Traced
+  // to `resolveItemFloorAttrUniforms` resolving an item's floor membership
+  // exactly ONCE, at material-build time, and never again — this proves the
+  // fix: an item built against ONE floor snapshot, then REFRESHED against a
+  // DIFFERENT one (exactly what happens if a floor is added, or an
+  // elevation edited, or a bake simply raced), lands on the NEW correct
+  // answer, in the SAME uniform objects, not a fresh pair.
+  // ══════════════════════════════════════════════════════════════════
+  {
+    const THREE = makeTHREE();
+    // Built against a scene that ONLY has two floors — 'lvl0' hasn't been
+    // added yet (or wasn't visible to this call for any other reason).
+    const sceneDocV1 = {
+      levels: [
+        { id: 'lvlGround', name: 'Ground', background: { src: 'g.webp' }, elevation: { bottom: 0, top: 10 } },
+        { id: 'lvlUpper', name: 'Upper', background: { src: 'u.webp' }, elevation: { bottom: 10, top: 20 } },
+      ],
+    };
+    const item = { kind: 'levelBackground', levelId: 'lvlUpper', key: { elevation: 10 } };
+    const uniforms = resolveItemFloorAttrUniforms({
+      THREE,
+      item,
+      viewedFloorIndex: 1,
+      sceneDoc: sceneDocV1,
+      logError: () => {},
+    });
+    ok(
+      'built against the v1 scene, the upper floor resolves to index 1',
+      Math.round(uniforms.uFloorIndex01.value * 255) === 1
+    );
+
+    // NOW the scene gains a genuine basement BELOW ground — floors re-sort by
+    // elevation and 'lvlUpper' shifts from index 1 to index 2. A real editing
+    // sequence (a floor added below existing ones), not a contrived one.
+    const sceneDocV2 = {
+      levels: [
+        { id: 'lvlBasement', name: 'Basement', background: { src: 'b.webp' }, elevation: { bottom: -10, top: 0 } },
+        ...sceneDocV1.levels,
+      ],
+    };
+    refreshItemFloorAttrUniforms(uniforms, {
+      item,
+      viewedFloorIndex: 2,
+      sceneDoc: sceneDocV2,
+      logError: () => {},
+    });
+    ok(
+      "🔒 refreshed against the v2 scene, the SAME uniform pair now reports the upper floor's NEW index (2) — " +
+        'this is the fix: the OLD code would have left it at 1 forever',
+      Math.round(uniforms.uFloorIndex01.value * 255) === 2
+    );
+    ok(
+      'refresh mutates the EXISTING uniform objects — it never hands back a fresh pair',
+      uniforms.uFloorIndex01 === uniforms.uFloorIndex01 && typeof uniforms.uFloorIndex01.value === 'number'
+    );
+
+    // A FRESH resolveItemFloorAttrUniforms call against v2, from scratch,
+    // must agree with the refreshed value — refresh isn't a different,
+    // second code path that could itself drift from the original resolver.
+    const freshV2 = resolveItemFloorAttrUniforms({
+      THREE,
+      item,
+      viewedFloorIndex: 2,
+      sceneDoc: sceneDocV2,
+      logError: () => {},
+    });
+    ok(
+      'refresh and a from-scratch build against the SAME scene agree exactly',
+      freshV2.uFloorIndex01.value === uniforms.uFloorIndex01.value
+    );
+  }
+
+  // ── RECEIVER ELEVATION (bits 2-5) — 2026-08-03, for the point-light
+  // height gate ("a lantern's own cover, sitting above the flame, should not
+  // light up from it"). ──────────────────────────────────────────────────
+  {
+    const THREE = makeTHREE();
+    // Same real-map bands as the ownership-fix fixture above (floor 0 =
+    // [0,10)) — a fresh instance rather than reaching out of that block's
+    // own scope, so this section reads standalone.
+    const sceneDoc = {
+      levels: [
+        { id: 'lvl0', name: 'Underground', background: { src: 'a.webp' }, elevation: { bottom: 0, top: 10 } },
+        { id: 'lvl1', name: 'Middle', background: { src: 'b.webp' }, elevation: { bottom: 10, top: 20 } },
+        { id: 'lvl2', name: 'Roof', background: { src: 'c.webp' }, elevation: { bottom: 20, top: 30 } },
+      ],
+    };
+
+    // Quantize/decode round-trip — the CPU twin must agree with itself
+    // across the documented range, including its own clamped edges.
+    for (const raw of [-50, 0, 1, 33, 50, 99, 100, 250]) {
+      const level = quantizeReceiverElevationAboveFloor(raw);
+      ok(
+        `level for raw elevation ${raw} stays in [0, ${RECEIVER_ELEVATION_LEVELS - 1}]`,
+        level >= 0 && level <= RECEIVER_ELEVATION_LEVELS - 1
+      );
+    }
+    ok('a negative elevation-above-floor clamps to level 0 (ground)', quantizeReceiverElevationAboveFloor(-50) === 0);
+    ok('elevation 0 (exactly at the floor´s own ground) is level 0', quantizeReceiverElevationAboveFloor(0) === 0);
+    ok(
+      `elevation at RANGE_UNITS (${RECEIVER_ELEVATION_RANGE_UNITS}) reaches the TOP level, not one short of it`,
+      quantizeReceiverElevationAboveFloor(RECEIVER_ELEVATION_RANGE_UNITS) === RECEIVER_ELEVATION_LEVELS - 1
+    );
+    ok(
+      'anything past the reference range clamps to the SAME top level — never wraps back toward ground',
+      quantizeReceiverElevationAboveFloor(RECEIVER_ELEVATION_RANGE_UNITS * 10) === RECEIVER_ELEVATION_LEVELS - 1
+    );
+    ok('a non-finite raw value reads as ground level, never NaN', quantizeReceiverElevationAboveFloor(NaN) === 0);
+
+    // The packed byte round-trips through the SAME decode the shader uses,
+    // regardless of which OTHER bits (overhead, occludes-background) ride
+    // alongside it — this is the whole reason it lives at bits 2-5 rather
+    // than sharing a byte position with either.
+    for (const level of [0, 1, 5, 10, RECEIVER_ELEVATION_LEVELS - 1]) {
+      const bare = level * 4;
+      const withOverhead = bare + PRESENCE_BIT_OVERHEAD;
+      const withOccludes = bare + PRESENCE_BIT_OCCLUDES_BACKGROUND;
+      const withBoth = bare + PRESENCE_BIT_OVERHEAD + PRESENCE_BIT_OCCLUDES_BACKGROUND;
+      ok(`level ${level} decodes correctly alone`, decodeReceiverElevationLevel(bare) === level);
+      ok(
+        `level ${level} decodes correctly WITH the overhead bit set`,
+        decodeReceiverElevationLevel(withOverhead) === level
+      );
+      ok(
+        `level ${level} decodes correctly WITH the occludes-background bit set`,
+        decodeReceiverElevationLevel(withOccludes) === level
+      );
+      ok(`level ${level} decodes correctly with BOTH other bits set`, decodeReceiverElevationLevel(withBoth) === level);
+      // decodeOverheadBit's own round-trip, same fixtures, same reasoning:
+      // the level field riding alongside it must never perturb this bit.
+      ok(`level ${level}, overhead bit reads 0 when unset`, decodeOverheadBit(bare) === 0);
+      ok(`level ${level}, overhead bit reads 1 when set`, decodeOverheadBit(withOverhead) === 1);
+      ok(
+        `level ${level}, overhead bit reads 0 when only occludes-background is set`,
+        decodeOverheadBit(withOccludes) === 0
+      );
+      ok(`level ${level}, overhead bit reads 1 with BOTH other bits set`, decodeOverheadBit(withBoth) === 1);
+    }
+
+    // THE COLLISION-SAFETY PIN — this field's own maximum, even combined with
+    // the overhead bit, must never reach specular's occlusion-bit threshold
+    // (64/255); the occludes-background bit, combined with this field's
+    // maximum, must still read unambiguously above it. Nothing forces bit
+    // allocation to respect this by construction — only this test does.
+    const maxElevationRaw = (RECEIVER_ELEVATION_LEVELS - 1) * 4;
+    ok(
+      "this field's own max, plus the overhead bit, stays BELOW the occlusion threshold (64) — no false " +
+        '"occluded" reading from elevation/overhead alone',
+      maxElevationRaw + PRESENCE_BIT_OVERHEAD < 64
+    );
+    ok(
+      'the occludes-background bit, plus this field at its max, still reads unambiguously as occluded',
+      PRESENCE_BIT_OCCLUDES_BACKGROUND + maxElevationRaw > 64
+    );
+
+    // Dequantize is the documented approximate inverse, not a claim of exact
+    // recovery — bounded by the field's own step size.
+    const stepUnits = RECEIVER_ELEVATION_RANGE_UNITS / (RECEIVER_ELEVATION_LEVELS - 1);
+    ok('dequantizing level 0 returns exactly 0 (ground)', receiverElevationLevelToUnits(0) === 0);
+    ok(
+      `dequantizing the top level returns exactly the reference range (${RECEIVER_ELEVATION_RANGE_UNITS})`,
+      receiverElevationLevelToUnits(RECEIVER_ELEVATION_LEVELS - 1) === RECEIVER_ELEVATION_RANGE_UNITS
+    );
+    ok(
+      'quantize -> dequantize never drifts further than one step from the original value (a value WITHIN ' +
+        'the range, not one that clamps)',
+      Math.abs(receiverElevationLevelToUnits(quantizeReceiverElevationAboveFloor(7)) - 7) <= stepUnits
+    );
+
+    // Wired through resolveItemFloorAttrUniforms — an item sitting well above
+    // its own floor's ground (a raised tile, or a stand-in for a lantern's
+    // own cover) reports a REAL, non-zero level; an item flush with its own
+    // floor's ground reports level 0, matching today's byte-identical
+    // behaviour for every scene that has never authored a raised drawable.
+    const groundBits = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'tile', levelId: '', key: { elevation: 0 } },
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    ok(
+      'an item flush with its own floor´s ground packs receiver-elevation level 0',
+      decodeReceiverElevationLevel(Math.round(groundBits * 255)) === 0
+    );
+    const raisedBits = resolveItemFloorAttrUniforms({
+      THREE,
+      // Floor 0 spans [0, 10) per the fixture below — an item at elevation 8
+      // sits near the TOP of its own floor's band, the lantern-cover shape.
+      item: { kind: 'tile', levelId: '', key: { elevation: 8 } },
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+    }).uPresenceBits01.value;
+    ok(
+      'an item raised well above its own floor´s ground packs a NON-ZERO receiver-elevation level',
+      decodeReceiverElevationLevel(Math.round(raisedBits * 255)) === quantizeReceiverElevationAboveFloor(8 - 0)
+    );
+    ok(
+      '...and that level is clearly above ground (0) — the lantern-cover shape this field exists for',
+      decodeReceiverElevationLevel(Math.round(raisedBits * 255)) > 0
+    );
+
+    // receiverElevationFraction01 — vegetation Case-2's own door. A tree
+    // overlay's HOST tile sits at ordinary ground elevation, but the CANOPY
+    // itself (VegetationKind#passiveElevationFraction, a 0..1 fraction of
+    // its OWN floor's band, exactly like this parameter) is what should gate
+    // a light's reach — never the host's own near-ground placement. Floor 0
+    // spans [0,10), so fraction 0.9 (a tree's own near-top fraction) resolves
+    // to elevation 9, well above the host's own elevation 1.
+    const hostGroundBits = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'tile', levelId: '', key: { elevation: 1 } }, // the host tile itself, barely off the ground
+      viewedFloorIndex: 0,
+      sceneDoc,
+      logError: () => {},
+      receiverElevationFraction01: 0.9, // the canopy's own height fraction, well above its host
+    }).uPresenceBits01.value;
+    ok(
+      'the fraction override replaces the item´s own elevation for the receiver-elevation field ONLY',
+      decodeReceiverElevationLevel(Math.round(hostGroundBits * 255)) === quantizeReceiverElevationAboveFloor(9 - 0)
+    );
+    ok(
+      '...and clearly differs from what the host´s OWN (near-ground) elevation would have packed',
+      decodeReceiverElevationLevel(Math.round(hostGroundBits * 255)) !== quantizeReceiverElevationAboveFloor(1 - 0)
+    );
+    // Floor MEMBERSHIP must still come from the item's real elevation, never
+    // the fraction — a canopy's floor is still whichever floor its HOST
+    // belongs to.
+    const floorOfHost = Math.round(
+      resolveItemFloorAttrUniforms({
+        THREE,
+        item: { kind: 'tile', levelId: '', key: { elevation: 1 } },
+        viewedFloorIndex: 0,
+        sceneDoc,
+        logError: () => {},
+        receiverElevationFraction01: 0.9,
+      }).uFloorIndex01.value * 255
+    );
+    ok(
+      'the fraction never leaks into floor MEMBERSHIP — the host´s own elevation (1) still resolves floor 0',
+      floorOfHost === 0
+    );
+    // An UNBOUNDED band (elevationTop undeclared/Infinity) has no scale to
+    // apply a fraction against — falls back to the item's own elevation,
+    // the same "no scale to work against" posture stampVegetationRenderOrders
+    // already takes for its own sort-order fallback.
+    const unboundedSceneDoc = {
+      levels: [{ id: 'lvlU', name: 'Unbounded', background: { src: 'u.webp' }, elevation: { bottom: 0, top: null } }],
+    };
+    const unboundedBits = resolveItemFloorAttrUniforms({
+      THREE,
+      item: { kind: 'tile', levelId: '', key: { elevation: 3 } },
+      viewedFloorIndex: 0,
+      sceneDoc: unboundedSceneDoc,
+      logError: () => {},
+      receiverElevationFraction01: 0.9,
+    }).uPresenceBits01.value;
+    ok(
+      'an unbounded band ignores the fraction and falls back to the item´s own real elevation (3)',
+      decodeReceiverElevationLevel(Math.round(unboundedBits * 255)) === quantizeReceiverElevationAboveFloor(3 - 0)
     );
   }
 

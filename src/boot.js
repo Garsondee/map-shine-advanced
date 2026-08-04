@@ -238,6 +238,7 @@ import {
   buildParamControl,
   buildInheritableRangeRow,
   collapsedStatusLine,
+  createSectionStore,
 } from './diag/effect-controls.js';
 import {
   createWaterSeams,
@@ -249,11 +250,17 @@ import {
   createSpecularSeams,
   createSpecularRegistration,
   SPECULAR_PARAMS,
+  SPECULAR_LAYER_PARAMS,
+  SPECULAR_LAYER_DEFAULTS,
   SPECULAR_DEBUG_CHANNELS,
   createWindowSeams,
   createWindowRegistration,
   WINDOW_PARAMS,
   WINDOW_DEBUG_CHANNELS,
+  createApertureGoboRegistration,
+  APERTURE_GOBO_PARAMS,
+  APERTURE_GOBO_DEBUG_CHANNELS,
+  resolveAnchorElevationRank,
 } from './effects/index.js';
 import {
   buildSunShadowsReport,
@@ -1091,6 +1098,7 @@ function install() {
     ['fluid', () => fluid.reapply()],
     ['specular', () => specular.reapply()],
     ['window light', () => windowLight.reapply()],
+    ['aperture gobo', () => apertureGobo.reapply()],
     ['bloom', () => reapplyBloom()],
     ['colour grade', () => reapplyGradeLook()],
     // Sun shadows MUST run per scene, not only at boot: this apply is what pushes
@@ -1777,6 +1785,14 @@ function install() {
         // the shared look" — omitting it would silently make every override
         // invisible to the renderer despite being correctly stored.
         params: a.params,
+        // THIS CANDLE'S OWN HEIGHT GATE INPUT (2026-08-03) — the flame
+        // sprite shares a point light's own occlusion gate
+        // (point-light-illumination.js#buildHeightGateNode); it needs to
+        // know where the FLAME itself sits, which `lastKnownFloors` (cached
+        // on scene load / floor switch, no new Foundry read) plus this
+        // anchor's own locked band already answer. `resolveAnchorElevation
+        // Rank`'s own doc explains the 'all-levels' sentinel case.
+        elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors),
       })),
     };
   };
@@ -1797,6 +1813,9 @@ function install() {
       x: a.x,
       y: a.y,
       params: a.params,
+      // See getCandleRenderState's own identical field, just above — the
+      // bolt shares the SAME height gate as the flame and a point light.
+      elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors),
     })),
   });
 
@@ -1919,6 +1938,20 @@ function install() {
     log,
   });
 
+  // APERTURE GOBO (docs/planning/Aperture-Gobo.md) — no mask seams to build
+  // alongside it (see that module's own header): the only thing the viewer
+  // needs from boot is the resolved render state, threaded straight into
+  // `startVtPanViewer({...})` below exactly like `getWindowRenderState`.
+  const apertureGobo = createApertureGoboRegistration({
+    effectRegistry,
+    deriveEffectLayers,
+    readSetting: (key) => readSetting(MODULE_ID, key),
+    writeSetting,
+    moduleId: MODULE_ID,
+    effectEnableKey,
+    log,
+  });
+
   // LIVE MASK-AUTHORITY CROSS-CHECK (2026-07-22, the wind+particle probe's
   // own next question): the probe's `wind.exposure` field reads wind's own
   // CACHED snapshot (`windExposureGrid`, refreshed by bakeWindField — see
@@ -1985,6 +2018,7 @@ function install() {
     fluid: fluid.reapply,
     specular: specular.reapply,
     window: windowLight.reapply,
+    apertureGobo: apertureGobo.reapply,
   };
   function forceEffectEnabled(id, enabled) {
     if (enabled == null) {
@@ -3042,6 +3076,88 @@ function install() {
   MapShine.setSpecular = specular.setSpecular;
   /** `MapShine.setSpecularDebug(4)` — the console twin of the picker below. */
   MapShine.setSpecularDebug = specular.setDebugChannel;
+  /** `MapShine.setSpecularLayer(1, {streak: 0.4})` — the console twin of the
+   * per-layer strips below. This function has existed in
+   * `specular-registration.js` since the layers themselves shipped
+   * (2026-07-27) but was NEVER attached to `MapShine` and had no UI either —
+   * found 2026-08-03 (ROUND 17) auditing every declared control for whether
+   * an author can actually reach it. `feedback_unconsumed_api_rots_silently`:
+   * fully wired all the way to the shader, unreachable by anyone. */
+  MapShine.setSpecularLayer = specular.setSpecularLayer;
+
+  /** Persisted open/closed state for the three shimmer-layer strips —
+   * independent of the card's own Advanced state and of each other, same
+   * reason `createSectionStore`'s own header gives for the card-level store:
+   * `debug-panel.js` rebuilds this whole card from scratch on every slider
+   * drag anywhere in it (including these), so a plain `<details open>` would
+   * slam shut the instant one was used. */
+  const specularLayerSections = createSectionStore();
+
+  /** A short, honest hint for the one layer whose defaults look like a typo
+   * if you don't know why: layer 3's parallax depth is NEGATIVE on purpose
+   * (`SPECULAR_LAYER_DEFAULTS`'s own comment — it counter-moves against the
+   * other two, which is most of what sells "a highlight sliding over a
+   * surface" rather than "a texture panning with the camera"). */
+  const SPECULAR_LAYER_HINT = ['', '', ' (counter-moving)'];
+
+  /**
+   * ONE SHIMMER LAYER'S OWN EIGHT CONTROLS, folded behind its own disclosure.
+   *
+   * `SPECULAR_LAYER_PARAMS` is ONE shared declaration (labels/ranges/help) —
+   * `SPECULAR_LAYER_DEFAULTS[i]` is what makes the three layers actually
+   * differ, and `specular.getLayers()[i]` is this session's live override, if
+   * any. A flat `schema` object (what `buildEffectCard` generates FOH/ROH
+   * from) has no way to express "one declaration, three independent value
+   * sets" — hence a hand-built strip, passed through `extraAdvanced`, rather
+   * than the generated machinery every OTHER specular control goes through.
+   * @param {number} i @returns {HTMLElement}
+   */
+  function buildSpecularLayerStrip(i) {
+    const sectionKey = `specular:layer${i}`;
+    const details = document.createElement('details');
+    details.open = specularLayerSections.isOpen(sectionKey);
+    details.addEventListener('toggle', () => specularLayerSections.setOpen(sectionKey, details.open));
+    Object.assign(details.style, {
+      border: '1px solid rgba(143,214,255,0.12)',
+      borderRadius: '7px',
+      background: 'rgba(143,214,255,0.03)',
+      flexBasis: '100%',
+    });
+    const summary = document.createElement('summary');
+    Object.assign(summary.style, {
+      cursor: 'pointer',
+      listStyle: 'none',
+      padding: '5px 8px',
+      fontSize: '10px',
+      fontWeight: '600',
+      color: '#8fa3c4',
+    });
+    summary.innerHTML = `<span class="msa-chev">▸</span> Shimmer layer ${i + 1}${SPECULAR_LAYER_HINT[i] ?? ''}`;
+    details.append(summary);
+
+    const body = document.createElement('div');
+    Object.assign(body.style, { display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '2px 8px 8px' });
+    const defaults = SPECULAR_LAYER_DEFAULTS[i] ?? {};
+    for (const [paramId, decl] of Object.entries(SPECULAR_LAYER_PARAMS)) {
+      const override = specular.getLayers()[i] ?? {};
+      body.append(
+        buildParamControl(paramId, decl, {
+          value: Number.isFinite(override[paramId]) ? override[paramId] : (defaults[paramId] ?? decl.default),
+          onChange: (v) => MapShine.setSpecularLayer(i, { [paramId]: v }),
+        })
+      );
+    }
+    details.append(body);
+    return details;
+  }
+
+  /** The three shimmer layers, one strip each, in their own wrapper. */
+  function buildSpecularLayerStrips() {
+    const wrap = document.createElement('div');
+    Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '4px', flexBasis: '100%' });
+    for (let i = 0; i < SPECULAR_LAYER_DEFAULTS.length; i++) wrap.append(buildSpecularLayerStrip(i));
+    return wrap;
+  }
 
   /**
    * THE DEBUG-CHANNEL PICKER — one dropdown that makes the shader say which of
@@ -3098,27 +3214,37 @@ function install() {
         // (feedback_foh_roh_must_differ). The test is "would a GM change this
         // mid-session, or only while tuning?", and these five are chosen
         // against the question an author actually arrives with — "why does the
-        // metal not read?", asked four times running.
+        // metal not read?", asked five times running now.
         //
         // `strength` (is it on at all) and `shimmerContrast` (is it moving)
         // answer that directly. `parallax` is the one control that decides
         // whether the shine reads as a REFLECTION or as paint, which is the
-        // difference the whole effect exists for. `unlit shine` is the fix for
-        // a dark room whose treasure has vanished. `per-object variety` is
-        // here because it is the newest capability and the one an author will
-        // want to feel out immediately.
+        // difference the whole effect exists for. `per-object variety` is here
+        // because it is a recent capability and the one an author will want to
+        // feel out immediately.
         //
-        // `patternSize`, `metalColour`, `driftSpeed`, `breathing` and
-        // `sunDirection` are set-once look decisions — ROH. The three per-layer
-        // strips are further back still, behind Advanced: they are where a
-        // surface gets DESIGNED, not where a session gets adjusted.
-        fohKeys: ['strength', 'shimmerGain', 'parallaxStrength', 'islandSpread', 'lightFloor'],
+        // ⚠️ `lightFloor` SWAPPED OUT FOR `incidentSteepness` (2026-08-03,
+        // ROUND 17): a live channel probe showed the darkness-suppression gate
+        // added the previous round crushing an ordinarily-lit point to under
+        // 1% of its true brightness — `incidentSteepness` is now THE first
+        // control an author reaches for when the shine reads as globally too
+        // faint, which is a more common way into this card than "make the
+        // never-quite-black floor" was.
+        //
+        // `patternSize`, `metalColour`, `driftSpeed`, `breathing`,
+        // `sunDirection` and the new `sheenCeiling`/`glintCeiling` (Response) —
+        // set-once look/response decisions — are ROH. The three per-layer
+        // strips render below the categorised groups via `extraAdvanced`: a
+        // flat schema cannot hold "one declaration, three live value sets", so
+        // they were never able to go through `fohKeys`/`schema` at all.
+        fohKeys: ['strength', 'incidentSteepness', 'shimmerGain', 'parallaxStrength', 'islandSpread'],
         getValue: (id) => readout.params?.[id] ?? SPECULAR_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setSpecular({ [id]: value }),
         enabled: readout.enabled,
         onToggleEnabled: (next) => MapShine.setSpecular({ enabled: next }),
         add: paintAffordance('specular'),
         extra: [buildSpecularDebugSelect()],
+        extraAdvanced: [buildSpecularLayerStrips()],
       });
     },
     { zone: 'workshop', effect: 'specular', order: 50 }
@@ -3268,6 +3394,110 @@ function install() {
         generatedAt: new Date().toISOString(),
       }),
     { effect: 'window' }
+  );
+
+  // APERTURE GOBO (docs/planning/Aperture-Gobo.md) — reads NO mask, so
+  // unlike window/specular there is no `buildXReport` cross-referencing the
+  // mask authority; the whole state worth reporting is the resolved params
+  // and `point-light-pool.js`'s own live readout (apertures found/dropped,
+  // lights currently showing a pattern), already assembled by
+  // `vt-pan-viewer-diagnostics.js#buildViewerDiagnostics` under its own
+  // `apertureGobo` key — the SAME bridge `pointLights` uses one line above
+  // it in that file, not a direct call from here.
+  MapShine.setApertureGobo = apertureGobo.setApertureGobo;
+  /** `MapShine.setApertureGoboDebug(true)` — the OLD console twin, kept working
+   * (maps to the `'pattern'` channel) alongside the picker below. */
+  MapShine.setApertureGoboDebug = (on) => apertureGobo.setDebug(on);
+  /** `MapShine.setApertureGoboDebugChannel('pattern')` — the console twin of
+   * the picker below. */
+  MapShine.setApertureGoboDebugChannel = apertureGobo.setDebugChannel;
+
+  /**
+   * THE DEBUG-CHANNEL PICKER — upgraded from a single "Show pattern only"
+   * checkbox (2026-08-03) after that ONE channel could not settle "is the
+   * gate the gap" against a live scene reading as completely unaffected by
+   * the real material with the pattern channel showing a clean, correct
+   * shape. Same idiom as window/specular's own pickers
+   * (`APERTURE_GOBO_DEBUG_CHANNELS` holds the why and the per-channel
+   * reading guide) — `docs/planning/Aperture-Gobo.md` §6.0/§10 names the
+   * live A/B this exists to make cheap.
+   * @returns {HTMLSelectElement}
+   */
+  function buildApertureGoboDebugSelect() {
+    const select = document.createElement('select');
+    select.className = 'msa-effect-preset-select';
+    select.title = 'Show one shader intermediate instead of the effect — see each option for what it reads.';
+    for (const ch of APERTURE_GOBO_DEBUG_CHANNELS) {
+      const opt = document.createElement('option');
+      opt.value = ch.id;
+      opt.textContent = ch.label;
+      opt.title = ch.reads;
+      select.appendChild(opt);
+    }
+    select.value = apertureGobo.getDebugChannel();
+    select.addEventListener('change', () => {
+      MapShine.setApertureGoboDebugChannel(select.value);
+    });
+    return select;
+  }
+
+  MapShine.debug.registerPanel(
+    'aperture-gobo-panel',
+    'Window light pattern',
+    ({ attachments }) => {
+      const readout = apertureGobo.getReadout();
+      return buildEffectCard({
+        id: 'apertureGobo',
+        diagnostics: attachments,
+        icon: '🪟',
+        title: 'Window light pattern',
+        subtitle: 'a point light shaped by a real aperture wall — no mask, no painting',
+        status: () => collapsedStatusLine({ enabled: readout.enabled }),
+        schema: APERTURE_GOBO_PARAMS,
+        fohKeys: ['strength', 'cols', 'rows', 'softness'],
+        getValue: (id) => readout.params?.[id] ?? APERTURE_GOBO_PARAMS[id]?.default,
+        onChange: (id, value) => MapShine.setApertureGobo({ [id]: value }),
+        enabled: readout.enabled,
+        onToggleEnabled: (next) => MapShine.setApertureGobo({ enabled: next }),
+        extra: [buildApertureGoboDebugSelect()],
+      });
+    },
+    { zone: 'workshop', effect: 'apertureGobo', order: 61 }
+  );
+
+  MapShine.debug.registerReport(
+    'aperture-gobo',
+    'Window light pattern (why is it not visible?)',
+    () => {
+      const readout = apertureGobo.getReadout();
+      // `apertureGobo` is a PLAIN VALUE here, already resolved by
+      // `vt-pan-viewer-diagnostics.js#buildViewerDiagnostics` (the same
+      // bridge `pointLights` uses) — not a function to call. A prior version
+      // of this line called `.getApertureGoboInfo?.()` directly off the
+      // diagnostics object, which doesn't exist there at all (that method
+      // lives on the INNER `_active` object `getDiagnostics()` never
+      // exposes directly) — it silently evaluated to `undefined` via
+      // optional chaining rather than throwing, so it took a live report
+      // (not a test) to surface: `available:false`/`unavailable:true` on a
+      // scene that was demonstrably rendering. Fixed at the bridge, not by
+      // reaching around it a second way.
+      const info = getVtPanViewerDiagnostics?.()?.apertureGobo ?? null;
+      return {
+        enabled: readout.enabled,
+        debugChannel: apertureGobo.getDebugChannel(),
+        params: readout.params,
+        // THE MOST LIKELY FIRST-RUN OUTCOME (Aperture-Gobo.md §9.1): this
+        // effect SHAPES light Foundry already lets through a wall — it
+        // cannot create light through a wall Foundry says is opaque. "0
+        // apertures found" on a scene with no window walls (move solid,
+        // light PROXIMITY — Foundry's own window convention) is a DATA
+        // fact, not a bug, and this report says so loudly rather than
+        // leaving a silent zero to be mistaken for one.
+        live: info ?? { unavailable: true, reason: 'viewer not started (no _active viewer instance)' },
+        generatedAt: new Date().toISOString(),
+      };
+    },
+    { effect: 'apertureGobo' }
   );
 
   MapShine.debug.registerReport(
@@ -4671,6 +4901,10 @@ function install() {
         getWindowMaskUrl,
         getWindowMaskRect,
         getWindowRenderState: windowLight.getRenderState,
+        // APERTURE GOBO's one seam (docs/planning/Aperture-Gobo.md) — no mask
+        // URL/rect pair, unlike SHINE/window just above: its only input is
+        // wall geometry `effects/lighting/point-light-pool.js` reads itself.
+        getApertureGoboRenderState: apertureGobo.getRenderState,
       })),
     };
   }
@@ -4882,6 +5116,12 @@ function install() {
     'Pixel Probe (click 3 pts)',
     async () => ({
       report: 'pixel-probe',
+      // A literal, hand-bumped string — bumped every time this probe's own
+      // report shape changes (2026-08-04, light-elevation-occlusion round
+      // 11). Exists ONLY so a pasted-back report can PROVE which build
+      // produced it, rather than assuming a reload picked up the latest
+      // source — removes "is my fix even loaded" as an open question.
+      probeBuildTag: 'r15-attr-alpha-test-fix-2026-08-04',
       generatedAt: new Date().toISOString(),
       points: await MapShine.armPixelProbe(3),
     }),
@@ -5158,6 +5398,159 @@ function install() {
       return probeSpecularChannelsAt(points);
     },
     { effect: 'specular' }
+  );
+
+  // ==========================================================================
+  // THE APERTURE GOBO CHANNEL PROBE (2026-08-03) — `probeSpecularChannelsAt`'s
+  // own pattern, adapted. Built after seven live rounds each found a real,
+  // fixed, verified bug and STILL produced a scene reading as completely
+  // unaffected, and — after bloom, the OTHER window-light effect, and a
+  // stale build/cache were each raised and each independently ruled out by
+  // the author — the author said directly: "stop assuming this isn't a code
+  // bug... enhance the reporting, upgrade the pixel probe." THIS is that:
+  // one click-3-points action, `illum` as the PRIMARY buffer (this effect
+  // draws into `buf:scene.illum` directly — unlike specular's post-composite
+  // `scene.lit` pass), `lit` carried alongside as a secondary check on
+  // whatever happens between illum and the pixel the author's eye actually
+  // sees (albedo multiply, bloom, grade). Down to TWO channels (`off`/
+  // `pattern`) as of round 10 (2026-08-04) — `visibility`/`gate-inputs`
+  // retired alongside the separate visibility-gate pass they used to read;
+  // see `APERTURE_GOBO_CHANNEL_PROBE_IDS`'s own comment below.
+  // ==========================================================================
+
+  // RETIRED (round 10, 2026-08-04): 'visibility'/'gate-inputs' both read the
+  // separate visibility-gate pass that no longer exists — the gobo pattern
+  // is now baked directly into the light's own MAX-blended illumination/
+  // coloration materials (point-light-illumination.js's own "THE GOBO IS
+  // PART OF THIS LIGHT'S OWN FALLOFF" header). Probing either of those ids
+  // now would silently read whatever 'off' already shows (point-light-
+  // pool.js's own debug mesh only distinguishes 'pattern' from everything
+  // else) — exactly the "instrument reads something, but not what its own
+  // label claims" trap this project treats as a real bug, not a shrug.
+  // Removed rather than left in place reading stale data.
+  const APERTURE_GOBO_CHANNEL_PROBE_IDS = ['off', 'pattern'];
+
+  /** Push an aperture-gobo debug channel and wait for it to actually be on
+   * screen — same 2-rAF margin as `waitForSpecularChannelToRender`, for the
+   * same reason (the registration's own channel is read fresh every frame
+   * by `point-light-pool.js#update`, no reapply needed, but the probe must
+   * not fire mid-frame against the change).
+   * @param {'off'|'pattern'} id @returns {Promise<void>} */
+  async function waitForApertureGoboChannelToRender(id) {
+    apertureGobo.setDebugChannel(id);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  /** Rec.709 luma of a decoded `[r,g,b,a]` readback. @param {number[]|null} rgba @returns {number|null} */
+  function apertureGoboProbeLuma(rgba) {
+    if (!rgba) return null;
+    return +(rgba[0] * 0.2126 + rgba[1] * 0.7152 + rgba[2] * 0.0722).toFixed(4);
+  }
+
+  /**
+   * @param {Array<{worldX:number, worldY:number}>} points
+   * @returns {Promise<object>}
+   */
+  async function probeApertureGoboChannelsAt(points) {
+    const list = (Array.isArray(points) ? points : []).slice(0, 3).map((p) => ({ x: p.worldX, y: p.worldY }));
+    const restoreTo = apertureGobo.getDebugChannel();
+    /** @type {Record<string, Array<object>>} */
+    const byChannel = {};
+    try {
+      for (const id of APERTURE_GOBO_CHANNEL_PROBE_IDS) {
+        await waitForApertureGoboChannelToRender(id);
+        const readback = await MapShine.probePixels(list);
+        byChannel[id] = readback.map((p) => ({
+          index: p.index,
+          worldX: p.worldX,
+          worldY: p.worldY,
+          onScreen: p.onScreen,
+          // Same falsifiability discipline `probeSpecularChannelsAt` uses:
+          // the device pixel actually read, and a control buffer this pass
+          // never writes (`albedo`), so "every channel reads identical" can
+          // be told apart from "the probe sampled one texel three times".
+          pixel: p.pixel ?? null,
+          controlAlbedo: p.buffers?.albedo?.rgba ?? null,
+          illum: p.buffers?.illum?.rgba ?? null,
+          lit: p.buffers?.lit?.rgba ?? null,
+          illumLuma: apertureGoboProbeLuma(p.buffers?.illum?.rgba ?? null),
+          litLuma: apertureGoboProbeLuma(p.buffers?.lit?.rgba ?? null),
+        }));
+      }
+    } finally {
+      // ALWAYS restored, success or throw.
+      await waitForApertureGoboChannelToRender(restoreTo);
+    }
+
+    // Re-shape channel-outer → point-outer: an author reading "point 2 (the
+    // mullion)" wants every channel's reading for THAT point together.
+    const byPoint = list.map((_, i) => {
+      const index = i + 1;
+      /** @type {Record<string, {illum:number[]|null, lit:number[]|null, illumLuma:number|null, litLuma:number|null}>} */
+      const channels = {};
+      for (const id of APERTURE_GOBO_CHANNEL_PROBE_IDS) {
+        const hit = byChannel[id]?.find((p) => p.index === index);
+        if (hit) channels[id] = { illum: hit.illum, lit: hit.lit, illumLuma: hit.illumLuma, litLuma: hit.litLuma };
+      }
+      const worldPoint = byChannel[APERTURE_GOBO_CHANNEL_PROBE_IDS[0]]?.find((p) => p.index === index);
+      const patternDark = (channels.pattern?.illumLuma ?? 1) < 0.05;
+      return {
+        index,
+        worldX: worldPoint?.worldX ?? null,
+        worldY: worldPoint?.worldY ?? null,
+        onScreen: worldPoint?.onScreen ?? null,
+        pixel: worldPoint?.pixel ?? null,
+        controlAlbedo: worldPoint?.controlAlbedo ?? null,
+        channels,
+        // FACTUAL FLAGS ONLY, never a verdict on `off` itself — mirrors
+        // specular's own posture. `shadowShouldBeFullyDark` is the
+        // load-bearing one, SIMPLER as of round 10 than it used to be: the
+        // gobo pattern now MAX-blends as part of the light's own single
+        // draw, so "the pattern says fully blocked" is the WHOLE condition
+        // for "this fragment should fall back to ambient/whatever else is
+        // already there" — there is no separate gate to also check. If this
+        // flag is true and `off`'s own illum reading is still bright well
+        // above the surrounding ambient, that is direct, numeric proof of a
+        // real bug (the pattern isn't reaching this light's own MAX-blend
+        // draw), not a two-mechanism ambiguity to disentangle first.
+        flags: { patternReachesDark: patternDark, shadowShouldBeFullyDark: patternDark },
+      };
+    });
+
+    const distinctPixels = new Set(byPoint.map((p) => (p.pixel ? `${p.pixel.x},${p.pixel.y}` : 'none')));
+    const distinctAlbedo = new Set(byPoint.map((p) => JSON.stringify(p.controlAlbedo)));
+    return {
+      report: 'aperture-gobo-channel-probe',
+      generatedAt: new Date().toISOString(),
+      sanity: {
+        pointsProbed: byPoint.length,
+        distinctPixelsRead: distinctPixels.size,
+        distinctControlAlbedo: distinctAlbedo.size,
+        verdict:
+          byPoint.length > 1 && distinctPixels.size === 1
+            ? 'PROBE FAULT: every point resolved to ONE device pixel — channel values below are one texel repeated, not a spatial comparison'
+            : byPoint.length > 1 && distinctAlbedo.size === 1
+              ? 'PROBE SUSPECT: distinct pixels but IDENTICAL control albedo — the readback may be sampling a stale or wrong target'
+              : 'probe healthy: distinct pixels AND distinct control albedo, so identical channel values below are the SHADER being constant, not the instrument',
+      },
+      points: byPoint,
+    };
+  }
+
+  // Designed for exactly the protocol this whole family of probes uses:
+  // click one point OVER an open pane, one OVER a mullion/frame, one further
+  // out for a baseline — same click-3-points flow every other probe here
+  // uses.
+  MapShine.debug.registerAction(
+    'aperture-gobo-channel-probe',
+    '🪟🔍 Window Pattern Channel Probe (click 3 pts)',
+    async () => {
+      const points = await MapShine.armPixelProbe(3);
+      if (!points.length)
+        return { report: 'aperture-gobo-channel-probe', generatedAt: new Date().toISOString(), points: [] };
+      return probeApertureGoboChannelsAt(points);
+    },
+    { effect: 'apertureGobo' }
   );
 
   // THE THIRD GROUP (2026-07-17, ghost-hunting round 3). Five theories dead by

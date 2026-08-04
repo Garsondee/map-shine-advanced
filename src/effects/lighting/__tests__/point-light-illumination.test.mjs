@@ -3,9 +3,14 @@
  *
  * `easeAttenuation`, `computeExposure`, `triangulateLightFan`,
  * `writeLightEdgePoints` and `computeEdgeSoftMarginNormalized` are pure and
- * Node-tested here. `buildPointLightIlluminationMaterial` builds TSL and is
- * browser-only (verified live via the debug panel / an A/B screenshot vs
- * Foundry, not a mocked THREE — CONVENTIONS.md §4).
+ * Node-tested here. `buildPointLightIlluminationMaterial` builds TSL; whether
+ * it LOOKS right is still browser-only (verified live via the debug panel /
+ * an A/B screenshot vs Foundry — CONVENTIONS.md §4), but the graph itself
+ * DOES construct cleanly in Node with the real (not mocked) vendored TSL —
+ * see `aperture-gobo-render.test.mjs`'s own "THE FULL INTEGRATION" block,
+ * which exercises this exact function with and without the aperture-gobo
+ * term wired in. That earlier "browser-only" framing here was never actually
+ * tested against; corrected rather than left to mislead the next reader.
  */
 import {
   easeAttenuation,
@@ -13,8 +18,24 @@ import {
   triangulateLightFan,
   writeLightEdgePoints,
   computeEdgeSoftMarginNormalized,
+  computeHeightGate,
+  buildPointLightIlluminationMaterial,
   MAX_LIGHT_EDGES,
+  elevationRank,
+  ELEVATION_RANK_FRACTION_DIVISOR,
+  HEIGHT_GATE_TOLERANCE_UNITS,
+  HEIGHT_GATE_SOFTNESS_UNITS,
+  RECEIVER_ELEVATION_LEVELS_MIRROR,
+  RECEIVER_ELEVATION_RANGE_UNITS_MIRROR,
+  LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
 } from '../point-light-illumination.js';
+import {
+  RECEIVER_ELEVATION_LEVELS,
+  RECEIVER_ELEVATION_RANGE_UNITS,
+  decodeReceiverElevationLevel,
+  quantizeReceiverElevationAboveFloor,
+} from '../../../vt/scene-attr.js';
+import * as THREE from '../../../vendor/three/three.webgpu.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
@@ -249,4 +270,266 @@ export function run(t) {
 
   // ---- MAX_LIGHT_EDGES sanity — a documented, sane cap ---------------------
   ok('MAX_LIGHT_EDGES is a sane, positive, generous cap', MAX_LIGHT_EDGES >= 32 && MAX_LIGHT_EDGES <= 256);
+
+  // ======================================================================
+  // THE CROSS-FILE PIN — vt/scene-attr.js's RECEIVER_ELEVATION_LEVELS/
+  // RANGE_UNITS and this module's own _MIRROR constants must agree, or this
+  // file's decode silently disagrees with what scene-attr.js actually packs.
+  // A direct import would create a vt/<->effects/ cycle (see this module's
+  // own "HEIGHT/ELEVATION GATE" header) — this test is what keeps the
+  // deliberate duplicate honest, the same shape as SPECULAR_DEFAULT_
+  // SHIMMER_GAIN vs SPECULAR_PARAMS.shimmerGain.default.
+  // ======================================================================
+  ok(
+    'RECEIVER_ELEVATION_LEVELS_MIRROR matches vt/scene-attr.js´s real constant',
+    RECEIVER_ELEVATION_LEVELS_MIRROR === RECEIVER_ELEVATION_LEVELS
+  );
+  ok(
+    'RECEIVER_ELEVATION_RANGE_UNITS_MIRROR matches vt/scene-attr.js´s real constant',
+    RECEIVER_ELEVATION_RANGE_UNITS_MIRROR === RECEIVER_ELEVATION_RANGE_UNITS
+  );
+
+  // ======================================================================
+  // elevationRank — the floor-index-dominant absolute height. THE fix for the
+  // 2026-08-03 live report; see the function's own doc for the postmortem.
+  // ======================================================================
+  ok(
+    'the within-floor fraction is STRICTLY below 1, so a floor´s own highest surface can never outrank ' +
+      'the floor above it — the whole load-bearing property of the rank',
+    elevationRank(0, RECEIVER_ELEVATION_RANGE_UNITS_MIRROR) < 1 &&
+      elevationRank(0, RECEIVER_ELEVATION_RANGE_UNITS_MIRROR * 100) < 1
+  );
+  ok(
+    'every floor-1 height outranks every floor-0 height',
+    [0, 1, 5, 9, 15, 400].every((hi) =>
+      [0, 1, 5, 9, 15, 400].every((lo) => elevationRank(1, hi) > elevationRank(0, lo))
+    )
+  );
+  ok(
+    'the rank is monotonic in height within one floor, and a negative height clamps to the floor´s ground',
+    elevationRank(2, 0) < elevationRank(2, 3) &&
+      elevationRank(2, 3) < elevationRank(2, 9) &&
+      elevationRank(2, -50) === elevationRank(2, 0)
+  );
+  ok(
+    'a decoded RECEIVER level and the CPU-side rank agree exactly — the shader divides the same 16 ' +
+      'buckets by the SAME divisor, and at RANGE=15 a level IS the height in units',
+    [0, 1, 5, 9, 15].every(
+      (units) =>
+        near(
+          elevationRank(3, units),
+          3 + quantizeReceiverElevationAboveFloor(units) / ELEVATION_RANK_FRACTION_DIVISOR
+        ) && quantizeReceiverElevationAboveFloor(units) === units
+    )
+  );
+  ok(
+    'the fraction span PLUS the gate´s whole tolerance+softness band stays strictly under one floor — ' +
+      'the invariant that makes cross-floor bleed structurally impossible rather than merely unlikely',
+    RECEIVER_ELEVATION_RANGE_UNITS_MIRROR / ELEVATION_RANK_FRACTION_DIVISOR +
+      (HEIGHT_GATE_TOLERANCE_UNITS + HEIGHT_GATE_SOFTNESS_UNITS) / ELEVATION_RANK_FRACTION_DIVISOR <
+      1
+  );
+  ok('a non-finite floor index or height degrades to the lowest rank, never NaN', elevationRank(NaN, NaN) === 0);
+
+  // ======================================================================
+  // computeHeightGate — the CPU twin of the shader's height/elevation gate.
+  // Both arguments are RANKS (elevationRank), never bare heights.
+  // ======================================================================
+  ok(
+    'the unconfigured sentinel always fully reaches, at any realistic receiver rank — no special-case ' +
+      'branch needed, the smoothstep itself saturates',
+    computeHeightGate(
+      elevationRank(9, RECEIVER_ELEVATION_RANGE_UNITS_MIRROR),
+      LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+    ) === 1
+  );
+  ok(
+    'a light reading NaN rank stays finite, never NaN downstream',
+    Number.isFinite(computeHeightGate(elevationRank(0, 5), NaN))
+  );
+  ok(
+    'a receiver at or BELOW the light is fully lit — a lamp lights its own floor, and an UNWRITTEN ' +
+      'attr texel (rank 0, the lowest possible) must read as PROCEED (fail-open polarity)',
+    computeHeightGate(elevationRank(0, 0), elevationRank(0, 5)) === 1 && computeHeightGate(0, elevationRank(2, 0)) === 1
+  );
+  ok(
+    'a receiver within the tolerance above the light is still fully lit',
+    computeHeightGate(elevationRank(0, 1), elevationRank(0, 0)) === 1
+  );
+  ok(
+    'a receiver past tolerance+softness above the light is fully dark',
+    computeHeightGate(
+      elevationRank(0, HEIGHT_GATE_TOLERANCE_UNITS + HEIGHT_GATE_SOFTNESS_UNITS + 1),
+      elevationRank(0, 0)
+    ) === 0
+  );
+  ok(
+    'the gate is monotonically NON-INCREASING as the receiver rises against a fixed light',
+    (() => {
+      const light = elevationRank(1, 5);
+      let prev = 2;
+      for (let f = 0; f <= 3; f++) {
+        for (let h = 0; h <= 15; h += 1) {
+          const g = computeHeightGate(elevationRank(f, h), light);
+          if (g > prev + 1e-9) return false;
+          prev = g;
+        }
+      }
+      return true;
+    })()
+  );
+  ok(
+    'the gate always stays within [0,1] across every floor/height combination',
+    [0, 1, 2, 3].every((f) =>
+      [0, 1, 5, 9, 15].every((h) => {
+        const g = computeHeightGate(elevationRank(f, h), elevationRank(1, 5));
+        return g >= 0 && g <= 1;
+      })
+    )
+  );
+  ok(
+    'a degenerate (zero) softness still resolves to a clean 0/1 edge, never NaN/Infinity',
+    Number.isFinite(computeHeightGate(elevationRank(0, 9), elevationRank(0, 0), 1, 0)) &&
+      computeHeightGate(elevationRank(0, 9), elevationRank(0, 0), 1, 0) === 0 &&
+      computeHeightGate(elevationRank(0, 0), elevationRank(0, 9), 1, 0) === 1
+  );
+  ok(
+    'LIGHT_ELEVATION_UNCONFIGURED_SENTINEL sits comfortably beyond any real rank (255 floors is the ' +
+      'hard ceiling of an RGBA8 floor-index channel), so the smoothstep genuinely saturates',
+    LIGHT_ELEVATION_UNCONFIGURED_SENTINEL > 255 + HEIGHT_GATE_TOLERANCE_UNITS + HEIGHT_GATE_SOFTNESS_UNITS
+  );
+
+  // ======================================================================
+  // ⚠️ ROUND 8 — receiverOverhead: an UNCONFIGURED light is not actually
+  // ungateable. PRESENCE_BIT_OVERHEAD hard-blocks ANY light, needing NO
+  // numeric elevation authored on either side — see buildHeightGateNode's
+  // own "ROUND 8" header for the full reasoning (rejecting the wider
+  // PRESENCE_BIT_OCCLUDES_BACKGROUND, which would have blocked a torch
+  // mounted on a table or a bush grown on a tile).
+  // ======================================================================
+  ok(
+    'an UNCONFIGURED light (the sentinel — never gated by the fine comparison) is STILL fully blocked ' +
+      'by genuine overhead/roof content — the exact gap the lantern-cover report exposed',
+    computeHeightGate(elevationRank(0, 5), LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, 1, 3, 1) === 0
+  );
+  ok(
+    'the SAME unconfigured light, SAME receiver, reaches fully when overhead is NOT set — the sentinel´s ' +
+      'own "reach everything by default" behaviour is unchanged for ordinary content',
+    computeHeightGate(elevationRank(0, 5), LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, 1, 3, 0) === 1
+  );
+  ok(
+    'a CONFIGURED light already fully occluded by the fine comparison stays occluded with overhead=0 ' +
+      '(no double-negative — overhead can only ADD occlusion, never remove it)',
+    computeHeightGate(elevationRank(0, 9), elevationRank(0, 5), 1, 3, 0) === 0
+  );
+  ok(
+    'a CONFIGURED light that WOULD fully reach under the fine comparison alone is still hard-blocked ' +
+      'when the receiver is genuinely overhead — overhead is an AND, not a fallback',
+    computeHeightGate(elevationRank(0, 0), elevationRank(0, 5), 1, 3, 1) === 0
+  );
+  ok(
+    'overhead is a clean binary gate, not a fractional blend — any truthy value blocks fully',
+    computeHeightGate(elevationRank(0, 0), elevationRank(0, 5), 1, 3, true) === 0 &&
+      computeHeightGate(elevationRank(0, 0), elevationRank(0, 5), 1, 3, 7) === 0
+  );
+
+  // ======================================================================
+  // ⚠️ THE AUTHOR'S OWN LIVE SCENARIOS, as regression pins. Each of these
+  // FAILED under the floor-relative model this replaced; the numbers come
+  // straight from the two live reports, not from invented fixtures
+  // (feedback_bench_must_build_inputs_like_production).
+  // ======================================================================
+  ok(
+    'LIVE CASE 1 — a lantern´s cover tile 4-5 units above its own flame, SAME floor, goes fully dark ' +
+      '(light=5, cover=9 and cover=10, the author´s own numbers)',
+    computeHeightGate(elevationRank(0, 9), elevationRank(0, 5)) === 0 &&
+      computeHeightGate(elevationRank(0, 10), elevationRank(0, 5)) === 0
+  );
+  ok(
+    'LIVE CASE 2 — the reported blowout: a light at -20 on a basement spanning [-20,0) (rank floor 0, ' +
+      '0 above its ground) must NOT light an upper storey´s floorboards at +5 on a floor spanning ' +
+      '[5,15) (rank floor 2, also 0 above ITS ground). Under the old floor-RELATIVE model both sides ' +
+      'read 0, the gate returned 0.5, and half a blown-out light painted the whole storey white.',
+    computeHeightGate(elevationRank(2, 0), elevationRank(0, 0)) === 0
+  );
+  ok(
+    'LIVE CASE 3 — light streaming OUT of a ground-floor window, seen from above: outside the building ' +
+      'there is no upper floor, so buf:scene.attr records the GROUND´s own low rank and the light ' +
+      'passes. The hole-stack model falls out of the same comparison, uncased.',
+    computeHeightGate(elevationRank(0, 0), elevationRank(0, 0)) === 1
+  );
+  ok(
+    'LIVE CASE 2, generalised — NO height within a lower floor can reach ANY height on a higher floor, ' +
+      'which is the property the old model lacked entirely',
+    [0, 1, 5, 9, 15].every((lightH) =>
+      [0, 1, 5, 9, 15].every((recvH) => computeHeightGate(elevationRank(1, recvH), elevationRank(0, lightH)) === 0)
+    )
+  );
+
+  // ======================================================================
+  // buildPointLightIlluminationMaterial — the height gate compiles cleanly
+  // with a real attrTexNode (the vendored TSL, not a mock — construction-only,
+  // matching this file's own header on what is and is not Node-verifiable).
+  // ======================================================================
+  {
+    const { uniform: u3, vec3: v3, texture } = THREE.TSL;
+    const attrTexture = new THREE.DataTexture(
+      new Uint8Array([0, 0, 0, 255]),
+      1,
+      1,
+      THREE.RGBAFormat,
+      THREE.UnsignedByteType
+    );
+    attrTexture.needsUpdate = true;
+    let built = null;
+    let err = null;
+    try {
+      built = buildPointLightIlluminationMaterial({
+        THREE,
+        uBackgroundColor: u3(v3(0.9, 0.9, 0.9)),
+        uDimColor: u3(v3(0.9, 0.9, 0.9)),
+        uBrightColor: u3(v3(1, 1, 1)),
+        attrTexNode: texture(attrTexture),
+      });
+    } catch (e) {
+      err = e;
+    }
+    ok(`the height gate constructs cleanly with a real attrTexNode (${err ? err.message : 'clean'})`, err === null);
+    ok('...and returns uLightElevationRank as a real settable uniform', !!built?.uLightElevationRank);
+    ok(
+      '...defaulting to the unconfigured sentinel — full reach, byte-identical to before this feature existed',
+      built.uLightElevationRank.value === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+    );
+
+    // Without attrTexNode at all, the gate must compile OUT entirely
+    // (`tsl/no-uniform-gates`) rather than throw on a missing texture read.
+    let unwired = null;
+    let unwiredErr = null;
+    try {
+      unwired = buildPointLightIlluminationMaterial({
+        THREE,
+        uBackgroundColor: u3(v3(0.9, 0.9, 0.9)),
+        uDimColor: u3(v3(0.9, 0.9, 0.9)),
+        uBrightColor: u3(v3(1, 1, 1)),
+      });
+    } catch (e) {
+      unwiredErr = e;
+    }
+    ok(
+      `omitting attrTexNode still constructs cleanly — the gate compiles out, not a missing-texture crash (${unwiredErr ? unwiredErr.message : 'clean'})`,
+      unwiredErr === null
+    );
+    ok(
+      '...and STILL returns the uniform (so a caller can set it without checking which branch built)',
+      !!unwired?.uLightElevationRank
+    );
+  }
+
+  // Sanity: this decode module import is exercised (not merely imported and
+  // unused) — proves the two files' constants really are comparable numbers,
+  // not two differently-shaped exports that happened to both be truthy.
+  ok(
+    'decodeReceiverElevationLevel (imported from scene-attr.js) is a real function, not undefined',
+    typeof decodeReceiverElevationLevel === 'function'
+  );
 }

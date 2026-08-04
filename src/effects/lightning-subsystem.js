@@ -65,9 +65,12 @@ function qualityForTier(perfTier) {
  * @param {*} args.uGlobalTimeMs - the ONE shared animation-clock TSL uniform node.
  * @param {() => {enabled: boolean, params: object, perfTier?: number, anchors: Array<object>}} args.getLightningRenderState -
  *   boot's data seam. Default-off means an un-wired caller draws no bolts.
+ * @param {*} [args.attrTexNode] - `buf:scene.attr`, UNSAMPLED — forwarded
+ *   verbatim to `buildLightningMaterial`'s own height/elevation gate; omit
+ *   for a bolt that ignores floor occlusion (pre-gate behaviour).
  * @returns {{scene:*, sync:(nowMs:number)=>void, dispose:()=>void, activeStrands:()=>Array<object>, droppedForCapacity:()=>number, forceStrike:()=>void}}
  */
-export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRenderState }) {
+export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRenderState, attrTexNode }) {
   const lightningScene = new THREE.Scene();
   let mesh = null;
   let geometry = null;
@@ -100,7 +103,7 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
   function ensureMaterial(quality) {
     if (matBundle && materialQuality === quality) return;
     const prev = matBundle;
-    matBundle = buildLightningMaterial({ THREE, uGlobalTimeMs, quality });
+    matBundle = buildLightningMaterial({ THREE, uGlobalTimeMs, quality, attrTexNode });
     materialQuality = quality;
     if (!mesh) {
       geometry = new THREE.BufferGeometry();

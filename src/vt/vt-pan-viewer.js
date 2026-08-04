@@ -97,13 +97,20 @@ import {
   easedZoomFactor,
 } from './view-state.js';
 import { coarsePinSet, coarseTopMipsForCap, computeCoarsePinBudget } from './residency.js';
-import { describeSceneAttrMrt, buildSceneAttrZeroMrt, buildRealFloorAttrMrtNode } from './scene-attr.js';
+import {
+  describeSceneAttrMrt,
+  buildSceneAttrZeroMrt,
+  buildRealFloorAttrMrtNode,
+  refreshItemFloorAttrUniforms,
+  decodeOverheadBit,
+  decodeReceiverElevationLevel,
+} from './scene-attr.js';
 import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
-import { sortByLayer, resolveElevationFloorIndex } from '../scene/layer-order.js';
+import { sortByLayer, resolveElevationFloorIndex, compareLayerKeys } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
   worldToNdc,
@@ -195,6 +202,8 @@ import {
   // left with the vegetation-shadow code in extraction step 2 — this file has
   // no remaining caller for any of them.)
   createPointLightPool,
+  LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
+  ELEVATION_RANK_FRACTION_DIVISOR,
   createWaterBodySubsystem,
   createWaterSurfaceSubsystem,
   createFluidSurfaceSubsystem,
@@ -801,6 +810,7 @@ export async function startVtPanViewer({
   getWindowMaskUrl,
   getWindowMaskRect,
   getWindowRenderState,
+  getApertureGoboRenderState,
   getFluidMaskItems,
   getFluidRenderState,
   onFluidCornersResolver,
@@ -892,6 +902,16 @@ export async function startVtPanViewer({
   // the same way specular's is: with no `_Window` file the effect renders
   // literally nothing, so a scene that never opted in cannot be surprised.
   getWindowRenderState ??= () => ({ enabled: true, params: {} });
+  // APERTURE GOBO's data seam (docs/planning/Aperture-Gobo.md): boot injects
+  // `{ enabled, params: <resolved APERTURE_GOBO_PARAMS>, debug }`. Unlike
+  // window/specular this effect has no mask seam at all — its only input is
+  // wall geometry `effects/lighting/point-light-pool.js` already reads
+  // itself. Default-ON, matching the manifest's `enabledFromProfile: 'low'`:
+  // with no aperture wall nearby, every light this effect touches renders
+  // byte-identical to how it did before this effect existed, so a scene that
+  // never placed a Foundry window (move solid, light PROXIMITY — Foundry's
+  // own window convention) cannot be surprised by it being on.
+  getApertureGoboRenderState ??= () => ({ enabled: true, params: {}, debug: false });
   // FLUID's seams (docs/planning/Fluid.md). `getFluidMaskItems` lists every
   // file at its own resolution — fluid has NO coarse-grid consumer, because
   // connected components and geodesic arc length are high-frequency questions
@@ -2030,6 +2050,11 @@ export async function startVtPanViewer({
       THREE,
       uGlobalTimeMs,
       getLightningRenderState,
+      // THE HEIGHT/ELEVATION GATE (2026-08-03) — the SAME buf:scene.attr node
+      // every point light already reads (envLight is built well before this
+      // subsystem, above). See lightning-render.js#buildLightningMaterial's
+      // own doc.
+      attrTexNode: envLight.attrTexNode,
     });
 
     const pointLights = createPointLightPool({
@@ -2041,6 +2066,7 @@ export async function startVtPanViewer({
       getCandleRenderState,
       getLightningRenderState,
       getLightningActiveStrands: () => lightningSubsystem.activeStrands(),
+      getApertureGoboRenderState,
       uGlobalTimeMs,
     });
 
@@ -3462,6 +3488,11 @@ export async function startVtPanViewer({
         candleFlameMat = buildCandleFlameMaterial({
           THREE,
           uGlobalTimeMs,
+          // THE HEIGHT/ELEVATION GATE (2026-08-03) — the SAME buf:scene.attr
+          // node every point light already reads (built at line ~1730, well
+          // before this per-frame updater ever runs). See candle-flame-
+          // render.js#buildCandleFlameMaterial's own doc.
+          attrTexNode: envLight.attrTexNode,
           quality: qualityTier,
           windHandle,
         });
@@ -4146,6 +4177,14 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightVegSync);
       syncAllVegetationMotionForFrame();
       profiler?.end(Z.lightVegSync);
+      // Keep every drawn item's `buf:scene.attr` floor-index LIVE — see
+      // `syncAllFloorAttrUniformsForFrame`'s own header for the live bug this
+      // fixes (specular invisible on one specific floor, forever, because
+      // this used to be resolved once and never again). Unzoned deliberately:
+      // this is new and cheap (one array scan of a small floor list per
+      // attr-carrying item); add a `diag/perf-zones.js` entry first if it
+      // ever shows up as non-trivial in a real perf report.
+      syncAllFloorAttrUniformsForFrame();
       // The wind field debug overlay (a no-op grid rebuild check when disabled).
       profiler?.begin(Z.lightWindOverlaySync);
       updateWindFieldOverlay();
@@ -4217,6 +4256,23 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightDrawPoints);
       renderer.render(pointLights.lightScene, camera);
       profiler?.end(Z.lightDrawPoints);
+      // APERTURE SHADOW DEBUG (docs/planning/Aperture-Gobo.md) — round 10
+      // (2026-08-04) retired the separate blend-toward-`backgroundFloor`
+      // pass this comment used to describe (`point-light-illumination.js`'s
+      // "THE GOBO IS PART OF THIS LIGHT'S OWN FALLOFF" header has the
+      // live-found reason: a separate pass on the ALREADY-composited buffer
+      // can darken a fragment below what an independent source, like
+      // daylight or another light, legitimately already provided there,
+      // with no way to tell the difference from outside the buffer). The
+      // gobo pattern is baked directly into `pointLights.lightScene`'s own
+      // MAX-blend draw now, just above — this call only draws the
+      // standalone "pattern" debug visualization mesh, usually empty (only
+      // present with a light selected into that debug channel). Always
+      // rendered (no `hasContent()`-style gate): rendering an empty Scene
+      // is a real no-op, not a wasted call worth branching around.
+      profiler?.begin(Z.lightDrawApertureShadow);
+      renderer.render(pointLights.apertureShadowScene, camera);
+      profiler?.end(Z.lightDrawApertureShadow);
       // WINDOW LIGHT (docs/planning/Windows.md) — ADDS on top of everything
       // above, same target, same camera, same guarded (autoClearColor=false)
       // sequence: a torch standing in a sunbeam should be brighter than
@@ -5780,7 +5836,7 @@ export async function startVtPanViewer({
     // new home, to stay under the size ratchet's per-function cap.)
 
     function buildWholeImageMaterial(tex, item, uvScale = [1, 1]) {
-      const { Fn, uniform, vec2, vec3, vec4, float, uv } = THREE.TSL;
+      const { Fn, uniform, vec2, vec3, vec4, float, uv, texture } = THREE.TSL;
       const uTint = uniform(vec3(1, 1, 1));
       const uAlpha = uniform(float(1));
       const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
@@ -5794,6 +5850,66 @@ export async function startVtPanViewer({
       // stores the bitmap's own size. Both are the number we want.
       const uTexSize = uniform(vec2(tex.image?.width || 1, tex.image?.height || 1));
       const occ = buildOcclusionUniforms(item);
+
+      // ⚠️ THE ITEM'S PHYSICAL SOLIDITY, BUILT SEPARATELY FROM THE ON-SCREEN
+      // COLOUR (2026-08-03, live report) — see buildRealFloorAttrMrtNode's own
+      // "SOLIDITY ALPHA" doc for the full account. `output.a` (the old
+      // default) is this material's FINAL on-screen alpha, which for an
+      // occludable roof already has `occlusionAlphaFactor(occ)` folded in — a
+      // fade meant PURELY so a player can see their own token standing under
+      // the roof. Reusing that as "is this physically here" made a light
+      // under the roof stop being occluded the instant a token walked into
+      // the room, which is exactly backwards: the roof did not move, only
+      // its RENDERING did.
+      //
+      // A genuine top-level TSL node (built HERE, not a closure variable
+      // captured across the colorNode Fn's own deferred boundary — that is
+      // the ORIGINAL, different trap this same doc warns about) — a plain
+      // `texture()` sample, deliberately NOT the clarity-enhanced `clear.a`
+      // the visible colour uses: clarity restores local contrast for DISPLAY,
+      // which is irrelevant for a coarse "is there real art here" occlusion
+      // signal.
+      //
+      // ============================================================================
+      // ⚠️ ROUND 10 (2026-08-04) — "LESS REPRESENTATIVE AT COARSE MIPS" WAS AN
+      // UNDER-STATEMENT: AT A COARSE ENOUGH MIP IT FLIPS TO WRONG, NOT JUST FUZZY
+      // ============================================================================
+      // Live report + `itemsAtPoint` diagnostic: a Tile with `restrictsLight`
+      // ticked, correctly the topmost VISIBLE thing at a probed pixel (on
+      // screen, drawn solidly on top of its floor, matching Foundry's own PIXI
+      // rendering of the identical object) — yet `buf:scene.attr`'s solidity
+      // channel read exactly 0 there, so its `restrictsLight`/overhead write
+      // never won the alpha-blended MRT write at all
+      // (`feedback_alpha_blended_write_needs_wide_margin`: that write is
+      // `dst·(1−α) + src·α`, never a hard overwrite — at α≈0 it is a total
+      // no-op, leaving whatever was UNDER the tile, its floor's own
+      // background, unchanged).
+      //
+      // ROOT CAUSE: `texture(tex, uv)` with no explicit LOD lets THREE pick an
+      // IMPLICIT mip from the fragment's own screen-space UV derivatives — the
+      // EXACT thing `layer-smear-render.js#GATE_AA_LOD`'s own header already
+      // proved untrustworthy for a sharp-edge read, one subsystem over: *"a
+      // plain `.sample()`... picks an implicit mip from screen-space
+      // derivatives... blurred the wall gate 21 world px"*. A small item's art
+      // (this codebase's own tile textures commonly ship with transparent
+      // padding around the painted shape, or simply a modest native
+      // resolution against a heavily zoomed-out view) minifies HARD at some
+      // camera distances — the automatic LOD selector can legitimately land on
+      // a mip coarse enough that the WHOLE texture's alpha, transparent
+      // padding included, averages toward ~0, at every UV, including dead
+      // centre of the visibly-opaque paint. That is not "less representative"
+      // of solidity — it is a wrong answer to "is there real art here", the
+      // one question this node exists to answer.
+      //
+      // THE FIX: sample at a FIXED, SHARP level (0 — the texture's own most
+      // detailed mip, always present whether raw or BC1/BC7-compressed),
+      // exactly `GATE_AA_LOD`'s own choice for the identical reason. Never
+      // softened by distance, so a small or padded item's TRUE edge — not a
+      // minified average of it — is what `buf:scene.attr` ever records.
+      // `uAlpha` (the item's OWN authored alpha, e.g. a fade-in) stays IN —
+      // that is a real, physical property of the item, not a per-frame
+      // render-convenience fade.
+      const physicalSolidityAlpha = texture(tex, uv().mul(uUvScale)).level(float(0)).a.mul(uAlpha);
 
       const material = new THREE.NodeMaterial();
       material.transparent = true;
@@ -5819,16 +5935,32 @@ export async function startVtPanViewer({
         c.a.mulAssign(occlusionAlphaFactor(occ));
         return c;
       })();
-      material.mrtNode = buildRealFloorAttrMrtNode({
+      // ⚠️ `floorAttrUniforms` is RETAINED (not just assigned) — see
+      // `refreshItemFloorAttrUniforms`'s own header in `vt/scene-attr.js` for
+      // the live bug this fixes: an item's floor membership used to be
+      // resolved once, here, and never revisited. The caller stores this on
+      // the item's `state.wholeImage.tiles[]` entry and refreshes it every
+      // frame (`syncAllFloorAttrUniformsForFrame`).
+      const { mrtNode, floorAttrUniforms } = buildRealFloorAttrMrtNode({
         THREE,
         item,
         viewedFloorIndex: view.floorIndex,
         sceneDoc: globalThis.canvas?.scene ?? null,
         logError: log.error,
         envLight,
+        solidityAlpha: physicalSolidityAlpha,
       });
+      material.mrtNode = mrtNode;
       return {
         material,
+        // ⚠️ ONLY `item` is stored — never `sceneDoc`/`viewedFloorIndex`
+        // alongside it. Those two are the exact things that change over
+        // time (a scene switch, a floor switch) and MUST be read fresh at
+        // every refresh, or storing them here would just move the same
+        // staleness bug one level up. `syncAllFloorAttrUniformsForFrame`
+        // supplies both live, every frame.
+        floorAttrUniforms,
+        floorAttrItem: item,
         appearance: {
           uTint,
           uAlpha,
@@ -6576,13 +6708,35 @@ export async function startVtPanViewer({
         return c;
       })();
 
-      // buf:scene.attr REAL WRITER, Case-1 embedded vegetation only (see
-      // isFloorSurface's own doc above — never true alongside asShadow, so
-      // no separate shadow-path guard is needed here). Reads its own alpha
-      // via TSL.output, not a closure variable (buildRealFloorAttrMrtNode's
-      // own doc has the live-crash story).
+      // buf:scene.attr REAL WRITER — Case-1 embedded vegetation (grass AS the
+      // floor) writes exactly like base map art. Reads its own alpha via
+      // TSL.output, not a closure variable (buildRealFloorAttrMrtNode's own
+      // doc has the live-crash story).
+      //
+      // ⚠️ KNOWN GAP, same bug class as buildWholeImageMaterial's own fix
+      // just above (2026-08-03): `output.a` here is ALSO the post-
+      // `occlusionAlphaFactor(occ)` on-screen alpha, so vegetation under a
+      // fading roof has the identical "solidity conflated with a player-
+      // convenience render fade" problem a light does. NOT fixed this round
+      // — `sampleUv` (this material's own colour sample coordinate) is built
+      // INSIDE the colour Fn from the full wind/sway UV-warp chain
+      // (uSwayAmount/uGaleBendAmount/uFlutterAmount/uClumpSizePx/…), so a
+      // correct pre-occlusion solidity sample would need to reproduce that
+      // whole warp independently rather than a cheap plain `texture()` read
+      // — real, but a materially bigger and riskier change than the roof-
+      // tile case this round was scoped to (the reported, screenshot-
+      // evidenced bug). Left as a real, acknowledged gap, not silently
+      // dropped.
+      // ⚠️ RETAINED, NOT JUST ASSIGNED — same fix, same reason as
+      // `buildWholeImageMaterial`'s identical comment: see
+      // `refreshItemFloorAttrUniforms`'s own header in `vt/scene-attr.js`.
+      // At most one of the two branches below runs per call (`isFloorSurface`
+      // is mutually exclusive with the overlay branch), so one variable pair
+      // covers both.
+      let floorAttrUniforms = null;
+      let floorAttrReceiverElevationFraction01;
       if (isFloorSurface) {
-        material.mrtNode = buildRealFloorAttrMrtNode({
+        const built = buildRealFloorAttrMrtNode({
           THREE,
           item,
           viewedFloorIndex: view.floorIndex,
@@ -6590,10 +6744,45 @@ export async function startVtPanViewer({
           logError: log.error,
           envLight,
         });
+        material.mrtNode = built.mrtNode;
+        floorAttrUniforms = built.floorAttrUniforms;
+      } else if (!asShadow) {
+        // buf:scene.attr REAL WRITER — Case-2 OVERLAY (2026-08-03, the height/
+        // elevation gate: "trees and bushes should be illuminated only if the
+        // lighting is at the correct height"). The overlay's own floor
+        // MEMBERSHIP is still its HOST's (`item` here IS the host — an
+        // overlay has no separate item of its own to resolve), but its
+        // light-reachable HEIGHT is the CANOPY's, riding the SAME
+        // `passiveElevationFraction` this kind already uses for sort order
+        // (`keyhole-mask-any-item-decision`'s "vegetation is a good exception"
+        // ruling — a canopy is a world object with its own height, not a
+        // surface property of what it happens to be painted on).
+        // ⚠️ The shadow twin (asShadow branch) is excluded on purpose: it is
+        // a flat, alpha-only darkening quad with no canopy colour of its own
+        // to gate by height — writing attr from it would just overwrite the
+        // real canopy write with a second, redundant copy at the same place.
+        const built = buildRealFloorAttrMrtNode({
+          THREE,
+          item,
+          viewedFloorIndex: view.floorIndex,
+          sceneDoc: globalThis.canvas?.scene ?? null,
+          logError: log.error,
+          envLight,
+          receiverElevationFraction01: kind.passiveElevationFraction,
+        });
+        material.mrtNode = built.mrtNode;
+        floorAttrUniforms = built.floorAttrUniforms;
+        floorAttrReceiverElevationFraction01 = kind.passiveElevationFraction;
       }
 
       return {
         material,
+        // `null` when neither branch above ran (a shadow twin, or an overlay
+        // whose host isn't a floor surface) — `syncAllFloorAttrUniformsForFrame`
+        // skips a null pair, same posture as its vegetation-motion sibling.
+        floorAttrUniforms,
+        floorAttrItem: item,
+        floorAttrReceiverElevationFraction01,
         appearance: {
           uTint,
           uAlpha,
@@ -6877,7 +7066,14 @@ export async function startVtPanViewer({
               }
               const wholeTile = { sx: 0, sy: 0, sw: c.width, sh: c.height, col: 0, row: 0 };
               const compressedUvScale = [c.width / padW, c.height / padH];
-              const { material, appearance, motion } = vegActive
+              const {
+                material,
+                appearance,
+                motion,
+                floorAttrUniforms,
+                floorAttrItem,
+                floorAttrReceiverElevationFraction01,
+              } = vegActive
                 ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
                     uvScale: compressedUvScale,
                     isFloorSurface: true, // Case-1 embedded veg IS the floor here — see the function's own doc
@@ -6886,7 +7082,23 @@ export async function startVtPanViewer({
                   })
                 : buildWholeImageMaterial(tex, item, compressedUvScale);
               const geometry = new THREE.BufferGeometry();
-              const t = { tile: wholeTile, sub: null, tex, geometry, material, appearance, motion, mesh: null };
+              // ⚠️ `floorAttrUniforms`/`floorAttrItem` retained on the tile entry
+              // itself — `syncAllFloorAttrUniformsForFrame` reads them every
+              // frame. See `refreshItemFloorAttrUniforms`'s own header
+              // (`vt/scene-attr.js`) for the live bug this exists to prevent.
+              const t = {
+                tile: wholeTile,
+                sub: null,
+                tex,
+                geometry,
+                material,
+                appearance,
+                motion,
+                mesh: null,
+                floorAttrUniforms: floorAttrUniforms ?? null,
+                floorAttrItem: floorAttrItem ?? null,
+                floorAttrReceiverElevationFraction01,
+              };
               setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
               const mesh = new THREE.Mesh(geometry, material);
               mesh.frustumCulled = false;
@@ -6995,7 +7207,14 @@ export async function startVtPanViewer({
                 // recovery, so there is nothing to do here but stop waiting.
               }
             }
-            const { material, appearance, motion } = vegActive
+            const {
+              material,
+              appearance,
+              motion,
+              floorAttrUniforms,
+              floorAttrItem,
+              floorAttrReceiverElevationFraction01,
+            } = vegActive
               ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
                   isFloorSurface: true,
                   flutterEnabled: vegTier.flutterEnabled,
@@ -7003,7 +7222,20 @@ export async function startVtPanViewer({
                 })
               : buildWholeImageMaterial(tex, item);
             const geometry = new THREE.BufferGeometry();
-            const t = { tile, sub: null, tex, geometry, material, appearance, motion, mesh: null };
+            // ⚠️ See the compressed-path sibling above for why these are kept.
+            const t = {
+              tile,
+              sub: null,
+              tex,
+              geometry,
+              material,
+              appearance,
+              motion,
+              mesh: null,
+              floorAttrUniforms: floorAttrUniforms ?? null,
+              floorAttrItem: floorAttrItem ?? null,
+              floorAttrReceiverElevationFraction01,
+            };
             setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
             const mesh = new THREE.Mesh(geometry, material);
             mesh.frustumCulled = false;
@@ -7339,7 +7571,14 @@ export async function startVtPanViewer({
               scene.add(shadowMesh);
             }
 
-            const { material, appearance, motion } = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
+            const {
+              material,
+              appearance,
+              motion,
+              floorAttrUniforms,
+              floorAttrItem,
+              floorAttrReceiverElevationFraction01,
+            } = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
               flutterEnabled: vegTier.flutterEnabled,
               // The world→UV basis the fold-free flutter cap needs; re-pushed
               // by `syncVegetationUvBasis` whenever this placement changes.
@@ -7363,6 +7602,13 @@ export async function startVtPanViewer({
             entry.material = material;
             entry.appearance = appearance;
             entry.motion = motion;
+            // ⚠️ See `refreshItemFloorAttrUniforms`'s own header (`vt/scene-
+            // attr.js`) — `syncAllFloorAttrUniformsForFrame` reads these every
+            // frame so this overlay's floor-index can never go stale the way
+            // the reported bug's background art did.
+            entry.floorAttrUniforms = floorAttrUniforms ?? null;
+            entry.floorAttrItem = floorAttrItem ?? null;
+            entry.floorAttrReceiverElevationFraction01 = floorAttrReceiverElevationFraction01;
             entry.segments = segments;
             entry.tex = loaded.tex;
             entry.compressed = loaded.compressed;
@@ -7508,6 +7754,58 @@ export async function startVtPanViewer({
               entry.shadow.mesh.visible = !!entry.shadow.residentVisible && draws;
               syncVegetationMotionUniforms(entry.shadow.motion, vegState.params);
             }
+          }
+        }
+      }
+    }
+
+    /**
+     * ⚠️ THE FIX FOR A REAL LIVE BUG (2026-08-03) — see `refreshItemFloorAttr
+     * Uniforms`'s own header in `vt/scene-attr.js` for the full account:
+     * specular worked on the basement/ground floor of a scene but was
+     * completely invisible on the newest, uppermost floor, because an item's
+     * `buf:scene.attr` floor-index was resolved exactly ONCE, at whatever
+     * moment its material happened to be built, and never revisited.
+     *
+     * Same shape as `syncAllVegetationMotionForFrame` right above (which this
+     * sits beside in `renderFrame`, for the same reason: `updateResidency
+     * Unguarded` only runs on a residency pass, never per-frame, so a
+     * per-frame sync is the only way to keep a LIVE value live) — iterates the
+     * SAME persistent `itemStates` map, touching ONLY uniform values, never
+     * geometry/visibility/renderOrder.
+     *
+     * Cheap: `refreshItemFloorAttrUniforms` is one `getActiveSceneFloors` call
+     * (itself one pass over a small, fixed floor list) plus a handful of
+     * comparisons, per item that actually carries floor-attr uniforms — most
+     * items (anything not a Level background/foreground/tile/vegetation
+     * overlay) have `floorAttrUniforms: null` and are skipped in one branch.
+     */
+    function syncAllFloorAttrUniformsForFrame() {
+      const sceneDoc = globalThis.canvas?.scene ?? null;
+      for (const state of itemStates.values()) {
+        if (state.wholeImage) {
+          for (const t of state.wholeImage.tiles) {
+            if (!t.floorAttrUniforms) continue;
+            refreshItemFloorAttrUniforms(t.floorAttrUniforms, {
+              item: t.floorAttrItem,
+              viewedFloorIndex: view.floorIndex,
+              sceneDoc,
+              logError: log.error,
+              receiverElevationFraction01: t.floorAttrReceiverElevationFraction01,
+            });
+          }
+        }
+        if (state.vegetationOverlays) {
+          for (const kind of VEGETATION_KINDS) {
+            const entry = state.vegetationOverlays[kind.id];
+            if (!entry || entry.status !== 'ready' || !entry.floorAttrUniforms) continue;
+            refreshItemFloorAttrUniforms(entry.floorAttrUniforms, {
+              item: entry.floorAttrItem,
+              viewedFloorIndex: view.floorIndex,
+              sceneDoc,
+              logError: log.error,
+              receiverElevationFraction01: entry.floorAttrReceiverElevationFraction01,
+            });
           }
         }
       }
@@ -7748,6 +8046,7 @@ export async function startVtPanViewer({
       lightDrawIllum: profiler?.indexOf('light.drawIllum') ?? -1,
       lightDrawRegions: profiler?.indexOf('light.drawRegions') ?? -1,
       lightDrawPoints: profiler?.indexOf('light.drawPointLights') ?? -1,
+      lightDrawApertureShadow: profiler?.indexOf('light.drawApertureShadow') ?? -1,
       lightDrawWindow: profiler?.indexOf('light.drawWindowLight') ?? -1,
       lightDrawColoration: profiler?.indexOf('light.drawColoration') ?? -1,
       lightDrawComposite: profiler?.indexOf('light.drawComposite') ?? -1,
@@ -8293,6 +8592,30 @@ export async function startVtPanViewer({
         if (state.wholeImage) {
           for (const t of state.wholeImage.tiles) {
             if (t.mesh) t.mesh.visible = false;
+          }
+        }
+        // VEGETATION CASE 2 — a THIRD mesh location this same cleanup missed
+        // (live bug, 2026-08-03, author: middle-floor `_Tree`/`_Bush` stayed
+        // visible from the UNDERGROUND floor below it, i.e. exactly the
+        // "ceiling hung over the floor below" bug the comment above already
+        // describes, one storage location later). `refreshVegetationOverlay`
+        // only ever runs for items still IN the draw list (`for (const item of
+        // items)`, several lines down) and is the ONLY place that writes
+        // `entry.mesh.visible` — so once an item's floor drops out of
+        // `wantedIds`, nothing ever visits it again to set that flag back to
+        // false, and an already-built overlay (and its shadow mesh) is stuck
+        // showing forever, wherever its world footprint happens to fall on
+        // ANY other floor. Symmetric with the whole-image fix above: hide,
+        // never dispose — a quick switch-and-back must stay free.
+        if (state.vegetationOverlays) {
+          for (const kind of VEGETATION_KINDS) {
+            const entry = state.vegetationOverlays[kind.id];
+            if (!entry) continue;
+            if (entry.mesh) entry.mesh.visible = false;
+            if (entry.shadow?.mesh) {
+              entry.shadow.residentVisible = false;
+              entry.shadow.mesh.visible = false;
+            }
           }
         }
       }
@@ -9280,8 +9603,127 @@ export async function startVtPanViewer({
      * @returns {Promise<{worldX:number, worldY:number, pixel:{x:number,y:number}|null,
      *   buffers: object|null, onScreen: boolean}>}
      */
+    /**
+     * WHICH ITEM(S) ARE ACTUALLY HERE — a CPU-side companion to
+     * `sampleOnePixel`'s GPU readback (2026-08-04, live report: `buf:scene
+     * .attr` at a probed point decoded as "not a Tile", even though the
+     * author had just clicked dead-centre on one, confirmed against Foundry's
+     * own PIXI rendering of the identical Tile). Decoding presence bits by
+     * hand can prove SOMETHING besides the expected Tile is winning that
+     * pixel, but not WHY — this answers that directly, from the SAME item
+     * registry `syncAllFloorAttrUniformsForFrame` reads every frame, no GPU
+     * readback involved, so it can't be wrong for a reason the GPU path is
+     * also wrong for.
+     *
+     * Every item whose world-space quad (`state.worldBounds` — rotation-
+     * aware, recomputed on every placement change, never a stale cache)
+     * contains the point, in PAINT order (index 0 = furthest back; the LAST
+     * entry is what SHOULD be topmost, by the same `compareLayerKeys` law the
+     * real renderer sorts by) — so a report shows everything claiming this
+     * pixel and lets the investigator see whether the expected item is even
+     * in the list, and if so, whether something else is ordered on top of it.
+     *
+     * ALSO carries `expected` (2026-08-04, round 13) — what
+     * `refreshItemFloorAttrUniforms` (the SAME production function every
+     * real material's uniforms refresh through every frame) computes for
+     * THIS item RIGHT NOW, decoded the identical way the shader decodes it.
+     * Pure JS, a throwaway scratch object in place of a real TSL uniform —
+     * no rendering, no renderer call, nothing that touches the GPU at all.
+     * This is what lets a report distinguish "the CPU-side math itself
+     * disagrees with what I expected" from "the math is right but the GPU
+     * buffer doesn't reflect it" — two different bugs, and neither
+     * `itemsAtPoint`'s own presence/visibility fields nor a raw `attr`
+     * readback can tell them apart alone.
+     *
+     * ⚠️ `liveTiles` (2026-08-04, round 14) — `expected` above is a FRESH
+     * recompute; it can never, by construction, catch a bug in getting that
+     * value from CPU to GPU. `liveTiles` closes that gap: for every whole-
+     * image sub-tile this item actually owns, it reads `.value` straight off
+     * the SAME uniform object `syncAllFloorAttrUniformsForFrame` is
+     * (supposedly) refreshing every frame — a plain property read, no
+     * renderer call, same safety class as `expected`. A live-vs-expected
+     * mismatch here — on the sub-tile whose `meshVisible` is true — proves
+     * the refresh loop isn't reaching THIS uniform object (a stale/orphaned
+     * reference between `t.floorAttrUniforms` and whatever the compiled
+     * material actually samples), as distinct from `expected` disagreeing
+     * with a raw `attr` readback (which would instead implicate
+     * `computeFloorAttrValues` itself, or alpha-blend compositing order).
+     *
+     * @param {number} worldX @param {number} worldY
+     * @returns {Array<{id:string, kind:string|null, elevation:number|null,
+     *   levelId:string|null, restrictsLight:boolean, hidden:boolean,
+     *   hasRealWriter:boolean, meshVisible:boolean, expected:
+     *   {floorIndex:number, overhead:number, receiverLevel:number, byte:number},
+     *   liveTiles:Array<{meshVisible:boolean, live:
+     *     {floorIndex:number, overhead:number, receiverLevel:number, byte:number}|null}>}>}
+     */
+    function itemsCoveringWorldPoint(worldX, worldY) {
+      const hits = [];
+      for (const state of itemStates.values()) {
+        const b = state.worldBounds;
+        if (!b || worldX < b.minX || worldX > b.maxX || worldY < b.minY || worldY > b.maxY) continue;
+        const item = state.item;
+        if (!item) continue;
+        const scratch = { uFloorIndex01: { value: 0 }, uPresenceBits01: { value: 0 } };
+        refreshItemFloorAttrUniforms(scratch, {
+          item,
+          viewedFloorIndex: view?.floorIndex ?? 0,
+          sceneDoc: globalThis.canvas?.scene ?? null,
+          logError: () => {},
+        });
+        const expectedByte = Math.round(scratch.uPresenceBits01.value * 255);
+        const liveTiles = (state.wholeImage?.tiles ?? []).map((t) => {
+          if (!t.floorAttrUniforms) return { meshVisible: !!t.mesh?.visible, live: null };
+          const liveByte = Math.round((t.floorAttrUniforms.uPresenceBits01?.value ?? 0) * 255);
+          return {
+            meshVisible: !!t.mesh?.visible,
+            live: {
+              floorIndex: Math.round((t.floorAttrUniforms.uFloorIndex01?.value ?? 0) * 255),
+              overhead: decodeOverheadBit(liveByte),
+              receiverLevel: decodeReceiverElevationLevel(liveByte),
+              byte: liveByte,
+            },
+          };
+        });
+        hits.push({
+          id: item.id,
+          kind: item.kind ?? null,
+          elevation: item.key?.elevation ?? null,
+          levelId: item.levelId || null,
+          restrictsLight: !!item.restrictsLight,
+          hidden: !!item.hidden,
+          // Absent once a whole-image chunk's material has actually built
+          // its `buf:scene.attr` writer — still-loading, or an item kind
+          // this pass never gives a real writer to at all, both show up as
+          // `false` here, exactly the "why isn't attr showing what I expect"
+          // signal this function exists to surface.
+          hasRealWriter: !!state.wholeImage?.tiles?.some((t) => t.floorAttrUniforms),
+          meshVisible: !!state.wholeImage?.tiles?.some((t) => t.mesh?.visible),
+          expected: {
+            floorIndex: Math.round(scratch.uFloorIndex01.value * 255),
+            overhead: decodeOverheadBit(expectedByte),
+            receiverLevel: decodeReceiverElevationLevel(expectedByte),
+            byte: expectedByte,
+          },
+          liveTiles,
+          _key: item.key,
+        });
+      }
+      hits.sort((a, b) => compareLayerKeys(a._key, b._key));
+      for (const h of hits) delete h._key;
+      return hits;
+    }
+
     async function sampleOnePixel(worldX, worldY) {
-      if (!view) return { worldX, worldY, pixel: null, buffers: null, onScreen: false };
+      if (!view)
+        return {
+          worldX,
+          worldY,
+          pixel: null,
+          buffers: null,
+          onScreen: false,
+          itemsAtPoint: itemsCoveringWorldPoint(worldX, worldY),
+        };
       const worldRect = viewToWorldRect(view, canvasW / canvasH);
       const ndc = worldToNdc({ x: worldX, y: worldY }, worldRect);
       const onScreen = ndc.x >= -1 && ndc.x <= 1 && ndc.y >= -1 && ndc.y <= 1;
@@ -9304,7 +9746,23 @@ export async function startVtPanViewer({
         // by 255 to read the floor index back as an integer.
         readOne(sceneColor, decodeByteRgba, 1),
       ]);
-      return { worldX, worldY, pixel, onScreen, buffers: { illum, lit, albedo, coloration, occlusion, attr } };
+      return {
+        worldX,
+        worldY,
+        pixel,
+        onScreen,
+        buffers: { illum, lit, albedo, coloration, occlusion, attr },
+        // CPU-only (`state.worldBounds` containment against the live item
+        // registry) — no rendering, no render-target/MRT swapping. A prior
+        // version of this diagnostic also rendered an isolated copy of the
+        // scene to answer a narrower question; that used the SAME production
+        // materials against a SECOND render target and corrupted their
+        // compiled WebGPU pipelines on first use, silently breaking the
+        // normal `runLightAccumulatePass`/`runSurfaceResponsePass` passes for
+        // every following frame (live-caught 2026-08-04) — removed entirely,
+        // not just fixed, because this probe must never be able to do that.
+        itemsAtPoint: itemsCoveringWorldPoint(worldX, worldY),
+      };
     }
 
     /** One distinct, high-contrast colour per probe point — index 1..3, wraps if ever called with more. */
@@ -10526,6 +10984,22 @@ export async function startVtPanViewer({
         poolSize: occlusionDiscs.size,
         activeDiscs: [...occlusionDiscs.values()].filter((e) => e.mesh.visible).length,
       }),
+      /** APERTURE GOBO's own readout (docs/planning/Aperture-Gobo.md) —
+       * apertures found/dropped/lit-lights as of the pool's LAST `update()`
+       * call. `getApertureGoboReadout()` itself just returns a shallow copy
+       * of a plain object `update()` mutates in place; nothing here
+       * recomputes anything. Consumed the SAME way `getPointLightsInfo` just
+       * below is: `getDiagnostics()` does NOT return this object directly
+       * (it delegates entirely to `buildViewerDiagnostics({_active, ...})`
+       * in vt-pan-viewer-diagnostics.js) — that function calls
+       * `_active.getApertureGoboInfo()` itself and packs the result under
+       * its own `apertureGobo` key. A method living here with no matching
+       * line in that file is invisible to `getVtPanViewerDiagnostics()`
+       * despite looking identical to every OTHER `getXInfo` on this object —
+       * this is the exact mistake this effect's own FIRST report round-trip
+       * caught live (author: "live: unavailable" on a scene that was
+       * demonstrably rendering). */
+      getApertureGoboInfo: () => pointLights.getApertureGoboReadout(),
       /** light.accumulate's point-light (tier-0) producer state — for the
        * Diagnostics report. `activeLights` counting LESS than `poolSize` is
        * normal (hidden, not disposed — see lightMeshes' own doc); the two
@@ -10557,12 +11031,32 @@ export async function startVtPanViewer({
         // darkness/attenuation settings) or something narrower. `hasColor`
         // is read off `entry.lastHasColor` (set every frame in
         // updatePointLightMeshes, diagnostic-only) rather than inferred from
-        // uColorationAlpha, which is unconditional again right now — see
-        // that assignment's own comment for the current (reverted) state.
+        // uColorationAlpha — STALE as of 2026-08-03: that uniform IS
+        // correctly hasColor-gated again (`point-light-pool.js`'s own
+        // `entry.uColorationAlpha.value = light.hasColor || forceDefaultColor
+        // ? computeColorationAlpha(...) : 0`, re-verified reading this exact
+        // line while chasing a live "uncoloured light looks weak" report).
+        // This comment described an intermediate, since-fixed state and was
+        // never updated; kept as `lastHasColor` regardless since sampling the
+        // uniform directly would still miss the `forceDefaultColor` half of
+        // the gate.
         let activeCount = 0;
         let colorlessCount = 0; // hasColor === false
         let coloredCount = 0;
         let colorationAlphaSum = 0;
+        // HEIGHT/ELEVATION GATE (2026-08-03) — "the light itself is visible
+        // through its own cover, not being occluded". Reported PER LIGHT
+        // (never just the one sample) because the whole point is to let the
+        // author find THEIR specific lantern's own resolved value rather than
+        // guess from an arbitrary first-found light — a report that only
+        // showed one sample would be exactly the kind of instrument that
+        // cannot answer the question it exists for
+        // (`feedback_instruments_must_not_lie`). `configuredCount` answers
+        // the FIRST, cheapest question — "is ANY light's elevation actually
+        // reaching the shader as non-default" — before looking at any
+        // individual value.
+        const lightElevations = [];
+        let elevationConfiguredCount = 0;
         // ANIMATED LIGHTS (2026-07-20) — per-type counts, tallied in the SAME
         // pass (no second walk of lightMeshes). `builtByType` counts active
         // lights whose animation resolved to a real registry entry;
@@ -10582,6 +11076,22 @@ export async function startVtPanViewer({
           if (entry.lastHasColor) coloredCount++;
           else colorlessCount++;
           colorationAlphaSum += entry.uColorationAlpha.value;
+          if (entry.uLightElevationRank) {
+            const v = entry.uLightElevationRank.value;
+            const configured = v !== LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+            if (configured) elevationConfiguredCount++;
+            // Report the rank SPLIT BACK into its two authored halves, not the
+            // packed float — "floor 0, 5ft up" is something the author can
+            // check against Foundry's own light sheet; "0.3125" is not
+            // (feedback_aggregate_cannot_name_the_source).
+            lightElevations.push({
+              sourceId: id,
+              configured,
+              rank: configured ? v : null,
+              floorIndex: configured ? Math.floor(v) : null,
+              heightAboveFloorBottom: configured ? (v - Math.floor(v)) * ELEVATION_RANK_FRACTION_DIVISOR : null,
+            });
+          }
           const animType = entry.animationType ?? null;
           if (animType) {
             if (entry.animationEntry) builtByType[animType] = (builtByType[animType] ?? 0) + 1;
@@ -10713,7 +11223,10 @@ export async function startVtPanViewer({
             "coloration (uColorationAlpha=0), matching Foundry's isRequired/hasColor gate. colorationSummary " +
             'below should now show mostly `coloured`; a high colorlessFraction would mean the colour read is ' +
             'still not landing. No other 12 coloration techniques, no contrast/saturation/shadow adjustments, ' +
-            'no darkness sources, no elevation occlusion (docs/planning/Light-Parity.md §5). Animated lights: ' +
+            'no darkness sources (docs/planning/Light-Parity.md §5). HEIGHT/ELEVATION OCCLUSION landed ' +
+            '2026-08-03 — see heightGate below for what each active light is ACTUALLY resolving; a light ' +
+            'reads unconfigured (reaches everything, no change from before this feature existed) until its ' +
+            "own AmbientLight elevation is set away from Foundry's 0 default. Animated lights: " +
             'see animationSummary below for what is ACTUALLY registered right now (live, not a hardcoded ' +
             'claim here) — effects/lighting/animations/registry.js is the source of truth.',
           poolSize: pointLights.lightMeshes.size,
@@ -10729,6 +11242,20 @@ export async function startVtPanViewer({
           sampleLight,
           colorationSummary,
           candleLightBreakdown,
+          // HEIGHT/ELEVATION GATE (2026-08-03) — PER LIGHT, deliberately not
+          // just one sample: the author needs to find THEIR specific light's
+          // own resolved value, not guess from an arbitrary first-found one.
+          // `configuredCount` answers the cheapest question first — is ANY
+          // light's elevation actually reaching the shader as non-default —
+          // before anyone looks at an individual value. `elevationAboveFloor`
+          // is `null` for an unconfigured light (the sentinel itself is an
+          // internal implementation constant, not a meaningful world height,
+          // so it is never surfaced as a number here).
+          heightGate: {
+            configuredCount: elevationConfiguredCount,
+            totalActive: lightElevations.length,
+            lights: lightElevations,
+          },
           // ANIMATED LIGHTS (2026-07-20) — builtByType/deferredByType/
           // unrecognizedTypes are per-animation-type counts among ACTIVE
           // lights this frame; deferredKnownReasons is KNOWN_DEFERRED_

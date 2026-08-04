@@ -152,7 +152,13 @@ export { buildCandleWallClipConfig, computeCandleWallClippedShape } from './scen
 // closed door blocks the wind field, an open door doesn't. `watchSceneWallStructure`
 // is the matching write-side signal — the one place Wall CRUD hooks are
 // subscribed, so a door toggling open/closed can trigger a rebake.
-export { readSceneWallSegments, deriveWallSolid, watchSceneWallStructure, watchDoorOpenings } from './scene-walls.js';
+export {
+  readSceneWallSegments,
+  deriveWallSolid,
+  deriveWallAperture,
+  watchSceneWallStructure,
+  watchDoorOpenings,
+} from './scene-walls.js';
 
 // THE DOOR READER — the one place a wall's DOOR GRAPHIC fields (texture,
 // animation type/double/direction/strength/flip, open state) are read, for the

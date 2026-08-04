@@ -151,4 +151,20 @@ export function run(t) {
       sub.outsideFlash01() === 0
     );
   }
+
+  // ── the batched geometry never exceeds WebGPU's guaranteed vertex-buffer
+  // ceiling (2026-08-01: 12 separate attributes here failed real pipeline
+  // COMPILE — invisible to graph construction alone — see
+  // keyhole-vertex-buffer-limit-fix.md). Cheap, no GPU render needed: this
+  // just counts the attributes actually set on the real geometry. ──
+  {
+    const { sub } = makeSubsystem({ perfTier: 3 });
+    sub.sync(0);
+    sub.forceStrike();
+    sub.sync(1);
+    const mesh = sub.scene.children.find((c) => c.geometry?.attributes);
+    ok('the strand mesh exists once a strike has spawned', !!mesh);
+    const attrCount = Object.keys(mesh.geometry.attributes).length;
+    ok(`the batched geometry uses ${attrCount} vertex buffers, safely under WebGPU's guaranteed 8`, attrCount <= 8);
+  }
 }

@@ -8801,10 +8801,10 @@ export async function startVtPanViewer({
       // depthAuthority.rebuild stamps `renderOrder` on each item via THE law
       // (scene/layer-order.js#sortByLayer — this IS that sort, not a second
       // one; see the depth authority's own doc for why it returns the sorted
-      // array as a drop-in) AND publishes a live rank table
-      // (docs/planning/Depth-Buffer.md, stage 1 — no consumer reads it yet).
-      // Rebuilt every update because the draw list itself changes with the
-      // viewed floor.
+      // array as a drop-in) AND publishes a live rank table that point lights'
+      // own per-frame `resolveExpectedDepth` reads (docs/planning/Depth-
+      // Buffer.md §9e onward). Rebuilt every update because the draw list
+      // itself changes with the viewed floor.
       const items = depthAuthority.rebuild(buildItems(view.floorIndex));
       // Vegetation sorts at its OWN elevation inside the host floor's band, not
       // at its host's — the author-ruled exception (see VegetationKind#
@@ -8812,6 +8812,54 @@ export async function startVtPanViewer({
       // it resolves each overlay's slot through the same comparator, so it
       // needs the stamped `renderOrder`s that only exist after the line above.
       stampVegetationRenderOrders(items);
+      // VEGETATION JOINS THE DEPTH AUTHORITY'S PUBLIC RANK TABLE — RIGHT HERE,
+      // NOT AT THE END OF THIS FUNCTION (moved 2026-08-05, fixing a live
+      // flicker report: "bushes rapidly oscillate between illuminated and
+      // not while panning"). `updateResidencyUnguarded` is `async` and DOES
+      // suspend for real (the `await ensureItemLoaded(item)` calls below, PHASE
+      // 1) — the render loop keeps calling `requestAnimationFrame` and
+      // `pointLights.update()` DURING that suspension, on whatever
+      // `depthAuthority` state happens to exist AT THAT INSTANT. The ORIGINAL
+      // placement of this exact block — after PHASE 1/2's loading loops —
+      // left `depthAuthority` holding the REAL-ITEMS-ONLY table (from the
+      // rebuild just above) for the ENTIRE async loading window, EVERY
+      // residency pass — which panning triggers constantly, each one real
+      // async work (new tiles loading), each one several rendered frames
+      // long. A light's occlusion query during that window found no
+      // vegetation rank at all and passed straight through; once the pass
+      // finally finished (this block, run too late), vegetation reappeared in
+      // the table and correctly occluded again — repeating every pass, which
+      // is "rapidly oscillate" during continuous panning.
+      //
+      // The actual FIX is simply WHERE this runs, not what it computes:
+      // `buildVegetationDepthItems` never touched `state.vegetationOverlays`
+      // (the loaded mesh/texture) at all — only `items`/floor bands/the
+      // STATIC discovery map (`getVegetationRenderState().urlByItemId`,
+      // resolved once at scene load, not per-pass) — so it never needed to
+      // wait for PHASE 1/2 in the first place; that was a false assumption in
+      // the original placement, not a real dependency. Running it here, with
+      // NO await between this and the rebuild just above, makes the
+      // transition from "last pass's full table" to "this pass's full table"
+      // ATOMIC from a concurrently-rendering frame's point of view — there is
+      // no synchronous gap for anything else to run in. `rebuildSceneDepth
+      // Proxies(itemsWithVegetation)`, further down, still waits for PHASE
+      // 1/2 to finish — it draws the real GPU proxy from the LOADED overlay
+      // mesh/texture, which genuinely does not exist until then; that part
+      // was never the bug. Deliberately still TWO rebuild calls, not one
+      // combined call: `stampVegetationRenderOrders` above already consumed
+      // the real-items-only `items` array, and its own "how many REAL items
+      // sort below" scan must never see these synthetic entries (unchanged
+      // reasoning from `vegetation-render.js#buildVegetationDepthItems`'s own
+      // header).
+      let vegFloors = [];
+      try {
+        const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+        if (floorsResult.ok) vegFloors = floorsResult.floors;
+      } catch (err) {
+        log.error('vegetation depth-item lookup (getActiveSceneFloors) failed — vegetation stays unranked:', err);
+      }
+      const vegDepthItems = buildVegetationDepthItems(items, vegFloors, getVegetationRenderState().urlByItemId);
+      const itemsWithVegetation = vegDepthItems.length ? depthAuthority.rebuild([...items, ...vegDepthItems]) : items;
       const wantedIds = new Set(items.map((i) => i.id));
       prefetchSkippedPacks = 0;
       lastUpdate.placementChanges = 0;
@@ -8960,33 +9008,12 @@ export async function startVtPanViewer({
       // Every item's placement/mesh/visibility for THIS pass is now final —
       // exactly the moment buf:scene.depth's own draw list must be re-derived
       // from (see rebuildSceneDepthProxies's own header for why wholesale,
-      // not incremental).
-      //
-      // VEGETATION JOINS THE DEPTH AUTHORITY (STAGE 2, 2026-08-04) — a SECOND
-      // `depthAuthority.rebuild(...)` call, deliberately not a mutation of the
-      // `items` reference `stampVegetationRenderOrders` and the per-item loop
-      // above already used. Those two consumers' own "how many REAL items
-      // sort below" logic (`vegetation-render.js#buildVegetationDepthItems`'s
-      // own header has the full reasoning) must never see these synthetic
-      // entries, or every overlay's already-shipped, working THREE
-      // `renderOrder` would shift by however many vegetation items happen to
-      // precede it — a regression in a system this round has no reason to
-      // touch. `state.vegetationOverlays` is fresh for THIS pass (the loop
-      // just above refreshed it), so this is the first point synthesis CAN
-      // run, and the last point before `rebuildSceneDepthProxies` needs the
-      // final table. `getActiveSceneFloors`, resolved here rather than
-      // threaded from `stampVegetationRenderOrders` (which does not expose
-      // its own copy) — the SAME established multi-reader pattern that
-      // function's own header already uses for the identical lookup.
-      let vegFloors = [];
-      try {
-        const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
-        if (floorsResult.ok) vegFloors = floorsResult.floors;
-      } catch (err) {
-        log.error('vegetation depth-item lookup (getActiveSceneFloors) failed — vegetation stays unranked:', err);
-      }
-      const vegDepthItems = buildVegetationDepthItems(items, vegFloors, getVegetationRenderState().urlByItemId);
-      const itemsWithVegetation = vegDepthItems.length ? depthAuthority.rebuild([...items, ...vegDepthItems]) : items;
+      // not incremental). `itemsWithVegetation`'s own RANKS were already
+      // published (right after the rebuild near the top of this function —
+      // see that block's own "2026-08-05" header for why timing, not the
+      // computation itself, was the actual bug); this call only needs to wait
+      // for THIS pass's real loading/placement to finish, since it draws the
+      // GPU proxy from the now-current mesh/texture state.
       rebuildSceneDepthProxies(itemsWithVegetation);
 
       lastItems = items;

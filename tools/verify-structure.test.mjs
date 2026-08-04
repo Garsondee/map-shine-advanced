@@ -426,6 +426,25 @@ const V2_CORPSES = [
     code: 'export function buildWindHeatmapMaterial({ THREE, uGlobalTimeMs, ambientWind, liveField }) {',
     note: 'bug #2: a stale material kept the startup bake’s texture forever — "rebaking never visibly changes anything"',
   },
+
+  // --- the old height-gate mechanism: a NEW invariant (like particles/
+  // allocator-only above), not a V2 line — depth/authority-only is built at
+  // the exact moment the depth authority replaced it as the live-confirmed
+  // fix, so there is no legacy/ corpse to cite. Proven against a synthetic
+  // offender shaped like what a SECOND effect would have written if this
+  // wall did not exist (docs/planning/Light-Elevation-Occlusion-Failure.md).
+  {
+    rule: 'depth/authority-only',
+    from: 'the shape a new consumer would write, absent this wall',
+    code: 'combinedFalloff = combinedFalloff.mul(buildHeightGateNode(THREE.TSL, { attrHere, uLightElevationRank }));',
+    note: 'fifteen rounds tuning this exact call for point lights; a second effect must reach for the depth authority instead',
+  },
+  {
+    rule: 'depth/authority-only',
+    from: "boot.js's own candle/lightning anchor mapping — the grandfathered, still-load-bearing call",
+    code: 'elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors),',
+    note: 'proves the pattern actually matches the real grandfathered call, not just a hypothetical shape',
+  },
 ];
 
 /** Lines that must NOT trip a rule (guards against a wall crying wolf). */
@@ -508,6 +527,22 @@ const MUST_PASS = [
   {
     code: 'MapShine.setGrade = (partial) => {};',
     note: 'a set*Grade public API setter (like setBloom), not a stage assignment',
+  },
+  // `depth/authority-only` bans the OLD gate's two CALL SITES, never its own
+  // pure arithmetic — computeHeightGate/elevationRank stay real, Node-tested
+  // functions in their own right (still load-bearing for the grandfathered
+  // candle/lightning path) and must never trip just for being referenced.
+  {
+    code: 'computeHeightGate(elevationRank(0, 9), elevationRank(0, 5))',
+    note: "the OLD gate's own pure-arithmetic twins are not banned, only the two call sites that reach the byte",
+  },
+  {
+    code: 'export const LIGHT_ELEVATION_UNCONFIGURED_SENTINEL = 1e6;',
+    note: 'the sentinel constant itself is not banned — candle/lightning still legitimately reads it',
+  },
+  {
+    code: 'const rank = depthAuthority.rankOfElevation(light.elevation);',
+    note: 'the NEW, sanctioned path this wall exists to push every new consumer toward',
   },
 ];
 

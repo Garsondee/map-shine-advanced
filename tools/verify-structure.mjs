@@ -978,6 +978,57 @@ export const RULES = [
       'the CPU. A consumer holding a handle cannot forget an input, because it never names one. ' +
       'Only the bake site builds a handle. See docs/planning/Wind.md §5.1.',
   },
+
+  // ===================================================================
+  // OCCLUSION HAS ONE AUTHORITY — "is something above me here" is answered
+  // by a real per-item rank (scene/depth-authority.js, buf:scene.depth,
+  // docs/planning/Depth-Buffer.md), never a bespoke bit-packed byte again.
+  // Locked the day point-light height occlusion was confirmed live
+  // (2026-08-04, author: "it needs to be the only depth system allowed and
+  // we need to make sure of that") — grandfathering the OLD mechanism's
+  // still-active consumers (candle/lightning sprites, a genuinely different
+  // per-vertex-baked data path, not yet migrated) at their CURRENT count,
+  // never a new one.
+  // ===================================================================
+  {
+    id: 'depth/authority-only',
+    // The OLD, retired-for-new-work mechanism's three call surfaces:
+    // buildHeightGateNode (the TSL gate itself), resolveLightElevationRank /
+    // resolveAnchorElevationRank (the CPU-side rank resolvers). A NEW effect
+    // needing "is something above/below me" reaches for
+    // scene/depth-authority.js (rankOf/rankOfElevation/floorOfRank) or
+    // vt/scene-depth.js (querySceneDepth/computeLightExpectedDepth) instead —
+    // see point-light-illumination.js's own "STAGE 2" header for the ported
+    // example. `computeHeightGate`/`elevationRank`/the mirrors/the sentinel
+    // are deliberately NOT in this pattern: they are the OLD gate's own pure
+    // arithmetic, still Node-tested on their own merits, and banning the
+    // constants would not stop anyone from re-deriving the same formula by
+    // hand under a new name — banning the two CALL SITES a new consumer would
+    // actually need is what makes the shortcut unwriteable.
+    pattern: /\b(?:buildHeightGateNode|resolveLightElevationRank|resolveAnchorElevationRank)\s*\(/,
+    allow: [
+      `${sep}point-light-illumination.js`, // defines buildHeightGateNode
+      `${sep}point-light-pool.js`, // defines both CPU-side resolvers
+      `${sep}boot.js`, // grandfathered: candle/lightning anchors' own resolveAnchorElevationRank call
+      `${sep}candle-flame-render.js`, // grandfathered: flame sprite's own gate call
+      `${sep}lightning-render.js`, // grandfathered: bolt ribbon's own gate call
+    ],
+    why:
+      'Fifteen rounds (docs/planning/Light-Elevation-Occlusion-Failure.md) tuning a floor-relative, ' +
+      '16-bucket-quantized receiver byte plus a 1e6 "unconfigured" sentinel — and a live pixel probe ' +
+      'STILL caught it reading alpha=0 under real, visible floor art the day it was finally retired. ' +
+      'A real per-item ordinal rank in a real depth attachment needed none of that tuning: no ' +
+      'quantization (the value IS the rank), no sentinel (an untouched elevation is just an ordinary, ' +
+      'low, real rank), no tolerance/softness band (rank is an exact comparison, not a fuzzy one). The ' +
+      'author confirmed the migrated point-light gate fixes the reported bug live on the first try.',
+    instead:
+      'scene/depth-authority.js#createDepthAuthority (rankOf / rankOfElevation / floorOfRank) is the ' +
+      'CPU-side rank table; vt/scene-depth.js (querySceneDepth, computeExpectedStoredDepth, ' +
+      'computeLightExpectedDepth) is its GPU-facing query half. A light/effect resolves its own rank ' +
+      "once, converts it to a comparable depth value, and compares against buf:scene.depth's stored " +
+      'sample — one line, no new bits, no new byte. See point-light-illumination.js#buildDepthHeightGateNode ' +
+      'for the worked example, and docs/planning/Depth-Buffer.md §9e for the full account.',
+  },
 ];
 
 // ---------------------------------------------------------------------------

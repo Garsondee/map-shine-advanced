@@ -4396,6 +4396,29 @@ export async function startVtPanViewer({
     // it still honestly names `startVtPanViewer` as the reachable entry point,
     // because externally that is still the only door in.
     function runGeometryWorldPass() {
+      // buf:scene.depth FIRST (REORDERED 2026-08-09, PERF — a live report on
+      // a 12K-map upper floor measured this whole pass's colour draw at
+      // 133ms GPU mean from just 22 draw calls: every overlapping opaque
+      // layer at a pixel was fully shaded, always, because this renderer
+      // runs with depthTest:false everywhere except this one pass). The
+      // colour draw below now reads THIS texture (`material.maskNode`,
+      // `buildWholeImageMaterial`) to reject a fragment a later, higher-
+      // ranked opaque layer would just paint over anyway — which only works
+      // if the texture already holds THIS FRAME's answer, not last frame's.
+      // Its own target/camera/scene are fully independent of sceneColor's
+      // MRT dance below (no mrtNode/setMRT concern here at all: this pass's
+      // material uses `fragmentNode`, which bypasses MRT entirely — see
+      // vt/scene-depth.js's own header), so moving it first introduces no
+      // new ordering hazard for its own two existing consumers either:
+      // specular/window read `sceneDepth.depthTexture` from `light
+      // .accumulate`, which still only starts after this ENTIRE pass (both
+      // halves) completes, exactly as before. Runs every frame, same
+      // cadence as the colour draw below, over whatever
+      // `rebuildSceneDepthProxies` last derived from residency — never
+      // rebuilt here.
+      profiler?.begin(Z.geomDepth);
+      runSceneDepthPass();
+      profiler?.end(Z.geomDepth);
       // MRT scoped, never left set (scene-attr.js's own header): a stale MRT
       // node would silently empty light.accumulate's single-attachment
       // targets right after this pass — save/set/restore.
@@ -4413,15 +4436,6 @@ export async function startVtPanViewer({
       profiler?.end(Z.geomDoors);
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
-      // buf:scene.depth — its OWN target, OWN camera, OWN scene; never shares
-      // sceneColor's MRT (no mrtNode/setMRT concern here at all: this pass's
-      // material uses `fragmentNode`, which bypasses MRT entirely regardless —
-      // see vt/scene-depth.js's own header). Runs every frame, same cadence
-      // as the world draw above, over whatever `rebuildSceneDepthProxies`
-      // last derived from residency — never rebuilt here.
-      profiler?.begin(Z.geomDepth);
-      runSceneDepthPass();
-      profiler?.end(Z.geomDepth);
     }
     function runSceneDepthPass() {
       // clearDepth scoped, never left set — the rest of this renderer runs
@@ -6506,6 +6520,39 @@ export async function startVtPanViewer({
       const uTint = uniform(vec3(1, 1, 1));
       const uAlpha = uniform(float(1));
       const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
+      // EARLY OCCLUSION REJECT (PERF, 2026-08-09 — live report: a 12K-map
+      // upper floor measured geometry.worldDraw at 133ms GPU mean, 22 draw
+      // calls, for a floor dense with stacked opaque content). This pass has
+      // ALWAYS run with depthTest:false (runGeometryWorldPass's own header:
+      // "the rest of this renderer runs with depthTest:false everywhere...
+      // this [depth-authority] pass is the ONE place a real Z exists") —
+      // every overlapping opaque layer at a pixel was fully shaded, always,
+      // with nothing to skip the ones a later draw would just paint over.
+      // `runSceneDepthPass` now runs BEFORE this pass (reordered in
+      // runGeometryWorldPass), so buf:scene.depth already holds this FRAME's
+      // real answer to "what's the highest-ranked opaque thing at this
+      // pixel" by the time this material's fragment shader runs — the exact
+      // same query specular/window already trust (querySceneDepth +
+      // computeTieSafeExpectedDepth), extended to the pass that actually
+      // owns the fill-rate cost this whole system exists to bound.
+      // `uExpectedDepth` starts at 0 (fail-open: `storedDepth.lessThan(0)`
+      // is never true for a real stored depth in ~[0.4,0.5], so nothing is
+      // ever wrongly discarded) and is kept current every residency pass by
+      // `rebuildSceneDepthProxies` (see `t.uExpectedDepth`'s own assignment
+      // there) — never computed once here and left stale, the exact bug
+      // class `floorAttrItem` exists to prevent one field over.
+      //
+      // Wired via `material.maskNode`, NOT a hand-placed `.discard()` inside
+      // `colorNode`'s own Fn: this material also has an `mrtNode`
+      // (buf:scene.attr), and `NodeMaterial#setupDiffuseColor` — verified in
+      // the vendored source (three.webgpu.js) — runs `bool(this.maskNode)
+      // .not().discard()` as its OWN first statement, before `colorNode` is
+      // even read and well before the mrtNode merge later in `setup()`. That
+      // is the exact ordering guarantee this fix needs (skip BOTH outputs,
+      // not just the visible one) and it comes from an official extension
+      // point, not an assumption about where a manually-placed discard would
+      // land in the generated shader.
+      const uExpectedDepth = uniform(float(0));
       // THE TEXTURE'S OWN TEXEL DIMENSIONS — what converts a UV derivative into
       // the texel footprint the clarity gate needs. Read off the texture rather
       // than passed in, because `tex.image` is already exactly right for BOTH
@@ -6582,6 +6629,14 @@ export async function startVtPanViewer({
       material.depthTest = false;
       material.depthWrite = false;
       material.side = THREE.DoubleSide; // negative scaleX flips winding — see world-quad.js
+      // EARLY OCCLUSION REJECT — see `uExpectedDepth`'s own comment above for
+      // the full account. `isAtOrBelow` is "nothing with a higher rank is
+      // recorded as opaque here" — true means draw, matching maskNode's own
+      // documented polarity (discards when the mask is FALSE).
+      material.maskNode = querySceneDepth(THREE.TSL, {
+        depthTexture: sceneDepth.depthTexture,
+        expectedDepth: uExpectedDepth,
+      }).isAtOrBelow;
       // buf:scene.attr REAL WRITER (scene-attr.js "THE REAL WRITERS") — base
       // map art IS the floor. Reads its own alpha via TSL.output, NOT a
       // closure variable (see buildRealFloorAttrMrtNode's own doc for the
@@ -6627,6 +6682,12 @@ export async function startVtPanViewer({
         // supplies both live, every frame.
         floorAttrUniforms,
         floorAttrItem: item,
+        // Kept fresh every residency pass by `rebuildSceneDepthProxies` —
+        // see `uExpectedDepth`'s own comment above. A top-level field, same
+        // shape as `floorAttrUniforms` above it, not folded into `appearance`
+        // below: this is bookkeeping for an internal query, never a
+        // user-facing visual control.
+        uExpectedDepth,
         appearance: {
           uTint,
           uAlpha,
@@ -7806,7 +7867,7 @@ export async function startVtPanViewer({
               }
               const wholeTile = { sx: 0, sy: 0, sw: c.width, sh: c.height, col: 0, row: 0 };
               const compressedUvScale = [c.width / padW, c.height / padH];
-              const { material, appearance, motion, floorAttrUniforms, floorAttrItem } = vegActive
+              const { material, appearance, motion, floorAttrUniforms, floorAttrItem, uExpectedDepth } = vegActive
                 ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
                     uvScale: compressedUvScale,
                     isFloorSurface: true, // Case-1 embedded veg IS the floor here — see the function's own doc
@@ -7819,6 +7880,11 @@ export async function startVtPanViewer({
               // itself — `syncAllFloorAttrUniformsForFrame` reads them every
               // frame. See `refreshItemFloorAttrUniforms`'s own header
               // (`vt/scene-attr.js`) for the live bug this exists to prevent.
+              // `uExpectedDepth` is `undefined` for a vegetation-material tile
+              // (that builder does not return one — Case-1 vegetation is not
+              // yet wired into the early-reject, a deliberately scoped
+              // limitation, not an oversight) — `rebuildSceneDepthProxies`
+              // guards on it being present before writing to it.
               const t = {
                 tile: wholeTile,
                 sub: null,
@@ -7830,6 +7896,7 @@ export async function startVtPanViewer({
                 mesh: null,
                 floorAttrUniforms: floorAttrUniforms ?? null,
                 floorAttrItem: floorAttrItem ?? null,
+                uExpectedDepth: uExpectedDepth ?? null,
               };
               setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
               const mesh = new THREE.Mesh(geometry, material);
@@ -7939,7 +8006,7 @@ export async function startVtPanViewer({
                 // recovery, so there is nothing to do here but stop waiting.
               }
             }
-            const { material, appearance, motion, floorAttrUniforms, floorAttrItem } = vegActive
+            const { material, appearance, motion, floorAttrUniforms, floorAttrItem, uExpectedDepth } = vegActive
               ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
                   isFloorSurface: true,
                   flutterEnabled: vegTier.flutterEnabled,
@@ -7959,6 +8026,7 @@ export async function startVtPanViewer({
               mesh: null,
               floorAttrUniforms: floorAttrUniforms ?? null,
               floorAttrItem: floorAttrItem ?? null,
+              uExpectedDepth: uExpectedDepth ?? null,
             };
             setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
             const mesh = new THREE.Mesh(geometry, material);
@@ -9508,6 +9576,14 @@ export async function startVtPanViewer({
         });
         const flags = computeSceneDepthFlags(item);
         for (const t of tiles) {
+          // EARLY OCCLUSION REJECT (see buildWholeImageMaterial's own
+          // comment) — kept fresh here, every residency pass, the exact
+          // rank this SAME pass just resolved for this item's depth-writer
+          // proxy above. `uExpectedDepth` is null for a vegetation-material
+          // tile (that builder does not create one yet); unconditional on
+          // `t.mesh?.visible` — cheap, and an invisible tile's uniform
+          // should not be allowed to go stale for whenever it next shows.
+          if (t.uExpectedDepth) t.uExpectedDepth.value = computeTieSafeExpectedDepth(rank, maxRank);
           if (!t.mesh?.visible) continue;
           const material = buildSceneDepthWriterMaterial({
             THREE,

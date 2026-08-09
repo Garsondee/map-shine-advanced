@@ -1958,3 +1958,87 @@ not evidence that anything committed between the two reports made performance wo
 not be filed as "still improving" either. `residency.itemLoad` (11.784ms mean) and the GPU-pool
 overflow (`maxPendingSize: 2019`, `maxResolveSkipStreak: 4`) both landed close to their 3rd-report
 values, consistent with both being stable, reproducible costs rather than noise-of-the-day.
+
+## 15. 2026-08-09 — a 12K-map upper floor solved the "point lights are not the whole story" question:
+overdraw, and a real fix at the pass-order level
+
+The user ran the SAME benchmark route on a 12,000×12,000px multi-floor map, from its upper floor.
+Result: **4.9 avgFps, worst frame 583ms**, `frame.gpuMs` p50 116ms/p95 340ms. This is not "worse" the
+way the earlier reports' 40ms swings were worse — it is a different regime entirely, and it named a
+new #1 priority outright.
+
+### The finding: `geometry.worldDraw` and `geometry.depthDraw` ARE the frame
+
+| Zone | GPU mean | Draw calls | (compare: lower-floor route) |
+| --- | --- | --- | --- |
+| `geometry.worldDraw` | **133.093 ms** | 22 | ~11ms / 16 draws |
+| `geometry.depthDraw` | **44.287 ms** | 9 | ~1ms / 6 draws |
+
+Together these account for effectively the entire frame (`pass.geometry.world`'s own total: 174.3ms).
+Lighting — the dominant cost in every earlier report — is ~8.5ms here, a non-issue. Draw-call counts
+are LOW (22, 9); triangle counts are modest (262K, 65K). That combination — few draws, huge per-draw
+cost, on a floor with lots of stacked opaque content (a multi-floor building interior) — is the
+signature of fill-rate-bound overdraw, not "too many objects."
+
+### Confirmed at the code level, not inferred
+
+`runGeometryWorldPass`'s own comment states it plainly: *"the rest of this renderer runs with
+depthTest:false everywhere... this [depth-authority] pass is the ONE place a real Z exists."* The main
+colour pass has ZERO hardware early-rejection. Every opaque layer stacked on a pixel gets fully shaded,
+always, because there was nothing to skip the ones a later draw would just paint over. This is a
+deliberate design choice ("design doc §2"), not an accidental bug — but its cost scales directly with
+how much opaque content overlaps in view, which is exactly why a simple outdoor bench route costs
+~11ms and a dense interior costs 133ms for a similarly-shaped draw list.
+
+### The fix — user explicitly approved the risk, given the payoff
+
+`runSceneDepthPass` (the depth-authority's own pass, which DOES use a real hardware depth test) used
+to run AFTER the colour draw, purely to feed other effects' occlusion queries. **Reordered it to run
+FIRST**, then wired `buildWholeImageMaterial` (the material every ordinary tile/background/roof uses)
+to reject already-covered fragments before paying their shading cost, using the exact same proven query
+every other depth-authority consumer already trusts:
+
+- `material.maskNode` — THREE's own `NodeMaterial` extension point, not a hand-placed `.discard()`.
+  Verified directly in the vendored source (`three.webgpu.js#setupDiffuseColor`): `bool(this.maskNode)
+  .not().discard()` runs as the material's own first statement, before `colorNode` is even read and
+  well before this material's `mrtNode` (buf:scene.attr) gets merged in — the ordering guarantee this
+  fix needs (skip BOTH outputs) comes from an official extension point, not an assumption about
+  generated-shader statement order.
+- `querySceneDepth` + `computeTieSafeExpectedDepth(rank, maxRank)` — the identical mechanism specular
+  and window already use LIVE for "is anything above my own drawn item" (`specular-material.js`'s own
+  docs name this exact caller shape: "an effect querying its OWN drawn item's rank"). Not a new
+  occlusion system — the locked depth authority, one more consumer.
+- `uExpectedDepth` is a uniform, defaulting to `0` (fail-open — `storedDepth.lessThan(0)` is never true
+  for a real stored depth in ~[0.4, 0.5], so nothing is ever wrongly discarded before the first update),
+  kept fresh every residency pass by `rebuildSceneDepthProxies` using the SAME `rank`/`maxRank` it
+  already computes there for the depth-writer proxy — never resolved once and left stale.
+
+**Scoped to `buildWholeImageMaterial` only.** `buildVegetationMaterial` (Case-1 self-vegetation) is NOT
+wired in — a smaller blast radius for a first attempt; ordinary tiles/backgrounds/roofs are the
+overwhelming majority of `geometry.worldDraw`'s cost.
+
+**Why this should not silently break holes/transparency**: `buf:scene.depth`'s own writer discards
+below the item's authored `alphaThreshold` (`buildSceneDepthWriterMaterial`), so a torn roof or a
+faded edge never registers as "opaque here" in the first place — `storedDepth` at that pixel already
+reflects whatever is genuinely visible underneath, exactly the semantics specular/window already rely
+on. The one real, deliberately-accepted residual risk: an item with alpha ABOVE the depth-writer's
+threshold but still meaningfully translucent (e.g. alpha 0.8) would still register as "opaque enough"
+to occlude, so a layer beneath it that should show a faint 20% blend-through would instead be
+discarded outright. This is not a NEW risk this fix introduces — every existing depth-authority
+consumer already makes the identical trade-off — but it is worth stating plainly rather than only
+noticing it if reported.
+
+`npm run verify` green (8186 tests). **NOT live-verified.** This is the single highest-risk change in
+the whole audit — it touches the sole occlusion system every other effect (point lights, DoF,
+specular, window, fire, sun-shadow) also depends on, and there is no way to confirm correctness (not
+just speed) without watching a real scene, including a map with roofs/holes/translucent overlays, not
+just checking the frame counter.
+
+### What still needs checking
+
+Whether this actually restores the 12K-map upper floor to a playable framerate, AND whether it changes
+anything visually on a normal scene (it should not) — both need the user's own eyes. If it holds up,
+`buildVegetationMaterial` is the natural next extension. If `geometry.depthDraw` itself is still
+disproportionately expensive after this lands, §4.3's own unconditional-`discard()`-defeats-early-Z
+finding (inside the depth-writer pass itself) is the next lever — unrelated to and unblocked by this
+fix.

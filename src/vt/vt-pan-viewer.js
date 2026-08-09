@@ -65,6 +65,7 @@ import { mipChainByteLength } from './block-compress.js';
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
 // the raw texture. Intra-zone.
 import { requestCompressedTexture, requestCoarseAlphaGrid } from './compressed-textures.js';
+import { buildCoverageCellMask, buildCoverageIndices, COVERAGE_MESH_CELLS } from './coverage-mesh.js';
 import {
   acquirePages,
   acquirePackedPages,
@@ -5986,6 +5987,12 @@ export async function startVtPanViewer({
     /** Items whose coarse alpha has been asked for — one request per item per
      * session (the worker's own IndexedDB cache handles across sessions). */
     const alphaRequested = new Set();
+    /** itemId → the item's coarse alpha grid, kept for COVERAGE MESHING
+     * (`vt/coverage-mesh.js`). Populated by `requestItemAlphaGrid`'s own
+     * delivery path, which is asynchronous and may never arrive at all (a
+     * broken source, a worker refusal) — every reader treats "no grid" as
+     * "draw the whole quad", the behaviour that predates coverage entirely. */
+    const coverageGrids = new Map();
     /** Reported in diagnostics so "sky-reach has no casters" is always
      * attributable: asked / arrived / refused, never inferred. */
     const alphaGridStats = { requested: 0, delivered: 0, failed: 0, skippedTokens: 0 };
@@ -6043,6 +6050,20 @@ export async function startVtPanViewer({
             return;
           }
           alphaGridStats.delivered++;
+          // COVERAGE MESHING's own input (`vt/coverage-mesh.js`) — the SAME
+          // grid the mask authority gets below, kept here too rather than
+          // re-derived, so the two can never disagree about where an item's art
+          // actually is. Stored by identity: `setTileGeometry` records which
+          // grid object a tile was last meshed against, and
+          // `refreshWholeImageItem` rebuilds the instant that differs — which
+          // is what turns this fire-and-forget arrival into a real geometry
+          // update rather than a value nobody re-reads.
+          coverageGrids.set(item.id, { w: res.gridW, h: res.gridH, data: res.grid });
+          scheduleResidencyUpdate().catch(() => {
+            // Non-fatal: the next residency pass re-meshes anyway. Coverage is
+            // an optimisation — a tile that keeps its full quad for another
+            // pass draws exactly as it did before this existed.
+          });
           onItemAlpha({
             ownerId: item.id,
             grid: { w: res.gridW, h: res.gridH, data: res.grid },
@@ -7649,14 +7670,40 @@ export async function startVtPanViewer({
      *   `shadowPadUv` undoes it). Used by the vegetation shadow so a swept
      *   shadow has somewhere to land; 0 for every ordinary drawable.
      */
-    function setTileGeometry(t, placement, imageW, imageH, segments = 1, padPx = 0) {
+    function setTileGeometry(t, placement, imageW, imageH, segments = 1, padPx = 0, coverageGrid = null) {
       t.sub = computeTileSubPlacement(placement, imageW, imageH, t.tile);
       // Grow in the item's LOCAL frame (width/height, pre-rotation) so a rotated
       // tile's pad rotates with it — the same reason `computeQuadCorners` is the
       // one place rotation is applied.
       if (padPx > 0) t.sub = padPlacement(t.sub, padPx);
-      const n = Math.max(1, Math.floor(segments));
+      const requested = Math.max(1, Math.floor(segments));
       const corners = computeQuadCorners(t.sub);
+      // COVERAGE MESH (2026-08-09, PERF — see `vt/coverage-mesh.js`'s own header
+      // for the measurement that forced it: on the author's mansion map a roof
+      // painting 3.7% of its 12000² canvas was rasterizing the WHOLE screen,
+      // every frame, in the colour pass AND the depth-authority pass). Drops the
+      // index entries for cells with no art in them; the VERTEX grid is
+      // untouched, so nothing moves and no visible pixel can change. An
+      // un-tessellated tile is promoted to a `COVERAGE_MESH_CELLS` grid purely
+      // to have cells to drop — a vegetation tile already has its own (finer)
+      // tessellation and keeps it.
+      //
+      // `t.coverageGrid` is stored so the caller can tell "this tile has already
+      // been meshed against THIS grid" from "the grid arrived since" — the grid
+      // is fetched asynchronously (`requestItemAlphaGrid` is fire-and-forget),
+      // so the first geometry build for an item legitimately happens without
+      // one and must be redone once it lands.
+      const mask = coverageGrid
+        ? buildCoverageCellMask({
+            grid: coverageGrid,
+            tile: t.tile,
+            imageW,
+            imageH,
+            cells: requested > 1 ? requested : COVERAGE_MESH_CELLS,
+          })
+        : null;
+      t.coverageGrid = coverageGrid;
+      const n = mask ? mask.cells : requested;
       const positionAttr = t.geometry.getAttribute('position');
       if (n <= 1) {
         const positions = buildQuadPositions(corners);
@@ -7669,10 +7716,16 @@ export async function startVtPanViewer({
           t.geometry.setIndex(Array.from(QUAD_INDICES));
         }
         t.segments = 1;
+        t.coverageSig = 'quad';
         return;
       }
       const grid = buildTessellatedQuadGeometry(corners, n);
-      if (positionAttr && t.segments === n) {
+      // Rebuilt whenever the SET of drawn cells changes, which is independent of
+      // whether the vertices moved: a tile can sit perfectly still and still
+      // need a new index buffer the frame its coverage grid finally arrives.
+      const coverageSig = mask ? `cov:${n}:${mask.occupiedCount}` : `full:${n}`;
+      const reused = positionAttr && t.segments === n;
+      if (reused) {
         // Same tessellation, moved — reuse the array (BufferAttribute has no
         // dispose(); reallocating per placement change is the leak-shaped
         // mistake reference_bufferattribute_no_dispose_trap names).
@@ -7681,7 +7734,10 @@ export async function startVtPanViewer({
       } else {
         t.geometry.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
         t.geometry.setAttribute('uv', new THREE.BufferAttribute(grid.uvs, 2));
-        t.geometry.setIndex(new THREE.BufferAttribute(grid.indices, 1));
+      }
+      if (!reused || t.coverageSig !== coverageSig) {
+        t.geometry.setIndex(new THREE.BufferAttribute(mask ? buildCoverageIndices(mask) : grid.indices, 1));
+        t.coverageSig = coverageSig;
       }
       t.segments = n;
     }
@@ -7898,7 +7954,13 @@ export async function startVtPanViewer({
                 floorAttrItem: floorAttrItem ?? null,
                 uExpectedDepth: uExpectedDepth ?? null,
               };
-              setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
+              // The coverage grid is usually still in flight at first build (it
+              // is requested from `ensureItemLoaded` and resolves later), so
+              // this is normally `null` and the tile starts as a full quad —
+              // `refreshWholeImageItem` re-meshes it the pass the grid lands.
+              // Passed anyway for the case where it has already arrived, e.g. a
+              // second tile of a split image, or a warm IndexedDB cache.
+              setTileGeometry(t, state.placement, imageW, imageH, vegSegments, 0, coverageGrids.get(item.id) ?? null);
               const mesh = new THREE.Mesh(geometry, material);
               mesh.frustumCulled = false;
               mesh.visible = false; // the refresh loop decides visibility + renderOrder
@@ -8098,9 +8160,23 @@ export async function startVtPanViewer({
           break;
         }
       }
+      // COVERAGE MESHING (`vt/coverage-mesh.js`) — the grid arrives
+      // asynchronously and usually LATER than an item's first geometry build,
+      // so "the placement moved" is not the only reason to re-mesh. Comparing
+      // the grid by IDENTITY (it is replaced exactly once, when it lands) makes
+      // this a one-shot rebuild per item rather than a per-pass recompute.
+      const coverageGrid = coverageGrids.get(item.id) ?? null;
       for (const t of wi.tiles) {
-        if (placementChanged) {
-          setTileGeometry(t, state.placement, wi.imageSize.width, wi.imageSize.height, t.segments ?? 1);
+        if (placementChanged || t.coverageGrid !== coverageGrid) {
+          setTileGeometry(
+            t,
+            state.placement,
+            wi.imageSize.width,
+            wi.imageSize.height,
+            t.segments ?? 1,
+            0,
+            coverageGrid
+          );
           // Case-1 self-vegetation: the fold-free flutter cap is expressed per
           // world px, so a resize moves it. No-ops on an ordinary (non-veg)
           // tile, whose `motion` has no such uniform.
@@ -8289,7 +8365,7 @@ export async function startVtPanViewer({
         const entry = { status: 'loading', mesh: null, material: null, geometry: null, tex: null, shadow: null };
         state.vegetationOverlays[kind.id] = entry;
         loadVegetationOverlayTexture(url)
-          .then((loaded) => {
+          .then(async (loaded) => {
             if (!loaded) {
               entry.status = 'error';
               return;
@@ -8305,6 +8381,37 @@ export async function startVtPanViewer({
             const segments = vegetationMeshSegments(state.placement?.width ?? 0, state.placement?.height ?? 0);
             const corners = computeQuadCorners(state.placement);
 
+            // COVERAGE MESHING for a Case-2 overlay (`vt/coverage-mesh.js`).
+            // Keyed on the OVERLAY'S OWN url, never the host item's src: a
+            // `_Tree` sibling file is a different image from the tile it grows
+            // on, and meshing a canopy against its host's coverage would drop
+            // exactly the cells where the canopy overhangs bare ground.
+            //
+            // Awaited inline rather than rebuilt later, unlike the whole-image
+            // path: this whole branch already runs once, asynchronously, after
+            // a texture decode, so there is a natural place to wait and no
+            // rebuild machinery is needed. Measured on the author's mansion:
+            // `_Tree` paints 11.9% of its 12000² canvas and `_Bush` 7.2%, both
+            // with art reaching every corner — so a bounding box saves nothing
+            // here and only per-cell coverage helps.
+            let vegCoverageGrid = null;
+            try {
+              const res = await requestCoarseAlphaGrid(url);
+              if (res?.grid) vegCoverageGrid = { w: res.gridW, h: res.gridH, data: res.grid };
+            } catch (err) {
+              // Fails OPEN to a full quad — a canopy that draws its whole
+              // (mostly empty) quad is slow, never wrong.
+              ingestLog.warn(`coarse alpha failed for vegetation overlay "${url}":`, err);
+            }
+            const vegCoverageMask = vegCoverageGrid
+              ? buildCoverageCellMask({
+                  grid: vegCoverageGrid,
+                  imageW: vegCoverageGrid.w,
+                  imageH: vegCoverageGrid.h,
+                  cells: segments,
+                })
+              : null;
+
             /** Both meshes share this grid SHAPE; each gets its OWN buffers
              * (a BufferAttribute cannot be shared between two geometries that
              * are updated independently). `padPx` grows the quad outward
@@ -8316,7 +8423,13 @@ export async function startVtPanViewer({
               const g = new THREE.BufferGeometry();
               g.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
               g.setAttribute('uv', new THREE.BufferAttribute(grid.uvs, 2));
-              g.setIndex(new THREE.BufferAttribute(grid.indices, 1));
+              // ⚠️ THE PADDED (SHADOW) QUAD KEEPS EVERY CELL. Its whole job is
+              // to hold the sun's SWEEP, which lands well outside the canopy's
+              // own silhouette — coverage-meshing it to the art would re-clip
+              // each swept shadow at the plant's own edge, the exact bug the
+              // padding exists to fix (`vegetationShadowPadPx`).
+              const useMask = padPx > 0 ? null : vegCoverageMask;
+              g.setIndex(new THREE.BufferAttribute(useMask ? buildCoverageIndices(useMask) : grid.indices, 1));
               return g;
             };
 
@@ -9790,45 +9903,60 @@ export async function startVtPanViewer({
       // WALL time, not pure CPU-busy time, same as residency.pass itself
       // (this loop's own `await ensureItemLoaded(item)` can genuinely suspend
       // for real decode work) — see scheduleResidencyUpdate's own comment.
+      //
+      // try/finally around the WHOLE loop (BUG FOUND LIVE, 2026-08-09 —
+      // ensureItemLoaded's own dims/masks brackets got this same fix one
+      // level down first): a live report showed this zone AND residency.pass
+      // both unbalanced by exactly 1, with zero itemLoadDims/itemLoadMasks
+      // occurrences that run (a fully cache-warm sweep — nothing new even
+      // decoded), which rules out the already-fixed inner throw path and
+      // narrows the leak to somewhere in this outer loop instead. The
+      // per-item try/catch below already protects `ensureItemLoaded` itself;
+      // it does not protect this bracket's own `profiler.end()` from
+      // anything else that might one day throw between iterations. Same
+      // fix, same reasoning, one level up.
       profiler?.begin(Z.residencyItemLoad);
       const states = [];
-      for (const item of items) {
-        // A PERMANENTLY-BROKEN ITEM IS NOT RETRIED (item 1d, 2026-07-17). Found
-        // in the author's own thrash report: ten identical `HTTP 404` entries
-        // for one token image, and `mainThreadFallbackSourceDecodes: 12`.
-        // `ensureItemLoaded` throws for a broken source, so `itemStates` never
-        // gets an entry, so it was re-attempted on EVERY residency pass —
-        // seventy-seven of them in that session — each paying a ranged fetch, a
-        // worker dimensions round-trip, AND a main-thread fallback decode
-        // attempt (the last of which is the operation this file elsewhere calls
-        // "a giant-image decode the render loop could feel"). `itemLoadErrors`
-        // deduped the REPORT; nothing deduped the WORK, so the report looked
-        // tidy while the cost repeated forever.
-        //
-        // The trade, stated because it IS a real one: a source that starts
-        // working later (a server hiccup, an asset uploaded mid-session) now
-        // needs a reload rather than fixing itself on the next pass. That is
-        // the right way round — an asset that 404s is overwhelmingly gone, not
-        // late, and paying an unbounded per-frame cost forever on the chance it
-        // returns is exactly the "reactive mechanism" shape Keyhole exists to
-        // delete. The failure stays LOUD either way: it is in `layerLoadErrors`
-        // in every report, permanently, not silently skipped.
-        if (failedItemIds.has(item.id)) continue;
-        try {
-          states.push([item, await ensureItemLoaded(item)]);
-        } catch (err) {
-          // One broken item (404 art, undecodable file) must not take the scene
-          // down. Recorded rather than thrown — the debug panel surfaces this,
-          // since the author debugs by pasting reports, not reading the console.
-          const message = String(err?.message || err);
-          failedItemIds.add(item.id);
-          if (!itemLoadErrors.some((e) => e.id === item.id)) {
-            itemLoadErrors.push({ id: item.id, src: item.src, error: message });
-            console.error(`[vt-pan-viewer] item "${item.id}" failed to load (${item.src}):`, err);
+      try {
+        for (const item of items) {
+          // A PERMANENTLY-BROKEN ITEM IS NOT RETRIED (item 1d, 2026-07-17). Found
+          // in the author's own thrash report: ten identical `HTTP 404` entries
+          // for one token image, and `mainThreadFallbackSourceDecodes: 12`.
+          // `ensureItemLoaded` throws for a broken source, so `itemStates` never
+          // gets an entry, so it was re-attempted on EVERY residency pass —
+          // seventy-seven of them in that session — each paying a ranged fetch, a
+          // worker dimensions round-trip, AND a main-thread fallback decode
+          // attempt (the last of which is the operation this file elsewhere calls
+          // "a giant-image decode the render loop could feel"). `itemLoadErrors`
+          // deduped the REPORT; nothing deduped the WORK, so the report looked
+          // tidy while the cost repeated forever.
+          //
+          // The trade, stated because it IS a real one: a source that starts
+          // working later (a server hiccup, an asset uploaded mid-session) now
+          // needs a reload rather than fixing itself on the next pass. That is
+          // the right way round — an asset that 404s is overwhelmingly gone, not
+          // late, and paying an unbounded per-frame cost forever on the chance it
+          // returns is exactly the "reactive mechanism" shape Keyhole exists to
+          // delete. The failure stays LOUD either way: it is in `layerLoadErrors`
+          // in every report, permanently, not silently skipped.
+          if (failedItemIds.has(item.id)) continue;
+          try {
+            states.push([item, await ensureItemLoaded(item)]);
+          } catch (err) {
+            // One broken item (404 art, undecodable file) must not take the scene
+            // down. Recorded rather than thrown — the debug panel surfaces this,
+            // since the author debugs by pasting reports, not reading the console.
+            const message = String(err?.message || err);
+            failedItemIds.add(item.id);
+            if (!itemLoadErrors.some((e) => e.id === item.id)) {
+              itemLoadErrors.push({ id: item.id, src: item.src, error: message });
+              console.error(`[vt-pan-viewer] item "${item.id}" failed to load (${item.src}):`, err);
+            }
           }
         }
+      } finally {
+        profiler?.end(Z.residencyItemLoad);
       }
-      profiler?.end(Z.residencyItemLoad);
 
       // PHASE 2 — view-tier streaming + mesh update, now that every coarse pin
       // is locked in and can't be starved.
@@ -10046,9 +10174,20 @@ export async function startVtPanViewer({
           // measurement for an 'event'-cadence zone (perf-zones.js's own
           // doc: never summed into a frame total), and matches what a live
           // residency pass actually costs from the caller's point of view.
+          //
+          // try/finally (BUG FOUND LIVE, 2026-08-09, same report as
+          // residency.itemLoad's own fix just below this function): without
+          // it, an exception anywhere inside updateResidencyUnguarded skips
+          // this end() and leaks the OUTER bracket open too, on top of
+          // whichever inner one already leaked — this function's own
+          // `residencyInFlight` reset in its own finally already survives
+          // that throw structurally; the profiler bracket did not.
           profiler?.begin(Z.residencyPass);
-          await updateResidencyUnguarded();
-          profiler?.end(Z.residencyPass);
+          try {
+            await updateResidencyUnguarded();
+          } finally {
+            profiler?.end(Z.residencyPass);
+          }
         } while (residencyDirty);
       } finally {
         residencyInFlight = false;

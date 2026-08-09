@@ -102,7 +102,9 @@ export const SUN_SHADOW_DEBUG_VIEWS = Object.freeze([
   // `layers` multiplies `SUN_SHADOW_LAYER_STRENGTH` at bake time instead —
   // the same mechanism Shader Lab's own `layerIsolate` uses, so the two tools
   // now isolate identically and can be compared directly. Index order is the
-  // packing's: [walls, overhead, floor-above, everything-higher].
+  // packing's: [walls, overhead, band 0, band 1] — the two bands being "every
+  // floor above this one" and "every floor above THAT", at their real derived
+  // elevations (`shadow-bands.js`, 2026-08-05).
   Object.freeze({
     id: 'shadow-building',
     label: 'Shadows — building/wall only',
@@ -119,35 +121,61 @@ export const SUN_SHADOW_DEBUG_VIEWS = Object.freeze([
   }),
   Object.freeze({
     id: 'shadow-skyreach',
-    label: 'Shadows — sky-reach only',
-    // B and A together: `packLayerTexelData` merges "the floor directly above"
-    // and "everything higher" into B today (A is the documented empty slot),
-    // so sky-reach is honestly ONE isolation, not two.
+    label: 'Shadows — sky-reach (everything above) only',
+    // BOTH bands together. They are one physical stack sliced at two
+    // elevations (`shadow-bands.js`), so isolating one of them alone would show
+    // half a building — honestly ONE isolation, not two.
     layers: [0, 0, 1, 1],
     shadow: [1, 0, 0, 0],
     caster: null,
   }),
   Object.freeze({
-    id: 'caster-coverage',
-    label: 'Data — sky-reach coverage (R)',
+    id: 'shadow-band-near',
+    label: 'Shadows — nearest floor above only',
+    layers: [0, 0, 1, 0],
+    shadow: [1, 0, 0, 0],
+    caster: null,
+  }),
+  Object.freeze({
+    id: 'shadow-band-far',
+    label: 'Shadows — two or more floors above only',
+    layers: [0, 0, 0, 1],
+    shadow: [1, 0, 0, 0],
+    caster: null,
+  }),
+  // ⚠️ THESE FOUR LABELS WERE WRONG UNTIL 2026-08-05, and had been since the
+  // layer-smear model replaced the march (2026-08-02). They still described the
+  // RETIRED march's caster packing (coverage / height / floating / gate), while
+  // the texture they draw has carried walls / overhead / above / (blockage)
+  // since. Anyone using "Data — receiver gate (A)" to check the receiver gate
+  // was looking at the cascade's blend factor. `feedback_instruments_must_not_
+  // lie` — a mislabelled channel view is worse than no channel view, because it
+  // is trusted. Now named for the packing `layer-smear-render.js`'s own header
+  // declares, band names included.
+  Object.freeze({
+    id: 'caster-walls',
+    // No mask-suffix literal in the label — `masks/authority-only` (rightly)
+    // forbids one outside the catalog, and a dropdown string is exactly the
+    // sort of copied suffix knowledge that rule exists to stop drifting.
+    label: 'Data — walls, from the outdoors mask (R)',
     shadow: null,
     caster: [1, 0, 0, 0],
   }),
   Object.freeze({
-    id: 'caster-height',
-    label: 'Data — floating height, overhead ∪ sky-reach (G)',
+    id: 'caster-overhead',
+    label: 'Data — this floor’s overhead coverage (G)',
     shadow: null,
     caster: [0, 1, 0, 0],
   }),
   Object.freeze({
-    id: 'caster-floating',
-    label: 'Data — floating coverage, overhead ∪ sky-reach (B)',
+    id: 'caster-band-near',
+    label: 'Data — band 0, everything above this floor (B)',
     shadow: null,
     caster: [0, 0, 1, 0],
   }),
   Object.freeze({
-    id: 'caster-gate',
-    label: 'Data — receiver gate / outdoors (A)',
+    id: 'caster-band-far',
+    label: 'Data — band 1, everything two floors up (A)',
     shadow: null,
     caster: [0, 0, 0, 1],
   }),

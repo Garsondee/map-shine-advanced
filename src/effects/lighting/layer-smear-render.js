@@ -11,20 +11,71 @@
  * THE LAYER TEXTURE'S PACKING — one channel per occluder layer, and nothing
  * else. No heights, no gate, no merged silhouettes:
  *
- *   R  this floor's WALLS      (`_Outdoors` dark)
- *   G  this floor's OVERHEAD   (overhead tiles hosted here)
- *   B  the floor DIRECTLY ABOVE (background ∪ foreground art)
- *   A  EVERYTHING HIGHER, merged
+ *   R  this floor's WALLS    (`_Outdoors` dark)
+ *   G  this floor's OVERHEAD (overhead tiles hosted here)
+ *   B  BAND 0 — `coverAbove(F)`,   every floor above this one
+ *   A  BAND 1 — `coverAbove(F+1)`, every floor above THAT
  *
  * That the whole occluder description is ONE texture plus ONE `vec4` of heights
  * is the point of this model, not a coincidence — the packing it replaced
  * carried coverage and height in channels that disagreed at every silhouette
  * edge, which is what a per-texel height buys you.
  *
+ * ⚠️ THE A CHANNEL CHANGED HANDS 2026-08-05 (the shadow cascade). It used to
+ * carry THE CASCADE's blend factor (the lower floor's `coverAbove`) because no
+ * silhouette source existed for a fourth layer. That blend factor now rides in
+ * the BAKED FIELD's own alpha instead — every slot publishes its own band-0
+ * coverage there for the slot above to read (`uCascade` below) — which freed
+ * this channel for the second real band, at zero extra memory and with no
+ * second texture upload per floor. `shadow-bands.js`'s header has the full
+ * decomposition and why the bands are cumulative rather than per-floor.
+ *
  * @module effects/lighting/layer-smear-render
  */
 import { PENUMBRA_PER_PX, GATE_SHARPEN_LOW, GATE_SHARPEN_HIGH } from './sun-occlusion.js';
-import { SHADOW_LAYER_COUNT, DEPTH_SCALES, LAYER_WALLS, LAYER_OVERHEAD } from './layer-smear.js';
+import {
+  SHADOW_LAYER_COUNT,
+  DEPTH_SCALES,
+  LAYER_WALLS,
+  LAYER_OVERHEAD,
+  SHADOW_BAND_LAYER_INDICES,
+  DIFFUSION_PER_HEIGHT_PX,
+} from './layer-smear.js';
+
+/**
+ * Which layers the SKY-REACH GRADIENT's nested isotropic reads are compiled in
+ * for — a BUILD-TIME set, not a runtime uniform.
+ *
+ * `setDepth` has always been able to switch the gradient off per layer by
+ * pushing a radius of 0, but a zero radius still COMPILED the reads: TSL has no
+ * way to skip a texture fetch on a runtime uniform, so every layer paid
+ * `DEPTH_SCALES` extra samples per station whether or not it could ever use
+ * them. That was 12 fetches per station for a feature only the "above" layers
+ * have ever been given a radius (`sun-shadow-subsystem.js`'s own `setDepth`
+ * call site) — an unconditional 4× on the dominant cost of the whole bake.
+ *
+ * Scoping it to the BAND layers here (a JS-time branch, the same
+ * `tsl/no-uniform-gates` discipline `lowerFieldTexNode` already uses) is what
+ * pays for the per-layer diffusion LOD added alongside it: 4 sharp + 6 depth
+ * reads per station, against 1 + 12 before. Strictly fewer samples, one more
+ * feature.
+ */
+const LAYER_HAS_DEPTH_GRADIENT = Array.from({ length: SHADOW_LAYER_COUNT }, (_, i) =>
+  SHADOW_BAND_LAYER_INDICES.includes(i)
+);
+
+/**
+ * Pick layer `i`'s own channel out of a packed RGBA sample. Six places in this
+ * shader index the packing; writing `[p.r, p.g, p.b, p.a][i]` at each of them
+ * is six chances for one of them to be transcribed in a different order the
+ * day a channel changes hands — which is exactly what happened to the A
+ * channel on 2026-08-05 (see this module's own packing header).
+ *
+ * @param {*} packed - a vec4 node.
+ * @param {number} i - a layer index, 0..`SHADOW_LAYER_COUNT`-1.
+ * @returns {*} a float node.
+ */
+const channelOf = (packed, i) => [packed.r, packed.g, packed.b, packed.a][i];
 
 /** Ceiling on a requested mip level — a texture's chain tops out at
  * `log2(dimension)`, and asking past it is undefined on some backends. */
@@ -72,7 +123,8 @@ export const GATE_AA_LOD = 0;
  * @returns {{
  *   material: *,
  *   layerTexNode: *,
- *   setSun: (resolved: {dirX:number, dirY:number, throwPx:number[], maxThrowPx:number}) => void,
+ *   setSun: (resolved: {dirX:number, dirY:number, throwPx:number[], heightPx:number[], maxThrowPx:number}) => void,
+ *   setCascade: (args: {active: boolean}) => void,
  *   setLayers: (args: {strengths?: number[]}) => void,
  *   setDepth: (args: {radiiPx: number[]}) => void,
  *   setField: (args: {layerGridDimPx?: number}) => void,
@@ -123,6 +175,30 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
   const uSun = uniform(vec4(0, -1, 0, 0));
   /** Per-layer throw distance, world px — `heightᵢ / tan(elevation)`, CPU-side. */
   const uThrowPx = uniform(vec4(0, 0, 0, 0));
+  /** Per-layer occluder HEIGHT, world px — the same `heightsPx` array
+   * `resolveLayerSmear` turned into `uThrowPx`, carried through unconverted.
+   *
+   * ⚠️ NOT DERIVABLE FROM `uThrowPx` IN THE SHADER, which is why it is a second
+   * uniform rather than a multiply. Throw is `height / tan(elevation)` folded
+   * through `lengthScale` and the dawn/dusk cap (`layerThrowPx`), so at a low
+   * sun two layers of very different heights can land on the SAME capped throw
+   * — and diffusion must still tell them apart, because how soft a shadow is
+   * depends on how far the light fell, not on how far the shadow was allowed to
+   * stretch. Inverting the cap on the GPU would be re-deriving a CPU decision
+   * from its own lossy output. */
+  const uHeightPx = uniform(vec4(0, 0, 0, 0));
+  /** THE CASCADE's blockage publication — `(scale, floor, _, _)`.
+   *
+   * This slot writes `max(band0 · scale, floor)` into its baked field's ALPHA,
+   * where the slot ABOVE reads it as "how much do I block the view down to
+   * you". `(1, 0)` while the effect is live publishes this floor's own band-0
+   * coverage verbatim; `(0, 1)` publishes a solid 1 — FULLY BLOCKED — which is
+   * the safe state, not the convenient one: an "off" or empty slot must make
+   * the cascade a provable no-op for the floor above rather than opening a
+   * hole onto a field that was never computed (`feedback_gate_polarity_must_
+   * fail_open`, and the same `absentBlockage = 255` convention the CPU packing
+   * used while this rode in the layer texture). Arithmetic, never a branch. */
+  const uCascade = uniform(vec4(1, 0, 0, 0));
   /** Per-layer strength 0..1. An upper floor need not darken as hard as a wall. */
   const uStrength = uniform(vec4(1, 1, 1, 1));
   /** (globalStrength, softnessMul, basePenumbraPx, falloffExponent). */
@@ -205,7 +281,17 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     const occ = [];
     for (let i = 0; i < SHADOW_LAYER_COUNT; i++) occ.push(float(0).toVar());
     const layerThrow = [uThrowPx.x, uThrowPx.y, uThrowPx.z, uThrowPx.w];
+    const layerHeight = [uHeightPx.x, uHeightPx.y, uHeightPx.z, uHeightPx.w];
     const depthRadii = [uDepth.x, uDepth.y, uDepth.z, uDepth.w];
+    const lodFor = (blurPx) => max(float(0), min(float(MAX_LOD), log2(max(blurPx.div(texelWorldPx), float(1)))));
+    // ⚠️ THE DIFFUSION FLOOR — the TSL twin of `layer-smear.js#
+    // layerDiffusionBlurPx`; read THAT for why a height term exists at all
+    // (the station blur widens with horizontal throw, so at a high sun it
+    // reports every caster as equally crisp no matter how far the light
+    // actually fell). Resolved ONCE per layer, outside the station loop: it
+    // depends only on this layer's own height and the shared softness, neither
+    // of which varies per station.
+    const layerDiffusionPx = layerHeight.map((h) => h.mul(float(DIFFUSION_PER_HEIGHT_PX)).mul(softnessMul));
 
     for (let j = 0; j <= STEPS; j++) {
       // `stationDistancePx(j, STEPS, maxThrow)` — stations bunch toward the
@@ -220,20 +306,25 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
       // slips between two stations and THE LAW breaks discretely even though it
       // holds continuously (the twin's header spells this out).
       const spacing = maxThrow.mul(float((2 * u) / STEPS));
-      const blurPx = max(
+      const stationBlurPx = max(
         basePx.add(d.mul(float(PENUMBRA_PER_PX)).mul(uBlur.x)).mul(softnessMul),
         max(spacing, texelWorldPx)
       );
-      const lod = max(float(0), min(float(MAX_LOD), log2(max(blurPx.div(texelWorldPx), float(1)))));
-      // ONE fetch serves every layer WITHOUT a depth radius — they are
-      // channels of the same texel, so carrying four throw lengths through a
-      // single shared walk is free.
-      const packed = layerTexNode.sample(stationUv).level(lod);
-      const cov = [packed.r, packed.g, packed.b, packed.a];
 
       for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
         const L = layerThrow[i];
         const r = depthRadii[i];
+        // ⚠️ ONE FETCH PER LAYER NOW, NOT ONE SHARED FETCH (2026-08-05, the
+        // shadow cascade). The four layers still live in four channels of the
+        // same texel, but they no longer want the same MIP: a band three
+        // storeys up must read blurrier than the wall at your feet, at the
+        // same station, or "softer the further it falls" cannot exist. The
+        // shared read is what made every layer's edge equally crisp.
+        //
+        // Cost is still DOWN on balance — `LAYER_HAS_DEPTH_GRADIENT`'s own
+        // header has the arithmetic (4 + 6 reads per station, against 1 + 12).
+        const blurPx = max(stationBlurPx, layerDiffusionPx[i]);
+        const sharp = channelOf(layerTexNode.sample(stationUv).level(lodFor(blurPx)), i);
         // THE SKY-REACH GRADIENT — `layer-smear.js#isotropicDepthTerm`'s own
         // header has the physics, and its own comment explains why this is
         // NOT a term `max`'d in alongside the march (measured: a station's
@@ -244,9 +335,7 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
         // blur, taken AT the station's own position — so the near-field read
         // is "how enclosed is the receiver itself" and far stations still
         // carry the normal dawn/dusk elongation via the same `falloff(d/L)`
-        // every layer uses. `r=0` (the default) always builds this fetch —
-        // TSL has no cheap way to skip a sample on a RUNTIME uniform — but it
-        // reads at mip 0 (no blur) and is unused (`select` below keeps `cov[i]`).
+        // every layer uses.
         //
         // NESTED RADII, not one — `layer-smear.js#DEPTH_SCALES` has the full
         // argument: a single radius SATURATES, so the middle of a wide span
@@ -254,27 +343,33 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
         // is exactly the flatness this feature exists to remove. Averaging
         // several nested mip levels encodes depth as "how many scales still
         // see solid", so the gradient keeps deepening inward.
-        let depthCov = float(0);
-        for (let s = 1; s <= DEPTH_SCALES; s++) {
-          const rs = r.mul(float(s / DEPTH_SCALES));
-          const lodS = max(float(0), min(float(MAX_LOD), log2(max(rs.div(texelWorldPx), float(1)))));
-          const packedS = layerTexNode.sample(stationUv).level(lodS);
-          depthCov = depthCov.add([packedS.r, packedS.g, packedS.b, packedS.a][i]);
+        //
+        // ⚠️ COMPILED IN ONLY FOR THE BAND LAYERS — a JS-time branch, see
+        // `LAYER_HAS_DEPTH_GRADIENT`'s own header. A layer that can never be
+        // given a radius no longer pays `DEPTH_SCALES` fetches per station to
+        // multiply by a uniform zero.
+        let coverage = sharp;
+        if (LAYER_HAS_DEPTH_GRADIENT[i]) {
+          let depthCov = float(0);
+          for (let s = 1; s <= DEPTH_SCALES; s++) {
+            const rs = r.mul(float(s / DEPTH_SCALES));
+            depthCov = depthCov.add(channelOf(layerTexNode.sample(stationUv).level(lodFor(rs)), i));
+          }
+          depthCov = depthCov.mul(float(1 / DEPTH_SCALES));
+          // `r > 0` picks the isotropic read; `r == 0` keeps the sharp one. This
+          // IS a real per-pixel branch (`select`, not `step`-as-arithmetic) —
+          // safe here because nothing downstream shares state ACROSS layers or
+          // stations the way the debug-channel fold that stranded 12 of 20
+          // channels did (memory: feedback_tsl_select_chain_strands_vars); each
+          // `occ[i]` is written exactly once per station regardless of which
+          // branch is taken.
+          // ⚠️ `depthCov.mul(sharp)`, NOT `depthCov` ALONE — the TSL twin of
+          // `layer-smear.js#layerSmearVisibility`'s own `* sharp`; read THAT for
+          // the measurement (mip 8 of this texture is 8×4 texels for the whole
+          // map, so using the wash as the coverage outright MADE it the
+          // silhouette and detached every sky-reach shadow from its caster).
+          coverage = select(r.greaterThan(float(0)), depthCov.mul(sharp), sharp);
         }
-        depthCov = depthCov.mul(float(1 / DEPTH_SCALES));
-        // `r > 0` picks the isotropic read; `r == 0` keeps the sharp one. This
-        // IS a real per-pixel branch (`select`, not `step`-as-arithmetic) —
-        // safe here because nothing downstream shares state ACROSS layers or
-        // stations the way the debug-channel fold that stranded 12 of 20
-        // channels did (memory: feedback_tsl_select_chain_strands_vars); each
-        // `occ[i]` is written exactly once per station regardless of which
-        // branch is taken.
-        // ⚠️ `depthCov.mul(cov[i])`, NOT `depthCov` ALONE — the TSL twin of
-        // `layer-smear.js#layerSmearVisibility`'s own `* sharp`; read THAT for
-        // the measurement (mip 8 of this texture is 8×4 texels for the whole
-        // map, so using the wash as the coverage outright MADE it the
-        // silhouette and detached every sky-reach shadow from its caster).
-        const coverage = select(r.greaterThan(float(0)), depthCov.mul(cov[i]), cov[i]);
         // `t > 1` (past this layer's throw) and `L <= 0` (this layer casts
         // nothing) both need to contribute ZERO. `max(L, 1e-3)` keeps the
         // divide finite and `clamp(0,1)` then pins `t` to 1, where the falloff
@@ -300,9 +395,9 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // so this costs no extra fetch (memory:
     // feedback_composite_only_terms_miss_shared_buffers — reuse the node a
     // consumer already reads, never re-sample it).
-    const selfCoverageWalls = [here.r, here.g, here.b, here.a][LAYER_WALLS];
+    const selfCoverageWalls = channelOf(here, LAYER_WALLS);
     occ[LAYER_WALLS].assign(occ[LAYER_WALLS].mul(float(1).sub(selfCoverageWalls)));
-    const selfCoverageOverhead = [here.r, here.g, here.b, here.a][LAYER_OVERHEAD];
+    const selfCoverageOverhead = channelOf(here, LAYER_OVERHEAD);
     occ[LAYER_OVERHEAD].assign(occ[LAYER_OVERHEAD].mul(float(1).sub(selfCoverageOverhead)));
 
     // Map-edge ramp, unchanged from the previous model.
@@ -315,19 +410,35 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     const attenuate = strength.mul(gate).mul(ramp);
     const layerStrength = [uStrength.x, uStrength.y, uStrength.z, uStrength.w];
     let transmittance = float(1);
-    for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
-      transmittance = transmittance.mul(float(1).sub(occ[i].mul(layerStrength[i]).mul(attenuate)));
+    transmittance = transmittance.mul(float(1).sub(occ[LAYER_WALLS].mul(layerStrength[LAYER_WALLS]).mul(attenuate)));
+    transmittance = transmittance.mul(
+      float(1).sub(occ[LAYER_OVERHEAD].mul(layerStrength[LAYER_OVERHEAD]).mul(attenuate))
+    );
+    // ⚠️ THE BANDS UNION, THEY DO NOT COMPOUND — the TSL twin of
+    // `layer-smear.js#layerSmearVisibility`'s own band block; read THAT for the
+    // full argument (they are ONE nested stack sliced at two elevations, not
+    // two occluders in series, and multiplying them would make every extra
+    // storey darken a shadow that is already opaque).
+    let bandOcc = float(0);
+    for (const i of SHADOW_BAND_LAYER_INDICES) {
+      bandOcc = max(bandOcc, occ[i].mul(layerStrength[i]));
     }
+    transmittance = transmittance.mul(float(1).sub(bandOcc.mul(attenuate)));
     const ownVis = transmittance.clamp(0, 1);
 
-    // ⚠️ THE CASCADE — see `lowerFieldTexNode`'s own header for the model and
-    // why A carries the blockage. A JS-time branch: floor 0 has no lower field
-    // and compiles this out entirely.
+    // ⚠️ THE CASCADE — see `lowerFieldTexNode`'s own header for the model. A
+    // JS-time branch: floor 0 has no lower field and compiles this out entirely.
     //
-    // `here.a` is the receiver's OWN texel, already fetched for the gate and
-    // the self-shadow term above, so the cascade costs one texture sample (the
-    // lower field) and one mix — not a second read of this floor's own data
-    // (memory: feedback_composite_only_terms_miss_shared_buffers).
+    // ⚠️ THE BLOCKAGE NOW COMES FROM THE LOWER FIELD'S OWN ALPHA, NOT THIS
+    // FLOOR'S LAYER TEXTURE (2026-08-05, the shadow cascade). It used to be
+    // `here.a` — the lower floor's `coverAbove`, packed into this floor's own
+    // layer texture by the CPU. That is the same grid the lower SLOT already
+    // holds as its own band 0, so it publishes it itself (below), and the
+    // channel it used to occupy became the second real band. One sample of the
+    // lower field now yields both halves of the cascade: `.r` is its
+    // already-cascaded visibility, `.a` is how much this floor blocks the view
+    // down to it. Sampled ONCE, both channels read from it (memory:
+    // feedback_composite_only_terms_miss_shared_buffers).
     //
     // ⚠️ THE LOWER FIELD IS ALREADY CASCADED. Slots bake bottom-up, so by the
     // time this runs, `lowerFieldTexNode` holds floor N-1's OWN shadow already
@@ -335,23 +446,50 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // "see through a hole in the middle floor all the way down" work without
     // this shader knowing how many floors exist — the recursion lives in the
     // bake ORDER, not in the shader.
-    const vis = lowerFieldTexNode ? mix(lowerFieldTexNode.sample(uv()).r, ownVis, here.a) : ownVis;
+    const lower = lowerFieldTexNode ? lowerFieldTexNode.sample(uv()) : null;
+    const vis = lower ? mix(lower.r, ownVis, lower.a) : ownVis;
 
-    // RGB, not just R, so the field is readable as a greyscale image in the
-    // debug layer cycler — a shadow field you can LOOK at is the difference
-    // between "this is broken" and "this has no casters".
-    return vec4(vec3(vis, vis, vis), float(1));
+    // ⚠️ ALPHA IS THE CASCADE'S PUBLICATION CHANNEL, not padding — see
+    // `uCascade`'s own header. It is safe to spend because this material is
+    // OPAQUE (`transparent` is never set, so three compiles no blend state at
+    // all) and every consumer of a baked field reads `.r` alone
+    // (`sun-occlusion-render.js#buildSunVisibilityNode`,
+    // `point-light-illumination.js`'s own `sampleSlot`, and the debug view's
+    // one-hot `uShadowMask`, which only ever selects RGB).
+    //
+    // RGB stays a flat greyscale, not just R, so the field is readable as an
+    // image in the debug layer cycler — a shadow field you can LOOK at is the
+    // difference between "this is broken" and "this has no casters".
+    const blockage = max(channelOf(here, SHADOW_BAND_LAYER_INDICES[0]).mul(uCascade.x), uCascade.y).clamp(0, 1);
+    return vec4(vec3(vis, vis, vis), blockage);
   })();
 
   return {
     material,
     layerTexNode,
-    /** @param {{dirX:number, dirY:number, throwPx:number[], maxThrowPx:number}} resolved -
+    /** @param {{dirX:number, dirY:number, throwPx:number[], heightPx:number[], maxThrowPx:number}} resolved -
      *  computed by the CALLER through `layer-smear.js#resolveLayerSmear`. */
     setSun(resolved) {
       uSun.value.set(resolved.dirX, resolved.dirY, resolved.maxThrowPx, 0);
       const t = resolved.throwPx ?? [];
       uThrowPx.value.set(t[0] ?? 0, t[1] ?? 0, t[2] ?? 0, t[3] ?? 0);
+      // ⚠️ FROM `resolved`, NEVER FROM THE CALLER'S OWN `heightsPx` ARRAY. The
+      // resolve is where a non-finite or negative height becomes 0; reading the
+      // raw input here instead would let a NaN reach `uHeightPx` and turn every
+      // layer's diffusion LOD into a NaN mip request — a whole-field failure
+      // from a value the CPU had already sanitised once.
+      const h = resolved.heightPx ?? [];
+      uHeightPx.value.set(h[0] ?? 0, h[1] ?? 0, h[2] ?? 0, h[3] ?? 0);
+    },
+    /**
+     * THE CASCADE's publication switch — see `uCascade`'s own header.
+     * @param {{active: boolean}} args - `active` is the subsystem's own
+     *   `enabled && casterHasCoverage`. Inactive publishes a solid 1 (fully
+     *   blocked), so the floor above cascades nothing rather than falling
+     *   through onto a field this slot never computed.
+     */
+    setCascade({ active }) {
+      uCascade.value.set(active ? 1 : 0, active ? 0 : 1, 0, 0);
     },
     setLayers({ strengths }) {
       if (!Array.isArray(strengths)) return;

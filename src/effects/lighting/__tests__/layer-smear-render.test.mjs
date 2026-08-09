@@ -31,7 +31,16 @@ export function run(t) {
   if (!bake) return;
 
   t.ok('it exposes a material and its layer texture node', !!bake.material && !!bake.layerTexNode);
-  for (const fn of ['setSun', 'setLayers', 'setDepth', 'setField', 'setLook', 'setRect', 'setEdgeBandPx']) {
+  for (const fn of [
+    'setSun',
+    'setCascade',
+    'setLayers',
+    'setDepth',
+    'setField',
+    'setLook',
+    'setRect',
+    'setEdgeBandPx',
+  ]) {
     t.ok(`it exposes ${fn}()`, typeof bake[fn] === 'function');
   }
 
@@ -41,6 +50,11 @@ export function run(t) {
   let setterError = null;
   try {
     bake.setSun(resolveLayerSmear({ azimuthDeg: 220, elevationDeg: 30, heightsPx: [300, 500, 900, 1400] }));
+    // THE CASCADE's publication switch — both states, because they are the two
+    // halves of a polarity (`layer-smear-render.js#uCascade`) and a setter that
+    // only ever gets driven one way is a setter whose other branch is untested.
+    bake.setCascade({ active: true });
+    bake.setCascade({ active: false });
     bake.setLayers({ strengths: [1, 0.8, 0.6, 0.4] });
     bake.setDepth({ radiiPx: [0, 0, 220, 220] });
     bake.setField({ layerGridDimPx: 2048 });

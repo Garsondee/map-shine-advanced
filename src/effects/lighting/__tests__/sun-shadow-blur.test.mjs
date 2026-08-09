@@ -155,7 +155,7 @@ export function run(t) {
     );
     ok(
       'an empty channel reports zeros rather than NaN from a 0/0',
-      crisp.higher.coveredPct === 0 && crisp.higher.softEdgePct === 0
+      crisp.band1.coveredPct === 0 && crisp.band1.softEdgePct === 0
     );
     // ⚠️ The report carries its own thresholds, because `casterField.coveredPct`
     // one level up counts `> 0` and these count `> 8`. Two differently-measured

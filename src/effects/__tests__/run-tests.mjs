@@ -8,9 +8,11 @@
  */
 import { run as runEffectRegistration } from './effect-registration.test.mjs';
 import { run as runEffectTier } from './effect-tier.test.mjs';
+import { run as runDepthOfFieldBlur } from './depth-of-field-blur.test.mjs';
 import { run as runDebugChannelSelect } from './debug-channel-select.test.mjs';
 import { run as runCandleFlame } from './candle-flame.test.mjs';
 import { run as runCandleFlameGeometry } from './candle-flame-geometry.test.mjs';
+import { run as runCandleIgnite } from './candle-ignite.test.mjs';
 import { run as runLightning } from './lightning.test.mjs';
 import { run as runLightningGeometry } from './lightning-geometry.test.mjs';
 import { run as runLightningSubsystem } from './lightning-subsystem.test.mjs';
@@ -53,9 +55,11 @@ const t = {
 const suites = [
   ['effect-registration', runEffectRegistration],
   ['effect-tier', runEffectTier],
+  ['depth-of-field-blur', runDepthOfFieldBlur],
   ['debug-channel-select', runDebugChannelSelect],
   ['candle-flame', runCandleFlame],
   ['candle-flame-geometry', runCandleFlameGeometry],
+  ['candle-ignite', runCandleIgnite],
   ['lightning', runLightning],
   ['lightning-geometry', runLightningGeometry],
   ['lightning-subsystem', runLightningSubsystem],

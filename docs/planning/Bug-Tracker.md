@@ -37,6 +37,17 @@ building on any of this.
 | 3 | No wind shadow; wind doesn't route around obstacles | wind | `BUILT (unverified)` — shadow only |
 | 4 | Vegetation liquifies at high wind | vegetation flutter | `BUILT (unverified)` |
 | 5 | Candles vanish when viewed from the floor above | candles / anchors | `BUILT (unverified)` |
+| 7 | Vegetation had no real height; its shadow could float above a floor above it | vegetation sort / shadow | `BUILT (unverified)` |
+| 8 | Candle flames go transparent/invisible at low elevation | candles / height gate | `OPEN` — needs a design call |
+| 9 | Doors render above overhead tiles (no depth-authority participation) | doors | `OPEN` |
+| 10 | Level background/foreground image doesn't refresh after a path change mid-session | ingest / VT viewer lifecycle | `OPEN` — supersedes bug 1's hypothesis |
+| 11 | Feature: a scene-wide door-config audit/edit tool | doors / UI | `OPEN` — needs a design call |
+| 12 | Loading screen's stall note never expired | UI | `BUILT (unverified)` |
+| 13 | Candle vs. a "Restrict Lighting" tile: absolute block instead of elevation-aware, flames don't render, stale flag on toggle | candles / lighting | `OPEN` (layering) — stale-flag half `BUILT (unverified)` |
+| 14 | Anchor View Mode showed every candle/lightning icon regardless of floor | candles / lightning / UI | `BUILT (unverified)` |
+| 15 | A sun shadow bleeds through an occluding roof on the floor above | sun shadows / layer smear | `OPEN` — needs a live repro to pin the exact item |
+| 16 | WebGPU crash: `_Specular` mask on a 12000² map exceeds `maxBufferSize` | specular / renderer limits | `BUILT (unverified)` — immediate fix only, adaptive system still open |
+| 17 | Feature: shared sun-brightness ceiling for `_Window` + a moonlight floor for night | window / lighting / design | `OPEN` — design proposal, no code yet |
 
 ---
 
@@ -87,6 +98,36 @@ texture path is a component of it.
 Second, unrelated thing to confirm: whether `Scene` is actually a member of
 `DRAW_LIST_DOCUMENTS` at all, which decides whether part 3 has *any* hook
 coverage today.
+
+### CORRECTION — 2026-08-08, checked against the current code: the hypothesis above is wrong
+
+This `placementKey` theory does **not** hold for the current on-disk code, for
+either part (tile path or Level background/foreground). Filed in full as **bug
+10** below (part 3 — a Level background specifically — is what the author
+re-reported live); summary for this entry:
+
+- `Level` **is** a `DRAW_LIST_DOCUMENTS` member (`SCENE_LAYER_DOCUMENTS =
+  ['Level', 'Tile']`) and `updateLevel` **does** fire `refreshVtPanViewerItems`
+  correctly — the hook reaches the ingest loop every time. (Bare top-level
+  `Scene.background`/`Scene.foreground` — the pre-Level-migration fallback —
+  genuinely has zero hook coverage, a real but narrower gap than what was
+  reported.)
+- `placementKey` (confirmed texture-path-free, as guessed) only ever gates
+  whether the QUAD GEOMETRY is re-stamped. It is never consulted by whatever
+  decides if the TEXTURE reloads — so even a fix that added a src-hash to
+  `placementKey` would not have closed this bug on its own.
+- The actual gate is one level deeper: `ensureWholeImageMeshes` (`vt/vt-pan-
+  viewer.js:7351-7352`) is **idempotent forever** — `if (state.wholeImage)
+  return state.wholeImage;` — and never re-reads `item.src` once built. This
+  is true for a plain Tile's texture too, not just a Level background; the
+  "different route" instinct in this entry's own text was directionally right
+  (Level items ARE a separate id-space from Tiles) but the actual blocking
+  mechanism turned out to be shared by both.
+
+See bug 10 for the full grounding, the proposed fix (a real "reload on source
+change" lifecycle feature — this is not a one-line patch), and open questions.
+Leaving the analysis above in place rather than deleting it, per this file's
+own discipline: a corrected hypothesis is a finding too.
 
 ### Related known bug class
 
@@ -278,6 +319,34 @@ On an ordinary floor with just background art — no tiles at elevations
 between the bush's midpoint and the tree's top — a `_Bush` and `_Tree`
 overlay painted so they visually overlap show the tree's canopy on top, every
 time, not incidentally.
+
+### Follow-up — 2026-08-06: the whole model replaced with a real, unbounded height (see bug 7)
+
+**Status of this specific change:** `BUILT (unverified)`.
+
+The worked-example table above (tile elevation 9/10/19/20 vs bush/tree) and
+the "tree at the floor top, bush at the midpoint" model it encodes are now
+**historical** — they described a deliberate sort-key CONVENIENCE (a fraction
+clamped inside the host's own floor band), never a physical height, and it
+was structurally incapable of placing a canopy above its own floor. The
+author asked for exactly that capability (bug 7, below): a real tree taller
+than a single-story roof. `VegetationKind#passiveElevationFraction` is gone;
+a canopy's sort elevation is now `hostFloorBand.bottom + heightFt`, using a
+live `treeHeightFt`/`bushHeightFt` param (defaults 25ft/2ft),
+**UNCLAMPED** — see `vegetation.js`'s own "HOW A KIND SORTS" section.
+
+**Also fixed in the same pass, a bug this bug's own "Deliberately NOT
+changed" section unknowingly left behind:** the vegetation ground-shadow's
+render order (`VEG_SHADOW_RENDER_ORDER_MAGNITUDE` added straight to the
+host's own `renderOrder`) was EXACTLY the "a sub-1.0 nudge added to a dense
+index can never claw back a whole floor's worth of items" bug class this bug
+already diagnosed and fixed for the canopy — left unfixed for the shadow on
+the reasoning "a canopy floats to canopy height; the shadow it casts belongs
+on the floor," which correctly says WHERE (ground level) but doesn't justify
+HOW ROBUSTLY the render order gets there. The shadow now goes through the
+SAME `vegetationOverlayRenderOrder` comparator the canopy uses, anchored at
+`heightFt: 0` (ground level) instead of the canopy's real height. Full
+account: bug 7.
 
 ---
 
@@ -598,6 +667,39 @@ them.
   `renderOrder` number (the regression fixture happened to always seed one).
   Fixed in `vegetationOverlayRenderOrder`; `npm run verify` green (7230
   tests). **Awaiting the author's live look** — see bug 2's follow-up section.
+- **2026-08-06** — Author report: standing on an upper floor, a tree's ground
+  shadow rendered above an opaque roof it should have hidden under (the
+  canopy already did); no way to set tree/bush height at all. Filed and
+  fixed as bug 7 — replaces bug 2's clamped-fraction sort model with a real,
+  unbounded `treeHeightFt`/`bushHeightFt` (defaults 25ft/2ft), and routes the
+  shadow's render order through the SAME robust comparator the canopy uses
+  (previously exempted by bug 2's own "Deliberately NOT changed" section —
+  the exact bug class that section's own fix diagnosed, left unfixed one
+  door over). Lint/format/tests clean for every file this change touched
+  (7732 of 7736 project tests passing — the other 4 failures are a
+  concurrent, unrelated `depthOfField` effect mid-build in this same working
+  tree, not from this change). `npm run verify:structure` also currently
+  fails on that same unrelated effect not yet being wired into `boot.js` —
+  pre-existing, not caused by this change. **Awaiting the author's live
+  look** — see bug 7 and bug 2's own follow-up section.
+- **2026-08-08** — Author filed a batch of 10 new reports in one sitting
+  (candle flame elevation transparency, door/overhead depth ordering, a
+  background-image reload gap, a door-config tool request, a stale loading-
+  screen note, candle-vs-restrict-light layering, anchor-symbol floor
+  filtering, a sun-shadow depth-bleed, a WebGPU `maxBufferSize` crash on the
+  12K Mansion map, and a sun-brightness/moonlight design ask for `_Window`).
+  Investigated all 10 in parallel (read-only agents, source-cited); filed as
+  bugs 8-17 below. Four were clear, low-risk fixes built the same session —
+  bug 12 (stale stall note), bug 14 (Anchor View Mode floor filtering), bug
+  16's immediate crash fix (`maxBufferSize` requiredLimits), and bug 13's
+  stale-flag half (a Tile's `restrictsLight` toggle now reaches an
+  already-loaded item instead of needing delete+recreate) — `npm run verify`
+  green (7725 tests, all touched files linted/formatted clean). The rest
+  (bugs 8, 9, 10, 11, 13's layering half, 15, 17) surfaced real architecture
+  or product-design forks the author needs to rule on before any code lands
+  — see each entry's "Open questions". **All four built fixes await the
+  author's live look**, per this file's own rule that only they promote past
+  `BUILT (unverified)`.
 
 ---
 
@@ -642,3 +744,882 @@ The author looking at a real scene. If the shine is back, the polarity was the
 cause. If it is not, channel 8 (floor gate) and channel 20 (attr, raw) now mean
 what they say for the first time, and the ladder in `tools/shader-lab`'s
 specular bench names which term is zero.
+
+---
+
+## 7. Vegetation had no real height, and its shadow could float above a floor above it
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-06 · **Docs:** `Vegetation.md`,
+this file's bug 2 (the render-order model this replaces/extends)
+
+### Symptom, in the author's own words
+
+Standing on an upper floor, looking down at a tree on the floor below, under
+an opaque rooftop (the upper floor's own Level background art):
+
+1. The tree's canopy is correctly hidden wherever the roof is opaque (shows
+   only through genuine holes) — this part already worked.
+2. The tree's ground-contact shadow (the smear decal, unrelated to the sun-
+   shadow cascade) rendered **on top of** the opaque roof, where it should
+   have been hidden exactly like the canopy.
+3. There was **no way to set a tree/bush's height** — the author wanted a
+   real height in feet (tree default 25ft — tall enough to clear a single
+   story, not two; bush default 2ft — real undergrowth height), globally
+   live-adjustable.
+
+### Root cause — confirmed against the code, not a hypothesis
+
+Vegetation had no real, unbounded world-elevation concept. Bug 2's
+`VegetationKind#passiveElevationFraction` (tree=1.0/floor top, bush=0.5/floor
+midpoint) was a **fraction clamped inside the host's own floor band** — a
+sort-key convenience from bug 2, never a physical height. It structurally
+could not place a canopy above its own floor, which is symptom 3 exactly.
+
+The shadow's render order
+(`VEG_SHADOW_RENDER_ORDER_MAGNITUDE` added straight to the host's own
+`renderOrder`) never went through the robust, per-floor-band-anchored
+comparator (`vegetationOverlayRenderOrder`) the canopy used — bug 2's own
+"Deliberately NOT changed" section left it on a bare host-relative nudge,
+exactly the "a sub-1.0 nudge added to a dense index can never claw back a
+whole floor's worth of items" bug class bug 2 already diagnosed and fixed
+for the canopy. A Case-2 overlay hosted on an ordinary TILE (not a Level
+background, which is always pinned to its floor's exact bottom) inherits
+whatever raw elevation the map author gave that specific tile — which can
+legitimately sit anywhere within its own floor — leaving the shadow's
+`host.renderOrder + 0.2` with no real margin against a floor above it.
+
+### What was built — 2026-08-06
+
+- **A real, unbounded canopy elevation**: `vegetationCanopyElevation(band,
+  heightFt) = band.bottom + heightFt`, deliberately NOT clamped to
+  `band.top` — the whole point (`effects/vegetation-render.js`).
+- **Two new live params**, `treeHeightFt` (default 25) / `bushHeightFt`
+  (default 2), category `Extent` — a documented, narrow exception to
+  vegetation's own "one shared param set" rule, mirroring bug 2's own
+  render-order exception (`effects/vegetation.js`).
+- **The shadow now uses the SAME robust comparator as the canopy**,
+  generalized via a new `opts` param (`heightFt`, `role: 'canopy'|'shadow'`,
+  `fallbackNudge`) — anchored at `heightFt: 0` (ground level, independent of
+  caster height) with its own `VEG_SLOT_RANK` tiebreak entries so a shadow
+  can never out-tiebreak a canopy on a sparse floor.
+- **The point-light height/elevation gate** (`buf:scene.attr`'s
+  `receiverHeightFt`, renamed from `receiverElevationFraction01`) now reads
+  the live height every frame (`syncAllFloorAttrUniformsForFrame`) rather
+  than a build-time snapshot — this channel was already fixed once (2026-08-03)
+  to never go stale, and the live-param wiring had to preserve that, not
+  regress it back to a cached value.
+- Global-default-only for this pass (confirmed with the author) — no
+  per-item height override yet. A single very tall tree needing to clear a
+  two-story building would need the global default raised, or a future
+  per-item override.
+
+### Fixed when
+
+On a real multi-floor scene: standing on the upper floor, the tree's shadow
+hides under the roof exactly where the canopy already does; dragging "Tree
+height" up/down (after a pan/zoom to trigger a residency pass) visibly
+changes whether the canopy pokes above a given floor's roofline; a torch near
+a tree still correctly treats the canopy as "above" it for the light-height
+gate.
+
+---
+
+## 8. Candle flames go transparent/invisible at low elevation
+
+**Status:** `OPEN` — root cause confirmed, fix needs a design call · **Reported:**
+2026-08-08 · **Docs:** `Light-and-Shadow.md`, this file's bug 5
+
+### Symptom, in the author's own words
+
+*"I can't see any candle flames on a map that is a single floor. I noticed
+that the candle flames are more transparent the lower their elevation is, so
+on my mansion map candles at elevation 14 have visible flames but candles at
+elevation 0 have invisible flames."* Single-floor maps are not exempt.
+
+### Root cause — CONFIRMED against the code
+
+`buildCandleFlameMaterial` (`effects/candle-flame-render.js:301-540`)
+multiplies the flame sprite's emission by `buildHeightGateNode(...)`
+(:520-527) — the ONLY place elevation touches this shader's output (no
+distance/fog term exists here; ruled out explicitly). That gate compares the
+flame's own per-vertex `flameElevationRank` (baked in
+`candle-flame-geometry.js:628-651`) against `buf:scene.attr` sampled at the
+flame's screen position.
+
+`flameElevationRank` comes from `resolveAnchorElevationRank`
+(`lighting/point-light-pool.js:223-236`), which — unlike its sibling for real
+Foundry lights, `resolveLightElevationRank` (:162-174, which treats raw
+elevation `0` as "never configured" and returns a sentinel that leaves the
+gate always open) — has **no such carve-out**. A candle's "Height off floor"
+defaults to `0` and is documented as a legitimate, common value ("right on
+the floor", `scene/anchor-catalog.js:109-131`), so most candles on a map get
+the *lowest possible* rank on their floor.
+
+`buildHeightGateNode` (`point-light-illumination.js:585-619`) only allows
+~1-4 world units of headroom above a rank of 0 (`HEIGHT_GATE_TOLERANCE_UNITS`
+= 1, `HEIGHT_GATE_SOFTNESS_UNITS` = 3, at ~1 unit/level per
+`vt/scene-attr.js:425-476`) before anything drawn under the flame in
+`buf:scene.attr` — a floor tile, a rug, furniture nudged upward for
+stacking — outranks and extinguishes it. At elevation 14 the headroom
+(~18 units) exceeds the whole quantizer range, so ordinary floor content
+can't gate it at all — exactly the reported 0-invisible / 14-visible split.
+
+**This is a known, named deferral, not a fresh bug.** `point-light-
+illumination.js:634-671` already documents that this exact `buf:scene.attr`
+gate was found unreliable and replaced everywhere else by the depth-
+authority-based `buildDepthHeightGateNode`/`buf:scene.depth` — and names
+`candle-flame-render.js`/`lightning-render.js` as the one deliberately
+not-yet-migrated exception.
+
+### The design call this needs
+
+**(a) Migrate** the candle flame's height gate onto
+`buildDepthHeightGateNode`/`buf:scene.depth`, closing the deferral the code
+already names as the intended end state — matches [[keyhole-depth-authority-sole-system-decision]].
+**(b) Narrower tune**: special-case elevation 0 for this gate specifically —
+but elevation 0 is a real, intentional value ("right on the floor"), not an
+unconfigured default, so sentinel-ing it away would just quietly disable the
+gate for most candles rather than fix the mismatch, and doesn't touch
+whatever the *other* elevations (a candle at 3-4 units, say) would still hit.
+
+Before either: a live `buf:scene.attr` pixel probe under one of the author's
+actual invisible elevation-0 flames on the Mansion map, to see exactly what
+receiver content is triggering the gate there.
+
+### Open questions
+
+- Migrate to the depth-authority gate now (matches locked doctrine, but
+  touches a shared TSL material builder + its test suite), or a narrower
+  tolerance fix scoped to candles specifically?
+- Do the tested candles actually have `floorBinding.mode === 'locked'`
+  (imported V2 candles), or could some already be `all-levels`
+  (always-sentinel, unaffected) — worth knowing which candles this even hits.
+- Is this the same bug as bug 13's symptom 2 (flames invisible under a
+  "Restrict Lighting" tile, independent of that tile's flag)? Likely yes —
+  both go through the same `flameElevationRank`/height-gate apparatus — but
+  unconfirmed; investigate together once a direction is picked.
+
+### Fixed when
+
+On the Mansion map, an elevation-0 candle's flame is visible exactly as
+reliably as one at elevation 14, on a single-floor map with no special setup.
+
+---
+
+## 9. Doors render above overhead tiles — no depth-authority participation at all
+
+**Status:** `OPEN` · **Reported:** 2026-08-08 · **Docs:** `Depth-Buffer.md`
+
+### Symptom
+
+*"Door rendering needs a depth buffer pass because currently it renders above
+overhead tiles."*
+
+### Root cause — CONFIRMED, and it's architectural, not a wrong number
+
+Doors are **structurally exempt** from occlusion, not mistuned:
+
+1. `foundry/scene-doors.js#deriveDoorSnapshot` (:117-159) never derives an
+   elevation or a `LayerKey` for a door — its `levels` field scopes floor
+   *visibility* only, never paint order.
+2. Door leaves live in their own private `THREE.Scene` (`door-graphics-
+   subsystem.js`'s `doorScene`), which is never fed into the `items` list
+   [[keyhole-depth-authority-design]] sorts. `depthAuthority.rankOf()` is
+   never called for a door anywhere (confirmed: zero references across all
+   door files).
+3. `door-graphics-render.js#buildDoorMaterial` (:314-332) sets
+   `depthTest = false; depthWrite = false` and never samples
+   `buf:scene.depth` — contrast `specular-material.js` (:330-381), which
+   samples it and discards/fades against `depthAuthority.rankOf(item)`
+   exactly the way this bug is asking doors to.
+4. Doors paint via a **second, separate** `renderer.render(doorGraphics.scene,
+   camera)` call (`vt-pan-viewer.js:3759-3765`, `autoClearColor=false`),
+   composited unconditionally on top of whatever the main scene just
+   painted — bypassing `scene/layer-order.js`'s sort law entirely, the one
+   paint-order mechanism every other drawable (including a Level's
+   foreground/roof art) goes through. This second call currently runs
+   (`vt-pan-viewer.js:4176`) **before** `runSceneDepthPass()` (:4187)
+   refreshes `buf:scene.depth` for the current frame — so even a rank-wired
+   door querying depth in place today would read last frame's stale buffer.
+
+**Not a surprise to the codebase** — `door-graphics.js`'s own `deferredRungs`
+(:88-91, "roof-occlusion") and `door-graphics-subsystem.js`'s own header
+("ORDERING CAVEAT", :27-32) both name this exact gap as known and
+deliberately deferred; `door-graphics.test.mjs:57-58` only asserts the rung
+is *documented*, not fixed.
+
+### Proposed fix (design decision needed before implementing)
+
+Wire doors through the existing depth-authority API, mirroring specular's
+pattern: (1) resolve a real elevation/`LayerKey` per door (the blocked
+precondition — a separate "per-floor-elevation" deferred rung is itself
+unbuilt); (2) feed each door leaf into `depthAuthority.rebuild()`'s item
+list, or at minimum use the no-geometry `depthAuthority.rankOfElevation()`
+shape point-light-illumination.js already uses, for a read-only gate;
+(3) add a `buf:scene.depth` query + discard/fade to `buildDoorMaterial`'s
+fragment node, copying specular's `computeSpecularDepthGate` shape;
+(4) reorder `renderDoorGraphicsInto()` to run *after* `runSceneDepthPass()`
+within the frame.
+
+### Open questions
+
+- What elevation should a door resolve to — its floor's ground elevation, or
+  Foundry's own `DoorMesh` placement convention (`foreground.sort-1`, cited
+  in `door-graphics-subsystem.js`'s own header)? Real design decision, not
+  plumbing.
+- Full depth-pass proxy for doors (so a token standing in a doorway occludes
+  correctly against it too — the vegetation Case-2 precedent argues for
+  this), or a read-only query (door discards itself, never appears in
+  `buf:scene.depth` for others)?
+- Keep doors in their own scene + a shader-side depth query, or fold door
+  leaves into the main `scene` so ordinary `renderOrder` (stamped by
+  `depthAuthority.rebuild`) suffices — the simpler fix the roof-occlusion
+  rung's own text originally proposed?
+
+### Fixed when
+
+A door sitting under an overhead/roof tile is hidden by it exactly like any
+other drawable at that elevation; a door in the open still draws correctly
+relative to everything else.
+
+---
+
+## 10. Level background/foreground image doesn't refresh after a path change mid-session
+
+**Status:** `OPEN` — supersedes bug 1's `placementKey` hypothesis · **Reported:**
+2026-08-08 · **Docs:** this file's bug 1 (corrected above)
+
+### Symptom, in the author's own words
+
+*"I have a background image set for a level. It works. I set a new
+background image for a level after loading and I think we're not busting the
+cache because the image doesn't change."*
+
+### Root cause — CONFIRMED, reading the actual ingest chain end to end
+
+The hook fires correctly — `Level` **is** a `DRAW_LIST_DOCUMENTS` member
+(`SCENE_LAYER_DOCUMENTS = ['Level','Tile']`, `foundry/scene-layers.js:439`)
+and `updateLevel` reaches `scheduleResidencyUpdate()`
+(`vt-pan-viewer.js:12503-12507`), which every pass calls
+`ensureWholeImageMeshes(state, item)` unconditionally
+(`vt-pan-viewer.js:9404-9409`).
+
+The item id is stable across a path edit (Level background/foreground items
+are keyed `level:${level.id}:${which}` — the Level document id + slot, never
+`cfg.src` — `scene-layers.js:297-298`), so `ensureItemLoaded`
+(`vt-pan-viewer.js:5638-5680`, pre-this-session) takes the "already loaded"
+fast path: `existing.item = item; return existing;` — it refreshes the item
+*reference* but never re-derives anything from the new `src`.
+
+**The actual gate:** `ensureWholeImageMeshes` (`vt-pan-viewer.js:7351-7352`)
+is **idempotent forever** — `if (state.wholeImage) return state.wholeImage;`
+— and its own comment (:7388-7398) says so outright. Whatever `item.src` was
+current the FIRST time this item's texture was built is what stays uploaded;
+every later call short-circuits before ever looking at `item.src` again.
+`refreshWholeImageItem`, the only other consumer of a "did this change"
+signal, is explicit too (:7718-7720): *"the textures never re-upload."*
+
+**This means bug 1's `placementKey` hypothesis does not hold** for the
+current code (see the correction on that entry) — `placementKey` only ever
+gates quad geometry, never whether the texture rebuilds, so adding a
+src-hash to it alone would not have fixed this. The real gap is one level
+deeper and applies to both a plain Tile's texture path AND a Level
+background/foreground the same way — there is no code anywhere in
+`vt-pan-viewer.js` that compares an item's *current* `src` against the `src`
+the loaded texture was actually built from.
+
+**Same shape, same gap, multiple caches:** `requestItemAlphaGrid`'s de-dupe
+(`:5727-5734`) is also keyed purely on `item.id`, so the cover-alpha grid
+used for shadow/occlusion physics stays pinned to the OLD image too. The
+whole per-item ingest pipeline (dims, masks, alpha grid, whole-image
+texture) is "load once per id, never revisited."
+
+**Ruled out:** the BC-compress worker's own cache already has a content
+validator (ETag/Last-Modified/Content-Length, `bc-compress.worker.js:211-236`)
+— moot here anyway, since the code path never gets far enough to re-ask it.
+
+### Proposed fix
+
+Belongs in the ingest layer, not `placementKey`. Give `ensureItemLoaded` a
+real "has the source identity changed" check before the fast path — compare
+the fresh `item.src` against what was actually built (store `state.loadedSrc`
+alongside `state.wholeImage`). On a mismatch: dispose the old GPU resources
+(texture/geometry/material, remove meshes from the scene) for every entry in
+`wi.tiles`, clear `state.wholeImage = null`, re-run `getSourceDimensions` +
+`loadExtraLayerPacks`, and clear this id from `alphaRequested` so the coarse-
+alpha grid re-derives too. The load is a fire-and-forget async IIFE
+(`wi.loadPromise`) — a rebuild triggered mid-flight needs a generation
+counter (or promise cancellation) so an old in-flight load can't stomp the
+new one after it resolves late.
+
+This is a small real lifecycle feature (item reload / src-invalidation) —
+not a one-line patch, given how many id-keyed "once forever" caches share the
+shape and the async-race hazard in tearing one down safely.
+
+### Open questions
+
+- Should the same fix cover vegetation Case-2 overlay siblings
+  (`ensureVegetationOverlay`) — likely the same one-time-forever shape, not
+  traced yet.
+- Is a generation-counter/cancellation guard already used elsewhere in this
+  file for a similar rebuild-while-loading race, or would this be the first?
+- Does the author want the legacy top-level `Scene.background`/`foreground`
+  path (pre-Level-migration scenes, zero hook coverage today — `updateScene`
+  is never registered) fixed in the same pass, or tracked separately?
+
+### Fixed when
+
+Changing a Level's background or foreground image path mid-session updates
+on screen without a Foundry refresh, same for a plain tile's texture path.
+
+---
+
+## 11. Feature: a scene-wide door-config audit/edit tool
+
+**Status:** `OPEN` — design decision needed, not started · **Reported:** 2026-08-08
+
+### Ask, in the author's own words
+
+*"Every door in my scene has an animation timer. It would be really useful
+to have a tool I can access which shows me and allows me to edit the
+rendered door config for every door in a scene. This will help me to make
+the doors consistent on all maps."*
+
+### What's there today — CONFIRMED
+
+The animation timer and every other rendered-door knob already live natively
+on each Wall document's `animation` schema field (type/duration/direction/
+strength/double/flip/texture) — Foundry's own data, read (read-only) via
+`foundry/scene-doors.js#deriveDoorSnapshot`. `effects/door-graphics.js`'s own
+`DOOR_GRAPHICS_PARAMS` is deliberately narrow (just `animateMotion`/
+`motionDurationScale`, effect-WIDE knobs for how MSA *plays* the motion) — by
+its own comment, a door's per-door animation config is Foundry data, not an
+MSA param.
+
+**No writer exists anywhere** — grepped the whole `foundry/` tree; only
+Foundry's own `DoorControl#_onMouseDown` writes `wall.document.update(...)`,
+never MSA itself. **No UI surface exists either** — no card, no panel; today
+there's only a console-only, effect-WIDE tuner (`MapShine.setDoors`,
+`boot.js:1585-1603`).
+
+The closest UX precedent, `ui/anchor-mode.js` (click-to-place/edit, multi-
+select popup for candles), doesn't map cleanly: it's built around MSA's own
+anchor store, and doors are pre-existing Foundry Wall documents scattered
+across the scene, not MSA-placed points. Also: `readSceneDoors` silently
+drops any wall with `door !== NONE` but no `animation.texture` set — reusing
+it as-is for an audit tool would hide exactly the undecorated doors a GM
+auditing for consistency would want to catch.
+
+### Proposed shape (needs the author's sign-off before building)
+
+A new small subsystem: (1) a guarded writer,
+`canvas.scene.walls.get(wallId)?.document.update({animation: patch})`,
+mirroring `camera-path-player.js#writeDarkness01`'s try/catch shape;
+(2) a new lister that does NOT drop untextured doors; (3) a UI host — genuinely
+open, see below.
+
+### Open questions
+
+- Enumerate every wall with `door !== NONE` (including untextured ones,
+  matching the literal "every door" ask), or only what MSA currently renders?
+- UI host: a new per-item list card under a `doorGraphics` effect card
+  (none exists today), a Lab-zone bulk-editing utility, or an extension of
+  `ui/anchor-mode.js`'s map-click flow? None is a clean drop-in.
+- The stated goal is CROSS-map consistency, but `Wall.animation` is per-scene
+  data with no cross-scene concept today — does this need a "preset" layer
+  (save one door's config, batch-apply, re-import into another scene), or is
+  per-scene bulk-editing enough for v1?
+- Single-door editing to start, or multi-select "edit N at once" from day
+  one, given the explicit consistency goal?
+
+### Fixed when
+
+The author can open one tool, see every door in the current scene with its
+real animation config, edit one or several at once, and see it take effect
+live.
+
+---
+
+## 12. Loading screen's "last step took Xs" note never expired
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-08 · **Docs:** `ui/load-progress.js`
+
+### Symptom
+
+*"There is a thing in the loading screen that says 'last action took...' but
+it's fairly useless, it doesn't actually inform the user of anything useful
+and might be confusing."*
+
+### Root cause — CONFIRMED
+
+The note (`ui/load-progress.js#describeLoad`, ~:317-322) is a legitimate,
+deliberately-designed liveness signal (a CSS spinner keeps animating on the
+compositor thread even when the main thread is dead — this note is one of
+the two honest signals that can't lie the same way). The bug was staleness,
+not meaninglessness: `state.lastStallMs` is written only when a NEW stall
+occurs and was never reset, so `describeLoad`'s gate
+(`lastStallMs >= STALL_THRESHOLD_MS`) stayed true for the rest of the load
+after the very first ≥250ms hitch — freezing that exact sentence on screen
+long after the main thread had recovered.
+
+### What was built — 2026-08-08
+
+Added `lastStallAtMs` (the timestamp of the most recent stall) alongside
+`lastStallMs`, and gated the note on recency — visible only while
+`nowMs - lastStallAtMs` is within `STALL_NOTE_VISIBLE_MS` (3s) of the stall
+that triggered it, instead of forever. `worstStallMs` (the post-load summary/
+flight-recorder high-water mark) is untouched — that one is correctly
+diagnostic, not the live note. Entirely contained in `ui/load-progress.js`
+(pure module); new Node tests cover both "still visible just inside the
+window" and "gone once it elapses, even though a stall did happen." `npm run
+verify` green.
+
+### Open questions
+
+- Exact decay window (3s chosen) is a UX call — flag if the author wants it
+  shorter/longer.
+
+### Fixed when
+
+Author loads a scene, sees one hitch's note appear and then disappear a few
+seconds later rather than sticking for the whole load.
+
+---
+
+## 13. Candle vs. a "Restrict Lighting" tile: absolute block instead of elevation-aware, flames invisible, stale flag on toggle
+
+**Status:** `OPEN` (the layering question) — the stale-flag half is
+`BUILT (unverified)` · **Reported:** 2026-08-08 · **Docs:** `Light-and-Shadow.md`
+
+### Symptom, in the author's own words
+
+*"I set an overhead layer on the ground floor to restrict light. The problem
+is that the candles aren't layered on top of the overhead layer even if they
+are above it, currently they render behind it. If I remove 'restrict light'
+the lighting does go on top but we need the layering to be correct. Either
+way the actual candle flames aren't rendering for some reason regardless.
+Removing and recreating the tile might fix it so that candles come back but
+it's showing signs of instability."*
+
+Three distinct symptoms, investigated separately.
+
+### Symptom 1 (layering) — CONFIRMED, needs a design call before fixing
+
+`vt/scene-attr.js:716`: `const overhead = isInForeground(elevation, {top})
+|| (item?.kind === 'tile' && item?.restrictsLight === true);` — the
+`restrictsLight` half has **no elevation comparison at all**. ANY tile with
+Foundry's "Restrict Lighting" ticked sets the overhead bit unconditionally,
+regardless of its own elevation relative to the light querying it. That bit
+then hard-blocks BOTH the candle's cast light
+(`point-light-illumination.js:585-619` and the newer :634-701, both consumed
+by the shared light-pool builder every Foundry/candle/lightning light goes
+through) and the flame sprite itself
+(`candle-flame-render.js:301-307,520-527`, wired to the same gate). The
+code's own comment calls this deliberate: "blocks light through it, full
+stop, regardless of what floor band its elevation happens to land in." A
+spot-check of vendored Foundry v14 source suggests real Foundry's own
+restrict-lighting consumption IS elevation-compared in at least one place,
+which is evidence against "elevation-blind by design" — not conclusive,
+flagged as worth a deeper trace.
+
+**This is a real behavior-semantics question, not a bug with one right
+answer** — any fix changes what "Restrict Lighting" means for every ordinary
+Foundry AmbientLight under a roof, not just candles, and needs the author's
+call on the intended semantics (does a light directly above a restrict-light
+tile always pass through, or only past some elevation gap?) before touching
+either gate implementation.
+
+### Symptom 2 (flames invisible regardless of the flag) — NOT explained by symptom 1
+
+Doesn't depend on `restrictsLight` at all, so it isn't this mechanism. Very
+likely the same bug as **bug 8** (the general elevation/height-gate issue) —
+shares the same `flameElevationRank`/height-gate apparatus — but not
+separately confirmed; resolve together once bug 8's direction is picked.
+
+### Symptom 3 (stale flag; the "instability") — CONFIRMED and FIXED
+
+`foundry/scene-layers.js#collectTiles` reads `tile.restrictions.light` fresh
+every hook fire, and `updateTile` IS a registered `DRAW_LIST_DOCUMENTS` hook
+— so a fresh `item` with the current flag value gets produced correctly. But
+for an EXISTING tile id, `ensureItemLoaded` only ever did
+`existing.item = item;` — it never touched `state.wholeImage.tiles[]`'s own
+`floorAttrItem`, a SEPARATE stored reference to the item, captured once at
+material-build time and read fresh every frame by
+`syncAllFloorAttrUniformsForFrame`. Since that stored reference itself was
+never reassigned, the `restrictsLight` bit baked into it stayed frozen at
+whatever it was the first time the tile loaded — exactly why deleting and
+recreating the tile (a fresh document id, full rebuild) "fixed" it, and why
+that read as instability rather than a real fix.
+
+**What was built:** `ensureItemLoaded`'s existing-item branch now also
+reassigns `t.floorAttrItem = item` for every tile on that item, so
+`restrictsLight` (and floor index, and anything else `buf:scene.attr` reads
+off the live item) tracks the CURRENT document, no delete/recreate needed.
+`npm run verify` green (7725 tests; this path isn't independently unit-tested
+— it's browser/GPU-only — but nothing regressed).
+
+### Open questions
+
+- What should "Restrict Lighting" mean when the light is clearly above the
+  tile — always pass through, or only past a threshold gap (mirroring
+  `HEIGHT_GATE_TOLERANCE_UNITS`/`SOFTNESS_UNITS`)? Needed before symptom 1
+  can be fixed.
+- Does the same stale-material gap (symptom 3's mechanism) affect other
+  tile flags baked the same way (`tint`, `alphaThreshold`, `occlusion`,
+  `restrictsWeather`)? Only `restrictsLight` was fixed this pass, scoped to
+  the literal report.
+- Confirm symptom 2 is the same root cause as bug 8 once that direction is
+  picked, rather than assuming.
+
+### Fixed when
+
+Toggling a tile's "Restrict Lighting" flag takes effect on the existing tile
+immediately (built — verify live); a candle genuinely above a restrict-light
+tile draws over it, one that's genuinely below/at the tile does not (needs
+the design call above); candle flames render reliably regardless of nearby
+restrict-light tiles (tracks with bug 8).
+
+---
+
+## 14. "MSA Anchor View" showed every candle/lightning icon regardless of floor
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-08 · **Docs:** this
+file's bug 5 (the `floorVisibility` field this reuses)
+
+### Symptom
+
+*"We should only show the anchor symbols for the floor that candles /
+lightning and everything else is actually set to / visible on."*
+
+### Root cause — CONFIRMED: two anchor-authority reads, only one floor-filtered
+
+`anchorsForEffect(effectId, floorContext)` (`scene/anchor-authority.js:161-174`,
+what actually renders) applies `floorMatches(a.floorBinding, floorContext,
+a.params?.floorVisibility)` — the gate bug 5 built. `anchorsForKind(kindId)`
+(:187-193) — the read "MSA Anchor View" mode uses — applies **neither** the
+`enabled` filter NOR the floor filter, by design (a GM needs to see disabled
+anchors to re-enable them), but the floor filter was dropped along with
+`enabled` only because both filters happened to live in the one alternate
+function; the reasoning that justifies skipping `enabled` never separately
+argued for skipping the floor filter too.
+
+`boot.js#enterAnchorViewMode` (:3247-3277) wires both kinds' `listAnchors` to
+the unfiltered `anchorsForKind`, with no `activeFloorContext` passed — so
+every candle/bolt icon in the whole scene draws on every floor, including
+ones whose locked floor band would hide their actual effect entirely. (The
+per-kind "Place" tool, `enterCandlePlacement`/`enterLightningPlacement`, was
+already correctly floor-filtered via `anchorsForEffect` — this bug is
+specifically about Anchor View Mode.)
+
+`anchorsForKind` itself can't just gain floor filtering, because
+`refreshCandleIgnition` (`boot.js:1332`, day/night auto-ignite) legitimately
+needs the full-scene, floor-agnostic read.
+
+### What was built — 2026-08-08
+
+A new `anchorsForKindOnFloor(kindId, floorContext)` in `anchor-authority.js`
+— same "keep disabled anchors visible" property as `anchorsForKind`, plus the
+same `floorMatches()` gate `anchorsForEffect` uses. `boot.js`'s two Anchor
+View Mode `listAnchors` callbacks now call it with `activeFloorContext`;
+`refreshCandleIgnition`'s own `anchorsForKind` call is untouched. Additive —
+no existing caller's contract changed. `npm run verify` green.
+
+### Open questions
+
+- Should Anchor View Mode keep an opt-in "show all floors" toggle for
+  finding an anchor placed on the wrong floor by mistake (its original
+  discovery-tool purpose), or is unconditional floor-matching correct per
+  the literal report? Not built — flagged for the author.
+- Confirm lightning's `floorVisibility` param shipped in the same pass as
+  candle's (referenced in `anchor-catalog.js`, not separately narrated in
+  bug 5's entry).
+
+### Fixed when
+
+Opening Anchor View Mode on a given floor shows only the candle/lightning
+icons whose effect is actually visible from that floor.
+
+---
+
+## 15. A sun shadow bleeds through an occluding roof on the floor above
+
+**Status:** `OPEN` — architecture gap confirmed, exact trigger needs a live
+repro · **Reported:** 2026-08-08 · **Docs:** `Sun-Shadows-Layer-Smear.md`,
+`Sun-Shadow-Cascade.md`
+
+### Symptom
+
+*"I'm on the upper floor of a building looking down at a rooftop visible on
+my level. I can see an 'overhead' shadow which is caused by the floor below
+but which is visible through an occluding roof which is on the upper floor
+and should be covering it."*
+
+### Root cause — CONFIRMED architecturally: two occlusion tests, one effect, no guarantee they agree
+
+The layer-smear cascade has TWO independent occlusion checks. (1)
+`environmental-light.js:446-480` picks which floor-slot a fragment reads
+from — migrated to `depthFlagsTexNode`/`buf:scene.depth` on 2026-08-05
+specifically "to honor the one-occlusion-system lock"
+([[keyhole-depth-authority-sole-system-decision]]). (2) Inside each floor's
+own bake, `layer-smear-render.js:429-450`'s cascade decides whether THAT
+floor is opaque at a world (x,y) using `coverAbove` — a **mask-authority-
+derived grid**, never the depth authority. `coverAbove` is built in
+`mask-derive.js#deriveFloorProducts` (:811-885) by a static per-item test:
+`isAbove = owner !== null ? owner > floor.index : ... item.elevation >=
+floor.ceilingElevation`. None of `layer-smear.js`, `layer-smear-render.js`,
+`sun-shadow-subsystem.js`, or `mask-derive.js` reference `depthAuthority` or
+`buf:scene.depth` at all (confirmed by grep across all four).
+
+So the cascade's "is this floor opaque here" answer and the depth
+authority's real per-item occlusion answer — the one vegetation's
+canopy-vs-roof correctly uses, and the one the sibling floor-select gate in
+this SAME effect now uses — are computed by two unrelated pipelines with no
+guarantee of agreement at any given pixel. When a roof reads opaque to the
+depth authority but `coverAbove`'s static `ownerFloorIndex`/elevation
+classification misses it (wrong/absent ownership, an elevation-fallback edge
+case, a hidden/late-loaded item, staleness relative to a mask-authority
+version bump), the cascade shows the floor-below's shadow bleeding through a
+roof the player can see is solid.
+
+**Could not pin the exact triggering item on the reporter's map without a
+live repro** — the architectural gap is confirmed from source; which
+specific roof item is misclassified is not.
+
+### Proposed fix
+
+(1) Instrument first — compare the sun-shadow debug band0/cascade view
+against the depth authority's own per-pixel floor-flags for the specific
+rooftop item, on the reporter's real map, to find exactly which item(s)
+disagree (per [[feedback_instruments_must_not_lie]] — don't guess). (2) The
+fix is almost certainly a `mask-derive.js` classification gap for that item
+(missing/wrong `ownerFloorIndex`, a bad elevation fallback, or an item class
+`coverAbove` doesn't consider that the depth authority's item-builder does),
+not a resolution problem. Note: the cascade can't simply be pointed at
+`buf:scene.depth` wholesale — that buffer is screen-space/per-camera-frame,
+while the cascade bakes once per floor in world space (the orthographic
+hole-stack model) — so a mask-grid is structurally the right kind of input;
+the fix is making its classification provably match the depth authority's
+for the same items, not swapping mechanisms.
+
+### Open questions
+
+- On the reporter's actual scene: is the offending roof explicitly
+  floor-owned, or relying on the elevation-fallback path — and does that
+  fallback actually clear the lower floor's ceiling elevation?
+- Is the roof excluded from `coverAbove` by `item.hidden` at bake time but
+  visible now (a staleness bug, not a classification bug)?
+- Should `mask-derive.js`'s per-item classification be reconciled with (or
+  literally sourced from) the depth authority's item list now that it's the
+  locked sole occlusion system, or is keeping them as two deliberately
+  different questions (screen compositing vs. world-space shadow silhouette)
+  still correct, provided their answers are audited to agree?
+
+### Fixed when
+
+On the reporter's own scene, standing on the upper floor, the shadow that
+was bleeding through the roof is fully hidden by it, matching the canopy's
+own occlusion.
+
+---
+
+## 16. WebGPU crash: `_Specular` mask on the 12000² Mansion map exceeds `maxBufferSize`
+
+**Status:** `BUILT (unverified)` — immediate fix only; the adaptive-resolution
+system is still `OPEN` · **Reported:** 2026-08-08 · **Docs:** `Specular.md`,
+`Performance.md`
+
+### Symptom (exact error)
+
+```
+THREE.WebGPURenderer: Uncaptured WebGPU GPUValidationError: Buffer size
+(324863904) exceeds the max buffer size limit (268435456). This adapter
+supports a higher maxBufferSize of 2147483648, which can be specified in
+requiredLimits when calling requestDevice().
+ - While validating [BufferDescriptor ""Dawn_DynamicUploaderStaging""]
+ - While [Failed to format error: "calling %s.WriteTexture(%s, (%u bytes), %s, %s)"]
+```
+
+Triggered by adding a `_Specular` mask to the 12000×12000px, 2-floor Mansion
+map.
+
+### Root cause — CONFIRMED, arithmetic matches the error to within 0.3%
+
+`vt/texture-limits.js#resolveRendererRequiredLimits` requested
+`maxTextureDimension2D` and `maxStorageBuffersPerShaderStage` via
+`requiredLimits` but never `maxBufferSize` — so WebGPU silently stayed at the
+spec floor (256MiB) even though this adapter supports 2GiB (per the error
+text itself). Both renderer construction sites (`boot.js:7000-7001`,
+`vt-pan-viewer.js:1203,1211`) already call the shared resolver correctly, so
+the one omission affected both.
+
+The actual oversized allocation: `_Specular` loads via `loadMaskImageTexture`
+(`vt/mask-image.js:167-283`) into ONE untiled `THREE.DataTexture` — dimension-
+capped (`MASK_IMAGE_MAX_DIM`) but **never byte-budget-capped**. At 12000px ×
+`SPECULAR_MASK_IMAGE_SCALE` (0.75) × 4 bytes/texel (RGBA): 9000×9000×4 =
+324,000,000 bytes — within ~0.3% of the reported 324,863,904 (the residual
+matches WebGPU's 256-byte row-padding exactly). The base MAP ART loader
+already has this exact defense (`MAX_WHOLE_TILE_DIM=8192`, added after a
+12000² upload TDR'd a device on a floor switch, tiling into a 2×2 grid of
+~137MB pieces instead) — `mask-image.js` was never given the same one; it
+only caps pixel dimension, not bytes. (Water's mask, same loader but 1
+byte/texel, sits at 144MB for the same map size — currently safe, but with
+much thinner margin than the art loader's own precedent targets.)
+
+### What was built — 2026-08-08 (immediate fix only)
+
+`chooseBufferSizeLimit(adapterMax, desired)` added to `texture-limits.js`,
+same clamp discipline as its two siblings (never exceed the adapter, never
+go below the 256MiB spec floor), targeting `DESIRED_BUFFER_SIZE` = 1GiB — 4×
+the floor rather than the siblings' 2×, because unlike them a `maxBufferSize`
+miss is a hard crash, not a graceful degrade, and 2× (512MiB) would not have
+cleared this exact 324MB case with real headroom for the next map. Wired
+into `resolveRendererRequiredLimits` as a third independent branch — fixes
+both construction sites via the one shared resolver. New Node tests mirror
+the existing pattern. `npm run verify` green (7725 tests).
+
+**This raises the ceiling only.** On hardware whose adapter genuinely can't
+grant more than 256MiB, an oversized single upload can still crash — that's
+what the system below is for.
+
+### The adaptive-resolution system — NOT built, needs the author's numbers
+
+The durable fix: give `mask-image.js`'s loader the SAME two-tier defense the
+art loader already has — a BYTE BUDGET (not just a dimension cap) that
+solves for resolution instead of guessing it: compute
+`bytesPerTexel × width × height` for `maskImageTargetSize()`'s candidate
+output, and scale down further before upload if it would cross the budget.
+Natural seam: extend `maskImageTargetSize()` (or a pure sibling function,
+mirroring how `chooseTextureLimit`/`planImageTiles` stay separate) with a
+`bytesPerTexel` + `byteBudget` param. Downscaling degrades a silhouette mask
+more gracefully than the art loader's multi-texture tiling would (and avoids
+adding tiling complexity to two shader consumers — specular's HSV decode,
+water's SDF seed — that assume one contiguous texture today).
+
+### Open questions
+
+- `DESIRED_BUFFER_SIZE` = 1GiB: right target, or should it track closer to
+  the adapter's real reported max (2GiB) minus margin, given a miss here is
+  a hard crash unlike the two siblings' graceful degrades?
+- The adaptive system's byte budget: a flat constant, a fraction of the
+  resolved `maxBufferSize`, or a fraction of estimated total scene VRAM
+  (`estTextureVramMB` is already tracked by the flight recorder)?
+- Should the byte-budget cap live in `mask-image.js` generally (covering
+  water's thinner margin too) or be specular-specific?
+- Is downscaling-to-budget acceptable for specular's visual target, or does
+  the author want tiling (full resolution, more shader complexity) instead —
+  a perceptual/artistic call, not a technical one.
+
+### Fixed when
+
+The Mansion map's `_Specular` mask loads without a crash (built — awaiting
+live confirmation); a future, even larger map degrades resolution
+automatically instead of crashing (not built).
+
+---
+
+## 17. Feature: a shared sun-brightness ceiling for `_Window` + a moonlight floor for night
+
+**Status:** `OPEN` — design proposal only, no code · **Reported:** 2026-08-08
+· **Docs:** `Windows-Aperture.md`, `Sky-and-Grade.md` (Grade Engine)
+
+### Ask, in the author's own words
+
+*"Somewhere we should track the highest value of sunlight brightness - this
+needs to become the exterior brightness of outside areas at noon with no
+clouds or blockers. That then needs to become the brightest that the
+_Window effect can get to. The idea is that we shouldn't have internal
+window light which ends up brighter than the external light. For this same
+reason we need to add a night time lighting which happens around midnight
+which is 'moon light' so that we can have the window lights show up at
+night as long as it's not too cloudy. Clouds lower the overall light and
+eventually we'll hook clouds into the window light system in a complex
+fashion."*
+
+### What's there today — CONFIRMED, and the defect is reproducible from the numbers alone
+
+**No shared ceiling exists.** The window effect's brightness cap
+(`window-cookie.js`'s `WINDOW_SHOULDER_K = 0.8`, asymptote ≈1.25 illum units)
+is a hardcoded, scene-independent constant — it never reads
+`env.ambient.daylight`, `darkness01`, or anything the exterior lighting
+computes. MSA's own noon parity essay puts daylight ambient at ~0.93-1.0
+(`DEFAULT_AMBIENT.daylight = [0.93,0.93,0.93]`). **1.25 already sits above
+that** — the defect the author describes is present in the code's own
+numbers, not just a hunch. `WINDOW_PARAMS.strength` (0..3, default 1.25) only
+changes how fast the shoulder *approaches* that same fixed 1.25 — never what
+it approaches.
+
+**A time-of-day model already exists** and is exactly where a moonlight term
+would hook in: `world/sun.js#computeSun` derives `dayFactor01`/`skyFactor01`/
+`twilight01`; `world/day-clock.js` is [[keyhole-time-authority-decision]];
+`world/environment.js#buildEnvSnapshot` derives one `darkness01` and carries
+`env.ambient.{daylight,darkness,brightest}` through untouched.
+`environmental-light.js#computeAmbientBackground` mixes daylight → darkness
+by `darkness01`, gated by the locked [[keyhole-darkness-realism-lever]]
+(default 0) — but there is no third "moonlight" endpoint anywhere; deep
+night simply floors out at Foundry's own `ambientDarkness` colour (or black
+at realism=1). `grep -r "moon"` across `src/` returns nothing.
+
+**Clouds are confirmed DESIGN ONLY** (`docs/planning/Clouds.md`: "NOTHING
+BUILT... No code exists"). `env.weather.cloudCover01` is a real scalar
+already consumed for sky chroma; `window-render.js`/`window.js` already
+carry a pre-wired, unfed `cloudFactorNode` seam (constant `1` today) —
+exactly this codebase's "seam with a safe default" pattern, ready for
+clouds to plug into later. Clouds.md's own author ruling ("read site, not
+the bake") is directly relevant to how the ceiling itself should be built —
+as a re-derived value, not a cached uniform, so a future cloud term is a
+one-line multiply at the point of use with zero rework.
+
+### Proposed architecture (for the author's sign-off — not implemented)
+
+1. **Peak exterior brightness, derived not tracked**: expose
+   `env.sunPeakRgb = env.ambient.daylight` (and its luminance) on the env
+   snapshot each frame — it's already the closed-form noon/no-cloud/no-
+   blocker peak, self-updates if a GM edits scene ambient, no reset/decay
+   logic needed. (A literal running-max would need its own decay rule if
+   that's actually what's wanted instead — see open questions.)
+2. **A moonlight endpoint**, night's counterpart to daylight — a tunable
+   colour constant (mirroring `sky-access.js`'s `FILL_NIGHT_RGB`) driven by
+   the SAME `skyFactor01`/`darkness01` curve the ambient floor already mixes
+   on, so the two ramps can never disagree.
+3. **Two real forks for where the moon floor plugs in** — (A) MAX-blend it
+   into the shared ambient floor scene-wide (reuses
+   `computeGlobalLightFloor`'s existing precedent — a genuinely lit exterior
+   at night), or (B) a window-only ceiling (bounds only the window's own
+   contribution). The brief's wording leans toward needing (A) regardless
+   (a moonlit window against a scene crushed to true black would look
+   wrong), but they're likely not mutually exclusive.
+4. **The window's clamp becomes dynamic**: `WINDOW_SHOULDER_K`'s fixed
+   asymptote becomes `k = 1 / ceilingIllumUnits`, where `ceilingIllumUnits`
+   mixes moon-peak → sun-peak on the same darkness/day curve — this is the
+   mechanism that actually enforces "windows never outshine the sun."
+   Touches both the CPU twin (`window-cookie.js`) and its TSL transcription,
+   CPU twin first, per this codebase's own convention.
+5. **Clouds' hook stays a one-line multiply** at the ceiling's point of use
+   once the real system lands — `env.weather.cloudCover01` could be wired in
+   now as a cheap interim dimmer if the author wants a first cut ahead of the
+   full procedural field.
+
+### Open questions
+
+- "Track the highest value" — a derived-per-frame constant (recommended:
+  self-updating, no reset logic) or an actual stateful running max sampled
+  during play (needs a decay/reset rule for when a GM edits the scene)?
+- Moonlight as a scene-wide floor (A), a window-only ceiling (B), or both?
+- Does `WINDOW_PARAMS.strength`'s felt meaning change once its asymptote is
+  dynamic instead of fixed at 1.25 — worth confirming rather than assuming,
+  since it's an already-shipped, author-tuned dial.
+- Should moonlight interact with `darknessRealism01` — crushed to zero at
+  realism=1 too (consistent with "true dark"), or a deliberate floor ABOVE
+  true-black even there, since the whole point is windows staying visible?
+- One physically-tuned ratio (moon = 1/20th of daylight, say), or two
+  independently authored RGB endpoints with their own strengths (mirroring
+  `sky-access.js`'s separately hand-picked key/fill colours)?
+- Wire the interim `cloudCover01` scalar into the ceiling now, or wait for
+  Clouds.md's real system?
+
+### Fixed when
+
+At noon, a maxed-out window never reads brighter than the exterior daylight
+next to it; at night, with the moon term active, a lit window is visibly
+brighter than its darkened surroundings; heavy cloud cover dims both
+together once clouds are wired in.

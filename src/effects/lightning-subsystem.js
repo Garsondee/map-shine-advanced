@@ -65,12 +65,33 @@ function qualityForTier(perfTier) {
  * @param {*} args.uGlobalTimeMs - the ONE shared animation-clock TSL uniform node.
  * @param {() => {enabled: boolean, params: object, perfTier?: number, anchors: Array<object>}} args.getLightningRenderState -
  *   boot's data seam. Default-off means an un-wired caller draws no bolts.
- * @param {*} [args.attrTexNode] - `buf:scene.attr`, UNSAMPLED — forwarded
- *   verbatim to `buildLightningMaterial`'s own height/elevation gate; omit
- *   for a bolt that ignores floor occlusion (pre-gate behaviour).
+ * @param {*} [args.depthTexNode] - `buf:scene.depth`, UNSAMPLED — forwarded
+ *   verbatim to `buildLightningMaterial`'s own depth-authority gate (2026-08-05
+ *   migration from the OLD `buf:scene.attr`/`buildHeightGateNode` mechanism —
+ *   see `lightning-render.js`'s own header). Omit, along with
+ *   `depthFlagsTexNode`/`resolveExpectedDepth`, for a bolt that ignores floor
+ *   occlusion entirely (byte-identical pre-gate behaviour, e.g. Shader Lab).
+ * @param {*} [args.depthFlagsTexNode] - `buf:scene.depth`'s flags attachment,
+ *   UNSAMPLED — same shape as `depthTexNode`.
+ * @param {(elevation: number) => number} [args.resolveExpectedDepth] - turns
+ *   a source's raw world elevation into the tie-safe depth value the shader
+ *   actually compares (`depthAuthority.rankOfElevation` +
+ *   `computeTieSafeExpectedDepth`, composed by `vt-pan-viewer.js` — the SAME
+ *   injection shape `point-light-pool.js#update` already receives and calls
+ *   per light, per frame). Resolved fresh per SOURCE every sync (so a live
+ *   elevation edit reaches the very next burst immediately), never per
+ *   already-spawned strand — a strand's own baked value stays fixed for its
+ *   lifetime, matching `baseIntensity`/`widthScale`'s own bake-once shape.
  * @returns {{scene:*, sync:(nowMs:number)=>void, dispose:()=>void, activeStrands:()=>Array<object>, droppedForCapacity:()=>number, forceStrike:()=>void}}
  */
-export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRenderState, attrTexNode }) {
+export function createLightningSubsystem({
+  THREE,
+  uGlobalTimeMs,
+  getLightningRenderState,
+  depthTexNode,
+  depthFlagsTexNode,
+  resolveExpectedDepth,
+}) {
   const lightningScene = new THREE.Scene();
   let mesh = null;
   let geometry = null;
@@ -103,7 +124,7 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
   function ensureMaterial(quality) {
     if (matBundle && materialQuality === quality) return;
     const prev = matBundle;
-    matBundle = buildLightningMaterial({ THREE, uGlobalTimeMs, quality, attrTexNode });
+    matBundle = buildLightningMaterial({ THREE, uGlobalTimeMs, quality, depthTexNode, depthFlagsTexNode });
     materialQuality = quality;
     if (!mesh) {
       geometry = new THREE.BufferGeometry();
@@ -170,6 +191,17 @@ export function createLightningSubsystem({ THREE, uGlobalTimeMs, getLightningRen
     const effectiveParams = perfTier < 1 ? { ...params, branchMax: 0 } : params;
 
     for (const source of sources) {
+      // THE BOLT'S OWN DEPTH-AUTHORITY INPUT — resolved fresh every sync (so a
+      // live elevation edit reaches the very next burst immediately) but only
+      // ACTUALLY READ by generateBurst() below at the moment a strand spawns,
+      // then baked into that strand for its whole lifetime (mirrors
+      // baseIntensity/widthScale's own bake-once shape). `source` is a fresh
+      // object every sync() call (groupLightningAnchorsIntoSources' own "never
+      // caches" contract) — mutating it in place here is safe, nothing else
+      // holds a reference to it. No injected resolver → 0 (an ordinary, low,
+      // real elevation, never a magic sentinel — matches point-light-pool.js's
+      // own "elevation 0 is not special-cased" convention).
+      source.expectedDepth = resolveExpectedDepth ? resolveExpectedDepth(source.elevation) : 0;
       let sched = schedules.get(source.linkId);
       if (!sched) {
         // A freshly-seen source staggers its FIRST burst across [0, maxDelayMs]

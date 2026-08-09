@@ -82,23 +82,121 @@ const TIER0_WIND_HANDLE = createWindHandle();
  * becomes worth building only if the camera ever tilts off straight-down —
  * recorded here, not built.)
  */
-const FLAME_BASE_RADIUS = 0.22; // round base radius, as a fraction of the quad half-extent
-const FLAME_TIP_RADIUS = 0.02; // radius at the tip → a point
-const FLAME_EDGE_SOFT = 0.05; // silhouette antialiasing width
+const FLAME_BASE_RADIUS = 0.23; // round base radius, as a fraction of the quad half-extent
+/** Radius at the tip. ⚠️ Was 0.02 — a true needle point, which under the noise
+ * displacement added 2026-08-06 frayed into thin spikes rather than the ROUNDED
+ * lobes the reference art is built from. A blunter tip keeps the teardrop
+ * silhouette while giving the lobe noise enough width to read as billowing. */
+const FLAME_TIP_RADIUS = 0.05;
+/** Silhouette softness, in quad fractions — so it SCALES with the flame.
+ * ⚠️ Was 0.05, which at the shipped 24-30px flame is subtle but at any larger
+ * candle is 15px of gaussian mush: the lab's first capture (2026-08-06) showed
+ * every flame as a soft featureless blob with no readable edge at all. The
+ * reference art the author supplied has painterly, DEFINED boundaries broken up
+ * by speckle rather than blurred away, so the edge is now crisp and
+ * `FLAME_GRAIN_*` below supplies the break-up instead. At the small end this is
+ * ~1px of transition, which is the right amount of antialiasing and no more. */
+const FLAME_EDGE_SOFT = 0.02;
 /** A tiny sideways bias for the resting spine (fraction of the quad). The spine's
  * LENGTH is now life-driven (FLAME_REST_LEN_*), pointing "up" (−Y is up on screen,
  * the camera flips Y); this is only the small x-lean of an otherwise-vertical
  * resting wisp. Wind adds on top. */
 const FLAME_REST_CURL_X = 0.0;
 
-/** Flame CORE + COLOUR GRADIENT (2026-07-20, author: "extremely bright core…
- * a slight gradient of colour to make it look more like a candle flame"). A
- * real candle flame is hottest (near-white/yellow) at the base by the wick and
- * cools (deeper orange) toward the tip. */
-const FLAME_BASE_COLOR = [1.0, 0.9, 0.62]; // hot yellow-white body near the wick
-const FLAME_CORE_WHITE = 0.9; // how far the very centre blows to pure white
-const FLAME_CORE_RADIUS = 0.12; // the white-hot core radius (fraction of the quad)
-const FLAME_CORE_BOOST = 1.7; // extra emission at the core (the "extremely bright" ask)
+/**
+ * ============================================================================
+ * THE COLOUR RAMP — rebuilt 2026-08-06 against the author's own reference art
+ * ============================================================================
+ *
+ * The author supplied a hand-painted fire/explosion sheet and asked for the
+ * candle's colours to "conform as closely as possible" to it. That painting's
+ * palette runs, from hottest to coolest:
+ *
+ *   pale cream-yellow  →  saturated golden  →  strong orange  →  deep orange-red
+ *   (#FEE5A2-ish)         (#FCB63E-ish)        (#F8901C-ish)     (#B36814-ish)
+ *
+ * ⚠️ WHAT THE OLD MODEL GOT WRONG, AND WHY NOTHING CAUGHT IT. It was
+ * `mix(FLAME_BASE_COLOR, flameColor, h)` — a pale cream body lerping to the
+ * AUTHORED colour at the TIP — multiplied by a `heat` term that fades toward
+ * that same tip, and then a 0.9-strength blow to pure WHITE at the core on top.
+ * So the one saturated colour in the whole shader was painted exactly where the
+ * brightness went to zero, and everything you could actually see was washed
+ * cream. The first lab capture (`tools/shader-lab/candle-lab.js`, built the
+ * same day for this) shows it plainly: sixteen pale beige blobs with no orange
+ * anywhere. It had been that way since 2026-07-20 and read as "a bit pale"
+ * rather than as a bug, because nothing ever rendered a flame bigger than 30px
+ * where the gradient's direction was legible.
+ *
+ * The ramp is now derived FROM the per-candle authored colour rather than
+ * lerping toward it, so it stays a real recolour knob (a blue candle ramps
+ * blue) while the DEFAULT lands on the reference palette above. Hot things do
+ * pale toward cream in reality, so the two hot stops mix toward cream/gold
+ * rather than being fixed — that is what keeps a recoloured candle from simply
+ * looking like flat tinted paper.
+ */
+const FLAME_PALE_GOLD = [1.0, 0.84, 0.35]; // what the INNER stop mixes toward
+const FLAME_CREAM = [1.0, 0.95, 0.72]; // what the CORE stop mixes toward
+const FLAME_RAMP_INNER_MIX = 0.45; // how far the inner stop travels to pale gold
+const FLAME_RAMP_CORE_MIX = 0.86; // how far the core stop travels to cream
+const FLAME_RIM_DARKEN = 0.78; // the deep orange-red rim = authored colour, deepened
+/** Ramp stop positions along `heat` (0 = silhouette, 1 = hottest core).
+ * Deliberately front-loaded: in the reference art the deep colour is a
+ * comparatively THIN rim and the bright golds/creams own most of the mass, so
+ * the ramp reaches its inner and core stops early rather than at the extremes.
+ *
+ * ⚠️ AND the saturated MID stop must own a wide plateau between them. A first
+ * pass front-loaded ALL THREE (T2 opening at 0.28), which handed most of the
+ * flame's area to the two stops that mix toward pale gold and cream — the
+ * result read pastel and washed, the same failure the old model had, reached
+ * from the opposite direction. The gap between T1's end and T2's start is where
+ * the authored colour shows at full saturation, and it has to be real. */
+const FLAME_RAMP_T1 = [0.02, 0.22]; // rim → mid
+const FLAME_RAMP_T2 = [0.4, 0.72]; // mid → inner  (0.22..0.40 = pure authored colour)
+const FLAME_RAMP_T3 = [0.66, 0.9]; // inner → core
+/** `heat`'s own shaping. <1 WIDENS the hot interior (the reference's blobs are
+ * mostly bright, with the deep colour confined to a rim), and the tip stays
+ * only mildly cooler because the distance-field depth already cools it. */
+const FLAME_HEAT_TIGHTNESS = 0.6;
+const FLAME_TIP_COOL = 0.75;
+/** Emission: a body floor + a heat-driven gain + a modest core kick. The core
+ * kick is deliberately FAR smaller than the 1.7 it replaced — that number
+ * existed to serve an "extremely bright core" ask by blowing the centre to
+ * white, and the reference art has no blown-out white anywhere in it. Brightness
+ * now comes from the pale cream ramp stop, not from clipping the channel. */
+const FLAME_EMIT_BODY = 0.6;
+const FLAME_EMIT_HEAT_GAIN = 1.0;
+const FLAME_CORE_RADIUS = 0.12; // the core kick's radius (fraction of the quad)
+const FLAME_CORE_BOOST = 0.5;
+
+/**
+ * ============================================================================
+ * THE BILLOWY SILHOUETTE — lobes + grain (2026-08-06, same reference)
+ * ============================================================================
+ * The painting's masses are cauliflower-like: big rounded lobes with smaller
+ * bumps riding on them, and a scatter of detached specks around the edge. A
+ * clean round-cone SDF cannot produce any of that, so the distance field itself
+ * is displaced by noise before it is thresholded — two octaves for the lobes
+ * (tier ≥1), plus a much finer, lower-amplitude octave for the painterly
+ * grain that breaks the silhouette into flecks (tier 2).
+ *
+ * Both are scaled by the flame's own base radius, NOT by the local `radiusAt`:
+ * keyed to `radiusAt` the lobes would vanish exactly where the cone tapers, so
+ * the tip — the most visually interesting part of a flame — would be the one
+ * place that stayed a smooth machined curve.
+ */
+const FLAME_LOBE_FREQ = 4.0; // lower = BIGGER, rounder lobes (5.5 read as torn, not billowed)
+const FLAME_LOBE_RATE = 0.9;
+const FLAME_LOBE_AMP = 0.3;
+const FLAME_LOBE_OCTAVE2 = 2.3; // second octave's frequency multiplier
+const FLAME_LOBE_OCTAVE2_W = 0.25;
+/** ⚠️ GRAIN IS HIGH-FREQUENCY AND LOW-AMPLITUDE, and the pairing is the whole
+ * point. At freq 13 / amp 0.15 the displacement is large enough RELATIVE to its
+ * own wavelength to move the silhouette itself, which shredded the outline into
+ * jagged tears instead of dusting it with flecks. Fine and weak reads as
+ * painterly grain; coarse and strong reads as damage. */
+const FLAME_GRAIN_FREQ = 22.0;
+const FLAME_GRAIN_RATE = 1.6;
+const FLAME_GRAIN_AMP = 0.09;
 
 /** GPU WIND (2026-07-20, author: "candles in a drafty castle"). The flame tip's
  * MAX displacement from the wind field, in quad fractions — a hard gust leans
@@ -161,7 +259,10 @@ const FLAME_CURL_RATE = 2.4; // per-candle bend that DESYNCS neighbours' tails
 const FLAME_CURL_AMP = 0.7; // curl strength relative to the coherent gust
 const FLAME_WARP_FREQ = 3.2; // tier-2 domain warp — the silhouette BOILS/CURLS
 const FLAME_WARP_RATE = 1.4; // (less precise, more organic than a clean teardrop)
-const FLAME_WARP_AMP = 0.13;
+/** Reduced from 0.13 on 2026-08-06: `FLAME_LOBE_*` now does the heavy lifting
+ * for silhouette irregularity, and stacking the full old warp on top of it
+ * pushed the shape past "chaotic but reads as a flame" into shapeless. */
+const FLAME_WARP_AMP = 0.06;
 
 /**
  * A per-candle pseudo-random in [0,1] from the wick's WORLD position — the
@@ -319,6 +420,7 @@ export function buildCandleFlameMaterial({
     smoothstep,
     mix,
     max,
+    pow,
     screenUV,
     mx_noise_float: perlin,
   } = THREE.TSL;
@@ -455,31 +557,98 @@ export function buildCandleFlameMaterial({
   const closest = tip.mul(h);
   const distToSpine = length(p.sub(closest));
   const radiusAt = mix(float(FLAME_BASE_RADIUS), float(FLAME_TIP_RADIUS), h).mul(sizeScale);
-  const signed = distToSpine.sub(radiusAt); // < 0 inside the teardrop
+  /** The flame's own scale reference for every noise displacement below — the
+   * BASE radius, not the tapering local one (see the FLAME_LOBE_* header). */
+  const radiusRef = max(float(FLAME_BASE_RADIUS).mul(sizeScale), float(1e-4));
+  let signed = distToSpine.sub(radiusAt); // < 0 inside the teardrop
+
+  // BILLOWY LOBES (tier ≥1) — two noise octaves displacing the distance field,
+  // so the silhouette grows rounded cauliflower lobes with smaller bumps on
+  // them instead of holding a machined cone. Phased by the per-candle seed
+  // (`pt`/`phase`) like every other noise here, so neighbours never billow in
+  // lockstep.
+  if (quality >= 1) {
+    const lobe1 = perlin(
+      vec2(
+        p.x.mul(float(FLAME_LOBE_FREQ)).add(pt.mul(float(FLAME_LOBE_RATE))),
+        p.y.mul(float(FLAME_LOBE_FREQ)).add(phase)
+      )
+    );
+    const lobe2 = perlin(
+      vec2(
+        p.y.mul(float(FLAME_LOBE_FREQ * FLAME_LOBE_OCTAVE2)).sub(pt.mul(float(FLAME_LOBE_RATE * 1.4))),
+        p.x.mul(float(FLAME_LOBE_FREQ * FLAME_LOBE_OCTAVE2)).add(phase)
+      )
+    );
+    const lobes = lobe1.mul(float(1 - FLAME_LOBE_OCTAVE2_W)).add(lobe2.mul(float(FLAME_LOBE_OCTAVE2_W)));
+    signed = signed.add(lobes.mul(radiusRef).mul(float(FLAME_LOBE_AMP)));
+  }
+
+  // PAINTERLY GRAIN (tier 2) — a much finer, weaker octave. Too small to
+  // change the read of the shape, big enough to fray the boundary into flecks
+  // and specks, which is what stops a flat-shaded SDF from looking vector-cut.
+  if (quality >= 2) {
+    const grain = perlin(
+      vec2(
+        p.x.mul(float(FLAME_GRAIN_FREQ)).add(pt.mul(float(FLAME_GRAIN_RATE))),
+        p.y.mul(float(FLAME_GRAIN_FREQ)).sub(phase)
+      )
+    );
+    signed = signed.add(grain.mul(radiusRef).mul(float(FLAME_GRAIN_AMP)));
+  }
 
   // Soft silhouette: 1 well inside, 0 outside (the well-defined smoothstep
   // direction, then inverted — never a reversed-edge smoothstep).
   const inside = float(1).sub(smoothstep(float(-FLAME_EDGE_SOFT), float(0), signed));
-  // Hottest at the base (h=0, the fuel), fading toward the tip.
-  const heat = mix(float(1), float(0.35), h);
 
-  // COLOUR GRADIENT — a hot yellow-white body at the base cooling to the
-  // authored warm orange at the tip (a real flame cools as it rises).
-  const baseCol = vec3(FLAME_BASE_COLOR[0], FLAME_BASE_COLOR[1], FLAME_BASE_COLOR[2]);
-  const gradient = mix(baseCol, flameColor, h);
+  // HEAT — how far INSIDE the (already noise-displaced) silhouette this
+  // fragment sits, normalised by the flame's own radius, then cooled slightly
+  // toward the tip. Derived from `signed` rather than from `h`/`distToSpine`
+  // directly so the colour bands FOLLOW the lobes instead of cutting across
+  // them — a lobe that bulges out carries its own rim of deep orange with it,
+  // which is exactly what the reference art does.
+  // ⚠️ NORMALISED BY THE *LOCAL* RADIUS, NOT THE BASE ONE. Dividing by
+  // `radiusRef` (the first cut, 2026-08-06) looked right on paper and rendered
+  // muddy brown: the cone TAPERS, so above the base the local radius is a small
+  // fraction of the base radius, the deepest reachable depth was correspondingly
+  // small, and `heat` could never climb past the rim stop — the entire upper
+  // flame came out rim-coloured. Against the local radius the spine reads ~1 at
+  // every height, so the flame is bright the whole way up with a deep rim
+  // wrapped around it (which is what the reference actually shows), and the tip
+  // cools through the explicit `FLAME_TIP_COOL` term instead of by accident.
+  const heatDenom = max(radiusAt, radiusRef.mul(float(0.25)));
+  const heat = clamp(
+    pow(clamp(signed.negate().div(heatDenom), float(0), float(1)), float(FLAME_HEAT_TIGHTNESS)).mul(
+      mix(float(1), float(FLAME_TIP_COOL), h)
+    ),
+    float(0),
+    float(1)
+  );
 
-  // WHITE-HOT CORE — a small, intense WHITE centre on the spine near the wick
-  // (coreT is 1 at the very centre, 0 by the core radius or up toward the tip).
+  // THE RAMP — four stops built FROM the authored per-candle colour (see the
+  // FLAME_PALE_GOLD header for why it is derived rather than lerped toward).
+  const rimCol = flameColor.mul(float(FLAME_RIM_DARKEN));
+  const innerCol = mix(flameColor, vec3(...FLAME_PALE_GOLD), float(FLAME_RAMP_INNER_MIX));
+  const coreCol = mix(flameColor, vec3(...FLAME_CREAM), float(FLAME_RAMP_CORE_MIX));
+  let colorOut = mix(rimCol, flameColor, smoothstep(float(FLAME_RAMP_T1[0]), float(FLAME_RAMP_T1[1]), heat));
+  colorOut = mix(colorOut, innerCol, smoothstep(float(FLAME_RAMP_T2[0]), float(FLAME_RAMP_T2[1]), heat));
+  colorOut = mix(colorOut, coreCol, smoothstep(float(FLAME_RAMP_T3[0]), float(FLAME_RAMP_T3[1]), heat));
+
+  // A small extra emission kick right at the wick — enough that the flame still
+  // reads as a light SOURCE, not so much that the centre clips to white.
   const coreRadius = max(float(FLAME_CORE_RADIUS).mul(sizeScale), float(1e-4));
   const coreT = clamp(float(1).sub(distToSpine.div(coreRadius)), float(0), float(1)).mul(mix(float(1), float(0), h));
-  const colorOut = mix(gradient, vec3(1, 1, 1), coreT.mul(float(FLAME_CORE_WHITE)));
 
   // EMISSION — guttering: near-dark in a cold period, a flare when alive (tier
   // ≥1); a gentle flicker at tier 0. Plus the bright core kick.
   const emitLevel =
     quality >= 1 ? mix(float(FLAME_EMIT_FLOOR), float(FLAME_EMIT_CEIL), life) : mix(float(0.75), float(1.1), life);
   let emission = inside
-    .mul(heat.add(coreT.mul(float(FLAME_CORE_BOOST))))
+    .mul(
+      float(FLAME_EMIT_BODY)
+        .add(heat.mul(float(FLAME_EMIT_HEAT_GAIN)))
+        .add(coreT.mul(float(FLAME_CORE_BOOST)))
+    )
     .mul(emitLevel)
     .mul(uIntensity)
     .mul(flameIntensity); // per-candle brightness (the anchor's own `intensity` param, finally read by the flame itself)

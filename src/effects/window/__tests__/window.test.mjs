@@ -49,9 +49,35 @@ export function run(t) {
 
   // --- every param is genuinely consumed (params/no-dead-controls proves ---
   // this at build time for real code; this pins the SHAPE the design argues
-  // for: a tiny schema, not a rebuild of V2's 98 controls).
+  // for: a small schema, not a rebuild of V2's 98 controls).
+  //
+  // ⚠️ THIS BOUND MOVED, 4 → 16, AND IT WAS A DELIBERATE DESIGN CHANGE, NOT A
+  // TEST BEING MADE TO FIT. It was written at 4 to encode "tier 0 is
+  // deliberately small". The author then asked for the glass rung by name and
+  // in the same breath asked for *"plenty of controls to alter the look of the
+  // RGB split"* (2026-08-05) — a direct instruction that the glass deserves a
+  // real control surface, which is the only authority that can move a pin like
+  // this one. Nine `Glass` params landed as a result.
+  //
+  // The bound is kept, and kept TIGHT, because what it actually guards is
+  // still live: V2's 98 controls were not one considered decision but the
+  // absence of any, one knob at a time, with 46 of them driving nothing at all.
+  // `params/no-dead-controls` walls the inert half at build time; this walls
+  // the accretion half. Sixteen leaves room for the deferred rungs that will
+  // legitimately want a knob (cloud, moon) and not much else — the next person
+  // to need more must come back here and justify it too.
   const keys = Object.keys(WINDOW_PARAMS);
-  ok('the whole schema is a small fraction of V2s 98 controls', keys.length <= 4);
+  ok('the whole schema is a small fraction of V2s 98 controls', keys.length <= 16);
+  ok(
+    'every glass control is grouped under its own category, so the panel does not read as one long list',
+    keys.filter((k) => k.startsWith('glass')).every((k) => WINDOW_PARAMS[k].category === 'Glass')
+  );
+  // The master: at 0 the pane is flat and EVERY glass term must vanish with
+  // it (window-glass.js's model makes warp, prism and caustic all derivatives
+  // of one field). A default above 0 is the standing "new features ship ON so
+  // the author actually sees them" rule.
+  ok('the glass master can reach 0 — flat glass is reachable', WINDOW_PARAMS.glassWarpPx.min === 0);
+  ok('…and ships on, not silently disabled', WINDOW_PARAMS.glassWarpPx.default > 0);
   ok(
     'every param declares a help string an author can act on',
     keys.every((k) => (WINDOW_PARAMS[k].help ?? '').length > 20)

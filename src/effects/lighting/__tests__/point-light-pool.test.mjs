@@ -111,14 +111,39 @@ export function run(t) {
   );
 
   // ======================================================================
-  // resolveAnchorElevationRank — the candle/lightning sibling. Always height
-  // 0 within its own floor (no anchor kind authors a z-height) — every
-  // assertion below is really about FLOOR resolution and the sentinel.
+  // resolveAnchorElevationRank — the candle/lightning sibling. Height within
+  // its own floor defaults to 0 (lightning still authors no z-height) but a
+  // caller may pass its own real value (candles, since 2026-08-05) — most
+  // assertions below are still really about FLOOR resolution and the
+  // sentinel, since that part is unaffected by the height argument.
   // ======================================================================
   ok(
-    'a LOCKED binding resolves to its own floor, height 0 — the honest default, since no anchor authors ' +
-      'a z-height',
+    'a LOCKED binding with no third arg resolves to its own floor, height 0 — the honest default for a ' +
+      'caller (lightning) that authors no z-height',
     resolveAnchorElevationRank({ mode: 'locked', bottom: 10, top: 20 }, FLOORS) === elevationRank(2, 0)
+  );
+  ok(
+    'a LOCKED binding with an authored height passes it straight through to elevationRank',
+    resolveAnchorElevationRank({ mode: 'locked', bottom: 10, top: 20 }, FLOORS, 6) === elevationRank(2, 6)
+  );
+  ok(
+    'a non-finite third arg falls back to height 0, never NaN propagating downstream',
+    resolveAnchorElevationRank({ mode: 'locked', bottom: 10, top: 20 }, FLOORS, NaN) === elevationRank(2, 0) &&
+      resolveAnchorElevationRank({ mode: 'locked', bottom: 10, top: 20 }, FLOORS, undefined) === elevationRank(2, 0)
+  );
+  ok(
+    'a height that stays within the anchor´s own floor band keeps that floor´s index (no crossing)',
+    resolveAnchorElevationRank({ mode: 'locked', bottom: 0, top: 10 }, FLOORS, 5) === elevationRank(1, 5)
+  );
+  ok(
+    'a height tall enough to clear the anchor´s own floor´s top re-attributes it to the floor ABOVE — the ' +
+      '2026-08-05 fix: the flame´s own gate can now cross floors the same way its cast light already can ' +
+      '(depth-authority.js#rankOfElevation), instead of only nudging a fraction capped well under one floor',
+    resolveAnchorElevationRank({ mode: 'locked', bottom: 0, top: 10 }, FLOORS, 15) === elevationRank(2, 5)
+  );
+  ok(
+    'a height tall enough to clear TWO floors´ worth re-attributes past both',
+    resolveAnchorElevationRank({ mode: 'locked', bottom: 0, top: 10 }, FLOORS, 25) === elevationRank(3, 5)
   );
   ok(
     'an ALL-LEVELS binding (the author´s own "show everywhere" choice, or a kind´s default) reads as the ' +

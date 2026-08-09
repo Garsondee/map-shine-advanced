@@ -12,6 +12,7 @@
  */
 
 import { WINDOW, WINDOW_PARAMS, WINDOW_DEBUG_CHANNELS } from './window.js';
+import { hexToRgb01 } from '../candle-flame-geometry.js';
 
 /**
  * @param {object} args
@@ -66,13 +67,25 @@ export function createWindowRegistration({
   }
 
   /**
-   * The viewer's seam. No colour decode here, unlike water's: every param is
-   * a scalar, because the COLOUR comes from the mask the author painted
-   * rather than from a picker — same absence as specular's, the same
-   * authoring model showing up in the plumbing.
+   * The viewer's seam. Decodes `dawnDuskTint`/`nightTint` from their authored
+   * hex to 0..1 RGB HERE, exactly where water decodes its own `tint` (same
+   * `hexToRgb01` — no further colour-space conversion, matching that
+   * precedent exactly) — `strength`/`contrast` still pass straight through
+   * unlike water's own params, because the base cookie COLOUR still comes
+   * from the mask the author painted, not a picker; only the two new
+   * daylight keyframes are pickers.
    */
   function getRenderState() {
-    return { enabled: readout.enabled, params: readout.params ?? {}, debugChannel };
+    const p = readout.params ?? {};
+    return {
+      enabled: readout.enabled,
+      params: {
+        ...p,
+        dawnDuskTint: typeof p.dawnDuskTint === 'string' ? hexToRgb01(p.dawnDuskTint) : undefined,
+        nightTint: typeof p.nightTint === 'string' ? hexToRgb01(p.nightTint) : undefined,
+      },
+      debugChannel,
+    };
   }
 
   /**

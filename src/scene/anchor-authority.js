@@ -173,6 +173,48 @@ export function createAnchorAuthority({ log }) {
     return out;
   }
 
+  /**
+   * Every anchor of ONE kind, unfiltered by `enabled` or floor — the
+   * authoring-view read. Deliberately distinct from `anchorsForEffect`,
+   * which drops disabled anchors on purpose (that is the render path's "only
+   * what should currently draw" contract); a GM re-enabling a greyed-out
+   * anchor in Anchor View Mode (`ui/anchor-view-mode.js`) needs to SEE the
+   * disabled ones too, so it cannot be built on top of that same filtered
+   * read (feedback_discovery_scope_narrower_than_authority).
+   * @param {string} kindId
+   * @returns {Array<object>} every resolved anchor of this kind, on or off.
+   */
+  function anchorsForKind(kindId) {
+    const out = [];
+    for (const a of scene.anchors.values()) {
+      if (a.kind === kindId) out.push(a);
+    }
+    return out;
+  }
+
+  /**
+   * Every anchor of ONE kind, unfiltered by `enabled` (same authoring-view
+   * intent as `anchorsForKind`) but filtered to a floor context the same way
+   * `anchorsForEffect` is — "MSA Anchor View" mode's own read. Anchor View
+   * Mode is a discovery tool for anchors on the CURRENT floor (including
+   * disabled ones, so a GM can re-enable them), not a whole-scene X-ray — an
+   * anchor locked to a different floor's band, and not widened by its own
+   * `floorVisibility` param, draws no icon here, matching what the render
+   * path would actually show from this floor.
+   * @param {string} kindId
+   * @param {{elevation?: number}|null} [floorContext]
+   * @returns {Array<object>} every resolved anchor of this kind visible from floorContext, on or off.
+   */
+  function anchorsForKindOnFloor(kindId, floorContext = null) {
+    const out = [];
+    for (const a of scene.anchors.values()) {
+      if (a.kind !== kindId) continue;
+      if (!floorMatches(a.floorBinding, floorContext, a.params?.floorVisibility)) continue;
+      out.push(a);
+    }
+    return out;
+  }
+
   /** The debug-panel report payload — the whole story, one click. */
   function getReport() {
     const byKind = {};
@@ -267,7 +309,17 @@ export function createAnchorAuthority({ log }) {
     return resolved;
   }
 
-  return { reset, setAnchors, addAnchor, removeAnchor, updateAnchor, anchorsForEffect, getReport };
+  return {
+    reset,
+    setAnchors,
+    addAnchor,
+    removeAnchor,
+    updateAnchor,
+    anchorsForEffect,
+    anchorsForKind,
+    anchorsForKindOnFloor,
+    getReport,
+  };
 }
 
 /**

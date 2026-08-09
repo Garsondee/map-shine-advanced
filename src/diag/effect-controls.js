@@ -51,8 +51,20 @@ export const CATEGORY_ORDER = Object.freeze([
   'Presence',
   'Look',
   'Detail',
+  // Fire's per-layer SURFACE groups (2026-08-09). A particle fire has three
+  // independent bodies — the flame, the sparks and the plume — each with its own
+  // count, lifetime, size and brightness, and lumping ~19 controls into 'Look'
+  // makes the card unusable for the tuning it exists to support. They sit inside
+  // the surface block because that is what they are, which keeps the canonical
+  // surface → emission → behaviour → size → couplings → machinery run intact.
+  'Flame',
+  'Ember',
+  'Smoke',
   'Light',
   'Motion',
+  // Perspective strength — a BEHAVIOUR of the particles, belonging to none of
+  // the three bodies above.
+  'Depth',
   'Shape',
   'Extent',
   'Outdoor',
@@ -374,6 +386,104 @@ export function buildInheritableRangeRow({
   return wrap;
 }
 
+/**
+ * The copy-button's payload — pure, so the SHAPE is Node-tested even though the
+ * button itself is DOM. Covers the WHOLE schema, not just whatever FOH/ROH
+ * happened to promote — the FOH/ROH split is a presentation concern, and the
+ * point of this snapshot is a complete "here is everything, paste it to
+ * Claude" that never depends on which card sections happen to be open.
+ *
+ * @param {object} a
+ * @param {string} a.id - the effect id, e.g. `'fire'`.
+ * @param {string} [a.title] - falls back to `id` when absent.
+ * @param {boolean} [a.enabled] - omitted from the payload entirely when the
+ *   caller has no concept of enabled/disabled (undefined, not false).
+ * @param {Record<string, object>} a.schema
+ * @param {(paramId: string) => unknown} a.getValue
+ * @returns {{effect: string, title: string, enabled?: boolean, values: Record<string, unknown>}}
+ */
+export function buildSettingsSnapshot({ id, title, enabled, schema, getValue }) {
+  const values = {};
+  for (const key of Object.keys(schema ?? {})) values[key] = getValue(key);
+  const snapshot = { effect: id, title: title ?? id, values };
+  if (enabled !== undefined) snapshot.enabled = enabled;
+  return snapshot;
+}
+
+/**
+ * Copy text to the clipboard, with the same async-API-then-`execCommand`
+ * fallback `debug-panel.js`'s own `copyToClipboard` uses. Duplicated rather
+ * than imported: this module's own header states it stays free of any import
+ * of `debug-panel.js` (and vice versa) so the two can be read independently —
+ * ~15 lines is cheap next to breaking that boundary for one helper.
+ * @param {string} text @returns {Promise<boolean>}
+ */
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      /* fall through to the execCommand fallback */
+    }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * The 📋 header button — EVERY workshop card gets one, because it is built
+ * here rather than per-effect. Author, 2026-08-09: *"add a button that needs
+ * to be in every section of the workshop which outputs the current values
+ * into the copy paste buffer so that I can give you a text file with settings
+ * rather than an image."* One declaration in the shared card generator beats
+ * "every effect panel remembers to add its own" the same way every other rule
+ * in this file does.
+ */
+function buildCopyButton({ id, title, schema, getValue, enabled }) {
+  const idleGlyph = '📋';
+  const btn = styled('button', {
+    pointerEvents: 'auto',
+    background: 'rgba(143,214,255,0.1)',
+    border: `1px solid rgba(${CYAN},0.3)`,
+    borderRadius: '6px',
+    color: MUTED,
+    font: '11px/1.2 Signika, sans-serif',
+    padding: '3px 7px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  });
+  btn.type = 'button';
+  btn.textContent = idleGlyph;
+  btn.title = 'Copy every current setting for this effect as text — paste it to Claude instead of a screenshot.';
+  shieldFromSummary(btn);
+  let resetTimer = null;
+  btn.addEventListener('click', async () => {
+    const snapshot = buildSettingsSnapshot({ id, title, enabled, schema, getValue });
+    const ok = await copyTextToClipboard(JSON.stringify(snapshot, null, 2));
+    clearTimeout(resetTimer);
+    btn.textContent = ok ? '✓ Copied' : '✗ Failed';
+    btn.style.color = ok ? '#a7ffc4' : '#ff9a9a';
+    resetTimer = setTimeout(() => {
+      btn.textContent = idleGlyph;
+      btn.style.color = MUTED;
+    }, 1400);
+  });
+  return btn;
+}
+
 function sectionLabel(text) {
   const el = styled('div', {
     fontSize: '9px',
@@ -627,6 +737,13 @@ export function buildEffectCard({
     toggleWrap.append('On', cb);
     shieldFromSummary(toggleWrap);
     head.append(toggleWrap);
+  }
+
+  // The copy button — see `buildCopyButton`'s own note. Skipped only for the
+  // degenerate case of a card with no params at all, the same "never render
+  // an empty thing" rule Advanced already follows below.
+  if (schema && Object.keys(schema).length > 0) {
+    head.append(buildCopyButton({ id, title, schema, getValue, enabled }));
   }
   card.append(head);
 

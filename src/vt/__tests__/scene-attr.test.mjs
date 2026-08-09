@@ -25,7 +25,6 @@ import {
   RECEIVER_ELEVATION_RANGE_UNITS,
   ATTR_SOLIDITY_ALPHA_TEST_THRESHOLD,
 } from '../scene-attr.js';
-import { SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 } from '../../effects/specular/specular-render.js';
 // The elevation-only lookup the floor-ownership fix replaced — imported so the
 // regression block below can prove it genuinely disagrees (a non-vacuous test).
 import { resolveElevationFloorIndex } from '../../scene/layer-order.js';
@@ -757,23 +756,27 @@ export function run(t) {
       decodeReceiverElevationLevel(Math.round(raisedBits * 255)) > 0
     );
 
-    // receiverElevationFraction01 — vegetation Case-2's own door. A tree
-    // overlay's HOST tile sits at ordinary ground elevation, but the CANOPY
-    // itself (VegetationKind#passiveElevationFraction, a 0..1 fraction of
-    // its OWN floor's band, exactly like this parameter) is what should gate
-    // a light's reach — never the host's own near-ground placement. Floor 0
-    // spans [0,10), so fraction 0.9 (a tree's own near-top fraction) resolves
-    // to elevation 9, well above the host's own elevation 1.
+    // receiverHeightFt (renamed 2026-08-06 from receiverElevationFraction01,
+    // when vegetation moved off a clamped-fraction sort model onto a real,
+    // unbounded height — same role, same gate, new units) — vegetation
+    // Case-2's own door. A tree overlay's HOST tile sits at ordinary ground
+    // elevation, but the CANOPY itself (its own live treeHeightFt/
+    // bushHeightFt, `vegetation-render.js#vegetationHeightFt`) is what should
+    // gate a light's reach — never the host's own near-ground placement.
+    // Floor 0 spans [0,10), so a height of 9 (well within the band, deliberately
+    // chosen so `bottom + heightFt` reproduces the exact same elevation the old
+    // `bottom + (top-bottom)*0.9` fraction test asserted on) resolves to
+    // elevation 9, well above the host's own elevation 1.
     const hostGroundBits = resolveItemFloorAttrUniforms({
       THREE,
       item: { kind: 'tile', levelId: '', key: { elevation: 1 } }, // the host tile itself, barely off the ground
       viewedFloorIndex: 0,
       sceneDoc,
       logError: () => {},
-      receiverElevationFraction01: 0.9, // the canopy's own height fraction, well above its host
+      receiverHeightFt: 9, // the canopy's own real height, well above its host
     }).uPresenceBits01.value;
     ok(
-      'the fraction override replaces the item´s own elevation for the receiver-elevation field ONLY',
+      'the height override replaces the item´s own elevation for the receiver-elevation field ONLY',
       decodeReceiverElevationLevel(Math.round(hostGroundBits * 255)) === quantizeReceiverElevationAboveFloor(9 - 0)
     );
     ok(
@@ -781,8 +784,8 @@ export function run(t) {
       decodeReceiverElevationLevel(Math.round(hostGroundBits * 255)) !== quantizeReceiverElevationAboveFloor(1 - 0)
     );
     // Floor MEMBERSHIP must still come from the item's real elevation, never
-    // the fraction — a canopy's floor is still whichever floor its HOST
-    // belongs to.
+    // the height override — a canopy's floor is still whichever floor its
+    // HOST belongs to.
     const floorOfHost = Math.round(
       resolveItemFloorAttrUniforms({
         THREE,
@@ -790,17 +793,18 @@ export function run(t) {
         viewedFloorIndex: 0,
         sceneDoc,
         logError: () => {},
-        receiverElevationFraction01: 0.9,
+        receiverHeightFt: 9,
       }).uFloorIndex01.value * 255
     );
     ok(
-      'the fraction never leaks into floor MEMBERSHIP — the host´s own elevation (1) still resolves floor 0',
+      'the height override never leaks into floor MEMBERSHIP — the host´s own elevation (1) still resolves floor 0',
       floorOfHost === 0
     );
     // An UNBOUNDED band (elevationTop undeclared/Infinity) has no scale to
-    // apply a fraction against — falls back to the item's own elevation,
-    // the same "no scale to work against" posture stampVegetationRenderOrders
-    // already takes for its own sort-order fallback.
+    // apply the height override against — falls back to the item's own
+    // elevation, the same "no scale to work against" posture
+    // stampVegetationRenderOrders already takes for its own sort-order
+    // fallback.
     const unboundedSceneDoc = {
       levels: [{ id: 'lvlU', name: 'Unbounded', background: { src: 'u.webp' }, elevation: { bottom: 0, top: null } }],
     };
@@ -810,57 +814,28 @@ export function run(t) {
       viewedFloorIndex: 0,
       sceneDoc: unboundedSceneDoc,
       logError: () => {},
-      receiverElevationFraction01: 0.9,
+      receiverHeightFt: 9,
     }).uPresenceBits01.value;
     ok(
-      'an unbounded band ignores the fraction and falls back to the item´s own real elevation (3)',
+      'an unbounded band ignores the height override and falls back to the item´s own real elevation (3)',
       decodeReceiverElevationLevel(Math.round(unboundedBits * 255)) === quantizeReceiverElevationAboveFloor(3 - 0)
     );
   }
 
-  // THE CROSS-FILE PIN — `effects/specular`'s decode threshold must sit
-  // strictly between "occluder bit clear" (0, or the overhead bit alone — its
-  // max is PRESENCE_BIT_OVERHEAD) and "occluder bit set" (at minimum
-  // PRESENCE_BIT_OCCLUDES_BACKGROUND, whether or not overhead is ALSO set).
-  // Nothing forces these two files to agree; only this test does — the same
-  // shape as `SPECULAR_DEFAULT_SHIMMER_GAIN` vs
-  // `SPECULAR_PARAMS.shimmerGain.default` in `specular.test.mjs`.
-  {
-    ok(
-      'the decode threshold clears every "occluder bit NOT set" byte value (0 or overhead alone)',
-      SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 > PRESENCE_BIT_OVERHEAD / 255
-    );
-    ok(
-      'the decode threshold sits BELOW every "occluder bit set" byte value, overhead or not',
-      SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 < PRESENCE_BIT_OCCLUDES_BACKGROUND / 255 &&
-        SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 < (PRESENCE_BIT_OCCLUDES_BACKGROUND + PRESENCE_BIT_OVERHEAD) / 255
-    );
-
-    // ⚠️ THE MARGIN PIN, 2026-07-29. `buildWholeImageMaterial`'s attr write is
-    // NOT a hard overwrite — it rides NormalBlending scaled by the material's
-    // OWN alpha (`attr_new = attr_old·(1−α) + attr_src·α`), and a real α is not
-    // always bit-exact 1.0 even when the art looks fully opaque. The bit's first
-    // shipped version (weight 4, threshold 3.5) needed ≥87.5% of its strength to
-    // survive and failed on a deficiency too small to see. Keep the margin wide
-    // even though the inverted polarity now makes the residual error harmless.
-    ok(
-      'the decode threshold tolerates the write surviving at only HALF its nominal strength',
-      SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 <= 0.5 * (PRESENCE_BIT_OCCLUDES_BACKGROUND / 255)
-    );
-    ok(
-      '…while the overhead bit alone cannot cross it even at FULL strength — ' +
-        'alpha-scaling only ever shrinks a value, never grows it',
-      PRESENCE_BIT_OVERHEAD / 255 < SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01
-    );
-
-    // ⚠️ THE FAIL-OPEN PIN — the assertion the ORIGINAL polarity could not have
-    // had, and the reason for the inversion. `buf:scene.attr` clears to
-    // (0,0,0,0) (this module's KNOWN GAP #2: "no geometry" and "floor 0, no
-    // flags" are the same bytes), so a cleared/never-written buffer MUST decode
-    // to "not occluded". A future edit that flips the polarity back fails here.
-    ok(
-      'an UNWRITTEN attr buffer (b = 0) decodes as NOT occluded — the effect must survive a missing write',
-      0 < SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01
-    );
-  }
+  // ⚠️ THE CROSS-FILE PIN THAT USED TO LIVE HERE IS GONE, NAMED HONESTLY, NOT
+  // SILENTLY DROPPED. Through STAGE 2 (2026-08-04), `effects/specular`'s own
+  // `SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01` decoded THIS byte's bit 7
+  // (`PRESENCE_BIT_OCCLUDES_BACKGROUND`) directly, and this block cross-
+  // checked the two constants against each other so a rename of either could
+  // not silently desync from the other. STAGE 3 (2026-08-05,
+  // `specular-render.js`'s own "STAGE 3" header) moved specular's occlusion
+  // read onto `buf:scene.depth`'s single rank comparison instead, and that
+  // threshold constant no longer exists — there is nothing left for a pin to
+  // cross-check. `PRESENCE_BIT_OCCLUDES_BACKGROUND`/
+  // `occludesBackgroundPresenceBit` themselves are UNCHANGED and still
+  // exercised above (this file's own "occludesBackgroundPresenceBit" block)
+  // — this bit is still written into `buf:scene.attr` every frame — but as
+  // far as this codebase's own source currently shows, nothing reads it back
+  // out any more. That is a real, separate finding (a write with no known
+  // reader), not this migration's to resolve.
 }

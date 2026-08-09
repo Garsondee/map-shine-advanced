@@ -153,6 +153,8 @@ Today the viewer draws the viewed floor plus whatever floors that floor's own `v
 
 **The depth pass takes its own draw list: every item from `collectSceneLayers`, all floors, regardless of view.** A light on floor 0 then correctly sees floor 3's roof above it whether or not floor 3 is currently being painted. This is strictly more than Foundry has (Foundry's depth mask only contains what the current view draws) and it costs one traversal of a trivial material.
 
+⚠️ **CORRECTION (2026-08-06, docs/planning/Depth-of-Field.md):** the paragraph above describes the ORIGINAL design intent, not what the live code actually does — caught while building depth-of-field's `post.dof` pass, whose correctness specifically depends on the real behaviour. `vt-pan-viewer.js`'s actual depth-authority rebuild is `depthAuthority.rebuild(buildItems(view.floorIndex))` — the SAME `buildItems` closure (`boot.js#buildItems`, scoped through `computeVisibleFloorIndices(floors, viewedFloorIndex)`) the COLOUR pass itself draws with, never an unconditional all-floors list. So `buf:scene.depth`'s floor-index reading is guaranteed to agree with what `scene.lit` actually shows at every pixel — a genuinely useful property (it is what makes a simple per-pixel floor-index comparison safe for `post.dof`), just not the "sees floors the colour pass never drew" property this paragraph originally claimed. If a FUTURE effect genuinely needs the all-floors behaviour this paragraph describes (a light on a hidden floor occluding something on a floor that IS drawn), that is real, unbuilt scope — not something to assume already works.
+
 ⚠️ **Residency caveat, stated not hidden.** An item on a floor that is not being drawn may have no resident texture, and the alpha test needs one. Use the **coarse mip**, which residency already pins for every item (`coarsePinSet` / `computeCoarsePinBudget`), and where even that is missing, **skip the item and log it** — never silently treat "not loaded" as "not there". [[feedback_instruments_must_not_lie]]: an incomplete slice must say so.
 
 ### 5b. Per-floor slices — DEFERRED OUT OF v1 (decided)
@@ -461,6 +463,22 @@ Author, same session, minutes after Β§9d landed, with a screenshot and a pixel
 
 **What this means for trust going forward:** the first round's fix (sorting `buildVegetationDepthItems`'s output by id) was a real, independently-provable bug with its own passing regression test — it is still correct and still needed once vegetation is reliably IN the table. It was simply not the bug causing THIS particular symptom. Both fixes are complementary, not competing. `npm run verify` green (7400 passed, unchanged count — this round moved code, it did not add new pure-function surface to test; the existing Β§9g/Β§9h regression tests already cover buildVegetationDepthItems's own contract, and this fix is about WHEN it is called, not WHAT it computes). Still `BUILT (unverified)` — not yet re-tested live.
 
+### 9i. Specular joins the depth authority (2026-08-05) — BUILT, not yet live
+
+The fourth consumer, and the first that has REAL DRAWN GEOMETRY of its own rather than a bare position (a light) or a synthesized overlay (vegetation). `specular-render.js`'s old floor gate was two ANDed `buf:scene.attr` reads — `floorMatch` (an equality test against the quad's own `uFloorIndex01`) and `backgroundVisible` (a presence-bit read, `1 - step(64/255, attr.b)`, checking `PRESENCE_BIT_OCCLUDES_BACKGROUND`, set whenever a Tile or a Level's own foreground/roof draws over its background). Both are now ONE ordinal comparison: is the real, currently-visible content at this screen pixel MY OWN background item, or has something ranked more-in-front drawn over it.
+
+**Why no flags-bit hard block, unlike light's tile-restrict check.** `PRESENCE_BIT_OCCLUDES_BACKGROUND` existed because `buf:scene.attr`'s floor-index byte cannot tell a same-floor Tile from the background it sits on — both share one floor index, so a second bit had to be hand-maintained. Rank does not have that blind spot: a Tile's `sortLayer` (`SORT_LAYERS.TILES`) is always numerically above a Level's (`SORT_LAYERS.SCENE`), and a Level's own foreground/roof art gets a strictly higher `zIndex` than its background at the SAME elevation (`scene/layer-order.js#sortByLayer`) — so anything that used to flip the old bit already, unconditionally, outranks the background it covers. One comparison reproduces both of the old gate's ANDed terms because the old gate's second term was rank wearing a disguise. `specular-material.js#computeSpecularDepthGate` is the new gate's CPU twin (mirrors `point-light-illumination.js#computeDepthHeightGate`'s shape, minus the flags argument); `specular-render.js` transcribes it as `step(uExpectedDepth, depthHere)` — arithmetic, never `select()`, per this exact file's own twelve-round scar tissue on TSL branching ("ARITHMETIC, NOT select()").
+
+**`computeTieSafeExpectedDepth` generalized to a second caller shape.** Stage 2 built this fail-open buffer (`vt/scene-depth.js`, renamed from `computeLightExpectedDepth` this same round) for "a light with no geometry of its own" resolved to its own floor's rank — a tie against real ground, the common case. Specular's query is structurally different but hits the SAME tie risk from the other side: "an effect querying its OWN drawn item's rank" — at every pixel where nothing occludes it, the stored depth this query samples IS that same background item's own rank, rasterized by the same depth pass — a tie by construction, every unoccluded pixel, not an edge case. Without the buffer, ordinary CPU/GPU float noise at that tie could read specular's own unoccluded background as "occluded" and black the whole effect out, every frame, on every floor — a global blackout dressed as a shader bug. The buffer subtracts, never adds, so a tie always resolves to visible.
+
+**The seam chain, composed exactly like `point-light-pool.js`'s own `resolveExpectedDepth`:** `specular-seams.js#getSpecularBackgroundItemId(floorIndex)` returns `` `level:${floor.id}:background` `` — the SAME id `foundry/scene-layers.js#collectLevelTextures` already builds for that exact item (a MIRROR of a real producer's own format, not an invented shape, since `floor.id` IS the same `level.id` both sides read). `boot.js` threads it into `startVtPanViewer`; `vt-pan-viewer.js` composes `resolveExpectedDepth: (floorIndex) => { const id = getSpecularBackgroundItemId(floorIndex); const rank = id ? depthAuthority.rankOf({ id }) : null; return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank); }` — falling open (0, the gate's own safe default) when the background item hasn't resolved into the current rank table yet, never guessing a rank. `specular-surface-subsystem.js` calls this EVERY frame from `sync()`, not just when a new mask loads (the old `setFloorIndex` call site) — the background's own rank can shift whenever the depth authority rebuilds (a residency pass, a pan), the exact staleness class §9h's vegetation flicker fix already found and fixed for a different consumer. Getting this wrong here would reproduce that same bug on a different effect.
+
+**The Shader Lab bench (`tools/shader-lab/bench-specular.js`) was rebuilt, not just re-pointed.** Its old `ATTR_PRESETS` hand-typed `buf:scene.attr` byte values (`bByte`/`aByte`); the new `DEPTH_PRESETS` renders a REAL small depth pass — the same production `buildSceneDepthWriterMaterial`/`buildSceneDepthProxyMesh` the real pass uses, two ranks (0 = background, 1 = an occluder), a real `THREE.DepthTexture` + `THREE.RenderTarget`, the same dedicated-camera constants (`DEPTH_PASS_CAMERA_Z/NEAR/FAR`) — never a hand-typed number standing in for what a real depth test would decide. Two old presets (`halfAlpha`, `oldWeight4`) have no analogue any more and were removed with that stated plainly: they existed only because `buf:scene.attr`'s write was alpha-blended and could survive at partial strength, a failure mode the new pass's hard alpha-test discard does not have. `gateLadder()`'s channel count dropped from eight distinct composite factors to seven (`floorMatch`+`occludedHere` → one `notOccluded`); channel 20 (`attrDirect`, the shared-node staleness control) is now `depthDirect`, sampling `buf:scene.depth` instead.
+
+**Status: `npm run verify` green end to end — 7404 tests passed, 0 failed, structure gates unchanged (29 rules, 9 ratcheted).** `docs/planning/Depth-Buffer.md`'s own two-word discipline still applies: this is `BUILT (unverified)`, not `LIVE` — nobody has looked at a real Foundry scene with a multi-floor Tile or roof covering specular's background yet. That promotion is the author's own eyes on their own scene, same standard as every stage above.
+
+While touching this, `SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01` (the now-dead consumer-side threshold) was deleted from `specular-render.js`, along with the cross-file pin test in `scene-attr.test.mjs` that only made sense while it existed. `PRESENCE_BIT_OCCLUDES_BACKGROUND`/`occludesBackgroundPresenceBit` themselves (the `buf:scene.attr` WRITE side) were deliberately left alone — as far as this codebase's own source currently shows, nothing reads that bit back out any more, which is a real, separate finding (a write with no known reader) flagged rather than silently resolved inside this migration.
+
 ---
 
 ## 10. Decisions — RESOLVED (author, 2026-08-04)
@@ -486,3 +504,221 @@ One consequence of (1) worth stating before it surprises anyone on first look: *
 ## 12. What this is not
 
 It is not a Z-buffer for perspective geometry; there is no perspective ([[keyhole-orthographic-hole-stack-model]]). It is not a replacement for the mask authority — masks answer "what did the author paint here", depth answers "what is on top here". It is not a soft-shadow or a visibility system. And it does not, on its own, make any effect correct — it makes every effect **ask the same question of the same authority**, so that when one of them is wrong, it is wrong once, in one place, visibly.
+
+---
+
+## §9j. FIFTH CONSUMER: SUN SHADOWS — the receiver side (2026-08-05)
+
+**Plan of record for the whole change: [`Sun-Shadow-Cascade.md`](Sun-Shadow-Cascade.md).**
+Only the depth-authority half is recorded here.
+
+Author, same session as the specular migration: *"use the depth buffer +
+shadows + sun angle to allow shadows to semi-realistically cascade downwards…
+have them cascade downwards until they hit a solid albedo surface."*
+
+**What migrated:** `environmental-light.js#blendSunVisibilityAcrossFloors`'s
+per-fragment floor index — the thing that decides WHICH floor's baked shadow
+field a screen pixel receives — moved from `buf:scene.attr`'s R channel to
+`buf:scene.depth`'s colour R. Both carry `floorIndex / 255` written by the same
+membership-then-band lookup (`resolveSceneDepthFloorIndex` mirrors
+`computeFloorAttrValues`), so the blend arithmetic is unchanged; what changed is
+who decides the winner — a hard `LessDepth` test plus a real alpha-test discard,
+instead of an alpha-blended MRT write. Both call sites moved together (the
+ambient fill's fullscreen quad at `uv()`, and every point light's world-space
+quad at `screenUV` — the twin-materials pair, [[feedback_mode_forks_silently_drop_features]]).
+
+**A real gap closed in passing, not a like-for-like port:** the depth colour
+clears to `(0,0,0,0)`, so a pixel where nothing drew reads `floorIndex = 0` and
+would match floor 0's slot — applying the ground floor's shadow to a hole in the
+map. `buf:scene.attr` had the identical latent gap; it was invisible there only
+because an empty pixel has no albedo to darken. A point light does not have that
+luxury: it multiplies its own falloff by this value, so it would have carved a
+ground-floor building's silhouette out of a light shining over open nothing.
+`blendSunVisibilityAcrossFloors` gained an optional `presence`
+(`depthFlagsTexNode.a`) multiplied into each slot's WEIGHT — so an absent
+surface falls through the function's existing "matched nothing ⇒ fully lit" arm
+rather than needing a second, differently-shaped default.
+
+**Reported, not assumed:** `envLight.sunShadowFloorGateSource` now says
+`'scene.depth' | 'scene.attr' | 'none'`. The two buffers carry the same value in
+the same channel, so an effect gated on the wrong one looks completely normal
+until a hole in a floor disagrees — and "which authority is this effect on" is
+exactly the question §9f's lock exists to keep answerable per effect.
+`attrTexture` stays wired as the fallback for a caller with no depth colour.
+
+**Not a consumer of the depth attachment itself.** The sun-shadow bake is a
+world-space pass over the whole scene rect and runs a few times a minute; the
+depth buffer is screen-space and per-frame. The CASTER half of this change gets
+its real elevations from Foundry's own Level documents plus
+`canvas.dimensions.distancePixels`, not from `buf:scene.depth` — see
+`Sun-Shadow-Cascade.md` §2. Only the RECEIVER question is a depth query, and it
+is the one that answers "cascade downwards until they hit a solid albedo
+surface" exactly.
+
+**Proof:** `npm run verify` green (7508 passed). Shader Lab's `sun-shadow` bench
+runs the real Tower Bridge art through the real derivation on real WebGPU —
+`all-floors-stack` ok 4/4. **Not live-confirmed** — no author's eyes on a real
+Foundry session yet.
+
+---
+
+## §9k. 🐛 The vegetation proxy never moved — "the outline jumps, the colour doesn't" (2026-08-05)
+
+**The report, verbatim:** *"Bushes and trees have a strange visual glitch at
+the moment... There is some sort of negative interaction between the graphic,
+the depth buffer and the wind distortion/movement which means that the
+outline of the bush/tree jumps around but the colour of it doesn't. A strange
+wispy weird effect that happens around the moving wind blown edge. My
+assumption is that this might be a complex interaction between the wind
+distortion and the graphics and the depth buffer, if the depth buffer lags
+the movement perhaps that might cause it?"* The author's own diagnosis named
+the right two systems; the actual mechanism is not a LAG (a one-frame delay)
+so much as a total, permanent absence — the depth pass never applied wind at
+all, on any frame, since §9g first built it.
+
+### Root cause — confirmed by reading the code, not a hypothesis
+
+Two facts, each independently confirmed:
+
+1. **The real canopy mesh moves.** `buildVegetationMaterial`'s own
+   `positionNode` (`vt-pan-viewer.js`) displaces every vertex by a live,
+   wind-driven vector every frame — clump-cell decorrelation, persistent gale
+   bend, oscillating sway, all sampled through `windHandle.node()` and
+   `uGlobalTimeMs`, capped at `VEG_MAX_DISPLACE_PX` (320 world px — routine
+   sway under default settings is tens of px, easily enough to be visually
+   obvious). This is the mesh actually drawn on screen; its silhouette moves
+   continuously.
+2. **The `buf:scene.depth` proxy for that SAME canopy does not.**
+   `rebuildSceneDepthProxies`'s `vegetationOverlay` branch (§9g) built its
+   proxy from `buildSceneDepthWriterMaterial` — a material with **no
+   `positionNode` at all** — applied to `overlay.geometry`, the identical
+   `BufferGeometry` the real mesh uses. `BufferGeometry`'s own position
+   attribute only changes on a PLACEMENT change (`refreshVegetationOverlay`'s
+   in-place buffer rewrite); wind lives ENTIRELY in the material's vertex
+   shader graph, which the depth-writer material never had. So every single
+   frame, forever, the proxy rasterized the canopy's REST-POSE footprint —
+   never swaying, regardless of wind strength.
+
+**Why that specific mismatch reads as "outline jumps, colour doesn't."**
+`buildDepthHeightGateNode` (`point-light-illumination.js`, §9e) is a hard,
+unsmoothed per-pixel gate: `select(depthHere.lessThan(uLightExpectedDepth), 0,
+1)` — deliberately no fade band, because rank is meant to be an exact
+ordinal, not a fuzzy quantity (that function's own doc). Wherever a point
+light's rank sits below a canopy's own (tree near its floor's top, bush at
+the midpoint — routine for any ground-level torch/lantern near a tree or
+bush), that light's illumination is switched on/off per pixel according to
+the STATIC proxy's silhouette. The canopy's own texture sample is untouched
+by this gate — it is a separate, multiplicative lighting term composited
+alongside the base colour, not baked into it. So on every frame: the canopy's
+PAINT stays visually anchored to the real, wind-displaced mesh (unaffected by
+the gate), while the LIGHT draped over it follows a boundary that never
+moves — a shimmering mismatch band tracing the wind-blown edge, reading as
+exactly "the outline jumps around but the colour doesn't."
+
+**Scope, stated precisely:** this needs an actual point light (torch,
+lantern, any placed `AmbientLight`) whose radius crosses a wind-swaying
+canopy edge — candle-flame/lightning sprites are still on the OLD
+`buf:scene.attr` mechanism (§9e's own scoping) and unaffected either way. Not
+yet checked: whether specular (§9i, `BUILT`, not yet live) exhibits the same
+class of artifact near a self-vegetation (Case 1) tile — Case 1 was never
+part of this gap (see below) so the exposure there, if any, would need its
+own trace.
+
+**Why only NOW, three rounds into vegetation's depth-authority integration.**
+Rounds 1-2 (§9h) were about a DIFFERENT failure mode — same-floor rank ties
+and an async-suspension window, both about WHEN/WHICH TABLE a query saw, not
+about WHAT SHAPE the proxy's own silhouette was. Neither round's fix, nor its
+regression test, touches geometry or the positionNode question at all — this
+is a genuinely separate defect in the same subsystem, not a recurrence of
+either fixed one.
+
+**Case 1 (a tile whose own texture IS `_Tree`/`_Bush`) was never exposed to
+this.** It has no separate proxy at all — it flows through the ordinary
+`ensureWholeImageMeshes`/`itemStates` path, so whatever depth pass draws it
+IS the same wind-displaced material the colour pass uses (when the effect is
+active). This gap is specific to Case 2's synthetic overlay proxy.
+
+### The fix — share the displacement, not duplicate it
+
+**Extracted, not reinvented.** `buildVegetationSwayDisplacementNode`
+(`vt-pan-viewer.js`, new, nested beside `buildVegetationMaterial`) is that
+function's OWN `positionNode` body — layers 1-3 only (clump decorrelation,
+persistent bend, oscillating sway) — lifted out so a second caller can share
+it byte-for-byte instead of risking a second, independently-typed copy
+drifting apart (this project's own repeatedly-named "twin" bug class,
+[[feedback_mode_forks_silently_drop_features]]). `buildVegetationMaterial`'s
+own positionNode is now three lines calling this function with its existing
+uniforms — a pure refactor, verified by the SAME 12 assertions this pass's
+own construction previously satisfied (`npm run verify` green throughout).
+
+**Deliberately excludes leaf flutter.** Flutter (`colorNode`'s own UV
+shuffle, layer 4) never moves a vertex — it only reshuffles which texel of
+the EXISTING footprint gets sampled, so it cannot move the silhouette the way
+bulk sway does. A proxy that only needs the canopy's own EDGE loses nothing
+visible by omitting a sub-pixel, fragment-only shimmer.
+
+**`buf:scene.depth`'s proxy now shares the CANOPY's own live uniforms, by
+reference, not a copy.** `rebuildSceneDepthProxies`'s `vegetationOverlay`
+branch builds a `positionNode` from `buildVegetationSwayDisplacementNode`,
+passing `overlay.motion` directly — the SAME object
+`syncAllVegetationMotionForFrame` (§9h's own per-frame sync, unconditional,
+every frame) already keeps live for the real canopy. This is the reason
+NOTHING new needed to be added to the per-frame sync loop at all: the proxy
+reads whatever `.value` the canopy's own uniforms currently hold, the instant
+they're written, because they are the literal same JS objects passed into a
+second TSL graph — not a mirrored, independently-synced pair the way the
+shadow mesh's own `entry.shadow.motion` is (§8.2's `syncVegetationMotionUniforms`
+precedent, which DOES need its own sync call because it genuinely is a
+separate copy). `uGlobalTimeMs` and `windHandle` are already single,
+module/closure-scoped objects referenced identically by every vegetation
+material in this file, so no new plumbing was needed for those either.
+`uSceneMin`/`uSceneSize` (scene-rect-derived, build-time-only) are rebuilt
+fresh for the proxy exactly the way `buildVegetationMaterial` builds its own
+— cheap, and matches that function's own existing posture toward those two
+uniforms.
+
+**`vt/scene-depth.js#buildSceneDepthWriterMaterial` gained one new, optional
+param — `positionNode`.** Every other existing caller (ordinary Level/tile/
+token proxies — all genuinely static) omits it and is unaffected; vegetation
+is the one caller that must not.
+
+### What was deliberately NOT attempted
+
+- **No softening of `buildDepthHeightGateNode`'s hard edge.** That function's
+  own doc states the no-fade-band choice is deliberate (rank is an exact
+  ordinal); reversing it for every consumer (point lights, specular) to paper
+  over vegetation's own animation would be a much bigger, riskier change than
+  the actual defect warrants, and would reintroduce exactly the "soft edge /
+  partial value" class §9b's own scenario 3 was built to prove impossible.
+- **No removal of vegetation's own occlusion participation.** Rolling
+  vegetation back out of the rank comparison would silently undo a feature
+  the author asked for and confirmed live one day earlier (§9g/§9h) — trading
+  a visible glitch for a silent regression is a worse trade than fixing the
+  actual mismatch.
+
+### Verification status
+
+`npm run verify` green: lint clean (0 errors; the two pre-existing shader-lab
+warnings are untouched by this change), format clean on every file this round
+touched, structure gates unchanged (29 rules, 9 ratcheted), full suite passing
+on every file this round modified. **This is shader/GPU code — Node tests
+prove the graph constructs and the existing pure-function suite still passes,
+never that the picture is correct**
+([[keyhole-tsl-constructs-in-node]]). `BUILT (unverified)`, not `LIVE` — the
+promotion this needs is the author standing near a torch-lit tree or bush in
+a real scene at real wind strength and confirming the shimmer at the edge is
+gone. No Shader Lab bench scenario exists yet for this specific claim
+("the proxy's silhouette tracks the canopy's own sway") — `bench-scene-depth.js`
+proves the mechanism `buf:scene.depth` itself rests on, but not this
+positionNode-sharing claim specifically; a dedicated scenario (two ranked
+quads, one wind-displaced by a known deterministic offset instead of live
+noise, sampled at a point that would only agree if the proxy actually moved)
+would be the natural next step if the live check does not fully resolve it.
+
+### Fixed when
+
+Near a placed light source whose radius crosses a canopy: at any non-zero
+wind strength, the light's contribution on and around the canopy no longer
+shimmers or "wisps" at the wind-blown edge — the boundary between lit and
+canopy-occluded ground visibly sways WITH the canopy's own silhouette, not
+independently of it.

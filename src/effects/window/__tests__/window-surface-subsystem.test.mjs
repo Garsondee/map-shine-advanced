@@ -64,7 +64,7 @@ function makeSubsystem(state) {
       t.needsUpdate = true;
       return t;
     },
-    attrTexture: stubTexture(),
+    depthTexture: stubTexture(),
     uViewRect: uniform(vec4(0, 0, 1000, 1000)),
     cloudFactorNode: null,
     getWindowRenderState: () => state,
@@ -169,7 +169,7 @@ export async function run(t) {
       t.needsUpdate = true;
       return t;
     },
-    attrTexture: stubTexture(),
+    depthTexture: stubTexture(),
     uViewRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
     getWindowRenderState: () => ({ enabled: true, params: {} }),
   });
@@ -178,6 +178,61 @@ export async function run(t) {
   ok('a floor with no authored file never becomes visible', meshesOf(empty)[0].visible === false);
   ok('…and hasContent() agrees', empty.hasContent() === false);
 
+  // ── SWITCHING TO A FLOOR WITH NO MASK CLEARS THE STALE QUAD ─────────────
+  // Mirrors specular-surface-subsystem.js's own live-found fix (2026-08-03):
+  // `ensureMaskImage` must actively clear `loadedUrl`/`contentBoundsWorld`
+  // when a floor has no mask of its own, not just skip the load — otherwise
+  // the PREVIOUS floor's quad stays visible, gated by a STALE
+  // `uExpectedDepth` (2026-08-05's own depth-authority migration) that no
+  // longer describes anything on the currently-viewed floor. Only floor 0
+  // has an authored `_Window` file here; every other floor genuinely has
+  // none.
+  const flip = createWindowSurfaceSubsystem({
+    THREE,
+    getWindowMaskUrl: (floorIndex) => (floorIndex === 0 ? 'stub://floor0_Window.webp' : null),
+    getWindowMaskRect: () => ({ minX: 0, minY: 0, maxX: 1000, maxY: 1000 }),
+    loadMaskImage: async () => ({
+      texture: stubTexture(),
+      contentBounds: { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
+      data: new Uint8Array(4 * 4 * 4).fill(200),
+      width: 4,
+      height: 4,
+      nativeWidth: 8,
+      nativeHeight: 8,
+      bytes: 256,
+    }),
+    createMaskTexture: (data, w, h) => {
+      const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      t.needsUpdate = true;
+      return t;
+    },
+    depthTexture: stubTexture(),
+    uViewRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
+    getWindowRenderState: () => ({ enabled: true, params: {}, debugChannel: 0 }),
+  });
+  const flipMesh = meshesOf(flip)[0];
+
+  flip.sync(0);
+  await Promise.resolve();
+  await Promise.resolve();
+  ok('floor 0 has a mask — the quad becomes visible', flipMesh.visible === true);
+  ok('…and getStatus reports floor 0 loaded', flip.getStatus().floor === 0);
+
+  flip.sync(1);
+  ok(
+    'a floor with no mask of its own HIDES the mesh, rather than leaving floor 0’s quad up',
+    flipMesh.visible === false
+  );
+  ok('…hasContent() agrees, so the pass early-returns', flip.hasContent() === false);
+  ok('…and the stale bounds are actually cleared, not just hidden', flip.getStatus().bounds === null);
+
+  flip.sync(0);
+  await Promise.resolve();
+  await Promise.resolve();
+  ok('switching back to floor 0 reloads and shows it again', flipMesh.visible === true);
+  ok('…and getStatus reports floor 0 again', flip.getStatus().floor === 0);
+
+  flip.dispose();
   sub.dispose();
   unwired.dispose();
   empty.dispose();

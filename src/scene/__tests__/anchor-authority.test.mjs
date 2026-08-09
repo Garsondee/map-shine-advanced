@@ -165,18 +165,72 @@ export function run(t) {
     );
   }
 
-  // --- an anchor kind with NO floorVisibility param is untouched -----------
-  // Lightning declares no such param, so its locked bindings must behave
-  // exactly as they did before this feature existed.
+  // --- lightning's OWN floorVisibility (2026-08-05, ROUND 3) ----------------
+  // Lightning hit the SAME "vanishes from the floor above" bug candle did
+  // (author report), and got the identical param — but with a DIFFERENT
+  // default than candle's 'own-floor'. The FIRST default tried, 'all-floors',
+  // was itself a real bug: `floorMatches` treats 'all-floors' as a full
+  // opt-out (returns true BEFORE the `e < binding.bottom` check even runs),
+  // so a bolt was offered to the renderer on a floor genuinely BELOW its own
+  // — visible looking "up" through solid floors, which this project's own
+  // hole-stack model says can never happen (author: "we need to make sure
+  // candles, lightning and everything else that is 'ABOVE' the camera's POV
+  // isn't visible"). `'own-and-above'` is the correct default: it still
+  // reaches every floor ABOVE the bolt (the original ask — "storm visible
+  // looking down from anywhere"), but goes through the SAME below-hiding
+  // check candle already relies on.
   {
     auth.reset({
       sceneKey: 'S5d',
       anchors: [{ id: 'bolt', kind: 'lightning', x: 0, y: 0, floorBinding: { mode: 'locked', bottom: 0, top: 20 } }],
     });
     t.ok(
-      'a kind without the param is still floor-bound as before',
+      'an untouched bolt defaults to own-and-above — visible on its own floor and looking down from above',
+      auth.anchorsForEffect('lightning', { elevation: 10 }).length === 1 &&
+        auth.anchorsForEffect('lightning', { elevation: 30 }).length === 1
+    );
+    t.ok(
+      'an untouched bolt is NOT visible from a floor below its own, even at the new default — the exact ROUND 3 regression',
+      auth.anchorsForEffect('lightning', { elevation: -10 }).length === 0
+    );
+  }
+  {
+    auth.reset({
+      sceneKey: 'S5e',
+      anchors: [
+        {
+          id: 'bolt-restricted',
+          kind: 'lightning',
+          x: 0,
+          y: 0,
+          floorBinding: { mode: 'locked', bottom: 0, top: 20 },
+          params: { floorVisibility: 'own-floor' },
+        },
+      ],
+    });
+    t.ok(
+      'an author can still opt a bolt back into strict own-floor-only visibility',
       auth.anchorsForEffect('lightning', { elevation: 30 }).length === 0 &&
         auth.anchorsForEffect('lightning', { elevation: 10 }).length === 1
+    );
+  }
+  {
+    auth.reset({
+      sceneKey: 'S5f',
+      anchors: [
+        {
+          id: 'bolt-unrestricted',
+          kind: 'lightning',
+          x: 0,
+          y: 0,
+          floorBinding: { mode: 'locked', bottom: 0, top: 20 },
+          params: { floorVisibility: 'all-floors' },
+        },
+      ],
+    });
+    t.ok(
+      'an author can still explicitly opt a bolt into all-floors (including below) if they genuinely want that look',
+      auth.anchorsForEffect('lightning', { elevation: -10 }).length === 1
     );
   }
 

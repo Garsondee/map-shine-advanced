@@ -9,6 +9,7 @@ import { validateParamsSchema } from '../../core/params-schema.js';
 import { UI_SHADOW_PARAMS, UI_WINDOW_SHADOW } from '../ui-window-shadow.js';
 import { GRADE, GRADE_LOOK_PARAMS } from '../grade/grade.js';
 import { BLOOM, BLOOM_PARAMS } from '../bloom.js';
+import { DEPTH_OF_FIELD, DOF_PARAMS } from '../depth-of-field.js';
 import { validateEffectManifest, validateAuthoring } from '../effect-manifest.js';
 import { MASK_KINDS } from '../../scene/mask-catalog.js';
 import { ANCHOR_KINDS } from '../../scene/anchor-catalog.js';
@@ -72,6 +73,25 @@ export function run(t) {
     resolveEffectEnabled(BLOOM, { profile: 'low', playerEnable: 'off' }) === false
   );
   ok("'enabled' is NOT a bloom param (the cascade owns it)", !('enabled' in BLOOM_PARAMS));
+
+  // DEPTH OF FIELD — mirrors BLOOM's own pinned block above: same shape (a
+  // single post-processing effect, on by default at every profile), same
+  // EFFECT_REAPPLIERS trap it must not repeat (boot.js's own comment there
+  // names bloom as the cautionary tale).
+  ok('DOF_PARAMS is a valid params schema', validateParamsSchema(DOF_PARAMS).ok);
+  ok('DEPTH_OF_FIELD is a valid manifest', validateEffectManifest(DEPTH_OF_FIELD).ok);
+  ok("the depth-of-field effect's id is depthOfField", DEPTH_OF_FIELD.id === 'depthOfField');
+  ok('depth of field ships ON at every profile', DEPTH_OF_FIELD.enabledFromProfile === 'low');
+  ok('depth of field resolves ON at Low by default', resolveEffectEnabled(DEPTH_OF_FIELD, { profile: 'low' }) === true);
+  ok(
+    'depth of field resolves ON at Standard by default',
+    resolveEffectEnabled(DEPTH_OF_FIELD, { profile: 'standard' }) === true
+  );
+  ok(
+    'a player can still turn depth of field OFF (final say)',
+    resolveEffectEnabled(DEPTH_OF_FIELD, { profile: 'low', playerEnable: 'off' }) === false
+  );
+  ok("'enabled' is NOT a depth-of-field param (the cascade owns it)", !('enabled' in DOF_PARAMS));
   ok("the effect's id is uiWindowShadow", UI_WINDOW_SHADOW.id === 'uiWindowShadow');
   ok('the effect declares its a11y flag (photosensitive: false)', UI_WINDOW_SHADOW.a11y.photosensitive === false);
   ok('the effect is gated to Extreme by default (expensive)', UI_WINDOW_SHADOW.enabledFromProfile === 'extreme');
@@ -122,6 +142,10 @@ export function run(t) {
     ANCHOR_KINDS.some((k) => k.effectId === CANDLE_FLAME.id)
   );
   ok('bloom has no ＋ — there is nowhere on a map to put a whole-image post effect', BLOOM.authoring === undefined);
+  ok(
+    'depth of field has no ＋ either — the same whole-image reasoning as bloom',
+    DEPTH_OF_FIELD.authoring === undefined
+  );
 
   // ======================================================================
   // validateEffectManifest — catches the malformed

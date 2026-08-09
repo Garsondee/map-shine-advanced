@@ -17,6 +17,7 @@ import { run as runFrameProfiler } from './frame-profiler.test.mjs';
 import { run as runGpuZoneTimer } from './gpu-zone-timer.test.mjs';
 import { run as runPerfSession } from './perf-session.test.mjs';
 import { run as runPerfHud } from './perf-hud.test.mjs';
+import { run as runPerfStrip } from './perf-strip.test.mjs';
 import { run as runWindFieldOverlay } from './wind-field-overlay.test.mjs';
 import { run as runWindProbe } from './wind-probe.test.mjs';
 import { run as runEffectControls } from './effect-controls.test.mjs';
@@ -52,6 +53,7 @@ const suites = [
   ['gpu-zone-timer', runGpuZoneTimer],
   ['perf-session', runPerfSession],
   ['perf-hud', runPerfHud],
+  ['perf-strip', runPerfStrip],
   ['wind-field-overlay', runWindFieldOverlay],
   ['wind-probe', runWindProbe],
   ['effect-controls', runEffectControls],

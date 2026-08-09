@@ -12,7 +12,8 @@ import {
   buildTessellatedQuadGeometry,
   VEGETATION_MIN_SEGMENTS,
   VEGETATION_MAX_SEGMENTS,
-  vegetationPassiveElevation,
+  vegetationCanopyElevation,
+  vegetationHeightFt,
   vegetationOverlayRenderOrder,
   buildVegetationDepthItems,
   flutterFoldFreeAmplitudePx,
@@ -76,79 +77,89 @@ export function run(t) {
 
   // --- validateVegetationKinds against the REAL declared table -------------
   ok('the real VEGETATION_KINDS table validates', validateVegetationKinds(VEGETATION_KINDS).ok);
-  {
-    // A fraction outside 0..1 would sort the overlay into a DIFFERENT floor's
-    // art — always a typo, never a tuning choice.
-    const outOfBand = VEGETATION_KINDS.map((k) => ({ ...k, passiveElevationFraction: 1.4 }));
-    ok('a passiveElevationFraction above 1 fails validation', !validateVegetationKinds(outOfBand).ok);
-    const missing = VEGETATION_KINDS.map((k) => {
-      const copy = { ...k };
-      delete copy.passiveElevationFraction;
-      return copy;
-    });
-    ok('a MISSING passiveElevationFraction fails validation', !validateVegetationKinds(missing).ok);
-  }
 
   // ==========================================================================
-  // PASSIVE ELEVATION — the fix for "a tile at elevation 0 / sort 1 draws over
-  // every bush and tree" (author-reported 2026-08-01).
-  //
-  // These assert the author's own stated OUTCOMES — which drawable ends up on
-  // top — NOT the arithmetic that produces them. The numbers are an
-  // implementation detail of `sortByLayer`'s dense indexing; the ORDER is the
-  // contract, and it is the thing that was actually wrong.
+  // REAL WORLD HEIGHT (2026-08-06) — replaces the old clamped-fraction model.
+  // Originally "a tile at elevation 0 / sort 1 draws over every bush and
+  // tree" (author-reported 2026-08-01) was fixed by sorting vegetation at a
+  // FRACTION of its own floor's band — a sort-key convenience, structurally
+  // incapable of placing a canopy above its own floor. This section now
+  // proves the actual feature request: a real, UNBOUNDED height that lets a
+  // tall enough tree correctly rank above a short building's roof and below
+  // a tall one's — see `vegetation.js`'s own "HOW A KIND SORTS".
   // ==========================================================================
   {
     const tree = VEGETATION_KINDS.find((k) => k.id === 'tree');
     const bush = VEGETATION_KINDS.find((k) => k.id === 'bush');
-    const band = { bottom: 0, top: 20 }; // the author's own worked example
+    const band = { bottom: 0, top: 20 };
 
-    ok('bush sits halfway up its floor band', vegetationPassiveElevation(bush, band) === 10);
-    ok('tree sits at the top of its floor band', vegetationPassiveElevation(tree, band) === 20);
+    // --- vegetationCanopyElevation: the raw formula ------------------------
     ok(
-      'a band with an undeclared (Infinite) ceiling yields null, never Infinity/NaN',
-      vegetationPassiveElevation(bush, { bottom: 0, top: Infinity }) === null &&
-        vegetationPassiveElevation(bush, { bottom: -Infinity, top: 20 }) === null
+      "a default-height (25ft) tree sits WELL ABOVE its own floor's top (20) — the whole point of the change",
+      vegetationCanopyElevation(band, 25) === 25 && 25 > band.top
     );
-    ok('a missing band yields null rather than throwing', vegetationPassiveElevation(bush, null) === null);
+    ok("a default-height (2ft) bush sits just above its floor's ground", vegetationCanopyElevation(band, 2) === 2);
     ok(
-      'a zero-height band is legitimate — every kind collapses onto that one elevation',
-      vegetationPassiveElevation(bush, { bottom: 7, top: 7 }) === 7 &&
-        vegetationPassiveElevation(tree, { bottom: 7, top: 7 }) === 7
+      'a band with an undeclared (Infinite) ceiling yields null, never Infinity/NaN — the SAME escape hatch as before, ' +
+        'a deliberate policy choice even though the new formula no longer mathematically needs `top`',
+      vegetationCanopyElevation({ bottom: 0, top: Infinity }, 2) === null &&
+        vegetationCanopyElevation({ bottom: -Infinity, top: 20 }, 2) === null
+    );
+    ok('a missing band yields null rather than throwing', vegetationCanopyElevation(null, 2) === null);
+    ok(
+      'a non-finite height yields null rather than throwing',
+      vegetationCanopyElevation(band, NaN) === null && vegetationCanopyElevation(band, undefined) === null
+    );
+    ok('an inverted band is malformed data, not a band', vegetationCanopyElevation({ bottom: 20, top: 0 }, 2) === null);
+    ok(
+      'a zero-height band is legitimate — the canopy sits genuinely ABOVE it, unlike the old fraction model which ' +
+        'collapsed every kind onto that one elevation',
+      vegetationCanopyElevation({ bottom: 7, top: 7 }, 5) === 12
     );
 
-    // A realistic draw list on a 0..20 floor: ground art, four tiles at the
-    // author's exact test elevations, and the floor's roof art on top.
+    // --- vegetationHeightFt: the live-param resolver ------------------------
+    ok(
+      'the declared defaults feed through when no live param is set',
+      vegetationHeightFt(tree, {}) === 25 && vegetationHeightFt(bush, {}) === 2
+    );
+    ok('a live param overrides the default', vegetationHeightFt(tree, { treeHeightFt: 40 }) === 40);
+    ok(
+      'a non-finite live value falls back to the declared default rather than propagating NaN',
+      vegetationHeightFt(tree, { treeHeightFt: NaN }) === 25
+    );
+    ok('undefined params falls back to the declared default, never throws', vegetationHeightFt(bush, undefined) === 2);
+
+    // --- THE ACTUAL FEATURE: a tall tree clears a short roof, not a tall one ---
+    // The tree's own ground floor (0-20). A SHORT single-story building's
+    // roof tile at 15ft (the default 25ft tree should clear it) and a TALL
+    // two-story building's roof tile at 30ft (the same tree should stay
+    // under it) — modelling the author's own worked example directly.
     const mk = (id, elevation, sortLayer, zIndex = 0) => ({
       id,
       key: makeLayerKey({ elevation, sortLayer, sort: 0, zIndex }),
     });
     const items = sortByLayer([
       mk('ground', 0, SORT_LAYERS.SCENE, 0),
-      mk('tile@9', 9, SORT_LAYERS.TILES),
-      mk('tile@10', 10, SORT_LAYERS.TILES),
-      mk('tile@19', 19, SORT_LAYERS.TILES),
-      mk('tile@20', 20, SORT_LAYERS.TILES),
-      mk('roof', 20, SORT_LAYERS.SCENE, 1),
+      mk('shortRoof', 15, SORT_LAYERS.TILES), // single-story building, ~15ft
+      mk('tallRoof', 30, SORT_LAYERS.TILES), // two-story building, ~30ft
     ]);
     const host = items.find((i) => i.id === 'ground');
     const at = (id) => items.find((i) => i.id === id).renderOrder;
-    const bushOrder = vegetationOverlayRenderOrder(items, host, bush, band).renderOrder;
-    const treeOrder = vegetationOverlayRenderOrder(items, host, tree, band).renderOrder;
+    const bushOrder = vegetationOverlayRenderOrder(items, host, bush, band, {
+      heightFt: vegetationHeightFt(bush, {}),
+    }).renderOrder;
+    const treeOrder = vegetationOverlayRenderOrder(items, host, tree, band, {
+      heightFt: vegetationHeightFt(tree, {}),
+    }).renderOrder;
 
-    // THE BUG ITSELF: the host is the ground at renderOrder 0, and EVERY tile
-    // sorts above it. Under the old `host.renderOrder + nudge` this put both
-    // kinds below every single tile on the map.
-    ok('vegetation no longer sorts next to its host — it clears the low tiles', bushOrder > at('tile@9'));
-
-    ok("a tile BELOW the bush's half-height draws under it", at('tile@9') < bushOrder);
-    ok('a tile AT the half-height mark beats the bush (ties go to the tile)', at('tile@10') > bushOrder);
-    ok('a tile below the floor top draws under the tree', at('tile@19') < treeOrder);
-    ok('only a tile at the very top of the floor beats the tree', at('tile@20') > treeOrder);
+    ok('vegetation sorts well above its own host, not merely nudged next to it', treeOrder > host.renderOrder + 1);
+    ok('a default-height (25ft) tree clears a short (15ft) single-story roof', treeOrder > at('shortRoof'));
+    ok('the SAME tree stays UNDER a tall (30ft) two-story roof', treeOrder < at('tallRoof'));
+    ok(
+      'a bush (2ft default) stays well under both roofs — it never had a chance of clearing either',
+      bushOrder < at('shortRoof') && bushOrder < at('tallRoof')
+    );
     ok('canopy still draws above undergrowth', treeOrder > bushOrder);
-    // The documented, deliberate consequence of SCENE_EFFECTS > SCENE: an
-    // author who wants roof art over a canopy puts it on a TILE at the top.
-    ok('a tree at the floor top draws over that floor’s roof art', treeOrder > at('roof'));
 
     // The bush must land strictly BETWEEN two real drawables — never colliding
     // with one, which would make the winner depend on THREE's own sort
@@ -159,27 +170,45 @@ export function run(t) {
     );
 
     // Unbounded band → the legacy host-relative nudge, and it SAYS so.
-    const fallback = vegetationOverlayRenderOrder(items, host, bush, { bottom: 0, top: Infinity });
+    const fallback = vegetationOverlayRenderOrder(items, host, bush, { bottom: 0, top: Infinity }, { heightFt: 2 });
     ok(
       'an unbounded floor band falls back to the host-relative nudge and reports it',
       fallback.fellBack === true && fallback.renderOrder === host.renderOrder + bush.renderOrderNudge
+    );
+    ok(
+      "a fallback (band-unusable) shadow call uses its OWN fallbackNudge, never the canopy's renderOrderNudge",
+      vegetationOverlayRenderOrder(
+        items,
+        host,
+        bush,
+        { bottom: 0, top: Infinity },
+        {
+          heightFt: 0,
+          role: 'shadow',
+          fallbackNudge: 0.2,
+        }
+      ).renderOrder ===
+        host.renderOrder + 0.2
     );
 
     // ========================================================================
     // THE SPARSE-FLOOR TIE — found 2026-08-04 chasing an author report of
     // `_Bush` drawing over `_Tree` on an ordinary scene. `below` only ever
-    // counts REAL drawables; it never compares bush's key against tree's. The
-    // fixture above always had a tile at elevation 19 (between bush's 10 and
-    // tree's 20) that broke the tie BY ACCIDENT — a floor with nothing at all
-    // between them (just background art, no intermediate tiles: the ordinary
-    // case, not the exception) never got exercised, and that is exactly where
-    // a fixed `n - 0.5` handed both kinds the identical renderOrder number.
+    // counts REAL drawables; it never compares one vegetation sub-item's key
+    // against another's. A floor with nothing at all between them (just
+    // background art, no intermediate tiles: the ordinary case, not the
+    // exception) is exactly where a fixed `n - 0.5` would hand two sub-items
+    // the identical renderOrder number.
     // ========================================================================
     {
       const sparseItems = sortByLayer([mk('ground', 0, SORT_LAYERS.SCENE, 0)]);
       const sparseHost = sparseItems[0];
-      const sparseBush = vegetationOverlayRenderOrder(sparseItems, sparseHost, bush, band);
-      const sparseTree = vegetationOverlayRenderOrder(sparseItems, sparseHost, tree, band);
+      const sparseBush = vegetationOverlayRenderOrder(sparseItems, sparseHost, bush, band, {
+        heightFt: vegetationHeightFt(bush, {}),
+      });
+      const sparseTree = vegetationOverlayRenderOrder(sparseItems, sparseHost, tree, band, {
+        heightFt: vegetationHeightFt(tree, {}),
+      });
       ok(
         'on a floor with nothing between them, bush and tree do NOT collide onto one renderOrder',
         sparseBush.renderOrder !== sparseTree.renderOrder
@@ -194,6 +223,43 @@ export function run(t) {
           sparseBush.renderOrder < sparseHost.renderOrder + 1 &&
           sparseTree.renderOrder > sparseHost.renderOrder &&
           sparseTree.renderOrder < sparseHost.renderOrder + 1
+      );
+
+      // ⚠️ NEW (2026-08-06): the shadow joins the SAME gap too — two kinds ×
+      // two roles is FOUR sub-items that could all tie if nothing
+      // distinguished them. Both shadows are called at `heightFt: 0` (ground
+      // level) so bush-shadow and tree-shadow compute the IDENTICAL
+      // elevation — the entire reason the tiebreak lives in a dedicated
+      // `VEG_SLOT_RANK` table, not in the elevation itself.
+      const sparseBushShadow = vegetationOverlayRenderOrder(sparseItems, sparseHost, bush, band, {
+        heightFt: 0,
+        role: 'shadow',
+        fallbackNudge: 0.2,
+      });
+      const sparseTreeShadow = vegetationOverlayRenderOrder(sparseItems, sparseHost, tree, band, {
+        heightFt: 0,
+        role: 'shadow',
+        fallbackNudge: 0.2,
+      });
+      const fourOrders = [
+        sparseBush.renderOrder,
+        sparseTree.renderOrder,
+        sparseBushShadow.renderOrder,
+        sparseTreeShadow.renderOrder,
+      ];
+      ok(
+        'all four vegetation sub-items (2 kinds × canopy/shadow) land at 4 DISTINCT renderOrders even with ' +
+          'nothing real to separate them',
+        new Set(fourOrders).size === 4
+      );
+      ok(
+        "both shadows sort BELOW both canopies — a shadow never conceptually outranks any canopy, tree's own or bush's",
+        Math.max(sparseBushShadow.renderOrder, sparseTreeShadow.renderOrder) <
+          Math.min(sparseBush.renderOrder, sparseTree.renderOrder)
+      );
+      ok(
+        'every one of the four still lands strictly inside the one real gap',
+        fourOrders.every((o) => o > sparseHost.renderOrder && o < sparseHost.renderOrder + 1)
       );
     }
   }
@@ -216,15 +282,24 @@ export function run(t) {
       levelId: 'ground',
       key: makeLayerKey({ elevation: 5, sortLayer: SORT_LAYERS.TILES }),
     };
+    // ⚠️ hostUpper/hostAttic's OWN elevations are deliberately chosen to avoid
+    // coincidentally tying a default-height (25ft) SYNTHETIC canopy elevation
+    // with a REAL item's own elevation — ground's tree lands at 0+25=25 and
+    // upper's tree at 20+25=45; picking 22/55 here (rather than 25/45) keeps
+    // every real-vs-synthetic elevation in this fixture distinct on purpose,
+    // not by accident (2026-08-06, after the fraction model's clamp — which
+    // could never exceed a floor's own top — was replaced by a real,
+    // unbounded height that legitimately CAN land on a number a real item
+    // also uses).
     const hostUpper = {
       id: 'tile:upper-host',
       levelId: 'upper',
-      key: makeLayerKey({ elevation: 25, sortLayer: SORT_LAYERS.TILES }),
+      key: makeLayerKey({ elevation: 22, sortLayer: SORT_LAYERS.TILES }),
     };
     const hostAttic = {
       id: 'tile:attic-host',
       levelId: 'attic',
-      key: makeLayerKey({ elevation: 45, sortLayer: SORT_LAYERS.TILES }),
+      key: makeLayerKey({ elevation: 55, sortLayer: SORT_LAYERS.TILES }),
     };
     const hostNoVeg = {
       id: 'tile:plain',
@@ -271,8 +346,10 @@ export function run(t) {
       vegItems.every((v) => v.vegHostItemId && v.vegKindId && items.some((i) => i.id === v.vegHostItemId))
     );
     ok(
-      "⚠️ levelId is the HOST's own resolved floor, never left to re-derive from the synthetic (top-of-band) elevation — " +
-        "a tree at fraction 1.0 sits EXACTLY at its floor's own top, precisely the half-open-band trap",
+      "⚠️ levelId is the HOST's own resolved floor, never left to re-derive from the synthetic elevation — with a " +
+        "real, UNBOUNDED height (2026-08-06) the synthetic elevation can land arbitrarily far into another floor's " +
+        "own territory (here, upper's tree at 20+25=45 sits well inside attic's 40+ band), so this override matters " +
+        'MORE than it did under the old clamped-fraction model, not less',
       vegItems.filter((v) => v.vegHostItemId === 'tile:ground-host').every((v) => v.levelId === 'ground') &&
         vegItems.filter((v) => v.vegHostItemId === 'tile:upper-host').every((v) => v.levelId === 'upper')
     );
@@ -317,13 +394,27 @@ export function run(t) {
         rankOf(hostNoVeg.id) != null
       );
     }
+
+    // ⚠️ NEW (2026-08-06): a live params override actually reaches the
+    // synthetic depth-authority item, end to end — not just the pure
+    // `vegetationCanopyElevation`/`vegetationHeightFt` unit tests above.
+    {
+      const shortTree = buildVegetationDepthItems(items, floors, urlByItemId, { treeHeightFt: 3 });
+      const shortTreeElevation = shortTree.find((v) => v.id === 'veg:tile:ground-host:tree')?.key?.elevation;
+      ok(
+        "a custom live treeHeightFt reaches the synthetic depth item's own elevation (0 + 3 = 3), not the default (25)",
+        shortTreeElevation === 3
+      );
+    }
   }
 
   // ==========================================================================
   // 🐛 THE FLICKER REGRESSION — author-reported LIVE, 2026-08-05: "bushes
   // flickering when I pan the camera". Two same-floor bushes tie EXACTLY on
-  // elevation/sortLayer/sort/zIndex (passiveElevationFraction is a per-KIND
-  // constant); `sortByLayer` (inside depthAuthority.rebuild) stamps
+  // elevation/sortLayer/sort/zIndex (bush height is a per-KIND live param,
+  // identical for every bush on the same floor, exactly as
+  // `passiveElevationFraction` was when this was first found); `sortByLayer`
+  // (inside depthAuthority.rebuild) stamps
   // `tiebreak = index` unconditionally from the CALLER's own array position
   // — so their relative rank is decided ENTIRELY by whatever order
   // buildVegetationDepthItems happened to emit them in. `items`' own order

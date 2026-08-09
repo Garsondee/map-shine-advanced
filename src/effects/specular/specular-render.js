@@ -59,6 +59,7 @@ import {
   SPECULAR_SHEEN_CEILING,
   SPECULAR_GLINT_CEILING,
   SPECULAR_INCIDENT_STEEPNESS,
+  SPECULAR_INCIDENT_KNEE,
 } from './specular-pattern.js';
 import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
@@ -84,44 +85,6 @@ import { buildDebugChannelColor, pickEquals } from '../debug-channel-select.js';
  * albedo, raising this to 1.0 is a one-number change, same as water's.
  */
 export const SPECULAR_MASK_IMAGE_SCALE = 0.75;
-
-/**
- * Decode threshold for `buf:scene.attr`'s presence-bitfield TOP BIT
- * (`vt/scene-attr.js#PRESENCE_BIT_OCCLUDES_BACKGROUND`, weight 128/255) — 1
- * where a Tile, or the Level's own foreground/roof, has painted OVER the
- * Level's background art, 0 where the background is still what is on screen.
- *
- * ⚠️ **THE BIT MEANS "OCCLUDED", NOT "BACKGROUND", AND THE SIGN IS THE FIX**
- * (inverted 2026-08-01 — that constant's own doc carries the full account).
- * It shipped 2026-07-29 the other way round, gating the whole effect on
- * "1 = my background is still topmost", and `buf:scene.attr` clears to
- * (0,0,0,0) — so an attr buffer that was never written was indistinguishable
- * from one saying "a Tile is on top", and either way `coverage` went to zero
- * EVERYWHERE and the effect vanished with no error anywhere. Reading it as
- * OCCLUSION makes the unwritten case mean "nothing is covering me", so the
- * worst an upstream failure can now do is let the shine draw where a tile
- * should have hidden it — local and visible, instead of global and silent.
- *
- * ⚠️ 64/255 — HALF the bit's own weight, not "halfway between the two raw
- * byte values". The write this decodes is NOT a hard overwrite: it rides
- * ordinary NormalBlending scaled by the drawing material's OWN alpha
- * (`attr_new = attr_old·(1−α) + attr_src·α`), which `vt/scene-attr.js`'s
- * header hedges as "opaque (alpha≈1)... **almost** entirely replaced" —
- * approximate, not exact, since α passes through compression, mip/CAS
- * processing and the occlusion-alpha multiply first. This threshold tolerates
- * an occluder's write surviving at only 50% of its nominal strength, while
- * the overhead bit alone (max raw value 1) can only ever be scaled SMALLER by
- * the same blend, never larger, so it cannot be mistaken for this one at any α.
- * Under the inverted polarity the residual error is in the safe direction: a
- * badly-attenuated occluder under-reports occlusion, it does not delete the pass.
- *
- * ⚠️ TWO PLACES KNOW THIS RELATIONSHIP — this threshold and the encode side's
- * bit weight in `vt/scene-attr.js`. `scene-attr.test.mjs` pins them against
- * each other so a future rename of one cannot silently desync from the other
- * (the same shape as `SPECULAR_DEFAULT_SHIMMER_GAIN` vs
- * `SPECULAR_PARAMS.shimmerGain.default`).
- */
-export const SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 = 64 / 255;
 
 /**
  * How many shimmer layers. Matched V2 at THREE through Round 18; DOUBLED to
@@ -173,8 +136,12 @@ export const SPECULAR_DEFAULT_STRENGTH = 20;
  * ⚠️ RAISED AGAIN, 1.3 → 2 = THE SCHEMA'S OWN MAX (ROUND 18, 2026-08-03) —
  * live-confirmed alongside `SPECULAR_DEFAULT_STRENGTH` above; see that
  * constant's header for the standard this round ships by.
+ *
+ * ⚠️ LOWERED 2 → 1.25 (ROUND 21, 2026-08-05) — new live-tuned defaults; no
+ * longer the schema's own max, but still above 1, i.e. still a deliberate
+ * oversaturation rather than a return to neutral colour.
  */
-export const SPECULAR_DEFAULT_SATURATION = 2;
+export const SPECULAR_DEFAULT_SATURATION = 1.25;
 /**
  * THE PATTERN'S WORLD SIZE, in px per pattern unit. **16384, V2's own default,
  * and it is much larger than it looks.**
@@ -190,8 +157,12 @@ export const SPECULAR_DEFAULT_SATURATION = 2;
  * cells across the same map, i.e. a busier, finer field — the opposite
  * direction from every earlier round's reasoning, and shipped anyway because
  * the author's own dialled-in scene is the standard, not the doc comment.
+ *
+ * ⚠️ RAISED 6528 → 10816 (ROUND 21, 2026-08-05) — new live-tuned defaults;
+ * back toward fewer, larger cells across the map, though still well under
+ * V2's original 16384.
  */
-export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 6528;
+export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 10816;
 /**
  * The master parallax gain. **1 = V2's measured ≈1:1 world-space slide**, i.e.
  * the shimmer is very nearly SCREEN-LOCKED and sweeps across the map as the
@@ -200,8 +171,14 @@ export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 6528;
  *
  * ⚠️ RAISED 1 → 3 = THE SCHEMA'S OWN MAX (ROUND 18, 2026-08-03) —
  * live-confirmed; see `SPECULAR_DEFAULT_STRENGTH`'s header.
+ *
+ * ⚠️ LOWERED 3 → 0.9 (ROUND 21, 2026-08-05) — new live-tuned defaults; no
+ * longer the schema's own max (`specular.test.mjs`'s own "defaults to its
+ * own max" pin for this param was updated alongside, not left stale). Close
+ * to V2's own ≈1:1 baseline (this constant's own opening paragraph) rather
+ * than the exaggerated 3x slide Round 18 shipped.
  */
-export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 3;
+export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 0.9;
 /**
  * How far islands' hashed parallax may diverge. 1 = the full hashed range,
  * 0 = every island moves identically (exactly V2's behaviour).
@@ -231,8 +208,13 @@ export const SPECULAR_DEFAULT_ISLAND_SPREAD = 2;
  */
 export const SPECULAR_DEFAULT_DRIFT_SPEED = 0;
 /** Global brightness breathing, ± this fraction. Small on purpose: a visible
- * pulse reads as a shader, an imperceptible one reads as a surface. */
-export const SPECULAR_DEFAULT_PULSE = 0.06;
+ * pulse reads as a shader, an imperceptible one reads as a surface.
+ *
+ * ⚠️ RAISED 0.06 → 0.28 (ROUND 21, 2026-08-05) — new live-tuned defaults; a
+ * clearly VISIBLE pulse now, a deliberate departure from this constant's own
+ * "keep it small" opening line — the author's own dialled-in scene is the
+ * standard, same posture every other Round 20 change takes. */
+export const SPECULAR_DEFAULT_PULSE = 0.28;
 /**
  * How much the shimmer may modulate the base reflectance. **Raised 4→5.5
  * (2026-07-27), alongside `SPECULAR_SHEEN_CEILING` dropping to 0.15** — the
@@ -251,8 +233,15 @@ export const SPECULAR_DEFAULT_PULSE = 0.06;
  * modulation on top reads as the right balance on the author's real scene —
  * not a contradiction of the reasoning above, a different equilibrium once
  * a NEIGHBOURING term moved this same round.
+ *
+ * ⚠️ RAISED 2.2 → 40 = THE SCHEMA'S OWN MAX (ROUND 21, 2026-08-05) — new
+ * live-tuned defaults, and the mirror image of Round 18's own reasoning:
+ * `SPECULAR_SHEEN_CEILING` is now exactly 0 this same round (the base shine
+ * term is algebraically eliminated, see that constant's own header), so
+ * shimmer modulation is the ONLY source of contrast left, and it now
+ * defaults to the most it can possibly contribute.
  */
-export const SPECULAR_DEFAULT_SHIMMER_GAIN = 2.2;
+export const SPECULAR_DEFAULT_SHIMMER_GAIN = 40;
 /**
  * THE LIGHT FLOOR. **0, corrected DOWN from 0.18 (2026-07-27) on direct live
  * feedback: metal was reading as SELF-ILLUMINATING in genuinely dark rooms —
@@ -289,8 +278,13 @@ export const SPECULAR_DEFAULT_SHIMMER_GAIN = 2.2;
  */
 export const SPECULAR_DEFAULT_LIGHT_FLOOR = 0;
 /** How strongly the sun's azimuth favours grain running across it, outdoors.
- * 1 = V2's full 0.35→1 brushed-metal swing over a day. */
-export const SPECULAR_DEFAULT_SUN_BIAS = 1;
+ * 1 = V2's full 0.35→1 brushed-metal swing over a day.
+ *
+ * ⚠️ LOWERED 1 → 0.99 (ROUND 21, 2026-08-05) — new live-tuned defaults;
+ * functionally identical to V2's own full swing, not a meaningfully
+ * different behaviour — the author's own dialled-in scene, recorded exactly
+ * rather than rounded back to 1. */
+export const SPECULAR_DEFAULT_SUN_BIAS = 0.99;
 
 /**
  * Per-layer defaults, transcribed from V2's tuned values.
@@ -449,8 +443,11 @@ export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
  * @param {*} args.islandPackTexture - `specular-islands.js`'s pack. RG = this
  *   texel's island parallax vector.
  * @param {*} args.illumTexture - `buf:scene.illum`.
- * @param {*} [args.attrTexture] - `buf:scene.attr`; null compiles the floor
- *   gate OUT entirely (a JS-time branch, never a uniform × 0).
+ * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment (a
+ *   `THREE.DepthTexture`); null compiles the floor gate OUT entirely (a
+ *   JS-time branch, never a uniform × 0) — see "THE FLOOR GATE" below for
+ *   the STAGE 3 (2026-08-05) depth-authority gate this replaced `attrTexture`
+ *   with, and why no flags/colour payload is needed alongside it.
  * @param {*} args.uViewRect - envLight's OWN view-rect uniform, shared rather
  *   than duplicated: two rects on different cadences is how two consumers of
  *   one frame stop agreeing where a world point is.
@@ -466,7 +463,7 @@ export function buildSpecularSurfaceMaterial({
   maskTexture,
   islandPackTexture,
   illumTexture,
-  attrTexture = null,
+  depthTexture = null,
   uViewRect,
   uOutdoorsRect,
   outdoorsTexNode,
@@ -484,6 +481,7 @@ export function buildSpecularSurfaceMaterial({
   sheenCeiling = SPECULAR_SHEEN_CEILING,
   glintCeiling = SPECULAR_GLINT_CEILING,
   incidentSteepness = SPECULAR_INCIDENT_STEEPNESS,
+  incidentKnee = SPECULAR_INCIDENT_KNEE,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -549,6 +547,7 @@ export function buildSpecularSurfaceMaterial({
   const uSheenCeiling = uniform(float(sheenCeiling));
   const uGlintCeiling = uniform(float(glintCeiling));
   const uIncidentSteepness = uniform(float(incidentSteepness));
+  const uIncidentKnee = uniform(float(incidentKnee));
   /** Foundry's OWN readability floor (`ambient.darkness`, pulled toward black
    * by `darknessRealism01`) — see `setDarknessFloor` below for the full
    * account. Defaults to (0,0,0): a caller that never wires this gets the
@@ -560,8 +559,16 @@ export function buildSpecularSurfaceMaterial({
   const uSunDir = uniform(vec2(1, 0));
   /** The crop's extent in mask-UV space. THE ENTIRE mask lookup — see `maskUv`. */
   const uMaskUvBounds = uniform(vec4(0, 0, 1, 1));
-  /** This quad's own floor, as `index / 255`. */
-  const uFloorIndex01 = uniform(float(0));
+  /** STAGE 3 (2026-08-05) — `computeTieSafeExpectedDepth`'s result for THIS
+   * quad's own background item's rank (`depth-authority.js#rankOf`), pushed
+   * by `setExpectedDepth` on the SAME cadence `setFloorIndex` used to have
+   * (a floor change). Defaults to 0: with the depth texture cleared to the
+   * far plane (1) until the first real depth pass runs, `depthHere(1) >=
+   * uExpectedDepth(0)` always holds, so an unwired/not-yet-synced caller
+   * fails OPEN (visible) — the same posture `uFloorIndex01` never had to
+   * think about because JS-time-compiling the gate out entirely was doing
+   * that job instead. See "THE FLOOR GATE" below. */
+  const uExpectedDepth = uniform(float(0));
   /** THE ISLAND PACK'S OWN BAKE STATUS, for debug channel 6 — added 2026-07-27
    * so "channel 6 is black" can never again mean three different things at
    * once. 0 = still the 1×1 placeholder (never baked — the mask never loaded,
@@ -1003,53 +1010,67 @@ export function buildSpecularSurfaceMaterial({
   const incidentLuma = max(dot(incident, vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2])), float(1e-6)).toVar(
     'specIncidentLuma'
   );
-  const incidentLumaClamped01 = min(incidentLuma, float(1));
-  const incidentLumaExcess = max(incidentLuma.sub(float(1)), float(0));
-  const steepenedLuma = pow(incidentLumaClamped01, uIncidentSteepness)
-    .add(incidentLumaExcess)
-    .toVar('specSteepenedLuma');
-  const shineResponse = incident.mul(steepenedLuma.div(incidentLuma)).toVar('specShineResponse');
+  // ⚠️ THE KNEE (2026-08-09) — `SPECULAR_INCIDENT_KNEE`'s own header carries
+  // the bench measurement that forced it (metal algebraically dead below
+  // illum ≈ 0.75, contrast exactly 1.000). In one line: `pow(x, S)` reaches 1
+  // only at `x == 1`, so "full shine" was anchored at a perfectly white
+  // fully-bright pixel, which no light in this engine short of noon sun
+  // produces. `uIncidentKnee` moves that anchor down to a light level that
+  // real lamps actually reach.
+  //
+  // ⚠️ THIS IS ALGEBRAICALLY IDENTICAL TO THE PREVIOUS CODE AT `knee == 1`,
+  // which is what makes it safe to add under the author's live-tuned
+  // steepness rather than a retune of it. Old: `mul = steepened/luma`, where
+  // `steepened = luma^S + max(luma-1,0)`. For `luma <= 1` that is `luma^(S-1)`;
+  // for `luma > 1` it is `luma/luma = 1`. New: `mul = min(luma/K,1)^(S-1)`,
+  // which at `K = 1` is `min(luma,1)^(S-1)` — the same two branches, with the
+  // saturating `min` replacing the explicit excess bookkeeping instead of
+  // running alongside it.
+  const kneeT = min(incidentLuma.div(max(uIncidentKnee, float(1e-4))), float(1)).toVar('specKneeT');
+  const shineResponse = incident
+    .mul(pow(kneeT, max(uIncidentSteepness.sub(float(1)), float(0))))
+    .toVar('specShineResponse');
 
-  // ── THE FLOOR GATE ───────────────────────────────────────────────────────
-  // A JS-time branch: with no attr texture the whole lookup is compiled OUT
-  // rather than multiplied by a one (`tsl/no-uniform-gates`).
+  // ── THE FLOOR GATE — STAGE 3 (2026-08-05), THE DEPTH AUTHORITY ──────────
+  // A JS-time branch: with no depth texture the whole lookup is compiled OUT
+  // rather than multiplied by a one (`tsl/no-uniform-gates`), the same
+  // posture the old `attrTexture`-gated version had.
+  //
+  // Replaces BOTH `floorMatch` (an attr.r floor-INDEX equality test) and
+  // `backgroundVisible` (an attr.b presence-BIT read) with ONE ordinal
+  // comparison, `point-light-illumination.js#buildDepthHeightGateNode`'s own
+  // rank gate transcribed for a query that has real drawn geometry of its
+  // own rather than a light's bare position. `specular-material.js#
+  // computeSpecularDepthGate` is this line's CPU twin, asserted in Node —
+  // its own header has the full account of why rank alone reproduces both
+  // of the old gate's ANDed terms with no flags-bit hard block needed: a
+  // Tile's `sortLayer` always outranks a Level's, and a Level's own
+  // foreground/roof always outranks its own background at the same
+  // elevation, so anything that used to flip
+  // `PRESENCE_BIT_OCCLUDES_BACKGROUND` already sits at a strictly higher
+  // rank than the background it covers.
+  //
+  // ⚠️ ARITHMETIC (`step`), NOT `select()` — this file's own hard-won rule
+  // (see the debug-colour composite below, "ARITHMETIC, NOT select()"): a
+  // `select()`-branched gate here would put `notOccluded` inside real WGSL
+  // control flow again, the exact shape that cost this file twelve rounds
+  // before. `step(edge, x) = x >= edge ? 1 : 0`, so `step(uExpectedDepth,
+  // depthHere)` IS `computeSpecularDepthGate`'s `storedDepth < expectedDepth
+  // ? 0 : 1` — same comparison, opposite argument order, zero branching.
+  //
+  // ⚠️ FAIL-OPEN SURVIVES THROUGH THE BUFFER, NOT A SECOND BRANCH — the old
+  // gate's own comment said it best: "the gate is '1 UNLESS something is
+  // covering me', not '1 WHERE my background is'." `uExpectedDepth`'s own
+  // declaration above (and `computeTieSafeExpectedDepth`'s doc,
+  // `vt/scene-depth.js`) carries that same discipline forward through the
+  // tie-safe subtraction instead of an explicit "unwritten" special case.
   let visibility01 = float(1);
   let debugFloorGate = vec3(1, 1, 0);
-  if (attrTexture) {
-    const attrHere = texture(attrTexture, screenUv);
-    const floorMatch = float(1)
-      .sub(smoothstep(float(0.4 / 255), float(0.9 / 255), abs(attrHere.r.sub(uFloorIndex01))))
-      .toVar('specFloorMatch');
-    const anythingDrawn = smoothstep(float(0), float(0.15), attrHere.a).toVar('specAnythingDrawn');
-    // ⚠️ `anythingDrawn` IS DIAGNOSTIC ONLY — `buf:scene.attr`'s ALPHA LANE IS
-    // CONFIRMED BROKEN (probe-measured 2026-07-27: `[0,0,1,0]` on painted metal,
-    // while R and G are correct and G varies spatially exactly as it should).
-    // Multiplying by it zeroed the entire effect on every floor. It stays
-    // computed and stays on debug channel 4's green, so the moment the alpha
-    // lane is fixed the multiply comes back in one line — deleting it would
-    // delete the evidence.
-    //
-    // ⚠️ TILES (AND THE LEVEL'S OWN FOREGROUND/ROOF) MUST PUNCH A HOLE HERE —
-    // reported live, 2026-07-29: a Tile drawn above the background still
-    // showed the BACKGROUND'S OWN shine glowing through it, because
-    // `floorMatch` alone only tells two FLOORS apart and cannot tell a
-    // same-floor Tile from its own background (both share one floor index).
-    // `buf:scene.attr`'s B channel records whichever item drew LAST (topmost,
-    // alpha≈1) at each texel (`scene-attr.js`'s own "THE REAL WRITERS"); its
-    // TOP bit is set by TILES AND FOREGROUND/ROOF ART
-    // (`vt/scene-attr.js#occludesBackgroundPresenceBit`), never by the
-    // background itself.
-    //
-    // ⚠️ THE SUBTRACTION IS LOAD-BEARING — the gate is "1 UNLESS something is
-    // covering me", not "1 WHERE my background is". Those differ on exactly
-    // one case and it is the one that matters: an attr buffer that was never
-    // written reads (0,0,0,0), which under the old polarity meant "not my
-    // background" and switched the ENTIRE effect off with no error anywhere.
-    // Read that constant's own doc before flipping this back.
-    const occludedHere = step(float(SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01), attrHere.b).toVar('specOccludedHere');
-    const backgroundVisible = float(1).sub(occludedHere).toVar('specBackgroundVisible');
-    visibility01 = floorMatch.mul(backgroundVisible);
-    debugFloorGate = vec3(floorMatch, anythingDrawn, backgroundVisible);
+  if (depthTexture) {
+    const depthHere = texture(depthTexture, screenUv).toVar('specDepthHere');
+    const notOccluded = step(uExpectedDepth, depthHere).toVar('specNotOccluded');
+    visibility01 = notOccluded;
+    debugFloorGate = vec3(notOccluded, depthHere, uExpectedDepth);
   }
 
   const coverage = presence.mul(visibility01).toVar('specCoverage');
@@ -1145,6 +1166,9 @@ export function buildSpecularSurfaceMaterial({
   // Free when off: at channel 0 this material is attached to no mesh, so the
   // selector below is not in a draw call at all.
   const uDebugChannel = uniform(float(0));
+  // Channel 20's own FRESH, unshared sample — see that channel's entry below
+  // for why it must not reuse `depthHere` from inside THE FLOOR GATE above.
+  const depthRawHere = depthTexture ? texture(depthTexture, screenUv) : float(0);
   const debugNodes = {
     quad: vec3(1, 0, 1),
     mask: maskSample.rgb,
@@ -1233,27 +1257,30 @@ export function buildSpecularSurfaceMaterial({
     // (`feedback_instruments_must_not_lie` — a fresh instance of it, invented
     // while hunting one.)
     illumDirect: texture(illumTexture, screenUv).rgb,
-    // ── CHANNEL 20 — attr, RAW, THROUGH A FRESH NODE ─────────────────────────
-    // ⚠️ ADDED 2026-07-29, ROUND 12's OWN UNRESOLVED WARNING: `illumDirect`
-    // above is the reason this exists at all — Round 7/8 (2026-07-27) found
-    // the DEBUG material can read STALE data for a texture-derived channel
-    // even when the REAL effect material reads the identical texture
-    // correctly, and closed with "do not trust a texture-derived specular
-    // debug channel until this is fixed" — the mechanism was never actually
-    // found, only worked around per-channel. `floorGate` (channel 8) reads
-    // `attrTexture` through the SAME shared `attrHere` node this material's
-    // OWN `visibility01` uses, so if that still-open bug is alive, channel 8
-    // could show "not background art here" even while the REAL pass reads it
-    // correctly — indistinguishable from my occlusion fix genuinely failing.
-    // This channel is the SAME control `illumDirect` already is for `illum`:
-    // a FRESH, UNSHARED `texture()` call, so a future report can diff this
-    // against `floorGate`'s implied R/B exactly the way channel 19 vs channel
+    // ── CHANNEL 20 — depth, RAW, THROUGH A FRESH NODE ────────────────────────
+    // ⚠️ ADDED 2026-07-29 as `attrDirect`, RENAMED 2026-08-05 alongside THE
+    // FLOOR GATE's own migration to `buf:scene.depth` — same control, same
+    // reason it exists, new source. ROUND 12's OWN UNRESOLVED WARNING still
+    // applies: `illumDirect` above is the reason this exists at all — Round
+    // 7/8 (2026-07-27) found the DEBUG material can read STALE data for a
+    // texture-derived channel even when the REAL effect material reads the
+    // identical texture correctly, and closed with "do not trust a
+    // texture-derived specular debug channel until this is fixed" — the
+    // mechanism was never actually found, only worked around per-channel.
+    // `floorGate` (channel 8) reads `depthTexture` through the SAME
+    // `depthHere` node this material's OWN `visibility01` uses, so if that
+    // still-open bug is alive, channel 8 could show "occluded" even while
+    // the REAL pass reads it correctly — indistinguishable from a genuine
+    // occlusion regression. This channel is the SAME control `illumDirect`
+    // already is for `illum`: a FRESH, UNSHARED `texture()` call, so a
+    // future report can diff this against `floorGate`'s own G channel
+    // (the same raw depth, broadcast) exactly the way channel 19 vs channel
     // 12 localised the illum bug in one reading instead of a fourth guess.
-    // `attrTexture` is never re-pointed after construction (unlike
+    // `depthTexture` is never re-pointed after construction (unlike
     // `maskTexture`, which `setMaskTexture` DOES reassign) — so unlike the
     // `maskDirect` mistake this shares no risk of capturing a build-time
     // placeholder; a fresh node here reads the SAME real texture, always.
-    attrDirect: attrTexture ? texture(attrTexture, screenUv).rgb : vec3(0, 0, 0),
+    depthDirect: vec3(depthRawHere, depthRawHere, depthRawHere),
   };
   // ⚠️ ARITHMETIC, NOT `select()` — and this is not a style choice. The
   // `select()` fold this replaces put every channel's maths inside its own
@@ -1313,8 +1340,13 @@ export function buildSpecularSurfaceMaterial({
     setViewCentre(cx, cy) {
       uViewCentre.value.set(cx, cy);
     },
-    setFloorIndex(index) {
-      uFloorIndex01.value = (Number.isFinite(index) ? Math.max(0, Math.min(255, index)) : 0) / 255;
+    /** STAGE 3 (2026-08-05) — replaces `setFloorIndex`. Push
+     * `computeTieSafeExpectedDepth(rank, maxRank)` for THIS quad's own
+     * background item's rank, on the SAME cadence the old floor index used
+     * (the subsystem's own `sync()`, whenever the viewed floor changes) —
+     * see `uExpectedDepth`'s own declaration above. @param {number} depth */
+    setExpectedDepth(depth) {
+      uExpectedDepth.value = Number.isFinite(depth) ? depth : 0;
     },
     /** The sun's azimuth, as ONE unit vector — the only route its direction has
      * into this effect. @param {number} dirX @param {number} dirY */
@@ -1331,7 +1363,7 @@ export function buildSpecularSurfaceMaterial({
     setDarknessFloor(r, g, b) {
       // `Math.max(0, NaN)` is NaN, not 0 — a bad/late scene snapshot must not
       // paint a permanent NaN hole in an additive pass, same guard shape as
-      // `setFloorIndex`/`setSunDir` above.
+      // `setExpectedDepth`/`setSunDir` above.
       const safe = (v) => (Number.isFinite(v) ? Math.max(0, v) : 0);
       uDarknessFloor.value.set(safe(r), safe(g), safe(b));
     },
@@ -1381,6 +1413,12 @@ export function buildSpecularSurfaceMaterial({
      * to a flat 1 regardless of how dark the pixel is (exactly 0) — both are
      * a real blow-up, not a stylistic extreme, so this keeps the knob inside
      * the region where the curve stays a curve. @param {number} v */
+    setIncidentKnee(v) {
+      // Clamped ABOVE 0: a knee of 0 would divide every light level to
+      // infinity, saturating `kneeT` everywhere and silently disabling the
+      // suppression curve entirely rather than "turning the knee off".
+      uIncidentKnee.value = Math.min(1, Math.max(0.01, v));
+    },
     setIncidentSteepness(v) {
       uIncidentSteepness.value = Math.max(0.05, v);
     },
@@ -1415,6 +1453,6 @@ export function buildSpecularSurfaceMaterial({
       uDebugChannel.value = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
     },
     outdoorsGateCompiled: !!outdoorsNode,
-    floorGateCompiled: !!attrTexture,
+    floorGateCompiled: !!depthTexture,
   };
 }

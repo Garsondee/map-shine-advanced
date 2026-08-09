@@ -572,30 +572,33 @@ export function decodeOverheadBit(presenceBitsByte) {
  * @param {(msg: string, err: unknown) => void} [args.logError] - defaults to
  *   a no-op; the caller's own logger, so a lookup failure is reported through
  *   the ONE log door (`log/one-door`), never a private console call here.
- * @param {number} [args.receiverElevationFraction01] - when finite AND this
- *   item's resolved floor has a BOUNDED band (`elevationTop` declared, not
+ * @param {number} [args.receiverHeightFt] - when finite AND this item's
+ *   resolved floor has a BOUNDED band (`elevationTop` declared, not
  *   Infinity), REPLACES `item.key.elevation` for the receiver-elevation
- *   sub-field (presence bits 2-5) ONLY, resolved as `bottom + (top-bottom) *
- *   fraction` — the SAME `bottom + band*fraction` shape
- *   `VegetationKind#passiveElevationFraction` already uses for sort order.
- *   Floor resolution and the overhead check still use the item's own real
- *   elevation/`levelId`, unchanged. For a vegetation Case-2 overlay (a tree/
- *   bush drawn ON a host tile, not the tile itself): the CANOPY's own height
- *   fraction belongs here, since the overlay's true floor is still its
- *   HOST's, but its light-reachable HEIGHT is the canopy's, not the host's
- *   near-ground placement — and passing a FRACTION (not a pre-resolved
- *   absolute elevation) means the caller never needs to separately resolve
- *   the floor's own band; this function already has it in scope. An
- *   unbounded band falls back to the item's own elevation, unchanged — the
- *   same "no scale to work against" posture `stampVegetationRenderOrders`
- *   takes for its own sort-order fallback. Omitted (the overwhelming common
- *   case — background art, tiles, Case-1 embedded vegetation) → identical to
- *   before this parameter existed.
+ *   sub-field (presence bits 2-5) ONLY, resolved as `bottom + receiverHeightFt`
+ *   — the SAME `bottom + heightFt` shape `vegetation-render.js#
+ *   vegetationCanopyElevation` uses for sort order (2026-08-06 — renamed from
+ *   `receiverElevationFraction01`/a `bottom + (top-bottom)*fraction` shape
+ *   when vegetation moved off a clamped-fraction model onto a real,
+ *   unbounded height; same role, same gate, new units). Floor resolution and
+ *   the overhead check still use the item's own real elevation/`levelId`,
+ *   unchanged. For a vegetation Case-2 overlay (a tree/bush drawn ON a host
+ *   tile, not the tile itself): the CANOPY's own real height belongs here,
+ *   since the overlay's true floor is still its HOST's, but its
+ *   light-reachable HEIGHT is the canopy's, not the host's near-ground
+ *   placement — and passing a HEIGHT (not a pre-resolved absolute elevation)
+ *   means the caller never needs to separately resolve the floor's own band;
+ *   this function already has it in scope. An unbounded band falls back to
+ *   the item's own elevation, unchanged — the same "no scale to work
+ *   against" posture `stampVegetationRenderOrders` takes for its own
+ *   sort-order fallback. Omitted (the overwhelming common case — background
+ *   art, tiles, Case-1 embedded vegetation) → identical to before this
+ *   parameter existed.
  * @returns {{floorIndex01: number, presenceBits01: number}} plain 0..1
  *   numbers — never a uniform. Callers that need TSL uniforms use
  *   `resolveItemFloorAttrUniforms`/`refreshItemFloorAttrUniforms` below.
  */
-function computeFloorAttrValues({ item, viewedFloorIndex, sceneDoc, logError, receiverElevationFraction01 }) {
+function computeFloorAttrValues({ item, viewedFloorIndex, sceneDoc, logError, receiverHeightFt }) {
   // Bit 7 depends only on `item.kind`, never on the floor lookup below, so it
   // is folded in BEFORE the try block — every return path (early-return on no
   // floors, on no resolved floor, or the catch below) carries it correctly,
@@ -715,16 +718,13 @@ function computeFloorAttrValues({ item, viewedFloorIndex, sceneDoc, logError, re
     // choice and the "relative to MY OWN floor" reasoning. `bottom` defaults
     // to 0 (an undeclared elevationBottom, same fallback resolveElevation
     // FloorIndex itself uses) rather than leaving this item's height
-    // undefined relative to a floor with no declared ground. The FRACTION
+    // undefined relative to a floor with no declared ground. The HEIGHT
     // override (see this function's own param doc) swaps ONLY the height fed
     // into the quantizer — floor membership above is still resolved from the
     // item's real elevation/levelId, never the override.
     const bottom = resolved.floor.elevationBottom ?? 0;
     const bandIsBounded = Number.isFinite(top);
-    const heightElevation =
-      Number.isFinite(receiverElevationFraction01) && bandIsBounded
-        ? bottom + (top - bottom) * receiverElevationFraction01
-        : elevation;
+    const heightElevation = Number.isFinite(receiverHeightFt) && bandIsBounded ? bottom + receiverHeightFt : elevation;
     const elevationLevel = quantizeReceiverElevationAboveFloor(heightElevation - bottom);
     presenceBits01 = (occluderBit + (overhead ? PRESENCE_BIT_OVERHEAD : 0) + elevationLevel * 4) / 255;
   } catch (err) {
@@ -753,8 +753,8 @@ function computeFloorAttrValues({ item, viewedFloorIndex, sceneDoc, logError, re
  * @param {(msg: string, err: unknown) => void} [args.logError] - defaults to
  *   a no-op; the caller's own logger, so a lookup failure is reported through
  *   the ONE log door (`log/one-door`), never a private console call here.
- * @param {number} [args.receiverElevationFraction01] - when finite AND this
- *   item's resolved floor has a BOUNDED band (`elevationTop` declared, not
+ * @param {number} [args.receiverHeightFt] - when finite AND this item's
+ *   resolved floor has a BOUNDED band (`elevationTop` declared, not
  *   Infinity), REPLACES `item.key.elevation` for the receiver-elevation
  *   sub-field (presence bits 2-5) ONLY — see `computeFloorAttrValues`'s own
  *   body for the full reasoning. Omitted (the overwhelming common case —
@@ -764,21 +764,14 @@ function computeFloorAttrValues({ item, viewedFloorIndex, sceneDoc, logError, re
  *   uniforms — call `refreshItemFloorAttrUniforms` on this SAME pair to keep
  *   them live; see that function's own header for why that matters.
  */
-export function resolveItemFloorAttrUniforms({
-  THREE,
-  item,
-  viewedFloorIndex,
-  sceneDoc,
-  logError,
-  receiverElevationFraction01,
-}) {
+export function resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex, sceneDoc, logError, receiverHeightFt }) {
   const { uniform, float } = THREE.TSL;
   const { floorIndex01, presenceBits01 } = computeFloorAttrValues({
     item,
     viewedFloorIndex,
     sceneDoc,
     logError,
-    receiverElevationFraction01,
+    receiverHeightFt,
   });
   return { uFloorIndex01: uniform(float(floorIndex01)), uPresenceBits01: uniform(float(presenceBits01)) };
 }
@@ -899,7 +892,7 @@ export function refreshItemFloorAttrUniforms(uniforms, args) {
  * @param {object|null} args.sceneDoc
  * @param {Function} [args.logError]
  * @param {object} args.envLight - needs `.uOutdoorsRect`/`.outdoorsTexNode`.
- * @param {number} [args.receiverElevationFraction01] - forwarded verbatim to
+ * @param {number} [args.receiverHeightFt] - forwarded verbatim to
  *   `resolveItemFloorAttrUniforms` — see that function's own param doc.
  * @param {*} [args.solidityAlpha] - a real, already-constructed TSL node (the
  *   item's PRE-occlusion-fade alpha). Omit to fall back to `TSL.output.a`
@@ -920,7 +913,7 @@ export function buildRealFloorAttrMrtNode({
   sceneDoc,
   logError,
   envLight,
-  receiverElevationFraction01,
+  receiverHeightFt,
   solidityAlpha,
 }) {
   const { mrt, output } = THREE.TSL;
@@ -930,7 +923,7 @@ export function buildRealFloorAttrMrtNode({
     viewedFloorIndex,
     sceneDoc,
     logError,
-    receiverElevationFraction01,
+    receiverHeightFt,
   });
   const { uFloorIndex01, uPresenceBits01 } = floorAttrUniforms;
   const outdoors01 = buildWorldSpaceOutdoorsGate(THREE.TSL, {

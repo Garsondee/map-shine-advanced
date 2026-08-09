@@ -13,6 +13,7 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runWindowCookie } from './window-cookie.test.mjs';
+import { run as runWindowGlass } from './window-glass.test.mjs';
 import { run as runWindow } from './window.test.mjs';
 import { run as runWindowRender } from './window-render.test.mjs';
 import { run as runWindowSurfaceSubsystem } from './window-surface-subsystem.test.mjs';
@@ -46,6 +47,7 @@ const t = {
 
 const suites = [
   ['window-cookie', runWindowCookie],
+  ['window-glass', runWindowGlass],
   ['window', runWindow],
   ['window-render', runWindowRender],
   ['window-surface-subsystem', runWindowSurfaceSubsystem],

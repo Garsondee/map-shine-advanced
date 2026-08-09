@@ -41,3 +41,9 @@ export { createParticleEngine } from './particle-runtime.js';
 // roof and obeys the same walls. See gust-runtime.js's header for why a ribbon
 // needs its own runtime rather than a draw-mode branch on the dot engine.
 export { createGustEngine } from './gust-runtime.js';
+// FIRE's flame/ember/smoke sprites — a THIRD runtime under the same roof, for
+// the same reason the gust engine is a second one. One factory, `kind` chosen at
+// build time; it allocates its own arena plus a spawn-point buffer, and
+// deliberately takes NO wind grid (fire reads one ambient vector, as V2 did),
+// which keeps it at seven storage buffers inside the guaranteed eight.
+export { createFireParticleEngine } from './fire-particle-runtime.js';

@@ -146,7 +146,28 @@ const STORE = 'blocks';
 // and must be re-encoded rather than re-served. BC7 is unaffected by the fix
 // (it never used toRgb565) but shares this key, so its records ride along —
 // the same all-or-nothing trade every bump here has made.
-const CACHE_VERSION = 8;
+// v9 (2026-08-06, the multi-mode encoder — author: zoomed out past 1:1 the art
+// sharpens "in a way that looks very grainy and slightly pixelated", where PIXI
+// stays smooth on the same textures). The encoder was single-mode BC7 (mode 6)
+// plus two pick-a-texel BC1 endpoint heuristics. Measured, encoder alone, no
+// mips and no sharpening involved: a soft antialiased cutout edge came back
+// with a MAX channel error of 119/255 and thin linework 127 — a handful of
+// texels landing on completely the wrong colour while the MEAN stayed under 3,
+// which is why four earlier rounds of averaged bars never saw it. On screen
+// those strays are speckle, and the albedo-clarity sharpen amplifies them.
+// Now: BC7 also fits mode 5 (colour and alpha on SEPARATE index tracks — the
+// antialiased-edge case mode 6 structurally cannot express) and mode 7 (two
+// subsets, for a block holding ink + interior + hole, which no single line can
+// hold at all), picking whichever mode reconstructs each block best; BC1 gained
+// PCA endpoints plus least-squares refinement. Soft edge 119 → 34, thin
+// linework 127 → 26, and BC1 stopped INFLATING contrast (95.39 → 101.34 became
+// 95.39 → 96.23, i.e. the posterisation that read as grain is gone). Every v8
+// record holds visibly noisier blocks than this encoder now produces and must
+// be re-encoded, not re-served. The new modes are confirmed byte-exact against
+// real hardware — `tools/shader-lab/bench-block-compress.js`, which decodes our
+// blocks on the GPU's own fixed-function decoder, the only oracle independent
+// of our reading of the spec.
+const CACHE_VERSION = 9;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two

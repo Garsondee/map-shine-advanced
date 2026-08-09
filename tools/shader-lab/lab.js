@@ -58,7 +58,7 @@ async function specRefresh() {
   const st = spec.getStatus();
   const ch = SPECULAR_DEBUG_CHANNELS.find((c) => c.n === st.debugChannel);
   document.getElementById('legend').textContent =
-    `SHINE bench — mask=${st.scenario}  attr=${st.attrPreset}  channel=${ch ? `${ch.n} ${ch.id}` : '0 (the effect)'}\n` +
+    `SHINE bench — mask=${st.scenario}  depth=${st.depthPreset}  channel=${ch ? `${ch.n} ${ch.id}` : '0 (the effect)'}\n` +
     `illum=${st.illum} darknessFloor=${st.darknessFloor} outdoors=${st.outdoors} baseSceneLit=${st.baseScene}\n` +
     `strength=${st.strength} shimmerGain=${st.shimmerGain} saturation=${st.saturation} zoom=${st.zoom} t=${(st.timeMs / 1000).toFixed(1)}s\n` +
     `islands=${st.islandReport ? `${st.islandReport.islands} (pre-cluster ${st.islandReport.preClusterComponents}, dropped ${st.islandReport.droppedSmall})` : 'n/a'}  ` +
@@ -128,8 +128,8 @@ function wireSpecularPanel() {
     spec.applyScenario(e.target.value);
     specRefresh();
   });
-  document.getElementById('specAttr').addEventListener('change', (e) => {
-    spec.state.attrPreset = e.target.value;
+  document.getElementById('specDepth').addEventListener('change', (e) => {
+    spec.state.depthPreset = e.target.value;
     specRefresh();
   });
   wireSpecRange('specIllum', 'illum', 2);
@@ -145,7 +145,7 @@ function wireSpecularPanel() {
     log('running gate ladder…');
     const r = await spec.gateLadder();
     log(
-      `LADDER (${r.scenario}, attr=${r.attr}, illum=${r.illum})\n` +
+      `LADDER (${r.scenario}, depth=${r.depth}, illum=${r.illum})\n` +
         r.rows.map((x) => `  ${String(x.n).padStart(2)} ${x.id.padEnd(12)} max=${x.max} mean=${x.mean}${x.DEAD ? '   <<< DEAD' : ''}`).join('\n') +
         `\n  => ${r.verdict}`
     );

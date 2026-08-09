@@ -44,6 +44,10 @@ function makeTSL() {
   return {
     Fn: (cb) => () => cb(),
     float: (v) => chainable('float', { value: v }),
+    // Unwraps a wrapped node's own `.value` (e.g. `uniform(float(x))`) down to
+    // the raw number, mirroring a real UniformNode's `.value` — a mock detail,
+    // not a claim about three's internals (this file's own header).
+    uniform: (v) => chainable('uniform', { value: v && typeof v === 'object' && 'value' in v ? v.value : v }),
     vec4: (...args) => chainable('vec4', { args }),
     texture: (tex, uv) => chainable('texture', { tex, uv }),
     screenUV: chainable('screenUV'),
@@ -219,8 +223,17 @@ export function run(t) {
     ok('writer: DoubleSide, same as every world-quad material', mat.side === 'DOUBLE');
     const payload = mat.fragmentNode;
     ok('writer: returns a vec4 payload', payload.__kind === 'vec4');
+    ok(
+      'writer: R (floor index) is a UNIFORM, never a baked shader constant — a fresh material every ' +
+        'residency rebuild would force a pipeline recompile per distinct floorIndex otherwise',
+      payload.args[0].__kind === 'uniform'
+    );
     ok('writer: R is the floor index, normalised', payload.args[0].value === 2 / 255);
     ok('writer: G (outdoors) is a real 0, the named KNOWN GAP — never undefined', payload.args[1].value === 0);
+    ok(
+      'writer: B (flags) is a UNIFORM, never a baked shader constant — same pipeline-recompile risk as R',
+      payload.args[2].__kind === 'uniform'
+    );
     ok('writer: B is the flags byte, normalised', payload.args[2].value === DEPTH_FLAG_IS_TILE / 255);
     ok(
       'writer: A is always 1 — the payload only exists where the fragment survived the alpha test',

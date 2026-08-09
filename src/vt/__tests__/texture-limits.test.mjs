@@ -6,11 +6,14 @@
 import {
   chooseTextureLimit,
   chooseStorageBufferLimit,
+  chooseBufferSizeLimit,
   planImageTiles,
   WEBGPU_SPEC_MIN_TEXTURE_DIM,
   DESIRED_TEXTURE_DIM,
   WEBGPU_SPEC_MIN_STORAGE_BUFFERS_PER_STAGE,
   DESIRED_STORAGE_BUFFERS_PER_STAGE,
+  WEBGPU_SPEC_MIN_BUFFER_SIZE,
+  DESIRED_BUFFER_SIZE,
 } from '../texture-limits.js';
 
 export function run(t) {
@@ -107,6 +110,43 @@ export function run(t) {
   ok('desired below floor is ignored → 8', chooseStorageBufferLimit(16, 4) === 8);
   ok('desired 12 honored when adapter allows', chooseStorageBufferLimit(16, 12) === 12);
   ok('desired 12 but adapter only 8 → 8', chooseStorageBufferLimit(8, 12) === 8);
+
+  // --- chooseBufferSizeLimit: same safety discipline, a different resource --
+  // --- (2026-08-08, the live "Buffer size (324863904) exceeds the max buffer
+  // --- size limit (268435456)" GPUValidationError this fixes) ---
+
+  ok(
+    'constants: buffer-size spec floor is 256MiB, desired is 1GiB',
+    WEBGPU_SPEC_MIN_BUFFER_SIZE === 268435456 && DESIRED_BUFFER_SIZE === 1073741824
+  );
+
+  // The live case: the adapter that hit the real error reported supporting 2GiB
+  // — a ~324MB single-buffer upload (a _Specular mask on a 12000² map) now
+  // fits comfortably under the raised 1GiB cap.
+  ok('adapter 2GiB → clamps to the 1GiB target, not the adapter max', chooseBufferSizeLimit(2147483648) === 1073741824);
+
+  // Adapter offers exactly what we target → that value.
+  ok('adapter 1GiB → 1GiB', chooseBufferSizeLimit(1073741824) === 1073741824);
+
+  // Weak hardware capped at the 256MiB spec floor → stays there (asking for
+  // more would make requestDevice throw); an upload bigger than this on this
+  // hardware needs its own byte-budget cap, not a higher requiredLimits ask.
+  ok(
+    'adapter 256MiB → stays at the floor (never exceed what the adapter supports)',
+    chooseBufferSizeLimit(268435456) === 268435456
+  );
+
+  // Implausible/bogus adapter values never drag us under the spec floor every
+  // real adapter grants.
+  ok('adapter 100MiB (below floor) → clamped up to 256MiB', chooseBufferSizeLimit(100 * 1024 * 1024) === 268435456);
+  ok('adapter undefined → 256MiB (safe default)', chooseBufferSizeLimit(undefined) === 268435456);
+  ok('adapter NaN → 256MiB (safe default)', chooseBufferSizeLimit(NaN) === 268435456);
+  ok('adapter 0 → 256MiB (safe default)', chooseBufferSizeLimit(0) === 268435456);
+
+  // A caller can lower the target, but never below the spec floor.
+  ok('desired below floor is ignored → 256MiB', chooseBufferSizeLimit(2147483648, 100 * 1024 * 1024) === 268435456);
+  ok('desired 512MiB honored when adapter allows', chooseBufferSizeLimit(2147483648, 536870912) === 536870912);
+  ok('desired 512MiB but adapter only 256MiB → 256MiB', chooseBufferSizeLimit(268435456, 536870912) === 268435456);
 
   // --- planImageTiles: the "quarter-split" (author's idea) generalized -------
 

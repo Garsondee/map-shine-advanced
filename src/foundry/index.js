@@ -232,3 +232,6 @@ export {
 // button. `syncControlPanelButtonState` re-syncs the toolbar highlight when
 // the panel's visibility changes for a reason other than this exact button.
 export { registerControlPanelButton, syncControlPanelButtonState } from './scene-controls-button.js';
+// THE ANCHOR VIEW TOGGLE — a second, GM-only tool just below the MSA button
+// that opens ui/anchor-view-mode.js (see scene-controls-button.js's own doc).
+export { registerAnchorViewModeButton, syncAnchorViewModeButtonState } from './scene-controls-button.js';

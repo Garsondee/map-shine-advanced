@@ -91,6 +91,33 @@ export function resolveAnchorLightRadiusPx(anchor, globalLightRadiusPx) {
 }
 
 /**
+ * This candle's ABSOLUTE world elevation (scene/Foundry units) — its own
+ * floor's ground (`floorBinding.bottom`, already a real elevation value, not
+ * an index: `scene/layer-order.js#resolveElevationFloorIndex` matches it
+ * directly against `floor.elevationBottom`) plus its own authored `elevation`
+ * param ("height off floor", `scene/anchor-catalog.js`, default 0). This is
+ * the ONE number that lets a candle's cast light agree with its own flame
+ * sprite about where it sits — see `point-light-pool.js#resolveAnchor
+ * ElevationRank`'s doc for the flame's own (separate, OLD-gate) consumer of
+ * the same `params.elevation` value.
+ *
+ * Returns `undefined` for an anchor with no locked floor band (`mode !==
+ * 'locked'`, or a non-finite `bottom` — the 'all-levels'/unset case) — the
+ * SAME opt-out posture `resolveAnchorElevationRank` already uses: an anchor
+ * that never chose a floor has nothing real to add a height on top of, so it
+ * stays unconfigured rather than silently resolving to a guess.
+ * @param {{floorBinding?: {mode?:string, bottom?:number|null}, params?: {elevation?:number}}} anchor
+ * @returns {number|undefined}
+ */
+export function resolveAnchorElevationWorldUnits(anchor) {
+  const fb = anchor?.floorBinding;
+  const bottom = Number(fb?.bottom);
+  if (!fb || fb.mode !== 'locked' || !Number.isFinite(bottom)) return undefined;
+  const h = Number(anchor?.params?.elevation);
+  return bottom + (Number.isFinite(h) ? h : 0);
+}
+
+/**
  * A closed circular polygon around (cx, cy), as Foundry's own light shape format
  * (flat `[x0,y0,x1,y1,...]` world-space points) — the candle light's "shape",
  * standing in for the wall-clipped `source.shape.points` a real Foundry light
@@ -415,6 +442,15 @@ function buildOneLightSource(c, baseRadius, color, qualityTier, windResponse) {
     sourceId: `candle:${c.id || `${Math.round(c.x)}_${Math.round(c.y)}`}`,
     x: c.x,
     y: c.y,
+    // THE LIGHT'S OWN DEPTH-AUTHORITY ELEVATION (2026-08-05) — a real
+    // Foundry-unit height (`clusterCandleAnchors`'s own averaged `c.elevation`,
+    // built from `boot.js#getCandleRenderState`'s `resolveAnchorElevation
+    // WorldUnits`), consumed exactly like a real Foundry light's own
+    // `document.elevation` (`point-light-pool.js#update`'s `resolveExpectedDepth
+    // (light.elevation)`). Previously always `undefined` here, which normalized
+    // to absolute elevation 0 regardless of which floor the candle was really
+    // on — the bug this field exists to close.
+    elevation: c.elevation,
     radius,
     // Sky exposure, averaged across the cluster's members (Wind.md Tier 0)
     // — so this light's OWN lean (candle-flicker.js) can sample the SAME
@@ -473,9 +509,9 @@ function buildOneLightSource(c, baseRadius, color, qualityTier, windResponse) {
  * and the resulting `sourceId`s are stable for pool reuse. Non-finite / id-less
  * anchors are dropped (the light pool never sees a bad source).
  *
- * @param {Array<{id?:string, x:number, y:number, windExposure?:number}>} anchors
+ * @param {Array<{id?:string, x:number, y:number, windExposure?:number, elevation?:number}>} anchors
  * @param {number} cellPx - bucket size in world px (anchors within a cell merge).
- * @returns {Array<{x:number, y:number, count:number, id:string, exposure:number}>} cluster centroids.
+ * @returns {Array<{x:number, y:number, count:number, id:string, exposure:number, elevation:number}>} cluster centroids.
  */
 export function clusterCandleAnchors(anchors, cellPx) {
   const list = Array.isArray(anchors) ? anchors : [];
@@ -488,7 +524,7 @@ export function clusterCandleAnchors(anchors, cellPx) {
     const key = `${Math.floor(x / size)}:${Math.floor(y / size)}`;
     let c = cells.get(key);
     if (!c) {
-      c = { sumX: 0, sumY: 0, n: 0, ids: [], intensity: 0, sumExposure: 0 };
+      c = { sumX: 0, sumY: 0, n: 0, ids: [], intensity: 0, sumExposure: 0, sumElevation: 0 };
       cells.set(key, c);
     }
     c.sumX += x;
@@ -512,6 +548,16 @@ export function clusterCandleAnchors(anchors, cellPx) {
     // rather than either extreme winning outright.
     const exRaw = Number(a?.windExposure);
     c.sumExposure += Number.isFinite(exRaw) ? Math.min(1, Math.max(0, exRaw)) : 1;
+    // Per-anchor absolute elevation (boot.js's own `resolveAnchorElevation
+    // WorldUnits` — a real Foundry-unit height), AVERAGED across the cluster
+    // — the same "net a partly-exposed cluster rather than either extreme
+    // winning outright" reasoning as sky exposure just above, applied to
+    // height instead of shelter. A candle whose own height must never be
+    // blended into its neighbours' already has an escape hatch: opting into
+    // `useCustomLightRadius`/`useCustomColor` pulls it into the singleton
+    // per-candle light path below, which never averages anything.
+    const elRaw = Number(a?.elevation);
+    c.sumElevation += Number.isFinite(elRaw) ? elRaw : 0;
     if (typeof a.id === 'string') c.ids.push(a.id);
   }
   const out = [];
@@ -523,6 +569,7 @@ export function clusterCandleAnchors(anchors, cellPx) {
       id: c.ids.slice().sort().join(','),
       intensity: c.intensity,
       exposure: c.sumExposure / c.n,
+      elevation: c.sumElevation / c.n,
     });
   }
   return out;

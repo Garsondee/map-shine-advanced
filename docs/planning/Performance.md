@@ -260,6 +260,15 @@ column of nulls. `method` now separates `sweepRequested` from `sweepIncluded` fo
 
 | 12 | 2026-07-28 | 🏁 Benchmark: "the camera didn't start at the north, it just moved down and to the right and finished" — a ~1s snap instead of a 60s sweep | **the SAME bug class as a 2026-07-21 regression already in `camera-path.test.mjs`, hit again.** A north-to-south sweep spans ~1.0 of the map's height; `DEFAULT_SETTINGS.longJumpFadeCut` defaults `true`, and `LONG_JUMP_FADE_RATIO = 0.33` classified the whole route as an ACCIDENTAL long jump — fade to black, instant snap straight to the south end (skipping north entirely), fade back in, done in ~1s. `generateKeyframePreset` already returns `suggestedLongJumpFadeCut: false` for exactly this reason; the benchmark action built its own `settings` object and dropped that field | the author watching the sweep and describing exactly what they saw |
 | 13 | 2026-07-28 | (found while fixing #12) even with a real sweep, the pan would start from wherever the camera already was, not the north edge — breaking both "starts at north" and run-to-run repeatability | `canvas.animatePan` interpolates from the CURRENT camera position; there is no implicit "snap to keyframe 0" in the player (correct for a hand-authored cinematic path, wrong for a fixed benchmark route) | reading the player code while fixing #12 |
+| 14 | 2026-08-05 | in one real combined-report run, SIX effects (window, bloom, grade, specular, uiWindowShadow, fluid) showed `resolved: true` in `sweepRaw.summary.perEffect[]` but `sweepUnresolvable: true` in `effects[]` for the SAME run — two panels of the SAME report disagreeing about whether the SAME number could be trusted | `estimateSweepNoiseFloor()` (the honest max of the bracketing-pair drift AND the worst negative reading) lived only in `perf-report.js`; `perf-lab.js`'s own `summarizeSweep()` — the function that actually produces `perEffect[].resolved` — used just the bracketing-pair floor alone, a strictly smaller number, so it cleared readings the reconciled floor would have rejected | the author pasting a real combined report and asking "have we achieved accurate and useful information?" — cross-referencing `sweepRaw.summary.perEffect` against `effects[]` by hand |
+
+**Round 14's fix created its own trap worth naming.** Moving `estimateSweepNoiseFloor` to `perf-lab.js`
+so `summarizeSweep` could use the SAME reconciled floor for `resolved` also broke `suspiciousNegative`
+(`cost<0 && |cost|>floor`) — a negative reading's magnitude can never exceed a floor that is partly
+*defined as* the max of all negative magnitudes including its own, so the flag became dead code the
+moment its input source changed. Fixed by keeping `suspiciousNegative` on the non-circular
+bracketing-pair floor alone, while `resolved` uses the reconciled one — two different questions
+("is this drift?" vs. "is this above the honest noise floor?") that must not share one threshold.
 
 **Round 12 is the sharpest lesson of this whole build: a codebase can document a bug class in a
 regression test and still repeat it in the very next file that touches the same API**, because

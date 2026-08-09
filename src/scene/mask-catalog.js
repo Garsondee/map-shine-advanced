@@ -117,6 +117,17 @@ export const MASK_KINDS = Object.freeze([
     // Was already true in behaviour, declared by nothing — see `rasterize`'s
     // own doc. `skyReach` consuming it made the extraction happen by accident.
     rasterize: true,
+    // ⚠️ THE PACKED TRIO HAS ONE SHARED ALPHA AND THIS KIND KEEPS IT.
+    // Declared explicitly since 2026-08-08; it used to be INFERRED from being
+    // the only `rasterize: true` member, which broke the instant `fire` also
+    // needed a derived grid. `_Outdoors` is the member that genuinely needs
+    // transparency preserved — the authority composites its sources BY ALPHA
+    // ("transparent means unpainted... transparent also means not inside a
+    // building"), and handing it another kind's alpha blackened the author's
+    // Town River Bridge map: a 98.1%-transparent overhead file measured 73.8%
+    // wall coverage live against 14.4% in the bench. See
+    // `vt/__tests__/packed-trio-alpha.test.mjs` for the full autopsy.
+    ownsPackedAlpha: true,
     meaning:
       'white = outdoors, black = indoors. REQUIRED (2026-07-21, author directive): a level with no ' +
       'discovered `_Outdoors` file no longer silently serves `absentValue` — sampleWorld/getDerived THROW ' +
@@ -132,7 +143,19 @@ export const MASK_KINDS = Object.freeze([
     channels: 'gray',
     packChannel: 'b',
     absentValue: 0,
-    meaning: 'white = fire-spawn region, black = none. Absent = no fire anywhere.',
+    // A GPU consumer is a consumer, and so is a CPU one — `rasterize` exists to
+    // declare exactly this. `effects/fire` reads the per-floor grid to EXTRACT
+    // fire sources from it: a chamfer distance transform over the painted
+    // region gives each point's distance to the nearest edge, and the ridge
+    // peaks of that field are where fires go, sized by twice their own
+    // distance. That is how a painted blob becomes one correctly-sized fire and
+    // a painted line along a wall becomes a ROW of small ones, with no second
+    // authoring step (`effects/fire/fire-mask.js`).
+    rasterize: true,
+    meaning:
+      'white = fire-spawn region, black = none. Absent = no fire anywhere. The painted region’s own ' +
+      'WIDTH sets each fire’s diameter, which then sets its puff rate, plume height, turbulence and ' +
+      'light radius — so a wide blob is a bonfire and a thin line is a row of small flames.',
   },
   {
     id: 'specular',
@@ -375,19 +398,38 @@ export function validateMaskCatalog(kinds = MASK_KINDS, derived = DERIVED_KINDS)
     fail(`packed trio incomplete: channels declared = [${[...packChannels.keys()].join(',')}] — need r,g,b or none`);
   }
 
-  // ⚠️ ONE PACKED RGBA PAGE HAS ONE ALPHA SLOT. It goes to the trio member the
-  // authority composites BY ALPHA (`rasterize`) — see `packedTrioChannelPolicy`.
-  // Two rasterized members would need two alphas and one would silently lose
-  // its transparency, which is exactly the bug this rule was written after; zero
-  // means nobody needs it and the declaration has drifted from the consumers.
+  // ⚠️ ONE PACKED RGBA PAGE HAS ONE ALPHA SLOT, AND ITS OWNER IS DECLARED.
+  //
+  // This used to require exactly one `rasterize: true` member, inferring
+  // ownership from it. That conflated two different questions and broke the
+  // moment a second trio member legitimately needed a derived grid: `fire`
+  // reads the per-floor grid to extract fire sources from the painted region,
+  // while wanting nothing to do with the alpha slot, because its
+  // `absentValue: 0` already says the right thing (a transparent texel is not
+  // fire). `rasterize` = "the authority derives a grid"; `ownsPackedAlpha` =
+  // "this member keeps the page's single transparency"
+  // (`feedback_one_byte_two_quantities`, 2026-08-08).
+  //
+  // Two claimants would need two alphas and one would silently lose its
+  // transparency — exactly the bug this rule was written after. Zero means
+  // nobody kept it and the declaration has drifted from the consumers.
   if (packChannels.size === 3) {
-    const packedRasterized = [...packChannels.values()].filter((id) => kinds.find((k) => k.id === id)?.rasterize);
-    if (packedRasterized.length !== 1) {
+    const packedIds = [...packChannels.values()];
+    const alphaOwners = packedIds.filter((id) => kinds.find((k) => k.id === id)?.ownsPackedAlpha === true);
+    if (alphaOwners.length !== 1) {
       fail(
-        `the packed trio must have EXACTLY ONE rasterized member to own the page's single alpha slot — ` +
-          `found ${packedRasterized.length} [${packedRasterized.join(',')}]. One RGBA page cannot carry two ` +
-          `sources' transparency; unpack one of them (packChannel: null) or drop its rasterize flag.`
+        `the packed trio must have EXACTLY ONE member declaring 'ownsPackedAlpha' to keep the page's single ` +
+          `alpha slot — found ${alphaOwners.length} [${alphaOwners.join(',')}]. One RGBA page cannot carry two ` +
+          `sources' transparency. Note this is NOT the same question as 'rasterize': a kind may need a derived ` +
+          `grid without needing transparency preserved, which is why the two are separate flags.`
       );
+    }
+    // A member that keeps the alpha must actually be one the authority derives
+    // a grid for — otherwise nothing consumes the transparency it is holding.
+    for (const id of alphaOwners) {
+      if (kinds.find((k) => k.id === id)?.rasterize !== true) {
+        fail(`'${id}' declares ownsPackedAlpha but is not rasterized — nothing would consume the alpha it keeps`);
+      }
     }
   }
 
@@ -450,7 +492,23 @@ export function packedTrioChannelPolicy() {
   const trio = packedTrioKinds();
   if (!trio) return null;
   const channels = /** @type {const} */ (['r', 'g', 'b']);
-  const owners = channels.filter((ch) => trio[ch].rasterize === true);
+  // ⚠️ THE OWNER IS DECLARED, NOT INFERRED FROM `rasterize` (2026-08-08).
+  //
+  // This used to pick "the one trio member with `rasterize: true`", which was
+  // correct while exactly one member had it and silently returned NULL — no
+  // policy, no packing, a thrown test — the moment a second kind needed a
+  // derived grid. `fire` hit that: it needs the per-floor grid to extract fire
+  // sources from the painted region, and it does NOT need the alpha slot,
+  // because its `absentValue` of 0 already says the right thing (a transparent
+  // texel is not fire).
+  //
+  // Those are two different questions and one flag was answering both
+  // (`feedback_one_byte_two_quantities`). `rasterize` means "the authority
+  // derives a grid for this kind"; `ownsPackedAlpha` means "this member keeps
+  // the trio's single shared transparency". The fallback preserves the old
+  // inference for any trio that declares neither.
+  const declared = channels.filter((ch) => trio[ch].ownsPackedAlpha === true);
+  const owners = declared.length > 0 ? declared : channels.filter((ch) => trio[ch].rasterize === true);
   if (owners.length !== 1) return null;
   const absentByte = { r: null, g: null, b: null };
   for (const ch of channels) {

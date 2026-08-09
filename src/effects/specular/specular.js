@@ -77,7 +77,9 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 1.3 → 2 = THE SCHEMA'S OWN MAX (2026-08-03, ROUND 18) —
     // live-confirmed; see `strength`'s own comment above and
     // `SPECULAR_DEFAULT_SATURATION`'s header for the full account.
-    default: 2,
+    // LOWERED 2 → 1.25 (ROUND 21, 2026-08-05) — new live-tuned defaults; see
+    // SPECULAR_DEFAULT_SATURATION's own header (specular-render.js).
+    default: 1.25,
     category: 'Look',
     label: 'Metal colour',
     help: "How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it — the default sits slightly above 1 to counteract the screen's own tonemap, which desaturates highlights as they brighten. This is the control that decides whether a map reads as treasure or as polished stone.",
@@ -93,7 +95,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     // why: `sheenCeiling` below moved up a great deal this same round, so
     // the base shine now carries more of the look and needs less shimmer
     // modulation on top of it.
-    default: 2.2,
+    // RAISED 2.2 → 40 = THE SCHEMA'S OWN MAX (ROUND 21, 2026-08-05) —
+    // new live-tuned defaults; see SPECULAR_DEFAULT_SHIMMER_GAIN's own
+    // header (specular-render.js).
+    default: 40,
     category: 'Look',
     label: 'Shimmer contrast',
     help: 'How far the moving patterns may brighten the metal above its resting shine. Low gives an even satin surface; high gives hard bright glints against darker metal, which is what reads as polished and slightly blown out. At 0 the metal still shines, it just stops moving.',
@@ -106,7 +111,9 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED 16384 → 6528 (2026-08-03, ROUND 18) — live-confirmed; a
     // smaller scale means MORE cells across the same map, i.e. a busier,
     // finer field. See `SPECULAR_DEFAULT_PATTERN_SCALE_PX`'s own header.
-    default: 6528,
+    // RAISED 6528 → 10816 (ROUND 21, 2026-08-05) — new live-tuned defaults;
+    // see SPECULAR_DEFAULT_PATTERN_SCALE_PX's own header (specular-render.js).
+    default: 10816,
     category: 'Look',
     label: 'Pattern size',
     help: 'How large the shimmer shapes are, measured across the MAP rather than the screen — so they stay the same physical size whether you are zoomed in or out. Large values give a few huge soft sweeps across the whole map; small values give many small busy ones. The fine glitter is not set here: that comes from how brightly you painted the mask.',
@@ -135,7 +142,9 @@ export const SPECULAR_PARAMS = Object.freeze({
     step: 0.05,
     // LOWERED 3 → 2.85 (2026-08-03, ROUND 18) — live-confirmed; barely
     // moved from the Round 17 default, unlike several of its neighbours.
-    default: 2.85,
+    // RAISED 2.85 → 7.15 (ROUND 21, 2026-08-05) — new live-tuned defaults;
+    // see SPECULAR_INCIDENT_STEEPNESS's own header (specular-pattern.js).
+    default: 7.15,
     category: 'Response',
     label: 'Light response',
     // NEW (2026-08-03, ROUND 17) — exposes `SPECULAR_INCIDENT_STEEPNESS`
@@ -151,6 +160,24 @@ export const SPECULAR_PARAMS = Object.freeze({
     // through while you diagnose what else might be dimming it.
     help: "How sharply the shine fades through shadow and dim ambient light before it reaches the screen. At 1 the shine tracks the scene's own light exactly, with no extra fade. Above 1, dim areas lose their shine much faster than bright ones do — only candles, point lights and direct sun keep their full sparkle, and the default (3) is fairly aggressive about this. Below 1, dim areas are boosted ABOVE what the plain light level would give — turn this down toward 0.1 if the shine is barely visible anywhere and you want to confirm the effect is there at all before fine-tuning where it should and shouldn't show.",
   },
+  // THE KNEE (2026-08-09) — pairs with `incidentSteepness` above: that one is
+  // HOW SHARPLY shine falls off below the knee, this one is WHERE the knee is.
+  // Added because the pair was previously a single control with its knee
+  // hardwired at 1.0 (a perfectly white, fully-bright pixel), which no light
+  // in the engine short of noon sun reaches — so candle-lit metal measured
+  // dead. `specular-pattern.js#SPECULAR_INCIDENT_KNEE` carries the bench
+  // sweep that proved it and the algebra showing 1.0 reproduces the old
+  // behaviour exactly.
+  incidentKnee: {
+    type: 'float',
+    min: 0.01,
+    max: 1,
+    step: 0.01,
+    default: 0.15,
+    category: 'Response',
+    label: 'Full-shine light level',
+    help: 'How much light a surface needs before its metal shines at full strength. Low values mean even a single candle makes gold flash; high values mean only direct sunlight does. This is the control to reach for when metal looks right outdoors but stays dead indoors near lamps and candles — it moves where "brightly lit" begins, while "Light response" above decides how fast the shine dies away below that point. At 1 only a pure white, fully-lit pixel counts as bright, which is how this behaved before the control existed.',
+  },
   sheenCeiling: {
     type: 'float',
     min: 0,
@@ -161,7 +188,12 @@ export const SPECULAR_PARAMS = Object.freeze({
     // lower, make it very low." This is the exact value Round 10 originally
     // measured and tuned for shimmer contrast, not a fresh guess. See
     // `SPECULAR_SHEEN_CEILING`'s own header (specular-pattern.js).
-    default: 0.15,
+    // LOWERED 0.15 → 0 (ROUND 21, 2026-08-05) — new live-tuned defaults;
+    // this is NOT merely "very low" — see SPECULAR_SHEEN_CEILING's own
+    // header (specular-pattern.js) for why it algebraically zeroes the
+    // sheen term entirely, leaving the shimmer as the only visible source
+    // of highlight.
+    default: 0,
     category: 'Response',
     label: 'Base shine ceiling',
     help: "How bright the metal's resting shine (no shimmer, just tint × light × strength) may get before this effect reins it in. The shipped default is deliberately low so the moving shimmer pattern keeps real contrast — pushed higher, the whole surface starts reading as an even, lit-from-within wash rather than a pattern of glints, trading contrast for raw visibility. Raise this only if the shine is present but reads too subtly to notice at all; the shimmer's own ceiling below is the one to raise if it is the moving GLINTS specifically that feel too dim.",
@@ -173,7 +205,11 @@ export const SPECULAR_PARAMS = Object.freeze({
     step: 1,
     // RAISED 20 → 28 (2026-08-03, ROUND 18) — live-confirmed; see
     // `sheenCeiling` above and `SPECULAR_GLINT_CEILING`'s own header.
-    default: 28,
+    // RAISED 28 → 200 = THE SCHEMA'S OWN MAX (ROUND 21, 2026-08-05) — new
+    // live-tuned defaults; see SPECULAR_GLINT_CEILING's own header
+    // (specular-pattern.js) — with sheenCeiling now 0, this carries the
+    // WHOLE effect.
+    default: 200,
     category: 'Response',
     label: 'Glint ceiling',
     help: "How bright the moving shimmer's own contribution may peak, independent of the base shine above. Shipped high on purpose because a real specular highlight is supposed to blow out toward bloom — raise it further if peaks still read as dim dots rather than hot sparks; lower it if the glints are overpowering the metal's own base colour.",
@@ -186,7 +222,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     step: 0.01,
     // RAISED 1 → 3 = THE SCHEMA'S OWN MAX (2026-08-03, ROUND 18) —
     // live-confirmed; see `strength`'s own comment above.
-    default: 3,
+    // LOWERED 3 → 0.9 (ROUND 21, 2026-08-05) — new live-tuned defaults, no
+    // longer the schema's own max; see SPECULAR_DEFAULT_PARALLAX_STRENGTH's
+    // own header (specular-render.js).
+    default: 0.9,
     category: 'Motion',
     label: 'Parallax',
     help: 'How much the shimmer slides across the metal as you pan the map. This is the single most important control for making the shine feel like a REFLECTION rather than a texture someone painted on. At 1 the patterns are nearly locked to your screen, sweeping over the map as you move, which is what light actually does. At 0 they are glued to the map and the illusion collapses.',
@@ -224,7 +263,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 0.5,
     step: 0.005,
-    default: 0.06,
+    // RAISED 0.06 → 0.28 (ROUND 21, 2026-08-05) — new live-tuned defaults,
+    // a clearly visible pulse now; see SPECULAR_DEFAULT_PULSE's own header
+    // (specular-render.js).
+    default: 0.28,
     category: 'Motion',
     label: 'Breathing',
     help: 'A gentle rise and fall in overall brightness over several seconds. Keep it small: a visible pulse reads as a shader effect, an almost imperceptible one reads as a living surface.',
@@ -235,7 +277,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1,
+    // LOWERED 1 → 0.99 (ROUND 21, 2026-08-05) — new live-tuned defaults,
+    // functionally identical to the full swing; see
+    // SPECULAR_DEFAULT_SUN_BIAS's own header (specular-render.js).
+    default: 0.99,
     category: 'Outdoor',
     label: 'Sun direction',
     help: 'How strongly the sun favours metal whose grain runs across its light, outdoors. This is what makes brushed metal brighten and dim through the day as the sun swings round, and on a flat top-down map it is the only way the sun direction reaches this effect at all. Indoors it does nothing, because indoors there is no sun to be angled against.',
@@ -445,23 +490,21 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
   Object.freeze({
     n: 8,
     id: 'floorGate',
-    label: '8 · Floor gate (R=floor, G=drawn, B=not occluded)',
+    label: '8 · Floor gate (R=visible, G=stored depth, B=expected depth)',
     reads:
-      'The scene-attribute verdict, and BOTH lit channels must be lit for the pass to draw. RED = this ' +
-      'quad floor matches; GREEN = the attribute buffer says art was drawn here; BLUE = nothing is ' +
-      'covering the Level`s background at this pixel. BLUE going black under a Tile or a roof, and ' +
-      'staying lit on bare background, is the gate working. ' +
-      '⚠️ BLUE IS "NOT OCCLUDED", NOT "IS BACKGROUND" — inverted 2026-08-01. It used to mean the ' +
-      'opposite, which made a never-written attr buffer read identically to "a Tile is on top" and ' +
-      'switched the whole effect off; now an unwired buffer fails OPEN and the shine draws. ' +
-      'GREEN IS EXPECTED TO BE BLACK — that buffer alpha lane is a known live bug and is deliberately ' +
-      'not multiplied in. ' +
-      '⚠️ THIS CHANNEL LIED FOR THREE LIVE ROUNDS (2026-07-27 to 07-29) and was fixed 2026-08-01: the ' +
-      'debug material`s channel selector compiled to real WGSL branches, so B read an unassigned ' +
-      'variable and was structurally ALWAYS black regardless of the buffer`s real contents. Any ' +
-      'conclusion drawn from this channel before that date is void — see ' +
-      '`effects/debug-channel-select.js`. Cross-check against channel 20 (attr, raw) whenever they ' +
-      'disagree.',
+      'STAGE 3 (2026-08-05) — the depth-authority verdict, replacing the old scene-attribute pair. RED = ' +
+      'the gate itself (1 = my background is what`s really visible here, 0 = something ranked above it ' +
+      '— a Tile, a roof — is drawn over it instead). GREEN = the RAW stored depth at this pixel, as a ' +
+      'grey ramp — this is new: the old gate had no continuous readout, only two bits. BLUE = this ' +
+      'quad`s own expected depth, broadcast flat across the whole quad — a solid, unchanging blue means ' +
+      '`setExpectedDepth` is being pushed; pure black blue on a wired effect means it is stuck at its ' +
+      'construction-time default and the seam feeding it is not calling through. ' +
+      '⚠️ RED IS "VISIBLE", NOT "IS BACKGROUND" — same fail-open polarity the old attr-based gate fought ' +
+      'for (inverted 2026-08-01, before this stage even existed): an unwired depth texture compiles the ' +
+      'whole gate OUT (RED reads 1 everywhere) rather than reading as occluded. ' +
+      'Cross-check GREEN here against channel 20 (depth, raw) — they sample the SAME texture through TWO ' +
+      'independent nodes and must always agree; a disagreement means the shared-node bug that lied on ' +
+      'this exact channel`s predecessor (2026-07-27 to 08-01, `effects/debug-channel-select.js`) is back.',
   }),
   Object.freeze({
     n: 9,
@@ -571,18 +614,18 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
   }),
   Object.freeze({
     n: 20,
-    id: 'attrDirect',
-    label: '20 · Attr, RAW (control for 8)',
+    id: 'depthDirect',
+    label: '20 · Depth, RAW (control for 8)',
     reads:
-      'The same `buf:scene.attr` at the same screen UV as channel 8 (floor gate), sampled directly with ' +
-      'NOTHING applied — R=floor index, G=outdoors, B=the presence bitfield (bit 128 = SOMETHING IS ' +
-      'COVERING the Level`s background here; bit 1 = overhead/roof). Reading it on bare background art, ' +
-      'B should be near ZERO and channel 8`s blue should be LIT — the two are complements, not copies. ' +
-      'B at or above 0.5 on bare background means a Tile/roof is claiming that pixel; B near zero under ' +
-      'a Tile means the occluder bit is not reaching this pass, so check `buf:scene.attr` wiring before ' +
-      'suspecting the mask. This channel is the CONTROL for channel 8 (a fresh, unshared texture node), ' +
-      'and it earned its keep: it is what proved 8`s blue was structurally black rather than measuring ' +
-      'anything (2026-08-01, `effects/debug-channel-select.js`).',
+      'RENAMED 2026-08-05 (was `attrDirect`) alongside channel 8`s own migration to `buf:scene.depth` — ' +
+      'same control, same reason it exists, new source. The same depth attachment at the same screen UV ' +
+      'as channel 8 (floor gate), sampled directly through a FRESH, UNSHARED node — R=G=B, one grey ramp ' +
+      '(a depth texture has one channel; this just broadcasts it). Must be PIXEL-IDENTICAL to channel ' +
+      '8`s own GREEN at all times — they sample the SAME texture through two independent `texture()` ' +
+      'calls. A disagreement between them, not a "wrong-looking" value on either alone, is the actual ' +
+      'signal: it means the shared-node staleness bug that lied on this exact channel`s predecessor ' +
+      '(2026-07-27 to 08-01, `effects/debug-channel-select.js`) is back, and channel 8 is the one to ' +
+      'distrust. This channel earned its keep proving precisely that once already.',
   }),
 ]);
 

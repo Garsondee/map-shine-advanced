@@ -61,6 +61,30 @@
  *      `formatOther` only excused −2…0. It is now `null` + `feltUnderstated`, and the
  *      panel states the pipelining conclusion outright, which is the useful reading.
  *
+ * ⚠️ THIRD POST-MORTEM (2026-08-06, from a live report pasted back for review): the
+ * SECOND post-mortem's `resolved` check was `Math.abs(cost) > noiseFloor` — magnitude
+ * only, no sign. A live run showed `doorGraphics: -1.3ms` and `grade: -1.5ms` BOTH marked
+ * `resolved: true`, each with a nonsensical negative "% of effects" (-48.1%, -55.6%) —
+ * the exact "physically impossible negative cost" class the second post-mortem's own
+ * evidence already named, just past the floor instead of inside it. An effect cannot cost
+ * less than zero; a negative reading that clears the floor is not a precisely-measured
+ * saving, it is a systematic bias (this run: a near-monotonic GPU-clock warm-up climb from
+ * ~19.3ms on the first few configs to ~23.4ms on the last few — the two-point baseline
+ * average only cancels a LINEAR drift, and does nothing for a warm-up curve that is mostly
+ * over by the time the closing baseline lands) big enough to swamp the floor. Two fixes:
+ *   1. `resolved` now requires `cost > noiseFloor` (positive AND clear of the floor), not
+ *      `Math.abs(cost) > noiseFloor` — see `summarizeSweep`.
+ *   2. A NEW `suspiciousNegative` flag on confidently-negative rows, surfaced by
+ *      `formatCost` as "⚠ drift, not cost" rather than silently folding into "< noise" —
+ *      the two are different findings ("we can't tell" vs. "something during this run
+ *      made this look cheaper than baseline, and it wasn't the effect").
+ *   3. `runSweep` gained an optional GPU warm-up phase (`warmupFrames`, all effects forced
+ *      on, off the measured clock) specifically to shrink this class of drift at the
+ *      source rather than only detect it after the fact.
+ *   4. The report now carries `context` (scene/floor/resolution/tier/msaVersion, from
+ *      `harness.getContext()`) so two runs are actually comparable, and a `notes` array
+ *      explaining what the percentages do and don't mean.
+ *
  * The pure helpers (config list, per-effect delta math, formatting) are Node-tested;
  * runSweep/waitForGpuSamples are testable with an injected harness + frame-waiter; the DOM
  * panel is browser-verified (CONVENTIONS §4).
@@ -88,6 +112,72 @@ function round2(v) {
 }
 function round1(v) {
   return v == null ? null : Math.round(v * 10) / 10;
+}
+
+/**
+ * Estimate the sweep's own noise floor, from the sweep's own results.
+ *
+ * MOVED HERE from perf-report.js 2026-08-06 (re-exported there for backward
+ * compatibility) — this is entirely about interpreting THIS instrument's own
+ * noise, and `summarizeSweep` below now calls it internally so the standalone
+ * sweep display and perf-report.js's combined `effects[]` can never disagree
+ * about which readings are trustworthy (they used to: this function's
+ * reconciled floor and `summarizeSweep`'s own bracketing-pair-only floor were
+ * two different numbers computed two different ways, and a live report showed
+ * 5 effects marked `resolved:true` in one place and rejected as noise in the
+ * other, for the exact same figure).
+ *
+ * ============================================================================
+ * WHY THIS EXISTS — the sweep is a DIFFERENCE OF TWO LARGE NUMBERS
+ * ============================================================================
+ *
+ * A sweep cost is `soloFrameGpu - baselineFrameGpu`, each a median of ~20
+ * whole-frame samples. At a 21.6 ms frame, resolving a 0.1 ms effect means
+ * resolving 0.5% of each measurement — far below the run-to-run variance of a
+ * real GPU. The tell is unmistakable and it showed up on the first working
+ * sweep (2026-07-27): **negative costs.** Vegetation -0.9 ms, doorGraphics
+ * -1.1 ms, water -0.8 ms, and `uiWindowShadow` — which was DISABLED and has no
+ * draw call at all by design — charged +0.6 ms.
+ *
+ * A negative GPU cost is physically impossible, so every negative reading is
+ * pure noise, and its magnitude is a DIRECT, SELF-CALIBRATING lower bound on how
+ * much noise this particular sweep carried. Anything inside ±that band is
+ * unresolvable and must not be reported as a number.
+ *
+ * This is deliberately empirical rather than a tuned constant: the floor scales
+ * with the machine, the scene and the frame cost, exactly as it should
+ * (`feedback_probed_constants_vs_derived` — derive it once from the data, do not
+ * hardcode a guess).
+ *
+ * ⚠️ THIS IS A LOWER BOUND, AND IT HAS A HOLE: it can only see noise that happened
+ * to land on the negative side of an effect that happened to be cheap. A sweep where
+ * every effect read slightly POSITIVE returns `null` — "no evidence" — even though the
+ * noise obviously did not go away. `summarizeSweep` also measures the floor DIRECTLY
+ * (it re-runs the identical all-off baseline at the end of the sweep; two runs of the
+ * same config can differ only by noise), which has no such hole. Both are lower bounds
+ * on the same quantity, so the honest combination is the LARGER: a −1.8 ms reading is
+ * still proof the floor is at least 1.8 ms even if the bracketing pair drifted less.
+ * Passing the measured value is strongly preferred; the derivation stays as the
+ * fallback for reports produced before it existed.
+ *
+ * @param {Array<{costMs?: number|null}>} perEffect
+ * @param {number|null} [measuredFloorMs] the bracketing-pair drift magnitude, when
+ *   the sweep produced one (this file's own `baselineDriftFloor`).
+ * @returns {number|null} the floor in ms, or null when neither source has evidence
+ *   (in which case we know nothing about the noise either way).
+ */
+export function estimateSweepNoiseFloor(perEffect, measuredFloorMs = null) {
+  const measured = Number.isFinite(measuredFloorMs) && measuredFloorMs > 0 ? measuredFloorMs : null;
+  if (!Array.isArray(perEffect) || perEffect.length === 0) return measured;
+  let worstNegative = 0;
+  for (const e of perEffect) {
+    const c = e?.costMs;
+    if (Number.isFinite(c) && c < worstNegative) worstNegative = c;
+  }
+  const derived = worstNegative < 0 ? Math.abs(worstNegative) : null;
+  if (derived == null) return measured;
+  if (measured == null) return derived;
+  return Math.max(derived, measured);
 }
 
 /**
@@ -154,21 +244,60 @@ export function summarizeSweep(raw, effects) {
   // thermal drift cancels instead of biasing all N effect costs. One reading → use it.
   const baseGpu =
     baseGpuOpen != null && baseGpuClose != null ? (baseGpuOpen + baseGpuClose) / 2 : (baseGpuOpen ?? baseGpuClose);
-  // THE MEASURED RESOLUTION FLOOR. Two runs of a BY-CONSTRUCTION identical config can
-  // only differ by noise, so this gap is the smallest cost this run is entitled to claim.
+  // THE MEASURED RESOLUTION FLOOR, HALF ONE — the bracketing pair. Two runs of a
+  // BY-CONSTRUCTION identical config can only differ by noise.
   const baselineDrift = baseGpuOpen != null && baseGpuClose != null ? baseGpuClose - baseGpuOpen : null;
-  const noiseFloor = baselineDrift == null ? null : Math.abs(baselineDrift);
+  const baselineDriftFloor = baselineDrift == null ? null : Math.abs(baselineDrift);
   const allGpu = num(allCfg.gpuMs);
   const totalEffectGpu = baseGpu != null && allGpu != null ? allGpu - baseGpu : null;
 
-  const perEffect = list
-    .map((e) => {
-      const r = safeRaw[e.id] ?? {};
-      const solo = num(r.gpuMs);
-      const cost = baseGpu != null && solo != null ? solo - baseGpu : null;
+  // PASS 1 — raw costs only, before any resolved/suspicious labelling. Needed
+  // up front because the FLOOR itself (below) depends on seeing every effect's
+  // cost first — the worst negative among THEM, not just the bracketing pair.
+  const rawCosts = list.map((e) => {
+    const r = safeRaw[e.id] ?? {};
+    const solo = num(r.gpuMs);
+    const cost = baseGpu != null && solo != null ? solo - baseGpu : null;
+    return { e, r, solo, cost };
+  });
+
+  // THE MEASURED RESOLUTION FLOOR, HALF TWO, RECONCILED — the larger of the
+  // bracketing-pair drift and the worst negative reading among THIS RUN's own
+  // effects (estimateSweepNoiseFloor's own doc: both are lower bounds on the
+  // same quantity, and the honest combination is the larger). Fixed 2026-08-06
+  // — a live report showed 5 effects marked `resolved:true` HERE (this
+  // function used the bracketing-pair floor alone, 0.1ms that run) while the
+  // SAME numbers were rejected as `sweepUnresolvable:'below-noise-floor'` in
+  // perf-report.js's combined effects[] (which already combined both floors,
+  // landing on 1.35ms) — one report, two disagreeing verdicts on one number.
+  const noiseFloor = estimateSweepNoiseFloor(
+    rawCosts.map(({ cost }) => ({ costMs: cost })),
+    baselineDriftFloor
+  );
+
+  const perEffect = rawCosts
+    .map(({ e, r, solo, cost }) => {
       // `null` = no floor was measured (an old report, or a one-baseline sweep) — that is
       // "unknown", NOT "resolved", and must not read as a clean bill of health.
-      const resolved = cost == null || noiseFloor == null ? null : Math.abs(cost) > noiseFloor;
+      //
+      // POSITIVE and clear of the floor — not `Math.abs(cost) > noiseFloor` (THIRD
+      // post-mortem, this file's header). An effect cannot cost less than zero; a
+      // negative reading big enough to clear the floor is a systematic bias (warm-up
+      // drift, most likely), not a measured saving, and must not read as "resolved".
+      const resolved = cost == null || noiseFloor == null ? null : cost > noiseFloor;
+      // A negative cost past the BRACKETING-PAIR floor is a DIFFERENT finding from
+      // "inside the noise" — it says something during the run made this look cheaper
+      // than baseline, and formatCost gives it its own label rather than folding it
+      // into "< noise". Compared against `baselineDriftFloor`, NOT the reconciled
+      // `noiseFloor` above — the reconciled floor is defined as (among other things)
+      // the worst negative reading ACROSS ALL effects, so no single effect's own
+      // magnitude can ever exceed it (it can at best tie, if it IS that worst
+      // reading); comparing a cost against a floor partly built FROM that same cost
+      // would make this permanently unreachable. `baselineDriftFloor` — the
+      // bracketing pair alone, independent of any individual effect's reading — is
+      // the honest, non-circular comparison: "bigger than what re-measuring the
+      // SAME idle scene twice already told us to expect from noise alone".
+      const suspiciousNegative = cost != null && cost < 0 && Math.abs(cost) > (baselineDriftFloor ?? 0);
       // A PERCENTAGE OF NOISE IS NOT A PERCENTAGE. The live reports that prompted this
       // printed "−64.3% of effects" for a −1.8 ms reading on an effect that cannot have a
       // negative cost. Suppress the share when the underlying ms is unresolvable; keep the
@@ -181,6 +310,7 @@ export function summarizeSweep(raw, effects) {
         gpuMsSolo: round2(solo),
         costMs: round2(cost),
         resolved,
+        suspiciousNegative,
         gpuP95: round2(num(r.gpuP95)),
         gpuSampleCount: r.gpuSampleCount ?? 0,
         pctOfEffects: pct,
@@ -203,8 +333,51 @@ export function summarizeSweep(raw, effects) {
   const feltUnderstated = allGpu != null && allFelt != null && allGpu > allFelt;
   const impliedOtherMs = allGpu != null && allFelt != null && !feltUnderstated ? round2(allFelt - allGpu) : null;
 
+  // ---- notes: permanent caveats + this-run-specific warnings, always plain language ----
+  const notes = [];
+  const anySuspiciousNegative = perEffect.some((e) => e.suspiciousNegative);
+  const anyResolved = perEffect.some((e) => e.resolved === true);
+  if (anyResolved) {
+    notes.push(
+      "Each effect's % is its OWN share of totalEffectGpuMs (all-on minus baseline), measured " +
+        'independently — solo readings do not have to sum to the whole stack (driver caching, shared ' +
+        'GPU state and per-effect noise all break the arithmetic a little), so shares can legitimately ' +
+        'add up to more or less than 100%. Treat them as a rough ranking, not an exact partition.'
+    );
+  }
+  if (anySuspiciousNegative) {
+    notes.push(
+      "⚠ One or more effects read CHEAPER than the baseline by more than this run's own noise floor " +
+        '(marked "drift, not cost" below). That is not a real saving — an effect cannot cost less than ' +
+        'zero — it means something changed systematically DURING the run (most often the GPU still ' +
+        'boost-clocking up under load). Re-run with a longer warmupFrames, or cross-check the suspect ' +
+        "effect against the per-zone Profile report, which doesn't depend on a drifting baseline at all."
+    );
+  }
+  // The whole-stack delta is itself just another two-point measurement, subject to the
+  // exact same drift/noise as any single effect — if IT can't clear the floor, every
+  // percentage computed against it is a share of a number this run cannot resolve either.
+  if (totalEffectGpu != null && noiseFloor != null && Math.abs(totalEffectGpu) <= noiseFloor) {
+    notes.push(
+      `⚠ totalEffectGpuMs (${round2(totalEffectGpu)}ms) is itself at or below this run's noise floor ` +
+        `(${round2(noiseFloor)}ms) — every per-effect percentage below is a share of a number this run ` +
+        'genuinely could not resolve. The ms figures are still the best available reading; the rankings ' +
+        'and percentages are not.'
+    );
+  }
+  if (baselineDrift != null && baseGpu > 0 && Math.abs(baselineDrift) / baseGpu > 0.03) {
+    notes.push(
+      `Notable drift this run: the closing baseline differs from the opening one by ` +
+        `${round2(baselineDrift)}ms (${round1((Math.abs(baselineDrift) / baseGpu) * 100)}% of the baseline ` +
+        'itself) — consistent with the GPU still reaching steady clock speed partway through the sweep. ' +
+        'A longer warmupFrames (or simply re-running once the scene has already been panning for a bit) ' +
+        'should shrink this.'
+    );
+  }
+
   return {
     perEffect,
+    notes,
     baseline: {
       gpuMs: round2(baseGpu),
       gpuSampleCount: base.gpuSampleCount ?? 0,
@@ -259,11 +432,15 @@ export function formatOther(v) {
  * Display a per-effect GPU cost against the run's own measured floor. An unresolvable
  * reading keeps its raw number (nothing is hidden) but is stated as being below the floor,
  * so it can never be read as a ranked result. `resolved === null` means no floor was
- * measured — "unknown", which is NOT the same as "fine".
- * @param {{costMs:number|null, resolved:boolean|null}} e
+ * measured — "unknown", which is NOT the same as "fine". `suspiciousNegative` (THIRD
+ * post-mortem, this file's header) gets its OWN label: a negative reading big enough to
+ * clear the floor is not "we can't tell" (that's `resolved === false` alone), it is "this
+ * run's own evidence says something biased the measurement, and it wasn't the effect".
+ * @param {{costMs:number|null, resolved:boolean|null, suspiciousNegative?:boolean}} e
  */
 export function formatCost(e) {
   const s = formatMs(e?.costMs);
+  if (e?.suspiciousNegative) return `⚠ drift, not cost (${s})`;
   if (e?.resolved === false) return `< noise (${s})`;
   if (e?.resolved == null) return `${s} (unverified floor)`;
   return s;
@@ -316,22 +493,41 @@ export async function waitForGpuSamples(harness, target, opts = {}) {
  * ALWAYS restores every effect to its real cascade in `finally`, even on error (and
  * disarms the probe + clears frame stats), so a sweep can never leave the scene forced
  * or its own throttling misreported as real hitches in the next diagnostics read.
+ *
+ * OPTIONAL GPU WARM-UP FIRST (THIRD post-mortem, this file's header): forces every
+ * effect ON — the heaviest config, the same shape `__all__` measures — and waits
+ * `warmupFrames` before the timed portion even begins. Off the measured clock entirely
+ * (no `raw` entry, no onProgress `felt`/`gpu` phase), it exists purely to let a GPU still
+ * ramping up its clocks under load finish ramping BEFORE any config is timed, rather than
+ * during the run where the two-baseline average can only partially correct for it.
  * @param {object} harness see the file header
  * @param {{settleFrames?:number, feltFrames?:number, gpuSampleTarget?:number,
- *   pollFrames?:number, maxGpuPolls?:number, onProgress?:Function, waitFrames?:Function}} [opts]
+ *   pollFrames?:number, maxGpuPolls?:number, warmupFrames?:number, onProgress?:Function,
+ *   waitFrames?:Function}} [opts]
  */
 export async function runSweep(harness, opts = {}) {
   const {
-    settleFrames = 20,
-    feltFrames = 60,
+    // RAISED 2026-08-06 (author: "I do not mind if you make the report generation
+    // take much longer, accuracy is more important"). This tool now only ever
+    // runs as ONE HALF of the combined Performance Report button, never a quick
+    // check nobody minds re-running — so every knob below is set for the
+    // tightest floor this instrument can deliver, not the fastest one.
+    settleFrames = 45,
+    feltFrames = 120,
     // 20 was not enough to resolve most effects: two live sweeps put nine of eleven
     // readings inside their own noise, several of them negative. The median's error falls
     // as ~1/√n, so doubling the target buys ~1.4× tighter costs for ~1s more per config.
     // `summary.noiseFloorMs` is now the signal for whether even this is enough — if the
     // floor comes back larger than the effect being chased, raise this, don't squint.
-    gpuSampleTarget = 40,
+    gpuSampleTarget = 90,
     pollFrames = 4,
-    maxGpuPolls = 120,
+    maxGpuPolls = 240,
+    // ~180 frames is a few seconds at any plausible frame rate — long enough for a GPU's
+    // boost-clock ramp to settle (the mechanism behind the drift a live report showed:
+    // gpuMs climbing ~19.3ms→23.4ms over the course of a run). Raised further alongside
+    // the rest of this run's knobs — a colder start (first sweep of a session) deserves
+    // more margin than a mid-session re-run, and this tool has no way to tell them apart.
+    warmupFrames = 300,
     onProgress = () => {},
     waitFrames = defaultWaitFrames,
   } = opts;
@@ -339,6 +535,11 @@ export async function runSweep(harness, opts = {}) {
   const configs = buildSweepConfigs(effects);
   const raw = {};
   try {
+    if (warmupFrames > 0 && effects.length > 0) {
+      onProgress({ index: -1, total: configs.length, label: 'GPU warm-up', phase: 'warmup' });
+      for (const e of effects) harness.setForcedEnabled(e.id, true);
+      await waitFrames(warmupFrames);
+    }
     for (let ci = 0; ci < configs.length; ci++) {
       const cfg = configs[ci];
       harness.setGpuProbe(false);
@@ -374,47 +575,56 @@ export async function runSweep(harness, opts = {}) {
     for (const e of effects) harness.setForcedEnabled(e.id, null); // restore the real cascade
     harness.resetFrameStats?.(); // leave the session's own diagnostics clean afterward
   }
-  return { effects, configs, raw, summary: summarizeSweep(raw, effects) };
+  // Scene/floor/resolution/build — so a report pasted back later, or compared against a
+  // previous one, says what it actually ran against instead of leaving that to memory.
+  // Optional: an older or minimal harness without `getContext` still returns a full report.
+  const context = harness.getContext?.() ?? null;
+  return { effects, configs, context, raw, summary: summarizeSweep(raw, effects) };
 }
 
 // ---- UI (browser-verified) ----------------------------------------------
+//
+// Clipboard copy is no longer this file's job (2026-08-06): the sweep only ever runs
+// as one phase of boot.js's combined action now, and every action already gets
+// click→run→copy→status for free from debug-panel-controls.js's `makeRunnable` — a
+// second copy of that logic here would just be a second place for it to drift.
 
-/** Copy text to the clipboard, falling back to a hidden textarea + execCommand where
- * the async Clipboard API is unavailable. Mirrors debug-panel.js's own (unexported)
- * helper — small enough that duplicating it beats coupling the two modules over it. */
-async function copyToClipboard(text) {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      /* fall through */
-    }
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
-}
+/** The DOM's own placeholder text — extracted so `renderResult(null)` (nothing has run
+ * yet) and the panel's initial state say the exact same thing, never two different
+ * "nothing here" messages that could drift apart. */
+const NO_RESULT_YET =
+  'No sweep result yet — run "🔬 Performance Report" above. It runs this sweep as one ' +
+  'half of a combined CPU + GPU measurement.';
 
 /**
- * Create the floating panel. Returns `{ open }` — boot registers a debug-panel action
- * that calls it. The panel builds lazily on first open.
- * @param {object} harness see the file header
+ * Create the embeddable per-effect GPU cost DISPLAY. Returns `{ el, renderResult,
+ * setStatus }` — a plain (non-floating) DOM node the caller mounts wherever it likes,
+ * plus two methods the caller drives from outside. Built eagerly, once, and the SAME
+ * node every time — boot.js registers it via `registerPanel(id, label, () => perfLab.el,
+ * {zone:'performance'})`, and debug-panel.js's Performance Center remounts that stable
+ * reference on every repaint, so a result on screen survives an unrelated registration
+ * elsewhere in the panel instead of vanishing.
+ *
+ * REFACTORED 2026-08-06 (twice the same day):
+ *   1. From a `position:fixed` floating overlay (`{ open() }`) into a plain embeddable
+ *      element — author directive: "move all performance monitoring things into a
+ *      single space which becomes the only place for performance related tools". The
+ *      logic above this point ALSO picked up its own fixes the same round (THIRD
+ *      post-mortem, this file's header): sign-aware `resolved`, `suspiciousNegative`,
+ *      `notes`, the warm-up phase, `context`.
+ *   2. From a SELF-TRIGGERING panel (its own "Run sweep" button, calling `runSweep`
+ *      itself) into a pure DISPLAY, no button, no `harness` param, driven entirely by
+ *      `renderResult`/`setStatus` — author directive: "I don't want two separate
+ *      buttons when a single report button would be more useful". The sweep now only
+ *      ever runs as one phase of boot.js's single combined "🔬 Performance Report"
+ *      action, alongside the per-zone CPU+GPU profile; this panel just shows whichever
+ *      half of that combined result is its own.
  */
-export function createPerfLab(harness) {
-  let panel = null;
-  let running = false;
+export function createPerfLab() {
+  if (typeof document === 'undefined') {
+    log.error('perf lab needs a DOM (no document) — returning a null element, not a floating panel to fall back to');
+    return { el: null, renderResult: () => {}, setStatus: () => {} };
+  }
 
   function el(tag, style, text) {
     const n = document.createElement(tag);
@@ -423,112 +633,107 @@ export function createPerfLab(harness) {
     return n;
   }
 
-  function build() {
-    const p = el('div', {
-      position: 'fixed',
-      top: '64px',
-      right: '16px',
-      zIndex: '2147483646',
-      width: '380px',
-      maxHeight: '80vh',
-      overflow: 'auto',
-      background: '#12161c',
-      color: '#dce3ea',
-      font: '12px/1.45 ui-monospace, Menlo, Consolas, monospace',
-      border: '1px solid rgba(143,214,255,0.25)',
-      borderRadius: '10px',
-      boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
-      padding: '12px 14px',
-    });
+  const root = el('div', {
+    width: '100%',
+    background: '#12161c',
+    color: '#dce3ea',
+    font: '12px/1.45 ui-monospace, Menlo, Consolas, monospace',
+    border: '1px solid rgba(143,214,255,0.25)',
+    borderRadius: '10px',
+    padding: '12px 14px',
+    boxSizing: 'border-box',
+  });
 
-    const head = el('div', {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      marginBottom: '8px',
-    });
-    head.appendChild(el('div', { fontWeight: 'bold', color: '#8fd6ff' }, '🔬 Performance Lab'));
-    const close = el('button', btnStyle('#2a3340'), '✕');
-    close.onclick = () => {
-      p.style.display = 'none';
-    };
-    head.appendChild(close);
-    p.appendChild(head);
+  const head = el('div', { fontWeight: 'bold', color: '#8fd6ff', marginBottom: '8px' }, '🔬 Per-effect GPU cost');
+  root.appendChild(head);
 
-    p.appendChild(
-      el(
-        'div',
-        { opacity: '0.75', marginBottom: '10px' },
-        'Measures each effect’s real GPU cost by turning it off→on. The scene flickers for a few seconds during a run, then restores.'
-      )
-    );
+  const status = el('div', { margin: '0 0 6px', minHeight: '16px', opacity: '0.85' }, '');
+  root.appendChild(status);
 
-    const runBtn = el('button', btnStyle('#1f6feb', true), 'Run sweep');
-    p.appendChild(runBtn);
+  const results = el('div', { opacity: '0.6' }, NO_RESULT_YET);
+  root.appendChild(results);
 
-    const status = el('div', { margin: '10px 0 6px', minHeight: '16px', opacity: '0.85' }, '');
-    p.appendChild(status);
-
-    const results = el('div', {});
-    p.appendChild(results);
-
-    runBtn.onclick = async () => {
-      if (running) return;
-      running = true;
-      runBtn.disabled = true;
-      runBtn.style.opacity = '0.5';
-      results.textContent = '';
-      try {
-        const out = await runSweep(harness, {
-          onProgress: (pr) => {
-            const phaseLabel = pr.phase === 'gpu' ? 'GPU (throttled)' : 'felt';
-            status.textContent = `Measuring ${pr.index + 1}/${pr.total} — ${pr.label} (${phaseLabel})…`;
-          },
-        });
-        // The full report (not just the summary) — effects, per-config raw readings
-        // (incl. sample counts and felt stats the summary doesn't surface per-effect),
-        // and the derived summary. Author's ask (2026-07-21): a paste-able JSON report
-        // instead of screenshots.
-        const json = JSON.stringify({ generatedAt: new Date().toISOString(), ...out }, null, 2);
-        const copied = await copyToClipboard(json);
-        status.textContent = copied
-          ? `Done — JSON report copied to your clipboard (${json.length.toLocaleString()} chars).`
-          : 'Done, but clipboard copy failed — the report was logged instead (also in the flight recorder export).';
-        if (!copied) log.warn('clipboard copy failed — full report follows:', json);
-        renderResults(results, out.summary);
-      } catch (err) {
-        log.error('perf sweep failed:', err);
-        status.textContent = `Sweep failed: ${err?.message ?? err}. Effects restored.`;
-      } finally {
-        running = false;
-        runBtn.disabled = false;
-        runBtn.style.opacity = '1';
-      }
-    };
-
-    document.body.appendChild(p);
-    return p;
+  /** Called by boot.js's combined action while the sweep phase is running. */
+  function setStatus(text) {
+    status.textContent = text ?? '';
   }
 
-  function renderResults(container, summary) {
+  /**
+   * Called by boot.js's combined action once its sweep phase finishes. `summary`/
+   * `context` are `runSweep`'s own return shape (`out.summary`, `out.context`) — the
+   * SAME shape this panel already rendered when it triggered its own runs, so nothing
+   * about `renderResults` below needed to change, only who calls it.
+   * @param {object|null} summary - null clears back to the placeholder (e.g. the
+   *   combined run failed before the sweep phase ever started).
+   * @param {object|null} [context]
+   */
+  function renderResult(summary, context) {
+    if (!summary) {
+      results.textContent = '';
+      results.style.opacity = '0.6';
+      results.textContent = NO_RESULT_YET;
+      return;
+    }
+    results.style.opacity = '1';
+    renderResults(results, summary, context);
+  }
+
+  function renderResults(container, summary, context) {
     container.textContent = '';
     const budget = 8.33; // 120Hz frame budget; the line a frame must not cross to feel smooth
 
-    container.appendChild(
-      el('div', { fontWeight: 'bold', margin: '6px 0 4px', color: '#8fd6ff' }, 'Per-effect GPU cost')
-    );
+    // SESSION CONTEXT FIRST — so a screenshot or a pasted-back report says what it ran
+    // against without anyone having to remember (2026-08-06: a live report reviewed with
+    // no scene/floor/resolution attached at all — impossible to tell "faster" from
+    // "lighter scene" a week later). Absent gracefully: an older/minimal harness without
+    // getContext still renders the rest of the report exactly as before.
+    if (context) {
+      const c = el('div', { opacity: '0.6', marginBottom: '8px' });
+      const res = context.resolution
+        ? `${context.resolution.w}×${context.resolution.h}@${context.resolution.pixelRatio}x`
+        : '—';
+      c.textContent =
+        `${context.sceneName ?? 'unknown scene'} · floor ${context.floorIndex ?? 0} · ${res} · ` +
+        `v${context.msaVersion ?? '?'} · ${context.enabledEffects?.length ?? 0} effect(s) enabled`;
+      container.appendChild(c);
+    }
+
+    // No inner "Per-effect GPU cost" heading here — the panel's own static header
+    // (outside `renderResults`, built once in createPerfLab) already says that.
     const table = el('table', { width: '100%', borderCollapse: 'collapse' });
     table.appendChild(row(['Effect', 'GPU cost', '% of fx', 'P95'], true));
     if (summary.perEffect.length === 0) table.appendChild(row(['(no effects registered)', '', '', '']));
     for (const e of summary.perEffect) {
       const tr = row([e.label, formatCost(e), e.pctOfEffects == null ? '—' : `${e.pctOfEffects}%`, formatMs(e.gpuP95)]);
       tr.title = `n=${e.gpuSampleCount} GPU samples`; // low-confidence readings are visible on hover, not hidden
-      // An unresolvable row is DIMMED, not deleted — the number stays readable, it just
-      // stops competing for the eye with the ones the run can actually stand behind.
-      if (e.resolved === false) tr.style.opacity = '0.45';
+      if (e.suspiciousNegative) {
+        // A DIFFERENT signal from "unresolved" — highlighted, not dimmed: this is the run's
+        // own evidence saying something biased the measurement, worth a second look, not
+        // just "not enough data".
+        tr.style.color = '#ffcf7a';
+      } else if (e.resolved === false) {
+        // An unresolvable row is DIMMED, not deleted — the number stays readable, it just
+        // stops competing for the eye with the ones the run can actually stand behind.
+        tr.style.opacity = '0.45';
+      }
       table.appendChild(tr);
     }
     container.appendChild(table);
+
+    if (summary.notes?.length) {
+      const notesBox = el('div', {
+        marginTop: '6px',
+        padding: '8px',
+        background: 'rgba(255,207,122,0.08)',
+        border: '1px solid rgba(255,207,122,0.25)',
+        borderRadius: '6px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '4px',
+      });
+      for (const n of summary.notes) notesBox.appendChild(el('div', { opacity: '0.85' }, n));
+      container.appendChild(notesBox);
+    }
 
     const floor = num(summary.noiseFloorMs);
     const unresolved = summary.perEffect.filter((e) => e.resolved === false).length;
@@ -620,27 +825,5 @@ export function createPerfLab(harness) {
     grid.appendChild(b);
   }
 
-  function btnStyle(bg, primary) {
-    return {
-      background: bg,
-      color: '#fff',
-      border: 'none',
-      borderRadius: '6px',
-      padding: primary ? '7px 14px' : '2px 8px',
-      cursor: 'pointer',
-      font: 'inherit',
-      fontWeight: primary ? '600' : '400',
-    };
-  }
-
-  return {
-    open() {
-      if (typeof document === 'undefined') {
-        log.error('perf lab needs a DOM (no document)');
-        return;
-      }
-      if (!panel) panel = build();
-      panel.style.display = 'block';
-    },
-  };
+  return { el: root, renderResult, setStatus };
 }

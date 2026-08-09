@@ -43,6 +43,15 @@
 import { HISTOGRAM_BUCKETS } from './flight-recorder.js';
 import { medianOf, percentileOf } from './gpu-probe.js';
 import { DEFAULT_PASS_BUDGET_MS, PASS_ZONE_PREFIX, isSparseCadence } from './perf-zones.js';
+// MOVED to perf-lab.js 2026-08-06 (the sweep's own module — this is entirely
+// about interpreting the SWEEP's noise, not the zone/effect merge this file
+// does) and re-exported here for backward compatibility. `summarizeSweep`
+// (perf-lab.js) now calls this SAME function internally so the standalone
+// sweep display and this file's `effects[]` attribution can never disagree
+// about which readings are trustworthy — see that file's own history for the
+// live report that caught them disagreeing.
+import { estimateSweepNoiseFloor } from './perf-lab.js';
+export { estimateSweepNoiseFloor };
 
 /** Coverage at or above this and the per-zone breakdown is trustworthy. */
 export const COVERAGE_GOOD = 0.85;
@@ -576,62 +585,6 @@ export function attributeZonesToEffects({
 }
 
 /**
- * Estimate the sweep's own noise floor, from the sweep's own results.
- *
- * ============================================================================
- * WHY THIS EXISTS — the sweep is a DIFFERENCE OF TWO LARGE NUMBERS
- * ============================================================================
- *
- * A sweep cost is `soloFrameGpu - baselineFrameGpu`, each a median of ~20
- * whole-frame samples. At a 21.6 ms frame, resolving a 0.1 ms effect means
- * resolving 0.5% of each measurement — far below the run-to-run variance of a
- * real GPU. The tell is unmistakable and it showed up on the first working
- * sweep (2026-07-27): **negative costs.** Vegetation -0.9 ms, doorGraphics
- * -1.1 ms, water -0.8 ms, and `uiWindowShadow` — which was DISABLED and has no
- * draw call at all by design — charged +0.6 ms.
- *
- * A negative GPU cost is physically impossible, so every negative reading is
- * pure noise, and its magnitude is a DIRECT, SELF-CALIBRATING lower bound on how
- * much noise this particular sweep carried. Anything inside ±that band is
- * unresolvable and must not be reported as a number.
- *
- * This is deliberately empirical rather than a tuned constant: the floor scales
- * with the machine, the scene and the frame cost, exactly as it should
- * (`feedback_probed_constants_vs_derived` — derive it once from the data, do not
- * hardcode a guess).
- *
- * ⚠️ THIS IS A LOWER BOUND, AND IT HAS A HOLE: it can only see noise that happened
- * to land on the negative side of an effect that happened to be cheap. A sweep where
- * every effect read slightly POSITIVE returns `null` — "no evidence" — even though the
- * noise obviously did not go away. `perf-lab.js` now measures the floor DIRECTLY (it
- * re-runs the identical all-off baseline at the end of the sweep; two runs of the same
- * config can differ only by noise), which has no such hole. Both are lower bounds on
- * the same quantity, so the honest combination is the LARGER: a −1.8 ms reading is
- * still proof the floor is at least 1.8 ms even if the bracketing pair drifted less.
- * Passing the measured value is strongly preferred; the derivation stays as the
- * fallback for reports produced before it existed.
- *
- * @param {Array<{costMs?: number|null}>} perEffect
- * @param {number|null} [measuredFloorMs] `summarizeSweep`'s `noiseFloorMs` — the
- *   bracketing-baseline drift, when the sweep produced one.
- * @returns {number|null} the floor in ms, or null when neither source has evidence
- *   (in which case we know nothing about the noise either way).
- */
-export function estimateSweepNoiseFloor(perEffect, measuredFloorMs = null) {
-  const measured = Number.isFinite(measuredFloorMs) && measuredFloorMs > 0 ? measuredFloorMs : null;
-  if (!Array.isArray(perEffect) || perEffect.length === 0) return measured;
-  let worstNegative = 0;
-  for (const e of perEffect) {
-    const c = e?.costMs;
-    if (Number.isFinite(c) && c < worstNegative) worstNegative = c;
-  }
-  const derived = worstNegative < 0 ? Math.abs(worstNegative) : null;
-  if (derived == null) return measured;
-  if (measured == null) return derived;
-  return Math.max(derived, measured);
-}
-
-/**
  * Roll a set of sparse (bake/event) zones into the only three numbers that mean
  * anything for work that does not run every frame: how often, how bad when it
  * does, and what it costs spread out. Deliberately NOT a mean over all frames.
@@ -932,6 +885,23 @@ export function deriveFindings({
     }
   }
 
+  // CPU-ONLY EFFECTS ARE A REAL MEASUREMENT, NOT A GAP — but a reader scanning
+  // effects[] for a verdict sees `declared.verdict:'unmeasured'` and nothing
+  // else unless told to look at zoneCpuMs. 2026-08-05: the author caught this
+  // report claiming these effects were invisible to it, when the zone profiler
+  // (CPU+GPU per zone since specular-sync/vegetation-rank-stamp/wind-bake were
+  // wired) had already measured them — the gap was legibility, not coverage.
+  for (const e of effects ?? []) {
+    if (e.method === 'cpu-zone-only' && Number.isFinite(e.zoneCpuMs)) {
+      out.push({
+        severity: 'low',
+        id: `cpu-only-cost:${e.id}`,
+        text: `${e.id}: ${e.zoneCpuMs}ms/frame CPU, no GPU zone and no resolved sweep reading. This effect has no draw-call GPU cost — its cost lives entirely on the CPU side, so declared.verdict reads 'unmeasured' by design, not by a hole in the instrument.`,
+        evidence: { effect: e.id, zoneCpuMs: e.zoneCpuMs },
+      });
+    }
+  }
+
   // THE SWEEP'S OWN RESOLUTION. Stated before any per-effect sweep number is
   // read, because it decides which of them mean anything at all.
   if (sweepNoiseFloorMs !== null) {
@@ -986,6 +956,7 @@ function buildInterpretation({ attribution, method }) {
     `'unreliable' or 'unmeasured': treat every zone number as "at least this much" and fix the instrument before trusting the picture — findings[] will say what broke.`,
     `THEN read findings[] top-down; it is sorted by severity and already names the single largest cost.`,
     `THEN frame.gapMs vs frame.gpuMs: if gap p95 is far above gpu p95 the bottleneck is CPU or presentation, not shading, and the zones[].cpuMs column is where to look.`,
+    `An effect with method:'cpu-zone-only' (e.g. specular sync, vegetation rank-stamp, wind bake) has a real, measured cost — read effects[].zoneCpuMs. It has no draw-call GPU cost by nature, so declared.verdict reads 'unmeasured' by design, not because the run failed to see it.`,
     `A null is an ABSENCE, never a zero. zones[].gpuAbsentByDeclaration true means the zone contains no draw calls at all; null with that flag false means measurement failed.`,
     `Sparse zones (cadence 'bake'/'event') are excluded from per-frame sums by construction — read their occurrenceRate and maxMs, never their mean, and see findings[] for any that spike over budget.`,
     method?.cpuClockResolutionMs
@@ -1157,6 +1128,16 @@ export function buildPerfReport({
       ids: belowClock.map((r) => r.id),
     },
     effects,
+    // THE RAW SWEEP, ECHOED BACK VERBATIM (2026-08-06) — everything above this
+    // point CONSUMES `sweep` (attributeZonesToEffects, estimateSweepNoiseFloor)
+    // and reshapes it into the zone-oriented `effects[]`/`findings` shape; that
+    // reshaping loses the sweep's OWN per-effect table (baseline/noise-floor/
+    // resolved/suspiciousNegative/pctOfEffects — see perf-lab.js#summarizeSweep)
+    // that its own renderer needs to draw the same table a standalone sweep
+    // shows. Echoing it back lets a caller (boot.js's combined report action)
+    // feed perf-lab's existing, tested display straight from ONE run instead of
+    // re-running the sweep a second time just to get its own shape back.
+    sweepRaw: sweep,
     vram,
     // INSTRUMENT HEALTH, kept separate from the measurements on purpose. An
     // unbalanced bracket or an overflowed query pool is a fault in the tool, and

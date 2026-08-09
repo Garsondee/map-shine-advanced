@@ -31,7 +31,7 @@
  *   scene's floor list. A GETTER: the list is replaced on every scene load and
  *   floor switch, and capturing the array would pin the first scene's floors
  *   forever.
- * @returns {{getWindowMaskRect: Function, getWindowMaskUrl: Function}}
+ * @returns {{getWindowMaskRect: Function, getWindowMaskUrl: Function, getWindowBackgroundItemId: Function}}
  */
 export function createWindowSeams({ maskAuthority, getFloors }) {
   return {
@@ -64,6 +64,35 @@ export function createWindowSeams({ maskAuthority, getFloors }) {
       if (!floor?.id) return null;
       const status = maskAuthority.authoredStatus(floor.id, 'window');
       return status.source === 'authored' ? status.url : null;
+    },
+
+    /**
+     * The depth-authority migration's own seam (2026-08-05), mirroring
+     * `specular-seams.js#getSpecularBackgroundItemId` exactly — the REAL
+     * drawable id `depthAuthority.rankOf` needs for THIS floor's background
+     * item, so the surface subsystem's expected-depth query asks "is
+     * anything ranked above MY OWN background" rather than needing any
+     * floor-index concept of its own.
+     *
+     * ⚠️ THE STRING IS NOT INVENTED — `foundry/scene-layers.js#
+     * collectLevelTextures` builds every Level background item's id as
+     * `` `level:${level.id}:background` `` (its own `consider('background')`
+     * closure), and `floor.id` here IS that SAME `level.id` — the identical
+     * mirror `getSpecularBackgroundItemId` already relies on. One string
+     * assembled from a shared, real field, not a guess at a producer's shape
+     * (`feedback_read_the_producer_never_invent_its_shape`).
+     *
+     * Returns `null` for an unresolved floor — the same "no product, stays
+     * hidden" posture `getWindowMaskUrl` already has, never a fabricated id
+     * that would resolve to nothing in the rank table.
+     *
+     * @param {number} floorIndex
+     * @returns {string|null}
+     */
+    getWindowBackgroundItemId: (floorIndex) => {
+      const floors = getFloors() ?? [];
+      const floor = floors.find((f) => f.index === floorIndex) ?? floors[floorIndex] ?? null;
+      return floor?.id ? `level:${floor.id}:background` : null;
     },
   };
 }

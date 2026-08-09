@@ -19,6 +19,7 @@ import {
   resolveAnchorColorHex,
   resolveAnchorSizePx,
   resolveAnchorLightRadiusPx,
+  resolveAnchorElevationWorldUnits,
 } from '../candle-flame-geometry.js';
 import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL } from '../lighting/point-light-illumination.js';
 
@@ -95,6 +96,38 @@ export function run(t) {
     );
   }
 
+  // --- resolveAnchorElevationWorldUnits — the candle's own absolute height -
+  {
+    ok(
+      'a locked floor + no elevation param -> the floor’s own ground',
+      resolveAnchorElevationWorldUnits({ floorBinding: { mode: 'locked', bottom: 20 }, params: {} }) === 20
+    );
+    ok(
+      'a locked floor + an authored elevation -> floor bottom plus that height',
+      resolveAnchorElevationWorldUnits({ floorBinding: { mode: 'locked', bottom: 20 }, params: { elevation: 8 } }) ===
+        28
+    );
+    ok(
+      'an all-levels binding has nothing to resolve -> undefined, not a guessed 0',
+      resolveAnchorElevationWorldUnits({ floorBinding: { mode: 'all-levels' }, params: { elevation: 8 } }) === undefined
+    );
+    ok(
+      'no floorBinding at all -> undefined',
+      resolveAnchorElevationWorldUnits({ params: { elevation: 8 } }) === undefined
+    );
+    ok(
+      'a locked binding with a non-finite bottom -> undefined',
+      resolveAnchorElevationWorldUnits({ floorBinding: { mode: 'locked', bottom: NaN }, params: {} }) === undefined
+    );
+    ok(
+      'a non-finite elevation param is treated as 0, never NaN',
+      resolveAnchorElevationWorldUnits({
+        floorBinding: { mode: 'locked', bottom: 20 },
+        params: { elevation: 'nope' },
+      }) === 20
+    );
+  }
+
   // --- candleCirclePolygon -------------------------------------------------
   {
     const poly = candleCirclePolygon(100, 200, 50, 16);
@@ -162,6 +195,25 @@ export function run(t) {
       approx(clusterCandleAnchors([{ id: 'a', x: 1, y: 2, windExposure: 7 }], 200)[0].exposure, 1) &&
         approx(clusterCandleAnchors([{ id: 'a', x: 1, y: 2, windExposure: -3 }], 200)[0].exposure, 0)
     );
+
+    // --- elevation aggregation (2026-08-05) -- same "net a blend, not
+    // either extreme" reasoning as windExposure above, applied to height.
+    const mixedElevation = clusterCandleAnchors(
+      [
+        { id: 'a', x: 100, y: 100, elevation: 10 },
+        { id: 'b', x: 110, y: 105, elevation: 30 },
+      ],
+      200
+    );
+    ok('a cluster AVERAGES member elevation', mixedElevation.length === 1 && approx(mixedElevation[0].elevation, 20));
+    ok(
+      'an anchor with no elevation counts as 0, matching resolveAnchorElevationWorldUnits’ own default',
+      approx(clusterCandleAnchors([{ id: 'a', x: 1, y: 2 }], 200)[0].elevation, 0)
+    );
+    ok(
+      'a singleton cluster carries that one anchor’s own elevation through unchanged',
+      approx(clusterCandleAnchors([{ id: 'a', x: 1, y: 2, elevation: 42 }], 1)[0].elevation, 42)
+    );
   }
 
   // --- buildCandleLightSources — the descriptor the light pool expects -----
@@ -203,11 +255,26 @@ export function run(t) {
         'color',
         'falloffModel',
         'animation',
+        'elevation',
       ].every((k) => k in L)
     );
     ok(
       'a lone anchor with no windExposure carries the fully-outdoors default (1) onto its light',
       approx(L.windExposure, 1)
+    );
+    ok('a lone anchor with no elevation carries 0 onto its light (never undefined)', approx(L.elevation, 0));
+    ok(
+      "a light's elevation is the cluster's averaged member elevation",
+      approx(
+        buildCandleLightSources(
+          [
+            { id: 'a', x: 100, y: 100, elevation: 12 },
+            { id: 'b', x: 110, y: 105, elevation: 28 },
+          ],
+          { lightRadiusPx: 150, colorHex: '#ffaa00' }
+        )[0].elevation,
+        20
+      )
     );
     ok(
       "a light's windExposure is the cluster's averaged member exposure",

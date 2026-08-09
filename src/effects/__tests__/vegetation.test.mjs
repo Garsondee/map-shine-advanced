@@ -50,9 +50,38 @@ export function run(t) {
   // as rungs land) — it is that BOTH KINDS SHARE ONE PARAM SET, with every
   // per-kind difference living in the kinds table as data. That is what V2
   // failed: two near-identical 2,400-line files, ~50 sliders EACH.
+  //
+  // ⚠️ NAMED, DOCUMENTED EXCEPTION (2026-08-06): `treeHeightFt`/`bushHeightFt`
+  // are genuinely independent per-kind LIVE params, not code-level constants
+  // — the author wants to dial tree and bush height separately (a 25ft tree
+  // beside a 2ft bush), which a single shared dial structurally cannot
+  // express. This mirrors the render-order exception `vegetation.js`'s own
+  // "HOW A KIND SORTS" section already documents (author, 2026-08-01:
+  // "vegetation is a good exception so let's make an exception for it") —
+  // vegetation earns a SECOND, narrowly-scoped exception here for the same
+  // underlying reason: a canopy's real-world properties (sort height,
+  // physical height) are NOT V2-style decorative tuning, they are honest
+  // per-kind physical facts. The broader rule still holds for everything
+  // else — this assertion now checks "every OTHER param", not "every param".
+  const KNOWN_PER_KIND_PARAMS = new Set(['treeHeightFt', 'bushHeightFt']);
   ok(
-    'both kinds share ONE param set — no per-kind params exist at all',
-    Object.keys(VEGETATION_PARAMS).every((k) => !k.startsWith('tree') && !k.startsWith('bush'))
+    'both kinds share ONE param set, except the two NAMED per-kind height params',
+    Object.keys(VEGETATION_PARAMS).every(
+      (k) => KNOWN_PER_KIND_PARAMS.has(k) || (!k.startsWith('tree') && !k.startsWith('bush'))
+    )
+  );
+  ok(
+    'the per-kind exception is EXACTLY these two keys, never silently grown',
+    Object.keys(VEGETATION_PARAMS).filter((k) => k.startsWith('tree') || k.startsWith('bush')).length ===
+      KNOWN_PER_KIND_PARAMS.size
+  );
+  ok(
+    "tree/bush height default to the author's own worked example — tall enough to clear a single story, " +
+      'short enough to stay under a two-story building; a bush low enough only a genuinely low light reaches it',
+    VEGETATION_PARAMS.treeHeightFt.default === 25 &&
+      VEGETATION_PARAMS.bushHeightFt.default === 2 &&
+      VEGETATION_PARAMS.treeHeightFt.category === 'Extent' &&
+      VEGETATION_PARAMS.bushHeightFt.category === 'Extent'
   );
   ok(
     // Raised 2026-07-23 (same day) after the author's own follow-up asked for
@@ -95,6 +124,14 @@ export function run(t) {
     ok(
       "a bush's leaves flutter at a FINER scale than a tree canopy's masses",
       bush.flutterSpaceFreq > tree.flutterSpaceFreq
+    );
+    // A leftover from the old clamped-fraction sort model (superseded
+    // 2026-08-06 by the real, unbounded treeHeightFt/bushHeightFt params
+    // above) would be a silent regression back to a floor-relative fraction
+    // — this is a RED TEST if that field is ever reintroduced by accident.
+    ok(
+      'no kind carries the old passiveElevationFraction field',
+      VEGETATION_KINDS.every((k) => !('passiveElevationFraction' in k))
     );
   }
 

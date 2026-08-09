@@ -18,7 +18,11 @@ export function run(t) {
   {
     const r = validatePassGraph(PASSES);
     t.ok(`THE PASS LIST IS A VALID GRAPH (${r.errors.join(' | ') || 'no errors'})`, r.ok);
-    t.ok('a sane number of passes (10-14, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 14);
+    // Ceiling raised 10->15 when post.dof landed (docs/planning/Depth-of-Field.md)
+    // — the second post-stage effect, deliberately not folded into post.bloom
+    // or the still-unbuilt post.grade seam. Widen deliberately again if a real
+    // pass genuinely earns rung 16; don't just bump the number to silence this.
+    t.ok('a sane number of passes (10-15, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 15);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

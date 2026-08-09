@@ -239,8 +239,9 @@ export const HEIGHT_GATE_SOFTNESS_UNITS = 3;
  * above MY OWN floor's `elevationBottom`", reasoning (in `vt/scene-attr.js`'s
  * own constant doc) that a basement at -40 and a tower floor at +400 "must
  * quantize on the same scale". That reasoning is correct for the question
- * `VegetationKind#passiveElevationFraction` answers — *where inside my own
- * band do I sit* — and catastrophically wrong for the question THIS gate
+ * a canopy's own real height (`vegetation-render.js#vegetationHeightFt`,
+ * `bottom + heightFt`) answers — *how far above my own floor's ground do I
+ * stand* — and catastrophically wrong for the question THIS gate
  * asks, which is inherently cross-floor: *is this light underneath the
  * surface I am looking at*. Normalizing both sides to their own floor's
  * ground ERASES the floor identity that is the entire signal.
@@ -649,7 +650,7 @@ export const DEPTH_FLAG_IS_TILE_MIRROR = 16;
  * band, no unconfigured sentinel — just RANK, a real per-item ordinal
  * (`scene/depth-authority.js`), compared directly. `uLightExpectedDepth` is
  * already the CPU-resolved comparable value
- * (`vt/scene-depth.js#computeLightExpectedDepth`, which ALSO bakes in the
+ * (`vt/scene-depth.js#computeTieSafeExpectedDepth`, which ALSO bakes in the
  * fail-open tie buffer — see that function's own doc for why a bare
  * `computeExpectedStoredDepth` would risk a light occluding its own floor's
  * ground on ordinary float noise); this function has no projection math left
@@ -677,7 +678,7 @@ export const DEPTH_FLAG_IS_TILE_MIRROR = 16;
  *   Omitted → the tile-restrict hard block compiles out; the rank gate alone
  *   still applies.
  * @param {*} args.uLightExpectedDepth - this light's
- *   `computeLightExpectedDepth` result, pushed as a uniform every frame
+ *   `computeTieSafeExpectedDepth` result, pushed as a uniform every frame
  *   (`point-light-pool.js`'s own refresh loop).
  * @returns {*} a float node in [0,1] to multiply into a falloff.
  */
@@ -710,7 +711,7 @@ export function buildDepthHeightGateNode(TSL, { depthHere, flagsHere, uLightExpe
  *
  * @param {object} args
  * @param {number} args.storedDepth - a `buf:scene.depth` DEPTH sample.
- * @param {number} args.expectedDepth - `computeLightExpectedDepth`'s result.
+ * @param {number} args.expectedDepth - `computeTieSafeExpectedDepth`'s result.
  * @param {number} [args.flagsByte=0] - a raw 0-255 `buf:scene.depth` COLOUR
  *   sample's B channel. Omitted → the tile-restrict block never fires.
  * @returns {number} 0 or 1.
@@ -1296,8 +1297,9 @@ export function buildPointLightIlluminationMaterial({
   // Author: "tiles for the covers of lanterns... should be dark because they
   // are above the light sources that make them" — and the same question
   // asked of vegetation (`vt-pan-viewer.js`'s tree/bush overlay, whose own
-  // canopy height rides the SAME channel via `VegetationKind#
-  // passiveElevationFraction`, not its host tile's elevation).
+  // canopy height rides the SAME channel via its live `treeHeightFt`/
+  // `bushHeightFt` — `vegetation-render.js#vegetationHeightFt` — not its
+  // host tile's elevation).
   //
   // SAME SHAPE AS `falloff`/`edgeSoftFactor`, NOT aperture-gobo's deleted
   // first design (see this file's own note just above for why that one was
@@ -1369,14 +1371,22 @@ export function buildPointLightIlluminationMaterial({
       const v = positionWorld.y.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
       return slot.texNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
     };
+    // ⚠️ THE FLOOR SOURCE IS `buf:scene.depth`, NOT `buf:scene.attr` (2026-08-05
+    // — the shadow cascade's receiver half). `blendSunVisibilityAcrossFloors`'s
+    // own `attrFloorIndex01` doc has the argument. `depthFlagsHere` is the SAME
+    // `screenUV` sample the depth HEIGHT gate above already takes (STAGE 2,
+    // 2026-08-04) — reused, never re-sampled (memory:
+    // feedback_composite_only_terms_miss_shared_buffers).
+    const shadowFloorHere = depthFlagsHere ?? attrHere;
     const sunVis =
-      attrHere && blendSunVisibilityAcrossFloors
+      shadowFloorHere && blendSunVisibilityAcrossFloors
         ? blendSunVisibilityAcrossFloors(THREE.TSL, {
-            attrFloorIndex01: attrHere.r,
+            attrFloorIndex01: shadowFloorHere.r,
+            presence: depthFlagsHere ? depthFlagsHere.a : null,
             slots: sunShadowSlotNodes.map((slot) => ({ sunVis: sampleSlot(slot), floorIndex01: slot.uFloorIndex01 })),
           })
-        : // No attr texture (or no injected blend fn) to gate by floor — fall
-          // back to slot 0 alone, the pre-multi-floor behaviour.
+        : // No floor buffer (or no injected blend fn) to gate by — fall back to
+          // slot 0 alone, the pre-multi-floor behaviour.
           sampleSlot(sunShadowSlotNodes[0]);
     backgroundFloor = uBackgroundColor.mul(sunVis);
   }

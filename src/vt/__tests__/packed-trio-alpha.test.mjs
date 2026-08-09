@@ -38,9 +38,27 @@ export function run(t) {
     const policy = packedTrioChannelPolicy();
     ok('the catalog declares a packed trio', !!trio);
     ok('and a channel policy for it', !!policy);
+    // ⚠️ THE OWNER IS DECLARED, NOT INFERRED (2026-08-08). This used to assert
+    // `rasterize === true`, which was the SELECTION RULE as well as the check —
+    // and that rule silently returned no policy at all the moment a second trio
+    // member needed a derived grid. `fire` did: it reads the per-floor grid to
+    // extract fire sources from the painted region, while wanting nothing to do
+    // with the alpha slot (its `absentValue: 0` already says "transparent is
+    // not fire"). Two questions, now two flags.
     ok(
-      `the alpha slot goes to the rasterized member (${policy.alphaOwner} = ${trio[policy.alphaOwner].id})`,
-      trio[policy.alphaOwner].rasterize === true
+      `the alpha slot goes to the DECLARED owner (${policy.alphaOwner} = ${trio[policy.alphaOwner].id})`,
+      trio[policy.alphaOwner].ownsPackedAlpha === true
+    );
+    ok(
+      'exactly one trio member claims the alpha slot',
+      ['r', 'g', 'b'].filter((ch) => trio[ch].ownsPackedAlpha === true).length === 1
+    );
+    // The bug this whole file exists for: a member may need a derived grid
+    // WITHOUT owning transparency. If those two ever collapse back into one
+    // flag, this fails.
+    ok(
+      'a member can be rasterized without owning the alpha slot',
+      ['r', 'g', 'b'].some((ch) => trio[ch].rasterize === true && trio[ch].ownsPackedAlpha !== true)
     );
     // THE regression guard: `r` is what it used to be hardcoded to, and `r` is
     // NOT the kind that needs it. If someone re-hardcodes it this fails.

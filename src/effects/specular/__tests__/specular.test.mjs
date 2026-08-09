@@ -26,8 +26,15 @@ import {
   SPECULAR_DEFAULT_PARALLAX_STRENGTH,
   SPECULAR_DEFAULT_ISLAND_SPREAD,
   SPECULAR_DEFAULT_DRIFT_SPEED,
+  SPECULAR_DEFAULT_PULSE,
+  SPECULAR_DEFAULT_SUN_BIAS,
 } from '../specular-render.js';
-import { SPECULAR_SHEEN_CEILING, SPECULAR_GLINT_CEILING, SPECULAR_INCIDENT_STEEPNESS } from '../specular-pattern.js';
+import {
+  SPECULAR_SHEEN_CEILING,
+  SPECULAR_GLINT_CEILING,
+  SPECULAR_INCIDENT_STEEPNESS,
+  SPECULAR_INCIDENT_KNEE,
+} from '../specular-pattern.js';
 
 export function run(t) {
   const { ok } = t;
@@ -177,6 +184,24 @@ export function run(t) {
     SPECULAR_PARAMS.incidentSteepness.category === 'Response' &&
       SPECULAR_PARAMS.incidentSteepness.default === SPECULAR_INCIDENT_STEEPNESS
   );
+  ok(
+    'incidentKnee exists, in Response, and agrees with the pattern module default',
+    SPECULAR_PARAMS.incidentKnee.category === 'Response' &&
+      SPECULAR_PARAMS.incidentKnee.default === SPECULAR_INCIDENT_KNEE
+  );
+  // ⚠️ THE KNEE MUST DEFAULT BELOW 1, AND THAT IS THE WHOLE POINT OF IT.
+  // At 1 the curve reaches full shine only where incident luma is 1 — a
+  // perfectly white, fully-bright pixel, which nothing in this engine short of
+  // direct noon sun produces, so candle- and lamp-lit metal measured
+  // algebraically DEAD (bench sweep, 2026-08-09; see SPECULAR_INCIDENT_KNEE's
+  // own header for the numbers). A future "tidy-up" that rounds this back to 1
+  // would silently restore that bug, so it is pinned rather than left to a
+  // comment.
+  ok('the knee sits below 1, so real lamps can reach full shine', SPECULAR_PARAMS.incidentKnee.default < 1);
+  ok(
+    'the knee can still be set to 1 — the documented reproduction of pre-knee behaviour',
+    SPECULAR_PARAMS.incidentKnee.max >= 1
+  );
   // Headroom the author explicitly asked for — high enough to genuinely
   // "brute-force punch through", not just a token bump.
   ok('shine strength now reaches well past its old ceiling of 3', SPECULAR_PARAMS.strength.max >= 10);
@@ -211,9 +236,8 @@ export function run(t) {
     SPECULAR_PARAMS.patternScalePx.default === SPECULAR_DEFAULT_PATTERN_SCALE_PX
   );
   ok(
-    'parallaxStrength: schema and render module agree, and it now defaults to its own max',
-    SPECULAR_PARAMS.parallaxStrength.default === SPECULAR_DEFAULT_PARALLAX_STRENGTH &&
-      SPECULAR_PARAMS.parallaxStrength.default === SPECULAR_PARAMS.parallaxStrength.max
+    'parallaxStrength: schema and render module agree on the live-confirmed value',
+    SPECULAR_PARAMS.parallaxStrength.default === SPECULAR_DEFAULT_PARALLAX_STRENGTH
   );
   ok(
     'islandSpread: schema and render module agree, and it now defaults to its own max',
@@ -225,9 +249,45 @@ export function run(t) {
     SPECULAR_PARAMS.driftSpeed.default === SPECULAR_DEFAULT_DRIFT_SPEED && SPECULAR_PARAMS.driftSpeed.default === 0
   );
   // shimmerGain/saturation/sheenCeiling/glintCeiling/incidentSteepness are
-  // already pinned above/earlier — their NEW live-confirmed values (2.2, 2,
-  // 1, 28, 2.85) flow through those SAME assertions with no test changes,
-  // which is the entire point of pinning by equality rather than by literal.
+  // already pinned above/earlier by EQUALITY, not by literal — their values
+  // change again below (ROUND 21) and flow through those SAME assertions
+  // with no test changes, which is the entire point of this pinning shape.
+  // (An earlier version of this comment named the Round 18 numbers directly;
+  // that list was already stale by Round 19's sheenCeiling revert before
+  // anyone touched it again — a literal snapshot in a comment rots exactly
+  // like one in an assertion would, it just fails a human reader instead of
+  // CI. Read the constants' own current values, never a comment's copy.)
+
+  // ── ROUND 21 (2026-08-05) — SECOND SET OF LIVE-CONFIRMED DEFAULTS. The
+  // author dialled the whole panel again on a real scene (a fresh screenshot,
+  // not a request to try something) — saturation/shimmerGain/patternScalePx/
+  // incidentSteepness/sheenCeiling/glintCeiling/parallaxStrength/pulse/
+  // sunBias all moved. The first seven are already covered by the SAME
+  // equality pins written for Round 16-18 above; `pulse` and `sunBias` had
+  // never been pinned at all until now — closing that gap, not a change
+  // these two constants specifically demanded on their own.
+  ok(
+    'pulse: schema and render module agree on the live-confirmed value',
+    SPECULAR_PARAMS.pulse.default === SPECULAR_DEFAULT_PULSE
+  );
+  ok(
+    'sunBias: schema and render module agree on the live-confirmed value',
+    SPECULAR_PARAMS.sunBias.default === SPECULAR_DEFAULT_SUN_BIAS
+  );
+  // ⚠️ THE SHEEN/GLINT INVERSION, STATED SO A FUTURE READER DOES NOT "FIX"
+  // IT: sheenCeiling is now exactly 0 (the base shine term is algebraically
+  // eliminated, `SPECULAR_SHEEN_CEILING`'s own header has the arithmetic)
+  // and glintCeiling is now its schema's own max — every visible highlight
+  // comes from the shimmer alone. Pinned as a relationship, not a repeat of
+  // the literal-comment mistake just above.
+  ok(
+    'the sheen ceiling is exactly zero — the base shine term is intentionally eliminated',
+    SPECULAR_PARAMS.sheenCeiling.default === 0
+  );
+  ok(
+    'the glint ceiling now defaults to its own schema max, carrying the whole effect alone',
+    SPECULAR_PARAMS.glintCeiling.default === SPECULAR_PARAMS.glintCeiling.max
+  );
 
   // --- it registers through the ONE door ----------------------------------
   const registry = createEffectRegistry();

@@ -38,8 +38,14 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { buildWindowSurfaceMaterial, WINDOW_MASK_IMAGE_SCALE } from './window-render.js';
+import {
+  buildWindowSurfaceMaterial,
+  WINDOW_MASK_IMAGE_SCALE,
+  WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB,
+  WINDOW_DEFAULT_NIGHT_TINT_RGB,
+} from './window-render.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
+import { computeSeedOffset } from './window-glass.js';
 
 const log = createLogger('WindowSurface');
 
@@ -50,6 +56,21 @@ const log = createLogger('WindowSurface');
 const WINDOW_BOUNDS_PAD_PX = 8;
 
 /**
+ * A → B → C over one 0..1 signal each, the SAME nested-two-stop idiom
+ * `sky-access.js#createSkyHandle` uses for its own dayFactor01/twilight01
+ * fill colour (night→twilight→day) — computed here in plain JS, once per
+ * frame, rather than as TSL node maths, because the inputs are three scalars
+ * and the whole point is to push ONE resolved uniform, not re-derive a lerp
+ * per fragment.
+ * @param {readonly number[]} a @param {readonly number[]} b @param {number} t
+ * @returns {number[]}
+ */
+function lerpRgb(a, b, t) {
+  const s = Math.min(1, Math.max(0, t));
+  return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s];
+}
+
+/**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
  * @param {(floorIndex: number) => string|null} args.getWindowMaskUrl
@@ -57,13 +78,29 @@ const WINDOW_BOUNDS_PAD_PX = 8;
  * @param {(opts: object) => Promise<object|null>} args.loadMaskImage
  * @param {(data: Uint8Array, w: number, h: number, filter: string) => *} args.createMaskTexture -
  *   the literal `new THREE.DataTexture(...)`, writable only in `vt/`.
- * @param {*} [args.attrTexture] - `buf:scene.attr`; null compiles the floor
- *   gate out.
+ * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment; null
+ *   compiles the floor gate out. Replaces `attrTexture` (2026-08-05),
+ *   mirroring `specular-surface-subsystem.js`'s own STAGE 3 migration.
+ * @param {(floorIndex: number) => number} [args.resolveExpectedDepth] - given
+ *   the VIEWED floor, returns `computeTieSafeExpectedDepth` for THIS quad's
+ *   OWN background item's rank. Composed in `vt-pan-viewer.js` from
+ *   `depthAuthority.rankOf` + `getWindowBackgroundItemId`, the SAME shape
+ *   `specular-surface-subsystem.js`'s own `resolveExpectedDepth` already
+ *   proved — this subsystem never touches `depthAuthority` directly. Called
+ *   every frame from `sync`, never cached: a floor's own background item can
+ *   change RANK whenever the depth authority rebuilds (a residency pass, a
+ *   pan, any item added or removed), not just on a floor switch — see that
+ *   call site's own comment.
  * @param {*} args.uViewRect - envLight's OWN view-rect uniform, shared rather
  *   than duplicated.
  * @param {*} [args.cloudFactorNode] - see `window-render.js`'s header. Passed
  *   straight through; `null` until `world/cloud-field.js` exists.
  * @param {() => object} [args.getWindowRenderState] - the look/enable seam.
+ * @param {() => object|null} [args.getEnvSun] - `world/sun.js#computeSun`'s
+ *   own return value, as a GETTER (not a captured value) — the same reason
+ *   specular's `getSkyHandle` is one: the viewer REASSIGNS its env snapshot
+ *   every frame, so capturing it here would pin whatever sun existed at
+ *   construction and the daylight tint would never move.
  * @returns {{scene: *, sync: Function, hasContent: Function, getStatus: Function, dispose: Function}}
  */
 export function createWindowSurfaceSubsystem({
@@ -72,15 +109,19 @@ export function createWindowSurfaceSubsystem({
   getWindowMaskRect,
   loadMaskImage,
   createMaskTexture,
-  attrTexture = null,
+  depthTexture = null,
+  resolveExpectedDepth,
   uViewRect,
   cloudFactorNode = null,
   getWindowRenderState,
+  getEnvSun,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
   // DECLARED, defaulted, consumed and never passed — every control dead,
   // every test green (`feedback_seam_default_hides_unwired`).
   getWindowRenderState ??= () => ({ enabled: true, params: {}, debugChannel: 0 });
+  getEnvSun ??= () => null;
+  resolveExpectedDepth ??= () => 0;
 
   /** A dedicated scene — see the header. */
   const scene = new THREE.Scene();
@@ -109,7 +150,7 @@ export function createWindowSurfaceSubsystem({
   const surface = buildWindowSurfaceMaterial({
     THREE,
     maskTexture,
-    attrTexture,
+    depthTexture,
     uViewRect,
     cloudFactorNode,
   });
@@ -136,10 +177,31 @@ export function createWindowSurfaceSubsystem({
    */
   function ensureMaskImage(floorIndex) {
     const url = getWindowMaskUrl(floorIndex);
+    // ⚠️ THE VIEWED FLOOR HAS NO MASK OF ITS OWN — clear whatever an EARLIER
+    // floor left behind, rather than leaving it up. Mirrors specular-surface-
+    // subsystem.js's own live-found fix (2026-08-03): without this branch, a
+    // stale quad's `contentBoundsWorld` stays set, the mesh stays visible,
+    // and the depth-authority gate (2026-08-05) is left comparing a STALE
+    // `uExpectedDepth` (this quad's own background rank from whatever floor
+    // last loaded) against the CURRENT floor's real stored depth — which can
+    // fail OPEN (the old floor's cookie bleeding onto a lower floor that
+    // genuinely ranks below it) rather than the old exact-floor-index gate's
+    // reliable fail-CLOSED. Hiding the mesh here is the honest state: no
+    // `_Window` is authored for what is actually on screen.
+    if (!url) {
+      if (loadedUrl !== null || contentBoundsWorld !== null) {
+        loadedUrl = null;
+        loadedFloor = -1;
+        contentBoundsWorld = null;
+        paddedBoundsUv = null;
+        refreshVisibility();
+      }
+      return;
+    }
     // Keyed on floor AS WELL AS url: two floors can legitimately share a file
     // path in a scene built by duplication, and re-reading the rect on a
     // floor switch is what keeps the mapping right when they do.
-    if (!url || loading || (url === loadedUrl && floorIndex === loadedFloor)) return;
+    if (loading || (url === loadedUrl && floorIndex === loadedFloor)) return;
     loading = true;
     const requestedFloor = floorIndex;
     loadMaskImage({ url, scale: WINDOW_MASK_IMAGE_SCALE, channels: 'rgb' })
@@ -154,7 +216,6 @@ export function createWindowSurfaceSubsystem({
         maskTexture?.dispose?.();
         maskTexture = loaded.texture;
         surface.setMaskTexture(loaded.texture);
-        surface.setFloorIndex(requestedFloor);
         loadedUrl = url;
         loadedFloor = requestedFloor;
         loadedMaskRect = rect;
@@ -165,7 +226,22 @@ export function createWindowSurfaceSubsystem({
         // the AABB pad is carried automatically and the two can never
         // disagree about where the quad's edges are.
         paddedBoundsUv = toUvBounds(contentBoundsWorld, rect);
-        if (paddedBoundsUv) surface.setMaskUvBounds(paddedBoundsUv);
+        if (paddedBoundsUv) {
+          surface.setMaskUvBounds(paddedBoundsUv);
+          // THE REFRACTION'S OWN WORLD→UV CONVERSION, derived from the SAME
+          // two boxes the bounds came from rather than from the mask rect
+          // directly — so the shader's px-to-UV step and the quad's own crop
+          // cannot drift apart, including in V's direction
+          // (`feedback_y_flip_recurring_risk`: both are `(world − min) / span`
+          // with no flip, and deriving the ratio from the already-computed
+          // pair is what keeps that true if either ever changes).
+          const worldW = contentBoundsWorld.maxX - contentBoundsWorld.minX;
+          const worldH = contentBoundsWorld.maxY - contentBoundsWorld.minY;
+          surface.setUvPerWorldPx(
+            Math.abs(worldW) > 1e-6 ? (paddedBoundsUv.maxU - paddedBoundsUv.minU) / worldW : 0,
+            Math.abs(worldH) > 1e-6 ? (paddedBoundsUv.maxV - paddedBoundsUv.minV) / worldH : 0
+          );
+        }
         maskInfo = {
           url,
           uploaded: `${loaded.width}x${loaded.height}`,
@@ -248,16 +324,74 @@ export function createWindowSurfaceSubsystem({
   function sync(floorIndex) {
     ensureMaskImage(floorIndex);
 
+    // THE EXPECTED DEPTH (2026-08-05). Pushed every frame and NEVER gated on
+    // a cached key, unlike the old `uFloorIndex01` (a static property of
+    // whichever mask happened to load, set once in `ensureMaskImage`'s own
+    // `.then()`): this quad's own background item can change RANK whenever
+    // the depth authority rebuilds — a residency pass, a pan, any item added
+    // or removed — the exact staleness class the vegetation flicker fix and
+    // specular's own STAGE 3 migration already found and fixed for other
+    // consumers. Harmless to call even while the mesh is hidden (no mask
+    // loaded yet, or `depthTexture` was never wired) — it only ever writes a
+    // uniform `setExpectedDepth` owns clamping for.
+    surface.setExpectedDepth(resolveExpectedDepth(floorIndex));
+
     // THE LOOK PARAMS. A string compare against cached uniform writes, and
     // NOT gated on any load generation: a slider drag changes no texture and
     // produces no reload.
     const state = getWindowRenderState();
     const p = state.params ?? {};
-    const key = [state.enabled ? 1 : 0, state.debugChannel ?? 0, p.strength, p.contrast].join('|');
+    // THE DAYLIGHT SIGNAL — the astrolabe's own sun, read every sync() (it is
+    // what makes the tint move at all) but folded into the SAME cached-key
+    // gate as the rest of the look params, rounded, so a static clock (paused,
+    // or no env snapshot yet) writes the uniform once and then leaves it alone.
+    const sun = getEnvSun();
+    const dayFactor01 = Number.isFinite(sun?.dayFactor01) ? sun.dayFactor01 : 1;
+    const twilight01 = Number.isFinite(sun?.twilight01) ? sun.twilight01 : 0;
+    const key = [
+      state.enabled ? 1 : 0,
+      state.debugChannel ?? 0,
+      p.strength,
+      p.contrast,
+      p.dawnDuskTint,
+      p.nightTint,
+      dayFactor01.toFixed(4),
+      twilight01.toFixed(4),
+      p.glassWarpPx,
+      p.glassDispersion,
+      p.glassScale,
+      p.glassDetail,
+      p.glassStriation,
+      p.glassStriationAngle,
+      p.glassCausticStrength,
+      p.glassCausticSharpness,
+      p.glassSeed,
+    ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
       if (Number.isFinite(p.strength)) surface.setStrength(p.strength);
       if (Number.isFinite(p.contrast)) surface.setContrast(p.contrast);
+      // THE GLASS — pushed as one object so the pane is never half-described.
+      // The seed is hashed HERE, on the CPU, so a raw seed can never reach a
+      // noise coordinate (`feedback_raw_seed_into_noise_coordinate`).
+      const seedOffset = computeSeedOffset(p.glassSeed);
+      surface.setGlass({
+        warpPx: p.glassWarpPx,
+        dispersion: p.glassDispersion,
+        scale: p.glassScale,
+        detail: p.glassDetail,
+        striation: p.glassStriation,
+        striationAngleDeg: p.glassStriationAngle,
+        causticStrength: p.glassCausticStrength,
+        causticSharpness: p.glassCausticSharpness,
+        seedOffset: [seedOffset.ox, seedOffset.oy],
+      });
+      // NIGHT → dawn/dusk → NOON (neutral) — the exact nested-lerp shape
+      // `sky-access.js`'s own fill-hue chain uses over the same two signals.
+      const dawnDusk = Array.isArray(p.dawnDuskTint) ? p.dawnDuskTint : WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB;
+      const night = Array.isArray(p.nightTint) ? p.nightTint : WINDOW_DEFAULT_NIGHT_TINT_RGB;
+      const nightToTwilight = lerpRgb(night, dawnDusk, twilight01);
+      surface.setDaylightTint(lerpRgb(nightToTwilight, [1, 1, 1], dayFactor01));
       debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
       surface.setDebugChannel(debugChannel);
       enabled = state.enabled !== false;

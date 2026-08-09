@@ -1,6 +1,7 @@
 /**
- * perf-hud.js — the LIVE per-zone overlay. Pan, zoom, toggle an effect, and
- * watch the ranking move.
+ * perf-hud.js — the LIVE per-zone ranking, embedded in the control panel's
+ * Performance Center (diag/perf-strip.js). Show it, pan, zoom, toggle an
+ * effect, and watch the ranking move.
  *
  * ============================================================================
  * WHY A LIVE VIEW AND NOT JUST THE REPORT
@@ -18,9 +19,14 @@
  *
  * boot.js's heartbeat strip already states this rule and repaints at ~4Hz to
  * honour it. Same here: one `setInterval` at 250ms, no rAF loop of its own, no
- * per-frame DOM work, `pointer-events: none` so it can never eat a click meant
- * for Foundry. And it MEASURES ITSELF — `overheadMs` is on the panel, so if this
- * ever becomes expensive the evidence is in plain sight rather than in a hunch.
+ * per-frame DOM work while hidden (armed only between `show()` and `hide()`).
+ * And it MEASURES ITSELF — `overheadMs` is on the panel, so if this ever
+ * becomes expensive the evidence is in plain sight rather than in a hunch.
+ *
+ * REFACTORED 2026-08-06 from a `position:fixed` top-right overlay (own DOM
+ * node, `pointer-events:none`, created/destroyed on show/hide) into a plain
+ * embeddable element that stays mounted for its whole lifetime — see
+ * `createPerfHud`'s own doc.
  *
  * @module diag/perf-hud
  */
@@ -92,6 +98,16 @@ export function buildHudRows(snapshot, { limit = HUD_ROWS } = {}) {
  * @param {(on: boolean) => void} [deps.setGpuZoneTimer]
  * @param {() => object} [deps.readGpuStatus]
  */
+/**
+ * REFACTORED 2026-08-06 from a `position:fixed` top-right floating overlay
+ * into a plain embeddable element (author directive: every performance tool
+ * lives in ONE place, the perf strip's own Performance Center — see
+ * diag/perf-strip.js and diag/debug-panel.js's `renderPerformanceCenter`).
+ * `root` is built ONCE, eagerly, and stays in the DOM for the component's
+ * whole lifetime; `show()`/`hide()` now toggle content and the paint
+ * interval/profiler arming, never create or remove the node itself — the
+ * SAME stable reference boot.js hands to `registerPanel` every time.
+ */
 export function createPerfHud({
   profiler,
   arm,
@@ -102,34 +118,52 @@ export function createPerfHud({
   setGpuZoneTimer = null,
   readGpuStatus = null,
 }) {
-  let host = null;
   let timer = null;
   let visible = false;
   let overheadMs = 0;
 
-  function ensureHost() {
-    if (host) return host;
-    host = document.createElement('div');
-    host.id = 'msa-perf-hud';
-    Object.assign(host.style, {
-      position: 'fixed',
-      top: '8px',
-      right: '8px',
-      zIndex: '2147483646',
-      pointerEvents: 'none', // never eat a click meant for Foundry
-      background: '#12161c',
-      color: '#d8dee9',
-      border: '1px solid #2e333c',
-      borderRadius: '6px',
-      padding: '8px 10px',
-      font: '12px/1.45 ui-monospace, Menlo, Consolas, monospace',
-      minWidth: '320px',
-      boxShadow: '0 4px 18px rgba(0,0,0,0.45)',
-      whiteSpace: 'pre',
-    });
-    document.body.appendChild(host);
-    return host;
+  const root = document.createElement('div');
+  root.id = 'msa-perf-hud';
+  Object.assign(root.style, {
+    width: '100%',
+    boxSizing: 'border-box',
+    background: '#12161c',
+    color: '#d8dee9',
+    border: '1px solid #2e333c',
+    borderRadius: '6px',
+    padding: '8px 10px',
+    font: '12px/1.45 ui-monospace, Menlo, Consolas, monospace',
+  });
+
+  const head = document.createElement('div');
+  Object.assign(head.style, { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' });
+  const title = document.createElement('div');
+  Object.assign(title.style, { fontWeight: 'bold', color: '#8fd6ff' });
+  title.textContent = '📊 Live zone ranking';
+  const toggleBtn = document.createElement('button');
+  Object.assign(toggleBtn.style, {
+    background: '#1f6feb',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '6px',
+    padding: '2px 10px',
+    cursor: 'pointer',
+    font: 'inherit',
+  });
+  head.append(title, toggleBtn);
+
+  const readout = document.createElement('div');
+  Object.assign(readout.style, { whiteSpace: 'pre', marginTop: '6px' });
+  readout.textContent =
+    'Off — click Show to arm the profiler and watch costs live while you pan, zoom, or toggle an effect.';
+
+  root.append(head, readout);
+
+  function syncToggleBtn() {
+    toggleBtn.textContent = visible ? 'Hide' : 'Show';
   }
+  syncToggleBtn();
+  toggleBtn.addEventListener('click', () => api.toggle());
 
   function paint() {
     const t0 = now();
@@ -162,8 +196,7 @@ export function createPerfHud({
     }
     lines.push(`  hud overhead ${fmt(round(overheadMs, 2))} ms/tick`);
 
-    const el = ensureHost();
-    el.textContent = lines.join('\n').replace('%%HEAD%%', '');
+    readout.textContent = lines.join('\n').replace('%%HEAD%%', '');
     // The rolling window: throw away what we just showed and start again, so the
     // next paint describes the next quarter-second rather than the whole session.
     arm();
@@ -175,7 +208,8 @@ export function createPerfHud({
     return v === null || v === undefined ? '—' : v.toFixed(3);
   }
 
-  return {
+  const api = {
+    el: root,
     isVisible: () => visible,
     toggle() {
       return visible ? this.hide() : this.show();
@@ -183,9 +217,9 @@ export function createPerfHud({
     show() {
       if (visible) return { visible: true };
       visible = true;
+      syncToggleBtn();
       setGpuZoneTimer?.(true);
       arm();
-      ensureHost();
       timer = setInterval(paint, HUD_TICK_MS);
       paint();
       return { visible: true, tickMs: HUD_TICK_MS };
@@ -193,12 +227,13 @@ export function createPerfHud({
     hide() {
       if (!visible) return { visible: false };
       visible = false;
+      syncToggleBtn();
       if (timer !== null) clearInterval(timer);
       timer = null;
       disarm();
       setGpuZoneTimer?.(false);
-      if (host?.parentNode) host.parentNode.removeChild(host);
-      host = null;
+      readout.textContent =
+        'Off — click Show to arm the profiler and watch costs live while you pan, zoom, or toggle an effect.';
       return { visible: false };
     },
     dispose() {
@@ -207,4 +242,5 @@ export function createPerfHud({
     /** The HUD's own cost, so it can be held to the rule in this file's header. */
     overheadMs: () => round(overheadMs, 3),
   };
+  return api;
 }

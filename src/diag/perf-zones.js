@@ -107,6 +107,13 @@ export const PASS_BUDGETS_MS = Object.freeze({
   'surface.response': 1.0,
   'surface.particles': 0.5,
   'post.bloom': 1.2,
+  // Deliberately tighter than bloom's 1.2ms: 5 total draws (4 downsample + 1
+  // composite) against bloom's 11 (no upsample/recombination chain here) —
+  // and the remaining frame-budget headroom before this pass existed was
+  // only ~0.43ms, so this number is bounded by the budget as much as by the
+  // pass's own real cost. Revise DOWN once measured, never up without
+  // shrinking a sibling first (the sum-vs-FRAME_BUDGET_MS check enforces this).
+  'post.dof': 0.35,
   'present.composite': 0.6,
 });
 
@@ -152,6 +159,14 @@ export const ZONES = Object.freeze(
     z('tick.camera', 'Camera derive', 'frame', null, null, 'cpu', 'steady', true, 'updateCamera'),
 
     // ---- sims stage: out of framePlan's range, driven directly ---------------
+    // Found unwired 2026-08-06: the wind grid's own bake — wall read +
+    // rasterize, TWO 4x-refined flood-fills, two distance transforms, three
+    // DataTexture builds/uploads, and on regrid three render-target
+    // allocations/clears — has no zone despite the identical 'bake' cadence
+    // shape sun-shadow/water-body bakes already have. Triggered live at
+    // mask-change, wall-change, ambient-change and floor-change, not just
+    // startup, so a live rebake's cost was completely invisible.
+    z('sims.windBake', 'Wind field bake', 'sims', null, null, 'cpu', 'bake', false, 'bakeWindField'),
     z('sims.wind', 'Wind sim', 'sims', null, null, 'both', 'conditional', false, 'tickWindSim'),
     z('sims.fluid', 'Fluid sim', 'sims', null, 'fluid', 'both', 'conditional', false, 'tickFluidSim'),
     z(
@@ -288,6 +303,24 @@ export const ZONES = Object.freeze(
       true,
       'fluidSurface.sync'
     ),
+    // Found unwired 2026-08-06: fluidSurface.sync() only TRIGGERS loadAndBake()
+    // without awaiting it, so light.fluidSurfaceSync's bracket closes before
+    // the real bake (extractTubeNet + buildFluidPack — a geodesic pass + two-
+    // pass chamfer distance transform + connected-component flood fill, all
+    // O(w×h) over up to 512x512 grids) ever runs, in a later promise
+    // continuation. Contrast with water's light.waterBodyBake, which wraps a
+    // SYNCHRONOUS bake end-to-end and was already fully covered.
+    z(
+      'light.fluidNetBake',
+      'Fluid tube-net + pack bake',
+      'lighting',
+      'light.accumulate',
+      'fluid',
+      'cpu',
+      'bake',
+      false,
+      'fluidSurface.loadAndBake'
+    ),
     z(
       'light.regionSetup',
       'Darkness region read',
@@ -398,6 +431,24 @@ export const ZONES = Object.freeze(
       false,
       'pointLights.lightScene'
     ),
+    // Found undeclared 2026-08-06 (perf-zone-coverage-audit): the bracket and
+    // Z-table entry already existed in vt-pan-viewer.js — this zone id simply
+    // had no declaration here, so profiler.begin/end on it were silent -1
+    // no-ops forever. Debug-only in practice (apertureShadowScene is usually
+    // empty — the real gobo pattern is baked into light.drawPointLights/
+    // light.drawColoration's own materials, round 10) but real when a light
+    // is selected into the aperture debug channel.
+    z(
+      'light.drawApertureShadow',
+      'Aperture gobo debug draw',
+      'lighting',
+      'light.accumulate',
+      'apertureGobo',
+      'gpu',
+      'conditional',
+      false,
+      'pointLights.apertureShadowScene'
+    ),
     z(
       'light.drawWindowLight',
       'Window light draw',
@@ -453,6 +504,22 @@ export const ZONES = Object.freeze(
       false,
       'lightningSubsystem.scene'
     ),
+    // ⚠️ ATTRIBUTED TO `fire` FROM DAY ONE. `light.drawPointLights` and
+    // `light.drawColoration` carry `ownerEffectId: null`, which is exactly why
+    // candles' 13.1 ms of a 20.4 ms frame went unnoticed for as long as it did
+    // (Performance-Insights.md §5B). Fire's light radii are LARGER than the
+    // candle's; it does not get to repeat that.
+    z(
+      'light.drawFire',
+      'Fire draw',
+      'lighting',
+      'light.accumulate',
+      'fire',
+      'gpu',
+      'conditional',
+      false,
+      'fireSubsystem.scene'
+    ),
     z(
       'light.drawWindOverlay',
       'Wind overlay draw',
@@ -466,6 +533,22 @@ export const ZONES = Object.freeze(
     ),
 
     // ---- surface stage -------------------------------------------------------
+    // Sync found unwired 2026-08-06 (perf-zone-coverage-audit): specularSurface.
+    // sync() — the mask-load poll, the R21 depth-authority resolveExpectedDepth
+    // query, sun-azimuth diff, ~63 param/layer comparisons — runs BEFORE
+    // surface.specularDraw's own bracket opens, so it was entirely invisible.
+    // Same parallel-CPU-zone shape as light.vegetationSync/light.waterSurfaceSync.
+    z(
+      'surface.specularSync',
+      'Specular surface sync',
+      'surface',
+      'surface.response',
+      'specular',
+      'cpu',
+      'steady',
+      true,
+      'specularSurface.sync'
+    ),
     z(
       'surface.specularDraw',
       'Specular response',
@@ -476,6 +559,21 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'runSurfaceResponsePass'
+    ),
+    // Island-pack bake found unwired 2026-08-06 — a connected-component
+    // labelling pass over up to 512x512 texels (specular-islands.js), the same
+    // shape as light.sunShadowBake/light.waterBodyBake but with zero coverage
+    // despite running on every mask load and every islandSpread drag.
+    z(
+      'surface.specularIslandBake',
+      'Specular island-pack bake',
+      'surface',
+      'surface.response',
+      'specular',
+      'cpu',
+      'bake',
+      false,
+      'bakeIslandPack'
     ),
     z(
       'surface.drawDust',
@@ -568,6 +666,42 @@ export const ZONES = Object.freeze(
       'bloomCompositeQuad.render'
     ),
 
+    // ---- post.dof: no bright-pass, no upsample chain — a straight downsample
+    // pyramid + one composite draw, cheaper than bloom's own 6-mip/2-band shape.
+    z(
+      'dof.uniformPush',
+      'DoF uniform push',
+      'post',
+      'post.dof',
+      'depthOfField',
+      'cpu',
+      'conditional',
+      true,
+      'runPostDofPass'
+    ),
+    z(
+      'dof.downsample',
+      'DoF downsample chain',
+      'post',
+      'post.dof',
+      'depthOfField',
+      'gpu',
+      'conditional',
+      false,
+      'dofDownQuad.render'
+    ),
+    z(
+      'dof.composite',
+      'DoF composite',
+      'post',
+      'post.dof',
+      'depthOfField',
+      'gpu',
+      'conditional',
+      false,
+      'dofCompositeQuad.render'
+    ),
+
     // ---- present -------------------------------------------------------------
     // ownerEffectId is null on purpose: the blit happens whether or not `grade`
     // is on — grade folds INTO this shader rather than adding a pass. See
@@ -585,6 +719,57 @@ export const ZONES = Object.freeze(
     ),
 
     // ---- residency: off the render loop. NEVER summed into a frame total. -----
+    // The four zones below (through vegetation.depthItemsBuild) were found
+    // completely unwired 2026-08-06 — updateResidencyUnguarded/
+    // scheduleResidencyUpdate had ZERO profiler coverage of any kind, so the
+    // exact work the "real per-item rank buffer" and "publish vegetation ranks"
+    // commits landed was invisible to every perf instrument despite running on
+    // every residency pass (continuously while panning, per the author's own
+    // bug reports).
+    z(
+      'depth.authorityRebuild',
+      'Depth authority rank rebuild',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'depthAuthority.rebuild'
+    ),
+    z(
+      'depth.proxyRebuild',
+      'Depth-writer proxy rebuild',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'rebuildSceneDepthProxies'
+    ),
+    z(
+      'vegetation.rankStamp',
+      'Vegetation render-order stamp',
+      'residency',
+      null,
+      'vegetation',
+      'cpu',
+      'event',
+      false,
+      'stampVegetationRenderOrders'
+    ),
+    z(
+      'vegetation.depthItemsBuild',
+      'Vegetation depth-item build',
+      'residency',
+      null,
+      'vegetation',
+      'cpu',
+      'event',
+      false,
+      'buildVegetationDepthItems'
+    ),
     z('residency.pass', 'Residency update', 'residency', null, null, 'cpu', 'event', false, 'scheduleResidencyUpdate'),
     z('residency.decode', 'Page decode', 'residency', null, null, 'cpu', 'event', false, 'requestDecodeUpload'),
     z('residency.upload', 'Page upload', 'residency', null, null, 'cpu', 'event', false, 'requestDecodeUpload'),
@@ -612,7 +797,7 @@ export const EFFECT_ZONING = Object.freeze({
   }),
   vegetation: Object.freeze({
     coverage: 'partial',
-    why: "Its per-frame uniform sync is zoned (light.vegetationSync), but the meshes draw inside geometry.world's shared scene in the one flat sort list — no render call of its own to bracket.",
+    why: "Its per-frame uniform sync is zoned (light.vegetationSync), as is the residency-pass rank stamp/build (vegetation.rankStamp, vegetation.depthItemsBuild), but the meshes draw inside geometry.world's shared scene in the one flat sort list — no render call of its own to bracket.",
   }),
   water: Object.freeze({
     coverage: 'partial',
@@ -621,6 +806,22 @@ export const EFFECT_ZONING = Object.freeze({
   uiWindowShadow: Object.freeze({
     coverage: 'full',
     why: 'Uniform push only — it has no draw call at all by design (the v6 perf fix removed the extra pass), so light.uiShadowStamps IS its entire cost.',
+  }),
+  // Added 2026-08-06 (perf-zone-coverage-audit found this effect had NO entry
+  // at all, despite owning zones — exactly the drift validateEffectZoning
+  // exists to catch, missed only because the check is one-directional: it
+  // never flagged a real effect with real zones simply having no key here).
+  specular: Object.freeze({
+    coverage: 'full',
+    why: 'Draw (surface.specularDraw), per-frame CPU sync (surface.specularSync) and the island-pack bake (surface.specularIslandBake) are all zoned — the sync and bake zones were added 2026-08-06 alongside this entry; before that, both ran with zero profiler coverage despite running every frame and on every mask load respectively.',
+  }),
+  fluid: Object.freeze({
+    coverage: 'partial',
+    why: "Its sim tick (sims.fluid), per-frame sync (light.fluidSurfaceSync) and tube-net/pack bake (light.fluidNetBake, added 2026-08-06) are zoned, but the absorb/emit surface draw is additively blended into geometry.world's shared scene at a fixed renderOrder — the same structural situation as water's tier-0 surface, no render call of its own to bracket.",
+  }),
+  apertureGobo: Object.freeze({
+    coverage: 'partial',
+    why: "Its own debug-visualization draw is zoned (light.drawApertureShadow, added 2026-08-06 — the bracket already existed in code, only the declaration was missing). The REAL per-fragment gobo pattern cost is baked directly into point-light-pool.js's main light/coloration materials and is only measurable as part of the null-owned light.drawPointLights/light.drawColoration zones.",
   }),
 });
 

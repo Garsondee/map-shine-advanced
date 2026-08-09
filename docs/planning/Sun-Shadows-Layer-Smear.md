@@ -6,6 +6,17 @@ author called a halt: *"Screw it. I want you to reconsider this whole problem,
 especially I want you to consider if there is just a simpler approach we could
 use that works with multiple floors and which isn't as massively complex."*
 
+> ⚠️ **EXTENDED 2026-08-05 by [`Sun-Shadow-Cascade.md`](Sun-Shadow-Cascade.md) —
+> read that alongside this one.** The MODEL below is unchanged and still
+> correct; what changed is what feeds it. Layers 2 and 3 are no longer "the
+> floor directly above" and an empty slot at one authored slider height — they
+> are two cumulative bands at REAL, Foundry-derived elevations, combined by
+> `max` rather than `×` (one stack sliced twice is not two occluders in series).
+> Softness now also follows the caster's vertical FALL, not only its horizontal
+> throw. The receiver's floor comes from `buf:scene.depth`, not
+> `buf:scene.attr`. Where this document says `aboveHeightPx`, that slider is now
+> the FALLBACK for scenes whose Levels declare no elevations.
+
 ---
 
 ## 1. The brief, in the author's own words

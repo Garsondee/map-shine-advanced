@@ -83,11 +83,26 @@ export async function run(t) {
   // specular: the surface subsystem needs the grid's SPEC only, to crop a
   // bounded quad to the mask's world rect — the COLOUR (what makes this a
   // light cookie at all) comes from the authored file, not from this grid.
+  // `fire` joined 2026-08-08 (Fire.md §9) — and it is the case that FORCED the
+  // `rasterize` / `ownsPackedAlpha` split. It needs the per-floor grid to
+  // extract fire sources from the painted region (a chamfer distance transform
+  // whose ridge peaks become fires, sized by the paint's own local width), and
+  // it is the SECOND trio member to need one. Ownership of the packed page's
+  // single alpha slot used to be inferred from "the only rasterized member",
+  // which returned no policy at all the moment that stopped being unique.
   t.ok(
-    'outdoors, specular, window, water and fluid are the rasterized kinds',
+    'outdoors, fire, specular, window, water and fluid are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,specular,window,water,fluid'
+      .join(',') === 'outdoors,fire,specular,window,water,fluid'
+  );
+  t.ok(
+    'fire is rasterized but does NOT own the packed alpha — the two flags are separate questions',
+    maskKindById('fire').rasterize === true && maskKindById('fire').ownsPackedAlpha !== true
+  );
+  t.ok(
+    'outdoors owns the packed alpha, because it is composited BY alpha',
+    maskKindById('outdoors').ownsPackedAlpha === true
   );
   t.ok(
     'water is NOT required — an unpainted _Water mask is a harmless default, unlike _Outdoors',
@@ -217,9 +232,13 @@ export async function run(t) {
     JSON.stringify(extractionPlanForLayer('albedo')) === JSON.stringify([{ contentId: 'albedo', channel: 'a' }])
   );
   const trioPlan = extractionPlanForLayer(PACKED_TRIO_LAYER_NAME);
+  // Two members of the trio are now read on the CPU: `outdoors` from g (the
+  // derivations) and `fire` from b (the fire effect's own source extraction).
+  // `shadow` from r is still consumed only on the GPU, so it extracts nothing.
+  const trioBy = Object.fromEntries(trioPlan.map((p) => [p.contentId, p.channel]));
   t.ok(
-    'trio extraction takes ONLY what derivations read (outdoors from g)',
-    trioPlan.length === 1 && trioPlan[0].contentId === 'outdoors' && trioPlan[0].channel === 'g'
+    `trio extraction takes ONLY what CPU consumers read (${JSON.stringify(trioBy)})`,
+    trioPlan.length === 2 && trioBy.outdoors === 'g' && trioBy.fire === 'b' && !('shadow' in trioBy)
   );
   const singleOutdoors = extractionPlanForLayer('outdoors');
   t.ok('unpacked outdoors extracts its r channel', singleOutdoors.length === 1 && singleOutdoors[0].channel === 'r');

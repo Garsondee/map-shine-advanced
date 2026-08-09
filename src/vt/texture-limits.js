@@ -101,18 +101,66 @@ export function chooseStorageBufferLimit(adapterMax, desired = DESIRED_STORAGE_B
   return Math.min(supported, want);
 }
 
+/** WebGPU's spec-guaranteed floor for `maxBufferSize` — every adapter supports
+ * at least this (it is also the DEFAULT the renderer already requests
+ * implicitly, hence "268435456" being the number in a real, live error:
+ * "Buffer size (324863904) exceeds the max buffer size limit (268435456).
+ * This adapter supports a higher maxBufferSize of 2147483648...", 2026-08-08
+ * — a `_Specular` mask built from a 12000² source, single untiled upload,
+ * ~324MB. We never request below it, never assume above it. */
+export const WEBGPU_SPEC_MIN_BUFFER_SIZE = 268435456;
+
+/** The cap we AIM for — 4x the spec floor (1 GiB). `chooseTextureLimit` and
+ * `chooseStorageBufferLimit` both target 2x their own floor; a flat 2x here
+ * (512 MiB) would NOT have cleared the 2026-08-08 crash (~324MB) with any real
+ * headroom for the next map, so this one targets more margin while staying
+ * far under the adapter's reported 2 GiB ceiling in that same error. Unlike
+ * its two siblings, a `maxBufferSize` miss is not a graceful dim/streaming
+ * degrade — it is a hard `GPUValidationError` crash — so erring toward more
+ * headroom here is deliberate, not just "the same 2x for consistency". */
+export const DESIRED_BUFFER_SIZE = 1073741824;
+
 /**
- * Browser glue around {@link chooseTextureLimit} + {@link chooseStorageBufferLimit}:
- * query the WebGPU adapter and build the `requiredLimits` object to hand
- * `new THREE.WebGPURenderer({...})`, so its device is created with BOTH raised
- * caps. Query the adapter for its real max FIRST and clamp to each
- * independently — requesting more than the adapter supports makes
- * `requestDevice` throw (a self-inflicted device-creation failure), whereas
- * clamping degrades gracefully (weak hardware just keeps the spec floor, and
- * the loader/particle engines degrade to fit — see each limit's own doc).
- * The two limits are resolved INDEPENDENTLY (one query failing/reporting
- * falsy never skips the other) — a compute-shader storage-buffer ceiling and
- * a texture-size ceiling are unrelated GPU resources.
+ * Choose the `maxBufferSize` to request from the WebGPU device. Pure — same
+ * shape and same safety discipline as {@link chooseTextureLimit} /
+ * {@link chooseStorageBufferLimit}: never ask for more than the adapter
+ * reports (that makes `requestDevice` throw), never ask for less than the
+ * spec floor every adapter grants, otherwise target `desired` (1 GiB).
+ *
+ * This raises the CEILING only — it does not shrink any single allocation.
+ * On hardware whose adapter genuinely cannot grant more than the 256MiB spec
+ * floor, an oversized single upload (e.g. an unscaled mask on a very large
+ * map) can still exceed it; the durable fix for THAT is bounding the upload's
+ * own byte size to fit under whatever limit is actually granted (see
+ * `vt/mask-image.js`'s target-size planning), not raising this ceiling
+ * further than the hardware will allow.
+ *
+ * @param {number} adapterMax - `adapter.limits.maxBufferSize`.
+ * @param {number} [desired=DESIRED_BUFFER_SIZE]
+ * @returns {number} the value to pass as `requiredLimits.maxBufferSize`.
+ */
+export function chooseBufferSizeLimit(adapterMax, desired = DESIRED_BUFFER_SIZE) {
+  const supported =
+    Number.isFinite(adapterMax) && adapterMax > WEBGPU_SPEC_MIN_BUFFER_SIZE ? adapterMax : WEBGPU_SPEC_MIN_BUFFER_SIZE;
+  const want =
+    Number.isFinite(desired) && desired > WEBGPU_SPEC_MIN_BUFFER_SIZE ? desired : WEBGPU_SPEC_MIN_BUFFER_SIZE;
+  return Math.min(supported, want);
+}
+
+/**
+ * Browser glue around {@link chooseTextureLimit} + {@link chooseStorageBufferLimit}
+ * + {@link chooseBufferSizeLimit}: query the WebGPU adapter and build the
+ * `requiredLimits` object to hand `new THREE.WebGPURenderer({...})`, so its
+ * device is created with ALL THREE raised caps. Query the adapter for its
+ * real max FIRST and clamp to each independently — requesting more than the
+ * adapter supports makes `requestDevice` throw (a self-inflicted
+ * device-creation failure), whereas clamping degrades gracefully (weak
+ * hardware just keeps the spec floor, and the loader/particle engines degrade
+ * to fit — see each limit's own doc).
+ * The three limits are resolved INDEPENDENTLY (one query failing/reporting
+ * falsy never skips the others) — a compute-shader storage-buffer ceiling, a
+ * texture-size ceiling, and a single-buffer-upload ceiling are unrelated GPU
+ * resources.
  *
  * Returns `undefined` when there's no adapter at all (WebGL2 path, or WebGPU
  * unavailable) — pass that straight through and three keeps its defaults.
@@ -144,6 +192,14 @@ export async function resolveRendererRequiredLimits() {
     if (adapterMaxStorageBuffers) {
       limits.maxStorageBuffersPerShaderStage = chooseStorageBufferLimit(adapterMaxStorageBuffers);
     }
+    // MAX BUFFER SIZE (2026-08-08, a live "Buffer size (324863904) exceeds the
+    // max buffer size limit (268435456)" GPUValidationError — see
+    // WEBGPU_SPEC_MIN_BUFFER_SIZE's own doc for the exact error). A single
+    // large mask/texture upload (e.g. `_Specular` on a 12000² map) can
+    // genuinely need more than the WebGPU default's 256MiB-per-buffer floor;
+    // raise it the SAME safe, adapter-clamped way as the two limits above.
+    const adapterMaxBufferSize = adapter.limits?.maxBufferSize;
+    if (adapterMaxBufferSize) limits.maxBufferSize = chooseBufferSizeLimit(adapterMaxBufferSize);
     return Object.keys(limits).length > 0 ? limits : undefined;
   } catch (_) {
     // No adapter / WebGPU unavailable / query threw — let three pick its

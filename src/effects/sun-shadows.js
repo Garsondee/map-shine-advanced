@@ -32,13 +32,42 @@
  *            SHARED `effects/shadow-access.js` handle, which every other caster
  *            in the scene reads too.
  *
- * NO LONGER TRUE, and named here rather than left for a reader to notice by
- * absence: heights for overhead tiles and the floor above were meant to come
- * from Foundry's own elevation data (the doctrine this file used to state
- * for exactly `buildingHeightPx`, its one authored exception) — that
- * derivation is not built yet, so `overheadHeightPx`/`aboveHeightPx` are
- * AUTHORED SLIDERS too, for now. A named simplification, not a silent one;
- * deriving them from real elevation data is a tracked follow-up.
+ * ============================================================================
+ * THE SHADOW CASCADE (2026-08-05) — the follow-up this file used to promise
+ * ============================================================================
+ *
+ * This header used to say, of the floor-above height: *"that derivation is not
+ * built yet, so `overheadHeightPx`/`aboveHeightPx` are AUTHORED SLIDERS too,
+ * for now… deriving them from real elevation data is a tracked follow-up."*
+ * `effects/lighting/shadow-bands.js` is that follow-up, and it landed after
+ * the author asked for what it enables: *"buildings which are several stories
+ * tall might cast their building, sky reach and overhead shadows and have a
+ * much longer larger shadow produced as a result of having access to the
+ * information for all floors."*
+ *
+ * What changed, in one line each:
+ *
+ *   - The single merged "everything above" layer became TWO CUMULATIVE BANDS
+ *     (`coverAbove` read at this floor AND at the one above it — both grids
+ *     already existed), so a setback, a tower and a two-storey wing each throw
+ *     their own length instead of sharing one.
+ *   - Each band's height is DERIVED from `Level.elevation` × Foundry's own
+ *     `canvas.dimensions.distancePixels`, not authored. `aboveHeightPx`
+ *     survives as the fallback for scenes with no Level elevations, and says so.
+ *   - A shadow now SOFTENS with the distance it fell, not only with how far it
+ *     stretched (`layer-smear.js#DIFFUSION_PER_HEIGHT_PX`) — the author's
+ *     "getting softer and more diffuse as they [cascade] downwards".
+ *   - Which floor a screen pixel RECEIVES a shadow on is read from
+ *     `buf:scene.depth` rather than `buf:scene.attr`, so a shadow falls through
+ *     a hole onto exactly the surface the eye sees through it
+ *     ([[keyhole-depth-authority-sole-system-decision]]).
+ *
+ * `overheadHeightPx` IS still an authored slider, and that is still a named
+ * simplification rather than an oversight: an overhead tile's height is a
+ * PER-TILE fact (an awning and a walkway on the same floor sit at different
+ * heights), and this model carries one height per LAYER by construction. It
+ * would need a per-tile layer or a per-texel height, and per-texel heights are
+ * the model this one replaced.
  *
  * NEW: `skyReachDepthPx` — the one param the layer-smear model's own
  * compositing needs that the march never did. A directional cast-shadow march
@@ -102,14 +131,28 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     help: 'How high overhead tiles on this floor sit above the ground — awnings, gates, walkways. Ideally this would come from each tile’s own Foundry elevation; until that lands, it is one height for all of them.',
   },
   aboveHeightPx: {
+    // ⚠️ A FALLBACK SINCE 2026-08-05, NOT THE PRIMARY SOURCE (the shadow
+    // cascade — `effects/lighting/shadow-bands.js` is the derivation). This
+    // param's own help text used to promise that "ideally this would come from
+    // the scene's own floor elevations"; it now does, from `Level.elevation`
+    // and `canvas.dimensions.distancePixels`, split into two bands so a
+    // five-storey stack throws a five-storey shadow. This slider is what a
+    // scene with NO usable Level elevations (a legacy single-background map
+    // with a raised tile over it) still gets — and the sun-shadow status report
+    // says, every bake, which of the two actually ran.
+    //
+    // The default stays 400 deliberately: on Foundry's own default 100px/5ft
+    // grid a 20-unit storey IS 400 world px, so the number the author tuned by
+    // eye and the number the derivation produces are the same number. Anyone
+    // who never gets a fallback sees no change at all.
     type: 'float',
     min: 0,
     max: 1200,
     step: 10,
     default: 400,
     category: 'Look',
-    label: 'Floor-above height',
-    help: 'How far above this floor the next one up (and everything higher) sits. Ideally this would come from the scene’s own floor elevations; until that lands, it is one height for the whole stack above you.',
+    label: 'Floor-above height (fallback)',
+    help: 'Only used when the scene’s Levels declare no elevations. Normally the height of every floor above you is read straight from the scene, so a taller building automatically casts a longer, softer shadow — this is the stand-in for maps that cannot answer.',
   },
   skyReachDepthPx: {
     // THE SKY-REACH GRADIENT (author, 2026-08-02, live, on the first real-map

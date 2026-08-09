@@ -32,6 +32,7 @@
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import { assignFloorSlotIndex, SUN_SHADOW_LAYER_STRENGTH } from '../sun-shadow-subsystem.js';
+import { SHADOW_BAND_LAYER_INDICES } from '../shadow-bands.js';
 import { blendSunVisibilityAcrossFloors } from '../environmental-light.js';
 
 /**
@@ -262,8 +263,14 @@ export function run(t) {
   //
   // The model: you see whatever surface is actually visible at this pixel,
   // carrying THAT surface's shadow. `layer-smear-render.js` ends with
-  // `mix(lowerField, ownVis, blockage)` where blockage is the layer texture's
-  // A channel = the LOWER floor's `coverAbove`. Twinned here in plain numbers.
+  // `mix(lowerField, ownVis, blockage)`.
+  //
+  // ⚠️ WHERE `blockage` COMES FROM CHANGED 2026-08-05 (the shadow cascade) —
+  // it was this floor's own layer-texture A channel (the lower floor's
+  // `coverAbove`, packed in by the CPU); it is now the LOWER FIELD's own alpha,
+  // published by the slot that already owns that grid. The VALUE and the
+  // arithmetic below are identical, which is exactly why the whole twin still
+  // holds unchanged — only the wire moved.
   {
     const cascade = (lower, own, blockage01) => lower * (1 - blockage01) + own * blockage01;
 
@@ -285,9 +292,11 @@ export function run(t) {
     // threshold, or every railing would pop between two states.
     ok('half-blocked blends the two', Math.abs(cascade(0.2, 1.0, 0.5) - 0.6) < 1e-9);
 
-    // ⚠️ THE BOTTOM FLOOR MUST BE UNTOUCHED. Floor 0 has no lower field, and
-    // its packed blockage is 255 (fully blocked) — so even if the cascade were
-    // wired up on it, the arithmetic returns its own answer exactly.
+    // ⚠️ THE BOTTOM FLOOR MUST BE UNTOUCHED. Floor 0 has no lower field at all
+    // (a JS-time branch compiles the cascade out), and an inactive slot
+    // publishes blockage 1 rather than 0 (`layer-smear-render.js#uCascade`) —
+    // so even where the cascade IS wired, the arithmetic returns its own answer
+    // exactly.
     ok(
       'blockage 1 is a provable identity for ANY lower value',
       [0, 0.37, 1].every((l) => cascade(l, 0.42, 1) === 0.42)
@@ -308,16 +317,29 @@ export function run(t) {
     ok('one solid floor in the chain stops the cascade dead', Math.abs(cascade(floor1Solid, 1, 0) - 1) < 1e-9);
   }
 
-  // ── A IS NO LONGER A SILHOUETTE CHANNEL, AND LAYER 3 MUST STAY INERT ──
-  // The cascade spends the layer texture's documented-empty 4th slot. The
-  // march still READS A as `cov[3]`, so this is safe ONLY while layer 3's
-  // strength is exactly 0 — `occ[3] × 0` contributes a transmittance factor of
-  // 1 by arithmetic, not by a branch. Giving layer 3 a real strength would
-  // silently turn the blockage grid into a fourth caster silhouette.
+  // ── THE TWO BANDS MUST DARKEN EQUALLY ────────────────────────────────
+  // ⚠️ THIS REPLACES A PIN THAT SAID `SUN_SHADOW_LAYER_STRENGTH[3] === 0`, and
+  // the replacement is the point. That zero was load-bearing while A carried
+  // the cascade's blockage (a non-silhouette that must never be marched as
+  // one). The shadow cascade gave A a real band silhouette and moved blockage
+  // into the baked field's alpha, so the reason for the zero is gone — but
+  // "layer 3 is special" must not silently become "layer 3 is arbitrary".
+  //
+  // The two bands slice ONE physical stack at two elevations, so they must
+  // darken identically: a shadow cast from three storeys up and one cast from
+  // one storey up differ in LENGTH and SOFTNESS, never in how black they are
+  // (the author's own rule that a shadow "may [never go] from black to grey to
+  // white to grey to white" applied across bands rather than along one).
   {
+    const [b0, b1] = SHADOW_BAND_LAYER_INDICES;
     ok(
-      `SUN_SHADOW_LAYER_STRENGTH[3] is exactly 0, so the A channel cannot cast (is ${SUN_SHADOW_LAYER_STRENGTH[3]})`,
-      SUN_SHADOW_LAYER_STRENGTH[3] === 0
+      `both bands carry the same strength, so an extra storey changes length and softness but not darkness ` +
+        `(${SUN_SHADOW_LAYER_STRENGTH[b0]} vs ${SUN_SHADOW_LAYER_STRENGTH[b1]})`,
+      SUN_SHADOW_LAYER_STRENGTH[b0] === SUN_SHADOW_LAYER_STRENGTH[b1]
+    );
+    ok(
+      'and it is strictly below 1, so "a little light should leak through" survives however tall the stack gets',
+      SUN_SHADOW_LAYER_STRENGTH[b1] > 0 && SUN_SHADOW_LAYER_STRENGTH[b1] < 1
     );
   }
 }

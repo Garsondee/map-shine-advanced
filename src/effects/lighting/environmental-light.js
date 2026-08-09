@@ -312,7 +312,7 @@ export function buildEnvironmentalLightMaterials({
   depthTexture,
   depthFlagsTexture,
 }) {
-  const { uniform, texture, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+  const { uniform, texture, uv, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SKY LIGHT (docs/planning/Sky.md) — atmosphere as LIGHT, not a grade.
@@ -443,12 +443,23 @@ export function buildEnvironmentalLightMaterials({
     // A JS-time branch, so a scene with no baked fields compiles to byte-
     // identical shader code — and a freshly-baked all-white slot is a
     // provable no-op even when it IS compiled in.
+    // ⚠️ THE FLOOR SOURCE IS `buf:scene.depth`, NOT `buf:scene.attr` (2026-08-05
+    // — the shadow cascade's receiver half, and this effect's own entry into
+    // [[keyhole-depth-authority-sole-system-decision]]'s "one occlusion system"
+    // lock). `blendSunVisibilityAcrossFloors`'s own `attrFloorIndex01` doc has
+    // the argument for why the depth pass's answer is the right one; the
+    // fullscreen quad reads it at `uv()` rather than `screenUV` because this
+    // pass IS the screen (the point-light path, drawing world-space quads,
+    // uses `screenUV` for the identical sample — see its own call site).
+    const depthFloorHere = depthFlagsTexNode ? depthFlagsTexNode.sample(uv()) : null;
+    const floorSource = depthFloorHere ?? attrTexNode;
     const sunVis =
       sunShadowSlots.length === 0
         ? null
-        : attrTexNode
+        : floorSource
           ? blendSunVisibilityAcrossFloors(THREE.TSL, {
-              attrFloorIndex01: attrTexNode.r,
+              attrFloorIndex01: floorSource.r,
+              presence: depthFloorHere ? depthFloorHere.a : null,
               slots: sunShadowSlots.map((slot) => ({
                 sunVis: buildSunVisibilityNode(THREE.TSL, {
                   uViewRect,
@@ -458,7 +469,7 @@ export function buildEnvironmentalLightMaterials({
                 floorIndex01: slot.uFloorIndex01,
               })),
             })
-          : // No attr texture to gate by floor — fall back to slot 0 alone,
+          : // Neither buffer to gate by floor — fall back to slot 0 alone,
             // the exact single-field, no-gating behaviour this had before the
             // per-floor gate existed at all (pre-2026-07-28).
             buildSunVisibilityNode(THREE.TSL, {
@@ -559,10 +570,18 @@ export function buildEnvironmentalLightMaterials({
     setOutdoorsRect,
     setSunShadowRect,
     setSunShadowFloorIndex,
-    /** True when an attr texture was supplied and the per-floor shadow gate is
-     * actually compiled into the ambient fill — same diagnostic posture as
+    /** True when SOME floor buffer was supplied and the per-floor shadow gate
+     * is actually compiled into the ambient fill — same diagnostic posture as
      * `skyGateCompiled` below and `specular-render.js`'s `floorGateCompiled`. */
-    sunShadowFloorGateCompiled: !!attrTexNode,
+    sunShadowFloorGateCompiled: !!(depthFlagsTexNode || attrTexNode),
+    /** WHICH buffer that gate is actually reading. Reported rather than
+     * assumed: `buf:scene.depth` and `buf:scene.attr` carry the same
+     * `floorIndex / 255` in the same channel, so a shadow gated on the WRONG
+     * one looks completely normal until a hole in a floor disagrees — and
+     * "which authority is this effect on" is exactly the question
+     * [[keyhole-depth-authority-sole-system-decision]]'s lock exists to keep
+     * answerable per effect. */
+    sunShadowFloorGateSource: depthFlagsTexNode ? 'scene.depth' : attrTexNode ? 'scene.attr' : 'none',
     /** Per-slot `{texNode, uRect, uFloorIndex01}` — SHARED with every point
      * light's own material (`point-light-illumination.js`), which samples the
      * SAME fields per-fragment so its background floor matches the shadowed
@@ -651,8 +670,26 @@ export function buildEnvironmentalLightMaterials({
  *
  * @param {*} TSL - THREE.TSL.
  * @param {object} args
- * @param {*} args.attrFloorIndex01 - this FRAGMENT's own floor index / 255
- *   (`attrTexNode.r`).
+ * @param {*} args.attrFloorIndex01 - this FRAGMENT's own floor index / 255.
+ *   ⚠️ SOURCED FROM `buf:scene.depth`'s COLOUR ATTACHMENT since 2026-08-05
+ *   (`depthFlagsTexNode.r`), not `buf:scene.attr` — the parameter keeps its
+ *   name only because renaming it would touch every caller and every test for
+ *   no behavioural gain; the VALUE is now the depth authority's own answer.
+ *   Both channels carry `floorIndex / 255` and both are written by the same
+ *   two-step membership-then-band lookup (`vt/scene-depth.js#
+ *   resolveSceneDepthFloorIndex` mirrors `scene-attr.js#computeFloorAttrValues`),
+ *   so the arithmetic below is unchanged — but the depth pass decides the
+ *   winner with a hard `LessDepth` test and a real alpha-test discard, where
+ *   attr decided it with an ALPHA-BLENDED MRT write. That is the difference
+ *   between "the surface actually visible here" and "whatever last blended
+ *   into this texel", and it is why the sun shadow now falls through a hole
+ *   onto exactly the floor the eye sees through it
+ *   ([[keyhole-orthographic-hole-stack-model]],
+ *   [[keyhole-depth-authority-sole-system-decision]]).
+ * @param {*} [args.presence] - `depthFlagsTexNode.a` — 1 where the depth pass
+ *   wrote a real surface, 0 where nothing drew. Optional: a caller with no
+ *   depth colour to read omits it and gets the pre-2026-08-05 behaviour
+ *   exactly.
  * @param {Array<{sunVis: *, floorIndex01: *}>} args.slots - one entry per
  *   resident field slot: `sunVis` is that slot's ALREADY-SAMPLED scalar node
  *   (`buildSunVisibilityNode`'s return, called once per slot by the caller —
@@ -661,14 +698,29 @@ export function buildEnvironmentalLightMaterials({
  *   not this function's); `floorIndex01` is that slot's own uniform.
  * @returns {*} a scalar 0..1 node.
  */
-export function blendSunVisibilityAcrossFloors(TSL, { attrFloorIndex01, slots }) {
+export function blendSunVisibilityAcrossFloors(TSL, { attrFloorIndex01, slots, presence = null }) {
   const { float, smoothstep, abs } = TSL;
   let totalWeight = float(0);
   let blended = float(0);
   for (const slot of slots) {
-    const weight = float(1).sub(
+    let weight = float(1).sub(
       smoothstep(float(0.4 / 255), float(0.9 / 255), abs(attrFloorIndex01.sub(slot.floorIndex01)))
     );
+    // ⚠️ PRESENCE, WHEN THE CALLER CAN SUPPLY IT (2026-08-05, the depth
+    // migration). `buf:scene.depth`'s colour attachment clears to `(0,0,0,0)`
+    // and is only written where an item passed its own alpha test — so a pixel
+    // with NO drawn surface at all reads `floorIndex = 0`, which matches floor
+    // 0's slot exactly and would apply the ground floor's shadow to a hole in
+    // the map. `buf:scene.attr` had the same shape and the same latent gap; it
+    // was invisible there only because an empty pixel has no albedo to darken.
+    // A point light does not have that luxury — it multiplies its own falloff
+    // by this, and would carve a ground-floor building's silhouette out of a
+    // light shining over open nothing.
+    //
+    // Multiplied into the WEIGHT rather than the result, so an absent surface
+    // falls through to this function's existing "matched nothing ⇒ fully lit"
+    // arm instead of needing a second, differently-shaped default.
+    if (presence) weight = weight.mul(presence);
     blended = blended.add(slot.sunVis.mul(weight));
     totalWeight = totalWeight.add(weight);
   }

@@ -21,7 +21,9 @@ import {
   SPECULAR_ALPHA_EPSILON,
   LUMA_601,
   LUMA_709,
+  computeSpecularDepthGate,
 } from '../specular-material.js';
+import { computeTieSafeExpectedDepth, computeExpectedStoredDepth } from '../../../vt/scene-depth.js';
 
 /** Rec.709 luma of a tint — the quantity the decode promises to preserve.
  * @param {number[]} c @returns {number} */
@@ -125,5 +127,52 @@ export function run(t) {
   ok(
     'a missing rect reports null rather than throwing',
     describeSpecularMapping({ maskRect: null, quadWorld: null, viewRect: null }).maskUvAtQuadCorners === null
+  );
+
+  // ======================================================================
+  // STAGE 3 (2026-08-05) — computeSpecularDepthGate, the depth-authority
+  // occlusion gate replacing the old floorMatch/backgroundVisible pair.
+  // Mirrors point-light-illumination.test.mjs's own computeDepthHeightGate
+  // block — same rank-only comparison, no flags byte (see this function's
+  // own header for why specular needs no tile-restrict-style hard block).
+  // ======================================================================
+  ok(
+    'something with a HIGHER rank than my own background (a Tile, a roof) drawn over me BLOCKS',
+    computeSpecularDepthGate({ storedDepth: 0.3, expectedDepth: 0.5 }) === 0
+  );
+  ok(
+    'my own background, exactly at its own expected depth (the common unoccluded case), PASSES',
+    computeSpecularDepthGate({ storedDepth: 0.5, expectedDepth: 0.5 }) === 1
+  );
+  ok(
+    'a LOWER-ranked item visible here (something further back than my own background) PASSES',
+    computeSpecularDepthGate({ storedDepth: 0.7, expectedDepth: 0.5 }) === 1
+  );
+
+  // ⚠️ THE CASE THAT MATTERS MOST FOR SPECULAR, UNLIKE LIGHT: every single
+  // UNOCCLUDED pixel is a tie by construction (vt/scene-depth.js#
+  // computeTieSafeExpectedDepth's own doc, second caller shape) — specular
+  // has no "floor's own ground below the light" fallback case the way a
+  // light does; if this tie reads as blocked, the ENTIRE effect goes dark
+  // on its own unoccluded background, not just a rare pixel.
+  ok(
+    "a real depth-pass write of the background's OWN rank (computeExpectedStoredDepth's bare value) " +
+      'still PASSES through the tie-safe expectedDepth — the tie this buffer exists to protect',
+    computeSpecularDepthGate({
+      storedDepth: computeExpectedStoredDepth(3, 10),
+      expectedDepth: computeTieSafeExpectedDepth(3, 10),
+    }) === 1
+  );
+  ok(
+    'the ordinal property survives the buffer at every rank: the rank ABOVE mine still blocks',
+    (() => {
+      const maxRank = 500;
+      for (let rank = 0; rank < 20; rank++) {
+        const myExpected = computeTieSafeExpectedDepth(rank, maxRank);
+        const aboveExpected = computeTieSafeExpectedDepth(rank + 1, maxRank);
+        if (computeSpecularDepthGate({ storedDepth: aboveExpected, expectedDepth: myExpected }) !== 0) return false;
+      }
+      return true;
+    })()
   );
 }

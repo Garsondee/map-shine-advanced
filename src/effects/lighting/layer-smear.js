@@ -59,19 +59,25 @@
  * @module effects/lighting/layer-smear
  */
 import { marchDirectionToSun } from './sun-occlusion.js';
+import { SHADOW_BAND_LAYER_INDICES } from './shadow-bands.js';
 
 /**
  * How many occluder layers the stack carries — ONE RGBA texture's worth, and a
  * deliberate hard bound rather than an open-ended list (the plan's §6):
  *
- *   0  this floor's WALLS      — `_Outdoors` dark, at the authored wall height
- *   1  this floor's OVERHEAD   — overhead tiles hosted on this floor
- *   2  the floor DIRECTLY ABOVE — its background ∪ foreground art
- *   3  EVERYTHING HIGHER, merged — floors above that, at the nearest one's height
+ *   0  this floor's WALLS    — `_Outdoors` dark, at the authored wall height
+ *   1  this floor's OVERHEAD — overhead tiles hosted on this floor
+ *   2  BAND 0 — `coverAbove(F)`,   every floor above, at the NEAREST one's real elevation
+ *   3  BAND 1 — `coverAbove(F+1)`, every floor above THAT, at the stack's real top
  *
- * Layer 3 merges on purpose: two floors far overhead throw nearly the same
- * offset, so merging costs a few px of offset error and saves an unbounded
- * layer count. Stated here so it is a decision, not a silent cap.
+ * ⚠️ LAYERS 2 AND 3 CHANGED MEANING 2026-08-05 (the shadow cascade —
+ * `shadow-bands.js`'s own header has the author's brief and the full
+ * decomposition). They used to be "the floor directly above" and "everything
+ * higher", both at ONE authored slider height, and layer 3 never carried a
+ * silhouette at all (its channel was spent on the cascade's blend factor
+ * instead, which now rides in the baked FIELD's own alpha). They are now two
+ * cumulative bands at REAL, Foundry-derived elevations, which is what makes a
+ * five-storey building throw a five-storey shadow instead of a one-storey one.
  */
 export const SHADOW_LAYER_COUNT = 4;
 
@@ -85,9 +91,70 @@ export const SHADOW_LAYER_COUNT = 4;
  * receiver is beneath it", and {@link layerSmearVisibility} has to treat
  * both differently for exactly that reason. Naming them keeps that asymmetry
  * legible instead of a bare `occ[0]`/`occ[1]`.
+ *
+ * The two BAND layers are named by `shadow-bands.js` and re-exported here
+ * rather than restated, so the packing, the model, the shader and the debug
+ * view cannot end up with two ideas of which slot is which.
  */
 export const LAYER_WALLS = 0;
 export const LAYER_OVERHEAD = 1;
+export { SHADOW_BAND_LAYER_INDICES };
+
+/**
+ * HOW MUCH A SHADOW DIFFUSES PER PIXEL OF FALL — the "softer as it cascades
+ * downwards" term, in penumbra px per px of caster height.
+ *
+ * Author, 2026-08-05: *"allow shadows to semi-realistically cascade downwards,
+ * getting softer and more diffuse as they do so."*
+ *
+ * ⚠️ THE EXISTING DISTANCE BLUR CANNOT DELIVER THIS, and the reason is worth
+ * stating rather than re-discovering. The station blur
+ * (`layer-smear-render.js`'s own `blurPx`) widens with distance ALONG THE
+ * SHADOW — so at a low sun everything is soft and at a high sun everything is
+ * crisp, regardless of how far the light actually fell. But a shadow's
+ * penumbra is set by the caster's VERTICAL drop, not its horizontal throw: at
+ * noon a roof three storeys up still casts a markedly softer edge than a
+ * kerbstone, even though both throw almost nothing. Without a height term the
+ * whole point of a multi-storey cascade — the tallest shadows reading as the
+ * softest — is invisible at exactly the hours the shadows are most legible.
+ *
+ * The physical value is the sun's own angular diameter (~0.53°, i.e.
+ * `tan ≈ 0.0093` px of penumbra per px of drop). This constant is
+ * deliberately larger: it is a LOOK constant (this file's own doctrine —
+ * `sun-shadow-subsystem.js`'s "LOOK CONSTANTS, NOT PARAMS" header), and it is
+ * multiplied by the shared atmospheric `softnessMul`, whose own shipped
+ * default (`softnessBias` 0.25) scales it back down to ≈0.03 — about three
+ * times physical, which is what makes the effect readable at map zoom rather
+ * than a sub-pixel technicality. Cloud and night soften it further through the
+ * SAME multiplier every other caster in the scene already reads
+ * (`effects/shadow-access.js`), so night-under-cloud remains the softest case
+ * without a second model saying so.
+ */
+export const DIFFUSION_PER_HEIGHT_PX = 0.12;
+
+/**
+ * The minimum penumbra a layer's own height earns it, world px — the ONE
+ * definition, shared by the CPU side (the bake's blur ledger, so a report can
+ * say what the shader will actually ask for) and the shader (which turns it
+ * into a mip LOD).
+ *
+ * ⚠️ This is a FLOOR on the station blur, never a replacement for it — the two
+ * answer different questions (how far did the light fall vs. how far has this
+ * sample walked from the caster), and `max` is what lets whichever is larger
+ * win without either being able to SHARPEN the other. Taking the height term
+ * alone would make a long dusk shadow's tip snap crisp; adding them would
+ * double-count the near field, where both are already saturated.
+ *
+ * @param {number} heightPx - this layer's own occluder height.
+ * @param {number} [softnessMul=1] - the shared atmospheric softness multiplier
+ *   (cloud × night × the author's `softnessBias`).
+ * @returns {number} world px, >= 0.
+ */
+export function layerDiffusionBlurPx(heightPx, softnessMul = 1) {
+  const h = Number.isFinite(heightPx) && heightPx > 0 ? heightPx : 0;
+  const s = Number.isFinite(softnessMul) && softnessMul > 0 ? softnessMul : 1;
+  return h * DIFFUSION_PER_HEIGHT_PX * s;
+}
 
 /**
  * THE TIER LADDER. Author, 2026-08-02: *"Ideally, it'll be nice and smooth and
@@ -363,16 +430,25 @@ function isotropicDepthTerm(sampleLayers, x, y, layerIndex, radiusPx) {
  * @param {number} args.azimuthDeg @param {number} args.elevationDeg
  * @param {number[]} args.heightsPx - one height per layer, `SHADOW_LAYER_COUNT` long.
  * @param {number} [args.lengthScale] @param {number} [args.maxLengthMul]
- * @returns {{dirX:number, dirY:number, throwPx:number[], maxThrowPx:number}}
+ * @returns {{dirX:number, dirY:number, throwPx:number[], heightPx:number[], maxThrowPx:number}}
  *   `dirX/dirY` point TOWARD the sun — the direction the back-trace walks.
+ *   `heightPx` is the resolved INPUT height per layer, carried through beside
+ *   the throw it produced: {@link layerDiffusionBlurPx} needs the height
+ *   itself, and it is NOT recoverable from `throwPx` (the dawn/dusk cap can
+ *   collapse two very different heights onto the same capped throw). Returning
+ *   both from the one resolve is what keeps the twin and the shader reading the
+ *   same pair, rather than the caller re-deriving one of them.
  */
 export function resolveLayerSmear({ azimuthDeg, elevationDeg, heightsPx = [], lengthScale = 1, maxLengthMul = 0 }) {
   const dir = marchDirectionToSun(azimuthDeg);
   const throwPx = [];
+  const heightPx = [];
   for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
-    throwPx.push(layerThrowPx({ heightPx: heightsPx[i] ?? 0, elevationDeg, lengthScale, maxLengthMul }));
+    const h = Number.isFinite(heightsPx[i]) && heightsPx[i] > 0 ? heightsPx[i] : 0;
+    heightPx.push(h);
+    throwPx.push(layerThrowPx({ heightPx: h, elevationDeg, lengthScale, maxLengthMul }));
   }
-  return { dirX: dir.x, dirY: dir.y, throwPx, maxThrowPx: Math.max(0, ...throwPx) };
+  return { dirX: dir.x, dirY: dir.y, throwPx, heightPx, maxThrowPx: Math.max(0, ...throwPx) };
 }
 
 /**
@@ -520,8 +596,38 @@ export function layerSmearVisibility({
   // are stacked.
   const global = clamp01(strength) * gate;
   let transmittance = 1;
-  for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
-    transmittance *= 1 - occ[i] * clamp01(strengths[i] ?? 1) * global;
+  transmittance *= 1 - occ[LAYER_WALLS] * clamp01(strengths[LAYER_WALLS] ?? 1) * global;
+  transmittance *= 1 - occ[LAYER_OVERHEAD] * clamp01(strengths[LAYER_OVERHEAD] ?? 1) * global;
+
+  // ⚠️ THE BANDS COMBINE BY `max`, NOT BY `×` (2026-08-05, the shadow cascade).
+  // Everything else in this model multiplies, and the header's argument for
+  // that is right — a wall beside you and a deck above you are different
+  // occluders in series, and light must clear both. The bands are NOT that.
+  // They are ONE physical stack sliced at two elevations, and by construction
+  // they are NESTED (`coverAbove(F+1) ⊆ coverAbove(F)` — `shadow-bands.js`'s
+  // own header) — so at any texel where the taller band is present, the
+  // shorter one is present too, describing the SAME masonry. Multiplying them
+  // would double-darken every multi-storey building against a single-storey
+  // one, and would keep darkening further with every floor added: a five-storey
+  // tower's shadow would go blacker than a three-storey one's for no physical
+  // reason, and "a little light should leak through" (the author's own rule,
+  // and what `SUN_SHADOW_LAYER_STRENGTH < 1` exists to guarantee) would quietly
+  // stop being true as scenes got taller.
+  //
+  // `max` is also the same combiner this model already uses WITHIN a layer, for
+  // exactly the same reason stated in the header: those samples are one
+  // occluder seen from many distances, a union. The bands are one occluder
+  // seen at many elevations. Same physics, same operator.
+  //
+  // For a two-floor scene band 1's throw is 0, so its occlusion is 0, so this
+  // reduces to `1 − occ[band0]·s·global` — BYTE-IDENTICAL to what the previous
+  // single-"above"-layer model computed. The cascade adds length to tall
+  // stacks without touching the picture on short ones.
+  let bandOcc = 0;
+  for (const i of SHADOW_BAND_LAYER_INDICES) {
+    const scaled = occ[i] * clamp01(strengths[i] ?? 1);
+    if (scaled > bandOcc) bandOcc = scaled;
   }
+  transmittance *= 1 - bandOcc * global;
   return clamp01(transmittance);
 }

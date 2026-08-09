@@ -158,6 +158,15 @@ export function createFluidSurfaceSubsystem({
   disposeSimRenderTarget,
   getFluidRenderState,
   timeMsNode,
+  // The tube-net + pack bake (extractTubeNet/buildFluidPack — a geodesic pass
+  // + two-pass chamfer distance transform + connected-component flood fill)
+  // runs inside loadAndBake's own async continuation, never a synchronous
+  // call site in vt-pan-viewer.js — so like specular's island-pack bake, it
+  // has to bracket itself. `beginById`/`endById` (the string form): this is
+  // a rare bake event, not a per-frame call, the exact "cold call site" case
+  // frame-profiler.js documents that form for (perf-zone-coverage-audit,
+  // 2026-08-06 — this bake previously had zero profiler coverage).
+  profiler = null,
 }) {
   // ⚠️ NO DEFAULT that fakes a wired seam. `feedback_seam_default_hides_unwired`:
   // water shipped its render-state seam declared, defaulted and never passed,
@@ -229,8 +238,16 @@ export function createFluidSurfaceSubsystem({
       const spanY = Math.max(...item.corners.map((c) => c.y)) - Math.min(...item.corners.map((c) => c.y));
       const grid = downsample(image.data, image.width, image.height, scale, spanX, spanY);
 
-      entry.net = extractTubeNet({ grid });
-      entry.pack = buildFluidPack({ net: entry.net });
+      profiler?.beginById('light.fluidNetBake');
+      try {
+        entry.net = extractTubeNet({ grid });
+        entry.pack = buildFluidPack({ net: entry.net });
+      } finally {
+        // Closed here even on a throw — the outer try only has a `finally`
+        // (no catch), so an unclosed bracket would otherwise survive as a
+        // permanently-open zone.
+        profiler?.endById('light.fluidNetBake');
+      }
       bakes++;
 
       for (const w of entry.net.warnings) log.warn(`bake (item ${item.id}): ${w}`);

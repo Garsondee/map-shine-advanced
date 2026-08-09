@@ -60,7 +60,7 @@
 
 import { createWindHandle } from '../world/index.js';
 import { simplexFloat } from './lighting/animations/tsl-noise-toolkit.js';
-import { buildHeightGateNode } from './lighting/point-light-illumination.js';
+import { buildDepthHeightGateNode } from './lighting/point-light-illumination.js';
 
 /** Bake-less fallback handle — organic gust/flutter noise only, no baked
  * openness/wall-avoidance field. Mirrors candle-flame-render.js's own
@@ -94,8 +94,9 @@ const DIRECT_ATTRS = Object.freeze([
  * tool exists for — see docs/planning/Shader-Lab.md's own "first real use"):
  * this file's original shape set 12 SEPARATE attributes (3 vec3 + 9 scalar).
  * (`strandBakeB` was widened vec3→vec4 on 2026-08-03 to fold in the height
- * gate's `elevationRank` — see `lightning-geometry.js#computeLightningStrand
- * Arrays`'s own doc — staying at 6 total buffers rather than opening a 7th.)
+ * gate's rank field (renamed `expectedDepth` in the 2026-08-05 depth-authority
+ * migration — see `lightning-geometry.js#computeLightningStrandArrays`'s own
+ * doc) — staying at 6 total buffers rather than opening a 7th.)
  * The real WebGPU render pipeline failed to COMPILE — "Vertex buffer count
  * (12) exceeds the maximum number of vertex buffers (8)" — so the bolt mesh
  * never drew a single pixel, on real hardware, despite every Node test
@@ -111,7 +112,7 @@ const DIRECT_ATTRS = Object.freeze([
 const PACKED_ATTRS = Object.freeze([
   ['sideUv', 2, ['side', 'uvOffset']],
   ['strandBakeA', 4, ['spawnMs', 'durationMs', 'seed', 'leaderFrac']],
-  ['strandBakeB', 4, ['restrikeCount', 'baseIntensity', 'widthScale', 'elevationRank']],
+  ['strandBakeB', 4, ['restrikeCount', 'baseIntensity', 'widthScale', 'expectedDepth']],
 ]);
 
 /** Interleave `keys.length` same-length source arrays into one packed
@@ -188,14 +189,17 @@ export function refillLightningGeometry(THREE, geometry, arrays) {
  * and returned for the caller to drive every frame — the same "uniforms out,
  * .value per frame" contract candle's `buildCandleFlameMaterial` uses.
  *
- * @param {{THREE:*, uGlobalTimeMs:*, quality?:number, windHandle?:object, attrTexNode?:*}} args
+ * @param {{THREE:*, uGlobalTimeMs:*, quality?:number, windHandle?:object, depthTexNode?:*, depthFlagsTexNode?:*}} args
  *   `quality` (default 2) graph-build-time gates the core-static crackle term
  *   (Effects.md Law 4: a tier that's off must never be constructed) — below 2
  *   skips constructing it entirely, never just multiplies it by zero.
- *   `attrTexNode` — `buf:scene.attr`, UNSAMPLED — wires the SAME height/
- *   elevation gate a point light and the candle flame use
- *   (`point-light-illumination.js#buildHeightGateNode`); omit it for a bolt
- *   that ignores floor occlusion entirely (byte-identical pre-gate behaviour).
+ *   `depthTexNode`/`depthFlagsTexNode` — `buf:scene.depth`, UNSAMPLED — wires
+ *   the SAME depth-authority occlusion gate a point light uses
+ *   (`point-light-illumination.js#buildDepthHeightGateNode`; 2026-08-05
+ *   migration from the OLD `buf:scene.attr`/`buildHeightGateNode` mechanism —
+ *   candle's own flame sprite is still on that OLD mechanism, deliberately
+ *   out of scope here). Omit both for a bolt that ignores floor occlusion
+ *   entirely (byte-identical pre-gate behaviour, e.g. Shader Lab).
  * @returns {{material:*, uniforms: Record<string, *>}}
  */
 export function buildLightningMaterial({
@@ -203,7 +207,8 @@ export function buildLightningMaterial({
   uGlobalTimeMs,
   quality = 2,
   windHandle = TIER0_WIND_HANDLE,
-  attrTexNode,
+  depthTexNode,
+  depthFlagsTexNode,
 }) {
   const {
     Fn,
@@ -258,7 +263,7 @@ export function buildLightningMaterial({
   const strandRestrikeCount = strandBakeB.x;
   const strandBaseIntensity = strandBakeB.y;
   const strandWidthScale = strandBakeB.z;
-  const strandElevationRank = strandBakeB.w;
+  const strandExpectedDepth = strandBakeB.w;
 
   /** Cubic smoothstep of an already-clamped-at-0 ratio — the shader twin of
    * lightning-geometry.js's own `smooth01`. */
@@ -280,7 +285,7 @@ export function buildLightningMaterial({
   const vLeaderFrac = strandLeaderFrac.toVarying('vLightningLeaderFrac');
   const vRestrikeCount = strandRestrikeCount.toVarying('vLightningRestrikeCount');
   const vBaseIntensity = strandBaseIntensity.toVarying('vLightningBaseIntensity');
-  const vElevationRank = strandElevationRank.toVarying('vLightningElevationRank');
+  const vExpectedDepth = strandExpectedDepth.toVarying('vLightningExpectedDepth');
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -438,26 +443,37 @@ export function buildLightningMaterial({
     alpha = alpha.mul(mix(float(0.45), float(1), growth));
 
     // ============================================================================
-    // THE HEIGHT/ELEVATION GATE — the SAME node point-light and candle-flame
-    // materials use. Multiplied into ALPHA (not just rgb): this material is
-    // AdditiveBlending, so an un-gated alpha would keep punching a lit value
-    // into the scene even with colour zeroed elsewhere
-    // (`feedback_blend_neutral_element_is_per_blend`).
+    // THE DEPTH-AUTHORITY OCCLUSION GATE (2026-08-05 — migrated from the OLD
+    // buf:scene.attr/buildHeightGateNode mechanism, still described in this
+    // file's own git history, to the SAME depth authority a point light
+    // already uses live — point-light-illumination.js#buildDepthHeightGateNode,
+    // the project's sole occlusion/rank system, see
+    // keyhole-depth-authority-sole-system-decision). Multiplied into ALPHA
+    // (not just rgb): this material is AdditiveBlending, so an un-gated alpha
+    // would keep punching a lit value into the scene even with colour zeroed
+    // elsewhere (`feedback_blend_neutral_element_is_per_blend`).
     //
-    // ⚠️ `screenUV`, never the bare node — `buf:scene.attr` is SCREEN-space
+    // ⚠️ `screenUV`, never the bare node — `buf:scene.depth` is SCREEN-space
     // and this is a WORLD-space ribbon mesh with no meaningful mesh uv of its
-    // own (`feedback_shared_texture_node_carries_the_wrong_uv`).
+    // own (`feedback_shared_texture_node_carries_the_wrong_uv`). Lightning's
+    // own draw uses the SAME shared world camera the depth-authority write
+    // pass frames against (`scene-depth.js#computeCameraFrustum`), which is
+    // what keeps this screenUV sample indexing the right world position —
+    // confirmed by reading that module directly, not assumed.
     //
-    // `vElevationRank` is a per-STRAND varying (`generateBurst`'s own doc for
+    // `vExpectedDepth` is a per-STRAND varying (`generateBurst`'s own doc for
     // why: a branch inherits its parent's floor, a fresh strike gets its own),
     // never a uniform — this mesh batches every active strand into one draw.
-    // A JS-time branch: with no `attrTexNode` this material is byte-identical
+    // A JS-time branch: with no `depthTexNode` this material is byte-identical
     // to before the gate existed.
-    if (attrTexNode) {
+    if (depthTexNode) {
+      const depthHere = depthTexNode.sample(screenUV);
+      const flagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
       alpha = alpha.mul(
-        buildHeightGateNode(THREE.TSL, {
-          attrHere: attrTexNode.sample(screenUV),
-          uLightElevationRank: vElevationRank,
+        buildDepthHeightGateNode(THREE.TSL, {
+          depthHere,
+          flagsHere,
+          uLightExpectedDepth: vExpectedDepth,
         })
       );
     }

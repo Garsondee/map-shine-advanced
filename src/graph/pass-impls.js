@@ -188,4 +188,18 @@ export const PASS_IMPLS = Object.freeze({
       'work) when the effect is disabled. Same invocability caveat as geometry.world — the loop lives ' +
       'inside startVtPanViewer.',
   },
+  'post.dof': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-08-06 (docs/planning/Depth-of-Field.md): runPostDofPass (a closure inside ' +
+      'startVtPanViewer, in the local passImpls map runPassPlan walks) reads scene.lit and ' +
+      "buf:scene.depth's floor-index colour payload, builds a 4-mip downsample pyramid through " +
+      'allocator-owned mip targets (effects/depth-of-field-render.js builds the TSL), and composites a ' +
+      'floor-distance-driven blur back into scene.lit via NormalBlending. Skips entirely (JS early-' +
+      'return, no GPU work) when the effect is disabled or the viewed floor is the ground floor. Same ' +
+      'invocability caveat as geometry.world — the loop lives inside startVtPanViewer.',
+  },
 });

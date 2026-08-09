@@ -35,6 +35,7 @@ import { WATER } from '../water/water.js';
 import { WATER_DEFAULT_TIER } from '../water/water-render.js';
 import { FLUID } from '../fluid/fluid.js';
 import { BLOOM } from '../bloom.js';
+import { DEPTH_OF_FIELD } from '../depth-of-field.js';
 import { VEGETATION } from '../vegetation.js';
 import { SUN_SHADOWS } from '../sun-shadows.js';
 import { GRADE } from '../grade/grade.js';
@@ -189,7 +190,18 @@ export function run(t) {
   ok('a well-formed ladder passes', validateEffectManifest(LADDER).ok);
 
   // --- the REAL shipped manifests, not just fixtures ------------------------
-  for (const m of [CANDLE_FLAME, WATER, SPECULAR, FLUID, BLOOM, VEGETATION, SUN_SHADOWS, GRADE, WINDOW]) {
+  for (const m of [
+    CANDLE_FLAME,
+    WATER,
+    SPECULAR,
+    FLUID,
+    BLOOM,
+    DEPTH_OF_FIELD,
+    VEGETATION,
+    SUN_SHADOWS,
+    GRADE,
+    WINDOW,
+  ]) {
     ok(`the shipped '${m.id}' manifest declares a well-formed ladder`, validateEffectManifest(m).ok === true);
   }
   ok(

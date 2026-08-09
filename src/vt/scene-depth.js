@@ -187,20 +187,32 @@ export function computeExpectedStoredDepth(rank, maxRank) {
 }
 
 /**
- * {@link computeExpectedStoredDepth}, ADJUSTED for a caller (a light) whose
- * own query is expected to land EXACTLY ON a real item's rank most of the
- * time — `depth-authority.js#rankOfElevation`'s own header: "a torch standing
- * on its own floor's ground is not occluded by that ground", i.e. the common
- * case is a TIE, not a clean gap. A bare `computeExpectedStoredDepth` value
- * compared with `storedDepth.lessThan(expectedDepth)` has no room for the
- * ordinary float noise between a CPU (JS double) prediction and a GPU
- * (float32) rasterized value at that same tie — `bench-scene-depth.js`'s own
- * query material already needed an `epsilon` for exactly this
- * ("scenario 5"'s `isEqual` check) even comparing two GPU-sampled values
- * against EACH OTHER, which is the easier case. Left unguarded, a light could
- * read its own floor's ground as "above" it and go dark everywhere, every
- * frame, the moment rounding tips the wrong way — a global blackout, not a
- * corner case.
+ * {@link computeExpectedStoredDepth}, ADJUSTED for a caller whose own query
+ * is expected to land EXACTLY ON a real item's rank most of the time — TWO
+ * genuinely different shapes of caller hit this, not one:
+ *
+ *   - **A light with no geometry of its own** — `depth-authority.js#
+ *     rankOfElevation`'s own header: "a torch standing on its own floor's
+ *     ground is not occluded by that ground", i.e. the common case is a TIE,
+ *     not a clean gap.
+ *   - **An effect querying its OWN drawn item's rank** — e.g. specular's
+ *     shine, gated on whether anything ranks ABOVE the Level background it
+ *     is painted over: at every pixel where nothing occludes it, the STORED
+ *     depth this query samples is that SAME background item's own rank,
+ *     rasterized by the SAME depth pass — a tie by construction, every
+ *     unoccluded pixel, not an edge case.
+ *
+ * Either way, a bare `computeExpectedStoredDepth` value compared with
+ * `storedDepth.lessThan(expectedDepth)` has no room for the ordinary float
+ * noise between a CPU (JS double) prediction and a GPU (float32) rasterized
+ * value at that same tie — `bench-scene-depth.js`'s own query material
+ * already needed an `epsilon` for exactly this ("scenario 5"'s `isEqual`
+ * check) even comparing two GPU-sampled values against EACH OTHER, which is
+ * the easier case. Left unguarded, a light could read its own floor's
+ * ground as "above" it and go dark everywhere, every frame, the moment
+ * rounding tips the wrong way — a global blackout, not a corner case; an
+ * effect querying its own item could black itself out on EVERY unoccluded
+ * pixel the same way.
  *
  * The fix is a fail-open buffer sized to HALF a single rank's own depth-space
  * gap, never a flat constant — see `[[feedback_margin_sized_to_gap_is_self_
@@ -212,17 +224,18 @@ export function computeExpectedStoredDepth(rank, maxRank) {
  * noise at an exact tie but can never bridge two distinct items into a false
  * tie, at any scene size. `feedback_gate_polarity_must_fail_open`: the buffer
  * SUBTRACTS from the block threshold, making blocking harder, never easier,
- * at the boundary — a receiver at or below the light stays lit.
+ * at the boundary — a receiver at or below the query stays visible.
  *
  * @param {number} rank
  * @param {number} maxRank
  * @returns {number} a stored-depth value slightly SMALLER (a slightly higher
  *   apparent rank) than {@link computeExpectedStoredDepth} would return —
- *   use this, never the bare formula, as `uLightExpectedDepth`/similar for
- *   any query comparing a GPU-SAMPLED `storedDepth` against a CPU-resolved
- *   rank with no drawn geometry of its own.
+ *   use this, never the bare formula, as `uLightExpectedDepth`/`uExpectedDepth`/
+ *   similar for any query comparing a GPU-SAMPLED `storedDepth` against a
+ *   CPU-resolved rank that is expected to tie with a real item most of the
+ *   time (with or without drawn geometry of its own).
  */
-export function computeLightExpectedDepth(rank, maxRank) {
+export function computeTieSafeExpectedDepth(rank, maxRank) {
   const perRankGap = 1 / ((Math.max(1, maxRank) + 1) * (DEPTH_PASS_FAR - DEPTH_PASS_NEAR));
   return computeExpectedStoredDepth(rank, maxRank) - perRankGap * 0.5;
 }
@@ -372,26 +385,56 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
  *   threshold (`collectLevelTextures`'s default, per `scene-layers.js`).
  * @param {number} args.floorIndex - 0-255, {@link resolveSceneDepthFloorIndex}'s result.
  * @param {number} args.flags - 0-31, {@link computeSceneDepthFlags}'s result.
+ * @param {*} [args.positionNode] - a vertex-stage TSL node, applied to
+ *   `material.positionNode` when present. EVERY existing caller (ordinary
+ *   Level/tile/token proxies) omits this — their real mesh is static, so the
+ *   default (no positionNode, i.e. the geometry's own rest-pose position) is
+ *   correct. The ONE caller that must not omit it is vegetation's own
+ *   proxy (`vt-pan-viewer.js#rebuildSceneDepthProxies`'s `vegetationOverlay`
+ *   branch): that proxy shares its geometry with a mesh whose REAL on-screen
+ *   position is wind-displaced every frame (`buildVegetationMaterial`'s own
+ *   `positionNode`) — leaving this at rest silently rasterizes a silhouette
+ *   that never moves while the canopy it is supposed to describe sways
+ *   continuously, which is precisely the bug
+ *   `buildVegetationSwayDisplacementNode`'s own header records
+ *   (`docs/planning/Depth-Buffer.md` §9k).
  * @returns {*} a `THREE.NodeMaterial`.
  */
-export function buildSceneDepthWriterMaterial({ THREE, tex, alphaThreshold = 0.75, floorIndex, flags }) {
-  const { Fn, float, vec4, texture } = THREE.TSL;
+export function buildSceneDepthWriterMaterial({ THREE, tex, alphaThreshold = 0.75, floorIndex, flags, positionNode }) {
+  const { Fn, float, uniform, vec4, texture } = THREE.TSL;
   const material = new THREE.NodeMaterial();
   material.side = THREE.DoubleSide;
   material.transparent = false;
   material.depthTest = true;
   material.depthWrite = true;
   material.depthFunc = THREE.LessDepth;
+  if (positionNode) material.positionNode = positionNode;
+  // floorIndex/flags/alphaThreshold are UNIFORMS, never `float(literal)` —
+  // `rebuildSceneDepthProxies` builds a brand-new material like this one for
+  // EVERY tile on EVERY residency pass (by design — see this function's own
+  // caller). A `float(x)` bakes x into the generated shader SOURCE, so two
+  // materials that differ only in floorIndex compile to two DIFFERENT
+  // pipelines; a scene with many distinct (floorIndex, flags, alphaThreshold)
+  // combinations forced a fresh WebGPU pipeline compile on nearly every
+  // residency pass, live-measured at a 3.4ms mean / 43ms max CPU cost for
+  // what is otherwise a 5-draw-call pass (`docs/planning/Performance.md`,
+  // 2026-08-06 profile, zone `geometry.depthDraw`). A `uniform()` keeps the
+  // value out of the shader text entirely, so every material sharing this
+  // function's same STRUCTURAL shape (textured or not, positionNode or not —
+  // a handful of variants, not one per item) compiles ONCE and is reused.
+  const uFloorIndex = uniform(float(floorIndex / 255));
+  const uFlags = uniform(float(flags / 255));
+  const uAlphaThreshold = uniform(float(alphaThreshold));
   material.fragmentNode = Fn(() => {
     const a = tex ? texture(tex).level(float(0)).a : float(1);
-    a.lessThan(float(alphaThreshold)).discard();
+    a.lessThan(uAlphaThreshold).discard();
     // G (outdoors) is a KNOWN GAP, stated honestly, not faked: wiring it
     // needs the same envLight/uOutdoorsRect plumbing scene-attr.js's real
     // writers take, and no Stage 1 consumer reads it yet (design doc §6's
     // own `d.outdoors` is for a later effect migration). 0 — "indoors" — is
     // the SAME safe default `packFloorAttr` already uses for a floor with
     // no authored outdoors mask, never a fabricated "somewhere outside".
-    return vec4(float(floorIndex / 255), float(0), float(flags / 255), float(1));
+    return vec4(uFloorIndex, float(0), uFlags, float(1));
   })();
   return material;
 }

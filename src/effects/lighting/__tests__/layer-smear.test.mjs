@@ -18,7 +18,11 @@
 import {
   SHADOW_LAYER_COUNT,
   LAYER_WALLS,
+  LAYER_OVERHEAD,
+  SHADOW_BAND_LAYER_INDICES,
+  DIFFUSION_PER_HEIGHT_PX,
   layerThrowPx,
+  layerDiffusionBlurPx,
   smearFalloff01,
   stationDistancePx,
   stationSpacingPx,
@@ -703,6 +707,184 @@ export function run(t) {
     t.ok(
       `the same partially-covered wall still casts a real shadow beside it (got ${partialBesideVis.toFixed(3)})`,
       partialBesideVis < 0.9
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE SHADOW CASCADE (2026-08-05) — bands union, they do not compound
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // Author: *"buildings which are several stories tall … have a much longer
+  // larger shadow produced as a result of having access to the information for
+  // all floors."* The band decomposition delivers LENGTH; these cases guard the
+  // thing that makes extra length safe to add — that stacking more storeys must
+  // not also stack more DARKNESS. `shadow-bands.js` proves the heights; this
+  // proves the combiner that consumes them.
+  {
+    // A silhouette present in BOTH bands (the nested case — `coverAbove(F+1) ⊆
+    // coverAbove(F)` by construction, so a tall building is in every band).
+    const inBothBands = () => {
+      const a = new Array(SHADOW_LAYER_COUNT).fill(0);
+      for (const i of SHADOW_BAND_LAYER_INDICES) a[i] = 1;
+      return a;
+    };
+    const inNearBandOnly = () => {
+      const a = new Array(SHADOW_LAYER_COUNT).fill(0);
+      a[SHADOW_BAND_LAYER_INDICES[0]] = 1;
+      return a;
+    };
+    const heights = new Array(SHADOW_LAYER_COUNT).fill(0);
+    heights[SHADOW_BAND_LAYER_INDICES[0]] = 400;
+    heights[SHADOW_BAND_LAYER_INDICES[1]] = 1060;
+    const resolved = resolveLayerSmear({ azimuthDeg: 220, elevationDeg: 45, heightsPx: heights });
+    const strengths = new Array(SHADOW_LAYER_COUNT).fill(0.95);
+
+    const both = layerSmearVisibility({ x: 0, y: 0, sampleLayers: inBothBands, resolved, strengths, steps: 32 });
+    const one = layerSmearVisibility({ x: 0, y: 0, sampleLayers: inNearBandOnly, resolved, strengths, steps: 32 });
+    // ⚠️ THE HEADLINE INVARIANT. If the bands multiplied (the combiner every
+    // OTHER layer in this model uses), `both` would be 0.05² = 0.0025 against
+    // `one`'s 0.05 — a three-storey building reading twenty times blacker than
+    // a two-storey one for no physical reason, and getting blacker still with
+    // every floor added. `max` makes an occluder present at two elevations
+    // exactly as opaque as one present at one.
+    t.ok(
+      `a building in BOTH bands is no darker than one in a single band (${both.toFixed(4)} vs ${one.toFixed(4)})`,
+      near(both, one, 1e-9)
+    );
+    t.ok(
+      `and both leave the author's "a little light should leak through" headroom (${both.toFixed(4)} > 0)`,
+      both > 0 && both < 0.2
+    );
+
+    // The bands are ONE occluder; walls and overhead are DIFFERENT occluders in
+    // series and must still compound. Proving one without the other would let a
+    // change that turned the whole model into a `max` pass go unnoticed.
+    //
+    // ⚠️ THE WALL MUST BE LOCAL AND THE RECEIVER MUST STAND OUTSIDE IT. A first
+    // version of this case put the wall EVERYWHERE (like the bands) and read
+    // exactly the band-only value — because the receiver then stands inside the
+    // wall's own silhouette, where the self-exclusion rule correctly discounts
+    // the whole wall term to zero. The test looked like a compounding failure
+    // and was a geometry mistake; `feedback_real_geometry_sweep_needs_occluder_
+    // stop` is the same trap on a bigger sweep.
+    const WALL_RADIUS = 40;
+    const bandsEverywhereWallHere = (x, y) => {
+      const a = inBothBands();
+      if (Math.hypot(x, y) <= WALL_RADIUS) a[LAYER_WALLS] = 1;
+      return a;
+    };
+    const wallHeights = [...heights];
+    wallHeights[LAYER_WALLS] = 260;
+    const seriesResolved = resolveLayerSmear({ azimuthDeg: 220, elevationDeg: 45, heightsPx: wallHeights });
+    const toSunSeries = marchDirectionToSun(220);
+    const outside = WALL_RADIUS + 20;
+    const at = { x: -toSunSeries.x * outside, y: -toSunSeries.y * outside };
+    const bandAndWall = layerSmearVisibility({
+      ...at,
+      sampleLayers: bandsEverywhereWallHere,
+      resolved: seriesResolved,
+      strengths,
+      steps: 32,
+    });
+    const bandOnlySeries = layerSmearVisibility({
+      ...at,
+      sampleLayers: inBothBands,
+      resolved: seriesResolved,
+      strengths,
+      steps: 32,
+    });
+    t.ok(
+      `a wall AND a stack above still compound — different occluders in series ` +
+        `(${bandAndWall.toFixed(4)} < ${bandOnlySeries.toFixed(4)})`,
+      bandAndWall < bandOnlySeries
+    );
+
+    // A layer with strength 0 must contribute nothing, INCLUDING through the
+    // band `max` — the debug isolation views work by zeroing strengths, and a
+    // `max` taken before the strength multiply would ignore them entirely
+    // (which is exactly how this effect's isolation views broke once before).
+    const farOnlyStrengths = new Array(SHADOW_LAYER_COUNT).fill(0);
+    farOnlyStrengths[SHADOW_BAND_LAYER_INDICES[1]] = 0.95;
+    const farIsolated = layerSmearVisibility({
+      x: 0,
+      y: 0,
+      sampleLayers: inNearBandOnly,
+      resolved,
+      strengths: farOnlyStrengths,
+      steps: 32,
+    });
+    t.ok(
+      `isolating the FAR band hides a caster that only exists in the near one (got ${farIsolated.toFixed(4)})`,
+      near(farIsolated, 1, 1e-9)
+    );
+  }
+
+  // ── THE DIFFUSION FLOOR — "softer and more diffuse as they cascade down" ──
+  {
+    t.ok('a zero-height layer diffuses nothing', layerDiffusionBlurPx(0) === 0);
+    t.ok(
+      'diffusion is linear in the caster height — twice as far up, twice as soft',
+      near(layerDiffusionBlurPx(800), layerDiffusionBlurPx(400) * 2)
+    );
+    t.ok(
+      `it is the shared atmospheric softness that scales it, so night-under-cloud stays the softest case`,
+      near(layerDiffusionBlurPx(400, 2), layerDiffusionBlurPx(400) * 2)
+    );
+    // ⚠️ THE REASON THIS TERM EXISTS AT ALL, asserted rather than described: at
+    // a HIGH sun the directional throw collapses toward zero, so the station
+    // blur (which scales with throw) reports a roof three storeys up as exactly
+    // as crisp as a kerbstone. The height term does not.
+    const noonWall = resolveLayerSmear({ azimuthDeg: 220, elevationDeg: 85, heightsPx: [260, 0, 0, 0] });
+    const noonRoof = resolveLayerSmear({ azimuthDeg: 220, elevationDeg: 85, heightsPx: [1060, 0, 0, 0] });
+    t.ok(
+      `at a near-overhead sun both throws are short (${noonWall.maxThrowPx.toFixed(0)}px, ` +
+        `${noonRoof.maxThrowPx.toFixed(0)}px) …`,
+      noonWall.maxThrowPx < 200 && noonRoof.maxThrowPx < 400
+    );
+    t.ok(
+      '… yet the taller caster is still markedly softer, which is the whole point of the term',
+      layerDiffusionBlurPx(noonRoof.heightPx[0]) > layerDiffusionBlurPx(noonWall.heightPx[0]) * 3
+    );
+    t.ok(
+      "the constant stays above the sun's own ~0.0093 physical value (it is a LOOK constant, stated not implied)",
+      DIFFUSION_PER_HEIGHT_PX > 0.0093
+    );
+    // Garbage in must not become a NaN mip request in the shader.
+    t.ok(
+      'non-finite inputs return a finite 0 rather than a NaN blur radius',
+      layerDiffusionBlurPx(Number.NaN) === 0 &&
+        layerDiffusionBlurPx(-5) === 0 &&
+        Number.isFinite(layerDiffusionBlurPx(400, Number.NaN))
+    );
+  }
+
+  // ── `resolveLayerSmear` CARRIES THE HEIGHTS THROUGH ──────────────────
+  // The shader needs the HEIGHT as well as the throw, and cannot recover one
+  // from the other: the dawn/dusk cap can land two very different heights on
+  // the same capped throw, and inverting a cap on the GPU would be re-deriving
+  // a CPU decision from its own lossy output.
+  {
+    const r = resolveLayerSmear({ azimuthDeg: 90, elevationDeg: 10, heightsPx: [260, 0, 400, 1060] });
+    t.ok('every layer gets a height entry', r.heightPx.length === SHADOW_LAYER_COUNT);
+    t.ok('the heights come through unchanged', r.heightPx[LAYER_WALLS] === 260 && r.heightPx[3] === 1060);
+    t.ok('an absent layer resolves to height 0, not undefined', r.heightPx[LAYER_OVERHEAD] === 0);
+    // The cap really does collapse two heights onto one throw at a low sun —
+    // which is the case that makes the second array necessary rather than
+    // merely convenient.
+    const capped = resolveLayerSmear({
+      azimuthDeg: 90,
+      elevationDeg: 1,
+      heightsPx: [400, 1060, 0, 0],
+      maxLengthMul: 2,
+    });
+    t.ok(
+      `a low sun caps both throws proportionally while the heights stay distinct ` +
+        `(${capped.throwPx[0]}/${capped.throwPx[1]} px from ${capped.heightPx[0]}/${capped.heightPx[1]})`,
+      capped.heightPx[0] !== capped.heightPx[1] && capped.throwPx[0] === 800 && capped.throwPx[1] === 2120
+    );
+    t.ok(
+      'a non-finite height is sanitised to 0 by the resolve, so the shader never sees it',
+      resolveLayerSmear({ azimuthDeg: 0, elevationDeg: 45, heightsPx: [Number.NaN, -3] }).heightPx.every((h) => h === 0)
     );
   }
 }

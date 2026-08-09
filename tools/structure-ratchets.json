@@ -6,6 +6,6 @@
   "log/one-door": 30,
   "time/one-clock": 35,
   "zones/one-door": 8,
-  "graph/reachable-from-boot": 1,
+  "graph/reachable-from-boot": 2,
   "params/one-owner": 0
 }

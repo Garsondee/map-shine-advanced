@@ -167,6 +167,120 @@ export async function run(t) {
     ok('averaging the bracket shrinks the impossible negative (−1.8 → −1.1)', shadow.costMs === -1.1);
   }
 
+  // --- summarizeSweep — THIRD post-mortem: a negative cost BIGGER than the floor used to
+  // --- read as "resolved" (magnitude-only check). This is the exact shape of the live
+  // --- report that caught it: doorGraphics/grade both negative AND past the floor.
+  {
+    const raw = {
+      __baseline__: { gpuMs: 19.8 },
+      candleFlame: { gpuMs: 18.9 }, // -1.5ms — same shape as the live 'grade' row
+      uiWindowShadow: { gpuMs: 22.2 }, // +1.8ms — a real, resolved positive cost
+      __all__: { gpuMs: 23.1, feltP50: 20.7 },
+      __baseline2__: { gpuMs: 21.0 }, // drift +1.2 → noiseFloor 1.2, baseGpu (avg) 20.4
+    };
+    const s = summarizeSweep(raw, EFFECTS);
+    const candle = s.perEffect.find((e) => e.id === 'candleFlame'); // cost = 18.9-20.4 = -1.5
+    const shadow = s.perEffect.find((e) => e.id === 'uiWindowShadow'); // cost = 22.2-20.4 = 1.8
+
+    // The reconciled floor now folds candle's own -1.5 INTO itself (it IS this
+    // sweep's worst negative reading), so it can only ever TIE candle's own
+    // magnitude, never be exceeded by it — which is exactly why `resolved`
+    // uses this floor but `suspiciousNegative` deliberately does not (see its
+    // own comment in summarizeSweep).
+    ok('the reconciled floor absorbs the worst negative reading itself', s.noiseFloorMs === 1.5);
+    ok(
+      'a negative reading past the BASELINE-PAIR floor is NOT "resolved" — confidently wrong, not a saving',
+      candle.resolved === false
+    );
+    ok(
+      'it IS flagged as suspicious drift (compared against the bracketing pair, 1.2, not the reconciled 1.5)',
+      candle.suspiciousNegative === true
+    );
+    ok('its percentage share is still suppressed, same as any unresolved row', candle.pctOfEffects === null);
+
+    ok('a genuine positive cost past the RECONCILED floor stays resolved', shadow.resolved === true);
+    ok('and is never flagged suspicious', shadow.suspiciousNegative === false);
+
+    ok(
+      'a run with a resolved effect explains what the percentages mean',
+      s.notes.some((n) => n.includes('share'))
+    );
+    ok(
+      'a run with a suspicious-negative effect gets an explicit warning about it',
+      s.notes.some((n) => n.toLowerCase().includes('drift'))
+    );
+  }
+
+  // --- summarizeSweep — FOURTH post-mortem (2026-08-06): the floor ITSELF used to be
+  // --- computed two different ways in two places. This reproduces the live report that
+  // --- caught it: a small POSITIVE reading (like 'grade': 0.35ms) cleared this function's
+  // --- OWN bracketing-pair-only floor (0.1ms that run) and printed resolved:true, while
+  // --- perf-report.js's separately-reconciled floor (1.35ms, from a DIFFERENT effect's
+  // --- worse negative reading) rejected the exact same number — one report, two verdicts.
+  {
+    const raw = {
+      __baseline__: { gpuMs: 20.0 }, // baseGpu (avg of 20.0/20.1) = 20.05
+      candleFlame: { gpuMs: 20.4 }, // cost = 20.4-20.05 = +0.35ms — clears the tiny bracket-only floor (0.1), but shouldn't survive reconciliation
+      uiWindowShadow: { gpuMs: 18.7 }, // cost = 18.7-20.05 = -1.35ms — a much worse negative from ANOTHER effect, sets the real floor
+      __all__: { gpuMs: 20.2, feltP50: 25 },
+      __baseline2__: { gpuMs: 20.1 }, // drift 0.1 → bracketing-pair-alone floor would be 0.1
+    };
+    const s = summarizeSweep(raw, EFFECTS);
+    const grade = s.perEffect.find((e) => e.id === 'candleFlame');
+    ok(
+      "the reconciled floor is the OTHER effect's worse negative (1.35), not the tiny bracket drift (0.1)",
+      s.noiseFloorMs === 1.35
+    );
+    ok(
+      'a small positive reading that would have cleared the bracket-alone floor is correctly REJECTED once reconciled',
+      grade.resolved === false && grade.costMs === 0.35
+    );
+    ok(
+      'a positive-but-unresolved reading is never mislabelled "suspicious" (only negatives are)',
+      grade.suspiciousNegative === false
+    );
+  }
+
+  // --- summarizeSweep — the "what do percentages mean" note only appears once there is
+  // --- at least one resolved effect for it to explain -----------------------------------
+  {
+    // Both effects land INSIDE a 0.5ms floor, one from each side of zero, and neither
+    // clears it — nothing here is "resolved", so there is nothing yet for a percentage
+    // note to explain.
+    const raw = {
+      __baseline__: { gpuMs: 20.0 },
+      candleFlame: { gpuMs: 20.4 }, // cost +0.15, inside the floor
+      uiWindowShadow: { gpuMs: 20.1 }, // cost -0.15, inside the floor (not suspicious — too small to be confident either way)
+      __all__: { gpuMs: 20.6, feltP50: 25 },
+      __baseline2__: { gpuMs: 20.5 }, // drift 0.5 → noiseFloor 0.5
+    };
+    const s = summarizeSweep(raw, EFFECTS);
+    ok(
+      'neither effect resolves',
+      s.perEffect.every((e) => e.resolved === false)
+    );
+    ok(
+      'a small negative inside the floor is NOT flagged suspicious — that needs magnitude too',
+      !s.perEffect.some((e) => e.suspiciousNegative)
+    );
+    // "rough ranking" is unique to the anyResolved-gated note — "share" alone also appears
+    // in the separate totalEffectGpuMs-unresolvable note, which CAN legitimately fire here.
+    ok('nothing resolved → no "what percentages mean" note', !s.notes.some((n) => n.includes('rough ranking')));
+    ok('nothing suspicious → no drift-warning note', !s.notes.some((n) => n.toLowerCase().includes('systematically')));
+  }
+
+  // --- formatCost — the suspicious-negative label is distinct from "< noise" -------------
+  {
+    ok(
+      'a suspicious-negative reading gets its own label, not folded into "< noise"',
+      formatCost({ costMs: -1.5, resolved: false, suspiciousNegative: true }) === '⚠ drift, not cost (-1.50 ms)'
+    );
+    ok(
+      'an ordinary unresolved reading (not flagged suspicious) still reads as noise',
+      formatCost({ costMs: 0.3, resolved: false, suspiciousNegative: false }) === '< noise (0.30 ms)'
+    );
+  }
+
   // --- summarizeSweep — felt and GPU are different clocks, not subtractable ---
   {
     // 2026-07-29 live: felt P50 8.4ms beside 13.6ms of MSA GPU work. The old code
@@ -251,6 +365,7 @@ export async function run(t) {
       gpuSampleTarget: 3,
       pollFrames: 0,
       waitFrames: immediate,
+      warmupFrames: 0, // this block tests the measured loop, not warm-up — see its own tests below
     });
     ok('raw captured every config, incl. the closing baseline', Object.keys(out.raw).length === 5);
     ok('baseline GPU + felt both recorded', out.raw.__baseline__.gpuMs === 5 && out.raw.__baseline__.feltP50 === 8.3);
@@ -286,6 +401,7 @@ export async function run(t) {
       gpuSampleTarget: 1,
       pollFrames: 0,
       waitFrames: immediate,
+      warmupFrames: 0, // this block tests per-config phases, not warm-up — see its own tests below
       onProgress: (pr) => phases.push(pr.phase),
     });
     ok('every config reports a felt phase then a gpu phase', phases.includes('felt') && phases.includes('gpu'));
@@ -298,7 +414,14 @@ export async function run(t) {
     const h = fakeHarness(EFFECTS, script, { throwOnConfigKey: 'uiWindowShadow' }); // throw mid-sweep
     let threw = false;
     try {
-      await runSweep(h, { settleFrames: 0, feltFrames: 0, gpuSampleTarget: 1, pollFrames: 0, waitFrames: immediate });
+      await runSweep(h, {
+        settleFrames: 0,
+        feltFrames: 0,
+        gpuSampleTarget: 1,
+        pollFrames: 0,
+        waitFrames: immediate,
+        warmupFrames: 0,
+      });
     } catch {
       threw = true;
     }
@@ -308,5 +431,89 @@ export async function run(t) {
     ok('the scene is STILL restored after an error (finally)', lastCandle[1] === null && lastShadow[1] === null);
     ok('the probe is disarmed after an error', h.calls.probe[h.calls.probe.length - 1] === false);
     ok('frame stats reset one final time on the way out', h.calls.reset > 0);
+  }
+
+  // --- runSweep — GPU warm-up: forces everything on, off the measured clock -----------
+  {
+    const script = {
+      __baseline__: { samplesNeeded: 1, gpuMs: 5 },
+      candleFlame: { samplesNeeded: 1, gpuMs: 17 },
+      uiWindowShadow: { samplesNeeded: 1, gpuMs: 6 },
+      __all__: { samplesNeeded: 1, gpuMs: 18, feltP50: 25 },
+      __baseline2__: { samplesNeeded: 1, gpuMs: 6 },
+    };
+    const h = fakeHarness(EFFECTS, script);
+    let warmupFrameArg = null;
+    let waitCallCount = 0;
+    const phases = [];
+    const waitFramesSpy = (n) => {
+      // The warm-up's own `await waitFrames(warmupFrames)` is the FIRST waitFrames call in
+      // the whole sweep — before any config's settle/felt/poll waits.
+      waitCallCount += 1;
+      if (waitCallCount === 1) warmupFrameArg = n;
+      return Promise.resolve();
+    };
+    await runSweep(h, {
+      settleFrames: 0,
+      feltFrames: 0,
+      gpuSampleTarget: 1,
+      pollFrames: 0,
+      warmupFrames: 42,
+      waitFrames: waitFramesSpy,
+      onProgress: (pr) => phases.push(pr),
+    });
+    ok('the warm-up reports its own progress phase, before any config', phases[0].phase === 'warmup');
+    ok('waits the requested warm-up frame count', warmupFrameArg === 42);
+    ok(
+      'every effect is forced ON for warm-up (the first N sets, before the baseline turns them back off)',
+      h.calls.forced.slice(0, 2).every(([, en]) => en === true)
+    );
+
+    // warmupFrames: 0 skips the phase entirely — no wasted wait, no phantom progress event.
+    const h2 = fakeHarness(EFFECTS, script);
+    const phases2 = [];
+    await runSweep(h2, {
+      settleFrames: 0,
+      feltFrames: 0,
+      gpuSampleTarget: 1,
+      pollFrames: 0,
+      warmupFrames: 0,
+      waitFrames: immediate,
+      onProgress: (pr) => phases2.push(pr.phase),
+    });
+    ok('warmupFrames: 0 skips warm-up entirely', !phases2.includes('warmup'));
+  }
+
+  // --- runSweep — context is read once and carried on the report, absent gracefully ----
+  {
+    const script = {
+      __baseline__: { samplesNeeded: 1, gpuMs: 5 },
+      candleFlame: { samplesNeeded: 1, gpuMs: 17 },
+      uiWindowShadow: { samplesNeeded: 1, gpuMs: 6 },
+      __all__: { samplesNeeded: 1, gpuMs: 18, feltP50: 25 },
+      __baseline2__: { samplesNeeded: 1, gpuMs: 6 },
+    };
+    const withContext = fakeHarness(EFFECTS, script);
+    withContext.getContext = () => ({ sceneName: 'Torture Fixture', floorIndex: 1, msaVersion: '0.6.0-dev.0' });
+    const out = await runSweep(withContext, {
+      settleFrames: 0,
+      feltFrames: 0,
+      gpuSampleTarget: 1,
+      pollFrames: 0,
+      warmupFrames: 0,
+      waitFrames: immediate,
+    });
+    ok('the report carries whatever the harness reports as context', out.context?.sceneName === 'Torture Fixture');
+
+    const noContext = fakeHarness(EFFECTS, script); // no getContext at all — an older/minimal harness
+    const out2 = await runSweep(noContext, {
+      settleFrames: 0,
+      feltFrames: 0,
+      gpuSampleTarget: 1,
+      pollFrames: 0,
+      warmupFrames: 0,
+      waitFrames: immediate,
+    });
+    ok('a harness without getContext still returns a full report, context is null not a throw', out2.context === null);
   }
 }

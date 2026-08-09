@@ -191,24 +191,48 @@ export function resolveLightElevationRank(light, floors) {
  * author deliberately widened. Only a 'locked' binding, which already IS an
  * elevation band matching a real Level's own, has anything to resolve.
  *
- * Height WITHIN the resolved floor is always 0 (its own floor's ground) — no
- * anchor kind authors a z-height today (candles/lightning are `x,y` only),
- * matching the honest "no finer value exists" default this project uses
- * everywhere else this gap shows up (`vt/scene-attr.js#resolveItemFloorAttr
- * Uniforms`'s own `elevation ?? 0` posture).
+ * Height WITHIN the resolved floor defaults to 0 (its own floor's ground) but
+ * `unitsAboveFloorBottom` lets a caller pass a real one — candles are the
+ * first anchor kind to author a z-height (`scene/anchor-catalog.js`'s
+ * `candleFlame.params.elevation`, "height off floor"; `lightning` still has
+ * no such param, so its own call site keeps passing 0 unchanged). This is
+ * the flame sprite's OWN (OLD-gate) height consumer — the light this same
+ * candle CASTS is a separate, depth-authority-based consumer
+ * (`candle-flame-geometry.js#resolveAnchorElevationWorldUnits`); both are now
+ * fed from the same authored `params.elevation` value so they agree.
+ *
+ * FLOOR-CROSSING (2026-08-05 fix): the floor INDEX is resolved from
+ * `floorBinding.bottom + unitsAboveFloorBottom` — the same absolute world
+ * elevation `resolveAnchorElevationWorldUnits` computes for the light this
+ * anchor casts — not from the raw, un-adjusted `floorBinding.bottom`. Before
+ * this fix, a tall enough authored height could only ever nudge the
+ * FRACTIONAL part of the rank within the anchor's ORIGINAL floor (capped at
+ * `RECEIVER_ELEVATION_RANGE_UNITS_MIRROR / ELEVATION_RANK_FRACTION_DIVISOR`,
+ * well under one floor's worth of rank) and could never cross into the next
+ * floor's own band the way the light's floor-agnostic `rankOfElevation`
+ * already could — the flame and its own light would agree on "higher" but
+ * disagree on "which floor". `unitsAboveFloorBottom = 0` (lightning, or an
+ * un-elevated candle) resolves to the exact same floor/height as before —
+ * this is additive, not a behaviour change for the untouched case.
  *
  * @param {{mode?:string, bottom?:number|null, top?:number|null}|null|undefined} floorBinding
  * @param {Array<{index:number, elevationBottom:number|null, elevationTop:number|null}>} floors
+ * @param {number} [unitsAboveFloorBottom] - this anchor's own authored height above its floor's ground (default 0).
  * @returns {number}
  */
-export function resolveAnchorElevationRank(floorBinding, floors) {
+export function resolveAnchorElevationRank(floorBinding, floors, unitsAboveFloorBottom = 0) {
   if (!floorBinding || floorBinding.mode !== 'locked' || !Number.isFinite(floorBinding.bottom)) {
     return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
   }
   if (!Array.isArray(floors) || floors.length === 0) return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
-  const resolved = resolveElevationFloorIndex(floors, floorBinding.bottom);
+  const height = Number.isFinite(unitsAboveFloorBottom) ? unitsAboveFloorBottom : 0;
+  const absoluteElevation = floorBinding.bottom + height;
+  const resolved = resolveElevationFloorIndex(floors, absoluteElevation);
   if (!resolved) return LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
-  return elevationRank(resolved.index, 0);
+  const resolvedFloorBottom = Number.isFinite(resolved.floor?.elevationBottom)
+    ? resolved.floor.elevationBottom
+    : floorBinding.bottom;
+  return elevationRank(resolved.index, absoluteElevation - resolvedFloorBottom);
 }
 
 /**
@@ -580,11 +604,11 @@ function createLightEntry({
  *   DEPTH-AUTHORITY HEIGHT GATE's own CPU resolver (STAGE 2, 2026-08-04),
  *   INJECTED rather than imported for the SAME reason
  *   `blendSunVisibilityAcrossFloors` is: `vt/scene-depth.js` (where
- *   `computeLightExpectedDepth` and the depth authority's own `maxRank` live)
+ *   `computeTieSafeExpectedDepth` and the depth authority's own `maxRank` live)
  *   cannot be imported from `effects/` — `vt/` already imports FROM
  *   `effects/`, and this codebase's layering is one-way. `vt-pan-viewer.js`
  *   composes this from `depthAuthority.rankOfElevation(elevation)` +
- *   `computeLightExpectedDepth(rank, depthAuthority.maxRank)`, called fresh
+ *   `computeTieSafeExpectedDepth(rank, depthAuthority.maxRank)`, called fresh
  *   per light per frame by `update()`'s own refresh loop (replacing
  *   `resolveLightElevationRank`/`resolveAnchorElevationRank` for ordinary
  *   Foundry lights — candle/lightning still use the old resolvers, a
@@ -608,6 +632,9 @@ export function createPointLightPool({
   getCandleRenderState,
   getLightningRenderState,
   getLightningActiveStrands,
+  /** Fire's per-frame light descriptors, already clustered by `fire-subsystem.js`.
+   * Optional so the pool stays constructible in rigs that have no fire. */
+  getFireLightSources = null,
   getApertureGoboRenderState,
   uGlobalTimeMs,
   resolveExpectedDepth,
@@ -866,7 +893,24 @@ export function createPointLightPool({
       }
     }
 
-    const lights = [...foundryLights, ...candleLights, ...lightningLights];
+    // FIRE LIGHTS — already clustered and built by `fire-subsystem.js`.
+    // Animates via `candleFlicker`'s own wind-aware noise (`registry.js`'s
+    // `firePuff` entry, 2026-08-09) rather than a clock shared with the flame
+    // particles — the two are independent now (the particle rebuild gave the
+    // flame its own per-particle age-driven animation; there is no single
+    // shared phase left to lock the light to). They arrive here already shaped
+    // like a Foundry light and flow through this one pool for region-aware
+    // ambient, the soft edge, coloration and MAX-blending.
+    //
+    // ⚠️ THE FIRE'S LIGHT IS THE FIRE'S COST. Measured on the candle: every
+    // flame billboard in a scene was 0.022 ms while its lights were 13.1 ms of
+    // a 20.4 ms frame across 91 draw calls, because a 24 px billboard covers
+    // ~576 px² against a 400 px light's ~785,000, drawn twice. Fire's radii are
+    // larger, which is why `buildFireLightSources` clusters by tier before this
+    // list ever reaches the pool.
+    const fireLights = getFireLightSources ? (getFireLightSources() ?? []) : [];
+
+    const lights = [...foundryLights, ...candleLights, ...lightningLights, ...fireLights];
     // Read ONCE per frame — a scene's grid size does not change light-to-light,
     // only scene-to-scene.
     const gridSizePixels = readGridSizePixels().gridSizePixels;
@@ -1229,18 +1273,23 @@ export function createPointLightPool({
         if (entry.uColorIntensityRaw) entry.uColorIntensityRaw.value = light.animation.intensityRaw;
       }
       entry.uRatio.value = light.ratio;
-      // HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04). See point-light-
-      // illumination.js's own "STAGE 2 — THE DEPTH-AUTHORITY HEIGHT GATE"
-      // section. `light.elevation` is `undefined` for candle/lightning-CAST
-      // lights (built by `buildCandleLightSources`/`buildLightningLightSources`,
-      // neither of which carries the field — their own FLAME SPRITE/BOLT
-      // RIBBON visuals are a completely separate render path, still gated by
-      // the OLD `resolveAnchorElevationRank`, see that function's own doc);
-      // `resolveExpectedDepth` normalizes that the same way
-      // `resolveLightElevationRank` used to (undefined/non-finite → treated
-      // as elevation 0 — `depth-authority.js#rankOfElevation`'s own "no
-      // special-casing needed" design point), so those light types keep
-      // their pre-existing, ungated-by-default reach with no branch here.
+      // HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04); candle CAST-light
+      // elevation authored 2026-08-05. See point-light-illumination.js's own
+      // "STAGE 2 — THE DEPTH-AUTHORITY HEIGHT GATE" section. `light.elevation`
+      // is a real absolute-world-units value for candle-cast lights now
+      // (`buildCandleLightSources` → `resolveAnchorElevationWorldUnits`, fed
+      // from the candle's own `params.elevation` "height off floor") — still
+      // `undefined` for lightning-cast lights (`buildLightningLightSources`
+      // carries no such field; lightning has no authored height yet). Either
+      // way, their own FLAME SPRITE/BOLT RIBBON visuals are a completely
+      // separate render path, gated by the OLD `resolveAnchorElevationRank`
+      // instead (see that function's own doc) — fed the SAME authored height
+      // for candles, so the two no longer disagree. `resolveExpectedDepth`
+      // normalizes `undefined`/non-finite the same way `resolveLightElevation
+      // Rank` used to (→ treated as elevation 0 — `depth-authority.js#rankOf
+      // Elevation`'s own "no special-casing needed" design point), so
+      // lightning keeps its pre-existing, ungated-by-default reach with no
+      // branch here.
       if (entry.uLightExpectedDepth && resolveExpectedDepth) {
         const expectedDepth = resolveExpectedDepth(light.elevation);
         entry.uLightExpectedDepth.value = expectedDepth;

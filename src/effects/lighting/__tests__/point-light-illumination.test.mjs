@@ -41,7 +41,7 @@ import {
 import {
   DEPTH_FLAG_RESTRICTS_LIGHT,
   DEPTH_FLAG_IS_TILE,
-  computeLightExpectedDepth,
+  computeTieSafeExpectedDepth,
   computeExpectedStoredDepth,
 } from '../../../vt/scene-depth.js';
 import * as THREE from '../../../vendor/three/three.webgpu.js';
@@ -531,23 +531,25 @@ export function run(t) {
   );
 
   // ======================================================================
-  // computeLightExpectedDepth (vt/scene-depth.js) — the fail-open tie buffer.
-  // Exercised HERE, not just in vt/__tests__/scene-depth.test.mjs, because
-  // this is the exact seam computeDepthHeightGate consumes: a light resolved
-  // to the SAME rank as its own floor's ground must pass through THIS gate,
-  // not just satisfy the formula in isolation.
+  // computeTieSafeExpectedDepth (vt/scene-depth.js) — the fail-open tie
+  // buffer, renamed 2026-08-05 (was computeLightExpectedDepth) once specular
+  // needed the SAME buffer for its own, non-light query. Exercised HERE, not
+  // just in vt/__tests__/scene-depth.test.mjs, because this is the exact seam
+  // computeDepthHeightGate consumes: a light resolved to the SAME rank as its
+  // own floor's ground must pass through THIS gate, not just satisfy the
+  // formula in isolation.
   // ======================================================================
   ok(
-    'computeLightExpectedDepth is STRICTLY SMALLER than the bare formula would give (the buffer subtracts, never adds)',
-    computeLightExpectedDepth(3, 10) < computeExpectedStoredDepth(3, 10)
+    'computeTieSafeExpectedDepth is STRICTLY SMALLER than the bare formula would give (the buffer subtracts, never adds)',
+    computeTieSafeExpectedDepth(3, 10) < computeExpectedStoredDepth(3, 10)
   );
   ok(
     "a receiver at the SAME rank as the light (computeExpectedStoredDepth's own bare value — what a real " +
       'drawable AT this exact rank actually stores) still PASSES the gate through the buffered ' +
-      'uLightExpectedDepth — the tie case computeLightExpectedDepth exists to protect',
+      'uLightExpectedDepth — the tie case computeTieSafeExpectedDepth exists to protect',
     computeDepthHeightGate({
       storedDepth: computeExpectedStoredDepth(3, 10),
-      expectedDepth: computeLightExpectedDepth(3, 10),
+      expectedDepth: computeTieSafeExpectedDepth(3, 10),
     }) === 1
   );
   ok(
@@ -555,8 +557,8 @@ export function run(t) {
     (() => {
       const maxRank = 500;
       for (let rank = 0; rank < 20; rank++) {
-        const expectedAtRank = computeLightExpectedDepth(rank, maxRank);
-        const expectedAtNextRank = computeLightExpectedDepth(rank + 1, maxRank);
+        const expectedAtRank = computeTieSafeExpectedDepth(rank, maxRank);
+        const expectedAtNextRank = computeTieSafeExpectedDepth(rank + 1, maxRank);
         // The rank ABOVE must still read as "above" (blocked) against a light
         // resolved to THIS rank — the whole ordinal property must survive
         // the buffer.

@@ -15,6 +15,7 @@
  */
 import {
   STALL_THRESHOLD_MS,
+  STALL_NOTE_VISIBLE_MS,
   LOAD_PHASES,
   createLoadState,
   beginPhase,
@@ -152,6 +153,22 @@ export function run(t) {
     ok(
       'but the NOTE reflects the most recent stall, not the worst',
       describeLoad(s, 3200).stallNote === 'still working — the last step took 0.3s'
+    );
+
+    // Bug (2026-08-08, author report): the note used to be gated purely on
+    // "was there ever a stall", so it froze on screen for the rest of the load
+    // even long after the main thread recovered. It must EXPIRE.
+    ok(
+      'the note is still visible just inside the decay window',
+      describeLoad(s, 3132 + STALL_NOTE_VISIBLE_MS).stallNote === 'still working — the last step took 0.3s'
+    );
+    ok(
+      'the note is GONE once the decay window has fully elapsed, even though a stall did happen',
+      describeLoad(s, 3132 + STALL_NOTE_VISIBLE_MS + 1).stallNote === null
+    );
+    ok(
+      'long after a stall, an otherwise-normal load reports no note at all',
+      describeLoad(s, 3132 + STALL_NOTE_VISIBLE_MS * 10).stallNote === null
     );
 
     ok('the threshold matches the renderer hitch log (250ms)', STALL_THRESHOLD_MS === 250);

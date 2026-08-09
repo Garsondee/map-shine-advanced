@@ -66,6 +66,21 @@
  */
 export const STALL_THRESHOLD_MS = 250;
 
+/**
+ * How long the "still working — the last step took Xs" note stays on screen
+ * after the stall it describes has ended.
+ *
+ * Bug (2026-08-08, author report): the note used to be gated purely on
+ * `lastStallMs >= STALL_THRESHOLD_MS`, which is true FOREVER once one stall
+ * happens — so the very first 250ms hitch in a load froze that exact sentence
+ * on screen for the rest of the load, long after the main thread was fine
+ * again. That reads as confusing/useless, not as reassurance: it looks like a
+ * fact about right now, and it was really a fact about several seconds ago.
+ * Gating on recency (via `lastStallAtMs`) keeps the note doing its one job —
+ * "that freeze you just saw was real and it's over" — without it going stale.
+ */
+export const STALL_NOTE_VISIBLE_MS = 3000;
+
 /** @enum {string} The phases of a scene load, in order. */
 export const LOAD_PHASES = Object.freeze({
   /** Reading Scene documents into a draw list. Effectively instant. */
@@ -105,6 +120,9 @@ const PHASE_LABELS = Object.freeze({
  * @property {number|null} lastTickMs - last liveness tick.
  * @property {number} worstStallMs - the longest gap between ticks this load.
  * @property {number} lastStallMs - the most recent stall, for the "that took Xms" note.
+ * @property {number|null} lastStallAtMs - when that stall was recorded (relative
+ *   to the same clock `nowMs` is drawn from), so the note can expire instead of
+ *   sticking forever. See {@link STALL_NOTE_VISIBLE_MS}.
  * @property {PhaseSpan[]} phases - every phase entered, with its duration. See
  *   {@link beginPhase}.
  */
@@ -150,6 +168,7 @@ export function createLoadState({ sceneId, sceneName, nowMs }) {
     lastTickMs: null,
     worstStallMs: 0,
     lastStallMs: 0,
+    lastStallAtMs: null,
     phases: [],
   };
 }
@@ -262,6 +281,7 @@ export function recordTick(state, nowMs) {
   state.lastTickMs = nowMs;
   if (gap >= STALL_THRESHOLD_MS) {
     state.lastStallMs = gap;
+    state.lastStallAtMs = nowMs;
     if (gap > state.worstStallMs) state.worstStallMs = gap;
   }
   return gap;
@@ -315,9 +335,14 @@ export function describeLoad(state, nowMs) {
   if (state.detail) parts.push(state.detail);
 
   // The stall note exists to answer "is it dead?" AFTER the fact — the only time
-  // it can be answered, since nothing runs during the stall itself.
+  // it can be answered, since nothing runs during the stall itself. It must also
+  // EXPIRE (see STALL_NOTE_VISIBLE_MS's header) — otherwise the first hitch of a
+  // load freezes this sentence on screen for the rest of it, long after the main
+  // thread recovered.
   const stallNote =
-    state.lastStallMs >= STALL_THRESHOLD_MS
+    state.lastStallMs >= STALL_THRESHOLD_MS &&
+    Number.isFinite(state.lastStallAtMs) &&
+    nowMs - state.lastStallAtMs <= STALL_NOTE_VISIBLE_MS
       ? `still working — the last step took ${(state.lastStallMs / 1000).toFixed(1)}s`
       : null;
 

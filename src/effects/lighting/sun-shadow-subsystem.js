@@ -124,6 +124,40 @@
  * risking either limit.
  *
  * ============================================================================
+ * §6 — THE SHADOW CASCADE (2026-08-05) — real heights, two bands, and where
+ * the blockage went
+ * ============================================================================
+ *
+ * Author: *"use the depth buffer + shadows + sun angle to allow shadows to
+ * semi-realistically cascade downwards, getting softer and more diffuse as they
+ * do so… buildings which are several stories tall might cast their building,
+ * sky reach and overhead shadows and have a much longer larger shadow produced
+ * as a result of having access to the information for all floors."*
+ *
+ * Three things changed here, and each has its own full write-up elsewhere:
+ *
+ *   1. **The band heights are DERIVED.** `shadow-bands.js#resolveShadowBandPlan`
+ *      turns the scene's own Foundry Level elevations plus
+ *      `canvas.dimensions.distancePixels` into per-band world-px heights, so a
+ *      five-storey stack throws a five-storey shadow. `aboveHeightPx` survives
+ *      only as the fallback, and the status report says which was used.
+ *   2. **There are TWO bands, not one merged "above".** Band 1 is the floor
+ *      ABOVE's own `coverAbove` — a grid `deriveFloorProducts` has always
+ *      produced, one floor index away, which is why this cost no new mask
+ *      derivation and no second texture (`packLayerTexelData`'s own header).
+ *   3. **The cascade's blend factor moved OUT of the layer texture** (freeing
+ *      the channel band 1 now uses) and into each slot's own BAKED FIELD's
+ *      alpha, published by `setCascade` and read by the slot above from
+ *      `lowerFieldTexNode.sample(uv()).a`. Same grid, same value, published by
+ *      the slot that already owns it instead of copied into every floor above.
+ *
+ * ⚠️ THE BAKE ORDER CONTRACT IS UNCHANGED AND STILL LOAD-BEARING. Slots bake
+ * bottom-up and slot N reads slot N-1's target, so `assignFloorSlotIndex`'s
+ * "slot index IS floor index" identity and the `bakeSerial`/`lastSeenLowerSerial`
+ * staleness link both still hold exactly as §5 describes — the cascade now
+ * carries one more channel through the same wire, not a new dependency.
+ *
+ * ============================================================================
  * USAGE (the shape the caller's own two-phase construction takes)
  * ============================================================================
  *
@@ -178,10 +212,12 @@ import {
   resolveLayerSmear,
   layerSmearTierPlan,
   layerSmearBakeSamples,
+  layerDiffusionBlurPx,
   LAYER_SMEAR_DEFAULT_TIER,
   LAYER_SMEAR_MAX_TIER,
   DEPTH_SCALES,
 } from './layer-smear.js';
+import { resolveShadowBandPlan, SHADOW_BAND_LAYER_INDICES } from './shadow-bands.js';
 import { buildSunShadowDebugMaterial, sunShadowDebugPaints, sunShadowDebugLayers } from './sun-shadow-debug.js';
 import { sampleMaskGridWorld } from '../../scene/index.js';
 import { createLogger } from '../../core/log.js';
@@ -278,7 +314,16 @@ export const SUN_SHADOW_EDGE_BAND_PX = 384;
 // producer instead of restating it (memory:
 // feedback_bench_must_build_inputs_like_production). They remain LOOK
 // CONSTANTS, not params: nothing outside this module may WRITE them.
-export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.95, 0.95, 0.95, 0]);
+// ⚠️ INDEX 3 WAS EXACTLY 0 UNTIL 2026-08-05, AND THAT ZERO WAS LOAD-BEARING.
+// While the A channel carried THE CASCADE's blend factor rather than a
+// silhouette, a non-zero strength here would have marched a blockage grid as
+// if it were an occluder — so the zero was pinned by a test, not merely
+// chosen. The shadow cascade gave A a real second BAND silhouette
+// (`packLayerTexelData`'s own header) and moved blockage into the baked
+// field's alpha, so index 3 is now an ordinary band and carries the same 0.95
+// its sibling does. The pin moved with the reason: `sun-shadow-multi-floor.
+// test.mjs` now asserts the two BANDS match each other instead.
+export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.95, 0.95, 0.95, 0.95]);
 /** Shape of the distance falloff — higher hugs the caster more tightly.
  * 1.6→1 2026-08-02 (author, live — the tuned "preferred default" pass). */
 export const SUN_SHADOW_FALLOFF_EXP = 1;
@@ -310,26 +355,32 @@ const SUN_SHADOW_MAX_FLOORS = 6;
  * The channel meanings — `layer-smear-render.js`'s own module header is the one
  * true source, verify against IT if the two ever disagree:
  *
- *   R = walls            (`1 − outdoors` — the `_Outdoors` dark)
- *   G = overhead          (this floor's own overhead tiles' coverage)
- *   B = the floor above, and everything higher, merged (`coverAbove`)
- *   A = unused — `SHADOW_LAYER_COUNT` is 4 but this bake only has 3 REAL
- *       silhouette sources today (walls, overhead, "above ∪ higher" already
- *       merged by `coverAbove` itself); splitting "the floor directly above"
- *       from "everything higher" into two channels needs a per-floor cover
- *       grid `deriveFloorProducts` does not expose yet. Left EMPTY and said
- *       out loud rather than quietly duplicated into B, so the gap stays
- *       visible instead of looking finished (`layer-smear-render.js`'s own
- *       header documents the same gap for Shader Lab's synthetic packing).
+ *   R = walls    (`1 − outdoors` — the `_Outdoors` dark)
+ *   G = overhead (this floor's own overhead tiles' coverage)
+ *   B = BAND 0 — `coverAbove(F)`,   every floor above this one
+ *   A = BAND 1 — `coverAbove(F+1)`, every floor above THAT
+ *
+ * ⚠️ THE SECOND BAND NEEDED NO NEW DERIVATION (2026-08-05). `packLayerTexelData`'s
+ * own previous header called splitting "the floor directly above" from
+ * "everything higher" blocked on "a per-floor cover grid `deriveFloorProducts`
+ * does not expose yet" — which was wrong, and the reason it was wrong is worth
+ * keeping: `coverAbove` is derived PER FLOOR and is CUMULATIVE, so read at the
+ * floor ABOVE the receiver it already IS "everything two or more storeys up".
+ * The grid was there the whole time, one floor index away
+ * ([[feedback_negative_grep_became_architecture]]'s smaller cousin — "the
+ * producer does not expose this" was a claim about a call I had not made).
  *
  * @param {object} args
  * @param {object} args.channels - `mask-derive.js`'s `casterChannels` (only
  *   `coverOverhead` is read).
  * @param {object} args.outdoorsGrid - the `outdoors` MaskGrid (its own,
  *   SHARED resolution — see the world-sampling note below).
- * @param {object|null} args.coverAboveGrid - the `coverAbove` MaskGrid, same
- *   shared resolution as `outdoors`. `null` reads as "nothing above" rather
+ * @param {object|null} args.coverAboveGrid - THIS floor's `coverAbove` MaskGrid,
+ *   same shared resolution as `outdoors`. `null` reads as "nothing above" rather
  *   than throwing — a floor genuinely can have nothing above it (the roof).
+ * @param {object|null} args.bandAboveGrid - the floor ABOVE's `coverAbove`
+ *   MaskGrid — band 1. `null` (no such floor, or its products are not derived)
+ *   reads as "nothing there".
  * @param {object} args.spec - the OUTPUT grid's `MaskGridSpec` (today,
  *   `channels.coverOverhead`'s own — see `bakeLayerTexture`'s call site for
  *   why that one).
@@ -387,8 +438,12 @@ export function describeLayerChannels(data, w, h) {
   return {
     walls: channel(0),
     overhead: channel(1),
-    floorAbove: channel(2),
-    higher: channel(3),
+    // Named for what the channels actually hold since 2026-08-05 — two
+    // cumulative bands, not "the floor above" and an empty slot. A report that
+    // still said `floorAbove`/`higher` would be describing the packing this
+    // one replaced (`feedback_instruments_must_not_lie`).
+    band0: channel(2),
+    band1: channel(3),
     thresholds: {
       emptyAtOrBelow: EMPTY_BYTE,
       solidAtOrAbove: SOLID_BYTE,
@@ -473,36 +528,39 @@ export function describeSourceGrid(grid) {
   };
 }
 
-export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, lowerCoverAboveGrid = null, spec }) {
+export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, bandAboveGrid = null, spec }) {
   const { w, h } = spec;
   const data = new Uint8Array(w * h * 4);
   let coveredTexels = 0;
-  // ⚠️⚠️ A IS NO LONGER "UNUSED" (2026-08-02) — it carries THE CASCADE's blend
-  // factor: the LOWER floor's `coverAbove`, i.e. "how much does THIS floor (and
-  // everything above it) block the view down to the floor below". 255 = solid,
-  // this floor's own shadow answers; 0 = a hole, fall through to the floor
-  // below. `layer-smear-render.js#lowerFieldTexNode` has the model.
+  // ⚠️⚠️ A IS THE SECOND BAND NOW (2026-08-05, the shadow cascade) — the floor
+  // ABOVE's own `coverAbove`, i.e. the union of every floor two or more storeys
+  // up. `shadow-bands.js`'s header has the decomposition and why the bands are
+  // cumulative (and therefore NESTED) rather than one grid per floor.
   //
-  // ⚠️ THIS IS SAFE ONLY BECAUSE LAYER 3 CASTS NOTHING. The march still reads
-  // A as `cov[3]`, but `SUN_SHADOW_LAYER_STRENGTH[3]` is 0 and its throw is 0,
-  // so `occ[3] × 0` contributes a transmittance factor of exactly 1 — inert by
-  // arithmetic, not by a branch. `sun-shadow-cascade.test.mjs` pins that zero;
-  // giving layer 3 a real strength would silently turn the blockage grid into
-  // a fourth silhouette. Splitting them needs a 5th channel (another texture),
-  // which is why the empty slot was worth spending here instead.
+  // ⚠️ IT USED TO CARRY THE CASCADE'S BLEND FACTOR, and that is now published
+  // by the lower SLOT itself, in its own baked field's alpha
+  // (`layer-smear-render.js#uCascade`) — the same grid, from the slot that
+  // already owns it, rather than a second copy packed into every floor above.
+  // That is what freed this channel, at zero extra memory: the alternative was
+  // a whole second `w × h × 4` DataTexture per floor slot, which at the Extreme
+  // rung is 16 MB × 6 floors ([[keyhole-device-loss-large-map]] is why that is
+  // stated in MB rather than waved through).
   //
-  // Absent (floor 0, nothing below it) = 255 everywhere: fully blocked, so the
-  // cascade is a provable no-op on the bottom floor.
-  const absentBlockage = 255;
-  // ⚠️ `outdoors` AND `coverAbove` MUST BE WORLD-SAMPLED, NEVER FLAT-INDEXED
-  // BY `i` (2026-07-30 — the casterGridDim/Quality-Extreme corruption bug,
-  // `packCasterTexelData`'s own header has the full post-mortem). Both live at
-  // the SHARED grid resolution (every effect's shared budget — water/wind/
-  // specular too), independent of whatever resolution THIS output `spec`
-  // asks for; indexing them with this loop's flat `i` silently reinterprets
-  // one row stride as another the moment the two resolutions diverge.
-  // `channels.coverOverhead` is natively at `spec`'s own resolution (it is
-  // WHERE `spec` came from), so it alone is safe to flat-index.
+  // ⚠️ LAYER 3 NOW CASTS FOR REAL. `SUN_SHADOW_LAYER_STRENGTH[3]` was pinned at
+  // exactly 0 for as long as this channel held blockage, precisely so a
+  // non-silhouette could not be marched as one. That pin is GONE with the
+  // reason for it — see that constant's own note.
+  //
+  // ⚠️ `outdoors`, `coverAbove` AND `bandAbove` MUST BE WORLD-SAMPLED, NEVER
+  // FLAT-INDEXED BY `i` (2026-07-30 — the casterGridDim/Quality-Extreme
+  // corruption bug, `packCasterTexelData`'s own header has the full
+  // post-mortem). All three live at the SHARED grid resolution (every effect's
+  // shared budget — water/wind/specular too), independent of whatever
+  // resolution THIS output `spec` asks for; indexing them with this loop's flat
+  // `i` silently reinterprets one row stride as another the moment the two
+  // resolutions diverge. `channels.coverOverhead` is natively at `spec`'s own
+  // resolution (it is WHERE `spec` came from), so it alone is safe to
+  // flat-index.
   for (let gy = 0; gy < h; gy++) {
     const wy = spec.y + (gy + 0.5) * spec.texelH;
     for (let gx = 0; gx < w; gx++) {
@@ -511,16 +569,19 @@ export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, low
       const outdoorsByte = sampleMaskGridWorld(outdoorsGrid, wx, wy) ?? 255;
       const overheadCoverage = channels.coverOverhead?.data[i] ?? 0;
       const aboveByte = coverAboveGrid ? (sampleMaskGridWorld(coverAboveGrid, wx, wy) ?? 0) : 0;
+      // Absent (no floor two storeys up, or its products are not derived yet)
+      // = 0, i.e. NOTHING THERE — the opposite polarity from the blockage this
+      // channel used to carry, and deliberately so: an absent SILHOUETTE must
+      // cast nothing, where an absent BLOCKAGE had to read fully-blocking. Same
+      // channel, opposite safe default, because they are opposite questions
+      // (`feedback_gate_polarity_must_fail_open`).
+      const bandAboveByte = bandAboveGrid ? (sampleMaskGridWorld(bandAboveGrid, wx, wy) ?? 0) : 0;
       const wallByte = 255 - outdoorsByte;
       data[i * 4 + 0] = wallByte;
       data[i * 4 + 1] = overheadCoverage;
       data[i * 4 + 2] = aboveByte;
-      // World-sampled like its two neighbours, never flat-indexed — it is the
-      // LOWER floor's shared-resolution grid, same trap as `outdoors`/`coverAbove`.
-      data[i * 4 + 3] = lowerCoverAboveGrid
-        ? (sampleMaskGridWorld(lowerCoverAboveGrid, wx, wy) ?? absentBlockage)
-        : absentBlockage;
-      if (wallByte > 0 || overheadCoverage > 0 || aboveByte > 0) coveredTexels++;
+      data[i * 4 + 3] = bandAboveByte;
+      if (wallByte > 0 || overheadCoverage > 0 || aboveByte > 0 || bandAboveByte > 0) coveredTexels++;
     }
   }
   return { data, coveredTexels, channelStats: describeLayerChannels(data, w, h) };
@@ -537,6 +598,15 @@ export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, low
  * @param {*} args.allocator
  * @param {{sceneRect: object}} args.dimensions
  * @param {(floorIndex: number) => object|null} args.getCasterHeightField
+ * @param {(() => {floors: object[], pxPerElevationUnit: number})|null} args.getShadowFloorPlan -
+ *   THE SHADOW CASCADE's own seam (2026-08-05): the scene's real floor
+ *   elevations plus Foundry's own px-per-distance-unit, so `shadow-bands.js`
+ *   can turn "three storeys up" into world pixels. A LIVE getter for the same
+ *   reason `getShadowHandle` is one — a floor's elevation can change under a
+ *   GM's hands mid-session, and a value captured at construction would pin
+ *   every shadow in the scene to whatever the levels looked like at boot.
+ *   Absent/null falls back to `SUN_SHADOW_PARAMS.aboveHeightPx`, the authored
+ *   slider this derivation replaces, and SAYS SO in the status report.
  * @param {() => {enabled: boolean, params: object}} args.getSunShadowRenderState
  * @param {(() => number)|null} args.getMaskAuthorityVersion
  * @param {() => {atmosphere: object}} args.getShadowHandle
@@ -600,6 +670,7 @@ function createFloorSlot({
   allocator,
   dimensions,
   getCasterHeightField,
+  getShadowFloorPlan,
   getSunShadowRenderState,
   getMaskAuthorityVersion,
   getShadowHandle,
@@ -609,7 +680,6 @@ function createFloorSlot({
   pushRect,
   rtName,
   lowerField = null,
-  floorSlotIndex = 0,
 }) {
   // ── STATE (was 11 viewer-closure locals; now one slot's own) ────────────
   //
@@ -877,24 +947,28 @@ function createFloorSlot({
     const { w, h } = spec;
     if (!(w > 0 && h > 0)) return { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
 
-    // THE CASCADE's blend factor: the floor BELOW's `coverAbove` — "how much
-    // do I block the view down to it". Fetched through the SAME seam as this
-    // floor's own field so a degraded lower floor degrades identically; a
-    // throw or a missing floor yields null, which packs as "fully blocked"
-    // and makes the cascade a provable no-op rather than a hole.
-    let lowerCoverAboveGrid = null;
-    if (floorSlotIndex > 0) {
-      try {
-        lowerCoverAboveGrid = getCasterHeightField(floorIndex - 1)?.coverAbove ?? null;
-      } catch (err) {
-        lowerCoverAboveGrid = null;
-      }
+    // BAND 1 — the floor ABOVE's own `coverAbove`, i.e. everything two or more
+    // storeys up (`shadow-bands.js`'s header has the decomposition). Fetched
+    // through the SAME seam as this floor's own field so a degraded upper floor
+    // degrades identically; a throw or a missing floor yields null, which packs
+    // as "nothing there" and simply leaves the second band empty.
+    //
+    // ⚠️ ALWAYS `floorIndex + 1`, NEVER a plan-chosen source index. The BAND
+    // PLAN decides HEIGHTS; the SILHOUETTE for band k is `coverAbove(F+k)` by
+    // construction, and letting two places choose the source floor is how the
+    // grid and the height it is smeared at would end up describing different
+    // storeys.
+    let bandAboveGrid = null;
+    try {
+      bandAboveGrid = getCasterHeightField(floorIndex + 1)?.coverAbove ?? null;
+    } catch {
+      bandAboveGrid = null;
     }
     const { data, coveredTexels, channelStats } = packLayerTexelData({
       channels,
       outdoorsGrid,
       coverAboveGrid: field?.coverAbove ?? null,
-      lowerCoverAboveGrid,
+      bandAboveGrid,
       spec,
     });
 
@@ -1005,6 +1079,24 @@ function createFloorSlot({
     // written value, not an unwritten one — the same correctness gotcha the
     // UI-shadow hit when it stopped having a draw to skip.)
     const active = state.enabled && casterHasCoverage;
+    // ⚠️⚠️ THE BAND HEIGHTS ARE DERIVED FROM THE SCENE, NOT AUTHORED (2026-08-05,
+    // the shadow cascade — `shadow-bands.js` is the derivation and its header is
+    // the argument). `aboveHeightPx` survives ONLY as the fallback for a scene
+    // that cannot answer the elevation question, which is why it is still read
+    // here rather than deleted: a legacy single-background scene with a raised
+    // tile over it has no Level elevations at all, and the slider is the honest
+    // answer there. `bandPlan.source` says which happened, in the status report,
+    // every bake — a derivation that silently falls back to a slider is
+    // indistinguishable from one that never ran (`feedback_seam_default_hides_
+    // unwired`).
+    const floorPlan = getShadowFloorPlan?.() ?? null;
+    const bandPlan = resolveShadowBandPlan({
+      floors: floorPlan?.floors ?? null,
+      receiverFloorIndex: casterFieldFloor,
+      pxPerElevationUnit: floorPlan?.pxPerElevationUnit ?? 0,
+      wallHeightPx: params.wallHeightPx ?? 0,
+      fallbackAboveHeightPx: params.aboveHeightPx ?? 0,
+    });
     // ⚠️ ZEROED WHEN INACTIVE, not read raw — mirrors the previous model's own
     // `active ? casterMaxHeightPx : 0`. Every height at 0 makes
     // `resolveLayerSmear` return `maxThrowPx = 0`, which `layerSmearVisibility`
@@ -1012,7 +1104,7 @@ function createFloorSlot({
     // early return) — the same "off costs nothing, and cannot half-apply"
     // guarantee, reached the model's own way rather than a caller-side branch.
     const heightsPx = active
-      ? [params.wallHeightPx ?? 0, params.overheadHeightPx ?? 0, params.aboveHeightPx ?? 0, 0]
+      ? [params.wallHeightPx ?? 0, params.overheadHeightPx ?? 0, bandPlan.heightsPx[0] ?? 0, bandPlan.heightsPx[1] ?? 0]
       : [0, 0, 0, 0];
     const resolved = resolveLayerSmear({
       azimuthDeg: atmosphere.azimuthDeg,
@@ -1033,12 +1125,29 @@ function createFloorSlot({
     // "sky-reach only" means the identical thing in both tools.
     const isolate = sunShadowDebugLayers(params.debugView ?? 'off');
     sunShadowBake.setLayers({ strengths: SUN_SHADOW_LAYER_STRENGTH.map((s, i) => s * (isolate[i] ?? 1)) });
-    // THE SKY-REACH GRADIENT — only the "above" layer (index 2) carries real
-    // data today (see `packLayerTexelData`'s own note on why index 3 is
-    // empty), so only it gets a real radius. Unlike the strengths/falloff
-    // above, this ONE stays a real param — see this file's own "LOOK
-    // CONSTANTS, NOT PARAMS" header for why it is the exception.
-    sunShadowBake.setDepth({ radiiPx: [0, 0, active ? (params.skyReachDepthPx ?? 0) : 0, 0] });
+    // THE SKY-REACH GRADIENT — the BAND layers only. Walls and overhead are
+    // thin casters with no meaningful interior for a receiver to stand deep
+    // inside (`layer-smear.js#isotropicDepthTerm`'s own header), so they have
+    // never had a radius; both bands do, because "how deep under cover am I"
+    // is the same question whichever storey the cover is on. Unlike the
+    // strengths/falloff above, this ONE stays a real param — see this file's
+    // own "LOOK CONSTANTS, NOT PARAMS" header for why it is the exception.
+    //
+    // ⚠️ THE INDICES COME FROM THE PACKING, not from two hand-typed zeroes and
+    // two hand-typed radii. `layer-smear-render.js` compiles the gradient's
+    // reads in for exactly `SHADOW_BAND_LAYER_INDICES` — a radius pushed to any
+    // OTHER layer would be silently ignored, which is precisely the class of
+    // "an instrument answering a different question than its label" this
+    // effect's own debug views were already caught doing once.
+    const skyReachPx = active ? (params.skyReachDepthPx ?? 0) : 0;
+    const depthRadii = [0, 0, 0, 0];
+    for (const i of SHADOW_BAND_LAYER_INDICES) depthRadii[i] = skyReachPx;
+    sunShadowBake.setDepth({ radiiPx: depthRadii });
+    // THE CASCADE's publication — this slot tells the slot ABOVE how much of
+    // the view down it blocks (`layer-smear-render.js#uCascade`). Pushed on
+    // every bake, including the "off" ones, because an inactive slot must
+    // publish "fully blocked" rather than leaving a stale "wide open".
+    sunShadowBake.setCascade({ active });
     sunShadowBake.setLook({
       strength01: active ? Math.max(0, Math.min(1, params.strength01 ?? 1)) * atmosphere.strengthMul : 0,
       softnessMul: atmosphere.softnessMul * Math.max(0.05, params.softnessBias ?? 1),
@@ -1060,7 +1169,37 @@ function createFloorSlot({
       enabled: !!state.enabled,
       active,
       sun: { ...bakedSun },
-      heightsPx: heightsPx.slice(0, 3).map((v) => Math.round(v)),
+      // ⚠️ ALL FOUR, NOT THE FIRST THREE. This used to slice(0,3) because layer
+      // 3 was structurally empty; band 1 is a real caster now, and a report
+      // that stops one short of the tallest shadow in the scene is exactly the
+      // instrument that cannot explain the picture it is describing.
+      heightsPx: heightsPx.map((v) => Math.round(v)),
+      // ⚠️ WHERE THOSE HEIGHTS CAME FROM — the whole point of the shadow
+      // cascade is that the band heights are DERIVED, and a derivation that
+      // quietly fell back to the old slider looks identical in every other
+      // number here. `source: 'fallback'` with a `reason` is the difference
+      // between "this scene has no multi-storey shadows" and "this scene's
+      // elevations never reached the bake".
+      bands: {
+        source: bandPlan.source,
+        reason: bandPlan.reason,
+        heightsPx: bandPlan.heightsPx.map((v) => Math.round(v)),
+        topOfStackPx: Math.round(bandPlan.topOfStackPx),
+        topOfStackSource: bandPlan.topOfStackSource,
+        // How many floors the LAST band had to swallow beyond its own lowest
+        // member. Non-zero means real storeys are being smeared at a height
+        // that is not their own — a stated cap, never a silent one
+        // (`feedback_silent_cap_corrupts_hard_boundary`).
+        mergedFloorsAbove: bandPlan.mergedFloorsAbove,
+        pxPerElevationUnit: floorPlan?.pxPerElevationUnit ?? null,
+        floorCount: floorPlan?.floors?.length ?? 0,
+        // THE "SOFTER AS IT FALLS" TERM, in the same units the blur ledger
+        // below reports — so "why is the top band so blurry" is answerable
+        // from the report rather than from reading the shader.
+        diffusionPx: heightsPx.map((h) =>
+          Math.round(layerDiffusionBlurPx(h, atmosphere.softnessMul * Math.max(0.05, params.softnessBias ?? 1)))
+        ),
+      },
       // WHAT THIS BAKE ACTUALLY COST, not what the ladder says it should have.
       // The rung is reported separately in `getStatus`; these are the numbers
       // the draw above was made of, so a report can never claim a resolution
@@ -1233,6 +1372,9 @@ function createFloorSlot({
  * @param {{sceneRect: object}} args.dimensions
  * @param {(floorIndex: number) => object|null} args.getCasterHeightField -
  *   boot's seam (`scene/sky-reach-access.js` behind it).
+ * @param {(() => {floors: object[], pxPerElevationUnit: number})|null} [args.getShadowFloorPlan] -
+ *   THE SHADOW CASCADE's own seam — see `createFloorSlot`'s own doc for the
+ *   full contract and what its absence falls back to.
  * @param {() => {enabled: boolean, params: object}} args.getSunShadowRenderState
  * @param {(() => number)|null} [args.getMaskAuthorityVersion]
  * @param {() => {atmosphere: object}} args.getShadowHandle - LIVE getter; see header.
@@ -1254,6 +1396,7 @@ export function createSunShadowSubsystem({
   allocator,
   dimensions,
   getCasterHeightField,
+  getShadowFloorPlan,
   getSunShadowRenderState,
   getMaskAuthorityVersion,
   getShadowHandle,
@@ -1279,6 +1422,7 @@ export function createSunShadowSubsystem({
         allocator,
         dimensions,
         getCasterHeightField,
+        getShadowFloorPlan,
         getSunShadowRenderState,
         getMaskAuthorityVersion,
         getShadowHandle,
@@ -1288,7 +1432,6 @@ export function createSunShadowSubsystem({
         // Floor 0 has nothing below it — null compiles the cascade out entirely
         // and its shader stays byte-identical to the pre-cascade one.
         lowerField: i === 0 ? null : slots[i - 1],
-        floorSlotIndex: i,
         // Bound ONCE per slot: this is the ENTIRE multi-floor consumer contract
         // — a slot pushes its own rect to its own uniform set, by INDEX, never
         // by floor identity. Only on a REAL rebake (this fires from inside

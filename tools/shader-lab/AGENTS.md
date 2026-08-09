@@ -228,7 +228,38 @@ even if the real art turns out to have zero genuine alpha holes anywhere (plausi
 background is usually painted edge-to-edge; `_Outdoors` masks, not alpha, carry this project's real
 indoor/outdoor signal).
 
-## 11. Known-good smoke test
+## 11. The `block-compress` bench — rung 1, the only oracle that isn't us
+
+`bench-block-compress.js` encodes with the real `vt/block-compress.js`, uploads the blocks as a real
+`CompressedTexture`, renders 1:1, and demands the **GPU's fixed-function decode** equal our own
+reference decoder.
+
+**It exists because the Node tests structurally cannot catch a wrong bit layout.** Encoder and
+decoder share an author and a reading of the BC7 spec, so a field at the wrong offset or a
+mistranscribed partition table is used *identically* by both: the round trip agrees with itself,
+every quality bar passes, and real hardware renders noise (`feedback_smooth_output_hides_ported_bugs`).
+The risk jumped on 2026-08-06 when the encoder went from one BC7 mode to three — mode 7 alone
+carries 1088 values of spec lookup table and a **two-anchor** index field where one misread bit
+shifts every bit after it.
+
+Three things this bench learned that are worth copying:
+
+- **BC7 is held to ZERO tolerance; BC1 is not, and that is not a relaxed bar.** BC7's decode is
+  exactly specified. BC1's two INTERPOLATED palette entries have implementation-defined low bits —
+  this GPU interpolates in 565 space, `decodeBC1` in 8-bit — so they are checked to within one 565
+  quantum while BC1's ENDPOINTS are still required exact (measured: 3905/3905 exact, maxDiff 0).
+  Collapsing both into one loose tolerance would throw away the strong half. **Do not "fix"
+  `decodeBC1` to match this GPU** — another vendor's part would then mismatch instead.
+- **Colour management off, everywhere.** `NoColorSpace` + `NoToneMapping` + `NearestFilter` + no
+  mips. The production art path is `SRGBColorSpace`, which is correct there and fatal here: the
+  readback would differ from an integer decoder by the whole transfer function and every check
+  would fail for a reason that is not a bug.
+- **A Y-CENTRED fixture cannot calibrate a Y-flip** — the same trap `bench-floor-lighting.js`
+  records. The mode-7 fixture was a centred disc and reported `mismatchesSameOrder: 0,
+  mismatchesFlipped: 0`; its centre is now deliberately off-centre in Y so the orientation check
+  can actually resolve something.
+
+## 12. Known-good smoke test
 
 ```js
 window.lab.describe().benches.map(b => b.name)   // ['fixture', 'derive', …, 'floor-lighting']
@@ -243,4 +274,8 @@ await window.lab.run('floor-lighting', 'the-authors-three-lights')
 await window.lab.run('derive', 'caster-grid-dim-independence')
 // expect: 8 pass — including `detector-is-not-vacuous`, which reproduces the 2026-07-30
 // stride bug on the real gate grid to prove the stability check can actually see it.
+await window.lab.run('block-compress', 'mode7-matches-hardware')
+// expect: 4 pass, 0 fail, ok:true — mismatchedBytes 0 of 16384. Every BC7 scenario
+// (mode5/mode6/mode7/all-modes-mixed) must report exactly 0; a non-zero count there is a
+// real bit-layout bug, not a tolerance to widen.
 ```

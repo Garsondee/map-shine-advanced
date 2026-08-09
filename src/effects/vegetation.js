@@ -52,6 +52,46 @@
  * `swayAmount`/`intensity`) are shared by every kind a scene has; a kind only
  * changes how strongly ITS OWN default response reads.
  *
+ * ============================================================================
+ * HOW A KIND SORTS — A REAL WORLD HEIGHT, NOT A FRACTION OF ITS HOST FLOOR
+ * ============================================================================
+ * A canopy's sort elevation is `hostFloorBand.bottom + heightFt`, where
+ * `heightFt` is the LIVE `treeHeightFt`/`bushHeightFt` param declared below
+ * (see `vegetation-render.js#vegetationHeightFt`/`vegetationCanopyElevation`)
+ * — UNBOUNDED, deliberately not clamped to `hostFloorBand.top`. It sorts
+ * through THE law (`scene/layer-order.js`) at that elevation like any other
+ * drawable — NOT at its host's elevation, and NOT capped at its own floor's
+ * ceiling. `renderOrderNudge` below is the fallback for the one case this
+ * cannot apply to: a floor with no bounded elevation band.
+ *
+ * THIS IS A DELIBERATE, AUTHOR-RULED EXCEPTION to "effect render order must be
+ * host-relative" (author, 2026-08-01: *"vegetation is a good exception so
+ * let's make an exception for it"*). The reasoning: a per-tile effect like
+ * specular is a SURFACE PROPERTY of its host and must follow it, but a tree
+ * canopy is a WORLD OBJECT WITH ITS OWN HEIGHT that merely happens to be
+ * painted onto a host.
+ *
+ * ⚠️ SUPERSEDES THE ORIGINAL 2026-08-01 MODEL (2026-08-06): the first version
+ * of this exception placed each kind at a FIXED FRACTION of its own host
+ * floor's band (tree at the top, `fraction=1`; bush at the midpoint,
+ * `fraction=0.5`) — a sort-key convenience, never a physical height, and
+ * structurally incapable of placing a canopy above its own floor (see
+ * `Bug-Tracker.md` bug #2/#3: no way to make a tree taller than a single-story
+ * building's roof, because the OLD model was clamped to `[bottom, top]` by
+ * construction). Real, unbounded height replaces it: a default 25ft tree
+ * (taller than most single-story Foundry floors, shorter than most two-story
+ * ones) now correctly ranks ABOVE a short floor's own roof art and BELOW a
+ * tall one's, exactly like a real tree would relative to a real building. A
+ * bush's honest default (2ft) means only a genuinely low light now illuminates
+ * its surface — see `point-light-illumination.js`'s height gate, which reads
+ * this SAME value (`receiverHeightFt`, `vt/scene-attr.js`).
+ *
+ * An UNBOUNDED band (`top` is +Infinity — Foundry's own normalisation for a
+ * Level with no declared ceiling, and what the synthetic single-floor
+ * fallback gets) still has no usable reference point, so height cannot be
+ * applied there either and `renderOrderNudge` takes over — unchanged from the
+ * original model. See `vegetationCanopyElevation`.
+ *
  * @typedef {object} VegetationKind
  * @property {string} id - 'tree' | 'bush' — also this kind's own settings-key fragment.
  * @property {string} maskKindId - the `scene/mask-catalog.js` kind id this
@@ -71,39 +111,8 @@
  *   the same item (a background painted with both `_Tree` and `_Bush`) —
  *   canopy above undergrowth. Irrelevant when only one kind is present.
  *
- *   ⚠️ THIS IS NOW THE *FALLBACK* PATH ONLY. It applies when the host's floor
- *   has no bounded elevation band (see `passiveElevationFraction` below), which
- *   is the ONLY case left where an overlay still sorts relative to its host.
- * @property {number} passiveElevationFraction - WHERE THIS KIND SITS INSIDE ITS
- *   HOST FLOOR'S ELEVATION BAND, as a 0..1 fraction of `[bottom, top]`. The
- *   overlay's sort elevation is `bottom + (top - bottom) * fraction`, and it
- *   sorts through THE law (`scene/layer-order.js`) at that elevation like any
- *   other drawable — NOT at its host's elevation.
- *
- *   THIS IS A DELIBERATE, AUTHOR-RULED EXCEPTION to "effect render order must
- *   be host-relative" (author, 2026-08-01: *"vegetation is a good exception so
- *   let's make an exception for it"*). The reasoning: a per-tile effect like
- *   specular is a SURFACE PROPERTY of its host and must follow it, but a tree
- *   canopy is a WORLD OBJECT WITH ITS OWN HEIGHT that merely happens to be
- *   painted onto a host. Sorting it at its host's elevation is what made a
- *   tile at elevation 0 / sort 1 draw straight over every bush and tree on the
- *   map (author-reported, 2026-08-01) — the old `renderOrderNudge` is < 1 and
- *   `renderOrder` is a DENSE INDEX, so a tile one slot above the host beat the
- *   nudge by construction and no amount of tuning could fix it.
- *
- *   The fractions below are the author's own model: a tile BELOW a kind's
- *   fraction goes under it, a tile AT OR ABOVE goes over it (ties break toward
- *   the tile, because `SORT_LAYERS.SCENE_EFFECTS` < `SORT_LAYERS.TILES`). On a
- *   floor spanning 0..20 that gives exactly the author's stated outcomes:
- *
- *       tile elev  9 → UNDER bush  │  tile elev 19 → UNDER tree
- *       tile elev 10 → OVER  bush  │  tile elev 20 → OVER  tree
- *
- *   An UNBOUNDED band (`top` is +Infinity — Foundry's own normalisation for a
- *   Level with no declared ceiling, and what the synthetic single-floor
- *   fallback gets) has no meaningful midpoint, so the fraction cannot be
- *   applied and `renderOrderNudge` above takes over. See
- *   `vegetationPassiveElevation`.
+ *   ⚠️ THIS IS NOW THE *FALLBACK* PATH ONLY, for a floor with no bounded
+ *   elevation band — see the module-level "HOW A KIND SORTS" section above.
  * @property {number} shadowHeightPx - HOW HIGH THIS KIND SITS ABOVE THE
  *   GROUND, in world px. The author's own shadow brief (2026-07-23) asked for
  *   exactly this and nothing more: *"only different offsets and the ability to
@@ -127,10 +136,6 @@ export const VEGETATION_KINDS = Object.freeze([
     label: 'Tree canopy',
     swayMultiplier: 1.3,
     renderOrderNudge: 0.6,
-    // THE TOP OF THE FLOOR. A tile only gets above a canopy by being at the
-    // very top of its floor's band — author, 2026-08-01: *"a tile on a floor
-    // can be above trees but only by being at the top of that floor"*.
-    passiveElevationFraction: 1,
     // A canopy sits well above head height — long, soft shadow.
     shadowHeightPx: 70,
     flutterSpaceFreq: 0.035,
@@ -141,10 +146,6 @@ export const VEGETATION_KINDS = Object.freeze([
     label: 'Bush foliage',
     swayMultiplier: 0.8,
     renderOrderNudge: 0.5,
-    // HALFWAY UP THE FLOOR — the author's own proposal, verbatim: *"set the
-    // passive elevation of _Bush to half way between the top and bottom of the
-    // level"*. Undergrowth stays below the canopy for free (0.5 < 1).
-    passiveElevationFraction: 0.5,
     // Waist-high — a tight, comparatively crisp shadow hugging its own base.
     shadowHeightPx: 16,
     flutterSpaceFreq: 0.06,
@@ -208,6 +209,49 @@ export const VEGETATION_PARAMS = Object.freeze({
     category: 'Look',
     label: 'Intensity',
     help: 'Master visibility of the canopy/foliage layer (alpha gain). 0 hides it entirely without disabling the effect.',
+  },
+  // REAL WORLD HEIGHT (2026-08-06) — replaces the old passiveElevationFraction
+  // sort-key hack (see VEGETATION_KINDS's own header above for the full
+  // history). A genuine height above the host floor's own ground, in the
+  // scene's own elevation units (Foundry's "distance units" — feet by nearly
+  // every real scene's convention). Decides sort order ONLY (via
+  // vegetation-render.js#vegetationCanopyElevation) — never the canopy's
+  // on-screen size, which is set entirely by the painted art's own footprint.
+  //
+  // ⚠️ TWO GENUINELY INDEPENDENT PER-KIND PARAMS, A NAMED, DELIBERATE
+  // EXCEPTION to "both kinds share ONE param set" (vegetation.test.mjs's own
+  // "no per-kind params" assertion carries a matching documented exception for
+  // exactly these two keys) — mirrors the render-order exception
+  // VEGETATION_KINDS's own header already documents (author, 2026-08-01:
+  // "vegetation is a good exception so let's make an exception for it"). A
+  // tree and a bush are different physical objects with genuinely
+  // uncorrelated real heights; a single shared dial could not express "taller
+  // trees, same bushes" at all.
+  treeHeightFt: {
+    type: 'float',
+    min: 1,
+    max: 150,
+    step: 1,
+    // Tall enough to clear most single-story Foundry floors (typically
+    // 10-20ft), short enough to stay under most two-story ones by default —
+    // author's own reasoning, 2026-08-06.
+    default: 25,
+    category: 'Extent',
+    label: 'Tree height (ft)',
+    help: "How tall a tree canopy stands, in the scene's own elevation units. Decides whether it sorts above or below the floor above it — a tall enough tree pokes its canopy through a short building's roofline, exactly like a real tree beside a real building. Does not change the canopy's on-screen size, only where it sorts.",
+  },
+  bushHeightFt: {
+    type: 'float',
+    min: 0.5,
+    max: 30,
+    step: 0.5,
+    // Real undergrowth height — low enough that only a genuinely low light
+    // source illuminates its surface (point-light-illumination.js's height
+    // gate reads this same value).
+    default: 2,
+    category: 'Extent',
+    label: 'Bush height (ft)',
+    help: "How tall a bush stands, in the scene's own elevation units. Low by default so only a genuinely low light illuminates its surface. Does not change the bush's on-screen size, only where it sorts.",
   },
   // WIND RESPONSE (Wind.md §8.1) — the SAME per-effect gain shape
   // `effects/candle-flame.js`'s own `windResponse` uses: one honest dial over

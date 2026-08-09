@@ -474,6 +474,28 @@ export const PASSES = [
       'invocability caveat as the other live passes.',
   },
   {
+    id: 'post.dof',
+    stage: 'post',
+    kind: 'gpu',
+    status: 'live',
+    owns: 'docs/planning/Depth-of-Field.md (the floor-distance mip blur)',
+    creates: [],
+    reads: ['buf:scene.depth'],
+    modifies: ['buf:scene.color'],
+    absorbs: ['FloorDepthBlurEffect'],
+    note:
+      'THE SECOND POST-STAGE EFFECT, and the first post-stage consumer of buf:scene.depth. Reads its ' +
+      'floor-index colour payload — winner-take-all under a hard depth test, never blended, unlike ' +
+      "buf:scene.attr's own floor channel — to compute how many floors below the CURRENTLY VIEWED " +
+      'floor each pixel sits on, maps that distance to a fractional LOD across a 4-mip downsample ' +
+      'pyramid of scene.lit (plain 13-tap, no Karis/threshold — the whole image blurs, not just ' +
+      'highlights), and composites the result back via NormalBlending: alpha=0 at/above the viewed ' +
+      'floor leaves those pixels byte-identical by the blend equation itself, never a branch. ' +
+      "Runtime: runPostDofPass, a closure in the viewer's local passImpls (mirrors post.bloom, its " +
+      'own template). A modernised rebuild of the V2 system it absorbs — same floor-distance INTENT, ' +
+      'a unified depth-authority read replacing N separate per-floor renders + Porter-Duff composites.',
+  },
+  {
     id: 'post.grade',
     stage: 'post',
     kind: 'gpu',
@@ -486,7 +508,6 @@ export const PASSES = [
       'ColorCorrectionEffectV2',
       'ContextualSceneGradeEffectV2',
       'AtmosphericFogEffectV2',
-      'FloorDepthBlurEffect',
       'DistortionManager',
       'LensEffectV2',
       'AsciiEffectV2',

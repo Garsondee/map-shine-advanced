@@ -4,7 +4,7 @@
  * Builds the REAL production shine material (`buildSpecularSurfaceMaterial`,
  * imported unmodified from `src/effects/specular/specular-render.js`) on a real
  * WebGPU device, feeds it hand-authored `_Specular` / `buf:scene.illum` /
- * `buf:scene.attr` / `_Outdoors` inputs, and reads the exact pixels back.
+ * `buf:scene.depth` / `_Outdoors` inputs, and reads the exact pixels back.
  *
  * ============================================================================
  * WHY THIS BENCH EXISTS, AND WHAT IT IS ACTUALLY FOR
@@ -15,17 +15,20 @@
  * because a product of eight terms that reads zero tells you nothing at all
  * about WHICH term was zero (`feedback_count_silent_preconditions`).
  *
- * The composite is:
+ * The composite is (STAGE 3, 2026-08-05 — `coverage`'s own second factor
+ * used to be `floorMatch × (1 − occludedHere)`, two `buf:scene.attr` reads;
+ * `specular-render.js`'s own "STAGE 3" header has the full account of why one
+ * `buf:scene.depth` rank comparison replaced both):
  *
  *     shine = ceil(tint × incident × strength × coverage)              (sheen)
  *           + ceil(tint × shimmer × gain × incident × strength × coverage)
- *     coverage = presence × floorMatch × (1 − occludedHere)
+ *     coverage = presence × notOccluded
  *
  * `gateLadder()` below renders EVERY factor in that expression, one debug
  * channel per term, over the SAME painted region, and reports each one's mean
  * and max. A zero in the ladder names the broken term outright. That is the
  * whole point: this bench does not test "does specular look right", it answers
- * "which of the eight things that must all be non-zero is zero".
+ * "which of the seven things that must all be non-zero is zero".
  *
  * ⚠️ IT CANNOT SEE A WIRING BUG IN THE VIEWER. Every input here is synthetic
  * and correct by construction, so a green ladder means "the shader is fine
@@ -36,14 +39,27 @@
  * @module tools/shader-lab/bench-specular
  */
 
-import {
-  buildSpecularSurfaceMaterial,
-  SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01,
-} from '../../src/effects/specular/specular-render.js';
+import { buildSpecularSurfaceMaterial } from '../../src/effects/specular/specular-render.js';
 import { buildSpecularIslandPack } from '../../src/effects/specular/specular-islands.js';
 import { buildWorldSpaceOutdoorsGate } from '../../src/effects/lighting/environmental-light.js';
 import { SPECULAR_DEBUG_CHANNELS } from '../../src/effects/specular/specular.js';
 import { computeCameraFrustum, QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../src/scene/world-quad.js';
+// STAGE 3 (2026-08-05) — the depth-authority gate's own REAL production
+// pieces, the same ones `vt/scene-depth.js`'s actual pass uses, proven first
+// against a live device in `bench-scene-depth.js` (this module's own header:
+// "WHAT IS PROVEN, AND WHERE"). This bench renders a REAL, small depth pass
+// with these rather than hand-typing simulated byte values, for the same
+// reason it builds the REAL `buildSpecularSurfaceMaterial` rather than a
+// lab-local reimplementation — see this file's own header.
+import {
+  DEPTH_PASS_CAMERA_Z,
+  DEPTH_PASS_NEAR,
+  DEPTH_PASS_FAR,
+  rankToDepthZ,
+  computeTieSafeExpectedDepth,
+  buildSceneDepthWriterMaterial,
+  buildSceneDepthProxyMesh,
+} from '../../src/vt/scene-depth.js';
 
 /** The bench's world rect. Fixed for the whole session so a probe coordinate
  * keeps meaning the same thing across scenario changes, exactly as the sun
@@ -58,30 +74,42 @@ const SCREEN_DIM = 512;
 const MASK_DIM = 512;
 
 /**
- * `buf:scene.attr` presets — the B-channel byte the floor gate decodes.
+ * `buf:scene.depth` RANK presets — STAGE 3 (2026-08-05), replacing the old
+ * `buf:scene.attr` B-channel byte presets below this comment's own former
+ * self. Each preset is a list of RANKS to actually render into a REAL depth
+ * pass (`renderDepthPass`, `createSpecularBench`'s own function) — never a
+ * hand-typed byte — background is rank 0, an occluder (a Tile, a roof) is
+ * rank 1, and the query point's own expected depth is ALWAYS rank 0's
+ * (`backgroundExpectedDepth`, computed once, constant across every preset
+ * exactly as a real background item's own rank would be regardless of what
+ * gets drawn over it elsewhere).
  *
- * ⚠️ THESE ARE THE HEART OF THE BENCH. `specular-render.js`'s gate is
- * `1 - step(64/255, attr.b)`, and `vt/scene-attr.js` writes `128/255` for art
- * that COVERS a Level's background (a Tile, a roof) through an ALPHA-BLENDED
- * MRT write. Every entry below is a state that write can genuinely land in —
- * including the two that must NOT switch the effect off.
+ * ⚠️ **TWO OLD PRESETS HAVE NO ANALOGUE HERE, AND THAT IS A REAL
+ * SIMPLIFICATION, NOT A DROPPED CASE.** The old `halfAlpha` (margin test) and
+ * `oldWeight4` (regression case) both existed because `buf:scene.attr`'s
+ * write was an ALPHA-BLENDED MRT write that could survive at partial
+ * strength (`feedback_alpha_blended_write_needs_wide_margin`) — a failure
+ * mode `computeSceneDepthFlags`'s depth-pass writer does not have:
+ * `buildSceneDepthWriterMaterial`'s own header says it plainly, "nothing in
+ * this pass blends at all," an alpha TEST (`.discard()`), not a blend
+ * factor. There is no "occluder wrote at half strength" state left to
+ * simulate.
  */
-export const ATTR_PRESETS = Object.freeze({
-  /** Healthy: the Level's background art is the topmost draw. Nothing sets the
-   * occluder bit, so the gate is OPEN. */
-  background: { label: 'bare background art (gate open)', bByte: 0, aByte: 255 },
-  /** A Tile / the Level's own foreground drew over it at full alpha. CLOSED. */
-  tileOver: { label: 'Tile or roof on top, α=1 (gate closes)', bByte: 128, aByte: 255 },
-  /** ⚠️ THE FAIL-OPEN CASE, and the reason the bit's polarity was inverted:
-   * cleared attr, the renderer-global `vec4(0,0,0,0)` safe default, or a
-   * material that never got its `mrtNode`. Must render, not vanish. */
-  neverWritten: { label: 'attr never written (cleared / zero-MRT) — MUST still draw', bByte: 0, aByte: 0 },
-  /** The alpha-attenuated occluder: a Tile whose attr write survived at only
-   * half strength. Under the inverted polarity this under-reports OCCLUSION,
-   * which is the safe direction — the shine leaks through a faint tile. */
-  halfAlpha: { label: 'Tile at α=0.5 (margin test — leaks, never vanishes)', bByte: 64, aByte: 128 },
-  /** The old weight-4 encoding, for the regression it actually was. */
-  oldWeight4: { label: 'occluder at the old weight-4 (under-reports)', bByte: 4, aByte: 255 },
+export const DEPTH_PRESETS = Object.freeze({
+  /** Healthy: only the background is drawn at the query point. Gate OPEN —
+   * and, per `computeTieSafeExpectedDepth`'s own doc, this IS the tie case
+   * every unoccluded pixel hits in production, not a lucky corner. */
+  background: { label: 'bare background art (gate open)', ranks: [0] },
+  /** Background (rank 0) AND a Tile / the Level's own foreground (rank 1)
+   * BOTH drawn over the SAME area — exactly production's shape, where the
+   * background is still there, just covered. `LessDepth` + a higher rank's
+   * smaller stored depth means rank 1 genuinely WINS the real depth test at
+   * this query point, exactly as it would in the real pass. CLOSED. */
+  tileOver: { label: 'Tile or roof on top (gate closes)', ranks: [0, 1] },
+  /** ⚠️ THE FAIL-OPEN CASE. Nothing drawn at all — the depth pass clears to
+   * the far plane (1) and nothing real ever loses to that (`rankToDepthZ`'s
+   * own doc). Must render, not vanish. */
+  neverWritten: { label: 'depth pass wrote nothing here (cleared) — MUST still draw', ranks: [] },
 });
 
 /** Decode one IEEE-754 binary16 to a JS number — `scene.lit` is HalfFloat in
@@ -197,9 +225,13 @@ export function createSpecularBench({ THREE, renderer, log }) {
 
   const state = {
     scenario: 'goldPlate',
-    attrPreset: 'background',
+    depthPreset: 'background',
     illum: 0.6,
     darknessFloor: 0,
+    /** `SPECULAR_INCIDENT_KNEE`'s production default. Exposed on the bench
+     * because the sweep that found the dead-below-0.75 bug is exactly the
+     * sweep that has to be re-run to prove a knee change fixed it. */
+    incidentKnee: 0.15,
     outdoors: 0,
     strength: 1,
     shimmerGain: 5.5,
@@ -237,9 +269,86 @@ export function createSpecularBench({ THREE, renderer, log }) {
   let maskTexture = solidTex(0, 0, 0, 255);
   let islandPackTexture = makeTex(new Uint8Array([191, 128, 0, 0]), 1, 1, true);
   const illumTexture = solidTex(153, 153, 153, 255);
-  const attrTexture = solidTex(0, 0, 0, 255);
   const outdoorsTexture = solidTex(0, 0, 0, 255);
   const outdoorsTexNode = texture(outdoorsTexture);
+
+  // ── THE DEPTH-AUTHORITY MINI SCENE — STAGE 3 (2026-08-05) ────────────────
+  // A REAL depth pass, the SAME production pieces `vt/scene-depth.js` uses
+  // (see this file's own import comment) — never a hand-typed byte standing
+  // in for what a real depth test would decide. Two ranks are all this bench
+  // needs: 0 (the background) and 1 (a Tile/roof occluder), both drawn full-
+  // rect so any query point sees whichever `DEPTH_PRESETS` entry asks for.
+  const DEPTH_MAX_RANK = 2;
+  const backgroundExpectedDepth = computeTieSafeExpectedDepth(0, DEPTH_MAX_RANK);
+  const depthTex = new THREE.DepthTexture(SCREEN_DIM, SCREEN_DIM, THREE.FloatType);
+  const depthRt = new THREE.RenderTarget(SCREEN_DIM, SCREEN_DIM, {
+    type: THREE.UnsignedByteType,
+    format: THREE.RGBAFormat,
+    depthBuffer: true,
+    depthTexture: depthTex,
+  });
+  const depthCamera = new THREE.OrthographicCamera(
+    SPEC_RECT.minX,
+    SPEC_RECT.maxX,
+    SPEC_RECT.maxY,
+    SPEC_RECT.minY,
+    DEPTH_PASS_NEAR,
+    DEPTH_PASS_FAR
+  );
+  depthCamera.position.set(0, 0, DEPTH_PASS_CAMERA_Z);
+  depthCamera.lookAt(0, 0, 0);
+  depthCamera.updateProjectionMatrix();
+  const depthQuadGeometry = new THREE.BufferGeometry();
+  depthQuadGeometry.setAttribute(
+    'position',
+    new THREE.BufferAttribute(
+      buildQuadPositions([
+        { x: SPEC_RECT.minX, y: SPEC_RECT.minY },
+        { x: SPEC_RECT.maxX, y: SPEC_RECT.minY },
+        { x: SPEC_RECT.maxX, y: SPEC_RECT.maxY },
+        { x: SPEC_RECT.minX, y: SPEC_RECT.maxY },
+      ]),
+      3
+    )
+  );
+  depthQuadGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+  depthQuadGeometry.setIndex(Array.from(QUAD_INDICES));
+  // `floorIndex`/`flags` are inert here — specular's own gate reads NEITHER
+  // (see `computeSpecularDepthGate`'s own header for why no flags-bit hard
+  // block is needed), so 0/0 is a correct placeholder, not a guess.
+  const backgroundDepthMesh = buildSceneDepthProxyMesh({
+    THREE,
+    geometry: depthQuadGeometry,
+    material: buildSceneDepthWriterMaterial({ THREE, floorIndex: 0, flags: 0 }),
+    z: rankToDepthZ(0, DEPTH_MAX_RANK),
+  });
+  const occluderDepthMesh = buildSceneDepthProxyMesh({
+    THREE,
+    geometry: depthQuadGeometry,
+    material: buildSceneDepthWriterMaterial({ THREE, floorIndex: 0, flags: 0 }),
+    z: rankToDepthZ(1, DEPTH_MAX_RANK),
+  });
+  const depthScene = new THREE.Scene();
+
+  /** Render exactly `ranks` into `depthTex`, clearing to the far plane (1)
+   * first — `DEPTH_PRESETS.neverWritten`'s own fail-open case relies on this
+   * clear happening EVERY call, not once at startup, so switching AWAY from
+   * an occluded preset genuinely clears the previous preset's write rather
+   * than leaving it stale underneath. @param {number[]} ranks */
+  function renderDepthPass(ranks) {
+    depthScene.clear();
+    if (ranks.includes(0)) depthScene.add(backgroundDepthMesh);
+    if (ranks.includes(1)) depthScene.add(occluderDepthMesh);
+    const prevTarget = renderer.getRenderTarget();
+    const prevClearDepth = renderer.getClearDepth();
+    renderer.setRenderTarget(depthRt);
+    renderer.setClearColor(0x000000, 0);
+    renderer.setClearDepth(1);
+    renderer.clear(true, true, true);
+    renderer.render(depthScene, depthCamera);
+    renderer.setRenderTarget(prevTarget);
+    renderer.setClearDepth(prevClearDepth);
+  }
 
   // THE REAL MATERIAL. Built exactly as `specular-surface-subsystem.js` builds
   // it, with the same injected seam (`buildWorldSpaceOutdoorsGate`) the viewer
@@ -249,7 +358,7 @@ export function createSpecularBench({ THREE, renderer, log }) {
     maskTexture,
     islandPackTexture,
     illumTexture,
-    attrTexture,
+    depthTexture: depthTex,
     uViewRect,
     uOutdoorsRect,
     outdoorsTexNode,
@@ -294,9 +403,8 @@ export function createSpecularBench({ THREE, renderer, log }) {
     illumTexture.image.data.set([lv, lv, lv, 255]);
     illumTexture.needsUpdate = true;
 
-    const preset = ATTR_PRESETS[state.attrPreset] ?? ATTR_PRESETS.background;
-    attrTexture.image.data.set([0, Math.round(state.outdoors * 255), preset.bByte, preset.aByte]);
-    attrTexture.needsUpdate = true;
+    const preset = DEPTH_PRESETS[state.depthPreset] ?? DEPTH_PRESETS.background;
+    renderDepthPass(preset.ranks);
 
     const o = Math.round(Math.max(0, Math.min(1, state.outdoors)) * 255);
     outdoorsTexture.image.data.set([o, o, o, 255]);
@@ -348,16 +456,14 @@ export function createSpecularBench({ THREE, renderer, log }) {
     };
     maskUvBounds = { minU, minV, maxU, maxV };
     surface.setMaskUvBounds(maskUvBounds);
-    geometry
-      .getAttribute('position')
-      .array.set(
-        buildQuadPositions([
-          { x: quadWorld.minX, y: quadWorld.minY },
-          { x: quadWorld.maxX, y: quadWorld.minY },
-          { x: quadWorld.maxX, y: quadWorld.maxY },
-          { x: quadWorld.minX, y: quadWorld.maxY },
-        ])
-      );
+    geometry.getAttribute('position').array.set(
+      buildQuadPositions([
+        { x: quadWorld.minX, y: quadWorld.minY },
+        { x: quadWorld.maxX, y: quadWorld.minY },
+        { x: quadWorld.maxX, y: quadWorld.maxY },
+        { x: quadWorld.minX, y: quadWorld.maxY },
+      ])
+    );
     geometry.getAttribute('position').needsUpdate = true;
 
     // THE REAL BAKE — `buildSpecularIslandPack`, unmodified, on the same bytes.
@@ -386,7 +492,13 @@ export function createSpecularBench({ THREE, renderer, log }) {
     surface.setSaturation(state.saturation);
     surface.setShimmerGain(state.shimmerGain);
     surface.setDarknessFloor(state.darknessFloor, state.darknessFloor, state.darknessFloor);
-    surface.setFloorIndex(0);
+    surface.setIncidentKnee(state.incidentKnee);
+    // Constant across every preset — the background's own rank does not
+    // change just because an occluder gets drawn somewhere else, exactly
+    // like a real item's rank in production. `renderDepthPass` (called from
+    // `pushScreenBuffers`, just above this function every `render()`) is
+    // what actually varies per preset.
+    surface.setExpectedDepth(backgroundExpectedDepth);
     surface.setDebugChannel(state.debugChannel);
     const v = viewRect();
     surface.setViewCentre((v.minX + v.maxX) / 2, (v.minY + v.maxY) / 2);
@@ -513,12 +625,14 @@ export function createSpecularBench({ THREE, renderer, log }) {
     // ⚠️ TWO KINDS OF CHANNEL, AND CONFLATING THEM MAKES THE LADDER LIE.
     // A CHAIN term multiplies into `shine`, so a zero in one IS the bug. An
     // INFORMATIONAL channel is a raw reading whose zero can be the correct
-    // answer — `outdoors` is 0 on any indoor scene, and `attrDirect` is 0 on
-    // healthy bare background art (the occluder bit is CLEAR there, which is
-    // exactly what "nothing is covering me" looks like). This bench flagged its
-    // own `attrDirect` as the first dead term the moment the gate's polarity
-    // was inverted, which is `feedback_instruments_must_not_lie` arriving for
-    // the instrument built to catch it. Classify, don't special-case.
+    // answer — `outdoors` is 0 on any indoor scene, and `depthDirect` reads
+    // a small, non-zero stored-depth value on HEALTHY bare background art
+    // (rank 0's own real depth, never literally zero — see `rankToDepthZ`'s
+    // own doc for why every real rank lands strictly inside `(0,1)`). This
+    // bench flagged its own predecessor (`attrDirect`) as a dead term once
+    // already, the moment the OLD gate's polarity was inverted —
+    // `feedback_instruments_must_not_lie` arriving for the instrument built
+    // to catch it. Classify, don't special-case.
     const CHAIN = [
       'quad',
       'mask',
@@ -534,7 +648,7 @@ export function createSpecularBench({ THREE, renderer, log }) {
       'glint',
       'final',
     ];
-    const INFORMATIONAL = ['attrDirect', 'outdoors', 'illumDirect'];
+    const INFORMATIONAL = ['depthDirect', 'outdoors', 'illumDirect'];
     const wanted = [...CHAIN, ...INFORMATIONAL];
     const byId = new Map(SPECULAR_DEBUG_CHANNELS.map((c) => [c.id, c]));
     const restore = state.debugChannel;
@@ -566,7 +680,7 @@ export function createSpecularBench({ THREE, renderer, log }) {
     const firstDead = rows.find((r) => r.DEAD);
     return {
       scenario: state.scenario,
-      attr: `${state.attrPreset} (b=${ATTR_PRESETS[state.attrPreset].bByte}/255; b ≥ ${(SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 * 255).toFixed(0)} means OCCLUDED — gate shuts)`,
+      depth: `${state.depthPreset} (expectedDepth=${backgroundExpectedDepth.toFixed(4)} for rank 0; storedDepth < expectedDepth means OCCLUDED — gate shuts)`,
       illum: state.illum,
       islands: islandReport,
       rows,
@@ -621,11 +735,11 @@ export function createSpecularBench({ THREE, renderer, log }) {
   async function selfTest() {
     const savedScenario = state.scenario;
     const savedChannel = state.debugChannel;
-    const savedAttr = state.attrPreset;
+    const savedDepthPreset = state.depthPreset;
     const orientPaint = (_u, v) => (v < 0.45 ? [255, 255, 255, 255] : [0, 0, 0, 0]);
     try {
       applyScenario(orientPaint);
-      state.attrPreset = 'background';
+      state.depthPreset = 'background';
       // ⚠️ CHANNEL 'quad' (a CONSTANT, no texture read), not 'strength'. The
       // marker has to be the one thing that cannot itself be broken: the quad
       // is cropped to the painted AABB, so "which rows did the mesh cover" is a
@@ -649,7 +763,7 @@ export function createSpecularBench({ THREE, renderer, log }) {
       log?.('specular selfTest: orientation OK, no flip needed');
       return true;
     } finally {
-      state.attrPreset = savedAttr;
+      state.depthPreset = savedDepthPreset;
       state.debugChannel = savedChannel;
       applyScenario(savedScenario);
       await render();
@@ -727,7 +841,7 @@ export function createSpecularBench({ THREE, renderer, log }) {
     state,
     SPEC_RECT,
     MASK_SCENARIOS,
-    ATTR_PRESETS,
+    DEPTH_PRESETS,
     applyScenario,
     render,
     paint,
@@ -761,7 +875,7 @@ export function createSpecularBench({ THREE, renderer, log }) {
       orientationFlip,
       outdoorsGateCompiled: surface.outdoorsGateCompiled,
       floorGateCompiled: surface.floorGateCompiled,
-      occluderThresholdByte: SPECULAR_OCCLUDES_BACKGROUND_THRESHOLD01 * 255,
+      backgroundExpectedDepth,
     }),
   };
 }

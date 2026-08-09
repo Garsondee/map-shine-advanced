@@ -18,11 +18,11 @@ import {
   generateBurst,
   computeStrandEnvelope,
   groupLightningAnchorsIntoSources,
+  defaultLightningElevation,
   buildLightningLightSources,
   computeLightningStrandArrays,
   hexToRgb01,
 } from '../lightning-geometry.js';
-import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL } from '../lighting/point-light-illumination.js';
 
 function approx(a, b, eps = 1e-6) {
   return Math.abs(a - b) <= eps;
@@ -211,9 +211,9 @@ export function run(t) {
     );
     ok('the main strand has a positive baseIntensity floor', main.baseIntensity >= 0.05);
     ok(
-      'a source with no elevationRank (every fixture above) bakes the SENTINEL, never 0/undefined/NaN — ' +
-        'the old "always fully reaches" behaviour for a caller predating the height gate',
-      main.elevationRank === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+      'a source with no expectedDepth (every fixture above) bakes 0, never undefined/NaN — an ordinary, ' +
+        'real, low value, never a magic "always fully reaches" sentinel (the depth authority has no sentinel concept)',
+      main.expectedDepth === 0
     );
 
     ok('branches is an array within [0, branchMax]', Array.isArray(branches) && branches.length <= PARAMS.branchMax);
@@ -231,25 +231,27 @@ export function run(t) {
       );
       ok('a branch is dimmer than its parent (branchIntensityScale<1)', b.baseIntensity < main.baseIntensity);
       ok(
-        'a branch inherits its PARENT´s own elevationRank exactly — it belongs to the same floor by construction',
-        b.elevationRank === main.elevationRank
+        'a branch inherits its PARENT´s own expectedDepth exactly — it belongs to the same floor by construction',
+        b.expectedDepth === main.expectedDepth
       );
     }
 
-    // A source WITH a real elevationRank carries it straight through to both
-    // the main strand and every branch (the height gate's own floor input).
-    const sourceWithRank = { ...source, elevationRank: 2.15625 };
-    const rankedBurst = generateBurst({
-      source: sourceWithRank,
+    // A source WITH a real expectedDepth carries it straight through to both
+    // the main strand and every branch (the depth-authority gate's own input —
+    // `lightning-subsystem.js#advanceSchedulesAndSpawn` is what actually
+    // resolves a raw `elevation` into this value; generateBurst just relays it).
+    const sourceWithDepth = { ...source, expectedDepth: 0.65625 };
+    const deepBurst = generateBurst({
+      source: sourceWithDepth,
       burstIndex: 0,
       spawnMs: 1000,
       maxPointsPerStrand: 96,
       params: PARAMS,
     });
-    ok('a source´s real elevationRank reaches the main strand unchanged', rankedBurst.main.elevationRank === 2.15625);
+    ok('a source´s real expectedDepth reaches the main strand unchanged', deepBurst.main.expectedDepth === 0.65625);
     ok(
       'and every branch of that same burst',
-      rankedBurst.branches.every((b) => b.elevationRank === 2.15625)
+      deepBurst.branches.every((b) => b.expectedDepth === 0.65625)
     );
 
     // Determinism: the SAME (source, burstIndex) always yields the SAME bolt —
@@ -375,6 +377,10 @@ export function run(t) {
     const { sources, orphaned } = groupLightningAnchorsIntoSources(anchors);
     ok('exactly one complete source is formed', sources.length === 1);
     ok('the source carries the correct endpoints', sources[0].startX === 0 && sources[0].endX === 500);
+    ok(
+      'the source also carries the ANCHOR ids of its two endpoints (for line-drawing UI, not the render path)',
+      sources[0].startId === 'a1' && sources[0].endId === 'a2'
+    );
     ok('the source seed is derived from its linkId (deterministic)', sources[0].seed === hashStringToSeed('bolt-1'));
     ok(
       'an incomplete link (no end) is reported orphaned, not silently dropped',
@@ -384,20 +390,63 @@ export function run(t) {
       'anchors with no linkId at all are ignored entirely',
       groupLightningAnchorsIntoSources([{ id: 'x', x: 0, y: 0, params: {} }]).sources.length === 0
     );
-    ok(
-      'a source with no elevationRank on its START anchor reads as the sentinel',
-      sources[0].elevationRank === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
-    );
+    ok('a source with no elevation on its START anchor reads as 0, not undefined/NaN', sources[0].elevation === 0);
 
-    // The bolt's own height-gate input comes from the START anchor specifically
-    // (generateBurst's own doc: "a strike genuinely does travel start→end").
+    // The bolt's own depth-authority input comes from the START anchor
+    // specifically (generateBurst's own doc: "a strike genuinely does travel
+    // start→end"). These are raw world elevations here (unresolved) — the
+    // rank/depth comparison itself is generateBurst's + lightning-subsystem.js's
+    // concern, not this pure grouping function's.
     const ranked = groupLightningAnchorsIntoSources([
-      { id: 'b1', x: 0, y: 0, params: { role: 'start', linkId: 'bolt-3' }, elevationRank: 1.5 },
-      { id: 'b2', x: 500, y: 0, params: { role: 'end', linkId: 'bolt-3' }, elevationRank: 9.9 },
+      { id: 'b1', x: 0, y: 0, params: { role: 'start', linkId: 'bolt-3' }, elevation: 1.5 },
+      { id: 'b2', x: 500, y: 0, params: { role: 'end', linkId: 'bolt-3' }, elevation: 9.9 },
     ]);
     ok(
-      'the resolved source carries the START anchor´s own rank, not the end´s',
-      ranked.sources[0].elevationRank === 1.5
+      'the resolved source carries the START anchor´s own elevation, not the end´s',
+      ranked.sources[0].elevation === 1.5
+    );
+  }
+
+  // --- defaultLightningElevation -------------------------------------------
+  {
+    const range = { min: 0, max: 50 };
+    ok(
+      'a locked 20-unit floor band [0,20) defaults to roughly half (10)',
+      defaultLightningElevation({ mode: 'locked', bottom: 0, top: 20 }, range) === 10
+    );
+    ok(
+      'the SAME 20-unit band height at a different absolute elevation gives the same default',
+      defaultLightningElevation({ mode: 'locked', bottom: 100, top: 120 }, range) === 10
+    );
+    ok(
+      'never zero, even for a near-zero-height floor band',
+      defaultLightningElevation({ mode: 'locked', bottom: 0, top: 0.4 }, range) === 1
+    );
+    ok(
+      'a floor taller than the param range clamps to the range max, never overflows it',
+      defaultLightningElevation({ mode: 'locked', bottom: 0, top: 200 }, range) === 50
+    );
+    ok(
+      'no locked floor band (all-levels) still returns a modest non-zero guess',
+      (() => {
+        const v = defaultLightningElevation({ mode: 'all-levels' }, range);
+        return Number.isFinite(v) && v > 0 && v <= 50;
+      })()
+    );
+    ok(
+      'a missing/undefined floorBinding is handled the same way as all-levels, not a throw',
+      (() => {
+        const v = defaultLightningElevation(undefined, range);
+        return Number.isFinite(v) && v > 0;
+      })()
+    );
+    ok(
+      'a missing range falls back to the schema defaults (0-50) rather than throwing',
+      Number.isFinite(defaultLightningElevation({ mode: 'locked', bottom: 0, top: 20 }))
+    );
+    ok(
+      'the result is always a whole number',
+      Number.isInteger(defaultLightningElevation({ mode: 'locked', bottom: 0, top: 33 }, range))
     );
   }
 
@@ -551,26 +600,25 @@ export function run(t) {
     const cappedPoints = computeLightningStrandArrays([longStrand], 24, 96);
     ok('per-strand point count is capped at maxPointsPerStrand', cappedPoints.strandPointCounts[0] === 96);
 
-    // THE HEIGHT-GATE INPUT — s1/s2 above carry no elevationRank (older-shaped
-    // fixtures), so this is also the defensive-default check: the sentinel,
-    // never 0/undefined/NaN.
+    // THE DEPTH-AUTHORITY INPUT — s1/s2 above carry no expectedDepth
+    // (older-shaped fixtures), so this is also the defensive-default check:
+    // 0, never undefined/NaN, never a magic sentinel.
     ok(
-      'a strand with no elevationRank bakes the SENTINEL on every one of its vertices',
-      arrays.elevationRank.slice(0, arrays.vertexCount).every((r) => r === LIGHT_ELEVATION_UNCONFIGURED_SENTINEL)
+      'a strand with no expectedDepth bakes 0 on every one of its vertices',
+      arrays.expectedDepth.slice(0, arrays.vertexCount).every((r) => r === 0)
     );
-    const ranked = computeLightningStrandArrays(
+    const deep = computeLightningStrandArrays(
       [
-        { ...s1, elevationRank: 0.15625 },
-        { ...s2, elevationRank: 2.15625 },
+        { ...s1, expectedDepth: 0.15625 },
+        { ...s2, expectedDepth: 0.65625 },
       ],
       24,
       96
     );
-    let rankBleed = false;
-    for (let v = 0; v < strand1VertCount; v++) if (ranked.elevationRank[v] !== 0.15625) rankBleed = true;
-    for (let v = strand1VertCount; v < ranked.vertexCount; v++)
-      if (ranked.elevationRank[v] !== 2.15625) rankBleed = true;
-    ok('a real elevationRank bakes per-strand with no cross-strand bleed, same pattern as seed', !rankBleed);
+    let depthBleed = false;
+    for (let v = 0; v < strand1VertCount; v++) if (deep.expectedDepth[v] !== 0.15625) depthBleed = true;
+    for (let v = strand1VertCount; v < deep.vertexCount; v++) if (deep.expectedDepth[v] !== 0.65625) depthBleed = true;
+    ok('a real expectedDepth bakes per-strand with no cross-strand bleed, same pattern as seed', !depthBleed);
   }
 
   // --- hexToRgb01 ------------------------------------------------------------

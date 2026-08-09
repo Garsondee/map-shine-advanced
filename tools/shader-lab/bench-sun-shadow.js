@@ -36,6 +36,7 @@
 import { marchDirectionToSun } from '../../src/effects/lighting/sun-occlusion.js';
 import { buildLayerSmearBakeMaterial } from '../../src/effects/lighting/layer-smear-render.js';
 import { resolveLayerSmear, layerSmearTierPlan } from '../../src/effects/lighting/layer-smear.js';
+import { resolveShadowBandPlan } from '../../src/effects/lighting/shadow-bands.js';
 import {
   packLayerTexelData,
   SUN_SHADOW_LAYER_STRENGTH,
@@ -327,10 +328,20 @@ export function createSunShadowBench({ THREE, log }) {
     // world-sampled by `packLayerTexelData` itself precisely because they can
     // legitimately sit at a DIFFERENT resolution than this one.
     const spec = p.casterChannels.coverOverhead.spec;
+    // ⚠️ BAND 1 — the floor ABOVE's own `coverAbove` (2026-08-05, the shadow
+    // cascade). `bakeLayerTexture` fetches this through a second
+    // `getCasterHeightField(floorIndex + 1)` call; the bench's equivalent is a
+    // second lookup in the SAME `products` array, which `derive()` already
+    // returns for every floor. Omitting it would leave the A channel empty and
+    // this bench would render the pre-cascade picture while production rendered
+    // the new one — precisely the drift
+    // `feedback_bench_must_build_inputs_like_production` names.
+    const above = products.find((x) => x.index === floorIndex + 1);
     const { data, channelStats } = packLayerTexelData({
       channels: p.casterChannels,
       outdoorsGrid: p.casterChannels.outdoors,
       coverAboveGrid: p.casterChannels.coverAbove ?? null,
+      bandAboveGrid: above?.casterChannels?.coverAbove ?? null,
       spec,
     });
     return {
@@ -609,10 +620,15 @@ export function createSunShadowBench({ THREE, log }) {
     all: [1, 1, 1, 1],
     walls: [1, 0, 0, 0],
     overhead: [0, 1, 0, 0],
-    // B and A together: `packLayerTexelData` merges "the floor directly above"
-    // and "everything higher" into B today (A is the documented empty slot),
-    // so sky-reach is honestly ONE isolation, not two.
+    // BOTH bands — one physical stack sliced at two elevations, so isolating
+    // "everything above me" honestly means both (`shadow-bands.js`).
     skyReach: [0, 0, 1, 1],
+    // …and each band alone, for the question the cascade made askable: is the
+    // long shadow coming from the floor directly above, or from the storeys
+    // above THAT? Matches `sun-shadow-debug.js`'s own two new views one for one,
+    // so the lab and the live dropdown isolate identically.
+    bandNear: [0, 0, 1, 0],
+    bandFar: [0, 0, 0, 1],
   });
 
   /** Every look/geometry input one render needs, resolved from `ctx.params`
@@ -656,12 +672,16 @@ export function createSunShadowBench({ THREE, log }) {
       azimuthDeg: params.azimuthDeg ?? 220,
       elevationDeg: params.elevationDeg ?? 30,
       tier: params.tier ?? 3,
+      // ⚠️ ONLY THE TWO AUTHORED HEIGHTS LIVE HERE NOW (2026-08-05, the shadow
+      // cascade). The two BAND heights are per-RECEIVER-FLOOR and derived, so
+      // they are resolved in `resolveFloorHeights` once the floor is known — a
+      // single `aboveHeightPx` for every floor is exactly the flatness the
+      // cascade exists to remove.
       heightsPx: [
         params.wallHeightPx ?? shipped('wallHeightPx'),
         params.overheadHeightPx ?? shipped('overheadHeightPx'),
-        params.aboveHeightPx ?? shipped('aboveHeightPx'),
-        0,
       ],
+      fallbackAboveHeightPx: params.aboveHeightPx ?? shipped('aboveHeightPx'),
       strengths: baseStrengths.map((s, i) => s * isolate[i]),
       // See `buildLayerField` for why this defaults to `tile` rather than the
       // derive bench's own `levelForeground`.
@@ -683,17 +703,55 @@ export function createSunShadowBench({ THREE, log }) {
     };
   }
 
+  /**
+   * THE BAND HEIGHTS FOR ONE FLOOR — through the REAL `resolveShadowBandPlan`,
+   * over the fixture's OWN author-given `FLOORS` bands and its own declared
+   * `distancePixels` (2026-08-05, the shadow cascade). Production composes the
+   * identical call from `getActiveSceneFloors` + `readGridDistancePixels`; this
+   * is the same function fed the same shape, never a bench-local restatement of
+   * "one storey is 400px" (`feedback_bench_must_build_inputs_like_production` —
+   * the whole reason `resolveShadowParams` above reads `SUN_SHADOW_PARAMS`
+   * rather than carrying its own numbers).
+   *
+   * @param {number} floorIndex @param {object} p - `resolveShadowParams`'s result.
+   * @returns {{heightsPx: number[], bandPlan: object}}
+   */
+  function resolveFloorHeights(floorIndex, p) {
+    const bandPlan = resolveShadowBandPlan({
+      floors: FIXTURE.floors.map((f) => ({
+        index: f.index,
+        elevationBottom: f.elevation?.bottom ?? null,
+        // Foundry's own unbounded-top convention is `null`; the fixture spells
+        // it `Number.POSITIVE_INFINITY`, which is the same fact in a different
+        // encoding and must be normalised HERE rather than taught to the
+        // production module (`feedback_read_the_producer_never_invent_its_shape`
+        // — the fixture is the one restating Foundry, so the fixture's own
+        // reader converts).
+        elevationTop: Number.isFinite(f.elevation?.top) ? f.elevation.top : null,
+      })),
+      receiverFloorIndex: floorIndex,
+      pxPerElevationUnit: FIXTURE.derive?.casterHeights?.distancePixels ?? 0,
+      wallHeightPx: p.heightsPx[0],
+      fallbackAboveHeightPx: p.fallbackAboveHeightPx,
+    });
+    return {
+      heightsPx: [p.heightsPx[0], p.heightsPx[1], bandPlan.heightsPx[0], bandPlan.heightsPx[1]],
+      bandPlan,
+    };
+  }
+
   /** Build + upload + render ONE floor's field. Returns the raw bytes plus the
    * field itself, so a caller can measure it as well as look at it. */
   async function renderOneFloor(floorIndex, plan, p) {
     const field = await buildLayerField(floorIndex, plan.fieldDim, plan.layerGridDim, p.overheadHostType);
+    const { heightsPx, bandPlan } = resolveFloorHeights(floorIndex, p);
     // ⚠️ `lengthScale`/`maxLengthMul` PASSED, as production does — omitting
     // them was the single biggest reason this bench's picture and the real
     // scene's stopped resembling each other (see `resolveShadowParams`).
     const resolved = resolveLayerSmear({
       azimuthDeg: p.azimuthDeg,
       elevationDeg: p.elevationDeg,
-      heightsPx: p.heightsPx,
+      heightsPx,
       lengthScale: p.lengthScale,
       maxLengthMul: p.maxLengthMul,
     });
@@ -701,6 +759,11 @@ export function createSunShadowBench({ THREE, log }) {
     layerSmear.setRect(field.rect);
     layerSmear.setField({ layerGridDimPx: field.w });
     layerSmear.setSun(resolved);
+    // This bench renders ONE floor at a time into a fresh target — there is no
+    // slot above to read the publication — but it is pushed anyway, at the same
+    // value a live bake pushes, so the bench never renders a uniform state
+    // production cannot reach.
+    layerSmear.setCascade({ active: true });
     layerSmear.setLayers({ strengths: p.strengths });
     layerSmear.setDepth({ radiiPx: p.depthRadiusPx });
     layerSmear.setLook({
@@ -712,7 +775,7 @@ export function createSunShadowBench({ THREE, log }) {
     });
     layerSmear.setEdgeBandPx(p.edgeBandPx);
     const bytes = await renderTo(layerSmear, layerSmearQuad, plan.fieldDim);
-    return { bytes, field, resolved };
+    return { bytes, field, resolved, bandPlan, heightsPx };
   }
 
   /**
@@ -886,8 +949,14 @@ export function createSunShadowBench({ THREE, log }) {
       // each default's own story, including why the author's requested "AO"
       // isolation deliberately does not exist.
       const p = resolveShadowParams(ctx.params);
-      const { heightsPx, strengths, depthRadiusPx } = p;
-      const { bytes, field, resolved } = await renderOneFloor(fx.index, plan, p);
+      const { strengths, depthRadiusPx } = p;
+      // ⚠️ `heightsPx` COMES BACK FROM THE RENDER, not from `p` (2026-08-05).
+      // Two of the four are derived per RECEIVER FLOOR now
+      // (`resolveFloorHeights`), so reading them off the shared param object
+      // would report the two authored ones and two `undefined`s — a report that
+      // cannot state the heights the picture beside it was actually made of
+      // (`feedback_instruments_must_not_lie`).
+      const { bytes, field, resolved, heightsPx, bandPlan } = await renderOneFloor(fx.index, plan, p);
       lastRender = { bytes, dim: plan.fieldDim, rect: field.rect, yFlip };
       paintTo('sunShadowView', bytes, plan.fieldDim);
 
@@ -946,6 +1015,10 @@ export function createSunShadowBench({ THREE, log }) {
           tier,
           plan,
           heightsPx,
+          // WHERE THE TWO BAND HEIGHTS CAME FROM — `source: 'fallback'` here
+          // means the fixture's own elevations did not reach the plan, which
+          // renders a plausible picture from the wrong input.
+          bandPlan,
           strengths,
           depthRadiusPx,
           layerIsolate: p.isolateKey,
@@ -1141,8 +1214,10 @@ export function createSunShadowBench({ THREE, log }) {
 
       const frames = [];
       const perFloor = [];
+      const bandsByFloor = [];
       for (const fx of FIXTURE.floors) {
-        const { bytes, field } = await renderOneFloor(fx.index, plan, p);
+        const { bytes, field, heightsPx, bandPlan } = await renderOneFloor(fx.index, plan, p);
+        bandsByFloor.push({ floorId: fx.id, heightsPx, source: bandPlan.source, reason: bandPlan.reason });
         const gate = measureFloorGateSurvival(bytes, plan.fieldDim, field);
         // Mean darkness over the WHOLE frame — the one number that says "this
         // floor got more/less shadow than that one" at a glance, next to the
@@ -1186,6 +1261,26 @@ export function createSunShadowBench({ THREE, log }) {
             expected: 'every floor shows SOME shadow',
             note: 'a floor at exactly 1.000 cast nothing at all — with layerIsolate set, that may be honest (that layer has no casters on that floor) rather than a defect.',
           })),
+          // ⚠️ THE CASCADE'S OWN ACCEPTANCE CRITERION (2026-08-05). The author
+          // asked for "a much longer larger shadow… as a result of having
+          // access to the information for all floors", and the mechanism that
+          // delivers it is per-floor DERIVED band heights. Every check above
+          // would still pass if the derivation silently fell back to one flat
+          // slider for every floor — the picture would simply be the old one.
+          // This is the check that can tell them apart.
+          evaluate('band-heights-are-derived-and-fall-with-the-receiver', () => {
+            const derived = bandsByFloor.filter((b) => b.source !== 'fallback');
+            const tops = bandsByFloor.map((b) => Math.max(b.heightsPx[2], b.heightsPx[3]));
+            const strictlyFalling = tops.every((h, i) => i === 0 || h <= tops[i - 1]);
+            return {
+              ok: derived.length === bandsByFloor.length && strictlyFalling && tops[0] > tops[tops.length - 1],
+              measured: bandsByFloor
+                .map((b) => `${b.floorId}=[${b.heightsPx[2]},${b.heightsPx[3]}]${b.source === 'fallback' ? '!' : ''}`)
+                .join(' '),
+              expected: 'every floor derives from elevation, and the stack above shortens as you climb',
+              note: bandsByFloor.find((b) => b.reason)?.reason ?? 'all floors derived from the fixture bands',
+            };
+          }),
         ],
         inputs: {
           floors: FIXTURE.floors.map((f) => f.id),
@@ -1193,7 +1288,9 @@ export function createSunShadowBench({ THREE, log }) {
           layerIsolate: p.isolateKey,
           azimuthDeg: p.azimuthDeg,
           elevationDeg: p.elevationDeg,
-          heightsPx: p.heightsPx,
+          // PER FLOOR, not one shared array — see `resolveFloorHeights`.
+          bandsByFloor,
+          authoredHeightsPx: p.heightsPx,
           strengths: p.strengths,
           depthRadiusPx: p.depthRadiusPx,
         },
@@ -1230,13 +1327,16 @@ export function createSunShadowBench({ THREE, log }) {
     params: {
       floorId: 'underground | middle | roof (default middle) — single-floor scenario only',
       layerIsolate:
-        'all | walls | overhead | skyReach (default all). NO `ao` — the layer-smear model has no AO term; see LAYER_ISOLATION.',
+        'all | walls | overhead | skyReach | bandNear | bandFar (default all). NO `ao` — the layer-smear ' +
+        'model has no AO term; see LAYER_ISOLATION.',
       azimuthDeg: 'default 220',
       elevationDeg: 'default 30',
       tier: 'default 3 (Extreme)',
       wallHeightPx: 'default 300',
       overheadHeightPx: 'default 220',
-      aboveHeightPx: 'default 400',
+      aboveHeightPx:
+        'default 400 — the FALLBACK only. The two band heights are derived per floor from the fixture’s own ' +
+        'elevation bands (`resolveFloorHeights`); this is used only if that derivation cannot answer.',
       strengths: 'per-layer 0..1, default [0.95, 0.95, 0.95, 0.95]',
       depthRadiusPx: 'per-layer world px, THE SKY-REACH GRADIENT, default [0, 0, 1300, 1340]',
     },
@@ -1248,6 +1348,7 @@ export function createSunShadowBench({ THREE, log }) {
       'orientation-calibrated',
       'every-floor-rendered',
       'no-floor-is-blank',
+      'band-heights-are-derived-and-fall-with-the-receiver',
     ],
     ready: () => true,
     runScenario,

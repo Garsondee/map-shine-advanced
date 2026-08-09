@@ -99,7 +99,18 @@ export function installAnchorMode(_MapShine) {
     markers: new Map(), // id -> { el, anchor } — the icon + the anchor it currently represents
     draggingId: null, // an id currently being dragged — reconcileMarkers skips repositioning it
     raf: 0,
+    lineCanvas: null, // OPTIONAL connector layer — only built when opts.linePairs is provided
   };
+
+  /** `opts.icon` accepts a plain glyph string (candle's own shape, unchanged)
+   * OR a `(anchor) => glyph` function (lightning: a different glyph per
+   * `anchor.params.role`). `anchor` is `null` for the toolbar hint (no
+   * specific anchor exists yet) — a role-aware resolver must handle that. */
+  function resolveIcon(anchor) {
+    const icon = state.opts.icon;
+    if (typeof icon === 'function') return icon(anchor) ?? FALLBACK_ICON;
+    return icon ?? FALLBACK_ICON;
+  }
 
   function notify(msg, type = 'info') {
     globalThis.ui?.notifications?.[type]?.(msg);
@@ -116,6 +127,12 @@ export function installAnchorMode(_MapShine) {
    * @param {(id: string, patch: object) => void} opts.updateAnchor - used for drag-to-move (`{x,y}`) and by the edit form.
    * @param {(id: string) => void} opts.removeAnchor
    * @param {(anchor: object, targetIds: string[]) => HTMLElement} opts.buildEditForm - the effect-specific fields for the popup; Delete/Close chrome is added by this file. `anchor` is a representative selection member (whichever was selected last) to read display values from; every field's `onChange` must patch ALL of `targetIds` (multi-select edits every selected anchor at once), not just `anchor.id`.
+   * @param {() => Array<[string,string]>} [opts.linePairs] - OPTIONAL: pairs of
+   *   anchor ids to connect with a visual line every frame (lightning's own
+   *   start/end per bolt; candle has no notion of "these belong together" and
+   *   never provides this). Effect-agnostic on purpose — this file only draws
+   *   whatever id pairs come back, it never derives the pairing itself (never
+   *   reaches into `params.linkId` or any other effect-specific field).
    * @returns {{ok: boolean, reason?: string}}
    */
   function enter(opts) {
@@ -130,6 +147,7 @@ export function installAnchorMode(_MapShine) {
     state.opts = opts;
     buildToolbar();
     buildMarkerLayer();
+    if (opts.linePairs) buildLineLayer(); // only the kinds that need it pay for it
     installHandlers();
     startMarkerLoop();
     return { ok: true };
@@ -144,6 +162,8 @@ export function installAnchorMode(_MapShine) {
     state.markers.clear();
     state.markerLayer?.remove();
     state.markerLayer = null;
+    state.lineCanvas?.remove();
+    state.lineCanvas = null;
     state.toolbar?.remove();
     state.toolbar = null;
     state.active = false;
@@ -180,7 +200,7 @@ export function installAnchorMode(_MapShine) {
     });
     const hint = styled('span', { opacity: '0.85' });
     hint.innerHTML =
-      `Click the map to place a ${state.opts.kindLabel}. Click an existing ${state.opts.icon ?? FALLBACK_ICON} ` +
+      `Click the map to place a ${state.opts.kindLabel}. Click an existing ${resolveIcon(null)} ` +
       'to edit it, or drag it to move it. Shift-click or drag a box over several to select them together — ' +
       'edit all their settings at once, or press Delete to remove them. ' +
       '<span style="opacity:.55">(Right-drag still pans, wheel still zooms.)</span>';
@@ -195,6 +215,61 @@ export function installAnchorMode(_MapShine) {
     const layer = styled('div', { position: 'fixed', inset: '0', zIndex: '100', pointerEvents: 'none' });
     document.body.appendChild(layer);
     state.markerLayer = layer;
+  }
+
+  // ---- the OPTIONAL connector layer — a plain 2D canvas, not PIXI ----------
+  // `foundry/canvas-compositing.js`'s own header is explicit that PIXI's
+  // `interface` group (Foundry's rulers/walls/grid/selection) is left
+  // entirely to Foundry — "if you ever find yourself writing code to keep
+  // MSA and PIXI in agreement about a pixel, STOP." A `pointer-events:none`
+  // DOM canvas sibling to the marker layer, driven by the SAME
+  // `ctx.worldToClient()` transform the icons already use, stays on MSA's own
+  // side of that seam entirely — mirrors `ui/paint-mode-canvas.js#drawDraft`'s
+  // draft-line overlay, the closest existing precedent for "a line between
+  // two world points" in this codebase.
+
+  function buildLineLayer() {
+    const canvas = styled('canvas', { position: 'fixed', inset: '0', zIndex: '99', pointerEvents: 'none' });
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    document.body.appendChild(canvas);
+    state.lineCanvas = canvas;
+  }
+
+  /** Redraws every connector line fresh each frame — cheap (a handful of line
+   * segments, never more than the anchor count) and avoids tracking WHICH
+   * pair moved, matching `reconcileMarkers`' own "re-read fresh" contract.
+   * Resizes the backing canvas on demand (`paint-mode-canvas.js`'s own
+   * precedent has no resize handling at all — this closes that gap rather
+   * than porting it). Reads marker POSITIONS from `state.markers` (kept fresh
+   * by `reconcileMarkers`, called immediately before this every tick) rather
+   * than re-querying `listAnchors()` a second time, so a line always matches
+   * exactly where the icons themselves are drawn, including mid-drag. */
+  function drawLines() {
+    const canvas = state.lineCanvas;
+    if (!canvas) return;
+    if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    const c2d = canvas.getContext('2d');
+    c2d.clearRect(0, 0, canvas.width, canvas.height);
+    const pairs = state.opts.linePairs?.() ?? [];
+    if (!pairs.length) return;
+    c2d.strokeStyle = `rgba(${CYAN},0.55)`;
+    c2d.lineWidth = 2;
+    c2d.setLineDash([6, 5]);
+    for (const [idA, idB] of pairs) {
+      const a = state.markers.get(idA);
+      const b = state.markers.get(idB);
+      if (!a || !b) continue; // one endpoint orphaned or not yet reconciled this tick — skip, don't guess
+      const pa = state.ctx.worldToClient(a.anchor.x, a.anchor.y);
+      const pb = state.ctx.worldToClient(b.anchor.x, b.anchor.y);
+      c2d.beginPath();
+      c2d.moveTo(pa.x, pa.y);
+      c2d.lineTo(pb.x, pb.y);
+      c2d.stroke();
+    }
   }
 
   function positionIcon(el, anchor) {
@@ -213,7 +288,7 @@ export function installAnchorMode(_MapShine) {
     }
   }
 
-  function makeIconEl(id) {
+  function makeIconEl(id, anchor) {
     const el = styled('div', {
       position: 'fixed',
       zIndex: '100',
@@ -227,7 +302,10 @@ export function installAnchorMode(_MapShine) {
       transition: 'transform .08s ease',
       touchAction: 'none', // let pointermove reach the drag handler instead of becoming a scroll/pan gesture
     });
-    el.textContent = state.opts.icon ?? FALLBACK_ICON;
+    // Set ONCE at creation, not re-set every reconcile tick — an anchor's own
+    // role (what a role-aware icon function keys off) never changes after
+    // placement, so there is nothing to keep in sync frame to frame.
+    el.textContent = resolveIcon(anchor);
     el.title = 'Click to edit · drag to move';
     el.addEventListener('pointerdown', (e) => startDrag(e, id, el));
     el.addEventListener('pointerenter', () => {
@@ -253,7 +331,7 @@ export function installAnchorMode(_MapShine) {
       seen.add(anchor.id);
       let entry = state.markers.get(anchor.id);
       if (!entry) {
-        const el = makeIconEl(anchor.id);
+        const el = makeIconEl(anchor.id, anchor);
         state.markerLayer.appendChild(el);
         entry = { el, anchor };
         state.markers.set(anchor.id, entry);
@@ -288,6 +366,7 @@ export function installAnchorMode(_MapShine) {
     const tick = () => {
       if (!state.active) return;
       reconcileMarkers();
+      drawLines(); // after reconcile, so it reads this tick's fresh marker positions
       state.raf = requestAnimationFrame(tick);
     };
     state.raf = requestAnimationFrame(tick);
@@ -432,8 +511,8 @@ export function installAnchorMode(_MapShine) {
     const kindTitle = opts.kindLabel[0].toUpperCase() + opts.kindLabel.slice(1);
     title.textContent =
       ids.length > 1
-        ? `${opts.icon ?? FALLBACK_ICON} ${ids.length} ${opts.kindLabel}s selected`
-        : `${opts.icon ?? FALLBACK_ICON} ${kindTitle}`;
+        ? `${resolveIcon(anchor)} ${ids.length} ${opts.kindLabel}s selected`
+        : `${resolveIcon(anchor)} ${kindTitle}`;
     const closeBtn = styled('button', {
       pointerEvents: 'auto',
       background: 'transparent',
@@ -458,7 +537,17 @@ export function installAnchorMode(_MapShine) {
 
     popup.append(opts.buildEditForm(anchor, ids));
 
-    const footer = styled('div', { display: 'flex', justifyContent: 'flex-end' });
+    // Delete sits on the LEFT and Apply on the right (2026-08-06, author-
+    // reported: the single Delete button used to be the only thing in the
+    // bottom-right "OK spot", so a reflexive dismiss-click deleted good
+    // candles instead of closing the popup). Apply is deliberately just
+    // ANOTHER close — every field in this form already commits live via its
+    // own onChange, so there is nothing left to "apply"; its whole job is to
+    // give the safe, expected bottom-right action somewhere to live that
+    // ISN'T destructive. Same footer for every anchor kind (candle,
+    // lightning, and whatever comes next), since this popup is built once
+    // here, not per kind.
+    const footer = styled('div', { display: 'flex', justifyContent: 'space-between', alignItems: 'center' });
     footer.append(
       button(
         ids.length > 1 ? `🗑 Delete ${ids.length}` : '🗑 Delete',
@@ -467,7 +556,8 @@ export function installAnchorMode(_MapShine) {
           closePopup();
         },
         '255,140,140'
-      )
+      ),
+      button('✅ Apply', closePopup, '167,255,196')
     );
     popup.append(footer);
 

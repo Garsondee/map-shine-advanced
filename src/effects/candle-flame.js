@@ -46,11 +46,20 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     type: 'color',
     // Author-picked warm tint, shown in a colour picker — decode before use.
     space: 'srgb',
-    // V2's candleFlame colour (legacy/scene/map-points-manager.js:1941 = 0xffaa00).
-    default: '#ffaa00',
+    // ⚠️ WAS `#ffaa00` — V2's candleFlame colour (legacy/scene/map-points-
+    // manager.js:1941 = 0xffaa00), carried across on the port. Changed
+    // 2026-08-06 to the dominant orange of the hand-painted reference sheet
+    // the author supplied ("make the candle colours conform as closely as
+    // possible to the ones from this picture"). `#ffaa00` has literally zero
+    // blue, which is more saturated than any pigment in that painting and
+    // reads acidic next to it; the reference's oranges all carry a little
+    // blue in the darks. This value is now the MID stop of the ramp
+    // candle-flame-render.js builds around it (rim/inner/core are derived), so
+    // it sets the whole flame's character rather than just its tip.
+    default: '#f8901c',
     category: 'Look',
     label: 'Flame colour',
-    help: 'The warm colour of the candle flame (tints both the flame and the light it casts).',
+    help: 'The warm colour of the candle flame (tints both the flame and the light it casts). The flame ramps from a deeper version of this at its edge, through this colour, up to a pale creamy version at its hottest core.',
   },
   lightRadiusPx: {
     type: 'float',
@@ -112,6 +121,64 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     category: 'Motion',
     label: 'Wind response',
     help: 'How much this candle reacts to the shared wind field — its flame lean, its cast light sway, gusts that make it gutter, and a strong-enough draft that snuffs it out. 0 = wind cannot touch it; 2 = twice as dramatic as the tuned default.',
+  },
+  // AUTO-IGNITE BY TIME OF DAY (2026-08-06, author request: "when the actual
+  // clock changes in the MSA control panel some candles will turn on and
+  // some off automatically, giving the scene a bit of spontaneous life").
+  // The dice-roll math itself is pure (effects/candle-ignite.js#
+  // shouldAutoIgnite); boot.js#refreshCandleIgnition re-rolls every
+  // participating candle (scene/anchor-catalog.js's own `autoIgnite` opt-out)
+  // on a dawn/dusk crossing and writes through `updateCandleAnchor` exactly
+  // like the manual per-candle "Lit" checkbox does.
+  //
+  // OFF BY DEFAULT — a deliberate, logged exception to
+  // feedback_default_on_new_features, the SAME reasoning world/day-clock.js's
+  // own `DEFAULT_RATE_HOURS_PER_MINUTE: 0` gives: a default-on roll would
+  // silently relight or snuff candles on every EXISTING scene the moment this
+  // ships, changing a look the author already lit on purpose. The author's
+  // own words: "This would be optional."
+  autoIgniteEnabled: {
+    type: 'bool',
+    default: false,
+    category: 'Presence',
+    label: 'Auto-ignite by time of day',
+    help: 'When on, each candle (that has not opted out below) rolls its own chance to be lit whenever day turns to night or back — a bit of spontaneous life. Off by default so no existing scene changes unasked; turn this on, then tune the chances and Reliability below.',
+  },
+  dayIgniteChancePct: {
+    type: 'float',
+    min: 0,
+    max: 100,
+    step: 1,
+    default: 25,
+    category: 'Presence',
+    label: 'Lit chance — day (%)',
+    help: 'How likely each participating candle is to be lit while it is day. Only takes effect once "Auto-ignite by time of day" is on.',
+  },
+  nightIgniteChancePct: {
+    type: 'float',
+    min: 0,
+    max: 100,
+    step: 1,
+    default: 85,
+    category: 'Presence',
+    label: 'Lit chance — night (%)',
+    help: 'How likely each participating candle is to be lit while it is night. Only takes effect once "Auto-ignite by time of day" is on.',
+  },
+  // RELIABILITY (author-chosen model, 2026-08-06 clarification): "scales the
+  // odds down" — at 100% the Day/Night % above applies exactly; below that,
+  // BOTH chances shrink toward zero together, so 0% never lights a candle
+  // regardless of the roll or the time of day. A safety dial for a GM who
+  // wants fewer surprises rather than more, without having to retune the two
+  // percentages above every time.
+  igniteReliabilityPct: {
+    type: 'float',
+    min: 0,
+    max: 100,
+    step: 1,
+    default: 100,
+    category: 'Presence',
+    label: 'Reliability (%)',
+    help: 'How much to trust the roll above. At 100%, the day/night chances apply exactly as set. Turning this down scales both chances toward zero, so at 0% no candle ever lights, day or night — pull it down if you want a calmer, more predictable scene.',
   },
 });
 

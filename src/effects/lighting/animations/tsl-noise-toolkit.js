@@ -41,9 +41,26 @@
  * Fractal Brownian Motion (Foundry's `FBM`/`FBMHQ` analog) — a scalar noise
  * field built from several summed octaves of Perlin noise.
  *
+ * ⚠️ THERE IS NO vec2 PATH, AND A vec2 ARGUMENT IS NOT CHEAPER. This wrapper
+ * tolerates a vec2, but `mx_fractal_noise_float` holds `p` as a `vec3` local
+ * (three.webgpu.js:53743) so it always resolves to the EIGHT-corner 3D Perlin
+ * variant, and `NodeBuilder.format` (:57770) silently pads a vec2 argument to
+ * `vec3(xy, 0.0)`. Every `fbmFloat(TSL, someVec2, …)` call site in `src/`
+ * already compiles to a full 3D noise call.
+ *
+ * MEASURED 2026-08-08 (`tools/shader-lab/bench-fire.js#noise-fold-ab`, RTX 3070
+ * Laptop): a LIVE third coordinate costs **1.047×** a constant one — i.e. the
+ * compiler is NOT folding that padded `0.0` back to four corners, so animating
+ * along z is free. Cost is **0.0439 ms/Mpx per octave** (0.1323 for the usual
+ * three), perfectly linear, with essentially zero fixed cost. Worley
+ * (`voronoiFloat`) is 27 lattice hashes ≈ 0.148 ms/Mpx — more than an entire
+ * 3-octave fBm, which is worth knowing before reaching for it as a 4th term.
+ *
  * @param {*} TSL - THREE.TSL.
- * @param {*} p - a vec2/vec3 TSL node, the sample position (spatial xy +
- *   time as a 3rd coordinate is the standard "animate 2D noise" trick).
+ * @param {*} p - a vec2/vec3 TSL node, the sample position. A vec2 is padded to
+ *   `vec3(xy, 0.0)` and costs the same as a vec3 — see the warning above.
+ *   Passing time as the 3rd coordinate is the standard "animate noise" trick
+ *   and, per the measurement above, is free.
  * @param {object} [opts]
  * @param {number} [opts.octaves=4]
  * @param {number} [opts.lacunarity=2]

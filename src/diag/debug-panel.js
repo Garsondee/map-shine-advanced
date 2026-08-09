@@ -96,6 +96,11 @@ import {
   REPORT_SKIN,
   ACTION_SKIN,
 } from './debug-panel-controls.js';
+// The perf/VRAM strip at the top of the panel — folded in from boot.js's old
+// standalone bottom-right HUD 2026-08-05 (author: it belongs "inside the main
+// panel, at the top"). Owns its own pure/DOM split; this file only mounts it
+// and forwards boot.js's per-tick stats through `updatePerfStrip`.
+import { createPerfStrip } from './perf-strip.js';
 
 export function installDebugPanel(MapShine) {
   if (MapShine.debug) return MapShine.debug; // idempotent
@@ -326,6 +331,7 @@ export function installDebugPanel(MapShine) {
   let shellRowEl = null; // rail + body; hidden when the panel is collapsed
   let zoneHeadEl = null; // the active zone's title/subtitle strip
   let footerEl = null;
+  let perfStripWidget = null; // { el, update(stats) } — see attachPanel's doc for why it sits ABOVE shellRowEl
   let collapsed = false;
   // The shell opens on the Bridge for a GM (the design's home per
   // docs/planning/Control-Panel.md) or Settings for a player — set for real in
@@ -352,11 +358,15 @@ export function installDebugPanel(MapShine) {
     return typeof game !== 'undefined' ? !!game.user?.isGM : true;
   }
 
-  /** Show/hide the whole panel (not the heartbeat/FPS strip above it — that
-   * stays up independently) and tell whoever is listening (the scene-controls
-   * toolbar button) so its highlight never drifts from what's actually on
-   * screen — the same "don't let a control lie about live state" rule as
-   * `refreshControls` above, applied to visibility instead of a dropdown. */
+  /** Show/hide the whole panel — including the perf strip at its top since
+   * 2026-08-05 (folded in from the old standalone heartbeat HUD; the author
+   * wanted it "inside the main panel," so closing the panel now hides it too,
+   * unlike before). Minimize is the one that leaves it up — see attachPanel's
+   * placement of `perfStripWidget` outside `shellRowEl`. Tells whoever is
+   * listening (the scene-controls toolbar button) so its highlight never
+   * drifts from what's actually on screen — the same "don't let a control lie
+   * about live state" rule as `refreshControls` above, applied to visibility
+   * instead of a dropdown. */
   function setPanelVisible(next) {
     if (panelVisible === next) return;
     panelVisible = next;
@@ -626,9 +636,10 @@ export function installDebugPanel(MapShine) {
     // MINIMIZE / CLOSE — two explicit buttons (author, 2026-07-20: "we also
     // need a button to close this dialogue as well as minimise it"), replacing
     // the old implicit "click anywhere on the header" gesture that was easy to
-    // confuse with the drag it shares a hit area with. Minimize shrinks to just
-    // this header bar (the panel is still "open" — the toolbar stays lit).
-    // Close hides the whole panel and dims the toolbar button; reopen from
+    // confuse with the drag it shares a hit area with. Minimize shrinks to the
+    // header bar + perf strip (the panel is still "open" — the toolbar stays
+    // lit, and FPS/VRAM stay readable at a glance). Close hides the whole
+    // panel, perf strip included, and dims the toolbar button; reopen from
     // there (foundry/scene-controls-button.js).
     const headerBtn = (glyph, title) => {
       const b = document.createElement('button');
@@ -674,6 +685,14 @@ export function installDebugPanel(MapShine) {
     btnRow.append(minimizeBtn, closeBtn);
 
     header.append(brand, btnRow);
+
+    // THE PERF STRIP — sits between the header and the shell row, i.e.
+    // OUTSIDE shellRowEl, deliberately: Minimize (below) only hides
+    // shellRowEl, so a minimized panel still shows live FPS/VRAM instead of
+    // going dark. It renders regardless of which zone is active and starts
+    // empty (all bars "unknown") until boot.js's heartbeat loop calls
+    // `MapShine.debug.updatePerfStrip(stats)` on its first tick.
+    perfStripWidget = createPerfStrip();
 
     // The shell row: the zone rail (left) + the active zone (right).
     shellRowEl = document.createElement('div');
@@ -722,6 +741,7 @@ export function installDebugPanel(MapShine) {
     shellRowEl.appendChild(main);
 
     panel.appendChild(header);
+    panel.appendChild(perfStripWidget.el);
     panel.appendChild(shellRowEl);
     updateZoneHead();
     // "Always opens for the GM at the moment" (author, 2026-07-20) — a
@@ -809,6 +829,11 @@ export function installDebugPanel(MapShine) {
     bodyEl.innerHTML = '';
     updateRail();
     warnOrphanedAttachments();
+    // Independent of which rail zone is active — the performance center lives
+    // in the perf strip's own expand area (see renderPerformanceCenter's doc),
+    // not behind a rail click, so it repaints on every registration/refresh
+    // the same as the active zone body does.
+    renderPerformanceCenter();
     if (activeZone === 'lab') renderLab();
     else renderProductZone(activeZone);
   }
@@ -996,6 +1021,49 @@ export function installDebugPanel(MapShine) {
     }
   }
 
+  /**
+   * THE PERFORMANCE CENTER — every performance-related report/action/panel,
+   * gathered from wherever it registered itself and mounted into the perf
+   * strip's own expand area (diag/perf-strip.js), never a rail zone.
+   *
+   * 2026-08-06, author directive: "move all performance monitoring things into
+   * a single space which becomes the only place for performance related
+   * tools" — these used to be scattered across the Lab's quick-reach row (a
+   * handful of `{primary:true}` buttons: Profile, Profile+sweep, Benchmark,
+   * the all-tiers report), a `{primary:true}` button that opened a SEPARATE
+   * floating "Effect Performance Lab" window, and a SEPARATE floating
+   * top-right live-zone-HUD overlay. All three homes are gone; every entry
+   * below simply declares `{ zone: 'performance' }` at its registration site
+   * (boot.js) instead of leaving `zone` unset (which would default to 'lab')
+   * or `{primary:true}` (which would put it in the Lab's quick-reach row).
+   *
+   * Flat, not foldered — unlike the Lab's dozens of diagnostics, there are a
+   * handful of these, and foldering a handful is chrome for a choice that
+   * doesn't exist (the same reasoning buildRoutedPanels/the rail already
+   * apply elsewhere). `registerPanel(..., {zone:'performance'})` is how
+   * perf-lab.js's sweep UI and perf-hud.js's live ranking table (both
+   * refactored 2026-08-06 from floating overlays into plain embeddable
+   * elements) land here too — same primitive every effect card already uses,
+   * no new registration API.
+   */
+  function renderPerformanceCenter() {
+    if (!perfStripWidget) return;
+    const wrap = document.createElement('div');
+    Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '8px' });
+
+    const quick = document.createElement('div');
+    Object.assign(quick.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
+    for (const [id, entry] of actions)
+      if (zoneOf(id, entry) === 'performance') quick.appendChild(makeRunnable(id, entry.label, ACTION_SKIN));
+    for (const [id, entry] of reports)
+      if (zoneOf(id, entry) === 'performance') quick.appendChild(makeRunnable(id, entry.label, REPORT_SKIN));
+    if (quick.children.length) wrap.appendChild(quick);
+
+    for (const node of buildRoutedPanels('performance')) wrap.appendChild(node);
+
+    perfStripWidget.setTools(wrap);
+  }
+
   // ---- THE PRODUCT ZONES — Tier 0 scaffold ---------------------------------
   // Each shows (a) whatever already-working controls are routed to it, then
   // (b) a 🚧 stub scaffold of what's planned — so the final arrangement can be
@@ -1030,6 +1098,18 @@ export function installDebugPanel(MapShine) {
     panelHost.appendChild(panelEl);
     renderBody();
     return panelEl;
+  }
+
+  /**
+   * Repaint the perf strip at the top of the panel — called every ~250ms from
+   * boot.js's heartbeat loop, the only place that owns `renderer`/the frame-gap
+   * ring/the VT diagnostics this needs. A no-op before `attachPanel` has run
+   * (the strip doesn't exist yet); boot.js calls this unconditionally via `?.`
+   * so it doesn't need to know that ordering itself.
+   * @param {object} stats - see diag/perf-strip.js's `buildPerfStripModel` doc for the shape.
+   */
+  function updatePerfStrip(stats) {
+    perfStripWidget?.update(stats);
   }
 
   // ---- baseline reports every stage benefits from --------------------------
@@ -1140,6 +1220,7 @@ export function installDebugPanel(MapShine) {
     runReport,
     copyToClipboard,
     attachPanel,
+    updatePerfStrip,
     // Whole-panel visibility — driven by the scene-controls toolbar button
     // (foundry/scene-controls-button.js) and the panel's own Close button.
     showPanel,

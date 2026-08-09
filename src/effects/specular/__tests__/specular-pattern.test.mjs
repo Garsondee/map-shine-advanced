@@ -257,8 +257,18 @@ export function run(t) {
   // is what makes it safe against an author cranking every slider to its
   // schema max simultaneously, a combination nobody explicitly designed for
   // but the ceiling must survive regardless.
-  ok('never reaches the ceiling', reinhardCeiling(1e9, C) < C);
-  ok('…and gets arbitrarily close', C - reinhardCeiling(1e9, C) < 1e-6);
+  // ⚠️ THE PROBE SCALES WITH `C`, NOT A FIXED CONSTANT (fixed at ROUND 21,
+  // 2026-08-05 — `SPECULAR_GLINT_CEILING` jumped 28 → 200 and a probe of a
+  // flat `1e9` stopped clearing `1e-6`: `C - reinhardCeiling(L, C) ≈ C²/L`
+  // for `L >> C`, so a BIGGER ceiling needs a proportionally bigger probe to
+  // land at the same absolute gap — a margin sized to today's C is exactly
+  // the self-defeating shape `feedback_margin_sized_to_gap_is_self_
+  // defeating` warns about. `L = C·1e9` keeps the gap at `≈ C/1e9`,
+  // comfortably under `1e-6` for any ceiling this schema could plausibly
+  // ship, not just the one that happened to be live when this was written.
+  const farL = C * 1e9;
+  ok('never reaches the ceiling', reinhardCeiling(farL, C) < C);
+  ok('…and gets arbitrarily close', C - reinhardCeiling(farL, C) < 1e-6);
   ok(
     'strictly monotonic — brighter input never darkens the output',
     reinhardCeiling(2, C) > reinhardCeiling(1, C) && reinhardCeiling(10, C) > reinhardCeiling(2, C)

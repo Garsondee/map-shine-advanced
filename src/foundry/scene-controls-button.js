@@ -26,6 +26,7 @@
  */
 
 const TOOL_NAME = 'map-shine-advanced';
+const ANCHOR_VIEW_TOOL_NAME = 'map-shine-anchor-view';
 
 /**
  * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
@@ -61,6 +62,57 @@ export function registerControlPanelButton({ isActive, onToggle }) {
 export function syncControlPanelButtonState(active) {
   const tool = ui?.controls?.controls?.tokens?.tools?.[TOOL_NAME];
   if (!tool) return; // scene controls have not prepared yet — their own next natural render carries the real state via isActive()
+  tool.active = !!active;
+  ui.controls.render(true);
+}
+
+/**
+ * THE ANCHOR VIEW TOGGLE (author request, 2026-08-06) — "a button just below
+ * the MSA button" that opens ui/anchor-view-mode.js: every candle/lightning
+ * anchor shown at once, on or off, right-click to flip. A SECOND tool in the
+ * SAME `tokens.tools` record as the MSA button above (never a second
+ * top-level control, for the identical reason `registerControlPanelButton`'s
+ * own header gives — a synthetic top-level control would steal "the active
+ * control" away from whatever layer the user actually had selected); `order:
+ * 101` sorts it immediately after the MSA button's own `order: 100`.
+ *
+ * GM-ONLY visibility, unlike the MSA button's own `visible: true` — turning
+ * off someone else's candles is a scene-authoring action, not something a
+ * player should be able to reach from their own toolbar. `visible` is read
+ * ONCE per `getSceneControlButtons` firing (verified against the real v14
+ * source, scene-controls.mjs: `if (tool.visible === false) delete
+ * control.tools[toolId]`, evaluated inline, not a live binding) — reading
+ * `game.user.isGM` at that moment is correct because each client only ever
+ * sees its own `game.user`.
+ *
+ * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
+ */
+export function registerAnchorViewModeButton({ isActive, onToggle }) {
+  Hooks.on('getSceneControlButtons', (controls) => {
+    const tokenControls = controls?.tokens;
+    if (!tokenControls?.tools) return;
+    if (Object.prototype.hasOwnProperty.call(tokenControls.tools, ANCHOR_VIEW_TOOL_NAME)) return;
+    tokenControls.tools[ANCHOR_VIEW_TOOL_NAME] = {
+      name: ANCHOR_VIEW_TOOL_NAME,
+      title: 'MSA Anchor View — see & toggle candle/lightning anchors',
+      icon: 'fas fa-map-pin',
+      toggle: true,
+      order: 101,
+      visible: game.user?.isGM === true,
+      active: isActive(),
+      onChange: (_event, active) => onToggle(active),
+    };
+  });
+}
+
+/** Re-sync this toggle's highlight when the view mode ends itself (its own
+ * in-canvas Done button, or Escape) rather than via a click on this exact
+ * toolbar button — mirrors `syncControlPanelButtonState` exactly.
+ * @param {boolean} active
+ */
+export function syncAnchorViewModeButtonState(active) {
+  const tool = ui?.controls?.controls?.tokens?.tools?.[ANCHOR_VIEW_TOOL_NAME];
+  if (!tool) return;
   tool.active = !!active;
   ui.controls.render(true);
 }

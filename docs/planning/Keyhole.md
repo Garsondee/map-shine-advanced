@@ -458,7 +458,7 @@ Harvest V3's FrameGraph/ThreeAllocator/GpuPassTimer/v3-perf/FullscreenPresent ne
 
 - **Unified geometry (exists in V3):** all visible floors drawn at real Z in one pass, `alphaTest` for floor holes, sampling albedo via `vtSample`. **MRT writes the B0-1 attribute buffer at last:** `scene.color` (RGBA16F) + `scene.attr` (RGBA8: floorId, outdoors, overhead/roof coverage, material flags). The attribute buffer is what makes shadows, water occlusion, and per-pixel floor gating _cheap screen-space reads_ instead of per-floor RT stacks — it was always the keystone (docs/planning/v3/B0-1) and it lands here, early, not last.
 - **Lighting:** harvested `ForwardLightingPass` (Foundry-v14 model, wall-clipped, MAX-blend illum + SCREEN coloration) rendering into `scene.illum`; composite `lit = albedo × illum`. Indoor/outdoor ambient reads `scene.attr` (no more world-res outdoors RT resolves).
-- **RT inventory at 3 MP internal** (allocator-enforced): color 24 MB + attr 12 + depth 12 + illum 24 + lit 24 + post ping/pong 48 + bloom chain ~8 + water/fog screen buffers ~30 ≈ **~180 MB.** At uncapped native 6.16 MP ≈ 370 MB. Versus V2's 1.1–3.6 GB. DRS (harvested governor) remains the fine-tuning knob, no longer the survival mechanism.
+- **RT inventory at 3 MP internal** (allocator-enforced): color 24 MB + attr 12 + depth 12 + illum 24 + lit 24 + post ping/pong 48 + bloom chain ~8 + dof chain ~8 + water/fog screen buffers ~30 ≈ **~188 MB.** At uncapped native 6.16 MP ≈ 387 MB. Versus V2's 1.1–3.6 GB. DRS (harvested governor) remains the fine-tuning knob, no longer the survival mechanism.
 
 ### 4.3 The Foundry adapter and the severed bridge (`src/foundry/`, `src/gameplay/`)
 

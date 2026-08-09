@@ -456,8 +456,70 @@ export function steepenIncidentRgb(rgb, lumaWeights, steepness) {
  * ceilings, and reported "we have a basic specular effect working again."
  * Barely moved from 3 — this control was already close to right, unlike
  * several of its neighbours.
+ *
+ * ⚠️ RAISED 2.85 → 7.15 (ROUND 21, 2026-08-05) — new live-tuned defaults,
+ * same "the author's own dialled-in scene is the standard" posture as every
+ * round above. This is now well past 3, i.e. MORE aggressive suppression of
+ * dim/shadowed metal than any earlier round shipped — only genuinely bright
+ * points (candles, point lights, direct sun) keep meaningful shine.
  */
-export const SPECULAR_INCIDENT_STEEPNESS = 2.85;
+export const SPECULAR_INCIDENT_STEEPNESS = 7.15;
+
+/**
+ * THE KNEE — the incident-light level at which metal reaches its FULL shine.
+ *
+ * ============================================================================
+ * ⚠️ WHY THIS CONSTANT HAD TO EXIST (measured 2026-08-09, not reasoned)
+ * ============================================================================
+ *
+ * Author, live: *"the light from candles still isn't causing specular surfaces
+ * to flash and shine yet."* Measured on the specular bench with production's
+ * own darkness floor (0.188), sweeping `illum` and reading `screenContrast`:
+ *
+ *     illum   0.188  0.25  0.30  0.40  0.55  0.75    1.00
+ *     contrast 1.000 1.000 1.000 1.000 1.000 1.001   1.346
+ *
+ * Metal was **algebraically dead below illum ≈ 0.75** — not merely dim,
+ * contrast exactly 1.000 — and only responded approaching 1.0. No candle, and
+ * in fact no light in the engine short of direct noon sun, ever gets there.
+ *
+ * THE MECHANISM. `steepenedLuma = pow(incidentLuma, S)` was applied to a value
+ * that had ALREADY been through the sRGB EOTF (≈ ^2.2), so the effective
+ * exponent on the light reading was ~15.7 — and, crucially, `pow(x, S)` only
+ * returns 1 when `x` is 1. So "full shine" was implicitly anchored at
+ * `incidentLuma == 1`, i.e. a perfectly white, fully-bright pixel. An
+ * ORDINARY lit point measures `incidentLuma ≈ 0.115` (that figure is the
+ * author's own ROUND 17 probe, recorded in {@link SPECULAR_INCIDENT_STEEPNESS}
+ * above), and `0.115^7.15 ≈ 1e-8`. The suppression curve was doing its job
+ * perfectly against an anchor point nothing in the scene could ever reach.
+ *
+ * Note the steepness comment directly above already claims "a genuinely bright
+ * pixel (a candle, a point light, noon sun) is completely unaffected." The
+ * measurement says otherwise for two of those three. It was a reasonable
+ * reading of the equation that was never checked against the output
+ * (`feedback_measure_the_output_not_the_equation`).
+ *
+ * ============================================================================
+ * WHY A KNEE RATHER THAN JUST LOWERING THE STEEPNESS
+ * ============================================================================
+ *
+ * The author has TWO standing asks that a single exponent cannot satisfy at
+ * once — ROUND 16: *"Shadows and lack of light should suppress the specular
+ * shine"*, and now: candles must make metal flash. Lowering `S` restores
+ * candle shine only by also restoring shine in the dim ambient the ROUND 16
+ * ask exists to kill. Separating "how sharply does shine fall off below the
+ * knee" (`S`, untouched, still the author's own live-tuned 7.15) from "where
+ * IS the knee" (this constant) makes both true simultaneously: full shine from
+ * candle-level light and up, hard suppression below it.
+ *
+ * `0.15` sits just above the author's own measured "ordinarily lit" reading of
+ * 0.115, so a candle's bright core clears it outright while its dim outer
+ * falloff does not. **A knee of 1.0 reproduces the previous behaviour
+ * EXACTLY** (see `specular-render.js`'s own note at the use site — the
+ * algebra is identical at K=1), which is what makes this safe to add to a
+ * live-tuned effect rather than a retune of it.
+ */
+export const SPECULAR_INCIDENT_KNEE = 0.15;
 
 /**
  * How brightly the SHEEN (the always-on base, no shimmer) may peak before its
@@ -549,8 +611,19 @@ export const SPECULAR_INCIDENT_STEEPNESS = 2.85;
  * alongside this, since the realistic-incidentAmt fix from Round 18 means
  * they now measure a genuinely representative scenario rather than a stale
  * flat stand-in.
+ *
+ * ⚠️ LOWERED ALL THE WAY TO 0 (ROUND 21, 2026-08-05) — new live-tuned
+ * defaults, continuing the SAME direction Round 19's own live feedback
+ * asked for ("make it very low"), taken to its logical end. **THIS IS NOT
+ * MERELY "very dim" — READ `ceilingCompress` BEFORE ASSUMING IT IS A BUG**:
+ * at `ceiling = 0`, `compressed = 0·luma/(0+luma) = 0` and `scale =
+ * compressed/luma = 0`, so the sheen term is multiplied by an EXACT, literal
+ * zero for any lit pixel (`luma > 1e-6`) — the steady base shine is
+ * algebraically eliminated, not merely dimmed, and every visible highlight
+ * comes from `glint` (the shimmer) alone. A live-tuned, deliberate choice,
+ * not a silent precondition to "fix" back upward.
  */
-export const SPECULAR_SHEEN_CEILING = 0.15;
+export const SPECULAR_SHEEN_CEILING = 0;
 
 /**
  * How brightly the GLINT (the shimmer's own contribution) may peak — high on
@@ -570,5 +643,11 @@ export const SPECULAR_SHEEN_CEILING = 0.15;
  * ⚠️ RAISED 20 → 28 (ROUND 18, 2026-08-03) — live-confirmed; see
  * `SPECULAR_SHEEN_CEILING`'s header for the full account of this round's
  * standard and the contrast trade-off it measured.
+ *
+ * ⚠️ RAISED 28 → 200 = THE SCHEMA'S OWN MAX (ROUND 21, 2026-08-05) — new
+ * live-tuned defaults, and it now carries the WHOLE effect: with
+ * `SPECULAR_SHEEN_CEILING` at exactly 0 this same round, `glint` is the
+ * ONLY term contributing to the composite's `1 +` structure at all — every
+ * highlight on screen is a shimmer peak, none is a steady base shine.
  */
-export const SPECULAR_GLINT_CEILING = 28;
+export const SPECULAR_GLINT_CEILING = 200;

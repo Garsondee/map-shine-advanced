@@ -67,7 +67,7 @@ function args(overrides = {}) {
     maskTexture: stubTexture(),
     islandPackTexture: stubTexture(),
     illumTexture: stubTexture(),
-    attrTexture: stubTexture(),
+    depthTexture: stubTexture(),
     // THE shared clock. Its absence is not a soft failure: the drift term calls
     // `.mul()` on it during graph CONSTRUCTION, so an unwired caller throws at
     // build time rather than rendering a frozen field — which is the loud
@@ -154,10 +154,10 @@ export function run(t) {
   ok('no mrtNode — scene.lit is single-attachment', !built.specularMaterial.mrtNode);
 
   // ── THE JS-TIME GATES (Effects.md Law 4: a uniform is not a gate) ────────
-  const noAttr = buildSpecularSurfaceMaterial(args({ attrTexture: null }));
-  ok('a null attr texture compiles the floor gate OUT rather than throwing', noAttr.floorGateCompiled === false);
-  ok('…and still produces the material', !!noAttr.specularMaterial);
-  ok('with attr present the floor gate IS compiled', built.floorGateCompiled === true);
+  const noDepth = buildSpecularSurfaceMaterial(args({ depthTexture: null }));
+  ok('a null depth texture compiles the floor gate OUT rather than throwing', noDepth.floorGateCompiled === false);
+  ok('…and still produces the material', !!noDepth.specularMaterial);
+  ok('with depth present the floor gate IS compiled', built.floorGateCompiled === true);
 
   const noOutdoors = buildSpecularSurfaceMaterial(args({ outdoorsTexNode: null }));
   ok(
@@ -211,7 +211,7 @@ export function run(t) {
     'setIslandPackTexture',
     'setMaskUvBounds',
     'setViewCentre',
-    'setFloorIndex',
+    'setExpectedDepth',
     'setSunDir',
     'setDarknessFloor',
     'setStrength',
@@ -244,7 +244,7 @@ export function run(t) {
   try {
     built.setMaskUvBounds({ minU: 0.1, minV: 0.2, maxU: 0.9, maxV: 0.8 });
     built.setViewCentre(10, 20);
-    built.setFloorIndex(2);
+    built.setExpectedDepth(0.5);
     built.setSunDir(0.6, 0.8);
     built.setDarknessFloor(0.188, 0.188, 0.188);
     built.setIslandBakeStatus(2);
@@ -287,7 +287,7 @@ export function run(t) {
     built.setPatternScale(0);
     built.setLayerRowSpacing(0, -5);
     built.setLayerDensity(0, 0);
-    built.setFloorIndex(NaN);
+    built.setExpectedDepth(NaN);
     built.setSunDir(0, 0);
     built.setDarknessFloor(NaN, -1, Infinity);
     // Out-of-range layer INDICES must be ignored rather than throw: the
@@ -369,11 +369,11 @@ export function run(t) {
     debugSetterError === null
   );
 
-  // Built with NO attr texture the floor-gate channel still has to produce a
+  // Built with NO depth texture the floor-gate channel still has to produce a
   // node — it reports "the gate compiled OUT, so it is permanently open"
   // rather than going black and accusing a gate that does not exist. If that
   // hoisted default were ever dropped back inside the `if`, this build throws.
-  ok('the floor-gate channel is wired even when the gate compiles out', !!noAttr.debugMaterial);
+  ok('the floor-gate channel is wired even when the gate compiles out', !!noDepth.debugMaterial);
   ok(
     'the island pack node is returned so the bake can re-point it',
     !!built.packTexNode && 'value' in built.packTexNode

@@ -318,3 +318,66 @@ export function decodeSpecularMask(r, g, b, a, saturation = 1) {
     ],
   };
 }
+
+/**
+ * ============================================================================
+ * STAGE 3 (2026-08-05) — THE DEPTH-AUTHORITY OCCLUSION GATE
+ * ============================================================================
+ * Replaces `specular-render.js`'s old TWO-mechanism floor gate —
+ * `floorMatch` (a `smoothstep`-softened equality test between `buf:scene.attr`
+ * R and `uFloorIndex01`) ANDed with `backgroundVisible` (`1 - step(...)`
+ * against `PRESENCE_BIT_OCCLUDES_BACKGROUND` in `buf:scene.attr` B) — with the
+ * SAME single ordinal comparison `point-light-illumination.js#computeDepthHeightGate`
+ * proved for light: is the real, currently-visible content at this screen
+ * pixel MY OWN drawn item, or has something with a more-in-front rank drawn
+ * over it.
+ *
+ * `expectedDepth` here is NOT "this light's floor" (specular has no floor
+ * concept of its own) — it is `computeTieSafeExpectedDepth(rank, maxRank)` for
+ * the RANK OF THE FLOOR'S OWN BACKGROUND ITEM specular is painted onto
+ * (`depthAuthority.rankOf({id: backgroundItemId})`), the second caller shape
+ * that function's own doc names explicitly: "an effect querying its OWN drawn
+ * item's rank," not a light with no geometry of its own. The tie-safe buffer
+ * matters here for exactly the reason it matters for a light standing on its
+ * own floor: without it, the background's own real depth-pass proxy write and
+ * this query's CPU-predicted value for that SAME rank could tie and round
+ * either way on ordinary float noise, and the failure direction — a floor's
+ * own shine occluding ITSELF — is silent and cosmetic, not a crash, so it is
+ * exactly the kind of bug that survives unnoticed. `computeTieSafeExpectedDepth`
+ * nudges the threshold to fail OPEN (visible) on a tie, matching the old
+ * gate's own documented polarity below.
+ *
+ * ⚠️ **NO FLAGS-BIT HARD BLOCK, UNLIKE LIGHT'S TILE-RESTRICT CHECK — and this
+ * is not a dropped feature, it is the OLD mechanism turning out to be a
+ * special case of the rank comparison alone.** `PRESENCE_BIT_OCCLUDES_BACKGROUND`
+ * (`vt/scene-attr.js#occludesBackgroundPresenceBit`) existed because
+ * `buf:scene.attr`'s floor-index byte cannot tell a same-floor Tile from the
+ * background it sits on — both share one floor index, so a second bit had to
+ * be hand-maintained to say "something drew on top of me here." Rank does not
+ * have that blind spot: a Tile's `sortLayer` (`SORT_LAYERS.TILES`) is always
+ * numerically above a Level's (`SORT_LAYERS.SCENE`), and a Level's own
+ * foreground/roof art gets a strictly higher `zIndex` than its background at
+ * the SAME elevation (`scene/layer-order.js#sortByLayer`) — so anything that
+ * used to flip `PRESENCE_BIT_OCCLUDES_BACKGROUND` already, unconditionally,
+ * outranks the background it covers. One comparison reproduces both of the
+ * old gate's ANDed terms because the old gate's second term was rank wearing
+ * a disguise.
+ *
+ * ⚠️ **FAIL-OPEN IS STILL THE LAW** — `specular-render.js`'s own comment on
+ * `backgroundVisible` says it best: "the gate is '1 UNLESS something is
+ * covering me', not '1 WHERE my background is'." An all-zero/unwritten sample
+ * meant "not my background" under the old polarity and silently killed the
+ * whole effect; this gate carries the identical discipline forward through
+ * the tie-safe buffer rather than a second explicit branch, exactly as
+ * {@link computeDepthHeightGate} does for light.
+ *
+ * @param {object} args
+ * @param {number} args.storedDepth - a `buf:scene.depth` DEPTH sample at this
+ *   screen pixel (whatever is actually visible there, from any floor).
+ * @param {number} args.expectedDepth - `computeTieSafeExpectedDepth`'s result
+ *   for the specular surface's OWN background item's rank.
+ * @returns {number} 0 or 1.
+ */
+export function computeSpecularDepthGate({ storedDepth, expectedDepth }) {
+  return storedDepth < expectedDepth ? 0 : 1;
+}

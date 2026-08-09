@@ -381,6 +381,24 @@ export function run(t) {
     // A CPU-only zone makes an effect "zoned" but gives no second GPU number,
     // so promising 'both' would promise an agreement check that cannot exist.
     ok("a cpu-only zone + a sweep is 'sweep', never 'both'", byId.vegetation.method === 'sweep');
+
+    // Take the sweep away entirely: the CPU zone is still a real measurement,
+    // just one with no GPU number to report — 'cpu-zone-only', never 'unmeasured'.
+    // 2026-08-05: caught reporting this as "structurally blind to CPU cost" when
+    // it was already sitting right here, just never surfaced to a reader.
+    const [vegNoSweep] = attributeZonesToEffects({
+      rows,
+      manifests: [VEGETATION],
+      effectZoning: EFFECT_ZONING,
+      sweep: null,
+      megapixels: 3.56,
+    });
+    ok("a CPU-zoned effect with no sweep at all is 'cpu-zone-only'", vegNoSweep.method === 'cpu-zone-only');
+    ok('its real CPU cost is on zoneCpuMs, not lost', vegNoSweep.zoneCpuMs === 0.4);
+    ok(
+      'it still has no GPU number to fabricate',
+      vegNoSweep.zoneGpuMs === null && vegNoSweep.sweepMarginalGpuMs === null
+    );
   }
 
   // ======================================================================
@@ -1017,6 +1035,9 @@ export function run(t) {
         zs('pass.post.bloom', { gpu: acc(720, 612, 2.1) }),
         zs('bloom.bright', { gpu: acc(120, 612, 0.5) }),
         zs('light.sunShadowBake', { gpu: acc(14.4, 3, 5.4) }),
+        // Vegetation's sync is CPU-zoned; the sweep below covers only bloom, so
+        // vegetation has a real cost with no GPU number at all — 'cpu-zone-only'.
+        zs('light.vegetationSync', { cpu: acc(244.8, 612, 0.9) }),
       ],
       frame: {
         gapSamples: Array.from({ length: 612 }, (_, i) => (i === 141 ? 168.4 : 8.4)),
@@ -1047,6 +1068,15 @@ export function run(t) {
     );
     ok('sweepIncluded reflects reality', full.method.sweepIncluded === true);
     ok('the interpretation names the verdict it saw', full.interpretation.includes(full.attribution.verdict));
+
+    const vegFull = full.effects.find((e) => e.id === 'vegetation');
+    ok('a real combined report rolls up a CPU-only effect as such', vegFull.method === 'cpu-zone-only');
+    ok('...with its cost intact', vegFull.zoneCpuMs === 0.4);
+    ok(
+      'a CPU-only cost gets its own finding rather than sitting silent in effects[]',
+      full.findings.some((f) => f.id === 'cpu-only-cost:vegetation')
+    );
+    ok('the interpretation guide tells a reader where to look for it', full.interpretation.includes('cpu-zone-only'));
 
     // Size discipline: the whole point of the sampling rules above.
     const bytes = JSON.stringify(full, null, 2).length;

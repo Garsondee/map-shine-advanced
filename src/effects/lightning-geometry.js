@@ -39,8 +39,6 @@
  * @module effects/lightning-geometry
  */
 
-import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL } from './lighting/point-light-illumination.js';
-
 // ============================================================================
 // SEEDED RNG — an exact port of V2's own hash + LCG (legacy/compositor-v2/
 // effects/LightningEffectV2.js `_hashStringToUint`/`_randFloat`/
@@ -331,13 +329,19 @@ export function generateBurst({ source, burstIndex, spawnMs, maxPointsPerStrand,
 
   const baseIntensity = Math.max(0.05, source.intensity ?? 1);
   const durationMs = Math.max(20, params.strikeDurationMs);
-  // THE STRIKE'S OWN HEIGHT-GATE INPUT — carried straight from `source`
-  // (see `groupLightningAnchorsIntoSources`' own doc). Branches inherit the
-  // SAME value below: a branch physically emanates from its parent strike,
-  // so it belongs to the same floor by construction, never a second lookup.
-  const elevationRank = Number.isFinite(source.elevationRank)
-    ? source.elevationRank
-    : LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+  // THE STRIKE'S OWN DEPTH-AUTHORITY INPUT (2026-08-05 — migrated from the
+  // OLD buf:scene.attr/buildHeightGateNode mechanism's `elevationRank` to
+  // the depth authority's own tie-safe expected-depth value; see
+  // lightning-subsystem.js's own doc for where this gets RESOLVED —
+  // `lightning-subsystem.js#advanceSchedulesAndSpawn` writes it onto
+  // `source` fresh every sync, this function only ever READS it) — carried
+  // straight from `source`. Branches inherit the SAME value below: a branch
+  // physically emanates from its parent strike, so it belongs to the same
+  // floor by construction, never a second lookup. No sentinel: an absent
+  // resolver already means 0 upstream (an ordinary, low, real value, never
+  // a magic "always visible" marker — matches point-light-pool.js's own
+  // "elevation 0 is not special-cased" convention).
+  const expectedDepth = Number.isFinite(source.expectedDepth) ? source.expectedDepth : 0;
 
   const main = {
     isBranch: false,
@@ -352,7 +356,7 @@ export function generateBurst({ source, burstIndex, spawnMs, maxPointsPerStrand,
     parentDurationMs: null,
     parentLeaderFrac: null,
     baseIntensity,
-    elevationRank,
+    expectedDepth,
     widthScale: 1,
     xs: mainXs,
     ys: mainYs,
@@ -434,7 +438,7 @@ export function generateBurst({ source, burstIndex, spawnMs, maxPointsPerStrand,
         parentDurationMs: durationMs,
         parentLeaderFrac: leaderFrac,
         baseIntensity: Math.max(0.01, baseIntensity * Math.max(0.05, params.branchIntensityScale)),
-        elevationRank,
+        expectedDepth,
         widthScale: Math.max(0.05, params.branchWidthScale),
         xs: bxs,
         ys: bys,
@@ -590,9 +594,9 @@ export function computeOutsideFlashSignal(nowMs, flashState, params) {
 // ============================================================================
 
 /**
- * @param {Array<{id:string, x:number, y:number, params?:object, elevationRank?:number}>} anchors
+ * @param {Array<{id:string, x:number, y:number, params?:object, elevation?:number}>} anchors
  * @returns {{
- *   sources: Array<{linkId:string, seed:number, startX:number, startY:number, endX:number, endY:number, intensity:number, elevationRank:number}>,
+ *   sources: Array<{linkId:string, seed:number, startId:string, endId:string, startX:number, startY:number, endX:number, endY:number, intensity:number, elevation:number}>,
  *   orphaned: Array<{id:string, linkId:string, role:string}>,
  * }}
  */
@@ -629,24 +633,40 @@ export function groupLightningAnchorsIntoSources(anchors) {
         : Number.isFinite(intensityEnd)
           ? intensityEnd
           : 1;
-      // THE BOLT'S OWN HEIGHT-GATE INPUT (2026-08-03) — the START anchor's own
-      // resolved rank (`boot.js#getLightningRenderState`). A bolt visually
-      // originates at its start point; using either anchor's own band would
-      // be defensible, but a strike genuinely does travel start→end, so the
-      // origin's own floor is the more honest single answer when the two
-      // anchors disagree. Defaults to the unconfigured sentinel (never 0) if
-      // absent — a hand-built test fixture predating this field gets the OLD
-      // "always fully reaches" behaviour, never a silently introduced gate.
-      const rankRaw = Number(bucket.start.elevationRank);
+      // THE BOLT'S OWN DEPTH-AUTHORITY INPUT (2026-08-03, migrated to the
+      // depth authority 2026-08-05) — the START anchor's own RAW world
+      // elevation (`boot.js#getLightningRenderState`,
+      // `resolveAnchorElevationWorldUnits`), not yet resolved into a depth
+      // value — `lightning-subsystem.js#advanceSchedulesAndSpawn` does that
+      // resolution per source, per sync, via its own injected
+      // `resolveExpectedDepth`. A bolt visually originates at its start
+      // point; using either anchor's own value would be defensible, but a
+      // strike genuinely does travel start→end, so the origin's own height
+      // is the more honest single answer when the two anchors disagree.
+      // Defaults to 0 (an ordinary, low, real elevation, never a magic
+      // sentinel) if absent — a hand-built test fixture predating this field
+      // gets exactly what an author who never touched the "height off
+      // floor" control gets: right on the floor, nothing special.
+      const elevationRaw = Number(bucket.start.elevation);
       sources.push({
         linkId,
         seed: hashStringToSeed(linkId),
+        // The anchor ids themselves — not consumed by the render path (which
+        // only ever needs positions), but the UI needs them: ui/anchor-mode.js
+        // draws a connector line between two ICONS, which are keyed by anchor
+        // id, not by world position. Exposed here rather than re-derived by a
+        // second matcher in boot.js — this function already has bucket.start/
+        // bucket.end in hand; inventing a parallel grouping there risks the
+        // exact "two matchers quietly disagree" shape this project has
+        // already been burned by (feedback_fallback_matcher_self_match).
+        startId: bucket.start.id,
+        endId: bucket.end.id,
         startX: bucket.start.x,
         startY: bucket.start.y,
         endX: bucket.end.x,
         endY: bucket.end.y,
         intensity,
-        elevationRank: Number.isFinite(rankRaw) ? rankRaw : LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
+        elevation: Number.isFinite(elevationRaw) ? elevationRaw : 0,
       });
     } else {
       if (bucket.start) orphaned.push({ id: bucket.start.id, linkId, role: 'start' });
@@ -655,6 +675,34 @@ export function groupLightningAnchorsIntoSources(anchors) {
     }
   }
   return { sources, orphaned };
+}
+
+/**
+ * A freshly-placed bolt's default "height off floor" (2026-08-05, author's
+ * own ask: never default to zero — pick a whole number roughly halfway up
+ * the floor it's being placed on). A flat constant can't be right for every
+ * scene: a 20-unit floor and a 200-unit floor don't share a sensible single
+ * guess, so this reads the REAL locked band (`boot.js#addLightningEndpoint`'s
+ * own `floorBinding`, the identical shape `floorMatches`/
+ * `resolveAnchorElevationWorldUnits` already consume) and halves it.
+ *
+ * @param {{mode?:string, bottom?:number|null, top?:number|null}|null|undefined} floorBinding
+ * @param {{min?:number, max?:number}} [range] - the `elevation` param's own
+ *   declared bounds (`scene/anchor-catalog.js`) — the result is clamped into
+ *   `[min+1, max]` so it can never land on `min` (0) even for a degenerate
+ *   (near-zero-height) floor band.
+ * @returns {number} a whole number.
+ */
+export function defaultLightningElevation(floorBinding, range = {}) {
+  const lo = Number.isFinite(range.min) ? range.min : 0;
+  const hi = Number.isFinite(range.max) ? range.max : 50;
+  const bottom = Number(floorBinding?.bottom);
+  const top = Number(floorBinding?.top);
+  const guess =
+    floorBinding?.mode === 'locked' && Number.isFinite(bottom) && Number.isFinite(top)
+      ? Math.round((top - bottom) / 2)
+      : Math.round((lo + hi) / 2); // no real floor band to read — a neutral, still-nonzero guess
+  return Math.min(hi, Math.max(lo + 1, guess));
 }
 
 // ============================================================================
@@ -861,7 +909,7 @@ export function buildLightningLightSources(activeStrands, nowMs, params) {
  * @returns {{
  *   positions: Float32Array, prevPos: Float32Array, nextPos: Float32Array, side: Float32Array, uvOffset: Float32Array,
  *   spawnMs: Float32Array, durationMs: Float32Array, seed: Float32Array, leaderFrac: Float32Array,
- *   restrikeCount: Float32Array, baseIntensity: Float32Array, elevationRank: Float32Array, widthScale: Float32Array, isBranch: Float32Array,
+ *   restrikeCount: Float32Array, baseIntensity: Float32Array, expectedDepth: Float32Array, widthScale: Float32Array, isBranch: Float32Array,
  *   parentSpawnMs: Float32Array, parentDurationMs: Float32Array, parentLeaderFrac: Float32Array, growthSpeed: Float32Array,
  *   indices: Uint32Array, strandPointCounts: number[], vertexCount: number, indexCount: number,
  * }}
@@ -884,12 +932,12 @@ export function computeLightningStrandArrays(activeStrands, maxStrands, maxPoint
   const leaderFrac = new Float32Array(vertCapacity);
   const restrikeCount = new Float32Array(vertCapacity);
   const baseIntensity = new Float32Array(vertCapacity);
-  // THE STRIKE'S OWN HEIGHT-GATE INPUT — see `generateBurst`'s own doc. Packed
-  // alongside baseIntensity/widthScale into `strandBakeB` in lightning-
-  // render.js (widened vec3→vec4) rather than opened as a 7th separate
-  // vertex buffer — that file's own header explains why (WebGPU's 8-buffer
-  // ceiling, hit live once already).
-  const elevationRank = new Float32Array(vertCapacity);
+  // THE STRIKE'S OWN DEPTH-AUTHORITY INPUT — see `generateBurst`'s own doc.
+  // Packed alongside baseIntensity/widthScale into `strandBakeB` in
+  // lightning-render.js (widened vec3→vec4) rather than opened as a 7th
+  // separate vertex buffer — that file's own header explains why (WebGPU's
+  // 8-buffer ceiling, hit live once already).
+  const expectedDepth = new Float32Array(vertCapacity);
   const widthScale = new Float32Array(vertCapacity);
   const isBranch = new Float32Array(vertCapacity);
   const parentSpawnMs = new Float32Array(vertCapacity);
@@ -935,12 +983,11 @@ export function computeLightningStrandArrays(activeStrands, maxStrands, maxPoint
         leaderFrac[v] = strand.leaderFrac;
         restrikeCount[v] = strand.restrikeCount;
         baseIntensity[v] = strand.baseIntensity;
-        // Defensive default, same posture as computeCandleFlameArrays' own
-        // rank fallback — a strand from an older/hand-built fixture without
-        // this field gets the OLD "always fully reaches" behaviour.
-        elevationRank[v] = Number.isFinite(strand.elevationRank)
-          ? strand.elevationRank
-          : LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+        // Defensive default — a strand from an older/hand-built fixture
+        // without this field reads as elevation 0, an ordinary real value,
+        // never a magic "always fully reaches" marker (no sentinel in the
+        // depth-authority system — see generateBurst's own doc).
+        expectedDepth[v] = Number.isFinite(strand.expectedDepth) ? strand.expectedDepth : 0;
         widthScale[v] = strand.widthScale;
         isBranch[v] = strand.isBranch ? 1 : 0;
         parentSpawnMs[v] = hasParent ? strand.parentSpawnMs : 0;
@@ -996,7 +1043,7 @@ export function computeLightningStrandArrays(activeStrands, maxStrands, maxPoint
     leaderFrac,
     restrikeCount,
     baseIntensity,
-    elevationRank,
+    expectedDepth,
     widthScale,
     isBranch,
     parentSpawnMs,

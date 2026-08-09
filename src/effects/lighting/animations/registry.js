@@ -166,6 +166,46 @@ export const LIGHT_ANIMATIONS = {
     buildIlluminationSeed: null, // coloration-only
     buildColorationSeed: buildEnergyColorationSeed,
   },
+  /**
+   * FIRE's cast light (docs/planning/Fire.md). Reuses `candleFlicker`'s
+   * builders verbatim rather than inventing a second wind-aware shader — same
+   * philosophy as the original `firePuff` (the difference between a candle
+   * and a bonfire is the DESCRIPTOR: radius, luminosity, ratio, `quality`),
+   * just pointed at MSA's own richer noise instead of Foundry's generic
+   * `flame` torch shader.
+   *
+   * ⚠️ RE-POINTED FROM `flame` TO `candleFlicker`, 2026-08-09, AUTHOR'S OWN
+   * DIRECTION: *"adjust fire light to work more like candle light."* `flame`
+   * (Foundry's stock torch noise, still used verbatim by `torch`/`siren`) has
+   * NO wind coupling at all — no lean, no gutter, no snuff — despite
+   * `buildFireLightSources` computing and shipping `windExposure`/
+   * `windResponse` on every fire light descriptor. Those fields were being
+   * built, carried, and read by nothing (`feedback_unconsumed_api_rots_
+   * silently`, same bug class this file already names for the OLD `firePuff`
+   * missing an entry at all). `candleFlicker`'s builders already accept
+   * `wind`/`windResponse` generically from the scaffold
+   * (`point-light-illumination.js` builds and passes them to WHICHEVER
+   * animation is active, not specially for candles) and fire's descriptor
+   * already carries `quality` in the exact 0..2 range `candleFlicker` expects
+   * (`buildFireLightSources`'s own `quality: clampNum(..., 0, 2)`) — so this
+   * is a pure re-point, no scaffold or descriptor change required.
+   *
+   * ⚠️ REGISTERED BECAUSE AN UNREGISTERED TYPE IS NOT INERT — IT IS FEATURELESS.
+   * `resolveLightAnimation` returns null for an unknown string, and the pool's
+   * `if (animation?.buildIlluminationSeed)` then skips the whole animated
+   * branch. That safety-slides to a STATIC light (correct, never a crash — the
+   * header above promises exactly this) but it also silently skips the WIND
+   * uniforms, which are built inside that same branch — exactly the gap this
+   * entry closes.
+   */
+  firePuff: {
+    label: 'Fire Puff',
+    cpuDriver: 'flicker',
+    flickerAmplification: () => 1,
+    forceDefaultColor: false,
+    buildIlluminationSeed: buildCandleFlickerIlluminationSeed,
+    buildColorationSeed: buildCandleFlickerColorationSeed,
+  },
 
   // TIER 1 (2026-07-20) — the remaining 17 light animations, same proven
   // pattern as Tier 0. `siren` is the one Tier-1 entry sharing torch's

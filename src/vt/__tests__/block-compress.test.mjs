@@ -14,6 +14,10 @@ import {
   encodeBC7,
   decodeBC7,
   bc7ByteLength,
+  bc7BlockMode,
+  bc7ModeHistogram,
+  BC7_PARTITION2_FOR_TEST,
+  BC7_ANCHOR2_FOR_TEST,
   encodeStriped,
   computeMipChainDims,
   mipChainByteLength,
@@ -596,6 +600,214 @@ export function run(t) {
     );
   }
 
+  // ══ THE MULTI-MODE ENCODER (2026-08-06) ═════════════════════════════════
+  // Author, on the shipped BC + mip + CAS pipeline: zoomed out past 1:1 the art
+  // sharpens, "but currently they sharpen in a way that looks very grainy and
+  // slightly pixelated", where PIXI/Foundry stay smooth on the same textures.
+  //
+  // MEASURED FIRST, single-mode encoder, NO mips and NO sharpening involved —
+  // so these are the encoder alone, not the clarity node amplifying something:
+  //
+  //   BC7 soft antialiased cutout edge   mean 2.89  rms 12.01  MAX 119
+  //   BC7 thin linework + partial alpha  mean 2.36  rms  8.06  MAX 127
+  //   BC1 thin linework on parchment     mean 7.00  rms 12.23  MAX  39
+  //   BC1 saturated colour field         mean 4.08  rms  6.69  MAX  30
+  //
+  // A MAX around 120/255 with a MEAN under 3 is the signature: a handful of
+  // texels land on completely the wrong colour while the average stays clean.
+  // That is stray speckle, and a contrast-adaptive sharpen cannot tell it from
+  // real detail — it amplifies both, which is the reported grain. Four earlier
+  // rounds of "the outlines are mushy" work never saw it because every bar they
+  // used was an average (memory: feedback_aggregate_cannot_name_the_source).
+  //
+  // BOTH BC7 failures are blocks where COLOUR AND ALPHA VARY TOGETHER, which
+  // mode 6 structurally cannot express: one line, one index per texel, so
+  // moving to fix alpha necessarily moves the colour. Mode 5 gives the two
+  // their own endpoints and their own indices. BC1 has no such mode, and its
+  // problem was different — snapping endpoints to block extremes OVERSHOT, so
+  // the decode came back with MORE contrast than the source (95.39 → 101.34,
+  // i.e. posterised). Least-squares endpoints have no reason to overshoot.
+  //
+  // The bars below sit at the MEASURED post-fix values, not comfortably above
+  // them — a bar at twice the real error cannot fail and is not an instrument.
+  const softCutout = (N) =>
+    makeImage(N, N, (x, y) => {
+      const d = Math.hypot(x - N / 2 + 0.5, y - N / 2 + 0.5);
+      const r = N * 0.35;
+      const cov = Math.max(0, Math.min(1, r + 1.5 - d));
+      const inkT = Math.max(0, Math.min(1, 2.5 - Math.abs(d - r)));
+      const c = [190, 150, 90].map((v) => Math.round(v * (1 - inkT) + 12 * inkT));
+      return [c[0], c[1], c[2], Math.round(cov * 255)];
+    });
+  const thinLinework = (N) =>
+    makeImage(N, N, (x, y) => {
+      if (x % 7 === 0 || y % 9 === 0 || (x + y) % 11 === 0) return INK_BLACK;
+      const v = 200 + ((x * 3 + y * 5) % 40);
+      return [v, v - 8, v - 24, 255];
+    });
+  /** RMS contrast of the luma channel — the metric the zoom-out work used. */
+  const rmsContrast = (img) => {
+    const l = [];
+    for (let i = 0; i < img.length; i += 4) l.push(luma(img[i], img[i + 1], img[i + 2]));
+    const mean = l.reduce((s, v) => s + v, 0) / l.length;
+    return Math.sqrt(l.reduce((s, v) => s + (v - mean) * (v - mean), 0) / l.length);
+  };
+
+  {
+    // THE HEADLINE CASE: an antialiased silhouette — ink colour holding steady
+    // while coverage ramps to nothing. This is most of the perimeter of every
+    // cutout prop in the author's art.
+    const N = 64;
+    const src = softCutout(N);
+    const out = decodeBC7(encodeBC7(src, N, N), N, N);
+    ok('BC7 soft antialiased edge: worst texel recovered (was 119, now ≤ 40)', maxRgbaError(src, out) <= 40);
+  }
+  {
+    const N = 64;
+    const src = thinLinework(N);
+    for (let i = 3; i < src.length; i += 4) src[i] = i % 97 === 0 ? 128 : 255;
+    const out = decodeBC7(encodeBC7(src, N, N), N, N);
+    ok('BC7 thin linework + partial alpha (was 127, now ≤ 30)', maxRgbaError(src, out) <= 30);
+  }
+  {
+    // EVERY MODE MUST ACTUALLY FIRE. Each one wins only by scoring, so a broken
+    // fit or a mismeasured error would simply never win — costing encode time,
+    // changing nothing, and reporting no symptom, because the image still
+    // round-trips fine via mode 6 (memory: feedback_seam_default_hides_unwired).
+    // No tolerance-band assertion above can catch that; this can.
+    const N = 64;
+    const soft = bc7ModeHistogram(encodeBC7(softCutout(N), N, N));
+    const ring = bc7ModeHistogram(encodeBC7(inkRing(N, 20, 26), N, N));
+    ok('BC7 chooses mode 5 for colour-and-alpha-varying blocks', ring[5] > 0);
+    ok('BC7 chooses mode 7 for three-cluster blocks', soft[7] > 0);
+    ok('BC7 still chooses mode 6 where one line suffices', soft[6] > 0 && ring[6] > 0);
+    const readable = (h) => h.every((n, m) => n === 0 || m === 5 || m === 6 || m === 7);
+    ok('BC7 emits no mode this decoder cannot read', readable(soft) && readable(ring));
+  }
+  {
+    // THE PARTITION TABLES. These are fixed by the BC7 spec, not derived here,
+    // and a mistranscribed entry is this file's worst failure mode: our own
+    // decoder would use the SAME wrong table, round-trip perfectly, and a real
+    // GPU — using the real table — would render noise
+    // (memory: feedback_smooth_output_hides_ported_bugs). The tables were
+    // cross-checked against seven independent implementations before landing;
+    // these invariants are what stops a later edit from quietly breaking one.
+    // Every check below is a property of the SPEC, not of our encoder, so none
+    // of them can be satisfied by a self-consistent mistake.
+    let allBinary = true;
+    let texel0AlwaysSubset0 = true;
+    let bothSubsetsUsed = true;
+    let anchorInSubset1 = true;
+    let partitionSum = 0;
+    let anchorSum = 0;
+    for (let p = 0; p < 64; p++) {
+      let ones = 0;
+      for (let t = 0; t < 16; t++) {
+        const v = BC7_PARTITION2_FOR_TEST[p * 16 + t];
+        if (v !== 0 && v !== 1) allBinary = false;
+        ones += v;
+        partitionSum += v;
+      }
+      if (BC7_PARTITION2_FOR_TEST[p * 16] !== 0) texel0AlwaysSubset0 = false;
+      if (ones === 0 || ones === 16) bothSubsetsUsed = false;
+      const a = BC7_ANCHOR2_FOR_TEST[p];
+      anchorSum += a;
+      if (BC7_PARTITION2_FOR_TEST[p * 16 + a] !== 1) anchorInSubset1 = false;
+    }
+    ok('partition table is 64×16 and strictly binary', BC7_PARTITION2_FOR_TEST.length === 1024 && allBinary);
+    ok('texel 0 is in subset 0 for every partition (why subset 0 anchors there)', texel0AlwaysSubset0);
+    ok('every partition genuinely uses both subsets', bothSubsetsUsed);
+    // The sharpest cross-table check: the two tables are independent data, so an
+    // anchor naming a texel that is NOT in subset 1 means one of them is wrong.
+    ok('every anchor names a texel actually in subset 1', anchorInSubset1);
+    ok('partition table checksum matches the verified tables (466)', partitionSum === 466);
+    ok('anchor table checksum matches the verified tables (620)', anchorSum === 620);
+  }
+  {
+    // Mode 7's index field is 30 bits, not 32, because BOTH anchors store one
+    // bit instead of two. Read or write that wrong and every later bit shifts,
+    // so the block decodes as noise rather than as a near-miss colour — which
+    // means a round-trip that lands CLOSE is real evidence the two-anchor
+    // layout is right, in a way it would not be for an ordinary endpoint slip.
+    const src = makeImage(4, 4, (x, y) => {
+      if (y === 0) return [10, 10, 10, 255];
+      if (y === 1) return [220, 180, 90, 255];
+      return [0, 0, 0, 0];
+    });
+    const blocks = encodeBC7(src, 4, 4);
+    ok('a three-cluster block picks mode 7', bc7BlockMode(blocks, 0) === 7);
+    ok('mode 7 round-trips a three-cluster block closely (≤ 16)', maxRgbaError(src, decodeBC7(blocks, 4, 4)) <= 16);
+  }
+  {
+    // The capability itself, isolated: alpha ramping across x while colour ramps
+    // across y. One line through RGBA cannot express two independent gradients;
+    // separate colour and alpha indices can.
+    const src = makeImage(4, 4, (x, y) => {
+      const v = [40, 120, 200, 255][y];
+      return [v, 255 - v, 128, [0, 85, 170, 255][x]];
+    });
+    const blocks = encodeBC7(src, 4, 4);
+    const out = decodeBC7(blocks, 4, 4);
+    ok('independent colour/alpha gradients pick mode 5', bc7BlockMode(blocks, 0) === 5);
+    ok('independent colour/alpha gradients recover (≤ 24)', maxRgbaError(src, out) <= 24);
+  }
+  {
+    // A flat block that mode 6 can hit EXACTLY: nothing can beat zero error, so
+    // the encoder must take it and not spend the other modes' time discovering
+    // that. All four channels are ODD deliberately — mode 6's p-bit is SHARED
+    // across R,G,B,A, so it can only land a channel exactly when every channel
+    // agrees on parity. `[77,133,201,200]` looks equally flat and is NOT exact
+    // (alpha 200 costs 1), which is a property of the format, not a defect.
+    const src = makeImage(4, 4, () => [77, 133, 201, 255]);
+    const blocks = encodeBC7(src, 4, 4);
+    ok('an exactly-representable block stays on mode 6', bc7BlockMode(blocks, 0) === 6);
+    ok('an exactly-representable block is still exact', maxRgbaError(src, decodeBC7(blocks, 4, 4)) === 0);
+  }
+  {
+    // BC1: the fitted line. Mean error is the honest headline (the max is a
+    // 1-texel-wide feature BC1's 2-endpoint format genuinely cannot hold —
+    // documented as a known residual, not silently hidden).
+    const N = 64;
+    const src = thinLinework(N);
+    const out = decodeBC1(encodeBC1(src, N, N), N, N);
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < src.length; i++) {
+      sum += Math.abs(src[i] - out[i]);
+      n++;
+    }
+    ok('BC1 thin linework mean error (was 7.00, now ≤ 4.5)', sum / n <= 4.5);
+    // THE OVERSHOOT, asserted directly. Snapping endpoints to block extremes
+    // returned MORE contrast than the source — posterisation, and exactly what
+    // reads as grain once sharpened. Least-squares endpoints must not overshoot
+    // by more than a couple of percent.
+    const ratio = rmsContrast(out) / rmsContrast(src);
+    ok('BC1 does not inflate contrast (was 1.062, now ≤ 1.02)', ratio <= 1.02);
+    ok('BC1 does not crush contrast either (≥ 0.97)', ratio >= 0.97);
+  }
+  {
+    const N = 64;
+    const src = makeImage(N, N, (x, y) => {
+      const v = 40 + ((x * 13 + y * 7) % 176);
+      return [v, (v * 0.7) | 0, (v * 0.4) | 0, 255];
+    });
+    const out = decodeBC1(encodeBC1(src, N, N), N, N);
+    let sum = 0;
+    for (let i = 0; i < src.length; i++) sum += Math.abs(src[i] - out[i]);
+    ok('BC1 saturated colour mean error (was 4.08, now ≤ 3.6)', sum / src.length <= 3.6);
+  }
+  {
+    // bc7BlockMode is itself an instrument, so it gets its own check rather than
+    // being trusted because the assertions above happened to pass.
+    const blocks = encodeBC7(
+      makeImage(8, 4, () => [10, 20, 30, 255]),
+      8,
+      4
+    );
+    ok('bc7ModeHistogram counts every block exactly once', bc7ModeHistogram(blocks).reduce((s, v) => s + v, 0) === 2);
+    ok('bc7BlockMode agrees with the histogram', bc7ModeHistogram(blocks)[bc7BlockMode(blocks, 0)] > 0);
+  }
+
   // ══ THE ENCODER-OUTPUT PIN ══════════════════════════════════════════════
   // These bytes are cached in IndexedDB under bc-compress.worker.js's
   // CACHE_VERSION, so an encoder change that alters output and does NOT bump
@@ -632,12 +844,13 @@ export function run(t) {
       if (d < 6) return [10, 10, 10, 255];
       return [(x * 16) & 255, (y * 16) & 255, 128, d < 7 ? 128 : 0];
     });
-    ok('BC1 encoder output is byte-stable (CACHE_VERSION 8)', fnv1a(encodeBC1(fixture, N, N)) === '94b1e28e');
-    // NOTE the BC7 hash did NOT move across the v7→v8 toRgb565 fix, and must
-    // not have: that function is BC1-only (BC7 mode 6 carries full 8-bit
-    // endpoints and never quantizes to 565). This pin is what PROVED that
-    // rather than assuming it — an unchanged hash here is the evidence the
-    // fix stayed in its own format.
-    ok('BC7 encoder output is byte-stable (CACHE_VERSION 8)', fnv1a(encodeBC7(fixture, N, N)) === 'f3ce221c');
+    // BOTH hashes moved at v8→v9 (the multi-mode encoder), and both HAD to:
+    // BC1 gained PCA + least-squares endpoints, and BC7 gained modes 5 and 7.
+    // Unlike the v7→v8 bump — where BC7's hash correctly stayed put, proving
+    // that BC1-only fix had stayed in its own format — there is no such
+    // cross-format evidence to read here, because this change deliberately
+    // touched both.
+    ok('BC1 encoder output is byte-stable (CACHE_VERSION 9)', fnv1a(encodeBC1(fixture, N, N)) === '6fa75fa5');
+    ok('BC7 encoder output is byte-stable (CACHE_VERSION 9)', fnv1a(encodeBC7(fixture, N, N)) === '3bd31c2d');
   }
 }

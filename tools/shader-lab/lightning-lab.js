@@ -297,6 +297,116 @@ class LightningLab {
     const bytes = ArrayBuffer.isView(buf) ? buf : new Uint8Array(buf);
     return { x: worldX, y: worldY, r: bytes[0] / 255, g: bytes[1] / 255, b: bytes[2] / 255, a: bytes[3] / 255 };
   }
+
+  /** Max (r+g+b) found over a grid spanning the current camera view — a
+   * bolt's fractal path can bow away from the start/end straight line by up
+   * to `macroDisplacement` world units, so probing one guessed point risks a
+   * false "nothing visible" miss. Scanning the whole framed view sidesteps
+   * needing to know exactly where the path landed. Reuses `samplePixel`
+   * verbatim (one offscreen render per grid cell — 256x256, cheap). */
+  async sampleMaxBrightnessInView(gridN = 9) {
+    const r = this._viewRect;
+    let best = { sum: -1 };
+    for (let iy = 0; iy < gridN; iy++) {
+      for (let ix = 0; ix < gridN; ix++) {
+        const wx = r.minX + ((ix + 0.5) / gridN) * (r.maxX - r.minX);
+        const wy = r.minY + ((iy + 0.5) / gridN) * (r.maxY - r.minY);
+        const px = await this.samplePixel(wx, wy);
+        const sum = px.r + px.g + px.b;
+        if (sum > best.sum) best = { ...px, sum };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * ==========================================================================
+   * DEPTH-AUTHORITY GATE — SYNTHETIC WIRING TEST (2026-08-05)
+   * ==========================================================================
+   * Builds a SELF-CONTAINED depth-pass render target + tiny scene, entirely
+   * separate from `vt/scene-depth.js`'s own dedicated camera/projection
+   * formula — this test does NOT re-verify `computeExpectedStoredDepth`'s
+   * algebra (that file's own header already names it "NOT YET VERIFIED
+   * AGAINST THE GPU'S OWN ACTUAL OUTPUT" and out of scope here) or the shared
+   * `buildDepthHeightGateNode` function itself (already proven live for point
+   * lights, `docs/planning/Depth-Buffer.md`). What IS new and unverified this
+   * session is the WIRING: `lightning-render.js`'s own `depthTexNode`/
+   * `depthFlagsTexNode` consumption, `lightning-subsystem.js`'s bake-once-
+   * per-strand `expectedDepth`, and `lightning-geometry.js`'s per-vertex
+   * write of it — all exercised end-to-end here with a REAL GPU-sampled depth
+   * texture (never faked at the JS level), same "build the instrument"
+   * discipline this session's NaN-bug investigation already required.
+   *
+   * `resolveExpectedDepth` here is a LAB STUB returning a fixed, directly-
+   * controlled float — this test does not exercise `depthAuthority.
+   * rankOfElevation`/`computeTieSafeExpectedDepth` either (pure JS, already
+   * covered by Node tests); it exists only so the shader has SOME comparable
+   * uniform to gate against.
+   */
+  async setupSyntheticDepthGate() {
+    const dim = 64;
+    this._depthRt = new THREE.RenderTarget(dim, dim, { depthBuffer: true });
+    this._depthRt.depthTexture = new THREE.DepthTexture(dim, dim);
+    this._depthRt.depthTexture.type = THREE.FloatType;
+
+    this._depthCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 10);
+    this._depthCamera.position.set(0, 0, 5);
+    this._depthCamera.lookAt(0, 0, 0);
+    this._depthScene = new THREE.Scene();
+
+    // Flags texture: plain RGBA8, hand-authored, all-zero — floorIndex=0,
+    // flags byte=0 (no restrictsLight/isTile bits), so the flags-gate half
+    // of buildDepthHeightGateNode is a guaranteed no-op and this test isolates
+    // the RANK comparison alone.
+    const flagsData = new Uint8Array(4 * 4 * 4);
+    this._flagsTex = new THREE.DataTexture(flagsData, 4, 4, THREE.RGBAFormat, THREE.UnsignedByteType);
+    this._flagsTex.needsUpdate = true;
+
+    const { texture, uniform, float } = THREE.TSL;
+    this._syntheticExpectedDepth = uniform(float(0.5));
+
+    this.sub.dispose();
+    this.sub = createLightningSubsystem({
+      THREE,
+      uGlobalTimeMs: this.uGlobalTimeMs,
+      getLightningRenderState: () => this._renderState(),
+      depthTexNode: texture(this._depthRt.depthTexture),
+      depthFlagsTexNode: texture(this._flagsTex),
+      resolveExpectedDepth: () => this._syntheticExpectedDepth.value,
+    });
+    this.sub.scene.add(this.startMarker);
+    this.sub.scene.add(this.endMarker);
+    log('synthetic depth gate wired: construction OK, no throw.');
+  }
+
+  /** Clears the synthetic depth target to its default FAR value (1.0) only —
+   * the "nothing occluding" case: `depthHere(1.0) < uLightExpectedDepth(0.5)`
+   * is false, so `buildDepthHeightGateNode` must read OPEN (gate=1). */
+  renderSyntheticDepthClear() {
+    const prev = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this._depthRt);
+    this.renderer.clear(true, true, true);
+    this.renderer.setRenderTarget(prev);
+  }
+
+  /** Renders a big plane very close to the depth camera — the "something
+   * occluding" case: stored depth lands near 0, `0 < 0.5` is true, so the
+   * gate must read CLOSED (gate=0) everywhere on screen. */
+  renderSyntheticDepthNearPlane() {
+    if (!this._nearPlaneMesh) {
+      const geo = new THREE.PlaneGeometry(4, 4);
+      const mat = new THREE.NodeMaterial();
+      mat.fragmentNode = THREE.TSL.vec4(1, 1, 1, 1);
+      this._nearPlaneMesh = new THREE.Mesh(geo, mat);
+      this._nearPlaneMesh.position.set(0, 0, 4.9); // camera at z=5, near=0.01 -> stored depth near 0
+      this._depthScene.add(this._nearPlaneMesh);
+    }
+    const prev = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this._depthRt);
+    this.renderer.clear(true, true, true);
+    this.renderer.render(this._depthScene, this._depthCamera);
+    this.renderer.setRenderTarget(prev);
+  }
 }
 
 // ---------------------------------------------------------------------------

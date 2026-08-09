@@ -29,7 +29,7 @@ function args(overrides = {}) {
   return {
     THREE,
     maskTexture: stubTexture(),
-    attrTexture: stubTexture(),
+    depthTexture: stubTexture(),
     uViewRect: uniform(vec4(0, 0, 100, 100)),
     ...overrides,
   };
@@ -67,10 +67,10 @@ export function run(t) {
   ok('no mrtNode — buf:scene.illum is single-attachment', !built.windowMaterial.mrtNode);
 
   // ── THE JS-TIME GATE (Effects.md Law 4: a uniform is not a gate) ────────
-  const noAttr = buildWindowSurfaceMaterial(args({ attrTexture: null }));
-  ok('a null attr texture compiles the floor gate OUT rather than throwing', noAttr.floorGateCompiled === false);
-  ok('…and still produces the material', !!noAttr.windowMaterial);
-  ok('with attr present the floor gate IS compiled', built.floorGateCompiled === true);
+  const noDepth = buildWindowSurfaceMaterial(args({ depthTexture: null }));
+  ok('a null depth texture compiles the floor gate OUT rather than throwing', noDepth.floorGateCompiled === false);
+  ok('…and still produces the material', !!noDepth.windowMaterial);
+  ok('with depth present the floor gate IS compiled', built.floorGateCompiled === true);
 
   // ── THE CLOUD SEAM — the whole point of this increment's TODO ───────────
   // No cloudFactorNode passed: must not throw, and must still produce a
@@ -100,7 +100,7 @@ export function run(t) {
   const setters = [
     'setMaskTexture',
     'setMaskUvBounds',
-    'setFloorIndex',
+    'setExpectedDepth',
     'setStrength',
     'setContrast',
     'setDebugChannel',
@@ -113,7 +113,7 @@ export function run(t) {
   let setterError = null;
   try {
     built.setMaskUvBounds({ minU: 0.1, minV: 0.2, maxU: 0.9, maxV: 0.8 });
-    built.setFloorIndex(2);
+    built.setExpectedDepth(0.5);
     built.setStrength(WINDOW_DEFAULT_STRENGTH);
     built.setContrast(WINDOW_DEFAULT_CONTRAST);
   } catch (err) {
@@ -126,7 +126,7 @@ export function run(t) {
   let guardError = null;
   try {
     built.setContrast(0);
-    built.setFloorIndex(NaN);
+    built.setExpectedDepth(NaN);
     built.setStrength(-5);
   } catch (err) {
     guardError = err;
@@ -137,12 +137,42 @@ export function run(t) {
   );
 
   ok(
-    'the mask texture node is returned so the loader can re-point it',
-    !!built.maskTexNode && 'value' in built.maskTexNode
+    'the mask texture nodes are returned so the loader can re-point them',
+    Array.isArray(built.maskTexNodes) && built.maskTexNodes.every((n) => n && 'value' in n)
   );
+  // THREE taps once the glass is on — one per dispersed channel. Pinned as a
+  // COUNT, because the failure this guards is not "the swap broke" but "the
+  // swap only reached the first one", which leaves two thirds of the light
+  // sampling the 1×1 placeholder and still renders a plausible cookie.
+  ok('the dispersion builds one texture node per channel', built.maskTexNodes.length === 3);
   const swapped = stubTexture();
   built.setMaskTexture(swapped);
-  ok('setMaskTexture re-points the node the effect samples', built.maskTexNode.value === swapped);
+  ok(
+    'setMaskTexture re-points EVERY node the effect samples, not just the first',
+    built.maskTexNodes.every((n) => n.value === swapped)
+  );
+
+  // ── THE JS-TIME GLASS BRANCH (`tsl/no-uniform-gates` / Effects.md Law 4) ──
+  // "If turning it off does not SHRINK the compiled shader, it is not off."
+  // The observable proxy for that here is the tap count: with the glass
+  // omitted the graph must build ONE mask tap, not three multiplied by zero.
+  const noGlass = buildWindowSurfaceMaterial(args({ glass: false }));
+  ok('with glass:false the graph builds a single mask tap', noGlass.maskTexNodes.length === 1);
+  ok('…and still exposes the same setter surface', typeof noGlass.setGlass === 'function');
+  let noGlassSetterError = null;
+  try {
+    // The setters must stay callable with the subgraph gone — the subsystem
+    // pushes them unconditionally and must not need to know which shape it got.
+    noGlass.setGlass({ warpPx: 5, dispersion: 0.5, seedOffset: [1, 2] });
+    noGlass.setUvPerWorldPx(0.01, 0.01);
+    for (const ch of WINDOW_DEBUG_CHANNELS) noGlass.setDebugChannel(ch.n);
+  } catch (err) {
+    noGlassSetterError = err;
+  }
+  ok(
+    `the glass setters are safe no-ops when the subgraph was never built (${noGlassSetterError ? noGlassSetterError.message : 'clean'})`,
+    noGlassSetterError === null
+  );
 
   // ── THE DEBUG CHANNELS — THE INSTRUMENT MUST NOT LIE ────────────────────
   // The builder ALREADY throws at construction on a channel with no node,
@@ -177,5 +207,5 @@ export function run(t) {
     `every declared channel (plus junk) survives setDebugChannel (${debugSetterError ? debugSetterError.message : 'clean'})`,
     debugSetterError === null
   );
-  ok('the floor-gate channel is wired even when the gate compiles out', !!noAttr.debugMaterial);
+  ok('the floor-gate channel is wired even when the gate compiles out', !!noDepth.debugMaterial);
 }

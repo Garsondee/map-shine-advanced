@@ -14,8 +14,10 @@
  */
 import { PASSES, STAGES } from '../../graph/index.js';
 import {
+  APERTURE_GOBO,
   BLOOM,
   CANDLE_FLAME,
+  DEPTH_OF_FIELD,
   DOOR_GRAPHICS,
   FLUID,
   GRADE,
@@ -44,9 +46,12 @@ import {
   zoneIndexOf,
   zonesForPass,
 } from '../perf-zones.js';
+import { FIRE } from '../../effects/fire/fire.js';
 
 const MANIFESTS = [
+  APERTURE_GOBO,
   BLOOM,
+  DEPTH_OF_FIELD,
   GRADE,
   WATER,
   SPECULAR,
@@ -58,6 +63,7 @@ const MANIFESTS = [
   VEGETATION,
   UI_WINDOW_SHADOW,
   LIGHTNING,
+  FIRE,
 ];
 
 export function run(t) {

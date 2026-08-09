@@ -76,7 +76,7 @@ const BENCHMARK_SWEEP_MS = 60000;
 const TIER_SETTLE_FRAMES = 90;
 import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
-import { ambientVectorFromWind, phaseBoundaryHours, resolveSky, applySkyEdit } from './world/index.js';
+import { ambientVectorFromWind, phaseBoundaryHours, resolveSky, applySkyEdit, computeSun } from './world/index.js';
 import {
   runVtLiveDecodeTest,
   startVtPanViewer,
@@ -140,8 +140,15 @@ import {
   UI_SHADOW_PARAMS,
   CANDLE_FLAME,
   CANDLE_FLAME_PARAMS,
+  shouldAutoIgnite,
+  stableUnit01,
   LIGHTNING,
   LIGHTNING_PARAMS,
+  FIRE,
+  FIRE_PARAMS,
+  extractFiresFromMask,
+  fireMaskSignature,
+  extractFireSpawnPoints,
   DOOR_GRAPHICS,
   VEGETATION,
   VEGETATION_PARAMS,
@@ -149,6 +156,10 @@ import {
   BLOOM_PARAMS,
   BLOOM_PRESETS,
   bloomPreset,
+  DEPTH_OF_FIELD,
+  DOF_PARAMS,
+  DOF_PRESETS,
+  dofPreset,
   SUN_SHADOWS,
   layerSmearTierPlan,
   SUN_SHADOW_PARAMS,
@@ -162,6 +173,9 @@ import {
   choiceLabels,
   resolveAnchorSizePx,
   resolveAnchorLightRadiusPx,
+  resolveAnchorElevationWorldUnits,
+  groupLightningAnchorsIntoSources,
+  defaultLightningElevation,
   GRADE_PRESETS,
   gradePreset,
   GRADE,
@@ -194,6 +208,8 @@ import {
   writeSetting,
   registerControlPanelButton,
   syncControlPanelButtonState,
+  registerAnchorViewModeButton,
+  syncAnchorViewModeButtonState,
   watchSceneWallStructure,
   watchDoorOpenings,
   readSceneDoors,
@@ -220,7 +236,13 @@ import {
   resetLoadingSceneMemory,
 } from './ui/loading-screen.js';
 import { LOAD_PHASES } from './ui/load-progress.js';
-import { installPainter, openCameraPathDialog, installAnchorMode, createAstrolabe } from './ui/index.js';
+import {
+  installPainter,
+  openCameraPathDialog,
+  installAnchorMode,
+  installAnchorViewMode,
+  createAstrolabe,
+} from './ui/index.js';
 import {
   SORT_LAYERS,
   makeLayerKey,
@@ -272,7 +294,11 @@ import {
 
 const MODULE_ID = 'map-shine-advanced';
 
-/** Boot-heartbeat HUD width — the live perf/info readout above the control panel. */
+/** Boot-heartbeat host box width. Historically sized the standalone perf HUD that
+ * used to render here directly; that HUD is now diag/perf-strip.js, mounted inside
+ * the control panel (which sets its own explicit width) — this now only sizes the
+ * host box itself, left as-is since the box's positioning (`right: 320px` below)
+ * was tuned against a real author-reported overlap with Foundry's sidebar. */
 const HEARTBEAT_W = 210;
 /** The heartbeat's own render target. Tiny and visually hidden (author, 2026-07-20:
  * "the rotating triangle isn't adding anything" — now that the numbers say it
@@ -536,6 +562,11 @@ function install() {
   // effects (candles today). Installed once, entered per-effect via the
   // Workshop panel below; stays effect-agnostic (ui/anchor-mode.js's own header).
   MapShine.__anchorMode = installAnchorMode(MapShine);
+  // ANCHOR VIEW MODE (2026-08-06) — the read/toggle sibling: see EVERY
+  // anchor at once (on or off) and right-click to flip one. Installed once,
+  // entered from its own scene-controls button below (ui/anchor-view-mode.js
+  // header explains why this is a separate file from anchor-mode.js above).
+  MapShine.__anchorViewMode = installAnchorViewMode(MapShine);
 
   // THE PASS GRAPH, VALIDATED AT BOOT (Keyhole §"THE FRAMEWORK" — 2026-07-17).
   // Node tests already prove PASSES validates (194+ assertions); this is the
@@ -734,6 +765,9 @@ function install() {
   /** Lightning READOUT — same posture as `candleReadout` just above. */
   let lightningReadout = { enabled: false, servedCount: 0, params: null, perfTier: null };
 
+  /** Fire READOUT — same posture as `candleReadout` just above. */
+  let fireReadout = { enabled: false, servedCount: 0, params: null, perfTier: null };
+
   /** Vegetation READOUT — same posture as `candleReadout` just above,
    * including `perfTier` (effect-cascade.js#resolveEffectTier, resolved for
    * EVERY effect at the registry door): the flutter shimmer and the ground
@@ -750,6 +784,12 @@ function install() {
    * is the real fix; this seed is the belt-and-braces half, the same posture
    * `water-registration.js` takes for the same reason. */
   let bloomReadout = { enabled: true, params: null };
+  /** Depth-of-field READOUT — same seed posture as bloom's own, above, and
+   * for the identical reason: the manifest already says `enabledFromProfile:
+   * 'low'`, so a `false` seed would misrepresent the window between
+   * construction and the first cascade resolve. `EFFECT_REAPPLIERS` (below)
+   * is what actually closes that window at boot. */
+  let dofReadout = { enabled: true, params: null };
   let sunShadowReadout = { enabled: false, params: null };
   /** Door-graphics READOUT — same posture as the readouts above: what the last
    * apply resolved (enable + the motion params the viewer's door manager reads). */
@@ -868,6 +908,21 @@ function install() {
     registerLightningMarkerSource();
   });
 
+  // FIRE — the vertical slab integral (docs/planning/Fire.md), through the SAME
+  // one door. Anchor-driven like the candle, and additionally mask-driven: the
+  // painted fire region's own width sets each blob's diameter, which then sets
+  // its puff rate, plume height, turbulence and light radius with no further
+  // authoring (that half is a later phase; anchors serve today).
+  effectRegistry.register(FIRE, (resolved) => {
+    const served = resolved.enabled ? anchorAuthority.anchorsForEffect('fire', activeFloorContext) : [];
+    fireReadout = {
+      enabled: resolved.enabled,
+      servedCount: served.length,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+    };
+  });
+
   // VEGETATION — `_Tree`/`_Bush`, MSA's third registered effect, through the
   // SAME one door. Unlike the candle it is NOT anchor-driven: its "instances"
   // are the tile/background items `vt-pan-viewer.js` already iterates for its
@@ -885,6 +940,15 @@ function install() {
   // viewer's runPostBloomPass reads each frame (see getBloomRenderState below).
   effectRegistry.register(BLOOM, (resolved) => {
     bloomReadout = { enabled: resolved.enabled, params: resolved.params };
+  });
+
+  // DEPTH OF FIELD — MSA's SECOND post-processing effect, through the SAME
+  // one door. Same shape as bloom's own registration just above: a
+  // whole-image screen pass with no anchor/item of its own, so `apply` only
+  // refreshes the shared readout the viewer's runPostDofPass reads each frame
+  // (see getDofRenderState below).
+  effectRegistry.register(DEPTH_OF_FIELD, (resolved) => {
+    dofReadout = { enabled: resolved.enabled, params: resolved.params };
   });
 
   // SUN SHADOWS (docs/planning/Sun-Shadows.md) — building + overhead +
@@ -1011,6 +1075,19 @@ function install() {
     effectRegistry.resolveAndApply('bloom', layers);
   }
 
+  /** Transient, in-memory depth-of-field param tuning (MapShine.setDof / the
+   * FOH-ROH card / a preset pick). Mirrors bloomLiveOverride exactly. */
+  const dofLiveOverride = {};
+
+  /** Re-resolve depth-of-field's cascade from live settings + the live
+   * override and apply. Mirrors reapplyBloom exactly; called on settings
+   * change, on ready, and by MapShine.setDof. */
+  function reapplyDof() {
+    const layers = deriveEffectLayers('depthOfField', (key) => readSetting(MODULE_ID, key));
+    layers.paramLayers = [dofLiveOverride];
+    effectRegistry.resolveAndApply('depthOfField', layers);
+  }
+
   /** Transient live override + re-resolve for SUN SHADOWS. Mirrors reapplyBloom
    * exactly (docs/planning/Sun-Shadows.md). */
   const sunShadowLiveOverride = {};
@@ -1054,6 +1131,17 @@ function install() {
     const layers = deriveEffectLayers('lightning', (key) => readSetting(MODULE_ID, key));
     layers.paramLayers = [lightningLiveOverride];
     effectRegistry.resolveAndApply('lightning', layers);
+  }
+
+  /** Transient, in-memory fire param tuning (MapShine.setFire) — mirrors
+   * candleLiveOverride/lightningLiveOverride exactly. */
+  const fireLiveOverride = {};
+
+  /** Re-resolve fire's cascade from live settings + the live override. */
+  function reapplyFire() {
+    const layers = deriveEffectLayers('fire', (key) => readSetting(MODULE_ID, key));
+    layers.paramLayers = [fireLiveOverride];
+    effectRegistry.resolveAndApply('fire', layers);
   }
 
   /** Transient, in-memory door-graphics param tuning (MapShine.setDoors) — the
@@ -1107,7 +1195,20 @@ function install() {
   const EFFECT_REAPPLIERS = [
     ['ui shadow', () => reapplyUiShadow()],
     ['candle', () => reapplyCandle()],
+    // Runs AFTER 'candle' (array order), so candleReadout.params is already
+    // fresh for this trigger by the time it reads autoIgniteEnabled etc.
+    ['candle auto-ignite', () => refreshCandleIgnition({ force: true })],
     ['lightning', () => reapplyLightning()],
+    // ⚠️ 2026-08-08: fire was EXACTLY the bug this list's own header warns
+    // about — `reapplyFire` existed, reachable from nowhere but
+    // `MapShine.setFire`, so `fireReadout` sat at its boot seed of
+    // `{enabled:false,...}` on every real ready/scene-load/settings-change
+    // until someone typed a console command. Author, live: fire appeared once
+    // (a manual `MapShine.setFire` call during testing had kicked it on for
+    // that session) and then was gone with no error on the next reload —
+    // exactly "silent, and invisible to a green test suite" from the note
+    // above, because nothing exercises boot's own reapply wiring.
+    ['fire', () => reapplyFire()],
     ['vegetation', () => reapplyVegetation()],
     ['door graphics', () => reapplyDoors()],
     ['water', () => water.reapply()],
@@ -1116,6 +1217,7 @@ function install() {
     ['window light', () => windowLight.reapply()],
     ['aperture gobo', () => apertureGobo.reapply()],
     ['bloom', () => reapplyBloom()],
+    ['depth of field', () => reapplyDof()],
     ['colour grade', () => reapplyGradeLook()],
     // Sun shadows MUST run per scene, not only at boot: this apply is what pushes
     // the new scene's `distancePixels` into the caster-height derivation, and an
@@ -1200,6 +1302,10 @@ function install() {
     authoredAnchorsPayload.overrides[id] = snapshotAnchorForPersistence(resolved);
     persistAuthoredAnchors();
     MapShine.debug?.refreshControls?.();
+    // A freshly-placed candle should reflect whatever the auto-ignite system
+    // has already decided for "right now", not sit lit (its authored default,
+    // above) until the next dawn/dusk crossing happens to come along.
+    refreshCandleIgnition({ force: true });
     return resolved;
   }
 
@@ -1227,6 +1333,57 @@ function install() {
       MapShine.debug?.refreshControls?.();
     }
     return existed;
+  }
+
+  // ---------------------------------------------------------------------------
+  // CANDLE AUTO-IGNITE (2026-08-06, author request) — the day/night dice roll
+  // itself is pure (effects/candle-ignite.js#shouldAutoIgnite); this is the
+  // ONLY place it is actually rolled and written through. Writes go through
+  // `updateCandleAnchor` exactly like the manual per-candle "Lit" checkbox
+  // does, so the render side needs no awareness this system exists at all —
+  // it only ever sees `anchor.enabled` change.
+  // ---------------------------------------------------------------------------
+
+  /** The day/night phase as of the LAST check, so the per-frame poll
+   * (pumpAstrolabe, below) can cheaply no-op on every frame that ISN'T a
+   * dawn/dusk crossing — `null` at boot, so the very first call always runs. */
+  let lastCandleIsDay = null;
+
+  /**
+   * Re-roll every participating candle's auto-ignite state against the
+   * CURRENT day/night phase.
+   *
+   * @param {{force?: boolean}} [opts] - `force`: re-roll even if the phase
+   *   has not flipped since the last call — a slider retune, a freshly
+   *   placed candle, or a scene/ready trigger (EFFECT_REAPPLIERS, below) all
+   *   need this even though the clock itself hasn't moved.
+   */
+  function refreshCandleIgnition({ force = false } = {}) {
+    const dial = getVtPanViewerTimeDialState();
+    const todHour = Number(dial?.todHour);
+    if (!Number.isFinite(todHour)) return; // viewer not ready yet — the next natural trigger tries again
+    const isDay = computeSun(todHour).aboveHorizon;
+    if (!force && isDay === lastCandleIsDay) return;
+    lastCandleIsDay = isDay;
+
+    const params = candleReadout.params ?? {};
+    if (params.autoIgniteEnabled !== true) return; // off by default — see CANDLE_FLAME_PARAMS' own doc
+
+    const dayChancePct = params.dayIgniteChancePct;
+    const nightChancePct = params.nightIgniteChancePct;
+    const reliabilityPct = params.igniteReliabilityPct;
+
+    for (const anchor of anchorAuthority.anchorsForKind('candleFlame')) {
+      if (anchor.params?.autoIgnite === false) continue; // this ONE candle opted out — only its manual "Lit" checkbox may move it
+      const nextEnabled = shouldAutoIgnite({
+        isDay,
+        dayChancePct,
+        nightChancePct,
+        reliabilityPct,
+        roll01: stableUnit01(anchor.id),
+      });
+      if (anchor.enabled !== nextEnabled) updateCandleAnchor(anchor.id, { enabled: nextEnabled });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1261,6 +1418,15 @@ function install() {
     // all, vs. millisecond-resolution + a short random suffix).
     const linkId = pendingLightningLinkId ?? `lightning:${crypto.randomUUID()}`;
     const id = `authored:${crypto.randomUUID()}`;
+    const params = { role, linkId };
+    // A fresh bolt's own "height off floor" (2026-08-05, author's own ask:
+    // never zero) — only the start endpoint's value is ever read
+    // (`groupLightningAnchorsIntoSources`'s own doc), so only it needs one
+    // computed; the end endpoint's own `elevation` stays at the schema
+    // default, unused, same as before.
+    if (role === 'start') {
+      params.elevation = defaultLightningElevation(floorBinding, anchorKindById('lightning')?.params?.elevation);
+    }
     const resolved = anchorAuthority.addAnchor({
       id,
       kind: 'lightning',
@@ -1268,7 +1434,7 @@ function install() {
       y,
       floorBinding,
       enabled: true,
-      params: { role, linkId },
+      params,
     });
     if (!resolved) {
       log.error(
@@ -1334,9 +1500,17 @@ function install() {
         .catch((err) => log.error('candle enable write/reapply failed:', err));
     }
     let changed = false;
-    // Every LOOK/LIGHT/MOTION param the debug-panel card writes (Presence's
-    // `enabled` is handled above, through the settings write, not this list).
-    for (const k of ['sizePx', 'color', 'lightRadiusPx', 'animationQuality', 'windResponse']) {
+    // Every CANDLE_FLAME_PARAMS key is settable (Presence's `enabled` is
+    // handled above, through the settings write, not this loop) — matches
+    // setLightning's own `Object.keys(...)` below rather than a hand-picked
+    // subset. This USED to be a hand-maintained list (['sizePx', 'color',
+    // 'lightRadiusPx', 'animationQuality', 'windResponse']) with exactly the
+    // failure mode setLightning's own comment warns about: the new auto-
+    // ignite params added below (2026-08-06) would have been silently
+    // un-settable from the debug panel — declared, defaulted, validated, and
+    // reachable from nowhere — until someone noticed the sliders looked live
+    // but did nothing.
+    for (const k of Object.keys(CANDLE_FLAME_PARAMS)) {
       if (k in p) {
         candleLiveOverride[k] = p[k];
         changed = true;
@@ -1345,6 +1519,12 @@ function install() {
     if (changed) {
       try {
         reapplyCandle();
+        // A slider drag under Advanced → Presence (auto-ignite on/off, either
+        // chance, Reliability) should re-roll at once, not wait for the next
+        // dawn/dusk crossing — `force` because the phase itself likely hasn't
+        // moved. Harmless no-op for every OTHER candle param (a colour tweak
+        // just re-confirms the same booleans).
+        refreshCandleIgnition({ force: true });
       } catch (err) {
         log.error('candle reapply (setCandle) failed:', err);
       }
@@ -1384,6 +1564,37 @@ function install() {
       }
     }
     return { ...lightningLiveOverride };
+  };
+
+  /**
+   * MapShine.setFire — the console tuner AND the Workshop card's write path.
+   * Mirrors setLightning exactly, including the "enabled writes the PLAYER
+   * setting, then reapplies once the write lands" ordering (see setCandle's own
+   * comment for why that matters).
+   *   MapShine.setFire({ posterize: 1, smokeAmount: 1.5 })
+   */
+  MapShine.setFire = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('fire', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyFire())
+        .catch((err) => log.error('fire enable write/reapply failed:', err));
+    }
+    let changed = false;
+    for (const k of Object.keys(FIRE_PARAMS)) {
+      if (k in p) {
+        fireLiveOverride[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      try {
+        reapplyFire();
+      } catch (err) {
+        log.error('fire reapply (setFire) failed:', err);
+      }
+    }
+    return { ...fireLiveOverride };
   };
 
   // MapShine.setVegetation — the console tuner AND the FOH/ROH panel's own
@@ -1555,6 +1766,37 @@ function install() {
     return { ...bloomLiveOverride };
   };
 
+  // MapShine.setDof — the console tuner AND the FOH/ROH card's + preset
+  // picker's write path (mirrors MapShine.setBloom exactly, including the
+  // "enabled writes the PLAYER setting, then reapplies once the write lands"
+  // shape). Accepts a full preset object (dofPreset(name)) or a single knob:
+  //   MapShine.setDof({ strength: 0.85, blurPerFloor: 2.0 })
+  MapShine.setDof = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('depthOfField', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyDof())
+        .catch((err) => log.error('depth of field enable write/reapply failed:', err));
+    }
+    let changed = false;
+    // Every key DOF_PARAMS declares — explicit, matching setBloom's precedent
+    // so a rename is a visible typo, not a silent no-op.
+    for (const k of ['strength', 'blurPerFloor', 'maxBlur']) {
+      if (k in p) {
+        dofLiveOverride[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      try {
+        reapplyDof();
+      } catch (err) {
+        log.error('depth of field reapply (setDof) failed:', err);
+      }
+    }
+    return { ...dofLiveOverride };
+  };
+
   // MapShine.setGrade — the Colour Grade card's + preset picker's + console
   // write path (mirrors MapShine.setBloom). A full preset object (gradePreset
   // (name)) or a single knob: MapShine.setGrade({ contrast: 1.2, toneMapping: 'aces' })
@@ -1652,6 +1894,11 @@ function install() {
   const getBloomRenderState = () => ({
     enabled: bloomReadout.enabled,
     params: bloomReadout.params ?? {},
+  });
+  // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
+  const getDofRenderState = () => ({
+    enabled: dofReadout.enabled,
+    params: dofReadout.params ?? {},
   });
 
   // SUN SHADOWS' two seams into the viewer (docs/planning/Sun-Shadows.md).
@@ -1755,6 +2002,43 @@ function install() {
     };
   };
 
+  /**
+   * THE SHADOW CASCADE's own seam (2026-08-05) — the scene's real floor
+   * elevations plus Foundry's own pixels-per-distance-unit, so
+   * `effects/lighting/shadow-bands.js` can answer "how many world pixels above
+   * this floor does the next one sit". Read LIVE on every call (the sun-shadow
+   * subsystem holds it as a getter): a GM can edit a Level's elevation
+   * mid-session, and a value captured at boot would pin every shadow in the
+   * scene to whatever the levels looked like then.
+   *
+   * ⚠️ BOTH HALVES ARE READS, NOT DERIVATIONS. The floors come from
+   * `getActiveSceneFloors` (already sorted, already carrying the real
+   * `elevation.bottom`/`elevation.top` off the Level documents), and the scale
+   * is `readGridDistancePixels`, which reads `canvas.dimensions.distancePixels`
+   * verbatim — Foundry's OWN pixels-per-grid-distance-unit constant, the same
+   * number `computeTokenOcclusionRadiusPx` already uses for light radii. It is
+   * deliberately NOT re-derived from `grid.size / grid.distance`, so the shadow
+   * system and Foundry's own geometry can never quietly disagree about how long
+   * a foot is (`scene-occlusion-sources.js`'s own header states this at length).
+   *
+   * Returns an empty floor list rather than throwing on any failure — the band
+   * plan treats that as "cannot answer" and falls back to the authored
+   * `aboveHeightPx` slider, reporting that it did.
+   */
+  const getShadowFloorPlan = () => {
+    try {
+      const sceneDoc = globalThis.canvas?.scene ?? null;
+      const floorsResult = getActiveSceneFloors(sceneDoc);
+      return {
+        floors: floorsResult.ok ? floorsResult.floors : [],
+        pxPerElevationUnit: readGridDistancePixels().distancePixels,
+      };
+    } catch (err) {
+      log.warn('sun shadows: could not read the scene floor plan — band heights fall back to the slider:', err);
+      return { floors: [], pxPerElevationUnit: 0 };
+    }
+  };
+
   // DOOR GRAPHICS' render-state seam (effects/door-graphics-render.js): the
   // cascade-resolved enable + motion params, plus the active floor's cached door
   // snapshots. `doorSnapshots` is read by reference every call, so a scene
@@ -1801,14 +2085,26 @@ function install() {
         // the shared look" — omitting it would silently make every override
         // invisible to the renderer despite being correctly stored.
         params: a.params,
-        // THIS CANDLE'S OWN HEIGHT GATE INPUT (2026-08-03) — the flame
-        // sprite shares a point light's own occlusion gate
-        // (point-light-illumination.js#buildHeightGateNode); it needs to
-        // know where the FLAME itself sits, which `lastKnownFloors` (cached
-        // on scene load / floor switch, no new Foundry read) plus this
-        // anchor's own locked band already answer. `resolveAnchorElevation
-        // Rank`'s own doc explains the 'all-levels' sentinel case.
-        elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors),
+        // THIS CANDLE'S OWN HEIGHT GATE INPUT (2026-08-03; height authored
+        // 2026-08-05) — the flame sprite shares a point light's own
+        // occlusion gate (point-light-illumination.js#buildHeightGateNode);
+        // it needs to know where the FLAME itself sits, which
+        // `lastKnownFloors` (cached on scene load / floor switch, no new
+        // Foundry read) plus this anchor's own locked band and its own
+        // authored `params.elevation` ("height off floor") now answer.
+        // `resolveAnchorElevationRank`'s own doc explains the 'all-levels'
+        // sentinel case.
+        elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors, a.params?.elevation),
+        // THIS CANDLE'S OWN CAST-LIGHT ELEVATION (2026-08-05) — a real
+        // absolute world elevation (`resolveAnchorElevationWorldUnits`, this
+        // same floorBinding + params.elevation, just not floor-index-shaped),
+        // fed to `effects/candle-flame-geometry.js#buildCandleLightSources`
+        // so the light this candle casts is ranked by the depth authority at
+        // the SAME height its flame sprite gates against above, instead of
+        // silently defaulting to absolute elevation 0
+        // (point-light-pool.js#update's own "light.elevation is undefined
+        // for candle-cast lights" comment — this is what closes that gap).
+        elevation: resolveAnchorElevationWorldUnits(a),
       })),
     };
   };
@@ -1829,11 +2125,167 @@ function install() {
       x: a.x,
       y: a.y,
       params: a.params,
-      // See getCandleRenderState's own identical field, just above — the
-      // bolt shares the SAME height gate as the flame and a point light.
-      elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors),
+      // THE BOLT'S OWN DEPTH-AUTHORITY INPUT (2026-08-05) — a raw absolute
+      // world elevation, the SAME `resolveAnchorElevationWorldUnits` call
+      // getCandleRenderState's own `elevation` field (just above) uses, NOT
+      // a pre-computed rank: `lightning-subsystem.js`'s own injected
+      // `resolveExpectedDepth` turns this into the tie-safe value the shader
+      // actually compares, the SAME two-step split every other depth-
+      // authority consumer already uses (vt-pan-viewer.js's own
+      // `resolveExpectedDepth` composition, right where it constructs this
+      // subsystem). Migrated OFF the OLD `resolveAnchorElevationRank`/
+      // `elevationRank` mechanism the flame sprite still uses — see
+      // lightning-render.js's own header for why only the ribbon mesh moved.
+      elevation: resolveAnchorElevationWorldUnits(a),
     })),
   });
+
+  /**
+   * FIRE'S RENDER-STATE SEAM. Same shape as the candle's and the bolt's: boot
+   * composes it, `vt/` never reaches the anchor authority or the settings
+   * cascade itself.
+   *
+   * ⚠️ `mPerPx` IS SERVED, NOT ASSUMED. Every derived quantity in the fire's
+   * scale chain — its puff frequency, its plume height, whether it reads as
+   * laminar or turbulent — depends on how many real METRES a painted pixel is,
+   * and that is a property of the scene's grid, not a constant. The same
+   * painted blob is a campfire on a 100 px/5 ft map and a housefire on a
+   * 20 px/5 ft one, and the puff law has to know which.
+   */
+  /**
+   * THE PAINTED `_Fire` REGION → FIRE SOURCES, cached by mask signature.
+   *
+   * ⚠️ CACHED, BECAUSE THIS IS A CHAMFER DISTANCE TRANSFORM OVER THE WHOLE
+   * FLOOR GRID and `getFireRenderState` is called every frame. The signature is
+   * sampled (see `fireMaskSignature`'s own note), so the mask authority's
+   * version counter is checked alongside it — a sampled hash can miss a small
+   * edit, and a stale bake surviving an edit is its own bug class.
+   */
+  let fireMaskCache = { floorIndex: null, signature: 0, version: -1, fires: [] };
+  /**
+   * THE SPAWN CLOUD — the same painted grid, as the flat point buffer the
+   * particle kernels index (`SPAWN_KINDS.extracted`).
+   *
+   * ⚠️ CACHED ON THE SAME SIGNATURE+VERSION PAIR AS THE FIRES ABOVE, and for a
+   * stronger reason: pushing a cloud re-seeds every engine, so recomputing it
+   * per frame would restart the whole population sixty times a second and
+   * nothing would ever live long enough to be seen. `signature` rides along on
+   * the returned object so the subsystem can tell "same cloud" without
+   * comparing buffers.
+   */
+  let fireSpawnCache = { floorIndex: null, signature: 0, version: -1, cloud: null };
+  const getFireSpawnCloud = (floorIndex) => {
+    let grid = null;
+    try {
+      grid = maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+    if (!grid) return null;
+    const version = getMaskAuthorityVersion?.() ?? -1;
+    const signature = fireMaskSignature(grid);
+    if (
+      fireSpawnCache.floorIndex === floorIndex &&
+      fireSpawnCache.signature === signature &&
+      fireSpawnCache.version === version
+    ) {
+      return fireSpawnCache.cloud;
+    }
+    const extracted = extractFireSpawnPoints(grid);
+    const cloud = { ...extracted, signature };
+    fireSpawnCache = { floorIndex, signature, version, cloud };
+    log.info(`fire: painted region on floor ${floorIndex} yielded ${extracted.count} spawn point(s)`);
+    return cloud;
+  };
+  const getMaskDrivenFires = (floorIndex) => {
+    let grid = null;
+    try {
+      grid = maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+    } catch (err) {
+      // An absent `_Fire` mask is the common case, not an error — most scenes
+      // have no fire painted at all. Anything else is worth saying once.
+      if (!/missing|absent|not found/i.test(String(err?.message ?? err))) {
+        log.warn('fire: could not read the painted region for floor', floorIndex, err);
+      }
+      return [];
+    }
+    if (!grid) return [];
+    const version = getMaskAuthorityVersion?.() ?? -1;
+    const signature = fireMaskSignature(grid);
+    if (
+      fireMaskCache.floorIndex === floorIndex &&
+      fireMaskCache.signature === signature &&
+      fireMaskCache.version === version
+    ) {
+      return fireMaskCache.fires;
+    }
+    const fires = extractFiresFromMask(grid);
+    fireMaskCache = { floorIndex, signature, version, fires };
+    log.info(`fire: painted region on floor ${floorIndex} yielded ${fires.length} fire(s)`);
+    return fires;
+  };
+
+  const getFireRenderState = () => {
+    const grid = canvas?.scene?.grid ?? null;
+    const feetPerSquare = Number(grid?.distance) > 0 ? Number(grid.distance) : 5;
+    const pxPerSquare = Number(grid?.size) > 0 ? Number(grid.size) : 100;
+    // Foundry authors distance in the scene's own units; 5 ft ≈ 1.524 m is the
+    // standard D&D square, and `grid.distance` is how many of those a square is.
+    const mPerPx = (feetPerSquare * 0.3048) / pxPerSquare;
+    const floorIndex = activeFloorContext?.floorIndex ?? 0;
+
+    // THE PAINTED REGION — the primary source. Each blob's own width sets its
+    // diameter, so a wide blob is a bonfire and a thin line along a wall is a
+    // row of small flames, with no second authoring step.
+    const maskFires = fireReadout.enabled
+      ? getMaskDrivenFires(floorIndex).map((f) => ({
+          ...f,
+          fuel: fireReadout.params?.fuel ?? 'wood',
+          color: fireReadout.params?.color ?? '#fdba35',
+          windExposure: sampleWindExposureAt(f.x, f.y),
+          outdoors01: sampleWindExposureAt(f.x, f.y),
+          // A painted fire sits on its floor's own ground. An anchor is what
+          // you place when you want it up on a table.
+          elevation: activeFloorContext?.elevation ?? 0,
+          // This fire HAS a painted shape to conform to — the render's mask
+          // clip (fire-render.js) is keyed on this, not on `id`'s `mask:`
+          // prefix, so the two never have a chance to silently disagree.
+          maskClip: true,
+        }))
+      : [];
+
+    return {
+      enabled: fireReadout.enabled,
+      params: fireReadout.params ?? {},
+      perfTier: fireReadout.perfTier,
+      mPerPx,
+      maskFireCount: maskFires.length,
+      // The particle kernels' shape source — every flame, ember and smoke
+      // sprite is born on one of these points.
+      spawnCloud: fireReadout.enabled ? getFireSpawnCloud(floorIndex) : null,
+      fires: [
+        ...maskFires,
+        ...anchorAuthority.anchorsForEffect('fire', activeFloorContext).map((a) => ({
+          id: a.id,
+          x: a.x,
+          y: a.y,
+          diameterPx: Number(a.params?.diameterPx) > 0 ? Number(a.params.diameterPx) : 120,
+          intensity: Number.isFinite(a.params?.intensity) ? a.params.intensity : 1,
+          fuel: a.params?.fuel ?? fireReadout.params?.fuel ?? 'wood',
+          color: a.params?.useCustomColor ? a.params.customColor : (fireReadout.params?.color ?? '#fdba35'),
+          windExposure: sampleWindExposureAt(a.x, a.y),
+          outdoors01: sampleWindExposureAt(a.x, a.y),
+          // A raw absolute world elevation, exactly as the bolt serves — the
+          // subsystem's injected `resolveExpectedDepth` turns it into the
+          // tie-safe value the shader compares. NEVER a pre-computed rank.
+          elevation: resolveAnchorElevationWorldUnits(a),
+          // An anchor is placed precisely because the author wants fire
+          // somewhere with no `_Fire` paint at all — never clipped.
+          maskClip: false,
+        })),
+      ],
+    };
+  };
 
   // WIND EXPOSURE AT AN ARBITRARY WORLD POINT (2026-07-21, Wind.md Tier 0/1 —
   // the debug overlay's own seam). Author-reported: the overlay's arrows
@@ -1877,6 +2329,21 @@ function install() {
   // (feedback_required_masks_fail_loud).
   const getOutdoorsMaskGrid = (floorIndex) => maskAuthority.getDerived('outdoors', floorIndex)?.grid ?? null;
 
+  // FIRE'S MASK, AS A GPU TEXTURE SEAM (2026-08-08) — the same coarse `_Fire`
+  // grid `getMaskDrivenFires` already extracts point sources from, handed to
+  // `vt/` to bake so the flame's own shader can clip its footprint to the
+  // painted shape instead of always drawing a free-floating circle. Unlike
+  // `_Outdoors`, an absent `_Fire` is the ordinary case (most floors have no
+  // fire painted at all) — swallowed here exactly like `getMaskDrivenFires`'s
+  // own try/catch, never the required-mask loud throw above.
+  const getFireMaskGrid = (floorIndex) => {
+    try {
+      return maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   // WATER's three mask-authority seams — see effects/water/water-seams.js for
   // why they ask different questions at deliberately different resolutions.
   const { getWaterMaskGrid, getFloorsWithWater, getWaterMaskUrl } = createWaterSeams({
@@ -1896,7 +2363,7 @@ function install() {
   // SHINE's two mask-authority seams (docs/planning/Specular.md) — see
   // effects/specular/specular-seams.js for why the RECT comes from the coarse
   // grid and the COLOUR can only come from the authored file.
-  const { getSpecularMaskRect, getSpecularMaskUrl } = createSpecularSeams({
+  const { getSpecularMaskRect, getSpecularMaskUrl, getSpecularBackgroundItemId } = createSpecularSeams({
     maskAuthority,
     getFloors: () => lastKnownFloors,
   });
@@ -1937,10 +2404,12 @@ function install() {
     log,
   });
 
-  // WINDOW LIGHT's two mask-authority seams (docs/planning/Windows.md) — same
+  // WINDOW LIGHT's mask-authority seams (docs/planning/Windows.md) — same
   // split as SHINE's, for the same reason: the RECT comes from the coarse
-  // grid, the COLOUR can only come from the authored file.
-  const { getWindowMaskRect, getWindowMaskUrl } = createWindowSeams({
+  // grid, the COLOUR can only come from the authored file. `getWindowBackground
+  // ItemId` is the depth-authority migration's own seam (2026-08-05), mirroring
+  // SHINE's `getSpecularBackgroundItemId` above.
+  const { getWindowMaskRect, getWindowMaskUrl, getWindowBackgroundItemId } = createWindowSeams({
     maskAuthority,
     getFloors: () => lastKnownFloors,
   });
@@ -2028,6 +2497,7 @@ function install() {
     uiWindowShadow: reapplyUiShadow,
     vegetation: reapplyVegetation,
     bloom: reapplyBloom,
+    depthOfField: reapplyDof,
     grade: reapplyGradeLook,
     doorGraphics: reapplyDoors,
     water: water.reapply,
@@ -2052,11 +2522,44 @@ function install() {
     layers.playerEnable = enabled ? 'on' : 'off'; // transient override — nothing written
     effectRegistry.resolveAndApply(id, layers);
   }
+  /**
+   * Scene/session context, shared by every performance report so two runs are actually
+   * comparable (author, 2026-08-06, reviewing a live sweep: the report had no idea what
+   * scene, floor, resolution or build it ran against — a real gap once you're trying to
+   * tell "did this get faster" apart from "this is a different, lighter scene"). ONE
+   * function, read by both `perfHarness` (the sweep) and `profileHarness` (the zone
+   * profiler) rather than two copies drifting apart — see `feedback_mode_forks_silently_
+   * drop_features` for why a second copy is exactly how that class of bug starts.
+   */
+  function buildPerfContext() {
+    const info = readVtPanViewerRenderInfo();
+    return {
+      msaVersion: MapShine.version,
+      codename: MapShine.codename,
+      resolution: info ? { w: info.width, h: info.height, pixelRatio: info.pixelRatio } : null,
+      sceneName: activeFloorContext?.sceneName ?? null,
+      floorIndex: activeFloorContext?.floorIndex ?? 0,
+      // Resolved through the REAL cascade, not a guessed settings key. An effect's on/off
+      // state is the product of profile + GM + player layers, and a report that guessed
+      // it would mislabel exactly the rows someone is about to act on.
+      enabledEffects: effectRegistry
+        .list()
+        .filter((m) =>
+          resolveEffectEnabled(
+            m,
+            deriveEffectLayers(m.id, (k) => readSetting(MODULE_ID, k))
+          )
+        )
+        .map((m) => m.id),
+    };
+  }
+
   const perfHarness = {
     listEffects: () => effectRegistry.list().map((m) => ({ id: m.id, label: m.title ?? m.id })),
     setForcedEnabled: (id, enabled) => forceEffectEnabled(id, enabled),
     setGpuProbe: (on) => setVtPanViewerGpuProbe(on),
     resetFrameStats: () => resetVtPanViewerFrameStats(),
+    getContext: () => buildPerfContext(),
     readCost: () => {
       const d = getVtPanViewerDiagnostics();
       return {
@@ -2067,19 +2570,20 @@ function install() {
       };
     },
   };
-  const perfLab = createPerfLab(perfHarness);
-  MapShine.debug.registerAction(
-    'perf-lab',
-    '🔬 Performance',
-    () => {
-      perfLab.open();
-      return {
-        opened: true,
-        hint: 'Panel opened (top-right). Click "Run sweep" — the scene will flicker for a few seconds, then restore. The full JSON report is copied to your clipboard when it finishes.',
-      };
-    },
-    { primary: true } // quick-reach, alongside Pixel Probe — both load-bearing, neither buried in a folder
-  );
+  // THE PERFORMANCE CENTER (docs/planning/Performance.md; author directive
+  // 2026-08-06: "move all performance monitoring things into a single space
+  // which becomes the only place for performance related tools"). Every
+  // perf-related report/action/panel below declares `{ zone: 'performance' }`
+  // instead of leaving `zone` unset (which defaults to the Lab) or
+  // `{primary:true}` (the Lab's own quick-reach row) — debug-panel.js's
+  // `renderPerformanceCenter` gathers all of them into diag/perf-strip.js's
+  // own expand area, never a rail zone. `perfLab`/`perfHud` used to be
+  // SEPARATE floating overlays (`.open()`/toggle-then-appear-top-right);
+  // both were refactored the same day into plain embeddable elements
+  // (`{ el }`) mounted here via the same `registerPanel` primitive every
+  // effect card already uses — no new registration API.
+  const perfLab = createPerfLab();
+  MapShine.debug.registerPanel('perf-lab-panel', 'Effect sweep', () => perfLab.el, { zone: 'performance' });
 
   // ===========================================================================
   // THE PERFORMANCE PROFILE (docs/planning/Performance.md)
@@ -2132,29 +2636,7 @@ function install() {
           samples.cpuEncodeMsAvgLast120 === null ? null : { p50: samples.cpuEncodeMsAvgLast120, sampleCount: 120 },
       };
     },
-    getContext: () => {
-      const info = readVtPanViewerRenderInfo();
-      return {
-        msaVersion: MapShine.version,
-        codename: MapShine.codename,
-        resolution: info ? { w: info.width, h: info.height, pixelRatio: info.pixelRatio } : null,
-        sceneName: activeFloorContext?.sceneName ?? null,
-        floorIndex: activeFloorContext?.floorIndex ?? 0,
-        // Resolved through the REAL cascade, not a guessed settings key. An
-        // effect's on/off state is the product of profile + GM + player layers,
-        // and a report that guessed it would mislabel exactly the rows someone
-        // is about to act on.
-        enabledEffects: effectRegistry
-          .list()
-          .filter((m) =>
-            resolveEffectEnabled(
-              m,
-              deriveEffectLayers(m.id, (k) => readSetting(MODULE_ID, k))
-            )
-          )
-          .map((m) => m.id),
-      };
-    },
+    getContext: () => buildPerfContext(),
     waitFrames: (n) => waitProfiledFrames(n),
     getManifests: () => effectRegistry.list(),
     readVram: () =>
@@ -2174,33 +2656,6 @@ function install() {
     runSweep: () => runSweep(perfHarness),
   };
 
-  MapShine.debug.registerAction(
-    'perf-run',
-    '🔬 Profile (per-zone)',
-    async () => {
-      const started = new Date().toISOString();
-      lastPerfProfile = await runProfileSession(profileHarness, {
-        generatedAt: started,
-        onProgress: (phase, detail) => log.info(`perf profile: ${phase}${detail ? ` — ${detail}` : ''}`),
-      });
-      // RETURN THE REPORT — do not copy it here. `debug-panel-controls.js`'s
-      // makeRunnable is what every action button in this panel is wired to: it
-      // awaits entry.fn(), THEN stringifies and copies whatever it returned —
-      // after this function has already returned. A copyToClipboard() call
-      // inside the action body runs first and is unconditionally overwritten a
-      // moment later by the panel's own copy of the return value. Confirmed
-      // live 2026-07-27: the clipboard held a five-field summary object, never
-      // the report, on every click. Every other action in this file
-      // (orientation-self-test, particle-diagnostics, vt-live-decode, …)
-      // already follows the real contract — just return the payload.
-      return lastPerfProfile;
-    },
-    // Quick-reach beside the sweep: this is the one you click when something
-    // feels slow, and burying it in a folder would make the sweep the default
-    // answer to a question it cannot answer.
-    { primary: true }
-  );
-
   const perfHud = createPerfHud({
     profiler: perfProfiler,
     arm: () =>
@@ -2216,23 +2671,68 @@ function install() {
   });
 
   // The full run: zones AND the on/off sweep, so every effect gets both a direct
-  // and a marginal measurement and the report can say where they disagree. Slow
-  // and visibly flickery (the sweep throttles the loop by design), which is why
-  // it is a separate, deliberate button rather than a flag on the quick one.
-  MapShine.debug.registerAction('perf-run-full', '🔬 Profile + effect sweep (slow)', async () => {
-    const started = new Date().toISOString();
-    lastPerfProfile = await runProfileSession(profileHarness, {
-      generatedAt: started,
-      includeSweep: true,
-      onProgress: (phase, detail) => log.info(`perf profile: ${phase}${detail ? ` — ${detail}` : ''}`),
-    });
-    // See perf-run's comment: the panel copies the RETURN VALUE, always after
-    // entry.fn() resolves — a manual copyToClipboard() here would be silently
-    // clobbered. effects[].agreement is already in the report per effect;
-    // filtering it into a synthetic summary field would just duplicate what
-    // the reader can already see.
-    return lastPerfProfile;
-  });
+  // and a marginal measurement and the report can say where they disagree.
+  //
+  // THE ONE BUTTON (2026-08-06, author directive: "I would like a single button
+  // which runs both a GPU and CPU report... I don't mind if you make the report
+  // generation take much longer, accuracy is more important... imagine that this
+  // tool might be used by a lay person, so a single performance button is the
+  // way to go"). This USED TO be three separate actions — a quick static zone
+  // profile ('perf-run'), a camera-driven benchmark with no sweep
+  // ('perf-benchmark'), and this one (zone profile + sweep, no camera movement)
+  // — each answering a different sliver of "what's slow" and leaving it to the
+  // reader to know which button gives which half. All three are now this ONE
+  // action: the camera drives a real N→S traversal (so residency/paging work
+  // shows up, not just a static view) WHILE the per-zone CPU+GPU profile
+  // measures it, and the effect sweep — the ONLY way to see grade/water/
+  // vegetation's cost, none of which have a zone of their own — runs
+  // afterward as an independent cross-check (perf-report.js's `effects[]`
+  // already reconciles the two automatically). Every settle/sample knob below
+  // is turned up for accuracy, not speed, on purpose.
+  MapShine.debug.registerAction(
+    'perf-run-full',
+    '🔬 Performance Report (this scene, CPU + GPU, ~2–4 min)',
+    async () => {
+      const path = buildBenchmarkPath(); // throws BEFORE anything runs if no scene is loaded
+      const started = new Date().toISOString();
+      // Start the camera moving, then profile WHILE it moves — the route IS the
+      // workload, so the measurement window is exactly its duration and every
+      // resident-page/paging cost a static view would never trigger gets a
+      // chance to show up.
+      const playing = playCameraPath(path).catch((err) => {
+        log.error('camera path playback failed during the performance report run:', err);
+      });
+      try {
+        lastPerfProfile = await runProfileSession(profileHarness, {
+          generatedAt: started,
+          measureUntil: playing,
+          includeSweep: true,
+          // 3x the profiler's own default (DEFAULT_SETTLE_FRAMES=30) — this run
+          // is already ~2-4 minutes end to end, so a few extra seconds letting
+          // shader compiles/the first residency pass/the first bake clear
+          // before the timed window starts is free by comparison, and buys a
+          // cleaner window than the quick actions this replaces ever had.
+          settleFrames: 90,
+          route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms`,
+          onProgress: (phase, detail) => log.info(`perf report: ${phase}${detail ? ` — ${detail}` : ''}`),
+        });
+      } finally {
+        stopCameraPath();
+        await playing;
+      }
+      // Feed the sweep's OWN rich per-effect table (perf-lab.js's tested
+      // renderer) from the SAME run, via the raw sweep buildPerfReport echoes
+      // back — no second sweep, no reshaping effects[] back into the shape
+      // renderResults expects.
+      perfLab.renderResult(lastPerfProfile.sweepRaw?.summary ?? null, lastPerfProfile.sweepRaw?.context ?? null);
+      // See perf-run's old comment (now folded into this one): the panel copies
+      // the RETURN VALUE, always after entry.fn() resolves — a manual
+      // copyToClipboard() here would be silently clobbered.
+      MapShine.debug.refreshControls();
+      return lastPerfProfile;
+    },
+    { zone: 'performance' }
+  );
 
   /**
    * Build the FIXED north-to-south benchmark route. Extracted 2026-07-29 (was
@@ -2310,28 +2810,6 @@ function install() {
       },
     });
   }
-
-  MapShine.debug.registerAction('perf-benchmark', '🏁 Benchmark: N→S map sweep (60s)', async () => {
-    const path = buildBenchmarkPath();
-    const started = new Date().toISOString();
-    // Start the camera moving, then profile WHILE it moves — the route IS the
-    // workload, so the measurement window is exactly its duration.
-    const playing = playCameraPath(path).catch((err) => {
-      log.error('camera path playback failed during the benchmark run:', err);
-    });
-    try {
-      lastPerfProfile = await runProfileSession(profileHarness, {
-        generatedAt: started,
-        measureUntil: playing,
-        route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms`,
-        onProgress: (phase, detail) => log.info(`perf benchmark: ${phase}${detail ? ` — ${detail}` : ''}`),
-      });
-    } finally {
-      stopCameraPath();
-      await playing;
-    }
-    return lastPerfProfile;
-  });
 
   /**
    * FORCE EVERY EFFECT to resolve as if the performance PROFILE were `profile`,
@@ -2447,9 +2925,10 @@ function install() {
         // by peak cost across tiers.
         ...summarizeTierComparison(tierResults),
       };
+      MapShine.debug.refreshControls();
       return lastPerfProfile;
     },
-    { primary: true }
+    { zone: 'performance' }
   );
   // THE ESCAPE HATCH for lastAllTiersReports — one full perf-profile report
   // for one tier from the LAST all-tiers run, with no second ~10-minute run.
@@ -2460,15 +2939,12 @@ function install() {
   // (feedback_debug_ui_one_action_one_control).
   MapShine.getTierReport = (profile) => lastAllTiersReports?.[profile] ?? null;
 
-  MapShine.debug.registerAction('perf-hud', '📊 Live zone HUD (toggle)', () => {
-    const state = perfHud.toggle();
-    return {
-      ...state,
-      hint: state.visible
-        ? 'Top-right overlay, repainting 4x/sec over a rolling window. Pan, zoom, or toggle an effect and watch the ranking move. Toggle again to switch it off — it arms the profiler while visible.'
-        : 'HUD off; the profiler and the GPU zone timer are disarmed.',
-    };
-  });
+  // Its own Show/Hide button lives inside perfHud.el now (2026-08-06) — no
+  // external toggle action needed. Deliberately still separate from the ONE
+  // report button below: this is a LIVE view for while you pan/zoom/toggle an
+  // effect by hand, not a report, and folding it into the report action would
+  // mean it could only ever show a snapshot from ~2-4 minutes ago.
+  MapShine.debug.registerPanel('perf-hud-panel', 'Live zone ranking', () => perfHud.el, { zone: 'performance' });
 
   // THE CAMERA-PATH TOOL (2026-07-21, author request: revive V2's camera-pass
   // recorder for PIXI mode, with UI-hide, needed to finish releasing maps).
@@ -2632,6 +3108,22 @@ function install() {
       })
     );
 
+    // Height off floor (2026-08-05) — always its own value, like brightness
+    // above: there is no shared "all candles" height to inherit from, so
+    // this is a plain param control rather than an inheritable-range-row.
+    // Feeds BOTH the flame sprite's own height gate and the light this
+    // candle casts (candle-flame-geometry.js#resolveAnchorElevationWorldUnits
+    // / point-light-pool.js#resolveAnchorElevationRank) — see anchor-catalog.
+    // js's `elevation` param doc for why depth-authority occlusion needed
+    // this authored at all. `patch()`'s `targetIds` fan-out already makes
+    // this a genuine batch edit across every selected candle for free.
+    wrap.append(
+      buildParamControl('elevation', CANDLE_ANCHOR_PARAMS.elevation, {
+        value: anchor.params?.elevation ?? 0,
+        onChange: (v) => patch({ params: { elevation: v } }),
+      })
+    );
+
     // Custom colour — a checkbox + a swatch (two rows, not one combined
     // control: the two generic widgets already exist and compose cleanly;
     // picking a colour also turns the override on, so a user who just wants
@@ -2672,6 +3164,18 @@ function install() {
         { type: 'bool', label: 'Lit', help: 'Turn this one candle off without deleting it.' },
         { value: anchor.enabled !== false, onChange: (v) => patch({ enabled: v }) }
       )
+    );
+
+    // Auto-ignite opt-out (2026-08-06) — whether the effect-wide day/night
+    // roll (Candle flames panel → Advanced → Presence) is even ALLOWED to
+    // touch this candle's own "Lit" above. Sits directly under it since the two
+    // controls answer one combined question: "is this candle lit, and who
+    // gets to decide that."
+    wrap.append(
+      buildParamControl('autoIgnite', CANDLE_ANCHOR_PARAMS.autoIgnite, {
+        value: anchor.params?.autoIgnite !== false,
+        onChange: (v) => patch({ params: { autoIgnite: v } }),
+      })
     );
 
     return wrap;
@@ -2726,6 +3230,12 @@ function install() {
     // (ui/anchor-mode.js's own header explains why this replaced proximity
     // hit-testing) — no need to separately arm the passive diagnostic overlay.
     const enterCandlePlacement = () => {
+      // Anchor View Mode shows every kind's icons at the SAME screen
+      // position/z-index this placement session draws its own — leaving
+      // both open at once would double-draw every candle icon. One replaces
+      // the other rather than stacking (mirrors enterAnchorViewMode's own
+      // matching guard, below).
+      if (MapShine.__anchorViewMode.isActive()) MapShine.__anchorViewMode.exit();
       const result = MapShine.__anchorMode.enter({
         kindLabel: 'candle',
         icon: anchorKindById('candleFlame')?.icon,
@@ -2782,6 +3292,50 @@ function install() {
    * catalog.js) — role/linkId/intensity the edit popup can show or patch. */
   const LIGHTNING_ANCHOR_PARAMS = anchorKindById('lightning')?.params ?? {};
 
+  /** Role-aware icon glyph (`ui/anchor-mode.js`'s `opts.icon` accepts a
+   * `(anchor) => glyph` function precisely for this) — start and end read
+   * visually distinct at a glance instead of two identical ⚡ with no way to
+   * tell which is which. `anchor` is `null` for the toolbar's own generic
+   * hint text; falls back to the start glyph there (the more natural "this
+   * is what you place first" representative). A waypoint (V2 wandering-line
+   * interior point, imported but not yet acted on) gets a neutral marker. */
+  function lightningRoleIcon(anchor) {
+    const role = anchor?.params?.role;
+    if (role === 'end') return '💥';
+    if (role === 'waypoint') return '🔹';
+    return '⚡';
+  }
+
+  /** `[startId, endId]` pairs for every COMPLETE bolt currently served —
+   * reuses the SAME pairing `lightning-subsystem.js` itself uses to spawn the
+   * real mesh (`groupLightningAnchorsIntoSources`), so the drawn connector
+   * line can never disagree with which anchors actually form a bolt. An
+   * orphaned single endpoint (placement interrupted mid-pair, or one end
+   * deleted) correctly contributes no pair — `anchor-mode.js#drawLines`
+   * already skips any id it can't find a marker for, so nothing more is
+   * needed here for that case. */
+  function lightningLinePairs() {
+    const anchors = anchorAuthority.anchorsForEffect('lightning', activeFloorContext);
+    const { sources } = groupLightningAnchorsIntoSources(anchors);
+    return sources.map((s) => [s.startId, s.endId]);
+  }
+
+  /** The OTHER endpoint sharing this one's `linkId` and holding `wantRole` —
+   * lets the elevation control below be shown (and correctly patch the START
+   * anchor) from EITHER endpoint's own popup. A NULL floor context
+   * (`anchorsForEffect`'s own "no filter, show everything" mode) so this
+   * lookup always finds the partner regardless of which floor is currently
+   * being viewed or either endpoint's own `floorVisibility` — this is a
+   * structural lookup (which anchors form one bolt), not a visibility one. */
+  function findLightningPartner(anchor, wantRole) {
+    const linkId = anchor?.params?.linkId;
+    if (!linkId) return null;
+    const anchors = anchorAuthority.anchorsForEffect('lightning', null);
+    return (
+      anchors.find((a) => a.id !== anchor.id && a.params?.linkId === linkId && a.params?.role === wantRole) ?? null
+    );
+  }
+
   /** Build the per-endpoint edit form (ui/anchor-mode.js's popup content).
    * `role`/`linkId` are shown read-only (structural — set once at placement,
    * never hand-edited); `intensity` and `enabled` (`Lit`) are the two
@@ -2800,7 +3354,7 @@ function install() {
       role === 'start'
         ? '⚡ Bolt start'
         : role === 'end'
-          ? '⚡ Bolt end (impact point)'
+          ? '💥 Bolt end (impact point)'
           : '⚡ Bolt waypoint (imported from a V2 wandering line — not yet used)';
     wrap.append(roleLine);
 
@@ -2810,6 +3364,38 @@ function install() {
         onChange: (v) => patch({ params: { intensity: v } }),
       })
     );
+
+    // HEIGHT OFF THE FLOOR (2026-08-05, depth-authority occlusion) — ONE
+    // shared value, stored on the start anchor only
+    // (`groupLightningAnchorsIntoSources`' own "the start anchor's own value
+    // is the bolt's only answer" design), but shown and editable from EITHER
+    // endpoint's own popup (author's own ask, 2026-08-05) so nobody has to
+    // remember which end "really" owns it. Deliberately writes straight to
+    // `startAnchor.id` rather than going through `patch()`/`targetIds` above
+    // — unlike `intensity`/`enabled`, "which endpoint's height changes" is
+    // never a per-selected-anchor question, it is always "this bolt's start".
+    if (role === 'start' || role === 'end') {
+      const startAnchor = role === 'start' ? anchor : findLightningPartner(anchor, 'start');
+      if (startAnchor) {
+        wrap.append(
+          buildParamControl('elevation', LIGHTNING_ANCHOR_PARAMS.elevation, {
+            value: startAnchor.params?.elevation ?? 0,
+            onChange: (v) => updateLightningAnchor(startAnchor.id, { params: { elevation: v } }),
+          })
+        );
+        if (role === 'end') {
+          const heightNote = document.createElement('div');
+          Object.assign(heightNote.style, { fontSize: '9.5px', opacity: '0.6' });
+          heightNote.textContent = 'Shared with this bolt’s ⚡ start point.';
+          wrap.append(heightNote);
+        }
+      } else {
+        const heightNote = document.createElement('div');
+        Object.assign(heightNote.style, { fontSize: '9.5px', opacity: '0.6' });
+        heightNote.textContent = 'This bolt’s ⚡ start point hasn’t been placed yet.';
+        wrap.append(heightNote);
+      }
+    }
 
     wrap.append(
       buildParamControl(
@@ -2835,14 +3421,16 @@ function install() {
     const onChange = (id, value) => MapShine.setLightning({ [id]: value });
 
     const enterLightningPlacement = () => {
+      if (MapShine.__anchorViewMode.isActive()) MapShine.__anchorViewMode.exit(); // see enterCandlePlacement's own note
       const result = MapShine.__anchorMode.enter({
         kindLabel: 'lightning bolt',
-        icon: anchorKindById('lightning')?.icon,
+        icon: lightningRoleIcon,
         listAnchors: () => anchorAuthority.anchorsForEffect('lightning', activeFloorContext),
         addAnchor: (wx, wy) => addLightningEndpoint(wx, wy),
         updateAnchor: (id, patch) => updateLightningAnchor(id, patch),
         removeAnchor: (id) => removeLightningAnchor(id),
         buildEditForm: buildLightningEditForm,
+        linePairs: lightningLinePairs,
       });
       if (!result?.ok) log.error('could not enter lightning placement mode:', result?.reason);
     };
@@ -2868,7 +3456,7 @@ function install() {
       add: {
         label: '➕ Place',
         title:
-          'Click the map to drop the bolt’s start, then click again for its end. Click an existing ⚡ to edit or remove it.',
+          'Click the map to drop the bolt’s ⚡ start, then click again for its 💥 impact point — a line connects the two. Click an existing icon to edit or remove it.',
         onAdd: enterLightningPlacement,
       },
     });
@@ -2879,6 +3467,120 @@ function install() {
     effect: 'lightning',
     order: 11,
   });
+
+  // ---------------------------------------------------------------------------
+  // THE FIRE WORKSHOP PANEL — same FOH/ROH card template as the two above.
+  //
+  // ⚠️ FIRE HAS TWO SOURCES AND THE CARD SAYS SO. Every other effect here is
+  // either painted (water, vegetation) or placed (candle, lightning); fire is
+  // both, and its PRIMARY source is the painted region — the region's own width
+  // sets each fire's diameter, which then sets everything else. So the card's
+  // affordance is Paint, and its status line reports the painted count and the
+  // placed count SEPARATELY. An author who paints a region and sees "0 fires"
+  // needs to know whether the mask was read at all, not just that nothing drew.
+  // ---------------------------------------------------------------------------
+  function buildFirePanel({ attachments } = {}) {
+    const schema = FIRE_PARAMS;
+    const getValue = (id) => {
+      const v = fireReadout.params?.[id];
+      return v !== undefined ? v : schema[id]?.default;
+    };
+    const onChange = (id, value) => MapShine.setFire({ [id]: value });
+
+    return buildEffectCard({
+      id: 'fire',
+      diagnostics: attachments,
+      icon: '🔥',
+      title: 'Fire',
+      subtitle: 'paint a region, or place one',
+      status: () => {
+        const state = getFireRenderState();
+        const painted = state.maskFireCount ?? 0;
+        const placed = anchorAuthority.anchorsForEffect('fire', activeFloorContext).length;
+        if (!fireReadout.enabled) return 'off';
+        if (painted === 0 && placed === 0) return 'nothing painted or placed yet';
+        const parts = [];
+        if (painted) parts.push(`${painted} painted`);
+        if (placed) parts.push(`${placed} placed`);
+        return parts.join(' · ');
+      },
+      schema,
+      // A strict, SMALL subset (feedback_foh_roh_must_differ). These are the
+      // mid-session questions: how stylised, how big the flames read, how much
+      // smoke, how far it lights. Everything else is set-once detail.
+      // ⚠️ WIDENED FOR A TUNING SESSION (2026-08-09). The author is driving the
+      // look from these controls, so the FOH set is the ones they reach for
+      // most — count, lifetime, opacity and the orange-vs-white dial — rather
+      // than the usual strict handful. Everything else stays in the ROH card.
+      fohKeys: ['flameCount', 'flameLifeScale', 'flameOpacity', 'flameColorAge', 'emberCount', 'smokeCount'],
+      getValue,
+      onChange,
+      enabled: fireReadout.enabled,
+      onToggleEnabled: (next) => MapShine.setFire({ enabled: next }),
+      // ⚠️ NO "➕ Place" AFFORDANCE YET, deliberately. The `fire` ANCHOR KIND is
+      // registered (`scene/anchor-catalog.js`) and `getFireRenderState` already
+      // serves anchors alongside painted fires, but the add/update/remove
+      // persistence helpers the placement mode needs (the candle's
+      // `addCandleAnchor`/`updateCandleAnchor` trio and its edit form) are not
+      // written. Shipping the button against missing functions would be a
+      // control that throws; shipping it against stubs would be a control that
+      // silently does nothing, which is worse (`params/no-dead-controls`'s own
+      // reasoning). Painting is the primary source anyway — the region's own
+      // width sizes each fire, which is the whole point.
+      add: paintAffordance('fire'),
+    });
+  }
+
+  MapShine.debug.registerPanel('fire-panel', 'Fire', buildFirePanel, {
+    zone: 'workshop',
+    effect: 'fire',
+    order: 12,
+  });
+
+  // ---------------------------------------------------------------------------
+  // MSA ANCHOR VIEW MODE (2026-08-06, author request) — "a button just below
+  // the MSA button... to quickly see the anchor handles for effects [and]
+  // turn things on and off". Listed by hand, exactly like the two Workshop
+  // panels just above register themselves by hand: there are only two anchor
+  // kinds today, and each needs its OWN setEnabled (updateCandleAnchor vs
+  // updateLightningAnchor each do their own persistence snapshot), so looping
+  // ANCHOR_KINDS generically would not skip any real work, just hide these
+  // two lines behind a lookup. The scene-controls button itself is
+  // registered further down, in the same init hook the MSA button's own
+  // lives in (foundry/scene-controls-button.js).
+  // ---------------------------------------------------------------------------
+
+  function enterAnchorViewMode() {
+    // The two modes draw icons at the same screen position/z-index — one
+    // replaces the other rather than stacking (mirrors the matching guard in
+    // enterCandlePlacement/enterLightningPlacement, above).
+    if (MapShine.__anchorMode.isActive()) MapShine.__anchorMode.exit();
+    const result = MapShine.__anchorViewMode.enter({
+      kinds: [
+        {
+          kindId: 'candleFlame',
+          label: 'candle',
+          icon: anchorKindById('candleFlame')?.icon,
+          listAnchors: () => anchorAuthority.anchorsForKindOnFloor('candleFlame', activeFloorContext),
+          setEnabled: (id, enabled) => updateCandleAnchor(id, { enabled }),
+        },
+        {
+          kindId: 'lightning',
+          label: 'lightning bolt',
+          icon: lightningRoleIcon,
+          listAnchors: () => anchorAuthority.anchorsForKindOnFloor('lightning', activeFloorContext),
+          setEnabled: (id, enabled) => updateLightningAnchor(id, { enabled }),
+        },
+      ],
+      // The toolbar's own Done button and Escape both call MapShine.__anchor
+      // ViewMode.exit() directly (ui/anchor-view-mode.js), bypassing the
+      // scene-controls tool entirely — without this, ending the session that
+      // way would leave the toolbar button showing "active" for a mode that
+      // has already closed.
+      onExit: () => syncAnchorViewModeButtonState(false),
+    });
+    if (!result?.ok) log.error('could not enter anchor view mode:', result?.reason);
+  }
 
   // VEGETATION'S OWN FOH/ROH CARD (2026-07-23, same day as Tier 2's shadow +
   // expressive-wind work, author follow-up: "I need you to add the FOH and
@@ -2978,6 +3680,68 @@ function install() {
     zone: 'workshop',
     effect: 'bloom',
     order: 80,
+  });
+
+  // DEPTH OF FIELD — the schema-driven card + a named-preset picker. Mirrors
+  // buildBloomPanel exactly (whole-image screen effect, no place/edit
+  // button). Only 3 params total (one blur band, not bloom's two), so all of
+  // them promote to the FOH strip — leaving ROH empty for this effect is the
+  // correct, expected shape (Effects-UI.md: "a fully-promoted category
+  // yields no bare heading"), not a gap.
+  function buildDofPanel({ attachments } = {}) {
+    const schema = DOF_PARAMS;
+    const getValue = (id) => {
+      const v = dofReadout.params?.[id];
+      return v !== undefined ? v : schema[id]?.default;
+    };
+    const onChange = (id, value) => MapShine.setDof({ [id]: value });
+
+    // Named-preset picker (docs/planning/Depth-of-Field.md) — applies a full
+    // preset as a live override, then refreshes the card so the sliders show
+    // the new values.
+    const presetSelect = document.createElement('select');
+    presetSelect.className = 'msa-effect-preset-select';
+    presetSelect.title = 'Apply a named depth-of-field preset';
+    const prettify = (n) => n.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Preset…';
+    presetSelect.appendChild(placeholder);
+    for (const name of Object.keys(DOF_PRESETS)) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = prettify(name);
+      presetSelect.appendChild(opt);
+    }
+    presetSelect.addEventListener('change', () => {
+      const name = presetSelect.value;
+      presetSelect.value = '';
+      if (!name) return;
+      MapShine.setDof(dofPreset(name));
+      MapShine.debug?.refreshControls?.();
+    });
+
+    return buildEffectCard({
+      id: 'depthOfField',
+      diagnostics: attachments,
+      icon: '🌫️',
+      title: 'Depth of Field',
+      subtitle: 'blur the floors below you',
+      status: () => collapsedStatusLine({ enabled: dofReadout.enabled }),
+      schema,
+      fohKeys: ['strength', 'blurPerFloor', 'maxBlur'],
+      getValue,
+      onChange,
+      enabled: dofReadout.enabled,
+      onToggleEnabled: (next) => MapShine.setDof({ enabled: next }),
+      extra: [presetSelect],
+    });
+  }
+
+  MapShine.debug.registerPanel('dof-panel', 'Depth of Field', buildDofPanel, {
+    zone: 'workshop',
+    effect: 'depthOfField',
+    order: 81,
   });
 
   // SUN SHADOWS — the schema-driven card. No preset picker and no place/edit
@@ -3548,71 +4312,200 @@ function install() {
   // an instrument defect, not a user error (memory:
   // feedback_never_blame_the_authors_technique). The label now says which one
   // MEASURES and which one only re-reads.
-  MapShine.debug.registerReport('perf-profile', '📄 Performance: last result (read-only)', () => {
-    const byStage = {};
-    for (const zone of ZONES) byStage[zone.stage] = (byStage[zone.stage] ?? 0) + 1;
-    // A completed run wins. This is a PURE readout of it — re-reading costs
-    // nothing and never re-measures, which is what lets the flight recorder
-    // include the last profile in a bundle without arming anything.
-    if (lastPerfProfile) return { ...lastPerfProfile, status: 'complete' };
-    const viewer = getVtPanViewerDiagnostics?.() ?? null;
-    const generatedAt = new Date().toISOString();
-    // ONE SHAPE, ALWAYS. Unarmed, this is a real report whose every measurement
-    // field is null — not a different, smaller object. A reader learns the layout
-    // before their first run, and the null-vs-zero discipline is visible in the
-    // one state where every field is honestly absent.
-    const base = buildPerfReport({
-      generatedAt,
-      msaVersion: MapShine.version,
-      zones: ZONES,
-      effectZoning: EFFECT_ZONING,
-      manifests: [],
-      budgetMs: FRAME_BUDGET_MS,
-    });
-    return {
-      ...base,
-      status: 'not-armed',
-      built: {
-        zoneTaxonomy: true,
-        reportBrain: true,
-        cpuZoneProfiler: true,
-        gpuZoneTimer: true,
-        liveHud: true,
-        benchmarkRoute: true,
-        vramInventory: 'partial — the render-target registry is not wired, so only the atlas estimate is real',
-      },
-      taxonomy: {
-        zoneCount: ZONES.length,
-        byStage,
-        frameBudgetMs: FRAME_BUDGET_MS,
-        passBudgetsMs: PASS_BUDGETS_MS,
-        // Cross-checked against the LIVE pass graph and effect ids in the Node
-        // suite; re-run here so a live session sees drift the tests cannot
-        // (a pass that only goes live at runtime, for instance).
-        selfCheck: {
-          zones: validateZoneTaxonomy(ZONES, {}),
-          effectZoning: validateEffectZoning(EFFECT_ZONING, ZONES),
+  MapShine.debug.registerReport(
+    'perf-profile',
+    '📄 Performance: last result (read-only)',
+    () => {
+      const byStage = {};
+      for (const zone of ZONES) byStage[zone.stage] = (byStage[zone.stage] ?? 0) + 1;
+      // A completed run wins. This is a PURE readout of it — re-reading costs
+      // nothing and never re-measures, which is what lets the flight recorder
+      // include the last profile in a bundle without arming anything.
+      if (lastPerfProfile) return { ...lastPerfProfile, status: 'complete' };
+      const viewer = getVtPanViewerDiagnostics?.() ?? null;
+      const generatedAt = new Date().toISOString();
+      // ONE SHAPE, ALWAYS. Unarmed, this is a real report whose every measurement
+      // field is null — not a different, smaller object. A reader learns the layout
+      // before their first run, and the null-vs-zero discipline is visible in the
+      // one state where every field is honestly absent.
+      const base = buildPerfReport({
+        generatedAt,
+        msaVersion: MapShine.version,
+        zones: ZONES,
+        effectZoning: EFFECT_ZONING,
+        manifests: [],
+        budgetMs: FRAME_BUDGET_MS,
+      });
+      return {
+        ...base,
+        status: 'not-armed',
+        built: {
+          zoneTaxonomy: true,
+          reportBrain: true,
+          cpuZoneProfiler: true,
+          gpuZoneTimer: true,
+          liveHud: true,
+          benchmarkRoute: true,
+          vramInventory: 'partial — the render-target registry is not wired, so only the atlas estimate is real',
         },
-      },
-      // Real today: the atlas estimate is the one number that matters against the
-      // measured device-loss wall, and it comes from the viewer's own per-format
-      // mip-chain accounting rather than three's (which counts a compressed
-      // texture as ONE BYTE — see diag/vram-inventory.js).
-      vram: buildVramInventory({ vtEstimate: viewer, ceilingMb: 2500 }),
-      interpretation:
-        '⚠️ NOTHING HAS BEEN MEASURED. This is the READ-ONLY report; it only ever shows the last completed run, ' +
-        'and there has not been one this session. It does not and cannot start a measurement. ' +
-        'To actually profile, click one of the ACTIONS: "🔬 Profile (per-zone)" for a 10-second window, or ' +
-        '"🏁 Benchmark: N→S map sweep (60s)" for the repeatable stress route. Then click THIS report to re-read ' +
-        'the result without re-running it. Every cost field above is null rather than zero — that is the shape a ' +
-        'completed run fills in. ' +
-        'What IS live and worth reading today: taxonomy.selfCheck must report ok:true for BOTH entries (a false means ' +
-        'a zone points at a pass or effect that no longer exists, and the profile it eventually produces would carry ' +
-        'a row nobody can act on), and vram gives the honest atlas estimate against the measured ~2.5GB device-loss ' +
-        "ceiling — honest because it comes from the viewer's own per-format mip-chain accounting, not three's, which " +
-        'counts a compressed texture as ONE BYTE. See docs/planning/Performance.md for what remains. ' +
-        base.interpretation,
-    };
+        taxonomy: {
+          zoneCount: ZONES.length,
+          byStage,
+          frameBudgetMs: FRAME_BUDGET_MS,
+          passBudgetsMs: PASS_BUDGETS_MS,
+          // Cross-checked against the LIVE pass graph and effect ids in the Node
+          // suite; re-run here so a live session sees drift the tests cannot
+          // (a pass that only goes live at runtime, for instance).
+          selfCheck: {
+            zones: validateZoneTaxonomy(ZONES, {}),
+            effectZoning: validateEffectZoning(EFFECT_ZONING, ZONES),
+          },
+        },
+        // Real today: the atlas estimate is the one number that matters against the
+        // measured device-loss wall, and it comes from the viewer's own per-format
+        // mip-chain accounting rather than three's (which counts a compressed
+        // texture as ONE BYTE — see diag/vram-inventory.js).
+        vram: buildVramInventory({ vtEstimate: viewer, ceilingMb: 2500 }),
+        interpretation:
+          '⚠️ NOTHING HAS BEEN MEASURED. This is the READ-ONLY report; it only ever shows the last completed run, ' +
+          'and there has not been one this session. It does not and cannot start a measurement. ' +
+          'To actually profile, click one of the ACTIONS: "🔬 Profile (per-zone)" for a 10-second window, or ' +
+          '"🏁 Benchmark: N→S map sweep (60s)" for the repeatable stress route. Then click THIS report to re-read ' +
+          'the result without re-running it. Every cost field above is null rather than zero — that is the shape a ' +
+          'completed run fills in. ' +
+          'What IS live and worth reading today: taxonomy.selfCheck must report ok:true for BOTH entries (a false means ' +
+          'a zone points at a pass or effect that no longer exists, and the profile it eventually produces would carry ' +
+          'a row nobody can act on), and vram gives the honest atlas estimate against the measured ~2.5GB device-loss ' +
+          "ceiling — honest because it comes from the viewer's own per-format mip-chain accounting, not three's, which " +
+          'counts a compressed texture as ONE BYTE. See docs/planning/Performance.md for what remains. ' +
+          base.interpretation,
+      };
+    },
+    { zone: 'performance' }
+  );
+
+  // THE INLINE RESULT VIEW — author's ask: "an area where you can press a
+  // button and get a detailed performance report", not just a clipboard copy.
+  // Rebuilt fresh every Performance Center repaint (registerPanel's own
+  // contract), so it always shows whatever `lastPerfProfile` currently holds;
+  // the four report-producing actions above each call `refreshControls()`
+  // right before they return so this updates the moment a run finishes,
+  // without this panel needing any polling of its own.
+  function buildPerfLastResultPanel() {
+    const el = document.createElement('div');
+    Object.assign(el.style, {
+      width: '100%',
+      boxSizing: 'border-box',
+      background: '#12161c',
+      color: '#dce3ea',
+      font: '11px/1.5 ui-monospace, Menlo, Consolas, monospace',
+      border: '1px solid rgba(143,214,255,0.25)',
+      borderRadius: '10px',
+      padding: '10px 12px',
+    });
+    const head = document.createElement('div');
+    Object.assign(head.style, { fontWeight: 'bold', color: '#8fd6ff', marginBottom: '6px' });
+    head.textContent = '📄 Last result';
+    el.appendChild(head);
+
+    if (!lastPerfProfile) {
+      const hint = document.createElement('div');
+      hint.style.opacity = '0.7';
+      hint.textContent = 'No report yet — run 🔬 Performance Report (or the ALL TIERS report) above.';
+      el.appendChild(hint);
+      return el;
+    }
+
+    const meta = document.createElement('div');
+    Object.assign(meta.style, { opacity: '0.75', marginBottom: '6px' });
+    meta.textContent = `${lastPerfProfile.report ?? 'perf-profile'} · ${lastPerfProfile.generatedAt ?? ''}`;
+    el.appendChild(meta);
+
+    // THE PLAIN-ENGLISH HEADLINE, BEFORE THE JSON (2026-08-06, author: "imagine
+    // that this tool might be used by a lay person"). perf-report.js already
+    // computes `interpretation` and a severity-ranked `findings[]` for a single
+    // run, and `summarizeTierComparison` computes a `ranked[]` for the ALL
+    // TIERS shape — both were already being thrown away here in favour of a raw
+    // JSON dump nobody but the author could read at a glance.
+    if (lastPerfProfile.interpretation) {
+      const interp = document.createElement('div');
+      Object.assign(interp.style, {
+        marginBottom: '8px',
+        padding: '8px',
+        background: 'rgba(143,214,255,0.06)',
+        border: '1px solid rgba(143,214,255,0.2)',
+        borderRadius: '6px',
+        opacity: '0.95',
+      });
+      interp.textContent = lastPerfProfile.interpretation;
+      el.appendChild(interp);
+    }
+    if (Array.isArray(lastPerfProfile.findings) && lastPerfProfile.findings.length) {
+      const order = { high: 0, medium: 1, low: 2 };
+      const sortedFindings = [...lastPerfProfile.findings].sort(
+        (a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3)
+      );
+      const SEVERITY_COLOR = { high: '#ffb4b4', medium: '#ffc478', low: '#8fd6ff' };
+      const findingsBox = document.createElement('div');
+      Object.assign(findingsBox.style, { marginBottom: '8px', display: 'flex', flexDirection: 'column', gap: '4px' });
+      const findingsHead = document.createElement('div');
+      Object.assign(findingsHead.style, { fontWeight: 'bold', color: '#8fd6ff', fontSize: '10px' });
+      findingsHead.textContent = `Findings (${sortedFindings.length}, worst first)`;
+      findingsBox.appendChild(findingsHead);
+      // Capped so "the headline" stays a headline — the full list is still in
+      // the JSON below, this is a triage list, not the whole report.
+      const FINDINGS_SHOWN = 6;
+      for (const f of sortedFindings.slice(0, FINDINGS_SHOWN)) {
+        const row = document.createElement('div');
+        row.style.color = SEVERITY_COLOR[f.severity] ?? '#dce3ea';
+        row.textContent = `[${f.severity ?? '?'}] ${f.text}`;
+        findingsBox.appendChild(row);
+      }
+      if (sortedFindings.length > FINDINGS_SHOWN) {
+        const more = document.createElement('div');
+        more.style.opacity = '0.6';
+        more.textContent = `…${sortedFindings.length - FINDINGS_SHOWN} more in findings[] below.`;
+        findingsBox.appendChild(more);
+      }
+      el.appendChild(findingsBox);
+    }
+    // THE ALL-TIERS SHAPE — no interpretation/findings (summarizeTierComparison's
+    // own, different output), so it gets its own compact headline: the top few
+    // zones/effects by PEAK cost across every tier, the same `ranked[]` the
+    // report's own doc calls "THE answer to where optimisation effort should go".
+    if (Array.isArray(lastPerfProfile.ranked) && lastPerfProfile.ranked.length) {
+      const rankedBox = document.createElement('div');
+      Object.assign(rankedBox.style, { marginBottom: '8px', display: 'flex', flexDirection: 'column', gap: '2px' });
+      const rankedHead = document.createElement('div');
+      Object.assign(rankedHead.style, { fontWeight: 'bold', color: '#8fd6ff', fontSize: '10px' });
+      rankedHead.textContent = 'Ranked by peak GPU cost across tiers (top 8)';
+      rankedBox.appendChild(rankedHead);
+      for (const r of lastPerfProfile.ranked.slice(0, 8)) {
+        const row = document.createElement('div');
+        row.textContent = `${r.label ?? r.id} (${r.kind}) — ${r.maxGpuMs == null ? 'unmeasured' : `${r.maxGpuMs}ms`}`;
+        rankedBox.appendChild(row);
+      }
+      el.appendChild(rankedBox);
+    }
+
+    const pre = document.createElement('pre');
+    Object.assign(pre.style, {
+      margin: '0',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+      maxHeight: '38vh',
+      overflowY: 'auto',
+      background: 'rgba(10,14,22,0.6)',
+      borderRadius: '6px',
+      padding: '8px',
+      opacity: '0.9',
+    });
+    pre.textContent = JSON.stringify(lastPerfProfile, null, 2);
+    el.appendChild(pre);
+    return el;
+  }
+  MapShine.debug.registerPanel('perf-last-result-panel', 'Last result', buildPerfLastResultPanel, {
+    zone: 'performance',
   });
 
   // FLUID — the whole chain, link by link. Click this FIRST when the tubes
@@ -4010,6 +4903,11 @@ function install() {
   // rather than remembering is what keeps the ring honest while time DRIFTS or
   // SWEEPS on its own, and what shows the pause ramp winding down live.
   const pumpAstrolabe = () => {
+    // UNGATED, unlike the astrolabe repaint below: candles must keep
+    // responding to the clock whether or not a GM currently has the dial
+    // open. Cheap on every frame that ISN'T a crossing (one computeSun call +
+    // a boolean compare) — see refreshCandleIgnition's own doc.
+    refreshCandleIgnition();
     // Gated on `isConnected`: the panel builds the dial once and the shell
     // detaches it when another zone is showing, so a closed panel costs one
     // property read per frame, not a repaint.
@@ -4827,6 +5725,13 @@ function install() {
         // injection posture as getCandleRenderState — the torture fixture has
         // no lightning anchors and stays bolt-free by construction.
         getLightningRenderState,
+        // FIRE's render-state seam — same injection posture as the two above.
+        // ⚠️ Passed, not merely declared: a render-state seam that is declared,
+        // defaulted and never passed is exactly how water shipped every control
+        // inert with a fully green test suite
+        // (`feedback_seam_default_hides_unwired`), and `createFireSubsystem`
+        // THROWS on a missing one rather than defaulting for that reason.
+        getFireRenderState,
         // DOOR GRAPHICS (effects/door-graphics-render.js): each frame the viewer
         // reconciles + animates the door leaves, reading the cascade-resolved
         // enable + motion params and the active-floor door snapshots from here.
@@ -4848,11 +5753,21 @@ function install() {
         // harness staying minimal, not a data dependency — wire it there too if
         // bloom ever needs soak-perf coverage.
         getBloomRenderState,
+        // DEPTH OF FIELD (effects/depth-of-field-render.js): same shape as
+        // bloom's own seam just above — a whole-image screen effect needing
+        // no scene data, so the torture-soak harness omits it the same way.
+        getDofRenderState,
         // SUN SHADOWS (docs/planning/Sun-Shadows.md) — the look/enable readout
         // and the floor's occluder height field. vt/ owns the bake and the
         // texture; it never reaches the mask authority or the registry itself.
         getSunShadowRenderState,
         getCasterHeightField,
+        // THE SHADOW CASCADE's floor-elevation seam (2026-08-05) — same
+        // real-scene-only reasoning as `getCasterHeightField` just above: the
+        // torture fixture has no Foundry Levels to read, and unwired the band
+        // heights fall back to the authored `aboveHeightPx` slider and SAY SO
+        // in the sun-shadow status report.
+        getShadowFloorPlan,
         // THE COLOUR GRADE (Look) effect — same shape as bloom; the viewer's
         // per-frame pushGradeLook reads the cascade-resolved enable + params.
         getGradeLookState,
@@ -4871,6 +5786,10 @@ function install() {
         // torture fixture's default (`() => null`) bakes a fully-outdoors
         // placeholder, which is a no-op while the sky ships neutral.
         getOutdoorsMaskGrid,
+        // FIRE'S mask-clip texture seam — same real-scene-only reasoning; an
+        // unwired/torture-fixture default of `() => null` leaves every fire
+        // unclipped (the fail-open default `bakeFireMaskTexture` already has).
+        getFireMaskGrid,
         // THE WATER BODY PACK's mask + cross-floor seams (Water.md §5.1) —
         // same real-scene-only reasoning; unwired means no floor has water, so
         // the jump flood never runs (inert by construction, not by a flag).
@@ -4910,12 +5829,25 @@ function install() {
         },
         getSpecularMaskUrl,
         getSpecularMaskRect,
+        // STAGE 3 (2026-08-05) — the depth-authority migration's own seam,
+        // added alongside `getSpecularMaskRect`/`getSpecularMaskUrl` above
+        // for the same reason: unwired, the viewer's own `resolveExpectedDepth`
+        // composition has no item id to resolve a rank for and the floor gate
+        // compiles out entirely (fails OPEN, not silently broken — see
+        // `specular-render.js`'s own `uExpectedDepth` doc).
+        getSpecularBackgroundItemId,
         getSpecularRenderState: specular.getRenderState,
-        // WINDOW LIGHT's three seams (Windows.md). Same real-scene-only
+        // WINDOW LIGHT's four seams (Windows.md). Same real-scene-only
         // reasoning as SHINE's directly above: unwired, both mask seams
         // return null and the effect renders literally nothing.
         getWindowMaskUrl,
         getWindowMaskRect,
+        // The depth-authority migration's own seam (2026-08-05), mirroring
+        // `getSpecularBackgroundItemId` above — unwired, the viewer's own
+        // `resolveExpectedDepth` composition has no item id to resolve a
+        // rank for and the floor gate fails OPEN (see window-render.js's
+        // own `uExpectedDepth` doc), not silently broken.
+        getWindowBackgroundItemId,
         getWindowRenderState: windowLight.getRenderState,
         // APERTURE GOBO's one seam (docs/planning/Aperture-Gobo.md) — no mask
         // URL/rect pair, unlike SHINE/window just above: its only input is
@@ -6277,6 +7209,19 @@ function install() {
         },
       });
       MapShine.debug.onVisibilityChange((visible) => syncControlPanelButtonState(visible));
+
+      // THE ANCHOR VIEW TOGGLE (author request, 2026-08-06) — the second,
+      // GM-only tool just below the button above (foundry/scene-controls-
+      // button.js#registerAnchorViewModeButton). `enterAnchorViewMode` is
+      // defined earlier in this same function, alongside the candle/lightning
+      // Workshop panels it lists.
+      registerAnchorViewModeButton({
+        isActive: () => MapShine.__anchorViewMode.isActive(),
+        onToggle: (active) => {
+          if (active) enterAnchorViewMode();
+          else MapShine.__anchorViewMode.exit();
+        },
+      });
     });
     Hooks.once('ready', () => {
       bootHeartbeat().catch((err) => log.error('bootHeartbeat failed:', err));
@@ -6372,51 +7317,15 @@ async function bootHeartbeat() {
       overflow: 'hidden',
     });
 
-    // THE HUD — FPS leads (author, 2026-07-20: "I want access to FPS
-    // information"), a couple of always-useful lines follow, and a "More" door
-    // opens onto everything else ("I'd like access to lots of information in a
-    // panel") without the generic module blurb sitting there uninvited every
-    // frame — the same progressive-disclosure shape as the control panel's own
-    // Advanced View / accordions, applied one level up.
-    const hud = document.createElement('div');
-    Object.assign(hud.style, {
-      fontSize: '11px',
-      lineHeight: '1.4',
-      fontFamily: 'ui-monospace, Consolas, monospace',
-      letterSpacing: '0.02em',
-    });
-    const fpsLine = document.createElement('div');
-    Object.assign(fpsLine.style, { fontSize: '18px', fontWeight: '700' });
-    const midLines = document.createElement('div');
-    Object.assign(midLines.style, { marginTop: '2px', opacity: '0.85' });
-
-    const moreToggle = document.createElement('button');
-    moreToggle.type = 'button';
-    moreToggle.textContent = '▾ more';
-    Object.assign(moreToggle.style, {
-      pointerEvents: 'auto',
-      marginTop: '4px',
-      background: 'transparent',
-      border: 'none',
-      padding: '0',
-      font: '10px/1.2 Signika, sans-serif',
-      color: '#8fd6ff',
-      opacity: '0.75',
-      cursor: 'pointer',
-      letterSpacing: '0.03em',
-    });
-    const moreLines = document.createElement('div');
-    Object.assign(moreLines.style, { marginTop: '3px', opacity: '0.8', display: 'none' });
-    let moreOpen = false;
-    moreToggle.addEventListener('click', () => {
-      moreOpen = !moreOpen;
-      moreLines.style.display = moreOpen ? 'block' : 'none';
-      moreToggle.textContent = moreOpen ? '▴ less' : '▾ more';
-    });
-
-    hud.append(fpsLine, midLines, moreToggle, moreLines);
+    // THE HUD used to live here as its own floating strip — FPS leading, a
+    // "More" door for the rest (author, 2026-07-20: "I want access to FPS
+    // information" / "lots of information... in a panel"). Folded into the
+    // control panel itself 2026-08-05 (author: it belongs "inside the main
+    // panel, at the top"; see diag/perf-strip.js, mounted by
+    // diag/debug-panel.js's `attachPanel`). This function's job now is just to
+    // gather the raw facts — frame gaps, VT diagnostics, VRAM, heap — and hand
+    // them to `MapShine.debug.updatePerfStrip`; it owns none of the display.
     host.appendChild(canvas);
-    host.appendChild(hud);
     document.body.appendChild(host);
 
     // Same raised WebGPU texture cap as the VT viewer (vt/texture-limits.js) —
@@ -6448,6 +7357,14 @@ async function bootHeartbeat() {
     const gaps = [];
     let lastT = null;
     let worstGapMs = 0;
+    // All-time MINIMUM frame gap — the standard proxy for the display's own
+    // refresh rate (browsers expose no such API). All-time, not rolling, for
+    // the same reason `worstGapMs` above is all-time: it only needs to see ONE
+    // uncongested frame, ever, and a short rolling window could stay congested
+    // longer than its own history. diag/perf-strip.js turns this into "how
+    // much of the display's own rate is actually landing" — the FPS health bar.
+    let bestGapMs = null;
+    let lastTickBucket = -1;
     renderer.setAnimationLoop((t) => {
       renderer.render(scene, camera);
 
@@ -6466,49 +7383,39 @@ async function bootHeartbeat() {
         gaps.push(gap);
         if (gaps.length > 120) gaps.shift();
         if (gap > worstGapMs) worstGapMs = gap;
+        if (gap > 0.5 && (bestGapMs === null || gap < bestGapMs)) bestGapMs = gap;
       }
       lastT = t;
 
-      // Repaint the numbers ~4x/sec — often enough to read, rare enough that the
-      // monitor never becomes the thing worth monitoring.
-      if (gaps.length && Math.floor(t / 250) !== hud.__lastTick) {
-        hud.__lastTick = Math.floor(t / 250);
+      // Repaint ~4x/sec — often enough to read, rare enough that the monitor
+      // never becomes the thing worth monitoring (same rule diag/perf-strip.js
+      // and diag/perf-hud.js both cite for their own repaint rates).
+      if (gaps.length && Math.floor(t / 250) !== lastTickBucket) {
+        lastTickBucket = Math.floor(t / 250);
         const avg = gaps.reduce((a, b) => a + b, 0) / gaps.length;
         const fps = avg > 0 ? 1000 / avg : 0;
         const recentWorst = Math.max(...gaps);
         const vt = getVtPanViewerDiagnostics();
-        const warn = recentWorst > 50 ? '#ffb4b4' : '#cfe8ff';
+        const backend = renderer.backend?.isWebGPUBackend ? 'webgpu' : renderer.backend ? 'webgl2' : 'unknown';
+        const heapInfo = performance.memory;
 
-        fpsLine.innerHTML = `<span style="color:${warn}">${fps.toFixed(0)} fps</span>`;
-
-        const midRows = [
-          `gap ${avg.toFixed(1)}ms (worst ${recentWorst.toFixed(0)}) · all-time ${worstGapMs.toFixed(0)}ms`,
-        ];
-        if (vt?.active) {
-          const c = vt.cacheStats;
-          midRows.push(
-            `VT ${vt.renderMode} · ${vt.itemsLoaded} items · mip ${vt.mip?.requested ?? '?'}`,
-            `pages ${c.residentPages}/${c.capacityPages} · miss ${c.misses} · evict ${c.evictions}`
-          );
-        } else {
-          midRows.push('VT: not running');
-        }
-        midLines.innerHTML = midRows.join('<br>');
-
-        // THE "MORE" DOOR — the generic module blurb lives here now instead of
-        // being always on screen (author, 2026-07-20: "lots of information on it
-        // which isn't useful since it's just generic module information"), plus
-        // whatever else is worth a glance without opening the Lab's own reports.
-        const backend = renderer.backend?.isWebGPUBackend ? 'WebGPU' : renderer.backend ? 'WebGL2' : 'unknown';
-        const adapterDesc = renderer.backend?.adapter?.info?.description;
-        const heap = performance.memory?.usedJSHeapSize;
-        const moreRows = [
-          `v${MapShine.version ?? VERSION} · ${STAGE}`,
-          `Three r${THREE.REVISION} · ${backend}${adapterDesc ? ` (${adapterDesc})` : ''}`,
-        ];
-        if (typeof heap === 'number') moreRows.push(`JS heap: ${(heap / 1048576).toFixed(0)}MB`);
-        moreRows.push('Full reports: control panel → 🔬 Lab');
-        moreLines.innerHTML = moreRows.join('<br>');
+        MapShine.debug?.updatePerfStrip({
+          fps,
+          avgGapMs: avg,
+          recentWorstMs: recentWorst,
+          allTimeWorstMs: worstGapMs,
+          bestGapMs,
+          vt,
+          // `.wholeImage`, NOT the diagnostics root — see readVram's own note a
+          // few hundred lines up: `estTextureVramMB` lives there, and the same
+          // measured device-loss wall (~2.5GB, keyhole-device-loss-large-map).
+          vram: buildVramInventory({ vtEstimate: vt?.wholeImage ?? null, ceilingMb: 2500 }),
+          heapUsedBytes: heapInfo?.usedJSHeapSize ?? null,
+          heapLimitBytes: heapInfo?.jsHeapSizeLimit ?? null,
+          renderInfo: readVtPanViewerRenderInfo(),
+          backend,
+          version: MapShine.version ?? VERSION,
+        });
       }
     });
 

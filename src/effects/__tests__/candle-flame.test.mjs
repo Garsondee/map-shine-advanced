@@ -45,10 +45,19 @@ export function run(t) {
     ok('register returns the candle id', id === 'candleFlame');
     const resolved = reg.resolveAndApply('candleFlame', { profile: 'standard' });
     ok('resolveAndApply drives the candle apply', applied !== null && applied.enabled === true);
+    // ⚠️ `color` is asserted against the SCHEMA rather than a repeated literal.
+    // It was hardcoded `'#ffaa00'` here, which is a second copy of a value the
+    // schema already owns — so retuning the flame's palette (2026-08-06, to the
+    // author's reference art) failed this test for no reason other than the
+    // duplication. What is worth pinning is that the cascade RESOLVES the
+    // declared default, not what that default happens to be this month.
     ok(
       'the resolved params carry the look defaults',
-      resolved.params.sizePx === 24 && resolved.params.color === '#ffaa00' && resolved.params.lightRadiusPx === 400
+      resolved.params.sizePx === 24 &&
+        resolved.params.color === CANDLE_FLAME_PARAMS.color.default &&
+        resolved.params.lightRadiusPx === 400
     );
+    ok('the flame colour default is a valid #rrggbb', /^#[0-9a-f]{6}$/i.test(CANDLE_FLAME_PARAMS.color.default));
     throws('a duplicate candle registration throws', () => reg.register(CANDLE_FLAME, () => {}), 'already registered');
   }
 }

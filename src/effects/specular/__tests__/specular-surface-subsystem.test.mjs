@@ -117,7 +117,7 @@ function makeSubsystem(state, loaded = { data: paintedRgba(32, 32), width: 32, h
       return t;
     },
     illumTexture: stubTexture(),
-    attrTexture: stubTexture(),
+    depthTexture: stubTexture(),
     timeMsNode: THREE.TSL.uniform(THREE.TSL.float(0)),
     uViewRect: uniform(vec4(0, 0, 1000, 1000)),
     uOutdoorsRect: uniform(vec4(0, 0, 1000, 1000)),
@@ -361,6 +361,13 @@ export async function run(t) {
   // every point while its B channel (`backgroundVisible`) read exactly 1 —
   // i.e. the pixel was genuinely plain, unoccluded Level background art, just
   // not the SAME floor this subsystem's single quad was tracking. Root cause:
+  // ⚠️ HISTORICAL NAMES: `setFloorIndex`/`floorMatch`/`backgroundVisible`/
+  // `buf:scene.attr` below are the STAGE-2-era mechanism this bug was fixed
+  // against (2026-08-03) and no longer exist as of STAGE 3 (2026-08-05),
+  // which replaced them with `setExpectedDepth`/`buf:scene.depth`'s single
+  // rank comparison. The FIX this test pins (`ensureMaskImage`'s `!url`
+  // early-clear branch) is unchanged by that migration and still the thing
+  // under test here.
   // `ensureMaskImage` only called `setFloorIndex` inside a NEW mask's load
   // callback, so a floor with no `_Specular` of its own left the PREVIOUS
   // floor's quad fully visible, still sampling real paint (floors share the
@@ -394,7 +401,7 @@ export async function run(t) {
       return t;
     },
     illumTexture: stubTexture(),
-    attrTexture: stubTexture(),
+    depthTexture: stubTexture(),
     timeMsNode: THREE.TSL.uniform(THREE.TSL.float(0)),
     uViewRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
     uOutdoorsRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),

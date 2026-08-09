@@ -96,64 +96,80 @@ export function run(t) {
     );
   }
 
-  // ── A CARRIES THE CASCADE'S BLOCKAGE (2026-08-02) ────────────────────
-  // A was the documented empty 4th silhouette slot until the cascade needed a
-  // channel. It now holds the LOWER floor's `coverAbove` — "how much do I
-  // block the view down to the floor below" — which
-  // `layer-smear-render.js` mixes this floor's own shadow against the floor
-  // below's already-cascaded field with.
+  // ── A CARRIES BAND 1 (2026-08-05, the shadow cascade) ────────────────
+  // A held the CASCADE's blend factor from 2026-08-02 until the shadow cascade
+  // moved that publication into each slot's own baked FIELD alpha
+  // (`layer-smear-render.js#uCascade`), freeing this channel for the second
+  // real band: the floor ABOVE's own `coverAbove`, i.e. every floor two or more
+  // storeys up. The polarity FLIPPED with the meaning, and that is the whole
+  // point of these cases: an absent BLOCKAGE had to read 255 (fully blocked,
+  // cascade a no-op), an absent SILHOUETTE must read 0 (nothing there, casts
+  // nothing). Same channel, opposite safe default, because they are opposite
+  // questions.
   {
     const channels = channelsAt(2, 2);
     channels.coverOverhead.data.fill(255);
     const outdoorsGrid = grid(2, 2, 1000, 1000, 0);
     const coverAboveGrid = grid(2, 2, 1000, 1000, 255);
 
-    // ⚠️ ABSENT = FULLY BLOCKED, NEVER 0. Floor 0 has nothing below it, and a
-    // 0 here would read as "wide open", cascading a field that does not exist.
-    // The polarity has to fail CLOSED (memory: feedback_gate_polarity_must_fail_open
-    // — the same reasoning, opposite safe direction, because here "proceed"
-    // means "show something else's shadow").
-    const noLower = packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec: channels.coverOverhead.spec });
+    const noBand = packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, spec: channels.coverOverhead.spec });
     t.ok(
-      'with no lower floor, A is 255 (fully blocked) — the cascade is a provable no-op on the bottom floor',
-      [0, 1, 2, 3].every((i) => noLower.data[i * 4 + 3] === 255)
+      'with no floor two storeys up, A is 0 — an absent silhouette casts nothing',
+      [0, 1, 2, 3].every((i) => noBand.data[i * 4 + 3] === 0)
     );
 
-    // A hole in this floor: the lower floor's coverAbove is 0 there, so the
-    // view falls through and the shader must show the floor below's shadow.
-    const openBelow = grid(2, 2, 1000, 1000, 0);
-    const open = packLayerTexelData({
+    const bandAboveGrid = grid(2, 2, 1000, 1000, 200);
+    const withBand = packLayerTexelData({
       channels,
       outdoorsGrid,
       coverAboveGrid,
-      lowerCoverAboveGrid: openBelow,
+      bandAboveGrid,
       spec: channels.coverOverhead.spec,
     });
     t.ok(
-      'a fully OPEN lower floor packs A = 0 — look straight through to the floor below',
-      [0, 1, 2, 3].every((i) => open.data[i * 4 + 3] === 0)
+      'A carries the floor-above coverAbove when a grid is supplied',
+      [0, 1, 2, 3].every((i) => withBand.data[i * 4 + 3] === 200)
     );
 
-    // Partial blockage must survive as a real gradient, not a threshold — a
-    // half-transparent walkway should half-reveal what is under it.
-    const halfBelow = grid(2, 2, 1000, 1000, 128);
+    // Partial coverage must survive as a real gradient, not a threshold — a
+    // half-transparent walkway two storeys up casts a half-strength shadow.
+    const halfBand = grid(2, 2, 1000, 1000, 128);
     const half = packLayerTexelData({
       channels,
       outdoorsGrid,
       coverAboveGrid,
-      lowerCoverAboveGrid: halfBelow,
+      bandAboveGrid: halfBand,
       spec: channels.coverOverhead.spec,
     });
     t.ok(
-      'partial blockage survives as a gradient rather than snapping to 0/255',
+      'partial band-1 coverage survives as a gradient rather than snapping to 0/255',
       [0, 1, 2, 3].every((i) => Math.abs(half.data[i * 4 + 3] - 128) <= 1)
     );
 
-    // And the other three channels must be untouched by any of it.
+    // ⚠️ THE BANDS ARE READ AT DIFFERENT FLOOR INDICES AND MUST NOT ALIAS. B is
+    // `coverAbove(F)`, A is `coverAbove(F+1)`; packing one must never write the
+    // other, or a two-band decomposition would silently be one band smeared at
+    // two heights — which looks exactly like a working cascade.
     t.ok(
-      'packing the blockage does not disturb walls/overhead/floorAbove',
-      open.data[0] === noLower.data[0] && open.data[1] === noLower.data[1] && open.data[2] === noLower.data[2]
+      'band 0 and band 1 stay independent, and neither disturbs walls/overhead',
+      withBand.data[2] === 255 &&
+        withBand.data[3] === 200 &&
+        withBand.data[0] === noBand.data[0] &&
+        withBand.data[1] === noBand.data[1]
     );
+
+    // `coveredTexels` must count a texel whose ONLY content is band 1 — it is
+    // the enable check for the whole effect (`casterHasCoverage`), and a floor
+    // whose only occluder is two storeys up would otherwise bake nothing.
+    const bandOnlyChannels = channelsAt(2, 2);
+    const bandOnly = packLayerTexelData({
+      channels: bandOnlyChannels,
+      outdoorsGrid: grid(2, 2, 1000, 1000, 255),
+      coverAboveGrid: null,
+      bandAboveGrid,
+      spec: bandOnlyChannels.coverOverhead.spec,
+    });
+    t.ok('a texel covered ONLY by band 1 still counts as coverage', bandOnly.coveredTexels === 4);
   }
 
   // ── A MISSING channels.coverOverhead READS 0, NOT A CRASH ────────────

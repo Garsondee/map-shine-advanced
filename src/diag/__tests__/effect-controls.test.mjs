@@ -10,6 +10,7 @@ import {
   rohGroups,
   createSectionStore,
   collapsedStatusLine,
+  buildSettingsSnapshot,
 } from '../effect-controls.js';
 
 import { routeEntry, sortPanelsForZone } from '../debug-panel-controls.js';
@@ -150,7 +151,26 @@ export function run(t) {
   ok('Light rides alongside the Effects-UI.md set', CATEGORY_ORDER.includes('Light'));
   ok(
     'the canonical order runs surface → emission → behaviour → size → couplings → machinery',
-    CATEGORY_ORDER.join(',') === 'Presence,Look,Detail,Light,Motion,Shape,Extent,Outdoor,Response,Technical'
+    CATEGORY_ORDER.join(',') ===
+      'Presence,Look,Detail,Flame,Ember,Smoke,Light,Motion,Depth,Shape,Extent,Outdoor,Response,Technical'
+  );
+  // ⚠️ Flame/Ember/Smoke/Depth added 2026-08-09 for fire's particle rebuild, and
+  // placed by MEANING rather than appended: the three bodies are SURFACE groups
+  // so they sit with Look/Detail, and Depth is a BEHAVIOUR so it sits with
+  // Motion. Appending them after Technical would have kept this assertion green
+  // while putting the fire's own controls after the machinery block in every
+  // panel — the canonical run is the thing being pinned, not the string.
+  for (const c of ['Flame', 'Ember', 'Smoke', 'Depth']) {
+    ok(`${c} is a real category, not silently swept into Technical`, CATEGORY_ORDER.includes(c));
+  }
+  ok(
+    'the three body groups stay inside the surface block, before Light',
+    CATEGORY_ORDER.indexOf('Smoke') < CATEGORY_ORDER.indexOf('Light')
+  );
+  ok(
+    'Depth sits with behaviour, after Motion and before size',
+    CATEGORY_ORDER.indexOf('Depth') > CATEGORY_ORDER.indexOf('Motion') &&
+      CATEGORY_ORDER.indexOf('Depth') < CATEGORY_ORDER.indexOf('Shape')
   );
   // Every category a shipped effect actually declares must be IN the list, or
   // groupParamsByCategory silently sweeps those params into Technical and the
@@ -226,4 +246,33 @@ export function run(t) {
     rohGroups(schema, undefined).flatMap((g) => g.keys).length === Object.keys(schema).length
   );
   ok('an empty schema yields zero ROH groups (never throws)', rohGroups(undefined, ['x']).length === 0);
+
+  // --- buildSettingsSnapshot: the copy-button payload ------------------------
+  {
+    const schema = {
+      flameCount: { type: 'float', category: 'Flame' },
+      color: { type: 'color', category: 'Look' },
+    };
+    const values = { flameCount: 47, color: '#fdba35' };
+    const getValue = (k) => values[k];
+
+    const snap = buildSettingsSnapshot({ id: 'fire', title: 'Fire', enabled: true, schema, getValue });
+    ok('the effect id rides through', snap.effect === 'fire');
+    ok('the title rides through', snap.title === 'Fire');
+    ok('enabled rides through', snap.enabled === true);
+    ok(
+      'every schema key is captured, not just a curated subset',
+      snap.values.flameCount === 47 && snap.values.color === '#fdba35'
+    );
+    ok('the payload is JSON-safe (round-trips)', JSON.parse(JSON.stringify(snap)).values.flameCount === 47);
+
+    const noTitle = buildSettingsSnapshot({ id: 'water', schema: {}, getValue: () => null });
+    ok('a missing title falls back to the id', noTitle.title === 'water');
+    ok('an empty schema yields an empty values object, not a throw', Object.keys(noTitle.values).length === 0);
+
+    const noEnabled = buildSettingsSnapshot({ id: 'x', schema: {}, getValue: () => null });
+    ok('enabled is OMITTED (not `false`) when the caller has no concept of it', !('enabled' in noEnabled));
+    const explicitlyOff = buildSettingsSnapshot({ id: 'x', enabled: false, schema: {}, getValue: () => null });
+    ok('an explicit `false` is kept, not treated as absent', explicitlyOff.enabled === false);
+  }
 }

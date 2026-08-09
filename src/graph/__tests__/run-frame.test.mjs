@@ -89,8 +89,13 @@ export function run(t) {
     // sit after the pass that writes buf:scene.illum, because reading the
     // illumination is the whole reason it is a pass rather than a drawable in
     // geometry.world the way water's surface is.
+    // `post.dof` joined 2026-08-06 (Depth-of-Field.md), between post.bloom and
+    // present.composite (post.grade is still a seam, so it never appears in a
+    // LIVE plan) — it reads buf:scene.depth, which is unaffected by ordering
+    // relative to bloom either way, but runs AFTER bloom so a bloomed bright
+    // light seen through a lower-floor hole blurs along with everything else.
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,post.bloom,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,post.bloom,post.dof,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

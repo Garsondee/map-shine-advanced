@@ -67,7 +67,17 @@ const SPECULAR_BOUNDS_PAD_PX = 8;
  * @param {(data: Float32Array, w: number, h: number) => *} args.createPackTexture -
  *   the island pack's own uploader. ⚠️ MUST use NearestFilter — see `bakeIslandPack`.
  * @param {*} args.illumTexture - `buf:scene.illum`.
- * @param {*} [args.attrTexture] - `buf:scene.attr`; null compiles the floor gate out.
+ * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment; null
+ *   compiles the floor gate out. STAGE 3 (2026-08-05) — replaces `attrTexture`.
+ * @param {(floorIndex: number) => number} [args.resolveExpectedDepth] - given
+ *   the VIEWED floor, returns `computeTieSafeExpectedDepth` for THIS quad's
+ *   OWN background item's rank. Composed in `vt-pan-viewer.js` from
+ *   `depthAuthority.rankOf` + `getSpecularBackgroundItemId`, the SAME shape
+ *   `point-light-pool.js`'s own `resolveExpectedDepth` callback already
+ *   proved — this subsystem never touches `depthAuthority` directly. Called
+ *   every frame from `sync`, never cached: see that call site's own comment
+ *   for why a floor's own rank is not the static quantity `uFloorIndex01`
+ *   used to be.
  * @param {*} args.uViewRect @param {*} args.uOutdoorsRect @param {*} args.outdoorsTexNode
  * @param {Function} args.buildOutdoorsGate
  * @param {*} args.timeMsNode - THE shared clock (`uGlobalTimeMs`), never a private one.
@@ -84,7 +94,8 @@ export function createSpecularSurfaceSubsystem({
   createMaskTexture,
   createPackTexture,
   illumTexture,
-  attrTexture = null,
+  depthTexture = null,
+  resolveExpectedDepth,
   uViewRect,
   uOutdoorsRect,
   outdoorsTexNode,
@@ -92,12 +103,27 @@ export function createSpecularSurfaceSubsystem({
   timeMsNode,
   getSpecularRenderState,
   getSkyHandle,
+  // The island-pack bake (buildSpecularIslandPack — a connected-component
+  // labelling pass over up to 512x512 texels) is triggered from INSIDE this
+  // subsystem (a mask-load continuation, or a live islandSpread change), never
+  // from a synchronous call site in vt-pan-viewer.js the way water's bake is
+  // — so unlike every other zone in this codebase, there is no outside call
+  // to bracket. `profiler` lets bakeIslandPack bracket itself instead
+  // (perf-zone-coverage-audit, 2026-08-06: this bake ran with zero profiler
+  // coverage despite firing on every mask load and every islandSpread drag).
+  // `beginById`/`endById` (the string form, not `Z`'s pre-resolved integer
+  // form): this subsystem is constructed BEFORE vt-pan-viewer.js's own `Z`
+  // lookup table exists, and a bake is rare enough that resolving the id by
+  // string on each call — exactly frame-profiler.js's documented "cold call
+  // sites" use case — costs nothing worth avoiding.
+  profiler = null,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
   // DECLARED, defaulted, consumed and never passed — every control dead, every
   // test green (`feedback_seam_default_hides_unwired`).
   getSpecularRenderState ??= () => ({ enabled: true, params: {} });
   getSkyHandle ??= () => null;
+  resolveExpectedDepth ??= () => 0;
 
   /** A dedicated scene — see the header. */
   const scene = new THREE.Scene();
@@ -151,7 +177,7 @@ export function createSpecularSurfaceSubsystem({
     maskTexture,
     islandPackTexture,
     illumTexture,
-    attrTexture,
+    depthTexture,
     uViewRect,
     uOutdoorsRect,
     outdoorsTexNode,
@@ -197,6 +223,7 @@ export function createSpecularSurfaceSubsystem({
    */
   function bakeIslandPack(spread) {
     if (!pendingBytes) return;
+    profiler?.beginById('surface.specularIslandBake');
     try {
       const pack = buildSpecularIslandPack({
         rgba: pendingBytes.data,
@@ -245,6 +272,8 @@ export function createSpecularSurfaceSubsystem({
       // Loud, and the effect still draws: the pack's placeholder is the global
       // parallax, so a failed bake costs per-object variety and nothing else.
       log.error('specular island pack bake failed — falling back to global parallax:', err);
+    } finally {
+      profiler?.endById('surface.specularIslandBake');
     }
   }
 
@@ -258,18 +287,20 @@ export function createSpecularSurfaceSubsystem({
     const url = getSpecularMaskUrl(floorIndex);
     // ⚠️ THE VIEWED FLOOR HAS NO MASK OF ITS OWN — clear whatever an EARLIER
     // floor left behind, rather than leaving it up. Live bug, 2026-08-03: this
-    // subsystem tracks exactly ONE floor's quad (`uFloorIndex01`, its geometry,
-    // its mask), set only when a NEW mask successfully loads. Without this
-    // branch, switching to a floor with no `_Specular` authored left the
-    // PREVIOUS floor's quad fully intact — visible, still sampling its own
-    // real mask (so `mask`/`tint`/`presence` keep reading real, plausible
-    // values, since floors share the same x,y footprint), but gated by
-    // `uFloorIndex01` for a floor that is no longer what `buf:scene.attr`
-    // reports at those pixels. `specular-render.js`'s floor gate then
-    // correctly refuses to draw — `floorMatch` reads 0 — and `strength` at any
-    // value changes nothing, which is indistinguishable from the effect being
-    // dead. Hiding the mesh here is the honest state: no `_Specular` is
-    // authored for what is actually on screen via the background-image path.
+    // subsystem tracks exactly ONE floor's quad (its geometry, its mask), set
+    // only when a NEW mask successfully loads. Without this branch, switching
+    // to a floor with no `_Specular` authored left the PREVIOUS floor's quad
+    // fully intact — visible, still sampling its own real mask (so
+    // `mask`/`tint`/`presence` keep reading real, plausible values, since
+    // floors share the same x,y footprint), gated by whatever rank THAT
+    // floor's background item happened to resolve to — no longer this floor's
+    // own background, once `resolveExpectedDepth` is fed the NEW `floorIndex`
+    // (STAGE 3, 2026-08-05 — the same rank comparison that used to be
+    // `floorMatch` reading 0 under the old `attrTexture` gate). `strength` at
+    // any value would change nothing either way, which is indistinguishable
+    // from the effect being dead. Hiding the mesh here is the honest state: no
+    // `_Specular` is authored for what is actually on screen via the
+    // background-image path.
     if (!url) {
       if (loadedUrl !== null || contentBoundsWorld !== null) {
         loadedUrl = null;
@@ -298,7 +329,6 @@ export function createSpecularSurfaceSubsystem({
         maskTexture?.dispose?.();
         maskTexture = loaded.texture;
         surface.setMaskTexture(loaded.texture);
-        surface.setFloorIndex(requestedFloor);
         loadedUrl = url;
         loadedFloor = requestedFloor;
         loadedMaskRect = rect;
@@ -401,6 +431,18 @@ export function createSpecularSurfaceSubsystem({
   function sync(floorIndex, viewRect) {
     ensureMaskImage(floorIndex);
 
+    // THE EXPECTED DEPTH — STAGE 3 (2026-08-05). Pushed every frame and NEVER
+    // gated on a cached key, unlike the old `uFloorIndex01` (a static property
+    // of whichever mask happened to load, set once in `ensureMaskImage`'s own
+    // `.then()`): this quad's own background item can change RANK whenever
+    // the depth authority rebuilds — a residency pass, a pan, any item added
+    // or removed — the exact staleness class the vegetation flicker fix
+    // (2026-08-05, `docs/planning/Depth-Buffer.md` §9h) already found and
+    // fixed for a different consumer. Harmless to call even while the mesh is
+    // hidden (no mask loaded yet, or `depthTexture` was never wired) — it
+    // only ever writes a uniform `setExpectedDepth` owns clamping for.
+    surface.setExpectedDepth(resolveExpectedDepth(floorIndex));
+
     // THE CAMERA. Pushed every frame and NEVER gated on a cached key: this is
     // the whole reason the shimmer moves when the author pans, so a skip here
     // would silently restore a painted-on look
@@ -446,6 +488,10 @@ export function createSpecularSurfaceSubsystem({
       p.sheenCeiling,
       p.glintCeiling,
       p.incidentSteepness,
+      // ⚠️ EVERY param pushed below MUST also appear in this key. It is an
+      // early-out cache: a param missing here is one whose changes are simply
+      // never applied after the first frame, with no error anywhere.
+      p.incidentKnee,
       JSON.stringify(layerParams),
     ].join('|');
     if (key === lastParamsKey) return;
@@ -461,6 +507,7 @@ export function createSpecularSurfaceSubsystem({
     if (Number.isFinite(p.sheenCeiling)) surface.setSheenCeiling(p.sheenCeiling);
     if (Number.isFinite(p.glintCeiling)) surface.setGlintCeiling(p.glintCeiling);
     if (Number.isFinite(p.incidentSteepness)) surface.setIncidentSteepness(p.incidentSteepness);
+    if (Number.isFinite(p.incidentKnee)) surface.setIncidentKnee(p.incidentKnee);
     if (Number.isFinite(p.pulse)) surface.setPulse(p.pulse);
     if (Number.isFinite(p.sunBias)) surface.setSunBias(p.sunBias);
 

@@ -50,7 +50,7 @@ import {
   SORT_LAYERS,
   resolveElevationFloorIndex,
 } from '../scene/index.js';
-import { VEGETATION_KINDS } from './vegetation.js';
+import { VEGETATION_KINDS, VEGETATION_PARAMS } from './vegetation.js';
 import { VEG_SHADOW_SMEAR_TAPS } from './vegetation-shadow-subsystem.js';
 
 /** Strip query/hash/directory/extension, case-preserved. Deliberately tiny and
@@ -132,19 +132,6 @@ export function validateVegetationKinds(kinds = VEGETATION_KINDS) {
     if (!Number.isFinite(kind.renderOrderNudge)) {
       errors.push(`kind '${kind.id}': renderOrderNudge must be a finite number`);
     }
-    // A fraction OUTSIDE 0..1 would place the overlay outside its own floor's
-    // band — i.e. sorted into a DIFFERENT floor's art. That is never a tuning
-    // choice, always a typo, and it fails as a RED TEST rather than as a
-    // baffling "my bushes render on the floor above" report.
-    if (
-      !(
-        Number.isFinite(kind.passiveElevationFraction) &&
-        kind.passiveElevationFraction >= 0 &&
-        kind.passiveElevationFraction <= 1
-      )
-    ) {
-      errors.push(`kind '${kind.id}': passiveElevationFraction must be a finite number within 0..1`);
-    }
   }
   return { ok: errors.length === 0, errors };
 }
@@ -217,45 +204,74 @@ export function flutterFoldFreeAmplitudePx(spaceFreq, { safety = VEG_FLUTTER_FOL
 }
 
 /**
- * WHERE THIS KIND SORTS — its passive elevation inside the host floor's band.
+ * WHERE A CANOPY SORTS — its host floor's own ground, plus a REAL, UNBOUNDED
+ * height above it (2026-08-06, replacing the old passive-fraction model — see
+ * `vegetation.js`'s own "HOW A KIND SORTS" section for the full history).
  *
- * See `VegetationKind#passiveElevationFraction` for WHY vegetation sorts at its
- * own elevation instead of its host's (the author-ruled exception to the
- * host-relative render-order rule).
+ * Deliberately NOT clamped to `band.top`: a tall enough `heightFt` sorts the
+ * canopy above its own floor's ceiling, so a real tree can correctly rank
+ * above (or below) whatever floor happens to sit over it, exactly like a real
+ * tree beside a real building. This is the whole point of the change — see
+ * `vegetationHeightFt` for where `heightFt` itself comes from.
  *
  * Returns `null` — NOT a guessed number — when the band is unbounded or
- * inverted. `top` is `+Infinity` for any Level with no declared ceiling
- * (Foundry's own `Level#prepareBaseData` normalisation, which
- * `foundry/scene-layers.js#levelElevation` replicates) and `bottom` is
- * `-Infinity` for one with no declared floor, so "no usable band" is ORDINARY
- * DATA, not an edge case: a scene whose author never set an elevation band on
- * their Level hits this on every single item. `bottom + (top - bottom) * f`
- * would return `Infinity` or `NaN` there and sort the overlay above (or
- * nowhere near) the entire scene — so the caller falls back to the old
+ * inverted, or `heightFt` itself isn't a finite number. `top` is `+Infinity`
+ * for any Level with no declared ceiling (Foundry's own `Level#
+ * prepareBaseData` normalisation, which `foundry/scene-layers.js#
+ * levelElevation` replicates) and `bottom` is `-Infinity` for one with no
+ * declared floor, so "no usable band" is ORDINARY DATA, not an edge case: a
+ * scene whose author never set an elevation band on their Level hits this on
+ * every single item. `bottom + heightFt` mathematically only needs `bottom`
+ * to be finite — `top` is still required here as a deliberate POLICY choice,
+ * not a forced consequence of the formula, so an unbounded-ceiling floor keeps
+ * exactly the same escape hatch (fall back to the host-relative nudge, warn)
+ * it always has, rather than quietly gaining a new capability an author on an
+ * unbounded floor never opted into. The caller falls back to the old
  * host-relative nudge and REPORTS it, rather than rendering a scene-destroying
- * number. That is the same posture `floorCeilings` already takes toward an
+ * number — the same posture `floorCeilings` already takes toward an
  * undeclared ceiling: surface the +Infinity so the author can set a band,
  * never chase a silent wrong answer.
  *
- * A ZERO-HEIGHT band (`bottom === top`, a legitimate Foundry Level) is fine and
- * needs no special case — every fraction collapses onto that one elevation, so
- * vegetation and its floor's art share it and `sortLayer` separates them.
+ * A ZERO-HEIGHT band (`bottom === top`, a legitimate Foundry Level) needs no
+ * special case: the canopy still sorts at `bottom + heightFt`, genuinely above
+ * its floor's single elevation point for any `heightFt > 0` — unlike the old
+ * fraction model, this does NOT collapse onto the floor's own elevation.
  *
- * @param {import('./vegetation.js').VegetationKind} kind
  * @param {{bottom: number, top: number}|null|undefined} band - the host floor's
  *   elevation band (`foundry/scene-layers.js#floorElevationBands`, or a
  *   `getActiveSceneFloors()` floor's `{elevationBottom, elevationTop}` mapped
  *   onto this shape by the caller).
- * @returns {number|null} the sort elevation, or null if the band is unusable.
+ * @param {number} heightFt - real height above `band.bottom`, in the SAME
+ *   units as `band` (Foundry scene distance units — see `vegetationHeightFt`).
+ * @returns {number|null} the sort elevation, or null if the band or height is
+ *   unusable. UNCLAMPED — may legitimately exceed `band.top`.
  */
-export function vegetationPassiveElevation(kind, band) {
+export function vegetationCanopyElevation(band, heightFt) {
   const bottom = band?.bottom;
   const top = band?.top;
   if (!Number.isFinite(bottom) || !Number.isFinite(top)) return null;
   if (top < bottom) return null; // an inverted band is malformed data, not a band
-  const fraction = kind?.passiveElevationFraction;
-  if (!Number.isFinite(fraction)) return null;
-  return bottom + (top - bottom) * fraction;
+  if (!Number.isFinite(heightFt)) return null;
+  return bottom + heightFt;
+}
+
+/**
+ * THE LIVE HEIGHT FOR ONE KIND — resolves `treeHeightFt`/`bushHeightFt`
+ * (`vegetation.js#VEGETATION_PARAMS`) from the currently-live resolved params,
+ * falling back to that param's own declared default when the live value is
+ * missing or non-finite (mirrors every other live-param read in this effect —
+ * never a silently-different second default living here).
+ *
+ * @param {import('./vegetation.js').VegetationKind} kind
+ * @param {Record<string, number>|null|undefined} params - live, resolved
+ *   `VEGETATION_PARAMS` values (`getVegetationRenderState().params` shape).
+ * @returns {number} feet (the scene's own elevation units).
+ */
+export function vegetationHeightFt(kind, params) {
+  const key = `${kind?.id}HeightFt`;
+  const live = params?.[key];
+  if (Number.isFinite(live)) return live;
+  return VEGETATION_PARAMS[key]?.default ?? 0;
 }
 
 /**
@@ -300,15 +316,36 @@ export function vegetationPassiveElevation(kind, band) {
  * caught this because it always seeded a tile at elevation 19 — between
  * bush's 10 and tree's 20 — which broke the tie by accident.
  *
- * Fix: instead of always bisecting the gap, place the kind AT a fixed point
- * inside it that is itself ordered by `passiveElevationFraction` — the same
- * field that already decided the two kinds' elevations are different in the
- * first place. Two kinds sharing one gap now get two distinct numbers inside
- * it, in the same relative order their elevations intend; two kinds NOT
- * sharing a gap are unaffected (still strictly separated by whichever real
- * drawables sit between them). `VEG_KIND_SLOT_MARGIN` keeps every kind's slot
- * strictly inside `(n-1, n)` — never touching either boundary — so this can
- * never newly collide with a REAL drawable's own integer `renderOrder`.
+ * Fix (2026-08-04): instead of always bisecting the gap, place the kind AT a
+ * fixed point inside it that is itself ordered by a dedicated ground-to-sky
+ * table (`VEG_SLOT_RANK`, below) — originally reused `passiveElevationFraction`
+ * directly (the same field that already decided the two kinds' elevations
+ * were different); that field no longer exists (2026-08-06, see
+ * `vegetation.js`'s "HOW A KIND SORTS"), so the ordering now lives in its own
+ * table, values UNCHANGED from the old fraction numbers for canopies. Two
+ * kinds sharing one gap now get two distinct numbers inside it, in the same
+ * relative order their elevations intend; two kinds NOT sharing a gap are
+ * unaffected (still strictly separated by whichever real drawables sit
+ * between them). `VEG_KIND_SLOT_MARGIN` keeps every slot strictly inside
+ * `(n-1, n)` — never touching either boundary — so this can never newly
+ * collide with a REAL drawable's own integer `renderOrder`.
+ *
+ * ============================================================================
+ * GENERALIZED TO SERVE THE SHADOW TOO (2026-08-06)
+ * ============================================================================
+ * Originally canopy-only; the vegetation ground-shadow used to bypass this
+ * entirely (`host.renderOrder + VEG_SHADOW_RENDER_ORDER_MAGNITUDE`, a bare
+ * host-relative nudge) — the EXACT bug class this function was built to fix
+ * for the canopy, left unfixed for the shadow (`Bug-Tracker.md` bug #2's own
+ * "Deliberately NOT changed" section). A Case-2 overlay hosted on an ordinary
+ * TILE (not a Level background, always pinned to its floor's exact bottom)
+ * inherits whatever raw elevation the map author gave that specific tile —
+ * which can legitimately sit anywhere within its own floor — leaving a bare
+ * `+0.2` nudge with no real margin against a floor above. `opts.heightFt: 0`
+ * anchors a shadow call at the host floor's own GROUND (a shadow lies on the
+ * ground regardless of caster height); `opts.role: 'shadow'` selects the
+ * shadow's own (lower) `VEG_SLOT_RANK` entries so a shadow can never
+ * out-tiebreak any canopy when nothing real separates all four in one gap.
  *
  * @param {ReadonlyArray<{key: object, renderOrder: number}>} sortedItems - the
  *   draw list AFTER `sortByLayer`, still in sorted order.
@@ -316,17 +353,42 @@ export function vegetationPassiveElevation(kind, band) {
  *   overlay is painted onto; used only for the fallback and the tiebreak.
  * @param {import('./vegetation.js').VegetationKind} kind
  * @param {{bottom: number, top: number}|null|undefined} band - host floor band.
+ * @param {object} [opts]
+ * @param {number} [opts.heightFt] - real height above `band.bottom`. A canopy
+ *   call passes `vegetationHeightFt(kind, params)`; a shadow call always
+ *   passes `0` (ground level, independent of caster height).
+ * @param {'canopy'|'shadow'} [opts.role='canopy'] - selects the tiebreak slot
+ *   in `VEG_SLOT_RANK` — affects ONLY the sparse-gap tiebreak, never the
+ *   computed elevation itself.
+ * @param {number} [opts.fallbackNudge] - added to `hostItem.renderOrder` when
+ *   the band is unusable (`fellBack: true`). Defaults to `kind.renderOrderNudge`
+ *   (the canopy's own legacy fallback) — a shadow call must pass
+ *   `VEG_SHADOW_RENDER_ORDER_MAGNITUDE` explicitly.
  * @returns {{renderOrder: number, elevation: number|null, fellBack: boolean}}
- *   `fellBack` is true when the band was unusable and the legacy host-relative
- *   nudge was used — the caller REPORTS that rather than swallowing it.
+ *   `fellBack` is true when the band was unusable and the fallback nudge was
+ *   used — the caller REPORTS that rather than swallowing it.
  */
 const VEG_KIND_SLOT_MARGIN = 0.02;
 
-export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) {
-  const elevation = vegetationPassiveElevation(kind, band);
+// Ground-to-sky tiebreak order when nothing real separates two vegetation
+// sub-items sharing one gap (the sparse-floor-tie class, Bug-Tracker.md bug
+// #2, 2026-08-04 — generalized to cover the shadow too, 2026-08-06). Canopy
+// values UNCHANGED from the original passiveElevationFraction numbers —
+// preserves every existing canopy-vs-canopy tiebreak byte-for-byte. Shadow
+// values are new and both sit below either canopy value: a shadow never
+// conceptually outranks any canopy, tree's own or bush's.
+const VEG_SLOT_RANK = Object.freeze({
+  bush: Object.freeze({ shadow: 0.1, canopy: 0.5 }),
+  tree: Object.freeze({ shadow: 0.2, canopy: 1.0 }),
+});
+
+export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band, opts = {}) {
+  const { heightFt, role = 'canopy', fallbackNudge } = opts;
+  const elevation = vegetationCanopyElevation(band, heightFt);
+  const nudge = Number.isFinite(fallbackNudge) ? fallbackNudge : (kind?.renderOrderNudge ?? 0);
   if (elevation === null) {
     return {
-      renderOrder: (hostItem?.renderOrder ?? 0) + (kind?.renderOrderNudge ?? 0),
+      renderOrder: (hostItem?.renderOrder ?? 0) + nudge,
       elevation: null,
       fellBack: true,
     };
@@ -350,11 +412,10 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
   for (const it of sortedItems ?? []) {
     if (it?.key && compareLayerKeys(it.key, key) < 0) below++;
   }
-  // Placed at a per-kind point inside the (below-1, below) gap, ordered by
-  // this kind's own passiveElevationFraction — see the doc comment above for
-  // why the old fixed midpoint (`below - 0.5` for every kind) let two
-  // different kinds collide onto one number.
-  const fraction = Number.isFinite(kind?.passiveElevationFraction) ? kind.passiveElevationFraction : 0.5;
+  // Placed at a per-(kind,role) point inside the (below-1, below) gap — see
+  // the doc comment above for why a fixed midpoint (`below - 0.5` for every
+  // caller) let different vegetation sub-items collide onto one number.
+  const fraction = VEG_SLOT_RANK[kind?.id]?.[role] ?? 0.5;
   const span = 1 - 2 * VEG_KIND_SLOT_MARGIN;
   const slot = VEG_KIND_SLOT_MARGIN + fraction * span;
   return { renderOrder: below - 1 + slot, elevation, fellBack: false };
@@ -449,18 +510,23 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
  * describes: a single fixed ordering could never have caught this.
  *
  * ⚠️ `levelId` IS SET TO THE HOST'S OWN RESOLVED FLOOR, NEVER LEFT TO
- * RE-DERIVE FROM THE SYNTHETIC ELEVATION. A tree's `passiveElevationFraction
- * = 1` places its synthetic `key.elevation` EXACTLY at its floor's own
- * `elevationTop` — precisely the case
- * `[[feedback_half_open_band_excludes_its_own_member]]` names: `resolve
- * ElevationFloorIndex`'s half-open `[bottom,top)` band would attribute that
- * exact value to the FLOOR ABOVE, not the floor the canopy actually belongs
- * to. `resolveSceneDepthFloorIndex`'s own "membership first" branch
- * (`vt/scene-depth.js`) exists for exactly this — set `levelId` and the
- * half-open lookup is never even attempted.
+ * RE-DERIVE FROM THE SYNTHETIC ELEVATION. Originally this mattered because a
+ * tree's OLD `passiveElevationFraction = 1` placed its synthetic
+ * `key.elevation` EXACTLY at its floor's own `elevationTop` — precisely the
+ * case `[[feedback_half_open_band_excludes_its_own_member]]` names: a
+ * half-open `[bottom,top)` band would attribute that exact boundary value to
+ * the FLOOR ABOVE, not the floor the canopy actually belongs to.
+ * `resolveSceneDepthFloorIndex`'s own "membership first" branch (`vt/
+ * scene-depth.js`) exists for exactly this — set `levelId` and the half-open
+ * lookup is never even attempted. ⚠️ MATTERS MORE NOW, NOT LESS (2026-08-06):
+ * with a real, unbounded `heightFt` (see `vegetationCanopyElevation`), the
+ * synthetic elevation can land arbitrarily far into another floor's own
+ * territory, not just at one boundary value — making this override the ONLY
+ * thing standing between a tall tree's canopy and being silently reattributed
+ * to the wrong floor for VISIBILITY purposes.
  *
  * An UNBOUNDED band (no declared `elevationTop`) is a NAMED gap, never a
- * fabricated number: `vegetationPassiveElevation` already returns `null`
+ * fabricated number: `vegetationCanopyElevation` already returns `null`
  * there, and this function skips the pair entirely rather than guessing an
  * elevation — the SAME posture `stampVegetationRenderOrders` already takes
  * for its own, separate (THREE paint-order) concern.
@@ -477,6 +543,9 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
  *   - `boot.js`'s own vegetation-discovery map (`getVegetationRenderState().
  *   urlByItemId`) — already scoped to `levelBackground`/`tile` hosts only
  *   (foregrounds excluded there), so this function does not re-check `item.kind`.
+ * @param {Record<string, number>|null|undefined} params - live, resolved
+ *   `VEGETATION_PARAMS` values (`getVegetationRenderState().params`) — feeds
+ *   `vegetationHeightFt` for each kind's real height.
  * @returns {Array<{id: string, key: object, kind: 'vegetationOverlay', levelId: string|null, vegHostItemId: string, vegKindId: string}>}
  *   one synthetic item per (host, kind) pair with a discovered URL AND a
  *   bounded floor band — never a real item, never a guessed elevation.
@@ -486,7 +555,7 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band) 
  *   across residency passes, regardless of `items`' own (residency-
  *   dependent) order.
  */
-export function buildVegetationDepthItems(items, floors, urlByItemId) {
+export function buildVegetationDepthItems(items, floors, urlByItemId, params) {
   if (!(urlByItemId instanceof Map) || urlByItemId.size === 0) return [];
   const bandById = new Map();
   for (const f of floors ?? []) {
@@ -504,7 +573,7 @@ export function buildVegetationDepthItems(items, floors, urlByItemId) {
     for (const kind of VEGETATION_KINDS) {
       const url = urls[kind.id];
       if (!url) continue;
-      const elevation = vegetationPassiveElevation(kind, band);
+      const elevation = vegetationCanopyElevation(band, vegetationHeightFt(kind, params));
       if (elevation === null) continue; // unbounded band - a named gap, never a guess
       out.push({
         id: `veg:${item.id}:${kind.id}`,

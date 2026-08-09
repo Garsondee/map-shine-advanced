@@ -84,6 +84,10 @@ const ingestLog = createLogger('vt-ingest');
 /** Log door for new call sites in this file — the rest still calls
  * console.* directly (ratcheted debt, not this fix's job to migrate). */
 const log = createLogger('vt-pan-viewer');
+/** Not a shared export anywhere in this codebase — every consumer of
+ * `readSetting`/`writeSetting` redeclares this same literal locally
+ * (`boot.js`, `foundry/anchor-adapter.js`, `foundry/paint-adapter.js`). */
+const MODULE_ID = 'map-shine-advanced';
 import {
   createInitialViewState,
   applyKey,
@@ -160,6 +164,7 @@ import {
   computeTokenOcclusionRadiusPx,
   getActiveSceneFloors,
   readSceneWallSegments,
+  readSetting,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback } from '../diag/render-fallback.js';
 import {
@@ -244,6 +249,8 @@ import {
   resolveEnvGrade,
   scaleGradeToIdentity,
   identityCubeLut,
+  profileRank,
+  GLOBAL_SETTING_KEYS,
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC } from '../core/frame-clock.js';
 import {
@@ -6681,8 +6688,19 @@ export async function startVtPanViewer({
         // drop-in replacement for the bare `texture(tex, uv)` this used to be.
         // Same linear units in and out; it only puts back the local contrast
         // minification averaged away, and only while minifying.
+        //
+        // PERF TIER (see shouldUseFullAlbedoClarity's own header) — a JS-level
+        // branch decided ONCE per material build, the same structural-variant
+        // shape `buildSceneDepthWriterMaterial`'s own `alwaysOpaque` uses: the
+        // `performance`/`low` path's generated shader genuinely does not
+        // contain the 4 neighbour taps or the CAS math, not merely a runtime
+        // condition that skips them. `standard` (the default) and above are
+        // byte-for-byte what ships today — see that function's own doc for
+        // why the boundary sits at `standard`, not just `extreme`.
         const uvS = uv().mul(uUvScale).toVar();
-        const clear = buildAlbedoClarityNode(THREE, tex, uvS, uTexSize);
+        const clear = shouldUseFullAlbedoClarity()
+          ? buildAlbedoClarityNode(THREE, tex, uvS, uTexSize)
+          : buildFlatAlbedoNode(THREE, tex, uvS);
         const c = vec4(clear.rgb, clear.a).toVar();
         c.rgb.mulAssign(uTint);
         c.a.mulAssign(uAlpha);
@@ -13819,6 +13837,73 @@ function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
   // Gamma-2.0 → linear. Downstream sees exactly the units it always did.
   const lin = TSL.max(sharpened, vec3(0));
   return { rgb: lin.mul(lin), a: c.a };
+}
+
+/**
+ * The bare 1-tap read `buildAlbedoClarityNode` degenerates to whenever
+ * `uSharpen` is 0: `w = amp*0*gate = 0` ⇒ `rcp = 1` ⇒ `sharpened = eC` ⇒
+ * `lin.mul(lin) = max(c.rgb,0).sqrt()² = max(c.rgb,0)`. Every one of the 4
+ * neighbour taps, the two `dFdx`/`dFdy` derivative reads, and the CAS
+ * contrast math is provably unreachable in that case — this function is
+ * that same output with the unreachable work actually removed, not merely
+ * multiplied by zero (a shader with an unconditional discard/branch still
+ * pays for the code inside it regardless of the runtime value feeding it —
+ * `buildSceneDepthWriterMaterial`'s own `alwaysOpaque` is the identical
+ * argument applied to a different function, `scene-depth.js`).
+ *
+ * @param {*} THREE @param {*} tex @param {*} uvNode
+ * @returns {{rgb:any, a:any}} SAME shape as `buildAlbedoClarityNode`'s own.
+ */
+function buildFlatAlbedoNode(THREE, tex, uvNode) {
+  const { vec3, texture, max } = THREE.TSL;
+  const c = texture(tex, uvNode);
+  return { rgb: max(c.rgb, vec3(0)), a: c.a };
+}
+
+/**
+ * ALBEDO CLARITY AS A REAL PERFORMANCE TIER (2026-08-09, PERF audit §18's own
+ * "next lever": `geometry.worldDraw` is the dominant zone at 56.5% of frame
+ * GPU, and 5 of `buildWholeImageMaterial`'s 6 texture taps are this filter).
+ *
+ * Gated on the SAME global performance profile every other tiered effect
+ * reads (`effects/effect-cascade.js`'s `PERFORMANCE_PROFILES`), read directly
+ * rather than through the effect-registry/manifest machinery: clarity has no
+ * manifest of its own (it is a quality knob on the always-on base floor art,
+ * not a toggleable effect), so there is nothing for `resolveEffectTier` to
+ * resolve against. `profileRank` is the same string→0-4 mapping every tiered
+ * consumer already trusts, imported directly.
+ *
+ * THE BOUNDARY, deliberately conservative: `standard` (rank 2) is the
+ * DEFAULT profile, and this project's own established rule — stated
+ * verbatim in `vegetation-render.js`'s own tier-3 doc — is that the DEFAULT
+ * profile must reproduce today's shipped behaviour EXACTLY, not just the
+ * top tier. So `standard`, `quality`, and `extreme` (rank >= 2) all keep the
+ * full 5-tap sharpen, byte-for-byte what ships today; only `performance` and
+ * `low` (rank < 2) — tiers a user has actively opted INTO for less cost —
+ * drop to the 1-tap read. No existing session, on any profile it is already
+ * running today, sees a different pixel.
+ *
+ * Read once per material build, the SAME freshness model
+ * `vegetationTierPlan`'s own callers already use (that function's own doc:
+ * "a live performance-profile change reaches an already-built tile... only
+ * on its next scene load, never retroactively") — a live profile toggle
+ * mid-session is not expected to retroactively cheapen an already-compiled
+ * material, matching the precedent rather than inventing a new promise.
+ *
+ * @returns {boolean} true when this build should use the full sharpen.
+ */
+function shouldUseFullAlbedoClarity() {
+  try {
+    const profile = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile);
+    return profileRank(profile) >= 2; // 2 === 'standard', the default rank
+  } catch {
+    // A settings read can fail before Foundry's own registry is ready (the
+    // shader-lab bench, a probe built before `game.settings` exists). Falls
+    // open to the full-fidelity path — the SAME direction every other
+    // fail-open in this codebase points, and the one that can never be
+    // mistaken for a deliberate quality choice.
+    return true;
+  }
 }
 
 /**

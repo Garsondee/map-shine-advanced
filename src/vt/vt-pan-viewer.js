@@ -5927,12 +5927,28 @@ export async function startVtPanViewer({
       // machinery `buildPack` still provides; only the ALBEDO atlas/VT
       // pipeline that used to sit alongside it (streaming mode, removed
       // 2026-07-22 — see feedback_mode_forks_silently_drop_features) is gone.
+      // try/finally, not a bare begin/await/end (BUG FOUND LIVE, 2026-08-09):
+      // `ensureItemLoaded` has no try/catch of its own — the caller's PHASE 1
+      // loop does (item 1d's "permanently-broken item" handling, a REAL,
+      // documented, recurring scenario: a 404'd asset). Without finally, a
+      // throwing `getSourceDimensions` would jump straight past
+      // `profiler.end()`, leaking this bracket open for the rest of the
+      // session — an unbalanced bracket THIS code would have caused, not
+      // measured. finally preserves the throw for the caller unchanged.
       profiler?.begin(Z.residencyItemLoadDims);
-      const dims = await getSourceDimensions(item.src);
-      profiler?.end(Z.residencyItemLoadDims);
+      let dims;
+      try {
+        dims = await getSourceDimensions(item.src);
+      } finally {
+        profiler?.end(Z.residencyItemLoadDims);
+      }
       profiler?.begin(Z.residencyItemLoadMasks);
-      const { packs, layerErrors } = await loadExtraLayerPacks(item);
-      profiler?.end(Z.residencyItemLoadMasks);
+      let packs, layerErrors;
+      try {
+        ({ packs, layerErrors } = await loadExtraLayerPacks(item));
+      } finally {
+        profiler?.end(Z.residencyItemLoadMasks);
+      }
       const state = {
         item,
         packs, // masks only — there is no albedo pack any more

@@ -2320,3 +2320,67 @@ mergeable with the clarity node's own center tap without reintroducing the exact
 implicit-LOD bug round 10 already fixed). The sharpening's zoom gate scales its OUTPUT,
 never skips the fetches — at this benchmark's zoom the gate is active, so this is a genuine
 quality-vs-speed tradeoff, not a free win, and stays the author's call to make.
+
+## 19. 2026-08-09, round 7 — a self-caught wrong diagnosis, and albedo clarity landed as a real tier
+
+A 7th live report (same floor, same resolution as the ORIGINAL baseline report — the cleanest
+possible comparison point): `geometry.worldDraw` 133.1ms → 26.7ms GPU (**-80%**),
+`geometry.depthDraw` 44.3ms → 7.9ms (**-82%**), avgFps 4.9 → **18.1** (+269%), frame.gpuMs p50
+116ms → 47.05ms (-59%). Two unbalanced brackets → 0. Pool overflow stayed clean. The new
+sub-zone instrumentation (§18) answered its own question: the depth pass's CPU cost is
+genuinely inside the `render()` call itself (7.68 of ~7.7ms), and `renderer.info.memory
+.programs` stayed EXACTLY flat (88→88) across the window — ruling out pipeline recompilation
+as an explanation for anything measured this round. One real loss alongside the wins: the
+single worst frame (783ms) is worse than the original baseline's worst (583ms) — a tail
+problem, not an average one, not yet investigated.
+
+### A wrong diagnosis caught before it shipped
+
+Read the report's own triangle counts (`geometry.depthDraw`: ~8,034 triangles/draw average)
+and initially concluded `COVERAGE_MESH_CELLS`'s 32→64 retune (§18) was wastefully tessellating
+the fully-opaque base layers (`Ground`, `First-Floor`) with 4x the vertex count for zero
+fill-rate benefit — presented this to the author as "option #1, high confidence, my own
+mistake." **Verified before implementing, per this project's own `feedback_measure_the
+_output_not_the_equation` doctrine, and found the theory wrong**: ran the real
+`buildCoverageCellMask` against the real mansion assets and confirmed `Ground`'s mask already
+comes back `null` → the existing `mask ? mask.cells : requested` fallback in `setTileGeometry`
+already routes it to the cheap 2-triangle quad, exactly as it should. The real explanation for
+the triangle count is mundane: large source images split into multiple tiles
+(`planImageTiles`), and `First-Floor` itself is only 33% opaque so its OWN partial coverage
+mask legitimately keeps ~3,448 of the possible 8,192 triangles — not a bug, coverage meshing
+working as designed. No code changed for this item; the task tracking it was closed as
+"already correct," not implemented.
+
+### Albedo clarity landed as a real performance tier
+
+`geometry.worldDraw` remained the dominant zone (56.5% of frame GPU) with 5 of its 6 texture
+taps spent on `buildAlbedoClarityNode`'s CAS sharpening. This project already has a real,
+working global performance-profile system (`PERFORMANCE_PROFILES = ['low','performance',
+'standard','quality','extreme']`, `effect-cascade.js`) that every other tiered effect
+(vegetation, specular, candle) already reads via `resolveEffectTier`. Clarity has no manifest
+of its own — it's a quality knob on the always-on base floor art, not a toggleable effect —
+so it reads the profile directly via `readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile)` +
+`profileRank()`, both already exported through barrels `vt-pan-viewer.js` imports from,
+confirmed to widen an existing edge rather than create a new one.
+
+**The boundary is `standard` (rank 2), not just `extreme` (rank 4) — deliberately, following
+this project's OWN already-established rule, not a new invention.** `vegetation-render.js`'s
+own tier-3 doc states it in so many words: the DEFAULT profile must reproduce today's shipped
+behaviour exactly, not just the top tier. So `standard`/`quality`/`extreme` (rank >= 2) all
+keep the full 5-tap sharpen, byte-for-byte unchanged; only `performance`/`low` (rank < 2) — a
+tier a user has actively opted into — drop to a 1-tap read (`buildFlatAlbedoNode`, the exact
+algebraic reduction of the existing sharpen math at `uSharpen=0`, with the now-provably-dead
+neighbour taps and CAS math actually removed from the graph, the same structural-variant
+reasoning `alwaysOpaque` already established one function over).
+
+**Named plainly, not buried:** this means the fix produces **no speedup on `standard`**, the
+default profile — almost certainly what every report captured so far in this whole audit was
+running under, since no profile change was ever mentioned. Whether `standard` itself should
+also drop to the cheap tier, given how heavily this specific investigation has prioritised
+raw performance over the codebase's general new-user-facing conservatism, is an open product
+question handed back to the author rather than decided unilaterally.
+
+`npm run verify` green (8228, unchanged — `vt-pan-viewer.js` has no Node test surface, matching
+its untested sibling `buildAlbedoClarityNode`). **BUILT, not live-verified**, and — unlike
+every other fix this audit — **will show ZERO effect in the next live report unless the
+author first switches their performance-profile setting to `performance` or `low`.**

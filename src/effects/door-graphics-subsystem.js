@@ -264,19 +264,41 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
           }
         }
 
-        // Re-derive the four world vertices + the tint/alpha for this progress.
-        const snap = applyDoorAnimation(leaf.closed, door, leaf.progress);
-        const placement = doorSnapshotToPlacement(snap, { texWidth: leaf.texWidth, texHeight: leaf.texHeight });
-        const positions = buildQuadPositions(computeQuadCorners(placement));
-        const posAttr = leaf.geometry.getAttribute('position');
-        if (posAttr && posAttr.array.length === positions.length) {
-          posAttr.array.set(positions);
-          posAttr.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
-        } else {
-          leaf.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        // Re-derive the four world vertices + the tint/alpha for this progress
+        // — but ONLY when an input to `applyDoorAnimation` actually changed
+        // (PERF, 2026-08-09: this used to run — and force a GPU buffer
+        // re-upload via `needsUpdate = true` — every frame for every leaf,
+        // whether or not the door had moved since the last one; steady-state
+        // is the overwhelming majority of a door's life). `sig` already
+        // covers everything `closedSig` tracks (endpoints, animation type,
+        // style, flip, texture); `direction`/`strength` are the two
+        // `applyDoorAnimation` also reads that `doorClosedSignature` does
+        // not (they gate the CLOSED placement, not the animated one), and
+        // `leaf.progress` is the one input that legitimately changes every
+        // frame WHILE animating.
+        const animChanged =
+          sig !== leaf.lastAnimSig ||
+          door.animation.direction !== leaf.lastAnimDirection ||
+          door.animation.strength !== leaf.lastAnimStrength ||
+          leaf.progress !== leaf.lastAnimProgress;
+        if (animChanged) {
+          const snap = applyDoorAnimation(leaf.closed, door, leaf.progress);
+          const placement = doorSnapshotToPlacement(snap, { texWidth: leaf.texWidth, texHeight: leaf.texHeight });
+          const positions = buildQuadPositions(computeQuadCorners(placement));
+          const posAttr = leaf.geometry.getAttribute('position');
+          if (posAttr && posAttr.array.length === positions.length) {
+            posAttr.array.set(positions);
+            posAttr.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
+          } else {
+            leaf.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          }
+          leaf.uTint.value.set(snap.tint[0], snap.tint[1], snap.tint[2]);
+          leaf.uAlpha.value = snap.alpha;
+          leaf.lastAnimSig = sig;
+          leaf.lastAnimDirection = door.animation.direction;
+          leaf.lastAnimStrength = door.animation.strength;
+          leaf.lastAnimProgress = leaf.progress;
         }
-        leaf.uTint.value.set(snap.tint[0], snap.tint[1], snap.tint[2]);
-        leaf.uAlpha.value = snap.alpha;
         leaf.mesh.visible = true;
       }
     }

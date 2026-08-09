@@ -825,6 +825,42 @@ export const ZONES = Object.freeze(
       false,
       'updateResidencyUnguarded'
     ),
+    // FOUND 2026-08-09 (round 3): a live report showed residency.itemLoad is
+    // ~96% of residency.pass's 10.5ms mean — but that zone wraps the WHOLE
+    // per-item loop, sequential across both items AND (inside
+    // loadExtraLayerPacks) across one item's own masks. These two nest inside
+    // it, firing once per NEW item (never for an already-loaded one, which
+    // returns from the `existing` branch before either runs) — their own
+    // `occurrences` count answers "how many new items appeared per pass",
+    // which residency.itemLoad's own count (once per PASS, not per item)
+    // cannot. Deliberately NOT restructuring the sequential await chain
+    // itself this round: this exact suspension point has a real history of
+    // subtle live bugs (the vegetation-rank flicker, the whole-screen
+    // MAGENTA regression, `ensureItemLoaded`'s own "permanently-broken item"
+    // fix) and there is no way to visually confirm a concurrency change
+    // doesn't reintroduce one blind. Measure first.
+    z(
+      'residency.itemLoadDims',
+      'Per-item dimension read (new items only)',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'ensureItemLoaded'
+    ),
+    z(
+      'residency.itemLoadMasks',
+      'Per-item mask-pack load (new items only)',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'ensureItemLoaded'
+    ),
     z(
       'residency.itemRefresh',
       'Per-item placement + mesh refresh (phase 2)',

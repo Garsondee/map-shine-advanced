@@ -1857,10 +1857,65 @@ and the effect sweep measured nothing this run (`sweepEffectsMeasured: 0`) — i
 why (every effect fell inside this run's ±2.75ms noise floor) — a pre-existing sweep limitation
 exposed by this run's particular noise level, not a regression.
 
+### Investigated same session: `ensureItemLoaded`'s pipeline — instrumented further, NOT restructured
+
+Read `ensureItemLoaded` end to end chasing `residency.itemLoad`'s 10ms. Found a real, well-evidenced
+opportunity: PHASE 1's outer loop (`for (const item of items) { ... await ensureItemLoaded(item) ...
+}`) and, one level down, `loadExtraLayerPacks`' own per-mask loop are BOTH plain sequential
+`for`-await loops — items (and a single item's own masks) load strictly one at a time. The underlying
+decode pipeline already supports real concurrency: `decode-pool.js`'s `_sliceSem`
+(`SLICE_MAX_CONCURRENT_SOURCES = 3`) exists specifically to bound — not prevent — concurrent source
+decodes, and multiple hitch samples show it sitting at `active: 0` alongside real work elsewhere,
+meaning the 3-way concurrency headroom this semaphore provides is never exploited by either loop.
+Parallelising both (`Promise.all` over items/masks, order preserved via `.map()`, per-item failure
+isolation preserved via a try/catch inside each mapped async function so `Promise.all` never rejects)
+is architecturally straightforward and the semaphore already makes it safe from a memory/decode-
+concurrency standpoint.
+
+**Deliberately NOT attempted.** This exact async-suspension point — `updateResidencyUnguarded`
+genuinely yielding mid-pass while the render loop keeps ticking — has caused multiple real, subtle,
+hard-to-reproduce live bugs already this project (the two-round vegetation rank-stamp flicker, the
+whole-screen MAGENTA regression, the "permanently-broken item" retry storm `ensureItemLoaded`'s own
+header documents). Changing WHEN items become available in `itemStates`/`states` — from strictly
+one-at-a-time to a concurrent burst — is exactly the kind of timing change that class of bug hides
+in, and this session has no way to visually confirm a change here doesn't reintroduce one. Instead,
+added two finer zones, nested inside `residency.itemLoad`: `residency.itemLoadDims` (wraps
+`getSourceDimensions`) and `residency.itemLoadMasks` (wraps `loadExtraLayerPacks`), firing once per
+NEW item rather than once per pass — their own `occurrences` count will tell the next live report how
+many new items typically load per pass (a number nothing currently exposes) and which of the two
+sub-calls actually dominates. That evidence is what should decide whether the parallelisation is
+worth the risk, and should ideally come from someone who can also confirm live that nothing broke.
+
+### Fixed: door leaves were re-uploading GPU geometry every frame, animating or not
+
+Found while scanning for OTHER steady-cadence zones with unexplained per-frame cost:
+`tick.doorSync` measures 1.003ms mean, EVERY frame (`occurrenceRate: 1`), regardless of whether any
+door is actually moving. Reading `syncDoorGraphics` (`door-graphics-subsystem.js`) found the cause:
+the CLOSED placement was already correctly dirty-checked (`doorClosedSignature` + `leaf.closedSig`,
+recomputed only when a door's geometry-affecting inputs actually change) — but the ANIMATED placement
+one step later was not. `applyDoorAnimation` + `doorSnapshotToPlacement` + `buildQuadPositions` ran
+unconditionally every frame for every leaf, and unconditionally set `posAttr.needsUpdate = true` —
+forcing a real GPU buffer re-upload — even for a door sitting fully open or fully closed, which is the
+overwhelming majority of a door's lifetime. Exactly the same bug shape as §3.8's point-light
+re-triangulation fix (round 1), just one layer over in a different subsystem.
+
+**Fixed** with the same shape of dirty check: `leaf.lastAnimSig`/`lastAnimDirection`/
+`lastAnimStrength`/`lastAnimProgress`, covering every input `applyDoorAnimation` reads that the
+existing `closedSig` does not (`door.animation.direction`/`strength`) plus `leaf.progress` itself —
+verified by hand against 6 scenarios (first sight, steady state, mid-animation, an instant snap with
+animation off, a live wall-geometry edit, a direction/strength-only change) rather than assumed.
+`npm run verify` green (8169 tests, unchanged count — this stateful, THREE.js-dependent subsystem has
+no direct unit harness, same as `point-light-pool.js`; only its pure math helpers are tested, and
+those are untouched). **BUILT, not live-verified** — but this fix's failure mode is unusually
+forgiving even if the dirty check were subtly wrong: the worst case is running every frame anyway
+(correct, just unoptimised) or a one-frame-late update that self-corrects the next frame, never a
+persistent wrong-state or a crash — a meaningfully safer risk profile than the residency-loop change
+just above, which is why this one was attempted and that one was not.
+
 ### What still needs checking
 
-`residency.itemLoad`'s real bottleneck — is `ensureItemLoaded`'s decode/fetch pipeline itself
-optimisable (worker parallelism, ranged-fetch batching), or is ~10ms/pan-triggered-pass simply the
-honest cost of streaming a large map and not worth chasing further? Unexamined this round.
-`geometry.depthDraw` and the sun-shadow/water debounce remain the two committed, fully-diagnosed,
-not-yet-attempted targets from §12/§13, unchanged by anything found here.
+`residency.itemLoad`'s real bottleneck is now instrumented two levels deep (`itemLoadDims`/
+`itemLoadMasks`) but still not measured — the next live report should read those first. Whether the
+door-graphics fix actually moves `tick.doorSync` toward zero on a mostly-idle scene is also unmeasured
+until the next live capture. `geometry.depthDraw` and the sun-shadow/water debounce remain the two
+committed, fully-diagnosed, not-yet-attempted targets from §12/§13, unchanged by anything found here.

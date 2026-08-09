@@ -5927,8 +5927,12 @@ export async function startVtPanViewer({
       // machinery `buildPack` still provides; only the ALBEDO atlas/VT
       // pipeline that used to sit alongside it (streaming mode, removed
       // 2026-07-22 — see feedback_mode_forks_silently_drop_features) is gone.
+      profiler?.begin(Z.residencyItemLoadDims);
       const dims = await getSourceDimensions(item.src);
+      profiler?.end(Z.residencyItemLoadDims);
+      profiler?.begin(Z.residencyItemLoadMasks);
       const { packs, layerErrors } = await loadExtraLayerPacks(item);
+      profiler?.end(Z.residencyItemLoadMasks);
       const state = {
         item,
         packs, // masks only — there is no albedo pack any more
@@ -8857,6 +8861,11 @@ export async function startVtPanViewer({
       residencyCoverAlphaPrime: profiler?.indexOf('residency.coverAlphaPrime') ?? -1,
       residencyStaleRelease: profiler?.indexOf('residency.staleRelease') ?? -1,
       residencyItemLoad: profiler?.indexOf('residency.itemLoad') ?? -1,
+      // ADDED 2026-08-09, round 3 — residency.itemLoad turned out to be ~96%
+      // of residency.pass; these two find out WHICH part of loading a new
+      // item costs that, before touching the sequential await chain itself.
+      residencyItemLoadDims: profiler?.indexOf('residency.itemLoadDims') ?? -1,
+      residencyItemLoadMasks: profiler?.indexOf('residency.itemLoadMasks') ?? -1,
       residencyItemRefresh: profiler?.indexOf('residency.itemRefresh') ?? -1,
     };
 

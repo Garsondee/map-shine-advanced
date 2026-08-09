@@ -16,6 +16,7 @@ export {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
+  getVtPanViewerRenderTargets,
   setVtPanViewerFloor,
   setVtPanViewerGpuProbe,
   // PER-PASS GPU TIMING (docs/planning/Performance.md). Distinct from the probe
@@ -24,6 +25,8 @@ export {
   setVtPanViewerGpuZoneTimer,
   getVtPanViewerGpuZoneStatus,
   readVtPanViewerRenderInfo,
+  readVtPanViewerDrawCallsOnly,
+  readVtPanViewerTriangleCountOnly,
   readVtPanViewerFrameSamples,
   setVtPanViewerWindOverlay,
   setVtPanViewerWindOverlayResolution,

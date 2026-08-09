@@ -2,7 +2,10 @@
 
 **What this is:** a systematic read of every renderer subsystem, hunting for work that is done twice,
 work that is done for pixels the camera cannot see, and patterns that are starting to cost more as
-the codebase grows. It is a **list of problems, not a list of fixes.** Nothing here has been built.
+the codebase grows. It started as **a list of problems, not a list of fixes** — most of it still is.
+**Update 2026-08-09:** a real live perf report landed and 8 CPU-only fixes went in on the strength of
+it. See §12 for exactly which entries are now fixed, which were investigated and deliberately
+deferred, and why — the rest of this document is otherwise unchanged from its original form.
 
 **What it is NOT:** a measurement. `Performance-Insights.md` is the measured ledger and stays the
 authority on what the frame actually costs. This document is upstream of it — it says *where to
@@ -1580,3 +1583,171 @@ Named so the gaps are not mistaken for clean bills of health:
    point of §10 is that the instrument already exists and several of its dials have never been
    turned; §5.8 shows a cheaper middle path also exists — running the real *non-GPU* half of a
    subsystem directly, without needing the app at all.
+
+---
+
+## 12. 2026-08-09 — a real live perf report landed, and 8 fixes went in
+
+**A real perf-profile JSON, captured by the author from a running session** (route
+`n_to_s:2kf/60000ms`, 2212 frames, `msaVersion 0.6.0-dev.0`), is saved at
+`docs/planning/perf-reports/2026-08-09-live-sweep.json` with a synthesis at the `.md` alongside it.
+Read that file for the full cross-reference against every finding above — the headline is that
+several "unsized, guessed 0.3–2 ms" entries turned out to be **larger than guessed**, and the
+instrument's own `findings[]` array (sorted by severity) independently named the same top costs
+this document already suspected.
+
+### What the live report changed about this document's own priorities
+
+- **§4.3 `geometry.depthDraw`: measured at 5.872 ms mean CPU, 46.6 ms max, every frame** — confirmed
+  real, confirmed large (≈82% of the whole `geometry.world` pass's CPU cost, by arithmetic against
+  the pass total), and confirmed as this document's single highest-value unfixed target. **Not
+  fixed** — see below.
+- **A cost this document never sized at all: `residency.pass` (`scheduleResidencyUpdate`) — 12.484 ms
+  mean per occurrence, 44 ms peak, firing on 42% of frames during a pan.** The single largest raw CPU
+  number in the whole report. Nothing this document catalogued inside `updateResidencyUnguarded`
+  accounts for it (`depth.proxyRebuild` alone is 0.257 ms/occurrence). **This is now the single
+  biggest open question this document does not answer.**
+- **§3.1's illumination/coloration duplication got hard numbers on both sides**: GPU 3.941 + 3.787 ms
+  combined, CPU-encode 2.377 + 1.409 ms combined — the CPU-encode figure is new information.
+- **§8.4's VRAM-inventory gap was confirmed live, verbatim**: `renderTargets.count: 0`. **Fixed.**
+- **§5B's (`Performance-Insights.md`) candle-flame methodology finding was independently
+  reproduced**: the live report's own `method-disagreement:candleFlame` finding (zone sum 0.025 ms vs
+  sweep marginal 3.45 ms) is exactly the signature that finding predicts.
+- Two **instrument-health** flags the report raised as "high severity," inherited here: one
+  unbalanced profiler bracket (one zone's number this run is suspect) and a GPU timestamp-query pool
+  overflow (some GPU numbers this run are missing, not zero). Overall coverage was still 97.9%,
+  "good" — the top-level picture is trustworthy; a specific number close to these caveats should be
+  re-measured, not treated as final.
+
+### Fixed (working tree, uncommitted pending review — 8 files, +421/−69 lines)
+
+All CPU/JS-only. **Zero shader or TSL changes were made** — every fix below is either a pure
+data-flow hoist (compute once, reuse where the value cannot differ), a dead-allocation removal, or a
+diagnostic-only wiring fix. `npm run verify` is green throughout (8,157 tests, lint, format, all 29
+structure rules). None of this has been seen live — see the caveat at the top of §11.
+
+| Fix | Targets |
+| --- | --- |
+| `getActiveSceneFloors` hoisted out of the per-tile frame loop (was once per tile per frame, now once per frame) | §5's masks-depth-5 / frame-loop-1 |
+| `computeAmbientColors` hoisted when no darkness regions are active (was once per light per frame) | §3.6 |
+| The dead soft-edge SDF's doubled `normalizeLightPolygon` call removed — `triangulateLightFan` now returns its own normalization for `writeLightEdgePoints` to reuse instead of recomputing it | §3.7 |
+| A real VALUE-comparison dirty-check added to per-frame light re-triangulation — skips `triangulateLightFan`/`writeLightEdgePoints`/buffer re-upload for a light whose (x, y, radius, shapePoints content) is unchanged | §3.8 |
+| Aperture-gobo wall segments pre-filtered to `aperture === true` once per frame, before the per-light scan (was: every light scans every wall) | §5.1, §6.8 |
+| The VRAM inventory wired to real render targets — `ThreeAllocator` gained a paired `onCreate`/`onDispose` hook; `vt-pan-viewer.js` exposes a live registry; all 3 `buildVramInventory` call sites in `boot.js` now pass real `targets` | §8.4 |
+| The `residency.upload` zone renamed to `residency.releaseBitmaps` — its body has measured a bitmap `.close()` loop since the real upload was deleted 2026-07-22; the old name told a reader "uploads cost ~0 ms" about a path that no longer exists | §8.4 |
+| The profiler's own per-bracket allocation overhead removed — `readDrawCalls`/`readTriangles` now read `renderer.info.render` directly (two zero-allocation accessors) instead of 4× `readRenderInfo()` per bracket, which allocated a fresh `Vector2` + 5-field object each time | §7.4 |
+
+### Investigated and deliberately NOT attempted — with the specific reason, not a general one
+
+- **Caching aperture-gobo wall segments across frames via `watchSceneWallStructure`** (the other half
+  of §5.1/§6.8). Found unsafe to self-register inside `createPointLightPool`: `startVtPanViewer`/
+  `stopVtPanViewer` is a confirmed real restart pair, and the watcher has no unsubscribe — registering
+  it in the pool factory would leak one set of `Hooks.on` listeners per viewer restart. The correct
+  fix threads a version counter from `boot.js` (the only place allowed to register raw hooks) through
+  `vt-pan-viewer.js` into the pool as an injected getter — a three-file change across two large,
+  active files, deferred as too invasive for this pass.
+- **A wall-clock debounce on sun-shadow's and water's bake gates**, mirroring `pollMaskAuthority
+  ForWindRebake`'s already-shipped 500 ms throttle (§5.8). The pattern does not transfer as directly
+  as it looked: wind's throttle gates a *cheap check* (skipping it loses nothing, since any mid-burst
+  version is equally unsettled); sun-shadow/water's problem is that their *expensive bake* fires on
+  every distinct value once their own cheap check finds a real difference. Throttling the bake itself
+  safely requires intercepting inside each subsystem's own `maybeBake`, right before the GPU call —
+  an outer wrapper that skips calling `maybeBake` entirely would also skip the bookkeeping that keeps
+  future checks correct. That means editing bake-decision logic inside two core GPU-effect files with
+  no way to visually confirm a throttled bake doesn't leave stale-looking shadows. Deferred; the fix
+  shape is fully designed for whoever has live Foundry access to verify it.
+- **The `geometry.depthDraw` incremental proxy reconcile** — the highest-value target this whole
+  document names, and the highest-risk. `buf:scene.depth` is a shared foundation multiple effects
+  read (the point-light height gate, depth of field, specular, window, fire's occlusion, sun-shadow's
+  floor attribution); no existing test could catch "the change-detection missed one field and this
+  shared buffer is now subtly wrong for every consumer." Left fully diagnosed, not attempted, for a
+  session with live visual verification.
+
+### What still needs checking, unchanged from §11 plus one new item
+
+Everything §11 already named (the five originally-unverified territories, `src/boot.js`'s remaining
+~7,000 lines beyond the effect-cascade/hook threads, `src/effects/fire/`, startup time, memory
+growth, low-end GPU behaviour) is still open. Added by this pass: **what, specifically, inside
+`updateResidencyUnguarded` costs 12.484 ms per occurrence** — the single largest number in the live
+report has no named culprit anywhere in this document.
+
+## 13. 2026-08-09, round 2 — the before/after report confirmed the targeted wins; this round chases
+the two things it left flat
+
+The live before/after comparison (§12's report, captured 1 hour apart) confirmed `light
+.pointLightUpdate` fell 23.8% (3.686ms → 2.807ms) and the VRAM/instrument fixes work exactly as
+built (`renderTargets.count` 0 → 25, `unbalancedBrackets` 1 → 0) — real, attributable wins, entirely
+in tail-latency (hitches 19 → 8, p99 50ms → 41.6ms) rather than average fps (flat at 38.6, because the
+frame is GPU-bound and every round-1 fix was CPU-only). It also confirmed, by leaving them
+untouched, that `geometry.depthDraw` (5.872ms → 5.792ms) and `residency.pass` (12.484ms →
+11.438ms, essentially flat) are real, reproducible, NOT measurement noise — exactly the two named at
+the end of §12 as the top remaining priorities. This round went after both, and against the third
+deferred item from §12 (the aperture-gobo cache).
+
+### Instrumentation added, not a fix — `residency.pass`'s 12ms mystery is now measurable, not solved
+
+Read `updateResidencyUnguarded` end to end looking for what the four already-zoned sub-costs
+(`depth.authorityRebuild`, `depth.proxyRebuild`, `vegetation.rankStamp`,
+`vegetation.depthItemsBuild` — summing to ~0.3ms) don't cover. Five candidates had NO bracket at
+all: `refreshCoarsePinBudget`, `primeCoverAlphaGrids`, the stale-item release/unpin loop, PHASE 1
+(per-item load), PHASE 2 (per-item placement + mesh refresh). Reading each one's steady-state cost
+by hand did not turn up an obvious single culprit — `ensureWholeImageMeshes` short-circuits
+immediately for an already-loaded item, `refreshWholeImageItem`'s steady-state cost is two property
+writes per tile, `refreshItemPlacement` is one arithmetic call + a string compare. Nothing read as
+individually expensive; the 12ms may be O(item count) death-by-a-thousand-cuts across PHASE 1/2,
+or concentrated somewhere this reading missed. **Rather than guess-fix on code-reading alone
+(`feedback_measure_the_output_not_the_equation`), five new zones now bracket every previously-dark
+line of this function**: `residency.coarsePinBudget`, `residency.coverAlphaPrime`,
+`residency.staleRelease`, `residency.itemLoad`, `residency.itemRefresh` (`perf-zones.js`,
+`vt-pan-viewer.js`). The next live capture will show the real breakdown; this pass only removed the
+blindfold.
+
+One real-but-probably-small finding surfaced along the way, deliberately NOT fixed: `refreshCoarsePin
+Budget` calls `buildItems(f)` once per FLOOR, every single residency pass (not just on document
+CRUD), to recompute the scene's total unique-item count for the coarse-pin budget. `depth
+.authorityRebuild`'s own 0.011ms mean already includes one `buildItems(singleFloor)` call, so doing
+it floorCount times is real but likely on the order of 0.02–0.05ms for a typical few-floor scene —
+not a plausible explanation for a 12ms gap. A proper fix means threading document-CRUD-vs-view-change
+awareness into a function that currently can't tell the two apart, which is exactly the kind of
+correctness-sensitive redesign this document's own named bug classes warn against attempting without
+a way to verify the invalidation is complete. Left diagnosed, not attempted — low priority given its
+likely size.
+
+### Fixed: aperture-gobo wall segments now cache across frames (closes the deferred half of §5.1/§6.8)
+
+`point-light-pool.js` was calling `readSceneWallSegments(currentFloorId)` — a full walk of every wall
+on the scene, re-deriving solid/blocksExterior/aperture per wall — once per frame, every frame,
+whether or not any wall had moved since the previous frame. Walls only change on
+createWall/updateWall/deleteWall (editing-cadence, exactly the same observation §5.8 already made for
+sun-shadow/water's own bake gates). Fixed the way §12 said it would need to be fixed: a version
+counter lives in `boot.js` (the only place allowed to register raw `Hooks.on` — `foundry/adapter-
+only`), registered ONCE via the existing `watchSceneWallStructure` adapter, independent of the
+confirmed `startVtPanViewer`/`stopVtPanViewer` restart pair — so it cannot leak a listener per scene
+switch the way self-registering inside `createPointLightPool` would have. The counter reaches the
+pool as a GETTER (`getApertureWallVersion`), threaded through `startVtPanViewer`'s own dependency
+list exactly like `buildItems` already is, for the same reason `getWindHandle` is a getter and not a
+captured value (this file's own "GETTERS VS VALUES" header trap) — capturing the number once would
+freeze the cache forever at whatever version existed at pool construction. The pool caches the
+aperture-filtered segment list keyed on `(currentFloorId, wallVersion)`; `enabled` is deliberately NOT
+part of the key, since the (floor, wall-version) → segments mapping is correct regardless of whether
+the effect happens to be on, so toggling it cannot invalidate anything the walls themselves didn't.
+Defaulted (`= () => 0`) at both injection points so the torture/soak fixture, which passes no wall
+context, still constructs a working pool. `npm run verify` green throughout (8,157 tests). Not seen
+live — the cache-correctness argument is structural (a scene switch tears down and rebuilds the whole
+pool, so a stale cache surviving a scene change is not a reachable state), not measured.
+
+### Investigated, still NOT attempted — unchanged from §12
+
+`geometry.depthDraw`'s incremental proxy reconcile and the sun-shadow/water wall-clock debounce are
+untouched this round for the same reasons §12 already gave: both need a way to visually confirm
+"nothing looks stale" that this session does not have. The before/after report's own flat numbers on
+`geometry.depthDraw` (5.872ms → 5.792ms) make it, if anything, a more confident target for whoever
+next has live Foundry access — two independent captures now agree on its cost.
+
+### What still needs checking
+
+Unchanged from §12, plus: **the actual breakdown across the five new residency zones** — this pass
+built the instrument, not the answer. Whoever captures the next live report should look at
+`residency.coarsePinBudget`/`coverAlphaPrime`/`staleRelease`/`itemLoad`/`itemRefresh` first, before
+anything else in this document, since one of them is very likely to be most of `residency.pass`'s
+remaining ~12ms.

@@ -726,6 +726,39 @@ export const ZONES = Object.freeze(
     // commits landed was invisible to every perf instrument despite running on
     // every residency pass (continuously while panning, per the author's own
     // bug reports).
+    // FOUND UNWIRED 2026-08-09 — the four zones above/below this comment
+    // covered ~0.3ms/occurrence of `residency.pass`'s own 12.484ms mean, per
+    // the first live report (docs/planning/perf-reports/2026-08-09-live-
+    // sweep.json). The other ~12ms had NO bracket anywhere inside
+    // `updateResidencyUnguarded` — the single biggest number in that report
+    // had no named culprit. These five close that gap, in roughly the order
+    // they run: the coarse-pin budget recompute and cover-alpha priming run
+    // first (both iterate items independent of the current draw list), then
+    // the stale-item release/unpin loop, then the two real per-item phases
+    // (PHASE 1 load, PHASE 2 placement+mesh refresh) that scale with how many
+    // items are in the current floor's draw list.
+    z(
+      'residency.coarsePinBudget',
+      'Coarse pin budget refresh',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'refreshCoarsePinBudget'
+    ),
+    z(
+      'residency.coverAlphaPrime',
+      'Cover alpha grid priming',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'primeCoverAlphaGrids'
+    ),
     z(
       'depth.authorityRebuild',
       'Depth authority rank rebuild',
@@ -770,9 +803,57 @@ export const ZONES = Object.freeze(
       false,
       'buildVegetationDepthItems'
     ),
+    z(
+      'residency.staleRelease',
+      'Stale item release/unpin',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'updateResidencyUnguarded'
+    ),
+    z(
+      'residency.itemLoad',
+      'Per-item load (phase 1)',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'updateResidencyUnguarded'
+    ),
+    z(
+      'residency.itemRefresh',
+      'Per-item placement + mesh refresh (phase 2)',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'updateResidencyUnguarded'
+    ),
     z('residency.pass', 'Residency update', 'residency', null, null, 'cpu', 'event', false, 'scheduleResidencyUpdate'),
     z('residency.decode', 'Page decode', 'residency', null, null, 'cpu', 'event', false, 'requestDecodeUpload'),
-    z('residency.upload', 'Page upload', 'residency', null, null, 'cpu', 'event', false, 'requestDecodeUpload'),
+    // RENAMED 2026-08-09 (was 'residency.upload' / 'Page upload') — the real
+    // GPU atlas upload this zone once bracketed was deleted 2026-07-22 (see
+    // its own call site's comment). Its body is now a bitmap `.close()`
+    // loop; the old name told a reader "uploads cost ~0 ms" about a code
+    // path that no longer exists (feedback_instruments_must_not_lie).
+    z(
+      'residency.releaseBitmaps',
+      'Release decoded bitmaps',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'requestDecodeUpload'
+    ),
   ].map(Object.freeze)
 );
 

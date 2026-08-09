@@ -397,16 +397,23 @@ function normalizeLightPolygon(shapePoints, originX, originY, radius) {
  *   frame's vertex count; a fresh, bigger array is allocated and returned
  *   ONLY when it doesn't (absent, or too small) — an occasional event when a
  *   light's polygon complexity grows, never a per-frame one.
- * @returns {{array: Float32Array, vertexCount: number}} `array` holds
- *   interleaved [x,y,z, ...] local-space vertices (3 per triangle, one
- *   triangle per polygon edge — origin + edge; z always 0), valid for its
- *   first `vertexCount` vertices (`3 * vertexCount` floats) — the rest, if
- *   `array` is larger than needed this frame, is STALE data from a previous,
- *   larger frame and must be ignored (the caller does this via
- *   `BufferGeometry#setDrawRange`, never by trusting `array.length`).
+ * @returns {{array: Float32Array, vertexCount: number, normalized: {lx: Float64Array, ly: Float64Array, n: number}}}
+ *   `array` holds interleaved [x,y,z, ...] local-space vertices (3 per
+ *   triangle, one triangle per polygon edge — origin + edge; z always 0),
+ *   valid for its first `vertexCount` vertices (`3 * vertexCount` floats) —
+ *   the rest, if `array` is larger than needed this frame, is STALE data
+ *   from a previous, larger frame and must be ignored (the caller does this
+ *   via `BufferGeometry#setDrawRange`, never by trusting `array.length`).
+ *   `normalized` is this call's own `normalizeLightPolygon` result — PERF
+ *   (2026-08-09): `writeLightEdgePoints` needs the IDENTICAL normalization
+ *   for the SAME light the same frame; a caller driving both from the same
+ *   `(shapePoints, originX, originY, radius)` should pass this straight into
+ *   `writeLightEdgePoints`'s own `normalized` parameter rather than let it
+ *   redo the same divide-and-subtract loop from scratch.
  */
 export function triangulateLightFan(shapePoints, originX, originY, radius, outArray) {
-  const { lx, ly, n } = normalizeLightPolygon(shapePoints, originX, originY, radius);
+  const normalized = normalizeLightPolygon(shapePoints, originX, originY, radius);
+  const { lx, ly, n } = normalized;
   const neededFloats = n * 3 * 3;
   const out = outArray && outArray.length >= neededFloats ? outArray : new Float32Array(neededFloats);
   let o = 0;
@@ -422,7 +429,7 @@ export function triangulateLightFan(shapePoints, originX, originY, radius, outAr
     out[o++] = ly[j];
     out[o++] = 0;
   }
-  return { array: out, vertexCount: n * 3 };
+  return { array: out, vertexCount: n * 3, normalized };
 }
 
 /**
@@ -444,10 +451,18 @@ export function triangulateLightFan(shapePoints, originX, originY, radius, outAr
  * @param {number[]} shapePoints - flat [x0,y0,x1,y1,...] world-space polygon.
  * @param {number} originX @param {number} originY @param {number} radius
  * @param {Array<{x: number, y: number}>} outPoints - fixed-length, reused every frame.
+ * @param {{lx: Float64Array, ly: Float64Array, n: number}} [normalized] -
+ *   PERF (2026-08-09): when the caller already normalized this SAME
+ *   `(shapePoints, originX, originY, radius)` this frame (`triangulateLightFan`'s
+ *   own `normalized` return, called on every light every frame regardless),
+ *   pass it here to skip a second, identical divide-and-subtract pass over
+ *   the polygon. Omitted → computed internally, exactly as before this
+ *   parameter existed (e.g. a standalone caller with no fan geometry of its
+ *   own to reuse).
  * @returns {number} how many of `outPoints` were written this frame (<= outPoints.length).
  */
-export function writeLightEdgePoints(shapePoints, originX, originY, radius, outPoints) {
-  const { lx, ly, n } = normalizeLightPolygon(shapePoints, originX, originY, radius);
+export function writeLightEdgePoints(shapePoints, originX, originY, radius, outPoints, normalized) {
+  const { lx, ly, n } = normalized ?? normalizeLightPolygon(shapePoints, originX, originY, radius);
   const count = Math.min(n, outPoints.length);
   for (let i = 0; i < count; i++) {
     outPoints[i].x = lx[i];

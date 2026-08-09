@@ -807,6 +807,18 @@ export async function startVtPanViewer({
   // the torture fixture, which deliberately does not profile — so every call
   // below is optional-chained rather than assuming a profiler exists.
   profiler = null,
+  // APERTURE-GOBO WALL-SEGMENT CACHE INVALIDATION (2026-08-09) — a GETTER,
+  // exactly like `getWindHandle`'s own "getters vs values" trap (this file's
+  // header): boot.js is the only place allowed to register the raw
+  // createWall/updateWall/deleteWall hooks (`foundry/adapter-only`), so it
+  // owns the counter and bumps it; point-light-pool.js reads it once per
+  // frame to decide whether its cached, aperture-filtered wall segments are
+  // still good for the current floor. Defaulted (not required) so the
+  // torture/soak fixture below — which passes no wall/document context at
+  // all — still constructs a working pool; a version that never advances
+  // just means the cache never invalidates, which is correct for a fixture
+  // with no walls that ever change.
+  getApertureWallVersion = () => 0,
   buildItems,
   dimensions,
   floorCount,
@@ -1482,7 +1494,91 @@ export async function startVtPanViewer({
     // RGBA16F per §4.2 ("scene.color (RGBA16F)"): effects need HDR headroom
     // (bloom has nothing to bloom from in 8-bit). Costs 2 bytes/channel, and
     // §4.2's whole inventory is budgeted on that.
-    const allocator = new ThreeAllocator({ THREE });
+    // VRAM INVENTORY (2026-08-09) — `diag/vram-inventory.js`'s own header
+    // names this as the FIRST of its three sources ("named render targets,
+    // from the allocator's own `onCreate` hook") and nothing had ever wired
+    // it: the live perf report's own `vram.renderTargets.count` read 0
+    // against a real ~390 MB of screen-sized targets. `onCreate`/`onDispose`
+    // keep `allocatedTargets` in sync with exactly what the allocator has
+    // live; `sizeRenderTarget` (vram-inventory.js) is queried lazily off the
+    // LIVE handle (never a snapshot), so a resize's `setSize()` — which
+    // mutates the SAME object in place — is reflected with no extra hook.
+    const allocatedTargets = new Map();
+    /** THREE's numeric type/format constants -> the stable string keys
+     * `diag/vram-inventory.js#TYPE_BYTES`/`FORMAT_CHANNELS` key off — that
+     * module is deliberately THREE-free ("Pure arithmetic; no THREE, no
+     * DOM"), so this glue lives on the one side that already has THREE
+     * injected. `null` for anything not in this project's own render-target
+     * vocabulary — `sizeRenderTarget` already reports an unmapped key as
+     * `unsized: true` rather than guessing. */
+    function threeTypeKey(type) {
+      switch (type) {
+        case THREE.UnsignedByteType:
+          return 'unsignedByte';
+        case THREE.ByteType:
+          return 'byte';
+        case THREE.HalfFloatType:
+          return 'halfFloat';
+        case THREE.FloatType:
+          return 'float';
+        case THREE.UnsignedIntType:
+          return 'unsignedInt';
+        case THREE.IntType:
+          return 'int';
+        case THREE.UnsignedShortType:
+          return 'unsignedShort';
+        case THREE.ShortType:
+          return 'short';
+        default:
+          return null;
+      }
+    }
+    function threeFormatKey(format) {
+      switch (format) {
+        case THREE.RedFormat:
+          return 'r';
+        case THREE.RGFormat:
+          return 'rg';
+        case THREE.RGBFormat:
+          return 'rgb';
+        case THREE.RGBAFormat:
+          return 'rgba';
+        case THREE.DepthFormat:
+          return 'depth';
+        default:
+          return null;
+      }
+    }
+    /** One row of `sizeRenderTarget`'s expected shape, read LIVE off `rt` —
+     * called at VRAM-report time, not cached at allocation time. */
+    function describeAllocatedTarget(rt) {
+      const textures = Array.isArray(rt.textures) && rt.textures.length ? rt.textures : [rt.texture];
+      const first = textures[0] ?? null;
+      return {
+        name: rt.name,
+        width: rt.width,
+        height: rt.height,
+        attachments: textures.length,
+        typeKey: first ? threeTypeKey(first.type) : null,
+        formatKey: first ? threeFormatKey(first.format) : null,
+      };
+    }
+    const allocator = new ThreeAllocator({
+      THREE,
+      // Keyed by `rt.name` (the allocator's own `v3:${name}` tag, set in
+      // `create()`), NOT `rt.uuid` — `RenderTarget` (src/vendor/three/
+      // three.webgpu.js:4798) has no `uuid` property; verified by reading
+      // the class body before assuming the common THREE.Object3D/Texture
+      // pattern applied here too. A name IS this allocator's own identity
+      // for a named target — the module's own header calls this "named
+      // render targets" — so it is also the correct de-dup key: a
+      // dispose-then-recreate under the same name (a regrid) naturally
+      // replaces its own registry row rather than accumulating a ghost.
+      onCreate: (rt) => allocatedTargets.set(rt.name, rt),
+      onDispose: (rt) => {
+        if (rt?.name && allocatedTargets.get(rt.name) === rt) allocatedTargets.delete(rt.name);
+      },
+    });
     const describeSceneColor = () => ({
       // Device pixels (drawBufW/H), NOT CSS pixels (canvasW/H) — see this
       // function's siting, right after where drawBufW/H is computed, for why
@@ -2347,6 +2443,7 @@ export async function startVtPanViewer({
     const pointLights = createPointLightPool({
       THREE,
       getWindHandle: () => windHandle,
+      getApertureWallVersion,
       envLight,
       blendSunVisibilityAcrossFloors,
       sceneColor,
@@ -8385,14 +8482,33 @@ export async function startVtPanViewer({
      * SAME persistent `itemStates` map, touching ONLY uniform values, never
      * geometry/visibility/renderOrder.
      *
-     * Cheap: `refreshItemFloorAttrUniforms` is one `getActiveSceneFloors` call
-     * (itself one pass over a small, fixed floor list) plus a handful of
-     * comparisons, per item that actually carries floor-attr uniforms — most
-     * items (anything not a Level background/foreground/tile/vegetation
-     * overlay) have `floorAttrUniforms: null` and are skipped in one branch.
+     * Cheap: `refreshItemFloorAttrUniforms` is a handful of comparisons per
+     * item that actually carries floor-attr uniforms — most items (anything
+     * not a Level background/foreground/tile/vegetation overlay) have
+     * `floorAttrUniforms: null` and are skipped in one branch. The floor list
+     * itself (`getActiveSceneFloors`) is resolved ONCE below, not once per
+     * item (2026-08-09 — it cannot differ between two items in the same pass
+     * over the same `sceneDoc`, so re-deriving it per item was pure waste,
+     * scaling with drawable count for a value that does not vary within it).
      */
     function syncAllFloorAttrUniformsForFrame() {
       const sceneDoc = globalThis.canvas?.scene ?? null;
+      // Resolved ONCE per frame, not once per item — see this function's own
+      // header. `computeFloorAttrValues` accepts this as `floorsResult` and
+      // skips its own internal `getActiveSceneFloors` call when it is given.
+      // ⚠️ Wrapped exactly like `computeFloorAttrValues`'s own internal call
+      // was (scene-attr.js) — `getActiveSceneFloors` resolves an asset URL
+      // per floor and can throw on a malformed one; that protection must not
+      // be lost just because the call moved up a level. `{ok:false}` is the
+      // same shape `computeFloorAttrValues` already treats as "no floors" —
+      // every per-item call below still falls back to `viewedFloorIndex`.
+      let floorsResult;
+      try {
+        floorsResult = getActiveSceneFloors(sceneDoc);
+      } catch (err) {
+        log.error('syncAllFloorAttrUniformsForFrame: getActiveSceneFloors failed — using the viewed floor:', err);
+        floorsResult = { ok: false, error: 'getActiveSceneFloors threw' };
+      }
       // Only vegetation's Case-2 overlays ever pass `receiverHeightFt` — Case 1
       // (a real tile's own author-set elevation IS its height) never does, see
       // `buildVegetationMaterial`'s `isFloorSurface` branch. Read live params
@@ -8409,6 +8525,7 @@ export async function startVtPanViewer({
               item: t.floorAttrItem,
               viewedFloorIndex: view.floorIndex,
               sceneDoc,
+              floorsResult,
               logError: log.error,
             });
           }
@@ -8421,6 +8538,7 @@ export async function startVtPanViewer({
               item: entry.floorAttrItem,
               viewedFloorIndex: view.floorIndex,
               sceneDoc,
+              floorsResult,
               logError: log.error,
               receiverHeightFt: vegetationHeightFt(kind, vegState.params),
             });
@@ -8729,7 +8847,17 @@ export async function startVtPanViewer({
       vegDepthItemsBuild: profiler?.indexOf('vegetation.depthItemsBuild') ?? -1,
       residencyPass: profiler?.indexOf('residency.pass') ?? -1,
       residencyDecode: profiler?.indexOf('residency.decode') ?? -1,
-      residencyUpload: profiler?.indexOf('residency.upload') ?? -1,
+      // RENAMED 2026-08-09 — see perf-zones.js's own declaration comment.
+      residencyReleaseBitmaps: profiler?.indexOf('residency.releaseBitmaps') ?? -1,
+      // ADDED 2026-08-09 — closing the "residency.pass costs 12.484ms/occurrence
+      // and nothing catalogued inside it accounts for more than ~0.3ms of that"
+      // gap (Performance-Audit-2026-08.md §12). These five brackets cover every
+      // remaining unmeasured line of updateResidencyUnguarded.
+      residencyCoarsePinBudget: profiler?.indexOf('residency.coarsePinBudget') ?? -1,
+      residencyCoverAlphaPrime: profiler?.indexOf('residency.coverAlphaPrime') ?? -1,
+      residencyStaleRelease: profiler?.indexOf('residency.staleRelease') ?? -1,
+      residencyItemLoad: profiler?.indexOf('residency.itemLoad') ?? -1,
+      residencyItemRefresh: profiler?.indexOf('residency.itemRefresh') ?? -1,
     };
 
     function renderFrame(nowMs) {
@@ -9054,10 +9182,11 @@ export async function startVtPanViewer({
       // indirection/atlas texture in a shader any more
       // (`ensureWholeImageMeshes`/`buildWholeImageMaterial` only ever bind an
       // item's OWN whole texture). Just release the decoded bitmaps so they
-      // don't leak.
-      profiler?.begin(Z.residencyUpload);
+      // don't leak. Zone renamed 2026-08-09 (was `residencyUpload` /
+      // 'residency.upload' / 'Page upload') — see perf-zones.js's own note.
+      profiler?.begin(Z.residencyReleaseBitmaps);
       for (const { decoded } of decodedForUpload) decoded.close?.();
-      profiler?.end(Z.residencyUpload);
+      profiler?.end(Z.residencyReleaseBitmaps);
     }
 
     // Which layer-pack is DISPLAYED (albedo by default). Every pack STREAMS
@@ -9376,7 +9505,9 @@ export async function startVtPanViewer({
       // coarse pin a few lines below (item 1b). See refreshCoarsePinBudget's
       // own header for why staleness here is the exact bug class this exists
       // to prevent.
+      profiler?.begin(Z.residencyCoarsePinBudget);
       refreshCoarsePinBudget();
+      profiler?.end(Z.residencyCoarsePinBudget);
       // ⚠️ COVER ALPHA IS PRIMED FOR EVERY FLOOR, NOT THE DRAW LIST (2026-07-26).
       // The draw list is filtered by what the viewed floor can SEE; cover
       // physics must not be. Before this, an upper floor's background art was
@@ -9386,7 +9517,9 @@ export async function startVtPanViewer({
       // means "present on every floor", so they were always drawn and always
       // had alpha. `alphaRequested` dedupes, so this is one decode per item per
       // session no matter how often residency runs.
+      profiler?.begin(Z.residencyCoverAlphaPrime);
       primeCoverAlphaGrids();
+      profiler?.end(Z.residencyCoverAlphaPrime);
       // depthAuthority.rebuild stamps `renderOrder` on each item via THE law
       // (scene/layer-order.js#sortByLayer — this IS that sort, not a second
       // one; see the depth authority's own doc for why it returns the sorted
@@ -9474,6 +9607,7 @@ export async function startVtPanViewer({
       // their coarse pins — those stay resident always, §4.1/§4.5) and hide the
       // mesh. Unpin never evicts directly — PageCache's LRU decides that under
       // real pressure — so a quick switch-and-back is free.
+      profiler?.begin(Z.residencyStaleRelease);
       for (const [id, state] of itemStates) {
         if (wantedIds.has(id)) continue;
         for (const pack of state.packs.values()) {
@@ -9521,6 +9655,7 @@ export async function startVtPanViewer({
           }
         }
       }
+      profiler?.end(Z.residencyStaleRelease);
 
       const worldRect = viewToWorldRect(view, canvasW / canvasH);
 
@@ -9532,6 +9667,11 @@ export async function startVtPanViewer({
       // coarse-pin request that finds nothing evictable simply FAILS, for pages
       // whose entire job is to GUARANTEE something is always resident. Front-
       // loading every coarse pin makes that structurally impossible.
+      //
+      // WALL time, not pure CPU-busy time, same as residency.pass itself
+      // (this loop's own `await ensureItemLoaded(item)` can genuinely suspend
+      // for real decode work) — see scheduleResidencyUpdate's own comment.
+      profiler?.begin(Z.residencyItemLoad);
       const states = [];
       for (const item of items) {
         // A PERMANENTLY-BROKEN ITEM IS NOT RETRIED (item 1d, 2026-07-17). Found
@@ -9569,9 +9709,11 @@ export async function startVtPanViewer({
           }
         }
       }
+      profiler?.end(Z.residencyItemLoad);
 
       // PHASE 2 — view-tier streaming + mesh update, now that every coarse pin
       // is locked in and can't be starved.
+      profiler?.begin(Z.residencyItemRefresh);
       for (const [item, state] of states) {
         // Counted, not just done. A document-driven refresh that runs and moves
         // NOTHING is indistinguishable from a hook that never fired — and those
@@ -9607,6 +9749,7 @@ export async function startVtPanViewer({
         ensureVegetationOverlay(state, item);
         refreshVegetationOverlay(state, item, show, changed);
       }
+      profiler?.end(Z.residencyItemRefresh);
 
       // Every item's placement/mesh/visibility for THIS pass is now final —
       // exactly the moment buf:scene.depth's own draw list must be re-derived
@@ -11318,6 +11461,14 @@ export async function startVtPanViewer({
       itemStates,
       occlusionMask,
       cache,
+      /** The VRAM inventory's own first source (`diag/vram-inventory.js`'s
+       * header): every render target the allocator currently has live, in
+       * the exact shape `sizeRenderTarget` expects. Read live off each
+       * handle (see `describeAllocatedTarget`'s own doc), never cached at
+       * allocation time. */
+      getRenderTargets() {
+        return Array.from(allocatedTargets.values(), describeAllocatedTarget);
+      },
       /** GROUND TRUTH for particle-wind debugging: read the ACTUAL GPU particle
        * velocities back and report whether they vary per-cell (the field is
        * reaching the kernel) or are uniform (it is not). See
@@ -11371,6 +11522,22 @@ export async function startVtPanViewer({
           height: size.height,
           pixelRatio: renderer.getPixelRatio?.() ?? 1,
         };
+      },
+      // PERF (2026-08-09): the profiler's own openSlot/closeSlot call
+      // readDrawCalls()/readTriangles() FOUR times per bracket (armed on
+      // EVERY profile run and EVERY live-HUD tick — frame-profiler.js's own
+      // header: "armed, every accumulator is a preallocated typed array...
+      // an instrument that triggers GC is measuring itself"). Both were
+      // wired to `readRenderInfo()`, which allocates a fresh `Vector2` PLUS
+      // a fresh 5-field object every call just to hand back one integer —
+      // ~320 allocations/frame while armed, none of it read (boot.js's own
+      // wiring discarded width/height/pixelRatio immediately). These two
+      // read the SAME `renderer.info.render` counters with zero allocation.
+      readDrawCallsOnly() {
+        return renderer.info?.render?.drawCalls ?? 0;
+      },
+      readTriangleCountOnly() {
+        return renderer.info?.render?.triangles ?? 0;
       },
       /**
        * Perf profile: the RAW frame-gap series and hitch log for the current
@@ -12823,6 +12990,19 @@ export function getVtPanViewerDiagnostics() {
 }
 
 /**
+ * The live render-target registry, for `diag/vram-inventory.js#buildVram
+ * Inventory`'s `targets` input (2026-08-09). `[]` when no viewer is running
+ * — the SAME "absence, not a lie" posture `getVtPanViewerDiagnostics` takes,
+ * so a caller building a VRAM report before/after a session needs no extra
+ * branch.
+ * @returns {Array<{name:string,width:number,height:number,attachments:number,typeKey:string|null,formatKey:string|null}>}
+ */
+export function getVtPanViewerRenderTargets() {
+  if (!_active) return [];
+  return _active.getRenderTargets();
+}
+
+/**
  * Sync the already-running viewer to a specific floor index — CHEAP (one
  * residency update, no atlas/page-cache reallocation), the fix for the real
  * live crash described in `startVtPanViewer`'s `initialFloorIndex` doc.
@@ -12934,6 +13114,21 @@ export function getVtPanViewerGpuZoneStatus() {
 export function readVtPanViewerRenderInfo() {
   if (!_active) return null;
   return _active.readRenderInfo();
+}
+
+/** Zero-allocation draw-call read for the profiler's per-bracket hot path
+ * (frame-profiler.js's `readDrawCalls` seam) — see `readDrawCallsOnly`'s own
+ * comment. `0` (not `null`) when no viewer is running, matching the shape
+ * `Number.isFinite`-style callers already expect from this seam. */
+export function readVtPanViewerDrawCallsOnly() {
+  if (!_active) return 0;
+  return _active.readDrawCallsOnly();
+}
+
+/** The triangle-count twin of {@link readVtPanViewerDrawCallsOnly}. */
+export function readVtPanViewerTriangleCountOnly() {
+  if (!_active) return 0;
+  return _active.readTriangleCountOnly();
 }
 
 /** The RAW frame-gap series + hitch log, for the profile report's own binning. */

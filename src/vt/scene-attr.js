@@ -594,11 +594,28 @@ export function decodeOverheadBit(presenceBitsByte) {
  *   sort-order fallback. Omitted (the overwhelming common case — background
  *   art, tiles, Case-1 embedded vegetation) → identical to before this
  *   parameter existed.
+ * @param {ReturnType<typeof getActiveSceneFloors>} [args.floorsResult] -
+ *   PERF (2026-08-09): a caller resolving this for MANY items in the same
+ *   frame (`vt-pan-viewer.js#syncAllFloorAttrUniformsForFrame`, one call per
+ *   whole-image tile AND per vegetation overlay) can compute
+ *   `getActiveSceneFloors(sceneDoc)` ONCE and pass the identical result to
+ *   every item — the floor list cannot differ between two items resolved in
+ *   the same pass over the same `sceneDoc`. Omitted (the single-item build-time
+ *   callers, `resolveItemFloorAttrUniforms`) → computed internally, exactly as
+ *   before this parameter existed. When provided, it is trusted as-is, never
+ *   re-derived or re-validated here.
  * @returns {{floorIndex01: number, presenceBits01: number}} plain 0..1
  *   numbers — never a uniform. Callers that need TSL uniforms use
  *   `resolveItemFloorAttrUniforms`/`refreshItemFloorAttrUniforms` below.
  */
-function computeFloorAttrValues({ item, viewedFloorIndex, sceneDoc, logError, receiverHeightFt }) {
+function computeFloorAttrValues({
+  item,
+  viewedFloorIndex,
+  sceneDoc,
+  logError,
+  receiverHeightFt,
+  floorsResult: providedFloorsResult,
+}) {
   // Bit 7 depends only on `item.kind`, never on the floor lookup below, so it
   // is folded in BEFORE the try block — every return path (early-return on no
   // floors, on no resolved floor, or the catch below) carries it correctly,
@@ -607,7 +624,7 @@ function computeFloorAttrValues({ item, viewedFloorIndex, sceneDoc, logError, re
   let floorIndex01 = viewedFloorIndex / 255;
   let presenceBits01 = occluderBit / 255;
   try {
-    const floorsResult = getActiveSceneFloors(sceneDoc);
+    const floorsResult = providedFloorsResult ?? getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok || !floorsResult.floors.length) return { floorIndex01, presenceBits01 };
     const elevation = item?.key?.elevation ?? 0;
     // ⚠️ MEMBERSHIP FIRST, THRESHOLD ONLY AS FALLBACK (memory:
@@ -811,7 +828,10 @@ export function resolveItemFloorAttrUniforms({ THREE, item, viewedFloorIndex, sc
  *   SAME pair `resolveItemFloorAttrUniforms` returned for this item — updated
  *   in place, never replaced.
  * @param {object} args - identical shape to `resolveItemFloorAttrUniforms`'s
- *   own args, minus `THREE` (nothing here builds a TSL node).
+ *   own args, minus `THREE` (nothing here builds a TSL node). A caller
+ *   refreshing MANY items in the same pass should include `floorsResult`
+ *   (see `computeFloorAttrValues`'s own doc) — this function does not need
+ *   its own copy of that logic; it forwards `args` whole.
  */
 export function refreshItemFloorAttrUniforms(uniforms, args) {
   const { floorIndex01, presenceBits01 } = computeFloorAttrValues(args);

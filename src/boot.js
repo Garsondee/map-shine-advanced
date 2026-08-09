@@ -82,11 +82,14 @@ import {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
+  getVtPanViewerRenderTargets,
   setVtPanViewerFloor,
   setVtPanViewerGpuProbe,
   setVtPanViewerGpuZoneTimer,
   getVtPanViewerGpuZoneStatus,
   readVtPanViewerRenderInfo,
+  readVtPanViewerDrawCallsOnly,
+  readVtPanViewerTriangleCountOnly,
   readVtPanViewerFrameSamples,
   setVtPanViewerWindOverlay,
   setVtPanViewerWindOverlayResolution,
@@ -2609,9 +2612,15 @@ function install() {
         // Draw-call and triangle deltas per zone, straight off renderer.info —
         // two integer reads per bracket, and enormously diagnostic ("point
         // lights = 340 draw calls" is a different problem from "point lights are
-        // fill-rate bound").
-        readDrawCalls: () => readVtPanViewerRenderInfo()?.drawCalls ?? 0,
-        readTriangles: () => readVtPanViewerRenderInfo()?.triangles ?? 0,
+        // fill-rate bound"). This comment used to be untrue: both were wired to
+        // `readVtPanViewerRenderInfo()`, which allocates a fresh Vector2 + a
+        // fresh 5-field object per call for a value this call site immediately
+        // discarded down to one integer — ~320 allocations/frame while armed,
+        // the instrument measuring its own GC pressure. Fixed 2026-08-09 by
+        // reading straight through to `renderer.info.render` with no
+        // allocation at all (see `readDrawCallsOnly`'s own comment).
+        readDrawCalls: () => readVtPanViewerDrawCallsOnly(),
+        readTriangles: () => readVtPanViewerTriangleCountOnly(),
       }),
     disarmProfiler: () => perfProfiler.disarm(),
     readProfile: () => perfProfiler.snapshot(),
@@ -2641,6 +2650,12 @@ function install() {
     getManifests: () => effectRegistry.list(),
     readVram: () =>
       buildVramInventory({
+        // (2026-08-09) The inventory's OWN header names this its first
+        // source ("named render targets, from the allocator's own onCreate
+        // hook") — never wired until now. Live-confirmed missing: a real
+        // perf report read `renderTargets.count: 0` against ~390 MB of
+        // actual screen-sized targets.
+        targets: getVtPanViewerRenderTargets(),
         // `.wholeImage`, NOT the diagnostics root — `estTextureVramMB` lives on
         // the whole-image summary (vt-pan-viewer-diagnostics.js's
         // summarizeWholeImage). Passing the root silently produced an
@@ -2662,8 +2677,12 @@ function install() {
       perfProfiler.arm({
         owner: 'hud', // so a profile session refuses rather than fighting the HUD's resets
         settleFrames: 0, // a live view wants THIS quarter-second, not a settled average
-        readDrawCalls: () => readVtPanViewerRenderInfo()?.drawCalls ?? 0,
-        readTriangles: () => readVtPanViewerRenderInfo()?.triangles ?? 0,
+        // Zero-allocation reads (2026-08-09) — see profileHarness's own
+        // armProfiler comment above for why this matters more here than
+        // almost anywhere else: the live HUD stays armed continuously, not
+        // just for one profile run.
+        readDrawCalls: () => readVtPanViewerDrawCallsOnly(),
+        readTriangles: () => readVtPanViewerTriangleCountOnly(),
       }),
     disarm: () => perfProfiler.disarm(),
     setGpuZoneTimer: (on) => setVtPanViewerGpuZoneTimer(on),
@@ -4364,8 +4383,9 @@ function install() {
         // Real today: the atlas estimate is the one number that matters against the
         // measured device-loss wall, and it comes from the viewer's own per-format
         // mip-chain accounting rather than three's (which counts a compressed
-        // texture as ONE BYTE — see diag/vram-inventory.js).
-        vram: buildVramInventory({ vtEstimate: viewer, ceilingMb: 2500 }),
+        // texture as ONE BYTE — see diag/vram-inventory.js). `targets` (2026-08-09)
+        // is a live snapshot independent of whether a profile has ever run.
+        vram: buildVramInventory({ targets: getVtPanViewerRenderTargets(), vtEstimate: viewer, ceilingMb: 2500 }),
         interpretation:
           '⚠️ NOTHING HAS BEEN MEASURED. This is the READ-ONLY report; it only ever shows the last completed run, ' +
           'and there has not been one this session. It does not and cannot start a measurement. ' +
@@ -4981,6 +5001,31 @@ function install() {
     });
   });
   if (!wallWatch.registered) log.warn(`wind auto-rebake not wired — ${wallWatch.reason}`);
+
+  // APERTURE-GOBO WALL-SEGMENT CACHE INVALIDATION (2026-08-09, Performance-
+  // Audit-2026-08.md §12 — the deferred half of §5.1/§6.8's pre-filter fix).
+  // point-light-pool.js used to call `readSceneWallSegments` — a full walk of
+  // every wall on the scene — every single frame, even though wall geometry
+  // only changes on these three hooks. A SECOND, independent watcher rather
+  // than folding into `wallWatch` above, same posture as `watchDoorOpenings`
+  // just below being its own subscription: two consumers of the same raw
+  // hooks with genuinely different jobs (one rebakes a wind grid, one just
+  // bumps a counter) should not be coupled through a shared callback. No
+  // coalescing needed here (unlike `wallWatch`'s queueMicrotask) — bumping an
+  // integer is O(1), so even a many-hooks-in-one-tick bulk edit costs nothing
+  // extra; the pool only ever reads the FINAL value, once, on its next frame.
+  // Registered here — once, for this module's whole lifetime — rather than
+  // inside `startRealSceneViewer`/`createPointLightPool`: that path is a
+  // confirmed real restart pair (`stopVtPanViewer`/`startVtPanViewer`), and
+  // `watchSceneWallStructure` has no unsubscribe, so registering it there
+  // would leak one more set of listeners per scene switch.
+  let apertureWallVersion = 0;
+  const apertureWallWatch = watchSceneWallStructure(() => {
+    apertureWallVersion++;
+  });
+  if (!apertureWallWatch.registered) {
+    log.warn(`aperture-gobo wall-segment cache not wired — ${apertureWallWatch.reason}`);
+  }
 
   // WIND.MD TIER 2 — THE TRANSIENT SIM (2026-07-21). A door opening fires a
   // real gust, not just Tier 1's slow rebake-and-catch-up. `watchDoorOpenings`
@@ -5669,6 +5714,7 @@ function install() {
       ...(await startVtPanViewer({
         THREE,
         buildItems,
+        getApertureWallVersion: () => apertureWallVersion,
         // FOUNDRY OWNS ALL INPUT on a real scene (keyhole-input-model-decision):
         // pointer-events:none, no MSA input handlers, and the view follows
         // canvas.stage instead of tracking its own camera. The torture fixture
@@ -7409,7 +7455,12 @@ async function bootHeartbeat() {
           // `.wholeImage`, NOT the diagnostics root — see readVram's own note a
           // few hundred lines up: `estTextureVramMB` lives there, and the same
           // measured device-loss wall (~2.5GB, keyhole-device-loss-large-map).
-          vram: buildVramInventory({ vtEstimate: vt?.wholeImage ?? null, ceilingMb: 2500 }),
+          // `targets` (2026-08-09): same fix as readVram's own call site.
+          vram: buildVramInventory({
+            targets: getVtPanViewerRenderTargets(),
+            vtEstimate: vt?.wholeImage ?? null,
+            ceilingMb: 2500,
+          }),
           heapUsedBytes: heapInfo?.usedJSHeapSize ?? null,
           heapLimitBytes: heapInfo?.jsHeapSizeLimit ?? null,
           renderInfo: readVtPanViewerRenderInfo(),

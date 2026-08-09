@@ -286,6 +286,31 @@ export function resolveAnchorElevationRank(floorBinding, floors, unitsAboveFloor
  * @returns {object} a new `lightMeshes` entry (not yet stored — the caller
  *   does that, since only the caller knows the `sourceId` key).
  */
+
+/**
+ * VALUE equality for a flat numeric polygon array — deliberately NOT `===`.
+ * `light.shapePoints` (`foundry/scene-lights.js#readActiveLightSources`)
+ * reads straight off Foundry's own live `source.shape.points`; this module
+ * has no verified guarantee that reference is stable across frames for an
+ * unmoved light (Foundry's own polygon-refresh cadence is not something this
+ * codebase has traced), so the re-triangulation dirty-check below compares
+ * CONTENT, which is correct regardless of Foundry's own caching behaviour —
+ * it can only ever be MORE conservative than a reference check (a same-
+ * content-different-array frame still correctly counts as "unchanged"),
+ * never less. Polygons here are small (`MAX_LIGHT_EDGES`-bounded, a few dozen
+ * numbers at most), so a full pass is negligible next to what it guards.
+ * @param {number[]|null} a @param {number[]|null} b
+ * @returns {boolean}
+ */
+function shapePointsUnchanged(a, b) {
+  if (a === b) return true; // same reference (incl. both null) — cheap common case, still correct
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 function createLightEntry({
   light,
   animationQuality,
@@ -559,6 +584,19 @@ function createLightEntry({
     apColApertures: colorationBuilt.apColApertures,
     apertureShadowDebugMesh,
     apertureShadowDebugMaterial,
+    // RE-TRIANGULATION DIRTY-CHECK (2026-08-09) — see update()'s own call
+    // site for why this is a VALUE comparison, not a reference one: `light.
+    // shapePoints` reads straight off Foundry's own live `source.shape.
+    // points` (`foundry/scene-lights.js#readActiveLightSources`), and this
+    // codebase has no verified guarantee that reference is stable across
+    // frames for an unmoved light. `NaN`/`null` sentinels guarantee the
+    // first frame for any light always takes the full (correct) path — NaN
+    // !== NaN, so `lastShapeX === light.x` is false until a real number is
+    // stored.
+    lastShapeX: NaN,
+    lastShapeY: NaN,
+    lastShapeRadius: NaN,
+    lastShapePoints: null,
   };
 }
 
@@ -636,6 +674,15 @@ export function createPointLightPool({
    * Optional so the pool stays constructible in rigs that have no fire. */
   getFireLightSources = null,
   getApertureGoboRenderState,
+  // WALL-SEGMENT CACHE INVALIDATION (2026-08-09) — a GETTER for the same
+  // reason `getWindHandle` is (see this file's own "GETTERS VS VALUES"
+  // trap): boot.js owns the counter and bumps it on createWall/updateWall/
+  // deleteWall; this pool just reads whatever it currently says. Defaulted
+  // so a caller with no wall-change context (tests, future fixtures) still
+  // constructs a working pool — see `apertureSegCache`'s own comment below
+  // for why a version that never advances is a correct, if permanently
+  // uncached-against-edits, degraded mode rather than a crash.
+  getApertureWallVersion = () => 0,
   uGlobalTimeMs,
   resolveExpectedDepth,
 }) {
@@ -726,6 +773,22 @@ export function createPointLightPool({
    * shape's own radius was, so a stable cache key costs nothing visually and
    * avoids recomputing the wall sweep every single frame a bolt flickers). */
   const lightningWallClipCache = new Map();
+
+  /** {floorId, wallVersion, segments}|null — the aperture-flagged wall
+   * segment list, recomputed only when the current floor or the wall
+   * structure (createWall/updateWall/deleteWall, via `getApertureWallVersion`)
+   * actually changed (2026-08-09, PERF: `readSceneWallSegments` walks every
+   * wall on the scene and `findAperturesForLight`'s own perf comment already
+   * established the per-light scan needs pre-filtering — this closes the
+   * OTHER half, the pre-filter itself re-running from scratch every frame
+   * regardless of whether any wall moved). Unlike `candleWallClipCache`/
+   * `lightningWallClipCache` above, this is ONE set of segments shared by
+   * every light this frame, not per-source — a plain nullable object, not a
+   * Map. `enabled` is deliberately NOT part of the cache key: the mapping
+   * from (floor, wall version) to segments is correct regardless of whether
+   * the effect happens to be on right now, so toggling it does not need to
+   * invalidate anything the walls themselves did not. */
+  let apertureSegCache = null;
 
   /**
    * Reconcile the point-light mesh pool against this frame's live Foundry
@@ -926,7 +989,42 @@ export function createPointLightPool({
     // there is no second "is the effect on" gate anywhere below this line.
     const apertureGoboState = getApertureGoboRenderState();
     const apertureGoboParams = apertureGoboState.params ?? {};
-    const wallSegmentsForApertures = apertureGoboState.enabled ? readSceneWallSegments(currentFloorId) : [];
+    // PERF (2026-08-09, ROUND 2 — round 1 is the filter inside the `if`
+    // below): `readSceneWallSegments` walks every wall on the scene and
+    // re-derives solid/blocksExterior/aperture for each one — real work that
+    // used to be paid every single frame regardless of whether any wall had
+    // moved since the last one. Walls only change on createWall/updateWall/
+    // deleteWall (editing-cadence, not frame-cadence — the exact same
+    // observation §5.8 already made for sun-shadow/water's bake gates), so
+    // this is cached against (current floor, wall-structure version) and
+    // only recomputed when either changed. `getApertureWallVersion` is a
+    // GETTER bumped by boot.js on those three hooks — see this function's own
+    // param doc for why capturing the number instead would freeze the cache
+    // forever at whatever version existed when the pool was constructed.
+    let apertureWallSegments = [];
+    if (apertureGoboState.enabled) {
+      const wallVersion = getApertureWallVersion();
+      if (
+        !apertureSegCache ||
+        apertureSegCache.floorId !== currentFloorId ||
+        apertureSegCache.wallVersion !== wallVersion
+      ) {
+        const rawWallSegments = readSceneWallSegments(currentFloorId);
+        // `findAperturesForLight`'s own loop is `if (!seg?.aperture)
+        // continue` — on a wall-dense scene the overwhelming majority of
+        // segments fail that check, and it re-runs, unchanged, for EVERY
+        // light every frame (O(lights x walls)). Filtering to aperture-only
+        // segments ONCE here, before the per-light loop, makes that per-light
+        // scan operate over just the walls that could ever matter — provably
+        // equivalent output: every segment this array drops would have
+        // failed `findAperturesForLight`'s own first line anyway.
+        const filteredWallSegments = rawWallSegments.length
+          ? rawWallSegments.filter((seg) => seg?.aperture)
+          : rawWallSegments;
+        apertureSegCache = { floorId: currentFloorId, wallVersion, segments: filteredWallSegments };
+      }
+      apertureWallSegments = apertureSegCache.segments;
+    }
     // Clamped against the SHADER's own hard cap (`aperture-gobo-render.js`'s
     // `MAX_APERTURES_PER_LIGHT`, the unroll count its uniform sets are built
     // to), not just the params schema's own declared `max` — belt and braces:
@@ -1052,6 +1150,21 @@ export function createPointLightPool({
     apertureGoboReadout.litLights = 0;
     apertureGoboReadout.enabled = apertureGoboState.enabled === true;
 
+    // PERF (2026-08-09): with no active darkness regions, `computeRegion
+    // AdjustedDarkness(light.x, light.y, darkness01, activeRegions)` returns
+    // the bare `darkness01` for EVERY light — its own first line proves this
+    // (`region-geometry.js`: `if (!Array.isArray(regions) || regions.length
+    // === 0) return darkness01;`), so `computeAmbientColors` then resolves an
+    // IDENTICAL triple for every light too. Resolved once here and reused,
+    // rather than recomputed (a `{...env}` spread + two `mixRgb` allocations)
+    // per light per frame for a scene-uniform answer. `null` when regions
+    // ARE active — the per-light loop below falls back to the original,
+    // region-aware per-light computation in that case, unchanged.
+    const sharedAmbientNoRegions =
+      Array.isArray(activeRegions) && activeRegions.length > 0
+        ? null
+        : computeAmbientColors({ ...env, darkness01 }, darknessRealism01);
+
     const seen = new Set();
     for (const light of lights) {
       seen.add(light.sourceId);
@@ -1080,16 +1193,18 @@ export function createPointLightPool({
       // uniform sets a light's material was built with is baked into its
       // graph at construction time (`aperture-gobo-render.js`'s own header —
       // deliberately no `Loop`/`uniformArray`, so the unroll count IS the
-      // shader). `wallSegmentsForApertures` is already `[]` when the effect
-      // is disabled, so this naturally resolves to zero for every light with
-      // no extra branch.
+      // shader). `apertureWallSegments` is already `[]` when the effect is
+      // disabled (filtering an empty array is still empty), so this
+      // naturally resolves to zero for every light with no extra branch.
+      // Pre-filtered to `aperture === true` once above, not the raw wall
+      // list — see that filter's own comment.
       const {
         apertures: lightApertures,
         dropped,
         totalFound,
       } = findAperturesForLight(
         { x: light.x, y: light.y, radius: light.radius },
-        wallSegmentsForApertures,
+        apertureWallSegments,
         maxAperturesPerLight,
         maxApertureDistancePx
       );
@@ -1202,29 +1317,48 @@ export function createPointLightPool({
           }
         }
       }
-      // REUSE, not reallocate (see lightMeshes' own doc — this is the
-      // device-lost fix, not an optimisation): triangulateLightFan writes
-      // into entry.scratchArray when it already has room. It returns a
-      // DIFFERENT array only on the rare frame this light's polygon outgrows
-      // its previous high-water mark, in which case (and ONLY then) a new
-      // BufferAttribute replaces the old one.
-      const { array, vertexCount } = triangulateLightFan(
-        light.shapePoints,
-        light.x,
-        light.y,
-        light.radius,
-        entry.scratchArray
+      // RE-TRIANGULATION DIRTY-CHECK (2026-08-09) — triangulateLightFan,
+      // the BufferAttribute re-upload and writeLightEdgePoints all derive
+      // PURELY from (light.x, light.y, light.radius, light.shapePoints); if
+      // none of those four differ from what was last written for THIS
+      // light, redoing them produces byte-identical output. `shapePoints`
+      // FAILURE-SAFE by construction: `shapePointsUnchanged` on the very
+      // first frame compares against the `null` sentinel and correctly
+      // reports "changed", so a light's first frame always takes the full,
+      // correct path — this can only skip work that would have been a
+      // no-op, never skip a real change.
+      const lightShapeChanged = !(
+        light.x === entry.lastShapeX &&
+        light.y === entry.lastShapeY &&
+        light.radius === entry.lastShapeRadius &&
+        shapePointsUnchanged(light.shapePoints, entry.lastShapePoints)
       );
-      if (array !== entry.scratchArray) {
-        entry.scratchArray = array;
-        entry.positionAttribute = new THREE.BufferAttribute(array, 3);
-        entry.positionAttribute.setUsage(THREE.DynamicDrawUsage);
-        entry.geometry.setAttribute('position', entry.positionAttribute);
-      } else {
-        entry.positionAttribute.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
+      let normalizedPolygon;
+      if (lightShapeChanged) {
+        // REUSE, not reallocate (see lightMeshes' own doc — this is the
+        // device-lost fix, not an optimisation): triangulateLightFan writes
+        // into entry.scratchArray when it already has room. It returns a
+        // DIFFERENT array only on the rare frame this light's polygon outgrows
+        // its previous high-water mark, in which case (and ONLY then) a new
+        // BufferAttribute replaces the old one.
+        const triangulated = triangulateLightFan(light.shapePoints, light.x, light.y, light.radius, entry.scratchArray);
+        const { array, vertexCount } = triangulated;
+        normalizedPolygon = triangulated.normalized;
+        if (array !== entry.scratchArray) {
+          entry.scratchArray = array;
+          entry.positionAttribute = new THREE.BufferAttribute(array, 3);
+          entry.positionAttribute.setUsage(THREE.DynamicDrawUsage);
+          entry.geometry.setAttribute('position', entry.positionAttribute);
+        } else {
+          entry.positionAttribute.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
+        }
+        // Only the first `vertexCount` vertices are valid THIS frame.
+        entry.geometry.setDrawRange(0, vertexCount);
+        entry.lastShapeX = light.x;
+        entry.lastShapeY = light.y;
+        entry.lastShapeRadius = light.radius;
+        entry.lastShapePoints = light.shapePoints;
       }
-      // Only the first `vertexCount` vertices are valid THIS frame.
-      entry.geometry.setDrawRange(0, vertexCount);
       // Mirrors Foundry's OWN mesh placement exactly: geometry is normalized
       // to local unit-radius space by triangulateLightFan, then
       // positioned/scaled back out to world space here.
@@ -1244,9 +1378,14 @@ export function createPointLightPool({
         entry.apertureShadowDebugMesh.visible = apertureGoboDebugChannel === 'pattern';
       }
       // PER-LIGHT REGION-AWARE AMBIENT — see this function's own header for
-      // the full "hard edge on a soft light" bug this fixes.
-      const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
-      const localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
+      // the full "hard edge on a soft light" bug this fixes. Skipped when no
+      // region is active (`sharedAmbientNoRegions` set above) — every light
+      // would resolve to the identical answer; see that constant's own doc.
+      let localAmbient = sharedAmbientNoRegions;
+      if (!localAmbient) {
+        const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
+        localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
+      }
       // SUN SHADOWS are NOT applied here — the light's own material samples
       // the baked field per-FRAGMENT. Two earlier attempts DID scale these
       // uniforms by a per-light scalar and both failed the same way: a
@@ -1331,14 +1470,24 @@ export function createPointLightPool({
       // TRUNCATION rather than growth — writeLightEdgePoints mutates
       // entry.edgePoints' existing Vector2 instances IN PLACE, never
       // replacing them (a uniformArray's size is fixed forever after its
-      // first setup() call).
-      entry.uEdgeCount.value = writeLightEdgePoints(
-        light.shapePoints,
-        light.x,
-        light.y,
-        light.radius,
-        entry.edgePoints
-      );
+      // first setup() call). Guarded by the SAME `lightShapeChanged` check
+      // as triangulateLightFan above (2026-08-09) — identical inputs, so an
+      // unchanged light's edge points are already correct from last frame
+      // and `entry.uEdgeCount.value` already holds the right count.
+      // `normalizedPolygon` is `triangulateLightFan`'s own normalization of
+      // this SAME (shapePoints, x, y, radius) — passed straight through so
+      // this call does not redo that divide-and-subtract pass (2 fresh
+      // Float64Arrays) a second time for identical output.
+      if (lightShapeChanged) {
+        entry.uEdgeCount.value = writeLightEdgePoints(
+          light.shapePoints,
+          light.x,
+          light.y,
+          light.radius,
+          entry.edgePoints,
+          normalizedPolygon
+        );
+      }
       entry.uEdgeSoftMargin.value = computeEdgeSoftMarginNormalized(gridSizePixels, light.radius);
       // COLORATION — the SAME transform as the illumination mesh (shares
       // geometry, but is a SEPARATE Object3D with its own transform).

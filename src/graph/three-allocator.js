@@ -175,6 +175,13 @@ export class ThreeAllocator {
    *   silent failure at every call site forever.
    * @param {(handle: any) => void} [options.onCreate] - Optional hook for
    *   diagnostics/budget accounting when a target is allocated.
+   * @param {(handle: any) => void} [options.onDispose] - Optional hook for
+   *   diagnostics/budget accounting when a target is freed — the paired
+   *   half of `onCreate` (2026-08-09): a registry built from `onCreate`
+   *   alone over-reports forever, since a disposed-and-replaced target
+   *   (a regrid, an effect-specific reallocation) never tells its listener
+   *   it is gone. Called AFTER the real `handle.dispose()`, same
+   *   never-silent posture as `onCreate`'s own try/catch.
    */
   constructor(options = {}) {
     if (!options.THREE) {
@@ -187,6 +194,7 @@ export class ThreeAllocator {
     }
     this._THREE = options.THREE;
     this._onCreate = typeof options.onCreate === 'function' ? options.onCreate : null;
+    this._onDispose = typeof options.onDispose === 'function' ? options.onDispose : null;
   }
 
   /**
@@ -363,6 +371,13 @@ export class ThreeAllocator {
       // A dispose that throws is a VRAM leak, which is this project's entire
       // crash class (§1: ~1.6GB ceiling). Never silent.
       log.error(`dispose threw for ${handle?.name ?? '(unnamed)'} — GPU memory may be leaked`, err);
+    }
+    if (this._onDispose) {
+      try {
+        this._onDispose(handle);
+      } catch (err) {
+        log.error(`onDispose hook threw for ${handle?.name ?? '(unnamed)'} — allocation kept, accounting lost`, err);
+      }
     }
   }
 }

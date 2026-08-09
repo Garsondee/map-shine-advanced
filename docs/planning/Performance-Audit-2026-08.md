@@ -2119,3 +2119,109 @@ fresh live report from the SAME 12K-map upper floor with both this fix and §15'
 `geometry.worldDraw`, `geometry.depthDraw`, or both actually drop, and by how much? Without that
 number, "no visible improvement" from §15 alone is still unexplained — this fix is a plausible
 contributor (§15's own doc named it as the next lever), not a confirmed one.
+
+## 17. 2026-08-09, round 5 — §15's fix DID work (worldDraw −67%), and looking at the real map
+assets found the thing no shader fix could reach
+
+The author captured a 5th live report on the same 12K mansion upper floor, with §15's maskNode fix and
+§16's `alwaysOpaque` fix both in. Headline: **both fixes worked, substantially.**
+
+| Zone | before (§15) | now | change |
+| --- | --- | --- | --- |
+| `geometry.worldDraw` GPU mean | 133.093 ms | **43.617 ms** | **−67 %** |
+| `geometry.depthDraw` GPU mean | 44.287 ms | **35.773 ms** | −19 % |
+| avgFps | 4.9 | **11.5** | +135 % |
+| worst frame | 583 ms | **141.7 ms** | −76 % |
+| `frame.gpuMs` p50 | 116 ms | 87.16 ms | −25 % |
+
+So §16's own "no visible improvement is still unexplained" is now answered: the improvement was real
+and large, it simply did not reach a *playable* framerate, which is what the author was judging by.
+`timestampPoolOverflowed` also cleared (false, `maxPendingSize` 2019 → 160), consistent with §14's
+"light-dense scene overflows a fixed pool" explanation rather than the stuck-resolve theory.
+
+**But the two zones are still 91% of the frame** (79.4 ms of 87.16 ms), so they remain the entire
+story. `geometry.worldDraw` alone is 49.7% of frame GPU from **22.1 draw calls** — the same
+few-draws/huge-per-draw signature as before, just smaller.
+
+### Reading the actual map assets, instead of theorising about them
+
+The author supplied the real test map (`mansion_example_map/`). Every layer was decoded in a real
+browser and its alpha measured — never inferred from file size
+(`feedback_asset_content_inferred_from_downstream_arithmetic`). **All eleven layers are 12000×12000
+(144 Mpx).** What is actually painted on them:
+
+| layer | painted | art bbox | rasterized |
+| --- | --- | --- | --- |
+| Ground | 100 % | 100 % | 100 % |
+| **Ground_Roof** | **3.7 %** | **9.9 %** | **100 %** |
+| **Ground_Overhead** | **1.1 %** | 43.3 % | **100 %** |
+| **First-Floor_Overhead** | **1.0 %** | 33.6 % | **100 %** |
+| First-Floor | 33.3 % | 43.3 % | **100 %** |
+| Ground_Tree | 11.9 % | 100 % | 100 % |
+| Ground_Bush | 7.2 % | 100 % | 100 % |
+
+A roof painting 3.7% of its canvas was rasterizing the whole screen, every frame, in both passes. No
+amount of shader tuning reaches that — it is fill spent on texels that are transparent by construction.
+
+This also explains why §15's fix plateaued where it did: **First-Floor is only 33% opaque**, so the
+depth-authority occlusion test can only ever reject about a third of the Ground layer beneath it. The
+other two thirds legitimately show through and must shade.
+
+### The fix: coverage meshing (`src/vt/coverage-mesh.js`, new)
+
+A quad is tessellated into a cell grid and the **index entries for cells with no art are dropped**. The
+vertex buffer is untouched — same positions, same UVs, same bilinear interpolation across a rotated or
+mirrored placement — so nothing moves and no visible pixel can change; empty cells simply stop being
+rasterized. Chosen over shrinking/cropping the quad precisely because a geometry that MOVES can distort
+art, mis-place a rotated tile, or break the `uvScale` crop the block-compressed path depends on.
+
+It reaches both passes from one place, which no shader-side fix can: `rebuildSceneDepthProxies` builds
+`buf:scene.depth`'s proxies on the item's OWN `t.geometry` (design doc §7), so a dropped cell stops
+rasterizing in `geometry.worldDraw` AND `geometry.depthDraw` for free.
+
+**Per-CELL, not per-bbox, and that is load-bearing:** `_Tree`/`_Bush` reach every corner of the canvas
+while painting under 12% of it, so a bounding-box crop — the obvious first idea — saves them nothing.
+
+**Re-measured against the real assets through the real shipped code: 49% of all rasterized cells
+disappear.** Ground_Roof 100 % → 11.5 %, First-Floor_Overhead → 31.9 %, Ground_Overhead → 43.8 %,
+Ground_Tree → 46.9 %, First-Floor → 49.9 %, Ground_Bush → 72 %. Ground is genuinely full and correctly
+keeps every cell (the function returns `null` — "nothing to gain, draw your ordinary quad").
+
+Three deliberate conservatisms, because dropping a cell that DID have art is invisible-missing-art:
+ANY texel at or over a LOW threshold (4/255) keeps the whole cell — never an average, which would erase
+a thin line crossing an otherwise-empty cell; the threshold asks "is anything here", never "is this
+opaque enough to occlude" (a different question the depth writer's own alpha test still asks
+separately); and the mask is dilated one cell in all 8 directions so faint sub-threshold edge falloff
+survives. Every unusable input — no grid, a short grid, a zero-sized image — returns `null` and draws
+the full quad exactly as before. The padded vegetation-**shadow** quad deliberately keeps every cell:
+its job is to hold the sun's sweep, which lands outside the canopy's own silhouette.
+
+Case-2 vegetation overlays are wired too, keyed on the **overlay's own file** rather than its host's —
+meshing a canopy against its host's coverage would drop exactly the cells where it overhangs bare
+ground.
+
+Also fixed, from the same report's `unbalancedBrackets: 2`: `residency.itemLoad`'s loop and
+`residency.pass`'s wrapper both lacked try/finally, so any throw leaked the bracket open and poisoned
+those zones. (A DIFFERENT bracket from §14's `itemLoadDims`/`itemLoadMasks` fix — this run recorded
+zero occurrences of those, a fully cache-warm sweep, which is what ruled the inner path out.)
+
+26 new unit tests. `npm run verify` green (8218). **BUILT, not live-verified.**
+
+### Predicted, and therefore falsifiable
+
+If coverage meshing behaves live the way it measures offline, `geometry.worldDraw` and
+`geometry.depthDraw` should fall roughly in half — ~79 ms → ~40 ms, frame GPU ~87 ms → ~50 ms, avgFps
+11.5 → ~19-20. That is a prediction, not a result; the next live report either shows it or the model of
+where the fill goes is wrong and should be re-examined rather than patched over.
+
+### The next lever, already located and measured
+
+`buildWholeImageMaterial` costs **six texture taps per surviving fragment**: five for
+`buildAlbedoClarityNode`'s CAS sharpening (centre + 4 neighbours) and a sixth for
+`physicalSolidityAlpha`'s separate `level(0)` read feeding the attr MRT. The sharpening is a pure
+display-quality feature and its taps are unconditional — the gate that fades it out at extreme zoom
+scales the RESULT, never skips the fetches. At the benchmark's own zoom (~1.6 texels/pixel) the gate is
+active, so it is doing real work and cannot be gated away for free; turning it into a genuine
+performance tier is the next big lever, worth ~4 of 6 texture fetches on the frame's dominant pass.
+That is a look change the author has to rule on, which is exactly why it is stated here rather than
+taken unilaterally.

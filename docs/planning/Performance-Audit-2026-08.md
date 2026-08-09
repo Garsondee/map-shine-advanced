@@ -2225,3 +2225,98 @@ active, so it is doing real work and cannot be gated away for free; turning it i
 performance tier is the next big lever, worth ~4 of 6 texture fetches on the frame's dominant pass.
 That is a look change the author has to rule on, which is exactly why it is stated here rather than
 taken unilaterally.
+
+## 18. 2026-08-09, round 6 — coverage meshing landed HARD (worldDraw -70% total, depthDraw
+-95% total), retuned the cell count, and instrumented the CPU mystery it left behind
+
+A 6th live report, same 12K mansion upper floor, with coverage meshing (§17) in place:
+
+| Zone | §16 (before coverage) | §18 (with coverage) | change |
+| --- | --- | --- | --- |
+| `geometry.worldDraw` GPU mean | 43.617 ms | **13.128 ms** | **-70%** |
+| `geometry.depthDraw` GPU mean | 35.773 ms | **2.182 ms** | **-94%** |
+| avgFps | 11.5 | **24.5** | +113% |
+| frame.gpuMs p50 | 87.16 ms | **29.49 ms** | -66% |
+
+Cumulative from the ORIGINAL pre-fix baseline (§15): `geometry.worldDraw` 133ms → 13.1ms
+(-90%), `geometry.depthDraw` 44.3ms → 2.18ms (-95%), avgFps 4.9 → 24.5 (5×). §17's own
+prediction ("roughly halve, avgFps → ~19-20") was beaten — the real result was better than
+forecast, not worse, worth naming explicitly since it means the fill-rate model was
+directionally right and, if anything, understated the win.
+
+**Correcting a live misread, worth recording as its own lesson:** the PRIOR round's report
+(§16, avgFps 11.5 after the maskNode/alwaysOpaque fixes) was the author's own "no huge
+performance improvements yet" — a 2.3× GPU speedup that still played at 11fps read as "no
+change" by feel. The fixes were real and large the whole time; only the FRAMERATE crossed
+into "noticeably better" once coverage meshing landed. **Ask for the numbers before
+concluding a fix did nothing** — a UX judgement and a measurement can disagree for many
+rounds in a row when multiple fixes are needed before the total crosses a felt threshold.
+
+### Retuned `COVERAGE_MESH_CELLS`, 32 → 64, measured before changing
+
+With the technique confirmed working live, re-measured the real mansion assets across
+several cell counts to find the actual tradeoff curve rather than guess a bigger number:
+
+| layer | 32 cells | 64 cells | 128 cells |
+| --- | --- | --- | --- |
+| Ground_Roof | 11.5% | 6.9% | 5.2% |
+| Ground_Overhead | 43.8% | 26.0% | 11.5% |
+| First-Floor_Overhead | 31.9% | 18.2% | 8.5% |
+
+64 cells captures most of the AVAILABLE further gain (overall rasterized fraction 50.9% →
+40.1%) while triangle counts per tile stay in the thousands — trivial against the ~137k a
+frame already draws. 128 cells keeps helping but with smaller marginal gains as triangle
+counts start growing faster. Chosen point, not a guess: still coarser than the 512-wide
+coarse-alpha grid's own effective resolution, so this is not yet limited by the grid itself.
+Vegetation overlays are unaffected — they tessellate at their own wind-sway `segments`
+count, never this constant.
+
+### The CPU mystery that coverage meshing did NOT touch: `geometry.depthDraw`'s own cost
+
+Even with GPU shading down to 2.18ms, `geometry.depthDraw`'s **CPU** cost stayed high:
+13.08ms mean for 9 draw calls — 26× `geometry.worldDraw`'s own CPU cost (0.499ms) for
+*twice* the draws (18.3). This is now the dominant unexplained cost in the frame, plausibly
+most of the gap between `frame.gpuMs` p50 (29.49ms) and the actual felt frame time
+(`frame.gapMs` p50, 41.7ms — avgFps 24.5 implies ~40.8ms/frame).
+
+**Investigated via the shader lab, not guessed.** Built three progressively more realistic
+isolated reproductions of `runSceneDepthPass`'s exact call shape, all on real WebGPU:
+1. Synthetic textureless materials, `alwaysOpaque` true vs false, alternating render targets.
+2. The SAME real 12000×12000 mansion textures bound, `buildSceneDepthWriterMaterial` used
+   unmodified, both structural variants.
+3. A write-then-read pattern matching the real frame (depth written, THEN sampled by a
+   `querySceneDepth`-based material in a later pass, exactly what specular/window/point
+   lights/worldDraw's own maskNode all do).
+
+**All three measured under 0.11ms/call** — roughly 100× smaller than the live 13ms. This
+rules out "this render call shape is inherently expensive" as the explanation; whatever
+costs 13ms live depends on something about the FULL production renderer's state that a
+fresh, short-lived isolated bench cannot reproduce (accumulated resource pressure, GC
+timing, or genuine pipeline churn that only manifests over a longer session).
+
+**Response: instrument it, the same move that solved `residency.pass`'s own 12ms mystery
+(§12).** Rather than keep guessing, split `runSceneDepthPass` into three nested CPU
+sub-zones (target-switch+clear, the `render()` call itself, target restore) — the next live
+report will show exactly which phase the cost is actually in, not just that the whole
+function costs 13ms. Also added a NEW instrument: `renderer.info.memory.programs`
+(three.js's own live compiled-pipeline count) sampled once right after settling and once at
+the end of the measurement window, surfaced as `instrument.pipelineStats` with a new
+`pipeline-programs-grew` finding if it climbs during a pan-only window — directly testing
+the leading hypothesis (unwanted pipeline recompilation) that `buildSceneDepthWriterMaterial`'s
+own header already named as a real, previously-measured cost class ("3.4ms mean/43ms max
+CPU" from exactly this cause, §4.3/round 1).
+
+10 new tests, `npm run verify` green (8228). **BUILT, not live-verified** — this round adds
+NO behavior change, only measurement; the next live report is what actually answers the CPU
+question.
+
+### Path to the author's 30fps target, restated with today's numbers
+
+`geometry.worldDraw` (13.1ms) is now the largest single zone by a wide margin — everything
+else is 1-3ms. The next concrete, already-measured lever: `buildWholeImageMaterial` costs
+6 texture taps per surviving fragment (5 for `buildAlbedoClarityNode`'s CAS sharpening,
+1 for `physicalSolidityAlpha`'s separate correctness-motivated `level(0)` read — NOT
+mergeable with the clarity node's own center tap without reintroducing the exact
+implicit-LOD bug round 10 already fixed). The sharpening's zoom gate scales its OUTPUT,
+never skips the fetches — at this benchmark's zoom the gate is active, so this is a genuine
+quality-vs-speed tradeoff, not a free win, and stays the author's call to make.

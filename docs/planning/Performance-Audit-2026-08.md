@@ -1919,3 +1919,42 @@ just above, which is why this one was attempted and that one was not.
 door-graphics fix actually moves `tick.doorSync` toward zero on a mostly-idle scene is also unmeasured
 until the next live capture. `geometry.depthDraw` and the sun-shadow/water debounce remain the two
 committed, fully-diagnosed, not-yet-attempted targets from §12/§13, unchanged by anything found here.
+
+### Correction, and a 4th report: a self-caught mis-attribution, a real bracket bug, and a genuinely
+mixed result
+
+**Correction first.** The "`tick.doorSync` measures 1.003ms mean" claim two sections up is WRONG —
+that number is `geometry.doorDraw`'s (the draw-call encode cost, `renderDoorGraphicsInto`), not
+`tick.doorSync`'s (the sync/animation-update cost, `syncDoorGraphics` — the function actually fixed).
+The two zones were conflated while writing up the finding. The dirty-check fix itself is still sound
+on its own logic (verified independently against source, not against the mis-cited number), but its
+expected payoff was mis-sized — `geometry.doorDraw` was never the target and the fix cannot move it.
+
+**A 4th live report** (16:33:52, ~25 minutes after the 3rd) surfaced a real bug: `instrument
+.profilerAnomalies.unbalancedBrackets: 2`, with `residency.itemLoad`/`residency.pass` each showing
+`unbalanced: 1`, and — separately — the two brand-new `residency.itemLoadDims`/`itemLoadMasks` zones
+absent from the report entirely despite being committed before this capture. Root cause of the
+bracket bug, found by reading rather than guessing: `ensureItemLoaded` has no try/catch of its own —
+the caller's PHASE 1 loop does, specifically for item 1d's documented "permanently-broken item"
+scenario (a 404'd asset, a real recurring case this exact codebase already has a name for). The new
+zones' bare `begin()`/`await`/`end()` meant a throwing `getSourceDimensions` or `loadExtraLayerPacks`
+would skip straight past `profiler.end()`, leaking that bracket open — an unbalanced bracket this
+instrumentation would have CAUSED, not measured. **Fixed** with try/finally around both, preserving
+the throw for the existing caller unchanged. Whether this bug actually explains this specific report's
+`unbalancedBrackets: 2` is unconfirmed — the new zones' total absence from the report is at least as
+consistent with the report simply predating the commit that added them (build/reload timing is
+ambiguous — the commit landed only ~2-3 minutes before this report's `generatedAt`, well inside the
+range a reload might or might not have happened in time for) as with the bracket leak itself. The fix
+is correct either way and was made regardless of which explanation is true.
+
+**The comparison itself is honestly mixed, not another improvement.** Several tail metrics moved the
+WRONG direction versus the 3rd report: p99 frame time 33.5ms → 41.6ms, hitches 6 → 8, p1-low fps
+29.9 → 24, worst frame 66.6ms → 83.3ms. `geometry.depthDraw` also went back up (5.198ms → 5.624ms),
+which is exactly why that earlier drop was flagged as "favourable variance, not a fix" rather than
+credited to anything — this report bears that caution out. Given the new `unbalancedBrackets` fault
+lowers confidence in this specific run's precision, and given this project's own documented run-to-run
+noise band, the most defensible read is that this is noise (possibly widened by the bracket fault),
+not evidence that anything committed between the two reports made performance worse — but it should
+not be filed as "still improving" either. `residency.itemLoad` (11.784ms mean) and the GPU-pool
+overflow (`maxPendingSize: 2019`, `maxResolveSkipStreak: 4`) both landed close to their 3rd-report
+values, consistent with both being stable, reproducible costs rather than noise-of-the-day.

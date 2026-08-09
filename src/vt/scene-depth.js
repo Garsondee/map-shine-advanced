@@ -398,9 +398,23 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
  *   continuously, which is precisely the bug
  *   `buildVegetationSwayDisplacementNode`'s own header records
  *   (`docs/planning/Depth-Buffer.md` §9k).
+ * @param {boolean} [args.alwaysOpaque=false] - true only when the caller has
+ *   already PROVEN (via `wi.alphaStats.min`, the real decoded source alpha —
+ *   never guessed) that every texel of `tex` sits at or above
+ *   `alphaThreshold`, so the discard below could structurally never fire.
+ *   See the comment beside its use for why this is a separate parameter and
+ *   not just a runtime-false condition.
  * @returns {*} a `THREE.NodeMaterial`.
  */
-export function buildSceneDepthWriterMaterial({ THREE, tex, alphaThreshold = 0.75, floorIndex, flags, positionNode }) {
+export function buildSceneDepthWriterMaterial({
+  THREE,
+  tex,
+  alphaThreshold = 0.75,
+  floorIndex,
+  flags,
+  positionNode,
+  alwaysOpaque = false,
+}) {
   const { Fn, float, uniform, vec4, texture } = THREE.TSL;
   const material = new THREE.NodeMaterial();
   material.side = THREE.DoubleSide;
@@ -424,9 +438,30 @@ export function buildSceneDepthWriterMaterial({ THREE, tex, alphaThreshold = 0.7
   // a handful of variants, not one per item) compiles ONCE and is reused.
   const uFloorIndex = uniform(float(floorIndex / 255));
   const uFlags = uniform(float(flags / 255));
+  // EARLY-Z FAST PATH (PERF, 2026-08-09, §4.3 of the perf audit): a discard()
+  // anywhere in a fragment shader forces the GPU to disable early-fragment-
+  // tests for the WHOLE shader — hardware can't see that the condition below
+  // is rare, only that the shader CONTAINS a discard at all, so even a
+  // fragment this pass's own `depthTest:true` would reject before running
+  // any shader still pays full shader cost. That defeats the exact
+  // optimization this whole pass exists to make available to
+  // `runGeometryWorldPass`'s later maskNode query. `!tex` is the SAME
+  // "always solid" case this function's own doc already names (no real item
+  // is textureless) — folded in here since it is, structurally, the same
+  // proof: no texel can ever read below threshold. Skipping the discard
+  // entirely — not just relying on it never firing at runtime — is what
+  // actually restores early-Z; the GPU only re-enables it when the shader
+  // has none at all. This is one more STRUCTURAL variant, same family as
+  // textured/untextured and positionNode/not in the comment above: every
+  // opaque item shares this leaner shape and compiles once, not once per
+  // item.
+  if (alwaysOpaque || !tex) {
+    material.fragmentNode = Fn(() => vec4(uFloorIndex, float(0), uFlags, float(1)))();
+    return material;
+  }
   const uAlphaThreshold = uniform(float(alphaThreshold));
   material.fragmentNode = Fn(() => {
-    const a = tex ? texture(tex).level(float(0)).a : float(1);
+    const a = texture(tex).level(float(0)).a;
     a.lessThan(uAlphaThreshold).discard();
     // G (outdoors) is a KNOWN GAP, stated honestly, not faked: wiring it
     // needs the same envLight/uOutdoorsRect plumbing scene-attr.js's real

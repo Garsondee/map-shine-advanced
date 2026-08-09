@@ -216,6 +216,12 @@ export function run(t) {
   // bench-scene-depth.js#buildDepthWriterMaterial's proven shape.
   {
     const THREE = makeTHREE();
+    let sampledTex = 'untouched';
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex) => {
+      sampledTex = tex;
+      return originalTexture(tex);
+    };
     const mat = buildSceneDepthWriterMaterial({ THREE, floorIndex: 2, flags: DEPTH_FLAG_IS_TILE });
     ok('writer: a real depth test, never bypassed', mat.depthTest === true && mat.depthWrite === true);
     ok('writer: LessDepth — this pass´s own proven convention, not GreaterDepth', mat.depthFunc === 'LESS');
@@ -239,6 +245,11 @@ export function run(t) {
       'writer: A is always 1 — the payload only exists where the fragment survived the alpha test',
       payload.args[3].value === 1
     );
+    ok(
+      'writer: no tex ("always solid", this module´s own documented case) never calls texture() at all — ' +
+        'the alpha test is gone from the graph, not just unreachable at runtime',
+      sampledTex === 'untouched'
+    );
   }
 
   // buildSceneDepthWriterMaterial — with a real texture, the alpha test
@@ -255,6 +266,49 @@ export function run(t) {
     const tex = { __kind: 'real-texture' };
     buildSceneDepthWriterMaterial({ THREE, tex, alphaThreshold: 0.6, floorIndex: 0, flags: 0 });
     ok('writer: sampled the item´s own real texture', sampledTex === tex);
+  }
+
+  // buildSceneDepthWriterMaterial — alwaysOpaque (PERF, 2026-08-09, §4.3 of
+  // the perf audit): the caller has already proven no texel of `tex` can
+  // ever read below alphaThreshold, so the discard must be OMITTED from the
+  // graph entirely — a runtime-false condition still contains a discard()
+  // statement, which is enough for real GPU hardware to disable
+  // early-fragment-tests for the whole shader regardless of how often it
+  // actually fires. Structural proof here: with alwaysOpaque, the texture is
+  // never even sampled, meaning the alpha-test statement never executes at
+  // graph-construction time — not merely "constructed but provably false".
+  {
+    const THREE = makeTHREE();
+    let sampledTex = 'untouched';
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex) => {
+      sampledTex = tex;
+      return originalTexture(tex);
+    };
+    const tex = { __kind: 'real-texture' };
+    const mat = buildSceneDepthWriterMaterial({
+      THREE,
+      tex,
+      alphaThreshold: 0.6,
+      floorIndex: 3,
+      flags: 1,
+      alwaysOpaque: true,
+    });
+    ok(
+      'writer alwaysOpaque: never samples the texture, even though one was supplied — the alpha test itself is gone',
+      sampledTex === 'untouched'
+    );
+    const payload = mat.fragmentNode;
+    ok('writer alwaysOpaque: still returns the SAME vec4 payload shape as the discard path', payload.__kind === 'vec4');
+    ok(
+      'writer alwaysOpaque: R is still the floor index, normalised and still a uniform (no pipeline-recompile regression)',
+      payload.args[0].__kind === 'uniform' && payload.args[0].value === 3 / 255
+    );
+    ok(
+      'writer alwaysOpaque: B is still the flags byte, normalised and still a uniform',
+      payload.args[2].__kind === 'uniform' && payload.args[2].value === 1 / 255
+    );
+    ok('writer alwaysOpaque: A is still 1', payload.args[3].value === 1);
   }
 
   // buildSceneDepthProxyMesh — shares the item's OWN geometry, never builds new.

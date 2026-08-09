@@ -9575,6 +9575,23 @@ export async function startVtPanViewer({
           logError: (msg, err) => log.error(msg, err),
         });
         const flags = computeSceneDepthFlags(item);
+        // EARLY-Z FAST PATH INPUT (see buildSceneDepthWriterMaterial's own
+        // `alwaysOpaque` doc) — `alphaStats` is the REAL decoded source
+        // alpha's {min,max,mean}, scanned once at compress time
+        // (bc-compress.worker.js), null on the raw-fallback path where
+        // opacity is simply unknown. `.min` is the WHOLE source image's
+        // floor, computed before any tile split (`planImageTiles`), so it
+        // safely covers every tile below regardless of how many this item
+        // was split into: no sub-region's minimum can read lower than the
+        // whole's. `alphaStats.min` is a raw 0-255 BYTE (bc-compress.worker.js
+        // reads it straight off `getImageData`'s Uint8ClampedArray, never
+        // normalized) while `alphaThreshold` is the 0-1 FRACTION the discard
+        // below tests the TSL texture sample against — one byte, two
+        // quantities; dividing by 255 here is what makes this the same
+        // comparison the discard below would have made, not a coincidentally
+        // near-always-true one.
+        const alphaStats = state.wholeImage.alphaStats;
+        const alwaysOpaque = alphaStats != null && alphaStats.min / 255 >= (item.alphaThreshold ?? 0.75);
         for (const t of tiles) {
           // EARLY OCCLUSION REJECT (see buildWholeImageMaterial's own
           // comment) — kept fresh here, every residency pass, the exact
@@ -9591,6 +9608,7 @@ export async function startVtPanViewer({
             alphaThreshold: item.alphaThreshold ?? 0.75,
             floorIndex,
             flags,
+            alwaysOpaque,
           });
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
           depthScene.add(mesh);

@@ -2042,3 +2042,80 @@ anything visually on a normal scene (it should not) — both need the user's own
 disproportionately expensive after this lands, §4.3's own unconditional-`discard()`-defeats-early-Z
 finding (inside the depth-writer pass itself) is the next lever — unrelated to and unblocked by this
 fix.
+
+## 16. 2026-08-09 — live-tested §15's fix: nothing broke, no visible improvement yet. Went after
+§15's own named next lever: `geometry.depthDraw`'s own early-Z defeat
+
+The user tested §15's `maskNode`/pass-reorder fix live on the same 12K-map upper floor: *"No
+performance improvement yet, but that might be correct, but nothing broke so far."* Correctness signal
+is good (no visual regression on a real scene with the depth authority's highest-risk change to date).
+The missing speedup is not yet root-caused — it could mean the fix genuinely isn't helping, or it could
+mean it IS helping but is masked by a cost that didn't move. §15's own "what still needs checking"
+section already named the second candidate explicitly: `geometry.depthDraw` (44.287ms GPU mean, its own
+pass, entirely unrelated to and unblocked by §15's fix) has the identical defeated-early-Z problem for a
+different reason, first identified back in §4.3.
+
+### The bug: a discard() this pass never needed to contain
+
+`buildSceneDepthWriterMaterial` — the depth-authority's OWN writer, drawn every residency pass for
+every tile — already sets `depthTest:true, depthWrite:true, depthFunc:LessDepth` (proven correct in
+`bench-scene-depth.js`). But its fragment shader unconditionally contains `a.lessThan(uAlphaThreshold)
+.discard()`. GPU hardware disables early-fragment-tests for an ENTIRE shader the moment it contains a
+discard, regardless of how rarely — or never — that discard actually fires for a given draw. An item
+with no real transparency anywhere (the overwhelming common case: solid floors, walls, roofs with no
+holes) was still paying full early-Z-defeated shading cost on every fragment, for a discard that could
+never have fired.
+
+### The fix: prove it, don't just hope it's rare — an `alwaysOpaque` structural variant
+
+`wi.alphaStats` (`{min, max, mean}`, the real decoded source alpha scanned once at compress time in
+`bc-compress.worker.js`, not a guess) was already sitting unused in scope at this exact call site —
+named as the missing piece back in §4.3. `buildSceneDepthWriterMaterial` now takes an `alwaysOpaque`
+flag; when true (or when `tex` is absent — this function's own documented "always solid" case), the
+discard and its alpha sample are omitted from the graph ENTIRELY, not just made unreachable at runtime.
+That distinction matters: a `float(1).lessThan(0.75)` that is always false still compiles a discard
+statement into the shader and still defeats early-Z; only removing the statement restores it.
+`rebuildSceneDepthProxies` computes this once per item, per residency pass:
+
+```js
+const alphaStats = state.wholeImage.alphaStats;
+const alwaysOpaque = alphaStats != null && alphaStats.min / 255 >= (item.alphaThreshold ?? 0.75);
+```
+
+`alphaStats` is `null` on the raw-fallback path (no compression worker ran, opacity genuinely unknown)
+— the conservative, existing discard-based material is kept in that case, no regression risk. The
+vegetation-overlay branch (a synthetic depth-proxy item with no `wholeImage`/`alphaStats` of its own)
+is left on the discard-based path too, unchanged.
+
+**A bug caught before it shipped, not after**: `alphaStats.min`/`.max` are raw 0–255 BYTES — read
+straight off `getImageData`'s `Uint8ClampedArray` in the compression worker, never normalized — while
+`alphaThreshold` is the 0–1 FRACTION the discard's real TSL texture sample is tested against. The first
+draft of this comparison was `alphaStats.min >= alphaThreshold` with no `/255`, which is true for almost
+any image with `min > 0` — it would have silently mis-classified items with REAL transparency holes
+(torn roofs, alpha-masked props) as "always opaque," making the depth-writer paint solid depth straight
+through a hole for every other depth-authority consumer downstream. Caught by reading the producer
+(`bc-compress.worker.js`'s own scan loop) before wiring the comparison, not by a failing test — this is
+the exact "one byte, two quantities" bug class this project has hit before. Fixed to
+`alphaStats.min / 255 >= (item.alphaThreshold ?? 0.75)`.
+
+`buildSceneDepthWriterMaterial`'s `alwaysOpaque` variant is a new STRUCTURAL shape (same family as
+textured/untextured, positionNode/not — see the function's own header on why materials are kept to "a
+handful of variants, not one per item"), so opaque items still share ONE compiled pipeline, not one
+each — the existing pipeline-recompile-avoidance property this function was already built around is
+preserved, not traded away for this fix.
+
+Added 6 unit tests to `scene-depth.test.mjs` proving the structural claim the way this file already
+proves TSL wiring (a spy on the mock `texture()` call, not shader output): `alwaysOpaque:true` and
+"no tex at all" both never call `texture()` at all, while the default/discard path still does; the
+returned payload shape (R/G/B/A) is identical either way. `npm run verify` green (8192 tests, 6 new).
+
+### What still needs checking
+
+**NOT live-verified.** Same posture as §15: this changes the depth authority's own writer pass, which
+every consumer depends on for correctness, not just speed — needs the user's own eyes on a real scene
+with actual holes/transparency (torn roofs, alpha-masked props) to confirm nothing renders solid that
+should show through, before trusting the perf side of it at all. The most valuable next diagnostic is a
+fresh live report from the SAME 12K-map upper floor with both this fix and §15's in place: does
+`geometry.worldDraw`, `geometry.depthDraw`, or both actually drop, and by how much? Without that
+number, "no visible improvement" from §15 alone is still unexplained — this fix is a plausible
+contributor (§15's own doc named it as the next lever), not a confirmed one.

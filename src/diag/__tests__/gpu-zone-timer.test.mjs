@@ -218,6 +218,99 @@ export async function run(t) {
     );
   }
 
+  // ---- overflow diagnostics: peak pending size ------------------------------
+  {
+    const renderer = fakeRenderer();
+    renderer.backend.__msaTimestampCapable = true;
+    const profiler = createFrameProfiler();
+    const timer = createGpuZoneTimer({ renderer, InspectorBase: FakeInspectorBase, profiler });
+    profiler.arm({ settleFrames: 0, clockResolutionMs: 0.1 });
+    timer.arm();
+
+    // Two passes open and never resolved (nothing is ever put into
+    // pool.timestamps for them) — both sit in `pending` simultaneously.
+    const slot = profiler.indexOf('light.drawPointLights');
+    profiler.begin(slot);
+    renderer.inspector.beginRender('r:1:1:f1');
+    profiler.end(slot);
+    profiler.begin(slot);
+    renderer.inspector.beginRender('r:2:1:f1');
+    profiler.end(slot);
+
+    timer.collect();
+    await flush();
+    ok('peak pending size reflects both still-unresolved uids', timer.getStatus().maxPendingSize === 2);
+    ok('a clean run reports no resolve-skip streak', timer.getStatus().maxResolveSkipStreak === 0);
+  }
+
+  // ---- overflow diagnostics: resolve-skip streak (a stuck resolve, not a
+  // missed collect() call) ----------------------------------------------------
+  {
+    const pool = { timestamps: new Map() };
+    let resolveCallCount = 0;
+    let releaseResolve = null;
+    const renderer = {
+      _inspector: null,
+      get inspector() {
+        return this._inspector;
+      },
+      set inspector(v) {
+        this._inspector = v;
+        if (v && typeof v.setRenderer === 'function') v.setRenderer(this);
+      },
+      backend: {
+        isWebGPUBackend: true,
+        trackTimestamp: true,
+        __msaTimestampCapable: true,
+        timestampQueryPool: { render: pool, compute: null },
+      },
+      info: { render: { drawCalls: 0, triangles: 0 } },
+      // Never settles until the test calls `releaseResolve()` — stands in for a
+      // `resultBuffer.mapAsync` that is genuinely stuck behind a GPU backlog.
+      async resolveTimestampsAsync() {
+        resolveCallCount++;
+        await new Promise((res) => {
+          releaseResolve = res;
+        });
+      },
+    };
+    const profiler = createFrameProfiler();
+    const timer = createGpuZoneTimer({ renderer, InspectorBase: FakeInspectorBase, profiler });
+    profiler.arm({ settleFrames: 0, clockResolutionMs: 0.1 });
+    timer.arm();
+
+    const slot = profiler.indexOf('light.drawPointLights');
+    const openAndCollect = (uid) => {
+      profiler.begin(slot);
+      renderer.inspector.beginRender(uid);
+      profiler.end(slot);
+      timer.collect();
+    };
+
+    openAndCollect('r:1:1:f1');
+    await flush();
+    ok('the first collect() call starts the (stuck) resolve', resolveCallCount === 1);
+    ok('the call that STARTS a resolve is not itself a skip', timer.getStatus().maxResolveSkipStreak === 0);
+
+    // Three more frames render and call collect() while the resolve is stuck.
+    for (let i = 0; i < 3; i++) {
+      openAndCollect(`r:${i + 2}:1:f1`);
+      await flush();
+    }
+    ok('three consecutive blocked collect() calls are counted', timer.getStatus().maxResolveSkipStreak === 3);
+    ok('no second resolve was requested while the first is still in flight', resolveCallCount === 1);
+
+    releaseResolve();
+    await flush();
+    openAndCollect('r:99:1:f1');
+    await flush();
+    ok('once the stuck resolve clears, the next collect() starts a fresh one', resolveCallCount === 2);
+    ok(
+      'the PEAK streak is retained even after the current streak resets',
+      timer.getStatus().maxResolveSkipStreak === 3
+    );
+  }
+
   // ---- status is honest about what it could not measure ---------------------
   {
     const renderer = fakeRenderer();

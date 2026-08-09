@@ -805,7 +805,19 @@ export function deriveFindings({
       severity: 'high',
       id: 'timestamp-pool-overflow',
       text: 'The GPU timestamp query pool overflowed during this window — three stops allocating queries once 1024 passes are outstanding and rendering continues silently. Zone GPU numbers after that point are missing, not zero, and coverage below is understated.',
-      evidence: { poolOverflow: true },
+      // maxPendingSize/maxResolveSkipStreak added 2026-08-09 (gpu-zone-timer.js)
+      // — undefined on an older report shape, so left OUT rather than forced to
+      // a misleading 0 (feedback_instruments_must_not_lie). A high
+      // maxResolveSkipStreak right before the overflow points at a stuck
+      // resolveTimestampsAsync (a GPU backlog), not a missed collect() call —
+      // see that file's own header for the hypothesis this was added to test.
+      evidence: {
+        poolOverflow: true,
+        ...(gpuTimer?.maxPendingSize !== undefined ? { maxPendingSize: gpuTimer.maxPendingSize } : {}),
+        ...(gpuTimer?.maxResolveSkipStreak !== undefined
+          ? { maxResolveSkipStreak: gpuTimer.maxResolveSkipStreak }
+          : {}),
+      },
     });
   }
   if (attribution?.verdict === 'unreliable' || attribution?.verdict === 'indicative') {

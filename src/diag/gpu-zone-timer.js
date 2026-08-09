@@ -140,6 +140,20 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
   let unattributed = 0;
   let overflowed = false;
   let resolveErrors = 0;
+  // OVERFLOW DIAGNOSTICS (2026-08-09) — `overflowed` alone says a run crossed
+  // the line; it says nothing about how CLOSE a non-overflowing run came, or
+  // what the pool was doing in the frames leading up to a crossing. Two live
+  // reports have shown `poolOverflowed: true` with no named cause anywhere in
+  // this codebase — a leading hypothesis is `renderFrame`'s own GPU-probe
+  // throttle (vt-pan-viewer.js: `if (gpuProbe.isActive() && gpuProbe
+  // .isMeasuring()) return`) blocking `collect()` for several consecutive
+  // ticks while a PRIOR `resolveTimestampsAsync` is still stuck awaiting
+  // `resultBuffer.mapAsync` — plausibly the same GPU backlog that also causes
+  // frame hitches, not an independent fault. Unconfirmed without a live run;
+  // these two counters are what the NEXT one needs to confirm or refute it.
+  let maxPendingSize = 0;
+  let resolveSkipStreak = 0;
+  let maxResolveSkipStreak = 0;
   /**
    * Whole-frame GPU samples, free of charge. `Backend.resolveTimestampsAsync`
    * writes the frame's TOTAL pass duration into `renderer.info.render.timestamp`
@@ -185,6 +199,11 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
   function foldResolved() {
     const backend = renderer?.backend;
     if (!backend || pending.size === 0) return;
+    // Checked at ENTRY, before this pass's own folding can shrink `pending` —
+    // the peak backlog a caller would see is "how many had piled up before we
+    // got a chance to try resolving any of them", not "how many are left over
+    // afterward".
+    if (pending.size > maxPendingSize) maxPendingSize = pending.size;
     for (const [uid, slot] of pending) {
       let has = false;
       const parsed = parseTimestampUid(uid);
@@ -234,6 +253,9 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
       unattributed = 0;
       overflowed = false;
       resolveErrors = 0;
+      maxPendingSize = 0;
+      resolveSkipStreak = 0;
+      maxResolveSkipStreak = 0;
       armed = true;
       return true;
     },
@@ -281,7 +303,16 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
       // therefore stall folding indefinitely on a slow readback, which showed up
       // as zones that simply never got a GPU number.
       foldResolved();
-      if (resolveInFlight) return;
+      if (resolveInFlight) {
+        // A run of these immediately BEFORE an overflow is the signature of
+        // the hypothesis in this file's own state-declaration comment: the
+        // pool only grows because a resolve is stuck, not because collect()
+        // stopped being called.
+        resolveSkipStreak++;
+        if (resolveSkipStreak > maxResolveSkipStreak) maxResolveSkipStreak = resolveSkipStreak;
+        return;
+      }
+      resolveSkipStreak = 0;
       if (typeof renderer.resolveTimestampsAsync !== 'function') return;
       resolveInFlight = true;
       Promise.resolve(renderer.resolveTimestampsAsync('render'))
@@ -315,6 +346,15 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
         malformedDurations: missed,
         resolveErrors,
         poolOverflowed: overflowed,
+        // OVERFLOW DIAGNOSTICS — see this factory's own state-declaration
+        // comment. `maxPendingSize` shows how close a run got even when it
+        // never crossed PENDING_UID_ALARM; `maxResolveSkipStreak` shows the
+        // longest run of consecutive collect() calls that found a PRIOR
+        // resolve still in flight and had to skip requesting a new one — a
+        // large streak right before `poolOverflowed: true` would confirm the
+        // "a stuck resolve, not a missed collect() call" hypothesis.
+        maxPendingSize,
+        maxResolveSkipStreak,
         // The denominator for attribution.coverage. Labelled, not called "the frame".
         frameGpuMs: frameGpuSamples.length
           ? {

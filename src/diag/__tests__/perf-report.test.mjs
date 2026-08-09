@@ -969,6 +969,29 @@ export function run(t) {
       'timestamp pool overflow is surfaced',
       overflowed.some((f) => f.id === 'timestamp-pool-overflow')
     );
+    ok(
+      'without a gpuTimer, evidence stays exactly what it always was (no crash on the older shape)',
+      overflowed.find((f) => f.id === 'timestamp-pool-overflow').evidence.maxPendingSize === undefined
+    );
+
+    // gpu-zone-timer.js's overflow diagnostics (2026-08-09), when present, ride
+    // along on the SAME finding rather than creating a second one.
+    const overflowedWithDiagnostics = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query', timestampPoolOverflowed: true },
+      gpuTimer: { maxPendingSize: 1847, maxResolveSkipStreak: 22 },
+      budgetMs: 8.33,
+    });
+    ok(
+      'still exactly one pool-overflow finding, not a duplicate',
+      overflowedWithDiagnostics.filter((f) => f.id === 'timestamp-pool-overflow').length === 1
+    );
+    const enriched = overflowedWithDiagnostics.find((f) => f.id === 'timestamp-pool-overflow');
+    ok('its evidence carries the peak pending size', enriched.evidence.maxPendingSize === 1847);
+    ok('...and the peak resolve-skip streak', enriched.evidence.maxResolveSkipStreak === 22);
 
     // A declared cost the measurement contradicts.
     const overEffects = attributeZonesToEffects({

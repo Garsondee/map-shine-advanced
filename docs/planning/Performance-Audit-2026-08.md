@@ -1751,3 +1751,116 @@ built the instrument, not the answer. Whoever captures the next live report shou
 `residency.coarsePinBudget`/`coverAlphaPrime`/`staleRelease`/`itemLoad`/`itemRefresh` first, before
 anything else in this document, since one of them is very likely to be most of `residency.pass`'s
 remaining ~12ms.
+
+### Instrumentation added: diagnostics for the GPU timestamp-query pool overflow
+
+Both live reports carried `instrument.gpuTimer.poolOverflowed: true` (§12) with no named cause
+anywhere in this document. Traced the mechanism as far as static reading allows:
+`renderFrame`'s own GPU-probe throttle (`if (gpuProbe.isActive() && gpuProbe.isMeasuring()) return`,
+`vt-pan-viewer.js`) skips `gpuZoneTimer.collect()` — the call that resets three's
+`currentQueryIndex` — for every tick between submitting a frame and that frame's
+`onSubmittedWorkDone()` resolving. Verified in the vendored source
+(`three.webgpu.js:74987`) that the index reset happens the instant
+`resolveTimestampsAsync` is CALLED, not when its promise settles — so under normal operation the
+pool resets every single rendering frame and should almost never overflow. The plausible remaining
+mechanism: `collect()`'s own `resolveInFlight` guard skips calling `resolveTimestampsAsync` again
+while a PRIOR call is still awaiting `resultBuffer.mapAsync` — if that readback stalls behind a real
+GPU backlog (the same backlog that would also produce the 44-66ms worst-case frames already in both
+reports), enough frames could render while genuinely blocked to cross 1024 outstanding passes before
+the stuck resolve ever clears. **Not confirmed — this is one hypothesis, not a diagnosis.**
+
+Rather than guess a fix for an unconfirmed mechanism, added two counters to `gpu-zone-timer.js`
+(`maxPendingSize`: the peak backlog a run ever reached, even short of the alarm threshold;
+`maxResolveSkipStreak`: the longest run of consecutive `collect()` calls blocked by a still-in-flight
+resolve) and rode them along on the *existing* `timestamp-pool-overflow` finding's evidence — a
+mid-task correction: the first draft of this added a SECOND, duplicate finding
+(`gpu-timestamp-pool-overflowed`) before checking whether one already existed. It did
+(`method?.timestampPoolOverflowed`, `perf-report.js:830`, gated on the same underlying
+`gpuStatus.poolOverflowed` value via a differently-named field) — caught before landing, reverted, and
+the counters attached to the real finding instead. A high `maxResolveSkipStreak` right before an
+overflow in the next live report would confirm the stuck-resolve hypothesis; a low one would rule it
+out and point back at something else entirely. `npm run verify` green (8169 tests).
+
+## 14. 2026-08-09, round 3 — a third live report closed the residency.pass mystery and overturned the pool-overflow hypothesis
+
+A third live capture (`docs/planning/perf-reports/2026-08-09-live-sweep-after-round2.json`, generated
+16:08:32, ~1h39m after §13's report, same route `n_to_s:2kf/60000ms`, same resolution) landed with
+round 2's instrumentation actually built into the profiled binary — the first report ever to carry
+the five new `residency.*` zones and the two new `gpuTimer` counters. Both paid off immediately.
+
+### `residency.pass`'s 12ms mystery: SOLVED, not just instrumented
+
+| Zone | Mean CPU (this report) | Share of `residency.pass` |
+| --- | --- | --- |
+| **`residency.itemLoad` (PHASE 1)** | **10.139 ms** | **~96%** |
+| `residency.coarsePinBudget` | 0.077 ms | |
+| `depth.proxyRebuild` | 0.218 ms | |
+| everything else (coverAlphaPrime, staleRelease, itemRefresh, depthAuthorityRebuild, vegRankStamp, vegDepthItemsBuild) | ~0.08 ms combined | |
+| **`residency.pass` total** | **10.524 ms** | **100%** |
+
+Nearly the entire cost is PHASE 1 — the loop that does `await ensureItemLoaded(item)` per item. This
+is NOT wasted CPU: `residency.itemLoad`'s own `drawCalls`/`triangles` figures (459.1 / 338,933.3) are
+almost identical to `residency.pass`'s own (459.1 / 338,933.3) — meaning ordinary frames keep
+rendering (and their draw calls land inside this zone's open bracket) while the await is genuinely
+suspended, exactly as `updateResidencyUnguarded`'s own header describes. This is **wall-clock time
+spent on real asynchronous loading work** (decode, ranged fetch, worker dimension round-trips — see
+`ensureItemLoaded`'s own comments) as the pan continuously reveals new map content, not a CPU cycle
+being burned pointlessly. The eight zones this document and round 2 sized as candidates (coarse-pin
+budget, cover-alpha priming, stale-item release, PHASE 2, plus the four pre-existing residency zones)
+were all correctly ruled out — they sum to ~0.4ms, matching the earlier code-reading estimate almost
+exactly. **The mystery is closed. Whether the streaming pipeline itself (decode worker count, ranged
+fetch batching) can be made faster is a new, well-defined, separate question — not the open one this
+document has carried since §12.**
+
+### The GPU-pool-overflow hypothesis from §13: likely WRONG, and the data says why
+
+`maxPendingSize: 2019` (just past the 2000 alarm) but **`maxResolveSkipStreak: 3`** — far too short a
+streak to accumulate 2019 pending queries through a stuck `resolveTimestampsAsync` alone (even at the
+file's own "~25 passes/frame" estimate, 3 blocked frames account for under 150 queries). The
+stuck-resolve hypothesis is not supported by this run.
+
+The number that actually explains it: this scene carries **~117 point lights** (`light
+.drawPointLights`/`light.drawColoration` both report `drawCalls: 117`), each drawing through two
+passes. A single frame's total timestamped render-pass count is therefore easily 250-300+ — five to
+ten times the "~25 render calls per frame" this file's own header comment (`gpu-zone-timer.js`) was
+written against. Against a pool that holds only 1024 passes total, ordinary, non-pathological GPU
+readback latency of even 3-4 frames is enough to overflow on a scene this light-dense — no stall
+required. **This is very likely an inherent limitation of the fixed-size vendor pool on light-heavy
+scenes, not a bug in this codebase**, and there is no known safe fix: the pool size (`2048`, `three
+.webgpu.js:76495`) is hardcoded inside `WebGPUBackend` with no constructor option or injection point,
+so raising it means patching vendored code — exactly the kind of blind vendor edit this project
+avoids. Recommendation: stop treating `poolOverflowed` as an open question on light-dense scenes: note
+it as an accepted instrument limitation (the report's own attribution.coverage of 97.4% already tells
+the reader most of the run is still trustworthy) rather than a target for further investigation,
+unless a future low-light-count scene ALSO overflows — that would revive the stuck-resolve theory.
+
+### The improvement trend, now three points instead of two
+
+| | Before (13:28) | After round 1 (14:29) | After round 2 (16:08) |
+| --- | --- | --- | --- |
+| p99 frame time | 50.0 ms | 41.6 ms | **33.5 ms** |
+| Hitches (>50ms) | 19 | 8 | **6** |
+| p1 Low fps | 20 | 24 | **29.9** |
+| CPU encode p50 | 17.6 ms | 16.32 ms | **14.13 ms** |
+| avgFps | 38.6 | 38.6 | **40.5** |
+| `light.pointLightUpdate` mean | 3.686 ms | 2.807 ms | **2.428 ms** |
+| `geometry.depthDraw` mean | 5.872 ms | 5.792 ms | 5.198 ms |
+
+Every tail-latency metric has now improved on three consecutive captures — a trend, not one noisy
+run. `light.pointLightUpdate`'s continued drop is consistent with round 2's aperture-gobo caching
+fix. `geometry.depthDraw` also moved down this time despite nothing targeting it directly — read as
+favourable run-to-run variance, not evidence its root cause (the unconditional `discard()` defeating
+early-Z, §4.3) is fixed; that fix is still fully unattempted. Two honest wrinkles: `light
+.pointLightUpdate`'s *max* rose (23.9ms → 29.1ms) even as its mean fell — plausibly one frame paying
+the aperture cache's own invalidation cost on a floor/wall-change moment, not investigated further;
+and the effect sweep measured nothing this run (`sweepEffectsMeasured: 0`) — its own finding explains
+why (every effect fell inside this run's ±2.75ms noise floor) — a pre-existing sweep limitation
+exposed by this run's particular noise level, not a regression.
+
+### What still needs checking
+
+`residency.itemLoad`'s real bottleneck — is `ensureItemLoaded`'s decode/fetch pipeline itself
+optimisable (worker parallelism, ranged-fetch batching), or is ~10ms/pan-triggered-pass simply the
+honest cost of streaming a large map and not worth chasing further? Unexamined this round.
+`geometry.depthDraw` and the sun-shadow/water debounce remain the two committed, fully-diagnosed,
+not-yet-attempted targets from §12/§13, unchanged by anything found here.

@@ -1,0 +1,180 @@
+{
+  "report": "perf-profile",
+  "formatVersion": 1,
+  "generatedAt": "2026-08-09T16:08:32.477Z",
+  "msaVersion": "0.6.0-dev.0",
+  "codename": null,
+  "method": {
+    "gpu": "timestamp-query",
+    "gpuReason": null,
+    "cpuClockResolutionMs": 0.09999999403953552,
+    "sweepRequested": true,
+    "sweepEffectsMeasured": 0,
+    "sweepEffectsRejected": 15,
+    "sweepNoiseFloorMs": 2.75,
+    "sweepIncluded": false,
+    "route": "n_to_s:2kf/60000ms",
+    "timestampPoolOverflowed": true,
+    "zoneStatsNote": "Zones report mean/max/amortised over the window, NOT percentiles. Per-zone percentiles would require retaining a per-frame sample per zone, which this profiler deliberately does not do — it stays zero-allocation while armed so the instrument does not create the GC hitches it is measuring. Percentiles are frame-level, where the samples already exist."
+  },
+  "window": {
+    "frames": 2335,
+    "durationMs": 57629.9,
+    "settleFramesDiscarded": 90,
+    "resolution": {
+      "w": 3840,
+      "h": 1906,
+      "pixelRatio": 1.5
+    },
+    "megapixels": 7.32,
+    "sceneName": null,
+    "floorIndex": 0,
+    "loop": "viewer"
+  },
+  "frame": {
+    "fps": {
+      "avgFps": 40.5,
+      "avgFpsNote": "frames ÷ elapsed time — the felt rate. NOT the mean of per-frame fps, which over-weights fast frames.",
+      "bestFps": 123.5,
+      "worstFps": 15,
+      "p1LowFps": 29.9,
+      "p5LowFps": 29.9,
+      "medianFps": 40,
+      "frameMs": {
+        "best": 8.1,
+        "median": 25,
+        "p95": 33.4,
+        "p99": 33.5,
+        "worst": 66.6
+      },
+      "sampleCount": 2335
+    },
+    "hangs": {
+      "note": "Bands are cumulative — a 300ms frame counts in all four. `worst` is sorted by severity and carries WHEN it happened, so a hang can be reproduced rather than just counted.",
+      "bands": [
+        { "label": "stutter (>2x median)", "minMs": 50, "count": 6 },
+        { "label": "hitch (>50ms)", "minMs": 50, "count": 6 },
+        { "label": "stall (>100ms)", "minMs": 100, "count": 0 },
+        { "label": "freeze (>250ms)", "minMs": 250, "count": 0 }
+      ],
+      "totalStalls": 6,
+      "kept": 6,
+      "dropped": 0,
+      "worst": [
+        { "frame": 1850, "atSec": 48.13, "gapMs": 66.6 },
+        { "frame": 212, "atSec": 5.65, "gapMs": 58.5 },
+        { "frame": 431, "atSec": 11.51, "gapMs": 58.5 },
+        { "frame": 668, "atSec": 18.06, "gapMs": 58.3 },
+        { "frame": 1184, "atSec": 32.67, "gapMs": 58.3 },
+        { "frame": 1473, "atSec": 39.95, "gapMs": 58.3 }
+      ]
+    },
+    "gapMs": { "p50": 25, "p90": 33.3, "p95": 33.4, "p99": 33.5, "max": 66.6, "sampleCount": 2335 },
+    "gpuMs": {
+      "p50": 23.27,
+      "p95": 28.44,
+      "max": 30.21,
+      "sampleCount": 625,
+      "basis": "sum of timestamped render passes per frame (renderer.info.render.timestamp)",
+      "caveat": "NOT the whole GPU frame: mipmap generation, presentation and any work outside a render pass are not counted. Coverage against this measures \"of the pass time we can see, how much did we attribute to a declared zone\" — a real question, but a narrower one than \"where did the frame go\"."
+    },
+    "cpuEncodeMs": { "p50": 14.13, "sampleCount": 120 },
+    "gapSampleCoverage": "every frame in the window",
+    "histogram": [
+      { "label": ">120fps", "frames": 50, "percent": 2.1 },
+      { "label": "60-120fps", "frames": 223, "percent": 9.6 },
+      { "label": "30-60fps", "frames": 1852, "percent": 79.3 },
+      { "label": "20-30fps", "frames": 203, "percent": 8.7 },
+      { "label": "10-20fps", "frames": 7, "percent": 0.3 }
+    ],
+    "shape": {
+      "note": "Worst frame gap in each of 60 equal buckets across the window — the SHAPE, not a dump.",
+      "buckets": 60,
+      "framesPerBucket": 38.9,
+      "bucketMs": 960.498,
+      "worstGapMs": [33.3,33.5,33.5,33.5,33.4,58.5,33.5,33.4,33.5,33.4,33.5,58.5,33.5,33.5,33.5,33.5,33.4,58.3,33.4,33.5,33.4,33.4,33.5,33.5,50,33.4,33.5,33.5,33.5,33.5,58.3,33.3,33.5,33.4,33.2,33.4,33.4,58.3,33.4,33.4,33.4,33.4,25.2,25.1,33.3,25.1,25.1,66.6,33.4,25.1,33.4,25.2,41.5,33.4,25.2,25.1,33.3,33.4,33.4,33.5]
+    },
+    "hitches": {
+      "thresholdMs": 50,
+      "count": 6,
+      "kept": 6,
+      "dropped": 0,
+      "items": [
+        { "atMs": 108007, "gapMs": 66.6, "halfSpanPx": 3008.996212121212, "decodeStats": { "sourcesDecoded": 0, "idbHits": 231, "idbSlices": 0, "idbPersists": 0, "maxSourceAcquireMs": 0, "lastSourceAcquireMs": 0, "maxSinglePageMs": 0, "lastSinglePageMs": 0, "workerSourceDecodes": 0, "mainThreadFallbackSourceDecodes": 0, "rangedFetchMisses": 0, "heldSources": 0, "semaphore": { "active": 0, "waiting": 0, "max": 3 }, "workerStatus": "not-yet-created", "workerUnavailableReason": null, "workerRequestFailures": [] }, "cacheStats": { "capacityPages": 2048, "residentPages": 231, "pinnedCoarse": 231, "pinnedView": 0, "freePages": 1817, "evictions": 0, "misses": 0, "coarseReservePages": 512, "coarseReserveMisses": 0 } },
+        { "atMs": 65523, "gapMs": 58.5, "halfSpanPx": 3008.996212121212, "decodeStats": { "sourcesDecoded": 0, "idbHits": 231, "idbSlices": 0, "idbPersists": 0, "maxSourceAcquireMs": 0, "lastSourceAcquireMs": 0, "maxSinglePageMs": 0, "lastSinglePageMs": 0, "workerSourceDecodes": 0, "mainThreadFallbackSourceDecodes": 0, "rangedFetchMisses": 0, "heldSources": 0, "semaphore": { "active": 0, "waiting": 0, "max": 3 }, "workerStatus": "not-yet-created", "workerUnavailableReason": null, "workerRequestFailures": [] }, "cacheStats": { "capacityPages": 2048, "residentPages": 231, "pinnedCoarse": 231, "pinnedView": 0, "freePages": 1817, "evictions": 0, "misses": 0, "coarseReservePages": 512, "coarseReserveMisses": 0 } },
+        { "atMs": 71381, "gapMs": 58.5, "halfSpanPx": 3008.996212121212, "decodeStats": { "sourcesDecoded": 0, "idbHits": 231, "idbSlices": 0, "idbPersists": 0, "maxSourceAcquireMs": 0, "lastSourceAcquireMs": 0, "maxSinglePageMs": 0, "lastSinglePageMs": 0, "workerSourceDecodes": 0, "mainThreadFallbackSourceDecodes": 0, "rangedFetchMisses": 0, "heldSources": 0, "semaphore": { "active": 0, "waiting": 0, "max": 3 }, "workerStatus": "not-yet-created", "workerUnavailableReason": null, "workerRequestFailures": [] }, "cacheStats": { "capacityPages": 2048, "residentPages": 231, "pinnedCoarse": 231, "pinnedView": 0, "freePages": 1817, "evictions": 0, "misses": 0, "coarseReservePages": 512, "coarseReserveMisses": 0 } },
+        { "atMs": 77931, "gapMs": 58.3, "halfSpanPx": 3008.996212121212, "decodeStats": { "sourcesDecoded": 0, "idbHits": 231, "idbSlices": 0, "idbPersists": 0, "maxSourceAcquireMs": 0, "lastSourceAcquireMs": 0, "maxSinglePageMs": 0, "lastSinglePageMs": 0, "workerSourceDecodes": 0, "mainThreadFallbackSourceDecodes": 0, "rangedFetchMisses": 0, "heldSources": 0, "semaphore": { "active": 0, "waiting": 0, "max": 3 }, "workerStatus": "not-yet-created", "workerUnavailableReason": null, "workerRequestFailures": [] }, "cacheStats": { "capacityPages": 2048, "residentPages": 231, "pinnedCoarse": 231, "pinnedView": 0, "freePages": 1817, "evictions": 0, "misses": 0, "coarseReservePages": 512, "coarseReserveMisses": 0 } },
+        { "atMs": 92540, "gapMs": 58.3, "halfSpanPx": 3008.996212121212, "decodeStats": { "sourcesDecoded": 0, "idbHits": 231, "idbSlices": 0, "idbPersists": 0, "maxSourceAcquireMs": 0, "lastSourceAcquireMs": 0, "maxSinglePageMs": 0, "lastSinglePageMs": 0, "workerSourceDecodes": 0, "mainThreadFallbackSourceDecodes": 0, "rangedFetchMisses": 0, "heldSources": 0, "semaphore": { "active": 0, "waiting": 0, "max": 3 }, "workerStatus": "not-yet-created", "workerUnavailableReason": null, "workerRequestFailures": [] }, "cacheStats": { "capacityPages": 2048, "residentPages": 231, "pinnedCoarse": 231, "pinnedView": 0, "freePages": 1817, "evictions": 0, "misses": 0, "coarseReservePages": 512, "coarseReserveMisses": 0 } },
+        { "atMs": 99823, "gapMs": 58.3, "halfSpanPx": 3008.996212121212, "decodeStats": { "sourcesDecoded": 0, "idbHits": 231, "idbSlices": 0, "idbPersists": 0, "maxSourceAcquireMs": 0, "lastSourceAcquireMs": 0, "maxSinglePageMs": 0, "lastSinglePageMs": 0, "workerSourceDecodes": 0, "mainThreadFallbackSourceDecodes": 0, "rangedFetchMisses": 0, "heldSources": 0, "semaphore": { "active": 0, "waiting": 0, "max": 3 }, "workerStatus": "not-yet-created", "workerUnavailableReason": null, "workerRequestFailures": [] }, "cacheStats": { "capacityPages": 2048, "residentPages": 231, "pinnedCoarse": 231, "pinnedView": 0, "freePages": 1817, "evictions": 0, "misses": 0, "coarseReservePages": 512, "coarseReserveMisses": 0 } }
+      ]
+    }
+  },
+  "attribution": {
+    "frameGpuMs": 23.27,
+    "attributedGpuMs": 22.654,
+    "residualGpuMs": 0.616,
+    "coverage": 0.974,
+    "verdict": "good",
+    "note": "2.6% of frame GPU time is unattributed (pass setup, mipmap generation, presentation). The per-zone breakdown below is trustworthy.",
+    "frameGpuBasis": "sum of timestamped render passes per frame (renderer.info.render.timestamp)",
+    "frameGpuCaveat": "NOT the whole GPU frame: mipmap generation, presentation and any work outside a render pass are not counted. Coverage against this measures \"of the pass time we can see, how much did we attribute to a declared zone\" — a real question, but a narrower one than \"where did the frame go\"."
+  },
+  "zones": [
+    { "id": "geometry.worldDraw", "label": "World scene draw", "kind": "gpu", "stage": "geometry", "cadence": "steady", "sparse": false, "isPass": false, "parent": "pass.geometry.world", "ownerEffectId": null, "detail": false, "site": "runGeometryWorldPass", "cpuMs": { "meanMs": 0.306, "maxMs": 1, "amortisedMsPerFrame": 0.306, "totalMs": 715.4, "occurrences": 2335 }, "gpuMs": { "meanMs": 11.434, "maxMs": 15.335, "amortisedMsPerFrame": 11.18, "totalMs": 26104.627, "occurrences": 2283 }, "gpuAbsentByDeclaration": false, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 16.1, "triangles": 262160.2, "unbalanced": 0 },
+    { "id": "light.drawPointLights", "label": "Point light draw", "kind": "gpu", "stage": "lighting", "cadence": "steady", "sparse": false, "isPass": false, "parent": "pass.light.accumulate", "ownerEffectId": null, "detail": false, "site": "pointLights.lightScene", "cpuMs": { "meanMs": 2.071, "maxMs": 7.2, "amortisedMsPerFrame": 2.071, "totalMs": 4835.4, "occurrences": 2335 }, "gpuMs": { "meanMs": 3.76, "maxMs": 7.668, "amortisedMsPerFrame": 3.676, "totalMs": 8583.643, "occurrences": 2283 }, "gpuAbsentByDeclaration": false, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 117, "triangles": 4247, "unbalanced": 0 },
+    { "id": "light.drawColoration", "label": "Coloration draw", "kind": "gpu", "stage": "lighting", "cadence": "steady", "sparse": false, "isPass": false, "parent": "pass.light.accumulate", "ownerEffectId": null, "detail": false, "site": "pointLights.colorationScene", "cpuMs": { "meanMs": 1.347, "maxMs": 3.9, "amortisedMsPerFrame": 1.347, "totalMs": 3146, "occurrences": 2335 }, "gpuMs": { "meanMs": 3.583, "maxMs": 7.078, "amortisedMsPerFrame": 3.503, "totalMs": 8179.22, "occurrences": 2283 }, "gpuAbsentByDeclaration": false, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 117, "triangles": 4247, "unbalanced": 0 },
+    { "id": "geometry.depthDraw", "label": "Depth authority draw", "kind": "gpu", "stage": "geometry", "cadence": "steady", "sparse": false, "isPass": false, "parent": "pass.geometry.world", "ownerEffectId": null, "detail": false, "site": "runSceneDepthPass", "cpuMs": { "meanMs": 5.198, "maxMs": 27.9, "amortisedMsPerFrame": 5.198, "totalMs": 12138.2, "occurrences": 2335 }, "gpuMs": { "meanMs": 1.028, "maxMs": 3.015, "amortisedMsPerFrame": 1.005, "totalMs": 2346.648, "occurrences": 2283 }, "gpuAbsentByDeclaration": false, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 6, "triangles": 65544.1, "unbalanced": 0 },
+    { "id": "geometry.doorDraw", "label": "Door graphics draw", "kind": "gpu", "stage": "geometry", "cadence": "conditional", "sparse": false, "isPass": false, "parent": "pass.geometry.world", "ownerEffectId": "doorGraphics", "detail": false, "site": "renderDoorGraphicsInto", "cpuMs": { "meanMs": 1.003, "maxMs": 2.3, "amortisedMsPerFrame": 1.003, "totalMs": 2341.6, "occurrences": 2335 }, "gpuMs": { "meanMs": 0.078, "maxMs": 1.376, "amortisedMsPerFrame": 0.076, "totalMs": 177.275, "occurrences": 2283 }, "gpuAbsentByDeclaration": false, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 154, "triangles": 308, "unbalanced": 0 },
+    { "id": "residency.coarsePinBudget", "label": "Coarse pin budget refresh", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "refreshCoarsePinBudget", "cpuMs": { "meanMs": 0.077, "maxMs": 0.4, "amortisedMsPerFrame": 0.031, "totalMs": 72.5, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "residency.coverAlphaPrime", "label": "Cover alpha grid priming", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "primeCoverAlphaGrids", "cpuMs": { "meanMs": 0.002, "maxMs": 0.1, "amortisedMsPerFrame": 0.001, "totalMs": 1.8, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "depth.authorityRebuild", "label": "Depth authority rank rebuild", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "depthAuthority.rebuild", "cpuMs": { "meanMs": 0.01, "maxMs": 0.2, "amortisedMsPerFrame": 0.008, "totalMs": 19, "occurrences": 1888 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.8085653104925054, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "depth.proxyRebuild", "label": "Depth-writer proxy rebuild", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "rebuildSceneDepthProxies", "cpuMs": { "meanMs": 0.218, "maxMs": 0.7, "amortisedMsPerFrame": 0.088, "totalMs": 205.6, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "vegetation.rankStamp", "label": "Vegetation render-order stamp", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": "vegetation", "detail": false, "site": "stampVegetationRenderOrders", "cpuMs": { "meanMs": 0.019, "maxMs": 0.2, "amortisedMsPerFrame": 0.008, "totalMs": 17.6, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "vegetation.depthItemsBuild", "label": "Vegetation depth-item build", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": "vegetation", "detail": false, "site": "buildVegetationDepthItems", "cpuMs": { "meanMs": 0.01, "maxMs": 0.2, "amortisedMsPerFrame": 0.004, "totalMs": 9.1, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "residency.staleRelease", "label": "Stale item release/unpin", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "updateResidencyUnguarded", "cpuMs": { "meanMs": 0.008, "maxMs": 0.1, "amortisedMsPerFrame": 0.003, "totalMs": 7.7, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "residency.itemLoad", "label": "Per-item load (phase 1)", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "updateResidencyUnguarded", "cpuMs": { "meanMs": 10.139, "maxMs": 46, "amortisedMsPerFrame": 4.099, "totalMs": 9571.4, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 459.1, "triangles": 338933.3, "unbalanced": 0 },
+    { "id": "residency.itemRefresh", "label": "Per-item placement + mesh refresh (phase 2)", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "updateResidencyUnguarded", "cpuMs": { "meanMs": 0.024, "maxMs": 3.2, "amortisedMsPerFrame": 0.01, "totalMs": 22.3, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "residency.pass", "label": "Residency update", "kind": "cpu", "stage": "residency", "cadence": "event", "sparse": true, "isPass": false, "parent": null, "ownerEffectId": null, "detail": false, "site": "scheduleResidencyUpdate", "cpuMs": { "meanMs": 10.524, "maxMs": 46.9, "amortisedMsPerFrame": 4.255, "totalMs": 9935.1, "occurrences": 944 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 0.4042826552462527, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 459.1, "triangles": 338933.3, "unbalanced": 0 },
+    { "id": "light.pointLightUpdate", "label": "Point light pool update", "kind": "cpu", "stage": "lighting", "cadence": "steady", "sparse": false, "isPass": false, "parent": "pass.light.accumulate", "ownerEffectId": null, "detail": false, "site": "pointLights.update", "cpuMs": { "meanMs": 2.428, "maxMs": 29.1, "amortisedMsPerFrame": 2.428, "totalMs": 5669.2, "occurrences": 2335 }, "gpuMs": null, "gpuAbsentByDeclaration": true, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 0, "triangles": 0, "unbalanced": 0 },
+    { "id": "pass.geometry.world", "label": "geometry.world", "kind": "gpu", "stage": null, "cadence": "steady", "sparse": false, "isPass": true, "parent": null, "ownerEffectId": null, "detail": false, "site": null, "cpuMs": { "meanMs": 6.51, "maxMs": 29.3, "amortisedMsPerFrame": 6.51, "totalMs": 15201.9, "occurrences": 2335 }, "gpuMs": null, "gpuAbsentByDeclaration": false, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 176.1, "triangles": 328012.3, "unbalanced": 0, "childCount": 3, "childGpuMs": 12.261, "ownGpuMs": null, "totalGpuMs": 12.261, "gpuIsExclusive": true, "breakdownNote": null },
+    { "id": "pass.light.accumulate", "label": "light.accumulate", "kind": "gpu", "stage": null, "cadence": "steady", "sparse": false, "isPass": true, "parent": null, "ownerEffectId": null, "detail": false, "site": null, "cpuMs": { "meanMs": 7.016, "maxMs": 39.7, "amortisedMsPerFrame": 7.016, "totalMs": 16383.1, "occurrences": 2335 }, "gpuMs": null, "gpuAbsentByDeclaration": false, "occurrenceRate": 1, "belowClockResolution": false, "clockNoiseFloorMs": 0.001, "drawCalls": 268, "triangles": 10904, "unbalanced": 0, "childCount": 21, "childGpuMs": 8.851, "ownGpuMs": null, "totalGpuMs": 8.851, "gpuIsExclusive": true, "breakdownNote": null }
+  ],
+  "vram": {
+    "renderTargets": { "count": 25, "namedMb": 390.54, "unsizedCount": 0, "unsizedNote": null },
+    "threeInfoMemory": null,
+    "vtEstimateMb": 825,
+    "estimatedTotalMb": 1215.54,
+    "ceilingMb": 2500,
+    "headroomFraction": 0.514,
+    "verdict": "ok"
+  },
+  "instrument": {
+    "profilerAnomalies": { "unbalancedBrackets": 0, "passSlotOverflow": 0, "note": null },
+    "gpuTimer": {
+      "method": "idle",
+      "capable": true,
+      "reason": null,
+      "backend": "webgpu",
+      "foldedSamples": 61641,
+      "pendingUids": 0,
+      "unattributedPasses": 2970,
+      "malformedDurations": 0,
+      "resolveErrors": 0,
+      "poolOverflowed": true,
+      "maxPendingSize": 2019,
+      "maxResolveSkipStreak": 3,
+      "note": "The timestamp query pool overflowed: three stops handing out queries past 1024 outstanding passes and rendering continues silently. Zone GPU numbers are MISSING for part of this window, not zero."
+    },
+    "note": "These describe the INSTRUMENT, not the renderer. Non-zero unbalancedBrackets or poolOverflowed means some numbers above are missing or suspect — fix the instrument before drawing conclusions."
+  },
+  "findings": [
+    { "severity": "high", "id": "sweep-produced-nothing", "text": "The effect sweep was requested and ran, but produced no per-effect cost for ANY effect. That run was wasted — every effects[].sweepMarginalGpuMs is null, so the effects that can only be measured by sweep (vegetation, water, grade) are still unmeasured. Check the sweep harness wiring before re-running.", "evidence": { "sweepRequested": true, "effectsMeasured": 0 } },
+    { "severity": "high", "id": "timestamp-pool-overflow", "text": "The GPU timestamp query pool overflowed during this window — three stops allocating queries once 1024 passes are outstanding and rendering continues silently. Zone GPU numbers after that point are missing, not zero, and coverage below is understated.", "evidence": { "poolOverflow": true, "maxPendingSize": 2019, "maxResolveSkipStreak": 3 } },
+    { "severity": "high", "id": "dominant-zone", "text": "geometry.worldDraw (World scene draw) is the single largest attributed zone at 11.18ms, 48% of frame GPU from 16.1 draw calls.", "evidence": { "zone": "geometry.worldDraw", "gpuMs": 11.18, "pctOfFrameGpu": 48, "drawCalls": 16.1 } },
+    { "severity": "high", "id": "sweep-below-resolution", "text": "The effect sweep cannot resolve anything cheaper than about 2.75ms on this run — that floor is measured from its own most-negative reading, and a negative GPU cost is impossible. 15 of 15 effects fell inside it and had their sweep number REJECTED (see effects[].sweepUnresolvable). Trust zoneGpuMs over sweepMarginalGpuMs wherever both exist.", "evidence": { "noiseFloorMs": 2.75, "rejected": 15, "effects": 15 } },
+    { "severity": "medium", "id": "sparse-spike:residency.itemLoad", "text": "residency.itemLoad ran 944 times and peaked at 46ms — over the 8.33ms frame budget on its own. Amortised it is negligible (4.099ms/frame); as a one-frame stall it is a visible hitch.", "evidence": { "zone": "residency.itemLoad", "peakMs": 46, "occurrences": 944 } },
+    { "severity": "medium", "id": "sparse-spike:residency.pass", "text": "residency.pass ran 944 times and peaked at 46.9ms — over the 8.33ms frame budget on its own. Amortised it is negligible (4.255ms/frame); as a one-frame stall it is a visible hitch.", "evidence": { "zone": "residency.pass", "peakMs": 46.9, "occurrences": 944 } },
+    { "severity": "medium", "id": "hitches", "text": "6 hitches over 50ms during the window. Cross-reference the worst against the sparse zones above before blaming a steady one.", "evidence": { "count": 6, "thresholdMs": 50 } }
+  ],
+  "note": "TRIMMED BY CLAUDE FOR ARCHIVAL: the full zones[]/effects[]/sweepRaw arrays from the live report were abbreviated to the zones directly discussed in Performance-Audit-2026-08.md's round-3 write-up, to keep this file a reasonable size. The generatedAt/method/window/frame/attribution/vram/instrument/findings blocks are verbatim from the original report."
+}

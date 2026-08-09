@@ -245,6 +245,53 @@ export const ZONES = Object.freeze(
       false,
       'runSceneDepthPass'
     ),
+    // THREE NESTED CPU SUB-ZONES (2026-08-09) — a live report measured
+    // geometry.depthDraw's own CPU cost at 13ms/frame for just 9 draw calls,
+    // 26x geometry.worldDraw's CPU cost for TWICE the draws (18). Three
+    // isolated shader-lab benches (real 12000px textures, real
+    // buildSceneDepthWriterMaterial, a write-then-sample-elsewhere frame
+    // shape) all measured this same call pattern under 0.11ms/call — nowhere
+    // near reproducing it. That rules out "this call shape is inherently
+    // slow" and points at something specific to the LIVE renderer's state
+    // that a fresh isolated bench cannot recreate. These three brackets are
+    // the SAME move that solved residency.pass's own 12ms mystery
+    // (Performance-Audit-2026-08.md §12): the parent zone's total was already
+    // known and unhelpful on its own; splitting it into every sub-phase turns
+    // one unexplained number into a pointer at the exact line, the next time
+    // a live report is captured with these built in.
+    z(
+      'geometry.depthSetup',
+      'Depth pass target switch + clear',
+      'geometry',
+      'geometry.world',
+      null,
+      'cpu',
+      'steady',
+      true,
+      'runSceneDepthPass'
+    ),
+    z(
+      'geometry.depthRenderCall',
+      'Depth pass renderer.render() call',
+      'geometry',
+      'geometry.world',
+      null,
+      'cpu',
+      'steady',
+      true,
+      'runSceneDepthPass'
+    ),
+    z(
+      'geometry.depthRestore',
+      'Depth pass target restore',
+      'geometry',
+      'geometry.world',
+      null,
+      'cpu',
+      'steady',
+      true,
+      'runSceneDepthPass'
+    ),
 
     // ---- light.accumulate: ten CPU syncs and seven draws in ONE plan pass -----
     // This is the whole reason pass-level timing alone is not enough.

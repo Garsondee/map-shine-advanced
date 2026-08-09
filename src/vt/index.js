@@ -27,6 +27,7 @@ export {
   readVtPanViewerRenderInfo,
   readVtPanViewerDrawCallsOnly,
   readVtPanViewerTriangleCountOnly,
+  getVtPanViewerPipelineStats,
   readVtPanViewerFrameSamples,
   setVtPanViewerWindOverlay,
   setVtPanViewerWindOverlayResolution,

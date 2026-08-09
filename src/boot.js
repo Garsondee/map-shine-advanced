@@ -90,6 +90,7 @@ import {
   readVtPanViewerRenderInfo,
   readVtPanViewerDrawCallsOnly,
   readVtPanViewerTriangleCountOnly,
+  getVtPanViewerPipelineStats,
   readVtPanViewerFrameSamples,
   setVtPanViewerWindOverlay,
   setVtPanViewerWindOverlayResolution,
@@ -2665,6 +2666,12 @@ function install() {
         // (keyhole-device-loss-large-map), not a guess.
         ceilingMb: 2500,
       }),
+    // PIPELINE HEALTH (2026-08-09) — see getVtPanViewerPipelineStats's own
+    // header for the mystery this exists to narrow down. Optional on the
+    // ProfileHarness typedef (perf-session.js checks `typeof === 'function'`
+    // before calling either sample), so the fake harness in that file's own
+    // tests needs no update to stay green.
+    readPipelineStats: () => getVtPanViewerPipelineStats(),
     // The sweep, consumed as an INDEPENDENT cross-check of zone attribution.
     // Two methods measuring the same effect and disagreeing is information —
     // perf-report.js classifies the disagreement rather than averaging it away.

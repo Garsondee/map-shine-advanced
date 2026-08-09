@@ -153,6 +153,10 @@ export async function runProfileSession(harness, opts = {}) {
 
   let gpuTimer = null;
   let armed = false;
+  // Declared here, not inside the try block below: a `const` scoped to that
+  // block would not survive past its own closing brace, and this value is
+  // needed again after `finally` runs, when the report gets assembled.
+  let pipelineStatsStart = null;
   try {
     say('arming', 'starting the GPU zone timer');
     gpuTimer = harness.setGpuZoneTimer(true);
@@ -163,6 +167,17 @@ export async function runProfileSession(harness, opts = {}) {
 
     say('settling', `${settleFrames} frames discarded (shader compile, first residency pass, first bake)`);
     await harness.waitFrames(settleFrames);
+
+    // PIPELINE HEALTH, START OF THE REAL WINDOW (2026-08-09) — sampled here,
+    // not before settling, on purpose: settle frames exist BECAUSE first-use
+    // shader compiles are expected and normal (this function's own settle
+    // rationale, one line up). Sampling before settling would count that
+    // expected one-time cost as part of the "did anything change during
+    // STEADY panning" delta this exists to answer. Optional: a harness that
+    // does not implement it (the fake one in this file's own tests) yields
+    // `null` here, and `buildPerfReport` treats a null pair as "not measured
+    // this run", never as "zero pipelines".
+    pipelineStatsStart = typeof harness.readPipelineStats === 'function' ? harness.readPipelineStats() : null;
 
     if (measureUntil) {
       // ROUTE-DRIVEN: measure for exactly as long as the workload runs, not for
@@ -193,6 +208,12 @@ export async function runProfileSession(harness, opts = {}) {
   const frameStats = harness.readFrameStats();
   const context = harness.getContext();
   const gpuStatus = harness.getGpuZoneStatus();
+  // PIPELINE HEALTH, END OF THE REAL WINDOW — paired with pipelineStatsStart
+  // above. Read here, before the sweep (which deliberately toggles effects
+  // on/off and would build/dispose materials of its own, poisoning "did
+  // anything change during ordinary panning" with the sweep's OWN expected
+  // churn).
+  const pipelineStatsEnd = typeof harness.readPipelineStats === 'function' ? harness.readPipelineStats() : null;
 
   let sweep = null;
   if (includeSweep && typeof harness.runSweep === 'function') {
@@ -238,6 +259,7 @@ export async function runProfileSession(harness, opts = {}) {
       gpuMs: gpuStatus?.frameGpuMs ?? frameStats.gpuMs ?? null,
     },
     sweep,
+    pipelineStats: pipelineStatsStart && pipelineStatsEnd ? { start: pipelineStatsStart, end: pipelineStatsEnd } : null,
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,
     vram: harness.readVram?.() ?? null,

@@ -178,7 +178,17 @@ export function run(t) {
     ok('COVERAGE_MESH_CELLS is a positive integer', Number.isInteger(COVERAGE_MESH_CELLS) && COVERAGE_MESH_CELLS > 1);
     const g = grid(512, 512, (x, y) => (x < 64 && y < 64 ? 255 : 0));
     const mask = buildCoverageCellMask({ grid: g, imageW: 12000, imageH: 12000, cells: COVERAGE_MESH_CELLS });
-    ok('a 12000² image with corner-only art drops most cells at the shipped size', mask.occupiedCount < 40);
+    // A FRACTION of the total, not a fixed count — the absolute cell count this
+    // corner occupies scales with COVERAGE_MESH_CELLS itself (a finer grid has
+    // more total cells AND a finer corner block), so a hardcoded bound breaks
+    // every time that constant is retuned even though the real property (most
+    // cells are dropped) still holds. 12.5%-per-axis corner art plus one ring
+    // of dilation is comfortably under a tenth of the grid at any cell count
+    // this module would plausibly ship.
+    ok(
+      'a 12000² image with corner-only art drops most cells at the shipped size',
+      mask.occupiedCount < mask.cells * mask.cells * 0.1
+    );
     ok(
       '...and buildCoverageIndices agrees with the count it reports',
       buildCoverageIndices(mask).length === mask.occupiedCount * 6

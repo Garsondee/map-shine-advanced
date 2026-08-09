@@ -736,6 +736,7 @@ export function deriveFindings({
   budgetMs,
   profilerAnomalies,
   gpuTimer,
+  pipelineStats = null,
   sweepRequested = false,
   sweepMeasuredCount = 0,
   sweepNoiseFloorMs = null,
@@ -761,6 +762,32 @@ export function deriveFindings({
       text: `The profiler ran out of pass-zone slots (${profilerAnomalies.passSlotOverflow} overflow(s)). Some passes were not measured at all, so attribution coverage below is understated.`,
       evidence: { passSlotOverflow: profilerAnomalies.passSlotOverflow },
     });
+  }
+  // PIPELINE GROWTH DURING A STEADY WINDOW (2026-08-09) — a scene that is only
+  // panning, not loading new content, should compile a HANDFUL of shader
+  // pipelines once and reuse them (buildSceneDepthWriterMaterial's own header:
+  // "a handful of variants, not one per item"). If `programs` is higher at the
+  // end of the window than the start, this renderer is still compiling
+  // pipelines it should already have, every pass — a real, live-measured cost
+  // this project has hit before (that same header: "3.4ms mean/43ms max CPU"
+  // from exactly this cause), not a one-time historical footnote. Any growth
+  // is worth surfacing; only a double-digit delta is escalated to `high`,
+  // since a rebuild or two during the settle-adjacent frames is plausible
+  // and not yet proof of a live leak.
+  if (Number.isFinite(pipelineStats?.start?.programs) && Number.isFinite(pipelineStats?.end?.programs)) {
+    const delta = pipelineStats.end.programs - pipelineStats.start.programs;
+    if (delta > 0) {
+      out.push({
+        severity: delta >= 10 ? 'high' : 'medium',
+        id: 'pipeline-programs-grew',
+        text: `renderer.info.memory.programs grew by ${delta} (${pipelineStats.start.programs} → ${pipelineStats.end.programs}) during a measurement window that should only be panning, not loading new content. A steady scene should compile a handful of shader pipelines once and reuse them — growth here means something is still forcing a fresh pipeline compile, a real CPU cost this project has measured before (buildSceneDepthWriterMaterial's own header: "3.4ms mean/43ms max CPU" from exactly this cause).`,
+        evidence: {
+          programsStart: pipelineStats.start.programs,
+          programsEnd: pipelineStats.end.programs,
+          delta,
+        },
+      });
+    }
   }
   // A SWEEP THAT RAN AND PRODUCED NOTHING. The sweep is slow and visibly
   // flickers the scene, so it is never run by accident — if it yielded no
@@ -999,6 +1026,7 @@ export function buildPerfReport({
   verbosity = 'default',
   profilerAnomalies = null,
   gpuTimer = null,
+  pipelineStats = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
   const megapixels =
@@ -1085,6 +1113,7 @@ export function buildPerfReport({
     budgetMs,
     profilerAnomalies,
     gpuTimer,
+    pipelineStats,
     sweepRequested: sweep !== null,
     sweepMeasuredCount,
     sweepNoiseFloorMs,
@@ -1158,9 +1187,18 @@ export function buildPerfReport({
     instrument: {
       profilerAnomalies,
       gpuTimer,
+      // PIPELINE HEALTH (2026-08-09) — renderer.info.memory, sampled once at
+      // the start of the real measurement window (after settling) and once at
+      // the end. `null` means the harness in use does not implement
+      // readPipelineStats, not "zero pipelines exist" — see
+      // getVtPanViewerPipelineStats's own header for why `programs` is the
+      // field worth watching first.
+      pipelineStats,
       note:
         'These describe the INSTRUMENT, not the renderer. Non-zero unbalancedBrackets or poolOverflowed ' +
-        'means some numbers above are missing or suspect — fix the instrument before drawing conclusions.',
+        'means some numbers above are missing or suspect — fix the instrument before drawing conclusions. ' +
+        'pipelineStats.start vs .end: any growth in `programs` during a pan-only window means a pipeline is ' +
+        'being recompiled that should already be cached — see findings[] for the threshold this crosses.',
     },
     findings,
     interpretation: buildInterpretation({

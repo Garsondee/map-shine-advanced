@@ -4439,6 +4439,13 @@ export async function startVtPanViewer({
       renderer.setMRT(previousMRT);
     }
     function runSceneDepthPass() {
+      // THREE NESTED SUB-ZONES (2026-08-09) — see Z.geomDepthSetup's own
+      // comment for why: geometry.depthDraw's own CPU cost measured 13ms/frame
+      // live for 9 draws, and no isolated bench of this same call shape came
+      // anywhere close. Splitting setup/render/restore is how the SAME class
+      // of mystery got solved for residency.pass — narrow to the exact line
+      // with a live report instead of guessing further blind.
+      profiler?.begin(Z.geomDepthSetup);
       // clearDepth scoped, never left set — the rest of this renderer runs
       // with depthTest:false everywhere (design doc §2: this pass is the ONE
       // place a real Z exists), so a leaked value is harmless to every other
@@ -4450,9 +4457,14 @@ export async function startVtPanViewer({
       renderer.setClearColor(0x000000, 0);
       renderer.setClearDepth(1); // LessDepth wins under this pass's own camera — see vt/scene-depth.js's header
       renderer.clear(true, true, true);
+      profiler?.end(Z.geomDepthSetup);
+      profiler?.begin(Z.geomDepthRenderCall);
       renderer.render(depthScene, depthCamera);
+      profiler?.end(Z.geomDepthRenderCall);
+      profiler?.begin(Z.geomDepthRestore);
       renderer.setRenderTarget(null);
       renderer.setClearDepth(prevClearDepth);
+      profiler?.end(Z.geomDepthRestore);
     }
     function runPresentCompositePass() {
       // THE SUN-SHADOW DEBUG VIEW (author, 2026-07-26) — when a view is picked
@@ -9000,6 +9012,13 @@ export async function startVtPanViewer({
       geomWorld: profiler?.indexOf('geometry.worldDraw') ?? -1,
       geomDoors: profiler?.indexOf('geometry.doorDraw') ?? -1,
       geomDepth: profiler?.indexOf('geometry.depthDraw') ?? -1,
+      // ADDED 2026-08-09 — see perf-zones.js's own declaration comment: the
+      // 13ms/frame CPU mystery three isolated shader-lab benches could not
+      // reproduce. These three narrow WHERE, inside runSceneDepthPass, the
+      // next live report should look.
+      geomDepthSetup: profiler?.indexOf('geometry.depthSetup') ?? -1,
+      geomDepthRenderCall: profiler?.indexOf('geometry.depthRenderCall') ?? -1,
+      geomDepthRestore: profiler?.indexOf('geometry.depthRestore') ?? -1,
       lightAmbient: profiler?.indexOf('light.ambient') ?? -1,
       lightSunBake: profiler?.indexOf('light.sunShadowBake') ?? -1,
       lightWaterBake: profiler?.indexOf('light.waterBodyBake') ?? -1,
@@ -11798,6 +11817,42 @@ export async function startVtPanViewer({
         return renderer.info?.render?.triangles ?? 0;
       },
       /**
+       * Perf profile: `renderer.info.memory`'s own LIVE resource counts —
+       * PIPELINE HEALTH, sampled once at the start and once at the end of a
+       * measurement window (`perf-session.js`), never per-frame (unlike the two
+       * above, this is not in any hot path, so a small allocation here costs
+       * nothing the instrument itself would need to worry about measuring).
+       *
+       * Built 2026-08-09 to chase a mystery three isolated shader-lab benches
+       * could not reproduce: `geometry.depthDraw`'s own CPU cost measured
+       * 13ms/frame live for 9 draws, calling the SAME `renderer.render()` shape
+       * that measured under 0.11ms/call in isolation with real textures and a
+       * real write-then-sample-elsewhere frame pattern. `programs` is the one
+       * number that directly tests the leading remaining hypothesis: this
+       * renderer's own docs (`buildSceneDepthWriterMaterial`'s header) already
+       * name unwanted pipeline diversity as a REAL, previously-measured cost
+       * class ("a fresh WebGPU pipeline compile on nearly every residency pass
+       * ... 3.4ms mean/43ms max CPU") — if `programs` climbs during a STEADY
+       * pan (no new items loading, no residency-triggered rebuild), that is
+       * this renderer still compiling pipelines it should be reusing, live,
+       * not a one-time historical finding.
+       *
+       * `geometries`/`textures`/`uniformBuffers` ride along for free from the
+       * same `renderer.info.memory` object — plausible in the same family of
+       * explanation (a growing live resource count during steady-state motion
+       * is itself a leak signature, independent of which one turns out to
+       * matter here).
+       */
+      readPipelineStats() {
+        const m = renderer.info?.memory;
+        return {
+          programs: m?.programs ?? null,
+          geometries: m?.geometries ?? null,
+          textures: m?.textures ?? null,
+          uniformBuffers: m?.uniformBuffers ?? null,
+        };
+      },
+      /**
        * Perf profile: the RAW frame-gap series and hitch log for the current
        * rolling window.
        *
@@ -13387,6 +13442,16 @@ export function readVtPanViewerDrawCallsOnly() {
 export function readVtPanViewerTriangleCountOnly() {
   if (!_active) return 0;
   return _active.readTriangleCountOnly();
+}
+
+/** `renderer.info.memory`'s live pipeline/resource counts — see the instance
+ * method's own header for why this exists and what a growing `programs`
+ * count during a steady pan would mean. `null` fields (not 0) when no viewer
+ * is running, so a report can tell "nothing to read" apart from "read zero
+ * live pipelines", which would be its own anomaly. */
+export function getVtPanViewerPipelineStats() {
+  if (!_active) return { programs: null, geometries: null, textures: null, uniformBuffers: null };
+  return _active.readPipelineStats();
 }
 
 /** The RAW frame-gap series + hitch log, for the profile report's own binning. */

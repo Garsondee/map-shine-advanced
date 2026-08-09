@@ -79,13 +79,28 @@
 /**
  * Cells per axis for an ordinary (non-vegetation) tile's coverage mesh.
  *
- * 32 is a deliberate middle: at 12000px that is one cell per 375 source px, so
- * a roof occupying 9.9% of its canvas lands in roughly 10-15% of cells even
- * after dilation, while the index buffer stays at most 32×32×6 = 6144 indices
- * (2048 triangles) per tile. Against the ~262k triangles a live frame already
- * draws, the added geometry is noise; the fill it removes is not.
+ * Measured against the real mansion assets (2026-08-09, after the first live
+ * report confirmed the technique): going finer trades a FEW THOUSAND more
+ * triangles — trivial next to the ~137k a frame already draws — for a large
+ * further fill cut on exactly the layers that need it most:
+ *
+ *   layer                    32 cells    64 cells    128 cells
+ *   Ground_Roof                11.5%        6.9%         5.2%
+ *   Ground_Overhead             43.8%       26.0%        11.5%
+ *   First-Floor_Overhead        31.9%       18.2%         8.5%
+ *
+ * 64 is the chosen point: most of the AVAILABLE gain past 32, well short of
+ * where triangle count starts growing faster than the fill it buys (128
+ * cells roughly triples the triangles for a smaller further cut). At 12000px
+ * that is one cell per 187.5 source px — still coarser than the 512-wide
+ * coarse alpha grid's own ~23px/texel, so this is not yet limited by the
+ * grid's own resolution (`buildCoverageCellMask`'s "finer than the grid"
+ * guard exists for exactly the point past which refining further stops
+ * helping). Index buffer stays at most 64×64×6 = 24576 indices (8192
+ * triangles) per tile — vegetation overlays are unaffected, they tessellate
+ * at their OWN wind-sway `segments` count, never this constant.
  */
-export const COVERAGE_MESH_CELLS = 32;
+export const COVERAGE_MESH_CELLS = 64;
 
 /** Alpha (0-255) at or above which a texel counts as "there is art here". */
 export const COVERAGE_ALPHA_THRESHOLD = 4;

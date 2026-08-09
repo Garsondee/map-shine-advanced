@@ -993,6 +993,66 @@ export function run(t) {
     ok('its evidence carries the peak pending size', enriched.evidence.maxPendingSize === 1847);
     ok('...and the peak resolve-skip streak', enriched.evidence.maxResolveSkipStreak === 22);
 
+    // PIPELINE GROWTH (2026-08-09) — a steady pan-only window recompiling
+    // shader pipelines it should already have cached.
+    const pipelineGrew = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineStats: { start: { programs: 12 }, end: { programs: 19 } },
+    });
+    const grewFinding = pipelineGrew.find((f) => f.id === 'pipeline-programs-grew');
+    ok('growth during the window is surfaced', grewFinding !== undefined);
+    ok('a small delta (< 10) stays medium, not high', grewFinding.severity === 'medium');
+    ok('evidence carries both raw counts and the delta', grewFinding.evidence.delta === 7);
+
+    const pipelineGrewALot = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineStats: { start: { programs: 12 }, end: { programs: 30 } },
+    });
+    ok(
+      'a double-digit delta escalates to high',
+      pipelineGrewALot.find((f) => f.id === 'pipeline-programs-grew').severity === 'high'
+    );
+
+    // Flat or shrinking must NOT trip it — programs only ever accumulate while
+    // live (three's own info.memory.programs), so a drop would mean a
+    // dispose/rebuild cycle, a different (and not yet a finding) shape.
+    const pipelineFlat = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineStats: { start: { programs: 12 }, end: { programs: 12 } },
+    });
+    ok('no growth raises no finding', !pipelineFlat.some((f) => f.id === 'pipeline-programs-grew'));
+
+    // A harness that never implemented readPipelineStats — the common case
+    // today — must not crash or fabricate a finding from missing data.
+    const pipelineAbsent = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineStats: null,
+    });
+    ok(
+      'no pipelineStats at all raises no finding (absence, not a zero)',
+      !pipelineAbsent.some((f) => f.id === 'pipeline-programs-grew')
+    );
+
     // A declared cost the measurement contradicts.
     const overEffects = attributeZonesToEffects({
       rows: buildZoneRows({ zones: ZONES, frames: 100, zoneStats: [zs('bloom.bright', { gpu: acc(1000, 100, 12) })] }),

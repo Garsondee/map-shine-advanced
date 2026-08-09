@@ -103,6 +103,29 @@ export async function run(t) {
     ok('zones came through', report.zones.length === 2);
     ok('instrument health is reported separately from the measurements', report.instrument !== undefined);
     ok('...and says so in as many words', report.instrument.note.includes('not the renderer'));
+    ok(
+      'a harness with no readPipelineStats produces no pipelineStats block (absence, not a fabricated zero)',
+      report.instrument.pipelineStats === null
+    );
+  }
+
+  // ---- PIPELINE HEALTH: sampled once after settling, once at the end --------
+  {
+    let calls = 0;
+    const readings = [{ programs: 12 }, { programs: 19 }];
+    const h = fakeHarness({
+      readPipelineStats: () => readings[Math.min(calls++, readings.length - 1)],
+    });
+    const report = await runProfileSession(h, { settleFrames: 30, measureFrames: 120 });
+    ok('readPipelineStats was called exactly twice — start and end, never per-frame', calls === 2);
+    ok(
+      'the report carries both readings, in order',
+      report.instrument.pipelineStats.start.programs === 12 && report.instrument.pipelineStats.end.programs === 19
+    );
+    ok(
+      'growth between them surfaces as a finding',
+      report.findings.some((f) => f.id === 'pipeline-programs-grew')
+    );
   }
 
   // ---- REFUSAL: never profile while the throttling probe is armed -----------

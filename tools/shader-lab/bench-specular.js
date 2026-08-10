@@ -232,6 +232,12 @@ export function createSpecularBench({ THREE, renderer, log }) {
      * because the sweep that found the dead-below-0.75 bug is exactly the
      * sweep that has to be re-run to prove a knee change fixed it. */
     incidentKnee: 0.15,
+    kneeSoftness: 0.5,
+    incidentGain: 0.55,
+    flickerAmount: 0.5,
+    flickerSpeed: 1.6,
+    flickerScalePx: 320,
+    flickerRoughness: 0.5,
     outdoors: 0,
     strength: 1,
     shimmerGain: 5.5,
@@ -493,6 +499,12 @@ export function createSpecularBench({ THREE, renderer, log }) {
     surface.setShimmerGain(state.shimmerGain);
     surface.setDarknessFloor(state.darknessFloor, state.darknessFloor, state.darknessFloor);
     surface.setIncidentKnee(state.incidentKnee);
+    surface.setKneeSoftness(state.kneeSoftness);
+    surface.setIncidentGain(state.incidentGain);
+    surface.setFlickerAmount(state.flickerAmount);
+    surface.setFlickerSpeed(state.flickerSpeed);
+    surface.setFlickerScalePx(state.flickerScalePx);
+    surface.setFlickerRoughness(state.flickerRoughness);
     // Constant across every preset — the background's own rank does not
     // change just because an occluder gets drawn somewhere else, exactly
     // like a real item's rank in production. `renderDepthPass` (called from

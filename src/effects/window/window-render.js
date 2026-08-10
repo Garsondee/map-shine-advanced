@@ -51,7 +51,7 @@ import {
   WINDOW_PRESENCE_EDGE0,
   WINDOW_PRESENCE_EDGE1,
   WINDOW_ALPHA_EPSILON,
-  WINDOW_SHOULDER_K,
+  WINDOW_DEFAULT_AMBIENT_CEILING,
 } from './window-cookie.js';
 import { WINDOW_DEBUG_CHANNELS, WINDOW_DEBUG_BOOST } from './window.js';
 import { buildDebugChannelColor } from '../debug-channel-select.js';
@@ -252,6 +252,37 @@ export function buildWindowSurfaceMaterial({
    * JS-time-compiling the gate out entirely was doing that job instead. See
    * "THE FLOOR GATE" below. */
   const uExpectedDepth = uniform(float(0));
+  /**
+   * THE OUTSIDE-AMBIENT CEILING (2026-08-09) — the highlight shoulder's own
+   * asymptote (see `shoulderScale` below), now driven by how bright it
+   * genuinely is outside THIS frame rather than the fixed
+   * `WINDOW_SHOULDER_K`-derived constant alone. Author: *"set the maximum
+   * brightness of the window light so that it conforms to the maximum
+   * outside ambient lighting and can't go above that."*
+   *
+   * Pushed by `setAmbientCeiling`, resolved once in JS by
+   * `window-surface-subsystem.js#sync` from `vt-pan-viewer.js`'s own
+   * `lastAmbientColors.background` (raised by any active global light) — the
+   * SAME value pushed into `buf:scene.illum`'s own floor
+   * (`envLight.setAmbient`), so "can this window ever look brighter than
+   * outdoors" and "what does outdoors actually look like right now" read the
+   * identical number, on the SAME peak-channel convention `sampleCookieAt`'s
+   * own `value` already uses (`max(r,g,b)`) rather than a per-channel colour
+   * cap — this bounds MAGNITUDE, it does not recolour the cookie.
+   *
+   * Defaults to `WINDOW_DEFAULT_AMBIENT_CEILING` — algebraically identical to
+   * the OLD fixed asymptote (`1/WINDOW_SHOULDER_K`) — so an unwired caller (a
+   * Node test, a lab bench with no ambient signal) renders exactly as before
+   * this change. `setAmbientCeiling` floors any non-finite/non-positive input
+   * to that same default: this is a BOUND, not a toggle, so "no signal yet"
+   * must still mean "capped at the old default," never "uncapped."
+   *
+   * ⚠️ No floor beyond that default is intentional — at genuine night-time
+   * darkness the ceiling is meant to approach zero, matching the author's
+   * own design intent recorded in `docs/planning/Windows.md`: "a cloud
+   * travels across the sky and the window light inside dims and dies."
+   */
+  const uAmbientCeiling = uniform(float(WINDOW_DEFAULT_AMBIENT_CEILING));
 
   // ── THE MASK UV — the quad's own `uv()`, remapped by the crop ────────────
   // Same reasoning as specular-render.js's own note: `uv()` cannot exceed
@@ -535,7 +566,13 @@ export function buildWindowSurfaceMaterial({
   // saturated cookie exactly where it is brightest).
   const rawPeak = max(max(rawLight.r, rawLight.g), rawLight.b).toVar('winRawPeak');
   const rawPeakSafe = max(rawPeak, float(1e-5));
-  const shapedPeak = rawPeakSafe.div(float(1).add(rawPeakSafe.mul(float(WINDOW_SHOULDER_K))));
+  // `softShoulder(x, k) = x / (1 + x·k)` asymptotes to `1/k` as `x → ∞` — so
+  // deriving `k` from `uAmbientCeiling` (`k = 1/ceiling`) makes the SAME
+  // curve shape from before (`window-cookie.js#softShoulder`, unchanged)
+  // asymptote at the live outside-ambient ceiling instead of a fixed
+  // constant. See `uAmbientCeiling`'s own doc for what feeds it.
+  const shoulderK = float(1).div(max(uAmbientCeiling, float(1e-4)));
+  const shapedPeak = rawPeakSafe.div(float(1).add(rawPeakSafe.mul(shoulderK)));
   const shoulderScale = shapedPeak.div(rawPeakSafe);
   const shoulderedLight = rawLight.mul(shoulderScale).toVar('winShouldered');
 
@@ -657,6 +694,17 @@ export function buildWindowSurfaceMaterial({
      * see `uExpectedDepth`'s own declaration above. @param {number} depth */
     setExpectedDepth(depth) {
       uExpectedDepth.value = Number.isFinite(depth) ? depth : 0;
+    },
+    /**
+     * THE OUTSIDE-AMBIENT CEILING — see `uAmbientCeiling`'s own doc. Any
+     * non-finite or non-positive input (no signal resolved yet) falls back
+     * to `WINDOW_DEFAULT_AMBIENT_CEILING`, never to an unbounded shoulder —
+     * this is a BOUND, not a feature toggle, so "I don't know the outside
+     * ambient this frame" must still mean "capped at the old default," not
+     * "uncapped." @param {number} v
+     */
+    setAmbientCeiling(v) {
+      uAmbientCeiling.value = Number.isFinite(v) && v > 0 ? v : WINDOW_DEFAULT_AMBIENT_CEILING;
     },
     setStrength(v2) {
       uStrength.value = Math.max(0, v2);

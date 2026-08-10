@@ -522,6 +522,84 @@ export const SPECULAR_INCIDENT_STEEPNESS = 7.15;
 export const SPECULAR_INCIDENT_KNEE = 0.15;
 
 /**
+ * ============================================================================
+ * THE CANDLE-LIGHT RESPONSE GROUP (2026-08-09) — author: *"far too much…
+ * give me lots of RoH controls so that I can tune the curve"*
+ * ============================================================================
+ *
+ * The knee above fixed "candle-lit metal is algebraically dead" and immediately
+ * produced the opposite complaint. That is not a mis-tuned number so much as a
+ * missing DIMENSION: with only a knee position and a falloff exponent, the
+ * curve's TOP is a hard `min(t,1)` clamp, so every lamp bright enough to clear
+ * the knee lands on the identical, maximal, perfectly flat response. These
+ * three constants give the top of the curve the same tunability the bottom
+ * already had.
+ *
+ * ⚠️ AND THE FLAT TOP IS ALSO WHY THE FLICKER VANISHED — see
+ * `specular-render.js`'s own note at the use site. A saturated curve cannot
+ * transmit variation, so no amount of flicker in `buf:scene.illum` could reach
+ * the screen once a candle cleared the knee. `SPECULAR_KNEE_SOFTNESS` is
+ * therefore doing double duty and is the first control to reach for on EITHER
+ * complaint.
+ */
+
+/**
+ * How gradually the response saturates at the knee. `0` is the hard
+ * `min(t, 1)` clamp (byte-identical to how this shipped hours earlier); `1`
+ * is a fully exponential approach that never quite reaches full, so brightness
+ * rolls off instead of clipping AND light variation keeps modulating all the
+ * way up. Default `0.5` — real rolloff, without discarding the knee's whole
+ * point of "past here, metal is properly lit."
+ */
+export const SPECULAR_KNEE_SOFTNESS = 0.5;
+
+/**
+ * A plain multiplier on the shine response, applied AFTER the curve. The
+ * blunt "all of this is too strong" dial, deliberately separate from
+ * `strength` (which scales the whole effect including its unlit behaviour) so
+ * lamp-lit metal can be pulled back without touching how the effect reads
+ * outdoors at noon. Default `0.55`, i.e. a real reduction from the value the
+ * author called "far too much" rather than a nominal one — the curve controls
+ * around it are what let that be dialled back up per scene.
+ */
+export const SPECULAR_INCIDENT_GAIN = 0.55;
+
+/**
+ * ============================================================================
+ * THE LIGHT-COUPLED FLICKER (2026-08-09) — author: *"a bit of organic
+ * animation on specular surfaces illuminated by candles"*
+ * ============================================================================
+ *
+ * An independent organic flutter, scaled by how strongly lit each pixel is.
+ * ⚠️ It is NOT the candle's own flicker re-derived — `specular-render.js`'s use
+ * site explains why that is structurally impossible from a merged `illum`
+ * buffer, and why re-deriving it would be a second authority on one value.
+ *
+ * Defaults are deliberately modest: this is a texture on the light, and the
+ * author's own standing instinct on a new look is to see it and then dial it
+ * (`feedback_default_on_new_features`), which is much easier from "present but
+ * gentle" than from "off" or from "obviously too much".
+ */
+/** Depth of the flutter, as a fraction of the shine. 0 = off.
+ * ⚠️ A zero-mean SPATIAL noise, which is why the bench's `onMetalMean` cannot
+ * see it at all and its `onMetalPeak` barely moves — the flutter redistributes
+ * brightness across the metal rather than raising it. Verified instead by
+ * capturing the frame at amount 0 vs 3 and diffing: visible organic mottling,
+ * and a 29% larger PNG (identical images compress identically). Do not "fix"
+ * a future flat mean reading here by raising this — read
+ * `feedback_aggregate_cannot_name_the_source` first. */
+export const SPECULAR_FLICKER_AMOUNT = 0.5;
+/** Flutter rate. Candle-ish: fast enough to read as flame, slow enough not to strobe. */
+export const SPECULAR_FLICKER_SPEED = 1.6;
+/** World-space size of one coherent flutter patch, in px. Roughly a candle's
+ * own pool of light, so nearby metal flickers together and distant metal does
+ * not. */
+export const SPECULAR_FLICKER_SCALE_PX = 320;
+/** Blend between the two noise octaves: 0 = the broad slow one alone (smooth
+ * breathing), 1 = the fine fast one alone (busy guttering). */
+export const SPECULAR_FLICKER_ROUGHNESS = 0.5;
+
+/**
  * How brightly the SHEEN (the always-on base, no shimmer) may peak before its
  * OWN ceiling reins it in.
  *

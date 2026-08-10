@@ -17,6 +17,7 @@ import {
   WINDOW_PRESENCE_EDGE0,
   WINDOW_PRESENCE_EDGE1,
   WINDOW_SHOULDER_K,
+  WINDOW_DEFAULT_AMBIENT_CEILING,
 } from '../window-cookie.js';
 
 /** @param {number[]} c @returns {number} */
@@ -122,6 +123,23 @@ export function run(t) {
   ok(
     'the asymptote holds even at an extreme (maxed strength=3) input — never reaches, let alone exceeds, 1/K',
     softShoulder(3) < 1 / WINDOW_SHOULDER_K && softShoulder(1000) < 1 / WINDOW_SHOULDER_K
+  );
+
+  // ── THE OUTSIDE-AMBIENT CEILING (2026-08-09) — window-render.js now
+  // derives the shoulder's own `k` from a live ceiling (`k = 1/ceiling`)
+  // instead of the fixed WINDOW_SHOULDER_K alone. Pinning the relationship
+  // here, not just in window-render.js, so the two can never drift apart.
+  ok(
+    'the unwired default is algebraically the SAME asymptote as the old fixed shoulder',
+    Math.abs(WINDOW_DEFAULT_AMBIENT_CEILING - 1 / WINDOW_SHOULDER_K) < 1e-12
+  );
+  ok(
+    'a lower ceiling (a darker outside) pulls the asymptote down with it — this is the whole point',
+    softShoulder(1000, 1 / 0.2) < softShoulder(1000, 1 / WINDOW_DEFAULT_AMBIENT_CEILING)
+  );
+  ok(
+    'and a maxed cookie under a dim ceiling still never reaches that ceiling, only approaches it',
+    softShoulder(1000, 1 / 0.2) < 0.2
   );
 
   // ⚠️ HUE/SATURATION MUST SURVIVE COMPRESSION. Compressing R, G, B

@@ -25,6 +25,7 @@
  */
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { createWindowSurfaceSubsystem } from '../window-surface-subsystem.js';
+import { WINDOW_DEFAULT_AMBIENT_CEILING } from '../window-cookie.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -232,8 +233,72 @@ export async function run(t) {
   ok('switching back to floor 0 reloads and shows it again', flipMesh.visible === true);
   ok('…and getStatus reports floor 0 again', flip.getStatus().floor === 0);
 
+  // ── AN UNWIRED getAmbientCeilingRgb IS SAFE, AND BOUNDED ────────────────
+  // `sub` above never passed the seam at all — the common shape for every
+  // OTHER test in this file. It must still report a real, positive ceiling,
+  // never 0/NaN/undefined, or a silently-unwired seam would silence window
+  // light everywhere the instant this shipped.
+  ok(
+    'with no getAmbientCeilingRgb passed at all, the reported ceiling is the documented default',
+    sub.getStatus().ambientCeiling === WINDOW_DEFAULT_AMBIENT_CEILING
+  );
+
+  // ── THE OUTSIDE-AMBIENT CEILING IS GENUINELY CONSUMED ───────────────────
+  // feedback_seam_default_hides_unwired: a getter threaded through but never
+  // actually READ is indistinguishable from a wired one until something
+  // proves the number it returns reaches the material. Closing over a
+  // mutable value and re-syncing is what proves that, rather than trusting
+  // the plumbing by inspection.
+  let ambientRgb = [0.9, 0.9, 0.9];
+  const ambientSub = createWindowSurfaceSubsystem({
+    THREE,
+    getWindowMaskUrl: () => 'stub://floor0_Window.webp',
+    getWindowMaskRect: () => ({ minX: 0, minY: 0, maxX: 1000, maxY: 1000 }),
+    loadMaskImage: async () => ({
+      texture: stubTexture(),
+      contentBounds: { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
+      data: new Uint8Array(4 * 4 * 4).fill(200),
+      width: 4,
+      height: 4,
+      nativeWidth: 8,
+      nativeHeight: 8,
+      bytes: 256,
+    }),
+    createMaskTexture: (data, w, h) => {
+      const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      t.needsUpdate = true;
+      return t;
+    },
+    depthTexture: stubTexture(),
+    uViewRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
+    getWindowRenderState: () => ({ enabled: true, params: {}, debugChannel: 0 }),
+    getAmbientCeilingRgb: () => ambientRgb,
+  });
+  ambientSub.sync(0);
+  await Promise.resolve();
+  await Promise.resolve();
+  ok(
+    'the ambient ceiling resolves to the PEAK channel of the getter’s RGB, not a fixed constant',
+    Math.abs(ambientSub.getStatus().ambientCeiling - 0.9) < 1e-9
+  );
+
+  ambientRgb = [0.1, 0.05, 0.02]; // a much darker outside — night falling
+  ambientSub.sync(0);
+  ok(
+    'a genuinely different outside ambient reaches getStatus() on the very next sync — read live, not cached forever',
+    Math.abs(ambientSub.getStatus().ambientCeiling - 0.1) < 1e-9
+  );
+
+  ambientRgb = null; // the getter can legitimately have nothing to report yet
+  ambientSub.sync(0);
+  ok(
+    'a null/malformed signal falls back to the documented default, never to 0 or NaN',
+    ambientSub.getStatus().ambientCeiling === WINDOW_DEFAULT_AMBIENT_CEILING
+  );
+
   flip.dispose();
   sub.dispose();
   unwired.dispose();
   empty.dispose();
+  ambientSub.dispose();
 }

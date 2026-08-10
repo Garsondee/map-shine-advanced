@@ -4781,8 +4781,62 @@ export async function startVtPanViewer({
       // `hasContent()` would mean the mesh could never become visible in the
       // first place.
       profiler?.begin(Z.lightDrawWindow);
-      windowSurface.sync(view?.floorIndex ?? 0);
-      if (windowSurface.hasContent()) renderer.render(windowSurface.scene, camera);
+      // EVERY FLOOR, NOT JUST THE VIEWED ONE (2026-08-09) — mirrors the
+      // sun-shadow loop at Z.lightSunBake above: same `getActiveSceneFloors`
+      // lookup, same single-viewed-floor fallback when it fails. See
+      // `createWindowSurfaceForFloor`'s own header for the live bug this
+      // fixes — a lower floor seen through a hole in the one the UI calls
+      // "current" never had a mask loaded for it at all, so its cookie had
+      // nothing to draw regardless of the (already-correct) per-floor depth
+      // gate.
+      const sceneDocForWindow = globalThis.canvas?.scene ?? null;
+      const floorsResultForWindow = getActiveSceneFloors(sceneDocForWindow);
+      const windowFloors =
+        floorsResultForWindow.ok && floorsResultForWindow.floors.length > 0
+          ? floorsResultForWindow.floors
+          : [{ index: view?.floorIndex ?? 0 }];
+      // PRUNE stale slots — a scene switch can shrink or renumber the floor
+      // list; without this, a subsystem (and its uploaded `_Window` texture)
+      // from a PREVIOUS scene lingers in VRAM for the rest of the session,
+      // the same per-Stop/Restart leak discipline `disposeWindowLight` exists
+      // for, just triggered by a scene switch instead. Cheap: at most a
+      // handful of floors, once per frame.
+      const liveWindowFloorIndices = new Set(windowFloors.map((f) => f.index));
+      for (const [floorIndex, surface] of windowSurfacesByFloor) {
+        if (!liveWindowFloorIndices.has(floorIndex)) {
+          surface.dispose();
+          windowSurfacesByFloor.delete(floorIndex);
+        }
+      }
+      for (const floor of windowFloors) {
+        // ⚠️ SKIP A FLOOR THAT ISN'T CURRENTLY COMPOSITED AT ALL — a floor
+        // ABOVE the viewed one (Foundry's own "roof cutaway" so a bird's-eye
+        // interior view works at all — see computeVisibleFloorIndices'
+        // header) never gets a background item built for it this residency
+        // pass, so `depthAuthority.rankOf` genuinely returns `null` here, not
+        // just occasionally. `resolveExpectedDepth`'s documented fail-open
+        // (`rank === null ? 0 : ...`) was calibrated for the OLD single-floor
+        // caller, where an unresolved rank meant a rare, transient race — the
+        // BLAST RADIUS there was "this one floor's own cookie ignores a
+        // tile's occlusion for a frame." Multiplied across every scene floor,
+        // an UNCONDITIONAL floor (the common case for one above the viewed
+        // floor, not a rare race) hits the SAME fail-open path every frame —
+        // and `uExpectedDepth = 0` makes `step(0, depthHere)` true at EVERY
+        // pixel (a stored depth is never negative), so that floor's cookie
+        // broadcast across the ENTIRE screen regardless of the viewed floor.
+        // Live-reported 2026-08-09: "the upper floor's window effect now
+        // appears on the ground floor all the time." Checking the SAME rank
+        // here, before ever syncing or rendering, is cheap (a hash lookup)
+        // and turns "gate fails open to everywhere" into "this floor draws
+        // nothing this frame" — correct, since nothing of it is on screen
+        // for the gate to bound in the first place.
+        const backgroundItemId = getWindowBackgroundItemId(floor.index);
+        const rank = backgroundItemId ? depthAuthority.rankOf({ id: backgroundItemId }) : null;
+        if (rank === null) continue;
+        const windowSurface = getWindowSurfaceForFloor(floor.index);
+        windowSurface.sync(floor.index);
+        if (windowSurface.hasContent()) renderer.render(windowSurface.scene, camera);
+      }
       profiler?.end(Z.lightDrawWindow);
       renderer.autoClearColor = previousAutoClearColor;
       // COLORATION (increment 3, 2026-07-19) — its OWN target, a SINGLE
@@ -6348,7 +6402,7 @@ export async function startVtPanViewer({
     // input here at all — this pass CONTRIBUTES to illum rather than reading
     // it). It still needs its own scene, for the same reason the point-light
     // pool and specular both do: `runLightAccumulatePass` renders it as an
-    // explicit `renderer.render(windowSurface.scene, camera)` call, right
+    // explicit `renderer.render(surface.scene, camera)` call per floor, right
     // after the point-light MAX-blend.
     //
     // `sceneDepth.depthTexture` is the SAME `buf:scene.depth` read specular
@@ -6362,36 +6416,79 @@ export async function startVtPanViewer({
     // (docs/planning/Windows.md §4) does not exist yet, so the builder's own
     // constant-1 default is what ships. The day that field lands, this is a
     // one-line addition here and nowhere else.
-    const windowSurface = createWindowSurfaceSubsystem({
-      THREE,
-      getWindowMaskUrl,
-      getWindowMaskRect,
-      loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
-      createMaskTexture: createMaskDataTexture,
-      depthTexture: sceneDepth.depthTexture ?? null,
-      // Composed exactly like specular's own `resolveExpectedDepth` above:
-      // resolved by ITEM ID rather than by elevation, since window has real
-      // drawn geometry of its own (the floor's background), unlike a light.
-      // `rankOf` can genuinely return `null` — no background item resolved
-      // for this floor yet, or none at all — and `computeTieSafeExpectedDepth`
-      // has no defined answer for `null`, so that case is handled HERE.
-      // Fails OPEN (0 — see `uExpectedDepth`'s own doc in window-render.js):
-      // the same "an upstream failure can let the cookie draw where a tile
-      // should have hidden it — local and visible, instead of global and
-      // silent" doctrine specular's gate was built around.
-      resolveExpectedDepth: (floorIndex) => {
-        const backgroundItemId = getWindowBackgroundItemId(floorIndex);
-        const rank = backgroundItemId ? depthAuthority.rankOf({ id: backgroundItemId }) : null;
-        return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
-      },
-      uViewRect: envLight.uViewRect,
-      getWindowRenderState,
-      // THE DAYLIGHT TINT's own sun read — a GETTER, matching `getSkyHandle`
-      // above: `lastEnvSnapshot` is REASSIGNED every `updateEnvSnapshot()`
-      // call, so capturing `.env.sun` here would freeze the tint at whatever
-      // hour the viewer booted at.
-      getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
-    });
+    //
+    // ⚠️ ONE SUBSYSTEM PER FLOOR, NOT ONE FOR "THE VIEWED FLOOR" (2026-08-09)
+    // — `feedback_single_floor_bake_vs_multi_floor_render` named this exact
+    // subsystem an unchecked candidate, and the author's own live report
+    // confirmed it: standing on an upper floor looking down through a hole,
+    // the lower floor's window light never drew at all. The depth gate in
+    // `window-render.js` was already correct PER FLOOR (it asks "is THIS
+    // floor's background the topmost visible thing here", exactly
+    // `keyhole-orthographic-hole-stack-model`'s own test) — the bug was that
+    // only the VIEWED floor's mask was ever loaded into a mesh in the first
+    // place, so a floor visible through a gap had no cookie to draw
+    // regardless of how the gate evaluated. Fixed the same way sun shadows
+    // already were (`sunShadows`'s "N independent per-floor slots",
+    // Z.lightSunBake above): one subsystem per floor, created lazily and
+    // cached in `windowSurfacesByFloor`, disposed the instant a floor drops
+    // out of the scene's own floor list (see the render-site loop). Every
+    // construction arg below is floor-INDEPENDENT — only `sync(floorIndex)`'s
+    // own argument (at the call site) varies per floor, since
+    // `getWindowMaskUrl`/`getWindowMaskRect`/`getWindowBackgroundItemId`
+    // already take a `floorIndex` param each.
+    const windowSurfacesByFloor = new Map();
+    function createWindowSurfaceForFloor() {
+      return createWindowSurfaceSubsystem({
+        THREE,
+        getWindowMaskUrl,
+        getWindowMaskRect,
+        loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
+        createMaskTexture: createMaskDataTexture,
+        depthTexture: sceneDepth.depthTexture ?? null,
+        // Composed exactly like specular's own `resolveExpectedDepth` above:
+        // resolved by ITEM ID rather than by elevation, since window has real
+        // drawn geometry of its own (the floor's background), unlike a light.
+        // `rankOf` can genuinely return `null` — no background item resolved
+        // for this floor yet, or none at all — and `computeTieSafeExpectedDepth`
+        // has no defined answer for `null`, so that case is handled HERE.
+        // Fails OPEN (0 — see `uExpectedDepth`'s own doc in window-render.js):
+        // the same "an upstream failure can let the cookie draw where a tile
+        // should have hidden it — local and visible, instead of global and
+        // silent" doctrine specular's gate was built around.
+        resolveExpectedDepth: (floorIndex) => {
+          const backgroundItemId = getWindowBackgroundItemId(floorIndex);
+          const rank = backgroundItemId ? depthAuthority.rankOf({ id: backgroundItemId }) : null;
+          return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+        },
+        uViewRect: envLight.uViewRect,
+        getWindowRenderState,
+        // THE DAYLIGHT TINT's own sun read — a GETTER, matching `getSkyHandle`
+        // above: `lastEnvSnapshot` is REASSIGNED every `updateEnvSnapshot()`
+        // call, so capturing `.env.sun` here would freeze the tint at whatever
+        // hour the viewer booted at.
+        getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
+        // THE OUTSIDE-AMBIENT CEILING (2026-08-09) — a GETTER for the same
+        // reason: `lastAmbientColors`/`lastGlobalLightFloor` are REASSIGNED
+        // every `runLightAccumulatePass()` call. `.background` (raised by any
+        // active global illumination) is the value that actually tracks
+        // day↔night outdoor brightness — unlike `.bright`, which
+        // `computeAmbientColors`'s own weighting collapses to the scene's
+        // CONSTANT `ambient.brightest` regardless of the hour ("bright's
+        // weight is 1... collapses to ambientBrightest regardless" — that
+        // function's own header). See `window-render.js#uAmbientCeiling`.
+        getAmbientCeilingRgb: () =>
+          lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : null,
+      });
+    }
+    /** Lazily create-or-reuse this floor's own subsystem. @param {number} floorIndex */
+    function getWindowSurfaceForFloor(floorIndex) {
+      let surface = windowSurfacesByFloor.get(floorIndex);
+      if (!surface) {
+        surface = createWindowSurfaceForFloor();
+        windowSurfacesByFloor.set(floorIndex, surface);
+      }
+      return surface;
+    }
 
     /**
      * THE VEGETATION-SHADOW SUBSYSTEM (extraction step 2 of docs/planning/
@@ -11977,19 +12074,28 @@ export async function startVtPanViewer({
        * `floorGate` report which branches actually COMPILED — both are silent
        * on screen if they did not, which is precisely why they are reported. */
       getSpecularInfo: () => specularSurface.getStatus(),
-      /** Tear down WINDOW LIGHT's mesh, its geometry, both NodeMaterials and
-       * the uploaded `_Window` DataTexture — same shape as `disposeSpecular`,
-       * same reason: a missed dispose here is a per-Stop/Restart texture leak. */
+      /** Tear down EVERY floor's WINDOW LIGHT mesh, geometry, both
+       * NodeMaterials and uploaded `_Window` DataTexture — same shape as
+       * `disposeSpecular`, same reason: a missed dispose here is a
+       * per-Stop/Restart texture leak, now fanned out over however many
+       * floors ever got their own lazily-created subsystem (see
+       * `createWindowSurfaceForFloor`). */
       disposeWindowLight() {
-        windowSurface.dispose();
+        for (const surface of windowSurfacesByFloor.values()) surface.dispose();
+        windowSurfacesByFloor.clear();
       },
-      /** WINDOW LIGHT's own state — for the debug report. `visible: false`
-       * with a loaded mask means the resolved floor painted no window light
-       * (the honest "nothing to draw"); `maskImage: 'not loaded'` means no
-       * `_Window` file exists for it at all, inert BY DESIGN. `floorGate`
-       * reports whether that branch actually COMPILED — silent on screen if
-       * it did not, which is precisely why it is reported. */
-      getWindowLightInfo: () => windowSurface.getStatus(),
+      /** WINDOW LIGHT's own state, ONE ENTRY PER FLOOR that has ever synced
+       * (2026-08-09 — this used to be a single object) — for the debug
+       * report. `visible: false` with a loaded mask means that floor painted
+       * no window light (the honest "nothing to draw"); `maskImage: 'not
+       * loaded'` means no `_Window` file exists for it at all, inert BY
+       * DESIGN. `floorGate` reports whether that branch actually COMPILED —
+       * silent on screen if it did not, which is precisely why it is
+       * reported. */
+      getWindowLightInfo: () =>
+        Array.from(windowSurfacesByFloor.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([floorIndex, surface]) => ({ floorIndex, ...surface.getStatus() })),
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,

@@ -60,6 +60,12 @@ import {
   SPECULAR_GLINT_CEILING,
   SPECULAR_INCIDENT_STEEPNESS,
   SPECULAR_INCIDENT_KNEE,
+  SPECULAR_KNEE_SOFTNESS,
+  SPECULAR_INCIDENT_GAIN,
+  SPECULAR_FLICKER_AMOUNT,
+  SPECULAR_FLICKER_SPEED,
+  SPECULAR_FLICKER_SCALE_PX,
+  SPECULAR_FLICKER_ROUGHNESS,
 } from './specular-pattern.js';
 import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
@@ -482,6 +488,12 @@ export function buildSpecularSurfaceMaterial({
   glintCeiling = SPECULAR_GLINT_CEILING,
   incidentSteepness = SPECULAR_INCIDENT_STEEPNESS,
   incidentKnee = SPECULAR_INCIDENT_KNEE,
+  kneeSoftness = SPECULAR_KNEE_SOFTNESS,
+  incidentGain = SPECULAR_INCIDENT_GAIN,
+  flickerAmount = SPECULAR_FLICKER_AMOUNT,
+  flickerSpeed = SPECULAR_FLICKER_SPEED,
+  flickerScalePx = SPECULAR_FLICKER_SCALE_PX,
+  flickerRoughness = SPECULAR_FLICKER_ROUGHNESS,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -548,6 +560,12 @@ export function buildSpecularSurfaceMaterial({
   const uGlintCeiling = uniform(float(glintCeiling));
   const uIncidentSteepness = uniform(float(incidentSteepness));
   const uIncidentKnee = uniform(float(incidentKnee));
+  const uKneeSoftness = uniform(float(kneeSoftness));
+  const uIncidentGain = uniform(float(incidentGain));
+  const uFlickerAmount = uniform(float(flickerAmount));
+  const uFlickerSpeed = uniform(float(flickerSpeed));
+  const uFlickerScalePx = uniform(float(flickerScalePx));
+  const uFlickerRoughness = uniform(float(flickerRoughness));
   /** Foundry's OWN readability floor (`ambient.darkness`, pulled toward black
    * by `darknessRealism01`) — see `setDarknessFloor` below for the full
    * account. Defaults to (0,0,0): a caller that never wires this gets the
@@ -1026,9 +1044,66 @@ export function buildSpecularSurfaceMaterial({
   // which at `K = 1` is `min(luma,1)^(S-1)` — the same two branches, with the
   // saturating `min` replacing the explicit excess bookkeeping instead of
   // running alongside it.
-  const kneeT = min(incidentLuma.div(max(uIncidentKnee, float(1e-4))), float(1)).toVar('specKneeT');
+  //
+  // ⚠️ THE HARD `min(t,1)` IS ALSO WHY THE FLICKER DISAPPEARED (author, live,
+  // 2026-08-09: *"No sign of candle flicker animation on specular surfaces"*,
+  // reported in the same breath as *"far too much"* brightness). Both are ONE
+  // symptom: once a candle's light clears the knee, `min` pins the response at
+  // exactly 1 — so the shine is simultaneously clamped at maximum AND perfectly
+  // FLAT, and the light's own flicker can no longer modulate anything. A curve
+  // that saturates absolutely cannot transmit variation through the saturated
+  // region. `uKneeSoftness` mixes that hard clamp toward an exponential
+  // approach that NEVER quite reaches 1, so brightness rolls off gracefully
+  // instead of clipping and the flicker keeps living all the way up.
+  //
+  // `1 - exp(-t)` rather than the textbook soft-min `t/(1+t^(1/s))^s`: that
+  // form needs `pow` with an exponent of `1/s`, which for a small softness is
+  // ~50 and overflows float32 for any `t` past a handful. This one is
+  // unconditionally safe (the argument to `exp` is never positive), and
+  // softness 0 still reproduces the hard clamp exactly.
+  const kneeRaw = incidentLuma.div(max(uIncidentKnee, float(1e-4))).toVar('specKneeRaw');
+  const kneeT = mix(
+    min(kneeRaw, float(1)),
+    float(1).sub(exp(kneeRaw.negate())),
+    clamp(uKneeSoftness, float(0), float(1))
+  ).toVar('specKneeT');
+  // ── LIGHT-COUPLED FLICKER (2026-08-09) ───────────────────────────────────
+  // The author's ask: *"A bit of organic animation on specular surfaces
+  // illuminated by candles."*
+  //
+  // ⚠️ THIS IS NOT THE CANDLE'S OWN FLICKER RE-DERIVED. `buf:scene.illum` is a
+  // MERGED buffer — every light in the scene MAX-blended together — so this
+  // pass cannot ask "which lamp lit this pixel, and what is its animation
+  // phase". Re-deriving per-candle flicker here would mean a second, parallel
+  // copy of `candle-flicker.js` keyed off light positions this shader does not
+  // have — exactly the "one value, two authorities" shape this project keeps
+  // paying for. Instead this is an INDEPENDENT organic flutter, SCALED by how
+  // strongly lit the pixel is, so it appears only where lamps actually reach
+  // and fades out in ambient-lit and unlit areas on its own, with no knowledge
+  // of the lights at all. The honest description is "metal shimmering in
+  // nearby firelight", not "metal reflecting candle #7".
+  //
+  // Two octaves at right angles, phased apart, over WORLD position — so
+  // neighbouring metal flutters independently instead of the whole map pulsing
+  // as one; `uFlickerScalePx` sets how large a coherent patch is.
+  const flickerUv = positionWorld.xy.div(max(uFlickerScalePx, float(1)));
+  const flickerT = tSec.mul(uFlickerSpeed);
+  const flickerA = mx_noise_float(vec2(flickerUv.x.add(flickerT), flickerUv.y.sub(flickerT.mul(float(0.7)))));
+  const flickerB = mx_noise_float(
+    vec2(flickerUv.y.mul(float(2.3)).sub(flickerT.mul(float(1.6))), flickerUv.x.mul(float(2.3)).add(float(11.7)))
+  );
+  const flickerNoise = mix(flickerA, flickerB, clamp(uFlickerRoughness, float(0), float(1)));
+  // `kneeT` is the light-presence weight: ~0 where nothing lights this pixel,
+  // ~1 under a lamp. Reusing it rather than inventing a second threshold means
+  // the flutter can never appear anywhere the shine itself does not.
+  const flicker = max(
+    float(1).add(flickerNoise.mul(uFlickerAmount).mul(kneeT)),
+    float(0) // a large amplitude must dim toward dark, never invert the shine
+  ).toVar('specFlicker');
   const shineResponse = incident
     .mul(pow(kneeT, max(uIncidentSteepness.sub(float(1)), float(0))))
+    .mul(uIncidentGain)
+    .mul(flicker)
     .toVar('specShineResponse');
 
   // ── THE FLOOR GATE — STAGE 3 (2026-08-05), THE DEPTH AUTHORITY ──────────
@@ -1413,6 +1488,24 @@ export function buildSpecularSurfaceMaterial({
      * to a flat 1 regardless of how dark the pixel is (exactly 0) — both are
      * a real blow-up, not a stylistic extreme, so this keeps the knob inside
      * the region where the curve stays a curve. @param {number} v */
+    setKneeSoftness(v) {
+      uKneeSoftness.value = Math.min(1, Math.max(0, v));
+    },
+    setIncidentGain(v) {
+      uIncidentGain.value = Math.max(0, v);
+    },
+    setFlickerAmount(v) {
+      uFlickerAmount.value = Math.max(0, v);
+    },
+    setFlickerSpeed(v) {
+      uFlickerSpeed.value = Math.max(0, v);
+    },
+    setFlickerScalePx(v) {
+      uFlickerScalePx.value = Math.max(1, v);
+    },
+    setFlickerRoughness(v) {
+      uFlickerRoughness.value = Math.min(1, Math.max(0, v));
+    },
     setIncidentKnee(v) {
       // Clamped ABOVE 0: a knee of 0 would divide every light level to
       // infinity, saturating `kneeT` everywhere and silently disabling the

@@ -290,22 +290,34 @@ export function buildWindowLightReport({ floorIndex, viewer, maskAuthority, read
     authoredWindowFloors: maskAuthority.floorsWithAuthored('window'),
     enabled: readout?.enabled ?? 'unresolved',
     params: readout?.params ?? 'not resolved yet',
-    surface: viewer?.windowLight ?? 'viewer not started',
+    // ONE ENTRY PER FLOOR that has ever synced (2026-08-09 — used to be a
+    // single object under `surface`, back when there was only ever one
+    // subsystem for "the viewed floor"; see keyhole-orthographic-hole-stack-
+    // model and feedback_single_floor_bake_vs_multi_floor_render for why that
+    // was wrong the moment a lower floor was visible through a hole).
+    surfaces: Array.isArray(viewer?.windowLight) ? viewer.windowLight : 'viewer not started',
     interpretation:
-      'IF `surface.debugChannel` IS NOT 0, STOP — you are looking at a DIAGNOSTIC, not at the effect. ' +
-      'The Window light card`s dropdown puts one shader intermediate on screen (see ' +
+      "EACH ENTRY IN `surfaces` IS ONE FLOOR'S OWN SUBSYSTEM (`floorIndex` names which) — a floor with " +
+      'no entry here has never been asked to sync (rare; only possible before the first frame, or if ' +
+      'getActiveSceneFloors is failing, in which case only the viewed floor gets an entry at all). ' +
+      "IF an entry's `debugChannel` IS NOT 0, STOP — that ONE floor is showing a DIAGNOSTIC, not the " +
+      'effect. The Window light card`s dropdown puts one shader intermediate on screen (see ' +
       'effects/window/window.js#WINDOW_DEBUG_CHANNELS); set it back to "Off" before judging anything ' +
-      'below. THEN READ `surface.maskImage`. "not loaded" means this floor has no authored window ' +
-      'mask file (nor a V2-era alias of it), so the pass draws literally nothing and ' +
-      'every other field is irrelevant — cross-check `authoredWindowFloors`, which is keyed on ' +
-      'provenance rather than on the mask being non-empty. A loaded mask with `painted: "NOTHING ' +
-      'PAINTED"` means the file exists and is entirely black. NEXT `surface.visible`: false with a ' +
-      'loaded, painted mask means the AABB crop or the enable flag killed it. THEN `surface.floorGate`: ' +
-      'false means `buf:scene.attr` was unavailable, so window light will draw on every floor at once ' +
-      'rather than only the one it belongs to — silent on screen, which is why this is reported. ' +
-      'FINALLY the params: `strength` 0 is off; `contrast` far from 1 reshapes the painted falloff but ' +
-      'cannot make an unpainted file glow. This effect reads the mask AS the light — there is no sun, ' +
-      "no time of day and no cloud coupling yet (see `window.js`'s own `deferredRungs`), so a flat, " +
-      'unchanging cookie at every hour is the CURRENT design, not a bug to chase.',
+      'below. THEN READ that entry\'s `maskImage`. "not loaded" means this floor has no authored window ' +
+      'mask file (nor a V2-era alias of it), so its pass draws literally nothing and every other field ' +
+      'on THAT entry is irrelevant — cross-check `authoredWindowFloors`, which is keyed on provenance ' +
+      'rather than on the mask being non-empty. A loaded mask with `painted: "NOTHING PAINTED"` means ' +
+      'the file exists and is entirely black. NEXT `visible`: false with a loaded, painted mask means ' +
+      'the AABB crop or the enable flag killed it for that floor. THEN `floorGate`: false means the ' +
+      "depth authority was unavailable when this material compiled, so this floor's window light will " +
+      'draw regardless of what is on top of it — silent on screen, which is why this is reported. ' +
+      "`ambientCeiling` is the live outside-ambient brightness this floor's cookie is currently capped " +
+      'at (2026-08-09) — a number far below what `strength` alone would predict is expected at night, ' +
+      'not a bug: the cookie is meant to dim toward that ceiling as outdoor light fades, never past it. ' +
+      'FINALLY the params (shared across every floor): `strength` 0 is off; `contrast` far from 1 ' +
+      'reshapes the painted falloff but cannot make an unpainted file glow. This effect reads the mask ' +
+      "AS the light — there is no cloud coupling yet (see `window.js`'s own `deferredRungs`), so a " +
+      'flat cookie shape at every hour (its BRIGHTNESS still moves with the ambient ceiling above) is ' +
+      'the CURRENT design, not a bug to chase.',
   };
 }

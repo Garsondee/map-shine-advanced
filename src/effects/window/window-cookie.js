@@ -212,6 +212,16 @@ export function softShoulder(raw, k = WINDOW_SHOULDER_K) {
 export const WINDOW_SHOULDER_K = 0.8;
 
 /**
+ * THE SHOULDER'S ASYMPTOTE when no live outside-ambient signal is wired —
+ * i.e. exactly what `WINDOW_SHOULDER_K` alone used to mean before the
+ * shoulder's ceiling became dynamic (`window-render.js#uAmbientCeiling`,
+ * `window-surface-subsystem.js#sync`'s own `getAmbientCeilingRgb`). Derived,
+ * not a second hand-copied literal, so it can never drift from
+ * `WINDOW_SHOULDER_K` if that constant is ever retuned.
+ */
+export const WINDOW_DEFAULT_AMBIENT_CEILING = 1 / WINDOW_SHOULDER_K;
+
+/**
  * The final RGB contribution to `buf:scene.illum`: `cookieRgb × modulation`
  * (strength, coverage, cloud factor — everything multiplicative that is not
  * part of the paint itself), shouldered on its PEAK channel so hue and

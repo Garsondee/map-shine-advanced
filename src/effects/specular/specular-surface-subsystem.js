@@ -492,6 +492,12 @@ export function createSpecularSurfaceSubsystem({
       // early-out cache: a param missing here is one whose changes are simply
       // never applied after the first frame, with no error anywhere.
       p.incidentKnee,
+      p.kneeSoftness,
+      p.incidentGain,
+      p.flickerAmount,
+      p.flickerSpeed,
+      p.flickerScalePx,
+      p.flickerRoughness,
       JSON.stringify(layerParams),
     ].join('|');
     if (key === lastParamsKey) return;
@@ -508,6 +514,12 @@ export function createSpecularSurfaceSubsystem({
     if (Number.isFinite(p.glintCeiling)) surface.setGlintCeiling(p.glintCeiling);
     if (Number.isFinite(p.incidentSteepness)) surface.setIncidentSteepness(p.incidentSteepness);
     if (Number.isFinite(p.incidentKnee)) surface.setIncidentKnee(p.incidentKnee);
+    if (Number.isFinite(p.kneeSoftness)) surface.setKneeSoftness(p.kneeSoftness);
+    if (Number.isFinite(p.incidentGain)) surface.setIncidentGain(p.incidentGain);
+    if (Number.isFinite(p.flickerAmount)) surface.setFlickerAmount(p.flickerAmount);
+    if (Number.isFinite(p.flickerSpeed)) surface.setFlickerSpeed(p.flickerSpeed);
+    if (Number.isFinite(p.flickerScalePx)) surface.setFlickerScalePx(p.flickerScalePx);
+    if (Number.isFinite(p.flickerRoughness)) surface.setFlickerRoughness(p.flickerRoughness);
     if (Number.isFinite(p.pulse)) surface.setPulse(p.pulse);
     if (Number.isFinite(p.sunBias)) surface.setSunBias(p.sunBias);
 

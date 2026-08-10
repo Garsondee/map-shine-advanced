@@ -138,7 +138,11 @@ export const SPECULAR_PARAMS = Object.freeze({
   incidentSteepness: {
     type: 'float',
     min: 0.1,
-    max: 8,
+    // WIDENED 8 → 20 (2026-08-09) on the author's *"give me wide ranges"* —
+    // the shipped default is already 7.15, so the old ceiling left barely any
+    // room to push the suppression harder, which is one of the two directions
+    // someone tuning this actually wants to explore.
+    max: 20,
     step: 0.05,
     // LOWERED 3 → 2.85 (2026-08-03, ROUND 18) — live-confirmed; barely
     // moved from the Round 17 default, unlike several of its neighbours.
@@ -177,6 +181,77 @@ export const SPECULAR_PARAMS = Object.freeze({
     category: 'Response',
     label: 'Full-shine light level',
     help: 'How much light a surface needs before its metal shines at full strength. Low values mean even a single candle makes gold flash; high values mean only direct sunlight does. This is the control to reach for when metal looks right outdoors but stays dead indoors near lamps and candles — it moves where "brightly lit" begins, while "Light response" above decides how fast the shine dies away below that point. At 1 only a pure white, fully-lit pixel counts as bright, which is how this behaved before the control existed.',
+  },
+  // ── THE TOP OF THE CURVE (2026-08-09) ──────────────────────────────────
+  // `incidentKnee` + `incidentSteepness` shape where the response STARTS and
+  // how fast it climbs; these two shape where it ENDS. Added on the author's
+  // *"far too much… give me lots of RoH controls so that I can tune the
+  // curve"* — the knee alone could only move the whole curve sideways, never
+  // flatten its top.
+  kneeSoftness: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.5,
+    category: 'Response',
+    label: 'Highlight rolloff',
+    help: "How gracefully the shine tops out once a surface is well lit. At 0 it slams into full brightness the moment a light is bright enough and stays pinned there — which both blows out the highlight and freezes it, because a pinned value cannot flicker. Turn this up to let bright metal keep getting gradually brighter instead of clipping, and to let a candle's own flicker keep showing through on well-lit metal. This is the first control to try if the shine looks blown out OR looks strangely static under a lamp.",
+  },
+  incidentGain: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.01,
+    default: 0.55,
+    category: 'Response',
+    label: 'Lamp-light gain',
+    help: 'A straight brightness multiplier on the shine that light produces, applied after the response curve. The blunt "all of this is too strong / too weak" dial. Separate from the main Strength control on purpose: this one only scales how much LIGHT-DRIVEN shine you get, so you can pull candle-lit metal back without changing how the effect reads outdoors at noon.',
+  },
+  // ── THE LIGHT-COUPLED FLICKER (2026-08-09) ─────────────────────────────
+  // Author: *"a bit of organic animation on specular surfaces illuminated by
+  // candles… give me more rather than less controls and wide ranges."*
+  // Filed under Motion beside driftSpeed/pulse — the other two temporal
+  // controls — rather than Response, which is about the light→shine curve.
+  flickerAmount: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 0.5,
+    category: 'Motion',
+    label: 'Firelight flicker',
+    help: 'How much lamp-lit metal flutters, as if catching a nearby flame. 0 turns it off entirely. Around 0.3 is a subtle live shimmer; past 1 the metal visibly surges and dims. It only ever appears where light actually falls, so unlit metal stays perfectly still no matter how high this goes.',
+  },
+  flickerSpeed: {
+    type: 'float',
+    min: 0,
+    max: 12,
+    step: 0.05,
+    default: 1.6,
+    category: 'Motion',
+    label: 'Flicker speed',
+    help: 'How fast that flutter moves. Low values breathe slowly like a hearth; high values gutter and snap like a candle in a draught. Very high values will read as a fast strobe, so raise it with the amount turned down first.',
+  },
+  flickerScalePx: {
+    type: 'float',
+    min: 16,
+    max: 4096,
+    step: 8,
+    default: 320,
+    category: 'Motion',
+    label: 'Flicker patch size',
+    help: "How large an area flickers together, in canvas pixels. Small values make metal sparkle in fine independent patches; large values make whole rooms surge as one. Roughly matching a candle's pool of light (a few hundred) reads most naturally.",
+  },
+  flickerRoughness: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.5,
+    category: 'Motion',
+    label: 'Flicker character',
+    help: 'The texture of the flutter, blending two speeds of movement. Toward 0 it is a broad slow swell, like firelight on a wall. Toward 1 it is finer and more agitated, like a flame guttering. Midway gives a mix of both.',
   },
   sheenCeiling: {
     type: 'float',

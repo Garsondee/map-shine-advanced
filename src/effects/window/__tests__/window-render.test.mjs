@@ -12,6 +12,7 @@
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { buildWindowSurfaceMaterial, WINDOW_DEFAULT_STRENGTH, WINDOW_DEFAULT_CONTRAST } from '../window-render.js';
 import { WINDOW_DEBUG_CHANNELS } from '../window.js';
+import { WINDOW_DEFAULT_AMBIENT_CEILING } from '../window-cookie.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -101,6 +102,7 @@ export function run(t) {
     'setMaskTexture',
     'setMaskUvBounds',
     'setExpectedDepth',
+    'setAmbientCeiling',
     'setStrength',
     'setContrast',
     'setDebugChannel',
@@ -114,6 +116,7 @@ export function run(t) {
   try {
     built.setMaskUvBounds({ minU: 0.1, minV: 0.2, maxU: 0.9, maxV: 0.8 });
     built.setExpectedDepth(0.5);
+    built.setAmbientCeiling(0.4);
     built.setStrength(WINDOW_DEFAULT_STRENGTH);
     built.setContrast(WINDOW_DEFAULT_CONTRAST);
   } catch (err) {
@@ -128,12 +131,47 @@ export function run(t) {
     built.setContrast(0);
     built.setExpectedDepth(NaN);
     built.setStrength(-5);
+    built.setAmbientCeiling(NaN);
+    built.setAmbientCeiling(0);
+    built.setAmbientCeiling(-2);
   } catch (err) {
     guardError = err;
   }
   ok(
     `out-of-range inputs are clamped, never propagated (${guardError ? guardError.message : 'clean'})`,
     guardError === null
+  );
+
+  // ── THE OUTSIDE-AMBIENT CEILING — A BOUND, NOT A TOGGLE ─────────────────
+  // "No signal yet" must fall back to the OLD fixed asymptote, never to an
+  // unbounded shoulder (feedback_gate_polarity_must_fail_open's sibling
+  // concern, for a brightness cap rather than an occlusion gate: failing
+  // "open" here would mean failing UNCAPPED, which is the ORIGINAL clipping
+  // bug this whole shoulder exists to prevent). This test can only prove the
+  // setter's OWN clamping — window-cookie.test.mjs proves the shoulder curve
+  // itself moves with the ceiling.
+  const freshMaterial = buildWindowSurfaceMaterial(args());
+  ok(
+    'setAmbientCeiling exists on a freshly-built material before any sync ever ran',
+    typeof freshMaterial.setAmbientCeiling === 'function'
+  );
+  let defaultCeilingError = null;
+  try {
+    // Every one of these means "no real signal resolved this frame" — all
+    // must land on the SAME safe default, never on 0/negative/NaN reaching
+    // the uniform (a zero ceiling would silence every window on the map the
+    // instant the getter glitches for one frame).
+    for (const junk of [NaN, 0, -1, Infinity, -Infinity]) freshMaterial.setAmbientCeiling(junk);
+  } catch (err) {
+    defaultCeilingError = err;
+  }
+  ok(
+    `every non-finite/non-positive input is absorbed, never forwarded raw (${defaultCeilingError ? defaultCeilingError.message : 'clean'})`,
+    defaultCeilingError === null
+  );
+  ok(
+    'WINDOW_DEFAULT_AMBIENT_CEILING is a real positive number',
+    Number.isFinite(WINDOW_DEFAULT_AMBIENT_CEILING) && WINDOW_DEFAULT_AMBIENT_CEILING > 0
   );
 
   ok(

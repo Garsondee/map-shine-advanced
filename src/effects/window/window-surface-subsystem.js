@@ -46,6 +46,7 @@ import {
 } from './window-render.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 import { computeSeedOffset } from './window-glass.js';
+import { WINDOW_DEFAULT_AMBIENT_CEILING } from './window-cookie.js';
 
 const log = createLogger('WindowSurface');
 
@@ -101,6 +102,14 @@ function lerpRgb(a, b, t) {
  *   specular's `getSkyHandle` is one: the viewer REASSIGNS its env snapshot
  *   every frame, so capturing it here would pin whatever sun existed at
  *   construction and the daylight tint would never move.
+ * @param {() => (readonly number[]|null)} [args.getAmbientCeilingRgb] - a
+ *   GETTER for the current outside-ambient colour (`vt-pan-viewer.js`'s own
+ *   `lastAmbientColors.background`, raised by any active global light) —
+ *   the same reasoning as `getEnvSun`: that value is REASSIGNED every
+ *   `runLightAccumulatePass()` call, so capturing it here would freeze the
+ *   window-light ceiling at whatever the sky looked like at construction.
+ *   `null`/malformed falls back to `WINDOW_DEFAULT_AMBIENT_CEILING` — see
+ *   `window-render.js#uAmbientCeiling`'s own doc.
  * @returns {{scene: *, sync: Function, hasContent: Function, getStatus: Function, dispose: Function}}
  */
 export function createWindowSurfaceSubsystem({
@@ -115,12 +124,14 @@ export function createWindowSurfaceSubsystem({
   cloudFactorNode = null,
   getWindowRenderState,
   getEnvSun,
+  getAmbientCeilingRgb,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
   // DECLARED, defaulted, consumed and never passed — every control dead,
   // every test green (`feedback_seam_default_hides_unwired`).
   getWindowRenderState ??= () => ({ enabled: true, params: {}, debugChannel: 0 });
   getEnvSun ??= () => null;
+  getAmbientCeilingRgb ??= () => null;
   resolveExpectedDepth ??= () => 0;
 
   /** A dedicated scene — see the header. */
@@ -143,6 +154,11 @@ export function createWindowSurfaceSubsystem({
   let lastParamsKey = '';
   /** Which debug intermediate is on screen — 0 = the effect as it ships. */
   let debugChannel = 0;
+  /** The last-resolved outside-ambient ceiling — see `getAmbientCeilingRgb`'s
+   * own doc and `window-render.js#uAmbientCeiling`. Tracked here (mirroring
+   * `debugChannel`/`enabled`) purely so `getStatus()` can report the live
+   * number for the debug report, the same reason those are tracked. */
+  let ambientCeiling = WINDOW_DEFAULT_AMBIENT_CEILING;
   let loadedMaskRect = null;
   let loadedContentBoundsUv = null;
   let paddedBoundsUv = null;
@@ -348,6 +364,15 @@ export function createWindowSurfaceSubsystem({
     const sun = getEnvSun();
     const dayFactor01 = Number.isFinite(sun?.dayFactor01) ? sun.dayFactor01 : 1;
     const twilight01 = Number.isFinite(sun?.twilight01) ? sun.twilight01 : 0;
+    // THE OUTSIDE-AMBIENT CEILING — same "read every sync(), fold into the
+    // cached key" idiom as dayFactor01/twilight01 above: this genuinely
+    // changes continuously as day turns to night, but only needs a real
+    // uniform WRITE when the resolved number actually moves.
+    const rawAmbientRgb = getAmbientCeilingRgb();
+    ambientCeiling =
+      Array.isArray(rawAmbientRgb) && rawAmbientRgb.length === 3 && rawAmbientRgb.every(Number.isFinite)
+        ? Math.max(rawAmbientRgb[0], rawAmbientRgb[1], rawAmbientRgb[2], 0)
+        : WINDOW_DEFAULT_AMBIENT_CEILING;
     const key = [
       state.enabled ? 1 : 0,
       state.debugChannel ?? 0,
@@ -357,6 +382,7 @@ export function createWindowSurfaceSubsystem({
       p.nightTint,
       dayFactor01.toFixed(4),
       twilight01.toFixed(4),
+      ambientCeiling.toFixed(4),
       p.glassWarpPx,
       p.glassDispersion,
       p.glassScale,
@@ -371,6 +397,7 @@ export function createWindowSurfaceSubsystem({
       lastParamsKey = key;
       if (Number.isFinite(p.strength)) surface.setStrength(p.strength);
       if (Number.isFinite(p.contrast)) surface.setContrast(p.contrast);
+      surface.setAmbientCeiling(ambientCeiling);
       // THE GLASS — pushed as one object so the pane is never half-described.
       // The seed is hashed HERE, on the CPU, so a raw seed can never reach a
       // noise coordinate (`feedback_raw_seed_into_noise_coordinate`).
@@ -419,6 +446,7 @@ export function createWindowSurfaceSubsystem({
         contentBoundsUv: loadedContentBoundsUv,
         maskUvBounds: paddedBoundsUv,
         maskRect: loadedMaskRect,
+        ambientCeiling,
       };
     },
     dispose() {

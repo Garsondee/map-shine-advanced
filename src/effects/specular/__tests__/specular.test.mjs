@@ -34,6 +34,12 @@ import {
   SPECULAR_GLINT_CEILING,
   SPECULAR_INCIDENT_STEEPNESS,
   SPECULAR_INCIDENT_KNEE,
+  SPECULAR_KNEE_SOFTNESS,
+  SPECULAR_INCIDENT_GAIN,
+  SPECULAR_FLICKER_AMOUNT,
+  SPECULAR_FLICKER_SPEED,
+  SPECULAR_FLICKER_SCALE_PX,
+  SPECULAR_FLICKER_ROUGHNESS,
 } from '../specular-pattern.js';
 
 export function run(t) {
@@ -84,7 +90,26 @@ export function run(t) {
   // The V2 corpse this replaces had 30 shimmer sliders, each a property of a
   // noise generator. The count is the claim; assert it stays honest.
   const keys = Object.keys(SPECULAR_PARAMS);
-  ok('the whole schema is well under V2’s 61 controls', keys.length + Object.keys(SPECULAR_LAYER_PARAMS).length <= 24);
+  // ⚠️ BOUND RAISED 24 → 32 (2026-08-09) — deliberately, on the author's own
+  // explicit direction: *"give me lots of RoH controls so that I can tune the
+  // curve… give me more rather than less controls in RoH and give me wide
+  // ranges."* Six controls landed that round (two shaping the top of the
+  // light-response curve, four for the firelight flicker).
+  //
+  // WHAT THIS GUARD IS ACTUALLY FOR, restated so the next raise is reasoned
+  // rather than reflexive: V2's corpse had THIRTY shimmer sliders that were
+  // the same nine knobs repeated three times, with no way to tell which layer
+  // you were editing. The disease is UNDIFFERENTIATED REPETITION, not the
+  // count — the count is only its cheapest proxy. Every control added this
+  // round names a distinct mechanism and says in its own help text which
+  // symptom it fixes, which is the property that actually matters and which
+  // the `help` assertion just below independently enforces.
+  //
+  // So: raising this is legitimate when each new control is its own mechanism,
+  // and is NOT legitimate as a way to make room for another eight-slider layer
+  // strip. If a future round wants that, it needs the layer-strip conversation,
+  // not a bigger number here.
+  ok('the whole schema is well under V2’s 61 controls', keys.length + Object.keys(SPECULAR_LAYER_PARAMS).length <= 32);
   ok(
     'every param declares a help string an author can act on',
     keys.every((k) => (SPECULAR_PARAMS[k].help ?? '').length > 40)
@@ -201,6 +226,47 @@ export function run(t) {
   ok(
     'the knee can still be set to 1 — the documented reproduction of pre-knee behaviour',
     SPECULAR_PARAMS.incidentKnee.max >= 1
+  );
+  // ── THE CANDLE-LIGHT RESPONSE GROUP + FLICKER (2026-08-09) ─────────────
+  ok(
+    'kneeSoftness exists, in Response, and agrees with the pattern module default',
+    SPECULAR_PARAMS.kneeSoftness.category === 'Response' &&
+      SPECULAR_PARAMS.kneeSoftness.default === SPECULAR_KNEE_SOFTNESS
+  );
+  ok(
+    'incidentGain exists, in Response, and agrees with the pattern module default',
+    SPECULAR_PARAMS.incidentGain.category === 'Response' &&
+      SPECULAR_PARAMS.incidentGain.default === SPECULAR_INCIDENT_GAIN
+  );
+  // ⚠️ SOFTNESS MUST DEFAULT ABOVE 0. At exactly 0 the response curve is a hard
+  // `min(t,1)` clamp, which pins every well-lit pixel at maximum — that is BOTH
+  // the "far too much" blowout AND the reason the flicker was invisible, since
+  // a saturated value cannot transmit variation. Pinned so a future tidy-up
+  // cannot quietly restore the clamp.
+  ok('the highlight rolloff is soft by default, so bright metal cannot pin flat', SPECULAR_KNEE_SOFTNESS > 0);
+  ok(
+    'flicker controls exist in Motion, beside the other temporal controls',
+    SPECULAR_PARAMS.flickerAmount.category === 'Motion' &&
+      SPECULAR_PARAMS.flickerSpeed.category === 'Motion' &&
+      SPECULAR_PARAMS.flickerScalePx.category === 'Motion' &&
+      SPECULAR_PARAMS.flickerRoughness.category === 'Motion'
+  );
+  ok(
+    'flicker schema agrees with the pattern module defaults',
+    SPECULAR_PARAMS.flickerAmount.default === SPECULAR_FLICKER_AMOUNT &&
+      SPECULAR_PARAMS.flickerSpeed.default === SPECULAR_FLICKER_SPEED &&
+      SPECULAR_PARAMS.flickerScalePx.default === SPECULAR_FLICKER_SCALE_PX &&
+      SPECULAR_PARAMS.flickerRoughness.default === SPECULAR_FLICKER_ROUGHNESS
+  );
+  ok('the flicker ships ON, so the feature is visible without hunting for it', SPECULAR_FLICKER_AMOUNT > 0);
+  // The author asked for WIDE ranges on every one of these, explicitly.
+  ok(
+    'the tuning ranges are genuinely wide, per the author’s own ask',
+    SPECULAR_PARAMS.flickerAmount.max >= 3 &&
+      SPECULAR_PARAMS.flickerSpeed.max >= 12 &&
+      SPECULAR_PARAMS.flickerScalePx.max >= 4096 &&
+      SPECULAR_PARAMS.incidentGain.max >= 4 &&
+      SPECULAR_PARAMS.incidentSteepness.max >= 20
   );
   // Headroom the author explicitly asked for — high enough to genuinely
   // "brute-force punch through", not just a token bump.

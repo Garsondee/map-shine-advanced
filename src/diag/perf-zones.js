@@ -292,6 +292,23 @@ export const ZONES = Object.freeze(
       true,
       'runSceneDepthPass'
     ),
+    // STAGE-0 CPU-MYSTERY EXPERIMENT (2026-08-10, debug-only, OFF unless
+    // `MapShine.setDebugFirstRenderProbe(true)`). A dummy 1-triangle render()
+    // into a scratch target, positioned immediately before this pass's own
+    // setup/render — see runSceneDepthPass's own comment for what question
+    // it answers. 'conditional', not 'steady': this zone only exists in a
+    // frame when the debug flag is armed, never in a normal player session.
+    z(
+      'geometry.debugFirstRenderProbe',
+      'Debug: dummy render() before the depth pass (Stage-0 experiment)',
+      'geometry',
+      'geometry.world',
+      null,
+      'cpu',
+      'conditional',
+      true,
+      'runSceneDepthPass'
+    ),
 
     // ---- light.accumulate: ten CPU syncs and seven draws in ONE plan pass -----
     // This is the whole reason pass-level timing alone is not enough.

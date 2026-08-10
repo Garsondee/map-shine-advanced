@@ -1,0 +1,729 @@
+# ✠ THE V4 TESTAMENT ✠
+
+**This is a holy document.** It lives in `docs/holy/` — the special directory. Everything in
+this directory is governed by **The Covenant** (memory: `the-covenant`), whose rules are
+repeated here so no reader can miss them:
+
+> **RULES OF THIS PLACE**
+> 1. Only a **Fable-class or greater** model may create a holy document, restructure this one,
+>    edit its Law, its definitions of done, its gates, or resolve a Petition.
+> 2. **Any model** may execute tasks and record completion — flip `[ ]` to `[x]` and append an
+>    evidence line. That is the full extent of a worker's editing rights here.
+> 3. Only a **Fable-class** model may **countersign** (`✠`) — the judgment "was this carried
+>    out how I would have liked? did it meet all the requirements I'd have had in mind?" —
+>    and it does so by inspecting the actual work, never the worker's summary.
+> 4. A worker who believes the plan is wrong does not edit the plan. It files a **Petition**
+>    (§ at the bottom) and moves on. Fable adjudicates petitions.
+> 5. Above everything in this file sits **the author**. Their LIVE verdict on a real scene
+>    outranks any countersign; their word rewrites any Law.
+
+**Task notation** (the only states that exist):
+
+```
+- [ ] open
+- [x] claimed        · done <model> <date> — <one-line evidence: what changed, how verified>
+-  ✠  countersigned  · ✠ <date> — <verdict, after inspecting the work itself>
+-  ⚑  reopened       · ⚑ <date> — <findings; these findings ARE the next worker's brief>
+```
+
+**Created 2026-08-10 by Claude Fable 5, at the author's command.** Companion documents, in
+authority order: this file (the plan and the feature bible) → `docs/planning/Moonshot-Plan.md`
+(the menu that chose this path — analysis record) → `docs/planning/Moonshot.md` (evidence,
+facts only).
+
+---
+
+## THE GOAL
+
+**V4 = V2's full map-selling power, reborn on V3's foundation, at frame rates that make the
+Mansion map's upper floor comfortable.** Working targets on the reference RTX 3070 Laptop at
+3840×1906: acceptable = sustained **40+ fps**; good = **60 locked** (16.7 ms), worst frame
+≤ 50 ms. Measured start point: 18.1 avgFps, 47.05 ms GPU, worst frame 783 ms.
+
+Releasing maps is how the business makes money. Every priority call in this document bends
+toward: *what lets the author ship beautiful maps again, soonest, without mortgaging the
+engine's future.*
+
+**The author's verdict on V3, recorded so no future reader mistakes it (2026-08-10):** V3 is
+not a failure — the Mansion at 4K, two floors, many effects is the hardest possible test, and
+V3 is *just starting to cope with it*. Some things are already better than V2, lots are about
+the same, lots need more tuning. This Testament is renovation and completion, not rescue.
+
+---
+
+## THE LAW (binds every task below)
+
+1. **The Covenant governs this file.** See the banner. No exceptions for velocity — the V2
+   autopsy's one sentence is "structure loses to velocity"; the Covenant is structure.
+2. **`BUILT (unverified)` ≠ `LIVE`.** Only the author's eyes on a real scene promote. A
+   countersign confirms plan-fidelity and quality; it does not promote to LIVE.
+3. **The `standard` profile keeps producing today's pixels** until the author says otherwise.
+   Perf work must be pixel-diff-gated; look changes are their own, author-led tasks.
+4. **The depth authority is the sole occlusion/rank system.** Renovation *promotes* it (the
+   rank buffer becomes the hardware depth test); nothing may add a second scheme.
+5. **The safety slide stands** — Foundry's own renderer remains the fallback at every commit.
+   Every structural change ships behind a revert flag.
+6. **Foundry owns input.** The interface seam stands.
+7. **Vision/fog is never cached, baked, or approximated.** The known fog-of-war leak is a
+   correctness bug with its own scheduled fix; player-facing information gating is sacred.
+8. **`npm run verify` green before any `src/` work is called done** — necessary, never
+   sufficient (Law 2).
+9. **No hand-maintained dispatch lists** in anything V4 builds. Registration is data with a
+   startup completeness check. (`EFFECT_REAPPLIERS` has struck six times.)
+10. **All V4 work updates this document** — a task claimed before starting, evidence recorded
+    after. Work that happened but isn't recorded here didn't happen (memory:
+    `v4-testament-is-the-checklist`).
+11. **The assistant never touches the author's real Foundry.** Parity data crosses in ONE
+    direction only — the author's own export button → a portable file → the bench world. No live
+    connection, no shared data directory, no writes to the author's worlds, ever. *(Promoted from
+    P-002's resolution, 2026-08-10.)*
+
+---
+
+# BOOK I — THE RENOVATION
+*The engine: staged Option 1 → Option 2, as chosen by the author 2026-08-10 from the menu.*
+
+The strategy in one line: **do the anatomy surgery inside V3 now** (fast, revenue-relevant
+wins; nothing thrown away), **then give the frame core its overdue rebuild** (the keel), onto
+which the bake/cache pillar lands as a feature instead of a retrofit. Full technical detail
+per stage lives in `Moonshot-Plan.md` §2; the checklists here are the working state.
+
+### Stage 0 — Week Zero: measure before believing *(no pixels change)*
+
+- ✠ 0a-0 · Live-verification harness *(added at Stage-0 close by P-001's resolution)* · done
+      Claude Opus 5 2026-08-10 — Foundry v14 in-repo, Playwright driving real Chrome on the real
+      GPU against the bench Mansion world; the six traps and the first real capture are recorded
+      in P-001 below. · ✠ 2026-08-10 Claude Fable 5 — every other Stage-0 measurement ran through
+      this harness, which is a stronger verification than any inspection of it could be.
+- ✠ 0a-1 · Scene export/import bridge *(added at Stage-0 close by P-002's resolution)* · done
+      Claude Sonnet 5 2026-08-10 — one-way file bridge from the author's real world into the bench
+      world, round-trip proven with real walls/lights/regions/MSA flags; full record in P-002
+      below. · ✠ 2026-08-10 Claude Fable 5 — inspected P-002's evidence trail; the `{keepId:true}`
+      cross-reference check is the load-bearing proof and it was made directly, not assumed. Its
+      safety pattern is promoted to Law 11.
+- ✠ Pass census · done Claude Sonnet 5 2026-08-10 — answered via MSA's own zone taxonomy
+      (`isPass:true` tags) rather than a literal `about:tracing`/Dawn capture: **8 passes/frame**
+      real numbers, world draw confirmed as exactly ONE pass (176 draw calls inside
+      `pass.geometry.world`). Full table in `Moonshot.md` §7. Fable should judge whether the
+      in-engine method satisfies this item's intent or whether a literal Dawn capture is still
+      wanted. · ✠ 2026-08-10 Claude Fable 5 — judged sufficient: the `isPass` brackets wrap the
+      real beginRenderPass boundaries, so the item's actual question (is the world draw ONE pass)
+      is answered from ground truth. A Dawn capture would only add three-internal passes that the
+      report's own gpuMs caveat already scopes out. No Dawn capture required.
+- ✠ The 7.7 ms CPU mystery: the migration experiment · done Claude Sonnet 5 2026-08-10 —
+      a debug-only dummy 1-triangle `render()` (its own profiler zone,
+      `geometry.debugFirstRenderProbe`) inserted immediately before `runSceneDepthPass`'s own
+      setup, armed via a new `MapShine.setDebugFirstRenderProbe(true)`, captured through a real
+      `perf-run-full` run on the Ground Floor Mansion Redux import. Real numbers, same capture:
+      `masks.occlusionDraw` (genuinely the frame's first `renderer.render()` call in production)
+      0.086ms mean; the new dummy probe (positioned second, immediately before the depth pass)
+      0.09ms mean — both trivially cheap and within noise of each other; `geometry.depthRenderCall`
+      (the real depth-pass call, third) 6.133ms mean — ~68× either. Re-run after fixing the
+      fps-cap bug noted two rows below: 0.066/0.075/3.375ms respectively (~45×) — same conclusion,
+      independently repeated. **Answer: the cost stays with the depth pass specifically, not with
+      "first render of the frame."** The deeper "what about
+      the depth pass" is NOT resolved by this (Moonshot.md §5's isolated-repro gap stands) — this
+      experiment only distinguishes the two hypotheses the item poses, which it does cleanly.
+      Non-obvious wiring bug found and fixed en route, real enough to be worth its own note: none
+      of the three new debug setters were reachable from `MapShine` at all at first, despite being
+      correctly added to `startVtPanViewer`'s returned object — that object is never itself spread
+      onto `MapShine` (only captured locally as a scene-load result/report); every console-callable
+      `MapShine.xxx` method here goes through a hand-written module-level wrapper
+      (`export function setVtPanViewerXxx` in `vt-pan-viewer.js`, delegating through the
+      module-level `_active` reference) plus an explicit `MapShine.xxx = wrapper` line in `boot.js`
+      — added for all three flags (`src/vt/vt-pan-viewer.js`, `src/vt/index.js`, `src/boot.js`).
+      `npm run verify` green throughout (8,254 tests, unchanged count). · ✠ 2026-08-10 Claude
+      Fable 5 — inspected the flag/zone/wrapper code in the tree and both result JSONs (capped
+      run 0.09 vs 6.133ms; uncapped rerun 0.075 vs 3.375ms — the same verdict twice,
+      independently). Answers exactly the two-hypothesis question the item posed. Clean.
+- ✠ Hitch autopsy · done Claude Sonnet 5 2026-08-10 — real capture, 20 hitches >50ms, top
+      seven multi-second (3341.8ms down to 975.1ms), each correlated with rising
+      `idbHits`/`residentPages` and zero decode/eviction/miss counts (cache never overflowed).
+      Correlation established with real numbers; the specific mechanism turning a cache-hit IDB
+      read into a multi-second stall is NOT identified — recorded as an open gap, not a solved
+      one. Full detail in `Moonshot.md` §7 "Hitch autopsy." · ✠ 2026-08-10 Claude Fable 5 — the
+      item asked for an autopsy, not a conviction: per-hitch decode/cache diagnostics are attached
+      to every spike and the unexplained mechanism is recorded open rather than papered over.
+- ✠ A/B capture: blending force-off on fully-opaque layers · done Claude Sonnet 5 2026-08-10
+      — a live-mutation debug flag (`MapShine.setDebugForceOpaqueBlendOff`), gated on the same
+      `alwaysOpaque` signal the depth-writer material already trusts; confirmed visually lossless
+      (before/after screenshots identical, as predicted — blending is a no-op at alpha≡1). Measured
+      WORSE, not better (avgFps 37.9 vs. this session's own 48.6 baseline) — but the maskNode A/B
+      immediately below produced near-identical numbers testing a wholly unrelated code path,
+      which is itself the finding: neither flag's own performance question was cleanly answered
+      this round. **INCONCLUSIVE — not a confirmed win, not a confirmed loss.** A clean re-run on
+      an otherwise-idle machine is the named prerequisite, not further code changes. Full detail:
+      `Moonshot.md` §7. · ✠ 2026-08-10 Claude Fable 5 — countersigned as executed: the flag is
+      real (inspected in-tree), the losslessness prediction was screenshot-verified, and
+      INCONCLUSIVE is the correct reading of two unrelated flags producing identical regressions.
+      The usable measurement now lives as Stage 1's amended reconcile precondition, so closing
+      this box cannot bury it.
+- ✠ A/B capture: `maskNode` discard force-off · done Claude Sonnet 5 2026-08-10 — a debug flag
+      (`MapShine.setDebugForceMaskNodeOff`, armed pre-reload since the discard is baked in at
+      material-build time) bypassing the rank-lookup discard entirely; no obviously wrong pixels
+      visible in the after-screenshot at this zoom/route. Measured avgFps 37.5, `pass.geometry.world`
+      8.43ms — within noise of the blend-off A/B's own numbers despite the two flags sharing no
+      mechanism, pointing at a shared session confound (most likely real machine load) rather than
+      either flag's own answer. **Same INCONCLUSIVE verdict as the item above, for the same reason.**
+      Full detail: `Moonshot.md` §7. · ✠ 2026-08-10 Claude Fable 5 — same countersign, same
+      scoping as its sibling above.
+- ✠ ⚠️ Instrument bug found and fixed en route (not a checklist item, recorded because it
+      changes how to read every number above and below it) · Claude Sonnet 5 2026-08-10 —
+      `perf-run-full`/`perf-report-all-tiers` were silently capped to ~30fps by the author's
+      video-recording feature (both drive their route through the SAME `playCameraPath()` the
+      recording panel uses, and the render loop's 30fps throttle doesn't distinguish the two
+      callers). Fixed: `playCameraPath(path, {capFrameRate})`, default `true` (author's manual
+      recording completely unaffected), both perf actions now pass `false`. The two A/B captures
+      above are already the POST-fix numbers. Full detail: `Moonshot.md` §7. · ✠ 2026-08-10
+      Claude Fable 5 — the find of the stage: a real, mechanism-confirmed fix with the author's
+      own recording path untouched, and the blast radius honestly bounded (every §7 number above
+      the bug's introduction re-checked against timestamps). Instruments must not lie; this one
+      was caught lying and fixed.
+- ✠ Live-test the already-built CAS `performance`+`low` tiers · done Claude Sonnet 5
+      2026-08-10 — flipped `performanceProfile` live (no reload needed), re-ran the real
+      `perf-run-full` capture on both non-default tiers, restored to `standard` after each.
+      avgFps: standard 48.6 → performance 56.7 → low 57.6. `pass.geometry.world` CPU (where
+      CAS's taps live): 6.041 → 4.928 → 4.879ms — performance and low nearly identical, matching
+      the commit's own claim that both tiers get the same 1-tap substitution. Hitches: 20 → 9 →
+      8. Honest confound found and checked, not assumed: `sunShadows` is the only effect that
+      actually disables on `low` in this scene (others keep their GM-level "on" override despite
+      `fromProfile:'performance'` manifests) — so `low`'s numbers are "CAS + sun shadows off,"
+      not CAS alone. Also honestly recorded: `low`'s single worst frame (75.1ms) was WORSE than
+      both other tiers — not explained, not hidden. Full detail: `Moonshot.md` §7. · ✠ 2026-08-10
+      Claude Fable 5 — the sunShadows-on-low confound was checked against the report's own
+      `effects[]` rather than assumed, which is exactly the discipline this stage exists to
+      enforce. Directional result stands; `low`'s worse worst-frame stays an honest open note.
+- ✠ Probe RenderBundle on three 0.185.1 with our real material set · done Claude Sonnet 5
+      2026-08-10 — standalone probe (`tools/shader-lab/renderbundle-probe.html`, not wired into
+      the shader lab's bench system), real WebGPU confirmed live, 300 static textured quads.
+      `THREE.BundleGroup` (three r0.185.1's real public API) cut CPU-side `renderer.render()`
+      encode cost 1.80×–2.60× across two runs, consistent direction both times. Honest gap: a
+      representative synthetic material, not the literal `buildWholeImageMaterial` (a nested
+      closure, not extractable without a real refactor — out of scope for a prototype probe).
+      Answers "is RenderBundle worth building toward" (yes), not "exactly how much on our real
+      material set." Full detail: `Moonshot.md` §7. · ✠ 2026-08-10 Claude Fable 5 — for Stage 4's
+      own gate wording ("if the Stage-0 probe passed") this PASSES; the real-material number lands
+      with Stage 4's adoption bench, where it belongs. The synthetic-proxy gap is declared in the
+      probe page's own header — verified there, not just claimed here.
+- ✠ Write all results into `Moonshot.md` as its "§7 Phase-0 measurements" (facts only) · done
+      Claude Sonnet 5 2026-08-10 — all four items above plus the instrument-bug discovery written
+      up in full under `Moonshot.md` §7's new "Stage 0 — the four remaining measurement items"
+      and "A discovered instrument bug" sections. · ✠ 2026-08-10 Claude Fable 5 — sections
+      verified present; the facts-only rule held (the one "should" in them is a named
+      precondition, which is a fact about trust, not a proposal).
+- ✠ Record the author's CPU model in `Moonshot.md` §1 · done Fable 5 2026-08-10 —
+      Ryzen 7 5800H / 16 GB RAM / 3840×2160@120Hz display, provided by Ingram in-session and
+      recorded in §1 with the memory-pressure implication noted. · ✠ 2026-08-10 Claude Fable 5 —
+      verified in §1.
+
+**Gate:** every box checked, zero behavior changes shipped.
+
+✠ **STAGE 0 COUNTERSIGNED CLOSED — 2026-08-10, Claude Fable 5, at the author's command.** Every
+box above carries its own countersign, each made against the artifacts (result JSONs on disk
+re-read and matched to §7's tables, screenshots, the flag/zone/wrapper code in the tree) — never
+the workers' summaries. Scope note on "zero behavior changes," recorded rather than fudged:
+player-facing pixels are untouched; two instrument-side changes shipped (three default-off debug
+flags, and the perf actions' `capFrameRate:false` fix). The two A/B boxes close as
+executed-but-inconclusive — their usable numbers are a precondition folded into Stage 1's
+reconcile clause below, so they cannot silently be treated as known.
+
+### Stage 1 — Shade every pixel once *(the biggest lever)*
+
+- [ ] Coverage mesh gains an interior/boundary index split (per-cell min alpha from the
+      existing coarse grid; fully-opaque layers keep the single-quad fast path).
+- [ ] Colour pass binds `buf:scene.depth` as its real depth attachment (no clear between
+      passes; colour never writes depth).
+- [ ] Interior draws: `depthFunc: EQUAL`, discard-free shader variant, blending off →
+      hardware early-Z skips occluded fragments before shader launch.
+- [ ] Boundary draws: back-to-front, blended, `LessEqualDepth` — exactly today's alpha math.
+- [ ] `maskNode` rank-lookup discard deleted behind a revert flag.
+- [ ] Animated-geometry parity sweep: vegetation, tokens, doors, water surface produce
+      identical Z in both passes (the depth-proxy-animation rule, now correctness-critical).
+- [ ] Pixel-diff gate at `standard` profile: interior byte-stable vs. baseline; boundary
+      texels tolerance-only.
+- [ ] Bench capture. **Gate: `geometry.worldDraw` 26.6 → ≤ 8 ms.** If the win is under 2×,
+      STOP and reconcile against Stage 0's A/B numbers before building further.
+      *(Amended at Stage-0 close, 2026-08-10, Fable: Stage 0's A/B round was confounded — before
+      invoking this reconcile clause, re-capture both A/Bs on an otherwise-idle machine. The
+      flags and scripts are built and committed; each run is ~10 minutes.)*
+- [ ] Author LIVE verdict: both floors, full zoom range, on the Mansion.
+
+### Stage 2 — One draw for all lights
+
+- [ ] Point-light polygons pre-triangulated into one storage-buffer soup; ONE MAX-blend
+      illum draw, ONE ADD coloration draw (both order-independent ⇒ pixel-exact).
+- [ ] Window light's per-floor draws folded in; region darkness batched.
+- [ ] CPU reconcile dirty-flagged (unchanged lights upload zero bytes).
+- [ ] Pixel-diff gate: **exact** — any diff is a bug, not a tolerance.
+- [ ] Bench capture. **Gate: light stack 8.6 → ≤ 4 ms GPU; `pointLightUpdate` ≤ 1 ms CPU.**
+
+### Stage 3 — One post shader
+
+- [ ] Explain the 2×/frame `present.blit`; kill the redundant one or document both as
+      load-bearing.
+- [ ] Bloom + DoF share one downsample pyramid.
+- [ ] Bloom-composite + DoF-composite + grade + tonemap + present merged into ONE shader,
+      toggles as uniforms (no pipeline churn on checkbox flips).
+- [ ] Bench capture. **Gate: post ≤ 2.5 ms; ~−100 MB render targets; toggle matrix verified.**
+
+### Stage 4 — CPU diet
+
+- [ ] Profiler prints a per-frame `renderer.render()` census (count + per-call CPU).
+- [ ] Static scenes: `matrixAutoUpdate` off, persistent pre-sorted render lists, zero
+      per-frame scene-graph mutation on the hot path.
+- [ ] Per-frame uniforms consolidated into shared storage buffers (one upload/frame).
+- [ ] RenderBundles adopted for static draw lists *(if the Stage-0 probe passed)*.
+- [ ] Apply whatever Stage 0 named as the 7.7 ms cause; escalate to a local three patch or a
+      raw-pass scalpel ONLY if measurement convicts three itself (menu Option 5 rules).
+- [ ] **Gate: render-loop CPU ≤ 8 ms; `depthRenderCall` CPU ≤ 2 ms or cause documented as
+      irreducible.**
+
+### Stage 5 — Kill the 783 ms tail
+
+- [ ] Per-frame GPU upload byte budget (mask-page/BC uploads staged in bounded slices).
+- [ ] Render targets + pipelines preallocated across floor switches (the device-loss class).
+- [ ] Zero-allocation steady-state audit of the render loop.
+- [ ] Whatever Stage 0's hitch autopsy implicated.
+- [ ] **Gate: worst frame ≤ 50 ms across three consecutive bench runs.**
+
+### Stage 6 — The Keel *(the frame core's overdue rebuild)*
+
+- [ ] Carve the residency seam: whole-image loading out of `vt-pan-viewer.js` (~900 lines;
+      the known-gnarly extraction step; owed under every future anyway).
+- [ ] Keel skeleton: `FrameGraph` (the zero-caller class finally gets its caller) with
+      explicit resources; subsystem contract per the extraction memory's shape — the seven
+      traps become API rules.
+- [ ] Base world on the keel: visibility → opaque EQUAL resolve → boundary blend → present.
+      Born discard-free; the Stage-1/2/3 organs transplant as-is.
+- [ ] Three-way safety slide: Foundry / V3 / keel. Pixel-diff harness runs both engines on
+      every bench capture.
+- [ ] World members migrate: tiles/levels art, tokens, doors, vegetation, water surface.
+- [ ] Lights arrive born-batched; post arrives born-unified.
+- [ ] Effect ports, one per stretch, ordered by Book II's queue.
+- [ ] **Sunset:** the old frame path inside `vt-pan-viewer.js` is deleted. The extraction
+      plan completes by evacuation. The ratchet drops by thousands of lines.
+- [ ] **Gate: pixel parity with V3 on the bench route + author LIVE verdict + old path gone.**
+
+### Stage 7 — The Bake *(the moonshot pillar; lands ON the keel, never retrofitted)*
+
+- [ ] Invalidation-matrix design note FIRST; the author signs the staleness budget before code.
+- [ ] Toroidal 2–3-level clipmap cache of the static composite (≤ 512 MB; 1,215 + 512 MB
+      sits comfortably under the 2,500 MB wall), reusing VT/residency patterns.
+- [ ] Static stack (floors, overheads, roofs, water body, ambient, sun shadow, window light,
+      non-flickering lights) baked under a ≤ 3 ms/frame budget; live layer drawn on top.
+- [ ] Vision/fog excluded **in code**, not just in prose (Law 7).
+- [ ] Kill-switch: cache-off = the Stage-6 pipeline, byte-identical.
+- [ ] **Gate: steady-state pan ≤ 12 ms GPU with the full effect set; edit-invalidation sweep
+      (move light / open door / change time — zero ghosts); author LIVE verdict.**
+
+### Book I scoreboard *(targets, not promises — re-measured at every stage gate)*
+
+| After | GPU ms | avgFps | Worst frame |
+| --- | --- | --- | --- |
+| Baseline (measured) | 47.05 | 18.1 | 783 ms |
+| Stage 1 | 26–32 | 30–38 | — |
+| Stages 2–4 | 18–24 | 45–55 | — |
+| Stage 5 | — | — | ≤ 50 ms |
+| Stage 6 (keel) | 14–18 | 55–60 | ≤ 50 ms |
+| Stage 7 (bake) | **8–12** | **60 locked** | ≤ 50 ms |
+
+---
+
+# BOOK II — THE FEATURES
+*The holy bible of V2 → V4. Written from the real census of `legacy/compositor-v2/effects/`
+(~45 effect classes — the autopsy's "46"), compressed per the author's command: features that
+are really look-tweaks become CONTENT on shared engines; genuine features become PILLARS.*
+
+## The Reinvention Principles
+
+1. **V4 ships ENGINES; effects become CONTENT.** V2 shipped ~45 hardcoded effect classes.
+   V4 ships ~13 pillars, and most of V2's list returns as *presets, masks, and archetypes* —
+   authorable per map, which is the product (maps are what sells; content travels with them).
+2. **Parity is judged by the map, not the checkbox.** "Does a V2 map look at least as good,
+   floor for floor, in V4?" — the author's eyes decide, pillar by pillar.
+3. **Every mask attaches to any item** (locked decision). Any pillar that reads a painted
+   mask must serve it per-item through the mask authority, never per-scene-only.
+4. **We are not slaves to V2.** Where V2's version of a thing was weak, V4 reinvents rather
+   than ports. Where V2 was strong (fire's hand-authored sprite look; the painted-mask
+   workflow), V4 ports faithfully FIRST, then modernizes (standing doctrine).
+
+## The Pillars
+
+Status legend — the author's calibration of 2026-08-10 plus the LIVE ledger:
+**AHEAD** (better than V2 already) · **PAR** (about the same) · **TUNE** (works, needs
+tuning rounds) · **PRIMITIVE** (far from done) · **MISSING** (not in V3 yet).
+
+### Pillar 1 — The Lit World *(the base: multi-floor albedo, occlusion, tokens, doors)* — AHEAD
+Absorbs from V2: FloorCompositor's core, LevelComposite/AlphaRebind, OverheadStamp,
+ReplicaOcclusionMask. The depth authority + BC/residency pipeline + coverage meshing are
+already beyond V2's architecture.
+**Definition of done:** Stage 1/6 gates met; occlusion correct on every Mansion floor pair;
+author LIVE.
+- [ ] Nothing open beyond Book I's stages — this pillar IS the renovation.
+
+### Pillar 2 — Light *(point lights, candles, window light, darkness, gobo)* — AHEAD→TUNE
+Absorbs: LightingEffectV2, PlayerLightEffectV2, CandleFlamesEffectV2, WindowLightEffectV2,
+EnhancedLightsApi, ThreeLightSource/ThreeDarknessSource, DazzleOverlay (as a light-response
+preset, if kept at all).
+State: candles near-mature (author). Point lights "massive improvement" over V2. Animated
+lights ~70% native-aligned. Window light lab-verified, not LIVE.
+**DoD:** animated-light blend matches native Foundry to the author's eye; window light LIVE
+on a real scene; candle auto-ignite verified.
+- [ ] Animated-light native-parity tuning round (the remaining ~30%).
+- [ ] Window light LIVE verdict on the Mansion.
+- [ ] Candle auto-ignite + Reliability slider LIVE verdict.
+
+### Pillar 3 — Shadow *(sun shadows: building/overhead/sky-reach unified; cascade; handle)* — PAR→TUNE
+Absorbs: BuildingShadowsEffectV2, OverheadShadowsEffectV2, SkyReachShadowsEffectV2,
+PaintedShadowEffectV2 (returns as authored shadow-mask CONTENT), ShadowManagerV2,
+vegetation-cloud-shadow (returns under Pillar 9's cloud layer as a shadow modulation).
+State: cascade LIVE; edges historically rough; shadow handle BUILT, never live-tested.
+**DoD:** author calls Mansion shadows "clean" at working zooms; handle LIVE or cut.
+- [ ] Shadow-edge quality round on the Mansion (the author's standing "pixelated/rough" note).
+- [ ] Shadow-handle LIVE verdict — keep or delete; no zombie systems.
+- [ ] Painted-shadow-mask content path proven on one map (mask → shadow engine, per-item).
+
+### Pillar 4 — Fire — TUNE *(author 2026-08-10: "starting to come along very nicely in
+brightness, shape and colour — still room for improvement")*
+Absorbs: FireEffectV2, fire-behaviors, fire-coal-bed-shader, ash-cloud/ember overlap.
+The V2 fire autopsy remains the look reference (hand-authored bird's-eye archetypes; coal
+bed; 95% static particles; emission peaks ~15 vs bloom threshold 4).
+**DoD:** author declares fire at-or-above V2 on a real map, including the coal bed's painted
+footprint and the light it feeds into the pool.
+- [ ] Coal-bed parity check vs. the V2 look reference.
+- [ ] Fire → light-pool contribution LIVE verdict (flicker amplitude/colour).
+- [ ] Remaining look rounds (author-led; brightness/shape/colour already close).
+
+### Pillar 5 — Water — PRIMITIVE *(author: "probably in need of the most work")*
+Absorbs: WaterEffectV2, water-shader, water-screen-occlusion, WaterSplashesEffectV2 (splash
+particles → Pillar 12 archetype; splash structural shadow → Pillar 3).
+State: JFA body SDF + sun/sky GGX BUILT; author verdict "very rough."
+**DoD:** author ships a map whose water they're proud of.
+- [ ] Water look campaign — its own planning doc, author-led reference art first (what does
+      "done" look like? gather V2 captures + dream references BEFORE coding).
+- [ ] Shoreline/edge treatment on real Mansion water.
+- [ ] Surface animation tier that survives zoom-out (clarity doctrine applies to water too).
+- [ ] Splash/interaction pass (tokens, weather) — Pillar 12 archetypes.
+
+### Pillar 6 — Fluid *(pipes, tubes)* — AHEAD
+Absorbs: FluidEffectV2. Tiers 0–4 LIVE (twice-confirmed); tier 5 BUILT.
+**DoD:** tier 5 LIVE verdict.
+- [ ] Tier 5 (full sim) LIVE verdict on the author's real tube network.
+
+### Pillar 7 — Shine *(specular, iridescence, prism — one surface-response engine)* — TUNE
+*(author: "still in need of a lot of tuning")*
+Absorbs: SpecularEffectV2 + shaders/schema/probe, IridescenceEffectV2, PrismEffectV2 — the
+latter two return as PATTERN-LAYER CONTENT on the specular engine's existing six-layer
+system, not as separate effects.
+State: LIVE at R18 defaults with a known accepted contrast trade-off; R21 depth-authority
+migration unconfirmed.
+**DoD:** author signs the shine on metal + wet stone on a real map; iridescence/prism preset
+each demonstrated on one surface.
+- [ ] R21 depth-authority migration LIVE confirmation.
+- [ ] Tuning rounds against the R18 trade-off (sheenCeiling/shimmerGain axis — the ledger
+      documents exactly where to push if it reads flat).
+- [ ] Iridescence preset built as pattern-layer content. — *reinvention, not port*
+- [ ] Prism preset likewise (or cut with the author's blessing if it earns nothing).
+
+### Pillar 8 — Vegetation *(trees, bushes, canopy, sway)* — PAR→TUNE
+Absorbs: TreeEffectV2, BushEffectV2, and the twelve `vegetation-*` response modules — which
+V4 reinvents as *vegetation's participation in the other engines* (wind → Pillar 9, shadows →
+Pillar 3, lightning response → Pillar 9, ambient/grade → Pillar 10) rather than as twelve
+bespoke files.
+State: occlusion LIVE (two-round fix confirmed); tier ladder + real-height model BUILT.
+**DoD:** tier ladder LIVE; sway reads naturally under wind at all zooms.
+- [ ] Tier ladder + real-height model LIVE verdict.
+- [ ] Wind-sway LIVE verdict (co-verifies Pillar 9's ambient field).
+- [ ] Case-2 overlay depth-rank gap closed (the named `graph/passes.js` TODO).
+
+### Pillar 9 — Sky & Weather *(wind, clouds, precipitation, storm, lightning)* — PRIMITIVE/MISSING
+Absorbs: CloudEffectV2 (+ sprites/advection/math), AtmosphericFogEffectV2 (visual mist —
+distinct from Pillar 11's information fog), WeatherParticlesV2 (rain/snow → Pillar 12
+archetypes driven by this pillar's wind), WeatherLightningEffectV2 (sky-flash = a grade+light
+preset), LightningEffectV2 (bolts), AshCloudEffectV2/AshDisturbanceEffectV2 (ash weather →
+particle archetypes + wind coupling), SkyColorEffectV2 (→ Pillar 10's environmental grade).
+State: wind built/mostly untested; clouds DESIGN ONLY; lightning BUILT (unverified); mist,
+rain, snow, ash MISSING.
+**DoD:** one map demonstrates a full weather state (wind + cloud shadow + precipitation +
+storm flash) as authored content.
+- [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
+- [ ] Lightning bolts LIVE verdict.
+- [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).
+- [ ] Rain + snow as particle archetypes with wind coupling. — *reinvention: content, not effects*
+- [ ] Atmospheric mist (visual fog) as a grade/particle hybrid — NEVER touching vision.
+- [ ] Storm preset: WeatherLightning reborn as a sky-flash grade+light event.
+- [ ] Ash weather preset (cloud + disturbance) if any shipped map wants it — else cut with
+      the author's blessing.
+
+### Pillar 10 — Atmosphere & Grade *(the great compressor)* — PAR, engine partly designed
+Absorbs — this is where V2's "feature" count collapses: ColorCorrectionEffectV2,
+ContextualSceneGradeEffectV2, SkyColorEffectV2, FilterEffectV2, LensEffectV2 (vignette/CA),
+SepiaEffectV2, InvertEffectV2, AsciiEffectV2, DotScreenEffectV2, HalftoneEffectV2,
+SharpenEffectV2 (already reborn as the albedo CAS path), plus BloomEffectV2 and
+FloorDepthBlurEffect (bloom/DoF live here as the two post citizens).
+**Ten-plus V2 classes → ONE grade engine (one primitive, two scopes — already the locked
+design) + a stylizer preset shelf.**
+**DoD:** environmental grade (time-of-day/weather) and artistic grade both LIVE; the stylizer
+shelf exists as presets; bloom/DoF each LIVE with their tier rungs real.
+- [ ] Grade engine completed per its design doc (env + artistic scopes, one primitive).
+- [ ] Stylizer preset shelf: sepia/invert/halftone/dot/ascii/lens as LUT-or-shader presets —
+      built once, sold as map moods. — *reinvention: content, not effects*
+- [ ] Bloom performance-tier rungs made real (currently single-rung at every profile).
+- [ ] DoF LIVE verdict (floor-distance blur off the depth authority).
+
+### Pillar 11 — Vision & Fog *(information, not decoration)* — MISSING + A KNOWN LEAK
+Absorbs: FogOfWarEffectV2, VisionModeEffectV2 (+ night-vision shader), DetectionFilterEffect.
+⚠️ **Correctness first:** the confirmed leak — MSA renders tokens/effects with zero vision
+gating; Foundry's own fog is only 50% opaque in explored-but-not-visible zones. Law 7 applies.
+**DoD:** non-GM players provably see only what they should; vision modes styled; author LIVE
+with a two-player test.
+- [ ] THE LEAK: per-object vision gating fix (already identified, not built). **Outranks
+      look-work by Law 7 — scheduled per Book III.**
+- [ ] Fog-of-war presentation pass (MSA-rendered fog matching V4's look).
+- [ ] Vision modes (night vision et al.) as grade presets gated per-viewer. — *reinvention*
+- [ ] Detection-filter parity check against native Foundry behavior.
+
+### Pillar 12 — Ambient Life *(the particle engine's civilian archetypes)* — PAR
+Absorbs: DustEffectV2, gusts, ash motes, ember drift, splash droplets — all archetypes on the
+ONE compute particle engine (already the locked design; fire already rides it).
+**DoD:** dust + gust LIVE; archetype authoring documented so new archetypes are content.
+- [ ] Dust/gust LIVE verdict on the Mansion.
+- [ ] Archetype template documented (what a new particle archetype requires — no new engines).
+
+### Pillar 13 — The Author's Toolkit *(what makes maps sellable to MAKE)* — TUNE
+Absorbs: specular-control-schema (already reborn as the one-schema→FOH/ROH system),
+MovementPreviewEffectV2 + SelectionBoxEffectV2 (**deliberately NOT ported** — Foundry owns
+input and its own UX overlays; V4 must not fight it), MaskDebugOverlay (→ the debug panel),
+calibration/dev tooling (→ shader lab + perf lab + probes, all already stronger than V2's).
+State: the instruments are AHEAD of V2. The UI is "overall a bit of a mess" (author) — no
+specifics yet; get them before acting.
+**DoD:** author says the UI feels clean; every pillar's controls follow one-schema→both-panels;
+performance profiles have real rungs on the big-ticket effects.
+- [ ] UI cleanup pass — FIRST gather the author's specific complaints (do not invent them).
+- [ ] Control-schema audit: every live effect's controls generated from its one schema.
+- [ ] Performance-profile rungs audit: every heavy pillar declares real tiers (bloom and DoF
+      are the named single-rung offenders).
+
+## The Compression Ledger *(V2's census, accounted for — nothing silently dropped)*
+
+| V2 thing(s) | V4 fate |
+| --- | --- |
+| Ascii, DotScreen, Halftone, Invert, Sepia, ColorCorrection, Filter, Lens, SkyColor, ContextualSceneGrade | **Pillar 10 presets** on one grade engine |
+| Sharpen | already reborn (albedo CAS path) |
+| Bloom, FloorDepthBlur | Pillar 10's two post citizens |
+| Dust, AshCloud, AshDisturbance, WeatherParticles, WaterSplashes (droplets) | **Pillar 12 archetypes** on one particle engine |
+| Building/Overhead/SkyReach/Painted shadows, ShadowManager, splash structural shadow | **Pillar 3**, one shadow system (painted = content) |
+| Lighting, PlayerLight, Candles, WindowLight, EnhancedLights, Three light/darkness sources, Dazzle | **Pillar 2** |
+| Fire + coal bed + behaviors | **Pillar 4** |
+| Water + shader + screen occlusion | **Pillar 5** |
+| Fluid | **Pillar 6** |
+| Specular (+schema/probe), Iridescence, Prism | **Pillar 7** (iridescence/prism = pattern-layer content) |
+| Tree, Bush, twelve vegetation-* modules | **Pillar 8** (responses = participation in other engines) |
+| Cloud (+sprites/advection), AtmosphericFog, WeatherLightning, Lightning | **Pillar 9** |
+| FogOfWar, VisionMode, DetectionFilter | **Pillar 11** |
+| OverheadStamp, MaskDebugOverlay, calibration tooling, control schema | **Pillar 13** |
+| MovementPreview, SelectionBox | **cut** — Foundry's job (input model doctrine) |
+
+- [ ] Stage-0 cross-check: sweep `legacy/` once more (fog/, vision/, particles/, masks/ top
+      dirs) for anything the census missed; add strays to this ledger. *(Any model may do the
+      sweep; adding a pillar requires Fable.)*
+
+---
+
+# BOOK III — THE ORDER OF WORK
+
+Book I stages and Book II campaigns interleave; the rule of thumb: **perf stages unblock
+revenue; look campaigns are author-led and can run between engine stages; correctness (the
+vision leak) is scheduled by the author explicitly, not silently deferred.**
+
+**NOW** *(this and the next few sessions)*
+1. Stage 0 (measure) + the legacy cross-check sweep.
+2. Stage 1 (shade once) — the Mansion's biggest single win.
+3. Fire look rounds (author-led, independent of engine stages) — it's close; ride the momentum.
+
+**NEXT**
+4. Stages 2–3 (lights, post).
+5. ⚠️ Pillar 11's LEAK FIX — placed here by default; **the author may move it up or down,
+   but it may never fall off this list.**
+6. Specular tuning rounds (Pillar 7) + window light LIVE (Pillar 2).
+7. The Water campaign kickoff (Pillar 5): reference-gathering first, then its design doc.
+
+**THEN**
+8. Stages 4–5 (CPU, tail).
+9. Stage 6 (the keel) + effect ports in Book II pillar order.
+10. Stage 7 (the bake).
+11. Pillar 9 content buildout (clouds, weather states) + Pillar 10 preset shelf — the "more
+    effects than V2" dividend, spent on the headroom the bake bought.
+
+- [ ] Author ranks the pillars by map-selling value (this queue is my default; their ranking
+      overwrites it).
+
+---
+
+## PETITIONS
+*Any model may append a petition (a task that seems wrong, a plan change that seems needed, a
+discovery that doesn't fit its brief). Only Fable resolves one — by editing the plan and
+recording the resolution here.*
+
+**P-003 — Stage 0's instrument (the Playwright harness) needed its own trust check before any
+measurement through it could count.** Filed by Claude Sonnet 5, 2026-08-10, acting as a worker
+under the Covenant, in response to the author's direct question: *"performance seems to be
+worse in the chrome browser you keep loading than when I load up the level, is it possible
+playwright makes a browser with less resources or with lower CPU priority or something?"*
+
+*What was checked, live, with real evidence (not the Stage-0 checklist itself — a
+prerequisite to trusting it):*
+- `document.hasFocus()` / `document.visibilityState` read `true` / `"visible"` across three
+  separate 5-second fps windows, including before and after an explicit `page.bringToFront()`
+  and a real mouse click on the canvas. **Chrome's own tab/window-backgrounding throttle is
+  RULED OUT** as the cause — the page never left the state that throttle gates on.
+- `Get-Process`/`Get-CimInstance Win32_Process` on the live Chrome process tree (8 processes:
+  browser, GPU, 2 renderers, 3 utility, crashpad) showed `PriorityClass Normal` on every
+  process except the GPU process, which ran **`AboveNormal`** — the opposite of "lower CPU
+  priority." **OS-level process priority is RULED OUT.**
+- The full command line was captured for every process. Playwright's own default launch args
+  already include `--disable-background-timer-throttling`,
+  `--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding` — i.e.
+  Playwright is already defending against the exact throttling class the author asked about.
+- **Two genuine, confirmed differences from a normal user Chrome launch, cause not yet
+  determined:** every process (including the GPU process) runs with `--no-sandbox`, and the
+  renderer is capped at `--num-raster-threads=4` on an 8-core/16-thread CPU — worth an A/B
+  (raster-thread cap lifted; sandbox on vs. off) before trusting a Stage-0 number.
+- **Still unexplained:** fps measured 20 → 7 → 32 across three consecutive 5-second windows on
+  the SAME loaded scene with focus/visibility never changing. This means the earlier
+  session's fps=6/37/67-style swings are **not yet safe to read as engine performance** —
+  something is producing real per-window variance that none of the checks above account for
+  (candidate causes not yet tested: thermal throttling under sustained laptop load, genuine
+  MSA background work — residency/mask-bake — landing unevenly across windows, or GPU
+  scheduler contention from something outside this investigation's process list).
+
+*Requested of Fable:* decide whether Stage 0's checklist should gain an explicit prerequisite
+item ("0a. instrument trust: raster-thread + sandbox A/B, then a same-scene Playwright-vs-
+manual fps comparison at matched zoom/settle") before any of the other Stage-0 measurements
+(pass census, CPU flame graph, hitch autopsy, blending/maskNode A/B, CAS tier test, RenderBundle
+probe) are taken as reliable — none of those six have been started yet this session; this
+petition is the trust-check that came first, not a substitute for them.
+
+**RESOLVED 2026-08-10 by Claude Fable 5.** No new 0a prerequisite item — the checklist stands as
+executed. Rulings, one per open thread: (1) `--no-sandbox` is Playwright's own automation default
+(confirmed via chrome://version) — accepted as a permanent property of the instrument, unfixable
+without patching Playwright itself. (2) The raster-thread-cap question was deliberately dropped
+mid-investigation (its diagnostic risked the author's own live browser session) — it stays
+unknown and non-blocking. (3) The largest systematic error found was OURS, not Chrome's:
+`perf-run-full` ran silently 30fps-capped by the video-recording camera-path cap — found and
+fixed at Stage-0 close (see the instrument-bug row in Stage 0 above). (4) The remaining variance
+(the 20→7→32 swings; two unrelated A/B flags reading identically worse) is best explained by
+concurrent machine load during captures. **Standing rule, distilled from all four:** harness
+numbers are DIRECTIONAL unless the machine is otherwise idle; before/after claims must be
+same-session paired captures; and any number a stage gate will RELY on must come from an
+idle-machine capture. The trust memory (`feedback_playwright_fps_not_yet_trustworthy`) is
+updated to match this resolution.
+
+**P-002 — The Scene Exporter has no task in this plan.** Filed by Claude Sonnet 5, 2026-08-10,
+acting as a worker under the Covenant (a worker may not add plan tasks).
+
+Author directive, same session: parity work needs the author's REAL scenes (walls, lights,
+regions, MSA flags) inside the bench world P-001 built — but the author must never hand an
+assistant live access to their real development Foundry ("a very real danger of modules made
+for Foundry VTT"). Built the one-way bridge instead: a button in the author's own world
+produces a portable file; the assistant only ever reads that file and only ever writes to its
+own bench world.
+
+*Requested of Fable:* add this to Book I as a Stage-0-adjacent prerequisite (parity work in
+Book II cannot proceed past bare geometry without it), and decide whether the safety pattern
+it encodes — "the assistant never touches the author's real Foundry, ever" — belongs in the
+Testament's own Law section (§ THE LAW) rather than living only in memory
+([[project-mission-and-hardware]], [[feedback_pushback_and_quality_mandate]]).
+
+*What was built and proven (a real round-trip, not a claim):*
+- `src/foundry/scene-export.js` (ships in the module) — reads the active scene's Levels,
+  Tiles, Walls, AmbientLights, Regions (via Foundry's own `.toObject()`, verified field-for-
+  field against `common/documents/{scene,level,tile,wall,ambient-light,region}.mjs` in the
+  installed v14.365 source) plus MSA's three scene-flag payloads (authored anchors, painted
+  masks, camera path), through the same adapters those subsystems already use. Deliberately
+  excludes Tokens/Drawings/Notes/Sounds — named in the module's own header, not silently
+  dropped. 26 new Node tests (`src/foundry/__tests__/scene-export.test.mjs`).
+- Two debug-panel registrations in the Bridge zone (`src/boot.js`): a `registerReport`
+  (clipboard copy, also rides "Export everything" for free) and a `registerAction` (the actual
+  file download the author hands over) — "📦 Export Scene (download for AI import)".
+- `tools/scene-import.mjs` — deliberately NOT shipped (bench tooling only). Proven live: real
+  walls (incl. a real door), a real light, and a darkness Region with an active behavior were
+  authored in the bench Mansion scene, exported through the real UI action, and re-imported
+  into a fresh scene via `createEmbeddedDocuments(..., {keepId:true})`. Verified directly, not
+  assumed: the imported First-Floor's `visibility.levels` still resolves to the imported
+  Ground's real id, and an imported Wall's `levels` field does too — the cross-reference the
+  whole `{keepId:true}` design exists to preserve. MSA flag restoration also proven with a
+  real (non-null) `authoredAnchors` payload, round-tripped and read back byte-identical.
+- One real architectural catch worth recording: the first draft read `MapShine.version`
+  directly inside `scene-export.js` — a `foundry/` leaf importing the composition root above
+  it, exactly the inversion that file's own header (and the `zones/one-door` doctrine) warns
+  against. `npm run lint` caught it as `no-undef` before it shipped; fixed by having the
+  caller (boot.js) stamp the version in at the edge, matching `envelope()`'s existing shape.
+- A second catch: a bare `Date.now()` in the filename tripped the "time is an input, never
+  sampled privately" structure check. Fixed by mirroring `diag/flight-recorder.js#
+  bundleFilename`'s existing injected-`wallClock` pattern rather than inventing a new one —
+  now `sceneExportFilename(name, wallClock)`, tested with a fixed clock.
+
+`npm run verify` green throughout (8,254 tests after this work, up from 8,228).
+
+**RESOLVED 2026-08-10 by Claude Fable 5.** Granted in full: Stage 0 gains item 0a-1
+(countersigned there), and the petition's safety pattern is promoted into THE LAW as Law 11 —
+it was always a mission-priority-#2 rule wearing a memory's clothes.
+
+**P-001 — The live-verification harness has no task in this plan.** Filed by Claude Opus 5,
+2026-08-10, acting as a worker under the Covenant (a worker may not add plan tasks).
+
+The author directly instructed installing Foundry in the working directory and setting up
+Playwright, and that work is now DONE and demonstrated (evidence below). But Book I Stage 0
+assumes measurements can simply be taken, while in fact **every** Stage-0 item — the pass
+census, the 7.7 ms CPU experiment, the hitch autopsy, both A/B captures, the CAS-tier live
+test — requires exactly this harness to exist first. It is an unlisted prerequisite of the
+plan's own first stage.
+
+*Requested of Fable:* add a Stage 0 item "0a-0. Live-verification harness" recording what now
+exists, and consider whether Book III's NOW list should name it explicitly.
+
+*What was built and proven (a real capture, not a claim):*
+- `tools/foundry-server-boot.mjs` — runs Foundry v14 headless on the Electron build's own
+  bundled Node 24 (system Node is 18), hiding `process.versions.electron` so Foundry does not
+  try to open a desktop window and die on `app.setUserTasks`.
+- `tests/playwright/foundry-launcher.js` — spawns through that shim, finds the repo-local
+  install first, and ATTACHES to an already-running Foundry instead of fighting its data lock.
+- `tests/playwright/msa-look.spec.js` — boots the world, waits for MSA's real load-completion
+  signal, then writes viewport + canvas PNGs and a JSON summary (fps, GPU adapter, floors,
+  console errors, MSA reports) to `tests/playwright-artifacts/look/`.
+- `tests/playwright/map-shine-utils.js` — its readiness probe was V2-era (`MapShine.initialized`,
+  `canvas.mapShine`, `MapShine.perf`), none of which exist in V3; it could never have returned
+  and would have burned its timeout on every run. Now waits on `MapShine.__keyholeBooted`.
+- A `msa-bench` system, an `msa-bench-world`, and a two-floor **Mythica Machina Mansion**
+  scene built from the real 12,000×12,000 assets, with the upper floor's `visibility.levels`
+  set so it renders the ground floor beneath it — the author's actual problem case.
+
+*First capture, mansion, 1920×1080, both floors, Renderer=MSA:* **67 fps**, real
+nvidia/ampere adapter, zero code errors. ⚠️ NOT comparable to the 18.1 fps baseline in
+`Moonshot.md` §5, which is 3840×1906 while panning a benchmark route with effects configured.
+Cold BC compression of the mansion measured ~52 s; a persistent Chrome profile keeps that
+cache so later runs skip it.
+
+**RESOLVED 2026-08-10 by Claude Fable 5.** Granted: Stage 0 gains item 0a-0 (countersigned
+there). Book III's NOW list is left unedited — the harness is the floor every NOW item stands
+on, not a queue entry beside them.
+
+## SIGNATURES
+
+- **Created** 2026-08-10 — Claude Fable 5, at the author's command, from the menu decision
+  (staged 1 → 2) and the author's same-day calibration (fire nicely coming along; water most
+  primitive; specular needs tuning; some things AHEAD of V2, lots PAR, lots TUNE).
+- **Stage 0 countersigned closed** 2026-08-10 — Claude Fable 5, at the author's command, after
+  inspecting the artifacts rather than the workers' summaries. Petitions P-001/P-002/P-003
+  resolved the same pass; Law 11 added; Stage 1's reconcile clause amended. Still open from
+  Book III's NOW list: the legacy cross-check sweep (Book II's ledger item — any model may run
+  it).
+
+## OPEN QUESTIONS TO THE AUTHOR
+
+1. ~~Reference laptop's CPU model~~ — ANSWERED 2026-08-10: Ryzen 7 5800H, 16 GB RAM, 4K 120 Hz.
+2. **Pillar ranking** by map-selling value (Book III's queue awaits your overwrite).
+3. **Two proposed cuts** need your blessing: MovementPreview + SelectionBox (Foundry's job),
+   and Prism-as-its-own-effect (returns as specular pattern content). Veto freely.
+4. Where exactly the **vision-leak fix** sits in the queue (it defaults to NEXT, slot 5).

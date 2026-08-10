@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>RenderBundle Probe (V4-Testament Stage 0)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        background: #1a1a1a;
+        color: #ddd;
+        font-family: monospace;
+        margin: 0;
+        padding: 12px;
+      }
+      canvas {
+        border: 1px solid #444;
+      }
+      #status {
+        white-space: pre-wrap;
+        font-size: 13px;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      V4-Testament Stage 0: "Probe RenderBundle on three 0.185.1 with our real
+      material set." NOT wired into the shader-lab's bench/scenario system —
+      this is a one-off, throwaway prototype probe, not a permanent lab bench.
+
+      What this measures: the CPU-side cost of `renderer.render(scene, camera)`
+      for a static scene of N textured quads, WITH vs WITHOUT wrapping that
+      content in a `THREE.BundleGroup` (three r0.185.1's real, public render-
+      bundle API — confirmed via node_modules/three source: a Group subclass
+      the renderer detects via `.isBundleGroup`, driving the WebGPU backend's
+      real GPURenderBundleEncoder internally; no separate renderer.renderBundle()
+      call exists or is needed).
+
+      HONEST GAP, stated plainly: this uses a SYNTHETIC representative material
+      (a NodeMaterial with one texture sample + a tint uniform), NOT the real
+      production `buildWholeImageMaterial` — that function is a nested closure
+      inside vt-pan-viewer.js's `startVtPanViewer`, not exported/extractable at
+      module scope, so reusing it verbatim here would need a real extraction
+      refactor, out of scope for a prototype-level probe. The shape (one texture
+      tap, simple TSL math, DoubleSide, NodeMaterial) is chosen to be
+      representative of that material's COST, not a claim of pixel parity.
+    -->
+    <canvas id="view" width="1024" height="1024"></canvas>
+    <div id="status">booting…</div>
+    <script type="module">
+      import * as THREE from '../../src/vendor/three/three.webgpu.js';
+
+      const statusEl = document.getElementById('status');
+      const log = (msg) => {
+        console.log('[renderbundle-probe]', msg);
+        statusEl.textContent += `\n${msg}`;
+      };
+
+      const N_QUADS = Number(new URLSearchParams(location.search).get('n') || 300);
+      const N_FRAMES = Number(new URLSearchParams(location.search).get('frames') || 150);
+
+      const canvas = document.getElementById('view');
+      const renderer = new THREE.WebGPURenderer({ canvas, antialias: false });
+      await renderer.init();
+      log(`renderer backend: ${renderer.backend.isWebGPUBackend ? 'WebGPU' : 'WebGL (WRONG — probe invalid)'}`);
+
+      // A tiny synthetic checkerboard DataTexture — shared across every quad,
+      // matching production's "one atlas texture, many draws" shape without
+      // needing a real BC-compressed asset for a CPU-cost probe.
+      const texSize = 64;
+      const texData = new Uint8Array(texSize * texSize * 4);
+      for (let y = 0; y < texSize; y++) {
+        for (let x = 0; x < texSize; x++) {
+          const i = (y * texSize + x) * 4;
+          const on = (Math.floor(x / 8) + Math.floor(y / 8)) % 2 === 0;
+          texData[i] = on ? 200 : 40;
+          texData[i + 1] = on ? 180 : 60;
+          texData[i + 2] = on ? 140 : 90;
+          texData[i + 3] = 255;
+        }
+      }
+      const tex = new THREE.DataTexture(texData, texSize, texSize, THREE.RGBAFormat);
+      tex.needsUpdate = true;
+
+      /** One representative material+geometry, matching buildWholeImageMaterial's
+       * general shape (one texture tap through TSL, a uniform tint, DoubleSide,
+       * NodeMaterial) without its clarity/occlusion/depth-authority machinery —
+       * see this file's own header for why the real function isn't reused. */
+      function buildRepresentativeQuad(THREE, tex, x, y) {
+        const { Fn, uniform, vec3, uv, texture } = THREE.TSL;
+        const uTint = uniform(vec3(1, 1, 1));
+        const material = new THREE.NodeMaterial();
+        material.side = THREE.DoubleSide;
+        material.colorNode = Fn(() => texture(tex, uv()).rgb.mul(uTint))();
+        const geo = new THREE.PlaneGeometry(0.08, 0.08);
+        const mesh = new THREE.Mesh(geo, material);
+        mesh.position.set(x, y, 0);
+        return mesh;
+      }
+
+      const GRID = Math.ceil(Math.sqrt(N_QUADS));
+      function buildQuads() {
+        const meshes = [];
+        for (let i = 0; i < N_QUADS; i++) {
+          const gx = i % GRID;
+          const gy = Math.floor(i / GRID);
+          const x = (gx / GRID) * 2 - 1;
+          const y = (gy / GRID) * 2 - 1;
+          meshes.push(buildRepresentativeQuad(THREE, tex, x, y));
+        }
+        return meshes;
+      }
+
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+      // PLAIN scene: N meshes added directly — ordinary per-frame traversal.
+      const scenePlain = new THREE.Scene();
+      for (const m of buildQuads()) scenePlain.add(m);
+
+      // BUNDLED scene: the SAME shape of content, wrapped in a BundleGroup.
+      // Static content only — matches the "~95% of screen unchanged during a
+      // pan" case Moonshot.md §1 names as the real-world target.
+      const sceneBundled = new THREE.Scene();
+      const bundle = new THREE.BundleGroup();
+      for (const m of buildQuads()) bundle.add(m);
+      sceneBundled.add(bundle);
+
+      /** Times N_FRAMES synchronous renderer.render() calls (CPU-side encode
+       * cost — the same thing geometry.depthRenderCall's zone measures in
+       * production, not GPU execution time). Warms up first (pipeline compile
+       * is a one-time cost that would otherwise dominate frame 1). */
+      async function timeRender(scene, label) {
+        renderer.render(scene, camera); // warm-up: pay pipeline compile here, not in the timed loop
+        await renderer.resolveTimestampsAsync?.().catch(() => {});
+        const t0 = performance.now();
+        for (let i = 0; i < N_FRAMES; i++) {
+          renderer.render(scene, camera);
+        }
+        const totalMs = performance.now() - t0;
+        const perFrameMs = totalMs / N_FRAMES;
+        log(`${label}: ${N_FRAMES} frames, ${totalMs.toFixed(1)}ms total, ${perFrameMs.toFixed(3)}ms/frame CPU`);
+        return { totalMs, perFrameMs, frames: N_FRAMES };
+      }
+
+      window.probe = {
+        async run() {
+          statusEl.textContent = '';
+          log(`N_QUADS=${N_QUADS} N_FRAMES=${N_FRAMES}`);
+          const plain = await timeRender(scenePlain, 'PLAIN (no bundle)');
+          const bundled = await timeRender(sceneBundled, 'BUNDLED (THREE.BundleGroup)');
+          const speedup = plain.perFrameMs / bundled.perFrameMs;
+          const verdict = { plain, bundled, speedup, n: N_QUADS, frames: N_FRAMES };
+          log(`SPEEDUP (plain/bundled): ${speedup.toFixed(2)}x`);
+          window.probeResult = verdict;
+          return verdict;
+        },
+      };
+
+      log('ready — window.probe.run() to measure, or it will auto-run in 500ms');
+      setTimeout(() => window.probe.run().catch((e) => log(`RUN FAILED: ${e.stack || e.message}`)), 500);
+    </script>
+  </body>
+</html>

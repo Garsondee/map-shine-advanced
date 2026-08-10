@@ -206,6 +206,24 @@ export function isCameraPathPlaying() {
   return !!playState;
 }
 
+/**
+ * V4-Testament Stage 0 fix (2026-08-10): `perf-run-full`/`perf-report-all-tiers` drive their
+ * benchmark route through this SAME player (see this file's header — one playback at a time,
+ * one `playState`), so without this distinction they were silently caught by the video-capture
+ * 30fps render cap (`vt-pan-viewer.js`'s `renderFrame`, `CAMERA_PATH_FRAME_CAP_MS`) — a feature
+ * built for the author's OWN external recording workflow, never intended to throttle a
+ * performance measurement. Discovered live: a `perf-run-full` capture read avgFps 25.7 with a
+ * dead-flat ~41.7ms frame time across an entire 56s window (a cap signature, not organic
+ * variance) and inflated per-zone costs (bigger camera jumps per rendered frame under the cap
+ * mean more residency work lands on each one). `getCameraPathPlaying` (the render loop's OWN
+ * throttle read, wired in boot.js) should call THIS, not the plain `isCameraPathPlaying` above —
+ * this one is false for a `capFrameRate:false` playback even while `isCameraPathPlaying()`
+ * correctly still reports the playback as active for every OTHER purpose (UI status, etc).
+ */
+export function isCameraPathPlayingCapped() {
+  return !!playState && playState.capFrameRate !== false;
+}
+
 /** @returns {Map<string, boolean>} which layers were ACTUALLY hidden (i.e.
  *  were `renderable:true` beforehand) — V2's own `_hideMapLayers` care,
  *  ported: a layer a GM had already hidden for their own reason must come
@@ -296,7 +314,10 @@ function fadeTo(el, toOpacity, ms) {
  * OR is stopped early (`stopCameraPath()` / Escape / a scene teardown) — it
  * never rejects for a user-initiated stop, only logs+resolves.
  * @param {import('./camera-path.js').CameraPath} pathData - already normalized.
- * @param {{onSegment?: (index: number, total: number) => void}} [opts]
+ * @param {{onSegment?: (index: number, total: number) => void, capFrameRate?: boolean}} [opts]
+ *   `capFrameRate` (default true) governs whether `isCameraPathPlayingCapped()` reports this
+ *   playback — see that function's own doc for why a `perf-run-full`-driven route must pass
+ *   `false` here.
  * @returns {Promise<void>}
  */
 export async function playCameraPath(pathData, opts = {}) {
@@ -343,7 +364,7 @@ export async function playCameraPath(pathData, opts = {}) {
     }
     playState = null;
   };
-  playState = { abort, restore };
+  playState = { abort, restore, capFrameRate: opts.capFrameRate !== false };
 
   try {
     if (settings.hideUi) {

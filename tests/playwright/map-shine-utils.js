@@ -89,6 +89,21 @@ async function ensureActiveScene(page, timeoutMs = 60000) {
   }
 }
 
+/**
+ * Wait until Map Shine Advanced has actually booted and is rendering.
+ *
+ * ⚠️ V2-ERA PROBES REMOVED, 2026-08-10. This function previously waited on
+ * `MapShine.initialized`, `canvas.mapShine`, and `canvas.mapShine.renderLoop.getFPS` — the
+ * V2 module's shape. NONE of those exist in V3: verified live against a real running world,
+ * where the `MapShine` global exposes `__keyholeBooted`, `__stage`, `version`, `debug`,
+ * `flight`, `soak` and the setter/probe helpers, with no `initialized`, no `canvas.mapShine`
+ * and no `MapShine.perf`. Against V3 the old checks could never become true, so this helper
+ * would burn its full timeout on every run and then blame the scene. The V3 readiness signal
+ * is `MapShine.__keyholeBooted`, corroborated by the module's own canvas existing in the DOM.
+ *
+ * `PERF_REQUIRE_MAPSHINE_PERF=true` additionally demands the debug/report surface
+ * (`MapShine.debug.runReport`), which is what drives the `perf-profile` report.
+ */
 async function waitForMapShineReady(page, timeoutMs = 180000) {
   const requirePerf = process.env.PERF_REQUIRE_MAPSHINE_PERF === 'true';
   const start = Date.now();
@@ -100,13 +115,10 @@ async function waitForMapShineReady(page, timeoutMs = 180000) {
       try {
         return {
           gameReady: window.game?.ready === true,
-          mapShineInitialized: !!window.MapShine?.initialized,
-          hasCanvasMapShine: !!window.canvas?.mapShine,
-          hasRenderLoop: !!window.canvas?.mapShine?.renderLoop,
-          hasGetFps: typeof window.canvas?.mapShine?.renderLoop?.getFPS === 'function',
-          hasPerf: !!window.MapShine?.perf,
-          hasExportAllJson: typeof window.MapShine?.perf?.exportAllJson === 'function',
-          hasDebug: !!window.MapShine?.debug,
+          booted: window.MapShine?.__keyholeBooted === true,
+          version: window.MapShine?.version || null,
+          hasCanvas: !!document.querySelector('canvas#msa-vt-pan-viewer-canvas'),
+          hasDebug: typeof window.MapShine?.debug?.runReport === 'function',
           hasJoin: !!document.querySelector('form#join-game-form, form#join'),
           url: window.location?.href || ''
         };
@@ -115,22 +127,14 @@ async function waitForMapShineReady(page, timeoutMs = 180000) {
       }
     });
 
-    const baseOk = (
-      state &&
-      state.gameReady &&
-      state.mapShineInitialized &&
-      state.hasCanvasMapShine &&
-      state.hasRenderLoop &&
-      state.hasGetFps
-    );
-
-    const perfOk = !!(state && state.hasPerf && state.hasExportAllJson);
+    const baseOk = !!(state && state.gameReady && state.booted && state.hasCanvas);
+    const perfOk = !!(state && state.hasDebug);
 
     if (baseOk && (perfOk || !requirePerf)) {
       if (!perfOk && !warnedNoPerf) {
         warnedNoPerf = true;
         try {
-          console.log('[perf] warning: MapShine ready but MapShine.perf.exportAllJson is missing; continuing without MapShine profiler export');
+          console.log('[perf] warning: MapShine booted but MapShine.debug.runReport is missing; continuing without report capture');
         } catch (_) {
         }
       }
@@ -141,10 +145,11 @@ async function waitForMapShineReady(page, timeoutMs = 180000) {
       state &&
       state.gameReady &&
       !state.hasJoin &&
-      !state.hasCanvasMapShine &&
+      !state.booted &&
       (Date.now() - start) > 30000
     ) {
-      throw new Error('MapShine never attached to canvas (canvas.mapShine missing). This usually means the active scene is not enabled for Map Shine Advanced.');
+      throw new Error('MapShine never booted (window.MapShine.__keyholeBooted is not true after 30s). '
+        + 'Usual causes: the module is not enabled in this world, or it threw during boot — check the browser console.');
     }
 
     const now = Date.now();

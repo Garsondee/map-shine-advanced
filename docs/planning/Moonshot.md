@@ -36,15 +36,19 @@ against the desktop part for contrast):
 | Computed FP32 throughput (100W) | ≈ 13.2 TFLOPS |
 | For reference: desktop RTX 3070 | 19.9 TFLOPS (fixed 220W desktop card, not what's being targeted) |
 
-**Known gap: CPU model not provided.** Several of the measured costs in §5 are CPU-side
-(residency loading, point-light pool bookkeeping, an as-yet-unexplained depth-pass CPU cost) —
-these are not purely a GPU question, and no CPU-side hardware fact is recorded here yet.
+**CPU and system, provided by the author 2026-08-10: AMD Ryzen 7 5800H (8 cores / 16
+threads, Zen 3), 16 GB system RAM.** Several of the measured costs in §5 are CPU-side
+(residency loading, point-light pool bookkeeping, the as-yet-unexplained depth-pass CPU
+cost) — now attributable to real silicon. The 16 GB RAM figure is itself load-bearing:
+Chrome + Foundry + 12,000px-map decoding inside 16 GB makes system memory pressure a live
+suspect for §5's hitch/tail-latency class, not an incidental spec.
 
 **Tested display context, from the live reports themselves (measured, not assumed):**
 captures this session ran at a 3840×1906 (or 3463×1906) canvas resolution with a 1.5×
 `pixelRatio` — i.e. a physical/CSS window in the neighbourhood of 2560×1270 with 1.5× DPI
-scaling applied, consistent with a high-DPI laptop panel, though the exact physical display
-was not independently confirmed.
+scaling applied, consistent with a high-DPI laptop panel — and confirmed by the author
+2026-08-10: the physical display is **3840×2160 @ 120 Hz** (4K minus browser chrome at 1.5×
+DPR reproduces the captured canvas sizes).
 
 **The one number that matters most for a 12,000×12,000px-per-layer map: 8 GB of VRAM, hard
 ceiling, no exceptions.** Laptop GPUs in this class do not come in higher-VRAM configurations
@@ -599,3 +603,242 @@ In commit order, each with its measured or structurally-verified effect:
 All of the above are `npm run verify` green; none have been confirmed against a live capture
 in the specific "did this actually help" sense except items 1–4, which the round-by-round
 report table in §5 already reflects.
+
+---
+
+## 7. Phase-0 measurements — real Mansion Redux import, Ground Floor (2026-08-10)
+
+**⚠️ NOT directly comparable to §5's table.** §5's rows are all the SAME floor (First-Floor,
+upper) on whatever scene content existed at the time. Everything below is **Ground Floor**
+(`floorIndex: 0`), on the **real, complete Mansion Redux import** (987 walls, 50 lights, 6
+tiles, 207 candle anchors, real painted fire mask) that landed in the bench world this same
+session — the first time this exact real content has been profiled this way at all. Resolution
+is also smaller (1920×1080, not 3840×1906). Treat this as a new baseline for THIS content, not
+a continuation of §5's trend line. Captured via `MapShine.debug.actions.get('perf-run-full')`,
+the real instrumented action (`n_to_s:2kf/60000ms` route, 132s wall-clock incl. settle),
+Playwright + real Chrome + real nvidia/ampere WebGPU, `channel:'chrome'` headed (see
+[[reference_live_foundry_harness]]). **Caveat on precision, per the author's own direction
+2026-08-10:** the harness's absolute fps numbers are not yet proven pixel-for-pixel comparable
+to a manually-loaded session (investigated; backgrounding-throttle and OS process priority
+were directly ruled out live, but a `--no-sandbox` flag, a `--num-raster-threads=4` cap, and an
+unexplained 20→7→32 fps swing across three same-scene 5s windows remain open — full detail:
+Testament Petition P-003 / `feedback_playwright_fps_not_yet_trustworthy`). Read everything below
+as **directionally real, not pixel-precise** — exactly the author's own instruction: rough
+numbers are still useful for "did this improve," just not for a tight before/after percentage.
+
+### Headline frame numbers
+
+avgFps 48.6 · median 59.9 · p5-low 29.9 · p1-low 24 · best 122 · worst 17.1. Frame time: median
+16.7ms, p95 33.4ms, p99 41.7ms, worst-in-window 58.4ms. Histogram: 59.9% of frames landed
+30–60fps, 27% landed 60–120fps, only 0.3% dropped under 20fps. VRAM: 399.4MB estimated /
+2,500MB ceiling, 84% headroom, verdict `ok`.
+
+**Instrument note, honestly recorded:** `method.gpu` reported `"timestamp-query"` (GPU timing
+WAS available this run), yet `attribution.verdict` still came back `"unmeasured"` and every
+zone's `gpuMs` is `null` — only `cpuMs` populated this capture. Every cost below is therefore
+**CPU-side only**; no GPU-ms figures exist for this run despite the instrument believing it had
+GPU timing available. This is flagged, not explained — a gap worth closing before the next
+capture is taken as a full picture.
+
+### Pass census — answers Stage 0's first checklist item directly
+
+MSA's own zone taxonomy tags render-pass boundaries explicitly (`isPass: true`), which answers
+"beginRenderPass count/frame, confirm the world draw is ONE pass" without needing a separate
+Dawn/`about:tracing` capture:
+
+| Pass (in frame order by stage) | Draw calls | Triangles | CPU mean |
+| --- | --- | --- | --- |
+| `pass.masks.occlusion` | 0 | 0 | 0.096 ms |
+| `pass.geometry.world` | 176 | 334,378 | 6.041 ms |
+| `pass.light.accumulate` | 236 | 9,416 | **8.76 ms** (single costliest pass) |
+| `pass.surface.response` | 2 | 4 | 0.153 ms |
+| `pass.surface.particles` | 0 | 0 | 0.001 ms |
+| `pass.post.bloom` | 11 | 11 | 0.675 ms |
+| `pass.post.dof` | 0 | 0 | 0.003 ms |
+| `pass.present.composite` | 2 | 2 | 0.167 ms |
+
+**8 passes/frame, confirmed. The world draw IS one pass** (`pass.geometry.world`) — 176
+individual draw calls (interior + boundary + doors + depth, combined) all inside a single
+beginRenderPass/endRenderPass boundary, matching the architecture the Testament's Law assumes.
+`pass.light.accumulate` is the single most expensive pass this capture, at 8.76ms CPU — close
+to §5's own baseline "light stack 8.6" figure, a rough but real cross-check between the two
+captures despite their different floors/content.
+
+Supporting per-zone detail: `geometry.depthDraw` + `geometry.depthRenderCall` together ≈9.1ms
+CPU on just 6 draw calls / 67,666 triangles each — directly relevant to Stage 0's "7.7ms CPU
+mystery" item, though the specific migration experiment (dummy 1-triangle `render()` before the
+depth pass) has NOT been run yet; this is supporting evidence, not that experiment's answer.
+
+### Effect-cost findings — real, actionable, from the profiler's own self-check
+
+The profiler compares each effect's MEASURED cost against its own declared budget tier and
+flags overshoots. Three fired this capture:
+
+| Effect | Measured | Declared max | Ratio |
+| --- | --- | --- | --- |
+| **doorGraphics** | 0.411 ms/Mpx | 0.01 ms/Mpx | **41.1× over** |
+| **candleFlame** | 1.908 ms/Mpx | 0.3 ms/Mpx | **6.36× over** |
+| **specular** | 0.169 ms/Mpx | 0.08 ms/Mpx | **2.11× over** |
+
+`fire` measured WITHIN its declared budget (0.459 vs 0.7 ms/Mpx max, ratio 0.66) — a clean
+result, consistent with the author's own "fire is coming along nicely" read. 10 of 15 effects
+fell below the sweep's own 0.15ms noise floor and were correctly rejected rather than reported
+as a false reading (7 of those are legitimately CPU-only effects with no GPU draw cost at all
+— `uiWindowShadow`, `lightning`, `vegetation`, `water`, `fluid`, `window`, `apertureGobo` —
+each under 0.2ms/frame CPU).
+
+### Hitch autopsy — real data, correlated but not yet explained
+
+20 hitches over the 50ms threshold this window; the worst seven were multi-second: 3341.8ms,
+2941.8ms, 2183.4ms, 1925.1ms, 1650ms, 1025ms, 975.1ms. Every one carries full decode/cache
+diagnostics: `sourcesDecoded: 0` and `mainThreadFallbackSourceDecodes: 0` throughout (nothing
+was being freshly decoded), while `idbHits` and `residentPages` both climb steadily alongside
+each hitch (119→125→140→182→203 across the sequence), `evictions: 0` and `misses: 0`
+throughout (the cache never overflowed or genuinely missed — capacity 2,048 pages, peak
+resident only 203). Separately, `residency.itemLoad`/`residency.pass` each ran 427 times,
+peaking at 22.5ms/23.4ms respectively (amortised negligible, ~3.2ms/frame — but a real
+one-frame stall each time it spikes). **Correlation is real and repeatable; the specific
+mechanism turning a same-cache IndexedDB read into a multi-second stall is not yet identified**
+— worth the same isolated-reproduction treatment §5's `geometry.depthRenderCall` gap already
+got, before attributing a cause.
+
+### CAS performance-tier live-test (§6 item 6) — first positive Stage-0 result
+
+`performanceProfile` flipped live (`standard` → `performance`, no reload, restored to
+`standard` afterward) and the identical `perf-run-full` capture re-run on the same scene/floor.
+**Not a laboratory-controlled A/B** — two independent 60s sweeps, each with its own real-world
+variance (window durations 38446.9ms vs 38690.2ms; frame counts 1868 vs 2193) — but the
+direction is consistent across every independent signal, which is what makes it a real result
+rather than noise:
+
+| Metric | `standard` | `performance` | Change |
+| --- | --- | --- | --- |
+| avgFps | 48.6 | 56.7 | **+16.7%** |
+| Worst frame in window | 58.4 ms | 50.1 ms | improved |
+| `pass.geometry.world` CPU mean (the pass CAS's texture taps live inside) | 6.041 ms | 4.928 ms | **−18.4%** |
+| Hitches (>50ms) | 20 | 9 | **less than half** |
+| Stalls (hangs.totalStalls) | 3 | 2 | improved |
+| `geometry.worldDraw` CPU mean (narrower zone) | 0.341 ms | 0.324 ms | ~5%, within noise |
+
+Median fps and p5-low fps were unchanged (59.9 / 29.9 both runs) — the improvement shows up in
+the CPU-bound tail (worst frame, hitch count), not the already-fast median, consistent with CAS
+sharpening being a fixed per-pixel tap-count cost rather than something that changes the
+frame's floor. **Verdict: real, positive, and mechanism-consistent** (the biggest single delta
+landed exactly in the pass the 5-tap→1-tap swap touches) — not yet re-run enough times to rule
+out run-to-run variance contributing part of the gap (see Testament Petition P-003 on this
+harness's own fps repeatability), but multiple independent indicators agreeing is itself
+evidence per the author's own "rough numbers still show whether something improved" guidance.
+
+### `low` tier — same test, third data point
+
+Same method, `performanceProfile` → `low`, restored to `standard` after. **One real confound,
+checked directly rather than assumed:** comparing `effects[].enabled` across all three captures,
+only `sunShadows` actually differs — `true` on `standard`/`performance`, `false` on `low`.
+Every other effect (`candleFlame`, `fire`, `vegetation`, `water`, etc.) stayed enabled on `low`
+despite declaring `fromProfile: 'performance'` in their manifests — this scene's authored
+GM-level overrides evidently win over the profile default for those, and only `sunShadows`
+lacked one. So the `low` numbers are "CAS 1-tap + sun shadows off," not "CAS 1-tap alone."
+
+| Metric | `standard` | `performance` | `low` |
+| --- | --- | --- | --- |
+| avgFps | 48.6 | 56.7 | **57.6** |
+| Worst frame | 58.4 ms | 50.1 ms | **75.1 ms** (worse than both) |
+| Hitches (>50ms) | 20 | 9 | 8 |
+| `pass.geometry.world` CPU | 6.041 ms | 4.928 ms | 4.879 ms (matches `performance` closely) |
+| `pass.light.accumulate` CPU | 8.76 ms | 7.275 ms | 7.093 ms |
+
+`pass.geometry.world`'s near-identical cost between `performance` and `low` (4.928 vs 4.879ms)
+is a genuine confirming signal — the commit describes the SAME 1-tap CAS substitution on both
+tiers, and the measurement agrees almost exactly, independent of `low`'s sun-shadows
+difference. avgFps and hitch count both continue improving from `standard`→`performance`→`low`.
+**But `low`'s single worst frame (75.1ms) is worse than either other tier** — a genuine, honest
+surprise, not smoothed over. Whether that traces to `sunShadows` toggling off mid-route, to
+this specific sweep's own run-to-run variance (per Petition P-003), or to something tier-
+specific has not been investigated further.
+
+### A discovered instrument bug: `perf-run-full` was silently capped to ~30fps
+
+Found live, 2026-08-10, while reading a first blend-off A/B result that looked wrong (avgFps
+25.7 with a dead-flat ~41.7ms frame time across an entire 56s window — a cap signature, not
+organic variance). `perf-run-full`/`perf-report-all-tiers` drive their benchmark route by
+calling `playCameraPath()` (`foundry/camera-path-player.js`) — the SAME function the author's
+own "🎥 Camera Path" recording panel calls. A separate, earlier-landed feature (author-requested,
+2026-08-10: "I record at 30fps... limit rendering to 30fps... while the camera path tool is
+running") throttles `renderFrame` (`vt-pan-viewer.js`) to ~30fps whenever ANY camera-path
+playback is active — with no distinction between "the author is recording a video" and "a perf
+capture is using the same player to drive its route." Every `perf-run-full`/`perf-report-all-tiers`
+capture taken since that recording-cap feature landed was therefore silently throttled, without
+that ever being noticed until this session's blend-off A/B result made it visible.
+
+**Fixed**, not just noted: `playCameraPath(pathData, {capFrameRate})` — default `true` (the
+author's manual recording panel is byte-for-byte unaffected), and a new
+`isCameraPathPlayingCapped()` (which the render loop's throttle actually reads, via
+`getCameraPathPlaying`) is `false` for a `capFrameRate:false` playback while `isCameraPathPlaying()`
+still correctly reports the playback active for every other purpose. Both perf actions now pass
+`capFrameRate:false`. `npm run verify` green throughout.
+
+**What this means for every fps/CPU-ms number already in this document above this line:** every
+capture in this file predates this bug's introduction (checked: this recording-cap feature's own
+verification artifact is timestamped 15:43, after every number recorded above) — so nothing
+already written into `Moonshot.md` needs revision on account of it. It only affects captures taken
+during this same later session, addressed directly below.
+
+### Stage 0 — the four remaining measurement items, 2026-08-10 (Ground Floor, uncapped after the fix above)
+
+**1. The CPU-mystery migration experiment — ANSWERED.** A debug-only dummy 1-triangle `render()`
+(its own zone, `geometry.debugFirstRenderProbe`), armed via `MapShine.setDebugFirstRenderProbe(true)`,
+inserted immediately before `runSceneDepthPass`'s own setup. Real `perf-run-full` capture, uncapped:
+`masks.occlusionDraw` (genuinely the frame's first `renderer.render()` call in production) 0.066–0.086ms
+mean across two runs; the new dummy probe (second call, immediately before the depth pass) 0.075–0.09ms
+mean; `geometry.depthRenderCall` (the real depth-pass call, third) 3.375–6.133ms mean — 45–68× either.
+**The cost stays with the depth pass specifically, not with "first render of the frame."** The deeper
+"what about the depth pass" remains open (the isolated-shader-lab-bench gap noted in §5 stands) — this
+experiment only distinguishes the two hypotheses the Testament's own item poses, which it does cleanly
+and repeatably across two independent captures (one still under the fps-cap bug, one after the fix —
+same conclusion both times).
+
+**2. A/B: blending force-off on fully-opaque layers — INCONCLUSIVE, not a confirmed win or loss.**
+`MapShine.setDebugForceOpaqueBlendOff(true)` mutates already-built colour-pass materials live
+(`t.material.transparent = false` + `needsUpdate = true`), gated on the same `alwaysOpaque` signal
+`buildSceneDepthWriterMaterial` already trusts — expected to be visually lossless (blending is a
+mathematical no-op at alpha≡1) and confirmed as such (before/after screenshots show no visible
+difference). Measured, uncapped: avgFps 37.9 vs. this same session's own `standard`-tier baseline
+48.6 (§7 above); `pass.geometry.world` CPU mean 8.385ms vs. 6.041ms — WORSE on both counts, the
+opposite of the hypothesis. **Not trusted as a real regression from the flag** — see finding 3.
+
+**3. A/B: maskNode discard force-off — the SAME numbers as finding 2, which is itself the finding.**
+`MapShine.setDebugForceMaskNodeOff(true)`, armed before a reload (the discard is baked into the
+compiled shader graph at material-build time, so a live toggle alone does nothing). Wrong pixels
+expected (a fragment a real occluder should have discarded can now show through); no obviously wrong
+pixels visible in the after-screenshot at this zoom/route regardless. Measured, uncapped: avgFps 37.5,
+`pass.geometry.world` CPU mean 8.43ms — within noise of finding 2's 37.9fps / 8.385ms, despite testing
+two unrelated code paths (one skips a discard at shading time, the other skips a blend state with no
+shared mechanism). **Two independent, unrelated flags producing near-identical "regressions" is itself
+evidence the regression belongs to neither flag** — most plausibly a shared confound this session
+(sustained real load from other applications running on the same machine throughout; thermal
+throttling was already an open, untested candidate per Petition P-003) rather than either A/B's own
+answer. Neither A/B's own performance question (does blending/discard genuinely cost what Stage 1
+predicts) was cleanly answered by this round — a clean re-run on an otherwise-idle machine is the
+named prerequisite before trusting either number, not a code fix.
+
+**4. RenderBundle probe on three 0.185.1 — VIABLE, real speedup, on a synthetic proxy workload.**
+Not run through the Foundry harness (no scene-content dependency) — a standalone page
+(`tools/shader-lab/renderbundle-probe.html`, served by the shader lab's existing static server, never
+wired into its bench/scenario system) confirms `THREE.BundleGroup` (three r0.185.1's real, public
+render-bundle API — a `Group` subclass the renderer detects via `.isBundleGroup`, driving the WebGPU
+backend's real `GPURenderBundleEncoder` internally; no separate `renderer.renderBundle()` call exists)
+cuts CPU-side `renderer.render()` encode cost for 300 static textured quads by **1.80×–2.60×** across
+two runs (real WebGPU confirmed live, not a fallback). Honest gap: the probe's material is a
+representative synthetic stand-in (one texture tap + a tint uniform via `NodeMaterial`), not the literal
+`buildWholeImageMaterial` — that function is a nested closure inside `startVtPanViewer`, not
+extractable at module scope without a real refactor, out of scope for a prototype-level probe. The
+result answers "is RenderBundle worth building toward" (yes, real CPU win, consistent direction both
+runs) — not "exactly how much it saves on our real material set."
+
+### What's still open from Stage 0's checklist after these captures
+
+All eight Stage-0 checklist items now have real evidence recorded (five in this document, three more
+as their own Testament evidence lines — record keeping split between "facts" here and "what was
+executed" there, per each document's own stated purpose). The one item this round could not cleanly
+answer is embedded in finding 3 above: the blending/maskNode A/B's own performance questions need a
+re-run on an otherwise-idle machine before either is trusted as a real number, not a code change.

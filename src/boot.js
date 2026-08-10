@@ -34,7 +34,7 @@
 import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
-import { installFlightRecorder } from './diag/flight-recorder.js';
+import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
 import { createPerfLab, runSweep } from './diag/perf-lab.js';
 import { describeWindBake } from './diag/wind-probe.js';
 // THE PERFORMANCE INSTRUMENT (docs/planning/Performance.md). The taxonomy and
@@ -55,7 +55,14 @@ import { createFrameProfiler } from './diag/frame-profiler.js';
 import { createProfiledFrameWaiter, runProfileSession } from './diag/perf-session.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
 // a second motion system — a fixed route is what makes two runs comparable.
-import { generatePresetKeyframes, normalizeCameraPath, playCameraPath, stopCameraPath } from './foundry/index.js';
+import {
+  generatePresetKeyframes,
+  normalizeCameraPath,
+  playCameraPath,
+  stopCameraPath,
+  isCameraPathPlayingCapped,
+} from './foundry/index.js';
+import { buildLiveSceneExport, sceneExportFilename } from './foundry/index.js';
 
 /**
  * The benchmark route's duration. 60s at a steady traverse (author, 2026-07-28)
@@ -134,6 +141,9 @@ import {
   runInteractiveVtPanViewerPixelProbe,
   probeVtPanViewerWindAndParticles,
   runInteractiveVtPanViewerWindProbe,
+  setVtPanViewerDebugFirstRenderProbe,
+  setVtPanViewerDebugForceMaskNodeOff,
+  setVtPanViewerDebugForceOpaqueBlendOff,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
 } from './vt/index.js';
@@ -497,6 +507,18 @@ MapShine.armPixelProbe = runInteractiveVtPanViewerPixelProbe;
 // / diag/wind-probe.js for the full reasoning.
 MapShine.probeWindAndParticles = probeVtPanViewerWindAndParticles;
 MapShine.armWindProbe = runInteractiveVtPanViewerWindProbe;
+// V4-TESTAMENT STAGE 0 (2026-08-10) — three measurement-only debug flags, the
+// SAME "MapShine.xxx = wrapperReachingModuleLevel_active" shape as the wind
+// probe above. Discovered the hard way: `startVtPanViewer`'s OWN returned
+// object (where these three setters are defined) is never itself spread onto
+// MapShine anywhere — only captured locally as a scene-load report/result, or
+// merged into a debug REPORT's return value (`vt-pan-viewer-start-real-scene`)
+// — so a method living only in that returned object is invisible to
+// `MapShine.xxx()` unless it ALSO gets one of these explicit wrappers. See
+// setVtPanViewerDebugFirstRenderProbe's own doc in vt-pan-viewer.js.
+MapShine.setDebugFirstRenderProbe = setVtPanViewerDebugFirstRenderProbe;
+MapShine.setDebugForceMaskNodeOff = setVtPanViewerDebugForceMaskNodeOff;
+MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
 // ⚠️🔬 THE CROSS-FLOOR MASK STACK PROBE (2026-08-02, author-commissioned:
 // *"I could click in one place and it'll probe the values for all floors at
 // once... the exact colour values for every point, for every floor and for
@@ -2725,7 +2747,9 @@ function install() {
       // workload, so the measurement window is exactly its duration and every
       // resident-page/paging cost a static view would never trigger gets a
       // chance to show up.
-      const playing = playCameraPath(path).catch((err) => {
+      // capFrameRate:false — this route drives a MEASUREMENT, not a recording; see
+      // isCameraPathPlayingCapped's own doc for the 2026-08-10 bug this fixes.
+      const playing = playCameraPath(path, { capFrameRate: false }).catch((err) => {
         log.error('camera path playback failed during the performance report run:', err);
       });
       try {
@@ -2904,7 +2928,8 @@ function install() {
           try {
             log.info(`perf report (all tiers): forcing tier ${tag}`);
             forcePerformanceProfile(profile);
-            const playing = playCameraPath(path).catch((err) => {
+            // capFrameRate:false — same fix as perf-run-full above; this is a measurement too.
+            const playing = playCameraPath(path, { capFrameRate: false }).catch((err) => {
               log.error(`perf report (all tiers): camera path playback failed during tier '${profile}':`, err);
             });
             try {
@@ -2981,6 +3006,49 @@ function install() {
     openCameraPathDialog();
     return { opened: true, hint: 'Panel opened (top-right). Capture keyframes from the live view, then Play.' };
   });
+
+  // THE SCENE EXPORTER (2026-08-10, author directive) — see foundry/scene-
+  // export.js's own header for the full reasoning: this is the one human-
+  // operated bridge to an assistant working on a separate bench world, so an
+  // assistant never has to be pointed at the author's real development
+  // server. Two registrations sharing one builder: a REPORT (pure — also
+  // rides "Export everything" for free) for a quick clipboard copy, and an
+  // ACTION for the file the author actually hands over (a full scene export
+  // is easily past what anyone should paste into a chat window — the exact
+  // reasoning downloadText's own doc already gives for the flight-recorder
+  // bundle).
+  MapShine.debug.registerReport(
+    'scene-export',
+    '📦 Scene export (data)',
+    () => {
+      const r = buildLiveSceneExport();
+      return r.ok
+        ? { msaVersion: MapShine.version ?? null, ...r.snapshot }
+        : { report: 'scene-export', ok: false, reason: r.reason };
+    },
+    { zone: 'bridge' }
+  );
+  MapShine.debug.registerAction(
+    'scene-export-download',
+    '📦 Export Scene (download for AI import)',
+    () => {
+      const r = buildLiveSceneExport();
+      if (!r.ok) return { ok: false, reason: r.reason };
+      const text = JSON.stringify({ msaVersion: MapShine.version ?? null, ...r.snapshot }, null, 2);
+      const filename = sceneExportFilename(r.snapshot.scene?.name);
+      const dl = downloadText(text, filename);
+      return {
+        ...dl,
+        sceneId: r.snapshot.sceneId,
+        levels: r.snapshot.levels.length,
+        tiles: r.snapshot.tiles.length,
+        walls: r.snapshot.walls.length,
+        lights: r.snapshot.lights.length,
+        regions: r.snapshot.regions.length,
+      };
+    },
+    { zone: 'bridge' }
+  );
 
   MapShine.debug.registerReport(
     'anchors',
@@ -5764,6 +5832,21 @@ function install() {
           const seam = restoreFoundryArt();
           log.info(`device lost — restored Foundry's own art (seam un-suppressed: ${seam}).`);
         },
+        // VIDEO-CAPTURE FRAME CAP (2026-08-10, author-requested): the author
+        // records promotional videos at 30fps externally, and rendering faster
+        // than that while the camera-path tool is playing only steals GPU
+        // headroom from the 30 frames the capture actually keeps — see
+        // renderFrame's own use of this getter for the throttle itself.
+        // `isCameraPathPlaying` already exists in foundry/camera-path-player.js
+        // for the debug panel's own play/stop button state; this just gives the
+        // render loop the same read, through the SAME injection seam as every
+        // other cross-cutting getter here (vt/ never reaches into foundry/).
+        // ⚠️ `isCameraPathPlayingCapped`, NOT the plain `isCameraPathPlaying` —
+        // see that function's own doc (2026-08-10 fix): perf-run-full/
+        // perf-report-all-tiers drive their benchmark route through the SAME
+        // player and must NOT be caught by the video-capture 30fps cap this
+        // getter feeds.
+        getCameraPathPlaying: isCameraPathPlayingCapped,
         // THE CANDLE EFFECT (effects/candle-flame-render.js): each frame the
         // viewer draws the flame billboards and merges the candle lights into
         // its pool, reading the cascade-resolved enable + params + active-floor

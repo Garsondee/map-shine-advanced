@@ -56,6 +56,11 @@ export {
   runInteractiveVtPanViewerPixelProbe,
   probeVtPanViewerWindAndParticles,
   runInteractiveVtPanViewerWindProbe,
+  // V4-Testament Stage 0 measurement-only debug flags — see each one's own
+  // doc comment in vt-pan-viewer.js (next to runSceneDepthPass).
+  setVtPanViewerDebugFirstRenderProbe,
+  setVtPanViewerDebugForceMaskNodeOff,
+  setVtPanViewerDebugForceOpaqueBlendOff,
   drawVtPanViewerWorldMarkers,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,

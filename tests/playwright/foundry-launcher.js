@@ -100,6 +100,12 @@ function getCandidateFoundryRoots() {
   if (process.env.FOUNDRY_INSTALL_DIR) out.push(process.env.FOUNDRY_INSTALL_DIR);
   if (process.env.FOUNDRY_APP_DIR) out.push(process.env.FOUNDRY_APP_DIR);
 
+  // The repo-local install (2026-08-10) — checked BEFORE the machine-wide ones so a
+  // checkout that ships its own Foundry is self-contained and does not silently bench
+  // against whatever version happens to be installed system-wide.
+  out.push(path.join(process.cwd(), 'FoundryVTT', 'Foundry Virtual Tabletop'));
+  out.push(path.join(process.cwd(), 'FoundryVTT'));
+
   const localAppData = process.env.LOCALAPPDATA || '';
   const programFiles = process.env.ProgramFiles || '';
   const programFilesX86 = process.env['ProgramFiles(x86)'] || '';
@@ -147,6 +153,37 @@ function discoverFoundryMain() {
   const err = new Error('Unable to locate Foundry main.js. Set FOUNDRY_PATH to the Foundry main.js entrypoint.');
   err.attempted = attempted;
   throw err;
+}
+
+/**
+ * Locate the Foundry Electron binary, whose BUNDLED Node is what actually runs the server.
+ *
+ * Foundry v14 requires Node >= 24 (`resources/app/package.json` → `release.node_version`).
+ * The system Node may be older — it was 18 on the reference machine — so spawning
+ * `process.execPath` fails outright with "requires Node.js version 24 or greater". The
+ * Electron binary carries its own Node 24 and can be driven as a plain interpreter via
+ * `ELECTRON_RUN_AS_NODE=1`, which removes the separate-Node-install requirement entirely.
+ *
+ * @returns {string} path to the Electron executable, or '' when only a bare Node install exists.
+ */
+function discoverElectronExe() {
+  const direct = process.env.FOUNDRY_ELECTRON_EXE || '';
+  if (direct && isFile(direct)) return direct;
+
+  const names = ['Foundry Virtual Tabletop.exe', 'FoundryVTT.exe', 'foundryvtt'];
+  for (const root of getCandidateFoundryRoots()) {
+    if (!root) continue;
+    for (const n of names) {
+      const p = path.join(root, n);
+      if (isFile(p)) return p;
+    }
+  }
+  return '';
+}
+
+/** @returns {string} the `resources/app` directory implied by a discovered main.js/main.mjs path. */
+function appDirFromMain(mainPath) {
+  return mainPath ? path.dirname(mainPath) : '';
 }
 
 function readOptionsJsonFromRoot(rootDir) {
@@ -248,6 +285,8 @@ class FoundryLauncher {
     }
 
     this.proc = null;
+    /** True when we reused a server someone else started; `stop()` must then leave it running. */
+    this.attached = false;
     this.serverStartTs = 0;
     this.serverReadyTs = 0;
 
@@ -260,6 +299,25 @@ class FoundryLauncher {
   }
 
   async start() {
+    // ATTACH MODE (2026-08-10). A Foundry already serving this port is used as-is rather
+    // than fought over: Foundry takes an exclusive lock on its data directory, so a second
+    // server on the same dataPath cannot start ("already locked by another process"). The
+    // author routinely has their own Foundry open, and a bench run must not require them to
+    // close it. `stop()` leaves an attached server alone — we did not start it.
+    if (process.env.FOUNDRY_BASE_URL) {
+      const url = process.env.FOUNDRY_BASE_URL.replace(/\/+$/, '');
+      const m = /:(\d+)$/.exec(url);
+      if (m) this.port = Number(m[1]);
+      this.attached = true;
+    } else if (await waitForServer(this.getBaseUrl(), 1500)) {
+      this.attached = true;
+    }
+
+    if (this.attached) {
+      this.serverStartTs = this.serverReadyTs = Date.now();
+      return true;
+    }
+
     if (!this.dataPath) {
       this.dataPath = discoverDataPath();
     }
@@ -285,19 +343,29 @@ class FoundryLauncher {
       throw new Error(`FOUNDRY_WORLD is required${hint}. Set FOUNDRY_WORLD or ensure options.json has a world or a world folder contains world.json.${extra}`);
     }
 
-    const args = [this.foundryPath];
-    if (this.headless) {
-      args.push('--headless');
-    }
+    // Prefer the Electron binary's bundled Node (see discoverElectronExe). It is launched
+    // through `tools/foundry-server-boot.mjs`, which hides `process.versions.electron` —
+    // without that, Foundry sees an Electron runtime, tries to open a desktop window, and
+    // dies on `app.setUserTasks` because `app` does not exist in run-as-node mode. Note
+    // `--headless` does NOT prevent that; nothing reads it before the window is built.
+    const electronExe = discoverElectronExe();
+    const bootShim = path.join(process.cwd(), 'tools', 'foundry-server-boot.mjs');
+    const useElectron = !!electronExe && isFile(bootShim);
+
+    const interpreter = useElectron ? electronExe : process.execPath;
+    const args = useElectron
+      ? [bootShim, `--foundry-app=${appDirFromMain(this.foundryPath)}`]
+      : [this.foundryPath];
+
+    if (this.headless) args.push('--headless');
     args.push(`--world=${this.world}`, `--port=${this.port}`);
-    if (this.dataPath) {
-      args.splice(1, 0, `--dataPath=${this.dataPath}`);
-    }
+    if (this.dataPath) args.push(`--dataPath=${this.dataPath}`);
 
     this.serverStartTs = Date.now();
-    this.proc = childProcess.spawn(process.execPath, args, {
+    this.proc = childProcess.spawn(interpreter, args, {
       stdio: 'pipe',
-      windowsHide: this.headless ? true : false
+      windowsHide: this.headless ? true : false,
+      env: useElectron ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env
     });
 
     this._stdout = [];
@@ -341,7 +409,7 @@ class FoundryLauncher {
       const baseUrl = this.getBaseUrl();
       const header = [
         `Foundry failed to start or become ready on ${baseUrl}`,
-        `node: ${process.execPath}`,
+        `interpreter: ${interpreter}${useElectron ? ' (Electron bundled Node, ELECTRON_RUN_AS_NODE=1)' : ''}`,
         `foundryPath: ${this.foundryPath}`,
         `dataPath: ${this.dataPath || '(none)'}`,
         `world: ${this.world}`,
@@ -368,6 +436,12 @@ class FoundryLauncher {
   }
 
   async stop() {
+    // Never kill a server we merely attached to — it is someone else's process (very likely
+    // the author's own open Foundry) and tearing it down would be a surprising side effect.
+    if (this.attached) {
+      this.attached = false;
+      return;
+    }
     if (!this.proc) return;
 
     const p = this.proc;

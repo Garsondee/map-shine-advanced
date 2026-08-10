@@ -22,3 +22,18 @@ src/vendor/three/.webgpu-entry.js
 # See docs/planning/Shader-Lab-Proving-Ground.md §5.3.
 tools/shader-lab/runs/
 tools/shader-lab/cache/
+
+# The live-verification harness (V4-Testament P-001/P-003, 2026-08-10).
+# Never commit: the in-repo Foundry INSTALL (675MB of licensed software — the
+# harness merely discovers it on disk at FoundryVTT/), the harness's persistent
+# Chrome profiles (session cookies + the BC IndexedDB cache), packaged module
+# builds, or perf-capture OUTPUTS. Capture SCRIPTS are the scenario and ARE
+# committed; a capture worth keeping gets its numbers into docs/planning/ —
+# the same rule as tools/shader-lab/runs/ above.
+FoundryVTT/
+module.zip
+tests/playwright-artifacts/chrome-profile/
+tests/playwright-artifacts/chrome-profile-usercheck/
+tests/playwright-artifacts/test-results/
+tests/playwright-artifacts/look/*.json
+tests/playwright-artifacts/look/*.png

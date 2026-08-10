@@ -827,6 +827,14 @@ export async function startVtPanViewer({
   // just means the cache never invalidates, which is correct for a fixture
   // with no walls that ever change.
   getApertureWallVersion = () => 0,
+  // VIDEO-CAPTURE FRAME CAP (2026-08-10, author-requested) — a GETTER, same
+  // "getters vs values" reasoning as getApertureWallVersion just above:
+  // foundry/camera-path-player.js's play state changes on its own schedule,
+  // not this function's, so renderFrame must read it live each tick rather
+  // than capture a stale snapshot at construction time. Defaulted to a
+  // never-playing stub so the torture/soak fixture — which never touches the
+  // camera-path tool — renders at full, uncapped rate exactly as before.
+  getCameraPathPlaying = () => false,
   buildItems,
   dimensions,
   floorCount,
@@ -4446,6 +4454,41 @@ export async function startVtPanViewer({
       renderer.setMRT(previousMRT);
     }
     function runSceneDepthPass() {
+      // STAGE-0 CPU-MYSTERY EXPERIMENT (2026-08-10, debug-only, OFF by
+      // default) — V4-Testament Stage 0 asks: does the ~7.7ms
+      // geometry.depthRenderCall CPU cost follow "first render() of the
+      // frame" (deferred upload/init flush) or stay with THIS pass
+      // specifically? A dummy 1-triangle render() into a scratch target,
+      // positioned immediately before this pass's own setup/render, answers
+      // it: if the cost MOVES onto this dummy call, it's a first-call tax;
+      // if geometry.depthRenderCall stays expensive regardless, it's this
+      // pass specifically. CAVEAT for reading the result: `masks.occlusion`
+      // (runMaskOcclusionPass) already calls renderer.render() every frame,
+      // unconditionally, before runGeometryWorldPass ever runs — so this is
+      // the frame's SECOND render() call, not literally its first. Read
+      // alongside masks.occlusionDraw's own real, already-measured cost.
+      if (debugFirstRenderProbeEnabled) {
+        if (!debugProbeScene) {
+          debugProbeScene = new THREE.Scene();
+          debugProbeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0.5, 0, -0.5, -0.5, 0, 0.5, -0.5, 0], 3));
+          debugProbeScene.add(new THREE.Mesh(geo, new THREE.NodeMaterial()));
+          debugProbeTarget = allocator.create('debug.firstRenderProbe', {
+            resolvedW: 4,
+            resolvedH: 4,
+            screenSized: false,
+            type: THREE.UnsignedByteType,
+            colorSpace: THREE.NoColorSpace,
+            filter: 'nearest',
+          });
+        }
+        profiler?.begin(Z.geomDebugFirstRenderProbe);
+        renderer.setRenderTarget(debugProbeTarget);
+        renderer.render(debugProbeScene, debugProbeCamera);
+        renderer.setRenderTarget(null);
+        profiler?.end(Z.geomDebugFirstRenderProbe);
+      }
       // THREE NESTED SUB-ZONES (2026-08-09) — see Z.geomDepthSetup's own
       // comment for why: geometry.depthDraw's own CPU cost measured 13ms/frame
       // live for 9 draws, and no isolated bench of this same call shape came
@@ -6770,10 +6813,18 @@ export async function startVtPanViewer({
       // the full account. `isAtOrBelow` is "nothing with a higher rank is
       // recorded as opaque here" — true means draw, matching maskNode's own
       // documented polarity (discards when the mask is FALSE).
-      material.maskNode = querySceneDepth(THREE.TSL, {
-        depthTexture: sceneDepth.depthTexture,
-        expectedDepth: uExpectedDepth,
-      }).isAtOrBelow;
+      // STAGE-0 A/B (2026-08-10, debug-only, OFF by default): bypassing this
+      // assignment leaves `material.maskNode` at NodeMaterial's own `null`
+      // default, which `setupDiffuseColor` (three.webgpu.js) treats as "no
+      // discard at all" — confirmed from its own null-check. Wrong pixels
+      // when armed (over-drawn-but-covered layers show through) — measurement
+      // only, never on for a real player.
+      if (!debugForceMaskNodeOff) {
+        material.maskNode = querySceneDepth(THREE.TSL, {
+          depthTexture: sceneDepth.depthTexture,
+          expectedDepth: uExpectedDepth,
+        }).isAtOrBelow;
+      }
       // buf:scene.attr REAL WRITER (scene-attr.js "THE REAL WRITERS") — base
       // map art IS the floor. Reads its own alpha via TSL.output, NOT a
       // closure variable (see buildRealFloorAttrMrtNode's own doc for the
@@ -9072,6 +9123,7 @@ export async function startVtPanViewer({
     const frameGapTimes = [];
     let lastFrameStartMs = null;
     const HITCH_THRESHOLD_MS = 50; // ~3 frames' worth at 60fps — a real, user-perceptible stall, not ordinary jitter
+    const CAMERA_PATH_FRAME_CAP_MS = 1000 / 30; // video capture target (author records at 30fps) — see renderFrame's own use below
     const HITCH_LOG_MAX = 200; // capped so a long thrash run can't grow this unboundedly
     const hitchLog = []; // {atMs, gapMs, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
 
@@ -9091,6 +9143,20 @@ export async function startVtPanViewer({
     // and the fallback when timestamps really are unavailable. See
     // diag/gpu-probe.js's header for the full correction.
     const gpuProbe = createGpuProbe();
+
+    // STAGE-0 MEASUREMENT-ONLY DEBUG FLAGS (2026-08-10, V4-Testament Stage 0).
+    // All three default OFF and change no pixel unless explicitly armed via
+    // their `MapShine.setDebugXxx(true)` setter below — never on for a real
+    // player. Each answers one Stage-0 A/B question; see the call site for
+    // what it does. `debugProbeScene/Camera/Target` are lazily built on first
+    // use (matching the self-test's own lazy-allocation pattern) so a normal
+    // session never pays for them.
+    let debugFirstRenderProbeEnabled = false;
+    let debugForceMaskNodeOff = false;
+    let debugForceOpaqueBlendOff = false;
+    let debugProbeScene = null;
+    let debugProbeCamera = null;
+    let debugProbeTarget = null;
 
     // PER-PASS GPU TIMING (docs/planning/Performance.md). Constructed here rather
     // than in boot.js because it needs the `renderer` this closure owns; the
@@ -9134,6 +9200,7 @@ export async function startVtPanViewer({
       geomDepthSetup: profiler?.indexOf('geometry.depthSetup') ?? -1,
       geomDepthRenderCall: profiler?.indexOf('geometry.depthRenderCall') ?? -1,
       geomDepthRestore: profiler?.indexOf('geometry.depthRestore') ?? -1,
+      geomDebugFirstRenderProbe: profiler?.indexOf('geometry.debugFirstRenderProbe') ?? -1,
       lightAmbient: profiler?.indexOf('light.ambient') ?? -1,
       lightSunBake: profiler?.indexOf('light.sunShadowBake') ?? -1,
       lightWaterBake: profiler?.indexOf('light.waterBodyBake') ?? -1,
@@ -9217,6 +9284,19 @@ export async function startVtPanViewer({
       // smearing into felt readings).
       if (gpuProbe.isActive() && gpuProbe.isMeasuring()) return;
       const now = nowMs ?? performance.now();
+
+      // VIDEO-CAPTURE FRAME CAP (2026-08-10) — the author records promotional
+      // videos externally at 30fps; rendering faster than that while the
+      // camera-path tool is playing only burns GPU work the capture will
+      // never see, stealing headroom from the frames that DO get captured.
+      // Skipping here (rather than scheduling a slower rAF) keeps the exact
+      // same hitch/gap posture as the GPU-probe throttle just above: a
+      // skipped tick leaves `lastFrameStartMs` untouched, so the NEXT real
+      // frame's gap is measured against the last real frame and lands under
+      // HITCH_THRESHOLD_MS (50ms — comfortably above this cap's ~33.3ms),
+      // never registering as a false hitch.
+      if (getCameraPathPlaying() && lastFrameStartMs !== null && now - lastFrameStartMs < CAMERA_PATH_FRAME_CAP_MS)
+        return;
 
       // HITCH DETECTION — see this file's own header note on frameGapTimes
       // for why this is a DIFFERENT (and more revealing) measurement than
@@ -9848,6 +9928,19 @@ export async function startVtPanViewer({
           // `t.mesh?.visible` — cheap, and an invisible tile's uniform
           // should not be allowed to go stale for whenever it next shows.
           if (t.uExpectedDepth) t.uExpectedDepth.value = computeTieSafeExpectedDepth(rank, maxRank);
+          // STAGE-0 A/B (2026-08-10, debug-only, OFF by default): measures the
+          // rgba16f MRT read-modify-write tax `light.accumulate`'s blend pays
+          // for opaque colour-pass draws that don't need it. Gated on the SAME
+          // `alwaysOpaque` signal buildSceneDepthWriterMaterial already trusts
+          // (real decoded source alpha, every texel >= threshold) — for those
+          // items blending is a mathematical no-op (src·1 + dst·0 = src), so
+          // this should be visually lossless, not a "wrong pixels" experiment
+          // like the maskNode one above. `needsUpdate` forces the NodeMaterial
+          // to recompile its pipeline with the new blend state.
+          if (debugForceOpaqueBlendOff && alwaysOpaque && t.material && t.material.transparent !== false) {
+            t.material.transparent = false;
+            t.material.needsUpdate = true;
+          }
           if (!t.mesh?.visible) continue;
           const material = buildSceneDepthWriterMaterial({
             THREE,
@@ -11885,6 +11978,26 @@ export async function startVtPanViewer({
       /** Perf lab: arm/disarm the gated GPU-completion probe (diag/gpu-probe.js). */
       setGpuProbe(on) {
         gpuProbe.setActive(on);
+      },
+      /** Stage-0 CPU-mystery experiment: see runSceneDepthPass's own comment.
+       * Takes effect on the NEXT frame — no reload needed (unlike the two
+       * setters below, this doesn't change any compiled material). */
+      setDebugFirstRenderProbe(on) {
+        debugFirstRenderProbeEnabled = !!on;
+      },
+      /** Stage-0 A/B: bypasses the maskNode occlusion discard. Baked into each
+       * material's compiled shader graph at BUILD time — set this BEFORE the
+       * scene/floor loads (or reload after setting) for it to take effect;
+       * toggling after materials are already built changes nothing. */
+      setDebugForceMaskNodeOff(on) {
+        debugForceMaskNodeOff = !!on;
+      },
+      /** Stage-0 A/B: forces blending off on colour-pass tiles the engine
+       * already knows are fully opaque. Mutates already-built materials live
+       * on the next residency pass (no reload required), matching how
+       * `uExpectedDepth` itself is kept live. */
+      setDebugForceOpaqueBlendOff(on) {
+        debugForceOpaqueBlendOff = !!on;
       },
       /**
        * Perf profile: arm/disarm PER-PASS GPU timing (diag/gpu-zone-timer.js).
@@ -14263,6 +14376,28 @@ export async function probeVtPanViewerWindAndParticles(points) {
 export async function runInteractiveVtPanViewerWindProbe(maxPoints = 3) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.runInteractiveWindProbe(maxPoints);
+}
+
+/**
+ * V4-Testament Stage 0 (2026-08-10) console-callable wrappers for the three
+ * measurement-only debug flags — see runSceneDepthPass's own comment in this
+ * file for what each answers. All three default OFF and change no pixel
+ * unless explicitly armed; none are ever on for a real player.
+ */
+export function setVtPanViewerDebugFirstRenderProbe(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setDebugFirstRenderProbe(on);
+  return { armed: !!on };
+}
+export function setVtPanViewerDebugForceMaskNodeOff(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setDebugForceMaskNodeOff(on);
+  return { armed: !!on };
+}
+export function setVtPanViewerDebugForceOpaqueBlendOff(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setDebugForceOpaqueBlendOff(on);
+  return { armed: !!on };
 }
 
 /**

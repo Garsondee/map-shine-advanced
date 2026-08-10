@@ -215,6 +215,7 @@ export {
   playCameraPath,
   stopCameraPath,
   isCameraPathPlaying,
+  isCameraPathPlayingCapped,
   generatePresetKeyframes,
 } from './camera-path-player.js';
 export {
@@ -235,3 +236,16 @@ export { registerControlPanelButton, syncControlPanelButtonState } from './scene
 // THE ANCHOR VIEW TOGGLE — a second, GM-only tool just below the MSA button
 // that opens ui/anchor-view-mode.js (see scene-controls-button.js's own doc).
 export { registerAnchorViewModeButton, syncAnchorViewModeButtonState } from './scene-controls-button.js';
+
+// THE SCENE EXPORTER (2026-08-10, author directive) — the one human-operated
+// bridge to an assistant working on a SEPARATE, disposable bench world: the
+// active scene's Levels/Tiles/Walls/AmbientLights/Regions plus MSA's own
+// scene-flag payloads, as one portable file. Never touches a second world
+// itself — it only ever reads the author's own active scene. See
+// scene-export.js's own header for the full reasoning.
+export {
+  buildLiveSceneExport,
+  buildSceneExportPayload,
+  collectExportTexturePaths,
+  sceneExportFilename,
+} from './scene-export.js';

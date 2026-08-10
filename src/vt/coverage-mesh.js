@@ -157,23 +157,9 @@ export function buildCoverageCellMask({
   const raw = new Uint8Array(n * n);
   let rawCount = 0;
   for (let cy = 0; cy < n; cy++) {
-    // Cell → source px → grid cell. `ceil` on the high edge and the +1 floor
-    // below guarantee at least one grid sample per mesh cell even when the mesh
-    // is finer than the grid — a cell that samples NOTHING would read as empty
-    // and silently delete art.
-    const py0 = sy + (sh * cy) / n;
-    const py1 = sy + (sh * (cy + 1)) / n;
-    let gy0 = Math.floor((py0 / ih) * gh);
-    let gy1 = Math.ceil((py1 / ih) * gh);
-    gy0 = Math.max(0, Math.min(gh - 1, gy0));
-    gy1 = Math.max(gy0 + 1, Math.min(gh, gy1));
+    const [gy0, gy1] = cellGridSpan(cy, n, sy, sh, ih, gh);
     for (let cx = 0; cx < n; cx++) {
-      const px0 = sx + (sw * cx) / n;
-      const px1 = sx + (sw * (cx + 1)) / n;
-      let gx0 = Math.floor((px0 / iw) * gw);
-      let gx1 = Math.ceil((px1 / iw) * gw);
-      gx0 = Math.max(0, Math.min(gw - 1, gx0));
-      gx1 = Math.max(gx0 + 1, Math.min(gw, gx1));
+      const [gx0, gx1] = cellGridSpan(cx, n, sx, sw, iw, gw);
       let hit = 0;
       for (let gy = gy0; gy < gy1 && !hit; gy++) {
         const row = gy * gw;
@@ -206,6 +192,120 @@ export function buildCoverageCellMask({
   // cheaper to build and identical to draw.
   if (occupiedCount >= n * n) return null;
   return { cells: n, occupied, occupiedCount };
+}
+
+/**
+ * One axis of the cell → coarse-grid-texel mapping: mesh cell `c` of `n`, over
+ * the tile's source span `[s0, s0+sLen)` of an `imgDim`-px image, → the
+ * half-open texel range `[g0, g1)` it must sample. `ceil` on the high edge and
+ * the `+1` floor guarantee at least one texel per cell even when the mesh is
+ * finer than the grid — a cell that samples NOTHING would read as empty and
+ * silently delete art. Extracted (2026-08-10, Stage 1) so
+ * `splitCoverageCellMask` cannot drift from `buildCoverageCellMask`'s mapping:
+ * one function, two callers, and the ceil-overlap is load-bearing for BOTH
+ * (here it keeps art; there it conservatively demotes edge-adjacent cells to
+ * boundary, which also covers bilinear filter reach at ~23px/texel).
+ *
+ * @param {number} c @param {number} n
+ * @param {number} s0 @param {number} sLen
+ * @param {number} imgDim @param {number} gDim
+ * @returns {[number, number]}
+ */
+function cellGridSpan(c, n, s0, sLen, imgDim, gDim) {
+  const p0 = s0 + (sLen * c) / n;
+  const p1 = s0 + (sLen * (c + 1)) / n;
+  let g0 = Math.floor((p0 / imgDim) * gDim);
+  let g1 = Math.ceil((p1 / imgDim) * gDim);
+  g0 = Math.max(0, Math.min(gDim - 1, g0));
+  g1 = Math.max(g0 + 1, Math.min(gDim, g1));
+  return [g0, g1];
+}
+
+/**
+ * STAGE 1 (docs/planning/Stage-1-Shade-Once.md §3) — partition an existing
+ * kept-cell mask into INTERIOR (certified fully opaque: every min-grid texel
+ * the cell touches is exactly 255) and BOUNDARY (every other kept cell).
+ *
+ * The certification source is the per-texel MIN grid
+ * (`coarse-alpha.js#accumulateMinAlphaBand`) — NEVER the box-averaged mean
+ * grid the occupancy mask was built from, which cannot certify a min (its
+ * §2 has the full argument). The dilation ring lands in boundary by
+ * construction: its texels touch alpha 0. `cellGridSpan`'s ceil-overlap means
+ * a cell adjacent to any transparency samples at least one sub-255 texel and
+ * demotes itself — the conservative direction, since a boundary cell drawn
+ * blended is always correct, merely unoptimised.
+ *
+ * Fails OPEN, matching this module's contract: `null` for any unusable input
+ * AND for "zero interior cells" — both mean the caller keeps its existing
+ * single mesh and today's exact pixels.
+ *
+ * @param {object} args
+ * @param {{cells:number, occupied:Uint8Array, occupiedCount:number}|null} args.mask -
+ *   from {@link buildCoverageCellMask}, for the SAME tile/image geometry.
+ * @param {{w:number, h:number, data:Uint8Array}|null|undefined} args.minGrid -
+ *   the item's min-alpha grid over its ENTIRE source image.
+ * @param {{sx:number, sy:number, sw:number, sh:number}|null} [args.tile]
+ * @param {number} args.imageW @param {number} args.imageH
+ * @returns {{
+ *   interior: {cells:number, occupied:Uint8Array, occupiedCount:number},
+ *   boundary: {cells:number, occupied:Uint8Array, occupiedCount:number},
+ * }|null} both halves are `buildCoverageIndices`-shaped; interior ∪ boundary
+ *   equals the input mask's occupied set exactly, and they are disjoint.
+ */
+export function splitCoverageCellMask({ mask, minGrid, tile = null, imageW, imageH }) {
+  const n = Math.floor(Number(mask?.cells) || 0);
+  const occupied = mask?.occupied;
+  if (n < 1 || !occupied || occupied.length < n * n) return null;
+  const gw = Math.floor(Number(minGrid?.w) || 0);
+  const gh = Math.floor(Number(minGrid?.h) || 0);
+  const data = minGrid?.data;
+  if (gw < 1 || gh < 1 || !data || data.length < gw * gh) return null;
+  const iw = Number(imageW) || 0;
+  const ih = Number(imageH) || 0;
+  if (!(iw > 0) || !(ih > 0)) return null;
+
+  const sx = Math.max(0, Number(tile?.sx) || 0);
+  const sy = Math.max(0, Number(tile?.sy) || 0);
+  const sw = Math.min(iw - sx, Number(tile?.sw) || iw);
+  const sh = Math.min(ih - sy, Number(tile?.sh) || ih);
+  if (!(sw > 0) || !(sh > 0)) return null;
+
+  const interior = new Uint8Array(n * n);
+  const boundary = new Uint8Array(n * n);
+  let interiorCount = 0;
+  let boundaryCount = 0;
+  for (let cy = 0; cy < n; cy++) {
+    const [gy0, gy1] = cellGridSpan(cy, n, sy, sh, ih, gh);
+    for (let cx = 0; cx < n; cx++) {
+      const ci = cy * n + cx;
+      if (!occupied[ci]) continue;
+      const [gx0, gx1] = cellGridSpan(cx, n, sx, sw, iw, gw);
+      let solid = 1;
+      for (let gy = gy0; gy < gy1 && solid; gy++) {
+        const row = gy * gw;
+        for (let gx = gx0; gx < gx1; gx++) {
+          if (data[row + gx] !== 255) {
+            solid = 0;
+            break;
+          }
+        }
+      }
+      if (solid) {
+        interior[ci] = 1;
+        interiorCount++;
+      } else {
+        boundary[ci] = 1;
+        boundaryCount++;
+      }
+    }
+  }
+  // Zero interior means the split buys nothing — one mesh drawing everything
+  // blended IS today's behaviour, so hand the caller back its fast path.
+  if (interiorCount === 0) return null;
+  return {
+    interior: { cells: n, occupied: interior, occupiedCount: interiorCount },
+    boundary: { cells: n, occupied: boundary, occupiedCount: boundaryCount },
+  };
 }
 
 /** Grow a cell mask by one cell in all 8 directions. See this module's own

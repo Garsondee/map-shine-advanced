@@ -124,3 +124,92 @@ export function coarseAlphaMean(grid) {
   for (let i = 0; i < d.length; i++) sum += d[i];
   return sum / (d.length * 255);
 }
+
+// ---------------------------------------------------------------------------
+// THE MIN-ALPHA GRID — Stage 1's interior certification ground truth
+// (docs/planning/Stage-1-Shade-Once.md §2).
+//
+// The grid above is a box-averaged MEAN (`createImageBitmap` downsample): a
+// texel answers "how much of me is opaque". Stage 1's interior/boundary split
+// needs a DIFFERENT question answered soundly: "is EVERY source pixel under
+// this texel fully opaque (alpha exactly 255)?" — because only alpha≡1 makes
+// an unblended draw byte-identical to today's blended one. A mean structurally
+// cannot certify that: at ~23²px per texel, one 254-alpha pixel among 529
+// still box-averages and rounds to 255 (the aggregate cannot name its source).
+//
+// So this grid stores the true per-texel MIN, accumulated by
+// `bc-compress.worker.js#handle()`'s existing full-pixel banded scan — the one
+// place every source pixel is already being read — one band at a time. Pixels
+// partition into texels by plain floor binning; the consumer
+// (`splitCoverageCellMask`) maps mesh cells onto texel RECTS with its own
+// ceil-overlap conservatism, so the two mappings do not need to agree about
+// texel edges, only about which texels exist.
+// ---------------------------------------------------------------------------
+
+/**
+ * A fresh min-alpha grid, every texel at 255 — the identity of `min`, so a
+ * texel nothing ever lowers reads "fully opaque", which is only reachable when
+ * every band was accumulated (the worker walks ALL rows; a partial walk is a
+ * thrown error there, never a silently-optimistic grid here).
+ *
+ * @param {number} gridW @param {number} gridH
+ * @returns {Uint8Array}
+ */
+export function createMinAlphaGrid(gridW, gridH) {
+  const w = Math.floor(Number(gridW) || 0);
+  const h = Math.floor(Number(gridH) || 0);
+  if (w < 1 || h < 1) throw new Error(`createMinAlphaGrid: bad dims ${gridW}x${gridH}`);
+  return new Uint8Array(w * h).fill(255);
+}
+
+/**
+ * Fold one decoded RGBA band (source rows `[bandY, bandY+bandH)`) into a
+ * min-alpha grid. Throws on a short buffer rather than reading past the end —
+ * a half-accumulated grid would certify texels it never saw
+ * (feedback_instruments_must_not_lie, the same discipline `extractAlphaGrid`
+ * already applies one function up).
+ *
+ * @param {object} args
+ * @param {Uint8Array} args.grid - from {@link createMinAlphaGrid}, mutated.
+ * @param {number} args.gridW @param {number} args.gridH
+ * @param {Uint8Array|Uint8ClampedArray} args.band - RGBA bytes, `imageW*bandH*4`.
+ * @param {number} args.bandY - first source row this band covers.
+ * @param {number} args.bandH - rows in this band.
+ * @param {number} args.imageW @param {number} args.imageH - source dims in px.
+ */
+export function accumulateMinAlphaBand({ grid, gridW, gridH, band, bandY, bandH, imageW, imageH }) {
+  const gw = Math.floor(Number(gridW) || 0);
+  const gh = Math.floor(Number(gridH) || 0);
+  const iw = Math.floor(Number(imageW) || 0);
+  const ih = Math.floor(Number(imageH) || 0);
+  const by = Math.floor(Number(bandY) || 0);
+  const bh = Math.floor(Number(bandH) || 0);
+  if (gw < 1 || gh < 1 || !grid || grid.length < gw * gh) {
+    throw new Error(`accumulateMinAlphaBand: bad grid (${gridW}x${gridH}, data ${grid ? grid.length : 'missing'})`);
+  }
+  if (iw < 1 || ih < 1 || bh < 1 || by < 0 || by + bh > ih) {
+    throw new Error(
+      `accumulateMinAlphaBand: bad band geometry (rows [${bandY},${bandY}+${bandH}) of ${imageW}x${imageH})`
+    );
+  }
+  const need = iw * bh * 4;
+  if (!band || band.length < need) {
+    throw new Error(
+      `accumulateMinAlphaBand: expected ${need} bytes for ${iw}x${bh} RGBA, got ${band ? band.length : 'missing'}`
+    );
+  }
+  // Column → texel-x once per band, not once per pixel: 12,000 divisions
+  // instead of 72 million for a mansion-sized layer.
+  const colGx = new Int32Array(iw);
+  for (let x = 0; x < iw; x++) colGx[x] = Math.min(gw - 1, Math.floor((x * gw) / iw));
+  for (let ry = 0; ry < bh; ry++) {
+    const gy = Math.min(gh - 1, Math.floor(((by + ry) * gh) / ih));
+    const rowBase = gy * gw;
+    let i = ry * iw * 4 + 3;
+    for (let x = 0; x < iw; x++, i += 4) {
+      const a = band[i];
+      const gi = rowBase + colGx[x];
+      if (a < grid[gi]) grid[gi] = a;
+    }
+  }
+}

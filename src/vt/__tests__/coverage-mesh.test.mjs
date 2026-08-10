@@ -10,6 +10,7 @@
 import {
   buildCoverageCellMask,
   buildCoverageIndices,
+  splitCoverageCellMask,
   COVERAGE_MESH_CELLS,
   COVERAGE_ALPHA_THRESHOLD,
 } from '../coverage-mesh.js';
@@ -192,6 +193,85 @@ export function run(t) {
     ok(
       '...and buildCoverageIndices agrees with the count it reports',
       buildCoverageIndices(mask).length === mask.occupiedCount * 6
+    );
+  }
+
+  // --- Stage 1: the interior/boundary split (splitCoverageCellMask) --------
+  // 640x640 image, 8-cell mesh (80px cells), 64x64 grids (10px texels): cell
+  // and texel edges align exactly, so expectations below are exact, not fuzzy.
+  // Left half painted solid, right half empty → occupied = cx 0..3 (art) plus
+  // cx 4 (the dilation ring).
+  {
+    const mean = grid(64, 64, (x) => (x < 32 ? 255 : 0));
+    const mask = buildCoverageCellMask({ grid: mean, imageW: 640, imageH: 640, cells: 8 });
+    const min = { w: 64, h: 64, data: grid(64, 64, (x) => (x < 32 ? 255 : 0)).data };
+    const split = splitCoverageCellMask({ mask, minGrid: min, imageW: 640, imageH: 640 });
+    ok('a split exists when certified-solid art exists', !!split);
+    const inter = occupiedSet(split.interior);
+    const bound = occupiedSet(split.boundary);
+    let disjoint = true;
+    for (const k of inter) if (bound.has(k)) disjoint = false;
+    ok('interior and boundary are DISJOINT', disjoint);
+    const occ = occupiedSet(mask);
+    ok(
+      'interior ∪ boundary is EXACTLY the kept-cell set — no cell invented, none lost',
+      inter.size + bound.size === occ.size && [...inter, ...bound].every((k) => occ.has(k))
+    );
+    ok(
+      'counts agree with the masks they describe',
+      split.interior.occupiedCount === inter.size && split.boundary.occupiedCount === bound.size
+    );
+    ok('solid-art cells are interior, to the paint edge', inter.has('0,0') && inter.has('3,4'));
+    ok('the dilation ring is boundary by construction', bound.has('4,0') && bound.has('4,7'));
+    ok(
+      'indices come out sized to each half',
+      buildCoverageIndices(split.interior).length === split.interior.occupiedCount * 6 &&
+        buildCoverageIndices(split.boundary).length === split.boundary.occupiedCount * 6
+    );
+  }
+  // One sub-255 texel deep inside otherwise-solid art demotes ONLY the cell
+  // whose rect contains it — the certification a box-averaged MEAN cannot make
+  // (a lone 254 rounds away in a mean; it must NOT round away here).
+  {
+    const mean = grid(64, 64, (x) => (x < 32 ? 255 : 0));
+    const mask = buildCoverageCellMask({ grid: mean, imageW: 640, imageH: 640, cells: 8 });
+    const minData = grid(64, 64, (x) => (x < 32 ? 255 : 0)).data;
+    minData[16 * 64 + 16] = 254; // texel (16,16) — inside cell (2,2)'s aligned 8-texel rect
+    const split = splitCoverageCellMask({ mask, minGrid: { w: 64, h: 64, data: minData }, imageW: 640, imageH: 640 });
+    ok('a single 254 texel demotes its own cell to boundary', occupiedSet(split.boundary).has('2,2'));
+    ok(
+      '…without touching any other interior cell',
+      occupiedSet(split.interior).has('0,6') && split.interior.occupiedCount === 31
+    );
+  }
+  // Fail-opens — every one hands the caller its single-mesh fast path back.
+  {
+    const mean = grid(64, 64, (x) => (x < 32 ? 255 : 0));
+    const mask = buildCoverageCellMask({ grid: mean, imageW: 640, imageH: 640, cells: 8 });
+    ok(
+      'a missing min grid fails open to null',
+      splitCoverageCellMask({ mask, minGrid: null, imageW: 640, imageH: 640 }) === null
+    );
+    const allSoft = { w: 64, h: 64, data: grid(64, 64, () => 200).data };
+    ok(
+      'zero certified-interior cells fails open to null (all-blended IS today)',
+      splitCoverageCellMask({ mask, minGrid: allSoft, imageW: 640, imageH: 640 }) === null
+    );
+    ok(
+      'a null mask fails open to null',
+      splitCoverageCellMask({ mask: null, minGrid: allSoft, imageW: 640, imageH: 640 }) === null
+    );
+  }
+  // A sub-rect tile maps through its own source rect, exactly like the builder.
+  {
+    const mean = grid(64, 64, (x) => (x < 32 ? 255 : 0));
+    const tile = { sx: 320, sy: 0, sw: 320, sh: 640 };
+    const mask = buildCoverageCellMask({ grid: mean, tile, imageW: 640, imageH: 640, cells: 8 });
+    ok('the right-half tile of left-half art keeps its all-empty mask', mask !== null && mask.occupiedCount === 0);
+    const min = { w: 64, h: 64, data: grid(64, 64, (x) => (x < 32 ? 255 : 0)).data };
+    ok(
+      'and its split is null (nothing occupied at all)',
+      splitCoverageCellMask({ mask, minGrid: min, tile, imageW: 640, imageH: 640 }) === null
     );
   }
 }

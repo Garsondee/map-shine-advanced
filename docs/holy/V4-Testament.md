@@ -229,24 +229,57 @@ reconcile clause below, so they cannot silently be treated as known.
 
 ### Stage 1 — Shade every pixel once *(the biggest lever)*
 
-- [ ] Coverage mesh gains an interior/boundary index split (per-cell min alpha from the
-      existing coarse grid; fully-opaque layers keep the single-quad fast path).
-- [ ] Colour pass binds `buf:scene.depth` as its real depth attachment (no clear between
-      passes; colour never writes depth).
-- [ ] Interior draws: `depthFunc: EQUAL`, discard-free shader variant, blending off →
-      hardware early-Z skips occluded fragments before shader launch.
-- [ ] Boundary draws: back-to-front, blended, `LessEqualDepth` — exactly today's alpha math.
-- [ ] `maskNode` rank-lookup discard deleted behind a revert flag.
-- [ ] Animated-geometry parity sweep: vegetation, tokens, doors, water surface produce
-      identical Z in both passes (the depth-proxy-animation rule, now correctness-critical).
-- [ ] Pixel-diff gate at `standard` profile: interior byte-stable vs. baseline; boundary
-      texels tolerance-only.
-- [ ] Bench capture. **Gate: `geometry.worldDraw` 26.6 → ≤ 8 ms.** If the win is under 2×,
-      STOP and reconcile against Stage 0's A/B numbers before building further.
+*Restructured at Stage-1 open, 2026-08-10, by Claude Fable 5 — original intent and every
+original gate preserved; the engineering design (the EQUAL-by-construction argument, the
+min-grid certification, eligibility rules, the shared-attachment legality constraint) is
+`docs/planning/Stage-1-Shade-Once.md`, created against the real code the same pass. One
+correction to the original list, recorded rather than silently applied: "per-cell min alpha
+from the existing coarse grid" is impossible — that grid is a box-averaged MEAN and a mean
+cannot certify a min (rounding hides sub-255 pixels). S1.1 builds the true min grid from the
+BC worker's existing full-pixel scan instead.*
+
+- [x] S1.1 Per-texel MIN alpha grid: pure accumulator (`vt/coarse-alpha.js`, Node-tested) +
+      accumulation in `bc-compress.worker.js`'s existing banded scan + cache format v10
+      (`alphaMinGrid`; v9 records fail-open to no-split = today's pixels) + plumbed to
+      `wi.alphaMinGrid`. · done Claude Fable 5 2026-08-10 — `createMinAlphaGrid` +
+      `accumulateMinAlphaBand` (throws on short/out-of-range bands rather than certifying
+      texels never seen), folded into `handle()`'s existing band loop; v10 comment carries the
+      mean-cannot-certify-a-min argument; grid rides the worker reply's transfer list; landed
+      inert at `wi.alphaMinGrid` (no consumer until S1.4). Node tests pin: min semantics (one
+      254 pixel drops exactly its texel — the case a mean rounds away), band-split
+      equivalence, corner clamp, both refusal paths.
+- [x] S1.2 Coverage mesh interior/boundary split (`splitCoverageCellMask`): interior = kept
+      cell whose min-grid texels are ALL 255; boundary = every other kept cell (dilation ring
+      lands there by construction); fully-opaque single-quad layers keep their fast path
+      (interior STATE only when `alphaStats.min === 255`). Pure, Node-tested, fail-open.
+      · done Claude Fable 5 2026-08-10 — the cell→texel mapping was EXTRACTED
+      (`cellGridSpan`), not copied, so the split cannot drift from
+      `buildCoverageCellMask`'s own mapping (one function, two callers; the ceil-overlap is
+      load-bearing for both). Fails open to `null` on any unusable input AND on zero interior
+      cells. Node tests pin: disjointness, interior∪boundary ≡ kept-set exactly, ring→boundary,
+      the single-254-texel demotion, all three fail-opens, sub-rect tiles. vt suite 744→766,
+      `npm run verify` green.
+- [ ] S1.3 Shared depth attachment: allocator extension (reference `buf:scene.depth`'s own
+      depthTexture; safe resize/dispose) + lab `bench-scene-depth.js` scenario 7 proving the
+      share AND the EQUAL bit-exactness claim on the real device BEFORE live wiring.
+- [ ] S1.4 Live wiring behind ONE revert flag (`earlyZComposition`, default OFF, flips the
+      whole mode as a unit — camera parameters, tile mesh Z, dual interior/boundary meshes,
+      material variants, attachment share, colour-only clear, `maskNode` deleted). Painter
+      order preserved globally; tokens/doors/water/Case-2 untouched; exclusions per the plan
+      (vegActive, occlusion-responsive, raw-fallback).
+- [ ] S1.5 Pixel-diff gate at `standard` profile: same-session flag-off/flag-on capture,
+      time frozen; interior byte-stable; boundary texels tolerance-only. The one known
+      intentional diff (under-fade reveal) verified in code and shown to the author, not
+      slipped through.
+- [ ] S1.6 Bench capture, §5's regime (4K, First-Floor, uncapped). **Gate:
+      `geometry.worldDraw` 26.6 → ≤ 8 ms.** If the win is under 2×, STOP and reconcile
+      against Stage 0's A/B numbers before building further.
       *(Amended at Stage-0 close, 2026-08-10, Fable: Stage 0's A/B round was confounded — before
       invoking this reconcile clause, re-capture both A/Bs on an otherwise-idle machine. The
       flags and scripts are built and committed; each run is ~10 minutes.)*
-- [ ] Author LIVE verdict: both floors, full zoom range, on the Mansion.
+- [ ] S1.7 Default flips ON (Law 3 satisfied by the diff gate's proof of identity; the flag
+      remains as the permanent revert per Law 5).
+- [ ] S1.8 Author LIVE verdict: both floors, full zoom range, on the Mansion.
 
 ### Stage 2 — One draw for all lights
 

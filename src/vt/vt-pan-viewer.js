@@ -8162,6 +8162,12 @@ export async function startVtPanViewer({
               wi.tiles.push(t);
               wi.compressed = c.cached ? `${c.format}(cached)` : c.format;
               wi.alphaStats = c.alphaStats ?? null;
+              // STAGE 1 (S1.1, docs/planning/Stage-1-Shade-Once.md): the
+              // per-texel MIN alpha grid — the coming interior/boundary
+              // split's certification input. Inert until S1.4 wires the split
+              // into the mesh build; null on pre-v10 cache records and the
+              // raw path (fail-open: no split, today's pixels).
+              wi.alphaMinGrid = c.alphaMinGrid ?? null;
               wi.status = 'ready';
               scheduleResidencyUpdate().catch(() => {
                 // Non-fatal: the next real input refreshes visibility anyway.

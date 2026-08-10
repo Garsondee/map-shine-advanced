@@ -85,7 +85,7 @@
  * warm costs nothing to reuse.
  */
 import { encodeStriped, computeMipChainDims } from './block-compress.js';
-import { coarseAlphaGridDims, extractAlphaGrid } from './coarse-alpha.js';
+import { coarseAlphaGridDims, extractAlphaGrid, createMinAlphaGrid, accumulateMinAlphaBand } from './coarse-alpha.js';
 // The mip reducer (Lanczos-2, premultiplied, dilated). Replaced the
 // OffscreenCanvas `drawImage` resize this file used to rely on — see
 // mip-resample.js's header for the two author-reported defects that motivated
@@ -167,7 +167,17 @@ const STORE = 'blocks';
 // real hardware — `tools/shader-lab/bench-block-compress.js`, which decodes our
 // blocks on the GPU's own fixed-function decoder, the only oracle independent
 // of our reading of the spec.
-const CACHE_VERSION = 9;
+// v10 (2026-08-10, Stage 1 "shade every pixel once" — docs/planning/
+// Stage-1-Shade-Once.md §2): the record gains `alphaMinGrid`, a per-texel MIN
+// of source alpha at coarse-alpha grid resolution, accumulated during the SAME
+// full-pixel banded scan alphaStats already runs. It is the interior/boundary
+// split's certification ground truth — the box-averaged alpha grid is a MEAN
+// and cannot certify "every pixel here is 255" (one 254 among a texel's ~529
+// pixels still rounds to 255; an aggregate cannot name its source). A v9
+// record lacks the field and would fail-open to boundary-everything (correct
+// pixels, no early-Z win) forever — re-encoded instead, the same
+// all-or-nothing trade every bump above has made.
+const CACHE_VERSION = 10;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two
@@ -432,6 +442,7 @@ async function handle(src) {
       height: cached.height,
       cached: true,
       alphaStats: cached.alphaStats ?? null,
+      alphaMinGrid: cached.alphaMinGrid ?? null,
     };
   }
 
@@ -478,6 +489,11 @@ async function handle(src) {
   let alphaMax = 0;
   let alphaSum = 0;
   let texelCount = 0;
+  // STAGE 1's INTERIOR CERTIFICATION (see the v10 cache note above): a
+  // per-texel MIN of source alpha, folded in from the SAME bands this scan
+  // already reads — the one place every source pixel is already in hand.
+  const { w: minGridW, h: minGridH } = coarseAlphaGridDims(w, h);
+  const minGridData = createMinAlphaGrid(minGridW, minGridH);
   for (let y = 0; y < h; y += STRIP_ROWS) {
     const sh = Math.min(STRIP_ROWS, h - y);
     const data = readStrip(y, sh);
@@ -489,8 +505,19 @@ async function handle(src) {
       alphaSum += a;
       texelCount++;
     }
+    accumulateMinAlphaBand({
+      grid: minGridData,
+      gridW: minGridW,
+      gridH: minGridH,
+      band: data,
+      bandY: y,
+      bandH: sh,
+      imageW: w,
+      imageH: h,
+    });
   }
   const alphaStats = { min: alphaMin, max: alphaMax, mean: texelCount ? +(alphaSum / texelCount).toFixed(2) : null };
+  const alphaMinGrid = { w: minGridW, h: minGridH, data: minGridData };
   const format = opaque ? 'bc1' : 'bc7';
   // encodeStriped re-reads each band and encodes it into the shared output — the
   // whole image is never resident at once. Result is bit-identical to a
@@ -536,10 +563,18 @@ async function handle(src) {
 
   // Store the levels (IndexedDB structuredClones every buffer, so the
   // originals stay valid to transfer to the main thread afterwards).
-  await cachePut(key, { format, width: w, height: h, levels, alphaStats, etag, lastModified, contentLength }).catch(
-    () => {}
-  );
-  return { format, levels, width: w, height: h, cached: false, alphaStats };
+  await cachePut(key, {
+    format,
+    width: w,
+    height: h,
+    levels,
+    alphaStats,
+    alphaMinGrid,
+    etag,
+    lastModified,
+    contentLength,
+  }).catch(() => {});
+  return { format, levels, width: w, height: h, cached: false, alphaStats, alphaMinGrid };
 }
 
 self.onmessage = async (e) => {
@@ -577,10 +612,16 @@ self.onmessage = async (e) => {
         height: r.height,
         cached: r.cached,
         alphaStats: r.alphaStats,
+        alphaMinGrid: r.alphaMinGrid ?? null,
       },
       // Every level's buffer is transferred, never copied — same contract as
-      // the old single-buffer message, just one entry per mip level now.
-      r.levels.map((lvl) => lvl.blocks)
+      // the old single-buffer message, just one entry per mip level now. The
+      // min grid's buffer rides the same list (the DB record is a separate
+      // structuredClone, so this one is ours to give away); a cached-but-
+      // gridless record (pre-v10, defensive) simply transfers nothing extra.
+      r.alphaMinGrid?.data?.buffer
+        ? [...r.levels.map((lvl) => lvl.blocks), r.alphaMinGrid.data.buffer]
+        : r.levels.map((lvl) => lvl.blocks)
     );
   } catch (err) {
     self.postMessage({ id, ok: false, error: String((err && err.message) || err) });

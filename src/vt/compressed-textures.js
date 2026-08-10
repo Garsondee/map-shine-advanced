@@ -43,7 +43,7 @@ function ensureWorker() {
   try {
     _worker = new Worker(new URL('./bc-compress.worker.js', import.meta.url), { type: 'module' });
     _worker.onmessage = (e) => {
-      const { id, ok, mode, format, levels, width, height, cached, alphaStats } = e.data || {};
+      const { id, ok, mode, format, levels, width, height, cached, alphaStats, alphaMinGrid } = e.data || {};
       const p = _pending.get(id);
       if (!p) return;
       _pending.delete(id);
@@ -78,6 +78,9 @@ function ensureWorker() {
         height,
         cached: !!cached,
         alphaStats: alphaStats ?? null,
+        // Stage 1 (S1.1): the per-texel MIN alpha grid — null on pre-v10 cache
+        // records; every consumer fails open on null (no split, today's pixels).
+        alphaMinGrid: alphaMinGrid ?? null,
       });
     };
     _worker.onerror = () => {
@@ -101,7 +104,8 @@ function ensureWorker() {
  * @returns {Promise<
  *   | { format: 'bc1'|'bc7', levels: Array<{width:number,height:number,blocks:Uint8Array}>,
  *       width: number, height: number, cached: boolean,
- *       alphaStats: {min:number,max:number,mean:number}|null }
+ *       alphaStats: {min:number,max:number,mean:number}|null,
+ *       alphaMinGrid: {w:number,h:number,data:Uint8Array}|null }
  *   | null                              // worker unavailable/failed — caller uses a raw texture
  * >}
  */

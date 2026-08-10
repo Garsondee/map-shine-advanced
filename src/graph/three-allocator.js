@@ -291,6 +291,16 @@ export class ThreeAllocator {
       desc
     );
     enforceKeyholeLaw(name, width, height, desc);
+    // ⚠️ THERE IS DELIBERATELY NO "shared depth texture" DESCRIPTOR FIELD
+    // (Stage 1, 2026-08-10). One was built, then DELETED the same session:
+    // `bench-scene-depth.js` scenario 'single-target-prepass-equal' proved on
+    // the real device that a second RenderTarget referencing another target's
+    // depthTexture gets NO usable depth on this backend — silently, zero
+    // validation errors (the scenario's 'cross-target-share-stays-dead-pin'
+    // check pins the limitation, and will FAIL loudly if a three upgrade ever
+    // makes sharing work). The sanctioned shape for a pass that needs another
+    // pass's depth as its live attachment is the SAME target with a
+    // `colorWrite:false` prepass — docs/planning/Stage-1-Shade-Once.md §4.
     // A REAL, samplable depth texture — built HERE, never at a call site, for
     // the SAME reason every other attachment is: `gpu/allocator-only`
     // (tools/verify-structure.mjs) fails the build on a `new *RenderTarget(`

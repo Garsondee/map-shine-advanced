@@ -295,7 +295,10 @@ export function createSceneDepthBench({ THREE, log }) {
     await renderer.renderAsync(scene, camera);
     renderer.setRenderTarget(prevTarget);
     renderer.setClearDepth(prevClearDepth);
-    const colorBuf = await renderer.readRenderTargetPixelsAsync(colorRt, 0, 0, DIM, DIM);
+    // colorRt's CURRENT size, never the DIM constant — scenario 7 resizes the
+    // target mid-scenario, and a 256-texel copy out of a 192-texel texture is
+    // a device-level validation error (found by that scenario's own first run).
+    const colorBuf = await renderer.readRenderTargetPixelsAsync(colorRt, 0, 0, colorRt.width, colorRt.height);
     for (const d of disposables) d.dispose?.();
     return {
       color: ArrayBuffer.isView(colorBuf) ? colorBuf : new Uint8Array(colorBuf),
@@ -1093,6 +1096,341 @@ export function createSceneDepthBench({ THREE, log }) {
     },
   });
 
+  /**
+   * SCENARIO 7 — STAGE 1's LOAD-BEARING UNKNOWNS, RETIRED ON THE REAL DEVICE
+   * (docs/planning/Stage-1-Shade-Once.md §4 names this scenario as the gate
+   * before any live wiring).
+   *
+   * ⚠️ THE FIRST DESIGN DIED HERE, WHICH IS THIS BENCH DOING ITS JOB. The
+   * original plan had a SECOND render target bind this pass's `depthTexture`
+   * as its own depth attachment ("the share"). The vendored
+   * `RenderTarget#set depthTexture` (three.webgpu.js:4911) has no
+   * "already in use" guard, so source reading said "maybe" — and this
+   * scenario's own first run said NO, definitively: the sharer's pass gets
+   * NO usable depth (a LessEqualDepth probe drew nothing anywhere;
+   * classified `cleared-to-0-or-no-attachment` by the diagnostic below), and
+   * it fails SILENTLY — zero validation errors, just black. The author's own
+   * independent research landed the same afternoon pointing at the same
+   * limitation (threejs discourse #90036: the backend manages GPU resources
+   * per RenderTarget; cross-target sharing does not resolve).
+   *
+   * WHAT THIS SCENARIO NOW PROVES — the design S1.4 actually ships
+   * (the "single-target prepass", the recommended shape for this backend):
+   * ONE target owns colour AND its own real depthTexture; pass 1 renders the
+   * depth-writer scene into it with `colorWrite:false` (depth lands, colour
+   * untouched); pass 2 renders EQUAL/unblended meshes at the SAME Z values
+   * with depth-clear disabled. Checks:
+   *   - the prepass writes NO colour (colorWrite:false genuinely masks);
+   *   - EQUAL at the same numeric Z through the same camera is EXACT — zero
+   *     epsilon — including an overlap resolved by the depth test;
+   *   - a mesh at an unwritten Z contributes NOTHING (non-vacuity);
+   *   - `renderer.autoClearDepth = false` around pass 2 is load-bearing;
+   *   - a resize survives (setSize disposes GPU resources; the pair of
+   *     passes must re-form cleanly at the new size);
+   *   - THE PIN: cross-target sharing stays dead. A second target binding
+   *     this target's depthTexture still draws nothing through it. If a
+   *     future three upgrade makes this check FAIL, the cheaper two-target
+   *     design has opened up and Stage 6 should hear about it.
+   *
+   * Production's claim is STRONGER than what this proves in one way, weaker
+   * in none: production shares the actual geometry INSTANCE between the two
+   * passes; this scenario rebuilds value-identical geometry through the same
+   * `buildQuadMesh`. Value-identical inputs proving exact ⇒ instance-shared
+   * inputs are exact a fortiori.
+   */
+  scenarios.set('single-target-prepass-equal', {
+    name: 'single-target-prepass-equal',
+    summary:
+      'Stage 1 gate, single-target design: a colorWrite:false depth prepass into the SAME target, ' +
+      'then EQUAL-at-the-same-Z colour draws — exact, zero epsilon, no validation errors. ' +
+      'Plus the pin: cross-target depthTexture sharing stays dead on this backend.',
+    async run(ctx) {
+      await ensureRenderer();
+      const checks = [];
+      let calibration = 'OK';
+      try {
+        await calibrate();
+      } catch (err) {
+        calibration = 'FAILED';
+        checks.push(check({ id: 'calibration', status: 'UNMEASURED', note: String(err?.message ?? err) }));
+      }
+
+      // Count real device validation errors across the WHOLE scenario. The
+      // device is reachable on the backend; if a future three rearranges
+      // that, the check degrades to UNMEASURED rather than silently passing.
+      const device = renderer?.backend?.device ?? null;
+      let uncapturedErrors = 0;
+      const onError = (e) => {
+        uncapturedErrors++;
+        log?.(`SCENE-DEPTH shared-depth-equal: uncapturederror: ${e?.error?.message ?? e}`);
+      };
+      device?.addEventListener?.('uncapturederror', onError);
+
+      const { Fn, float, vec4 } = THREE.TSL;
+      /** Flat-colour material in the exact interior-draw state the plan
+       * specifies: EQUAL, no depth write, no blend, no discard anywhere. */
+      const equalMat = (r255, g255, b255) => {
+        const m = new THREE.NodeMaterial();
+        m.side = THREE.DoubleSide;
+        m.transparent = false;
+        m.depthTest = true;
+        m.depthWrite = false;
+        m.depthFunc = THREE.EqualDepth;
+        m.fragmentNode = Fn(() => vec4(float(r255 / 255), float(g255 / 255), float(b255 / 255), float(1)))();
+        return m;
+      };
+
+      // Geometry: L covers x∈[0,666], R covers x∈[333,1000] (both y∈[100,900],
+      // leaving uncovered rows to prove EQUAL-against-cleared-depth draws
+      // nothing). Overlap x∈[333,666] — R at the higher rank must own it.
+      const maxRank = 3;
+      const zL = (0 + 1) / (maxRank + 1); // rankToDepthZ(0, 3), inlined with its formula visible
+      const zR = (2 + 1) / (maxRank + 1); // rankToDepthZ(2, 3)
+      const zGhost = (1 + 1) / (maxRank + 1); // rank 1 — NOTHING writes this depth
+      const rectL = { minX: 0, minY: 100, maxX: 666, maxY: 900 };
+      const rectR = { minX: 333, minY: 100, maxX: 1000, maxY: 900 };
+
+      /** The depth-writer material in PREPASS trim: same depth state, colour
+       * writes masked — the exact production shape (the proxy scene rendered
+       * into sceneColor before the world draw, leaving colour untouched). */
+      const prepassMat = () => {
+        const m = buildDepthWriterMaterial({ THREE, r255: 123, g255: 45, b255: 67 });
+        m.colorWrite = false; // the payload bytes above must NEVER land — checked below
+        return m;
+      };
+
+      const runBothPasses = async () => {
+        const dim = colorRt.width;
+        // Pass 1 — the prepass: depth-writer scene into the ONE target,
+        // colour+depth cleared here (the frame's single clear), colour writes
+        // masked so only depth lands.
+        const preScene = new THREE.Scene();
+        const preMeshes = [
+          buildQuadMesh(THREE, rectL, prepassMat(), zL),
+          buildQuadMesh(THREE, rectR, prepassMat(), zR),
+        ];
+        for (const m of preMeshes) preScene.add(m);
+        const prevTarget = renderer.getRenderTarget();
+        const prevClearDepth = renderer.getClearDepth();
+        renderer.setRenderTarget(colorRt);
+        renderer.setClearColor(0x000000, 0);
+        renderer.setClearDepth(1);
+        renderer.clear(true, true, true);
+        await renderer.renderAsync(preScene, camera);
+        const afterPrepass0 = await renderer.readRenderTargetPixelsAsync(colorRt, 0, 0, dim, dim);
+        const afterPrepass = ArrayBuffer.isView(afterPrepass0) ? afterPrepass0 : new Uint8Array(afterPrepass0);
+        // Pass 2 — the "world" pass into the SAME target: NOTHING cleared;
+        // autoClearDepth/autoClearColor both off so the pass loads what pass 1
+        // left (production clears colour at frame start too — here pass 1's
+        // clear IS the frame start).
+        const scene = new THREE.Scene();
+        const meshes = [
+          buildQuadMesh(THREE, rectL, equalMat(255, 0, 0), zL),
+          buildQuadMesh(THREE, rectR, equalMat(0, 255, 0), zR),
+          // The negative control, IN the same draw: full-coverage mesh at a
+          // depth nothing wrote. EQUAL must reject it at every pixel — this is
+          // what makes the positive checks non-vacuous.
+          buildQuadMesh(THREE, WORLD, equalMat(0, 0, 255), zGhost),
+        ];
+        for (const m of meshes) scene.add(m);
+        const prevAutoClearDepth = renderer.autoClearDepth;
+        const prevAutoClearColor = renderer.autoClearColor;
+        renderer.autoClearDepth = false; // ← load-bearing; see this scenario's header
+        renderer.autoClearColor = false;
+        renderer.setRenderTarget(colorRt);
+        await renderer.renderAsync(scene, camera);
+        renderer.setRenderTarget(prevTarget);
+        renderer.setClearDepth(prevClearDepth);
+        renderer.autoClearDepth = prevAutoClearDepth;
+        renderer.autoClearColor = prevAutoClearColor;
+        const buf0 = await renderer.readRenderTargetPixelsAsync(colorRt, 0, 0, dim, dim);
+        for (const m of [...preMeshes, ...meshes]) m.geometry.dispose?.();
+        return { afterPrepass, buf: ArrayBuffer.isView(buf0) ? buf0 : new Uint8Array(buf0) };
+      };
+
+      // `sampleColor` is DIM-bound; sample the sharer at its own size directly.
+      const sampleAt = (buf, dim, x, y) => {
+        const fx = (x - WORLD.minX) / (WORLD.maxX - WORLD.minX);
+        const fy = (y - WORLD.minY) / (WORLD.maxY - WORLD.minY);
+        const px = Math.min(dim - 1, Math.max(0, Math.floor(fx * dim)));
+        const rowFromBottom = Math.min(dim - 1, Math.max(0, Math.floor(fy * dim)));
+        const row = orientation === 'flipped' ? dim - 1 - rowFromBottom : rowFromBottom;
+        const i = (row * dim + px) * 4;
+        return { r: buf[i], g: buf[i + 1], b: buf[i + 2], a: buf[i + 3] };
+      };
+
+      const { afterPrepass, buf } = await runBothPasses();
+
+      checks.push(
+        evaluate('prepass-writes-no-colour', () => {
+          let touched = 0;
+          for (let i = 0; i < afterPrepass.length; i++) if (afterPrepass[i] !== 0) touched++;
+          return {
+            ok: touched === 0,
+            measured: `${touched} non-zero bytes after the prepass`,
+            expected: '0',
+            note: 'colorWrite:false genuinely masks — the writer´s payload bytes must never land in the colour attachment',
+          };
+        })
+      );
+
+      checks.push(
+        evaluate('EQUAL-exact-left-exclusive-region-is-rank0', () => {
+          const s = sampleAt(buf, DIM, 166, 500);
+          return {
+            ok: s.r === 255 && s.g === 0 && s.b === 0,
+            measured: `${s.r},${s.g},${s.b}`,
+            expected: '255,0,0',
+            note: 'L´s EQUAL passes with ZERO epsilon where the depth pass stored L´s own Z',
+          };
+        })
+      );
+      checks.push(
+        evaluate('EQUAL-exact-overlap-region-is-rank2-not-rank0', () => {
+          const s = sampleAt(buf, DIM, 500, 500);
+          return {
+            ok: s.g === 255 && s.r === 0,
+            measured: `${s.r},${s.g},${s.b}`,
+            expected: '0,255,0',
+            note: 'where the depth test resolved the overlap to R, L´s EQUAL must FAIL and R´s must pass',
+          };
+        })
+      );
+      checks.push(
+        evaluate('EQUAL-exact-right-exclusive-region-is-rank2', () => {
+          const s = sampleAt(buf, DIM, 833, 500);
+          return { ok: s.g === 255 && s.r === 0, measured: `${s.r},${s.g},${s.b}`, expected: '0,255,0', note: '' };
+        })
+      );
+      checks.push(
+        evaluate('wrong-Z-mesh-contributes-NOTHING-anywhere', () => {
+          let blue = 0;
+          for (let i = 2; i < buf.length; i += 4) if (buf[i] !== 0) blue++;
+          return {
+            ok: blue === 0,
+            measured: `${blue} blue-tinted pixels`,
+            expected: '0',
+            note: 'the ghost mesh at an unwritten depth is rejected EVERYWHERE — the positive checks are not vacuous',
+          };
+        })
+      );
+      checks.push(
+        evaluate('uncovered-rows-stay-clear', () => {
+          const s = sampleAt(buf, DIM, 500, 40);
+          return {
+            ok: s.r === 0 && s.g === 0 && s.b === 0 && s.a === 0,
+            measured: `${s.r},${s.g},${s.b},${s.a}`,
+            expected: '0,0,0,0',
+            note: 'cleared depth (far plane) EQUALs nothing — no mesh covers these rows anyway',
+          };
+        })
+      );
+
+      // Resize the target (production: a window resize), re-run both passes
+      // at the new size, and demand the same answers — setSize() disposes GPU
+      // resources (RenderTarget#setSize calls dispose), so the prepass+EQUAL
+      // pair must re-form cleanly from nothing.
+      const DIM2 = 192;
+      colorRt.setSize(DIM2, DIM2);
+      const { buf: buf2 } = await runBothPasses();
+      checks.push(
+        evaluate('survives-a-resize', () => {
+          const a = sampleAt(buf2, DIM2, 166, 500);
+          const b = sampleAt(buf2, DIM2, 500, 500);
+          return {
+            ok: a.r === 255 && a.g === 0 && b.g === 255 && b.r === 0,
+            measured: `left=${a.r},${a.g} overlap=${b.r},${b.g}`,
+            expected: 'left=255,0 overlap=0,255',
+            note: 'the single-target prepass+EQUAL pair re-forms cleanly after every GPU resource was disposed',
+          };
+        })
+      );
+      // Restore the bench's own target size for whatever scenario runs next,
+      // and refill the depth attachment at the restored size for the pin below.
+      colorRt.setSize(DIM, DIM);
+      await runBothPasses();
+
+      // THE PIN — cross-target sharing stays dead. A second target binding
+      // THIS target's depthTexture must see none of its values (this
+      // scenario's own first run proved the share silently resolves to
+      // nothing on this backend; the author's independent research agreed —
+      // threejs discourse #90036). A permissive LessEqualDepth probe through
+      // the "shared" attachment must draw NOTHING. If a future three makes
+      // this FAIL, the cheaper two-target design has opened up — re-plan
+      // Stage 6's keel resource model with it.
+      {
+        const sharer = new THREE.RenderTarget(DIM, DIM, {
+          type: THREE.UnsignedByteType,
+          format: THREE.RGBAFormat,
+          minFilter: THREE.NearestFilter,
+          magFilter: THREE.NearestFilter,
+          colorSpace: THREE.NoColorSpace,
+          depthBuffer: true,
+        });
+        sharer.depthTexture = colorRt.depthTexture;
+        const probeScene = new THREE.Scene();
+        const probeMat = equalMat(255, 255, 0);
+        probeMat.depthFunc = THREE.LessEqualDepth;
+        const probeMesh = buildQuadMesh(THREE, WORLD, probeMat, zL);
+        probeScene.add(probeMesh);
+        const prevTarget = renderer.getRenderTarget();
+        const prevAutoClearDepth = renderer.autoClearDepth;
+        renderer.autoClearDepth = false;
+        renderer.setRenderTarget(sharer);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, false, false);
+        await renderer.renderAsync(probeScene, camera);
+        renderer.setRenderTarget(prevTarget);
+        renderer.autoClearDepth = prevAutoClearDepth;
+        const pinBuf0 = await renderer.readRenderTargetPixelsAsync(sharer, 0, 0, DIM, DIM);
+        const pinBuf = ArrayBuffer.isView(pinBuf0) ? pinBuf0 : new Uint8Array(pinBuf0);
+        probeMesh.geometry.dispose?.();
+        sharer.dispose();
+        checks.push(
+          evaluate('cross-target-share-stays-dead-pin', () => {
+            let drawn = 0;
+            for (let i = 0; i < pinBuf.length; i += 4) if (pinBuf[i] !== 0) drawn++;
+            return {
+              ok: drawn === 0,
+              measured: `${drawn} pixels drawn through the share`,
+              expected: '0 (the share resolves to nothing on this backend)',
+              note: 'a FAILURE here means a three upgrade made cross-target depth sharing work — good news, re-plan on it',
+            };
+          })
+        );
+      }
+
+      device?.removeEventListener?.('uncapturederror', onError);
+      checks.push(
+        device
+          ? evaluate('no-webgpu-validation-errors', () => ({
+              ok: uncapturedErrors === 0,
+              measured: `${uncapturedErrors} uncapturederror events`,
+              expected: '0',
+              note: 'the share, the EQUAL pipeline, the resize and the dispose all validated clean on the real device',
+            }))
+          : check({
+              id: 'no-webgpu-validation-errors',
+              status: 'UNMEASURED',
+              note: 'renderer.backend.device not reachable — cannot listen for uncapturederror',
+            })
+      );
+
+      const artifacts = [];
+      const canvas = document.createElement('canvas');
+      paint(canvas, buf, 'single-target prepass+EQUAL (red=rank0, green=rank2)');
+      artifacts.push(await saveCanvasPng(ctx.runId, 'single-target-prepass-equal.png', canvas));
+
+      return {
+        checks,
+        calibration,
+        artifacts: artifacts.filter(Boolean),
+        inputs: { orientation, zL, zR, zGhost, DIM, DIM2 },
+        stats: { uncapturedErrors },
+      };
+    },
+  });
+
   const bench = {
     name: 'scene-depth',
     title: 'The depth authority´s GPU half — order-independent occlusion',
@@ -1126,6 +1464,15 @@ export function createSceneDepthBench({ THREE, log }) {
       'gpu-query-query-isEqual-matches-real-rank-order',
       'gpu-query-above-isAbove-matches-real-rank-order',
       'gpu-query-above-isEqual-matches-real-rank-order',
+      'prepass-writes-no-colour',
+      'EQUAL-exact-left-exclusive-region-is-rank0',
+      'EQUAL-exact-overlap-region-is-rank2-not-rank0',
+      'EQUAL-exact-right-exclusive-region-is-rank2',
+      'wrong-Z-mesh-contributes-NOTHING-anywhere',
+      'uncovered-rows-stay-clear',
+      'survives-a-resize',
+      'cross-target-share-stays-dead-pin',
+      'no-webgpu-validation-errors',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

@@ -210,6 +210,21 @@ export function run(t) {
     ok('dispose applied', rt._disposed === true);
   }
 
+  // There is deliberately NO shared-depth descriptor field: a `sharedDepthTexture`
+  // extension was built and then deleted the same session after
+  // bench-scene-depth.js's 'single-target-prepass-equal' scenario proved
+  // cross-target depthTexture sharing silently dead on the WebGPU backend
+  // (see create()'s own comment). This test pins the field's ABSENCE so a
+  // future session reaching for it finds the story, not a footgun.
+  {
+    const T = makeTHREE();
+    const d = ThreeAllocator.describe(T, { resolvedW: 10, resolvedH: 10, sharedDepthTexture: {} });
+    ok(
+      'describe() ignores a sharedDepthTexture field (the dead design must not half-work)',
+      !('sharesDepthTexture' in d)
+    );
+  }
+
   // Integration with FrameGraph.
   {
     const T = makeTHREE();

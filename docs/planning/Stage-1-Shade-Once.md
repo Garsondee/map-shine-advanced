@@ -99,28 +99,46 @@ test off — pixels preserved by painter order, the discard's savings forgone):
    STATE (EQUAL/unblended) only when `alphaStats.min === 255` (Ground qualifies; a
    min-in-[threshold,255) item does not — its alpha < 1 needs blending).
 
-## 4. Sharing the depth attachment
+## 4. The depth attachment — single-target prepass *(REVISED 2026-08-10, same day)*
 
-`sceneColor` (the MRT colour target) must bind `buf:scene.depth`'s own `depthTexture` as its
-depth attachment, cleared by the depth pass only — never by the colour pass.
+**The original design here — `sceneColor` binding `buf:scene.depth`'s own `depthTexture` as
+its depth attachment — is DEAD, proven so on the real device before any live wiring** (the
+whole point of the scenario gate): `bench-scene-depth.js`'s first run showed a second target
+referencing another target's depth texture gets NO usable depth on three r0.185.1's WebGPU
+backend, and it fails SILENTLY — zero validation errors, just black (a `LessEqualDepth`
+probe drew nothing anywhere). The author's independent research the same afternoon pointed
+at the same backend limitation (threejs discourse #90036: GPU resources are managed per
+RenderTarget; cross-target sharing does not resolve). The scenario now PINS the dead share
+(`cross-target-share-stays-dead-pin`) — if a future three upgrade makes it work, the pin
+fails loudly and the cheaper design reopens for the Stage-6 keel.
 
-- **Allocator extension** (`graph/three-allocator.js` — the one door;
-  `gpu/allocator-only` stays intact): a descriptor field to REFERENCE an existing
-  depth texture rather than create one; resize keeps the single shared texture consistent
-  (sized once, by its owner `sceneDepth`); dispose must not double-free.
-- **Clear discipline:** the world pass clears COLOUR only. Audit the current clear path
-  (autoClear vs explicit) before wiring; the door render into the same target already
-  proves the no-clear composite pattern.
-- ⚠️ **WebGPU validation constraint, load-bearing:** a texture cannot be a pass's depth
-  attachment AND a sampled binding in the same pass. Today `maskNode` SAMPLES the depth
-  texture during the colour pass — so sharing is only legal once `maskNode` is gone. The
-  revert flag therefore flips the WHOLE composition mode (camera + meshes + materials +
-  attachment + maskNode) as one unit; there is no legal half-way state.
-- **Verified in the lab BEFORE live wiring** (`bench-scene-depth.js` scenario 7): pass A
-  writes depth through the proxy material; pass B binds the same depth texture with a
-  colour-material clone at the same Z and `EQUAL`; assert full coverage (bit-exactness of
-  the shared transform) and zero validation errors. This retires the two biggest unknowns
-  (API viability + EQUAL precision) for minutes instead of live-loop hours.
+**The shipped design — the single-target prepass** (the backend's recommended shape, and
+scenario-proven 9/9 green including zero-epsilon EQUAL):
+
+- `sceneColor` (flag ON) is built with **its own `depthTexture: true`** — the allocator's
+  EXISTING capability; no extension needed (the one built for sharing was deleted the same
+  session, with a tombstone comment in `create()` and an absence-pin test).
+- **Frame order becomes three renders:** (1) today's `sceneDepth` pass, UNCHANGED — the
+  payload (floor/flags) colour + its own private depth (which may drop to a non-samplable
+  renderbuffer, `depth: true`, since nothing samples it any more); (2) **the prepass**: the
+  SAME proxy scene rendered again into `sceneColor` with `colorWrite: false` on its
+  materials — depth lands, colour untouched (scenario check: zero colour bytes); this
+  render carries the frame's world clear (colour + depth); (3) the world pass into
+  `sceneColor`, nothing cleared (`autoClearDepth` AND `autoClearColor` false — both proven
+  load-bearing), interiors `EQUAL`, boundaries `LessEqualDepth`.
+- **`querySceneDepth` consumers migrate their texture handle**: the samplable depth becomes
+  `sceneColor.depthTexture` (same rank-depth convention, same values the proxies write).
+  Flag OFF keeps today's arrangement exactly — the handle switch rides the flag's rebuild.
+- **Named cost, honestly:** one extra `renderer.render()` per frame of the ~6-draw proxy
+  scene. The depth pass's own render call carries the unexplained 3.4–7.5ms CPU cost
+  (Stage 0's measurement); the prepass may pay a sibling tax. This is measured at S1.6's
+  bench, not guessed; if it eats the win, the reconcile path runs. (The prepass reuses the
+  SAME `depthScene` object — no rebuild, no new proxies.)
+- **A non-participant discipline the depth attachment makes correctness-critical:** every
+  `depthTest:false` world member (tokens, doors, water, Case-2) must ALSO set
+  `depthWrite:false` — a z=0 member silently writing ~0.4995 into the depth buffer would
+  punch EQUAL-failing holes into any interior drawn after it. Sweepable, testable, part of
+  S1.4's parity checks.
 
 ## 5. The revert flag, and defaults
 
@@ -149,8 +167,9 @@ the permanent revert (Law 5).
 
 S1.1 min-grid (pure accumulator + worker + v10 + plumbing, fail-open) →
 S1.2 coverage split (pure, tested) →
-S1.3 allocator sharing + lab scenario 7 →
-S1.4 live wiring behind the flag (camera, dual meshes, materials, attachment, clears) →
+S1.3 lab scenario: single-target prepass + zero-epsilon EQUAL proven; dead share pinned →
+S1.4 live wiring behind the flag (camera, prepass, dual meshes, materials, clears,
+     depthWrite:false sweep, consumer handle migration) →
 S1.5 pixel-diff gate → S1.6 bench gate → S1.7 default ON →
 S1.8 author LIVE verdict.
 

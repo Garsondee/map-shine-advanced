@@ -259,13 +259,32 @@ BC worker's existing full-pixel scan instead.*
       cells. Node tests pin: disjointness, interior∪boundary ≡ kept-set exactly, ring→boundary,
       the single-254-texel demotion, all three fail-opens, sub-rect tiles. vt suite 744→766,
       `npm run verify` green.
-- [ ] S1.3 Shared depth attachment: allocator extension (reference `buf:scene.depth`'s own
-      depthTexture; safe resize/dispose) + lab `bench-scene-depth.js` scenario 7 proving the
-      share AND the EQUAL bit-exactness claim on the real device BEFORE live wiring.
+- [x] S1.3 The depth attachment, lab-gated · done Claude Fable 5 2026-08-10 — the ORIGINAL
+      design (a second target sharing `buf:scene.depth`'s depthTexture) is DEAD: proven on
+      the real device by the scenario built to gate it (`bench-scene-depth.js`
+      'single-target-prepass-equal', first run) — the sharer's pass gets no usable depth,
+      SILENTLY (zero validation errors; a LessEqualDepth probe drew nothing; diagnostic
+      classified `cleared-to-0-or-no-attachment`). The author's independent research landed
+      the same afternoon pointing at the same backend limitation (threejs discourse #90036) —
+      recorded so no future session re-fights it. **Pivoted the same session to the
+      single-target prepass** (plan §4, rewritten): sceneColor owns `depthTexture:true`
+      (existing allocator capability); the proxy scene renders into it `colorWrite:false`
+      before the world pass. Scenario result: **9/9 green** — prepass writes zero colour
+      bytes; **EQUAL at the same Z is EXACT, zero epsilon** (overlap resolved by the depth
+      test); a wrong-Z mesh contributes nothing (non-vacuity); `autoClearDepth=false` proven
+      load-bearing; resize survives; the dead share is PINNED as a regression check
+      (`cross-target-share-stays-dead-pin` — fails loudly if a three upgrade opens the
+      cheaper design); zero validation errors throughout. The allocator sharing extension
+      built earlier the same session was DELETED (a tombstone comment in `create()` + an
+      absence-pin test replace it — proven-dead API must not ship as a footgun).
 - [ ] S1.4 Live wiring behind ONE revert flag (`earlyZComposition`, default OFF, flips the
-      whole mode as a unit — camera parameters, tile mesh Z, dual interior/boundary meshes,
-      material variants, attachment share, colour-only clear, `maskNode` deleted). Painter
-      order preserved globally; tokens/doors/water/Case-2 untouched; exclusions per the plan
+      whole mode as a unit — camera parameters, the colorWrite:false depth prepass into
+      sceneColor (which owns `depthTexture:true` under the flag), tile mesh Z, dual
+      interior/boundary meshes, material variants, no-clear world pass, `maskNode` deleted,
+      `querySceneDepth` consumers' texture handle migrated to sceneColor's depth). Painter
+      order preserved globally; tokens/doors/water/Case-2 untouched EXCEPT the new
+      correctness rule: every depthTest:false member also sets depthWrite:false (a z=0
+      member writing depth punches EQUAL-failing holes — plan §4). Exclusions per the plan
       (vegActive, occlusion-responsive, raw-fallback).
 - [ ] S1.5 Pixel-diff gate at `standard` profile: same-session flag-off/flag-on capture,
       time frozen; interior byte-stable; boundary texels tolerance-only. The one known

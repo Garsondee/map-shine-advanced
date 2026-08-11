@@ -532,6 +532,13 @@ MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
 // bench gates pass; kept afterwards as the permanent revert (Testament Law 5).
 MapShine.setEarlyZComposition = setVtPanViewerEarlyZComposition;
 MapShine.getEarlyZComposition = getVtPanViewerEarlyZComposition;
+// PIPELINE HEALTH (2026-08-09, see getVtPanViewerPipelineStats's own header)
+// — was only reachable through a full perf-run-full capture before now.
+// Console-exposed directly (2026-08-11) so "did renderer.info.programs grow
+// during this one pan" is a one-line check, the same weight as
+// getEarlyZComposition's own transition counters — no armed profiler
+// session needed, this just reads renderer.info straight through.
+MapShine.getPipelineStats = getVtPanViewerPipelineStats;
 // STAGE 2's revert flag — point-light batching (S2.4,
 // docs/planning/Point-Light-Batching-Design.md). Default OFF; nothing reads
 // it yet (S2.5, pool integration, is its first real consumer).

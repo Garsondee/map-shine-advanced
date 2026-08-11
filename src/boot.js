@@ -261,6 +261,9 @@ import {
   installAnchorMode,
   installAnchorViewMode,
   createAstrolabe,
+  showPerfProgress,
+  hidePerfProgress,
+  formatPerfProgressText,
 } from './ui/index.js';
 import {
   SORT_LAYERS,
@@ -2742,7 +2745,19 @@ function install() {
     // pipeline stats, so a report can show whether it actually did anything
     // during THIS run rather than needing a CPU sample profile to find out
     // (which is how this fix's own root cause was originally found).
-    readDepthProxyPoolStats: () => getVtPanViewerDiagnostics?.()?.depthProxyMaterialPool ?? null,
+    // BUG FOUND LIVE, 2026-08-11 (first real perf-run-full capture after this
+    // hook shipped): this called `getVtPanViewerDiagnostics()`, whose return
+    // shape is `buildViewerDiagnostics(...)` — `depthProxyMaterialPool` is
+    // not now and was never one of its fields (grep-verified: the pool's
+    // stats live ONLY inside `getEarlyZComposition()`'s return object,
+    // vt-pan-viewer.js). Silently always null, in a shape that looks
+    // identical to "the harness doesn't implement this hook" —
+    // perf-session.js cannot tell the two apart, so the report never said a
+    // word. Same wrong-accessor confusion already caught once this session
+    // via live console debugging (see `[[feedback_sandboxed_browser_pane_lacks_os_focus]]`'s
+    // sibling note) and never propagated back into this wiring. Fixed to the
+    // accessor that actually carries the field.
+    readDepthProxyPoolStats: () => getVtPanViewerEarlyZComposition?.()?.depthProxyMaterialPool ?? null,
     // HIDE-WHILE-MEASURING, the pair — see debugPanelVisibleBeforeHide's own
     // declaration a few lines up for the full rationale. Both optional on the
     // ProfileHarness typedef, matching every other harness hook here
@@ -2827,11 +2842,20 @@ function install() {
           // cleaner window than the quick actions this replaces ever had.
           settleFrames: 90,
           route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms`,
-          onProgress: (phase, detail) => log.info(`perf report: ${phase}${detail ? ` — ${detail}` : ''}`),
+          onProgress: (phase, detail) => {
+            log.info(`perf report: ${phase}${detail ? ` — ${detail}` : ''}`);
+            // ON-SCREEN, INDEPENDENT OF THE DEBUG PANEL (2026-08-11) — hideLiveUi
+            // already took the panel away for this whole run; without this the
+            // author has nothing to look at for minutes. showPerfProgress lazily
+            // creates on its first call and dirty-checks every call after, so
+            // this is safe to call on every tick.
+            showPerfProgress(formatPerfProgressText(phase, detail));
+          },
         });
       } finally {
         stopCameraPath();
         await playing;
+        hidePerfProgress();
       }
       // Feed the sweep's OWN rich per-effect table (perf-lab.js's tested
       // renderer) from the SAME run, via the raw sweep buildPerfReport echoes
@@ -3001,8 +3025,14 @@ function install() {
                 measureUntil: playing,
                 settleFrames: TIER_SETTLE_FRAMES,
                 route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms:tier=${profile}`,
-                onProgress: (phase, detail) =>
-                  log.info(`perf report (all tiers) [${profile}]: ${phase}${detail ? ` — ${detail}` : ''}`),
+                onProgress: (phase, detail) => {
+                  log.info(`perf report (all tiers) [${profile}]: ${phase}${detail ? ` — ${detail}` : ''}`);
+                  // Same on-screen readout as perf-run-full — see its own comment.
+                  // hidePerfProgress() runs once, after the WHOLE tier loop below,
+                  // not per tier, so this stays up continuously across tiers
+                  // instead of flickering closed between each one.
+                  showPerfProgress(formatPerfProgressText(phase, `[${tag}] ${detail ?? ''}`.trim()));
+                },
               });
               tierResults.push({ profile, report });
             } finally {
@@ -3020,6 +3050,7 @@ function install() {
         // restore path already gives the effect sweep.
         log.info('perf report (all tiers): restoring the real performance profile');
         forcePerformanceProfile(null);
+        hidePerfProgress();
       }
       // Kept OUT of what gets copied — see lastAllTiersReports' own doc for why
       // (the ~300KB v1). Console-reachable via MapShine.getTierReport below,

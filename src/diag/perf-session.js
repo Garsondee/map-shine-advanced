@@ -142,6 +142,9 @@ export async function runProfileSession(harness, opts = {}) {
     measureUntil = null,
     onProgress = null,
     generatedAt = null,
+    // How often the measuring phase ticks progress, see below. Overridable so
+    // a test can see a tick without a real second-long wait.
+    measuringTickIntervalMs = 1000,
   } = opts;
 
   // See this file's header. Refusing loudly beats producing a report whose every
@@ -241,16 +244,41 @@ export async function runProfileSession(harness, opts = {}) {
     depthProxyPoolStatsStart =
       typeof harness.readDepthProxyPoolStats === 'function' ? harness.readDepthProxyPoolStats() : null;
 
-    if (measureUntil) {
-      // ROUTE-DRIVEN: measure for exactly as long as the workload runs, not for
-      // a frame count guessed from an unknown frame rate. A 60s sweep at an
-      // unknown 30–60fps is 1,800–3,600 frames; picking either number would
-      // truncate the route or sit idle at the end of it.
-      say('measuring', 'until the benchmark route completes');
-      await measureUntil;
-    } else {
-      say('measuring', `${measureFrames} frames`);
-      await harness.waitFrames(measureFrames);
+    // PERIODIC PROGRESS DURING THE MEASURING WINDOW (2026-08-11, author: "even
+    // without a UI it would be nice to have text on screen to give me a rough
+    // idea of how far through the process I am") — `hideLiveUi` above can take
+    // the debug panel away for the full length of a `perf-run-full` route
+    // (minutes, not seconds), and the `say('measuring', …)` calls below fire
+    // exactly ONCE each, at the start of their branch. Without a tick there is
+    // nothing to report for the entire span between "measuring" and
+    // "building". A plain interval, not another rAF hook: this only needs to
+    // update text a couple of times a second, and `readProfile()` is already
+    // a cheap, allocation-light snapshot meant to be polled from outside the
+    // render loop — `createProfiledFrameWaiter` above calls it on every rAF
+    // tick for the whole wait. Created only when someone is listening, so a
+    // caller with no `onProgress` (every non-interactive/test caller) pays
+    // nothing extra — no timer, no extra `readProfile()` calls.
+    const tickMeasuringProgress = () => {
+      const p = harness.readProfile();
+      const elapsedS = (p.durationMs / 1000).toFixed(1);
+      say('measuring-tick', `${p.frames} frames · ${elapsedS}s elapsed`);
+    };
+    const progressTimer =
+      typeof onProgress === 'function' ? setInterval(tickMeasuringProgress, measuringTickIntervalMs) : null;
+    try {
+      if (measureUntil) {
+        // ROUTE-DRIVEN: measure for exactly as long as the workload runs, not for
+        // a frame count guessed from an unknown frame rate. A 60s sweep at an
+        // unknown 30–60fps is 1,800–3,600 frames; picking either number would
+        // truncate the route or sit idle at the end of it.
+        say('measuring', 'until the benchmark route completes');
+        await measureUntil;
+      } else {
+        say('measuring', `${measureFrames} frames`);
+        await harness.waitFrames(measureFrames);
+      }
+    } finally {
+      if (progressTimer) clearInterval(progressTimer);
     }
   } finally {
     // ALWAYS, on every path. The GPU timer holds a vendor-internal flag on and a

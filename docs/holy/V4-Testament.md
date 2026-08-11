@@ -1109,6 +1109,138 @@ vision leak) is scheduled by the author explicitly, not silently deferred.**
 discovery that doesn't fit its brief). Only Fable resolves one — by editing the plan and
 recording the resolution here.*
 
+**P-008 — A real camera-stress `perf-run-full` capture (post DEFERRED-S1b) shows residency
+streaming, not shading, as the dominant unaddressed cost — plus a confirmed-and-fixed
+instrumentation bug and an explanation (partial) for the 3-round-old `geometry.depthDraw` CPU
+mystery.** Filed by Claude Sonnet 5, 2026-08-11, acting as a worker under the Covenant. Prompted
+by the author's own question: "it's not feeling like Stage 1 or 2 have had much effect… are the
+real gains ahead of us?" — answered here from a real report, not a guess.
+
+**Context.** Same session as DEFERRED-S1b (the depth-proxy material pool) and the Stage 4 UI/perf
+fixes below. The author ran a fresh `perf-run-full` afterward — Mansion, floor 1, N→S route, 3840×
+1906@1.5x (7.32 Mpx), 463 measured frames over 50,813.6 ms — and pasted the full report. Read in
+full; findings below are grounded in its actual numbers, cross-checked against source, not inferred
+from the summary text.
+
+**FINDING 1 (the big one) — residency/streaming, not any shading stage, is the single largest CPU
+cost in this capture, and no Stage has touched it.** `residency.pass` (`scheduleResidencyUpdate`)
+totalled **14,843.7 ms of the window's 50,813.6 ms — 29.2% of ALL wall-clock time** — firing on 462
+of 463 frames (effectively every frame under continuous panning, not the occasional event its own
+`cadence:'event'`/`sparse:true` declaration implies at this camera speed). Its own child,
+`residency.itemLoad` ("Per-item load, phase 1"), accounts for 14,630.7 ms of that — 31.668 ms mean
+**per occurrence**, on its own bigger than an entire 30fps frame budget (33.3 ms), before the GPU
+does anything. Neither Stage 1 (shading) nor Stage 2 (point-light batching) touches this system at
+all — its near-total absence from the report's own top-line `findings[]` (buried as two
+"sparse-spike, medium severity, amortised negligible" entries) undersells it: "amortised" is the
+wrong lens for a cost that fires on 99.8% of frames. **This is the least\-'stage-shaped' finding of
+the session and arguably the highest-value next target** — no design doc claims it, no existing
+Stage's gate would catch a regression in it.
+
+**FINDING 2 — `geometry.world` alone is ~100% of the frame's measured GPU cost, split three ways,
+and Stage 1 is one of the three.** `pass.geometry.world.totalGpuMs: 89.788` against
+`frame.gpuMs.p50: 89.78` — geometry/depth owns essentially the *entire* GPU frame; lighting + bloom
++ DoF + present sum to **~7.3 ms combined (≈8%)**. Inside geometry, three zones split it almost
+evenly: the depth-authority pass (36.276 ms, see Finding 3), the main world draw (`geometry.
+worldDraw`, 27.112 ms), and **Stage 1's own early-Z prepass into `scene.color`** (`geometry.
+earlyZPrepass`, 26.379 ms — a SECOND render of the proxy geometry, which is the cost Stage 1 spends
+to buy EQUAL-depth rejection in the main draw). This report has no A/B: it cannot say whether that
+26.379 ms is bought back by reduced overdraw in `worldDraw`, because `worldDraw`'s own number
+(27.112 ms) is not obviously smaller than an un-instrumented guess at its legacy cost would be.
+**Recommended next step, for the author, not buildable from this chair:** toggle
+`MapShine.setEarlyZComposition(false)` and re-run the identical route/settings to get a real
+before/after on whether Stage 1 nets positive on this map at this resolution. Until that A/B
+exists, "Stage 1 hasn't visibly moved the fps" is neither confirmed nor refuted by this report —
+the ingredients to check it are all present in the zone table, the comparison itself is not.
+
+**FINDING 3 — partial explanation for the `geometry.depthDraw`/`geometry.depthRenderCall` anomaly
+P-007 flagged as "an unexplained outlier for three rounds," read from `diag/gpu-zone-timer.js`'s
+own attribution code, not guessed.** `ZoneInspector.beginRender(uid)` attributes each GPU
+timestamp to `profiler.currentSlot()` — whichever zone is innermost-open at the instant
+`renderer.render()` fires. `runSceneDepthPass` opens `geometry.depthDraw` (kind `'gpu'`) as an
+outer bracket, but immediately inside it opens three SEQUENTIAL CPU sub-zones
+(`geometry.depthSetup` → `geometry.depthRenderCall` → `geometry.depthRestore`, added 2026-08-09 to
+chase this exact mystery); the real `renderer.render(depthScene, depthCamera)` call sits inside
+`geometry.depthRenderCall`. Because the timestamp lands on whatever is innermost, **`geometry.
+depthDraw` can never receive a GPU timestamp by construction** (hence its permanent `gpuMs: null`
+in every report to date, including this one) **while `geometry.depthRenderCall` — declared `kind:
+'cpu'`, `gpuAbsentByDeclaration: true` — silently carries the pass's real GPU execution time**
+(36.752 ms mean this run, the single largest GPU number in the whole zone table). This is a
+zone-*labelling* artifact, not a phantom cost: the ~36 ms of real GPU time is genuinely being spent
+on the depth pass, just filed under a zone whose own declaration says it shouldn't be there.
+**What this does NOT explain, and is not claimed to:** `geometry.depthRenderCall`'s *CPU* number
+(11.633 ms mean, for encoding only 9 draws — `geometry.worldDraw`'s CPU is 0.362 ms for 19 draws,
+~32× cheaper per call for MORE draws). P-007's addendum already found and fixed one real cause of
+CPU-side depth-pass bloat (TSL shader-graph cache churn); DEFERRED-S1b's pooling fix is holding in
+THIS exact report (`pipelineStats.programs: 84 → 84`, zero growth across the whole 50s pan) — so
+cache churn is ruled out as the explanation for what's left. The residual ~11.6 ms/frame CPU cost
+of this one call is narrowed, not solved, and remains open exactly as P-007 left it. (No code
+change proposed here: reattributing GPU timestamps to the nearest `kind:'gpu'` ancestor in the
+zone stack, rather than the innermost open zone, would fix the *label* but touches sensitive,
+well-tested measurement code for a labelling clarity gain — a job for its own dedicated pass, not
+a rider on this one.)
+
+**FINDING 4 (confirmed and fixed) — `depthProxyPoolStats` has been silently null in every real
+report since it shipped, including the one prompting this petition.** `boot.js`'s
+`readDepthProxyPoolStats` called `getVtPanViewerDiagnostics()?.depthProxyMaterialPool` —
+`getVtPanViewerDiagnostics()` delegates to `buildViewerDiagnostics(...)`, whose param list has
+never included the pool. The field lives ONLY on `getVtPanViewerEarlyZComposition()`'s return
+object (grep-verified). The pasted report's own `instrument.depthProxyPoolStats: null` is this bug,
+caught live in the wild, not a coincidence — a `typeof harness.readDepthProxyPoolStats ===
+'function'` check in `perf-session.js` cannot tell "hook absent" from "hook present but wrong,"
+so nothing surfaced the gap. **Fixed** (`boot.js`, now reads `getVtPanViewerEarlyZComposition()`);
+the next `perf-run-full` will show real hit/miss/eviction numbers for the pool instead of an
+absence that looks identical to "not implemented." Same wrong-accessor confusion this session
+already hit once live via console debugging — recorded so it cannot happen a third time
+([[feedback_sandboxed_browser_pane_lacks_os_focus]]'s sibling note; a dedicated memory entry was
+also written this session).
+
+**Built, not just found — the on-screen progress readout the author asked for.** "Even without a
+UI it would be nice to have text on screen to give me a rough idea of how far through the
+process I am." `ui/perf-progress-overlay.js`: a small `pointerEvents:'none'` corner readout,
+deliberately NOT `ui/loading-screen.js` (that is a full opaque curtain meant to block a scene that
+isn't ready — a perf run needs the camera path to stay visible, this just adds a few words that
+never compete with it). Wired into both `perf-run-full` and `perf-report-all-tiers`'s
+`onProgress` callbacks; `perf-session.js` now ticks `'measuring-tick'` progress once a second
+(configurable, `harness.readProfile()`-driven, only when someone is listening — a caller with no
+`onProgress` creates no timer and pays nothing extra) so there is something to show for the whole
+span between "measuring" and "building," not just at phase boundaries. Routed through `ui/
+index.js` (the zone's one door — `zones/one-door`'s ratchet caught and rejected a first attempt
+that imported the file directly). 9 new Node tests (`ui/__tests__/perf-progress-overlay.test.mjs`)
++ 3 new `perf-session.test.mjs` blocks; live-injected the identical styled element into the real
+bench Mansion DOM to confirm placement/legibility (correct rect, correct computed colours) —
+`computer{screenshot}` itself is blocked by this pane's known focus limitation
+([[feedback_sandboxed_browser_pane_lacks_os_focus]]), so this is DOM-level, not pixel-level,
+verification. `npm run verify` green, 8,509 tests (+14 net over the previous session's 8,495).
+
+**Open lead, not investigated this round:** `pipelineStats.uniformBuffers` grew **2,137 → 8,637**
+(4.04×) across the same window that held `programs` flat at 84. Whether this is expected
+(per-material/per-light UBO allocation scaling with new tiles entering residency, torn down
+between passes) or a real per-frame leak is unknown — flagged for the next investigation, not
+diagnosed here.
+
+**Two of the report's OWN high-severity findings, worth a follow-up, not expanded on here:** `fire`
+measured 2.25× its highest declared tier (1.578 vs 0.7 ms/Mpx) and `window` (light) measured 2.6×
+(0.156 vs 0.06 ms/Mpx) — both manifests have never been checked against a measurement before this
+report existed. Separately, `candleFlame`, `specular` and `window` all show zone-sum vs
+sweep-marginal disagreements beyond the report's own 25% tolerance, flagged `method-disagreement`
+— unresolved, not averaged away.
+
+**The honest answer to "are Stage 1/2 gains real, is the real gain still ahead of us":** yes, and
+yes. Stage 1 (shade once) and Stage 2 (light batching) each targeted a specific, real cost —
+redundant per-pixel shading and per-light draw multiplication — that is **not what this capture's
+frame time is made of**. Point lights cost ~3 ms combined here (Stage 2 had nothing to batch in
+this scene/route); Stage 1 is a real ~26 ms GPU line-item whose payback is unmeasured, not
+confirmed absent. The dominant costs exposed by THIS capture — residency streaming (29.2% of wall
+time, no Stage owns it) and the raw geometry/depth GPU cost (~90 ms, ~100% of frame GPU) — sit
+upstream and downstream of both Stages respectively. A frame median of 108.2 ms needs roughly a
+3× cut to reach a steady 30fps (33.3 ms) and ~6.5× for 60fps (16.6 ms); GPU time ALONE (89.78 ms
+p50) already exceeds the 30fps budget before any CPU cost is added. Nothing here says Stage 1/2
+were a mistake — it says the biggest remaining levers, by this evidence, are residency streaming
+first and the geometry/depth stage's raw cost second, neither of which either Stage was built to
+move.
+
+---
+
 **P-007 — A committed trace-analysis tool, and the finding it found: TSL shader-graph REBUILDS are
 running during rendering, sustained, at 10.7% of the main thread — independently confirming the
 "unwanted pipeline recompilation" hypothesis round 6 instrumented and never got an answer for.**

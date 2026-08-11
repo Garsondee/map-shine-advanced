@@ -13,3 +13,4 @@ export { installPainter } from './paint-mode.js';
 export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialog.js';
 export { installAnchorMode } from './anchor-mode.js';
 export { installAnchorViewMode } from './anchor-view-mode.js';
+export { showPerfProgress, hidePerfProgress, formatPerfProgressText } from './perf-progress-overlay.js';

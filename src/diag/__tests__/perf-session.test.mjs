@@ -466,6 +466,92 @@ export async function run(t) {
     ok('...and telling the user what to do', err.message.includes('load a scene'));
   }
 
+  // ---- MEASURING PROGRESS TICKS while a long measuring window is pending ---
+  {
+    // waitFrames is called TWICE (settle, then measure) — only the measure
+    // call should hang, or settling would never finish and the ticker (which
+    // only exists inside the measuring block) would never get created.
+    let resolveMeasure;
+    const measureWaited = new Promise((r) => {
+      resolveMeasure = r;
+    });
+    let waitCallCount = 0;
+    const h = fakeHarness({
+      async waitFrames(n) {
+        this._calls.push(['waitFrames', n]);
+        waitCallCount++;
+        if (waitCallCount === 1) return; // settle: resolves next microtask
+        await measureWaited; // measure: hangs until resolved below
+      },
+    });
+    const phases = [];
+    const details = [];
+    const donePromise = runProfileSession(h, {
+      settleFrames: 1,
+      measureFrames: 1,
+      measuringTickIntervalMs: 5,
+      onProgress: (p, d) => {
+        phases.push(p);
+        details.push(d);
+      },
+    });
+    await new Promise((r) => setTimeout(r, 40)); // let a few 5ms ticks fire
+    resolveMeasure();
+    await donePromise;
+    ok('measuring-tick fires while a long measuring window is pending', phases.includes('measuring-tick'));
+    ok(
+      '...carrying a frame count and elapsed time',
+      details.some((d) => typeof d === 'string' && d.includes('frames') && d.includes('s elapsed'))
+    );
+  }
+
+  // ---- the measuring-tick timer is cleared once measuring resolves ---------
+  {
+    let intervalsCreated = 0;
+    let intervalsCleared = 0;
+    const realSetInterval = globalThis.setInterval;
+    const realClearInterval = globalThis.clearInterval;
+    globalThis.setInterval = (...a) => {
+      intervalsCreated++;
+      return realSetInterval(...a);
+    };
+    globalThis.clearInterval = (...a) => {
+      intervalsCleared++;
+      return realClearInterval(...a);
+    };
+    try {
+      const h = fakeHarness();
+      await runProfileSession(h, {
+        settleFrames: 1,
+        measureFrames: 1,
+        measuringTickIntervalMs: 5,
+        onProgress: () => {},
+      });
+    } finally {
+      globalThis.setInterval = realSetInterval;
+      globalThis.clearInterval = realClearInterval;
+    }
+    ok('exactly one measuring-tick timer is created when onProgress is given', intervalsCreated === 1);
+    ok('it is cleared again before the session returns', intervalsCleared === 1);
+  }
+
+  // ---- no measuring-tick timer at all when nobody is listening -------------
+  {
+    let intervalsCreated = 0;
+    const realSetInterval = globalThis.setInterval;
+    globalThis.setInterval = (...a) => {
+      intervalsCreated++;
+      return realSetInterval(...a);
+    };
+    try {
+      const h = fakeHarness();
+      await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    } finally {
+      globalThis.setInterval = realSetInterval;
+    }
+    ok('no timer is created at all without an onProgress callback', intervalsCreated === 0);
+  }
+
   // ---- defaults ------------------------------------------------------------
   {
     ok(`the default window is ${DEFAULT_MEASURE_FRAMES} frames (~10s at 60fps)`, DEFAULT_MEASURE_FRAMES === 600);

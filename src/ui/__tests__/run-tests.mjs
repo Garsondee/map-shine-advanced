@@ -11,6 +11,7 @@
  */
 import { run as runAstrolabe } from './astrolabe.test.mjs';
 import { run as runLoadProgress } from './load-progress.test.mjs';
+import { run as runPerfProgressOverlay } from './perf-progress-overlay.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -48,6 +49,7 @@ const t = {
 const suites = [
   ['astrolabe', runAstrolabe],
   ['load-progress', runLoadProgress],
+  ['perf-progress-overlay', runPerfProgressOverlay],
 ];
 
 for (const [name, fn] of suites) {

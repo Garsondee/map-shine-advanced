@@ -115,6 +115,91 @@ trace question. The depth pass being the *largest* contributor (48.4%) is a stro
 
 ---
 
+## 2a. ADDENDUM — the cache-key churn from §2, root-caused
+
+*Author directive, same session: "Go find out why the cache key is churning." Answered from the
+vendored three source (`src/vendor/three/three.webgpu.js`) cross-examined against the trace, not
+guessed. This section supersedes §2's "not yet known" close.*
+
+### The mechanism, every link read in source
+
+1. **`rebuildSceneDepthProxies(items)`** (`vt/vt-pan-viewer.js:10377`), called from
+   `updateResidencyUnguarded` (`:10823`) every residency pass, opens by disposing **every** proxy
+   material in both lists:
+   ```js
+   for (const entry of depthProxyEntries) { depthScene.remove(entry.mesh); entry.material.dispose(); }
+   depthProxyEntries = [];
+   // ...same again for depthPrepassEntries
+   ```
+2. **`.dispose()` evicts the compiled shader graph.** three's `Nodes.delete()`
+   (`three.webgpu.js:58628-58640`): `nodeBuilderState.usedTimes--`, and at zero,
+   `this.nodeBuilderCache.delete(this.getForRenderCacheKey(object))`.
+3. **Wholesale disposal is why the refcount reaches zero.** Proxies sharing a cache key share one
+   `nodeBuilderState` with `usedTimes = N` (incremented at `:58537/58558/58593`). Disposing all N
+   drives it to 0. Disposing a *subset* would leave `usedTimes > 0` and the cached graph would
+   survive. The wholesale-ness is not incidental — it is the mechanism.
+4. Fresh materials get built (`buildSceneDepthWriterMaterial`, `:10531`); the new render objects'
+   `initialCacheKey` is absent from `nodeBuilderCache`, so `getForRender` (`:58505`) runs a full
+   `NodeBuilder.build()`.
+5. **S1.4 doubled it.** `addDepthPrepassTwin` (`:10319`) builds a *second* material per tile
+   (`{...writerArgs, colorWrite:false}`) for `depthPrepassScene`, disposed/rebuilt by the same
+   wholesale loop, rendered inside `runGeometryWorldPass` (`:4489`). `earlyZComposition` defaults
+   **`true`** (`:9399` — S1.4's Testament text says "default OFF"; it has since flipped). This is
+   exactly why §2's cost split ~50/50 between `runSceneDepthPass` (48.4%) and `runGeometryWorldPass`
+   (46.3%): one cause, paid twice.
+
+### The causal test — including the first, WRONG version of it
+
+A frame-level cross-tab (does a `PageAnimator::serviceScriptedAnimations` frame span contain both
+build work AND a residency/proxy-rebuild call?) found only 32.1% of residency frames had build work
+vs 25.3% of non-residency frames — near-parity, read initially as **falsification**. That test was
+flawed: `scheduleResidencyUpdate` (`:10974`) can run residency in its own task outside any frame
+span, so cause and effect land in *different* frame buckets by construction — the test's unit was
+wrong, not the hypothesis.
+
+Corrected: a **time-window** test over raw sample timestamps, clustering into episodes (gap >50 ms
+= new episode) and measuring lag from each build episode's start to the nearest preceding
+proxy-rebuild episode's end:
+
+```
+build episodes: 85
+  lag <= 50 ms  : 70  (82.4%)
+  lag <= 200 ms : 77  (90.6%)
+  lag <= 1000 ms: 85  (100.0%)
+  median lag: 24 ms  (~one frame)
+episode duration: median 48.5 ms; top ten: 795,723,707,602,555,549,519,494,479,454 ms
+```
+
+**Ruled out, with a number, not assumed:** cache-key *drift* on already-live render objects.
+`getForRenderCacheKey` returns the fixed `initialCacheKey`; the drift path exists
+(`RenderObjects.get`, `:45986`, fed by `getDynamicCacheKey`'s lights-node/context-version/clipping
+terms) but `RenderObject.getCacheKey` totals only **83 ms inclusive across the whole capture** —
+far too little to be the driver. Also checked: MSA sets `material.needsUpdate = true` in exactly
+four non-vendor places, none per-frame on a proxy material.
+
+### Fixes, ascending risk, none attempted this session
+
+This is the depth authority — a shared foundation with 7 consumers (`keyhole-depth-authority-design`)
+— and Law 3 requires perf work be pixel-diff-gated. `keyhole-performance-audit-2026-08` already
+named the incremental reconcile "highest risk … left for a session with live Foundry access,"
+which this session does not have.
+
+- **(C) Early-out on an unchanged draw list.** Signature the derived proxy set; skip the rebuild
+  when identical. Lowest risk, pure short-circuit. Bounded upside: 214 proxy-rebuild episodes
+  produced only 85 build episodes, so ~60% already hit cache today.
+- **(B) Pool the materials; keep the wholesale MESH rebuild.** *The option this investigation
+  unlocks.* `buildSceneDepthWriterMaterial` is a pure function of `writerArgs` — cache materials on
+  a signature of those args and reuse the objects. Draw-list semantics are untouched (same meshes,
+  order, z, state); because materials are never disposed, `usedTimes` never hits zero and the graph
+  cache is never evicted, attacking step 3 directly. Precondition to verify first: nothing mutates a
+  proxy material post-construction (nearby `needsUpdate`/`depthWrite` writes target the tile's own
+  `t.material`, not the proxy's), and vegetation's per-item `positionNode` needs keying-in or
+  exclusion.
+- **(A) Incremental proxy reconcile.** The endgame the audit already named. Highest value, highest
+  risk, needs the author's own eyes on a real scene.
+
+---
+
 ## 3. FINDING 2 — the debug HUD costs 2,451 ms (6.9% of the main thread), while open
 
 DOM writes (`set textContent`, `set innerHTML`, `setAttribute`, `set innerText`,
@@ -262,11 +347,14 @@ path, not an independent problem.
 
 ## 8. Recommended next actions, in value order
 
-1. **Chase the TSL cache miss (§2).** Highest value by a wide margin — 10.7% of the main thread,
-   and it corroborates a three-round-old unexplained cost. This is now a code question: instrument
-   or log `getForRenderCacheKey` churn for depth-pass materials specifically, and check whether
-   S1.4's material states/`alwaysOpaque` variants flip during a pan. Start at
-   `runSceneDepthPass` (48.4%).
+1. ~~Chase the TSL cache miss (§2).~~ **DONE, same session — see §2a.** Root cause:
+   `rebuildSceneDepthProxies` wholesale-disposes every depth-proxy material every residency pass,
+   which drives three's `nodeBuilderState.usedTimes` refcount to 0 and evicts the compiled shader
+   graph; S1.4's `depthPrepassScene` twin (`earlyZComposition`, default `true`) pays the same cost
+   twice, explaining the ~50/50 pass split. Recommended fix: **(B) pool the proxy materials** by a
+   signature of `writerArgs`, keeping the mesh rebuild wholesale but never disposing a material that
+   would still be reused — the graph cache is then never evicted. Needs a pixel-diff gate (Law 3);
+   not attempted this session (no live Foundry access, shared depth-authority foundation).
 2. **Pair the next capture with a simultaneous `perf-run-full`.** The author has agreed to this.
    It is the only way to convert "GPU 85.8% busy" into a named pass, and it closes the one blind
    spot that matters.

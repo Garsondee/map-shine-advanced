@@ -990,6 +990,84 @@ or `buildSceneDepthWriterMaterial`'s `alwaysOpaque` structural variant flipping 
 churn creating fresh materials; or a per-frame-varying node hash. **This is now a code question,
 not a trace question** — and the highest-value next investigation in the capture.
 
+---
+
+### ✅ ADDENDUM, same session — THE CAUSE IS FOUND, and it is none of the three guesses above
+
+*Author directive: "Go find out why the cache key is churning." Answered from the vendored three
+source cross-examined against the trace. Recorded here as evidence on this petition; the plan is
+untouched (worker remit).*
+
+**The mechanism, end to end, every link read in source rather than inferred:**
+
+1. **`rebuildSceneDepthProxies(items)`** (`vt/vt-pan-viewer.js:10377`), called from
+   `updateResidencyUnguarded` (`:10823`) on **every residency pass**, opens by **wholesale
+   disposing every proxy material** in BOTH lists:
+   `for (const entry of depthProxyEntries) { depthScene.remove(entry.mesh); entry.material.dispose(); }`
+   — and the same loop again for `depthPrepassEntries`.
+2. **`material.dispose()` EVICTS THE COMPILED SHADER GRAPH.** three's `Nodes.delete()`
+   (`three.webgpu.js:58628-58640`) does `nodeBuilderState.usedTimes--` and, **at zero**,
+   `this.nodeBuilderCache.delete(this.getForRenderCacheKey(object))`. Refcount increments live at
+   `:58537/58558/58593`.
+3. **Wholesale disposal is what guarantees the refcount reaches zero.** Proxies sharing a cache key
+   share ONE `nodeBuilderState` with `usedTimes = N`. Disposing all N drives it to 0 → evicted.
+   Disposing a subset would leave `usedTimes > 0` and **the cache would survive**. The wholesale-ness
+   is not incidental to the bug; it IS the bug.
+4. Fresh materials are then built (`buildSceneDepthWriterMaterial`, `:10531`), so the new render
+   objects carry an `initialCacheKey` no longer present in `nodeBuilderCache` — and
+   `getForRender` (`:58505`) runs a full `NodeBuilder.build()`: prebuild + every build stage +
+   `flowNodeFromShaderStage` over every node in the graph.
+5. **S1.4 DOUBLED THE COST.** `addDepthPrepassTwin` (`:10319`) builds a SECOND material per tile
+   (`{...writerArgs, colorWrite:false}`) into `depthPrepassScene`, disposed and rebuilt by the same
+   wholesale loop. `earlyZComposition` is now **`true` by default** (`:9399`; the S1.4 text above
+   says "default OFF" — it has since been flipped). That twin is rendered inside
+   `runGeometryWorldPass` (`:4489`), which is **exactly why the cost splits ~50/50** between the two
+   passes: 48.4% `runSceneDepthPass` (the proxies) / 46.3% `runGeometryWorldPass` (the twins). The
+   split was never two independent problems — it is one cause paid twice.
+
+**The causal evidence, measured (a first attempt at this test was WRONG and is recorded so the
+method is not repeated):** a frame-level cross-tab said only 32.1% of residency frames contained
+build work vs 25.3% of non-residency frames — near-parity, which read as *falsification*. That test
+was flawed: `scheduleResidencyUpdate` (`:10974`) means residency runs in its **own task**, so the
+rebuild and the build it causes land in **different frames by construction**. Re-run as a
+time-window test over sample timestamps: of **85 build episodes**, **82.4% begin within 50 ms of a
+`rebuildSceneDepthProxies` episode ending**, **median lag 24 ms — about one frame** — and **100%
+within 1 s**. Episodes are large: median 48.5 ms, top ten 454–795 ms each.
+
+**Ruled OUT, with numbers, not assumption:** cache-key *drift* on live render objects. three's
+`getForRenderCacheKey` returns `renderObject.initialCacheKey`, fixed at construction; the drift path
+does exist (`RenderObjects.get`, `:45986`, dispose-and-recreate when `getCacheKey()` no longer
+matches, fed by `getDynamicCacheKey`'s lights node + `renderer.contextNode.version` + clipping) —
+but `RenderObject.getCacheKey` totals only **83 ms inclusive across the whole 36 s capture**, orders
+of magnitude too little for mass invalidation. **The eviction is the disposal, not key drift.** Also
+checked and cleared: MSA sets `material.needsUpdate = true` in only four non-vendor places, none of
+them per-frame on proxy materials.
+
+**Three fixes, in ascending risk — none attempted, and deliberately so.** This is the depth
+authority, a shared foundation with 7 consumers; Law 3 requires perf work be pixel-diff-gated, and
+`keyhole-performance-audit-2026-08` already recorded the incremental reconcile as "highest value,
+highest risk … left fully diagnosed for a session with live Foundry access," which this session does
+not have.
+- **(C) Early-out on an unchanged draw list** — signature the derived proxy set; skip the whole
+  rebuild when identical. Lowest risk (pure short-circuit, zero semantic change). Bounded upside:
+  214 proxy-rebuild episodes produced only 85 build episodes, so ~60% already hit cache; this
+  removes the wasted disposal on those but not the 85 real ones.
+- **(B) POOL THE MATERIALS, keep the wholesale mesh rebuild** — *the new option this investigation
+  unlocks, and the recommended one.* `buildSceneDepthWriterMaterial` is a pure function of
+  `writerArgs`, so cache materials on a signature of those args and reuse the same material objects.
+  The draw list stays wholesale-rebuilt (meshes are cheap); because the materials are never disposed,
+  `usedTimes` never reaches zero and **the graph cache is never evicted** — attacking step 3
+  directly. Risk is materially lower than (A) because *draw-list semantics do not change at all*:
+  same meshes, same order, same z, same state. Precondition to verify first: nothing mutates a proxy
+  material after construction (the `needsUpdate`/`depthWrite` writes nearby operate on the TILE's
+  `t.material`, not the proxy's), and vegetation's per-item `positionNode` must be keyed in or
+  excluded from the pool.
+- **(A) Incremental proxy reconcile** — the endgame already named in the audit. Highest value,
+  highest risk, needs the author's own eyes on a real scene.
+
+**Added to this petition's requests for Fable:** whether (B) is worker-executable behind a revert
+flag with a pixel-diff gate, or belongs to the same "live Foundry access" queue as (A).
+
 **FINDING 2 — the debug HUD costs 2,451 ms (6.9% of the main thread), but only while open.** DOM
 writes total 2,617 ms and **94% of that is MSA's own diagnostic UI**: `astrolabe.js:506 update`
 1,415 ms · `astrolabe.js:350 syncTuningSummary` 709 ms · `perf-strip.js` 259 ms ·

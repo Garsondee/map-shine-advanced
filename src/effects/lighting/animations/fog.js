@@ -21,8 +21,8 @@ import { fbmFloat } from './tsl-noise-toolkit.js';
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildFogColorationSeed({ THREE, uLightColor, uColorationAlpha, time, uIntensityRaw }) {
-  const { float, vec2, vec3, mix, clamp, positionLocal } = THREE.TSL;
+export function buildFogColorationSeed({ THREE, uLightColor, uColorationAlpha, time, uIntensityRaw, localPosition }) {
+  const { float, vec2, vec3, mix, clamp } = THREE.TSL;
 
   const c1 = uLightColor.mul(float(0.6));
   const c2 = uLightColor.mul(float(0.95));
@@ -31,7 +31,8 @@ export function buildFogColorationSeed({ THREE, uLightColor, uColorationAlpha, t
   const c5 = vec3(0.3, 0.3, 0.3);
   const c6 = uLightColor;
 
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const p = vUvs.mul(float(8));
 
   const q = fbmFloat(THREE.TSL, p.sub(time.mul(float(0.1))));

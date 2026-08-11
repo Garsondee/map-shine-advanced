@@ -21,8 +21,9 @@
 import { rotate2d, pie } from './tsl-noise-toolkit.js';
 
 /**
- * `ncoord = positionLocal.xy` (already Foundry's own `vUvs*2-1` in this
- * project's local-unit-radius space — no separate transform needed).
+ * `ncoord = localPosition` (already Foundry's own `vUvs*2-1` in this
+ * project's local-unit-radius space — no separate transform needed; NEVER
+ * `positionLocal` directly, see candle-flicker.js's own header).
  * `angularIntensity = mix(PI, PI*0.5, intensity*0.1)` — a WIDE beam at low
  * intensity, narrowing as intensity rises.
  *
@@ -34,10 +35,18 @@ import { rotate2d, pie } from './tsl-noise-toolkit.js';
  * @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildRevolvingColorationSeed({ THREE, uLightColor, uColorationAlpha, time, uIntensityRaw }) {
-  const { float, mix, positionLocal } = THREE.TSL;
+export function buildRevolvingColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, mix } = THREE.TSL;
 
-  const ncoord = rotate2d(THREE.TSL, positionLocal.xy, time);
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const ncoord = rotate2d(THREE.TSL, localPosition, time);
   const angularIntensity = mix(float(Math.PI), float(Math.PI * 0.5), uIntensityRaw.mul(float(0.1)));
   const angularCorrection = pie(THREE.TSL, ncoord, angularIntensity, float(0.15), float(1));
 

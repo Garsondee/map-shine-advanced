@@ -28,10 +28,11 @@ const INV_TWO_PI = 1 / (2 * Math.PI);
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildRainbowswirlColorationSeed({ THREE, uLightColor, dist, time, uIntensityRaw }) {
-  const { float, atan, length, mix, smoothstep, positionLocal } = THREE.TSL;
+export function buildRainbowswirlColorationSeed({ THREE, uLightColor, dist, time, uIntensityRaw, localPosition }) {
+  const { float, atan, length, mix, smoothstep } = THREE.TSL;
 
-  const nuv = positionLocal.xy;
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const nuv = localPosition;
   const angle = atan(nuv.x, nuv.y).mul(float(INV_TWO_PI)).add(float(0.5));
   const radius = length(nuv);
   const rainbow = hsb2rgb(THREE.TSL, angle.add(radius).sub(time.mul(float(0.2))), float(1), float(1));

@@ -22,15 +22,24 @@ const FBM2 = { octaves: 2 };
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildDomeColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, vec2, vec3, mix, clamp, abs, pow, positionLocal } = THREE.TSL;
+export function buildDomeColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, vec2, vec3, mix, clamp, abs, pow } = THREE.TSL;
 
   // transform(): hemispherize + rotate(t) + scale(8*intensity) about the
   // 0.5 pivot — rotation and scale commute here (scale is uniform/scalar),
   // so this is expressed as rotate-then-scale rather than composing an
   // explicit mat2*mat2 product.
   const half = vec2(0.5, 0.5);
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const f = hspherize(THREE.TSL, dist);
   const t = time.mul(float(0.02));
   const rotated = rotate2d(THREE.TSL, vUvs.sub(half), t);

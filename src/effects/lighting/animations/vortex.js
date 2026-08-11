@@ -86,14 +86,23 @@ function spice(TSL, iuv, rotAngle, time, c1, c2, c3, c4, c5, c6) {
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildVortexColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, positionLocal } = THREE.TSL;
+export function buildVortexColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float } = THREE.TSL;
 
   // t*0.5 drives both rotations — vortex's own twist uses `intensity` (not
   // time) for its angle, per vortexTwist's own formula; the swirl's OWN
   // rotation below uses `t = time*0.5` as Foundry's source does.
   const t = time.mul(float(0.5));
-  const vuv = vortexTwist(THREE.TSL, positionLocal.xy.mul(float(0.5)).add(float(0.5)), dist, uIntensityRaw);
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const vuv = vortexTwist(THREE.TSL, localPosition.mul(float(0.5)).add(float(0.5)), dist, uIntensityRaw);
 
   const c1 = uLightColor.mul(float(0.55));
   const c2 = uLightColor.mul(float(0.95));

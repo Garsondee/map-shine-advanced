@@ -43,13 +43,23 @@ import { voronoiVec3 } from './tsl-noise-toolkit.js';
  * @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildEnergyColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, vec2, vec3, cos, sin, sqrt, mix, positionLocal } = THREE.TSL;
+export function buildEnergyColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, vec2, vec3, cos, sin, sqrt, mix } = THREE.TSL;
 
   // Foundry's vUvs — see flame.js's own header for the derivation this
-  // project already establishes (positionLocal.xy, unit-radius/origin-
-  // centered, mapped to Foundry's [0,1]/0.5-centered uv space).
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // project already establishes (unit-radius/origin-centered local space,
+  // mapped to Foundry's [0,1]/0.5-centered uv space). NEVER `positionLocal`
+  // directly — see candle-flicker.js's own header (`localPosition` is the
+  // shading core's injected equivalent, safe under batching).
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
 
   // f = (1-sqrt(1-dist))/dist. At dist=0 (the light's exact center) this is
   // a genuine 0/0 in Foundry's own literal formula too, not guarded there

@@ -341,6 +341,11 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
       uLightColor,
       uColorationAlpha,
       dist,
+      // THE FIX (2026-08-11) — see point-light-illumination.js's own
+      // identical comment on this same param for the full account
+      // (docs/planning/Point-Light-Batching-Design.md §3.6). NEVER
+      // `positionLocal.xy` inside a seed builder — read this instead.
+      localPosition: localUnitXY,
       defaultSeed,
       time,
       uIntensityRaw,

@@ -1057,6 +1057,18 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
       uRatio,
       uAttenuationEased,
       dist,
+      // THE FIX (2026-08-11, S2.3's real-and-fixed batching gap): the vec2
+      // `dist` was derived from, for any seed builder that needs the full
+      // 2D local position (a lean/UV/rotation, not just a scalar radius) —
+      // NEVER `positionLocal.xy` directly. That global reads the mesh's own
+      // RAW vertex-position attribute, which for a per-light mesh happens to
+      // BE the unit-circle local space (mesh.position/scale places it), but
+      // for S2's BATCHED mesh is the WORLD-BAKED coordinate instead — see
+      // docs/planning/Point-Light-Batching-Design.md §3.6 for the full
+      // account of the bug this closes (candleShape, confirmed; several
+      // sibling animations share the same direct-`positionLocal` pattern,
+      // fixed alongside it, same session, same reason).
+      localPosition: localXY,
       defaultSeed,
       time,
       uIntensityRaw,

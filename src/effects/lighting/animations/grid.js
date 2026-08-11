@@ -90,11 +90,20 @@ function forcegrid(TSL, suv, dist, time, uIntensityRaw, uLightColor) {
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildGridColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, vec2, positionLocal } = THREE.TSL;
+export function buildGridColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, vec2 } = THREE.TSL;
 
   const half = vec2(0.5, 0.5);
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(half);
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const vUvs = localPosition.mul(float(0.5)).add(half);
   const uvs = vUvs
     .sub(half)
     .mul(uIntensityRaw.mul(float(0.2)))

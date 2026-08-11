@@ -69,15 +69,25 @@ export function buildFlameIlluminationSeed({ THREE, defaultSeed, time }) {
  * @param {*} args.uRatio - the light's own base ratio uniform.
  * @returns {{finalColor: *}}
  */
-export function buildFlameColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw, uRatio }) {
-  const { float, vec2, mix, clamp, smoothstep, max, pow, positionLocal } = THREE.TSL;
+export function buildFlameColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  uRatio,
+  localPosition,
+}) {
+  const { float, vec2, mix, clamp, smoothstep, max, pow } = THREE.TSL;
 
   const { brightnessPulse } = buildFlickerNode(THREE.TSL, { time, amplification: float(1) });
 
   // Foundry's vUvs (this project's own point-light-illumination.js already
-  // establishes this equivalence): positionLocal.xy (unit-radius, centered
-  // at the origin) mapped to Foundry's [0,1]-space centered at 0.5.
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // establishes this equivalence): local space (unit-radius, centered at the
+  // origin) mapped to Foundry's [0,1]-space centered at 0.5. NEVER
+  // `positionLocal` directly — see candle-flicker.js's own header.
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
 
   // scale(uv, s) = (uv - 0.5) * s + 0.5 — flame.mjs's own mat2-pivot helper,
   // a uniform zoom about the light's own center.

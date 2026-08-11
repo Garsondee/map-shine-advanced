@@ -526,20 +526,27 @@ Worker models execute + mark only; ANY surprise is a petition.*
 - [x] **S2.3 Lab proof, production-shaped** — `bench-point-lights.js` scenario 4, the checks
       specified in design doc §7 (fully-loaded 8-buffer layout; byte-parity vs uniform-built
       twins; movement via span rewrite; zero-write byte-stability).
-      **Gate: all six green on-device.** ⚠️ **6/7 — closed with one real, documented gap, not
-      silently fudged to green.** 2026-08-11 (Claude Sonnet 5): mechanism checks all pass —
-      1 draw call for the fully-loaded (animated+wind) case, the 8-buffer layout compiles and
-      draws for real, movement via `position`-span rewrite is proven (old footprint empty, new
-      footprint correct), a single light's value rewrite touches nothing else, two zero-write
-      renders stay byte-stable. The ONE fail is real and understood, not mysterious: at
-      `animationQuality:2` (production's actual value for the real Mansion's candles), the
-      batched mesh diverges from production's own per-light wrapper because
-      `animations/candle-flicker.js#candleShape` reads `positionLocal` directly, bypassing the
-      core's own injected local-position value — confirmed by an isolated per-quality-tier A/B:
-      the identical comparison at `animationQuality:1` is byte-identical, isolating the gap to
-      that one animation helper (design doc §3.6, new). **S2.4/S2.5 must not claim candle
-      buckets batch correctly until this is fixed or candles are excluded from v1** — the
-      author's call, not decided here.
+      **Gate: all six green on-device.** ✅ **7/7 — including a real gap found, then FIXED
+      the same day, on the author's explicit instruction not to half-do it.** 2026-08-11
+      (Claude Sonnet 5): mechanism checks all passed from the start — 1 draw call for the
+      fully-loaded (animated+wind) case, the 8-buffer layout compiles and draws for real,
+      movement via `position`-span rewrite is proven, a single light's value rewrite touches
+      nothing else, two zero-write renders stay byte-stable. ONE check failed initially, and was
+      real, not mysterious: at `animationQuality:2` (production's actual value for the real
+      Mansion's candles), the batched mesh diverged from production's own per-light wrapper
+      because `animations/candle-flicker.js#candleShape` read `positionLocal` directly,
+      bypassing the core's own injected local-position value. A full audit
+      (`grep -rn positionLocal src/effects/lighting/animations`) found the identical pattern in
+      18 MORE animation files — nearly the whole registry. **Fixed in all 19**: the core now
+      injects `localPosition` into every `buildIlluminationSeed`/`buildColorationSeed` call
+      (design doc §3.6, now CLOSED), and every affected seed builder (plus shared internal
+      helpers — `candleShape`, `sunburstPattern`, `bwave`, `smokefading`) reads that instead.
+      Re-verified: the bench check now passes at `maxChannelDelta:0` (7/7 total), `npm run
+      verify` green (21 suites, 8373 passed), and a live-Foundry capture with real candles
+      confirms the per-light path is unaffected. ⚠️ Only `candle-flicker.js` was CONFIRMED
+      broken by the bench before fixing; the other 18 were fixed on the strength of the
+      identical `positionLocal.xy` read in the identical injection context, not independently
+      reproduced-broken first — a strong structural inference, not 19 separate proofs.
       Also en route: P-005 corrects a FALSE finding this same investigation surfaced — the
       third scenario's own `moving-a-light-only-touched-its-OWN-transform-slot` (previously
       "narrowed, not root-caused" as a suspected device defect) was a Y-flip bug in this bench

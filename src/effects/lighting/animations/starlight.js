@@ -24,15 +24,25 @@ const FBM2 = { octaves: 2 };
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildStarlightColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, vec2, cos, sin, normalize, tan, clamp, max, pow, positionLocal } = THREE.TSL;
+export function buildStarlightColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, vec2, cos, sin, normalize, tan, clamp, max, pow } = THREE.TSL;
 
   // transform(): a pure rotation by t=time*0.2, no pivot shift (verified
   // against source — unlike most other transforms in this set).
   const t = time.mul(float(0.2));
   const cost = cos(t);
   const sint = sin(t);
-  const uv0 = positionLocal.xy; // (vUvs - 0.5) — already this project's own local space
+  // (vUvs - 0.5) — already this project's own local space. NEVER
+  // `positionLocal` directly — see candle-flicker.js's own header.
+  const uv0 = localPosition;
   const uv = vec2(uv0.x.mul(cost).sub(uv0.y.mul(sint)), uv0.x.mul(sint).add(uv0.y.mul(cost)));
 
   const rayT = time.mul(float(0.5));

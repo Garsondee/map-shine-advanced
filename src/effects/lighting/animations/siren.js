@@ -36,14 +36,23 @@ import { buildFlickerNode, buildFlickerRatioNode } from './light-animation-clock
  * @param {*} args.computeSwitchColorBand - the scaffold's own band-rebuild closure.
  * @returns {{finalColor: *}}
  */
-export function buildSirenIlluminationSeed({ THREE, uRatio, uIntensityRaw, time, dist, computeSwitchColorBand }) {
-  const { float, mix, clamp, positionLocal } = THREE.TSL;
+export function buildSirenIlluminationSeed({
+  THREE,
+  uRatio,
+  uIntensityRaw,
+  time,
+  dist,
+  computeSwitchColorBand,
+  localPosition,
+}) {
+  const { float, mix, clamp } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
   const { n, brightnessPulse } = buildFlickerNode(THREE.TSL, { time, amplification });
   const jitteredRatio = buildFlickerRatioNode(THREE.TSL, uRatio, n);
   const seed = computeSwitchColorBand(jitteredRatio);
 
-  const ncoord = rotate2d(THREE.TSL, positionLocal.xy, time.mul(float(50)));
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const ncoord = rotate2d(THREE.TSL, localPosition, time.mul(float(50)));
   const angularIntensity = mix(float(Math.PI), float(0), uIntensityRaw.mul(float(0.1)));
   const gradientFade = clamp(float(0.45).mul(dist), float(0.05), float(1));
   const angularCorrection = mix(float(1), pie(THREE.TSL, ncoord, angularIntensity, gradientFade, float(1)), float(0.5));
@@ -62,12 +71,21 @@ export function buildSirenIlluminationSeed({ THREE, uRatio, uIntensityRaw, time,
  * @param {*} args.dist
  * @returns {{finalColor: *}}
  */
-export function buildSirenColorationSeed({ THREE, uLightColor, uColorationAlpha, uIntensityRaw, time, dist }) {
-  const { float, mix, clamp, positionLocal } = THREE.TSL;
+export function buildSirenColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  uIntensityRaw,
+  time,
+  dist,
+  localPosition,
+}) {
+  const { float, mix, clamp } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
   const { brightnessPulse } = buildFlickerNode(THREE.TSL, { time, amplification });
 
-  const ncoord = rotate2d(THREE.TSL, positionLocal.xy, time.mul(float(50)));
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const ncoord = rotate2d(THREE.TSL, localPosition, time.mul(float(50)));
   const angularIntensity = mix(float(Math.PI), float(0), uIntensityRaw.mul(float(0.1)));
   const gradientFade = clamp(float(0.15).mul(dist), float(0.05), float(1));
   const angularCorrection = pie(THREE.TSL, ncoord, angularIntensity, gradientFade, float(1));

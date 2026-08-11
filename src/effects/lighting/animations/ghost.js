@@ -29,10 +29,11 @@ function tcosWave(TSL, time) {
  * @param {*} args.THREE @param {*} args.defaultSeed @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildGhostIlluminationSeed({ THREE, defaultSeed, time, uIntensityRaw }) {
-  const { float, vec2, mix, positionLocal } = THREE.TSL;
+export function buildGhostIlluminationSeed({ THREE, defaultSeed, time, uIntensityRaw, localPosition }) {
+  const { float, vec2, mix } = THREE.TSL;
 
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const distortion1 = fbmFloat(
     THREE.TSL,
     vec2(
@@ -81,10 +82,19 @@ export function buildGhostIlluminationSeed({ THREE, defaultSeed, time, uIntensit
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildGhostColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, vec2, mix, pow, sin, positionLocal } = THREE.TSL;
+export function buildGhostColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, vec2, mix, pow, sin } = THREE.TSL;
 
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const one = vec2(1, 1);
   const distortion1 = fbmFloat(
     THREE.TSL,

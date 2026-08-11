@@ -42,10 +42,13 @@ function transform(TSL, uv, time) {
   return sheared.add(half);
 }
 
-/** `smokefading(dist)` — shared verbatim between channels. */
-function smokefading(TSL, dist, time, uIntensityRaw) {
-  const { float, mix, pow, max, positionLocal } = TSL;
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+/**
+ * `smokefading(dist)` — shared verbatim between channels. `localPosition`:
+ * NEVER `positionLocal` directly — see candle-flicker.js's own header.
+ */
+function smokefading(TSL, dist, time, uIntensityRaw, localPosition) {
+  const { float, mix, pow, max } = TSL;
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const uv = transform(TSL, vUvs, time);
   const t = time.mul(float(0.4));
 
@@ -60,8 +63,8 @@ function smokefading(TSL, dist, time, uIntensityRaw) {
  * @param {*} args.THREE @param {*} args.dist @param {*} args.defaultSeed @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildSmokepatchIlluminationSeed({ THREE, dist, defaultSeed, time, uIntensityRaw }) {
-  const finalColor = defaultSeed.mul(smokefading(THREE.TSL, dist, time, uIntensityRaw));
+export function buildSmokepatchIlluminationSeed({ THREE, dist, defaultSeed, time, uIntensityRaw, localPosition }) {
+  const finalColor = defaultSeed.mul(smokefading(THREE.TSL, dist, time, uIntensityRaw, localPosition));
   return { finalColor };
 }
 
@@ -70,7 +73,17 @@ export function buildSmokepatchIlluminationSeed({ THREE, dist, defaultSeed, time
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildSmokepatchColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const finalColor = uLightColor.mul(smokefading(THREE.TSL, dist, time, uIntensityRaw)).mul(uColorationAlpha);
+export function buildSmokepatchColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const finalColor = uLightColor
+    .mul(smokefading(THREE.TSL, dist, time, uIntensityRaw, localPosition))
+    .mul(uColorationAlpha);
   return { finalColor };
 }

@@ -81,10 +81,19 @@ function hexaPattern(TSL, uv, time, uLightColor) {
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildHexaColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, pow, positionLocal } = THREE.TSL;
+export function buildHexaColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, pow } = THREE.TSL;
 
-  const uv = transform(THREE.TSL, positionLocal.xy.mul(float(0.5)).add(float(0.5)), dist, time, uIntensityRaw);
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const uv = transform(THREE.TSL, localPosition.mul(float(0.5)).add(float(0.5)), dist, time, uIntensityRaw);
   const finalColor = hexaPattern(THREE.TSL, uv, time, uLightColor)
     .mul(pow(float(1).sub(dist), float(0.18)))
     .mul(uColorationAlpha);

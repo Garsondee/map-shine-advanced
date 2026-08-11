@@ -29,10 +29,19 @@ const INV_TWO_PI = 1 / (2 * Math.PI);
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildEmanationColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, atan, fract, sin, smoothstep, positionLocal } = THREE.TSL;
+export function buildEmanationColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, atan, fract, sin, smoothstep } = THREE.TSL;
 
-  const uv = positionLocal.xy;
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const uv = localPosition;
   const angle = atan(uv.x, uv.y).mul(float(INV_TWO_PI));
   const beamsRaw = fract(angle.mul(uIntensityRaw).add(sin(dist.mul(float(10)).sub(time))));
   const beams = mirrorTriangle(THREE.TSL, beamsRaw);

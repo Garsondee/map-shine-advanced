@@ -14,12 +14,16 @@
 
 import { fbmFloat, rotate2d } from './tsl-noise-toolkit.js';
 
-/** `bwave(dist, coeff)` — shared shape, channel-specific coefficient. */
-function bwave(TSL, dist, time, uIntensityRaw, coeff) {
-  const { float, vec2, sin, mix, clamp, positionLocal } = TSL;
+/**
+ * `bwave(dist, coeff)` — shared shape, channel-specific coefficient.
+ * `localPosition`: NEVER `positionLocal` directly — see candle-flicker.js's
+ * own header.
+ */
+function bwave(TSL, dist, time, uIntensityRaw, coeff, localPosition) {
+  const { float, vec2, sin, mix, clamp } = TSL;
   const half = vec2(0.5, 0.5);
   const t = time.mul(float(0.25));
-  const rotated = rotate2d(TSL, positionLocal.xy.mul(float(0.5)).add(float(0.5)).sub(half), t);
+  const rotated = rotate2d(TSL, localPosition.mul(float(0.5)).add(float(0.5)).sub(half), t);
   const uv = rotated.mul(float(2.5)).add(half);
 
   const motion = fbmFloat(TSL, uv.add(time.mul(float(0.25))));
@@ -35,8 +39,8 @@ function bwave(TSL, dist, time, uIntensityRaw, coeff) {
  * @param {*} args.THREE @param {*} args.dist @param {*} args.defaultSeed @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildWitchwaveIlluminationSeed({ THREE, dist, defaultSeed, time, uIntensityRaw }) {
-  const finalColor = defaultSeed.mul(bwave(THREE.TSL, dist, time, uIntensityRaw, 0.3));
+export function buildWitchwaveIlluminationSeed({ THREE, dist, defaultSeed, time, uIntensityRaw, localPosition }) {
+  const finalColor = defaultSeed.mul(bwave(THREE.TSL, dist, time, uIntensityRaw, 0.3, localPosition));
   return { finalColor };
 }
 
@@ -45,7 +49,17 @@ export function buildWitchwaveIlluminationSeed({ THREE, dist, defaultSeed, time,
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildWitchwaveColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const finalColor = uLightColor.mul(bwave(THREE.TSL, dist, time, uIntensityRaw, 0.55)).mul(uColorationAlpha);
+export function buildWitchwaveColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const finalColor = uLightColor
+    .mul(bwave(THREE.TSL, dist, time, uIntensityRaw, 0.55, localPosition))
+    .mul(uColorationAlpha);
   return { finalColor };
 }

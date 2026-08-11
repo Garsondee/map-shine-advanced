@@ -32,12 +32,15 @@ function tcosWave(TSL, time) {
  * @param {*} args.THREE @param {*} args.defaultSeed @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildFairyIlluminationSeed({ THREE, defaultSeed, time }) {
-  const { float, vec2, mix, positionLocal } = THREE.TSL;
+export function buildFairyIlluminationSeed({ THREE, defaultSeed, time, localPosition }) {
+  const { float, vec2, mix } = THREE.TSL;
   // Illumination's own motionWave doesn't read intensity at all (verified
   // against source) — `uIntensityRaw` isn't needed here.
 
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // NEVER `positionLocal` directly (2026-08-11 fix, batching-breaking for the
+  // same reason candle-flicker.js's own header documents) — `localPosition`
+  // is the shading core's own injected local-space vec2.
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const one = vec2(1, 1);
   const distortion1 = fbmFloat(
     THREE.TSL,
@@ -86,10 +89,19 @@ export function buildFairyIlluminationSeed({ THREE, defaultSeed, time }) {
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.uColorationAlpha @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildFairyColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, time, uIntensityRaw }) {
-  const { float, vec2, mix, sin, atan, length, smoothstep, positionLocal } = THREE.TSL;
+export function buildFairyColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  dist,
+  time,
+  uIntensityRaw,
+  localPosition,
+}) {
+  const { float, vec2, mix, sin, atan, length, smoothstep } = THREE.TSL;
 
-  const vUvs = positionLocal.xy.mul(float(0.5)).add(float(0.5));
+  // NEVER `positionLocal` directly — see the illumination twin's own comment.
+  const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const one = vec2(1, 1);
   const distortion1 = fbmFloat(
     THREE.TSL,
@@ -140,7 +152,7 @@ export function buildFairyColorationSeed({ THREE, uLightColor, uColorationAlpha,
   uv = uv.add(half);
 
   const intens = uIntensityRaw.mul(float(0.1));
-  const nuv = positionLocal.xy;
+  const nuv = localPosition;
   const puvX = atan(nuv.x, nuv.y).mul(float(INV_TWO_PI)).add(float(0.5));
   const puvY = length(nuv);
   const rainbow = hsb2rgb(THREE.TSL, puvX.add(puvY).sub(time.mul(float(0.2))), float(1), float(1));

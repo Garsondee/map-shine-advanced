@@ -229,10 +229,17 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse) {
  * fades, SHARED by both channels so their footprints agree. Tier 0/1: plain
  * circular `dist`. Tier 2: a wandering LEAN offsets the pool, an OVAL stretch
  * elongates it along the lean, and its SIZE couples to `life` (dim → shrink)
- * plus its own breath. Reads `positionLocal` directly (like sunburst/
- * emanation) for the fragment's true 2D position.
+ * plus its own breath. Reads the injected `localPosition` for the
+ * fragment's true 2D position — NEVER `positionLocal` directly (fixed
+ * 2026-08-11: that global is the mesh's raw vertex-position attribute,
+ * which for S2's BATCHED mesh is a world-baked coordinate, not the
+ * unit-circle local space this function's math assumes — see
+ * docs/planning/Point-Light-Batching-Design.md §3.6).
  *
- * @param {*} TSL @param {*} time @param {*} dist @param {*} life @param {number} quality
+ * @param {*} TSL @param {*} time @param {*} dist @param {*} localPosition -
+ *   the SAME local-space vec2 `dist` was derived from
+ *   (`length(localPosition) === dist`), injected by the shading core.
+ * @param {*} life @param {number} quality
  * @param {*} [wind] - a vec2 node, the scaffold's already-sampled shared wind
  *   (world/wind-field.js's `sampleWind`, Wind.md Tier 0) — present whenever
  *   this light carries a world position + exposure. Absent → falls back to
@@ -244,11 +251,11 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse) {
  *   Default 1 when `wind` is present but this is omitted.
  * @returns {{flameDist: *}}
  */
-function candleShape(TSL, time, dist, life, quality, wind, windResponse) {
+function candleShape(TSL, time, dist, localPosition, life, quality, wind, windResponse) {
   if (quality < 2) return { flameDist: dist };
-  const { float, vec2, mx_noise_float: perlin, positionLocal, length, dot, max } = TSL;
+  const { float, vec2, mx_noise_float: perlin, length, dot, max } = TSL;
 
-  const P = positionLocal.xy;
+  const P = localPosition;
 
   // Wandering lean — THE SHARED FIELD when provided (Wind.md Tier 0: this is
   // the fix for "the light used to lean in its OWN wind, different from the
@@ -301,6 +308,9 @@ function candleShape(TSL, time, dist, life, quality, wind, windResponse) {
  * @param {*} args.uIntensityRaw
  * @param {*} args.time
  * @param {*} args.dist
+ * @param {*} args.localPosition - the local-space vec2 `dist` was derived
+ *   from — forwarded to `candleShape`, NEVER read via `positionLocal`
+ *   directly (see that function's own header for why).
  * @param {*} args.computeSwitchColorBand - the scaffold's own band-rebuild closure.
  * @param {number} [args.quality=0] - graph-build-time tier (see this module's header).
  * @param {*} [args.wind] - the scaffold's shared wind sample (Wind.md Tier 0
@@ -319,6 +329,7 @@ export function buildCandleFlickerIlluminationSeed({
   uIntensityRaw,
   time,
   dist,
+  localPosition,
   computeSwitchColorBand,
   quality = 0,
   wind,
@@ -332,7 +343,7 @@ export function buildCandleFlickerIlluminationSeed({
 
   // The bright core rides the SHARED warped distance, so at tier 2 the hot
   // centre leans and elongates with the rest of the pool.
-  const { flameDist } = candleShape(THREE.TSL, time, dist, life, quality, wind, windResponse);
+  const { flameDist } = candleShape(THREE.TSL, time, dist, localPosition, life, quality, wind, windResponse);
   const compressedRatio = jitteredRatio.mul(float(CORE_SCALE));
   const upperEdge = max(jitteredRatio, compressedRatio.add(float(0.0001)));
   const extraCompress = smoothstep(compressedRatio, upperEdge, flameDist);
@@ -353,6 +364,8 @@ export function buildCandleFlickerIlluminationSeed({
  * @param {*} args.uIntensityRaw
  * @param {*} args.time
  * @param {*} args.dist
+ * @param {*} args.localPosition - see `buildCandleFlickerIlluminationSeed`'s
+ *   identical param — NEVER read via `positionLocal` directly.
  * @param {number} [args.quality=0] - graph-build-time tier (see this module's header).
  * @param {*} [args.wind] - the scaffold's shared wind sample (Wind.md Tier 0
  *   — see `candleShape`'s own param). Forwarded from point-light-
@@ -369,11 +382,12 @@ export function buildCandleFlickerColorationSeed({
   uIntensityRaw,
   time,
   dist,
+  localPosition,
   quality = 0,
   wind,
   windResponse,
 }) {
-  const { float, vec2, vec3, mix, clamp, mx_noise_float: perlin, positionLocal } = THREE.TSL;
+  const { float, vec2, vec3, mix, clamp, mx_noise_float: perlin } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
   const { brightnessPulse, warmth, life } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
 
@@ -389,10 +403,10 @@ export function buildCandleFlickerColorationSeed({
   // The saturated flame-glow footprint: the SHARED warped distance (oval/
   // leaning/sizing at tier 2), then a BOILING edge — position-based 2D noise
   // that drifts over time, so the rim churns and licks instead of rotating.
-  const { flameDist } = candleShape(THREE.TSL, time, dist, life, quality, wind);
+  const { flameDist } = candleShape(THREE.TSL, time, dist, localPosition, life, quality, wind);
   let edge = flameDist;
   if (quality >= 2) {
-    const P = positionLocal.xy;
+    const P = localPosition;
     const churn = perlin(
       vec2(
         P.x.mul(float(EDGE_CHURN_SCALE)).add(time.mul(float(EDGE_CHURN_RATE))),

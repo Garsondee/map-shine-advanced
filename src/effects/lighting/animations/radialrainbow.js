@@ -23,10 +23,11 @@ import { hsb2rgb } from './tsl-noise-toolkit.js';
  * @param {*} args.THREE @param {*} args.uLightColor @param {*} args.dist @param {*} args.time @param {*} args.uIntensityRaw
  * @returns {{finalColor: *}}
  */
-export function buildRadialrainbowColorationSeed({ THREE, uLightColor, dist, time, uIntensityRaw }) {
-  const { float, length, mix, smoothstep, positionLocal } = THREE.TSL;
+export function buildRadialrainbowColorationSeed({ THREE, uLightColor, dist, time, uIntensityRaw, localPosition }) {
+  const { float, length, mix, smoothstep } = THREE.TSL;
 
-  const radius = length(positionLocal.xy);
+  // NEVER `positionLocal` directly — see candle-flicker.js's own header.
+  const radius = length(localPosition);
   const rainbow = hsb2rgb(THREE.TSL, radius.sub(time.mul(float(0.2))), float(1), float(1));
 
   const intens = uIntensityRaw.mul(float(0.1));

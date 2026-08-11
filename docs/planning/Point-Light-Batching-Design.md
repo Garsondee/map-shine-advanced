@@ -218,52 +218,47 @@ is a closed-list check, `feedback_category_string_must_be_in_closed_list`); and 
 CODE PATH itself, which is both the aperture path and the safety slide (flag OFF = today's
 renderer, byte-identical). Nothing is deleted in Stage 2.
 
-### §3.6 A REAL gap S2.1 did not close: animation seed builders reading `positionLocal` directly
+### §3.6 CLOSED — animation seed builders reading `positionLocal` directly
 
-**Found 2026-08-11, S2.3, confirmed by an isolated per-quality-tier A/B, not left as a mystery.**
-S2.1's core split parameterizes `positionLocal.xy` as `inputs.localUnitXY` for the CORE's own use
-(`dist`, falloff, switchColor). It does NOT — could not, given the current call shape —
-intercept an animation SEED BUILDER that reaches for the TSL global `positionLocal` symbol
-itself, bypassing the injected value entirely. `animations/candle-flicker.js#candleShape`
-(called only at `animationQuality >= 2` — **production's actual value for the real Mansion's
-candles**, per S2.1's own harness capture) does exactly this at its line ~251
-(`const P = positionLocal.xy;`), for its lean/shape math.
+**Found 2026-08-11, S2.3, confirmed by an isolated per-quality-tier A/B; FIXED the same day, on
+the author's explicit instruction not to half-do it.** S2.1's core split parameterizes
+`positionLocal.xy` as `inputs.localUnitXY` for the CORE's own use (`dist`, falloff,
+switchColor) — but did not, by itself, reach the animation SEED BUILDERS the core calls out to,
+several of which read the TSL global `positionLocal` directly, bypassing the injected value.
+`animations/candle-flicker.js#candleShape` (called only at `animationQuality >= 2` — production's
+actual value for the real Mansion's candles) was the confirmed case; a full audit
+(`grep -rn positionLocal src/effects/lighting/animations`) found the SAME pattern in 18 more
+files — effectively every angular/UV-space animation in the registry.
 
-For a per-light mesh, `positionLocal` genuinely IS the unit-circle local coordinate
-(`mesh.position`/`mesh.scale` place it), so this has always worked correctly. For a BATCHED mesh
-(§3.3: `position` holds the WORLD-BAKED `origin + local*radius`, mesh transform identity),
-`positionLocal` is the WORLD coordinate — feeding `candleShape` a wildly out-of-range value.
-Bench proof (`bench-point-lights.js` scenario 4, `batched-byte-identical-to-uniform-twins` /
-`-below-quality-2`): the SAME batched-vs-twin comparison is BYTE-IDENTICAL at `animationQuality:1`
-and diverges ONLY at `:2`, isolating the gap precisely to `candleShape`'s own quality-gated
-branch — not the core, not the packed-attribute mechanism, not any other part of this design.
-`candleShape`'s own comment names `sunburst`/`emanation` as reading `positionLocal` the same way
-— likely the same class of gap, unaudited.
+**The fix, applied to all 19 files:** `buildIlluminationShadingCore`/`buildColorationShadingCore`
+now pass `localPosition: localXY` into every `animation.buildIlluminationSeed`/
+`buildColorationSeed` call (`point-light-illumination.js`/`point-light-coloration.js`). Every
+affected seed builder (and the internal helpers some of them share — `candleShape`,
+`sunburstPattern`, `bwave`, `smokefading`) now accepts `localPosition` as an explicit parameter
+and reads THAT instead of `positionLocal` — for the existing per-light path, `localPosition` IS
+`positionLocal.xy` (the exact same node, injected through unchanged), so this is provably
+behaviour-preserving there; for the batched path, it is now the correct local-space value instead
+of the world-baked one.
 
-**What this means for the plan:** batching is proven correct today for every light whose
-animation (if any) never reads `positionLocal` directly — which per S2.0's census covers document
-lights (`flame`, unaudited) but NOT the real Mansion's 207-anchor candle bucket at its actual
-quality tier. **S2.4/S2.5 must not claim candle buckets batch correctly until this is fixed or
-candles are excluded from v1 batching** (mirroring §3.1's own aperture-exclusion precedent) —
-whichever the author decides. Fixing it properly means auditing every animation seed builder for
-direct `positionLocal`/`positionWorld` reads and giving each an injectable local-position
-parameter, mirroring what S2.1 already did for the core itself — real, bounded, but NOT
-scoped or estimated here; that estimate is a prerequisite for whichever S2.4/S2.5 executor picks
-this up, not assumed.
+**Verified:** `bench-point-lights.js` scenario 4's `batched-byte-identical-to-uniform-twins`
+(the real `animationQuality:2` case) now passes at `maxChannelDelta:0` — 7/7 checks green, up
+from 6/7. `npm run verify` green (21 suites, 8373 passed). A live-Foundry capture (real candles,
+quality 2) confirms the per-light path is unaffected. Only `candle-flicker.js` was confirmed
+BROKEN before the fix (the other 18 were fixed alongside it on the strength of the identical
+pattern, not independently reproduced-broken first — see V4-Testament.md's S2.3 entry for the
+full account and what that does and doesn't prove).
 
 ---
 
 ## §4 Parity strategy
 
 Parity is STRUCTURAL, not aspirational: one shading core means the batched material cannot
-"forget" a term. The remaining risk is the input path — uniform read vs attribute-varying read
-of the same float32. All per-light attributes are constant across a light's fan, and `aLocalUnit`
-rides the identical attribute→varying path `positionLocal` itself uses INSIDE THE CORE, so the
-expectation there is bit-exactness — confirmed on-device (`batched-byte-identical-to-uniform-
-twins-below-quality-2`, byte-identical). This does NOT extend to code the core calls OUT to that
-reaches for `positionLocal` on its own, bypassing the injected value — §3.6 documents the one
-confirmed instance (`candleShape`, `animationQuality >= 2`) and why it is a separate, real gap
-rather than a parity failure in the core itself.
+"forget" a term. The input path — uniform read vs attribute-varying read of the same float32 —
+is proven bit-exact on-device (`batched-byte-identical-to-uniform-twins`, `maxChannelDelta:0`,
+including the real `animationQuality:2` candle case since §3.6's fix). §3.6 has the full account
+of the one gap this surfaced (animation seed builders reaching for `positionLocal` directly,
+bypassing the core's injected local-position value) and its fix — a separate concern from the
+core's own parity, now closed, not a residual risk.
 
 **The pixel gate stays `exact`** (Testament S2.7). The ONLY lawful relaxation, should constant-
 attribute interpolation wobble by 1 ulp on this hardware: max per-channel delta ≤ 1/255 with
@@ -305,19 +300,18 @@ perf-session.js + test). S2.6's executor must coordinate before modifying instru
 
 ---
 
-## §7 Lab proof spec (S2.3 — scenario 4 of `bench-point-lights.js`) — DONE, 6/7 green
-
-Check IDs — six pass; the seventh is a real, understood, DELIBERATELY-not-fudged fail (§3.6):
+## §7 Lab proof spec (S2.3 — scenario 4 of `bench-point-lights.js`) — DONE, 7/7 green
 
 - `packed-batch-renders-one-draw` ✅ — fully-loaded layout (anim + wind, 8 buffers), N lights, 1
   real `drawCalls`.
 - `fully-loaded-layout-fits-vertex-buffer-limit` ✅ — the §3.3 arithmetic proven by compile+draw,
   not arithmetic alone.
-- `batched-byte-identical-to-uniform-twins` ❌ **real, understood fail** — production's actual
-  `animationQuality:2` diverges for the reason §3.6 documents (an animation seed builder, not
-  the core). Left failing on purpose rather than silently testing a lower quality tier.
+- `batched-byte-identical-to-uniform-twins` ✅ — production's actual `animationQuality:2`,
+  `maxChannelDelta:0`. Failed once (§3.6's gap), then fixed the same session — not silently
+  worked around by testing a lower quality tier.
 - `batched-byte-identical-to-uniform-twins-below-quality-2` ✅ — the SAME comparison at
-  `animationQuality:1`: byte-identical, isolating §3.6's gap to that one animation helper.
+  `animationQuality:1`: byte-identical, ISOLATED §3.6's gap to `candleShape` before the fix (now
+  redundant with the check above but kept as a narrower regression check).
 - `span-position-rewrite-moves-a-light` ✅ — movement via span rewrite (the mechanism of record,
   replacing `uniformArray`); old footprint empty, new footprint correct. (This check, and the
   third scenario's sibling, were both false-failing earlier the same day on a Y-flip bug in this

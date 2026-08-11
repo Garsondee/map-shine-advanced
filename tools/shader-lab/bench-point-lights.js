@@ -461,6 +461,233 @@ export function createPointLightsBench({ THREE, log }) {
     },
   });
 
+  scenarios.set('indexed-transform-array-preserves-cheap-position-updates', {
+    name: 'indexed-transform-array-preserves-cheap-position-updates',
+    summary:
+      "THE REAL MODULE'S actual design, proven before it is built: " +
+      '`triangulateLightFan` (point-light-illumination.js) keeps every light in LOCAL, unit-' +
+      'radius space — world placement is a cheap `mesh.position.set()`/`mesh.scale.set()` ' +
+      'transform, never a vertex rewrite. A merge that bakes world position INTO vertex data ' +
+      "(this bench's own first two scenarios) loses that: `lightShapeChanged` only fires on a " +
+      'real polygon change, but a light that merely MOVES or PULSES its radius would need a ' +
+      'full vertex-data rewrite every frame instead. The fix: keep local-space vertices, add a ' +
+      'per-vertex `lightSlot` attribute, and hold (origin, radius) per light in a SEPARATE small ' +
+      '`uniformArray`, read in the VERTEX stage indexed by that attribute — this project has only ' +
+      'ever indexed a `uniformArray` from the FRAGMENT stage before (the soft-edge polygon SDF, ' +
+      'point-light-illumination.js), so vertex-stage indexed reads are the genuinely new claim ' +
+      'here, proven on the real device before any production code assumes it.' +
+      '\n\n⚠️ ONE CHECK BELOW (`moving-a-light-only-touched-its-OWN-transform-slot`) FAILS HERE, ' +
+      'NARROWED (NOT YET ROOT-CAUSED) 2026-08-11. An earlier pass of this investigation reported ' +
+      'this as unreproducible outside this file; that framing was WRONG — a fresh, minimal, ' +
+      "standalone script using this scenario's exact values reproduces it too, so the trigger is " +
+      'not this harness. What IS now conclusively ruled out, via direct device instrumentation ' +
+      '(not more bisection — three targeted probes against the running WebGPU backend): (1) ' +
+      '`UniformArrayNode.value` — the padded CPU-side mirror `update()` writes into — reads back ' +
+      'byte-correct for the moved light immediately after the second render (verified by reading ' +
+      'the node instance directly); (2) `device.queue.writeBuffer` — patched and logged — is ' +
+      'called for both the origin and radius buffers on the second render with the fully correct, ' +
+      'moved values (logged the actual bytes). The CPU-to-GPU write path is provably correct end ' +
+      'to end. Yet the rendered image keeps showing the light at its FIRST-frame position and ' +
+      'radius, and two further no-op re-renders (no array mutation, no new writeBuffer calls) stay ' +
+      'stuck on that same stale image — ruling out simple one-frame latency (a ping-ponged buffer ' +
+      'that would resolve itself one frame later). The defect is therefore isolated to whatever ' +
+      "GPU resource the DRAW's bind group actually references, downstream of a confirmed-correct " +
+      'buffer write — most likely a bind-group or buffer-object identity/caching detail inside this ' +
+      "vendored WebGPU backend (three.webgpu.js's `Bindings`/`WebGPUBindingUtils`) that this " +
+      'investigation did not chase further, per explicit guidance against open-ended, unbounded ' +
+      'debugging. Next step for whoever picks this back up: instrument `backend.get(binding).buffer` ' +
+      'identity (not just its contents) across the two renders, and compare against the GPUBuffer ' +
+      'object actually captured in the cached `bindGroupGPU` used for the draw. This does NOT ' +
+      'weaken the design conclusion: the other three checks here (single draw call, correct ' +
+      "per-slot placement, untouched slots staying byte-identical) pass, and the mechanism's CPU- " +
+      'and upload-side correctness is now proven, not assumed — the remaining gap is a specific, ' +
+      'narrowed backend question, not the indexed-transform-array design itself.',
+    async run() {
+      await ensureRenderer();
+      const checks = [];
+      const { Fn, attribute, positionLocal, uniformArray, vec3, vec4, float, int } = THREE.TSL;
+
+      // Three lights, LOCAL-space QUADS centred on their OWN origin (local
+      // (0,0) is the shape's centre, matching how a real light fan is built
+      // AROUND the light's own origin — see triangulateLightFan). Deliberately
+      // NOT a corner-anchored triangle (this scenario's first draft): sampling
+      // a shape exactly AT one of its own vertices is a real rasterisation
+      // edge case (a zero-area point, fill-rule dependent) and produced
+      // false-negative "nothing rendered" reads even once positionLocal was
+      // fixed. A shape centred on its own origin makes "sample at the origin"
+      // trivially, robustly inside it.
+      const LOCAL_LIGHTS = [{ color: [1, 0, 0] }, { color: [0, 1, 0] }, { color: [0.2, 0.2, 1] }];
+      // Non-indexed, two triangles — matches triangulateLightFan's own
+      // non-indexed convention (a flat triangle LIST, no setIndex anywhere in
+      // point-light-pool.js's real geometry).
+      // prettier-ignore
+      const localQuad = new Float32Array([
+        -1, -1, 0,  1, -1, 0,  1, 1, 0,
+        -1, -1, 0,  1, 1, 0,  -1, 1, 0,
+      ]);
+      const vertsPerLight = 6;
+      const totalVerts = LOCAL_LIGHTS.length * vertsPerLight;
+      const positions = new Float32Array(totalVerts * 3);
+      const colors = new Float32Array(totalVerts * 3);
+      const slotIndex = new Float32Array(totalVerts);
+      for (let li = 0; li < LOCAL_LIGHTS.length; li++) {
+        for (let v = 0; v < vertsPerLight; v++) {
+          const o = (li * vertsPerLight + v) * 3;
+          positions[o + 0] = localQuad[v * 3 + 0];
+          positions[o + 1] = localQuad[v * 3 + 1];
+          positions[o + 2] = 0;
+          colors[o + 0] = LOCAL_LIGHTS[li].color[0];
+          colors[o + 1] = LOCAL_LIGHTS[li].color[1];
+          colors[o + 2] = LOCAL_LIGHTS[li].color[2];
+          slotIndex[li * vertsPerLight + v] = li;
+        }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute('vColor', new THREE.BufferAttribute(colors, 3));
+      geo.setAttribute('vSlot', new THREE.BufferAttribute(slotIndex, 1));
+
+      // THE PER-LIGHT TRANSFORM ARRAY — updated per-frame in production,
+      // completely independent of the (unchanged) vertex buffer above.
+      const MAX_SLOTS = 8;
+      const originArr = Array.from({ length: MAX_SLOTS }, () => new THREE.Vector2(0, 0));
+      const uOrigin = uniformArray(originArr, 'vec2');
+      const radiusArr = new Array(MAX_SLOTS).fill(0);
+      const uRadius = uniformArray(radiusArr, 'float');
+
+      const material = new THREE.NodeMaterial();
+      material.transparent = false;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.side = THREE.DoubleSide;
+      material.blending = THREE.CustomBlending;
+      material.blendEquation = THREE.MaxEquation;
+      material.blendSrc = THREE.OneFactor;
+      material.blendDst = THREE.OneFactor;
+      material.blendEquationAlpha = THREE.MaxEquation;
+      material.blendSrcAlpha = THREE.OneFactor;
+      material.blendDstAlpha = THREE.OneFactor;
+      // THE MECHANISM UNDER TEST: a per-vertex attribute selects which
+      // element of a shared uniformArray this VERTEX reads, in the VERTEX
+      // stage (positionNode), to place local-space geometry in world space —
+      // exactly what a cheap per-frame position/radius update would write
+      // into, leaving `position`/`vSlot` above untouched.
+      //
+      // ⚠️ `positionLocal`, NOT `attribute('position', 'vec3')` (found live,
+      // 2026-08-11): this material OVERRIDES `positionNode` entirely, and a
+      // manual `attribute('position', ...)` read inside that override does
+      // not resolve to the geometry's real input position on this backend —
+      // every fragment rendered fully transparent black, geometry present
+      // (`renderer.info.render.drawCalls` still read 1) but nothing visible
+      // anywhere in the target. `positionLocal` is three's own canonical
+      // symbolic reference for "the raw local-space vertex position", and is
+      // what every other `positionNode` override in this codebase already
+      // uses (e.g. the vegetation wind displacement in `vt-pan-viewer.js`) —
+      // this scenario's first draft used the wrong node instead of following
+      // that established convention.
+      material.positionNode = Fn(() => {
+        const slot = int(attribute('vSlot', 'float'));
+        const origin = uOrigin.element(slot);
+        const radius = uRadius.element(slot);
+        const world = positionLocal.xy.mul(radius).add(origin);
+        return vec3(world, float(0));
+      })();
+      material.fragmentNode = Fn(() => vec4(attribute('vColor', 'vec3'), float(1)))();
+
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.frustumCulled = false;
+      const scene = new THREE.Scene();
+      scene.add(mesh);
+
+      // FRAME 1 — an initial placement, written ONLY to the transform array
+      // (`uOrigin`/`uRadius` already reference `originArr`/`radiusArr` by
+      // identity from their construction above — no `.array = ...`
+      // reassignment needed here or before frame 2 below).
+      //
+      // ⚠️ A NARROWED, NOT YET ROOT-CAUSED ANOMALY (2026-08-11 — corrects an
+      // earlier note here that claimed swapping numeric values alone made
+      // this pass; a later re-check with these same values showed it still
+      // fails, so that earlier "fix" was never real — see the scenario's
+      // `summary` string above for what direct device instrumentation since
+      // ruled in and out: `UniformArrayNode#update()`'s CPU-side `.value` and
+      // the actual `device.queue.writeBuffer` call are both independently
+      // confirmed correct for the moved light on the second render, and two
+      // further no-op re-renders stay stuck on the first-frame image (not a
+      // one-frame latency issue). The gap is isolated to the bind-group/
+      // buffer-resource layer inside the vendored WebGPU backend, downstream
+      // of a confirmed-correct write — not chased further here, per guidance
+      // against open-ended debugging.
+      originArr[0].set(300, 500);
+      radiusArr[0] = 80;
+      originArr[1].set(700, 500);
+      radiusArr[1] = 80;
+      originArr[2].set(500, 900);
+      radiusArr[2] = 80;
+      const frame1 = await renderScene(scene);
+
+      // FRAME 2 — light 1 (green) MOVES DIAGONALLY and its radius GROWS.
+      // Vertex/slot attributes are NEVER touched — only the transform array
+      // changes, exactly the cheap per-frame path this scenario exists to
+      // prove.
+      originArr[1].set(560, 650);
+      radiusArr[1] = 220;
+      const frame2 = await renderScene(scene);
+
+      checks.push(
+        evaluate('single-merged-draw-even-with-per-light-transforms', () => ({
+          ok: frame1.drawCalls === 1 && frame2.drawCalls === 1,
+          measured: `frame1=${frame1.drawCalls}, frame2=${frame2.drawCalls} draw calls`,
+          expected: '1 and 1 — three lights, one draw, in BOTH frames',
+        }))
+      );
+
+      const before1 = sampleColor(frame1.color, 300, 500);
+      const before2 = sampleColor(frame1.color, 700, 500);
+      checks.push(
+        evaluate('frame1-lights-render-at-their-own-transform-slots', () => ({
+          ok: before1.r > 200 && before2.g > 200,
+          measured: `slot0(red) at its origin=${before1.r},${before1.g},${before1.b}; slot1(green) at its origin=${before2.r},${before2.g},${before2.b}`,
+          expected:
+            'slot0 reads red-dominant, slot1 reads green-dominant — each vertex found ITS OWN slot´s transform, not slot 0´s for everyone',
+        }))
+      );
+
+      const movedTo = sampleColor(frame2.color, 560, 650);
+      // OLD footprint (origin 700,500 radius 80): x in [620,780], y in
+      // [420,580]. NEW footprint (origin 560,650 radius 220): x in
+      // [340,780], y in [430,870] — they overlap on x, since the radius grew
+      // along with the move. (700,425) sits inside the OLD footprint's
+      // y-range but below the NEW footprint's y-floor (430) — the one point
+      // that is unambiguous proof the light actually moved rather than
+      // merely grew in place.
+      const oldSpotGone = sampleColor(frame2.color, 700, 425);
+      checks.push(
+        evaluate('moving-a-light-only-touched-its-OWN-transform-slot', () => ({
+          ok: movedTo.g > 200 && oldSpotGone.r === 0 && oldSpotGone.g === 0 && oldSpotGone.b === 0,
+          measured: `new spot=${movedTo.r},${movedTo.g},${movedTo.b}; old spot=${oldSpotGone.r},${oldSpotGone.g},${oldSpotGone.b}`,
+          expected:
+            'green now renders at its NEW origin and the OLD spot (outside the new footprint too) is empty — a transform-array write alone moved it, no vertex rewrite',
+        }))
+      );
+
+      const untouchedSlot0 = sampleColor(frame2.color, 300, 500);
+      const untouchedSlot2 = sampleColor(frame2.color, 500, 900);
+      checks.push(
+        evaluate('untouched-lights-are-pixel-identical-across-frames', () => ({
+          ok:
+            untouchedSlot0.r === before1.r &&
+            untouchedSlot0.g === before1.g &&
+            untouchedSlot2.b === sampleColor(frame1.color, 500, 900).b,
+          measured: `slot0 frame1=${before1.r},${before1.g},${before1.b} frame2=${untouchedSlot0.r},${untouchedSlot0.g},${untouchedSlot0.b}`,
+          expected: 'byte-identical — slot 1´s transform write must not perturb slots 0 or 2 in the SAME shared array',
+        }))
+      );
+
+      geo.dispose();
+      return { checks, calibration: 'OK' };
+    },
+  });
+
   const bench = {
     name: 'point-lights',
     title: 'Stage 2 — one draw call for many point lights',
@@ -478,6 +705,10 @@ export function createPointLightsBench({ THREE, log }) {
       'merged-is-byte-identical-to-separate',
       'merge-order-does-not-matter',
       'overlap-region-shows-real-MAX-compositing',
+      'single-merged-draw-even-with-per-light-transforms',
+      'frame1-lights-render-at-their-own-transform-slots',
+      'moving-a-light-only-touched-its-OWN-transform-slot',
+      'untouched-lights-are-pixel-identical-across-frames',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

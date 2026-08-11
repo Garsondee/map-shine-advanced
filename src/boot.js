@@ -144,6 +144,8 @@ import {
   setVtPanViewerDebugFirstRenderProbe,
   setVtPanViewerDebugForceMaskNodeOff,
   setVtPanViewerDebugForceOpaqueBlendOff,
+  setVtPanViewerShaderRebuildProbe,
+  getVtPanViewerShaderRebuilds,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
   setVtPanViewerPointLightBatching,
@@ -527,6 +529,10 @@ MapShine.armWindProbe = runInteractiveVtPanViewerWindProbe;
 MapShine.setDebugFirstRenderProbe = setVtPanViewerDebugFirstRenderProbe;
 MapShine.setDebugForceMaskNodeOff = setVtPanViewerDebugForceMaskNodeOff;
 MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
+// SHADER-REBUILD PROBE — arm, pan, read. See setVtPanViewerShaderRebuildProbe's
+// own doc in vt-pan-viewer.js for the console workflow.
+MapShine.setShaderRebuildProbe = setVtPanViewerShaderRebuildProbe;
+MapShine.getShaderRebuilds = getVtPanViewerShaderRebuilds;
 // STAGE 1's revert flag — "shade every pixel once"
 // (docs/planning/Stage-1-Shade-Once.md). Default OFF until its pixel-diff and
 // bench gates pass; kept afterwards as the permanent revert (Testament Law 5).

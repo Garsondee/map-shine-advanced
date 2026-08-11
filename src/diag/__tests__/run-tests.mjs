@@ -23,6 +23,7 @@ import { run as runWindProbe } from './wind-probe.test.mjs';
 import { run as runEffectControls } from './effect-controls.test.mjs';
 import { run as runSettingsPanel } from './settings-panel.test.mjs';
 import { run as runRenderFallback } from './render-fallback.test.mjs';
+import { run as runShaderRebuildProbe } from './shader-rebuild-probe.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -60,6 +61,7 @@ const suites = [
   ['effect-controls', runEffectControls],
   ['settings-panel', runSettingsPanel],
   ['render-fallback', runRenderFallback],
+  ['shader-rebuild-probe', runShaderRebuildProbe],
 ];
 
 for (const [name, fn] of suites) {

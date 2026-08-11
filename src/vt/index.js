@@ -61,6 +61,10 @@ export {
   setVtPanViewerDebugFirstRenderProbe,
   setVtPanViewerDebugForceMaskNodeOff,
   setVtPanViewerDebugForceOpaqueBlendOff,
+  // SHADER-REBUILD PROBE (diag/shader-rebuild-probe.js) — which material
+  // re-runs three's TSL node-graph build, and why.
+  setVtPanViewerShaderRebuildProbe,
+  getVtPanViewerShaderRebuilds,
   // STAGE 1's revert flag (docs/planning/Stage-1-Shade-Once.md).
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,

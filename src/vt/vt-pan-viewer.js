@@ -141,6 +141,7 @@ import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orien
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
+import { createShaderRebuildProbe } from '../diag/shader-rebuild-probe.js';
 import { resolveElevationFloorIndex, compareLayerKeys } from '../scene/layer-order.js';
 // THE ZONE'S ONE DOOR (zones/one-door) — unlike the layer-order/world-quad/
 // occlusion imports just above and below (pre-existing, tolerated debt at
@@ -9473,6 +9474,22 @@ export async function startVtPanViewer({
       : null;
 
     /**
+     * SHADER-REBUILD PROBE (diag/shader-rebuild-probe.js, 2026-08-11) — which
+     * material is re-running three's TSL node-graph build every frame, and
+     * whether the cause is a NEW material object or the SAME material with
+     * rebuilt nodes. Constructed here for the same reason as the GPU zone
+     * timer one line up (it needs the `renderer` this closure owns), and OFF
+     * until armed: it wraps `getForRender` on the hot path, so it must cost
+     * exactly nothing for a real player.
+     *
+     * Three Chrome traces showed 40-67% of a frame inside `NodeBuilder.build()`
+     * and four separate hypotheses about the cause were tested and killed —
+     * see the probe module's own header for the list. This exists so the fifth
+     * question is answered by measurement rather than another guess.
+     */
+    let shaderRebuildProbe = null;
+
+    /**
      * ZONE INDICES, RESOLVED ONCE. Every id below is declared in
      * `diag/perf-zones.js` and cross-checked against the live pass graph by its
      * Node suite, so a typo here becomes `-1` — which every begin/end treats as a
@@ -12861,6 +12878,46 @@ export async function startVtPanViewer({
       getGpuZoneStatus() {
         return gpuZoneTimer ? gpuZoneTimer.getStatus() : { method: 'none', capable: false, reason: 'no profiler seam' };
       },
+      /**
+       * SHADER-REBUILD PROBE arm/disarm (diag/shader-rebuild-probe.js).
+       * Lazily constructed on first arm so an unarmed session never even
+       * builds the object, and hard-required to find `renderer._nodes` —
+       * a probe that silently reported zero rebuilds forever would be worse
+       * than no probe at all ([[feedback_instruments_must_not_lie]]).
+       */
+      setShaderRebuildProbe(on) {
+        if (!on) {
+          if (!shaderRebuildProbe) return { armed: false };
+          shaderRebuildProbe.uninstall();
+          return { armed: false, ...shaderRebuildProbe.stats() };
+        }
+        if (!shaderRebuildProbe) {
+          const nodes = renderer?._nodes ?? null;
+          if (!nodes) {
+            return {
+              armed: false,
+              skipped: true,
+              reason:
+                "renderer._nodes is not present — three's internal layout changed and this probe needs rewiring. " +
+                'Reporting the skip rather than arming a probe that would count nothing.',
+            };
+          }
+          try {
+            shaderRebuildProbe = createShaderRebuildProbe({ nodes });
+          } catch (err) {
+            return { armed: false, skipped: true, reason: String(err?.message ?? err) };
+          }
+        }
+        shaderRebuildProbe.reset();
+        shaderRebuildProbe.install();
+        return { armed: true };
+      },
+      /** Perf profile: what the shader-rebuild probe has seen so far. */
+      getShaderRebuildStats() {
+        return shaderRebuildProbe
+          ? shaderRebuildProbe.stats()
+          : { installed: false, calls: 0, hits: 0, misses: 0, labels: [], note: 'probe never armed this session' };
+      },
       /** Perf profile: renderer.info counters, for per-zone draw-call deltas. */
       readRenderInfo() {
         const size = renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -15261,6 +15318,27 @@ export function setVtPanViewerDebugForceOpaqueBlendOff(on) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   _active.setDebugForceOpaqueBlendOff(on);
   return { armed: !!on };
+}
+
+/**
+ * SHADER-REBUILD PROBE (diag/shader-rebuild-probe.js) — arm, pan, read.
+ * Answers "which material re-runs three's TSL node-graph build every frame,
+ * and is the cause a NEW material object or the SAME one with rebuilt nodes?"
+ * Those two need opposite fixes; see the probe module's own header.
+ *
+ * Usage, from the console:
+ *   MapShine.setShaderRebuildProbe(true)   // arm + reset
+ *   ...pan the camera for a few seconds...
+ *   MapShine.getShaderRebuilds()           // read labels[], worst first
+ *   MapShine.setShaderRebuildProbe(false)  // disarm (wraps a hot-path call)
+ */
+export function setVtPanViewerShaderRebuildProbe(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setShaderRebuildProbe(on);
+}
+export function getVtPanViewerShaderRebuilds() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getShaderRebuildStats();
 }
 
 /**

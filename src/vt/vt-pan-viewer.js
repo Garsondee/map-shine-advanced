@@ -6408,6 +6408,20 @@ export async function startVtPanViewer({
     // depthProxyEntries or depthPrepassEntries, and disposeSceneDepth()
     // below tears down both together.
     const depthProxyMaterialPool = createDepthProxyMaterialPool();
+    /**
+     * VEGETATION PROXY POSITION NODES, cached per overlay motion bag — see
+     * `rebuildSceneDepthProxies`'s vegetation branch for the full account of
+     * the bug this closes and why the key is the motion bag rather than the
+     * item id.
+     *
+     * A WeakMap, deliberately: an overlay that is rebuilt (or a scene that is
+     * torn down) drops its motion bag, and the cached node graph becomes
+     * collectable with it — no eviction pass to write, and no way for a stale
+     * entry to be found by a live lookup. `vegetationProxyNodeSeq` only ever
+     * increases, so an id is never reused by a later, different node.
+     */
+    const vegetationProxyNodeCache = new WeakMap();
+    let vegetationProxyNodeSeq = 0;
 
     // ── WATER TIER 0: the surface (effects/water/water-surface-subsystem.js)
     // Constructed HERE, after `scene` — that module owns the mesh, the
@@ -10526,13 +10540,56 @@ export async function startVtPanViewer({
           // populated from this same `VEGETATION_KINDS` table by
           // `buildVegetationDepthItems`.
           const vegKind = VEGETATION_KINDS.find((k) => k.id === item.vegKindId);
-          let positionNode;
-          if (vegKind && overlay.motion) {
+          // THE POSITION NODE IS NOW CACHED PER OVERLAY, NOT REBUILT PER PASS
+          // (2026-08-11 — the fix for the finding this file's own git history
+          // calls the shader-rebuild investigation; full account in
+          // `docs/planning/Shader-Rebuild-Investigation-2026-08-11.md`).
+          //
+          // WHAT WAS WRONG. This branch used to build a fresh `positionNode`
+          // closure AND a fresh `buildSceneDepthWriterMaterial(...)` on every
+          // pass, and `rebuildSceneDepthProxies` runs EVERY FRAME while the
+          // camera moves (`depth.proxyRebuild`, occurrenceRate 1.0 across a
+          // real 463-frame capture). A TSL node's cache key is its INSTANCE ID
+          // (`Node.customCacheKey()` returns `this.id`, three.webgpu.js:32525),
+          // so a rebuilt graph — even a byte-identical one — misses three's
+          // `nodeBuilderCache` and pays a full `NodeBuilder.build()` on the
+          // next render. Live-measured with `diag/shader-rebuild-probe.js`:
+          // 763 of 765 rebuilds were `materialChanged`, 512+ distinct cache
+          // keys, against a flat `renderer.info.programs` (which is this bug's
+          // signature, not its absence — three caches pipelines by generated
+          // SOURCE, so a regenerated-identical graph allocates no program
+          // while still paying to be regenerated).
+          //
+          // WHY THE ORIGINAL EXCLUSION LOOKED SAFE AND WASN'T. It was justified
+          // by "0.9% of the total rebuild cost" — but that measured the cost of
+          // CONSTRUCTING the material inside this residency zone, which really
+          // is cheap. It did not measure the consequence one pass later, in a
+          // different zone, where the graph rebuild actually lands. That is the
+          // exact "a small zone timing hides a large downstream cost" trap
+          // `docs/planning/Residency-Streaming-Audit-2026-08-11.md` names in
+          // its own §6, walked into by the very change that audit accompanied.
+          //
+          // KEYED ON `overlay.motion`, NOT ON THE ITEM. The node closes over
+          // that bag BY REFERENCE (see `buildVegetationSwayDisplacementNode`),
+          // so it stays live without rebuilding — but if the overlay is ever
+          // rebuilt with a NEW motion bag, a cached node would animate from the
+          // dead one. A WeakMap keyed on the bag itself makes that impossible:
+          // a new bag cannot find an old entry, and the old entry becomes
+          // collectable with the bag. `nodeSeq` then gives each surviving node
+          // a stable id for the pool's `variantKey`, so two canopies can never
+          // share a pooled material (the pool now THROWS on a positionNode with
+          // no variantKey rather than aliasing them).
+          //
+          // The scene-rect uniforms are UPDATED in place rather than rebuilt,
+          // for the same reason the node is: rebuilding them would defeat the
+          // whole fix, and `uniform()` values are writable by design.
+          let nodeEntry = overlay.motion ? vegetationProxyNodeCache.get(overlay.motion) : null;
+          if (vegKind && overlay.motion && !nodeEntry) {
             const { Fn, uniform, vec2, vec3, float, positionLocal } = THREE.TSL;
             const sceneRect = dimensions.sceneRect;
             const sceneMin = uniform(vec2(sceneRect.x, sceneRect.y));
             const sceneSize = uniform(vec2(Math.max(1, sceneRect.width), Math.max(1, sceneRect.height)));
-            positionNode = Fn(() => {
+            const positionNode = Fn(() => {
               const displace = buildVegetationSwayDisplacementNode({
                 motion: overlay.motion,
                 kindSwayMul: float(vegKind.swayMultiplier),
@@ -10541,6 +10598,12 @@ export async function startVtPanViewer({
               });
               return positionLocal.add(vec3(displace.x, displace.y, float(0)));
             })();
+            nodeEntry = { id: ++vegetationProxyNodeSeq, positionNode, sceneMin, sceneSize };
+            vegetationProxyNodeCache.set(overlay.motion, nodeEntry);
+          } else if (nodeEntry) {
+            const sceneRect = dimensions.sceneRect;
+            nodeEntry.sceneMin.value.set(sceneRect.x, sceneRect.y);
+            nodeEntry.sceneSize.value.set(Math.max(1, sceneRect.width), Math.max(1, sceneRect.height));
           }
           const writerArgs = {
             THREE,
@@ -10548,23 +10611,25 @@ export async function startVtPanViewer({
             alphaThreshold: 0.75,
             floorIndex,
             flags: 0,
-            positionNode,
+            positionNode: nodeEntry?.positionNode,
+            // Distinguishes THIS canopy's node graph from every other one —
+            // required by the pool whenever a positionNode is present.
+            variantKey: nodeEntry ? `veg:${nodeEntry.id}` : undefined,
           };
-          // NOT pooled — deliberately (see depth-proxy-material-pool.js's own
-          // header): this closure's positionNode is fresh every call, over a
-          // live per-overlay motion reference, and pooling it correctly would
-          // mean restructuring this branch to check the pool BEFORE building
-          // the closure. Measured cost of leaving it unpooled: 0.9% of the
-          // total rebuild cost the pool exists to cut — real upside left on
-          // the table on purpose, not missed.
-          const material = buildSceneDepthWriterMaterial(writerArgs);
+          const material = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(writerArgs), () =>
+            buildSceneDepthWriterMaterial(writerArgs)
+          );
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: overlay.geometry, material, z });
           depthScene.add(mesh);
-          depthProxyEntries.push({ mesh, material, pooled: false });
+          depthProxyEntries.push({ mesh, material, pooled: true });
           // The canopy's own alpha-tested silhouette must occlude in the
           // prepass exactly as it already does through `maskNode` today —
-          // otherwise floor interiors would draw THROUGH solid canopy.
-          addDepthPrepassTwin(writerArgs, overlay.geometry, z);
+          // otherwise floor interiors would draw THROUGH solid canopy. Pooled
+          // too now: the twin shares this same cached positionNode (the
+          // prepass and the real proxy MUST animate identically, or the canopy
+          // would occlude where it is not drawn — see
+          // `feedback_depth_proxy_needs_the_same_animation`).
+          addDepthPrepassTwin(writerArgs, overlay.geometry, z, true);
           continue;
         }
         const state = itemStates.get(item.id);

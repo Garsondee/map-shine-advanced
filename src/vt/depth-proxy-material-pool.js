@@ -82,9 +82,17 @@
  * @param {number} args.floorIndex
  * @param {number} args.flags
  * @param {boolean} [args.alwaysOpaque]
- * @param {*} [args.positionNode] - presence only; see this module's own
- *   header for why a positionNode-bearing call is deliberately never pooled
- *   in practice, and why the signature still accounts for it defensively.
+ * @param {*} [args.positionNode] - presence only. PRESENCE IS NOT IDENTITY:
+ *   two different canopies both carry a positionNode, and their nodes animate
+ *   DIFFERENT items. A caller passing a positionNode must therefore also pass
+ *   a `variantKey` that distinguishes it, or two canopies would share one
+ *   pooled material and one of them would sway to the other's wind. That
+ *   requirement is enforced below (this function throws rather than returning
+ *   a silently-aliasing key) — see `variantKey`.
+ * @param {string} [args.variantKey] - REQUIRED whenever `positionNode` is
+ *   present; ignored otherwise. Anything stable that identifies which item's
+ *   node graph this is (the caller's own per-overlay id). Folded into the key
+ *   so two positionNode-bearing materials can never collide.
  * @param {boolean} [args.colorWrite] - `false` for S1.4's prepass twin,
  *   otherwise the real proxy — MUST differentiate the key: two materials
  *   that differ only in `colorWrite` are not interchangeable (one paints the
@@ -100,15 +108,31 @@ export function computeDepthProxyMaterialSignature({
   flags,
   alwaysOpaque = false,
   positionNode,
+  variantKey,
   colorWrite = true,
 }) {
   const cw = colorWrite === false ? 0 : 1;
-  const hasPos = positionNode ? 1 : 0;
+  // FAIL LOUD RATHER THAN ALIAS (2026-08-11). The original version folded only
+  // the PRESENCE of a positionNode into the key, which was safe ONLY because
+  // the one caller that had one never used this pool. Now that it
+  // does, presence-only would map every canopy to a single shared entry and
+  // animate them all from whichever overlay happened to build first — a wrong
+  // -picture bug that no test of THIS module would catch, because the aliasing
+  // is only visible on screen. A required, explicit id is what makes that
+  // class of bug unrepresentable instead of merely unlikely.
+  if (positionNode && !variantKey) {
+    throw new Error(
+      'computeDepthProxyMaterialSignature: a positionNode-bearing material MUST also pass a variantKey. ' +
+        'Without one, two different canopies would share a pooled material and sway to the wrong item’s ' +
+        'wind — silent, on-screen-only, and invisible to this module’s own tests.'
+    );
+  }
+  const pos = positionNode ? `pos:${variantKey}` : 'nopos';
   if (alwaysOpaque || !tex) {
-    return `opaque|${floorIndex}|${flags}|${cw}|${hasPos}`;
+    return `opaque|${floorIndex}|${flags}|${cw}|${pos}`;
   }
   const texId = tex.uuid ?? String(tex.id ?? 'notex');
-  return `alpha|${texId}|${floorIndex}|${flags}|${alphaThreshold}|${cw}|${hasPos}`;
+  return `alpha|${texId}|${floorIndex}|${flags}|${alphaThreshold}|${cw}|${pos}`;
 }
 
 /**

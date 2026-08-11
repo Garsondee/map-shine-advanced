@@ -91,9 +91,124 @@ export function run(t) {
       })
   );
   t.ok(
-    'signature: a positionNode-bearing call is defensively distinguished from one without',
+    'signature: a positionNode-bearing call is distinguished from one without',
     computeDepthProxyMaterialSignature({ tex: texA, floorIndex: 1, flags: 0, alphaThreshold: 0.75 }) !==
-      computeDepthProxyMaterialSignature({ tex: texA, floorIndex: 1, flags: 0, alphaThreshold: 0.75, positionNode: {} })
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        positionNode: {},
+        variantKey: 'veg:1',
+      })
+  );
+
+  // ── variantKey: the anti-aliasing contract (2026-08-11) ───────────────────
+  // Vegetation canopies now go THROUGH this pool. Each carries its own
+  // positionNode animating its OWN item, so presence-only keying would map
+  // them all to one shared material and sway every canopy to whichever one
+  // built first — a wrong-picture bug visible only on screen. These pin that
+  // the aliasing is impossible to express, not merely unlikely.
+  t.ok(
+    'signature: two canopies with DIFFERENT variantKeys never share a key',
+    computeDepthProxyMaterialSignature({
+      tex: texA,
+      floorIndex: 1,
+      flags: 0,
+      alphaThreshold: 0.75,
+      positionNode: {},
+      variantKey: 'veg:1',
+    }) !==
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        positionNode: {},
+        variantKey: 'veg:2',
+      })
+  );
+  t.ok(
+    'signature: the SAME canopy re-requested across passes gets the SAME key (the whole point of the fix)',
+    computeDepthProxyMaterialSignature({
+      tex: texA,
+      floorIndex: 1,
+      flags: 0,
+      alphaThreshold: 0.75,
+      positionNode: {},
+      variantKey: 'veg:7',
+    }) ===
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        // A DIFFERENT node object — the caller caches it, but even if it did
+        // not, identity of the node must not leak into the key or the pool
+        // could never hit.
+        positionNode: {},
+        variantKey: 'veg:7',
+      })
+  );
+  t.ok(
+    'signature: a canopy and its colorWrite:false prepass twin stay distinct even at the same variantKey',
+    computeDepthProxyMaterialSignature({
+      tex: texA,
+      floorIndex: 1,
+      flags: 0,
+      alphaThreshold: 0.75,
+      positionNode: {},
+      variantKey: 'veg:1',
+    }) !==
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        positionNode: {},
+        variantKey: 'veg:1',
+        colorWrite: false,
+      })
+  );
+  t.ok(
+    'signature: variantKey differentiates on the OPAQUE branch too',
+    computeDepthProxyMaterialSignature({
+      floorIndex: 1,
+      flags: 0,
+      alwaysOpaque: true,
+      positionNode: {},
+      variantKey: 'veg:1',
+    }) !==
+      computeDepthProxyMaterialSignature({
+        floorIndex: 1,
+        flags: 0,
+        alwaysOpaque: true,
+        positionNode: {},
+        variantKey: 'veg:2',
+      })
+  );
+  {
+    // SABOTAGE: a positionNode with no variantKey must THROW, not return a
+    // silently-aliasing key. This is the guard that makes the wrong-picture
+    // bug unrepresentable.
+    let threw = null;
+    try {
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        positionNode: {},
+      });
+    } catch (e) {
+      threw = e;
+    }
+    t.ok('signature: a positionNode with no variantKey throws rather than aliasing', threw !== null);
+    t.ok('...and the message names the real consequence', threw.message.includes('variantKey'));
+  }
+  t.ok(
+    'signature: a call with NO positionNode still needs no variantKey (tiles are unaffected)',
+    typeof computeDepthProxyMaterialSignature({ tex: texA, floorIndex: 1, flags: 0, alphaThreshold: 0.75 }) === 'string'
   );
   t.ok(
     'signature: falls back to tex.id when tex.uuid is absent, never collides with "notex"',

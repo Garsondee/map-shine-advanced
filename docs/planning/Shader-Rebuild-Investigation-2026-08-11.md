@@ -1,6 +1,17 @@
 # The Shader-Rebuild Investigation — 2026-08-11
 
-**Status: cause NARROWED to one mechanism, exact culprit NOT yet named. Instrument built to name it.**
+**Status: CULPRIT NAMED by measurement, and FIXED. Awaiting the author's re-trace to confirm the win.**
+
+> **ANSWER (added after the probe ran).** The author armed the probe, panned, and read:
+> `{calls: 1397, hits: 632, misses: 765, labels: [{label: "Mesh/NodeMaterial", misses: 765,`
+> `materialChanged: 763, nodesChanged: 1, distinctCacheKeys: 512+ (truncated)}]}`
+>
+> **763 of 765 rebuilds were `materialChanged`** — a brand-new material object nearly every time,
+> 512+ distinct cache keys, a **55 % miss rate**. Not node mutation: something was *constructing*
+> fresh materials on the hot path.
+>
+> **It was the vegetation branch of `rebuildSceneDepthProxies` — and it was excluded from the
+> material pool on purpose, by me, one commit earlier.** See §4a. Fixed in the same session.
 
 Opened at the author's direction: *"I think we have a recursive problem. Start a new document. We need
 to work out what is going on here. We need to track down the performance problem causes and get them
@@ -165,6 +176,72 @@ Read `labels[0]`:
 
 ---
 
+## 4a. THE CULPRIT, and the honest account of how it got there
+
+`rebuildSceneDepthProxies`'s **vegetation branch** (`vt/vt-pan-viewer.js`) built, on every pass:
+
+```js
+positionNode = Fn(() => { ...buildVegetationSwayDisplacementNode... })();  // fresh TSL nodes
+const material = buildSceneDepthWriterMaterial(writerArgs);                // fresh material
+depthProxyEntries.push({ mesh, material, pooled: false });
+addDepthPrepassTwin(writerArgs, overlay.geometry, z);                      // pooled defaults FALSE
+```
+
+That is **two fresh materials per canopy per pass** — and `rebuildSceneDepthProxies` runs **every
+frame** while the camera moves (`depth.proxyRebuild`, `occurrenceRate: 1.0` across the 463-frame
+P-008 capture). Fresh nodes ⇒ fresh cache key (§2's keystone) ⇒ guaranteed full `NodeBuilder.build()`
+on the very next render. Which is exactly what all three traces show, in exactly the two render calls
+that render these proxies.
+
+### How it got there — a measurement that measured the wrong thing
+
+This exclusion was deliberate. The comment justifying it read:
+
+> *"Measured cost of leaving it unpooled: 0.9% of the total rebuild cost the pool exists to cut —
+> real upside left on the table on purpose, not missed."*
+
+That 0.9 % was real — and irrelevant. It measured the cost of **constructing** the material, inside
+the residency zone, which genuinely is cheap. It did not measure the **consequence**: one pass later,
+in a *different zone*, three rebuilds the whole node graph because the material it was handed is new.
+
+That is precisely the *"a small zone timing hides a large downstream cost"* trap named in
+`Residency-Streaming-Audit-2026-08-11.md` §6 — written in the same session, by the same author of the
+change, one commit earlier. **Naming a trap is not the same as being immune to it.**
+
+The second half of the mistake was the safety argument: the pool's signature folded in only the
+*presence* of a positionNode, which was safe **only** because no positionNode-bearing caller ever used
+the pool. That made the exclusion self-justifying — it was unsafe to pool *because* the signature
+assumed nothing would.
+
+### The fix (shipped this session)
+
+1. **`computeDepthProxyMaterialSignature` now requires an explicit `variantKey` whenever a
+   `positionNode` is present, and THROWS otherwise.** Presence-only keying would map every canopy to
+   one shared material and sway them all from whichever built first — a wrong-picture bug visible
+   only on screen and invisible to any unit test. The throw makes it unrepresentable rather than
+   unlikely.
+2. **The position node is cached per overlay in a `WeakMap` keyed on `overlay.motion`** — the bag the
+   node closes over by reference. A rebuilt overlay brings a new bag, which cannot find an old entry,
+   so a stale node can never animate a live canopy; the old entry becomes collectable with the bag.
+   A monotonic `id` on each entry supplies the `variantKey`.
+3. **Scene-rect uniforms are updated in place**, not rebuilt — rebuilding them would defeat the fix.
+4. **Both the proxy and its prepass twin are pooled and share the one cached node**, preserving
+   `[[feedback_depth_proxy_needs_the_same_animation]]` (the twin must sway identically or the canopy
+   occludes where it is not drawn).
+
+7 new Node tests pin the `variantKey` contract, including the sabotage case. `npm run verify` green
+at **8,559**.
+
+### What is NOT yet proven
+
+The fix is verified by construction and by unit test, **not yet by a trace**. `nodesChanged: 1` in
+the probe reading is also unexplained — one single miss classified as same-material-new-nodes. One
+occurrence is consistent with an ordinary cold-start artifact, but it is recorded rather than waved
+away. The confirming measurement is the author's: re-arm the probe, pan, and expect `misses` to fall
+to near zero.
+
+---
+
 ## 5. Why this outranks everything else currently queued
 
 Trace #3's frame: 77.8 ms total, ~59 ms of it shader building. Removing it would take that frame to
@@ -182,9 +259,15 @@ miss* — meaning the work is redundant by construction, not inherent.
 
 ## 6. Open items
 
-- **[NEXT] Run the probe and name the culprit.** One pan, one console read.
-- **Then fix it**, by whichever of the two shapes §4 reports.
-- **Re-measure with a trace**, not with `programs` (see §2's warning).
+- ~~Run the probe and name the culprit~~ — **DONE**, see §4a.
+- ~~Fix it~~ — **DONE**, see §4a's fix list.
+- **[NEXT] Confirm the win.** Re-arm the probe, pan, expect `misses` near zero; then a fresh trace
+  to see `NodeBuilder.build()` fall out of the profile. Confirm with a **trace**, never with
+  `programs` (see §2's warning — it was flat throughout the bug and will stay flat after the fix).
+- **[NEXT] Check the canopies still sway**, and sway correctly per-item. The pool's `variantKey`
+  guard makes cross-canopy aliasing unrepresentable, but "the animation still runs at all" is a
+  screen verdict, not a unit test — this touched the node that drives it.
+- The single unexplained `nodesChanged: 1` from the probe reading (§4a).
 - Unresolved from earlier rounds and NOT re-opened here: the 20 worst hitches (250-667 ms) with
   provably idle decode/cache, still unexplained
   (`Residency-Streaming-Audit-2026-08-11.md` §5).

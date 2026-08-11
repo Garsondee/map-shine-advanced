@@ -132,6 +132,26 @@
  * light.visibility work is needed for point-light occlusion specifically,
  * only for the SUN's shadow producers (Light-and-Shadow.md's actual scope).
  *
+ * ============================================================================
+ * S2.1 (2026-08-11) — SPLIT INTO A SHARED CORE + A PER-LIGHT WRAPPER
+ * ============================================================================
+ * `docs/planning/Point-Light-Batching-Design.md` §3.2: `buildIlluminationShadingCore`
+ * (defined just above `buildPointLightIlluminationMaterial`, below) takes
+ * every per-light VALUE this material has ever used as an already-built NODE
+ * (`inputs`), the pool-wide resources unchanged (`shared`), and the graph-
+ * BUILD-time choices that decide what even gets constructed (`flags`) — it
+ * is 100% of the shading arithmetic this file has ever had, relocated
+ * without being rewritten. `buildPointLightIlluminationMaterial` itself
+ * becomes a thin wrapper: create every uniform it has always created, in
+ * the exact same conditions, hand them to the core, assemble the material
+ * from what comes back. This is what lets a future BATCHED caller (S2.4:
+ * `inputs.*` are packed per-vertex attributes instead of per-light
+ * uniforms) reuse the identical formula instead of hand-copying a second
+ * shader — the exact failure mode the design doc's §0 names
+ * (`feedback_mode_forks_silently_drop_features`). `point-light-pool.js` is
+ * unaware of the split: same import, same call, same return shape, same
+ * per-frame `.value` writes.
+ *
  * @module effects/lighting/point-light-illumination
  */
 
@@ -865,7 +885,486 @@ function makeSdPolygonEdgeDistance(TSL) {
 }
 
 /**
- * Build ONE point light's illumination material — fresh `uRatio`/
+ * THE SHADING CORE — every term this material has ever computed, taking
+ * already-built per-light NODES rather than creating any itself. See this
+ * module's own "S2.1" header for why the split exists and what it does and
+ * does not change. `buildPointLightIlluminationMaterial`, below, is the
+ * per-light wrapper that creates the uniforms and calls this.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {object} args.inputs - per-light values, as NODES: `localUnitXY`
+ *   (replaces every `positionLocal.xy` read — the per-light wrapper passes
+ *   `positionLocal.xy` itself; a future batched caller passes a packed
+ *   attribute instead), `ratio`, `attenuationEased`, `exposure`, `edgeCount`,
+ *   `edgeSoftMargin`, `edgePointsUniform`, `expectedDepth`,
+ *   `backgroundColor`/`dimColor`/`brightColor` (the shared ambient triple,
+ *   already per-light-adjusted by the caller), `anim`
+ *   (`{speedRaw, reverseSign, seed, intensityRaw}` or `null` — null means
+ *   this bucket/light has no animation seed, matching `animation?.
+ *   buildIlluminationSeed` being absent), `wind` (`{center, exposure,
+ *   response}` or `null`, opt-in, present only when BOTH `flags.animation`
+ *   builds a seed AND wind was supplied — mirrors the original nested
+ *   condition exactly).
+ * @param {object} args.shared - pool-wide resources: `attrTexNode`,
+ *   `depthTexNode`, `depthFlagsTexNode`, `sunShadowSlotNodes`,
+ *   `blendSunVisibilityAcrossFloors`, `apertureGoboShared`, `uGlobalTimeMs`,
+ *   `windHandle`.
+ * @param {object} args.flags - graph-BUILD-time choices: `animation` (the
+ *   matched registry entry or null), `animationQuality`, `falloffModel`,
+ *   `apertureCount`, `apGoboCols`, `apGoboRows`.
+ * @returns {{finalNode: *, alphaNode: *, backgroundFloor: *,
+ *   combinedFalloff: *, finalColorExposed: *, uApLampHeight: (*|null),
+ *   apApertures: (Array|null)}}
+ */
+export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
+  const { float, vec2, mix, clamp, smoothstep, length, positionWorld, screenUV, select } = THREE.TSL;
+
+  const {
+    attrTexNode,
+    depthTexNode,
+    depthFlagsTexNode,
+    sunShadowSlotNodes,
+    blendSunVisibilityAcrossFloors,
+    apertureGoboShared,
+    uGlobalTimeMs,
+    windHandle,
+  } = shared;
+  const {
+    animation,
+    animationQuality = 0,
+    falloffModel = 'foundry',
+    apertureCount = 0,
+    apGoboCols,
+    apGoboRows,
+  } = flags;
+  const {
+    localUnitXY,
+    ratio: uRatio,
+    attenuationEased: uAttenuationEased,
+    exposure: uExposure,
+    edgeCount: uEdgeCount,
+    edgeSoftMargin: uEdgeSoftMargin,
+    edgePointsUniform,
+    expectedDepth: uLightExpectedDepth,
+    backgroundColor: uBackgroundColor,
+    dimColor: uDimColor,
+    brightColor: uBrightColor,
+    anim,
+    wind: windInputs,
+  } = inputs;
+
+  /**
+   * ============================================================================
+   * ⚠️ `buf:scene.attr` MUST BE SAMPLED WITH `screenUV` HERE. NEVER BARE.
+   * ============================================================================
+   * **This is the 2026-08-03 ROUND-4 fix, and it is the reason rounds 1-3 all
+   * failed on a real scene while every arithmetic trace looked perfect.**
+   *
+   * `attrTexNode` arrives from `environmental-light.js` as a plain
+   * `texture(attrTexture)` — a node with NO uv of its own, so it defaults to
+   * `uv()`, the MESH's own texture coordinate. That is correct for the
+   * environmental pass, which is a FULLSCREEN QUAD where `uv()` spans the
+   * screen. It is meaningless here: a point light draws a WORLD-SPACE fan
+   * whose geometry (`point-light-pool.js#createLightEntry`) sets exactly ONE
+   * attribute, `position` — **there is no `uv` attribute on a light mesh at
+   * all.** Every `attrTexNode.r`/`.b` read in this material was therefore
+   * sampling a constant, identical for every fragment of every light.
+   *
+   * Measured, not reasoned: the `floor-lighting` bench renders this exact
+   * material over a real three-floor building and varies ONLY the attr
+   * buffer. Before this fix its `the-frame-changes-at-all-between-floors`
+   * check reported **0.00% of pixels differ** — a byte-identical frame whether
+   * the fragment sat under a solid slab or under open sky. A gate cannot be
+   * "tuned" out of reading the wrong texel, which is why three rounds of
+   * margin/range/rank corrections downstream all changed nothing visible.
+   *
+   * `buf:scene.attr` is a SCREEN-space buffer (an MRT attachment on
+   * `scene.color`, sized in device px — `vt/scene-attr.js#describeSceneAttrMrt`),
+   * so the fragment's own texel is at `screenUV`. This is the identical
+   * technique the sibling COLORATION material — which shares this very
+   * geometry object — already uses and documents as "this project's own
+   * already-proven technique" (`point-light-coloration.js`, `texture(albedo
+   * Texture, screenUV)`), and which `light-visibility.js` states outright:
+   * *"`screenUV` is target/viewport-relative (not mesh-UV-relative)"*.
+   *
+   * Sampled ONCE and shared by both consumers below (the height gate and the
+   * per-floor sun-shadow blend) rather than sampled twice — one texel fetch,
+   * and no chance of the two disagreeing about where "here" is.
+   */
+  const attrHere = attrTexNode ? attrTexNode.sample(screenUV) : null;
+  // Same `screenUV`-not-bare rule as `attrHere` just above (this material's
+  // mesh carries no `uv` attribute) — see this file's own "STAGE 2" section
+  // for why these two feed the height/elevation gate now instead of `attrHere`.
+  const depthHere = depthTexNode ? depthTexNode.sample(screenUV) : null;
+  const depthFlagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
+
+  // dist: Foundry's own vUvs/dist derivation collapses, in this project's
+  // local-unit-radius space, to exactly this — see this module's header.
+  const localXY = localUnitXY;
+  const dist = length(localXY);
+
+  // switchColor(bright, dim, dist) — TRANSITION, audit §5c. Exposed as a
+  // reusable function of `ratio` (not just the default `uRatio`) so a
+  // flicker/pulse-driven animation can rebuild this SAME band with its own
+  // GPU-jittered ratio — see this function's own header.
+  const computeSwitchColorBand = (ratio) => {
+    const attenuationStrength = uAttenuationEased.mul(float(0.7));
+    const lowerEdge = ratio.mul(float(0.99).sub(attenuationStrength));
+    const upperEdge = clamp(ratio.mul(float(1.01).add(attenuationStrength)), float(0.0001), float(1.0));
+    const t = smoothstep(lowerEdge, upperEdge, dist);
+    return mix(uBrightColor, uDimColor, t);
+  };
+  const defaultSeed = computeSwitchColorBand(uRatio);
+
+  // ANIMATION SEED INJECTION — see this function's own header. Absent
+  // `animation`/`buildIlluminationSeed` (the overwhelming common case, and
+  // every call site before this param existed): finalColor === defaultSeed,
+  // output is unchanged. `skipExposure` is a second, rarer escape hatch:
+  // docs/reference/foundry-v14-light-animations-audit.md's own §4 `pulse`
+  // entry is the ONE Foundry animation (of 27) whose illumination channel
+  // skips `${ADJUSTMENTS}` (== EXPOSURE here) entirely, verified against
+  // source — a JS-time decision (which nodes get BUILT), not a runtime one,
+  // per the `tsl/no-uniform-gates` wall ("tier selection is a JS `if` at
+  // graph-build time — the nodes are never constructed"; a runtime toggle
+  // would still pay for the compiled branch).
+  let finalColor = defaultSeed;
+  let skipExposure = false;
+  if (animation?.buildIlluminationSeed) {
+    const { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw } = anim;
+    const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
+    // SHARED WIND (Wind.md Tier 0) — OPT-IN: built only when the caller
+    // supplies BOTH a world position and a finite exposure (an ordinary,
+    // non-wind-aware Foundry light supplies neither, so it builds nothing
+    // extra and pays nothing extra). `wind` is a vec2 node, sampled ONCE
+    // here — a seed builder wanting it reads `args.wind` directly rather
+    // than calling `sampleWind` itself, so there is exactly one call site
+    // per light, never a per-animation re-derivation of the same field.
+    let wind;
+    let uWindResponse;
+    if (windInputs) {
+      uWindResponse = windInputs.response;
+      wind = windHandle.node(THREE.TSL, {
+        centerXY: windInputs.center,
+        time: uGlobalTimeMs,
+        exposure: windInputs.exposure,
+      });
+    }
+    const seeded = animation.buildIlluminationSeed({
+      THREE,
+      uBrightColor,
+      uDimColor,
+      uRatio,
+      uAttenuationEased,
+      dist,
+      defaultSeed,
+      time,
+      uIntensityRaw,
+      computeSwitchColorBand,
+      quality: animationQuality,
+      wind,
+      windResponse: uWindResponse,
+    });
+    finalColor = seeded.finalColor;
+    skipExposure = seeded.skipExposure === true;
+  }
+
+  // EXPOSURE, audit §8/§18 (`AdaptiveIlluminationShader.EXPOSURE`) — a
+  // luminosity-driven multiplier on the switchColor result, BEFORE falloff.
+  // `uExposure = luminosity*2-1` (computeExposure, computed on the CPU side
+  // per light per frame — the SAME "ease once outside the shader" pattern as
+  // uAttenuationEased). At the default luminosity (0.5) this is exactly 0, a
+  // true no-op — which is why every point light rendered correctly before
+  // this term existed; it only bites when a light's luminosity is tuned away
+  // from default (e.g. the global-illumination floor's OWN default is 0, not
+  // 0.5 — effects/lighting/environmental-light.js#computeGlobalLightFloor
+  // handles that case separately since it isn't a mesh). `select` reproduces
+  // Foundry's `if (exposure>0) {...} else if (exposure!=0) {...}` — the
+  // "else" (exposure exactly 0) branch is folded into the same `<=0` arm
+  // below since `1+exposure` at exposure=0 is already the identity.
+  let finalColorExposed;
+  if (skipExposure) {
+    finalColorExposed = finalColor;
+  } else {
+    const attenuationStrengthExp = uAttenuationEased.mul(float(0.25));
+    const lowerEdgeExp = uRatio.mul(float(0.98).sub(attenuationStrengthExp));
+    const upperEdgeExp = clamp(uRatio.mul(float(1.02).add(attenuationStrengthExp)), float(0.0001), float(1.0));
+    const quartExposure = uExposure.mul(float(0.25));
+    const finalExposurePositive = quartExposure
+      .mul(float(1).sub(smoothstep(lowerEdgeExp, upperEdgeExp, dist)))
+      .add(quartExposure);
+    const exposureFactor = select(
+      uExposure.greaterThan(float(0)),
+      float(1).add(finalExposurePositive),
+      float(1).add(uExposure)
+    );
+    finalColorExposed = finalColor.mul(exposureFactor);
+  }
+
+  // FALLOFF, audit §7 — the AUTHORED attenuation slider's own radial corona,
+  // epsilon-guarded: Foundry branches `if (attenuation != 0.0)` to skip a
+  // degenerate smoothstep(1,1,dist) when attenuation is authored as exactly
+  // 0 (a reachable state — LightData's AlphaField allows it). A branch-free
+  // equivalent: floor attenuation at a tiny epsilon, so the edge case
+  // becomes a razor-thin (not degenerate/undefined) transition instead —
+  // numerically harmless, avoids relying on a shader backend's edge0==edge1
+  // smoothstep behaviour being well-defined.
+  // FALLOFF MODEL (2026-07-20) — a graph-BUILD-time JS branch (never a
+  // uniform, per no-uniform-gates): `foundry` is the default attenuation-
+  // slider corona above; `inverseSquare` is a physical bright-centre/fast-
+  // drop-off curve (candles — see inverseSquareFalloff's own header). The
+  // attenuation slider does not apply to the inverse-square model (its
+  // steepness is INVERSE_SQUARE_STEEPNESS, not the slider).
+  let falloff;
+  if (falloffModel === 'inverseSquare') {
+    falloff = inverseSquareFalloff(THREE.TSL, dist);
+  } else {
+    const attenForFalloff = uAttenuationEased.max(float(0.0001));
+    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  }
+
+  // THE SOFT-EDGE MARGIN — a SEPARATE, constant-width antialiasing term
+  // (see this module's header): signedDist < 0 means inside the true
+  // boundary; -signedDist grows the further inside a fragment sits.
+  // smoothstep(0, margin, -signedDist) is 0 right at/outside the boundary,
+  // 1 once safely past the margin — multiplied into `falloff`, NOT
+  // replacing it, since the two answer different questions.
+  const sdPolygonEdgeDistance = makeSdPolygonEdgeDistance(THREE.TSL);
+  const signedDist = sdPolygonEdgeDistance(vec2(localXY.x, localXY.y), edgePointsUniform, uEdgeCount);
+  const edgeSoftFactor = smoothstep(float(0), uEdgeSoftMargin, signedDist.negate());
+  // STILL DISABLED (2026-07-19) — the "lights read monochrome" report is
+  // CONFIRMED NOT this term (root cause found + fixed elsewhere: point-
+  // light-coloration.js's mesh was drawing for colourless lights, where real
+  // Foundry's `isRequired` gate skips it entirely — see vt-pan-viewer.js's
+  // `colorationMesh.visible = light.hasColor` and foundry/scene-lights.js's
+  // `hasColor` field). BUT wiring `edgeSoftFactor` into `combinedFalloff`
+  // was tried live once (same day) and produced a DIFFERENT, WORSE symptom
+  // — the whole scene went solid black, all 79 active lights included, not
+  // just colourless ones — so something in this Loop/uniformArray/Fn SDF
+  // path is genuinely broken in the browser, not merely dead-code-eliminated
+  // as the earlier bisection worried. Reading the vendored THREE source
+  // (UniformArrayNode#update, updateType RENDER) did not turn up the cause —
+  // it copies array[i].x/.y into its buffer every render call, which looks
+  // correct. Needs a live A/B (screenshot with/without this line) to find
+  // the real defect before it's safe to re-enable. Do NOT flip this back to
+  // `falloff.mul(edgeSoftFactor)` without that live verification first.
+  //
+  // ⚠️ S2.1 (2026-08-11) — LEAVE DISABLED, NOW FOR A SECOND, INDEPENDENT
+  // REASON TOO: `docs/planning/Point-Light-Batching-Design.md`'s Finding B
+  // connects this exact symptom (a `uniformArray` read via a `Loop`, live-
+  // confirmed broken) to a SECOND, unexplained `uniformArray` failure found
+  // in `tools/shader-lab/bench-point-lights.js` (vertex-stage, a different
+  // symptom). Batching's own mechanism of record deliberately avoids
+  // `uniformArray`-indexed reads entirely (design doc §0) — re-enabling this
+  // term is explicitly out of Stage 2's scope regardless of the S2.1 split.
+  let combinedFalloff = falloff;
+  void edgeSoftFactor;
+
+  // ── HEIGHT/ELEVATION GATE (2026-08-03) ───────────────────────────────────
+  // Author: "tiles for the covers of lanterns... should be dark because they
+  // are above the light sources that make them" — and the same question
+  // asked of vegetation (`vt-pan-viewer.js`'s tree/bush overlay, whose own
+  // canopy height rides the SAME channel via its live `treeHeightFt`/
+  // `bushHeightFt` — `vegetation-render.js#vegetationHeightFt` — not its
+  // host tile's elevation).
+  //
+  // SAME SHAPE AS `falloff`/`edgeSoftFactor`, NOT aperture-gobo's deleted
+  // first design (see this file's own note just above for why that one was
+  // removed): this multiplies INTO `combinedFalloff`, so gating it to 0 only
+  // ever fades THIS light's own contribution back to `backgroundFloor` — the
+  // ambient floor MAX-blending already agrees on. It can never darken a
+  // fragment BELOW that floor, which is exactly what a light being too low
+  // to reach a receiver means (no contribution from THIS source, not
+  // "actively dark").
+  //
+  // STAGE 2 (2026-08-04) — RANK, not a floor-relative byte. See this file's
+  // own "STAGE 2 — THE DEPTH-AUTHORITY HEIGHT GATE" section (just above
+  // `buildDepthHeightGateNode`) for the full reasoning and the live pixel-
+  // probe evidence that retired `buf:scene.attr` for this consumer.
+  // `uLightExpectedDepth` has no "unconfigured" sentinel to default to —
+  // `scene/depth-authority.js#rankOfElevation`'s own point is that elevation
+  // 0 (untouched) is already an ordinary, real, comparable rank, so this
+  // starts at 0 (harmless: `point-light-pool.js`'s per-frame refresh
+  // overwrites it before this material ever draws a real frame) rather than
+  // inheriting the old sentinel's meaning.
+  if (depthHere) {
+    combinedFalloff = combinedFalloff.mul(
+      buildDepthHeightGateNode(THREE.TSL, { depthHere, flagsHere: depthFlagsHere, uLightExpectedDepth })
+    );
+  }
+
+  // APERTURE GOBO (docs/planning/Aperture-Gobo.md) used to multiply into
+  // THIS falloff, same family as `edgeSoftFactor` above — REMOVED 2026-08-03,
+  // the same day it shipped, after the first live scene showed why that home
+  // was structurally wrong: this material MAX-blends into `buf:scene.illum`,
+  // and a MAX blend can only ever brighten a fragment above whatever is
+  // already there — a term living INSIDE one light's own falloff can never
+  // darken a spot BELOW ambient, no matter how it's tuned, which is exactly
+  // why the pattern was invisible in daylight and barely visible even at
+  // night. A window's mullion pattern needs to behave like a genuine SHADOW
+  // — darkening the SHARED illumination directly, the same way the sun-
+  // shadow field already does — so it now lives in its own dedicated
+  // MULTIPLY-blended pass (`aperture-gobo-render.js#buildApertureShadowMaterial`,
+  // `point-light-pool.js`'s own `apertureShadowScene`), drawn AFTER point
+  // lights accumulate, not folded into any one light's own material. This
+  // file is deliberately apertures-UNAWARE again.
+
+  // SUN-SHADOW ATTENUATION — see this module's own header for the two failed
+  // per-light attempts and why this has to be per-FRAGMENT. `positionWorld.xy`
+  // is the real fragment world position (the exact node + world-rect mapping
+  // `region-darkness.js` and `environmental-light.js#buildOutdoorsGate`
+  // already use), so the floor is shadowed precisely where the shadow is.
+  //
+  // ⚠️ PER-FLOOR, NOT JUST PER-FRAGMENT (2026-08-02) — a light's own footprint
+  // can straddle a floor gap exactly the same way any other content can (a
+  // torch near a stairwell, or one floor below a hole in the floor above), so
+  // "which slot's field applies" is ALSO a per-fragment question, answered by
+  // the SAME arithmetic blend `environmental-light.js`'s own ambient fill
+  // uses — never a `select()`/branch fold (`feedback_tsl_select_chain_strands_vars`).
+  // Before this a light had NO floor gate at all (unlike the ambient fill,
+  // which has had one since 2026-07-28): every light sampled whichever ONE
+  // field happened to be resident, on every floor, all the time.
+  //
+  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
+  // slots supplied the lookup is absent from the compiled shader entirely and
+  // this material is byte-identical to what it was before cast shadows existed.
+  let backgroundFloor = uBackgroundColor;
+  if (sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
+    // Clamped, never wrapped — a light overhanging a field's edge reads the
+    // nearest edge value rather than a caster from the far side of the map.
+    const sampleSlot = (slot) => {
+      const u = positionWorld.x.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
+      const v = positionWorld.y.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
+      return slot.texNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
+    };
+    // ⚠️ THE FLOOR SOURCE IS `buf:scene.depth`, NOT `buf:scene.attr` (2026-08-05
+    // — the shadow cascade's receiver half). `blendSunVisibilityAcrossFloors`'s
+    // own `attrFloorIndex01` doc has the argument. `depthFlagsHere` is the SAME
+    // `screenUV` sample the depth HEIGHT gate above already takes (STAGE 2,
+    // 2026-08-04) — reused, never re-sampled (memory:
+    // feedback_composite_only_terms_miss_shared_buffers).
+    const shadowFloorHere = depthFlagsHere ?? attrHere;
+    const sunVis =
+      shadowFloorHere && blendSunVisibilityAcrossFloors
+        ? blendSunVisibilityAcrossFloors(THREE.TSL, {
+            attrFloorIndex01: shadowFloorHere.r,
+            presence: depthFlagsHere ? depthFlagsHere.a : null,
+            slots: sunShadowSlotNodes.map((slot) => ({ sunVis: sampleSlot(slot), floorIndex01: slot.uFloorIndex01 })),
+          })
+        : // No floor buffer (or no injected blend fn) to gate by — fall back to
+          // slot 0 alone, the pre-multi-floor behaviour.
+          sampleSlot(sunShadowSlotNodes[0]);
+    backgroundFloor = uBackgroundColor.mul(sunVis);
+  }
+
+  // THE GOBO IS PART OF THIS LIGHT'S OWN FALLOFF (round 10, 2026-08-04) —
+  // NOT a separate pass drawn after this material MAX-blends. Three earlier
+  // rounds this SAME session tried a separate pass (`aperture-gobo-
+  // render.js#buildApertureShadowMaterial`, blend-toward-`backgroundFloor`
+  // on the ALREADY-composited buffer, then a second MULTIPLY pass for
+  // coloration) and both shared the identical, live-confirmed flaw: a live
+  // screenshot with the effect toggled off showed a light's own wedge
+  // crossing a building's own cast shadow with NO extra darkening —
+  // ordinary MAX behaviour. With the separate pass on, the SAME wedge grew
+  // a visibly darker rim, because `mix(backgroundFloor, dst, strengthed)`
+  // at a blocked fragment collapses to EXACTLY `backgroundFloor`, no matter
+  // how `dst` (the ALREADY-fully-composited scene) got to be bright — it
+  // could have been daylight, or a completely unrelated second light, and
+  // this light's own shadow would drag it down regardless. Author, in
+  // response: "parts of the effect which darken should never be able to
+  // survive a direct illumination from any other source. The sun would
+  // remove it and point lights would also remove it... treat the effect as
+  // a type of illumination but carefully mix it into the existing
+  // illumination."
+  //
+  // The fix is exactly that: multiply the gobo term into THIS light's own
+  // `combinedFalloff` BEFORE the mix below, so the material's SINGLE
+  // MAX-blend draw already reflects the pattern — no separate pass, nothing
+  // to drag the shared buffer down after the fact. At a blocked fragment
+  // (goboTerm=0): `mix(backgroundFloor, finalColorExposed, 0) =
+  // backgroundFloor` exactly — THIS light's own "as if I weren't here"
+  // colour — which then MAX-blends against whatever the sun/other lights
+  // already drew. If they were already brighter, MAX keeps THEM, unchanged
+  // — the shadow is invisible there, correctly, with no extra logic. If
+  // nothing else reaches that fragment (a dark room, an alley's own
+  // shadow), `backgroundFloor` becomes the visible result — a real,
+  // correctly-bounded shadow. This is the SAME property the
+  // visibility-gate machinery (rounds 1/2/3/5/6/7/8, `aperture-gobo.js#
+  // computeApertureShadowVisibility`) spent seven rounds trying to
+  // approximate from OUTSIDE the MAX-blend hierarchy — MAX-blending
+  // correctly gives it for free, which is why that machinery is retired
+  // alongside this change (see aperture-gobo.js's own header).
+  //
+  // Graph-BUILD-TIME gate (`apertureCount` is a JS integer, part of the
+  // material rebuild key, never a uniform — `tsl/no-uniform-gates`): a
+  // light with no apertures compiles NONE of this, byte-identical to
+  // before `apertureCount` existed as a param.
+  let combinedFalloffGoboed = combinedFalloff;
+  let uApLampHeight = null;
+  let apApertures = null;
+  if (apertureCount > 0) {
+    const goboResult = buildApertureGoboTerm({
+      THREE,
+      positionWorldXY: positionWorld.xy,
+      dist,
+      apertureCount,
+      cols: apGoboCols,
+      rows: apGoboRows,
+      shared: apertureGoboShared,
+    });
+    if (goboResult) {
+      // `uStrength` — a REAL bug, found live (2026-08-04): this mix was
+      // documented (`aperture-gobo-render.js#createApertureGoboSharedUniforms`'s
+      // own header, "applied by the CALLER... mixes the combined node
+      // toward 1 by 1-uStrength") but never actually WRITTEN — the uniform
+      // was created and updated every frame by `point-light-pool.js`, and
+      // simply never multiplied into anything, so "Pattern strength" did
+      // nothing regardless of its own value. `mix(1, node, uStrength)`:
+      // at uStrength=1 (default), `goboResult.node` passes through
+      // unchanged (byte-identical to before this fix); at 0, the gobo term
+      // is fully neutral (this light renders exactly as if it had no
+      // aperture at all), matching the schema's own documented meaning.
+      const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
+      combinedFalloffGoboed = combinedFalloff.mul(strengthedGobo);
+      uApLampHeight = goboResult.uLampHeight;
+      apApertures = goboResult.apertures;
+    }
+  }
+
+  // FRAGMENT_END (illumination), audit §5c: mix(background, finalColor, depth).
+  const outputColor = mix(backgroundFloor, finalColorExposed, combinedFalloffGoboed);
+
+  return {
+    finalNode: outputColor,
+    alphaNode: float(1),
+    // This light's OWN "no contribution here" colour — `uBackgroundColor`,
+    // already attenuated by per-fragment sun-shadow visibility when slots are
+    // supplied (see "SUN-SHADOW ATTENUATION" above). Also `point-light-
+    // coloration.js`'s own gobo term's blend target — see that module's
+    // header for why coloration needs this same node, not just illum.
+    backgroundFloor,
+    // This light's own radial reach (0 at the dim edge, 1 at full strength),
+    // UNMODULATED by the gobo pattern (that multiply happens locally, just
+    // above, into `combinedFalloffGoboed` — never mutating the value
+    // returned here), and its true unshadowed colour.
+    combinedFalloff,
+    finalColorExposed,
+    // APERTURE GOBO (round 10) — `null` when this light has no apertures.
+    // `point-light-pool.js` writes the real per-aperture geometry into
+    // `apApertures`' own uniforms every frame, the same way it always wrote
+    // `aperture-gobo-render.js#buildApertureShadowMaterial`'s return before
+    // that function stopped owning the main material.
+    uApLampHeight,
+    apApertures,
+  };
+}
+
+/**
+ * Build ONE point light's illumination material — the per-light WRAPPER.
+ * See this module's own "S2.1" header: this function's job is now ONLY to
+ * create the uniforms it has always created (unchanged conditions,
+ * unchanged defaults) and hand them to {@link buildIlluminationShadingCore};
+ * the shading arithmetic itself lives there, not here. Fresh `uRatio`/
  * `uAttenuationEased`/soft-edge uniforms per light (mirrors vt-pan-viewer.js's
  * `buildOcclusionDisc`'s per-instance `uElevation`), referencing THREE
  * SHARED ambient-colour uniforms every light reads (updated once per frame
@@ -1065,67 +1564,7 @@ export function buildPointLightIlluminationMaterial({
   apGoboRows,
   apertureGoboShared,
 }) {
-  const {
-    uniform,
-    uniformArray,
-    float,
-    int,
-    vec2,
-    vec4,
-    mix,
-    clamp,
-    smoothstep,
-    length,
-    positionLocal,
-    positionWorld,
-    screenUV,
-    select,
-  } = THREE.TSL;
-
-  /**
-   * ============================================================================
-   * ⚠️ `buf:scene.attr` MUST BE SAMPLED WITH `screenUV` HERE. NEVER BARE.
-   * ============================================================================
-   * **This is the 2026-08-03 ROUND-4 fix, and it is the reason rounds 1-3 all
-   * failed on a real scene while every arithmetic trace looked perfect.**
-   *
-   * `attrTexNode` arrives from `environmental-light.js` as a plain
-   * `texture(attrTexture)` — a node with NO uv of its own, so it defaults to
-   * `uv()`, the MESH's own texture coordinate. That is correct for the
-   * environmental pass, which is a FULLSCREEN QUAD where `uv()` spans the
-   * screen. It is meaningless here: a point light draws a WORLD-SPACE fan
-   * whose geometry (`point-light-pool.js#createLightEntry`) sets exactly ONE
-   * attribute, `position` — **there is no `uv` attribute on a light mesh at
-   * all.** Every `attrTexNode.r`/`.b` read in this material was therefore
-   * sampling a constant, identical for every fragment of every light.
-   *
-   * Measured, not reasoned: the `floor-lighting` bench renders this exact
-   * material over a real three-floor building and varies ONLY the attr
-   * buffer. Before this fix its `the-frame-changes-at-all-between-floors`
-   * check reported **0.00% of pixels differ** — a byte-identical frame whether
-   * the fragment sat under a solid slab or under open sky. A gate cannot be
-   * "tuned" out of reading the wrong texel, which is why three rounds of
-   * margin/range/rank corrections downstream all changed nothing visible.
-   *
-   * `buf:scene.attr` is a SCREEN-space buffer (an MRT attachment on
-   * `scene.color`, sized in device px — `vt/scene-attr.js#describeSceneAttrMrt`),
-   * so the fragment's own texel is at `screenUV`. This is the identical
-   * technique the sibling COLORATION material — which shares this very
-   * geometry object — already uses and documents as "this project's own
-   * already-proven technique" (`point-light-coloration.js`, `texture(albedo
-   * Texture, screenUV)`), and which `light-visibility.js` states outright:
-   * *"`screenUV` is target/viewport-relative (not mesh-UV-relative)"*.
-   *
-   * Sampled ONCE and shared by both consumers below (the height gate and the
-   * per-floor sun-shadow blend) rather than sampled twice — one texel fetch,
-   * and no chance of the two disagreeing about where "here" is.
-   */
-  const attrHere = attrTexNode ? attrTexNode.sample(screenUV) : null;
-  // Same `screenUV`-not-bare rule as `attrHere` just above (this material's
-  // mesh carries no `uv` attribute) — see this file's own "STAGE 2" section
-  // for why these two feed the height/elevation gate now instead of `attrHere`.
-  const depthHere = depthTexNode ? depthTexNode.sample(screenUV) : null;
-  const depthFlagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
+  const { uniform, uniformArray, float, int, vec2, vec4, positionLocal } = THREE.TSL;
 
   const uRatio = uniform(float(0.5));
   const uAttenuationEased = uniform(float(0.5));
@@ -1141,37 +1580,6 @@ export function buildPointLightIlluminationMaterial({
   const edgePoints = Array.from({ length: MAX_LIGHT_EDGES }, () => new THREE.Vector2(0, 0));
   const edgePointsUniform = uniformArray(edgePoints, 'vec2');
 
-  // dist: Foundry's own vUvs/dist derivation collapses, in this project's
-  // local-unit-radius space, to exactly this — see this module's header.
-  const localXY = positionLocal.xy;
-  const dist = length(localXY);
-
-  // switchColor(bright, dim, dist) — TRANSITION, audit §5c. Exposed as a
-  // reusable function of `ratio` (not just the default `uRatio`) so a
-  // flicker/pulse-driven animation can rebuild this SAME band with its own
-  // GPU-jittered ratio — see this function's own header.
-  const computeSwitchColorBand = (ratio) => {
-    const attenuationStrength = uAttenuationEased.mul(float(0.7));
-    const lowerEdge = ratio.mul(float(0.99).sub(attenuationStrength));
-    const upperEdge = clamp(ratio.mul(float(1.01).add(attenuationStrength)), float(0.0001), float(1.0));
-    const t = smoothstep(lowerEdge, upperEdge, dist);
-    return mix(uBrightColor, uDimColor, t);
-  };
-  const defaultSeed = computeSwitchColorBand(uRatio);
-
-  // ANIMATION SEED INJECTION — see this function's own header. Absent
-  // `animation`/`buildIlluminationSeed` (the overwhelming common case, and
-  // every call site before this param existed): finalColor === defaultSeed,
-  // output is unchanged. `skipExposure` is a second, rarer escape hatch:
-  // docs/reference/foundry-v14-light-animations-audit.md's own §4 `pulse`
-  // entry is the ONE Foundry animation (of 27) whose illumination channel
-  // skips `${ADJUSTMENTS}` (== EXPOSURE here) entirely, verified against
-  // source — a JS-time decision (which nodes get BUILT), not a runtime one,
-  // per the `tsl/no-uniform-gates` wall ("tier selection is a JS `if` at
-  // graph-build time — the nodes are never constructed"; a runtime toggle
-  // would still pay for the compiled branch).
-  let finalColor = defaultSeed;
-  let skipExposure = false;
   let uSpeedRaw = null;
   let uReverseSign = null;
   let uSeed = null;
@@ -1184,15 +1592,8 @@ export function buildPointLightIlluminationMaterial({
     uReverseSign = uniform(float(1));
     uSeed = uniform(float(0));
     uIntensityRaw = uniform(float(5));
-    const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
-    // SHARED WIND (Wind.md Tier 0) — OPT-IN: built only when the caller
-    // supplies BOTH a world position and a finite exposure (an ordinary,
-    // non-wind-aware Foundry light supplies neither, so it builds nothing
-    // extra and pays nothing extra). `wind` is a vec2 node, sampled ONCE
-    // here — a seed builder wanting it reads `args.wind` directly rather
-    // than calling `sampleWind` itself, so there is exactly one call site
-    // per light, never a per-animation re-derivation of the same field.
-    let wind;
+    // SHARED WIND (Wind.md Tier 0) — OPT-IN, see this function's own
+    // `windCenter`/`windExposure` param docs.
     if (Number.isFinite(windExposure)) {
       uWindCenter = uniform(vec2(windCenter?.x ?? 0, windCenter?.y ?? 0));
       uWindExposure = uniform(float(windExposure));
@@ -1201,287 +1602,47 @@ export function buildPointLightIlluminationMaterial({
       // caller carrying wind machinery but not yet passing windResponse
       // still gets today's look, never a silently wind-deaf light.
       uWindResponse = uniform(float(Number.isFinite(windResponse) ? windResponse : 1));
-      wind = windHandle.node(THREE.TSL, {
-        centerXY: uWindCenter,
-        time: uGlobalTimeMs,
-        exposure: uWindExposure,
-      });
     }
-    const seeded = animation.buildIlluminationSeed({
-      THREE,
-      uBrightColor,
-      uDimColor,
-      uRatio,
-      uAttenuationEased,
-      dist,
-      defaultSeed,
-      time,
-      uIntensityRaw,
-      computeSwitchColorBand,
-      quality: animationQuality,
-      wind,
-      windResponse: uWindResponse,
-    });
-    finalColor = seeded.finalColor;
-    skipExposure = seeded.skipExposure === true;
   }
 
-  // EXPOSURE, audit §8/§18 (`AdaptiveIlluminationShader.EXPOSURE`) — a
-  // luminosity-driven multiplier on the switchColor result, BEFORE falloff.
-  // `uExposure = luminosity*2-1` (computeExposure, computed on the CPU side
-  // per light per frame — the SAME "ease once outside the shader" pattern as
-  // uAttenuationEased). At the default luminosity (0.5) this is exactly 0, a
-  // true no-op — which is why every point light rendered correctly before
-  // this term existed; it only bites when a light's luminosity is tuned away
-  // from default (e.g. the global-illumination floor's OWN default is 0, not
-  // 0.5 — effects/lighting/environmental-light.js#computeGlobalLightFloor
-  // handles that case separately since it isn't a mesh). `select` reproduces
-  // Foundry's `if (exposure>0) {...} else if (exposure!=0) {...}` — the
-  // "else" (exposure exactly 0) branch is folded into the same `<=0` arm
-  // below since `1+exposure` at exposure=0 is already the identity.
-  let finalColorExposed;
-  if (skipExposure) {
-    finalColorExposed = finalColor;
-  } else {
-    const attenuationStrengthExp = uAttenuationEased.mul(float(0.25));
-    const lowerEdgeExp = uRatio.mul(float(0.98).sub(attenuationStrengthExp));
-    const upperEdgeExp = clamp(uRatio.mul(float(1.02).add(attenuationStrengthExp)), float(0.0001), float(1.0));
-    const quartExposure = uExposure.mul(float(0.25));
-    const finalExposurePositive = quartExposure
-      .mul(float(1).sub(smoothstep(lowerEdgeExp, upperEdgeExp, dist)))
-      .add(quartExposure);
-    const exposureFactor = select(
-      uExposure.greaterThan(float(0)),
-      float(1).add(finalExposurePositive),
-      float(1).add(uExposure)
-    );
-    finalColorExposed = finalColor.mul(exposureFactor);
-  }
-
-  // FALLOFF, audit §7 — the AUTHORED attenuation slider's own radial corona,
-  // epsilon-guarded: Foundry branches `if (attenuation != 0.0)` to skip a
-  // degenerate smoothstep(1,1,dist) when attenuation is authored as exactly
-  // 0 (a reachable state — LightData's AlphaField allows it). A branch-free
-  // equivalent: floor attenuation at a tiny epsilon, so the edge case
-  // becomes a razor-thin (not degenerate/undefined) transition instead —
-  // numerically harmless, avoids relying on a shader backend's edge0==edge1
-  // smoothstep behaviour being well-defined.
-  // FALLOFF MODEL (2026-07-20) — a graph-BUILD-time JS branch (never a
-  // uniform, per no-uniform-gates): `foundry` is the default attenuation-
-  // slider corona above; `inverseSquare` is a physical bright-centre/fast-
-  // drop-off curve (candles — see inverseSquareFalloff's own header). The
-  // attenuation slider does not apply to the inverse-square model (its
-  // steepness is INVERSE_SQUARE_STEEPNESS, not the slider).
-  let falloff;
-  if (falloffModel === 'inverseSquare') {
-    falloff = inverseSquareFalloff(THREE.TSL, dist);
-  } else {
-    const attenForFalloff = uAttenuationEased.max(float(0.0001));
-    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
-  }
-
-  // THE SOFT-EDGE MARGIN — a SEPARATE, constant-width antialiasing term
-  // (see this module's header): signedDist < 0 means inside the true
-  // boundary; -signedDist grows the further inside a fragment sits.
-  // smoothstep(0, margin, -signedDist) is 0 right at/outside the boundary,
-  // 1 once safely past the margin — multiplied into `falloff`, NOT
-  // replacing it, since the two answer different questions.
-  const sdPolygonEdgeDistance = makeSdPolygonEdgeDistance(THREE.TSL);
-  const signedDist = sdPolygonEdgeDistance(vec2(localXY.x, localXY.y), edgePointsUniform, uEdgeCount);
-  const edgeSoftFactor = smoothstep(float(0), uEdgeSoftMargin, signedDist.negate());
-  // STILL DISABLED (2026-07-19) — the "lights read monochrome" report is
-  // CONFIRMED NOT this term (root cause found + fixed elsewhere: point-
-  // light-coloration.js's mesh was drawing for colourless lights, where real
-  // Foundry's `isRequired` gate skips it entirely — see vt-pan-viewer.js's
-  // `colorationMesh.visible = light.hasColor` and foundry/scene-lights.js's
-  // `hasColor` field). BUT wiring `edgeSoftFactor` into `combinedFalloff`
-  // was tried live once (same day) and produced a DIFFERENT, WORSE symptom
-  // — the whole scene went solid black, all 79 active lights included, not
-  // just colourless ones — so something in this Loop/uniformArray/Fn SDF
-  // path is genuinely broken in the browser, not merely dead-code-eliminated
-  // as the earlier bisection worried. Reading the vendored THREE source
-  // (UniformArrayNode#update, updateType RENDER) did not turn up the cause —
-  // it copies array[i].x/.y into its buffer every render call, which looks
-  // correct. Needs a live A/B (screenshot with/without this line) to find
-  // the real defect before it's safe to re-enable. Do NOT flip this back to
-  // `falloff.mul(edgeSoftFactor)` without that live verification first.
-  let combinedFalloff = falloff;
-  void edgeSoftFactor;
-
-  // ── HEIGHT/ELEVATION GATE (2026-08-03) ───────────────────────────────────
-  // Author: "tiles for the covers of lanterns... should be dark because they
-  // are above the light sources that make them" — and the same question
-  // asked of vegetation (`vt-pan-viewer.js`'s tree/bush overlay, whose own
-  // canopy height rides the SAME channel via its live `treeHeightFt`/
-  // `bushHeightFt` — `vegetation-render.js#vegetationHeightFt` — not its
-  // host tile's elevation).
-  //
-  // SAME SHAPE AS `falloff`/`edgeSoftFactor`, NOT aperture-gobo's deleted
-  // first design (see this file's own note just above for why that one was
-  // removed): this multiplies INTO `combinedFalloff`, so gating it to 0 only
-  // ever fades THIS light's own contribution back to `backgroundFloor` — the
-  // ambient floor MAX-blending already agrees on. It can never darken a
-  // fragment BELOW that floor, which is exactly what a light being too low
-  // to reach a receiver means (no contribution from THIS source, not
-  // "actively dark").
-  //
-  // STAGE 2 (2026-08-04) — RANK, not a floor-relative byte. See this file's
-  // own "STAGE 2 — THE DEPTH-AUTHORITY HEIGHT GATE" section (just above
-  // `buildDepthHeightGateNode`) for the full reasoning and the live pixel-
-  // probe evidence that retired `buf:scene.attr` for this consumer.
-  // `uLightExpectedDepth` has no "unconfigured" sentinel to default to —
-  // `scene/depth-authority.js#rankOfElevation`'s own point is that elevation
-  // 0 (untouched) is already an ordinary, real, comparable rank, so this
-  // starts at 0 (harmless: `point-light-pool.js`'s per-frame refresh
-  // overwrites it before this material ever draws a real frame) rather than
-  // inheriting the old sentinel's meaning.
+  // ── HEIGHT/ELEVATION GATE input — see buildIlluminationShadingCore's own
+  // "STAGE 2" section. `uLightExpectedDepth` has no "unconfigured" sentinel
+  // — starts at 0 (harmless: point-light-pool.js's per-frame refresh
+  // overwrites it before this material ever draws a real frame).
   const uLightExpectedDepth = uniform(float(0));
-  if (depthHere) {
-    combinedFalloff = combinedFalloff.mul(
-      buildDepthHeightGateNode(THREE.TSL, { depthHere, flagsHere: depthFlagsHere, uLightExpectedDepth })
-    );
-  }
 
-  // APERTURE GOBO (docs/planning/Aperture-Gobo.md) used to multiply into
-  // THIS falloff, same family as `edgeSoftFactor` above — REMOVED 2026-08-03,
-  // the same day it shipped, after the first live scene showed why that home
-  // was structurally wrong: this material MAX-blends into `buf:scene.illum`,
-  // and a MAX blend can only ever brighten a fragment above whatever is
-  // already there — a term living INSIDE one light's own falloff can never
-  // darken a spot BELOW ambient, no matter how it's tuned, which is exactly
-  // why the pattern was invisible in daylight and barely visible even at
-  // night. A window's mullion pattern needs to behave like a genuine SHADOW
-  // — darkening the SHARED illumination directly, the same way the sun-
-  // shadow field already does — so it now lives in its own dedicated
-  // MULTIPLY-blended pass (`aperture-gobo-render.js#buildApertureShadowMaterial`,
-  // `point-light-pool.js`'s own `apertureShadowScene`), drawn AFTER point
-  // lights accumulate, not folded into any one light's own material. This
-  // file is deliberately apertures-UNAWARE again.
-
-  // SUN-SHADOW ATTENUATION — see this module's own header for the two failed
-  // per-light attempts and why this has to be per-FRAGMENT. `positionWorld.xy`
-  // is the real fragment world position (the exact node + world-rect mapping
-  // `region-darkness.js` and `environmental-light.js#buildOutdoorsGate`
-  // already use), so the floor is shadowed precisely where the shadow is.
-  //
-  // ⚠️ PER-FLOOR, NOT JUST PER-FRAGMENT (2026-08-02) — a light's own footprint
-  // can straddle a floor gap exactly the same way any other content can (a
-  // torch near a stairwell, or one floor below a hole in the floor above), so
-  // "which slot's field applies" is ALSO a per-fragment question, answered by
-  // the SAME arithmetic blend `environmental-light.js`'s own ambient fill
-  // uses — never a `select()`/branch fold (`feedback_tsl_select_chain_strands_vars`).
-  // Before this a light had NO floor gate at all (unlike the ambient fill,
-  // which has had one since 2026-07-28): every light sampled whichever ONE
-  // field happened to be resident, on every floor, all the time.
-  //
-  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
-  // slots supplied the lookup is absent from the compiled shader entirely and
-  // this material is byte-identical to what it was before cast shadows existed.
-  let backgroundFloor = uBackgroundColor;
-  if (sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
-    // Clamped, never wrapped — a light overhanging a field's edge reads the
-    // nearest edge value rather than a caster from the far side of the map.
-    const sampleSlot = (slot) => {
-      const u = positionWorld.x.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
-      const v = positionWorld.y.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
-      return slot.texNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
-    };
-    // ⚠️ THE FLOOR SOURCE IS `buf:scene.depth`, NOT `buf:scene.attr` (2026-08-05
-    // — the shadow cascade's receiver half). `blendSunVisibilityAcrossFloors`'s
-    // own `attrFloorIndex01` doc has the argument. `depthFlagsHere` is the SAME
-    // `screenUV` sample the depth HEIGHT gate above already takes (STAGE 2,
-    // 2026-08-04) — reused, never re-sampled (memory:
-    // feedback_composite_only_terms_miss_shared_buffers).
-    const shadowFloorHere = depthFlagsHere ?? attrHere;
-    const sunVis =
-      shadowFloorHere && blendSunVisibilityAcrossFloors
-        ? blendSunVisibilityAcrossFloors(THREE.TSL, {
-            attrFloorIndex01: shadowFloorHere.r,
-            presence: depthFlagsHere ? depthFlagsHere.a : null,
-            slots: sunShadowSlotNodes.map((slot) => ({ sunVis: sampleSlot(slot), floorIndex01: slot.uFloorIndex01 })),
-          })
-        : // No floor buffer (or no injected blend fn) to gate by — fall back to
-          // slot 0 alone, the pre-multi-floor behaviour.
-          sampleSlot(sunShadowSlotNodes[0]);
-    backgroundFloor = uBackgroundColor.mul(sunVis);
-  }
-
-  // THE GOBO IS PART OF THIS LIGHT'S OWN FALLOFF (round 10, 2026-08-04) —
-  // NOT a separate pass drawn after this material MAX-blends. Three earlier
-  // rounds this SAME session tried a separate pass (`aperture-gobo-
-  // render.js#buildApertureShadowMaterial`, blend-toward-`backgroundFloor`
-  // on the ALREADY-composited buffer, then a second MULTIPLY pass for
-  // coloration) and both shared the identical, live-confirmed flaw: a live
-  // screenshot with the effect toggled off showed a light's own wedge
-  // crossing a building's own cast shadow with NO extra darkening —
-  // ordinary MAX behaviour. With the separate pass on, the SAME wedge grew
-  // a visibly darker rim, because `mix(backgroundFloor, dst, strengthed)`
-  // at a blocked fragment collapses to EXACTLY `backgroundFloor`, no matter
-  // how `dst` (the ALREADY-fully-composited scene) got to be bright — it
-  // could have been daylight, or a completely unrelated second light, and
-  // this light's own shadow would drag it down regardless. Author, in
-  // response: "parts of the effect which darken should never be able to
-  // survive a direct illumination from any other source. The sun would
-  // remove it and point lights would also remove it... treat the effect as
-  // a type of illumination but carefully mix it into the existing
-  // illumination."
-  //
-  // The fix is exactly that: multiply the gobo term into THIS light's own
-  // `combinedFalloff` BEFORE the mix below, so the material's SINGLE
-  // MAX-blend draw already reflects the pattern — no separate pass, nothing
-  // to drag the shared buffer down after the fact. At a blocked fragment
-  // (goboTerm=0): `mix(backgroundFloor, finalColorExposed, 0) =
-  // backgroundFloor` exactly — THIS light's own "as if I weren't here"
-  // colour — which then MAX-blends against whatever the sun/other lights
-  // already drew. If they were already brighter, MAX keeps THEM, unchanged
-  // — the shadow is invisible there, correctly, with no extra logic. If
-  // nothing else reaches that fragment (a dark room, an alley's own
-  // shadow), `backgroundFloor` becomes the visible result — a real,
-  // correctly-bounded shadow. This is the SAME property the
-  // visibility-gate machinery (rounds 1/2/3/5/6/7/8, `aperture-gobo.js#
-  // computeApertureShadowVisibility`) spent seven rounds trying to
-  // approximate from OUTSIDE the MAX-blend hierarchy — MAX-blending
-  // correctly gives it for free, which is why that machinery is retired
-  // alongside this change (see aperture-gobo.js's own header).
-  //
-  // Graph-BUILD-TIME gate (`apertureCount` is a JS integer, part of the
-  // material rebuild key, never a uniform — `tsl/no-uniform-gates`): a
-  // light with no apertures compiles NONE of this, byte-identical to
-  // before `apertureCount` existed as a param.
-  let combinedFalloffGoboed = combinedFalloff;
-  let uApLampHeight = null;
-  let apApertures = null;
-  if (apertureCount > 0) {
-    const goboResult = buildApertureGoboTerm({
+  const { finalNode, alphaNode, backgroundFloor, combinedFalloff, finalColorExposed, uApLampHeight, apApertures } =
+    buildIlluminationShadingCore({
       THREE,
-      positionWorldXY: positionWorld.xy,
-      dist,
-      apertureCount,
-      cols: apGoboCols,
-      rows: apGoboRows,
-      shared: apertureGoboShared,
+      inputs: {
+        localUnitXY: positionLocal.xy,
+        ratio: uRatio,
+        attenuationEased: uAttenuationEased,
+        exposure: uExposure,
+        edgeCount: uEdgeCount,
+        edgeSoftMargin: uEdgeSoftMargin,
+        edgePointsUniform,
+        expectedDepth: uLightExpectedDepth,
+        backgroundColor: uBackgroundColor,
+        dimColor: uDimColor,
+        brightColor: uBrightColor,
+        anim: uSpeedRaw
+          ? { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw }
+          : null,
+        wind: uWindCenter ? { center: uWindCenter, exposure: uWindExposure, response: uWindResponse } : null,
+      },
+      shared: {
+        attrTexNode,
+        depthTexNode,
+        depthFlagsTexNode,
+        sunShadowSlotNodes,
+        blendSunVisibilityAcrossFloors,
+        apertureGoboShared,
+        uGlobalTimeMs,
+        windHandle,
+      },
+      flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows },
     });
-    if (goboResult) {
-      // `uStrength` — a REAL bug, found live (2026-08-04): this mix was
-      // documented (`aperture-gobo-render.js#createApertureGoboSharedUniforms`'s
-      // own header, "applied by the CALLER... mixes the combined node
-      // toward 1 by 1-uStrength") but never actually WRITTEN — the uniform
-      // was created and updated every frame by `point-light-pool.js`, and
-      // simply never multiplied into anything, so "Pattern strength" did
-      // nothing regardless of its own value. `mix(1, node, uStrength)`:
-      // at uStrength=1 (default), `goboResult.node` passes through
-      // unchanged (byte-identical to before this fix); at 0, the gobo term
-      // is fully neutral (this light renders exactly as if it had no
-      // aperture at all), matching the schema's own documented meaning.
-      const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
-      combinedFalloffGoboed = combinedFalloff.mul(strengthedGobo);
-      uApLampHeight = goboResult.uLampHeight;
-      apApertures = goboResult.apertures;
-    }
-  }
-
-  // FRAGMENT_END (illumination), audit §5c: mix(background, finalColor, depth).
-  const outputColor = mix(backgroundFloor, finalColorExposed, combinedFalloffGoboed);
 
   const material = new THREE.NodeMaterial();
   material.transparent = false;
@@ -1495,7 +1656,7 @@ export function buildPointLightIlluminationMaterial({
   material.blendEquationAlpha = THREE.MaxEquation;
   material.blendSrcAlpha = THREE.OneFactor;
   material.blendDstAlpha = THREE.OneFactor;
-  material.fragmentNode = vec4(outputColor, float(1));
+  material.fragmentNode = vec4(finalNode, alphaNode);
 
   return {
     material,
@@ -1519,23 +1680,9 @@ export function buildPointLightIlluminationMaterial({
     uWindCenter,
     uWindExposure,
     uWindResponse,
-    // This light's OWN "no contribution here" colour — `uBackgroundColor`,
-    // already attenuated by per-fragment sun-shadow visibility when slots are
-    // supplied (see "SUN-SHADOW ATTENUATION" above). Also `point-light-
-    // coloration.js`'s own gobo term's blend target — see that module's
-    // header for why coloration needs this same node, not just illum.
     backgroundFloor,
-    // This light's own radial reach (0 at the dim edge, 1 at full strength),
-    // UNMODULATED by the gobo pattern (that multiply happens locally, just
-    // above, into `combinedFalloffGoboed` — never mutating the value
-    // returned here), and its true unshadowed colour.
     combinedFalloff,
     finalColorExposed,
-    // APERTURE GOBO (round 10) — `null` when this light has no apertures.
-    // `point-light-pool.js` writes the real per-aperture geometry into
-    // `apApertures`' own uniforms every frame, the same way it always wrote
-    // `aperture-gobo-render.js#buildApertureShadowMaterial`'s return before
-    // that function stopped owning the main material.
     uApLampHeight,
     apApertures,
   };

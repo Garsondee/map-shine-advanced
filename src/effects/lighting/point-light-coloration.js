@@ -87,6 +87,29 @@
  * reaches a given pixel — the common case — and only under-brightens where
  * two OR MORE lights' coloration genuinely overlaps.
  *
+ * ============================================================================
+ * S2.1 (2026-08-11) — SPLIT INTO A SHARED CORE + A PER-LIGHT WRAPPER
+ * ============================================================================
+ * `docs/planning/Point-Light-Batching-Design.md` §3.2: `buildColorationShadingCore`
+ * takes every per-light VALUE as an already-built NODE (`inputs`), the
+ * pool-wide resources as-is (`shared`), and the graph-BUILD-time choices
+ * that pick which terms even get constructed (`flags`) — it contains 100%
+ * of the ARITHMETIC this module has ever had, unchanged, just no longer
+ * responsible for deciding what kind of node backs each input. This is the
+ * ONLY thing that makes a later BATCHED caller (S2.4: `inputs.*` are packed
+ * per-vertex attributes instead of per-light uniforms) safe to add without a
+ * second, hand-copied shading formula — the exact bug class named in the
+ * design doc's §0 (`feedback_mode_forks_silently_drop_features`).
+ *
+ * `buildPointLightColorationMaterial` is now a THIN WRAPPER: it creates
+ * every uniform this function has always created, in the exact same
+ * conditions, then calls the core with those uniforms as `inputs` and
+ * returns the exact same handle shape callers already destructure. Its own
+ * behaviour — what gets built, in what order, under what condition — did
+ * not change; only where each line lives did. `point-light-pool.js` is
+ * completely unaware of this split: same import, same call, same return
+ * shape, same per-frame `.value` writes.
+ *
  * @module effects/lighting/point-light-coloration
  */
 
@@ -119,13 +142,247 @@ export function computeColorationAlpha(alpha01, technique) {
 }
 
 /**
- * Build ONE point light's coloration material (technique 1 only — see this
- * module's header). Fresh per-light uniforms (mirrors point-light-
- * illumination.js's own per-light pattern) — `uAttenuationEased` is a SMALL,
- * deliberate duplication of the illumination material's own (same light,
- * same value) rather than threading a shared node across two independently-
- * built materials; the extra per-frame uniform set is negligible and keeps
- * each material builder self-contained.
+ * THE SHADING CORE — every term this material has ever computed, taking
+ * already-built per-light NODES rather than creating any itself. See this
+ * module's own "S2.1" header for why the split exists and what it does and
+ * does not change.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {object} args.inputs - per-light values, as NODES:
+ *   `localUnitXY` (replaces every `positionLocal.xy` read — the per-light
+ *   wrapper passes `positionLocal.xy` itself; a future batched caller passes
+ *   a packed attribute instead), `attenuationEased`, `colorationAlpha`,
+ *   `lightColor`, `expectedDepth`, `ratio` (the illumination twin's own base
+ *   ratio — see the wrapper's own param doc), `anim`
+ *   (`{speedRaw, reverseSign, seed, intensityRaw}` or `null` — null means
+ *   this bucket/light has no animation seed, matching `animation?.
+ *   buildColorationSeed` being absent), `wind`
+ *   (`{center, exposure, response}` or `null`, opt-in, present only when
+ *   BOTH `flags.animation` builds a seed AND wind was supplied — mirrors
+ *   the original nested condition exactly).
+ * @param {object} args.shared - pool-wide resources: `albedoTexture`,
+ *   `depthTexNode`, `depthFlagsTexNode`, `apertureGoboShared`,
+ *   `uGlobalTimeMs`, `windHandle`.
+ * @param {object} args.flags - graph-BUILD-time choices: `animation` (the
+ *   matched registry entry or null), `animationQuality`, `falloffModel`,
+ *   `apertureCount`, `apGoboCols`, `apGoboRows`.
+ * @returns {{finalNode: *, alphaNode: *, uApColLampHeight: (*|null), apColApertures: (Array|null)}}
+ */
+export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
+  const { vec3, float, texture, screenUV, smoothstep, length, positionWorld, dot, sqrt, sRGBTransferOETF, mix } =
+    THREE.TSL;
+
+  const { albedoTexture, depthTexNode, depthFlagsTexNode, apertureGoboShared, uGlobalTimeMs, windHandle } = shared;
+  const {
+    animation,
+    animationQuality = 0,
+    falloffModel = 'foundry',
+    apertureCount = 0,
+    apGoboCols,
+    apGoboRows,
+  } = flags;
+  const {
+    localUnitXY,
+    attenuationEased: uAttenuationEased,
+    colorationAlpha: uColorationAlpha,
+    lightColor: uLightColor,
+    expectedDepth: uLightExpectedDepth,
+    ratio: uRatio,
+    anim,
+    wind: windInputs,
+  } = inputs;
+
+  // dist/FALLOFF — identical formula to point-light-illumination.js's own
+  // (Foundry shares this term across illumination AND coloration verbatim).
+  // No `uRatio` here — technique 1 ("Adaptive Luminance") never reads ratio;
+  // that's an illumination-channel-only (switchColor bright/dim) concept.
+  const dist = length(localUnitXY);
+  // FALLOFF MODEL — mirrors point-light-illumination.js's own branch (both
+  // channels must fade together, so the coloration glow tracks the same
+  // curve as the floor lift). `inverseSquare` is the candle's physical
+  // bright-centre/fast-drop curve; `foundry` is the attenuation corona.
+  let falloff;
+  if (falloffModel === 'inverseSquare') {
+    falloff = inverseSquareFalloff(THREE.TSL, dist);
+  } else {
+    const attenForFalloff = uAttenuationEased.max(float(0.0001));
+    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  }
+
+  // ============================================================================
+  // THE HEIGHT/ELEVATION GATE — the SAME node the illumination twin uses.
+  // ============================================================================
+  // A point light is drawn by TWO meshes sharing ONE geometry: the illumination
+  // mesh and THIS one, which carries the visible coloured glow and every
+  // ANIMATED light effect (torch, pulse, chroma — the whole animations
+  // registry). Gating only the illumination half is exactly the state the
+  // author reported live: *"You are now correctly occluding the light polygon.
+  // But you aren't correctly occluding the animated light source."* The floor
+  // lift went dark under a slab while the animated colour kept painting
+  // straight through it.
+  //
+  // Multiplied into `falloff` SPECIFICALLY, not into `outputColor`, because
+  // falloff feeds BOTH the colour (`finalColor.mul(falloff)`) and the material's
+  // ALPHA (`vec4(outputColor, falloff)`). One multiply therefore gates the glow
+  // AND its coverage together — and under this material's MAX blend an
+  // un-gated alpha would keep writing a lit depth value even with the colour
+  // zeroed (`feedback_blend_neutral_element_is_per_blend`: what counts as
+  // "no contribution" is per-blend, and for MAX it is a genuine zero in every
+  // channel that is read downstream).
+  //
+  // ⚠️ `screenUV`, never the bare node — `buf:scene.depth` is a SCREEN-space
+  // buffer and this is a WORLD-space fan mesh with no `uv` attribute at all.
+  // This file already samples its albedo the same way, and calls it "this
+  // project's own already-proven technique" (see `mapColor` below). Passing
+  // `depthTexNode` unsampled is the round-1-to-3 bug verbatim
+  // (`feedback_shared_texture_node_carries_the_wrong_uv`).
+  //
+  // STAGE 2 (2026-08-04) — see point-light-illumination.js's own "STAGE 2 —
+  // THE DEPTH-AUTHORITY HEIGHT GATE" section for the full reasoning. No
+  // "unconfigured" sentinel: `point-light-pool.js`'s per-frame refresh
+  // overwrites this for every light, touched or not.
+  //
+  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
+  // depth texture supplied this material is byte-identical to what it was
+  // before the gate existed.
+  if (depthTexNode) {
+    falloff = falloff.mul(
+      buildDepthHeightGateNode(THREE.TSL, {
+        depthHere: depthTexNode.sample(screenUV),
+        flagsHere: depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null,
+        uLightExpectedDepth,
+      })
+    );
+  }
+
+  // APERTURE GOBO (round 10, 2026-08-04) — the SAME "multiply into `falloff`
+  // itself, not `outputColor`" discipline as the height gate immediately
+  // above, and for the identical reason spelled out in that gate's own
+  // comment: `falloff` feeds BOTH this material's colour AND its alpha
+  // (`vec4(outputColor, falloff)`, below), and this material MAX-blends —
+  // zeroing only the colour while leaving alpha positive would still MAX a
+  // lit depth value into the shared buffer with no colour behind it
+  // (`feedback_blend_neutral_element_is_per_blend`). `point-light-
+  // illumination.js`'s own header has the full round 1-10 history of why
+  // this lives INSIDE the light's own MAX-blend draw rather than a separate
+  // post-process pass — coloration needs the identical treatment for the
+  // identical reason: a colourless light already contributes zero here
+  // (`uColorationAlpha`), but a coloured or animated one draws real,
+  // additive brightness that must ALSO respect the gobo pattern, and MUST
+  // do so as part of THIS light's own MAX-blend contribution so an
+  // independently brighter source (another light's own coloration) is never
+  // dragged down by a pass that doesn't know it's there.
+  let uApColLampHeight = null;
+  let apColApertures = null;
+  if (apertureCount > 0) {
+    const goboResult = buildApertureGoboTerm({
+      THREE,
+      positionWorldXY: positionWorld.xy,
+      dist,
+      apertureCount,
+      cols: apGoboCols,
+      rows: apGoboRows,
+      shared: apertureGoboShared,
+    });
+    if (goboResult) {
+      // `uStrength` — the SAME real, live-found bug `point-light-
+      // illumination.js`'s own identical fix describes (documented since
+      // round 10 but never actually wired into either channel): `mix(1,
+      // node, uStrength)` — at uStrength=1 (default) byte-identical to
+      // before this fix, at 0 fully neutral (no aperture at all).
+      const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
+      falloff = falloff.mul(strengthedGobo);
+      uApColLampHeight = goboResult.uLampHeight;
+      apColApertures = goboResult.apertures;
+    }
+  }
+
+  // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
+  // scaled by the underlying MAP pixel's own perceived brightness — BT.709
+  // luminance, verbatim (`base-shader-mixin.mjs#PERCEIVED_BRIGHTNESS`:
+  // sqrt(dot(BT709, c*c))).
+  //
+  // COLOUR SPACE (2026-07-19, part of the "single-hue wash" fix): Foundry
+  // computes this on its PRIMARY texture, which is sRGB (its canvas has no
+  // colour management). MSA's `buf:scene.color` is LINEAR (srgbDecode'd on
+  // upload), so the raw sample here is linear — perceivedBrightness of a
+  // linear value is systematically LOWER than of the same pixel in sRGB,
+  // which would make the coloration weaker than Foundry's. OETF the sample
+  // back to sRGB first so `reflection` matches Foundry's number exactly. This
+  // is the coloration-side half of the gamma-space correction whose other
+  // half is the gamma-space ADD in environmental-light.js's composite.
+  const mapColor = sRGBTransferOETF(texture(albedoTexture, screenUV).rgb);
+  const BT709 = vec3(0.2126, 0.7152, 0.0722);
+  const reflection = sqrt(dot(BT709, mapColor.mul(mapColor)));
+
+  // ANIMATION SEED INJECTION — see this function's own header. Absent
+  // `animation`/`buildColorationSeed`: seedColor === defaultSeed, output is
+  // unchanged from before this param existed.
+  const defaultSeed = uLightColor.mul(uColorationAlpha);
+  let seedColor = defaultSeed;
+  if (animation?.buildColorationSeed) {
+    const { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw } = anim;
+    const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
+    // SHARED WIND (Wind.md Tier 0) — see point-light-illumination.js's own
+    // identical block for the full "why"; OPT-IN on the same two params.
+    let wind;
+    let uWindResponse;
+    if (windInputs) {
+      uWindResponse = windInputs.response;
+      wind = windHandle.node(THREE.TSL, {
+        centerXY: windInputs.center,
+        time: uGlobalTimeMs,
+        exposure: windInputs.exposure,
+      });
+    }
+    const seeded = animation.buildColorationSeed({
+      THREE,
+      uLightColor,
+      uColorationAlpha,
+      dist,
+      defaultSeed,
+      time,
+      uIntensityRaw,
+      uRatio,
+      quality: animationQuality,
+      wind,
+      windResponse: uWindResponse,
+    });
+    seedColor = seeded.finalColor;
+  }
+
+  const techniqueColor = seedColor.mul(reflection);
+
+  // TEMPORARY DIAGNOSTIC REVERT (2026-07-21) — the SHADOW term below is
+  // suspected of causing a live "THREE.NodeBuilder: Uniform "null" not
+  // implemented" build-time failure on EVERY point light (75 identical
+  // errors, one per light, in a real mansion scene — `getForRender` catches
+  // it and silently falls back to a blank material per light, which is what
+  // "broke the lighting"). Isolating: this bypasses the shadow multiply
+  // entirely so the author can confirm whether the error clears. If it does,
+  // the bug is confirmed inside the block below and gets root-caused before
+  // re-enabling, not re-added blindly. See keyhole-coloration-shadow-fix.md.
+  // const shadowing = mix(float(1), smoothstep(float(0.25), float(0.35), reflection), uShadows);
+  const finalColor = techniqueColor;
+  const outputColor = finalColor.mul(falloff);
+
+  return { finalNode: outputColor, alphaNode: falloff, uApColLampHeight, apColApertures };
+}
+
+/**
+ * Build ONE point light's coloration material — the per-light WRAPPER. See
+ * this module's own "S2.1" header: this function's job is now ONLY to
+ * create the uniforms it has always created (unchanged conditions, unchanged
+ * defaults) and hand them to {@link buildColorationShadingCore}; the shading
+ * arithmetic itself lives there, not here.
+ *
+ * Fresh per-light uniforms (mirrors point-light-illumination.js's own
+ * per-light pattern) — `uAttenuationEased` is a SMALL, deliberate duplication
+ * of the illumination material's own (same light, same value) rather than
+ * threading a shared node across two independently-built materials; the
+ * extra per-frame uniform set is negligible and keeps each material builder
+ * self-contained.
  *
  * Samples `albedoTexture` (this project's own `buf:scene.color`, the RAW
  * map — NOT the illuminated result: Foundry's illumination and coloration
@@ -225,163 +482,14 @@ export function buildPointLightColorationMaterial({
   apGoboRows,
   apertureGoboShared,
 }) {
-  const {
-    uniform,
-    vec2,
-    vec3,
-    vec4,
-    float,
-    texture,
-    screenUV,
-    smoothstep,
-    length,
-    positionLocal,
-    positionWorld,
-    dot,
-    sqrt,
-    sRGBTransferOETF,
-    // RE-ENABLED (2026-08-04, round 18) — for the `uStrength` fix below,
-    // NOT the still-disabled SHADOW term (`uShadows`) further down this
-    // file, which stays commented out; that one's own suspected build
-    // failure was in ITS OWN term's construction, not in `mix` itself
-    // (already used safely elsewhere, e.g. point-light-illumination.js).
-    mix,
-  } = THREE.TSL;
+  const { uniform, vec2, vec3, vec4, float, positionLocal } = THREE.TSL;
 
   const uAttenuationEased = uniform(float(0.5));
   const uColorationAlpha = uniform(float(1));
   const uLightColor = uniform(vec3(1, 1, 1));
   const uShadows = uniform(float(0));
-
-  // dist/FALLOFF — identical formula to point-light-illumination.js's own
-  // (Foundry shares this term across illumination AND coloration verbatim).
-  // No `uRatio` here — technique 1 ("Adaptive Luminance") never reads ratio;
-  // that's an illumination-channel-only (switchColor bright/dim) concept.
-  const dist = length(positionLocal.xy);
-  // FALLOFF MODEL — mirrors point-light-illumination.js's own branch (both
-  // channels must fade together, so the coloration glow tracks the same
-  // curve as the floor lift). `inverseSquare` is the candle's physical
-  // bright-centre/fast-drop curve; `foundry` is the attenuation corona.
-  let falloff;
-  if (falloffModel === 'inverseSquare') {
-    falloff = inverseSquareFalloff(THREE.TSL, dist);
-  } else {
-    const attenForFalloff = uAttenuationEased.max(float(0.0001));
-    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
-  }
-
-  // ============================================================================
-  // THE HEIGHT/ELEVATION GATE — the SAME node the illumination twin uses.
-  // ============================================================================
-  // A point light is drawn by TWO meshes sharing ONE geometry: the illumination
-  // mesh and THIS one, which carries the visible coloured glow and every
-  // ANIMATED light effect (torch, pulse, chroma — the whole animations
-  // registry). Gating only the illumination half is exactly the state the
-  // author reported live: *"You are now correctly occluding the light polygon.
-  // But you aren't correctly occluding the animated light source."* The floor
-  // lift went dark under a slab while the animated colour kept painting
-  // straight through it.
-  //
-  // Multiplied into `falloff` SPECIFICALLY, not into `outputColor`, because
-  // falloff feeds BOTH the colour (`finalColor.mul(falloff)`) and the material's
-  // ALPHA (`vec4(outputColor, falloff)`). One multiply therefore gates the glow
-  // AND its coverage together — and under this material's MAX blend an
-  // un-gated alpha would keep writing a lit depth value even with the colour
-  // zeroed (`feedback_blend_neutral_element_is_per_blend`: what counts as
-  // "no contribution" is per-blend, and for MAX it is a genuine zero in every
-  // channel that is read downstream).
-  //
-  // ⚠️ `screenUV`, never the bare node — `buf:scene.depth` is a SCREEN-space
-  // buffer and this is a WORLD-space fan mesh with no `uv` attribute at all.
-  // This file already samples its albedo the same way, and calls it "this
-  // project's own already-proven technique" (see `mapColor` below). Passing
-  // `depthTexNode` unsampled is the round-1-to-3 bug verbatim
-  // (`feedback_shared_texture_node_carries_the_wrong_uv`).
-  //
-  // STAGE 2 (2026-08-04) — see point-light-illumination.js's own "STAGE 2 —
-  // THE DEPTH-AUTHORITY HEIGHT GATE" section for the full reasoning. No
-  // "unconfigured" sentinel: `point-light-pool.js`'s per-frame refresh
-  // overwrites this for every light, touched or not.
-  //
-  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
-  // depth texture supplied this material is byte-identical to what it was
-  // before the gate existed.
   const uLightExpectedDepth = uniform(float(0));
-  if (depthTexNode) {
-    falloff = falloff.mul(
-      buildDepthHeightGateNode(THREE.TSL, {
-        depthHere: depthTexNode.sample(screenUV),
-        flagsHere: depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null,
-        uLightExpectedDepth,
-      })
-    );
-  }
 
-  // APERTURE GOBO (round 10, 2026-08-04) — the SAME "multiply into `falloff`
-  // itself, not `outputColor`" discipline as the height gate immediately
-  // above, and for the identical reason spelled out in that gate's own
-  // comment: `falloff` feeds BOTH this material's colour AND its alpha
-  // (`vec4(outputColor, falloff)`, below), and this material MAX-blends —
-  // zeroing only the colour while leaving alpha positive would still MAX a
-  // lit depth value into the shared buffer with no colour behind it
-  // (`feedback_blend_neutral_element_is_per_blend`). `point-light-
-  // illumination.js`'s own header has the full round 1-10 history of why
-  // this lives INSIDE the light's own MAX-blend draw rather than a separate
-  // post-process pass — coloration needs the identical treatment for the
-  // identical reason: a colourless light already contributes zero here
-  // (`uColorationAlpha`), but a coloured or animated one draws real,
-  // additive brightness that must ALSO respect the gobo pattern, and MUST
-  // do so as part of THIS light's own MAX-blend contribution so an
-  // independently brighter source (another light's own coloration) is never
-  // dragged down by a pass that doesn't know it's there.
-  let uApColLampHeight = null;
-  let apColApertures = null;
-  if (apertureCount > 0) {
-    const goboResult = buildApertureGoboTerm({
-      THREE,
-      positionWorldXY: positionWorld.xy,
-      dist,
-      apertureCount,
-      cols: apGoboCols,
-      rows: apGoboRows,
-      shared: apertureGoboShared,
-    });
-    if (goboResult) {
-      // `uStrength` — the SAME real, live-found bug `point-light-
-      // illumination.js`'s own identical fix describes (documented since
-      // round 10 but never actually wired into either channel): `mix(1,
-      // node, uStrength)` — at uStrength=1 (default) byte-identical to
-      // before this fix, at 0 fully neutral (no aperture at all).
-      const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
-      falloff = falloff.mul(strengthedGobo);
-      uApColLampHeight = goboResult.uLampHeight;
-      apColApertures = goboResult.apertures;
-    }
-  }
-
-  // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
-  // scaled by the underlying MAP pixel's own perceived brightness — BT.709
-  // luminance, verbatim (`base-shader-mixin.mjs#PERCEIVED_BRIGHTNESS`:
-  // sqrt(dot(BT709, c*c))).
-  //
-  // COLOUR SPACE (2026-07-19, part of the "single-hue wash" fix): Foundry
-  // computes this on its PRIMARY texture, which is sRGB (its canvas has no
-  // colour management). MSA's `buf:scene.color` is LINEAR (srgbDecode'd on
-  // upload), so the raw sample here is linear — perceivedBrightness of a
-  // linear value is systematically LOWER than of the same pixel in sRGB,
-  // which would make the coloration weaker than Foundry's. OETF the sample
-  // back to sRGB first so `reflection` matches Foundry's number exactly. This
-  // is the coloration-side half of the gamma-space correction whose other
-  // half is the gamma-space ADD in environmental-light.js's composite.
-  const mapColor = sRGBTransferOETF(texture(albedoTexture, screenUV).rgb);
-  const BT709 = vec3(0.2126, 0.7152, 0.0722);
-  const reflection = sqrt(dot(BT709, mapColor.mul(mapColor)));
-
-  // ANIMATION SEED INJECTION — see this function's own header. Absent
-  // `animation`/`buildColorationSeed`: seedColor === defaultSeed, output is
-  // unchanged from before this param existed.
-  const defaultSeed = uLightColor.mul(uColorationAlpha);
-  let seedColor = defaultSeed;
   let uSpeedRaw = null;
   let uReverseSign = null;
   let uSeed = null;
@@ -394,52 +502,34 @@ export function buildPointLightColorationMaterial({
     uReverseSign = uniform(float(1));
     uSeed = uniform(float(0));
     uIntensityRaw = uniform(float(5));
-    const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
     // SHARED WIND (Wind.md Tier 0) — see point-light-illumination.js's own
     // identical block for the full "why"; OPT-IN on the same two params.
-    let wind;
     if (Number.isFinite(windExposure)) {
       uWindCenter = uniform(vec2(windCenter?.x ?? 0, windCenter?.y ?? 0));
       uWindExposure = uniform(float(windExposure));
       // A THIRD wind uniform, same opt-in gate — see point-light-
       // illumination.js's own identical `windResponse` param doc.
       uWindResponse = uniform(float(Number.isFinite(windResponse) ? windResponse : 1));
-      wind = windHandle.node(THREE.TSL, {
-        centerXY: uWindCenter,
-        time: uGlobalTimeMs,
-        exposure: uWindExposure,
-      });
     }
-    const seeded = animation.buildColorationSeed({
-      THREE,
-      uLightColor,
-      uColorationAlpha,
-      dist,
-      defaultSeed,
-      time,
-      uIntensityRaw,
-      uRatio,
-      quality: animationQuality,
-      wind,
-      windResponse: uWindResponse,
-    });
-    seedColor = seeded.finalColor;
   }
 
-  const techniqueColor = seedColor.mul(reflection);
-
-  // TEMPORARY DIAGNOSTIC REVERT (2026-07-21) — the SHADOW term below is
-  // suspected of causing a live "THREE.NodeBuilder: Uniform "null" not
-  // implemented" build-time failure on EVERY point light (75 identical
-  // errors, one per light, in a real mansion scene — `getForRender` catches
-  // it and silently falls back to a blank material per light, which is what
-  // "broke the lighting"). Isolating: this bypasses the shadow multiply
-  // entirely so the author can confirm whether the error clears. If it does,
-  // the bug is confirmed inside the block below and gets root-caused before
-  // re-enabling, not re-added blindly. See keyhole-coloration-shadow-fix.md.
-  // const shadowing = mix(float(1), smoothstep(float(0.25), float(0.35), reflection), uShadows);
-  const finalColor = techniqueColor;
-  const outputColor = finalColor.mul(falloff);
+  const { finalNode, alphaNode, uApColLampHeight, apColApertures } = buildColorationShadingCore({
+    THREE,
+    inputs: {
+      localUnitXY: positionLocal.xy,
+      attenuationEased: uAttenuationEased,
+      colorationAlpha: uColorationAlpha,
+      lightColor: uLightColor,
+      expectedDepth: uLightExpectedDepth,
+      ratio: uRatio,
+      anim: uSpeedRaw
+        ? { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw }
+        : null,
+      wind: uWindCenter ? { center: uWindCenter, exposure: uWindExposure, response: uWindResponse } : null,
+    },
+    shared: { albedoTexture, depthTexNode, depthFlagsTexNode, apertureGoboShared, uGlobalTimeMs, windHandle },
+    flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows },
+  });
 
   const material = new THREE.NodeMaterial();
   material.transparent = false;
@@ -471,7 +561,7 @@ export function buildPointLightColorationMaterial({
   // was real, stored, spec-wrong data with zero current visible effect —
   // worth correcting before a future alpha-aware consumer (a debug view, a
   // masking step) silently inherits the wrong contract.
-  material.fragmentNode = vec4(outputColor, falloff);
+  material.fragmentNode = vec4(finalNode, alphaNode);
 
   return {
     material,

@@ -489,10 +489,21 @@ Worker models execute + mark only; ANY surprise is a petition.*
       `candleFlame` anchors ⇒ one runtime bucket pair. Projected point-light draws 136 → ~4-6.
       37/50 lights carry darkness windows ⇒ membership flips are NORMAL, the lifecycle is
       sized for them (design doc §3.4). Full table in the design doc §1.
-- [ ] **S2.1 The shared shading core** — extract `buildIlluminationShadingCore` /
+- [x] **S2.1 The shared shading core** — extract `buildIlluminationShadingCore` /
       `buildColorationShadingCore` (per-light values injected as NODES — uniform or attribute);
       rebind BOTH existing per-light builders through them, public API to the pool unchanged.
-      **Gate: harness capture byte-identical to pre-refactor; `npm run verify` green.**
+      **Gate: harness capture byte-identical to pre-refactor; `npm run verify` green.** ✅
+      2026-08-11 (Claude Sonnet 5): `npm run verify` — 21 suites, 8323 passed, 0 failed
+      (includes `candle-flame-render.js`/`lightning-render.js`/`effects/index.js`'s untouched
+      imports of the helper exports this split left alone). Harness gate:
+      `tests/playwright-artifacts/look/s2-1-capture.mjs` (baseline, then after, two separate
+      process runs — no live flag exists yet to flip mid-session, so this is two full loads of
+      the SAME camera/floor/frozen-time state instead of S1.5's single-session flip) +
+      `s2-1-diff.mjs`. First Floor, time frozen, non-vacuous both captures (92 active lights:
+      87 candleFlicker + 5 firePuff, identical pool composition before/after) — **0 of
+      2,073,600 pixels differ, `maxChannelDelta: 0`.** Both illumination's soft-edge-disabled
+      state and coloration's shadow-disabled state were preserved exactly (neither term was
+      accidentally re-enabled by the restructure — the design doc's §0 ❌4).
 - [ ] **S2.2 Bucket module** (pure, Node-tested): admission (closed-list; aperture-lit lights
       NEVER admitted in v1), key fn (resolved animation entry, not raw string), coloration
       membership (`hasColor || forceDefaultColor`), span allocator (double-growth,

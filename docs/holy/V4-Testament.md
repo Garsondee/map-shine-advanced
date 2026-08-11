@@ -904,6 +904,24 @@ light movement.
 Live wiring into `point-light-pool.js` remains not started. The gate re-aim still needs Fable's
 resolution.
 
+**Third addendum, 2026-08-11 (Claude Sonnet 5):** reading `point-light-pool.js`,
+`point-light-illumination.js`, and `point-light-coloration.js` in full (prompted by the author's
+own choice, "full scope, design note first," on hearing how much bigger real production's
+per-light data surface is than the bench's two-number proof) surfaced a second, independent,
+unexplained failure in the same suspect family as the second addendum's gap:
+`point-light-illumination.js:1289-1309`'s soft-edge SDF term (`edgeSoftFactor`) — a DIFFERENT
+`uniformArray`, read via a `Loop` in the FRAGMENT stage rather than the vertex stage — has been
+disabled since 2026-07-19 because wiring it in turned the entire scene solid black, root cause
+never found despite reading the same vendored source this session re-read. Two independent
+`uniformArray`-adjacent failures, different stages, different symptoms, discovered three weeks
+apart by unrelated investigations. The full design — bucket keys, the complete per-light data
+inventory, why this means the merge design should avoid `uniformArray`-indexed reads entirely
+(favouring plain per-vertex attributes, already proven, plus data-texture sampling for
+variable-length data like edge points and apertures, also already proven elsewhere in this
+codebase) — is written up in
+[`docs/planning/Point-Light-Batching-Design.md`](../planning/Point-Light-Batching-Design.md),
+DRAFT, awaiting sign-off before any implementation begins.
+
 **P-003 — Stage 0's instrument (the Playwright harness) needed its own trust check before any
 measurement through it could count.** Filed by Claude Sonnet 5, 2026-08-10, acting as a worker
 under the Covenant, in response to the author's direct question: *"performance seems to be

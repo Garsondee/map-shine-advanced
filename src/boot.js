@@ -146,6 +146,8 @@ import {
   setVtPanViewerDebugForceOpaqueBlendOff,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
+  setVtPanViewerPointLightBatching,
+  getVtPanViewerPointLightBatching,
   getVtPanViewerSceneSettle,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
@@ -527,6 +529,11 @@ MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
 // bench gates pass; kept afterwards as the permanent revert (Testament Law 5).
 MapShine.setEarlyZComposition = setVtPanViewerEarlyZComposition;
 MapShine.getEarlyZComposition = getVtPanViewerEarlyZComposition;
+// STAGE 2's revert flag — point-light batching (S2.4,
+// docs/planning/Point-Light-Batching-Design.md). Default OFF; nothing reads
+// it yet (S2.5, pool integration, is its first real consumer).
+MapShine.setPointLightBatching = setVtPanViewerPointLightBatching;
+MapShine.getPointLightBatching = getVtPanViewerPointLightBatching;
 // SCENE SETTLE (2026-08-11, author: the 12k² upper floor "takes an extremely
 // long time to appear which causes confusion for you and me... we currently
 // don't correctly track when the system is actually finished loading"). ONE

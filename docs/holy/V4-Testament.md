@@ -554,10 +554,58 @@ Worker models execute + mark only; ANY surprise is a petition.*
       rewrite check pass cleanly once the sampler was fixed. Read P-005 before trusting any
       EARLIER claim in this document about a "vertex-stage uniformArray defect" — it is
       retracted.
-- [ ] **S2.4 Batched binding** — attribute-input binding of the S2.1 core, both channels;
+- [x] **S2.4 Batched binding** — attribute-input binding of the S2.1 core, both channels;
       buckets → merged meshes in `lightScene`/`colorationScene`, behind `pointLightBatching`
       (default OFF; register it, then grep `EFFECT_REAPPLIERS` in boot.js — the hand-list has
-      lost six effects silently).
+      lost six effects silently). · done Claude Sonnet 5 2026-08-11 — new module
+      `effects/lighting/point-light-batch-mesh.js`: `createBatchedLightMesh({THREE, channel,
+      shared, flags})` builds ONE bucket's merged mesh for either channel, material built ONCE
+      from S2.1's `buildIlluminationShadingCore`/`buildColorationShadingCore` (never a second
+      hand-written shader), geometry buffers grow-only via S2.2's `createBucket` (no per-frame
+      GPU allocation — design doc §0 rule 3). Real bug found and fixed BEFORE wiring anything
+      up, by tracing the bench's own movement scenario against this module's real API: gating
+      the position/`aLocalUnit` rewrite on `createBucket`'s `rebuilt` flag alone is wrong — that
+      flag only tracks membership/vertex-count, so a light that MOVES without changing its
+      polygon's point count (the common case) would silently freeze at its first-ever position
+      forever after. Fixed with a separate per-member `(x,y,radius,shapePoints)` placement
+      dirty-check (`shapePointsUnchanged`, exported, mirrors `point-light-pool.js`'s own
+      `lastShapeX/Y/Radius/Points`), independent of bucket-level `rebuilt`. Also checked, not
+      assumed: design doc §3.3's coloration `aParams` table marks the 4th float "spare" even
+      though `buildColorationShadingCore` threads a `ratio` value into `animation.
+      buildColorationSeed` whenever one exists — grepped every registered `buildColorationSeed`
+      across `effects/lighting/animations/*.js` for `uRatio` reads: zero found (only the
+      ILLUMINATION seed builders read it), so the table is correct today, `edgeSoftFactor`'s
+      exact shape (a live wire, no current receiver) — recorded in the module's own header as a
+      named trap for whoever adds a ratio-reading coloration animation later, not silently
+      built around. `pointLightBatching` flag registered default OFF (`vt-pan-viewer.js` +
+      `vt/index.js` + `boot.js`, `MapShine.setPointLightBatching`/`getPointLightBatching`),
+      mirroring `earlyZComposition`'s exact pattern; NOT added to `EFFECT_REAPPLIERS` — checked
+      against precedent, not assumed: `earlyZComposition` isn't in that list either, since
+      neither flag has a per-scene GM/player-enable+params cascade to re-resolve, both are read
+      live every frame by their own consumer instead. Nothing reads the flag yet — S2.5 (pool
+      integration) is its first real caller, the SAME "wall built before the room it governs"
+      shape S2.2's bucket module used (`graph/reachable-from-boot` ratchet bumped 3→4,
+      `tools/structure-ratchets.json`, `[structure-change]`).
+      **Evidence:** `npm run verify` green — 21 suites, 8397 passed (8373 baseline + 24 new
+      Node assertions, `__tests__/point-light-batch-mesh.test.mjs`, registered in
+      `effects/lighting/__tests__/run-tests.mjs`'s own dispatch list — caught live: the FIRST
+      verify run after writing the tests stayed "8373, ALL GREEN" because the new file wasn't
+      in that hand-maintained list yet, so all 24 assertions silently never ran; registering
+      them surfaced 8 real failures, all in the test file's own float32-vs-JS-double `===`
+      comparisons (non-power-of-2 literals like `0.1`/`0.6`/`0.9` round-trip differently through
+      a `Float32Array`), not the production code — fixed by using integers throughout). Real
+      device: `tools/shader-lab/bench-point-lights.js`'s `production-shaped-packed-batch`
+      scenario retargeted at this real module (S2.3's own bench-local mesh builder deleted, the
+      SAME proof now exercises production code, not a parallel copy —
+      `feedback_mode_forks_silently_drop_features` risk closed) — **8/8 checks pass, `ok:true`**,
+      `maxChannelDelta:0` against the per-light production twins at BOTH `animationQuality:2`
+      (production's real value) and `:1`, `bucket rebuilt:false` on the movement/value-rewrite/
+      steady-state checks (proving the per-member placement fix, not an incidental bucket
+      rebuild, is what catches a moving light), plus one NEW check exercising the COLORATION
+      channel for the first time (`coloration-batch-renders-one-draw-and-matches-twin`: 4-buffer
+      simple layout, 1 draw call, `maxChannelDelta:0` against N separate production coloration
+      meshes, non-vacuous sample). No console errors; only pre-existing, unrelated warnings
+      (`renderAsync` deprecation, an unrelated specular-bench TSL name collision).
 - [ ] **S2.5 Pool integration** — reconcile writes into bucket spans with value-diff
       dirty-skip (steady state ⇒ zero uploads); per-light path RETAINED for aperture-lit +
       non-admitted lights (it is also the safety slide: flag OFF = today's renderer,

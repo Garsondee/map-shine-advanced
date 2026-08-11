@@ -9402,6 +9402,19 @@ export async function startVtPanViewer({
     const depthPrepassScene = new THREE.Scene();
     let depthPrepassEntries = [];
 
+    /**
+     * STAGE 2's revert flag (S2.4, `docs/planning/Point-Light-Batching-
+     * Design.md` §8's rollout order). Default OFF: nothing reads this yet
+     * (S2.5, "pool integration", is its first real caller — the same
+     * "wall built before the room it governs" shape S2.2's bucket module
+     * already used, `docs/holy/V4-Testament.md`'s S2.2 entry). Unlike
+     * `earlyZComposition`, flipping it needs no `scheduleResidencyUpdate()`
+     * nudge: point lights fully reconcile every frame regardless (`point-
+     * light-pool.js#update`), so the very next frame after a flip already
+     * reads the new value.
+     */
+    let pointLightBatching = false;
+
     // PER-PASS GPU TIMING (docs/planning/Performance.md). Constructed here rather
     // than in boot.js because it needs the `renderer` this closure owns; the
     // profiler it feeds is injected from boot, so ownership of the DATA still
@@ -12619,6 +12632,21 @@ export async function startVtPanViewer({
         return { earlyZComposition, changed: true };
       },
       /**
+       * STAGE 2's revert flag (see `pointLightBatching`'s own declaration).
+       * No residency nudge needed — `point-light-pool.js#update()` runs
+       * every frame regardless and will read the new value on its very next
+       * call.
+       */
+      setPointLightBatching(on) {
+        const next = !!on;
+        if (next === pointLightBatching) return { pointLightBatching, changed: false };
+        pointLightBatching = next;
+        return { pointLightBatching, changed: true };
+      },
+      getPointLightBatching() {
+        return { pointLightBatching };
+      },
+      /**
        * The flag AND the evidence that it is actually doing something.
        *
        * A pixel-diff of a flag that changed nothing is byte-identical for the
@@ -15120,6 +15148,22 @@ export function getVtPanViewerEarlyZComposition() {
   // `state.tiles` — which made a real, engaged, byte-identical run report
   // itself as VACUOUS on 2026-08-10. The instrument was wrong, not the engine.
   return _active.getEarlyZComposition();
+}
+
+/**
+ * STAGE 2's revert flag — point-light batching (S2.4,
+ * `docs/planning/Point-Light-Batching-Design.md`). Default OFF; ON, lights
+ * sharing one compiled material draw as ONE merged mesh instead of one draw
+ * per light. Nothing reads this yet — S2.5 (pool integration) is its first
+ * real consumer. Call as `MapShine.setPointLightBatching(true)`.
+ */
+export function setVtPanViewerPointLightBatching(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setPointLightBatching(on);
+}
+export function getVtPanViewerPointLightBatching() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getPointLightBatching();
 }
 
 /**

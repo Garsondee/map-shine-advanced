@@ -79,12 +79,11 @@
  * @module tools/shader-lab/bench-point-lights
  */
 import { evaluate, registerBench } from './contract.js';
-import {
-  buildIlluminationShadingCore,
-  buildPointLightIlluminationMaterial,
-} from '../../src/effects/lighting/point-light-illumination.js';
+import { buildPointLightIlluminationMaterial } from '../../src/effects/lighting/point-light-illumination.js';
+import { buildPointLightColorationMaterial } from '../../src/effects/lighting/point-light-coloration.js';
 import { resolveLightAnimation } from '../../src/effects/lighting/animations/registry.js';
 import { describeBucketVertexBuffers } from '../../src/effects/lighting/point-light-batch.js';
+import { createBatchedLightMesh } from '../../src/effects/lighting/point-light-batch-mesh.js';
 import { createWindHandle } from '../../src/world/index.js';
 
 const WORLD = { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
@@ -135,8 +134,11 @@ function buildFanLocal(sides, radius) {
  * caller-supplied one, unlike `buildFanLocal`): S2.3's callers separately
  * bake each light's REAL radius into the batched mesh's WORLD `position`
  * buffer while keeping this shape's raw unit-circle coordinates for
- * `aLocalUnit` — see `buildPackedBatchIllumMesh`'s own header for why both
- * are needed.
+ * `aLocalUnit` — see `effects/lighting/point-light-batch-mesh.js#
+ * writeLightSpanGeometry`'s own header for why both are needed. Still used
+ * here for {@link buildUniformTwinIllumMeshes}'s per-light twin meshes
+ * (production's real per-light path, untouched by batching) — the actual
+ * batched mesh is built by the real production module since S2.4.
  *
  * @param {number} sides
  * @returns {{positions: Float32Array, vertexCount: number}} `positions` is
@@ -310,180 +312,87 @@ function buildMergedLightsMesh(THREE, lights) {
 }
 
 /**
- * S2.3's real thing under test: N lights merged into ONE mesh, per-light
- * values carried as PACKED PER-VERTEX ATTRIBUTES (never `uniformArray`, per
- * `docs/planning/Point-Light-Batching-Design.md` §0/§2), shaded by the REAL
- * production core (`buildIlluminationShadingCore`, unmodified — S2.1's own
- * split is what makes this possible without a second, hand-copied shader).
+ * A regular `sides`-gon WORLD-space polygon around (x,y) at `radius` — feeds
+ * the REAL production `triangulateLightFan` (via `createBatchedLightMesh`)
+ * an input shaped like `foundry/scene-lights.js#deriveLightSnapshot`'s own
+ * `shapePoints`, rather than handing a pre-built local-space fan to a
+ * bench-local mesh builder (S2.3's own `buildPackedBatchIllumMesh`, now
+ * retired — see this scenario's own header for why S2.4 promoted it to
+ * production and pointed THIS bench at the real module instead).
  *
- * TWO different local-space concepts, BOTH needed, matching design doc §3.3:
- *   - `position` (world-space) is BAKED at build/rebuild time —
- *     `origin + localUnit*radius` — computed ONCE here on the CPU, never a
- *     runtime transform. This is the movement mechanism of record, replacing
- *     the BANNED `uniformArray`-indexed transform (the third scenario's own
- *     narrowed-not-fixed defect).
- *   - `aLocalUnit` carries the RAW unit-circle coordinates, unscaled,
- *     untranslated — what the shading core's `dist`/falloff/switchColor math
- *     actually needs (the equivalent of the per-light path's own
- *     `positionLocal.xy`, which is unusable here because `positionLocal` on
- *     THIS mesh already means the WORLD-baked value).
+ * Produces the IDENTICAL local-space fan `buildFanLocalUnit(sides)` builds
+ * directly: `triangulateLightFan` normalizes each point back to
+ * `((px-x)/radius, (py-y)/radius)` = `(cos a, sin a)`, and fans them in the
+ * SAME `i, i+1` winding — so the twin comparison below (which still uses
+ * `buildFanLocalUnit` for its per-light meshes) remains apples-to-apples.
  *
- * `layout` (from `describeBucketVertexBuffers`, S2.2) drives which buffers
- * actually get created — the SAME function production's own bucket registry
- * will call, so this scenario is a real exercise of it, not a parallel guess.
- *
- * @param {*} THREE
- * @param {Array<object>} lights - see the scenario's own light fixtures for
- *   the exact per-light fields consumed.
- * @param {object} args
- * @param {boolean} args.animated @param {boolean} args.windPresent
- * @param {*} [args.animationEntry] - `resolveLightAnimation`'s own return;
- *   required when `animated`.
- * @param {*} args.uGlobalTimeMs @param {*} args.windHandle
- * @param {number} [args.animationQuality=2] @param {string} [args.falloffModel='inverseSquare']
- * @returns {{mesh: *, geo: *, spans: Record<string,{start:number,count:number}>,
- *   buffers: Record<string,*>, layout: *}} `spans`/`buffers` are what the
- *   movement/value-rewrite checks mutate directly — the exact CPU-side
- *   handles a real bucket registry (S2.2's `createBucket`) would also hold.
+ * @param {number} x @param {number} y @param {number} radius @param {number} sides
+ * @returns {number[]} flat [x0,y0,x1,y1,...] world-space polygon.
  */
-function buildPackedBatchIllumMesh(
-  THREE,
-  lights,
-  {
-    animated,
-    windPresent,
-    animationEntry,
-    uGlobalTimeMs,
-    windHandle,
-    animationQuality = 2,
-    falloffModel = 'inverseSquare',
+function regularPolygonShapePoints(x, y, radius, sides) {
+  const pts = new Array(sides * 2);
+  for (let i = 0; i < sides; i++) {
+    const a = (i / sides) * Math.PI * 2;
+    pts[i * 2 + 0] = x + Math.cos(a) * radius;
+    pts[i * 2 + 1] = y + Math.sin(a) * radius;
   }
-) {
-  const { attribute, vec2, vec3, vec4 } = THREE.TSL;
-  const layout = describeBucketVertexBuffers({ channel: 'illumination', animated, windPresent });
+  return pts;
+}
 
-  const fans = lights.map((l) => buildFanLocalUnit(l.sides));
-  const totalVerts = fans.reduce((s, f) => s + f.vertexCount, 0);
+/**
+ * Adapts one of this scenario's ILLUMINATION light fixtures (a flat
+ * `{sourceId, x, y, radius, sides, ...}` object) into
+ * `createBatchedLightMesh`'s own per-member value contract (that module's
+ * header has the full field list). `expectedDepth` defaults to 0 — this
+ * scenario runs with `depthTexNode: null`, under which the height gate
+ * compiles out entirely (a JS-time branch, `point-light-illumination.js`'s
+ * own header), so the value is provably unread; defaulted anyway to match
+ * what the retired local builder did, belt-and-braces.
+ * @param {object} l @returns {object}
+ */
+function toIllumMember(l) {
+  return {
+    sourceId: l.sourceId,
+    x: l.x,
+    y: l.y,
+    radius: l.radius,
+    shapePoints: regularPolygonShapePoints(l.x, l.y, l.radius, l.sides),
+    ratio: l.ratio,
+    attenuationEased: l.attenuationEased,
+    exposure: l.exposure ?? 0,
+    expectedDepth: l.expectedDepth ?? 0,
+    bg: l.bg,
+    dim: l.dim,
+    bright: l.bright,
+    speedRaw: l.speedRaw,
+    reverseSign: l.reverseSign,
+    seed: l.seed,
+    intensityRaw: l.intensityRaw,
+    windExposure: l.windExposure,
+    windResponse: l.windResponse,
+  };
+}
 
-  const itemSizes = { position: 3, aLocalUnit: 2, aParams: 4, aColorA: 4, aColorB: 4, aColorC: 4, aAnim: 4, aWind: 4 };
-  const arrays = {};
-  for (const name of layout.buffers) arrays[name] = new Float32Array(totalVerts * itemSizes[name]);
-
-  let vOff = 0;
-  const spans = {};
-  for (let li = 0; li < lights.length; li++) {
-    const l = lights[li];
-    const fan = fans[li];
-    spans[l.sourceId] = { start: vOff, count: fan.vertexCount };
-    for (let v = 0; v < fan.vertexCount; v++) {
-      const lx = fan.positions[v * 3 + 0];
-      const ly = fan.positions[v * 3 + 1];
-      const vi = vOff + v;
-      arrays.position[vi * 3 + 0] = l.x + lx * l.radius;
-      arrays.position[vi * 3 + 1] = l.y + ly * l.radius;
-      arrays.position[vi * 3 + 2] = 0;
-      arrays.aLocalUnit[vi * 2 + 0] = lx;
-      arrays.aLocalUnit[vi * 2 + 1] = ly;
-      arrays.aParams[vi * 4 + 0] = l.ratio;
-      arrays.aParams[vi * 4 + 1] = l.attenuationEased;
-      arrays.aParams[vi * 4 + 2] = l.exposure ?? 0;
-      arrays.aParams[vi * 4 + 3] = l.expectedDepth ?? 0;
-      arrays.aColorA[vi * 4 + 0] = l.bg[0];
-      arrays.aColorA[vi * 4 + 1] = l.bg[1];
-      arrays.aColorA[vi * 4 + 2] = l.bg[2];
-      arrays.aColorA[vi * 4 + 3] = l.dim[0];
-      arrays.aColorB[vi * 4 + 0] = l.dim[1];
-      arrays.aColorB[vi * 4 + 1] = l.dim[2];
-      arrays.aColorB[vi * 4 + 2] = l.bright[0];
-      arrays.aColorB[vi * 4 + 3] = l.bright[1];
-      arrays.aColorC[vi * 4 + 0] = l.bright[2];
-      arrays.aColorC[vi * 4 + 1] = 0;
-      arrays.aColorC[vi * 4 + 2] = 0;
-      arrays.aColorC[vi * 4 + 3] = 0;
-      if (animated) {
-        arrays.aAnim[vi * 4 + 0] = l.speedRaw;
-        arrays.aAnim[vi * 4 + 1] = l.reverseSign;
-        arrays.aAnim[vi * 4 + 2] = l.seed;
-        arrays.aAnim[vi * 4 + 3] = l.intensityRaw;
-      }
-      if (windPresent) {
-        arrays.aWind[vi * 4 + 0] = l.x;
-        arrays.aWind[vi * 4 + 1] = l.y;
-        arrays.aWind[vi * 4 + 2] = l.windExposure;
-        arrays.aWind[vi * 4 + 3] = l.windResponse;
-      }
-    }
-    vOff += fan.vertexCount;
-  }
-
-  const geo = new THREE.BufferGeometry();
-  const buffers = {};
-  for (const name of layout.buffers) {
-    const attr = new THREE.BufferAttribute(arrays[name], itemSizes[name]);
-    geo.setAttribute(name, attr);
-    buffers[name] = attr;
-  }
-
-  const aParamsNode = attribute('aParams', 'vec4');
-  const aColorANode = attribute('aColorA', 'vec4');
-  const aColorBNode = attribute('aColorB', 'vec4');
-  const aColorCNode = attribute('aColorC', 'vec4');
-  let animInput = null;
-  if (animated) {
-    const n = attribute('aAnim', 'vec4');
-    animInput = { speedRaw: n.x, reverseSign: n.y, seed: n.z, intensityRaw: n.w };
-  }
-  let windInput = null;
-  if (windPresent) {
-    const n = attribute('aWind', 'vec4');
-    windInput = { center: vec2(n.x, n.y), exposure: n.z, response: n.w };
-  }
-
-  const { finalNode, alphaNode } = buildIlluminationShadingCore({
-    THREE,
-    inputs: {
-      localUnitXY: attribute('aLocalUnit', 'vec2'),
-      ratio: aParamsNode.x,
-      attenuationEased: aParamsNode.y,
-      exposure: aParamsNode.z,
-      expectedDepth: aParamsNode.w,
-      backgroundColor: vec3(aColorANode.x, aColorANode.y, aColorANode.z),
-      dimColor: vec3(aColorANode.w, aColorBNode.x, aColorBNode.y),
-      brightColor: vec3(aColorBNode.z, aColorBNode.w, aColorCNode.x),
-      anim: animInput,
-      wind: windInput,
-    },
-    shared: {
-      uGlobalTimeMs,
-      windHandle,
-      attrTexNode: null,
-      depthTexNode: null,
-      depthFlagsTexNode: null,
-      sunShadowSlotNodes: null,
-      blendSunVisibilityAcrossFloors: null,
-      apertureGoboShared: null,
-    },
-    flags: { animation: animated ? animationEntry : null, animationQuality, falloffModel, apertureCount: 0 },
-  });
-
-  const material = new THREE.NodeMaterial();
-  material.transparent = false;
-  material.depthTest = false;
-  material.depthWrite = false;
-  material.side = THREE.DoubleSide;
-  material.blending = THREE.CustomBlending;
-  material.blendEquation = THREE.MaxEquation;
-  material.blendSrc = THREE.OneFactor;
-  material.blendDst = THREE.OneFactor;
-  material.blendEquationAlpha = THREE.MaxEquation;
-  material.blendSrcAlpha = THREE.OneFactor;
-  material.blendDstAlpha = THREE.OneFactor;
-  material.fragmentNode = vec4(finalNode, alphaNode);
-
-  const mesh = new THREE.Mesh(geo, material);
-  mesh.frustumCulled = false;
-
-  return { mesh, geo, spans, buffers, layout };
+/** The COLORATION sibling of {@link toIllumMember}. @param {object} l @returns {object} */
+function toColorMember(l) {
+  return {
+    sourceId: l.sourceId,
+    x: l.x,
+    y: l.y,
+    radius: l.radius,
+    shapePoints: regularPolygonShapePoints(l.x, l.y, l.radius, l.sides),
+    attenuationEased: l.attenuationEased,
+    colorationAlpha: l.colorationAlpha,
+    expectedDepth: 0,
+    ratio: l.ratio ?? 0, // packed but inert — see point-light-batch-mesh.js's own header
+    lightColor: l.lightColor,
+    speedRaw: l.speedRaw,
+    reverseSign: l.reverseSign,
+    seed: l.seed,
+    intensityRaw: l.intensityRaw,
+    windExposure: l.windExposure,
+    windResponse: l.windResponse,
+  };
 }
 
 /**
@@ -496,7 +405,9 @@ function buildPackedBatchIllumMesh(
  * divergence is real — this is what production draws TODAY, per light.
  *
  * @param {*} THREE @param {Array<object>} lights
- * @param {object} args - same shape as `buildPackedBatchIllumMesh`'s own.
+ * @param {object} args - `{animated, windPresent, animationEntry, uGlobalTimeMs,
+ *   windHandle, animationQuality, falloffModel}` — this scenario's own `fullCfg`/
+ *   `lowerQualityCfg` shape.
  * @returns {{scene: *, handles: Array<{mesh:*, handle:object, light:object}>}}
  */
 function buildUniformTwinIllumMeshes(
@@ -997,7 +908,15 @@ export function createPointLightsBench({ THREE, log }) {
       "mesh diverges from production's own per-light wrapper — root cause CONFIRMED (not a " +
       "mystery): candle-flicker.js's candleShape() reads `positionLocal` directly at quality>=2, " +
       "bypassing the core's own injected local-position value; the SAME comparison at quality:1 " +
-      'passes byte-perfectly, isolating the gap to that one animation helper, not the core split.',
+      'passes byte-perfectly, isolating the gap to that one animation helper, not the core split.' +
+      "\n\nS2.4 (2026-08-11, `effects/lighting/point-light-batch-mesh.js`) promoted this scenario's " +
+      "own mesh-building logic to production and pointed every check above at the REAL module's " +
+      '`createBatchedLightMesh`/`.reconcile()` instead of a bench-local copy — the movement/value ' +
+      'checks now go through its real per-member placement dirty-check (asserted via `rebuilt:false` ' +
+      'where the bucket itself should not have rebuilt) rather than poking buffer arrays directly. ' +
+      'One added check, `coloration-batch-renders-one-draw-and-matches-twin`: the COLORATION channel ' +
+      '(Testament S2.4\'s own "both channels" scope), simple case, byte-identical to N separate ' +
+      'production coloration meshes against a shared flat-albedo stand-in.',
     async run() {
       await ensureRenderer();
       const checks = [];
@@ -1077,6 +996,16 @@ export function createPointLightsBench({ THREE, log }) {
         falloffModel: 'inverseSquare',
       };
 
+      const illumShared = {
+        uGlobalTimeMs,
+        windHandle,
+        attrTexNode: null,
+        depthTexNode: null,
+        depthFlagsTexNode: null,
+        sunShadowSlotNodes: null,
+        blendSunVisibilityAcrossFloors: null,
+        apertureGoboShared: null,
+      };
       const layout = describeBucketVertexBuffers({ channel: 'illumination', animated: true, windPresent: true });
       // ⚠️ `evaluate()` calls its callback SYNCHRONOUSLY and reads
       // `.ok`/`.measured`/`.expected` off whatever it returns IMMEDIATELY
@@ -1092,17 +1021,39 @@ export function createPointLightsBench({ THREE, log }) {
       // corrupting checks 2-4's own results too (a stray-render race, not a
       // batching-mechanism bug — caught and fixed before it could be
       // mistaken for one).
+      //
+      // S2.4 (2026-08-11): this scenario now calls the REAL PRODUCTION
+      // `createBatchedLightMesh` (`effects/lighting/point-light-batch-mesh.js`)
+      // instead of a bench-local mesh builder — S2.3's own proof retargeted
+      // at the code it was proving, not a parallel copy of it
+      // (`feedback_mode_forks_silently_drop_features` risk, closed).
+      const fullBatch = createBatchedLightMesh({
+        THREE,
+        channel: 'illumination',
+        shared: illumShared,
+        flags: {
+          animated: true,
+          windPresent: true,
+          animationEntry,
+          animationQuality: 2,
+          falloffModel: 'inverseSquare',
+        },
+      });
       {
-        const batch = buildPackedBatchIllumMesh(THREE, FULL_LIGHTS, fullCfg);
         const scene = new THREE.Scene();
-        scene.add(batch.mesh);
+        scene.add(fullBatch.mesh);
+        fullBatch.reconcile(FULL_LIGHTS.map(toIllumMember));
         const r = await renderScene(scene);
-        batch.geo.dispose();
+        const realAttrCount = Object.keys(fullBatch.mesh.geometry.attributes).length;
         checks.push(
           evaluate('fully-loaded-layout-fits-vertex-buffer-limit', () => ({
             ok:
-              layout.count === 8 && layout.ok === true && Object.keys(batch.buffers).length === 8 && r.drawCalls === 1,
-            measured: `describeBucketVertexBuffers count=${layout.count} ok=${layout.ok}; real geometry attributes=${Object.keys(batch.buffers).length}; drawCalls=${r.drawCalls}`,
+              layout.count === 8 &&
+              layout.ok === true &&
+              fullBatch.layout.count === 8 &&
+              realAttrCount === 8 &&
+              r.drawCalls === 1,
+            measured: `describeBucketVertexBuffers count=${layout.count} ok=${layout.ok}; createBatchedLightMesh´s own layout.count=${fullBatch.layout.count}; real geometry attributes=${realAttrCount}; drawCalls=${r.drawCalls}`,
             expected:
               '8 and true from the arithmetic, matching 8 REAL attributes that actually compiled and drew — the device accepted the fully-loaded layout, not just the count',
           }))
@@ -1110,12 +1061,13 @@ export function createPointLightsBench({ THREE, log }) {
       }
 
       const packedResult = await (async () => {
-        const batch = buildPackedBatchIllumMesh(THREE, FULL_LIGHTS, fullCfg);
         const scene = new THREE.Scene();
-        scene.add(batch.mesh);
-        const frame = await renderScene(scene);
-        batch.geo.dispose();
-        return frame;
+        scene.add(fullBatch.mesh);
+        // Same members, same content — re-reconciling is the steady-state
+        // path (`rebuilt:false`, this bucket already built above), exactly
+        // what a real per-frame caller (S2.5) does every frame regardless.
+        fullBatch.reconcile(FULL_LIGHTS.map(toIllumMember));
+        return renderScene(scene);
       })();
       checks.push(
         evaluate('packed-batch-renders-one-draw', () => ({
@@ -1178,17 +1130,34 @@ export function createPointLightsBench({ THREE, log }) {
         }))
       );
 
+      fullBatch.dispose();
+
       // Isolates the CORE mechanism from the animation-seed-builder gap just
       // documented: the SAME batched-vs-twin comparison, SAME lights, ONLY
       // `animationQuality` dropped to 1 (still animated, still wind-present —
-      // `candleShape`'s positionLocal branch specifically requires >=2).
+      // `candleShape`'s positionLocal branch specifically requires >=2). A
+      // DIFFERENT `animationQuality` is a DIFFERENT bucket key in production
+      // terms (design doc §3.1), hence a fresh `createBatchedLightMesh`
+      // instance, not a mutation of `fullBatch`.
       const lowerQualityCfg = { ...fullCfg, animationQuality: 1 };
       const packedLowQ = await (async () => {
-        const batch = buildPackedBatchIllumMesh(THREE, FULL_LIGHTS, lowerQualityCfg);
+        const batch = createBatchedLightMesh({
+          THREE,
+          channel: 'illumination',
+          shared: illumShared,
+          flags: {
+            animated: true,
+            windPresent: true,
+            animationEntry,
+            animationQuality: 1,
+            falloffModel: 'inverseSquare',
+          },
+        });
         const scene = new THREE.Scene();
         scene.add(batch.mesh);
+        batch.reconcile(FULL_LIGHTS.map(toIllumMember));
         const frame = await renderScene(scene);
-        batch.geo.dispose();
+        batch.dispose();
         return frame;
       })();
       const twinsLowQ = buildUniformTwinIllumMeshes(THREE, FULL_LIGHTS, lowerQualityCfg);
@@ -1252,39 +1221,51 @@ export function createPointLightsBench({ THREE, log }) {
           bright: [0, 0, 1],
         },
       ];
-      const simpleCfg = {
-        animated: false,
-        windPresent: false,
-        uGlobalTimeMs,
-        windHandle,
-        falloffModel: 'foundry',
-      };
-      const simpleBatch = buildPackedBatchIllumMesh(THREE, SIMPLE_LIGHTS, simpleCfg);
+      const simpleBatch = createBatchedLightMesh({
+        THREE,
+        channel: 'illumination',
+        shared: illumShared,
+        flags: {
+          animated: false,
+          windPresent: false,
+          animationEntry: null,
+          animationQuality: 0,
+          falloffModel: 'foundry',
+        },
+      });
       const simpleScene = new THREE.Scene();
       simpleScene.add(simpleBatch.mesh);
 
+      let simpleMembers = SIMPLE_LIGHTS.map(toIllumMember);
+      simpleBatch.reconcile(simpleMembers);
       const simpleFrame1 = await renderScene(simpleScene);
       const pBefore = sampleColor(simpleFrame1.color, 300, 500);
       const qBefore = sampleColor(simpleFrame1.color, 700, 500);
       const rBefore = sampleColor(simpleFrame1.color, 500, 850);
 
-      // MOVE light q: rewrite ONLY its `position` span (world-baked), reusing
-      // the SAME `aLocalUnit` values already stored — a real, minimal move,
-      // not a full rebuild. New spot (560,750) is 286.5px from the old
-      // (700,500) — well past 2*radius(80)=160, so the two footprints cannot
-      // overlap; nothing else reaches either point (p and r are both >390px
-      // from both).
-      const qSpan = simpleBatch.spans['q'];
+      // MOVE light q: reconcile with an updated member list — its vertex
+      // COUNT is unchanged (same `sides`), so `createBucket` itself reports
+      // `rebuilt:false`; this exercises `createBatchedLightMesh`'s own
+      // PER-MEMBER placement dirty-check (asserted below via
+      // `moveResult.rebuilt === false`), not a bucket-level rebuild
+      // coincidentally doing the same thing — the exact mechanism that
+      // replaces `uniformArray`'s indexed transform. New spot (560,750) is
+      // 286.5px from the old (700,500) — well past 2*radius(80)=160, so the
+      // two footprints cannot overlap; nothing else reaches either point (p
+      // and r are both >390px from both).
       const qNewX = 560;
       const qNewY = 750;
-      for (let v = 0; v < qSpan.count; v++) {
-        const vi = qSpan.start + v;
-        const lx = simpleBatch.buffers.aLocalUnit.array[vi * 2 + 0];
-        const ly = simpleBatch.buffers.aLocalUnit.array[vi * 2 + 1];
-        simpleBatch.buffers.position.array[vi * 3 + 0] = qNewX + lx * SIMPLE_LIGHTS[1].radius;
-        simpleBatch.buffers.position.array[vi * 3 + 1] = qNewY + ly * SIMPLE_LIGHTS[1].radius;
-      }
-      simpleBatch.buffers.position.needsUpdate = true;
+      simpleMembers = simpleMembers.map((m) =>
+        m.sourceId === 'q'
+          ? {
+              ...m,
+              x: qNewX,
+              y: qNewY,
+              shapePoints: regularPolygonShapePoints(qNewX, qNewY, SIMPLE_LIGHTS[1].radius, SIMPLE_LIGHTS[1].sides),
+            }
+          : m
+      );
+      const moveResult = simpleBatch.reconcile(simpleMembers);
       const simpleFrame2 = await renderScene(simpleScene);
       const qOldSpotAfter = sampleColor(simpleFrame2.color, 700, 500);
       const qNewSpotAfter = sampleColor(simpleFrame2.color, qNewX, qNewY);
@@ -1292,27 +1273,25 @@ export function createPointLightsBench({ THREE, log }) {
         evaluate('span-position-rewrite-moves-a-light', () => ({
           ok:
             qBefore.g > 150 && // non-vacuity: the old spot was genuinely lit BEFORE the move, not vacuously empty all along
+            moveResult.rebuilt === false &&
             qOldSpotAfter.r === 0 &&
             qOldSpotAfter.g === 0 &&
             qOldSpotAfter.b === 0 &&
             qNewSpotAfter.g > 150,
-          measured: `old spot(700,500) before=${qBefore.r},${qBefore.g},${qBefore.b} after=${qOldSpotAfter.r},${qOldSpotAfter.g},${qOldSpotAfter.b}; new spot(${qNewX},${qNewY})=${qNewSpotAfter.r},${qNewSpotAfter.g},${qNewSpotAfter.b}`,
+          measured: `old spot(700,500) before=${qBefore.r},${qBefore.g},${qBefore.b} after=${qOldSpotAfter.r},${qOldSpotAfter.g},${qOldSpotAfter.b}; new spot(${qNewX},${qNewY})=${qNewSpotAfter.r},${qNewSpotAfter.g},${qNewSpotAfter.b}; bucket rebuilt=${moveResult.rebuilt}`,
           expected:
-            'old spot WAS lit green, now empty; new spot is green — a `position`-span rewrite (not a transform, not uniformArray) moved the light, and stuck across the re-render',
+            'old spot WAS lit green, now empty; new spot is green; rebuilt:false — a per-member placement rewrite (not a bucket rebuild, not a transform, not uniformArray) moved the light, and stuck across the re-render',
         }))
       );
 
-      // REWRITE light p's OWN value span (aParams + aColorB, its bright
-      // colour's red channel component) — every other light must stay
-      // byte-identical.
-      const pSpan = simpleBatch.spans['p'];
-      for (let v = 0; v < pSpan.count; v++) {
-        const vi = pSpan.start + v;
-        simpleBatch.buffers.aParams.array[vi * 4 + 0] = 0.05; // ratio: much smaller bright core
-        simpleBatch.buffers.aColorB.array[vi * 4 + 2] = 0.1; // bright.r: red -> dim
-      }
-      simpleBatch.buffers.aParams.needsUpdate = true;
-      simpleBatch.buffers.aColorB.needsUpdate = true;
+      // REWRITE light p's OWN VALUES (ratio + bright.r) via a fresh
+      // reconcile — every other light must stay byte-identical. Vertex
+      // count and placement are untouched for every member, so this again
+      // hits `rebuilt:false`.
+      simpleMembers = simpleMembers.map((m) =>
+        m.sourceId === 'p' ? { ...m, ratio: 0.05, bright: [0.1, m.bright[1], m.bright[2]] } : m
+      );
+      const valueResult = simpleBatch.reconcile(simpleMembers);
       const simpleFrame3 = await renderScene(simpleScene);
       const pAfter = sampleColor(simpleFrame3.color, 300, 500);
       const qAfterValueRewrite = sampleColor(simpleFrame3.color, qNewX, qNewY);
@@ -1320,6 +1299,7 @@ export function createPointLightsBench({ THREE, log }) {
       checks.push(
         evaluate('span-value-rewrite-touches-one-light-only', () => ({
           ok:
+            valueResult.rebuilt === false &&
             (pAfter.r !== pBefore.r || pAfter.g !== pBefore.g || pAfter.b !== pBefore.b) &&
             qAfterValueRewrite.r === qNewSpotAfter.r &&
             qAfterValueRewrite.g === qNewSpotAfter.g &&
@@ -1327,12 +1307,20 @@ export function createPointLightsBench({ THREE, log }) {
             rAfter.r === rBefore.r &&
             rAfter.g === rBefore.g &&
             rAfter.b === rBefore.b,
-          measured: `p before=${pBefore.r},${pBefore.g},${pBefore.b} after=${pAfter.r},${pAfter.g},${pAfter.b}; q unchanged=${qAfterValueRewrite.g === qNewSpotAfter.g}; r unchanged=${rAfter.b === rBefore.b}`,
+          measured: `p before=${pBefore.r},${pBefore.g},${pBefore.b} after=${pAfter.r},${pAfter.g},${pAfter.b}; q unchanged=${qAfterValueRewrite.g === qNewSpotAfter.g}; r unchanged=${rAfter.b === rBefore.b}; bucket rebuilt=${valueResult.rebuilt}`,
           expected:
-            "p's own appearance changed (the rewrite had real effect); q and r are byte-identical to their own prior frames — the SAME shared-array-write isolation the third scenario's own passing checks already proved, now on the safe mechanism",
+            "rebuilt:false, p's own appearance changed (the rewrite had real effect); q and r are byte-identical to their own prior frames — the SAME shared-array-write isolation the third scenario's own passing checks already proved, now on the safe mechanism",
         }))
       );
 
+      // STEADY STATE — reconcile again with LITERALLY UNCHANGED members
+      // (the real per-frame call S2.5 will make every frame regardless of
+      // whether anything actually changed) and render again. S2.4 does not
+      // value-diff yet (its own header), so this still writes every value
+      // buffer — proving that redundant rewrite is idempotent (byte-stable
+      // output), which is the guarantee S2.5's dirty-skip optimizes on TOP
+      // of, not a substitute for.
+      const steadyResult = simpleBatch.reconcile(simpleMembers);
       const simpleFrame4 = await renderScene(simpleScene);
       let steadyMaxDelta = 0;
       for (let i = 0; i < simpleFrame3.color.length; i++) {
@@ -1341,14 +1329,136 @@ export function createPointLightsBench({ THREE, log }) {
       }
       checks.push(
         evaluate('steady-state-renders-byte-stable-with-zero-writes', () => ({
-          ok: steadyMaxDelta === 0,
-          measured: `maxChannelDelta=${steadyMaxDelta} across two renders with no buffer writes between them`,
+          ok: steadyMaxDelta === 0 && steadyResult.rebuilt === false,
+          measured: `maxChannelDelta=${steadyMaxDelta} across two renders with an unchanged-member reconcile between them; bucket rebuilt=${steadyResult.rebuilt}`,
           expected:
-            '0 — this is the exact class of check that caught the third scenario´s uniformArray defect (a stale image persisting across renders); run here against the safe, span-rewrite mechanism, it must actually pass',
+            '0 and rebuilt:false — this is the exact class of check that caught the third scenario´s uniformArray defect (a stale image persisting across renders); run here against the safe, span-rewrite mechanism, it must actually pass',
         }))
       );
 
-      simpleBatch.geo.dispose();
+      simpleBatch.dispose();
+
+      // ==== Check: COLORATION channel (Testament S2.4´s own scope is "both
+      // channels") — the simple (no animation, no wind) case, proving
+      // `createBatchedLightMesh`'s coloration branch actually compiles and
+      // draws correctly, byte-identical to N separate production coloration
+      // meshes. A flat 1x1 albedo stand-in (coloration's `reflection` term
+      // needs A texture, unlike illumination's optional depth/attr inputs —
+      // point-light-coloration.js samples it unconditionally) — uniform
+      // colour is a legitimate input, not an invented producer shape; both
+      // the batch and its twin sample the SAME texture, so the comparison
+      // stays apples-to-apples regardless of what it holds. ====
+      const albedoTexture = new THREE.DataTexture(
+        new Uint8Array([160, 160, 160, 255]),
+        1,
+        1,
+        THREE.RGBAFormat,
+        THREE.UnsignedByteType
+      );
+      // NoColorSpace (the default, set explicitly) — coloration's own OETF
+      // call expects a LINEAR sample (matching `buf:scene.color`'s real
+      // contract, per point-light-coloration.js's own header); an sRGB-
+      // tagged texture would double-encode it.
+      albedoTexture.colorSpace = THREE.NoColorSpace;
+      albedoTexture.needsUpdate = true;
+      const colorShared = {
+        uGlobalTimeMs,
+        windHandle,
+        albedoTexture,
+        depthTexNode: null,
+        depthFlagsTexNode: null,
+        apertureGoboShared: null,
+      };
+      const COLOR_LIGHTS = [
+        {
+          sourceId: 'cp',
+          x: 300,
+          y: 500,
+          radius: 80,
+          sides: 20,
+          attenuationEased: 0.6,
+          colorationAlpha: 1,
+          lightColor: [1, 0, 0],
+        },
+        {
+          sourceId: 'cq',
+          x: 700,
+          y: 500,
+          radius: 80,
+          sides: 20,
+          attenuationEased: 0.6,
+          colorationAlpha: 1,
+          lightColor: [0, 1, 0],
+        },
+      ];
+      const colorBatch = createBatchedLightMesh({
+        THREE,
+        channel: 'coloration',
+        shared: colorShared,
+        flags: {
+          animated: false,
+          windPresent: false,
+          animationEntry: null,
+          animationQuality: 0,
+          falloffModel: 'foundry',
+        },
+      });
+      const colorBatchResult = colorBatch.reconcile(COLOR_LIGHTS.map(toColorMember));
+      const colorScene = new THREE.Scene();
+      colorScene.add(colorBatch.mesh);
+      const colorBatchFrame = await renderScene(colorScene);
+
+      const { uniform, float: colFloat } = THREE.TSL;
+      const colorTwinScene = new THREE.Scene();
+      const colorTwinHandles = [];
+      for (const l of COLOR_LIGHTS) {
+        const handle = buildPointLightColorationMaterial({
+          THREE,
+          albedoTexture,
+          animation: null,
+          uGlobalTimeMs,
+          uRatio: uniform(colFloat(0)),
+          animationQuality: 0,
+          falloffModel: 'foundry',
+          windHandle,
+        });
+        handle.uAttenuationEased.value = l.attenuationEased;
+        handle.uColorationAlpha.value = l.colorationAlpha;
+        handle.uLightColor.value.set(l.lightColor[0], l.lightColor[1], l.lightColor[2]);
+        const fan = buildFanLocalUnit(l.sides);
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(fan.positions, 3));
+        const mesh = new THREE.Mesh(geo, handle.material);
+        mesh.position.set(l.x, l.y, 0);
+        mesh.scale.set(l.radius, l.radius, 1);
+        mesh.frustumCulled = false;
+        colorTwinScene.add(mesh);
+        colorTwinHandles.push(mesh);
+      }
+      const colorTwinFrame = await renderScene(colorTwinScene);
+      for (const m of colorTwinHandles) m.geometry.dispose();
+
+      let colorMaxDelta = 0;
+      for (let i = 0; i < colorBatchFrame.color.length; i++) {
+        colorMaxDelta = Math.max(colorMaxDelta, Math.abs(colorBatchFrame.color[i] - colorTwinFrame.color[i]));
+      }
+      const colorOverlapSample = sampleColor(colorBatchFrame.color, 300, 500);
+      checks.push(
+        evaluate('coloration-batch-renders-one-draw-and-matches-twin', () => ({
+          ok:
+            colorBatch.layout.count === 4 &&
+            colorBatchFrame.drawCalls === 1 &&
+            colorMaxDelta === 0 &&
+            colorBatchResult.rebuilt === true &&
+            (colorOverlapSample.r > 10 || colorOverlapSample.g > 10 || colorOverlapSample.b > 10),
+          measured: `layout.count=${colorBatch.layout.count}; drawCalls=${colorBatchFrame.drawCalls}; maxChannelDelta=${colorMaxDelta}; sample(300,500)=${colorOverlapSample.r},${colorOverlapSample.g},${colorOverlapSample.b}`,
+          expected:
+            '4 buffers (position, aLocalUnit, aParams, aLightColor — the simple no-anim/no-wind coloration layout), 1 draw call for 2 lights, 0 pixel delta against N separate production coloration meshes, and a non-vacuous (actually lit) sample point',
+        }))
+      );
+      colorBatch.dispose();
+      albedoTexture.dispose();
+
       return { checks, calibration: 'OK' };
     },
   });
@@ -1363,7 +1473,10 @@ export function createPointLightsBench({ THREE, log }) {
       'MAX blending is byte-identical to N separate draws, order-independent, and costs ONE real ' +
       'renderer.info.render.drawCalls instead of N. S2.3 then proves the PRODUCTION-SHAPED version ' +
       'of that mechanism: the REAL shading core and REAL layout function, fed via packed per-vertex ' +
-      'attributes (never `uniformArray`), byte-identical to N separate production-wrapper meshes.',
+      'attributes (never `uniformArray`), byte-identical to N separate production-wrapper meshes. ' +
+      'S2.4 (2026-08-11) retargeted the production-shaped scenario at the REAL production module ' +
+      '(`effects/lighting/point-light-batch-mesh.js#createBatchedLightMesh`) instead of a bench-local ' +
+      'copy, and added a coloration-channel proof (Testament S2.4´s own "both channels" scope).',
     scenarios,
     checkIds: [
       'two-groups-cost-two-real-draw-calls',
@@ -1383,6 +1496,7 @@ export function createPointLightsBench({ THREE, log }) {
       'span-position-rewrite-moves-a-light',
       'span-value-rewrite-touches-one-light-only',
       'steady-state-renders-byte-stable-with-zero-writes',
+      'coloration-batch-renders-one-draw-and-matches-twin',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

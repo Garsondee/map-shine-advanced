@@ -64,6 +64,9 @@ export {
   // STAGE 1's revert flag (docs/planning/Stage-1-Shade-Once.md).
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
+  // STAGE 2's revert flag — point-light batching (docs/planning/Point-Light-Batching-Design.md).
+  setVtPanViewerPointLightBatching,
+  getVtPanViewerPointLightBatching,
   // SCENE SETTLE — the real "everything is on screen now" signal (vt/settle.js).
   getVtPanViewerSceneSettle,
   drawVtPanViewerWorldMarkers,

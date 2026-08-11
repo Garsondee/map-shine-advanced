@@ -201,13 +201,39 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
     return slot;
   }
 
+  // Sentinel for openAt[i]: "a begin() landed while settling". Distinct from
+  // -1 (closed) and from every real timestamp (now() is never negative). See
+  // openSlot/closeSlot's own comments for why this exists.
+  const SETTLING = -2;
+
   function openSlot(i) {
     if (i < 0 || i >= slots) return;
-    // Already open: a re-entrant begin. Keep the FIRST timestamp (the outer
-    // bracket is the true extent) and count the anomaly rather than silently
+    // Already open: a re-entrant begin (or one still pending from the settle
+    // window below). Keep the FIRST open (real timestamp or SETTLING — either
+    // way it is the true extent) and count the anomaly rather than silently
     // overwriting, which would under-report the zone forever after.
-    if (openAt[i] >= 0) {
+    if (openAt[i] !== -1) {
       unbalanced[i]++;
+      return;
+    }
+    // NO CLOCK READ WHILE SETTLING (BUG FOUND LIVE, 2026-08-11 — a live
+    // perf-run-full report showed `residency.pass`/`residency.itemLoad` each
+    // unbalanced by exactly 1, on a run whose try/finally around both was
+    // already correct). `perf-run-full` starts the camera path — which fires
+    // real residency passes — BEFORE/WHILE the profiler is still settling
+    // (runProfileSession arms with settleFrames well after playCameraPath is
+    // already moving). A pass whose begin() lands during that settle window
+    // used to be silently gated off entirely (this function returned without
+    // touching openAt), while its own `finally { profiler.end(...) }` has no
+    // way to know that — it fires whenever the pass's real async work
+    // finishes, often AFTER settling completes, and found nothing open: a
+    // spurious "end with no begin". The bracket was never mispaired; the
+    // WINDOW moved out from under it. Recording SETTLING here (no now() call
+    // — settling must stay exactly as free as disarmed) lets closeSlot
+    // recognise that same story on the other end and discard silently instead
+    // of flagging an anomaly that was never a renderer bug.
+    if (settleRemaining > 0) {
+      openAt[i] = SETTLING;
       return;
     }
     openAt[i] = now();
@@ -241,12 +267,18 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
     const start = openAt[i];
     // An end with no begin. Counted, never silently dropped: it means a bracket
     // is mispaired somewhere, and every number for this zone is suspect.
-    if (start < 0) {
+    if (start === -1) {
       unbalanced[i]++;
       return;
     }
-    const elapsed = now() - start;
     openAt[i] = -1;
+    // The matching begin() landed during settling and was recorded as SETTLING,
+    // not a timestamp (see openSlot). This end() — whether it also happens
+    // during settling or, as in the live bug, well after — closes the SAME
+    // bracket the caller opened; discard it exactly like any other settle-
+    // window sample, silently, with no clock read and no anomaly.
+    if (start === SETTLING) return;
+    const elapsed = now() - start;
     popStack(i);
     if (elapsed >= 0) {
       cpuSum[i] += elapsed;
@@ -277,12 +309,16 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
   // Built ONCE. The render loop passes this same object to runPassPlan every
   // frame; building it inline there would allocate two closures per frame.
   const passHooks = Object.freeze({
+    // settleRemaining is no longer checked here — openSlot/closeSlot already
+    // gate on it themselves (the SETTLING sentinel), and checking it twice
+    // would re-introduce the exact boundary-straddle bug their own comments
+    // describe, just for pass zones instead of declared ones.
     onPassBegin(passId) {
-      if (!armed || settleRemaining > 0) return;
+      if (!armed) return;
       openSlot(slotForPass(passId));
     },
     onPassEnd(passId) {
-      if (!armed || settleRemaining > 0) return;
+      if (!armed) return;
       closeSlot(slotForPass(passId));
     },
   });
@@ -331,11 +367,16 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
       owner = null;
       readDrawCalls = null;
       readTriangles = null;
-      // Any zone still open at disarm was never closed. Close the books on it as
-      // an anomaly so a truncated window cannot leave a stale open timestamp
-      // that poisons the NEXT run's first sample.
+      // Any zone still open at disarm was never closed — including one still
+      // holding SETTLING (openSlot's sentinel for "begin landed during
+      // settling"): closeSlot forgives THAT sentinel when a real end()
+      // eventually finds it, but nothing ever came here to claim it, which is
+      // a genuine mispaired bracket (a throw during settling, same as any
+      // other), not the boundary artifact the sentinel exists to silence.
+      // Close the books on it as an anomaly so a truncated window cannot leave
+      // a stale open timestamp that poisons the NEXT run's first sample.
       for (let i = 0; i < slots; i++) {
-        if (openAt[i] >= 0) {
+        if (openAt[i] !== -1) {
           unbalanced[i]++;
           openAt[i] = -1;
         }
@@ -361,21 +402,26 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
     /** Zone index for a declared id, or -1. Resolve ONCE, outside the loop. */
     indexOf: (id) => zoneIndexOf(id),
 
+    // settleRemaining is checked INSIDE openSlot/closeSlot, not here — see
+    // their own comments (frame-profiler's SETTLING sentinel). Gating it here
+    // too would independently re-decide "are we settling?" at begin time vs
+    // end time, which is exactly what let a pass that starts mid-settle and
+    // finishes after report a false unbalanced bracket.
     begin(index) {
-      if (!armed || settleRemaining > 0) return;
+      if (!armed) return;
       openSlot(index);
     },
     end(index) {
-      if (!armed || settleRemaining > 0) return;
+      if (!armed) return;
       closeSlot(index);
     },
     /** Convenience for cold call sites; prefer the integer form in the loop. */
     beginById(id) {
-      if (!armed || settleRemaining > 0) return;
+      if (!armed) return;
       openSlot(zoneIndexOf(id));
     },
     endById(id) {
-      if (!armed || settleRemaining > 0) return;
+      if (!armed) return;
       closeSlot(zoneIndexOf(id));
     },
 

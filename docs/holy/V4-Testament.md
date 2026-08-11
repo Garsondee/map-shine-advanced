@@ -498,6 +498,59 @@ closes over the wrong item's motion state.
 **Needs Law 3's pixel-diff gate** (same class of proof as S1.5's byte-identical capture) before it
 may ship — this touches the depth authority, a shared foundation with 7 consumers.
 
+**BUILT 2026-08-11, Claude Sonnet 5 — evidence below; NOT yet the author's own LIVE verdict** (the
+two-word doctrine, THE GOAL's own banner: `BUILT (unverified)` vs `LIVE`).
+
+`vt/depth-proxy-material-pool.js` (new, pure, zero THREE dependency) —
+`computeDepthProxyMaterialSignature` + a pass-scoped mark-and-sweep pool (`beginPass`/`get`/
+`endPass`/`disposeAll`/`stats`). Wired into `rebuildSceneDepthProxies`: the TILE branch (and its
+S1.4 prepass twin) resolves through the pool; the VEGETATION branch is deliberately left unpooled,
+exactly as this petition scoped it (its own positionNode-aliasing risk, and only 0.9% of the
+measured rebuild cost). `disposeSceneDepth` (full viewer teardown) fixed alongside it — a real,
+self-caught correctness issue: once a signature can be shared by several tiles in one pass, looping
+`depthProxyEntries` and calling `.dispose()` per ENTRY would call it more than once on the SAME
+pooled material; now disposes via the pool's own `disposeAll()` (visits each distinct material
+exactly once) and additionally now tears down `depthPrepassEntries` too — a pre-existing gap (S1.4's
+own twins were never explicitly disposed on teardown before this).
+
+Both preconditions this petition named were verified against the actual code, not assumed: (1)
+confirmed by reading `applyEarlyZTileState` and the `debugForceOpaqueBlendOff` branch — both mutate
+`t.material` (the tile's own production material), never the depth-proxy material this pool
+manages; (2) resolved by exclusion — vegetation's positionNode never enters the pool at all.
+
+**Evidence, ascending rigor:**
+- 30 new Node assertions (`vt/__tests__/depth-proxy-material-pool.test.mjs`) — signature decisions
+  pinned against `scene-depth.js`'s own source (opaque items share ONE key across different
+  textures because the shader never samples `tex` in that branch; alpha-tested items MUST
+  differentiate by texture; `colorWrite` differentiates the real proxy from its twin, since they can
+  never share one material object), plus the full mark-and-sweep lifecycle including sabotage cases
+  (`get()`/`endPass()` outside a `beginPass()` bracket throws; a signature shared by 3 callers in one
+  pass is disposed exactly once on eviction, never 3 times).
+- `npm run verify` green throughout — 8,495 tests.
+- **Live-booted, real WebGPU, the bench Mansion, both floors** (`msa-look.spec.js`, then a live
+  console session against the same running instance): scene renders correctly (screenshot: both
+  floors, walls, furniture, lighting, occlusion all visually correct — no black holes, no
+  wrong-floor bleed-through); zero NEW console errors (the one present is pre-existing and
+  unrelated — `boot.js:7130`'s VRAM-severance PIXI-proxy-fetch failure, confirmed via `git log`/grep
+  against code this session never touched). `MapShine.getEarlyZComposition().depthProxyMaterialPool`
+  read live: **`{hits: 30, misses: 6, evictions: 0, size: 6}`** — internally consistent with the
+  scene's own real counts (`depthProxies: 6` = 5 tagged tiles + 1 vegetation item;
+  `tiles: {interior: 4, passthrough: 1}`), an 83% hit rate already before any panning, zero
+  evictions (nothing pooled has gone stale yet).
+- **Honest gap:** could not watch the hit count climb further under live interaction this session —
+  the sandboxed browser pane used for this check lacks OS-level focus, and Chrome throttles
+  `requestAnimationFrame` in an unfocused tab regardless of `document.hidden` spoofing (confirmed:
+  `document.hasFocus()` stayed `false` throughout, even after `tabs_select` and a forced
+  `visibilitychange` dispatch). Reads as an environment limit, not a code question mark — the
+  numbers already obtained are real and self-consistent, produced by genuine residency passes that
+  ran during normal scene load/settle before this session ever touched the page.
+- **No byte-exact pixel-diff was run.** No revert flag exists for this fix — it is a pure allocation
+  optimisation with no semantic branch to flip, unlike S1.4's `earlyZComposition`. Correctness rests
+  on the signature function's own tests, the two preconditions verified against source, and the live
+  visual check above — not an S1.5-style byte-identical capture. If a future session wants that
+  exact proof, the shape is the same as S1.5's: capture with this fix temporarily reverted
+  (reintroduce the unconditional dispose) vs current, same camera/floor/frozen time.
+
 ### Stage 2 — One draw for many lights *(restructured by Fable, 2026-08-11 — P-004 RESOLVED, see the petition ledger)*
 
 *The original "storage-buffer soup / ONE illum draw / ONE ADD coloration draw" sketch is
@@ -683,7 +736,7 @@ worker-initiated plan edit. Evidence for all six: a real 36s camera-stress DevTo
 - [ ] RenderBundles adopted for static draw lists *(if the Stage-0 probe passed)*.
 - [ ] Apply whatever Stage 0 named as the 7.7 ms cause; escalate to a local three patch or a
       raw-pass scalpel ONLY if measurement convicts three itself (menu Option 5 rules).
-- [ ] **Perf harness stops measuring itself.** *(added 2026-08-11)* `runProfileSession`
+- [x] **Perf harness stops measuring itself.** *(added 2026-08-11)* `runProfileSession`
       (`diag/perf-session.js`) already guards two instruments from fighting over ownership (the
       live zone HUD vs a profile session mid-window); it does NOT yet guard a simpler, different
       problem — live debug UI (the astrolabe dial, `perf-strip`, any open panel) costing real
@@ -694,12 +747,30 @@ worker-initiated plan edit. Evidence for all six: a real 36s camera-stress DevTo
       before. **Until this ships, any perf report captured with a debug panel open is suspect for
       that reason alone** — this item should land before trusting a borderline reading on any
       other Stage 4 gate.
-- [ ] **Dirty-check `astrolabe.js`'s `syncTuningSummary`.** *(added 2026-08-11)* Called from
+      · done Claude Sonnet 5 2026-08-11 — `runProfileSession` calls `harness.hideLiveUi?.()` right
+      after arming (before the settle wait, so settling ALSO runs hidden) and
+      `harness.restoreLiveUi?.()` in the `finally` block, always, mirroring `disarmProfiler`'s own
+      always-runs guarantee — tested that a failing `restoreLiveUi` cannot mask the original error.
+      `boot.js`'s `profileHarness` implements the pair over the ALREADY-EXISTING
+      `MapShine.debug.hidePanel`/`showPanel`/`isPanelVisible` (confirmed these three already
+      existed, simply unused for this purpose): remembers whether the panel was visible BEFORE
+      hiding, so restore reopens it only if the author had it open — a GM who had already closed it
+      is not surprised by it popping open when a run finishes. 8 new Node assertions
+      (`perf-session.test.mjs`), including the throwing-path and both-hooks-optional cases.
+      **Live-verified, not just unit-tested:** `MapShine.debug.hidePanel()`/`showPanel()`/
+      `isPanelVisible()` called directly against the live bench session —
+      `{before: true, afterHide: false, afterShow: true}`, the exact expected sequence.
+- [x] **Dirty-check `astrolabe.js`'s `syncTuningSummary`.** *(added 2026-08-11)* Called from
       `update()` every frame (`astrolabe.js:531`); rewrites `tuningSummary.innerHTML`
       unconditionally for a string whose only variable is `skyRow.value() > 0`. Re-render only on
       that boolean's actual change. Measured: 709ms across one 35.6s capture. Zero visual risk —
       the output string is byte-identical whenever the boolean doesn't change.
-- [ ] **Throttle live-diagnostic repaints to a human-perceptible cadence.** *(added 2026-08-11)*
+      · done Claude Sonnet 5 2026-08-11 — `lastSkyOn` tracks the boolean; the function returns
+      before touching `innerHTML` when it is unchanged since the last call. The render branch
+      itself is byte-for-byte untouched, only the call is now guarded — verified by inspection, low
+      enough risk that no dedicated test was written beyond the live session's "no console error,
+      panel renders correctly" check (same session as the item below).
+- [x] **Throttle live-diagnostic repaints to a human-perceptible cadence.** *(added 2026-08-11)*
       The astrolabe dial's `update()` (SVG attribute writes for the clock hand/wind arrow),
       `perf-strip`'s numeric readout, and `describeRenderMode`'s `getComputedStyle` watchdog check
       (`diag/render-fallback.js:178`, reached every frame via the diagnostics report) all currently
@@ -710,6 +781,26 @@ worker-initiated plan edit. Evidence for all six: a real 36s camera-stress DevTo
       (ROH) cost, gated on a panel being open — not currently paid by every player. Real, worth
       fixing, but lower urgency than a cost every player pays; it primarily matters because it has
       been quietly inflating every past perf capture taken with a panel open (see the item above).
+      · done Claude Sonnet 5 2026-08-11, PARTIALLY, with a correction recorded rather than silently
+      dropped: **`perf-strip` needed NO fix.** Reading `boot.js`'s heartbeat loop before touching
+      anything found it ALREADY throttles `updatePerfStrip` to ~4Hz (`Math.floor(t/250)`, its ONLY
+      call site) — this item's own 259ms figure is perf-strip's real cost at an already-correct
+      cadence, not evidence of a missing one; fixing it again would have been redundant, so it was
+      left untouched. What DID need building: `pumpAstrolabe` (`boot.js`) now takes rAF's own
+      callback timestamp as an INPUT (never a new `performance.now()` call boot.js is not allowed to
+      make — `time/one-clock`) and repaints at most every 100ms, additionally gated on
+      `MapShine.debug.isPanelVisible() !== false` (fails OPEN on an unexpected `undefined`, per this
+      project's own gate-polarity doctrine) so the hide-while-measuring item above actually stops
+      its cost rather than just CSS-hiding it. `describeRenderMode` gained its own internal ~250ms
+      cache, keyed on `(canvas, loopActive)` so a genuinely different question is never served a
+      stale answer — chosen over auditing every current and future caller's frequency, since this
+      file has no visibility into that (confirmed: reached from 7+ sites in `boot.js` alone). Both
+      throttles are safe specifically BECAUSE `engageFoundryFallback` (the REAL safety mechanism)
+      mutates the DOM synchronously, independent of whether/when `describeRenderMode` is ever
+      called — verified by reading it, not assumed. First test file for `render-fallback.js` (11
+      new assertions, reachable without a DOM mock via the real `canvas:null` code path,
+      CONVENTIONS.md §4). `npm run verify` green (8,495 tests). Live-booted with no new console
+      errors (see DEFERRED-S1b's own evidence block above, same session).
 - [ ] **Give point-light wall-clipping its own perf zone.** *(added 2026-08-11)*
       `computeLightWallClippedShape` (`scene-wall-clip.js:255`) measured at 988ms inclusive across
       one 35.6s capture — nearly as much as the ENTIRE `point-light-pool.js` update it serves
@@ -717,6 +808,17 @@ worker-initiated plan edit. Evidence for all six: a real 36s camera-stress DevTo
       `light.pointLightUpdate`'s total until now. Instrument first; decide whether it needs its
       own optimisation only once a live per-zone number, not an inclusive-sample estimate,
       confirms it.
+      **Investigated, NOT built, 2026-08-11 (Claude Sonnet 5) — scope grew past what this item
+      asked for, recorded rather than rushed.** Wiring this needs profiler access threaded through
+      TWO files: `point-light-pool.js`'s `update()` has ZERO profiler references anywhere in the
+      file today (confirmed by reading it whole) — the entire point-light subsystem is timed only
+      as one opaque external bracket (`light.pointLightUpdate`, opened by `runLightAccumulatePass`)
+      — and `scene-lights.js#readActiveLightSources` (its one confirmed call site) would need a new
+      parameter too. That is a real, first-time architectural addition to how this subsystem reaches
+      the profiler, not a data-only zone declaration, and it sits beside Foundry's lighting/vision
+      adapter — exactly where this project's own doctrine says slow down, not rush. Deferred to its
+      own properly-scoped pass rather than wired carelessly inside an already-large session that
+      also touched the depth authority, the perf harness, and three other files.
 - [ ] **Gate: render-loop CPU ≤ 8 ms; `depthRenderCall` CPU ≤ 2 ms or cause documented as
       irreducible.**
 

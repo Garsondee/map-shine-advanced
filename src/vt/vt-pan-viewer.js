@@ -135,6 +135,7 @@ import {
   DEPTH_PASS_NEAR,
   DEPTH_PASS_FAR,
 } from './scene-depth.js';
+import { computeDepthProxyMaterialSignature, createDepthProxyMaterialPool } from './depth-proxy-material-pool.js';
 import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
@@ -6381,11 +6382,31 @@ export async function startVtPanViewer({
     // item's own tile geometry rather than allocating any of its own, and
     // residency passes are already event-driven, never per-frame.
     const depthScene = new THREE.Scene();
-    /** @type {Array<{mesh: *, material: *}>} the depth scene's OWN current
-     * children — tracked here (not read back off `depthScene.children`, which
-     * would also see anything else ever added to it) so a rebuild disposes
-     * EXACTLY what the last rebuild created, nothing more, nothing less. */
+    /** @type {Array<{mesh: *, material: *, pooled: boolean}>} the depth
+     * scene's OWN current children — tracked here (not read back off
+     * `depthScene.children`, which would also see anything else ever added
+     * to it) so a rebuild disposes EXACTLY what the last rebuild created,
+     * nothing more, nothing less. `pooled` records whether `material` is
+     * owned by `depthProxyMaterialPool` below (a tile) or built fresh every
+     * pass (vegetation, deliberately never pooled — see
+     * depth-proxy-material-pool.js's own header) — it decides who is allowed
+     * to dispose `material`: an entry's own rebuild loop for a non-pooled
+     * one, only the pool's own endPass()/disposeAll() sweep for a pooled
+     * one. Getting this wrong in either direction is a real bug: disposing a
+     * pooled material directly would evict it from three's own graph cache
+     * out from under the pool's bookkeeping (`usedTimes` would go negative);
+     * never disposing a non-pooled one would leak it forever. */
     let depthProxyEntries = [];
+    // DEFERRED-S1b (docs/holy/V4-Testament.md; mechanism in
+    // docs/planning/Trace-Analysis-2026-08-11.md §2a) — ONE pool shared by
+    // both depthScene's real proxies and depthPrepassScene's S1.4 twins
+    // (their signatures always differ on `colorWrite`, so they can never
+    // collide into the same entry). Lives beside depthProxyEntries because
+    // the two are lifecycle-paired: every pooled material this pool is
+    // still holding is referenced by exactly one current entry in
+    // depthProxyEntries or depthPrepassEntries, and disposeSceneDepth()
+    // below tears down both together.
+    const depthProxyMaterialPool = createDepthProxyMaterialPool();
 
     // ── WATER TIER 0: the surface (effects/water/water-surface-subsystem.js)
     // Constructed HERE, after `scene` — that module owns the mesh, the
@@ -9398,7 +9419,9 @@ export async function startVtPanViewer({
 
     let earlyZComposition = true;
     /** Prepass twins of `depthScene`'s proxies — same geometry, colour masked.
-     * Rebuilt with them, every residency pass, never per frame. */
+     * Rebuilt with them, every residency pass, never per frame. Shares
+     * `depthProxyMaterialPool` with `depthProxyEntries` above — see that
+     * declaration's own doc for the `pooled` field's meaning. */
     const depthPrepassScene = new THREE.Scene();
     let depthPrepassEntries = [];
 
@@ -10315,13 +10338,23 @@ export async function startVtPanViewer({
      * real proxy was built from, so the two can never drift into describing
      * different geometry, alpha thresholds or animation; only `colorWrite`
      * differs. Shares the item's geometry, exactly as the proxy does.
+     *
+     * @param {boolean} [pooled] - true for the tile branch, false (default)
+     *   for vegetation — must match whatever the CALLER passed for the real
+     *   proxy's own `pooled` tag, since this twin shares its writerArgs and
+     *   therefore its eligibility. See depthProxyEntries' own doc.
      */
-    function addDepthPrepassTwin(writerArgs, geometry, z) {
+    function addDepthPrepassTwin(writerArgs, geometry, z, pooled = false) {
       if (!earlyZComposition) return;
-      const material = buildSceneDepthWriterMaterial({ ...writerArgs, colorWrite: false });
+      const twinArgs = { ...writerArgs, colorWrite: false };
+      const material = pooled
+        ? depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(twinArgs), () =>
+            buildSceneDepthWriterMaterial(twinArgs)
+          )
+        : buildSceneDepthWriterMaterial(twinArgs);
       const mesh = buildSceneDepthProxyMesh({ THREE, geometry, material, z });
       depthPrepassScene.add(mesh);
-      depthPrepassEntries.push({ mesh, material });
+      depthPrepassEntries.push({ mesh, material, pooled });
     }
 
     /**
@@ -10375,16 +10408,25 @@ export async function startVtPanViewer({
     }
 
     function rebuildSceneDepthProxies(items) {
+      // DEFERRED-S1b — the MESH rebuild stays wholesale (every old mesh is
+      // unconditionally removed below, exactly as before); only a
+      // NON-pooled material (vegetation) is disposed here. A pooled
+      // (tile) material's fate is decided by depthProxyMaterialPool's own
+      // endPass() sweep further down, AFTER this pass has had the chance to
+      // re-request it — disposing it here, unconditionally, is exactly the
+      // wholesale-disposal-every-pass bug this pool exists to stop (see
+      // depth-proxy-material-pool.js's own header for the mechanism).
       for (const entry of depthProxyEntries) {
         depthScene.remove(entry.mesh);
-        entry.material.dispose();
+        if (!entry.pooled) entry.material.dispose();
       }
       depthProxyEntries = [];
       for (const entry of depthPrepassEntries) {
         depthPrepassScene.remove(entry.mesh);
-        entry.material.dispose();
+        if (!entry.pooled) entry.material.dispose();
       }
       depthPrepassEntries = [];
+      depthProxyMaterialPool.beginPass();
       const maxRank = depthAuthority.maxRank;
       const sceneDoc = globalThis.canvas?.scene ?? null;
       const viewedFloorIndex = view?.floorIndex ?? 0;
@@ -10453,10 +10495,17 @@ export async function startVtPanViewer({
             flags: 0,
             positionNode,
           };
+          // NOT pooled — deliberately (see depth-proxy-material-pool.js's own
+          // header): this closure's positionNode is fresh every call, over a
+          // live per-overlay motion reference, and pooling it correctly would
+          // mean restructuring this branch to check the pool BEFORE building
+          // the closure. Measured cost of leaving it unpooled: 0.9% of the
+          // total rebuild cost the pool exists to cut — real upside left on
+          // the table on purpose, not missed.
           const material = buildSceneDepthWriterMaterial(writerArgs);
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: overlay.geometry, material, z });
           depthScene.add(mesh);
-          depthProxyEntries.push({ mesh, material });
+          depthProxyEntries.push({ mesh, material, pooled: false });
           // The canopy's own alpha-tested silhouette must occlude in the
           // prepass exactly as it already does through `maskNode` today —
           // otherwise floor interiors would draw THROUGH solid canopy.
@@ -10529,13 +10578,32 @@ export async function startVtPanViewer({
             flags,
             alwaysOpaque,
           };
-          const material = buildSceneDepthWriterMaterial(writerArgs);
+          // POOLED (DEFERRED-S1b) — tex/alphaThreshold/floorIndex/flags/
+          // alwaysOpaque are all either a stable texture reference or a
+          // value unchanged pass-to-pass for the same tile, so the common
+          // case is a cache HIT: the same material object comes back, three's
+          // own nodeBuilderCache entry for it is never evicted, and
+          // getForRender skips the graph rebuild entirely. See
+          // depth-proxy-material-pool.js's own header for the full mechanism
+          // and why this is safe (the material is a pure function of
+          // writerArgs; nothing mutates it after construction — verified
+          // against applyEarlyZTileState and the debugForceOpaqueBlendOff
+          // branch above, both of which touch `t.material`, the TILE's own
+          // production material, never this depth-proxy one).
+          const material = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(writerArgs), () =>
+            buildSceneDepthWriterMaterial(writerArgs)
+          );
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
           depthScene.add(mesh);
-          depthProxyEntries.push({ mesh, material });
-          addDepthPrepassTwin(writerArgs, t.geometry, z);
+          depthProxyEntries.push({ mesh, material, pooled: true });
+          addDepthPrepassTwin(writerArgs, t.geometry, z, true);
         }
       }
+      // Anything still in the pool that no tile above re-requested this pass
+      // is truly gone (the item unloaded, or its writerArgs genuinely
+      // changed) — evict and dispose it now, never before the loop had a
+      // chance to reuse it.
+      depthProxyMaterialPool.endPass((m) => m.dispose());
       // Last, after every tile material above has settled into its own state:
       // nothing in the world draw may write depth (see this function's own
       // header for the holes that would otherwise appear under tokens).
@@ -12699,6 +12767,13 @@ export async function startVtPanViewer({
           tiles,
           prepassMeshes: depthPrepassEntries.length,
           depthProxies: depthProxyEntries.length,
+          // DEFERRED-S1b's own proof-of-work (Testament P-007 addendum) —
+          // lifetime hit/miss/eviction counts off the depth-proxy material
+          // pool. A live `hits` rate near zero on a scene that's actually
+          // panning would mean the pool isn't doing its job; this is what
+          // lets a future perf report SHOW that rather than infer it from a
+          // CPU sample profile the way this fix's own root cause was found.
+          depthProxyMaterialPool: depthProxyMaterialPool.stats(),
           refusedBy,
           // The DEFERRED-S1a headline: tiles a per-cell min-alpha split could
           // plausibly convert. Zero here means that work would change nothing
@@ -12842,16 +12917,35 @@ export async function startVtPanViewer({
         // Disposing it would break every other fullscreen pass three runs.
       },
       /** Tear down buf:scene.depth + every depth-proxy material this pass
-       * built. NOT the proxy meshes' geometry — every one of them SHARES an
-       * item's own tile geometry (`disposeActive`'s own `itemStates` loop
-       * disposes that), never a copy this pass owns. */
+       * built, in BOTH depthScene and depthPrepassScene (the latter was a
+       * real pre-existing gap, closed here — S1.4's prepass twins were never
+       * explicitly disposed on full teardown before DEFERRED-S1b touched
+       * this method). NOT the proxy meshes' geometry — every one of them
+       * SHARES an item's own tile geometry (`disposeActive`'s own
+       * `itemStates` loop disposes that), never a copy this pass owns.
+       *
+       * Pooled (tile) materials are disposed through the pool's own
+       * `disposeAll()`, never by looping the entry arrays directly: since
+       * DEFERRED-S1b, several entries can share ONE pooled material object
+       * (every tile whose writerArgs collapse to the same signature), and
+       * calling `.dispose()` once per ENTRY would call it more than once on
+       * the SAME material — the pool's own Map naturally visits each
+       * distinct material exactly once regardless of how many entries
+       * reference it. Non-pooled (vegetation) materials are never shared
+       * this way, so disposing them per-entry is exactly as safe as before. */
       disposeSceneDepth() {
         allocator.dispose(sceneDepth);
         for (const entry of depthProxyEntries) {
           depthScene.remove(entry.mesh);
-          entry.material.dispose();
+          if (!entry.pooled) entry.material.dispose();
         }
+        for (const entry of depthPrepassEntries) {
+          depthPrepassScene.remove(entry.mesh);
+          if (!entry.pooled) entry.material.dispose();
+        }
+        depthProxyMaterialPool.disposeAll((m) => m.dispose());
         depthProxyEntries = [];
+        depthPrepassEntries = [];
       },
       /** Tear down light.accumulate's targets + materials (see disposeActive).
        * Geometry is the shared QuadGeometry — never disposed, same as present. */

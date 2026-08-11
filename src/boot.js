@@ -2654,6 +2654,16 @@ function install() {
   // `time/one-clock` allows one — boot only says WHAT to wait on.
   const waitProfiledFrames = createProfiledFrameWaiter({ readProfile: () => perfProfiler.snapshot() });
 
+  // HIDE-WHILE-MEASURING (Testament Stage 4, 2026-08-11 — "hide itself and
+  // cost nothing during tests"). Remembers whether the debug panel was
+  // showing BEFORE the harness hid it, so restoreLiveUi() reopens it only if
+  // the author had it open — a GM who had already closed it must not have it
+  // popped open by a perf run finishing. `hidePanel()` alone (debug-panel.js)
+  // is CSS display:none, not a DOM detach — it does not by itself stop
+  // per-frame cost (pumpAstrolabe's own throttle gates on isPanelVisible()
+  // for exactly this reason, a few hundred lines up); this pair is what
+  // actually makes a measurement window pay none of it.
+  let debugPanelVisibleBeforeHide = false;
   const profileHarness = {
     isGpuProbeArmed: () => getVtPanViewerDiagnostics?.()?.gpuProbe?.active === true,
     profilerOwner: () => perfProfiler.owner(),
@@ -2723,6 +2733,30 @@ function install() {
     // before calling either sample), so the fake harness in that file's own
     // tests needs no update to stay green.
     readPipelineStats: () => getVtPanViewerPipelineStats(),
+    // DEPTH-PROXY MATERIAL POOL HEALTH (DEFERRED-S1b, 2026-08-11) — same
+    // optional-hook shape as readPipelineStats one line up. Reads straight
+    // through to the diagnostics field `rebuildSceneDepthProxies`'s own pool
+    // already exposes (vt-pan-viewer.js), so this is a proof-of-work counter,
+    // not a new measurement: the pool's OWN lifetime hits/misses/evictions,
+    // sampled before/after the window by perf-session.js exactly like
+    // pipeline stats, so a report can show whether it actually did anything
+    // during THIS run rather than needing a CPU sample profile to find out
+    // (which is how this fix's own root cause was originally found).
+    readDepthProxyPoolStats: () => getVtPanViewerDiagnostics?.()?.depthProxyMaterialPool ?? null,
+    // HIDE-WHILE-MEASURING, the pair — see debugPanelVisibleBeforeHide's own
+    // declaration a few lines up for the full rationale. Both optional on the
+    // ProfileHarness typedef, matching every other harness hook here
+    // (perf-session.js checks `typeof === 'function'` before calling either),
+    // so the fake harness in perf-session.test.mjs needs no update to stay
+    // green — a run without either hook simply measures with the UI exactly
+    // as it already sends it.
+    hideLiveUi: () => {
+      debugPanelVisibleBeforeHide = MapShine.debug?.isPanelVisible?.() ?? false;
+      MapShine.debug?.hidePanel?.();
+    },
+    restoreLiveUi: () => {
+      if (debugPanelVisibleBeforeHide) MapShine.debug?.showPanel?.();
+    },
     // The sweep, consumed as an INDEPENDENT cross-check of zone attribution.
     // Two methods measuring the same effect and disagreeing is information —
     // perf-report.js classifies the disagreement rather than averaging it away.
@@ -5023,19 +5057,46 @@ function install() {
   // at `init` either — calling it earlier would silently resolve every scene's
   // sky as "no active scene" until the next unrelated settings change.
 
-  // The dial mirrors the live engines every frame it is visible. Reading back
-  // rather than remembering is what keeps the ring honest while time DRIFTS or
-  // SWEEPS on its own, and what shows the pause ramp winding down live.
-  const pumpAstrolabe = () => {
+  // The dial mirrors the live engines, THROTTLED, while it is visible. Reading
+  // back rather than remembering is what keeps the ring honest while time
+  // DRIFTS or SWEEPS on its own, and what shows the pause ramp winding down
+  // live — none of which needs render-framerate cadence to read as "live" to
+  // a human: a clock hand and a wind arrow moving 10x/sec is indistinguishable
+  // from 60-120x/sec, and the repaint itself was measured at a real cost
+  // (astrolabe.js's own `update()`: 1,415ms/6.9% of one 35.6s capture's main
+  // thread — docs/planning/Trace-Analysis-2026-08-11.md §3, Testament Stage 4).
+  const ASTROLABE_REPAINT_INTERVAL_MS = 100; // ~10Hz
+  let lastAstrolabeRepaintMs = -Infinity;
+  // `nowMs` is requestAnimationFrame's OWN callback timestamp — an INPUT this
+  // function receives, never a `performance.now()` call boot.js would not be
+  // allowed to make (`time/one-clock`, tools/verify-structure.mjs, exempts
+  // only diag/ and core/frame-clock.js). The previous version of this
+  // function took no parameter at all and silently discarded the one rAF
+  // already hands every callback.
+  const pumpAstrolabe = (nowMs) => {
     // UNGATED, unlike the astrolabe repaint below: candles must keep
     // responding to the clock whether or not a GM currently has the dial
     // open. Cheap on every frame that ISN'T a crossing (one computeSun call +
     // a boolean compare) — see refreshCandleIgnition's own doc.
     refreshCandleIgnition();
-    // Gated on `isConnected`: the panel builds the dial once and the shell
-    // detaches it when another zone is showing, so a closed panel costs one
-    // property read per frame, not a repaint.
-    if (astrolabe?.root?.isConnected) {
+    // THREE conditions, all must hold: (1) `isConnected` — the panel builds
+    // the dial once and the shell detaches it when another zone is showing;
+    // (2) NOT explicitly hidden — `isPanelVisible() === false` after
+    // MapShine.debug.hidePanel() (perf-session.js calls this while measuring,
+    // Testament Stage 4's "hide itself and cost nothing during tests"); a
+    // MISSING isPanelVisible (an unusual boot order, or a harness with no
+    // debug panel at all) fails OPEN — paints anyway — matching this
+    // project's own gate-polarity doctrine
+    // (feedback_gate_polarity_must_fail_open): an occasional extra repaint is
+    // a far smaller failure than a dial that silently freezes with no visible
+    // cause. (3) the throttle window has elapsed.
+    const hiddenForMeasurement = MapShine.debug?.isPanelVisible?.() === false;
+    if (
+      astrolabe?.root?.isConnected &&
+      !hiddenForMeasurement &&
+      nowMs - lastAstrolabeRepaintMs >= ASTROLABE_REPAINT_INTERVAL_MS
+    ) {
+      lastAstrolabeRepaintMs = nowMs;
       const dial = getVtPanViewerTimeDialState();
       // `windSpeed01` is the ONE value the dial owns rather than reads back:
       // the wind engine only learns it on commit (a rebake per pointermove

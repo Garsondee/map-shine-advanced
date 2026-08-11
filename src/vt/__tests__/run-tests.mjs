@@ -22,6 +22,7 @@ import { run as runSceneDepth } from './scene-depth.test.mjs';
 import { run as runCoverageMesh } from './coverage-mesh.test.mjs';
 import { run as runSettle } from './settle.test.mjs';
 import { run as runCompressedTextures } from './compressed-textures.test.mjs';
+import { run as runDepthProxyMaterialPool } from './depth-proxy-material-pool.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -72,6 +73,7 @@ const suites = [
   ['coverage-mesh', runCoverageMesh],
   ['settle', runSettle],
   ['compressed-textures', runCompressedTextures],
+  ['depth-proxy-material-pool', runDepthProxyMaterialPool],
 ];
 
 for (const [name, fn] of suites) {

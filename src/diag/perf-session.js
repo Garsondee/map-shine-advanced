@@ -28,6 +28,29 @@
  * armed would silently drop most of its samples and every occurrence rate would
  * be wrong by an unknown factor. That is a hard error here, not a comment.
  *
+ * ============================================================================
+ * THE GPU ZONE TIMER ARMS AFTER SETTLING, NOT BEFORE (2026-08-11)
+ * ============================================================================
+ *
+ * `setGpuZoneTimer` routes through the vt-pan-viewer instance, reachable only
+ * via a module-level `_active` that is not set until `startVtPanViewer`
+ * finishes construction. Arming at t=0 raced that construction: on a slow
+ * scene (the 12k mansion's upper floor is the known-worst case) `_active` was
+ * still null, the arm call silently no-op'd with `{skipped:true,
+ * reason:'viewer not started'}`, and every `zones[].gpuMs` came back null for
+ * the rest of the run — three separate live captures reproduced this exact
+ * signature (`instrument.gpuTimer.armResult` in the saved reports), and
+ * nothing retried the arm. `method.gpu` still read `'timestamp-query'`
+ * throughout, because that field was built from `gpuStatus.capable` — a
+ * static per-device probe, true regardless of whether arming happened — so
+ * the report never told the reader the arm had been skipped (Moonshot.md §7's
+ * flagged gap). The fix has two parts: arm only after `waitFrames(settleFrames)`
+ * proves frames are actually flowing (a live render loop is the only thing
+ * that advances the profiler's frame count, so `_active` is guaranteed by
+ * then), and build `method.gpu`/`gpuReason` from the arm RESULT as well as
+ * static capability, so a future skip — for any reason — is reported honestly
+ * instead of silently.
+ *
  * @module diag/perf-session
  */
 import { buildPerfReport } from './perf-report.js';
@@ -157,16 +180,53 @@ export async function runProfileSession(harness, opts = {}) {
   // block would not survive past its own closing brace, and this value is
   // needed again after `finally` runs, when the report gets assembled.
   let pipelineStatsStart = null;
+  // DEPTH-PROXY MATERIAL POOL HEALTH (DEFERRED-S1b, 2026-08-11) — same
+  // before/after-the-window shape as pipelineStats immediately above, and
+  // for the same reason: `depthProxyMaterialPool.stats()` is a LIFETIME
+  // counter, so only the DELTA across this window says anything about what
+  // happened during it. Optional exactly like readPipelineStats — a harness
+  // that does not implement it (this file's own fake-harness tests) yields
+  // `null`, and `buildPerfReport` must treat a null pair as "not measured",
+  // never as "the pool did nothing".
+  let depthProxyPoolStatsStart = null;
   try {
-    say('arming', 'starting the GPU zone timer');
-    gpuTimer = harness.setGpuZoneTimer(true);
-
     harness.resetFrameStats();
     harness.armProfiler({ settleFrames });
     armed = true;
 
+    // HIDE-WHILE-MEASURING (Testament Stage 4, 2026-08-11) — before settling
+    // even starts, so the settle window ALSO runs with the UI hidden, not
+    // just the measured portion. `restoreLiveUi` (finally, below) always
+    // runs, reopening the panel only if it was open before this call — see
+    // boot.js's own `debugPanelVisibleBeforeHide` for that half.
+    harness.hideLiveUi?.();
+
     say('settling', `${settleFrames} frames discarded (shader compile, first residency pass, first bake)`);
     await harness.waitFrames(settleFrames);
+
+    // ARMED HERE, AFTER SETTLING, NOT BEFORE (2026-08-11) — `setGpuZoneTimer`
+    // routes through the vt-pan-viewer instance (`diag/gpu-zone-timer.js`
+    // needs the live `renderer`), which callers reach through a module-level
+    // `_active` set only once `startVtPanViewer` finishes construction. Arming
+    // at t=0, before that construction is guaranteed done, raced it: on a slow
+    // scene (the 12k mansion's upper floor is the known-worst case) `_active`
+    // was still null, `setGpuZoneTimer(true)` silently no-op'd with
+    // `{skipped:true, reason:'viewer not started'}`, and every zone's gpuMs
+    // came back null for the rest of the run — nothing here ever retried it.
+    // Three separate live captures reproduced exactly this signature (see
+    // `instrument.gpuTimer.armResult` in the saved reports). `method.gpu`
+    // still read 'timestamp-query' throughout, because that field reflects
+    // static device CAPABILITY (`gpuStatus.capable`, probed once at
+    // construction), not whether arming actually happened this run — the
+    // report was never wrong about the hardware, only silent about the skip.
+    // The settle wait above is proof of life: `waitFrames` only resolves once
+    // the profiler has actually COUNTED frames, and only a live viewer's
+    // render loop calls `profiler.endFrame()` — so `_active` is guaranteed
+    // non-null by the time we get here. This also stops wasting query-pool
+    // slots on settle-window passes, which folded as unattributed anyway
+    // (CPU zones stay closed while `settleRemaining > 0`, frame-profiler.js).
+    say('arming', 'starting the GPU zone timer');
+    gpuTimer = harness.setGpuZoneTimer(true);
 
     // PIPELINE HEALTH, START OF THE REAL WINDOW (2026-08-09) — sampled here,
     // not before settling, on purpose: settle frames exist BECAUSE first-use
@@ -178,6 +238,8 @@ export async function runProfileSession(harness, opts = {}) {
     // `null` here, and `buildPerfReport` treats a null pair as "not measured
     // this run", never as "zero pipelines".
     pipelineStatsStart = typeof harness.readPipelineStats === 'function' ? harness.readPipelineStats() : null;
+    depthProxyPoolStatsStart =
+      typeof harness.readDepthProxyPoolStats === 'function' ? harness.readDepthProxyPoolStats() : null;
 
     if (measureUntil) {
       // ROUTE-DRIVEN: measure for exactly as long as the workload runs, not for
@@ -202,6 +264,14 @@ export async function runProfileSession(harness, opts = {}) {
       // disarm must not mask the original error on the throwing path.
       say('warning', 'failed to disarm the GPU zone timer');
     }
+    // ALWAYS, same reasoning as disarmProfiler above — a thrown error must
+    // still hand the panel back, or a failed run leaves the author with no
+    // UI and no idea why.
+    try {
+      harness.restoreLiveUi?.();
+    } catch {
+      say('warning', 'failed to restore the debug panel after measuring');
+    }
   }
 
   const profile = harness.readProfile();
@@ -214,6 +284,11 @@ export async function runProfileSession(harness, opts = {}) {
   // anything change during ordinary panning" with the sweep's OWN expected
   // churn).
   const pipelineStatsEnd = typeof harness.readPipelineStats === 'function' ? harness.readPipelineStats() : null;
+  // Same "before the sweep" reasoning as pipelineStatsEnd: the sweep
+  // deliberately disposes/rebuilds effect materials of its own, which would
+  // register as pool churn that has nothing to do with ordinary panning.
+  const depthProxyPoolStatsEnd =
+    typeof harness.readDepthProxyPoolStats === 'function' ? harness.readDepthProxyPoolStats() : null;
 
   let sweep = null;
   if (includeSweep && typeof harness.runSweep === 'function') {
@@ -236,8 +311,20 @@ export async function runProfileSession(harness, opts = {}) {
       loop: 'viewer',
     },
     method: {
-      gpu: gpuStatus?.capable ? 'timestamp-query' : 'frame-only',
-      gpuReason: gpuStatus?.reason ?? null,
+      // CAPABLE ≠ ARMED (2026-08-11). `gpuStatus.capable` is the static
+      // per-device probe (`gpu-zone-timer.js`'s `probeTimestampSupport`) — true
+      // for any hardware with the timestamp-query feature, regardless of
+      // whether THIS run's `arm()` call actually happened. `gpuTimer` is the
+      // arm RESULT captured above, before anything could disarm it, and it is
+      // the only place a skipped arm (`{skipped:true, reason:'viewer not
+      // started'}`) is visible. Checking capability alone let a skipped arm
+      // masquerade as `'timestamp-query'` while every zones[].gpuMs stayed
+      // null — the gap this file's own header now documents.
+      gpu: gpuStatus?.capable && gpuTimer?.skipped !== true ? 'timestamp-query' : 'frame-only',
+      gpuReason:
+        gpuTimer?.skipped === true
+          ? (gpuTimer?.reason ?? 'GPU zone timer did not arm for this run')
+          : (gpuStatus?.reason ?? null),
       cpuClockResolutionMs: profile.clockResolutionMs,
       route,
       timestampPoolOverflowed: gpuStatus?.poolOverflowed ?? false,
@@ -260,6 +347,10 @@ export async function runProfileSession(harness, opts = {}) {
     },
     sweep,
     pipelineStats: pipelineStatsStart && pipelineStatsEnd ? { start: pipelineStatsStart, end: pipelineStatsEnd } : null,
+    depthProxyPoolStats:
+      depthProxyPoolStatsStart && depthProxyPoolStatsEnd
+        ? { start: depthProxyPoolStatsStart, end: depthProxyPoolStatsEnd }
+        : null,
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,
     vram: harness.readVram?.() ?? null,

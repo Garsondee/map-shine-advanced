@@ -348,10 +348,21 @@ export function createAstrolabe(opts) {
    * the feature. Hiding it behind a disclosure would have quietly undone that, so
    * the disclosure ADVERTISES the one thing hiding it would have cost.
    */
+  // DIRTY-CHECKED (2026-08-11, Testament Stage 4) — this used to rewrite
+  // innerHTML unconditionally from `update()`, i.e. every render frame the
+  // dial is visible, for a string whose only variable is the boolean below.
+  // Live-measured cost: 709ms across one 35.6s capture
+  // (docs/planning/Trace-Analysis-2026-08-11.md §3). `lastSkyOn` starts
+  // `null` so the FIRST call (right below) always renders — only a REPEAT
+  // call with an unchanged boolean is skipped.
+  let lastSkyOn = null;
   const syncTuningSummary = () => {
+    const skyOn = skyRow.value() > 0;
+    if (skyOn === lastSkyOn) return;
+    lastSkyOn = skyOn;
     tuningSummary.innerHTML =
       '<span class="msa-chev">▸</span> Sky &amp; light' +
-      (skyRow.value() > 0 ? '' : ' <span style="opacity:.6">· sky light off</span>');
+      (skyOn ? '' : ' <span style="opacity:.6">· sky light off</span>');
   };
   syncTuningSummary();
 

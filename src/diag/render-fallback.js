@@ -158,6 +158,32 @@ export function getFallbackState() {
 }
 
 /**
+ * How long a `describeRenderMode` answer is trusted before its DOM checks
+ * (`getComputedStyle`, `getBoundingClientRect` — both style-recalc-forcing
+ * reads) actually re-run, vs handing back the last answer. Matches
+ * perf-strip.js's own ~4x/sec repaint cadence for the same reason: this is a
+ * REPORTING readout, not the safety mechanism itself — `engageFoundryFallback`
+ * mutates the DOM (the warning banner) and fires `ui.notifications.error`
+ * synchronously, the instant a real failure is detected, entirely independent
+ * of whether or when anything calls `describeRenderMode()` afterward. Caching
+ * this diagnostic for up to a quarter second therefore costs nothing safety-
+ * relevant — only how fresh a REPORT built during that window is. Live-
+ * measured at ~68ms across one 35.6s capture before this cache existed
+ * (docs/planning/Trace-Analysis-2026-08-11.md), reached from `diag/vt-pan-
+ * viewer-diagnostics.js`'s diagnostics builder, whose own call frequency this
+ * file has no visibility into — the cache is what makes that frequency stop
+ * mattering, rather than auditing every current and future caller.
+ */
+const DESCRIBE_RENDER_MODE_CACHE_MS = 250;
+let lastDescribeRenderMode = null;
+let lastDescribeRenderModeAt = -Infinity;
+/** The canvas/loopActive pair the cached answer was computed for — a change
+ * in either invalidates the cache immediately, so a genuinely different
+ * question never gets the previous question's cached answer. */
+let lastDescribeRenderModeCanvas = null;
+let lastDescribeRenderModeLoopActive = null;
+
+/**
  * THE QUESTION THAT COULD NOT BE ANSWERED FROM A REPORT: *is the thing I am
  * looking at MSA, or Foundry?*
  *
@@ -176,6 +202,26 @@ export function getFallbackState() {
  *            fallback: {active:boolean, reason:string|null, detail:string|null, at:string|null}}}
  */
 export function describeRenderMode({ canvas, loopActive }) {
+  // `performance.now()` is allowed here — `time/one-clock` (tools/verify-
+  // structure.mjs) exempts `diag/` for exactly this kind of self-contained
+  // instrument, and this value never crosses this module's own boundary.
+  const now = performance.now();
+  if (
+    lastDescribeRenderMode &&
+    canvas === lastDescribeRenderModeCanvas &&
+    loopActive === lastDescribeRenderModeLoopActive &&
+    now - lastDescribeRenderModeAt < DESCRIBE_RENDER_MODE_CACHE_MS
+  ) {
+    return lastDescribeRenderMode;
+  }
+  lastDescribeRenderModeAt = now;
+  lastDescribeRenderModeCanvas = canvas;
+  lastDescribeRenderModeLoopActive = loopActive;
+  lastDescribeRenderMode = computeRenderModeUncached({ canvas, loopActive });
+  return lastDescribeRenderMode;
+}
+
+function computeRenderModeUncached({ canvas, loopActive }) {
   const fallback = getFallbackState();
   const no = (renderModeReason) => ({
     renderMode: 'foundry-fallback',

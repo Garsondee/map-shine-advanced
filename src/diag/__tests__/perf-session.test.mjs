@@ -86,13 +86,16 @@ export async function run(t) {
 
     const seq = h._calls.map((c) => c[0]).join(',');
     ok(
-      'the sequence is arm-timer, reset, arm-profiler, wait, wait, disarm, disarm-timer',
-      seq === 'setGpuZoneTimer,resetFrameStats,armProfiler,waitFrames,waitFrames,disarmProfiler,setGpuZoneTimer'
+      'the sequence is reset, arm-profiler, wait(settle), arm-timer, wait(measure), disarm, disarm-timer',
+      seq === 'resetFrameStats,armProfiler,waitFrames,setGpuZoneTimer,waitFrames,disarmProfiler,setGpuZoneTimer'
     );
-    ok('the GPU timer is armed before the profiler', h._calls[0][1] === true);
+    ok(
+      'the GPU timer arms only AFTER settling proves the viewer is live (2026-08-11 race fix)',
+      h._calls[3][0] === 'setGpuZoneTimer' && h._calls[3][1] === true
+    );
     ok('the GPU timer is disarmed at the end', h._calls[h._calls.length - 1][1] === false);
-    ok('the settle window is passed to the profiler', h._calls[2][1] === 30);
-    ok('settle and measure are waited separately', h._calls[3][1] === 30 && h._calls[4][1] === 120);
+    ok('the settle window is passed to the profiler', h._calls[1][1] === 30);
+    ok('settle and measure are waited separately', h._calls[2][1] === 30 && h._calls[4][1] === 120);
     ok('progress is reported through the phases', phases.includes('settling') && phases.includes('measuring'));
 
     ok('a finished report comes back', report.report === 'perf-profile');
@@ -126,6 +129,80 @@ export async function run(t) {
       'growth between them surfaces as a finding',
       report.findings.some((f) => f.id === 'pipeline-programs-grew')
     );
+  }
+
+  // ---- HIDE-WHILE-MEASURING: hideLiveUi/restoreLiveUi (Testament Stage 4) ---
+  {
+    const h = fakeHarness({
+      hideLiveUi() {
+        this._calls.push(['hideLiveUi']);
+      },
+      restoreLiveUi() {
+        this._calls.push(['restoreLiveUi']);
+      },
+    });
+    await runProfileSession(h, { settleFrames: 30, measureFrames: 120 });
+    const seq = h._calls.map((c) => c[0]);
+    ok('hideLiveUi is called when the harness implements it', seq.includes('hideLiveUi'));
+    ok('restoreLiveUi is called when the harness implements it', seq.includes('restoreLiveUi'));
+    ok('the UI is hidden BEFORE settling starts, not after', seq.indexOf('hideLiveUi') < seq.indexOf('waitFrames'));
+    ok(
+      'restoreLiveUi runs LAST — after both disarms, never before',
+      seq.indexOf('restoreLiveUi') > seq.lastIndexOf('setGpuZoneTimer')
+    );
+  }
+
+  // ---- a harness with NEITHER hook still works — both are optional ----------
+  {
+    const h = fakeHarness();
+    ok('the default fake harness defines neither hook', h.hideLiveUi === undefined && h.restoreLiveUi === undefined);
+    const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    ok('a harness without hideLiveUi/restoreLiveUi still produces a report', report.report === 'perf-profile');
+  }
+
+  // ---- restoreLiveUi runs even on the throwing path, same as disarmProfiler -
+  {
+    const boom = new Error('the render loop died mid-window');
+    const h = fakeHarness({
+      async waitFrames(n) {
+        this._calls.push(['waitFrames', n]);
+        throw boom;
+      },
+      restoreLiveUi() {
+        this._calls.push(['restoreLiveUi']);
+      },
+    });
+    let threw = null;
+    try {
+      await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    } catch (e) {
+      threw = e;
+    }
+    ok('the original error still propagates', threw === boom);
+    ok(
+      'the UI is still restored on the path where measuring itself threw',
+      h._calls.some((c) => c[0] === 'restoreLiveUi')
+    );
+  }
+
+  // ---- a restoreLiveUi that itself fails must not mask the original error ---
+  {
+    const boom = new Error('primary failure');
+    const h = fakeHarness({
+      async waitFrames() {
+        throw boom;
+      },
+      restoreLiveUi() {
+        throw new Error('restoreLiveUi exploded');
+      },
+    });
+    let threw = null;
+    try {
+      await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    } catch (e) {
+      threw = e;
+    }
+    ok('a failing restoreLiveUi does not mask the original error', threw === boom);
   }
 
   // ---- REFUSAL: never profile while the throttling probe is armed -----------
@@ -224,6 +301,32 @@ export async function run(t) {
     const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
     ok("an incapable device degrades to 'frame-only'", report.method.gpu === 'frame-only');
     ok('...carrying the reason', report.method.gpuReason.includes('trackTimestamp'));
+    ok(
+      '...and the report says loudly that GPU attribution is unavailable',
+      report.findings.some((f) => f.id === 'gpu-attribution-unavailable')
+    );
+  }
+
+  // ---- A SKIPPED ARM DEGRADES HONESTLY TOO (2026-08-11) — the live bug this
+  // reorder fixed: `setGpuZoneTimer(true)` can come back `{skipped:true}` on a
+  // perfectly capable device (the viewer just was not live yet when it was
+  // called). Before this fix `method.gpu` was built from capability alone and
+  // would have lied and said 'timestamp-query' here — three separate live
+  // captures did exactly that while every zones[].gpuMs stayed null.
+  {
+    const h = fakeHarness({
+      setGpuZoneTimer(on) {
+        this._calls.push(['setGpuZoneTimer', on]);
+        return on ? { skipped: true, reason: 'viewer not started' } : undefined;
+      },
+      getGpuZoneStatus: () => ({ capable: true, reason: null, poolOverflowed: false, unattributedPasses: 0 }),
+    });
+    const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    ok("a skipped arm degrades to 'frame-only' even though the device is capable", report.method.gpu === 'frame-only');
+    ok(
+      '...carrying the actual skip reason, not the (absent) capability reason',
+      report.method.gpuReason === 'viewer not started'
+    );
     ok(
       '...and the report says loudly that GPU attribution is unavailable',
       report.findings.some((f) => f.id === 'gpu-attribution-unavailable')

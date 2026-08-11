@@ -737,6 +737,7 @@ export function deriveFindings({
   profilerAnomalies,
   gpuTimer,
   pipelineStats = null,
+  depthProxyPoolStats = null,
   sweepRequested = false,
   sweepMeasuredCount = 0,
   sweepNoiseFloorMs = null,
@@ -786,6 +787,35 @@ export function deriveFindings({
           programsEnd: pipelineStats.end.programs,
           delta,
         },
+      });
+    }
+  }
+  // DEPTH-PROXY MATERIAL POOL HEALTH (DEFERRED-S1b, 2026-08-11) — the direct
+  // proof-of-work for the fix that closes the SAME cost class
+  // pipeline-programs-grew above exists to catch (buildSceneDepthWriterMaterial's
+  // own header, again: "a handful of variants, not one per item"). Delta
+  // across the window, same reasoning as pipelineStats: lifetime counters
+  // mean only start-vs-end says anything about THIS run.
+  if (Number.isFinite(depthProxyPoolStats?.start?.hits) && Number.isFinite(depthProxyPoolStats?.end?.hits)) {
+    const hits = depthProxyPoolStats.end.hits - depthProxyPoolStats.start.hits;
+    const misses = depthProxyPoolStats.end.misses - depthProxyPoolStats.start.misses;
+    const evictions = depthProxyPoolStats.end.evictions - depthProxyPoolStats.start.evictions;
+    const total = hits + misses;
+    if (total > 0) {
+      const hitRatePct = round((hits / total) * 100, 1);
+      // A LOW hit rate on a window that had real residency-pass activity
+      // (total > 0 already establishes that) means something is churning the
+      // pool's own signature every pass — a material variant flipping, or a
+      // genuine burst of new content — either way worth a look, not silence.
+      // Not escalated past 'medium': a cold-start burst of misses right after
+      // settling is expected and this finding cannot yet tell that apart from
+      // a real leak (see this block's own evidence, which reports the raw
+      // counts so a reader can).
+      out.push({
+        severity: hitRatePct < 50 ? 'medium' : 'low',
+        id: 'depth-proxy-pool-health',
+        text: `The depth-proxy material pool served ${hits} cache hit(s) and ${misses} miss(es) (${hitRatePct}% hit rate) during this window, evicting ${evictions} stale entr${evictions === 1 ? 'y' : 'ies'}. ${hitRatePct < 50 ? 'A hit rate under 50% during ordinary panning suggests something is still forcing a fresh material — check whether a variant (alwaysOpaque, floorIndex, flags) is flipping every pass rather than staying stable.' : "A healthy hit rate means rebuildSceneDepthProxies is reusing materials instead of paying a shader-graph rebuild for each one — see the Testament's DEFERRED-S1b for the mechanism this replaced."}`,
+        evidence: { hits, misses, evictions, hitRatePct },
       });
     }
   }
@@ -1027,6 +1057,7 @@ export function buildPerfReport({
   profilerAnomalies = null,
   gpuTimer = null,
   pipelineStats = null,
+  depthProxyPoolStats = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
   const megapixels =
@@ -1114,6 +1145,7 @@ export function buildPerfReport({
     profilerAnomalies,
     gpuTimer,
     pipelineStats,
+    depthProxyPoolStats,
     sweepRequested: sweep !== null,
     sweepMeasuredCount,
     sweepNoiseFloorMs,
@@ -1194,11 +1226,20 @@ export function buildPerfReport({
       // getVtPanViewerPipelineStats's own header for why `programs` is the
       // field worth watching first.
       pipelineStats,
+      // DEPTH-PROXY MATERIAL POOL HEALTH (2026-08-11) — renderer.info.memory's
+      // OWN sibling for the depth-proxy pool specifically: lifetime
+      // hits/misses/evictions, sampled at the same two points as
+      // pipelineStats and for the same reason. `null` means the harness in
+      // use does not implement readDepthProxyPoolStats, not "the pool did
+      // nothing" — see depth-proxy-material-pool.js's own header.
+      depthProxyPoolStats,
       note:
         'These describe the INSTRUMENT, not the renderer. Non-zero unbalancedBrackets or poolOverflowed ' +
         'means some numbers above are missing or suspect — fix the instrument before drawing conclusions. ' +
         'pipelineStats.start vs .end: any growth in `programs` during a pan-only window means a pipeline is ' +
-        'being recompiled that should already be cached — see findings[] for the threshold this crosses.',
+        'being recompiled that should already be cached — see findings[] for the threshold this crosses. ' +
+        'depthProxyPoolStats.start vs .end: a low hit rate means the same class of rebuild is happening ' +
+        'downstream of the depth-proxy pool specifically — see findings[].',
     },
     findings,
     interpretation: buildInterpretation({

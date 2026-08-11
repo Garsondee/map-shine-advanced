@@ -1241,6 +1241,89 @@ move.
 
 ---
 
+### ✅ ADDENDUM, same session — full residency audit, and a correction to this petition's own
+### Finding 1
+
+*Author directive: "Launch a full investigation into Residency streaming too. Create a report on
+it... Full audit looking for performance pain points and looking for ways to win back as much
+performance as possible." Full record: `docs/planning/Residency-Streaming-Audit-2026-08-11.md`
+(archived per the standing long-report rule); only the plan-relevant summary lives here. Method
+stated there in full: four parallel read-only research passes, one central claim independently
+re-verified by direct reading before being written up — recorded honestly rather than presented as
+uniformly first-hand.*
+
+**A correction to this petition's own Finding 1, found while investigating it further.** Finding 1
+above called residency streaming *"the single largest **CPU cost**"* while also correctly computing
+*"29.2% of ALL **wall-clock** time"* two paragraphs later — inconsistent, and the inconsistency
+matters. `residency.pass`/`residency.itemLoad`'s reported duration is a plain wall-clock delta
+(`frame-profiler.js`'s `openSlot`/`closeSlot`, `now() − start`, verified directly: no thread-time
+API, no idle-vs-busy distinction anywhere in the file) around a loop that genuinely `await`s real
+network/IndexedDB round trips, one item at a time (`updateResidencyUnguarded`'s phase 1,
+`vt-pan-viewer.js:10798-10839`). Both bracket call sites already say so in their own comments
+("WALL time, not pure CPU-busy time"), and a prior audit two days earlier
+(`Performance-Audit-2026-08.md` §14) already reached this same conclusion independently — this
+petition should have cross-referenced it and didn't. **The fix this points at is latency/
+concurrency (overlap the sequential round trips), not CPU speed** — a materially different target
+than "the single largest CPU cost" implies.
+
+**A sharper, related finding, found chasing the first one down: the reason this zone shows real-
+looking `drawCalls: 365.1` / `triangles: 428448.2` despite being declared `kind:'cpu'` with no
+draws of its own is a genuine instrumentation artifact, independently re-verified by direct
+reading of `frame-profiler.js`.** `openSlot`/`closeSlot` sample `renderer.info.render.drawCalls`/
+`.triangles` **unconditionally for every zone, with no check of that zone's declared `kind`**.
+Because `scheduleResidencyUpdate()` runs fire-and-forget (never awaited by the render loop, which
+keeps ticking via `renderer.setAnimationLoop` independently) and this zone's bracket genuinely
+suspends across real animation frames, its begin/end drawCalls sample lands at two arbitrary points
+in two DIFFERENT frames' independently-reset counters — a delta that looks like plausible data
+(matching what one real frame's totals could be) rather than the noise it actually is. **Practical
+consequence: residency's wall-clock time demonstrably overlaps normal frame rendering for at least
+part of its span — it is concurrent time, not proven-exclusive main-thread-blocking time.** The
+29.2%-of-wall-clock figure is real and residency is still the biggest unowned system in the engine
+— but it should not be read as "29.2% of the frame budget was stolen from rendering."
+
+**Six further findings, full detail and file:line citations in the archived report:**
+1. The per-item/per-mask loading loops are strictly sequential `await` chains with zero
+   parallelism, while the underlying decode pool already has unused 3-way concurrency
+   (`SLICE_MAX_CONCURRENT_SOURCES=3`, `decode-pool.js:113`) — the likely biggest real lever, but
+   flagged **risky**: this exact suspension point has twice before produced real, shipped live
+   regressions when touched carelessly (a vegetation render-order flicker; a whole-screen magenta
+   regression from two passes racing on shared pin state), both named with fix commits in the
+   surrounding code. Needs a dedicated live-verification session, not a benchmark-only change.
+2. `refreshCoarsePinBudget`/`primeCoverAlphaGrids` are PROVABLY invariant to camera movement (pure
+   functions of scene documents, never of view state) yet re-run on every single camera-driven
+   pass — currently cheap only because the bench scene is small; a real document-hook entry point
+   already exists to gate them properly. Flagged **moderate** (sound from static reading, needs
+   live proof before shipping per this project's own defensive-fix rule).
+3. The stale-item release loop scans the FULL, monotonically-growing `itemStates` map every pass
+   (one mutator, zero deletions, confirmed by grep) — not costly yet, but unbounded by session
+   length/exploration breadth on a large multi-floor map.
+4. Root cause of "fires on 462 of 463 frames": `syncFoundryCamera`'s 1-screen-pixel dirty
+   threshold is correctly tuned for the specific regression it was built to fix (residual eased-
+   camera jitter reporting movement after the user let go) but provides near-zero throttling
+   during genuine deliberate panning. A coarser threshold is flagged **risky** — this project has
+   already reverted one prior debounce attempt here for making panning feel laggy, and the current
+   1px value exists to fix its own prior regression.
+5. **A still-OPEN, unsolved mystery, not claimed to be answered:** the report's 20 worst hitches
+   (250-667ms, spread across the whole capture) all show COMPLETELY IDLE decode/cache activity —
+   ruling out mask-streaming I/O as their cause, but no smoking-gun mechanism was found in the
+   cache-hit fast path either. Needs a live Chrome trace correlated against hitch timestamps
+   (`tools/trace-analyze.mjs` already exists for this) — recorded as unresolved, not guessed at.
+6. A genuinely cheap, zero-risk fix worth taking regardless of anything else: stop sampling
+   drawCalls/triangles for zones not declared `kind:'gpu'`/`'both'` in `frame-profiler.js` (or
+   suppress them at the report layer) — this exact artifact has now misled two separate
+   investigations two days apart into treating noise as signal.
+
+**Recommended order** (full reasoning in the archived report §6): (1) fix the drawCalls/triangles
+instrument artifact — cheap, diagnostics-only; (2) pull the still-missing numbers from existing
+tools before deciding anything further (`residency.itemLoad.maxMs`, real `itemStates.size`, whether
+the worst hitches actually overlap an in-flight pass) — zero code risk; (3) gate the two
+camera-invariant pre-phase scans to document-change triggers — moderate, needs live verification;
+(4) parallelize the sequential load chains — the larger win, real risk, needs a dedicated live
+session; (5) the camera-threshold and stale-release items — lower priority, same live-verification
+discipline required.
+
+---
+
 **P-007 — A committed trace-analysis tool, and the finding it found: TSL shader-graph REBUILDS are
 running during rendering, sustained, at 10.7% of the main thread — independently confirming the
 "unwanted pipeline recompilation" hypothesis round 6 instrumented and never got an answer for.**

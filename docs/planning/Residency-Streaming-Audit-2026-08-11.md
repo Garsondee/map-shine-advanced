@@ -204,20 +204,28 @@ needs a live Chrome trace correlated against `hitchLog` timestamps and residency
 
 ## 6. Optimization menu — risk-tagged, ordered by what to do first
 
-**1. Fix the drawCalls/triangles sampling artifact (§2). Cheap-safe, diagnostics-only, zero
-runtime behavior change.** Either stop sampling `readDrawCalls`/`readTriangles` for zones not
-declared `kind:'gpu'`/`'both'` in `frame-profiler.js`'s `openSlot`/`closeSlot`, or suppress/zero
-those fields for `'cpu'`-kind zones at the report layer. This has already misled two separate
+**1. ✅ DONE, 2026-08-11, same session — fix the drawCalls/triangles sampling artifact (§2).**
+Shipped as the report-layer suppression option: `buildZoneRows` (`src/diag/perf-report.js`) now
+forces `drawCalls`/`triangles` to `null` for any zone declared `kind:'cpu'`, reusing the exact same
+`gpuAbsentByDeclaration` condition already computed for `gpuMs` — the report's own interpretation
+note already promised "gpuAbsentByDeclaration true means the zone contains no draw calls at all";
+this makes that promise actually true instead of just documented. `frame-profiler.js`'s hot sampling
+path was deliberately left untouched (still samples for every zone, same as before) — the fix is
+purely "stop presenting numbers known to be meaningless," not a change to the measurement hot path
+itself, which keeps the change small and low-risk. 4 new Node tests pin a real 'cpu' zone
+(`light.vegetationSync`) suppresses even when fed contaminated raw data, while real 'gpu' and 'both'
+zones (`light.drawPointLights`, `geometry.earlyZPrepass`) pass their genuine numbers through
+unaffected. `npm run verify` green, 8,513 tests (+4). This has already misled two separate
 investigations (the 2026-08-09 audit and, briefly, this one) into treating a measurement artifact as
-a real signal — worth closing so a third investigation doesn't re-spend the time. **Do this first,
-before trusting any zone's drawCalls/triangles numbers in future reports.**
+a real signal — closed so a third investigation doesn't re-spend the time.
 
-**2. Pull the missing numbers before deciding what to optimize next. Cheap-safe, zero code change
-— run existing tools, read existing fields.** Specifically: `residency.itemLoad.maxMs` and the
-`itemLoadDims`/`itemLoadMasks` occurrence counts from a fresh `perf-run-full` (resolves "steady tax
-vs. front-loaded burst," §1); `itemStates.size` / `documentSync.itemCount` from a live
-`getDiagnostics()` pull, not a perf report (resolves real item-count scale, §3); whether the 20
-worst-hitch windows temporally overlap an in-flight residency pass at all (§5, needs
+**2. ✅ PARTIALLY DONE, 2026-08-11, same session — pulled what's live-reachable without a full
+capture.** `itemStates.size`/`documentSync.itemCount` resolved directly via
+`MapShine.debug.runReport('vt-pan-viewer-diagnostics')` against the bench Mansion — see §7 for the
+numbers and the honest caveat about what they do and don't prove. **Still outstanding, and genuinely
+needs a fresh `perf-run-full` capture, not a console read:** `residency.itemLoad.maxMs` and the
+`itemLoadDims`/`itemLoadMasks` occurrence counts (resolves "steady tax vs. front-loaded burst," §1);
+whether the 20 worst-hitch windows temporally overlap an in-flight residency pass at all (§5, needs
 `tools/trace-analyze.mjs` against a fresh Chrome trace taken during a repeat of this exact route).
 
 **3. Gate `refreshCoarsePinBudget`/`primeCoverAlphaGrids` to document-change triggers instead of
@@ -255,10 +263,23 @@ rebuild (options already proposed in `Trace-Analysis-2026-08-11.md` §2a).
 
 ## 7. Open questions requiring live data, not further code reading
 
+- **RESOLVED, 2026-08-11, same session** — real `itemStates.size` / `documentSync.itemCount` for
+  the bench Mansion, pulled live via `MapShine.debug.runReport('vt-pan-viewer-diagnostics')`
+  (console-reachable; not the same accessor as `getVtPanViewerDiagnostics`, which is not exposed
+  on `MapShine` at all): **`itemsLoaded: 8`** (cumulative distinct items loaded this session),
+  **`documentSync.itemCount: 5`** (current floor's draw-list size — matches `drawList.length: 5`,
+  cross-confirmed), `decodeStats.workerStatus: 'active'` (this live session HAD triggered a real
+  decode by the time of this read, unlike the captured report's `'not-yet-created'` moment —
+  consistent with Agent 3's "strictly lazy, on-demand" explanation, not a contradiction of it).
+  **This confirms the item count for this scene really is tiny (single digits), not hundreds** —
+  strengthening the "front-loaded burst from a few NEW items, not a steady per-item tax across many
+  items" reading of §1's open question, since 14,630.7ms spread only 462 ways with only 5-8 items
+  total cannot be "many cheap items summing up." **Caveat, stated honestly: this is the small bench
+  scene, not proven representative of the author's largest real production maps** — the O(total-
+  scene) scaling risk in §3 is about maps this scene does not represent, and remains open for those.
 - `residency.itemLoad.maxMs` and `itemLoadDims`/`itemLoadMasks` occurrence counts — resolves
-  steady-tax vs. front-loaded-burst (§1).
-- Real `itemStates.size` / `documentSync.itemCount` for an actual production scene, not just the
-  small bench fixture — resolves how much §3's two O(total-scene) costs actually matter today.
+  steady-tax vs. front-loaded-burst definitively (§1). Now more likely to be "burst" per the item
+  count above, but not yet confirmed with the actual max/occurrence numbers.
 - Whether the do-while's 462 `residency.pass` occurrences are mostly fresh top-level entries or
   mostly same-call re-iterations — not separable with current instrumentation.
 - Whether the 20 worst hitches temporally correlate with an in-flight residency pass at all, or are

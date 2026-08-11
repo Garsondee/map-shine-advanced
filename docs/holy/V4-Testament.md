@@ -1322,6 +1322,17 @@ camera-invariant pre-phase scans to document-change triggers — moderate, needs
 session; (5) the camera-threshold and stale-release items — lower priority, same live-verification
 discipline required.
 
+**✅ (1) DONE, same session** — `buildZoneRows` (`perf-report.js`) now forces `drawCalls`/
+`triangles` to `null` for any `kind:'cpu'` zone, reusing the existing `gpuAbsentByDeclaration`
+condition rather than duplicating it. 4 new tests pin the suppression against a real 'cpu' zone
+fed contaminated data, and confirm real 'gpu'/'both' zones are unaffected. `npm run verify` green,
+8,513 tests. **✅ (2) PARTIALLY DONE** — `itemStates.size`/`documentSync.itemCount` pulled live
+from the bench Mansion (`itemsLoaded: 8`, `documentSync.itemCount: 5`) via
+`MapShine.debug.runReport('vt-pan-viewer-diagnostics')` — confirms the item count for this scene is
+genuinely tiny, strengthening the front-loaded-burst reading of Finding 1 above. `maxMs` and the
+hitch/pass-overlap questions still need a fresh capture and a Chrome trace respectively — not done
+yet. Full detail and honest caveats: archived report §6/§7.
+
 ---
 
 **P-007 — A committed trace-analysis tool, and the finding it found: TSL shader-graph REBUILDS are

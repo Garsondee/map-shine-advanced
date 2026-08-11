@@ -269,6 +269,9 @@ export function buildZoneRows({ zoneStats = [], zones = [], frames = 0, clockRes
     const cpu = statFrom(stat.cpu, frames);
     const gpu = statFrom(stat.gpu, frames);
     const floor = clockNoiseFloorMs(clockResolutionMs, stat.cpu?.count ?? 0);
+    // Computed once, reused below for every field this declaration covers —
+    // not just gpuMs (see the drawCalls/triangles comment further down).
+    const gpuAbsentByDeclaration = (decl?.kind ?? 'gpu') === 'cpu';
     rows.push({
       id: stat.id,
       label: decl?.label ?? (isPass ? passId : stat.id),
@@ -285,12 +288,29 @@ export function buildZoneRows({ zoneStats = [], zones = [], frames = 0, clockRes
       gpuMs: gpu,
       // A 'cpu' zone has no GPU work BY DECLARATION. That is a different fact
       // from "we failed to measure its GPU time", and the report says which.
-      gpuAbsentByDeclaration: (decl?.kind ?? 'gpu') === 'cpu',
+      gpuAbsentByDeclaration,
       occurrenceRate: frames > 0 ? round(stat.cpu?.count || stat.gpu?.count || 0, 0) / frames : null,
       belowClockResolution: cpu !== null && floor !== null && cpu.meanMs !== null && cpu.meanMs < floor,
       clockNoiseFloorMs: floor === null ? null : ms(floor),
-      drawCalls: avgOf(stat.drawCalls),
-      triangles: avgOf(stat.triangles),
+      // SUPPRESSED FOR 'cpu' ZONES (2026-08-11, Residency-Streaming-Audit
+      // §2/§6.1) — this is `gpuAbsentByDeclaration`'s OWN promise, made in this
+      // file's interpretation note ("gpuAbsentByDeclaration true means the
+      // zone contains no draw calls at all") but never actually enforced here
+      // until now. frame-profiler.js's openSlot/closeSlot sample
+      // renderer.info.render.drawCalls/triangles UNCONDITIONALLY at every
+      // zone's begin/end, with no check of the zone's declared kind. A zone
+      // whose bracket spans a real `await` (residency's own sequential
+      // per-item load chain, most visibly) can close after one or more
+      // UNRELATED frames rendered during the wait — three's own counters
+      // reset every rAF tick, so the sampled delta is THEIR draws, not this
+      // zone's, and lands in a plausible-looking range instead of reading as
+      // the noise it is. Confirmed live: `residency.itemLoad` — genuinely
+      // zero draws of its own — reported 365 draw calls / 428k triangles.
+      // A 'gpu'/'both' zone genuinely issues draws, so its numbers pass
+      // through unchanged; only 'cpu' is suppressed, matching the exact set
+      // gpuAbsentByDeclaration already names.
+      drawCalls: gpuAbsentByDeclaration ? null : avgOf(stat.drawCalls),
+      triangles: gpuAbsentByDeclaration ? null : avgOf(stat.triangles),
       unbalanced: stat.unbalanced ?? 0,
     });
   }

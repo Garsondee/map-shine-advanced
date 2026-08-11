@@ -1207,6 +1207,50 @@ export function run(t) {
   }
 
   // ======================================================================
+  // drawCalls/triangles suppressed for 'cpu' zones (2026-08-11,
+  // Residency-Streaming-Audit §2/§6.1) — a 'cpu' zone's bracket can span a
+  // real await and sample an UNRELATED frame's draws (frame-profiler.js
+  // samples renderer.info unconditionally, with no check of zone kind); a
+  // nonzero reading there was never a real cost of that zone. gpuAbsentByDeclaration
+  // already promises "no draw calls at all" for these zones — this pins that
+  // the promise is actually enforced, not just documented.
+  // ======================================================================
+  {
+    // A real 'cpu'-kind zone (light.vegetationSync), fed CONTAMINATED raw
+    // drawCalls/triangles data — exactly the shape a zone whose bracket spans
+    // an unrelated rendered frame would produce.
+    const rows = buildZoneRows({
+      zones: ZONES,
+      frames: 100,
+      zoneStats: [
+        zs('light.vegetationSync', {
+          cpu: acc(50, 100, 1.2),
+          drawCalls: { sum: 36500, count: 100 },
+          triangles: { sum: 42844800, count: 100 },
+        }),
+      ],
+    });
+    ok('a cpu-kind zone reports null drawCalls, even with contaminated raw data', rows[0].drawCalls === null);
+    ok('...and null triangles, same reason', rows[0].triangles === null);
+
+    // A real 'gpu'-kind zone with genuine draws must NOT be affected.
+    const gpuRows = buildZoneRows({
+      zones: ZONES,
+      frames: 100,
+      zoneStats: [zs('light.drawPointLights', { gpu: acc(300, 100, 4), drawCalls: { sum: 300, count: 100 } })],
+    });
+    ok('a gpu-kind zone keeps its real drawCalls, unaffected', gpuRows[0].drawCalls === 3);
+
+    // A 'both'-kind zone (real draws AND real CPU wall time) must also pass through.
+    const bothRows = buildZoneRows({
+      zones: ZONES,
+      frames: 100,
+      zoneStats: [zs('geometry.earlyZPrepass', { gpu: acc(200, 100, 3), drawCalls: { sum: 900, count: 100 } })],
+    });
+    ok("a 'both'-kind zone keeps its real drawCalls too", bothRows[0].drawCalls === 9);
+  }
+
+  // ======================================================================
   // summarizeTierComparison — THE optimisation-priority tool (rewritten
   // 2026-07-29 the same day, from the author's own first real run: ~300KB,
   // and the effect that actually moved was invisible in it)

@@ -130,6 +130,20 @@ function extractZone(report, id) {
   };
 }
 
+// ⚠️ FORCE THE FLAG OFF EXPLICITLY — NEVER ASSUME THE BOOT DEFAULT IS OFF
+// (countersign fix, 2026-08-11): S1.7 flipped `earlyZComposition`'s default to
+// TRUE, so "just capture whatever boot gave us" would silently diff ON against
+// ON and pass vacuously. Record the initial state and restore THAT at the end
+// — hardcoding `false` there has the mirror bug.
+const initialFlag = await page.evaluate(() => window.MapShine?.getEarlyZComposition?.()?.earlyZComposition ?? null);
+console.log('[s1-bench] initial flag state at boot:', JSON.stringify(initialFlag));
+await page.evaluate(() => window.MapShine?.setEarlyZComposition?.(false));
+// Same next-residency-pass mechanics as the ON flip below: nudge one, settle.
+await page.mouse.wheel(0, -40);
+await page.waitForTimeout(600);
+await page.mouse.wheel(0, 40);
+await waitForSceneSettled(page, { label: 'after forcing flag OFF' });
+
 // FLAG OFF — baseline, today's shipping behaviour.
 const off = await runPerfCapture('flag OFF');
 
@@ -154,8 +168,9 @@ console.log('[s1-bench] flag state + NON-VACUITY before ON capture:', JSON.strin
 
 const on = await runPerfCapture('flag ON');
 
-// RESTORE (Law 3).
-await page.evaluate(() => window.MapShine?.setEarlyZComposition?.(false));
+// RESTORE THE INITIAL STATE (Law 3) — whatever boot gave us, not a hardcoded
+// value that goes stale the next time the default changes.
+await page.evaluate((v) => window.MapShine?.setEarlyZComposition?.(v === true), initialFlag);
 
 const ZONE_IDS = ['geometry.worldDraw', 'geometry.depthDraw', 'geometry.depthRenderCall', 'geometry.doorDraw'];
 const comparison = {};

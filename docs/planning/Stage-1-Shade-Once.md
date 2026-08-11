@@ -235,3 +235,12 @@ S1.8 author LIVE verdict.
 
 **Out of scope, explicitly:** tokens/doors/water/Case-2 draw exactly as today; the light
 stack (Stage 2); the Case-2 rank gap (Pillar 8); any change at `earlyZComposition:false`.
+
+**DEFERRED-S1a (recorded at countersign, 2026-08-11 — mirrors the Testament's closing
+block):** the per-CELL interior/boundary split this plan's §2–§3 designed (S1.1's
+`alphaMinGrid` + S1.2's `splitCoverageCellMask`) shipped built-and-tested but UNCONSUMED —
+S1.4's live wiring certifies per whole item (`alphaStats.min === 255`) only, which is §3
+item 4's single-quad clause promoted to the only interior route. The per-cell split remains
+the designed upside for partially-transparent images: its consumer belongs where
+`applyEarlyZTileState` decides state, the data already arrives at `wi.alphaMinGrid`, and the
+S1.5 pixel-diff gate (scripts now boot-default-safe) is the acceptance test.

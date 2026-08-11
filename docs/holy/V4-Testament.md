@@ -302,6 +302,27 @@ BC worker's existing full-pixel scan instead.*
       `passthrough` now restores the same stashed `legacyMaskNode` the `legacy` state already
       did. **Confirmed against the live harness same day** — see S1.5 below: byte-identical,
       non-vacuous, First Floor, both interior AND passthrough tiles exercised.
+      · ✠ 2026-08-11 Claude Fable 5 — countersigned against the committed code (69b78c6),
+      re-read line by line, with THREE deviations between this item's original text and what
+      shipped, reconciled here rather than left to disagree: **(1) "dual interior/boundary
+      meshes" did not ship** — the live path certifies per whole ITEM (`alphaStats.min === 255`,
+      the S1.2 text's own single-quad clause, now the ONLY interior route); `alphaMinGrid` and
+      `splitCoverageCellMask` are built, tested, cached (v10) and consumed by NOTHING — grep
+      confirms zero live call sites. Recorded as DEFERRED-S1a in the closing block below so it
+      cannot rot silently ([[feedback_unconsumed_api_rots_silently]] is the named hazard).
+      **(2) "maskNode deleted" was over-broad** — the evidence note above already corrects it;
+      the shipped truth is interiors-only, and I verified the passthrough branch restores the
+      stashed node. **(3) "consumers' texture handle migrated to sceneColor's depth" did NOT
+      happen, deliberately and better** — `runSceneDepthPass` is untouched and every
+      `querySceneDepth` consumer still samples `sceneDepth.depthTexture` (verified at each call
+      site); sceneColor's own depth exists solely for the hardware test. Zero consumer churn
+      beats the plan's migration. Also verified by inspection: tile mesh and prepass twin take
+      the SAME `z` in the same loop iteration on shared geometry; the world draw renders through
+      `depthCamera` — the prepass's own camera — which is what makes EQUAL exact; the rebuild
+      disposes materials only, never shared geometry; the depthWrite sweep covers `scene` and
+      doors stay safe by draw order plus the next frame's full depth clear; the flag-off branch
+      is byte-for-byte the legacy path; all three plan exclusions present in
+      `isEarlyZInteriorTile`. Sound work, honestly recorded, including its own wrong turn.
 - [x] S1.5 Pixel-diff gate at `standard` profile · done Claude Sonnet 5 2026-08-11 —
       `tests/playwright-artifacts/look/stage1-earlyz-pixel-diff.mjs` against the live bench
       Mansion, First Floor (Ground has nothing above it to occlude — barely exercises the
@@ -320,7 +341,17 @@ BC worker's existing full-pixel scan instead.*
       roof. The known intentional-diff case (§6 gate 1: a token under a faded occludable item)
       is unverified either way — the bench world carries no tokens; still open, flagged for
       whoever next touches occlusion-fade + earlyZ together.
-- [x] S1.6 Bench capture, §5's regime (4K, First-Floor, uncapped). **Gate:
+      · ✠ 2026-08-11 Claude Fable 5 — result JSON re-read from disk, verdict logic re-read in
+      the script (non-vacuity is AND-ed into the verdict, so a do-nothing flag cannot pass —
+      the exact double-wrap failure from earlier this session cannot recur), both PNGs viewed.
+      One latent defect found IN THE GATE ITSELF during this countersign and fixed on the spot:
+      both S1.5's and S1.6's scripts assumed the boot default was flag-OFF and restored a
+      hardcoded `false` — true when written, false the moment S1.7 flipped the default, after
+      which a re-run would have diffed ON-vs-ON and "passed" vacuously. Both scripts now record
+      the initial state, force OFF explicitly for the baseline, and restore what boot gave
+      them. The RECORDED evidence above is unaffected (captured at the default-false commit
+      state, non-vacuity fields prove the flip really flipped). Countersigned with that fix in
+      the tree. **Gate:
       `geometry.worldDraw` 26.6 → ≤ 8 ms.** If the win is under 2×, STOP and reconcile
       against Stage 0's A/B numbers before building further.
       *(Amended at Stage-0 close, 2026-08-10, Fable: Stage 0's A/B round was confounded — before
@@ -353,7 +384,19 @@ BC worker's existing full-pixel scan instead.*
       it IS genuinely a sub-2× win by the plan's own stated bar, and the plan's own Law says STOP
       there, not "explain it away and continue." Presented to the author as an explicit choice
       (accept-and-continue / idle-machine re-run / stop-for-review); they chose accept-and-continue.
-- [x] S1.7 Default flips ON · done Claude Sonnet 5 2026-08-11 — `vt-pan-viewer.js`:
+      · ✠ 2026-08-11 Claude Fable 5 — the STOP clause was honoured in the only way that
+      matters: the sub-2× reading was surfaced to the author as a decision, with the case for
+      each option, and their acceptance is recorded above — that is the reconcile clause
+      discharged by the authority it exists to protect. The numbers themselves I checked
+      against the raw report JSON: `unbalanced:0` on both zones of interest confirmed;
+      attribution `'good'` both captures; the ~19%-net-after-prepass arithmetic re-done by
+      hand and correct. One PROVENANCE note recorded, not hidden: these are the first real
+      per-zone GPU numbers any capture this session has produced, and an uncommitted
+      instrument fix for exactly that failure (perf-session arming the GPU zone timer after
+      settling — another session's work, in the tree but deliberately NOT in Stage 1's commit)
+      plausibly enabled them. That changes where the credit lands, not what the numbers say:
+      the instrument's own self-report this run was healthy, and the A/B is internally
+      consistent. If that fix is ever reverted, re-run this gate before citing it. — `vt-pan-viewer.js`:
       `earlyZComposition` now defaults `true` (was `false`), doc comment updated in place. Law 3
       satisfied by S1.5's diff-gate proof of identity + the author's own S1.6 accept decision
       above; the flag remains fully wired as the permanent revert per Law 5
@@ -362,8 +405,38 @@ BC worker's existing full-pixel scan instead.*
       independently re-verified against the live harness beyond this — S1.5/S1.6 already
       exercised the exact code path this flip activates by default; flipping the DEFAULT
       introduces no new logic to prove.
+      · ✠ 2026-08-11 Claude Fable 5 — `let earlyZComposition = true` verified at its
+      declaration; the revert path verified live in code: the `legacy` state restores the
+      stashed maskNode and the flag-off render branch is untouched, so
+      `setEarlyZComposition(false)` genuinely returns today's pixels, not an approximation.
+      The "no new logic to prove" reasoning is correct and I adopt it.
 - [x] S1.8 Author LIVE verdict · Ingram, 2026-08-11 — "I've loaded the scene up and nothing
       broke, no errors." Stage 1 closed.
+      · ✠ 2026-08-11 Claude Fable 5 — the verdict is the author's alone and is recorded
+      verbatim. Scope noted for honesty, not as a caveat against their word: this was a load
+      and a look, and the plan's fuller sweep (both floors, full zoom range) remains theirs to
+      exercise whenever they play — the LIVE ledger, not this checklist, tracks anything they
+      find later. The stage closes at their word, as the Covenant intends.
+
+✠ **STAGE 1 COUNTERSIGNED CLOSED — 2026-08-11, Claude Fable 5, at the author's command.**
+Every box carries its own countersign, each made against the artifacts — the committed code
+re-read function by function, the lab scenario re-run by my own hand this pass (9/9, zero
+validation errors), the gate JSONs re-read from disk, both capture PNGs viewed — never the
+worker's summaries. The stage's story includes a wrong diagnosis published and retracted the
+same day; it is kept in full above because the retraction is the part worth more than the
+result. What ships: certified-opaque items draw once through hardware EQUAL-depth instead of
+blend-and-discard, behind a live-flippable revert flag now defaulting ON, at a measured
+1.55× on `geometry.worldDraw` (≈19% net after the prepass pays for itself) with
+byte-identical pixels.
+
+**DEFERRED-S1a, named so it cannot rot:** the per-CELL interior/boundary split (S1.1's
+`alphaMinGrid` + S1.2's `splitCoverageCellMask`) is built, Node-tested, and cached at format
+v10 — and consumed by nothing. The shipped certification is per whole item, which on the
+bench already yields interior:4. Wiring the per-cell split would extend the EQUAL fast path
+into partially-transparent images (most floors with any authored hole) — real upside, untaken.
+Whoever picks it up: the consumer belongs where `applyEarlyZTileState` decides state, the
+plumbing ends at `wi.alphaMinGrid`, and S1.5's pixel-diff gate (scripts now boot-default-safe)
+is the acceptance test. Until then the grid is write-only by RECORD, not by accident.
 
 ### Stage 2 — One draw for all lights
 
@@ -836,6 +909,14 @@ on, not a queue entry beside them.
   resolved the same pass; Law 11 added; Stage 1's reconcile clause amended. Still open from
   Book III's NOW list: the legacy cross-check sweep (Book II's ledger item — any model may run
   it).
+- **Stage 1 countersigned closed** 2026-08-11 — Claude Fable 5, at the author's command, after
+  re-reading the committed code, re-running the lab scenario by hand, and re-reading both gate
+  artifacts from disk. Three text-vs-shipped deviations reconciled in S1.4's countersign; a
+  wrong diagnosis retracted in the open; the bench STOP clause surfaced to the author and
+  discharged by their explicit accept; one latent gate defect (boot-default assumption in both
+  harness scripts) found during countersign and fixed. DEFERRED-S1a recorded: the per-cell
+  interior split is built and tested but unconsumed — real untaken upside, named so it cannot
+  rot.
 
 ## OPEN QUESTIONS TO THE AUTHOR
 

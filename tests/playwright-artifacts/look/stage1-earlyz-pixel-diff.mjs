@@ -67,14 +67,19 @@ async function waitForMapArtLoaded(timeoutMs) {
       try {
         const raw = await window.MapShine?.debug?.runReport?.('loading-screen-state');
         const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        return { showing: r?.showing !== false, complete: r?.current?.complete === true, error: r?.current?.error ?? null };
+        return {
+          showing: r?.showing !== false,
+          complete: r?.current?.complete === true,
+          error: r?.current?.error ?? null,
+        };
       } catch (e) {
         return { showing: true, error: null };
       }
     });
     if (st?.error) throw new Error(`MSA reported a load error: ${JSON.stringify(st.error)}`);
     if (st && (st.complete || !st.showing)) return;
-    if (Date.now() - start > timeoutMs) throw new Error(`Map art did not finish loading after ${Math.round((Date.now() - start) / 1000)}s`);
+    if (Date.now() - start > timeoutMs)
+      throw new Error(`Map art did not finish loading after ${Math.round((Date.now() - start) / 1000)}s`);
     await page.waitForTimeout(1000);
   }
 }
@@ -111,6 +116,21 @@ if (process.env.S1_FLOOR !== 'ground') {
   // refuses to proceed early on a cold one.
   await waitForSceneSettled(page, { label: 'first floor' });
 }
+
+// ⚠️ FORCE THE FLAG OFF EXPLICITLY — NEVER ASSUME THE BOOT DEFAULT IS OFF
+// (countersign fix, 2026-08-11): S1.7 flipped `earlyZComposition`'s default to
+// TRUE. Without this, `before` would capture the ON state, the later flip
+// would be a no-op (`changed:false`), and an ON-vs-ON diff would "pass" while
+// proving nothing. Initial state is recorded and restored at the end — the
+// old hardcoded `setEarlyZComposition(false)` restore had the mirror bug.
+const initialFlag = await page.evaluate(() => window.MapShine?.getEarlyZComposition?.()?.earlyZComposition ?? null);
+console.log('[s1-diff] initial flag state at boot:', JSON.stringify(initialFlag));
+await page.evaluate(() => window.MapShine?.setEarlyZComposition?.(false));
+// Same next-residency-pass mechanics as the ON flip below: nudge one, settle.
+await page.mouse.wheel(0, -40);
+await page.waitForTimeout(600);
+await page.mouse.wheel(0, 40);
+await waitForSceneSettled(page, { label: 'after forcing flag OFF' });
 
 // FREEZE TIME — see this file's header.
 const frozen = await page.evaluate(() => {
@@ -185,8 +205,9 @@ const state = await page.evaluate(() => window.MapShine?.getEarlyZComposition?.(
 console.log('[s1-diff] flag state + NON-VACUITY at capture:', JSON.stringify(state));
 const stateOff = { note: 'captured after restore below' };
 
-// Restore the default so nothing is left in a non-default state (Law 3).
-await page.evaluate(() => window.MapShine?.setEarlyZComposition?.(false));
+// Restore the INITIAL state so nothing is left different from how boot set it
+// (Law 3) — never a hardcoded value, which goes stale when the default changes.
+await page.evaluate((v) => window.MapShine?.setEarlyZComposition?.(v === true), initialFlag);
 
 if (before.w !== after.w || before.h !== after.h) {
   console.error(`[s1-diff] size mismatch ${before.w}x${before.h} vs ${after.w}x${after.h} — cannot diff`);

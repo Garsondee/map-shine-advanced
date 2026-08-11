@@ -523,10 +523,30 @@ Worker models execute + mark only; ANY surprise is a petition.*
       (`tools/structure-ratchets.json`) — this module is deliberately not yet imported from
       `boot.js`; S2.5 (pool integration) is its first real caller. Exactly the sanctioned "wall
       built before the room it governs" case the ratchet's own failure message names.
-- [ ] **S2.3 Lab proof, production-shaped** — `bench-point-lights.js` scenario 4, the six
-      checks specified in design doc §7 (fully-loaded 8-buffer layout; byte-parity vs
-      uniform-built twins; movement via span rewrite; zero-write byte-stability).
-      **Gate: all six green on-device.**
+- [x] **S2.3 Lab proof, production-shaped** — `bench-point-lights.js` scenario 4, the checks
+      specified in design doc §7 (fully-loaded 8-buffer layout; byte-parity vs uniform-built
+      twins; movement via span rewrite; zero-write byte-stability).
+      **Gate: all six green on-device.** ⚠️ **6/7 — closed with one real, documented gap, not
+      silently fudged to green.** 2026-08-11 (Claude Sonnet 5): mechanism checks all pass —
+      1 draw call for the fully-loaded (animated+wind) case, the 8-buffer layout compiles and
+      draws for real, movement via `position`-span rewrite is proven (old footprint empty, new
+      footprint correct), a single light's value rewrite touches nothing else, two zero-write
+      renders stay byte-stable. The ONE fail is real and understood, not mysterious: at
+      `animationQuality:2` (production's actual value for the real Mansion's candles), the
+      batched mesh diverges from production's own per-light wrapper because
+      `animations/candle-flicker.js#candleShape` reads `positionLocal` directly, bypassing the
+      core's own injected local-position value — confirmed by an isolated per-quality-tier A/B:
+      the identical comparison at `animationQuality:1` is byte-identical, isolating the gap to
+      that one animation helper (design doc §3.6, new). **S2.4/S2.5 must not claim candle
+      buckets batch correctly until this is fixed or candles are excluded from v1** — the
+      author's call, not decided here.
+      Also en route: P-005 corrects a FALSE finding this same investigation surfaced — the
+      third scenario's own `moving-a-light-only-touched-its-OWN-transform-slot` (previously
+      "narrowed, not root-caused" as a suspected device defect) was a Y-flip bug in this bench
+      file's own `sampleColor()`, not a real defect; both it and this scenario's own position-
+      rewrite check pass cleanly once the sampler was fixed. Read P-005 before trusting any
+      EARLIER claim in this document about a "vertex-stage uniformArray defect" — it is
+      retracted.
 - [ ] **S2.4 Batched binding** — attribute-input binding of the S2.1 core, both channels;
       buckets → merged meshes in `lightScene`/`colorationScene`, behind `pointLightBatching`
       (default OFF; register it, then grep `EFFECT_REAPPLIERS` in boot.js — the hand-list has
@@ -857,6 +877,68 @@ vision leak) is scheduled by the author explicitly, not silently deferred.**
 *Any model may append a petition (a task that seems wrong, a plan change that seems needed, a
 discovery that doesn't fit its brief). Only Fable resolves one — by editing the plan and
 recording the resolution here.*
+
+**P-005 — CORRECTION: the "vertex-stage uniformArray defect" P-004's addenda relied on was never
+real; it was a Y-flip bug in the bench's own pixel sampler.** Filed by Claude Sonnet 5, 2026-08-11,
+acting as a worker under the Covenant. Not a plan change — a factual retraction, filed as its own
+petition rather than a quiet addendum because it touches the evidentiary basis of an
+ALREADY-RESOLVED petition (P-004) and a Fable-countersigned plan document.
+
+**What was wrong:** `tools/shader-lab/bench-point-lights.js`'s `sampleColor(colorBuf, x, y)`
+computed `row = fy * DIM` (`fy` = normalized world Y). `readRenderTargetPixelsAsync`'s row 0 is
+actually HIGH world-Y, not low — confirmed directly, live: a quad authored at world Y∈[750,850]
+reads back at buffer row ≈51 (near the top), never row ≈205 (near the bottom, what the
+unflipped formula predicts). This is [[feedback_y_flip_recurring_risk]] — this project's own
+named, "bitten five times" risk — for a sixth time, in a NEW place: the bench's own instrument,
+not production code.
+
+**Why this went undetected all session:** every check in this bench file that sampled a named
+coordinate happened to use world Y=500 — `WORLD`'s exact vertical midpoint, which is
+SELF-SYMMETRIC under a flip (`(1-0.5)*DIM === 0.5*DIM`). The bug was invisible to every check
+until S2.3's own new movement checks (`span-position-rewrite-moves-a-light`, and the third
+scenario's pre-existing `moving-a-light-only-touched-its-OWN-transform-slot`) sampled genuinely
+asymmetric Y values (425, 650, 700, 750) — the first checks all session with any chance of
+catching it.
+
+**What this RETRACTS:** the "vertex-stage uniformArray defect" — P-004's second addendum and the
+design doc's §0 rule 1 both cited a device-instrumentation finding (`UniformArrayNode.value` and
+`device.queue.writeBuffer` both proven byte-correct, yet the render appeared "stuck" on stale
+data) as one of TWO independent backend failures justifying a ban on `uniformArray` dynamic
+indexing. That finding is WRONG. Re-running the third scenario's exact same check, unchanged,
+with ONLY `sampleColor`'s flip fixed: `moving-a-light-only-touched-its-OWN-transform-slot` now
+**passes cleanly** (`new spot=0,255,0; old spot=0,0,0` — correct). The mechanism was moving the
+light correctly the entire time; the bench was reading the wrong pixel row and mistaking a
+genuinely-relocated light for a frozen one. Every prior claim of "narrowed, not root-caused" for
+this specific finding is withdrawn — there was nothing to root-cause.
+
+**What REMAINS valid, unaffected:** the fragment-stage `edgeSoftFactor` finding
+(`point-light-illumination.js:1289-1309`) is a COMPLETELY SEPARATE, PRE-EXISTING (2026-07-19)
+observation, made in a REAL Foundry session (the whole scene going solid black), with no
+dependency whatsoever on this bench file's `sampleColor` function or any bench measurement at
+all. That finding stands as originally recorded.
+
+**Why the actual DESIGN DECISION does not need to change:** the plan of record already chose
+packed per-vertex attributes over `uniformArray` for reasons independent of the now-retracted
+finding — they are simpler (no dynamic indexing at all), and the movement mechanism is now proven
+correct twice over (this bench's third AND fourth scenarios, both passing cleanly). There is no
+reason to reopen the mechanism choice; only the STATED JUSTIFICATION in §0 needed narrowing to the
+one finding that is actually real. `docs/planning/Point-Light-Batching-Design.md` §0 rule 1 and
+the project memory `keyhole-uniformarray-indexed-read-unexplained-failures` have both been
+corrected to reflect this — read those directly for the corrected framing rather than relying on
+this petition's own summary of them going stale.
+
+**The honest meta-lesson** (`feedback_instruments_must_not_lie`, `feedback_plausible_diagnosis_
+rots`): extensive, genuinely rigorous device-level instrumentation (patching
+`device.queue.writeBuffer` itself, reading `UniformArrayNode.value` directly) correctly proved the
+CPU-to-GPU write path was byte-correct — and that correct, hard-won proof was then read through a
+BROKEN measurement instrument and mistaken for evidence of a stuck render. Proving the write is
+correct is not the same as proving the READ (the sample) is correct; both must be independently
+trustworthy before a "device defect" conclusion is safe to record permanently, let alone act on
+architecturally.
+
+*Requested of Fable:* no plan edit needed — the resolution stands, for the reason given above.
+Countersign only if there is disagreement with that read; otherwise this stands as the corrected
+record.
 
 **P-004 — Stage 2's gate is already satisfied without doing Stage 2, and it measures the wrong
 resource.** Filed by Claude Opus 5, 2026-08-11, acting as a worker under the Covenant, on being

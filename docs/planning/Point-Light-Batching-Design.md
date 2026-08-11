@@ -22,12 +22,19 @@ channel instead of two per light.
 
 **Never do these (each has cost this project already paid):**
 
-1. ❌ **No `uniformArray`/storage-buffer DYNAMIC-INDEX reads of per-light data, either shader
-   stage.** Two independent, unexplained device failures are pinned: vertex-stage
-   (`tools/shader-lab/bench-point-lights.js` scenario 3 — CPU value AND `writeBuffer` proven
-   byte-correct, draw stuck on stale data regardless) and fragment-stage
+1. ❌ **No `uniformArray`/storage-buffer DYNAMIC-INDEX reads of per-light data in the FRAGMENT
+   stage** — the one confirmed, still-live production failure:
    (`point-light-illumination.js:1289` `edgeSoftFactor` — scene went solid black, disabled since
-   2026-07-19). Memory: `keyhole-uniformarray-indexed-read-unexplained-failures`.
+   2026-07-19, root cause never found). ⚠️ **CORRECTION, 2026-08-11:** this rule previously ALSO
+   cited a second, "vertex-stage" failure (bench-point-lights.js scenario 3) as independent
+   evidence — that finding was RETRACTED the same day: it was a Y-flip bug in the bench's own
+   `sampleColor()` (`row = fy*DIM` instead of `row = (1-fy)*DIM`), not a device defect. The
+   vertex-stage indexed-transform mechanism was measured again with the fix and passes cleanly.
+   See V4-Testament.md's P-004 third addendum for the full account. The BUILD decision below is
+   UNCHANGED (packed per-vertex attributes were already independently proven and remain the
+   simpler, zero-indexing choice regardless of whether vertex-stage `uniformArray` also works) —
+   only the STATED REASON narrows to the one still-real fragment-stage failure. Memory:
+   `keyhole-uniformarray-indexed-read-unexplained-failures` (also corrected).
 2. ❌ **No second hand-written shader.** The batched material is the S2.1 shared core with
    attribute inputs; the per-light material is the SAME core with uniform inputs. If you are
    copy-pasting shader graph code between two builders, you are building the
@@ -211,16 +218,52 @@ is a closed-list check, `feedback_category_string_must_be_in_closed_list`); and 
 CODE PATH itself, which is both the aperture path and the safety slide (flag OFF = today's
 renderer, byte-identical). Nothing is deleted in Stage 2.
 
+### §3.6 A REAL gap S2.1 did not close: animation seed builders reading `positionLocal` directly
+
+**Found 2026-08-11, S2.3, confirmed by an isolated per-quality-tier A/B, not left as a mystery.**
+S2.1's core split parameterizes `positionLocal.xy` as `inputs.localUnitXY` for the CORE's own use
+(`dist`, falloff, switchColor). It does NOT — could not, given the current call shape —
+intercept an animation SEED BUILDER that reaches for the TSL global `positionLocal` symbol
+itself, bypassing the injected value entirely. `animations/candle-flicker.js#candleShape`
+(called only at `animationQuality >= 2` — **production's actual value for the real Mansion's
+candles**, per S2.1's own harness capture) does exactly this at its line ~251
+(`const P = positionLocal.xy;`), for its lean/shape math.
+
+For a per-light mesh, `positionLocal` genuinely IS the unit-circle local coordinate
+(`mesh.position`/`mesh.scale` place it), so this has always worked correctly. For a BATCHED mesh
+(§3.3: `position` holds the WORLD-BAKED `origin + local*radius`, mesh transform identity),
+`positionLocal` is the WORLD coordinate — feeding `candleShape` a wildly out-of-range value.
+Bench proof (`bench-point-lights.js` scenario 4, `batched-byte-identical-to-uniform-twins` /
+`-below-quality-2`): the SAME batched-vs-twin comparison is BYTE-IDENTICAL at `animationQuality:1`
+and diverges ONLY at `:2`, isolating the gap precisely to `candleShape`'s own quality-gated
+branch — not the core, not the packed-attribute mechanism, not any other part of this design.
+`candleShape`'s own comment names `sunburst`/`emanation` as reading `positionLocal` the same way
+— likely the same class of gap, unaudited.
+
+**What this means for the plan:** batching is proven correct today for every light whose
+animation (if any) never reads `positionLocal` directly — which per S2.0's census covers document
+lights (`flame`, unaudited) but NOT the real Mansion's 207-anchor candle bucket at its actual
+quality tier. **S2.4/S2.5 must not claim candle buckets batch correctly until this is fixed or
+candles are excluded from v1 batching** (mirroring §3.1's own aperture-exclusion precedent) —
+whichever the author decides. Fixing it properly means auditing every animation seed builder for
+direct `positionLocal`/`positionWorld` reads and giving each an injectable local-position
+parameter, mirroring what S2.1 already did for the core itself — real, bounded, but NOT
+scoped or estimated here; that estimate is a prerequisite for whichever S2.4/S2.5 executor picks
+this up, not assumed.
+
 ---
 
 ## §4 Parity strategy
 
 Parity is STRUCTURAL, not aspirational: one shading core means the batched material cannot
 "forget" a term. The remaining risk is the input path — uniform read vs attribute-varying read
-of the same float32. All per-light attributes are constant across a light's fan, and
-`aLocalUnit` rides the identical attribute→varying path `positionLocal` itself uses, so the
-expectation is bit-exactness. S2.3's scenario proves it on-device
-(`batched-byte-identical-to-uniform-twins`).
+of the same float32. All per-light attributes are constant across a light's fan, and `aLocalUnit`
+rides the identical attribute→varying path `positionLocal` itself uses INSIDE THE CORE, so the
+expectation there is bit-exactness — confirmed on-device (`batched-byte-identical-to-uniform-
+twins-below-quality-2`, byte-identical). This does NOT extend to code the core calls OUT to that
+reaches for `positionLocal` on its own, bypassing the injected value — §3.6 documents the one
+confirmed instance (`candleShape`, `animationQuality >= 2`) and why it is a separate, real gap
+rather than a parity failure in the core itself.
 
 **The pixel gate stays `exact`** (Testament S2.7). The ONLY lawful relaxation, should constant-
 attribute interpolation wobble by 1 ulp on this hardware: max per-channel delta ≤ 1/255 with
@@ -262,22 +305,27 @@ perf-session.js + test). S2.6's executor must coordinate before modifying instru
 
 ---
 
-## §7 Lab proof spec (S2.3 — scenario 4 of `bench-point-lights.js`)
+## §7 Lab proof spec (S2.3 — scenario 4 of `bench-point-lights.js`) — DONE, 6/7 green
 
-Check IDs, all must pass on-device before any production wiring:
+Check IDs — six pass; the seventh is a real, understood, DELIBERATELY-not-fudged fail (§3.6):
 
-- `packed-batch-renders-one-draw` — fully-loaded layout (anim + wind, 8 buffers), N lights, 1
+- `packed-batch-renders-one-draw` ✅ — fully-loaded layout (anim + wind, 8 buffers), N lights, 1
   real `drawCalls`.
-- `fully-loaded-layout-fits-vertex-buffer-limit` — the §3.3 arithmetic proven by compile+draw,
+- `fully-loaded-layout-fits-vertex-buffer-limit` ✅ — the §3.3 arithmetic proven by compile+draw,
   not arithmetic alone.
-- `batched-byte-identical-to-uniform-twins` — same values through per-light-style uniform
-  materials vs one batched mesh: byte-equal readback (this is simultaneously the constant-
-  attribute interpolation-exactness proof, §4).
-- `span-position-rewrite-moves-a-light` — movement via span rewrite (the mechanism of record,
-  REPLACING the banned uniformArray transform); old footprint empty, new footprint correct.
-- `span-value-rewrite-touches-one-light-only` — rewrite one light's `aParams`/colour span;
+- `batched-byte-identical-to-uniform-twins` ❌ **real, understood fail** — production's actual
+  `animationQuality:2` diverges for the reason §3.6 documents (an animation seed builder, not
+  the core). Left failing on purpose rather than silently testing a lower quality tier.
+- `batched-byte-identical-to-uniform-twins-below-quality-2` ✅ — the SAME comparison at
+  `animationQuality:1`: byte-identical, isolating §3.6's gap to that one animation helper.
+- `span-position-rewrite-moves-a-light` ✅ — movement via span rewrite (the mechanism of record,
+  replacing `uniformArray`); old footprint empty, new footprint correct. (This check, and the
+  third scenario's sibling, were both false-failing earlier the same day on a Y-flip bug in this
+  bench's own `sampleColor` — fixed; see V4-Testament.md P-005. Not a mechanism defect, never
+  was.)
+- `span-value-rewrite-touches-one-light-only` ✅ — rewrite one light's `aParams`/colour span;
   every other light byte-stable.
-- `steady-state-renders-byte-stable-with-zero-writes` — two renders, no writes between:
+- `steady-state-renders-byte-stable-with-zero-writes` ✅ — two renders, no writes between:
   byte-identical frames.
 
 ---

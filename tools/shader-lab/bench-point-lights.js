@@ -79,6 +79,13 @@
  * @module tools/shader-lab/bench-point-lights
  */
 import { evaluate, registerBench } from './contract.js';
+import {
+  buildIlluminationShadingCore,
+  buildPointLightIlluminationMaterial,
+} from '../../src/effects/lighting/point-light-illumination.js';
+import { resolveLightAnimation } from '../../src/effects/lighting/animations/registry.js';
+import { describeBucketVertexBuffers } from '../../src/effects/lighting/point-light-batch.js';
+import { createWindHandle } from '../../src/world/index.js';
 
 const WORLD = { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
 const DIM = 256;
@@ -113,6 +120,46 @@ function buildFanLocal(sides, radius) {
     indices[i * 3 + 2] = next + 1;
   }
   return { positions, indices, vertexCount };
+}
+
+/**
+ * A regular n-gon fan, UNIT-RADIUS, NON-INDEXED — S2.3's own fixture, DIFFERENT
+ * from {@link buildFanLocal} on purpose: `buildFanLocal` is indexed (`sides+1`
+ * vertices + a shared index buffer), which is NOT how production geometry is
+ * shaped (`triangulateLightFan`, `point-light-illumination.js` — a flat
+ * triangle LIST, `vertexCount = n*3`, no `setIndex` anywhere,
+ * `docs/planning/Point-Light-Batching-Design.md` §3.3 cites this exact
+ * convention). S2.3 is the "production-shaped" scenario — its own fixture
+ * has to match that shape, not the earlier scenarios' simpler indexed one
+ * (`feedback_bench_must_build_inputs_like_production`). Unit radius (not a
+ * caller-supplied one, unlike `buildFanLocal`): S2.3's callers separately
+ * bake each light's REAL radius into the batched mesh's WORLD `position`
+ * buffer while keeping this shape's raw unit-circle coordinates for
+ * `aLocalUnit` — see `buildPackedBatchIllumMesh`'s own header for why both
+ * are needed.
+ *
+ * @param {number} sides
+ * @returns {{positions: Float32Array, vertexCount: number}} `positions` is
+ *   xyz (z always 0), 3 floats/vertex, `vertexCount = sides*3`.
+ */
+function buildFanLocalUnit(sides) {
+  const vertexCount = sides * 3;
+  const positions = new Float32Array(vertexCount * 3);
+  let o = 0;
+  for (let i = 0; i < sides; i++) {
+    const a0 = (i / sides) * Math.PI * 2;
+    const a1 = ((i + 1) / sides) * Math.PI * 2;
+    positions[o++] = 0;
+    positions[o++] = 0;
+    positions[o++] = 0; // centre
+    positions[o++] = Math.cos(a0);
+    positions[o++] = Math.sin(a0);
+    positions[o++] = 0; // rim i
+    positions[o++] = Math.cos(a1);
+    positions[o++] = Math.sin(a1);
+    positions[o++] = 0; // rim i+1
+  }
+  return { positions, vertexCount };
 }
 
 /**
@@ -262,6 +309,259 @@ function buildMergedLightsMesh(THREE, lights) {
   return mesh;
 }
 
+/**
+ * S2.3's real thing under test: N lights merged into ONE mesh, per-light
+ * values carried as PACKED PER-VERTEX ATTRIBUTES (never `uniformArray`, per
+ * `docs/planning/Point-Light-Batching-Design.md` §0/§2), shaded by the REAL
+ * production core (`buildIlluminationShadingCore`, unmodified — S2.1's own
+ * split is what makes this possible without a second, hand-copied shader).
+ *
+ * TWO different local-space concepts, BOTH needed, matching design doc §3.3:
+ *   - `position` (world-space) is BAKED at build/rebuild time —
+ *     `origin + localUnit*radius` — computed ONCE here on the CPU, never a
+ *     runtime transform. This is the movement mechanism of record, replacing
+ *     the BANNED `uniformArray`-indexed transform (the third scenario's own
+ *     narrowed-not-fixed defect).
+ *   - `aLocalUnit` carries the RAW unit-circle coordinates, unscaled,
+ *     untranslated — what the shading core's `dist`/falloff/switchColor math
+ *     actually needs (the equivalent of the per-light path's own
+ *     `positionLocal.xy`, which is unusable here because `positionLocal` on
+ *     THIS mesh already means the WORLD-baked value).
+ *
+ * `layout` (from `describeBucketVertexBuffers`, S2.2) drives which buffers
+ * actually get created — the SAME function production's own bucket registry
+ * will call, so this scenario is a real exercise of it, not a parallel guess.
+ *
+ * @param {*} THREE
+ * @param {Array<object>} lights - see the scenario's own light fixtures for
+ *   the exact per-light fields consumed.
+ * @param {object} args
+ * @param {boolean} args.animated @param {boolean} args.windPresent
+ * @param {*} [args.animationEntry] - `resolveLightAnimation`'s own return;
+ *   required when `animated`.
+ * @param {*} args.uGlobalTimeMs @param {*} args.windHandle
+ * @param {number} [args.animationQuality=2] @param {string} [args.falloffModel='inverseSquare']
+ * @returns {{mesh: *, geo: *, spans: Record<string,{start:number,count:number}>,
+ *   buffers: Record<string,*>, layout: *}} `spans`/`buffers` are what the
+ *   movement/value-rewrite checks mutate directly — the exact CPU-side
+ *   handles a real bucket registry (S2.2's `createBucket`) would also hold.
+ */
+function buildPackedBatchIllumMesh(
+  THREE,
+  lights,
+  {
+    animated,
+    windPresent,
+    animationEntry,
+    uGlobalTimeMs,
+    windHandle,
+    animationQuality = 2,
+    falloffModel = 'inverseSquare',
+  }
+) {
+  const { attribute, vec2, vec3, vec4 } = THREE.TSL;
+  const layout = describeBucketVertexBuffers({ channel: 'illumination', animated, windPresent });
+
+  const fans = lights.map((l) => buildFanLocalUnit(l.sides));
+  const totalVerts = fans.reduce((s, f) => s + f.vertexCount, 0);
+
+  const itemSizes = { position: 3, aLocalUnit: 2, aParams: 4, aColorA: 4, aColorB: 4, aColorC: 4, aAnim: 4, aWind: 4 };
+  const arrays = {};
+  for (const name of layout.buffers) arrays[name] = new Float32Array(totalVerts * itemSizes[name]);
+
+  let vOff = 0;
+  const spans = {};
+  for (let li = 0; li < lights.length; li++) {
+    const l = lights[li];
+    const fan = fans[li];
+    spans[l.sourceId] = { start: vOff, count: fan.vertexCount };
+    for (let v = 0; v < fan.vertexCount; v++) {
+      const lx = fan.positions[v * 3 + 0];
+      const ly = fan.positions[v * 3 + 1];
+      const vi = vOff + v;
+      arrays.position[vi * 3 + 0] = l.x + lx * l.radius;
+      arrays.position[vi * 3 + 1] = l.y + ly * l.radius;
+      arrays.position[vi * 3 + 2] = 0;
+      arrays.aLocalUnit[vi * 2 + 0] = lx;
+      arrays.aLocalUnit[vi * 2 + 1] = ly;
+      arrays.aParams[vi * 4 + 0] = l.ratio;
+      arrays.aParams[vi * 4 + 1] = l.attenuationEased;
+      arrays.aParams[vi * 4 + 2] = l.exposure ?? 0;
+      arrays.aParams[vi * 4 + 3] = l.expectedDepth ?? 0;
+      arrays.aColorA[vi * 4 + 0] = l.bg[0];
+      arrays.aColorA[vi * 4 + 1] = l.bg[1];
+      arrays.aColorA[vi * 4 + 2] = l.bg[2];
+      arrays.aColorA[vi * 4 + 3] = l.dim[0];
+      arrays.aColorB[vi * 4 + 0] = l.dim[1];
+      arrays.aColorB[vi * 4 + 1] = l.dim[2];
+      arrays.aColorB[vi * 4 + 2] = l.bright[0];
+      arrays.aColorB[vi * 4 + 3] = l.bright[1];
+      arrays.aColorC[vi * 4 + 0] = l.bright[2];
+      arrays.aColorC[vi * 4 + 1] = 0;
+      arrays.aColorC[vi * 4 + 2] = 0;
+      arrays.aColorC[vi * 4 + 3] = 0;
+      if (animated) {
+        arrays.aAnim[vi * 4 + 0] = l.speedRaw;
+        arrays.aAnim[vi * 4 + 1] = l.reverseSign;
+        arrays.aAnim[vi * 4 + 2] = l.seed;
+        arrays.aAnim[vi * 4 + 3] = l.intensityRaw;
+      }
+      if (windPresent) {
+        arrays.aWind[vi * 4 + 0] = l.x;
+        arrays.aWind[vi * 4 + 1] = l.y;
+        arrays.aWind[vi * 4 + 2] = l.windExposure;
+        arrays.aWind[vi * 4 + 3] = l.windResponse;
+      }
+    }
+    vOff += fan.vertexCount;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  const buffers = {};
+  for (const name of layout.buffers) {
+    const attr = new THREE.BufferAttribute(arrays[name], itemSizes[name]);
+    geo.setAttribute(name, attr);
+    buffers[name] = attr;
+  }
+
+  const aParamsNode = attribute('aParams', 'vec4');
+  const aColorANode = attribute('aColorA', 'vec4');
+  const aColorBNode = attribute('aColorB', 'vec4');
+  const aColorCNode = attribute('aColorC', 'vec4');
+  let animInput = null;
+  if (animated) {
+    const n = attribute('aAnim', 'vec4');
+    animInput = { speedRaw: n.x, reverseSign: n.y, seed: n.z, intensityRaw: n.w };
+  }
+  let windInput = null;
+  if (windPresent) {
+    const n = attribute('aWind', 'vec4');
+    windInput = { center: vec2(n.x, n.y), exposure: n.z, response: n.w };
+  }
+
+  const { finalNode, alphaNode } = buildIlluminationShadingCore({
+    THREE,
+    inputs: {
+      localUnitXY: attribute('aLocalUnit', 'vec2'),
+      ratio: aParamsNode.x,
+      attenuationEased: aParamsNode.y,
+      exposure: aParamsNode.z,
+      expectedDepth: aParamsNode.w,
+      backgroundColor: vec3(aColorANode.x, aColorANode.y, aColorANode.z),
+      dimColor: vec3(aColorANode.w, aColorBNode.x, aColorBNode.y),
+      brightColor: vec3(aColorBNode.z, aColorBNode.w, aColorCNode.x),
+      anim: animInput,
+      wind: windInput,
+    },
+    shared: {
+      uGlobalTimeMs,
+      windHandle,
+      attrTexNode: null,
+      depthTexNode: null,
+      depthFlagsTexNode: null,
+      sunShadowSlotNodes: null,
+      blendSunVisibilityAcrossFloors: null,
+      apertureGoboShared: null,
+    },
+    flags: { animation: animated ? animationEntry : null, animationQuality, falloffModel, apertureCount: 0 },
+  });
+
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.MaxEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.MaxEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(finalNode, alphaNode);
+
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.frustumCulled = false;
+
+  return { mesh, geo, spans, buffers, layout };
+}
+
+/**
+ * The COMPARISON TWIN for `batched-byte-identical-to-uniform-twins`: N
+ * SEPARATE meshes, each built by the REAL, unmodified per-light wrapper
+ * (`buildPointLightIlluminationMaterial`) and placed via `mesh.position`/
+ * `mesh.scale` — production's actual, current technique
+ * (`point-light-pool.js:1365-1366`), untouched by anything S2 has built.
+ * If the batched mesh's rendered output ever diverges from this, the
+ * divergence is real — this is what production draws TODAY, per light.
+ *
+ * @param {*} THREE @param {Array<object>} lights
+ * @param {object} args - same shape as `buildPackedBatchIllumMesh`'s own.
+ * @returns {{scene: *, handles: Array<{mesh:*, handle:object, light:object}>}}
+ */
+function buildUniformTwinIllumMeshes(
+  THREE,
+  lights,
+  {
+    animated,
+    windPresent,
+    animationEntry,
+    uGlobalTimeMs,
+    windHandle,
+    animationQuality = 2,
+    falloffModel = 'inverseSquare',
+  }
+) {
+  const { uniform, vec3 } = THREE.TSL;
+  const scene = new THREE.Scene();
+  const handles = [];
+  for (const l of lights) {
+    const uBackgroundColor = uniform(vec3(l.bg[0], l.bg[1], l.bg[2]));
+    const uDimColor = uniform(vec3(l.dim[0], l.dim[1], l.dim[2]));
+    const uBrightColor = uniform(vec3(l.bright[0], l.bright[1], l.bright[2]));
+    const handle = buildPointLightIlluminationMaterial({
+      THREE,
+      uBackgroundColor,
+      uDimColor,
+      uBrightColor,
+      animation: animated ? animationEntry : null,
+      uGlobalTimeMs,
+      animationQuality,
+      falloffModel,
+      windCenter: windPresent ? { x: l.x, y: l.y } : undefined,
+      windExposure: windPresent ? l.windExposure : undefined,
+      windResponse: windPresent ? l.windResponse : undefined,
+      windHandle,
+    });
+    handle.uRatio.value = l.ratio;
+    handle.uAttenuationEased.value = l.attenuationEased;
+    handle.uExposure.value = l.exposure ?? 0;
+    handle.uLightExpectedDepth.value = l.expectedDepth ?? 0;
+    if (animated) {
+      handle.uSpeedRaw.value = l.speedRaw;
+      handle.uReverseSign.value = l.reverseSign;
+      handle.uSeed.value = l.seed;
+      handle.uIntensityRaw.value = l.intensityRaw;
+    }
+    if (windPresent) {
+      handle.uWindCenter.value.set(l.x, l.y);
+      handle.uWindExposure.value = l.windExposure;
+      handle.uWindResponse.value = l.windResponse;
+    }
+    const fan = buildFanLocalUnit(l.sides);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(fan.positions, 3));
+    const mesh = new THREE.Mesh(geo, handle.material);
+    // Production's REAL placement technique — see this function's own header.
+    mesh.position.set(l.x, l.y, 0);
+    mesh.scale.set(l.radius, l.radius, 1);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    handles.push({ mesh, handle, light: l });
+  }
+  return { scene, handles };
+}
+
 export function createPointLightsBench({ THREE, log }) {
   let renderer = null;
   let camera = null;
@@ -301,11 +601,23 @@ export function createPointLightsBench({ THREE, log }) {
     return { color: ArrayBuffer.isView(buf) ? buf : new Uint8Array(buf), drawCalls };
   }
 
+  // ⚠️ Y-FLIP (feedback_y_flip_recurring_risk — this project's own named,
+  // "bitten five times" risk; this is the sixth), found live 2026-08-11 while
+  // debugging what looked like a real GPU defect in S2.3's new checks.
+  // `readRenderTargetPixelsAsync`'s row 0 is HIGH world-Y (near `WORLD.maxY`),
+  // not low — confirmed directly: a quad authored at world Y∈[750,850] reads
+  // back at buffer row ≈51 (near the TOP), never row ≈205 (near the bottom,
+  // what the un-flipped `row = fy*DIM` this function used to compute would
+  // predict). Every check that only ever sampled y=500 (this WORLD's exact
+  // vertical midpoint, self-symmetric under a flip) was blind to this the
+  // whole session; only an asymmetric-Y sample point could ever have caught
+  // it, which is exactly what S2.3's own movement checks were the first to
+  // do. `row = (1 - fy) * DIM`, not `fy * DIM`.
   function sampleColor(colorBuf, x, y) {
     const fx = (x - WORLD.minX) / (WORLD.maxX - WORLD.minX);
     const fy = (y - WORLD.minY) / (WORLD.maxY - WORLD.minY);
     const px = Math.min(DIM - 1, Math.max(0, Math.floor(fx * DIM)));
-    const row = Math.min(DIM - 1, Math.max(0, Math.floor(fy * DIM)));
+    const row = Math.min(DIM - 1, Math.max(0, Math.floor((1 - fy) * DIM)));
     const i = (row * DIM + px) * 4;
     return { r: colorBuf[i], g: colorBuf[i + 1], b: colorBuf[i + 2], a: colorBuf[i + 3] };
   }
@@ -476,32 +788,22 @@ export function createPointLightsBench({ THREE, log }) {
       'ever indexed a `uniformArray` from the FRAGMENT stage before (the soft-edge polygon SDF, ' +
       'point-light-illumination.js), so vertex-stage indexed reads are the genuinely new claim ' +
       'here, proven on the real device before any production code assumes it.' +
-      '\n\n⚠️ ONE CHECK BELOW (`moving-a-light-only-touched-its-OWN-transform-slot`) FAILS HERE, ' +
-      'NARROWED (NOT YET ROOT-CAUSED) 2026-08-11. An earlier pass of this investigation reported ' +
-      'this as unreproducible outside this file; that framing was WRONG — a fresh, minimal, ' +
-      "standalone script using this scenario's exact values reproduces it too, so the trigger is " +
-      'not this harness. What IS now conclusively ruled out, via direct device instrumentation ' +
-      '(not more bisection — three targeted probes against the running WebGPU backend): (1) ' +
-      '`UniformArrayNode.value` — the padded CPU-side mirror `update()` writes into — reads back ' +
-      'byte-correct for the moved light immediately after the second render (verified by reading ' +
-      'the node instance directly); (2) `device.queue.writeBuffer` — patched and logged — is ' +
-      'called for both the origin and radius buffers on the second render with the fully correct, ' +
-      'moved values (logged the actual bytes). The CPU-to-GPU write path is provably correct end ' +
-      'to end. Yet the rendered image keeps showing the light at its FIRST-frame position and ' +
-      'radius, and two further no-op re-renders (no array mutation, no new writeBuffer calls) stay ' +
-      'stuck on that same stale image — ruling out simple one-frame latency (a ping-ponged buffer ' +
-      'that would resolve itself one frame later). The defect is therefore isolated to whatever ' +
-      "GPU resource the DRAW's bind group actually references, downstream of a confirmed-correct " +
-      'buffer write — most likely a bind-group or buffer-object identity/caching detail inside this ' +
-      "vendored WebGPU backend (three.webgpu.js's `Bindings`/`WebGPUBindingUtils`) that this " +
-      'investigation did not chase further, per explicit guidance against open-ended, unbounded ' +
-      'debugging. Next step for whoever picks this back up: instrument `backend.get(binding).buffer` ' +
-      'identity (not just its contents) across the two renders, and compare against the GPUBuffer ' +
-      'object actually captured in the cached `bindGroupGPU` used for the draw. This does NOT ' +
-      'weaken the design conclusion: the other three checks here (single draw call, correct ' +
-      "per-slot placement, untouched slots staying byte-identical) pass, and the mechanism's CPU- " +
-      'and upload-side correctness is now proven, not assumed — the remaining gap is a specific, ' +
-      'narrowed backend question, not the indexed-transform-array design itself.',
+      '\n\n✅ ALL FOUR CHECKS PASS (corrected 2026-08-11 — see docs/holy/V4-Testament.md P-005 for ' +
+      'the full account). This scenario previously reported `moving-a-light-only-touched-its-OWN-' +
+      'transform-slot` as failing, and an extensive investigation (real, careful device ' +
+      'instrumentation: patching `UniformArrayNode.value` and `device.queue.writeBuffer` itself, ' +
+      'both proven byte-correct) concluded the render was somehow "stuck" on stale data, narrowed ' +
+      "to the backend's bind-group layer. That conclusion was WRONG. The actual bug was in THIS " +
+      "BENCH FILE's own `sampleColor()` — `row = fy * DIM` instead of `row = (1 - fy) * DIM` " +
+      "(readRenderTargetPixelsAsync's row 0 is HIGH world-Y, not low). Every check in this file " +
+      "that sampled a named coordinate happened to use world Y=500 (this WORLD's exact vertical " +
+      'midpoint, self-symmetric under a flip), so the bug was invisible until this specific check ' +
+      'sampled asymmetric Y values (425, 650). With `sampleColor` fixed, this check passes ' +
+      'cleanly — the light was moving correctly the whole time; the write WAS byte-correct AND the ' +
+      'render WAS correct, only the MEASUREMENT reading it back was wrong. The device-instrumentation ' +
+      'work itself was not wasted — it correctly ruled out the write path, which is exactly why the ' +
+      'remaining gap (a broken read) was findable once someone thought to question the sampler ' +
+      'instead of the mechanism (`feedback_instruments_must_not_lie`).',
     async run() {
       await ensureRenderer();
       const checks = [];
@@ -604,19 +906,10 @@ export function createPointLightsBench({ THREE, log }) {
       // identity from their construction above — no `.array = ...`
       // reassignment needed here or before frame 2 below).
       //
-      // ⚠️ A NARROWED, NOT YET ROOT-CAUSED ANOMALY (2026-08-11 — corrects an
-      // earlier note here that claimed swapping numeric values alone made
-      // this pass; a later re-check with these same values showed it still
-      // fails, so that earlier "fix" was never real — see the scenario's
-      // `summary` string above for what direct device instrumentation since
-      // ruled in and out: `UniformArrayNode#update()`'s CPU-side `.value` and
-      // the actual `device.queue.writeBuffer` call are both independently
-      // confirmed correct for the moved light on the second render, and two
-      // further no-op re-renders stay stuck on the first-frame image (not a
-      // one-frame latency issue). The gap is isolated to the bind-group/
-      // buffer-resource layer inside the vendored WebGPU backend, downstream
-      // of a confirmed-correct write — not chased further here, per guidance
-      // against open-ended debugging.
+      // ✅ RESOLVED 2026-08-11 — see the scenario's `summary` string above and
+      // docs/holy/V4-Testament.md's P-005: this was never a device defect.
+      // This scenario's OWN `sampleColor()` had a Y-flip bug, unrelated to
+      // anything below — fixed once, at its one definition, not here.
       originArr[0].set(300, 500);
       radiusArr[0] = 80;
       originArr[1].set(700, 500);
@@ -688,6 +981,378 @@ export function createPointLightsBench({ THREE, log }) {
     },
   });
 
+  scenarios.set('production-shaped-packed-batch', {
+    name: 'production-shaped-packed-batch',
+    summary:
+      "S2.3 (docs/planning/Point-Light-Batching-Design.md §7) — Stage 2's mechanism of record, " +
+      'proven on-device with the REAL shading core (`buildIlluminationShadingCore`, S2.1) and the ' +
+      'REAL layout function (`describeBucketVertexBuffers`, S2.2), not a simplified stand-in. Seven ' +
+      "checks, 6/7 passing: one draw for the fully-loaded (animated + wind) case; that layout's " +
+      '8-buffer count proven by an actual compile+draw, not arithmetic alone; movement via ' +
+      'rewriting the `position` span (the mechanism that REPLACES uniformArray — the third ' +
+      'scenario\'s own once-"unresolved" check is now RESOLVED, docs/holy/V4-Testament.md P-005: ' +
+      "it was a Y-flip bug in THIS FILE's own `sampleColor`, not a device defect); a single light's " +
+      'value rewrite touches nothing else; two renders with zero writes stay byte-stable. The ONE ' +
+      "real, understood failure: at animationQuality:2 (production's actual value), the batched " +
+      "mesh diverges from production's own per-light wrapper — root cause CONFIRMED (not a " +
+      "mystery): candle-flicker.js's candleShape() reads `positionLocal` directly at quality>=2, " +
+      "bypassing the core's own injected local-position value; the SAME comparison at quality:1 " +
+      'passes byte-perfectly, isolating the gap to that one animation helper, not the core split.',
+    async run() {
+      await ensureRenderer();
+      const checks = [];
+      const animationEntry = resolveLightAnimation('candleFlicker');
+      const uGlobalTimeMs = THREE.TSL.uniform(THREE.TSL.float(4200));
+      const windHandle = createWindHandle();
+
+      // ==== Checks 1-3: the FULLY-LOADED case (animated + wind), candleFlicker
+      // — S2.0's own census found this is production's actual dominant shape
+      // (207 candle anchors, one shared bucket). ====
+      const FULL_LIGHTS = [
+        {
+          sourceId: 'A',
+          x: 300,
+          y: 400,
+          radius: 90,
+          sides: 20,
+          ratio: 0.25,
+          attenuationEased: 0.6,
+          exposure: 0,
+          bg: [0.5, 0.5, 0.5],
+          dim: [0.65, 0.65, 0.65],
+          bright: [1, 0.9, 0.8],
+          speedRaw: 5,
+          reverseSign: 1,
+          seed: 11,
+          intensityRaw: 5,
+          windExposure: 0.7,
+          windResponse: 1,
+        },
+        {
+          sourceId: 'B',
+          x: 650,
+          y: 400,
+          radius: 130,
+          sides: 24,
+          ratio: 0.3,
+          attenuationEased: 0.5,
+          exposure: 0,
+          bg: [0.5, 0.5, 0.5],
+          dim: [0.6, 0.6, 0.6],
+          bright: [1, 1, 0.9],
+          speedRaw: 5,
+          reverseSign: 1,
+          seed: 37,
+          intensityRaw: 5,
+          windExposure: 0.4,
+          windResponse: 1,
+        },
+        {
+          sourceId: 'C',
+          x: 480,
+          y: 750,
+          radius: 70,
+          sides: 16,
+          ratio: 0.2,
+          attenuationEased: 0.7,
+          exposure: 0,
+          bg: [0.5, 0.5, 0.5],
+          dim: [0.6, 0.6, 0.6],
+          bright: [1, 0.85, 0.7],
+          speedRaw: 5,
+          reverseSign: 1,
+          seed: 59,
+          intensityRaw: 5,
+          windExposure: 0.9,
+          windResponse: 1,
+        },
+      ];
+      const fullCfg = {
+        animated: true,
+        windPresent: true,
+        animationEntry,
+        uGlobalTimeMs,
+        windHandle,
+        animationQuality: 2,
+        falloffModel: 'inverseSquare',
+      };
+
+      const layout = describeBucketVertexBuffers({ channel: 'illumination', animated: true, windPresent: true });
+      // ⚠️ `evaluate()` calls its callback SYNCHRONOUSLY and reads
+      // `.ok`/`.measured`/`.expected` off whatever it returns IMMEDIATELY
+      // (contract.js:93-109) — it does not await a Promise. This check (and
+      // every other one below) computes its async result FIRST via a plain
+      // `await`, then calls `evaluate()` with a synchronous closure over the
+      // already-resolved values. An earlier draft returned `renderScene(...)
+      // .then(...)` directly from the `evaluate()` callback — `evaluate()`
+      // read the unresolved Promise as a truthy-but-fieldless object
+      // (`.ok`/`.measured` both undefined → an instant, uninformative fail)
+      // AND, because nothing awaited it, let every render AFTER this one
+      // start while this one was still in flight on the shared `colorRt`,
+      // corrupting checks 2-4's own results too (a stray-render race, not a
+      // batching-mechanism bug — caught and fixed before it could be
+      // mistaken for one).
+      {
+        const batch = buildPackedBatchIllumMesh(THREE, FULL_LIGHTS, fullCfg);
+        const scene = new THREE.Scene();
+        scene.add(batch.mesh);
+        const r = await renderScene(scene);
+        batch.geo.dispose();
+        checks.push(
+          evaluate('fully-loaded-layout-fits-vertex-buffer-limit', () => ({
+            ok:
+              layout.count === 8 && layout.ok === true && Object.keys(batch.buffers).length === 8 && r.drawCalls === 1,
+            measured: `describeBucketVertexBuffers count=${layout.count} ok=${layout.ok}; real geometry attributes=${Object.keys(batch.buffers).length}; drawCalls=${r.drawCalls}`,
+            expected:
+              '8 and true from the arithmetic, matching 8 REAL attributes that actually compiled and drew — the device accepted the fully-loaded layout, not just the count',
+          }))
+        );
+      }
+
+      const packedResult = await (async () => {
+        const batch = buildPackedBatchIllumMesh(THREE, FULL_LIGHTS, fullCfg);
+        const scene = new THREE.Scene();
+        scene.add(batch.mesh);
+        const frame = await renderScene(scene);
+        batch.geo.dispose();
+        return frame;
+      })();
+      checks.push(
+        evaluate('packed-batch-renders-one-draw', () => ({
+          ok: packedResult.drawCalls === 1,
+          measured: `drawCalls=${packedResult.drawCalls}`,
+          expected: '1 — three animated, wind-present lights, one merged mesh, one real draw call',
+        }))
+      );
+
+      const twins = buildUniformTwinIllumMeshes(THREE, FULL_LIGHTS, fullCfg);
+      const twinFrame = await renderScene(twins.scene);
+      for (const h of twins.handles) h.mesh.geometry.dispose();
+      let maxDelta = 0;
+      let firstDiffAt = null;
+      for (let i = 0; i < packedResult.color.length; i++) {
+        const d = Math.abs(packedResult.color[i] - twinFrame.color[i]);
+        if (d > maxDelta) maxDelta = d;
+        if (d > 0 && firstDiffAt === null) firstDiffAt = i;
+      }
+      // ⚠️ CONFIRMED, REAL, UNDERSTOOD GAP (2026-08-11) — do not fudge this to
+      // pass by quietly lowering `fullCfg.animationQuality`. `quality: 2` is
+      // the REAL production value (S2.1's own harness capture: the live
+      // Mansion's candles run at `animation.quality:2` today) — testing
+      // anything lower would misrepresent what batching actually supports.
+      // Root cause, found by reading source, then CONFIRMED by an isolated
+      // per-quality-tier A/B (not left as a mystery): `animations/candle-
+      // flicker.js#candleShape` (called only at `quality >= 2`) reads
+      // `positionLocal.xy` DIRECTLY (line ~251) — the raw TSL global vertex-
+      // position symbol — instead of using the `dist`/local-position value
+      // the shading core already computed and would have passed through
+      // correctly. For the per-light twin mesh, `positionLocal` genuinely IS
+      // the unit-circle local coordinate (mesh.position/scale places it), so
+      // `candleShape`'s lean/shape math gets sane inputs. For the BATCHED
+      // mesh, `positionLocal` is the WORLD-BAKED coordinate (§3.3's own
+      // design — `position` holds `origin + local*radius`), so the SAME code
+      // feeds `candleShape` a wildly out-of-range value, producing garbage
+      // shape math that collapses this check's sample point to pure
+      // background. Isolated with a per-quality-tier A/B, single light,
+      // single sample point: quality 0 and 1 are BYTE-IDENTICAL between
+      // batch and twin (`candleShape`'s own `if (quality<2) return
+      // {flameDist:dist}` fallback correctly uses the injected value); only
+      // quality>=2 diverges, and only there. `sunburst`/`emanation` are
+      // named in `candleShape`'s own comment as reading `positionLocal` the
+      // same way — likely the same class of gap, unaudited here.
+      //
+      // This is NOT a device defect and NOT covered by S2.1's core split —
+      // the core itself is proven correct (see the quality<2 check just
+      // below). It is a SEPARATE, real requirement S2.1 did not anticipate:
+      // animation SEED BUILDERS that reach for `positionLocal` directly also
+      // need to accept an injected local-position node before they batch
+      // correctly. Recorded as a real gap in
+      // `docs/planning/Point-Light-Batching-Design.md` and
+      // `docs/holy/V4-Testament.md` — not silently worked around here.
+      checks.push(
+        evaluate('batched-byte-identical-to-uniform-twins', () => ({
+          ok: maxDelta === 0,
+          measured: `maxChannelDelta=${maxDelta}${firstDiffAt !== null ? ` (first diff at byte ${firstDiffAt})` : ''}; twin drawCalls=${twinFrame.drawCalls}`,
+          expected:
+            '0, but a REAL, understood gap fails this at quality:2 (production´s actual value): candle-flicker.js´s candleShape() reads positionLocal directly, bypassing the injected local-position value — sound for quality<2 (see the next check), broken specifically where an animation seed builder reaches around the core´s own injection seam',
+        }))
+      );
+
+      // Isolates the CORE mechanism from the animation-seed-builder gap just
+      // documented: the SAME batched-vs-twin comparison, SAME lights, ONLY
+      // `animationQuality` dropped to 1 (still animated, still wind-present —
+      // `candleShape`'s positionLocal branch specifically requires >=2).
+      const lowerQualityCfg = { ...fullCfg, animationQuality: 1 };
+      const packedLowQ = await (async () => {
+        const batch = buildPackedBatchIllumMesh(THREE, FULL_LIGHTS, lowerQualityCfg);
+        const scene = new THREE.Scene();
+        scene.add(batch.mesh);
+        const frame = await renderScene(scene);
+        batch.geo.dispose();
+        return frame;
+      })();
+      const twinsLowQ = buildUniformTwinIllumMeshes(THREE, FULL_LIGHTS, lowerQualityCfg);
+      const twinLowQFrame = await renderScene(twinsLowQ.scene);
+      for (const h of twinsLowQ.handles) h.mesh.geometry.dispose();
+      let lowQMaxDelta = 0;
+      for (let i = 0; i < packedLowQ.color.length; i++) {
+        lowQMaxDelta = Math.max(lowQMaxDelta, Math.abs(packedLowQ.color[i] - twinLowQFrame.color[i]));
+      }
+      checks.push(
+        evaluate('batched-byte-identical-to-uniform-twins-below-quality-2', () => ({
+          ok: lowQMaxDelta === 0,
+          measured: `maxChannelDelta=${lowQMaxDelta} at animationQuality:1 (same lights, same wind, quality lowered only enough to avoid candleShape's positionLocal branch)`,
+          expected:
+            "0 — proves the CORE mechanism (buildIlluminationShadingCore fed via packed attributes) is sound; the sibling check's failure is isolated to the animation seed builder's own direct positionLocal read, not the core split",
+        }))
+      );
+
+      // ==== Checks 4-6: the SIMPLE case (no animation, no wind) — isolates
+      // the SPAN-REWRITE mechanism itself from the shading formula's own
+      // complexity. Falloff 'foundry' (the default every real Foundry light
+      // uses), differentiated from the fully-loaded case's 'inverseSquare'. ====
+      const SIMPLE_LIGHTS = [
+        {
+          sourceId: 'p',
+          x: 300,
+          y: 500,
+          radius: 80,
+          sides: 20,
+          ratio: 0.4,
+          attenuationEased: 0.6,
+          exposure: 0,
+          bg: [0.3, 0.3, 0.3],
+          dim: [0.5, 0.5, 0.5],
+          bright: [1, 0, 0],
+        },
+        {
+          sourceId: 'q',
+          x: 700,
+          y: 500,
+          radius: 80,
+          sides: 20,
+          ratio: 0.4,
+          attenuationEased: 0.6,
+          exposure: 0,
+          bg: [0.3, 0.3, 0.3],
+          dim: [0.5, 0.5, 0.5],
+          bright: [0, 1, 0],
+        },
+        {
+          sourceId: 'r',
+          x: 500,
+          y: 850,
+          radius: 80,
+          sides: 20,
+          ratio: 0.4,
+          attenuationEased: 0.6,
+          exposure: 0,
+          bg: [0.3, 0.3, 0.3],
+          dim: [0.5, 0.5, 0.5],
+          bright: [0, 0, 1],
+        },
+      ];
+      const simpleCfg = {
+        animated: false,
+        windPresent: false,
+        uGlobalTimeMs,
+        windHandle,
+        falloffModel: 'foundry',
+      };
+      const simpleBatch = buildPackedBatchIllumMesh(THREE, SIMPLE_LIGHTS, simpleCfg);
+      const simpleScene = new THREE.Scene();
+      simpleScene.add(simpleBatch.mesh);
+
+      const simpleFrame1 = await renderScene(simpleScene);
+      const pBefore = sampleColor(simpleFrame1.color, 300, 500);
+      const qBefore = sampleColor(simpleFrame1.color, 700, 500);
+      const rBefore = sampleColor(simpleFrame1.color, 500, 850);
+
+      // MOVE light q: rewrite ONLY its `position` span (world-baked), reusing
+      // the SAME `aLocalUnit` values already stored — a real, minimal move,
+      // not a full rebuild. New spot (560,750) is 286.5px from the old
+      // (700,500) — well past 2*radius(80)=160, so the two footprints cannot
+      // overlap; nothing else reaches either point (p and r are both >390px
+      // from both).
+      const qSpan = simpleBatch.spans['q'];
+      const qNewX = 560;
+      const qNewY = 750;
+      for (let v = 0; v < qSpan.count; v++) {
+        const vi = qSpan.start + v;
+        const lx = simpleBatch.buffers.aLocalUnit.array[vi * 2 + 0];
+        const ly = simpleBatch.buffers.aLocalUnit.array[vi * 2 + 1];
+        simpleBatch.buffers.position.array[vi * 3 + 0] = qNewX + lx * SIMPLE_LIGHTS[1].radius;
+        simpleBatch.buffers.position.array[vi * 3 + 1] = qNewY + ly * SIMPLE_LIGHTS[1].radius;
+      }
+      simpleBatch.buffers.position.needsUpdate = true;
+      const simpleFrame2 = await renderScene(simpleScene);
+      const qOldSpotAfter = sampleColor(simpleFrame2.color, 700, 500);
+      const qNewSpotAfter = sampleColor(simpleFrame2.color, qNewX, qNewY);
+      checks.push(
+        evaluate('span-position-rewrite-moves-a-light', () => ({
+          ok:
+            qBefore.g > 150 && // non-vacuity: the old spot was genuinely lit BEFORE the move, not vacuously empty all along
+            qOldSpotAfter.r === 0 &&
+            qOldSpotAfter.g === 0 &&
+            qOldSpotAfter.b === 0 &&
+            qNewSpotAfter.g > 150,
+          measured: `old spot(700,500) before=${qBefore.r},${qBefore.g},${qBefore.b} after=${qOldSpotAfter.r},${qOldSpotAfter.g},${qOldSpotAfter.b}; new spot(${qNewX},${qNewY})=${qNewSpotAfter.r},${qNewSpotAfter.g},${qNewSpotAfter.b}`,
+          expected:
+            'old spot WAS lit green, now empty; new spot is green — a `position`-span rewrite (not a transform, not uniformArray) moved the light, and stuck across the re-render',
+        }))
+      );
+
+      // REWRITE light p's OWN value span (aParams + aColorB, its bright
+      // colour's red channel component) — every other light must stay
+      // byte-identical.
+      const pSpan = simpleBatch.spans['p'];
+      for (let v = 0; v < pSpan.count; v++) {
+        const vi = pSpan.start + v;
+        simpleBatch.buffers.aParams.array[vi * 4 + 0] = 0.05; // ratio: much smaller bright core
+        simpleBatch.buffers.aColorB.array[vi * 4 + 2] = 0.1; // bright.r: red -> dim
+      }
+      simpleBatch.buffers.aParams.needsUpdate = true;
+      simpleBatch.buffers.aColorB.needsUpdate = true;
+      const simpleFrame3 = await renderScene(simpleScene);
+      const pAfter = sampleColor(simpleFrame3.color, 300, 500);
+      const qAfterValueRewrite = sampleColor(simpleFrame3.color, qNewX, qNewY);
+      const rAfter = sampleColor(simpleFrame3.color, 500, 850);
+      checks.push(
+        evaluate('span-value-rewrite-touches-one-light-only', () => ({
+          ok:
+            (pAfter.r !== pBefore.r || pAfter.g !== pBefore.g || pAfter.b !== pBefore.b) &&
+            qAfterValueRewrite.r === qNewSpotAfter.r &&
+            qAfterValueRewrite.g === qNewSpotAfter.g &&
+            qAfterValueRewrite.b === qNewSpotAfter.b &&
+            rAfter.r === rBefore.r &&
+            rAfter.g === rBefore.g &&
+            rAfter.b === rBefore.b,
+          measured: `p before=${pBefore.r},${pBefore.g},${pBefore.b} after=${pAfter.r},${pAfter.g},${pAfter.b}; q unchanged=${qAfterValueRewrite.g === qNewSpotAfter.g}; r unchanged=${rAfter.b === rBefore.b}`,
+          expected:
+            "p's own appearance changed (the rewrite had real effect); q and r are byte-identical to their own prior frames — the SAME shared-array-write isolation the third scenario's own passing checks already proved, now on the safe mechanism",
+        }))
+      );
+
+      const simpleFrame4 = await renderScene(simpleScene);
+      let steadyMaxDelta = 0;
+      for (let i = 0; i < simpleFrame3.color.length; i++) {
+        const d = Math.abs(simpleFrame3.color[i] - simpleFrame4.color[i]);
+        if (d > steadyMaxDelta) steadyMaxDelta = d;
+      }
+      checks.push(
+        evaluate('steady-state-renders-byte-stable-with-zero-writes', () => ({
+          ok: steadyMaxDelta === 0,
+          measured: `maxChannelDelta=${steadyMaxDelta} across two renders with no buffer writes between them`,
+          expected:
+            '0 — this is the exact class of check that caught the third scenario´s uniformArray defect (a stale image persisting across renders); run here against the safe, span-rewrite mechanism, it must actually pass',
+        }))
+      );
+
+      simpleBatch.geo.dispose();
+      return { checks, calibration: 'OK' };
+    },
+  });
+
   const bench = {
     name: 'point-lights',
     title: 'Stage 2 — one draw call for many point lights',
@@ -696,7 +1361,9 @@ export function createPointLightsBench({ THREE, log }) {
       'Proves the batching mechanism Stage 2 is built on: groups do not reduce real draw calls ' +
       '(so S1a-style grouping is the wrong tool here); a merged, ungrouped, many-shaped mesh under ' +
       'MAX blending is byte-identical to N separate draws, order-independent, and costs ONE real ' +
-      'renderer.info.render.drawCalls instead of N.',
+      'renderer.info.render.drawCalls instead of N. S2.3 then proves the PRODUCTION-SHAPED version ' +
+      'of that mechanism: the REAL shading core and REAL layout function, fed via packed per-vertex ' +
+      'attributes (never `uniformArray`), byte-identical to N separate production-wrapper meshes.',
     scenarios,
     checkIds: [
       'two-groups-cost-two-real-draw-calls',
@@ -709,6 +1376,13 @@ export function createPointLightsBench({ THREE, log }) {
       'frame1-lights-render-at-their-own-transform-slots',
       'moving-a-light-only-touched-its-OWN-transform-slot',
       'untouched-lights-are-pixel-identical-across-frames',
+      'fully-loaded-layout-fits-vertex-buffer-limit',
+      'packed-batch-renders-one-draw',
+      'batched-byte-identical-to-uniform-twins',
+      'batched-byte-identical-to-uniform-twins-below-quality-2',
+      'span-position-rewrite-moves-a-light',
+      'span-value-rewrite-touches-one-light-only',
+      'steady-state-renders-byte-stable-with-zero-writes',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

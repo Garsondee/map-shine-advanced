@@ -71,7 +71,12 @@ import {
   PRIORITY_INTERACTIVE,
 } from './compressed-textures.js';
 import { createSettleTracker } from './settle.js';
-import { buildCoverageCellMask, buildCoverageIndices, COVERAGE_MESH_CELLS } from './coverage-mesh.js';
+import {
+  buildCoverageCellMask,
+  buildCoverageIndices,
+  splitCoverageCellMask,
+  COVERAGE_MESH_CELLS,
+} from './coverage-mesh.js';
 import {
   acquirePages,
   acquirePackedPages,
@@ -564,6 +569,11 @@ function disposeActive() {
       try {
         t.geometry?.dispose();
         t.material?.dispose();
+        // S1a's interior sibling is a REAL second material with its own
+        // compiled pipeline (it shares only nodes, never the material object),
+        // so it needs its own dispose or a Stop/Restart leaks one per split
+        // tile.
+        t.splitInteriorMaterial?.dispose();
         t.tex?.dispose();
       } catch (_) {
         // A handle already freed (or a texture that never finished uploading)
@@ -7926,7 +7936,16 @@ export async function startVtPanViewer({
      *   `shadowPadUv` undoes it). Used by the vegetation shadow so a swept
      *   shadow has somewhere to land; 0 for every ordinary drawable.
      */
-    function setTileGeometry(t, placement, imageW, imageH, segments = 1, padPx = 0, coverageGrid = null) {
+    function setTileGeometry(
+      t,
+      placement,
+      imageW,
+      imageH,
+      segments = 1,
+      padPx = 0,
+      coverageGrid = null,
+      minGrid = null
+    ) {
       t.sub = computeTileSubPlacement(placement, imageW, imageH, t.tile);
       // Grow in the item's LOCAL frame (width/height, pre-rotation) so a rotated
       // tile's pad rotates with it — the same reason `computeQuadCorners` is the
@@ -7973,6 +7992,10 @@ export async function startVtPanViewer({
         }
         t.segments = 1;
         t.coverageSig = 'quad';
+        // A single un-tessellated quad has no cells to split; make sure a tile
+        // that USED to carry a split does not keep stale groups (a placement
+        // change can drop a tile from meshed to quad).
+        clearCellSplit(t);
         return;
       }
       const grid = buildTessellatedQuadGeometry(corners, n);
@@ -7991,11 +8014,78 @@ export async function startVtPanViewer({
         t.geometry.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
         t.geometry.setAttribute('uv', new THREE.BufferAttribute(grid.uvs, 2));
       }
-      if (!reused || t.coverageSig !== coverageSig) {
-        t.geometry.setIndex(new THREE.BufferAttribute(mask ? buildCoverageIndices(mask) : grid.indices, 1));
-        t.coverageSig = coverageSig;
+      // S1a — THE PER-CELL INTERIOR/BOUNDARY SPLIT (Testament DEFERRED-S1a).
+      // Only cells whose every min-alpha texel is 255 can take the unblended
+      // EQUAL path; the rest keep today's blended painter draw. Both halves
+      // index the SAME vertex grid, so this is one index buffer in two spans
+      // plus two draw groups — no second geometry, no duplicated vertices.
+      //
+      // `splitCoverageCellMask` returns null when it cannot certify anything
+      // (no min-grid, unusable input, or zero interior cells), and null here
+      // means exactly today's single-span behaviour — the fail-open the whole
+      // feature is built around.
+      //
+      // ⚠️ WHY it declined is RECORDED, not just THAT it did. All three causes
+      // — no coverage mask, no min-grid, no cell that certifies fully opaque —
+      // collapse to the same `null` and the same byte-identical frame, so
+      // without this a split that converts nothing is indistinguishable from a
+      // split that never had its inputs. The first live run hit exactly that:
+      // the pixel gate reported a triumphant byte-identical PASS while
+      // `tiles.split` was 0 ([[feedback_instruments_must_not_lie]]).
+      let split = null;
+      let splitDeclined = null;
+      if (!mask) splitDeclined = 'noCoverageMask';
+      else if (!minGrid) splitDeclined = 'noMinGrid';
+      else {
+        split = splitCoverageCellMask({ mask, minGrid, tile: t.tile, imageW, imageH });
+        if (!split) splitDeclined = 'noFullyOpaqueCells';
+      }
+      t.splitDeclined = splitDeclined;
+      // The signature must change whenever the SPAN LENGTHS change, not just
+      // the occupied count: two different splits of the same cell count would
+      // otherwise reuse each other's groups and draw the wrong ranges.
+      const splitSig = split ? `:s${split.interior.occupiedCount}/${split.boundary.occupiedCount}` : '';
+      const fullSig = `${coverageSig}${splitSig}`;
+      if (!reused || t.coverageSig !== fullSig) {
+        if (split) {
+          const interiorIdx = buildCoverageIndices(split.interior);
+          const boundaryIdx = buildCoverageIndices(split.boundary);
+          const merged = new Uint32Array(interiorIdx.length + boundaryIdx.length);
+          merged.set(interiorIdx, 0);
+          merged.set(boundaryIdx, interiorIdx.length);
+          t.geometry.setIndex(new THREE.BufferAttribute(merged, 1));
+          t.geometry.clearGroups();
+          // Group 0 = interior (material slot 0), group 1 = boundary (slot 1).
+          // Order matters: the interior span draws first, matching the order a
+          // single blended draw would have composited them in.
+          t.geometry.addGroup(0, interiorIdx.length, 0);
+          t.geometry.addGroup(interiorIdx.length, boundaryIdx.length, 1);
+          t.cellSplit = { interiorIndices: interiorIdx.length, boundaryIndices: boundaryIdx.length };
+        } else {
+          t.geometry.setIndex(new THREE.BufferAttribute(mask ? buildCoverageIndices(mask) : grid.indices, 1));
+          clearCellSplit(t);
+        }
+        t.coverageSig = fullSig;
       }
       t.segments = n;
+    }
+
+    /**
+     * Drop a tile's per-cell split back to one undivided span.
+     *
+     * The groups MUST go, not just the bookkeeping: a stale group pair whose
+     * ranges outlive the index buffer they described would make a later
+     * material-array draw read past the end of it. `earlyZState` is reset too
+     * so `applyEarlyZTileState` re-derives the material shape from scratch
+     * rather than trusting a tag that described a geometry that no longer
+     * exists.
+     */
+    function clearCellSplit(t) {
+      if (!t?.cellSplit) return;
+      t.cellSplit = null;
+      t.geometry?.clearGroups?.();
+      if (t.mesh && Array.isArray(t.mesh.material)) t.mesh.material = t.material;
+      t.earlyZState = null;
     }
 
     // Serialize whole-image loads so only ONE giant image is ever in flight
@@ -8216,7 +8306,19 @@ export async function startVtPanViewer({
               // `refreshWholeImageItem` re-meshes it the pass the grid lands.
               // Passed anyway for the case where it has already arrived, e.g. a
               // second tile of a split image, or a warm IndexedDB cache.
-              setTileGeometry(t, state.placement, imageW, imageH, vegSegments, 0, coverageGrids.get(item.id) ?? null);
+              setTileGeometry(
+                t,
+                state.placement,
+                imageW,
+                imageH,
+                vegSegments,
+                0,
+                coverageGrids.get(item.id) ?? null,
+                // S1a: already populated by the compressed-texture load above,
+                // so a tile built from a warm cache can take the split on its
+                // very first geometry build rather than waiting for a re-mesh.
+                wi.alphaMinGrid ?? null
+              );
               const mesh = new THREE.Mesh(geometry, material);
               mesh.frustumCulled = false;
               mesh.visible = false; // the refresh loop decides visibility + renderOrder
@@ -8437,7 +8539,8 @@ export async function startVtPanViewer({
             wi.imageSize.height,
             t.segments ?? 1,
             0,
-            coverageGrid
+            coverageGrid,
+            wi.alphaMinGrid ?? null
           );
           // Case-1 self-vegetation: the fold-free flutter cap is expressed per
           // world px, so a resize moves it. No-ops on an ordinary (non-veg)
@@ -10006,8 +10109,18 @@ export async function startVtPanViewer({
      *   when it passes, otherwise the FIRST test that refused.
      */
     function earlyZInteriorVerdict(t, alphaStats) {
-      if (!alphaStats) return { interior: false, reason: 'noAlphaStats' };
-      if (alphaStats.min !== 255) return { interior: false, reason: 'alpha' };
+      // ⚠️ ORDER IS LOAD-BEARING: every STRUCTURAL exclusion is tested before
+      // per-texel alpha, so that `reason === 'alpha'` means "alpha is the ONLY
+      // objection" and nothing weaker. Corrected 2026-08-11, having first
+      // shipped the other way round: with alpha tested first, a vegetation tile
+      // or a fading roof that ALSO happened to have sub-255 alpha short-
+      // circuited to 'alpha' and was counted an S1a candidate it can never be.
+      // That is not merely a reporting error — `applyEarlyZTileState` gates the
+      // per-cell split on this exact reason, and a split applied to a
+      // per-frame-faded roof would draw its "interior" cells unblended while
+      // the fade says they must blend. The verdict's BOOLEAN is unaffected
+      // either way (all five tests must pass for `interior`); only the
+      // attribution — and now a real behavioural gate — depends on the order.
       if (!t?.uExpectedDepth) return { interior: false, reason: 'vegetation' };
       const w = t.appearance?.uOcclusionWeights?.value;
       if (w && (w.x !== 0 || w.y !== 0 || w.z !== 0 || w.w !== 0)) {
@@ -10015,6 +10128,8 @@ export async function startVtPanViewer({
       }
       const a = t.appearance?.uAlpha?.value;
       if (Number.isFinite(a) && a < 1) return { interior: false, reason: 'authoredAlpha' };
+      if (!alphaStats) return { interior: false, reason: 'noAlphaStats' };
+      if (alphaStats.min !== 255) return { interior: false, reason: 'alpha' };
       return { interior: true, reason: 'interior' };
     }
 
@@ -10036,7 +10151,15 @@ export async function startVtPanViewer({
       // reason that only appears once a tile happens to transition would be
       // missing for exactly the tiles that never move.
       t.earlyZReason = verdict.reason;
-      const want = !earlyZComposition ? 'legacy' : verdict.interior ? 'interior' : 'passthrough';
+      // S1a — the per-CELL split, and note the gate: `reason === 'alpha'` ONLY.
+      // Every other refusal is structural (a live wind `positionNode`, a
+      // per-frame occlusion fade, an item-wide authored alpha, unknown
+      // opacity) and applies to the whole draw, not to individual texels — a
+      // split would draw "interior" cells unblended for a tile whose own fade
+      // says every cell must blend. `earlyZInteriorVerdict` orders its tests so
+      // this reason carries exactly that meaning; see its own header.
+      const canSplit = earlyZComposition && !verdict.interior && verdict.reason === 'alpha' && !!t.cellSplit;
+      const want = !earlyZComposition ? 'legacy' : verdict.interior ? 'interior' : canSplit ? 'split' : 'passthrough';
       // The mesh's Z is refreshed every pass regardless of state: rank can
       // change (a floor switch, a new item) without the STATE changing, and a
       // stale Z is exactly what would make an interior's EqualDepth miss.
@@ -10088,7 +10211,55 @@ export async function startVtPanViewer({
           mat.depthFunc = THREE.LessEqualDepth;
         }
       }
+      // THE MESH'S MATERIAL SHAPE, decided last so every branch above has
+      // already settled `mat`'s own state. Only the 'split' state uses an
+      // array; every other state hands back the single material, which three
+      // draws as ONE undivided span regardless of any groups still on the
+      // geometry (verified in the vendored source: a non-array material pushes
+      // with `group = null`, three.webgpu.js's own renderObject branch). That
+      // is what lets the depth proxy and the prepass twin keep sharing this
+      // exact geometry with a single writer material and still cover the whole
+      // tile — they must, or an interior cell would EQUAL-test against depth
+      // nothing ever wrote.
+      t.mesh.material = want === 'split' ? [ensureSplitInteriorMaterial(t), mat] : mat;
       mat.needsUpdate = true;
+    }
+
+    /**
+     * S1a — the interior half of a split tile: the SAME shading, drawn
+     * unblended with a hardware `EqualDepth` test.
+     *
+     * ⚠️ IT SHARES ITS NODES WITH THE BOUNDARY MATERIAL, BY REFERENCE, AND THAT
+     * IS THE ENTIRE DESIGN. `colorNode`/`mrtNode` are TSL node objects holding
+     * the item's live uniforms (`uAlpha`, the floor-attr pair, the clarity and
+     * occlusion terms, every per-frame `.value` write the viewer already
+     * makes). Assigning the same node instances means one uniform object feeds
+     * both pipelines, so every existing per-frame sync — none of which knows
+     * this material exists — keeps working untouched. Building a second
+     * material through `buildWholeImageMaterial` instead would fork the
+     * uniforms and create precisely the hand-maintained update list this
+     * codebase has been bitten by six times ([[feedback_hand_maintained_
+     * dispatch_lists_forgets_new_effects]]); the depth proxy already shares a
+     * live `positionNode` for the same reason ([[feedback_depth_proxy_needs_
+     * the_same_animation]]).
+     *
+     * No `maskNode`: interior cells are certified opaque and rank-occluded by
+     * the depth test, exactly as a whole-tile 'interior' draw is.
+     */
+    function ensureSplitInteriorMaterial(t) {
+      if (t.splitInteriorMaterial) return t.splitInteriorMaterial;
+      const base = t.material;
+      const m = new THREE.NodeMaterial();
+      m.colorNode = base.colorNode;
+      m.mrtNode = base.mrtNode;
+      if (base.positionNode) m.positionNode = base.positionNode;
+      m.side = base.side;
+      m.transparent = false;
+      m.depthTest = true;
+      m.depthWrite = false;
+      m.depthFunc = THREE.EqualDepth;
+      t.splitInteriorMaterial = m;
+      return m;
     }
 
     /**
@@ -12459,7 +12630,7 @@ export async function startVtPanViewer({
        * count of 0 means the gate proved nothing, whatever the diff says.
        */
       getEarlyZComposition() {
-        const tiles = { interior: 0, passthrough: 0, legacy: 0, untagged: 0 };
+        const tiles = { interior: 0, split: 0, passthrough: 0, legacy: 0, untagged: 0 };
         // WHY each non-interior tile was refused, and — for the only refusal a
         // finer alpha split could ever overturn ('alpha') — whether the data
         // that split needs is actually present. Together these answer
@@ -12468,17 +12639,30 @@ export async function startVtPanViewer({
         const refusedBy = {};
         let alphaRefusedWithMinGrid = 0;
         let alphaRefusedWithoutMinGrid = 0;
+        // S1a's own non-vacuity: a 'split' tile that certified zero interior
+        // cells would be a split in name only. Six indices per cell.
+        let splitInteriorCells = 0;
+        let splitBoundaryCells = 0;
+        const splitDeclinedBy = {};
         for (const state of itemStates.values()) {
           const wi = state.wholeImage;
           for (const t of wi?.tiles ?? []) {
             const k = t.earlyZState;
-            if (k === 'interior' || k === 'passthrough' || k === 'legacy') tiles[k]++;
+            if (k === 'interior' || k === 'split' || k === 'passthrough' || k === 'legacy') tiles[k]++;
             else tiles.untagged++;
+            if (k === 'split' && t.cellSplit) {
+              splitInteriorCells += t.cellSplit.interiorIndices / 6;
+              splitBoundaryCells += t.cellSplit.boundaryIndices / 6;
+            }
             const r = t.earlyZReason ?? 'unmeasured';
             refusedBy[r] = (refusedBy[r] ?? 0) + 1;
             if (r === 'alpha') {
               if (wi?.alphaMinGrid) alphaRefusedWithMinGrid++;
               else alphaRefusedWithoutMinGrid++;
+              // Only a candidate's decline is interesting: a tile refused on
+              // structural grounds was never eligible for the split anyway.
+              const d = t.splitDeclined ?? (t.cellSplit ? 'split' : 'neverMeshed');
+              splitDeclinedBy[d] = (splitDeclinedBy[d] ?? 0) + 1;
             }
           }
         }
@@ -12493,6 +12677,16 @@ export async function startVtPanViewer({
           // on this scene, whatever its design merit.
           s1aCandidateTiles: alphaRefusedWithMinGrid,
           s1aBlockedNoMinGrid: alphaRefusedWithoutMinGrid,
+          // WHY a candidate tile is not actually split. Without this, "the
+          // split converted nothing" and "the split never had its inputs" are
+          // the same byte-identical frame — see setTileGeometry's own note.
+          splitDeclinedBy,
+          // S1a, LIVE: cells actually taking the unblended EQUAL path, and the
+          // ones still blending beside them. `splitInteriorCells === 0` while
+          // `tiles.split > 0` means the split shipped without converting a
+          // single cell — byte-identical for the most boring possible reason.
+          splitInteriorCells,
+          splitBoundaryCells,
         };
       },
       /**

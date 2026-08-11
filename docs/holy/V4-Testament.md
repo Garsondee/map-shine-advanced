@@ -842,6 +842,38 @@ Until this is resolved I am proceeding only with work that is correct under eith
 measurement, and the lab proof that one MAX-blended batched draw is order-independent and
 pixel-exact against today's 68 separate draws. No live wiring, no default flips.
 
+**Addendum, 2026-08-11 (Claude Sonnet 5, at the author's direct instruction to continue —
+"let's get on with it" — recorded as authorization, not a Fable resolution):** the batching
+mechanism itself is now PROVEN on the real device, `tools/shader-lab/bench-point-lights.js`
+(wired into the lab at `point-lights-lab.js`), 6/6 checks green:
+- Confirms in source AND on-device that `resolveLightAnimation` baking a specific animation
+  variant into each light's compiled material at build time is the project's own
+  `tsl/no-uniform-gates` discipline (`world/wind-access.js`'s own header names it), not an
+  oversight — so "one uber-shader, runtime branch on animation type" is the WRONG shape for
+  this codebase and was rejected before writing any of it.
+- Confirms S1a's own technique (geometry groups + a material array) does NOT reduce real draw
+  calls — `renderer.info.render.drawCalls` reads 2 for a 2-group mesh, not 1, because each
+  group reaches the backend's low-level draw dispatch separately. Groups save shading cost
+  (S1a's goal), not CPU dispatch cost (this stage's).
+- Confirms the actual mechanism: N differently-shaped, differently-positioned,
+  differently-coloured lights, MERGED into one ungrouped mesh sharing ONE already-compiled
+  material (per-light data baked into extra vertex attributes, no new shader branch), draw at
+  **1 real call instead of N**, byte-identical to N separate draws, order-independent, with
+  real (non-vacuous) MAX-blend compositing confirmed at an overlap region.
+- One false lead chased and ruled out, kept in the bench's own header rather than deleted
+  quietly: the proof material's FIRST draft set `transparent:true` (a plausible guess) instead
+  of copying `point-light-illumination.js:1487`'s real `transparent:false` — that one flag
+  mismatch made `DoubleSide` look like it cost 2 draws per mesh (a real backend behaviour,
+  just not one production hits), which looked like a free "switch to FrontSide, halve
+  everything" win sitting unclaimed in production. Re-tested against the material's OWN real
+  flags before believing it: at `transparent:false`, DoubleSide costs exactly 1 draw,
+  byte-identical to FrontSide. No free win existed — a `bench must build inputs like
+  production` catch, on my own bench, before it reached this record as a false finding.
+
+Live wiring into `point-light-pool.js` is the next step, not yet started. The gate re-aim
+above still needs Fable's resolution before a default flips; the mechanism it would flip TO is
+no longer a proposal.
+
 **P-003 — Stage 0's instrument (the Playwright harness) needed its own trust check before any
 measurement through it could count.** Filed by Claude Sonnet 5, 2026-08-10, acting as a worker
 under the Covenant, in response to the author's direct question: *"performance seems to be

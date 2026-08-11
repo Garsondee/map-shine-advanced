@@ -463,6 +463,41 @@ this is a count rather than a guess.*
   samples AND zero untagged — and leads its verdict with completeness. The Ground Floor figure
   above is still reported as INCOMPLETE for exactly that reason.
 
+**DEFERRED-S1b, named so it cannot rot** *(added 2026-08-11 at the author's direct instruction in
+chat — "append your suggested fixes… that's the checklist that gets us to V4" — a real task
+addition to a closed stage, not a worker-initiated plan edit; full mechanism, the corrected causal
+test, and the fix options in ascending risk all live in P-007's addendum and
+`docs/planning/Trace-Analysis-2026-08-11.md` §2a — read both before starting).*
+
+**Pool `buildSceneDepthWriterMaterial`'s output instead of disposing it every residency pass.**
+`rebuildSceneDepthProxies` (`vt-pan-viewer.js:10377`) wholesale-disposes every depth-proxy material
+— both the real proxy and S1.4's prepass twin — on every residency pass. `material.dispose()`
+drives three's per-cache-key `nodeBuilderState.usedTimes` refcount to zero (only WHOLESALE
+disposal guarantees that; disposing a subset would leave it cached), which evicts the COMPILED
+SHADER GRAPH from `nodeBuilderCache` — the next material built from the same `writerArgs` misses
+and pays a full `NodeBuilder.build()`. Measured live, a real 36s camera-stress capture: **3,831ms /
+10.7% of the ENTIRE main thread**, sustained (flat across 18 time bins — not one-time compile),
+split ~50/50 between `runSceneDepthPass` and `runGeometryWorldPass` because the prepass twin pays
+the identical cost a second time.
+
+**The fix:** cache materials keyed on a signature of `writerArgs` (a pure function's natural cache
+key) and reuse the object across residency passes instead of disposing+rebuilding. The MESH
+rebuild can and should stay wholesale — meshes are cheap; this is about the material only. A
+pooled material is never disposed, so `usedTimes` never reaches zero and three's own graph cache is
+never evicted — this attacks the eviction mechanism directly rather than working around its
+symptom.
+
+**Two preconditions to verify FIRST, named so they cannot be skipped:** (1) confirm nothing
+currently mutates a proxy material post-construction — the nearby `needsUpdate`/`depthWrite`
+writes target the TILE's own `t.material`, not the proxy's, but re-confirm against the code at
+build time, do not trust this note alone; (2) decide how vegetation's per-item `positionNode`
+(built fresh per overlay by `buildVegetationSwayDisplacementNode`) is keyed into the pool or
+explicitly excluded, since two vegetation proxies must never share a material whose position node
+closes over the wrong item's motion state.
+
+**Needs Law 3's pixel-diff gate** (same class of proof as S1.5's byte-identical capture) before it
+may ship — this touches the depth authority, a shared foundation with 7 consumers.
+
 ### Stage 2 — One draw for many lights *(restructured by Fable, 2026-08-11 — P-004 RESOLVED, see the petition ledger)*
 
 *The original "storage-buffer soup / ONE illum draw / ONE ADD coloration draw" sketch is
@@ -636,6 +671,11 @@ Worker models execute + mark only; ANY surprise is a petition.*
 
 ### Stage 4 — CPU diet
 
+*The six items below, marked "added 2026-08-11," entered at the author's direct instruction in
+chat — "append your suggested fixes… that's the checklist that gets us to V4" — not a
+worker-initiated plan edit. Evidence for all six: a real 36s camera-stress DevTools capture
+(`tools/trace-analyze.mjs`, Testament P-007, full record `docs/planning/Trace-Analysis-2026-08-11.md`).*
+
 - [ ] Profiler prints a per-frame `renderer.render()` census (count + per-call CPU).
 - [ ] Static scenes: `matrixAutoUpdate` off, persistent pre-sorted render lists, zero
       per-frame scene-graph mutation on the hot path.
@@ -643,6 +683,40 @@ Worker models execute + mark only; ANY surprise is a petition.*
 - [ ] RenderBundles adopted for static draw lists *(if the Stage-0 probe passed)*.
 - [ ] Apply whatever Stage 0 named as the 7.7 ms cause; escalate to a local three patch or a
       raw-pass scalpel ONLY if measurement convicts three itself (menu Option 5 rules).
+- [ ] **Perf harness stops measuring itself.** *(added 2026-08-11)* `runProfileSession`
+      (`diag/perf-session.js`) already guards two instruments from fighting over ownership (the
+      live zone HUD vs a profile session mid-window); it does NOT yet guard a simpler, different
+      problem — live debug UI (the astrolabe dial, `perf-strip`, any open panel) costing real
+      main-thread CPU purely by being open, polluting whatever it measures. Live-measured: 2,451ms
+      / 6.9% of one 35.6s capture's main thread was MSA's own diagnostic UI, 94% of all DOM-write
+      cost in that capture. Add a snapshot/close/restore around `armProfiler`/`disarmProfiler` —
+      record which panels are open, close them, run the measurement, reopen exactly what was open
+      before. **Until this ships, any perf report captured with a debug panel open is suspect for
+      that reason alone** — this item should land before trusting a borderline reading on any
+      other Stage 4 gate.
+- [ ] **Dirty-check `astrolabe.js`'s `syncTuningSummary`.** *(added 2026-08-11)* Called from
+      `update()` every frame (`astrolabe.js:531`); rewrites `tuningSummary.innerHTML`
+      unconditionally for a string whose only variable is `skyRow.value() > 0`. Re-render only on
+      that boolean's actual change. Measured: 709ms across one 35.6s capture. Zero visual risk —
+      the output string is byte-identical whenever the boolean doesn't change.
+- [ ] **Throttle live-diagnostic repaints to a human-perceptible cadence.** *(added 2026-08-11)*
+      The astrolabe dial's `update()` (SVG attribute writes for the clock hand/wind arrow),
+      `perf-strip`'s numeric readout, and `describeRenderMode`'s `getComputedStyle` watchdog check
+      (`diag/render-fallback.js:178`, reached every frame via the diagnostics report) all currently
+      run at render framerate for values a human reads at a glance. ~10Hz is indistinguishable
+      from 60–120Hz for a rotating dial or a numeric counter and would still catch a
+      Foundry-fallback within ~100ms — cutting this whole category's cost by ~85-90% for zero
+      perceptible loss. **Scope, stated plainly:** this and the two items above are GM/author-facing
+      (ROH) cost, gated on a panel being open — not currently paid by every player. Real, worth
+      fixing, but lower urgency than a cost every player pays; it primarily matters because it has
+      been quietly inflating every past perf capture taken with a panel open (see the item above).
+- [ ] **Give point-light wall-clipping its own perf zone.** *(added 2026-08-11)*
+      `computeLightWallClippedShape` (`scene-wall-clip.js:255`) measured at 988ms inclusive across
+      one 35.6s capture — nearly as much as the ENTIRE `point-light-pool.js` update it serves
+      (1,367ms) — with no zone of its own in `perf-zones.js`, invisible inside
+      `light.pointLightUpdate`'s total until now. Instrument first; decide whether it needs its
+      own optimisation only once a live per-zone number, not an inclusive-sample estimate,
+      confirms it.
 - [ ] **Gate: render-loop CPU ≤ 8 ms; `depthRenderCall` CPU ≤ 2 ms or cause documented as
       irreducible.**
 

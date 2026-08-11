@@ -13,6 +13,7 @@ import { run as runEnvironmentalLight } from './environmental-light.test.mjs';
 import { run as runPointLightIllumination } from './point-light-illumination.test.mjs';
 import { run as runPointLightColoration } from './point-light-coloration.test.mjs';
 import { run as runPointLightPool } from './point-light-pool.test.mjs';
+import { run as runPointLightBatch } from './point-light-batch.test.mjs';
 import { run as runRegionGeometry } from './region-geometry.test.mjs';
 import { run as runLightVisibility } from './light-visibility.test.mjs';
 import { run as runSunOcclusion } from './sun-occlusion.test.mjs';
@@ -59,6 +60,7 @@ const suites = [
   ['point-light-illumination', runPointLightIllumination],
   ['point-light-coloration', runPointLightColoration],
   ['point-light-pool', runPointLightPool],
+  ['point-light-batch', runPointLightBatch],
   ['region-geometry', runRegionGeometry],
   ['light-visibility', runLightVisibility],
   ['sun-occlusion', runSunOcclusion],

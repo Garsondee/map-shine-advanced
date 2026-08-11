@@ -504,11 +504,25 @@ Worker models execute + mark only; ANY surprise is a petition.*
       2,073,600 pixels differ, `maxChannelDelta: 0`.** Both illumination's soft-edge-disabled
       state and coloration's shadow-disabled state were preserved exactly (neither term was
       accidentally re-enabled by the restructure — the design doc's §0 ❌4).
-- [ ] **S2.2 Bucket module** (pure, Node-tested): admission (closed-list; aperture-lit lights
+- [x] **S2.2 Bucket module** (pure, Node-tested): admission (closed-list; aperture-lit lights
       NEVER admitted in v1), key fn (resolved animation entry, not raw string), coloration
       membership (`hasColor || forceDefaultColor`), span allocator (double-growth,
       membership-change rebuild only), the §3.3 packed layout with its 8-vertex-buffer
-      arithmetic. **Evidence: Node tests.**
+      arithmetic. **Evidence: Node tests.** ✅ 2026-08-11 (Claude Sonnet 5):
+      `effects/lighting/point-light-batch.js` — `computeBucketKey`/`canBatchLight`/
+      `isColorationEligible`/`describeBucketVertexBuffers`/`createBucket`/`createBucketRegistry`/
+      `partitionLightsForBatching`. 42 new assertions
+      (`__tests__/point-light-batch.test.mjs`), `npm run verify` 21 suites/8373 passed.
+      `describeBucketVertexBuffers` proves the fully-loaded illumination layout is EXACTLY 8
+      buffers LIVE (not just by comment) — `ok:true`, sitting AT
+      `MAX_VERTEX_BUFFERS_PER_PIPELINE`, not over it. One real test-writing mistake caught by
+      the run itself: an "empty bucket reconciles as a rebuild" assertion was wrong (a
+      never-touched bucket reconciling to empty is correctly a no-op — nothing to build either
+      side); fixed to test the actually-meaningful case (a POPULATED bucket losing every member).
+      ⚠️ **[structure-change]**: `graph/reachable-from-boot` bumped 2→3
+      (`tools/structure-ratchets.json`) — this module is deliberately not yet imported from
+      `boot.js`; S2.5 (pool integration) is its first real caller. Exactly the sanctioned "wall
+      built before the room it governs" case the ratchet's own failure message names.
 - [ ] **S2.3 Lab proof, production-shaped** — `bench-point-lights.js` scenario 4, the six
       checks specified in design doc §7 (fully-loaded 8-buffer layout; byte-parity vs
       uniform-built twins; movement via span rewrite; zero-write byte-stability).

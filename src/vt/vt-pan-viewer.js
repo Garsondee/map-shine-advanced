@@ -64,7 +64,12 @@ import { mipChainByteLength } from './block-compress.js';
 // back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
 // the raw texture. Intra-zone.
-import { requestCompressedTexture, requestCoarseAlphaGrid, getCompressedTextureStats } from './compressed-textures.js';
+import {
+  requestCompressedTexture,
+  requestCoarseAlphaGrid,
+  getCompressedTextureStats,
+  PRIORITY_INTERACTIVE,
+} from './compressed-textures.js';
 import { createSettleTracker } from './settle.js';
 import { buildCoverageCellMask, buildCoverageIndices, COVERAGE_MESH_CELLS } from './coverage-mesh.js';
 import {
@@ -8653,7 +8658,11 @@ export async function startVtPanViewer({
             // here and only per-cell coverage helps.
             let vegCoverageGrid = null;
             try {
-              const res = await requestCoarseAlphaGrid(url);
+              // INTERACTIVE, unlike the bulk shadow-cover priming that shares
+              // this worker: this await gates a mesh that is about to be DRAWN,
+              // so it belongs in front of any "improves a later frame" work.
+              // See compressed-textures.js's own priority-lane header.
+              const res = await requestCoarseAlphaGrid(url, { priority: PRIORITY_INTERACTIVE });
               if (res?.grid) vegCoverageGrid = { w: res.gridW, h: res.gridH, data: res.grid };
             } catch (err) {
               // Fails OPEN to a full quad — a canopy that draws its whole
@@ -9950,7 +9959,8 @@ export async function startVtPanViewer({
      */
     /**
      * STAGE 1 — is this tile's art CERTIFIED fully opaque, so an unblended
-     * `EqualDepth` draw is byte-identical to today's blended one?
+     * `EqualDepth` draw is byte-identical to today's blended one? Returns the
+     * verdict AND which test decided it.
      *
      * `alwaysOpaque` (the depth writer's own early-Z input) is NOT the same
      * question and must never be reused here: it asks "is every texel at or
@@ -9973,14 +9983,39 @@ export async function startVtPanViewer({
      *  - the item's own authored alpha below 1, same arithmetic as above.
      *  - no `alphaStats` at all (the raw-decode fallback): opacity unknown,
      *    so fail open to today's path.
+     *
+     * ⚠️ THE REASON IS RETURNED, NOT JUST THE BOOLEAN, and that is what makes
+     * DEFERRED-S1a a measurable question rather than a guess. "This tile is not
+     * interior" and "this tile could be made interior by finer alpha
+     * certification" are different facts, and only the second justifies
+     * building the per-CELL min-alpha split the Testament defers. A tile
+     * refused for `occlusionResponsive` or `vegetation` is excluded on grounds
+     * no amount of alpha resolution touches; a split would buy it exactly
+     * nothing ([[feedback_measure_the_output_not_the_equation]]).
+     *
+     * DEFERRED-S1a (the Testament's own closing block) proposes extending the
+     * fast path to partially-transparent art via the per-CELL min-alpha split.
+     * That work is worth doing ONLY for tiles refused by `alpha` — a tile
+     * refused for `occlusionResponsive` (a roof that fades under a token) or
+     * `vegetation` (live wind `positionNode`) is excluded on grounds no
+     * amount of alpha resolution touches, and a split would buy it nothing.
+     * Measuring that split BEFORE building it is the whole point of this
+     * function ([[feedback_measure_the_output_not_the_equation]]).
+     *
+     * @returns {{interior: boolean, reason: string}} `reason` is 'interior'
+     *   when it passes, otherwise the FIRST test that refused.
      */
-    function isEarlyZInteriorTile(t, alphaStats) {
-      if (!(alphaStats && alphaStats.min === 255)) return false;
-      if (!t?.uExpectedDepth) return false; // vegetation material — see above
+    function earlyZInteriorVerdict(t, alphaStats) {
+      if (!alphaStats) return { interior: false, reason: 'noAlphaStats' };
+      if (alphaStats.min !== 255) return { interior: false, reason: 'alpha' };
+      if (!t?.uExpectedDepth) return { interior: false, reason: 'vegetation' };
       const w = t.appearance?.uOcclusionWeights?.value;
-      if (w && (w.x !== 0 || w.y !== 0 || w.z !== 0 || w.w !== 0)) return false;
+      if (w && (w.x !== 0 || w.y !== 0 || w.z !== 0 || w.w !== 0)) {
+        return { interior: false, reason: 'occlusionResponsive' };
+      }
       const a = t.appearance?.uAlpha?.value;
-      return !(Number.isFinite(a) && a < 1);
+      if (Number.isFinite(a) && a < 1) return { interior: false, reason: 'authoredAlpha' };
+      return { interior: true, reason: 'interior' };
     }
 
     /**
@@ -9995,7 +10030,13 @@ export async function startVtPanViewer({
     function applyEarlyZTileState(t, alphaStats, z) {
       const mat = t?.material;
       if (!mat || !t.mesh) return;
-      const want = !earlyZComposition ? 'legacy' : isEarlyZInteriorTile(t, alphaStats) ? 'interior' : 'passthrough';
+      const verdict = earlyZInteriorVerdict(t, alphaStats);
+      // Recorded even when the flag is OFF and even when the state is
+      // unchanged below: this is the input to the DEFERRED-S1a decision, and a
+      // reason that only appears once a tile happens to transition would be
+      // missing for exactly the tiles that never move.
+      t.earlyZReason = verdict.reason;
+      const want = !earlyZComposition ? 'legacy' : verdict.interior ? 'interior' : 'passthrough';
       // The mesh's Z is refreshed every pass regardless of state: rank can
       // change (a floor switch, a new item) without the STATE changing, and a
       // stale Z is exactly what would make an interior's EqualDepth miss.
@@ -12419,11 +12460,26 @@ export async function startVtPanViewer({
        */
       getEarlyZComposition() {
         const tiles = { interior: 0, passthrough: 0, legacy: 0, untagged: 0 };
+        // WHY each non-interior tile was refused, and — for the only refusal a
+        // finer alpha split could ever overturn ('alpha') — whether the data
+        // that split needs is actually present. Together these answer
+        // "is DEFERRED-S1a worth building?" with measurement instead of
+        // assumption; see `earlyZInteriorVerdict`'s own doc.
+        const refusedBy = {};
+        let alphaRefusedWithMinGrid = 0;
+        let alphaRefusedWithoutMinGrid = 0;
         for (const state of itemStates.values()) {
-          for (const t of state.wholeImage?.tiles ?? []) {
+          const wi = state.wholeImage;
+          for (const t of wi?.tiles ?? []) {
             const k = t.earlyZState;
             if (k === 'interior' || k === 'passthrough' || k === 'legacy') tiles[k]++;
             else tiles.untagged++;
+            const r = t.earlyZReason ?? 'unmeasured';
+            refusedBy[r] = (refusedBy[r] ?? 0) + 1;
+            if (r === 'alpha') {
+              if (wi?.alphaMinGrid) alphaRefusedWithMinGrid++;
+              else alphaRefusedWithoutMinGrid++;
+            }
           }
         }
         return {
@@ -12431,6 +12487,12 @@ export async function startVtPanViewer({
           tiles,
           prepassMeshes: depthPrepassEntries.length,
           depthProxies: depthProxyEntries.length,
+          refusedBy,
+          // The DEFERRED-S1a headline: tiles a per-cell min-alpha split could
+          // plausibly convert. Zero here means that work would change nothing
+          // on this scene, whatever its design merit.
+          s1aCandidateTiles: alphaRefusedWithMinGrid,
+          s1aBlockedNoMinGrid: alphaRefusedWithoutMinGrid,
         };
       },
       /**

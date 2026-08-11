@@ -21,6 +21,7 @@ import { run as runVtPanViewerDiagnostics } from './vt-pan-viewer-diagnostics.te
 import { run as runSceneDepth } from './scene-depth.test.mjs';
 import { run as runCoverageMesh } from './coverage-mesh.test.mjs';
 import { run as runSettle } from './settle.test.mjs';
+import { run as runCompressedTextures } from './compressed-textures.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -70,6 +71,7 @@ const suites = [
   ['scene-depth', runSceneDepth],
   ['coverage-mesh', runCoverageMesh],
   ['settle', runSettle],
+  ['compressed-textures', runCompressedTextures],
 ];
 
 for (const [name, fn] of suites) {

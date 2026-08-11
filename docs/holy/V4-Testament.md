@@ -438,6 +438,31 @@ Whoever picks it up: the consumer belongs where `applyEarlyZTileState` decides s
 plumbing ends at `wi.alphaMinGrid`, and S1.5's pixel-diff gate (scripts now boot-default-safe)
 is the acceptance test. Until then the grid is write-only by RECORD, not by accident.
 
+*Measured 2026-08-11 (Claude Opus 5, worker — evidence only, no plan change):
+`tests/playwright-artifacts/look/s1a-candidates.mjs`, against the live bench Mansion, flag ON
+(the shipped default), asserted rather than assumed. `earlyZInteriorVerdict` now returns WHICH
+test refused each tile and `getEarlyZComposition` reports `refusedBy`/`s1aCandidateTiles`, so
+this is a count rather than a guess.*
+- **First Floor — complete census, and it agrees exactly with S1.6's trusted capture (9 depth
+  proxies, interior:4 / passthrough:4): ALL FOUR passthrough tiles are refused for `alpha`,
+  and all four have a min-grid present.** So the split could convert 4 of that floor's 8
+  tiles. **S1a is build-worthy on evidence** — and the hypothesis that these were
+  occlusion-responsive roofs (which no alpha resolution could help) was WRONG:
+  `occlusionResponsive` does not appear in `refusedBy` at all, on either floor.
+- **Ground Floor — 1 alpha-refused candidate, and a SEPARATE, NEWLY VISIBLE GAP: 3 of its 8
+  tiles are `untagged`, stably, across 149 consecutive samples (~5 minutes).** Untagged means
+  `applyEarlyZTileState` never ran for them — they sit OUTSIDE Stage 1's composition path
+  entirely and take neither the interior nor the passthrough path, so Stage 1 does nothing for
+  them at all. This is not a loading artifact and was invisible before this instrumentation
+  existed. Filed as its own follow-up; NOT silently folded into the S1a count.
+- ⚠️ *Instrument note, recorded because it nearly produced a false finding:* this census's
+  FIRST run reported identical counts for both floors and only 6 proxies for a floor S1.6
+  measured at 9 — it had sampled a half-resident scene, because `waitForSceneSettled` returned
+  on the previous floor's stale "settled" (the floor-switch reset defect, fixed in its own
+  task). The script now waits on its own evidence — counts byte-identical across consecutive
+  samples AND zero untagged — and leads its verdict with completeness. The Ground Floor figure
+  above is still reported as INCOMPLETE for exactly that reason.
+
 ### Stage 2 — One draw for all lights
 
 - [ ] Point-light polygons pre-triangulated into one storage-buffer soup; ONE MAX-blend
@@ -754,6 +779,68 @@ vision leak) is scheduled by the author explicitly, not silently deferred.**
 *Any model may append a petition (a task that seems wrong, a plan change that seems needed, a
 discovery that doesn't fit its brief). Only Fable resolves one — by editing the plan and
 recording the resolution here.*
+
+**P-004 — Stage 2's gate is already satisfied without doing Stage 2, and it measures the wrong
+resource.** Filed by Claude Opus 5, 2026-08-11, acting as a worker under the Covenant, on being
+asked to begin Stage 2. Not a request to weaken the stage — a request to re-aim it, because as
+written it would pass vacuously.
+
+*The gate as written:* "light stack 8.6 → ≤ 4 ms GPU; `pointLightUpdate` ≤ 1 ms CPU."
+
+*What the light stack actually costs today* (read from `stage1-earlyz-bench-result.json`, the
+S1.6 capture — real per-zone GPU timing, `attribution.verdict:'good'`, First Floor, flag ON):
+
+| zone | GPU ms | CPU ms | draws |
+| --- | --- | --- | --- |
+| `light.drawColoration` | 0.352 | 0.825 | 68 |
+| `light.drawPointLights` | 0.348 | 1.304 | 68 |
+| `light.drawWindowLight` | 0.161 | 0.184 | 4 |
+| `light.drawComposite` | 0.105 | 0.065 | 1 |
+| `light.drawIllum` | 0.102 | 0.187 | 1 |
+| `light.drawRegions` | 0.065 | 0.138 | 8 |
+| `light.drawCandleFlame` | 0.023 | 0.067 | 2 |
+| **every light GPU zone summed** | **1.156** | — | — |
+| `light.pointLightUpdate` | (no GPU) | **2.710** | 0 |
+| `pass.light.accumulate` (the whole pass) | — | **5.886** | **152** |
+
+**The GPU half of the gate is already met by a factor of 3.5 — before Stage 2 changes
+anything.** 1.156 ms against a ≤4 ms bar. The 8.6 ms baseline has the same provenance problem
+Fable already documented for `geometry.worldDraw`'s 26.6 ms at S1.6: it predates both the
+Mansion Redux re-import and this session's own optimisation work. A stage whose gate is
+satisfied at the moment it opens cannot tell success from having done nothing —
+[[feedback_instruments_must_not_lie]] applied to a gate rather than an instrument.
+
+**Where the cost actually is: CPU, and specifically draw-call submission.** The light pass
+spends **5.886 ms of CPU** issuing **152 draw calls** — 68 point lights + 68 coloration draws
+being the bulk — against a whole-frame GPU time of 4.33 ms. That is ~39 µs of CPU per draw
+call, the classic WebGPU/three submission overhead, and it means **the light stack is CPU-bound,
+not GPU-bound**: the GPU finishes this work in a quarter of the time the CPU takes to ask for
+it. `light.pointLightUpdate`'s 2.710 ms CPU (the one CPU number the gate does name) is real and
+over its 1 ms bar, but it is less than half the story; the pass-level 5.886 ms is the headline.
+
+**Stage 2's THESIS is untouched by this and is, if anything, better supported.** "Point-light
+polygons pre-triangulated into one storage-buffer soup; ONE MAX-blend illum draw, ONE ADD
+coloration draw" collapses ~136 draw calls to 2. On these numbers that is a CPU saving of
+several milliseconds per frame — at 60 fps, a third of the frame budget — which dwarfs any
+plausible GPU saving from the same change. The work is right; only its justification and its
+gate are aimed at the wrong resource.
+
+*Requested of Fable:* re-gate Stage 2 against what it actually improves. A suggested shape,
+offered as a starting point and not as a plan edit (which is not mine to make):
+- **CPU, the primary gate:** `pass.light.accumulate` CPU **5.886 → ≤ 2.5 ms**, and its draw
+  count **152 → ≤ 20**. Both are measured today, on this content, by the same instrument.
+- **`light.pointLightUpdate` CPU ≤ 1 ms** — keep exactly as written; it is a real, currently
+  failing bar (2.710 ms).
+- **GPU, as a NON-REGRESSION bound rather than a target:** the summed light GPU zones must not
+  exceed **~1.4 ms** (today's 1.156 ms plus headroom). Stated this way it catches the real risk
+  of the redesign — that one giant batched draw shades more pixels than 136 scissored small
+  ones did — which the current "≤ 4 ms" ceiling is far too loose to notice.
+- **Re-baseline honestly:** record 8.6 ms as historical, superseded by the 1.156 ms/5.886 ms
+  pair above, the same way S1.6's entry handles 26.6 ms.
+
+Until this is resolved I am proceeding only with work that is correct under either gate:
+measurement, and the lab proof that one MAX-blended batched draw is order-independent and
+pixel-exact against today's 68 separate draws. No live wiring, no default flips.
 
 **P-003 — Stage 0's instrument (the Playwright harness) needed its own trust check before any
 measurement through it could count.** Filed by Claude Sonnet 5, 2026-08-10, acting as a worker

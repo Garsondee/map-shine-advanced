@@ -97,6 +97,8 @@ import {
   elevationRank,
 } from './point-light-illumination.js';
 import { buildPointLightColorationMaterial, computeColorationAlpha } from './point-light-coloration.js';
+import { canBatchLight, computeBucketKey, isColorationEligible } from './point-light-batch.js';
+import { createBatchedLightMesh } from './point-light-batch-mesh.js';
 import {
   readActiveLightSources,
   readGridSizePixels,
@@ -674,6 +676,16 @@ export function createPointLightPool({
    * Optional so the pool stays constructible in rigs that have no fire. */
   getFireLightSources = null,
   getApertureGoboRenderState,
+  // STAGE 2 BATCHING'S OWN REVERT FLAG (S2.5, `docs/planning/Point-Light-
+  // Batching-Design.md` §8) — a GETTER for the SAME reason every other
+  // live-toggle in this param list is: `vt-pan-viewer.js` owns the `let
+  // pointLightBatching` variable and flips it via
+  // `MapShine.setPointLightBatching`; this pool just reads whatever it
+  // currently says, fresh, every `update()` call. Defaulted OFF so an
+  // un-wired caller (tests, a future fixture) gets today's per-light
+  // renderer, byte-identical — the safety-slide default, never an opt-in
+  // surprise.
+  getPointLightBatchingEnabled = () => false,
   // WALL-SEGMENT CACHE INVALIDATION (2026-08-09) — a GETTER for the same
   // reason `getWindHandle` is (see this file's own "GETTERS VS VALUES"
   // trap): boot.js owns the counter and bumps it on createWall/updateWall/
@@ -725,6 +737,25 @@ export function createPointLightPool({
    * cap never drops something with no trace. */
   const apertureGoboReadout = { totalFound: 0, dropped: 0, litLights: 0, enabled: false };
 
+  /** THE BATCHING READOUT (S2.5) — bucket/member counts as of the LAST
+   * `update()` call, mutated in place (mirrors `apertureGoboReadout`'s own
+   * shape/reason just above). Exists so a light count reported by THIS pool
+   * is never silently wrong once `pointLightBatching` is on: today's
+   * diagnostics (`vt-pan-viewer.js`'s `getPointLightsInfo`-shaped block)
+   * only walk `lightMeshes` and would undercount a batched light entirely —
+   * `feedback_pool_health_needs_a_loud_gate`'s own lesson, applied here
+   * before that gap ever gets a chance to be silent. Folding this into that
+   * diagnostic is its own, separately-scoped task (the module header's own
+   * "diagnostics assembly... its own step 5") — this readout is what that
+   * future work reads from, not a replacement for it. */
+  const batchingReadout = {
+    enabled: false,
+    illumBucketCount: 0,
+    illumLightCount: 0,
+    colorBucketCount: 0,
+    colorLightCount: 0,
+  };
+
   /** sourceId -> { mesh, material, geometry, positionAttribute, scratchArray,
    * uRatio, uAttenuationEased, ... }. Reconciled every frame in `update()`.
    *
@@ -753,6 +784,25 @@ export function createPointLightPool({
    * new, bigger array/attribute) on the rare frame a light's polygon exceeds
    * its previous high-water mark. */
   const lightMeshes = new Map();
+
+  /** bucketKey -> {mesh, reconcile, dispose, layout} (`point-light-batch-
+   * mesh.js#createBatchedLightMesh`'s own return) — S2.5's illumination
+   * bucket registry. Same "hide, never delete" lifecycle as `lightMeshes`
+   * above (see that Map's own doc for why): a bucket key with zero members
+   * THIS frame is reconciled with an empty array (`mesh.visible` goes
+   * false, `totalVertexCount` goes 0) rather than disposed, because
+   * darkness-window membership flips are NORMAL, not rare (design doc §1 —
+   * 37/50 census lights carry an activation window), and a bucket's own
+   * capacity only grows — rebuilding it from scratch on every empty frame
+   * would throw away exactly the reuse this whole design exists for. */
+  const illumBuckets = new Map();
+  /** The coloration sibling of `illumBuckets` — a SEPARATE registry (own
+   * meshes, own materials, own `colorationScene`), same "hide never delete"
+   * lifecycle. A bucket key can exist in one registry without the other:
+   * `isColorationEligible` (colourless, non-`forceDefaultColor` members)
+   * gates coloration membership independently of illumination admission,
+   * mirroring today's per-light `uColorationAlpha=0` posture. */
+  const colorBuckets = new Map();
 
   /** sourceId -> {floorId, radius, points, source, reason} — per-candle
    * WALL-CLIPPED shape cache (2026-07-20, the "candle light bleeds through
@@ -873,6 +923,37 @@ export function createPointLightPool({
     // LIGHT. env.time.tMs is the ONE clock (time/one-clock wall) — no new
     // performance.now() anywhere in this pass.
     uGlobalTimeMs.value = env.time.tMs;
+    // STAGE 2 BATCHING (S2.5) — read fresh every frame, same as every other
+    // live toggle this pool reads (`getApertureGoboRenderState` etc.). The
+    // two SHARED resource bundles below are cheap object literals over
+    // values already stable for this pool's whole lifetime (`envLight`/
+    // `sceneColor`/`blendSunVisibilityAcrossFloors`/`apertureGoboShared`/
+    // `uGlobalTimeMs` — see this module's own "GETTERS VS VALUES" header)
+    // plus THIS frame's `windHandle` — built once here, read only at
+    // bucket-CREATION time (a brand-new bucket key), matching
+    // `createLightEntry`'s own identical shared-resource shape one call
+    // site down. Field names/shapes match `buildIlluminationShadingCore`'s/
+    // `buildColorationShadingCore`'s own documented `shared` params exactly
+    // (point-light-illumination.js / point-light-coloration.js).
+    const pointLightBatchingEnabled = getPointLightBatchingEnabled() === true;
+    const illumSharedResources = {
+      attrTexNode: envLight.attrTexNode,
+      depthTexNode: envLight.depthTexNode,
+      depthFlagsTexNode: envLight.depthFlagsTexNode,
+      sunShadowSlotNodes: envLight.sunShadowSlotNodes,
+      blendSunVisibilityAcrossFloors,
+      apertureGoboShared,
+      uGlobalTimeMs,
+      windHandle,
+    };
+    const colorSharedResources = {
+      albedoTexture: sceneColor.texture,
+      depthTexNode: envLight.depthTexNode,
+      depthFlagsTexNode: envLight.depthFlagsTexNode,
+      apertureGoboShared,
+      uGlobalTimeMs,
+      windHandle,
+    };
     // Hoisted above its previous single use (candles' own wall-clip cache,
     // below) so `readActiveLightSources` can also key its OWN wall-clip cache
     // by the SAME floor value — one read, both consumers, never two floor
@@ -1217,6 +1298,14 @@ export function createPointLightPool({
         : computeAmbientColors({ ...env, darkness01 }, darknessRealism01);
 
     const seen = new Set();
+    // bucketKey -> {members: [], flags: {...}} — fresh every frame; a light
+    // absent this frame (deleted, or outside its own darkness01 window —
+    // `readActiveLightSources` already filtered it out of `lights` before
+    // this function ever sees it) simply never gets pushed, and the
+    // reconcile pass after this loop naturally drops it from its bucket,
+    // same as `seen`/`lightMeshes`' own per-light equivalent.
+    const illumBatchGroups = new Map();
+    const colorBatchGroups = new Map();
     for (const light of lights) {
       seen.add(light.sourceId);
       let entry = lightMeshes.get(light.sourceId);
@@ -1282,6 +1371,129 @@ export function createPointLightPool({
         paneWidthPx: apertureGoboPaneWidthPx,
         paneHeightPx: apertureGoboPaneHeightPx,
       });
+
+      // STAGE 2 BATCHING (S2.5) — admission is decided HERE, right where
+      // `apertureCount`/`falloffModel` are both already resolved (design
+      // doc §3.1/§3.5: aperture-lit lights and any falloff model outside
+      // the closed list NEVER batch, full stop — they fall through to the
+      // UNCHANGED per-light path below, which is ALSO Stage 2's own safety
+      // slide: flag OFF makes `canBatch` false for every light, byte-
+      // identical to before this branch existed).
+      const canBatch = pointLightBatchingEnabled && canBatchLight({ apertureCount, falloffModel });
+      if (canBatch) {
+        // A light that batches THIS frame but had a per-light entry from a
+        // PREVIOUS frame (its own apertureCount just dropped to 0 — the only
+        // realistic transition, since falloffModel is constant per source)
+        // must have that entry HIDDEN, never left visible: `seen.add`
+        // already ran above, so the generic end-of-loop "not in seen"
+        // cleanup below will NOT hide it — this light is very much seen,
+        // just by the other path now. Hidden, not deleted, the same "hide
+        // never delete" doctrine `lightMeshes` itself documents.
+        const staleEntry = lightMeshes.get(light.sourceId);
+        if (staleEntry) {
+          staleEntry.mesh.visible = false;
+          staleEntry.colorationMesh.visible = false;
+          if (staleEntry.apertureShadowDebugMesh) staleEntry.apertureShadowDebugMesh.visible = false;
+        }
+
+        const animationEntry = resolveLightAnimation(light.animation.type);
+        const windPresent = Number.isFinite(light.windExposure);
+        const bucketKey = computeBucketKey({
+          animationType: light.animation.type,
+          animationResolved: animationEntry !== null,
+          animationQuality,
+          falloffModel,
+          windPresent,
+        });
+
+        // SHARED per-frame values — the SAME formulas the per-light path
+        // below uses on its own copy of the same light, just written into a
+        // packed-vertex member object instead of a per-light uniform.
+        let localAmbient = sharedAmbientNoRegions;
+        if (!localAmbient) {
+          const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
+          localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
+        }
+        const attenuationEased = easeAttenuation(light.attenuation01);
+        const exposure = computeExposure(light.luminosity01);
+        const expectedDepth = resolveExpectedDepth ? resolveExpectedDepth(light.elevation) : 0;
+        const reverseSign = light.animation.reverse ? -1 : 1;
+        // Same `?? 1` fallback the per-light path's own uniform write uses
+        // (`entry.uIllumWindExposure.value = light.windExposure ?? 1`) —
+        // writing a raw `undefined` into a Float32Array silently becomes
+        // NaN (`feedback_raw_seed_into_noise_coordinate`), and this is
+        // written regardless of `windPresent` (a bucket with no `aWind`
+        // buffer simply never reads it — see `layout.buffers`).
+        const windExposureSafe = light.windExposure ?? 1;
+        const windResponseSafe = light.windResponse ?? 1;
+
+        const illumAnimated = !!animationEntry?.buildIlluminationSeed;
+        let illumGroup = illumBatchGroups.get(bucketKey);
+        if (!illumGroup) {
+          illumGroup = {
+            members: [],
+            flags: { animated: illumAnimated, windPresent, animationEntry, animationQuality, falloffModel },
+          };
+          illumBatchGroups.set(bucketKey, illumGroup);
+        }
+        illumGroup.members.push({
+          sourceId: light.sourceId,
+          x: light.x,
+          y: light.y,
+          radius: light.radius,
+          shapePoints: light.shapePoints,
+          ratio: light.ratio,
+          attenuationEased,
+          exposure,
+          expectedDepth,
+          bg: localAmbient.background,
+          dim: localAmbient.dim,
+          bright: localAmbient.bright,
+          speedRaw: light.animation.speedRaw,
+          reverseSign,
+          seed: light.animation.seed,
+          intensityRaw: light.animation.intensityRaw,
+          windExposure: windExposureSafe,
+          windResponse: windResponseSafe,
+        });
+
+        // COLORATION MEMBERSHIP — independent of illumination admission,
+        // the SAME `hasColor || forceDefaultColor` rule the per-light path's
+        // own `uColorationAlpha` gate already applies
+        // (point-light-batch.js#isColorationEligible, the ONE place this
+        // rule lives now).
+        const forceDefaultColor = animationEntry?.forceDefaultColor === true;
+        if (isColorationEligible({ hasColor: light.hasColor, forceDefaultColor })) {
+          const colorAnimated = !!animationEntry?.buildColorationSeed;
+          let colorGroup = colorBatchGroups.get(bucketKey);
+          if (!colorGroup) {
+            colorGroup = {
+              members: [],
+              flags: { animated: colorAnimated, windPresent, animationEntry, animationQuality, falloffModel },
+            };
+            colorBatchGroups.set(bucketKey, colorGroup);
+          }
+          colorGroup.members.push({
+            sourceId: light.sourceId,
+            x: light.x,
+            y: light.y,
+            radius: light.radius,
+            shapePoints: light.shapePoints,
+            attenuationEased,
+            colorationAlpha: computeColorationAlpha(light.alpha01, 1),
+            expectedDepth,
+            ratio: light.ratio,
+            lightColor: light.color,
+            speedRaw: light.animation.speedRaw,
+            reverseSign,
+            seed: light.animation.seed,
+            intensityRaw: light.animation.intensityRaw,
+            windExposure: windExposureSafe,
+            windResponse: windResponseSafe,
+          });
+        }
+        continue;
+      }
 
       if (
         entry &&
@@ -1588,6 +1800,56 @@ export function createPointLightPool({
         }
       }
     }
+
+    // STAGE 2 BATCHING (S2.5) — reconcile every bucket THIS frame's admitted
+    // lights grouped into, then hide (never delete — see `illumBuckets`' own
+    // doc) any EXISTING bucket key with zero members this frame. A brand-new
+    // key gets its mesh built once here and added to the SAME scene the
+    // per-light meshes already share (design doc §3.4: MAX blending is
+    // order-independent, proven — buckets and per-light meshes coexist in
+    // one scene with no ordering requirement between them).
+    batchingReadout.enabled = pointLightBatchingEnabled;
+    batchingReadout.illumBucketCount = illumBatchGroups.size;
+    batchingReadout.illumLightCount = 0;
+    batchingReadout.colorBucketCount = colorBatchGroups.size;
+    batchingReadout.colorLightCount = 0;
+    for (const [key, group] of illumBatchGroups) {
+      let bucket = illumBuckets.get(key);
+      if (!bucket) {
+        bucket = createBatchedLightMesh({
+          THREE,
+          channel: 'illumination',
+          shared: illumSharedResources,
+          flags: group.flags,
+        });
+        lightScene.add(bucket.mesh);
+        illumBuckets.set(key, bucket);
+      }
+      const result = bucket.reconcile(group.members);
+      batchingReadout.illumLightCount += result.memberCount;
+    }
+    for (const [key, bucket] of illumBuckets) {
+      if (!illumBatchGroups.has(key)) bucket.reconcile([]);
+    }
+    for (const [key, group] of colorBatchGroups) {
+      let bucket = colorBuckets.get(key);
+      if (!bucket) {
+        bucket = createBatchedLightMesh({
+          THREE,
+          channel: 'coloration',
+          shared: colorSharedResources,
+          flags: group.flags,
+        });
+        colorationScene.add(bucket.mesh);
+        colorBuckets.set(key, bucket);
+      }
+      const result = bucket.reconcile(group.members);
+      batchingReadout.colorLightCount += result.memberCount;
+    }
+    for (const [key, bucket] of colorBuckets) {
+      if (!colorBatchGroups.has(key)) bucket.reconcile([]);
+    }
+
     return gridSizePixels;
   }
 
@@ -1624,6 +1886,22 @@ export function createPointLightPool({
       }
     }
     lightMeshes.clear();
+    for (const bucket of illumBuckets.values()) {
+      try {
+        bucket.dispose();
+      } catch (err) {
+        log.error('point-light illumination bucket dispose failed — VRAM may be leaked:', err);
+      }
+    }
+    illumBuckets.clear();
+    for (const bucket of colorBuckets.values()) {
+      try {
+        bucket.dispose();
+      } catch (err) {
+        log.error('point-light coloration bucket dispose failed — VRAM may be leaked:', err);
+      }
+    }
+    colorBuckets.clear();
   }
 
   /** The aperture-gobo readout — apertures found/dropped/lit-lights as of
@@ -1635,6 +1913,43 @@ export function createPointLightPool({
     return { ...apertureGoboReadout };
   }
 
+  /** THE BATCHING READOUT (S2.5) — see `batchingReadout`'s own doc. */
+  function getBatchingReadout() {
+    return { ...batchingReadout };
+  }
+
+  /**
+   * Invalidate every batched bucket's material — the bucket sibling of the
+   * per-light `entry.animationType = '__wind_rebake_pending__'` sentinel
+   * trick `vt-pan-viewer.js`'s own wind-rebake handler uses. A bucket
+   * material bakes in `windHandle` at CONSTRUCTION time (same as a per-light
+   * material — see `point-light-illumination.js`'s own "SHARED WIND" seed-
+   * injection block), but a bucket's KEY (`computeBucketKey`) has no
+   * wind-HANDLE-identity component, only a `windPresent` boolean — so unlike
+   * a per-light entry, waiting for "next frame's key mismatch" would never
+   * fire. Disposing every bucket outright and clearing both registries is
+   * the fix: the very next `update()` call finds no existing bucket for any
+   * key, so every batched light rebuilds its bucket fresh against THIS
+   * frame's `getWindHandle()` result, same as a freshly-appearing light
+   * would. Removes each mesh from its scene BEFORE disposing (the scene
+   * itself is NOT being torn down here, unlike this pool's own `dispose()`
+   * above — an undisposed-but-orphaned mesh reference left in a live scene
+   * is exactly the zombie-node class the per-light rebuild path already
+   * avoids via its own `lightScene.remove(entry.mesh)` call).
+   */
+  function invalidateBatchedWindMaterials() {
+    for (const bucket of illumBuckets.values()) {
+      lightScene.remove(bucket.mesh);
+      bucket.dispose();
+    }
+    illumBuckets.clear();
+    for (const bucket of colorBuckets.values()) {
+      colorationScene.remove(bucket.mesh);
+      bucket.dispose();
+    }
+    colorBuckets.clear();
+  }
+
   return Object.freeze({
     lightScene,
     colorationScene,
@@ -1644,6 +1959,8 @@ export function createPointLightPool({
     lightningWallClipCache,
     update,
     getApertureGoboReadout,
+    getBatchingReadout,
+    invalidateBatchedWindMaterials,
     dispose,
   });
 }

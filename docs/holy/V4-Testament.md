@@ -694,10 +694,57 @@ Worker models execute + mark only; ANY surprise is a petition.*
       simple layout, 1 draw call, `maxChannelDelta:0` against N separate production coloration
       meshes, non-vacuous sample). No console errors; only pre-existing, unrelated warnings
       (`renderAsync` deprecation, an unrelated specular-bench TSL name collision).
-- [ ] **S2.5 Pool integration** — reconcile writes into bucket spans with value-diff
+- [x] **S2.5 Pool integration** — reconcile writes into bucket spans with value-diff
       dirty-skip (steady state ⇒ zero uploads); per-light path RETAINED for aperture-lit +
       non-admitted lights (it is also the safety slide: flag OFF = today's renderer,
-      byte-identical); darkness-window membership flips exercised.
+      byte-identical); darkness-window membership flips exercised. ✅ 2026-08-12 (Claude
+      Sonnet 5): `point-light-pool.js#update` now branches each light on
+      `pointLightBatching && canBatchLight({apertureCount, falloffModel})` right where both
+      fields are already resolved — admitted lights accumulate into per-bucket-key member
+      groups (`computeBucketKey`, coloration membership independently via
+      `isColorationEligible`) instead of getting a per-light entry; non-admitted lights fall
+      through the UNCHANGED per-light code path via `continue`. Buckets are get-or-created
+      (`createBatchedLightMesh`) and reconciled AFTER the light loop, added to the SAME
+      `lightScene`/`colorationScene` per-light meshes already use; a bucket key with zero
+      members this frame is reconciled with `[]` (hidden, never deleted — same doctrine as
+      `lightMeshes`), so darkness-window flips (design doc §1: 37/50 census lights carry an
+      activation window) are handled by the SAME "light present or absent in `lights` this
+      frame" mechanism both paths already rely on — structural, not yet exercised by a
+      dedicated test. A light transitioning per-light→batched has its stale per-light entry
+      explicitly hidden (`seen.add` already ran, so the generic end-of-loop cleanup would
+      have missed it). THE VALUE-DIFF DIRTY-SKIP (design doc §3.4's other half, deferred by
+      S2.4's own header): `point-light-batch-mesh.js#reconcile` now carries a `lastValues`
+      snapshot per member (array fields cloned, never by reference) alongside the existing
+      `lastPlacement`, and skips `writeValueSpan` + that attribute's `needsUpdate` when no
+      member's values changed — a bucket rebuild still forces every member's values to
+      rewrite (spans moved). TWO gaps found and fixed before they could bite, not by
+      accident: (1) a wind rebake invalidates per-light entries via a sentinel string
+      forcing next-frame's rebuild-key check to fail, but a bucket's OWN key has no
+      wind-handle-identity component, so that mechanism would never fire for a bucket —
+      added `invalidateBatchedWindMaterials()` (removes each bucket mesh from its scene,
+      disposes, clears both registries) and wired it into `vt-pan-viewer.js`'s existing
+      wind-rebake block alongside the per-light sentinel. (2) the pool's own diagnostics
+      (`vt-pan-viewer.js`'s `getPointLightsInfo`-shaped block, still deferred to the
+      extraction plan's own step 5) only walk `lightMeshes` and would silently undercount
+      once batching is on — added `getBatchingReadout()` (bucket/member counts, mirrors
+      `getApertureGoboReadout`'s shape) so the gap is visible/actionable rather than silent
+      (`feedback_pool_health_needs_a_loud_gate`), without doing the full diagnostics rewrite
+      (genuinely separate, larger scope). **Evidence:** `npm run verify` green — 22 suites,
+      8593 passed, 0 failed; `graph/reachable-from-boot` ratchet tightened 4→2 (both batch
+      modules are now reachable via `point-light-pool.js`'s new imports — no longer "wall
+      built before the room it governs"). Real device: re-ran
+      `tools/shader-lab/bench-point-lights.js`'s `production-shaped-packed-batch` scenario
+      (WebGPU, real draws, real pixel readback) unchanged — **8/8 checks still pass**,
+      including `steady-state-renders-byte-stable-with-zero-writes` (`maxChannelDelta:0,
+      rebuilt:false`), the exact check that would catch a dirty-skip regression; no console
+      errors. ⚠️ **What this does NOT yet prove**: this bench calls
+      `createBatchedLightMesh`/`.reconcile()` directly — it does not exercise
+      `point-light-pool.js`'s NEW admission/bucket-lifecycle code itself (needs a live
+      THREE/WebGPU pool, which the bench does not construct). `pointLightBatching` defaults
+      OFF, so today's renderer is unaffected regardless. The real gate for the integration
+      itself — flag ON vs OFF, pixel-exact, on a real captured scene — is S2.7, not done
+      here; this entry is `BUILT (unverified)` for the pool-integration code specifically,
+      `LIVE`-equivalent only for the dirty-skip mechanism the bench re-confirmed.
 - [ ] **S2.6 `pointLightUpdate` interior** — sub-zone it FIRST (source-read / candle-build /
       aperture-scan / ambient / writes; prime suspect: `buildCandleLightSources` clustering
       207 anchors at frame cadence), then fix ONLY what the zones convict. ⚠️ `src/diag/`

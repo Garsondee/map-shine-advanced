@@ -2506,6 +2506,12 @@ export async function startVtPanViewer({
       // flame is drawing with.
       getFireLightSources: () => fireSubsystem.lightSources(),
       getApertureGoboRenderState,
+      // STAGE 2 BATCHING (S2.5) — the SAME TDZ-safe closure pattern as
+      // `getWindHandle` just above (`pointLightBatching` is declared FURTHER
+      // DOWN this function, safe because this arrow is not invoked until
+      // `pointLights.update()` runs from the frame loop — see this
+      // function's own "GETTERS VS VALUES" header).
+      getPointLightBatchingEnabled: () => pointLightBatching,
       uGlobalTimeMs,
       // THE HEIGHT/ELEVATION GATE's OWN CPU RESOLVER — STAGE 2 (2026-08-04).
       // `effects/lighting/` cannot import `vt/scene-depth.js` directly (`vt/`
@@ -3578,6 +3584,13 @@ export async function startVtPanViewer({
           candleFlameMat = null;
         }
         for (const entry of pointLights.lightMeshes.values()) entry.animationType = '__wind_rebake_pending__';
+        // STAGE 2 BATCHING (S2.5) — the bucket sibling of the per-light
+        // sentinel just above; see `invalidateBatchedWindMaterials`'s own
+        // header (point-light-pool.js) for why a bucket needs a DIFFERENT
+        // invalidation mechanism than "wait for next frame's key mismatch".
+        // Safe to call unconditionally: a no-op when `pointLightBatching` is
+        // off (both registries are simply empty).
+        pointLights.invalidateBatchedWindMaterials();
         if (windOverlayMat) {
           windOverlayMat.material?.dispose();
           windOverlayMat = null;

@@ -7,18 +7,23 @@
  * — never a second, hand-written shader (design doc §0 rule 2).
  *
  * ============================================================================
- * WHAT THIS FILE DOES NOT DO YET (S2.5's job, not this one's)
+ * WHAT THIS FILE DOES NOT DO (pool integration is point-light-pool.js's job)
  * ============================================================================
- * This module does not read live Foundry light data, does not decide bucket
- * MEMBERSHIP (that is `point-light-batch.js#partitionLightsForBatching`),
- * and does not value-diff against last frame — every `reconcile()` call
- * rewrites every member's VALUE attributes unconditionally (shape/position
- * IS already skipped when the bucket didn't rebuild — see `reconcile`'s own
- * doc). "Steady state writes zero bytes" (design doc §3.4) is S2.5's
- * dirty-skip layered on top of this module's `reconcile`, not built here.
- * Matches S2.2's own precedent: `point-light-batch.js` shipped with zero
- * live call sites until S2.5, "the sanctioned 'wall built before the room it
- * governs' case" (`docs/holy/V4-Testament.md`'s S2.2 entry).
+ * This module does not read live Foundry light data and does not decide
+ * bucket MEMBERSHIP: `point-light-pool.js#update` decides which lights are
+ * batch-admitted (`point-light-batch.js#canBatchLight`) and groups them by
+ * `computeBucketKey`, then calls THIS module's `reconcile(members)` once per
+ * bucket per frame (S2.5, `docs/holy/V4-Testament.md`).
+ *
+ * VALUE-DIFF DIRTY-SKIP (S2.5, 2026-08-11) — `reconcile()` compares each
+ * member's VALUE fields (everything but sourceId/x/y/radius/shapePoints,
+ * already covered by the placement dirty-check below) against a per-member
+ * snapshot taken the last time they were WRITTEN, and skips both
+ * `writeValueSpan` and the value buffers' `needsUpdate` flag when nothing
+ * changed for ANY member this frame — "steady state writes zero bytes"
+ * (design doc §3.4). A bucket REBUILD (membership/vertex-count change)
+ * still forces every member's values to rewrite unconditionally, same as
+ * the placement dirty-check, because a rebuild moves every span.
  *
  * ============================================================================
  * THE PACKED LAYOUT (design doc §3.3) — implemented here EXACTLY, once
@@ -477,6 +482,60 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
     );
   }
 
+  /** sourceId -> {...every VALUE field last WRITTEN} — the value-level
+   * sibling of `lastPlacement`, S2.5's own dirty-skip (see this module's
+   * header). Snapshotted via {@link snapshotValues} (array fields cloned,
+   * never stored by reference) so a caller reusing the SAME array object
+   * across frames can never make an actually-changed value read as
+   * unchanged. */
+  const lastValues = new Map();
+
+  /** Every field `snapshotValues`/`valuesChanged` compare — everything
+   * `placementChanged` does NOT already own. */
+  const VALUE_SNAPSHOT_SKIP_KEYS = new Set(['sourceId', 'x', 'y', 'radius', 'shapePoints']);
+
+  /**
+   * A plain clone of one member's VALUE fields — array-valued ones
+   * (`bg`/`dim`/`bright`/`lightColor`) are cloned, never stored by
+   * reference, so a later in-place mutation of the CALLER's own array can
+   * never retroactively change what this snapshot compares against
+   * (mirrors `shapePointsUnchanged`'s own "value, not reference" doctrine).
+   * @param {object} m @returns {object}
+   */
+  function snapshotValues(m) {
+    const snap = {};
+    for (const key in m) {
+      if (VALUE_SNAPSHOT_SKIP_KEYS.has(key)) continue;
+      const v = m[key];
+      snap[key] = Array.isArray(v) ? v.slice() : v;
+    }
+    return snap;
+  }
+
+  /**
+   * @param {string} sourceId @param {object} m @returns {boolean} true iff
+   *   this is a never-before-seen member OR any VALUE field differs from
+   *   the last snapshot taken for it.
+   */
+  function valuesChanged(sourceId, m) {
+    const prev = lastValues.get(sourceId);
+    if (!prev) return true;
+    for (const key in m) {
+      if (VALUE_SNAPSHOT_SKIP_KEYS.has(key)) continue;
+      const a = m[key];
+      const b = prev[key];
+      if (Array.isArray(a)) {
+        if (!Array.isArray(b) || a.length !== b.length) return true;
+        for (let i = 0; i < a.length; i++) {
+          if (a[i] !== b[i]) return true;
+        }
+      } else if (a !== b) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Reconcile this bucket's mesh against THIS frame's membership. See this
    * module's header for the per-member value contract.
@@ -502,6 +561,9 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
       for (const id of lastPlacement.keys()) {
         if (!live.has(id)) lastPlacement.delete(id);
       }
+      for (const id of lastValues.keys()) {
+        if (!live.has(id)) lastValues.delete(id);
+      }
     }
     const fans = new Map();
     const bucketMembers = new Array(members.length);
@@ -519,6 +581,7 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
     if (grew) ensureCapacity(capacity);
 
     let anyGeometryWrite = rebuilt; // a rebuild always touches every span, so every member's geometry is written below regardless
+    let anyValueWrite = rebuilt; // same reasoning — a rebuild moves every span, so every member's values must land at their NEW location too
     for (const m of members) {
       const span = spans.get(m.sourceId);
       if (rebuilt || placementChanged(m.sourceId, m)) {
@@ -527,12 +590,16 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
         lastPlacement.set(m.sourceId, { x: m.x, y: m.y, radius: m.radius, shapePoints: m.shapePoints });
         anyGeometryWrite = true;
       }
-      writeValueSpan(m, span);
+      if (rebuilt || valuesChanged(m.sourceId, m)) {
+        writeValueSpan(m, span);
+        lastValues.set(m.sourceId, snapshotValues(m));
+        anyValueWrite = true;
+      }
     }
 
     for (const name of layout.buffers) {
       const isGeometryBuffer = name === 'position' || name === 'aLocalUnit';
-      if (isGeometryBuffer && !anyGeometryWrite) continue;
+      if (isGeometryBuffer ? !anyGeometryWrite : !anyValueWrite) continue;
       geometry.attributes[name].needsUpdate = true;
     }
 
@@ -554,6 +621,7 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
     geometry.dispose();
     fanScratch.clear();
     lastPlacement.clear();
+    lastValues.clear();
   }
 
   return { mesh, reconcile, dispose, layout };

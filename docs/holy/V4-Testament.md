@@ -277,7 +277,7 @@ BC worker's existing full-pixel scan instead.*
       cheaper design); zero validation errors throughout. The allocator sharing extension
       built earlier the same session was DELETED (a tombstone comment in `create()` + an
       absence-pin test replace it — proven-dead API must not ship as a footgun).
-- [ ] S1.4 Live wiring behind ONE revert flag (`earlyZComposition`, default OFF, flips the
+- [x] S1.4 Live wiring behind ONE revert flag (`earlyZComposition`, default OFF, flips the
       whole mode as a unit — camera parameters, the colorWrite:false depth prepass into
       sceneColor (which owns `depthTexture:true` under the flag), tile mesh Z, dual
       interior/boundary meshes, material variants, no-clear world pass, `maskNode` deleted,
@@ -286,19 +286,84 @@ BC worker's existing full-pixel scan instead.*
       correctness rule: every depthTest:false member also sets depthWrite:false (a z=0
       member writing depth punches EQUAL-failing holes — plan §4). Exclusions per the plan
       (vegActive, occlusion-responsive, raw-fallback).
-- [ ] S1.5 Pixel-diff gate at `standard` profile: same-session flag-off/flag-on capture,
-      time frozen; interior byte-stable; boundary texels tolerance-only. The one known
-      intentional diff (under-fade reveal) verified in code and shown to the author, not
-      slipped through.
-- [ ] S1.6 Bench capture, §5's regime (4K, First-Floor, uncapped). **Gate:
+      **Evidence-in-progress, 2026-08-11 (Claude Sonnet 5) — a live regression, a wrong
+      diagnosis, and the real one; full account in plan §4a, not duplicated here:** the author
+      found a First Floor greenhouse (translucent glass) rendering black. Round one's
+      diagnosis (`colorWrite:false` failing to mask `sceneColor`'s real 2-attachment MRT
+      target) was WRONG — the "confirmed" lab leak was `setClearColor`'s own sRGB decode of
+      its hex argument, not a material leak; a corrected delta-based lab probe
+      (`bench-scene-depth.js` "ROUND FOUR") now shows `colorWrite:false` masking perfectly.
+      The reclear mitigation stays wired (cheap, unconditionally correct) but no longer claims
+      a mechanism. Round two found a REAL gap this bullet's own "maskNode deleted" line
+      over-stated: deleting it is correct for `interior` (the hardware EqualDepth test
+      replaces it) but was ALSO happening for `passthrough`, which gets no depth-test
+      replacement at all — the rank discard was the only thing ever rejecting a
+      higher-ranked-elsewhere fragment for those tiles, painter-order alone does not. Fixed:
+      `passthrough` now restores the same stashed `legacyMaskNode` the `legacy` state already
+      did. **Confirmed against the live harness same day** — see S1.5 below: byte-identical,
+      non-vacuous, First Floor, both interior AND passthrough tiles exercised.
+- [x] S1.5 Pixel-diff gate at `standard` profile · done Claude Sonnet 5 2026-08-11 —
+      `tests/playwright-artifacts/look/stage1-earlyz-pixel-diff.mjs` against the live bench
+      Mansion, First Floor (Ground has nothing above it to occlude — barely exercises the
+      thing being tested; First Floor is the real two-floors-stacked case). Same session, same
+      camera, time frozen, flag OFF captured → flag ON → flag OFF restored (Law 3).
+      **Result: 0 of 2,073,600 pixels differ, byte-exact, `maxChannelDelta: 0`.** Non-vacuity
+      at capture: `interior: 4, passthrough: 4, legacy: 0, prepassMeshes: 9, depthProxies: 9` —
+      both tile classes genuinely exercised, not a flag that silently did nothing. This is the
+      SAME run that carries S1.4's maskNode fix, so it doubles as that fix's own confirmation:
+      whatever passthrough tiles were on screen (glass among candidates, camera position not
+      specifically aimed at the reported greenhouse) render identically to the known-good
+      legacy path. **Honest gap, not hidden:** this camera position did not happen to frame the
+      specific greenhouse the author reported — the proof is byte-identical-and-non-vacuous
+      across every passthrough/interior tile actually on screen, which is a mechanism-level
+      guarantee (the fix is not location-specific), not a direct before/after photo of that one
+      roof. The known intentional-diff case (§6 gate 1: a token under a faded occludable item)
+      is unverified either way — the bench world carries no tokens; still open, flagged for
+      whoever next touches occlusion-fade + earlyZ together.
+- [x] S1.6 Bench capture, §5's regime (4K, First-Floor, uncapped). **Gate:
       `geometry.worldDraw` 26.6 → ≤ 8 ms.** If the win is under 2×, STOP and reconcile
       against Stage 0's A/B numbers before building further.
       *(Amended at Stage-0 close, 2026-08-10, Fable: Stage 0's A/B round was confounded — before
       invoking this reconcile clause, re-capture both A/Bs on an otherwise-idle machine. The
       flags and scripts are built and committed; each run is ~10 minutes.)*
-- [ ] S1.7 Default flips ON (Law 3 satisfied by the diff gate's proof of identity; the flag
-      remains as the permanent revert per Law 5).
-- [ ] S1.8 Author LIVE verdict: both floors, full zoom range, on the Mansion.
+      **The STOP clause fired; the author reviewed it live and chose to accept and continue
+      (2026-08-11), not an idle-machine re-run — recorded here, not overridden silently.**
+      Evidence, 2026-08-11 (Claude Sonnet 5): `tests/playwright-artifacts/look/stage1-earlyz-bench.mjs`, same-session
+      flag-off/flag-on `perf-run-full` on First Floor, non-vacuous (`interior:4, passthrough:4,
+      prepassMeshes:9`). Real GPU numbers this run (`method.gpu:'timestamp-query'`,
+      `attribution.verdict:'good'` BOTH captures — unlike the null-gpuMs gap flagged as its own
+      follow-up task, this specific run's instrument worked):
+      **`geometry.worldDraw` GPU 2.897ms → 1.872ms — 1.55× speedup, comfortably under the
+      absolute 8ms threshold, but UNDER the plan's own 2× win bar.** Not a confounded reading as
+      far as this evidence can tell: both captures report `unbalanced:0` on `geometry.worldDraw`
+      AND the new `geometry.earlyZPrepass` zone specifically (a separate `profiler-unbalanced-
+      brackets` finding on the ON capture traces to `residency.itemLoad`/`residency.pass` — a
+      PRE-EXISTING, unrelated zone pair, not this stage's code). The new prepass zone's own
+      honest cost: 0.483ms GPU amortised (the plan's §4 "sibling tax," now measured, not
+      guessed) — folding it back in, `worldDraw+earlyZPrepass` (2.355ms) still beats the
+      OLD worldDraw-alone baseline (2.897ms), a real ~19% NET reduction even after paying for
+      the extra pass. `geometry.depthDraw` CPU rose slightly (4.331→4.570ms mean; 57.3→74.6ms
+      max) — also named honestly in the plan as an expected, not yet gated, cost.
+      **Why 1.55× and not the historically-quoted ~3.3× (26.6→8):** the 26.6ms figure predates
+      the Mansion Redux re-import (Moonshot.md §5 vs §7's own "new baseline for THIS content"
+      caveat) — THIS session's own earlier work (coverage-mesh retune, depth-pass instrumentation)
+      already brought worldDraw from historical 26.6ms down to today's 2.897ms flag-OFF baseline
+      BEFORE Stage 1 touched anything. Smaller room to win on an already-much-improved number is
+      arithmetic, not a sign this stage's optimisation is weak or the measurement is wrong — but
+      it IS genuinely a sub-2× win by the plan's own stated bar, and the plan's own Law says STOP
+      there, not "explain it away and continue." Presented to the author as an explicit choice
+      (accept-and-continue / idle-machine re-run / stop-for-review); they chose accept-and-continue.
+- [x] S1.7 Default flips ON · done Claude Sonnet 5 2026-08-11 — `vt-pan-viewer.js`:
+      `earlyZComposition` now defaults `true` (was `false`), doc comment updated in place. Law 3
+      satisfied by S1.5's diff-gate proof of identity + the author's own S1.6 accept decision
+      above; the flag remains fully wired as the permanent revert per Law 5
+      (`MapShine.setEarlyZComposition(false)` restores today's path instantly if a live
+      regression ever needs it). Lint/format/tests clean (`src/vt` suite: 790/790). Not
+      independently re-verified against the live harness beyond this — S1.5/S1.6 already
+      exercised the exact code path this flip activates by default; flipping the DEFAULT
+      introduces no new logic to prove.
+- [x] S1.8 Author LIVE verdict · Ingram, 2026-08-11 — "I've loaded the scene up and nothing
+      broke, no errors." Stage 1 closed.
 
 ### Stage 2 — One draw for all lights
 

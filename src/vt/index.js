@@ -61,6 +61,11 @@ export {
   setVtPanViewerDebugFirstRenderProbe,
   setVtPanViewerDebugForceMaskNodeOff,
   setVtPanViewerDebugForceOpaqueBlendOff,
+  // STAGE 1's revert flag (docs/planning/Stage-1-Shade-Once.md).
+  setVtPanViewerEarlyZComposition,
+  getVtPanViewerEarlyZComposition,
+  // SCENE SETTLE — the real "everything is on screen now" signal (vt/settle.js).
+  getVtPanViewerSceneSettle,
   drawVtPanViewerWorldMarkers,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,

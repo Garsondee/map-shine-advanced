@@ -461,11 +461,74 @@ async function bestEffortLogin(page) {
   if (stillHasJoin) throw new Error('Login did not complete (still on join screen)');
 }
 
+/**
+ * WAIT FOR THE MAP TO ACTUALLY BE ON SCREEN — the replacement for every
+ * guessed `waitForTimeout(45000)` in this harness.
+ *
+ * Author, 2026-08-11: *"the 12k x 12k mansion map's upper floor takes an
+ * extremely long time to appear which causes confusion for you and me... we
+ * currently don't correctly track when the system is actually finished
+ * loading, so the loading screen goes away too quickly."* This polls MSA's own
+ * settle detector (`MapShine.getSceneSettle()` → `src/vt/settle.js`), which
+ * answers from real outstanding-work counters — items loading, textures still
+ * BC-compressing, decodes in flight, residency passes queued — and holds them
+ * at zero for a quiet period before saying yes.
+ *
+ * TWO THINGS IT DOES THAT A SLEEP CANNOT:
+ *  - it finishes as soon as the work is genuinely done (a warm cache settles in
+ *    seconds instead of paying a worst-case guess), and
+ *  - when it does NOT finish, it says exactly which stage is outstanding, so a
+ *    stuck load is a one-line diagnosis instead of a 20-minute mystery.
+ *
+ * Throws on timeout WITH the live blockers attached — never returns a quiet
+ * "probably fine", which is the failure mode that makes a capture script
+ * screenshot a half-drawn map and report it as truth.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {{timeoutMs?: number, pollMs?: number, label?: string}} [opts]
+ * @returns {Promise<object>} the settling verdict at the moment it settled.
+ */
+async function waitForSceneSettled(page, { timeoutMs = 600000, pollMs = 1000, label = 'scene' } = {}) {
+  const start = Date.now();
+  let lastLog = 0;
+  for (;;) {
+    const st = await page.evaluate(() => {
+      try {
+        return window.MapShine?.getSceneSettle?.() ?? { settled: false, waitingFor: ['MapShine.getSceneSettle missing'] };
+      } catch (e) {
+        return { settled: false, waitingFor: [`getSceneSettle threw: ${String(e?.message ?? e)}`] };
+      }
+    });
+    if (st?.settled === true) {
+      const secs = ((Date.now() - start) / 1000).toFixed(1);
+      try {
+        console.log(`[settle] ${label} SETTLED after ${secs}s (quiet ${st.quietForMs}ms)`);
+      } catch (_) {}
+      return st;
+    }
+    const waited = Date.now() - start;
+    if (waited > timeoutMs) {
+      const why = (st?.waitingFor ?? []).join('; ') || 'unknown';
+      throw new Error(`${label} never settled after ${Math.round(waited / 1000)}s — still waiting for: ${why}`);
+    }
+    // Progress that NAMES the blocker, so a long cold load is legible while it
+    // happens rather than only after it fails.
+    if (waited - lastLog > 5000) {
+      lastLog = waited;
+      try {
+        console.log(`[settle] ${label} ${Math.round(waited / 1000)}s — waiting for: ${(st?.waitingFor ?? []).join('; ')}`);
+      } catch (_) {}
+    }
+    await page.waitForTimeout(pollMs);
+  }
+}
+
 module.exports = {
   waitForCanvasReady,
   waitForMapShineReady,
   unpauseIfPaused,
   bestEffortLogin,
   waitForGameReady,
-  ensureActiveScene
+  ensureActiveScene,
+  waitForSceneSettled
 };

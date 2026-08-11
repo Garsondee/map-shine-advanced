@@ -140,13 +140,64 @@ scenario-proven 9/9 green including zero-epsilon EQUAL):
   punch EQUAL-failing holes into any interior drawn after it. Sweepable, testable, part of
   S1.4's parity checks.
 
+## 4a. A live regression found during S1.4, a wrong diagnosis, and the real one *(2026-08-11)*
+
+The author, testing S1.4 live, reported a First Floor greenhouse roof — translucent glass —
+rendering black, "it used to work." Two rounds of investigation, worth recording honestly
+both for what turned out right and what didn't:
+
+**Round one (WRONG, corrected same day).** Diagnosed as `buildSceneDepthWriterMaterial`'s
+`colorWrite:false` failing to mask attachment 0 of `sceneColor`'s real two-attachment MRT
+target (colour + `buf:scene.attr`) — the prepass's near-black payload supposedly leaking
+through and a translucent draw blending against it. A rebuilt `bench-scene-depth.js` scenario
+("ROUND TWO") seemed to confirm this on the real device. It did not: the "confirmed leak" was
+`renderer.setClearColor`'s own sRGB decode of its hex argument, applied regardless of the
+target's declared `NoColorSpace` — the "leaked" bytes were an exact sRGB decode of the clear
+colour itself, reproduced identically by a plain clear with zero geometry ever drawn. A
+corrected, delta-based probe ("ROUND FOUR", same file) shows `colorWrite:false` masking
+attachment 0 perfectly: a draw and a no-draw are byte-identical. Full account in that
+scenario's own header comment — read it before trusting any future colorWrite/MRT claim on
+this backend, because the WRONG version looked exactly as convincing as the right one until
+someone thought to test a colourless clear against a bright, distinguishable reference instead
+of the raw hex numbers.
+
+The `renderer.clear(true, false, false)` reclear this round shipped (`runGeometryWorldPass`,
+right after the prepass render) **stays wired** — it is unconditionally cheap and cannot make
+anything worse — but no longer claims a mechanism it isn't proven to fix.
+
+**Round two (the actual gap, §3's own "boundaries `LessEqualDepth`" line hides it).**
+`applyEarlyZTileState` (`vt-pan-viewer.js`) nulled `mat.maskNode` — the rank-lookup discard,
+`querySceneDepth(...).isAtOrBelow` — for BOTH `interior` and `passthrough` tiles alike.
+Correct for `interior`: the hardware `EqualDepth` test replaces it. **Wrong for
+`passthrough`**: those tiles get NO depth-test replacement (`depthTest` stays `false`, same as
+`legacy`), so the discard was not a redundant optimisation for them, it was the ONLY mechanism
+that ever rejected a fragment something higher-ranked already covers — painter-order alone
+does not. The code's own comment claimed passthrough would "keep today's exact alpha math and
+painter order," directly contradicted by dropping the one thing painter-order occlusion
+depended on; the `legacy` branch a few lines above already restores this same stashed node for
+what is essentially the identical reason. Fixed: `passthrough` now restores
+`mat.maskNode = t.legacyMaskNode`, same as `legacy`; only `interior` still nulls it. §6 gate 1's
+existing "one honest known diff" callout (maskNode-discarded content vs. painter-covered
+content, under a faded occludable item) is the SAME underlying class of gap — this fix narrows
+it, does not necessarily close it; re-check that callout at S1.5.
+
+**Status, updated after S1.5 ran (2026-08-11):** the pixel-diff gate, run with this fix in
+place, came back byte-identical on First Floor — 0 of 2,073,600 pixels differ, `interior: 4,
+passthrough: 4` genuinely exercised. This is a mechanism-level confirmation (every
+passthrough tile on screen renders exactly like the known-good legacy path), not a direct
+before/after photo of the specific reported greenhouse — that room did not happen to be in
+the test camera's frame. See S1.5's own Testament entry for the full honest accounting,
+including what this does and does not prove.
+
 ## 5. The revert flag, and defaults
 
 `earlyZComposition` — one boolean, read at material/mesh build time, toggled via the standing
-`MapShine.setXxx` wrapper pattern, rebuild via the existing refresh path. **Default OFF while
-building; flipped ON only after the pixel-diff gate passes** (Law 3: `standard` keeps
-today's pixels — satisfied by *proof of identity*, not by assertion), with the flag kept as
-the permanent revert (Law 5).
+`MapShine.setXxx` wrapper pattern, rebuild via the existing refresh path. Default OFF while
+building; **flipped ON 2026-08-11 (S1.7)** once the pixel-diff gate passed (Law 3: `standard`
+keeps today's pixels — satisfied by *proof of identity*, not by assertion) and the bench
+gate's own STOP clause was reviewed and accepted by the author (S1.6's own entry has the full
+account). The flag stays wired as the permanent revert (Law 5) — `MapShine.
+setEarlyZComposition(false)` restores today's path instantly.
 
 ## 6. Gates
 
@@ -161,6 +212,15 @@ the permanent revert (Law 5).
 2. **Bench** (`perf-run-full`, uncapped, 4K viewport, First-Floor — §5's regime): gate
    `geometry.worldDraw ≤ 8ms` GPU. Under 2× win → STOP per the Testament's amended
    reconcile clause (idle-machine A/B re-runs first).
+   **Run 2026-08-11:** absolute gate PASSES (1.872ms ≤ 8ms), but the win (2.897→1.872ms,
+   1.55×) is under the 2× bar — the STOP clause fired. Not treated as confounded (both
+   captures `attribution.verdict:'good'`, `geometry.worldDraw` and the new
+   `geometry.earlyZPrepass` zone both `unbalanced:0`; a real `profiler-unbalanced-brackets`
+   finding on the ON run traces to unrelated `residency.itemLoad`/`residency.pass` zones, now
+   its own follow-up task) — the smaller-than-historical win traces to the 26.6ms baseline
+   predating the Mansion Redux re-import, not to a weak optimisation or a bad measurement.
+   Full accounting in the Testament's own S1.6 entry. Left for the author/a Fable countersign
+   to decide whether this discharges the clause or an idle-machine re-run is still wanted.
 3. **Author LIVE verdict** — both floors, full zoom range, on the Mansion. Theirs alone.
 
 ## 7. Step order (the Testament checklist mirrors this)

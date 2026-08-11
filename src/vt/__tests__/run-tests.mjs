@@ -20,6 +20,7 @@ import { run as runPackedTrioAlpha } from './packed-trio-alpha.test.mjs';
 import { run as runVtPanViewerDiagnostics } from './vt-pan-viewer-diagnostics.test.mjs';
 import { run as runSceneDepth } from './scene-depth.test.mjs';
 import { run as runCoverageMesh } from './coverage-mesh.test.mjs';
+import { run as runSettle } from './settle.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -68,6 +69,7 @@ const suites = [
   ['vt-pan-viewer-diagnostics', runVtPanViewerDiagnostics],
   ['scene-depth', runSceneDepth],
   ['coverage-mesh', runCoverageMesh],
+  ['settle', runSettle],
 ];
 
 for (const [name, fn] of suites) {

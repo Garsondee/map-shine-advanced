@@ -414,6 +414,7 @@ export function buildSceneDepthWriterMaterial({
   flags,
   positionNode,
   alwaysOpaque = false,
+  colorWrite = true,
 }) {
   const { Fn, float, uniform, vec4, texture } = THREE.TSL;
   const material = new THREE.NodeMaterial();
@@ -422,6 +423,17 @@ export function buildSceneDepthWriterMaterial({
   material.depthTest = true;
   material.depthWrite = true;
   material.depthFunc = THREE.LessDepth;
+  // STAGE 1's DEPTH PREPASS (docs/planning/Stage-1-Shade-Once.md §4) builds a
+  // SECOND copy of every proxy with `colorWrite:false` and renders it into
+  // `scene.color`, so that target's own depth attachment carries this pass's
+  // exact answer for the world draw's `EqualDepth` interiors to test against.
+  // Colour is masked rather than the payload simply being ignored: the world
+  // target's attachment 0 is the frame's real picture, and these materials
+  // would otherwise paint floor-index bytes over it. Proven on the real device
+  // (bench-scene-depth.js 'single-target-prepass-equal': zero colour bytes
+  // land) — the cross-target depthTexture share this replaces is silently dead
+  // on this backend, see that scenario's own header.
+  material.colorWrite = colorWrite !== false;
   if (positionNode) material.positionNode = positionNode;
   // floorIndex/flags/alphaThreshold are UNIFORMS, never `float(literal)` —
   // `rebuildSceneDepthProxies` builds a brand-new material like this one for

@@ -292,6 +292,22 @@ export const ZONES = Object.freeze(
       true,
       'runSceneDepthPass'
     ),
+    // STAGE 1's DEPTH PREPASS (docs/planning/Stage-1-Shade-Once.md §4) — the
+    // proxy scene rendered a SECOND time, colour-masked, into scene.color so
+    // its depth attachment can drive the world draw's EqualDepth interiors.
+    // 'conditional': it only runs while `earlyZComposition` is on, so a
+    // median over ALL frames would misreport it in a flag-off session.
+    z(
+      'geometry.earlyZPrepass',
+      'Early-Z depth prepass into scene.color',
+      'geometry',
+      'geometry.world',
+      null,
+      'both',
+      'conditional',
+      false,
+      'runGeometryWorldPass'
+    ),
     // STAGE-0 CPU-MYSTERY EXPERIMENT (2026-08-10, debug-only, OFF unless
     // `MapShine.setDebugFirstRenderProbe(true)`). A dummy 1-triangle render()
     // into a scratch target, positioned immediately before this pass's own

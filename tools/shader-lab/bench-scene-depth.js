@@ -1117,10 +1117,36 @@ export function createSceneDepthBench({ THREE, log }) {
    * WHAT THIS SCENARIO NOW PROVES — the design S1.4 actually ships
    * (the "single-target prepass", the recommended shape for this backend):
    * ONE target owns colour AND its own real depthTexture; pass 1 renders the
-   * depth-writer scene into it with `colorWrite:false` (depth lands, colour
-   * untouched); pass 2 renders EQUAL/unblended meshes at the SAME Z values
-   * with depth-clear disabled. Checks:
-   *   - the prepass writes NO colour (colorWrite:false genuinely masks);
+   * depth-writer scene into it (depth lands); pass 2 renders EQUAL/unblended
+   * meshes at the SAME Z values with depth-clear disabled.
+   *
+   * ⚠️ ROUND TWO (2026-08-11) — THIS SCENARIO ITSELF HAD THE SAME GAP IT WAS
+   * BUILT TO CLOSE. Its first version tested `colorWrite:false` against a
+   * SINGLE-attachment target and got a clean pass — "the prepass writes no
+   * colour". Production's real `scene.color` is a TWO-attachment MRT target
+   * (colour + `buf:scene.attr`), and the author's own eyes on a real
+   * translucent roof found black-tinted glass BEFORE this scenario ever
+   * caught anything wrong. Rebuilt against the real two-attachment shape
+   * (`mrtTarget`, `zeroAttrMrt` mirroring production's `sceneAttrZeroMrt`).
+   *
+   * ⚠️ ROUND FOUR (2026-08-11, SAME DAY) — ROUND TWO'S OWN "CONFIRMED LEAK"
+   * WAS ITSELF A MEASUREMENT ARTIFACT, NOT A REAL FINDING. That round
+   * compared a readback against the RAW HEX bytes of the clear colour
+   * (0x112233 → expected [17,34,51]) and read [1,4,8] — logged as proof
+   * `colorWrite:false` leaks the material's payload through. It does not.
+   * `renderer.setClearColor(hex, alpha)` decodes hex as sRGB before it
+   * reaches the buffer, REGARDLESS of this target's declared `NoColorSpace`
+   * — [17,34,51] sRGB-decodes to EXACTLY [1,4,8]. A plain clear with ZERO
+   * geometry ever rendered reproduces the identical bytes; a delta between
+   * "before the prepass draws" and "after" (same buffer, same colour-space
+   * transform on both sides) shows NO difference at all. `colorWrite:false`
+   * masks attachment 0 correctly on this target, on this backend, as far as
+   * this scenario can now tell. The greenhouse bug the author actually saw
+   * is REAL and still needs a correct diagnosis — this was not it. Checks
+   * now cover the FULL, corrected story:
+   *   - `colorWrite-false-masks-attachment-0-on-a-real-mrt-target` — a
+   *     before/after delta on the SAME buffer, immune to whatever
+   *     colour-space transform is in play; must read identical;
    *   - EQUAL at the same numeric Z through the same camera is EXACT — zero
    *     epsilon — including an overlap resolved by the depth test;
    *   - a mesh at an unwritten Z contributes NOTHING (non-vacuity);
@@ -1131,6 +1157,12 @@ export function createSceneDepthBench({ THREE, log }) {
    *     this target's depthTexture still draws nothing through it. If a
    *     future three upgrade makes this check FAIL, the cheaper two-target
    *     design has opened up and Stage 6 should hear about it.
+   *
+   * The colour-only reclear stays wired in `vt-pan-viewer.js` regardless —
+   * cheap, unconditionally correct (a plain clear cannot leave stale data
+   * behind, whatever the real bug turns out to be) — but its doc comment
+   * there needs the same correction this one just got: it no longer has a
+   * confirmed mechanism to point to, only a symptom still waiting on one.
    *
    * Production's claim is STRONGER than what this proves in one way, weaker
    * in none: production shares the actual geometry INSTANCE between the two
@@ -1166,9 +1198,35 @@ export function createSceneDepthBench({ THREE, log }) {
       };
       device?.addEventListener?.('uncapturederror', onError);
 
-      const { Fn, float, vec4 } = THREE.TSL;
+      const { float, vec4 } = THREE.TSL;
       /** Flat-colour material in the exact interior-draw state the plan
-       * specifies: EQUAL, no depth write, no blend, no discard anywhere. */
+       * specifies: EQUAL, no depth write, no blend, no discard anywhere.
+       *
+       * ⚠️ `.colorNode`, NOT `.fragmentNode` (changed 2026-08-11, chasing the
+       * SAME MRT saga as `zeroAttrMrt`'s own comment above). A `fragmentNode`
+       * material never routes through the `colorNode`/MRT build path at all —
+       * it always emits a single unnamed `@location(0)` output, no matter
+       * what `mrt()` is bound, material- or renderer-level. That is invisible
+       * on a target with only ONE real attachment (every earlier version of
+       * this scenario), but `mrtTarget` genuinely has two, and WebGPU
+       * requires a matching fragment output for EVERY attachment whose write
+       * mask is nonzero — `colorWrite:false` (the prepass's own escape hatch)
+       * apparently zeroes that requirement for BOTH attachments uniformly,
+       * but pass 2 needs attachment 0's real output, so that escape hatch
+       * isn't available here. `colorNode` populates `TSL.output` at build
+       * time (`scene-attr.js`'s own "THE MRT MECHANISM" header), which is
+       * exactly what lets the renderer-global `zeroAttrMrt` — now carrying
+       * BOTH `output` and `attr` keys — supply a real member for attachment 0
+       * (this material's own colour) AND attachment 1 (the safe zero),
+       * without this helper needing its own per-material mrtNode at all.
+       * This is not a lab-only workaround: it makes `equalMat` MORE faithful
+       * to production, not less — the real interior/EQUAL draw material
+       * (`buildWholeImageMaterial`) is colorNode-based too; `equalMat` was
+       * simplified for depth-test isolation, never meant to also stand in
+       * for `buildDepthWriterMaterial`'s fragmentNode shape. That shape stays
+       * exactly as shipped in `prepassMat` below, unchanged — it is the real
+       * production prepass function, not a lab helper, and this scenario's
+       * whole point is to test what THAT actually does. */
       const equalMat = (r255, g255, b255) => {
         const m = new THREE.NodeMaterial();
         m.side = THREE.DoubleSide;
@@ -1176,7 +1234,7 @@ export function createSceneDepthBench({ THREE, log }) {
         m.depthTest = true;
         m.depthWrite = false;
         m.depthFunc = THREE.EqualDepth;
-        m.fragmentNode = Fn(() => vec4(float(r255 / 255), float(g255 / 255), float(b255 / 255), float(1)))();
+        m.colorNode = vec4(float(r255 / 255), float(g255 / 255), float(b255 / 255), float(1));
         return m;
       };
 
@@ -1195,15 +1253,50 @@ export function createSceneDepthBench({ THREE, log }) {
        * into sceneColor before the world draw, leaving colour untouched). */
       const prepassMat = () => {
         const m = buildDepthWriterMaterial({ THREE, r255: 123, g255: 45, b255: 67 });
-        m.colorWrite = false; // the payload bytes above must NEVER land — checked below
+        m.colorWrite = false; // does NOT mask on a real MRT target — see this scenario's own header
         return m;
       };
 
+      // ⚠️ A DEDICATED TWO-ATTACHMENT TARGET, NOT THE BENCH'S SHARED `colorRt`.
+      // FOUND LIVE, 2026-08-11 (the author's own eyes on a real translucent
+      // roof, not this harness): the FIRST version of this scenario used
+      // `colorRt` — a SINGLE-attachment target — and `prepass-writes-no-colour`
+      // passed clean. Production's real `scene.color` is a TWO-attachment MRT
+      // target (colour + `buf:scene.attr`), and on THAT shape `colorWrite:false`
+      // does NOT mask attachment 0 on this backend — confirmed here by
+      // rebuilding the scenario against the real shape, after the live bug
+      // pointed at the gap. A single-attachment lab proof is not equivalent to
+      // a multi-attachment production target; this scenario now tests the one
+      // that ships. `mrtNode` mirrors `sceneAttrZeroMrt` (`vt-pan-viewer.js`) —
+      // the SAME "safe zero attr" binding held during production's own prepass.
+      const { mrt, output: mrtOutput, vec4: vec4TSL } = THREE.TSL;
+      const mrtTarget = new THREE.RenderTarget(DIM, DIM, {
+        count: 2,
+        type: THREE.UnsignedByteType,
+        format: THREE.RGBAFormat,
+        minFilter: THREE.NearestFilter,
+        magFilter: THREE.NearestFilter,
+        colorSpace: THREE.NoColorSpace,
+        depthBuffer: true,
+      });
+      mrtTarget.textures[0].name = 'output';
+      mrtTarget.textures[1].name = 'attr';
+      // ⚠️ BOTH keys, not just 'attr' — THIS WAS ITS OWN BUG, found chasing a
+      // pipeline-validation error ("targets[1]…no corresponding fragment stage
+      // output but writeMask is not zero") that showed up only once pass 2's
+      // materials (colorWrite defaulting to true, unlike the prepass) rendered
+      // under this binding. `scene-attr.js#buildSceneAttrZeroMrt` — the exact
+      // production node this is supposed to mirror — is `mrt({ output, attr:
+      // vec4(0,0,0,0) })`; a version with only 'attr' silently leaves the
+      // OTHER attachment with no merged-MRT-side output at all. The prepass
+      // (colorWrite:false) never surfaced this: a zero write mask needs no
+      // matching shader output, so the gap was invisible there. Production
+      // never had this bug — only this scenario's first draft, which copied
+      // half the real node.
+      const zeroAttrMrt = mrt({ output: mrtOutput, attr: vec4TSL(0, 0, 0, 0) });
+
       const runBothPasses = async () => {
-        const dim = colorRt.width;
-        // Pass 1 — the prepass: depth-writer scene into the ONE target,
-        // colour+depth cleared here (the frame's single clear), colour writes
-        // masked so only depth lands.
+        const dim = mrtTarget.width;
         const preScene = new THREE.Scene();
         const preMeshes = [
           buildQuadMesh(THREE, rectL, prepassMat(), zL),
@@ -1212,13 +1305,33 @@ export function createSceneDepthBench({ THREE, log }) {
         for (const m of preMeshes) preScene.add(m);
         const prevTarget = renderer.getRenderTarget();
         const prevClearDepth = renderer.getClearDepth();
-        renderer.setRenderTarget(colorRt);
+        const prevMRT = renderer.getMRT();
+        renderer.setMRT(zeroAttrMrt); // bound across BOTH passes, exactly as production holds it
+        renderer.setRenderTarget(mrtTarget);
         renderer.setClearColor(0x000000, 0);
         renderer.setClearDepth(1);
         renderer.clear(true, true, true);
         await renderer.renderAsync(preScene, camera);
-        const afterPrepass0 = await renderer.readRenderTargetPixelsAsync(colorRt, 0, 0, dim, dim);
-        const afterPrepass = ArrayBuffer.isView(afterPrepass0) ? afterPrepass0 : new Uint8Array(afterPrepass0);
+        // THE FIX UNDER TEST: a colour-only reclear between the prepass and the
+        // world draw — depth is NOT touched (see vt-pan-viewer.js's own comment
+        // at this exact call for the full account of why colorWrite alone
+        // cannot be trusted here). Kept here so pass 2 experiences the EXACT
+        // production call sequence; its own before/after bytes are proven by
+        // the dedicated non-zero-clear probe below, NOT read back here — see
+        // that probe's own header for why a (0,0,0,0)-cleared readback can
+        // never show whether this line did anything at all.
+        renderer.clear(true, false, false);
+        // ⚠️ MRT STAYS BOUND THROUGH PASS 2 — TRIED UNBINDING IT HERE FIRST,
+        // THAT WAS THE WRONG FIX. `mrtTarget` genuinely has two real
+        // attachments regardless of whether any mrt() node is bound at all —
+        // the render pass descriptor is built from the TARGET's own texture
+        // list, not from `renderer.getMRT()`. So unbinding does not remove
+        // the "every attachment with a nonzero write mask needs a matching
+        // fragment output" requirement, it just removes the one mechanism
+        // (`colorNode` + `mrt()`) that can SATISFY it for attachment 1. The
+        // real fix was `equalMat` itself — see its own doc comment above for
+        // why it is `.colorNode` now, not `.fragmentNode`, and why that makes
+        // it MORE production-faithful, not a lab-only workaround.
         // Pass 2 — the "world" pass into the SAME target: NOTHING cleared;
         // autoClearDepth/autoClearColor both off so the pass loads what pass 1
         // left (production clears colour at frame start too — here pass 1's
@@ -1237,15 +1350,18 @@ export function createSceneDepthBench({ THREE, log }) {
         const prevAutoClearColor = renderer.autoClearColor;
         renderer.autoClearDepth = false; // ← load-bearing; see this scenario's header
         renderer.autoClearColor = false;
-        renderer.setRenderTarget(colorRt);
+        renderer.setRenderTarget(mrtTarget);
         await renderer.renderAsync(scene, camera);
         renderer.setRenderTarget(prevTarget);
+        renderer.setMRT(prevMRT);
         renderer.setClearDepth(prevClearDepth);
         renderer.autoClearDepth = prevAutoClearDepth;
         renderer.autoClearColor = prevAutoClearColor;
-        const buf0 = await renderer.readRenderTargetPixelsAsync(colorRt, 0, 0, dim, dim);
+        const buf0 = await renderer.readRenderTargetPixelsAsync(mrtTarget, 0, 0, dim, dim, 0, 0);
         for (const m of [...preMeshes, ...meshes]) m.geometry.dispose?.();
-        return { afterPrepass, buf: ArrayBuffer.isView(buf0) ? buf0 : new Uint8Array(buf0) };
+        return {
+          buf: ArrayBuffer.isView(buf0) ? buf0 : new Uint8Array(buf0),
+        };
       };
 
       // `sampleColor` is DIM-bound; sample the sharer at its own size directly.
@@ -1259,17 +1375,91 @@ export function createSceneDepthBench({ THREE, log }) {
         return { r: buf[i], g: buf[i + 1], b: buf[i + 2], a: buf[i + 3] };
       };
 
-      const { afterPrepass, buf } = await runBothPasses();
+      const { buf } = await runBothPasses();
+
+      // ⚠️ THE ORIGINAL "LEAK" FINDING WAS A MEASUREMENT ARTIFACT, NOT A REAL
+      // ONE — CORRECTED 2026-08-11, round four of this scenario's MRT saga,
+      // and this is the one worth reading before touching this block again.
+      //
+      // Every earlier version of this probe compared the readback against
+      // the RAW hex bytes of the clear colour (e.g. clearColor 0x112233 →
+      // expected [17,34,51]) and read back [1,4,8] instead — logged as proof
+      // `colorWrite:false` leaks the material's own payload through. It does
+      // not. `renderer.setClearColor(hex, alpha)` decodes its hex argument
+      // as sRGB before it ever reaches the buffer, REGARDLESS of this
+      // target's own `colorSpace: NoColorSpace` — [17,34,51] sRGB-decodes to
+      // EXACTLY [1,4,8] (confirmed by hand: standard sRGB→linear on each
+      // channel, ((c+0.055)/1.055)^2.4, matches to the integer). A SECOND,
+      // differently-coloured clear (0xc86432 → expected raw [200,100,50])
+      // read back [147,32,8] — ALSO an exact sRGB decode of ITS OWN hex, not
+      // of the previous clear or of anything a material wrote. Most
+      // decisively: a PLAIN clear with ZERO geometry ever rendered produces
+      // the identical [1,4,8,255] this "leak" was measured at — there is
+      // nothing left for `colorWrite:false` to have failed to mask.
+      //
+      // The correct test compares BEFORE vs AFTER the prepass draws, on the
+      // SAME buffer, through the SAME (whatever it is) colour-space
+      // transform — a delta, not a comparison against a hand-computed
+      // expectation. If they match, colorWrite:false masked correctly.
+      //
+      // This does NOT (yet) explain the greenhouse bug the author actually
+      // saw — that diagnosis needs to be redone; see Stage-1-Shade-Once.md
+      // and V4-Testament.md's own notes on this round for the honest
+      // "still open" status. The colour-only reclear stays wired in
+      // vt-pan-viewer.js regardless — it is cheap, unconditionally correct
+      // (a plain clear cannot leave stale data behind, whatever the actual
+      // bug turns out to be), and this round never found a reason to distrust
+      // it, only a reason to distrust WHY it was first believed necessary.
+      let noDrawBaseline = null;
+      let afterDrawSameBuffer = null;
+      {
+        const probeTarget = new THREE.RenderTarget(DIM, DIM, {
+          count: 2,
+          type: THREE.UnsignedByteType,
+          format: THREE.RGBAFormat,
+          minFilter: THREE.NearestFilter,
+          magFilter: THREE.NearestFilter,
+          colorSpace: THREE.NoColorSpace,
+          depthBuffer: true,
+        });
+        probeTarget.textures[0].name = 'output';
+        probeTarget.textures[1].name = 'attr';
+        const probeScene = new THREE.Scene();
+        probeScene.add(buildQuadMesh(THREE, rectL, prepassMat(), zL));
+        probeScene.add(buildQuadMesh(THREE, rectR, prepassMat(), zR));
+        const pPrevTarget = renderer.getRenderTarget();
+        const pPrevMRT = renderer.getMRT();
+        renderer.setMRT(zeroAttrMrt);
+        renderer.setRenderTarget(probeTarget);
+        renderer.setClearColor(0x112233, 1); // any non-zero, distinguishable colour
+        renderer.setClearDepth(1);
+        renderer.clear(true, true, true);
+        const baseline0 = await renderer.readRenderTargetPixelsAsync(probeTarget, 0, 0, DIM, DIM, 0, 0);
+        noDrawBaseline = sampleAt(ArrayBuffer.isView(baseline0) ? baseline0 : new Uint8Array(baseline0), DIM, 166, 500);
+        await renderer.renderAsync(probeScene, camera); // colorWrite:false — should change NOTHING
+        const afterDraw0 = await renderer.readRenderTargetPixelsAsync(probeTarget, 0, 0, DIM, DIM, 0, 0);
+        afterDrawSameBuffer = sampleAt(
+          ArrayBuffer.isView(afterDraw0) ? afterDraw0 : new Uint8Array(afterDraw0),
+          DIM,
+          166,
+          500
+        );
+        renderer.setRenderTarget(pPrevTarget);
+        renderer.setMRT(pPrevMRT);
+        renderer.setClearColor(0x000000, 0); // restore runBothPasses' own convention for any caller after this
+        probeTarget.dispose();
+      }
 
       checks.push(
-        evaluate('prepass-writes-no-colour', () => {
-          let touched = 0;
-          for (let i = 0; i < afterPrepass.length; i++) if (afterPrepass[i] !== 0) touched++;
+        evaluate('colorWrite-false-masks-attachment-0-on-a-real-mrt-target', () => {
+          const a = noDrawBaseline;
+          const b = afterDrawSameBuffer;
+          const matches = a.r === b.r && a.g === b.g && a.b === b.b && a.a === b.a;
           return {
-            ok: touched === 0,
-            measured: `${touched} non-zero bytes after the prepass`,
-            expected: '0',
-            note: 'colorWrite:false genuinely masks — the writer´s payload bytes must never land in the colour attachment',
+            ok: matches,
+            measured: `no-draw=${a.r},${a.g},${a.b},${a.a} vs after-colorWrite-false-draw=${b.r},${b.g},${b.b},${b.a}`,
+            expected: 'identical — a colorWrite:false draw must be indistinguishable from no draw at all',
+            note: 'CORRECTED 2026-08-11 — this used to assert the OPPOSITE, on a comparison against the wrong (non-sRGB-decoded) expected value; see this block´s own header',
           };
         })
       );
@@ -1331,7 +1521,7 @@ export function createSceneDepthBench({ THREE, log }) {
       // resources (RenderTarget#setSize calls dispose), so the prepass+EQUAL
       // pair must re-form cleanly from nothing.
       const DIM2 = 192;
-      colorRt.setSize(DIM2, DIM2);
+      mrtTarget.setSize(DIM2, DIM2);
       const { buf: buf2 } = await runBothPasses();
       checks.push(
         evaluate('survives-a-resize', () => {
@@ -1345,9 +1535,9 @@ export function createSceneDepthBench({ THREE, log }) {
           };
         })
       );
-      // Restore the bench's own target size for whatever scenario runs next,
-      // and refill the depth attachment at the restored size for the pin below.
-      colorRt.setSize(DIM, DIM);
+      // Restore this scenario's own target size, and refill the depth
+      // attachment at the restored size for the pin below.
+      mrtTarget.setSize(DIM, DIM);
       await runBothPasses();
 
       // THE PIN — cross-target sharing stays dead. A second target binding
@@ -1367,7 +1557,7 @@ export function createSceneDepthBench({ THREE, log }) {
           colorSpace: THREE.NoColorSpace,
           depthBuffer: true,
         });
-        sharer.depthTexture = colorRt.depthTexture;
+        sharer.depthTexture = mrtTarget.depthTexture;
         const probeScene = new THREE.Scene();
         const probeMat = equalMat(255, 255, 0);
         probeMat.depthFunc = THREE.LessEqualDepth;
@@ -1421,6 +1611,11 @@ export function createSceneDepthBench({ THREE, log }) {
       paint(canvas, buf, 'single-target prepass+EQUAL (red=rank0, green=rank2)');
       artifacts.push(await saveCanvasPng(ctx.runId, 'single-target-prepass-equal.png', canvas));
 
+      // This scenario's OWN target, built fresh every run — unlike `colorRt`
+      // (owned by `ensureRenderer()`, persists for the bench's lifetime), this
+      // one must dispose itself or a repeated run leaks VRAM for the session.
+      mrtTarget.dispose();
+
       return {
         checks,
         calibration,
@@ -1464,7 +1659,7 @@ export function createSceneDepthBench({ THREE, log }) {
       'gpu-query-query-isEqual-matches-real-rank-order',
       'gpu-query-above-isAbove-matches-real-rank-order',
       'gpu-query-above-isEqual-matches-real-rank-order',
-      'prepass-writes-no-colour',
+      'colorWrite-false-masks-attachment-0-on-a-real-mrt-target',
       'EQUAL-exact-left-exclusive-region-is-rank0',
       'EQUAL-exact-overlap-region-is-rank2-not-rank0',
       'EQUAL-exact-right-exclusive-region-is-rank2',

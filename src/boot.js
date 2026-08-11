@@ -144,6 +144,9 @@ import {
   setVtPanViewerDebugFirstRenderProbe,
   setVtPanViewerDebugForceMaskNodeOff,
   setVtPanViewerDebugForceOpaqueBlendOff,
+  setVtPanViewerEarlyZComposition,
+  getVtPanViewerEarlyZComposition,
+  getVtPanViewerSceneSettle,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
 } from './vt/index.js';
@@ -519,6 +522,17 @@ MapShine.armWindProbe = runInteractiveVtPanViewerWindProbe;
 MapShine.setDebugFirstRenderProbe = setVtPanViewerDebugFirstRenderProbe;
 MapShine.setDebugForceMaskNodeOff = setVtPanViewerDebugForceMaskNodeOff;
 MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
+// STAGE 1's revert flag — "shade every pixel once"
+// (docs/planning/Stage-1-Shade-Once.md). Default OFF until its pixel-diff and
+// bench gates pass; kept afterwards as the permanent revert (Testament Law 5).
+MapShine.setEarlyZComposition = setVtPanViewerEarlyZComposition;
+MapShine.getEarlyZComposition = getVtPanViewerEarlyZComposition;
+// SCENE SETTLE (2026-08-11, author: the 12k² upper floor "takes an extremely
+// long time to appear which causes confusion for you and me... we currently
+// don't correctly track when the system is actually finished loading"). ONE
+// call, answered from real outstanding-work counters instead of a stopwatch,
+// and it names what it is still waiting for. See vt/settle.js.
+MapShine.getSceneSettle = getVtPanViewerSceneSettle;
 // ⚠️🔬 THE CROSS-FLOOR MASK STACK PROBE (2026-08-02, author-commissioned:
 // *"I could click in one place and it'll probe the values for all floors at
 // once... the exact colour values for every point, for every floor and for
@@ -620,6 +634,14 @@ function install() {
   // `fusedWith` honestly: geometry.world/present.composite currently share ONE
   // real implementation, and this report says so rather than implying three
   // independent passes exist.
+  // SCENE SETTLE — "has the map finished appearing, and if not, what is it
+  // still waiting for?" Registered as a report so the author can read it from
+  // the debug panel during a slow cold load instead of guessing at a loading
+  // screen that clears early, and so every capture script can poll ONE thing
+  // rather than sleeping a guessed number of seconds. See vt/settle.js.
+  MapShine.debug.registerReport('scene-settled', 'Scene settled? (real load completion)', () =>
+    getVtPanViewerSceneSettle()
+  );
   MapShine.debug.registerReport('pass-graph-health', 'Pass graph health', () => {
     const graph = validatePassGraph(PASSES);
     const seamChecks = PASSES.filter((p) => p.status === 'seam').map((p) => {

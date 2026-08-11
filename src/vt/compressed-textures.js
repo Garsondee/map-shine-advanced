@@ -165,7 +165,13 @@ export function requestCoarseAlphaGrid(src) {
 
 /** Snapshot of the client's counters for the flight recorder. */
 export function getCompressedTextureStats() {
-  return { ..._stats, unavailable: _unavailable, workerCreated: !!_worker };
+  // `pending` is the DIRECT count of requests the worker has not answered yet
+  // — never derived by subtracting completions from `requests`, which would
+  // double-count a cached hit (it increments both `cached` and its format
+  // counter) and quietly drift negative. The scene-settle detector
+  // (`vt/settle.js`) reads exactly this: a 12,000² BC compress is the longest
+  // pole in a cold load, and "is one still running" must be a fact, not a sum.
+  return { ..._stats, pending: _pending.size, unavailable: _unavailable, workerCreated: !!_worker };
 }
 
 /** Tear down the worker (viewer dispose). Best-effort. */

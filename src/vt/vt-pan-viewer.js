@@ -64,7 +64,8 @@ import { mipChainByteLength } from './block-compress.js';
 // back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
 // the raw texture. Intra-zone.
-import { requestCompressedTexture, requestCoarseAlphaGrid } from './compressed-textures.js';
+import { requestCompressedTexture, requestCoarseAlphaGrid, getCompressedTextureStats } from './compressed-textures.js';
+import { createSettleTracker } from './settle.js';
 import { buildCoverageCellMask, buildCoverageIndices, COVERAGE_MESH_CELLS } from './coverage-mesh.js';
 import {
   acquirePages,
@@ -1616,7 +1617,24 @@ export async function startVtPanViewer({
     // `describeSceneColorMrt()` keeps attachment 0 IDENTICAL to plain
     // `describeSceneColor()` (still used unchanged below); attachment 1 is
     // B0-1 §2.1's RGBA8/Nearest/NoColorSpace, named 'attr' for `MRTNode`.
-    const describeSceneColorMrt = () => describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
+    // STAGE 1 — this target gains its OWN real depth attachment (see
+    // `earlyZComposition`). Allocated UNCONDITIONALLY, in both flag states,
+    // for one reason worth stating: it makes the flag live-flippable, which
+    // is what lets the pixel-diff gate capture flag-off and flag-on in ONE
+    // session at one camera position — the only way that diff proves identity
+    // rather than approximately-matching two different sessions.
+    //
+    // Costing it honestly: one screen-sized depth32float ≈ 29 MB at 3840×1906,
+    // against 51% measured headroom under the 2,500 MB device-loss wall
+    // (Moonshot.md §3). With the flag OFF nothing tests or writes it — every
+    // world material still runs `depthTest:false`/`depthWrite:false` — so the
+    // attachment cannot affect a single pixel; depth state is orthogonal to
+    // colour output when both are off.
+    const describeSceneColorMrt = () => ({
+      ...describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH }),
+      depthTexture: true,
+      depthTextureType: THREE.FloatType,
+    });
     const sceneColor = allocator.create('scene.color', describeSceneColorMrt());
     // `buf:scene.depth` (docs/planning/Depth-Buffer.md) — finally real, not
     // just reserved (`graph/passes.js:185` has named `geometry.world` as its
@@ -4440,10 +4458,65 @@ export async function startVtPanViewer({
       // targets right after this pass — save/set/restore.
       const previousMRT = renderer.getMRT();
       renderer.setMRT(sceneAttrZeroMrt);
-      profiler?.begin(Z.geomWorld);
-      renderer.setRenderTarget(sceneColor);
-      renderer.render(scene, camera);
-      profiler?.end(Z.geomWorld);
+      // STAGE 1 (see `earlyZComposition`'s own declaration for the full
+      // account). The prepass carries this target's ONLY clear — colour AND
+      // depth — and the world draw then loads both, which is why both
+      // autoClear halves must be off across it (proven load-bearing in the
+      // lab: with either left on, the world draw wipes what it needs to read).
+      if (earlyZComposition) {
+        const prevAutoClearDepth = renderer.autoClearDepth;
+        const prevAutoClearColor = renderer.autoClearColor;
+        const prevClearDepth = renderer.getClearDepth();
+        profiler?.begin(Z.geomEarlyZPrepass);
+        renderer.setRenderTarget(sceneColor);
+        renderer.setClearDepth(1); // far plane — every real rank sits nearer, so an unwritten texel loses to anything
+        renderer.clear(true, true, true);
+        renderer.render(depthPrepassScene, depthCamera);
+        // ⚠️ A COLOUR-ONLY RECLEAR, KEPT AS CHEAP INSURANCE — NOT A CONFIRMED
+        // MECHANISM (2026-08-11, corrected same day). The live bug this was
+        // first written for: a translucent roof (a greenhouse) rendering
+        // black. The FIRST diagnosis — `buildSceneDepthWriterMaterial`'s
+        // `colorWrite:false` failing to mask attachment 0 on a real
+        // two-attachment MRT target — turned out to be a MEASUREMENT
+        // ARTIFACT, not a real finding: the lab test that "confirmed" it
+        // compared a GPU readback against the RAW hex bytes of a clear
+        // colour, not against what `renderer.setClearColor` actually stores
+        // (it sRGB-decodes its hex argument regardless of the target's own
+        // declared colour space) — the "leaked" bytes were an exact sRGB
+        // decode of the clear colour itself, reproduced identically by a
+        // plain clear with ZERO geometry ever drawn. A corrected, delta-based
+        // version of that same lab scenario (`bench-scene-depth.js`,
+        // `single-target-prepass-equal`) now shows `colorWrite:false`
+        // masking attachment 0 perfectly: a draw and a no-draw are
+        // byte-identical. See that scenario's own "ROUND FOUR" header for
+        // the full account.
+        //
+        // So the greenhouse bug's REAL cause is still open — this reclear is
+        // not proven to fix it, and is not proven irrelevant to it either.
+        // It stays here because it is unconditionally cheap and can never
+        // make anything WORSE (a plain colour clear cannot leave stale data
+        // behind, whatever the real mechanism turns out to be), not because
+        // a mechanism justifies it. If the greenhouse bug reappears, or
+        // turns out to have a different root cause entirely, look there
+        // first rather than trusting this comment's old story.
+        renderer.clear(true, false, false);
+        profiler?.end(Z.geomEarlyZPrepass);
+        renderer.autoClearDepth = false;
+        renderer.autoClearColor = false;
+        profiler?.begin(Z.geomWorld);
+        renderer.render(scene, depthCamera);
+        profiler?.end(Z.geomWorld);
+        // Restored BEFORE the door draw below, which does its own
+        // autoClearColor guard and must find the renderer as it always was.
+        renderer.autoClearDepth = prevAutoClearDepth;
+        renderer.autoClearColor = prevAutoClearColor;
+        renderer.setClearDepth(prevClearDepth);
+      } else {
+        profiler?.begin(Z.geomWorld);
+        renderer.setRenderTarget(sceneColor);
+        renderer.render(scene, camera);
+        profiler?.end(Z.geomWorld);
+      }
       // Door leaves composite over the map INTO the same target (not cleared),
       // so the light.accumulate pass lights them like the tiles beneath them.
       // Class-B overlay, same safe zero-default, no mrtNode override needed.
@@ -9164,6 +9237,59 @@ export async function startVtPanViewer({
     let debugProbeCamera = null;
     let debugProbeTarget = null;
 
+    /**
+     * STAGE 1 — "SHADE EVERY PIXEL ONCE" (docs/planning/Stage-1-Shade-Once.md).
+     * ONE revert flag, flipping the whole composition mode as a unit (Law 5:
+     * every structural change ships behind a revert flag). **Default ON as of
+     * S1.7, 2026-08-11** — the diff gate (S1.5: byte-identical, non-vacuous,
+     * First Floor) and the bench gate (S1.6: `geometry.worldDraw` GPU
+     * 2.897→1.872ms, absolute ≤8ms threshold met — see the Testament's own
+     * S1.6 entry for the honest accounting of why the RELATIVE win is smaller
+     * than the stale historical figure) both cleared, satisfying Law 3. The
+     * flag remains wired as the permanent revert, unchanged (Law 5) — flip it
+     * back with `MapShine.setEarlyZComposition(false)` if a live regression
+     * ever needs today's pixels back immediately.
+     *
+     * ON, the frame's world stage becomes THREE renders instead of one:
+     *   1. `runSceneDepthPass` — UNCHANGED. Still writes `buf:scene.depth`'s
+     *      payload colour (floor index/flags) and its own private depth, so
+     *      every existing `querySceneDepth` consumer (specular, window light,
+     *      depth of field, point lights, lightning) keeps sampling the exact
+     *      texture it samples today. NOTHING migrates.
+     *   2. The PREPASS — the same proxy scene, colour-masked, into
+     *      `scene.color`, giving THAT target's own depth attachment the same
+     *      per-pixel winner. (A second target cannot simply reference
+     *      scene.depth's texture: silently dead on this backend, device-proven
+     *      and pinned — bench-scene-depth.js 'single-target-prepass-equal'.)
+     *   3. The world draw — nothing cleared, rendered through `depthCamera`
+     *      (never a mutated `camera`, which other passes share) so every
+     *      vertex takes the SAME transform the prepass just used. Certified
+     *      fully-opaque tiles draw `EqualDepth`, unblended, discard-free: the
+     *      GPU's own early-Z then rejects occluded fragments BEFORE the
+     *      fragment shader runs, which `maskNode`'s texture-lookup discard
+     *      structurally cannot do (a discard anywhere disables early-Z for the
+     *      whole shader).
+     *
+     * OFF, every line below is inert and the frame is byte-for-byte today's.
+     */
+    /**
+     * SCENE SETTLE (vt/settle.js) — "is everything actually on screen yet?"
+     * Sampled on a fixed frame cadence rather than per frame: the counters it
+     * reads allocate small objects, and this must never become a cost in the
+     * steady-state loop it is measuring. Every ~10 frames is ~6 Hz at 60fps —
+     * far finer than the multi-second stages it is watching, and continuous
+     * (so a work spike between two external polls is still seen).
+     */
+    const settleTracker = createSettleTracker();
+    let settleFrameCount = 0;
+    const SETTLE_SAMPLE_EVERY_FRAMES = 10;
+
+    let earlyZComposition = true;
+    /** Prepass twins of `depthScene`'s proxies — same geometry, colour masked.
+     * Rebuilt with them, every residency pass, never per frame. */
+    const depthPrepassScene = new THREE.Scene();
+    let depthPrepassEntries = [];
+
     // PER-PASS GPU TIMING (docs/planning/Performance.md). Constructed here rather
     // than in boot.js because it needs the `renderer` this closure owns; the
     // profiler it feeds is injected from boot, so ownership of the DATA still
@@ -9207,6 +9333,7 @@ export async function startVtPanViewer({
       geomDepthRenderCall: profiler?.indexOf('geometry.depthRenderCall') ?? -1,
       geomDepthRestore: profiler?.indexOf('geometry.depthRestore') ?? -1,
       geomDebugFirstRenderProbe: profiler?.indexOf('geometry.debugFirstRenderProbe') ?? -1,
+      geomEarlyZPrepass: profiler?.indexOf('geometry.earlyZPrepass') ?? -1,
       lightAmbient: profiler?.indexOf('light.ambient') ?? -1,
       lightSunBake: profiler?.indexOf('light.sunShadowBake') ?? -1,
       lightWaterBake: profiler?.indexOf('light.waterBodyBake') ?? -1,
@@ -9483,6 +9610,11 @@ export async function startVtPanViewer({
 
       frameTimes.push(performance.now() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
+      // SCENE SETTLE — counted every frame (so "is the renderer actually
+      // drawing" is answerable), sampled on a cadence (so reading the counters
+      // is not a per-frame cost). See `settleTracker`'s own declaration.
+      settleFrameCount++;
+      if (settleFrameCount % SETTLE_SAMPLE_EVERY_FRAMES === 0) sampleSceneSettle(t0);
       // Closes the profiler's frame AFTER the pass plan, so a frame's zones are
       // complete before it is counted. Called with no argument on purpose: the
       // profiler reads its own clock in diag/, where `time/one-clock` permits it.
@@ -9816,12 +9948,218 @@ export async function startVtPanViewer({
      * @param {Array<object>} items - `depthAuthority.rebuild`'s own return
      *   (already ranked; this function only READS ranks, never re-derives them).
      */
+    /**
+     * STAGE 1 — is this tile's art CERTIFIED fully opaque, so an unblended
+     * `EqualDepth` draw is byte-identical to today's blended one?
+     *
+     * `alwaysOpaque` (the depth writer's own early-Z input) is NOT the same
+     * question and must never be reused here: it asks "is every texel at or
+     * above the item's `alphaThreshold`" (0.75 by default), which is exactly
+     * right for "does this occlude" and exactly wrong for "does blending
+     * change the result". An item whose minimum alpha is 0.8 occludes, and
+     * blending it still darkens what is beneath — only alpha ≡ 1 makes
+     * `src·a + dst·(1−a)` equal to a plain `src` write. Hence `min === 255`,
+     * the strict form, read off the REAL decoded source alpha.
+     *
+     * Four exclusions, each with a real failure behind it:
+     *  - a vegetation-material tile has a live `positionNode` (wind sway), so
+     *    its colour vertices and its depth proxy could disagree about where a
+     *    fragment IS; the codebase already excludes these from the rank
+     *    query (`uExpectedDepth` is null for them), so that same null is the
+     *    signal here rather than a second, driftable test.
+     *  - an occlusion-responsive item (a roof that fades as a token walks
+     *    under it) multiplies its OUTPUT alpha per frame. Fade is a render
+     *    convenience, not solidity — and a faded draw needs blending.
+     *  - the item's own authored alpha below 1, same arithmetic as above.
+     *  - no `alphaStats` at all (the raw-decode fallback): opacity unknown,
+     *    so fail open to today's path.
+     */
+    function isEarlyZInteriorTile(t, alphaStats) {
+      if (!(alphaStats && alphaStats.min === 255)) return false;
+      if (!t?.uExpectedDepth) return false; // vegetation material — see above
+      const w = t.appearance?.uOcclusionWeights?.value;
+      if (w && (w.x !== 0 || w.y !== 0 || w.z !== 0 || w.w !== 0)) return false;
+      const a = t.appearance?.uAlpha?.value;
+      return !(Number.isFinite(a) && a < 1);
+    }
+
+    /**
+     * STAGE 1 — put ONE tile's colour material into the composition state the
+     * current flag calls for, and record which state it is in so the next
+     * residency pass can skip an unchanged material. Every transition below
+     * changes the compiled pipeline (blend state, depth state, or the shader
+     * graph itself via `maskNode`), so `needsUpdate` is set — which is
+     * precisely why this is guarded by a stored state tag and runs per
+     * RESIDENCY PASS, never per frame.
+     */
+    function applyEarlyZTileState(t, alphaStats, z) {
+      const mat = t?.material;
+      if (!mat || !t.mesh) return;
+      const want = !earlyZComposition ? 'legacy' : isEarlyZInteriorTile(t, alphaStats) ? 'interior' : 'passthrough';
+      // The mesh's Z is refreshed every pass regardless of state: rank can
+      // change (a floor switch, a new item) without the STATE changing, and a
+      // stale Z is exactly what would make an interior's EqualDepth miss.
+      t.mesh.position.z = earlyZComposition ? z : 0;
+      if (t.earlyZState === want) return;
+      t.earlyZState = want;
+      if (want === 'legacy') {
+        mat.transparent = true;
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.depthFunc = THREE.LessEqualDepth;
+        if (t.legacyMaskNode !== undefined) mat.maskNode = t.legacyMaskNode;
+      } else {
+        // Stash the rank-lookup discard ONCE, so flipping the flag back can
+        // restore the exact node rather than rebuilding the material.
+        if (t.legacyMaskNode === undefined) t.legacyMaskNode = mat.maskNode ?? null;
+        mat.depthWrite = false; // only the prepass writes depth — see the sweep below
+        if (want === 'interior') {
+          // THE DISCARD GOES AWAY HERE, and ONLY here: its job (reject a
+          // fragment something higher-ranked already covers) is now the
+          // hardware depth test's, done before the shader launches instead
+          // of inside it.
+          mat.maskNode = null;
+          mat.transparent = false;
+          mat.depthTest = true;
+          mat.depthFunc = THREE.EqualDepth;
+        } else {
+          // ⚠️ FOUND LIVE, 2026-08-11 (a greenhouse roof rendering wrong —
+          // the actual bug report; a colorWrite/MRT theory chased earlier
+          // the same day turned out to be a measurement artifact, see
+          // vt-pan-viewer.js's own reclear comment a few hundred lines up).
+          // A passthrough tile gets NO hardware depth-test replacement
+          // (`depthTest` stays false, right below) — so the rank-lookup
+          // discard is not a redundant optimisation for it the way it is
+          // for 'interior', it is the ONLY thing that ever rejected a
+          // fragment something higher-ranked already covers. The code here
+          // used to null it anyway (copied from the interior branch above
+          // without re-deriving whether the reasoning still applied), while
+          // its OWN comment claimed "keep today's exact alpha math and
+          // painter order" — directly contradicted by dropping the one
+          // mechanism that painter-order occlusion actually depended on.
+          // `want === 'legacy'` above already restores this same stashed
+          // node for the exact same reason; passthrough needs it for a
+          // reason that is if anything MORE direct, since legacy has no
+          // depth test to fall back on at all, ever.
+          mat.maskNode = t.legacyMaskNode;
+          mat.transparent = true;
+          mat.depthTest = false;
+          mat.depthFunc = THREE.LessEqualDepth;
+        }
+      }
+      mat.needsUpdate = true;
+    }
+
+    /**
+     * STAGE 1 — NOTHING IN THE WORLD DRAW WRITES DEPTH; only the prepass does.
+     *
+     * `NodeMaterial` defaults `depthWrite` to true, and this renderer's other
+     * world members (tokens, doors, water's tier-0 surface, vegetation
+     * billboards, Case-2 canopy overlays) have never needed to care, because
+     * until now `scene.color` had no depth attachment for them to write into.
+     * It does under this flag — and a member drawn at z=0 through this pass's
+     * camera would stamp its own depth across everything it covers, punching
+     * `EqualDepth`-failing holes into any interior tile drawn after it.
+     *
+     * Swept generically over the live scene rather than fixed at each
+     * member's own construction site: a hand-maintained list of "materials
+     * that must not write depth" is precisely the shape this project has been
+     * bitten by six times (`EFFECT_REAPPLIERS`), and a member added next year
+     * would silently reintroduce the holes. The traversal is per residency
+     * pass, not per frame, and `needsUpdate` fires only on a real change.
+     */
+    function sweepWorldSceneDepthWrites() {
+      if (!earlyZComposition) return;
+      scene.traverse((obj) => {
+        const m = obj?.material;
+        if (!m) return;
+        const list = Array.isArray(m) ? m : [m];
+        for (const one of list) {
+          if (one && one.depthWrite !== false) {
+            one.depthWrite = false;
+            one.needsUpdate = true;
+          }
+        }
+      });
+    }
+
+    /**
+     * STAGE 1 — the colour-masked twin of one depth proxy, for the prepass
+     * that gives `scene.color`'s own depth attachment the same answer
+     * `buf:scene.depth` just computed. Takes the SAME argument object the
+     * real proxy was built from, so the two can never drift into describing
+     * different geometry, alpha thresholds or animation; only `colorWrite`
+     * differs. Shares the item's geometry, exactly as the proxy does.
+     */
+    function addDepthPrepassTwin(writerArgs, geometry, z) {
+      if (!earlyZComposition) return;
+      const material = buildSceneDepthWriterMaterial({ ...writerArgs, colorWrite: false });
+      const mesh = buildSceneDepthProxyMesh({ THREE, geometry, material, z });
+      depthPrepassScene.add(mesh);
+      depthPrepassEntries.push({ mesh, material });
+    }
+
+    /**
+     * The live half of SCENE SETTLE (vt/settle.js has the rule and the why).
+     * Reads the REAL outstanding-work counters from the subsystems that own
+     * them — never a proxy for them, and never a timer.
+     *
+     * ONE HONEST GAP, named rather than faked: `maskPagesPending` has no
+     * accessor on the page cache today, so it is not reported and the settle
+     * decision does not include it. Mask pages are coarse (256²) and stream
+     * far faster than the whole-image chain that dominates a cold load, so
+     * this is a real but small hole — recorded here so a future reader knows
+     * it is absent by omission, not by a claim that it is always zero
+     * (`feedback_instruments_must_not_lie`).
+     */
+    function collectSettleWork() {
+      let itemsLoading = 0;
+      let vegetationOverlaysLoading = 0;
+      for (const state of itemStates.values()) {
+        if (state?.wholeImage?.status === 'loading') itemsLoading++;
+        const overlays = state?.vegetationOverlays;
+        if (overlays) {
+          for (const key of Object.keys(overlays)) {
+            if (overlays[key]?.status === 'loading') vegetationOverlaysLoading++;
+          }
+        }
+      }
+      const bc = getCompressedTextureStats();
+      const dec = getDecodeStats();
+      const sem = dec?.semaphore ?? null;
+      return {
+        itemsLoading,
+        vegetationOverlaysLoading,
+        bcCompressOutstanding: bc?.pending ?? 0,
+        decodesInFlight: sem?.active ?? sem?.inFlight ?? 0,
+        decodeQueueDepth: sem?.queued ?? sem?.waiting ?? 0,
+        residencyInFlight,
+        residencyDirty,
+      };
+    }
+
+    /**
+     * Take one settle sample. TIME IS AN INPUT — the frame's own clock read is
+     * passed in, never sampled privately here (`time/one-clock`): a second
+     * clock in the render loop is how two parts of one frame come to disagree
+     * about when they happened.
+     * @param {number} nowMs - the current frame's own start time.
+     */
+    function sampleSceneSettle(nowMs) {
+      return settleTracker.sample(collectSettleWork(), nowMs, settleFrameCount);
+    }
+
     function rebuildSceneDepthProxies(items) {
       for (const entry of depthProxyEntries) {
         depthScene.remove(entry.mesh);
         entry.material.dispose();
       }
       depthProxyEntries = [];
+      for (const entry of depthPrepassEntries) {
+        depthPrepassScene.remove(entry.mesh);
+        entry.material.dispose();
+      }
+      depthPrepassEntries = [];
       const maxRank = depthAuthority.maxRank;
       const sceneDoc = globalThis.canvas?.scene ?? null;
       const viewedFloorIndex = view?.floorIndex ?? 0;
@@ -9882,17 +10220,22 @@ export async function startVtPanViewer({
               return positionLocal.add(vec3(displace.x, displace.y, float(0)));
             })();
           }
-          const material = buildSceneDepthWriterMaterial({
+          const writerArgs = {
             THREE,
             tex: overlay.tex,
             alphaThreshold: 0.75,
             floorIndex,
             flags: 0,
             positionNode,
-          });
+          };
+          const material = buildSceneDepthWriterMaterial(writerArgs);
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: overlay.geometry, material, z });
           depthScene.add(mesh);
           depthProxyEntries.push({ mesh, material });
+          // The canopy's own alpha-tested silhouette must occlude in the
+          // prepass exactly as it already does through `maskNode` today —
+          // otherwise floor interiors would draw THROUGH solid canopy.
+          addDepthPrepassTwin(writerArgs, overlay.geometry, z);
           continue;
         }
         const state = itemStates.get(item.id);
@@ -9947,20 +10290,31 @@ export async function startVtPanViewer({
             t.material.transparent = false;
             t.material.needsUpdate = true;
           }
+          // STAGE 1 — composition state for THIS tile, before the visibility
+          // check below: an invisible tile must already be in the right state
+          // for the frame it becomes visible again, the same reason
+          // `uExpectedDepth` above is refreshed unconditionally.
+          applyEarlyZTileState(t, alphaStats, z);
           if (!t.mesh?.visible) continue;
-          const material = buildSceneDepthWriterMaterial({
+          const writerArgs = {
             THREE,
             tex: t.tex,
             alphaThreshold: item.alphaThreshold ?? 0.75,
             floorIndex,
             flags,
             alwaysOpaque,
-          });
+          };
+          const material = buildSceneDepthWriterMaterial(writerArgs);
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
           depthScene.add(mesh);
           depthProxyEntries.push({ mesh, material });
+          addDepthPrepassTwin(writerArgs, t.geometry, z);
         }
       }
+      // Last, after every tile material above has settled into its own state:
+      // nothing in the world draw may write depth (see this function's own
+      // header for the holes that would otherwise appear under tokens).
+      sweepWorldSceneDepthWrites();
     }
 
     async function updateResidencyUnguarded() {
@@ -10660,6 +11014,13 @@ export async function startVtPanViewer({
      */
     async function setFloorIndex(floorIndex) {
       if (!view || view.floorIndex === floorIndex) return false;
+      // A floor switch starts a NEW settle, not a continued one (settle.js's
+      // own test suite documents this contract) — without this reset, the
+      // tracker kept reporting the OLD floor's already-quiet state, so
+      // waitForSceneSettled resolved instantly on the new floor while it was
+      // still loading (live-caught: quiet duration reused verbatim across a
+      // floor switch in a pixel-diff run against the bench world).
+      settleTracker.reset();
       view = { ...view, floorIndex };
       // WIND REBAKE ON FLOOR SWITCH (2026-07-23, live author report: on a
       // real two-floor map, the floor BELOW kept reading the floor ABOVE's
@@ -12004,6 +12365,73 @@ export async function startVtPanViewer({
        * `uExpectedDepth` itself is kept live. */
       setDebugForceOpaqueBlendOff(on) {
         debugForceOpaqueBlendOff = !!on;
+      },
+      /**
+       * STAGE 1's revert flag (see `earlyZComposition`'s own declaration).
+       * Takes effect on the NEXT residency pass, which re-states every tile
+       * material and rebuilds the prepass — so a caller that wants it applied
+       * immediately should nudge the view (any pan/zoom schedules one), or
+       * simply wait for the pass a camera move already triggers.
+       */
+      /**
+       * SCENE SETTLE — the one call that answers "has this map finished
+       * appearing?" with a reason attached. Samples fresh on every call (so a
+       * caller polling slower than the render cadence still gets current
+       * truth) and returns `vt/settle.js`'s verdict: `settled`, how long work
+       * has been quiet, and — when it has not settled — exactly what it is
+       * still waiting for.
+       */
+      getSceneSettle() {
+        // The LAST sample, never a fresh one: sampling here would mean reading
+        // a clock outside the render loop (`time/one-clock`), and the loop
+        // already samples on its own cadence — at 60fps the answer is at most
+        // ~160ms old, far finer than the multi-second stages being watched.
+        // A renderer that has stopped returns its last sample unchanged, which
+        // correctly reads as "not settled" rather than inventing progress.
+        return (
+          settleTracker.read() ?? {
+            settled: false,
+            quietForMs: 0,
+            blockers: [],
+            totalOutstanding: 0,
+            waitingFor: ['the first settle sample (no frame has rendered yet)'],
+            sampledAtMs: null,
+          }
+        );
+      },
+      setEarlyZComposition(on) {
+        const next = !!on;
+        if (next === earlyZComposition) return { earlyZComposition, changed: false };
+        earlyZComposition = next;
+        scheduleResidencyUpdate();
+        return { earlyZComposition, changed: true };
+      },
+      /**
+       * The flag AND the evidence that it is actually doing something.
+       *
+       * A pixel-diff of a flag that changed nothing is byte-identical for the
+       * most boring possible reason, and would read exactly like a triumphant
+       * pass (`feedback_instruments_must_not_lie`; the sibling trap
+       * `feedback_count_silent_preconditions` — this path has four
+       * preconditions, any one of which silently yields "no interiors"). So
+       * the reader gets the counts, never just the boolean: an `interior`
+       * count of 0 means the gate proved nothing, whatever the diff says.
+       */
+      getEarlyZComposition() {
+        const tiles = { interior: 0, passthrough: 0, legacy: 0, untagged: 0 };
+        for (const state of itemStates.values()) {
+          for (const t of state.wholeImage?.tiles ?? []) {
+            const k = t.earlyZState;
+            if (k === 'interior' || k === 'passthrough' || k === 'legacy') tiles[k]++;
+            else tiles.untagged++;
+          }
+        }
+        return {
+          earlyZComposition,
+          tiles,
+          prepassMeshes: depthPrepassEntries.length,
+          depthProxies: depthProxyEntries.length,
+        };
       },
       /**
        * Perf profile: arm/disarm PER-PASS GPU timing (diag/gpu-zone-timer.js).
@@ -14404,6 +14832,38 @@ export function setVtPanViewerDebugForceOpaqueBlendOff(on) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   _active.setDebugForceOpaqueBlendOff(on);
   return { armed: !!on };
+}
+
+/**
+ * STAGE 1's revert flag — "shade every pixel once"
+ * (docs/planning/Stage-1-Shade-Once.md). Default OFF; ON, certified
+ * fully-opaque tiles draw against a real hardware depth test instead of a
+ * shader-side discard. See `earlyZComposition` inside `startVtPanViewer` for
+ * the full mechanism. Call as `MapShine.setEarlyZComposition(true)`.
+ */
+export function setVtPanViewerEarlyZComposition(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setEarlyZComposition(on);
+}
+/**
+ * SCENE SETTLE (vt/settle.js) — "has the map finished appearing?", with the
+ * blockers named when it has not. Built for the 12,000² cold load, where the
+ * honest answer can be a minute away and every previous method was a guessed
+ * `sleep`. Call as `MapShine.getSceneSettle()`.
+ */
+export function getVtPanViewerSceneSettle() {
+  if (!_active) return { skipped: true, reason: 'viewer not started', settled: false };
+  return _active.getSceneSettle();
+}
+
+export function getVtPanViewerEarlyZComposition() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  // Returned FLAT, never re-wrapped in another `{ earlyZComposition: … }`:
+  // the inner call already returns that key alongside the non-vacuity counts,
+  // and double-nesting it hid `tiles`/`prepassMeshes` from a caller reading
+  // `state.tiles` — which made a real, engaged, byte-identical run report
+  // itself as VACUOUS on 2026-08-10. The instrument was wrong, not the engine.
+  return _active.getEarlyZComposition();
 }
 
 /**

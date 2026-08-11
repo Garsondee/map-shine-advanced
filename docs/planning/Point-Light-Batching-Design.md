@@ -1,216 +1,301 @@
-# Point-Light Batching Design — Stage 2, full scope
+# Point-Light Batching — Stage 2's Mechanism of Record
 
-Status: **DRAFT, awaiting the author's sign-off before implementation starts.** Written by
-Claude Sonnet 5, 2026-08-11, per the author's direct choice ("Full scope, design note first")
-after the narrower "swap the update mechanism" framing turned out to undersell the real
-engineering surface. See `docs/holy/V4-Testament.md`'s Stage 2 section and petition P-004 for
-the goal/gate this serves; this document does not re-litigate either.
+Status: **PLAN OF RECORD — countersigned by Fable (claude-fable-5), 2026-08-11.** Supersedes the
+same-day DRAFT of this file (whose open questions are now decided) and the Testament's original
+"storage-buffer soup" sketch (struck — see P-004's resolution in `docs/holy/V4-Testament.md`).
+Executors: read this WHOLE file before touching any S2 task. Worker-class models execute and
+mark only; ANY surprise — a check that won't pass, a limit hit, a shape that doesn't match this
+document — is a petition, never an improvisation.
 
-Every claim below is grounded in a direct read of the real production files, not inference —
-file:line citations throughout so this is checkable, not just trusted.
+Every factual claim cites the real file it was read from. If this document and the code ever
+disagree, the code is telling you something changed — stop and petition; do not silently adapt.
 
-## 1. What's proven so far, and what it doesn't cover
+---
 
-`tools/shader-lab/bench-point-lights.js` proved the CORE mechanism: many differently-shaped,
-differently-positioned, differently-coloured lights merged into ONE ungrouped mesh sharing ONE
-compiled material draw at **1 real draw call instead of N**, byte-identical to N separate draws,
-order-independent under MAX blending. That bench's per-light data was two numbers (origin,
-radius) plus a per-vertex baked colour.
+## §0 The verdict in one screen
 
-Real point lights carry far more. Reading `point-light-pool.js#createLightEntry` and
-`update()`, plus `point-light-illumination.js#buildPointLightIlluminationMaterial` and
-`point-light-coloration.js#buildPointLightColorationMaterial` in full, every light currently
-gets:
+**Build:** merge all point lights that share one compiled material into ONE non-indexed,
+ungrouped mesh per (bucket × channel), per-light values carried as **packed per-vertex
+attributes**, drawn with the SAME shading graph production already uses — extracted once into a
+shared core so the batched and per-light materials cannot drift. One draw call per bucket per
+channel instead of two per light.
 
-- **Its own compiled material pair** (illumination + coloration), each a fresh `NodeMaterial`
-  built once and reused — not two of a shared pool.
-- **~15-20 independent scalar/vector uniforms per material** (see §3's full inventory).
-- **A variable-length polygon edge-point array** (up to `MAX_LIGHT_EDGES = 64` vec2s,
-  `point-light-illumination.js:161`) for the soft-edge SDF.
-- **Up to `MAX_APERTURES_PER_LIGHT` (4, `aperture-gobo.js:163`) per-aperture uniform structs**
-  (`uA`, `uDir`, `uNrm`, `uSLAWallLen` — `point-light-pool.js:1300-1319`), only on lights near a
-  window.
-- **A THIRD debug mesh** (`apertureShadowDebugMesh`) when apertures are present — diagnostic
-  only, not part of the accumulate pass, out of scope here.
+**Never do these (each has cost this project already paid):**
 
-None of that surface was exercised by the bench. This document is the plan for closing that
-gap, not a claim that the gap is already closed.
+1. ❌ **No `uniformArray`/storage-buffer DYNAMIC-INDEX reads of per-light data, either shader
+   stage.** Two independent, unexplained device failures are pinned: vertex-stage
+   (`tools/shader-lab/bench-point-lights.js` scenario 3 — CPU value AND `writeBuffer` proven
+   byte-correct, draw stuck on stale data regardless) and fragment-stage
+   (`point-light-illumination.js:1289` `edgeSoftFactor` — scene went solid black, disabled since
+   2026-07-19). Memory: `keyhole-uniformarray-indexed-read-unexplained-failures`.
+2. ❌ **No second hand-written shader.** The batched material is the S2.1 shared core with
+   attribute inputs; the per-light material is the SAME core with uniform inputs. If you are
+   copy-pasting shader graph code between two builders, you are building the
+   `feedback_mode_forks_silently_drop_features` bug — stop.
+3. ❌ **No per-frame GPU buffer/attribute allocation.** The 2026-07-18 device-loss autopsy
+   (`point-light-pool.js:735-754`): `BufferAttribute` has no `dispose()`; churning them leaks
+   native buffers until the device dies. Buckets pre-allocate, grow by doubling, rebuild only on
+   membership change.
+4. ❌ **Do not re-enable `edgeSoftFactor` or coloration `uShadows`.** Both are disabled in
+   production with documented live failures. Batching must reproduce today's ACTUAL output —
+   which does not include them — byte for byte.
+5. ❌ **No runtime uniform-driven behaviour branches** (`tsl/no-uniform-gates`,
+   `world/wind-access.js` header). Animation type, falloff model, quality, wind presence,
+   aperture unroll counts are graph-BUILD-time. That is exactly why buckets exist.
 
-## 2. The central finding: avoid `uniformArray` + dynamic indexing entirely
+---
 
-This is the most important thing this investigation turned up, and it changes the design.
+## §1 Measured reality (what this stage is actually against)
 
-**Finding A (new, 2026-08-11):** the bench's third scenario built a per-vertex `lightSlot`
-attribute indexing a shared `uniformArray` from the **vertex** stage (`positionNode`). Direct
-device instrumentation — patching `UniformArrayNode`'s CPU-side `.value` and
-`device.queue.writeBuffer` itself — proved the CPU-to-GPU write path is byte-correct end to end
-for a moved light, and two further no-op re-renders stayed stuck on the pre-move image (ruling
-out one-frame latency). The defect is real, reproducible, and narrowed to the bind-group/
-buffer-resource layer of the vendored WebGPU backend, not root-caused. See
-`tools/shader-lab/bench-point-lights.js`'s third scenario and `V4-Testament.md`'s P-004 second
-addendum for the full evidence trail.
+From `stage1-earlyz-bench-result.json` (S1.6 capture, First Floor, flag ON, idle machine):
 
-**Finding B (pre-existing, independently discovered — 2026-07-19, unconnected to Finding A
-until this document):** `point-light-illumination.js:1289-1309`. The soft-edge margin term
-(`edgeSoftFactor`) reads `edgePointsUniform` — a `uniformArray(edgePoints, 'vec2')` — through a
-`Loop`-based SDF function (`sdPolygonEdgeDistance`) in the **fragment** stage. The code is
-built, then explicitly discarded: `let combinedFalloff = falloff; void edgeSoftFactor;`. The
-comment explains why: wiring it in was tried live once, and it turned the **entire scene solid
-black** — all 79 active lights, not just the ones it should have touched. The author's own note:
-*"something in this Loop/uniformArray/Fn SDF path is genuinely broken in the browser... Reading
-the vendored THREE source (UniformArrayNode#update, updateType RENDER) did not turn up the
-cause — it copies array\[i\].x/.y into its buffer every render call, which looks correct."* It
-has stayed disabled ever since, unresolved.
+| zone                                                    | GPU ms           | CPU ms    | draws   |
+| ------------------------------------------------------- | ---------------- | --------- | ------- |
+| `light.drawPointLights`                                 | 0.348            | 1.304     | 68      |
+| `light.drawColoration`                                  | 0.352            | 0.825     | 68      |
+| `light.drawWindowLight`                                 | 0.161            | 0.184     | 4       |
+| `light.drawRegions`                                     | 0.065            | 0.138     | 8       |
+| `light.drawComposite` + `drawIllum` + `drawCandleFlame` | 0.230            | 0.319     | 4       |
+| `light.pointLightUpdate` (CPU reconcile)                | —                | 2.710     | 0       |
+| **`pass.light.accumulate` total**                       | **1.156 summed** | **5.886** | **152** |
 
-**Read together:** this vendored WebGPU backend (three.webgpu.js, r0.185.1) has now produced
-two independent, unexplained failures tied to `uniformArray` + dynamic/`Loop`-driven indexing —
-one in the vertex stage, one in the fragment stage, discovered three weeks apart by different
-investigations that never previously knew about each other. Different symptoms (frozen-stale
-vs. solid-black), same suspect family. That is not proof the mechanism is categorically broken,
-but it is a strong enough pattern that **this design does not use `uniformArray`-indexed reads
-for per-light batching, in either shader stage, at all.** Re-attempting either existing disabled
-use of the pattern is explicitly out of scope for Stage 2.
+The pass is CPU-bound: ~39 µs of CPU per draw call against a GPU that finishes the whole light
+stack in 1.156 ms. The cost splits into two roughly equal halves — draw submission (~2.1 ms
+across 136 point-light draws) and the JS reconcile (2.710 ms) — and Stage 2 attacks BOTH.
 
-**What this rules in instead — both already proven, independently, elsewhere in this
-codebase:**
-- **Plain per-vertex attributes.** The bench's own scenario 2 already proved this: N lights'
-  colour baked as a per-vertex attribute, one merged mesh, one draw, byte-identical output. No
-  known failure mode anywhere in this codebase.
-- **Texture sampling with a computed UV.** Used extensively and safely already —
-  `attrTexNode.sample(screenUV)`, `depthTexNode.sample(screenUV)`,
-  `texture(albedoTexture, screenUV)` all through the exact files read for this document. A
-  completely different GPU code path from `uniformArray`/`Loop`, with zero history of this
-  failure class anywhere in this project.
+**S2.0 census of the real Mansion** (`tools/point-light-census.mjs` against
+`tests/playwright-artifacts/look/mansion-redux-remapped.json`, 2026-08-11):
 
-## 3. Full per-light data inventory, and where each piece goes
+- 50 document lights: **every one `flame`-animated, every one coloured, zero hidden, zero
+  aperture-lit** → exactly **ONE bucket** → 2 draws (was 100).
+- **207 `candleFlame` anchors** → runtime candle lights, already clustered by perfTier before
+  reaching the pool (`buildCandleLightSources`); all share one material identity
+  (candleFlicker + inverseSquare + wind + one quality tier) → **one more bucket pair** → 2 draws.
+- **Zero aperture walls on the entire scene** — deferring aperture batching costs nothing on the
+  flagship content.
+- 37 of 50 lights carry a darkness activation window — membership can CHANGE as darkness01
+  drifts (lights entering/leaving the active set), so bucket membership transitions are a
+  normal, recurring event, not a rare GM-edit event. The lifecycle in §3.4 is sized for that.
 
-| Data | Source | Shape | Batching strategy |
-| --- | --- | --- | --- |
-| Position (x, y), radius | `light.x/y/radius` | 2×float | **Baked into vertex positions** at bucket-rebuild time (matches the workaround already approved for the vertex-stage bug — see §2). Not a runtime transform. |
-| `uBackgroundColor`/`uDimColor`/`uBrightColor` | region-adjusted ambient, `point-light-pool.js:339-344`, recomputed per light per frame | 3×vec3 | Per-vertex attribute, rebuilt on change. |
-| `uRatio`, `uAttenuationEased`, `uExposure` | `easeAttenuation`/`computeExposure`, per light | 3×float | Per-vertex attribute. |
-| `uEdgeCount`, `uEdgeSoftMargin` | `computeEdgeSoftMarginNormalized` | 2×float (int, float) | Per-vertex attribute (int as a float attribute, cast in-shader — already how `vSlot` works in the bench). |
-| Edge points (soft-edge SDF polygon) | `writeLightEdgePoints`, up to `MAX_LIGHT_EDGES=64` vec2 | variable-length | **Data texture**, one light per row/column, sampled by computed UV in the fragment shader (see §2's texture-sampling precedent). NOTE: this term is currently disabled in production (Finding B) — batching must not silently re-enable it; the data-texture rewrite is preparatory infrastructure only unless the author separately decides to re-attempt the SDF fix. |
-| `uLightExpectedDepth` (elevation/depth gate) | `resolveExpectedDepth`, per light per frame | float | Per-vertex attribute. |
-| Animation raw uniforms ×2 (illum + coloration) | `uSpeedRaw/uReverseSign/uSeed/uIntensityRaw`, `light.animation.*` | 2×4 floats | Per-vertex attribute (present only for animated lights — buckets already split by animation type, see §4, so a whole bucket has them or doesn't). |
-| Wind uniforms ×2 (illum + coloration) | `uWindCenter/uWindExposure/uWindResponse` | 2×(vec2+2×float) | Per-vertex attribute, opt-in (candles carry these; plain Foundry lights don't — another bucket-key dimension, §4). |
-| Aperture structs (up to 4/light) | `uA/uDir/uNrm/uSLAWallLen` ×2 (illum + coloration) | variable-length, capped at 4 | **Data texture**, same technique as edge points. Low priority — see §6, apertures fragment buckets by construction regardless of how the data itself is carried. |
-| `uApLampHeight` ×2 | `resolveLampHeight` | float | Per-vertex attribute, opt-in with apertures. |
-| `uColorationAlpha`, `uLightColor`, `uShadows` (coloration-only) | `computeColorationAlpha`, light colour, (disabled) shadows | float, vec3, float | Per-vertex attribute. `uShadows` is currently dead code (`point-light-coloration.js:431-441`, disabled 2026-07-21 after a build-time TSL failure) — carry the slot but do not wire it live. |
+Projected steady state on this content: 136 point-light draws → **~4-6** (flame pair, candle
+pair, plus a fire/lightning pair when active). The S2.9 draw gate (≤16) has real headroom.
 
-Every row above is either a scalar/vector (→ per-vertex attribute, the proven mechanism) or
-genuinely variable-length (→ data texture, a different proven mechanism). Nothing in this table
-needs `uniformArray`.
+---
 
-## 4. The bucket key (what makes lights shader-compatible)
+## §2 The two lawful carriers for per-light data
 
-Graph-BUILD-time choices — baked into the compiled shader, not read as data — force lights into
-separate buckets. Verified against source, not assumed:
+1. **Packed per-vertex attributes** — for every fixed-size per-light value. Proven on this
+   device: bench scenario 2 (per-vertex colour, merged mesh, byte-identical to separate draws)
+   and production's own `vColor`-style attribute reads in fragment stage (auto-varying works —
+   the bench's `fragmentNode` reads `attribute('vColor','vec3')` and renders correctly).
+2. **Data textures sampled by computed UV** — for variable-length per-light data ONLY (edge
+   points, apertures — neither needed in v1: `edgeSoftFactor` is disabled and aperture-lit
+   lights stay per-light). The technique is this project's daily bread
+   (`screenUV` sampling throughout the lighting stack); reserved here as the named escape hatch
+   so nobody reinvents `uniformArray` when a variable-length need appears.
 
-- **`animationType`** (`resolveLightAnimation`, `animations/registry.js`) — ~24 registered
-  animations (torch, pulse, chroma, flame, siren, wave, fog, sunburst, dome, emanation, hexa,
-  ghost, vortex, witchwave, rainbowswirl, radialrainbow, fairy, grid, starlight, smokepatch,
-  candleFlicker, energy, revolving...) plus "none". Each builds a genuinely different TSL
-  sub-graph (`buildIlluminationSeed`/`buildColorationSeed`), not just different uniform values.
-- **`falloffModel`** (`'foundry'` | `'inverseSquare'`) — a JS `if` at graph-build time,
-  `point-light-illumination.js:1269-1281`.
-- **`animationQuality`** — forwarded as `quality` into the seed builder, a tier, per-animation
-  build-time behaviour.
-- **Wind presence** (`Number.isFinite(windExposure)`) — whether the wind uniforms/sampling
-  exist in the graph at all is a JS `if` (`point-light-illumination.js:1196`), not runtime.
-- **`apertureCount` × `apGoboCols` × `apGoboRows`** — confirmed graph-build-time (unroll counts,
-  `aperture-gobo-render.js`'s own header, cited directly in
-  `point-light-pool.js:1240-1249`'s own rebuild-key check). Two lights with different aperture
-  counts, or the same count but different derived pane counts, **cannot** share a compiled
-  material, full stop — no batching technique changes this.
+---
 
-Bucket key, concretely: `(animationType, falloffModel, animationQuality, windPresent,
-apertureCount, apGoboCols, apGoboRows)`.
+## §3 Architecture
 
-## 5. Rebuild-on-change, not cheap-array-mutation
+### §3.1 Bucket key
 
-Per the author's own direction after Finding A: **do not** rely on mutating a shared array and
-expecting the GPU draw to pick it up. Instead, whenever any light in a bucket is added, removed,
-or has any of its per-vertex-attribute values change, **rewrite that bucket's vertex buffer**
-(plain typed-array `.set()` writes into the existing, reused `Float32Array` — never a new
-allocation, matching this pool's own existing device-lost fix discipline,
-`point-light-pool.js:735-754`) and flag `.needsUpdate = true`, exactly the mechanism the bench's
-own scenario 2 already proved correct.
+`(channel, animationEntryIdentity, animationQuality, falloffModel, windPresent)` where:
 
-**This needs its own measurement, not an assumption.** A bucket rebuild is O(lights in bucket ×
-vertices per light) CPU work, every frame that bucket has ANY dirty member. If one fast-animating
-light (e.g. `candleFlicker`, which jitters every frame by design) shares a large bucket with many
-static lights, the whole bucket rebuilds every frame regardless of the static members' own
-stillness. Whether that's cheaper than today's 152-draws-of-5.886ms-CPU depends on real numbers
-this document does not have yet — propose a bench scenario (extending `bench-point-lights.js`)
-that measures rebuild cost at realistic bucket sizes (e.g. 20, 50, 100 lights) before committing
-to a single-bucket-per-animation-type design. If large mixed-liveliness buckets prove expensive,
-splitting "static this frame" from "dirty this frame" members into two sub-buffers (both still
-one draw call, via one merged mesh with two `BufferAttribute` regions, similar to the
-interior/boundary split S1a already built for coverage tiles) is a reasonable fallback — not
-designed here, flagged as a fallback if measurement calls for it.
+- `channel` ∈ {illumination, coloration} — two meshes per bucket, mirroring today's two-mesh-
+  per-light structure (`point-light-pool.js#createLightEntry`).
+- `animationEntryIdentity` = the RESOLVED registry entry (`resolveLightAnimation`,
+  `animations/registry.js:363`), with null (no/unported animation) as its own value. Key on the
+  resolution, not the raw string: two unported type strings bake identical materials.
+- `falloffModel` ∈ {foundry, inverseSquare} (`point-light-illumination.js:1276`).
+- `windPresent` = `Number.isFinite(light.windExposure)` (`point-light-illumination.js:1196`) —
+  candles true, document lights false.
+- **Aperture-lit lights (`apertureCount > 0`) do not enter buckets at all in v1** — they keep
+  today's per-light path unchanged (own meshes, own materials, own per-frame aperture uniform
+  writes). Census: zero exist on the flagship map. Their unroll counts (`apertureCount`,
+  `apGoboCols`, `apGoboRows`) are graph-build-time (`aperture-gobo-render.js` header;
+  `point-light-pool.js:1240-1249`) and would fragment buckets by construction.
 
-## 6. What does not batch cleanly
+**Coloration membership:** a light joins a coloration bucket iff
+`hasColor || animationEntry.forceDefaultColor` — Foundry's own `isRequired` gate
+(`point-light-coloration.js` header). Today production draws a colourless light's coloration
+mesh with alpha 0 (a visible-mesh workaround, `vt-pan-viewer.js`); batching culls it by
+membership instead, which is both cheaper and closer to real Foundry. (Census: all 50 Mansion
+lights are coloured, so this changes nothing there — the rule exists for other maps.)
 
-- **Aperture-lit lights fragment into many small buckets by construction** (§4) — a scene with
-  varied window shapes near lights gets little draw-call reduction there regardless of technique.
-  Recommend: measure how many of the real Mansion's active lights carry `apertureCount > 0`
-  before deciding whether to batch them at all in v1, or leave them on today's per-light-mesh
-  path indefinitely (their absolute count is likely small — apertures require a nearby
-  `light:PROXIMITY` wall).
-- **The two already-disabled shader terms** (`edgeSoftFactor`, coloration's `uShadows`) must
-  stay disabled through this work. Building the data-texture infrastructure for edge points
-  (§3) is reasonable prep, but flipping either term back on is a separate decision with its own
-  live A/B verification — not a side effect of batching.
-- **Per-light caches stay per-light.** `candleWallClipCache`/`lightningWallClipCache`/the
-  re-triangulation dirty-check (`lastShapeX/Y/Radius/Points`,
-  `point-light-pool.js:587-599`) all operate at the individual-light granularity today. A
-  batched bucket needs an aggregating dirty-check (any member dirty → rebuild the bucket) layered
-  on top, not a replacement for the existing per-light ones.
-- **Draw ORDER within the accumulate pass.** MAX blending is commutative (already proven,
-  bench scenario 2's `merge-order-does-not-matter`), so bucket draw order doesn't affect the
-  illumination/coloration result. It has NOT been checked against the aperture shadow pass or
-  any other consumer that might be order-sensitive — worth a specific check before assuming it
-  generalizes.
+### §3.2 The shared shading core (S2.1 — the load-bearing refactor)
 
-## 7. Recommended build order
+Extract from `buildPointLightIlluminationMaterial` + `buildPointLightColorationMaterial` ONE
+pair of core functions (same file, exported):
 
-Mirrors Stage 1's own S1.1→S1.6 discipline: prove each piece in the lab against production-
-faithful inputs, then wire behind a flag, then gate on a pixel-diff + bench measurement, in that
-order, never skipping ahead to live wiring on an unproven piece.
+```
+buildIlluminationShadingCore({ THREE, inputs, shared, flags }) -> { finalNode, alphaNode }
+buildColorationShadingCore({ THREE, inputs, shared, flags }) -> { finalNode, alphaNode }
+```
 
-1. **Census the real Mansion's lights** by bucket key (§4) — cheap, fast, answers "is this worth
-   building" before any code. If most lights land in 1-2 large buckets (plausible: many static
-   ambient lights + many candles), the ROI case is strong. If they're evenly spread across two
-   dozen animation types in ones and twos, the payoff shrinks a lot and the scope should shrink
-   with it.
-2. **Bucket-key + grouping logic, CPU-only, Node-tested.** No rendering change. Verifies the key
-   computation against real light snapshots.
-3. **Bench: the simplest real bucket** (no animation, no aperture, `foundry` falloff) with the
-   FULL uniform surface from §3's table (not just origin/radius) — colors, elevation, edge count/
-   margin — proving the per-vertex-attribute techniqueSCALEs to the real data shape, still no
-   `uniformArray`.
-4. **Bench: the data-texture technique** for edge points, on a synthetic polygon, checked against
-   the CPU-computed SDF the disabled `uniformArray` version was supposed to produce — infrastructure
-   only, per §6, not a re-enable.
-5. **Bench: rebuild-cost measurement** (§5) at realistic bucket sizes, on real device.
-6. **Live wiring, flagged, one bucket shape at a time** — pixel-diff gate against today's
-   per-light-mesh rendering (exact, per the Testament's own Stage 2 bullet), bench gate against
-   P-004's proposed CPU/draw-count numbers, starting with whichever bucket the census (step 1)
-   shows is largest.
-7. **Extend to animated buckets**, ordered by the census, each animation type's seed function
-   is a genuinely different shader graph and gets its own pixel-diff pass — do not assume torch
-   working means chroma works.
-8. **Apertures**: revisit after the above, scoped by what step 1's census shows; may reasonably
-   stay out of v1 entirely.
+- `inputs` — per-light VALUES as NODES, the caller's choice of uniform or attribute:
+  `localUnitXY` (replaces every internal `positionLocal.xy` read — the per-light binding passes
+  `positionLocal.xy` itself; the batched binding passes `attribute('aLocalUnit','vec2')`),
+  `ratio`, `attenuationEased`, `exposure`, `expectedDepth`, `backgroundColor`, `dimColor`,
+  `brightColor` (illumination); `attenuationEased`, `colorationAlpha`, `lightColor`,
+  `expectedDepth` (coloration); plus `anim: {speedRaw, reverseSign, seed, intensityRaw} | null`
+  and `wind: {centerXY, exposure, response} | null`.
+- `shared` — the pool-wide resources, unchanged and still uniforms/textures:
+  `uGlobalTimeMs`, `depthTexNode`/`depthFlagsTexNode`/`attrTexNode`, `sunShadowSlotNodes`,
+  `blendSunVisibilityAcrossFloors`, `albedoTexture`, `apertureGoboShared`.
+- `flags` — the graph-build-time key fields (`animationEntry`, `quality`, `falloffModel`,
+  `apertureCount`+`cols`+`rows` — batched bindings always pass `apertureCount: 0`, which
+  compiles the gobo term out via the existing JS-time branch).
 
-## 8. Open questions for the author, before implementation starts
+The EXISTING per-light builders become thin wrappers: create their uniforms exactly as today,
+call the core, return the same `{material, u*}` handle objects — **their public API to
+`point-light-pool.js` does not change in S2.1**, which is what makes S2.1 independently
+gateable: harness capture before vs after must be byte-identical, proving the extraction moved
+the graph without changing it.
 
-- Is aperture batching in scope for v1, or explicitly deferred (recommendation: defer, pending
-  the census in step 1)?
-- Given Finding B (the pre-existing disabled `edgeSoftFactor`), is re-investigating that bug now
-  worthwhile on its own, given it's the same suspect family as Finding A and might share a root
-  cause — or does it stay parked as a separate, lower-priority item?
-- How much CPU rebuild cost (§5) is acceptable for a large mixed-liveliness bucket, before the
-  split-buffer fallback becomes worth the extra complexity? A number to bench against, not a
-  guess.
+### §3.3 Batched vertex layout (the 8-buffer arithmetic, done here so nobody redoes it wrong)
+
+Non-indexed triangle list (matching `triangulateLightFan`'s own convention — no `setIndex`
+anywhere in the pool), all member fans concatenated, per-light values DUPLICATED across that
+light's vertices. Mesh transform identity; camera unchanged.
+
+Illumination bucket:
+
+| #   | buffer       | type | contents                                                                                                                                                                                                 |
+| --- | ------------ | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `position`   | vec3 | world-space fan vertex (x, y, 0) — placement BAKED at write time                                                                                                                                         |
+| 2   | `aLocalUnit` | vec2 | unit-radius local coords, the fan builder's pre-placement output — reproduces the per-light path's `positionLocal.xy` through the identical attribute→varying path (this is what makes `dist` bit-exact) |
+| 3   | `aParams`    | vec4 | (ratio, attenuationEased, exposure, expectedDepth)                                                                                                                                                       |
+| 4   | `aColorA`    | vec4 | (background.r, background.g, background.b, dim.r)                                                                                                                                                        |
+| 5   | `aColorB`    | vec4 | (dim.g, dim.b, bright.r, bright.g)                                                                                                                                                                       |
+| 6   | `aColorC`    | vec4 | (bright.b, spare, spare, spare)                                                                                                                                                                          |
+| 7   | `aAnim`      | vec4 | (speedRaw, reverseSign, seed, intensityRaw) — animated buckets ONLY                                                                                                                                      |
+| 8   | `aWind`      | vec4 | (origin.x, origin.y, windExposure, windResponse) — wind buckets ONLY; wind centre IS the light origin (`point-light-pool.js:389`)                                                                        |
+
+Coloration bucket: `position`, `aLocalUnit`, `aParams` = (attenuationEased, colorationAlpha,
+expectedDepth, spare), `aLightColor` = (rgb, spare), `aAnim`, `aWind` — 6 buffers max.
+
+**The fully-loaded illumination bucket sits EXACTLY at the 8-vertex-buffer pipeline limit**
+(memory: `keyhole-vertex-buffer-limit-fix`). Adding ANY new per-light field requires re-running
+this arithmetic first — the spares in `aColorC`/`aParams` are the first landing spots; an
+interleaved-buffer investigation is the second; a petition is the third. S2.3's lab scenario
+includes a fully-loaded-layout compile+draw check so the limit is proven, not assumed.
+
+### §3.4 Bucket lifecycle
+
+- **Build/grow:** per-bucket typed arrays sized to current membership with doubling headroom;
+  per-light span registry (`sourceId → {bucketKey, vertexStart, vertexCount}`). Growth or
+  membership change (add/remove/key change — including darkness-window activation flips, which
+  the census says are NORMAL here, 37/50 lights) rebuilds that bucket's arrays: one allocation
+  event, amortized, never per-frame.
+- **Per-frame value writes:** the reconcile computes each light's CPU values exactly as today
+  (ambient triple, eased attenuation, exposure, expectedDepth, …) then **compares before
+  writing** into the span (value-diff dirty-skip). Any write → that attribute's
+  `needsUpdate = true` (whole-buffer reupload is fine at this size: ~68 lights × ~33 verts ×
+  ≤27 floats ≈ 250 KB worst case; `addUpdateRange` is a measured-need optimization, not v1).
+  **Steady state — nothing changed — writes ZERO bytes**: animation jitter is GPU-side
+  (`uGlobalTimeMs` + per-light seeds), so a static scene's buckets go fully quiet. This is the
+  Testament's "unchanged lights upload zero bytes" bullet, made concrete.
+- **Movement/reshape:** gated by the EXISTING per-light shape dirty-check
+  (`lastShapeX/Y/Radius/Points`, `point-light-pool.js:587-599`); on change, re-triangulate into
+  the span (positions + `aLocalUnit`), same `triangulateLightFan` output as today. A span that
+  shrinks pads with degenerate (repeated-point) triangles; compaction rides the next rebuild.
+- **Draw:** `geometry.setDrawRange(0, activeVertexCount)` per bucket; buckets live in the same
+  `lightScene`/`colorationScene` alongside the per-light (aperture) meshes — MAX blending is
+  order-independent (proven, bench scenario 2), so coexistence is free.
+
+### §3.5 What stays per-light forever (v1)
+
+Aperture-lit lights; anything failing bucket admission (unknown falloff string, etc. — admission
+is a closed-list check, `feedback_category_string_must_be_in_closed_list`); and the per-light
+CODE PATH itself, which is both the aperture path and the safety slide (flag OFF = today's
+renderer, byte-identical). Nothing is deleted in Stage 2.
+
+---
+
+## §4 Parity strategy
+
+Parity is STRUCTURAL, not aspirational: one shading core means the batched material cannot
+"forget" a term. The remaining risk is the input path — uniform read vs attribute-varying read
+of the same float32. All per-light attributes are constant across a light's fan, and
+`aLocalUnit` rides the identical attribute→varying path `positionLocal` itself uses, so the
+expectation is bit-exactness. S2.3's scenario proves it on-device
+(`batched-byte-identical-to-uniform-twins`).
+
+**The pixel gate stays `exact`** (Testament S2.7). The ONLY lawful relaxation, should constant-
+attribute interpolation wobble by 1 ulp on this hardware: max per-channel delta ≤ 1/255 with
+zero pixels at ≥ 2/255 — and invoking it requires the failing-check evidence attached AND the
+author's explicit sign-off, recorded in the Testament. Do not reach for it pre-emptively.
+
+---
+
+## §5 The reconcile half (`pointLightUpdate` 2.710 → ≤ 1 ms)
+
+Instrument BEFORE optimizing (`feedback_aggregate_cannot_name_the_source`): S2.6 sub-zones the
+reconcile into source-read / candle-build / aperture-scan / ambient / writes. Prime suspects,
+in suspected order (to be convicted or cleared by the zones, not assumed):
+
+1. **`buildCandleLightSources` over 207 anchors, every frame** — clustering runs at frame
+   cadence for content that changes at author-edit cadence. If convicted: cache clustered
+   output keyed on (anchor set identity, perfTier, params), invalidate via the anchor
+   authority's own change signal.
+2. **~30 uniform `.value` object writes × 68 lights** — becomes compare-and-maybe-memcpy into
+   bucket arrays (§3.4) for batched lights automatically.
+3. **Per-light region-ambient recompute** — already fast-pathed when no regions are active
+   (`point-light-pool.js:1153-1166`); measure before touching further.
+
+⚠️ `src/diag/` currently carries the author's own uncommitted edits (frame-profiler.js,
+perf-session.js + test). S2.6's executor must coordinate before modifying instrumentation files
+— check `git status` first; if they're still dirty, petition rather than colliding.
+
+---
+
+## §6 The other accumulate draws
+
+- **Region darkness (8 draws → 1, S2.8):** same merged-mesh technique, far simpler (one shared
+  material, simple polygons, no animation buckets). In scope.
+- **Window light (4 draws, 0.161 GPU / 0.184 CPU ms):** folding it into the batch means
+  entangling a separate per-floor subsystem for ~0.15 ms of CPU. **Deferred by decision** —
+  recorded here with its numbers so the deferral is auditable. Revisit only if S2.9's capture
+  shows the pass still over gate with these draws as the remainder.
+- Composite/illum/candle-flame draws (4): untouched — they are already one-ish draw each.
+
+---
+
+## §7 Lab proof spec (S2.3 — scenario 4 of `bench-point-lights.js`)
+
+Check IDs, all must pass on-device before any production wiring:
+
+- `packed-batch-renders-one-draw` — fully-loaded layout (anim + wind, 8 buffers), N lights, 1
+  real `drawCalls`.
+- `fully-loaded-layout-fits-vertex-buffer-limit` — the §3.3 arithmetic proven by compile+draw,
+  not arithmetic alone.
+- `batched-byte-identical-to-uniform-twins` — same values through per-light-style uniform
+  materials vs one batched mesh: byte-equal readback (this is simultaneously the constant-
+  attribute interpolation-exactness proof, §4).
+- `span-position-rewrite-moves-a-light` — movement via span rewrite (the mechanism of record,
+  REPLACING the banned uniformArray transform); old footprint empty, new footprint correct.
+- `span-value-rewrite-touches-one-light-only` — rewrite one light's `aParams`/colour span;
+  every other light byte-stable.
+- `steady-state-renders-byte-stable-with-zero-writes` — two renders, no writes between:
+  byte-identical frames.
+
+---
+
+## §8 Rollout
+
+`pointLightBatching` flag, default OFF, in the same registry every other effect flag uses (and
+— grep `EFFECT_REAPPLIERS` in boot.js after registering ANYTHING,
+`feedback_hand_maintained_dispatch_lists_forgets_new_effects`). Order: S2.1 lands and gates
+alone (byte-identical, flag-irrelevant) → S2.2-S2.5 behind the flag → S2.7 pixel gate ON-vs-OFF
+exact → author LIVE verdict → default ON (`feedback_default_on_new_features`). Kill switch is
+the flag; the per-light path remains in the codebase regardless (§3.5).
+
+---
+
+## §9 Explicitly out of scope for Stage 2
+
+Root-causing the vendored backend's uniformArray defect (pinned, banned, moved past); any
+re-enable of `edgeSoftFactor`/`uShadows`; the runtime-branch uber-shader (forbidden by
+`tsl/no-uniform-gates`); window-light folding (deferred with numbers, §6); RenderBundles and
+render-loop CPU work outside the light pass (Stage 4's mandate, not this one).

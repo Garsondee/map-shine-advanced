@@ -463,14 +463,67 @@ this is a count rather than a guess.*
   samples AND zero untagged — and leads its verdict with completeness. The Ground Floor figure
   above is still reported as INCOMPLETE for exactly that reason.
 
-### Stage 2 — One draw for all lights
+### Stage 2 — One draw for many lights *(restructured by Fable, 2026-08-11 — P-004 RESOLVED, see the petition ledger)*
 
-- [ ] Point-light polygons pre-triangulated into one storage-buffer soup; ONE MAX-blend
-      illum draw, ONE ADD coloration draw (both order-independent ⇒ pixel-exact).
-- [ ] Window light's per-floor draws folded in; region darkness batched.
-- [ ] CPU reconcile dirty-flagged (unchanged lights upload zero bytes).
-- [ ] Pixel-diff gate: **exact** — any diff is a bug, not a tolerance.
-- [ ] Bench capture. **Gate: light stack 8.6 → ≤ 4 ms GPU; `pointLightUpdate` ≤ 1 ms CPU.**
+*The original "storage-buffer soup / ONE illum draw / ONE ADD coloration draw" sketch is
+STRUCK: it was unbuildable as written — it collided with `tsl/no-uniform-gates` (animation
+type/quality/falloff/wind/aperture-unrolls are graph-BUILD-time behaviour, so ONE draw for all
+lights is impossible by this project's own law), it mis-stated coloration's blend (MAX in MSA,
+not ADD — the ADD happens in the composite), and its natural implementation path runs through
+`uniformArray` dynamic indexing, which now has TWO pinned, unexplained device failures (P-004
+addenda). The mechanism of record is
+[`docs/planning/Point-Light-Batching-Design.md`](../planning/Point-Light-Batching-Design.md) —
+every S2 executor reads it WHOLE, first. Its §0 rules are law; the five ❌s there are repeated
+here so they cannot be missed:*
+
+*❌ no `uniformArray`/storage dynamic-index per-light reads (either stage) · ❌ no second
+hand-copied shader — both materials come from S2.1's ONE shared core · ❌ no per-frame GPU
+buffer/attribute allocation (the device-loss class) · ❌ `edgeSoftFactor` and coloration
+`uShadows` STAY disabled · ❌ no default flip before S2.7's gate + the author's LIVE verdict.
+Worker models execute + mark only; ANY surprise is a petition.*
+
+- [x] **S2.0 Census** — bucket the real map's lights by compiled-material key before writing
+      any batching code. ✅ 2026-08-11 (Fable): `tools/point-light-census.mjs` against
+      `mansion-redux-remapped.json` — 50 document lights, ALL `flame`-animated, ALL coloured,
+      ZERO aperture-lit (zero aperture walls on the whole scene) ⇒ **one bucket**; plus 207
+      `candleFlame` anchors ⇒ one runtime bucket pair. Projected point-light draws 136 → ~4-6.
+      37/50 lights carry darkness windows ⇒ membership flips are NORMAL, the lifecycle is
+      sized for them (design doc §3.4). Full table in the design doc §1.
+- [ ] **S2.1 The shared shading core** — extract `buildIlluminationShadingCore` /
+      `buildColorationShadingCore` (per-light values injected as NODES — uniform or attribute);
+      rebind BOTH existing per-light builders through them, public API to the pool unchanged.
+      **Gate: harness capture byte-identical to pre-refactor; `npm run verify` green.**
+- [ ] **S2.2 Bucket module** (pure, Node-tested): admission (closed-list; aperture-lit lights
+      NEVER admitted in v1), key fn (resolved animation entry, not raw string), coloration
+      membership (`hasColor || forceDefaultColor`), span allocator (double-growth,
+      membership-change rebuild only), the §3.3 packed layout with its 8-vertex-buffer
+      arithmetic. **Evidence: Node tests.**
+- [ ] **S2.3 Lab proof, production-shaped** — `bench-point-lights.js` scenario 4, the six
+      checks specified in design doc §7 (fully-loaded 8-buffer layout; byte-parity vs
+      uniform-built twins; movement via span rewrite; zero-write byte-stability).
+      **Gate: all six green on-device.**
+- [ ] **S2.4 Batched binding** — attribute-input binding of the S2.1 core, both channels;
+      buckets → merged meshes in `lightScene`/`colorationScene`, behind `pointLightBatching`
+      (default OFF; register it, then grep `EFFECT_REAPPLIERS` in boot.js — the hand-list has
+      lost six effects silently).
+- [ ] **S2.5 Pool integration** — reconcile writes into bucket spans with value-diff
+      dirty-skip (steady state ⇒ zero uploads); per-light path RETAINED for aperture-lit +
+      non-admitted lights (it is also the safety slide: flag OFF = today's renderer,
+      byte-identical); darkness-window membership flips exercised.
+- [ ] **S2.6 `pointLightUpdate` interior** — sub-zone it FIRST (source-read / candle-build /
+      aperture-scan / ambient / writes; prime suspect: `buildCandleLightSources` clustering
+      207 anchors at frame cadence), then fix ONLY what the zones convict. ⚠️ `src/diag/`
+      carries the author's own uncommitted edits — coordinate, never collide.
+- [ ] **S2.7 Pixel gate + flip** — bench-route captures, flag ON vs OFF: **exact** (any diff
+      is a bug; the ONLY relaxation is design doc §4's contingency, with evidence + the
+      author's sign-off). Author LIVE verdict → default ON.
+- [ ] **S2.8 Region darkness batched** (8 draws → 1, same technique). Window-light folding is
+      DEFERRED by decision with its numbers recorded (design doc §6) — do not build it.
+- [ ] **S2.9 Bench capture on an idle machine.** **Gate (P-004 resolution): `pass.light.
+      accumulate` CPU 5.886 → ≤ 2.5 ms with point-light draws 136 → ≤ 16;
+      `light.pointLightUpdate` CPU 2.710 → ≤ 1 ms; summed light-zone GPU ≤ 1.4 ms
+      (non-regression). The old "8.6 ms GPU" baseline is HISTORICAL — superseded by the S1.6
+      capture's 1.156 ms, same provenance rule as `geometry.worldDraw`'s 26.6.**
 
 ### Stage 3 — One post shader
 
@@ -921,6 +974,21 @@ variable-length data like edge points and apertures, also already proven elsewhe
 codebase) — is written up in
 [`docs/planning/Point-Light-Batching-Design.md`](../planning/Point-Light-Batching-Design.md),
 DRAFT, awaiting sign-off before any implementation begins.
+
+**RESOLVED by Fable (claude-fable-5), 2026-08-11 — granted in full, and the stage restructured
+around it.** The re-aimed gate is adopted verbatim into Stage 2's S2.9: CPU is the primary gate
+(`pass.light.accumulate` 5.886 → ≤ 2.5 ms, point-light draws 136 → ≤ 16), `pointLightUpdate`
+≤ 1 ms stands as written, GPU becomes a ≤ 1.4 ms non-regression bound, and the 8.6 ms baseline
+is recorded as historical. The storage-buffer-soup sketch is STRUCK for the reasons this
+petition's three addenda document; the mechanism of record is packed per-vertex attributes
+through ONE shared shading core (no `uniformArray` dynamic indexing anywhere in it), specified
+in `docs/planning/Point-Light-Batching-Design.md` — now PLAN OF RECORD, Fable-countersigned,
+its DRAFT status and open questions resolved (apertures: deferred, zero exist on the flagship
+map per S2.0's census; the fragment-stage `edgeSoftFactor` bug: stays parked, out of stage
+scope; rebuild-cost ceiling: subsumed by the `pointLightUpdate` ≤ 1 ms gate itself). The second
+addendum's failing bench check blocks nothing — the mechanism it tested is banned from
+production use and the scenario stays as the pinned record of the backend defect;
+root-causing that defect is explicitly outside Stage 2's scope.
 
 **P-003 — Stage 0's instrument (the Playwright harness) needed its own trust check before any
 measurement through it could count.** Filed by Claude Sonnet 5, 2026-08-10, acting as a worker

@@ -9418,6 +9418,31 @@ export async function startVtPanViewer({
     const SETTLE_SAMPLE_EVERY_FRAMES = 10;
 
     let earlyZComposition = true;
+    /**
+     * EARLY-Z STATE TRANSITION COUNTERS (2026-08-11, diagnostic only) — built
+     * to test a live hypothesis from a Chrome trace showing 67% of a frame
+     * (50.1 of 72.1ms) spent inside three's NodeBuilder `build()`, reached via
+     * `needsRefresh -> getMonitor -> getNodeBuilderState -> getForRender ->
+     * build` on the world-geometry render call. `applyEarlyZTileState` below
+     * mutates `mat.maskNode`/`mat.transparent`/`mat.depthTest`/`mat.depthFunc`
+     * in place on a state transition — both `maskNode` (part of the node
+     * graph) and `transparent` (bumps `Material.version`) are shader-
+     * invalidating. If tiles flip between `interior`/`passthrough` while
+     * panning (the verdict depends on things that can shift with the camera),
+     * that is a live rebuild-storm generator no isolated bench would catch.
+     *
+     * `earlyZTransitionCount` answers "is this churning at all". The
+     * `->` map answers "which states, how much of each". `earlyZReversalCount`
+     * is the one that actually indicts OSCILLATION specifically (A->B->A
+     * within one window) rather than one-time settling as new tiles stream
+     * in — a tile transitioning straight back to the state it just left.
+     * Read via `MapShine.getEarlyZComposition().earlyZTransitions` before and
+     * after a pan; the delta is the answer. No reset needed for that
+     * workflow (subtract), so none is built.
+     */
+    let earlyZTransitionCount = 0;
+    let earlyZReversalCount = 0;
+    const earlyZTransitionsByPair = new Map(); // "from->to" -> count
     /** Prepass twins of `depthScene`'s proxies — same geometry, colour masked.
      * Rebuilt with them, every residency pass, never per frame. Shares
      * `depthProxyMaterialPool` with `depthProxyEntries` above — see that
@@ -10201,6 +10226,19 @@ export async function startVtPanViewer({
       // stale Z is exactly what would make an interior's EqualDepth miss.
       t.mesh.position.z = earlyZComposition ? z : 0;
       if (t.earlyZState === want) return;
+      // DIAGNOSTIC COUNTERS (2026-08-11) — see this closure's own declaration
+      // a few hundred lines up for what these test and why. Two property
+      // reads and a Map bump, gated behind the SAME early-return every other
+      // branch here already relies on to skip a no-op transition — this is
+      // not a new cost on the steady-state (unchanged) path, only on a real
+      // state flip, which is exactly the event being counted.
+      earlyZTransitionCount++;
+      earlyZTransitionsByPair.set(
+        `${t.earlyZState ?? 'null'}->${want}`,
+        (earlyZTransitionsByPair.get(`${t.earlyZState ?? 'null'}->${want}`) ?? 0) + 1
+      );
+      if (t.earlyZPrevState === want) earlyZReversalCount++;
+      t.earlyZPrevState = t.earlyZState;
       t.earlyZState = want;
       if (want === 'legacy') {
         mat.transparent = true;
@@ -12790,6 +12828,19 @@ export async function startVtPanViewer({
           // single cell — byte-identical for the most boring possible reason.
           splitInteriorCells,
           splitBoundaryCells,
+          // MATERIAL-MUTATION CHURN COUNTERS (2026-08-11) — see this closure's
+          // `earlyZTransitionCount` declaration for the full account. Lifetime
+          // counts, like depthProxyMaterialPool.stats() above: read before and
+          // after a pan, the DELTA is the answer, not the raw number. A
+          // nonzero `reversals` specifically means a tile flipped back to a
+          // state it just left (A->B->A) — the shape that would make
+          // material-mutation churn repeat continuously while panning rather
+          // than settle once.
+          earlyZTransitions: {
+            total: earlyZTransitionCount,
+            reversals: earlyZReversalCount,
+            byPair: Object.fromEntries(earlyZTransitionsByPair),
+          },
         };
       },
       /**

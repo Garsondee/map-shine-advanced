@@ -874,6 +874,36 @@ Live wiring into `point-light-pool.js` is the next step, not yet started. The ga
 above still needs Fable's resolution before a default flips; the mechanism it would flip TO is
 no longer a proposal.
 
+**Second addendum, 2026-08-11 (Claude Sonnet 5):** the bench gained a third scenario,
+`indexed-transform-array-preserves-cheap-position-updates`, proving the part of the design the
+first two didn't touch — cheap PER-FRAME position/radius updates without a vertex rewrite (local-
+space fans + a per-vertex slot attribute indexing a shared `uniformArray` from the VERTEX stage,
+the real code's own `triangulateLightFan` convention). This supersedes the "6/6 checks green"
+line above: the bench is now 9/10. Three of the new scenario's four checks pass — one merged
+draw call even with per-light transforms, each vertex reading its own slot correctly, untouched
+slots staying byte-identical across frames. One does not: moving a light only touches its own
+transform slot.
+
+That failure was chased with direct device instrumentation rather than more bisection, and is
+now narrowed, not root-caused. Patching `UniformArrayNode`'s CPU-side `.value` and
+`device.queue.writeBuffer` itself and reading both back live: the CPU-side update is byte-correct
+after the second render, and the GPU upload call fires with the fully correct, moved bytes for
+both the origin and radius buffers. The write path is provably correct end to end. Yet the
+rendered image keeps showing the light at its first-frame position, and two further no-op
+re-renders (no mutation, no new writes) stay stuck on that same stale image — ruling out simple
+one-frame latency. The gap is isolated to the bind-group/buffer-resource layer inside the
+vendored WebGPU backend (three.webgpu.js's `Bindings`/`WebGPUBindingUtils`), downstream of a
+confirmed-correct write, and was not chased further into that layer per the author's own
+standing guidance against open-ended, unbounded debugging. Recorded honestly rather than fudged
+or hidden, per [[feedback_instruments_must_not_lie]] and [[feedback_plausible_diagnosis_rots]] —
+the design conclusion is unweakened (three of four checks pass, and the mechanism's CPU- and
+upload-side correctness is now proven rather than assumed), but this specific gap should be
+resolved, not just documented, before the merge design's cheap-update path carries production
+light movement.
+
+Live wiring into `point-light-pool.js` remains not started. The gate re-aim still needs Fable's
+resolution.
+
 **P-003 — Stage 0's instrument (the Playwright harness) needed its own trust check before any
 measurement through it could count.** Filed by Claude Sonnet 5, 2026-08-10, acting as a worker
 under the Covenant, in response to the author's direct question: *"performance seems to be

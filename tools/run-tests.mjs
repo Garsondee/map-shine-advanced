@@ -67,6 +67,7 @@ import { spawnSync } from 'node:child_process';
 import { run as runStructure } from './verify-structure.test.mjs';
 import { run as runGateSelfTest } from './run-tests.test.mjs';
 import { run as runReachability } from './reachability.test.mjs';
+import { run as runTraceAnalyze } from './trace-analyze.test.mjs';
 
 // fileURLToPath, not URL.pathname — the repo path contains spaces, which
 // pathname percent-encodes into %20 and fs then cannot find.
@@ -126,10 +127,19 @@ function runInProcess(name, fn) {
 
 function main() {
   /** @type {{name: string, passed: number, failed: number, fails?: string[], error?: string}[]} */
+  // ⚠️ THIS IS A HAND-MAINTAINED DISPATCH LIST — the one thing rule 1 above
+  // forbids everywhere else, surviving here only because these `tools/` suites
+  // export `run(t)` for in-process execution rather than self-reporting like the
+  // globbed `src/**` suites. It has already cost this project once at the layer
+  // below (a whole test FILE never ran, 24 assertions silently unexecuted —
+  // memory: feedback_test_dispatch_list_forgets_new_files). Adding a
+  // `tools/*.test.mjs` means adding it BOTH as an import above AND as a row
+  // here; forgetting either leaves the gate green with nothing behind it.
   const results = [
     runInProcess('tools/verify-structure.test.mjs', runStructure),
     runInProcess('tools/run-tests.test.mjs (the gate testing itself)', runGateSelfTest),
     runInProcess('tools/reachability.test.mjs', runReachability),
+    runInProcess('tools/trace-analyze.test.mjs', runTraceAnalyze),
   ];
 
   const suites = discoverSuites();

@@ -933,6 +933,263 @@ vision leak) is scheduled by the author explicitly, not silently deferred.**
 discovery that doesn't fit its brief). Only Fable resolves one — by editing the plan and
 recording the resolution here.*
 
+**P-007 — A committed trace-analysis tool, and the finding it found: TSL shader-graph REBUILDS are
+running during rendering, sustained, at 10.7% of the main thread — independently confirming the
+"unwanted pipeline recompilation" hypothesis round 6 instrumented and never got an answer for.**
+Filed by Claude Sonnet 5, 2026-08-11, acting as a worker under the Covenant. Full long-form record:
+`docs/planning/Trace-Analysis-2026-08-11.md` (archived per the standing long-report rule); only the
+plan-relevant summary lives here.
+
+**What the author asked for, and what shipped.** The author captured a second trace
+(`Trace-20260811T155628.json.gz`, 158.4 MB, 645,219 events, **36.4 s**, Mansion **upper floor**,
+camera moved deliberately to stress the engine) and asked for a real tool rather than another hand
+analysis. Shipped: **`tools/trace-analyze.mjs`** + **`tools/trace-analyze.test.mjs`** (49
+assertions, registered in `tools/run-tests.mjs`, `npm run verify` GREEN at 8,446). Reads `.json` or
+`.json.gz`; emits Markdown + JSON; has a `--compare` mode for before/after pairs. Law 11 held
+throughout — only the static file the author exported was ever read.
+
+The tool encodes the three measurement bugs P-006 recorded so they cannot recur: interval-**merged**
+busy time with `assertUtilizationSane` **throwing** on the impossible >100% figure that was caught
+by hand last time; breadcrumb-based windowing (a `ts:0` metadata event once turned 11.3 s into
+428,161,450 ms); and automatic profiler-artifact detection that **requires real containment** of
+`CpuProfiler::StartProfiling`, so a genuine early hitch is never silently discarded — that sabotage
+case is a test, not a comment. It detected and excluded an 826.9 ms artifact in this capture
+unprompted.
+
+**Headline, this capture (effective window 35,581 ms):** 871 presented frames → **24.5 fps**; main
+thread **78.3%** busy; GPU submission **85.8%**; frame p99 68.9 ms; felt cadence p99 99.3 ms, max
+607 ms; **236 hitches >50 ms**; 69% of frames ≥20 ms.
+
+**A REGIME CHANGE worth naming, and a partial correction to P-006's headline.** P-006 read main
+54.3% vs GPU 90.6% (36-point gap) and called MSA GPU-submission-bound. That was an **11-second idle
+capture**. Under real camera stress the gap collapses to **7.5 points** — inside the tool's own
+"neither dominates" band. Both are honest; they are two regimes, and the stress one is the one the
+author plays in. **"GPU-bound" should not be carried forward as an unqualified property of the
+engine** — it is a property of the idle case.
+
+**FINDING 1 (the big one) — 3,831 ms / 10.7% of all main-thread samples is TSL graph building,
+inside `_renderScene`, sustained across the whole capture.** Attribution: **`runSceneDepthPass`
+48.4%** (1,855 ms) · **`runGeometryWorldPass` 46.3%** (1,775 ms) · 94.7% enters via three's
+`_renderScene`. Present in **44.8% of frames (390/871)**. Binned 18× across 36 s it is **FLAT** —
+first third 628 ms, last third 706 ms — so it is NOT one-time shader compile, which decays.
+Verified as a genuine **cache miss**, not expensive key computation (the two need opposite fixes,
+so it was checked rather than assumed): `getForRender` 3,876 ms inclusive ≈ the 3,831 ms of build
+work, while all `getCacheKey` variants total ~383 ms and `_createNodeBuilder` only 26 ms — the cost
+is rebuilding the graph because `nodeBuilderCache` is being missed.
+
+This **independently confirms the hypothesis `keyhole-performance-audit-2026-08` round 6 built
+`instrument.pipelineStats`/`pipeline-programs-grew` to test and never got a live answer for** — the
+cost class `buildSceneDepthWriterMaterial`'s own header already named once at "3.4 ms mean / 43 ms
+max CPU". That the DEPTH pass is the largest contributor is a strong hint, since
+`geometry.depthDraw`'s CPU has been an unexplained outlier for three rounds (13.08 ms for 9 draws,
+26× worldDraw's CPU for twice the draws).
+
+**Honestly bounded:** the trace proves rebuilds happen and names the two passes; it **cannot** say
+why the key churns. Unconfirmed candidates: S1.4's `interior`/`passthrough`/`legacy` material states
+or `buildSceneDepthWriterMaterial`'s `alwaysOpaque` structural variant flipping mid-pan; residency
+churn creating fresh materials; or a per-frame-varying node hash. **This is now a code question,
+not a trace question** — and the highest-value next investigation in the capture.
+
+**FINDING 2 — the debug HUD costs 2,451 ms (6.9% of the main thread), but only while open.** DOM
+writes total 2,617 ms and **94% of that is MSA's own diagnostic UI**: `astrolabe.js:506 update`
+1,415 ms · `astrolabe.js:350 syncTuningSummary` 709 ms · `perf-strip.js` 259 ms ·
+`render-fallback.js:177 describeRenderMode` 68 ms. Stated fairly: `pumpAstrolabe` (boot.js:5028)
+gates on `astrolabe?.root?.isConnected`, so a closed dial costs one property read per frame — this
+is **not** stolen from every player session, it is stolen from this MEASUREMENT and from the
+author's authoring sessions. One piece is wasteful regardless: `syncTuningSummary` is called from
+`update()` (astrolabe.js:531) **every frame** and writes `innerHTML` for a string whose only
+variable is `skyRow.value() > 0` — 709 ms of HTML re-parsing for a value that changes when a slider
+crosses zero. A dirty-check is near-free and unconditionally correct, the same shape as the
+point-light re-triangulation and door-leaf fixes already landed.
+
+**This closes P-006's Finding 4 open question: YES, the report builders are live-polled**, and
+`describeRenderMode`'s `getComputedStyle` really does run per frame.
+
+**FINDING 3 — P-006's rAF puzzle, resolved and downgraded.** 4,808 callbacks / 871 frame services =
+5.52 per frame, but grouped by dominant module these are **multiple legitimate independent loops**,
+not one loop misscheduling: three.webgpu.js (MSA's render loop) 21,315 ms across 1,147 callbacks;
+foundry.mjs 210; **render-fallback.js 76; astrolabe.js 136; vt-pan-viewer-diagnostics.js 21;
+perf-strip.js 7**; and 2,839 callbacks with no samples at all (each finishing inside one 0.25 ms
+sampling interval — trivial bookkeeping). The real finding is smaller and different from the
+suspicion: **~275 ms of rAF time belongs to diagnostics**, which is Finding 2 from another angle.
+
+**FINDING 4 — a misreadable number, flagged so nobody quotes it wrong.** MSA-authored code is only
+**3.0% of main-thread SELF time** (1,066 ms) against three-vendor's 19.0%. That does **not** mean
+MSA costs 3% of the frame — our code's job is to drive three, and the work lands there. The
+inclusive view: `renderFrame` 9,267 ms · `runPassPlan` 9,080 ms · `runGeometryWorldPass` 5,233 ms ·
+`runLightAccumulatePass` 3,296 ms · `runSceneDepthPass` 2,348 ms. Also recorded so it is never
+reported as a finding: `update` at three.webgpu.js:45346 (10,778 ms, the largest single entry) is
+three's own rAF driver closure that CALLS `renderFrame` — the tree root, not a cost. Verified in the
+vendored source.
+
+**FINDING 5 (secondary, point lights) — `computeLightWallClippedShape` (scene-wall-clip.js:255) costs
+988 ms, nearly as much as the entire `point-light-pool` update it serves (1,367 ms)**, with
+`readActiveLightSources` at 1,024 ms. Wall-clipping geometry is a bigger share of light cost than
+its position in the ledger suggests, and it has no perf zone of its own.
+
+**Requested of Fable:**
+1. Whether Finding 1 earns a **numbered task in Stage 2 or Stage 3** (it is squarely a frame-core
+   cost and currently belongs to no box), or should wait for the paired zone-timer capture below.
+2. Whether the **regime correction** above should amend how Stage gates quote "GPU-bound" — the
+   Book I scoreboard's targets were set against numbers whose regime is now known to matter.
+3. Whether the **paired capture protocol** (a DevTools trace and a `perf-run-full` over the SAME
+   interaction) should become a standing requirement for perf claims — **the author has already
+   agreed to it in-session** ("using this report to improve the performance report is a good idea,
+   I'm happy with that compromise"), so this is a ratification, not a proposal.
+4. Whether the ~709 ms `syncTuningSummary` dirty-check and the diagnostics polling cadence are
+   worker-executable now (they are small, safe, and outside any current stage's scope) or should be
+   queued.
+5. Whether `computeLightWallClippedShape` earns its own `perf-zones.js` zone alongside
+   `buildOneLightSource` (P-006's request 3, still open).
+
+**P-006 — A live Chrome DevTools trace from the author's real production server independently
+confirms MSA is GPU-submission-bound, not CPU-bound, and its own instrumentation nearly produced
+a false 1.19-second "hitch."** Filed by Claude Sonnet 5, 2026-08-11, acting as a worker under the
+Covenant (a worker may not add plan tasks). No Stage 0 or Stage 1/2 checklist item covers "analyze
+an ad hoc DevTools capture the author dropped in," so this is filed as a discovery rather than
+claimed against an existing box.
+
+> ⚠️ **PARTIALLY SUPERSEDED BY P-007 (same day) — do not read Finding 1 standalone.** This capture
+> was **11 seconds, idle** (no camera movement). P-007's 36-second camera-stress capture of the
+> Mansion upper floor measures main 78.3% vs GPU 85.8% — a 7.5-point gap, not this petition's
+> 36-point one. "GPU-submission-bound" is a property of the IDLE regime, not of the engine. P-007
+> also RESOLVES this petition's Finding 4 (report builders are live-polled: yes) and Finding 5 (the
+> rAF multiplier is several legitimate loops, ~275 ms of it diagnostics).
+
+**Provenance, and Law 11 compliance stated explicitly:** the author placed
+`chrome-performance-traces/Trace-20260811T154340.json.gz` directly in the repo (git status shows
+it untracked — author-added, not fetched). Decompressed: 51.6 MB, standard Chrome DevTools JSON
+(`metadata.source: "DevTools"`, NOT the Playwright harness), 186,766 trace events, one full V8 CPU
+sample profile (38,942 samples, 422 chunks). Its own JS profile file-URLs prove it was captured
+against `https://mythicamachina.com/modules/map-shine-advanced/...` — the author's real production
+server, real MSA, real Foundry (`https://mythicamachina.com/scripts/foundry.mjs` appears too) —
+**this session only ever read the static file the author had already exported; no connection was
+made to mythicamachina.com or any live Foundry instance**, same one-way-only shape Law 11 requires
+for [[reference_scene_export_import_bridge]]-class data, just for a trace file instead of a scene.
+Recording window: **11.292 s** (`metadata.modifications.initialBreadcrumb.window`, cross-checked
+against the trace's own event timestamps — see the self-caught bug below for why that
+cross-check mattered). `hostDPR: 1.5`; exact canvas resolution not present in the capture.
+
+**Finding 1 — GPU-submission-bound, confirmed by an independent measurement path.** Main JS
+thread (`CrRendererMain`) true busy time — computed by merging overlapping `[ts, ts+dur)` spans
+per thread, not by summing event durations by name (see the self-caught bug below for why that
+distinction is load-bearing) — is 6,136.4 ms / 11,291.6 ms = **54.3%**; excluding the one-time
+startup artifact (Finding 2) that falls to **≈49%**. The GPU process's actual command-submission
+thread (`CrGpuMain`) merged-busy is **90.6%** (10,228.2 ms), of which the `GPUTask` span alone —
+confirmed as a true subset, not double-counted — is **84.0%** of the entire 11.292 s window by
+itself. Actually-presented frame rate, from `DrawFrame` instant markers (the same primitive
+DevTools' own FPS meter uses): 306 frames / 11.292 s = **27.1 fps**. CPU has real headroom (~46–51%
+idle-or-elsewhere); the GPU submission thread does not. This is a different measurement path
+(browser-native tracing) independently landing on the same diagnosis
+[[keyhole-performance-audit-2026-08]] already carries from MSA's own instrumented zone timer
+(point lights are real fan-polygon geometry, ~16× bandwidth headroom but real fill-rate/pass
+costs) — worth recording as corroboration, not a new discovery. **Ceiling on this trace: no
+Dawn/GPU trace category was recorded, so it can say the GPU thread was busy, never WHICH MSA pass**
+— `perf-session.js`'s own GPU zone timer remains the only tool that can attribute this to
+`geometry.worldDraw` vs `pass.light.accumulate` vs anything else. Against THE GOAL (line 38–41
+above): 27.1 fps sits between the recorded start point (18.1 avgFps) and "acceptable" (40+ fps) —
+stated as a directional data point only, since resolution/route/scene here don't match the
+3840×1906 reference benchmark and are not known from the trace.
+
+**Finding 2 — a DevTools instrumentation artifact nearly read as a 1.19 s hitch; caught, not
+chased.** The single largest main-thread event in the whole capture is one `RunTask`,
+dur=1187.4 ms, starting 1.234 ms *before* the recording's own start marker — effectively the very
+first thing captured. At the same instant (tsRel=0.066 ms), `CpuProfiler::StartProfiling` runs for
+1155.5 ms. Two `V8.DeoptimizeAllOptimizedCodeWithFunction` calls (1.917 ms + 1.386 ms) land at
+tsRel=1186.6 ms and 1188.6 ms — literally the instant the long task ends — which is exactly the
+signature of a profiler attaching mid-session and deoptimizing already-JITed code so it can
+reinstrument it. **Excluding this one event, the main thread recorded zero tasks over 50 ms for
+the remaining ~10.1 s.** Recorded as a standing caveat for the next trace read: the first
+~1.2–1.5 s after clicking Record (with JS Profiling on) is instrument overhead, not gameplay —
+same lesson shape as [[feedback_playwright_fps_not_yet_trustworthy]]'s "the systematic error was
+ours," just DevTools instead of Playwright.
+
+**Finding 3 — CPU self-time corroborates two already-tracked costs; surfaces no new dominant MSA
+hotspot.** Self-time only, from the CPU profiler's own per-node sample accounting — deliberately
+NOT the naive "sum durations by event name" approach, which is unusable on this trace: the
+Finding-2 artifact nests through `FunctionCall`/`EventDispatch`/`v8.callFunction`, inflating each
+of their totals by over a second and producing a badly misleading "hottest event" ranking if taken
+at face value. Of 38,942 samples: 38.8% `(program)`, 23.6% `(idle)` — ~62% of main-thread sample
+time here is not attributable JS/DOM work at all. `point-light-pool.js:841`'s `update` — the exact
+function this project's own perf ledger has tracked across three rounds of fixes (3.686 → 2.807 →
+2.428 ms mean, [[keyhole-performance-audit-2026-08]]) — is the largest MSA-authored (non-vendored-
+three) self-time cost: 189 samples (0.49%). Independent corroboration, via a wholly different
+measurement method, that this remains real and present, consistent with "already improving," not a
+regression. `effects/candle-flame-geometry.js:430`'s `buildOneLightSource` (145 samples, 0.37%) is
+the *second*-largest MSA-authored self-time cost — larger than most of the point-light pool's own
+sub-costs — and has no dedicated `perf-zones.js` zone separating it from the rest of `pass.light`.
+No third MSA function clears ~0.2% self-time.
+
+**Finding 4 — a real, DOM-churn-shaped cost, traced to two call sites by line number and verified
+against source, neither confirmed as per-frame.** ~9.0% of all CPU samples went to raw DOM writes
+(`set textContent` 4.02%+0.58%, `set innerHTML` 2.51%+0.24%, `setAttribute` 1.20%, `set innerText`
+0.40%); `Layout`+`Paint`+`UpdateLayoutTree`+`PrePaint`+`HitTest` together cost 414.6 ms (3.7% of
+the window) across 359–412 occurrences each — roughly once per rendered frame (306 `DrawFrame`s).
+Read the actual source at both flagged line numbers rather than assume:
+- `mask-authority.js:943` `requiredMissingAuthoredIds` (150 combined self-time samples across two
+  profile nodes) is reached only through `buildMaskAuthorityReport` (`mask-authority-report.js:166`)
+  — report-builder machinery. Its own doc comment already asserts it's cheap per call ("a handful
+  of Map lookups... per host of one floor"), confirmed by reading it. The open question isn't its
+  per-call cost — it's whether `buildMaskAuthorityReport` is polled on a live HUD interval or only
+  built on-demand (a button click), and this trace cannot answer that.
+- `diag/render-fallback.js:178` `describeRenderMode` (62 samples) calls `getComputedStyle` (a
+  style-recalc-forcing read), reached through `vt-pan-viewer-diagnostics.js:606`'s big diagnostics
+  report object — same report-builder family, same open question.
+
+Both call sites are diagnostics/report code, not obviously the render loop itself, verified by
+reading their actual callers — this downgrades the finding from "likely bug" to "open question
+about polling cadence," recorded honestly rather than as a diagnosis I didn't check.
+
+**Finding 5 — two puzzles reported without a guessed explanation.** `requestAnimationFrame` fired
+~5× more often than frames were actually presented: 1,530 `FireAnimationFrame` events vs 306
+`DrawFrame` events over the same 11.292 s (135.5/s vs 27.1/s). No per-callback stack attribution
+exists in this trace to say whether that's several legitimate independent rAF loops (Foundry's own
+ticker, MSA's render loop, UI animation) or one loop doing avoidable extra scheduling — left open,
+not diagnosed. Separately, `PipelineReporter` async spans pair cleanly (0 unmatched begins/ends, 0
+suspected id reuse — checked explicitly, since silent id reuse would corrupt every number
+downstream of it) but count 1,736 spans against only 306 actually-presented frames, with a
+percentile shape (p50=8.5 ms, p90≈p99≈108 ms, max=1200 ms matching Finding 2's artifact almost
+exactly) that doesn't obviously map 1:1 to displayed-frame cadence. Reported as a secondary,
+unverified-semantics metric — the 27.1 fps headline above comes from the simpler, standard
+`DrawFrame` count instead, deliberately.
+
+**Finding 6 — an environmental confound, instrument hygiene rather than an MSA finding.** ~1.86%
+of all CPU samples landed in three `chrome-extension://` origins unrelated to Foundry/MSA (ids:
+`hdokiejnpimakedhajhdlcegeplioahd`, `nngceckbapebfimnlniiiahkandclblb`,
+`gighmmpiobklfepjocnamgkkbiglidom`). Real main-thread cost, not MSA's or Foundry's to fix. A
+future capture from an extensions-disabled/incognito profile would remove this confound; a changed
+number here between captures should not be read as an MSA regression or improvement.
+
+**Two measurement bugs this petition caught in its own first draft, before they could ship into a
+holy document — recorded because the mistake is instructive, not just the fix:** (1) a `ts:0`
+metadata event (`process_name`/`thread_name`, common in Chrome traces) dragged a naive min/max scan
+into reporting a **428-million-millisecond** trace duration instead of the real 11.292 s, until
+cross-checked against the trace's own DevTools-recorded breadcrumb window and against duration-
+bearing events only. (2) summing event durations per GPU thread by name, ignoring nesting, produced
+a physically impossible **174.6%** utilization figure for `CrGpuMain` — fixed by merging overlapping
+`[ts, ts+dur)` intervals per thread instead of summing them, the only way to get a true ≤100% busy
+figure when parent and child spans coexist on one thread. Neither number above is the pre-fix one.
+
+**Requested of Fable:**
+1. Whether "exclude the first ~1.2–1.5 s of any DevTools capture (JS-profiler attach cost)"
+   belongs as a standing methodology note somewhere durable — a memory beside
+   [[feedback_playwright_fps_not_yet_trustworthy]], or wherever future author-captured traces will
+   be read next.
+2. Whether Finding 4's open question (is `buildMaskAuthorityReport`/`describeRenderMode` on a
+   live-polled HUD interval, or on-demand only) is worth a one-session call-counter to settle, or
+   small enough (≤0.4% self-time each) to leave alone.
+3. Whether `buildOneLightSource` (candle geometry) earns its own `perf-zones.js` zone now that it's
+   the second-largest MSA-authored self-time cost this profile surfaces.
+4. Whether future ad hoc DevTools captures should be paired with a simultaneous MSA
+   `perf-run-full`/`perf-report` run for the SAME interaction, so a future trace's GPU-busy time can
+   be attributed to a specific MSA pass instead of stopping at "the GPU thread was busy."
+5. The two self-caught measurement bugs recorded above — worth a line in
+   [[feedback_instruments_must_not_lie]], or left as this petition's own record.
+
+*(The two Node scripts used to produce these numbers are disposable session scratch, not committed
+— gunzip + trace-event aggregation, rewritten once mid-session after catching the two bugs above.
+Not proposed as a permanent `tools/` addition unless Fable or the author wants one.)*
+
 **P-005 — CORRECTION: the "vertex-stage uniformArray defect" P-004's addenda relied on was never
 real; it was a Y-flip bug in the bench's own pixel sampler.** Filed by Claude Sonnet 5, 2026-08-11,
 acting as a worker under the Covenant. Not a plan change — a factual retraction, filed as its own

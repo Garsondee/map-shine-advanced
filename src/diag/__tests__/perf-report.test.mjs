@@ -1053,6 +1053,130 @@ export function run(t) {
       !pipelineAbsent.some((f) => f.id === 'pipeline-programs-grew')
     );
 
+    // SHADER-REBUILD CHURN (2026-08-11) — the general-purpose version of the
+    // check above: watches three's own node-graph cache directly, so it
+    // catches a rebuild regardless of which subsystem caused it, unlike
+    // depth-proxy-pool-health which can only see churn INSIDE that one pool.
+    const churning = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      shaderRebuildStats: {
+        installed: true,
+        calls: 1397,
+        hits: 632,
+        misses: 765,
+        labelsDropped: 0,
+        labels: [
+          { label: 'Mesh/NodeMaterial', misses: 765, materialChanged: 763, nodesChanged: 1, distinctCacheKeys: 512 },
+        ],
+      },
+    });
+    const churnFinding = churning.find((f) => f.id === 'shader-rebuild-churn');
+    ok('a real repeat-rebuild is surfaced', churnFinding !== undefined);
+    ok(
+      '...at HIGH severity unconditionally — a repeat rebuild is never a cold start',
+      churnFinding.severity === 'high'
+    );
+    ok('...naming the worst label', churnFinding.text.includes('Mesh/NodeMaterial'));
+    ok(
+      '...and identifying the cause as a NEW material object, with the pooling fix',
+      churnFinding.text.includes('NEW material object') && churnFinding.text.includes('pool')
+    );
+    ok(
+      '...warning that renderer.info.programs will NOT show this',
+      churnFinding.text.includes('programs will NOT show')
+    );
+    ok(
+      'evidence carries the raw counts',
+      churnFinding.evidence.materialChanged === 763 && churnFinding.evidence.nodesChanged === 1
+    );
+
+    // The OTHER shape: same material, rebuilt nodes — pooling would not help,
+    // and the finding's own fix text must say so, not repeat the pooling advice.
+    const nodesChurning = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      shaderRebuildStats: {
+        installed: true,
+        calls: 10,
+        hits: 0,
+        misses: 3,
+        labelsDropped: 0,
+        labels: [
+          { label: 'canopy/NodeMaterial', misses: 3, materialChanged: 0, nodesChanged: 2, distinctCacheKeys: 3 },
+        ],
+      },
+    });
+    const nodesFinding = nodesChurning.find((f) => f.id === 'shader-rebuild-churn');
+    ok('the same-material-new-nodes shape is also caught', nodesFinding !== undefined);
+    ok(
+      '...and its fix text says pooling would NOT help, rather than repeating the pooling advice',
+      nodesFinding.text.includes('pooling the material would change nothing')
+    );
+
+    // A cold-start-only window (every label's first-ever miss, never a
+    // repeat) must NOT trip this — the probe's own classification already
+    // excludes the first miss, but the finding must not re-derive it wrong.
+    const coldOnly = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      shaderRebuildStats: {
+        installed: true,
+        calls: 40,
+        hits: 0,
+        misses: 40,
+        labelsDropped: 0,
+        labels: [
+          { label: 'tile/NodeMaterial', misses: 40, materialChanged: 0, nodesChanged: 0, distinctCacheKeys: 40 },
+        ],
+      },
+    });
+    ok(
+      'a probe that saw only first-ever misses (no repeats) raises no finding',
+      !coldOnly.some((f) => f.id === 'shader-rebuild-churn')
+    );
+
+    // A probe that never armed (harness didn't implement the hook) must not
+    // fabricate a finding from missing data.
+    const churnAbsent = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      shaderRebuildStats: null,
+    });
+    ok(
+      'no shaderRebuildStats at all raises no finding (absence, not a zero)',
+      !churnAbsent.some((f) => f.id === 'shader-rebuild-churn')
+    );
+
+    // A probe that armed but found a fully healthy window (only cold-start
+    // misses, or pure hits) must also stay quiet.
+    const churnHealthy = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      shaderRebuildStats: { installed: true, calls: 100, hits: 100, misses: 0, labelsDropped: 0, labels: [] },
+    });
+    ok('a fully healthy window raises no finding', !churnHealthy.some((f) => f.id === 'shader-rebuild-churn'));
+
     // A declared cost the measurement contradicts.
     const overEffects = attributeZonesToEffects({
       rows: buildZoneRows({ zones: ZONES, frames: 100, zoneStats: [zs('bloom.bright', { gpu: acc(1000, 100, 12) })] }),

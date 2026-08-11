@@ -1335,6 +1335,45 @@ yet. Full detail and honest caveats: archived report §6/§7.
 
 ---
 
+### ✅ ADDENDUM 2, same investigative thread, new session — the shader-rebuild culprit found, fixed,
+### confirmed live; plus a general fix for how it hid, and a second related finding
+
+*Prompted by three real Chrome traces the author captured, all showing 40-67% of a frame inside
+three's `NodeBuilder.build()`. Full record, all evidence, all code cited:
+`docs/planning/Shader-Rebuild-Investigation-2026-08-11.md`. Summary only, here.*
+
+**The culprit:** `rebuildSceneDepthProxies`'s vegetation branch — deliberately excluded from
+DEFERRED-S1b's material pool one commit earlier, in this same session, citing "0.9% of the total
+rebuild cost." That number measured constructing the material; it never measured the consequence
+one pass later, in a different zone, where the graph rebuild actually lands — the exact
+"small zone timing hides a large downstream cost" trap this same session's own residency audit had
+just named. **Fixed**: the position node is now cached per overlay, the pool's signature now
+requires (and throws without) an explicit `variantKey` for any positionNode-bearing material so two
+canopies can never silently alias. **Confirmed with a real re-trace**: ~8.3ms steady frames,
+~120fps, up from the 13fps a 72.1ms frame implied before.
+
+**The author's own critical finding, generalized past this one bug:** *"why the hell haven't we
+been seeing useful, loud, informative errors generated as a result of the cache not working?"* The
+pool's own hit-rate finding already existed and still didn't catch this, because a health check
+scoped to one pool is structurally blind to code routed around it. Fixed generally: a new
+`diag/shader-rebuild-probe.js` watches three's shader cache directly (not any one pool's proxy for
+it), now **armed automatically** in every `perf-run-full` (same lifecycle as the GPU zone timer),
+with an unconditional high-severity `shader-rebuild-churn` finding. Standing rule recorded in
+memory: `feedback_pool_health_needs_a_loud_gate`.
+
+**A second, related finding from the SAME confirming trace:** point-light wall-clipping
+(`readActiveLightSources` → Foundry's own `ClockwiseSweepPolygon`) had no cache at all, unlike its
+candle/lightning siblings — recomputing a full wall-sweep from scratch every frame for every light
+Foundry's darkness gate disagreed with MSA's own model about (routine in Aesthetic mode, the
+default). Measured at 9.9% of the confirming trace, the new #1 cost once the shader-rebuild fix
+landed. Fixed the same session, stricter than its candle precedent (also invalidates on
+position/angle/rotation, since a real light — unlike a candle — can be attached to a moving token).
+**Not yet confirmed by a trace** — fixed by construction and 13 new unit tests only.
+
+`npm run verify` green throughout, **8,593 tests** (from 8,509 at this addendum's start).
+
+---
+
 **P-007 — A committed trace-analysis tool, and the finding it found: TSL shader-graph REBUILDS are
 running during rendering, sustained, at 10.7% of the main thread — independently confirming the
 "unwanted pipeline recompilation" hypothesis round 6 instrumented and never got an answer for.**

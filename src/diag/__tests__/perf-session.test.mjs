@@ -152,6 +152,59 @@ export async function run(t) {
     );
   }
 
+  // ---- SHADER-REBUILD PROBE: armed after settling, disarmed before restore -
+  {
+    const h = fakeHarness({
+      setShaderRebuildProbe(on) {
+        this._calls.push(['setShaderRebuildProbe', on]);
+      },
+      readShaderRebuildStats: () => ({ installed: false, calls: 0, hits: 0, misses: 0, labels: [] }),
+      hideLiveUi() {
+        this._calls.push(['hideLiveUi']);
+      },
+      restoreLiveUi() {
+        this._calls.push(['restoreLiveUi']);
+      },
+    });
+    const report = await runProfileSession(h, { settleFrames: 30, measureFrames: 120 });
+    const seq = h._calls.map((c) => c[0]);
+    ok('the probe is armed when the harness implements it', seq.includes('setShaderRebuildProbe'));
+    ok(
+      'it arms AFTER settling, alongside the GPU zone timer — never before',
+      seq.indexOf('setShaderRebuildProbe') > seq.indexOf('waitFrames')
+    );
+    const armCall = h._calls.find((c) => c[0] === 'setShaderRebuildProbe' && c[1] === true);
+    const disarmCall = h._calls.find((c) => c[0] === 'setShaderRebuildProbe' && c[1] === false);
+    ok('it arms with true', armCall !== undefined);
+    ok('...and disarms with false, exactly once each', disarmCall !== undefined);
+    ok(
+      'disarm happens before the UI is restored, same ordering as every other instrument',
+      seq.indexOf('setShaderRebuildProbe', seq.indexOf('setShaderRebuildProbe') + 1) < seq.indexOf('restoreLiveUi')
+    );
+    ok('the stats are read into the report', report.instrument.shaderRebuildStats !== undefined);
+  }
+
+  // ---- a harness WITHOUT the probe hook still works — it is optional --------
+  {
+    const h = fakeHarness();
+    ok('the default fake harness defines no shader-rebuild hooks', h.setShaderRebuildProbe === undefined);
+    const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    ok('a harness without the probe still produces a report', report.report === 'perf-profile');
+    ok('...with an absent (not fabricated-zero) shaderRebuildStats', report.instrument.shaderRebuildStats === null);
+  }
+
+  // ---- a failing probe disarm does not mask the original error, nor the run -
+  {
+    const h = fakeHarness({
+      setShaderRebuildProbe(on) {
+        this._calls.push(['setShaderRebuildProbe', on]);
+        if (on === false) throw new Error('probe disarm exploded');
+      },
+    });
+    const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    ok('a failing probe disarm does not fail the whole run', report.report === 'perf-profile');
+  }
+
   // ---- a harness with NEITHER hook still works — both are optional ----------
   {
     const h = fakeHarness();

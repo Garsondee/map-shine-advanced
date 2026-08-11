@@ -774,6 +774,34 @@ export function createPointLightPool({
    * avoids recomputing the wall sweep every single frame a bolt flickers). */
   const lightningWallClipCache = new Map();
 
+  /**
+   * sourceId -> {floorId, x, y, radius, angle, rotation, points, source,
+   * reason} — the THIRD sibling of `candleWallClipCache` (2026-08-11, found
+   * via the shader-rebuild trace investigation; a real but separate bug from
+   * the one that investigation was chasing).
+   *
+   * `readActiveLightSources` (`foundry/scene-lights.js`) calls
+   * `computeLightWallClippedShape` for every real placed light Foundry's own
+   * darkness gate disabled but MSA's darkness model says should stay on (the
+   * "Aesthetic mode disagrees with Foundry's darkness verdict" fix — see that
+   * file's own header). Unlike the candle/lightning call sites, that call had
+   * NO cache around it at all: on a scene where Foundry's gate and MSA's
+   * model disagree for most/all real lights (routine in Aesthetic mode, the
+   * default), every one of them re-ran Foundry's own `ClockwiseSweepPolygon`
+   * sweep — vertex identification, edge identification, boundary
+   * constraints — from scratch, every single frame. Live-measured at 9.9% of
+   * a frame in a Chrome trace, the new #1 cost once the shader-rebuild fix
+   * landed.
+   *
+   * Invalidated on floor OR radius, matching the candle cache's own
+   * precedent, PLUS position/angle/rotation, which candles' cache does not
+   * check: a candle is a static anchor, but a real Foundry light can be
+   * attached to a moving token, and skipping a position check here would
+   * silently render a moving light's wall-clip from its OLD position — a
+   * correctness bug the candle precedent structurally cannot have.
+   */
+  const regularLightWallClipCache = new Map();
+
   /** {floorId, wallVersion, segments}|null — the aperture-flagged wall
    * segment list, recomputed only when the current floor or the wall
    * structure (createWall/updateWall/deleteWall, via `getApertureWallVersion`)
@@ -845,10 +873,33 @@ export function createPointLightPool({
     // LIGHT. env.time.tMs is the ONE clock (time/one-clock wall) — no new
     // performance.now() anywhere in this pass.
     uGlobalTimeMs.value = env.time.tMs;
+    // Hoisted above its previous single use (candles' own wall-clip cache,
+    // below) so `readActiveLightSources` can also key its OWN wall-clip cache
+    // by the SAME floor value — one read, both consumers, never two floor
+    // values disagreeing about which is "current" this frame.
+    const currentFloorId = currentFloor?.id ?? null;
     // darkness01 gates each light's OWN activation window (LightData.darkness
     // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
-    // header for why this lives in the reader, not here).
-    const { lights: foundryLights } = readActiveLightSources(darkness01);
+    // header for why this lives in the reader, not here). `regularLightWallClipCache`
+    // (this closure's own declaration has the full mechanism/why) is what
+    // stops the darkness-mismatch recompute path inside it from re-running
+    // Foundry's ClockwiseSweepPolygon from scratch every frame.
+    const { lights: foundryLights, seenSourceIds: seenLightSourceIds } = readActiveLightSources(darkness01, {
+      wallClipCache: regularLightWallClipCache,
+      floorId: currentFloorId,
+    });
+    // Prune against `seenSourceIds`, NOT the filtered `foundryLights` — same
+    // reasoning as the lightning cache's own prune a few dozen lines down,
+    // but deliberately the WIDER set: a light merely outside its own
+    // darkness01 window this frame is still real and must keep its cache
+    // entry (see readActiveLightSources' own doc for why the two sets
+    // differ). Only a light gone from `seenSourceIds` entirely — genuinely
+    // deleted — should be evicted.
+    if (regularLightWallClipCache.size && seenLightSourceIds) {
+      for (const id of regularLightWallClipCache.keys()) {
+        if (!seenLightSourceIds.has(id)) regularLightWallClipCache.delete(id);
+      }
+    }
     // THE HEIGHT/ELEVATION GATE's OWN per-frame floor lookup — RETIRED here
     // (STAGE 2, 2026-08-04): `resolveExpectedDepth` (injected) resolves
     // straight from `depthAuthority`'s already-rebuilt rank table, no
@@ -880,8 +931,8 @@ export function createPointLightPool({
     // never a light that vanishes). `currentFloor` is the SAME value region-
     // darkness elevation-filtering already computed this frame — reused, never
     // re-derived, so a candle's wall-clip and the region-darkness pass can
-    // never disagree about which floor is active.
-    const currentFloorId = currentFloor?.id ?? null;
+    // never disagree about which floor is active — see the hoisted
+    // `currentFloorId` declaration above, shared with `readActiveLightSources`.
     for (const candle of candleLights) {
       let cached = candleWallClipCache.get(candle.sourceId);
       if (!cached || cached.floorId !== currentFloorId || cached.radius !== candle.radius) {

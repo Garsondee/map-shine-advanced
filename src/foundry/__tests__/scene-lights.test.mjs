@@ -7,7 +7,12 @@
  * `canvas.scene.environment.globalLight` reads are browser-only (verified
  * via a debug report, not here).
  */
-import { deriveLightSnapshot, deriveGlobalLightConfig, isDarknessOnlyDisable } from '../scene-lights.js';
+import {
+  deriveLightSnapshot,
+  deriveGlobalLightConfig,
+  isDarknessOnlyDisable,
+  wallClipCacheEntryMatches,
+} from '../scene-lights.js';
 
 /** A valid triangle around the origin — 3 vertices, 6 numbers, even length. */
 const TRIANGLE = [-100, -100, 100, -100, 0, 100];
@@ -436,5 +441,60 @@ export function run(t) {
   ok(
     'a non-finite darkness01 floors to 0, same convention as deriveLightSnapshot',
     deriveGlobalLightConfig({ enabled: true, darknessMin: 0, darknessMax: 1 }, NaN) !== null
+  );
+
+  // ==========================================================================
+  // wallClipCacheEntryMatches — the pure decision behind the 2026-08-11 fix.
+  // A real trace showed computeLightWallClippedShape (Foundry's own
+  // ClockwiseSweepPolygon sweep) re-running from scratch every frame for
+  // every darkness-mismatched light, with no cache at all — 9.9% of a frame
+  // in the live capture. This is the caching decision that closes it; get it
+  // wrong in either direction and the fix either does nothing (too strict) or
+  // renders a stale shape (too loose).
+  // ==========================================================================
+  const FACTS = Object.freeze({ floorId: 'floor-0', x: 100, y: 200, radius: 400, angle: 360, rotation: 0 });
+
+  ok(
+    'no cached entry at all (first ever sighting) is never a match',
+    wallClipCacheEntryMatches(undefined, FACTS) === false
+  );
+  ok('null is treated the same as undefined', wallClipCacheEntryMatches(null, FACTS) === false);
+  ok('identical facts match', wallClipCacheEntryMatches({ ...FACTS, points: [1, 2, 3, 4, 5, 6] }, FACTS) === true);
+
+  // ---- each field independently invalidates — this is the whole contract --
+  for (const field of ['floorId', 'x', 'y', 'radius', 'angle', 'rotation']) {
+    const changed = { ...FACTS, [field]: field === 'floorId' ? 'floor-1' : FACTS[field] + 1 };
+    ok(
+      `a changed ${field} invalidates the cache entry (the field candles' own cache does not check: x/y/angle/rotation)`,
+      wallClipCacheEntryMatches({ ...FACTS, points: [] }, changed) === false
+    );
+  }
+
+  // ---- THE MOVING-LIGHT CASE — the reason this cache checks more than the
+  // candle precedent (floor + radius only) ----------------------------------
+  ok(
+    'a light that MOVED (attached to a token) invalidates on position alone, even with everything else unchanged',
+    wallClipCacheEntryMatches({ ...FACTS, points: [] }, { ...FACTS, x: FACTS.x + 50 }) === false
+  );
+
+  // ---- NaN handling — a real, documented possibility for `angle` ----------
+  // (isDarknessOnlyDisable's own `Number.isFinite(angle)` guard exists
+  // because angle can genuinely be non-finite for some light configs.)
+  {
+    const nanAngle = { ...FACTS, angle: NaN };
+    ok(
+      'a NaN angle matches a PRIOR NaN angle (Object.is, not ===, so NaN reads as unchanged rather than perpetually different)',
+      wallClipCacheEntryMatches({ ...nanAngle, points: [] }, nanAngle) === true
+    );
+    ok(
+      'a NaN angle does NOT match a real numeric one',
+      wallClipCacheEntryMatches({ ...FACTS, angle: NaN, points: [] }, FACTS) === false
+    );
+  }
+
+  // ---- a floor value of `null` (no active floor) must still work, not throw
+  ok(
+    'floorId:null on both sides matches (a scene with no floor concept still caches correctly)',
+    wallClipCacheEntryMatches({ ...FACTS, floorId: null, points: [] }, { ...FACTS, floorId: null }) === true
   );
 }

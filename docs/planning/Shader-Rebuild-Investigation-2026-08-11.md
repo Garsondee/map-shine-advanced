@@ -1,6 +1,8 @@
 # The Shader-Rebuild Investigation — 2026-08-11
 
-**Status: CULPRIT NAMED by measurement, and FIXED. Awaiting the author's re-trace to confirm the win.**
+**Status: CULPRIT NAMED, FIXED, and CONFIRMED by a real re-trace (~120fps steady, §6).**
+**Plus: a general fix for how this kind of bug hides (§7), and a second, related finding from the
+same confirming trace, fixed but not yet re-traced (§8).**
 
 > **ANSWER (added after the probe ran).** The author armed the probe, panned, and read:
 > `{calls: 1397, hits: 632, misses: 765, labels: [{label: "Mesh/NodeMaterial", misses: 765,`
@@ -257,28 +259,113 @@ miss* — meaning the work is redundant by construction, not inherent.
 
 ---
 
-## 6. Open items
+## 6. THE FIX CONFIRMED — a real trace, ~9x fewer hangs, ~120fps steady
+
+The author re-traced after the vegetation-pooling fix (§4a) landed. Frame times in the new capture
+sit at a **steady 8.2-8.5ms**, essentially every frame — roughly **120fps**, up from the 13fps a
+72.1ms frame implied before. `NodeBuilder.build()` no longer dominates the profile at all.
+
+## 7. THE SILENT-FAILURE PROBLEM — the author's own critical call-out
+
+Immediately after confirming the win, the author raised a sharper point, generalized past this one
+bug: *"why the hell haven't we been seeing useful, loud, informative errors generated as a result
+of the cache not working?"* A cache that silently reverts to its slow path produces CORRECT pixels
+and WRONG performance — no test catches that, no crash announces it. This project's own
+`depthProxyMaterialPool.stats()` and its `depth-proxy-pool-health` finding already existed and
+still didn't catch the vegetation bug, for two compounding reasons: the accessor bug (§ P-008's own
+Finding 4) left the finding's input `null` in every real report, AND — the sharper point — a
+health check scoped to "inside this one pool" is structurally blind to code that was never routed
+through the pool at all, which is exactly what the vegetation exclusion was.
+
+**Fixed, generalized rather than patched once:**
+
+- `perf-session.js` now arms `shader-rebuild-probe.js` **automatically** for every measured
+  window (same lifecycle as the GPU zone timer — armed after settling, disarmed in the `finally`),
+  not a manual console step someone has to remember exists.
+- `perf-report.js` gained a `shader-rebuild-churn` finding, **`'high'` severity unconditionally**
+  (the probe's own classification already excludes each label's first, expected miss, so anything
+  it reports is by construction a repeat rebuild this window — no cold-start ambiguity to hedge
+  against, unlike `depth-proxy-pool-health`'s `'medium'`).
+- The instrument watches three's OWN node-graph cache directly (`Nodes.getForRender`), not any one
+  pool's proxy for it — so it catches churn regardless of which subsystem causes it, closing the
+  exact blind spot that let the vegetation bug hide.
+- Full account, generalized past this one bug into a standing rule for every future pool this
+  project builds: `[[feedback_pool_health_needs_a_loud_gate]]` (memory).
+
+`npm run verify` green throughout, 8,580 tests at this point.
+
+## 8. SECOND FINDING FROM THE SAME TRACE — point-light wall-clip, uncached
+
+The confirming trace's own new #1 cost (`point-light-pool.js#update`, 17.2% of the sampled window;
+its `readActiveLightSources` → `computeLightWallClippedShape` → Foundry's `ClockwiseSweepPolygon`
+chain alone, 9.9%) was a second, genuinely separate bug, found by reading the code the trace
+pointed at rather than guessed from the percentage alone.
+
+**Mechanism, verified against source, not assumed:** `readActiveLightSources`
+(`foundry/scene-lights.js`) recomputes a light's TRUE wall-clipped shape whenever Foundry's own
+darkness gate disabled it but MSA's own darkness model (the "Aesthetic mode" default) says it
+should stay on — a real, needed, already-correct fix for a real bug (see that file's own header).
+But unlike its candle/lightning siblings in `point-light-pool.js` (`candleWallClipCache`,
+`lightningWallClipCache`), that call had **no cache around it at all**. On a scene where Foundry's
+gate and MSA's model disagree for most/all real lights — routine in Aesthetic mode, the default —
+every one of them re-ran Foundry's own vertex-identification/edge-identification/sweep pipeline
+from scratch, every single frame.
+
+**Fixed, same session:** a third sibling cache, `regularLightWallClipCache`, threaded into
+`readActiveLightSources` via an optional `{wallClipCache, floorId}` param (the function stays pure
+and correct without one — the old always-recompute behaviour — so nothing that already calls it
+without the new option breaks). Deliberately **stricter** than the candle/lightning precedent it
+extends: invalidated on floor and radius (matching them) **plus position, angle, and rotation**,
+which they do not check — a candle is a static anchor, but a real Foundry light can be attached to
+a moving token, and skipping a position check would have silently rendered a moving light's
+wall-clip from wherever it used to be. Pruned against a NEW `seenSourceIds` set `
+readActiveLightSources` now also returns — deliberately wider than its own `lights` output, so a
+light merely cycling outside its darkness window this frame (still real, still tracked by Foundry)
+is never confused with a light that was actually deleted; only the second should evict a cache
+entry. NaN-safe (`Object.is`, not `===`) since `angle` can genuinely be non-finite for some light
+configs (`isDarknessOnlyDisable`'s own `Number.isFinite` guard exists for the same reason).
+
+The caching *decision* was extracted as a pure, exported `wallClipCacheEntryMatches(cached,
+current)` — `readActiveLightSources` itself stays browser-only/live-verified by this file's own
+established convention (its test file's own header says so), but the decision most likely to hide
+a subtle off-by-one bug is now Node-tested directly: 13 new assertions, including the NaN case and
+the moving-light case.
+
+`npm run verify` green, **8,593 tests**. **Not yet confirmed by a trace** — verified by construction
+and unit test only, same honest caveat as §4a's fix carried before its own confirmation landed.
+
+## 9. Open items
 
 - ~~Run the probe and name the culprit~~ — **DONE**, see §4a.
 - ~~Fix it~~ — **DONE**, see §4a's fix list.
-- **[NEXT] Confirm the win.** Re-arm the probe, pan, expect `misses` near zero; then a fresh trace
-  to see `NodeBuilder.build()` fall out of the profile. Confirm with a **trace**, never with
-  `programs` (see §2's warning — it was flat throughout the bug and will stay flat after the fix).
-- **[NEXT] Check the canopies still sway**, and sway correctly per-item. The pool's `variantKey`
-  guard makes cross-canopy aliasing unrepresentable, but "the animation still runs at all" is a
-  screen verdict, not a unit test — this touched the node that drives it.
-- The single unexplained `nodesChanged: 1` from the probe reading (§4a).
+- ~~Confirm the win with a trace~~ — **DONE**, see §6: ~8.3ms steady, ~120fps.
+- ~~Make pool/cache health loud automatically~~ — **DONE**, see §7.
+- ~~Chase the trace's new #1 cost (point-light wall-clip)~~ — **DONE, code-level**, see §8. Fixed
+  by construction and unit test; **not yet confirmed by a trace** — the same honest gap §4a's fix
+  carried before its own confirmation landed.
+- **[NEXT] Confirm §8's fix with a trace.** Same discipline as before: a trace, never
+  `renderer.info.programs`-style proxies — this specific fix has no such proxy metric at all yet,
+  which is itself worth noting; `computeLightWallClippedShape`'s own call count would be the
+  natural one if this class of fix recurs.
+- **[NEXT] Check the canopies still sway**, and sway correctly per-item (§4a's fix). The pool's
+  `variantKey` guard makes cross-canopy aliasing unrepresentable, but "the animation still runs at
+  all" is a screen verdict, not a unit test — this touched the node that drives it.
+- **[NEXT] Check moving lights** (§8's fix) — a light attached to a moving token should track
+  smoothly; the position-invalidation logic is unit-tested but its real-world trigger (a token
+  actually moving with a light attached) has not been observed live.
+- The single unexplained `nodesChanged: 1` from the §4a probe reading — still unexplained, not
+  re-investigated this round.
 - Unresolved from earlier rounds and NOT re-opened here: the 20 worst hitches (250-667 ms) with
   provably idle decode/cache, still unexplained
   (`Residency-Streaming-Audit-2026-08-11.md` §5).
 - `mask-authority.js` shows real per-frame self time in trace #2 (`requiredMissingAuthoredIds`
   38.3 ms, `sampleWorld` 28.8 ms) and `candle-flame-geometry.js#buildOneLightSource` 36.1 ms. Small
   beside the shader rebuild, but they are per-frame costs in code that reads like it should be
-  cached. Worth a look **after** the main finding is fixed, not before.
+  cached. Worth a look **after** the fixes above are confirmed, not before.
 
 ---
 
-## 7. A note on method, recorded deliberately
+## 10. A note on method, recorded deliberately
 
 Rounds 1-4 each ended with a plausible mechanism, read from real source, that turned out not to be
 what was happening. The pattern in all four: *a mechanism that COULD produce the symptom was treated

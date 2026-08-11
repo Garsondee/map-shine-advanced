@@ -313,6 +313,47 @@ export function isDarknessOnlyDisable({ attached, suppressed, hidden, radius, an
 }
 
 /**
+ * Is a cached wall-clip result still good for THIS light, right now? Pure and
+ * Node-testable by design, same split as `isDarknessOnlyDisable` above: the
+ * live gatherer (`readActiveLightSources`) plucks the current facts off a
+ * live source and hands them here; this function makes the actual call.
+ *
+ * Checks floor and radius (matching the candle-light cache's own precedent,
+ * `point-light-pool.js#candleWallClipCache`) PLUS position and rotation,
+ * which that precedent does not check — a candle is a static anchor, but a
+ * real Foundry light can be attached to a moving token, and skipping a
+ * position check would silently render a moving light's wall-clip shape from
+ * wherever it USED to be.
+ *
+ * @param {{floorId: string|null, x: number, y: number, radius: number,
+ *   angle: number, rotation: number, points: number[]}|undefined} cached -
+ *   whatever `wallClipCache.get(sourceId)` returned; `undefined` (never
+ *   cached, or a prior call had no cache to write to) is handled the same as
+ *   any other mismatch.
+ * @param {{floorId: string|null, x: number, y: number, radius: number,
+ *   angle: number, rotation: number}} current - the light's facts THIS frame.
+ * @returns {boolean}
+ */
+export function wallClipCacheEntryMatches(cached, { floorId, x, y, radius, angle, rotation }) {
+  if (!cached) return false;
+  // Object.is, not ===: `angle`/`rotation` can genuinely be NaN for some
+  // light configs (isDarknessOnlyDisable's own `Number.isFinite(angle)`
+  // guard exists because of this). Plain `===` treats NaN as never equal to
+  // itself, which would make a NaN-angle light's cache entry look invalid on
+  // EVERY read even when truly unchanged — defeating the cache permanently
+  // for exactly the lights most likely to hit this path. `Object.is` is the
+  // one comparison in JS where `NaN` correctly reads as equal to `NaN`.
+  return (
+    cached.floorId === floorId &&
+    Object.is(cached.x, x) &&
+    Object.is(cached.y, y) &&
+    Object.is(cached.radius, radius) &&
+    Object.is(cached.angle, angle) &&
+    Object.is(cached.rotation, rotation)
+  );
+}
+
+/**
  * Live read of every active, non-global point light source currently within
  * its own darkness activation window. Never throws — a Foundry API surprise
  * here must never take a render frame down with it (same reasoning as
@@ -322,22 +363,42 @@ export function isDarknessOnlyDisable({ attached, suppressed, hidden, radius, an
  *   SAME env snapshot the caller already built this frame — see this
  *   module's header for why an unreadable value floors to 0 rather than
  *   blocking every light.
+ * @param {object} [opts]
+ * @param {Map<string,object>} [opts.wallClipCache] - sourceId -> cached
+ *   wall-clip result, OWNED BY THE CALLER (point-light-pool.js's
+ *   `regularLightWallClipCache` — see its own declaration for the full
+ *   mechanism/why). Optional and pure without it: a caller that doesn't pass
+ *   one gets the old always-recompute behaviour, never a crash. This module
+ *   stays pure either way — it never creates or retains the cache itself.
+ * @param {string|null} [opts.floorId] - required alongside `wallClipCache`;
+ *   part of the cache's own invalidation key, same floor value the caller
+ *   already resolved this frame (never re-derived here).
  * @returns {{lights: Array<NonNullable<ReturnType<typeof deriveLightSnapshot>>>,
- *   source: 'scene'|'default', reason: string|null}}
+ *   source: 'scene'|'default', reason: string|null,
+ *   seenSourceIds: Set<string>}} `seenSourceIds` is every id THIS FUNCTION
+ *   looked at, before `deriveLightSnapshot`'s own darkness-window filter —
+ *   deliberately wider than `lights`, so a caller pruning `wallClipCache`
+ *   against it does not evict a still-real light's cache entry just because
+ *   this particular frame's darkness01 put it outside its own window (a light
+ *   that cycles in/out of its window is not the same event as a light being
+ *   deleted, and only the second one should evict a cache entry).
  */
-export function readActiveLightSources(darkness01) {
+export function readActiveLightSources(darkness01, { wallClipCache = null, floorId = null } = {}) {
   try {
     const collection = typeof canvas !== 'undefined' ? (canvas?.effects?.lightSources ?? null) : null;
     if (!collection) {
       return {
         lights: [],
         source: 'default',
+        seenSourceIds: new Set(),
         reason: 'no active scene (canvas.effects.lightSources is absent) — reading as zero lights, not guessed',
       };
     }
     const lights = [];
+    const seenSourceIds = new Set();
     for (const source of collection) {
       if (!source || source.sourceId === 'globalLight') continue;
+      seenSourceIds.add(source.sourceId);
       // `source.active` bakes Foundry's OWN darkness-activation verdict in
       // alongside hidden/zero-radius/suppressed (BaseEffectSource#active) —
       // see this module's header for why that can't be trusted wholesale.
@@ -356,19 +417,54 @@ export function readActiveLightSources(darkness01) {
         // source.shape.points is genuinely degenerate — recompute the TRUE
         // wall-clipped shape ourselves, the same technique already proven
         // for candle lights (scene-wall-clip.js).
-        const recomputed = computeLightWallClippedShape({
+        //
+        // CACHED (2026-08-11) — this call had no cache at all before, unlike
+        // its candle/lightning siblings in point-light-pool.js: on a scene
+        // where Foundry's darkness gate and MSA's own model disagree for
+        // most/all real lights (routine in Aesthetic mode, the default),
+        // EVERY one of them re-ran Foundry's ClockwiseSweepPolygon sweep from
+        // scratch, every frame — measured at 9.9% of a frame in a live Chrome
+        // trace. `wallClipCache` is optional so this function stays pure and
+        // correct without it (the old behaviour); a caller that supplies one
+        // gets the speedup. Position/angle/rotation are checked, not just
+        // floor/radius (the candle cache's own bar) — a real light can be
+        // attached to a moving token, and skipping that check would silently
+        // render a moving light's wall-clip from its OLD position.
+        const cached = wallClipCache?.get(source.sourceId);
+        const stillValid = wallClipCacheEntryMatches(cached, {
+          floorId,
           x: source.x,
           y: source.y,
           radius: source.radius,
           angle: source.data?.angle,
           rotation: source.data?.rotation,
-          walls: source.data?.walls,
-          externalRadius: source.data?.externalRadius,
-          priority: source.data?.priority,
-          level: source.level,
-          source,
         });
+        const recomputed = stillValid
+          ? cached
+          : computeLightWallClippedShape({
+              x: source.x,
+              y: source.y,
+              radius: source.radius,
+              angle: source.data?.angle,
+              rotation: source.data?.rotation,
+              walls: source.data?.walls,
+              externalRadius: source.data?.externalRadius,
+              priority: source.data?.priority,
+              level: source.level,
+              source,
+            });
         if (!recomputed.points) continue; // could not safely recompute — safety-slide to "off", never guess
+        if (!stillValid && wallClipCache) {
+          wallClipCache.set(source.sourceId, {
+            floorId,
+            x: source.x,
+            y: source.y,
+            radius: source.radius,
+            angle: source.data?.angle,
+            rotation: source.data?.rotation,
+            points: recomputed.points,
+          });
+        }
         shapePoints = recomputed.points;
       }
       const snap = deriveLightSnapshot(
@@ -441,11 +537,12 @@ export function readActiveLightSources(darkness01) {
       );
       if (snap) lights.push(snap);
     }
-    return { lights, source: 'scene', reason: null };
+    return { lights, source: 'scene', reason: null, seenSourceIds };
   } catch (err) {
     return {
       lights: [],
       source: 'default',
+      seenSourceIds: new Set(),
       reason: `reading canvas.effects.lightSources threw: ${err?.message ?? err}`,
     };
   }

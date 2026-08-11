@@ -758,6 +758,7 @@ export function deriveFindings({
   gpuTimer,
   pipelineStats = null,
   depthProxyPoolStats = null,
+  shaderRebuildStats = null,
   sweepRequested = false,
   sweepMeasuredCount = 0,
   sweepNoiseFloorMs = null,
@@ -836,6 +837,55 @@ export function deriveFindings({
         id: 'depth-proxy-pool-health',
         text: `The depth-proxy material pool served ${hits} cache hit(s) and ${misses} miss(es) (${hitRatePct}% hit rate) during this window, evicting ${evictions} stale entr${evictions === 1 ? 'y' : 'ies'}. ${hitRatePct < 50 ? 'A hit rate under 50% during ordinary panning suggests something is still forcing a fresh material — check whether a variant (alwaysOpaque, floorIndex, flags) is flipping every pass rather than staying stable.' : "A healthy hit rate means rebuildSceneDepthProxies is reusing materials instead of paying a shader-graph rebuild for each one — see the Testament's DEFERRED-S1b for the mechanism this replaced."}`,
         evidence: { hits, misses, evictions, hitRatePct },
+      });
+    }
+  }
+  // SHADER-REBUILD CHURN (2026-08-11) — the general form of the check above:
+  // depth-proxy-pool-health can only see churn INSIDE that one pool, and the
+  // bug that motivated this ("vegetation was excluded from the pool, so its
+  // churn was invisible to the pool's own health check by definition") is
+  // exactly why a narrower instrument isn't enough. This one watches three's
+  // OWN shader-graph cache directly, so it catches a rebuild regardless of
+  // which subsystem caused it — pooled, unpooled, not built yet.
+  //
+  // NOT hedged the way depth-proxy-pool-health is: that finding stays at
+  // 'medium' because a cold-start burst of misses right after settling is
+  // expected and it cannot yet tell that apart from a real leak. This probe
+  // does not have that ambiguity — `materialChanged`/`nodesChanged` only ever
+  // count the SECOND-and-later miss for a given label (shader-rebuild-probe.js
+  // `recordMiss`: classification is skipped until there is a previous
+  // observation to compare against), so a nonzero value here is never a
+  // one-time settle cost. It is, by construction, a REPEAT rebuild of
+  // something that already built once this window — which a healthy pooled
+  // or stable material should never do. High severity, unconditionally.
+  if (shaderRebuildStats?.installed === true && Array.isArray(shaderRebuildStats.labels)) {
+    const churning = shaderRebuildStats.labels.filter((l) => l.materialChanged > 0 || l.nodesChanged > 0);
+    if (churning.length > 0) {
+      const worst = churning[0]; // the probe itself sorts worst-first
+      // NAME THE DOMINANT CAUSE, not every cause present. A label can carry a
+      // handful of stray nodesChanged alongside hundreds of materialChanged
+      // (or the reverse) — hedging with "both X and Y" every time a second
+      // count is merely nonzero reads as equally likely when one obviously
+      // dominates, and it is the DOMINANT one that decides which fix actually
+      // moves the number. Ties favour materialChanged: pooling still closes
+      // half the gap even on an even split, where "stop rebuilding nodes"
+      // alone would not touch the material-identity half at all.
+      const materialDominant = worst.materialChanged >= worst.nodesChanged;
+      const cause = materialDominant ? 'a NEW material object' : 'the SAME material with a rebuilt node graph';
+      const fix = materialDominant
+        ? 'pool/reuse the material (the shape vt/depth-proxy-material-pool.js already uses)'
+        : 'stop rebuilding its nodes — pooling the material would change nothing here';
+      out.push({
+        severity: 'high',
+        id: 'shader-rebuild-churn',
+        text: `${worst.label} rebuilt three's TSL node graph ${worst.materialChanged + worst.nodesChanged} time(s) beyond its first build this window — mostly ${cause} (${worst.materialChanged} material-changed, ${worst.nodesChanged} nodes-changed). Full NodeBuilder.build() is expensive (measured elsewhere in this project at 40-67% of a frame) and renderer.info.programs will NOT show this: three caches pipelines by generated shader source, so a regenerated-but-identical graph allocates no new program while still paying to be regenerated. Fix: ${fix}.`,
+        evidence: {
+          label: worst.label,
+          materialChanged: worst.materialChanged,
+          nodesChanged: worst.nodesChanged,
+          distinctCacheKeys: worst.distinctCacheKeys,
+          otherChurningLabels: churning.length - 1,
+        },
       });
     }
   }
@@ -1078,6 +1128,7 @@ export function buildPerfReport({
   gpuTimer = null,
   pipelineStats = null,
   depthProxyPoolStats = null,
+  shaderRebuildStats = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
   const megapixels =
@@ -1166,6 +1217,7 @@ export function buildPerfReport({
     gpuTimer,
     pipelineStats,
     depthProxyPoolStats,
+    shaderRebuildStats,
     sweepRequested: sweep !== null,
     sweepMeasuredCount,
     sweepNoiseFloorMs,
@@ -1253,13 +1305,24 @@ export function buildPerfReport({
       // use does not implement readDepthProxyPoolStats, not "the pool did
       // nothing" — see depth-proxy-material-pool.js's own header.
       depthProxyPoolStats,
+      // SHADER-REBUILD CHURN (2026-08-11) — three's OWN shader-graph cache,
+      // watched directly rather than through any one pool's proxy for it (see
+      // deriveFindings' own comment on `shader-rebuild-churn` for why a
+      // pool-scoped check alone was not enough: it cannot see churn in code
+      // that was never routed through that pool at all, which is exactly the
+      // shape of the bug this closed). `null` means the harness in use does
+      // not implement readShaderRebuildStats, not "no churn happened" — see
+      // shader-rebuild-probe.js's own header.
+      shaderRebuildStats,
       note:
         'These describe the INSTRUMENT, not the renderer. Non-zero unbalancedBrackets or poolOverflowed ' +
         'means some numbers above are missing or suspect — fix the instrument before drawing conclusions. ' +
         'pipelineStats.start vs .end: any growth in `programs` during a pan-only window means a pipeline is ' +
         'being recompiled that should already be cached — see findings[] for the threshold this crosses. ' +
         'depthProxyPoolStats.start vs .end: a low hit rate means the same class of rebuild is happening ' +
-        'downstream of the depth-proxy pool specifically — see findings[].',
+        'downstream of the depth-proxy pool specifically — see findings[]. shaderRebuildStats.labels: any ' +
+        'materialChanged/nodesChanged above zero is a REPEAT rebuild this window, not a cold start — see ' +
+        'findings[] for which label and which fix it implies.',
     },
     findings,
     interpretation: buildInterpretation({

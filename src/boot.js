@@ -2771,6 +2771,18 @@ function install() {
     // sibling note) and never propagated back into this wiring. Fixed to the
     // accessor that actually carries the field.
     readDepthProxyPoolStats: () => getVtPanViewerEarlyZComposition?.()?.depthProxyMaterialPool ?? null,
+    // SHADER-REBUILD CHURN (2026-08-11) — see shader-rebuild-probe.js's own
+    // header for the mechanism and `feedback_pool_health_needs_a_loud_gate`
+    // for why this is wired in AUTOMATICALLY rather than staying a manual
+    // console tool: the vegetation depth-proxy fix that closed one instance
+    // of this bug was only found by hours of Chrome-trace archaeology,
+    // because nothing watched the pool's own hit rate loudly enough to
+    // matter. Every perf-run-full now arms this for the measured window,
+    // same shape as setGpuZoneTimer — optional on the harness typedef, so a
+    // caller (or this file's own test fixtures) without it just measures
+    // without this instrument, same as every other optional hook here.
+    setShaderRebuildProbe: (on) => setVtPanViewerShaderRebuildProbe(on),
+    readShaderRebuildStats: () => getVtPanViewerShaderRebuilds(),
     // HIDE-WHILE-MEASURING, the pair — see debugPanelVisibleBeforeHide's own
     // declaration a few lines up for the full rationale. Both optional on the
     // ProfileHarness typedef, matching every other harness hook here

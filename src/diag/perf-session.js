@@ -230,6 +230,17 @@ export async function runProfileSession(harness, opts = {}) {
     // (CPU zones stay closed while `settleRemaining > 0`, frame-profiler.js).
     say('arming', 'starting the GPU zone timer');
     gpuTimer = harness.setGpuZoneTimer(true);
+    // SHADER-REBUILD CHURN (2026-08-11) — armed for every measured window from
+    // here on, not just when someone remembers to run it by hand from the
+    // console. See shader-rebuild-probe.js's own header for the mechanism this
+    // watches: a pool/cache whose hit rate silently collapses produces CORRECT
+    // pixels and WRONG performance, so nothing but this kind of instrument
+    // would ever notice — the vegetation depth-proxy bug this exists to catch
+    // was found only by hours of Chrome-trace reading, precisely because
+    // nothing was watching loudly enough. Optional on the harness (like
+    // readPipelineStats above it): a caller without it just measures without
+    // this instrument.
+    if (typeof harness.setShaderRebuildProbe === 'function') harness.setShaderRebuildProbe(true);
 
     // PIPELINE HEALTH, START OF THE REAL WINDOW (2026-08-09) — sampled here,
     // not before settling, on purpose: settle frames exist BECAUSE first-use
@@ -292,6 +303,11 @@ export async function runProfileSession(harness, opts = {}) {
       // disarm must not mask the original error on the throwing path.
       say('warning', 'failed to disarm the GPU zone timer');
     }
+    try {
+      if (typeof harness.setShaderRebuildProbe === 'function') harness.setShaderRebuildProbe(false);
+    } catch {
+      say('warning', 'failed to disarm the shader-rebuild probe');
+    }
     // ALWAYS, same reasoning as disarmProfiler above — a thrown error must
     // still hand the panel back, or a failed run leaves the author with no
     // UI and no idea why.
@@ -317,6 +333,15 @@ export async function runProfileSession(harness, opts = {}) {
   // register as pool churn that has nothing to do with ordinary panning.
   const depthProxyPoolStatsEnd =
     typeof harness.readDepthProxyPoolStats === 'function' ? harness.readDepthProxyPoolStats() : null;
+  // SHADER-REBUILD CHURN, read AFTER disarm — same ordering as gpuStatus above
+  // and for the same reason: disarm() uninstalls the hook but does not clear
+  // the counters (only the NEXT arm's reset() does), so the just-finished
+  // window's totals are still sitting there to read. No start/end pairing
+  // needed here unlike pipelineStats/depthProxyPoolStats: the probe resets
+  // itself to zero on every arm, so this single read already IS the delta for
+  // this window, not a lifetime counter.
+  const shaderRebuildStats =
+    typeof harness.readShaderRebuildStats === 'function' ? harness.readShaderRebuildStats() : null;
 
   let sweep = null;
   if (includeSweep && typeof harness.runSweep === 'function') {
@@ -379,6 +404,7 @@ export async function runProfileSession(harness, opts = {}) {
       depthProxyPoolStatsStart && depthProxyPoolStatsEnd
         ? { start: depthProxyPoolStatsStart, end: depthProxyPoolStatsEnd }
         : null,
+    shaderRebuildStats,
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,
     vram: harness.readVram?.() ?? null,

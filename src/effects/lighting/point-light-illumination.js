@@ -358,7 +358,10 @@ export function inverseSquareFalloff(TSL, dist) {
  */
 export function easeAttenuation(attenuation01) {
   const a = Math.min(1, Math.max(0, Number.isFinite(attenuation01) ? attenuation01 : 0));
-  return (Math.cos(Math.PI * Math.pow(a, 1.5)) - 1) / -2;
+  // a**1.5 === a * sqrt(a) for a >= 0 (guaranteed by the clamp above) — V8 has
+  // no fast path for Math.pow's general fractional-exponent case, so this
+  // avoids that on a per-light-per-frame call.
+  return (Math.cos(Math.PI * (a * Math.sqrt(a))) - 1) / -2;
 }
 
 /**

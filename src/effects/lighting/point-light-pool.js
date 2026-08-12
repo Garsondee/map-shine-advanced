@@ -110,6 +110,7 @@ import {
   APERTURE_GOBO_DEFAULTS,
   SOFT_FAR_PX_BASE,
   REACH_SOFT_FAR_PX_BASE,
+  computeWallFrame,
   findAperturesForLight,
   resolveLampHeight,
   deriveApertureGoboPaneCount,
@@ -816,6 +817,43 @@ export function createPointLightPool({
    * mirroring today's per-light `uColorationAlpha=0` posture. */
   const colorBuckets = new Map();
 
+  /** PER-FRAME BATCH-RECONCILE SCRATCH (perf, 2026-08-12) — hoisted out of
+   * `update()`'s own body. `seen`/`illumBatchGroups`/`colorBatchGroups` used
+   * to be a fresh `new Set()`/`new Map()` on EVERY `update()` call, and every
+   * batched light's member data was a brand-new ~15-field object literal
+   * `.push()`-ed every frame. `pointLightBatching` defaults ON
+   * (`vt-pan-viewer.js`) and `BATCH_FALLOFF_MODELS` (point-light-batch.js)
+   * covers both light kinds this pool ever builds ('foundry', 'inverseSquare')
+   * — so this ran for nearly every light, every frame: exactly the per-frame-
+   * allocation-on-the-hot-path class `lightMeshes`' own device-lost fix above
+   * already exists to avoid.
+   *
+   * `illumBatchGroups`/`colorBatchGroups` now persist (never cleared or
+   * deleted — same "hide, never delete" doctrine as `lightMeshes`/
+   * `illumBuckets`). Each group's `slots` is a grow-only pool of reusable
+   * member objects (mirrors `entry.scratchArray`'s own discipline),
+   * overwritten BY INDEX up to that frame's own `memberCount` rather than
+   * reallocated. `members` is a thin array of REFERENCES into `slots`,
+   * rebuilt every frame (cheap — pointer copies, not object allocations) to
+   * the exact live length `bucket.reconcile()` expects.
+   *
+   * SAFE TO REUSE: `point-light-batch-mesh.js#reconcile()` never retains a
+   * member object past its own synchronous call — it copies scalars straight
+   * into the bucket's `Float32Array` buffers and `.slice()`s any array field
+   * (`bg`/`dim`/`bright`/`lightColor`) it needs for its own dirty-check
+   * snapshot. Overwriting a slot's fields next frame cannot corrupt anything
+   * a previous `reconcile()` call is still holding onto. */
+  const seen = new Set();
+  const illumBatchGroups = new Map();
+  const colorBatchGroups = new Map();
+  /** `deriveApertureGoboPaneCount`'s own `out` scratch — same "reuse, don't
+   * reallocate" discipline as `seen`/`illumBatchGroups` just above, one level
+   * down: that function runs once per light, per frame, and its `{cols,rows}`
+   * return is read into plain numbers immediately (`update()`'s own
+   * destructure), so one pool-wide instance safely survives every light's
+   * call within a frame. */
+  const apertureGoboPaneCountScratch = { cols: 1, rows: 1 };
+
   // POOL HEALTH (cache-completeness pass, 2026-08-12) — same hits/misses
   // doctrine as depth-proxy-material-pool.js: a hit is the existing Map
   // entry surviving its own staleness check untouched (no mesh/material/
@@ -881,8 +919,14 @@ export function createPointLightPool({
    */
   const regularLightWallClipCache = new Map();
 
-  /** {floorId, wallVersion, segments}|null — the aperture-flagged wall
-   * segment list, recomputed only when the current floor or the wall
+  /** `readActiveLightSources`'s own options object, hoisted rather than a
+   * fresh `{wallClipCache, floorId}` literal every `update()` call — `
+   * wallClipCache` is this SAME `regularLightWallClipCache` every frame; only
+   * `.floorId` actually changes, written just before the call below. */
+  const readActiveLightSourcesOpts = { wallClipCache: regularLightWallClipCache, floorId: null };
+
+  /** {floorId, wallVersion, segments, frames}|null — the aperture-flagged
+   * wall segment list, recomputed only when the current floor or the wall
    * structure (createWall/updateWall/deleteWall, via `getApertureWallVersion`)
    * actually changed (2026-08-09, PERF: `readSceneWallSegments` walks every
    * wall on the scene and `findAperturesForLight`'s own perf comment already
@@ -894,7 +938,14 @@ export function createPointLightPool({
    * Map. `enabled` is deliberately NOT part of the cache key: the mapping
    * from (floor, wall version) to segments is correct regardless of whether
    * the effect happens to be on right now, so toggling it does not need to
-   * invalidate anything the walls themselves did not. */
+   * invalidate anything the walls themselves did not.
+   *
+   * `frames` (2026-08-12, cache-completeness pass) — `segments[i]`'s own
+   * pre-computed `computeWallFrame(...)`, PARALLEL by index, built in the
+   * SAME rebuild as `segments` itself and passed straight through to
+   * `findAperturesForLight`'s own `wallFrames` parameter so that function's
+   * per-light loop never re-derives a static wall's direction/normal/length
+   * from scratch every frame — see that call site's own comment. */
   let apertureSegCache = null;
 
   /** LIFETIME hit/miss/eviction counters for the four caches above, one key
@@ -1020,15 +1071,13 @@ export function createPointLightPool({
     // live Chrome trace on a scene where Foundry's darkness gate and MSA's
     // model disagree for most lights (routine in Aesthetic mode).
     profiler?.beginById('light.pointLightWallClip');
+    readActiveLightSourcesOpts.floorId = currentFloorId;
     const {
       lights: foundryLights,
       seenSourceIds: seenLightSourceIds,
       wallClipHits,
       wallClipMisses,
-    } = readActiveLightSources(darkness01, {
-      wallClipCache: regularLightWallClipCache,
-      floorId: currentFloorId,
-    });
+    } = readActiveLightSources(darkness01, readActiveLightSourcesOpts);
     wallClipCacheStats.regular.hits += wallClipHits;
     wallClipCacheStats.regular.misses += wallClipMisses;
     // Prune against `seenSourceIds`, NOT the filtered `foundryLights` — same
@@ -1218,6 +1267,7 @@ export function createPointLightPool({
     // param doc for why capturing the number instead would freeze the cache
     // forever at whatever version existed when the pool was constructed.
     let apertureWallSegments = [];
+    let apertureWallFrames = null;
     if (apertureGoboState.enabled) {
       const wallVersion = getApertureWallVersion();
       if (
@@ -1238,11 +1288,32 @@ export function createPointLightPool({
         const filteredWallSegments = rawWallSegments.length
           ? rawWallSegments.filter((seg) => seg?.aperture)
           : rawWallSegments;
-        apertureSegCache = { floorId: currentFloorId, wallVersion, segments: filteredWallSegments };
+        // PERF (2026-08-12, cache-completeness pass): a wall's own FRAME
+        // (direction/normal/length — one Math.hypot, two divides, a handful
+        // of object allocations) is static geometry, identical for every
+        // light that scans it — only createWall/updateWall/deleteWall (which
+        // already bump `wallVersion`) can change it. Computing it here, once
+        // per cache rebuild, instead of inside `findAperturesForLight`'s own
+        // per-light loop, is what actually makes the filter above worth
+        // doing: filtering `segments` already cut the loop down to just the
+        // walls that could matter; this cuts the PER-WALL MATH down to once
+        // per (floor, wall edit) instead of once per (light, wall) every
+        // single frame. Parallel to `filteredWallSegments` by INDEX (never
+        // reordered independently of it), so `findAperturesForLight`'s own
+        // `wallFrames[i]` lookup stays valid for as long as this cache entry
+        // does.
+        const filteredWallFrames = filteredWallSegments.map((seg) => computeWallFrame(seg));
+        apertureSegCache = {
+          floorId: currentFloorId,
+          wallVersion,
+          segments: filteredWallSegments,
+          frames: filteredWallFrames,
+        };
       } else {
         wallClipCacheStats.apertureWalls.hits += 1;
       }
       apertureWallSegments = apertureSegCache.segments;
+      apertureWallFrames = apertureSegCache.frames;
     }
     // Clamped against the SHADER's own hard cap (`aperture-gobo-render.js`'s
     // `MAX_APERTURES_PER_LIGHT`, the unroll count its uniform sets are built
@@ -1393,15 +1464,16 @@ export function createPointLightPool({
     // on any scene with real light counts — this is the zone to read first
     // once a live report exists.
     profiler?.beginById('light.pointLightReconcile');
-    const seen = new Set();
-    // bucketKey -> {members: [], flags: {...}} — fresh every frame; a light
-    // absent this frame (deleted, or outside its own darkness01 window —
-    // `readActiveLightSources` already filtered it out of `lights` before
-    // this function ever sees it) simply never gets pushed, and the
-    // reconcile pass after this loop naturally drops it from its bucket,
-    // same as `seen`/`lightMeshes`' own per-light equivalent.
-    const illumBatchGroups = new Map();
-    const colorBatchGroups = new Map();
+    // POOL-SCOPED, NEVER RECREATED — see this pool's own "PER-FRAME
+    // BATCH-RECONCILE SCRATCH" declaration for the full reasoning.
+    // `illumBatchGroups`/`colorBatchGroups` persist across frames (a group's
+    // `slots` pool would be pointless to keep if the Map holding it were
+    // rebuilt every call) — only `memberCount` resets here; a group with zero
+    // members this frame reconciles to an empty view further down, same as
+    // `seen`/`lightMeshes`' own per-light equivalent.
+    seen.clear();
+    for (const group of illumBatchGroups.values()) group.memberCount = 0;
+    for (const group of colorBatchGroups.values()) group.memberCount = 0;
     for (const light of lights) {
       seen.add(light.sourceId);
       let entry = lightMeshes.get(light.sourceId);
@@ -1442,7 +1514,8 @@ export function createPointLightPool({
         { x: light.x, y: light.y, radius: light.radius },
         apertureWallSegments,
         maxAperturesPerLight,
-        maxApertureDistancePx
+        maxApertureDistancePx,
+        apertureWallFrames
       );
       const apertureCount = lightApertures.length;
       apertureGoboReadout.totalFound += totalFound;
@@ -1460,13 +1533,16 @@ export function createPointLightPool({
       // this round introduces — `cols`/`rows` were already one pair shared
       // across every aperture on a light before this round; this only
       // changes where the pair's VALUE comes from.
-      const { cols: apertureGoboCols, rows: apertureGoboRows } = deriveApertureGoboPaneCount({
-        wallLen: lightApertures[0]?.wallLen,
-        sillPx: apertureGoboShared.uSillPx.value,
-        headPx: apertureGoboShared.uHeadPx.value,
-        paneWidthPx: apertureGoboPaneWidthPx,
-        paneHeightPx: apertureGoboPaneHeightPx,
-      });
+      const { cols: apertureGoboCols, rows: apertureGoboRows } = deriveApertureGoboPaneCount(
+        {
+          wallLen: lightApertures[0]?.wallLen,
+          sillPx: apertureGoboShared.uSillPx.value,
+          headPx: apertureGoboShared.uHeadPx.value,
+          paneWidthPx: apertureGoboPaneWidthPx,
+          paneHeightPx: apertureGoboPaneHeightPx,
+        },
+        apertureGoboPaneCountScratch
+      );
 
       // STAGE 2 BATCHING (S2.5) — admission is decided HERE, right where
       // `apertureCount`/`falloffModel` are both already resolved (design
@@ -1528,30 +1604,40 @@ export function createPointLightPool({
         if (!illumGroup) {
           illumGroup = {
             members: [],
+            slots: [],
+            memberCount: 0,
             flags: { animated: illumAnimated, windPresent, animationEntry, animationQuality, falloffModel },
           };
           illumBatchGroups.set(bucketKey, illumGroup);
         }
-        illumGroup.members.push({
-          sourceId: light.sourceId,
-          x: light.x,
-          y: light.y,
-          radius: light.radius,
-          shapePoints: light.shapePoints,
-          ratio: light.ratio,
-          attenuationEased,
-          exposure,
-          expectedDepth,
-          bg: localAmbient.background,
-          dim: localAmbient.dim,
-          bright: localAmbient.bright,
-          speedRaw: light.animation.speedRaw,
-          reverseSign,
-          seed: light.animation.seed,
-          intensityRaw: light.animation.intensityRaw,
-          windExposure: windExposureSafe,
-          windResponse: windResponseSafe,
-        });
+        // SLOT REUSE, NOT `.push({...})` — see this pool's own "PER-FRAME
+        // BATCH-RECONCILE SCRATCH" declaration. `slots[idx]` survives across
+        // frames; only grows (a fresh `{}`) the rare frame this bucket's own
+        // member count exceeds its previous high-water mark.
+        let illumSlot = illumGroup.slots[illumGroup.memberCount];
+        if (!illumSlot) {
+          illumSlot = {};
+          illumGroup.slots[illumGroup.memberCount] = illumSlot;
+        }
+        illumGroup.memberCount++;
+        illumSlot.sourceId = light.sourceId;
+        illumSlot.x = light.x;
+        illumSlot.y = light.y;
+        illumSlot.radius = light.radius;
+        illumSlot.shapePoints = light.shapePoints;
+        illumSlot.ratio = light.ratio;
+        illumSlot.attenuationEased = attenuationEased;
+        illumSlot.exposure = exposure;
+        illumSlot.expectedDepth = expectedDepth;
+        illumSlot.bg = localAmbient.background;
+        illumSlot.dim = localAmbient.dim;
+        illumSlot.bright = localAmbient.bright;
+        illumSlot.speedRaw = light.animation.speedRaw;
+        illumSlot.reverseSign = reverseSign;
+        illumSlot.seed = light.animation.seed;
+        illumSlot.intensityRaw = light.animation.intensityRaw;
+        illumSlot.windExposure = windExposureSafe;
+        illumSlot.windResponse = windResponseSafe;
 
         // COLORATION MEMBERSHIP — independent of illumination admission,
         // the SAME `hasColor || forceDefaultColor` rule the per-light path's
@@ -1565,28 +1651,34 @@ export function createPointLightPool({
           if (!colorGroup) {
             colorGroup = {
               members: [],
+              slots: [],
+              memberCount: 0,
               flags: { animated: colorAnimated, windPresent, animationEntry, animationQuality, falloffModel },
             };
             colorBatchGroups.set(bucketKey, colorGroup);
           }
-          colorGroup.members.push({
-            sourceId: light.sourceId,
-            x: light.x,
-            y: light.y,
-            radius: light.radius,
-            shapePoints: light.shapePoints,
-            attenuationEased,
-            colorationAlpha: computeColorationAlpha(light.alpha01, 1),
-            expectedDepth,
-            ratio: light.ratio,
-            lightColor: light.color,
-            speedRaw: light.animation.speedRaw,
-            reverseSign,
-            seed: light.animation.seed,
-            intensityRaw: light.animation.intensityRaw,
-            windExposure: windExposureSafe,
-            windResponse: windResponseSafe,
-          });
+          let colorSlot = colorGroup.slots[colorGroup.memberCount];
+          if (!colorSlot) {
+            colorSlot = {};
+            colorGroup.slots[colorGroup.memberCount] = colorSlot;
+          }
+          colorGroup.memberCount++;
+          colorSlot.sourceId = light.sourceId;
+          colorSlot.x = light.x;
+          colorSlot.y = light.y;
+          colorSlot.radius = light.radius;
+          colorSlot.shapePoints = light.shapePoints;
+          colorSlot.attenuationEased = attenuationEased;
+          colorSlot.colorationAlpha = computeColorationAlpha(light.alpha01, 1);
+          colorSlot.expectedDepth = expectedDepth;
+          colorSlot.ratio = light.ratio;
+          colorSlot.lightColor = light.color;
+          colorSlot.speedRaw = light.animation.speedRaw;
+          colorSlot.reverseSign = reverseSign;
+          colorSlot.seed = light.animation.seed;
+          colorSlot.intensityRaw = light.animation.intensityRaw;
+          colorSlot.windExposure = windExposureSafe;
+          colorSlot.windResponse = windResponseSafe;
         }
         continue;
       }
@@ -1719,6 +1811,17 @@ export function createPointLightPool({
         entry.lastShapeX = light.x;
         entry.lastShapeY = light.y;
         entry.lastShapeRadius = light.radius;
+        // REFERENCE, NOT A COPY — a same-reference-mutated-content hazard was
+        // raised and investigated (2026-08-12), then ruled out against the
+        // vendored source: `PointEffectSource#_createShapes` (client/canvas/
+        // sources/point-effect-source.mjs) does `this.shape = polygonClass.
+        // create(...)`, whose `static create()` (source-polygon.mjs) always
+        // `new this()`s a BRAND-NEW polygon instance, and `ClockwiseSweep
+        // Polygon#_compute` starts with `this.points = []` — a fresh array,
+        // never a truncate-and-refill of the old one. `source.shape.points`
+        // is therefore never the same array reference across two recomputes
+        // with different content; `shapePointsUnchanged`'s `a === b` fast
+        // path is safe by construction.
         entry.lastShapePoints = light.shapePoints;
       }
       // Mirrors Foundry's OWN mesh placement exactly: geometry is normalized
@@ -1909,6 +2012,23 @@ export function createPointLightPool({
     // empty and these loops iterate zero times), so this behaves as a
     // 'conditional' zone in effect even though the brackets are unconditional.
     profiler?.beginById('light.pointLightBatchReconcile');
+    // FINALIZE THIS FRAME'S MEMBER VIEWS — `group.members` (what
+    // `bucket.reconcile()` actually reads) is rebuilt from `group.slots`/
+    // `group.memberCount` every frame: cheap REFERENCE copies into a thin
+    // array, never new member objects (see this pool's own "PER-FRAME
+    // BATCH-RECONCILE SCRATCH" declaration). Runs for EVERY known group, not
+    // just ones touched this frame, so a group whose last light just left
+    // correctly shrinks to an empty view instead of replaying stale members.
+    for (const group of illumBatchGroups.values()) {
+      const n = group.memberCount;
+      for (let i = 0; i < n; i++) group.members[i] = group.slots[i];
+      if (group.members.length !== n) group.members.length = n;
+    }
+    for (const group of colorBatchGroups.values()) {
+      const n = group.memberCount;
+      for (let i = 0; i < n; i++) group.members[i] = group.slots[i];
+      if (group.members.length !== n) group.members.length = n;
+    }
     // STAGE 2 BATCHING (S2.5) — reconcile every bucket THIS frame's admitted
     // lights grouped into, then hide (never delete — see `illumBuckets`' own
     // doc) any EXISTING bucket key with zero members this frame. A brand-new
@@ -1917,9 +2037,18 @@ export function createPointLightPool({
     // order-independent, proven — buckets and per-light meshes coexist in
     // one scene with no ordering requirement between them).
     batchingReadout.enabled = pointLightBatchingEnabled;
-    batchingReadout.illumBucketCount = illumBatchGroups.size;
+    // NOT `.size` — `illumBatchGroups` now persists every bucket key ever
+    // seen (never deleted, matching `lightMeshes`' own "hide never delete"
+    // precedent elsewhere in this file), so `.size` would count stale,
+    // now-empty groups too. Counted directly to keep this readout's meaning
+    // unchanged: how many distinct buckets have >=1 member THIS frame.
+    let illumBucketCount = 0;
+    for (const group of illumBatchGroups.values()) if (group.memberCount > 0) illumBucketCount++;
+    let colorBucketCount = 0;
+    for (const group of colorBatchGroups.values()) if (group.memberCount > 0) colorBucketCount++;
+    batchingReadout.illumBucketCount = illumBucketCount;
     batchingReadout.illumLightCount = 0;
-    batchingReadout.colorBucketCount = colorBatchGroups.size;
+    batchingReadout.colorBucketCount = colorBucketCount;
     batchingReadout.colorLightCount = 0;
     for (const [key, group] of illumBatchGroups) {
       let bucket = illumBuckets.get(key);

@@ -416,8 +416,15 @@ export const MAX_MULLIONS_PER_AXIS = 8;
  * arbitrary perpendicular — `orientApertureToLight` is what fixes its sign
  * per-light). Pure geometry, no light involved yet. UNCHANGED by design 4.
  *
+ * `B` (round 2026-08-12, perf-audit) rides along for free — `findAperturesForLight`'s
+ * own assignment-pass loop needs both endpoints (`distancePointToSegment`,
+ * `computeAngularWidthFromLight`) and used to rebuild `{x:seg.x1,y:seg.y1}`/
+ * `{x:seg.x2,y:seg.y2}` itself every call; returning `B` here lets that loop
+ * reuse THIS object instead, one fewer pair of throwaway allocations per
+ * (light, wall).
+ *
  * @param {{x1:number,y1:number,x2:number,y2:number}} wall
- * @returns {{A:{x:number,y:number}, dir:{x:number,y:number}, nrm:{x:number,y:number}, wallLen:number}|null}
+ * @returns {{A:{x:number,y:number}, B:{x:number,y:number}, dir:{x:number,y:number}, nrm:{x:number,y:number}, wallLen:number}|null}
  *   `null` for a degenerate (zero-length, or non-finite) wall segment.
  */
 export function computeWallFrame(wall) {
@@ -430,7 +437,7 @@ export function computeWallFrame(wall) {
   if (!(len > 1e-6)) return null;
   const dir = { x: dx / len, y: dy / len };
   const nrm = { x: -dir.y, y: dir.x };
-  return { A: { x: x1, y: y1 }, dir, nrm, wallLen: len };
+  return { A: { x: x1, y: y1 }, B: { x: x2, y: y2 }, dir, nrm, wallLen: len };
 }
 
 /**
@@ -532,6 +539,19 @@ export function computeAngularWidthFromLight(light, A, B) {
  * @param {Array<{x1:number,y1:number,x2:number,y2:number,aperture:boolean}>} wallSegments
  * @param {number} maxAperturesPerLight
  * @param {number} [maxApertureDistancePx] - defaults to `APERTURE_GOBO_DEFAULTS.maxApertureDistancePx`.
+ * @param {Array<object>} [wallFrames] - perf seam (2026-08-12): `wallSegments`
+ *   is STATIC geometry (only createWall/updateWall/deleteWall touch it — a
+ *   GM-editing-cadence event, not a frame-cadence one), but this function
+ *   runs once per LIGHT, every frame — without this, `computeWallFrame`'s own
+ *   hypot+divides+allocations were being redone, identically, for every
+ *   (light, wall) pair, every frame, for walls that hadn't moved since the
+ *   scene loaded. When provided, MUST be a `computeWallFrame(...)` result
+ *   PARALLEL to `wallSegments` by index (`point-light-pool.js`'s own
+ *   `apertureSegCache.frames`, built alongside `apertureSegCache.segments` at
+ *   the exact same rebuild, is the one real caller) — `wallFrames[i]` is
+ *   trusted for `wallSegments[i]` with no re-validation. Absent (every test/
+ *   bench call site) falls back to computing it inline, byte-identical to
+ *   before this parameter existed.
  * @returns {{apertures: object[], totalFound: number, dropped: number}}
  *   `apertures` — oriented aperture frames (`orientApertureToLight`'s own
  *   shape), widest-angle first, capped at `maxAperturesPerLight`.
@@ -540,7 +560,8 @@ export function findAperturesForLight(
   light,
   wallSegments,
   maxAperturesPerLight,
-  maxApertureDistancePx = APERTURE_GOBO_DEFAULTS.maxApertureDistancePx
+  maxApertureDistancePx = APERTURE_GOBO_DEFAULTS.maxApertureDistancePx,
+  wallFrames = null
 ) {
   const cap = Number.isFinite(maxAperturesPerLight) && maxAperturesPerLight > 0 ? Math.floor(maxAperturesPerLight) : 0;
   const searchDistance = Math.max(
@@ -548,16 +569,26 @@ export function findAperturesForLight(
     Math.min(light.radius, Number.isFinite(maxApertureDistancePx) ? maxApertureDistancePx : Infinity)
   );
   const candidates = [];
-  for (const seg of wallSegments ?? []) {
+  const segs = wallSegments ?? [];
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
     if (!seg?.aperture) continue;
-    const frame = computeWallFrame(seg);
+    const frame = wallFrames ? wallFrames[i] : computeWallFrame(seg);
     if (!frame) continue;
-    const A = { x: seg.x1, y: seg.y1 };
-    const B = { x: seg.x2, y: seg.y2 };
+    // `frame.A`/`frame.B` reused directly rather than rebuilt from
+    // `seg.x1/y1/x2/y2` — the SAME points `computeWallFrame` already made.
+    const { A, B } = frame;
     if (distancePointToSegment(light, A, B) > searchDistance) continue;
+    // `oriented` is a scratch object nothing else references yet — mutating
+    // it in place and pushing IT (never a spread-copy) skips one allocation
+    // per candidate; `aperture.A`/`B`/`dir`/`nrm` are read-only from here on
+    // (`point-light-pool.js`'s own per-frame uniform writer only ever calls
+    // `.set(src.A.x, src.A.y)` on THEIR OWN uniform value, never on `src`
+    // itself), so sharing `frame`'s own sub-objects across every light that
+    // scans this wall is safe.
     const oriented = orientApertureToLight(frame, light);
-    const angularWidth = computeAngularWidthFromLight(light, A, B);
-    candidates.push({ ...oriented, angularWidth });
+    oriented.angularWidth = computeAngularWidthFromLight(light, A, B);
+    candidates.push(oriented);
   }
   candidates.sort((p, q) => q.angularWidth - p.angularWidth);
   const apertures = candidates.slice(0, cap);
@@ -611,9 +642,20 @@ export function resolveLampHeight(light, params) {
  * @param {number} args.headPx
  * @param {number} args.paneWidthPx
  * @param {number} args.paneHeightPx
+ * @param {{cols:number,rows:number}} [out] - perf seam (2026-08-12): this
+ *   runs once per light, per frame, in `point-light-pool.js#update`'s hot
+ *   loop. When provided, `out` is written in place and returned instead of
+ *   allocating a fresh `{cols,rows}` — the caller owns `out`'s lifetime (a
+ *   single pool-scope scratch object, reused across every light THIS frame,
+ *   the same "hoist the container, `.clear()`/overwrite don't reallocate"
+ *   discipline `update()`'s own `seen`/`illumBatchGroups` scratch already
+ *   follows), safe because `cols`/`rows` are read into plain numbers by the
+ *   caller before the next light's call overwrites them. Absent (every test/
+ *   bench call site) returns a fresh object, byte-identical to before this
+ *   parameter existed.
  * @returns {{cols: number, rows: number}}
  */
-export function deriveApertureGoboPaneCount({ wallLen, sillPx, headPx, paneWidthPx, paneHeightPx }) {
+export function deriveApertureGoboPaneCount({ wallLen, sillPx, headPx, paneWidthPx, paneHeightPx }, out) {
   const safePaneWidthPx = Math.max(Number.isFinite(paneWidthPx) ? paneWidthPx : APERTURE_GOBO_DEFAULTS.paneWidthPx, 1);
   const safePaneHeightPx = Math.max(
     Number.isFinite(paneHeightPx) ? paneHeightPx : APERTURE_GOBO_DEFAULTS.paneHeightPx,
@@ -627,6 +669,11 @@ export function deriveApertureGoboPaneCount({ wallLen, sillPx, headPx, paneWidth
   );
   const cols = Math.min(Math.max(Math.round(effectiveWallLen / safePaneWidthPx), 1), MAX_MULLIONS_PER_AXIS);
   const rows = Math.min(Math.max(Math.round(spanPx / safePaneHeightPx), 1), MAX_MULLIONS_PER_AXIS);
+  if (out) {
+    out.cols = cols;
+    out.rows = rows;
+    return out;
+  }
   return { cols, rows };
 }
 
@@ -699,10 +746,23 @@ export function forwardProjectWindowPointToFloor(sW, x, aperture) {
  *   never gets "seen" through the TOP of a window it stands below the top
  *   of — see this module's own header for why this is a real geometric fact,
  *   not a missing case).
+ *
+ *   `h > z` STRICTLY (not `h - z` merely nonzero) is not itself enough to
+ *   keep the division well-behaved: `h`/`z` are both author-tunable schema
+ *   values (`defaultLampHeightPx`, `headPx`, ...), and this module's own
+ *   header already documents one live round where they landed close enough
+ *   to matter (`headPx` needing to stay "meaningfully ABOVE" `defaultLampHeightPx`).
+ *   A denominator that floats arbitrarily close to 0 without ever hitting the
+ *   `!(h > z)` branch returns a huge-but-uncontrolled finite `x`, not the
+ *   deliberate `Infinity` sentinel above — `Math.max(h - z, 1e-6)` floors it
+ *   at the SAME epsilon `aperture-gobo-render.js`'s own TSL twin already uses
+ *   for this identical division (`rowBoundaryX`'s own `max(uLampHeight.sub(zVal),
+ *   float(1e-6))`) — this was the one place the CPU "spec" and its GPU
+ *   transcription had quietly diverged.
  */
 export function computeApertureRowBoundaryX({ a, h, z }) {
   if (!(h > z)) return Infinity;
-  return (a * z) / (h - z);
+  return (a * z) / Math.max(h - z, 1e-6);
 }
 
 /**

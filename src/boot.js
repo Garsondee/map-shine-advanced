@@ -669,7 +669,11 @@ function install() {
   // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
   // debug panel and returns a hydrate hook the canvasReady handler calls to pull
   // any saved paint for the newly-loaded scene (docs/planning/Authoring-and-Distribution.md).
-  MapShine.__painter = installPainter(MapShine);
+  // `onFloorChanged` closes the gap `syncActiveFloorContext`'s own header
+  // describes: the painter's Floor stepper drives `setVtPanViewerFloor`
+  // directly and has no other way to keep fire/candle/lightning/doors
+  // pointed at the floor it just switched to.
+  MapShine.__painter = installPainter(MapShine, { onFloorChanged: syncActiveFloorContext });
   // ANCHOR MODE (2026-07-22) — click-to-place/click-to-edit for discrete point
   // effects (candles today). Installed once, entered per-effect via the
   // Workshop panel below; stays effect-agnostic (ui/anchor-mode.js's own header).
@@ -986,6 +990,38 @@ function install() {
     // no per-floor-scoped walls to hide anyway.
     activeFloorContext =
       elevation == null ? null : { elevation, floorIndex, band: [bottom, top], levelId: floor.id ?? null };
+  }
+
+  /**
+   * Re-resolve `activeFloorContext` (+ door scoping) for an EXPLICIT floor
+   * index, reading the CURRENT scene's own floor list fresh.
+   *
+   * ⚠️ EXISTS BECAUSE `setVtPanViewerFloor` HAS NO IDEA THIS CONTEXT EXISTS.
+   * It is `vt/`'s own cheap residency-swap, entirely unaware of boot.js's
+   * `activeFloorContext` — by design, the same seam that keeps `vt/` from
+   * reaching the anchor authority directly. The ONLY caller that already kept
+   * `activeFloorContext` correct was the native `canvasReady` same-scene
+   * branch below, which calls `updateActiveFloorContext` + `refreshDoors`
+   * itself, inline, before its own `setVtPanViewerFloor` call. Every OTHER
+   * direct caller of `setVtPanViewerFloor` (`ui/paint-mode.js`'s own Floor
+   * stepper) moved the live view without ever telling boot.js which floor was
+   * now active — so `getFireRenderState`'s `activeFloorContext?.floorIndex`
+   * (and candle/lightning's anchor filtering, and door scoping) stayed
+   * pinned to whatever floor was active when `canvasReady` last ran, while
+   * the painter's own `state.floor` moved on ahead of it. Reported live,
+   * 2026-08-12: painting/viewing a floor above the one MSA last natively
+   * synced to kept showing THAT floor's fire, and the new floor's own
+   * painted `_Fire` region never ignited — this is that gap, closed once
+   * here so every future direct `setVtPanViewerFloor` caller can just call
+   * this alongside it instead of re-deriving the two-call sequence.
+   */
+  function syncActiveFloorContext(floorIndex) {
+    const sceneDoc = canvas?.scene ?? null;
+    if (!sceneDoc) return;
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    if (!floorsResult.ok) return;
+    updateActiveFloorContext(floorsResult.floors, floorIndex);
+    refreshDoors();
   }
 
   // THE CANDLE FLAME — MSA's second registered effect, first ported from V2,
@@ -3160,6 +3196,11 @@ function install() {
             showPerfProgress('switching to the floor above for a second sweep…');
             const switchResult = await setVtPanViewerFloor(nextFloor.index);
             if (switchResult.changed) switchedAwayFromFloorIndex = startFloorIndex;
+            // Without this, the second sweep would measure floor 2's art/geometry
+            // cost while fire/candle/lightning still rendered floor 1's content and
+            // doors stayed scoped to floor 1's level — see `syncActiveFloorContext`'s
+            // own header for the general gap this closes.
+            if (switchResult.changed) syncActiveFloorContext(nextFloor.index);
             // EVENT-DRIVEN, NOT A GUESSED SLEEP — waitForSceneSettled polls
             // vt/settle.js's real "is everything actually on screen yet?"
             // signal, exactly why that module exists (its own header: "every
@@ -3241,6 +3282,7 @@ function install() {
         if (switchedAwayFromFloorIndex !== null) {
           try {
             await setVtPanViewerFloor(switchedAwayFromFloorIndex);
+            syncActiveFloorContext(switchedAwayFromFloorIndex);
           } catch (err) {
             log.error('perf report: failed to restore the original floor after the multi-floor phase:', err);
           }

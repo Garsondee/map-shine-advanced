@@ -76,7 +76,21 @@ const UNDO_LIMIT = 10; // at PAINT_GRID_MAX_DIM=4096 each undo snapshot is ~16MB
 /** Authored (paintable) kinds only — derived products (skyReach…) have no suffix. */
 const PAINTABLE_KINDS = MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.suffixes.length > 0);
 
-export function installPainter(MapShine) {
+/**
+ * @param {object} MapShine
+ * @param {object} [deps]
+ * @param {(floorIndex:number)=>void} [deps.onFloorChanged] - told AFTER the
+ *   Floor stepper moves, win or lose on the live-view follow. `setVtPanViewerFloor`
+ *   is `vt/`'s own residency swap and knows nothing of boot.js's
+ *   `activeFloorContext` — without this callback, fire/candle/lightning's
+ *   floor-scoped reads and door scoping stayed pinned to whichever floor
+ *   `canvasReady` last natively synced to while this stepper moved the
+ *   painter (and the live view) on ahead of it (found live, 2026-08-12: fire
+ *   kept burning on the floor below, the newly-painted floor's own region
+ *   never ignited). Optional so tests/tools that construct the painter
+ *   without a full boot() still work.
+ */
+export function installPainter(MapShine, { onFloorChanged = null } = {}) {
   const state = {
     active: false,
     ctx: null,
@@ -170,6 +184,16 @@ export function installPainter(MapShine) {
   // viewer still lets you paint floor N's mask, just without the live picture.
   // One switch in flight at a time — rapid clicking floors is a KNOWN trigger
   // for a still-open residency bug (keyhole-device-loss-large-map.md).
+  //
+  // ⚠️ `setVtPanViewerFloor` MOVES THE PICTURE, NOT `activeFloorContext` —
+  // `onFloorChanged` (boot.js's `syncActiveFloorContext`) is the other half
+  // `canvasReady`'s own same-scene branch gets for free and this stepper did
+  // not: without it, fire/candle/lightning's floor-scoped reads and door
+  // scoping stayed on whatever floor was active when `canvasReady` last ran,
+  // silently disagreeing with the floor this stepper (and the live view) had
+  // already moved to. Called unconditionally alongside `state.floor`, even on
+  // a failed/absent live view — the same "mask editing is authoritative"
+  // posture, applied to which floor's CONTENT the rest of the app renders.
   async function changeFloor(delta) {
     if (state.floorSwitching) return;
     const max = Math.max(0, (state.ctx?.floorCount ?? 21) - 1);
@@ -189,6 +213,7 @@ export function installPainter(MapShine) {
       state.floorSwitching = false;
     }
     state.floor = next;
+    onFloorChanged?.(next);
     layerFor(state.kind); // ensure the new floor's layer exists
     markFull(activeKey());
     state.refreshToolbar?.();

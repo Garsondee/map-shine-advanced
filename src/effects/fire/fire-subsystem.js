@@ -95,6 +95,17 @@ const SPRITE_REFERENCE_DIAMETER_PX = 100;
 const PER_FIRE = Object.freeze({ flame: 12, ember: 10, smoke: 24 });
 
 /**
+ * "Nothing painted on this floor" as a real, stable spawn-cloud value — see
+ * the spawn-sync block's own note in `syncUnguarded` for why a null cloud
+ * must be pushed to every engine like any other change, not treated as
+ * nothing to do. Signature `0` deliberately matches what
+ * `fireSpawnSignature`/`fireMaskSignature` (fire-mask.js/fire-spawn-points.js)
+ * already return for "no grid", so this is the existing "no paint" fact, not
+ * a second one invented here.
+ */
+const EMPTY_SPAWN_CLOUD = Object.freeze({ points: new Float32Array(0), count: 0, paintedTexels: 0, signature: 0 });
+
+/**
  * @param {object} deps
  * @param {*} deps.THREE - injected.
  * @param {() => object} deps.getFireRenderState - `{enabled, params, perfTier, fires[], spawnCloud}`.
@@ -255,21 +266,30 @@ export function createFireSubsystem({
     // four archetype engines all want the identical cohesed cloud, and
     // `applyCohesion` is a deterministic function of (cloud, fires, cohesion),
     // so there is no reason to recompute it four times in the same frame.
-    if (cloud) {
-      const cloudChanged = cloud.signature !== lastSpawnSignature;
-      const transformedByKind = new Map();
-      for (const { engine, kind } of engines) {
-        const cohesion = runtime.perKind?.[kind]?.cohesion ?? 0;
-        if (cloudChanged || lastCohesionByEngine.get(engine) !== cohesion) {
-          if (!transformedByKind.has(kind)) {
-            transformedByKind.set(kind, cohesion ? applyCohesion(cloud, fires, cohesion) : cloud);
-          }
-          engine.setSpawnPoints(transformedByKind.get(kind));
-          lastCohesionByEngine.set(engine, cohesion);
+    //
+    // ⚠️ A NULL CLOUD MUST STILL BE PUSHED, NOT SKIPPED. This block used to be
+    // gated on `if (cloud)`, so a floor with fire ANCHORS but no painted
+    // `_Fire` region (`cloud` is null; the early-return above only fires when
+    // BOTH paint and fires are empty) left every engine holding whatever
+    // spawn cloud it saw last — including a PREVIOUS floor's, after a floor
+    // switch that lost its paint but kept an anchor. `EMPTY_SPAWN_CLOUD` gives
+    // "nothing painted here" its own stable signature (0, the same value
+    // `fireSpawnSignature`/`fireMaskSignature` already return for "no grid"),
+    // so that state is pushed and tracked exactly like any other paint change.
+    const effectiveCloud = cloud ?? EMPTY_SPAWN_CLOUD;
+    const cloudChanged = effectiveCloud.signature !== lastSpawnSignature;
+    const transformedByKind = new Map();
+    for (const { engine, kind } of engines) {
+      const cohesion = runtime.perKind?.[kind]?.cohesion ?? 0;
+      if (cloudChanged || lastCohesionByEngine.get(engine) !== cohesion) {
+        if (!transformedByKind.has(kind)) {
+          transformedByKind.set(kind, cloud && cohesion ? applyCohesion(cloud, fires, cohesion) : effectiveCloud);
         }
+        engine.setSpawnPoints(transformedByKind.get(kind));
+        lastCohesionByEngine.set(engine, cohesion);
       }
-      lastSpawnSignature = cloud.signature;
     }
+    lastSpawnSignature = effectiveCloud.signature;
 
     // ⚠️ SPRITES SCALE TO THE FIRE THEY BELONG TO — see
     // SPRITE_REFERENCE_DIAMETER_PX. The MEDIAN, not the mean: one bonfire in a

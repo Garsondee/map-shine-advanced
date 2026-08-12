@@ -186,4 +186,49 @@ export function run(t) {
       emberEngine.spawnCalls.length === 2 &&
       smokeEngine.spawnCalls.length === 2
   );
+
+  // ── THE FLOOR-SWITCH REGRESSION (2026-08-12): a floor with an ANCHOR fire
+  // but no painted `_Fire` region (`spawnCloud` goes null) MUST still push an
+  // EMPTY cloud to every engine — the live bug report this test exists for
+  // was every engine spawning from the PREVIOUS floor's real paint forever,
+  // because the whole push used to be skipped outright whenever `cloud` was
+  // null (`if (cloud) {...}` around the entire block). `fires` staying
+  // non-empty (the anchor) is what keeps `sync()` past its early-return; the
+  // spawn cloud itself going null is the exact shape a floor switch away from
+  // paint produces. ──
+  state.fires = [{ id: 'anchor1', x: 20, y: 20, diameterPx: 60, intensity: 1 }];
+  state.spawnCloud = null;
+  subsystem.sync(renderer, 64, 0.016, rect);
+  t.ok(
+    'a floor with no paint (anchor fire only) still pushes EVERY engine, not just the ones already pending',
+    flameEngines.every((e) => e.spawnCalls.length === 4) &&
+      emberEngine.spawnCalls.length === 3 &&
+      smokeEngine.spawnCalls.length === 3
+  );
+  t.ok(
+    "the pushed cloud is genuinely EMPTY (count 0), not the stale previous floor's real points",
+    [...flameEngines, emberEngine, smokeEngine].every((e) => e.spawnCalls.at(-1)?.count === 0)
+  );
+
+  // Paint returning after an anchor-only floor must push again too — proves
+  // the empty state was actually TRACKED (lastSpawnSignature moved to 0),
+  // not merely "skipped, so anything looks different next time".
+  state.spawnCloud = makeCloud(
+    [
+      [30, 30],
+      [70, 70],
+    ],
+    55555
+  );
+  subsystem.sync(renderer, 80, 0.016, rect);
+  t.ok(
+    'paint returning after an anchor-only floor pushes the real cloud again, to every engine',
+    flameEngines.every((e) => e.spawnCalls.length === 5) &&
+      emberEngine.spawnCalls.length === 4 &&
+      smokeEngine.spawnCalls.length === 4
+  );
+  t.ok(
+    'every engine received the real 2-point cloud, not another empty one',
+    [...flameEngines, emberEngine, smokeEngine].every((e) => e.spawnCalls.at(-1)?.count === 2)
+  );
 }

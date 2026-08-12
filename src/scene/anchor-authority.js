@@ -309,6 +309,20 @@ export function createAnchorAuthority({ log }) {
     return resolved;
   }
 
+  /**
+   * The CRUD generation counter — bumped by every `reset`/`setAnchors`/
+   * `addAnchor`/`removeAnchor`/`updateAnchor` call, never by a read. A cheap
+   * cache-invalidation signal for a caller (boot.js's `get*RenderState`
+   * seams) that wants to memoize a derived per-anchor array instead of
+   * re-mapping it every frame — the same "read a version, skip work when it
+   * hasn't moved" shape `getApertureWallVersion`/`getMaskAuthorityVersion`
+   * already establish elsewhere in this codebase.
+   * @returns {number}
+   */
+  function getVersion() {
+    return version;
+  }
+
   return {
     reset,
     setAnchors,
@@ -319,6 +333,7 @@ export function createAnchorAuthority({ log }) {
     anchorsForKind,
     anchorsForKindOnFloor,
     getReport,
+    getVersion,
   };
 }
 

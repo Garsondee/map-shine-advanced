@@ -2260,3 +2260,56 @@ and NOT built this session. Finding 1 partly reframes the question it was meant 
 does not remove it. And nothing in this session was verified in live Foundry: it is 8,725 Node
 assertions plus static wiring verification, and the author's next `perf-run-full` is its first
 real execution.
+
+---
+
+**ADDENDUM to P-009, same day â€” the live regression P-009 itself shipped, fixed within the hour;
+and the temporal split it left "NOT DONE" is now built.** Filed by Claude Sonnet 5, 2026-08-12.
+Commits `779b135`, `efff64e`.
+
+**The regression.** The author ran `perf-run-full` immediately after P-009 landed and hit it on
+the first try: `waited 30s for 120 frames but only 0 were counted. The viewer is probably not
+running â€” load a scene first.` â€” on a viewer rendering correctly. Root cause: `runStructuralAB`
+called `harness.waitFrames(settleFrames)` for the toggle's settle period BEFORE
+`harness.armProfiler(...)`. `createProfiledFrameWaiter` (`perf-session.js`) only advances while
+the profiler is armed and receiving `beginFrame`/`endFrame` from the real render loop; at that
+point in the sequence it was still disarmed (the main window's own teardown runs before this
+function is ever reached), so the poll's count could never leave 0 regardless of real frame rate.
+**Fixed** by arming once per block with the settle count baked in and running both waits inside
+that one continuously-armed window â€” exactly the sequence `perf-session.js`'s own main window
+already uses, and the same shape as a prior live incident this project fixed once before
+(2026-08-11, the GPU zone timer race: *"arm only after `waitFrames(settleFrames)` proves frames
+are actually flowing"*). The test fake had let `waitFrames` resolve unconditionally regardless of
+arm state, which is exactly how this shipped past 62 passing tests; it now models the real
+contract and pins the fix with a direct assertion that every `waitFrames` call across a full A/B
+run has `armed:true`. Verified by temporarily reintroducing the bug and confirming the new test
+throws the exact live error wording before restoring the fix. `npm run verify` green, 8,726
+tests.
+
+**The temporal split.** P-009 designed and costed this, then explicitly left it undone: *"widen
+the typed arrays to `slots x EPOCHS`, recompute `epochBase` once per frame in `beginFrame`,
+~10KB, zero allocation."* Built with one simplification found while implementing it â€” a full
+N-epoch histogram was more than the actual question needs. The residency audit's own wording
+("a steady cost... or a few expensive early passes dragging the average up") is a TWO-region
+question, early vs. rest, not a fine-grained histogram, so the shipped design is a single
+`earlyWindowMs` boundary (default 10s) rather than a configurable epoch count â€” simpler, cheaper,
+and a closer match to what was actually asked. `frame-profiler.js` tracks, per zone, how much CPU
+time landed within that boundary of the real post-settle window, classified by bracket OPEN time
+so one sample is never split across two buckets. **CPU only, deliberately** â€” see the module's
+own header for why GPU has no equivalent signal without a separate change to
+`gpu-zone-timer.js`'s pending-uid bookkeeping, and the motivating question was CPU-only anyway.
+
+`classifyTemporalShape` (`perf-report.js`) compares the ACTUAL early share against what a
+UNIFORM zone would show for that window (`earlyWindowMs / durationMs`), not against zero â€” a
+healthy steady zone still has some early cost, proportional to how much of the window "early"
+covers. A new `temporal-shape:<zone>` finding fires in both directions: front-loaded (a burst â€”
+settling, cache warm-up, a one-time setup cost) and back-loaded (thermal throttling, a growing
+data structure, degrading cache behaviour), neither of which a flat mean over the whole window
+would ever surface. Verified against the real 2026-08-12 numbers before writing permanent tests:
+a fully front-loaded reading of `residency.itemLoad`'s 6,189ms verdicts `front-loaded` at 5.36Ã—
+the expected share; the same total spread proportionally across the window verdicts `steady` at
+exactly 1.0Ã— â€” confirming the design does not flag a healthy zone just for having any early cost
+at all. `npm run verify` green, 8,758 tests.
+
+**Both fixes are Node-verified only.** Neither has run against live Foundry yet â€” the author's
+next `perf-run-full` is the first real execution of either.

@@ -1879,12 +1879,14 @@ export function run(t) {
     ok('...93.7% of 6189ms accounted for by I/O', share.evidence.ioFraction === 0.937);
     ok('...so it stays at low severity and confirms the audit', share.severity === 'low');
 
-    // uniformBuffers: P-008's "open lead", flagged rather than diagnosed.
+    // uniformBuffers: P-008's "open lead" — RESOLVED 2026-08-13 by the live
+    // parked-camera experiment this finding's own (former) text asked for.
     const ub = find(f, 'uniform-buffers-grew');
     ok('a >=2x uniformBuffers growth is surfaced at last', ub !== null);
     ok('...as a ratio, which is the only meaningful form', ub.evidence.ratio === 3.13);
-    ok('...explicitly NOT calling it a leak', !ub.text.includes('leak') && ub.text.includes('NOT decided here'));
-    ok('...and it names the experiment that would settle it', ub.text.includes('camera parked'));
+    ok('...downgraded to low now the question is settled, not open', ub.severity === 'low');
+    ok('...explains growth as content-driven, not a leak', ub.text.includes('not a leak'));
+    ok('...and cites the parked-camera experiment that settled it', ub.text.includes('parked-camera test'));
 
     // ====================================================================
     // A STEADY ZONE WITH A CATASTROPHIC OUTLIER (2026-08-12) — steady-spike

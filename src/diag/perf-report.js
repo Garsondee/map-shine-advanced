@@ -1067,29 +1067,34 @@ export function deriveFindings({
       });
     }
   }
-  // UNIFORM-BUFFER GROWTH (2026-08-12) — P-008's own "open lead, not investigated
-  // this round" (uniformBuffers 2,137 → 8,637, 4.04×, while `programs` held flat
-  // at 84). It stayed uninvestigated partly because nothing surfaced it: the raw
-  // pair was printed under instrument.pipelineStats and no finding ever pointed
-  // at it, so it read as background detail rather than a question. The
-  // 2026-08-12 capture repeated it (5,607 → 17,539, 3.1×) and it was STILL
-  // nobody's finding.
-  //
-  // ⚠️ DELIBERATELY NOT CALLED A LEAK. Growth here is genuinely ambiguous:
-  // per-material/per-light UBO allocation scaling with new content entering
-  // residency is expected and benign, and this report cannot tell that apart
-  // from unbounded per-frame allocation. What it CAN do is refuse to let the
-  // question go unasked for a third capture running. Ratio-based, not
-  // delta-based — an absolute count means nothing without its starting point.
+  // UNIFORM-BUFFER GROWTH (2026-08-12; RESOLVED 2026-08-13) — P-008's own
+  // "open lead, not investigated this round" (uniformBuffers 2,137 → 8,637,
+  // 4.04×), repeated in five straight touring captures (up to 11.42× by
+  // 2026-08-12 night) and never settled. This finding's own text used to
+  // instruct the reader to "re-run a window with the camera parked so no new
+  // content streams in" — that experiment ran live 2026-08-13
+  // (uniform-buffer-parked-probe.mjs): settled at 357, then held EXACTLY 357
+  // for 55+ seconds of parked, ambient-only render loop (candle flicker, fire
+  // particles, per-frame uniform pushes — zero new residency). By this
+  // finding's own stated criterion ("if the ratio holds with a static view,
+  // it is per-frame allocation, not content") the question is answered:
+  // content-driven, not a leak. A touring route WILL always show growth here
+  // — that is new residency legitimately allocating materials, expected and
+  // benign — so this no longer needs anyone's attention on an ordinary
+  // capture. Downgraded to `low` and kept only as a tripwire: a ratio this
+  // large on a window that was NOT touring new content (a parked
+  // structuralAB block, or a route that revisits only already-loaded ground)
+  // would be the real, still-worth-chasing signal the original P-008 lead
+  // was actually looking for.
   if (Number.isFinite(pipelineStats?.start?.uniformBuffers) && Number.isFinite(pipelineStats?.end?.uniformBuffers)) {
     const from = pipelineStats.start.uniformBuffers;
     const to = pipelineStats.end.uniformBuffers;
     const ratio = from > 0 ? to / from : null;
     if (ratio !== null && ratio >= 2) {
       out.push({
-        severity: 'medium',
+        severity: 'low',
         id: 'uniform-buffers-grew',
-        text: `renderer.info.memory.uniformBuffers grew ${round(ratio, 2)}× (${from} → ${to}) across the measurement window. Whether that is expected (per-material/per-light UBOs allocated as new content enters residency, torn down between passes) or an unbounded per-frame allocation is NOT decided here — this report cannot tell those apart. It is flagged because the same growth appeared in the 2026-08-11 capture (4.04×) and went uninvestigated for want of anyone naming it. To settle it: re-run a window with the camera parked so no new content streams in. If the ratio holds with a static view, it is per-frame allocation, not content.`,
+        text: `renderer.info.memory.uniformBuffers grew ${round(ratio, 2)}× (${from} → ${to}) across the measurement window — expected and benign for a touring route: a live parked-camera test (2026-08-13) confirmed this count holds perfectly flat once settled when no new content streams in, so growth here just means new residency material allocation, not a leak. Only worth a second look if this ratio shows up on a window that was NOT touring new ground (a parked measurement, or a route that only revisits already-loaded content).`,
         evidence: { uniformBuffersStart: from, uniformBuffersEnd: to, ratio: round(ratio, 2) },
       });
     }

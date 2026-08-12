@@ -39,6 +39,7 @@ export {
   setVtPanViewerTimeRate,
   setVtPanViewerTimeMode,
   getVtPanViewerTimeDialState,
+  getVtPanViewerTodHour,
   setVtPanViewerSkyRealism,
   setVtPanViewerGradeEnvStrength,
   setVtPanViewerCloudCover,

@@ -120,6 +120,7 @@ import {
   setVtPanViewerTimeRate,
   setVtPanViewerTimeMode,
   getVtPanViewerTimeDialState,
+  getVtPanViewerTodHour,
   setVtPanViewerSkyRealism,
   setVtPanViewerGradeEnvStrength,
   setVtPanViewerCloudCover,
@@ -1515,8 +1516,11 @@ function install() {
    *   need this even though the clock itself hasn't moved.
    */
   function refreshCandleIgnition({ force = false } = {}) {
-    const dial = getVtPanViewerTimeDialState();
-    const todHour = Number(dial?.todHour);
+    // getVtPanViewerTodHour — the zero-allocation sibling of the full dial
+    // state (this fires UNGATED every rAF via pumpAstrolabe, 60-120x/sec;
+    // the full getVtPanViewerTimeDialState() below is already gated behind
+    // the astrolabe panel being open AND a 100ms throttle, so it stays there).
+    const todHour = Number(getVtPanViewerTodHour());
     if (!Number.isFinite(todHour)) return; // viewer not ready yet — the next natural trigger tries again
     const isDay = computeSun(todHour).aboveHorizon;
     if (!force && isDay === lastCandleIsDay) return;

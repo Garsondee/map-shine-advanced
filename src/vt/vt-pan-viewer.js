@@ -14138,6 +14138,12 @@ export async function startVtPanViewer({
        * all already computed, no allocation beyond the literal.
        * `null` before the first frame — the caller simply skips a repaint.
        */
+      /** Zero-allocation sibling of `getTimeDialState` below, for a caller
+       * that only needs the ONE scalar (`refreshCandleIgnition`'s ungated
+       * every-rAF poll, boot.js) — returning the full dial object just to
+       * read `todHour` off it allocated a ~10-field object 60-120x/sec for
+       * a value this reads directly off the same source with none. */
+      getTodHour: () => lastEnvSnapshot?.env?.time?.todHour ?? null,
       getTimeDialState: () => {
         if (!lastEnvSnapshot) return null;
         const { env, dayClock: clock } = lastEnvSnapshot;
@@ -15566,6 +15572,16 @@ function mix1(a, b, t) {
  */
 export function getVtPanViewerTimeDialState() {
   return _active?.getTimeDialState?.() ?? null;
+}
+
+/**
+ * The SAME hour `getVtPanViewerTimeDialState().todHour` would read, without
+ * allocating the other nine fields around it — for a poll that only ever
+ * needs the one number (`refreshCandleIgnition`'s ungated every-rAF call,
+ * boot.js). `null` before the first frame, same as the full dial state.
+ */
+export function getVtPanViewerTodHour() {
+  return _active?.getTodHour?.() ?? null;
 }
 
 /**

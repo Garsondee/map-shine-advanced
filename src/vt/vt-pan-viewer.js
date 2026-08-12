@@ -14840,6 +14840,104 @@ export async function startVtPanViewer({
       setIsolateItem, // "show only this draw item" — see isolateItemId's header
       getIsolateItemId: () => isolateItemId,
       getDrawListIds: () => lastItems.map((i) => ({ id: i.id, kind: i.kind, renderOrder: i.renderOrder })),
+      /**
+       * WORLD-DRAW COMPOSITION (2026-08-12, Testament Track B.1) — geometry.worldDraw
+       * is a single `renderer.render(scene, camera)` call with no internal seam a
+       * profiler zone can bracket (three.js walks its own scene graph; there is no
+       * per-item timing hook). This can't say what costs GPU TIME, only what's
+       * actually IN the draw — grouped by the same closed `item.kind` taxonomy the
+       * rest of this file already uses (`'levelBackground'`, `'levelForeground'`,
+       * `'tile'`, `'token'`, `'vegetationOverlay'` — see mask-authority.js's own
+       * `COVER_ITEM_KINDS`, scene-tokens.js and vegetation-render.js for where each
+       * is assigned; NOT `_placement.kind`, a different field on the same item that
+       * happens to share the name). That turns one opaque
+       * 10ms number into "here's what's actually in it" — real information the
+       * perf report currently has none of.
+       * @returns {{byKind: Array<{kind:string, items:number, meshes:number,
+       *   trianglesOwned:number, unresolvedItems:number}>, totalTriangles:number,
+       *   totalMeshes:number, totalItems:number, note:string}}
+       */
+      getGeometryComposition: () => {
+        const countMeshTriangles = (mesh) => {
+          if (!mesh || !mesh.visible || !mesh.geometry) return 0;
+          const geom = mesh.geometry;
+          if (geom.index) return geom.index.count / 3;
+          const pos = geom.attributes?.position;
+          return pos ? pos.count / 3 : 0;
+        };
+        const groups = new Map();
+        const groupFor = (kind) => {
+          let g = groups.get(kind);
+          if (!g) {
+            g = { kind, items: 0, meshes: 0, triangles: 0, unresolvedItems: 0 };
+            groups.set(kind, g);
+          }
+          return g;
+        };
+        for (const item of lastItems) {
+          const kind = item.kind ?? 'unknown';
+          const g = groupFor(kind);
+          g.items += 1;
+          if (kind === 'levelBackground' || kind === 'levelForeground' || kind === 'tile') {
+            // Whole-image items: one mesh PER SUB-TILE (`state.wholeImage.tiles[]`,
+            // same structure `getDrawListIds`'s siblings elsewhere in this file
+            // already read) — a large map is routinely several of these.
+            const tiles = itemStates.get(item.id)?.wholeImage?.tiles;
+            if (!tiles || tiles.length === 0) {
+              g.unresolvedItems += 1;
+              continue;
+            }
+            for (const t of tiles) {
+              if (!t.mesh?.visible) continue;
+              g.meshes += 1;
+              g.triangles += countMeshTriangles(t.mesh);
+            }
+          } else if (kind === 'vegetationOverlay') {
+            // ONE mesh per (host, kind) — lives on the HOST item's own state, not
+            // this synthetic item's (see finishScenDepthPass's own comment on
+            // this exact shape, a few hundred lines up in this file).
+            const hostState = itemStates.get(item.vegHostItemId);
+            const overlay = hostState?.vegetationOverlays?.[item.vegKindId];
+            if (!overlay?.mesh?.visible) {
+              g.unresolvedItems += 1;
+              continue;
+            }
+            g.meshes += 1;
+            g.triangles += countMeshTriangles(overlay.mesh);
+          } else if (kind === 'token') {
+            // Shared geometry (`occlusionDiscGeometry`), one instance per active
+            // token via the `occlusionDiscs` pool — see that pool's own doc.
+            const entry = occlusionDiscs.get(item.id);
+            if (!entry?.mesh?.visible) {
+              g.unresolvedItems += 1;
+              continue;
+            }
+            g.meshes += 1;
+            g.triangles += countMeshTriangles(entry.mesh);
+          } else {
+            // Closed-list violation or a kind this diagnostic doesn't know how to
+            // resolve a mesh for yet — counted, never silently dropped.
+            g.unresolvedItems += 1;
+          }
+        }
+        const byKind = [...groups.values()]
+          .map(({ triangles, ...rest }) => ({ ...rest, trianglesOwned: Math.round(triangles) }))
+          .sort((a, b) => b.trianglesOwned - a.trianglesOwned);
+        return {
+          byKind,
+          totalTriangles: byKind.reduce((sum, g) => sum + g.trianglesOwned, 0),
+          totalMeshes: byKind.reduce((sum, g) => sum + g.meshes, 0),
+          totalItems: lastItems.length,
+          note:
+            'Counts triangles a mesh OWNS, not what the GPU actually had to paint: an ' +
+            'off-screen or fully-overlapped item still counts fully, and see-through ' +
+            'content (foliage, roof art) can cost far more in real paint time than its ' +
+            'triangle share alone suggests. This is composition, not a timing ' +
+            'measurement — cross-reference with geometry.worldDraw for the one real ' +
+            'GPU-time number this pass produces, and a WebGPU-Inspector capture for ' +
+            'real per-draw GPU time.',
+        };
+      },
       // --- runZoomThrashTest support (2026-07-16) ---------------------------
       /** Wipe frame-gap/hitch history for a clean measurement window. */
       resetHitchTracking() {
@@ -15994,6 +16092,11 @@ export function stopVtPanViewerLiveMarkers() {
 export function getVtPanViewerDrawListIds() {
   if (!_active) return [];
   return _active.getDrawListIds();
+}
+
+export function getVtPanViewerGeometryComposition() {
+  if (!_active) return null;
+  return _active.getGeometryComposition();
 }
 
 /** @returns {string} the isolated item id, or `''` when showing everything. */

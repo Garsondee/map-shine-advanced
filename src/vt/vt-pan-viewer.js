@@ -9559,7 +9559,7 @@ export async function startVtPanViewer({
      * light-pool.js#update`), so the very next frame after a flip already
      * reads the new value.
      */
-    let pointLightBatching = false;
+    let pointLightBatching = true;
 
     // PER-PASS GPU TIMING (docs/planning/Performance.md). Constructed here rather
     // than in boot.js because it needs the `renderer` this closure owns; the

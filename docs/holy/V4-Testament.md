@@ -775,11 +775,10 @@ Worker models execute + mark only; ANY surprise is a petition.*
       uncommitted-edits warning above no longer applies; those files landed in the same `d518233`
       commit. Full capture cross-reference: the perf-report artifact delivered to the author
       2026-08-12, same session.
-- [ ] **S2.7 Pixel gate + flip** — bench-route captures, flag ON vs OFF: **exact** (any diff
+- [x] **S2.7 Pixel gate + flip** — bench-route captures, flag ON vs OFF: **exact** (any diff
       is a bug; the ONLY relaxation is design doc §4's contingency, with evidence + the
       author's sign-off). Author LIVE verdict → default ON.
-      **Pixel gate: BUILT and RUN, 2026-08-12 Claude Sonnet 5 — exact PASS. The flip itself
-      still needs your live verdict, not taken here — see below.**
+      **Pixel gate: BUILT and RUN, 2026-08-12 Claude Sonnet 5 — exact PASS.**
       `tests/playwright-artifacts/look/s2-7-pixel-diff.mjs` (new, modeled on S1.5's
       `stage1-earlyz-pixel-diff.mjs`), against the live bench Mansion, Ground Floor, same
       session, frozen time, flag OFF captured → flag ON → flag OFF restored (Law 3). **Result:
@@ -802,11 +801,18 @@ Worker models execute + mark only; ANY surprise is a petition.*
       **What this does NOT do: flip the default.** The design doc's §8 and this very line both
       read "Author LIVE verdict → default ON" — unlike Stage 1, where the flip preceded the
       author's look (S1.6 → S1.7), this task explicitly conditions the flip ON that verdict
-      coming FIRST. The exact pass above is the evidence for you to look at;
-      `MapShine.setPointLightBatching(true)` remains a live, instant, revertible toggle for
-      whenever you want to see it running yourself and give that verdict. Left `[ ]` rather
-      than `[x]` on purpose — the gate half of this task is proven, the flip half is not this
-      worker's call to make.
+      coming FIRST — which is exactly what happened, in order: the exact-pixel proof and the
+      Ground-Floor-batched screenshot were handed to the author in chat, and the author's own
+      words, verbatim, were **"Also make the fix from your previous output ON by default."**
+      **Author LIVE verdict, Ingram, 2026-08-12 — recorded above, verbatim, before the flip.**
+      Flip done the same session, Claude Sonnet 5: `vt-pan-viewer.js`, `pointLightBatching`
+      default `false` → `true` (mirrors S1.7's identical one-line flip for `earlyZComposition`).
+      `npm run verify` green throughout, unchanged 9,112 tests (a default-value flip touches no
+      branch a test doesn't already cover for both states). `MapShine.setPointLightBatching
+      (false)` remains the instant, live revert per Law 5 if a regression ever needs it. Not
+      independently re-verified against the live harness beyond S2.7's own gate above — same
+      "no new logic to prove" reasoning S1.7's countersign used, since the gate already exercised
+      the exact code path this flip now activates by default.
 - [ ] **S2.8 Region darkness batched** (8 draws → 1, same technique). Window-light folding is
       DEFERRED by decision with its numbers recorded (design doc §6) — do not build it.
 - [ ] **S2.9 Bench capture on an idle machine.** **Gate (P-004 resolution): `pass.light.

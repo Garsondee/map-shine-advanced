@@ -2869,7 +2869,7 @@ function install() {
   // is turned up for accuracy, not speed, on purpose.
   MapShine.debug.registerAction(
     'perf-run-full',
-    '🔬 Performance Report (this scene, CPU + GPU, ~2–4 min)',
+    '🔬 Performance Report (this scene, CPU + GPU, ~2–3 min)',
     async () => {
       const path = buildBenchmarkPath(); // throws BEFORE anything runs if no scene is loaded
       const started = new Date().toISOString();

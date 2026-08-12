@@ -97,6 +97,33 @@ const RAPID_STRESS_SWEEP_MS = 5000;
  */
 const RAPID_STRESS_RECOVERY_TIMEOUT_MS = 30000;
 /**
+ * A fixed floor UNDER every event-driven wait in this action
+ * (multi-floor-hitch-2026-08-12, author's own report: "when the performance
+ * sweep goes up a floor it encounters a hitch which is entirely to do with
+ * loading... add at least 5 seconds of pause before carrying out any
+ * action"). `waitForSceneSettled` can genuinely report "settled" — nothing
+ * left in the trackers it knows how to poll — while a first-frame shader/
+ * pipeline compile for content the new floor just made visible is still
+ * queued; this is a deliberate belt-and-suspenders margin on TOP of that
+ * event-driven wait, never a replacement for it. Applied before every
+ * phase's camera sweep starts moving.
+ */
+const MIN_ACTION_PAUSE_MS = 5000;
+/**
+ * The SAME margin, sized specifically for a floor change (author's own
+ * number: "something like 15 seconds"). Chained AFTER `waitForSceneSettled`
+ * resolves — a floor switch is exactly the action the author's report named
+ * as the hitch's source, so it gets a larger floor than
+ * `MIN_ACTION_PAUSE_MS` alone. Applied to BOTH floor switches this action
+ * performs: the forward switch (Phase 2) and the restore switch back to the
+ * original floor (Phase 2's own finally, before Phase 3 starts) — the
+ * restore is a real floor load too, not a free no-op.
+ */
+const FLOOR_CHANGE_SETTLE_BUFFER_MS = 15000;
+/** Plain fixed-duration wait — no clock read, just a timer (time/one-clock
+ * is about READING the current time, which this never does). @param {number} ms */
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
  * How long to settle after FORCING a new performance tier, before a tier-
  * comparison run starts measuring it (see `perf-report-all-tiers` below). 3×
  * `DEFAULT_SETTLE_FRAMES` (30) — a tier change can rebuild several effects'
@@ -3252,6 +3279,9 @@ function install() {
     '🔬 Performance Report (this scene, CPU + GPU, ~2–3 min, longer if multi-floor)',
     async () => {
       const path = buildBenchmarkPath(); // throws BEFORE anything runs if no scene is loaded
+      // MIN_ACTION_PAUSE_MS's own doc — a fixed floor before this (or any)
+      // phase's camera sweep starts moving.
+      await pause(MIN_ACTION_PAUSE_MS);
       const started = new Date().toISOString();
       // Start the camera moving, then profile WHILE it moves — the route IS the
       // workload, so the measurement window is exactly its duration and every
@@ -3369,6 +3399,15 @@ function install() {
                     ),
                 })
               : null;
+            // FLOOR_CHANGE_SETTLE_BUFFER_MS's own doc — a fixed margin ON TOP
+            // of the event-driven wait above, sized for the specific hitch
+            // the author reported here: "the performance sweep goes up a
+            // floor it encounters a hitch which is entirely to do with
+            // loading". Only after a REAL switch — nothing to buffer
+            // against otherwise, so the no-switch path still gets its own
+            // MIN_ACTION_PAUSE_MS floor instead.
+            showPerfProgress(switchResult.changed ? 'floor settled — extra settle margin…' : 'preparing…');
+            await pause(switchResult.changed ? FLOOR_CHANGE_SETTLE_BUFFER_MS : MIN_ACTION_PAUSE_MS);
 
             const path2 = buildBenchmarkPath();
             const playing2 = playCameraPath(path2, { capFrameRate: false }).catch((err) => {
@@ -3435,8 +3474,24 @@ function install() {
         // it found it, on any exit path (success, timeout, or thrown error).
         if (switchedAwayFromFloorIndex !== null) {
           try {
-            await setVtPanViewerFloor(switchedAwayFromFloorIndex);
+            const restoreResult = await setVtPanViewerFloor(switchedAwayFromFloorIndex);
             syncActiveFloorContext(switchedAwayFromFloorIndex);
+            // THE RESTORE IS A REAL FLOOR LOAD TOO (multi-floor-hitch-2026-08-12)
+            // — Phase 3 (rapid stress) runs next, on whatever this restored,
+            // and previously started measuring immediately with zero settle
+            // time for it. Same event-driven-wait-then-fixed-margin shape as
+            // the forward switch above, so Phase 3 doesn't inherit a loading
+            // hitch from switching BACK.
+            if (restoreResult.changed) {
+              await waitForSceneSettled({
+                onProgress: (s) =>
+                  showPerfProgress(
+                    `floor ${switchedAwayFromFloorIndex} settling (restore) — ${(s?.waitingFor ?? []).join(', ') || 'starting'}`
+                  ),
+              });
+              showPerfProgress('floor restored — extra settle margin…');
+              await pause(FLOOR_CHANGE_SETTLE_BUFFER_MS);
+            }
           } catch (err) {
             log.error('perf report: failed to restore the original floor after the multi-floor phase:', err);
           }
@@ -3456,6 +3511,12 @@ function install() {
       // recorded, never invalidates the floor-1 report above it.
       let rapidStressSweep = null;
       try {
+        showPerfProgress('preparing for rapid stress sweep…');
+        // MIN_ACTION_PAUSE_MS's own doc. On top of whatever margin the floor
+        // restore above already added (only when a real multi-floor switch
+        // happened) — cheap insurance either way, and this phase's own p99/
+        // max are exactly the numbers a lingering load hitch would corrupt.
+        await pause(MIN_ACTION_PAUSE_MS);
         showPerfProgress('rapid diagonal stress sweep — bottom-left to top-right…');
         const path3 = buildStressSweepPath(); // throws BEFORE anything runs if no scene is loaded
         const playing3 = playCameraPath(path3, { capFrameRate: false }).catch((err) => {

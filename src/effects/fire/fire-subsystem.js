@@ -106,6 +106,43 @@ const PER_FIRE = Object.freeze({ flame: 12, ember: 10, smoke: 24 });
 const EMPTY_SPAWN_CLOUD = Object.freeze({ points: new Float32Array(0), count: 0, paintedTexels: 0, signature: 0 });
 
 /**
+ * ⚠️ THE COHESION CACHE-STALENESS GAP THIS CLOSES. Cohesion pulls every spawn
+ * point toward its NEAREST entry in `fires` (`applyCohesion`, fire-spawn-
+ * points.js) — but the cache below that decides WHETHER to re-run that pull
+ * only ever watched the SPAWN CLOUD's own signature (`fireSpawnSignature`,
+ * built from `_Fire`'s SPAWN_THRESHOLD=0.18 reading of the grid) and the
+ * cohesion VALUE. `fires` itself — built by a DIFFERENT extraction
+ * (`extractFiresFromMask`, PAINT_THRESHOLD=0.25, chamfer ridge-walk,
+ * peak-separation) over the SAME grid — was never part of that
+ * invalidation. Both are sampled hashes over the same data and USUALLY
+ * settle together, but nothing enforces that: if `fires` finishes
+ * (re-)deriving even one tick later than `cloud` — a real possibility during
+ * progressive mask streaming, or any future path that recomputes one without
+ * touching the other — cohesion's next push bakes in whatever `fires` list
+ * existed at that moment, correct or not, and then never gets asked to check
+ * again until the SPAWN CLOUD changes or the slider itself moves. A fire
+ * genuinely missing from that stale list is not "not pulled" — every one of
+ * its own spawn points still runs the SAME nearest-search, against a list
+ * that no longer contains itself, and gets assigned to whichever real fire
+ * IS in the list, however far away. This mixes `fires`' own content into the
+ * same staleness check so it can never fall behind `cloud` again.
+ * @param {Array<{x:number,y:number}>} fires
+ */
+function fireListSignature(fires) {
+  let hash = 2166136261 >>> 0;
+  const mix = (v) => {
+    hash ^= v | 0;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  };
+  mix(fires.length);
+  for (const f of fires) {
+    mix(Math.round(Number(f?.x) || 0));
+    mix(Math.round(Number(f?.y) || 0));
+  }
+  return hash;
+}
+
+/**
  * @param {object} deps
  * @param {*} deps.THREE - injected.
  * @param {() => object} deps.getFireRenderState - `{enabled, params, perfTier, fires[], spawnCloud}`.
@@ -158,6 +195,9 @@ export function createFireSubsystem({
   let currentLights = [];
   let hasContent = false;
   let lastSpawnSignature = null;
+  /** Last `fireListSignature(fires)` the cohesion cache was computed against
+   * — see that function's own header for the staleness gap this closes. */
+  let lastFiresSignature = null;
   /**
    * Last cohesion amount applied PER ENGINE — keyed by the engine object itself,
    * NOT by `kind`.
@@ -286,8 +326,19 @@ export function createFireSubsystem({
     // "nothing painted here" its own stable signature (0, the same value
     // `fireSpawnSignature`/`fireMaskSignature` already return for "no grid"),
     // so that state is pushed and tracked exactly like any other paint change.
+    //
+    // ⚠️ `fires` GETS ITS OWN SIGNATURE TOO, MIXED INTO THE SAME CHECK — see
+    // `fireListSignature`'s own header. `cloud`'s signature alone is not
+    // sufficient: `fires` (cohesion's pull TARGETS) is built by a completely
+    // different extraction over the same grid and can settle a tick later
+    // than `cloud` does. Missing that meant a stale `fires` list — one
+    // genuinely missing a fire that had already finished extracting — could
+    // get baked into `applyCohesion`'s result and then never be asked to
+    // recompute again until the paint itself changed or the slider moved,
+    // even though the CORRECT list was available the entire time.
     const effectiveCloud = cloud ?? EMPTY_SPAWN_CLOUD;
-    const cloudChanged = effectiveCloud.signature !== lastSpawnSignature;
+    const firesSignature = fireListSignature(fires);
+    const cloudChanged = effectiveCloud.signature !== lastSpawnSignature || firesSignature !== lastFiresSignature;
     const transformedByKind = new Map();
     for (const { engine, kind } of engines) {
       const cohesion = runtime.perKind?.[kind]?.cohesion ?? 0;
@@ -300,6 +351,7 @@ export function createFireSubsystem({
       }
     }
     lastSpawnSignature = effectiveCloud.signature;
+    lastFiresSignature = firesSignature;
 
     // ⚠️ SPRITES SCALE TO THE FIRE THEY BELONG TO — see
     // SPRITE_REFERENCE_DIAMETER_PX. The MEDIAN, not the mean: one bonfire in a

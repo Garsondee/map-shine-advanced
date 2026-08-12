@@ -257,4 +257,38 @@ export function run(t) {
     '"Fire intensity" reaches every engine\'s setParams.intensity, not "Flame brightness"',
     engineInstances.every((e) => e.paramCalls.at(-1)?.intensity === 1.8)
   );
+
+  // ── THE STALE-fires REGRESSION (2026-08-12): `fires` (cohesion's own pull
+  // TARGETS, from extractFiresFromMask) is a DIFFERENT extraction than
+  // `spawnCloud` (from extractFireSpawnPoints) over the same grid, and can
+  // settle at a different moment. The cache used to watch only `cloud`'s own
+  // signature + the cohesion value — a fire moving (or a fire appearing that
+  // was missing when cohesion last ran) with the SAME spawnCloud object must
+  // still force a fresh push, or a stale `fires` list bakes into
+  // `applyCohesion`'s result and is never asked to recompute again until the
+  // paint itself changes or the slider moves — even though the correct list
+  // was available the whole time. Cohesion (1.5) is still active from the
+  // earlier step; only `fires` moves here, `state.spawnCloud`'s object
+  // reference is untouched. ──
+  const cloudBeforeFiresMove = state.spawnCloud;
+  state.fires = [{ id: 'anchor1', x: 90, y: 90, diameterPx: 60, intensity: 1 }]; // moved from (20,20)
+  subsystem.sync(renderer, 112, 0.016, rect);
+  t.ok(
+    'state.spawnCloud is still the SAME object — this is testing fires alone, not a paint edit',
+    state.spawnCloud === cloudBeforeFiresMove
+  );
+  t.ok(
+    'a fires-list change alone (spawnCloud object untouched) still pushes every engine',
+    flameEngines.every((e) => e.spawnCalls.length === 6) &&
+      emberEngine.spawnCalls.length === 5 &&
+      smokeEngine.spawnCalls.length === 5
+  );
+  t.ok(
+    "the re-pull actually reflects the fire's NEW position, not a no-op re-push of the same result",
+    flameEngines.every((e) => {
+      const before = e.spawnCalls.at(-2)?.points;
+      const after = e.spawnCalls.at(-1)?.points;
+      return before && after && (after[0] !== before[0] || after[1] !== before[1]);
+    })
+  );
 }

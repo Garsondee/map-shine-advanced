@@ -182,6 +182,11 @@ let lastDescribeRenderModeAt = -Infinity;
  * question never gets the previous question's cached answer. */
 let lastDescribeRenderModeCanvas = null;
 let lastDescribeRenderModeLoopActive = null;
+// POOL HEALTH (cache-completeness pass, 2026-08-12) — hits = the cached
+// answer reused (line below); misses = computeRenderModeUncached actually
+// ran (the DOM style-recalc-forcing reads this cache exists to throttle).
+let describeRenderModeHits = 0;
+let describeRenderModeMisses = 0;
 
 /**
  * THE QUESTION THAT COULD NOT BE ANSWERED FROM A REPORT: *is the thing I am
@@ -212,13 +217,22 @@ export function describeRenderMode({ canvas, loopActive }) {
     loopActive === lastDescribeRenderModeLoopActive &&
     now - lastDescribeRenderModeAt < DESCRIBE_RENDER_MODE_CACHE_MS
   ) {
+    describeRenderModeHits += 1;
     return lastDescribeRenderMode;
   }
+  describeRenderModeMisses += 1;
   lastDescribeRenderModeAt = now;
   lastDescribeRenderModeCanvas = canvas;
   lastDescribeRenderModeLoopActive = loopActive;
   lastDescribeRenderMode = computeRenderModeUncached({ canvas, loopActive });
   return lastDescribeRenderMode;
+}
+
+/** Snapshot of this module's own cache counters — for the perf report's
+ * cache-health pass. Lifetime counters; a caller wanting one window's rate
+ * samples before/after, same convention as `depth-proxy-material-pool.js`. */
+export function getDescribeRenderModeStats() {
+  return { hits: describeRenderModeHits, misses: describeRenderModeMisses };
 }
 
 function computeRenderModeUncached({ canvas, loopActive }) {

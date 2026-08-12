@@ -86,6 +86,13 @@ export function installPainter(MapShine) {
     floorSwitching: false, // a live setVtPanViewerFloor call is in flight — buttons disable so rapid clicks can't retrigger the flagged rapid-floor-switch residency bug
     gridCanvases: {}, // key -> offscreen canvas
     gridImageData: {}, // key -> cached ImageData for that canvas (reused, not reallocated, per frame)
+    // POOL HEALTH (cache-completeness pass, 2026-08-12) — incremented in
+    // paint-mode-canvas.js#renderGrid, the actual read/write site (this file
+    // only owns state; that one owns the draw loop). canvas* = the offscreen
+    // canvas element itself; imageData* = the packed ImageData buffer, which
+    // can miss on its own even when the canvas hit (a resize keeps the same
+    // canvas element but needs a fresh ImageData sized to match).
+    gridCachePoolStats: { canvasHits: 0, canvasMisses: 0, imageDataHits: 0, imageDataMisses: 0 },
     dirty: new Set(), // keys whose gridCanvas needs re-rendering
     previewRect: {}, // key -> {x0,y0,x1,y1} cell bounds changed since last render, or `true` for the whole grid
     dirtySinceSave: false, // any unsaved edits? drives the Save indicator + the close/switch guards
@@ -561,6 +568,11 @@ export function installPainter(MapShine) {
       state.dirtySinceSave = false; // freshly loaded from the scene = clean
       for (const key of Object.keys(layers)) markFull(key);
       return { loaded: Object.keys(layers).length > 0, mismatched };
+    },
+    /** POOL HEALTH — see gridCachePoolStats' own declaration for the exact
+     * hit/miss doctrine. */
+    getGridCachePoolStats() {
+      return { ...state.gridCachePoolStats };
     },
   };
 }

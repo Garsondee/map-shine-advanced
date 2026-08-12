@@ -165,6 +165,16 @@ export function createSpecularSurfaceSubsystem({
    * Released immediately after: a full-resolution RGBA buffer is tens of MB and
    * nothing needs it once the labels are packed. */
   let pendingBytes = null;
+  // BAKE-COUNT HEALTH (cache-completeness pass, 2026-08-12) — bakeIslandPack
+  // has no internal skip branch of its own (the `!pendingBytes` guard just
+  // below is a one-time "no mask loaded yet" startup gate, never cleared
+  // again after the first load — see `pendingBytes`' own comment — so
+  // counting it as an ongoing hit would be a fabrication). Its TWO call
+  // sites (a mask-load continuation vs. a live islandSpread drag) have
+  // incomparable upstream gating, so — same doctrine as
+  // vt-pan-viewer.js's bakeWindField — this is a MISSES-only lifetime tally,
+  // not a hits/misses pair.
+  let islandPackBakeCount = 0;
   /** The author's island spread, so a slider change can rebake. Bootstrap
    * value only — overwritten by the first real sync below; imported rather
    * than hand-typed so it can never silently drift from the shipped default
@@ -223,6 +233,7 @@ export function createSpecularSurfaceSubsystem({
    */
   function bakeIslandPack(spread) {
     if (!pendingBytes) return;
+    islandPackBakeCount += 1;
     profiler?.beginById('surface.specularIslandBake');
     try {
       const pack = buildSpecularIslandPack({
@@ -586,6 +597,9 @@ export function createSpecularSurfaceSubsystem({
          * hue-per-object picture). Cross-checkable against the shader without
          * GPU access. */
         islandBakeStatus,
+        /** BAKE-COUNT HEALTH — see islandPackBakeCount's own declaration for
+         * why this is a lifetime tally, not a hits/misses pair. */
+        islandPackBakeCount,
         /**
          * ⚠️ THE NUMBER THAT DECIDES WHETHER THE AABB CROP IS DOING ITS JOB
          * (2026-07-28, the performance audit).

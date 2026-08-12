@@ -22,9 +22,11 @@ import {
   COVERAGE_UNRELIABLE,
   HITCHES_KEPT,
   SHAPE_BUCKETS,
+  TRIVIAL_GEOMETRY_TRIANGLE_CEILING,
   annotatePassResiduals,
   attributeZonesToEffects,
   buildHistogram,
+  buildOffenderSummary,
   buildPerfReport,
   buildZoneRows,
   classifyAgreement,
@@ -35,9 +37,11 @@ import {
   compareToManifest,
   computeAttribution,
   condenseFrameHistory,
+  dedupeHitchContext,
   deriveFindings,
   estimateSweepNoiseFloor,
   findHangs,
+  formatOffenderSummaryText,
   statFrom,
   summariseFrameRate,
   summariseSamples,
@@ -429,7 +433,12 @@ export function run(t) {
     ok('...and no costBasis is claimed', water.costBasis === null);
     ok('...and no ms/Mpx is fabricated', water.measuredMsPerMp === null);
     ok("...and the declared verdict is 'unmeasured', never 'within'", water.declared.verdict === 'unmeasured');
-    ok('...and the note says WHY it is not comparable', water.declared.note.includes('fragment'));
+    ok(
+      // report-density-2026-08-12: shortened to a pointer rather than
+      // repeating whyNotZoned's own (more specific) explanation a second time.
+      '...and the note says WHY it is not comparable',
+      water.declared.note.includes('coverage') && water.declared.note.includes('whyNotZoned')
+    );
     ok('the zone number is still reported, just not promoted to a total', water.zones.length === 1);
 
     // (2) AN ALL-BAKE EFFECT HAS NO ms/Mpx. A bake amortised over the window is
@@ -1288,6 +1297,40 @@ export function run(t) {
     ok(
       'an understated declared cost class is a finding',
       overFindings.some((f) => f.id === 'declared-cost-understated:bloom')
+    );
+
+    // report-density-2026-08-12: the MIRROR case — measured well UNDER the
+    // declared budget — is computed by compareToManifest but was never
+    // surfaced as a finding until now.
+    const underEffects = attributeZonesToEffects({
+      rows: buildZoneRows({
+        zones: ZONES,
+        frames: 100,
+        zoneStats: [zs('bloom.bright', { gpu: acc(0.01, 100, 0.01) })],
+      }),
+      manifests: [BLOOM],
+      effectZoning: EFFECT_ZONING,
+      megapixels: 1,
+    });
+    ok(
+      'the fixture really does produce an under verdict',
+      underEffects.find((e) => e.id === 'bloom').declared.verdict === 'under'
+    );
+    const underFindings = deriveFindings({
+      attribution,
+      rows,
+      effects: underEffects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+    });
+    ok(
+      'an overstated declared cost class is ALSO a finding now, not silently dropped',
+      underFindings.some((f) => f.id === 'declared-cost-overstated:bloom')
+    );
+    ok(
+      '...at LOW severity — a stale-cheap budget is not urgent the way a real overrun is',
+      underFindings.find((f) => f.id === 'declared-cost-overstated:bloom').severity === 'low'
     );
   }
 
@@ -2156,6 +2199,279 @@ export function run(t) {
     ok(
       'omitting windowDiagnostics entirely defaults safely',
       !deriveFindings(base).some((f) => f.id.startsWith('window-surface-composition'))
+    );
+  }
+
+  // ======================================================================
+  // report-density-2026-08-12 — dedupeHitchContext
+  // ======================================================================
+  {
+    const decodeA = { sourcesDecoded: 0, idbHits: 5 };
+    const decodeB = { sourcesDecoded: 1, idbHits: 5 };
+    const cacheA = { misses: 0 };
+    const items = [
+      { atMs: 1, gapMs: 600, decodeStats: decodeA, cacheStats: cacheA },
+      { atMs: 2, gapMs: 500, decodeStats: decodeA, cacheStats: cacheA }, // byte-identical to #0
+      { atMs: 3, gapMs: 400, decodeStats: decodeB, cacheStats: cacheA }, // decodeStats genuinely differs
+    ];
+    const out = dedupeHitchContext(items);
+    ok(
+      'the FIRST occurrence of a blob is kept in full',
+      JSON.stringify(out[0].decodeStats) === JSON.stringify(decodeA)
+    );
+    ok(
+      'a byte-identical REPEAT is collapsed to a pointer, not kept in full',
+      typeof out[1].decodeStats === 'string' && out[1].decodeStats.includes('items[0]')
+    );
+    ok('cacheStats — identical across all three — collapses on both repeats', typeof out[2].cacheStats === 'string');
+    ok(
+      'a GENUINELY DIFFERENT decodeStats is never collapsed, even mid-run',
+      typeof out[2].decodeStats === 'object' && out[2].decodeStats.sourcesDecoded === 1
+    );
+    ok('gapMs/atMs — the real per-hitch numbers — are untouched by dedup', out[2].gapMs === 400 && out[2].atMs === 3);
+    ok(
+      'a hitch with no decodeStats/cacheStats at all is passed through unchanged',
+      (() => {
+        const bare = dedupeHitchContext([{ atMs: 9, gapMs: 10 }]);
+        return bare[0].decodeStats === undefined && bare[0].gapMs === 10;
+      })()
+    );
+  }
+
+  // ======================================================================
+  // report-density-2026-08-12 — trivial (fullscreen-quad) geometry pairs
+  // collapse into ONE finding instead of one per pair
+  // ======================================================================
+  {
+    // Exactly at the ceiling — proves the boundary is inclusive, not just "small".
+    const quad = (id, gpu) =>
+      zs(id, { gpuMs: acc(gpu, 447, gpu * 1.2), drawCalls: 1, triangles: TRIVIAL_GEOMETRY_TRIANGLE_CEILING });
+    const realGeo = (id, gpu) =>
+      zs(id, { gpuMs: acc(gpu, 447, gpu * 1.2), drawCalls: 9, triangles: TRIVIAL_GEOMETRY_TRIANGLE_CEILING * 10000 });
+    const rows = [quad('bloom.bright', 0.4), quad('bloom.composite', 0.4), quad('present.blit', 0.4)];
+    const findings = deriveFindings({
+      attribution: { frameGpuMs: 20, verdict: 'good' },
+      rows,
+      effects: [],
+      frame: {},
+      method: {},
+      budgetMs: 8.33,
+    });
+    const individual = findings.filter((f) => f.id.startsWith('duplicate-geometry:'));
+    const summaryFinding = findings.find((f) => f.id === 'duplicate-geometry-fullscreen-quads');
+    ok(
+      'three mutually-matching tiny quads produce ZERO individual duplicate-geometry findings',
+      individual.length === 0
+    );
+    ok('...and exactly ONE consolidated finding instead', !!summaryFinding);
+    ok(
+      '...covering all three pairs (C(3,2)=3) in its evidence, nothing silently dropped',
+      summaryFinding.evidence.pairs.length === 3
+    );
+    ok('the consolidated finding is low severity, not high', summaryFinding.severity === 'low');
+
+    // A pair involving REAL scene geometry still gets its own full finding.
+    const mixedRows = [
+      quad('bloom.bright', 0.4),
+      quad('bloom.composite', 0.4),
+      realGeo('geometry.depthDraw', 9),
+      realGeo('geometry.earlyZPrepass', 9),
+    ];
+    const mixedFindings = deriveFindings({
+      attribution: { frameGpuMs: 20, verdict: 'good' },
+      rows: mixedRows,
+      effects: [],
+      frame: {},
+      method: {},
+      budgetMs: 8.33,
+    });
+    ok(
+      'a real-geometry pair (well over the triangle ceiling) still earns its OWN individual finding',
+      mixedFindings.some((f) => f.id === 'duplicate-geometry:geometry.depthDraw+geometry.earlyZPrepass')
+    );
+    ok(
+      'the two tiny quads in the SAME run still fold into the one consolidated finding',
+      mixedFindings.some((f) => f.id === 'duplicate-geometry-fullscreen-quads' && f.evidence.pairs.length === 1)
+    );
+  }
+
+  // ======================================================================
+  // report-density-2026-08-12 — buildOffenderSummary / formatOffenderSummaryText
+  // ======================================================================
+  {
+    const rows = [
+      zs('geometry.worldDraw', { label: 'World scene draw', ownerEffectId: null, gpuMs: acc(6, 447, 8) }),
+      zs('light.candleSync', {
+        label: 'Candle flame sync',
+        ownerEffectId: 'candleFlame',
+        cpuMs: acc(0.5, 447, 0.6),
+      }),
+    ];
+    const effects = [
+      {
+        id: 'window',
+        label: 'Window Light',
+        costMs: 1.175,
+        declared: { verdict: 'over', ratioToDeclaredMax: 9.47 },
+      },
+      { id: 'candleFlame', label: 'Candles', costMs: 0.2, declared: { verdict: 'within' } },
+    ];
+    const findings = [
+      {
+        severity: 'high',
+        id: 'duplicate-geometry:geometry.depthDraw+geometry.earlyZPrepass',
+        text: 'Two zones submit the same geometry, 22ms/frame combined.',
+        evidence: { zones: ['geometry.worldDraw'], combinedGpuMs: 22 },
+      },
+      {
+        severity: 'high',
+        id: 'declared-cost-understated:window',
+        text: 'window measured over its declared budget.',
+        evidence: { effect: 'window' },
+      },
+      { severity: 'high', id: 'profiler-unbalanced-brackets', text: '2 mispaired brackets detected.', evidence: {} },
+    ];
+    const caches = [
+      { id: 'a', label: 'Vegetation node cache', hits: 2, misses: 8, hitRatePct: 20 },
+      { id: 'b', label: 'Page cache', hits: 99, misses: 1, hitRatePct: 99 },
+    ];
+
+    const summary = buildOffenderSummary({ rows, effects, findings, caches });
+
+    // The synthetic duplicate-geometry finding (22ms combined) legitimately
+    // outranks window's own 1.175ms — this is correct descending-by-ms
+    // behaviour across MIXED effect/finding candidates, not a bug: the
+    // point of this fixture is proving the sort handles both kinds at once.
+    ok(
+      'the biggest real ms number (the 22ms duplicate-geometry finding) ranks first',
+      summary.topOffenders[0]?.costMs === 22
+    );
+    ok(
+      'window (measuring 9.47x over budget) still ranks by its own real ms cost, ahead of the cheaper candle',
+      (() => {
+        const windowIdx = summary.topOffenders.findIndex((o) => o.label === 'Window Light');
+        const candleIdx = summary.topOffenders.findIndex((o) => o.label === 'Candles');
+        return windowIdx !== -1 && candleIdx !== -1 && windowIdx < candleIdx;
+      })()
+    );
+    ok(
+      'a real-geometry duplicate finding with no owning effect earns its own ranked slot',
+      summary.topOffenders.some((o) => o.sourceIds[0]?.startsWith('duplicate-geometry:'))
+    );
+    ok(
+      'declared-cost-understated:window is NOT double-counted alongside the window effect entry',
+      summary.topOffenders.filter((o) => o.label === 'Window Light').length === 1
+    );
+    ok(
+      'every offender carries a plain-language whatItMeans sentence',
+      summary.topOffenders.every((o) => typeof o.whatItMeans === 'string' && o.whatItMeans.length > 0)
+    );
+    ok(
+      'cache warnings surface the low-hit-rate cache by its human label',
+      summary.cacheWarnings.some((w) => w.label === 'Vegetation node cache')
+    );
+    ok('a healthy cache never appears in cacheWarnings', !summary.cacheWarnings.some((w) => w.label === 'Page cache'));
+    ok(
+      'instrument-health findings (unbalanced brackets) are separated into instrumentWarnings, never mixed into topOffenders',
+      summary.instrumentWarnings.some((w) => w.text.includes('mispaired')) &&
+        !summary.topOffenders.some((o) => o.whatItMeans.includes('mispaired'))
+    );
+
+    const empty = buildOffenderSummary({ rows: [], effects: [], findings: [], caches: [] });
+    ok(
+      'an empty run produces zero offenders, not a crash, with an explanatory note',
+      empty.topOffenders.length === 0 && empty.note.length > 0
+    );
+
+    const text = formatOffenderSummaryText(summary);
+    ok('formatOffenderSummaryText produces readable text naming the worst offender', text.includes('Window Light'));
+    ok('...and surfaces the cache warning', text.includes('Vegetation node cache'));
+    ok('...and surfaces the instrument warning', text.toLowerCase().includes('mispaired'));
+    ok(
+      'formatOffenderSummaryText(null) fails safe, not with a crash',
+      formatOffenderSummaryText(null) === 'No summary available.'
+    );
+  }
+
+  // ======================================================================
+  // report-density-2026-08-12 — cpuEarlyMs trimmed from every zone the
+  // temporal-shape finding did NOT flag
+  // ======================================================================
+  {
+    const zones = [
+      {
+        id: 'z.flat',
+        label: 'Flat zone',
+        stage: 'lighting',
+        pass: null,
+        ownerEffectId: null,
+        kind: 'cpu',
+        cadence: 'steady',
+        detail: false,
+        site: 'x',
+      },
+    ];
+    const zoneStats = [
+      {
+        id: 'z.flat',
+        cpu: acc(1, 447, 1.2),
+        cpuEarly: acc(1, 200, 1.2), // uniform rate — never front/back-loaded
+        gpu: null,
+        drawCalls: null,
+        triangles: null,
+      },
+    ];
+    const report = buildPerfReport({
+      window: { frames: 447, durationMs: 30000, earlyWindowMs: 10000 },
+      method: {},
+      zoneStats,
+      zones,
+      effectZoning: {},
+      frame: { gapSamples: [], hitches: [] },
+      manifests: [],
+      budgetMs: 8.33,
+    });
+    const row = report.zones.find((z) => z.id === 'z.flat');
+    ok(
+      'a zone with a uniform (never flagged) early/late split has cpuEarlyMs stripped by default',
+      row && row.cpuEarlyMs === undefined
+    );
+    ok(
+      "verbosity:'full' keeps cpuEarlyMs on every zone regardless of the verdict",
+      buildPerfReport({
+        window: { frames: 447, durationMs: 30000, earlyWindowMs: 10000 },
+        method: {},
+        zoneStats,
+        zones,
+        effectZoning: {},
+        frame: { gapSamples: [], hitches: [] },
+        manifests: [],
+        budgetMs: 8.33,
+        verbosity: 'full',
+      }).zones.find((z) => z.id === 'z.flat').cpuEarlyMs !== undefined
+    );
+  }
+
+  // ======================================================================
+  // report-density-2026-08-12 — summary is present and first in a real
+  // buildPerfReport() call
+  // ======================================================================
+  {
+    const report = buildPerfReport({
+      window: { frames: 100, durationMs: 2000 },
+      method: {},
+      zoneStats: [],
+      zones: [],
+      effectZoning: {},
+      frame: { gapSamples: [], hitches: [] },
+      manifests: [],
+      budgetMs: 8.33,
+    });
+    ok('buildPerfReport always includes a summary field', 'summary' in report);
+    ok('summary is the first key after report/formatVersion', Object.keys(report).indexOf('summary') <= 2);
+    ok(
+      'an empty run still produces a well-formed (empty) summary, not a crash',
+      Array.isArray(report.summary.topOffenders)
     );
   }
 }

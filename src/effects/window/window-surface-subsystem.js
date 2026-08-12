@@ -121,6 +121,14 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  *   window-light ceiling at whatever the sky looked like at construction.
  *   `null`/malformed falls back to `WINDOW_DEFAULT_AMBIENT_CEILING` — see
  *   `window-render.js#uAmbientCeiling`'s own doc.
+ * @param {*} [args.profiler] - so `sync()` can bracket its own per-frame cost
+ *   (`light.windowSync` — perf-instrumentation-audit-2026-08-12: this ran
+ *   with zero profiler coverage despite pushing a per-frame depth-authority
+ *   query and a ~17-field dirty-check key, the SAME shape
+ *   `specularSurface.sync()`'s own zone already covers). `beginById`/
+ *   `endById` (the string form, not vt-pan-viewer.js's own pre-resolved `Z`
+ *   table): this subsystem is constructed independently of that table, same
+ *   reasoning as `specular-surface-subsystem.js`'s own `profiler` param.
  * @returns {{scene: *, sync: Function, hasContent: Function, getStatus: Function, dispose: Function}}
  */
 export function createWindowSurfaceSubsystem({
@@ -136,6 +144,7 @@ export function createWindowSurfaceSubsystem({
   getWindowRenderState,
   getEnvSun,
   getAmbientCeilingRgb,
+  profiler = null,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
   // DECLARED, defaulted, consumed and never passed — every control dead,
@@ -173,6 +182,14 @@ export function createWindowSurfaceSubsystem({
   let loadedMaskRect = null;
   let loadedContentBoundsUv = null;
   let paddedBoundsUv = null;
+  // POOL HEALTH (cache-completeness pass, 2026-08-12) — the mask RELOAD gate
+  // (`ensureMaskImage`'s own url+floor equality check below): a hit is the
+  // same url+floor already loaded (skip); a miss is a genuinely new load
+  // kicked off. `loading` (mid-flight) is NEITHER — no cache decision was
+  // possible yet, same "not ready" doctrine mask-authority.js's own
+  // bakeRuns/bakeSkips uses for !scene.gridSpec.
+  let maskReloadHits = 0;
+  let maskReloadMisses = 0;
 
   const surface = buildWindowSurfaceMaterial({
     THREE,
@@ -228,7 +245,12 @@ export function createWindowSurfaceSubsystem({
     // Keyed on floor AS WELL AS url: two floors can legitimately share a file
     // path in a scene built by duplication, and re-reading the rect on a
     // floor switch is what keeps the mapping right when they do.
-    if (loading || (url === loadedUrl && floorIndex === loadedFloor)) return;
+    if (loading) return;
+    if (url === loadedUrl && floorIndex === loadedFloor) {
+      maskReloadHits += 1;
+      return;
+    }
+    maskReloadMisses += 1;
     loading = true;
     const requestedFloor = floorIndex;
     loadMaskImage({ url, scale: WINDOW_MASK_IMAGE_SCALE, channels: 'rgb' })
@@ -349,6 +371,20 @@ export function createWindowSurfaceSubsystem({
    * @param {number} floorIndex - the VIEWED floor.
    */
   function sync(floorIndex) {
+    profiler?.beginById('light.windowSync');
+    try {
+      syncUnguarded(floorIndex);
+    } finally {
+      profiler?.endById('light.windowSync');
+    }
+  }
+
+  /** The real body of `sync()`, split out so the zone bracket above can wrap
+   * it with a try/finally without indenting the whole function — a thrown
+   * error must still close the bracket, or every later frame's measurement
+   * is poisoned by one that never re-opens (frame-profiler.js's own
+   * `unbalancedBrackets` anomaly). */
+  function syncUnguarded(floorIndex) {
     ensureMaskImage(floorIndex);
 
     // THE EXPECTED DEPTH (2026-08-05). Pushed every frame and NEVER gated on
@@ -458,6 +494,9 @@ export function createWindowSurfaceSubsystem({
         maskUvBounds: paddedBoundsUv,
         maskRect: loadedMaskRect,
         ambientCeiling,
+        /** POOL HEALTH — see maskReloadHits' own declaration for the exact
+         * hit/miss doctrine. */
+        maskReloadGate: { hits: maskReloadHits, misses: maskReloadMisses },
         // SCENE COMPOSITION (2026-08-12) — added to chase a real, still-open
         // finding: the perf report's own `light.drawWindowLight` zone reads
         // ~4 GPU draw calls per `renderer.render(windowSurface.scene, ...)`

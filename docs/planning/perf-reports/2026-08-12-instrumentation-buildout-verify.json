@@ -1,0 +1,5799 @@
+{
+  "floorInfo": {
+    "id": "defaultLevel0000",
+    "name": "Ground Floor"
+  },
+  "elapsedS": 101,
+  "result": {
+    "report": "perf-profile",
+    "formatVersion": 1,
+    "generatedAt": "2026-08-12T13:08:56.475Z",
+    "msaVersion": "0.6.0-dev.0",
+    "codename": null,
+    "method": {
+      "gpu": "timestamp-query",
+      "gpuReason": null,
+      "cpuClockResolutionMs": 0.09999999403953552,
+      "sweepRequested": false,
+      "sweepEffectsMeasured": 0,
+      "sweepEffectsRejected": 0,
+      "sweepNoiseFloorMs": null,
+      "sweepIncluded": false,
+      "route": "n_to_s:2kf/60000ms",
+      "timestampPoolOverflowed": true,
+      "zoneStatsNote": "Zones report mean/max/amortised over the window, NOT percentiles. Per-zone percentiles would require retaining a per-frame sample per zone, which this profiler deliberately does not do — it stays zero-allocation while armed so the instrument does not create the GC hitches it is measuring. Percentiles are frame-level, where the samples already exist."
+    },
+    "window": {
+      "frames": 447,
+      "durationMs": 30069.9,
+      "earlyWindowMs": 10000,
+      "settleFramesDiscarded": 90,
+      "resolution": {
+        "w": 1920,
+        "h": 1080,
+        "pixelRatio": 1
+      },
+      "megapixels": 2.07,
+      "sceneName": null,
+      "floorIndex": 0,
+      "loop": "viewer"
+    },
+    "frame": {
+      "fps": {
+        "avgFps": 14.9,
+        "avgFpsNote": "frames ÷ elapsed time — the felt rate. NOT the mean of per-frame fps, which over-weights fast frames.",
+        "bestFps": 122,
+        "worstFps": 1.4,
+        "p1LowFps": 2.4,
+        "p5LowFps": 8,
+        "medianFps": 17.2,
+        "frameMs": {
+          "best": 8.2,
+          "median": 58.3,
+          "p95": 125.1,
+          "p99": 408.2,
+          "worst": 708.3
+        },
+        "sampleCount": 447
+      },
+      "hangs": {
+        "note": "Bands are cumulative — a 300ms frame counts in all four. `worst` is sorted by severity and carries WHEN it happened, so a hang can be reproduced rather than just counted.",
+        "bands": [
+          {
+            "label": "stutter (>2x median)",
+            "minMs": 116.6,
+            "count": 23
+          },
+          {
+            "label": "hitch (>50ms)",
+            "minMs": 50,
+            "count": 268
+          },
+          {
+            "label": "stall (>100ms)",
+            "minMs": 100,
+            "count": 36
+          },
+          {
+            "label": "freeze (>250ms)",
+            "minMs": 250,
+            "count": 13
+          }
+        ],
+        "totalStalls": 268,
+        "kept": 20,
+        "dropped": 248,
+        "worst": [
+          {
+            "frame": 181,
+            "atSec": 7.29,
+            "gapMs": 708.3
+          },
+          {
+            "frame": 339,
+            "atSec": 21.97,
+            "gapMs": 625
+          },
+          {
+            "frame": 232,
+            "atSec": 13,
+            "gapMs": 483.2
+          },
+          {
+            "frame": 372,
+            "atSec": 25.13,
+            "gapMs": 416.8
+          },
+          {
+            "frame": 308,
+            "atSec": 18.74,
+            "gapMs": 408.2
+          },
+          {
+            "frame": 336,
+            "atSec": 21.01,
+            "gapMs": 366.7
+          },
+          {
+            "frame": 358,
+            "atSec": 23.6,
+            "gapMs": 366.6
+          },
+          {
+            "frame": 361,
+            "atSec": 24.03,
+            "gapMs": 324.9
+          },
+          {
+            "frame": 231,
+            "atSec": 12.52,
+            "gapMs": 308.5
+          },
+          {
+            "frame": 237,
+            "atSec": 13.53,
+            "gapMs": 300
+          },
+          {
+            "frame": 355,
+            "atSec": 23.13,
+            "gapMs": 291.8
+          },
+          {
+            "frame": 338,
+            "atSec": 21.34,
+            "gapMs": 275.1
+          },
+          {
+            "frame": 285,
+            "atSec": 16.86,
+            "gapMs": 266.6
+          },
+          {
+            "frame": 321,
+            "atSec": 19.77,
+            "gapMs": 233.3
+          },
+          {
+            "frame": 199,
+            "atSec": 9.11,
+            "gapMs": 175
+          },
+          {
+            "frame": 374,
+            "atSec": 25.32,
+            "gapMs": 158.7
+          },
+          {
+            "frame": 297,
+            "atSec": 17.71,
+            "gapMs": 158.3
+          },
+          {
+            "frame": 380,
+            "atSec": 25.78,
+            "gapMs": 150.1
+          },
+          {
+            "frame": 73,
+            "atSec": 1.82,
+            "gapMs": 133.4
+          },
+          {
+            "frame": 207,
+            "atSec": 9.95,
+            "gapMs": 133.4
+          }
+        ]
+      },
+      "gapMs": {
+        "p50": 58.3,
+        "p90": 100,
+        "p95": 125.1,
+        "p99": 408.2,
+        "max": 708.3,
+        "sampleCount": 447
+      },
+      "gpuMs": {
+        "p50": 54.07,
+        "p95": 92.6,
+        "max": 682.49,
+        "sampleCount": 113,
+        "basis": "sum of timestamped render passes per frame (renderer.info.render.timestamp)",
+        "caveat": "NOT the whole GPU frame: mipmap generation, presentation and any work outside a render pass are not counted. Coverage against this measures \"of the pass time we can see, how much did we attribute to a declared zone\" — a real question, but a narrower one than \"where did the frame go\"."
+      },
+      "cpuEncodeMs": {
+        "p50": 13.19,
+        "sampleCount": 120
+      },
+      "gapSampleCoverage": "every frame in the window",
+      "histogram": [
+        {
+          "label": ">120fps",
+          "frames": 3,
+          "percent": 0.7
+        },
+        {
+          "label": "60-120fps",
+          "frames": 9,
+          "percent": 2
+        },
+        {
+          "label": "30-60fps",
+          "frames": 70,
+          "percent": 15.7
+        },
+        {
+          "label": "20-30fps",
+          "frames": 77,
+          "percent": 17.2
+        },
+        {
+          "label": "10-20fps",
+          "frames": 237,
+          "percent": 53
+        },
+        {
+          "label": "4-10fps",
+          "frames": 38,
+          "percent": 8.5
+        },
+        {
+          "label": "1-4fps",
+          "frames": 13,
+          "percent": 2.9
+        }
+      ],
+      "shape": {
+        "note": "Worst frame gap in each of 60 equal buckets across the window — the SHAPE, not a dump.",
+        "buckets": 60,
+        "framesPerBucket": 7.5,
+        "bucketMs": 501.165,
+        "worstGapMs": [
+          41.6,
+          25.1,
+          25,
+          25.1,
+          25.1,
+          25.1,
+          25.2,
+          25.1,
+          25.1,
+          133.4,
+          50.1,
+          75,
+          50,
+          50.2,
+          75,
+          75.1,
+          50,
+          50.2,
+          83.3,
+          50.1,
+          83.3,
+          50,
+          75.1,
+          50,
+          708.3,
+          108.4,
+          175,
+          133.4,
+          133.3,
+          100.1,
+          100,
+          483.2,
+          66.8,
+          91.7,
+          66.8,
+          91.7,
+          66.7,
+          66.6,
+          266.6,
+          158.3,
+          66.7,
+          408.2,
+          99.9,
+          233.3,
+          66.7,
+          625,
+          58.5,
+          291.8,
+          366.6,
+          133.2,
+          416.8,
+          150.1,
+          125.1,
+          75,
+          66.8,
+          66.8,
+          66.8,
+          66.7,
+          66.7,
+          75
+        ]
+      },
+      "hitches": {
+        "thresholdMs": 50,
+        "count": 200,
+        "countIsReceivedNotTotal": "How many hitch records reached this report. Compare against frame.hangs.totalStalls — which comes from the profiler's own complete gap series — for how many actually occurred.",
+        "kept": 20,
+        "droppedFromReport": 180,
+        "droppedByRing": 80,
+        "items": [
+          {
+            "atMs": 77509,
+            "gapMs": 625,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 80667,
+            "gapMs": 416.8,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 74284,
+            "gapMs": 408.2,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 76551,
+            "gapMs": 366.7,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 79142,
+            "gapMs": 366.6,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 79576,
+            "gapMs": 324.9,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 69067,
+            "gapMs": 300,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 78676,
+            "gapMs": 291.8,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 76884,
+            "gapMs": 275.1,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 72400,
+            "gapMs": 266.6,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 75309,
+            "gapMs": 233.3,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 80859,
+            "gapMs": 158.7,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 73250,
+            "gapMs": 158.3,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 81326,
+            "gapMs": 150.1,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 80009,
+            "gapMs": 133.2,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 82176,
+            "gapMs": 125.1,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 74959,
+            "gapMs": 99.9,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 69617,
+            "gapMs": 91.7,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 70875,
+            "gapMs": 91.7,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          },
+          {
+            "atMs": 74559,
+            "gapMs": 83.3,
+            "halfSpanPx": 3409.090909090909,
+            "decodeStats": {
+              "sourcesDecoded": 0,
+              "idbHits": 203,
+              "idbSlices": 0,
+              "idbPersists": 0,
+              "maxSourceAcquireMs": 0,
+              "lastSourceAcquireMs": 0,
+              "maxSinglePageMs": 0,
+              "lastSinglePageMs": 0,
+              "workerSourceDecodes": 0,
+              "mainThreadFallbackSourceDecodes": 0,
+              "rangedFetchMisses": 0,
+              "heldSources": 0,
+              "semaphore": {
+                "active": 0,
+                "waiting": 0,
+                "max": 3
+              },
+              "workerStatus": "not-yet-created",
+              "workerUnavailableReason": null,
+              "workerRequestFailures": []
+            },
+            "cacheStats": {
+              "capacityPages": 2048,
+              "residentPages": 203,
+              "pinnedCoarse": 203,
+              "pinnedView": 0,
+              "freePages": 1845,
+              "evictions": 0,
+              "misses": 0,
+              "coarseReservePages": 512,
+              "coarseReserveMisses": 0
+            }
+          }
+        ]
+      },
+      "inFlightDuringHitches": {
+        "thresholdMs": 50,
+        "frames": 268,
+        "zones": {
+          "residency.itemLoad": 170,
+          "residency.pass": 170
+        }
+      }
+    },
+    "bottleneck": {
+      "verdict": "gpu-bound",
+      "median": {
+        "gapMs": 58.3,
+        "gpuMs": 54.07,
+        "unexplainedMs": 4.23,
+        "gpuFraction": 0.927,
+        "verdict": "gpu-bound"
+      },
+      "tail": {
+        "gapMs": 125.1,
+        "gpuMs": 92.6,
+        "unexplainedMs": 32.5,
+        "gpuFraction": 0.74,
+        "verdict": "mixed"
+      },
+      "tailDiffers": true,
+      "note": "GPU-BOUND at the median: the timestamped render passes account for most of the frame, so zones[] is where the frame time actually is — optimise the top row. The TAIL DISAGREES WITH THE MEDIAN (p95 is 'mixed', p50 is 'gpu-bound') — these have different fixes, and this run needs both. The median says what the steady frame costs; the p95 says what the hitches are made of. The unexplained remainder is NOT proven to be CPU time: mipmap generation, presentation and any GPU work outside a render pass are all real GPU cost that frame.gpuMs does not count (see its own `basis`/`caveat`). Three candidates, not one."
+    },
+    "attribution": {
+      "frameGpuMs": 54.07,
+      "attributedGpuMs": 53.054,
+      "residualGpuMs": 1.016,
+      "coverage": 0.981,
+      "verdict": "good",
+      "note": "1.9% of frame GPU time is unattributed (pass setup, mipmap generation, presentation). The per-zone breakdown below is trustworthy.",
+      "frameGpuBasis": "sum of timestamped render passes per frame (renderer.info.render.timestamp)",
+      "frameGpuCaveat": "NOT the whole GPU frame: mipmap generation, presentation and any work outside a render pass are not counted. Coverage against this measures \"of the pass time we can see, how much did we attribute to a declared zone\" — a real question, but a narrower one than \"where did the frame go\"."
+    },
+    "zones": [
+      {
+        "id": "geometry.worldDraw",
+        "label": "World scene draw",
+        "kind": "gpu",
+        "stage": "geometry",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.geometry.world",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "runGeometryWorldPass",
+        "cpuMs": {
+          "meanMs": 0.411,
+          "maxMs": 7.9,
+          "amortisedMsPerFrame": 0.411,
+          "totalMs": 183.5,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.392,
+          "maxMs": 7.9,
+          "amortisedMsPerFrame": 0.182,
+          "totalMs": 81.5,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 16.345,
+          "maxMs": 321.585,
+          "amortisedMsPerFrame": 15.943,
+          "totalMs": 7126.516,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 12.7,
+        "triangles": 265732.8,
+        "unbalanced": 0
+      },
+      {
+        "id": "geometry.depthDraw",
+        "label": "Depth authority draw",
+        "kind": "gpu",
+        "stage": "geometry",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.geometry.world",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "runSceneDepthPass",
+        "cpuMs": {
+          "meanMs": 0.658,
+          "maxMs": 4.1,
+          "amortisedMsPerFrame": 0.658,
+          "totalMs": 294.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.592,
+          "maxMs": 4.1,
+          "amortisedMsPerFrame": 0.275,
+          "totalMs": 123.1,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 13.802,
+          "maxMs": 625.082,
+          "amortisedMsPerFrame": 13.462,
+          "totalMs": 6017.581,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 5.8,
+        "triangles": 67333.4,
+        "unbalanced": 0
+      },
+      {
+        "id": "geometry.earlyZPrepass",
+        "label": "Early-Z depth prepass into scene.color",
+        "kind": "both",
+        "stage": "geometry",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.geometry.world",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "runGeometryWorldPass",
+        "cpuMs": {
+          "meanMs": 0.528,
+          "maxMs": 2.5,
+          "amortisedMsPerFrame": 0.528,
+          "totalMs": 235.9,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.475,
+          "maxMs": 2.5,
+          "amortisedMsPerFrame": 0.221,
+          "totalMs": 98.9,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 8.686,
+          "maxMs": 74.252,
+          "amortisedMsPerFrame": 8.472,
+          "totalMs": 3787.129,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 5.8,
+        "triangles": 67333.4,
+        "unbalanced": 0
+      },
+      {
+        "id": "surface.specularDraw",
+        "label": "Specular response",
+        "kind": "gpu",
+        "stage": "surface",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.surface.response",
+        "ownerEffectId": "specular",
+        "detail": false,
+        "site": "runSurfaceResponsePass",
+        "cpuMs": {
+          "meanMs": 0.128,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.128,
+          "totalMs": 57.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.12,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.056,
+          "totalMs": 25,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 8.613,
+          "maxMs": 20.775,
+          "amortisedMsPerFrame": 8.401,
+          "totalMs": 3755.278,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 4,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawPointLights",
+        "label": "Point light draw",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "pointLights.lightScene",
+        "cpuMs": {
+          "meanMs": 2.77,
+          "maxMs": 6.3,
+          "amortisedMsPerFrame": 2.77,
+          "totalMs": 1238.4,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 2.647,
+          "maxMs": 5.2,
+          "amortisedMsPerFrame": 1.232,
+          "totalMs": 550.5,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 2.085,
+          "maxMs": 7.668,
+          "amortisedMsPerFrame": 2.034,
+          "totalMs": 909.115,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 101,
+        "triangles": 3503,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawColoration",
+        "label": "Coloration draw",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "pointLights.colorationScene",
+        "cpuMs": {
+          "meanMs": 1.791,
+          "maxMs": 4.7,
+          "amortisedMsPerFrame": 1.791,
+          "totalMs": 800.8,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 1.727,
+          "maxMs": 3.5,
+          "amortisedMsPerFrame": 0.804,
+          "totalMs": 359.3,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 1.632,
+          "maxMs": 7.93,
+          "amortisedMsPerFrame": 1.592,
+          "totalMs": 711.59,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 101,
+        "triangles": 3503,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawWindowLight",
+        "label": "Window light draw",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "window",
+        "detail": false,
+        "site": "windowSurface.scene",
+        "cpuMs": {
+          "meanMs": 0.211,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.211,
+          "totalMs": 94.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.201,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.094,
+          "totalMs": 41.9,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 1.204,
+          "maxMs": 3.867,
+          "amortisedMsPerFrame": 1.175,
+          "totalMs": 525.009,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 4,
+        "unbalanced": 0
+      },
+      {
+        "id": "present.blit",
+        "label": "Present composite",
+        "kind": "gpu",
+        "stage": "present",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.present.composite",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "runPresentCompositePass",
+        "cpuMs": {
+          "meanMs": 0.229,
+          "maxMs": 12,
+          "amortisedMsPerFrame": 0.229,
+          "totalMs": 102.4,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.198,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.092,
+          "totalMs": 41.1,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.333,
+          "maxMs": 3.146,
+          "amortisedMsPerFrame": 0.649,
+          "totalMs": 290.193,
+          "occurrences": 872
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 2,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawIllum",
+        "label": "Illumination fill",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "illumQuad.render",
+        "cpuMs": {
+          "meanMs": 0.242,
+          "maxMs": 0.8,
+          "amortisedMsPerFrame": 0.242,
+          "totalMs": 108.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.211,
+          "maxMs": 0.6,
+          "amortisedMsPerFrame": 0.098,
+          "totalMs": 43.9,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.505,
+          "maxMs": 159.711,
+          "amortisedMsPerFrame": 0.492,
+          "totalMs": 220.135,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 1,
+        "triangles": 1,
+        "unbalanced": 0
+      },
+      {
+        "id": "geometry.doorDraw",
+        "label": "Door graphics draw",
+        "kind": "gpu",
+        "stage": "geometry",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.geometry.world",
+        "ownerEffectId": "doorGraphics",
+        "detail": false,
+        "site": "renderDoorGraphicsInto",
+        "cpuMs": {
+          "meanMs": 1.274,
+          "maxMs": 3,
+          "amortisedMsPerFrame": 1.274,
+          "totalMs": 569.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 1.177,
+          "maxMs": 3,
+          "amortisedMsPerFrame": 0.548,
+          "totalMs": 244.9,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.337,
+          "maxMs": 76.349,
+          "amortisedMsPerFrame": 0.329,
+          "totalMs": 147.128,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 154,
+        "triangles": 308,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawComposite",
+        "label": "Lit composite",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "compositeQuad.render",
+        "cpuMs": {
+          "meanMs": 0.149,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.149,
+          "totalMs": 66.4,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.14,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.065,
+          "totalMs": 29.2,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.155,
+          "maxMs": 2.884,
+          "amortisedMsPerFrame": 0.151,
+          "totalMs": 67.437,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 1,
+        "triangles": 1,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawRegions",
+        "label": "Darkness region draw",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "runLightAccumulatePass",
+        "cpuMs": {
+          "meanMs": 0.213,
+          "maxMs": 0.6,
+          "amortisedMsPerFrame": 0.213,
+          "totalMs": 95.1,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.202,
+          "maxMs": 0.6,
+          "amortisedMsPerFrame": 0.094,
+          "totalMs": 42.1,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.087,
+          "maxMs": 1.966,
+          "amortisedMsPerFrame": 0.085,
+          "totalMs": 38.011,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 16,
+        "triangles": 32,
+        "unbalanced": 0
+      },
+      {
+        "id": "bloom.composite",
+        "label": "Bloom composite",
+        "kind": "gpu",
+        "stage": "post",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.post.bloom",
+        "ownerEffectId": "bloom",
+        "detail": false,
+        "site": "bloomCompositeQuad.render",
+        "cpuMs": {
+          "meanMs": 0.071,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.071,
+          "totalMs": 31.6,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.069,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.032,
+          "totalMs": 14.3,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.086,
+          "maxMs": 2.556,
+          "amortisedMsPerFrame": 0.084,
+          "totalMs": 37.487,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 1,
+        "triangles": 1,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawFire",
+        "label": "Fire draw",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "fire",
+        "detail": false,
+        "site": "fireSubsystem.scene",
+        "cpuMs": {
+          "meanMs": 0.457,
+          "maxMs": 2.3,
+          "amortisedMsPerFrame": 0.914,
+          "totalMs": 408.4,
+          "occurrences": 894
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.445,
+          "maxMs": 2.3,
+          "amortisedMsPerFrame": 0.415,
+          "totalMs": 185.3,
+          "occurrences": 416
+        },
+        "gpuMs": {
+          "meanMs": 0.051,
+          "maxMs": 4.719,
+          "amortisedMsPerFrame": 0.05,
+          "totalMs": 22.151,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 2,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 6,
+        "triangles": 928,
+        "unbalanced": 0
+      },
+      {
+        "id": "bloom.bright",
+        "label": "Bloom bright pass",
+        "kind": "gpu",
+        "stage": "post",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.post.bloom",
+        "ownerEffectId": "bloom",
+        "detail": false,
+        "site": "bloomBrightQuad.render",
+        "cpuMs": {
+          "meanMs": 0.085,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.085,
+          "totalMs": 38.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.085,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.04,
+          "totalMs": 17.7,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.039,
+          "maxMs": 0.066,
+          "amortisedMsPerFrame": 0.038,
+          "totalMs": 16.974,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 1,
+        "triangles": 1,
+        "unbalanced": 0
+      },
+      {
+        "id": "bloom.upsampleCore",
+        "label": "Bloom upsample (core)",
+        "kind": "gpu",
+        "stage": "post",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.post.bloom",
+        "ownerEffectId": "bloom",
+        "detail": false,
+        "site": "bloomUpQuad.render",
+        "cpuMs": {
+          "meanMs": 0.142,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.142,
+          "totalMs": 63.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.142,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.066,
+          "totalMs": 29.5,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.016,
+          "maxMs": 0.066,
+          "amortisedMsPerFrame": 0.032,
+          "totalMs": 14.221,
+          "occurrences": 872
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 2,
+        "unbalanced": 0
+      },
+      {
+        "id": "bloom.downsample",
+        "label": "Bloom downsample chain",
+        "kind": "gpu",
+        "stage": "post",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.post.bloom",
+        "ownerEffectId": "bloom",
+        "detail": false,
+        "site": "bloomDownQuad.render",
+        "cpuMs": {
+          "meanMs": 0.381,
+          "maxMs": 0.9,
+          "amortisedMsPerFrame": 0.381,
+          "totalMs": 170.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.38,
+          "maxMs": 0.8,
+          "amortisedMsPerFrame": 0.177,
+          "totalMs": 79.1,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.006,
+          "maxMs": 0.066,
+          "amortisedMsPerFrame": 0.031,
+          "totalMs": 13.894,
+          "occurrences": 2180
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 5,
+        "triangles": 5,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawCandleFlame",
+        "label": "Candle flame draw",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "candleFlame",
+        "detail": false,
+        "site": "candleFlameScene",
+        "cpuMs": {
+          "meanMs": 0.115,
+          "maxMs": 0.9,
+          "amortisedMsPerFrame": 0.115,
+          "totalMs": 51.5,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.114,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.053,
+          "totalMs": 23.8,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.025,
+          "maxMs": 1.049,
+          "amortisedMsPerFrame": 0.024,
+          "totalMs": 10.945,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 516,
+        "unbalanced": 0
+      },
+      {
+        "id": "bloom.upsampleAtmo",
+        "label": "Bloom upsample (atmosphere)",
+        "kind": "gpu",
+        "stage": "post",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.post.bloom",
+        "ownerEffectId": "bloom",
+        "detail": false,
+        "site": "bloomUpQuad.render",
+        "cpuMs": {
+          "meanMs": 0.13,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.13,
+          "totalMs": 58.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.143,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.066,
+          "totalMs": 29.7,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0.005,
+          "maxMs": 0.066,
+          "amortisedMsPerFrame": 0.01,
+          "totalMs": 4.391,
+          "occurrences": 872
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 2,
+        "unbalanced": 0
+      },
+      {
+        "id": "tick.continuousInputs",
+        "label": "Input easing",
+        "kind": "cpu",
+        "stage": "frame",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": true,
+        "site": "updateContinuousInputs",
+        "cpuMs": {
+          "meanMs": 0.132,
+          "maxMs": 1.4,
+          "amortisedMsPerFrame": 0.132,
+          "totalMs": 59,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.131,
+          "maxMs": 1.4,
+          "amortisedMsPerFrame": 0.061,
+          "totalMs": 27.2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "tick.tokenSync",
+        "label": "Token placement sync",
+        "kind": "cpu",
+        "stage": "frame",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "syncTokenPlacements",
+        "cpuMs": {
+          "meanMs": 0.004,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.004,
+          "totalMs": 1.8,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.005,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 1,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "tick.doorSync",
+        "label": "Door graphics sync",
+        "kind": "cpu",
+        "stage": "frame",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": "doorGraphics",
+        "detail": false,
+        "site": "syncDoorGraphics",
+        "cpuMs": {
+          "meanMs": 0.078,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.078,
+          "totalMs": 35,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.075,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.035,
+          "totalMs": 15.7,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "tick.envSnapshot",
+        "label": "Environment snapshot",
+        "kind": "cpu",
+        "stage": "frame",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": true,
+        "site": "updateEnvSnapshot",
+        "cpuMs": {
+          "meanMs": 0.082,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.082,
+          "totalMs": 36.8,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.083,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.038,
+          "totalMs": 17.2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "tick.windRebakePoll",
+        "label": "Wind rebake poll",
+        "kind": "cpu",
+        "stage": "frame",
+        "cadence": "bake",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": true,
+        "site": "pollMaskAuthorityForWindRebake",
+        "cpuMs": {
+          "meanMs": 0.002,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 1.1,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.001,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0,
+          "totalMs": 0.2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "sims.wind",
+        "label": "Wind sim",
+        "kind": "both",
+        "stage": "sims",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "tickWindSim",
+        "cpuMs": {
+          "meanMs": 0.002,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 0.9,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.001,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.001,
+          "totalMs": 0.3,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0
+      },
+      {
+        "id": "sims.fluid",
+        "label": "Fluid sim",
+        "kind": "both",
+        "stage": "sims",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": "fluid",
+        "detail": false,
+        "site": "tickFluidSim",
+        "cpuMs": {
+          "meanMs": 0.007,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.007,
+          "totalMs": 3.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.007,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.003,
+          "totalMs": 1.4,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0
+      },
+      {
+        "id": "masks.occlusionDraw",
+        "label": "Occlusion mask draw",
+        "kind": "gpu",
+        "stage": "masks",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.masks.occlusion",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "runMaskOcclusionPass",
+        "cpuMs": {
+          "meanMs": 0.13,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.13,
+          "totalMs": 58.1,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.125,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.058,
+          "totalMs": 26.1,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0,
+          "maxMs": 0,
+          "amortisedMsPerFrame": 0,
+          "totalMs": 0,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0
+      },
+      {
+        "id": "geometry.depthRenderCall",
+        "label": "Depth pass renderer.render() call",
+        "kind": "cpu",
+        "stage": "geometry",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.geometry.world",
+        "ownerEffectId": null,
+        "detail": true,
+        "site": "runSceneDepthPass",
+        "cpuMs": {
+          "meanMs": 0.612,
+          "maxMs": 4.1,
+          "amortisedMsPerFrame": 0.612,
+          "totalMs": 273.5,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.552,
+          "maxMs": 4.1,
+          "amortisedMsPerFrame": 0.257,
+          "totalMs": 114.8,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.sunShadowBake",
+        "label": "Sun shadow bake",
+        "kind": "both",
+        "stage": "lighting",
+        "cadence": "bake",
+        "sparse": true,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "sunShadows",
+        "detail": false,
+        "site": "sunShadows.maybeBake",
+        "cpuMs": {
+          "meanMs": 0.056,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.056,
+          "totalMs": 25.1,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.052,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.024,
+          "totalMs": 10.9,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.waterBodyBake",
+        "label": "Water body pack bake",
+        "kind": "both",
+        "stage": "lighting",
+        "cadence": "bake",
+        "sparse": true,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "water",
+        "detail": false,
+        "site": "waterBody.maybeBake",
+        "cpuMs": {
+          "meanMs": 0.012,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.012,
+          "totalMs": 5.4,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.01,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.004,
+          "totalMs": 2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.regionSetup",
+        "label": "Darkness region read",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "readElevationFilteredDarknessRegions",
+        "cpuMs": {
+          "meanMs": 0.091,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.091,
+          "totalMs": 40.5,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.088,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.041,
+          "totalMs": 18.4,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.pointLightUpdate",
+        "label": "Point light pool update",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "pointLights.update",
+        "cpuMs": {
+          "meanMs": 1.402,
+          "maxMs": 4.7,
+          "amortisedMsPerFrame": 1.402,
+          "totalMs": 626.6,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 1.317,
+          "maxMs": 4.7,
+          "amortisedMsPerFrame": 0.613,
+          "totalMs": 274,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.pointLightWallClip",
+        "label": "Point light wall-clip (real Foundry lights)",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "readActiveLightSources",
+        "cpuMs": {
+          "meanMs": 0.091,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.091,
+          "totalMs": 40.7,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.079,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.037,
+          "totalMs": 16.4,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.pointLightSourceBuild",
+        "label": "Authored light source build (candle/lightning/fire)",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "pointLights.update",
+        "cpuMs": {
+          "meanMs": 0.694,
+          "maxMs": 1.9,
+          "amortisedMsPerFrame": 0.694,
+          "totalMs": 310.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.665,
+          "maxMs": 1.9,
+          "amortisedMsPerFrame": 0.309,
+          "totalMs": 138.3,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.pointLightApertureSetup",
+        "label": "Aperture-gobo wall-segment setup + shared uniforms",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "apertureGobo",
+        "detail": false,
+        "site": "pointLights.update",
+        "cpuMs": {
+          "meanMs": 0.003,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.003,
+          "totalMs": 1.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.003,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 0.7,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.pointLightReconcile",
+        "label": "Per-light mesh reconcile (aperture assignment, rebuild, triangulation, uniforms)",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "pointLights.update",
+        "cpuMs": {
+          "meanMs": 0.607,
+          "maxMs": 2.2,
+          "amortisedMsPerFrame": 0.607,
+          "totalMs": 271.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.563,
+          "maxMs": 2.2,
+          "amortisedMsPerFrame": 0.262,
+          "totalMs": 117.2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.pointLightBatchReconcile",
+        "label": "Batched light bucket reconcile (Stage 2)",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "pointLights.update",
+        "cpuMs": {
+          "meanMs": 0,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0,
+          "totalMs": 0.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0,
+          "maxMs": 0,
+          "amortisedMsPerFrame": 0,
+          "totalMs": 0,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": true,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.candleSync",
+        "label": "Candle flame sync",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "candleFlame",
+        "detail": true,
+        "site": "updateCandleFlame",
+        "cpuMs": {
+          "meanMs": 0.288,
+          "maxMs": 1.7,
+          "amortisedMsPerFrame": 0.288,
+          "totalMs": 128.9,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.269,
+          "maxMs": 0.8,
+          "amortisedMsPerFrame": 0.125,
+          "totalMs": 56,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.vegetationSync",
+        "label": "Vegetation motion sync",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "vegetation",
+        "detail": false,
+        "site": "syncAllVegetationMotionForFrame",
+        "cpuMs": {
+          "meanMs": 0.043,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.043,
+          "totalMs": 19.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.055,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.026,
+          "totalMs": 11.4,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.windowSync",
+        "label": "Window light sync",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "window",
+        "detail": false,
+        "site": "windowSurface.sync",
+        "cpuMs": {
+          "meanMs": 0.036,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.036,
+          "totalMs": 16.1,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.034,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.016,
+          "totalMs": 7.1,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.fireSync",
+        "label": "Fire sync (engine step loop)",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "fire",
+        "detail": false,
+        "site": "fireSubsystem.sync",
+        "cpuMs": {
+          "meanMs": 0.664,
+          "maxMs": 2.3,
+          "amortisedMsPerFrame": 0.664,
+          "totalMs": 296.9,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.652,
+          "maxMs": 2.3,
+          "amortisedMsPerFrame": 0.304,
+          "totalMs": 135.7,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.uiShadowStamps",
+        "label": "UI shadow stamps",
+        "kind": "cpu",
+        "stage": "lighting",
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "uiWindowShadow",
+        "detail": false,
+        "site": "updateUiShadowStamps",
+        "cpuMs": {
+          "meanMs": 0.002,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 1,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.003,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 0.7,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "light.drawApertureShadow",
+        "label": "Aperture gobo debug draw",
+        "kind": "gpu",
+        "stage": "lighting",
+        "cadence": "conditional",
+        "sparse": false,
+        "isPass": false,
+        "parent": "pass.light.accumulate",
+        "ownerEffectId": "apertureGobo",
+        "detail": false,
+        "site": "pointLights.apertureShadowScene",
+        "cpuMs": {
+          "meanMs": 0.097,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.097,
+          "totalMs": 43.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.095,
+          "maxMs": 0.3,
+          "amortisedMsPerFrame": 0.044,
+          "totalMs": 19.8,
+          "occurrences": 208
+        },
+        "gpuMs": {
+          "meanMs": 0,
+          "maxMs": 0,
+          "amortisedMsPerFrame": 0,
+          "totalMs": 0,
+          "occurrences": 436
+        },
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0
+      },
+      {
+        "id": "residency.coarsePinBudget",
+        "label": "Coarse pin budget refresh",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "refreshCoarsePinBudget",
+        "cpuMs": {
+          "meanMs": 0.112,
+          "maxMs": 1.2,
+          "amortisedMsPerFrame": 0.06,
+          "totalMs": 27,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.129,
+          "maxMs": 1.2,
+          "amortisedMsPerFrame": 0.029,
+          "totalMs": 13,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "residency.coverAlphaPrime",
+        "label": "Cover alpha grid priming",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "primeCoverAlphaGrids",
+        "cpuMs": {
+          "meanMs": 0.004,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 1,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.007,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.002,
+          "totalMs": 0.7,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "depth.authorityRebuild",
+        "label": "Depth authority rank rebuild",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "depthAuthority.rebuild",
+        "cpuMs": {
+          "meanMs": 0.019,
+          "maxMs": 0.6,
+          "amortisedMsPerFrame": 0.021,
+          "totalMs": 9.4,
+          "occurrences": 484
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.019,
+          "maxMs": 0.6,
+          "amortisedMsPerFrame": 0.009,
+          "totalMs": 3.8,
+          "occurrences": 202
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 1.0827740492170022,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "depth.proxyRebuild",
+        "label": "Depth-writer proxy rebuild",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "rebuildSceneDepthProxies",
+        "cpuMs": {
+          "meanMs": 0.179,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.097,
+          "totalMs": 43.2,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.194,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.044,
+          "totalMs": 19.6,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "vegetation.rankStamp",
+        "label": "Vegetation render-order stamp",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": "vegetation",
+        "detail": false,
+        "site": "stampVegetationRenderOrders",
+        "cpuMs": {
+          "meanMs": 0.029,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.016,
+          "totalMs": 7,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.028,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.006,
+          "totalMs": 2.8,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "vegetation.depthItemsBuild",
+        "label": "Vegetation depth-item build",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": "vegetation",
+        "detail": false,
+        "site": "buildVegetationDepthItems",
+        "cpuMs": {
+          "meanMs": 0.014,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.007,
+          "totalMs": 3.3,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.017,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.004,
+          "totalMs": 1.7,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "residency.staleRelease",
+        "label": "Stale item release/unpin",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "updateResidencyUnguarded",
+        "cpuMs": {
+          "meanMs": 0.012,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.006,
+          "totalMs": 2.8,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.015,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.003,
+          "totalMs": 1.5,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "residency.itemLoad",
+        "label": "Per-item load (phase 1)",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "updateResidencyUnguarded",
+        "cpuMs": {
+          "meanMs": 13.084,
+          "maxMs": 30.5,
+          "amortisedMsPerFrame": 7.084,
+          "totalMs": 3166.4,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 12.42,
+          "maxMs": 30.5,
+          "amortisedMsPerFrame": 2.806,
+          "totalMs": 1254.4,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "residency.itemLoadMasks",
+        "label": "Per-item mask-pack load (new items only)",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "ensureItemLoaded",
+        "cpuMs": null,
+        "cpuEarlyMs": null,
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": null,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 1
+      },
+      {
+        "id": "residency.itemRefresh",
+        "label": "Per-item placement + mesh refresh (phase 2)",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "updateResidencyUnguarded",
+        "cpuMs": {
+          "meanMs": 0.046,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.025,
+          "totalMs": 11.2,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.057,
+          "maxMs": 0.2,
+          "amortisedMsPerFrame": 0.013,
+          "totalMs": 5.8,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "residency.pass",
+        "label": "Residency update",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "scheduleResidencyUpdate",
+        "cpuMs": {
+          "meanMs": 13.536,
+          "maxMs": 31.4,
+          "amortisedMsPerFrame": 7.328,
+          "totalMs": 3275.7,
+          "occurrences": 242
+        },
+        "cpuEarlyMs": {
+          "meanMs": 12.924,
+          "maxMs": 31.4,
+          "amortisedMsPerFrame": 2.92,
+          "totalMs": 1305.3,
+          "occurrences": 101
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0.5413870246085011,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.002,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 0
+      },
+      {
+        "id": "residency.decode",
+        "label": "Page decode",
+        "kind": "cpu",
+        "stage": "residency",
+        "cadence": "event",
+        "sparse": true,
+        "isPass": false,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": "requestDecodeUpload",
+        "cpuMs": null,
+        "cpuEarlyMs": null,
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": true,
+        "occurrenceRate": 0,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": null,
+        "drawCalls": null,
+        "triangles": null,
+        "unbalanced": 1
+      },
+      {
+        "id": "pass.masks.occlusion",
+        "label": "masks.occlusion",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 0.154,
+          "maxMs": 0.5,
+          "amortisedMsPerFrame": 0.154,
+          "totalMs": 68.7,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.15,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.07,
+          "totalMs": 31.2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0,
+        "childCount": 2,
+        "childGpuMs": 0,
+        "ownGpuMs": null,
+        "totalGpuMs": 0,
+        "gpuIsExclusive": true,
+        "breakdownNote": null
+      },
+      {
+        "id": "pass.geometry.world",
+        "label": "geometry.world",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 2.88,
+          "maxMs": 16,
+          "amortisedMsPerFrame": 2.88,
+          "totalMs": 1287.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 2.65,
+          "maxMs": 16,
+          "amortisedMsPerFrame": 1.233,
+          "totalMs": 551.2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 178.4,
+        "triangles": 400707.5,
+        "unbalanced": 0,
+        "childCount": 7,
+        "childGpuMs": 38.206,
+        "ownGpuMs": null,
+        "totalGpuMs": 38.206,
+        "gpuIsExclusive": true,
+        "breakdownNote": null
+      },
+      {
+        "id": "pass.light.accumulate",
+        "label": "light.accumulate",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 7.886,
+          "maxMs": 16.5,
+          "amortisedMsPerFrame": 7.886,
+          "totalMs": 3525.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 7.515,
+          "maxMs": 15.7,
+          "amortisedMsPerFrame": 3.497,
+          "totalMs": 1563.1,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 236,
+        "triangles": 9416,
+        "unbalanced": 0,
+        "childCount": 28,
+        "childGpuMs": 5.603,
+        "ownGpuMs": null,
+        "totalGpuMs": 5.603,
+        "gpuIsExclusive": true,
+        "breakdownNote": null
+      },
+      {
+        "id": "pass.surface.response",
+        "label": "surface.response",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 0.173,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.173,
+          "totalMs": 77.4,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.162,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.075,
+          "totalMs": 33.6,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 4,
+        "unbalanced": 0,
+        "childCount": 2,
+        "childGpuMs": 8.401,
+        "ownGpuMs": null,
+        "totalGpuMs": 8.401,
+        "gpuIsExclusive": true,
+        "breakdownNote": null
+      },
+      {
+        "id": "pass.surface.particles",
+        "label": "surface.particles",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 0.001,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.001,
+          "totalMs": 0.3,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.001,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0,
+          "totalMs": 0.2,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": true,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0,
+        "childCount": 0,
+        "childGpuMs": null,
+        "ownGpuMs": null,
+        "totalGpuMs": null,
+        "gpuIsExclusive": true,
+        "breakdownNote": "No sub-zones are declared inside this pass, so its cost is a single opaque number. That is a gap in the taxonomy, not evidence that nothing in it is expensive."
+      },
+      {
+        "id": "pass.post.bloom",
+        "label": "post.bloom",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 0.821,
+          "maxMs": 1.6,
+          "amortisedMsPerFrame": 0.821,
+          "totalMs": 367.1,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.832,
+          "maxMs": 1.4,
+          "amortisedMsPerFrame": 0.387,
+          "totalMs": 173,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 11,
+        "triangles": 11,
+        "unbalanced": 0,
+        "childCount": 6,
+        "childGpuMs": 0.195,
+        "ownGpuMs": null,
+        "totalGpuMs": 0.195,
+        "gpuIsExclusive": true,
+        "breakdownNote": null
+      },
+      {
+        "id": "pass.post.dof",
+        "label": "post.dof",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 0.003,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.003,
+          "totalMs": 1.2,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.002,
+          "maxMs": 0.1,
+          "amortisedMsPerFrame": 0.001,
+          "totalMs": 0.5,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 0,
+        "triangles": 0,
+        "unbalanced": 0,
+        "childCount": 0,
+        "childGpuMs": null,
+        "ownGpuMs": null,
+        "totalGpuMs": null,
+        "gpuIsExclusive": true,
+        "breakdownNote": "No sub-zones are declared inside this pass, so its cost is a single opaque number. That is a gap in the taxonomy, not evidence that nothing in it is expensive."
+      },
+      {
+        "id": "pass.present.composite",
+        "label": "present.composite",
+        "kind": "gpu",
+        "stage": null,
+        "cadence": "steady",
+        "sparse": false,
+        "isPass": true,
+        "parent": null,
+        "ownerEffectId": null,
+        "detail": false,
+        "site": null,
+        "cpuMs": {
+          "meanMs": 0.239,
+          "maxMs": 12,
+          "amortisedMsPerFrame": 0.239,
+          "totalMs": 106.7,
+          "occurrences": 447
+        },
+        "cpuEarlyMs": {
+          "meanMs": 0.207,
+          "maxMs": 0.4,
+          "amortisedMsPerFrame": 0.096,
+          "totalMs": 43,
+          "occurrences": 208
+        },
+        "gpuMs": null,
+        "gpuAbsentByDeclaration": false,
+        "occurrenceRate": 1,
+        "belowClockResolution": false,
+        "clockNoiseFloorMs": 0.001,
+        "drawCalls": 2,
+        "triangles": 2,
+        "unbalanced": 0,
+        "childCount": 1,
+        "childGpuMs": 0.649,
+        "ownGpuMs": null,
+        "totalGpuMs": 0.649,
+        "gpuIsExclusive": true,
+        "breakdownNote": null
+      }
+    ],
+    "zonesCollapsed": {
+      "note": "11 detail zones below 1% of frame GPU and 0.05ms CPU, summed. Ask for verbosity:'full' to expand.",
+      "count": 11,
+      "gpuMsTotal": 0,
+      "cpuMsTotal": 0.194,
+      "ids": [
+        "tick.camera",
+        "masks.occlusionSync",
+        "geometry.depthSetup",
+        "geometry.depthRestore",
+        "light.ambient",
+        "light.waterSurfaceSync",
+        "light.fluidSurfaceSync",
+        "light.lightningSync",
+        "light.windOverlaySync",
+        "surface.specularSync",
+        "bloom.uniformPush"
+      ]
+    },
+    "belowClockResolution": {
+      "note": "Mean is under the clock's own noise floor (resolution / sqrt(12n)). These zones RAN — they are reported as present with no number, because a number here would be quantisation noise, which is the same lie as reporting 0 for \"not measured\".",
+      "ids": [
+        "geometry.depthRestore",
+        "light.pointLightBatchReconcile",
+        "light.windOverlaySync",
+        "pass.surface.particles"
+      ]
+    },
+    "effects": [
+      {
+        "id": "uiWindowShadow",
+        "label": "UI window shadows",
+        "enabled": false,
+        "method": "cpu-zone-only",
+        "zoneGpuMs": null,
+        "zoneCpuMs": 0.002,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.1,
+          "declaredMaxMsPerMp": 0.1,
+          "classes": [
+            "C1"
+          ],
+          "verdict": "unmeasured",
+          "note": "Declared but not measured this run — see this effect's `method` and `whyNotZoned`."
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": "Uniform push only — it has no draw call at all by design (the v6 perf fix removed the extra pass), so light.uiShadowStamps IS its entire cost.",
+        "zones": [
+          "light.uiShadowStamps"
+        ]
+      },
+      {
+        "id": "candleFlame",
+        "label": "Candle flames",
+        "enabled": true,
+        "method": "zone",
+        "zoneGpuMs": 0.024,
+        "zoneCpuMs": 0.403,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": 0.024,
+        "costBasis": "zones",
+        "measuredMsPerMp": 0.012,
+        "declared": {
+          "declaredMinMsPerMp": 0.01,
+          "declaredMaxMsPerMp": 0.3,
+          "classes": [
+            "C0",
+            "C1",
+            "C2",
+            "C2",
+            "C8"
+          ],
+          "verdict": "within",
+          "ratioToDeclaredMax": 0.04,
+          "note": null
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": null,
+        "zones": [
+          "light.candleSync",
+          "light.drawCandleFlame"
+        ]
+      },
+      {
+        "id": "lightning",
+        "label": "Lightning",
+        "enabled": true,
+        "method": "cpu-zone-only",
+        "zoneGpuMs": null,
+        "zoneCpuMs": 0.02,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.01,
+          "declaredMaxMsPerMp": 0.15,
+          "classes": [
+            "C1",
+            "C1",
+            "C1",
+            "C6"
+          ],
+          "verdict": "unmeasured",
+          "note": "Declared but not measured this run — see this effect's `method` and `whyNotZoned`."
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": null,
+        "zones": [
+          "light.lightningSync"
+        ]
+      },
+      {
+        "id": "fire",
+        "label": "Fire",
+        "enabled": true,
+        "method": "zone",
+        "zoneGpuMs": 0.05,
+        "zoneCpuMs": 1.578,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.05,
+          "declaredMaxMsPerMp": 0.7,
+          "classes": [
+            "C8",
+            "C1",
+            "C1",
+            "C1",
+            "C3",
+            "C8"
+          ],
+          "verdict": "unmeasured",
+          "note": "Not comparable this run: this effect's zone coverage is 'partial', so the zones that DID report are a fragment of its cost, not a total. Run the sweep for a marginal figure."
+        },
+        "zoneCoverage": "partial",
+        "whyNotZoned": "light.fireSync (state read, spawn-cloud/cohesion bookkeeping, the per-engine TSL-compute step loop) and light.drawFire (the particle billboard draw — flame/ember/smoke sprites) are both zoned, but fire's LIGHT SOURCES (buildFireLightSources, built inside sync() and merged into the point-light pool via getFireLightSources) draw through the shared, null-owned light.drawPointLights/light.drawColoration zones — the exact same structural gap that hid candles' cost for as long as it did (Performance-Insights.md §5B/§5C), now true of fire too and not fixable without restructuring how source types share those two zones.",
+        "zones": [
+          "light.fireSync",
+          "light.drawFire"
+        ]
+      },
+      {
+        "id": "vegetation",
+        "label": "Vegetation (trees & bushes)",
+        "enabled": true,
+        "method": "cpu-zone-only",
+        "zoneGpuMs": null,
+        "zoneCpuMs": 0.043,
+        "sparse": {
+          "note": "Bake/event work that did not run during this window — nothing was measured.",
+          "bakeFired": false,
+          "measures": "check-only",
+          "peakMs": 0.2,
+          "amortisedMsPerFrame": 0.023,
+          "occurrences": 484,
+          "occurrencesAre": "checks",
+          "zones": [
+            "vegetation.rankStamp",
+            "vegetation.depthItemsBuild"
+          ]
+        },
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.02,
+          "declaredMaxMsPerMp": 0.2,
+          "classes": [
+            "C1",
+            "C2",
+            "C8",
+            "C8",
+            "C8",
+            "C8"
+          ],
+          "verdict": "unmeasured",
+          "note": "Not comparable this run: this effect's zone coverage is 'partial', so the zones that DID report are a fragment of its cost, not a total. Run the sweep for a marginal figure."
+        },
+        "zoneCoverage": "partial",
+        "whyNotZoned": "Its per-frame uniform sync is zoned (light.vegetationSync), as is the residency-pass rank stamp/build (vegetation.rankStamp, vegetation.depthItemsBuild), but the meshes draw inside geometry.world's shared scene in the one flat sort list — no render call of its own to bracket.",
+        "zones": [
+          "light.vegetationSync",
+          "vegetation.rankStamp",
+          "vegetation.depthItemsBuild"
+        ]
+      },
+      {
+        "id": "bloom",
+        "label": "Bloom",
+        "enabled": true,
+        "method": "zone",
+        "zoneGpuMs": 0.195,
+        "zoneCpuMs": 0.818,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": 0.195,
+        "costBasis": "zones",
+        "measuredMsPerMp": 0.094,
+        "declared": {
+          "declaredMinMsPerMp": 0.3,
+          "declaredMaxMsPerMp": 0.3,
+          "classes": [
+            "C2"
+          ],
+          "verdict": "under",
+          "ratioToDeclaredMax": 0.31,
+          "note": "Measured well under the declared estimate (0.094 vs 0.3 ms/Mpx). Cheap to leave, but the declaration is pessimistic enough to be misleading in a budget."
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": null,
+        "zones": [
+          "bloom.uniformPush",
+          "bloom.bright",
+          "bloom.downsample",
+          "bloom.upsampleCore",
+          "bloom.upsampleAtmo",
+          "bloom.composite"
+        ]
+      },
+      {
+        "id": "depthOfField",
+        "label": "Depth of Field",
+        "enabled": true,
+        "method": "unmeasured",
+        "zoneGpuMs": null,
+        "zoneCpuMs": null,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.15,
+          "declaredMaxMsPerMp": 0.15,
+          "classes": [
+            "C2"
+          ],
+          "verdict": "unmeasured",
+          "note": "Declared but not measured this run — see this effect's `method` and `whyNotZoned`."
+        },
+        "zoneCoverage": "none",
+        "whyNotZoned": null,
+        "zones": []
+      },
+      {
+        "id": "sunShadows",
+        "label": "Sun shadows",
+        "enabled": true,
+        "method": "unmeasured",
+        "zoneGpuMs": null,
+        "zoneCpuMs": null,
+        "sparse": {
+          "note": "THE BAKE DID NOT FIRE during this window. These numbers are the cost of the per-frame CHECK (a few comparisons and an early return), NOT of a bake — occurrences counts checks, not bakes. To measure the real bake cost, change the sun angle or repaint the mask so it rebakes while profiling.",
+          "bakeFired": false,
+          "measures": "check-only",
+          "peakMs": 0.3,
+          "amortisedMsPerFrame": 0.056,
+          "occurrences": 447,
+          "occurrencesAre": "checks",
+          "zones": [
+            "light.sunShadowBake"
+          ]
+        },
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.05,
+          "declaredMaxMsPerMp": 0.05,
+          "classes": [
+            "C3",
+            "C5",
+            "C5",
+            "C5"
+          ],
+          "verdict": "unmeasured",
+          "note": "NOT MEASURED AT ALL this run: this effect's only zones are bakes, and none of them fired during the window. sparse.occurrences counts the per-frame CHECK, not bakes — see sparse.note."
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": null,
+        "zones": [
+          "light.sunShadowBake"
+        ]
+      },
+      {
+        "id": "grade",
+        "label": "Colour Grade",
+        "enabled": true,
+        "method": "unmeasured",
+        "zoneGpuMs": null,
+        "zoneCpuMs": null,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.15,
+          "declaredMaxMsPerMp": 0.15,
+          "classes": [
+            "C2"
+          ],
+          "verdict": "unmeasured",
+          "note": "Not comparable this run: this effect's zone coverage is 'none', so the zones that DID report are a fragment of its cost, not a total. Run the sweep for a marginal figure."
+        },
+        "zoneCoverage": "none",
+        "whyNotZoned": "Folded into the present composite shader (gradePresent) rather than adding a pass, so present.blit costs the same whether grade is on or off. Sweep-only.",
+        "zones": []
+      },
+      {
+        "id": "doorGraphics",
+        "label": "Door graphics",
+        "enabled": true,
+        "method": "zone",
+        "zoneGpuMs": 0.329,
+        "zoneCpuMs": 1.352,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": 0.329,
+        "costBasis": "zones",
+        "measuredMsPerMp": 0.159,
+        "declared": {
+          "declaredMinMsPerMp": 0.01,
+          "declaredMaxMsPerMp": 0.01,
+          "classes": [
+            "C0"
+          ],
+          "verdict": "over",
+          "ratioToDeclaredMax": 15.9,
+          "note": "MEASURED 15.9× the highest declared tier (0.159 vs 0.01 ms/Mpx). Either the manifest estimate is wrong or the implementation drifted past it — the declaration has never been checked against a measurement before now."
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": null,
+        "zones": [
+          "tick.doorSync",
+          "geometry.doorDraw"
+        ]
+      },
+      {
+        "id": "water",
+        "label": "Water",
+        "enabled": true,
+        "method": "cpu-zone-only",
+        "zoneGpuMs": null,
+        "zoneCpuMs": 0.034,
+        "sparse": {
+          "note": "THE BAKE DID NOT FIRE during this window. These numbers are the cost of the per-frame CHECK (a few comparisons and an early return), NOT of a bake — occurrences counts checks, not bakes. To measure the real bake cost, change the sun angle or repaint the mask so it rebakes while profiling.",
+          "bakeFired": false,
+          "measures": "check-only",
+          "peakMs": 0.2,
+          "amortisedMsPerFrame": 0.012,
+          "occurrences": 447,
+          "occurrencesAre": "checks",
+          "zones": [
+            "light.waterBodyBake"
+          ]
+        },
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.02,
+          "declaredMaxMsPerMp": 0.1,
+          "classes": [
+            "C4",
+            "C1",
+            "C2",
+            "C3"
+          ],
+          "verdict": "unmeasured",
+          "note": "Not comparable this run: this effect's zone coverage is 'partial', so the zones that DID report are a fragment of its cost, not a total. Run the sweep for a marginal figure."
+        },
+        "zoneCoverage": "partial",
+        "whyNotZoned": "The JFA body bake and the surface sync are zoned, but the tier-0 surface is a drawable at renderOrder 0.5 inside geometry.world (surface.water is still a seam), so its draw cost cannot be separated.",
+        "zones": [
+          "light.waterBodyBake",
+          "light.waterSurfaceSync"
+        ]
+      },
+      {
+        "id": "fluid",
+        "label": "Fluid",
+        "enabled": true,
+        "method": "cpu-zone-only",
+        "zoneGpuMs": null,
+        "zoneCpuMs": 0.022,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0.01,
+          "declaredMaxMsPerMp": 0.08,
+          "classes": [
+            "C4",
+            "C1",
+            "C4",
+            "C4",
+            "C5",
+            "C5"
+          ],
+          "verdict": "unmeasured",
+          "note": "Not comparable this run: this effect's zone coverage is 'partial', so the zones that DID report are a fragment of its cost, not a total. Run the sweep for a marginal figure."
+        },
+        "zoneCoverage": "partial",
+        "whyNotZoned": "Its sim tick (sims.fluid), per-frame sync (light.fluidSurfaceSync) and tube-net/pack bake (light.fluidNetBake, added 2026-08-06) are zoned, but the absorb/emit surface draw is additively blended into geometry.world's shared scene at a fixed renderOrder — the same structural situation as water's tier-0 surface, no render call of its own to bracket.",
+        "zones": [
+          "sims.fluid",
+          "light.fluidSurfaceSync"
+        ]
+      },
+      {
+        "id": "specular",
+        "label": "Metal & shine",
+        "enabled": true,
+        "method": "zone",
+        "zoneGpuMs": 8.401,
+        "zoneCpuMs": 0.166,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": 8.401,
+        "costBasis": "zones",
+        "measuredMsPerMp": 4.058,
+        "declared": {
+          "declaredMinMsPerMp": 0.005,
+          "declaredMaxMsPerMp": 0.08,
+          "classes": [
+            "C4",
+            "C1",
+            "C1",
+            "C1",
+            "C3",
+            "C3"
+          ],
+          "verdict": "over",
+          "ratioToDeclaredMax": 50.72,
+          "note": "MEASURED 50.72× the highest declared tier (4.058 vs 0.08 ms/Mpx). Either the manifest estimate is wrong or the implementation drifted past it — the declaration has never been checked against a measurement before now."
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": "Draw (surface.specularDraw), per-frame CPU sync (surface.specularSync) and the island-pack bake (surface.specularIslandBake) are all zoned — the sync and bake zones were added 2026-08-06 alongside this entry; before that, both ran with zero profiler coverage despite running every frame and on every mask load respectively.",
+        "zones": [
+          "surface.specularSync",
+          "surface.specularDraw"
+        ]
+      },
+      {
+        "id": "window",
+        "label": "Window light",
+        "enabled": true,
+        "method": "zone",
+        "zoneGpuMs": 1.175,
+        "zoneCpuMs": 0.247,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": 1.175,
+        "costBasis": "zones",
+        "measuredMsPerMp": 0.568,
+        "declared": {
+          "declaredMinMsPerMp": 0.06,
+          "declaredMaxMsPerMp": 0.06,
+          "classes": [
+            "C4"
+          ],
+          "verdict": "over",
+          "ratioToDeclaredMax": 9.47,
+          "note": "MEASURED 9.47× the highest declared tier (0.568 vs 0.06 ms/Mpx). Either the manifest estimate is wrong or the implementation drifted past it — the declaration has never been checked against a measurement before now."
+        },
+        "zoneCoverage": "full",
+        "whyNotZoned": "Unlike water/vegetation/fluid, window light draws into its OWN dedicated per-floor scene (windowSurface.scene, never merged into geometry.world or the point-light pool) — light.windowSync (its per-frame depth-authority query + look-param dirty-check) and light.drawWindowLight (the draw itself) together cover its entire cost with nothing left un-zoned.",
+        "zones": [
+          "light.windowSync",
+          "light.drawWindowLight"
+        ]
+      },
+      {
+        "id": "apertureGobo",
+        "label": "Window light pattern",
+        "enabled": true,
+        "method": "zone",
+        "zoneGpuMs": 0,
+        "zoneCpuMs": 0.1,
+        "sparse": null,
+        "sweepMarginalGpuMs": null,
+        "sweepRawMs": null,
+        "sweepUnresolvable": null,
+        "sweepUnresolvableNote": null,
+        "agreement": null,
+        "costMs": null,
+        "costBasis": null,
+        "measuredMsPerMp": null,
+        "declared": {
+          "declaredMinMsPerMp": 0,
+          "declaredMaxMsPerMp": 0,
+          "classes": [
+            "C1"
+          ],
+          "verdict": "unmeasured",
+          "note": "Not comparable this run: this effect's zone coverage is 'partial', so the zones that DID report are a fragment of its cost, not a total. Run the sweep for a marginal figure."
+        },
+        "zoneCoverage": "partial",
+        "whyNotZoned": "Its own debug-visualization draw is zoned (light.drawApertureShadow, added 2026-08-06 — the bracket already existed in code, only the declaration was missing). The REAL per-fragment gobo pattern cost is baked directly into point-light-pool.js's main light/coloration materials and is only measurable as part of the null-owned light.drawPointLights/light.drawColoration zones.",
+        "zones": [
+          "light.pointLightApertureSetup",
+          "light.drawApertureShadow"
+        ]
+      }
+    ],
+    "caches": [
+      {
+        "id": "vtPageCache",
+        "label": "VT page cache (atlas residency)",
+        "ownerEffectId": null,
+        "hits": null,
+        "misses": 0,
+        "evictions": 0,
+        "size": 203,
+        "capacity": 2048,
+        "hitRatePct": null,
+        "note": "page-cache.js exposes no hits counter (only misses/evictions are lifetime counts — everything else is point-in-time occupancy), so hitRatePct cannot be computed. size/capacity are the END-of-window snapshot."
+      },
+      {
+        "id": "vtDecodePool",
+        "label": "VT decode pool (source bitmap + IndexedDB)",
+        "ownerEffectId": null,
+        "hits": 0,
+        "misses": 0,
+        "evictions": null,
+        "size": null,
+        "capacity": null,
+        "hitRatePct": null,
+        "note": "hits = pages served from IndexedDB without a re-decode (idbHits); misses = full SOURCE images actually decoded (sourcesDecoded) — different granularities (per-page vs per-source), so hitRatePct here is directional, not an exact per-request rate."
+      },
+      {
+        "id": "vegetationProxyNodeCache",
+        "label": "Vegetation depth-proxy node cache (unpooled)",
+        "ownerEffectId": "vegetation",
+        "hits": 484,
+        "misses": 0,
+        "evictions": null,
+        "size": null,
+        "capacity": null,
+        "hitRatePct": 100,
+        "note": "A WeakMap keyed on each overlay’s own motion bag (deliberately excluded from depth-proxy-material-pool.js — see that file’s \"WHY VEGETATION IS DELIBERATELY EXCLUDED\"). No size/eviction is observable: entries vanish uncounted when their motion bag is garbage-collected."
+      },
+      {
+        "id": "maskAuthorityBakeGate",
+        "label": "Mask authority bake gate (derived-mask recompute)",
+        "ownerEffectId": null,
+        "hits": 123535,
+        "misses": 0,
+        "evictions": null,
+        "size": null,
+        "capacity": null,
+        "hitRatePct": 100,
+        "note": "hits = recomputeIfDirty() was called but the products from last time were still valid (skipped); misses = a real recompute ran. A miss rate far above the real content-change rate during passive panning (no document edits in this window) would point at the arity-1 CRUD-hook over-invalidation Performance-Audit-2026-08.md §5.8 already named but never measured directly."
+      },
+      {
+        "id": "pointLightWallClip.candle",
+        "label": "Point light: candle wall-clip cache",
+        "ownerEffectId": "candleFlame",
+        "hits": 38889,
+        "misses": 0,
+        "evictions": 0,
+        "size": null,
+        "capacity": null,
+        "hitRatePct": 100,
+        "note": null
+      },
+      {
+        "id": "pointLightWallClip.lightning",
+        "label": "Point light: lightning wall-clip cache",
+        "ownerEffectId": "lightning",
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0,
+        "size": null,
+        "capacity": null,
+        "hitRatePct": null,
+        "note": null
+      },
+      {
+        "id": "pointLightWallClip.regular",
+        "label": "Point light: real-light wall-clip cache",
+        "ownerEffectId": null,
+        "hits": 13410,
+        "misses": 0,
+        "evictions": 0,
+        "size": null,
+        "capacity": null,
+        "hitRatePct": 100,
+        "note": "The 9.9%-of-a-frame cost light.pointLightWallClip now zones directly — see that zone for the CPU cost this cache exists to avoid."
+      },
+      {
+        "id": "pointLightWallClip.apertureWalls",
+        "label": "Point light: aperture-gobo wall segments",
+        "ownerEffectId": "apertureGobo",
+        "hits": 447,
+        "misses": 0,
+        "evictions": null,
+        "size": null,
+        "capacity": null,
+        "hitRatePct": 100,
+        "note": null
+      },
+      {
+        "id": "depthProxyMaterialPool",
+        "label": "Depth-proxy material pool (tile early-Z materials)",
+        "ownerEffectId": null,
+        "hits": 2864,
+        "misses": 2,
+        "evictions": 0,
+        "size": 10,
+        "capacity": null,
+        "hitRatePct": 99.9,
+        "note": "Mirrors instrument.depthProxyPoolStats — see findings[] for depth-proxy-pool-health, the tuned verdict on this same data."
+      }
+    ],
+    "sweepRaw": null,
+    "structuralAB": {
+      "ran": true,
+      "skipped": null,
+      "method": "on→off→on, 180 measured frames per block, profiler armed per block",
+      "cameraNote": "Measured with the camera PARKED at wherever the benchmark route ended, not moving along it. That removes camera motion — the largest source of frame-to-frame variance, and most of why this resolves what the whole-frame effect sweep cannot — at the cost of measuring one view rather than the map. See each toggle's `representative` block for whether that view stood in for the route.",
+      "toggles": [
+        {
+          "id": "earlyZComposition",
+          "label": "Early-Z composition (Stage 1, \"shade once\")",
+          "question": "Stage 1 renders the opaque proxy geometry a SECOND time into scene.color to buy EQUAL-depth rejection in the main world draw. Does the rejection it buys cost less than the extra submission it pays?",
+          "liveState": true,
+          "settleFrames": 120,
+          "measureFrames": 180,
+          "blocks": {
+            "on1": {
+              "frames": 180,
+              "frameGpuMs": 43.52,
+              "attributedGpuMs": 42.98615466666666,
+              "gpuSampleCount": 45,
+              "zones": {
+                "masks.occlusionDraw": 0,
+                "geometry.worldDraw": 13.31400248888888,
+                "geometry.doorDraw": 0.033496177777777726,
+                "geometry.depthDraw": 10.6889216,
+                "geometry.earlyZPrepass": 4.9210254222222245,
+                "light.drawIllum": 0.11359573333333327,
+                "light.drawRegions": 0.06480782222222209,
+                "light.drawPointLights": 0.5501383111111112,
+                "light.drawApertureShadow": 0,
+                "light.drawWindowLight": 1.7410730666666683,
+                "light.drawColoration": 0.3546225777777787,
+                "light.drawComposite": 0.10740622222222208,
+                "light.drawCandleFlame": 0.024029866666666636,
+                "light.drawFire": 0.020753066666666643,
+                "surface.specularDraw": 10.490857244444436,
+                "bloom.bright": 0.03568071111111105,
+                "bloom.downsample": 0.0280348444444444,
+                "bloom.upsampleCore": 0.037501155555555485,
+                "bloom.upsampleAtmo": 0.0058254222222222235,
+                "bloom.composite": 0.07573048888888874,
+                "present.blit": 0.37865244444444607
+              },
+              "gpuTimer": {
+                "armed": true,
+                "support": {
+                  "method": "timestamp-query",
+                  "capable": true,
+                  "backend": "webgpu",
+                  "reason": null
+                }
+              }
+            },
+            "off": {
+              "frames": 180,
+              "frameGpuMs": 39.52,
+              "attributedGpuMs": 38.774374399999985,
+              "gpuSampleCount": 45,
+              "zones": {
+                "masks.occlusionDraw": 0,
+                "geometry.worldDraw": 14.119003022222223,
+                "geometry.doorDraw": 0.028398933333333293,
+                "geometry.depthDraw": 10.496318577777773,
+                "light.drawIllum": 0.10777031111111107,
+                "light.drawRegions": 0.05971057777777765,
+                "light.drawPointLights": 0.5439487999999999,
+                "light.drawApertureShadow": 0,
+                "light.drawWindowLight": 1.7454421333333352,
+                "light.drawColoration": 0.3538944000000008,
+                "light.drawComposite": 0.10158079999999986,
+                "light.drawCandleFlame": 0.02111715555555553,
+                "light.drawFire": 0.024029866666666636,
+                "surface.specularDraw": 10.52981475555555,
+                "bloom.bright": 0.041142044444444366,
+                "bloom.downsample": 0.03131164444444439,
+                "bloom.upsampleCore": 0.028763022222222177,
+                "bloom.upsampleAtmo": 0.010922666666666669,
+                "bloom.composite": 0.07973546666666652,
+                "present.blit": 0.4514702222222222
+              },
+              "gpuTimer": {
+                "armed": true,
+                "support": {
+                  "method": "timestamp-query",
+                  "capable": true,
+                  "backend": "webgpu",
+                  "reason": null
+                }
+              }
+            },
+            "on2": {
+              "frames": 180,
+              "frameGpuMs": 43.32,
+              "attributedGpuMs": 42.703257599999986,
+              "gpuSampleCount": 45,
+              "zones": {
+                "masks.occlusionDraw": 0,
+                "geometry.worldDraw": 13.318735644444436,
+                "geometry.doorDraw": 0.032403911111111065,
+                "geometry.depthDraw": 10.47301688888889,
+                "geometry.earlyZPrepass": 4.876970666666665,
+                "light.drawIllum": 0.1161443555555555,
+                "light.drawRegions": 0.06153102222222209,
+                "light.drawPointLights": 0.5563278222222224,
+                "light.drawApertureShadow": 0,
+                "light.drawWindowLight": 1.7425294222222238,
+                "light.drawColoration": 0.3568071111111118,
+                "light.drawComposite": 0.10412942222222213,
+                "light.drawCandleFlame": 0.02330168888888886,
+                "light.drawFire": 0.01929671111111109,
+                "surface.specularDraw": 10.413306311111107,
+                "bloom.bright": 0.037501155555555485,
+                "bloom.downsample": 0.029127111111111065,
+                "bloom.upsampleCore": 0.027670755555555513,
+                "bloom.upsampleAtmo": 0.016383999999999992,
+                "bloom.composite": 0.0735459555555554,
+                "present.blit": 0.42452764444444513
+              },
+              "gpuTimer": {
+                "armed": true,
+                "support": {
+                  "method": "timestamp-query",
+                  "capable": true,
+                  "backend": "webgpu",
+                  "reason": null
+                }
+              }
+            }
+          },
+          "verdict": "costs-more-than-it-saves",
+          "onGpuMs": 42.845,
+          "offGpuMs": 38.774,
+          "deltaGpuMs": 4.07,
+          "noiseFloorMs": 0.283,
+          "significanceFactor": 1.5,
+          "onBlocks": [
+            42.986,
+            42.703
+          ],
+          "perZone": [
+            {
+              "id": "geometry.earlyZPrepass",
+              "watched": true,
+              "onMs": 4.899,
+              "offMs": 0,
+              "deltaMs": 4.899
+            },
+            {
+              "id": "geometry.worldDraw",
+              "watched": true,
+              "onMs": 13.316,
+              "offMs": 14.119,
+              "deltaMs": -0.803
+            },
+            {
+              "id": "geometry.depthDraw",
+              "watched": true,
+              "onMs": 10.581,
+              "offMs": 10.496,
+              "deltaMs": 0.085
+            },
+            {
+              "id": "surface.specularDraw",
+              "watched": false,
+              "onMs": 10.452,
+              "offMs": 10.53,
+              "deltaMs": -0.078
+            },
+            {
+              "id": "present.blit",
+              "watched": false,
+              "onMs": 0.402,
+              "offMs": 0.451,
+              "deltaMs": -0.05
+            },
+            {
+              "id": "light.drawPointLights",
+              "watched": false,
+              "onMs": 0.553,
+              "offMs": 0.544,
+              "deltaMs": 0.009
+            },
+            {
+              "id": "light.drawIllum",
+              "watched": false,
+              "onMs": 0.115,
+              "offMs": 0.108,
+              "deltaMs": 0.007
+            },
+            {
+              "id": "geometry.doorDraw",
+              "watched": false,
+              "onMs": 0.033,
+              "offMs": 0.028,
+              "deltaMs": 0.005
+            },
+            {
+              "id": "bloom.bright",
+              "watched": false,
+              "onMs": 0.037,
+              "offMs": 0.041,
+              "deltaMs": -0.005
+            },
+            {
+              "id": "bloom.composite",
+              "watched": false,
+              "onMs": 0.075,
+              "offMs": 0.08,
+              "deltaMs": -0.005
+            },
+            {
+              "id": "light.drawWindowLight",
+              "watched": false,
+              "onMs": 1.742,
+              "offMs": 1.745,
+              "deltaMs": -0.004
+            },
+            {
+              "id": "light.drawComposite",
+              "watched": false,
+              "onMs": 0.106,
+              "offMs": 0.102,
+              "deltaMs": 0.004
+            },
+            {
+              "id": "light.drawFire",
+              "watched": false,
+              "onMs": 0.02,
+              "offMs": 0.024,
+              "deltaMs": -0.004
+            },
+            {
+              "id": "bloom.upsampleCore",
+              "watched": false,
+              "onMs": 0.033,
+              "offMs": 0.029,
+              "deltaMs": 0.004
+            },
+            {
+              "id": "light.drawRegions",
+              "watched": false,
+              "onMs": 0.063,
+              "offMs": 0.06,
+              "deltaMs": 0.003
+            },
+            {
+              "id": "light.drawCandleFlame",
+              "watched": false,
+              "onMs": 0.024,
+              "offMs": 0.021,
+              "deltaMs": 0.003
+            },
+            {
+              "id": "bloom.downsample",
+              "watched": false,
+              "onMs": 0.029,
+              "offMs": 0.031,
+              "deltaMs": -0.003
+            },
+            {
+              "id": "light.drawColoration",
+              "watched": false,
+              "onMs": 0.356,
+              "offMs": 0.354,
+              "deltaMs": 0.002
+            },
+            {
+              "id": "geometry.depthRenderCall",
+              "watched": true,
+              "onMs": 0,
+              "offMs": 0,
+              "deltaMs": 0
+            },
+            {
+              "id": "masks.occlusionDraw",
+              "watched": false,
+              "onMs": 0,
+              "offMs": 0,
+              "deltaMs": 0
+            },
+            {
+              "id": "light.drawApertureShadow",
+              "watched": false,
+              "onMs": 0,
+              "offMs": 0,
+              "deltaMs": 0
+            },
+            {
+              "id": "bloom.upsampleAtmo",
+              "watched": false,
+              "onMs": 0.011,
+              "offMs": 0.011,
+              "deltaMs": 0
+            }
+          ],
+          "representative": {
+            "checked": 3,
+            "diverging": [
+              "geometry.earlyZPrepass"
+            ],
+            "zones": [
+              {
+                "id": "geometry.earlyZPrepass",
+                "abMs": 4.899,
+                "routeMs": 8.472,
+                "ratio": 0.58
+              },
+              {
+                "id": "geometry.worldDraw",
+                "abMs": 13.316,
+                "routeMs": 15.943,
+                "ratio": 0.84
+              },
+              {
+                "id": "geometry.depthDraw",
+                "abMs": 10.581,
+                "routeMs": 13.462,
+                "ratio": 0.79
+              }
+            ],
+            "verdict": "view-local",
+            "note": "geometry.earlyZPrepass cost materially differently here than across the route, so this parked view is NOT representative of it. The verdict below is TRUE OF THIS VIEW and must not be generalised to the map — re-run the A/B parked somewhere with different overdraw before deciding anything permanent."
+          },
+          "note": "COSTS MORE THAN IT SAVES: 4.07ms/frame MORE EXPENSIVE with it on (42.845ms vs 38.774ms), clearing the 0.283ms noise floor. perZone below shows what it added and what (if anything) it gave back."
+        }
+      ]
+    },
+    "vram": {
+      "renderTargets": {
+        "count": 25,
+        "namedMb": 131.8,
+        "unsizedCount": 0,
+        "unsizedNote": null,
+        "items": [
+          {
+            "name": "v3:scene.color",
+            "width": 1920,
+            "height": 1080,
+            "attachments": 2,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 31.64,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.illum",
+            "width": 1920,
+            "height": 1080,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 15.82,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.lit",
+            "width": 1920,
+            "height": 1080,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 15.82,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.coloration",
+            "width": 1920,
+            "height": 1080,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 15.82,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.depth",
+            "width": 1920,
+            "height": 1080,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 7.91,
+            "unsized": false
+          },
+          {
+            "name": "v3:occlusion.mask",
+            "width": 1920,
+            "height": 1080,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 7.91,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.sunShadow.slot0",
+            "width": 1024,
+            "height": 1024,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 4,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.sunShadow.slot1",
+            "width": 1024,
+            "height": 1024,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 4,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.sunShadow.slot2",
+            "width": 1024,
+            "height": 1024,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 4,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.sunShadow.slot3",
+            "width": 1024,
+            "height": 1024,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 4,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.sunShadow.slot4",
+            "width": 1024,
+            "height": 1024,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 4,
+            "unsized": false
+          },
+          {
+            "name": "v3:scene.sunShadow.slot5",
+            "width": 1024,
+            "height": 1024,
+            "attachments": 1,
+            "typeKey": "unsignedByte",
+            "formatKey": "rgba",
+            "bytesPerPixel": 4,
+            "mb": 4,
+            "unsized": false
+          },
+          {
+            "name": "v3:bloom.mip0",
+            "width": 960,
+            "height": 540,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 3.96,
+            "unsized": false
+          },
+          {
+            "name": "v3:dof.mip0",
+            "width": 960,
+            "height": 540,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 3.96,
+            "unsized": false
+          },
+          {
+            "name": "v3:bloom.mip1",
+            "width": 480,
+            "height": 270,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.99,
+            "unsized": false
+          },
+          {
+            "name": "v3:dof.mip1",
+            "width": 480,
+            "height": 270,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.99,
+            "unsized": false
+          },
+          {
+            "name": "v3:wind.sim.ping",
+            "width": 320,
+            "height": 320,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.78,
+            "unsized": false
+          },
+          {
+            "name": "v3:wind.sim.pong",
+            "width": 320,
+            "height": 320,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.78,
+            "unsized": false
+          },
+          {
+            "name": "v3:wind.sim.publish",
+            "width": 320,
+            "height": 320,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.78,
+            "unsized": false
+          },
+          {
+            "name": "v3:bloom.mip2",
+            "width": 240,
+            "height": 135,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.25,
+            "unsized": false
+          },
+          {
+            "name": "v3:dof.mip2",
+            "width": 240,
+            "height": 135,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.25,
+            "unsized": false
+          },
+          {
+            "name": "v3:bloom.mip3",
+            "width": 120,
+            "height": 68,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.06,
+            "unsized": false
+          },
+          {
+            "name": "v3:dof.mip3",
+            "width": 120,
+            "height": 68,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.06,
+            "unsized": false
+          },
+          {
+            "name": "v3:bloom.mip4",
+            "width": 60,
+            "height": 34,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0.02,
+            "unsized": false
+          },
+          {
+            "name": "v3:bloom.mip5",
+            "width": 30,
+            "height": 17,
+            "attachments": 1,
+            "typeKey": "halfFloat",
+            "formatKey": "rgba",
+            "bytesPerPixel": 8,
+            "mb": 0,
+            "unsized": false
+          }
+        ]
+      },
+      "threeInfoMemory": null,
+      "vtEstimateMb": 825,
+      "vtEstimateNote": "From the viewer's own per-format mip-chain accounting, which understands BC compression. This is the honest figure for the atlas.",
+      "estimatedTotalMb": 956.8,
+      "ceilingMb": 2500,
+      "headroomFraction": 0.617,
+      "verdict": "ok",
+      "note": "An ESTIMATE against a MEASURED wall, and it says so. Nothing here queries actual driver allocation — WebGPU exposes no such API — so treat it as a ranking of consumers plus an order-of-magnitude total, not a budget."
+    },
+    "instrument": {
+      "profilerAnomalies": {
+        "unbalancedBrackets": 2,
+        "passSlotOverflow": 0,
+        "note": "Mispaired begin/end brackets or exhausted pass slots were detected. The affected zones are counted, not silently dropped — treat their numbers as suspect and fix the bracket before trusting them."
+      },
+      "gpuTimer": {
+        "method": "idle",
+        "capable": true,
+        "reason": null,
+        "backend": "webgpu",
+        "foldedSamples": 12208,
+        "pendingUids": 0,
+        "unattributedPasses": 0,
+        "malformedDurations": 0,
+        "resolveErrors": 0,
+        "poolOverflowed": true,
+        "maxPendingSize": 2008,
+        "maxResolveSkipStreak": 3,
+        "frameGpuMs": {
+          "p50": 54.07,
+          "p95": 92.6,
+          "max": 682.49,
+          "sampleCount": 113,
+          "basis": "sum of timestamped render passes per frame (renderer.info.render.timestamp)",
+          "caveat": "NOT the whole GPU frame: mipmap generation, presentation and any work outside a render pass are not counted. Coverage against this measures \"of the pass time we can see, how much did we attribute to a declared zone\" — a real question, but a narrower one than \"where did the frame go\"."
+        },
+        "note": "The timestamp query pool overflowed: three stops handing out queries past 1024 outstanding passes and rendering continues silently. Zone GPU numbers are MISSING for part of this window, not zero.",
+        "armResult": {
+          "armed": true,
+          "support": {
+            "method": "timestamp-query",
+            "capable": true,
+            "backend": "webgpu",
+            "reason": null
+          }
+        }
+      },
+      "pipelineStats": {
+        "start": {
+          "programs": 80,
+          "geometries": 196,
+          "textures": 49,
+          "uniformBuffers": 579
+        },
+        "end": {
+          "programs": 84,
+          "geometries": 197,
+          "textures": 53,
+          "uniformBuffers": 3413
+        }
+      },
+      "depthProxyPoolStats": {
+        "start": {
+          "hits": 164,
+          "misses": 8,
+          "evictions": 0,
+          "size": 8
+        },
+        "end": {
+          "hits": 3028,
+          "misses": 10,
+          "evictions": 0,
+          "size": 10
+        }
+      },
+      "shaderRebuildStats": {
+        "installed": false,
+        "calls": 2834,
+        "hits": 2830,
+        "misses": 4,
+        "labelsDropped": 0,
+        "labels": [
+          {
+            "label": "Mesh/NodeMaterial",
+            "misses": 4,
+            "materialChanged": 2,
+            "nodesChanged": 1,
+            "distinctCacheKeys": 4,
+            "distinctCacheKeysTruncated": false
+          }
+        ],
+        "note": "misses are FULL TSL node-graph rebuilds. Per label: materialChanged>0 means a NEW material object each time (fix = pool the material); nodesChanged>0 means the SAME material with a new node graph (fix = stop rebuilding its nodes — pooling would change nothing). renderer.info.programs stays FLAT during this either way, because three caches pipelines by generated source, not by node identity — flat programs is this bug’s signature, not its absence."
+      },
+      "pipelineRebuildStats": {
+        "installed": false,
+        "calls": 191930,
+        "hits": 191926,
+        "misses": 4,
+        "labelsDropped": 0,
+        "labels": [
+          {
+            "label": "Mesh/NodeMaterial",
+            "misses": 4
+          }
+        ],
+        "note": "misses are real GPU PIPELINE compiles (device.createRenderPipeline), a DIFFERENT cache from shader-rebuild-probe.js's node-graph one — see this module's own header for why a miss here can happen even when that probe reads clean. Per label: how many times this render object forced a brand-new pipeline this window (no material/nodes split here — a pipeline miss already names the render object directly, so there is no second axis to classify)."
+      },
+      "cacheStats": {
+        "start": {
+          "vtPageCache": {
+            "capacityPages": 2048,
+            "residentPages": 203,
+            "pinnedCoarse": 203,
+            "pinnedView": 0,
+            "freePages": 1845,
+            "evictions": 0,
+            "misses": 0,
+            "coarseReservePages": 512,
+            "coarseReserveMisses": 0
+          },
+          "vtDecodePool": {
+            "sourcesDecoded": 0,
+            "idbHits": 203,
+            "idbSlices": 0,
+            "idbPersists": 0,
+            "maxSourceAcquireMs": 0,
+            "lastSourceAcquireMs": 0,
+            "maxSinglePageMs": 0,
+            "lastSinglePageMs": 0,
+            "workerSourceDecodes": 0,
+            "mainThreadFallbackSourceDecodes": 0,
+            "rangedFetchMisses": 0,
+            "heldSources": 0,
+            "semaphore": {
+              "active": 0,
+              "waiting": 0,
+              "max": 3
+            },
+            "workerStatus": "not-yet-created",
+            "workerUnavailableReason": null,
+            "workerRequestFailures": []
+          },
+          "vegetationProxyNodeCache": {
+            "hits": 33,
+            "misses": 2
+          },
+          "pointLightWallClip": {
+            "candle": {
+              "hits": 8613,
+              "misses": 87,
+              "evictions": 0
+            },
+            "lightning": {
+              "hits": 0,
+              "misses": 0,
+              "evictions": 0
+            },
+            "regular": {
+              "hits": 2970,
+              "misses": 30,
+              "evictions": 0
+            },
+            "apertureWalls": {
+              "hits": 99,
+              "misses": 1
+            }
+          },
+          "maskAuthorityBakeGate": {
+            "bakeRuns": 5,
+            "bakeSkips": 27690
+          }
+        },
+        "end": {
+          "vtPageCache": {
+            "capacityPages": 2048,
+            "residentPages": 203,
+            "pinnedCoarse": 203,
+            "pinnedView": 0,
+            "freePages": 1845,
+            "evictions": 0,
+            "misses": 0,
+            "coarseReservePages": 512,
+            "coarseReserveMisses": 0
+          },
+          "vtDecodePool": {
+            "sourcesDecoded": 0,
+            "idbHits": 203,
+            "idbSlices": 0,
+            "idbPersists": 0,
+            "maxSourceAcquireMs": 0,
+            "lastSourceAcquireMs": 0,
+            "maxSinglePageMs": 0,
+            "lastSinglePageMs": 0,
+            "workerSourceDecodes": 0,
+            "mainThreadFallbackSourceDecodes": 0,
+            "rangedFetchMisses": 0,
+            "heldSources": 0,
+            "semaphore": {
+              "active": 0,
+              "waiting": 0,
+              "max": 3
+            },
+            "workerStatus": "not-yet-created",
+            "workerUnavailableReason": null,
+            "workerRequestFailures": []
+          },
+          "vegetationProxyNodeCache": {
+            "hits": 517,
+            "misses": 2
+          },
+          "pointLightWallClip": {
+            "candle": {
+              "hits": 47502,
+              "misses": 87,
+              "evictions": 0
+            },
+            "lightning": {
+              "hits": 0,
+              "misses": 0,
+              "evictions": 0
+            },
+            "regular": {
+              "hits": 16380,
+              "misses": 30,
+              "evictions": 0
+            },
+            "apertureWalls": {
+              "hits": 546,
+              "misses": 1
+            }
+          },
+          "maskAuthorityBakeGate": {
+            "bakeRuns": 5,
+            "bakeSkips": 151225
+          }
+        }
+      },
+      "windowDiagnostics": [
+        {
+          "floorIndex": 0,
+          "visible": true,
+          "debugChannel": 0,
+          "enabled": true,
+          "floor": 0,
+          "bounds": {
+            "minX": 7312,
+            "minY": 4016,
+            "maxX": 9940,
+            "maxY": 11880
+          },
+          "maskImage": {
+            "url": "modules/map-shine-advanced/mansion_example_map/mythica-machina-mansion-redux/assets/mythica-machina-mansion-Ground_Windows.webp",
+            "uploaded": "6000x6000",
+            "native": "12000x12000",
+            "mb": 137.3,
+            "painted": "yes"
+          },
+          "floorGate": true,
+          "contentBoundsUv": {
+            "minU": 0.36,
+            "minV": 0.08533333333333333,
+            "maxU": 0.5776666666666667,
+            "maxV": 0.7393333333333333
+          },
+          "maskUvBounds": {
+            "minU": 0.35933333333333334,
+            "minV": 0.08466666666666667,
+            "maxU": 0.5783333333333334,
+            "maxV": 0.74
+          },
+          "maskRect": {
+            "minX": 3000,
+            "minY": 3000,
+            "maxX": 15000,
+            "maxY": 15000
+          },
+          "ambientCeiling": 0.9333333333333333,
+          "sceneChildCount": 1,
+          "sceneChildren": [
+            {
+              "type": "Mesh",
+              "visible": true,
+              "triangles": 2,
+              "material": {
+                "type": "NodeMaterial",
+                "side": "double",
+                "transparent": true,
+                "visible": true
+              }
+            }
+          ]
+        }
+      ],
+      "note": "These describe the INSTRUMENT, not the renderer. Non-zero unbalancedBrackets or poolOverflowed means some numbers above are missing or suspect — fix the instrument before drawing conclusions. pipelineStats.start vs .end: any growth in `programs` during a pan-only window means a pipeline is being recompiled that should already be cached — see findings[] for the threshold this crosses. depthProxyPoolStats.start vs .end: a low hit rate means the same class of rebuild is happening downstream of the depth-proxy pool specifically — see findings[]. shaderRebuildStats.labels: any materialChanged/nodesChanged above zero is a REPEAT rebuild this window, not a cold start — see findings[] for which label and which fix it implies. pipelineRebuildStats.labels: a DIFFERENT, downstream cache from shaderRebuildStats — misses above 1 for a label is a repeat GPU pipeline compile, and can fire even when shaderRebuildStats reads clean."
+    },
+    "findings": [
+      {
+        "severity": "high",
+        "id": "profiler-unbalanced-brackets",
+        "text": "2 mispaired begin/end bracket(s) were detected during this run. The affected zones' numbers are SUSPECT — an unterminated bracket does not crash, it quietly poisons that zone. This is a fault in the instrument, not in the renderer.",
+        "evidence": {
+          "unbalancedBrackets": 2
+        }
+      },
+      {
+        "severity": "high",
+        "id": "timestamp-pool-overflow",
+        "text": "The GPU timestamp query pool overflowed during this window — three stops allocating queries once 1024 passes are outstanding and rendering continues silently. Zone GPU numbers after that point are missing, not zero, and coverage below is understated.",
+        "evidence": {
+          "poolOverflow": true,
+          "maxPendingSize": 2008,
+          "maxResolveSkipStreak": 3
+        }
+      },
+      {
+        "severity": "high",
+        "id": "bottleneck",
+        "text": "Median frame: 54.07ms of timestamped render-pass GPU inside a 58.3ms frame (92.7% explained, 4.23ms not). At p95: 92.6ms inside 125.1ms (74% explained, 32.5ms not). GPU-BOUND at the median: the timestamped render passes account for most of the frame, so zones[] is where the frame time actually is — optimise the top row. The TAIL DISAGREES WITH THE MEDIAN (p95 is 'mixed', p50 is 'gpu-bound') — these have different fixes, and this run needs both. The median says what the steady frame costs; the p95 says what the hitches are made of. The unexplained remainder is NOT proven to be CPU time: mipmap generation, presentation and any GPU work outside a render pass are all real GPU cost that frame.gpuMs does not count (see its own `basis`/`caveat`). Three candidates, not one.",
+        "evidence": {
+          "verdict": "gpu-bound",
+          "medianGapMs": 58.3,
+          "medianGpuMs": 54.07,
+          "medianUnexplainedMs": 4.23,
+          "tailVerdict": "mixed",
+          "tailUnexplainedMs": 32.5,
+          "tailDiffers": true
+        }
+      },
+      {
+        "severity": "high",
+        "id": "structural-ab:earlyZComposition",
+        "text": "Early-Z composition (Stage 1, \"shade once\") — COSTS MORE THAN IT SAVES: 4.07ms/frame MORE EXPENSIVE with it on (42.845ms vs 38.774ms), clearing the 0.283ms noise floor. perZone below shows what it added and what (if anything) it gave back. Biggest movers: geometry.earlyZPrepass +4.899ms, geometry.worldDraw -0.803ms, geometry.depthDraw +0.085ms. geometry.earlyZPrepass cost materially differently here than across the route, so this parked view is NOT representative of it. The verdict below is TRUE OF THIS VIEW and must not be generalised to the map — re-run the A/B parked somewhere with different overdraw before deciding anything permanent. The question this answers: Stage 1 renders the opaque proxy geometry a SECOND time into scene.color to buy EQUAL-depth rejection in the main world draw. Does the rejection it buys cost less than the extra submission it pays?",
+        "evidence": {
+          "toggle": "earlyZComposition",
+          "verdict": "costs-more-than-it-saves",
+          "liveState": true,
+          "onGpuMs": 42.845,
+          "offGpuMs": 38.774,
+          "deltaGpuMs": 4.07,
+          "noiseFloorMs": 0.283,
+          "representative": "view-local",
+          "viewLocal": true,
+          "topMovers": [
+            {
+              "id": "geometry.earlyZPrepass",
+              "watched": true,
+              "onMs": 4.899,
+              "offMs": 0,
+              "deltaMs": 4.899
+            },
+            {
+              "id": "geometry.worldDraw",
+              "watched": true,
+              "onMs": 13.316,
+              "offMs": 14.119,
+              "deltaMs": -0.803
+            },
+            {
+              "id": "geometry.depthDraw",
+              "watched": true,
+              "onMs": 10.581,
+              "offMs": 10.496,
+              "deltaMs": 0.085
+            },
+            {
+              "id": "surface.specularDraw",
+              "watched": false,
+              "onMs": 10.452,
+              "offMs": 10.53,
+              "deltaMs": -0.078
+            },
+            {
+              "id": "present.blit",
+              "watched": false,
+              "onMs": 0.402,
+              "offMs": 0.451,
+              "deltaMs": -0.05
+            }
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "duplicate-geometry:geometry.depthDraw+geometry.earlyZPrepass",
+        "text": "geometry.depthDraw and geometry.earlyZPrepass submit the SAME geometry — 5.8 vs 5.8 draw calls, 67333.4 vs 67333.4 triangles — costing 21.934ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "geometry.depthDraw",
+            "geometry.earlyZPrepass"
+          ],
+          "drawCalls": [
+            5.8,
+            5.8
+          ],
+          "triangles": [
+            67333.4,
+            67333.4
+          ],
+          "combinedGpuMs": 21.934
+        }
+      },
+      {
+        "severity": "high",
+        "id": "steady-spike:geometry.worldDraw",
+        "text": "geometry.worldDraw runs every frame and looks cheap on average (0.411ms CPU mean, 16.345ms GPU mean) — but peaked at 7.9ms CPU (19.2x its own mean), 321.585ms GPU (19.7x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "geometry.worldDraw",
+          "spikes": [
+            {
+              "column": "CPU",
+              "meanMs": 0.411,
+              "maxMs": 7.9,
+              "ratio": 19.2
+            },
+            {
+              "column": "GPU",
+              "meanMs": 16.345,
+              "maxMs": 321.585,
+              "ratio": 19.7
+            }
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "steady-spike:geometry.doorDraw",
+        "text": "geometry.doorDraw runs every frame and looks cheap on average (0.337ms GPU mean) — but peaked at 76.349ms GPU (226.6x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "geometry.doorDraw",
+          "spikes": [
+            {
+              "column": "GPU",
+              "meanMs": 0.337,
+              "maxMs": 76.349,
+              "ratio": 226.6
+            }
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "steady-spike:geometry.depthDraw",
+        "text": "geometry.depthDraw runs every frame and looks cheap on average (13.802ms GPU mean) — but peaked at 625.082ms GPU (45.3x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "geometry.depthDraw",
+          "spikes": [
+            {
+              "column": "GPU",
+              "meanMs": 13.802,
+              "maxMs": 625.082,
+              "ratio": 45.3
+            }
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "steady-spike:light.drawIllum",
+        "text": "light.drawIllum runs every frame and looks cheap on average (0.505ms GPU mean) — but peaked at 159.711ms GPU (316.3x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "light.drawIllum",
+          "spikes": [
+            {
+              "column": "GPU",
+              "meanMs": 0.505,
+              "maxMs": 159.711,
+              "ratio": 316.3
+            }
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "steady-spike:present.blit",
+        "text": "present.blit runs every frame and looks cheap on average (0.229ms CPU mean) — but peaked at 12ms CPU (52.4x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "present.blit",
+          "spikes": [
+            {
+              "column": "CPU",
+              "meanMs": 0.229,
+              "maxMs": 12,
+              "ratio": 52.4
+            }
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "steady-spike:pass.present.composite",
+        "text": "pass.present.composite runs every frame and looks cheap on average (0.239ms CPU mean) — but peaked at 12ms CPU (50.2x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "pass.present.composite",
+          "spikes": [
+            {
+              "column": "CPU",
+              "meanMs": 0.239,
+              "maxMs": 12,
+              "ratio": 50.2
+            }
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "declared-cost-understated:doorGraphics",
+        "text": "doorGraphics: MEASURED 15.9× the highest declared tier (0.159 vs 0.01 ms/Mpx). Either the manifest estimate is wrong or the implementation drifted past it — the declaration has never been checked against a measurement before now.",
+        "evidence": {
+          "effect": "doorGraphics",
+          "measuredMsPerMp": 0.159,
+          "declaredMaxMsPerMp": 0.01,
+          "classes": [
+            "C0"
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "declared-cost-understated:specular",
+        "text": "specular: MEASURED 50.72× the highest declared tier (4.058 vs 0.08 ms/Mpx). Either the manifest estimate is wrong or the implementation drifted past it — the declaration has never been checked against a measurement before now.",
+        "evidence": {
+          "effect": "specular",
+          "measuredMsPerMp": 4.058,
+          "declaredMaxMsPerMp": 0.08,
+          "classes": [
+            "C4",
+            "C1",
+            "C1",
+            "C1",
+            "C3",
+            "C3"
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "declared-cost-understated:window",
+        "text": "window: MEASURED 9.47× the highest declared tier (0.568 vs 0.06 ms/Mpx). Either the manifest estimate is wrong or the implementation drifted past it — the declaration has never been checked against a measurement before now.",
+        "evidence": {
+          "effect": "window",
+          "measuredMsPerMp": 0.568,
+          "declaredMaxMsPerMp": 0.06,
+          "classes": [
+            "C4"
+          ]
+        }
+      },
+      {
+        "severity": "high",
+        "id": "hitches-overlap-zone",
+        "text": "170 of 268 frames over 50ms (63.4%) landed while residency.itemLoad was still open. Only frame-spanning zones can appear here, so this is direct evidence about the question the 2026-08-11 residency audit closed unable to answer. ⚠️ OVERLAP IS NOT CAUSE: an async bracket that stays open across many frames will overlap hitches by coincidence alone. Compare this share against that zone's own occurrence rate — if the zone is open during 90% of ALL frames, overlapping 90% of hitches means nothing; if it is open during 20% of frames but 80% of hitches, that is a real signal.",
+        "evidence": {
+          "hitchFrames": 268,
+          "thresholdMs": 50,
+          "zonesInFlight": [
+            {
+              "id": "residency.itemLoad",
+              "hitchFrames": 170,
+              "share": 63.4
+            },
+            {
+              "id": "residency.pass",
+              "hitchFrames": 170,
+              "share": 63.4
+            }
+          ]
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "pipeline-programs-grew",
+        "text": "renderer.info.memory.programs grew by 4 (80 → 84) during a measurement window that should only be panning, not loading new content. A steady scene should compile a handful of shader pipelines once and reuse them — growth here means something is still forcing a fresh pipeline compile, a real CPU cost this project has measured before (buildSceneDepthWriterMaterial's own header: \"3.4ms mean/43ms max CPU\" from exactly this cause).",
+        "evidence": {
+          "programsStart": 80,
+          "programsEnd": 84,
+          "delta": 4
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "uniform-buffers-grew",
+        "text": "renderer.info.memory.uniformBuffers grew 5.89× (579 → 3413) across the measurement window. Whether that is expected (per-material/per-light UBOs allocated as new content enters residency, torn down between passes) or an unbounded per-frame allocation is NOT decided here — this report cannot tell those apart. It is flagged because the same growth appeared in the 2026-08-11 capture (4.04×) and went uninvestigated for want of anyone naming it. To settle it: re-run a window with the camera parked so no new content streams in. If the ratio holds with a static view, it is per-frame allocation, not content.",
+        "evidence": {
+          "uniformBuffersStart": 579,
+          "uniformBuffersEnd": 3413,
+          "ratio": 5.89
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "dominant-zone",
+        "text": "geometry.worldDraw (World scene draw) is the single largest attributed zone at 15.943ms, 29.5% of frame GPU from 12.7 draw calls.",
+        "evidence": {
+          "zone": "geometry.worldDraw",
+          "gpuMs": 15.943,
+          "pctOfFrameGpu": 29.5,
+          "drawCalls": 12.7
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "sparse-spike:residency.itemLoad",
+        "text": "residency.itemLoad ran 242 times and peaked at 30.5ms — over the 8.33ms frame budget on its own. Amortised it is negligible (7.084ms/frame); as a one-frame stall it is a visible hitch.",
+        "evidence": {
+          "zone": "residency.itemLoad",
+          "peakMs": 30.5,
+          "occurrences": 242
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "sparse-spike:residency.pass",
+        "text": "residency.pass ran 242 times and peaked at 31.4ms — over the 8.33ms frame budget on its own. Amortised it is negligible (7.328ms/frame); as a one-frame stall it is a visible hitch.",
+        "evidence": {
+          "zone": "residency.pass",
+          "peakMs": 31.4,
+          "occurrences": 242
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "steady-spike:geometry.earlyZPrepass",
+        "text": "geometry.earlyZPrepass runs every frame and looks cheap on average (8.686ms GPU mean) — but peaked at 74.252ms GPU (8.5x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "geometry.earlyZPrepass",
+          "spikes": [
+            {
+              "column": "GPU",
+              "meanMs": 8.686,
+              "maxMs": 74.252,
+              "ratio": 8.5
+            }
+          ]
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "steady-spike:pass.geometry.world",
+        "text": "pass.geometry.world runs every frame and looks cheap on average (2.88ms CPU mean) — but peaked at 16ms CPU (5.6x its own mean) at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.",
+        "evidence": {
+          "zone": "pass.geometry.world",
+          "spikes": [
+            {
+              "column": "CPU",
+              "meanMs": 2.88,
+              "maxMs": 16,
+              "ratio": 5.6
+            }
+          ]
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "residency-io-share",
+        "text": "residency.itemLoad spent 3166.4ms, of which its real-I/O sub-zones (residency.itemLoadMasks) account for 0ms — 0%. MOST OF THIS ZONE IS NOT I/O. The 2026-08-11 audit's \"parallelise the sequential awaits\" lever can only reach the I/O share; the majority here is something the pass does regardless of loading, and needs its own explanation.",
+        "evidence": {
+          "zone": "residency.itemLoad",
+          "totalMs": 3166.4,
+          "ioMs": 0,
+          "ioFraction": 0,
+          "ioZonesPresent": [
+            "residency.itemLoadMasks"
+          ]
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "temporal-shape:bloom.upsampleAtmo",
+        "text": "bloom.upsampleAtmo: 51% of its 58.2ms total CPU cost landed in the first 10000ms of the 30069.9ms window, where a uniform/steady-rate zone would show ~33.3% (1.53x expected). FRONT-LOADED: this reads as a burst — new content settling in, a cache warming, a one-time setup cost — not a per-frame tax. Averaging it over the whole window UNDERSTATES what it costs early and OVERSTATES what it costs later; read earlyMs/lateMs below separately, never the blended mean.",
+        "evidence": {
+          "zone": "bloom.upsampleAtmo",
+          "verdict": "front-loaded",
+          "earlyMs": 29.7,
+          "lateMs": 28.5,
+          "totalMs": 58.2,
+          "earlyWindowMs": 10000,
+          "durationMs": 30069.9,
+          "expectedEarlyFraction": 0.333,
+          "actualEarlyFraction": 0.51,
+          "ratio": 1.53
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "effects-unpriceable",
+        "text": "7 enabled effect(s) have NO cost figure and cannot get one from this tool as it stands: fire, vegetation, depthOfField, grade, water, fluid, apertureGobo. Each draws inside a shared scene render with no bracket of its own (see effects[].whyNotZoned), so zones can only ever report a fragment; and the sweep — their only other route — could not resolve them either. This is a STANDING GAP in the instrument, not a property of this run: re-running will not fix it. The fix is a zone bracket around each one's draw, or accepting that these effects are permanently unbudgeted.",
+        "evidence": {
+          "effects": [
+            {
+              "id": "fire",
+              "zoneCoverage": "partial",
+              "why": "light.fireSync (state read, spawn-cloud/cohesion bookkeeping, the per-engine TSL-compute step loop) and light.drawFire (the particle billboard draw — flame/ember/smoke sprites) are both zoned, but fire's LIGHT SOURCES (buildFireLightSources, built inside sync() and merged into the point-light pool via getFireLightSources) draw through the shared, null-owned light.drawPointLights/light.drawColoration zones — the exact same structural gap that hid candles' cost for as long as it did (Performance-Insights.md §5B/§5C), now true of fire too and not fixable without restructuring how source types share those two zones."
+            },
+            {
+              "id": "vegetation",
+              "zoneCoverage": "partial",
+              "why": "Its per-frame uniform sync is zoned (light.vegetationSync), as is the residency-pass rank stamp/build (vegetation.rankStamp, vegetation.depthItemsBuild), but the meshes draw inside geometry.world's shared scene in the one flat sort list — no render call of its own to bracket."
+            },
+            {
+              "id": "depthOfField",
+              "zoneCoverage": "none",
+              "why": null
+            },
+            {
+              "id": "grade",
+              "zoneCoverage": "none",
+              "why": "Folded into the present composite shader (gradePresent) rather than adding a pass, so present.blit costs the same whether grade is on or off. Sweep-only."
+            },
+            {
+              "id": "water",
+              "zoneCoverage": "partial",
+              "why": "The JFA body bake and the surface sync are zoned, but the tier-0 surface is a drawable at renderOrder 0.5 inside geometry.world (surface.water is still a seam), so its draw cost cannot be separated."
+            },
+            {
+              "id": "fluid",
+              "zoneCoverage": "partial",
+              "why": "Its sim tick (sims.fluid), per-frame sync (light.fluidSurfaceSync) and tube-net/pack bake (light.fluidNetBake, added 2026-08-06) are zoned, but the absorb/emit surface draw is additively blended into geometry.world's shared scene at a fixed renderOrder — the same structural situation as water's tier-0 surface, no render call of its own to bracket."
+            },
+            {
+              "id": "apertureGobo",
+              "zoneCoverage": "partial",
+              "why": "Its own debug-visualization draw is zoned (light.drawApertureShadow, added 2026-08-06 — the bracket already existed in code, only the declaration was missing). The REAL per-fragment gobo pattern cost is baked directly into point-light-pool.js's main light/coloration materials and is only measurable as part of the null-owned light.drawPointLights/light.drawColoration zones."
+            }
+          ]
+        }
+      },
+      {
+        "severity": "medium",
+        "id": "hitches",
+        "text": "200 hitches over 50ms during the window. Cross-reference the worst against the sparse zones above before blaming a steady one.",
+        "evidence": {
+          "count": 200,
+          "thresholdMs": 50
+        }
+      },
+      {
+        "severity": "low",
+        "id": "depth-proxy-pool-health",
+        "text": "The depth-proxy material pool served 2864 cache hit(s) and 2 miss(es) (99.9% hit rate) during this window, evicting 0 stale entries. A healthy hit rate means rebuildSceneDepthProxies is reusing materials instead of paying a shader-graph rebuild for each one — see the Testament's DEFERRED-S1b for the mechanism this replaced.",
+        "evidence": {
+          "hits": 2864,
+          "misses": 2,
+          "evictions": 0,
+          "hitRatePct": 99.9
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:light.drawIllum+light.drawComposite",
+        "text": "light.drawIllum and light.drawComposite submit the SAME geometry — 1 vs 1 draw calls, 1 vs 1 triangles — costing 0.643ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "light.drawIllum",
+            "light.drawComposite"
+          ],
+          "drawCalls": [
+            1,
+            1
+          ],
+          "triangles": [
+            1,
+            1
+          ],
+          "combinedGpuMs": 0.643
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:light.drawIllum+bloom.bright",
+        "text": "light.drawIllum and bloom.bright submit the SAME geometry — 1 vs 1 draw calls, 1 vs 1 triangles — costing 0.53ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "light.drawIllum",
+            "bloom.bright"
+          ],
+          "drawCalls": [
+            1,
+            1
+          ],
+          "triangles": [
+            1,
+            1
+          ],
+          "combinedGpuMs": 0.53
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:light.drawIllum+bloom.composite",
+        "text": "light.drawIllum and bloom.composite submit the SAME geometry — 1 vs 1 draw calls, 1 vs 1 triangles — costing 0.576ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "light.drawIllum",
+            "bloom.composite"
+          ],
+          "drawCalls": [
+            1,
+            1
+          ],
+          "triangles": [
+            1,
+            1
+          ],
+          "combinedGpuMs": 0.576
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:light.drawPointLights+light.drawColoration",
+        "text": "light.drawPointLights and light.drawColoration submit the SAME geometry — 101 vs 101 draw calls, 3503 vs 3503 triangles — costing 3.626ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "light.drawPointLights",
+            "light.drawColoration"
+          ],
+          "drawCalls": [
+            101,
+            101
+          ],
+          "triangles": [
+            3503,
+            3503
+          ],
+          "combinedGpuMs": 3.626
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:light.drawWindowLight+surface.specularDraw",
+        "text": "light.drawWindowLight and surface.specularDraw submit the SAME geometry — 2 vs 2 draw calls, 4 vs 4 triangles — costing 9.576ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "light.drawWindowLight",
+            "surface.specularDraw"
+          ],
+          "drawCalls": [
+            2,
+            2
+          ],
+          "triangles": [
+            4,
+            4
+          ],
+          "combinedGpuMs": 9.576
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:light.drawComposite+bloom.bright",
+        "text": "light.drawComposite and bloom.bright submit the SAME geometry — 1 vs 1 draw calls, 1 vs 1 triangles — costing 0.189ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "light.drawComposite",
+            "bloom.bright"
+          ],
+          "drawCalls": [
+            1,
+            1
+          ],
+          "triangles": [
+            1,
+            1
+          ],
+          "combinedGpuMs": 0.189
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:light.drawComposite+bloom.composite",
+        "text": "light.drawComposite and bloom.composite submit the SAME geometry — 1 vs 1 draw calls, 1 vs 1 triangles — costing 0.235ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "light.drawComposite",
+            "bloom.composite"
+          ],
+          "drawCalls": [
+            1,
+            1
+          ],
+          "triangles": [
+            1,
+            1
+          ],
+          "combinedGpuMs": 0.235
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:bloom.bright+bloom.composite",
+        "text": "bloom.bright and bloom.composite submit the SAME geometry — 1 vs 1 draw calls, 1 vs 1 triangles — costing 0.122ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "bloom.bright",
+            "bloom.composite"
+          ],
+          "drawCalls": [
+            1,
+            1
+          ],
+          "triangles": [
+            1,
+            1
+          ],
+          "combinedGpuMs": 0.122
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:bloom.upsampleCore+bloom.upsampleAtmo",
+        "text": "bloom.upsampleCore and bloom.upsampleAtmo submit the SAME geometry — 2 vs 2 draw calls, 2 vs 2 triangles — costing 0.042ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "bloom.upsampleCore",
+            "bloom.upsampleAtmo"
+          ],
+          "drawCalls": [
+            2,
+            2
+          ],
+          "triangles": [
+            2,
+            2
+          ],
+          "combinedGpuMs": 0.042
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:bloom.upsampleCore+present.blit",
+        "text": "bloom.upsampleCore and present.blit submit the SAME geometry — 2 vs 2 draw calls, 2 vs 2 triangles — costing 0.681ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "bloom.upsampleCore",
+            "present.blit"
+          ],
+          "drawCalls": [
+            2,
+            2
+          ],
+          "triangles": [
+            2,
+            2
+          ],
+          "combinedGpuMs": 0.681
+        }
+      },
+      {
+        "severity": "low",
+        "id": "duplicate-geometry:bloom.upsampleAtmo+present.blit",
+        "text": "bloom.upsampleAtmo and present.blit submit the SAME geometry — 2 vs 2 draw calls, 2 vs 2 triangles — costing 0.659ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.",
+        "evidence": {
+          "zones": [
+            "bloom.upsampleAtmo",
+            "present.blit"
+          ],
+          "drawCalls": [
+            2,
+            2
+          ],
+          "triangles": [
+            2,
+            2
+          ],
+          "combinedGpuMs": 0.659
+        }
+      },
+      {
+        "severity": "low",
+        "id": "cpu-only-cost:uiWindowShadow",
+        "text": "uiWindowShadow: 0.002ms/frame CPU, no GPU zone and no resolved sweep reading. This effect has no draw-call GPU cost — its cost lives entirely on the CPU side, so declared.verdict reads 'unmeasured' by design, not by a hole in the instrument.",
+        "evidence": {
+          "effect": "uiWindowShadow",
+          "zoneCpuMs": 0.002
+        }
+      },
+      {
+        "severity": "low",
+        "id": "cpu-only-cost:lightning",
+        "text": "lightning: 0.02ms/frame CPU, no GPU zone and no resolved sweep reading. This effect has no draw-call GPU cost — its cost lives entirely on the CPU side, so declared.verdict reads 'unmeasured' by design, not by a hole in the instrument.",
+        "evidence": {
+          "effect": "lightning",
+          "zoneCpuMs": 0.02
+        }
+      },
+      {
+        "severity": "low",
+        "id": "cpu-only-cost:vegetation",
+        "text": "vegetation: 0.043ms/frame CPU, no GPU zone and no resolved sweep reading. This effect has no draw-call GPU cost — its cost lives entirely on the CPU side, so declared.verdict reads 'unmeasured' by design, not by a hole in the instrument.",
+        "evidence": {
+          "effect": "vegetation",
+          "zoneCpuMs": 0.043
+        }
+      },
+      {
+        "severity": "low",
+        "id": "cpu-only-cost:water",
+        "text": "water: 0.034ms/frame CPU, no GPU zone and no resolved sweep reading. This effect has no draw-call GPU cost — its cost lives entirely on the CPU side, so declared.verdict reads 'unmeasured' by design, not by a hole in the instrument.",
+        "evidence": {
+          "effect": "water",
+          "zoneCpuMs": 0.034
+        }
+      },
+      {
+        "severity": "low",
+        "id": "cpu-only-cost:fluid",
+        "text": "fluid: 0.022ms/frame CPU, no GPU zone and no resolved sweep reading. This effect has no draw-call GPU cost — its cost lives entirely on the CPU side, so declared.verdict reads 'unmeasured' by design, not by a hole in the instrument.",
+        "evidence": {
+          "effect": "fluid",
+          "zoneCpuMs": 0.022
+        }
+      }
+    ],
+    "interpretation": "READ attribution.verdict FIRST ('good'). It decides whether the rest of this report is a partition of the frame or a lower bound. 'good' (coverage >= 0.85): zones[] is a trustworthy breakdown — optimise the top row. 'indicative' (>= 0.6): a large slice is unattributed; use effects[].sweepMarginalGpuMs, which is measured independently of zone timing. 'unreliable' or 'unmeasured': treat every zone number as \"at least this much\" and fix the instrument before trusting the picture — findings[] will say what broke. THEN read findings[] top-down; it is sorted by severity and already names the single largest cost. THEN frame.gapMs vs frame.gpuMs: if gap p95 is far above gpu p95 the bottleneck is CPU or presentation, not shading, and the zones[].cpuMs column is where to look. An effect with method:'cpu-zone-only' (e.g. specular sync, vegetation rank-stamp, wind bake) has a real, measured cost — read effects[].zoneCpuMs. It has no draw-call GPU cost by nature, so declared.verdict reads 'unmeasured' by design, not because the run failed to see it. A null is an ABSENCE, never a zero. zones[].gpuAbsentByDeclaration true means the zone contains no draw calls at all; null with that flag false means measurement failed. Sparse zones (cadence 'bake'/'event') are excluded from per-frame sums by construction — read their occurrenceRate and maxMs, never their mean, and see findings[] for any that spike over budget. caches[] is a DIFFERENT axis from zones[] — how well each cache is reusing work, not how much CPU/GPU time was spent. A low hitRatePct earns a cache-low-hit-rate finding; a null hitRatePct means that cache exposes no hits counter to compute one from (see each row's own note), not a healthy 0% read as absent. CPU means below 0.09999999403953552ms/sqrt(12n) are listed in belowClockResolution[] with no number attached; the clock physically cannot resolve them and a number there would be noise dressed as a measurement."
+  },
+  "consoleErrors": [
+    "[log] Loaded icons/svg/terror.svg (50.79%)",
+    "[error] Map Shine Advanced | boot VRAM severance — canvasInit proxy registration failed: TypeError: Failed to fetch",
+    "[warning] Error: You are accessing the global \"CanvasAnimation\" which is now namespaced under foundry.canvas.animation.CanvasAnimation\nDeprecated since Version 13\nBackwards-compatible support will be removed in Version 15\n    at logCompatibilityWarning (http://localhost:30000/scripts/foundry.mjs:1548:17)\n    ",
+    "[warning] Error: You are accessing the global \"CanvasAnimation\" which is now namespaced under foundry.canvas.animation.CanvasAnimation\nDeprecated since Version 13\nBackwards-compatible support will be removed in Version 15\n    at logCompatibilityWarning (http://localhost:30000/scripts/foundry.mjs:1548:17)\n    "
+  ]
+}

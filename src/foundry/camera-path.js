@@ -313,6 +313,8 @@ export const CAMERA_PATH_PRESETS = Object.freeze([
   { id: 'n_to_s', label: 'North to South' },
   { id: 'w_to_e', label: 'West to East' },
   { id: 'e_to_w', label: 'East to West' },
+  { id: 'sw_to_ne', label: 'Southwest to Northeast (diagonal)' },
+  { id: 'ne_to_sw', label: 'Northeast to Southwest (diagonal)' },
 ]);
 
 /** @param {number} v @param {number} [min=0.05] @param {number} [max=3] @returns {number} */
@@ -402,6 +404,40 @@ export function generateKeyframePreset(presetId, opts) {
     const left = kf(b.xL, b.centerY, zoom);
     const right = kf(b.xR, b.centerY, zoom);
     const keyframes = presetId === 'w_to_e' ? [left, right] : [right, left];
+    return { keyframes, suggestedSweepMs: PRESET_SUGGESTED_SWEEP_MS, suggestedLongJumpFadeCut: false };
+  }
+
+  // DIAGONAL CORNER-TO-CORNER (rapid-diagonal-stress-2026-08-12) — the
+  // benchmark's own deliberate worst case: a fast pass covers both axes at
+  // once, so a floor's residency/paging system has to page in new content
+  // from every direction simultaneously, unlike a pure N-S or W-E sweep.
+  // "top"/"bottom" mean the SAME thing `n_to_s`'s own `.yT`/`.yB` already do
+  // — Y increases SOUTH (`feedback_y_flip_recurring_risk`, bitten 5x
+  // already; reusing `getBoundsForZoom`'s own field names rather than
+  // re-deriving the axis is what keeps this preset from being a 6th).
+  // Southwest = (west, south) = (xL, yB); northeast = (east, north) = (xR, yT).
+  //
+  // ⚠️ FIT BOTH AXES WITH REAL MARGIN, NOT A TIGHT SINGLE-AXIS FIT (found
+  // live in this file's own test suite, 2026-08-12, TWICE) — n_to_s/w_to_e
+  // each fit only the axis they pan along (width or height) at a TIGHT
+  // ~0.99 padding, because the other axis is meant to stay centered and
+  // `getBoundsForZoom` collapses a fully-visible axis to one centered point
+  // by design. A diagonal pans BOTH axes at once, so it needs genuine
+  // headroom on BOTH, not just "not the same axis n_to_s already uses" —
+  // `Math.min(...)` at the SAME tight 0.99 padding still collapsed one axis
+  // on a square scene (round 1 of this fix). The 'full' preset below solves
+  // the identical problem with its own `sweepZoom` — fit to HALF the
+  // narrower dimension, not the whole thing — reused here rather than
+  // re-deriving a third margin constant.
+  if (presetId === 'sw_to_ne' || presetId === 'ne_to_sw') {
+    const zoom = clampZoom(Math.min(viewW / (dims.sceneWidth * 0.5), viewH / (dims.sceneHeight * 0.5)));
+    const b = getBoundsForZoom(dims, zoom, viewW, viewH);
+    const sw = kf(b.xL, b.yB, zoom);
+    const ne = kf(b.xR, b.yT, zoom);
+    const keyframes = presetId === 'sw_to_ne' ? [sw, ne] : [ne, sw];
+    // Same "deliberately far apart, do not fade-cut it" reasoning as
+    // n_to_s/w_to_e above — a corner-to-corner diagonal is the LONGEST
+    // possible pair on the map, guaranteed to trip the long-jump heuristic.
     return { keyframes, suggestedSweepMs: PRESET_SUGGESTED_SWEEP_MS, suggestedLongJumpFadeCut: false };
   }
 

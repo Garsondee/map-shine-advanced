@@ -98,13 +98,21 @@ export function createPaintCanvas(state, { activeKey }) {
     const [cr, cg, cb] = colorFor(kind);
     const { spec, data } = layer;
     let g = state.gridCanvases[key];
-    if (!g) g = state.gridCanvases[key] = document.createElement('canvas');
+    if (!g) {
+      state.gridCachePoolStats.canvasMisses += 1;
+      g = state.gridCanvases[key] = document.createElement('canvas');
+    } else {
+      state.gridCachePoolStats.canvasHits += 1;
+    }
     const gctx = g.getContext('2d');
     let img = state.gridImageData[key];
     if (g.width !== spec.w || g.height !== spec.h || !img) {
+      state.gridCachePoolStats.imageDataMisses += 1;
       g.width = spec.w;
       g.height = spec.h;
       img = state.gridImageData[key] = gctx.createImageData(spec.w, spec.h);
+    } else {
+      state.gridCachePoolStats.imageDataHits += 1;
     }
     const packed = new Uint32Array(img.data.buffer);
     const rgbBase = cr | (cg << 8) | (cb << 16);

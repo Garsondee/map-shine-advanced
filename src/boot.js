@@ -49,10 +49,10 @@ import {
   validateEffectZoning,
   validateZoneTaxonomy,
 } from './diag/perf-zones.js';
-import { buildPerfReport, summarizeTierComparison } from './diag/perf-report.js';
+import { buildPerfReport, summarizeTierComparison, formatOffenderSummaryText } from './diag/perf-report.js';
 import { buildVramInventory } from './diag/vram-inventory.js';
 import { createFrameProfiler } from './diag/frame-profiler.js';
-import { createProfiledFrameWaiter, runProfileSession } from './diag/perf-session.js';
+import { createProfiledFrameWaiter, createSceneSettleWaiter, runProfileSession } from './diag/perf-session.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
 // a second motion system — a fixed route is what makes two runs comparable.
 import {
@@ -71,6 +71,17 @@ import { buildLiveSceneExport, sceneExportFilename } from './foundry/index.js';
  * the averages. The profiler's gap ring is sized to hold the whole run.
  */
 const BENCHMARK_SWEEP_MS = 60000;
+/**
+ * The rapid-diagonal STRESS sweep's own duration (rapid-diagonal-stress-
+ * 2026-08-12, author's own spec: "a much more rapid 5 second sweep to top
+ * right"). Deliberately far shorter than BENCHMARK_SWEEP_MS above and
+ * covering the map's longest possible traverse (corner to corner, both axes
+ * at once) — the point is maximum residency/paging pressure per second, not
+ * a representative cruise. Read this phase's hitches/p99 frame time, never
+ * its mean, the same "sparse work is not a per-frame cost" discipline
+ * perf-report.js already applies elsewhere.
+ */
+const RAPID_STRESS_SWEEP_MS = 5000;
 /**
  * How long to settle after FORCING a new performance tier, before a tier-
  * comparison run starts measuring it (see `perf-report-all-tiers` below). 3×
@@ -148,6 +159,13 @@ import {
   getVtPanViewerShaderRebuilds,
   setVtPanViewerPipelineRebuildProbe,
   getVtPanViewerPipelineRebuilds,
+  getVtPanViewerVegetationProxyCacheStats,
+  getVtPanViewerPointLightWallClipCacheStats,
+  getVtPanViewerPointLightMeshPoolStats,
+  getVtPanViewerPoolStats,
+  getVtPanViewerDoorPoolStats,
+  getVtPanViewerWindBakeStats,
+  getPyramidStoreStats,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
   setVtPanViewerPointLightBatching,
@@ -221,6 +239,7 @@ import {
   importV2Anchors,
   registerPixiProxy,
   getPixiResidencyReport,
+  getPixiProxyStats,
   registerCanvasCompositing,
   applyArtSuppression,
   restoreFoundryArt,
@@ -247,7 +266,7 @@ import {
   setSceneSkyOverride,
   watchSceneSky,
 } from './foundry/index.js';
-import { engageFoundryFallback } from './diag/render-fallback.js';
+import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
 import { buildSettingsPanel } from './diag/settings-panel.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
 import {
@@ -373,6 +392,22 @@ let lastPerfProfile = null;
  * ('extreme')` from the console. See `perf-report-all-tiers` below.
  */
 let lastAllTiersReports = null;
+/**
+ * multi-floor-sweep-2026-08-12 — the SECOND floor's complete `perf-profile`
+ * report from the last multi-floor run, held here for the same reason
+ * `lastAllTiersReports` is: `lastPerfProfile` stays the PRIMARY floor's full
+ * report (so a single-floor scene's shape never changes), and this is the
+ * escape hatch for the rare "show me everything about the second floor too"
+ * ask — `MapShine.getMultiFloorReport()` — without paying for a second run.
+ */
+let lastMultiFloorSecondReport = null;
+/**
+ * rapid-diagonal-stress-2026-08-12 — the rapid diagonal stress sweep's
+ * complete `perf-profile` report from the last run, same escape-hatch
+ * posture as `lastMultiFloorSecondReport` right above:
+ * `MapShine.getRapidStressReport()`.
+ */
+let lastRapidStressReport = null;
 
 // ---------------------------------------------------------------------------
 // Namespace. Legacy is disconnected, so there is no live `window.MapShine` to
@@ -2238,6 +2273,18 @@ function install() {
    * version counter is checked alongside it — a sampled hash can miss a small
    * edit, and a stale bake surviving an edit is its own bug class.
    */
+  // BAKE-GATE HEALTH (cache-completeness pass, 2026-08-12) — same bakeRuns/
+  // bakeSkips doctrine as mask-authority.js's own recomputeIfDirty: a skip
+  // is the floorIndex+signature+version triple matching the cached slot (the
+  // chamfer transform below did NOT re-run); a run is a real re-extraction.
+  // Kept as two SEPARATE pairs, not one shared counter, because the mask and
+  // spawn-cloud caches below are independently-slotted objects that COULD
+  // diverge if a future call site reads one without the other — conflating
+  // them would be exactly the "one byte, two quantities" trap.
+  let fireMaskBakeRuns = 0;
+  let fireMaskBakeSkips = 0;
+  let fireSpawnBakeRuns = 0;
+  let fireSpawnBakeSkips = 0;
   let fireMaskCache = { floorIndex: null, signature: 0, version: -1, fires: [] };
   /**
    * THE SPAWN CLOUD — the same painted grid, as the flat point buffer the
@@ -2266,8 +2313,10 @@ function install() {
       fireSpawnCache.signature === signature &&
       fireSpawnCache.version === version
     ) {
+      fireSpawnBakeSkips += 1;
       return fireSpawnCache.cloud;
     }
+    fireSpawnBakeRuns += 1;
     const extracted = extractFireSpawnPoints(grid);
     const cloud = { ...extracted, signature };
     fireSpawnCache = { floorIndex, signature, version, cloud };
@@ -2294,8 +2343,10 @@ function install() {
       fireMaskCache.signature === signature &&
       fireMaskCache.version === version
     ) {
+      fireMaskBakeSkips += 1;
       return fireMaskCache.fires;
     }
+    fireMaskBakeRuns += 1;
     const fires = extractFiresFromMask(grid);
     fireMaskCache = { floorIndex, signature, version, fires };
     log.info(`fire: painted region on floor ${floorIndex} yielded ${fires.length} fire(s)`);
@@ -2713,6 +2764,10 @@ function install() {
   // The frame waiter reads a clock, so it is built in diag/ where
   // `time/one-clock` allows one — boot only says WHAT to wait on.
   const waitProfiledFrames = createProfiledFrameWaiter({ readProfile: () => perfProfiler.snapshot() });
+  // Same reasoning, for the multi-floor sweep's own settle wait
+  // (multi-floor-sweep-2026-08-12) — boot only says WHAT to read
+  // (`getVtPanViewerSceneSettle`, already imported above).
+  const waitForSceneSettled = createSceneSettleWaiter({ readSettle: () => getVtPanViewerSceneSettle() });
 
   // HIDE-WHILE-MEASURING (Testament Stage 4, 2026-08-11 — "hide itself and
   // cost nothing during tests"). Remembers whether the debug panel was
@@ -2838,6 +2893,15 @@ function install() {
     // window discipline, same optional-hook shape.
     setPipelineRebuildProbe: (on) => setVtPanViewerPipelineRebuildProbe(on),
     readPipelineRebuildStats: () => getVtPanViewerPipelineRebuilds(),
+    // PASS-SLOT ALLOCATOR (perf-instrumentation-audit-2026-08-12, cache
+    // completeness pass) — `perfProfiler` is a plain module-level object, not
+    // viewer-dependent (see its own `const perfProfiler = createFrameProfiler()`
+    // near the top of this file), so this needs no `?.` guard the way every
+    // `getVtPanViewer*` hook above does. `capacity()` is already relative to
+    // the last `arm()` (`reset()` clears `passSlots` and `passSlotOverflow` on
+    // every arm — frame-profiler.js), so a single post-disarm read already IS
+    // this window's own count, same reasoning as readShaderRebuildStats above.
+    readPassSlotStats: () => perfProfiler.capacity(),
     // WINDOW-SURFACE COMPOSITION (2026-08-12) — chasing a real, still-open
     // finding: `light.drawWindowLight` reports ~4 GPU draw calls per
     // renderer.render() call where "one mesh, one quad" (window-surface-
@@ -2848,6 +2912,79 @@ function install() {
     // read-once hook here, rather than reaching into the general diagnostics
     // blob by hand.
     readWindowDiagnostics: () => getVtPanViewerDiagnostics()?.windowLight ?? null,
+    // CACHE HEALTH (perf-instrumentation-audit-2026-08-12) — every cache this
+    // composition root can reach that isn't already covered by one of the
+    // dedicated probes above (readPipelineStats/readDepthProxyPoolStats/
+    // readShaderRebuildStats/readPipelineRebuildStats keep their own existing
+    // report fields — see `cache-report.js`'s own header for why those are
+    // mirrored into `caches[]` rather than duplicated). A keyed object, not
+    // an array: perf-report.js matches start/end snapshots by key, and a
+    // plain object needs no separate id field per entry. `null` per key when
+    // the underlying read isn't reachable (viewer not started, mask
+    // authority not constructed) — never a fabricated zero.
+    readCacheStats: () => ({
+      vtPageCache: getVtPanViewerDiagnostics()?.cacheStats ?? null,
+      vtDecodePool: getVtPanViewerDiagnostics()?.decodeStats ?? null,
+      vegetationProxyNodeCache: getVtPanViewerVegetationProxyCacheStats?.() ?? null,
+      pointLightWallClip: getVtPanViewerPointLightWallClipCacheStats?.() ?? null,
+      maskAuthorityBakeGate: maskAuthority?.getBakeStats?.() ?? null,
+      // TIER A (cache-completeness pass, perf-instrumentation-audit-2026-08-12
+      // §5F) — three more caches that already had native stats and needed no
+      // new instrumentation, only wiring: the BC1/BC7 + coarse-alpha-grid
+      // background worker, the coarse-alpha per-item request memoization (a
+      // DIFFERENT layer — see cache-report.js's own note on why these two
+      // don't collapse into one row), and the water body's jump-flood
+      // bake-vs-poll gate (same bakeRuns/bakeSkips doctrine as
+      // maskAuthorityBakeGate above, water-body-subsystem.js's own numbers).
+      compressedTextureWorker: getVtPanViewerDiagnostics()?.wholeImage?.compressed?.worker ?? null,
+      coarseAlphaGridRequests: getVtPanViewerDiagnostics()?.wholeImage?.coarseAlpha ?? null,
+      waterBodyBakeGate: getVtPanViewerDiagnostics()?.waterBody ?? null,
+      // `wholeImage.sunShadows` (yes, nested under that key — see
+      // summarizeWholeImage's own header in vt-pan-viewer-diagnostics.js for
+      // why; a mechanical extraction, not a redesign) carries `.floors[]`,
+      // one entry per active floor slot, each with its own `.bakeGate` —
+      // sun-shadow-subsystem.js's two per-floor gates (caster field vs the
+      // shadow field itself). cache-report.js sums both across floors.
+      sunShadowBakeGate: getVtPanViewerDiagnostics()?.wholeImage?.sunShadows ?? null,
+      // FIRE MASK/SPAWN — this composition root's OWN two single-slot
+      // caches (fireMaskCache/fireSpawnCache above), gated on the same
+      // floorIndex+signature+version triple. Closure-local counters, read
+      // directly — no getter indirection needed, unlike the module-owned
+      // caches above.
+      fireMaskBakeGate: { bakeRuns: fireMaskBakeRuns, bakeSkips: fireMaskBakeSkips },
+      fireSpawnBakeGate: { bakeRuns: fireSpawnBakeRuns, bakeSkips: fireSpawnBakeSkips },
+      windFieldBakeGate: getVtPanViewerWindBakeStats?.() ?? null,
+      islandPackBakeGate: getVtPanViewerDiagnostics()?.specular ?? null,
+      // POOL HEALTH (cache-completeness pass, 2026-08-12) — five more mesh/
+      // resource pools: point-light-pool.js's own three registries, this
+      // file's own three (regionMeshes/occlusionDiscs/itemStates, one
+      // reader), door-graphics-subsystem.js's two, and the IndexedDB
+      // page-blob persistence layer (viewer-independent, no `?.()` needed).
+      pointLightMeshPools: getVtPanViewerPointLightMeshPoolStats?.() ?? null,
+      vtMeshPools: getVtPanViewerPoolStats?.() ?? null,
+      doorPools: getVtPanViewerDoorPoolStats?.() ?? null,
+      pyramidStore: getPyramidStoreStats(),
+      // UI/EDITOR CACHES (cache-completeness pass, 2026-08-12) — lower
+      // priority than the render-path pools above (GM-only tooling, not a
+      // live-gameplay hot path), but every single cache means these too.
+      // describeRenderMode is viewer-independent (module-level, like
+      // pyramidStore); the other three read GM-tool state that may not
+      // exist yet this session (painter/anchor tools install once at boot
+      // but their own internal state only matters once entered).
+      describeRenderMode: getDescribeRenderModeStats(),
+      paintModeGridCache: MapShine.__painter?.getGridCachePoolStats?.() ?? null,
+      anchorMarkerPool: MapShine.__anchorMode?.getMarkerPoolStats?.() ?? null,
+      anchorViewMarkerPool: MapShine.__anchorViewMode?.getMarkerPoolStats?.() ?? null,
+      // SPECIAL CASES (cache-completeness pass, 2026-08-12 §5F-3) — three
+      // caches that do not fit the standard start/end-delta shape, each for
+      // a DIFFERENT reason. See cache-report.js's own header for graph/
+      // frame-graph.js's pool, deliberately absent (zero live callers —
+      // graph/index.js's own header — there is nothing to measure, not
+      // "not measured yet"). maskDiscovery and pixiProxy below ARE wired,
+      // just not as ordinary hit/miss pairs.
+      maskDiscovery: maskAuthority?.getDiscoveryStats?.() ?? null,
+      pixiProxy: getPixiProxyStats(),
+    }),
     // HIDE-WHILE-MEASURING, the pair — see debugPanelVisibleBeforeHide's own
     // declaration a few lines up for the full rationale. Both optional on the
     // ProfileHarness typedef, matching every other harness hook here
@@ -2910,7 +3047,11 @@ function install() {
   // is turned up for accuracy, not speed, on purpose.
   MapShine.debug.registerAction(
     'perf-run-full',
-    '🔬 Performance Report (this scene, CPU + GPU, ~2–3 min)',
+    // ~2-3 min for a single floor; a multi-floor scene adds a second sweep
+    // plus an EVENT-DRIVEN settle wait (vt/settle.js) that can genuinely run
+    // several extra minutes on a cold floor — see the multi-floor phase's
+    // own header below for why that is correct, not a regression.
+    '🔬 Performance Report (this scene, CPU + GPU, ~2–3 min, longer if multi-floor)',
     async () => {
       const path = buildBenchmarkPath(); // throws BEFORE anything runs if no scene is loaded
       const started = new Date().toISOString();
@@ -2975,6 +3116,202 @@ function install() {
         await playing;
         hidePerfProgress();
       }
+
+      // PHASE 2: MULTI-FLOOR (multi-floor-sweep-2026-08-12, author's own
+      // design: "single scene camera sweep, then go up a floor (only if
+      // there is another floor) wait a long time for the upper floor to
+      // settle, then do another sweep on there"). Best-effort and fully
+      // isolated from phase 1's own try/finally above: any failure here is
+      // caught and recorded in `multiFloor.reason`, never lets a working
+      // floor-1 report come back empty-handed because floor 2 misbehaved.
+      let multiFloor = null;
+      let switchedAwayFromFloorIndex = null; // set only once a REAL switch happened — see the restore finally below
+      try {
+        // getActiveSceneDoc() (foundry/adapter-only) — never a fresh
+        // `typeof canvas` check here; that ratchet is already at its bound.
+        const sceneDoc = getActiveSceneDoc();
+        const floorsResult = getActiveSceneFloors(sceneDoc);
+        if (!floorsResult.ok) {
+          multiFloor = { compared: false, reason: floorsResult.error ?? 'could not read this scene’s floors' };
+        } else if (floorsResult.floors.length <= 1) {
+          multiFloor = { compared: false, reason: 'this scene has only one floor — nothing to switch to' };
+        } else {
+          const floors = floorsResult.floors;
+          const startFloorIndex = resolveFloorDescriptor(sceneDoc, floors);
+          const startPos = floors.findIndex((f) => f.index === startFloorIndex);
+          // "up" = next HIGHER elevation, i.e. the next entry in `floors`
+          // (already elevation-sorted ascending — getActiveSceneFloors' own doc).
+          const nextFloor = startPos >= 0 && startPos + 1 < floors.length ? floors[startPos + 1] : null;
+          if (!nextFloor) {
+            multiFloor = {
+              compared: false,
+              reason: `already on the top floor (index ${startFloorIndex}, "${floors[startPos]?.name ?? '?'}") — nothing above it to sweep`,
+            };
+          } else {
+            log.info(`perf report: switching floor ${startFloorIndex} -> ${nextFloor.index} for the multi-floor phase`);
+            showPerfProgress('switching to the floor above for a second sweep…');
+            const switchResult = await setVtPanViewerFloor(nextFloor.index);
+            if (switchResult.changed) switchedAwayFromFloorIndex = startFloorIndex;
+            // EVENT-DRIVEN, NOT A GUESSED SLEEP — waitForSceneSettled polls
+            // vt/settle.js's real "is everything actually on screen yet?"
+            // signal, exactly why that module exists (its own header: "every
+            // fixed waitForTimeout... is a guess standing in for this
+            // module"). Skipped only when the floor genuinely did not
+            // change (nothing to settle from).
+            const settleInfo = switchResult.changed
+              ? await waitForSceneSettled({
+                  onProgress: (s) =>
+                    showPerfProgress(
+                      `floor ${nextFloor.index} settling — ${(s?.waitingFor ?? []).join(', ') || 'starting'}`
+                    ),
+                })
+              : null;
+
+            const path2 = buildBenchmarkPath();
+            const playing2 = playCameraPath(path2, { capFrameRate: false }).catch((err) => {
+              log.error('camera path playback failed during the multi-floor phase:', err);
+            });
+            let floor2Report = null;
+            try {
+              floor2Report = await runProfileSession(profileHarness, {
+                generatedAt: new Date().toISOString(),
+                measureUntil: playing2,
+                includeSweep: false,
+                settleFrames: 90,
+                route: `n_to_s:${path2.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms:floor=${nextFloor.index}${settleInfo?.timedOut ? ':UNSETTLED-TIMEOUT' : ''}`,
+                onProgress: (phase, detail) => {
+                  log.info(`perf report (floor ${nextFloor.index}): ${phase}${detail ? ` — ${detail}` : ''}`);
+                  showPerfProgress(formatPerfProgressText(`floor ${nextFloor.index}: ${phase}`, detail));
+                },
+              });
+            } finally {
+              stopCameraPath();
+              await playing2;
+            }
+
+            lastMultiFloorSecondReport = floor2Report;
+            // REUSE summarizeTierComparison — 'profile' just means 'floor' here.
+            // Its own header already solved "don't nest two full reports":
+            // v1 of the all-tiers report did that and was rejected as "~300KB,
+            // mostly duplication" — the full second report lives in
+            // lastMultiFloorSecondReport / MapShine.getMultiFloorReport()
+            // instead, exactly like lastAllTiersReports/getTierReport.
+            const comparison = summarizeTierComparison([
+              { profile: `floor-${startFloorIndex}`, report: lastPerfProfile },
+              { profile: `floor-${nextFloor.index}`, report: floor2Report },
+            ]);
+            multiFloor = {
+              compared: true,
+              baseFloorIndex: startFloorIndex,
+              secondFloorIndex: nextFloor.index,
+              secondFloorName: nextFloor.name ?? null,
+              // THE SWITCH ITSELF, measured separately from steady-state
+              // cruising on floor 2 — conflating "just switched" cost with
+              // "cruising" cost would hide exactly the transient this phase
+              // exists to see (author's own framing: "wait a long time").
+              switchTransient: {
+                switchMs: settleInfo?.elapsedMs ?? null,
+                settled: settleInfo?.settled ?? !switchResult.changed,
+                timedOut: settleInfo?.timedOut ?? false,
+                blockersAtEnd: settleInfo?.blockers ?? [],
+              },
+              note:
+                'The FULL second-floor report is not nested here — call MapShine.getMultiFloorReport() from the ' +
+                "console for it, without paying for a second run. 'ranked' below is the direct answer to 'which " +
+                "zone/effect is worst across floors', reusing perf-report-all-tiers' own comparison shape.",
+              ...comparison,
+            };
+          }
+        }
+      } catch (err) {
+        log.error('perf report: multi-floor phase failed — floor-1 report above is still valid:', err);
+        multiFloor = { compared: false, reason: `multi-floor phase threw: ${err?.message ?? err}` };
+      } finally {
+        // ALWAYS return to the floor the author was actually looking at — a
+        // performance report must never leave the scene somewhere else than
+        // it found it, on any exit path (success, timeout, or thrown error).
+        if (switchedAwayFromFloorIndex !== null) {
+          try {
+            await setVtPanViewerFloor(switchedAwayFromFloorIndex);
+          } catch (err) {
+            log.error('perf report: failed to restore the original floor after the multi-floor phase:', err);
+          }
+        }
+        hidePerfProgress();
+      }
+      lastPerfProfile.multiFloor = multiFloor;
+
+      // PHASE 3: RAPID DIAGONAL STRESS (rapid-diagonal-stress-2026-08-12,
+      // author's own design: "move to the bottom left of a scene, then do a
+      // much more rapid 5 second sweep to top right and specifically record
+      // performance in that move as a measure of the performance issues
+      // during rapid camera movements"). Independent of phase 2 — runs
+      // regardless of whether the multi-floor phase found another floor,
+      // stays on whatever floor phase 2's own finally already restored.
+      // Best-effort, same posture as phase 2: any failure here is caught and
+      // recorded, never invalidates the floor-1 report above it.
+      let rapidStressSweep = null;
+      try {
+        showPerfProgress('rapid diagonal stress sweep — bottom-left to top-right…');
+        const path3 = buildStressSweepPath(); // throws BEFORE anything runs if no scene is loaded
+        const playing3 = playCameraPath(path3, { capFrameRate: false }).catch((err) => {
+          log.error('camera path playback failed during the rapid-stress phase:', err);
+        });
+        let stressReport = null;
+        try {
+          stressReport = await runProfileSession(profileHarness, {
+            generatedAt: new Date().toISOString(),
+            measureUntil: playing3,
+            includeSweep: false,
+            // Deliberately NOT 90 like phases 1/2 — this phase's whole point
+            // is the FIRST few seconds of rapid movement, and a 5s route has
+            // no room for a 90-frame (1.5s @ 60fps) settle before measuring
+            // most of it away. A few frames is enough to clear the camera's
+            // own snap-to-start, nothing more.
+            settleFrames: 5,
+            route: `sw_to_ne:${path3.keyframes.length}kf/${RAPID_STRESS_SWEEP_MS}ms`,
+            onProgress: (phase, detail) => {
+              log.info(`perf report (rapid stress): ${phase}${detail ? ` — ${detail}` : ''}`);
+              showPerfProgress(formatPerfProgressText(`rapid stress: ${phase}`, detail));
+            },
+          });
+        } finally {
+          stopCameraPath();
+          await playing3;
+        }
+
+        lastRapidStressReport = stressReport;
+        // REUSE summarizeTierComparison A THIRD TIME — 'profile' means
+        // "which regime" here (steady cruise vs. rapid diagonal). Answers
+        // "which zone/effect gets disproportionately worse under rapid
+        // movement", which is the whole point of running this phase at all.
+        const comparison = summarizeTierComparison([
+          { profile: 'steady-sweep', report: lastPerfProfile },
+          { profile: 'rapid-diagonal-stress', report: stressReport },
+        ]);
+        rapidStressSweep = {
+          measured: true,
+          durationMs: RAPID_STRESS_SWEEP_MS,
+          // p99/max, NEVER the mean, for the reason this phase's own route
+          // builder doc gives: 5 seconds of deliberately-worst-case movement
+          // averaged with itself hides exactly the spikes it exists to catch.
+          p99FrameMs: stressReport?.frame?.gapMs?.p99 ?? null,
+          maxFrameMs: stressReport?.frame?.gapMs?.max ?? null,
+          hitchCount: stressReport?.frame?.hitches?.count ?? null,
+          note:
+            'The FULL rapid-stress report is not nested here — call MapShine.getRapidStressReport() from the ' +
+            "console for it. 'ranked' below answers 'which zone/effect gets disproportionately worse under rapid " +
+            "movement', reusing perf-report-all-tiers' own comparison shape.",
+          ...comparison,
+        };
+      } catch (err) {
+        log.error('perf report: rapid-stress phase failed — floor-1 report above is still valid:', err);
+        rapidStressSweep = { measured: false, reason: `rapid-stress phase threw: ${err?.message ?? err}` };
+      } finally {
+        hidePerfProgress();
+      }
+      lastPerfProfile.rapidStressSweep = rapidStressSweep;
+
       // Feed the sweep's OWN rich per-effect table (perf-lab.js's tested
       // renderer) from the SAME run, via the raw sweep buildPerfReport echoes
       // back — no second sweep, no reshaping effects[] back into the shape
@@ -2984,6 +3321,13 @@ function install() {
       // that reads as "the sweep ran and found nothing".
       if (lastPerfProfile.sweepRaw?.summary) {
         perfLab.renderResult(lastPerfProfile.sweepRaw.summary, lastPerfProfile.sweepRaw.context ?? null);
+      }
+      // THE DISPLAYED SUMMARY (2026-08-12, author: "improve the displayed
+      // information that appears after a run... a non-technical user" can
+      // read it). On screen the moment the run finishes — never requires
+      // opening or parsing the JSON this action also returns.
+      if (lastPerfProfile.summary) {
+        log.info(formatOffenderSummaryText(lastPerfProfile.summary));
       }
       // See perf-run's old comment (now folded into this one): the panel copies
       // the RETURN VALUE, always after entry.fn() resolves — a manual
@@ -2999,13 +3343,11 @@ function install() {
   // *"Make the Early-Z part of the performance sweep. Make it do something
   // like an A/B - even doing the whole sweep twice in both modes."*
   //
-  // A SEPARATE action from `perf-run-full` on purpose, not folded into it:
-  // this doubles perf-lab's own sweep cost, which is already the exact
-  // ~1.5-3 minute expense `perf-run-full`'s own `includeSweep: false` above
-  // was written to avoid paying by default. Running it here, on demand, does
-  // not undo that streamlining — it is a second, slower, standalone
-  // instrument for one specific question, not a replacement for the fast
-  // default path.
+  // Not folded into `perf-run-full`: this doubles perf-lab's own sweep cost,
+  // which is already the exact ~1.5-3 minute expense `perf-run-full`'s own
+  // `includeSweep: false` above was written to avoid paying by default. It is
+  // a second, slower, standalone instrument for one specific question, not a
+  // replacement for the fast default path.
   //
   // See `perf-lab.js#runSweepStructuralAB` for the method and its own
   // honesty caveats — most importantly, the noise floor this comparison uses
@@ -3014,29 +3356,30 @@ function install() {
   // Read both: this instrument's own `baseline.gpuMs` (all effects off) is
   // the cleanest possible reading of the toggle's raw pipeline cost, at the
   // price of ~4-8 minutes instead of ~1.
-  MapShine.debug.registerAction(
-    'perf-earlyz-sweep-ab',
-    '🔬 Early-Z A/B — full effect sweep ×2 (~4–8 min)',
-    async () => {
-      // Same discipline as perf-run-full: hide the panel for the whole
-      // multi-minute run so the author has something readable on screen
-      // (showPerfProgress below) instead of a frozen debug panel, and so the
-      // panel's own polling never contends with the sweep's measurements.
-      profileHarness.hideLiveUi?.();
-      try {
-        return await runSweepStructuralAB(perfHarness, 'earlyZComposition', {
-          onProgress: (phase, detail) => {
-            log.info(`early-Z A/B: ${phase}${detail ? ` — ${detail}` : ''}`);
-            showPerfProgress(formatPerfProgressText(phase, detail));
-          },
-        });
-      } finally {
-        hidePerfProgress();
-        profileHarness.restoreLiveUi?.();
-      }
-    },
-    { zone: 'performance' }
-  );
+  //
+  // CONSOLE-ONLY, NOT A PANEL BUTTON (2026-08-12, author: "just a single
+  // performance report button"; see feedback_debug_ui_one_action_one_control
+  // — "get rid of anything no longer helpful and tidy everything up"). Not
+  // deleted, because it is a genuinely different, real instrument, not a
+  // superseded one — `perf-run-full`'s default `includeStructuralAB` already
+  // answers this SAME earlyZComposition question with same-run (stronger)
+  // evidence for free on every run, so this is now the rare deep-dive escape
+  // hatch, not the everyday tool. Call `MapShine.runEarlyZSweepAB()` from the
+  // console when the default A/B isn't enough.
+  MapShine.runEarlyZSweepAB = async () => {
+    profileHarness.hideLiveUi?.();
+    try {
+      return await runSweepStructuralAB(perfHarness, 'earlyZComposition', {
+        onProgress: (phase, detail) => {
+          log.info(`early-Z A/B: ${phase}${detail ? ` — ${detail}` : ''}`);
+          showPerfProgress(formatPerfProgressText(phase, detail));
+        },
+      });
+    } finally {
+      hidePerfProgress();
+      profileHarness.restoreLiveUi?.();
+    }
+  };
 
   /**
    * Build the FIXED north-to-south benchmark route. Extracted 2026-07-29 (was
@@ -3116,6 +3459,48 @@ function install() {
   }
 
   /**
+   * Build the RAPID DIAGONAL STRESS route (rapid-diagonal-stress-2026-08-12,
+   * author's own design: "move to the bottom left of a scene, then do a much
+   * more rapid 5 second sweep to top right and specifically record
+   * performance in that move as a measure of the performance issues during
+   * rapid camera movements"). Same shape as `buildBenchmarkPath` above, just
+   * a different preset (`sw_to_ne` — camera-path.js's own corner-to-corner
+   * diagonal, added for this) and RAPID_STRESS_SWEEP_MS instead of the
+   * steady 60s duration.
+   *
+   * `longJumpFadeCut: false` IS LOAD-BEARING here too, for the identical
+   * reason `buildBenchmarkPath` states it above: a corner-to-corner diagonal
+   * is the LONGEST possible pair on the map, guaranteed to trip the
+   * long-jump heuristic and fade-cut/teleport instead of sweeping — which
+   * would silently turn "rapid movement stress test" into "no movement at
+   * all, then an instant cut," the exact bug already found live once on the
+   * ORIGINAL north-to-south sweep before this field was ever set explicitly.
+   * `generateKeyframePreset`'s own `suggestedLongJumpFadeCut: false` for this
+   * preset says so already — read from the producer, not re-guessed.
+   * @returns {object} a normalized camera path, ready for `playCameraPath`.
+   */
+  function buildStressSweepPath() {
+    const preset = generatePresetKeyframes('sw_to_ne');
+    if (!preset?.keyframes?.length) {
+      throw new Error(
+        'perf benchmark: could not derive a diagonal stress route from this scene. That needs the live scene ' +
+          'dimensions, so load a scene first.'
+      );
+    }
+    return normalizeCameraPath({
+      keyframes: preset.keyframes,
+      settings: {
+        sweepMs: RAPID_STRESS_SWEEP_MS,
+        easing: 'linear',
+        hideUi: false,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        longJumpFadeCut: preset.suggestedLongJumpFadeCut,
+      },
+    });
+  }
+
+  /**
    * FORCE EVERY EFFECT to resolve as if the performance PROFILE were `profile`,
    * without writing the setting — same shape as `forceEffectEnabled` above:
    * `deriveEffectLayers` (real settings) + one field OVERRIDDEN + direct
@@ -3167,81 +3552,85 @@ function install() {
   // this is a ~5-10 minute run and one bad tier should not cost the rest of
   // it. The real profile is ALWAYS restored in the outer `finally`, whether
   // every tier succeeded or the run was aborted partway.
-  MapShine.debug.registerAction(
-    'perf-report-all-tiers',
-    '📊 Performance Report — ALL TIERS (slow)',
-    async () => {
-      const path = buildBenchmarkPath(); // throws BEFORE anything is forced if no scene is loaded
-      const generatedAt = new Date().toISOString();
-      const tierResults = [];
-      const tiersFailed = [];
-      try {
-        for (let i = 0; i < PERFORMANCE_PROFILES.length; i++) {
-          const profile = PERFORMANCE_PROFILES[i];
-          const tag = `${i + 1}/${PERFORMANCE_PROFILES.length} '${profile}'`;
+  //
+  // NO LONGER "THE" BUTTON — CONSOLE-ONLY (2026-08-12, author: "just a single
+  // performance report button"; feedback_debug_ui_one_action_one_control).
+  // `perf-run-full` is now the panel's only performance control; this stays a
+  // real, deliberately-built capability (nothing here was superseded, it
+  // answers a different question — per-tier cost comparison, not "what's
+  // slow right now") reachable as `MapShine.runAllTiersPerfReport()` for the
+  // rare "compare every quality tier" ask, same posture as `getTierReport`'s
+  // own escape-hatch just below.
+  MapShine.runAllTiersPerfReport = async () => {
+    const path = buildBenchmarkPath(); // throws BEFORE anything is forced if no scene is loaded
+    const generatedAt = new Date().toISOString();
+    const tierResults = [];
+    const tiersFailed = [];
+    try {
+      for (let i = 0; i < PERFORMANCE_PROFILES.length; i++) {
+        const profile = PERFORMANCE_PROFILES[i];
+        const tag = `${i + 1}/${PERFORMANCE_PROFILES.length} '${profile}'`;
+        try {
+          log.info(`perf report (all tiers): forcing tier ${tag}`);
+          forcePerformanceProfile(profile);
+          // capFrameRate:false — same fix as perf-run-full above; this is a measurement too.
+          const playing = playCameraPath(path, { capFrameRate: false }).catch((err) => {
+            log.error(`perf report (all tiers): camera path playback failed during tier '${profile}':`, err);
+          });
           try {
-            log.info(`perf report (all tiers): forcing tier ${tag}`);
-            forcePerformanceProfile(profile);
-            // capFrameRate:false — same fix as perf-run-full above; this is a measurement too.
-            const playing = playCameraPath(path, { capFrameRate: false }).catch((err) => {
-              log.error(`perf report (all tiers): camera path playback failed during tier '${profile}':`, err);
+            const report = await runProfileSession(profileHarness, {
+              generatedAt: new Date().toISOString(),
+              measureUntil: playing,
+              settleFrames: TIER_SETTLE_FRAMES,
+              route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms:tier=${profile}`,
+              onProgress: (phase, detail) => {
+                log.info(`perf report (all tiers) [${profile}]: ${phase}${detail ? ` — ${detail}` : ''}`);
+                // Same on-screen readout as perf-run-full — see its own comment.
+                // hidePerfProgress() runs once, after the WHOLE tier loop below,
+                // not per tier, so this stays up continuously across tiers
+                // instead of flickering closed between each one.
+                showPerfProgress(formatPerfProgressText(phase, `[${tag}] ${detail ?? ''}`.trim()));
+              },
             });
-            try {
-              const report = await runProfileSession(profileHarness, {
-                generatedAt: new Date().toISOString(),
-                measureUntil: playing,
-                settleFrames: TIER_SETTLE_FRAMES,
-                route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms:tier=${profile}`,
-                onProgress: (phase, detail) => {
-                  log.info(`perf report (all tiers) [${profile}]: ${phase}${detail ? ` — ${detail}` : ''}`);
-                  // Same on-screen readout as perf-run-full — see its own comment.
-                  // hidePerfProgress() runs once, after the WHOLE tier loop below,
-                  // not per tier, so this stays up continuously across tiers
-                  // instead of flickering closed between each one.
-                  showPerfProgress(formatPerfProgressText(phase, `[${tag}] ${detail ?? ''}`.trim()));
-                },
-              });
-              tierResults.push({ profile, report });
-            } finally {
-              stopCameraPath();
-              await playing;
-            }
-          } catch (err) {
-            log.error(`perf report (all tiers): tier ${tag} failed, continuing to the next tier:`, err);
-            tiersFailed.push({ profile, error: String(err?.message ?? err) });
+            tierResults.push({ profile, report });
+          } finally {
+            stopCameraPath();
+            await playing;
           }
+        } catch (err) {
+          log.error(`perf report (all tiers): tier ${tag} failed, continuing to the next tier:`, err);
+          tiersFailed.push({ profile, error: String(err?.message ?? err) });
         }
-      } finally {
-        // ALWAYS, even if every tier threw — a forced tier must never survive
-        // past this action, the same guarantee `forceEffectEnabled`'s own
-        // restore path already gives the effect sweep.
-        log.info('perf report (all tiers): restoring the real performance profile');
-        forcePerformanceProfile(null);
-        hidePerfProgress();
       }
-      // Kept OUT of what gets copied — see lastAllTiersReports' own doc for why
-      // (the ~300KB v1). Console-reachable via MapShine.getTierReport below,
-      // without paying for a second run.
-      lastAllTiersReports = Object.fromEntries(tierResults.map(({ profile, report }) => [profile, report]));
-      lastPerfProfile = {
-        report: 'perf-tier-comparison',
-        formatVersion: 2, // v1 nested full per-tier reports here; see lastAllTiersReports' doc for why that's gone
-        generatedAt,
-        route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms`,
-        tiersRun: tierResults.map((t) => t.profile),
-        tiersFailed,
-        note: "Full per-tier reports are not included here — call MapShine.getTierReport('<profile>') in the console for one tier's complete zone/effect breakdown.",
-        // frame / perTierHealth / ranked — see summarizeTierComparison's own
-        // doc. `ranked` is THE answer to "where should optimisation effort
-        // go": every effect AND every unowned shared zone, one list, sorted
-        // by peak cost across tiers.
-        ...summarizeTierComparison(tierResults),
-      };
-      MapShine.debug.refreshControls();
-      return lastPerfProfile;
-    },
-    { zone: 'performance' }
-  );
+    } finally {
+      // ALWAYS, even if every tier threw — a forced tier must never survive
+      // past this action, the same guarantee `forceEffectEnabled`'s own
+      // restore path already gives the effect sweep.
+      log.info('perf report (all tiers): restoring the real performance profile');
+      forcePerformanceProfile(null);
+      hidePerfProgress();
+    }
+    // Kept OUT of what gets copied — see lastAllTiersReports' own doc for why
+    // (the ~300KB v1). Console-reachable via MapShine.getTierReport below,
+    // without paying for a second run.
+    lastAllTiersReports = Object.fromEntries(tierResults.map(({ profile, report }) => [profile, report]));
+    lastPerfProfile = {
+      report: 'perf-tier-comparison',
+      formatVersion: 2, // v1 nested full per-tier reports here; see lastAllTiersReports' doc for why that's gone
+      generatedAt,
+      route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms`,
+      tiersRun: tierResults.map((t) => t.profile),
+      tiersFailed,
+      note: "Full per-tier reports are not included here — call MapShine.getTierReport('<profile>') in the console for one tier's complete zone/effect breakdown.",
+      // frame / perTierHealth / ranked — see summarizeTierComparison's own
+      // doc. `ranked` is THE answer to "where should optimisation effort
+      // go": every effect AND every unowned shared zone, one list, sorted
+      // by peak cost across tiers.
+      ...summarizeTierComparison(tierResults),
+    };
+    MapShine.debug.refreshControls();
+    return lastPerfProfile;
+  };
   // THE ESCAPE HATCH for lastAllTiersReports — one full perf-profile report
   // for one tier from the LAST all-tiers run, with no second ~10-minute run.
   // Console-only by design: a "which tier" parameter has no natural home in
@@ -3250,6 +3639,14 @@ function install() {
   // ask that a console call fits better than a fifth permanent button
   // (feedback_debug_ui_one_action_one_control).
   MapShine.getTierReport = (profile) => lastAllTiersReports?.[profile] ?? null;
+
+  // THE SAME ESCAPE HATCH, for the multi-floor phase's own second-floor
+  // report (multi-floor-sweep-2026-08-12) — see lastMultiFloorSecondReport's
+  // own doc for why it isn't nested inside the main perf-run-full report.
+  MapShine.getMultiFloorReport = () => lastMultiFloorSecondReport;
+  // Same escape hatch for the rapid diagonal stress sweep's own full report
+  // (rapid-diagonal-stress-2026-08-12).
+  MapShine.getRapidStressReport = () => lastRapidStressReport;
 
   // Its own Show/Hide button lives inside perfHud.el now (2026-08-06) — no
   // external toggle action needed. Deliberately still separate from the ONE

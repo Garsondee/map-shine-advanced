@@ -82,6 +82,17 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
   const doorTextureCache = new Map();
   /** wallId -> Array<leaf state> (1 for a single door, 2 for a double). */
   const doorLeaves = new Map();
+  // POOL HEALTH (cache-completeness pass, 2026-08-12) — doorTextureCache:
+  // hit = a real cached {texture,...} object reused (line below); miss = a
+  // URL never seen before, a fresh TextureLoader().load() kicked off.
+  // 'pending'/'failed' reads are NEITHER — no new decision was made, same
+  // "not ready yet" doctrine mask-authority.js's own bakeRuns/bakeSkips
+  // uses for !scene.gridSpec. doorLeaves: hit = existing leaves reused
+  // untouched; miss = leaf count or texture changed, buildDoorLeaves reran.
+  let doorTextureHits = 0;
+  let doorTextureMisses = 0;
+  let doorLeavesHits = 0;
+  let doorLeavesMisses = 0;
   let doorLastTimeMs = null;
   /** px/square — stable per scene (foundry/scene-geometry.js#computeSceneDimensions). */
   const DOOR_GRID_SIZE = dimensions?.size > 0 ? dimensions.size : 100;
@@ -93,7 +104,11 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
   function ensureDoorTexture(url) {
     const cached = doorTextureCache.get(url);
     if (cached === 'pending' || cached === 'failed') return null;
-    if (cached) return cached;
+    if (cached) {
+      doorTextureHits += 1;
+      return cached;
+    }
+    doorTextureMisses += 1;
     doorTextureCache.set(url, 'pending');
     new THREE.TextureLoader().load(
       url,
@@ -220,7 +235,10 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
       // needsRecreate on animation.texture/double).
       const wantLeaves = door.animation.double ? 2 : 1;
       if (!leaves || leaves.length !== wantLeaves || leaves[0].texUrl !== door.animation.texture) {
+        doorLeavesMisses += 1;
         leaves = buildDoorLeaves(door, tex);
+      } else {
+        doorLeavesHits += 1;
       }
 
       for (const leaf of leaves) {
@@ -331,5 +349,13 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
     },
     sync: syncDoorGraphics,
     dispose: disposeDoorGraphics,
+    /** POOL HEALTH — doorTextureCache/doorLeaves' own hit/miss counters. See
+     * their declaration for the exact hit/miss doctrine. */
+    getPoolStats() {
+      return {
+        doorTextureCache: { hits: doorTextureHits, misses: doorTextureMisses, size: doorTextureCache.size },
+        doorLeaves: { hits: doorLeavesHits, misses: doorLeavesMisses, size: doorLeaves.size },
+      };
+    },
   };
 }

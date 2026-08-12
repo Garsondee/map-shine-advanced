@@ -62,6 +62,15 @@ import { runStructuralAB } from './perf-structural-ab.js';
 export const DEFAULT_MEASURE_FRAMES = 600;
 /** A window that has not advanced in this long means the viewer is not running. */
 export const WAIT_TIMEOUT_MS = 30000;
+/**
+ * Safety net for `createSceneSettleWaiter` — deliberately much longer than
+ * `WAIT_TIMEOUT_MS` above, which assumes a healthy already-running viewer.
+ * A floor switch can mean a genuine cold load: `vt/settle.js`'s own header,
+ * "the 12,000² mansion map's upper floor... the honest answer can be a
+ * minute away." A few minutes of headroom beyond that, not a hard promise —
+ * see that module's own `waitingFor` for what a timeout was actually stuck on.
+ */
+export const DEFAULT_SETTLE_WAIT_TIMEOUT_MS = 240000;
 
 /**
  * Build the `waitFrames` half of a harness.
@@ -106,6 +115,52 @@ export function createProfiledFrameWaiter({
       };
       raf(tick);
     });
+  };
+}
+
+/**
+ * Build the `waitForSceneSettled` half of a multi-floor harness —
+ * multi-floor-sweep-2026-08-12 (author: "wait a long time for the upper
+ * floor to settle"). Polls `readSettle()` (`vt/settle.js`'s own tracker,
+ * already reset by `setFloorIndex` on every real floor change — see that
+ * function's own header) until it reports `settled`, or a timeout is
+ * reached — an EVENT-DRIVEN wait, not a guessed fixed sleep, for the exact
+ * reason `vt/settle.js` itself was built: "every fixed `waitForTimeout`... is
+ * a guess standing in for this module."
+ *
+ * NOT a rejection on timeout, unlike `createProfiledFrameWaiter#waitFrames`
+ * above: a floor that never settles is real, useful information (the
+ * resolved value's `timedOut`/`blockers`/`waitingFor`) a caller should be
+ * able to note in the report and move on from, not a reason to blow up an
+ * entire multi-phase capture that may already have spent minutes on an
+ * earlier floor.
+ *
+ * Lives here rather than in `boot.js` for the same `time/one-clock` reason
+ * `createProfiledFrameWaiter` does two comments up.
+ */
+export function createSceneSettleWaiter({
+  readSettle,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = () => performance.now(),
+  pollIntervalMs = 250,
+  timeoutMs = DEFAULT_SETTLE_WAIT_TIMEOUT_MS,
+} = {}) {
+  return async function waitForSceneSettled({ onProgress = null } = {}) {
+    const startedAt = now();
+    // elapsedMs travels WITH the result rather than making the caller take
+    // its own timestamp either side of this call — boot.js is not allowed a
+    // clock read at all (`time/one-clock`), so the one thing it might want
+    // to log (how long the wait took) has to come from here.
+    let last = readSettle();
+    while (!last?.settled) {
+      if (now() - startedAt > timeoutMs) {
+        return { ...last, timedOut: true, elapsedMs: Math.round(now() - startedAt) };
+      }
+      if (typeof onProgress === 'function') onProgress(last);
+      await wait(pollIntervalMs);
+      last = readSettle();
+    }
+    return { ...last, timedOut: false, elapsedMs: Math.round(now() - startedAt) };
   };
 }
 
@@ -197,6 +252,10 @@ export async function runProfileSession(harness, opts = {}) {
   // `null`, and `buildPerfReport` must treat a null pair as "not measured",
   // never as "the pool did nothing".
   let depthProxyPoolStatsStart = null;
+  // CACHE HEALTH (2026-08-12) — same before/after-the-window shape as
+  // pipelineStats/depthProxyPoolStats immediately above, declared here for
+  // the same reason: needed again after `finally` runs.
+  let cacheStatsStart = null;
   try {
     harness.resetFrameStats();
     harness.armProfiler({ settleFrames });
@@ -266,6 +325,11 @@ export async function runProfileSession(harness, opts = {}) {
     pipelineStatsStart = typeof harness.readPipelineStats === 'function' ? harness.readPipelineStats() : null;
     depthProxyPoolStatsStart =
       typeof harness.readDepthProxyPoolStats === 'function' ? harness.readDepthProxyPoolStats() : null;
+    // CACHE HEALTH, START OF THE REAL WINDOW (2026-08-12) — same "sample
+    // before/after settling, so a one-time cold-start cost doesn't get
+    // counted as this window's own churn" reasoning as pipelineStats
+    // immediately above.
+    cacheStatsStart = typeof harness.readCacheStats === 'function' ? harness.readCacheStats() : null;
 
     // PERIODIC PROGRESS DURING THE MEASURING WINDOW (2026-08-11, author: "even
     // without a UI it would be nice to have text on screen to give me a rough
@@ -350,6 +414,9 @@ export async function runProfileSession(harness, opts = {}) {
   // register as pool churn that has nothing to do with ordinary panning.
   const depthProxyPoolStatsEnd =
     typeof harness.readDepthProxyPoolStats === 'function' ? harness.readDepthProxyPoolStats() : null;
+  // CACHE HEALTH, END OF THE REAL WINDOW — same "before the sweep" ordering
+  // as depthProxyPoolStatsEnd immediately above.
+  const cacheStatsEnd = typeof harness.readCacheStats === 'function' ? harness.readCacheStats() : null;
   // SHADER-REBUILD CHURN, read AFTER disarm — same ordering as gpuStatus above
   // and for the same reason: disarm() uninstalls the hook but does not clear
   // the counters (only the NEXT arm's reset() does), so the just-finished
@@ -364,6 +431,11 @@ export async function runProfileSession(harness, opts = {}) {
   // single read already IS the delta for this window.
   const pipelineRebuildStats =
     typeof harness.readPipelineRebuildStats === 'function' ? harness.readPipelineRebuildStats() : null;
+  // PASS-SLOT ALLOCATOR, read AFTER disarm — same reset-on-arm reasoning as
+  // shaderRebuildStats immediately above: frame-profiler.js's own reset()
+  // clears passSlots/passSlotOverflow on every arm, so this single read
+  // already IS this window's own count.
+  const passSlotStats = typeof harness.readPassSlotStats === 'function' ? harness.readPassSlotStats() : null;
   // WINDOW-SURFACE COMPOSITION (2026-08-12) — a snapshot, not a delta, so
   // read-once here is the whole story (no start/end pairing needed, same
   // reasoning as shaderRebuildStats immediately above but simpler still: this
@@ -461,8 +533,10 @@ export async function runProfileSession(harness, opts = {}) {
       depthProxyPoolStatsStart && depthProxyPoolStatsEnd
         ? { start: depthProxyPoolStatsStart, end: depthProxyPoolStatsEnd }
         : null,
+    cacheStats: cacheStatsStart && cacheStatsEnd ? { start: cacheStatsStart, end: cacheStatsEnd } : null,
     shaderRebuildStats,
     pipelineRebuildStats,
+    passSlotStats,
     windowDiagnostics,
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,

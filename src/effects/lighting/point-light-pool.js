@@ -659,6 +659,9 @@ function createLightEntry({
  *   lightMeshes: Map, candleWallClipCache: Map, lightningWallClipCache: Map,
  *   update: (darkness01: number, activeRegions: object[], env: object, darknessRealism01: number, currentFloor: object) => number,
  *   getApertureGoboReadout: () => {totalFound: number, dropped: number, litLights: number, enabled: boolean},
+ *   getBatchingReadout: () => object,
+ *   getWallClipCacheStats: () => {candle: object, lightning: object, regular: object, apertureWalls: object},
+ *   invalidateBatchedWindMaterials: () => void,
  *   dispose: () => void,
  * }}
  */
@@ -697,6 +700,15 @@ export function createPointLightPool({
   getApertureWallVersion = () => 0,
   uGlobalTimeMs,
   resolveExpectedDepth,
+  // PERF-INSTRUMENTATION-AUDIT-2026-08-12 — this file had ZERO internal
+  // profiler brackets despite owning the busiest lighting draw pass (91 real
+  // wall-clipped polygons — the locked perf calibration) and a confirmed 30x
+  // mean/max spread on the single opaque `light.pointLightUpdate` bracket
+  // vt-pan-viewer.js already wraps `update()` in. `beginById`/`endById`
+  // (string form, not vt-pan-viewer.js's own pre-resolved `Z` table) — same
+  // reasoning as `specular-surface-subsystem.js`'s own `profiler` param:
+  // this pool is constructed independently of that table.
+  profiler = null,
 }) {
   /** A tiny dedicated Scene for point-light meshes — kept separate from the
    * world scene so a MAX-blended accumulate pass never has to filter out
@@ -804,6 +816,23 @@ export function createPointLightPool({
    * mirroring today's per-light `uColorationAlpha=0` posture. */
   const colorBuckets = new Map();
 
+  // POOL HEALTH (cache-completeness pass, 2026-08-12) — same hits/misses
+  // doctrine as depth-proxy-material-pool.js: a hit is the existing Map
+  // entry surviving its own staleness check untouched (no mesh/material/
+  // geometry rebuild this frame); a miss is either a brand-new key or an
+  // existing one that failed that check and got torn down + recreated.
+  // lightMeshes counts PER-LIGHT entries only — a light that batches this
+  // frame takes an entirely different path (see the `canBatch` branch's own
+  // `continue`) and never reaches lightMeshes' own hit/miss check; its
+  // activity shows up in illumBuckets/colorBuckets below instead, which
+  // count PER-BUCKET-KEY (not per-light) creation.
+  let lightMeshHits = 0;
+  let lightMeshMisses = 0;
+  let illumBucketHits = 0;
+  let illumBucketMisses = 0;
+  let colorBucketHits = 0;
+  let colorBucketMisses = 0;
+
   /** sourceId -> {floorId, radius, points, source, reason} — per-candle
    * WALL-CLIPPED shape cache (2026-07-20, the "candle light bleeds through
    * walls" fix — `foundry/scene-wall-clip.js`'s own header has the full
@@ -867,6 +896,24 @@ export function createPointLightPool({
    * the effect happens to be on right now, so toggling it does not need to
    * invalidate anything the walls themselves did not. */
   let apertureSegCache = null;
+
+  /** LIFETIME hit/miss/eviction counters for the four caches above, one key
+   * each — perf-instrumentation-audit-2026-08-12. Same "mutated in place,
+   * exposed via a plain getter" shape as `apertureGoboReadout`/
+   * `batchingReadout` (this file's own precedent), except these are
+   * cumulative across the pool's whole lifetime rather than reset every
+   * `update()` — matching `depth-proxy-material-pool.js`'s own convention
+   * (the report samples start/end around a measurement window and reports
+   * the DELTA, since a lifetime total alone says nothing about what
+   * happened during any one window). `apertureWalls` has no `evictions`
+   * key: it is a single nullable object, not a Map — there is nothing to
+   * evict, only replace, which a miss already counts. */
+  const wallClipCacheStats = {
+    candle: { hits: 0, misses: 0, evictions: 0 },
+    lightning: { hits: 0, misses: 0, evictions: 0 },
+    regular: { hits: 0, misses: 0, evictions: 0 },
+    apertureWalls: { hits: 0, misses: 0 },
+  };
 
   /**
    * Reconcile the point-light mesh pool against this frame's live Foundry
@@ -965,10 +1012,25 @@ export function createPointLightPool({
     // (this closure's own declaration has the full mechanism/why) is what
     // stops the darkness-mismatch recompute path inside it from re-running
     // Foundry's ClockwiseSweepPolygon from scratch every frame.
-    const { lights: foundryLights, seenSourceIds: seenLightSourceIds } = readActiveLightSources(darkness01, {
+    // WALL-CLIP FOR REAL FOUNDRY LIGHTS (perf-instrumentation-audit-2026-08-12,
+    // "Give point-light wall-clipping its own perf zone" — V4-Testament.md,
+    // filed 2026-08-11, deferred as "needs profiler access threaded through
+    // two files with zero existing references"). This is that pass: the ONE
+    // call site `readActiveLightSources` measured at 9.9% of a frame in a
+    // live Chrome trace on a scene where Foundry's darkness gate and MSA's
+    // model disagree for most lights (routine in Aesthetic mode).
+    profiler?.beginById('light.pointLightWallClip');
+    const {
+      lights: foundryLights,
+      seenSourceIds: seenLightSourceIds,
+      wallClipHits,
+      wallClipMisses,
+    } = readActiveLightSources(darkness01, {
       wallClipCache: regularLightWallClipCache,
       floorId: currentFloorId,
     });
+    wallClipCacheStats.regular.hits += wallClipHits;
+    wallClipCacheStats.regular.misses += wallClipMisses;
     // Prune against `seenSourceIds`, NOT the filtered `foundryLights` — same
     // reasoning as the lightning cache's own prune a few dozen lines down,
     // but deliberately the WIDER set: a light merely outside its own
@@ -978,9 +1040,13 @@ export function createPointLightPool({
     // deleted — should be evicted.
     if (regularLightWallClipCache.size && seenLightSourceIds) {
       for (const id of regularLightWallClipCache.keys()) {
-        if (!seenLightSourceIds.has(id)) regularLightWallClipCache.delete(id);
+        if (!seenLightSourceIds.has(id)) {
+          regularLightWallClipCache.delete(id);
+          wallClipCacheStats.regular.evictions += 1;
+        }
       }
     }
+    profiler?.endById('light.pointLightWallClip');
     // THE HEIGHT/ELEVATION GATE's OWN per-frame floor lookup — RETIRED here
     // (STAGE 2, 2026-08-04): `resolveExpectedDepth` (injected) resolves
     // straight from `depthAuthority`'s already-rebuilt rank table, no
@@ -990,6 +1056,7 @@ export function createPointLightPool({
     // through this SAME pool: region-aware ambient, the soft edge, coloration
     // and MAX-blending, all for free. This is the "point light we control": its
     // radius/colour come from the candle effect's params, not a Foundry doc.
+    profiler?.beginById('light.pointLightSourceBuild');
     const candleLightState = getCandleRenderState();
     const candleLights = candleLightState.enabled
       ? buildCandleLightSources(candleLightState.anchors, {
@@ -1017,6 +1084,7 @@ export function createPointLightPool({
     for (const candle of candleLights) {
       let cached = candleWallClipCache.get(candle.sourceId);
       if (!cached || cached.floorId !== currentFloorId || cached.radius !== candle.radius) {
+        wallClipCacheStats.candle.misses += 1;
         const result = computeCandleWallClippedShape({
           x: candle.x,
           y: candle.y,
@@ -1025,6 +1093,8 @@ export function createPointLightPool({
         });
         cached = { floorId: currentFloorId, radius: candle.radius, ...result };
         candleWallClipCache.set(candle.sourceId, cached);
+      } else {
+        wallClipCacheStats.candle.hits += 1;
       }
       if (cached.points) candle.shapePoints = cached.points;
       // cached.points === null: candle KEEPS buildCandleLightSources' own
@@ -1062,6 +1132,7 @@ export function createPointLightPool({
       if (!lightningWallClipEnabled) continue; // KEEPS the naive-circle shapePoints untouched, unclipped by design
       let cached = lightningWallClipCache.get(strike.sourceId);
       if (!cached || cached.floorId !== currentFloorId || cached.radius !== strike.wallClipRadiusPx) {
+        wallClipCacheStats.lightning.misses += 1;
         const result = computeCandleWallClippedShape({
           x: strike.x,
           y: strike.y,
@@ -1070,6 +1141,8 @@ export function createPointLightPool({
         });
         cached = { floorId: currentFloorId, radius: strike.wallClipRadiusPx, ...result };
         lightningWallClipCache.set(strike.sourceId, cached);
+      } else {
+        wallClipCacheStats.lightning.hits += 1;
       }
       if (cached.points) strike.shapePoints = cached.points;
       // cached.points === null: the strike KEEPS its own naive-circle
@@ -1084,7 +1157,10 @@ export function createPointLightPool({
     if (lightningWallClipCache.size) {
       const liveLightningIds = new Set(lightningLights.map((s) => s.sourceId));
       for (const id of lightningWallClipCache.keys()) {
-        if (!liveLightningIds.has(id)) lightningWallClipCache.delete(id);
+        if (!liveLightningIds.has(id)) {
+          lightningWallClipCache.delete(id);
+          wallClipCacheStats.lightning.evictions += 1;
+        }
       }
     }
 
@@ -1109,7 +1185,15 @@ export function createPointLightPool({
     // Read ONCE per frame — a scene's grid size does not change light-to-light,
     // only scene-to-scene.
     const gridSizePixels = readGridSizePixels().gridSizePixels;
+    profiler?.endById('light.pointLightSourceBuild');
 
+    // APERTURE-GOBO SETUP (perf-instrumentation-audit-2026-08-12) — the wall-
+    // segment cache rebuild/filter this block's own "PERF (2026-08-09)"
+    // comments below already identify as a real, self-diagnosed concern,
+    // plus the shared-uniform writes and the no-active-regions ambient
+    // pre-resolve. See `apertureSegCache`'s own declaration for the cache
+    // mechanism this zone's hit/miss counters track.
+    profiler?.beginById('light.pointLightApertureSetup');
     // APERTURE GOBO (docs/planning/Aperture-Gobo.md) — read ONCE per frame,
     // shared by every light below, same "read once, use per-light" shape as
     // `gridSizePixels` just above.
@@ -1141,6 +1225,7 @@ export function createPointLightPool({
         apertureSegCache.floorId !== currentFloorId ||
         apertureSegCache.wallVersion !== wallVersion
       ) {
+        wallClipCacheStats.apertureWalls.misses += 1;
         const rawWallSegments = readSceneWallSegments(currentFloorId);
         // `findAperturesForLight`'s own loop is `if (!seg?.aperture)
         // continue` — on a wall-dense scene the overwhelming majority of
@@ -1154,6 +1239,8 @@ export function createPointLightPool({
           ? rawWallSegments.filter((seg) => seg?.aperture)
           : rawWallSegments;
         apertureSegCache = { floorId: currentFloorId, wallVersion, segments: filteredWallSegments };
+      } else {
+        wallClipCacheStats.apertureWalls.hits += 1;
       }
       apertureWallSegments = apertureSegCache.segments;
     }
@@ -1296,7 +1383,16 @@ export function createPointLightPool({
       Array.isArray(activeRegions) && activeRegions.length > 0
         ? null
         : computeAmbientColors({ ...env, darkness01 }, darknessRealism01);
+    profiler?.endById('light.pointLightApertureSetup');
 
+    // PER-LIGHT RECONCILE (perf-instrumentation-audit-2026-08-12) — the
+    // biggest, most complex phase of `update()`: per-light aperture
+    // assignment, the batching-vs-per-light admission decision, mesh
+    // create/rebuild, the re-triangulation dirty-check and every per-light
+    // uniform write. Likely the dominant cost inside `light.pointLightUpdate`
+    // on any scene with real light counts — this is the zone to read first
+    // once a live report exists.
+    profiler?.beginById('light.pointLightReconcile');
     const seen = new Set();
     // bucketKey -> {members: [], flags: {...}} — fresh every frame; a light
     // absent this frame (deleted, or outside its own darkness01 window —
@@ -1528,6 +1624,7 @@ export function createPointLightPool({
         entry = null;
       }
       if (!entry) {
+        lightMeshMisses += 1;
         entry = createLightEntry({
           light,
           animationQuality,
@@ -1547,6 +1644,8 @@ export function createPointLightPool({
           apertureGoboShared,
         });
         lightMeshes.set(light.sourceId, entry);
+      } else {
+        lightMeshHits += 1;
       }
       // THE PER-FRAME APERTURE UNIFORM WRITE — a wall's position doesn't
       // change frame to frame, but a light standing near a door can SWING
@@ -1800,7 +1899,16 @@ export function createPointLightPool({
         }
       }
     }
+    profiler?.endById('light.pointLightReconcile');
 
+    // BATCH RECONCILE (perf-instrumentation-audit-2026-08-12) — isolated from
+    // the per-light reconcile above on purpose: batching (S2.5) exists to
+    // REDUCE cost, so its own overhead should be independently visible and
+    // comparable, not folded into the loop it is meant to be cheaper than.
+    // Near-zero when `pointLightBatchingEnabled` is off (both group maps stay
+    // empty and these loops iterate zero times), so this behaves as a
+    // 'conditional' zone in effect even though the brackets are unconditional.
+    profiler?.beginById('light.pointLightBatchReconcile');
     // STAGE 2 BATCHING (S2.5) — reconcile every bucket THIS frame's admitted
     // lights grouped into, then hide (never delete — see `illumBuckets`' own
     // doc) any EXISTING bucket key with zero members this frame. A brand-new
@@ -1816,6 +1924,7 @@ export function createPointLightPool({
     for (const [key, group] of illumBatchGroups) {
       let bucket = illumBuckets.get(key);
       if (!bucket) {
+        illumBucketMisses += 1;
         bucket = createBatchedLightMesh({
           THREE,
           channel: 'illumination',
@@ -1824,6 +1933,8 @@ export function createPointLightPool({
         });
         lightScene.add(bucket.mesh);
         illumBuckets.set(key, bucket);
+      } else {
+        illumBucketHits += 1;
       }
       const result = bucket.reconcile(group.members);
       batchingReadout.illumLightCount += result.memberCount;
@@ -1834,6 +1945,7 @@ export function createPointLightPool({
     for (const [key, group] of colorBatchGroups) {
       let bucket = colorBuckets.get(key);
       if (!bucket) {
+        colorBucketMisses += 1;
         bucket = createBatchedLightMesh({
           THREE,
           channel: 'coloration',
@@ -1842,6 +1954,8 @@ export function createPointLightPool({
         });
         colorationScene.add(bucket.mesh);
         colorBuckets.set(key, bucket);
+      } else {
+        colorBucketHits += 1;
       }
       const result = bucket.reconcile(group.members);
       batchingReadout.colorLightCount += result.memberCount;
@@ -1849,6 +1963,7 @@ export function createPointLightPool({
     for (const [key, bucket] of colorBuckets) {
       if (!colorBatchGroups.has(key)) bucket.reconcile([]);
     }
+    profiler?.endById('light.pointLightBatchReconcile');
 
     return gridSizePixels;
   }
@@ -1918,6 +2033,35 @@ export function createPointLightPool({
     return { ...batchingReadout };
   }
 
+  /** THE WALL-CLIP CACHE HEALTH READOUT (perf-instrumentation-audit-2026-08-12)
+   * — see `wallClipCacheStats`' own doc. LIFETIME counters, unlike the two
+   * readouts above (which `update()` resets and rewrites every call): a
+   * caller wanting "what happened during THIS window" samples this once
+   * before and once after, same convention `depth-proxy-material-pool.js`
+   * already established. Deep-copied (nested per-cache objects), not a
+   * shallow spread — the two readouts above are flat and a shallow copy is
+   * enough for them; this one is not. */
+  function getWallClipCacheStats() {
+    return {
+      candle: { ...wallClipCacheStats.candle },
+      lightning: { ...wallClipCacheStats.lightning },
+      regular: { ...wallClipCacheStats.regular },
+      apertureWalls: { ...wallClipCacheStats.apertureWalls },
+    };
+  }
+
+  /** POOL HEALTH — lightMeshes/illumBuckets/colorBuckets' own hit/miss
+   * counters (see their own declaration for the exact hit/miss doctrine).
+   * Lifetime counters, same before/after sampling convention as
+   * getWallClipCacheStats above and depth-proxy-material-pool.js. */
+  function getMeshPoolStats() {
+    return {
+      lightMeshes: { hits: lightMeshHits, misses: lightMeshMisses, size: lightMeshes.size },
+      illumBuckets: { hits: illumBucketHits, misses: illumBucketMisses, size: illumBuckets.size },
+      colorBuckets: { hits: colorBucketHits, misses: colorBucketMisses, size: colorBuckets.size },
+    };
+  }
+
   /**
    * Invalidate every batched bucket's material — the bucket sibling of the
    * per-light `entry.animationType = '__wind_rebake_pending__'` sentinel
@@ -1960,6 +2104,8 @@ export function createPointLightPool({
     update,
     getApertureGoboReadout,
     getBatchingReadout,
+    getWallClipCacheStats,
+    getMeshPoolStats,
     invalidateBatchedWindMaterials,
     dispose,
   });

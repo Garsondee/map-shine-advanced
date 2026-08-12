@@ -100,6 +100,12 @@ export function installAnchorMode(_MapShine) {
     draggingId: null, // an id currently being dragged — reconcileMarkers skips repositioning it
     raf: 0,
     lineCanvas: null, // OPTIONAL connector layer — only built when opts.linePairs is provided
+    // POOL HEALTH (cache-completeness pass, 2026-08-12) — reconcileMarkers'
+    // own create-vs-reuse decision: hits = an existing marker icon reused
+    // (its anchor refreshed in place); misses = a new anchor id, its icon
+    // element created. Runs every animation frame while active, so a
+    // healthy session shows near-0 misses after the first frame.
+    markerPoolStats: { hits: 0, misses: 0 },
   };
 
   /** `opts.icon` accepts a plain glyph string (candle's own shape, unchanged)
@@ -331,11 +337,13 @@ export function installAnchorMode(_MapShine) {
       seen.add(anchor.id);
       let entry = state.markers.get(anchor.id);
       if (!entry) {
+        state.markerPoolStats.misses += 1;
         const el = makeIconEl(anchor.id, anchor);
         state.markerLayer.appendChild(el);
         entry = { el, anchor };
         state.markers.set(anchor.id, entry);
       } else {
+        state.markerPoolStats.hits += 1;
         entry.anchor = anchor; // keep the cached anchor fresh for click/drag handlers
       }
       if (state.draggingId !== anchor.id) positionIcon(entry.el, anchor);
@@ -674,5 +682,14 @@ export function installAnchorMode(_MapShine) {
     state.windowHandlers = null;
   }
 
-  return { enter, exit, isActive };
+  return {
+    enter,
+    exit,
+    isActive,
+    /** POOL HEALTH — see markerPoolStats' own declaration for the exact
+     * hit/miss doctrine. */
+    getMarkerPoolStats() {
+      return { ...state.markerPoolStats };
+    },
+  };
 }

@@ -2490,6 +2490,10 @@ export async function startVtPanViewer({
       // under `effects/particles/`, so fire's own module has no business
       // reaching for one. Same one-door discipline as every other engine here.
       createEngine: createFireParticleEngine,
+      // So sync() can bracket its own per-frame cost (light.fireSync) —
+      // perf-instrumentation-audit-2026-08-12, same shape as specular's own
+      // `profiler` a few call sites down.
+      profiler,
     });
 
     const pointLights = createPointLightPool({
@@ -2536,6 +2540,11 @@ export async function startVtPanViewer({
         const rank = depthAuthority.rankOfElevation(safeElevation);
         return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
       },
+      // So update() can bracket its own internal phases (light.pointLightWallClip/
+      // SourceBuild/ApertureSetup/Reconcile/BatchReconcile) — perf-
+      // instrumentation-audit-2026-08-12, same shape as specular's own
+      // `profiler` above.
+      profiler,
     });
 
     // ------------------------------------------------------------------
@@ -2580,6 +2589,12 @@ export async function startVtPanViewer({
      * only hidden, full cleanup needs a deleteRegion hook — not built this
      * cut, bounded leak: grows with distinct darkness-regions ever seen). */
     const regionMeshes = new Map();
+    // POOL HEALTH (cache-completeness pass, 2026-08-12) — a hit is the
+    // existing entry surviving its own kind check untouched; a miss is
+    // either a brand-new key or an existing one whose shape TYPE changed
+    // under the same id/index (see the `entry.kind !== kind` branch below).
+    let regionMeshHits = 0;
+    let regionMeshMisses = 0;
 
     /**
      * Reconcile the region-darkness mesh pool against this frame's live
@@ -2739,6 +2754,7 @@ export async function startVtPanViewer({
         seen.add(key);
         let entry = regionMeshes.get(key);
         if (!entry || entry.kind !== kind) {
+          regionMeshMisses += 1;
           // A shape's TYPE changing under the same id/index is not a real
           // Foundry event (shapes are not retyped in place), handled
           // anyway — same defensive posture as lightMeshes' own reconcile.
@@ -2754,6 +2770,8 @@ export async function startVtPanViewer({
           regionScene.add(mesh);
           entry = { mesh, kind, ...built };
           regionMeshes.set(key, entry);
+        } else {
+          regionMeshHits += 1;
         }
         entry.mesh.position.set(bounds.cx, bounds.cy, 0);
         entry.mesh.scale.set(bounds.halfWidth * 2, bounds.halfHeight * 2, 1);
@@ -3046,6 +3064,10 @@ export async function startVtPanViewer({
     let windForceThaw = false; // debug/perf-lab override — see setVtPanViewerWindForceThaw
     /** @type {import('../world/index.js').WindContributor[]} */
     let windActiveImpulses = []; // oneShot contributors (doors, test gusts), pruned each tick
+    // BAKE-COUNT HEALTH — see bakeWindField's own header comment for why this
+    // is a lifetime invocation tally, not a hits/misses pair.
+    let windBakeTotal = 0;
+    const windBakeCountsByReason = Object.create(null);
 
     /**
      * Read walls, rasterize, relax, upload — see this block's own header.
@@ -3075,6 +3097,20 @@ export async function startVtPanViewer({
      *   moments earlier (feedback_instruments_must_not_lie).
      */
     function bakeWindField(reason = 'manual') {
+      // BAKE-COUNT HEALTH (cache-completeness pass, 2026-08-12) — unlike
+      // mask-authority.js/water-body-subsystem.js, this bake has no single
+      // upstream dirty-check to pair a bakeRuns/bakeSkips gate against: 4 of
+      // its 5 call sites (startup/floor-change/ambient-change/manual) are
+      // plain imperative triggers with no poll step at all, and the 5th
+      // (mask-change, via pollMaskAuthorityForWindRebake's own throttle+
+      // version-compare) already has its OWN skip path that never reaches
+      // this function — a skip counter added HERE could only ever read 0.
+      // So this is a MISSES-only counter (every call is a real, uncached
+      // rebake by definition), broken down by `reason` — answering "is
+      // something thrashing this expensive rebake" without fabricating a
+      // hit rate this call site cannot honestly report.
+      windBakeTotal += 1;
+      windBakeCountsByReason[reason] = (windBakeCountsByReason[reason] ?? 0) + 1;
       // Wraps the WHOLE function via try/finally rather than each of its 5
       // call sites (4 internal + rebakeVtPanViewerWindField's external
       // `_active.bakeWindField(...)` path) — finally runs before every return
@@ -5723,6 +5759,11 @@ export async function startVtPanViewer({
      * distinct tokens ever seen in the session, not per frame. Full lifecycle
      * cleanup needs a deleteToken hook wired from boot.js; not built this cut. */
     const occlusionDiscs = new Map();
+    // POOL HEALTH (cache-completeness pass, 2026-08-12) — a hit is an
+    // existing token's disc reused untouched; a miss is a token seen for
+    // the first time this session (its own shader compiles exactly once).
+    let occlusionDiscHits = 0;
+    let occlusionDiscMisses = 0;
 
     /**
      * Build (once, on first appearance) one token's disc mesh — a flat green-
@@ -5805,8 +5846,11 @@ export async function startVtPanViewer({
         seen.add(o.id);
         let entry = occlusionDiscs.get(o.id);
         if (!entry) {
+          occlusionDiscMisses += 1;
           entry = buildOcclusionDisc();
           occlusionDiscs.set(o.id, entry);
+        } else {
+          occlusionDiscHits += 1;
         }
         entry.mesh.position.set(o.centerX, o.centerY, 0);
         entry.mesh.scale.set(o.radiusPx, o.radiusPx, 1);
@@ -5862,6 +5906,13 @@ export async function startVtPanViewer({
     // different elevations on the same floor — the thing a per-floor model
     // structurally cannot express.
     const itemStates = new Map();
+    // POOL HEALTH (cache-completeness pass, 2026-08-12) — a hit is an
+    // already-loaded item reused untouched (no re-decode, no re-fetch of
+    // extra layer packs); a miss enters the full async
+    // getSourceDimensions+loadExtraLayerPacks chain in ensureItemLoaded
+    // below — by far the most expensive of this pool's two outcomes.
+    let itemStateHits = 0;
+    let itemStateMisses = 0;
     // THE DEPTH AUTHORITY (docs/planning/Depth-Buffer.md, stage 1) — ONE
     // instance for this viewer's lifetime. `updateResidencyUnguarded`'s own
     // `depthAuthority.rebuild(...)` call, below, replaces a bare
@@ -6125,6 +6176,7 @@ export async function startVtPanViewer({
     async function ensureItemLoaded(item) {
       const existing = itemStates.get(item.id);
       if (existing) {
+        itemStateHits += 1;
         existing.item = item; // refresh (renderOrder/key change per update)
         // ⚠️ BUG FIX (2026-08-08, author report: a candle behind an existing
         // Tile whose "Restrict Lighting" flag was toggled stayed dark until
@@ -6146,6 +6198,7 @@ export async function startVtPanViewer({
         }
         return existing;
       }
+      itemStateMisses += 1;
 
       // No albedo atlas, no page streaming for the floor art —
       // `ensureWholeImageMeshes` decodes/uploads that directly, matching
@@ -6436,6 +6489,17 @@ export async function startVtPanViewer({
      */
     const vegetationProxyNodeCache = new WeakMap();
     let vegetationProxyNodeSeq = 0;
+    // HIT/MISS COUNTERS (perf-instrumentation-audit-2026-08-12) — a WeakMap
+    // has no `.size`/iteration, so unlike `depth-proxy-material-pool.js`'s own
+    // `stats()` this cannot report current occupancy, only lifetime
+    // hits/misses at the two branches below. Flagged by that audit as "the
+    // exact class of bug depth-proxy-material-pool.js exists to fix" — this
+    // is its own un-pooled sibling (deliberately excluded from that pool, see
+    // its own header's "WHY VEGETATION IS DELIBERATELY EXCLUDED"), so a low
+    // hit rate here is the same class of live cost that pool's own
+    // `depth-proxy-pool-health` finding already watches for.
+    let vegetationProxyHits = 0;
+    let vegetationProxyMisses = 0;
 
     // ── WATER TIER 0: the surface (effects/water/water-surface-subsystem.js)
     // Constructed HERE, after `scene` — that module owns the mesh, the
@@ -6659,6 +6723,10 @@ export async function startVtPanViewer({
         // function's own header). See `window-render.js#uAmbientCeiling`.
         getAmbientCeilingRgb: () =>
           lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : null,
+        // So sync() can bracket its own per-frame cost (light.windowSync) —
+        // perf-instrumentation-audit-2026-08-12, same shape as specular's
+        // own `profiler` above.
+        profiler,
       });
     }
     /** Lazily create-or-reuse this floor's own subsystem. @param {number} floorIndex */
@@ -10624,6 +10692,7 @@ export async function startVtPanViewer({
           // whole fix, and `uniform()` values are writable by design.
           let nodeEntry = overlay.motion ? vegetationProxyNodeCache.get(overlay.motion) : null;
           if (vegKind && overlay.motion && !nodeEntry) {
+            vegetationProxyMisses += 1;
             const { Fn, uniform, vec2, vec3, float, positionLocal } = THREE.TSL;
             const sceneRect = dimensions.sceneRect;
             const sceneMin = uniform(vec2(sceneRect.x, sceneRect.y));
@@ -10640,6 +10709,7 @@ export async function startVtPanViewer({
             nodeEntry = { id: ++vegetationProxyNodeSeq, positionNode, sceneMin, sceneSize };
             vegetationProxyNodeCache.set(overlay.motion, nodeEntry);
           } else if (nodeEntry) {
+            vegetationProxyHits += 1;
             const sceneRect = dimensions.sceneRect;
             nodeEntry.sceneMin.value.set(sceneRect.x, sceneRect.y);
             nodeEntry.sceneSize.value.set(Math.max(1, sceneRect.width), Math.max(1, sceneRect.height));
@@ -13061,6 +13131,44 @@ export async function startVtPanViewer({
         return pipelineRebuildProbe
           ? pipelineRebuildProbe.stats()
           : { installed: false, calls: 0, hits: 0, misses: 0, labels: [], note: 'probe never armed this session' };
+      },
+      /** CACHE HEALTH (perf-instrumentation-audit-2026-08-12) — every cache
+       * this file can see hits/misses/evictions for that has no dedicated
+       * probe of its own already (unlike shader/pipeline-rebuild above, which
+       * keep their own established report fields). Lifetime counters, same
+       * "caller samples before/after a window" convention as
+       * `getEarlyZComposition().depthProxyMaterialPool` — see
+       * `cache-report.js` for the adapter that turns these into report rows. */
+      getVegetationProxyCacheStats() {
+        return { hits: vegetationProxyHits, misses: vegetationProxyMisses };
+      },
+      getPointLightWallClipCacheStats() {
+        return pointLights.getWallClipCacheStats();
+      },
+      /** POOL HEALTH — point-light-pool.js's own lightMeshes/illumBuckets/
+       * colorBuckets hit/miss counters. See that file's own doc. */
+      getPointLightMeshPoolStats() {
+        return pointLights.getMeshPoolStats();
+      },
+      /** POOL HEALTH — this file's OWN three mesh/state pools (region-
+       * darkness meshes, token occlusion discs, per-item load state). See
+       * each counter pair's own declaration for its exact hit/miss doctrine. */
+      getVtPoolStats() {
+        return {
+          regionMeshes: { hits: regionMeshHits, misses: regionMeshMisses, size: regionMeshes.size },
+          occlusionDiscs: { hits: occlusionDiscHits, misses: occlusionDiscMisses, size: occlusionDiscs.size },
+          itemStates: { hits: itemStateHits, misses: itemStateMisses, size: itemStates.size },
+        };
+      },
+      /** POOL HEALTH — door-graphics-subsystem.js's own doorTextureCache/
+       * doorLeaves hit/miss counters. See that file's own doc. */
+      getDoorPoolStats() {
+        return doorGraphics.getPoolStats();
+      },
+      /** BAKE-COUNT HEALTH — see bakeWindField's own header for why this is a
+       * lifetime invocation tally broken down by reason, not hits/misses. */
+      getWindBakeStats() {
+        return { total: windBakeTotal, byReason: { ...windBakeCountsByReason } };
       },
       /** Perf profile: renderer.info counters, for per-zone draw-call deltas. */
       readRenderInfo() {
@@ -15491,6 +15599,50 @@ export function setVtPanViewerShaderRebuildProbe(on) {
 export function getVtPanViewerShaderRebuilds() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getShaderRebuildStats();
+}
+
+/** CACHE HEALTH (perf-instrumentation-audit-2026-08-12) — vegetation's own
+ * unpooled depth-proxy node-graph cache (see `getVegetationProxyCacheStats`'s
+ * own doc for why it is separate from `depth-proxy-material-pool.js`). */
+export function getVtPanViewerVegetationProxyCacheStats() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getVegetationProxyCacheStats();
+}
+
+/** CACHE HEALTH — the point-light pool's four wall-clip caches (candle,
+ * lightning, real Foundry lights, aperture-gobo wall segments). See
+ * `point-light-pool.js#getWallClipCacheStats`'s own doc. */
+export function getVtPanViewerPointLightWallClipCacheStats() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getPointLightWallClipCacheStats();
+}
+
+/** POOL HEALTH — the point-light pool's mesh/bucket registries (lightMeshes,
+ * illumBuckets, colorBuckets). See `point-light-pool.js#getMeshPoolStats`. */
+export function getVtPanViewerPointLightMeshPoolStats() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getPointLightMeshPoolStats();
+}
+
+/** POOL HEALTH — this file's own three mesh/state pools (regionMeshes,
+ * occlusionDiscs, itemStates). See `getVtPoolStats`'s own doc. */
+export function getVtPanViewerPoolStats() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getVtPoolStats();
+}
+
+/** POOL HEALTH — door-graphics-subsystem.js's doorTextureCache/doorLeaves.
+ * See `door-graphics-subsystem.js#getPoolStats`. */
+export function getVtPanViewerDoorPoolStats() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getDoorPoolStats();
+}
+
+/** BAKE-COUNT HEALTH — `bakeWindField`'s own lifetime invocation tally, by
+ * reason. See its own header comment for why this has no hits/misses pair. */
+export function getVtPanViewerWindBakeStats() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getWindBakeStats();
 }
 
 /**

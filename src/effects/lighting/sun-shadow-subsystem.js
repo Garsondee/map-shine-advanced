@@ -718,6 +718,18 @@ function createFloorSlot({
    * effect is switched back on — so re-enabling would otherwise show no shadow
    * until something else happened to dirty a mask. */
   let casterFieldLoaded = false;
+  // BAKE-GATE HEALTH (cache-completeness pass, 2026-08-12) — TWO separate
+  // gates in this one slot, tracked separately because they can diverge (the
+  // caster field can go stale without the sun/params/cascade gate tripping,
+  // and vice versa): casterField* covers the `version !== casterFieldVersion`
+  // check just below (the chamfer/coverage bake over the caster height
+  // field); sunShadow* covers the multi-condition OR further down
+  // (params/geometry/cascade/sun-angle — the actual shadow-field bake). Same
+  // bakeRuns/bakeSkips doctrine as mask-authority.js's own recomputeIfDirty.
+  let casterFieldBakeRuns = 0;
+  let casterFieldBakeSkips = 0;
+  let sunShadowBakeRuns = 0;
+  let sunShadowBakeSkips = 0;
   /** True once the collapsed 1×1 white field has been written for the current
    * "off" spell, so being off costs one 1×1 draw in total rather than one per
    * frame. Cleared the moment the effect is enabled again. */
@@ -1287,9 +1299,12 @@ function createFloorSlot({
 
     const version = getMaskAuthorityVersion ? getMaskAuthorityVersion() : casterFieldVersion;
     if (!casterFieldLoaded || version !== casterFieldVersion) {
+      casterFieldBakeRuns += 1;
       casterFieldVersion = version;
       lastCasterBakeResult = bakeLayerTexture(floorIndex);
       casterFieldLoaded = true;
+    } else {
+      casterFieldBakeSkips += 1;
     }
     const paramsKey = JSON.stringify(state.params ?? {}) + `|on|t${activeTier}`;
     const paramsChanged = paramsKey !== lastSunShadowParamsKey;
@@ -1308,9 +1323,12 @@ function createFloorSlot({
       lowerChanged ||
       sunNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg)
     ) {
+      sunShadowBakeRuns += 1;
       bakeSunShadowField(
         geometryChanged ? 'profile' : paramsChanged ? 'param' : lowerChanged ? 'cascade' : bakedSun ? 'sun' : 'first'
       );
+    } else {
+      sunShadowBakeSkips += 1;
     }
   }
 
@@ -1339,6 +1357,16 @@ function createFloorSlot({
         floorIndex: casterFieldFloor,
         caster: lastCasterBakeResult ?? 'never baked',
         lastBake: lastSunShadowBake ?? 'never baked',
+        // BAKE-GATE HEALTH — see casterFieldBakeRuns' own declaration above
+        // for why these are two separate pairs. Lifetime counters for this
+        // slot; a caller wanting one window's rate samples before/after,
+        // same convention as depth-proxy-material-pool.js.
+        bakeGate: {
+          casterFieldBakeRuns,
+          casterFieldBakeSkips,
+          sunShadowBakeRuns,
+          sunShadowBakeSkips,
+        },
         profile: {
           tier: activeTier,
           maxTier: LAYER_SMEAR_MAX_TIER,

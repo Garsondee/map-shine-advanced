@@ -18,7 +18,12 @@
  * because `state` is module-level and mutable, and a future test importing
  * this module should not have to discover that the hard way.
  */
-import { describeRenderMode, clearFoundryFallback, getFallbackState } from '../render-fallback.js';
+import {
+  describeRenderMode,
+  clearFoundryFallback,
+  getFallbackState,
+  getDescribeRenderModeStats,
+} from '../render-fallback.js';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,6 +31,10 @@ function sleep(ms) {
 
 export async function run(t) {
   clearFoundryFallback();
+  // POOL HEALTH — lifetime counters, no reset hook (same convention as every
+  // other cache in this pass), so a window is measured before/after like a
+  // real caller would.
+  const statsBefore = getDescribeRenderModeStats();
 
   // ── the DOM-free path this cache is actually testable through ─────────────
   const r0 = describeRenderMode({ canvas: null, loopActive: false });
@@ -71,4 +80,10 @@ export async function run(t) {
   // exists to save), so once ANYTHING invalidates the cache (args or time),
   // a state change since the last read is visible.
   t.ok("fallback state starts inactive (cleared at this test's own top)", getFallbackState().active === false);
+
+  // ── POOL HEALTH counters match the hit/miss sequence proven above ─────────
+  // r0=miss r1=hit r2=miss r3=miss r4=hit r5=miss r6=miss r7=miss — 2 hits, 6 misses.
+  const statsAfter = getDescribeRenderModeStats();
+  t.ok('exactly 2 hits were counted across the sequence above', statsAfter.hits - statsBefore.hits === 2);
+  t.ok('exactly 6 misses were counted across the sequence above', statsAfter.misses - statsBefore.misses === 6);
 }

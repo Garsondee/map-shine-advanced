@@ -423,6 +423,70 @@ export const ZONES = Object.freeze(
       false,
       'pointLights.update'
     ),
+    // FIVE INTERNAL SUB-ZONES (2026-08-12, perf-instrumentation-audit) — same
+    // move as geometry.depthDraw's own three sub-zones: light.pointLightUpdate
+    // measured a confirmed 30x mean/max spread (0.76ms mean / 22.7ms max, the
+    // capture that motivated the steady-spike finding) with zero internal
+    // breakdown across 1,966 lines and the busiest lighting draw pass (91 real
+    // wall-clipped polygons — the locked perf calibration). Sequential,
+    // non-overlapping siblings inside point-light-pool.js#update, in call
+    // order — see that function's own comments at each bracket for exactly
+    // what each phase covers.
+    z(
+      'light.pointLightWallClip',
+      'Point light wall-clip (real Foundry lights)',
+      'lighting',
+      'light.accumulate',
+      null,
+      'cpu',
+      'steady',
+      false,
+      'readActiveLightSources'
+    ),
+    z(
+      'light.pointLightSourceBuild',
+      'Authored light source build (candle/lightning/fire)',
+      'lighting',
+      'light.accumulate',
+      null,
+      'cpu',
+      'steady',
+      false,
+      'pointLights.update'
+    ),
+    z(
+      'light.pointLightApertureSetup',
+      'Aperture-gobo wall-segment setup + shared uniforms',
+      'lighting',
+      'light.accumulate',
+      'apertureGobo',
+      'cpu',
+      'steady',
+      false,
+      'pointLights.update'
+    ),
+    z(
+      'light.pointLightReconcile',
+      'Per-light mesh reconcile (aperture assignment, rebuild, triangulation, uniforms)',
+      'lighting',
+      'light.accumulate',
+      null,
+      'cpu',
+      'steady',
+      false,
+      'pointLights.update'
+    ),
+    z(
+      'light.pointLightBatchReconcile',
+      'Batched light bucket reconcile (Stage 2)',
+      'lighting',
+      'light.accumulate',
+      null,
+      'cpu',
+      'conditional',
+      false,
+      'pointLights.update'
+    ),
     z(
       'light.candleSync',
       'Candle flame sync',
@@ -466,6 +530,35 @@ export const ZONES = Object.freeze(
       'conditional',
       true,
       'updateWindFieldOverlay'
+    ),
+    // FOUND UNWIRED 2026-08-12 (perf-instrumentation-audit) — the two
+    // remaining instances of the exact "sync() runs before its own draw
+    // bracket opens" shape already fixed for specular/water/fluid/wind
+    // (2026-08-06). windowSurface.sync() pushes a per-frame depth-authority
+    // query plus a ~17-field dirty-check key; fireSubsystem.sync() drives the
+    // per-engine TSL-compute step loop — brand new, never audited at all
+    // (Performance-Audit-2026-08.md §11).
+    z(
+      'light.windowSync',
+      'Window light sync',
+      'lighting',
+      'light.accumulate',
+      'window',
+      'cpu',
+      'steady',
+      false,
+      'windowSurface.sync'
+    ),
+    z(
+      'light.fireSync',
+      'Fire sync (engine step loop)',
+      'lighting',
+      'light.accumulate',
+      'fire',
+      'cpu',
+      'conditional',
+      false,
+      'fireSubsystem.sync'
     ),
     z(
       'light.uiShadowStamps',
@@ -1003,6 +1096,21 @@ export const EFFECT_ZONING = Object.freeze({
   uiWindowShadow: Object.freeze({
     coverage: 'full',
     why: 'Uniform push only — it has no draw call at all by design (the v6 perf fix removed the extra pass), so light.uiShadowStamps IS its entire cost.',
+  }),
+  // Added 2026-08-12 (perf-instrumentation-audit) — both 'window' and 'fire'
+  // owned a zone (their draw) with no EFFECT_ZONING entry at all, the exact
+  // one-directional drift validateEffectZoning cannot catch on its own (see
+  // the 'specular' entry's own comment below for the same gap, closed once
+  // already for a different effect). Both silently defaulted to
+  // zoneCoverage:'full' in the report before this — a live instance of
+  // feedback_instruments_must_not_lie, not a hypothetical.
+  window: Object.freeze({
+    coverage: 'full',
+    why: 'Unlike water/vegetation/fluid, window light draws into its OWN dedicated per-floor scene (windowSurface.scene, never merged into geometry.world or the point-light pool) — light.windowSync (its per-frame depth-authority query + look-param dirty-check) and light.drawWindowLight (the draw itself) together cover its entire cost with nothing left un-zoned.',
+  }),
+  fire: Object.freeze({
+    coverage: 'partial',
+    why: "light.fireSync (state read, spawn-cloud/cohesion bookkeeping, the per-engine TSL-compute step loop) and light.drawFire (the particle billboard draw — flame/ember/smoke sprites) are both zoned, but fire's LIGHT SOURCES (buildFireLightSources, built inside sync() and merged into the point-light pool via getFireLightSources) draw through the shared, null-owned light.drawPointLights/light.drawColoration zones — the exact same structural gap that hid candles' cost for as long as it did (Performance-Insights.md §5B/§5C), now true of fire too and not fixable without restructuring how source types share those two zones.",
   }),
   // Added 2026-08-06 (perf-zone-coverage-audit found this effect had NO entry
   // at all, despite owning zones — exactly the drift validateEffectZoning

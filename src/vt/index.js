@@ -69,6 +69,15 @@ export {
   // downstream: did a render object force a brand-new GPU pipeline compile.
   setVtPanViewerPipelineRebuildProbe,
   getVtPanViewerPipelineRebuilds,
+  // CACHE HEALTH (perf-instrumentation-audit-2026-08-12) — the caches this
+  // file can see hits/misses (or a bake-count tally) for that have no probe
+  // of their own.
+  getVtPanViewerVegetationProxyCacheStats,
+  getVtPanViewerPointLightWallClipCacheStats,
+  getVtPanViewerPointLightMeshPoolStats,
+  getVtPanViewerPoolStats,
+  getVtPanViewerDoorPoolStats,
+  getVtPanViewerWindBakeStats,
   // STAGE 1's revert flag (docs/planning/Stage-1-Shade-Once.md).
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
@@ -103,6 +112,11 @@ export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 // readPageBitmapPixels: the mask authority's injected page-pixel reader —
 // per-page CPU extraction is decode machinery, so it lives with the decoder.
 export { getSourceBitmap, readPageBitmapPixels } from './decode-pool.js';
+// CACHE HEALTH (cache-completeness pass, 2026-08-12) — the IndexedDB
+// page-blob persistence layer decode-pool.js reads/writes through. Module-
+// level state, not viewer-dependent (works before/after the WebGPU viewer
+// starts), so this is imported directly rather than through _active.
+export { getPyramidStoreStats } from './pyramid-store.js';
 // resolveRendererRequiredLimits: the boot heartbeat renderer (boot.js) needs
 // the SAME raised WebGPU texture cap as the VT viewer, or the flight recorder
 // (which reads the heartbeat's device) misreports the limit. Cross-zone, so it

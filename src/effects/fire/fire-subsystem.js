@@ -111,6 +111,17 @@ const PER_FIRE = Object.freeze({ flame: 12, ember: 10, smoke: 24 });
  *   (`createFireParticleEngine`). Injected rather than imported because
  *   `particles/allocator-only` keeps every `instancedArray` under
  *   `effects/particles/`, and this module has no business reaching for one.
+ * @param {*} [deps.profiler] - so `sync()` can bracket its own per-frame cost
+ *   (`light.fireSync` — perf-instrumentation-audit-2026-08-12: `src/effects/
+ *   fire/` shipped with zero profiler coverage anywhere, unlike every other
+ *   authored-light source in this pool — candles/lightning both have their
+ *   own sync zone). Covers the per-engine `engine.step()` loop too, so a
+ *   compute-dispatch cost hiding inside it is no longer invisible the way
+ *   candles' own point-light cost was before `light.drawPointLights` was
+ *   read closely (Performance-Insights.md §5B/§5C). `beginById`/`endById`
+ *   (string form) — same reasoning as `specular-surface-subsystem.js`'s own
+ *   `profiler` param: this subsystem is constructed independently of
+ *   vt-pan-viewer.js's pre-resolved `Z` index table.
  * @returns {{scene:*, sync:Function, lightSources:()=>Array<object>,
  *   hasContent:boolean, getStatus:()=>object, dispose:()=>void}}
  */
@@ -121,6 +132,7 @@ export function createFireSubsystem({
   getWindHandle = null,
   getPxPerMeter = null,
   createEngine = null,
+  profiler = null,
 }) {
   if (typeof getFireRenderState !== 'function') {
     throw new TypeError(
@@ -195,6 +207,20 @@ export function createFireSubsystem({
    * @param {object} [worldRect] - the visible rect, for the engines' own bounds.
    */
   function sync(renderer, nowMs, dtSec, worldRect) {
+    profiler?.beginById('light.fireSync');
+    try {
+      syncUnguarded(renderer, nowMs, dtSec, worldRect);
+    } finally {
+      profiler?.endById('light.fireSync');
+    }
+  }
+
+  /** The real body of `sync()` — see `window-surface-subsystem.js#sync`'s
+   * identical split for why: a try/finally around the whole function would
+   * force re-indenting every line, and a thrown error must still close the
+   * bracket regardless of which of this function's several early returns
+   * would otherwise have skipped that. */
+  function syncUnguarded(renderer, nowMs, dtSec, worldRect) {
     const state = getFireRenderState() ?? {};
     const fires = Array.isArray(state.fires) ? state.fires : [];
     const cloud = state.spawnCloud ?? null;

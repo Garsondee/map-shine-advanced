@@ -12,7 +12,12 @@
  *     for the rest of the session.
  */
 import { BLOOM, SPECULAR } from '../../effects/index.js';
-import { DEFAULT_MEASURE_FRAMES, createProfiledFrameWaiter, runProfileSession } from '../perf-session.js';
+import {
+  DEFAULT_MEASURE_FRAMES,
+  createProfiledFrameWaiter,
+  createSceneSettleWaiter,
+  runProfileSession,
+} from '../perf-session.js';
 
 /** Let queued promise callbacks run. */
 const flushTicks = () => new Promise((r) => setTimeout(r, 0));
@@ -203,6 +208,28 @@ export async function run(t) {
     });
     const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
     ok('a failing probe disarm does not fail the whole run', report.report === 'perf-profile');
+  }
+
+  // ---- PASS-SLOT ALLOCATOR: no arm/disarm toggle — a plain read-once hook,
+  // same as windowDiagnostics, since perfProfiler.capacity() needs no probe
+  // installed and is already relative to this window's own arm() ----------
+  {
+    const h = fakeHarness({
+      readPassSlotStats: () => ({ slots: 80, declaredCount: 60, passSlotsUsed: 9 }),
+    });
+    const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    ok(
+      'the reading is threaded into instrument.passSlotStats verbatim',
+      report.instrument.passSlotStats?.passSlotsUsed === 9
+    );
+  }
+
+  // ---- a harness WITHOUT readPassSlotStats still works — it is optional -----
+  {
+    const h = fakeHarness();
+    ok('the default fake harness defines no readPassSlotStats hook', h.readPassSlotStats === undefined);
+    const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    ok('...with an absent (not fabricated-zero) passSlotStats', report.instrument.passSlotStats === null);
   }
 
   // ---- PIPELINE-REBUILD PROBE: armed after settling, disarmed before restore
@@ -570,6 +597,116 @@ export async function run(t) {
     ok('a stalled viewer rejects rather than hanging', err !== null);
     ok('...naming how many frames it actually saw', err.message.includes('only 0'));
     ok('...and telling the user what to do', err.message.includes('load a scene'));
+  }
+
+  // ---- createSceneSettleWaiter — multi-floor-sweep-2026-08-12 --------------
+  {
+    // Already settled on the very first read — no polling needed at all.
+    const waiter = createSceneSettleWaiter({
+      readSettle: () => ({ settled: true, blockers: [], waitingFor: [] }),
+      now: () => 0,
+    });
+    const result = await waiter();
+    ok('already-settled resolves immediately with settled:true', result.settled === true);
+    ok('...and timedOut:false', result.timedOut === false);
+  }
+
+  {
+    // Polls a few times (real "still loading" reads) before settling.
+    let callCount = 0;
+    const waits = [];
+    const waiter = createSceneSettleWaiter({
+      readSettle: () => {
+        callCount++;
+        return callCount < 3
+          ? {
+              settled: false,
+              blockers: [{ key: 'itemsLoading', label: 'still loading', count: 1 }],
+              waitingFor: ['still loading (1)'],
+            }
+          : { settled: true, blockers: [], waitingFor: [] };
+      },
+      wait: (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+      now: () => 0,
+    });
+    const result = await waiter();
+    ok('polls until settled', result.settled === true);
+    ok('...and genuinely polled (waited) at least twice before settling', waits.length >= 2);
+  }
+
+  {
+    // A settle that never arrives times out rather than hanging the whole
+    // multi-floor phase forever — the WHOLE reason this is not a rejection
+    // like createProfiledFrameWaiter's own timeout above (see this
+    // function's own header): a stuck floor is real information, not a
+    // reason to blow up an otherwise-good floor-1 report.
+    let clock = 0;
+    const waiter = createSceneSettleWaiter({
+      readSettle: () => ({
+        settled: false,
+        blockers: [{ key: 'bcCompressOutstanding', label: 'textures still being GPU-compressed', count: 4 }],
+        waitingFor: ['textures still being GPU-compressed (4)'],
+      }),
+      wait: (ms) => {
+        clock += ms;
+        return Promise.resolve();
+      },
+      now: () => clock,
+      timeoutMs: 1000,
+      pollIntervalMs: 300,
+    });
+    const result = await waiter();
+    ok('a settle that never arrives times out rather than hanging forever', result.timedOut === true);
+    ok('...and still honestly reports settled:false, never flips it to true', result.settled === false);
+    ok('...and still names what it was stuck waiting for', result.waitingFor.length > 0);
+    ok('...and reports how long it actually waited (elapsedMs), not a guess', result.elapsedMs >= 1000);
+  }
+
+  {
+    // onProgress fires with the live blocker list while genuinely waiting.
+    let callCount = 0;
+    const progressReads = [];
+    const waiter = createSceneSettleWaiter({
+      readSettle: () => {
+        callCount++;
+        return callCount < 2
+          ? { settled: false, blockers: [], waitingFor: ['the quiet period to elapse'] }
+          : { settled: true, blockers: [], waitingFor: [] };
+      },
+      wait: () => Promise.resolve(),
+      now: () => 0,
+    });
+    await waiter({ onProgress: (s) => progressReads.push(s) });
+    ok('onProgress is called with the live settle state while still waiting', progressReads.length >= 1);
+    ok(
+      '...and never called once already settled',
+      progressReads.every((s) => s.settled === false)
+    );
+  }
+
+  {
+    // A NULL/undefined settle read (nothing sampled yet) must not crash the
+    // waiter — vt-pan-viewer.js's own getSceneSettle() falls back to a named
+    // "first sample" placeholder, never a bare null, but this function must
+    // survive a harness that has not wired that far either. Clock advances
+    // via the SAME `wait`-increments-`clock` pattern as the timeout test
+    // above, so this terminates instead of looping forever on a fixed now().
+    let clock = 0;
+    const waiter = createSceneSettleWaiter({
+      readSettle: () => null,
+      wait: (ms) => {
+        clock += ms;
+        return Promise.resolve();
+      },
+      now: () => clock,
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    });
+    const result = await waiter();
+    ok('a null settle read is treated as not-yet-settled, not a crash', result.timedOut === true);
   }
 
   // ---- MEASURING PROGRESS TICKS while a long measuring window is pending ---

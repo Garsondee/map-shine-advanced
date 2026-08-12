@@ -52,6 +52,7 @@ import { DEFAULT_PASS_BUDGET_MS, PASS_ZONE_PREFIX, isSparseCadence } from './per
 // live report that caught them disagreeing.
 import { estimateSweepNoiseFloor } from './perf-lab.js';
 export { estimateSweepNoiseFloor };
+import { buildCacheRows, findLowHitRateCaches } from './cache-report.js';
 
 /** Coverage at or above this and the per-zone breakdown is trustworthy. */
 export const COVERAGE_GOOD = 0.85;
@@ -79,10 +80,58 @@ export const HITCHES_KEPT = 20;
 export const STEADY_SPIKE_RATIO_FACTOR = 5;
 /** Below this the spike itself is too small in absolute terms to matter, even at a wild ratio. */
 export const STEADY_SPIKE_MIN_PEAK_MS = 5;
+/**
+ * report-density-2026-08-12 (author: "critique the report, too many tokens doesn't make things
+ * easier"). A fullscreen post-process quad is EXACTLY 2 triangles / 1 draw call by construction
+ * (QUAD_INDICES) — every bloom/DoF/present/composite pass matches every OTHER one on
+ * drawCalls+triangles for that reason alone, not because anything is wrong. The 2026-08-12 live
+ * capture's `duplicate-geometry` findings were 12 pairs, 11 of them exactly this shape (8,108 of
+ * findings[]'s 26,457 bytes for zero new information — verified by hand against the real capture,
+ * not guessed). Anything at or under this ceiling is folded into ONE summary finding instead of one
+ * verbose finding per pair; real scene geometry (thousands of triangles) still gets its own full
+ * finding, unchanged.
+ */
+export const TRIVIAL_GEOMETRY_TRIANGLE_CEILING = 8;
 
 const round = (v, dp) => (v === null || !Number.isFinite(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp);
 const ms = (v) => round(v, 3);
 const pct = (v) => round(v, 1);
+
+/**
+ * Collapse repeated `decodeStats`/`cacheStats` blobs across a hitch list —
+ * report-density-2026-08-12 (author: "too many tokens doesn't make things
+ * easier for LLMs to work with"). Both are captured fresh AT EACH hitch's own
+ * moment (vt-pan-viewer.js's own header: "full context AT THE MOMENT it
+ * happened") — genuinely real per-hitch data, not a bug — but on a window
+ * where nothing was actively streaming, EVERY hitch reads the identical
+ * snapshot: the 2026-08-12 live capture had 20 hitches, 1 distinct
+ * `decodeStats` value and 1 distinct `cacheStats` value between them — 13,129
+ * of `frame`'s 16,282 bytes for information that says the same thing 20
+ * times. Only a BYTE-IDENTICAL repeat is collapsed (a single differing field
+ * is real information and stays in full) — the mechanism this exists to
+ * preserve, unchanged: reading which hitch FIRST shows a changed value is
+ * still exactly how a reader correlates a hitch with what streaming was
+ * doing, per that same header's own worked example.
+ * @param {object[]} items - already sorted/sliced to what the report will keep.
+ */
+export function dedupeHitchContext(items) {
+  const seen = { decodeStats: new Map(), cacheStats: new Map() };
+  return items.map((item, i) => {
+    const out = { ...item };
+    for (const key of ['decodeStats', 'cacheStats']) {
+      const val = item[key];
+      if (val === undefined || val === null) continue;
+      const sig = JSON.stringify(val);
+      const firstIndex = seen[key].get(sig);
+      if (firstIndex === undefined) {
+        seen[key].set(sig, i);
+      } else {
+        out[key] = `unchanged since items[${firstIndex}]`;
+      }
+    }
+    return out;
+  });
+}
 
 /**
  * The floor below which a mean is indistinguishable from clock quantisation.
@@ -728,10 +777,13 @@ export function attributeZonesToEffects({
 
     const sparseSummary = sparse.length === 0 ? null : summariseSparse(sparse);
     const declared = compareToManifest(measuredMsPerMp, manifest);
+    // report-density-2026-08-12: this exact sentence used to repeat verbatim
+    // for every partial/none-coverage effect (3x in the 2026-08-12 capture) —
+    // `whyNotZoned` right below already carries the SPECIFIC mechanism, and
+    // the standing-gap finding (`effects-unpriceable`) already says this once
+    // for all of them together. Short pointer, not a third copy of the reasoning.
     if (declared.verdict === 'unmeasured' && incomplete && sweepGpu === null) {
-      declared.note =
-        `Not comparable this run: this effect's zone coverage is '${zoning.coverage}', so the zones that DID report ` +
-        'are a fragment of its cost, not a total. Run the sweep for a marginal figure.';
+      declared.note = `Not comparable this run — zone coverage is '${zoning.coverage}'. See whyNotZoned/effects-unpriceable.`;
     } else if (declared.verdict === 'unmeasured' && sparseSummary && !hasGpuZone) {
       declared.note = sparseSummary.bakeFired
         ? 'Not comparable this run: every zone this effect owns is a BAKE. A bake amortised over the window is not ' +
@@ -940,6 +992,7 @@ export function deriveFindings({
   sweepMeasuredCount = 0,
   sweepNoiseFloorMs = null,
   sweepRejectedCount = 0,
+  caches = [],
 }) {
   const out = [];
 
@@ -1345,12 +1398,21 @@ export function deriveFindings({
         !r.isPass && Number.isFinite(r.drawCalls) && r.drawCalls > 0 && Number.isFinite(r.triangles) && r.triangles > 0
     );
     const near = (a, b) => Math.abs(a - b) <= Math.max(a, b) * 0.01;
+    // TRIVIAL (fullscreen-quad) MATCHES ARE COLLECTED, NOT REPORTED ONE-BY-ONE
+    // (report-density-2026-08-12) — see TRIVIAL_GEOMETRY_TRIANGLE_CEILING's own
+    // doc. Every pair's data still reaches the reader, in evidence[], just
+    // folded into ONE finding instead of one verbose finding per pair.
+    const trivialPairs = [];
     for (let i = 0; i < drawn.length; i++) {
       for (let j = i + 1; j < drawn.length; j++) {
         const a = drawn[i];
         const b = drawn[j];
         if (!near(a.drawCalls, b.drawCalls) || !near(a.triangles, b.triangles)) continue;
         const combined = ms((a.gpuMs?.amortisedMsPerFrame ?? 0) + (b.gpuMs?.amortisedMsPerFrame ?? 0));
+        if (a.triangles <= TRIVIAL_GEOMETRY_TRIANGLE_CEILING && b.triangles <= TRIVIAL_GEOMETRY_TRIANGLE_CEILING) {
+          trivialPairs.push({ zones: [a.id, b.id], drawCalls: [a.drawCalls, b.drawCalls], combinedGpuMs: combined });
+          continue;
+        }
         out.push({
           severity:
             combined > 0 && Number.isFinite(attribution?.frameGpuMs) && combined / attribution.frameGpuMs > 0.25
@@ -1366,6 +1428,14 @@ export function deriveFindings({
           },
         });
       }
+    }
+    if (trivialPairs.length > 0) {
+      out.push({
+        severity: 'low',
+        id: 'duplicate-geometry-fullscreen-quads',
+        text: `${trivialPairs.length} pair(s) of zones submit matching tiny (≤${TRIVIAL_GEOMETRY_TRIANGLE_CEILING}-triangle) geometry — the shape every fullscreen post-process quad has by construction (bloom/DoF/present/composite each draw one 2-triangle quad), so this is expected, not a discovery. Listed in evidence for completeness; not worth chasing individually the way a real-geometry match (see any OTHER duplicate-geometry:* finding) is.`,
+        evidence: { pairs: trivialPairs },
+      });
     }
   }
 
@@ -1621,6 +1691,24 @@ export function deriveFindings({
           classes: e.declared.classes,
         },
       });
+    } else if (e.declared?.verdict === 'under') {
+      // report-density-2026-08-12: computed by compareToManifest since day
+      // one, never surfaced here — a reader following findings[] top-down
+      // (this report's own stated reading order) had to manually scan all
+      // 15 effects[] entries by hand to learn a manifest had gone stale on
+      // the CHEAP side. LOW, deliberately: cheap to leave exactly as it is,
+      // this is "the budgeting doc is pessimistic," never a problem.
+      out.push({
+        severity: 'low',
+        id: `declared-cost-overstated:${e.id}`,
+        text: `${e.id}: ${e.declared.note}`,
+        evidence: {
+          effect: e.id,
+          measuredMsPerMp: e.measuredMsPerMp,
+          declaredMinMsPerMp: e.declared.declaredMinMsPerMp,
+          classes: e.declared.classes,
+        },
+      });
     }
   }
 
@@ -1746,6 +1834,21 @@ export function deriveFindings({
     }
   }
 
+  // CACHE HEALTH (2026-08-12) — the generalised form of depth-proxy-pool-
+  // health, applied to every cache this report can see (see cache-report.js's
+  // own header for why this is a blunt, single-threshold check rather than a
+  // per-cache-tuned one). Ranked 'medium', matching depth-proxy-pool-health's
+  // own severity for the same "hit rate under 50%" shape — real, but not
+  // self-evidently a bug the way a shader-rebuild-churn finding is.
+  for (const c of findLowHitRateCaches(caches)) {
+    out.push({
+      severity: 'medium',
+      id: `cache-low-hit-rate:${c.id}`,
+      text: `${c.label} hit rate is ${c.hitRatePct}% (${c.hits} hit${c.hits === 1 ? '' : 's'}, ${c.misses} miss${c.misses === 1 ? '' : 'es'}) during this window. A cache reused far less than it was rebuilt during ordinary panning suggests its invalidation key is changing more often than the content actually does — check what's flipping it every pass rather than assuming this is routine churn.`,
+      evidence: { cache: c.id, hitRatePct: c.hitRatePct, hits: c.hits, misses: c.misses },
+    });
+  }
+
   if (Number.isFinite(frame?.hitches?.count) && frame.hitches.count > 0) {
     out.push({
       severity: frame.hitches.count > 5 ? 'medium' : 'low',
@@ -1757,6 +1860,193 @@ export function deriveFindings({
 
   const order = { high: 0, medium: 1, low: 2 };
   return out.sort((a, b) => order[a.severity] - order[b.severity]);
+}
+
+/**
+ * THE SUMMARY (2026-08-12, author: "a non-technical user... say the problem
+ * is related to 'candles'"). A ranked top-10 in plain language, plus
+ * cache-health warnings, meant to be read FIRST and never require opening
+ * zones[]/effects[]/findings[]/caches[] at all. Pure presentation over data
+ * this file already computed — no new measurement, and every entry carries
+ * its own `sourceIds` so a technical reader can still jump to the raw row.
+ *
+ * WHY EFFECTS AND ZONES ARE MERGED INTO ONE RANKED LIST, NOT TWO SEPARATE
+ * ONES: an effect's own `costMs` already includes every zone it owns (see
+ * `attributeZonesToEffects`), so a zone with `ownerEffectId` set is SKIPPED
+ * here — including it too would double-count. Only NULL-owned zones (engine
+ * work no single effect can claim) compete as their own entries.
+ *
+ * WHY SOME HIGH-SEVERITY FINDINGS ALSO COMPETE FOR A SLOT: a real cost can
+ * hide behind a finding with no zone of its own to rank by — shader-rebuild
+ * churn, two zones submitting the same geometry, an overflowed GPU timestamp
+ * pool. These would never appear in a summary built ONLY from zones[]/
+ * effects[]'s own ms numbers, which is exactly the kind of gap this exists
+ * to close.
+ */
+export function buildOffenderSummary({ rows, effects, findings, caches }) {
+  const zoneById = new Map((rows ?? []).map((r) => [r.id, r]));
+  const effectLabelById = new Map((effects ?? []).map((e) => [e.id, e.label]));
+  /** A finding's evidence sometimes names a zone; if that zone belongs to an
+   * effect, attribute the finding to the EFFECT's human label — this is the
+   * literal "say it's the candles" mechanism the request named. */
+  const labelForZoneId = (zoneId) => {
+    const z = zoneById.get(zoneId);
+    if (!z) return zoneId;
+    if (z.ownerEffectId && effectLabelById.has(z.ownerEffectId)) return effectLabelById.get(z.ownerEffectId);
+    return z.label ?? zoneId;
+  };
+
+  const candidates = [];
+
+  for (const e of effects ?? []) {
+    if (!Number.isFinite(e.costMs) || e.costMs <= 0) continue;
+    const overBudget = e.declared?.verdict === 'over';
+    candidates.push({
+      label: e.label,
+      costMs: e.costMs,
+      severity: overBudget ? 'high' : 'info',
+      whatItMeans: overBudget
+        ? `${e.label} is costing ${e.costMs}ms every frame — ${e.declared.ratioToDeclaredMax}× its own declared budget. This has never been checked against a real measurement before now, so either the budget is stale or something regressed.`
+        : `${e.label} is costing ${e.costMs}ms every frame.`,
+      sourceIds: [e.id],
+    });
+  }
+
+  for (const r of rows ?? []) {
+    if (r.ownerEffectId || r.isPass || r.sparse) continue;
+    const costMs = r.gpuMs?.amortisedMsPerFrame ?? r.cpuMs?.amortisedMsPerFrame ?? null;
+    if (!Number.isFinite(costMs) || costMs <= 0) continue;
+    candidates.push({
+      label: r.label,
+      costMs,
+      severity: 'info',
+      whatItMeans: `${r.label} — engine-level cost not owned by any single effect — is costing ${ms(costMs)}ms every frame.`,
+      sourceIds: [r.id],
+    });
+  }
+
+  // High-severity findings that name real cost with no zone/effect entry of
+  // their own to be folded into above — see this function's own header.
+  const COSTLY_FINDING_PREFIXES = [
+    'duplicate-geometry:',
+    'shader-rebuild-churn',
+    'pipeline-rebuild-churn',
+    'pipeline-programs-grew',
+    'residency-cost-is-not-io',
+    'declared-cost-understated:', // effects[] already carries this effect's OWN costMs — see the note below
+  ];
+  for (const f of findings ?? []) {
+    if (f.severity !== 'high') continue;
+    if (!COSTLY_FINDING_PREFIXES.some((p) => f.id.startsWith(p))) continue;
+    // declared-cost-understated is already represented via its effect's own
+    // candidate above (same costMs, same 'over' branch) — skip the duplicate
+    // rather than let one real cost claim two ranked slots.
+    if (f.id.startsWith('declared-cost-understated:')) continue;
+    const impliedMs = f.evidence?.combinedGpuMs ?? null;
+    const zones = f.evidence?.zones ?? (f.evidence?.zone ? [f.evidence.zone] : []);
+    const label = zones.length ? zones.map(labelForZoneId).join(' + ') : f.id.split(':')[0].replace(/-/g, ' ');
+    candidates.push({
+      label,
+      costMs: impliedMs,
+      severity: 'high',
+      whatItMeans: f.text,
+      sourceIds: [f.id],
+    });
+  }
+
+  // Instrument-health findings are WARNINGS about trusting the numbers
+  // above, not offenders in their own right — kept in a separate list so
+  // they never compete with (or get lost among) real cost entries.
+  const INSTRUMENT_WARNING_PREFIXES = [
+    'profiler-unbalanced-brackets',
+    'timestamp-pool-overflow',
+    'gpu-attribution-unavailable',
+    'attribution-coverage-low',
+    'sweep-produced-nothing',
+  ];
+  const instrumentWarnings = (findings ?? [])
+    .filter((f) => INSTRUMENT_WARNING_PREFIXES.some((p) => f.id.startsWith(p)))
+    .map((f) => ({ severity: f.severity, text: f.text }));
+
+  // Cache warnings — plain-language restatement of cache-low-hit-rate,
+  // never re-derived: same findLowHitRateCaches call deriveFindings already
+  // made, so this can never disagree with findings[] about which caches
+  // qualify.
+  const cacheWarnings = findLowHitRateCaches(caches ?? []).map((c) => ({
+    label: c.label,
+    hitRatePct: c.hitRatePct,
+    text: `${c.label} is only avoiding repeated work ${c.hitRatePct}% of the time this window (${c.misses} unnecessary rebuild${c.misses === 1 ? '' : 's'} out of ${c.hits + c.misses} checks) — worth a look before trusting it as healthy.`,
+  }));
+
+  // Real cost first (descending); high-severity findings with no ms number
+  // rank just under the smallest measured cost rather than at the very top
+  // (a known-real-but-unquantified issue should not outrank a huge measured
+  // one) or the very bottom (it must not vanish below every trivial 0.01ms
+  // zone either).
+  const smallestRealCost = candidates.reduce(
+    (min, c) => (Number.isFinite(c.costMs) && c.costMs < min ? c.costMs : min),
+    Infinity
+  );
+  const rankValue = (c) =>
+    Number.isFinite(c.costMs) ? c.costMs : (smallestRealCost === Infinity ? 1 : smallestRealCost) / 2;
+  candidates.sort((a, b) => rankValue(b) - rankValue(a));
+
+  const topOffenders = candidates.slice(0, 10).map((c, i) => ({
+    rank: i + 1,
+    label: c.label,
+    costMs: Number.isFinite(c.costMs) ? ms(c.costMs) : null,
+    severity: c.severity,
+    whatItMeans: c.whatItMeans,
+    sourceIds: c.sourceIds,
+  }));
+
+  return {
+    note:
+      topOffenders.length === 0
+        ? 'Nothing measured a real cost or tripped a high-severity finding this run — either the scene is genuinely cheap, or attribution.verdict is poor enough that this list would be guessing. Check attribution.verdict before trusting an empty list as good news.'
+        : `Ranked by measured ms/frame where a real number exists; high-severity findings with no zone of their own to rank by are folded in beneath the smallest measured cost, never above it and never dropped. Full detail for any entry: look up its sourceIds in effects[]/zones[]/findings[].`,
+    topOffenders,
+    cacheWarnings,
+    instrumentWarnings,
+  };
+}
+
+/**
+ * Render `summary` (buildOffenderSummary's return value) as plain,
+ * console-friendly text — "the displayed information after a run", not just
+ * a field inside a JSON blob nobody opens. `boot.js`'s `perf-run-full` action
+ * logs this directly, so the answer is on screen the moment the run finishes,
+ * before anyone has to copy/paste/parse anything.
+ * @param {ReturnType<typeof buildOffenderSummary>} summary
+ * @returns {string}
+ */
+export function formatOffenderSummaryText(summary) {
+  if (!summary) return 'No summary available.';
+  const lines = ['🔬 PERFORMANCE SUMMARY', ''];
+  if (summary.topOffenders.length === 0) {
+    lines.push(`(nothing to rank) ${summary.note}`);
+  } else {
+    lines.push('Top performance issues, worst first:');
+    for (const o of summary.topOffenders) {
+      const costText = o.costMs !== null ? `${o.costMs}ms/frame` : '(no direct ms figure)';
+      const flag = o.severity === 'high' ? ' ⚠️' : '';
+      lines.push(`  ${o.rank}. ${o.label} — ${costText}${flag}`);
+      lines.push(`     ${o.whatItMeans}`);
+    }
+  }
+  lines.push('');
+  if (summary.cacheWarnings.length === 0) {
+    lines.push('Cache health: no cache is unhealthy this run.');
+  } else {
+    lines.push('⚠️ Cache warnings:');
+    for (const w of summary.cacheWarnings) lines.push(`  - ${w.text}`);
+  }
+  if (summary.instrumentWarnings.length > 0) {
+    lines.push('');
+    lines.push('⚠️ Instrument warnings (numbers above may be affected):');
+    for (const w of summary.instrumentWarnings) lines.push(`  - [${w.severity}] ${w.text}`);
+  }
+  return lines.join('\n');
 }
 
 /** The reading order, stated. Every report in this codebase ends with one. */
@@ -1771,6 +2061,7 @@ function buildInterpretation({ attribution, method }) {
     `An effect with method:'cpu-zone-only' (e.g. specular sync, vegetation rank-stamp, wind bake) has a real, measured cost — read effects[].zoneCpuMs. It has no draw-call GPU cost by nature, so declared.verdict reads 'unmeasured' by design, not because the run failed to see it.`,
     `A null is an ABSENCE, never a zero. zones[].gpuAbsentByDeclaration true means the zone contains no draw calls at all; null with that flag false means measurement failed.`,
     `Sparse zones (cadence 'bake'/'event') are excluded from per-frame sums by construction — read their occurrenceRate and maxMs, never their mean, and see findings[] for any that spike over budget.`,
+    `caches[] is a DIFFERENT axis from zones[] — how well each cache is reusing work, not how much CPU/GPU time was spent. A low hitRatePct earns a cache-low-hit-rate finding; a null hitRatePct means that cache exposes no hits counter to compute one from (see each row's own note), not a healthy 0% read as absent.`,
     method?.cpuClockResolutionMs
       ? `CPU means below ${method.cpuClockResolutionMs}ms/sqrt(12n) are listed in belowClockResolution[] with no number attached; the clock physically cannot resolve them and a number there would be noise dressed as a measurement.`
       : `The CPU clock resolution was not measured this run, so no noise floor was applied — treat small CPU means with suspicion.`,
@@ -1802,8 +2093,10 @@ export function buildPerfReport({
   gpuTimer = null,
   pipelineStats = null,
   depthProxyPoolStats = null,
+  cacheStats = null,
   shaderRebuildStats = null,
   pipelineRebuildStats = null,
+  passSlotStats = null,
   windowDiagnostics = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
@@ -1892,7 +2185,11 @@ export function buildPerfReport({
       kept: Math.min(hitchCap, hitchItems.length),
       droppedFromReport: Math.max(0, hitchItems.length - hitchCap),
       droppedByRing: Number.isFinite(frame.hitchesDropped) ? frame.hitchesDropped : null,
-      items: [...hitchItems].sort((a, b) => (b.gapMs ?? 0) - (a.gapMs ?? 0)).slice(0, hitchCap),
+      // dedupeHitchContext skipped under verbosity:'full' — that mode's whole
+      // contract (see `zonesCollapsed`'s own note) is "nothing collapsed".
+      items: full
+        ? [...hitchItems].sort((a, b) => (b.gapMs ?? 0) - (a.gapMs ?? 0)).slice(0, hitchCap)
+        : dedupeHitchContext([...hitchItems].sort((a, b) => (b.gapMs ?? 0) - (a.gapMs ?? 0)).slice(0, hitchCap)),
     },
     inFlightDuringHitches: frame.hitchZones ?? null,
   };
@@ -1914,6 +2211,14 @@ export function buildPerfReport({
   );
   const sweepRejectedCount = effects.filter((e) => e.sweepUnresolvable !== null).length;
   const bottleneck = classifyBottleneck({ gapMs: frameBlock.gapMs, gpuMs: frameBlock.gpuMs });
+  const caches = buildCacheRows({
+    cacheStats,
+    depthProxyPoolStats,
+    shaderRebuildStats,
+    pipelineRebuildStats,
+    passSlotStats,
+    windowDiagnostics,
+  });
   const findings = deriveFindings({
     attribution,
     rows: allRows,
@@ -1936,11 +2241,33 @@ export function buildPerfReport({
     sweepMeasuredCount,
     sweepNoiseFloorMs,
     sweepRejectedCount,
+    caches,
   });
+
+  // STRIP cpuEarlyMs FROM EVERY ZONE THE temporal-shape FINDING DID NOT FLAG
+  // (report-density-2026-08-12) — it is computed (findings[] above already
+  // read it) but carried on every zone regardless of the verdict: the
+  // 2026-08-12 live capture had it on 61 of 63 zones and it explained exactly
+  // 1 finding. Kept in full under verbosity:'full'; kept on any zone that DID
+  // earn a `temporal-shape:*` finding, since that is the one case where a
+  // reader would want to see the early/late split with their own eyes rather
+  // than trust the verdict alone. New objects, not mutation — `allRows` (what
+  // `deriveFindings` above already read) is left untouched.
+  const flaggedShapeZoneIds = new Set(
+    findings.filter((f) => f.id.startsWith('temporal-shape:')).map((f) => f.evidence?.zone)
+  );
+  const trimmedZones = full
+    ? kept
+    : kept.map((r) => (r.cpuEarlyMs && !flaggedShapeZoneIds.has(r.id) ? { ...r, cpuEarlyMs: undefined } : r));
+
+  const summary = buildOffenderSummary({ rows: allRows, effects, findings, caches });
 
   return {
     report: 'perf-profile',
     formatVersion: 1,
+    // FIRST ON PURPOSE (2026-08-12) — the one thing meant to be read without
+    // opening anything else. See buildOffenderSummary's own header.
+    summary,
     generatedAt,
     msaVersion,
     codename,
@@ -1988,7 +2315,7 @@ export function buildPerfReport({
     // frame is still only a third of the answer.
     bottleneck,
     attribution,
-    zones: kept,
+    zones: trimmedZones,
     zonesCollapsed: collapsed,
     belowClockResolution: {
       note:
@@ -1998,6 +2325,12 @@ export function buildPerfReport({
       ids: belowClock.map((r) => r.id),
     },
     effects,
+    // EVERY CACHE THIS REPORT CAN SEE, one row each (2026-08-12) — see
+    // cache-report.js's own header for the adapter that built this and why
+    // three of these rows mirror instrument.* fields below rather than
+    // owning a second copy of that data. `findings[]`'s own `cache-low-hit-
+    // rate:*` entries are the generalised verdict on this same array.
+    caches,
     // THE RAW SWEEP, ECHOED BACK VERBATIM (2026-08-06) — everything above this
     // point CONSUMES `sweep` (attributeZonesToEffects, estimateSweepNoiseFloor)
     // and reshapes it into the zone-oriented `effects[]`/`findings` shape; that
@@ -2052,6 +2385,20 @@ export function buildPerfReport({
       // own header. `null` means the harness in use does not implement
       // readPipelineRebuildStats, not "no churn happened".
       pipelineRebuildStats,
+      // PASS-SLOT ALLOCATOR, RAW (cache-completeness pass, 2026-08-12) —
+      // frame-profiler.js's own `{slots, declaredCount, passSlotsUsed}`,
+      // already relative to this window (reset on every arm). `null` means
+      // the harness does not implement readPassSlotStats. See
+      // `framePassSlotAllocator` in caches[] for the normalized row, and
+      // `profilerAnomalies.passSlotOverflow` for when this ran out of room.
+      passSlotStats,
+      // CACHE HEALTH, RAW (2026-08-12) — the keyed start/end snapshot pair
+      // `caches[]` above was built from, echoed back verbatim for a reader
+      // who wants a cache's own native shape (page-cache.js's
+      // capacityPages/pinnedCoarse/etc., decode-pool's idb*/worker* fields)
+      // rather than the normalized row. `null` means the harness does not
+      // implement readCacheStats.
+      cacheStats,
       // WINDOW-SURFACE COMPOSITION (2026-08-12) — one entry per floor that
       // has ever synced, each carrying `sceneChildCount`/`sceneChildren` from
       // `getStatus()`. `null` means the harness does not implement

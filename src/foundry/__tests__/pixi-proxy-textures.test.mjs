@@ -1,12 +1,22 @@
 /**
  * Node verification for foundry/pixi-proxy-textures.js's pure part
- * (computeProxyDimensions). registerPixiProxy/getPixiResidencyReport touch
- * OffscreenCanvas/createImageBitmap/the global PIXI (browser-only) -- verified
- * live via the debug panel instead, per this codebase's own convention.
+ * (computeProxyDimensions), PLUS registerPixiProxy's three EARLY-RETURN
+ * branches (unavailable/already-cached/too-small), which resolve before
+ * touching OffscreenCanvas/createImageBitmap and so ARE reachable with an
+ * injected fake `PIXI` (the function's own `opts.PIXI` seam). The actual
+ * seed path (OffscreenCanvas draw + createImageBitmap + real PIXI.Assets)
+ * stays browser-only -- verified live via the debug panel, per this
+ * codebase's own convention -- so getPixiProxyStats().registered is proven
+ * to exist and start at a sane baseline here, not to actually increment.
  */
-import { computeProxyDimensions, DEFAULT_MAX_PROXY_DIMENSION_PX } from '../pixi-proxy-textures.js';
+import {
+  computeProxyDimensions,
+  DEFAULT_MAX_PROXY_DIMENSION_PX,
+  registerPixiProxy,
+  getPixiProxyStats,
+} from '../pixi-proxy-textures.js';
 
-export function run(t) {
+export async function run(t) {
   const { ok } = t;
 
   ok(
@@ -73,4 +83,47 @@ export function run(t) {
       d.width >= 1 && d.height >= 1
     );
   }
+
+  // ==========================================================================
+  // registerPixiProxy's three EARLY-RETURN branches, via an injected fake
+  // PIXI — none of these reach OffscreenCanvas/createImageBitmap.
+  // ==========================================================================
+  const before = getPixiProxyStats();
+
+  // --- PIXI unavailable ------------------------------------------------------
+  {
+    const r = await registerPixiProxy('foo.webp', { width: 4000, height: 4000 }, { PIXI: {} });
+    ok('no PIXI.Assets.cache: registered:false', r.registered === false);
+    ok('no PIXI.Assets.cache: reason names the actual cause', /unavailable/.test(r.reason));
+  }
+
+  // --- already cached under this exact src ------------------------------------
+  {
+    const fakePIXI = { Assets: { cache: new Map([['already.webp', {}]]) } };
+    const r = await registerPixiProxy('already.webp', { width: 4000, height: 4000 }, { PIXI: fakePIXI });
+    ok('already-cached src: registered:false', r.registered === false);
+    ok('already-cached src: reason names the actual cause', /already registered/.test(r.reason));
+  }
+
+  // --- source already small enough: proxying would not help ------------------
+  {
+    const fakePIXI = { Assets: { cache: new Map() } };
+    const r = await registerPixiProxy(
+      'small.webp',
+      { width: 800, height: 600 },
+      { PIXI: fakePIXI, maxDimensionPx: 1024 }
+    );
+    ok('already-small source: registered:false', r.registered === false);
+    ok('already-small source: reason names the actual cause', /would not help/.test(r.reason));
+  }
+
+  // --- getPixiProxyStats reflects exactly those three outcomes, and no other -
+  const after = getPixiProxyStats();
+  ok('unavailable incremented by exactly 1', after.unavailable - before.unavailable === 1);
+  ok('alreadyCached incremented by exactly 1', after.alreadyCached - before.alreadyCached === 1);
+  ok('skippedTooSmall incremented by exactly 1', after.skippedTooSmall - before.skippedTooSmall === 1);
+  ok(
+    'registered did NOT increment — none of the three branches above reach the real seed path',
+    after.registered === before.registered
+  );
 }

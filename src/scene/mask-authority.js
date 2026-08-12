@@ -185,6 +185,21 @@ export function createMaskAuthority({ readPageImageData, log }) {
   let dirty = false;
   let products = []; // DerivedFloorProducts[], valid when !dirty
   let productsVersion = -1;
+  // BAKE-GATE HEALTH (perf-instrumentation-audit-2026-08-12) — `recomputeIfDirty`
+  // is the version-gated bake underneath nearly every derived-mask consumer
+  // in this file; `bakeSkips` (dirty was already false — the products from
+  // last time are still valid) vs `bakeRuns` (dirty was true — a real
+  // recompute happened) is the SAME "bakes vs polls" shape
+  // `water-body-subsystem.js#getStatus` already reports, and answers a
+  // question §5.8 (docs/planning/Performance-Audit-2026-08.md) already
+  // raised but never measured: a scene where `touch()` fires far more often
+  // than the derived products actually need to change (the arity-1 CRUD-hook
+  // bug that file names — ANY field write to ANY Tile/Level triggers this)
+  // would show as a bakeRuns/bakeSkips ratio much higher than the real
+  // content-change rate. `!scene.gridSpec` (scene not ready yet) is counted
+  // as neither — no cache decision was possible, not a hit.
+  let bakeRuns = 0;
+  let bakeSkips = 0;
 
   const counters = {
     pagesOffered: 0,
@@ -556,7 +571,12 @@ export function createMaskAuthority({ readPageImageData, log }) {
   }
 
   function recomputeIfDirty() {
-    if (!dirty || !scene.gridSpec) return;
+    if (!scene.gridSpec) return; // not ready yet — no cache decision was possible, not a hit
+    if (!dirty) {
+      bakeSkips += 1;
+      return;
+    }
+    bakeRuns += 1;
     const outdoorsKind = maskKindById('outdoors');
 
     // A LEVEL'S OWN ART BELONGS TO EXACTLY ONE FLOOR, and that is a stronger
@@ -1036,10 +1056,40 @@ export function createMaskAuthority({ readPageImageData, log }) {
     });
   }
 
+  /**
+   * ONE-SHOT mask discovery's own summary (cache-completeness pass,
+   * 2026-08-12) — see `foundry/mask-discovery.js`'s own header for why this
+   * has no ongoing hit/miss pair to poll: `listingCache`/`probeMemo` are
+   * function-LOCAL to `discoverAuthoredMasks`, discarded the instant it
+   * returns. `scene.discovery` is the STORED result from the one run at
+   * scene load (`setDiscovery` above), so this reads that instead of trying
+   * to observe something that no longer exists. `null` before discovery has
+   * ever run.
+   */
+  function getDiscoveryStats() {
+    if (!scene.discovery) return null;
+    // Defensive against `perFloor`/`failures` being absent, not just empty —
+    // several existing tests build a `setDiscovery` payload by hand with
+    // only the fields THEIR OWN assertions need (byTargetId/method), same
+    // as any other partial-fixture risk this codebase already guards for
+    // elsewhere. `Array.isArray` before `.length`/`.filter` turns a missing
+    // field into an honest `null`, never a throw.
+    const perFloor = Array.isArray(scene.discovery.perFloor) ? scene.discovery.perFloor : null;
+    const failures = Array.isArray(scene.discovery.failures) ? scene.discovery.failures : null;
+    return {
+      method: scene.discovery.method ?? null,
+      probesAttempted: Number.isFinite(scene.discovery.probesAttempted) ? scene.discovery.probesAttempted : null,
+      floorsDiscovered: perFloor ? perFloor.length : null,
+      floorsWithMasks: perFloor ? perFloor.filter((f) => f.found > 0).length : null,
+      failures: failures ? failures.length : null,
+    };
+  }
+
   return {
     reset,
     setItems,
     setDiscovery,
+    getDiscoveryStats,
     layersForItem,
     ingestDecodedPage,
     ingestItemAlpha,
@@ -1136,6 +1186,15 @@ export function createMaskAuthority({ readPageImageData, log }) {
     getProductsVersion() {
       recomputeIfDirty();
       return productsVersion;
+    },
+    /** BAKE-GATE HEALTH — see `bakeRuns`/`bakeSkips`' own declaration above.
+     * Lifetime counters; a caller wanting one window's rate samples this
+     * before and after, same convention as `depth-proxy-material-pool.js`'s
+     * `stats()`. Deliberately NOT gated behind `recomputeIfDirty()` — this
+     * reports the counters' CURRENT state, and forcing a recompute just to
+     * read them would corrupt the very count being read. */
+    getBakeStats() {
+      return { bakeRuns, bakeSkips };
     },
     /**
      * Which floors have AUTHORED content for a `rasterize: true` kind — the

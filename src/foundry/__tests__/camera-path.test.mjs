@@ -399,6 +399,39 @@ export function run(t) {
       return s2n[0].y === n2s[1].y && s2n[1].y === n2s[0].y;
     })()
   );
+
+  // ---- sw_to_ne / ne_to_sw — rapid-diagonal-stress-2026-08-12 --------------
+  ok(
+    'sw_to_ne and ne_to_sw are exact reverses of each other',
+    (() => {
+      const sw2ne = generateKeyframePreset('sw_to_ne', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
+      const ne2sw = generateKeyframePreset('ne_to_sw', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).keyframes;
+      return (
+        sw2ne[0].x === ne2sw[1].x && sw2ne[0].y === ne2sw[1].y && sw2ne[1].x === ne2sw[0].x && sw2ne[1].y === ne2sw[0].y
+      );
+    })()
+  );
+  ok(
+    // Y increases SOUTH (feedback_y_flip_recurring_risk) — southwest must be
+    // the LARGER y (further south) and the SMALLER x (further west); the
+    // second keyframe (northeast) is the opposite on both axes. A flipped
+    // axis here would silently sweep SE->NW or NW->SE instead, covering the
+    // wrong diagonal while still "looking like" a corner-to-corner move.
+    'sw_to_ne genuinely starts SOUTH-WEST (larger y, smaller x) and ends NORTH-EAST (smaller y, larger x)',
+    (() => {
+      const [sw, ne] = generateKeyframePreset('sw_to_ne', {
+        dims: SQUARE_DIMS,
+        screenW: 1920,
+        screenH: 1080,
+      }).keyframes;
+      return sw.y > ne.y && sw.x < ne.x;
+    })()
+  );
+  ok(
+    'the diagonal preset also suggests longJumpFadeCut:false — it is the LONGEST possible pair on the map',
+    generateKeyframePreset('sw_to_ne', { dims: SQUARE_DIMS, screenW: 1920, screenH: 1080 }).suggestedLongJumpFadeCut ===
+      false
+  );
   ok(
     "every preset suggests V2's own 15s-per-leg pacing",
     (() => {

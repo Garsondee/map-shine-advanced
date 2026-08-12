@@ -29,6 +29,20 @@ const STORE = 'pages';
 /** @type {Promise<IDBDatabase|null>|null} */
 let _openPromise = null;
 
+// POOL HEALTH (cache-completeness pass, 2026-08-12) — module-level, not
+// closure-local: unlike every other cache in this codebase, this module
+// exports bare functions with no factory/enclosing scope to hold counters
+// in. hits/misses are getPageBlob's own READ outcome (a real Blob found vs
+// not — the caller falls back to slicing from source on a miss, this
+// module's own header); writes/writeFailures are putPageBlob's own outcome.
+// A `db` unavailable/transaction-error read is NEITHER a hit nor a miss —
+// no cache decision was possible, same doctrine every bake-gate in this
+// pass uses for its own "not ready" branch.
+let _pageHits = 0;
+let _pageMisses = 0;
+let _pageWrites = 0;
+let _pageWriteFailures = 0;
+
 /** @returns {Promise<IDBDatabase|null>} */
 function openDb() {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
@@ -69,7 +83,11 @@ export async function getPageBlob(key) {
     try {
       const tx = db.transaction(STORE, 'readonly');
       const req = tx.objectStore(STORE).get(String(key));
-      req.onsuccess = () => resolve(req.result ?? null);
+      req.onsuccess = () => {
+        if (req.result) _pageHits += 1;
+        else _pageMisses += 1;
+        resolve(req.result ?? null);
+      };
       req.onerror = () => resolve(null);
     } catch (_) {
       resolve(null);
@@ -85,12 +103,26 @@ export async function putPageBlob(key, blob) {
     try {
       const tx = db.transaction(STORE, 'readwrite');
       tx.objectStore(STORE).put(blob, String(key));
-      tx.oncomplete = () => resolve(true);
-      tx.onerror = () => resolve(false);
+      tx.oncomplete = () => {
+        _pageWrites += 1;
+        resolve(true);
+      };
+      tx.onerror = () => {
+        _pageWriteFailures += 1;
+        resolve(false);
+      };
     } catch (_) {
       resolve(false);
     }
   });
+}
+
+/** Snapshot of this module's own read/write counters — for the perf
+ * report's cache-health pass. Lifetime counters; a caller wanting one
+ * window's rate samples before/after, same convention as
+ * `depth-proxy-material-pool.js`. */
+export function getPyramidStoreStats() {
+  return { hits: _pageHits, misses: _pageMisses, writes: _pageWrites, writeFailures: _pageWriteFailures };
 }
 
 /**

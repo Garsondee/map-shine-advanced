@@ -54,6 +54,22 @@
 /** Keyhole.md §4.3's own stated proxy ceiling. */
 export const DEFAULT_MAX_PROXY_DIMENSION_PX = 1024;
 
+// WRITE-OUTCOME HEALTH (cache-completeness pass, 2026-08-12) — module-level,
+// same reasoning as vt/pyramid-store.js: no factory/closure here to hold
+// counters in. ⚠️ THESE ARE NOT HITS/MISSES AGAINST PIXI.Assets.cache — this
+// module does not own that store and cannot see Foundry's/PixiJS's own
+// internal lookups against it (this file's own header: "the one fact...
+// can't be confirmed from source alone"). They count MSA's OWN write
+// ATTEMPTS into it: registered = a proxy was actually seeded (real work
+// done); alreadyCached = registerPixiProxy was asked to seed a src that was
+// already resident (redundant call avoided, not a Foundry cache hit);
+// tooSmall/unavailable are structural non-applicability, neither a hit nor
+// a miss — no decision about caching was made at all.
+let proxyRegistered = 0;
+let proxyAlreadyCached = 0;
+let proxySkippedTooSmall = 0;
+let proxyUnavailable = 0;
+
 /**
  * Pure: the proxy's output dimensions for a given source size, preserving
  * aspect ratio, never upscaling. `needed:false` means the source is already
@@ -104,14 +120,17 @@ export async function registerPixiProxy(realSrc, sourceBitmap, opts = {}) {
   const maxDimensionPx = opts.maxDimensionPx ?? DEFAULT_MAX_PROXY_DIMENSION_PX;
   const PIXI = opts.PIXI ?? globalThis.PIXI;
   if (!PIXI?.Assets?.cache) {
+    proxyUnavailable += 1;
     return { registered: false, reason: 'PIXI.Assets.cache unavailable (not running inside Foundry?)' };
   }
   if (PIXI.Assets.cache.has(realSrc)) {
+    proxyAlreadyCached += 1;
     return { registered: false, reason: 'already registered/cached under this src' };
   }
 
   const dims = computeProxyDimensions(sourceBitmap.width, sourceBitmap.height, maxDimensionPx);
   if (!dims.needed) {
+    proxySkippedTooSmall += 1;
     return { registered: false, reason: 'source already <= maxDimensionPx; proxying would not help' };
   }
 
@@ -134,6 +153,7 @@ export async function registerPixiProxy(realSrc, sourceBitmap, opts = {}) {
   const baseTexture = PIXI.BaseTexture.from(proxyBitmap);
   const texture = new PIXI.Texture(baseTexture);
   PIXI.Assets.cache.set(realSrc, texture);
+  proxyRegistered += 1;
 
   return {
     registered: true,
@@ -178,4 +198,18 @@ export function getPixiResidencyReport(srcs, PIXIOverride) {
     };
   });
   return { available: true, entries };
+}
+
+/** Snapshot of this module's own write-outcome counters — see their
+ * declaration above for why these are NOT hits/misses against
+ * PIXI.Assets.cache itself. Lifetime counters; a caller wanting one
+ * window's rate samples before/after, same convention as
+ * `depth-proxy-material-pool.js`. */
+export function getPixiProxyStats() {
+  return {
+    registered: proxyRegistered,
+    alreadyCached: proxyAlreadyCached,
+    skippedTooSmall: proxySkippedTooSmall,
+    unavailable: proxyUnavailable,
+  };
 }

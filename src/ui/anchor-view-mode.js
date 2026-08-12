@@ -91,6 +91,10 @@ export function installAnchorViewMode(_MapShine) {
     markers: new Map(), // "<kindId>:<anchorId>" -> { el, anchor, kind }
     windowHandlers: null,
     raf: 0,
+    // POOL HEALTH (cache-completeness pass, 2026-08-12) — same doctrine as
+    // ui/anchor-mode.js's own markerPoolStats: hits = an existing marker
+    // reused; misses = a new markerId, its icon created.
+    markerPoolStats: { hits: 0, misses: 0 },
   };
 
   function notify(msg, type = 'info') {
@@ -271,11 +275,13 @@ export function installAnchorViewMode(_MapShine) {
         seen.add(markerId);
         let entry = state.markers.get(markerId);
         if (!entry) {
+          state.markerPoolStats.misses += 1;
           const el = makeIconEl(markerId, kind, anchor);
           state.markerLayer.appendChild(el);
           entry = { el, anchor, kind };
           state.markers.set(markerId, entry);
         } else {
+          state.markerPoolStats.hits += 1;
           entry.anchor = anchor; // keep the cached anchor fresh for the toggle handler
         }
         positionIcon(entry.el, anchor);
@@ -321,5 +327,14 @@ export function installAnchorViewMode(_MapShine) {
     state.windowHandlers = null;
   }
 
-  return { enter, exit, isActive };
+  return {
+    enter,
+    exit,
+    isActive,
+    /** POOL HEALTH — see markerPoolStats' own declaration for the exact
+     * hit/miss doctrine. */
+    getMarkerPoolStats() {
+      return { ...state.markerPoolStats };
+    },
+  };
 }

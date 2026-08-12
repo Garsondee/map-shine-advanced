@@ -736,4 +736,107 @@ export async function run(t) {
     () => failing.sampleWorld('outdoors', 0, 5, 5),
     'REQUIRED MASK MISSING'
   );
+
+  // --- getBakeStats() — perf-instrumentation-audit-2026-08-12 --------------
+  // The bake-gate hit/miss counters underneath recomputeIfDirty(). Asserted
+  // as DELTAS across a controlled call sequence, not absolute counts — the
+  // exact number of internal recomputeIfDirty() calls reset()/setDiscovery()
+  // themselves trigger is an implementation detail this test does not pin.
+  {
+    const gate = createMaskAuthority({ readPageImageData: (bitmap) => bitmap, log });
+    gate.reset({
+      sceneKey: 'bake-gate-test',
+      dimensions: { width: 10, height: 10 },
+      floors: [{ index: 0, id: 'L0', name: 'x', ceilingElevation: 5 }],
+      items: [
+        { id: 'level:L0:background', kind: 'levelBackground', levelId: 'L0', hidden: false, key: { elevation: 0 } },
+      ],
+      resolvePlacement: () => ({ x: 5, y: 5, width: 10, height: 10 }),
+    });
+    const beforeVersion = gate.getBakeStats();
+    // First read after reset() — content is genuinely dirty (a real scene
+    // just loaded), so this MUST cost at least one real recompute.
+    gate.getProductsVersion();
+    const afterFirstRead = gate.getBakeStats();
+    t.ok(
+      'a version read right after reset() causes at least one real bake (bakeRuns increases)',
+      afterFirstRead.bakeRuns > beforeVersion.bakeRuns
+    );
+    // Second read, nothing changed in between — must be a skip, not a
+    // second recompute of identical products.
+    gate.getProductsVersion();
+    const afterSecondRead = gate.getBakeStats();
+    t.ok(
+      'a second, redundant version read with nothing changed in between is a SKIP, not another bake',
+      afterSecondRead.bakeRuns === afterFirstRead.bakeRuns && afterSecondRead.bakeSkips > afterFirstRead.bakeSkips
+    );
+    // A real content change (another reset()) must make the NEXT read cost a
+    // real bake again — the gate is not stuck permanently skipping.
+    gate.reset({
+      sceneKey: 'bake-gate-test-2',
+      dimensions: { width: 10, height: 10 },
+      floors: [{ index: 0, id: 'L0', name: 'x', ceilingElevation: 5 }],
+      items: [
+        { id: 'level:L0:background', kind: 'levelBackground', levelId: 'L0', hidden: false, key: { elevation: 0 } },
+      ],
+      resolvePlacement: () => ({ x: 5, y: 5, width: 10, height: 10 }),
+    });
+    gate.getProductsVersion();
+    const afterRealChange = gate.getBakeStats();
+    t.ok(
+      'a genuine content change (a second reset()) causes another real bake, not a permanent skip state',
+      afterRealChange.bakeRuns > afterSecondRead.bakeRuns
+    );
+  }
+
+  // --- getDiscoveryStats() — cache-completeness pass, 2026-08-12 -----------
+  // A ONE-SHOT summary of scene.discovery, not an ongoing hit/miss pair —
+  // see this method's own doc.
+  {
+    const disco = createMaskAuthority({ readPageImageData: (bitmap) => bitmap, log });
+    disco.reset({
+      sceneKey: 'discovery-stats-test',
+      dimensions: { width: 10, height: 10 },
+      floors: [{ index: 0, id: 'L0', name: 'x', ceilingElevation: 5 }],
+      items: [
+        { id: 'level:L0:background', kind: 'levelBackground', levelId: 'L0', hidden: false, key: { elevation: 0 } },
+      ],
+      resolvePlacement: () => ({ x: 5, y: 5, width: 10, height: 10 }),
+    });
+    t.ok(
+      'before any setDiscovery call, getDiscoveryStats() is null, not a fabricated zero',
+      disco.getDiscoveryStats() === null
+    );
+
+    disco.setDiscovery({
+      byTargetId: new Map(),
+      method: 'mixed',
+      probesAttempted: 7,
+      perFloor: [
+        { targetId: 'level:L0:background', method: 'listing', found: 2, aliasesUsed: [] },
+        { targetId: 'level:L1:background', method: 'probe', found: 0, aliasesUsed: [] },
+      ],
+      failures: [{ targetId: 'level:L1:background', stage: 'listing', detail: 'denied' }],
+    });
+    const full = disco.getDiscoveryStats();
+    t.ok('method is read straight through', full.method === 'mixed');
+    t.ok('probesAttempted is read straight through', full.probesAttempted === 7);
+    t.ok('floorsDiscovered is perFloor.length (2)', full.floorsDiscovered === 2);
+    t.ok('floorsWithMasks counts only entries with found > 0 (1, not 2)', full.floorsWithMasks === 1);
+    t.ok('failures is failures.length (1)', full.failures === 1);
+
+    // A partial payload (perFloor/failures absent) is a REAL shape other
+    // tests in this file already construct (setDiscovery only needs
+    // byTargetId/method for THEIR assertions) — must produce an honest
+    // null, never throw on `.length`/`.filter` of an absent array.
+    disco.setDiscovery({ byTargetId: new Map(), method: 'listing', probesAttempted: 0 });
+    const partial = disco.getDiscoveryStats();
+    t.ok('a partial payload does not throw', partial !== undefined);
+    t.ok(
+      'floorsDiscovered is null, not a crash or a fabricated 0, when perFloor is absent',
+      partial.floorsDiscovered === null
+    );
+    t.ok('floorsWithMasks is null for the same reason', partial.floorsWithMasks === null);
+    t.ok('failures is null when the field itself is absent', partial.failures === null);
+  }
 }

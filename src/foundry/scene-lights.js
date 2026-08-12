@@ -375,13 +375,18 @@ export function wallClipCacheEntryMatches(cached, { floorId, x, y, radius, angle
  *   already resolved this frame (never re-derived here).
  * @returns {{lights: Array<NonNullable<ReturnType<typeof deriveLightSnapshot>>>,
  *   source: 'scene'|'default', reason: string|null,
- *   seenSourceIds: Set<string>}} `seenSourceIds` is every id THIS FUNCTION
+ *   seenSourceIds: Set<string>, wallClipHits: number, wallClipMisses: number}}
+ *   `seenSourceIds` is every id THIS FUNCTION
  *   looked at, before `deriveLightSnapshot`'s own darkness-window filter —
  *   deliberately wider than `lights`, so a caller pruning `wallClipCache`
  *   against it does not evict a still-real light's cache entry just because
  *   this particular frame's darkness01 put it outside its own window (a light
  *   that cycles in/out of its window is not the same event as a light being
  *   deleted, and only the second one should evict a cache entry).
+ *   `wallClipHits`/`wallClipMisses` — real counts against `wallClipCache`
+ *   this call (perf-instrumentation-audit-2026-08-12), both 0 when no cache
+ *   was supplied. The caller accumulates these into its own lifetime
+ *   `getWallClipCacheStats()` readout (point-light-pool.js).
  */
 export function readActiveLightSources(darkness01, { wallClipCache = null, floorId = null } = {}) {
   try {
@@ -392,10 +397,21 @@ export function readActiveLightSources(darkness01, { wallClipCache = null, floor
         source: 'default',
         seenSourceIds: new Set(),
         reason: 'no active scene (canvas.effects.lightSources is absent) — reading as zero lights, not guessed',
+        wallClipHits: 0,
+        wallClipMisses: 0,
       };
     }
     const lights = [];
     const seenSourceIds = new Set();
+    // WALL-CLIP CACHE HEALTH (perf-instrumentation-audit-2026-08-12) — real
+    // counts, not derived from cache.size before/after: size alone cannot
+    // distinguish "reused an existing entry" from "recomputed and
+    // overwrote one", and those are the exact two outcomes a hit rate
+    // needs to tell apart. Zero when `wallClipCache` is not supplied — a
+    // caller running the pure, uncached path genuinely performs zero cache
+    // checks, not an unmeasured number of them.
+    let wallClipHits = 0;
+    let wallClipMisses = 0;
     for (const source of collection) {
       if (!source || source.sourceId === 'globalLight') continue;
       seenSourceIds.add(source.sourceId);
@@ -439,6 +455,15 @@ export function readActiveLightSources(darkness01, { wallClipCache = null, floor
           angle: source.data?.angle,
           rotation: source.data?.rotation,
         });
+        // Only counted when a cache was actually supplied — the pure,
+        // uncached call shape (`wallClipCache` omitted) always takes the
+        // "recompute" branch below by construction (`wallClipCacheEntryMatches`
+        // returns false for an undefined `cached`), and that is not a real
+        // MISS against a cache that was never asked to hold anything.
+        if (wallClipCache) {
+          if (stillValid) wallClipHits += 1;
+          else wallClipMisses += 1;
+        }
         const recomputed = stillValid
           ? cached
           : computeLightWallClippedShape({
@@ -537,13 +562,15 @@ export function readActiveLightSources(darkness01, { wallClipCache = null, floor
       );
       if (snap) lights.push(snap);
     }
-    return { lights, source: 'scene', reason: null, seenSourceIds };
+    return { lights, source: 'scene', reason: null, seenSourceIds, wallClipHits, wallClipMisses };
   } catch (err) {
     return {
       lights: [],
       source: 'default',
       seenSourceIds: new Set(),
       reason: `reading canvas.effects.lightSources threw: ${err?.message ?? err}`,
+      wallClipHits: 0,
+      wallClipMisses: 0,
     };
   }
 }

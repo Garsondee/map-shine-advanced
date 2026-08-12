@@ -5,12 +5,15 @@
  * guarantee. The DOM panel is browser-verified (CONVENTIONS §4).
  */
 import {
+  SWEEP_AB_SIGNIFICANCE_FACTOR,
   buildSweepConfigs,
-  summarizeSweep,
+  compareSweepPair,
+  formatCost,
   formatMs,
   formatOther,
-  formatCost,
   runSweep,
+  runSweepStructuralAB,
+  summarizeSweep,
   waitForGpuSamples,
 } from '../perf-lab.js';
 
@@ -515,5 +518,211 @@ export async function run(t) {
       waitFrames: immediate,
     });
     ok('a harness without getContext still returns a full report, context is null not a throw', out2.context === null);
+  }
+
+  // ======================================================================
+  // compareSweepPair — two independent full sweeps, on vs off
+  // ======================================================================
+  // The real shape this answers: does a structural toggle (early-Z) cost
+  // anything on the CLEANEST possible reading (all-effects-off baseline),
+  // and does the effect stack agree.
+  {
+    const sweepResult = (baselineGpu, allGpu, floor, perEffect) => ({
+      summary: { baseline: { gpuMs: baselineGpu }, all: { gpuMs: allGpu }, noiseFloorMs: floor, perEffect },
+    });
+    const eff = (id, costMs, resolved = true) => ({ id, label: id, costMs, resolved });
+
+    // ON costs 5ms more on the bare baseline; both runs' floors are tiny (0.05),
+    // so 5ms clears 0.05 * 1.5 comfortably. Per-effect costs identical on both
+    // sides — the toggle should not be seen to move any individual effect.
+    const on = sweepResult(25, 25.4, 0.05, [eff('candleFlame', 0.3), eff('uiWindowShadow', 0.1)]);
+    const off = sweepResult(20, 20.4, 0.05, [eff('candleFlame', 0.3), eff('uiWindowShadow', 0.1)]);
+    const cmp = compareSweepPair(on, off);
+    ok('a real baseline delta clearing the floor earns a verdict', cmp.verdict === 'costs-more-than-it-saves');
+    ok('...the delta is signed ON minus OFF', cmp.baselineDeltaMs === 5);
+    ok('...the floor used is the LARGER of the two runs own floors', cmp.noiseFloorMs === 0.05);
+    ok(
+      '...per-effect deltas read ~0 for effects unaffected by the toggle',
+      cmp.perEffect.every((e) => e.deltaMs === 0)
+    );
+    ok('...the all-on reading is checked against the baseline reading', cmp.agreesWithAllOn === true);
+    ok('...and the note says so, not silently', cmp.note.includes('agrees within noise'));
+    ok('...the significance factor is the same value the module exports', SWEEP_AB_SIGNIFICANCE_FACTOR === 1.5);
+
+    // The opposite sign: OFF costs more, so the toggle pays for itself.
+    const cheaperOn = sweepResult(18, 18.4, 0.05, [eff('candleFlame', 0.3)]);
+    const pricier = sweepResult(25, 25.4, 0.05, [eff('candleFlame', 0.3)]);
+    ok('a negative delta reads as pays-for-itself', compareSweepPair(cheaperOn, pricier).verdict === 'pays-for-itself');
+
+    // A delta that does NOT clear the floor earns no verdict — same discipline
+    // as the same-run A/B: "could not tell" must never masquerade as a result.
+    const close1 = sweepResult(25, 25.4, 0.5, [eff('candleFlame', 0.3)]);
+    const close2 = sweepResult(25.3, 25.7, 0.5, [eff('candleFlame', 0.3)]);
+    const noVerdict = compareSweepPair(close1, close2);
+    ok('a delta inside the conservative floor earns no verdict', noVerdict.verdict === 'within-noise');
+    ok('...the note says "could not tell", not "no difference"', noVerdict.note.includes('could not tell'));
+
+    // A real, UNRESOLVED disagreement between baseline and all-on readings —
+    // the effect stack costs something the bare baseline does not predict —
+    // must be surfaced, not smoothed into the baseline-only verdict.
+    const onDisagree = sweepResult(25, 40, 0.05, []); // all-on jumped 15ms more than baseline alone explains
+    const offDisagree = sweepResult(20, 20.4, 0.05, []);
+    const disagreeCmp = compareSweepPair(onDisagree, offDisagree);
+    ok('a baseline/all-on disagreement is detected', disagreeCmp.agreesWithAllOn === false);
+    ok('...and flagged with a warning in the note, not silently averaged away', disagreeCmp.note.includes('⚠️'));
+
+    // A zone/effect present only on one side must not crash the diff — it is
+    // simply excluded from perEffect (no meaningful delta exists for it).
+    const onlyOnOne = sweepResult(25, 25.4, 0.05, [eff('candleFlame', 0.3), eff('onlyOnThisSide', 1)]);
+    const missing = sweepResult(20, 20.4, 0.05, [eff('candleFlame', 0.3)]);
+    ok(
+      'an effect present on only one side is excluded, not a crash',
+      compareSweepPair(onlyOnOne, missing).perEffect.every((e) => e.id !== 'onlyOnThisSide')
+    );
+
+    // Missing summaries entirely — an absence, never a fabricated comparison.
+    const blind = compareSweepPair({ summary: null }, off);
+    ok('a missing summary on either side yields unmeasured, not a throw', blind.verdict === 'unmeasured');
+  }
+
+  // ======================================================================
+  // runSweepStructuralAB — the sweep, run twice, one toggle flip apart
+  // ======================================================================
+  // `ci` (config index) in this fixture resets on every toggle flip, mirroring
+  // the real control flow: runSweepStructuralAB always flips the toggle
+  // immediately before starting a FRESH runSweep pass over every config.
+  function fakeAbHarness(effects, scriptByState, { initial = true, canToggle = true, canRead = true } = {}) {
+    const orderedKeys = buildSweepConfigs(effects).map((c) => c.key);
+    let state = initial;
+    let ci = -1;
+    let pollsSinceArm = 0;
+    let gpuCount = 0;
+    const flips = [];
+    const harness = {
+      flips,
+      listEffects: () => effects,
+      setForcedEnabled: () => {},
+      setGpuProbe: (on) => {
+        if (on) {
+          pollsSinceArm = 0;
+          gpuCount = 0;
+        }
+      },
+      resetFrameStats: () => {
+        ci += 1;
+      },
+      readCost: () => {
+        const key = orderedKeys[ci];
+        const s = (scriptByState[state ? 'on' : 'off'] ?? {})[key] ?? {};
+        pollsSinceArm += 1;
+        gpuCount = Math.min(pollsSinceArm, s.samplesNeeded ?? 1);
+        return {
+          gpuProbe: {
+            gpuMsMedian: gpuCount > 0 ? (s.gpuMs ?? null) : null,
+            gpuMsP95: gpuCount > 0 ? (s.gpuP95 ?? null) : null,
+            sampleCount: gpuCount,
+          },
+          hitchStats: { frameGapP50Ms: s.feltP50 ?? null, frameGapP95Ms: s.feltP95 ?? null, hitchCount: null },
+        };
+      },
+    };
+    // `canRead:false` means the ACCESSOR EXISTS but cannot resolve a real
+    // value (e.g. an id the harness doesn't recognise, or the viewer not
+    // started) — the DIFFERENT refusal path from omitting the method
+    // entirely, which `harness-cannot-toggle` already covers below.
+    harness.readStructuralToggle = canRead ? () => state : () => null;
+    if (canToggle) {
+      harness.setStructuralToggle = (id, on) => {
+        flips.push([id, on]);
+        state = on;
+        ci = -1; // a fresh runSweep pass starts right after every flip
+        return { changed: true };
+      };
+    }
+    return harness;
+  }
+
+  const AB_EFFECTS = [{ id: 'candleFlame', label: 'Candle flames' }];
+  // __baseline__ and __baseline2__ are IDENTICAL within each state — summarizeSweep
+  // averages the pair (see its own header), so a deliberate difference between them
+  // would blur the ON-vs-OFF numbers this fixture exists to keep clean; that
+  // averaging behaviour already has its own coverage above.
+  const abScript = {
+    on: {
+      __baseline__: { gpuMs: 25, samplesNeeded: 1 },
+      candleFlame: { gpuMs: 25.3, samplesNeeded: 1 },
+      __baseline2__: { gpuMs: 25, samplesNeeded: 1 },
+    },
+    off: {
+      __baseline__: { gpuMs: 20, samplesNeeded: 1 },
+      candleFlame: { gpuMs: 20.3, samplesNeeded: 1 },
+      __baseline2__: { gpuMs: 20, samplesNeeded: 1 },
+    },
+  };
+  const FAST_AB_OPTS = { settleFrames: 0, feltFrames: 0, gpuSampleTarget: 1, pollFrames: 0, waitFrames: immediate };
+
+  {
+    {
+      const h = fakeAbHarness(AB_EFFECTS, abScript, { initial: true });
+      const r = await runSweepStructuralAB(h, 'earlyZComposition', FAST_AB_OPTS);
+      ok('a live A/B sweep reports that it ran', r.ran === true);
+      ok('...flipped ON first', h.flips[0][1] === true);
+      ok('...then OFF', h.flips[1][1] === false);
+      ok(
+        '...then restored the toggle to what it found, as a THIRD flip',
+        h.flips.length === 3 && h.flips[2][1] === true
+      );
+      ok('...carrying the live state it started from', r.liveState === true);
+      ok('...both full sweeps actually ran', r.on?.summary != null && r.off?.summary != null);
+      ok('...the ON sweep saw the ON-state numbers', r.on.summary.baseline.gpuMs === 25);
+      ok('...the OFF sweep saw the OFF-state numbers', r.off.summary.baseline.gpuMs === 20);
+      ok('...a comparison was computed from both', r.comparison?.baselineDeltaMs === 5);
+      ok('...settle-frames used is reported', Number.isFinite(r.settleFrames));
+    }
+
+    // A throw partway through the SECOND sweep must not strand the toggle off.
+    {
+      const h = fakeAbHarness(AB_EFFECTS, abScript, { initial: true });
+      const realReadCost = h.readCost;
+      let calls = 0;
+      h.readCost = (...args) => {
+        calls++;
+        // The ON sweep (3 configs x 3 readCost calls each = felt, one GPU
+        // poll, final GPU read = 9 total) must complete fully before this
+        // fires, so the throw lands partway through OFF's own 9 calls.
+        if (calls > 10) throw new Error('boom mid-OFF-sweep');
+        return realReadCost(...args);
+      };
+      let threw = false;
+      try {
+        await runSweepStructuralAB(h, 'earlyZComposition', FAST_AB_OPTS);
+      } catch {
+        threw = true;
+      }
+      ok('a throw mid-second-sweep propagates', threw === true);
+      ok('...but the toggle is still restored to what it was found as', h.flips[h.flips.length - 1][1] === true);
+    }
+
+    // An originally-OFF toggle must be restored to OFF, not left ON (the ON
+    // pass always runs first regardless of the live starting state).
+    {
+      const h = fakeAbHarness(AB_EFFECTS, abScript, { initial: false });
+      const r = await runSweepStructuralAB(h, 'earlyZComposition', FAST_AB_OPTS);
+      ok('originally-off is restored to off', h.flips[h.flips.length - 1][1] === false);
+      ok('...even though liveState correctly recorded it as the starting point', r.liveState === false);
+    }
+
+    // Refusals must be NAMED, never a silent "ran and found nothing".
+    {
+      const noHooks = { listEffects: () => AB_EFFECTS };
+      const r1 = await runSweepStructuralAB(noHooks, 'earlyZComposition', FAST_AB_OPTS);
+      ok('a harness with no toggle hooks refuses rather than throwing', r1.ran === false);
+      ok('...naming the reason as a wiring gap', r1.skipped === 'harness-cannot-toggle');
+
+      const unreadable = fakeAbHarness(AB_EFFECTS, abScript, { canRead: false });
+      const r2 = await runSweepStructuralAB(unreadable, 'earlyZComposition', FAST_AB_OPTS);
+      ok('an unreadable toggle is never flipped blind', r2.ran === false);
+      ok('...because there would be nothing to restore it to', r2.skipped === 'toggle-not-readable');
+    }
   }
 }

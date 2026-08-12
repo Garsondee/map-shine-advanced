@@ -29,6 +29,9 @@ const PHASE_LABELS = Object.freeze({
   sweeping: 'Profiling: sweeping',
   building: 'Profiling: building report',
   warning: 'Profiling: warning',
+  'sweep-ab': 'Early-Z A/B: switching state',
+  'sweep-ab-on': 'Early-Z A/B: sweeping (ON)',
+  'sweep-ab-off': 'Early-Z A/B: sweeping (OFF)',
 });
 
 /**

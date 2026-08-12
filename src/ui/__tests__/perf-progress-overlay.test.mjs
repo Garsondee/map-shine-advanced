@@ -30,6 +30,14 @@ export function run(t) {
   );
   t.ok('a phase with no detail carries no dash', !formatPerfProgressText('building').includes('—'));
   t.ok('an unknown phase name is not swallowed', formatPerfProgressText('mystery-phase') === 'mystery-phase');
+  t.ok(
+    'the early-Z A/B outer phase has its own label',
+    formatPerfProgressText('sweep-ab', 'earlyZComposition ON') === 'Early-Z A/B: switching state — earlyZComposition ON'
+  );
+  t.ok(
+    'the ON inner sweep is distinguishable from the OFF one',
+    formatPerfProgressText('sweep-ab-on') !== formatPerfProgressText('sweep-ab-off')
+  );
 
   // ---- environment safety: no DOM here, so every call must be a safe no-op
   t.ok('not visible before show', isPerfProgressVisible() === false);

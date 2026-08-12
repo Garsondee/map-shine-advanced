@@ -35,7 +35,7 @@ import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
-import { createPerfLab, runSweep } from './diag/perf-lab.js';
+import { createPerfLab, runSweep, runSweepStructuralAB } from './diag/perf-lab.js';
 import { describeWindBake } from './diag/wind-probe.js';
 // THE PERFORMANCE INSTRUMENT (docs/planning/Performance.md). The taxonomy and
 // the report brain are pure and land ahead of the profiler that will feed them,
@@ -2625,6 +2625,43 @@ function install() {
     };
   }
 
+  // STRUCTURAL TOGGLES (2026-08-12) — pipeline choices, not effects, and the
+  // distinction is the whole reason these need their own hook rather than a
+  // sweep config. `setForcedEnabled` routes through the effect registry
+  // (resolveAndApply on a layer stack); these are plain viewer-level booleans
+  // that no registry knows about, which is exactly why the early-Z question
+  // was previously only answerable by driving the app from OUTSIDE via
+  // Playwright and running the whole 2-4 minute capture twice.
+  //
+  // Read-back is REQUIRED, not a convenience: perf-structural-ab (and now
+  // perf-lab's runSweepStructuralAB) refuse to flip any toggle they cannot
+  // read first, because a throw mid-run that left early-Z off would surface
+  // as a rendering regression from nowhere, hours later, with nothing
+  // pointing back here.
+  //
+  // SHARED between `perfHarness` and `profileHarness` via spread below, not
+  // two copies of the same id→accessor dispatch — a second hand-maintained
+  // copy drifting from the first is exactly
+  // [[feedback_hand_maintained_dispatch_lists_forgets_new_effects]]'s shape,
+  // just for structural toggles instead of effects. Added to `perfHarness`
+  // 2026-08-12 specifically so `perf-lab.js`'s sweep can be run once per
+  // toggle state (`runSweepStructuralAB`) — it previously only reached
+  // `profileHarness`, which the zone profiler uses but the effect sweep does
+  // not.
+  const structuralToggleHooks = {
+    readStructuralToggle: (id) => {
+      if (id === 'earlyZComposition') {
+        const s = getVtPanViewerEarlyZComposition();
+        return typeof s?.earlyZComposition === 'boolean' ? s.earlyZComposition : null;
+      }
+      return null;
+    },
+    setStructuralToggle: (id, on) => {
+      if (id === 'earlyZComposition') return setVtPanViewerEarlyZComposition(on);
+      return null;
+    },
+  };
+
   const perfHarness = {
     listEffects: () => effectRegistry.list().map((m) => ({ id: m.id, label: m.title ?? m.id })),
     setForcedEnabled: (id, enabled) => forceEffectEnabled(id, enabled),
@@ -2640,6 +2677,7 @@ function install() {
         renderMsAvgLast120: d.renderMsAvgLast120 ?? null,
       };
     },
+    ...structuralToggleHooks,
   };
   // THE PERFORMANCE CENTER (docs/planning/Performance.md; author directive
   // 2026-08-06: "move all performance monitoring things into a single space
@@ -2805,29 +2843,9 @@ function install() {
     // Two methods measuring the same effect and disagreeing is information —
     // perf-report.js classifies the disagreement rather than averaging it away.
     runSweep: () => runSweep(perfHarness),
-    // STRUCTURAL TOGGLES (2026-08-12) — pipeline choices, not effects, and the
-    // distinction is the whole reason these need their own hook rather than a
-    // sweep config. `setForcedEnabled` routes through the effect registry
-    // (resolveAndApply on a layer stack); these are plain viewer-level booleans
-    // that no registry knows about, which is exactly why the early-Z question
-    // was previously only answerable by driving the app from OUTSIDE via
-    // Playwright and running the whole 2-4 minute capture twice.
-    //
-    // Read-back is REQUIRED, not a convenience: perf-structural-ab refuses to
-    // flip any toggle it cannot read first, because a throw mid-run that left
-    // early-Z off would surface as a rendering regression from nowhere, hours
-    // later, with nothing pointing back here.
-    readStructuralToggle: (id) => {
-      if (id === 'earlyZComposition') {
-        const s = getVtPanViewerEarlyZComposition();
-        return typeof s?.earlyZComposition === 'boolean' ? s.earlyZComposition : null;
-      }
-      return null;
-    },
-    setStructuralToggle: (id, on) => {
-      if (id === 'earlyZComposition') return setVtPanViewerEarlyZComposition(on);
-      return null;
-    },
+    // See `structuralToggleHooks`'s own declaration (above `perfHarness`) for
+    // the full rationale — shared between both harnesses, not duplicated.
+    ...structuralToggleHooks,
   };
 
   const perfHud = createPerfHud({
@@ -2949,6 +2967,50 @@ function install() {
       // copyToClipboard() here would be silently clobbered.
       MapShine.debug.refreshControls();
       return lastPerfProfile;
+    },
+    { zone: 'performance' }
+  );
+
+  // EARLY-Z A/B, THE FULL SWEEP TWICE (2026-08-12) — author directive, given
+  // directly in response to the combined report's first early-Z verdict:
+  // *"Make the Early-Z part of the performance sweep. Make it do something
+  // like an A/B - even doing the whole sweep twice in both modes."*
+  //
+  // A SEPARATE action from `perf-run-full` on purpose, not folded into it:
+  // this doubles perf-lab's own sweep cost, which is already the exact
+  // ~1.5-3 minute expense `perf-run-full`'s own `includeSweep: false` above
+  // was written to avoid paying by default. Running it here, on demand, does
+  // not undo that streamlining — it is a second, slower, standalone
+  // instrument for one specific question, not a replacement for the fast
+  // default path.
+  //
+  // See `perf-lab.js#runSweepStructuralAB` for the method and its own
+  // honesty caveats — most importantly, the noise floor this comparison uses
+  // is a CONSERVATIVE APPROXIMATION across two independent sweeps, not a
+  // same-run measurement the way `perf-structural-ab.js`'s parked A/B's is.
+  // Read both: this instrument's own `baseline.gpuMs` (all effects off) is
+  // the cleanest possible reading of the toggle's raw pipeline cost, at the
+  // price of ~4-8 minutes instead of ~1.
+  MapShine.debug.registerAction(
+    'perf-earlyz-sweep-ab',
+    '🔬 Early-Z A/B — full effect sweep ×2 (~4–8 min)',
+    async () => {
+      // Same discipline as perf-run-full: hide the panel for the whole
+      // multi-minute run so the author has something readable on screen
+      // (showPerfProgress below) instead of a frozen debug panel, and so the
+      // panel's own polling never contends with the sweep's measurements.
+      profileHarness.hideLiveUi?.();
+      try {
+        return await runSweepStructuralAB(perfHarness, 'earlyZComposition', {
+          onProgress: (phase, detail) => {
+            log.info(`early-Z A/B: ${phase}${detail ? ` — ${detail}` : ''}`);
+            showPerfProgress(formatPerfProgressText(phase, detail));
+          },
+        });
+      } finally {
+        hidePerfProgress();
+        profileHarness.restoreLiveUi?.();
+      }
     },
     { zone: 'performance' }
   );

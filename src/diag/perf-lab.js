@@ -90,6 +90,12 @@
  * panel is browser-verified (CONVENTIONS §4).
  */
 import { createLogger } from '../core/log.js';
+// Single source of truth for how long a structural toggle needs to settle
+// after being flipped before it is safe to measure — see that module's own
+// header. Importing rather than re-declaring a second constant here is
+// deliberate: two settle-frame numbers for the SAME toggle, hand-maintained
+// in two files, is exactly how they drift apart from each other unnoticed.
+import { toggleById } from './perf-structural-ab.js';
 
 const log = createLogger('perf-lab');
 
@@ -580,6 +586,228 @@ export async function runSweep(harness, opts = {}) {
   // Optional: an older or minimal harness without `getContext` still returns a full report.
   const context = harness.getContext?.() ?? null;
   return { effects, configs, context, raw, summary: summarizeSweep(raw, effects) };
+}
+
+/**
+ * A delta between two INDEPENDENT full sweeps must clear this multiple of
+ * their own noise floor to earn a verdict — same reasoning, same factor, as
+ * `perf-structural-ab.js`'s `AB_SIGNIFICANCE_FACTOR` (not imported: that
+ * constant belongs to a different comparison shape — one run's own
+ * bracketing-pair drift, not two independent runs' floors maxed together —
+ * and importing a same-VALUED-by-coincidence constant across an unrelated
+ * boundary is worse than a second `1.5` with its own citation).
+ */
+export const SWEEP_AB_SIGNIFICANCE_FACTOR = 1.5;
+
+/**
+ * Compare two full `runSweep` results taken under different structural-toggle
+ * states. Two readings matter, for different reasons:
+ *
+ *   - `baselineDeltaMs` — the ALL-EFFECTS-OFF scene cost, on vs off. This is
+ *     the CLEANEST possible reading of what the toggle itself costs: no
+ *     effect's shader, no bloom/DoF chain, nothing but the raw geometry/depth
+ *     pipeline the toggle actually changes. If early-Z (or any future
+ *     structural toggle) has a real cost, THIS is where it shows most clearly.
+ *   - `allOnDeltaMs` — the ALL-EFFECTS-ON scene cost, on vs off. The
+ *     real-world reading, with the full effect stack active. If this
+ *     DISAGREES with `baselineDeltaMs` beyond noise, that is itself a finding
+ *     — some effect's cost is coupled to the toggle in a way nobody expected
+ *     — and is left visible rather than averaged away.
+ *
+ * ⚠️ THE NOISE FLOOR HERE IS A CONSERVATIVE APPROXIMATION, NOT A MEASURED ONE.
+ * Each sweep's own `noiseFloorMs` comes from re-measuring the SAME config
+ * (its bracketing baseline pair) within ONE continuous run — a real,
+ * in-run measurement. Comparing ACROSS two independent sweeps, taken
+ * minutes apart with a toggle flip and a settle wait in between, has no
+ * equivalent same-run bracketing pair to measure ITS noise directly. Taking
+ * the larger of the two runs' own floors is a reasonable lower bound, not a
+ * proof — cross-run drift (further thermal drift, a differently-timed
+ * warm-up) could exceed it. Treat a `pays-for-itself`/`costs-more-than-it-
+ * saves` verdict here as a strong signal, not the same evidentiary weight as
+ * `perf-structural-ab.js`'s own same-run ON→OFF→ON design.
+ */
+export function compareSweepPair(on, off) {
+  const s1 = on?.summary;
+  const s2 = off?.summary;
+  if (!s1 || !s2) {
+    return {
+      verdict: 'unmeasured',
+      note: 'At least one of the two sweeps produced no summary at all, so no comparison is possible.',
+      baselineDeltaMs: null,
+      allOnDeltaMs: null,
+      noiseFloorMs: null,
+      perEffect: [],
+    };
+  }
+  const floor = Math.max(s1.noiseFloorMs ?? 0, s2.noiseFloorMs ?? 0) || null;
+  const baselineDeltaMs =
+    num(s1.baseline?.gpuMs) != null && num(s2.baseline?.gpuMs) != null
+      ? round2(s1.baseline.gpuMs - s2.baseline.gpuMs)
+      : null;
+  const allOnDeltaMs =
+    num(s1.all?.gpuMs) != null && num(s2.all?.gpuMs) != null ? round2(s1.all.gpuMs - s2.all.gpuMs) : null;
+
+  const significant =
+    baselineDeltaMs != null && floor != null && Math.abs(baselineDeltaMs) > floor * SWEEP_AB_SIGNIFICANCE_FACTOR;
+  const verdict =
+    baselineDeltaMs == null || floor == null
+      ? 'unmeasured'
+      : !significant
+        ? 'within-noise'
+        : baselineDeltaMs < 0
+          ? 'pays-for-itself'
+          : 'costs-more-than-it-saves';
+
+  // Every effect present in BOTH runs — normally all of them, since the same
+  // harness.listEffects() feeds both sweeps, but a live toggle of the effect
+  // registry mid-run (unlikely, not impossible) must not crash this.
+  const perEffect = [];
+  const offById = new Map((s2.perEffect ?? []).map((e) => [e.id, e]));
+  for (const e1 of s1.perEffect ?? []) {
+    const e2 = offById.get(e1.id);
+    if (!e2) continue;
+    perEffect.push({
+      id: e1.id,
+      label: e1.label,
+      onCostMs: e1.costMs,
+      offCostMs: e2.costMs,
+      deltaMs: e1.costMs != null && e2.costMs != null ? round2(e1.costMs - e2.costMs) : null,
+      onResolved: e1.resolved,
+      offResolved: e2.resolved,
+    });
+  }
+  // Biggest absolute mover first, unresolved-on-both-sides last — matches the
+  // "what should I look at first" ordering this file uses everywhere else.
+  perEffect.sort((a, b) => Math.abs(b.deltaMs ?? -Infinity) - Math.abs(a.deltaMs ?? -Infinity));
+
+  const agree =
+    baselineDeltaMs != null &&
+    allOnDeltaMs != null &&
+    floor != null &&
+    Math.abs(baselineDeltaMs - allOnDeltaMs) <= floor * SWEEP_AB_SIGNIFICANCE_FACTOR;
+
+  const note =
+    verdict === 'unmeasured'
+      ? 'At least one sweep pair had no resolvable baseline (see baselineOpenMs/baselineCloseMs on each summary), so this comparison has nothing to stand on.'
+      : verdict === 'within-noise'
+        ? `NO VERDICT: the all-off baseline moved ${baselineDeltaMs}ms between the two sweeps, which does not clear the conservative cross-run floor (${round2(floor)}ms x ${SWEEP_AB_SIGNIFICANCE_FACTOR}). That is "this comparison could not tell", not "no difference".`
+        : `${verdict === 'pays-for-itself' ? 'PAYS FOR ITSELF' : 'COSTS MORE THAN IT SAVES'}: the all-off baseline (pure geometry/depth pipeline, no effects) is ${Math.abs(baselineDeltaMs)}ms ${baselineDeltaMs < 0 ? 'CHEAPER' : 'MORE EXPENSIVE'} with the toggle on, clearing the conservative cross-run floor (${round2(floor)}ms x ${SWEEP_AB_SIGNIFICANCE_FACTOR}). ` +
+          (agree
+            ? 'The all-on reading (full effect stack) agrees within noise — this is not an effect-stack artefact.'
+            : `⚠️ The all-on reading disagrees: ${allOnDeltaMs}ms with the full effect stack active, vs ${baselineDeltaMs}ms on bare geometry. Something in the effect stack is coupled to this toggle — worth its own look before trusting the baseline reading alone.`);
+
+  return { verdict, baselineDeltaMs, allOnDeltaMs, noiseFloorMs: floor, agreesWithAllOn: agree, perEffect, note };
+}
+
+/**
+ * THE SWEEP, RUN TWICE — once per state of a structural (pipeline) toggle, so
+ * the per-effect cost table and the scene-level baseline can be compared side
+ * by side under both. Author's own words, in response to the report's first
+ * early-Z verdict: *"Make the Early-Z part of the performance sweep. Make it
+ * do something like an A/B - even doing the whole sweep twice in both
+ * modes."*
+ *
+ * ============================================================================
+ * WHY THIS EXISTS ALONGSIDE `perf-structural-ab.js`, NOT INSTEAD OF IT
+ * ============================================================================
+ *
+ * `perf-structural-ab.js`'s A/B is per-ZONE, parked at one view, ON→OFF→ON in
+ * one continuous window — fast (~1 minute total), same-run noise floor, but
+ * only ever answers "what does the toggle cost on the route's own effect
+ * mix, at one point on the map". This function answers a DIFFERENT question:
+ * "does the toggle change what any INDIVIDUAL EFFECT costs, and what's the
+ * cleanest possible reading of the toggle's own raw cost with every effect
+ * stripped away" — using the sweep's existing per-effect on/off machinery,
+ * unchanged, just run once per toggle state. Slower (two full sweeps, ~3-6
+ * minutes total) and a weaker noise floor (see `compareSweepPair`'s own
+ * header) — a second, independent instrument asking a related but different
+ * question, not a faster or slower version of the same one.
+ *
+ * ALWAYS restores the toggle to whatever it was, even on a throw partway
+ * through the second sweep — same discipline as `perf-structural-ab.js` and
+ * for the same reason: a throw that left a live viewer's pipeline flipped
+ * would surface as an unexplained rendering change hours later.
+ *
+ * @param {object} harness — the SAME sweep harness `runSweep` takes, PLUS
+ *   `setStructuralToggle(id, on)` / `readStructuralToggle(id)`.
+ * @param {string} toggleId — e.g. `'earlyZComposition'`.
+ * @param {object} [opts] — forwarded to BOTH inner `runSweep` calls
+ *   (settleFrames, feltFrames, gpuSampleTarget, warmupFrames, waitFrames…).
+ *   `onProgress`, if given, receives the SAME `(phase, detail)` string pair
+ *   `perf-session.js` uses elsewhere, not `runSweep`'s own richer per-config
+ *   object shape — this function adapts one into the other so a caller does
+ *   not need to know it is running the sweep twice.
+ */
+export async function runSweepStructuralAB(harness, toggleId, opts = {}) {
+  const { onProgress = () => {}, waitFrames = defaultWaitFrames, ...sweepOpts } = opts;
+
+  if (typeof harness?.setStructuralToggle !== 'function' || typeof harness?.readStructuralToggle !== 'function') {
+    return {
+      ran: false,
+      skipped: 'harness-cannot-toggle',
+      // Named, not shrugged at — a caller that asked for this and got nothing
+      // must be able to tell "not supported" from "ran and found nothing".
+      note: 'This harness exposes no setStructuralToggle/readStructuralToggle hook, so no A/B sweep is possible. That is a wiring gap, not a measurement result.',
+      toggleId,
+      on: null,
+      off: null,
+      comparison: null,
+    };
+  }
+  const original = harness.readStructuralToggle(toggleId);
+  if (typeof original !== 'boolean') {
+    return {
+      ran: false,
+      skipped: 'toggle-not-readable',
+      note: `The '${toggleId}' toggle could not be read back from this viewer, so it was never flipped — flipping it blind would leave nothing to restore it to.`,
+      toggleId,
+      on: null,
+      off: null,
+      comparison: null,
+    };
+  }
+
+  // Settle-frames for THIS toggle, from the single catalog in
+  // perf-structural-ab.js — falls back to a conservative default for a
+  // toggle that hasn't been catalogued there yet, rather than refusing.
+  const settleFrames = toggleById(toggleId)?.settleFrames ?? 120;
+
+  const wrapProgress = (mode) => (p) => {
+    const pos = Number.isFinite(p?.index) && p.index >= 0 ? ` (${p.index + 1}/${p.total})` : '';
+    onProgress(
+      `sweep-ab-${mode.toLowerCase()}`,
+      `${toggleId} ${mode} — ${p?.label ?? ''}${pos}${p?.phase ? `, ${p.phase}` : ''}`
+    );
+  };
+
+  let on = null;
+  let off = null;
+  try {
+    onProgress('sweep-ab', `${toggleId} ON — settling ${settleFrames} frames, then the full effect sweep`);
+    harness.setStructuralToggle(toggleId, true);
+    await waitFrames(settleFrames);
+    on = await runSweep(harness, { ...sweepOpts, waitFrames, onProgress: wrapProgress('ON') });
+
+    onProgress('sweep-ab', `${toggleId} OFF — settling ${settleFrames} frames, then the full effect sweep`);
+    harness.setStructuralToggle(toggleId, false);
+    await waitFrames(settleFrames);
+    off = await runSweep(harness, { ...sweepOpts, waitFrames, onProgress: wrapProgress('OFF') });
+  } finally {
+    // RESTORE, ALWAYS — outside the measurement try's own scope so it runs
+    // even if arming/measuring itself threw partway through either sweep.
+    harness.setStructuralToggle(toggleId, original);
+  }
+
+  return {
+    ran: true,
+    skipped: null,
+    toggleId,
+    liveState: original,
+    settleFrames,
+    on,
+    off,
+    comparison: compareSweepPair(on, off),
+  };
 }
 
 // ---- UI (browser-verified) ----------------------------------------------

@@ -589,6 +589,28 @@ function disposeActive() {
         pack.indirectionTexture.dispose();
       } catch (_) {}
     }
+    // Case-2 vegetation overlays (`state.vegetationOverlays[kindId]`) — a
+    // THIRD mesh storage location beside state.{geometry,material} and
+    // state.wholeImage.tiles, added later and never wired into this teardown
+    // (the same "third mesh location the cleanup forgot" bug already fixed
+    // once for the residency drop-out loop's visibility toggle — see
+    // keyhole-vegetation-floor-visibility-fix — but that fix hides on drop,
+    // it never disposes; this is the Stop/Restart/scene-switch counterpart).
+    // Without this every canopy + shadow geometry/material and the decoded
+    // _Tree/_Bush texture leaked into VRAM on every scene switch.
+    for (const kind of VEGETATION_KINDS) {
+      const entry = state.vegetationOverlays?.[kind.id];
+      if (!entry) continue;
+      try {
+        entry.geometry?.dispose();
+        entry.material?.dispose();
+        entry.tex?.dispose();
+        entry.shadow?.geometry?.dispose();
+        entry.shadow?.material?.dispose();
+      } catch (_) {
+        // Best-effort, same reasoning as the wholeImage.tiles loop above.
+      }
+    }
   }
   try {
     _active.disposeOcclusionMask?.();
@@ -2595,6 +2617,15 @@ export async function startVtPanViewer({
     // under the same id/index (see the `entry.kind !== kind` branch below).
     let regionMeshHits = 0;
     let regionMeshMisses = 0;
+    /** Persistent brightest-first sort scratch for updateRegionDarknessMeshes,
+     * reused across frames instead of `.map()`-ing a fresh array of wrapper
+     * objects every call (this runs every frame via runLightAccumulatePass).
+     * Slot objects are mutated in place (`.region`/`.adjusted` overwritten
+     * every frame for every index in use); `.length` is truncated down when
+     * fewer regions are active, so a `for...of` over it only sees this
+     * frame's live entries — growth beyond the previous frame's count is the
+     * only case that still allocates a slot. */
+    const regionSortScratch = [];
 
     /**
      * Reconcile the region-darkness mesh pool against this frame's live
@@ -2650,37 +2681,23 @@ export async function startVtPanViewer({
      *   both" reasoning as this function's own header already states for
      *   `activeRegions`.
      */
-    function readElevationFilteredDarknessRegions() {
+    function readElevationFilteredDarknessRegions(floorsResult) {
       const { regions } = readActiveDarknessRegions();
 
-      // getActiveSceneFloors was designed for boot.js's own scene-load/
-      // floor-switch call sites, not a per-frame hot path — wrapped here
-      // (unlike its other callers) because a throw reaching this function
-      // would crash light.accumulate for the WHOLE frame, not just this one
-      // reader. Falls back to "no floor identified" (unrestricted band, every
-      // region stays active) on any failure — fail open, never a black frame.
-      let currentFloor = null;
-      try {
-        // `globalThis.canvas`, NOT the bare `canvas` identifier (2026-07-23,
-        // ROOT-CAUSE FIX): this file declares its OWN local `let canvas` for
-        // the WebGPU render surface's DOM element (this function's own
-        // enclosing scope, see that declaration's header) — every bare
-        // `canvas` reference inside this closure resolves to THAT DOM
-        // element, never Foundry's global, so `canvas?.scene` was silently
-        // always `undefined` and this lookup ALWAYS fell to "no floor
-        // identified" regardless of scene/floor state. The established fix
-        // for exactly this shadow already exists elsewhere in this SAME file
-        // (`followFoundryCamera`'s `globalThis.canvas?.stage`) — this
-        // function and bakeWindField's own floor lookup just predated/missed
-        // that convention. `globalThis.canvas` bypasses the local shadow
-        // entirely and needs no `typeof` guard (a property read, unlike a
-        // bare identifier, never throws when unset).
-        const sceneDoc = globalThis.canvas?.scene ?? null;
-        const floorsResult = getActiveSceneFloors(sceneDoc);
-        currentFloor = floorsResult.ok ? floorsResult.floors.find((f) => f.index === view.floorIndex) : null;
-      } catch (err) {
-        log.error('region-darkness elevation lookup (getActiveSceneFloors) failed — treating as unrestricted:', err);
-      }
+      // `floorsResult` is resolved ONCE per frame by the caller
+      // (`runLightAccumulatePass`) and shared across every per-frame
+      // `getActiveSceneFloors` consumer (this reader, the sun-shadow bake
+      // check, window light, floor-attr uniforms) — see that function's own
+      // header (2026-08-12: four independent per-frame call sites were each
+      // re-deriving the SAME scene's SAME floor list from scratch, allocating
+      // a fresh array + wrapper object per floor, per call, four times a
+      // frame). `getActiveSceneFloors` can throw on a malformed Level
+      // background URL; the caller's try/catch already turns that into
+      // `{ok:false}` before it ever reaches here, so a lookup failure reads
+      // as "no floor identified" (unrestricted band, every region stays
+      // active) — fail open, never a black frame, same posture as before
+      // this was hoisted out.
+      const currentFloor = floorsResult.ok ? floorsResult.floors.find((f) => f.index === view.floorIndex) : null;
       // A floor we couldn't identify (no active scene, or the index isn't in
       // this frame's floor list) reads as unrestricted — fail OPEN (every
       // region still active), never silently darkness-mute the whole scene
@@ -2718,9 +2735,19 @@ export async function startVtPanViewer({
     let lastRegionGating = null;
 
     function updateRegionDarknessMeshes(darkness01, activeRegions) {
-      const sortedByBrightestLast = activeRegions
-        .map((region) => ({ region, adjusted: applyDarknessAdjustment(darkness01, region.mode, region.modifier) }))
-        .sort((a, b) => b.adjusted - a.adjusted);
+      for (let i = 0; i < activeRegions.length; i++) {
+        const region = activeRegions[i];
+        const adjusted = applyDarknessAdjustment(darkness01, region.mode, region.modifier);
+        if (i < regionSortScratch.length) {
+          regionSortScratch[i].region = region;
+          regionSortScratch[i].adjusted = adjusted;
+        } else {
+          regionSortScratch.push({ region, adjusted });
+        }
+      }
+      regionSortScratch.length = activeRegions.length; // drop any slots left over from a larger previous frame
+      regionSortScratch.sort((a, b) => b.adjusted - a.adjusted);
+      const sortedByBrightestLast = regionSortScratch;
 
       const seen = new Set();
       let renderOrder = 0;
@@ -4681,6 +4708,26 @@ export async function startVtPanViewer({
     // before present.composite (which reads sceneLit): the env snapshot is
     // already refreshed for this frame by updateEnvSnapshot() up in renderFrame.
     function runLightAccumulatePass() {
+      // THE FLOOR LIST, RESOLVED EXACTLY ONCE FOR THE WHOLE PASS (2026-08-12
+      // cache-completeness pass). Four independent readers below —
+      // region-darkness elevation gating, the sun-shadow per-floor bake
+      // check, window light, floor-attr uniforms — each used to call
+      // `getActiveSceneFloors(sceneDoc)` separately, every frame, over the
+      // SAME `sceneDoc`: same `scene.levels` walk, same sort, same per-floor
+      // `resolveAssetUrl` + `Array.from(visibility.levels)` allocation,
+      // four times for one identical answer. `getActiveSceneFloors` was
+      // designed for boot.js's own scene-load/floor-switch call sites, not a
+      // per-frame hot path; wrapped here (once, instead of four times) so a
+      // throw (a malformed Level background URL) can't crash this whole pass.
+      // `{ok:false}` reads as "no floor identified" to every consumer below —
+      // same fail-open posture each of them already had independently.
+      let floorsResultForFrame;
+      try {
+        floorsResultForFrame = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+      } catch (err) {
+        log.error('runLightAccumulatePass: getActiveSceneFloors failed — every floor-aware reader falls back:', err);
+        floorsResultForFrame = { ok: false, error: 'getActiveSceneFloors threw' };
+      }
       const env = lastEnvSnapshot?.env ?? {};
       const darkness01 = env.darkness01 ?? 0;
       // The darkness-realism lever (see setDarknessRealism): 0 = Foundry parity
@@ -4743,16 +4790,10 @@ export async function startVtPanViewer({
       // fields this writes.
       profiler?.begin(Z.lightSunBake);
       {
-        // Same lookup, same fail-open posture, as `readElevationFilteredDarknessRegions`'s
-        // own `floorsResult` a few hundred lines up — `getActiveSceneFloors`
-        // was designed for boot's own scene-load/floor-switch call sites, not
-        // a per-frame hot path, but two OTHER per-frame call sites already
-        // accept that cost (wind's level lookup, darkness regions'), so a
-        // third matching them is the established convention here, not a new
-        // one. A lookup failure must not silently stop casting shadows on the
-        // one floor the viewer definitely knows about.
-        const sceneDocForSunShadows = globalThis.canvas?.scene ?? null;
-        const floorsResultForSunShadows = getActiveSceneFloors(sceneDocForSunShadows);
+        // `floorsResultForFrame` — resolved once at the top of this pass, see
+        // its own header. A lookup failure must not silently stop casting
+        // shadows on the one floor the viewer definitely knows about.
+        const floorsResultForSunShadows = floorsResultForFrame;
         if (floorsResultForSunShadows.ok && floorsResultForSunShadows.floors.length > 0) {
           for (const floor of floorsResultForSunShadows.floors) sunShadows.maybeBake(floor.index);
         } else {
@@ -4827,7 +4868,7 @@ export async function startVtPanViewer({
       // ambient fix), and (2026-07-20) the SAME currentFloor for candle
       // wall-clipping — never a second, potentially-drifting floor lookup.
       profiler?.begin(Z.lightRegions);
-      const { regions: activeRegions, currentFloor } = readElevationFilteredDarknessRegions();
+      const { regions: activeRegions, currentFloor } = readElevationFilteredDarknessRegions(floorsResultForFrame);
       updateRegionDarknessMeshes(darkness01, activeRegions);
       profiler?.end(Z.lightRegions);
 
@@ -4866,7 +4907,7 @@ export async function startVtPanViewer({
       // this is new and cheap (one array scan of a small floor list per
       // attr-carrying item); add a `diag/perf-zones.js` entry first if it
       // ever shows up as non-trivial in a real perf report.
-      syncAllFloorAttrUniformsForFrame();
+      syncAllFloorAttrUniformsForFrame(floorsResultForFrame);
       // The wind field debug overlay (a no-op grid rebuild check when disabled).
       profiler?.begin(Z.lightWindOverlaySync);
       updateWindFieldOverlay();
@@ -4965,15 +5006,14 @@ export async function startVtPanViewer({
       // first place.
       profiler?.begin(Z.lightDrawWindow);
       // EVERY FLOOR, NOT JUST THE VIEWED ONE (2026-08-09) — mirrors the
-      // sun-shadow loop at Z.lightSunBake above: same `getActiveSceneFloors`
-      // lookup, same single-viewed-floor fallback when it fails. See
+      // sun-shadow loop at Z.lightSunBake above: same `floorsResultForFrame`,
+      // same single-viewed-floor fallback when it fails. See
       // `createWindowSurfaceForFloor`'s own header for the live bug this
       // fixes — a lower floor seen through a hole in the one the UI calls
       // "current" never had a mask loaded for it at all, so its cookie had
       // nothing to draw regardless of the (already-correct) per-floor depth
       // gate.
-      const sceneDocForWindow = globalThis.canvas?.scene ?? null;
-      const floorsResultForWindow = getActiveSceneFloors(sceneDocForWindow);
+      const floorsResultForWindow = floorsResultForFrame;
       const windowFloors =
         floorsResultForWindow.ok && floorsResultForWindow.floors.length > 0
           ? floorsResultForWindow.floors
@@ -5764,6 +5804,14 @@ export async function startVtPanViewer({
     // the first time this session (its own shader compiles exactly once).
     let occlusionDiscHits = 0;
     let occlusionDiscMisses = 0;
+    /** Persistent occluder scratch for runMaskOcclusionPass, reused across
+     * frames instead of allocating a fresh array of `{id,elevation,centerX,
+     * centerY,radiusPx}` wrapper objects every call (this runs every frame).
+     * Slot objects are mutated in place; both arrays' `.length` is truncated
+     * to this frame's real occluder count, same pattern as
+     * updateRegionDarknessMeshes' own sort scratch. */
+    const maskOccluderScratch = [];
+    const maskOccluderElevationScratch = [];
 
     /**
      * Build (once, on first appearance) one token's disc mesh — a flat green-
@@ -5818,7 +5866,7 @@ export async function startVtPanViewer({
     function runMaskOcclusionPass() {
       profiler?.begin(Z.masksSync);
       const distancePixels = readGridDistancePixels().distancePixels;
-      const occluders = [];
+      let occluderCount = 0;
       for (const it of lastItems) {
         if (it.kind !== 'token') continue;
         if (it.hidden) continue; // dimmed-for-GM tokens still occlude in real Foundry; hidden ones do not
@@ -5828,16 +5876,26 @@ export async function startVtPanViewer({
           distancePixels,
         });
         if (radiusPx <= 0) continue;
-        occluders.push({
-          id: it.id,
-          elevation: it.key.elevation,
-          centerX: it.footprint.centerX,
-          centerY: it.footprint.centerY,
-          radiusPx,
-        });
+        let o;
+        if (occluderCount < maskOccluderScratch.length) {
+          o = maskOccluderScratch[occluderCount];
+        } else {
+          o = {};
+          maskOccluderScratch.push(o);
+        }
+        o.id = it.id;
+        o.elevation = it.key.elevation;
+        o.centerX = it.footprint.centerX;
+        o.centerY = it.footprint.centerY;
+        o.radiusPx = radiusPx;
+        maskOccluderElevationScratch[occluderCount] = o.elevation;
+        occluderCount++;
       }
+      maskOccluderScratch.length = occluderCount; // drop any slots left over from a larger previous frame
+      maskOccluderElevationScratch.length = occluderCount;
+      const occluders = maskOccluderScratch;
 
-      occlusionMask.elevationTable = buildElevationTable(occluders.map((o) => o.elevation));
+      occlusionMask.elevationTable = buildElevationTable(maskOccluderElevationScratch);
 
       // Reconcile the disc pool: add new, update every survivor, hide stale
       // (see occlusionDiscs' own doc for why "hide" not "dispose").
@@ -6270,7 +6328,6 @@ export async function startVtPanViewer({
         layerErrors,
         imageSize: { width: dims.width, height: dims.height },
         placement: null,
-        placementKey: null,
         worldBounds: null,
         geometry: null,
         material: null,
@@ -6404,15 +6461,33 @@ export async function startVtPanViewer({
      *
      * Recomputed every residency pass rather than cached at load, so a tile the
      * GM drags, rotates or resizes follows its document instead of freezing
-     * where it first appeared. The `placementKey` compare keeps that cheap: the
-     * common case is "nothing moved", which costs one string build and no GPU work.
+     * where it first appeared. The field-by-field compare against the previous
+     * placement keeps that cheap: the common case is "nothing moved", which
+     * costs a handful of numeric comparisons and no GPU work, no allocation.
      */
     function refreshItemPlacement(state, item) {
       const placement = computeItemPlacement(item, state.imageSize, dimensions);
-      const key = `${placement.x},${placement.y},${placement.width},${placement.height},${placement.anchorX},${placement.anchorY},${placement.rotation}`;
-      if (key === state.placementKey) return false;
+      // Direct numeric comparison against the PREVIOUS placement object, not a
+      // templated string key — this runs every frame per token
+      // (`syncTokenPlacements`), and a still token (the common case) was
+      // building and throwing away a fresh interpolated string 60x/sec for
+      // nothing. `state.placement` is always reassigned wholesale, never
+      // mutated in place, so comparing its fields against the freshly
+      // computed `placement` is a safe, allocation-free equality check.
+      const prev = state.placement;
+      if (
+        prev &&
+        prev.x === placement.x &&
+        prev.y === placement.y &&
+        prev.width === placement.width &&
+        prev.height === placement.height &&
+        prev.anchorX === placement.anchorX &&
+        prev.anchorY === placement.anchorY &&
+        prev.rotation === placement.rotation
+      ) {
+        return false;
+      }
       state.placement = placement;
-      state.placementKey = key;
       state.worldBounds = computeQuadBounds(placement);
       if (state.geometry) {
         const pos = state.geometry.getAttribute('position');
@@ -6454,9 +6529,10 @@ export async function startVtPanViewer({
      * Deliberately NOT routed through `updateResidency()` — that pass does
      * real GPU/streaming work (this scene's cache is already oversubscribed,
      * see item 1b) and must stay event-driven, not run every frame. This
-     * touches ONLY pure JS geometry: `refreshItemPlacement` compares a
-     * placementKey and returns early when nothing moved, so the steady-state
-     * cost is one string build and a `!==` per token, every frame. Visibility
+     * touches ONLY pure JS geometry: `refreshItemPlacement` compares the fresh
+     * placement against the previous one field-by-field and returns early when
+     * nothing moved, so the steady-state cost is a handful of numeric `!==`
+     * checks per token, every frame, no allocation. Visibility
      * and streaming are untouched here — still owned by `updateResidency()`.
      */
     function syncTokenPlacements() {
@@ -9215,29 +9291,19 @@ export async function startVtPanViewer({
      * item that actually carries floor-attr uniforms — most items (anything
      * not a Level background/foreground/tile/vegetation overlay) have
      * `floorAttrUniforms: null` and are skipped in one branch. The floor list
-     * itself (`getActiveSceneFloors`) is resolved ONCE below, not once per
-     * item (2026-08-09 — it cannot differ between two items in the same pass
-     * over the same `sceneDoc`, so re-deriving it per item was pure waste,
-     * scaling with drawable count for a value that does not vary within it).
+     * itself (`getActiveSceneFloors`) is resolved ONCE per FRAME by the
+     * caller (`runLightAccumulatePass`), not once per item (2026-08-09) NOR
+     * once per per-frame subsystem (2026-08-12 — this was one of FOUR
+     * independent per-frame `getActiveSceneFloors` call sites inside
+     * `runLightAccumulatePass` alone, each re-deriving the identical result
+     * for the identical `sceneDoc`; see that function's own header) — it
+     * cannot differ between two consumers in the same frame over the same
+     * `sceneDoc`, so re-deriving it anywhere below this level is pure waste.
+     * `computeFloorAttrValues` accepts the shared result as `floorsResult`
+     * and skips its own internal `getActiveSceneFloors` call when given one.
      */
-    function syncAllFloorAttrUniformsForFrame() {
+    function syncAllFloorAttrUniformsForFrame(floorsResult) {
       const sceneDoc = globalThis.canvas?.scene ?? null;
-      // Resolved ONCE per frame, not once per item — see this function's own
-      // header. `computeFloorAttrValues` accepts this as `floorsResult` and
-      // skips its own internal `getActiveSceneFloors` call when it is given.
-      // ⚠️ Wrapped exactly like `computeFloorAttrValues`'s own internal call
-      // was (scene-attr.js) — `getActiveSceneFloors` resolves an asset URL
-      // per floor and can throw on a malformed one; that protection must not
-      // be lost just because the call moved up a level. `{ok:false}` is the
-      // same shape `computeFloorAttrValues` already treats as "no floors" —
-      // every per-item call below still falls back to `viewedFloorIndex`.
-      let floorsResult;
-      try {
-        floorsResult = getActiveSceneFloors(sceneDoc);
-      } catch (err) {
-        log.error('syncAllFloorAttrUniformsForFrame: getActiveSceneFloors failed — using the viewed floor:', err);
-        floorsResult = { ok: false, error: 'getActiveSceneFloors threw' };
-      }
       // Only vegetation's Case-2 overlays ever pass `receiverHeightFt` — Case 1
       // (a real tile's own author-set elevation IS its height) never does, see
       // `buildVegetationMaterial`'s `isFloorSurface` branch. Read live params
@@ -11339,7 +11405,7 @@ export async function startVtPanViewer({
      *                                screen still disagrees. Fix the upload
      *                                (BufferAttribute -> GPU under WebGPU).
      *
-     * `placementChanges` counts items whose placementKey ACTUALLY changed, so a
+     * `placementChanges` counts items whose placement ACTUALLY changed, so a
      * zero here means "nothing moved", never "I did not look" — every pass
      * writes all three fields (doctrine #5, feedback_instruments_must_not_lie).
      *

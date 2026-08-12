@@ -177,7 +177,15 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
   class ZoneInspector extends InspectorBase {
     beginRender(uid) {
       if (!armed) return;
-      const slot = profiler.currentSlot();
+      // NEAREST GPU-CAPABLE ANCESTOR, not simply the innermost open zone
+      // (2026-08-12). A `kind:'gpu'` bracket that opens a `kind:'cpu'` sub-zone
+      // around its own renderer.render() call would otherwise hand that child
+      // its entire GPU cost while reporting null for itself — see
+      // frame-profiler.js#gpuTargetSlot for the full history and for why the
+      // attributed TOTAL is unaffected by this. `currentSlot` is retained on the
+      // profiler (it is the honest answer to a different question) but is no
+      // longer what decides attribution.
+      const slot = profiler.gpuTargetSlot ? profiler.gpuTargetSlot() : profiler.currentSlot();
       // A render with no zone open is real (something outside every bracket) and
       // is COUNTED rather than silently attributed to slot 0, which would quietly
       // inflate whichever zone happened to be first in the taxonomy.

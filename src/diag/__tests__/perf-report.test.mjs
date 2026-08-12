@@ -28,6 +28,7 @@ import {
   buildPerfReport,
   buildZoneRows,
   classifyAgreement,
+  classifyBottleneck,
   clockNoiseFloorMs,
   collapseInsignificant,
   compareToManifest,
@@ -1263,7 +1264,13 @@ export function run(t) {
     ok('the shape series is present and bounded', full.frame.shape.worstGapMs.length === SHAPE_BUCKETS);
     ok('the spike survives condensation', full.frame.shape.worstGapMs.includes(168.4));
     ok('the histogram is populated', full.frame.histogram.length > 0);
-    ok('hitches are kept with a dropped count', full.frame.hitches.dropped === 0 && full.frame.hitches.count === 1);
+    ok(
+      'hitches are kept with a dropped count',
+      full.frame.hitches.droppedFromReport === 0 && full.frame.hitches.count === 1
+    );
+    // A viewer that never told us how many its own ring discarded must read as
+    // UNKNOWN. `?? 0` here is what hid a 430-hitch loss for three captures.
+    ok('an unreported ring-drop count is null, not zero', full.frame.hitches.droppedByRing === null);
     ok('effects are rolled up', full.effects.length === 3);
     ok(
       'zones are sorted by GPU cost, heaviest first',
@@ -1300,7 +1307,7 @@ export function run(t) {
       verbosity: 'full',
     });
     ok('verbosity full collapses nothing', verbose.zonesCollapsed.count === 0);
-    ok('verbosity full keeps every hitch', verbose.frame.hitches.dropped === 0);
+    ok('verbosity full keeps every hitch', verbose.frame.hitches.droppedFromReport === 0);
 
     const capped = buildPerfReport({
       generatedAt: '2026-07-27T00:00:00.000Z',
@@ -1309,8 +1316,77 @@ export function run(t) {
       frame: { hitches: Array.from({ length: HITCHES_KEPT + 5 }, (_, i) => ({ atMs: i, gapMs: 60 + i })) },
     });
     ok('the default report caps hitches', capped.frame.hitches.kept === HITCHES_KEPT);
-    ok('capped hitches are COUNTED as dropped, never silently lost', capped.frame.hitches.dropped === 5);
+    ok('capped hitches are COUNTED as dropped, never silently lost', capped.frame.hitches.droppedFromReport === 5);
     ok('the hitches kept are the WORST ones', capped.frame.hitches.items[0].gapMs === 60 + HITCHES_KEPT + 4);
+
+    // TWO DIFFERENT LOSSES, NEVER SUMMED (2026-08-12). The viewer's ring
+    // discarding the oldest hitches is a REAL loss of data; the report showing
+    // only the worst 20 of what it received is a display cap. Adding them made
+    // a run that lost 430 hitches to the ring report `dropped: 180`, all of it
+    // the harmless one — which is how the ring loss stayed invisible.
+    const bothLosses = buildPerfReport({
+      generatedAt: '2026-07-27T00:00:00.000Z',
+      zones: ZONES,
+      manifests: [],
+      frame: {
+        hitches: Array.from({ length: HITCHES_KEPT + 5 }, (_, i) => ({ atMs: i, gapMs: 60 + i })),
+        hitchesDropped: 430,
+      },
+    });
+    ok('a real ring loss is reported separately', bothLosses.frame.hitches.droppedByRing === 430);
+    ok('...from the display cap', bothLosses.frame.hitches.droppedFromReport === 5);
+    ok(
+      '...and count is labelled as RECEIVED, not as total',
+      bothLosses.frame.hitches.countIsReceivedNotTotal.includes('reached this report')
+    );
+  }
+
+  // ======================================================================
+  // WHAT WAS IN FLIGHT WHEN IT FROZE (2026-08-12)
+  // ======================================================================
+  // The 2026-08-11 residency audit closed §5 unable to say whether the 250-667ms
+  // freezes overlapped an in-flight residency pass, and said it would need a
+  // Chrome trace. Both possible answers are findings — a zero overlap RULES OUT
+  // the hypothesis, which is worth as much as confirming it.
+  {
+    const base = {
+      attribution: { frameGpuMs: 70 },
+      rows: [],
+      effects: [],
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      profilerAnomalies: {},
+      gpuTimer: {},
+    };
+    const overlap = deriveFindings({
+      ...base,
+      frame: { inFlightDuringHitches: { thresholdMs: 50, frames: 200, zones: { 'residency.itemLoad': 180 } } },
+    });
+    const hit = overlap.find((x) => x.id === 'hitches-overlap-zone');
+    ok('a zone open during most hitches is surfaced', hit !== null && hit !== undefined);
+    ok('...at high severity past half', hit.severity === 'high');
+    ok('...with the share computed', hit.evidence.zonesInFlight[0].share === 90);
+    ok('...and it explicitly refuses to call overlap causation', hit.text.includes('OVERLAP IS NOT CAUSE'));
+    ok('...telling the reader what to compare it against', hit.text.includes('occurrence rate'));
+
+    const clean = deriveFindings({
+      ...base,
+      frame: { inFlightDuringHitches: { thresholdMs: 50, frames: 200, zones: {} } },
+    });
+    const ruled = clean.find((x) => x.id === 'hitches-no-zone-in-flight');
+    ok('hitches with NOTHING open is itself a finding', ruled !== null && ruled !== undefined);
+    ok('...framed as a result, not a missing measurement', ruled.text.includes('RULES OUT'));
+    ok('...and it names where to look next', ruled.text.includes('GC'));
+
+    // No hitches at all is not a finding in either direction.
+    const quiet = deriveFindings({
+      ...base,
+      frame: { inFlightDuringHitches: { thresholdMs: 50, frames: 0, zones: {} } },
+    });
+    ok(
+      'a window with no hitches produces neither finding',
+      !quiet.some((x) => x.id.startsWith('hitches-no-zone') || x.id.startsWith('hitches-overlap'))
+    );
   }
 
   // ======================================================================
@@ -1514,5 +1590,200 @@ export function run(t) {
       'an entry missing its report is skipped, not crashed on',
       Object.keys(summarizeTierComparison([{ profile: 'low' }]).frame).length === 0
     );
+  }
+
+  // ======================================================================
+  // THE DIAGNOSTIC FINDINGS (2026-08-12) — questions the report now answers
+  // itself instead of leaving to whoever reads it
+  // ======================================================================
+  //
+  // Every number in this block is REAL, from the 2026-08-12 Mansion capture
+  // (floor 1, N→S, 3840×1906@1.5x, 675 frames). Fixtures invented to make an
+  // assertion pass prove the assertion, not the tool — and this project already
+  // has a name for that (feedback_synthetic_fixture_invariant_is_not_authored_art).
+  {
+    // --- classifyBottleneck: the median and the tail can disagree ----------
+    const b = classifyBottleneck({ gapMs: { p50: 75, p95: 108.4 }, gpuMs: { p50: 70.78, p95: 76.35 } });
+    ok("the headline verdict is the MEDIAN's — the felt frame rate", b.verdict === 'gpu-bound');
+    ok('...94.4% of the median frame is inside a timestamped pass', b.median.gpuFraction === 0.944);
+    ok('...but the p95 tail is only 70.4% explained', b.tail.gpuFraction === 0.704);
+    ok('...so the tail lands on a DIFFERENT verdict', b.tail.verdict === 'mixed');
+    ok('...and the disagreement is stated, not averaged away', b.tailDiffers === true);
+    ok('the tail names its own unexplained ms', b.tail.unexplainedMs === 32.05);
+    ok(
+      'the note refuses to call the remainder "CPU time"',
+      b.note.includes('NOT proven to be CPU time') && b.note.includes('presentation')
+    );
+
+    // A null is an absence: no samples must not read as a balanced frame.
+    const none = classifyBottleneck({ gapMs: null, gpuMs: null });
+    ok('no samples yields verdict "unmeasured", never a fabricated balance', none.verdict === 'unmeasured');
+    ok('...with null halves, not zeroed ones', none.median === null && none.tail === null);
+    ok(
+      'a zero gap cannot divide by zero into a verdict',
+      classifyBottleneck({ gapMs: { p50: 0 }, gpuMs: { p50: 5 } }).verdict === 'unmeasured'
+    );
+
+    // --- the findings, driven off the real zone shapes ---------------------
+    const row = (id, over = {}) => ({
+      id,
+      isPass: false,
+      sparse: false,
+      gpuAbsentByDeclaration: false,
+      drawCalls: null,
+      triangles: null,
+      gpuMs: null,
+      cpuMs: null,
+      ...over,
+    });
+    const findingIds = (f) => f.map((x) => x.id);
+    const find = (f, id) => f.find((x) => x.id === id) ?? null;
+
+    const realRows = [
+      row('geometry.earlyZPrepass', { drawCalls: 9.1, triangles: 73116.1, gpuMs: { amortisedMsPerFrame: 18.129 } }),
+      row('geometry.depthDraw', { drawCalls: 9.1, triangles: 73116.1, gpuMs: { amortisedMsPerFrame: 18.196 } }),
+      row('geometry.depthRenderCall', {
+        gpuAbsentByDeclaration: true,
+        site: 'runSceneDepthPass',
+        gpuMs: { amortisedMsPerFrame: 18.196 },
+      }),
+      row('residency.itemLoad', {
+        sparse: true,
+        gpuAbsentByDeclaration: true,
+        cpuMs: { meanMs: 9.406, maxMs: 25.4, totalMs: 6189, occurrences: 658, amortisedMsPerFrame: 9.169 },
+      }),
+    ];
+    const f = deriveFindings({
+      attribution: { frameGpuMs: 70.78, verdict: 'good', coverage: 0.984 },
+      rows: realRows,
+      effects: [],
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      bottleneck: b,
+      profilerAnomalies: {},
+      gpuTimer: {},
+      pipelineStats: {
+        start: { programs: 87, uniformBuffers: 5607 },
+        end: { programs: 87, uniformBuffers: 17539 },
+      },
+    });
+
+    // A 'cpu' zone carrying GPU time is a contradiction, and must be loud. This
+    // is the guard that stays behind the gpu-zone-timer fix — the next zone
+    // nested that way will be written by someone who never read it.
+    const contradiction = find(f, 'zone-kind-contradiction:geometry.depthRenderCall');
+    ok('a cpu-declared zone carrying GPU time is flagged', contradiction !== null);
+    ok('...at high severity — it invalidates how two rows read', contradiction.severity === 'high');
+    ok(
+      '...and a genuinely cpu-only zone is NOT flagged',
+      !findingIds(f).includes('zone-kind-contradiction:residency.itemLoad')
+    );
+
+    // The bottleneck outranks dominant-zone: "worldDraw is 33% of frame GPU" is
+    // only actionable once you know frame GPU is most of the frame.
+    const bf = find(f, 'bottleneck');
+    ok('the bottleneck verdict is a finding, not just a block', bf !== null);
+    ok('...escalated to high when the tail disagrees with the median', bf.severity === 'high');
+    ok(
+      '...it appears ABOVE dominant-zone',
+      findingIds(f).indexOf('bottleneck') < findingIds(f).indexOf('dominant-zone')
+    );
+
+    // Two zones with the same draw signature are submitting the same meshes.
+    const dup = find(f, 'duplicate-geometry:geometry.earlyZPrepass+geometry.depthDraw');
+    ok('identical draw signatures across two zones are flagged', dup !== null);
+    ok('...with both costs summed — 36ms of the 70.78ms frame', dup.evidence.combinedGpuMs === 36.325);
+    ok('...at high severity, being over a quarter of frame GPU', dup.severity === 'high');
+    ok('...and it refuses to declare which of the two readings it is', dup.text.includes('cannot tell which'));
+
+    // THE ONE THAT CHANGES THE DIAGNOSIS. itemLoadDims/itemLoadMasks only open
+    // on ensureItemLoaded's NEW-item path, so their absence measures "zero new
+    // items", which means the 2026-08-11 audit's parallelise-the-awaits fix
+    // cannot be what this window's 6.19s is waiting on.
+    const res = find(f, 'residency-cost-is-not-io');
+    ok('residency cost with no I/O sub-zones present is flagged', res !== null);
+    ok('...at high severity — it redirects an already-planned fix', res.severity === 'high');
+    ok(
+      '...it names the absence as a measurement, not a gap',
+      res.text.includes('MEASURES something rather than missing it')
+    );
+    ok('...and says the concurrency fix would buy nothing here', res.text.includes('would change nothing here'));
+    ok('...evidence records that neither I/O zone was present', res.evidence.ioZonesPresent.length === 0);
+
+    // The mirror case: when the I/O path DID run, report how much it explains
+    // rather than firing the alarm.
+    const withIo = deriveFindings({
+      attribution: { frameGpuMs: 70.78 },
+      rows: [
+        ...realRows,
+        row('residency.itemLoadDims', {
+          sparse: true,
+          gpuAbsentByDeclaration: true,
+          cpuMs: { totalMs: 4000, occurrences: 8 },
+        }),
+        row('residency.itemLoadMasks', {
+          sparse: true,
+          gpuAbsentByDeclaration: true,
+          cpuMs: { totalMs: 1800, occurrences: 8 },
+        }),
+      ],
+      effects: [],
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      profilerAnomalies: {},
+      gpuTimer: {},
+    });
+    ok(
+      'when the I/O zones DID fire, the alarm does not fire',
+      !findingIds(withIo).includes('residency-cost-is-not-io')
+    );
+    const share = find(withIo, 'residency-io-share');
+    ok('...a share finding reports how much of the parent is real I/O', share !== null);
+    ok('...93.7% of 6189ms accounted for by I/O', share.evidence.ioFraction === 0.937);
+    ok('...so it stays at low severity and confirms the audit', share.severity === 'low');
+
+    // uniformBuffers: P-008's "open lead", flagged rather than diagnosed.
+    const ub = find(f, 'uniform-buffers-grew');
+    ok('a >=2x uniformBuffers growth is surfaced at last', ub !== null);
+    ok('...as a ratio, which is the only meaningful form', ub.evidence.ratio === 3.13);
+    ok('...explicitly NOT calling it a leak', !ub.text.includes('leak') && ub.text.includes('NOT decided here'));
+    ok('...and it names the experiment that would settle it', ub.text.includes('camera parked'));
+
+    // Effects with no route to a number at all — a standing gap, not a run gap.
+    const stranded = deriveFindings({
+      attribution: { frameGpuMs: 70.78 },
+      rows: [],
+      effects: [
+        {
+          id: 'water',
+          enabled: true,
+          zoneCoverage: 'partial',
+          costMs: null,
+          whyNotZoned: 'draws inside geometry.world',
+        },
+        {
+          id: 'grade',
+          enabled: true,
+          zoneCoverage: 'none',
+          costMs: null,
+          whyNotZoned: 'folded into the present shader',
+        },
+        { id: 'bloom', enabled: true, zoneCoverage: 'full', costMs: 0.7 },
+        { id: 'apertureGobo', enabled: false, zoneCoverage: 'partial', costMs: null },
+      ],
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      profilerAnomalies: {},
+      gpuTimer: {},
+    });
+    const unpriceable = find(stranded, 'effects-unpriceable');
+    ok('effects with no route to a cost figure are named', unpriceable !== null);
+    ok('...only the two that are enabled AND uncosted', unpriceable.evidence.effects.length === 2);
+    ok('...a fully-zoned effect is not among them', !unpriceable.text.includes('bloom'));
+    ok('...nor is a DISABLED one — it has no cost to miss', !unpriceable.text.includes('apertureGobo'));
+    ok('...and it says re-running will not help', unpriceable.text.includes('re-running will not fix it'));
   }
 }

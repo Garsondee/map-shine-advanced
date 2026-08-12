@@ -219,6 +219,84 @@ export function findHangs(gapSamples, { keep = HITCHES_KEPT, medianMs = null } =
   };
 }
 
+/**
+ * IS THIS FRAME GPU-BOUND OR NOT? — the first question anyone asks, answered.
+ *
+ * Until 2026-08-12 this report computed both halves of the answer and then told
+ * the READER to do the division: *"THEN frame.gapMs vs frame.gpuMs: if gap p95
+ * is far above gpu p95 the bottleneck is CPU or presentation"* (the
+ * interpretation string, still there, now backed by this). That instruction was
+ * followed correctly at least twice and skipped silently more often than that —
+ * a verdict a tool can compute must not be left as an exercise.
+ *
+ * ⚠️ TWO PERCENTILES, NOT ONE, BECAUSE THEY ROUTINELY DISAGREE. A frame can be
+ * GPU-bound at the median and CPU-bound in the tail, and that combination has a
+ * completely different fix from either pure case (shrink the shader vs. find the
+ * stall). Reporting only p50 hides every hitch; reporting only p95 makes a
+ * healthy median look broken. Both, always, separately labelled.
+ *
+ * ⚠️ THE RESIDUAL IS NOT "CPU TIME", AND THIS FUNCTION MUST NOT CALL IT THAT.
+ * `frame.gpuMs` is the sum of TIMESTAMPED RENDER PASSES (its own `basis` field
+ * says so). Mipmap generation, presentation/swap, and any GPU work outside a
+ * render pass are real GPU cost that is NOT in that number. So gap − gpu is
+ * "time the measured passes do not explain", whose candidates are CPU work,
+ * presentation, AND untimestamped GPU work — three different bugs. Naming one of
+ * them here would be the `feedback_aggregate_cannot_name_the_source` error with
+ * extra confidence.
+ */
+export const GPU_BOUND_FRACTION = 0.85;
+export const CPU_BOUND_FRACTION = 0.6;
+
+export function classifyBottleneck({ gapMs = null, gpuMs = null } = {}) {
+  const at = (p) => {
+    const gap = gapMs?.[p];
+    const gpu = gpuMs?.[p];
+    if (!Number.isFinite(gap) || gap <= 0 || !Number.isFinite(gpu)) return null;
+    const explained = gpu / gap;
+    return {
+      gapMs: ms(gap),
+      gpuMs: ms(gpu),
+      unexplainedMs: ms(gap - gpu),
+      gpuFraction: round(explained, 3),
+      verdict:
+        explained >= GPU_BOUND_FRACTION ? 'gpu-bound' : explained >= CPU_BOUND_FRACTION ? 'mixed' : 'not-gpu-bound',
+    };
+  };
+  const median = at('p50');
+  const tail = at('p95');
+  if (median === null && tail === null) {
+    return {
+      verdict: 'unmeasured',
+      median: null,
+      tail: null,
+      note:
+        'Neither the frame gap nor the per-pass GPU total was measurable this run, so no bottleneck verdict is ' +
+        'possible. This is an ABSENCE, not a "balanced" frame — check method.gpu first.',
+    };
+  }
+  // The HEADLINE verdict is the median's, because that is the felt frame rate.
+  // The tail is reported beside it and drives its own sentence when it differs,
+  // rather than being averaged into a single misleading word.
+  const verdict = median?.verdict ?? tail?.verdict ?? 'unmeasured';
+  const split = median !== null && tail !== null && median.verdict !== tail.verdict;
+  return {
+    verdict,
+    median,
+    tail,
+    tailDiffers: split,
+    note:
+      (verdict === 'gpu-bound'
+        ? 'GPU-BOUND at the median: the timestamped render passes account for most of the frame, so zones[] is where the frame time actually is — optimise the top row.'
+        : verdict === 'mixed'
+          ? 'MIXED at the median: a substantial slice of the frame is not explained by the timestamped render passes. Read zones[].cpuMs beside zones[].gpuMs — the answer is in both columns.'
+          : 'NOT GPU-BOUND at the median: most of the frame is NOT inside a timestamped render pass. Shrinking a shader will not move this — look at zones[].cpuMs, and at anything outside a render pass entirely.') +
+      (split
+        ? ` The TAIL DISAGREES WITH THE MEDIAN (p95 is '${tail.verdict}', p50 is '${median.verdict}') — these have different fixes, and this run needs both. The median says what the steady frame costs; the p95 says what the hitches are made of.`
+        : '') +
+      ' The unexplained remainder is NOT proven to be CPU time: mipmap generation, presentation and any GPU work outside a render pass are all real GPU cost that frame.gpuMs does not count (see its own `basis`/`caveat`). Three candidates, not one.',
+  };
+}
+
 /** Percentile block for a raw sample array. All-null (never all-zero) when empty. */
 export function summariseSamples(samples) {
   const n = Array.isArray(samples) ? samples.length : 0;
@@ -754,6 +832,8 @@ export function deriveFindings({
   frame,
   method,
   budgetMs,
+  bottleneck = null,
+  structuralAB = null,
   profilerAnomalies,
   gpuTimer,
   pipelineStats = null,
@@ -769,6 +849,32 @@ export function deriveFindings({
   // INSTRUMENT FAULTS FIRST. If the tool misbehaved, that outranks anything it
   // measured — a reader who acts on a number produced by a broken bracket is
   // worse off than one who read nothing.
+
+  // A 'cpu' ZONE THAT CARRIES GPU TIME IS A MISLABELLED MEASUREMENT (2026-08-12).
+  // GPU timestamps are attributed to whichever zone is innermost-open when the
+  // render fires. A `kind:'gpu'` zone that opens a `kind:'cpu'` sub-zone around
+  // its own `renderer.render()` call therefore hands its entire GPU cost to the
+  // child and reports `gpuMs: null` itself — which this report renders as
+  // "measurement failed", the exact opposite of what happened.
+  //
+  // This cost three separate investigations the same rediscovery (P-007 filed it
+  // as "an unexplained outlier for three rounds"; P-008 Finding 3 traced the
+  // mechanism; the 2026-08-12 capture hit it again) before anyone wrote it down
+  // somewhere the tool itself would say it. gpu-zone-timer.js now walks to the
+  // nearest GPU-kind ancestor so this should not recur — this finding is the
+  // GUARD that stays behind, because the next zone nested this way will be
+  // written by someone who has not read that fix.
+  for (const r of rows ?? []) {
+    const gpu = r.gpuMs?.amortisedMsPerFrame;
+    if (!r.gpuAbsentByDeclaration || !Number.isFinite(gpu) || gpu <= 0) continue;
+    out.push({
+      severity: 'high',
+      id: `zone-kind-contradiction:${r.id}`,
+      text: `${r.id} is declared kind:'cpu' (gpuAbsentByDeclaration: true, meaning "this zone contains no draw calls at all") yet carries ${gpu}ms/frame of real GPU time. Both cannot be true. Either the declaration is wrong, or a GPU timestamp landed here because this zone was the innermost bracket open around somebody else's renderer.render() call — in which case that GPU time belongs to an ancestor and the ancestor is reporting a misleading gpuMs: null.`,
+      evidence: { zone: r.id, gpuMsPerFrame: gpu, site: r.site, parent: r.parent },
+    });
+  }
+
   if (profilerAnomalies?.unbalancedBrackets > 0) {
     out.push({
       severity: 'high',
@@ -808,6 +914,33 @@ export function deriveFindings({
           programsEnd: pipelineStats.end.programs,
           delta,
         },
+      });
+    }
+  }
+  // UNIFORM-BUFFER GROWTH (2026-08-12) — P-008's own "open lead, not investigated
+  // this round" (uniformBuffers 2,137 → 8,637, 4.04×, while `programs` held flat
+  // at 84). It stayed uninvestigated partly because nothing surfaced it: the raw
+  // pair was printed under instrument.pipelineStats and no finding ever pointed
+  // at it, so it read as background detail rather than a question. The
+  // 2026-08-12 capture repeated it (5,607 → 17,539, 3.1×) and it was STILL
+  // nobody's finding.
+  //
+  // ⚠️ DELIBERATELY NOT CALLED A LEAK. Growth here is genuinely ambiguous:
+  // per-material/per-light UBO allocation scaling with new content entering
+  // residency is expected and benign, and this report cannot tell that apart
+  // from unbounded per-frame allocation. What it CAN do is refuse to let the
+  // question go unasked for a third capture running. Ratio-based, not
+  // delta-based — an absolute count means nothing without its starting point.
+  if (Number.isFinite(pipelineStats?.start?.uniformBuffers) && Number.isFinite(pipelineStats?.end?.uniformBuffers)) {
+    const from = pipelineStats.start.uniformBuffers;
+    const to = pipelineStats.end.uniformBuffers;
+    const ratio = from > 0 ? to / from : null;
+    if (ratio !== null && ratio >= 2) {
+      out.push({
+        severity: 'medium',
+        id: 'uniform-buffers-grew',
+        text: `renderer.info.memory.uniformBuffers grew ${round(ratio, 2)}× (${from} → ${to}) across the measurement window. Whether that is expected (per-material/per-light UBOs allocated as new content enters residency, torn down between passes) or an unbounded per-frame allocation is NOT decided here — this report cannot tell those apart. It is flagged because the same growth appeared in the 2026-08-11 capture (4.04×) and went uninvestigated for want of anyone naming it. To settle it: re-run a window with the camera parked so no new content streams in. If the ratio holds with a static view, it is per-frame allocation, not content.`,
+        evidence: { uniformBuffersStart: from, uniformBuffersEnd: to, ratio: round(ratio, 2) },
       });
     }
   }
@@ -956,6 +1089,125 @@ export function deriveFindings({
     });
   }
 
+  // WHERE THE FRAME ACTUALLY WENT, BEFORE ANY ZONE IS NAMED (2026-08-12). This
+  // outranks `dominant-zone` deliberately: "geometry.worldDraw is 33% of frame
+  // GPU" is only actionable once you know frame GPU is most of the frame. When
+  // it is not, the biggest GPU zone is a distraction and this finding says so
+  // first. See classifyBottleneck for why the residual is not called "CPU time".
+  if (bottleneck && bottleneck.verdict !== 'unmeasured') {
+    const notGpu = bottleneck.verdict === 'not-gpu-bound';
+    out.push({
+      severity: notGpu || bottleneck.tailDiffers ? 'high' : 'medium',
+      id: 'bottleneck',
+      text:
+        `Median frame: ${bottleneck.median?.gpuMs}ms of timestamped render-pass GPU inside a ${bottleneck.median?.gapMs}ms frame ` +
+        `(${pct((bottleneck.median?.gpuFraction ?? 0) * 100)}% explained, ${bottleneck.median?.unexplainedMs}ms not). ` +
+        (bottleneck.tail
+          ? `At p95: ${bottleneck.tail.gpuMs}ms inside ${bottleneck.tail.gapMs}ms (${pct(bottleneck.tail.gpuFraction * 100)}% explained, ${bottleneck.tail.unexplainedMs}ms not). `
+          : '') +
+        bottleneck.note,
+      evidence: {
+        verdict: bottleneck.verdict,
+        medianGapMs: bottleneck.median?.gapMs ?? null,
+        medianGpuMs: bottleneck.median?.gpuMs ?? null,
+        medianUnexplainedMs: bottleneck.median?.unexplainedMs ?? null,
+        tailVerdict: bottleneck.tail?.verdict ?? null,
+        tailUnexplainedMs: bottleneck.tail?.unexplainedMs ?? null,
+        tailDiffers: bottleneck.tailDiffers ?? false,
+      },
+    });
+  }
+
+  // DID THE PIPELINE TRADE PAY OFF? (2026-08-12). Ranked high because it is the
+  // only finding in this report produced by an actual controlled experiment
+  // rather than by reading one state — and because the question it settles
+  // (Stage 1's early-Z prepass, ~18ms/frame) has been open, explicitly
+  // "recommended next step, not buildable from this chair", since P-008.
+  for (const t of structuralAB?.toggles ?? []) {
+    if (t.verdict === 'unmeasured') {
+      out.push({
+        severity: 'medium',
+        id: `structural-ab-unmeasured:${t.id}`,
+        text: `The ${t.label} A/B ran but produced no comparable GPU numbers, so the trade is still unmeasured. ${t.note}`,
+        evidence: { toggle: t.id },
+      });
+      continue;
+    }
+    const viewLocal = t.representative?.verdict === 'view-local';
+    out.push({
+      // 'within-noise' is not a null result to bury — it means the experiment
+      // ran and could not decide, which is exactly when someone would otherwise
+      // read the raw delta and believe it.
+      severity: t.verdict === 'costs-more-than-it-saves' ? 'high' : t.verdict === 'within-noise' ? 'medium' : 'low',
+      id: `structural-ab:${t.id}`,
+      text:
+        `${t.label} — ${t.note}` +
+        (t.perZone?.length
+          ? ` Biggest movers: ${t.perZone
+              .slice(0, 3)
+              .map((z) => `${z.id} ${z.deltaMs >= 0 ? '+' : ''}${z.deltaMs}ms`)
+              .join(', ')}.`
+          : '') +
+        (t.representative?.note ? ` ${t.representative.note}` : '') +
+        ` The question this answers: ${t.question}`,
+      evidence: {
+        toggle: t.id,
+        verdict: t.verdict,
+        liveState: t.liveState,
+        onGpuMs: t.onGpuMs,
+        offGpuMs: t.offGpuMs,
+        deltaGpuMs: t.deltaGpuMs,
+        noiseFloorMs: t.noiseFloorMs,
+        representative: t.representative?.verdict ?? null,
+        viewLocal,
+        topMovers: (t.perZone ?? []).slice(0, 5),
+      },
+    });
+  }
+
+  // THE SAME GEOMETRY SUBMITTED TWICE (2026-08-12). Two zones reporting the same
+  // draw-call AND triangle counts are drawing the same thing — which is
+  // sometimes exactly right (a depth prepass IS a second submission of the same
+  // meshes, and buys early-Z rejection with it) and sometimes a redundant pass
+  // nobody noticed. This report cannot tell those apart and does not try.
+  //
+  // What it CAN do is stop the pair going unremarked. The 2026-08-12 capture had
+  // `geometry.earlyZPrepass` and `geometry.depthDraw` both at exactly 9.1 draws
+  // / 73,116.1 triangles, 18.1ms and 18.2ms respectively — 36ms/frame, over half
+  // the GPU frame, spent submitting one set of meshes twice — and no finding
+  // said a word about it. Whether that is the price of early-Z or a genuine
+  // duplicate is the question this hands the reader, with the numbers already
+  // lined up.
+  {
+    const drawn = (rows ?? []).filter(
+      (r) =>
+        !r.isPass && Number.isFinite(r.drawCalls) && r.drawCalls > 0 && Number.isFinite(r.triangles) && r.triangles > 0
+    );
+    const near = (a, b) => Math.abs(a - b) <= Math.max(a, b) * 0.01;
+    for (let i = 0; i < drawn.length; i++) {
+      for (let j = i + 1; j < drawn.length; j++) {
+        const a = drawn[i];
+        const b = drawn[j];
+        if (!near(a.drawCalls, b.drawCalls) || !near(a.triangles, b.triangles)) continue;
+        const combined = ms((a.gpuMs?.amortisedMsPerFrame ?? 0) + (b.gpuMs?.amortisedMsPerFrame ?? 0));
+        out.push({
+          severity:
+            combined > 0 && Number.isFinite(attribution?.frameGpuMs) && combined / attribution.frameGpuMs > 0.25
+              ? 'high'
+              : 'low',
+          id: `duplicate-geometry:${a.id}+${b.id}`,
+          text: `${a.id} and ${b.id} submit the SAME geometry — ${a.drawCalls} vs ${b.drawCalls} draw calls, ${a.triangles} vs ${b.triangles} triangles — costing ${combined}ms/frame between them. That is either a depth/early-Z prepass paying for itself in reduced overdraw downstream, or one submission too many. This report cannot tell which: it can see that the meshes went in twice, not what the second pass bought. Settle it with an A/B (structuralAB below, if this run has one) rather than by reasoning about it.`,
+          evidence: {
+            zones: [a.id, b.id],
+            drawCalls: [a.drawCalls, b.drawCalls],
+            triangles: [a.triangles, b.triangles],
+            combinedGpuMs: combined,
+          },
+        });
+      }
+    }
+  }
+
   // The single biggest attributed cost, named.
   const leaves = (rows ?? []).filter((r) => !r.isPass && !r.sparse && Number.isFinite(r.gpuMs?.amortisedMsPerFrame));
   const top = [...leaves].sort((a, b) => b.gpuMs.amortisedMsPerFrame - a.gpuMs.amortisedMsPerFrame)[0];
@@ -979,6 +1231,82 @@ export function deriveFindings({
         text: `${r.id} ran ${r.gpuMs?.occurrences ?? r.cpuMs?.occurrences ?? 0} times and peaked at ${peak}ms — over the ${budgetMs}ms frame budget on its own. Amortised it is negligible (${r.gpuMs?.amortisedMsPerFrame ?? r.cpuMs?.amortisedMsPerFrame}ms/frame); as a one-frame stall it is a visible hitch.`,
         evidence: { zone: r.id, peakMs: peak, occurrences: r.gpuMs?.occurrences ?? r.cpuMs?.occurrences ?? 0 },
       });
+    }
+  }
+
+  // ==========================================================================
+  // RESIDENCY: IS THIS I/O LATENCY, OR SOMETHING ELSE WEARING ITS COAT?
+  // ==========================================================================
+  // Added 2026-08-12, and this one has a specific wrong answer it exists to
+  // prevent, twice given.
+  //
+  // `residency.itemLoad` wraps a sequential `for...of` with `await
+  // ensureItemLoaded(item)` inside. `ensureItemLoaded` has two branches: an
+  // ALREADY-LOADED path with no `await` anywhere in it (a Map.get and a field
+  // overwrite — genuinely sub-millisecond), and a NEW-ITEM path that pays real
+  // network/IndexedDB round trips. Only the new-item path opens
+  // `residency.itemLoadDims`/`residency.itemLoadMasks`, and the profiler emits
+  // NO ROW AT ALL for a zone that never fired.
+  //
+  // So those two zones being absent is not a gap in the report — it is a
+  // MEASUREMENT, and a decisive one: **zero new items appeared during this
+  // window.** Every `ensureItemLoaded` call took the await-free fast path.
+  //
+  // Why that matters enough to hard-code: both the 2026-08-11 audit and the
+  // Testament petition it corrected concluded residency is "a latency/
+  // concurrency problem — overlap the sequential round trips", and proposed
+  // parallelising those awaits as the single biggest lever. That conclusion is
+  // sound ONLY for a window where the new-item path actually ran. On a window
+  // where it did not, the same cost is coming from somewhere else entirely, and
+  // parallelising I/O that never happened would buy exactly nothing. The
+  // 2026-08-12 capture is that window — 6.19 SECONDS in `residency.itemLoad`
+  // with both I/O children absent — and nothing in the report said so, because
+  // an absent row looks the same as a row nobody thought about.
+  {
+    const byId = new Map((rows ?? []).map((r) => [r.id, r]));
+    const load = byId.get('residency.itemLoad');
+    const ioChildren = ['residency.itemLoadDims', 'residency.itemLoadMasks'];
+    const fired = ioChildren.filter((id) => byId.has(id));
+    const totalMs = load?.cpuMs?.totalMs ?? null;
+    // Only interesting when the parent actually cost something. A window with no
+    // residency activity at all is not a finding, it is a quiet scene.
+    if (load && Number.isFinite(totalMs) && totalMs > 100) {
+      if (fired.length === 0) {
+        out.push({
+          severity: 'high',
+          id: 'residency-cost-is-not-io',
+          text: `residency.itemLoad spent ${totalMs}ms (mean ${load.cpuMs.meanMs}ms over ${load.cpuMs.occurrences} occurrences, peak ${load.cpuMs.maxMs}ms) — but NEITHER of its I/O sub-zones (${ioChildren.join(', ')}) appears in this report at all. Those two only open on ensureItemLoaded's new-item path; the profiler emits no row for a zone that never fired. Their absence therefore MEASURES something rather than missing it: zero new items were loaded this window, so every call took the already-loaded branch, which contains no await at all. Whatever this time is, it is NOT the sequential network/IndexedDB latency that the 2026-08-11 residency audit identified and proposed parallelising — that path did not execute. Parallelising it would change nothing here. Look instead at what the pass does unconditionally per occurrence, independent of loading.`,
+          evidence: {
+            zone: 'residency.itemLoad',
+            totalMs,
+            meanMs: load.cpuMs.meanMs,
+            maxMs: load.cpuMs.maxMs,
+            occurrences: load.cpuMs.occurrences,
+            ioZonesPresent: [],
+            ioZonesExpected: ioChildren,
+          },
+        });
+      } else {
+        // The other half of the same question, and the reason this is not just a
+        // one-sided alarm: when the I/O path DID run, say how much of the parent
+        // it explains. A large unexplained remainder is the same finding as
+        // above in weaker form; a small one confirms the audit's diagnosis.
+        let childMs = 0;
+        for (const id of fired) childMs += byId.get(id)?.cpuMs?.totalMs ?? 0;
+        const explained = totalMs > 0 ? childMs / totalMs : null;
+        out.push({
+          severity: explained !== null && explained < 0.5 ? 'medium' : 'low',
+          id: 'residency-io-share',
+          text: `residency.itemLoad spent ${totalMs}ms, of which its real-I/O sub-zones (${fired.join(', ')}) account for ${ms(childMs)}ms — ${pct((explained ?? 0) * 100)}%. ${explained !== null && explained < 0.5 ? 'MOST OF THIS ZONE IS NOT I/O. The 2026-08-11 audit\'s "parallelise the sequential awaits" lever can only reach the I/O share; the majority here is something the pass does regardless of loading, and needs its own explanation.' : 'The majority of this zone IS genuine I/O wait, which is what the 2026-08-11 audit predicted — its concurrency fix targets the right thing on this window.'}`,
+          evidence: {
+            zone: 'residency.itemLoad',
+            totalMs,
+            ioMs: ms(childMs),
+            ioFraction: round(explained, 3),
+            ioZonesPresent: fired,
+          },
+        });
+      }
     }
   }
 
@@ -1059,6 +1387,36 @@ export function deriveFindings({
     });
   }
 
+  // EFFECTS THAT NO RUN OF THIS TOOL CAN EVER PRICE (2026-08-12). An effect with
+  // `zoneCoverage: 'partial'`/'none' draws inside somebody else's scene render
+  // and has no bracket of its own, so zones can only ever report a fragment of
+  // it. Its ONLY route to a number is the sweep — and the sweep diffs two
+  // whole-frame medians, so on any run where its own noise floor exceeds the
+  // effect's cost, that route is closed too.
+  //
+  // Both halves of that were already reported separately (`whyNotZoned` per
+  // effect, `sweep-below-resolution` for the sweep) and the CONJUNCTION — "these
+  // specific effects are unpriceable, permanently, until someone adds a zone" —
+  // was left for the reader to assemble. It never got assembled: `water`,
+  // `vegetation`, `fluid` and `grade` have gone unpriced in every capture to
+  // date without that ever being stated as a standing gap rather than a
+  // this-run absence.
+  {
+    const stranded = (effects ?? []).filter(
+      (e) => e.enabled !== false && (e.zoneCoverage === 'partial' || e.zoneCoverage === 'none') && e.costMs === null
+    );
+    if (stranded.length > 0) {
+      out.push({
+        severity: 'medium',
+        id: 'effects-unpriceable',
+        text: `${stranded.length} enabled effect(s) have NO cost figure and cannot get one from this tool as it stands: ${stranded.map((e) => e.id).join(', ')}. Each draws inside a shared scene render with no bracket of its own (see effects[].whyNotZoned), so zones can only ever report a fragment; and the sweep — their only other route — could not resolve them either. This is a STANDING GAP in the instrument, not a property of this run: re-running will not fix it. The fix is a zone bracket around each one's draw, or accepting that these effects are permanently unbudgeted.`,
+        evidence: {
+          effects: stranded.map((e) => ({ id: e.id, zoneCoverage: e.zoneCoverage, why: e.whyNotZoned })),
+        },
+      });
+    }
+  }
+
   // Methods that disagree without an explanation. Only where the sweep produced
   // a value we actually believe — comparing a zone against rejected noise would
   // manufacture a contradiction out of nothing.
@@ -1070,6 +1428,49 @@ export function deriveFindings({
         text: `${e.id}: zone sum ${e.zoneGpuMs}ms vs sweep marginal ${e.sweepMarginalGpuMs}ms — beyond the ${AGREEMENT_TOLERANCE * 100}% tolerance, and this effect declares FULL zone coverage, so one of the two is wrong. Do not average them.`,
         evidence: { effect: e.id, zoneGpuMs: e.zoneGpuMs, sweepMarginalGpuMs: e.sweepMarginalGpuMs },
       });
+    }
+  }
+
+  // WHAT WAS RUNNING WHEN IT FROZE (2026-08-12). The 2026-08-11 residency audit
+  // closed §5 with a named, unresolved mystery — 20 hitches of 250-667ms whose
+  // decode/cache stats showed zero I/O — and the honest note that settling it
+  // "needs a live Chrome trace correlated against hitchLog timestamps and
+  // residency in-flight windows". The profiler now computes that correlation
+  // itself, so the answer arrives with every report instead of needing a trace.
+  //
+  // BOTH ANSWERS ARE WORTH REPORTING. A high overlap is the first real evidence
+  // pointing at residency; a ZERO overlap rules it out and redirects the next
+  // investigation, which is exactly what the audit could not establish.
+  {
+    const hz = frame?.inFlightDuringHitches ?? null;
+    const hitchFrames = hz?.frames ?? 0;
+    if (hz && hitchFrames > 0) {
+      const ranked = Object.entries(hz.zones ?? {}).sort((a, b) => b[1] - a[1]);
+      if (ranked.length === 0) {
+        out.push({
+          severity: 'medium',
+          id: 'hitches-no-zone-in-flight',
+          text: `${hitchFrames} frame(s) exceeded ${hz.thresholdMs}ms, and NOT ONE of them had any profiler zone still open when it landed. Zones that span frames — the async residency brackets — are the only ones this check can catch, so this RULES OUT "a residency pass was mid-flight" as the explanation for the stalls in this window. That is a real result, not a missing measurement: it closes the hypothesis the 2026-08-11 audit left open and points the next investigation at something outside the instrumented render path entirely (GC, browser compositing, driver, or work nobody has bracketed yet).`,
+          evidence: { hitchFrames, thresholdMs: hz.thresholdMs, zonesInFlight: [] },
+        });
+      } else {
+        const [topId, topCount] = ranked[0];
+        const share = pct((topCount / hitchFrames) * 100);
+        out.push({
+          severity: share >= 50 ? 'high' : 'medium',
+          id: 'hitches-overlap-zone',
+          text: `${topCount} of ${hitchFrames} frames over ${hz.thresholdMs}ms (${share}%) landed while ${topId} was still open. Only frame-spanning zones can appear here, so this is direct evidence about the question the 2026-08-11 residency audit closed unable to answer. ⚠️ OVERLAP IS NOT CAUSE: an async bracket that stays open across many frames will overlap hitches by coincidence alone. Compare this share against that zone's own occurrence rate — if the zone is open during 90% of ALL frames, overlapping 90% of hitches means nothing; if it is open during 20% of frames but 80% of hitches, that is a real signal.`,
+          evidence: {
+            hitchFrames,
+            thresholdMs: hz.thresholdMs,
+            zonesInFlight: ranked.map(([id, count]) => ({
+              id,
+              hitchFrames: count,
+              share: pct((count / hitchFrames) * 100),
+            })),
+          },
+        });
+      }
     }
   }
 
@@ -1119,6 +1520,7 @@ export function buildPerfReport({
   effectZoning = {},
   frame = {},
   sweep = null,
+  structuralAB = null,
   manifests = [],
   enabledEffects = null,
   vram = null,
@@ -1196,16 +1598,48 @@ export function buildPerfReport({
     shape: condenseFrameHistory(gapSamples, { durationMs: win.durationMs ?? null }),
     hitches: {
       thresholdMs: frame.hitchThresholdMs ?? null,
+      // ⚠️ THREE DIFFERENT NUMBERS, AND CONFLATING THEM HID A REAL LOSS
+      // (2026-08-12). `count` is how many hitches this report RECEIVED, which is
+      // NOT how many happened: the viewer's own ring caps at HITCH_LOG_MAX and
+      // shifts the oldest out. `droppedByRing` is how many it threw away before
+      // this report ever saw them; `droppedFromReport` is how many were received
+      // and merely not printed. Until now the first was unmeasured (nothing
+      // produced `hitchesDropped`, so `?? 0` quietly asserted none) and the two
+      // were summed into one `dropped` — so a run that lost 430 hitches to the
+      // ring reported `dropped: 180`, all of it the harmless display cap.
+      //
+      // `null`, not 0, when the viewer cannot report it. "We do not know how
+      // many were dropped" and "none were dropped" are different claims, and
+      // frame.hangs.totalStalls (from the profiler's own complete gap ring) is
+      // the honest total to compare `count` against.
       count: hitchItems.length,
+      countIsReceivedNotTotal:
+        "How many hitch records reached this report. Compare against frame.hangs.totalStalls — which comes from the profiler's own complete gap series — for how many actually occurred.",
       kept: Math.min(hitchCap, hitchItems.length),
-      dropped: Math.max(0, hitchItems.length - hitchCap) + (frame.hitchesDropped ?? 0),
+      droppedFromReport: Math.max(0, hitchItems.length - hitchCap),
+      droppedByRing: Number.isFinite(frame.hitchesDropped) ? frame.hitchesDropped : null,
       items: [...hitchItems].sort((a, b) => (b.gapMs ?? 0) - (a.gapMs ?? 0)).slice(0, hitchCap),
     },
+    inFlightDuringHitches: frame.hitchZones ?? null,
   };
 
   const sweepMeasuredCount = effects.filter((e) => e.sweepMarginalGpuMs !== null).length;
-  const sweepNoiseFloorMs = estimateSweepNoiseFloor(sweep?.summary?.perEffect ?? sweep?.perEffect ?? []);
+  // ⚠️ MUST PASS THE MEASURED FLOOR (fixed 2026-08-12). `attributeZonesToEffects`
+  // computes this same floor WITH `sweep.summary.noiseFloorMs` (the sweep's own
+  // directly-measured open-vs-close baseline drift) and uses it to accept or
+  // reject every per-effect reading. This call omitted it, so the floor printed
+  // in `method.sweepNoiseFloorMs` and quoted in the `sweep-below-resolution`
+  // finding could be SMALLER than the one the rejections were actually made
+  // with — a report explaining its own rejections with the wrong threshold.
+  // perf-lab.js's header records this exact class of bug (two disagreeing floors
+  // in one report) as already found and fixed once; this was the same bug
+  // surviving in a second call site.
+  const sweepNoiseFloorMs = estimateSweepNoiseFloor(
+    sweep?.summary?.perEffect ?? sweep?.perEffect ?? [],
+    sweep?.summary?.noiseFloorMs ?? null
+  );
   const sweepRejectedCount = effects.filter((e) => e.sweepUnresolvable !== null).length;
+  const bottleneck = classifyBottleneck({ gapMs: frameBlock.gapMs, gpuMs: frameBlock.gpuMs });
   const findings = deriveFindings({
     attribution,
     rows: allRows,
@@ -1213,6 +1647,8 @@ export function buildPerfReport({
     frame: frameBlock,
     method,
     budgetMs,
+    bottleneck,
+    structuralAB,
     profilerAnomalies,
     gpuTimer,
     pipelineStats,
@@ -1262,6 +1698,12 @@ export function buildPerfReport({
       loop: win.loop ?? 'viewer',
     },
     frame: frameBlock,
+    // WHERE THE FRAME WENT, as a verdict rather than as two numbers the reader
+    // is told to divide. Sits beside `attribution` on purpose: attribution
+    // partitions the GPU time we CAN see, this one says how much of the frame
+    // that time is in the first place. A trustworthy partition of a third of the
+    // frame is still only a third of the answer.
+    bottleneck,
     attribution,
     zones: kept,
     zonesCollapsed: collapsed,
@@ -1283,6 +1725,12 @@ export function buildPerfReport({
     // feed perf-lab's existing, tested display straight from ONE run instead of
     // re-running the sweep a second time just to get its own shape back.
     sweepRaw: sweep,
+    // THE CONTROLLED EXPERIMENT, kept whole (2026-08-12). Unlike sweepRaw this
+    // is not echoed for a renderer's benefit — it is here because findings[]
+    // reports only each toggle's verdict and top three movers, while the full
+    // per-zone ON/OFF table is what someone deciding whether to KEEP a pipeline
+    // choice actually needs to read.
+    structuralAB,
     vram,
     // INSTRUMENT HEALTH, kept separate from the measurements on purpose. An
     // unbalanced bracket or an overflowed query pool is a fault in the tool, and

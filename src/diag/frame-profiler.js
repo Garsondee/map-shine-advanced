@@ -55,6 +55,13 @@ export const DEFAULT_SETTLE_FRAMES = 30;
  * that happens to end wherever the buffer ran out. 16KB, allocated once.
  */
 export const GAP_CAPACITY = 4096;
+/**
+ * A frame slower than this counts as a hitch for the in-flight-zone correlation.
+ * Matches `vt-pan-viewer.js`'s own HITCH_THRESHOLD_MS deliberately: two
+ * instruments disagreeing about what counts as a hitch, in the same report, is
+ * the kind of quiet contradiction this file exists to avoid.
+ */
+export const DEFAULT_HITCH_THRESHOLD_MS = 50;
 /** Trials used to measure the clock's real step. */
 export const CLOCK_PROBE_TRIALS = 25;
 
@@ -118,6 +125,27 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
   const openStack = new Int32Array(64);
   let stackDepth = 0;
 
+  // WHICH SLOTS MAY LEGALLY RECEIVE A GPU TIMESTAMP (2026-08-12). Precomputed
+  // once so the attribution walk below stays a typed-array read per level and
+  // never touches the ZONES array (or allocates) inside a frame.
+  //
+  // Declared slots: 1 for kind 'gpu'/'both', 0 for 'cpu'. Pass slots (>=
+  // declaredCount) are synthesized, carry no declaration, and genuinely DO own
+  // GPU work — a pass row's own gpuMs is exactly the draws inside it that no
+  // sub-zone bracketed. They are valid targets.
+  const slotTakesGpu = new Uint8Array(slots);
+  for (let i = 0; i < slots; i++) {
+    slotTakesGpu[i] = i >= declaredCount || zones[i]?.kind !== 'cpu' ? 1 : 0;
+  }
+
+  // HITCH ↔ IN-FLIGHT ZONE CORRELATION. Preallocated like everything else here:
+  // one Int32Array and two counters, incremented only on frames that already
+  // exceeded the threshold, so the common path pays a single comparison. See
+  // beginFrame for what this can and cannot observe.
+  const hitchOpenZone = new Int32Array(slots);
+  let hitchFrames = 0;
+  let hitchThresholdMs = DEFAULT_HITCH_THRESHOLD_MS;
+
   /** passId -> slot, allocated on first sight then reused. */
   const passSlots = new Map();
   let nextPassSlot = declaredCount;
@@ -174,6 +202,8 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
     openDraws.fill(0);
     openTris.fill(0);
     unbalanced.fill(0);
+    hitchOpenZone.fill(0);
+    hitchFrames = 0;
     stackDepth = 0;
     passSlots.clear();
     nextPassSlot = declaredCount;
@@ -337,6 +367,7 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
       readDrawCalls: rdc = null,
       readTriangles: rt = null,
       owner: nextOwner = 'anonymous',
+      hitchThresholdMs: hitchMs = DEFAULT_HITCH_THRESHOLD_MS,
     } = {}) {
       // Re-arming as the SAME owner is normal — that is how the HUD gets a
       // rolling window. Arming over somebody else's live window is the bug.
@@ -353,6 +384,7 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
       readDrawCalls = typeof rdc === 'function' ? rdc : null;
       readTriangles = typeof rt === 'function' ? rt : null;
       settleRemaining = Math.max(0, settleFrames | 0);
+      hitchThresholdMs = Number.isFinite(hitchMs) && hitchMs > 0 ? hitchMs : DEFAULT_HITCH_THRESHOLD_MS;
       // Measured at arm time, not assumed, and not re-measured per run — the
       // clamp is a property of the page, not of the window being measured. An
       // injected value skips the probe entirely (tests with a frozen fake clock,
@@ -391,6 +423,47 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
      */
     currentSlot: () => (stackDepth > 0 ? openStack[stackDepth - 1] : -1),
     openDepth: () => stackDepth,
+
+    /**
+     * THE SLOT A GPU TIMESTAMP BELONGS TO — the innermost open zone that is
+     * allowed to own GPU work, which is NOT always the innermost open zone.
+     *
+     * ⚠️ WHY THIS IS NOT JUST `currentSlot()` (fixed 2026-08-12, after the same
+     * bug was rediscovered in three separate investigations).
+     *
+     * `runSceneDepthPass` opens `geometry.depthDraw` (kind 'gpu') and then, one
+     * level in, `geometry.depthRenderCall` (kind 'cpu') around the actual
+     * `renderer.render()` call — three CPU sub-zones added in 2026-08 to chase a
+     * CPU mystery in that pass. Attribution by innermost-open therefore handed
+     * the depth pass's ENTIRE GPU cost (~18ms/frame, the second largest number
+     * in the whole table) to a zone declared to contain no draw calls at all,
+     * while `geometry.depthDraw` — the zone that exists precisely to hold it —
+     * reported `gpuMs: null` in every report ever produced. The report renders
+     * that null as "measurement failed", which is the exact opposite of what
+     * happened, and each investigation had to re-derive the truth from the
+     * bracket nesting before it could read its own numbers.
+     *
+     * ⚠️ THE ATTRIBUTED TOTAL IS UNCHANGED BY THIS. Every sample still lands in
+     * exactly one slot, and `computeAttribution` sums every row — so coverage,
+     * the residual, and the frame total are all bit-identical to before. Only
+     * the LABEL moves, from a zone that disclaims GPU work to its nearest
+     * ancestor that claims it.
+     *
+     * FALLBACK, deliberate: if no GPU-capable ancestor is open at all, this
+     * returns the innermost slot exactly as before rather than -1. Dropping the
+     * sample would silently shrink coverage — losing real measured GPU time to
+     * make a label tidy — which is the trade this file never makes. The
+     * mislabelled row is then caught loudly at the report layer
+     * (`zone-kind-contradiction`), which names the zone instead of leaving a
+     * bare counter.
+     */
+    gpuTargetSlot: () => {
+      for (let d = stackDepth - 1; d >= 0; d--) {
+        const slot = openStack[d];
+        if (slotTakesGpu[slot]) return slot;
+      }
+      return stackDepth > 0 ? openStack[stackDepth - 1] : -1;
+    },
 
     isArmed: () => armed,
     /** Who owns the live window, or null. Callers guard on this BEFORE arming. */
@@ -453,6 +526,37 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
         if (gap > 0 && Number.isFinite(gap)) {
           if (gapCount < GAP_CAPACITY) gapMs[gapCount++] = gap;
           else gapDropped++;
+          // WHAT WAS STILL RUNNING WHEN THE FRAME HUNG? (2026-08-12)
+          //
+          // This is the ONLY point in the codebase where the frame gap and the
+          // open-zone stack are both in scope, which is why the correlation
+          // lives here rather than beside the viewer's own hitch log.
+          //
+          // ⚠️ READ WHAT THIS CAN AND CANNOT SEE. By the time frame N's gap is
+          // known — at the START of frame N+1 — every render-loop zone from
+          // frame N has already closed. So `stackDepth` here is normally 0, and
+          // the only zones this can ever catch open are the ones that genuinely
+          // SPAN frames: the `cadence:'event'` residency brackets, which suspend
+          // across real `await`s while the render loop keeps ticking
+          // independently (scheduleResidencyUpdate is fire-and-forget).
+          //
+          // That narrowness is the entire point. The 2026-08-11 residency audit
+          // closed with a named, unresolved mystery: 20 hitches of 250-667ms
+          // whose decode/cache stats showed ZERO I/O activity, with no mechanism
+          // found and the honest note that resolving it "needs a live Chrome
+          // trace correlated against hitchLog timestamps and residency in-flight
+          // windows". This is that correlation, computed in-process, for free,
+          // on every run — no trace, no manual timestamp alignment.
+          //
+          // A high count here says the freezes land while residency is
+          // mid-flight (not proof of cause, but the first real evidence either
+          // way). A count of zero rules that out and sends the next
+          // investigation somewhere else — which is worth just as much and is
+          // what the audit could not establish at all.
+          if (gap > hitchThresholdMs) {
+            hitchFrames++;
+            for (let d = 0; d < stackDepth; d++) hitchOpenZone[openStack[d]]++;
+          }
         }
       }
       lastFrameStartMs = t;
@@ -496,6 +600,25 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
         settleFramesDiscarded: settleDiscarded,
         clockResolutionMs,
         zoneStats,
+        // WHICH ZONES WERE MID-FLIGHT WHEN A FRAME HUNG (2026-08-12). See
+        // beginFrame for what this can and cannot observe — in short, only zones
+        // that genuinely span frames (the async residency brackets) can ever
+        // appear here, which is exactly the question the 2026-08-11 audit closed
+        // unable to answer.
+        //
+        // `zones` is emitted only for slots with a nonzero count, so an empty
+        // object beside a nonzero `frames` is a REAL result — "no zone was open
+        // during any hitch" — not a gap. That is why `frames` ships alongside
+        // it: without the denominator, empty would be ambiguous.
+        hitchZones: (() => {
+          const z = {};
+          for (let i = 0; i < slots; i++) {
+            if (hitchOpenZone[i] > 0) {
+              z[i < declaredCount ? zones[i].id : `${PASS_ZONE_PREFIX}${passIdForSlot(i)}`] = hitchOpenZone[i];
+            }
+          }
+          return { thresholdMs: hitchThresholdMs, frames: hitchFrames, zones: z };
+        })(),
         anomalies: {
           unbalancedBrackets: totalUnbalanced,
           passSlotOverflow,

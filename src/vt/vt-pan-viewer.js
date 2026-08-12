@@ -9365,7 +9365,8 @@ export async function startVtPanViewer({
     const HITCH_THRESHOLD_MS = 50; // ~3 frames' worth at 60fps — a real, user-perceptible stall, not ordinary jitter
     const CAMERA_PATH_FRAME_CAP_MS = 1000 / 30; // video capture target (author records at 30fps) — see renderFrame's own use below
     const HITCH_LOG_MAX = 200; // capped so a long thrash run can't grow this unboundedly
-    const hitchLog = []; // {atMs, gapMs, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
+    const hitchLog = []; // {atMs, gapMs, halfSpanPx, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
+    let hitchesDropped = 0; // oldest hitches the ring discarded — reported, never silent (see the shift below)
 
     // GPU PROBE (2026-07-20) — the Performance Lab's WHOLE-FRAME measurement
     // engine, gated OFF in normal play. See diag/gpu-probe.js: it times real GPU
@@ -9664,7 +9665,19 @@ export async function startVtPanViewer({
             decodeStats: getDecodeStats(),
             cacheStats: cache.stats(),
           });
-          if (hitchLog.length > HITCH_LOG_MAX) hitchLog.shift();
+          // COUNT WHAT THE RING DROPS (2026-08-12). Without this the report
+          // prints `dropped: 0` while `shift()` silently discards the oldest
+          // hitches, which is the one thing every other ring in this project is
+          // forbidden from doing (flight-recorder.js: "no ring here silently
+          // truncates"). Caught live in the 2026-08-12 capture, where
+          // `hangs.totalStalls` counted 630 frames over 50ms from the profiler's
+          // own complete gap series while `hitches.count` read exactly 200 —
+          // HITCH_LOG_MAX to the digit. 430 hitches had been thrown away and
+          // the report said none had.
+          if (hitchLog.length > HITCH_LOG_MAX) {
+            hitchLog.shift();
+            hitchesDropped++;
+          }
         }
       }
       lastFrameStartMs = now;
@@ -13073,6 +13086,10 @@ export async function startVtPanViewer({
         return {
           gapSamples: frameGapTimes.slice(),
           hitches: hitchLog.slice(),
+          // Consumed by perf-report.js's `frame.hitches.dropped`, which has read
+          // this field since it was written but which NOTHING produced until
+          // 2026-08-12 — so it silently added 0 and the truncation was invisible.
+          hitchesDropped,
           hitchThresholdMs: HITCH_THRESHOLD_MS,
           cpuEncodeMsAvgLast120: frameTimes.length
             ? Math.round((frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length) * 100) / 100
@@ -13091,6 +13108,9 @@ export async function startVtPanViewer({
       resetFrameStats() {
         frameGapTimes.length = 0;
         hitchLog.length = 0;
+        // Must clear with the ring it counts, or the NEXT window inherits the
+        // previous one's drops and reports truncation that never happened to it.
+        hitchesDropped = 0;
         lastFrameStartMs = null;
       },
       /** Tear down buf:scene.color + the present chain (see disposeActive). */
@@ -14431,6 +14451,7 @@ export async function startVtPanViewer({
       resetHitchTracking() {
         frameGapTimes.length = 0;
         hitchLog.length = 0;
+        hitchesDropped = 0;
         lastFrameStartMs = null;
       },
       /**

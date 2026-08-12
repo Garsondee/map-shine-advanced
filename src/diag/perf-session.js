@@ -56,6 +56,7 @@
 import { buildPerfReport } from './perf-report.js';
 import { EFFECT_ZONING, FRAME_BUDGET_MS, ZONES } from './perf-zones.js';
 import { DEFAULT_SETTLE_FRAMES } from './frame-profiler.js';
+import { runStructuralAB } from './perf-structural-ab.js';
 
 /** Default measured window. ~10s at 60fps — long enough for a bake to appear. */
 export const DEFAULT_MEASURE_FRAMES = 600;
@@ -136,6 +137,10 @@ export async function runProfileSession(harness, opts = {}) {
     settleFrames = DEFAULT_SETTLE_FRAMES,
     measureFrames = DEFAULT_MEASURE_FRAMES,
     includeSweep = false,
+    // DEFAULT ON, unlike includeSweep (2026-08-12). It is cheap relative to what
+    // it answers — three short parked blocks against the sweep's 18 configs —
+    // and every capture to date has left the question it settles open.
+    includeStructuralAB = true,
     verbosity = 'default',
     route = null,
     /** A promise that resolves when the workload ends; replaces `measureFrames`. */
@@ -349,6 +354,25 @@ export async function runProfileSession(harness, opts = {}) {
     sweep = await harness.runSweep();
   }
 
+  // STRUCTURAL A/B (2026-08-12) — "does this pipeline choice pay for itself",
+  // which the effect sweep structurally cannot answer and which was previously
+  // only reachable by running the whole capture twice by hand from Playwright
+  // (tests/playwright-artifacts/look/stage1-earlyz-bench.mjs). Runs AFTER the
+  // route and after the sweep, on a parked camera, and re-arms the profiler
+  // per block — see perf-structural-ab.js for the method and its three rules.
+  //
+  // Fed the main window's own per-frame zone GPU so it can check whether the
+  // parked view it measures stands in for the route at all. Without that the
+  // A/B would silently generalise one static view to the whole map.
+  let structuralAB = null;
+  if (includeStructuralAB && typeof harness.setStructuralToggle === 'function') {
+    const routeZones = {};
+    for (const z of profile.zoneStats ?? []) {
+      if (z?.gpu && Number.isFinite(z.gpu.sumMs) && profile.frames > 0) routeZones[z.id] = z.gpu.sumMs / profile.frames;
+    }
+    structuralAB = await runStructuralAB(harness, { routeZones, onProgress });
+  }
+
   say('building', 'assembling the report');
   return buildPerfReport({
     generatedAt,
@@ -397,8 +421,12 @@ export async function runProfileSession(harness, opts = {}) {
       // (it throttles the loop), so without this coverage could never be
       // computed during a profile at all — every run would verdict 'unmeasured'.
       gpuMs: gpuStatus?.frameGpuMs ?? frameStats.gpuMs ?? null,
+      // Which zones were still open when a frame hung — the profiler's own
+      // correlation, computed in-process. See frame-profiler.js#beginFrame.
+      hitchZones: profile.hitchZones ?? null,
     },
     sweep,
+    structuralAB,
     pipelineStats: pipelineStatsStart && pipelineStatsEnd ? { start: pipelineStatsStart, end: pipelineStatsEnd } : null,
     depthProxyPoolStats:
       depthProxyPoolStatsStart && depthProxyPoolStatsEnd

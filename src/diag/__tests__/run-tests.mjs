@@ -12,6 +12,7 @@ import { run as runGpuProbe } from './gpu-probe.test.mjs';
 import { run as runPerfLab } from './perf-lab.test.mjs';
 import { run as runPerfZones } from './perf-zones.test.mjs';
 import { run as runPerfReport } from './perf-report.test.mjs';
+import { run as runPerfStructuralAB } from './perf-structural-ab.test.mjs';
 import { run as runVramInventory } from './vram-inventory.test.mjs';
 import { run as runFrameProfiler } from './frame-profiler.test.mjs';
 import { run as runGpuZoneTimer } from './gpu-zone-timer.test.mjs';
@@ -50,6 +51,7 @@ const suites = [
   ['perf-lab', runPerfLab],
   ['perf-zones', runPerfZones],
   ['perf-report', runPerfReport],
+  ['perf-structural-ab', runPerfStructuralAB],
   ['vram-inventory', runVramInventory],
   ['frame-profiler', runFrameProfiler],
   ['gpu-zone-timer', runGpuZoneTimer],

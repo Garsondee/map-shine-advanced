@@ -2711,6 +2711,10 @@ function install() {
       return {
         gapSamples: samples.gapSamples ?? [],
         hitches: samples.hitches ?? [],
+        // ?? null, NOT ?? 0 — an older viewer that does not report this must
+        // read as "unknown", not as "nothing was dropped". perf-report.js
+        // distinguishes the two.
+        hitchesDropped: samples.hitchesDropped ?? null,
         hitchThresholdMs: samples.hitchThresholdMs ?? null,
         // The COARSE whole-frame GPU number, from the other instrument. Present
         // only if a sweep armed it — normally null, and null here is honest:
@@ -2801,6 +2805,29 @@ function install() {
     // Two methods measuring the same effect and disagreeing is information —
     // perf-report.js classifies the disagreement rather than averaging it away.
     runSweep: () => runSweep(perfHarness),
+    // STRUCTURAL TOGGLES (2026-08-12) — pipeline choices, not effects, and the
+    // distinction is the whole reason these need their own hook rather than a
+    // sweep config. `setForcedEnabled` routes through the effect registry
+    // (resolveAndApply on a layer stack); these are plain viewer-level booleans
+    // that no registry knows about, which is exactly why the early-Z question
+    // was previously only answerable by driving the app from OUTSIDE via
+    // Playwright and running the whole 2-4 minute capture twice.
+    //
+    // Read-back is REQUIRED, not a convenience: perf-structural-ab refuses to
+    // flip any toggle it cannot read first, because a throw mid-run that left
+    // early-Z off would surface as a rendering regression from nowhere, hours
+    // later, with nothing pointing back here.
+    readStructuralToggle: (id) => {
+      if (id === 'earlyZComposition') {
+        const s = getVtPanViewerEarlyZComposition();
+        return typeof s?.earlyZComposition === 'boolean' ? s.earlyZComposition : null;
+      }
+      return null;
+    },
+    setStructuralToggle: (id, on) => {
+      if (id === 'earlyZComposition') return setVtPanViewerEarlyZComposition(on);
+      return null;
+    },
   };
 
   const perfHud = createPerfHud({
@@ -2859,7 +2886,32 @@ function install() {
         lastPerfProfile = await runProfileSession(profileHarness, {
           generatedAt: started,
           measureUntil: playing,
-          includeSweep: true,
+          // ⚠️ THE EFFECT SWEEP IS OFF BY DEFAULT AS OF 2026-08-12, and this is
+          // a deliberate removal of work, not an oversight.
+          //
+          // It costs 18 configs (~1.5-3 minutes, over half this action's total
+          // runtime) and has produced ZERO usable per-effect numbers in three
+          // consecutive real captures. That is not a tuning problem. The method
+          // diffs two WHOLE-FRAME GPU medians, so its resolution floor is set by
+          // frame-scale variance — measured at 7.3ms on the 2026-08-12 run, and
+          // 12.8ms of that run's own opening-vs-closing baseline drift — while
+          // the effects it is asked to price cost ~0.5ms each. Every one of the
+          // 15 fell inside the floor and was correctly rejected. Running it
+          // again would burn the same minutes to reject them again.
+          //
+          // What replaced it: `includeStructuralAB` (default on, three short
+          // parked blocks) answers a question the sweep never could, using the
+          // per-zone GPU timer, which is both finer and more direct. And the
+          // effects the sweep was the ONLY route for (water, vegetation, fluid,
+          // grade) are now named explicitly by the report's own
+          // `effects-unpriceable` finding as a STANDING instrument gap needing a
+          // zone bracket — which is the honest status, and more useful than a
+          // column of rejected noise that made the gap look like bad luck.
+          //
+          // Not deleted, just not automatic: perf-lab's sweep remains wired and
+          // tested, and passing `includeSweep: true` here still runs it for
+          // anyone who wants it on a quiet machine.
+          includeSweep: false,
           // 3x the profiler's own default (DEFAULT_SETTLE_FRAMES=30) — this run
           // is already ~2-4 minutes end to end, so a few extra seconds letting
           // shader compiles/the first residency pass/the first bake clear
@@ -2885,8 +2937,13 @@ function install() {
       // Feed the sweep's OWN rich per-effect table (perf-lab.js's tested
       // renderer) from the SAME run, via the raw sweep buildPerfReport echoes
       // back — no second sweep, no reshaping effects[] back into the shape
-      // renderResults expects.
-      perfLab.renderResult(lastPerfProfile.sweepRaw?.summary ?? null, lastPerfProfile.sweepRaw?.context ?? null);
+      // renderResults expects. Guarded since 2026-08-12: with includeSweep off
+      // by default there is usually no sweep to render, and pushing a null
+      // through would replace the panel's last real result with an empty table
+      // that reads as "the sweep ran and found nothing".
+      if (lastPerfProfile.sweepRaw?.summary) {
+        perfLab.renderResult(lastPerfProfile.sweepRaw.summary, lastPerfProfile.sweepRaw.context ?? null);
+      }
       // See perf-run's old comment (now folded into this one): the panel copies
       // the RETURN VALUE, always after entry.fn() resolves — a manual
       // copyToClipboard() here would be silently clobbered.

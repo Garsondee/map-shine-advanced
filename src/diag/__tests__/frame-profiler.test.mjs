@@ -437,4 +437,144 @@ export function run(t) {
         .join(',') === idsBefore
     );
   }
+
+  // ======================================================================
+  // GPU ATTRIBUTION TARGETS THE NEAREST GPU-CAPABLE ANCESTOR (2026-08-12)
+  // ======================================================================
+  // The real shape this fixes, verbatim from the live render loop:
+  // `runSceneDepthPass` opens geometry.depthDraw (kind 'gpu') and then
+  // geometry.depthRenderCall (kind 'cpu') around the actual renderer.render().
+  // Attribution by innermost-open gave a zone declared to have NO draw calls
+  // ~18ms/frame of real GPU time, while the zone that exists to hold it read
+  // `null` — which every report renders as "measurement failed".
+  {
+    const { now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    const kindOf = (id) => ZONES.find((z) => z.id === id)?.kind;
+    // Pin the declarations this test's whole point rests on. If someone
+    // re-declares depthRenderCall as 'gpu' the fix becomes a no-op, and this
+    // test must fail loudly rather than keep passing for the wrong reason.
+    ok("geometry.depthDraw is declared kind:'gpu'", kindOf('geometry.depthDraw') === 'gpu');
+    ok("geometry.depthRenderCall is declared kind:'cpu'", kindOf('geometry.depthRenderCall') === 'cpu');
+
+    const outer = p.indexOf('geometry.depthDraw');
+    const inner = p.indexOf('geometry.depthRenderCall');
+    p.arm({ settleFrames: 0 });
+    p.beginFrame(0);
+    p.begin(outer);
+    p.begin(inner);
+
+    ok('currentSlot still answers "innermost open", unchanged', p.currentSlot() === inner);
+    ok('gpuTargetSlot skips the cpu child and returns the gpu ancestor', p.gpuTargetSlot() === outer);
+
+    // The end-to-end consequence, through the real accumulator.
+    p.noteGpuMs(p.gpuTargetSlot(), 18.2);
+    p.end(inner);
+    p.end(outer);
+    p.endFrame();
+    const rows = p.snapshot().zoneStats;
+    const draw = rows.find((z) => z.id === 'geometry.depthDraw');
+    const call = rows.find((z) => z.id === 'geometry.depthRenderCall');
+    ok('the gpu-declared zone now carries the GPU time', draw?.gpu?.sumMs === 18.2);
+    ok('the cpu-declared zone carries none of it', call?.gpu === null);
+    p.disarm();
+  }
+
+  // A cpu zone with NO gpu ancestor must still receive the sample rather than
+  // lose it. Dropping it would silently shrink attribution coverage — trading
+  // real measured GPU time for a tidy label, which this file never does. The
+  // mislabelling is caught at the report layer instead (zone-kind-contradiction).
+  {
+    const { now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    const only = p.indexOf('geometry.depthRenderCall');
+    p.arm({ settleFrames: 0 });
+    p.beginFrame(0);
+    p.begin(only);
+    ok('a lone cpu zone is still returned rather than -1', p.gpuTargetSlot() === only);
+    p.end(only);
+    p.endFrame();
+    p.disarm();
+  }
+
+  // No zone open at all stays -1 — the "unattributed pass" path, which
+  // gpu-zone-timer counts rather than folding into slot 0.
+  {
+    const { now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    p.arm({ settleFrames: 0 });
+    p.beginFrame(0);
+    ok('gpuTargetSlot is -1 when nothing is open', p.gpuTargetSlot() === -1);
+    p.endFrame();
+    p.disarm();
+  }
+
+  // ======================================================================
+  // HITCH ↔ IN-FLIGHT ZONE CORRELATION (2026-08-12)
+  // ======================================================================
+  // The 2026-08-11 residency audit closed with "do the 250-667ms freezes
+  // overlap an in-flight residency pass?" explicitly unresolved, needing a
+  // Chrome trace to settle. This computes it in-process. Only zones that SPAN
+  // frames can be caught — which is precisely the class the question was about.
+  {
+    const { state, now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    const spanning = p.indexOf('residency.itemLoad');
+    p.arm({ settleFrames: 0, hitchThresholdMs: 50 });
+
+    // Frame 1: nothing open, baseline.
+    p.beginFrame((state.t = 0));
+    p.endFrame();
+    // A zone opens and stays open ACROSS the next frames — the residency shape,
+    // where scheduleResidencyUpdate is fire-and-forget and the render loop keeps
+    // ticking through its awaits.
+    p.begin(spanning);
+    p.beginFrame((state.t = 16)); // 16ms — fine, not a hitch
+    p.endFrame();
+    p.beginFrame((state.t = 216)); // 200ms gap — a hitch, WITH the zone open
+    p.endFrame();
+    p.end(spanning);
+    p.beginFrame((state.t = 500)); // 284ms gap — a hitch, with NOTHING open
+    p.endFrame();
+
+    const hz = p.snapshot().hitchZones;
+    ok('the threshold used is reported alongside the counts', hz.thresholdMs === 50);
+    ok('both hitch frames are counted', hz.frames === 2);
+    ok('the frame-spanning zone is credited for the one it was open during', hz.zones['residency.itemLoad'] === 1);
+    ok('...and NOT for the hitch after it closed', hz.zones['residency.itemLoad'] !== 2);
+    ok('a zone that was never open does not appear at all', !('geometry.worldDraw' in hz.zones));
+    p.disarm();
+  }
+
+  // Zero overlap must be reported as a REAL result — "no zone was open during
+  // any hitch" — which is only unambiguous because `frames` ships beside it.
+  {
+    const { state, now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    p.arm({ settleFrames: 0, hitchThresholdMs: 50 });
+    p.beginFrame((state.t = 0));
+    p.endFrame();
+    p.beginFrame((state.t = 300));
+    p.endFrame();
+    const hz = p.snapshot().hitchZones;
+    ok('a hitch with nothing open still counts as a hitch frame', hz.frames === 1);
+    ok('...with an empty zone map, which is a result not a gap', Object.keys(hz.zones).length === 0);
+    p.disarm();
+  }
+
+  // Re-arming must clear the correlation with everything else, or one window
+  // inherits the previous window's freezes.
+  {
+    const { state, now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    p.arm({ settleFrames: 0, hitchThresholdMs: 50 });
+    p.beginFrame((state.t = 0));
+    p.endFrame();
+    p.beginFrame((state.t = 300));
+    p.endFrame();
+    ok('the first window saw a hitch', p.snapshot().hitchZones.frames === 1);
+    p.arm({ settleFrames: 0, hitchThresholdMs: 50 });
+    ok('re-arming clears the hitch correlation', p.snapshot().hitchZones.frames === 0);
+    p.disarm();
+  }
 }

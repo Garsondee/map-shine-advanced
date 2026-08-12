@@ -214,11 +214,32 @@ function lumaExtremalPair(texels) {
  * buffer across every block rather than taking a fresh array per block (see the
  * allocation header above; this is the single biggest allocation in the file). */
 function gatherBlock(rgba, width, height, bx, by, out) {
+  const startX = bx * 4;
+  const startY = by * 4;
+  // FAST PATH: the block is entirely inside the image, so every Math.min clamp
+  // below is a no-op — skip straight to a flat sequential copy. This is the
+  // OVERWHELMING majority of blocks (every one when width/height are already
+  // multiples of 4, which whole-image and mip-chain sizes both are — see
+  // computeMipChainDims), and gatherBlock runs once per block: 9 million times
+  // for a 12000² layer, so the clamp math is pure overhead there.
+  if (startX + 3 < width && startY + 3 < height) {
+    let di = 0;
+    for (let ty = 0; ty < 4; ty++) {
+      let si = ((startY + ty) * width + startX) * 4;
+      for (let tx = 0; tx < 4; tx++) {
+        out[di++] = rgba[si++];
+        out[di++] = rgba[si++];
+        out[di++] = rgba[si++];
+        out[di++] = rgba[si++];
+      }
+    }
+    return;
+  }
   for (let ty = 0; ty < 4; ty++) {
-    const sy = Math.min(by * 4 + ty, height - 1);
+    const sy = Math.min(startY + ty, height - 1);
     const rowOff = sy * width;
     for (let tx = 0; tx < 4; tx++) {
-      const sx = Math.min(bx * 4 + tx, width - 1);
+      const sx = Math.min(startX + tx, width - 1);
       const si = (rowOff + sx) * 4;
       const di = (ty * 4 + tx) * 4;
       out[di] = rgba[si];
@@ -682,10 +703,15 @@ function encodeBC1Block(texels, out, off) {
     bj = 1,
     bd = -1;
   for (let i = 0; i < 16; i++) {
+    // Hoisted out of the j loop: texel i's channels don't change across j, so
+    // read them once per i (16 reads) instead of once per (i,j) pair (120).
+    const ir = texels[i * 4],
+      ig = texels[i * 4 + 1],
+      ib = texels[i * 4 + 2];
     for (let j = i + 1; j < 16; j++) {
-      const dr = texels[i * 4] - texels[j * 4],
-        dg = texels[i * 4 + 1] - texels[j * 4 + 1],
-        db = texels[i * 4 + 2] - texels[j * 4 + 2];
+      const dr = ir - texels[j * 4],
+        dg = ig - texels[j * 4 + 1],
+        db = ib - texels[j * 4 + 2];
       const d = dr * dr + dg * dg + db * db;
       if (d > bd) {
         bd = d;
@@ -992,6 +1018,17 @@ const _scratchLinePal = new Int32Array(16 * 4);
  * return the block's total squared error over the selected channels. Indices are
  * written into `outIdx` addressed by TEXEL id (not by member position), because
  * the bitstream is raster-ordered while a subset's members are not.
+ *
+ * THREE UNROLLED FAST PATHS, guarded by identity on `chans` itself (not just
+ * `nc`): every call site in this file passes exactly one of CHANS_RGBA,
+ * CHANS_RGB or CHANS_A, so this is the hottest loop in the encoder (every seed
+ * × every least-squares refinement round × every mode-5/7 subset). Unrolling
+ * the channel loop into named locals drops the `chans[c]` indirection inside
+ * the nLevels×count search. Checking the array REFERENCE, not just `nc`, means
+ * a hypothetical future caller with a different 3- or 4-channel selection (say,
+ * BGR instead of RGB) falls through to the general path below instead of
+ * silently reading the wrong offsets — see memory:
+ * feedback_category_string_must_be_in_closed_list.
  */
 function assignLineIndices(texels, members, count, chans, nc, rec0, rec1, weights, nLevels, outIdx) {
   const pal = _scratchLinePal;
@@ -1001,6 +1038,77 @@ function assignLineIndices(texels, members, count, chans, nc, rec0, rec1, weight
     for (let c = 0; c < nc; c++) pal[k * 4 + c] = (rec0[c] * iw + rec1[c] * w + 32) >> 6;
   }
   let total = 0;
+  if (nc === 4 && chans === CHANS_RGBA) {
+    for (let m = 0; m < count; m++) {
+      const t = members[m];
+      const base = t * 4;
+      const v0 = texels[base],
+        v1 = texels[base + 1],
+        v2 = texels[base + 2],
+        v3 = texels[base + 3];
+      let best = 0;
+      let bestD = Infinity;
+      for (let k = 0; k < nLevels; k++) {
+        const pk = k * 4;
+        const d0 = v0 - pal[pk],
+          d1 = v1 - pal[pk + 1],
+          d2 = v2 - pal[pk + 2],
+          d3 = v3 - pal[pk + 3];
+        const d = d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3;
+        if (d < bestD) {
+          bestD = d;
+          best = k;
+        }
+      }
+      outIdx[t] = best;
+      total += bestD;
+    }
+    return total;
+  }
+  if (nc === 3 && chans === CHANS_RGB) {
+    for (let m = 0; m < count; m++) {
+      const t = members[m];
+      const base = t * 4;
+      const v0 = texels[base],
+        v1 = texels[base + 1],
+        v2 = texels[base + 2];
+      let best = 0;
+      let bestD = Infinity;
+      for (let k = 0; k < nLevels; k++) {
+        const pk = k * 4;
+        const d0 = v0 - pal[pk],
+          d1 = v1 - pal[pk + 1],
+          d2 = v2 - pal[pk + 2];
+        const d = d0 * d0 + d1 * d1 + d2 * d2;
+        if (d < bestD) {
+          bestD = d;
+          best = k;
+        }
+      }
+      outIdx[t] = best;
+      total += bestD;
+    }
+    return total;
+  }
+  if (nc === 1 && chans === CHANS_A) {
+    for (let m = 0; m < count; m++) {
+      const t = members[m];
+      const vA = texels[t * 4 + 3];
+      let best = 0;
+      let bestD = Infinity;
+      for (let k = 0; k < nLevels; k++) {
+        const d0 = vA - pal[k * 4];
+        const d = d0 * d0;
+        if (d < bestD) {
+          bestD = d;
+          best = k;
+        }
+      }
+      outIdx[t] = best;
+      total += bestD;
+    }
+    return total;
+  }
   for (let m = 0; m < count; m++) {
     const t = members[m];
     const base = t * 4;
@@ -1140,6 +1248,16 @@ function fitLine(texels, members, count, chans, nc, weights, nLevels, qbits, use
  * `Math.round(-0.5)` is `-0` in JS — never below zero. Verified exhaustively
  * over all 512 (channel, p) inputs; it was unreachable code that only made the
  * hot loop look like it could branch.
+ *
+ * ⚠️ THE THREE ROUNDING DIVISIONS ARE BIT SHIFTS, NOT `Math.round`/`/2`. `v` is
+ * always a Uint8Array read (0..255, integer), so `Math.round((v-1)/2) === v>>1`
+ * and `Math.round(v/2) === (v+1)>>1` EXACTLY — proved by cases on v even/odd
+ * (JS's `Math.round` breaks a `.5` up, matching floor-division-by-2 with the
+ * `-1`/`+1` offsets already baked in) and brute-force-checked over all 256
+ * inputs. This is the file's hottest per-block call (scoreBC7Pair, twice per
+ * block minimum), unlike `toRgb565`'s division-by-255 above, which is NOT a
+ * power of two and where a shift genuinely would change the answer — that one
+ * stays a division on purpose; do not "consolidate" the two.
  */
 function makeBC7Endpoint() {
   return { q: new Uint8Array(4), rec: new Uint8Array(4), p: 0, err: 0 };
@@ -1150,7 +1268,7 @@ function quantizeBC7Endpoint(texels, base, out) {
   let err1 = 0;
   for (let c = 0; c < 4; c++) {
     const v = texels[base + c];
-    let qc = Math.round((v - 1) / 2);
+    let qc = v >> 1;
     if (qc > 127) qc = 127;
     const d = v - ((qc << 1) | 1);
     err1 += d * d;
@@ -1158,7 +1276,7 @@ function quantizeBC7Endpoint(texels, base, out) {
   let err0 = 0;
   for (let c = 0; c < 4; c++) {
     const v = texels[base + c];
-    let qc = Math.round(v / 2);
+    let qc = (v + 1) >> 1;
     if (qc > 127) qc = 127;
     const d = v - (qc << 1);
     err0 += d * d;
@@ -1167,7 +1285,8 @@ function quantizeBC7Endpoint(texels, base, out) {
   const q = out.q,
     rec = out.rec;
   for (let c = 0; c < 4; c++) {
-    let qc = Math.round((texels[base + c] - p) / 2);
+    const v = texels[base + c];
+    let qc = p === 1 ? v >> 1 : (v + 1) >> 1;
     if (qc > 127) qc = 127;
     q[c] = qc;
     rec[c] = (qc << 1) | p;
@@ -1272,11 +1391,17 @@ function scoreBC7Mode6(texels) {
     bj = 0,
     bd = -1;
   for (let i = 0; i < 16; i++) {
+    // Hoisted out of the j loop: texel i's channels don't change across j, so
+    // read them once per i (16 reads) instead of once per (i,j) pair (120).
+    const ir = texels[i * 4],
+      ig = texels[i * 4 + 1],
+      ib = texels[i * 4 + 2],
+      ia = texels[i * 4 + 3];
     for (let j = i + 1; j < 16; j++) {
-      const dr = texels[i * 4] - texels[j * 4],
-        dg = texels[i * 4 + 1] - texels[j * 4 + 1],
-        db = texels[i * 4 + 2] - texels[j * 4 + 2],
-        da = texels[i * 4 + 3] - texels[j * 4 + 3];
+      const dr = ir - texels[j * 4],
+        dg = ig - texels[j * 4 + 1],
+        db = ib - texels[j * 4 + 2],
+        da = ia - texels[j * 4 + 3];
       const d = dr * dr + dg * dg + db * db + da * da;
       if (d > bd) {
         bd = d;
@@ -1594,8 +1719,15 @@ const _scratchPartMembers0 = new Uint8Array(16);
 const _scratchPartMembers1 = new Uint8Array(16);
 const _scratchPartScores = new Float64Array(64);
 const _scratchPartOrder = new Int32Array(64);
-const _scratchPartSum = new Float64Array(8);
-const _scratchPartSumSq = new Float64Array(8);
+/** Subset-1-only sums, plus the block-wide totals subset 0 is derived from
+ * (see rankBC7Partitions). All four arrays hold sums of Uint8 channel values
+ * (max 16 × 255² = 1,040,400 per entry), exactly representable in float64, so
+ * deriving subset 0 as total−subset1 is exact integer subtraction — not an
+ * approximation of the direct per-subset accumulation it replaces. */
+const _scratchPartSum1 = new Float64Array(4);
+const _scratchPartSumSq1 = new Float64Array(4);
+const _scratchPartSumTotal = new Float64Array(4);
+const _scratchPartSumSqTotal = new Float64Array(4);
 
 /**
  * Rank all 64 partitions cheaply, by how tightly each subset's texels cluster
@@ -1609,32 +1741,56 @@ const _scratchPartSumSq = new Float64Array(8);
  *
  * One pass using `Σx² − (Σx)²/n`, so 16 texels × 4 channels per partition rather
  * than a mean pass plus a deviation pass.
+ *
+ * Subset 0's sum/sumSq are DERIVED from the block-wide total minus subset 1,
+ * rather than accumulated directly, so the per-partition inner loop only ever
+ * touches subset-1 members — roughly half the block's texels on average —
+ * instead of visiting all 16 unconditionally. The block-wide total is computed
+ * ONCE up front, not per partition. See the scratch arrays' own doc for why
+ * this derivation is exact, not merely close.
  */
 function rankBC7Partitions(texels, outOrder) {
-  const sum = _scratchPartSum;
-  const sumSq = _scratchPartSumSq;
+  const sumTotal = _scratchPartSumTotal;
+  const sumSqTotal = _scratchPartSumSqTotal;
+  for (let c = 0; c < 4; c++) {
+    sumTotal[c] = 0;
+    sumSqTotal[c] = 0;
+  }
+  for (let t = 0; t < 16; t++) {
+    for (let c = 0; c < 4; c++) {
+      const v = texels[t * 4 + c];
+      sumTotal[c] += v;
+      sumSqTotal[c] += v * v;
+    }
+  }
+
+  const sum1 = _scratchPartSum1;
+  const sumSq1 = _scratchPartSumSq1;
   for (let p = 0; p < 64; p++) {
-    for (let i = 0; i < 8; i++) {
-      sum[i] = 0;
-      sumSq[i] = 0;
+    for (let c = 0; c < 4; c++) {
+      sum1[c] = 0;
+      sumSq1[c] = 0;
     }
     let n1 = 0;
     const base = p * 16;
     for (let t = 0; t < 16; t++) {
-      const s = BC7_PARTITION2[base + t];
-      n1 += s;
-      const o = s * 4;
-      for (let c = 0; c < 4; c++) {
-        const v = texels[t * 4 + c];
-        sum[o + c] += v;
-        sumSq[o + c] += v * v;
+      if (BC7_PARTITION2[base + t] === 1) {
+        n1++;
+        for (let c = 0; c < 4; c++) {
+          const v = texels[t * 4 + c];
+          sum1[c] += v;
+          sumSq1[c] += v * v;
+        }
       }
     }
     const n0 = 16 - n1;
     let score = 0;
     for (let c = 0; c < 4; c++) {
-      if (n0 > 0) score += sumSq[c] - (sum[c] * sum[c]) / n0;
-      if (n1 > 0) score += sumSq[4 + c] - (sum[4 + c] * sum[4 + c]) / n1;
+      if (n0 > 0) {
+        const s0 = sumTotal[c] - sum1[c];
+        score += sumSqTotal[c] - sumSq1[c] - (s0 * s0) / n0;
+      }
+      if (n1 > 0) score += sumSq1[c] - (sum1[c] * sum1[c]) / n1;
     }
     _scratchPartScores[p] = score;
     outOrder[p] = p;
@@ -1759,13 +1915,34 @@ function emitBC7Mode7(cand, out, off) {
 
 /** A forward-only LSB-first bit writer over `out`, starting at byte `off`.
  * Shared by every mode's emitter so the bit-packing convention can only be
- * defined once. */
+ * defined once.
+ *
+ * WRITES A WHOLE BYTE-SPAN AT A TIME, not bit-by-bit: each call packs as many
+ * of its remaining bits as fit in the current byte (`space = 8 - bitOffset`)
+ * with one mask+shift+OR, instead of one branch per bit. Every emitter writes
+ * a full 128-bit block this way, so this is the single most-called primitive
+ * in the file — 9 million blocks × ~10 field writes each for a 12000² layer.
+ * Bit-for-bit identical to the old per-bit loop: both only ever OR new bits
+ * into a byte (never clear), and consuming `val`'s low bits `toWrite` at a
+ * time via `v & mask` then `v >>= toWrite` visits the same bits in the same
+ * LSB-first order the old `(val >> k) & 1` loop did, just batched. `val` is
+ * always a small non-negative int (a mode marker, a quantized channel, a
+ * p-bit, or an index), so the signed `>>` used to consume it never goes
+ * negative. */
 function makeBitWriter(out, off) {
   let bit = off * 8;
   return (val, n) => {
-    for (let k = 0; k < n; k++) {
-      if ((val >> k) & 1) out[bit >> 3] |= 1 << (bit & 7);
-      bit++;
+    let v = val;
+    let remaining = n;
+    while (remaining > 0) {
+      const byteIdx = bit >> 3;
+      const bitOffset = bit & 7;
+      const toWrite = Math.min(8 - bitOffset, remaining);
+      const mask = (1 << toWrite) - 1;
+      out[byteIdx] |= (v & mask) << bitOffset;
+      v >>= toWrite;
+      remaining -= toWrite;
+      bit += toWrite;
     }
   };
 }

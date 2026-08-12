@@ -2098,6 +2098,7 @@ export function buildPerfReport({
   pipelineRebuildStats = null,
   passSlotStats = null,
   windowDiagnostics = null,
+  geometryComposition = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
   const megapixels =
@@ -2340,6 +2341,17 @@ export function buildPerfReport({
     // shows. Echoing it back lets a caller (boot.js's combined report action)
     // feed perf-lab's existing, tested display straight from ONE run instead of
     // re-running the sweep a second time just to get its own shape back.
+    // WORLD-DRAW COMPOSITION (2026-08-12, Testament Track B.1) — what's
+    // actually IN geometry.worldDraw's 13 draws / 266k triangles, grouped by
+    // item kind. geometry.worldDraw itself (in zones[] above) is one opaque
+    // renderer.render() call with no internal timing seam — this is the
+    // cheaper, safe question this report CAN answer instead: composition, not
+    // GPU time. `null` means the harness does not implement
+    // readGeometryComposition, or the viewer had not started. See
+    // getGeometryComposition's own doc (vt-pan-viewer.js) for the closed
+    // item.kind list and the ownership-vs-paint-time caveat, which travels
+    // with the data itself in its own `.note` field.
+    geometryComposition,
     sweepRaw: sweep,
     // THE CONTROLLED EXPERIMENT, kept whole (2026-08-12). Unlike sweepRaw this
     // is not echoed for a renderer's benefit — it is here because findings[]

@@ -445,6 +445,10 @@ export async function runProfileSession(harness, opts = {}) {
   // perf-report.js's `window-surface-composition` finding, which reads this.
   const windowDiagnostics =
     typeof harness.readWindowDiagnostics === 'function' ? harness.readWindowDiagnostics() : null;
+  // WORLD-DRAW COMPOSITION (2026-08-12, Testament Track B.1) — a snapshot,
+  // not a delta, same reasoning as windowDiagnostics immediately above.
+  const geometryComposition =
+    typeof harness.readGeometryComposition === 'function' ? harness.readGeometryComposition() : null;
 
   let sweep = null;
   if (includeSweep && typeof harness.runSweep === 'function') {
@@ -538,6 +542,7 @@ export async function runProfileSession(harness, opts = {}) {
     pipelineRebuildStats,
     passSlotStats,
     windowDiagnostics,
+    geometryComposition,
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,
     vram: harness.readVram?.() ?? null,

@@ -83,6 +83,20 @@ const BENCHMARK_SWEEP_MS = 60000;
  */
 const RAPID_STRESS_SWEEP_MS = 5000;
 /**
+ * How long to watch AFTER the scripted rapid sweep above ends before giving up
+ * (rapid-pan-hitch-2026-08-12, chasing the author's own report: "when the
+ * rapid camera pan happens in the test it always results in a hitch that
+ * lasts for 10 seconds or so"). The OLD `measureUntil: playing3` stopped
+ * measuring the instant the scripted movement finished — exactly when, per
+ * that report, the real trouble starts. ~3x the author's own reported ~10s
+ * felt duration: enough to see recovery genuinely finish rather than clip the
+ * read at an arbitrary boundary, without waiting anywhere near
+ * `DEFAULT_SETTLE_WAIT_TIMEOUT_MS` (240s) — that timeout is sized for a
+ * genuine cold floor load (multi-floor's own phase, above), a different
+ * question from "how long does a pan-triggered hitch take to resolve".
+ */
+const RAPID_STRESS_RECOVERY_TIMEOUT_MS = 30000;
+/**
  * How long to settle after FORCING a new performance tier, before a tier-
  * comparison run starts measuring it (see `perf-report-all-tiers` below). 3×
  * `DEFAULT_SETTLE_FRAMES` (30) — a tier change can rebuild several effects'
@@ -2936,6 +2950,15 @@ function install() {
   // (multi-floor-sweep-2026-08-12) — boot only says WHAT to read
   // (`getVtPanViewerSceneSettle`, already imported above).
   const waitForSceneSettled = createSceneSettleWaiter({ readSettle: () => getVtPanViewerSceneSettle() });
+  // A SEPARATE waiter, not a reuse of waitForSceneSettled above — same
+  // readSettle source, but RAPID_STRESS_RECOVERY_TIMEOUT_MS (30s) instead of
+  // that one's DEFAULT_SETTLE_WAIT_TIMEOUT_MS (240s, sized for a cold floor
+  // load). See RAPID_STRESS_RECOVERY_TIMEOUT_MS's own doc for why these two
+  // timeouts must differ.
+  const waitForRapidStressRecovery = createSceneSettleWaiter({
+    readSettle: () => getVtPanViewerSceneSettle(),
+    timeoutMs: RAPID_STRESS_RECOVERY_TIMEOUT_MS,
+  });
 
   // HIDE-WHILE-MEASURING (Testament Stage 4, 2026-08-11 — "hide itself and
   // cost nothing during tests"). Remembers whether the debug panel was
@@ -3080,6 +3103,13 @@ function install() {
     // read-once hook here, rather than reaching into the general diagnostics
     // blob by hand.
     readWindowDiagnostics: () => getVtPanViewerDiagnostics()?.windowLight ?? null,
+    // WORLD-DRAW COMPOSITION (2026-08-12, Testament Track B.1) — a snapshot,
+    // not a delta, same reasoning as readWindowDiagnostics immediately above:
+    // "what's actually in the draw right now" needs no start/end pairing.
+    // `null` means the viewer has not started; see getGeometryComposition's
+    // own doc in vt-pan-viewer.js for what this answers and its own honest
+    // ownership-vs-GPU-time caveat.
+    readGeometryComposition: () => getVtPanViewerGeometryComposition(),
     // CACHE HEALTH (perf-instrumentation-audit-2026-08-12) — every cache this
     // composition root can reach that isn't already covered by one of the
     // dedicated probes above (readPipelineStats/readDepthProxyPoolStats/
@@ -3431,11 +3461,23 @@ function install() {
         const playing3 = playCameraPath(path3, { capFrameRate: false }).catch((err) => {
           log.error('camera path playback failed during the rapid-stress phase:', err);
         });
+        // RECOVERY WAIT (rapid-pan-hitch-2026-08-12) — playing3 ALONE only
+        // covers the scripted 5s sweep; see RAPID_STRESS_RECOVERY_TIMEOUT_MS's
+        // own doc for why that used to be exactly where this report stopped
+        // watching. Chained onto playing3, not started in parallel with it —
+        // recovery is "what happens once the camera has actually stopped",
+        // not "what happens during the sweep too".
+        const recoveryWait = playing3.then(() =>
+          waitForRapidStressRecovery({
+            onProgress: (s) =>
+              showPerfProgress(`rapid stress: recovering — ${(s?.waitingFor ?? []).join(', ') || 'settling'}`),
+          })
+        );
         let stressReport = null;
         try {
           stressReport = await runProfileSession(profileHarness, {
             generatedAt: new Date().toISOString(),
-            measureUntil: playing3,
+            measureUntil: recoveryWait,
             includeSweep: false,
             // Deliberately NOT 90 like phases 1/2 — this phase's whole point
             // is the FIRST few seconds of rapid movement, and a 5s route has
@@ -3453,6 +3495,10 @@ function install() {
           stopCameraPath();
           await playing3;
         }
+        // Already resolved by the time runProfileSession returned above
+        // (measureUntil awaited this same promise) — this re-await is just
+        // how the caller gets at the VALUE runProfileSession itself discards.
+        const recoveryInfo = await recoveryWait;
 
         lastRapidStressReport = stressReport;
         // REUSE summarizeTierComparison A THIRD TIME — 'profile' means
@@ -3465,13 +3511,47 @@ function install() {
         ]);
         rapidStressSweep = {
           measured: true,
-          durationMs: RAPID_STRESS_SWEEP_MS,
+          // The REAL measured span (scripted sweep + however long recovery
+          // actually took), not the nominal RAPID_STRESS_SWEEP_MS — see
+          // recovery.sweepDurationMsNominal below for that number instead.
+          durationMs: stressReport?.window?.durationMs ?? RAPID_STRESS_SWEEP_MS,
           // p99/max, NEVER the mean, for the reason this phase's own route
           // builder doc gives: 5 seconds of deliberately-worst-case movement
           // averaged with itself hides exactly the spikes it exists to catch.
+          // Now spans the recovery period too, so a hitch that lands AFTER
+          // the camera stops is counted here exactly like one during the
+          // sweep itself.
           p99FrameMs: stressReport?.frame?.gapMs?.p99 ?? null,
           maxFrameMs: stressReport?.frame?.gapMs?.max ?? null,
           hitchCount: stressReport?.frame?.hitches?.count ?? null,
+          // THE RECOVERY WINDOW ITSELF (rapid-pan-hitch-2026-08-12) — real,
+          // measured wait time from when the scripted movement ended to when
+          // the scene actually went quiet (or the 30s cap was hit). A
+          // `timedOut:true` here is real, useful information — it means
+          // whatever the author is feeling took LONGER than 30s to resolve,
+          // not that the measurement failed.
+          recovery: {
+            elapsedMs: recoveryInfo.elapsedMs,
+            settled: recoveryInfo.settled,
+            timedOut: recoveryInfo.timedOut,
+            blockersAtEnd: recoveryInfo.blockers ?? [],
+            waitingForAtEnd: recoveryInfo.waitingFor ?? [],
+            timeoutMs: RAPID_STRESS_RECOVERY_TIMEOUT_MS,
+            // The SCRIPTED sweep duration, not a separately-measured
+            // boundary — the actual tween runs on real elapsed time
+            // (playCameraPath), so this is a close proxy for "how far into
+            // durationMs above the camera actually stopped moving", not an
+            // exact one. Frame/hitch records in frame.hitches.items (this
+            // report's own window) carry their own atMs — cross-reference
+            // against this number to split "during the sweep" from "during
+            // recovery" rather than treating it as exact.
+            sweepDurationMsNominal: RAPID_STRESS_SWEEP_MS,
+            note:
+              'Real, measured wait time (getVtPanViewerSceneSettle, same tracker the multi-floor phase uses) ' +
+              'from when the scripted sweep ended to when the scene actually went quiet, capped at timeoutMs. ' +
+              'durationMs/p99FrameMs/maxFrameMs/hitchCount above already include this period — it is not a ' +
+              'separate measurement, only the part of the same window after the camera stopped moving.',
+          },
           note:
             'The FULL rapid-stress report is not nested here — call MapShine.getRapidStressReport() from the ' +
             "console for it. 'ranked' below answers 'which zone/effect gets disproportionately worse under rapid " +

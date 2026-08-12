@@ -420,6 +420,7 @@ async function acquireSliceSource(url) {
   // giant-image decode the render loop could feel. See _decodeStats' own doc
   // for why this counter is a permanent tripwire, not a one-off debugging aid.
   _decodeStats.mainThreadFallbackSourceDecodes++;
+  recordMainThreadFallback(acquireStartMs, url, acquireMs);
   _sliceHeld.set(url, { bitmap, refs: 1 });
   return { source: bitmap, done: () => releaseSliceSource(url) };
 }
@@ -504,6 +505,27 @@ const WORKER_REQUEST_FAILURE_LOG_MAX = 10;
 function recordWorkerRequestFailure(kind, url, reason) {
   _workerRequestFailures.push({ kind, url: String(url).slice(-80), reason });
   if (_workerRequestFailures.length > WORKER_REQUEST_FAILURE_LOG_MAX) _workerRequestFailures.shift();
+}
+
+/**
+ * PER-EVENT MAIN-THREAD FALLBACK TIMING (rapid-pan-hitch-2026-08-12). A
+ * DIFFERENT question from `_workerRequestFailures` above: that log says WHY a
+ * request fell back (a worker failure); this one says HOW LONG each fallback
+ * actually took and WHEN, which `mainThreadFallbackSourceDecodes` (a count)
+ * and `maxSourceAcquireMs`/`lastSourceAcquireMs` (session-lifetime max/last)
+ * cannot: a single catastrophic 2.5s event and five 200ms ones both look
+ * identical in those three numbers alone. Fed by `acquireSliceSource`'s own
+ * already-computed `acquireStartMs`/`acquireMs` — no new clock read. Bounded
+ * ring buffer, same discipline as `_workerRequestFailures` immediately above.
+ * @type {Array<{atMs: number, url: string, ms: number}>}
+ */
+const _mainThreadFallbackLog = [];
+const MAIN_THREAD_FALLBACK_LOG_MAX = 10;
+
+/** @param {number} atMs @param {string} url @param {number} ms */
+function recordMainThreadFallback(atMs, url, ms) {
+  _mainThreadFallbackLog.push({ atMs: Math.round(atMs), url: String(url).slice(-80), ms: Math.round(ms) });
+  if (_mainThreadFallbackLog.length > MAIN_THREAD_FALLBACK_LOG_MAX) _mainThreadFallbackLog.shift();
 }
 
 /**
@@ -1049,6 +1071,12 @@ export function getDecodeStats() {
     // OTHER, still-unaccounted-for path is reaching acquireSliceSource — a
     // real gap this log would make visible rather than hide.
     workerRequestFailures: [..._workerRequestFailures],
+    // PER-EVENT TIMING for those same fallback decodes (rapid-pan-hitch-
+    // 2026-08-12) — see _mainThreadFallbackLog's own doc for what this adds
+    // over mainThreadFallbackSourceDecodes/maxSourceAcquireMs above: the last
+    // few EVENTS themselves (when, which asset, how long), not just an
+    // aggregate count and a session-lifetime max.
+    mainThreadFallbackLog: [..._mainThreadFallbackLog],
   };
 }
 

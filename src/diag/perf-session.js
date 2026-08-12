@@ -381,6 +381,9 @@ export async function runProfileSession(harness, opts = {}) {
     window: {
       frames: profile.frames,
       durationMs: profile.durationMs,
+      // What "early" meant for classifyTemporalShape (perf-report.js), sourced
+      // from the profiler's own snapshot — see frame-profiler.js#arm.
+      earlyWindowMs: profile.earlyWindowMs,
       settleFramesDiscarded: profile.settleFramesDiscarded,
       resolution: context.resolution ?? null,
       sceneName: context.sceneName ?? null,

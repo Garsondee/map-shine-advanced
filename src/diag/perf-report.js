@@ -297,6 +297,80 @@ export function classifyBottleneck({ gapMs = null, gpuMs = null } = {}) {
   };
 }
 
+/**
+ * FRONT-LOADED BURST vs STEADY TAX — the residency audit's own stated open
+ * question ("is the mean a steady cost across all passes, or a few expensive
+ * early passes dragging the average up?"), generalised to any zone with real
+ * CPU cost, not just `residency.itemLoad`.
+ *
+ * A mean cannot answer this by construction: 10 occurrences at 10ms each and
+ * 1 occurrence at 91ms plus 9 at 1ms both average to 10ms. `frame-profiler.js`
+ * now tracks how much of a zone's total landed in the first `earlyWindowMs` of
+ * the real (post-settle) window — this turns that split into a verdict.
+ *
+ * ⚠️ THE COMPARISON IS AGAINST WHAT UNIFORM WOULD LOOK LIKE, NOT AGAINST ZERO.
+ * A zone that is genuinely steady still has SOME early share, just proportional
+ * to how much of the window "early" covers — `earlyWindowMs / durationMs`. A
+ * 10s early bucket in a 60s window should hold ~17% of a uniform zone's cost;
+ * reporting anything less than 100% as suspicious would flag every healthy
+ * zone. The verdict compares the ACTUAL early share against that EXPECTED
+ * share, not against an arbitrary absolute threshold.
+ */
+export const TEMPORAL_RATIO_FACTOR = 1.5;
+/** Below this total the split is measuring noise, not a real shape. */
+export const TEMPORAL_MIN_TOTAL_MS = 50;
+
+export function classifyTemporalShape({
+  totalMs = null,
+  earlyMs = null,
+  earlyWindowMs = null,
+  durationMs = null,
+} = {}) {
+  if (!Number.isFinite(totalMs) || totalMs < TEMPORAL_MIN_TOTAL_MS) {
+    return {
+      verdict: 'unmeasured',
+      note: `Total cost under ${TEMPORAL_MIN_TOTAL_MS}ms — too small for the early/late split to say anything real.`,
+    };
+  }
+  if (
+    !Number.isFinite(durationMs) ||
+    !Number.isFinite(earlyWindowMs) ||
+    earlyWindowMs <= 0 ||
+    durationMs <= earlyWindowMs
+  ) {
+    return {
+      verdict: 'not-applicable',
+      note:
+        `The window (${ms(durationMs)}ms) is not longer than the early bucket (${ms(earlyWindowMs)}ms), so every ` +
+        'sample in it is "early" by construction — the split cannot distinguish anything on a window this short.',
+    };
+  }
+  const early = Number.isFinite(earlyMs) ? earlyMs : 0;
+  const expectedEarlyFraction = earlyWindowMs / durationMs;
+  const actualEarlyFraction = early / totalMs;
+  const ratio = expectedEarlyFraction > 0 ? actualEarlyFraction / expectedEarlyFraction : null;
+  const verdict =
+    ratio === null
+      ? 'unmeasured'
+      : ratio >= TEMPORAL_RATIO_FACTOR
+        ? 'front-loaded'
+        : ratio <= 1 / TEMPORAL_RATIO_FACTOR
+          ? 'back-loaded'
+          : 'steady';
+  return {
+    verdict,
+    earlyMs: ms(early),
+    lateMs: ms(totalMs - early),
+    totalMs: ms(totalMs),
+    earlyWindowMs: ms(earlyWindowMs),
+    durationMs: ms(durationMs),
+    expectedEarlyFraction: round(expectedEarlyFraction, 3),
+    actualEarlyFraction: round(actualEarlyFraction, 3),
+    ratio: ratio === null ? null : round(ratio, 2),
+    note: null,
+  };
+}
+
 /** Percentile block for a raw sample array. All-null (never all-zero) when empty. */
 export function summariseSamples(samples) {
   const n = Array.isArray(samples) ? samples.length : 0;
@@ -363,6 +437,11 @@ export function buildZoneRows({ zoneStats = [], zones = [], frames = 0, clockRes
       detail: decl?.detail ?? false,
       site: decl?.site ?? null,
       cpuMs: cpu,
+      // The EARLY-only slice of the same cpu cost — perf-report.js's own
+      // classifyTemporalShape reads this beside cpuMs to answer "is this a
+      // steady tax or a front-loaded burst". GPU has no equivalent field: see
+      // frame-profiler.js's header for why that split is CPU-only.
+      cpuEarlyMs: statFrom(stat.cpuEarly, frames),
       gpuMs: gpu,
       // A 'cpu' zone has no GPU work BY DECLARATION. That is a different fact
       // from "we failed to measure its GPU time", and the report says which.
@@ -834,6 +913,11 @@ export function deriveFindings({
   budgetMs,
   bottleneck = null,
   structuralAB = null,
+  // For classifyTemporalShape — both null by default so a caller that omits
+  // them (every fixture predating 2026-08-12) gets 'not-applicable' verdicts
+  // and zero new findings, not a crash.
+  earlyWindowMs = null,
+  durationMs = null,
   profilerAnomalies,
   gpuTimer,
   pipelineStats = null,
@@ -1310,6 +1394,55 @@ export function deriveFindings({
     }
   }
 
+  // ==========================================================================
+  // FRONT-LOADED BURST vs STEADY TAX, EVERY ZONE (2026-08-12)
+  // ==========================================================================
+  // Generalises the residency-specific check above: does THIS zone's cost look
+  // like a uniform per-frame tax, or is it concentrated near the start of the
+  // window (settling, cache warm-up, a one-time setup) or growing toward the
+  // end (thermal throttling, a data structure that grows with session length,
+  // degrading cache behaviour)? See classifyTemporalShape's own header for why
+  // the comparison is against the EXPECTED early share for a uniform zone, not
+  // against zero.
+  //
+  // Scanned for every row with real cpu cost, not a hand-picked list — the
+  // MIN_TOTAL_MS/RATIO_FACTOR thresholds inside classifyTemporalShape are what
+  // keep this from spamming a finding for every trivial zone, the same shape
+  // duplicate-geometry and uniform-buffers-grew already use.
+  for (const r of rows ?? []) {
+    const shape = classifyTemporalShape({
+      totalMs: r.cpuMs?.totalMs ?? null,
+      earlyMs: r.cpuEarlyMs?.totalMs ?? 0,
+      earlyWindowMs,
+      durationMs,
+    });
+    if (shape.verdict !== 'front-loaded' && shape.verdict !== 'back-loaded') continue;
+    const frontLoaded = shape.verdict === 'front-loaded';
+    out.push({
+      severity: 'medium',
+      id: `temporal-shape:${r.id}`,
+      text:
+        `${r.id}: ${pct(shape.actualEarlyFraction * 100)}% of its ${shape.totalMs}ms total CPU cost landed in the ` +
+        `first ${shape.earlyWindowMs}ms of the ${shape.durationMs}ms window, where a uniform/steady-rate zone would ` +
+        `show ~${pct(shape.expectedEarlyFraction * 100)}% (${shape.ratio}x expected). ` +
+        (frontLoaded
+          ? 'FRONT-LOADED: this reads as a burst — new content settling in, a cache warming, a one-time setup cost — not a per-frame tax. Averaging it over the whole window UNDERSTATES what it costs early and OVERSTATES what it costs later; read earlyMs/lateMs below separately, never the blended mean.'
+          : 'BACK-LOADED: this zone got MORE expensive as the window went on. Worth checking for thermal throttling, a growing data structure, or degrading cache behaviour — none of which a flat mean over the whole window would ever surface.'),
+      evidence: {
+        zone: r.id,
+        verdict: shape.verdict,
+        earlyMs: shape.earlyMs,
+        lateMs: shape.lateMs,
+        totalMs: shape.totalMs,
+        earlyWindowMs: shape.earlyWindowMs,
+        durationMs: shape.durationMs,
+        expectedEarlyFraction: shape.expectedEarlyFraction,
+        actualEarlyFraction: shape.actualEarlyFraction,
+        ratio: shape.ratio,
+      },
+    });
+  }
+
   // Passes the taxonomy cannot break down. This is a gap in the INSTRUMENT, and
   // it is worth saying out loud: a reader who cannot see inside an expensive
   // pass will otherwise conclude the cost is irreducible.
@@ -1649,6 +1782,8 @@ export function buildPerfReport({
     budgetMs,
     bottleneck,
     structuralAB,
+    earlyWindowMs: win.earlyWindowMs ?? null,
+    durationMs: win.durationMs ?? null,
     profilerAnomalies,
     gpuTimer,
     pipelineStats,
@@ -1690,6 +1825,11 @@ export function buildPerfReport({
     window: {
       frames,
       durationMs: ms(win.durationMs ?? null),
+      // Echoed, not assumed — a reader looking at findings[]'s `temporal-
+      // shape:*` evidence or a zone's own `cpuEarlyMs` must be able to see
+      // exactly what "early" meant for THIS run without cross-referencing the
+      // profiler's default.
+      earlyWindowMs: win.earlyWindowMs ?? null,
       settleFramesDiscarded: win.settleFramesDiscarded ?? null,
       resolution: win.resolution ?? null,
       megapixels,

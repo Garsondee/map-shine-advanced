@@ -29,6 +29,7 @@ import {
   buildZoneRows,
   classifyAgreement,
   classifyBottleneck,
+  classifyTemporalShape,
   clockNoiseFloorMs,
   collapseInsignificant,
   compareToManifest,
@@ -1750,6 +1751,111 @@ export function run(t) {
     ok('...as a ratio, which is the only meaningful form', ub.evidence.ratio === 3.13);
     ok('...explicitly NOT calling it a leak', !ub.text.includes('leak') && ub.text.includes('NOT decided here'));
     ok('...and it names the experiment that would settle it', ub.text.includes('camera parked'));
+
+    // ====================================================================
+    // FRONT-LOADED BURST vs STEADY TAX (2026-08-12) — classifyTemporalShape
+    // ====================================================================
+    // Real numbers: a 53,584ms window, a 10,000ms early bucket (~18.7%
+    // expected share for a uniform zone) — matches the 2026-08-12 capture.
+    {
+      const front = classifyTemporalShape({ totalMs: 6189, earlyMs: 6189, earlyWindowMs: 10000, durationMs: 53584 });
+      ok('all cost inside the early bucket reads as front-loaded', front.verdict === 'front-loaded');
+      ok('...expected share for a uniform zone over this window is ~18.7%', front.expectedEarlyFraction === 0.187);
+      ok('...actual share is the full 100%', front.actualEarlyFraction === 1);
+      ok('...the ratio is reported, not just the verdict', front.ratio === 5.36);
+      ok('...lateMs is the true remainder, not re-derived elsewhere', front.lateMs === 0);
+
+      // A zone whose early share MATCHES what uniform coverage predicts must
+      // NOT be flagged — the comparison is against expected, not against zero.
+      const steady = classifyTemporalShape({ totalMs: 6189, earlyMs: 1157, earlyWindowMs: 10000, durationMs: 53584 });
+      ok('a share matching the expected fraction reads as steady', steady.verdict === 'steady');
+      ok('...the ratio is exactly 1', steady.ratio === 1);
+
+      // Getting WORSE over time is the opposite finding, not a null result.
+      const back = classifyTemporalShape({ totalMs: 4000, earlyMs: 50, earlyWindowMs: 10000, durationMs: 53584 });
+      ok('cost concentrated LATE reads as back-loaded, not steady', back.verdict === 'back-loaded');
+      ok('...ratio well under 1', back.ratio < 1);
+
+      // Below the noise floor: too small to say anything, not a fabricated verdict.
+      const tiny = classifyTemporalShape({ totalMs: 20, earlyMs: 20, earlyWindowMs: 10000, durationMs: 53584 });
+      ok('a near-zero total is unmeasured, not classified either way', tiny.verdict === 'unmeasured');
+
+      // A window no longer than the early bucket cannot distinguish anything —
+      // every sample IS early by construction, and the tool says so.
+      const short = classifyTemporalShape({ totalMs: 500, earlyMs: 500, earlyWindowMs: 10000, durationMs: 4000 });
+      ok('a window shorter than the early bucket is not-applicable', short.verdict === 'not-applicable');
+      ok('...not silently treated as maximally front-loaded', short.verdict !== 'front-loaded');
+
+      // Missing inputs (an older report, a fixture that never wired this
+      // through) must default to inert, never throw and never fabricate.
+      const blind = classifyTemporalShape({ totalMs: 500, earlyMs: 500 });
+      ok('missing durationMs/earlyWindowMs is not-applicable, not a crash', blind.verdict === 'not-applicable');
+    }
+
+    // The finding itself, through deriveFindings — same real numbers.
+    {
+      const temporalRows = [
+        {
+          id: 'residency.itemLoad',
+          isPass: false,
+          cpuMs: { totalMs: 6189 },
+          cpuEarlyMs: { totalMs: 6189 },
+        },
+        {
+          // A steady zone in the SAME window must not get a finding.
+          id: 'light.pointLightUpdate',
+          isPass: false,
+          cpuMs: { totalMs: 542 },
+          cpuEarlyMs: { totalMs: 101 }, // ~18.6% — matches the ~18.7% expected
+        },
+      ];
+      const tf = deriveFindings({
+        attribution: { frameGpuMs: 70.78 },
+        rows: temporalRows,
+        effects: [],
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        earlyWindowMs: 10000,
+        durationMs: 53584,
+        profilerAnomalies: {},
+        gpuTimer: {},
+      });
+      const shape = tf.find((x) => x.id === 'temporal-shape:residency.itemLoad');
+      ok('the front-loaded zone gets its own finding', shape !== null && shape !== undefined);
+      ok(
+        '...naming the percentage AND the expected percentage',
+        shape.text.includes('100%') && shape.text.includes('18.7%')
+      );
+      ok('...framed as a burst, not a per-frame tax', shape.text.includes('FRONT-LOADED'));
+      ok('...telling the reader to stop trusting the blended mean', shape.text.includes('blended mean'));
+      ok(
+        '...evidence carries the raw numbers for further digging',
+        tf.find((x) => x.id === 'temporal-shape:residency.itemLoad').evidence.earlyMs === 6189
+      );
+      ok(
+        'the steady zone in the SAME window produces no finding',
+        !tf.some((x) => x.id === 'temporal-shape:light.pointLightUpdate')
+      );
+
+      // Omitting earlyWindowMs/durationMs entirely (every fixture predating
+      // this feature, and any caller of an older shape) must add ZERO new
+      // findings — not crash, not fabricate a verdict from nothing.
+      const noTemporal = deriveFindings({
+        attribution: { frameGpuMs: 70.78 },
+        rows: temporalRows,
+        effects: [],
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        profilerAnomalies: {},
+        gpuTimer: {},
+      });
+      ok(
+        'omitting the temporal inputs produces no temporal-shape findings at all',
+        !noTemporal.some((x) => x.id.startsWith('temporal-shape:'))
+      );
+    }
 
     // Effects with no route to a number at all — a standing gap, not a run gap.
     const stranded = deriveFindings({

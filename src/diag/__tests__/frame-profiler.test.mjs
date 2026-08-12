@@ -17,7 +17,12 @@
  *      worst outcome an instrument can have (feedback_instruments_must_not_lie).
  */
 import { ZONES } from '../perf-zones.js';
-import { DEFAULT_SETTLE_FRAMES, createFrameProfiler, measureClockResolution } from '../frame-profiler.js';
+import {
+  DEFAULT_EARLY_WINDOW_MS,
+  DEFAULT_SETTLE_FRAMES,
+  createFrameProfiler,
+  measureClockResolution,
+} from '../frame-profiler.js';
 import { buildZoneRows } from '../perf-report.js';
 
 /** A clock that only moves when the test moves it, and counts every read. */
@@ -575,6 +580,126 @@ export function run(t) {
     ok('the first window saw a hitch', p.snapshot().hitchZones.frames === 1);
     p.arm({ settleFrames: 0, hitchThresholdMs: 50 });
     ok('re-arming clears the hitch correlation', p.snapshot().hitchZones.frames === 0);
+    p.disarm();
+  }
+
+  // ======================================================================
+  // FRONT-LOADED BURST vs STEADY TAX (2026-08-12)
+  // ======================================================================
+  // The residency audit's own open question, generalised: "is the mean a
+  // steady cost, or a few expensive early occurrences dragging it up?" A mean
+  // alone cannot answer this — it is the SAME NUMBER either way. This is CPU
+  // only (see the module header for why GPU is out of scope for this pass).
+  {
+    const { state, now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    const i = p.indexOf('residency.itemLoad');
+    p.arm({ settleFrames: 0, earlyWindowMs: 100 });
+
+    // Frame 1: an occurrence that opens and closes entirely inside the early
+    // window (t=10 to t=40, both < 100).
+    p.beginFrame((state.t = 0));
+    state.t = 10;
+    p.begin(i);
+    state.t = 40;
+    p.end(i);
+    p.endFrame();
+
+    // Frame 2: an occurrence that opens WELL PAST the early window (t=500).
+    p.beginFrame((state.t = 500));
+    state.t = 520;
+    p.begin(i);
+    state.t = 560;
+    p.end(i);
+    p.endFrame();
+
+    const row = p.snapshot().zoneStats.find((z) => z.id === 'residency.itemLoad');
+    ok('the total includes BOTH occurrences', row.cpu.count === 2 && row.cpu.sumMs === 30 + 40);
+    ok('only the early occurrence lands in cpuEarly', row.cpuEarly.count === 1 && row.cpuEarly.sumMs === 30);
+    ok('cpuEarly.maxMs reflects only the early sample', row.cpuEarly.maxMs === 30);
+    p.disarm();
+  }
+
+  // Classification is by OPEN time, not close time — a bracket that opens
+  // early but runs long still counts as early, never split across both.
+  {
+    const { state, now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    const i = p.indexOf('residency.itemLoad');
+    p.arm({ settleFrames: 0, earlyWindowMs: 100 });
+    p.beginFrame((state.t = 0));
+    state.t = 50; // opens at 50, inside the 100ms early window
+    p.begin(i);
+    state.t = 400; // closes long after the early window ended
+    p.end(i);
+    p.endFrame();
+    const row = p.snapshot().zoneStats.find((z) => z.id === 'residency.itemLoad');
+    ok('a long-running bracket that OPENED early is credited to early, not split', row.cpuEarly.count === 1);
+    ok('...with its FULL duration, not truncated at the boundary', row.cpuEarly.sumMs === 350);
+    p.disarm();
+  }
+
+  // A zone with NO early occurrences reports cpuEarly:null, never a zero
+  // block — "none of it was early" is a real result, not an absence. A
+  // deliberately tight early window (1ms) means even a bracket opening at
+  // t=5 falls outside it.
+  {
+    const { state, now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    const i = p.indexOf('residency.itemLoad');
+    p.arm({ settleFrames: 0, earlyWindowMs: 1 });
+    p.beginFrame((state.t = 0));
+    state.t = 5;
+    p.begin(i);
+    state.t = 15;
+    p.end(i);
+    p.endFrame();
+    const row = p.snapshot().zoneStats.find((z) => z.id === 'residency.itemLoad');
+    ok('cpu total is still real', row.cpu.count === 1 && row.cpu.sumMs === 10);
+    ok('cpuEarly is null, not a zero block, when nothing qualified', row.cpuEarly === null);
+    p.disarm();
+  }
+
+  // earlyWindowMs is echoed back — the report layer must never have to guess
+  // what threshold produced the numbers it is reading.
+  {
+    const { now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    p.arm({ settleFrames: 0 });
+    ok(
+      'the default early window is echoed when not overridden',
+      p.snapshot().earlyWindowMs === DEFAULT_EARLY_WINDOW_MS
+    );
+    p.arm({ settleFrames: 0, earlyWindowMs: 2500 });
+    ok('an explicit early window is echoed back exactly', p.snapshot().earlyWindowMs === 2500);
+    // Nonsense input falls back to the default rather than propagating NaN or
+    // a negative threshold into every classification downstream.
+    p.arm({ settleFrames: 0, earlyWindowMs: -5 });
+    ok('a non-positive early window falls back to the default', p.snapshot().earlyWindowMs === DEFAULT_EARLY_WINDOW_MS);
+    p.disarm();
+  }
+
+  // Re-arming must clear the early accumulators along with everything else.
+  {
+    const { state, now } = fakeClock();
+    const p = createFrameProfiler({ now });
+    const i = p.indexOf('residency.itemLoad');
+    p.arm({ settleFrames: 0, earlyWindowMs: 1000 });
+    p.beginFrame((state.t = 0));
+    state.t = 5;
+    p.begin(i);
+    state.t = 15;
+    p.end(i);
+    p.endFrame();
+    ok(
+      'the first window saw an early occurrence',
+      p.snapshot().zoneStats.find((z) => z.id === 'residency.itemLoad').cpuEarly.count === 1
+    );
+    p.arm({ settleFrames: 0, earlyWindowMs: 1000 });
+    ok(
+      're-arming clears the early accumulators',
+      p.snapshot().zoneStats.find((z) => z.id === 'residency.itemLoad') === undefined
+    );
     p.disarm();
   }
 }

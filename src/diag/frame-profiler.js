@@ -64,6 +64,13 @@ export const GAP_CAPACITY = 4096;
 export const DEFAULT_HITCH_THRESHOLD_MS = 50;
 /** Trials used to measure the clock's real step. */
 export const CLOCK_PROBE_TRIALS = 25;
+/**
+ * A CPU sample whose bracket OPENED within this many ms of the real window's
+ * start counts as "early" for the front-loaded-burst-vs-steady-tax split. Ten
+ * seconds is long enough to catch a settling burst (new residency items, a
+ * cache warming) without swallowing the whole window on a short capture.
+ */
+export const DEFAULT_EARLY_WINDOW_MS = 10000;
 
 /**
  * Measure the clock's actual resolution by spinning until the value changes.
@@ -146,6 +153,30 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
   let hitchFrames = 0;
   let hitchThresholdMs = DEFAULT_HITCH_THRESHOLD_MS;
 
+  // FRONT-LOADED BURST vs STEADY TAX (2026-08-12) — the residency audit's own
+  // stated open question, generalised past residency to every zone: "is the
+  // mean a steady cost across all occurrences, or a few expensive early ones
+  // dragging the average up?" Cannot be answered from `cpuSum`/`cpuCount`
+  // alone — a mean is the SAME NUMBER either way, by construction.
+  //
+  // ⚠️ CPU ONLY, DELIBERATELY. A CPU bracket's OPEN timestamp is right here,
+  // for free, at `openSlot` — classifying it early/late costs one comparison
+  // at `closeSlot`. A GPU sample has no equivalent: `recordGpuMs` fires
+  // asynchronously, a frame or more after the pass was actually issued, with
+  // no "when did this originate" signal available without plumbing a second
+  // timestamp through `gpu-zone-timer.js`'s own pending-uid bookkeeping — a
+  // real, separate change this pass does not take on. The motivating question
+  // (`residency.itemLoad`) is CPU-only anyway; scope matches the ask.
+  //
+  // Three PARALLEL arrays, not a doubled set — `cpuSum`/`cpuCount`/`cpuMax`
+  // stay exactly as they are (every existing consumer is unaffected), and
+  // "late" is `total − early`, derived at report time rather than stored, so
+  // this adds one comparison and three writes to the hot path, not six.
+  const cpuSumEarly = new Float64Array(slots);
+  const cpuMaxEarly = new Float64Array(slots);
+  const cpuCountEarly = new Int32Array(slots);
+  let earlyWindowMs = DEFAULT_EARLY_WINDOW_MS;
+
   /** passId -> slot, allocated on first sight then reused. */
   const passSlots = new Map();
   let nextPassSlot = declaredCount;
@@ -204,6 +235,9 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
     unbalanced.fill(0);
     hitchOpenZone.fill(0);
     hitchFrames = 0;
+    cpuSumEarly.fill(0);
+    cpuMaxEarly.fill(0);
+    cpuCountEarly.fill(0);
     stackDepth = 0;
     passSlots.clear();
     nextPassSlot = declaredCount;
@@ -314,6 +348,16 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
       cpuSum[i] += elapsed;
       cpuCount[i]++;
       if (elapsed > cpuMax[i]) cpuMax[i] = elapsed;
+      // Classified by when the bracket OPENED, not by when it closed — a
+      // sample never gets split across both buckets. `windowStartMs` is
+      // guaranteed non-null here: `start` is only a real timestamp (not the
+      // SETTLING sentinel, already handled above) once settling has already
+      // ended, and settling ending is exactly what sets `windowStartMs`.
+      if (start < windowStartMs + earlyWindowMs) {
+        cpuSumEarly[i] += elapsed;
+        cpuCountEarly[i]++;
+        if (elapsed > cpuMaxEarly[i]) cpuMaxEarly[i] = elapsed;
+      }
     }
     if (readDrawCalls !== null) {
       const d = readDrawCalls() - openDraws[i];
@@ -368,6 +412,7 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
       readTriangles: rt = null,
       owner: nextOwner = 'anonymous',
       hitchThresholdMs: hitchMs = DEFAULT_HITCH_THRESHOLD_MS,
+      earlyWindowMs: earlyMs = DEFAULT_EARLY_WINDOW_MS,
     } = {}) {
       // Re-arming as the SAME owner is normal — that is how the HUD gets a
       // rolling window. Arming over somebody else's live window is the bug.
@@ -385,6 +430,7 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
       readTriangles = typeof rt === 'function' ? rt : null;
       settleRemaining = Math.max(0, settleFrames | 0);
       hitchThresholdMs = Number.isFinite(hitchMs) && hitchMs > 0 ? hitchMs : DEFAULT_HITCH_THRESHOLD_MS;
+      earlyWindowMs = Number.isFinite(earlyMs) && earlyMs > 0 ? earlyMs : DEFAULT_EARLY_WINDOW_MS;
       // Measured at arm time, not assumed, and not re-measured per run — the
       // clamp is a property of the page, not of the window being measured. An
       // injected value skips the probe entirely (tests with a frozen fake clock,
@@ -582,6 +628,13 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
         zoneStats.push({
           id: i < declaredCount ? zones[i].id : `${PASS_ZONE_PREFIX}${passIdForSlot(i)}`,
           cpu: cpuCount[i] > 0 ? { sumMs: cpuSum[i], count: cpuCount[i], maxMs: cpuMax[i] } : null,
+          // The EARLY-only slice of the same CPU cost, for the front-loaded-
+          // burst-vs-steady-tax split (perf-report.js#classifyTemporalShape).
+          // `null`, never a zero block, when nothing in this zone opened during
+          // the early window — that is a real "none of it was early" result,
+          // not an absence, and `statFrom` already knows the difference.
+          cpuEarly:
+            cpuCountEarly[i] > 0 ? { sumMs: cpuSumEarly[i], count: cpuCountEarly[i], maxMs: cpuMaxEarly[i] } : null,
           gpu: gpuCount[i] > 0 ? { sumMs: gpuSum[i], count: gpuCount[i], maxMs: gpuMax[i] } : null,
           drawCalls: drawCount[i] > 0 ? { sum: drawSum[i], count: drawCount[i] } : null,
           triangles: drawCount[i] > 0 ? { sum: triSum[i], count: drawCount[i] } : null,
@@ -599,6 +652,9 @@ export function createFrameProfiler({ now = defaultNow, zones = ZONES, maxPassZo
         durationMs: windowStartMs === null || windowEndMs === null ? null : windowEndMs - windowStartMs,
         settleFramesDiscarded: settleDiscarded,
         clockResolutionMs,
+        // What "early" meant for THIS window — echoed, not assumed, so the
+        // report layer never has to guess what threshold produced its numbers.
+        earlyWindowMs,
         zoneStats,
         // WHICH ZONES WERE MID-FLIGHT WHEN A FRAME HUNG (2026-08-12). See
         // beginFrame for what this can and cannot observe — in short, only zones

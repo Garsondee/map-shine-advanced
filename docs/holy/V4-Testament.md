@@ -2573,3 +2573,43 @@ the upper floor is hovering around 30-35 fps. That's a serious improvement."** P
 harder of the two floors by every measure this Testament has taken (multiFloor comparisons
 throughout Book I). No revert flag exists to record a default flip against; this verdict IS the
 promotion.
+
+---
+
+**ADDENDUM to P-011, same day — the fix's own before/after comparison exposed a second layer of
+the identical bug, one level up the call stack, not yet fixed.** Filed by Claude Sonnet 5,
+2026-08-12, acting as a worker under the Covenant, while building a requested before/after
+comparison report.
+
+A fresh `perf-run-full` capture (same route, same floor, ~78 minutes after the P-011 fix landed)
+confirms `residency.itemLoad` holding at **9.6ms total this window vs the ORIGINAL baseline's
+9,492ms — a 989× reduction**, matching the earlier mid-session proof closely. But
+`residency.pass` — the zone wrapping the entire residency system — still cost **7,028.9ms**.
+Before the fix, that number was ~98% explained by `itemLoad` alone. Now, with `itemLoad` fixed,
+only **~1.6%** of it (~116ms) is accounted for by anything residency does — **the other ~98.4%
+was always there, invisible behind the bigger cost, not introduced by this fix.**
+
+**Code-verified, not guessed:** `scheduleResidencyUpdate` (`vt-pan-viewer.js:11349`) does exactly
+`await updateResidencyUnguarded()` inside its `do`/`while`, bracketed by `residency.pass`. `update
+ResidencyUnguarded` is still declared `async` (correctly — it genuinely needs to await real I/O
+when new items appear) — which means **every single call to it still pays the identical
+unconditional-microtask-yield tax P-011 just proved costs real time**, one level higher up the
+stack than the fix already reaches. The shape is exact: same "always-async wrapper around
+mostly-synchronous work" pattern, same mechanism, different call site.
+
+**Not yet fixed, and harder than P-011's fix was:** phase 1's loop could be split cleanly because
+the CALLER (the loop) already knows, per item, whether real async work is needed.
+`scheduleResidencyUpdate` doesn't have that luxury — `updateResidencyUnguarded` is one function
+whose OWN body decides, mid-execution, whether it needs to await anything, and the caller can't
+peek that in advance the same way. A fix here likely needs `updateResidencyUnguarded` to signal
+back synchronously when it did no real async work, so the do-while can skip the outer await on
+that path — a real design question, not a one-line change.
+
+**Honest caveat, stated plainly:** this session's own numbers drifted a lot from ordinary machine
+load across four captures on the same route (avgFps 42.5 / 73.6 / 49.6 / 35.5) — confirmed via
+`geometry.worldDraw`, untouched by any fix this session, itself costing 21% more in this same
+capture (9.185ms → 11.086ms) with byte-identical geometry submitted. Some of `residency.pass`'s
+remaining 7,028.9ms could be that same drift landing on an async boundary rather than a fixed,
+reproducible cost. The CODE MATCH is exact and load-bearing; the MAGNITUDE claim is not yet proven
+to P-011's own standard and needs the same live before/after treatment before anyone spends a fix
+on it. Flagged as the clear next target, not yet chased.

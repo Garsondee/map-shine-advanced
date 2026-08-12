@@ -212,6 +212,103 @@ export function run(t) {
     noGlassSetterError === null
   );
 
+  // ── THE OCCLUSION GATE (`gateGlass`, 2026-08-12) — Fn()/If() around the
+  // GLASS BUILD ITSELF, one cache layer below the JS-time glass branch above:
+  // that one shrinks the COMPILED SHADER; this one skips PER-FRAGMENT WORK
+  // within a shader that already has the glass compiled in. Defaults OFF —
+  // every assertion above this block already proves the off/default path is
+  // unaffected by this parameter's mere existence. ─────────────────────────
+  ok('gateGlassCompiled defaults false — the default path is unchanged', built.gateGlassCompiled === false);
+
+  let gatedError = null;
+  let gated = null;
+  try {
+    gated = buildWindowSurfaceMaterial(args({ gateGlass: true }));
+  } catch (err) {
+    gatedError = err;
+  }
+  ok(
+    `gateGlass:true with a real depth texture constructs without throwing (${gatedError ? gatedError.message : 'clean'})`,
+    gatedError === null
+  );
+  ok('…and reports the gate as actually compiled', gated?.gateGlassCompiled === true);
+  ok('…and still returns a real, distinct colorNode', !!gated?.windowMaterial?.colorNode);
+  // ⚠️ STILL THREE TAPS, NOT SIX — this is the trap, not a typo. The gated
+  // build's OWN buildGlassCookie() call lives inside a TSL Fn() callback,
+  // which `reference_tsl_fn_deferred_execution_trap` says does NOT run when
+  // this line executes — it runs LATER, only when three's NodeBuilder
+  // actually visits the graph (a real shader compile, no WebGPU device in
+  // Node — keyhole-tsl-constructs-in-node). So in THIS test the deferred half
+  // never ran at all, and maskTexNodes only ever saw the ONE eager
+  // (debug-material) build, identical in count to the ungated case above.
+  // Proving that gap is exactly why the two assertions below exist, and why
+  // this file's own header names live verification as the next required step.
+  ok('the deferred half never actually ran in this test — same tap count as ungated', gated.maskTexNodes.length === 3);
+
+  // THE BUG THIS FOUND: a texture() node built AFTER setMaskTexture already
+  // ran would normally close over the STALE construction-time texture
+  // forever — setMaskTexture can only update nodes that already exist, and
+  // window-surface-subsystem.js calls it once, asynchronously, BEFORE the
+  // mesh (and hence this deferred build) ever becomes visible. `liveMaskTexture`
+  // exists so a node built later still starts correct — this cannot exercise
+  // the deferred texture() call itself (see above), but it can and does prove
+  // the variable that call depends on actually moves.
+  const beforeSwap = gated.debugGetLiveMaskTexture();
+  const swappedGated = stubTexture();
+  let gatedSwapError = null;
+  try {
+    gated.setMaskTexture(swappedGated);
+  } catch (err) {
+    gatedSwapError = err;
+  }
+  ok(
+    `setMaskTexture still runs cleanly against the gated build (${gatedSwapError ? gatedSwapError.message : 'clean'})`,
+    gatedSwapError === null
+  );
+  ok(
+    'setMaskTexture updates the LIVE reference a not-yet-built node will read, not just existing nodes',
+    gated.debugGetLiveMaskTexture() === swappedGated && gated.debugGetLiveMaskTexture() !== beforeSwap
+  );
+  ok(
+    '…and existing (eager, debug-material) nodes still get updated exactly as before',
+    gated.maskTexNodes.every((n) => n.value === swappedGated)
+  );
+  // The two builds share the SAME uniform objects (declared once, outside
+  // buildGlassCookie) rather than each owning a copy — so one setGlass() call
+  // must move both without needing to know either build happened.
+  let gatedGlassSetterError = null;
+  try {
+    gated.setGlass({ warpPx: 12, dispersion: 0.3 });
+  } catch (err) {
+    gatedGlassSetterError = err;
+  }
+  ok(
+    `setGlass still works against the gated build (${gatedGlassSetterError ? gatedGlassSetterError.message : 'clean'})`,
+    gatedGlassSetterError === null
+  );
+
+  // A real depth texture is required for the gate to mean anything — see
+  // `gateGlass`'s own JSDoc on why gating a JS-constant `visibility01` would
+  // just be a branch around "always true", pure overhead for nothing skipped.
+  const gatedNoDepth = buildWindowSurfaceMaterial(args({ gateGlass: true, depthTexture: null }));
+  ok(
+    'gateGlass:true with NO depth texture falls back to the ungated build rather than gating on a constant',
+    gatedNoDepth.gateGlassCompiled === false
+  );
+  ok('…and still produces a working material', !!gatedNoDepth.windowMaterial?.colorNode);
+
+  // THE INSTRUMENT MUST NOT LIE (feedback_instruments_must_not_lie): the
+  // debug material's own channels come from the UNGATED build always, so
+  // gateGlass must not change what the field-diagnostic channels are built
+  // from. This cannot check the RENDERED picture (no WebGPU device in Node —
+  // keyhole-tsl-constructs-in-node), but it can and does check that both the
+  // gated and ungated runs construct the SAME kind of debug material rather
+  // than gateGlass silently reaching into the debug channels too.
+  ok(
+    'the debug material still exists and is distinct from the (now gated) add pass',
+    !!gated?.debugMaterial && gated.debugMaterial !== gated.windowMaterial
+  );
+
   // ── THE DEBUG CHANNELS — THE INSTRUMENT MUST NOT LIE ────────────────────
   // The builder ALREADY throws at construction on a channel with no node,
   // which means the first assertion in this file also asserts every declared

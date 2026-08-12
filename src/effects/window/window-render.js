@@ -155,7 +155,15 @@ export const GLASS_DEBUG_OFFSET_REF_PX = 20;
  *   subgraph at all. A JS-TIME branch: `false` constructs none of it, so the
  *   compiled shader shrinks by five noise taps and two mask taps rather than
  *   multiplying them by a zero (`tsl/no-uniform-gates`). Defaults ON — the
- *   author's `glassWarpPx = 0` is the runtime off switch, and it is exact.
+ *   author's `glassWarpPx = 0` is the runtime off switch, and it is exact,
+ *   but it is a VISUAL off switch only — the noise underneath still runs;
+ *   see `gateGlass` below for the one that actually skips it.
+ * @param {boolean} [args.gateGlass] - skip the glass/caustic computation on
+ *   the GPU for fragments the floor gate has already decided are invisible,
+ *   instead of computing it unconditionally and multiplying the result by
+ *   zero. Defaults OFF (behaviour byte-identical to before this existed) —
+ *   see "THE FLOOR GATE" below for the measurement that motivates this and
+ *   why it needs a live visual check before it can default on.
  * @returns {object} the material plus its setters.
  */
 export function buildWindowSurfaceMaterial({
@@ -167,10 +175,28 @@ export function buildWindowSurfaceMaterial({
   strength = WINDOW_DEFAULT_STRENGTH,
   contrast = WINDOW_DEFAULT_CONTRAST,
   glass = true,
+  gateGlass = false,
 }) {
   const TSL = THREE.TSL;
-  const { texture, uv, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, step, clamp, max, abs, sign, mix } =
-    TSL;
+  const {
+    texture,
+    uv,
+    vec2,
+    vec3,
+    vec4,
+    float,
+    uniform,
+    positionWorld,
+    smoothstep,
+    step,
+    clamp,
+    max,
+    abs,
+    sign,
+    mix,
+    Fn,
+    If,
+  } = TSL;
 
   const uStrength = uniform(float(strength));
   const uContrast = uniform(float(contrast));
@@ -300,6 +326,28 @@ export function buildWindowSurfaceMaterial({
   const maskTexNodes = [];
 
   /**
+   * THE LIVE MASK TEXTURE — read by `sampleCookieAt` INSTEAD OF the raw
+   * `maskTexture` parameter, and it is not a stylistic indirection.
+   *
+   * ⚠️ `gateGlass`'s gated build (below) constructs its OWN, SECOND set of
+   * `texture()` nodes DEFERRED, inside a TSL `Fn()` callback — which does not
+   * run at all when this function is called; it runs LATER, whenever three's
+   * NodeBuilder first actually visits this material's graph
+   * (`reference_tsl_fn_deferred_execution_trap`), which in practice is the
+   * mesh's first VISIBLE render. `window-surface-subsystem.js` keeps the mesh
+   * hidden until its mask has finished loading and `setMaskTexture` has
+   * ALREADY been called — so that deferred build's texture() calls, whenever
+   * they finally run, would otherwise close over the ORIGINAL `maskTexture`
+   * parameter (a `const`, never reassigned) and permanently sample the
+   * construction-time placeholder, DEAF to the one `setMaskTexture` call that
+   * already happened before they were ever built. `setMaskTexture` updates
+   * THIS variable too, so any node built after that call — early or late —
+   * starts correct instead of relying on a retroactive `.value` fix-up that,
+   * for a not-yet-constructed node, cannot exist to receive it.
+   */
+  let liveMaskTexture = maskTexture;
+
+  /**
    * THE DECODE — the transcription of `decodeWindowMask`. With the glass on
    * this runs once per colour channel, because each one arrives from its own
    * place on the mask; with it off, once.
@@ -313,7 +361,7 @@ export function buildWindowSurfaceMaterial({
    * forever, and the cookie would render in a plausible partial colour.
    */
   const sampleCookieAt = (uvNode, label) => {
-    const texNode = texture(maskTexture, uvNode);
+    const texNode = texture(liveMaskTexture, uvNode);
     maskTexNodes.push(texNode);
     const s = texNode.toVar(`${label}Sample`);
     const value = max(max(s.r, s.g), s.b).toVar(`${label}Value`);
@@ -352,161 +400,188 @@ export function buildWindowSurfaceMaterial({
   // profile moves (specular carries that machinery; this does not). Declaring
   // a `fromProfile` rung that no rebuild honours would be a manifest claiming
   // more than exists — see `deferredRungs.glassPerfGate`. Today the author's
-  // own `glassWarpPx = 0` is the off switch, and it is exact.
+  // own `glassWarpPx = 0` is a VISUAL off switch, and it is exact, but the
+  // noise underneath still runs — it is not a cost off switch. `gateGlass`
+  // below is the one that is.
   // ⚠️ WORLD SPACE, NOT UV. The lumps are a property of the PANE, so they
   // must keep their size and their place while the camera moves and
   // regardless of the mask file's own aspect ratio. A field sampled in UV
   // would stretch with the mask and swim under a pan — the same class of
   // mistake as sampling a screen buffer with a world UV
   // (`feedback_shared_texture_node_carries_the_wrong_uv`), one layer up.
-  /** The centre tap — the honest single representative for the diagnostic
-   * channels whose question predates the glass (mask/presence/level/tint). */
-  let tapG;
-  /** The cookie, per channel, presence already folded in. */
-  let cookie;
-  /** The focusing multiplier; a literal 1 with the glass compiled out. */
-  let causticGain = float(1);
-  // Neutral diagnostics for the glass channels when there is no glass — flat
-  // mid-grey, which is exactly what their reading guides say "off" looks like.
-  let debugGlassHeight = vec3(0.5, 0.5, 0.5);
-  let debugGlassOffset = vec3(0.5, 0.5, 0.5);
+  //
+  // ⚠️ A FUNCTION, NOT A FLAT BLOCK — CALLED TWICE (2026-08-12). One floor's
+  // window quad draws EVEN WHEN THAT FLOOR IS ENTIRELY HIDDEN: every floor
+  // gets its own subsystem, kept alive and drawing for as long as the floor
+  // exists in the scene, not just while it is the viewed one (see "ONE
+  // SUBSYSTEM PER FLOOR" at this module's call site in vt-pan-viewer.js). On
+  // a multi-floor map every hidden floor's window light was paying the full
+  // ten-simplex-tap glass field only to be zeroed by the floor gate below —
+  // `gateGlass` skips that. It has to stay a plain callable rather than
+  // inlining a branch, because the FIRST call below runs UNGATED (the debug
+  // material's own channels must never lie about the field, so they read
+  // this build regardless of `gateGlass` — same posture as `cellular` in
+  // `specular-render.js`'s own shimmer gate) and the SECOND, gated call
+  // (below "THE FLOOR GATE") has to reconstruct the same maths a second time
+  // inside an `If()` — seeing `specularMaterial.colorNode`'s own header:
+  // `If()` is a silent no-op outside `Fn()`, and the maths must be
+  // CONSTRUCTED inside that callback, not built outside and merely
+  // referenced, or it hoists straight back out of the branch.
+  /** @returns {{tapG: object, cookie: object, causticGain: object, debugGlassHeight: object, debugGlassOffset: object}} */
+  function buildGlassCookie() {
+    /** The centre tap — the honest single representative for the diagnostic
+     * channels whose question predates the glass (mask/presence/level/tint). */
+    let tapG;
+    /** The cookie, per channel, presence already folded in. */
+    let cookie;
+    /** The focusing multiplier; a literal 1 with the glass compiled out. */
+    let causticGain = float(1);
+    // Neutral diagnostics for the glass channels when there is no glass — flat
+    // mid-grey, which is exactly what their reading guides say "off" looks like.
+    let debugGlassHeight = vec3(0.5, 0.5, 0.5);
+    let debugGlassOffset = vec3(0.5, 0.5, 0.5);
 
-  if (glass) {
-    const glassScaleSafe = max(uGlassScale, float(1));
-    const striationAngleRad = uGlassStriationAngle.mul(float(Math.PI / 180)).toVar('winGlassAngle');
-    // THE STRIATIONS, FOR FREE. Compressing the sample coordinate on one axis
-    // ELONGATES the features along it — so the cylinder-glass draw lines cost
-    // one divide, not a second noise layer.
-    const striationStretch = float(1)
-      .add(uGlassStriation.mul(float(GLASS_STRIATION_STRETCH)))
-      .toVar('winGlassStretch');
-    const fieldBase = rotate2d(TSL, positionWorld.xy.div(glassScaleSafe), striationAngleRad);
-    const fieldP = vec2(fieldBase.x.div(striationStretch), fieldBase.y).add(uGlassSeedOffset).toVar('winGlassP');
+    if (glass) {
+      const glassScaleSafe = max(uGlassScale, float(1));
+      const striationAngleRad = uGlassStriationAngle.mul(float(Math.PI / 180)).toVar('winGlassAngle');
+      // THE STRIATIONS, FOR FREE. Compressing the sample coordinate on one axis
+      // ELONGATES the features along it — so the cylinder-glass draw lines cost
+      // one divide, not a second noise layer.
+      const striationStretch = float(1)
+        .add(uGlassStriation.mul(float(GLASS_STRIATION_STRETCH)))
+        .toVar('winGlassStretch');
+      const fieldBase = rotate2d(TSL, positionWorld.xy.div(glassScaleSafe), striationAngleRad);
+      const fieldP = vec2(fieldBase.x.div(striationStretch), fieldBase.y).add(uGlassSeedOffset).toVar('winGlassP');
 
-    /**
-     * ONE tap of the thickness field — two octaves, the second crossfaded by
-     * `glassDetail` (see `GLASS_OCTAVE2_FREQ`'s own note on why this is not
-     * `fbmFloat`). The second octave is offset by an arbitrary constant so it
-     * does not share the first's lattice origin.
-     * @param {number} offX @param {number} offY - in FIELD units, not px.
-     */
-    const heightAt = (offX, offY) => {
-      const p = offX === 0 && offY === 0 ? fieldP : fieldP.add(vec2(float(offX), float(offY)));
-      const octave1 = simplexFloat(TSL, p);
-      const octave2 = simplexFloat(TSL, p.mul(float(GLASS_OCTAVE2_FREQ)).add(vec2(float(31.4), float(17.9))));
-      return octave1.add(octave2.mul(uGlassDetail).mul(float(GLASS_OCTAVE2_AMP)));
-    };
+      /**
+       * ONE tap of the thickness field — two octaves, the second crossfaded by
+       * `glassDetail` (see `GLASS_OCTAVE2_FREQ`'s own note on why this is not
+       * `fbmFloat`). The second octave is offset by an arbitrary constant so it
+       * does not share the first's lattice origin.
+       * @param {number} offX @param {number} offY - in FIELD units, not px.
+       */
+      const heightAt = (offX, offY) => {
+        const p = offX === 0 && offY === 0 ? fieldP : fieldP.add(vec2(float(offX), float(offY)));
+        const octave1 = simplexFloat(TSL, p);
+        const octave2 = simplexFloat(TSL, p.mul(float(GLASS_OCTAVE2_FREQ)).add(vec2(float(31.4), float(17.9))));
+        return octave1.add(octave2.mul(uGlassDetail).mul(float(GLASS_OCTAVE2_AMP)));
+      };
 
-    // FIVE TAPS, TWO DERIVATIVES. The centre is needed only by the curvature,
-    // the neighbours by both — which is what makes the caustic nearly free
-    // once the warp has been paid for (window-glass.js#computeGlassField).
-    const hC = heightAt(0, 0).toVar('winGlassHC');
-    const hL = heightAt(-GLASS_SAMPLE_EPSILON, 0).toVar('winGlassHL');
-    const hR = heightAt(GLASS_SAMPLE_EPSILON, 0).toVar('winGlassHR');
-    const hD = heightAt(0, -GLASS_SAMPLE_EPSILON).toVar('winGlassHD');
-    const hU = heightAt(0, GLASS_SAMPLE_EPSILON).toVar('winGlassHU');
+      // FIVE TAPS, TWO DERIVATIVES. The centre is needed only by the curvature,
+      // the neighbours by both — which is what makes the caustic nearly free
+      // once the warp has been paid for (window-glass.js#computeGlassField).
+      const hC = heightAt(0, 0).toVar('winGlassHC');
+      const hL = heightAt(-GLASS_SAMPLE_EPSILON, 0).toVar('winGlassHL');
+      const hR = heightAt(GLASS_SAMPLE_EPSILON, 0).toVar('winGlassHR');
+      const hD = heightAt(0, -GLASS_SAMPLE_EPSILON).toVar('winGlassHD');
+      const hU = heightAt(0, GLASS_SAMPLE_EPSILON).toVar('winGlassHU');
 
-    // `computeGlassField`, line for line — neither divided by ε, see its header.
-    const gradFieldX = hR.sub(hL).div(float(2));
-    const gradFieldY = hU.sub(hD).div(float(2));
-    const curvature = hR.add(hL).add(hD).add(hU).div(float(4)).sub(hC).toVar('winGlassCurv');
+      // `computeGlassField`, line for line — neither divided by ε, see its header.
+      const gradFieldX = hR.sub(hL).div(float(2));
+      const gradFieldY = hU.sub(hD).div(float(2));
+      const curvature = hR.add(hL).add(hD).add(hU).div(float(4)).sub(hC).toVar('winGlassCurv');
 
-    // ── BACK TO WORLD SPACE ────────────────────────────────────────────────
-    // The field was sampled through a rotate-then-stretch, so the gradient
-    // that came out is in the GLASS's frame, not the world's. A gradient
-    // transforms by the TRANSPOSE of that map (`∇_p = Mᵀ ∇_q`), which here
-    // is: undo the stretch on the same axis it was applied to, then rotate
-    // back.
-    //
-    // Skipping this would not look broken — it would look like the light
-    // always slides a little along the draw lines, an error that reads as a
-    // stylistic choice rather than as a bug, which is exactly the kind this
-    // codebase has paid for before. Six ALU ops to be actually right.
-    const gradWorld = rotate2d(
-      TSL,
-      vec2(gradFieldX.div(striationStretch), gradFieldY),
-      striationAngleRad.mul(float(-1))
-    ).toVar('winGlassGrad');
+      // ── BACK TO WORLD SPACE ────────────────────────────────────────────────
+      // The field was sampled through a rotate-then-stretch, so the gradient
+      // that came out is in the GLASS's frame, not the world's. A gradient
+      // transforms by the TRANSPOSE of that map (`∇_p = Mᵀ ∇_q`), which here
+      // is: undo the stretch on the same axis it was applied to, then rotate
+      // back.
+      //
+      // Skipping this would not look broken — it would look like the light
+      // always slides a little along the draw lines, an error that reads as a
+      // stylistic choice rather than as a bug, which is exactly the kind this
+      // codebase has paid for before. Six ALU ops to be actually right.
+      const gradWorld = rotate2d(
+        TSL,
+        vec2(gradFieldX.div(striationStretch), gradFieldY),
+        striationAngleRad.mul(float(-1))
+      ).toVar('winGlassGrad');
 
-    // ── THE DISPERSION — one deflection, three magnitudes ──────────────────
-    // `computeChannelOffsetPx` × `computeDispersionScales`, folded: green
-    // rides the base offset and red/blue sit symmetrically either side of it,
-    // so turning the split up separates the channels rather than sliding the
-    // whole cookie. World px → mask UV through the subsystem's conversion.
-    const baseOffsetPx = gradWorld.mul(uGlassWarpPx).toVar('winGlassOffsetPx');
-    const baseOffsetUv = baseOffsetPx.mul(uUvPerWorldPx).toVar('winGlassOffsetUv');
-    const dispersionK = uGlassDispersion.mul(float(GLASS_DISPERSION_SPREAD)).toVar('winGlassDispK');
+      // ── THE DISPERSION — one deflection, three magnitudes ──────────────────
+      // `computeChannelOffsetPx` × `computeDispersionScales`, folded: green
+      // rides the base offset and red/blue sit symmetrically either side of it,
+      // so turning the split up separates the channels rather than sliding the
+      // whole cookie. World px → mask UV through the subsystem's conversion.
+      const baseOffsetPx = gradWorld.mul(uGlassWarpPx).toVar('winGlassOffsetPx');
+      const baseOffsetUv = baseOffsetPx.mul(uUvPerWorldPx).toVar('winGlassOffsetUv');
+      const dispersionK = uGlassDispersion.mul(float(GLASS_DISPERSION_SPREAD)).toVar('winGlassDispK');
 
-    const tapR = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).sub(dispersionK))), 'winR');
-    tapG = sampleCookieAt(maskUv.add(baseOffsetUv), 'winG');
-    const tapB = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).add(dispersionK))), 'winB');
+      const tapR = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).sub(dispersionK))), 'winR');
+      tapG = sampleCookieAt(maskUv.add(baseOffsetUv), 'winG');
+      const tapB = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).add(dispersionK))), 'winB');
 
-    // ⚠️ PRESENCE IS PER-CHANNEL, AND THAT IS THE WHOLE PRISM. Taking a
-    // single shared silhouette would keep the cookie's EDGE monochrome and
-    // confine the colour split to its interior — which is where there is
-    // least to see, because the interior is usually flat paint. The fringe
-    // belongs on the edge: that is where a real pane throws its rainbow.
-    cookie = vec3(
-      tapR.cookie.r.mul(tapR.presence),
-      tapG.cookie.g.mul(tapG.presence),
-      tapB.cookie.b.mul(tapB.presence)
-    ).toVar('winCookie');
+      // ⚠️ PRESENCE IS PER-CHANNEL, AND THAT IS THE WHOLE PRISM. Taking a
+      // single shared silhouette would keep the cookie's EDGE monochrome and
+      // confine the colour split to its interior — which is where there is
+      // least to see, because the interior is usually flat paint. The fringe
+      // belongs on the edge: that is where a real pane throws its rainbow.
+      cookie = vec3(
+        tapR.cookie.r.mul(tapR.presence),
+        tapG.cookie.g.mul(tapG.presence),
+        tapB.cookie.b.mul(tapB.presence)
+      ).toVar('winCookie');
 
-    // ── THE CAUSTIC — `computeCausticGain`, transcribed ───────────────────
-    // The JS twin early-returns an exact 1 at strength 0; this needs no
-    // branch to match it, because both terms below are multiplied by the
-    // strength and vanish with it.
-    // ⚠️ `GLASS_CURVATURE_GAIN` is load-bearing, not a tuning nicety: without
-    // it the convergence sits near 0.05 and the shaping power annihilates it.
-    // Measured on this very bench — see that constant's own header.
-    //
-    // ⚠️ SOFT saturation, never `clamp()` — `softSaturate` transcribed. With a
-    // hard clamp the caustic rendered as a near-binary stencil, because the
-    // field's tail runs far past 1 after the gain and every bit of it flattened
-    // onto the bound. `x / (1 + |x|)`, the same compressor shape the highlight
-    // shoulder below uses.
-    const convScaled = curvature.mul(float(-GLASS_CURVATURE_GAIN)).toVar('winGlassConvRaw');
-    const convergence = convScaled.div(float(1).add(abs(convScaled))).toVar('winGlassConv');
-    const sharpness = max(uGlassCausticSharpness, float(0.5));
-    // ONE power on the MAGNITUDE, sign reattached — shaping only the bright
-    // side is what made turning the caustic up dim the whole cookie.
-    const shaped = abs(convergence).pow(sharpness).mul(sign(convergence)).toVar('winGlassShaped');
-    causticGain = max(
-      float(0),
-      float(1)
-        .add(uGlassCausticStrength.mul(max(shaped, float(0))))
-        .sub(uGlassCausticStrength.mul(float(GLASS_CAUSTIC_DARK_RATIO)).mul(max(shaped.mul(float(-1)), float(0))))
-    ).toVar('winCaustic');
+      // ── THE CAUSTIC — `computeCausticGain`, transcribed ───────────────────
+      // The JS twin early-returns an exact 1 at strength 0; this needs no
+      // branch to match it, because both terms below are multiplied by the
+      // strength and vanish with it.
+      // ⚠️ `GLASS_CURVATURE_GAIN` is load-bearing, not a tuning nicety: without
+      // it the convergence sits near 0.05 and the shaping power annihilates it.
+      // Measured on this very bench — see that constant's own header.
+      //
+      // ⚠️ SOFT saturation, never `clamp()` — `softSaturate` transcribed. With a
+      // hard clamp the caustic rendered as a near-binary stencil, because the
+      // field's tail runs far past 1 after the gain and every bit of it flattened
+      // onto the bound. `x / (1 + |x|)`, the same compressor shape the highlight
+      // shoulder below uses.
+      const convScaled = curvature.mul(float(-GLASS_CURVATURE_GAIN)).toVar('winGlassConvRaw');
+      const convergence = convScaled.div(float(1).add(abs(convScaled))).toVar('winGlassConv');
+      const sharpness = max(uGlassCausticSharpness, float(0.5));
+      // ONE power on the MAGNITUDE, sign reattached — shaping only the bright
+      // side is what made turning the caustic up dim the whole cookie.
+      const shaped = abs(convergence).pow(sharpness).mul(sign(convergence)).toVar('winGlassShaped');
+      causticGain = max(
+        float(0),
+        float(1)
+          .add(uGlassCausticStrength.mul(max(shaped, float(0))))
+          .sub(uGlassCausticStrength.mul(float(GLASS_CAUSTIC_DARK_RATIO)).mul(max(shaped.mul(float(-1)), float(0))))
+      ).toVar('winCaustic');
 
-    // The field itself, remapped to grey. `GLASS_DEBUG_HEIGHT_RANGE` is the
-    // field's own bound, so a lump reaches white rather than clipping halfway.
-    debugGlassHeight = vec3(1, 1, 1).mul(hC.div(float(2 * GLASS_DEBUG_HEIGHT_RANGE)).add(float(0.5)));
-    // Normalised against a FIXED px reference, not against `glassWarpPx` —
-    // dividing by the live slider would renormalise the picture as it moved,
-    // and the channel could then never show "the warp is off" (flat grey),
-    // which is the single most useful thing it has to say.
-    debugGlassOffset = vec3(
-      baseOffsetPx.x.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
-      baseOffsetPx.y.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
-      float(0.5)
-    );
-  } else {
-    // NO GLASS: one tap, monochrome presence — byte-for-byte the pre-glass
-    // effect, and a visibly smaller compiled shader.
-    tapG = sampleCookieAt(maskUv, 'win');
-    cookie = tapG.cookie.mul(tapG.presence).toVar('winCookie');
+      // The field itself, remapped to grey. `GLASS_DEBUG_HEIGHT_RANGE` is the
+      // field's own bound, so a lump reaches white rather than clipping halfway.
+      debugGlassHeight = vec3(1, 1, 1).mul(hC.div(float(2 * GLASS_DEBUG_HEIGHT_RANGE)).add(float(0.5)));
+      // Normalised against a FIXED px reference, not against `glassWarpPx` —
+      // dividing by the live slider would renormalise the picture as it moved,
+      // and the channel could then never show "the warp is off" (flat grey),
+      // which is the single most useful thing it has to say.
+      debugGlassOffset = vec3(
+        baseOffsetPx.x.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
+        baseOffsetPx.y.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
+        float(0.5)
+      );
+    } else {
+      // NO GLASS: one tap, monochrome presence — byte-for-byte the pre-glass
+      // effect, and a visibly smaller compiled shader.
+      tapG = sampleCookieAt(maskUv, 'win');
+      cookie = tapG.cookie.mul(tapG.presence).toVar('winCookie');
+    }
+    return { tapG, cookie, causticGain, debugGlassHeight, debugGlassOffset };
   }
 
-  // ── THE CAUSTIC ONLY, HERE — see this module's header on `uDaylightTint`
-  // for why the astrolabe tint is NOT folded in at this point any more. The
-  // caustic stays: it is a real brightness variation from the glass itself
-  // (light physically concentrating on the thick spots) and has to go through
-  // the highlight shoulder below like any other magnitude the cookie can
-  // blow out with — same reasoning as `uStrength`/`coverage`/`cloudFactor`,
-  // all multiplied in before the shoulder for the identical reason.
-  const cookieTinted = cookie.mul(causticGain).toVar('winCookieTinted');
+  // UNGATED — the debug material's own channels must never lie about the
+  // field regardless of `gateGlass` (see `buildGlassCookie`'s own header
+  // above), and this doubles as exactly today's behaviour when `gateGlass`
+  // is off: the production material below reuses THESE SAME node objects
+  // rather than building a second, merely-equivalent copy, so the "off"
+  // shader stays byte-identical to before this existed, not just
+  // numerically the same.
+  const debugGlass = buildGlassCookie();
 
   // ── THE FLOOR GATE — THE DEPTH AUTHORITY (2026-08-05) ────────────────────
+  // Moved ahead of the gated glass build below (2026-08-12): the whole point
+  // is to know visibility BEFORE deciding whether to pay for the glass, not
+  // after — this section's own maths is otherwise unchanged.
   // A JS-time branch: with no depth texture the whole lookup is compiled OUT
   // rather than multiplied by a one (`tsl/no-uniform-gates`), the same
   // posture the old `attrTexture`-gated version had. Screen UV comes from
@@ -548,6 +623,35 @@ export function buildWindowSurfaceMaterial({
   // stays monochrome and shared, correctly: which floor a texel belongs to is
   // a screen-space fact about the map, not a property of a wavelength.
   const coverage = visibility01.toVar('winCoverage');
+
+  // ── THE CAUSTIC ONLY, HERE — see this module's header on `uDaylightTint`
+  // for why the astrolabe tint is NOT folded in at this point any more. The
+  // caustic stays: it is a real brightness variation from the glass itself
+  // (light physically concentrating on the thick spots) and has to go through
+  // the highlight shoulder below like any other magnitude the cookie can
+  // blow out with — same reasoning as `uStrength`/`coverage`/`cloudFactor`,
+  // all multiplied in before the shoulder for the identical reason.
+  //
+  // ⚠️ GATED BUILD, ONLY WHEN ASKED (`gateGlass`) AND ONLY WHEN THERE IS A
+  // REAL SIGNAL TO GATE ON (`depthTexture`) — see `gateGlass`'s own JSDoc and
+  // `buildGlassCookie`'s header for the measurement and the mechanism.
+  // Gating on a JS-constant `visibility01` (no depth texture) would add an
+  // `If()` around a condition that is always true — pure overhead, nothing
+  // skipped. Visually LOSSLESS by construction either way: the gated-off
+  // value is the zero vector, and 0 is exactly what `cookieTinted * coverage`
+  // already produced there before this existed (`rawLight` below still
+  // multiplies by `coverage` regardless of which path built `cookieTinted`).
+  const cookieTinted =
+    gateGlass && depthTexture
+      ? Fn(() => {
+          const out = vec3(0, 0, 0).toVar('winCookieTintedGated');
+          If(visibility01.greaterThan(float(0)), () => {
+            const gated = buildGlassCookie();
+            out.assign(gated.cookie.mul(gated.causticGain));
+          });
+          return out;
+        })().toVar('winCookieTinted')
+      : debugGlass.cookie.mul(debugGlass.causticGain).toVar('winCookieTinted');
 
   // ── THE CLOUD SEAM — see this module's header ────────────────────────────
   const cloudFactor = (cloudFactorNode ?? float(1)).toVar('winCloudFactor');
@@ -632,19 +736,22 @@ export function buildWindowSurfaceMaterial({
   // it is the one that lands on the base deflection, so it is the honest
   // single representative of a decode that is now three decodes. Their
   // reading guides in `window.js` say so.
+  // ⚠️ ALWAYS `debugGlass`, NEVER the (possibly) gated `cookieTinted` build —
+  // these channels have to show the field as it truly is regardless of
+  // `gateGlass`; see `buildGlassCookie`'s own header.
   const debugNodes = {
     quad: vec3(1, 0, 1),
-    mask: tapG.sample.rgb,
-    presence: vec3(tapG.presence, tapG.presence, tapG.presence),
-    level: vec3(tapG.level, tapG.level, tapG.level),
-    tint: tapG.tint,
+    mask: debugGlass.tapG.sample.rgb,
+    presence: vec3(debugGlass.tapG.presence, debugGlass.tapG.presence, debugGlass.tapG.presence),
+    level: vec3(debugGlass.tapG.level, debugGlass.tapG.level, debugGlass.tapG.level),
+    tint: debugGlass.tapG.tint,
     floorGate: debugFloorGate,
     daylightTint: uDaylightTint,
-    glassHeight: debugGlassHeight,
-    glassOffset: debugGlassOffset,
+    glassHeight: debugGlass.debugGlassHeight,
+    glassOffset: debugGlass.debugGlassOffset,
     // Mid-grey IS 1.0 — so "no focusing anywhere" reads as a flat grey field
     // rather than as a black one that could be confused with a dead channel.
-    caustic: vec3(1, 1, 1).mul(causticGain.mul(float(0.5))),
+    caustic: vec3(1, 1, 1).mul(debugGlass.causticGain.mul(float(0.5))),
     rawLight: rawLight.mul(float(WINDOW_DEBUG_BOOST)),
     final: cookieLight.mul(float(WINDOW_DEBUG_BOOST)),
   };
@@ -678,8 +785,14 @@ export function buildWindowSurfaceMaterial({
     debugMaterial,
     maskTexNodes,
     /** THE ONE DOOR onto the mask texture — ALL THREE dispersion taps, never
-     * just the first (see `sampleCookieAt`'s own warning). */
+     * just the first (see `sampleCookieAt`'s own warning), AND every tap that
+     * does not exist yet either (see `liveMaskTexture`'s own header): the
+     * gated build's own taps are constructed later, deferred inside a TSL
+     * `Fn()`, so updating only `maskTexNodes` here would silently miss them —
+     * they would be built after this call, from whatever `liveMaskTexture`
+     * was left at, with no second chance to receive this update. */
     setMaskTexture(tex) {
+      liveMaskTexture = tex;
       for (const node of maskTexNodes) node.value = tex;
     },
     /** The crop's extent in MASK-UV space — the entire mask lookup.
@@ -765,5 +878,17 @@ export function buildWindowSurfaceMaterial({
       uDebugChannel.value = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
     },
     floorGateCompiled: !!depthTexture,
+    // Whether the production material actually took the gated build — false
+    // whenever `gateGlass` was off OR there was no depth texture to gate on,
+    // matching `cookieTinted`'s own condition exactly rather than echoing
+    // `gateGlass` alone, which could otherwise claim a skip that never compiled.
+    gateGlassCompiled: !!(gateGlass && depthTexture),
+    // TEST/DIAGNOSTIC ONLY — no render-path code should ever call this. Exists
+    // because `liveMaskTexture`'s own correctness (does a texture() node
+    // built AFTER setMaskTexture still start pointed at the right texture)
+    // cannot be observed by constructing the deferred gated build in Node at
+    // all (`reference_tsl_fn_deferred_execution_trap`); this at least proves
+    // the WIRING setMaskTexture depends on actually moves.
+    debugGetLiveMaskTexture: () => liveMaskTexture,
   };
 }

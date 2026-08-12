@@ -2393,7 +2393,15 @@ function install() {
     fireMaskBakeRuns += 1;
     const fires = extractFiresFromMask(grid);
     fireMaskCache = { floorIndex, signature, version, fires };
-    log.info(`fire: painted region on floor ${floorIndex} yielded ${fires.length} fire(s)`);
+    // Positions ride along, not just the count (2026-08-12) — a live report of
+    // "two painted fireplaces, cohesion collapses them together" is otherwise
+    // unanswerable without a console dump: this line alone says whether
+    // extraction genuinely found two separate peaks (and where) or merged them
+    // into one, which is the fork the cohesion pull's own correctness depends on.
+    log.info(
+      `fire: painted region on floor ${floorIndex} yielded ${fires.length} fire(s)`,
+      fires.map((f) => ({ id: f.id, x: Math.round(f.x), y: Math.round(f.y), diameterPx: Math.round(f.diameterPx) }))
+    );
     return fires;
   };
 

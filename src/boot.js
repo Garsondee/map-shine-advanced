@@ -591,6 +591,14 @@ MapShine.getPipelineStats = getVtPanViewerPipelineStats;
 // it yet (S2.5, pool integration, is its first real consumer).
 MapShine.setPointLightBatching = setVtPanViewerPointLightBatching;
 MapShine.getPointLightBatching = getVtPanViewerPointLightBatching;
+// Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
+// NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/
+// colorBuckets `.size` answers "did batching actually admit any lights this
+// frame", the same weight as getEarlyZComposition's own tile counters. Was
+// already reachable through cache-report's cacheStats snapshot (boot.js's
+// `pointLightMeshPools` field); this is the same function, just also given
+// its own door.
+MapShine.getPointLightMeshPoolStats = getVtPanViewerPointLightMeshPoolStats;
 // SCENE SETTLE (2026-08-11, author: the 12k² upper floor "takes an extremely
 // long time to appear which causes confusion for you and me... we currently
 // don't correctly track when the system is actually finished loading"). ONE

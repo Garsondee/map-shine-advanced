@@ -745,13 +745,68 @@ Worker models execute + mark only; ANY surprise is a petition.*
       itself — flag ON vs OFF, pixel-exact, on a real captured scene — is S2.7, not done
       here; this entry is `BUILT (unverified)` for the pool-integration code specifically,
       `LIVE`-equivalent only for the dirty-skip mechanism the bench re-confirmed.
-- [ ] **S2.6 `pointLightUpdate` interior** — sub-zone it FIRST (source-read / candle-build /
+- [x] **S2.6 `pointLightUpdate` interior** — sub-zone it FIRST (source-read / candle-build /
       aperture-scan / ambient / writes; prime suspect: `buildCandleLightSources` clustering
       207 anchors at frame cadence), then fix ONLY what the zones convict. ⚠️ `src/diag/`
       carries the author's own uncommitted edits — coordinate, never collide.
+      · done Claude Sonnet 5 2026-08-12 — the sub-zoning itself had ALREADY shipped, same day,
+      in commit `d518233` ("Consolidate perf reporting to one button…"), as five sequential,
+      non-overlapping zones inside `point-light-pool.js#update` — `light.pointLightWallClip`,
+      `light.pointLightSourceBuild`, `light.pointLightApertureSetup`, `light.pointLightReconcile`,
+      `light.pointLightBatchReconcile` — verified for real (not just the `perf-zones.js` comment):
+      matching `beginById`/`endById` pairs at lines 1022/1049, 1059/1188, 1196/1386, 1395/1902,
+      1911/1966. It landed without ever being connected back to this task, so it wasn't recorded —
+      flagged here per Law 10, work that happened but wasn't written down didn't happen. Read
+      against a real Ground Floor capture the same day (58s, 2456 frames): the suspects are
+      answered by real data now, not assumption. `light.pointLightSourceBuild` (candle/lightning/
+      fire source build — prime suspect #1's `buildCandleLightSources`) is 0.567ms mean, **57% of
+      the whole `light.pointLightUpdate` total (0.991ms)** — convicted, exactly as predicted.
+      `light.pointLightReconcile` (suspect #2, per-light uniform writes) is 0.376ms/38%; wall-clip
+      and aperture-setup are negligible (0.042ms/0.002ms) and already fully cached (`pointLightWall
+      Clip.candle`/`.regular` both 100% hit rate this same capture). **Convicted by relative share,
+      but the absolute number doesn't currently justify the fix**: the WHOLE reconcile (0.991ms)
+      already sits under this section's own `≤1ms` gate on this floor, and `buildCandleLightSources`
+      re-clusters 207 largely-static anchors every frame for 0.567ms of a 16.7ms budget (~3.4%).
+      Caching the clustered output (keyed on anchor-set identity + perfTier + params, as this
+      section already specifies) remains a real, identified, low-risk-when-built improvement — left
+      as a named, ready-to-pick-up item rather than built speculatively against a number that isn't
+      over budget, ahead of this Stage's actual remaining prize (S2.7's 7.571ms/frame draw-call
+      cost, still switched off). `git status` checked clean on `src/diag/` before this note — the
+      uncommitted-edits warning above no longer applies; those files landed in the same `d518233`
+      commit. Full capture cross-reference: the perf-report artifact delivered to the author
+      2026-08-12, same session.
 - [ ] **S2.7 Pixel gate + flip** — bench-route captures, flag ON vs OFF: **exact** (any diff
       is a bug; the ONLY relaxation is design doc §4's contingency, with evidence + the
       author's sign-off). Author LIVE verdict → default ON.
+      **Pixel gate: BUILT and RUN, 2026-08-12 Claude Sonnet 5 — exact PASS. The flip itself
+      still needs your live verdict, not taken here — see below.**
+      `tests/playwright-artifacts/look/s2-7-pixel-diff.mjs` (new, modeled on S1.5's
+      `stage1-earlyz-pixel-diff.mjs`), against the live bench Mansion, Ground Floor, same
+      session, frozen time, flag OFF captured → flag ON → flag OFF restored (Law 3). **Result:
+      0 of 2,073,600 pixels differ, byte-exact, `maxChannelDelta: 0`.** Non-vacuity at capture:
+      `illumBuckets.size: 3, colorBuckets.size: 3` (6 admitted buckets total, on a scene that
+      was drawing every light per-light a moment before — the census's own "~4-6 bucket pairs"
+      projection, landed almost exactly). `poolStatsOff` confirms zero buckets before the flip
+      (`illumBuckets.size: 0, colorBuckets.size: 0`), so this is not two already-batched states
+      compared against each other. `lightMeshes.size` held at 101 across both reads, exactly as
+      §3.5 predicts ("hide, never delete") — every batchable light left the per-light draw path
+      but its mesh entry stayed resident, hidden.
+      A console-exposed `MapShine.getPointLightMeshPoolStats()` was added (`boot.js`, wrapping
+      the already-existing `getVtPanViewerPointLightMeshPoolStats`/`pointLights.getMeshPoolStats()`
+      — S2.5 built the pool-side function but never wired it past the perf-report's own
+      `cacheStats` snapshot) so this gate's non-vacuity check does not need a full
+      `perf-run-full` capture just to read three numbers. `npm run verify` green throughout,
+      9,112 tests — this addition is a thin accessor with no branch of its own, the same shape
+      as `getPipelineStats` a few lines above it in `boot.js`, so no new Node test was added for
+      it specifically.
+      **What this does NOT do: flip the default.** The design doc's §8 and this very line both
+      read "Author LIVE verdict → default ON" — unlike Stage 1, where the flip preceded the
+      author's look (S1.6 → S1.7), this task explicitly conditions the flip ON that verdict
+      coming FIRST. The exact pass above is the evidence for you to look at;
+      `MapShine.setPointLightBatching(true)` remains a live, instant, revertible toggle for
+      whenever you want to see it running yourself and give that verdict. Left `[ ]` rather
+      than `[x]` on purpose — the gate half of this task is proven, the flip half is not this
+      worker's call to make.
 - [ ] **S2.8 Region darkness batched** (8 draws → 1, same technique). Window-light folding is
       DEFERRED by decision with its numbers recorded (design doc §6) — do not build it.
 - [ ] **S2.9 Bench capture on an idle machine.** **Gate (P-004 resolution): `pass.light.

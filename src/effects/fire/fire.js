@@ -181,7 +181,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: -2,
     max: 3,
     step: 0.02,
-    default: 0,
+    default: 0.5,
     category: 'Flame',
     label: 'Cohesion (pull together)',
     help: 'Pulls every flame toward its fire’s own centre of mass. 0 = spawns spread across the full painted shape, as now. 1 = every flame collapses onto that single point. Negative pushes flames apart instead, beyond their painted region.',

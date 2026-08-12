@@ -43,7 +43,7 @@ export const DOF_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1.0,
+    default: 0.5,
     category: 'Look',
     label: 'Strength',
     help: 'Overall blend intensity of the below-floor blur. 0 = invisible; 1 = the blurred floors fully replace their sharp source.',

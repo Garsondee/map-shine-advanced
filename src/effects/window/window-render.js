@@ -74,7 +74,7 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 
 /** Defaults, mirroring `WINDOW_PARAMS` — the single source of truth for the
  * values; the schema quotes them. A change lands in both or neither. */
-export const WINDOW_DEFAULT_STRENGTH = 1.25;
+export const WINDOW_DEFAULT_STRENGTH = 1;
 export const WINDOW_DEFAULT_CONTRAST = 1;
 /** Hex source for the two daylight keyframes — mirrors `WINDOW_PARAMS.dawnDuskTint`/
  * `.nightTint`'s own `default`. Decoded once here rather than per frame; noon has
@@ -85,7 +85,7 @@ export const WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB = hexToRgb01(WINDOW_DEFAULT_DAWN_
 export const WINDOW_DEFAULT_NIGHT_TINT_RGB = hexToRgb01(WINDOW_DEFAULT_NIGHT_TINT_HEX);
 
 /** The glass defaults, mirroring `WINDOW_PARAMS`'s own `Glass` category. */
-export const WINDOW_DEFAULT_GLASS_WARP_PX = 60;
+export const WINDOW_DEFAULT_GLASS_WARP_PX = 20;
 export const WINDOW_DEFAULT_GLASS_DISPERSION = 1;
 export const WINDOW_DEFAULT_GLASS_SCALE = 400;
 export const WINDOW_DEFAULT_GLASS_DETAIL = 1;

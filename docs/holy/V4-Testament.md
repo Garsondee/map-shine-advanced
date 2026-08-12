@@ -2145,3 +2145,118 @@ on, not a queue entry beside them.
 3. **Two proposed cuts** need your blessing: MovementPreview + SelectionBox (Foundry's job),
    and Prism-as-its-own-effect (returns as specular pattern content). Veto freely.
 4. Where exactly the **vision-leak fix** sits in the queue (it defaults to NEXT, slot 5).
+
+---
+
+**P-009 â€” The perf report now answers its own diagnostic questions, the effect sweep is
+retired from the default run, and one finding it produces contradicts P-008's addendum about
+where residency's cost comes from.** Filed by Claude Sonnet 5, 2026-08-12, acting as a worker
+under the Covenant. Prompted by the author directly: *"if you think the full performance
+recording sweep contains a lot of time wasting efforts then streamline it. We need good data,
+not useless data... make the performance report produce the answers you need automatically
+because then it can monitor this situation and warn us if this sort of thing happens again."*
+Commit `99b46c4`. `npm run verify` green, 8,725 tests (+212).
+
+**FINDING 1 â€” the correction, and it is to this session's own predecessor.** The 2026-08-11
+Residency Streaming Audit (Â§1, Â§6.4) and the P-008 addendum both concluded residency is *"a
+latency/scheduling problem â€” how many sequential round-trips does loading incur, and can they
+overlap"*, and ranked **parallelising the sequential `await` chains as "the larger win"**. That
+conclusion is sound only for a window where the new-item path actually ran.
+`residency.itemLoadDims`/`residency.itemLoadMasks` (`perf-zones.js:922-943`) open ONLY on
+`ensureItemLoaded`'s new-item branch â€” the already-loaded branch returns before either bracket â€”
+and `frame-profiler.js:477` emits **no row at all** for a zone that never fired. In the
+2026-08-12 capture **both are absent while `residency.itemLoad` spent 6,189ms** (9.406ms mean
+over 658 occurrences, peak 25.4ms). Zero new items loaded. Every call took the await-free fast
+path. **Parallelising those awaits would have changed nothing on that window**, and the audit's
+own Â§7 listed the numbers that would have shown this ("`itemLoadDims`/`itemLoadMasks` occurrence
+counts â€” resolves steady-tax vs front-loaded-burst definitively") as still outstanding. They
+were not outstanding; they were absent, and the absence WAS the answer. A new finding
+(`residency-cost-is-not-io`) now says so in words on every future capture. **What this does NOT
+say:** that residency is cheap, or that the concurrency work is wrong in general â€” only that
+whatever those 6.19 seconds are, that window's cost is not the I/O the audit named, and the next
+investigation must find what the pass does unconditionally per occurrence.
+
+**FINDING 2 â€” the effect sweep is structurally incapable of its job and has been retired from
+`perf-run-full`.** 18 configs, ~1.5-3 minutes, over half the action's runtime, and **zero usable
+per-effect numbers across three consecutive real captures** â€” 15 of 15 rejected on 2026-08-12.
+Not a tuning problem: it diffs two whole-frame GPU medians, so its floor is frame-scale variance
+(7.3ms measured, against 12.8ms of its own opening-vs-closing baseline drift) while the effects
+it prices cost ~0.5ms each inside a ~70ms frame. `includeSweep` is now `false` in boot's
+`perf-run-full`; perf-lab remains wired and tested for anyone who wants it. The effects it was
+the only route for (water, vegetation, fluid, grade) are now named by a new `effects-unpriceable`
+finding as a **standing instrument gap needing a zone bracket** â€” their honest status, and more
+useful than a column of rejected noise that made the gap look like bad luck.
+
+**BUILT â€” `diag/perf-structural-ab.js`, and it settles S1.6/P-008's open early-Z question
+without a second manual capture.** P-008 Finding 2 recommended toggling
+`MapShine.setEarlyZComposition(false)` and re-running, explicitly *"for the author, not buildable
+from this chair"*; Stage-1-Shade-Once Â§6.2's bench gate has only ever run on the far lighter
+First-Floor scene (1.55x, under its own 2x bar). This arms the **zone** profiler in each toggle
+state and diffs **per-zone** GPU, so it reports "earlyZPrepass cost X, worldDraw gave back Y"
+rather than "the total moved". Three rules it enforces: **ON, OFF, ON**, so the two ON blocks'
+disagreement IS the run's measured noise floor and a delta inside it earns no verdict; a
+**representativeness check** comparing its parked-view zone numbers against the route window's,
+which declines to generalise when they diverge; and **restore in a `finally`**. It also hides the
+live UI for its duration â€” the perf HUD re-arms the profiler as a different owner ~4x/second and
+`frame-profiler.arm()` throws on an owner mismatch, an exposure the sweep never had because it
+never armed the profiler. `setStructuralToggle`/`readStructuralToggle` are new optional harness
+hooks; the catalog lives in the diag module so it is Node-testable and so each toggle's QUESTION
+travels with it.
+
+**FIXED â€” the `geometry.depthDraw` anomaly P-007 flagged as "an unexplained outlier for three
+rounds" and P-008 Finding 3 diagnosed but deliberately left alone.** GPU timestamps were
+attributed to `profiler.currentSlot()` â€” the innermost open zone. `runSceneDepthPass` opens
+`geometry.depthDraw` (`kind:'gpu'`) and then `geometry.depthRenderCall` (`kind:'cpu'`) around the
+actual `renderer.render()`, so the depth pass's entire ~18ms/frame landed on a zone declared to
+contain no draw calls, while the zone that exists to hold it read `gpuMs: null` â€” which the
+report renders as "measurement failed", the exact opposite of what happened. `gpuTargetSlot()`
+now walks to the nearest GPU-kind ancestor. **The attributed TOTAL is unchanged** (every sample
+still lands in exactly one row, and `computeAttribution` sums every row), so coverage and the
+residual are bit-identical; only the label moves. P-008 declined this as "sensitive, well-tested
+measurement code for a labelling clarity gain" â€” reassessed because three separate investigations
+have now had to re-derive it before they could read their own numbers, and a report-layer guard
+(`zone-kind-contradiction`) stays behind to catch the next zone nested this way.
+
+**FIXED â€” the hitch log was silently truncating, which violates this project's own stated rule
+for every other ring.** `frame.hitchesDropped` has been READ by `perf-report.js` since it was
+written and was produced by NOTHING, so `?? 0` quietly asserted no loss on every capture ever
+made. Live proof in the 2026-08-12 report: `hangs.totalStalls` counted **630** frames over 50ms
+from the profiler's own complete gap series, while `hitches.count` read exactly **200** â€”
+`HITCH_LOG_MAX` to the digit. ~430 hitches discarded, reported as `dropped: 180`, all of it the
+harmless display cap. Now produced, reset with the ring it counts, and split into `droppedByRing`
+(real loss) vs `droppedFromReport` (display cap) so summing can never hide the first behind the
+second again. `null`, not `0`, when a viewer cannot report it.
+
+**BUILT â€” hitch/in-flight-zone correlation, which closes the audit's Â§5 method gap.** The
+residency audit closed with 20 hitches of 250-667ms showing zero decode/cache activity, no
+mechanism found, and the honest note that resolving it *"needs a live Chrome trace correlated
+against `hitchLog` timestamps and residency in-flight windows"*. `frame-profiler.js#beginFrame`
+is the only point where the frame gap and the open-zone stack are both in scope, so the
+correlation now happens there â€” one comparison on the common path, a preallocated `Int32Array`,
+no allocation. **It can only ever see zones that genuinely span frames** (the async residency
+brackets), because every render-loop zone from frame N has closed by the time frame N's gap is
+known at the start of N+1. That narrowness IS the question. **Both answers are findings**: a high
+overlap is the first real evidence pointing at residency (with an explicit "overlap is not cause"
+caveat and the occurrence-rate comparison a reader needs), and a **zero** overlap RULES IT OUT
+and redirects the next investigation â€” which is worth as much, and is what the audit could not
+establish at all.
+
+**Also new, smaller:** `bottleneck` (GPU-bound vs not, at BOTH p50 and p95 because they disagree
+on this capture â€” 94.4% vs 70.4% explained â€” and refusing to call the remainder "CPU time", since
+mipmap generation and presentation are also outside `frame.gpuMs`); `duplicate-geometry`
+(`geometry.earlyZPrepass` and `geometry.depthDraw` at identical 9.1 draws / 73,116.1 triangles,
+~36ms/frame between them, previously unremarked in any report); `uniform-buffers-grew` (P-008's
+own "open lead, not investigated this round" â€” 4.04x then, 3.13x now, still nobody's finding
+until this one, and deliberately NOT called a leak). Plus a real bug: `estimateSweepNoiseFloor`
+was called twice with different arguments (`perf-report.js:479` vs `:1207`), the second omitting
+the measured floor â€” so the threshold the report PRINTED could disagree with the one its
+rejections were actually made with. perf-lab's own header records that exact class of bug as
+found and fixed once; this was it surviving in a second call site.
+
+**NOT DONE, and named rather than left implied:** the epoch/temporal split of zone accumulators
+(front-loaded burst vs steady tax) was designed and costed â€” widen the typed arrays to
+`slots x EPOCHS`, recompute `epochBase` once per frame in `beginFrame`, ~10KB, zero allocation â€”
+and NOT built this session. Finding 1 partly reframes the question it was meant to answer but
+does not remove it. And nothing in this session was verified in live Foundry: it is 8,725 Node
+assertions plus static wiring verification, and the author's next `perf-run-full` is its first
+real execution.

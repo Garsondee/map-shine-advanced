@@ -2566,3 +2566,10 @@ risk-tagged, and untouched; `uniform-buffers-grew` (10-27× across four separate
 mystery from the original audit's §5 has any OTHER cause besides genuine new-item loads is still
 not fully separated out. This petition closes the specific, named mystery the author asked for —
 "already loaded, still costs 10ms" — not every open question about residency.
+
+**Author LIVE verdict, Ingram, 2026-08-12 — "Nothing seems to be broken by it and performance on
+the upper floor is hovering around 30-35 fps. That's a serious improvement."** Promoted from
+`BUILT (unverified)` to `LIVE` by the author's own eyes on the real Mansion, upper floor — the
+harder of the two floors by every measure this Testament has taken (multiFloor comparisons
+throughout Book I). No revert flag exists to record a default flip against; this verdict IS the
+promotion.

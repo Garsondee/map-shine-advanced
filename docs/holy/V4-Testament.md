@@ -2613,3 +2613,61 @@ remaining 7,028.9ms could be that same drift landing on an async boundary rather
 reproducible cost. The CODE MATCH is exact and load-bearing; the MAGNITUDE claim is not yet proven
 to P-011's own standard and needs the same live before/after treatment before anyone spends a fix
 on it. Flagged as the clear next target, not yet chased.
+
+---
+
+**SECOND ADDENDUM to P-011, same day — chased, fixed, and proven live: ~33× on `residency.pass`
+itself.** Filed by Claude Sonnet 5, 2026-08-12, acting as a worker under the Covenant. Prompted by
+the author directly: *"You've made great progress and already you've identified the next
+suspicious culprit. Investigate and fix please."*
+
+**The fix.** `updateResidencyUnguarded` is no longer `async`. It now runs its full synchronous
+prefix (coarse-pin budget, cover-alpha priming, both `depthAuthority.rebuild` calls, vegetation
+ranking, stale-item release) exactly as before, then attempts PHASE 1 as ONE synchronous scan:
+every item resolves through `tryGetLoadedItem` (P-011's own sync fast path) into a `stateById`
+Map; an item that ISN'T loaded yet is collected into `pendingItems` rather than awaited inline, so
+the scan itself never creates a Promise. **If `pendingItems` is empty — the ordinary case — the
+whole pass, including PHASE 2 and the depth-proxy rebuild, finishes right there and the function
+returns `null`.** Only when at least one item is genuinely new does it call the new
+`loadPendingResidencyItems` (async, awaits each SEQUENTIALLY, never parallelised — deliberately
+unchanged from the original loop's behaviour, per this exact suspension point's real history of
+live regressions) and return that Promise. `scheduleResidencyUpdate`'s own `do`/`while` now reads:
+`const pending = updateResidencyUnguarded(); if (pending) await pending;` — the `if` is load-
+bearing, since `await null` still costs the same microtask tick this whole change exists to stop
+paying. PHASE 2's body was extracted, unchanged line-for-line, into `finishResidencyPass`, called
+by both the synchronous-complete path and the async continuation, so there is exactly one copy of
+that logic rather than two that could drift — `states` is rebuilt from `items`' own order via
+`stateById.get`, not from insertion order into the Map, so the final list is byte-identical in
+shape to what the single original loop produced regardless of which path resolved which item.
+
+**Evidence.** `npm run verify` green throughout, 9,116 tests (net +4 over this session's other
+commits, unrelated to this change — no new tests were written for a pure control-flow/scheduling
+change with no new branch a test doesn't already cover for both the sync-complete and async-
+continuation shapes; same reasoning DEFERRED-S1b and P-011's own first fix already used). A live
+`perf-run-full` capture, same bench Mansion, same route: **`residency.pass` — 7,028.9ms → 213.9ms,
+a 32.9× reduction**, and against the session's ORIGINAL baseline (9,742.3ms) a **45.5× reduction**.
+Genuinely new items still load correctly and pay real cost exactly as before — this same capture's
+`residency.itemLoadDims` fired twice, 480ms mean, real network I/O, unaffected by this change. No
+new console errors (the one present, `boot VRAM severance`, is the same pre-existing, unrelated
+failure named in DEFERRED-S1b). **The hitch-correlation picture changed too, not just the number:**
+this capture's `hitches-overlap-zone` finding now names `residency.itemLoadDims` (genuine new-item
+I/O) at only 1.3% overlap with hitches — residency no longer dominates that finding at all, a
+completely different shape from every earlier capture this session where residency's own cost was
+the loudest signal in the report.
+
+**Honest caveat, stated as plainly as the last one:** this capture's WHOLE-FRAME numbers
+(avgFps 29, 93 hitches) look worse than the immediately-prior capture, and should NOT be read as
+this fix regressing anything — two confounds, both checked, not assumed: (1) this specific capture
+reports a DIFFERENT internal render resolution (1920×1080@1×, 2.07 Mpx) than every other capture
+this session (3840×1906@1.5×, 7.32 Mpx) — a cause not chased down, flagged as its own open
+question, not this petition's to solve; (2) even correcting for that, `geometry.worldDraw` — the
+same untouched control zone the first addendum used — costs roughly double per-megapixel here
+versus earlier in this exact session (≈2.82ms/Mpx vs ≈1.51ms/Mpx), consistent with real
+accumulated machine/thermal load after several hours of continuous back-to-back captures in one
+sitting, not with anything this fix changed. The zone-level number (`residency.pass` itself, the
+thing this fix actually touches) is the trustworthy signal, exactly as the first addendum already
+argued; this capture is further confirmation of that reading, not a contradiction of it. **Not yet
+the author's own LIVE verdict** — built, verified by `npm run verify`, and measured live twice by
+this worker; the two-word doctrine still applies. Recommend a fresh machine/browser restart before
+trusting any further WHOLE-FRAME number from this session — the zone-level numbers don't need one,
+the frame-level ones do.

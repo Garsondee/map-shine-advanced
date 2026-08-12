@@ -10886,7 +10886,25 @@ export async function startVtPanViewer({
       sweepWorldSceneDepthWrites();
     }
 
-    async function updateResidencyUnguarded() {
+    /**
+     * NOT `async` — deliberately, since 2026-08-12 (P-011's addendum). See the
+     * "ROOT-CAUSE" comment inside the phase-1 scan below for the mechanism;
+     * this function's own signature is the fix one level up from that one.
+     * `updateResidencyUnguarded` used to be `async function`, which meant
+     * every call unconditionally returned a Promise and every caller's
+     * `await` unconditionally deferred to the microtask queue — paid on
+     * EVERY pass, even the overwhelming majority that need no real async
+     * work at all (confirmed: a fresh capture right after the phase-1 fix
+     * landed showed `residency.pass` still costing 7,028.9ms with only
+     * ~1.6% of that explained by anything this function is known to do).
+     *
+     * Returns `null` when the WHOLE pass finished synchronously (no item
+     * needed real loading) — the caller (`scheduleResidencyUpdate`) then
+     * awaits nothing at all for this pass. Returns a `Promise` only when at
+     * least one item genuinely needs `ensureItemLoaded`'s async path, in
+     * which case `loadPendingResidencyItems` below finishes the pass.
+     */
+    function updateResidencyUnguarded() {
       // Refreshed every pass, not cached — the scene's total pack count
       // changes as documents are created/deleted, and a NEW item created since
       // the last pass must see the CURRENT count when it first requests its
@@ -10935,21 +10953,20 @@ export async function startVtPanViewer({
       // VEGETATION JOINS THE DEPTH AUTHORITY'S PUBLIC RANK TABLE — RIGHT HERE,
       // NOT AT THE END OF THIS FUNCTION (moved 2026-08-05, fixing a live
       // flicker report: "bushes rapidly oscillate between illuminated and
-      // not while panning"). `updateResidencyUnguarded` is `async` and DOES
-      // suspend for real (the `await ensureItemLoaded(item)` calls below, PHASE
-      // 1) — the render loop keeps calling `requestAnimationFrame` and
-      // `pointLights.update()` DURING that suspension, on whatever
-      // `depthAuthority` state happens to exist AT THAT INSTANT. The ORIGINAL
-      // placement of this exact block — after PHASE 1/2's loading loops —
-      // left `depthAuthority` holding the REAL-ITEMS-ONLY table (from the
-      // rebuild just above) for the ENTIRE async loading window, EVERY
-      // residency pass — which panning triggers constantly, each one real
-      // async work (new tiles loading), each one several rendered frames
-      // long. A light's occlusion query during that window found no
-      // vegetation rank at all and passed straight through; once the pass
-      // finally finished (this block, run too late), vegetation reappeared in
-      // the table and correctly occluded again — repeating every pass, which
-      // is "rapidly oscillate" during continuous panning.
+      // not while panning"). PHASE 1 below CAN still suspend for real (a
+      // genuinely new item's `await ensureItemLoaded(item)`) — the render loop
+      // keeps calling `requestAnimationFrame` and `pointLights.update()`
+      // DURING that suspension, on whatever `depthAuthority` state happens to
+      // exist AT THAT INSTANT. The ORIGINAL placement of this exact block —
+      // after PHASE 1/2's loading loops — left `depthAuthority` holding the
+      // REAL-ITEMS-ONLY table (from the rebuild just above) for the ENTIRE
+      // async loading window, EVERY residency pass — which panning triggers
+      // constantly, each one real async work (new tiles loading), each one
+      // several rendered frames long. A light's occlusion query during that
+      // window found no vegetation rank at all and passed straight through;
+      // once the pass finally finished (this block, run too late), vegetation
+      // reappeared in the table and correctly occluded again — repeating
+      // every pass, which is "rapidly oscillate" during continuous panning.
       //
       // The actual FIX is simply WHERE this runs, not what it computes:
       // `buildVegetationDepthItems` never touched `state.vegetationOverlays`
@@ -11056,10 +11073,104 @@ export async function startVtPanViewer({
       // whose entire job is to GUARANTEE something is always resident. Front-
       // loading every coarse pin makes that structurally impossible.
       //
-      // WALL time, not pure CPU-busy time, same as residency.pass itself
-      // (this loop's own `await ensureItemLoaded(item)` can genuinely suspend
-      // for real decode work) — see scheduleResidencyUpdate's own comment.
-      //
+      // ONE SYNCHRONOUS SCAN, not a loop that may-or-may-not await per item:
+      // every item resolves through `tryGetLoadedItem` first (a plain Map.get,
+      // never a Promise); an item that is NOT yet loaded is collected into
+      // `pendingItems` rather than awaited right here, so this scan itself
+      // NEVER suspends — see the ROOT-CAUSE comment below for why that
+      // matters. `stateById`, not a positional array, so the true async path
+      // (`loadPendingResidencyItems`) and this synchronous scan can both
+      // write results without racing on array order — PHASE 2 rebuilds the
+      // final ordered list from `items` once every state is known.
+      profiler?.begin(Z.residencyItemLoad);
+      const stateById = new Map();
+      const pendingItems = [];
+      for (const item of items) {
+        // A PERMANENTLY-BROKEN ITEM IS NOT RETRIED (item 1d, 2026-07-17). Found
+        // in the author's own thrash report: ten identical `HTTP 404` entries
+        // for one token image, and `mainThreadFallbackSourceDecodes: 12`.
+        // `ensureItemLoaded` throws for a broken source, so `itemStates` never
+        // gets an entry, so it was re-attempted on EVERY residency pass —
+        // seventy-seven of them in that session — each paying a ranged fetch, a
+        // worker dimensions round-trip, AND a main-thread fallback decode
+        // attempt (the last of which is the operation this file elsewhere calls
+        // "a giant-image decode the render loop could feel"). `itemLoadErrors`
+        // deduped the REPORT; nothing deduped the WORK, so the report looked
+        // tidy while the cost repeated forever.
+        //
+        // The trade, stated because it IS a real one: a source that starts
+        // working later (a server hiccup, an asset uploaded mid-session) now
+        // needs a reload rather than fixing itself on the next pass. That is
+        // the right way round — an asset that 404s is overwhelmingly gone, not
+        // late, and paying an unbounded per-frame cost forever on the chance it
+        // returns is exactly the "reactive mechanism" shape Keyhole exists to
+        // delete. The failure stays LOUD either way: it is in `layerLoadErrors`
+        // in every report, permanently, not silently skipped.
+        if (failedItemIds.has(item.id)) continue;
+        // ROOT-CAUSE, 2026-08-12 — the mystery three prior rounds (2026-08-09
+        // x2, 2026-08-11's full audit, 2026-08-12's own report) all chased
+        // and none closed: `residency.itemLoad` cost ~6-10ms/pass on a
+        // cache-warm scene where `residency.itemLoadDims`/`itemLoadMasks`
+        // (the only REAL I/O in this loop) never fired at all. A fresh zone
+        // (`residency.itemLoadExisting`, wrapping ONLY the already-loaded
+        // branch's own body) proved that branch itself costs ~0.002ms —
+        // genuinely trivial, exactly as every static reading always said.
+        // 99.8% of the zone's cost was unaccounted for by ANY code inside
+        // `ensureItemLoaded`, on either branch. It was never in the branch
+        // bodies — it was the `await` boundary itself: `ensureItemLoaded`
+        // is `async`, so calling it ALWAYS returns a Promise, and `await`
+        // on a Promise ALWAYS defers its continuation to the microtask
+        // queue — real, spec'd behaviour, paid on EVERY already-loaded item
+        // (~5/pass here) even though nothing async is happening. On a busy
+        // frame, that deferred continuation shares the microtask queue with
+        // whatever ELSE has pending promise work at that instant, and the
+        // WALL-CLOCK bracket (genuine elapsed time, not a measurement bug —
+        // see this function's own draw-call-sampling note elsewhere) counts
+        // however long that takes to drain, not just this item's own turn.
+        // `tryGetLoadedItem` answers "already loaded?" synchronously, with no
+        // Promise and no yield at all — collecting the few genuinely-new
+        // items into `pendingItems` INSTEAD OF awaiting inline means a pass
+        // where every item is already loaded, the common case, never creates
+        // a Promise anywhere in this function, which is what lets THIS
+        // function's own caller skip its `await` too (see this file's other
+        // 2026-08-12 comment, on `scheduleResidencyUpdate`).
+        const loaded = tryGetLoadedItem(item);
+        if (loaded !== undefined) {
+          stateById.set(item.id, loaded);
+        } else {
+          pendingItems.push(item);
+        }
+      }
+
+      if (pendingItems.length === 0) {
+        // The common case: nothing needs to await, so nothing does. Finish
+        // the WHOLE pass synchronously, right here, and return `null` — the
+        // caller never creates or awaits a Promise for this pass at all.
+        profiler?.end(Z.residencyItemLoad);
+        finishResidencyPass(items, stateById, thisPass, worldRect, itemsWithVegetation);
+        return null;
+      }
+
+      // At least one genuinely new item exists. `loadPendingResidencyItems`
+      // awaits each SEQUENTIALLY — never `Promise.all` — matching this
+      // loop's original behaviour exactly; deliberately unchanged, since this
+      // exact suspension point has a real history of live regressions when
+      // touched carelessly (a vegetation-rank flicker, a whole-screen
+      // MAGENTA from two passes racing on shared pin state — see
+      // Residency-Streaming-Audit-2026-08-11.md §6 item 4). This function
+      // now returns a Promise ONLY on the path that genuinely needs one.
+      return loadPendingResidencyItems(items, stateById, pendingItems, thisPass, worldRect, itemsWithVegetation);
+    }
+
+    /**
+     * The genuinely-async remainder of a residency pass — only ever called
+     * when `updateResidencyUnguarded`'s synchronous scan found at least one
+     * item that isn't loaded yet. Awaits each SEQUENTIALLY (never
+     * concurrently — see that function's own comment on why), same
+     * try/catch per item as before, then hands off to the same
+     * `finishResidencyPass` the synchronous path uses.
+     */
+    async function loadPendingResidencyItems(items, stateById, pendingItems, thisPass, worldRect, itemsWithVegetation) {
       // try/finally around the WHOLE loop (BUG FOUND LIVE, 2026-08-09 —
       // ensureItemLoaded's own dims/masks brackets got this same fix one
       // level down first): a live report showed this zone AND residency.pass
@@ -11071,63 +11182,10 @@ export async function startVtPanViewer({
       // it does not protect this bracket's own `profiler.end()` from
       // anything else that might one day throw between iterations. Same
       // fix, same reasoning, one level up.
-      profiler?.begin(Z.residencyItemLoad);
-      const states = [];
       try {
-        for (const item of items) {
-          // A PERMANENTLY-BROKEN ITEM IS NOT RETRIED (item 1d, 2026-07-17). Found
-          // in the author's own thrash report: ten identical `HTTP 404` entries
-          // for one token image, and `mainThreadFallbackSourceDecodes: 12`.
-          // `ensureItemLoaded` throws for a broken source, so `itemStates` never
-          // gets an entry, so it was re-attempted on EVERY residency pass —
-          // seventy-seven of them in that session — each paying a ranged fetch, a
-          // worker dimensions round-trip, AND a main-thread fallback decode
-          // attempt (the last of which is the operation this file elsewhere calls
-          // "a giant-image decode the render loop could feel"). `itemLoadErrors`
-          // deduped the REPORT; nothing deduped the WORK, so the report looked
-          // tidy while the cost repeated forever.
-          //
-          // The trade, stated because it IS a real one: a source that starts
-          // working later (a server hiccup, an asset uploaded mid-session) now
-          // needs a reload rather than fixing itself on the next pass. That is
-          // the right way round — an asset that 404s is overwhelmingly gone, not
-          // late, and paying an unbounded per-frame cost forever on the chance it
-          // returns is exactly the "reactive mechanism" shape Keyhole exists to
-          // delete. The failure stays LOUD either way: it is in `layerLoadErrors`
-          // in every report, permanently, not silently skipped.
-          if (failedItemIds.has(item.id)) continue;
-          // ROOT-CAUSE, 2026-08-12 — the mystery three prior rounds (2026-08-09
-          // x2, 2026-08-11's full audit, 2026-08-12's own report) all chased
-          // and none closed: `residency.itemLoad` cost ~6-10ms/pass on a
-          // cache-warm scene where `residency.itemLoadDims`/`itemLoadMasks`
-          // (the only REAL I/O in this loop) never fired at all. A fresh zone
-          // (`residency.itemLoadExisting`, wrapping ONLY the already-loaded
-          // branch's own body) proved that branch itself costs ~0.002ms —
-          // genuinely trivial, exactly as every static reading always said.
-          // 99.8% of the zone's cost was unaccounted for by ANY code inside
-          // `ensureItemLoaded`, on either branch. It was never in the branch
-          // bodies — it was the `await` boundary itself: `ensureItemLoaded`
-          // is `async`, so calling it ALWAYS returns a Promise, and `await`
-          // on a Promise ALWAYS defers its continuation to the microtask
-          // queue — real, spec'd behaviour, paid on EVERY already-loaded item
-          // (~5/pass here) even though nothing async is happening. On a busy
-          // frame, that deferred continuation shares the microtask queue with
-          // whatever ELSE has pending promise work at that instant, and the
-          // WALL-CLOCK bracket (genuine elapsed time, not a measurement bug —
-          // see this loop's own note above on why draw-call SAMPLING across
-          // this same boundary was contaminated the same way) counts however
-          // long that takes to drain, not just this item's own turn. `tryGet
-          // LoadedItem` (`ensureItemLoaded`'s own doc) answers "already
-          // loaded?" synchronously, with no Promise and no yield at all, so a
-          // pass where every item is already loaded — the common case, this
-          // whole loop long — now never awaits once.
-          const alreadyLoaded = tryGetLoadedItem(item);
-          if (alreadyLoaded !== undefined) {
-            states.push([item, alreadyLoaded]);
-            continue;
-          }
+        for (const item of pendingItems) {
           try {
-            states.push([item, await ensureItemLoaded(item)]);
+            stateById.set(item.id, await ensureItemLoaded(item));
           } catch (err) {
             // One broken item (404 art, undecodable file) must not take the scene
             // down. Recorded rather than thrown — the debug panel surfaces this,
@@ -11142,6 +11200,23 @@ export async function startVtPanViewer({
         }
       } finally {
         profiler?.end(Z.residencyItemLoad);
+      }
+      finishResidencyPass(items, stateById, thisPass, worldRect, itemsWithVegetation);
+    }
+
+    /**
+     * PHASE 2 onward — always synchronous, run by EITHER the fully-sync path
+     * or the async continuation above, once every item's state is known.
+     * Rebuilds the final ordered `states` list from `items` (not from
+     * insertion order into `stateById`, which can differ between the two
+     * callers) so this behaves identically to the single loop it replaced,
+     * regardless of which path resolved which item.
+     */
+    function finishResidencyPass(items, stateById, thisPass, worldRect, itemsWithVegetation) {
+      const states = [];
+      for (const item of items) {
+        const state = stateById.get(item.id);
+        if (state !== undefined) states.push([item, state]);
       }
 
       // PHASE 2 — view-tier streaming + mesh update, now that every coarse pin
@@ -11188,11 +11263,11 @@ export async function startVtPanViewer({
       // exactly the moment buf:scene.depth's own draw list must be re-derived
       // from (see rebuildSceneDepthProxies's own header for why wholesale,
       // not incremental). `itemsWithVegetation`'s own RANKS were already
-      // published (right after the rebuild near the top of this function —
-      // see that block's own "2026-08-05" header for why timing, not the
-      // computation itself, was the actual bug); this call only needs to wait
-      // for THIS pass's real loading/placement to finish, since it draws the
-      // GPU proxy from the now-current mesh/texture state.
+      // published (right after the rebuild near the top of updateResidency
+      // Unguarded — see that block's own "2026-08-05" header for why timing,
+      // not the computation itself, was the actual bug); this call only needs
+      // to wait for THIS pass's real loading/placement to finish, since it
+      // draws the GPU proxy from the now-current mesh/texture state.
       profiler?.begin(Z.depthProxyRebuild);
       rebuildSceneDepthProxies(itemsWithVegetation);
       profiler?.end(Z.depthProxyRebuild);
@@ -11355,10 +11430,10 @@ export async function startVtPanViewer({
       try {
         do {
           residencyDirty = false;
-          // WALL time, not pure CPU-busy time — this genuinely awaits real
-          // async work (PHASE 1/2 loading below). That is the correct
-          // measurement for an 'event'-cadence zone (perf-zones.js's own
-          // doc: never summed into a frame total), and matches what a live
+          // WALL time, not pure CPU-busy time when this pass genuinely awaits
+          // real async work (PHASE 1's `loadPendingResidencyItems`) — the
+          // correct measurement for an 'event'-cadence zone (perf-zones.js's
+          // own doc: never summed into a frame total), matching what a live
           // residency pass actually costs from the caller's point of view.
           //
           // try/finally (BUG FOUND LIVE, 2026-08-09, same report as
@@ -11368,9 +11443,18 @@ export async function startVtPanViewer({
           // whichever inner one already leaked — this function's own
           // `residencyInFlight` reset in its own finally already survives
           // that throw structurally; the profiler bracket did not.
+          //
+          // ONLY `await` WHEN THERE IS SOMETHING TO AWAIT (2026-08-12, P-011's
+          // addendum) — `updateResidencyUnguarded` is no longer `async`; it
+          // returns `null` when the whole pass finished synchronously (no
+          // item needed real loading, the common case) or a real Promise when
+          // at least one did. `await null` would still cost a microtask tick
+          // — the exact tax this whole change exists to stop paying — so the
+          // `if` below is load-bearing, not a style choice.
           profiler?.begin(Z.residencyPass);
           try {
-            await updateResidencyUnguarded();
+            const pending = updateResidencyUnguarded();
+            if (pending) await pending;
           } finally {
             profiler?.end(Z.residencyPass);
           }

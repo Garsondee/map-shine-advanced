@@ -1753,6 +1753,93 @@ export function run(t) {
     ok('...and it names the experiment that would settle it', ub.text.includes('camera parked'));
 
     // ====================================================================
+    // A STEADY ZONE WITH A CATASTROPHIC OUTLIER (2026-08-12) — steady-spike
+    // ====================================================================
+    // Real numbers from the 2026-08-12 08:22 capture: pass.light.accumulate
+    // and light.pointLightUpdate BOTH looked perfectly healthy on their mean
+    // alone (4.8ms, 0.76ms) while spiking 6.8x/30x — and no existing finding
+    // (dominant-zone, bottleneck, sparse-spike) could see either, because the
+    // first two only read means and the third only ever looks at sparse
+    // (bake/event) zones.
+    {
+      const spikeRow = (id, over) => ({ id, isPass: false, sparse: false, gpuMs: null, cpuMs: null, ...over });
+      const steadyRows = [
+        // The pass ITSELF — a pass row's cpuMs is an ordinary inclusive
+        // measurement (unlike its gpuMs, which is a residual — see the
+        // finding's own header) and must NOT be skipped just for being a pass.
+        {
+          id: 'pass.light.accumulate',
+          isPass: true,
+          sparse: false,
+          gpuMs: null,
+          cpuMs: { meanMs: 4.802, maxMs: 32.7 },
+        },
+        spikeRow('light.pointLightUpdate', { cpuMs: { meanMs: 0.755, maxMs: 22.7 } }),
+        spikeRow('light.drawPointLights', { cpuMs: { meanMs: 1.728, maxMs: 9.1 } }),
+        // Just under the 5x ratio floor (4.81x) — must NOT fire. This is the
+        // real fourth point-light zone from the same capture, deliberately
+        // left just outside the threshold rather than invented round numbers,
+        // so the boundary is pinned against a real reading, not a convenient one.
+        spikeRow('light.drawColoration', { cpuMs: { meanMs: 1.207, maxMs: 5.8 } }),
+        // A GPU-side spike, to prove the GPU column is checked independently
+        // of CPU, not just carried along for zones that already spiked on CPU.
+        spikeRow('geometry.worldDraw', { gpuMs: { meanMs: 2, maxMs: 20 }, cpuMs: { meanMs: 0.455, maxMs: 1.1 } }),
+        // Healthy zone: real cost, real max, but nowhere near 5x — must NOT fire.
+        spikeRow('bloom.composite', { gpuMs: { meanMs: 0.272, maxMs: 1.18 } }),
+        // Below the absolute floor even though the RATIO is enormous (100x) —
+        // a ratio alone must never be enough; the spike has to matter in ms too.
+        spikeRow('tick.tokenSync', { cpuMs: { meanMs: 0.001, maxMs: 0.1 } }),
+      ];
+      const sf = deriveFindings({
+        attribution: { frameGpuMs: 24.9 },
+        rows: steadyRows,
+        effects: [],
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        profilerAnomalies: {},
+        gpuTimer: {},
+      });
+      const sfIds = sf.map((x) => x.id);
+
+      ok(
+        'the pass row itself fires — it is NOT skipped for being a pass',
+        sfIds.includes('steady-spike:pass.light.accumulate')
+      );
+      ok('the 30x CPU spike fires', sfIds.includes('steady-spike:light.pointLightUpdate'));
+      ok('the 5.3x CPU spike (just over the floor) fires', sfIds.includes('steady-spike:light.drawPointLights'));
+      ok(
+        'the 4.81x CPU spike (just under the floor) does NOT fire',
+        !sfIds.includes('steady-spike:light.drawColoration')
+      );
+      ok('a GPU-column spike fires independently of CPU', sfIds.includes('steady-spike:geometry.worldDraw'));
+      ok(
+        'a healthy zone with real but unremarkable variance does not fire',
+        !sfIds.includes('steady-spike:bloom.composite')
+      );
+      ok('a huge RATIO under the absolute ms floor does not fire', !sfIds.includes('steady-spike:tick.tokenSync'));
+
+      const pu = sf.find((x) => x.id === 'steady-spike:light.pointLightUpdate');
+      ok('30x ratio escalates to high severity', pu.severity === 'high');
+      ok(
+        '...the text states both the mean and the peak plainly',
+        pu.text.includes('0.755ms') && pu.text.includes('22.7ms')
+      );
+      ok('...and names the ratio', pu.text.includes('30.1x'));
+      ok('...evidence carries the raw spike data for further digging', pu.evidence.spikes[0].ratio === 30.1);
+
+      const worldDraw = sf.find((x) => x.id === 'steady-spike:geometry.worldDraw');
+      ok('the GPU spike is escalated to high (10x ratio ≥ 15 is false, so medium)', worldDraw.severity === 'medium');
+      ok('...and labelled GPU, not CPU', worldDraw.text.includes('GPU'));
+
+      const plu = sf.find((x) => x.id === 'steady-spike:light.pointLightUpdate');
+      ok(
+        '...cross-references the shader-rebuild finding rather than claiming a cause',
+        plu.text.includes('hides a spike this size completely') && !plu.text.toLowerCase().includes('caused by')
+      );
+    }
+
+    // ====================================================================
     // FRONT-LOADED BURST vs STEADY TAX (2026-08-12) — classifyTemporalShape
     // ====================================================================
     // Real numbers: a 53,584ms window, a 10,000ms early bucket (~18.7%
@@ -1891,5 +1978,93 @@ export function run(t) {
     ok('...a fully-zoned effect is not among them', !unpriceable.text.includes('bloom'));
     ok('...nor is a DISABLED one — it has no cost to miss', !unpriceable.text.includes('apertureGobo'));
     ok('...and it says re-running will not help', unpriceable.text.includes('re-running will not fix it'));
+  }
+
+  // ======================================================================
+  // WINDOW-SURFACE SCENE COMPOSITION (2026-08-12) — window-surface-composition
+  // ======================================================================
+  // Chases the live, still-open finding: light.drawWindowLight reports ~4 GPU
+  // draw calls per render() call where "one mesh, one quad" predicts 1.
+  {
+    const base = {
+      attribution: { frameGpuMs: 24.9 },
+      rows: [],
+      effects: [],
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      profilerAnomalies: {},
+      gpuTimer: {},
+    };
+
+    // The real anomaly shape: a VISIBLE floor with more than one scene child.
+    const anomalyFindings = deriveFindings({
+      ...base,
+      windowDiagnostics: [
+        { floorIndex: 0, visible: true, sceneChildCount: 2, sceneChildren: [{ type: 'Mesh' }, { type: 'Mesh' }] },
+        { floorIndex: 1, visible: true, sceneChildCount: 1, sceneChildren: [{ type: 'Mesh' }] },
+      ],
+    });
+    const anomaly = anomalyFindings.find((f) => f.id === 'window-surface-composition:0');
+    ok('a visible floor with 2 scene children is flagged', anomaly !== undefined);
+    ok('...names the exact count', anomaly.text.includes('contains 2 children'));
+    ok('...names WHAT the extra members are', anomaly.text.includes('["Mesh","Mesh"]'));
+    ok('...evidence carries the raw children for further digging', anomaly.evidence.sceneChildCount === 2);
+    ok(
+      'the healthy floor in the SAME window does not also fire',
+      !anomalyFindings.some((f) => f.id === 'window-surface-composition:1')
+    );
+
+    // Zero children on a visible floor is a DIFFERENT, sharper contradiction
+    // (hasContent()/visible say there is something to draw; the scene
+    // disagrees) and gets its own sentence, not the generic "extra members" one.
+    const zeroFindings = deriveFindings({
+      ...base,
+      windowDiagnostics: [{ floorIndex: 3, visible: true, sceneChildCount: 0, sceneChildren: [] }],
+    });
+    const zero = zeroFindings.find((f) => f.id === 'window-surface-composition:3');
+    ok('zero children on a visible floor is its own, sharper finding', zero !== undefined);
+    ok('...calling it a contradiction, not just "extra members"', zero.text.includes('contradiction'));
+
+    // Healthy: every floor at exactly 1 child — no finding at all.
+    const healthy = deriveFindings({
+      ...base,
+      windowDiagnostics: [
+        { floorIndex: 0, visible: true, sceneChildCount: 1, sceneChildren: [{ type: 'Mesh' }] },
+        { floorIndex: 1, visible: true, sceneChildCount: 1, sceneChildren: [{ type: 'Mesh' }] },
+      ],
+    });
+    ok(
+      'every floor at the expected count produces no findings at all',
+      !healthy.some((f) => f.id.startsWith('window-surface-composition'))
+    );
+
+    // An INVISIBLE floor's composition is moot — must not fire even with a
+    // wild count, since its draw cost is not part of this session's numbers.
+    const invisible = deriveFindings({
+      ...base,
+      windowDiagnostics: [{ floorIndex: 2, visible: false, sceneChildCount: 5, sceneChildren: [] }],
+    });
+    ok(
+      'an invisible floor is never flagged, regardless of its composition',
+      !invisible.some((f) => f.id.startsWith('window-surface-composition'))
+    );
+
+    // Absence handling: null (no harness support) and [] (harness supports it,
+    // nothing has synced yet) must both be safe no-ops, never a throw.
+    const nullResult = deriveFindings({ ...base, windowDiagnostics: null });
+    ok(
+      'windowDiagnostics: null (no harness support) produces no findings, not a crash',
+      !nullResult.some((f) => f.id.startsWith('window-surface-composition'))
+    );
+    const emptyResult = deriveFindings({ ...base, windowDiagnostics: [] });
+    ok(
+      'windowDiagnostics: [] (nothing synced yet) also produces no findings',
+      !emptyResult.some((f) => f.id.startsWith('window-surface-composition'))
+    );
+    ok(
+      'omitting windowDiagnostics entirely defaults safely',
+      !deriveFindings(base).some((f) => f.id.startsWith('window-surface-composition'))
+    );
   }
 }

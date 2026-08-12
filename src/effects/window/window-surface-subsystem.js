@@ -72,6 +72,17 @@ function lerpRgb(a, b, t) {
 }
 
 /**
+ * THREE's `Material.side` numeric constants, decoded for `getStatus()`'s own
+ * diagnostic report. Hardcoded rather than read off an injected `THREE`
+ * (this file's own header: "injected, never imported") — these three values
+ * (FrontSide/BackSide/DoubleSide = 0/1/2) have been stable across every
+ * three.js release this project has ever vendored, and a status accessor
+ * has no THREE reference in scope outside the factory closure to read them
+ * from symbolically.
+ */
+const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'double' });
+
+/**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
  * @param {(floorIndex: number) => string|null} args.getWindowMaskUrl
@@ -447,6 +458,41 @@ export function createWindowSurfaceSubsystem({
         maskUvBounds: paddedBoundsUv,
         maskRect: loadedMaskRect,
         ambientCeiling,
+        // SCENE COMPOSITION (2026-08-12) — added to chase a real, still-open
+        // finding: the perf report's own `light.drawWindowLight` zone reads
+        // ~4 GPU draw calls per `renderer.render(windowSurface.scene, ...)`
+        // call, where "ONE MESH, ADDITIVE" (this file's own header, above)
+        // predicts 1. Static reading already ruled out `DoubleSide` causing a
+        // second internal pass and the profiler's draw-counter itself
+        // double-counting (both checked directly against three's vendored
+        // source). Reported here, every time, rather than gated behind a
+        // console call, so the NEXT `perf-run-full` answers the question from
+        // data instead of needing a live session — see
+        // `perf-report.js`'s `window-surface-composition` finding, which
+        // reads exactly this field and flags it when `sceneChildCount` is
+        // not exactly 1 for a visible floor.
+        sceneChildCount: scene.children.length,
+        sceneChildren: scene.children.map((child) => ({
+          type: child.type,
+          visible: child.visible,
+          // Indexed triangle count (QUAD_INDICES: 6 indices = 2 triangles),
+          // not vertex count — a shared/indexed mesh's vertex count does not
+          // equal its real triangle count, and this quad is indexed.
+          triangles: child.geometry?.index
+            ? child.geometry.index.count / 3
+            : (child.geometry?.attributes?.position?.count ?? null),
+          material: child.material
+            ? {
+                type: child.material.type,
+                // THREE's numeric side constants (FrontSide:0, BackSide:1,
+                // DoubleSide:2) decoded here so a reader of the JSON report
+                // does not have to hold three's own enum in their head.
+                side: WINDOW_MATERIAL_SIDE_NAMES[child.material.side] ?? child.material.side,
+                transparent: child.material.transparent,
+                visible: child.material.visible,
+              }
+            : null,
+        })),
       };
     },
     dispose() {

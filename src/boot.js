@@ -2825,6 +2825,16 @@ function install() {
     // without this instrument, same as every other optional hook here.
     setShaderRebuildProbe: (on) => setVtPanViewerShaderRebuildProbe(on),
     readShaderRebuildStats: () => getVtPanViewerShaderRebuilds(),
+    // WINDOW-SURFACE COMPOSITION (2026-08-12) — chasing a real, still-open
+    // finding: `light.drawWindowLight` reports ~4 GPU draw calls per
+    // renderer.render() call where "one mesh, one quad" (window-surface-
+    // subsystem.js's own header) predicts 1. `getVtPanViewerDiagnostics().
+    // windowLight` already exists (fed from `getWindowLightInfo()`, one
+    // entry per floor that has ever synced) — this just gives perf-session.js
+    // its own named seam to read it through, matching every other optional
+    // read-once hook here, rather than reaching into the general diagnostics
+    // blob by hand.
+    readWindowDiagnostics: () => getVtPanViewerDiagnostics()?.windowLight ?? null,
     // HIDE-WHILE-MEASURING, the pair — see debugPanelVisibleBeforeHide's own
     // declaration a few lines up for the full rationale. Both optional on the
     // ProfileHarness typedef, matching every other harness hook here

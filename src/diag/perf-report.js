@@ -68,6 +68,17 @@ export const DECLARED_OVER_FACTOR = 1.25;
 export const AGREEMENT_TOLERANCE = 0.25;
 /** Hitches kept in the default report; the rest are counted, never silently lost. */
 export const HITCHES_KEPT = 20;
+/**
+ * A steady/conditional zone's max must be at least this many times its own
+ * mean before `steady-spike` fires — see that finding's own header for the
+ * two live examples (6.8x, 30x) that motivated it. Picked, not derived: the
+ * zero-allocation profiler tracks no variance/stddev to derive a real
+ * statistical threshold from, so this is a hand-picked, documented multiple
+ * in the same style as `DECLARED_OVER_FACTOR`/`AGREEMENT_TOLERANCE` above.
+ */
+export const STEADY_SPIKE_RATIO_FACTOR = 5;
+/** Below this the spike itself is too small in absolute terms to matter, even at a wild ratio. */
+export const STEADY_SPIKE_MIN_PEAK_MS = 5;
 
 const round = (v, dp) => (v === null || !Number.isFinite(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp);
 const ms = (v) => round(v, 3);
@@ -923,6 +934,7 @@ export function deriveFindings({
   pipelineStats = null,
   depthProxyPoolStats = null,
   shaderRebuildStats = null,
+  windowDiagnostics = null,
   sweepRequested = false,
   sweepMeasuredCount = 0,
   sweepNoiseFloorMs = null,
@@ -1106,6 +1118,34 @@ export function deriveFindings({
       });
     }
   }
+
+  // WINDOW-SURFACE SCENE COMPOSITION (2026-08-12) — chasing a real,
+  // still-open finding: `light.drawWindowLight` reports ~4 GPU draw calls
+  // per `renderer.render()` call where the code — "ONE MESH, ADDITIVE",
+  // `window-surface-subsystem.js`'s own header — predicts 1. Node-level
+  // testing against the REAL vendored three.js already confirms the
+  // subsystem's OWN construction is correct (exactly one mesh, two
+  // triangles) — so if this ever fires, the anomaly is not in how the mesh
+  // is built, and is worth chasing at the live-scene level instead.
+  //
+  // `windowDiagnostics` is one entry per floor that has ever synced
+  // (`getWindowLightInfo()`'s own doc), each carrying `sceneChildCount` from
+  // `getStatus()` — see that function's own header for exactly why this
+  // exists. A floor that is currently VISIBLE (the only state whose draw
+  // cost this session's zone numbers actually reflect) with anything other
+  // than exactly one scene child is the anomaly worth naming.
+  for (const floor of windowDiagnostics ?? []) {
+    if (!floor?.visible) continue; // an invisible floor draws nothing — its composition is moot
+    const count = floor.sceneChildCount;
+    if (!Number.isFinite(count) || count === 1) continue;
+    out.push({
+      severity: 'medium',
+      id: `window-surface-composition:${floor.floorIndex}`,
+      text: `Window light's floor ${floor.floorIndex} is visible and drawing, but its own scene contains ${count} children, not the 1 (one mesh, one quad) the subsystem's own construction guarantees when tested directly. ${count === 0 ? 'Zero children on a VISIBLE floor is a contradiction — hasContent()/mesh.visible say there is something to draw, but nothing is actually in the scene to draw it. Check whether disposal ran without also hiding the mesh.' : `Extra scene member(s) present: ${JSON.stringify((floor.sceneChildren ?? []).map((c) => c.type))}.`} This is the live data point the drawCalls:4-per-occurrence question needed — read it against light.drawWindowLight's own drawCalls/triangles for this window.`,
+      evidence: { floorIndex: floor.floorIndex, sceneChildCount: count, sceneChildren: floor.sceneChildren ?? null },
+    });
+  }
+
   // A SWEEP THAT RAN AND PRODUCED NOTHING. The sweep is slow and visibly
   // flickers the scene, so it is never run by accident — if it yielded no
   // per-effect numbers, the run was wasted and the reader must be told rather
@@ -1316,6 +1356,68 @@ export function deriveFindings({
         evidence: { zone: r.id, peakMs: peak, occurrences: r.gpuMs?.occurrences ?? r.cpuMs?.occurrences ?? 0 },
       });
     }
+  }
+
+  // ==========================================================================
+  // A STEADY ZONE WITH A CATASTROPHIC OUTLIER — the mean hides it completely
+  // ==========================================================================
+  // `sparse-spike` above already catches "cheap on average, brutal on the one
+  // frame it lands" for bake/event zones — but `isSparseCadence` deliberately
+  // EXCLUDES steady/conditional zones from that check, because their mean
+  // already belongs in the per-frame budget by design (that's what makes them
+  // steady). Nothing was watching whether a zone that runs every single frame
+  // could ALSO have a wild outlier hiding behind a perfectly healthy-looking
+  // mean — until this was found live, 2026-08-12: `pass.light.accumulate`
+  // read 4.8ms mean / 32.7ms max (6.8x) and `light.pointLightUpdate` read
+  // 0.76ms mean / 22.7ms max (30x) in the SAME capture, and neither crossed
+  // any existing finding's threshold, because `dominant-zone`/`bottleneck`
+  // only ever look at the mean and `sparse-spike` only ever looks at sparse
+  // zones.
+  //
+  // ⚠️ THIS FINDING NAMES A SHAPE, NOT A CAUSE. A wide mean/max spread on a
+  // steady zone is consistent with several real mechanisms — a shader or GPU
+  // pipeline rebuild (check `shaderRebuildStats`/any `shader-rebuild-churn` or
+  // `pipeline-rebuild-churn` finding FIRST if either fired this window — that
+  // is a much more specific answer than this one), a one-time cache-warm cost
+  // that happened to land inside the measured window, OS scheduling jitter,
+  // or a genuine per-occurrence workload difference (more visible lights this
+  // particular frame, more draw calls). What this finding hands you is WHICH
+  // zone and HOW BIG the gap is — it cannot, from mean/max alone, say which
+  // of those explains it.
+  for (const r of (rows ?? []).filter((x) => !x.sparse)) {
+    const spikes = [];
+    // A PASS ROW'S gpuMs IS A DIFFERENT QUANTITY, NOT EXCLUDED ENTIRELY. Its
+    // own header (annotatePassResiduals) is explicit: under exclusive GPU
+    // attribution, a pass row's plain `gpuMs` is its UN-BRACKETED RESIDUAL —
+    // whatever no sub-zone claimed — not the pass's total cost (that is
+    // `totalGpuMs`). Checking the residual for a "spike" would answer a
+    // different, mostly uninteresting question. Its `cpuMs`, though, is a
+    // perfectly ordinary inclusive wall-time measurement with no such
+    // caveat — and skipping the WHOLE row (the first cut of this finding
+    // did exactly that) would have missed `pass.light.accumulate` itself,
+    // the zone that motivated this finding in the first place.
+    const columns = r.isPass
+      ? [['cpuMs', 'CPU']]
+      : [
+          ['cpuMs', 'CPU'],
+          ['gpuMs', 'GPU'],
+        ];
+    for (const [field, label] of columns) {
+      const stat = r[field];
+      if (!stat || !Number.isFinite(stat.meanMs) || !Number.isFinite(stat.maxMs) || stat.meanMs <= 0) continue;
+      const ratio = stat.maxMs / stat.meanMs;
+      if (stat.maxMs >= STEADY_SPIKE_MIN_PEAK_MS && ratio >= STEADY_SPIKE_RATIO_FACTOR) {
+        spikes.push({ column: label, meanMs: stat.meanMs, maxMs: stat.maxMs, ratio: round(ratio, 1) });
+      }
+    }
+    if (spikes.length === 0) continue;
+    const worstRatio = Math.max(...spikes.map((s) => s.ratio));
+    out.push({
+      severity: worstRatio >= 15 ? 'high' : 'medium',
+      id: `steady-spike:${r.id}`,
+      text: `${r.id} runs every frame and looks cheap on average (${spikes.map((s) => `${s.meanMs}ms ${s.column} mean`).join(', ')}) — but peaked at ${spikes.map((s) => `${s.maxMs}ms ${s.column} (${s.ratio}x its own mean)`).join(', ')} at least once in this window. A per-frame mean this healthy hides a spike this size completely; as a one-frame stall it is a visible hitch that the frame budget alone would never predict.`,
+      evidence: { zone: r.id, spikes },
+    });
   }
 
   // ==========================================================================
@@ -1664,6 +1766,7 @@ export function buildPerfReport({
   pipelineStats = null,
   depthProxyPoolStats = null,
   shaderRebuildStats = null,
+  windowDiagnostics = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
   const megapixels =
@@ -1789,6 +1892,7 @@ export function buildPerfReport({
     pipelineStats,
     depthProxyPoolStats,
     shaderRebuildStats,
+    windowDiagnostics,
     sweepRequested: sweep !== null,
     sweepMeasuredCount,
     sweepNoiseFloorMs,
@@ -1902,6 +2006,14 @@ export function buildPerfReport({
       // not implement readShaderRebuildStats, not "no churn happened" — see
       // shader-rebuild-probe.js's own header.
       shaderRebuildStats,
+      // WINDOW-SURFACE COMPOSITION (2026-08-12) — one entry per floor that
+      // has ever synced, each carrying `sceneChildCount`/`sceneChildren` from
+      // `getStatus()`. `null` means the harness does not implement
+      // readWindowDiagnostics; `[]` means the harness implements it but no
+      // floor has synced yet — two different absences, neither a lie. See
+      // `window-surface-composition` in findings[] for the question this
+      // exists to answer.
+      windowDiagnostics,
       note:
         'These describe the INSTRUMENT, not the renderer. Non-zero unbalancedBrackets or poolOverflowed ' +
         'means some numbers above are missing or suspect — fix the instrument before drawing conclusions. ' +

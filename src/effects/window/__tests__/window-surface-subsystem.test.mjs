@@ -105,6 +105,29 @@ export async function run(t) {
   ok('the mesh carries the ADDITIVE cookie material by default', mesh.material.blendDst === THREE.OneFactor);
   ok('the reported debug channel is 0 — the effect as it ships', sub.getStatus().debugChannel === 0);
 
+  // ── SCENE COMPOSITION (2026-08-12) — chasing the live drawCalls:4 finding ──
+  // `meshesOf()` above already confirms exactly one MESH via `.isMesh`; this
+  // confirms the SAME thing through the new diagnostic field a live perf
+  // report actually reads, on the REAL vendored three.js (this test imports
+  // it directly, not a hand-rolled fake) — so if `getStatus()`'s own counting
+  // ever disagreed with what the scene really contains, this would catch it
+  // even though `meshesOf()` alone would not.
+  {
+    const status = sub.getStatus();
+    ok('getStatus reports exactly one scene child', status.sceneChildCount === 1);
+    ok(
+      '...matching scene.children.length directly, not a re-derived count',
+      status.sceneChildCount === sub.scene.children.length
+    );
+    ok('...the child list has exactly one entry', status.sceneChildren.length === 1);
+    ok('...it is a Mesh', status.sceneChildren[0].type === 'Mesh');
+    ok('...visible, matching mesh.visible', status.sceneChildren[0].visible === true);
+    // QUAD_INDICES = 6 indices = 2 triangles — a single quad, not 4.
+    ok('...with exactly 2 triangles (one quad, indexed)', status.sceneChildren[0].triangles === 2);
+    ok('...carrying material info, not null', status.sceneChildren[0].material !== null);
+    ok('...side decoded to a name, not a bare 0/1/2', typeof status.sceneChildren[0].material.side === 'string');
+  }
+
   // ── PICKING A CHANNEL ───────────────────────────────────────────────────
   const litMaterial = mesh.material;
   state.debugChannel = 4;

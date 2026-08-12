@@ -347,6 +347,15 @@ export async function runProfileSession(harness, opts = {}) {
   // this window, not a lifetime counter.
   const shaderRebuildStats =
     typeof harness.readShaderRebuildStats === 'function' ? harness.readShaderRebuildStats() : null;
+  // WINDOW-SURFACE COMPOSITION (2026-08-12) — a snapshot, not a delta, so
+  // read-once here is the whole story (no start/end pairing needed, same
+  // reasoning as shaderRebuildStats immediately above but simpler still: this
+  // isn't even a counter, it's "what does the scene actually contain right
+  // now"). Chases a real, still-open finding: `light.drawWindowLight` reports
+  // ~4 GPU draw calls per render() call where the code predicts 1 — see
+  // perf-report.js's `window-surface-composition` finding, which reads this.
+  const windowDiagnostics =
+    typeof harness.readWindowDiagnostics === 'function' ? harness.readWindowDiagnostics() : null;
 
   let sweep = null;
   if (includeSweep && typeof harness.runSweep === 'function') {
@@ -436,6 +445,7 @@ export async function runProfileSession(harness, opts = {}) {
         ? { start: depthProxyPoolStatsStart, end: depthProxyPoolStatsEnd }
         : null,
     shaderRebuildStats,
+    windowDiagnostics,
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,
     vram: harness.readVram?.() ?? null,

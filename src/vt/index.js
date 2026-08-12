@@ -51,6 +51,7 @@ export {
   setVtPanViewerDisplayLayer,
   setVtPanViewerIsolateItem,
   getVtPanViewerDrawListIds,
+  getVtPanViewerGeometryComposition,
   getVtPanViewerIsolateItemId,
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
@@ -112,7 +113,7 @@ export {
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 // readPageBitmapPixels: the mask authority's injected page-pixel reader —
 // per-page CPU extraction is decode machinery, so it lives with the decoder.
-export { getSourceBitmap, readPageBitmapPixels } from './decode-pool.js';
+export { getSourceBitmap, releaseSourceBitmap, readPageBitmapPixels } from './decode-pool.js';
 // CACHE HEALTH (cache-completeness pass, 2026-08-12) — the IndexedDB
 // page-blob persistence layer decode-pool.js reads/writes through. Module-
 // level state, not viewer-dependent (works before/after the WebGPU viewer

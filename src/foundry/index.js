@@ -69,7 +69,12 @@ export { discoverAuthoredMasks } from './mask-discovery.js';
 export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS, tokenFootprint } from './scene-tokens.js';
 
 // VRAM severance — feed PIXI <=1024px proxies so Foundry never decodes the real file.
-export { registerPixiProxy, getPixiResidencyReport, getPixiProxyStats } from './pixi-proxy-textures.js';
+export {
+  registerPixiProxy,
+  getPixiResidencyReport,
+  getPixiProxyStats,
+  urlsToEvictOnSceneChange,
+} from './pixi-proxy-textures.js';
 
 // THE INTERFACE SEAM — MSA owns the art, PIXI keeps the interactive chrome.
 export {

@@ -64,6 +64,8 @@ import {
   parseImageDimensions,
   toRootAbsoluteAssetUrl,
   readLeadingBytes,
+  reducePinRefState,
+  INITIAL_PIN_REF_STATE,
 } from './decode-primitives.js';
 
 export { DEFAULT_BORDER_PX, pageWorldRect, computePagePlacement };
@@ -139,6 +141,11 @@ export function readPageBitmapPixels(bitmap) {
 /** @type {Map<string, Promise<ImageBitmap>>} URL -> in-flight/decoded full-image bitmap. */
 const _sourceCache = new Map();
 
+/** @type {Map<string, import('./decode-primitives.js').PinRefState>} URL -> acquireSliceSource's
+ * pinned-path refcount + deferred-release flag. See reducePinRefState's doc (decode-primitives.js)
+ * for the close-under-an-in-flight-read race this exists to prevent. */
+const _pinRefStates = new Map();
+
 /**
  * Fetch + decode a source image's FULL bitmap exactly once; every later call
  * for the same URL reuses the cached (settled or in-flight) promise.
@@ -161,8 +168,30 @@ export function getSourceBitmap(url) {
   return entry;
 }
 
-/** Evict a cached source bitmap (e.g. a scene's background image changed). @param {string} url */
+/**
+ * Evict a cached source bitmap — e.g. a scene's background image changed, or
+ * (boot.js's `registerFloorProxies`) the scene that pinned it is no longer
+ * the active one. Deferred, not immediate, if `acquireSliceSource`'s pinned
+ * fast path is still actively reading this URL right now (still-draining
+ * page-streaming for the scene being left) — see `reducePinRefState`'s doc
+ * (decode-primitives.js) for the close-under-an-in-flight-read race this
+ * avoids. The common case (nothing pin-referencing this URL) closes
+ * immediately, same as before this deferral existed.
+ * @param {string} url
+ */
 export function releaseSourceBitmap(url) {
+  const { state, shouldClose } = reducePinRefState(_pinRefStates.get(url) ?? INITIAL_PIN_REF_STATE, 'evict');
+  if (!shouldClose) {
+    _pinRefStates.set(url, state);
+    return;
+  }
+  _pinRefStates.delete(url);
+  closeAndForgetSource(url);
+}
+
+/** The actual close-and-drop `releaseSourceBitmap` defers until any in-flight
+ * pinned-path reader (tracked in `_pinRefStates`) has released this URL. */
+function closeAndForgetSource(url) {
   _sourceCache
     .get(url)
     ?.then((bmp) => bmp.close?.())
@@ -337,7 +366,20 @@ function fetchAndDecode(url) {
  */
 async function acquireSliceSource(url) {
   const pinned = _sourceCache.get(url);
-  if (pinned) return { source: await pinned, done: () => {} }; // pinned proxy bitmap — never ring-managed/closed
+  if (pinned) {
+    // Ref BEFORE awaiting, not after — closes the window where a concurrent
+    // releaseSourceBitmap could see zero refs and close the bitmap while this
+    // call is still (in practice, briefly) waiting on that same promise. See
+    // reducePinRefState's doc (decode-primitives.js) for the full race.
+    _pinRefStates.set(url, reducePinRefState(_pinRefStates.get(url) ?? INITIAL_PIN_REF_STATE, 'acquire').state);
+    try {
+      const bitmap = await pinned;
+      return { source: bitmap, done: () => releasePinRef(url) };
+    } catch (err) {
+      releasePinRef(url);
+      throw err;
+    }
+  }
 
   const held = _sliceHeld.get(url);
   if (held) {
@@ -553,6 +595,29 @@ function releaseSliceSource(url) {
     } catch (_) {}
     _sliceHeld.delete(url);
     _sliceSem.release(); // free the slot for the next NEW source
+  }
+}
+
+/** `done()` for acquireSliceSource's PINNED fast path — the `_pinRefStates`
+ * counterpart to `releaseSliceSource` above. Closes the source here (instead
+ * of immediately in releaseSourceBitmap) if a releaseSourceBitmap(url) call
+ * arrived while this was still the last active pinned-path reader. */
+function releasePinRef(url) {
+  const { state, shouldClose } = reducePinRefState(_pinRefStates.get(url) ?? INITIAL_PIN_REF_STATE, 'release');
+  if (shouldClose) {
+    _pinRefStates.delete(url);
+    closeAndForgetSource(url);
+    return;
+  }
+  // Back to the untracked initial state (no active reader, nothing pending)?
+  // Drop the entry rather than storing one indistinguishable from "absent" —
+  // `_pinRefStates` should stay bounded to URLs with something to remember
+  // right now, not grow one entry per distinct URL ever pin-referenced this
+  // session (the exact unbounded-growth shape this whole fix exists to end).
+  if (state.refs === 0 && !state.pendingRelease) {
+    _pinRefStates.delete(url);
+  } else {
+    _pinRefStates.set(url, state);
   }
 }
 
@@ -952,6 +1017,22 @@ export function getDecodeStats() {
     ..._decodeStats,
     heldSources: _sliceHeld.size,
     semaphore: _sliceSem.stats(),
+    // PINNED SOURCES — `_sourceCache` (boot.js's `registerFloorProxies`, via
+    // `getSourceBitmap`). Unlike heldSources/semaphore above (the BOUNDED
+    // slice-decode ring, capped at SLICE_MAX_CONCURRENT_SOURCES), this cache
+    // has no size cap by construction: an entry is released only by an
+    // explicit `releaseSourceBitmap(url)` call. A count that only ever grows
+    // as more distinct scenes are visited in one session is exactly the
+    // unbounded-growth `releaseSourceBitmap`'s scene-change caller exists to
+    // stop — see that function's own doc.
+    pinnedSources: _sourceCache.size,
+    // Non-zero here for more than an instant means a releaseSourceBitmap
+    // call is waiting on an in-flight pinned-path read to drain (see
+    // reducePinRefState's doc) — expected to settle back to 0 quickly, not a
+    // steady-state value; a report that keeps finding it nonzero would mean
+    // something is holding a pinned read open far longer than a page-slice
+    // should ever take.
+    pinnedSourcesAwaitingRelease: Array.from(_pinRefStates.values()).filter((s) => s.pendingRelease).length,
     // Worker health, always visible without a console check (this project's
     // established debug-panel protocol): 'active' once successfully created,
     // 'unavailable' + the ACTUAL error if construction/loading ever failed

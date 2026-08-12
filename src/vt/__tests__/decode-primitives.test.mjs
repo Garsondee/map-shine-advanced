@@ -15,6 +15,8 @@ import {
   __readLeadingBytes,
   parseImageDimensions,
   toRootAbsoluteAssetUrl,
+  reducePinRefState,
+  INITIAL_PIN_REF_STATE,
 } from '../decode-primitives.js';
 
 export async function run(t) {
@@ -514,5 +516,117 @@ export async function run(t) {
     // Degenerate inputs must never throw (a decode request must survive them).
     ok('toRootAbsoluteAssetUrl: empty string returns empty string', toRootAbsoluteAssetUrl('') === '');
     ok('toRootAbsoluteAssetUrl: null returns null (no throw)', toRootAbsoluteAssetUrl(null) === null);
+  }
+
+  // --- reducePinRefState: decode-pool.js's pinned-source release lifecycle
+  // (added 2026-08-12, closing the `_sourceCache` unbounded-growth bug —
+  // boot.js's registerFloorProxies pinned every floor of every scene ever
+  // visited, forever, since nothing in the codebase ever called
+  // releaseSourceBitmap). Models the exact sequence acquireSliceSource /
+  // releaseSourceBitmap drive it through, with no browser API involved — this
+  // is the part of that fix that CAN be proven in Node; the actual
+  // ImageBitmap.close() behavior stays live-only, same convention as the rest
+  // of this file. -------------------------------------------------------
+  {
+    ok(
+      'INITIAL_PIN_REF_STATE starts at zero refs, no pending release',
+      INITIAL_PIN_REF_STATE.refs === 0 && INITIAL_PIN_REF_STATE.pendingRelease === false
+    );
+
+    // The common case, UNCHANGED from before this fix existed: evicting a URL
+    // nothing is currently reading closes it immediately.
+    {
+      const r = reducePinRefState(INITIAL_PIN_REF_STATE, 'evict');
+      ok(
+        'evict with zero refs: closes immediately (matches pre-fix releaseSourceBitmap behavior)',
+        r.shouldClose === true
+      );
+      ok(
+        'evict with zero refs: resulting state is back to initial',
+        r.state.refs === 0 && r.state.pendingRelease === false
+      );
+    }
+
+    // acquire -> release, no evict in between: an ordinary bracket must never
+    // close (nothing here asked decode-pool.js to release this URL at all).
+    {
+      const afterAcquire = reducePinRefState(INITIAL_PIN_REF_STATE, 'acquire');
+      ok('acquire: refs goes to 1', afterAcquire.state.refs === 1);
+      ok('acquire: never closes', afterAcquire.shouldClose === false);
+      const afterRelease = reducePinRefState(afterAcquire.state, 'release');
+      ok('release with no pending evict: refs back to 0', afterRelease.state.refs === 0);
+      ok(
+        'release with no pending evict: does not close (nobody asked to evict this URL)',
+        afterRelease.shouldClose === false
+      );
+    }
+
+    // THE RACE THIS FIX CLOSES: acquire (an in-flight pinned-path read starts)
+    // -> evict (a scene change asks to release this URL) — the read must NOT
+    // be closed out from under itself; only its OWN matching release may.
+    {
+      let s = INITIAL_PIN_REF_STATE;
+      let r = reducePinRefState(s, 'acquire');
+      s = r.state;
+      ok('acquire then evict: acquire itself never closes', r.shouldClose === false);
+
+      r = reducePinRefState(s, 'evict');
+      s = r.state;
+      ok('acquire then evict: evict while referenced defers, does not close yet', r.shouldClose === false);
+      ok('acquire then evict: pendingRelease is now set', s.pendingRelease === true);
+      ok('acquire then evict: ref count is untouched by evict itself', s.refs === 1);
+
+      r = reducePinRefState(s, 'release');
+      s = r.state;
+      ok('acquire, evict, then release: the deferred release now closes — THE fix', r.shouldClose === true);
+      ok(
+        'acquire, evict, then release: state resets to initial after closing',
+        s.refs === 0 && s.pendingRelease === false
+      );
+    }
+
+    // Multiple concurrent readers: only the LAST release (the one that drains
+    // refs to 0) may close, even though evict was requested while readers
+    // were still active.
+    {
+      let s = INITIAL_PIN_REF_STATE;
+      s = reducePinRefState(s, 'acquire').state; // reader A
+      s = reducePinRefState(s, 'acquire').state; // reader B
+      ok('two acquires: refs is 2', s.refs === 2);
+
+      let r = reducePinRefState(s, 'evict');
+      s = r.state;
+      ok('evict with 2 active readers: defers', r.shouldClose === false);
+
+      r = reducePinRefState(s, 'release'); // reader A finishes
+      s = r.state;
+      ok('first of two releases: does NOT close (reader B is still active)', r.shouldClose === false);
+      ok(
+        'first of two releases: refs drops to 1, pending release still remembered',
+        s.refs === 1 && s.pendingRelease === true
+      );
+
+      r = reducePinRefState(s, 'release'); // reader B finishes — the real last-reader-out
+      ok('second (last) release: closes now that every reader has finished', r.shouldClose === true);
+    }
+
+    // Double-evict is idempotent — a second releaseSourceBitmap(url) call for
+    // an already-pending URL must not do anything surprising.
+    {
+      let s = reducePinRefState(INITIAL_PIN_REF_STATE, 'acquire').state;
+      s = reducePinRefState(s, 'evict').state;
+      const r = reducePinRefState(s, 'evict');
+      ok(
+        'evict while already pending: still defers (idempotent)',
+        r.shouldClose === false && r.state.pendingRelease === true
+      );
+    }
+
+    // release can never go negative — a defensive floor, so a caller bug
+    // elsewhere can't turn into a wrong close on some later legitimate release.
+    {
+      const r = reducePinRefState(INITIAL_PIN_REF_STATE, 'release');
+      ok('release with zero refs never goes negative', r.state.refs === 0);
+    }
   }
 }

@@ -95,6 +95,48 @@ export function computeProxyDimensions(sourceWidth, sourceHeight, maxDimensionPx
 }
 
 /**
+ * Pure: which of the OUTGOING scene's pinned floor-background URLs
+ * (`decode-pool.js`'s `_sourceCache`, populated by `getSourceBitmap` — see
+ * this file's header) are safe to release now that the INCOMING scene is
+ * about to be proxied.
+ *
+ * THE BUG THIS CLOSES: `boot.js`'s `registerFloorProxies` calls
+ * `getSourceBitmap(floor.url)` for every floor of EVERY scene the GM ever
+ * visits, unconditionally, from Foundry's own `canvasInit` hook (this file's
+ * header, "DEFAULT ON"). `getSourceBitmap`'s cache had no matching release
+ * anywhere in the codebase until `releaseSourceBitmap` gained a real caller —
+ * so a full-resolution decoded source bitmap (500MB+ for a 12000² map) stayed
+ * resident forever per distinct scene visited, an unbounded-growth path to an
+ * OOM crash on a long session with several large maps — exactly the failure
+ * class the VRAM severance this file implements was built to prevent.
+ *
+ * `canvasInit` fires for a same-scene FLOOR SWITCH too, not just a genuine
+ * scene change (this file's header cites the source: `Scene#view` calls
+ * `canvas.draw()` on `sceneChanged || levelChanged`, either one). Evicting on
+ * every `canvasInit` would defeat that cheap floor-switch path by re-fetching
+ * the CURRENT scene's own still-needed sources — so this returns `[]`
+ * whenever `prevSceneId === nextSceneId`, the same "same scene ⇒ no-op"
+ * discipline `foundry/canvas-lifecycle.js` already applies to teardown.
+ *
+ * SET DIFFERENCE, not "release everything": two distinct scenes can
+ * legitimately share one background image (or a scene can be revisited), so
+ * a URL still present in the incoming scene's own floor list is kept pinned
+ * rather than closed and immediately re-fetched.
+ *
+ * @param {string|null} prevSceneId
+ * @param {string[]} prevUrls - the outgoing scene's floor URLs, as last registered.
+ * @param {string|null} nextSceneId
+ * @param {string[]} nextUrls - the incoming scene's floor URLs (`[]` for a
+ *   scene with no usable Level art — everything from `prevUrls` is released).
+ * @returns {string[]} URLs to pass to `releaseSourceBitmap`, `[]` for a same-scene call.
+ */
+export function urlsToEvictOnSceneChange(prevSceneId, prevUrls, nextSceneId, nextUrls) {
+  if (prevSceneId === nextSceneId) return [];
+  const keep = new Set(nextUrls);
+  return prevUrls.filter((url) => url && !keep.has(url));
+}
+
+/**
  * Generate a small proxy image from an ALREADY-DECODED source bitmap (reuses
  * `decode-pool.js`'s `getSourceBitmap()` cache — no new decode infrastructure)
  * and seed it into `PIXI.Assets.cache` under the REAL src key, so any Foundry

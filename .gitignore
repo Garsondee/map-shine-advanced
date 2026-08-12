@@ -37,3 +37,9 @@ tests/playwright-artifacts/chrome-profile-usercheck/
 tests/playwright-artifacts/test-results/
 tests/playwright-artifacts/look/*.json
 tests/playwright-artifacts/look/*.png
+
+# Raw Chrome DevTools Performance-panel captures handed to tools/trace-analyze.mjs.
+# Same rule as perf-capture outputs above: these are regenerable evidence, not
+# source — a capture worth keeping gets its findings into docs/planning/, not
+# the .json(.gz) itself committed. Files run 10s-100s of MB.
+chrome-performance-traces/

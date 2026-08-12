@@ -129,6 +129,7 @@ import {
   resetVtPanViewerFrameStats,
   setVtPanViewerIsolateItem,
   getVtPanViewerDrawListIds,
+  getVtPanViewerGeometryComposition,
   getVtPanViewerIsolateItemId,
   runZoomThrashTest,
   soakPanStep,
@@ -139,6 +140,7 @@ import {
   runSceneDepthSelfTest,
   getParticleReadback,
   getSourceBitmap,
+  releaseSourceBitmap,
   readPageBitmapPixels,
   resolveRendererRequiredLimits,
   setDarknessRealism,
@@ -241,6 +243,7 @@ import {
   registerPixiProxy,
   getPixiResidencyReport,
   getPixiProxyStats,
+  urlsToEvictOnSceneChange,
   registerCanvasCompositing,
   applyArtSuppression,
   restoreFoundryArt,
@@ -606,6 +609,13 @@ MapShine.getPointLightMeshPoolStats = getVtPanViewerPointLightMeshPoolStats;
 // call, answered from real outstanding-work counters instead of a stopwatch,
 // and it names what it is still waiting for. See vt/settle.js.
 MapShine.getSceneSettle = getVtPanViewerSceneSettle;
+// WORLD-DRAW COMPOSITION (2026-08-12, Testament Track B.1) — geometry.worldDraw
+// is one opaque renderer.render() call with no internal timing seam (see
+// getGeometryComposition's own doc in vt-pan-viewer.js). This names what's
+// actually IN the 13 draws / 266k triangles by item kind, without timing any
+// of it — the cheap, safe first step before pointing WebGPU Inspector at
+// whatever this flags as heaviest.
+MapShine.getGeometryComposition = getVtPanViewerGeometryComposition;
 // ⚠️🔬 THE CROSS-FLOOR MASK STACK PROBE (2026-08-02, author-commissioned:
 // *"I could click in one place and it'll probe the values for all floors at
 // once... the exact colour values for every point, for every floor and for
@@ -2212,6 +2222,26 @@ function install() {
     doors: doorSnapshots,
   });
 
+  // ANCHOR RENDER-STATE MEMOS (perf audit, 2026-08-12) — `getCandleRenderState`/
+  // `getLightningRenderState`/`getFireRenderState` are called every frame
+  // (`getFireRenderState`'s own header already said so; the other two are
+  // called from the SAME per-frame `point-light-pool.js#update` call, plus
+  // again from the flame/bolt sprite render), and each used to re-run its
+  // `.map()` over every served anchor unconditionally — a fresh Array plus a
+  // fresh per-anchor object EVERY call, the exact per-frame-allocation this
+  // codebase's own point-light-pool.js module header says is a hard rule
+  // against. An anchor's resolved fields only actually change when: (a) the
+  // anchor set itself changes (create/update/delete — `anchorAuthority.
+  // getVersion()`), (b) the active floor changes (`activeFloorContext`/
+  // `lastKnownFloors` are both REASSIGNED, never mutated in place, by
+  // `updateActiveFloorContext` — see that function's own body — so `!==` is
+  // a correct, cheap staleness check), or (c) for candle/fire, the outdoor
+  // mask a live `windExposure` sample reads streams in or is repainted
+  // (`getMaskAuthorityVersion()`, the SAME signal `getMaskDrivenFires`'s own
+  // cache already keys on below). Each memo recomputes only when ITS OWN
+  // dependency set changed, so a floor switch invalidates all three while an
+  // unrelated settings tweak invalidates none.
+  let candleAnchorMemo = { anchorVersion: -1, floorContext: null, floors: null, maskVersion: -1, anchors: [] };
   const getCandleRenderState = () => {
     // WIND EXPOSURE per candle (2026-07-20; CORRECTED 2026-07-21) — sample
     // the RAW authored `outdoors` mask ("is this location indoors or
@@ -2229,43 +2259,59 @@ function install() {
     // (`safeSampleOutdoors`, above), cheap for the handful a scene has. This
     // is the boot-owned bridge: vt/ never reaches the mask authority.
     const floorIndex = activeFloorContext?.floorIndex ?? 0;
+    const anchorVersion = anchorAuthority.getVersion();
+    const maskVersion = getMaskAuthorityVersion();
+    if (
+      candleAnchorMemo.anchorVersion !== anchorVersion ||
+      candleAnchorMemo.floorContext !== activeFloorContext ||
+      candleAnchorMemo.floors !== lastKnownFloors ||
+      candleAnchorMemo.maskVersion !== maskVersion
+    ) {
+      candleAnchorMemo = {
+        anchorVersion,
+        floorContext: activeFloorContext,
+        floors: lastKnownFloors,
+        maskVersion,
+        anchors: anchorAuthority.anchorsForEffect('candleFlame', activeFloorContext).map((a) => ({
+          id: a.id,
+          x: a.x,
+          y: a.y,
+          windExposure: safeSampleOutdoors(floorIndex, a.x, a.y),
+          // PER-CANDLE OVERRIDES (2026-07-22) — colour/size/brightness/light-
+          // reach live here (scene/anchor-catalog.js's per-anchor params).
+          // effects/candle-flame-render.js's resolveAnchorColorHex/SizePx/
+          // LightRadiusPx read this to decide "does THIS candle differ from
+          // the shared look" — omitting it would silently make every override
+          // invisible to the renderer despite being correctly stored.
+          params: a.params,
+          // THIS CANDLE'S OWN HEIGHT GATE INPUT (2026-08-03; height authored
+          // 2026-08-05) — the flame sprite shares a point light's own
+          // occlusion gate (point-light-illumination.js#buildHeightGateNode);
+          // it needs to know where the FLAME itself sits, which
+          // `lastKnownFloors` (cached on scene load / floor switch, no new
+          // Foundry read) plus this anchor's own locked band and its own
+          // authored `params.elevation` ("height off floor") now answer.
+          // `resolveAnchorElevationRank`'s own doc explains the 'all-levels'
+          // sentinel case.
+          elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors, a.params?.elevation),
+          // THIS CANDLE'S OWN CAST-LIGHT ELEVATION (2026-08-05) — a real
+          // absolute world elevation (`resolveAnchorElevationWorldUnits`, this
+          // same floorBinding + params.elevation, just not floor-index-shaped),
+          // fed to `effects/candle-flame-geometry.js#buildCandleLightSources`
+          // so the light this candle casts is ranked by the depth authority at
+          // the SAME height its flame sprite gates against above, instead of
+          // silently defaulting to absolute elevation 0
+          // (point-light-pool.js#update's own "light.elevation is undefined
+          // for candle-cast lights" comment — this is what closes that gap).
+          elevation: resolveAnchorElevationWorldUnits(a),
+        })),
+      };
+    }
     return {
       enabled: candleReadout.enabled,
       params: candleReadout.params ?? {},
       perfTier: candleReadout.perfTier,
-      anchors: anchorAuthority.anchorsForEffect('candleFlame', activeFloorContext).map((a) => ({
-        id: a.id,
-        x: a.x,
-        y: a.y,
-        windExposure: safeSampleOutdoors(floorIndex, a.x, a.y),
-        // PER-CANDLE OVERRIDES (2026-07-22) — colour/size/brightness/light-
-        // reach live here (scene/anchor-catalog.js's per-anchor params).
-        // effects/candle-flame-render.js's resolveAnchorColorHex/SizePx/
-        // LightRadiusPx read this to decide "does THIS candle differ from
-        // the shared look" — omitting it would silently make every override
-        // invisible to the renderer despite being correctly stored.
-        params: a.params,
-        // THIS CANDLE'S OWN HEIGHT GATE INPUT (2026-08-03; height authored
-        // 2026-08-05) — the flame sprite shares a point light's own
-        // occlusion gate (point-light-illumination.js#buildHeightGateNode);
-        // it needs to know where the FLAME itself sits, which
-        // `lastKnownFloors` (cached on scene load / floor switch, no new
-        // Foundry read) plus this anchor's own locked band and its own
-        // authored `params.elevation` ("height off floor") now answer.
-        // `resolveAnchorElevationRank`'s own doc explains the 'all-levels'
-        // sentinel case.
-        elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors, a.params?.elevation),
-        // THIS CANDLE'S OWN CAST-LIGHT ELEVATION (2026-08-05) — a real
-        // absolute world elevation (`resolveAnchorElevationWorldUnits`, this
-        // same floorBinding + params.elevation, just not floor-index-shaped),
-        // fed to `effects/candle-flame-geometry.js#buildCandleLightSources`
-        // so the light this candle casts is ranked by the depth authority at
-        // the SAME height its flame sprite gates against above, instead of
-        // silently defaulting to absolute elevation 0
-        // (point-light-pool.js#update's own "light.elevation is undefined
-        // for candle-cast lights" comment — this is what closes that gap).
-        elevation: resolveAnchorElevationWorldUnits(a),
-      })),
+      anchors: candleAnchorMemo.anchors,
     };
   };
 
@@ -2276,29 +2322,47 @@ function install() {
   // effects/lightning-render.js's own header for why that's simpler here than
   // candle's per-anchor bake). vt/ never reaches the anchor authority or the
   // settings cascade; it only ever sees what this closure hands it.
-  const getLightningRenderState = () => ({
-    enabled: lightningReadout.enabled,
-    params: lightningReadout.params ?? {},
-    perfTier: lightningReadout.perfTier,
-    anchors: anchorAuthority.anchorsForEffect('lightning', activeFloorContext).map((a) => ({
-      id: a.id,
-      x: a.x,
-      y: a.y,
-      params: a.params,
-      // THE BOLT'S OWN DEPTH-AUTHORITY INPUT (2026-08-05) — a raw absolute
-      // world elevation, the SAME `resolveAnchorElevationWorldUnits` call
-      // getCandleRenderState's own `elevation` field (just above) uses, NOT
-      // a pre-computed rank: `lightning-subsystem.js`'s own injected
-      // `resolveExpectedDepth` turns this into the tie-safe value the shader
-      // actually compares, the SAME two-step split every other depth-
-      // authority consumer already uses (vt-pan-viewer.js's own
-      // `resolveExpectedDepth` composition, right where it constructs this
-      // subsystem). Migrated OFF the OLD `resolveAnchorElevationRank`/
-      // `elevationRank` mechanism the flame sprite still uses — see
-      // lightning-render.js's own header for why only the ribbon mesh moved.
-      elevation: resolveAnchorElevationWorldUnits(a),
-    })),
-  });
+  // See `candleAnchorMemo`'s own doc just above for why this memoizes and on
+  // what — lightning has no live wind sample, so its key drops `maskVersion`.
+  let lightningAnchorMemo = { anchorVersion: -1, floorContext: null, floors: null, anchors: [] };
+  const getLightningRenderState = () => {
+    const anchorVersion = anchorAuthority.getVersion();
+    if (
+      lightningAnchorMemo.anchorVersion !== anchorVersion ||
+      lightningAnchorMemo.floorContext !== activeFloorContext ||
+      lightningAnchorMemo.floors !== lastKnownFloors
+    ) {
+      lightningAnchorMemo = {
+        anchorVersion,
+        floorContext: activeFloorContext,
+        floors: lastKnownFloors,
+        anchors: anchorAuthority.anchorsForEffect('lightning', activeFloorContext).map((a) => ({
+          id: a.id,
+          x: a.x,
+          y: a.y,
+          params: a.params,
+          // THE BOLT'S OWN DEPTH-AUTHORITY INPUT (2026-08-05) — a raw absolute
+          // world elevation, the SAME `resolveAnchorElevationWorldUnits` call
+          // getCandleRenderState's own `elevation` field uses, NOT a
+          // pre-computed rank: `lightning-subsystem.js`'s own injected
+          // `resolveExpectedDepth` turns this into the tie-safe value the
+          // shader actually compares, the SAME two-step split every other
+          // depth-authority consumer already uses (vt-pan-viewer.js's own
+          // `resolveExpectedDepth` composition, right where it constructs this
+          // subsystem). Migrated OFF the OLD `resolveAnchorElevationRank`/
+          // `elevationRank` mechanism the flame sprite still uses — see
+          // lightning-render.js's own header for why only the ribbon mesh moved.
+          elevation: resolveAnchorElevationWorldUnits(a),
+        })),
+      };
+    }
+    return {
+      enabled: lightningReadout.enabled,
+      params: lightningReadout.params ?? {},
+      perfTier: lightningReadout.perfTier,
+      anchors: lightningAnchorMemo.anchors,
+    };
+  };
 
   /**
    * FIRE'S RENDER-STATE SEAM. Same shape as the candle's and the bolt's: boot
@@ -2329,6 +2393,11 @@ function install() {
   // spawn-cloud caches below are independently-slotted objects that COULD
   // diverge if a future call site reads one without the other — conflating
   // them would be exactly the "one byte, two quantities" trap.
+  // A STABLE shared reference for "fire disabled this call" — NOT a fresh
+  // `[]` literal, which would compare unequal to itself call-to-call and
+  // defeat `fireAnchorMemo`'s own `maskFiresRef` dependency check (see that
+  // memo's doc below) every single frame fire happens to be off.
+  const EMPTY_FIRE_ARRAY = Object.freeze([]);
   let fireMaskBakeRuns = 0;
   let fireMaskBakeSkips = 0;
   let fireSpawnBakeRuns = 0;
@@ -2409,6 +2478,25 @@ function install() {
     return fires;
   };
 
+  // See `candleAnchorMemo`'s own doc for the general shape/reason. Fire's
+  // `fires` array is more entangled than candle/lightning's — it wraps BOTH
+  // the mask-driven fires (already internally cached by `getMaskDrivenFires`,
+  // whose OWN returned array reference is reused here as a dependency signal
+  // rather than re-deriving its floorIndex/signature/version key a second
+  // time) and the anchor-placed ones, and both branches read `fireReadout.
+  // params?.fuel`/`.color` as a fallback — `fireReadout` itself is REASSIGNED
+  // wholesale on every settings re-resolve (`effectRegistry.register(FIRE,
+  // ...)` below), never mutated in place, so it is a valid, cheap reference
+  // key exactly like `activeFloorContext`.
+  let fireAnchorMemo = {
+    anchorVersion: -1,
+    floorContext: null,
+    floors: null,
+    maskVersion: -1,
+    readout: null,
+    maskFiresRef: null,
+    fires: [],
+  };
   const getFireRenderState = () => {
     const grid = canvas?.scene?.grid ?? null;
     const feetPerSquare = Number(grid?.distance) > 0 ? Number(grid.distance) : 5;
@@ -2420,54 +2508,78 @@ function install() {
 
     // THE PAINTED REGION — the primary source. Each blob's own width sets its
     // diameter, so a wide blob is a bonfire and a thin line along a wall is a
-    // row of small flames, with no second authoring step.
-    const maskFires = fireReadout.enabled
-      ? getMaskDrivenFires(floorIndex).map((f) => ({
-          ...f,
-          fuel: fireReadout.params?.fuel ?? 'wood',
-          color: fireReadout.params?.color ?? '#fdba35',
-          windExposure: sampleWindExposureAt(f.x, f.y),
-          outdoors01: sampleWindExposureAt(f.x, f.y),
-          // A painted fire sits on its floor's own ground. An anchor is what
-          // you place when you want it up on a table.
-          elevation: activeFloorContext?.elevation ?? 0,
-          // This fire HAS a painted shape to conform to — the render's mask
-          // clip (fire-render.js) is keyed on this, not on `id`'s `mask:`
-          // prefix, so the two never have a chance to silently disagree.
-          maskClip: true,
-        }))
-      : [];
+    // row of small flames, with no second authoring step. `getMaskDrivenFires`
+    // is already cache-gated internally (floorIndex+signature+version); read
+    // unconditionally so its returned reference is available as this memo's
+    // OWN dependency signal below, even on a frame nothing else changed.
+    const maskFiresSource = fireReadout.enabled ? getMaskDrivenFires(floorIndex) : EMPTY_FIRE_ARRAY;
+    const anchorVersion = anchorAuthority.getVersion();
+    const maskVersion = getMaskAuthorityVersion();
+    if (
+      fireAnchorMemo.anchorVersion !== anchorVersion ||
+      fireAnchorMemo.floorContext !== activeFloorContext ||
+      fireAnchorMemo.floors !== lastKnownFloors ||
+      fireAnchorMemo.maskVersion !== maskVersion ||
+      fireAnchorMemo.readout !== fireReadout ||
+      fireAnchorMemo.maskFiresRef !== maskFiresSource
+    ) {
+      const maskFires = fireReadout.enabled
+        ? maskFiresSource.map((f) => ({
+            ...f,
+            fuel: fireReadout.params?.fuel ?? 'wood',
+            color: fireReadout.params?.color ?? '#fdba35',
+            windExposure: sampleWindExposureAt(f.x, f.y),
+            outdoors01: sampleWindExposureAt(f.x, f.y),
+            // A painted fire sits on its floor's own ground. An anchor is what
+            // you place when you want it up on a table.
+            elevation: activeFloorContext?.elevation ?? 0,
+            // This fire HAS a painted shape to conform to — the render's mask
+            // clip (fire-render.js) is keyed on this, not on `id`'s `mask:`
+            // prefix, so the two never have a chance to silently disagree.
+            maskClip: true,
+          }))
+        : [];
+      fireAnchorMemo = {
+        anchorVersion,
+        floorContext: activeFloorContext,
+        floors: lastKnownFloors,
+        maskVersion,
+        readout: fireReadout,
+        maskFiresRef: maskFiresSource,
+        fires: [
+          ...maskFires,
+          ...anchorAuthority.anchorsForEffect('fire', activeFloorContext).map((a) => ({
+            id: a.id,
+            x: a.x,
+            y: a.y,
+            diameterPx: Number(a.params?.diameterPx) > 0 ? Number(a.params.diameterPx) : 120,
+            intensity: Number.isFinite(a.params?.intensity) ? a.params.intensity : 1,
+            fuel: a.params?.fuel ?? fireReadout.params?.fuel ?? 'wood',
+            color: a.params?.useCustomColor ? a.params.customColor : (fireReadout.params?.color ?? '#fdba35'),
+            windExposure: sampleWindExposureAt(a.x, a.y),
+            outdoors01: sampleWindExposureAt(a.x, a.y),
+            // A raw absolute world elevation, exactly as the bolt serves — the
+            // subsystem's injected `resolveExpectedDepth` turns it into the
+            // tie-safe value the shader compares. NEVER a pre-computed rank.
+            elevation: resolveAnchorElevationWorldUnits(a),
+            // An anchor is placed precisely because the author wants fire
+            // somewhere with no `_Fire` paint at all — never clipped.
+            maskClip: false,
+          })),
+        ],
+      };
+    }
 
     return {
       enabled: fireReadout.enabled,
       params: fireReadout.params ?? {},
       perfTier: fireReadout.perfTier,
       mPerPx,
-      maskFireCount: maskFires.length,
+      maskFireCount: fireReadout.enabled ? maskFiresSource.length : 0,
       // The particle kernels' shape source — every flame, ember and smoke
       // sprite is born on one of these points.
       spawnCloud: fireReadout.enabled ? getFireSpawnCloud(floorIndex) : null,
-      fires: [
-        ...maskFires,
-        ...anchorAuthority.anchorsForEffect('fire', activeFloorContext).map((a) => ({
-          id: a.id,
-          x: a.x,
-          y: a.y,
-          diameterPx: Number(a.params?.diameterPx) > 0 ? Number(a.params.diameterPx) : 120,
-          intensity: Number.isFinite(a.params?.intensity) ? a.params.intensity : 1,
-          fuel: a.params?.fuel ?? fireReadout.params?.fuel ?? 'wood',
-          color: a.params?.useCustomColor ? a.params.customColor : (fireReadout.params?.color ?? '#fdba35'),
-          windExposure: sampleWindExposureAt(a.x, a.y),
-          outdoors01: sampleWindExposureAt(a.x, a.y),
-          // A raw absolute world elevation, exactly as the bolt serves — the
-          // subsystem's injected `resolveExpectedDepth` turns it into the
-          // tie-safe value the shader compares. NEVER a pre-computed rank.
-          elevation: resolveAnchorElevationWorldUnits(a),
-          // An anchor is placed precisely because the author wants fire
-          // somewhere with no `_Fire` paint at all — never clipped.
-          maskClip: false,
-        })),
-      ],
+      fires: fireAnchorMemo.fires,
     };
   };
 
@@ -6760,8 +6872,32 @@ function install() {
   // registerFloorProxies() is called from canvasInit below (unconditional,
   // no toggle — see the default-on note above) and is idempotent per src
   // (registerPixiProxy itself no-ops if that src is already cached).
+  //
+  // EVICTION (added 2026-08-12 — decode-pool.js's `_sourceCache`, which
+  // `getSourceBitmap` below pins into, had no caller for its own
+  // `releaseSourceBitmap` anywhere in the codebase: every floor of every
+  // scene ever visited stayed resident as a full-resolution ImageBitmap
+  // — 500MB+ for a 12000² map — for the rest of the session. `canvasInit`
+  // fires on EVERY floor switch too, not just a genuine scene change (see
+  // this function's own header note + foundry/canvas-lifecycle.js), so
+  // eviction cannot key off "registerFloorProxies ran again" — it keys off
+  // the scene id actually changing. `urlsToEvictOnSceneChange` (pure,
+  // Node-tested) returns [] for a same-scene call, so an ordinary floor
+  // switch never evicts anything the still-active viewer might be
+  // mid-decode with.
+  let lastProxiedSceneId = null;
+  let lastProxiedFloorUrls = [];
   async function registerFloorProxies(sceneDoc) {
+    const sceneId = sceneDoc?.id ?? null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
+    const nextUrls = floorsResult.ok ? floorsResult.floors.map((f) => f.url).filter(Boolean) : [];
+
+    for (const url of urlsToEvictOnSceneChange(lastProxiedSceneId, lastProxiedFloorUrls, sceneId, nextUrls)) {
+      releaseSourceBitmap(url);
+    }
+    lastProxiedSceneId = sceneId;
+    lastProxiedFloorUrls = nextUrls;
+
     if (!floorsResult.ok) return;
     for (const floor of floorsResult.floors) {
       const bitmap = await getSourceBitmap(floor.url);
@@ -7958,13 +8094,35 @@ function install() {
           return;
         }
 
-        lastRealSceneId = sceneDoc.id;
+        // `lastRealSceneId` is NOT set until `startRealSceneViewer` actually
+        // succeeds below (2026-08-12 fix) — it used to be set HERE,
+        // synchronously, before the `await`. `canvasReady` is a plain
+        // `Hooks.on` callback: Foundry does not await it, so a second
+        // `canvasReady` firing while this one is still mid-boot (a known
+        // quirk on initial load, and whenever another module redraws the
+        // canvas) ran with `lastRealSceneId` already pointing at THIS scene
+        // while `getVtPanViewerDiagnostics().active` was still false (`
+        // _active` is only assigned near the very end of `startVtPanViewer`,
+        // after every await — mask-dimension fetches, `ensureItemLoaded`,
+        // `scheduleResidencyUpdate`, `renderer.compileAsync` — has already
+        // resolved). That combination fails the same-scene branch's `&&
+        // active` check, so the second execution fell through to here and
+        // called `startRealSceneViewer` a SECOND time concurrently with the
+        // first — two overlapping boots racing to allocate/assign the same
+        // module-level `_active`, canvas and GPU resources. Gating the
+        // assignment on success closes the window: a concurrent second
+        // firing now finds `lastRealSceneId` still `null`-or-stale and takes
+        // this same "full boot" path too, which is redundant but no longer a
+        // race — `startVtPanViewer`'s own resource setup is what would need
+        // re-entrancy protection to make even THAT free, a separate, larger
+        // change this fix does not attempt.
         const result = await startRealSceneViewer(targetFloorIndex);
         if (result.ok === false) {
           log.warn(`real-scene VT viewer did not start:`, result.error);
           endSceneLoad({ error: result.error });
           return;
         }
+        lastRealSceneId = sceneDoc.id;
         log.info(`real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
 
         // LIFT ONLY WHEN THERE IS SOMETHING TO SEE. startVtPanViewer has resolved,

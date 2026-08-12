@@ -1,19 +1,20 @@
 /**
- * Node verification for foundry/pixi-proxy-textures.js's pure part
- * (computeProxyDimensions), PLUS registerPixiProxy's three EARLY-RETURN
- * branches (unavailable/already-cached/too-small), which resolve before
- * touching OffscreenCanvas/createImageBitmap and so ARE reachable with an
- * injected fake `PIXI` (the function's own `opts.PIXI` seam). The actual
- * seed path (OffscreenCanvas draw + createImageBitmap + real PIXI.Assets)
- * stays browser-only -- verified live via the debug panel, per this
- * codebase's own convention -- so getPixiProxyStats().registered is proven
- * to exist and start at a sane baseline here, not to actually increment.
+ * Node verification for foundry/pixi-proxy-textures.js's pure parts
+ * (computeProxyDimensions, urlsToEvictOnSceneChange), PLUS registerPixiProxy's
+ * three EARLY-RETURN branches (unavailable/already-cached/too-small), which
+ * resolve before touching OffscreenCanvas/createImageBitmap and so ARE
+ * reachable with an injected fake `PIXI` (the function's own `opts.PIXI`
+ * seam). The actual seed path (OffscreenCanvas draw + createImageBitmap +
+ * real PIXI.Assets) stays browser-only -- verified live via the debug panel,
+ * per this codebase's own convention -- so getPixiProxyStats().registered is
+ * proven to exist and start at a sane baseline here, not to actually increment.
  */
 import {
   computeProxyDimensions,
   DEFAULT_MAX_PROXY_DIMENSION_PX,
   registerPixiProxy,
   getPixiProxyStats,
+  urlsToEvictOnSceneChange,
 } from '../pixi-proxy-textures.js';
 
 export async function run(t) {
@@ -126,4 +127,69 @@ export async function run(t) {
     'registered did NOT increment — none of the three branches above reach the real seed path',
     after.registered === before.registered
   );
+
+  // ==========================================================================
+  // urlsToEvictOnSceneChange (added 2026-08-12) — the decision boot.js's
+  // registerFloorProxies uses to release decode-pool.js's `_sourceCache`
+  // entries for a scene that's been left behind, WITHOUT ever evicting a
+  // same-scene floor switch's still-needed URLs (canvasInit fires for both;
+  // only the scene id actually changing may evict anything).
+  // ==========================================================================
+
+  // --- same scene id (a floor switch, or a redundant canvasInit for the
+  // scene already showing) -> NEVER evicts, regardless of what the URL lists
+  // look like. This is the invariant that keeps a floor switch cheap. -------
+  {
+    const r = urlsToEvictOnSceneChange('scene-A', ['a.webp', 'b.webp'], 'scene-A', ['a.webp']);
+    ok('same sceneId: returns [] even though the URL lists differ', Array.isArray(r) && r.length === 0);
+  }
+  {
+    const r = urlsToEvictOnSceneChange(null, [], null, []);
+    ok('both null sceneId (e.g. two blank-canvas calls in a row): treated as "same scene", returns []', r.length === 0);
+  }
+
+  // --- genuine scene change, no shared URLs: everything the old scene had
+  // pinned is released. ------------------------------------------------------
+  {
+    const r = urlsToEvictOnSceneChange('scene-A', ['a.webp', 'b.webp'], 'scene-B', ['c.webp']);
+    ok(
+      'genuine scene change, no overlap: releases every previous URL',
+      r.length === 2 && r.includes('a.webp') && r.includes('b.webp')
+    );
+    ok('genuine scene change, no overlap: does not release the incoming scene’s own URL', !r.includes('c.webp'));
+  }
+
+  // --- genuine scene change, ONE shared URL (two scenes legitimately reusing
+  // the same background image, or a revisit): the shared URL must be KEPT
+  // pinned, not closed and immediately re-fetched. ---------------------------
+  {
+    const r = urlsToEvictOnSceneChange('scene-A', ['shared.webp', 'a-only.webp'], 'scene-B', [
+      'shared.webp',
+      'b-only.webp',
+    ]);
+    ok('shared URL across scenes: kept (not returned for eviction)', !r.includes('shared.webp'));
+    ok('non-shared previous URL: still released', r.includes('a-only.webp') && r.length === 1);
+  }
+
+  // --- incoming scene has no usable Level art (getActiveSceneFloors not ok)
+  // -> nextUrls is [], so every previous URL is released; nothing left to keep. --
+  {
+    const r = urlsToEvictOnSceneChange('scene-A', ['a.webp', 'b.webp'], 'scene-B', []);
+    ok('incoming scene has no floors: releases everything the previous scene had', r.length === 2);
+  }
+
+  // --- first-ever call: nothing was previously proxied, so there is nothing
+  // to release, even though prevSceneId (null) !== nextSceneId. -------------
+  {
+    const r = urlsToEvictOnSceneChange(null, [], 'scene-A', ['a.webp']);
+    ok('first call (no previous scene): returns [] (nothing was ever pinned yet)', r.length === 0);
+  }
+
+  // --- defensive: a stray falsy entry in prevUrls (should never happen --
+  // registerFloorProxies filters with .filter(Boolean) -- but must not crash
+  // or be handed back as something to "release"). ---------------------------
+  {
+    const r = urlsToEvictOnSceneChange('scene-A', ['a.webp', '', null, 'b.webp'], 'scene-B', []);
+    ok('falsy entries in prevUrls are never returned for release', r.every(Boolean) && r.length === 2);
+  }
 }

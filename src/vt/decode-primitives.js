@@ -285,6 +285,49 @@ export async function readLeadingBytes(res, n) {
   return out;
 }
 
+/**
+ * Pure reducer for one pinned source's release lifecycle (`decode-pool.js`'s
+ * `_sourceCache`). A pinned bitmap can be released (`releaseSourceBitmap`,
+ * added so a scene MSA leaves behind doesn't keep its full-resolution source
+ * ImageBitmap resident forever — see decode-pool.js's own header) WHILE
+ * `acquireSliceSource`'s pinned fast path is still actively reading it
+ * (page-streaming for the scene the user is in the middle of leaving, still
+ * draining). Closing the bitmap out from under that in-flight read would
+ * throw on its next `drawImage` call — a real race, not a theoretical one,
+ * since eviction is driven by `canvasInit` firing for the NEXT scene, which
+ * has no way to know whether the OUTGOING scene's residency system has fully
+ * quiesced.
+ *
+ * The fix mirrors `_sliceHeld`'s existing ring-managed refcounting elsewhere
+ * in decode-pool.js (`releaseSliceSource`'s `refs<=0` check) — same shape,
+ * applied to the previously-unmanaged pinned cache: a release request while
+ * `refs > 0` is deferred (`pendingRelease:true`) rather than acted on
+ * immediately, and whichever `release` action drains the last ref performs it.
+ *
+ * @typedef {{refs: number, pendingRelease: boolean}} PinRefState
+ * @param {PinRefState} state
+ * @param {'acquire'|'release'|'evict'} action - 'acquire'/'release' bracket one
+ *   pinned-fast-path read; 'evict' is a `releaseSourceBitmap(url)` request.
+ * @returns {{state: PinRefState, shouldClose: boolean}} `shouldClose:true` means
+ *   the caller must close the bitmap and drop it from `_sourceCache` now.
+ */
+export function reducePinRefState(state, action) {
+  if (action === 'acquire') {
+    return { state: { refs: state.refs + 1, pendingRelease: state.pendingRelease }, shouldClose: false };
+  }
+  if (action === 'release') {
+    const refs = Math.max(0, state.refs - 1);
+    if (refs === 0 && state.pendingRelease) return { state: { refs: 0, pendingRelease: false }, shouldClose: true };
+    return { state: { refs, pendingRelease: state.pendingRelease }, shouldClose: false };
+  }
+  // 'evict'
+  if (state.refs > 0) return { state: { refs: state.refs, pendingRelease: true }, shouldClose: false };
+  return { state: { refs: 0, pendingRelease: false }, shouldClose: true };
+}
+
+/** The state a URL starts in before any pinned-path acquire or evict request. */
+export const INITIAL_PIN_REF_STATE = Object.freeze({ refs: 0, pendingRelease: false });
+
 /** Test seam: the pure semaphore, exported for Node verification. @private */
 export const __createSemaphore = createSemaphore;
 

@@ -335,26 +335,52 @@ export async function runStructuralAB(harness, opts = {}) {
           const on = state === 'on';
           say('structural-ab', `${toggle.label} — ${state.toUpperCase()} (${step + 1}/${AB_SEQUENCE.length})`);
           harness.setStructuralToggle(toggle.id, on);
-          await harness.waitFrames(settleFrames);
-
           harness.resetFrameStats();
-          harness.armProfiler({ settleFrames: 0 });
-          // Kept, not discarded: `{skipped: true, reason}` here is why a block
-          // came back with no GPU numbers, and losing it turns a diagnosable
-          // wiring problem into an unexplained null three layers up.
-          const timer = harness.setGpuZoneTimer(true);
+          // ⚠️ ARM BEFORE WAITING, ALWAYS — fixed 2026-08-12 after a live
+          // failure. `waitFrames` (perf-session.js's `createProfiledFrameWaiter`)
+          // polls `readProfile().frames + .settleFramesDiscarded`, and NEITHER
+          // number advances unless the profiler is armed and receiving
+          // `beginFrame`/`endFrame` from the real render loop. The first cut of
+          // this function called `waitFrames(settleFrames)` for the toggle's
+          // settle period BEFORE this `armProfiler` call — at that moment the
+          // profiler was still disarmed (the main window's own teardown runs
+          // before this function is ever reached), so the poll's `seen` could
+          // never leave 0 no matter how many real frames rendered. Every run
+          // timed out at 30s with "waited 30s for 120 frames but only 0 were
+          // counted" — that error's own wording blames the viewer, on a viewer
+          // that was rendering perfectly.
+          //
+          // The fix is to arm ONCE per block with the settle count baked in,
+          // exactly like `perf-session.js`'s own main window
+          // (`armProfiler({settleFrames})` immediately followed by
+          // `waitFrames(settleFrames)`), and let both the settle wait and the
+          // measurement wait run inside that one continuously-armed window.
+          // `waitFrames` is incremental — each call snapshots its own starting
+          // count — so calling it twice in a row against one armed window is
+          // exactly the pattern the main session already relies on, not a new
+          // one invented here.
+          harness.armProfiler({ settleFrames });
           try {
-            await harness.waitFrames(measureFrames);
-            const block = summariseAbBlock({
-              profile: harness.readProfile(),
-              gpuStatus: harness.getGpuZoneStatus(),
-            });
-            block.gpuTimer = timer ?? null;
-            // ON is measured twice; keep both, keyed so compareAbBlocks can use
-            // their disagreement as the floor.
-            blocks[step === 0 ? 'on1' : step === 1 ? 'off' : 'on2'] = block;
+            await harness.waitFrames(settleFrames);
+            // Kept, not discarded: `{skipped: true, reason}` here is why a
+            // block came back with no GPU numbers, and losing it turns a
+            // diagnosable wiring problem into an unexplained null three layers
+            // up.
+            const timer = harness.setGpuZoneTimer(true);
+            try {
+              await harness.waitFrames(measureFrames);
+              const block = summariseAbBlock({
+                profile: harness.readProfile(),
+                gpuStatus: harness.getGpuZoneStatus(),
+              });
+              block.gpuTimer = timer ?? null;
+              // ON is measured twice; keep both, keyed so compareAbBlocks can
+              // use their disagreement as the floor.
+              blocks[step === 0 ? 'on1' : step === 1 ? 'off' : 'on2'] = block;
+            } finally {
+              harness.setGpuZoneTimer(false);
+            }
           } finally {
-            harness.setGpuZoneTimer(false);
             harness.disarmProfiler();
           }
         }

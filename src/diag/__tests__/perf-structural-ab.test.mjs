@@ -32,15 +32,35 @@ const block = (zones) => ({
   zones,
 });
 
-/** Minimal harness: records the flip order so restore can be asserted. */
+/**
+ * Minimal harness: records the flip order so restore can be asserted, AND
+ * models the one contract that actually matters here — `waitFrames` only
+ * counts while the profiler is armed, exactly like the real
+ * `createProfiledFrameWaiter` (perf-session.js).
+ *
+ * ⚠️ THIS FAKE USED TO RESOLVE `waitFrames` UNCONDITIONALLY, and that is
+ * precisely how the 2026-08-12 live regression shipped past 62 passing tests.
+ * The real bug was `waitFrames(settleFrames)` called BEFORE `armProfiler` —
+ * live, that meant the poll's `seen` count could never leave 0 no matter how
+ * many real frames rendered, and the run timed out at 30s with an error that
+ * blames "the viewer is probably not running" on a viewer rendering perfectly.
+ * A fake that does not enforce the same ordering constraint the real harness
+ * enforces is not a fake of the real harness — it is a fake of a DIFFERENT,
+ * easier harness, and every test built on it is checking the wrong contract.
+ */
 function fakeHarness({ toggles = { earlyZComposition: true }, throwOnBlock = -1, zonesFor = null } = {}) {
   const flips = [];
   const uiEvents = [];
+  // {armed} per waitFrames call — the direct regression pin. If this ever
+  // contains a `false`, some call site is waiting on an unarmed profiler again.
+  const waitCalls = [];
   let blockIndex = 0;
+  let armed = false;
   const state = { ...toggles };
   return {
     flips,
     uiEvents,
+    waitCalls,
     state,
     readStructuralToggle: (id) => (id in state ? state[id] : null),
     setStructuralToggle: (id, on) => {
@@ -48,7 +68,18 @@ function fakeHarness({ toggles = { earlyZComposition: true }, throwOnBlock = -1,
       state[id] = on;
       return { changed: true };
     },
-    waitFrames: async () => {},
+    waitFrames: async () => {
+      waitCalls.push({ armed });
+      if (!armed) {
+        // The real waiter does not throw synchronously here — it polls for
+        // WAIT_TIMEOUT_MS and THEN throws this exact wording. Throwing
+        // immediately is a deliberate test simplification (no 30-second test),
+        // not a claim that the real error is synchronous.
+        throw new Error(
+          'perf profile: waited 30s for frames but only 0 were counted. The viewer is probably not running — load a scene first.'
+        );
+      }
+    },
     resetFrameStats: () => {},
     // The live HUD re-arms the profiler as a DIFFERENT owner ~4x/second, and
     // frame-profiler.arm() throws on an owner mismatch. The A/B must therefore
@@ -57,8 +88,11 @@ function fakeHarness({ toggles = { earlyZComposition: true }, throwOnBlock = -1,
     restoreLiveUi: () => uiEvents.push('restore'),
     armProfiler: () => {
       if (blockIndex === throwOnBlock) throw new Error('arm exploded');
+      armed = true;
     },
-    disarmProfiler: () => {},
+    disarmProfiler: () => {
+      armed = false;
+    },
     setGpuZoneTimer: () => ({ armed: true }),
     getGpuZoneStatus: () => ({ frameGpuMs: { p50: 70, sampleCount: 60 } }),
     readProfile: () => {
@@ -259,6 +293,12 @@ export function run(t) {
       // Without this the live perf HUD re-arms the profiler as owner 'hud'
       // mid-block and frame-profiler.arm() throws on the mismatch.
       ok('...having taken the live UI down for its duration', h.uiEvents.join(',') === 'hide,restore');
+      // ⚠️ THE DIRECT REGRESSION PIN for the 2026-08-12 live failure: every
+      // waitFrames call happened while the profiler was ARMED. Two per block
+      // (settle, then measure) x three blocks = 6. If this ever contains a
+      // `false`, some call site is waiting on an unarmed profiler again, and it
+      // will time out live exactly like it did before this fake could catch it.
+      ok('every waitFrames call happened while armed', h.waitCalls.length === 6 && h.waitCalls.every((c) => c.armed));
     }
 
     // Restore is in a `finally`. This is the block that matters most: a throw

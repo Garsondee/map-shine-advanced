@@ -934,6 +934,7 @@ export function deriveFindings({
   pipelineStats = null,
   depthProxyPoolStats = null,
   shaderRebuildStats = null,
+  pipelineRebuildStats = null,
   windowDiagnostics = null,
   sweepRequested = false,
   sweepMeasuredCount = 0,
@@ -1113,6 +1114,42 @@ export function deriveFindings({
           materialChanged: worst.materialChanged,
           nodesChanged: worst.nodesChanged,
           distinctCacheKeys: worst.distinctCacheKeys,
+          otherChurningLabels: churning.length - 1,
+        },
+      });
+    }
+  }
+
+  // PIPELINE-REBUILD CHURN (2026-08-12) — one cache layer downstream of
+  // shader-rebuild-churn just above: not "was the TSL node graph rebuilt"
+  // but "did that graph's shader source need a brand-new GPU PIPELINE
+  // OBJECT" (device.createRenderPipeline — a real, synchronous,
+  // main-thread-blocking driver call, three.webgpu.js's Pipelines class). A
+  // node graph can be perfectly cached — shaderRebuildStats reading a clean
+  // 0-miss window — while THIS cache still misses, e.g. the same material
+  // rendering into a different render target for the first time. See
+  // pipeline-rebuild-probe.js's own header for the mechanism, including why
+  // counting `.set()` calls directly (rather than diffing cache size) is
+  // what makes this reliable: a genuine rebuild can release the render
+  // object's previous pipeline in the same call that installs the new one,
+  // netting `.size` to zero even though a real compile happened.
+  //
+  // Same "not hedged" reasoning as shader-rebuild-churn, applied by hand:
+  // this probe's `misses` is a flat per-label count with no built-in
+  // settle-vs-churn split, so only a label's SECOND-and-later miss counts —
+  // its first is an expected cold compile, same as any other cache warming
+  // up, never a one-time settle cost this deep into the measured window.
+  if (pipelineRebuildStats?.installed === true && Array.isArray(pipelineRebuildStats.labels)) {
+    const churning = pipelineRebuildStats.labels.filter((l) => l.misses > 1);
+    if (churning.length > 0) {
+      const worst = churning[0]; // the probe itself sorts worst-first
+      out.push({
+        severity: 'high',
+        id: 'pipeline-rebuild-churn',
+        text: `${worst.label} forced a brand-new GPU pipeline compile ${worst.misses - 1} time(s) beyond its first this window. device.createRenderPipeline is synchronous and main-thread-blocking, and this is a DIFFERENT cache from shader-rebuild-churn's node graph one — see pipeline-rebuild-probe.js's own header for why a miss here can happen even when that one reads clean. Likely cause: this render object's material/geometry/render-target combination changing shape between frames (e.g. a render-target or blend-state change), not the node graph itself — pooling/reusing the object rather than the material is the fix to try first.`,
+        evidence: {
+          label: worst.label,
+          misses: worst.misses,
           otherChurningLabels: churning.length - 1,
         },
       });
@@ -1766,6 +1803,7 @@ export function buildPerfReport({
   pipelineStats = null,
   depthProxyPoolStats = null,
   shaderRebuildStats = null,
+  pipelineRebuildStats = null,
   windowDiagnostics = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
@@ -1892,6 +1930,7 @@ export function buildPerfReport({
     pipelineStats,
     depthProxyPoolStats,
     shaderRebuildStats,
+    pipelineRebuildStats,
     windowDiagnostics,
     sweepRequested: sweep !== null,
     sweepMeasuredCount,
@@ -2006,6 +2045,13 @@ export function buildPerfReport({
       // not implement readShaderRebuildStats, not "no churn happened" — see
       // shader-rebuild-probe.js's own header.
       shaderRebuildStats,
+      // PIPELINE-REBUILD CHURN (2026-08-12) — one cache layer downstream of
+      // shaderRebuildStats above: watches three's GPU PIPELINE cache
+      // (device.createRenderPipeline) directly, which can miss even when the
+      // node-graph cache above reads clean — see pipeline-rebuild-probe.js's
+      // own header. `null` means the harness in use does not implement
+      // readPipelineRebuildStats, not "no churn happened".
+      pipelineRebuildStats,
       // WINDOW-SURFACE COMPOSITION (2026-08-12) — one entry per floor that
       // has ever synced, each carrying `sceneChildCount`/`sceneChildren` from
       // `getStatus()`. `null` means the harness does not implement
@@ -2022,7 +2068,9 @@ export function buildPerfReport({
         'depthProxyPoolStats.start vs .end: a low hit rate means the same class of rebuild is happening ' +
         'downstream of the depth-proxy pool specifically — see findings[]. shaderRebuildStats.labels: any ' +
         'materialChanged/nodesChanged above zero is a REPEAT rebuild this window, not a cold start — see ' +
-        'findings[] for which label and which fix it implies.',
+        'findings[] for which label and which fix it implies. pipelineRebuildStats.labels: a DIFFERENT, ' +
+        'downstream cache from shaderRebuildStats — misses above 1 for a label is a repeat GPU pipeline ' +
+        'compile, and can fire even when shaderRebuildStats reads clean.',
     },
     findings,
     interpretation: buildInterpretation({

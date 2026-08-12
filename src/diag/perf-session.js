@@ -246,6 +246,13 @@ export async function runProfileSession(harness, opts = {}) {
     // readPipelineStats above it): a caller without it just measures without
     // this instrument.
     if (typeof harness.setShaderRebuildProbe === 'function') harness.setShaderRebuildProbe(true);
+    // PIPELINE-REBUILD CHURN (2026-08-12) — one cache layer downstream of the
+    // shader-rebuild probe just above: not "was the node graph rebuilt" but
+    // "did that graph need a brand-new GPU pipeline compile" — see
+    // pipeline-rebuild-probe.js's own header for why a miss there can happen
+    // even when the probe above reads a clean 0-miss window. Same
+    // arm-for-every-measured-window discipline, same optional hook.
+    if (typeof harness.setPipelineRebuildProbe === 'function') harness.setPipelineRebuildProbe(true);
 
     // PIPELINE HEALTH, START OF THE REAL WINDOW (2026-08-09) — sampled here,
     // not before settling, on purpose: settle frames exist BECAUSE first-use
@@ -313,6 +320,11 @@ export async function runProfileSession(harness, opts = {}) {
     } catch {
       say('warning', 'failed to disarm the shader-rebuild probe');
     }
+    try {
+      if (typeof harness.setPipelineRebuildProbe === 'function') harness.setPipelineRebuildProbe(false);
+    } catch {
+      say('warning', 'failed to disarm the pipeline-rebuild probe');
+    }
     // ALWAYS, same reasoning as disarmProfiler above — a thrown error must
     // still hand the panel back, or a failed run leaves the author with no
     // UI and no idea why.
@@ -347,6 +359,11 @@ export async function runProfileSession(harness, opts = {}) {
   // this window, not a lifetime counter.
   const shaderRebuildStats =
     typeof harness.readShaderRebuildStats === 'function' ? harness.readShaderRebuildStats() : null;
+  // PIPELINE-REBUILD CHURN, read AFTER disarm — same reasoning and same
+  // reset-on-arm semantics as shaderRebuildStats immediately above: this
+  // single read already IS the delta for this window.
+  const pipelineRebuildStats =
+    typeof harness.readPipelineRebuildStats === 'function' ? harness.readPipelineRebuildStats() : null;
   // WINDOW-SURFACE COMPOSITION (2026-08-12) — a snapshot, not a delta, so
   // read-once here is the whole story (no start/end pairing needed, same
   // reasoning as shaderRebuildStats immediately above but simpler still: this
@@ -445,6 +462,7 @@ export async function runProfileSession(harness, opts = {}) {
         ? { start: depthProxyPoolStatsStart, end: depthProxyPoolStatsEnd }
         : null,
     shaderRebuildStats,
+    pipelineRebuildStats,
     windowDiagnostics,
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,

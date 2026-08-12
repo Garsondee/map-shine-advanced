@@ -142,6 +142,7 @@ import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/p
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
 import { createShaderRebuildProbe } from '../diag/shader-rebuild-probe.js';
+import { createPipelineRebuildProbe } from '../diag/pipeline-rebuild-probe.js';
 import { resolveElevationFloorIndex, compareLayerKeys } from '../scene/layer-order.js';
 // THE ZONE'S ONE DOOR (zones/one-door) — unlike the layer-order/world-quad/
 // occlusion imports just above and below (pre-existing, tolerated debt at
@@ -9518,6 +9519,18 @@ export async function startVtPanViewer({
     let shaderRebuildProbe = null;
 
     /**
+     * PIPELINE-REBUILD PROBE (diag/pipeline-rebuild-probe.js, 2026-08-12) —
+     * one cache layer downstream of the shader-rebuild probe above: not "was
+     * the TSL node graph rebuilt" but "did that graph's shader source need a
+     * brand-new GPU PIPELINE OBJECT" (device.createRenderPipeline, a real,
+     * synchronous, main-thread-blocking driver call). A node graph can be
+     * perfectly cached while this cache still misses. Same reason for living
+     * here (needs the `renderer` this closure owns) and same OFF-until-armed
+     * discipline (it wraps `getForRender` on the hot path too).
+     */
+    let pipelineRebuildProbe = null;
+
+    /**
      * ZONE INDICES, RESOLVED ONCE. Every id below is declared in
      * `diag/perf-zones.js` and cross-checked against the live pass graph by its
      * Node suite, so a typo here becomes `-1` — which every begin/end treats as a
@@ -13009,6 +13022,46 @@ export async function startVtPanViewer({
           ? shaderRebuildProbe.stats()
           : { installed: false, calls: 0, hits: 0, misses: 0, labels: [], note: 'probe never armed this session' };
       },
+      /**
+       * PIPELINE-REBUILD PROBE arm/disarm (diag/pipeline-rebuild-probe.js).
+       * Lazily constructed on first arm so an unarmed session never even
+       * builds the object, and hard-required to find `renderer._pipelines` —
+       * a probe that silently reported zero rebuilds forever would be worse
+       * than no probe at all ([[feedback_instruments_must_not_lie]]).
+       */
+      setPipelineRebuildProbe(on) {
+        if (!on) {
+          if (!pipelineRebuildProbe) return { armed: false };
+          pipelineRebuildProbe.uninstall();
+          return { armed: false, ...pipelineRebuildProbe.stats() };
+        }
+        if (!pipelineRebuildProbe) {
+          const pipelines = renderer?._pipelines ?? null;
+          if (!pipelines) {
+            return {
+              armed: false,
+              skipped: true,
+              reason:
+                "renderer._pipelines is not present — three's internal layout changed and this probe needs " +
+                'rewiring. Reporting the skip rather than arming a probe that would count nothing.',
+            };
+          }
+          try {
+            pipelineRebuildProbe = createPipelineRebuildProbe({ pipelines });
+          } catch (err) {
+            return { armed: false, skipped: true, reason: String(err?.message ?? err) };
+          }
+        }
+        pipelineRebuildProbe.reset();
+        pipelineRebuildProbe.install();
+        return { armed: true };
+      },
+      /** Perf profile: what the pipeline-rebuild probe has seen so far. */
+      getPipelineRebuildStats() {
+        return pipelineRebuildProbe
+          ? pipelineRebuildProbe.stats()
+          : { installed: false, calls: 0, hits: 0, misses: 0, labels: [], note: 'probe never armed this session' };
+      },
       /** Perf profile: renderer.info counters, for per-zone draw-call deltas. */
       readRenderInfo() {
         const size = renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -15438,6 +15491,27 @@ export function setVtPanViewerShaderRebuildProbe(on) {
 export function getVtPanViewerShaderRebuilds() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getShaderRebuildStats();
+}
+
+/**
+ * PIPELINE-REBUILD PROBE (diag/pipeline-rebuild-probe.js) — arm, pan, read.
+ * One cache layer downstream of the shader-rebuild probe above: answers "did
+ * this render object force a brand-new GPU PIPELINE compile", which can
+ * happen even when the node-graph probe reads a clean 0-miss window.
+ *
+ * Usage, from the console:
+ *   MapShine.setPipelineRebuildProbe(true)   // arm + reset
+ *   ...pan the camera for a few seconds...
+ *   MapShine.getPipelineRebuilds()           // read labels[], worst first
+ *   MapShine.setPipelineRebuildProbe(false)  // disarm (wraps a hot-path call)
+ */
+export function setVtPanViewerPipelineRebuildProbe(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setPipelineRebuildProbe(on);
+}
+export function getVtPanViewerPipelineRebuilds() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getPipelineRebuildStats();
 }
 
 /**

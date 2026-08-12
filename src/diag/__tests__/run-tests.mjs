@@ -25,6 +25,7 @@ import { run as runEffectControls } from './effect-controls.test.mjs';
 import { run as runSettingsPanel } from './settings-panel.test.mjs';
 import { run as runRenderFallback } from './render-fallback.test.mjs';
 import { run as runShaderRebuildProbe } from './shader-rebuild-probe.test.mjs';
+import { run as runPipelineRebuildProbe } from './pipeline-rebuild-probe.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -64,6 +65,7 @@ const suites = [
   ['settings-panel', runSettingsPanel],
   ['render-fallback', runRenderFallback],
   ['shader-rebuild-probe', runShaderRebuildProbe],
+  ['pipeline-rebuild-probe', runPipelineRebuildProbe],
 ];
 
 for (const [name, fn] of suites) {

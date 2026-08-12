@@ -146,6 +146,8 @@ import {
   setVtPanViewerDebugForceOpaqueBlendOff,
   setVtPanViewerShaderRebuildProbe,
   getVtPanViewerShaderRebuilds,
+  setVtPanViewerPipelineRebuildProbe,
+  getVtPanViewerPipelineRebuilds,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
   setVtPanViewerPointLightBatching,
@@ -533,6 +535,10 @@ MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
 // own doc in vt-pan-viewer.js for the console workflow.
 MapShine.setShaderRebuildProbe = setVtPanViewerShaderRebuildProbe;
 MapShine.getShaderRebuilds = getVtPanViewerShaderRebuilds;
+// PIPELINE-REBUILD PROBE — arm, pan, read. See setVtPanViewerPipelineRebuildProbe's
+// own doc in vt-pan-viewer.js for the console workflow.
+MapShine.setPipelineRebuildProbe = setVtPanViewerPipelineRebuildProbe;
+MapShine.getPipelineRebuilds = getVtPanViewerPipelineRebuilds;
 // STAGE 1's revert flag — "shade every pixel once"
 // (docs/planning/Stage-1-Shade-Once.md). Default OFF until its pixel-diff and
 // bench gates pass; kept afterwards as the permanent revert (Testament Law 5).
@@ -2825,6 +2831,13 @@ function install() {
     // without this instrument, same as every other optional hook here.
     setShaderRebuildProbe: (on) => setVtPanViewerShaderRebuildProbe(on),
     readShaderRebuildStats: () => getVtPanViewerShaderRebuilds(),
+    // PIPELINE-REBUILD CHURN (2026-08-12) — one cache layer downstream of the
+    // shader-rebuild probe just above: see pipeline-rebuild-probe.js's own
+    // header for why a miss here can happen even when that probe reads a
+    // clean 0-miss window at the same time. Same auto-arm-for-the-measured-
+    // window discipline, same optional-hook shape.
+    setPipelineRebuildProbe: (on) => setVtPanViewerPipelineRebuildProbe(on),
+    readPipelineRebuildStats: () => getVtPanViewerPipelineRebuilds(),
     // WINDOW-SURFACE COMPOSITION (2026-08-12) — chasing a real, still-open
     // finding: `light.drawWindowLight` reports ~4 GPU draw calls per
     // renderer.render() call where "one mesh, one quad" (window-surface-

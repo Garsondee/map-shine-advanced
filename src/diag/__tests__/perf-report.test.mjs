@@ -1179,6 +1179,97 @@ export function run(t) {
     });
     ok('a fully healthy window raises no finding', !churnHealthy.some((f) => f.id === 'shader-rebuild-churn'));
 
+    // PIPELINE-REBUILD CHURN (2026-08-12) — one cache layer downstream of
+    // shader-rebuild-churn above: a flat per-label miss count (no
+    // materialChanged/nodesChanged split — a pipeline miss already names the
+    // render object directly), so the finding applies the "first miss is a
+    // cold start, not churn" bar by hand instead of relying on the probe.
+    const pipelineChurning = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineRebuildStats: {
+        installed: true,
+        calls: 900,
+        hits: 850,
+        misses: 50,
+        labelsDropped: 0,
+        labels: [{ label: 'window/glass', misses: 6 }],
+      },
+    });
+    const pipelineChurnFinding = pipelineChurning.find((f) => f.id === 'pipeline-rebuild-churn');
+    ok('a real repeat pipeline compile is surfaced', pipelineChurnFinding !== undefined);
+    ok(
+      '...at HIGH severity unconditionally — a repeat compile is never a cold start',
+      pipelineChurnFinding.severity === 'high'
+    );
+    ok('...naming the worst label', pipelineChurnFinding.text.includes('window/glass'));
+    ok(
+      '...counting repeats beyond the first (5, not 6)',
+      pipelineChurnFinding.text.includes('5 time(s)') && pipelineChurnFinding.evidence.misses === 6
+    );
+    ok(
+      '...distinguishing itself from shader-rebuild-churn explicitly',
+      pipelineChurnFinding.text.includes('DIFFERENT cache from shader-rebuild-churn')
+    );
+
+    // A cold-start-only window (every label's first-ever miss, never a
+    // repeat) must NOT trip this.
+    const pipelineColdOnly = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineRebuildStats: {
+        installed: true,
+        calls: 40,
+        hits: 0,
+        misses: 40,
+        labelsDropped: 0,
+        labels: [{ label: 'tile/NodeMaterial', misses: 1 }],
+      },
+    });
+    ok(
+      'a label seen only once (a cold compile) raises no finding',
+      !pipelineColdOnly.some((f) => f.id === 'pipeline-rebuild-churn')
+    );
+
+    // A probe that never armed (harness didn't implement the hook) must not
+    // fabricate a finding from missing data.
+    const pipelineChurnAbsent = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineRebuildStats: null,
+    });
+    ok(
+      'no pipelineRebuildStats at all raises no finding (absence, not a zero)',
+      !pipelineChurnAbsent.some((f) => f.id === 'pipeline-rebuild-churn')
+    );
+
+    // A probe that armed but found a fully healthy window must also stay quiet.
+    const pipelineChurnHealthy = deriveFindings({
+      attribution,
+      rows,
+      effects,
+      frame: {},
+      method: { gpu: 'timestamp-query' },
+      budgetMs: 8.33,
+      pipelineRebuildStats: { installed: true, calls: 100, hits: 100, misses: 0, labelsDropped: 0, labels: [] },
+    });
+    ok(
+      'a fully healthy window raises no finding',
+      !pipelineChurnHealthy.some((f) => f.id === 'pipeline-rebuild-churn')
+    );
+
     // A declared cost the measurement contradicts.
     const overEffects = attributeZonesToEffects({
       rows: buildZoneRows({ zones: ZONES, frames: 100, zoneStats: [zs('bloom.bright', { gpu: acc(1000, 100, 12) })] }),

@@ -65,6 +65,10 @@ export {
   // re-runs three's TSL node-graph build, and why.
   setVtPanViewerShaderRebuildProbe,
   getVtPanViewerShaderRebuilds,
+  // PIPELINE-REBUILD PROBE (diag/pipeline-rebuild-probe.js) — one cache layer
+  // downstream: did a render object force a brand-new GPU pipeline compile.
+  setVtPanViewerPipelineRebuildProbe,
+  getVtPanViewerPipelineRebuilds,
   // STAGE 1's revert flag (docs/planning/Stage-1-Shade-Once.md).
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,

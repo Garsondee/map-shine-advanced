@@ -60,10 +60,11 @@ class FakeScene {
 
 export function run(t) {
   const engineInstances = [];
-  const makeFakeEngine = (kind, archetype) => {
+  const makeFakeEngine = (kind, archetype, renderOrder) => {
     const e = {
       kind,
       archetype,
+      renderOrder,
       scene: { visible: true, renderOrder: 0 },
       spawnCalls: [],
       paramCalls: [],
@@ -105,7 +106,7 @@ export function run(t) {
   const subsystem = createFireSubsystem({
     THREE: { Scene: FakeScene },
     getFireRenderState: () => state,
-    createEngine: ({ kind, archetype }) => makeFakeEngine(kind, archetype),
+    createEngine: ({ kind, archetype, renderOrder }) => makeFakeEngine(kind, archetype, renderOrder),
   });
 
   const renderer = {}; // only needs to be truthy — no real compute happens
@@ -120,6 +121,15 @@ export function run(t) {
   t.ok(
     'every flame engine received its first spawn push',
     flameEngines.every((e) => e.spawnCalls.length === 1)
+  );
+
+  // ── renderOrder MUST be a construction-time arg, not set on `engine.scene`
+  // after the fact — THREE reads it off the renderable MESH, never off an
+  // ancestor container, so the old `engine.scene.renderOrder = ...` line was
+  // a silent no-op. This asserts `createEngine` actually receives it. ──
+  t.ok(
+    'flame and ember get renderOrder 0/1, smoke gets 2, passed to createEngine',
+    flameEngines.every((e) => e.renderOrder === 0) && emberEngine.renderOrder === 1 && smokeEngine.renderOrder === 2
   );
 
   // ── motionSpeed IS GLOBAL: it must reach EVERY engine, not just flame's ──
@@ -230,5 +240,21 @@ export function run(t) {
   t.ok(
     'every engine received the real 2-point cloud, not another empty one',
     [...flameEngines, emberEngine, smokeEngine].every((e) => e.spawnCalls.at(-1)?.count === 2)
+  );
+
+  // ── "Fire intensity" (Presence category — p.intensity), not "Flame
+  // brightness" (Look category — p.brightness), must reach every engine's
+  // setParams as `intensity`. fireRuntimeFromParams returns BOTH: `intensity`
+  // (from p.brightness, a volumetric-material uniform that only ever reached
+  // the orphaned fire-render.js) and `fireIntensity` (from p.intensity, the
+  // control an author actually reaches for — "How hard everything burns").
+  // The live particle engine's own `intensity` param feeds its real emission
+  // uniform, so the subsystem must forward `runtime.fireIntensity` to it, not
+  // `runtime.intensity` — moving "Fire intensity" used to do nothing at all. ──
+  state.params = { ...state.params, intensity: 1.8, brightness: 0.2 };
+  subsystem.sync(renderer, 96, 0.016, rect);
+  t.ok(
+    '"Fire intensity" reaches every engine\'s setParams.intensity, not "Flame brightness"',
+    engineInstances.every((e) => e.paramCalls.at(-1)?.intensity === 1.8)
   );
 }

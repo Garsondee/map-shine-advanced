@@ -199,6 +199,14 @@ const PERSPECTIVE_CAMERA_HEIGHT = 1000;
  * @param {object} deps.worldRect - `{minX,minY,maxX,maxY}`; a placeholder is fine,
  *   `step()` sets the real one each frame.
  * @param {number} [deps.zDepth=0]
+ * @param {number} [deps.renderOrder=0] - set on the actual MESH, not `scene`.
+ *   THREE reads `renderOrder` off the renderable object being drawn, never off
+ *   an ancestor container — `fire-subsystem.js` used to set it on the wrapper
+ *   `engine.scene` it hands the caller, which has no geometry of its own and
+ *   is never itself the thing rendered, so it was a silent no-op (smoke's
+ *   "draws last" guarantee rested entirely on scene-graph insertion order by
+ *   accident, not on this value). Taking it here, at the one place the mesh
+ *   actually gets constructed, is what makes it real.
  * @param {object} [deps.windHandle]
  * @param {number} [deps.pxPerMeter=100]
  * @returns {object} `{scene, capacity, init, step, setWorldRect, setSpawnPoints, updateWind, debugState}`
@@ -210,6 +218,7 @@ export function createFireParticleEngine({
   system,
   worldRect,
   zDepth = 0,
+  renderOrder = 0,
   windHandle = TIER0_WIND_HANDLE,
   pxPerMeter = 100,
 }) {
@@ -666,6 +675,7 @@ export function createFireParticleEngine({
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false; // world-space bounds vary per frame; culling is the GPU's job
+  mesh.renderOrder = renderOrder; // see the constructor param's own doc — must be on the mesh, not `scene`
   const scene = new THREE.Scene();
   scene.add(mesh);
 

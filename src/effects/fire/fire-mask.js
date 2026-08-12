@@ -363,6 +363,16 @@ export function extractFiresFromMask(grid, { maxFires = MAX_FIRES, minDiameterPx
  * a signature that silently misses a change is exactly how a stale bake
  * survives an edit (`feedback_url_keyed_cache_needs_a_content_validator`).
  *
+ * ⚠️ MUST MIX `spec.width`/`spec.height`, NOT JUST `spec.w`/`spec.h` — its
+ * sibling `fireSpawnSignature` (fire-spawn-points.js) already does, and this
+ * one didn't. `w`/`h` are the TEXEL GRID dimensions; `width`/`height` are the
+ * WORLD-SPACE rect they cover. A region's world bounds can change (a resize,
+ * or a different item hosting the same texel resolution) with `w`/`h`/`x`/`y`
+ * all unchanged, and every downstream `x`/`y`/`diameterPx` this function's
+ * caller caches depends on `width`/`height` too (`extractFiresFromMask` reads
+ * `texelW = spec.width / w`). Without this, that resize reads as "unchanged"
+ * and `fireMaskCache` (boot.js) serves stale positions/sizes past the edit.
+ *
  * @param {{spec: object, data: Uint8Array}} grid @returns {number}
  */
 export function fireMaskSignature(grid) {
@@ -378,6 +388,8 @@ export function fireMaskSignature(grid) {
   mix(spec.h);
   mix(Math.round(spec.x));
   mix(Math.round(spec.y));
+  mix(Math.round(spec.width));
+  mix(Math.round(spec.height));
   const stride = Math.max(1, Math.floor(data.length / 4096));
   let sum = 0;
   let count = 0;

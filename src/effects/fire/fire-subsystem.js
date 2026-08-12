@@ -185,20 +185,30 @@ export function createFireSubsystem({
     const pxPerMeter = getPxPerMeter?.() ?? 100;
     const worldRect = { minX: 0, minY: 0, maxX: 1, maxY: 1 }; // real rect arrives per frame
     const add = (kind, archetype, capacity) => {
+      // ⚠️ SMOKE DRAWS LAST. It is the only NORMAL-blended layer, so it must
+      // composite over the additive flame and embers rather than under them —
+      // smoke sits above the fire and genuinely hides what is beneath it, which
+      // is the whole reason it is not additive.
+      //
+      // ⚠️ MUST BE A CONSTRUCTOR PARAM, NOT `engine.scene.renderOrder` SET
+      // AFTER THE FACT — THREE reads `renderOrder` off the RENDERABLE OBJECT
+      // (the mesh), never off an ancestor container, and `engine.scene` is
+      // just a wrapper this factory hands back, with no geometry of its own.
+      // Setting it here used to be a silent no-op: smoke's "draws last"
+      // guarantee rested entirely on scene-graph insertion order (this loop
+      // happens to add smoke last) rather than on any explicit ordering, which
+      // would have broken the moment that insertion order ever changed.
+      const renderOrder = kind === 'smoke' ? 2 : kind === 'ember' ? 1 : 0;
       const engine = createEngine({
         THREE,
         kind,
         archetype,
         system: { id: `fire.${kind}`, params: { capacity } },
         worldRect,
+        renderOrder,
         windHandle,
         pxPerMeter,
       });
-      // ⚠️ SMOKE DRAWS LAST. It is the only NORMAL-blended layer, so it must
-      // composite over the additive flame and embers rather than under them —
-      // smoke sits above the fire and genuinely hides what is beneath it, which
-      // is the whole reason it is not additive.
-      engine.scene.renderOrder = kind === 'smoke' ? 2 : kind === 'ember' ? 1 : 0;
       engines.push({ engine, kind });
       scene.add(engine.scene);
     };
@@ -310,7 +320,20 @@ export function createFireSubsystem({
       const tune = runtime.perKind?.[kind] ?? {};
       engine.setParams({
         ...tune,
-        intensity: runtime.intensity,
+        // ⚠️ `fireIntensity`, NOT `intensity`. `fireRuntimeFromParams` returns
+        // BOTH: `intensity` is `p.brightness` ("Flame brightness", Look) — a
+        // volumetric-material uniform that only ever reached the orphaned
+        // `fire-render.js` — while `fireIntensity` is `p.intensity` ("Fire
+        // intensity", Presence, "how hard everything burns"), the control an
+        // author actually reaches for. This engine's own `setParams` takes an
+        // `intensity` key (feeds `uIntensity`, the live shader's real
+        // brightness uniform) — reading `runtime.intensity` here silently
+        // wired the WRONG source param to it: moving "Fire intensity" did
+        // nothing to the live particle fire, and "Flame brightness" (whose own
+        // help text describes banding/posterize failure modes that don't
+        // exist in this shader) was the one that happened to work, by
+        // coincidence of a shared field name (`feedback_shared_field_two_meanings_two_registries`).
+        intensity: runtime.fireIntensity,
         cameraHeight: runtime.cameraHeight,
         motionSpeed: runtime.motionSpeed,
         // Smoke keeps V2's absolute sizing: it is the layer the author reports

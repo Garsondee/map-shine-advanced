@@ -305,5 +305,13 @@ export function run(t) {
     // change the signature.
     const moved = gridFrom(['....', '.##.', '.##.', '....'], { x: 500 });
     t.ok('a moved grid signs differently', fireMaskSignature(a) !== fireMaskSignature(moved));
+
+    // A resized WORLD RECT with the SAME texel grid (w/h/x/y unchanged) must
+    // also change the signature — this is what `w`/`h` alone cannot see:
+    // `extractFiresFromMask` derives `texelW = spec.width / w`, so a resize
+    // changes every fire's x/y/diameterPx while the texel dimensions and
+    // origin this signature otherwise mixes stay identical.
+    const resized = { spec: { ...a.spec, width: a.spec.width * 3, height: a.spec.height * 3 }, data: a.data };
+    t.ok('a resized world rect (same w/h/x/y) signs differently', fireMaskSignature(a) !== fireMaskSignature(resized));
   }
 }

@@ -6173,9 +6173,25 @@ export async function startVtPanViewer({
       return { packs, layerErrors };
     }
 
-    async function ensureItemLoaded(item) {
+    /**
+     * THE SYNCHRONOUS FAST PATH (split out 2026-08-12 — see the ROOT-CAUSE
+     * comment on PHASE 1's loop, below, for the full story). Returns the
+     * existing state if `item` is already loaded, `undefined` if it genuinely
+     * needs `loadNewItem`'s async round trip. No `await` anywhere in this
+     * function, on purpose: it must be callable WITHOUT ever creating (or
+     * making a caller await) a Promise, because an `async function` ALWAYS
+     * returns one and `await`ing even an already-resolved Promise always
+     * defers its continuation to the microtask queue — real, spec'd
+     * behaviour, not a bug, but a real cost when paid unnecessarily on every
+     * one of ~5 already-loaded items, every single residency pass, every
+     * pass a busy microtask queue happens to be sharing that deferred tick
+     * with something else entirely.
+     */
+    function tryGetLoadedItem(item) {
       const existing = itemStates.get(item.id);
-      if (existing) {
+      if (!existing) return undefined;
+      profiler?.begin(Z.residencyItemLoadExisting);
+      try {
         itemStateHits += 1;
         existing.item = item; // refresh (renderOrder/key change per update)
         // ⚠️ BUG FIX (2026-08-08, author report: a candle behind an existing
@@ -6191,13 +6207,24 @@ export async function startVtPanViewer({
         // time this tile loaded — exactly the "resolved once, never revisited"
         // bug class `floorAttrItem` was invented to close, just one hop
         // upstream of where that fix actually landed. A fresh document (delete
-        // + recreate) gets a new id and takes the `!existing` branch below,
-        // which is why that was the author's own workaround.
+        // + recreate) gets a new id and takes `loadNewItem` below, which is
+        // why that was the author's own workaround.
         if (existing.wholeImage) {
           for (const t of existing.wholeImage.tiles) t.floorAttrItem = item;
         }
         return existing;
+      } finally {
+        profiler?.end(Z.residencyItemLoadExisting);
       }
+    }
+
+    /**
+     * THE GENUINELY-NEW-ITEM PATH ONLY. Callers must have already tried
+     * `tryGetLoadedItem` and gotten `undefined` — this function does not
+     * re-check `itemStates` itself, so calling it for an already-loaded item
+     * would wrongly re-fetch and stomp its state.
+     */
+    async function loadNewItem(item) {
       itemStateMisses += 1;
 
       // No albedo atlas, no page streaming for the floor art —
@@ -6216,7 +6243,7 @@ export async function startVtPanViewer({
       // pipeline that used to sit alongside it (streaming mode, removed
       // 2026-07-22 — see feedback_mode_forks_silently_drop_features) is gone.
       // try/finally, not a bare begin/await/end (BUG FOUND LIVE, 2026-08-09):
-      // `ensureItemLoaded` has no try/catch of its own — the caller's PHASE 1
+      // this function has no try/catch of its own — the caller's PHASE 1
       // loop does (item 1d's "permanently-broken item" handling, a REAL,
       // documented, recurring scenario: a 404'd asset). Without finally, a
       // throwing `getSourceDimensions` would jump straight past
@@ -6255,6 +6282,20 @@ export async function startVtPanViewer({
       itemStates.set(item.id, state);
       requestItemAlphaGrid(item, dims);
       return state;
+    }
+
+    /**
+     * COMBINED CONVENIENCE WRAPPER — unchanged public shape/behaviour for the
+     * two callers that don't care about the microtask-yield cost (the
+     * one-time initial scene load and the background floor-prewarm loop,
+     * both already async top to bottom). PHASE 1's own loop, below, does NOT
+     * call this — it calls `tryGetLoadedItem` directly so an all-already-
+     * loaded pass never awaits at all. See that loop's own comment.
+     */
+    async function ensureItemLoaded(item) {
+      const existing = tryGetLoadedItem(item);
+      if (existing !== undefined) return existing;
+      return loadNewItem(item);
     }
 
     /** Items whose coarse alpha has been asked for — one request per item per
@@ -9696,6 +9737,12 @@ export async function startVtPanViewer({
       // item costs that, before touching the sequential await chain itself.
       residencyItemLoadDims: profiler?.indexOf('residency.itemLoadDims') ?? -1,
       residencyItemLoadMasks: profiler?.indexOf('residency.itemLoadMasks') ?? -1,
+      // ADDED 2026-08-12 — three captures running (P-008, its addendum,
+      // 2026-08-12's report) confirm the two zones above never fire on a
+      // cache-warm pan, so residency.itemLoad's ~10.6ms mean is NOT new-item
+      // I/O. This isolates the one remaining unmeasured branch: the
+      // `existing` early-return itself (see perf-zones.js's own comment).
+      residencyItemLoadExisting: profiler?.indexOf('residency.itemLoadExisting') ?? -1,
       residencyItemRefresh: profiler?.indexOf('residency.itemRefresh') ?? -1,
     };
 
@@ -11049,6 +11096,36 @@ export async function startVtPanViewer({
           // delete. The failure stays LOUD either way: it is in `layerLoadErrors`
           // in every report, permanently, not silently skipped.
           if (failedItemIds.has(item.id)) continue;
+          // ROOT-CAUSE, 2026-08-12 — the mystery three prior rounds (2026-08-09
+          // x2, 2026-08-11's full audit, 2026-08-12's own report) all chased
+          // and none closed: `residency.itemLoad` cost ~6-10ms/pass on a
+          // cache-warm scene where `residency.itemLoadDims`/`itemLoadMasks`
+          // (the only REAL I/O in this loop) never fired at all. A fresh zone
+          // (`residency.itemLoadExisting`, wrapping ONLY the already-loaded
+          // branch's own body) proved that branch itself costs ~0.002ms —
+          // genuinely trivial, exactly as every static reading always said.
+          // 99.8% of the zone's cost was unaccounted for by ANY code inside
+          // `ensureItemLoaded`, on either branch. It was never in the branch
+          // bodies — it was the `await` boundary itself: `ensureItemLoaded`
+          // is `async`, so calling it ALWAYS returns a Promise, and `await`
+          // on a Promise ALWAYS defers its continuation to the microtask
+          // queue — real, spec'd behaviour, paid on EVERY already-loaded item
+          // (~5/pass here) even though nothing async is happening. On a busy
+          // frame, that deferred continuation shares the microtask queue with
+          // whatever ELSE has pending promise work at that instant, and the
+          // WALL-CLOCK bracket (genuine elapsed time, not a measurement bug —
+          // see this loop's own note above on why draw-call SAMPLING across
+          // this same boundary was contaminated the same way) counts however
+          // long that takes to drain, not just this item's own turn. `tryGet
+          // LoadedItem` (`ensureItemLoaded`'s own doc) answers "already
+          // loaded?" synchronously, with no Promise and no yield at all, so a
+          // pass where every item is already loaded — the common case, this
+          // whole loop long — now never awaits once.
+          const alreadyLoaded = tryGetLoadedItem(item);
+          if (alreadyLoaded !== undefined) {
+            states.push([item, alreadyLoaded]);
+            continue;
+          }
           try {
             states.push([item, await ensureItemLoaded(item)]);
           } catch (err) {

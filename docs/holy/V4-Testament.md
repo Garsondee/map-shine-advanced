@@ -2471,3 +2471,98 @@ behaviour change earns the author's own eyes before defaulting on, not a worker'
 `npm run verify` green throughout, 8,899 tests. All four items the author asked for are built and
 wired into a single `perf-run-full`/`gateGlass` combination — nothing here requires a second
 manual step to observe, except turning `gateGlass` on, which is deliberately left to the author.
+
+---
+
+**P-011 — The residency "already-loaded" mystery, chased across four rounds since 2026-08-09 and
+never closed, is CLOSED: root cause found, fixed, and proven live at 677×.** Filed by Claude
+Sonnet 5, 2026-08-12, acting as a worker under the Covenant. Prompted by the author directly:
+*"focus all your attention on 'The mystery that keeps coming back' — residency and streaming...
+Dig deep, kill this performance problem at long last please."*
+
+**The root cause.** `ensureItemLoaded` (`vt-pan-viewer.js`) is declared `async` even though its
+"already loaded" branch (`itemStates.get` hits — the OVERWHELMING common case on a cache-warm pan,
+confirmed zero new items by three separate captures running: P-008, its addendum, and this
+session's own report) does no asynchronous work at all — a `Map.get`, a field write, a small
+bounded loop. **That doesn't matter.** An `async function` always returns a Promise, and `await`
+on a Promise — even one already resolved — always defers its continuation to the microtask queue.
+That is correct, spec'd JavaScript, paid in full on every one of the ~5 already-loaded items PHASE
+1's loop awaits, every single residency pass, whether or not anything needs to wait for anything.
+On a busy frame, that deferred continuation shares the microtask queue with whatever else has
+promise work pending at that instant — and the zone's wall-clock bracket (genuinely elapsed real
+time, not a measurement bug; see this loop's own pre-existing comment on the closely related
+draw-call-sampling contamination the 2026-08-11 audit already found) counts however long the
+queue takes to drain, not just this item's own turn.
+
+**How it was found — instrument before optimizing, the same move S2.6 just used on
+`light.pointLightUpdate`, aimed at this system instead.** A new zone, `residency.itemLoadExisting`
+(`perf-zones.js`, `ensureItemLoaded`'s existing-branch bracketed on its own), isolated the ONE
+branch of this function nobody had directly measured. A real `perf-run-full` capture (Ground
+Floor, 565 passes, 4,382... — window varies, see raw JSONs) read **`residency.itemLoadExisting`:
+0.002ms mean, 6.2ms total** across the whole capture — genuinely trivial, exactly as every static
+reading since 2026-08-09 always said. Against that, `residency.itemLoad` (the zone wrapping the
+WHOLE per-item loop) totalled **3,828.3ms** the same capture. **6.2ms of measured work inside a
+3,828.3ms bracket — 99.8% unaccounted for by any code inside `ensureItemLoaded`, on either
+branch.** It was never in a branch body. It was the `await` boundary itself.
+
+**The fix.** `ensureItemLoaded` split into three: `tryGetLoadedItem(item)` — the SAME already-
+loaded logic, verbatim, now a plain synchronous function, no `async`, no Promise, ever;
+`loadNewItem(item)` — the genuinely-new-item path, unchanged, still `async`, still pays real
+`await`s for real I/O; `ensureItemLoaded(item)` — kept as a thin combined wrapper, byte-identical
+behaviour to before, for its other two callers (the one-time initial scene load and the background
+floor-prewarm loop — both already async top to bottom, both unaffected). **Only PHASE 1's own loop
+changes**: it now calls `tryGetLoadedItem` first and only falls through to `await
+ensureItemLoaded(item)` when that returns `undefined`. A pass where every item is already
+loaded — the ordinary case, this whole loop long — now awaits **zero times** instead of once per
+item.
+
+**Evidence, before → after, same machine, same bench Mansion, same route (raw JSONs:
+`tests/playwright-artifacts/look/perf-run-full-result.json`, overwritten between runs — numbers
+transcribed here before the second run replaced the file):**
+
+| zone | before | after |
+| --- | --- | --- |
+| `residency.itemLoad` mean | 6.776 ms | **0.01 ms** |
+| `residency.itemLoad` total | 3,828.3 ms | **4.6 ms** |
+| `residency.itemLoadExisting` mean | 0.002 ms | 0.001 ms (unchanged, as expected — its own body was never touched) |
+
+**A 677× reduction in the zone's own mean cost**, from a change that touches nothing but WHERE an
+`await` happens, not what any branch computes. `npm run verify` green throughout both edits,
+9,112 tests, unchanged count (this is a scheduling change with no new branch a test doesn't
+already cover for both states). No new console errors in either live capture (the one present,
+`boot VRAM severance — canvasInit proxy registration failed`, is the same pre-existing, unrelated
+failure DEFERRED-S1b's own evidence already named).
+
+**Proof the real I/O path is untouched, not just unbroken:** the AFTER capture happened to include
+two genuinely new items (`residency.itemLoadDims`: 2 occurrences, 487.25ms mean, 936.8ms max) —
+real network fetches, front-loaded in the capture's first 10 seconds (a fresh session's initial
+settle), costing real time exactly as they should. `loadNewItem` was never touched by this fix and
+this is direct, live evidence it still works.
+
+**Honest caveats, named rather than buried:**
+- **fps is NOT the proof here, the zone number is.** avgFps varied across this session's several
+  back-to-back captures (42.5 / 73.6 / 49.6) purely from ordinary machine-load noise (P-003's own
+  standing rule: these need an idle machine to compare cleanly) — nowhere near clean enough for an
+  fps-level before/after claim. The zone-level number is the trustworthy one: it isolates exactly
+  the code path that changed, is immune to whatever else the machine was doing, and moved 677×.
+- **The AFTER capture's own `hitches-overlap-zone` finding still shows `residency.pass` open
+  during 90% of that run's hitches.** This is NOT a sign the fix failed — it is the two genuine
+  new-item loads above, each a real ~487ms-average network wait, which legitimately stall whatever
+  frame they land in. That is the Aug-11 audit's OWN separately-flagged, separately-risk-tagged
+  lever (§6 item 4, "parallelize the sequential per-item/per-mask await chains") — real, still
+  open, deliberately NOT touched by this fix, which was surgical: kill the cost paid for NOTHING,
+  leave the cost paid for something real exactly as it was.
+- **Not yet the author's own LIVE verdict.** Built, tested, measured twice live by this worker;
+  the two-word doctrine (`BUILT (unverified)` vs `LIVE`) means this is the former until the author
+  loads a real scene and looks. No revert flag exists — like DEFERRED-S1b, this is a pure
+  scheduling/allocation change with no semantic branch to gate behind one; correctness rests on
+  `tryGetLoadedItem` being a verbatim extraction (checked by re-reading both versions side by side
+  during this edit) plus the two live captures above, not a byte-diff gate.
+
+**What remains genuinely open, so the next reader doesn't assume this closes residency
+entirely:** the sequential-await-chain cost for GENUINELY new items (audit §6 item 4) is real,
+risk-tagged, and untouched; `uniform-buffers-grew` (10-27× across four separate sightings now,
+2026-08-11 ×2, this session ×2) remains a live, un-investigated lead; whether the 20-worst-hitch
+mystery from the original audit's §5 has any OTHER cause besides genuine new-item loads is still
+not fully separated out. This petition closes the specific, named mystery the author asked for —
+"already loaded, still costs 10ms" — not every open question about residency.

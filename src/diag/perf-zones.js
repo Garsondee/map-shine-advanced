@@ -1034,6 +1034,32 @@ export const ZONES = Object.freeze(
       false,
       'ensureItemLoaded'
     ),
+    // ADDED 2026-08-12, chasing the "round 3" mystery two comments up one
+    // step further: three separate captures (P-008, its addendum, and the
+    // report P-009/P-010 shipped) all confirm zero occurrences of the two
+    // zones just above during a cache-warm pan — so residency.itemLoad's
+    // ~10.6ms mean cannot be new-item I/O. It has to be either the `existing`
+    // branch's own work (Map.get + field writes + a bounded per-tile loop —
+    // "sub-millisecond" by static reading, never measured) or the per-item
+    // loop machinery AROUND `ensureItemLoaded` (the `failedItemIds` check,
+    // the try/catch, the array push, one microtask tick per `await` even on
+    // an already-resolved promise). This zone brackets ONLY the `existing`
+    // branch's own body, so `residency.itemLoad − (this zone's sum) −
+    // itemLoadDims − itemLoadMasks` is what's left over in the loop shell
+    // itself — the same "instrument before optimizing" move S2.6 just used
+    // on `light.pointLightUpdate` (`feedback_aggregate_cannot_name_the_
+    // source`), aimed at this system instead.
+    z(
+      'residency.itemLoadExisting',
+      'Per-item already-loaded refresh (existing items only)',
+      'residency',
+      null,
+      null,
+      'cpu',
+      'event',
+      false,
+      'ensureItemLoaded'
+    ),
     z(
       'residency.itemRefresh',
       'Per-item placement + mesh refresh (phase 2)',

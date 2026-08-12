@@ -2313,3 +2313,100 @@ at all. `npm run verify` green, 8,758 tests.
 
 **Both fixes are Node-verified only.** Neither has run against live Foundry yet â€” the author's
 next `perf-run-full` is the first real execution of either.
+
+---
+
+**P-010 — "All four": a steady-zone spike finding, a window-composition diagnostic, a
+pipeline-level rebuild probe, and the window-light occlusion gate — the last of which found and
+fixed a real bug before it could ship.** Filed by Claude Opus 5, 2026-08-12, acting as a worker
+under the Covenant. Prompted by the author directly, after a Chrome trace screenshot and three
+questions: *"Looks like light accumulation is still the main performance bottleneck. Do you
+agree? Investigate window light... Make the Early-Z part of the performance sweep."* — this
+session answered with four numbered follow-ups, and the author's reply was *"All four — build
+them - preferably make it so that I can run a performance report and give you all this
+information."* Commits `41d72b7`, `2ae41bd`, `770a4ee`.
+
+**BUILT — `steady-spike:<zoneId>`, the finding that names the shape behind the author's own
+screenshot.** `pass.light.accumulate` and `light.pointLightUpdate` each read a healthy mean in
+the 2026-08-12 capture (4.8ms and 0.76ms) while separately peaking at 32.7ms (6.8x) and 22.7ms
+(30x) in the SAME window — invisible to every existing finding, because `dominant-zone`/
+`bottleneck` only ever read the mean and `sparse-spike` only ever reads sparse-cadence zones. This
+fires on any every-frame zone whose `max/mean` ratio clears 5x with a peak of at least 5ms — high
+severity above 15x. A pass row's `cpuMs` is checked (an ordinary inclusive measurement); its
+`gpuMs` is deliberately excluded, because `annotatePassResiduals` makes that column a residual,
+not a total, and checking it would answer a different, uninteresting question — an early draft
+excluded pass rows entirely and would have silently dropped the exact zone this exists to catch,
+caught by hand-verifying against the real numbers before the permanent tests were written. The
+finding names the shape, not the cause, and points at `shader-rebuild-churn`/`pipeline-rebuild-churn`
+first — see below.
+
+**BUILT — `window-surface-composition:<floorIndex>`, chasing a live anomaly (`drawCalls:4` where
+the code predicts 1) that remains genuinely unresolved.** `getStatus()` now reports
+`sceneChildCount`/`sceneChildren` per floor; the finding fires when a visible floor's count isn't
+exactly 1. A Node test against the REAL vendored `three.webgpu.js` confirms the subsystem's OWN
+construction is correct (one mesh, two triangles) — so if this ever fires, the anomaly is not in
+how the mesh is built, and the mystery is narrowed to the live-runtime level, not solved.
+
+**BUILT — `diag/pipeline-rebuild-probe.js`, one cache layer below `shader-rebuild-probe.js`.**
+That probe answers "was the TSL node graph rebuilt"; this one answers "did that graph's shader
+source need a brand-new GPU PIPELINE object" (`Pipelines._getRenderPipeline` to
+`backend.createRenderPipeline`, synchronous and main-thread-blocking in the ordinary render loop)
+— a graph can be perfectly cached while this cache still misses. Two designs were tried and
+rejected before the shipped one: diffing `pipelines.caches.size` before/after fails because a
+genuine rebuild can release the render object's previous pipeline in the SAME call that installs
+the new one, netting `.size` to zero; a one-time wrap of `caches.set` goes silently dark after
+`Pipelines.dispose()` (reachable from any renderer/context teardown mid-session) reassigns
+`.caches` to a fresh Map. The shipped probe counts `.set()` calls directly via a wrap that
+re-verifies and re-applies itself on every tracked `getForRender` call, so it survives a
+mid-session `.caches` swap instead of quietly stopping. Wired through the same
+auto-armed-per-report path as its sibling: `vt-pan-viewer.js` to `boot.js`'s `profileHarness` to
+`perf-session.js` to a new `pipeline-rebuild-churn` finding — an id `steady-spike`'s own text
+already named by anticipation before this probe existed to back it.
+
+**BUILT, THEN A REAL BUG FOUND AND FIXED BEFORE IT SHIPPED — `gateGlass` on
+`buildWindowSurfaceMaterial`, default OFF.** "ONE SUBSYSTEM PER FLOOR" (`vt-pan-viewer.js`,
+2026-08-09) keeps every floor's window quad drawing for as long as that floor exists in the
+scene, not just while it is viewed — so on a multi-floor map, every hidden floor pays the full
+ten-simplex-tap glass field only to be zeroed by the floor gate at the very end. Follows
+`specular-render.js`'s own proven `Fn()`/`If()` shimmer-gate idiom exactly: the maths must be
+CONSTRUCTED inside the `If()` callback, not built outside and referenced, or (per that file's own
+header) it hoists straight back out of the branch and skips nothing. The debug material's own
+channels stay ungated always — `feedback_instruments_must_not_lie` — via a `buildGlassCookie()`
+helper called once ungated (debug) and, when the gate compiles in, a second time inside the
+branch (production only).
+
+**The bug.** TSL's `Fn()` callback is deferred (`reference_tsl_fn_deferred_execution_trap`) — it
+does not run when `buildWindowSurfaceMaterial` is called, only later, whenever three's
+NodeBuilder first actually visits the graph (in practice, the mesh's first VISIBLE render).
+`window-surface-subsystem.js` keeps the mesh hidden until its mask has finished loading and
+`setMaskTexture()` has ALREADY been called once, asynchronously. The gated build's own `texture()`
+taps, being constructed after that point, would have closed over the construction-time placeholder
+texture forever — `setMaskTexture` can only update nodes that already exist, and a node built
+later has no chance to receive an update that already happened. Found by tracing the actual load
+sequence by hand, not by a failing test: no Node test can exercise a deferred `Fn()` callback's
+body at all (no WebGPU device — the same ceiling `keyhole-tsl-constructs-in-node` already names),
+so this would have shipped invisible to 8,899 green assertions and surfaced only as windows on
+every floor rendering the wrong (stub) texture, live, in front of the author. **Fixed** with a
+`liveMaskTexture` variable `setMaskTexture` updates in addition to its existing node loop, so a
+`texture()` node built after the call still starts correct instead of depending on a retroactive
+fix-up a not-yet-built node cannot receive. A test-only `debugGetLiveMaskTexture()` getter proves
+the wiring moves, which is the most Node can prove of this fix at all.
+
+**Live verification.** Two full `npx playwright test tests/playwright/msa-look.spec.js` runs
+against the real Mythica Machina Mansion (two floors, real GPU) — one with `gateGlass:true` wired
+in at the one call site, one with the shipped default — both completed with no crash and
+structurally identical scene composition; a close pixel-region comparison found no difference
+beyond one animated token's rotation phase (unrelated to window light, confirmed by inspection). A
+third, more rigorous attempt — a same-technique adaptation of `stage1-earlyz-pixel-diff.mjs`'s
+frozen-time, pixel-exact diff (`gateGlass` isn't live-flippable like `earlyZComposition`, so this
+needed two separate frozen loads rather than one live flip) — hung with zero output after the
+browser launched; Foundry's own server log shows login/game-ready succeeding in under 15 seconds,
+so the hang is client-side in `map-shine-utils.js`'s wait chain, cause not diagnosed. Left
+uncommitted at `tests/playwright-artifacts/look/capture-window-canvas.mjs` for whoever picks this
+up next. **`gateGlass` ships default OFF** — this evidence is real but short of the pixel-exact
+bar the Stage 1 precedent set, and per `feedback_safety_slide_outranks_doctrine` a shader
+behaviour change earns the author's own eyes before defaulting on, not a worker's judgment call.
+
+`npm run verify` green throughout, 8,899 tests. All four items the author asked for are built and
+wired into a single `perf-run-full`/`gateGlass` combination — nothing here requires a second
+manual step to observe, except turning `gateGlass` on, which is deliberately left to the author.

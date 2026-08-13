@@ -17,6 +17,7 @@ import {
   toRootAbsoluteAssetUrl,
   reducePinRefState,
   INITIAL_PIN_REF_STATE,
+  parseContentRangeTotal,
 } from '../decode-primitives.js';
 
 export async function run(t) {
@@ -516,6 +517,40 @@ export async function run(t) {
     // Degenerate inputs must never throw (a decode request must survive them).
     ok('toRootAbsoluteAssetUrl: empty string returns empty string', toRootAbsoluteAssetUrl('') === '');
     ok('toRootAbsoluteAssetUrl: null returns null (no throw)', toRootAbsoluteAssetUrl(null) === null);
+  }
+
+  // --- parseContentRangeTotal: the packed-page IndexedDB staleness fix
+  // (2026-08-13 — a same-name mask re-upload served the OLD decode forever,
+  // matching pageStoreKey's own long-standing "add an mtime/version segment
+  // here later" TODO). Pure parse of a `Content-Range` response header into
+  // the resource's current total byte length — decode-pool.js's
+  // getContentValidator folds this into the page-store key so a genuinely
+  // different file naturally misses the old cache entry.
+  {
+    ok(
+      'parseContentRangeTotal: a normal partial-content header yields the total',
+      parseContentRangeTotal('bytes 0-0/259840') === 259840
+    );
+    ok(
+      'parseContentRangeTotal: is case-insensitive on the unit token',
+      parseContentRangeTotal('Bytes 0-0/1024') === 1024
+    );
+    ok(
+      'parseContentRangeTotal: tolerates surrounding whitespace',
+      parseContentRangeTotal('  bytes 0-0/1024  ') === 1024
+    );
+    ok('parseContentRangeTotal: null header (Range not honoured) yields null', parseContentRangeTotal(null) === null);
+    ok('parseContentRangeTotal: absent header (undefined) yields null', parseContentRangeTotal(undefined) === null);
+    ok('parseContentRangeTotal: non-string input yields null, never throws', parseContentRangeTotal(42) === null);
+    ok('parseContentRangeTotal: malformed header yields null', parseContentRangeTotal('not a content-range') === null);
+    ok(
+      'parseContentRangeTotal: a wildcard total ("bytes 0-0/*", server doesn\'t know the length) yields null',
+      parseContentRangeTotal('bytes 0-0/*') === null
+    );
+    ok(
+      'parseContentRangeTotal: a zero total is treated as unknown, not a real 0-byte file',
+      parseContentRangeTotal('bytes 0-0/0') === null
+    );
   }
 
   // --- reducePinRefState: decode-pool.js's pinned-source release lifecycle

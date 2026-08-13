@@ -66,6 +66,7 @@ import {
   readLeadingBytes,
   reducePinRefState,
   INITIAL_PIN_REF_STATE,
+  parseContentRangeTotal,
 } from './decode-primitives.js';
 
 export { DEFAULT_BORDER_PX, pageWorldRect, computePagePlacement };
@@ -166,6 +167,71 @@ export function getSourceBitmap(url) {
     _sourceCache.set(url, entry);
   }
   return entry;
+}
+
+/** @type {Map<string, Promise<string|null>>} URL -> the CURRENT content validator
+ * (this session's cheap ranged-GET size probe result), settled or in-flight.
+ * One fetch per URL per browser session — see `getContentValidator`'s own doc. */
+const _validatorCache = new Map();
+
+/**
+ * The current content validator for a URL — a `bytes=0-0` ranged GET (same
+ * technique `mask-discovery.js`'s existence probe already uses), reduced to
+ * its `Content-Range` total via `parseContentRangeTotal`. Memoized per URL for
+ * the life of this browser session: this exists to answer "has this URL's
+ * FILE CONTENT changed since IndexedDB last cached a page from it" — see
+ * `decode-primitives.js#parseContentRangeTotal`'s own header for the gap this
+ * closes (`pageStoreKey`'s "URL+mtime" design intent, never finished) — and a
+ * page is only ever a cache candidate ONCE per this same session, so re-
+ * probing on every call would pay a network round trip for no new answer.
+ *
+ * ⚠️ FAILS SOFT TO `null`, THE SAME POSTURE EVERY OTHER PIECE OF THIS MODULE
+ * TAKES ON A CACHE. A server that ignores Range, a CORS failure, an offline
+ * probe — none of these are "the content changed"; they are "validation isn't
+ * possible right now", and the caller's own null-check falls back to the
+ * OLD, URL-only key (today's behaviour, unchanged) rather than treating an
+ * unprobeable URL as permanently uncacheable.
+ *
+ * @param {string} url - already root-absolute (`toRootAbsoluteAssetUrl`).
+ * @returns {Promise<string|null>} a short validator string to fold into a
+ *   page-store key, or null if this URL can't be validated this way.
+ */
+function getContentValidator(url) {
+  let entry = _validatorCache.get(url);
+  if (!entry) {
+    entry = fetch(url, { headers: { Range: 'bytes=0-0' } })
+      .then((res) => {
+        // Any non-2xx (including a server that doesn't have this URL at all)
+        // fails soft below. A 200 (Range ignored, full body sent) is `res.ok`
+        // too but carries no `Content-Range` header, so parseContentRangeTotal
+        // already resolves that case to null on its own — no separate check needed.
+        if (!res.ok) return null;
+        const total = parseContentRangeTotal(res.headers.get('Content-Range'));
+        return total === null ? null : `sz${total}`;
+      })
+      .catch(() => null);
+    _validatorCache.set(url, entry);
+  }
+  return entry;
+}
+
+/**
+ * Fold each URL's current content validator into its page-store key —
+ * `pageStoreKey(url, ...)` becomes `pageStoreKey(`${url}#${validator}`, ...)`
+ * when a validator is available, byte-identical to today's key otherwise. A
+ * plain `Map` (not `Promise.all`) so a single slow/failed probe among several
+ * URLs can't block the ones that resolved fine.
+ * @param {string[]} urls @returns {Promise<Map<string, string>>} url -> keyed URL.
+ */
+async function resolveValidatedUrls(urls) {
+  const out = new Map();
+  await Promise.all(
+    urls.map(async (url) => {
+      const validator = await getContentValidator(url);
+      out.set(url, validator ? `${url}#${validator}` : url);
+    })
+  );
+  return out;
 }
 
 /**
@@ -656,6 +722,32 @@ function persistPage(key, canvas) {
   } catch (_) {}
 }
 
+/**
+ * Re-persist a WORKER-decoded page under the validated key, closing the loop
+ * `getContentValidator` opens. The worker's own `persist()` (decode-pool.
+ * worker.js) still writes under the PLAIN url/packId it was dispatched with —
+ * changing that would mean widening the worker message protocol, a cross-
+ * thread change this fix deliberately avoids touching. Left alone, that gap
+ * would make every worker-decoded page a PERMANENT miss against the validated
+ * key every future lookup asks for — correct (never stale) but wasteful
+ * (re-decoding pages that haven't actually changed, every single session).
+ * This closes it from the main thread instead: cheap (an `ImageBitmap` is
+ * already fully decoded; drawing it once costs nothing like a real decode),
+ * additive (the worker's own persist is untouched, so this is pure belt-and-
+ * braces), and only ever runs for genuine MISSES — never the hot hit path.
+ * @param {string} keyUrl @param {{mip:number,px:number,py:number}} page @param {ImageBitmap} bitmap
+ */
+function repersistUnderValidatedKey(keyUrl, page, bitmap) {
+  try {
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0);
+    persistPage(pageStoreKey(keyUrl, page.mip, page.px, page.py), canvas);
+  } catch (_) {
+    // Best-effort — the page still renders fine this frame either way; only
+    // a FUTURE session's cache-hit rate is at stake here, never correctness.
+  }
+}
+
 // parseImageDimensions moved to decode-primitives.js (imported above) — pure
 // PNG/WebP header parsing; see that file for the WebP device-loss history.
 
@@ -742,9 +834,16 @@ export async function acquirePages(url, table, pages, opts = {}) {
   const pageSizePx = opts.pageSizePx ?? 256;
   const results = [];
   const misses = [];
+  // THE CONTENT VALIDATOR — see `getContentValidator`'s own doc for the gap
+  // this closes (`pageStoreKey`'s unfinished "URL+mtime" design intent). Falls
+  // back to the plain `url` (today's behaviour, byte-identical) when this
+  // URL can't be validated. Resolved ONCE per call, not per page — same
+  // "once per batch" cost discipline `acquirePackedPages` already applies to
+  // its own channel-source acquisition.
+  const keyUrl = (await resolveValidatedUrls([url])).get(url) ?? url;
 
   for (const page of pages) {
-    const key = pageStoreKey(url, page.mip, page.px, page.py);
+    const key = pageStoreKey(keyUrl, page.mip, page.px, page.py);
     let blob = null;
     try {
       blob = await getPageBlob(key);
@@ -779,7 +878,12 @@ export async function acquirePages(url, table, pages, opts = {}) {
       pageSizePx,
     });
     if (worker) {
-      results.push(...foldWorkerResults(worker, misses, 1)); // one source decoded
+      const fromWorker = foldWorkerResults(worker, misses, 1); // one source decoded
+      results.push(...fromWorker);
+      // See `repersistUnderValidatedKey`'s own doc — the worker's own persist
+      // (decode-pool.worker.js) still writes under the plain `url`; this
+      // closes the loop so a FUTURE session's validated lookup can hit too.
+      if (keyUrl !== url) for (const { page, bitmap } of fromWorker) repersistUnderValidatedKey(keyUrl, page, bitmap);
     } else {
       // FALLBACK — the original main-thread slice path (still correct, just
       // with the giant-source freeze the worker exists to remove).
@@ -791,7 +895,7 @@ export async function acquirePages(url, table, pages, opts = {}) {
           const { canvas, bitmap } = await timedDecodePage(source, rect, pageSizePx);
           results.push({ page, bitmap });
           _decodeStats.idbSlices++;
-          persistPage(pageStoreKey(url, page.mip, page.px, page.py), canvas);
+          persistPage(pageStoreKey(keyUrl, page.mip, page.px, page.py), canvas);
           const now = performance.now();
           if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
             await yieldToMain();
@@ -836,6 +940,27 @@ export async function acquirePages(url, table, pages, opts = {}) {
  * channel means what it says with no alpha needed — except the owner, whose
  * alpha is exactly the "did the author paint here" bit its rasterizer wants.
  *
+ * ⚠️ THAT RESOLUTION IS A THRESHOLD, NOT A LINEAR BLEND (2026-08-13). The
+ * first version computed `raw × a + absentByte × (1 − a)` — a genuinely
+ * transparent (a=0) texel correctly resolved to `absentByte`, exactly the
+ * catalog's own reasoning for giving `fire` no alpha slot ("a transparent
+ * texel is not fire" — `mask-catalog.js#packedTrioChannelPolicy`) — but a
+ * PARTIALLY transparent one (an antialiased brush edge, a=0.3..0.9) got its
+ * RAW VALUE scaled down by however soft that edge happened to be, even though
+ * neither `fire`'s nor `shadow`'s own catalog `meaning` says anything about
+ * alpha at all — both are pure grayscale signals ("white=fire, black=none").
+ * A small/thin painted stroke is mostly edge and almost no solid core, so it
+ * lost far more of its intensity to this than a large blob with a big opaque
+ * centre ever would — author-reported live: fire painted small on an upper
+ * floor registered nothing, while the identical paint amount worked fine on
+ * the ground floor, and the SAME small paint's own peak stored byte measured
+ * 234/255 rather than a clean 255 — exactly this attenuation's signature.
+ * `compositePackedTexels` now gates on alpha (`PACKED_CHANNEL_ALPHA_GATE`)
+ * instead of scaling by it: below the gate a texel is the faintest fringe of
+ * nothing really painted there (still correctly absent); at or above it, the
+ * artist meant to paint here, and gets their RAW value back, undimmed by
+ * whatever alpha their brush's edge happened to leave behind.
+ *
  * Passing no policy reproduces the old bytes exactly, so the torture world (whose
  * shared-hole invariant is genuine) is unaffected.
  *
@@ -846,6 +971,18 @@ export const LEGACY_PACK_CHANNEL_POLICY = /** @type {PackChannelPolicy} */ (
 );
 
 /**
+ * THE ANTIALIASED-FRINGE GATE for a non-owner packed channel's own alpha byte
+ * (0..255) — mirrors `scene/mask-derive.js#HEIGHT_COVERAGE_THRESHOLD`'s own
+ * value and reasoning exactly (that module is a different zone; `vt/` cannot
+ * import across the boundary, so this is its own copy, not a shared
+ * reference — the same "every consumer gets its own copy" discipline this
+ * codebase already applies to its depth-authority resolvers). Below this, a
+ * texel is the faintest fringe of an antialiased edge, nothing really painted
+ * there. At or above it, the artist meant this pixel to carry real content.
+ */
+const PACKED_CHANNEL_ALPHA_GATE = 8;
+
+/**
  * Bumped whenever the recipe above changes. It rides in the IndexedDB page-store
  * key, because a packed page is persisted by `packId` and a stale composite is
  * indistinguishable from a fresh one — the [[feedback_url_keyed_cache_needs_a_content_validator]]
@@ -853,7 +990,7 @@ export const LEGACY_PACK_CHANNEL_POLICY = /** @type {PackChannelPolicy} */ (
  * every returning session would keep serving pages packed under the broken rule
  * and the fix would look like it did nothing.
  */
-export const PACK_RECIPE_VERSION = 2;
+export const PACK_RECIPE_VERSION = 4;
 
 /**
  * Composite one packed RGBA page from its three channel sources, in place.
@@ -881,8 +1018,14 @@ export function compositePackedTexels(out, rPix, gPix, bPix, policy) {
       if (ch === alphaOwner || absent == null) {
         out[j + offsetOf[ch]] = raw;
       } else {
-        const a = pix[j + 3] / 255;
-        out[j + offsetOf[ch]] = Math.round(raw * a + absent * (1 - a));
+        // A GATE, NOT A SCALE — see this function's own header for why. Below
+        // the fringe threshold the artist didn't mean to paint here (absent);
+        // at or above it, they did, and their RAW value survives undimmed —
+        // never scaled down by however soft their brush's own edge happened
+        // to be, which used to punish a small/thin stroke (mostly edge) far
+        // harder than a large blob (mostly solid core) for painting the same
+        // way.
+        out[j + offsetOf[ch]] = pix[j + 3] >= PACKED_CHANNEL_ALPHA_GATE ? raw : absent;
       }
     }
     out[j + 3] = ownerPix[j + 3];
@@ -939,13 +1082,20 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
   // thread, the worker's `persist()`, and the IndexedDB lookup below can never
   // disagree about which recipe a stored page was baked under.
   packId = `${packId}#pack${PACK_RECIPE_VERSION}`;
+  // THE CONTENT VALIDATOR — see `getContentValidator`'s own doc for the gap
+  // this closes. All 3 channel sources fold in (any one of `_Shadow`/
+  // `_Outdoors`/`_Fire` changing must invalidate the SHARED packed page), and
+  // `keyPackId` falls back to the plain `packId` (today's behaviour, byte-
+  // identical) when none of the three can be validated.
+  const [rV, gV, bV] = await Promise.all([channelUrls.r, channelUrls.g, channelUrls.b].map(getContentValidator));
+  const keyPackId = rV || gV || bV ? `${packId}@${rV ?? '_'}-${gV ?? '_'}-${bV ?? '_'}` : packId;
   const borderPx = opts.borderPx ?? DEFAULT_BORDER_PX;
   const pageSizePx = opts.pageSizePx ?? 256;
   const results = [];
   const misses = [];
 
   for (const page of pages) {
-    const key = pageStoreKey(packId, page.mip, page.px, page.py);
+    const key = pageStoreKey(keyPackId, page.mip, page.px, page.py);
     let blob = null;
     try {
       blob = await getPageBlob(key);
@@ -980,7 +1130,13 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
       channelPolicy,
     });
     if (worker) {
-      results.push(...foldWorkerResults(worker, misses, 3)); // 3 channel sources decoded
+      const fromWorker = foldWorkerResults(worker, misses, 3); // 3 channel sources decoded
+      results.push(...fromWorker);
+      // See `repersistUnderValidatedKey`'s own doc — the worker's own persist
+      // (decode-pool.worker.js) still writes under the plain `packId`; this
+      // closes the loop so a FUTURE session's validated lookup can hit too.
+      if (keyPackId !== packId)
+        for (const { page, bitmap } of fromWorker) repersistUnderValidatedKey(keyPackId, page, bitmap);
     } else {
       // FALLBACK — the original main-thread packed compositing path.
       // Slice each channel source ONCE for the whole miss batch, extracting
@@ -1021,7 +1177,7 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
         ctx.putImageData(out, 0, 0);
         results.push({ page, bitmap: await createImageBitmap(canvas) });
         _decodeStats.idbSlices++;
-        persistPage(pageStoreKey(packId, page.mip, page.px, page.py), canvas);
+        persistPage(pageStoreKey(keyPackId, page.mip, page.px, page.py), canvas);
         const now = performance.now();
         if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
           await yieldToMain();

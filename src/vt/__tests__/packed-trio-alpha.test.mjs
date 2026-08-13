@@ -124,11 +124,36 @@ export function run(t) {
     ok(`a transparent r (absent 255) resolves to 255, not to its 0 byte (got ${resolved[0]})`, resolved[0] === 255);
     ok('a transparent b (absent 0) resolves to 0', resolved[2] === 0);
 
-    // Half-transparent: a straight source-over toward the absent value.
-    const half = new Uint8ClampedArray(4);
-    compositePackedTexels(half, px(0, 128), px(10, 255), px(200, 128), policy);
-    ok(`a half-transparent r blends toward its absent value (got ${half[0]}, want ~128)`, Math.abs(half[0] - 128) <= 1);
-    ok(`a half-transparent b blends toward 0 (got ${half[2]}, want ~100)`, Math.abs(half[2] - 100) <= 1);
+    // ⚠️ GATED, NOT SCALED (2026-08-13) — see compositePackedTexels' own header
+    // for the author-reported bug this replaces: painting fire small on an
+    // upper floor registered nothing, while the identical paint amount worked
+    // fine on the ground floor, traced to a soft/antialiased brush edge's
+    // alpha silently scaling down the artist's RAW painted value — punishing
+    // a small/thin stroke (mostly edge) far harder than a large blob (mostly
+    // solid core). A texel at or above the fringe gate now keeps its raw
+    // value verbatim, no matter how far short of fully-opaque its own alpha
+    // falls short — that IS the fix, so this pins it rather than just not
+    // regressing it.
+    const halfAlpha = new Uint8ClampedArray(4);
+    compositePackedTexels(halfAlpha, px(0, 128), px(10, 255), px(200, 128), policy);
+    ok(
+      `a half-transparent (a=128) r keeps its RAW value, not a blend toward absent (got ${halfAlpha[0]}, want 0)`,
+      halfAlpha[0] === 0
+    );
+    ok(`a half-transparent (a=128) b keeps its RAW value (got ${halfAlpha[2]}, want 200)`, halfAlpha[2] === 200);
+
+    // Just below the gate: still the faintest fringe of nothing really
+    // painted there — resolves to absent, same as fully transparent.
+    const fringe = new Uint8ClampedArray(4);
+    compositePackedTexels(fringe, px(0, 7), px(10, 255), px(200, 7), policy);
+    ok(`a=7 (below the gate) r resolves to its absent value (got ${fringe[0]}, want 255)`, fringe[0] === 255);
+    ok(`a=7 (below the gate) b resolves to its absent value (got ${fringe[2]}, want 0)`, fringe[2] === 0);
+
+    // Right at the gate: the artist meant to paint here.
+    const atGate = new Uint8ClampedArray(4);
+    compositePackedTexels(atGate, px(0, 8), px(10, 255), px(200, 8), policy);
+    ok(`a=8 (right at the gate) r keeps its RAW value (got ${atGate[0]}, want 0)`, atGate[0] === 0);
+    ok(`a=8 (right at the gate) b keeps its RAW value (got ${atGate[2]}, want 200)`, atGate[2] === 200);
 
     // Opaque everywhere: byte-for-byte the old behaviour, so a genuinely
     // opaque mask (the entirely-black `_Outdoors` an underground scene is

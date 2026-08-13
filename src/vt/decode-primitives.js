@@ -247,6 +247,43 @@ export function toRootAbsoluteAssetUrl(url) {
 }
 
 /**
+ * Parse the byte-range TOTAL out of a `Content-Range` response header
+ * (`"bytes 0-0/12345"` → `12345`) — the content validator a `bytes=0-0`
+ * ranged GET already returns for free (the SAME technique `mask-discovery.js`'s
+ * existence probe and this module's own `getSourceDimensions` already use),
+ * repurposed here to answer "did this URL's bytes change" rather than just
+ * "does this URL exist". Pure, Node-testable; the fetch itself is
+ * decode-pool.js's job (browser-only).
+ *
+ * ⚠️ THE GAP THIS CLOSES. `pyramid-store.js#pageStoreKey`'s own header has
+ * said, since this module's first version, "add an mtime/version segment here
+ * later if authored assets ever change under a stable URL" — Keyhole.md
+ * §4.1's original design called the key "URL+mtime"; the implementation only
+ * ever kept the URL half. A same-name file replacement (a repainted mask,
+ * re-exported under its existing filename) is therefore byte-identical in
+ * every cache key this module computes, so a page decoded before the edit
+ * keeps being served after it — forever, across every future session, until
+ * `PACK_RECIPE_VERSION` is manually bumped
+ * (`feedback_url_keyed_cache_needs_a_content_validator`). `getContentValidator`
+ * (decode-pool.js) uses this to fold the CURRENT byte length into the page-
+ * store key, so a genuinely different file naturally misses the old entry
+ * instead of needing an explicit staleness check.
+ *
+ * @param {string|null|undefined} headerValue - a `Content-Range` header, or absent.
+ * @returns {number|null} the resource's total byte length, or null if the
+ *   header is missing/malformed (the server didn't honour Range, or the
+ *   response wasn't partial content) — the caller's fail-soft signal to skip
+ *   validation rather than invent a value.
+ */
+export function parseContentRangeTotal(headerValue) {
+  if (typeof headerValue !== 'string') return null;
+  const m = /^bytes\s+\d+-\d+\/(\d+)$/i.exec(headerValue.trim());
+  if (!m) return null;
+  const total = Number(m[1]);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+/**
  * Read only the first `n` bytes of a Response's body via its stream, then
  * cancel the rest — the point being to never pay for what a full
  * `res.arrayBuffer()` would cost when the server ignored our Range header and

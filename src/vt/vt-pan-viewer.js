@@ -8336,6 +8336,16 @@ export async function startVtPanViewer({
           })
         : null;
       t.coverageGrid = coverageGrid;
+      // `t.alphaMinGrid` — the S1a sibling of `t.coverageGrid` just above, same
+      // reasoning: the min-grid ALSO arrives asynchronously (it rides the same
+      // compressed-texture load `wi.alphaMinGrid` is set from), so the first
+      // geometry build for an item legitimately happens without one, and
+      // `refreshWholeImageItem`'s own re-mesh condition needs a way to tell
+      // "already meshed against THIS min-grid" from "it arrived since" — the
+      // exact comparison `t.coverageGrid !== coverageGrid` already makes for
+      // the coverage grid, extended to this one now that a caller can act on
+      // the difference.
+      t.alphaMinGrid = minGrid;
       const n = mask ? mask.cells : requested;
       const positionAttr = t.geometry.getAttribute('position');
       if (n <= 1) {
@@ -8658,12 +8668,34 @@ export async function startVtPanViewer({
                 floorAttrItem: floorAttrItem ?? null,
                 uExpectedDepth: uExpectedDepth ?? null,
               };
+              // ⚠️ SET ON `wi` BEFORE `setTileGeometry` BELOW, NOT AFTER (fixed
+              // 2026-08-13 — the S1a min-grid split was structurally unable to
+              // ever engage on a tile's first build until this moved). Both
+              // used to be assigned several lines further down, past this same
+              // synchronous block's `setTileGeometry` call — which reads
+              // `wi.alphaMinGrid` for THIS exact tile RIGHT BELOW. On every
+              // first build `wi` is a freshly-created object with neither
+              // field set yet, so that read was always `undefined`, no matter
+              // how fresh the compressed-texture cache record actually was —
+              // confirmed live: `getEarlyZComposition()`'s own diagnostic
+              // (which reads `wi.alphaMinGrid` fresh, at REPORT time) showed
+              // real min-grid data present, while `t.splitDeclined` stayed
+              // stuck at `'noMinGrid'` — a value `setTileGeometry` had already
+              // captured and would never re-derive (see the re-mesh gate this
+              // same fix's sibling closes in `refreshWholeImageItem`, a few
+              // hundred lines down). The comment that used to sit on the
+              // `setTileGeometry` call below ("already populated... on its
+              // very first geometry build") described what THIS reordering
+              // now actually makes true, not what the old order did.
+              wi.alphaStats = c.alphaStats ?? null;
+              wi.alphaMinGrid = c.alphaMinGrid ?? null;
               // The coverage grid is usually still in flight at first build (it
               // is requested from `ensureItemLoaded` and resolves later), so
               // this is normally `null` and the tile starts as a full quad —
               // `refreshWholeImageItem` re-meshes it the pass the grid lands.
               // Passed anyway for the case where it has already arrived, e.g. a
-              // second tile of a split image, or a warm IndexedDB cache.
+              // second tile of a split image, or a warm IndexedDB cache — now
+              // genuinely true for the min-grid too, per the note just above.
               setTileGeometry(
                 t,
                 state.placement,
@@ -8672,10 +8704,7 @@ export async function startVtPanViewer({
                 vegSegments,
                 0,
                 coverageGrids.get(item.id) ?? null,
-                // S1a: already populated by the compressed-texture load above,
-                // so a tile built from a warm cache can take the split on its
-                // very first geometry build rather than waiting for a re-mesh.
-                wi.alphaMinGrid ?? null
+                wi.alphaMinGrid
               );
               const mesh = new THREE.Mesh(geometry, material);
               mesh.frustumCulled = false;
@@ -8699,13 +8728,9 @@ export async function startVtPanViewer({
               }
               wi.tiles.push(t);
               wi.compressed = c.cached ? `${c.format}(cached)` : c.format;
-              wi.alphaStats = c.alphaStats ?? null;
-              // STAGE 1 (S1.1, docs/planning/Stage-1-Shade-Once.md): the
-              // per-texel MIN alpha grid — the coming interior/boundary
-              // split's certification input. Inert until S1.4 wires the split
-              // into the mesh build; null on pre-v10 cache records and the
-              // raw path (fail-open: no split, today's pixels).
-              wi.alphaMinGrid = c.alphaMinGrid ?? null;
+              // alphaStats/alphaMinGrid are already set — see the comment a
+              // few dozen lines up, right before this tile's own
+              // `setTileGeometry` call, which is what actually needs them.
               wi.status = 'ready';
               scheduleResidencyUpdate().catch(() => {
                 // Non-fatal: the next real input refreshes visibility anyway.
@@ -8888,8 +8913,18 @@ export async function startVtPanViewer({
       // the grid by IDENTITY (it is replaced exactly once, when it lands) makes
       // this a one-shot rebuild per item rather than a per-pass recompute.
       const coverageGrid = coverageGrids.get(item.id) ?? null;
+      // S1a's OWN min-grid needs the identical treatment (fixed 2026-08-13) —
+      // it arrives asynchronously too (the same compressed-texture load that
+      // sets `wi.alphaMinGrid`), and a tile meshed before it landed would
+      // otherwise stay on `splitDeclined:'noMinGrid'` for the rest of the
+      // session: nothing else ever asked `setTileGeometry` to look again.
+      // `wi.alphaMinGrid ?? null` here is the value THIS pass would build
+      // against; `t.alphaMinGrid` (set by `setTileGeometry` itself) is what
+      // the tile was last actually meshed against — identity-compared, same
+      // as the coverage grid, since it too is replaced exactly once per item.
+      const minGrid = wi.alphaMinGrid ?? null;
       for (const t of wi.tiles) {
-        if (placementChanged || t.coverageGrid !== coverageGrid) {
+        if (placementChanged || t.coverageGrid !== coverageGrid || t.alphaMinGrid !== minGrid) {
           setTileGeometry(
             t,
             state.placement,
@@ -8898,7 +8933,7 @@ export async function startVtPanViewer({
             t.segments ?? 1,
             0,
             coverageGrid,
-            wi.alphaMinGrid ?? null
+            minGrid
           );
           // Case-1 self-vegetation: the fold-free flutter cap is expressed per
           // world px, so a resize moves it. No-ops on an ordinary (non-veg)
@@ -10783,8 +10818,18 @@ export async function startVtPanViewer({
      *   for vegetation — must match whatever the CALLER passed for the real
      *   proxy's own `pooled` tag, since this twin shares its writerArgs and
      *   therefore its eligibility. See depthProxyEntries' own doc.
+     * @param {object|null} [interiorWriterArgs] - S1a (Testament DEFERRED-S1a):
+     *   when the CALLER already split this same geometry into interior/
+     *   boundary index groups (`t.cellSplit`, `setTileGeometry`), pass the
+     *   interior half's own writer args here (same shape as `writerArgs`,
+     *   `alwaysOpaque:true`) and this twin becomes a TWO-material array
+     *   matching those groups exactly — group 0 (interior) gets the no-
+     *   discard material, group 1 (boundary) gets today's. `null`/omitted
+     *   keeps today's single-material behaviour byte-for-byte; every
+     *   existing caller (vegetation, and every non-split tile) is
+     *   unaffected by this parameter's mere existence.
      */
-    function addDepthPrepassTwin(writerArgs, geometry, z, pooled = false) {
+    function addDepthPrepassTwin(writerArgs, geometry, z, pooled = false, interiorWriterArgs = null) {
       if (!earlyZComposition) return;
       const twinArgs = { ...writerArgs, colorWrite: false };
       const material = pooled
@@ -10792,9 +10837,24 @@ export async function startVtPanViewer({
             buildSceneDepthWriterMaterial(twinArgs)
           )
         : buildSceneDepthWriterMaterial(twinArgs);
-      const mesh = buildSceneDepthProxyMesh({ THREE, geometry, material, z });
+      // S1a — same two-group geometry the caller already built for the real
+      // proxy (see rebuildSceneDepthProxies' own tile loop), so group 0 must
+      // get the interior material and group 1 this boundary one, in that
+      // order, or the prepass would light up the wrong half as "already
+      // certified opaque".
+      let finalMaterial = material;
+      if (interiorWriterArgs) {
+        const interiorTwinArgs = { ...interiorWriterArgs, colorWrite: false };
+        const interiorMaterial = pooled
+          ? depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(interiorTwinArgs), () =>
+              buildSceneDepthWriterMaterial(interiorTwinArgs)
+            )
+          : buildSceneDepthWriterMaterial(interiorTwinArgs);
+        finalMaterial = [interiorMaterial, material];
+      }
+      const mesh = buildSceneDepthProxyMesh({ THREE, geometry, material: finalMaterial, z });
       depthPrepassScene.add(mesh);
-      depthPrepassEntries.push({ mesh, material, pooled });
+      depthPrepassEntries.push({ mesh, material: finalMaterial, pooled });
     }
 
     /**
@@ -11083,13 +11143,64 @@ export async function startVtPanViewer({
           // against applyEarlyZTileState and the debugForceOpaqueBlendOff
           // branch above, both of which touch `t.material`, the TILE's own
           // production material, never this depth-proxy one).
-          const material = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(writerArgs), () =>
-            buildSceneDepthWriterMaterial(writerArgs)
-          );
-          const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
-          depthScene.add(mesh);
-          depthProxyEntries.push({ mesh, material, pooled: true });
-          addDepthPrepassTwin(writerArgs, t.geometry, z, true);
+          //
+          // S1a — THE DEPTH-AUTHORITY HALF OF THE PER-CELL SPLIT (Testament
+          // DEFERRED-S1a). `applyEarlyZTileState` just above already decided
+          // the COLOUR mesh's split — `t.cellSplit` is its own proof, set by
+          // `setTileGeometry` the moment `t.geometry` got its two index
+          // groups (interior=0, boundary=1). This depth-authority proxy and
+          // its prepass twin SHARE that exact `t.geometry` object (never a
+          // copy), so they already have those two groups for free — they
+          // were just being drawn with ONE material covering both, which is
+          // why splitting the geometry alone bought `geometry.depthDraw`/
+          // `geometry.earlyZPrepass` nothing: a non-array material draws
+          // every group with itself regardless (verified in vendored source,
+          // see `applyEarlyZTileState`'s own comment on this exact fact).
+          //
+          // An interior cell's own certification — every min-grid texel in
+          // its footprint reads exactly 255 (`splitCoverageCellMask`) — is
+          // strictly stronger than `alwaysOpaque`'s own bar (every texel at
+          // or above `alphaThreshold`, which is ≤255), so it is always safe
+          // to build the interior half with `alwaysOpaque:true`: the discard
+          // that half's shader would otherwise carry could structurally
+          // never fire, exactly the same proof the whole-tile fast path
+          // already relies on, just scoped to a cell instead of an item.
+          // `depthWrite`/`depthTest`/`depthFunc` are untouched either way —
+          // `buildSceneDepthWriterMaterial` already sets those unconditionally,
+          // so both halves still write real depth for their own cells.
+          //
+          // Gated on `earlyZComposition` alongside `t.cellSplit`, matching
+          // `applyEarlyZTileState`'s own `canSplit` exactly: `t.cellSplit` is
+          // computed independently of the flag (`setTileGeometry` has no
+          // reference to it), so trusting its presence alone here would let
+          // this pass split while the colour draw stays on its single-
+          // material path — a real, inconsistent intermediate state with two
+          // different revert behaviours instead of the one flag this whole
+          // feature is built to revert with (Law 5).
+          let material;
+          if (earlyZComposition && t.cellSplit) {
+            const interiorWriterArgs = { ...writerArgs, alwaysOpaque: true };
+            const interiorMaterial = depthProxyMaterialPool.get(
+              computeDepthProxyMaterialSignature(interiorWriterArgs),
+              () => buildSceneDepthWriterMaterial(interiorWriterArgs)
+            );
+            const boundaryMaterial = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(writerArgs), () =>
+              buildSceneDepthWriterMaterial(writerArgs)
+            );
+            material = [interiorMaterial, boundaryMaterial];
+            const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
+            depthScene.add(mesh);
+            depthProxyEntries.push({ mesh, material, pooled: true });
+            addDepthPrepassTwin(writerArgs, t.geometry, z, true, interiorWriterArgs);
+          } else {
+            material = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(writerArgs), () =>
+              buildSceneDepthWriterMaterial(writerArgs)
+            );
+            const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
+            depthScene.add(mesh);
+            depthProxyEntries.push({ mesh, material, pooled: true });
+            addDepthPrepassTwin(writerArgs, t.geometry, z, true);
+          }
         }
       }
       // Anything still in the pool that no tile above re-requested this pass

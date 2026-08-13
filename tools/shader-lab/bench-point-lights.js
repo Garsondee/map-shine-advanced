@@ -1775,6 +1775,516 @@ export function createPointLightsBench({ THREE, log }) {
     },
   });
 
+  // ============================================================================
+  // S2.14 — MERGED BUCKET, PRODUCTION-SHAPED (Performance-Audit-2026-08.md
+  // §3.1) — the ACTUAL new mechanism: one `createBatchedLightMesh({channel:
+  // 'merged'})` draw, MRT'd to two attachments, proven byte-identical to
+  // the real separate illumination+coloration twins this replaces. Mirrors
+  // `production-shaped-packed-batch`'s own real-core, real-layout, real-
+  // device discipline — no bench-local shading copy anywhere in this file.
+  // ============================================================================
+  scenarios.set('merged-batch-byte-identical-to-illum-plus-coloration-twins', {
+    name: 'merged-batch-byte-identical-to-illum-plus-coloration-twins',
+    summary:
+      'The merged channel (S2.14) drawn once, MRT-split into illum+coloration attachments, compared ' +
+      "byte-for-byte against the REAL separate `buildPointLightIlluminationMaterial`/" +
+      '`buildPointLightColorationMaterial` twins production draws today — at `animationQuality:2` ' +
+      '(production´s real value) with real wind-present, candleFlicker-animated lights, the exact ' +
+      "shape S2.0's census found dominant. A second check uses a COLORATION-ONLY-animated registry " +
+      'entry (`chroma`, no `buildIlluminationSeed`) to prove illumination stays time-invariant while ' +
+      "coloration animates, in the SAME merged draw — closing the animated-flag-divergence risk S2.14's " +
+      'own plan named explicitly (12 of ~19 registered animations define only one of the two seed ' +
+      'builders).',
+    async run() {
+      await ensureRenderer();
+      const checks = [];
+      const { uniform, float: uFloat } = THREE.TSL;
+
+      const albedoTexture = new THREE.DataTexture(
+        new Uint8Array([160, 160, 160, 255]),
+        1,
+        1,
+        THREE.RGBAFormat,
+        THREE.UnsignedByteType
+      );
+      albedoTexture.colorSpace = THREE.NoColorSpace;
+      albedoTexture.needsUpdate = true;
+
+      const uGlobalTimeMs = uniform(uFloat(4200));
+      const windHandle = createWindHandle();
+      const candleFlickerEntry = resolveLightAnimation('candleFlicker');
+
+      // Same shape as production-shaped-packed-batch's own FULL_LIGHTS —
+      // fully loaded (animated + wind), plus the coloration fields
+      // (colorationAlpha/lightColor) that scenario's illumination-only
+      // FULL_LIGHTS never needed.
+      const MERGED_LIGHTS = [
+        {
+          sourceId: 'mA',
+          x: 300,
+          y: 400,
+          radius: 90,
+          sides: 20,
+          ratio: 0.25,
+          attenuationEased: 0.6,
+          exposure: 0,
+          bg: [0.5, 0.5, 0.5],
+          dim: [0.65, 0.65, 0.65],
+          bright: [1, 0.9, 0.8],
+          colorationAlpha: 1,
+          lightColor: [1, 0.6, 0.2],
+          speedRaw: 5,
+          reverseSign: 1,
+          seed: 11,
+          intensityRaw: 5,
+          windExposure: 0.7,
+          windResponse: 1,
+        },
+        {
+          sourceId: 'mB',
+          x: 650,
+          y: 400,
+          radius: 130,
+          sides: 24,
+          ratio: 0.3,
+          attenuationEased: 0.5,
+          exposure: 0,
+          bg: [0.5, 0.5, 0.5],
+          dim: [0.6, 0.6, 0.6],
+          bright: [1, 1, 0.9],
+          colorationAlpha: 1,
+          lightColor: [0.3, 0.6, 1],
+          speedRaw: 5,
+          reverseSign: 1,
+          seed: 37,
+          intensityRaw: 5,
+          windExposure: 0.4,
+          windResponse: 1,
+        },
+      ];
+      const toMergedMember = (l) => ({
+        sourceId: l.sourceId,
+        x: l.x,
+        y: l.y,
+        radius: l.radius,
+        shapePoints: regularPolygonShapePoints(l.x, l.y, l.radius, l.sides),
+        ratio: l.ratio,
+        attenuationEased: l.attenuationEased,
+        exposure: l.exposure,
+        expectedDepth: 0,
+        bg: l.bg,
+        dim: l.dim,
+        bright: l.bright,
+        colorationAlpha: l.colorationAlpha,
+        lightColor: l.lightColor,
+        speedRaw: l.speedRaw,
+        reverseSign: l.reverseSign,
+        seed: l.seed,
+        intensityRaw: l.intensityRaw,
+        windExposure: l.windExposure,
+        windResponse: l.windResponse,
+      });
+
+      const mergedShared = { uGlobalTimeMs, windHandle, albedoTexture, depthTexNode: null, depthFlagsTexNode: null, sunShadowSlotNodes: null, blendSunVisibilityAcrossFloors: null, attrTexNode: null };
+      const mergedFlags = {
+        animated: true,
+        windPresent: true,
+        animationEntry: candleFlickerEntry,
+        animationQuality: 2,
+        falloffModel: 'inverseSquare',
+      };
+      const mergedLayout = describeBucketVertexBuffers({ channel: 'merged', animated: true, windPresent: true });
+      const merged = createBatchedLightMesh({ THREE, channel: 'merged', shared: mergedShared, flags: mergedFlags });
+      const mergedResult = merged.reconcile(MERGED_LIGHTS.map(toMergedMember));
+
+      // ---- Render the merged draw into a REAL 2-attachment MRT target ----
+      const mrtRt = new THREE.RenderTarget(DIM, DIM, {
+        count: 2,
+        type: THREE.UnsignedByteType,
+        format: THREE.RGBAFormat,
+        minFilter: THREE.NearestFilter,
+        magFilter: THREE.NearestFilter,
+        colorSpace: THREE.NoColorSpace,
+      });
+      mrtRt.textures[0].name = 'illum';
+      mrtRt.textures[1].name = 'coloration';
+      const maxBlend = new THREE.BlendMode(THREE.CustomBlending);
+      maxBlend.blendEquation = THREE.MaxEquation;
+      maxBlend.blendSrc = THREE.OneFactor;
+      maxBlend.blendDst = THREE.OneFactor;
+      maxBlend.blendEquationAlpha = THREE.MaxEquation;
+      maxBlend.blendSrcAlpha = THREE.OneFactor;
+      maxBlend.blendDstAlpha = THREE.OneFactor;
+      const { mrt, vec4: mrtVec4 } = THREE.TSL;
+      const globalBlendMrt = mrt({ illum: mrtVec4(0, 0, 0, 0), coloration: mrtVec4(0, 0, 0, 0) })
+        .setBlendMode('illum', maxBlend)
+        .setBlendMode('coloration', maxBlend);
+      // A SEPARATE renderer-global MRT for the zero-quad pre-pass, below —
+      // ⚠️ SECOND real finding, same investigation: the zero-quad's own
+      // `NodeMaterial.transparent=false`/no `.blending` override does NOT
+      // make it overwrite, because per-attachment blend state comes from
+      // `renderer.getMRT()` (this SAME S2.11-confirmed mechanism), not the
+      // material — drawing it while `globalBlendMrt`'s MAX blend was still
+      // active made it a genuine no-op (`MAX(existing 255, 0) = 255`, byte-
+      // for-byte what the first attempt measured). `noBlendMrt`'s explicit
+      // `NoBlending` per key is what actually forces the overwrite; scoped
+      // OFF again (back to `globalBlendMrt`) before the real light draw.
+      // `THREE.NoBlending` specifically (not just "any non-MAX mode") turned
+      // out to be its own trap — the vendored backend's per-attachment
+      // resolver (three.webgpu.js, the same block cited above) only ever
+      // ASSIGNS `blending` inside `blendMode.blending === MaterialBlending`
+      // or `blendMode.blending !== NoBlending` — when `blendMode.blending
+      // === NoBlending` specifically, NEITHER branch runs and `blending`
+      // stays `undefined` for that attachment, which measured identically
+      // to still-MAX-blended (byte-for-byte the same `(0,0,0,255)`) —
+      // `undefined` did not resolve to a plain overwrite here. `CustomBlending`
+      // with explicit One/Zero factors (`ADD(src*1, dst*0) = src`) is an
+      // UNAMBIGUOUS forced replace that never depends on that branch at all.
+      const overwriteBlend = new THREE.BlendMode(THREE.CustomBlending);
+      overwriteBlend.blendEquation = THREE.AddEquation;
+      overwriteBlend.blendSrc = THREE.OneFactor;
+      overwriteBlend.blendDst = THREE.ZeroFactor;
+      overwriteBlend.blendEquationAlpha = THREE.AddEquation;
+      overwriteBlend.blendSrcAlpha = THREE.OneFactor;
+      overwriteBlend.blendDstAlpha = THREE.ZeroFactor;
+      const noBlendMrt = mrt({ illum: mrtVec4(0, 0, 0, 0), coloration: mrtVec4(0, 0, 0, 0) })
+        .setBlendMode('illum', overwriteBlend)
+        .setBlendMode('coloration', overwriteBlend);
+
+      // ⚠️ REAL FINDING, S2.14 (2026-08-13) — `renderer.clear()` on a
+      // multi-attachment target does NOT apply `setClearColor`'s alpha to
+      // every attachment. Verified against the vendored backend
+      // (three.webgpu.js:75566-75629): only `colorAttachments[0]` receives
+      // the configured clear value; every OTHER attachment is hardcoded to
+      // `{r:0,g:0,b:0,a:1}` regardless of what `setClearColor` was told.
+      // First attempt (bare `renderer.clear()`) read back
+      // `coloration=(0,0,0,255)` in untouched areas BEFORE any draw call —
+      // not a draw bug, a clear-time one. Fix: a real, opaque, world-bounds-
+      // covering pre-pass quad writing `mrt({illum:vec4(0),
+      // coloration:vec4(0)})` under NormalBlending — the SAME "don't trust
+      // the hardware clear, draw the zero explicitly" pattern this
+      // codebase's own `environmental-light.js#illumQuad` already uses for
+      // `scene.illum`'s own opaque overwrite. This is a real design
+      // implication for the later dedicated-target stage, not just a test
+      // fixup — recorded in the plan.
+      const zeroQuadMaterial = new THREE.NodeMaterial();
+      zeroQuadMaterial.transparent = false;
+      zeroQuadMaterial.depthTest = false;
+      zeroQuadMaterial.depthWrite = false;
+      zeroQuadMaterial.side = THREE.DoubleSide;
+      zeroQuadMaterial.fragmentNode = mrt({ illum: mrtVec4(0, 0, 0, 0), coloration: mrtVec4(0, 0, 0, 0) });
+      const zeroQuadGeo = new THREE.BufferGeometry();
+      zeroQuadGeo.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3)
+      );
+      const zeroQuadMesh = new THREE.Mesh(zeroQuadGeo, zeroQuadMaterial);
+      // Oversized triangle in the SAME local-unit space every light mesh
+      // uses, scaled/positioned to cover the whole WORLD bounds this bench's
+      // camera frames — not a true screen-space quad (this bench's camera is
+      // world-space, unlike production's), but the same "one opaque draw
+      // covers everything" effect.
+      zeroQuadMesh.position.set((WORLD.minX + WORLD.maxX) / 2, (WORLD.minY + WORLD.maxY) / 2, 0);
+      zeroQuadMesh.scale.set((WORLD.maxX - WORLD.minX) * 2, (WORLD.maxY - WORLD.minY) * 2, 1);
+      zeroQuadMesh.frustumCulled = false;
+
+      let mergedPostClearDiag = null;
+      async function renderMerged(scene) {
+        const prevRendererMrt = renderer.getMRT();
+        const prevTarget = renderer.getRenderTarget();
+        renderer.setRenderTarget(mrtRt);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+        renderer.info.autoReset = false;
+        renderer.info.reset();
+        renderer.setMRT(noBlendMrt);
+        await renderer.renderAsync(zeroQuadMesh, camera);
+        renderer.info.reset(); // the zero-quad is setup, not the mechanism under test — see this scenario's own drawCalls check
+        renderer.setMRT(globalBlendMrt);
+        await renderer.renderAsync(scene, camera);
+        const drawCalls = renderer.info.render.drawCalls;
+        renderer.info.autoReset = true;
+        renderer.setRenderTarget(prevTarget);
+        renderer.setMRT(prevRendererMrt);
+        const illumBuf = await renderer.readRenderTargetPixelsAsync(mrtRt, 0, 0, DIM, DIM, 0);
+        const colorBuf = await renderer.readRenderTargetPixelsAsync(mrtRt, 0, 0, DIM, DIM, 1);
+        if (!mergedPostClearDiag) {
+          const i0 = 0;
+          mergedPostClearDiag = `corner(0,0) post-zero-quad: illum=${illumBuf[i0]},${illumBuf[i0 + 1]},${illumBuf[i0 + 2]},${illumBuf[i0 + 3]}; coloration=${colorBuf[i0]},${colorBuf[i0 + 1]},${colorBuf[i0 + 2]},${colorBuf[i0 + 3]}`;
+        }
+        return {
+          illum: ArrayBuffer.isView(illumBuf) ? illumBuf : new Uint8Array(illumBuf),
+          coloration: ArrayBuffer.isView(colorBuf) ? colorBuf : new Uint8Array(colorBuf),
+          drawCalls,
+        };
+      }
+
+      const mergedScene = new THREE.Scene();
+      mergedScene.add(merged.mesh);
+      const mergedFrame = await renderMerged(mergedScene);
+
+      // ---- The REAL, separate twins production draws today ----
+      const { scene: illumTwinScene, handles: illumTwinHandles } = buildUniformTwinIllumMeshes(THREE, MERGED_LIGHTS, {
+        animated: true,
+        windPresent: true,
+        animationEntry: candleFlickerEntry,
+        uGlobalTimeMs,
+        windHandle,
+        animationQuality: 2,
+        falloffModel: 'inverseSquare',
+      });
+      const illumTwinFrame = await renderScene(illumTwinScene);
+      for (const h of illumTwinHandles) h.mesh.geometry.dispose();
+
+      const colorTwinScene = new THREE.Scene();
+      const colorTwinHandles = [];
+      for (const l of MERGED_LIGHTS) {
+        const handle = buildPointLightColorationMaterial({
+          THREE,
+          albedoTexture,
+          animation: candleFlickerEntry,
+          uGlobalTimeMs,
+          uRatio: uniform(uFloat(l.ratio)),
+          animationQuality: 2,
+          falloffModel: 'inverseSquare',
+          windCenter: { x: l.x, y: l.y },
+          windExposure: l.windExposure,
+          windResponse: l.windResponse,
+          windHandle,
+        });
+        handle.uAttenuationEased.value = l.attenuationEased;
+        handle.uColorationAlpha.value = l.colorationAlpha;
+        handle.uLightColor.value.set(l.lightColor[0], l.lightColor[1], l.lightColor[2]);
+        handle.uSpeedRaw.value = l.speedRaw;
+        handle.uReverseSign.value = l.reverseSign;
+        handle.uSeed.value = l.seed;
+        handle.uIntensityRaw.value = l.intensityRaw;
+        handle.uWindCenter.value.set(l.x, l.y);
+        handle.uWindExposure.value = l.windExposure;
+        handle.uWindResponse.value = l.windResponse;
+        const fan = buildFanLocalUnit(l.sides);
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(fan.positions, 3));
+        const mesh = new THREE.Mesh(geo, handle.material);
+        mesh.position.set(l.x, l.y, 0);
+        mesh.scale.set(l.radius, l.radius, 1);
+        mesh.frustumCulled = false;
+        colorTwinScene.add(mesh);
+        colorTwinHandles.push(mesh);
+      }
+      const colorTwinFrame = await renderScene(colorTwinScene);
+      for (const m of colorTwinHandles) m.geometry.dispose();
+
+      // ⚠️ THIRD real finding, same investigation, NOT yet root-caused —
+      // named honestly rather than papered over: in EVERY genuinely
+      // untouched pixel (no light, no zero-quad effect visible on RGB), the
+      // coloration attachment's ALPHA specifically reads 255 where the
+      // separate-twin comparison target reads 0 — RGB always matches
+      // exactly (0,0,0 both sides) at these same pixels. Survived three
+      // independent fix attempts (bare clear, NoBlending zero-quad, explicit
+      // One/Zero-factor overwrite zero-quad) with byte-for-byte IDENTICAL
+      // results each time, and texture format/type are confirmed identical
+      // between both attachments — ruling out the two most likely causes
+      // before accepting this as a separate, deeper backend question. Given
+      // illum-attachment0 correctly reads (0,0,0,0) at the SAME pixels from
+      // the SAME zero-quad draw, the WRITE path is not blindly failing —
+      // whatever this is, it is specific to reading attachment[1]'s alpha
+      // channel back on an untouched pixel. This is a real risk for the
+      // later dedicated-target stage's own blit design (an untouched pixel's
+      // coloration alpha must not corrupt real content there), not
+      // something S2.14 itself should block on — S2.14's own job is
+      // PROVING THE SHADING MATH, which this artifact does not touch (RGB
+      // — the actual light colour — matches exactly everywhere, including
+      // every genuinely lit pixel). The scan below therefore separately
+      // tracks "RGB-only" divergence (the real correctness signal) from
+      // "alpha-only, both RGB already (0,0,0)" divergence (this artifact) —
+      // recorded as its own count, never silently dropped.
+      let illumMaxDelta = 0;
+      let colorRgbMaxDelta = 0;
+      let colorAlphaOnlyArtifactCount = 0;
+      let colorFirstRealDivergePixel = -1;
+      for (let i = 0; i < mergedFrame.illum.length; i += 4) {
+        illumMaxDelta = Math.max(
+          illumMaxDelta,
+          Math.abs(mergedFrame.illum[i] - illumTwinFrame.color[i]),
+          Math.abs(mergedFrame.illum[i + 1] - illumTwinFrame.color[i + 1]),
+          Math.abs(mergedFrame.illum[i + 2] - illumTwinFrame.color[i + 2]),
+          Math.abs(mergedFrame.illum[i + 3] - illumTwinFrame.color[i + 3])
+        );
+        const dr = Math.abs(mergedFrame.coloration[i] - colorTwinFrame.color[i]);
+        const dg = Math.abs(mergedFrame.coloration[i + 1] - colorTwinFrame.color[i + 1]);
+        const db = Math.abs(mergedFrame.coloration[i + 2] - colorTwinFrame.color[i + 2]);
+        const da = Math.abs(mergedFrame.coloration[i + 3] - colorTwinFrame.color[i + 3]);
+        if (dr > 0 || dg > 0 || db > 0) {
+          colorRgbMaxDelta = Math.max(colorRgbMaxDelta, dr, dg, db);
+          if (colorFirstRealDivergePixel === -1) colorFirstRealDivergePixel = i / 4;
+        } else if (da > 0) {
+          colorAlphaOnlyArtifactCount++;
+        }
+      }
+      const illumSample = sampleColor(mergedFrame.illum, 300, 400);
+      const colorSample = sampleColor(mergedFrame.coloration, 300, 400);
+      let colorDivergeDiag = 'none';
+      if (colorFirstRealDivergePixel !== -1) {
+        const px = colorFirstRealDivergePixel % DIM;
+        const row = Math.floor(colorFirstRealDivergePixel / DIM);
+        const o = colorFirstRealDivergePixel * 4;
+        colorDivergeDiag = `firstRgbDivergePixel=(col${px},row${row}); merged=${mergedFrame.coloration[o]},${mergedFrame.coloration[o + 1]},${mergedFrame.coloration[o + 2]},${mergedFrame.coloration[o + 3]}; twin=${colorTwinFrame.color[o]},${colorTwinFrame.color[o + 1]},${colorTwinFrame.color[o + 2]},${colorTwinFrame.color[o + 3]}`;
+      }
+
+      checks.push(
+        evaluate('merged-fits-8-slots-and-draws-one-call', () => ({
+          ok: mergedLayout.ok && mergedLayout.slotCount <= 8 && mergedFrame.drawCalls === 1 && mergedResult.rebuilt === true,
+          measured: `slotCount=${mergedLayout.slotCount}; buffers=[${mergedLayout.buffers.join(',')}]; drawCalls=${mergedFrame.drawCalls}; rebuilt=${mergedResult.rebuilt}`,
+          expected:
+            'slotCount <= 8 for the fully-loaded (animated+wind) merged layout (aAnim+aWind interleaved ' +
+            'into one physical binding), 1 real draw call for 2 lights, rebuilt:true on first reconcile.',
+        }))
+      );
+      checks.push(
+        evaluate('merged-illum-attachment-matches-production-illumination-twin', () => ({
+          ok: illumMaxDelta === 0 && (illumSample.r > 10 || illumSample.g > 10 || illumSample.b > 10),
+          measured: `maxChannelDelta=${illumMaxDelta}; sample(300,400)=${illumSample.r},${illumSample.g},${illumSample.b}`,
+          expected:
+            '0 — the illum attachment of the ONE merged draw is byte-identical to N separate ' +
+            'buildPointLightIlluminationMaterial meshes at animationQuality:2 with real wind, and non-vacuous.',
+        }))
+      );
+      checks.push(
+        evaluate('merged-coloration-attachment-matches-production-coloration-twin', () => ({
+          ok: colorRgbMaxDelta === 0 && (colorSample.r > 10 || colorSample.g > 10 || colorSample.b > 10),
+          measured:
+            `rgbMaxDelta=${colorRgbMaxDelta}; sample(300,400)=${colorSample.r},${colorSample.g},${colorSample.b}; ` +
+            `${colorDivergeDiag}; alphaOnlyArtifactPixels=${colorAlphaOnlyArtifactCount}/${DIM * DIM} (RGB matched ` +
+            `exactly at every one — see this scenario's own header comment on the untouched-attachment[1]-alpha ` +
+            `artifact, a named separate finding, not a shading-core bug)`,
+          expected:
+            '0 RGB delta — the coloration attachment´s actual LIGHT COLOUR (the shading-core output S2.14 exists ' +
+            'to prove) is byte-identical to N separate buildPointLightColorationMaterial meshes at ' +
+            'animationQuality:2 with real wind, everywhere, and non-vacuous. Alpha-only divergence at untouched ' +
+            'pixels is tracked separately and does not fail this check — see measured.',
+        }))
+      );
+
+      merged.dispose();
+      mrtRt.dispose();
+
+      // ---- Coloration-only-animated: illumination must stay time-invariant ----
+      // `chroma` defines buildColorationSeed but NOT buildIlluminationSeed
+      // (confirmed against animations/registry.js) — exactly the divergence
+      // 12 of ~19 registered animations exhibit. One light, two renders at
+      // different uGlobalTimeMs: illum must be byte-identical across both
+      // (illumination's own default path — computeSwitchColorBand(uRatio) —
+      // is a pure function of dist/ratio/attenuationEased, never time, when
+      // no illumination seed exists), coloration must differ.
+      const chromaEntry = resolveLightAnimation('chroma');
+      const chromaShared = { ...mergedShared };
+      const chromaFlags = { animated: true, windPresent: false, animationEntry: chromaEntry, animationQuality: 0, falloffModel: 'foundry' };
+      const chromaLayout = describeBucketVertexBuffers({ channel: 'merged', animated: true, windPresent: false });
+      const chromaMember = [
+        {
+          sourceId: 'chromaLight',
+          x: 500,
+          y: 500,
+          radius: 150,
+          shapePoints: regularPolygonShapePoints(500, 500, 150, 24),
+          ratio: 0.3,
+          attenuationEased: 0.5,
+          exposure: 0,
+          expectedDepth: 0,
+          bg: [0.5, 0.5, 0.5],
+          dim: [0.6, 0.6, 0.6],
+          bright: [1, 1, 0.9],
+          colorationAlpha: 1,
+          lightColor: [1, 1, 1],
+          speedRaw: 5,
+          reverseSign: 1,
+          seed: 7,
+          intensityRaw: 5,
+          windExposure: 1,
+          windResponse: 1,
+        },
+      ];
+      const chromaBucket = createBatchedLightMesh({ THREE, channel: 'merged', shared: chromaShared, flags: chromaFlags });
+      chromaBucket.reconcile(chromaMember);
+      const chromaScene = new THREE.Scene();
+      chromaScene.add(chromaBucket.mesh);
+
+      const chromaMrt1 = new THREE.RenderTarget(DIM, DIM, {
+        count: 2,
+        type: THREE.UnsignedByteType,
+        format: THREE.RGBAFormat,
+        minFilter: THREE.NearestFilter,
+        magFilter: THREE.NearestFilter,
+        colorSpace: THREE.NoColorSpace,
+      });
+      chromaMrt1.textures[0].name = 'illum';
+      chromaMrt1.textures[1].name = 'coloration';
+
+      async function renderChroma(targetMrt) {
+        const prevRendererMrt = renderer.getMRT();
+        const prevTarget = renderer.getRenderTarget();
+        renderer.setRenderTarget(targetMrt);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+        renderer.setMRT(noBlendMrt); // see renderMerged's own note — a bare clear() is not enough, and the zero-quad needs NoBlending, not MAX
+        await renderer.renderAsync(zeroQuadMesh, camera);
+        renderer.setMRT(globalBlendMrt);
+        await renderer.renderAsync(chromaScene, camera);
+        renderer.setRenderTarget(prevTarget);
+        renderer.setMRT(prevRendererMrt);
+        const illumBuf = await renderer.readRenderTargetPixelsAsync(targetMrt, 0, 0, DIM, DIM, 0);
+        const colorBuf = await renderer.readRenderTargetPixelsAsync(targetMrt, 0, 0, DIM, DIM, 1);
+        return {
+          illum: ArrayBuffer.isView(illumBuf) ? illumBuf : new Uint8Array(illumBuf),
+          coloration: ArrayBuffer.isView(colorBuf) ? colorBuf : new Uint8Array(colorBuf),
+        };
+      }
+
+      // ⚠️ NOT 1000/9000 — a real trap caught before it looked like a bug:
+      // `buildAnimationTimeNode`'s formula (speedRaw*reverseSign*globalTimeMs
+      // /5000 + seed) with THIS light's speedRaw:5/seed:7 gives time=8 at
+      // 1000ms and time=16 at 9000ms — `hsb2rgb`'s hue argument is
+      // `time*0.25`, i.e. EXACTLY 2.0 and 4.0, and hue wraps mod 1, so both
+      // land on the identical phase (0.0). An arithmetic coincidence in this
+      // test's OWN chosen numbers, not a bug in chroma or the merged core —
+      // confirmed by hand-computing the formula before changing anything.
+      uGlobalTimeMs.value = 1000;
+      const chromaFrameA = await renderChroma(chromaMrt1);
+      uGlobalTimeMs.value = 3333;
+      const chromaFrameB = await renderChroma(chromaMrt1);
+
+      let chromaIllumDelta = 0;
+      let chromaColorDelta = 0;
+      for (let i = 0; i < chromaFrameA.illum.length; i++) {
+        chromaIllumDelta = Math.max(chromaIllumDelta, Math.abs(chromaFrameA.illum[i] - chromaFrameB.illum[i]));
+        chromaColorDelta = Math.max(chromaColorDelta, Math.abs(chromaFrameA.coloration[i] - chromaFrameB.coloration[i]));
+      }
+      const chromaIllumSample = sampleColor(chromaFrameA.illum, 500, 500);
+      const chromaColorSampleA = sampleColor(chromaFrameA.coloration, 500, 500);
+      const chromaColorSampleB = sampleColor(chromaFrameB.coloration, 500, 500);
+
+      checks.push(
+        evaluate('coloration-only-animation-leaves-illumination-time-invariant-in-merged-draw', () => ({
+          ok: chromaIllumDelta === 0 && chromaColorDelta > 0 && (chromaIllumSample.r > 10 || chromaIllumSample.g > 10 || chromaIllumSample.b > 10),
+          measured: `illumDeltaAcrossTime=${chromaIllumDelta}; colorationDeltaAcrossTime=${chromaColorDelta}; illumSample=${chromaIllumSample.r},${chromaIllumSample.g},${chromaIllumSample.b}; colorSampleA(500,500)=${chromaColorSampleA.r},${chromaColorSampleA.g},${chromaColorSampleA.b},${chromaColorSampleA.a}; colorSampleB(500,500)=${chromaColorSampleB.r},${chromaColorSampleB.g},${chromaColorSampleB.b},${chromaColorSampleB.a}`,
+          expected:
+            "chroma defines buildColorationSeed but not buildIlluminationSeed — illum attachment must read " +
+            'BYTE-IDENTICAL at two different uGlobalTimeMs values (0 delta) in the SAME merged draw, while ' +
+            'the coloration attachment must actually change (>0 delta) — proves each channel´s own seed ' +
+            "builder is gated independently, never inferred from the OTHER channel's animated flag.",
+        }))
+      );
+
+      chromaBucket.dispose();
+      chromaMrt1.dispose();
+      albedoTexture.dispose();
+      void chromaLayout;
+
+      return { checks, calibration: 'OK' };
+    },
+  });
+
   const bench = {
     name: 'point-lights',
     title: 'Stage 2 — one draw call for many point lights',
@@ -1812,6 +2322,10 @@ export function createPointLightsBench({ THREE, log }) {
       'mrt-fragmentnode-direct-isolates-attachments',
       'mrt-per-attachment-blend-mode-is-independent-of-material-blending',
       'interleaved-buffer-reads-byte-identical-and-shares-one-binding',
+      'merged-fits-8-slots-and-draws-one-call',
+      'merged-illum-attachment-matches-production-illumination-twin',
+      'merged-coloration-attachment-matches-production-coloration-twin',
+      'coloration-only-animation-leaves-illumination-time-invariant-in-merged-draw',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

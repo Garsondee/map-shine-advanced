@@ -1148,15 +1148,16 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // byte-identical to point-light-coloration.js's own; see
   // buildPointLightSharedTerms's own header, just above, for the full
   // account (and for why the wind sample/buildAnimationTimeNode are NOT
-  // included there). `depthHere`/`depthFlagsHere` come back too, so the
-  // SUN-SHADOW block below can reuse the SAME `buf:scene.depth` sample
-  // instead of a second one.
+  // included there). `depthFlagsHere` comes back too, so the SUN-SHADOW
+  // block below can reuse the SAME `buf:scene.depth` sample instead of a
+  // second one (bare `depthHere` is NOT reused here — the height gate it
+  // would feed is already baked into `falloff`/`falloffGoboed` inside the
+  // shared-terms call itself).
   const localXY = localUnitXY;
   const {
     dist,
     falloff: combinedFalloff,
     falloffGoboed: combinedFalloffGoboed,
-    depthHere,
     depthFlagsHere,
     uApLampHeight,
     apApertures,

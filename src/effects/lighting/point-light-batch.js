@@ -128,24 +128,46 @@ export function isColorationEligible({ hasColor, forceDefaultColor }) {
  * matching the per-light wrapper's own "create only what `animation?.
  * buildXSeed`/`windExposure`-finiteness call for" conditions today.
  *
+ * `channel: 'merged'` (S2.14, Performance-Audit-2026-08.md §3.1) packs BOTH
+ * channels' own fields into one layout: `aParamsShared` (attenuationEased,
+ * expectedDepth, ratio, exposure — the first two genuinely shared, the last
+ * two illumination-only but coloration ignores them, exactly like today's
+ * separate coloration `aParams` carries an inert `ratio` spare), `aColorA/
+ * B/C` (bg/dim/bright, THEN colorationAlpha and lightColor.r/g once bright
+ * is exhausted), `aLightColorB` (lightColor.b + 3 genuine spares). At the
+ * fully-loaded (animated+wind) worst case this reaches 8 physical slots
+ * ONLY because `aAnim`+`aWind` share ONE binding via an interleaved buffer
+ * (`slotCount` below, not `buffers.length`, is what a device limit actually
+ * counts) — see `point-light-batch-mesh.js#createBatchedLightMesh`'s own
+ * interleaving construction for the other half of this contract.
+ *
  * @param {object} args
- * @param {'illumination'|'coloration'} args.channel
+ * @param {'illumination'|'coloration'|'merged'} args.channel
  * @param {boolean} args.animated
  * @param {boolean} args.windPresent
- * @returns {{buffers: string[], count: number, ok: boolean}} `ok` is false
- *   iff `count` exceeds {@link MAX_VERTEX_BUFFERS_PER_PIPELINE} — a hard
- *   stop for whoever is about to add a field, not a warning to route around.
+ * @returns {{buffers: string[], count: number, slotCount: number, ok: boolean}}
+ *   `buffers`/`count` name every logical attribute (shader/attribute wiring
+ *   needs every name, interleaved or not); `slotCount` is the real physical
+ *   vertex-buffer-binding count (`count` minus 1 when `channel==='merged'`
+ *   AND both `animated`/`windPresent` are true, since `aAnim`+`aWind` then
+ *   share one binding). `ok` is false iff `slotCount` exceeds
+ *   {@link MAX_VERTEX_BUFFERS_PER_PIPELINE} — a hard stop for whoever is
+ *   about to add a field, not a warning to route around.
  */
 export function describeBucketVertexBuffers({ channel, animated, windPresent }) {
   const buffers = ['position', 'aLocalUnit'];
   if (channel === 'illumination') {
     buffers.push('aParams', 'aColorA', 'aColorB', 'aColorC');
-  } else {
+  } else if (channel === 'coloration') {
     buffers.push('aParams', 'aLightColor');
+  } else {
+    buffers.push('aParamsShared', 'aColorA', 'aColorB', 'aColorC', 'aLightColorB');
   }
   if (animated) buffers.push('aAnim');
   if (windPresent) buffers.push('aWind');
-  return { buffers, count: buffers.length, ok: buffers.length <= MAX_VERTEX_BUFFERS_PER_PIPELINE };
+  const interleaved = channel === 'merged' && animated && windPresent;
+  const slotCount = interleaved ? buffers.length - 1 : buffers.length;
+  return { buffers, count: buffers.length, slotCount, ok: slotCount <= MAX_VERTEX_BUFFERS_PER_PIPELINE };
 }
 
 /**

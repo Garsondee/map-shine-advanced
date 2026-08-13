@@ -73,16 +73,23 @@
 import { createBucket, describeBucketVertexBuffers } from './point-light-batch.js';
 import { buildIlluminationShadingCore, triangulateLightFan } from './point-light-illumination.js';
 import { buildColorationShadingCore } from './point-light-coloration.js';
+import { buildMergedPointLightShadingCore } from './point-light-merged.js';
 
-/** Per-buffer float count — the SAME names `describeBucketVertexBuffers` emits. */
+/** Per-buffer float count — the SAME names `describeBucketVertexBuffers` emits.
+ * `aAnim`/`aWind` keep their own itemSize (4 each) even when a `channel:
+ * 'merged'` bucket interleaves them into one physical binding — the VIEW
+ * each name gets stays 4 floats wide, only the underlying buffer's stride
+ * changes (see `createBatchedLightMesh`'s own `ensureCapacity`). */
 const ITEM_SIZES = Object.freeze({
   position: 3,
   aLocalUnit: 2,
   aParams: 4,
+  aParamsShared: 4,
   aColorA: 4,
   aColorB: 4,
   aColorC: 4,
   aLightColor: 4,
+  aLightColorB: 4,
   aAnim: 4,
   aWind: 4,
 });
@@ -281,6 +288,111 @@ export function writeColorationValueSpan(arrays, start, count, values) {
 }
 
 /**
+ * Broadcast one MERGED-channel light's per-frame VALUES (S2.14) — the third
+ * sibling of {@link writeIlluminationValueSpan}/{@link writeColorationValueSpan}.
+ * Packed layout (`point-light-batch.js#describeBucketVertexBuffers`'s own
+ * `'merged'` branch): `aParamsShared` = (attenuationEased, expectedDepth,
+ * ratio, exposure); `aColorA/B/C` = (bg, dim, bright) THEN colorationAlpha
+ * and lightColor.r/g once `bright` is exhausted; `aLightColorB` =
+ * (lightColor.b, spare×3). `aAnim`/`aWind`, when both present, share ONE
+ * physical buffer at stride 8 (detected here via `arrays.aAnim ===
+ * arrays.aWind`, the same reference `createBatchedLightMesh`'s
+ * `ensureCapacity` deliberately gives both names in that case) — writing
+ * BOTH in one pass at that stride, rather than each independently at
+ * stride 4, is what correctness here actually depends on. Pure.
+ *
+ * @param {object} arrays @param {number} start @param {number} count
+ * @param {object} values - the union of illumination's and coloration's own
+ *   per-light fields (see this module's header).
+ */
+export function writeMergedValueSpan(arrays, start, count, values) {
+  const {
+    ratio,
+    attenuationEased,
+    exposure,
+    expectedDepth,
+    bg,
+    dim,
+    bright,
+    colorationAlpha,
+    lightColor,
+    speedRaw,
+    reverseSign,
+    seed,
+    intensityRaw,
+    x,
+    y,
+    windExposure,
+    windResponse,
+  } = values;
+  const animWindInterleaved = !!arrays.aAnim && arrays.aAnim === arrays.aWind;
+  for (let v = 0; v < count; v++) {
+    const vi = start + v;
+    if (arrays.aParamsShared) {
+      const o = vi * 4;
+      arrays.aParamsShared[o + 0] = attenuationEased;
+      arrays.aParamsShared[o + 1] = expectedDepth;
+      arrays.aParamsShared[o + 2] = ratio;
+      arrays.aParamsShared[o + 3] = exposure;
+    }
+    if (arrays.aColorA) {
+      const o = vi * 4;
+      arrays.aColorA[o + 0] = bg[0];
+      arrays.aColorA[o + 1] = bg[1];
+      arrays.aColorA[o + 2] = bg[2];
+      arrays.aColorA[o + 3] = dim[0];
+    }
+    if (arrays.aColorB) {
+      const o = vi * 4;
+      arrays.aColorB[o + 0] = dim[1];
+      arrays.aColorB[o + 1] = dim[2];
+      arrays.aColorB[o + 2] = bright[0];
+      arrays.aColorB[o + 3] = bright[1];
+    }
+    if (arrays.aColorC) {
+      const o = vi * 4;
+      arrays.aColorC[o + 0] = bright[2];
+      arrays.aColorC[o + 1] = colorationAlpha;
+      arrays.aColorC[o + 2] = lightColor[0];
+      arrays.aColorC[o + 3] = lightColor[1];
+    }
+    if (arrays.aLightColorB) {
+      const o = vi * 4;
+      arrays.aLightColorB[o + 0] = lightColor[2];
+      arrays.aLightColorB[o + 1] = 0;
+      arrays.aLightColorB[o + 2] = 0;
+      arrays.aLightColorB[o + 3] = 0;
+    }
+    if (animWindInterleaved) {
+      const o = vi * 8;
+      arrays.aAnim[o + 0] = speedRaw;
+      arrays.aAnim[o + 1] = reverseSign;
+      arrays.aAnim[o + 2] = seed;
+      arrays.aAnim[o + 3] = intensityRaw;
+      arrays.aAnim[o + 4] = x;
+      arrays.aAnim[o + 5] = y;
+      arrays.aAnim[o + 6] = windExposure;
+      arrays.aAnim[o + 7] = windResponse;
+    } else {
+      if (arrays.aAnim) {
+        const o = vi * 4;
+        arrays.aAnim[o + 0] = speedRaw;
+        arrays.aAnim[o + 1] = reverseSign;
+        arrays.aAnim[o + 2] = seed;
+        arrays.aAnim[o + 3] = intensityRaw;
+      }
+      if (arrays.aWind) {
+        const o = vi * 4;
+        arrays.aWind[o + 0] = x;
+        arrays.aWind[o + 1] = y;
+        arrays.aWind[o + 2] = windExposure;
+        arrays.aWind[o + 3] = windResponse;
+      }
+    }
+  }
+}
+
+/**
  * Build the ONE shared-core material this bucket instance draws with —
  * called ONCE, at construction. A bucket's graph-build-time flags
  * (animated/windPresent/animationEntry/animationQuality/falloffModel) are
@@ -290,18 +402,18 @@ export function writeColorationValueSpan(arrays, start, count, values) {
  * rebuild of this one. No `tsl/no-uniform-gates` risk here for exactly that
  * reason.
  *
- * @param {object} THREE @param {'illumination'|'coloration'} channel
+ * @param {object} THREE @param {'illumination'|'coloration'|'merged'} channel
  * @param {object} shared - passed straight through to the channel's own
- *   shading core (`buildIlluminationShadingCore`/`buildColorationShadingCore`'s
- *   own `shared` param — see each function's header for its exact shape).
+ *   shading core (`buildIlluminationShadingCore`/`buildColorationShadingCore`/
+ *   `buildMergedPointLightShadingCore`'s own `shared` param — see each
+ *   function's header for its exact shape).
  * @param {{animated: boolean, windPresent: boolean, animationEntry: object|null,
  *   animationQuality: number, falloffModel: string}} flags
  * @param {{buffers: string[]}} layout
  * @returns {*} a `THREE.NodeMaterial`.
  */
 function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
-  const { attribute, vec2, vec3, vec4 } = THREE.TSL;
-  const aParamsNode = attribute('aParams', 'vec4');
+  const { attribute, vec2, vec3, vec4, mrt } = THREE.TSL;
 
   const animInput = flags.animated
     ? (() => {
@@ -316,6 +428,79 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
       })()
     : null;
 
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.MaxEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.MaxEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+
+  if (channel === 'merged') {
+    // S2.14 — the fields NOT part of describeBucketVertexBuffers's shared
+    // aParamsShared/aColorA-C/aLightColorB packing all come from THESE four
+    // buffers; see that function's own header for the exact float layout,
+    // and writeMergedValueSpan for the write side this read side must match.
+    const aParamsSharedNode = attribute('aParamsShared', 'vec4');
+    const aColorANode = attribute('aColorA', 'vec4');
+    const aColorBNode = attribute('aColorB', 'vec4');
+    const aColorCNode = attribute('aColorC', 'vec4');
+    const aLightColorBNode = attribute('aLightColorB', 'vec4');
+    const coreInputs = {
+      localUnitXY: attribute('aLocalUnit', 'vec2'),
+      attenuationEased: aParamsSharedNode.x,
+      expectedDepth: aParamsSharedNode.y,
+      ratio: aParamsSharedNode.z,
+      exposure: aParamsSharedNode.w,
+      backgroundColor: vec3(aColorANode.x, aColorANode.y, aColorANode.z),
+      dimColor: vec3(aColorANode.w, aColorBNode.x, aColorBNode.y),
+      brightColor: vec3(aColorBNode.z, aColorBNode.w, aColorCNode.x),
+      colorationAlpha: aColorCNode.y,
+      lightColor: vec3(aColorCNode.z, aColorCNode.w, aLightColorBNode.x),
+      anim: animInput,
+      wind: windInput,
+    };
+    const { illumFinal, illumAlpha, colorFinal, colorAlpha } = buildMergedPointLightShadingCore({
+      THREE,
+      inputs: coreInputs,
+      shared,
+      flags: {
+        animation: flags.animated ? flags.animationEntry : null,
+        animationQuality: flags.animationQuality,
+        falloffModel: flags.falloffModel,
+      },
+    });
+    // ⚠️ PER-ATTACHMENT BLEND STATE IS RENDERER-GLOBAL, NOT MATERIAL-LOCAL
+    // (found live building S2.11's mechanism proof — see
+    // reference_mrt_blend_state_is_renderer_global memory / this project's
+    // own account): this material's own `mrt(...).setBlendMode(...)` here
+    // correctly routes VALUES to the 'illum'/'coloration' named attachments,
+    // but blend state is ONLY actually applied when the SAME blend modes are
+    // ALSO set via `renderer.setMRT(...)` at the point this mesh is drawn —
+    // S2.15's job, not this module's. The `material.blending`/etc. set above
+    // is therefore a harmless, never-consulted fallback while that render-
+    // time call is in place (MaterialBlending is the only value that would
+    // make the renderer defer to it; CustomBlending never does).
+    const maxBlend = new THREE.BlendMode(THREE.CustomBlending);
+    maxBlend.blendEquation = THREE.MaxEquation;
+    maxBlend.blendSrc = THREE.OneFactor;
+    maxBlend.blendDst = THREE.OneFactor;
+    maxBlend.blendEquationAlpha = THREE.MaxEquation;
+    maxBlend.blendSrcAlpha = THREE.OneFactor;
+    maxBlend.blendDstAlpha = THREE.OneFactor;
+    material.fragmentNode = mrt({ illum: vec4(illumFinal, illumAlpha), coloration: vec4(colorFinal, colorAlpha) })
+      .setBlendMode('illum', maxBlend)
+      .setBlendMode('coloration', maxBlend);
+    void layout;
+    return material;
+  }
+
+  const aParamsNode = attribute('aParams', 'vec4');
   let coreInputs;
   if (channel === 'illumination') {
     const aColorANode = attribute('aColorA', 'vec4');
@@ -366,18 +551,6 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
     },
   });
 
-  const material = new THREE.NodeMaterial();
-  material.transparent = false;
-  material.depthTest = false;
-  material.depthWrite = false;
-  material.side = THREE.DoubleSide;
-  material.blending = THREE.CustomBlending;
-  material.blendEquation = THREE.MaxEquation;
-  material.blendSrc = THREE.OneFactor;
-  material.blendDst = THREE.OneFactor;
-  material.blendEquationAlpha = THREE.MaxEquation;
-  material.blendSrcAlpha = THREE.OneFactor;
-  material.blendDstAlpha = THREE.OneFactor;
   material.fragmentNode = vec4(finalNode, alphaNode);
   void layout; // not needed by the graph itself — kept as a param for symmetry with the caller's own bookkeeping
   return material;
@@ -390,7 +563,7 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
  * same bookkeeping.
  *
  * @param {object} args @param {object} args.THREE
- * @param {'illumination'|'coloration'} args.channel
+ * @param {'illumination'|'coloration'|'merged'} args.channel
  * @param {object} args.shared - forwarded to the shading core untouched.
  * @param {{animated: boolean, windPresent: boolean, animationEntry: object|null,
  *   animationQuality: number, falloffModel: string}} args.flags
@@ -399,8 +572,10 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
  *   dispose: () => void, layout: {buffers: string[], count: number}}}
  */
 export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
-  if (channel !== 'illumination' && channel !== 'coloration') {
-    throw new Error(`createBatchedLightMesh: channel must be 'illumination' or 'coloration' (got '${channel}')`);
+  if (channel !== 'illumination' && channel !== 'coloration' && channel !== 'merged') {
+    throw new Error(
+      `createBatchedLightMesh: channel must be 'illumination', 'coloration' or 'merged' (got '${channel}')`
+    );
   }
   const resolvedFlags = {
     animated: flags.animated === true,
@@ -416,7 +591,7 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
   });
   if (!layout.ok) {
     throw new Error(
-      `createBatchedLightMesh(${channel}): this bucket needs ${layout.count} vertex buffers ` +
+      `createBatchedLightMesh(${channel}): this bucket needs ${layout.slotCount} vertex-buffer slots ` +
         `[${layout.buffers.join(', ')}], over MAX_VERTEX_BUFFERS_PER_PIPELINE — see ` +
         `Point-Light-Batching-Design.md §3.3 before adding another field`
     );
@@ -427,8 +602,37 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
   const geometry = new THREE.BufferGeometry();
   const arrays = {};
 
+  // S2.14: a MERGED, fully-loaded (animated+wind) bucket packs `aAnim`+
+  // `aWind` into ONE physical binding via an InterleavedBuffer — the ONE
+  // combination `describeBucketVertexBuffers` marks as needing fewer
+  // physical slots than logical buffer names (its own `slotCount` vs
+  // `count`). S2.11's shader-lab proof confirmed this on-device: byte-
+  // identical to two separate buffers, and both attribute VIEWS correctly
+  // share one underlying `InterleavedBuffer` object.
+  const interleaveAnimWind =
+    channel === 'merged' && layout.buffers.includes('aAnim') && layout.buffers.includes('aWind');
+
   function ensureCapacity(nextCapacity) {
     for (const name of layout.buffers) {
+      if (interleaveAnimWind && name === 'aWind') continue; // built alongside 'aAnim' below, same pass
+      if (interleaveAnimWind && name === 'aAnim') {
+        const stride = ITEM_SIZES.aAnim + ITEM_SIZES.aWind; // 8 — speedRaw/reverseSign/seed/intensityRaw | x/y/windExposure/windResponse
+        const raw = new Float32Array(nextCapacity * stride);
+        const interleaved = new THREE.InterleavedBuffer(raw, stride);
+        interleaved.setUsage(THREE.DynamicDrawUsage);
+        // BOTH names resolve to the SAME raw array — writeMergedValueSpan's
+        // own `arrays.aAnim === arrays.aWind` check is how it detects this
+        // and switches to single-pass stride-8 writes instead of two
+        // independent stride-4 ones.
+        arrays.aAnim = raw;
+        arrays.aWind = raw;
+        geometry.setAttribute('aAnim', new THREE.InterleavedBufferAttribute(interleaved, ITEM_SIZES.aAnim, 0));
+        geometry.setAttribute(
+          'aWind',
+          new THREE.InterleavedBufferAttribute(interleaved, ITEM_SIZES.aWind, ITEM_SIZES.aAnim)
+        );
+        continue;
+      }
       const itemSize = ITEM_SIZES[name];
       const arr = new Float32Array(nextCapacity * itemSize);
       arrays[name] = arr;
@@ -611,8 +815,10 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
   function writeValueSpan(m, span) {
     if (channel === 'illumination') {
       writeIlluminationValueSpan(arrays, span.start, span.count, m);
-    } else {
+    } else if (channel === 'coloration') {
       writeColorationValueSpan(arrays, span.start, span.count, m);
+    } else {
+      writeMergedValueSpan(arrays, span.start, span.count, m);
     }
   }
 

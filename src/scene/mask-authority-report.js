@@ -22,7 +22,7 @@
  */
 
 import { MASK_KINDS, DERIVED_KINDS, CASTER_HEIGHT_SCALE_PX } from './mask-catalog.js';
-import { maskGridMean } from './mask-derive.js';
+import { maskGridMean, maskGridCountAbove } from './mask-derive.js';
 
 /** URLs are long and the tail is the informative half. */
 function tailOf(u) {
@@ -105,12 +105,30 @@ function floorRow({ floor, found, product, requiredMasksMissing }) {
           // with its PROVENANCE beside its mean — because an all-zero water
           // grid means two completely different things depending on whether a
           // mask was authored, and only one of them is a content gap.
+          // The SOURCE COUNT rides right in the summary string, not just
+          // buried in `completeness` below — `rasterizeAuthored` composites
+          // by OVERWRITE in draw order (a later source replaces an earlier
+          // one within their shared footprint), so "authored" alone cannot
+          // distinguish "one real source" from "a real source THEN a blank
+          // one drawn over it" — two floors with byte-identical painted
+          // content can legitimately have a different host count for the
+          // same kind (feedback_instruments_must_not_lie).
           rasterized: Object.fromEntries(
             Object.entries(product.authored ?? {}).map(([id, grid]) => [
               id,
-              `${Math.round(maskGridMean(grid) * 100)}% (${product.completeness.authoredSources?.[id] ?? 'unknown'})`,
+              `${Math.round(maskGridMean(grid) * 100)}% (${product.completeness.authoredSources?.[id] ?? 'unknown'}, ${product.completeness.authoredSourceCounts?.[id] ?? '?'} source(s))`,
             ])
           ),
+          // THE EXACT QUESTION `effects/fire/fire-mask.js#extractFiresFromMask`
+          // asks, mirrored here (2026-08-13 diagnostic pass): `PAINT_THRESHOLD`
+          // there is 0.25 (≈64/255) — a texel must clear this before it is even
+          // a CANDIDATE ridge point. `rasterized.fire`'s own % above is too
+          // coarse to answer this for sparse content (a handful of texels
+          // against a 262,144-texel grid always rounds to "0%"), so this counts
+          // them directly instead of guessing from the rounded mean.
+          fireTexelsAtOrAbovePaintThreshold: product.authored?.fire
+            ? maskGridCountAbove(product.authored.fire, 64)
+            : null,
           completeness: product.completeness,
         }
       : 'no products (floor unknown to derivation)',

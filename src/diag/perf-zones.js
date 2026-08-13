@@ -604,6 +604,27 @@ export const ZONES = Object.freeze(
       false,
       'pointLights.lightScene'
     ),
+    // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) — off by
+    // default (`pointLightMrtMerge`), so 'conditional' like the aperture-
+    // shadow/window zones just below, not 'steady' like the draw it sits
+    // beside. Wraps the WHOLE produce-then-illum-blit sequence: the zero-fill
+    // pre-pass into `scene.pointLightMerged`, the (currently always-empty —
+    // S2.16 wires real membership) merged-bucket draw, and the MAX-blit of
+    // its illum attachment into `scene.illum`. `ownerEffectId: null` — same
+    // reasoning `light.drawPointLights`/`light.drawColoration` already state:
+    // this is a different way to draw the SAME point lights, not an optional
+    // visual effect a user toggles.
+    z(
+      'light.drawPointLightsMerged',
+      'Merged point-light draw + illum blit',
+      'lighting',
+      'light.accumulate',
+      null,
+      'gpu',
+      'conditional',
+      false,
+      'pointLightMergedZeroQuad'
+    ),
     // Found undeclared 2026-08-06 (perf-zone-coverage-audit): the bracket and
     // Z-table entry already existed in vt-pan-viewer.js — this zone id simply
     // had no declaration here, so profiler.begin/end on it were silent -1
@@ -643,6 +664,21 @@ export const ZONES = Object.freeze(
       'steady',
       false,
       'pointLights.colorationScene'
+    ),
+    // S2.15's other half — blits `scene.pointLightMerged`'s ALREADY-produced
+    // (see `light.drawPointLightsMerged` just above; the merged target is
+    // rendered ONCE per frame, not twice) coloration attachment into
+    // `scene.coloration`. Off by default, same reasoning as its sibling zone.
+    z(
+      'light.drawColorationMergedBlit',
+      'Merged coloration blit',
+      'lighting',
+      'light.accumulate',
+      null,
+      'gpu',
+      'conditional',
+      false,
+      'pointLightMergedColorationBlitQuad'
     ),
     z(
       'light.drawComposite',

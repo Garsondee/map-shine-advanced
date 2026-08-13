@@ -62,7 +62,7 @@ export { createSunShadowSubsystem, SUN_SHADOW_QUANTIZE_DEG } from './lighting/su
 // includes from the picked view, so "sky-reach only" isolates for real.
 export { SUN_SHADOW_DEBUG_VIEWS, sunShadowDebugPaints, sunShadowDebugView } from './lighting/sun-shadow-debug.js';
 // THE POINT-LIGHT POOL — extraction step 3 of docs/planning/
-// VT-Pan-Viewer-Extraction.md. The mesh pool, its two dedicated scenes, the
+// VT-Pan-Viewer-Extraction.md. The mesh pool, its four dedicated scenes, the
 // candle wall-clip cache, and the per-frame reconcile.
 export { createPointLightPool, resolveAnchorElevationRank } from './lighting/point-light-pool.js';
 export {
@@ -88,6 +88,19 @@ export {
   ELEVATION_RANK_FRACTION_DIVISOR,
 } from './lighting/point-light-illumination.js';
 export { buildPointLightColorationMaterial, computeColorationAlpha } from './lighting/point-light-coloration.js';
+// S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) — the dedicated-
+// target/blit infrastructure the viewer's own render sequence wires up.
+// `buildMergedPointLightShadingCore` itself is NOT re-exported here —
+// `point-light-batch-mesh.js` is its only caller, a sibling file inside
+// `effects/lighting/` that imports it directly; a barrel path nothing outside
+// the zone uses would just be an unconsumed export (`feedback_unconsumed_
+// api_rots_silently`).
+export {
+  describePointLightMergedMrt,
+  buildPointLightMergedRendererMrtStructs,
+  buildPointLightMergedZeroQuadMaterial,
+  buildPointLightMergedBlitMaterial,
+} from './lighting/point-light-merged.js';
 // ── ANIMATED LIGHTS (docs/planning/Light-Parity.md §5's last item;
 // docs/reference/foundry-v14-light-animations-audit.md) ─────────────────────
 export { LIGHT_ANIMATIONS, KNOWN_DEFERRED_ANIMATIONS, resolveLightAnimation } from './lighting/animations/registry.js';

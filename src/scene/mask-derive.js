@@ -909,6 +909,22 @@ export function deriveFloorProducts({
         input?.sources?.length > 0 ? 'authored' : 'default',
       ])
     );
+    // ⚠️ THE COUNT, NOT JUST THE authored/default VERDICT (2026-08-13
+    // diagnostic pass — a floor-specific fire-registration mystery that
+    // `authoredSources` alone couldn't distinguish). `rasterizeAuthored`
+    // composites its sources by OVERWRITE, in draw order, a LATER source
+    // replacing an EARLIER one within their shared footprint
+    // (`compositeItemOverwrite`'s own doc) — so "authored" only ever says "at
+    // least one source contributed something", never "and nothing drawn after
+    // it blanked the result back out". Two floors with byte-identical painted
+    // content can legitimately have a DIFFERENT number of items hosting the
+    // same kind (`scene/layer-order.js#maskHostFloorIndices` is per-item, per-
+    // floor), and if one of them is a second, unpainted host drawn after the
+    // real one, this is the field that would show it — `authoredSources`
+    // alone reads identically ("authored") on both floors either way.
+    const authoredSourceCounts = Object.fromEntries(
+      Object.entries(floor.authored ?? {}).map(([id, input]) => [id, input?.sources?.length ?? 0])
+    );
 
     // THE BUILDING CHANNEL — the dark of `_Outdoors` IS the building footprint.
     // No item, no alpha, no elevation: the author already painted where the
@@ -1038,6 +1054,7 @@ export function deriveFloorProducts({
         // applied to a kind that is not required: report the difference rather
         // than throw on it).
         authoredSources,
+        authoredSourceCounts,
         ceilingElevation: floor.ceilingElevation,
         // null (not 0) when the floor declares no ground: "we do not know" and
         // "it is at zero" produce very different shadows, and only one of them
@@ -1094,6 +1111,23 @@ export function maskGridMean(grid) {
   let sum = 0;
   for (let i = 0; i < grid.data.length; i++) sum += grid.data[i];
   return sum / (grid.data.length * 255);
+}
+
+/**
+ * How many texels in a grid clear a given byte threshold (0..255) — the exact
+ * question a sparse-content extractor (e.g. `effects/fire/fire-mask.js`'s
+ * `PAINT_THRESHOLD`) actually asks, which `maskGridMean` cannot answer for a
+ * small/sparse region: a handful of bright texels against a 262,144-texel
+ * grid rounds to "0%" whether they are genuinely absent or genuinely present,
+ * so the mean alone cannot distinguish "nothing here" from "a small real
+ * thing here" (`feedback_instruments_must_not_lie`).
+ * @param {{data: Uint8Array|number[]}} grid @param {number} byteThreshold
+ * @returns {number}
+ */
+export function maskGridCountAbove(grid, byteThreshold) {
+  let count = 0;
+  for (let i = 0; i < grid.data.length; i++) if (grid.data[i] >= byteThreshold) count++;
+  return count;
 }
 
 /**

@@ -246,6 +246,10 @@ import {
   // left with the vegetation-shadow code in extraction step 2 — this file has
   // no remaining caller for any of them.)
   createPointLightPool,
+  describePointLightMergedMrt,
+  buildPointLightMergedRendererMrtStructs,
+  buildPointLightMergedZeroQuadMaterial,
+  buildPointLightMergedBlitMaterial,
   createWaterBodySubsystem,
   createWaterSurfaceSubsystem,
   createFluidSurfaceSubsystem,
@@ -1105,8 +1109,8 @@ export async function startVtPanViewer({
   // THE SAFETY SLIDE'S seam-restore hook (see the renderer.onDeviceLost handler
   // below). Injected exactly like the others so vt/ stays ignorant of the
   // interface seam: the composition root (boot.js) wires this to
-  // restoreFoundryArt(), because un-suppressing canvas.environment is a Foundry-
-  // adapter concern this file must not reach into directly.
+  // restoreFoundryArt(), because un-suppressing Foundry's primary/effects art
+  // is a Foundry-adapter concern this file must not reach into directly.
   onDeviceLost ??= () => {};
   // Captured for runZoomThrashTest's "blank slate" restart (2026-07-16) —
   // the SAME fully-resolved params this call itself used, so a later restart
@@ -1716,6 +1720,19 @@ export async function startVtPanViewer({
     // light.js's composite essay for why a linear-space add washed the scene
     // to a single hue and gamma-space fixes it).
     const sceneColoration = allocator.create('scene.coloration', describeSceneColor());
+    // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) —
+    // `scene.pointLightMerged`, written by nothing else, ever. Allocated
+    // UNCONDITIONALLY, in both `pointLightMrtMerge` flag states — the SAME
+    // reasoning `describeSceneColorMrt`'s own comment states for its depth
+    // attachment: it makes the flag live-flippable, which is what lets the
+    // pixel-diff gate capture flag-off and flag-on in ONE session at one
+    // camera position. With the flag OFF, nothing ever draws into it or
+    // reads from it (see the two guarded call sites below), so its mere
+    // existence cannot affect a single pixel.
+    const scenePointLightMerged = allocator.create(
+      'scene.pointLightMerged',
+      describePointLightMergedMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH })
+    );
 
     // ========================================================================
     // UI-SHADOW — open Foundry windows cast a soft offset shadow (2026-07-20).
@@ -2170,6 +2187,24 @@ export async function startVtPanViewer({
     const illumQuad = new THREE.QuadMesh(envLight.illumMaterial);
     const compositeQuad = new THREE.QuadMesh(envLight.compositeMaterial);
 
+    // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) —
+    // `scene.pointLightMerged`'s own renderer-global MRT structs (blend
+    // state — see `buildPointLightMergedRendererMrtStructs`'s own doc for
+    // why that's separate from material value-routing) and its three quads:
+    // the zero-fill pre-pass, and the two single-attachment MAX-blits into
+    // `sceneIllum`/`sceneColoration`. Built ONCE, same as `illumQuad`/
+    // `compositeQuad` just above — `scenePointLightMerged.textures[i]` are
+    // stable references for the target's lifetime (the allocator resizes
+    // in-place, never replaces), so no per-frame rebuild is needed.
+    const pointLightMergedMrtStructs = buildPointLightMergedRendererMrtStructs(THREE);
+    const pointLightMergedZeroQuad = new THREE.QuadMesh(buildPointLightMergedZeroQuadMaterial(THREE));
+    const pointLightMergedIllumBlitQuad = new THREE.QuadMesh(
+      buildPointLightMergedBlitMaterial(THREE, scenePointLightMerged.textures[0])
+    );
+    const pointLightMergedColorationBlitQuad = new THREE.QuadMesh(
+      buildPointLightMergedBlitMaterial(THREE, scenePointLightMerged.textures[1])
+    );
+
     // ========================================================================
     // post.bloom — the dual-filter bloom pyramid (2026-07-23, docs/planning/Bloom.md)
     // ========================================================================
@@ -2480,6 +2515,29 @@ export async function startVtPanViewer({
         return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
       },
     });
+
+    /**
+     * THE CANDLE FLAME SPRITE'S OWN DEPTH-AUTHORITY RESOLVER (migrated
+     * 2026-08-13, mirroring lightning's own fix above — the flame sprite was
+     * the last consumer left on the OLD buf:scene.attr/elevationRank gate;
+     * candle's cast LIGHT was already migrated, see getCandleRenderState's
+     * `elevation` field in boot.js). Candle has no subsystem factory of its
+     * own to inject this into the way lightning/fire do — `updateCandleFlame`
+     * (far below, called every frame from the render loop) builds the flame
+     * geometry directly — so this is a plain named function it calls itself,
+     * rather than a constructor-injected closure. Same two-line composition
+     * as lightning's copy just above, on purpose: every depth-authority
+     * consumer gets its OWN copy, never a shared reference
+     * (keyhole-depth-authority-design.md). TDZ-safe for the same reason as
+     * lightning's closure — `depthAuthority` is declared `const` further down
+     * this function, but this is not CALLED until `updateCandleFlame()` runs
+     * from the frame loop, long after that declaration has executed.
+     */
+    function resolveCandleExpectedDepth(elevation) {
+      const safeElevation = Number.isFinite(elevation) ? elevation : 0;
+      const rank = depthAuthority.rankOfElevation(safeElevation);
+      return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+    }
 
     /**
      * THE FIRE SUBSYSTEM (effects/fire/fire-subsystem.js) — the vertical slab
@@ -3992,11 +4050,11 @@ export async function startVtPanViewer({
     }
 
     /** Cheap change-detector over the anchor positions + size + wind exposure +
-     * colour + height gate, so the geometry (which BAKES center/windExposure/
-     * flameColor/flameIntensity/elevationRank as attributes) is rebuilt only
-     * on a real change (scene load, floor switch, a size/colour/elevation
-     * tweak — global OR per-candle — or the outdoors mask streaming in and
-     * changing a candle's exposure). */
+     * colour + depth-authority gate, so the geometry (which BAKES center/
+     * windExposure/flameColor/flameIntensity/expectedDepth as attributes) is
+     * rebuilt only on a real change (scene load, floor switch, a size/colour/
+     * elevation tweak — global OR per-candle — or the outdoors mask streaming
+     * in and changing a candle's exposure). */
     function candleFlameSignature(anchors, sizePx, colorHex) {
       let h = (anchors.length * 1000003 + Math.round((sizePx || 0) * 100)) | 0;
       h = hashStrInto(h, colorHex);
@@ -4011,26 +4069,34 @@ export async function startVtPanViewer({
         h = (h * 31 + Math.round((p?.intensity ?? 1) * 100)) | 0;
         if (p?.useCustomColor) h = hashStrInto(h, p.customColor);
         if (p?.useCustomSize) h = (h * 31 + Math.round(Number(p.customSizePx) || 0)) | 0;
-        // THE HEIGHT GATE'S OWN BAKED VALUE (2026-08-05 fix) — `a.elevationRank`
-        // (getCandleRenderState's `resolveAnchorElevationRank` result) is what
-        // actually lands in the `elevationRank` vertex attribute below; hashing
-        // the RESOLVED rank (not just `p?.elevation`) catches every way it can
-        // change — the candle's own authored height, a floor switch re-resolving
-        // which floor's band it falls in, or the 'all-levels' sentinel — so an
-        // elevation-only edit can no longer leave a stale rank baked on the GPU
-        // while everything else about the candle stays the same.
-        h = (h * 31 + Math.round((a.elevationRank ?? 0) * 1000)) | 0;
+        // THE DEPTH-AUTHORITY GATE'S OWN BAKED VALUE (2026-08-13 migration) —
+        // `a.expectedDepth` (resolveCandleExpectedDepth's result, applied in
+        // updateCandleFlame just below) is what actually lands in the
+        // `expectedDepth` vertex attribute; hashing the RESOLVED value (not
+        // just `p?.elevation`) catches every way it can change — the candle's
+        // own authored height, a floor switch re-resolving which floor's rank
+        // it falls in — so an elevation-only edit can no longer leave a stale
+        // value baked on the GPU while everything else about the candle stays
+        // the same.
+        h = (h * 31 + Math.round((a.expectedDepth ?? 0) * 1000)) | 0;
       }
       return h;
     }
 
     function updateCandleFlame() {
       const state = getCandleRenderState();
-      const anchors = state.enabled ? (Array.isArray(state.anchors) ? state.anchors : []) : [];
-      if (!anchors.length) {
+      const rawAnchors = state.enabled ? (Array.isArray(state.anchors) ? state.anchors : []) : [];
+      if (!rawAnchors.length) {
         if (candleFlameMesh) candleFlameMesh.visible = false;
         return;
       }
+      // THE FLAME SPRITE'S OWN DEPTH-AUTHORITY INPUT (2026-08-13 migration) —
+      // `resolveCandleExpectedDepth` turns each anchor's raw absolute world
+      // elevation (`state.anchors[].elevation`, already correct and already
+      // consumed by this same anchor's cast LIGHT — boot.js#getCandleRenderState's
+      // own note) into the tie-safe value the shader compares, mirroring
+      // lightning's/pointLights' own composition.
+      const anchors = rawAnchors.map((a) => ({ ...a, expectedDepth: resolveCandleExpectedDepth(a.elevation) }));
       const sizePx = Number(state.params?.sizePx) > 0 ? Number(state.params.sizePx) : 1;
       // The flame's chaotic-life detail is a graph-BUILD-time tier (like the
       // light pool's), so a live animationQuality change rebuilds the material.
@@ -4051,11 +4117,14 @@ export async function startVtPanViewer({
         candleFlameMat = buildCandleFlameMaterial({
           THREE,
           uGlobalTimeMs,
-          // THE HEIGHT/ELEVATION GATE (2026-08-03) — the SAME buf:scene.attr
-          // node every point light already reads (built at line ~1730, well
-          // before this per-frame updater ever runs). See candle-flame-
-          // render.js#buildCandleFlameMaterial's own doc.
-          attrTexNode: envLight.attrTexNode,
+          // THE DEPTH-AUTHORITY GATE (2026-08-13 migration) — the SAME
+          // buf:scene.depth nodes every point light and lightning bolt
+          // already read (built well before this per-frame updater ever
+          // runs). See candle-flame-render.js#buildCandleFlameMaterial's own
+          // doc for why this replaced the OLD buf:scene.attr/attrTexNode
+          // mechanism.
+          depthTexNode: envLight.depthTexNode,
+          depthFlagsTexNode: envLight.depthFlagsTexNode,
           quality: qualityTier,
           windHandle,
         });
@@ -4979,6 +5048,40 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightDrawPoints);
       renderer.render(pointLights.lightScene, camera);
       profiler?.end(Z.lightDrawPoints);
+      // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) — off by
+      // default (`pointLightMrtMerge`). `pointLights.mergedScene` stays
+      // permanently empty until S2.16 wires real bucket membership, so this
+      // whole block is today a provable no-op even when the flag is ON: the
+      // zero-quad overwrites scene.pointLightMerged, nothing ever draws into
+      // it, and MAX-blending an all-zero source into sceneIllum changes
+      // nothing — exactly the isolated-mechanism proof this stage's own
+      // gate needs before S2.16 gives it real content to carry.
+      if (pointLightMrtMerge) {
+        pointLightMrtMergeDrawCount++;
+        profiler?.begin(Z.lightDrawPointsMerged);
+        const prevPointLightMergedMrt = renderer.getMRT();
+        renderer.setRenderTarget(scenePointLightMerged);
+        // The zero-fill pre-pass (S2.14's own first finding — never rely on
+        // renderer.clear()'s multi-attachment asymmetry, see this module's
+        // own header). An explicit overwrite-blend draw replaces BOTH
+        // attachments unconditionally, regardless of whatever the target
+        // held a moment ago — no separate renderer.clear() call needed, or
+        // wanted, alongside it.
+        renderer.setMRT(pointLightMergedMrtStructs.overwriteMrt);
+        pointLightMergedZeroQuad.render(renderer);
+        // The real merged-bucket draw, MAX-blended same as every other
+        // point-light accumulate pass. Currently always empty — see this
+        // block's own header.
+        renderer.setMRT(pointLightMergedMrtStructs.maxBlendMrt);
+        renderer.render(pointLights.mergedScene, camera);
+        renderer.setMRT(prevPointLightMergedMrt);
+        // Back to sceneIllum (still autoClearColor=false — the guarded
+        // sequence this sits inside) to MAX-blit the merged illum
+        // attachment in.
+        renderer.setRenderTarget(sceneIllum);
+        pointLightMergedIllumBlitQuad.render(renderer);
+        profiler?.end(Z.lightDrawPointsMerged);
+      }
       // APERTURE SHADOW DEBUG (docs/planning/Aperture-Gobo.md) — round 10
       // (2026-08-04) retired the separate blend-toward-`backgroundFloor`
       // pass this comment used to describe (`point-light-illumination.js`'s
@@ -5062,17 +5165,37 @@ export async function startVtPanViewer({
       }
       profiler?.end(Z.lightDrawWindow);
       renderer.autoClearColor = previousAutoClearColor;
-      // COLORATION (increment 3, 2026-07-19) — its OWN target, a SINGLE
-      // render() call (autoClearColor restored above), so the ordinary
-      // "first render() after setRenderTarget clears" behaviour is correct
-      // and wanted here: an area with no lights nearby should stay exactly
-      // black/zero (no ambient floor to pre-fill, unlike illum's), and a
-      // fresh per-frame clear is exactly what makes that true rather than
-      // accumulating stale coloration from a previous frame.
+      // COLORATION (increment 3, 2026-07-19) — its OWN target. The FIRST
+      // render() call below relies on the ordinary "first render() after
+      // setRenderTarget clears" behaviour (autoClearColor restored above),
+      // which is correct and wanted here: an area with no lights nearby
+      // should stay exactly black/zero (no ambient floor to pre-fill,
+      // unlike illum's), and a fresh per-frame clear is exactly what makes
+      // that true rather than accumulating stale coloration from a previous
+      // frame. A SECOND, guarded call (S2.15's merged-coloration blit) can
+      // follow it — see that block's own comment just below.
       profiler?.begin(Z.lightDrawColoration);
       renderer.setRenderTarget(sceneColoration);
       renderer.render(pointLights.colorationScene, camera);
       profiler?.end(Z.lightDrawColoration);
+      // S2.15's other half (see `light.drawPointLightsMerged`'s own header,
+      // above, for the full "provable no-op today" reasoning) — blits
+      // scene.pointLightMerged's ALREADY-produced (rendered ONCE per frame,
+      // on the illum side above, not twice) coloration attachment MAX-
+      // blended into the SAME target the line above just drew. Guarded
+      // (autoClearColor=false) so this second render() call does not wipe
+      // it — the ordinary "first render() after setRenderTarget clears"
+      // behaviour just above is exactly what THAT call wants (an area with
+      // no lights nearby should stay exactly black/zero); this one must not
+      // repeat it.
+      if (pointLightMrtMerge) {
+        profiler?.begin(Z.lightDrawColorationMergedBlit);
+        const prevColorationAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        pointLightMergedColorationBlitQuad.render(renderer);
+        renderer.autoClearColor = prevColorationAutoClear;
+        profiler?.end(Z.lightDrawColorationMergedBlit);
+      }
       // scene.lit = EOTF(OETF(albedo) × illum + coloration) — the coloration
       // is ADDED inside the composite now, in GAMMA space (Foundry parity;
       // the old separate additive quad blended in LINEAR space and washed the
@@ -9668,6 +9791,32 @@ export async function startVtPanViewer({
      */
     let pointLightBatching = true;
 
+    /**
+     * S2.15's OWN revert flag (Performance-Audit-2026-08.md §3.1's MRT-merge
+     * plan) — gates whether the produce-then-blit sequence below (two call
+     * sites in the light-draw loop) runs AT ALL. Default OFF, same posture
+     * `pointLightBatching` shipped with. Unlike that flag, THIS one already
+     * has a real caller the moment it flips (the target-alloc/zero-quad/blit
+     * machinery this stage built) even though `pointLights.mergedScene`
+     * stays permanently empty until S2.16 wires real bucket membership into
+     * it — flipping this flag today is provably a no-op (MAX-blending an
+     * always-zero source changes nothing), which is exactly S2.15's own
+     * gate: prove the NEW machinery is inert in isolation before S2.16 gives
+     * it real content to carry. Only has any visual effect once BOTH this
+     * and `pointLightBatching` are on (S2.16 also gates real membership on
+     * `pointLightBatching`, same as every other batched channel).
+     */
+    let pointLightMrtMerge = false;
+    /** NON-VACUITY COUNTER — the same "prove the new code path genuinely
+     * ran, not just that the flag flipped without error" discipline S2.7's
+     * own `getPointLightMeshPoolStats` readout served. `pointLights.merged
+     * Scene` stays permanently empty until S2.16, so a canvas pixel-diff
+     * alone cannot distinguish "the produce+blit sequence ran and was
+     * correctly inert" from "the `if` block never executed at all" — this
+     * counter can. Incremented once per frame inside that block, exposed
+     * via `getPointLightMrtMerge()`'s own return shape. */
+    let pointLightMrtMergeDrawCount = 0;
+
     // PER-PASS GPU TIMING (docs/planning/Performance.md). Constructed here rather
     // than in boot.js because it needs the `renderer` this closure owns; the
     // profiler it feeds is injected from boot, so ownership of the DATA still
@@ -9755,9 +9904,11 @@ export async function startVtPanViewer({
       lightDrawIllum: profiler?.indexOf('light.drawIllum') ?? -1,
       lightDrawRegions: profiler?.indexOf('light.drawRegions') ?? -1,
       lightDrawPoints: profiler?.indexOf('light.drawPointLights') ?? -1,
+      lightDrawPointsMerged: profiler?.indexOf('light.drawPointLightsMerged') ?? -1,
       lightDrawApertureShadow: profiler?.indexOf('light.drawApertureShadow') ?? -1,
       lightDrawWindow: profiler?.indexOf('light.drawWindowLight') ?? -1,
       lightDrawColoration: profiler?.indexOf('light.drawColoration') ?? -1,
+      lightDrawColorationMergedBlit: profiler?.indexOf('light.drawColorationMergedBlit') ?? -1,
       lightDrawComposite: profiler?.indexOf('light.drawComposite') ?? -1,
       lightDrawCandle: profiler?.indexOf('light.drawCandleFlame') ?? -1,
       lightDrawLightning: profiler?.indexOf('light.drawLightning') ?? -1,
@@ -11914,6 +12065,12 @@ export async function startVtPanViewer({
       allocator.resize(sceneIllum, drawBufW, drawBufH, describeSceneColor());
       allocator.resize(sceneLit, drawBufW, drawBufH, describeSceneColor());
       allocator.resize(sceneColoration, drawBufW, drawBufH, describeSceneColor());
+      allocator.resize(
+        scenePointLightMerged,
+        drawBufW,
+        drawBufH,
+        describePointLightMergedMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH })
+      );
       // post.bloom's mip chain tracks the drawing buffer too — each mip a
       // fixed fraction of it. setSize mutates the SAME texture object in place
       // (as for scene.color above), so the composite material's baked
@@ -13171,6 +13328,21 @@ export async function startVtPanViewer({
         return { pointLightBatching };
       },
       /**
+       * S2.15's OWN revert flag (see `pointLightMrtMerge`'s own declaration).
+       * No residency nudge needed, same reasoning as `setPointLightBatching`
+       * just above — the two guarded call sites in the light-draw loop read
+       * the closure variable directly, fresh, every frame.
+       */
+      setPointLightMrtMerge(on) {
+        const next = !!on;
+        if (next === pointLightMrtMerge) return { pointLightMrtMerge, changed: false };
+        pointLightMrtMerge = next;
+        return { pointLightMrtMerge, changed: true };
+      },
+      getPointLightMrtMerge() {
+        return { pointLightMrtMerge, drawCount: pointLightMrtMergeDrawCount };
+      },
+      /**
        * The flag AND the evidence that it is actually doing something.
        *
        * A pixel-diff of a flag that changed nothing is byte-identical for the
@@ -13547,6 +13719,13 @@ export async function startVtPanViewer({
         allocator.dispose(sceneIllum);
         allocator.dispose(sceneLit);
         allocator.dispose(sceneColoration);
+        // S2.15's dedicated target + its three quad materials (zero-quad,
+        // illum blit, coloration blit) — same per-Stop/Restart VRAM-leak
+        // reasoning as every other entry in this list.
+        allocator.dispose(scenePointLightMerged);
+        pointLightMergedZeroQuad.material.dispose();
+        pointLightMergedIllumBlitQuad.material.dispose();
+        pointLightMergedColorationBlitQuad.material.dispose();
         for (const mip of bloomMips) allocator.dispose(mip);
         for (const mip of dofMips) allocator.dispose(mip);
         envLight.illumMaterial.dispose();
@@ -16053,6 +16232,24 @@ export function setVtPanViewerPointLightBatching(on) {
 export function getVtPanViewerPointLightBatching() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getPointLightBatching();
+}
+
+/**
+ * S2.15's OWN revert flag — the dedicated `scene.pointLightMerged` target +
+ * blit machinery (Performance-Audit-2026-08.md §3.1's MRT-merge plan).
+ * Default OFF. `pointLights.mergedScene` stays permanently empty until S2.16
+ * wires real bucket membership into it, so flipping this ON today is
+ * provably a no-op — that is S2.15's own gate, proving the new machinery is
+ * inert before S2.16 gives it real content. Call as
+ * `MapShine.setPointLightMrtMerge(true)`.
+ */
+export function setVtPanViewerPointLightMrtMerge(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setPointLightMrtMerge(on);
+}
+export function getVtPanViewerPointLightMrtMerge() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getPointLightMrtMerge();
 }
 
 /**

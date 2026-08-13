@@ -38,7 +38,7 @@ building on any of this.
 | 4 | Vegetation liquifies at high wind | vegetation flutter | `BUILT (unverified)` |
 | 5 | Candles vanish when viewed from the floor above | candles / anchors | `BUILT (unverified)` |
 | 7 | Vegetation had no real height; its shadow could float above a floor above it | vegetation sort / shadow | `BUILT (unverified)` |
-| 8 | Candle flames go transparent/invisible at low elevation | candles / height gate | `OPEN` — needs a design call |
+| 8 | Candle flames go transparent/invisible at low elevation | candles / height gate | `LIVE` ✅ — author-confirmed 2026-08-13 |
 | 9 | Doors render above overhead tiles (no depth-authority participation) | doors | `OPEN` |
 | 10 | Level background/foreground image doesn't refresh after a path change mid-session | ingest / VT viewer lifecycle | `OPEN` — supersedes bug 1's hypothesis |
 | 11 | Feature: a scene-wide door-config audit/edit tool | doors / UI | `OPEN` — needs a design call |
@@ -48,6 +48,8 @@ building on any of this.
 | 15 | A sun shadow bleeds through an occluding roof on the floor above | sun shadows / layer smear | `OPEN` — needs a live repro to pin the exact item |
 | 16 | WebGPU crash: `_Specular` mask on a 12000² map exceeds `maxBufferSize` | specular / renderer limits | `BUILT (unverified)` — immediate fix only, adaptive system still open |
 | 17 | Feature: shared sun-brightness ceiling for `_Window` + a moonlight floor for night | window / lighting / design | `OPEN` — design proposal, no code yet |
+| 18 | Selecting a token shows a frozen, screen-locked second copy of the map inside explored fog | fog-of-war / art suppression | `BUILT (unverified)` — fix live-tested, author hasn't looked yet |
+| 19 | Painted `_Fire` region doesn't register on First Floor even with visible white paint | fire / mask extraction | `OPEN` (root cause) — workaround `BUILT`, live-tested |
 
 ---
 
@@ -826,7 +828,8 @@ gate.
 
 ## 8. Candle flames go transparent/invisible at low elevation
 
-**Status:** `OPEN` — root cause confirmed, fix needs a design call · **Reported:**
+**Status:** `LIVE` ✅ — author-confirmed 2026-08-13: *"Candle flames appear on
+the upper floor now so that is a serious improvement."* · **Reported:**
 2026-08-08 · **Docs:** `Light-and-Shadow.md`, this file's bug 5
 
 ### Symptom, in the author's own words
@@ -899,10 +902,39 @@ receiver content is triggering the gate there.
   both go through the same `flameElevationRank`/height-gate apparatus — but
   unconfirmed; investigate together once a direction is picked.
 
+### Fix — 2026-08-13
+
+**(a) was built**, not (b) — migrated `candle-flame-render.js`/`candle-flame-
+geometry.js` onto `buildDepthHeightGateNode`/`buf:scene.depth`, mirroring
+lightning's own 2026-08-05 migration exactly: rename `elevationRank`→
+`expectedDepth` throughout, swap `attrTexNode`→`depthTexNode`+
+`depthFlagsTexNode`, a per-consumer `resolveCandleExpectedDepth` closure in
+`vt-pan-viewer.js` (every depth-authority consumer gets its own copy, never a
+shared reference). `boot.js`'s dead `resolveAnchorElevationRank` import
+removed; the function itself is left in place (nothing else calls it now, but
+full removal is separate cleanup). The new gate has no sentinel/tolerance
+concept at all — elevation 0 is an ordinary low rank, compared the same bare-
+ordinal way as every other elevation — so this closes the 0-vs-14 asymmetry
+structurally rather than by special-casing it.
+
+Matches locked depth-authority doctrine and the author's own framing ("we can
+get specular to render on both floors — so why not candle"). Bug 13's symptom
+2 is very likely resolved as a side effect (the new gate's `flagsHere` param
+carries the same tile-restricts-light bit, now elevation-aware instead of an
+absolute block) — not independently re-tested against a Restrict-Lighting
+tile specifically.
+
+`npm run verify` green (9152 tests). Live-verified in the real Foundry harness
+(bench Mansion, both floors): ground floor unregressed, First Floor now shows
+flame sprites at anchor positions that previously failed.
+
 ### Fixed when
 
 On the Mansion map, an elevation-0 candle's flame is visible exactly as
 reliably as one at elevation 14, on a single-floor map with no special setup.
+Cross-floor half confirmed live (status line above); the single-floor
+elevation-0 case follows from the same mechanism but wasn't independently
+re-tested.
 
 ---
 
@@ -1623,3 +1655,248 @@ At noon, a maxed-out window never reads brighter than the exterior daylight
 next to it; at night, with the moon term active, a lit window is visibly
 brighter than its darkened surroundings; heavy cloud cover dims both
 together once clouds are wired in.
+
+---
+
+## 18. Selecting a token shows a frozen, screen-locked second copy of the map inside explored fog
+
+**Status:** `BUILT (unverified)` — root cause confirmed, fix implemented and
+live-tested against the real bench-Mansion harness; author has not yet
+looked at it on a real scene · **Reported:** 2026-08-13 · **Docs:**
+`src/foundry/canvas-compositing.js` (the interface-seam header comment),
+memory `keyhole-fog-shader-primary-texture-freeze`
+
+### Symptom
+
+*"When I select a token there is the black part of the fog of war which is
+working correctly but the 'explored' area isn't correctly pinned to world
+space. This only happens when I select tokens, essentially the black fog of
+war appears but I see a double set of albedos and one of them moves when I
+move the camera and the other one stays still."*
+
+### Root cause — CONFIRMED against the vendored Foundry v14 source, not guessed
+
+Foundry's own fog-of-war shader depends on a texture MSA's art suppression
+silently freezes. Chain, each link read from source:
+
+1. MSA hides Foundry's own map art via `canvas.environment.renderable =
+   false` (`canvas-compositing.js:311`) — intentional, MSA owns drawing the
+   map.
+2. `canvas.environment` is the literal PIXI **parent** of `canvas.primary`
+   (`groups/environment.mjs:21`), and neither it nor `CanvasGroupMixin`
+   override `render()` — it's the stock `PIXI.Container#render()`, which
+   early-returns on `!renderable` **before walking children**. So
+   suppression doesn't just hide `canvas.primary` — it stops PIXI from ever
+   calling its `render()` at all.
+3. `canvas.primary` is a `CachedContainer` (`groups/primary.mjs:29`), and
+   `CachedContainer#render()` (`containers/advanced/cached-container.mjs:
+   209-221`) is where its children get re-rendered into its own internal
+   `renderTexture` — gated by that same `!renderable` early-return (line
+   211). Never reached ⇒ **`canvas.primary.renderTexture` freezes solid**,
+   holding whatever it had at the instant suppression engaged (effectively
+   scene boot).
+4. Foundry's `VisibilityFilter` (Foundry's fog-of-war shader) unconditionally
+   samples that exact texture: `primaryTexture: canvas.primary.renderTexture`
+   (`groups/visibility.mjs:336`). Its fragment shader
+   (`rendering/filters/visibility.mjs:140,149`) uses it as `baseColor` for
+   the **explored-but-not-currently-visible** zone's whole formula — a
+   normal 0.5-alpha blend, so MSA's live render underneath shows through
+   double-exposed against this frozen snapshot. The pure-black
+   **unexplored** zone's formula doesn't read `baseColor` at all
+   (`vec4(unexploredColor, 1.0)`), which is exactly why the author sees the
+   black zone as correct and only the grey/explored zone as broken.
+5. The sample UV is screen-space (`filterMaskTextureCoord`,
+   `rendering/filters/visibility.mjs:91`), not world-space — so the frozen
+   snapshot always fills the current viewport regardless of camera position:
+   it reads as camera-locked ("stays still") while MSA's own live,
+   world-tracked render pans normally ("moves"). Two renders of the map, two
+   different apparent behaviours.
+6. Why only on token select: `CanvasVisibility#refresh()` sets
+   `this.visible = canvas.effects.visionSources.some(s => s.active) ||
+   !game.user.isGM` (`groups/visibility.mjs:489`). For a GM with no
+   controlled token this whole group — filter included — never runs, so the
+   frozen-texture dependency is never exercised until a vision source goes
+   active. Players (never GM) have it active essentially always.
+
+### Proposed fix — scoped, not built
+
+Stop suppressing `canvas.primary` at the parent (`environment`) level, which
+inseparably bundles "stop the cache" with "stop the screen output". Instead:
+
+- Leave `canvas.primary.renderable` at its default `true` so
+  `CachedContainer#render`'s cache-refresh keeps running every frame,
+  feeding Foundry's own fog shader (and anything else reading
+  `canvas.primary.renderTexture`) correctly.
+- Suppress only the screen output: `canvas.primary.sprite.renderable =
+  false` (the bound `SpriteMesh`, always present from construction) — stops
+  the unconditional on-screen blit without touching the cache-refresh half.
+- `canvas.effects` is a plain `PIXI.Container`, not a `CachedContainer`
+  (`groups/effects.mjs:31`) — no freeze failure mode, so it keeps being
+  suppressed the simple way: `canvas.effects.renderable = false` directly.
+- The safety-slide revert path needs the mirrored update
+  (`canvas.primary.sprite.renderable = true; canvas.effects.renderable =
+  true;`) so the fallback-to-Foundry mechanism stays correct.
+
+**Rejected alternative:** suppressing `canvas.visibility` entirely would
+kill the ghost by killing ALL of Foundry's fog rendering, including the
+black zone the author confirmed works — trades a visual bug for losing a
+wanted feature, and edges toward the separate, already-known non-GM
+visibility gap (bug tracked in memory `keyhole-fog-of-war-gap`).
+
+### Open questions
+
+- **Perf cost, unmeasured.** This gives back some of the render-to-texture
+  cost MSA currently skips by suppressing at the parent level — the same
+  cost vanilla Foundry pays every frame with no MSA at all. Likely small
+  against V3's own budget, but not yet run through the perf harness.
+- **Patch now vs. fold into the larger "MSA owns fog+vision rendering"
+  project** (already the locked long-term direction — see
+  `Point-Light-Batching-Design.md`'s sibling doc for the fog equivalent, not
+  yet written). The bigger project would obsolete this entire shader
+  dependency at once, and also closes the non-GM visibility gap in the same
+  motion. The scoped patch above doesn't block or contradict that project —
+  it's a correct stopgap, not a hack destined for rework — but which to do
+  first is the author's call, not a technical one.
+
+### Fixed when
+
+With a token controlled (or as any player) and the camera panned across
+explored-but-not-currently-visible territory, only one copy of the map is
+visible and it tracks the camera exactly — no ghosted second image, static
+or otherwise.
+
+### Live-tested, 2026-08-13 — `tests/playwright-artifacts/look/fog-shader-primary-freeze-verify.mjs`
+
+Ran against the real bench-Mansion Foundry harness (not just Node unit
+tests). Confirmed live: `canvas.primary.renderable:true` (cache stays
+active) with `canvas.primary.sprite.renderable:false` and
+`canvas.effects.renderable:false` (output still suppressed) — the intended
+new state. THE DECISIVE CHECK: read back `canvas.primary.renderTexture`'s
+actual pixel content before and after a real camera pan (9000,9000 →
+12000,12000 world units, confirmed via `canvas.stage.pivot`) — content
+genuinely changed (checksum 11351663→12169478, center pixel
+[140,67,67,255]→[137,71,57,255]). Before this fix that texture would have
+been frozen at whatever it held from scene boot, byte-identical regardless
+of camera movement — this is direct, live proof the cache is no longer
+frozen, not just a source-level argument.
+
+**Gap, honestly noted:** the bench Mansion scene has no tokens placed on
+it, so an actual "control a token, watch the ghost disappear" screenshot
+could not be captured — only the underlying mechanism. Full visual
+confirmation still needs the author's own eyes on a real scene with a real
+token, per this project's own BUILT-vs-LIVE convention.
+
+**Perf, honestly noted:** a settled (post-`waitForSceneSettled` + 8s dwell),
+no-token-controlled fps read came back **53fps** vs. the harness's own
+prior **67fps** baseline (memory `reference_live_foundry_harness`,
+2026-08-10, same scene/resolution). Suggestive of a real but moderate cost
+from keeping `canvas.primary`'s cache alive — but NOT a controlled A/B (the
+two readings differ in camera framing at minimum, and that memory's own
+baseline already cautions it isn't directly comparable across runs). A true
+flag-toggle-in-one-session measurement (same shape as `s2-15-pixel-diff.mjs`)
+would isolate this precisely if it matters enough to chase further.
+
+---
+
+## 19. Painted `_Fire` region doesn't register on First Floor even with visible white paint
+
+**Status:** `OPEN` (root cause) — a live-tunable workaround is `BUILT`,
+live-tested against the real bench-Mansion harness · **Reported:** 2026-08-13
+· **Docs:** `Fire.md`, `src/effects/fire/fire-mask.js`,
+`src/effects/fire/fire-spawn-points.js`
+
+### Symptom, in the author's own words
+
+*"The fireplace has this in the `_Fire` mask. If I make this much bigger a
+fire appears but then the fire is too large for the fireplace. There are
+plenty of fully white pixels in this yet no fire. Not fixed yet and this
+problem only happens on the upper floor."* Then, decisively: *"I copied the
+exact same block of pixels into the ground floor and they work perfectly
+fine on the ground floor and fail completely on the upper floor. Proven."*
+
+### What was ruled out, one at a time
+
+Native texture resolution (both Levels 12000×12000), per-Level texture
+placement config (`scaleX`/`scaleY`=1, offset=0, `fit`='fill', rotation=0 —
+identical on both), source count (exactly one `_Fire` source on both floors),
+and grid emptiness (25 real above-threshold texels confirmed present in
+First Floor's own derived grid via `fireTexelsAtOrAbovePaintThreshold`). None
+of these explained the asymmetry.
+
+### Two real bugs found and fixed along the way — neither is the full answer
+
+1. **Stale packed-page cache with no content awareness**
+   (`vt/pyramid-store.js#pageStoreKey`) — the cache key was URL-only, a
+   documented never-finished TODO (Keyhole.md §4.1 said "URL+mtime"). Fixed:
+   a ranged-GET content-validator now folds real byte size into the cache
+   key (`decode-pool.js`), `PACK_RECIPE_VERSION` 2→3.
+2. **Packed-channel alpha attenuation** — `compositePackedTexels`'s
+   non-owner-channel resolution (`_Fire`/`_Shadow` share one packed RGBA
+   texture with `_Outdoors`, only one channel keeps real alpha) was a
+   *linear blend* toward the channel's `absentValue`, not a threshold — so
+   antialiased/soft-edged paint got dimmed proportionally to its own alpha,
+   disproportionately punishing small strokes. Fixed: a hard
+   `PACKED_CHANNEL_ALPHA_GATE` (byte ≥8) replaces the blend,
+   `PACK_RECIPE_VERSION` 3→4.
+
+Both are real, verified improvements (`npm run verify` green throughout),
+but the author's own same-bytes-different-floor test proved neither was the
+full explanation — the exact floor-specific mechanism is still not found.
+
+### The workaround shipped instead, per direct author request
+
+*"Give me a way to change the sensitivity so that I can boost the chance of
+fire appearing but please make sure that the system once I stop moving the
+control rebuilds the fire effect so that I can test it immediately without
+having to refresh Foundry."*
+
+- New `maskSensitivity` param (`FIRE_PARAMS`, 'Presence' category, range
+  0.02–0.6, default 0.25 — unchanged behaviour until moved) drives the paint
+  threshold both `getMaskDrivenFires` (`extractFiresFromMask`'s
+  `paintThreshold`) and `getFireSpawnCloud` (`extractFireSpawnPoints`'s
+  `threshold`, kept at the same shipped ratio to the fire threshold) read
+  every call.
+- Rides in both caches' key alongside signature/version
+  (`fireMaskCache`/`fireSpawnCache` in `boot.js`), so a slider move forces a
+  genuine re-extraction on the very next frame — never a stale read.
+- Added to the Fire panel's front-of-house strip (`boot.js`'s
+  `buildFirePanel`) — a session-tuning control the author will reach for
+  repeatedly while diagnosing a specific fireplace, not set-once detail.
+
+### Live-tested, 2026-08-13 — `tests/playwright-artifacts/look/fire-sensitivity-live-verify.mjs`
+
+Against the real bench-Mansion harness, First Floor, driving
+`MapShine.setFire({maskSensitivity})` (the exact call the new slider's
+`onChange` makes):
+
+| Sensitivity | Fires found | Fresh extraction logged? |
+| --- | --- | --- |
+| 0.25 (default) | **0** | — (baseline) |
+| 0.05 (low) | **1** | ✅ yes, timestamped after the call |
+| 0.55 (high) | 0 | ✅ yes, timestamped after the call |
+| 0.25 (back to default) | 0 | ✅ yes, timestamped after the call |
+
+Confirms both halves of the ask: the control genuinely finds a fire on First
+Floor that the default threshold misses (directly addressing the reported
+symptom), and every change produces a real, immediate re-extraction with no
+Foundry reload — never a stale or skipped result.
+
+### Fixed when
+
+Root cause: identical painted bytes yield the same fire count on every
+floor at the SAME sensitivity setting, with no slider needed. Not yet true —
+still open. Workaround: confirmed live above; author's own eyes on the real
+scene (not the harness) is the remaining step to promote this to `LIVE`.
+
+### Open questions
+
+- What is actually different about First Floor's extraction path at the
+  *default* threshold specifically? The 1-fire-at-0.05 result proves the
+  paint is real and locatable — so the remaining asymmetry is about how
+  close that specific blob sits to the threshold on each floor, not about
+  data being missing. Worth a direct `chamferDistance` peak-value probe on
+  the same blob, both floors, at the SAME sensitivity, next time this is
+  picked back up.
+- Should `maskSensitivity` eventually apply per-floor or globally? Today
+  it's one global override — raising it to solve a First Floor problem also
+  raises the bar on Ground floor.

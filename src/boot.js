@@ -214,6 +214,8 @@ import {
   getVtPanViewerEarlyZComposition,
   setVtPanViewerPointLightBatching,
   getVtPanViewerPointLightBatching,
+  setVtPanViewerPointLightMrtMerge,
+  getVtPanViewerPointLightMrtMerge,
   getVtPanViewerSceneSettle,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
@@ -373,7 +375,6 @@ import {
   createApertureGoboRegistration,
   APERTURE_GOBO_PARAMS,
   APERTURE_GOBO_DEBUG_CHANNELS,
-  resolveAnchorElevationRank,
 } from './effects/index.js';
 import {
   buildSunShadowsReport,
@@ -636,6 +637,13 @@ MapShine.getPipelineStats = getVtPanViewerPipelineStats;
 // it yet (S2.5, pool integration, is its first real consumer).
 MapShine.setPointLightBatching = setVtPanViewerPointLightBatching;
 MapShine.getPointLightBatching = getVtPanViewerPointLightBatching;
+// S2.15's revert flag — point-light illum/coloration MRT merge (Performance-
+// Audit-2026-08.md §3.1). Default OFF; `pointLights.mergedScene` stays
+// permanently empty until S2.16 wires real bucket membership, so this flag
+// alone cannot change a pixel yet — see its own declaration in vt-pan-
+// viewer.js for the full reasoning.
+MapShine.setPointLightMrtMerge = setVtPanViewerPointLightMrtMerge;
+MapShine.getPointLightMrtMerge = getVtPanViewerPointLightMrtMerge;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/
 // colorBuckets `.size` answers "did batching actually admit any lights this
@@ -2325,25 +2333,23 @@ function install() {
           // the shared look" — omitting it would silently make every override
           // invisible to the renderer despite being correctly stored.
           params: a.params,
-          // THIS CANDLE'S OWN HEIGHT GATE INPUT (2026-08-03; height authored
-          // 2026-08-05) — the flame sprite shares a point light's own
-          // occlusion gate (point-light-illumination.js#buildHeightGateNode);
-          // it needs to know where the FLAME itself sits, which
-          // `lastKnownFloors` (cached on scene load / floor switch, no new
-          // Foundry read) plus this anchor's own locked band and its own
-          // authored `params.elevation` ("height off floor") now answer.
-          // `resolveAnchorElevationRank`'s own doc explains the 'all-levels'
-          // sentinel case.
-          elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors, a.params?.elevation),
-          // THIS CANDLE'S OWN CAST-LIGHT ELEVATION (2026-08-05) — a real
-          // absolute world elevation (`resolveAnchorElevationWorldUnits`, this
-          // same floorBinding + params.elevation, just not floor-index-shaped),
-          // fed to `effects/candle-flame-geometry.js#buildCandleLightSources`
-          // so the light this candle casts is ranked by the depth authority at
-          // the SAME height its flame sprite gates against above, instead of
-          // silently defaulting to absolute elevation 0
+          // THIS CANDLE'S OWN DEPTH-AUTHORITY ELEVATION (2026-08-05, cast
+          // light; flame sprite joined 2026-08-13) — a real absolute world
+          // elevation (`resolveAnchorElevationWorldUnits`, this anchor's
+          // floorBinding + `params.elevation` "height off floor"), NOT a
+          // pre-computed rank: `vt-pan-viewer.js`'s own `resolveExpectedDepth`
+          // (light path, via the point-light pool) and `resolveCandleExpected
+          // Depth` (flame-sprite path, updateCandleFlame) each turn this into
+          // the tie-safe value their own shader compares — the SAME
+          // two-step split every other depth-authority consumer uses
+          // (`keyhole-depth-authority-design.md`). Both this candle's LIGHT
+          // and its FLAME are now ranked at the SAME height, instead of the
+          // light silently defaulting to absolute elevation 0
           // (point-light-pool.js#update's own "light.elevation is undefined
           // for candle-cast lights" comment — this is what closes that gap).
+          // Migrated OFF the OLD `resolveAnchorElevationRank`/`elevationRank`
+          // mechanism the flame sprite used to carry on its own — see
+          // lightning-render.js's own header for the identical prior fix.
           elevation: resolveAnchorElevationWorldUnits(a),
         })),
       };
@@ -2439,11 +2445,39 @@ function install() {
   // defeat `fireAnchorMemo`'s own `maskFiresRef` dependency check (see that
   // memo's doc below) every single frame fire happens to be off.
   const EMPTY_FIRE_ARRAY = Object.freeze([]);
+  /**
+   * THE LIVE-TUNABLE FIRE-MASK SENSITIVITY (2026-08-13, author request — a
+   * way to boost detection of small/faint painted fire without a Foundry
+   * reload, after a real live case: identical painted pixels registered on
+   * one floor and not another, and even a fix to the packed-alpha attenuation
+   * this session already found didn't fully explain it). Resolves
+   * `FIRE_PARAMS.maskSensitivity` from the live readout — never a second
+   * hardcoded copy of the schema's own default, which would drift the moment
+   * one of the two changed and not the other. Read fresh on every
+   * `getMaskDrivenFires`/`getFireSpawnCloud` call: cheap (one property read +
+   * one clamp), and reading it fresh is what lets the cache-key comparison
+   * below force a real re-extraction the instant the author releases the
+   * slider, same as any other authored-content change already does.
+   */
+  function resolveFireMaskSensitivity() {
+    const raw = Number(fireReadout.params?.maskSensitivity);
+    const { min, max, default: def } = FIRE_PARAMS.maskSensitivity;
+    return Number.isFinite(raw) ? Math.max(min, Math.min(max, raw)) : def;
+  }
+  /**
+   * The spawn cloud's own threshold keeps THIS ratio to the (live-tunable)
+   * paint threshold, preserving their shipped relationship
+   * (`fire-spawn-points.js`'s `SPAWN_THRESHOLD` 0.18 / `fire-mask.js`'s
+   * `PAINT_THRESHOLD` 0.25) as the one "Mask sensitivity" slider moves,
+   * rather than exposing two separate controls for what is conceptually one
+   * question — "how much paint counts as real".
+   */
+  const FIRE_SPAWN_TO_PAINT_THRESHOLD_RATIO = 0.18 / 0.25;
   let fireMaskBakeRuns = 0;
   let fireMaskBakeSkips = 0;
   let fireSpawnBakeRuns = 0;
   let fireSpawnBakeSkips = 0;
-  let fireMaskCache = { floorIndex: null, signature: 0, version: -1, fires: [] };
+  let fireMaskCache = { floorIndex: null, signature: 0, version: -1, sensitivity: null, fires: [] };
   /**
    * THE SPAWN CLOUD — the same painted grid, as the flat point buffer the
    * particle kernels index (`SPAWN_KINDS.extracted`).
@@ -2455,7 +2489,7 @@ function install() {
    * the returned object so the subsystem can tell "same cloud" without
    * comparing buffers.
    */
-  let fireSpawnCache = { floorIndex: null, signature: 0, version: -1, cloud: null };
+  let fireSpawnCache = { floorIndex: null, signature: 0, version: -1, sensitivity: null, cloud: null };
   const getFireSpawnCloud = (floorIndex) => {
     let grid = null;
     try {
@@ -2466,18 +2500,29 @@ function install() {
     if (!grid) return null;
     const version = getMaskAuthorityVersion?.() ?? -1;
     const signature = fireMaskSignature(grid);
+    // THE LIVE-TUNABLE SENSITIVITY (2026-08-13, author request — a way to
+    // boost detection of small/faint painted fire without a Foundry reload).
+    // Rides in the CACHE KEY, same as signature/version: a slider move must
+    // force a re-extraction the instant the author stops dragging, exactly
+    // like any other authored-content change already does. Spawn's own
+    // threshold keeps its EXISTING ratio to the paint threshold (0.18/0.25 ≈
+    // 0.72 today) as the single slider moves, rather than exposing two
+    // separate, confusing controls for what is conceptually one question
+    // ("how much paint counts as real").
+    const sensitivity = resolveFireMaskSensitivity();
     if (
       fireSpawnCache.floorIndex === floorIndex &&
       fireSpawnCache.signature === signature &&
-      fireSpawnCache.version === version
+      fireSpawnCache.version === version &&
+      fireSpawnCache.sensitivity === sensitivity
     ) {
       fireSpawnBakeSkips += 1;
       return fireSpawnCache.cloud;
     }
     fireSpawnBakeRuns += 1;
-    const extracted = extractFireSpawnPoints(grid);
+    const extracted = extractFireSpawnPoints(grid, { threshold: sensitivity * FIRE_SPAWN_TO_PAINT_THRESHOLD_RATIO });
     const cloud = { ...extracted, signature };
-    fireSpawnCache = { floorIndex, signature, version, cloud };
+    fireSpawnCache = { floorIndex, signature, version, sensitivity, cloud };
     log.info(`fire: painted region on floor ${floorIndex} yielded ${extracted.count} spawn point(s)`);
     return cloud;
   };
@@ -2496,17 +2541,22 @@ function install() {
     if (!grid) return [];
     const version = getMaskAuthorityVersion?.() ?? -1;
     const signature = fireMaskSignature(grid);
+    // See getFireSpawnCloud's own note — same live-tunable sensitivity, same
+    // cache-key discipline, so the two never disagree about what "painted"
+    // means for one map even as the slider moves.
+    const sensitivity = resolveFireMaskSensitivity();
     if (
       fireMaskCache.floorIndex === floorIndex &&
       fireMaskCache.signature === signature &&
-      fireMaskCache.version === version
+      fireMaskCache.version === version &&
+      fireMaskCache.sensitivity === sensitivity
     ) {
       fireMaskBakeSkips += 1;
       return fireMaskCache.fires;
     }
     fireMaskBakeRuns += 1;
-    const fires = extractFiresFromMask(grid);
-    fireMaskCache = { floorIndex, signature, version, fires };
+    const fires = extractFiresFromMask(grid, { paintThreshold: sensitivity });
+    fireMaskCache = { floorIndex, signature, version, sensitivity, fires };
     // Positions ride along, not just the count (2026-08-12) — a live report of
     // "two painted fireplaces, cohesion collapses them together" is otherwise
     // unanswerable without a console dump: this line alone says whether
@@ -4178,12 +4228,13 @@ function install() {
     // Height off floor (2026-08-05) — always its own value, like brightness
     // above: there is no shared "all candles" height to inherit from, so
     // this is a plain param control rather than an inheritable-range-row.
-    // Feeds BOTH the flame sprite's own height gate and the light this
-    // candle casts (candle-flame-geometry.js#resolveAnchorElevationWorldUnits
-    // / point-light-pool.js#resolveAnchorElevationRank) — see anchor-catalog.
-    // js's `elevation` param doc for why depth-authority occlusion needed
-    // this authored at all. `patch()`'s `targetIds` fan-out already makes
-    // this a genuine batch edit across every selected candle for free.
+    // Feeds BOTH the flame sprite's own depth-authority gate and the light
+    // this candle casts (candle-flame-geometry.js#resolveAnchorElevationWorldUnits,
+    // read by both getCandleRenderState's `elevation` field) — see
+    // anchor-catalog.js's `elevation` param doc for why depth-authority
+    // occlusion needed this authored at all. `patch()`'s `targetIds` fan-out
+    // already makes this a genuine batch edit across every selected candle
+    // for free.
     wrap.append(
       buildParamControl('elevation', CANDLE_ANCHOR_PARAMS.elevation, {
         value: anchor.params?.elevation ?? 0,
@@ -4579,7 +4630,18 @@ function install() {
       // look from these controls, so the FOH set is the ones they reach for
       // most — count, lifetime, opacity and the orange-vs-white dial — rather
       // than the usual strict handful. Everything else stays in the ROH card.
-      fohKeys: ['flameCount', 'flameLifeScale', 'flameOpacity', 'flameColorAge', 'emberCount', 'smokeCount'],
+      // `maskSensitivity` joined 2026-08-13: a live floor-specific miss (paint
+      // that lit on one floor and not another) means this is exactly a
+      // reach-for-it-mid-session control right now, not set-once detail.
+      fohKeys: [
+        'flameCount',
+        'flameLifeScale',
+        'flameOpacity',
+        'flameColorAge',
+        'emberCount',
+        'smokeCount',
+        'maskSensitivity',
+      ],
       getValue,
       onChange,
       enabled: fireReadout.enabled,
@@ -7081,18 +7143,23 @@ function install() {
   // proper A/B visual testing of the lights").
   //
   // NOT a new mechanism — the interface seam already has a fully reversible
-  // lever for exactly this (canvas-compositing.js): `canvas.environment
-  // .renderable`. false = Foundry's own primary+effects art is suppressed and
-  // MSA (stacked underneath, verified z-index 0 vs Foundry's own canvas —
-  // vt-pan-viewer.js's stackUnderBoard) shows through. true = Foundry draws
-  // its own art again, on top, occluding MSA. MSA's render loop keeps running
-  // in EITHER mode (wasted GPU work while hidden, never a correctness issue —
-  // pausing it is a possible follow-up, not needed for A/B comparison).
+  // lever for exactly this (canvas-compositing.js). Two sub-levers as of
+  // 2026-08-13 (see that file's "PRIMARY-CACHE-FREEZE FIX" section):
+  // `canvas.primary.sprite.renderable` + `canvas.effects.renderable`. Both
+  // false = Foundry's own primary+effects art OUTPUT is suppressed (though
+  // primary's internal cache keeps refreshing, deliberately, so Foundry's own
+  // fog shader stays fed) and MSA (stacked underneath, verified z-index 0 vs
+  // Foundry's own canvas — vt-pan-viewer.js's stackUnderBoard) shows through.
+  // Both true = Foundry draws its own art again, on top, occluding MSA. MSA's
+  // render loop keeps running in EITHER mode (wasted GPU work while hidden,
+  // never a correctness issue — pausing it is a possible follow-up, not
+  // needed for A/B comparison).
   //
   // A dropdown, not a plain button (feedback_debug_ui_one_action_one_control:
   // mutually-exclusive modes are a dropdown), reading its value from the SAME
-  // live fact the interface-seam report already exposes — one source of
-  // truth, not a second one invented for this control.
+  // live fact the interface-seam report already exposes (the combined
+  // `foundryArtRenderable` signal — true only when BOTH sub-levers read
+  // true) — one source of truth, not a second one invented for this control.
   //
   // Switching TO Foundry is unconditional (`restoreFoundryArt` — showing
   // Foundry's own art is never unsafe). Switching TO MSA reuses
@@ -7107,7 +7174,7 @@ function install() {
       { value: 'msa', label: 'MSA' },
       { value: 'foundry', label: 'Foundry' },
     ],
-    () => (getCanvasCompositingReport().environmentRenderable ? 'foundry' : 'msa'),
+    () => (getCanvasCompositingReport().foundryArtRenderable ? 'foundry' : 'msa'),
     async (mode) => {
       if (mode === 'foundry') {
         if (!restoreFoundryArt())
@@ -8453,7 +8520,7 @@ function syncInterfaceSeam(context) {
     );
   }
   // Re-sync the "Renderer" dropdown (and any other control) against reality
-  // NOW — this is the exact moment environmentRenderable can flip. Without
+  // NOW — this is the exact moment foundryArtRenderable can flip. Without
   // this the debug panel's FIRST paint (registered during boot, before any
   // scene has loaded) shows whatever was true at that early instant, and
   // nothing ever repaints it (see refreshControls' own doc). Called

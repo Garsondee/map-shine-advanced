@@ -14,7 +14,7 @@
  */
 import { decideArtSuppression, MSA_OWNED_GROUPS } from '../canvas-compositing.js';
 
-const HEALTHY = { contextAlpha: true, clearAlpha: 0, environmentPresent: true };
+const HEALTHY = { contextAlpha: true, clearAlpha: 0, groupsPresent: true };
 
 export async function run(t) {
   // ---- the happy path -------------------------------------------------
@@ -41,7 +41,7 @@ export async function run(t) {
     t.ok('contextAlpha null => REFUSE (unknown is not permission)', dNull.suppress === false);
     t.ok('contextAlpha null is coded distinctly from a real false', dNull.code === 'context-alpha-unknown');
 
-    const dUndef = decideArtSuppression({ clearAlpha: 0, environmentPresent: true });
+    const dUndef = decideArtSuppression({ clearAlpha: 0, groupsPresent: true });
     t.ok('contextAlpha absent entirely => REFUSE', dUndef.suppress === false);
     t.ok('absent contextAlpha codes as unknown', dUndef.code === 'context-alpha-unknown');
   }
@@ -81,27 +81,27 @@ export async function run(t) {
 
   // ---- no scene drawn yet: refuse, but this one is benign, not a fault.
   {
-    const d = decideArtSuppression({ ...HEALTHY, environmentPresent: false });
-    t.ok('no canvas.environment => REFUSE', d.suppress === false);
-    t.ok('missing environment is coded benignly', d.code === 'no-environment');
+    const d = decideArtSuppression({ ...HEALTHY, groupsPresent: false });
+    t.ok('no primary/effects groups => REFUSE', d.suppress === false);
+    t.ok('missing render targets is coded benignly', d.code === 'no-render-targets');
   }
 
   // ---- ordering: the UNRECOVERABLE fact must win the report. If the context is
   // opaque, saying "clear alpha is wrong" sends the reader to fix the fixable
   // thing while the real cause (too late to ever fix this session) goes unsaid.
   {
-    const d = decideArtSuppression({ contextAlpha: false, clearAlpha: 1, environmentPresent: false });
+    const d = decideArtSuppression({ contextAlpha: false, clearAlpha: 1, groupsPresent: false });
     t.ok('with everything wrong, the context attribute is reported first', d.code === 'context-opaque');
   }
 
   // ---- every refusal is actionable: a code and a non-empty reason, always.
   {
     const cases = [
-      { contextAlpha: null, clearAlpha: 0, environmentPresent: true },
-      { contextAlpha: false, clearAlpha: 0, environmentPresent: true },
-      { contextAlpha: true, clearAlpha: null, environmentPresent: true },
-      { contextAlpha: true, clearAlpha: 1, environmentPresent: true },
-      { contextAlpha: true, clearAlpha: 0, environmentPresent: false },
+      { contextAlpha: null, clearAlpha: 0, groupsPresent: true },
+      { contextAlpha: false, clearAlpha: 0, groupsPresent: true },
+      { contextAlpha: true, clearAlpha: null, groupsPresent: true },
+      { contextAlpha: true, clearAlpha: 1, groupsPresent: true },
+      { contextAlpha: true, clearAlpha: 0, groupsPresent: false },
     ];
     const allNamed = cases.every((c) => {
       const d = decideArtSuppression(c);
@@ -120,15 +120,15 @@ export async function run(t) {
     const values = {
       contextAlpha: [true, false, null, undefined],
       clearAlpha: [0, 1, 0.5, null, undefined],
-      environmentPresent: [true, false],
+      groupsPresent: [true, false],
     };
     let suppressCount = 0;
     let total = 0;
     for (const ca of values.contextAlpha) {
       for (const cl of values.clearAlpha) {
-        for (const ep of values.environmentPresent) {
+        for (const ep of values.groupsPresent) {
           total++;
-          if (decideArtSuppression({ contextAlpha: ca, clearAlpha: cl, environmentPresent: ep }).suppress) {
+          if (decideArtSuppression({ contextAlpha: ca, clearAlpha: cl, groupsPresent: ep }).suppress) {
             suppressCount++;
             // and it had better be exactly the healthy one
             t.ok('the only suppressing input is the fully-verified one', ca === true && cl === 0 && ep === true);

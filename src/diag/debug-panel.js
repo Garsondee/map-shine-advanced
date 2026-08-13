@@ -175,7 +175,7 @@ export function installDebugPanel(MapShine) {
    * closure that reads `getValue()` and paints it) only ran at REGISTRATION
    * time and again on `mousedown` (see renderButtons' own comment: "re-read
    * on open"). Most controls — including "Renderer", whose `getValue()`
-   * reads `environmentRenderable`, a scene-load-dependent fact — are
+   * reads `foundryArtRenderable`, a scene-load-dependent fact — are
    * registered during boot, BEFORE the interface seam / art suppression has
    * actually settled. So the panel's FIRST paint showed whatever was true at
    * that early instant (often "Foundry", since MSA hadn't suppressed PIXI's

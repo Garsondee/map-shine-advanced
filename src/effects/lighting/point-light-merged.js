@@ -276,3 +276,141 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
 
   return { illumFinal, illumAlpha, colorFinal, colorAlpha };
 }
+
+/**
+ * S2.15 — `scene.pointLightMerged`'s own descriptor: a `ThreeAllocator`-shaped
+ * MRT target for `buildMergedPointLightShadingCore`'s two outputs, isolated
+ * from every other target (written by nothing else, ever — this design's own
+ * plan doc, "a new, dedicated, isolated 2-attachment MRT target"). Same
+ * HalfFloat/NoColorSpace/linear shape as `scene.illum`/`scene.coloration`
+ * (`vt-pan-viewer.js#describeSceneColor`) — NOT the RGBA8 the S2.11/S2.14
+ * bench targets used (those were test-only; this one is blitted 1:1 into the
+ * real HalfFloat targets, so a lossy 8-bit intermediate would throw away real
+ * precision production already carries).
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {number} args.resolvedW @param {number} args.resolvedH - device px.
+ * @returns {object} a `ThreeAllocator`-shaped descriptor.
+ */
+export function describePointLightMergedMrt({ THREE, resolvedW, resolvedH }) {
+  return {
+    resolvedW,
+    resolvedH,
+    screenSized: true,
+    type: THREE.HalfFloatType,
+    colorSpace: THREE.NoColorSpace,
+    filter: 'linear',
+    depth: false,
+    mrtCount: 2,
+    attachments: [{ outputName: 'illum' }, { outputName: 'coloration' }],
+  };
+}
+
+/**
+ * The two RENDERER-GLOBAL MRT structs the produce-then-blit sequence needs —
+ * see S2.11's own finding (this module's own header links it): per-attachment
+ * BLEND state is read from `renderer.getMRT()`, never from a material's own
+ * `.fragmentNode`/`.mrtNode`, so both the zero-quad's forced overwrite and the
+ * real merged draw's MAX-accumulate need a renderer-global struct, scoped
+ * on/off around their own draw exactly like `scene-attr.js`'s own
+ * save/set/restore discipline.
+ *
+ * `overwriteMrt` uses explicit `CustomBlending` + One/Zero factors, never
+ * `THREE.NoBlending` — S2.14's OWN second real finding (this module's header)
+ * is that `NoBlending` does not resolve to a plain overwrite on this backend's
+ * per-attachment resolver; `ADD(src·1, dst·0) = src` is unambiguous and does
+ * not depend on that branch at all.
+ *
+ * @param {*} THREE
+ * @returns {{maxBlendMrt: *, overwriteMrt: *}}
+ */
+export function buildPointLightMergedRendererMrtStructs(THREE) {
+  const { mrt, vec4 } = THREE.TSL;
+
+  const maxBlend = new THREE.BlendMode(THREE.CustomBlending);
+  maxBlend.blendEquation = THREE.MaxEquation;
+  maxBlend.blendSrc = THREE.OneFactor;
+  maxBlend.blendDst = THREE.OneFactor;
+  maxBlend.blendEquationAlpha = THREE.MaxEquation;
+  maxBlend.blendSrcAlpha = THREE.OneFactor;
+  maxBlend.blendDstAlpha = THREE.OneFactor;
+  const maxBlendMrt = mrt({ illum: vec4(0, 0, 0, 0), coloration: vec4(0, 0, 0, 0) })
+    .setBlendMode('illum', maxBlend)
+    .setBlendMode('coloration', maxBlend);
+
+  const overwriteBlend = new THREE.BlendMode(THREE.CustomBlending);
+  overwriteBlend.blendEquation = THREE.AddEquation;
+  overwriteBlend.blendSrc = THREE.OneFactor;
+  overwriteBlend.blendDst = THREE.ZeroFactor;
+  overwriteBlend.blendEquationAlpha = THREE.AddEquation;
+  overwriteBlend.blendSrcAlpha = THREE.OneFactor;
+  overwriteBlend.blendDstAlpha = THREE.ZeroFactor;
+  const overwriteMrt = mrt({ illum: vec4(0, 0, 0, 0), coloration: vec4(0, 0, 0, 0) })
+    .setBlendMode('illum', overwriteBlend)
+    .setBlendMode('coloration', overwriteBlend);
+
+  return { maxBlendMrt, overwriteMrt };
+}
+
+/**
+ * The opaque zero-fill pre-pass — S2.14's FIRST real finding (this module's
+ * own header): `renderer.clear()` on a multi-attachment target only honors
+ * `setClearColor`'s alpha on attachment 0, hardcoding every other attachment
+ * to `(0,0,0,1)` regardless. A real draw that overwrites both attachments to
+ * exactly `(0,0,0,0)` is the fix — the SAME "don't trust the hardware clear,
+ * draw the zero explicitly" pattern `environmental-light.js#illumQuad` uses
+ * for `scene.illum`. Must be drawn while `buildPointLightMergedRendererMrt
+ * Structs`'s `overwriteMrt` is the active renderer-global MRT (this
+ * material's own `fragmentNode` only routes VALUES, never blend state — see
+ * that function's own doc).
+ *
+ * @param {*} THREE
+ * @returns {*} a `NodeMaterial`, ready to wrap in a `THREE.QuadMesh`.
+ */
+export function buildPointLightMergedZeroQuadMaterial(THREE) {
+  const { mrt, vec4 } = THREE.TSL;
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = mrt({ illum: vec4(0, 0, 0, 0), coloration: vec4(0, 0, 0, 0) });
+  return material;
+}
+
+/**
+ * ONE reusable shape (called twice — once per attachment, since each blits
+ * into a DIFFERENT single-attachment destination target) — samples ONE
+ * `scene.pointLightMerged` attachment at `screenUV` and MAX-blends it into
+ * whatever ordinary (non-MRT) target is currently bound. Ordinary per-
+ * material `.blending`, not a renderer-global MRT struct — `sceneIllum`/
+ * `sceneColoration` are both single-attachment, so this needs none of the
+ * renderer-global-MRT-blend mechanism the produce step above does; the
+ * SAME per-material MAX-blend idiom `point-light-illumination.js#build
+ * PointLightIlluminationMaterial` already uses for its own single-attachment
+ * accumulate draw.
+ *
+ * @param {*} THREE
+ * @param {*} sourceTexture - one of `scene.pointLightMerged`'s two textures
+ *   (`rt.textures[0]` illum, `rt.textures[1]` coloration) — a stable
+ *   reference for the target's lifetime (the allocator resizes textures
+ *   in-place, never replaces them), so this can be built once and reused
+ *   every frame like every other quad material in this codebase.
+ * @returns {*} a `NodeMaterial`, ready to wrap in a `THREE.QuadMesh`.
+ */
+export function buildPointLightMergedBlitMaterial(THREE, sourceTexture) {
+  const { texture, screenUV, vec4 } = THREE.TSL;
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.MaxEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.MaxEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(texture(sourceTexture, screenUV));
+  return material;
+}

@@ -48,7 +48,7 @@
  */
 
 import { createWindHandle } from '../world/index.js';
-import { buildHeightGateNode } from './lighting/point-light-illumination.js';
+import { buildDepthHeightGateNode } from './lighting/point-light-illumination.js';
 
 /**
  * THE TIER-0 FALLBACK HANDLE — a bake-less handle, so a caller that supplies
@@ -294,7 +294,7 @@ import { computeCandleFlameArrays } from './candle-flame-geometry.js';
  * @returns {{geometry: *, quadCount: number}}
  */
 export function buildCandleFlameGeometry(THREE, anchors, opts) {
-  const { positions, uvs, centers, exposures, colors, intensities, elevationRanks, indices, quadCount } =
+  const { positions, uvs, centers, exposures, colors, intensities, expectedDepths, indices, quadCount } =
     computeCandleFlameArrays(anchors, opts);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -303,8 +303,8 @@ export function buildCandleFlameGeometry(THREE, anchors, opts) {
   geometry.setAttribute('windExposure', new THREE.BufferAttribute(exposures, 1));
   geometry.setAttribute('flameColor', new THREE.BufferAttribute(colors, 3));
   geometry.setAttribute('flameIntensity', new THREE.BufferAttribute(intensities, 1));
-  // THE HEIGHT GATE'S OWN INPUT — see computeCandleFlameArrays' own doc.
-  geometry.setAttribute('elevationRank', new THREE.BufferAttribute(elevationRanks, 1));
+  // THE DEPTH-AUTHORITY GATE'S OWN INPUT — see computeCandleFlameArrays' own doc.
+  geometry.setAttribute('expectedDepth', new THREE.BufferAttribute(expectedDepths, 1));
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   // Draw only the quads actually filled — matters only if the belt-and-braces
   // finite check dropped an anchor (the authority guarantees it never does), in
@@ -385,7 +385,7 @@ export function buildCandleFlameGeometry(THREE, anchors, opts) {
  *                  tail (coherent gust + per-candle curl), width/length pulsing.
  *   2 "lavish"   — + a domain-warped silhouette (boiling, curling, imprecise).
  *
- * @param {{THREE: *, uGlobalTimeMs?: *, quality?: number, windHandle?: object, attrTexNode?: *}} args -
+ * @param {{THREE: *, uGlobalTimeMs?: *, quality?: number, windHandle?: object, depthTexNode?: *, depthFlagsTexNode?: *}} args -
  *   `uGlobalTimeMs` is the shared clock (the viewer's one clock); when
  *   absent the flame rests. `quality` is the build-time tier (default 2).
  *   `windHandle` is `world/wind-access.js#createWindHandle`'s product — the
@@ -393,9 +393,10 @@ export function buildCandleFlameGeometry(THREE, anchors, opts) {
  *   2's transient all ride INSIDE it (Wind.md §5.1), replacing the four
  *   separate arguments this used to forward by hand into `sampleWind`. Omit it
  *   entirely for byte-identical Tier-0 behaviour (a flame that only knows the
- *   organic gust noise). `attrTexNode` — `buf:scene.attr`, UNSAMPLED — wires
- *   the SAME height/elevation gate a point light uses
- *   (`point-light-illumination.js#buildHeightGateNode`); omit it for a flame
+ *   organic gust noise). `depthTexNode` — `buf:scene.depth`, UNSAMPLED — wires
+ *   the DEPTH-AUTHORITY gate lightning and the point-light pool already use
+ *   (`point-light-illumination.js#buildDepthHeightGateNode`); `depthFlagsTexNode`
+ *   is its optional flag payload (tile-restricts-light). Omit both for a flame
  *   that ignores floor occlusion entirely (byte-identical pre-gate behaviour).
  * @returns {{material: *, uIntensity: *, uLean: *, uWindResponse: *}}
  */
@@ -404,7 +405,8 @@ export function buildCandleFlameMaterial({
   uGlobalTimeMs,
   quality = 2,
   windHandle = TIER0_WIND_HANDLE,
-  attrTexNode,
+  depthTexNode,
+  depthFlagsTexNode = null,
 }) {
   const {
     uv,
@@ -443,7 +445,7 @@ export function buildCandleFlameMaterial({
   const windExposure = attribute('windExposure', 'float');
   const flameColor = attribute('flameColor', 'vec3');
   const flameIntensity = attribute('flameIntensity', 'float');
-  const flameElevationRank = attribute('elevationRank', 'float');
+  const flameExpectedDepth = attribute('expectedDepth', 'float');
 
   // PER-CANDLE SEED + TIME PHASE — the desync fix (see flameHash). Every noise
   // reads `pt` (time offset by the candle's own seed), so neighbours differ.
@@ -666,31 +668,41 @@ export function buildCandleFlameMaterial({
   }
 
   // ============================================================================
-  // THE HEIGHT/ELEVATION GATE — the SAME node a point light's own materials
-  // use (`point-light-illumination.js#buildHeightGateNode`), applied to the
-  // flame SPRITE itself. A candle's cast LIGHT already flows through the
-  // point-light pool; the flame you actually SEE is a separate batched mesh
-  // and needed its own wiring — the author's own follow-up after the point-
-  // light fix: "now do the candle flame and lightning shaders too."
+  // THE DEPTH-AUTHORITY OCCLUSION GATE — the SAME node lightning and the
+  // point-light pool already use (`point-light-illumination.js#
+  // buildDepthHeightGateNode`), applied to the flame SPRITE itself. A
+  // candle's cast LIGHT already flowed through the point-light pool; the
+  // flame you actually SEE is a separate batched mesh that used to carry its
+  // own OLDER gate — a lossy, per-floor-relative, quantized-to-16-levels
+  // `buf:scene.attr` byte (`keyhole-depth-authority-sole-system-decision`) —
+  // which is what produced candles that stayed dark/invisible on an upper
+  // floor even with their light correctly showing. This is the same rebuild
+  // lightning's own bolt already got: a bare ordinal compare against
+  // `buf:scene.depth`, no smoothstep tolerance, no sentinel concept.
   //
-  // ⚠️ `screenUV`, never the bare node — `buf:scene.attr` is a SCREEN-space
+  // ⚠️ `screenUV`, never the bare node — `buf:scene.depth` is a SCREEN-space
   // buffer and this is a WORLD-space billboard batch; a bare `texture()` node
   // would default to this mesh's OWN `uv` (which DOES exist here, unlike a
   // light's fan — but it is the flame's LOCAL 0..1 quad coordinate, not a
   // screen coordinate, so it would sample the wrong thing just as surely as
   // no uv at all — `feedback_shared_texture_node_carries_the_wrong_uv`).
   //
-  // `flameElevationRank` is baked PER-CANDLE at geometry build time
-  // (`computeCandleFlameArrays`), not a uniform — this mesh batches every
-  // visible candle into ONE draw call, and different candles can legitimately
-  // sit on different floors (`scene/anchor-authority.js`'s `own-and-above`
-  // visibility). A JS-time branch, not a uniform gate: with no `attrTexNode`
-  // this material is byte-identical to before the gate existed.
-  if (attrTexNode) {
+  // `flameExpectedDepth` is baked PER-CANDLE at geometry build time
+  // (`computeCandleFlameArrays`), from the viewer's own candle-specific
+  // `resolveExpectedDepth` closure — not a uniform, since this mesh batches
+  // every visible candle into ONE draw call, and different candles can
+  // legitimately sit on different floors (`scene/anchor-authority.js`'s
+  // `own-and-above` visibility). A JS-time branch, not a uniform gate: with
+  // no `depthTexNode` this material is byte-identical to before the gate
+  // existed.
+  if (depthTexNode) {
+    const depthHere = depthTexNode.sample(screenUV);
+    const flagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
     emission = emission.mul(
-      buildHeightGateNode(THREE.TSL, {
-        attrHere: attrTexNode.sample(screenUV),
-        uLightElevationRank: flameElevationRank,
+      buildDepthHeightGateNode(THREE.TSL, {
+        depthHere,
+        flagsHere,
+        uLightExpectedDepth: flameExpectedDepth,
       })
     );
   }

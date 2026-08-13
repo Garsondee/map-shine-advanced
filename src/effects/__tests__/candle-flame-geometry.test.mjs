@@ -21,7 +21,6 @@ import {
   resolveAnchorLightRadiusPx,
   resolveAnchorElevationWorldUnits,
 } from '../candle-flame-geometry.js';
-import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL } from '../lighting/point-light-illumination.js';
 
 function approx(a, b, eps = 1e-6) {
   return Math.abs(a - b) <= eps;
@@ -561,24 +560,23 @@ export function run(t) {
     );
   }
 
-  // --- computeCandleFlameArrays — the flame's OWN height-gate input -----------
+  // --- computeCandleFlameArrays — the flame's OWN depth-authority gate input --
   {
-    const { elevationRanks } = computeCandleFlameArrays([{ x: 0, y: 0, elevationRank: 2.5 }], { sizePx: 10 });
-    ok('elevationRanks is 4 verts × 1 float', elevationRanks.length === 4);
+    const { expectedDepths } = computeCandleFlameArrays([{ x: 0, y: 0, expectedDepth: 2.5 }], { sizePx: 10 });
+    ok('expectedDepths is 4 verts × 1 float', expectedDepths.length === 4);
     ok(
-      'every vert of a quad carries the SAME baked rank — a flat per-candle value, not a gradient',
-      elevationRanks.every((r) => approx(r, 2.5))
+      'every vert of a quad carries the SAME baked depth — a flat per-candle value, not a gradient',
+      expectedDepths.every((r) => approx(r, 2.5))
     );
     ok(
-      'an anchor with NO elevationRank defaults to the SENTINEL, never 0 — a hand-built fixture (or a caller ' +
-        'predating this field) must keep the OLD "always fully reaches" behaviour, not a silently-introduced gate',
-      computeCandleFlameArrays([{ x: 0, y: 0 }], { sizePx: 10 }).elevationRanks[0] ===
-        LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+      "an anchor with NO expectedDepth defaults to 0 — the depth authority's own fail-open value (an " +
+        'unwritten depth texel also clears to 0), so a hand-built fixture (or a caller predating this field) ' +
+        'keeps the OLD "always fully reaches" behaviour',
+      computeCandleFlameArrays([{ x: 0, y: 0 }], { sizePx: 10 }).expectedDepths[0] === 0
     );
     ok(
-      'a non-finite elevationRank ALSO reads as the sentinel, never NaN propagating into the shader',
-      computeCandleFlameArrays([{ x: 0, y: 0, elevationRank: NaN }], { sizePx: 10 }).elevationRanks[0] ===
-        LIGHT_ELEVATION_UNCONFIGURED_SENTINEL
+      'a non-finite expectedDepth ALSO reads as 0, never NaN propagating into the shader',
+      computeCandleFlameArrays([{ x: 0, y: 0, expectedDepth: NaN }], { sizePx: 10 }).expectedDepths[0] === 0
     );
   }
 

@@ -50,6 +50,16 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Fuel',
     help: 'What is burning. Wood is the default look; coal burns deeper and lower; oil is tall and very sooty; magical is hue-shifted for the unnatural stuff.',
   },
+  maskSensitivity: {
+    type: 'float',
+    min: 0.02,
+    max: 0.6,
+    step: 0.01,
+    default: 0.25,
+    category: 'Presence',
+    label: 'Mask sensitivity',
+    help: 'How much of the painted fire mask counts as real paint before a fire registers there. LOWER catches fainter or smaller painted strokes — turn this DOWN if fire you painted is not appearing. HIGHER requires bolder, more solid paint before a fire lights at all. Default (0.25) is what extraction has always used, unchanged unless you move this.',
+  },
 
   // ── Look ──────────────────────────────────────────────────────────────────
   color: {

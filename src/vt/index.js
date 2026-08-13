@@ -86,6 +86,9 @@ export {
   // STAGE 2's revert flag — point-light batching (docs/planning/Point-Light-Batching-Design.md).
   setVtPanViewerPointLightBatching,
   getVtPanViewerPointLightBatching,
+  // S2.15's revert flag — point-light illum/coloration MRT merge (Performance-Audit-2026-08.md §3.1).
+  setVtPanViewerPointLightMrtMerge,
+  getVtPanViewerPointLightMrtMerge,
   // SCENE SETTLE — the real "everything is on screen now" signal (vt/settle.js).
   getVtPanViewerSceneSettle,
   drawVtPanViewerWorldMarkers,

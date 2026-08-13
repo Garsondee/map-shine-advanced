@@ -85,6 +85,14 @@ import { resolveLightAnimation } from '../../src/effects/lighting/animations/reg
 import { describeBucketVertexBuffers } from '../../src/effects/lighting/point-light-batch.js';
 import { createBatchedLightMesh } from '../../src/effects/lighting/point-light-batch-mesh.js';
 import { createWindHandle } from '../../src/world/index.js';
+import {
+  describePointLightMergedMrt,
+  buildPointLightMergedRendererMrtStructs,
+  buildPointLightMergedZeroQuadMaterial,
+  buildPointLightMergedBlitMaterial,
+} from '../../src/effects/lighting/point-light-merged.js';
+import { ThreeAllocator } from '../../src/graph/three-allocator.js';
+import { decodeHalfFloatRgba } from '../../src/diag/pixel-probe.js';
 
 const WORLD = { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
 const DIM = 256;
@@ -1664,7 +1672,7 @@ export function createPointLightsBench({ THREE, log }) {
           expected:
             'At the overlap: illum = MAX((1,0,0),(0,1,0)) = (255,255,0) — real MAX blending applied to ' +
             'the illum attachment. coloration = MAX((0,0,1),(0,0,0.5)) = (0,0,255) — the SAME MAX ' +
-            "equation applied independently to the SECOND attachment via MRTNode#setBlendMode, from a " +
+            'equation applied independently to the SECOND attachment via MRTNode#setBlendMode, from a ' +
             'material that never sets `.blending`/`.blendEquation` at its own top level at all (both ' +
             'blend states live entirely on the mrt() node) — proves per-attachment blend state is real ' +
             'and independent, not a single material-wide setting smeared across both outputs.',
@@ -1754,7 +1762,12 @@ export function createPointLightsBench({ THREE, log }) {
 
       checks.push(
         evaluate('interleaved-buffer-reads-byte-identical-and-shares-one-binding', () => ({
-          ok: interleaveMaxDelta === 0 && sameBufferObject && centreSample.r > 50 && centreSample.g > 50 && centreSample.b > 50,
+          ok:
+            interleaveMaxDelta === 0 &&
+            sameBufferObject &&
+            centreSample.r > 50 &&
+            centreSample.g > 50 &&
+            centreSample.b > 50,
           measured:
             `maxChannelDelta=${interleaveMaxDelta}; sameUnderlyingBuffer=${sameBufferObject}; ` +
             `centreSample=${centreSample.r},${centreSample.g},${centreSample.b}`,
@@ -1787,7 +1800,7 @@ export function createPointLightsBench({ THREE, log }) {
     name: 'merged-batch-byte-identical-to-illum-plus-coloration-twins',
     summary:
       'The merged channel (S2.14) drawn once, MRT-split into illum+coloration attachments, compared ' +
-      "byte-for-byte against the REAL separate `buildPointLightIlluminationMaterial`/" +
+      'byte-for-byte against the REAL separate `buildPointLightIlluminationMaterial`/' +
       '`buildPointLightColorationMaterial` twins production draws today — at `animationQuality:2` ' +
       '(production´s real value) with real wind-present, candleFlicker-animated lights, the exact ' +
       "shape S2.0's census found dominant. A second check uses a COLORATION-ONLY-animated registry " +
@@ -1885,7 +1898,16 @@ export function createPointLightsBench({ THREE, log }) {
         windResponse: l.windResponse,
       });
 
-      const mergedShared = { uGlobalTimeMs, windHandle, albedoTexture, depthTexNode: null, depthFlagsTexNode: null, sunShadowSlotNodes: null, blendSunVisibilityAcrossFloors: null, attrTexNode: null };
+      const mergedShared = {
+        uGlobalTimeMs,
+        windHandle,
+        albedoTexture,
+        depthTexNode: null,
+        depthFlagsTexNode: null,
+        sunShadowSlotNodes: null,
+        blendSunVisibilityAcrossFloors: null,
+        attrTexNode: null,
+      };
       const mergedFlags = {
         animated: true,
         windPresent: true,
@@ -2134,7 +2156,11 @@ export function createPointLightsBench({ THREE, log }) {
 
       checks.push(
         evaluate('merged-fits-8-slots-and-draws-one-call', () => ({
-          ok: mergedLayout.ok && mergedLayout.slotCount <= 8 && mergedFrame.drawCalls === 1 && mergedResult.rebuilt === true,
+          ok:
+            mergedLayout.ok &&
+            mergedLayout.slotCount <= 8 &&
+            mergedFrame.drawCalls === 1 &&
+            mergedResult.rebuilt === true,
           measured: `slotCount=${mergedLayout.slotCount}; buffers=[${mergedLayout.buffers.join(',')}]; drawCalls=${mergedFrame.drawCalls}; rebuilt=${mergedResult.rebuilt}`,
           expected:
             'slotCount <= 8 for the fully-loaded (animated+wind) merged layout (aAnim+aWind interleaved ' +
@@ -2179,7 +2205,13 @@ export function createPointLightsBench({ THREE, log }) {
       // no illumination seed exists), coloration must differ.
       const chromaEntry = resolveLightAnimation('chroma');
       const chromaShared = { ...mergedShared };
-      const chromaFlags = { animated: true, windPresent: false, animationEntry: chromaEntry, animationQuality: 0, falloffModel: 'foundry' };
+      const chromaFlags = {
+        animated: true,
+        windPresent: false,
+        animationEntry: chromaEntry,
+        animationQuality: 0,
+        falloffModel: 'foundry',
+      };
       const chromaLayout = describeBucketVertexBuffers({ channel: 'merged', animated: true, windPresent: false });
       const chromaMember = [
         {
@@ -2205,7 +2237,12 @@ export function createPointLightsBench({ THREE, log }) {
           windResponse: 1,
         },
       ];
-      const chromaBucket = createBatchedLightMesh({ THREE, channel: 'merged', shared: chromaShared, flags: chromaFlags });
+      const chromaBucket = createBatchedLightMesh({
+        THREE,
+        channel: 'merged',
+        shared: chromaShared,
+        flags: chromaFlags,
+      });
       chromaBucket.reconcile(chromaMember);
       const chromaScene = new THREE.Scene();
       chromaScene.add(chromaBucket.mesh);
@@ -2258,7 +2295,10 @@ export function createPointLightsBench({ THREE, log }) {
       let chromaColorDelta = 0;
       for (let i = 0; i < chromaFrameA.illum.length; i++) {
         chromaIllumDelta = Math.max(chromaIllumDelta, Math.abs(chromaFrameA.illum[i] - chromaFrameB.illum[i]));
-        chromaColorDelta = Math.max(chromaColorDelta, Math.abs(chromaFrameA.coloration[i] - chromaFrameB.coloration[i]));
+        chromaColorDelta = Math.max(
+          chromaColorDelta,
+          Math.abs(chromaFrameA.coloration[i] - chromaFrameB.coloration[i])
+        );
       }
       const chromaIllumSample = sampleColor(chromaFrameA.illum, 500, 500);
       const chromaColorSampleA = sampleColor(chromaFrameA.coloration, 500, 500);
@@ -2266,10 +2306,13 @@ export function createPointLightsBench({ THREE, log }) {
 
       checks.push(
         evaluate('coloration-only-animation-leaves-illumination-time-invariant-in-merged-draw', () => ({
-          ok: chromaIllumDelta === 0 && chromaColorDelta > 0 && (chromaIllumSample.r > 10 || chromaIllumSample.g > 10 || chromaIllumSample.b > 10),
+          ok:
+            chromaIllumDelta === 0 &&
+            chromaColorDelta > 0 &&
+            (chromaIllumSample.r > 10 || chromaIllumSample.g > 10 || chromaIllumSample.b > 10),
           measured: `illumDeltaAcrossTime=${chromaIllumDelta}; colorationDeltaAcrossTime=${chromaColorDelta}; illumSample=${chromaIllumSample.r},${chromaIllumSample.g},${chromaIllumSample.b}; colorSampleA(500,500)=${chromaColorSampleA.r},${chromaColorSampleA.g},${chromaColorSampleA.b},${chromaColorSampleA.a}; colorSampleB(500,500)=${chromaColorSampleB.r},${chromaColorSampleB.g},${chromaColorSampleB.b},${chromaColorSampleB.a}`,
           expected:
-            "chroma defines buildColorationSeed but not buildIlluminationSeed — illum attachment must read " +
+            'chroma defines buildColorationSeed but not buildIlluminationSeed — illum attachment must read ' +
             'BYTE-IDENTICAL at two different uGlobalTimeMs values (0 delta) in the SAME merged draw, while ' +
             'the coloration attachment must actually change (>0 delta) — proves each channel´s own seed ' +
             "builder is gated independently, never inferred from the OTHER channel's animated flag.",
@@ -2280,6 +2323,242 @@ export function createPointLightsBench({ THREE, log }) {
       chromaMrt1.dispose();
       albedoTexture.dispose();
       void chromaLayout;
+
+      return { checks, calibration: 'OK' };
+    },
+  });
+
+  // ============================================================================
+  // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) — THE
+  // DEDICATED TARGET + BLIT infrastructure, proven against the REAL
+  // production functions (`describePointLightMergedMrt`,
+  // `buildPointLightMergedRendererMrtStructs`, `buildPointLightMergedZero
+  // QuadMaterial`, `buildPointLightMergedBlitMaterial`) fed through a REAL
+  // `ThreeAllocator` — not bench-local copies, and not the hand-built
+  // `RenderTarget` S2.11's own scenario used before this module existed (see
+  // that scenario's own comment, above). S2.15 wires these SAME functions
+  // into `vt-pan-viewer.js` with `pointLights.mergedScene` still
+  // permanently empty (S2.16's job) — so the whole point of this proof is
+  // that turning the new machinery on, with nothing routed through it yet,
+  // changes NOTHING: a genuine, MEASURED no-op against a real non-zero
+  // pre-fill, never an assumption.
+  // ============================================================================
+  scenarios.set('merged-target-and-blits-are-inert-when-scene-is-empty', {
+    name: 'merged-target-and-blits-are-inert-when-scene-is-empty',
+    summary:
+      "S2.15's own gate: the REAL production target-descriptor/blend-struct/zero-quad/blit-material " +
+      'functions, fed through a REAL ThreeAllocator, produce a target that reads exactly (0,0,0,0) at ' +
+      'every attachment after the zero-quad+empty-scene sequence (proven against a KNOWN NON-ZERO ' +
+      'pre-fill, not a target that merely started at zero), and blitting that all-zero content into ' +
+      'pre-filled destination targets leaves them BYTE-IDENTICAL — the whole new code path is a genuine ' +
+      'no-op before S2.16 gives it real content to carry.',
+    async run() {
+      await ensureRenderer();
+      const checks = [];
+      const { vec4: fillVec4, mrt: mrtFn } = THREE.TSL;
+
+      const allocator = new ThreeAllocator({ THREE });
+      const mergedRt = allocator.create(
+        'scene.pointLightMerged',
+        describePointLightMergedMrt({ THREE, resolvedW: DIM, resolvedH: DIM })
+      );
+
+      checks.push(
+        evaluate('descriptor-through-real-allocator-is-2-attachment-halffloat', () => ({
+          ok:
+            Array.isArray(mergedRt.textures) &&
+            mergedRt.textures.length === 2 &&
+            mergedRt.textures[0].name === 'illum' &&
+            mergedRt.textures[1].name === 'coloration' &&
+            mergedRt.textures[0].type === THREE.HalfFloatType &&
+            mergedRt.textures[1].type === THREE.HalfFloatType,
+          measured: `attachments=${mergedRt.textures?.length}; names=${mergedRt.textures?.map((t) => t.name).join(',')}; types=${mergedRt.textures?.map((t) => t.type).join(',')}`,
+          expected:
+            '2 attachments named illum/coloration, both HalfFloatType — the REAL allocator fed the REAL ' +
+            "descriptor function, not a hand-copied shape (matches scene.illum/scene.coloration's own " +
+            'precision, unlike the RGBA8 test targets earlier scenarios in this file use).',
+        }))
+      );
+
+      const { maxBlendMrt, overwriteMrt } = buildPointLightMergedRendererMrtStructs(THREE);
+      const zeroQuad = new THREE.QuadMesh(buildPointLightMergedZeroQuadMaterial(THREE));
+      const emptyScene = new THREE.Scene(); // S2.16 not built yet — mirrors pointLights.mergedScene today
+
+      // Pre-fill BOTH attachments with a KNOWN NON-ZERO value, under the
+      // SAME `overwriteMrt` struct the zero-quad itself uses below — if
+      // `overwriteMrt` were somehow broken (a no-op), THIS fill would fail
+      // its own contrast-guard check first, before the zero-quad check
+      // could produce a false PASS (feedback_calibration_needs_a_contrast_guard).
+      const garbageMaterial = new THREE.NodeMaterial();
+      garbageMaterial.transparent = false;
+      garbageMaterial.fragmentNode = mrtFn({
+        illum: fillVec4(0.4, 0.5, 0.6, 0.7),
+        coloration: fillVec4(0.15, 0.25, 0.35, 0.45),
+      });
+      const garbageQuad = new THREE.QuadMesh(garbageMaterial);
+
+      const prevTarget0 = renderer.getRenderTarget();
+      const prevMrt0 = renderer.getMRT();
+
+      const readOnePixel = async (target, textureIndex, x, y) => {
+        const raw = await renderer.readRenderTargetPixelsAsync(target, x, y, 1, 1, textureIndex);
+        return decodeHalfFloatRgba(raw);
+      };
+
+      renderer.setRenderTarget(mergedRt);
+      renderer.setMRT(overwriteMrt);
+      // QuadMesh's OWN `.render(renderer)` — NOT `renderer.renderAsync(quad,
+      // camera)`. QuadMesh carries its own internal NDC camera
+      // (three.webgpu.js's `_camera2`) and `.render()` uses it; passing this
+      // bench's WORLD-space camera through the renderer's generic path
+      // instead projects the quad's [-1,1] NDC geometry through the WRONG
+      // transform, landing it far outside the sampled points below (found
+      // live — the first attempt's "garbage fill" read back as pure zero,
+      // the exact signature of a quad that silently missed every sample).
+      // Mirrors production's OWN call shape (`illumQuad.render(renderer)`,
+      // vt-pan-viewer.js) exactly.
+      garbageQuad.render(renderer);
+
+      const illumGarbage = await readOnePixel(mergedRt, 0, 40, 40);
+      const colorGarbage = await readOnePixel(mergedRt, 1, 200, 200);
+
+      checks.push(
+        evaluate('pre-fill-contrast-guard-is-genuinely-non-zero', () => ({
+          ok: illumGarbage[0] > 0.1 && colorGarbage[1] > 0.1,
+          measured: `illum@(40,40)=${illumGarbage.join(',')}; coloration@(200,200)=${colorGarbage.join(',')}`,
+          expected:
+            'both attachments read the authored garbage fill before the zero-quad runs — a zero-check ' +
+            'below would be vacuous without this.',
+        }))
+      );
+
+      // THE REAL PRODUCE SEQUENCE — mirrors vt-pan-viewer.js's own new call
+      // site exactly, INCLUDING the `autoClearColor=false` guard that site
+      // inherits from the surrounding illum sequence (vt-pan-viewer.js's own
+      // "BLACK OUTSIDE THE LIGHT RADIUS FIX" — multiple render() calls to the
+      // SAME target each clear by default unless guarded). Found live, first
+      // attempt: without this guard, the empty-scene render() call below is
+      // ITSELF a fresh implicit clear (autoClearColor defaults true) — since
+      // it draws nothing, that clear's own S2.14-proven asymmetry
+      // (attachment 1 hardcoded to (0,0,0,1)) becomes the FINAL, un-overwritten
+      // state, undoing the zero-quad's own correct (0,0,0,0) write a moment
+      // earlier. A bench bug (missing the guard production always provides),
+      // not a production one.
+      const prevAutoClear0 = renderer.autoClearColor;
+      renderer.autoClearColor = false;
+      renderer.setMRT(overwriteMrt);
+      zeroQuad.render(renderer);
+      renderer.setMRT(maxBlendMrt);
+      await renderer.renderAsync(emptyScene, camera);
+      renderer.autoClearColor = prevAutoClear0;
+      renderer.setMRT(prevMrt0);
+      renderer.setRenderTarget(prevTarget0);
+
+      const illumZero1 = await readOnePixel(mergedRt, 0, 40, 40);
+      const illumZero2 = await readOnePixel(mergedRt, 0, 220, 10);
+      const colorZero1 = await readOnePixel(mergedRt, 1, 200, 200);
+      const colorZero2 = await readOnePixel(mergedRt, 1, 5, 250);
+      const isZero4 = (v) => v[0] === 0 && v[1] === 0 && v[2] === 0 && v[3] === 0;
+
+      checks.push(
+        evaluate('merged-target-reads-exact-zero-after-real-zeroquad-plus-empty-scene', () => ({
+          ok: isZero4(illumZero1) && isZero4(illumZero2) && isZero4(colorZero1) && isZero4(colorZero2),
+          measured: `illum@(40,40)=${illumZero1.join(',')}; illum@(220,10)=${illumZero2.join(',')}; coloration@(200,200)=${colorZero1.join(',')}; coloration@(5,250)=${colorZero2.join(',')}`,
+          expected:
+            'exactly (0,0,0,0) at every sampled point, both attachments, replacing the garbage fill above ' +
+            "— the REAL zero-quad material + REAL overwrite blend struct, not renderer.clear() (S2.14's " +
+            'own proven-asymmetric mechanism).',
+        }))
+      );
+
+      // ---- THE BLIT HALF — pre-fill two ordinary single-attachment targets
+      // (mirroring sceneIllum/sceneColoration's own shape), blit the now-
+      // all-zero merged attachments into them, confirm byte-identical. ----
+      const describeSingle = () => ({
+        resolvedW: DIM,
+        resolvedH: DIM,
+        type: THREE.HalfFloatType,
+        colorSpace: THREE.NoColorSpace,
+        filter: 'linear',
+        depth: false,
+      });
+      const destIllum = allocator.create('bench.destIllum', describeSingle());
+      const destColoration = allocator.create('bench.destColoration', describeSingle());
+
+      const destFillMaterial = (r, g, b, a) => {
+        const m = new THREE.NodeMaterial();
+        m.transparent = false;
+        m.fragmentNode = fillVec4(r, g, b, a);
+        return m;
+      };
+      const destIllumFillQuad = new THREE.QuadMesh(destFillMaterial(0.55, 0.35, 0.15, 0.9));
+      const destColorationFillQuad = new THREE.QuadMesh(destFillMaterial(0.05, 0.65, 0.85, 0.2));
+
+      renderer.setRenderTarget(destIllum);
+      destIllumFillQuad.render(renderer);
+      renderer.setRenderTarget(destColoration);
+      destColorationFillQuad.render(renderer);
+      renderer.setRenderTarget(prevTarget0);
+
+      const readFullBuffer = async (target, textureIndex = 0) => {
+        const raw = await renderer.readRenderTargetPixelsAsync(target, 0, 0, DIM, DIM, textureIndex);
+        return ArrayBuffer.isView(raw) ? raw : new Uint16Array(raw);
+      };
+      const illumBefore = await readFullBuffer(destIllum);
+      const colorationBefore = await readFullBuffer(destColoration);
+      const illumBeforeSample = decodeHalfFloatRgba(illumBefore.slice(0, 4));
+
+      const illumBlitQuad = new THREE.QuadMesh(buildPointLightMergedBlitMaterial(THREE, mergedRt.textures[0]));
+      const colorationBlitQuad = new THREE.QuadMesh(buildPointLightMergedBlitMaterial(THREE, mergedRt.textures[1]));
+
+      // SAME guard, SAME reason as the produce sequence above — production's
+      // real illum-side blit call site inherits `autoClearColor=false` from
+      // the surrounding illum sequence, and its coloration-side call site
+      // sets/restores it around just itself (vt-pan-viewer.js). Without it
+      // here, `illumBlitQuad.render()`'s own render() call would implicitly
+      // re-clear destIllum FIRST, so the MAX-blit would run against a fresh
+      // clear instead of the pre-fill above — found live, first attempt (every
+      // word differed, the signature of "blitting against a wiped destination"
+      // not "the blit corrupted real content").
+      const prevAutoClear1 = renderer.autoClearColor;
+      renderer.autoClearColor = false;
+      renderer.setRenderTarget(destIllum);
+      illumBlitQuad.render(renderer);
+      renderer.setRenderTarget(destColoration);
+      colorationBlitQuad.render(renderer);
+      renderer.autoClearColor = prevAutoClear1;
+      renderer.setRenderTarget(prevTarget0);
+
+      const illumAfter = await readFullBuffer(destIllum);
+      const colorationAfter = await readFullBuffer(destColoration);
+
+      let illumDiff = 0;
+      for (let i = 0; i < illumBefore.length; i++) if (illumBefore[i] !== illumAfter[i]) illumDiff++;
+      let colorationDiff = 0;
+      for (let i = 0; i < colorationBefore.length; i++)
+        if (colorationBefore[i] !== colorationAfter[i]) colorationDiff++;
+
+      checks.push(
+        evaluate('blit-of-all-zero-merged-content-leaves-destinations-byte-identical', () => ({
+          ok: illumDiff === 0 && colorationDiff === 0 && illumBeforeSample[0] > 0.1,
+          measured: `illumDiffWords=${illumDiff}/${illumBefore.length}; colorationDiffWords=${colorationDiff}/${colorationBefore.length}; destIllumPrefillSample=${illumBeforeSample.join(',')}`,
+          expected:
+            'zero raw-half-float-word differences in either destination across the whole ' +
+            `${DIM}x${DIM} buffer after MAX-blending the all-zero merged attachments in — the REAL blit ` +
+            'material, against a genuinely non-zero pre-fill (the sample above), so a pass-through bug ' +
+            '(destination silently zeroed) cannot hide as a false PASS.',
+        }))
+      );
+
+      allocator.dispose(mergedRt);
+      allocator.dispose(destIllum);
+      allocator.dispose(destColoration);
+      garbageMaterial.dispose();
+      zeroQuad.material.dispose();
+      destIllumFillQuad.material.dispose();
+      destColorationFillQuad.material.dispose();
+      illumBlitQuad.material.dispose();
+      colorationBlitQuad.material.dispose();
 
       return { checks, calibration: 'OK' };
     },
@@ -2326,6 +2605,10 @@ export function createPointLightsBench({ THREE, log }) {
       'merged-illum-attachment-matches-production-illumination-twin',
       'merged-coloration-attachment-matches-production-coloration-twin',
       'coloration-only-animation-leaves-illumination-time-invariant-in-merged-draw',
+      'descriptor-through-real-allocator-is-2-attachment-halffloat',
+      'pre-fill-contrast-guard-is-genuinely-non-zero',
+      'merged-target-reads-exact-zero-after-real-zeroquad-plus-empty-scene',
+      'blit-of-all-zero-merged-content-leaves-destinations-byte-identical',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

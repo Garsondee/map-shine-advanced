@@ -14,8 +14,6 @@
  * @module effects/candle-flame-geometry
  */
 
-import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL } from './lighting/point-light-illumination.js';
-
 /**
  * Parse a `#rrggbb` colour to linear-ish [r,g,b] in 0..1. Foundry stores light
  * colours as sRGB hex and its lighting shaders use them in gamma space (see
@@ -622,9 +620,9 @@ export function clusterCandleAnchors(anchors, cellPx) {
  * onto every vertex it always implicitly rendered with, so this is additive,
  * not a behaviour change for the common case.
  *
- * @param {Array<{x:number, y:number, windExposure?:number, params?:object, elevationRank?:number}>} anchors
+ * @param {Array<{x:number, y:number, windExposure?:number, params?:object, expectedDepth?:number}>} anchors
  * @param {{sizePx:number, colorHex?:string}} opts
- * @returns {{positions: Float32Array, uvs: Float32Array, centers: Float32Array, exposures: Float32Array, colors: Float32Array, intensities: Float32Array, elevationRanks: Float32Array, indices: Uint32Array, quadCount: number}}
+ * @returns {{positions: Float32Array, uvs: Float32Array, centers: Float32Array, exposures: Float32Array, colors: Float32Array, intensities: Float32Array, expectedDepths: Float32Array, indices: Uint32Array, quadCount: number}}
  */
 export function computeCandleFlameArrays(anchors, { sizePx, colorHex } = {}) {
   const list = Array.isArray(anchors) ? anchors : [];
@@ -635,13 +633,16 @@ export function computeCandleFlameArrays(anchors, { sizePx, colorHex } = {}) {
   const exposures = new Float32Array(n * 4);
   const colors = new Float32Array(n * 4 * 3);
   const intensities = new Float32Array(n * 4);
-  // THE FLAME'S OWN HEIGHT-GATE INPUT (2026-08-03) — `boot.js#getCandleRender
-  // State`'s `resolveAnchorElevationRank`, baked flat across all 4 verts of
-  // this candle's quad, same shape as exposures/intensities above. Defaults
-  // to the SENTINEL (never 0) when absent — a Node test building arrays by
-  // hand, or any caller that predates this field, must get the OLD "always
-  // fully reaches" behaviour, never a silently-introduced occlusion.
-  const elevationRanks = new Float32Array(n * 4);
+  // THE FLAME'S OWN OCCLUSION-GATE INPUT — DEPTH AUTHORITY, not the old
+  // per-floor-relative `buf:scene.attr` rank (keyhole-depth-authority-sole-
+  // system-decision). `vt-pan-viewer.js`'s candle-specific `resolveExpected
+  // Depth` closure turns each anchor's raw world elevation into this, baked
+  // flat across all 4 verts of this candle's quad, same shape as exposures/
+  // intensities above. Defaults to 0 when absent — the depth authority's own
+  // fail-open value (an unwritten depth texel also clears to 0), so a Node
+  // test building arrays by hand, or any caller that predates this field,
+  // gets the same "never occluded" behaviour the old sentinel gave it.
+  const expectedDepths = new Float32Array(n * 4);
   const indices = new Uint32Array(n * 6);
   let quadCount = 0;
   for (let i = 0; i < n; i++) {
@@ -657,8 +658,8 @@ export function computeCandleFlameArrays(anchors, { sizePx, colorHex } = {}) {
     const [cr, cg, cb] = hexToRgb01(resolveAnchorColorHex(anchor, colorHex));
     const intnRaw = Number(anchor?.params?.intensity);
     const intensity = Number.isFinite(intnRaw) ? Math.min(1, Math.max(0, intnRaw)) : 1;
-    const rankRaw = Number(anchor?.elevationRank);
-    const rank = Number.isFinite(rankRaw) ? rankRaw : LIGHT_ELEVATION_UNCONFIGURED_SENTINEL;
+    const depthRaw = Number(anchor?.expectedDepth);
+    const expectedDepth = Number.isFinite(depthRaw) ? depthRaw : 0;
     const q = quadCount;
     const p = q * 12;
     const uvo = q * 8;
@@ -697,7 +698,7 @@ export function computeCandleFlameArrays(anchors, { sizePx, colorHex } = {}) {
       centers[co + v * 2 + 1] = cy;
       exposures[so + v] = ex;
       intensities[so + v] = intensity;
-      elevationRanks[so + v] = rank;
+      expectedDepths[so + v] = expectedDepth;
       colors[clo + v * 3 + 0] = cr;
       colors[clo + v * 3 + 1] = cg;
       colors[clo + v * 3 + 2] = cb;
@@ -710,5 +711,5 @@ export function computeCandleFlameArrays(anchors, { sizePx, colorHex } = {}) {
     indices[io + 5] = base + 3;
     quadCount++;
   }
-  return { positions, uvs, centers, exposures, colors, intensities, elevationRanks, indices, quadCount };
+  return { positions, uvs, centers, exposures, colors, intensities, expectedDepths, indices, quadCount };
 }

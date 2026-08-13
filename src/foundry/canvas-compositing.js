@@ -106,15 +106,87 @@
  *    reconcile two sources of truth — Foundry remains the only owner of the
  *    clear colour; we own one channel of it.
  *
- * 3. `canvas.environment.renderable = false` — kills `primary` + `effects`.
- *    `CachedContainer#render` early-returns on `!this.renderable`
- *    (containers/advanced/cached-container.mjs:211), and `primary` already sets
- *    `eventMode = "none"` (groups/primary.mjs:30) so nothing hit-tests through
- *    it anyway. `renderable` (not `visible`): PIXI's EventBoundary skips
- *    INVISIBLE subtrees when hit-testing, and we must never disturb hit-testing.
+ * 3. Suppress `primary` + `effects` WITHOUT freezing `primary`'s internal
+ *    cache (rewritten 2026-08-13 — see "THE PRIMARY-CACHE-FREEZE FIX" below
+ *    for why the original single-lever version broke Foundry's own fog
+ *    shader). Two separate, more surgical moves:
+ *
+ *      canvas.primary.sprite.renderable = false;   // hides primary's OUTPUT only
+ *      canvas.effects.renderable = false;           // effects has no cache to protect
+ *
+ *    `primary` itself (and hence `CachedContainer#render`'s cache-refresh
+ *    half — containers/advanced/cached-container.mjs:209-221) is left
+ *    running every frame. `primary` already sets `eventMode = "none"`
+ *    (groups/primary.mjs:36) so nothing hit-tests through it regardless of
+ *    which lever suppresses it. `renderable` (not `visible`), same reason as
+ *    always: PIXI's EventBoundary skips INVISIBLE subtrees when hit-testing,
+ *    and we must never disturb hit-testing.
  *
  * 4. MSA's canvas drops `pointer-events: none` and stacks BELOW `#board`. The
  *    hack becomes unnecessary: a canvas underneath cannot swallow a click.
+ *
+ * ============================================================================
+ * THE PRIMARY-CACHE-FREEZE FIX (2026-08-13) — why §3 changed from one lever
+ * to two, source-verified line-by-line, not guessed
+ * ============================================================================
+ *
+ * The original version of this file suppressed with one assignment:
+ * `canvas.environment.renderable = false`. `canvas.environment` is the
+ * literal PIXI PARENT of `canvas.primary` (groups/environment.mjs:21, "A
+ * container group which contains the primary canvas group and the effects
+ * canvas group"), and neither it nor `CanvasGroupMixin` override `render()` —
+ * it is the stock `PIXI.Container#render()`, which early-returns on
+ * `!this.renderable` BEFORE walking `this.children`. So suppressing the
+ * PARENT didn't just hide `canvas.primary` — it meant PIXI never called
+ * `canvas.primary.render(renderer)` AT ALL.
+ *
+ * `canvas.primary` is a `CachedContainer` (groups/primary.mjs:29,
+ * `PrimaryCanvasGroup extends CanvasGroupMixin(CachedContainer)`), and
+ * `CachedContainer#render()` is where its children (background/tiles/
+ * tokens/weather) get re-rendered into `canvas.primary.renderTexture` — an
+ * internal cache, gated by that SAME `!renderable` early-return. Never
+ * reached ⇒ that render texture froze solid at whatever it held the instant
+ * suppression engaged (effectively scene boot), and nothing about that was
+ * visible... until Foundry's OWN fog-of-war shader turned out to depend on
+ * it: `CanvasVisibility#_draw()` builds its `VisibilityFilter` with
+ * `primaryTexture: canvas.primary.renderTexture` (groups/visibility.mjs:336),
+ * and the fragment shader's "explored, not-currently-visible" fog zone
+ * (rendering/filters/visibility.mjs:140,149) blends 50% of that frozen
+ * snapshot UNDER whatever MSA renders live. Because the shader samples it in
+ * screen space (`filterMaskTextureCoord`, same file:91), not world space, the
+ * frozen snapshot fills the current viewport regardless of camera position —
+ * it reads as a second, camera-locked copy of the map ghosted under MSA's
+ * own correctly camera-tracked render. Author-reported 2026-08-13 ("I see a
+ * double set of albedos and one of them moves... the other one stays
+ * still"), traced to here, tracked as Bug #18 in `docs/planning/
+ * Bug-Tracker.md`. Full source trail: memory
+ * `keyhole-fog-shader-primary-texture-freeze`.
+ *
+ * Nobody had exercised this path before, because `canvas.visibility.visible`
+ * (the whole group this filter lives in) only goes true once a vision
+ * source is active (groups/visibility.mjs:489) — a GM with no controlled
+ * token never rendered it, which is how almost every prior live-testing
+ * session was conducted.
+ *
+ * The fix: split "keep the cache fresh" from "show the cache on screen".
+ * `CachedContainer#render()` already has this split built in — an
+ * unconditional `this.#sprite?.render(renderer)` blit (the normal on-screen
+ * path) plus a SEPARATE `displayed`-gated raw re-render (default `false`,
+ * unused here). Suppressing the bound `sprite`'s OWN `renderable` stops only
+ * the blit; `canvas.primary`'s own `renderable` stays `true` (its default),
+ * so the cache-refresh block keeps running every frame, feeding Foundry's
+ * fog shader (and anything else that reads `canvas.primary.renderTexture`)
+ * correctly. `canvas.effects` never had this failure mode — it's a plain
+ * `PIXI.Container` (groups/effects.mjs:31), not a `CachedContainer` — so it
+ * keeps being suppressed the simple way, just no longer riding on
+ * `environment`'s shared lever.
+ *
+ * Cost, honestly stated: this gives back some of the render-to-texture work
+ * MSA previously skipped by suppressing at the parent level — the same cost
+ * vanilla Foundry (no MSA) already pays every frame as normal operation.
+ * Measure before assuming it matters (feedback_measure_the_output_not_the_
+ * equation) — do not re-introduce the parent-level shortcut to "optimize"
+ * this without re-deriving that it doesn't reopen the frozen-texture bug.
  *
  * ============================================================================
  * THE COUPLING RULE — why `decideArtSuppression` exists (the safety slide)
@@ -139,9 +211,10 @@
  *   under `rendered`. It is deliberately LEFT WITH PIXI. The author's direction
  *   (2026-07-17, keyhole-vision-fog-direction) is that MSA takes fog+vision
  *   EVENTUALLY — reproducing Foundry's logic, rendering it with Three's
- *   strengths (smooth fog). When that day comes it is the same lever
- *   (`renderable = false`) applied to one more group. Keep this per-group and
- *   reversible so that stays an addition, not a rewrite.
+ *   strengths (smooth fog), which would obsolete the whole primary-texture
+ *   dependency above at once. Until then, §3's two-lever suppression is the
+ *   scoped fix. Keep suppression per-group and reversible so that day is an
+ *   addition, not a rewrite.
  * - The DRAG PREVIEW's art. A preview Token is a real Token, so its `_draw`
  *   also pushes a mesh into `primary` — suppressed with everything else. MSA
  *   draws from DOCUMENTS and a preview is not a document; it lives at
@@ -167,10 +240,11 @@ export const MSA_OWNED_GROUPS = Object.freeze(['primary', 'effects']);
  *   `null` = could not read. IMMUTABLE for the session once the context exists.
  * @param {number|null} facts.clearAlpha - `renderer.background.alpha`. `null` =
  *   could not read.
- * @param {boolean} facts.environmentPresent - is `canvas.environment` there to suppress?
+ * @param {boolean} facts.groupsPresent - do `canvas.primary`, `canvas.primary.sprite`
+ *   and `canvas.effects` all exist to suppress?
  * @returns {{suppress: boolean, code: string, reason: string}}
  */
-export function decideArtSuppression({ contextAlpha, clearAlpha, environmentPresent }) {
+export function decideArtSuppression({ contextAlpha, clearAlpha, groupsPresent }) {
   if (contextAlpha === null || contextAlpha === undefined) {
     return {
       suppress: false,
@@ -207,11 +281,13 @@ export function decideArtSuppression({ contextAlpha, clearAlpha, environmentPres
         'colour changes (environment.mjs:179) — the initializeCanvasEnvironment re-assert did not run.',
     };
   }
-  if (!environmentPresent) {
+  if (!groupsPresent) {
     return {
       suppress: false,
-      code: 'no-environment',
-      reason: 'canvas.environment does not exist yet — nothing to suppress. Normal before a scene is drawn.',
+      code: 'no-render-targets',
+      reason:
+        'canvas.primary / canvas.primary.sprite / canvas.effects do not all exist yet — nothing to ' +
+        'suppress. Normal before a scene is drawn.',
     };
   }
   return {
@@ -228,7 +304,10 @@ export function decideArtSuppression({ contextAlpha, clearAlpha, environmentPres
  * conflated with a real value.
  *
  * @returns {{contextAlpha: boolean|null, clearAlpha: number|null,
- *   environmentPresent: boolean, environmentRenderable: boolean|null, readErrors: string[]}}
+ *   primaryPresent: boolean, primarySpritePresent: boolean, effectsPresent: boolean,
+ *   groupsPresent: boolean, primarySpriteRenderable: boolean|null,
+ *   effectsRenderable: boolean|null, foundryArtRenderable: boolean|null,
+ *   readErrors: string[]}}
  */
 export function readCompositingFacts() {
   const readErrors = [];
@@ -255,16 +334,52 @@ export function readCompositingFacts() {
     readErrors.push(`reading renderer.background.alpha threw: ${err?.message ?? err}`);
   }
 
-  const env = typeof canvas !== 'undefined' ? (canvas?.environment ?? null) : null;
-  const environmentPresent = !!env;
-  let environmentRenderable = null;
+  const primary = typeof canvas !== 'undefined' ? (canvas?.primary ?? null) : null;
+  const effects = typeof canvas !== 'undefined' ? (canvas?.effects ?? null) : null;
+  const primaryPresent = !!primary;
+  const primarySpritePresent = !!primary?.sprite;
+  const effectsPresent = !!effects;
+  const groupsPresent = primaryPresent && primarySpritePresent && effectsPresent;
+
+  let primarySpriteRenderable = null;
   try {
-    if (env && typeof env.renderable === 'boolean') environmentRenderable = env.renderable;
+    if (primary?.sprite && typeof primary.sprite.renderable === 'boolean') {
+      primarySpriteRenderable = primary.sprite.renderable;
+    }
   } catch (err) {
-    readErrors.push(`reading canvas.environment.renderable threw: ${err?.message ?? err}`);
+    readErrors.push(`reading canvas.primary.sprite.renderable threw: ${err?.message ?? err}`);
   }
 
-  return { contextAlpha, clearAlpha, environmentPresent, environmentRenderable, readErrors };
+  let effectsRenderable = null;
+  try {
+    if (effects && typeof effects.renderable === 'boolean') effectsRenderable = effects.renderable;
+  } catch (err) {
+    readErrors.push(`reading canvas.effects.renderable threw: ${err?.message ?? err}`);
+  }
+
+  // Single combined signal, mirroring the pre-2026-08-13 `environmentRenderable`
+  // shape for callers that just want "is Foundry's own art currently showing" —
+  // true only when BOTH halves genuinely read true; any false or unread (null)
+  // on either half means Foundry's art is at least partly suppressed.
+  const foundryArtRenderable =
+    primarySpriteRenderable === true && effectsRenderable === true
+      ? true
+      : primarySpriteRenderable === null && effectsRenderable === null
+        ? null
+        : false;
+
+  return {
+    contextAlpha,
+    clearAlpha,
+    primaryPresent,
+    primarySpritePresent,
+    effectsPresent,
+    groupsPresent,
+    primarySpriteRenderable,
+    effectsRenderable,
+    foundryArtRenderable,
+    readErrors,
+  };
 }
 
 /** Re-assert the transparent clear alpha after Foundry clobbers it. See header §2. */
@@ -297,8 +412,8 @@ export function applyArtSuppression() {
 
   if (!decision.suppress) {
     // ANNOUNCE, ALWAYS — never a silent fallback (feedback_safety_slide_outranks_doctrine).
-    // 'no-environment' is the one benign case: it just means no scene is drawn yet.
-    if (decision.code !== 'no-environment') {
+    // 'no-render-targets' is the one benign case: it just means no scene is drawn yet.
+    if (decision.code !== 'no-render-targets') {
       console.warn(
         `[MSA] interface seam: NOT suppressing Foundry's art (${decision.code}) — ${decision.reason} ` +
           'Foundry is rendering the scene normally; MSA is underneath and invisible.'
@@ -308,13 +423,18 @@ export function applyArtSuppression() {
   }
 
   try {
-    canvas.environment.renderable = false;
+    // Two levers, not one — see header §3 / "THE PRIMARY-CACHE-FREEZE FIX".
+    // `canvas.primary` itself is deliberately left renderable:true so its
+    // CachedContainer keeps refreshing `renderTexture` every frame; only the
+    // bound sprite's on-screen blit is suppressed.
+    canvas.primary.sprite.renderable = false;
+    canvas.effects.renderable = false;
   } catch (err) {
-    console.error('[MSA] interface seam: suppressing canvas.environment failed:', err);
+    console.error('[MSA] interface seam: suppressing Foundry primary/effects failed:', err);
     return {
       applied: false,
       code: 'suppress-threw',
-      reason: `Setting canvas.environment.renderable = false threw: ${err?.message ?? err}`,
+      reason: `Setting canvas.primary.sprite.renderable/canvas.effects.renderable = false threw: ${err?.message ?? err}`,
       facts,
     };
   }
@@ -323,18 +443,29 @@ export function applyArtSuppression() {
 
 /**
  * Hand Foundry's art back. The reverse of applyArtSuppression, for the safety
- * slide's "fall back to Foundry" path and for Stop/Clear.
+ * slide's "fall back to Foundry" path and for Stop/Clear. Best-effort: restores
+ * whichever of `canvas.primary.sprite` / `canvas.effects` actually exists,
+ * rather than requiring both (the safety slide prefers showing SOME Foundry
+ * art over refusing entirely on a partial state).
  *
- * @returns {boolean} whether the restore actually happened
+ * @returns {boolean} whether at least one restore actually happened
  */
 export function restoreFoundryArt() {
   try {
-    const env = typeof canvas !== 'undefined' ? (canvas?.environment ?? null) : null;
-    if (!env) return false;
-    env.renderable = true;
-    return true;
+    const primary = typeof canvas !== 'undefined' ? (canvas?.primary ?? null) : null;
+    const effects = typeof canvas !== 'undefined' ? (canvas?.effects ?? null) : null;
+    let restored = false;
+    if (primary?.sprite) {
+      primary.sprite.renderable = true;
+      restored = true;
+    }
+    if (effects) {
+      effects.renderable = true;
+      restored = true;
+    }
+    return restored;
   } catch (err) {
-    console.error('[MSA] interface seam: restoring canvas.environment failed:', err);
+    console.error('[MSA] interface seam: restoring canvas.primary/canvas.effects failed:', err);
     return false;
   }
 }
@@ -385,19 +516,26 @@ export function getCanvasCompositingReport() {
     generatedAt: new Date().toISOString(),
     contextAlpha: facts.contextAlpha,
     clearAlpha: facts.clearAlpha,
-    environmentPresent: facts.environmentPresent,
-    environmentRenderable: facts.environmentRenderable,
+    primaryPresent: facts.primaryPresent,
+    primarySpritePresent: facts.primarySpritePresent,
+    effectsPresent: facts.effectsPresent,
+    primarySpriteRenderable: facts.primarySpriteRenderable,
+    effectsRenderable: facts.effectsRenderable,
+    foundryArtRenderable: facts.foundryArtRenderable,
     readErrors: facts.readErrors,
     decision,
     msaOwnedGroups: [...MSA_OWNED_GROUPS],
     interpretation:
-      'HEALTHY = contextAlpha:true, clearAlpha:0, environmentRenderable:false. That means the PIXI ' +
-      "canvas is genuinely transparent, Foundry's art is off, and its interface chrome (selection " +
+      'HEALTHY = contextAlpha:true, clearAlpha:0, foundryArtRenderable:false (i.e. ' +
+      'primarySpriteRenderable:false AND effectsRenderable:false). That means the PIXI canvas is ' +
+      "genuinely transparent, Foundry's art output is off (though canvas.primary's own internal cache " +
+      "keeps refreshing every frame — deliberate, see the header's PRIMARY-CACHE-FREEZE FIX section — " +
+      "so Foundry's own fog shader still reads a live snapshot), and its interface chrome (selection " +
       'borders, grid, walls, control icons, rulers) is drawing on top of MSA. ' +
       'contextAlpha:false is UNRECOVERABLE this session — the canvasConfig hook did not run in time. ' +
       'clearAlpha:1 with contextAlpha:true means Foundry re-clobbered the alpha and the ' +
       'initializeCanvasEnvironment re-assert is not firing. ' +
-      'environmentRenderable:true alongside a refusal is CORRECT and deliberate — the safety slide ' +
+      'foundryArtRenderable:true alongside a refusal is CORRECT and deliberate — the safety slide ' +
       'chose Foundry rendering over a blank screen; read decision.reason for which fact forced it.',
   };
 }

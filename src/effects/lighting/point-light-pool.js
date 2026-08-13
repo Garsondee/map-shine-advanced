@@ -657,6 +657,7 @@ function createLightEntry({
  *   "STAGE 2" header).
  * @returns {{
  *   lightScene: object, colorationScene: object, apertureShadowScene: object,
+ *   mergedScene: object,
  *   lightMeshes: Map, candleWallClipCache: Map, lightningWallClipCache: Map,
  *   update: (darkness01: number, activeRegions: object[], env: object, darknessRealism01: number, currentFloor: object) => number,
  *   getApertureGoboReadout: () => {totalFound: number, dropped: number, litLights: number, enabled: boolean},
@@ -733,6 +734,20 @@ export function createPointLightPool({
    * buffer with no way to tell which source contributed what). This scene
    * now holds only the standalone visualization mesh, usually empty. */
   const apertureShadowScene = new THREE.Scene();
+  /** A FOURTH dedicated Scene — S2.15 (Performance-Audit-2026-08.md §3.1's
+   * MRT-merge plan). Deliberately created now, empty, ahead of the pool
+   * logic that will populate it: `vt-pan-viewer.js`'s render sequence needs
+   * a stable scene reference to draw (even a permanently-empty one, while
+   * `pointLightMrtMerge` stays off) so its own two call-site insertions
+   * never need a second edit once S2.16 starts admitting members into it.
+   * S2.16 ("Pool integration behind pointLightMrtMerge") is the stage that
+   * actually adds membership/bucket-routing logic — likely mirroring
+   * `illumBuckets`/`colorBuckets`' own bucket-per-key shape with a THIRD
+   * registry, gated on the batching AND merge flags both being on (exact
+   * shape decided when that stage is built, not here). Until then this
+   * scene renders nothing, ever, regardless of the flag — a real, provable
+   * no-op, not a guess. */
+  const mergedScene = new THREE.Scene();
 
   /** APERTURE GOBO's SHARED (one-per-pool, not one-per-light) generator +
    * softness uniforms — created ONCE here, exactly like `uGlobalTimeMs`
@@ -2262,6 +2277,7 @@ export function createPointLightPool({
     lightScene,
     colorationScene,
     apertureShadowScene,
+    mergedScene,
     lightMeshes,
     candleWallClipCache,
     lightningWallClipCache,

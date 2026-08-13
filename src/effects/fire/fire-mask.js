@@ -76,13 +76,17 @@ const MAX_FIRES = 64;
  *
  * @param {Uint8Array} data - w*h, row-major, row 0 = minY.
  * @param {number} w @param {number} h
+ * @param {number} [paintThreshold=PAINT_THRESHOLD] - 0..1; below this a texel
+ *   reads as unpainted. Overridable so a caller (`extractFiresFromMask`'s own
+ *   `paintThreshold` option) can raise or lower how much paint counts as fire
+ *   without touching the module default every other caller still gets.
  * @returns {Float32Array} distance in texels; 0 wherever unpainted.
  */
-export function chamferDistance(data, w, h) {
+export function chamferDistance(data, w, h, paintThreshold = PAINT_THRESHOLD) {
   const n = w * h;
   const dist = new Float32Array(n);
   const BIG = 1e9;
-  const threshold = PAINT_THRESHOLD * 255;
+  const threshold = paintThreshold * 255;
 
   for (let i = 0; i < n; i++) dist[i] = data[i] >= threshold ? BIG : 0;
 
@@ -228,9 +232,17 @@ const ELONGATION_RATIO = 8;
  * @param {object} [opts]
  * @param {number} [opts.maxFires=MAX_FIRES]
  * @param {number} [opts.minDiameterPx=8] - below this a fire is not worth a draw or a light.
+ * @param {number} [opts.paintThreshold=PAINT_THRESHOLD] - 0..1; the "Mask
+ *   sensitivity" param (`effects/fire/fire.js#FIRE_PARAMS.maskSensitivity`)
+ *   overrides this live — see `boot.js#getMaskDrivenFires`. Lower catches
+ *   fainter/smaller paint (a soft-edged or downsampled-away small stroke);
+ *   higher requires bolder paint before it registers at all.
  * @returns {Array<{id:string,x:number,y:number,diameterPx:number,intensity:number}>}
  */
-export function extractFiresFromMask(grid, { maxFires = MAX_FIRES, minDiameterPx = 8 } = {}) {
+export function extractFiresFromMask(
+  grid,
+  { maxFires = MAX_FIRES, minDiameterPx = 8, paintThreshold = PAINT_THRESHOLD } = {}
+) {
   const spec = grid?.spec ?? null;
   const data = grid?.data ?? null;
   if (!spec || !data) return [];
@@ -238,8 +250,8 @@ export function extractFiresFromMask(grid, { maxFires = MAX_FIRES, minDiameterPx
   const h = spec.h | 0;
   if (w <= 0 || h <= 0 || data.length < w * h) return [];
 
-  const dist = chamferDistance(data, w, h);
-  const { labels, boxes } = labelComponents(data, w, h, PAINT_THRESHOLD * 255);
+  const dist = chamferDistance(data, w, h, paintThreshold);
+  const { labels, boxes } = labelComponents(data, w, h, paintThreshold * 255);
 
   // Candidate ridge texels, widest first. Anything under MIN_PEAK_TEXELS is a
   // one-texel speck of paint, not a fire.

@@ -50,6 +50,7 @@ building on any of this.
 | 17 | Feature: shared sun-brightness ceiling for `_Window` + a moonlight floor for night | window / lighting / design | `OPEN` — design proposal, no code yet |
 | 18 | Selecting a token shows a frozen, screen-locked second copy of the map inside explored fog | fog-of-war / art suppression | `BUILT (unverified)` — fix live-tested, author hasn't looked yet |
 | 19 | Painted `_Fire` region doesn't register on First Floor even with visible white paint | fire / mask extraction | `OPEN` (root cause) — workaround `BUILT`, live-tested |
+| 20 | First Floor runs at ~half Ground floor's framerate — `geometry.depthDraw`/`geometry.earlyZPrepass` cost ~10x more there | depth authority / early-Z | `BUILT (unverified)` — pixel-diff clean, author hasn't looked yet |
 
 ---
 
@@ -1900,3 +1901,99 @@ scene (not the harness) is the remaining step to promote this to `LIVE`.
 - Should `maskSensitivity` eventually apply per-floor or globally? Today
   it's one global override — raising it to solve a First Floor problem also
   raises the bar on Ground floor.
+
+---
+
+## 20. First Floor runs at ~half Ground floor's framerate — depth-authority passes cost ~10x more there
+
+**Status:** `BUILT (unverified)` — pixel-diff clean and the fix confirmed genuinely
+engaged, not just present; author has not yet looked at it live · **Reported:**
+2026-08-13 (v0.6.1 performance review) · **Docs:** `docs/planning/Performance-Review-v0.6.1.md`,
+`docs/planning/Stage-1-Shade-Once.md`, `docs/planning/perf-reports/2026-08-13-v0.6.1-baseline.json`
+
+### Symptom
+
+The v0.6.1 baseline perf capture: Ground floor 57.8fps avg, First Floor 30.5fps
+avg — roughly half. `multiFloor.ranked` isolated it to two specific zones, not
+a general "more stuff" story: `geometry.depthDraw` 9.51x more expensive on
+First Floor, `geometry.earlyZPrepass` 9.77x more, while the main colour draw
+(`geometry.worldDraw`) only cost 1.4x more.
+
+### Root cause — CONFIRMED against the real art, not guessed
+
+A canvas-based alpha-channel decode of the actual source files: `Ground.webp`
+reads alpha=255 (fully opaque) at every sampled point, including four
+native-resolution edge strips. `First-Floor.webp` is **66.7% fully
+transparent overall**, with a genuine, solid 300px-wide border of alpha=0 on
+all four edges — confirmed by the author independently ("the upper floor is
+the main upper floor of a building with a gap of transparency around the
+edges of the map").
+
+A `discard()` anywhere in a fragment shader disables hardware early-fragment-
+tests for that whole shader (already known and exploited elsewhere in this
+codebase — it's the reason the depth-authority system's own `alwaysOpaque`
+fast path exists at all). Ground's background never needs a discard and gets
+free hardware occlusion; First Floor's background structurally cannot pass
+the whole-item `alwaysOpaque` check (`alphaStats.min` is 0, nowhere near the
+threshold), so its full-map-footprint shader pays full fragment cost across
+its entire on-screen area, in both `runSceneDepthPass` and its early-Z
+prepass twin, every frame.
+
+### What was already half-built, and what was actually missing
+
+The colour draw already has a per-cell interior/boundary split for exactly
+this case (S1a — `splitCoverageCellMask` in `vt/coverage-mesh.js`,
+`applyEarlyZTileState`/`ensureSplitInteriorMaterial` in `vt-pan-viewer.js`),
+shipped and live since S1.4-S1.7 (`docs/planning/Stage-1-Shade-Once.md`).
+`rebuildSceneDepthProxies`'s own comment already named why it doesn't help
+`geometry.depthDraw`/`geometry.earlyZPrepass`: the depth-authority proxy and
+its prepass twin **share the same split geometry** (`t.geometry`, the same
+object the colour tile uses) but were still drawn with **one** material
+covering both index groups — a non-array material draws every group with
+itself regardless of how many groups the geometry has.
+
+### The fix
+
+`rebuildSceneDepthProxies` now builds a SECOND writer material
+(`alwaysOpaque:true`) for a tile's interior cells whenever `earlyZComposition`
+is on and the colour draw already split that tile (`t.cellSplit`), and
+assigns `[interior, boundary]` to match the geometry's own two groups.
+`addDepthPrepassTwin` gained a matching optional parameter. Both pool through
+the existing `depthProxyMaterialPool`, which already disambiguates by
+`alwaysOpaque` — no new pooling logic. An interior cell's certification
+(every min-alpha-grid texel reads exactly 255) is strictly stronger than
+`alwaysOpaque`'s own bar, so this is provably safe, not a new risk.
+
+**Two real, pre-existing bugs found and fixed along the way** — S1a's own
+min-grid consumption was silently dead without them, on EVERY floor, not
+just First Floor:
+1. `wi.alphaMinGrid`/`wi.alphaStats` were assigned to the item state AFTER
+   that tile's first `setTileGeometry()` call, not before — so the very
+   first geometry build for every item always read `undefined`, regardless
+   of how fresh the compressed-texture cache record actually was.
+2. `refreshWholeImageItem`'s re-mesh trigger only fired on a placement
+   change or the coverage grid changing — nothing re-triggered when the
+   min-grid arrived asynchronously after that first build (the normal case),
+   so a tile meshed before it landed stayed on `splitDeclined:'noMinGrid'`
+   for the rest of the session, permanently. Fixed by tracking
+   `t.alphaMinGrid` the same way `t.coverageGrid` already is.
+
+### Verification so far
+
+`npm run verify` green throughout. Live pixel-diff on First Floor
+(`stage1-earlyz-pixel-diff.mjs`, flag OFF vs ON, same session/camera): **0 of
+2,073,600 pixels differ**. Confirmed genuinely engaged, not vacuous — before
+the two timing bugs above were fixed, every candidate tile declined with
+`noMinGrid` despite real min-grid data being present (`getEarlyZComposition()`
+itself read it fine; `setTileGeometry` had captured a stale `undefined` and
+nothing ever asked it to look again). After: `splitInteriorCells: 1233`,
+`splitBoundaryCells: 773`, zero `noMinGrid` declines remaining.
+
+**Not yet done:** a fresh multi-floor perf capture to confirm the actual
+framerate gap narrowed (the pixel-diff proves correctness, not speed) — the
+author asked to stop the live-test loop and will verify this themselves.
+
+### Fixed when
+
+First Floor's frame time approaches Ground floor's for equivalent content,
+and the author's own eyes confirm nothing looks different on either floor.

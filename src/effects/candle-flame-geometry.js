@@ -513,6 +513,16 @@ function buildOneLightSource(c, baseRadius, color, qualityTier, windResponse) {
  * @param {number} cellPx - bucket size in world px (anchors within a cell merge).
  * @returns {Array<{x:number, y:number, count:number, id:string, exposure:number, elevation:number}>} cluster centroids.
  */
+// A generous power-of-two cell-coordinate multiplier for `clusterCandleAnchors`'s
+// packed numeric bucket key (perf pass, 2026-08-13 — replaces a per-anchor
+// template-literal string key, one fewer allocation per candle per frame).
+// `cellX * CANDLE_CLUSTER_KEY_MULT + cellY` is collision-free as long as
+// |cellY| stays under half this value; even a pathological 1,000,000px map
+// clustered at a 1px cell size only reaches a cellY on the order of 1e6, and
+// this constant clears that by a further ~30x, with cellX*MULT still many
+// orders of magnitude below Number.MAX_SAFE_INTEGER for any real scene.
+const CANDLE_CLUSTER_KEY_MULT = 67108864; // 2^26
+
 export function clusterCandleAnchors(anchors, cellPx) {
   const list = Array.isArray(anchors) ? anchors : [];
   const size = Number.isFinite(cellPx) && cellPx > 0 ? cellPx : 1;
@@ -521,7 +531,7 @@ export function clusterCandleAnchors(anchors, cellPx) {
     const x = Number(a?.x);
     const y = Number(a?.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    const key = `${Math.floor(x / size)}:${Math.floor(y / size)}`;
+    const key = Math.floor(x / size) * CANDLE_CLUSTER_KEY_MULT + Math.floor(y / size);
     let c = cells.get(key);
     if (!c) {
       c = { sumX: 0, sumY: 0, n: 0, ids: [], intensity: 0, sumExposure: 0, sumElevation: 0 };

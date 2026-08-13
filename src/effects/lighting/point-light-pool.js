@@ -891,6 +891,15 @@ export function createPointLightPool({
    * avoids recomputing the wall sweep every single frame a bolt flickers). */
   const lightningWallClipCache = new Map();
 
+  /** Persistent scratch array for the per-frame `lights` merge below (perf
+   * pass, 2026-08-13) — `[...a, ...b, ...c, ...d]` allocates a brand-new
+   * array every frame regardless of whether any source changed; `.length = 0`
+   * + push reuses the same backing array instead, matching this file's own
+   * `entry.scratchArray`/`entry.edgePoints` reuse discipline elsewhere. Read
+   * exactly once per frame (a single `for...of` loop), never retained past
+   * that loop, so reusing its identity across frames is safe. */
+  const lightsScratch = [];
+
   /**
    * sourceId -> {floorId, x, y, radius, angle, rotation, points, source,
    * reason} — the THIRD sibling of `candleWallClipCache` (2026-08-11, found
@@ -1145,7 +1154,28 @@ export function createPointLightPool({
       } else {
         wallClipCacheStats.candle.hits += 1;
       }
-      if (cached.points) candle.shapePoints = cached.points;
+      if (cached.points) {
+        candle.shapePoints = cached.points;
+      } else if (cached.circleX === candle.x && cached.circleY === candle.y && cached.circlePoints) {
+        // UNCLIPPED CANDLE, UNMOVED (perf pass, 2026-08-13) —
+        // buildCandleLightSources' own candleCirclePolygon() allocates a
+        // FRESH 64-float array every frame (candle-flame-geometry.js), which
+        // defeats shapePointsUnchanged's `a===b` fast path below (this file's
+        // own per-entry dirty-check) even though the content is provably
+        // identical whenever x/y/radius match — candleCirclePolygon is a pure
+        // function of exactly those three numbers. Radius is already
+        // confirmed equal by the cache-hit branch above; x/y are checked
+        // explicitly here since the wall-clip cache's own key deliberately
+        // omits them (see this loop's header comment). Reusing the SAME
+        // array reference lets that fast path actually hit instead of a
+        // 64-element content scan, every frame, for every candle with no
+        // wall nearby — the common case.
+        candle.shapePoints = cached.circlePoints;
+      } else {
+        cached.circleX = candle.x;
+        cached.circleY = candle.y;
+        cached.circlePoints = candle.shapePoints;
+      }
       // cached.points === null: candle KEEPS buildCandleLightSources' own
       // naive-circle shapePoints untouched — the pre-fix behaviour, not a gap
       // this change introduces.
@@ -1230,7 +1260,12 @@ export function createPointLightPool({
     // list ever reaches the pool.
     const fireLights = getFireLightSources ? (getFireLightSources() ?? []) : [];
 
-    const lights = [...foundryLights, ...candleLights, ...lightningLights, ...fireLights];
+    lightsScratch.length = 0;
+    for (const l of foundryLights) lightsScratch.push(l);
+    for (const l of candleLights) lightsScratch.push(l);
+    for (const l of lightningLights) lightsScratch.push(l);
+    for (const l of fireLights) lightsScratch.push(l);
+    const lights = lightsScratch;
     // Read ONCE per frame — a scene's grid size does not change light-to-light,
     // only scene-to-scene.
     const gridSizePixels = readGridSizePixels().gridSizePixels;

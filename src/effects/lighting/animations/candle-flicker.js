@@ -174,13 +174,37 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse) {
   const amplitude = amplification.mul(float(0.45));
   const remap = (raw) => raw.add(float(1)).mul(float(0.5)); // perlin [-1,1] → [0,1]
 
+  // VERTEX-STAGE HOIST (Performance-Audit-2026-08.md §3.5, CONFIRMED) — every
+  // input reaching this function (time/amplitude/wind/windResponse) is a
+  // per-light UNIFORM, so `n`/`brightnessPulse`/`warmth`/`life` are all
+  // constant across a light's whole mesh for this frame. Left as plain nodes
+  // they get compiled into `material.fragmentNode` and re-evaluate up to 5
+  // mx_noise_float calls at EVERY fragment the light covers (up to ~785,000
+  // for a large light, per this file's own sibling `point-light-pool.js`
+  // comment on fire's radii) instead of once at each of the mesh's own
+  // <=192 fan vertices. `.toVarying(name)` (three.webgpu.js's `VaryingNode`,
+  // already load-bearing elsewhere in this codebase —
+  // `particles/particle-runtime.js`'s `vFade`, `effects/lightning-render.js`'s
+  // strand varyings) computes the wrapped node ONCE in the vertex stage and
+  // interpolates the result into the fragment stage — lossless by
+  // construction, since a value that is constant across the primitive
+  // interpolates to itself exactly at every fragment.
+  const hoist = (node, name) => node.toVarying(name);
+
   if (quality < 1) {
     // TIER 0 — byte-identical to light-animation-clock.js#buildFlickerNode.
     // No wind coupling at this tier, matching the flame's own tier-0 "no
-    // wind, no gutter" design (candle-flame-render.js's own header).
+    // wind, no gutter" design (candle-flame-render.js's own header). Hoisted
+    // too (harmless: hoisting changes WHERE a uniform value is computed,
+    // never WHAT it computes to) so tier 0 gets the identical win.
     const unit = remap(perlin(vec2(time, float(0))));
     const n = unit.mul(amplitude);
-    return { n, brightnessPulse: float(0.55).add(n), warmth: unit.sub(float(0.5)).mul(float(2)), life: unit };
+    return {
+      n: hoist(n, 'vCandleLifeN'),
+      brightnessPulse: hoist(float(0.55).add(n), 'vCandleBrightnessPulse'),
+      warmth: hoist(unit.sub(float(0.5)).mul(float(2)), 'vCandleWarmth'),
+      life: hoist(unit, 'vCandleLife'),
+    };
   }
 
   // TIER ≥1 — chaotic guttering. FOUR decorrelated octaves summed around a
@@ -221,7 +245,12 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse) {
   const snuff = wind ? smoothstep(float(WIND_SNUFF_MAG_LOW), float(WIND_SNUFF_MAG_HIGH), windMag) : float(0);
   const brightnessPulse = mix(float(BRIGHT_FLOOR), float(BRIGHT_CEIL), life).mul(float(1).sub(snuff));
   const warmth = life.sub(float(0.5)).mul(float(2));
-  return { n, brightnessPulse, warmth, life };
+  return {
+    n: hoist(n, 'vCandleLifeN'),
+    brightnessPulse: hoist(brightnessPulse, 'vCandleBrightnessPulse'),
+    warmth: hoist(warmth, 'vCandleWarmth'),
+    life: hoist(life, 'vCandleLife'),
+  };
 }
 
 /**
@@ -261,9 +290,9 @@ function candleShape(TSL, time, dist, localPosition, life, quality, wind, windRe
   // the fix for "the light used to lean in its OWN wind, different from the
   // flame's"). Falls back to the original two-decorrelated-noises-plus-gust
   // lean otherwise.
-  let lean;
+  let leanRaw;
   if (wind) {
-    lean = wind.mul(float(SHARED_WIND_LEAN_SCALE)).mul(windResponse ?? float(1));
+    leanRaw = wind.mul(float(SHARED_WIND_LEAN_SCALE)).mul(windResponse ?? float(1));
   } else {
     const leanX = perlin(vec2(time.mul(float(LEAN_RATE)), float(41)));
     const leanY = perlin(vec2(time.mul(float(LEAN_RATE)), float(53)));
@@ -271,30 +300,43 @@ function candleShape(TSL, time, dist, localPosition, life, quality, wind, windRe
       .mul(float(0.5))
       .add(float(0.5));
     const leanMag = float(LEAN_BASE).add(gust.mul(float(LEAN_GUST)));
-    lean = vec2(leanX, leanY).mul(leanMag);
+    leanRaw = vec2(leanX, leanY).mul(leanMag);
   }
 
-  // Shift the pool body toward the lean (the flame bends off the wick).
-  const centered = P.sub(lean);
-
-  // Elliptical metric: decompose into along/across the lean axis, elongate
-  // along, squash across. Lean magnitude drives how oval it gets, so a
-  // resting flame is nearly round and a gusting one is a long tongue.
-  const leanLen = length(lean);
-  const axis = lean.div(max(leanLen, float(0.001))); // safe: tiny lean → ~round anyway
-  const along = dot(centered, axis);
-  const across = dot(centered, vec2(axis.y.negate(), axis.x));
-  const a = float(1).add(leanLen.mul(float(STRETCH_ALONG))); // reaches further along the lean
-  const b = max(float(1).sub(leanLen.mul(float(STRETCH_PERP))), float(PERP_MIN)); // narrower across
+  // Elliptical metric setup: decompose into along/across the lean axis,
+  // elongate along, squash across. Lean magnitude drives how oval it gets, so
+  // a resting flame is nearly round and a gusting one is a long tongue.
+  const leanLenRaw = length(leanRaw);
+  const axisRaw = leanRaw.div(max(leanLenRaw, float(0.001))); // safe: tiny lean → ~round anyway
+  const aRaw = float(1).add(leanLenRaw.mul(float(STRETCH_ALONG))); // reaches further along the lean
+  const bRaw = max(float(1).sub(leanLenRaw.mul(float(STRETCH_PERP))), float(PERP_MIN)); // narrower across
 
   // Size: couples to brightness (a gutter dip shrinks the pool) + own breath.
   const breathe = perlin(vec2(time.mul(float(BREATHE_RATE)), float(71)));
-  const size = max(
+  const sizeRaw = max(
     float(SIZE_BASE)
       .add(life.mul(float(SIZE_LIFE)))
       .add(breathe.mul(float(SIZE_BREATHE))),
     float(0.3)
   );
+
+  // VERTEX-STAGE HOIST (same reasoning as candleLife's own, above) —
+  // lean/axis/a/b/size all derive purely from wind/windResponse/time/life,
+  // every one a per-light uniform (`life` arrives already hoisted from
+  // candleLife), so none of them need the per-fragment `P` this function was
+  // called for. Only the combination with `P` just below genuinely needs the
+  // fragment stage.
+  const lean = leanRaw.toVarying('vCandleLean');
+  const axis = axisRaw.toVarying('vCandleAxis');
+  const a = aRaw.toVarying('vCandleStretchA');
+  const b = bRaw.toVarying('vCandleStretchB');
+  const size = sizeRaw.toVarying('vCandleSize');
+
+  // Shift the pool body toward the lean (the flame bends off the wick) — the
+  // first point in this function that actually needs the fragment's own P.
+  const centered = P.sub(lean);
+  const along = dot(centered, axis);
+  const across = dot(centered, vec2(axis.y.negate(), axis.x));
 
   const flameDist = length(vec2(along.div(a), across.div(b))).div(size);
   return { flameDist };

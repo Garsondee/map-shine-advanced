@@ -237,7 +237,29 @@ the composite reads three and takes 0.28 ms. Scaling the measured 0.67 ms by pow
 The mechanism to fix it already exists and is already proven — `rebuildFragment()` is already
 re-invoked on a compile-time change (the tone-map swap).
 
-### 3.5 ✅ CONFIRMED — a 13-noise wind sample whose every input is a uniform, evaluated per fragment, in both light shaders
+### 3.5 🟢 BUILT (unverified live) — a 13-noise wind sample whose every input is a uniform, evaluated per fragment, in both light shaders
+
+**Update 2026-08-13:** the `varying()` hoist this section recommends is now built, entirely inside
+`animations/candle-flicker.js` — `candleLife`'s four return values (`n`/`brightnessPulse`/`warmth`/`life`)
+and `candleShape`'s tier-2 `lean`/`axis`/`a`/`b`/`size` sub-expressions are each wrapped in
+`.toVarying(name)` (three.webgpu.js's `VaryingNode`, the same primitive already load-bearing in
+`particle-runtime.js`'s `vFade` and `lightning-render.js`'s strand varyings). Neither
+`point-light-illumination.js` nor `point-light-coloration.js` needed a line changed — `wind` reaches
+both hoisted consumers as a parameter, so the whole dependency chain (including `sampleWind`'s own
+texture taps) moves with it. Confirmed the WebGPU backend handles this correctly, not just assumed:
+`three.webgpu.js`'s `_generateTextureSample` explicitly switches from `textureSample()` (fragment-only,
+implicit-derivative) to `textureSampleLevel(uv, 0)` whenever `shaderStage !== "fragment"` — texture reads
+inside a `.toVarying()`-wrapped subgraph are vertex-stage-legal by construction, not a gamble.
+Verified via `tools/shader-lab` rung 4 (`window.lab.run('point-lights', 'production-shaped-packed-batch')`,
+which builds the REAL `buildIlluminationShadingCore`/`buildColorationShadingCore` at production
+`animationQuality:2` with real wind-present lights): `batched-byte-identical-to-uniform-twins` passes at
+`maxChannelDelta:0`, i.e. the hoisted output is pixel-identical to the pre-hoist fragment-evaluated one,
+on a real device — the "lossless by construction" claim below, measured rather than just reasoned.
+`npm run verify` green (9152 passed). **Named residual, deliberately not chased this round:** `candleLife`
+and `candleShape` each independently call `.toVarying()` on their own copy of the `wind`-dependent chain,
+so the wind sample is computed twice at vertex granularity instead of shared once — still a ~99.9%+ cut
+in total invocations (192 vertices × 2 vs ~785,000 fragments × 1), just not the theoretical maximum.
+Not yet run against a real Foundry session with a live wind-swept candle — `BUILT`, not `LIVE`.
 
 `point-light-illumination.js:1181-1193` · `point-light-coloration.js:401-411` · `world/wind-field.js:659-762` · `animations/candle-flicker.js:189`
 

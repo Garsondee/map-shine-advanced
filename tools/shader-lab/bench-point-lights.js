@@ -1463,6 +1463,318 @@ export function createPointLightsBench({ THREE, log }) {
     },
   });
 
+  // ============================================================================
+  // S2.11 — MRT-MERGE MECHANISM PROOF (Performance-Audit-2026-08.md §3.1's
+  // illum/coloration merge follow-on, docs/planning/Point-Light-Batching-
+  // Design.md's own §0 discipline: prove the riskiest mechanism first,
+  // isolated, on a real device, before any production file depends on it —
+  // the SAME posture this bench's own header already documents for Stage 2's
+  // packed-attribute mechanism).
+  // ============================================================================
+  scenarios.set('mrt-merge-mechanism-proof', {
+    name: 'mrt-merge-mechanism-proof',
+    summary:
+      'Two independent mechanics the illum/coloration MRT-merge design depends on, proven on a real ' +
+      'device before touching production. (1) A `.fragmentNode`-direct material assigning ' +
+      '`mrt({illum,coloration}).setBlendMode(name, blend)` correctly isolates and independently ' +
+      'MAX-blends two named attachments of a dedicated 2-attachment target — verified against ' +
+      "three.webgpu.js's fragmentNode-direct build branch (this path does NOT go through the " +
+      'renderer-global safe-default merge, which only engages for `.colorNode`+`.mrtNode` materials — ' +
+      'every illum-writing material in this codebase except window-render.js uses `.fragmentNode` ' +
+      "directly) and MRTNode#setup's own name-matched member assignment. (2) An interleaved `aAnim`+" +
+      '`aWind` buffer (one InterleavedBuffer, two InterleavedBufferAttribute views — ordinary, ' +
+      'long-established three.js machinery, not novel to this project) renders byte-identical output ' +
+      'to the same two fields as separate buffers, confirmed at the JS level to share one underlying ' +
+      'buffer object — the property a WebGPU pipeline needs to coalesce two attributes into one ' +
+      'vertex-buffer binding instead of two.',
+    async run() {
+      await ensureRenderer();
+      const checks = [];
+      const { mrt, vec4, attribute, Fn } = THREE.TSL;
+
+      // ---- Checks 1-2: fragmentNode-direct MRT, independent per-attachment MAX blend ----
+      const mrtRt = new THREE.RenderTarget(DIM, DIM, {
+        count: 2,
+        type: THREE.UnsignedByteType,
+        format: THREE.RGBAFormat,
+        minFilter: THREE.NearestFilter,
+        magFilter: THREE.NearestFilter,
+        colorSpace: THREE.NoColorSpace,
+      });
+      // Name-matching, not position (MRTNode#setup, three.webgpu.js:48577-48590) —
+      // these names are exactly what buildMrtMeshMaterial's `mrt({...})` keys below
+      // must match, mirroring `outputName` in the production allocator descriptor
+      // shape (three-allocator.js) without needing the allocator itself here.
+      mrtRt.textures[0].name = 'illum';
+      mrtRt.textures[1].name = 'coloration';
+
+      // Hoisted OUT of buildMrtMeshMaterial (2026-08-13, fixing the first
+      // attempt's real gap — see the note below, right before renderer.setMRT):
+      // this SAME BlendMode instance is needed by the RENDERER-GLOBAL mrt too,
+      // not just each mesh's own material-level mrt().
+      const maxBlend = new THREE.BlendMode(THREE.CustomBlending);
+      maxBlend.blendEquation = THREE.MaxEquation;
+      maxBlend.blendSrc = THREE.OneFactor;
+      maxBlend.blendDst = THREE.OneFactor;
+      maxBlend.blendEquationAlpha = THREE.MaxEquation;
+      maxBlend.blendSrcAlpha = THREE.OneFactor;
+      maxBlend.blendDstAlpha = THREE.OneFactor;
+
+      function buildMrtMeshMaterial(illumRgba, colorationRgba) {
+        const material = new THREE.NodeMaterial();
+        material.transparent = false;
+        material.depthTest = false;
+        material.depthWrite = false;
+        material.side = THREE.DoubleSide;
+        // Deliberately NO `.blending`/`.blendEquation` set at the material's own
+        // top level — both attachments' blend state lives entirely on the mrt()
+        // node itself, via `THREE.BlendMode` + `MRTNode#setBlendMode` (three.webgpu.js
+        // :48457-48545), the mechanism check 2 below actually exercises.
+        material.fragmentNode = mrt({
+          illum: vec4(illumRgba[0], illumRgba[1], illumRgba[2], illumRgba[3]),
+          coloration: vec4(colorationRgba[0], colorationRgba[1], colorationRgba[2], colorationRgba[3]),
+        })
+          .setBlendMode('illum', maxBlend)
+          .setBlendMode('coloration', maxBlend);
+        return material;
+      }
+
+      // Two overlapping diamonds (sides:4 fans) — a fan's horizontal meridian
+      // (world Y = its own centre) spans its full local x∈[-1,1], so sampling
+      // along that one Y for both meshes cleanly separates "A only" / "overlap"
+      // / "B only" without needing exact geometric edge math.
+      const fanA = buildFanLocalUnit(4);
+      const geoA = new THREE.BufferGeometry();
+      geoA.setAttribute('position', new THREE.BufferAttribute(fanA.positions, 3));
+      const meshA = new THREE.Mesh(geoA, buildMrtMeshMaterial([1, 0, 0, 1], [0, 0, 1, 1]));
+      meshA.position.set(450, 500, 0);
+      meshA.scale.set(200, 200, 1);
+      meshA.frustumCulled = false;
+
+      const fanB = buildFanLocalUnit(4);
+      const geoB = new THREE.BufferGeometry();
+      geoB.setAttribute('position', new THREE.BufferAttribute(fanB.positions, 3));
+      const meshB = new THREE.Mesh(geoB, buildMrtMeshMaterial([0, 1, 0, 1], [0, 0, 0.5, 1]));
+      meshB.position.set(600, 500, 0); // overlaps meshA along X∈[400,650]
+      meshB.scale.set(200, 200, 1);
+      meshB.frustumCulled = false;
+
+      const mrtScene = new THREE.Scene();
+      mrtScene.add(meshA, meshB);
+
+      // ⚠️ REAL GAP FOUND HERE, FIRST TRY (this is exactly what S2.11 is for):
+      // per-attachment BLEND STATE is NOT read from the material's own
+      // `fragmentNode` MRTNode at all — pipeline creation reads it from
+      // `renderObject.context.mrt.getBlendMode(name)` (three.webgpu.js:74356,
+      // :74363), and `context.mrt` is populated from `renderer.getMRT()`
+      // (three.webgpu.js:52076: `state.mrt = renderer.getMRT()`) — the
+      // RENDERER-GLOBAL setting, entirely separate from whatever mrt() node a
+      // `.fragmentNode`-direct material happens to construct for VALUE
+      // ROUTING. First attempt (no `renderer.setMRT()` call at all) rendered
+      // with plain overwrite on BOTH attachments — `getBlendMode` fell back to
+      // `_noBlending` because `renderer.getMRT()` was null. VALUE routing
+      // (which key goes to which named attachment) is unaffected by this and
+      // still comes from the material's own fragmentNode — confirmed by the
+      // first check above passing on the FIRST attempt, before this fix.
+      // Scoped exactly like `scene-attr.js`'s own documented discipline
+      // ("MRT MUST BE SCOPED, NEVER LEFT GLOBALLY SET"): save, set, draw,
+      // restore. The renderer-global mrt's own OUTPUT NODES are never read in
+      // the fragmentNode-direct path (only its blendModes map is), so a
+      // throwaway zero-value struct is sufficient here.
+      const prevRendererMrt = renderer.getMRT();
+      const globalBlendMrt = mrt({
+        illum: vec4(0, 0, 0, 0),
+        coloration: vec4(0, 0, 0, 0),
+      })
+        .setBlendMode('illum', maxBlend)
+        .setBlendMode('coloration', maxBlend);
+      renderer.setMRT(globalBlendMrt);
+
+      const prevTarget = renderer.getRenderTarget();
+      renderer.setRenderTarget(mrtRt);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear(true, true, true);
+      renderer.info.autoReset = false;
+      renderer.info.reset();
+      await renderer.renderAsync(mrtScene, camera);
+      const mrtDrawCalls = renderer.info.render.drawCalls;
+      renderer.info.autoReset = true;
+      renderer.setRenderTarget(prevTarget);
+      renderer.setMRT(prevRendererMrt);
+
+      // `readRenderTargetPixelsAsync`'s 6th param IS `textureIndex` (verified
+      // against the vendored signature — see this project's own memory of the
+      // ONE call site that got this wrong by trusting a stale doc comment
+      // instead: feedback_read_the_producer_never_invent_its_shape).
+      const illumBuf = await renderer.readRenderTargetPixelsAsync(mrtRt, 0, 0, DIM, DIM, 0);
+      const colorBuf = await renderer.readRenderTargetPixelsAsync(mrtRt, 0, 0, DIM, DIM, 1);
+      const illumArr = ArrayBuffer.isView(illumBuf) ? illumBuf : new Uint8Array(illumBuf);
+      const colorArr = ArrayBuffer.isView(colorBuf) ? colorBuf : new Uint8Array(colorBuf);
+
+      const illumOnlyA = sampleColor(illumArr, 320, 500);
+      const illumOverlap = sampleColor(illumArr, 525, 500);
+      const illumOnlyB = sampleColor(illumArr, 730, 500);
+      const colorOnlyA = sampleColor(colorArr, 320, 500);
+      const colorOverlap = sampleColor(colorArr, 525, 500);
+      const colorOnlyB = sampleColor(colorArr, 730, 500);
+
+      checks.push(
+        evaluate('mrt-fragmentnode-direct-isolates-attachments', () => ({
+          ok:
+            mrtDrawCalls === 2 &&
+            illumOnlyA.r === 255 &&
+            illumOnlyA.g === 0 &&
+            illumOnlyA.b === 0 &&
+            illumOnlyB.r === 0 &&
+            illumOnlyB.g === 255 &&
+            illumOnlyB.b === 0 &&
+            colorOnlyA.r === 0 &&
+            colorOnlyA.g === 0 &&
+            colorOnlyA.b === 255 &&
+            colorOnlyB.r === 0 &&
+            colorOnlyB.g === 0 &&
+            colorOnlyB.b > 100 &&
+            colorOnlyB.b < 150,
+          measured:
+            `drawCalls=${mrtDrawCalls}; illum(A)=${illumOnlyA.r},${illumOnlyA.g},${illumOnlyA.b}; ` +
+            `illum(B)=${illumOnlyB.r},${illumOnlyB.g},${illumOnlyB.b}; ` +
+            `coloration(A)=${colorOnlyA.r},${colorOnlyA.g},${colorOnlyA.b}; ` +
+            `coloration(B)=${colorOnlyB.r},${colorOnlyB.g},${colorOnlyB.b}`,
+          expected:
+            '2 real draw calls; illum attachment reads pure red at A, pure green at B — NEVER carrying ' +
+            "either mesh's own coloration (blue) value; coloration attachment reads pure blue at A, " +
+            '~half-blue at B — NEVER carrying either illum (red/green) value. Proves a `.fragmentNode`-' +
+            'direct `mrt(...)` struct routes each named key to its own attachment with zero cross-' +
+            'contamination — the load-bearing fact the dedicated-target design (S2.15) depends on.',
+        }))
+      );
+
+      checks.push(
+        evaluate('mrt-per-attachment-blend-mode-is-independent-of-material-blending', () => ({
+          ok:
+            illumOverlap.r === 255 &&
+            illumOverlap.g === 255 &&
+            illumOverlap.b === 0 &&
+            colorOverlap.r === 0 &&
+            colorOverlap.g === 0 &&
+            colorOverlap.b === 255,
+          measured:
+            `illum(overlap)=${illumOverlap.r},${illumOverlap.g},${illumOverlap.b}; ` +
+            `coloration(overlap)=${colorOverlap.r},${colorOverlap.g},${colorOverlap.b}`,
+          expected:
+            'At the overlap: illum = MAX((1,0,0),(0,1,0)) = (255,255,0) — real MAX blending applied to ' +
+            'the illum attachment. coloration = MAX((0,0,1),(0,0,0.5)) = (0,0,255) — the SAME MAX ' +
+            "equation applied independently to the SECOND attachment via MRTNode#setBlendMode, from a " +
+            'material that never sets `.blending`/`.blendEquation` at its own top level at all (both ' +
+            'blend states live entirely on the mrt() node) — proves per-attachment blend state is real ' +
+            'and independent, not a single material-wide setting smeared across both outputs.',
+        }))
+      );
+
+      mrtRt.dispose();
+      geoA.dispose();
+      geoB.dispose();
+
+      // ---- Check 3: interleaved aAnim+aWind — byte-identical, one shared buffer ----
+      function buildInterleaveTestMaterial() {
+        const material = new THREE.NodeMaterial();
+        material.transparent = false;
+        material.depthTest = false;
+        material.depthWrite = false;
+        material.fragmentNode = Fn(() => {
+          const anim = attribute('aAnim', 'vec4');
+          const wind = attribute('aWind', 'vec4');
+          // Sum both fields into a visible colour so neither can be silently
+          // dead-code-eliminated or read as zero without changing the output.
+          return vec4(anim.x.add(wind.x), anim.y.add(wind.y), anim.z.add(wind.z), 1);
+        })();
+        return material;
+      }
+
+      const fanC = buildFanLocalUnit(4);
+      const ANIM_VALS = [0.1, 0.2, 0.05, 5];
+      const WIND_VALS = [0.3, 0.15, 0.4, 1];
+
+      // TWIN 1 — two separate BufferAttributes (today's shape).
+      const geoSeparate = new THREE.BufferGeometry();
+      geoSeparate.setAttribute('position', new THREE.BufferAttribute(fanC.positions, 3));
+      const animData = new Float32Array(fanC.vertexCount * 4);
+      const windData = new Float32Array(fanC.vertexCount * 4);
+      for (let i = 0; i < fanC.vertexCount; i++) {
+        animData.set(ANIM_VALS, i * 4);
+        windData.set(WIND_VALS, i * 4);
+      }
+      geoSeparate.setAttribute('aAnim', new THREE.BufferAttribute(animData, 4));
+      geoSeparate.setAttribute('aWind', new THREE.BufferAttribute(windData, 4));
+      const meshSeparate = new THREE.Mesh(geoSeparate, buildInterleaveTestMaterial());
+      meshSeparate.position.set(500, 500, 0);
+      meshSeparate.scale.set(300, 300, 1);
+      meshSeparate.frustumCulled = false;
+
+      // TWIN 2 — ONE InterleavedBuffer, two InterleavedBufferAttribute VIEWS
+      // (stride 8 floats: aAnim at offset 0, aWind at offset 4) — the exact
+      // mechanism S2.14's packed layout needs for its 8th (aAnimWind) slot.
+      const geoInterleaved = new THREE.BufferGeometry();
+      geoInterleaved.setAttribute('position', new THREE.BufferAttribute(fanC.positions, 3));
+      const interleavedData = new Float32Array(fanC.vertexCount * 8);
+      for (let i = 0; i < fanC.vertexCount; i++) {
+        interleavedData.set([...ANIM_VALS, ...WIND_VALS], i * 8);
+      }
+      const interleavedBuffer = new THREE.InterleavedBuffer(interleavedData, 8);
+      geoInterleaved.setAttribute('aAnim', new THREE.InterleavedBufferAttribute(interleavedBuffer, 4, 0));
+      geoInterleaved.setAttribute('aWind', new THREE.InterleavedBufferAttribute(interleavedBuffer, 4, 4));
+      const meshInterleaved = new THREE.Mesh(geoInterleaved, buildInterleaveTestMaterial());
+      meshInterleaved.position.set(500, 500, 0);
+      meshInterleaved.scale.set(300, 300, 1);
+      meshInterleaved.frustumCulled = false;
+
+      const sceneSeparate = new THREE.Scene();
+      sceneSeparate.add(meshSeparate);
+      const separateFrame = await renderScene(sceneSeparate);
+
+      const sceneInterleaved = new THREE.Scene();
+      sceneInterleaved.add(meshInterleaved);
+      const interleavedFrame = await renderScene(sceneInterleaved);
+
+      let interleaveMaxDelta = 0;
+      for (let i = 0; i < separateFrame.color.length; i++) {
+        interleaveMaxDelta = Math.max(interleaveMaxDelta, Math.abs(separateFrame.color[i] - interleavedFrame.color[i]));
+      }
+      // Confirmed at the JS level, not assumed: both attribute views share ONE
+      // underlying buffer object — the property a WebGPU pipeline needs in
+      // order to coalesce them into a single vertex-buffer binding. Direct
+      // GPU-side pipeline slot-count measurement was deliberately NOT attempted
+      // this pass (would mean intentionally exceeding a device limit to prove
+      // the negative case, a real device-lost risk this project has been
+      // burned by before on unrelated large-map work) — this check proves
+      // correctness + the JS-level sharing precondition, not the device limit
+      // itself.
+      const sameBufferObject = geoInterleaved.attributes.aAnim.data === geoInterleaved.attributes.aWind.data;
+      const centreSample = sampleColor(interleavedFrame.color, 500, 500);
+
+      checks.push(
+        evaluate('interleaved-buffer-reads-byte-identical-and-shares-one-binding', () => ({
+          ok: interleaveMaxDelta === 0 && sameBufferObject && centreSample.r > 50 && centreSample.g > 50 && centreSample.b > 50,
+          measured:
+            `maxChannelDelta=${interleaveMaxDelta}; sameUnderlyingBuffer=${sameBufferObject}; ` +
+            `centreSample=${centreSample.r},${centreSample.g},${centreSample.b}`,
+          expected:
+            '0 — a two-view InterleavedBufferAttribute pair reads `aAnim`/`aWind` byte-identically to the ' +
+            'same fields as two separate BufferAttributes (proves the interleave offset/stride is ' +
+            'correct, not silently reading garbage or the wrong field). sameUnderlyingBuffer:true — both ' +
+            'attributes share ONE `InterleavedBuffer` JS object. GPU-side pipeline slot count was NOT ' +
+            'independently measured this pass (see note above) — this is a correctness + JS-level-' +
+            'sharing proof, not a device-limit probe.',
+        }))
+      );
+
+      geoSeparate.dispose();
+      geoInterleaved.dispose();
+
+      return { checks, calibration: 'OK' };
+    },
+  });
+
   const bench = {
     name: 'point-lights',
     title: 'Stage 2 — one draw call for many point lights',
@@ -1497,6 +1809,9 @@ export function createPointLightsBench({ THREE, log }) {
       'span-value-rewrite-touches-one-light-only',
       'steady-state-renders-byte-stable-with-zero-writes',
       'coloration-batch-renders-one-draw-and-matches-twin',
+      'mrt-fragmentnode-direct-isolates-attachments',
+      'mrt-per-attachment-blend-mode-is-independent-of-material-blending',
+      'interleaved-buffer-reads-byte-identical-and-shares-one-binding',
     ],
     ready: () => true,
     async runScenario(scenario, ctx) {

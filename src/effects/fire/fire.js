@@ -55,10 +55,10 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 0.6,
     step: 0.01,
-    default: 0.25,
+    default: 0.2,
     category: 'Presence',
     label: 'Mask sensitivity',
-    help: 'How much of the painted fire mask counts as real paint before a fire registers there. LOWER catches fainter or smaller painted strokes — turn this DOWN if fire you painted is not appearing. HIGHER requires bolder, more solid paint before a fire lights at all. Default (0.25) is what extraction has always used, unchanged unless you move this.',
+    help: 'How much of the painted fire mask counts as real paint before a fire registers there. LOWER catches fainter or smaller painted strokes — turn this DOWN if fire you painted is not appearing. HIGHER requires bolder, more solid paint before a fire lights at all.',
   },
 
   // ── Look ──────────────────────────────────────────────────────────────────
@@ -191,10 +191,10 @@ export const FIRE_PARAMS = Object.freeze({
     min: -2,
     max: 3,
     step: 0.02,
-    default: 0.5,
+    default: 0,
     category: 'Flame',
     label: 'Cohesion (pull together)',
-    help: 'Pulls every flame toward its fire’s own centre of mass. 0 = spawns spread across the full painted shape, as now. 1 = every flame collapses onto that single point. Negative pushes flames apart instead, beyond their painted region.',
+    help: 'Pulls every flame toward its fire’s own centre of mass. 0 = spawns spread across the full painted shape (the default — OFF). 1 = every flame collapses onto that single point. Negative pushes flames apart instead, beyond their painted region. ⚠ A good idea, currently buggy — the author has found the live result unreliable, so this defaults off until it is fixed. Move it off 0 to experiment, not to rely on.',
   },
 
   // ── Ember ─────────────────────────────────────────────────────────────────

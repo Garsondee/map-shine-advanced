@@ -1019,7 +1019,9 @@ export function fireRuntimeFromParams(params = {}, chain = {}) {
         spawnBias: clampNum(num(p.flameSpawnBias, 0), -20, 20),
         // A CPU-side pull toward the fire's own centre of mass, consumed by
         // `fire-subsystem.js` (never reaches a uniform) — see `applyCohesion`.
-        cohesion: clampNum(num(p.flameCohesion, 0.5), -2, 3),
+        // Default 0 (off) — known good idea, currently buggy in practice
+        // (author verdict, 2026-08-13); see FIRE_PARAMS.flameCohesion's help.
+        cohesion: clampNum(num(p.flameCohesion, 0), -2, 3),
       },
       ember: {
         activeCount: Math.round(clampNum(num(p.emberCount, 10), 0, 200)),

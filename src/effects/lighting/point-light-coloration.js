@@ -114,8 +114,7 @@
  */
 
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
-import { inverseSquareFalloff, buildDepthHeightGateNode } from './point-light-illumination.js';
-import { buildApertureGoboTerm } from './aperture-gobo-render.js';
+import { buildPointLightSharedTerms } from './point-light-illumination.js';
 import { createWindHandle } from '../../world/index.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
@@ -170,8 +169,7 @@ export function computeColorationAlpha(alpha01, technique) {
  * @returns {{finalNode: *, alphaNode: *, uApColLampHeight: (*|null), apColApertures: (Array|null)}}
  */
 export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
-  const { vec3, float, texture, screenUV, smoothstep, length, positionWorld, dot, sqrt, sRGBTransferOETF, mix } =
-    THREE.TSL;
+  const { vec3, texture, screenUV, dot, sqrt, sRGBTransferOETF } = THREE.TSL;
 
   const { albedoTexture, depthTexNode, depthFlagsTexNode, apertureGoboShared, uGlobalTimeMs, windHandle } = shared;
   const {
@@ -193,110 +191,38 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     wind: windInputs,
   } = inputs;
 
-  // dist/FALLOFF — identical formula to point-light-illumination.js's own
-  // (Foundry shares this term across illumination AND coloration verbatim).
-  // No `uRatio` here — technique 1 ("Adaptive Luminance") never reads ratio;
-  // that's an illumination-channel-only (switchColor bright/dim) concept.
-  const dist = length(localUnitXY);
-  // FALLOFF MODEL — mirrors point-light-illumination.js's own branch (both
-  // channels must fade together, so the coloration glow tracks the same
-  // curve as the floor lift). `inverseSquare` is the candle's physical
-  // bright-centre/fast-drop curve; `foundry` is the attenuation corona.
-  let falloff;
-  if (falloffModel === 'inverseSquare') {
-    falloff = inverseSquareFalloff(THREE.TSL, dist);
-  } else {
-    const attenForFalloff = uAttenuationEased.max(float(0.0001));
-    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
-  }
-
-  // ============================================================================
-  // THE HEIGHT/ELEVATION GATE — the SAME node the illumination twin uses.
-  // ============================================================================
-  // A point light is drawn by TWO meshes sharing ONE geometry: the illumination
-  // mesh and THIS one, which carries the visible coloured glow and every
-  // ANIMATED light effect (torch, pulse, chroma — the whole animations
-  // registry). Gating only the illumination half is exactly the state the
-  // author reported live: *"You are now correctly occluding the light polygon.
-  // But you aren't correctly occluding the animated light source."* The floor
-  // lift went dark under a slab while the animated colour kept painting
-  // straight through it.
-  //
-  // Multiplied into `falloff` SPECIFICALLY, not into `outputColor`, because
-  // falloff feeds BOTH the colour (`finalColor.mul(falloff)`) and the material's
-  // ALPHA (`vec4(outputColor, falloff)`). One multiply therefore gates the glow
-  // AND its coverage together — and under this material's MAX blend an
-  // un-gated alpha would keep writing a lit depth value even with the colour
-  // zeroed (`feedback_blend_neutral_element_is_per_blend`: what counts as
-  // "no contribution" is per-blend, and for MAX it is a genuine zero in every
-  // channel that is read downstream).
-  //
-  // ⚠️ `screenUV`, never the bare node — `buf:scene.depth` is a SCREEN-space
-  // buffer and this is a WORLD-space fan mesh with no `uv` attribute at all.
-  // This file already samples its albedo the same way, and calls it "this
-  // project's own already-proven technique" (see `mapColor` below). Passing
-  // `depthTexNode` unsampled is the round-1-to-3 bug verbatim
-  // (`feedback_shared_texture_node_carries_the_wrong_uv`).
-  //
-  // STAGE 2 (2026-08-04) — see point-light-illumination.js's own "STAGE 2 —
-  // THE DEPTH-AUTHORITY HEIGHT GATE" section for the full reasoning. No
-  // "unconfigured" sentinel: `point-light-pool.js`'s per-frame refresh
-  // overwrites this for every light, touched or not.
-  //
-  // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
-  // depth texture supplied this material is byte-identical to what it was
-  // before the gate existed.
-  if (depthTexNode) {
-    falloff = falloff.mul(
-      buildDepthHeightGateNode(THREE.TSL, {
-        depthHere: depthTexNode.sample(screenUV),
-        flagsHere: depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null,
-        uLightExpectedDepth,
-      })
-    );
-  }
-
-  // APERTURE GOBO (round 10, 2026-08-04) — the SAME "multiply into `falloff`
-  // itself, not `outputColor`" discipline as the height gate immediately
-  // above, and for the identical reason spelled out in that gate's own
-  // comment: `falloff` feeds BOTH this material's colour AND its alpha
-  // (`vec4(outputColor, falloff)`, below), and this material MAX-blends —
-  // zeroing only the colour while leaving alpha positive would still MAX a
-  // lit depth value into the shared buffer with no colour behind it
-  // (`feedback_blend_neutral_element_is_per_blend`). `point-light-
-  // illumination.js`'s own header has the full round 1-10 history of why
-  // this lives INSIDE the light's own MAX-blend draw rather than a separate
-  // post-process pass — coloration needs the identical treatment for the
-  // identical reason: a colourless light already contributes zero here
-  // (`uColorationAlpha`), but a coloured or animated one draws real,
-  // additive brightness that must ALSO respect the gobo pattern, and MUST
-  // do so as part of THIS light's own MAX-blend contribution so an
-  // independently brighter source (another light's own coloration) is never
-  // dragged down by a pass that doesn't know it's there.
-  let uApColLampHeight = null;
-  let apColApertures = null;
-  if (apertureCount > 0) {
-    const goboResult = buildApertureGoboTerm({
-      THREE,
-      positionWorldXY: positionWorld.xy,
-      dist,
-      apertureCount,
-      cols: apGoboCols,
-      rows: apGoboRows,
-      shared: apertureGoboShared,
-    });
-    if (goboResult) {
-      // `uStrength` — the SAME real, live-found bug `point-light-
-      // illumination.js`'s own identical fix describes (documented since
-      // round 10 but never actually wired into either channel): `mix(1,
-      // node, uStrength)` — at uStrength=1 (default) byte-identical to
-      // before this fix, at 0 fully neutral (no aperture at all).
-      const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
-      falloff = falloff.mul(strengthedGobo);
-      uApColLampHeight = goboResult.uLampHeight;
-      apColApertures = goboResult.apertures;
-    }
-  }
+  // dist / FALLOFF / THE HEIGHT-ELEVATION GATE / APERTURE GOBO — S2.13
+  // (Performance-Audit-2026-08.md §3.1): identical formula to point-light-
+  // illumination.js's own (Foundry shares these terms across illumination
+  // AND coloration verbatim — a point light is drawn by TWO meshes sharing
+  // ONE geometry, and gating only the illumination half was the exact live
+  // bug the author reported: "You are now correctly occluding the light
+  // polygon. But you aren't correctly occluding the animated light source."
+  // The gobo term lives the same way, for the same
+  // `feedback_blend_neutral_element_is_per_blend` reason — see
+  // `buildPointLightSharedTerms`'s own header, in point-light-
+  // illumination.js, for the full account of all four terms now computed
+  // there once for both channels). No `uRatio` feeds any of this — technique
+  // 1 ("Adaptive Luminance") never reads ratio, that's an
+  // illumination-channel-only (switchColor bright/dim) concept.
+  const {
+    dist,
+    falloffGoboed: falloff,
+    uApLampHeight: uApColLampHeight,
+    apApertures: apColApertures,
+  } = buildPointLightSharedTerms({
+    THREE,
+    localUnitXY,
+    attenuationEased: uAttenuationEased,
+    expectedDepth: uLightExpectedDepth,
+    falloffModel,
+    depthTexNode,
+    depthFlagsTexNode,
+    apertureCount,
+    apGoboCols,
+    apGoboRows,
+    apertureGoboShared,
+  });
 
   // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
   // scaled by the underlying MAP pixel's own perceived brightness — BT.709

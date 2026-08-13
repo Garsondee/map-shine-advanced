@@ -124,18 +124,35 @@ export function extractFireSpawnPoints(grid, { maxPoints = MAX_SPAWN_POINTS, thr
   // and neighbouring points tile the region without gaps or double-density.
   const jitterRadiusPx = Math.max(texelW, texelH) * 0.5;
 
-  const stride = Math.max(1, Math.ceil(painted / cap));
-  const count = Math.min(cap, Math.ceil(painted / stride));
+  // ⚠️ A FRACTIONAL ACCUMULATOR, NOT AN INTEGER STRIDE (2026-08-13 — the
+  // "density cliff" this replaces). `Math.ceil(painted / cap)` jumps by whole
+  // integers, so crossing ONE painted texel past a multiple of `cap` could
+  // DOUBLE the stride and roughly HALVE the spawned count outright: at
+  // cap=4096, painted=4096 kept every texel (stride 1, count 4096); painted=
+  // 4097 jumped stride to 2, dropping count to 2049 — a ~50% cliff from one
+  // extra painted pixel, and it repeated at every multiple of cap. `keepEvery`
+  // below is a FLOAT, so `count` (and therefore the spawned density) rises
+  // smoothly with `painted` right up to the cap instead of sawtoothing.
+  const count = Math.min(cap, painted);
+  const keepEvery = painted / count;
   const points = new Float32Array(count * SPAWN_POINT_STRIDE);
 
   let seen = 0;
+  let nextEmitAt = 0;
   let out = 0;
   for (let y = 0; y < h && out < count; y++) {
     for (let x = 0; x < w && out < count; x++) {
       const v = data[y * w + x];
       if (v < cut) continue;
-      // Take every `stride`-th painted texel, spread across the whole raster.
-      if (seen++ % stride !== 0) continue;
+      // Emit the FIRST eligible texel at or past each `keepEvery`-wide
+      // bucket boundary — `count` emissions total, spread evenly across
+      // every eligible texel regardless of how close `painted` sits to `cap`.
+      if (seen < nextEmitAt) {
+        seen++;
+        continue;
+      }
+      nextEmitAt += keepEvery;
+      seen++;
       const o = out * SPAWN_POINT_STRIDE;
       // Texel CENTRE → world. Row 0 is minY (MaskGrid's own convention) and
       // world +Y is DOWN, so there is no flip here — the camera owns the one
@@ -277,7 +294,14 @@ export function packSpawnPoints(dest, cloud, capacity) {
   const src = cloud?.points ?? null;
   const n = Math.min(cap, Math.max(0, Math.floor(cloud?.count ?? 0)));
   if (src && n > 0) dest.set(src.subarray(0, n * SPAWN_POINT_STRIDE), 0);
-  // Everything past the real points reads as "paint of zero brightness here".
-  dest.fill(0, n * SPAWN_POINT_STRIDE, cap * SPAWN_POINT_STRIDE);
+  // Everything past the real points reads as "paint of zero brightness here"
+  // — through `dest.length`, NOT `cap * SPAWN_POINT_STRIDE`. `dest` is
+  // documented as exactly `capacity * SPAWN_POINT_STRIDE` long, but nothing
+  // above actually enforces that beyond a minimum-length check, so a caller
+  // handing in a genuinely larger (pooled/oversized) buffer would otherwise
+  // leave whatever it held past `cap` uncleared — a stale point from a
+  // previous scene's paint, sitting past the declared capacity but still
+  // inside the real buffer a shader could read.
+  dest.fill(0, n * SPAWN_POINT_STRIDE, dest.length);
   return n;
 }

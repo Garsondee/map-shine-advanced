@@ -138,6 +138,53 @@ export function run(t) {
     );
   }
 
+  // ── NO DENSITY CLIFF AT THE CAP BOUNDARY (2026-08-13) ──────────────────────
+  // The original subsample picked an INTEGER stride via `Math.ceil(painted /
+  // cap)`, which jumps by whole numbers: at painted===cap it kept everything
+  // (stride 1), but ONE more painted texel pushed the stride to 2 and roughly
+  // HALVED the spawned count outright — a real, sudden visual density drop
+  // from a single extra painted pixel, repeating at every multiple of cap.
+  {
+    const capAt20 = (paintedCount) => {
+      const cols = 10;
+      const rowsNeeded = Math.ceil(paintedCount / cols);
+      const rows = [];
+      let remaining = paintedCount;
+      for (let r = 0; r < rowsNeeded; r++) {
+        const thisRow = Math.min(cols, remaining);
+        rows.push('#'.repeat(thisRow) + '.'.repeat(cols - thisRow));
+        remaining -= thisRow;
+      }
+      return extractFireSpawnPoints(gridFrom(rows, { texel: 10 }), { maxPoints: 20 }).count;
+    };
+    const atCap = capAt20(20);
+    const oneOver = capAt20(21);
+    t.ok('painted exactly at the cap keeps every eligible texel', atCap === 20);
+    t.ok(
+      `one MORE painted texel than the cap does not crater the count (cap=20 got ${oneOver}, was ~10 under the old integer-stride bug)`,
+      oneOver === 20
+    );
+  }
+
+  {
+    // The general property the fix promises: count tracks min(cap, painted)
+    // smoothly across a whole range of caps against a FIXED painted total —
+    // no cap value should see a sudden drop relative to its neighbours.
+    const rows = [];
+    for (let r = 0; r < 10; r++) rows.push('#'.repeat(10)); // 100 painted texels
+    const g = gridFrom(rows, { texel: 10 });
+    const counts = [90, 91, 99, 100, 101, 150].map((cap) => extractFireSpawnPoints(g, { maxPoints: cap }).count);
+    t.ok(
+      `count exactly matches min(cap, painted) at every sampled cap (${counts.join(', ')})`,
+      counts[0] === 90 &&
+        counts[1] === 91 &&
+        counts[2] === 99 &&
+        counts[3] === 100 &&
+        counts[4] === 100 &&
+        counts[5] === 100
+    );
+  }
+
   // ── ASCENDING-BY-BRIGHTNESS ORDER — load-bearing for the spawn-bias control ─
 
   {
@@ -252,6 +299,27 @@ export function run(t) {
       dest.slice(padStart).every((v) => v === 0)
     );
     t.ok('...which reads as zero brightness', dest[padStart + 2] === 0);
+  }
+
+  {
+    // ⚠️ AN OVERSIZED (pooled) DEST BUFFER MUST BE FULLY CLEARED PAST THE REAL
+    // POINTS, NOT JUST UP TO `capacity * STRIDE` (2026-08-13). The docs only
+    // ever promise `dest` is "capacity * SPAWN_POINT_STRIDE long", but nothing
+    // above enforces that beyond a minimum-length check — a caller handing in
+    // a genuinely LARGER buffer (a pooled allocation, say) would previously
+    // leave whatever it held past the declared capacity uncleared: a stale
+    // point from a prior scene's paint, sitting inside the real buffer a
+    // shader could still read even though it is past `capacity`.
+    const cloud = extractFireSpawnPoints(gridFrom(['.#.']));
+    const capacity = 2;
+    const oversized = new Float32Array(6 * SPAWN_POINT_STRIDE); // 3x larger than capacity needs
+    oversized.fill(999);
+    const written = packSpawnPoints(oversized, cloud, capacity);
+    t.ok(`it still reports what it wrote (${written})`, written === 1);
+    t.ok(
+      'EVERYTHING past the real points is cleared, including past the declared capacity',
+      oversized.slice(written * SPAWN_POINT_STRIDE).every((v) => v === 0)
+    );
   }
 
   {

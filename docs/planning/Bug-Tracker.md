@@ -51,8 +51,78 @@ building on any of this.
 | 18 | Selecting a token shows a frozen, screen-locked second copy of the map inside explored fog | fog-of-war / art suppression | `BUILT (unverified)` — fix live-tested, author hasn't looked yet |
 | 19 | Painted `_Fire` region doesn't register on First Floor even with visible white paint | fire / mask extraction | `OPEN` (root cause) — workaround `BUILT`, live-tested |
 | 20 | First Floor runs at ~half Ground floor's framerate — `geometry.depthDraw`/`geometry.earlyZPrepass` cost ~10x more there | depth authority / early-Z | `BUILT (verified engaged)` 2026-08-15 — split live on the author's machine, both zones ~4-5× cheaper; upper-floor gap persists from a DIFFERENT cause (Reckoning F-R0.1.1) |
+| **21** | **Foundry re-renders the whole map every frame for a consumer that usually isn't running — the upper floor's real cost (27 fps → 120 fps when suppressed)** | interface seam / fog / perf | `OPEN` — **cause CONFIRMED by live A/B**, fix designed not built |
 
 ---
+
+## 21. Foundry's primary group re-renders the whole map every frame, for a consumer that is usually switched off
+
+**Status:** `OPEN` — root cause **CONFIRMED live**, fix designed, not built ·
+**Found:** 2026-08-15 (the Reckoning, R0.9) · **Docs:** `docs/holy/V4-Reckoning.md`
+(F-R0.1.7), `src/foundry/canvas-compositing.js` header
+
+### Symptom
+
+The upper floor of a two-floor map runs at ~27 fps where the ground floor is
+vsync-capped at 120 — and no MSA effect toggle, and no MSA perf zone, touches
+the difference. Disabling all fifteen effects changed nothing (author, live).
+
+### Root cause — confirmed by A/B, not inferred
+
+MSA suppresses Foundry's art OUTPUT (`canvas.primary.sprite.renderable = false`)
+but deliberately leaves `canvas.primary.renderable = true`, so PIXI's
+`CachedContainer#render()` keeps re-rendering the entire primary group into
+`canvas.primary.renderTexture` every frame. That was the correct fix for Bug #18
+(Foundry's own fog shader reads that texture and had frozen), and
+`canvas-compositing.js`'s own header states the cost honestly and ends
+**"Measure before assuming it matters."** It was never measured. It landed
+2026-08-13; the author hit the wall 2026-08-15.
+
+**The A/B** (`canvas.primary.renderable = false`, upper floor, camera parked,
+Reckoning Report v3 both sides):
+
+| | frame time | fps | GPU zones | gap p50/p95/max | hitches |
+| --- | --- | --- | --- | --- | --- |
+| as shipped | 37.14 ms | 26.9 | 8.31 ms | 41.6 / 41.8 / 83.4 | 2 |
+| suppressed | **8.35 ms** | **119.8 (vsync-capped)** | 4.16 ms | 8.3 / 8.5 / 17.0 | **0 / 471** |
+
+The two captures differ by 13% in canvas pixels (6.34 vs 7.32 Mpx); a separate
+resolution sweep needed a **53%** pixel cut to reach the cap, so resolution
+cannot account for a ≥4.45× swing. Frame gaps were exact integer multiples of
+the 8.33 ms refresh interval before (missed-vsync presentation) and flat after.
+
+**It scales with floor** because an upper floor makes more of Foundry's own
+primary objects renderable, and **with resolution** because the cache texture is
+canvas-sized. It is invisible to every MSA zone because it happens in Foundry's
+separate GL context on Foundry's own ticker — which is why three prior audits
+ranked MSA's own passes and found nothing that explained the gap.
+
+### The aggravating detail
+
+The same capture reports **`visibilityVisible: false`**: Foundry's
+`CanvasVisibility` group — the only consumer of that render texture — only
+becomes visible once a vision source is active. A GM with no controlled token
+never renders it. So the map was being re-rendered **84 of 85 objects into a
+2.82 Mpx texture, every frame, for nobody**, in precisely the session shape the
+author uses to author maps.
+
+### Fix direction (designed, not built)
+
+An unconditional payment for a conditional consumer — the named silent-
+precondition shape. Cheapest first:
+
+1. **Gate the cache on its consumer:** `canvas.primary.renderable` follows
+   `canvas.visibility.visible`. Fog stays byte-correct whenever it renders;
+   sessions with no vision source pay nothing. Event-driven, never polled.
+2. **Shrink the cache** when it IS needed (the filter blends it at 50% in screen
+   space; a downscaled texture may be indistinguishable). Measure first.
+3. Feed the filter a texture MSA already owns — invasive, touches the seam's
+   "never draw the same thing twice" doctrine. Last resort.
+
+### Fixed when
+
+The upper floor holds its frame rate with fog-of-war **on and correct** — a live
+test with a controlled token, which is the exact condition that hid Bug #18.
 
 ## 1. Changing a tile's graphic path doesn't update its visuals
 

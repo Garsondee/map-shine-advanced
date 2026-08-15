@@ -223,7 +223,15 @@ call), and the whole-frame ratio meets the Testament's own comfort bar (First Fl
       files with the author's in-flight wind-gustiness work and rides the working tree until
       that lands; the pure module + tests are committed.
 
-- [ ] **R0.9 · THE SECOND-RENDERER A/B — the campaign's single highest-value press.**
+- ✅ **R0.9 · THE SECOND-RENDERER A/B — CONVICTED.** · done Claude Fable 5 2026-08-15, from the
+      author's own console press. `canvas.primary.renderable = false` on the upper floor:
+      **37.14 ms → 8.35 ms/frame (26.9 → 119.8 fps, vsync-capped)**, frame gaps flat at 8.3 ms
+      (from a bimodal 33/42 ms missed-vsync pattern), zero hitches in 471 frames. The 13% canvas
+      difference between the two captures cannot explain a ≥4.45× swing — the earlier sweep
+      needed a 53% pixel cut to reach the cap. F-R0.1.7 → **S4, the measured cause**. Full
+      account above; fix designed, not built (Law 7). Filed as Bug #21.
+      *(Original brief kept below for the record.)*
+- [x] ~~**R0.9 · THE SECOND-RENDERER A/B — the campaign's single highest-value press.**~~
       On the upper floor at FULL resolution, run `canvas.primary.renderable = false` in the
       console, press the Reckoning Report, then restore with `= true`. Foundry's fog goes stale
       in between (Bug #18 returning, by choice, for seconds) — nothing else changes and nothing
@@ -841,7 +849,7 @@ finding). All S0 for the multiplier; all worth a worker's afternoon.
 | F-R0.1.4 | R-06/R-07 | **Two items FAIL compression** (`compressedWorker.failed: 2`) and fall back to raw decode: no alphaStats at all ⇒ full-footprint blended+discard in all three geometry passes, forever, on both floors. Cause unknown. | S3 | CONFIRMED present, cause unknown | 2026-08-15 |
 | F-R0.1.5 | R-01 | Fullscreen passes that CANNOT care about floor count still slowed 1.8–4× upstairs (`present.blit` 0.80→1.45, `light.drawIllum` 0.35→1.39, `light.drawComposite` 0.40→1.07, `light.drawRegions` 0.32→0.73 on an empty scene). A systemic slowdown, not per-layer fill. | S4 | MEASURED — strongest structural clue to F-R0.1.1 | 2026-08-15 |
 | F-R0.1.6 | R-38/R-39 | The report's own `floors` section died on both presses (`getActiveSceneFloors` returns a `{ok,floors}` wrapper, not an array) — an instrument defect found by its own first use. | instrumentation | FIXED same day (report v2) | 2026-08-15 |
-| **F-R0.1.7** | R-18 | **THE SECOND RENDERER.** `canvas.primary.renderable` stays true (Bug #18's fix, 2026-08-13) so Foundry re-renders every map object into a canvas-resolution texture every frame, in its own GL context. Invisible to all zones, immune to effect toggles, scales with resolution AND floor. The file itself says "Measure before assuming it matters" — nobody had. | **S3** | IDENTIFIED — one console line from MEASURED | 2026-08-15 |
+| **F-R0.1.7** | R-18 | **THE SECOND RENDERER — THE CAUSE.** `canvas.primary.renderable` stays true (Bug #18's fix, 2026-08-13) so Foundry re-renders 84 of its 85 primary objects into a 2.82 Mpx texture every frame, in its own GL context. Suppressing it took the upper floor **37.14 ms → 8.35 ms (27 → 120 fps, vsync-capped)**. Worse: `visibilityVisible: false` — the cache's only consumer wasn't even running. | **S4 (measured cause)** | **CONFIRMED** · fix designed, not built · Bug #21 | 2026-08-15 |
 | **F-R0.1.8** | R-01 | **The upper floor is RESOLUTION-BOUND, measured:** halving the canvas took it 27 fps → 120 fps (vsync-capped), superlinear in pixels. Frame gaps are exact integer multiples of 8.33 ms — missed-vsync presentation, not uniform slowness. | **S4 (measured)** | MEASURED | 2026-08-15 |
 
 **Status chain:** SUSPECTED → MEASURED → CONFIRMED → FIX BUILT (unverified) → LIVE · or
@@ -943,6 +951,63 @@ resolution got 1.8–3.5× slower** (F-R0.1.5).
 **Status: S3 — mechanism identified and documented, contribution UNMEASURED.**
 The discriminator is one reversible console line, and report v3 now gathers the
 census (`foundryCanvas`) and prints the verdict automatically.
+
+### ✅✅ R0.9 — CONVICTED. The A/B was decisive (2026-08-15, author's own console)
+
+`canvas.primary.renderable = false`, upper floor, camera parked, everything else
+identical:
+
+| Upper floor | canvas | frame time | fps | GPU zones | frame-gap p50 / p95 / max | hitches |
+| --- | --- | --- | --- | --- | --- | --- |
+| **primary ON** (as shipped) | 7.32 Mpx | **37.14 ms** | **26.9** | 8.31 ms | 41.6 / 41.8 / **83.4** | 2 |
+| **primary OFF** | 6.34 Mpx | **8.35 ms** | **119.8 — vsync-capped** | 4.16 ms | 8.3 / 8.5 / **17.0** | **0 of 471** |
+
+**The confound is answered by arithmetic.** The A/B canvas was 6.34 Mpx vs
+7.32 Mpx — only **13% fewer pixels**. The earlier resolution sweep needed a
+**53%** pixel cut to reach the cap. A 13% cut cannot produce a **≥4.45×**
+improvement; the resolution difference is nowhere near sufficient. **Suppressing
+Foundry's own primary re-render is what took the upper floor from ~27 fps to the
+120 Hz cap.** The frame-gap distribution collapsed from a bimodal 33/42 ms
+missed-vsync pattern to a flat 8.3 ms with a single 17 ms blip in 471 frames.
+
+**And the census exposed a second, worse fact: the cache has no consumer right
+now.** The same dump reports **`visibilityVisible: false`** — Foundry's
+`CanvasVisibility` group (the *only* thing that reads
+`canvas.primary.renderTexture`, per this file's own source trail) is not
+rendering at all, because it only turns on once a vision source is active. So
+MSA was re-rendering **84 of Foundry's 85 primary objects into a 2.82 Mpx
+texture, every frame, for nobody** — a GM with no controlled token, which is
+exactly how the author authors maps.
+
+**Why it costs so much:** PIXI is drawing the scene's 12000²-class art minified
+into that texture. Minified sampling without a usable mip chain is the
+cache-hostile worst case, which is also why the cost is superlinear in pixels
+and why it drags MSA's own unrelated fullscreen passes down with it (F-R0.1.5).
+
+**⇒ F-R0.1.7 promoted to S4 (measured cause). This is the upper-floor mystery's
+answer.** Not the depth passes, not the effects, not the layer stack.
+
+### THE FIX DIRECTION (design only — not built; Law 7, and fog is sacred)
+
+The 2026-08-13 change was correct in kind and wrong in scope: it made an
+**unconditional** payment for a **conditional** consumer — the named silent-
+precondition shape. Candidates, cheapest first:
+
+1. **Gate the cache on its consumer.** Keep `canvas.primary.renderable = true`
+   only while `canvas.visibility.visible === true` (a vision source is active),
+   and false otherwise. Fog stays byte-correct whenever it renders; the GM's
+   authoring session — and every session with no vision source — pays nothing.
+   Needs a hook/observer on the visibility group's own state, never a poll.
+2. **Shrink what the cache costs when it IS needed** — the fog filter samples it
+   in screen space at 50% blend; a downscaled cache may be visually identical.
+   Measure before assuming (this document's own Law 2).
+3. **Feed the filter a texture MSA already owns** instead of Foundry's — the
+   most invasive, and the only one that touches the seam's "never draw the same
+   thing twice" doctrine. Last resort.
+
+Gate 1 is the obvious first move and is reversible behind a flag. Whoever builds
+it owns a live fog test with a controlled token (the exact condition that hid
+Bug #18 for weeks), not just a frame-rate number.
 
 **How to read the older table below.** The geometry triad rose, but from a base so small it cannot
 carry a 50 ms deficit: the three passes together are ~6 ms of a 61.5 ms frame.

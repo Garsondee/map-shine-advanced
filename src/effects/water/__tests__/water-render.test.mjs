@@ -140,6 +140,51 @@ export function run(t) {
     built[0].normalCompiled === false && built[1].normalCompiled === false && built[2].normalCompiled === false
   );
 
+  // ── THE DEPTH-AUTHORITY GATE (2026-08-15) ──────────────────────────────
+  // Mirrors "THE GATE ACTUALLY GATES" above for the SECOND JS-time branch
+  // this file now has: `floorGateCompiled` is the one structural consequence
+  // Node can observe (same reasoning as `bodyTexNode === null` above — a
+  // uniform-based "gate" could not produce a JS-visible false here).
+  for (const tier of [0, 1, 2, 3]) {
+    let err = null;
+    let withDepth = null;
+    try {
+      withDepth = buildWaterSurfaceMaterial(args({ tier, depthTexture: stubTexture() }));
+    } catch (e) {
+      err = e;
+    }
+    ok(`tier ${tier}: constructs with a depth texture present (${err ? err.message : 'clean'})`, err === null);
+    if (withDepth) {
+      ok(`tier ${tier}: depthTexture + uViewRect together compile the gate IN`, withDepth.floorGateCompiled === true);
+      ok(
+        `tier ${tier}: still returns both meshes with the gate compiled in`,
+        !!withDepth.absorbMaterial && !!withDepth.inscatterMaterial
+      );
+    }
+  }
+  ok(
+    'no depthTexture at all (the pre-migration / unwired shape) compiles the gate OUT, not merely open',
+    built[3].floorGateCompiled === false
+  );
+  {
+    // depthTexture present but uViewRect absent must ALSO compile the gate
+    // out: it has no screen position to sample at without it. Tier 0, not 3
+    // — tier 3's OWN synthesised eye (`water-light.js`) is independently
+    // documented as "Required for tier 3" and was never defended against a
+    // missing uViewRect either; conflating the two here would test a
+    // combination this file never promised to support and misattribute a
+    // pre-existing, unrelated gap to this gate.
+    let err = null;
+    let b = null;
+    try {
+      b = buildWaterSurfaceMaterial(args({ tier: 0, depthTexture: stubTexture(), uViewRect: undefined }));
+    } catch (e) {
+      err = e;
+    }
+    ok(`depthTexture with no uViewRect constructs rather than throwing (${err ? err.message : 'clean'})`, err === null);
+    if (b) ok('...and reports the gate as compiled-out, not silently open', b.floorGateCompiled === false);
+  }
+
   // ── THE UNWIRED-CALLER PATHS, which are the ones that rot ──────────────
   {
     let err = null;
@@ -207,6 +252,7 @@ export function run(t) {
     'setTint',
     'setOpacity',
     'setShorelineDepth',
+    'setExpectedDepth',
   ];
   for (const tier of [0, 1, 2, 3]) {
     const b = built[tier];

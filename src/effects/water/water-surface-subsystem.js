@@ -76,6 +76,30 @@ const log = createLogger('WaterSurface');
  * @param {() => object|null} [args.getSkyHandle] - `effects/sky-access.js`'s
  *   handle for THIS frame. The ONE description of the outdoor light; this
  *   module never touches the hour (`env/one-sun`).
+ * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment
+ *   (2026-08-15, the depth-authority migration). `null` compiles the
+ *   occlusion gate out entirely — see `water-render.js`'s own header.
+ * @param {(floorIndex: number) => number|null} [args.resolveExpectedDepth] -
+ *   given the floor THIS instance represents, `computeTieSafeExpectedDepth`
+ *   for its own background item's rank. Composed in `vt-pan-viewer.js` from
+ *   `depthAuthority.rankOf` + `getWaterBackgroundItemId`, the SAME shape
+ *   `specular-surface-subsystem.js`/`window-surface-subsystem.js` already
+ *   proved. Called every frame from `sync`, never cached — a floor's own
+ *   background item can change RANK whenever the depth authority rebuilds.
+ *
+ *   ⚠️ RETURNS `null` FOR "UNRESOLVED", NOT `0` — a DELIBERATE DIVERGENCE from
+ *   specular/window's own `rank === null ? 0 : ...` composition. Those two
+ *   own an explicit per-floor render CALL their own frame loop can simply
+ *   skip when a floor's rank is unresolved (window-render.js's own "SKIP A
+ *   FLOOR THAT ISN'T CURRENTLY COMPOSITED AT ALL" fix). Water has no such
+ *   call to skip — every instance's meshes live in the ONE shared main
+ *   `scene` and draw unconditionally whenever `mesh.visible` is true, every
+ *   frame, with no per-floor early-out available downstream. Failing open to
+ *   0 here would reproduce window's OWN third live bug verbatim (an
+ *   unresolved floor's content broadcasting across the entire screen,
+ *   `step(0, depthHere)` being true everywhere) — so `null` instead feeds
+ *   `refreshVisibility` below, which hides the WHOLE mesh rather than letting
+ *   the shader gate fail open pixel-by-pixel.
  * @returns {{sync: (floorIndex: number, viewRect?: object|null) => void,
  *   getStatus: () => object, dispose: () => void}}
  */
@@ -93,11 +117,18 @@ export function createWaterSurfaceSubsystem({
   outdoorsTexNode,
   buildOutdoorsGate,
   getSkyHandle,
+  depthTexture = null,
+  resolveExpectedDepth,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
   getWaterRenderState ??= () => ({ enabled: true, params: {} });
   getSkyHandle ??= () => null;
+  // Fails OPEN — matches `buildWaterSurfaceMaterial`'s own `uExpectedDepth`
+  // default (0) for an unwired caller: with no resolver at all (the torture
+  // fixture, a caller predating this migration), water renders exactly as it
+  // did before, gated by paint order alone.
+  resolveExpectedDepth ??= () => 0;
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
   geometry.setIndex(Array.from(QUAD_INDICES));
@@ -128,14 +159,23 @@ export function createWaterSurfaceSubsystem({
    * the FIRST build (below, before any `sync()` has resolved a real tier)
    * shows today's shipped look, same reasoning as `WATER_DEFAULT_TIER` itself. */
   let builtForTier = WATER_DEFAULT_TIER;
+  /** The last value `resolveExpectedDepth` actually returned (raw, BEFORE
+   * `setExpectedDepth`'s own null→0 coercion) — see `refreshVisibility`'s own
+   * use of it, and `resolveExpectedDepth`'s doc above for why `null` must hide
+   * the mesh rather than fail open. */
+  let lastExpectedDepth = 0;
 
-  /** The ONE place visibility is decided, so the three conditions can never
-   * drift apart across the call sites that each learn about one of them —
-   * and, since tier 1, so the two meshes can never drift apart either. Half a
+  /** The ONE place visibility is decided, so the conditions can never drift
+   * apart across the call sites that each learn about one of them — and,
+   * since tier 1, so the two meshes can never drift apart either. Half a
    * water surface (absorption with no in-scatter, or the reverse) is a far
-   * worse failure than none, and it would look like a shader bug. */
+   * worse failure than none, and it would look like a shader bug.
+   *
+   * `lastExpectedDepth !== null` (2026-08-15) — see `resolveExpectedDepth`'s
+   * own doc for why an unresolved floor hides the WHOLE mesh here rather than
+   * letting the shader-side gate fail open pixel-by-pixel. */
   function refreshVisibility() {
-    const show = enabled && !!waterBody.getWaterBounds() && !!loadedUrl;
+    const show = enabled && !!waterBody.getWaterBounds() && !!loadedUrl && lastExpectedDepth !== null;
     for (const m of meshes) m.visible = show;
   }
 
@@ -168,6 +208,11 @@ export function createWaterSurfaceSubsystem({
       outdoorsTexNode,
       buildOutdoorsGate,
       tier,
+      // THE DEPTH-AUTHORITY GATE (2026-08-15) — floor-INDEPENDENT (the SAME
+      // `buf:scene.depth` attachment every instance reads), so it rebuilds
+      // fine on a tier change like everything else here; only `uExpectedDepth`
+      // (pushed per-frame in `sync`, below) actually varies per floor.
+      depthTexture,
     });
   }
 
@@ -274,6 +319,25 @@ export function createWaterSurfaceSubsystem({
       lastParamsKey = '';
       lastSkyKey = '';
     }
+
+    // THE DEPTH-AUTHORITY GATE's OWN EXPECTED DEPTH (2026-08-15). Pushed
+    // every frame and NEVER gated on a cached key, unlike the tier/params
+    // below — mirrors `window-surface-subsystem.js`'s identical reasoning:
+    // this floor's own background item can change RANK whenever the depth
+    // authority rebuilds (a residency pass, a pan, any item added or
+    // removed), not just on a floor switch. `lastExpectedDepth` keeps the
+    // RAW (possibly-null) result for `refreshVisibility` above; the surface
+    // setter itself still coerces null→0 as its own shader-side safety net.
+    //
+    // ⚠️ `refreshVisibility()` HERE TOO, UNCONDITIONALLY — this is the ONE
+    // input to visibility that changes on ITS OWN cadence, independent of the
+    // params-key and bake-generation gates below. Skipping it on a frame
+    // neither of those gates caught would leave `mesh.visible` a frame stale
+    // exactly when a residency pass flips this floor's rank from resolved to
+    // unresolved (or back) with no param or bake change alongside it.
+    lastExpectedDepth = resolveExpectedDepth(floorIndex);
+    surface.setExpectedDepth(lastExpectedDepth ?? 0);
+    refreshVisibility();
 
     // THE EYE. Pushed every frame and NEVER gated on anything — mirrors
     // `specular-surface-subsystem.js`'s identical reasoning: this is the whole
@@ -415,6 +479,16 @@ export function createWaterSurfaceSubsystem({
         // reporting it (`water-light.js`'s header). Reported now precisely
         // because that state looks healthy from every other field here.
         waveNormal: surface.normalCompiled,
+        // THE DEPTH-AUTHORITY GATE (2026-08-15) — `false` on a live multi-floor
+        // scene means water is back to paint-order-only occlusion, the exact
+        // "renders above things that should mask it" bug this migration fixed.
+        floorGateCompiled: surface.floorGateCompiled,
+        // The raw (possibly-null) resolve — `null` means this floor's own
+        // background item has no rank right now (not currently composited, or
+        // a transient residency-pass race), and IS why `visible` reads false
+        // even with a healthy bake and a loaded mask; see `resolveExpectedDepth`'s
+        // own doc for why this hides the mesh rather than failing the shader open.
+        expectedDepth: lastExpectedDepth,
       };
     },
     dispose() {

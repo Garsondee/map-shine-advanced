@@ -2798,9 +2798,12 @@ function install() {
     }
   };
 
-  // WATER's three mask-authority seams — see effects/water/water-seams.js for
+  // WATER's four mask-authority seams — see effects/water/water-seams.js for
   // why they ask different questions at deliberately different resolutions.
-  const { getWaterMaskGrid, getFloorsWithWater, getWaterMaskUrl } = createWaterSeams({
+  // `getWaterBackgroundItemId` is the depth-authority migration's own seam
+  // (2026-08-15), the same shape `getSpecularBackgroundItemId`/
+  // `getWindowBackgroundItemId` already use below.
+  const { getWaterMaskGrid, getFloorsWithWater, getWaterMaskUrl, getWaterBackgroundItemId } = createWaterSeams({
     maskAuthority,
     getFloors: () => lastKnownFloors,
   });
@@ -7343,6 +7346,10 @@ function install() {
         getWaterMaskGrid,
         getFloorsWithWater,
         getWaterMaskUrl,
+        // THE DEPTH-AUTHORITY MIGRATION's own seam (2026-08-15) — see
+        // `getSpecularBackgroundItemId`/`getWindowBackgroundItemId` just below
+        // for the identical shape this mirrors.
+        getWaterBackgroundItemId,
         // WATER's look/enable seam. ⚠️ Its ABSENCE is invisible: the viewer's
         // own default is `{enabled: true, params: {}}`, so water renders
         // perfectly at its hardcoded defaults while every panel control does

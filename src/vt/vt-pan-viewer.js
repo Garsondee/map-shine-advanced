@@ -172,6 +172,13 @@ import {
   // number. See `publishSceneDarkness`'s own header.
   publishSceneDarkness,
   shouldPublishDarkness,
+  // THE GLOBAL ILLUMINATION WRITE-BACK (2026-08-15) — the SECOND, independent
+  // gate the darkness write-back above cannot close by itself. See
+  // `deriveGlobalLightWindow`'s own header.
+  deriveGlobalLightWindow,
+  publishGlobalLightWindow,
+  shouldPublishGlobalLightWindow,
+  readSceneGlobalLightRaw,
   readSceneAmbient,
   readGamePaused,
   watchGamePaused,
@@ -204,6 +211,7 @@ import {
   computeShapeMeshBounds,
   writeRegionPolygonPoints,
   applyDarknessAdjustment,
+  computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
   buildRegionRectangleMaterial,
@@ -921,6 +929,7 @@ export async function startVtPanViewer({
   getWaterMaskGrid,
   getFloorsWithWater,
   getWaterMaskUrl,
+  getWaterBackgroundItemId,
   getWaterRenderState,
   getSpecularMaskUrl,
   getSpecularMaskRect,
@@ -1001,6 +1010,13 @@ export async function startVtPanViewer({
   // hidden entirely rather than falling back to the blocky SDF-thresholded
   // edge this change exists to stop drawing (water-render.js's header).
   getWaterMaskUrl ??= () => null;
+  // THE DEPTH-AUTHORITY MIGRATION's own seam (2026-08-15), mirroring
+  // specular's/window's `get*BackgroundItemId` above for the same reason:
+  // unwired (the torture fixture), `resolveExpectedDepth` below can never
+  // resolve a real rank, so each floor's `uExpectedDepth` stays at its
+  // construction-time default and the effect behaves exactly as it would with
+  // `depthTexture` itself unwired — inert by construction, not silently broken.
+  getWaterBackgroundItemId ??= () => null;
   // WATER's look/enable seam — default-ON, matching the manifest's own
   // `enabledFromProfile: 'low'`: tier 0 is a mask read and a tint, so an
   // un-wired caller still gets water rather than a silently-disabled effect.
@@ -2031,16 +2047,49 @@ export async function startVtPanViewer({
     // and a second identical copy is exactly the kind of fork that made V2's
     // water a 15k-line family (Water.md §2.4). Only its NAME reads as
     // sun-specific, which the alias below fixes at the call site.
-    const waterBody = createWaterBodySubsystem({
-      THREE,
-      allocator,
-      getWaterMaskGrid,
-      getFloorsWithWater,
-      getMaskAuthorityVersion,
-      renderWaterPass: renderSunShadowPass,
-      // NEAREST — the seed pass needs a crisp water/land interface.
-      createWaterMaskTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
-    });
+    //
+    // ⚠️ ONE INSTANCE PER FLOOR, NOT ONE FOR "THE VIEWED FLOOR" (2026-08-15)
+    // — `feedback_single_floor_bake_vs_multi_floor_render` named this exact
+    // subsystem an unchecked candidate for the identical bug class sun shadows
+    // and window light were each already found and fixed for; live-reported
+    // for water itself as "water renders above things that should be masking
+    // it," worse on upper floors. The OLD single global instance called
+    // `maybeBake(view.floorIndex)` — the UI's "current floor" concept, never
+    // "every floor on screen" — so a floor visible through a gap that was NOT
+    // the resolved viewed-floor pack had no body pack of its own at all,
+    // regardless of what `resolveWaterFloor`'s own cross-floor borrow rule
+    // said should be there. Fixed the SAME way window light's identical bug
+    // was (`windowSurfacesByFloor`, its own header): one subsystem per floor,
+    // created lazily and cached in `waterBodiesByFloor`, disposed the instant
+    // a floor drops out of the scene's own floor list (see the frame-loop's
+    // own prune step, `Z.lightWaterBake` below). Each slot's `maybeBake(F)` is
+    // called with ITS OWN floor index as the "viewed" floor — `resolveWaterFloor`
+    // needs no changes at all: asking it "what water does floor F see" for
+    // every real F, independently, is exactly what a per-floor slot means,
+    // and the cross-floor borrow rule (Water.md §4) resolves identically
+    // whether F is the UI's current floor or not.
+    const waterBodiesByFloor = new Map();
+    function createWaterBodyForFloor() {
+      return createWaterBodySubsystem({
+        THREE,
+        allocator,
+        getWaterMaskGrid,
+        getFloorsWithWater,
+        getMaskAuthorityVersion,
+        renderWaterPass: renderSunShadowPass,
+        // NEAREST — the seed pass needs a crisp water/land interface.
+        createWaterMaskTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
+      });
+    }
+    /** Lazily create-or-reuse this floor's own body pack. @param {number} floorIndex */
+    function getWaterBodyForFloor(floorIndex) {
+      let body = waterBodiesByFloor.get(floorIndex);
+      if (!body) {
+        body = createWaterBodyForFloor();
+        waterBodiesByFloor.set(floorIndex, body);
+      }
+      return body;
+    }
 
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
@@ -4935,19 +4984,54 @@ export async function startVtPanViewer({
       // event, so a camera-gated rebake would leave the author's brushstrokes
       // invisible until they panned (`feedback_residency_sync_vs_render_loop`,
       // and the trap Water.md §5.1 names in advance). Almost every frame this
-      // is one integer compare and a return; the jump flood itself runs only
-      // when the mask version or the resolved floor actually moves — which
-      // `waterBody.getStatus()` reports as `bakes` vs `polls` so the two can
-      // be seen NOT to track each other.
+      // is one integer compare and a return per floor; the jump flood itself
+      // runs only when a floor's own mask version or resolved floor actually
+      // moves — which each floor's own `getStatus()` reports as `bakes` vs
+      // `polls` so the two can be seen NOT to track each other.
+      //
+      // EVERY FLOOR, NOT JUST THE VIEWED ONE (2026-08-15) — mirrors the
+      // sun-shadow loop above and the window loop further down (both fixed
+      // for the identical bug class already). Same `floorsResultForFrame`,
+      // same single-viewed-floor fallback when it fails. See
+      // `waterBodiesByFloor`'s own header for the live bug this fixes.
       profiler?.begin(Z.lightWaterBake);
-      waterBody.maybeBake(view?.floorIndex ?? 0);
+      const floorsResultForWater = floorsResultForFrame;
+      const waterFloors =
+        floorsResultForWater.ok && floorsResultForWater.floors.length > 0
+          ? floorsResultForWater.floors
+          : [{ index: view?.floorIndex ?? 0 }];
+      // PRUNE stale slots — a scene switch can shrink or renumber the floor
+      // list; without this, a body pack + surface (and its three RGBA16F
+      // jump-flood targets, its uploaded high-res mask) from a PREVIOUS scene
+      // lingers in VRAM for the rest of the session, the same per-Stop/Restart
+      // leak discipline `disposeWaterBody` exists for, just triggered by a
+      // scene switch instead. Cheap: at most a handful of floors, once per
+      // frame.
+      const liveWaterFloorIndices = new Set(waterFloors.map((f) => f.index));
+      for (const [floorIndex, body] of waterBodiesByFloor) {
+        if (!liveWaterFloorIndices.has(floorIndex)) {
+          waterSurfacesByFloor.get(floorIndex)?.dispose();
+          waterSurfacesByFloor.delete(floorIndex);
+          body.dispose();
+          waterBodiesByFloor.delete(floorIndex);
+        }
+      }
+      for (const floor of waterFloors) getWaterBodyForFloor(floor.index).maybeBake(floor.index);
       profiler?.end(Z.lightWaterBake);
-      // Re-crop the tier-0 surface quad to the water's AABB — gated on the same
-      // bake generation, so a quiet frame costs one integer compare. The
-      // viewRect is for tier 3's synthesised eye ONLY and is never gated —
-      // same call specular makes below, for the same reason.
+      // Re-crop each floor's own tier-0 surface quad to ITS water's AABB —
+      // gated on that floor's own bake generation, so a quiet frame costs one
+      // integer compare per floor. The viewRect is for tier 3's synthesised
+      // eye ONLY and is never gated — same call specular makes below, for the
+      // same reason. `mesh.visible` (inside `sync`, per floor) is what
+      // actually decides whether an unresolved-depth-rank floor draws — see
+      // `resolveExpectedDepth`'s own doc above for why that check lives
+      // INSIDE the subsystem here rather than as a skip in this loop, unlike
+      // window's own identical-looking loop below.
       profiler?.begin(Z.lightWaterSync);
-      waterSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
+      {
+        const waterViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+        for (const floor of waterFloors) getWaterSurfaceForFloor(floor.index).sync(floor.index, waterViewRect);
+      }
       profiler?.end(Z.lightWaterSync);
       // FLUID: same cadence, same shape — cheap to call, one string compare when
       // nothing changed, and it owns its own mask-url change detection.
@@ -5603,6 +5687,22 @@ export async function startVtPanViewer({
      *  it should" ([[feedback_absent_zone_row_is_a_measurement]] — the number of
      *  times a conditional actually fired IS the measurement). */
     let darknessPublishAttempts = 0;
+    /**
+     * GLOBAL ILLUMINATION WRITE-BACK STATE (2026-08-15) — see
+     * `foundry/scene-environment.js#deriveGlobalLightWindow`'s own header.
+     * Separate from the darkness-level state above on purpose: this value is
+     * change-throttled, not time-throttled (`shouldPublishGlobalLightWindow`),
+     * because the region set it derives from is static almost all the time.
+     */
+    let lastPublishedGlobalLightWindow = null;
+    /** Mirrors `lastDarknessPublishResult`'s own reasoning — a failed write-back
+     *  must be visible in the report, not indistinguishable from "nothing to do". */
+    let lastGlobalLightPublishResult = null;
+    /** This frame's raw `computeMinimumDarknessFloor` result — refreshed every
+     *  frame regardless of the publish throttle, so the report can answer
+     *  "why is it disabled" (no protective region vs. floor too low) without
+     *  a separate investigation. */
+    let lastMinDarknessRegionFloor = null;
 
     // ── THE SKY ────────────────────────────────────────────────────────────
     // `todHour` HAS a real source as of 2026-07-23: the day clock
@@ -5762,6 +5862,27 @@ export async function startVtPanViewer({
         lastDarknessPublishResult = published;
         darknessPublishAttempts += 1;
       }
+
+      // ── PUBLISH GLOBAL ILLUMINATION'S WINDOW (2026-08-15) ────────────────
+      // The SECOND, independent gate behind "a token outside at noon thinks
+      // it's in the dark" — see `deriveGlobalLightWindow`'s own header for
+      // the full account of why the darkness-level publish above cannot fix
+      // this alone. Unfiltered by elevation/floor on purpose: Global
+      // Illumination is one scene-wide toggle, so the window must stay safe
+      // for a darkness-adjusting region on ANY floor, not just the one
+      // `view.floorIndex` currently renders.
+      const { regions: allActiveDarknessRegions } = readActiveDarknessRegions();
+      const minDarknessRegionFloor = computeMinimumDarknessFloor(allActiveDarknessRegions);
+      lastMinDarknessRegionFloor = minDarknessRegionFloor;
+      const nextGlobalLightWindow = deriveGlobalLightWindow(minDarknessRegionFloor);
+      if (shouldPublishGlobalLightWindow(nextGlobalLightWindow, lastPublishedGlobalLightWindow)) {
+        const publishedWindow = publishGlobalLightWindow(minDarknessRegionFloor);
+        if (publishedWindow.ok) {
+          lastPublishedGlobalLightWindow = { enabled: publishedWindow.enabled, max: publishedWindow.max };
+        }
+        lastGlobalLightPublishResult = publishedWindow;
+      }
+
       // THE SHADOW HANDLE — rebuilt only when the sky actually MOVED, not every
       // frame: it is an immutable value object, and churning a new one per
       // frame would defeat the version-compare its own consumers rely on.
@@ -6918,25 +7039,59 @@ export async function startVtPanViewer({
     // Constructed HERE, after `scene` — that module owns the mesh, the
     // AABB crop and the high-res mask load, and its header explains why the
     // ordering is a caller requirement (trap #4, hit three times).
-    const waterSurface = createWaterSurfaceSubsystem({
-      THREE,
-      scene,
-      waterBody,
-      getWaterMaskUrl,
-      createMaskTexture: createMaskDataTexture,
-      loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
-      getWaterRenderState,
-      timeMsNode: uGlobalTimeMs, // tier 2's field travels on THE shared clock
-      // TIER 3 — envLight's OWN uniforms, shared rather than duplicated: two
-      // view rects updated on different cadences is exactly how two consumers
-      // of one frame end up disagreeing about where a world point is. The
-      // identical objects `specularSurface` below receives.
-      uViewRect: envLight.uViewRect,
-      uOutdoorsRect: envLight.uOutdoorsRect,
-      outdoorsTexNode: envLight.outdoorsTexNode,
-      buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
-      getSkyHandle: () => skyHandle,
-    });
+    //
+    // ⚠️ ONE INSTANCE PER FLOOR — see `waterBodiesByFloor`'s own header just
+    // above for the bug this fixes; this is the mesh-owning half of the same
+    // fix. Every construction arg below is floor-INDEPENDENT except `waterBody`
+    // (paired to THIS floor's own body-pack slot) — only `sync(floorIndex,
+    // viewRect)`'s own arguments (at the frame-loop call site) vary per floor.
+    const waterSurfacesByFloor = new Map();
+    function createWaterSurfaceForFloor(floorIndex) {
+      return createWaterSurfaceSubsystem({
+        THREE,
+        scene,
+        waterBody: getWaterBodyForFloor(floorIndex),
+        getWaterMaskUrl,
+        createMaskTexture: createMaskDataTexture,
+        loadMaskImage: (url) => loadMaskImageTexture({ url, THREE }),
+        getWaterRenderState,
+        timeMsNode: uGlobalTimeMs, // tier 2's field travels on THE shared clock
+        // TIER 3 — envLight's OWN uniforms, shared rather than duplicated: two
+        // view rects updated on different cadences is exactly how two consumers
+        // of one frame end up disagreeing about where a world point is. The
+        // identical objects `specularSurface` below receives.
+        uViewRect: envLight.uViewRect,
+        uOutdoorsRect: envLight.uOutdoorsRect,
+        outdoorsTexNode: envLight.outdoorsTexNode,
+        buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+        getSkyHandle: () => skyHandle,
+        // THE DEPTH-AUTHORITY GATE (2026-08-15) — composed exactly like
+        // specular's/window's own `resolveExpectedDepth` below, resolved by
+        // ITEM ID rather than by elevation: water has real drawn geometry of
+        // its own (the floor's background it rides), unlike a light.
+        depthTexture: sceneDepth.depthTexture ?? null,
+        resolveExpectedDepth: (fi) => {
+          const backgroundItemId = getWaterBackgroundItemId(fi);
+          const rank = backgroundItemId ? depthAuthority.rankOf({ id: backgroundItemId }) : null;
+          // ⚠️ `null`, NOT `0` — see `water-surface-subsystem.js`'s own
+          // `resolveExpectedDepth` doc for why water cannot use specular's/
+          // window's fail-OPEN-to-0 posture: water has no per-floor render
+          // CALL a frame loop can skip, so failing open here would broadcast
+          // this floor's water across the entire screen the instant its rank
+          // is momentarily unresolved — window's own third live bug, ported.
+          return rank === null ? null : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+        },
+      });
+    }
+    /** Lazily create-or-reuse this floor's own surface. @param {number} floorIndex */
+    function getWaterSurfaceForFloor(floorIndex) {
+      let surface = waterSurfacesByFloor.get(floorIndex);
+      if (!surface) {
+        surface = createWaterSurfaceForFloor(floorIndex);
+        waterSurfacesByFloor.set(floorIndex, surface);
+      }
+      return surface;
+    }
 
     // ── FLUID, tiers 0-4 (docs/planning/Fluid.md) ──────────────────────────
     // Beside water's surface for the same trap-#4 reason: it takes `scene`, so
@@ -10402,9 +10557,9 @@ export async function startVtPanViewer({
       profiler?.end(Z.simsWind);
       // FLUID's own sim tick — same clock, same "inside the gpuProbe bracket"
       // reasoning as tickWindSim above, and it must run AFTER this frame's own
-      // fluidSurface.sync() call (earlier in this same function, beside
-      // waterSurface.sync) so a mask-triggered rebake this frame already has
-      // its sim resources built by the time this looks for them.
+      // fluidSurface.sync() call (earlier in this same function, beside the
+      // per-floor water bake/sync loop) so a mask-triggered rebake this frame
+      // already has its sim resources built by the time this looks for them.
       profiler?.begin(Z.simsFluid);
       tickFluidSim(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
       profiler?.end(Z.simsFluid);
@@ -14207,15 +14362,19 @@ export async function startVtPanViewer({
       disposeSunShadows() {
         sunShadows.dispose();
       },
-      /** Tear down water.body + the two jump-flood ping-pong targets + the
-       * three bake materials + the mask DataTexture (water-body-subsystem.js's
-       * own dispose). Same per-Stop/Restart VRAM-leak reasoning as every other
-       * entry in this list — three RGBA16F world-space targets is the largest
-       * single allocation water makes. */
+      /** Tear down EVERY floor's own water.body (the two jump-flood ping-pong
+       * targets + the three bake materials + the mask DataTexture) and surface
+       * (mesh + geometry + two NodeMaterials + the high-res mask DataTexture) —
+       * one instance per floor since 2026-08-15 (`waterBodiesByFloor`'s own
+       * header). Same per-Stop/Restart VRAM-leak reasoning as every other entry
+       * in this list — three RGBA16F world-space targets, per floor, is the
+       * largest single allocation water makes. */
       disposeWaterBody() {
-        waterSurface.dispose();
+        for (const surface of waterSurfacesByFloor.values()) surface.dispose();
+        waterSurfacesByFloor.clear();
         fluidSurface.dispose();
-        waterBody.dispose();
+        for (const body of waterBodiesByFloor.values()) body.dispose();
+        waterBodiesByFloor.clear();
       },
       /** Tear down SHINE's two meshes, their shared geometry, both
        * NodeMaterials and the uploaded `_Specular` DataTexture. That texture is
@@ -14855,6 +15014,15 @@ export async function startVtPanViewer({
           // are what turn "darkness isn't working" into one glance.
           foundryDarkness01: readSceneDarkness().darkness01,
           darknessReason: lastEnvSnapshot.darkness.reason,
+          // THE GLOBAL ILLUMINATION WRITE-BACK's own state (2026-08-15) — the
+          // SECOND gate behind "token outside at noon is in the dark"; see
+          // `deriveGlobalLightWindow`'s own header. Same three-facts shape as
+          // the darkness fields above: what MSA published, whether the write
+          // itself succeeded, and what Foundry is holding right now.
+          publishedGlobalLightWindow: lastPublishedGlobalLightWindow,
+          globalLightPublish: lastGlobalLightPublishResult,
+          foundryGlobalLight: readSceneGlobalLightRaw(),
+          minDarknessRegionFloor: lastMinDarknessRegionFloor,
           ambientSource: lastEnvSnapshot.ambient?.source ?? null,
           ambientReason: lastEnvSnapshot.ambient?.reason ?? null,
           todHourSource: lastEnvSnapshot.todHourSource,
@@ -15238,17 +15406,28 @@ export async function startVtPanViewer({
        * (§4) — a derived READOUT, never a param. `floorIndex: null` there is
        * not an error: it means no floor in this scene has an authored water
        * mask, so nothing is baked and nothing should be drawn.
+       *
+       * ONE ENTRY PER FLOOR that has ever synced (2026-08-15 — this used to be
+       * a single object; mirrors `getWindowLightInfo`'s own shape exactly).
+       * `surface.floorGateCompiled: false` with a live multi-floor scene means
+       * water is back to paint-order-only occlusion — the exact bug this
+       * migration fixed.
        */
-      getWaterBodyInfo: () => ({
-        ...waterBody.getStatus(),
-        // TIER 0's own state (2026-07-26). `surfaceVisible: false` with a
-        // healthy bake means the mask holds no water on the resolved floor —
-        // the honest "nothing to draw", distinct from a broken bake. `bounds`
-        // is the water's measured world AABB, which the quad is cropped to
-        // (Law 6); if it ever reads as the whole mask rect, the crop is not
-        // working and water is paying fullscreen cost for a river.
-        surface: waterSurface.getStatus(),
-      }),
+      getWaterBodyInfo: () =>
+        Array.from(waterBodiesByFloor.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([floorIndex, body]) => ({
+            floorIndex,
+            ...body.getStatus(),
+            // TIER 0's own state (2026-07-26). `surfaceVisible: false` with a
+            // healthy bake means the mask holds no water on the resolved floor
+            // — the honest "nothing to draw", distinct from a broken bake.
+            // `bounds` is the water's measured world AABB, which the quad is
+            // cropped to (Law 6); if it ever reads as the whole mask rect, the
+            // crop is not working and water is paying fullscreen cost for a
+            // river.
+            surface: waterSurfacesByFloor.get(floorIndex)?.getStatus() ?? 'not synced',
+          })),
       /**
        * FLUID's own chain state — every link, so "why do I see nothing" is
        * answered by reading ONE report rather than by another round trip with

@@ -34,7 +34,7 @@
  *   scene's floor list. A GETTER: the list is replaced on every scene load and
  *   floor switch, and capturing the array would pin the first scene's floors
  *   forever (trap #1 of the extraction plan, in its non-viewer form).
- * @returns {{getWaterMaskGrid: Function, getFloorsWithWater: Function, getWaterMaskUrl: Function}}
+ * @returns {{getWaterMaskGrid: Function, getFloorsWithWater: Function, getWaterMaskUrl: Function, getWaterBackgroundItemId: Function}}
  */
 export function createWaterSeams({ maskAuthority, getFloors }) {
   return {
@@ -64,6 +64,30 @@ export function createWaterSeams({ maskAuthority, getFloors }) {
       if (!floor?.id) return null;
       const status = maskAuthority.authoredStatus(floor.id, 'water');
       return status.source === 'authored' ? status.url : null;
+    },
+
+    /**
+     * THE DEPTH-AUTHORITY MIGRATION's own seam (2026-08-15) — byte-for-byte
+     * the same shape as `getSpecularBackgroundItemId`/`getWindowBackgroundItemId`.
+     * The REAL drawable id `depthAuthority.rankOf` needs for THIS floor's own
+     * background item, so a per-floor water surface's occlusion query asks
+     * "is anything ranked above MY OWN floor's background" instead of relying
+     * on paint order alone — see `water-render.js`'s own header for why paint
+     * order stopped being sufficient the moment water could be borrowed onto
+     * (or viewed from) a floor other than the lowest one in the composite.
+     *
+     * ⚠️ THE STRING IS NOT INVENTED — `foundry/scene-layers.js#
+     * collectLevelTextures` builds every Level background item's id as
+     * `` `level:${level.id}:background` ``, and `floor.id` here IS that SAME
+     * `level.id`. Mirrors the other two background-item seams exactly.
+     *
+     * @param {number} floorIndex
+     * @returns {string|null}
+     */
+    getWaterBackgroundItemId: (floorIndex) => {
+      const floors = getFloors() ?? [];
+      const floor = floors.find((f) => f.index === floorIndex) ?? floors[floorIndex] ?? null;
+      return floor?.id ? `level:${floor.id}:background` : null;
     },
   };
 }

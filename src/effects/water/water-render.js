@@ -143,30 +143,60 @@
  * `if (activeTier >= N)` block lands the day its own code does.
  *
  * ============================================================================
- * ⚠️ THERE IS NO `buf:scene.attr` READ HERE, AND THAT IS A CORRECTION
+ * ⚠️ CORRECTION, 2026-08-15 — PAINT ORDER ALONE WAS NEVER SUFFICIENT, AND THE
+ * PARAGRAPHS BELOW ARE THE STALE REASONING THAT SHIPPED ANYWAY
+ * ============================================================================
+ * The "draw order IS the punch" argument two sections down is correct FOR A
+ * SINGLE FLOOR IN ISOLATION and was written three days before the depth
+ * authority (`keyhole-depth-authority-sole-system-decision`, LOCKED
+ * 2026-08-04) existed to check it against. `water-surface-subsystem.js`'s own
+ * header made the load-bearing assumption explicit: "index 0 of the sorted
+ * list [is] always... the floor background" — true only when water's own
+ * resolved floor happens to be the LOWEST floor in whatever multi-floor
+ * composite the current frame actually draws. The moment a floor BELOW
+ * water's own is also part of that composite (any multi-floor scene, viewed
+ * from anywhere but the single lowest floor — which per
+ * `keyhole-orthographic-hole-stack-model` is the ORDINARY case, not an edge
+ * one), that lower floor's own real content sorts BETWEEN the true index-0
+ * background and water's own fixed position, and paint order alone can no
+ * longer promise the lower floor stays behind it. Reported live 2026-08-15:
+ * "water renders above things that should be masking it," worse on upper
+ * floors — exactly this shape, and exactly the same symptom specular and
+ * window were each built to fix on this same system months earlier
+ * ("previously they were failing to render correctly on the upper floor").
+ *
+ * THE FIX rides the now-LOCKED depth authority, the same one line every other
+ * consumer already uses: `step(uExpectedDepth, depthHere)` against
+ * `buf:scene.depth`, gating BOTH of tier 0's meshes toward each blend's own
+ * neutral element (white for the multiply, zero for the add — see "WATER IS
+ * TWO BLENDS" below) wherever something already ranks above water's own
+ * floor's background at this pixel. Paint order still does the REST of the
+ * job it always did — same-floor foam/wet-band layering, mesh-1-before-mesh-2
+ * ordering — this only closes the CROSS-FLOOR gap paint order could never
+ * promise on its own. See `water-surface-subsystem.js` and
+ * `water-seams.js#getWaterBackgroundItemId` for the rest of the migration.
+ *
+ * ============================================================================
+ * ⚠️ THERE IS NO `buf:scene.attr` READ HERE — STILL TRUE, DIFFERENT REASON
  * ============================================================================
  * Water.md §6 and `graph/passes.js` both describe tier 0's occlusion — "the
  * punch" — as a `buf:scene.attr` read: sample the attribute buffer, kill water
- * under opaque upper geometry. Building it found that to be both unnecessary
- * and unsafe:
+ * under opaque upper geometry. That specific mechanism remains both
+ * unnecessary and unsafe:
  *
  *   UNSAFE — water draws inside `runGeometryWorldPass`, which is the very pass
  *   that WRITES `buf:scene.attr` as MRT attachment 1 of `scene.color`. Sampling
  *   a target the same pass is writing is undefined behaviour on both backends.
  *
- *   UNNECESSARY — this renderer paints by `scene/layer-order.js`'s painter's
- *   algorithm (`depthTest: false`, `transparent: true`, ascending renderOrder).
- *   The water mesh sits just above the floor background and below everything
- *   else, so upper-floor art, bridge decks and roofs draw OVER it with their
- *   own alpha, and wherever that art is transparent — a hole, a gap between
- *   planks — the water shows through. **The draw order IS the punch**, exactly
- *   and for free, including the soft partial-alpha case §12 worried about.
+ *   UNNECESSARY — `buf:scene.depth` is a SEPARATE attachment, written by
+ *   `runSceneDepthPass` BEFORE the colour draw runs at all (the depth
+ *   authority's own "SEVENTH CONSUMER" pass-order change, 2026-08-09), so
+ *   reading it here has none of `buf:scene.attr`'s same-pass hazard — it is
+ *   already fully written by the time water's fragment shader runs.
  *
- * V2 needed an explicit occluder because it composited per-floor stacks and
- * had already lost the one flat sort order; MSA has that order (Foundry's own,
- * `reference_foundry_v14_layering_law`), so the mechanism dissolves rather than
- * being ported. The cross-floor BORROW still matters and still rides tier 0 —
- * it decides which floor's mask to bake, which is a different question.
+ * Paint order still handles same-floor, non-occlusion layering for free (see
+ * below); the depth-authority gate above is what makes cross-floor occlusion
+ * actually correct rather than merely usually-correct.
  *
  * THREE is INJECTED, never imported (the bloom split's rule).
  *
@@ -389,18 +419,30 @@ export const WATER_DEFAULT_TIER = 3;
  * @param {readonly number[]} [args.tint]
  * @param {number} [args.opacity]
  * @param {*} [args.uViewRect] - envLight's shared view-rect uniform. Required
- *   for tier 3's synthesised eye — see `water-light.js`.
+ *   for tier 3's synthesised eye (`water-light.js`) AND, since 2026-08-15, for
+ *   mapping `positionWorld` to the depth-authority gate's own screen UV — see
+ *   `args.depthTexture`. Absent compiles BOTH to their safe defaults (tier 3's
+ *   zero reflection; the occlusion gate open).
  * @param {*} [args.uOutdoorsRect] @param {*} [args.outdoorsTexNode] - envLight's
  *   outdoors rect/texture, shared the same way.
  * @param {Function} [args.buildOutdoorsGate] - injected world-space gate
  *   builder; absent compiles tier 3's reflection to a safe zero.
+ * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment
+ *   (2026-08-15, the depth-authority migration — see the module header).
+ *   Absent/null compiles the occlusion gate OUT entirely (a JS-time branch,
+ *   Effects.md Law 4 — never a uniform multiplied by a permanent one), which
+ *   is exactly today's pre-migration behaviour: paint order alone. Present,
+ *   it gates BOTH meshes toward their own blend's neutral element wherever
+ *   `buf:scene.depth` says something already ranks above THIS water's own
+ *   floor at a pixel — see `args.uViewRect` for the screen-UV it is sampled at.
  * @param {number} [args.tier] - the resolved rung (effect-cascade.js#resolveEffectTier).
  *   JS-`if` gates rungs 1-3's node construction (Effects.md Law 4) — see the
  *   header's "TIER GATING" section. Absent/non-finite falls back to
  *   {@link WATER_DEFAULT_TIER}, today's shipped look, never tier 0.
  * @returns {{absorbMaterial:*, inscatterMaterial:*, maskTexNode:*, bodyTexNode:*|null,
  *   setMaskRect:(r:object)=>void, setTint:(rgb:readonly number[])=>void,
- *   setOpacity:(v:number)=>void, tier:number}} TWO materials, for two meshes over the
+ *   setOpacity:(v:number)=>void, setExpectedDepth:(v:number)=>void,
+ *   floorGateCompiled:boolean, tier:number}} TWO materials, for two meshes over the
  *   same geometry — see the header. The caller draws `absorbMaterial` first.
  *   `bodyTexNode` is `null` below tier 1 (never sampled, so nothing to re-point
  *   on a bake regrid — callers must guard the same way `water-surface-
@@ -435,6 +477,8 @@ export function buildWaterSurfaceMaterial({
   viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
   chop = WATER_TIER3_CHOP,
   tier = WATER_DEFAULT_TIER,
+  // ── THE DEPTH-AUTHORITY GATE (2026-08-15) ──────────────────────────────────
+  depthTexture = null,
 }) {
   // THE GATE. Clamped/coerced ONCE, here, so every `if (activeTier >= N)`
   // below reads a known-good integer regardless of what a caller passed —
@@ -445,8 +489,24 @@ export function buildWaterSurfaceMaterial({
   // true BY CONSTRUCTION rather than by trusting the resolver's contract a
   // second time.
   const activeTier = Number.isFinite(tier) ? Math.max(0, Math.floor(tier)) : WATER_DEFAULT_TIER;
-  const { texture, vec2, vec3, vec4, float, uniform, positionWorld, smoothstep, clamp, exp, log, max, dot, mrt } =
-    THREE.TSL;
+  const {
+    texture,
+    vec2,
+    vec3,
+    vec4,
+    float,
+    uniform,
+    positionWorld,
+    smoothstep,
+    clamp,
+    exp,
+    log,
+    max,
+    dot,
+    mrt,
+    step,
+    mix,
+  } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
   const uBodyRect = uniform(vec4(bodyRect.minX, bodyRect.minY, bodyRect.maxX, bodyRect.maxY));
@@ -468,6 +528,15 @@ export function buildWaterSurfaceMaterial({
   // here at all" floor, and exposing a knob that can be raised above the upper
   // edge would let the author invert the ramp into a hard edge by accident.
   const uPresenceEdge1 = uniform(float(WATER_PRESENCE_EDGE1));
+  // THE DEPTH-AUTHORITY GATE's OWN EXPECTED DEPTH (2026-08-15) —
+  // `computeTieSafeExpectedDepth`'s result for THIS floor's own background
+  // item's rank, pushed by `setExpectedDepth` every sync, the exact shape
+  // `window-render.js`'s own `uExpectedDepth` uses. Defaults to 0: with the
+  // depth texture cleared to the far plane (1) until the first real depth
+  // pass runs, `depthHere(1) >= uExpectedDepth(0)` always holds, so an
+  // unwired/not-yet-synced caller fails OPEN (water draws) — never a global
+  // blackout from an upstream failure.
+  const uExpectedDepth = uniform(float(0));
 
   // WORLD → mask UV. `positionWorld` (not `uv()`): the quad's own UVs would
   // only be right if the mesh exactly covered the mask rect, and it does not —
@@ -749,6 +818,37 @@ export function buildWaterSurfaceMaterial({
     material.blendDstAlpha = THREE.OneFactor;
   }
 
+  // ── THE DEPTH-AUTHORITY GATE (2026-08-15) — see the module header ────────
+  // A JS-time branch: with no depth texture OR no view rect, the whole lookup
+  // is compiled OUT rather than multiplied by a one (Effects.md Law 4 /
+  // `tsl/no-uniform-gates`), so an unwired caller (the torture fixture, a
+  // material built before envLight's view rect exists) pays nothing extra and
+  // renders exactly as it did before this migration — paint order alone.
+  //
+  // Screen UV comes from `positionWorld` mapped through the SAME `uViewRect`
+  // the geometry pass wrote `buf:scene.depth` against — byte-for-byte
+  // `window-render.js`'s own floor-gate mapping, so the two agree about where
+  // a world point lands on screen without a second derivation. NOT `uv()` or
+  // the built-in `screenUV()`: this quad is a world-space AABB crop, not a
+  // fullscreen pass (`feedback_shared_texture_node_carries_the_wrong_uv`).
+  let notOccluded = float(1);
+  let floorGateCompiled = false;
+  if (depthTexture && uViewRect) {
+    const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
+    const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
+    const screenU = positionWorld.x.sub(uViewRect.x).div(viewSpanX);
+    const screenV = positionWorld.y.sub(uViewRect.y).div(viewSpanY);
+    const screenUv = vec2(clamp(screenU, 0, 1), clamp(screenV, 0, 1));
+    const depthHere = texture(depthTexture, screenUv);
+    // `step(edge,x) = x>=edge ? 1:0`, so this reads "is the stored depth at
+    // this pixel AT OR ABOVE my own floor's rank" — 1 unless something ranked
+    // strictly higher (a Tile, a roof, a floor above) is drawn over it. The
+    // SAME single ordinal comparison every other depth-authority consumer
+    // already uses; no tolerance/softness needed, a real rank is exact.
+    notOccluded = step(uExpectedDepth, depthHere);
+    floorGateCompiled = true;
+  }
+
   // ── MESH 1: ABSORPTION ───────────────────────────────────────────────────
   // `dst · src` — the bed, multiplied per channel. The wet band rides here and
   // ONLY here, as a neutral darkening with no colour of its own.
@@ -759,13 +859,19 @@ export function buildWaterSurfaceMaterial({
   const foamHide = float(1).sub(field.foam);
 
   const absorbMaterial = new THREE.NodeMaterial();
-  absorbMaterial.colorNode = vec4(bedTransmit.mul(float(1).sub(wetBand)).mul(foamHide), 1);
+  const absorbColor = bedTransmit.mul(float(1).sub(wetBand)).mul(foamHide);
+  // OCCLUDED → `vec3(1,1,1)`, the multiply's OWN neutral element (see the
+  // header on why white, not black — [[feedback_blend_neutral_element_is_per_blend]]):
+  // whatever already won this pixel passes through completely untouched,
+  // never darkened by a water pass that should not be there at all.
+  absorbMaterial.colorNode = vec4(mix(vec3(1, 1, 1), absorbColor, notOccluded), 1);
   configureShared(absorbMaterial);
   absorbMaterial.blendSrc = THREE.ZeroFactor;
   absorbMaterial.blendDst = THREE.SrcColorFactor;
   // WHITE, not the global zero — the multiplicative identity. See the header:
   // `attr · 0` would erase the floor attributes under every water pixel, and
-  // blend state is not per-attachment on WebGL2.
+  // blend state is not per-attachment on WebGL2. Already occlusion-safe as-is
+  // (white is neutral regardless of `notOccluded`), so it needs no gating.
   absorbMaterial.mrtNode = mrt({ attr: vec4(1, 1, 1, 1) });
 
   // ── MESH 2: IN-SCATTER ───────────────────────────────────────────────────
@@ -783,11 +889,16 @@ export function buildWaterSurfaceMaterial({
   // PLUS the sun/sky reflection. 0.85 rather than pure white on the foam term:
   // blown-out foam reads as a UI overlay, and the grade stack downstream has
   // its own opinion about highlights.
+  //
+  // OCCLUDED → the WHOLE term scaled toward 0, the add's own neutral element —
+  // an occluded water pixel must emit no light at all, not merely skip its
+  // bed multiply.
   inscatterMaterial.colorNode = vec4(
     inscatter
       .mul(foamHide)
       .add(field.foam.mul(float(0.85)))
-      .add(reflection),
+      .add(reflection)
+      .mul(notOccluded),
     1
   );
   configureShared(inscatterMaterial);
@@ -882,6 +993,20 @@ export function buildWaterSurfaceMaterial({
     setOpacity(v) {
       uOpacity.value = v;
     },
+    /** THE DEPTH-AUTHORITY GATE's own push — `computeTieSafeExpectedDepth(rank,
+     * maxRank)` for THIS floor's own background item's rank, on the SAME
+     * cadence `window-render.js#setExpectedDepth` uses (every sync, never
+     * cached — a floor's own background item can change RANK whenever the
+     * depth authority rebuilds, not just on a floor switch). @param {number} v */
+    setExpectedDepth(v) {
+      uExpectedDepth.value = Number.isFinite(v) ? v : 0;
+    },
+    /** For the debug report — whether the occlusion gate actually compiled
+     * (both a depth texture AND a view rect were present at build time) or
+     * fell back to unconditionally-open (paint order alone, pre-migration
+     * behaviour). `false` here on a live multi-floor scene means the SAME
+     * "renders above things that should mask it" bug this migration fixed. */
+    floorGateCompiled,
     /** WATER_PARAMS `shorelineDepth`. Clamped ABOVE the fixed lower edge: the
      * two define a band, and a band whose top sits at or below its bottom
      * turns `smoothstep` back into the step function that made the shoreline

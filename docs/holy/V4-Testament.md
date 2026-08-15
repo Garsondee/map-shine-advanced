@@ -1192,6 +1192,10 @@ vision leak) is scheduled by the author explicitly, not silently deferred.**
 1. Stage 0 (measure) + the legacy cross-check sweep.
 2. Stage 1 (shade once) — the Mansion's biggest single win.
 3. Fire look rounds (author-led, independent of engine stages) — it's close; ride the momentum.
+4. **THE RECKONING** — the full-system rendering audit (`docs/holy/V4-Reckoning.md`, its own
+   holy document, opened 2026-08-15 at the author's command after the upper-floor cost mystery
+   resisted its first fixes). First act: R0.1, the post-S1a verdict capture for Bug #20. Runs
+   alongside the stages; its findings feed them; its census must reach every runtime file.
 
 **NEXT**
 4. Stages 2–3 (lights, post).
@@ -2198,6 +2202,12 @@ on, not a queue entry beside them.
   harness scripts) found during countersign and fixed. DEFERRED-S1a recorded: the per-cell
   interior split is built and tested but unconsumed — real untaken upside, named so it cannot
   rot.
+- **The Reckoning opened** 2026-08-15 — Claude Fable 5, at the author's command: the
+  upper-floor cost mystery (Bug #20's two zones at 9.5×/9.8×, fix `BUILT (unverified)`)
+  escalated into a full-system audit campaign with its own holy document
+  (`docs/holy/V4-Reckoning.md`): a 41-row census over all 259 runtime files, a pass protocol
+  with twelve standard questions, a multiplier ledger, and fifteen seeded leads. Opening
+  surveys archived in `docs/planning/reckoning/`. Registered in Book III's NOW list, slot 4.
 
 ## OPEN QUESTIONS TO THE AUTHOR
 

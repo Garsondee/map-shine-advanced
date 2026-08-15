@@ -51,7 +51,7 @@ building on any of this.
 | 18 | Selecting a token shows a frozen, screen-locked second copy of the map inside explored fog | fog-of-war / art suppression | `BUILT (unverified)` — fix live-tested, author hasn't looked yet |
 | 19 | Painted `_Fire` region doesn't register on First Floor even with visible white paint | fire / mask extraction | `OPEN` (root cause) — workaround `BUILT`, live-tested |
 | 20 | First Floor runs at ~half Ground floor's framerate — `geometry.depthDraw`/`geometry.earlyZPrepass` cost ~10x more there | depth authority / early-Z | `BUILT (verified engaged)` 2026-08-15 — split live on the author's machine, both zones ~4-5× cheaper; upper-floor gap persists from a DIFFERENT cause (Reckoning F-R0.1.1) |
-| **21** | **Foundry re-renders the whole map every frame for a consumer that usually isn't running — the upper floor's real cost (27 fps → 120 fps when suppressed)** | interface seam / fog / perf | `OPEN` — **cause CONFIRMED by live A/B**, fix designed not built |
+| **21** | **Foundry re-renders the whole map every frame for a consumer that usually isn't running — the upper floor's real cost (27 fps → 120 fps when suppressed)** | interface seam / fog / perf | `BUILT (unverified)` 2026-08-15 — third lever + MSA-owned explored-fog wash, on by default, no flag |
 
 ---
 
@@ -119,10 +119,53 @@ precondition shape. Cheapest first:
 3. Feed the filter a texture MSA already owns — invasive, touches the seam's
    "never draw the same thing twice" doctrine. Last resort.
 
+### The fix, as built (2026-08-15, same day) — `BUILT (unverified)`
+
+**On by default, no flag** — the author's explicit rule: *"If you build it and
+place it behind a console command or button I might forget to do that work which
+will lead to confusion and wasted time."*
+
+`src/foundry/canvas-compositing.js` gains a **third lever** beside the two it
+already had, all applied together by `applyArtSuppression()` and reversed
+together by `restoreFoundryArt()` (so the renderer A/B toggle stays honest):
+
+```
+canvas.primary.sprite.renderable = false;   // Foundry's map OUTPUT   (since 2026-07)
+canvas.effects.renderable        = false;   // Foundry's lighting/vision output
+canvas.primary.renderable        = false;   // the map RE-RENDER      (NEW — Bug #21)
+```
+
+**MSA takes over the one thing that texture was for.** The fog filter's explored
+wash now samples an MSA-owned 1×1 texture (`applyExploredFogBase()`), re-asserted
+on the `visibilityRefresh` hook because `CanvasVisibility#_draw()` builds a brand
+new filter on every canvas draw and would silently re-adopt Foundry's texture.
+
+**What MSA did NOT take over, deliberately: the vision LOGIC.** Foundry keeps
+sweep polygons, the vision mask, fog exploration and its persistence, and every
+"who may see what" decision. Those are correctness and they are Foundry's job.
+The masking behaviour is therefore bit-identical: UNEXPLORED is still an opaque
+`vec4(unexploredColor, 1.0)` that hides MSA's map (the player-secrets guarantee),
+CURRENTLY-VISIBLE is still fully transparent. Only the 50%-alpha memory wash
+changed hands.
+
+**Why a flat colour is faithful:** substituting mid-grey into the shader gives
+`explored.rgb = exploredColor*B(0.5) + 0.5*exploredColor = exploredColor` — exactly
+vanilla's result for a mid-brightness map pixel. The flat base reproduces
+vanilla's average and loses only the per-pixel modulation, under a blurred
+half-alpha wash, over MSA's own live map which is still fully visible beneath.
+Tunable: `MapShine.setExploredFogBase('#404040')`.
+
+Verification so far: `npm run verify` green (9,279 tests, +17 new pinning the
+colour resolver's clamping and its fail-to-default behaviour — a malformed colour
+must never be able to take out fog rendering). The `interface-seam` report and
+the Reckoning Report's `foundryCanvas` census both now read
+`primaryRenderable:false` + `exploredFogBaseOwner:"msa"` when healthy.
+
 ### Fixed when
 
 The upper floor holds its frame rate with fog-of-war **on and correct** — a live
-test with a controlled token, which is the exact condition that hid Bug #18.
+test **with a controlled token** (the exact condition that hid Bug #18 for weeks),
+plus the author's eyes on how explored regions now read.
 
 ## 1. Changing a tile's graphic path doesn't update its visuals
 

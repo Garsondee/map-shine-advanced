@@ -303,6 +303,9 @@ import {
   applyArtSuppression,
   restoreFoundryArt,
   getCanvasCompositingReport,
+  getFoundryRendererCensus,
+  setExploredFogBase,
+  getExploredFogBase,
   registerCanvasTearDownWatchdog,
   registerSettings,
   readSetting,
@@ -624,6 +627,13 @@ MapShine.armWindProbe = runInteractiveVtPanViewerWindProbe;
 MapShine.setDebugFirstRenderProbe = setVtPanViewerDebugFirstRenderProbe;
 MapShine.setDebugForceMaskNodeOff = setVtPanViewerDebugForceMaskNodeOff;
 MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
+// THE EXPLORED-FOG WASH (Bug #21) — MSA owns the look of explored-but-unseen
+// regions now that Foundry no longer re-renders the map to produce it. This is a
+// LOOK knob, not an on/off: the suppression itself is unconditional and has no
+// flag (author's rule, 2026-08-15). `MapShine.setExploredFogBase('#404040')`,
+// or `{r,g,b}`, or 0xRRGGBB; darker = explored areas read dimmer.
+MapShine.setExploredFogBase = setExploredFogBase;
+MapShine.getExploredFogBase = getExploredFogBase;
 // SHADER-REBUILD PROBE — arm, pan, read. See setVtPanViewerShaderRebuildProbe's
 // own doc in vt-pan-viewer.js for the console workflow.
 MapShine.setShaderRebuildProbe = setVtPanViewerShaderRebuildProbe;
@@ -4204,6 +4214,27 @@ function install() {
         rows,
       };
     });
+    // THE FOUNDRY-SIDE CENSUS (added 2026-08-15, report v3) — the one large GPU
+    // consumer MSA's own zones can NEVER see, because it lives in Foundry's
+    // separate PIXI/WebGL context on Foundry's own ticker.
+    //
+    // Why it matters, from this repo's own words: `canvas-compositing.js`'s
+    // PRIMARY-CACHE-FREEZE FIX (2026-08-13, Bug #18) deliberately leaves
+    // `canvas.primary.renderable === true` so `CachedContainer#render` keeps
+    // re-rendering every map object into `canvas.primary.renderTexture` each
+    // frame — a canvas-RESOLUTION render texture — purely to keep Foundry's own
+    // fog shader fed. That file states the cost honestly and then says
+    // "Measure before assuming it matters." Nobody ever did. This section is
+    // that measurement's raw material: the render texture's size, and how many
+    // PIXI objects are actually being re-rendered into it on THIS floor.
+    // Both halves live in the foundry adapter (the ONE door for Foundry
+    // globals): the seam answers "is Foundry's art showing", the census answers
+    // "how much is Foundry's renderer still DOING" — different questions, and
+    // only the first had ever been asked.
+    const foundryCanvasSection = grab('foundryCanvas', () => ({
+      seam: getCanvasCompositingReport(),
+      ...getFoundryRendererCensus(),
+    }));
     const suspects = grab('suspects', () => ({
       dofEnabled: effectsSection?.rows?.find((r) => r.id === 'depthOfField')?.enabled ?? null,
       windowSurfacesAlive: census?.windowSurfacesAlive ?? null,
@@ -4267,6 +4298,7 @@ function install() {
         earlyZ,
         effects: effectsSection,
         suspects,
+        foundryCanvas: foundryCanvasSection,
         vram: vramSection,
         wholeImage: wholeImageSection,
         zones: zonesSection,

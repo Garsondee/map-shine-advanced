@@ -12,11 +12,60 @@
  * over a void. Every assertion below is a variant of "when in doubt, leave
  * Foundry rendering."
  */
-import { decideArtSuppression, MSA_OWNED_GROUPS } from '../canvas-compositing.js';
+import {
+  decideArtSuppression,
+  MSA_OWNED_GROUPS,
+  resolveExploredFogBase,
+  DEFAULT_EXPLORED_FOG_BASE,
+} from '../canvas-compositing.js';
 
 const HEALTHY = { contextAlpha: true, clearAlpha: 0, groupsPresent: true };
 
 export async function run(t) {
+  // ---- THE THIRD LEVER's colour input (Bug #21) -----------------------------
+  // MSA now supplies the explored-fog wash directly instead of letting Foundry
+  // re-render the whole map to produce it. This resolver stands between author
+  // input and a live shader uniform, so a bad value must degrade to the default
+  // and never throw: a malformed colour taking out fog rendering would be a
+  // player-visible information leak, not a cosmetic bug.
+  {
+    const d = resolveExploredFogBase(undefined);
+    t.ok(
+      'undefined => the documented mid-grey default',
+      d.r === DEFAULT_EXPLORED_FOG_BASE.r && d.g === 128 && d.b === 128
+    );
+    t.ok('default is mid-grey, which reproduces vanilla explored fog for a mid-brightness pixel', d.r === 128);
+
+    const hex = resolveExploredFogBase('#204080');
+    t.ok('#rrggbb parsed', hex.r === 0x20 && hex.g === 0x40 && hex.b === 0x80);
+    t.ok(
+      'a bare hex without # parses the same',
+      JSON.stringify(resolveExploredFogBase('204080')) === JSON.stringify(hex)
+    );
+
+    const num = resolveExploredFogBase(0x204080);
+    t.ok('0xRRGGBB parsed', num.r === 0x20 && num.g === 0x40 && num.b === 0x80);
+
+    const obj = resolveExploredFogBase({ r: 10, g: 20, b: 30 });
+    t.ok('{r,g,b} passed through', obj.r === 10 && obj.g === 20 && obj.b === 30);
+    const clamped = resolveExploredFogBase({ r: -5, g: 300, b: 12.6 });
+    t.ok('out-of-range clamped and rounded, never NaN', clamped.r === 0 && clamped.g === 255 && clamped.b === 13);
+
+    for (const bad of ['nonsense', '#12', {}, { r: 1, g: 2 }, null, NaN, [], true]) {
+      const got = resolveExploredFogBase(bad);
+      t.ok(
+        `unusable input (${JSON.stringify(bad)}) falls back to the default instead of throwing`,
+        got.r === 128 && got.g === 128 && got.b === 128
+      );
+    }
+    // The default must be a COPY — a caller mutating what it got back must not
+    // be able to rewrite the module's own constant for every later call.
+    const a = resolveExploredFogBase(null);
+    a.r = 7;
+    t.ok('the default is returned as a fresh copy', resolveExploredFogBase(null).r === 128);
+    t.ok('the exported constant is frozen', Object.isFrozen(DEFAULT_EXPLORED_FOG_BASE));
+  }
+
   // ---- the happy path -------------------------------------------------
   {
     const d = decideArtSuppression(HEALTHY);

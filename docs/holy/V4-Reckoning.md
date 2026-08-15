@@ -987,7 +987,31 @@ and why it drags MSA's own unrelated fullscreen passes down with it (F-R0.1.5).
 **⇒ F-R0.1.7 promoted to S4 (measured cause). This is the upper-floor mystery's
 answer.** Not the depth passes, not the effects, not the layer stack.
 
-### THE FIX DIRECTION (design only — not built; Law 7, and fog is sacred)
+### ✅ THE FIX, BUILT SAME DAY — on by default, no flag (author's rule)
+
+The author's instruction on reading the verdict: *"If you build a fix it must be
+on by default not hidden behind anything else… we shouldn't be rendering the map
+in Foundry AND in MSA at the same time that's silly."* Built, `npm run verify`
+green (9,279 tests):
+
+- **Third lever** in `applyArtSuppression()`: `canvas.primary.renderable = false`
+  alongside the two existing ones; `restoreFoundryArt()` reverses all three
+  together so the renderer A/B toggle stays honest.
+- **MSA owns the explored-fog wash**: the visibility filter's `primaryTexture`
+  now points at an MSA 1×1 texture, re-asserted on `visibilityRefresh` because
+  `CanvasVisibility#_draw()` builds a fresh filter on every canvas draw.
+- **Foundry keeps the vision LOGIC** — sweep polygons, the vision mask, fog
+  exploration and persistence, every "who may see what" decision. Masking is
+  bit-identical: unexplored still opaque (the player-secrets guarantee), visible
+  still transparent. Only the 50%-alpha memory wash changed hands.
+- Look knob: `MapShine.setExploredFogBase('#404040')`. Mid-grey default
+  reproduces vanilla's average exactly (see Bug #21 for the shader algebra).
+- Bug #18 is now structurally unreachable: nothing samples that texture.
+
+Status `BUILT (unverified)` — needs the author's eyes, **with a controlled
+token**, the exact condition that hid Bug #18.
+
+### The fix direction as originally designed (kept for the record)
 
 The 2026-08-13 change was correct in kind and wrong in scope: it made an
 **unconditional** payment for a **conditional** consumer — the named silent-

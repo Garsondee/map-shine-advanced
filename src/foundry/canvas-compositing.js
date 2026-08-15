@@ -188,6 +188,14 @@
  * equation) — do not re-introduce the parent-level shortcut to "optimize"
  * this without re-deriving that it doesn't reopen the frozen-texture bug.
  *
+ * ⚠️ SUPERSEDED 2026-08-15 — IT MATTERED. Measured at 37.1 ms/frame vs 8.35 ms
+ * on a two-floor map's upper floor (Bug #21). The cost is gone and the frozen-
+ * texture bug is now structurally unreachable, because nothing samples that
+ * texture any more: MSA supplies the fog filter's explored wash directly. See
+ * "THE THIRD LEVER" further down. The paragraph above is kept because its
+ * warning still binds — the parent-level shortcut (`canvas.environment.
+ * renderable = false`) remains the wrong move, for the reason it gives.
+ *
  * ============================================================================
  * THE COUPLING RULE — why `decideArtSuppression` exists (the safety slide)
  * ============================================================================
@@ -222,6 +230,10 @@
  *   Expect to drag an outline with no picture until that is wired. Real,
  *   bounded, and NOT silently pretended away.
  */
+
+import { createLogger } from '../core/log.js';
+
+const log = createLogger('interface-seam');
 
 /** The Foundry canvas groups MSA takes over. `visibility` is NOT among them — see the header. */
 export const MSA_OWNED_GROUPS = Object.freeze(['primary', 'effects']);
@@ -400,6 +412,210 @@ function reassertClearAlpha() {
   }
 }
 
+// ============================================================================
+// THE THIRD LEVER (2026-08-15) — MSA takes the explored-fog render off Foundry
+// ============================================================================
+//
+// THE COST THE HEADER ABOVE ASKED SOMEONE TO MEASURE. The PRIMARY-CACHE-FREEZE
+// FIX kept `canvas.primary.renderable = true` so `CachedContainer#render()` would
+// keep re-rendering every map object into `canvas.primary.renderTexture` each
+// frame, and closed with "Measure before assuming it matters." Measured, live,
+// 2026-08-15 (Bug #21 / `docs/holy/V4-Reckoning.md` R0.9): on a two-floor map's
+// upper floor it was costing **37.1 ms/frame vs 8.35 ms** — 27 fps against a
+// vsync-capped 120. It mattered enormously.
+//
+// It is also, structurally, the V2 blunder this file exists to prevent: TWO
+// RENDERERS DRAWING THE SAME PICTURE. MSA draws the map; Foundry was drawing it
+// again into a texture, every frame, at canvas resolution.
+//
+// WHO ACTUALLY READ THAT TEXTURE (grepped in the vendored v14 source, all six):
+//   effects.mjs:245, rendered-effect-source.mjs:290, point-vision-source.mjs:424,
+//   point-darkness-source.mjs:236, base-light-source.mjs:238   -> all live inside
+//     `canvas.effects`, which this file already suppresses. They never render.
+//   visibility.mjs:336 (the fog filter)                        -> THE ONLY LIVE
+//     CONSUMER, and it uses the texture for exactly one term.
+//
+// WHAT THAT ONE TERM DOES (rendering/filters/visibility.mjs:140,148-149):
+//
+//     vec4 baseColor = texture2D(primaryTexture, vMaskTextureCoord);
+//     float reflec   = perceivedBrightness(baseColor.rgb);
+//     vec4 explored  = vec4(min((exploredColor * reflec)
+//                             + (baseColor.rgb * exploredColor), vec3(1.0)), 0.5);
+//
+// `baseColor` tints the EXPLORED-but-not-currently-visible zone and nothing else.
+// The masking that matters is untouched by it: UNEXPLORED is a flat
+// `vec4(unexploredColor, 1.0)` (opaque — it hides MSA's map, which is what keeps
+// players' secrets), and CURRENTLY-VISIBLE is `vec4(0.0)` (transparent — MSA's
+// map shows through). Only the 50%-alpha memory wash reads the map.
+//
+// SO: MSA hands the filter its OWN texture for that term and Foundry stops
+// redrawing the map. Foundry keeps every scrap of the vision LOGIC — sweep
+// polygons, the vision mask, fog exploration and its persistence, who may see
+// what — because that logic is correctness, it is Foundry's job, and MSA must
+// not fork it (the parity doctrine, and the fog-of-war gap is a live security
+// concern). MSA takes over only the LOOK of the stale region, which is a
+// rendering decision, which is MSA's job.
+//
+// WHY A FLAT COLOUR IS FAITHFUL, not a shrug: substitute a mid-grey C=0.5 into
+// the shader above and, for the default `exploredColor` of white,
+// `explored.rgb = exploredColor*B(0.5) + 0.5*exploredColor = exploredColor` —
+// exactly what vanilla produces for a mid-brightness map pixel. The flat base
+// reproduces vanilla's AVERAGE result and loses only the per-pixel modulation
+// (bright map areas hazing slightly more than dark ones) — for a blurred,
+// half-alpha wash drawn over MSA's own live map, which is still fully visible
+// underneath. The knob is `setExploredFogBase()` so the author can tune the
+// memory wash directly instead of inheriting whatever the art happened to be.
+//
+// ⚠️ This is ON BY DEFAULT and has no flag, by the author's explicit rule
+// (2026-08-15): "If you build it and place it behind a console command or button
+// I might forget to do that work which will lead to confusion and wasted time."
+// `restoreFoundryArt()` reverses all three levers together so the renderer A/B
+// toggle stays honest.
+
+// `createLogger`, not console.* — the `log/one-door` tripwire's whole point is
+// that console output cannot be exported, so a bypassed line is a line missing
+// from the flight-recorder bundle the author sends when something goes wrong.
+// Everything below is exactly the kind of thing you want in that bundle.
+
+/** MSA's default explored-fog base — mid-grey; see the section header for why. */
+export const DEFAULT_EXPLORED_FOG_BASE = Object.freeze({ r: 128, g: 128, b: 128 });
+
+/**
+ * Normalise an explored-fog base colour. Pure — the clamping and the shape are
+ * what the live path depends on, so they are Node-tested rather than trusted.
+ *
+ * Accepts `{r,g,b}` (0-255), a `#rrggbb` string, or a 24-bit number. Anything
+ * unusable returns the default rather than throwing: a bad colour must never be
+ * able to take out the fog render.
+ *
+ * @param {object|string|number|null|undefined} input
+ * @returns {{r: number, g: number, b: number}} 0-255 integers
+ */
+export function resolveExploredFogBase(input) {
+  const clamp = (v) => Math.max(0, Math.min(255, Math.round(Number(v))));
+  const ok = (v) => Number.isFinite(Number(v));
+  if (typeof input === 'string') {
+    const hex = input.trim().replace(/^#/, '');
+    if (/^[0-9a-fA-F]{6}$/.test(hex)) {
+      return {
+        r: parseInt(hex.slice(0, 2), 16),
+        g: parseInt(hex.slice(2, 4), 16),
+        b: parseInt(hex.slice(4, 6), 16),
+      };
+    }
+    return { ...DEFAULT_EXPLORED_FOG_BASE };
+  }
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    const n = Math.max(0, Math.min(0xffffff, Math.round(input)));
+    return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
+  }
+  if (input && ok(input.r) && ok(input.g) && ok(input.b)) {
+    return { r: clamp(input.r), g: clamp(input.g), b: clamp(input.b) };
+  }
+  return { ...DEFAULT_EXPLORED_FOG_BASE };
+}
+
+/** The live base colour + its 1×1 PIXI texture. Rebuilt only when the colour changes. */
+let exploredFogBase = { ...DEFAULT_EXPLORED_FOG_BASE };
+let exploredFogTexture = null;
+let exploredFogTextureKey = null;
+
+/**
+ * The 1×1 texture MSA feeds the fog filter in place of Foundry's whole-map
+ * re-render. Built from a canvas element (no PIXI internals), cached by colour.
+ * A 1×1 texture with default clamped wrapping returns the same colour for every
+ * sample, including the out-of-range coordinates the filter can produce.
+ * @returns {object|null} a PIXI.Texture, or null if PIXI is unavailable
+ */
+function ensureExploredFogTexture() {
+  const key = `${exploredFogBase.r},${exploredFogBase.g},${exploredFogBase.b}`;
+  if (exploredFogTexture && exploredFogTextureKey === key) return exploredFogTexture;
+  if (typeof PIXI === 'undefined' || typeof document === 'undefined') return null;
+  try {
+    const el = document.createElement('canvas');
+    el.width = 1;
+    el.height = 1;
+    const ctx = el.getContext('2d');
+    if (!ctx) return null;
+    ctx.fillStyle = `rgb(${exploredFogBase.r},${exploredFogBase.g},${exploredFogBase.b})`;
+    ctx.fillRect(0, 0, 1, 1);
+    const next = PIXI.Texture.from(el);
+    // Destroy the previous one only AFTER the new one exists — a throw halfway
+    // must never leave the filter holding a destroyed texture.
+    const prev = exploredFogTexture;
+    exploredFogTexture = next;
+    exploredFogTextureKey = key;
+    try {
+      prev?.destroy(true);
+    } catch {
+      /* a texture we no longer reference failing to free is not worth a throw */
+    }
+    return exploredFogTexture;
+  } catch (err) {
+    log.error('building the explored-fog base texture failed', { err: err?.message ?? String(err) });
+    return null;
+  }
+}
+
+/**
+ * Point Foundry's visibility filter at MSA's explored-fog base instead of
+ * `canvas.primary.renderTexture`. Idempotent and cheap (a reference compare), so
+ * it is safe on a per-refresh hook — which it needs to be, because
+ * `CanvasVisibility#_draw()` builds a BRAND NEW filter on every canvas draw and
+ * would silently re-adopt Foundry's texture otherwise.
+ *
+ * @returns {{applied: boolean, reason: string}}
+ */
+export function applyExploredFogBase() {
+  try {
+    const filter = typeof canvas !== 'undefined' ? (canvas?.visibility?.filter ?? null) : null;
+    if (!filter?.uniforms) return { applied: false, reason: 'no visibility filter yet (canvas not drawn)' };
+    const tex = ensureExploredFogTexture();
+    if (!tex) return { applied: false, reason: 'could not build the explored-fog base texture' };
+    if (filter.uniforms.primaryTexture === tex) return { applied: true, reason: 'already applied' };
+    filter.uniforms.primaryTexture = tex;
+    return { applied: true, reason: 'explored-fog base is MSA-owned' };
+  } catch (err) {
+    log.error('pointing the fog filter at MSA’s explored base failed', { err: err?.message ?? String(err) });
+    return { applied: false, reason: `threw: ${err?.message ?? err}` };
+  }
+}
+
+/**
+ * Give the fog filter Foundry's own render texture back. Paired with
+ * `restoreFoundryArt()` — if Foundry is drawing the map again, its fog should
+ * read the map again.
+ * @returns {boolean}
+ */
+function restoreFoundryFogBase() {
+  try {
+    const filter = typeof canvas !== 'undefined' ? (canvas?.visibility?.filter ?? null) : null;
+    const rt = typeof canvas !== 'undefined' ? (canvas?.primary?.renderTexture ?? null) : null;
+    if (!filter?.uniforms || !rt) return false;
+    filter.uniforms.primaryTexture = rt;
+    return true;
+  } catch (err) {
+    log.error('restoring the fog filter’s primaryTexture failed', { err: err?.message ?? String(err) });
+    return false;
+  }
+}
+
+/**
+ * Set the colour MSA washes explored-but-unseen regions with. Applies live.
+ * @param {object|string|number} color - `{r,g,b}` 0-255, `#rrggbb`, or 0xRRGGBB
+ * @returns {{base: {r: number, g: number, b: number}, applied: boolean, reason: string}}
+ */
+export function setExploredFogBase(color) {
+  exploredFogBase = resolveExploredFogBase(color);
+  const res = applyExploredFogBase();
+  return { base: { ...exploredFogBase }, ...res };
+}
+
+/** The colour MSA is currently washing explored regions with. */
+export function getExploredFogBase() {
+  return { ...exploredFogBase };
+}
+
 /**
  * Apply (or refuse) art suppression, from measured facts. Idempotent — safe to
  * call on every canvasReady.
@@ -423,22 +639,27 @@ export function applyArtSuppression() {
   }
 
   try {
-    // Two levers, not one — see header §3 / "THE PRIMARY-CACHE-FREEZE FIX".
-    // `canvas.primary` itself is deliberately left renderable:true so its
-    // CachedContainer keeps refreshing `renderTexture` every frame; only the
-    // bound sprite's on-screen blit is suppressed.
-    canvas.primary.sprite.renderable = false;
-    canvas.effects.renderable = false;
+    // THREE levers — see header §3, "THE PRIMARY-CACHE-FREEZE FIX", and "THE
+    // THIRD LEVER" above. Order matters only for readability; all are idempotent.
+    canvas.primary.sprite.renderable = false; // Foundry's map OUTPUT — off since 2026-07
+    canvas.effects.renderable = false; // Foundry's lighting/vision output — off
+    // ...and the map RE-RENDER itself (2026-08-15, Bug #21). The cache existed
+    // for one live consumer, the fog filter's explored wash, and MSA now supplies
+    // that directly. Nothing left reads the texture, so nothing needs it built.
+    canvas.primary.renderable = false;
   } catch (err) {
     console.error('[MSA] interface seam: suppressing Foundry primary/effects failed:', err);
     return {
       applied: false,
       code: 'suppress-threw',
-      reason: `Setting canvas.primary.sprite.renderable/canvas.effects.renderable = false threw: ${err?.message ?? err}`,
+      reason: `Setting canvas.primary.sprite.renderable/canvas.effects.renderable/canvas.primary.renderable = false threw: ${err?.message ?? err}`,
       facts,
     };
   }
-  return { applied: true, code: decision.code, reason: decision.reason, facts };
+  // The fog filter may not exist yet on the first canvasReady — this is
+  // idempotent and the `visibilityRefresh` hook re-applies until it takes.
+  const fogBase = applyExploredFogBase();
+  return { applied: true, code: decision.code, reason: decision.reason, facts, fogBase };
 }
 
 /**
@@ -461,6 +682,15 @@ export function restoreFoundryArt() {
     }
     if (effects) {
       effects.renderable = true;
+      restored = true;
+    }
+    // The third lever, reversed — and the fog filter handed back Foundry's own
+    // texture. If Foundry is drawing the map again its fog must read the map
+    // again, or the A/B toggle would compare against a half-restored Foundry.
+    if (primary) {
+      primary.renderable = true;
+      primary.renderDirty = true; // the cache is stale by exactly as long as it was off
+      restoreFoundryFogBase();
       restored = true;
     }
     return restored;
@@ -499,6 +729,18 @@ export function registerCanvasCompositing() {
   // §2 — re-assert after Foundry's environment colour update clobbers the alpha.
   Hooks.on('initializeCanvasEnvironment', () => {
     reassertClearAlpha();
+  });
+
+  // §3 — re-assert MSA's explored-fog base. `CanvasVisibility#_draw()` builds a
+  // BRAND NEW VisibilityFilter (groups/visibility.mjs:331) on every canvas draw
+  // and hands it `canvas.primary.renderTexture`, so a one-shot assignment would
+  // be silently reverted by the next scene load or canvas redraw — and the
+  // symptom would be a perf regression nobody could see, which is precisely how
+  // this cost hid for two days. `visibilityRefresh` fires from the group's own
+  // refresh (groups/visibility.mjs:635); the handler is a reference compare on
+  // the already-applied path, so riding a frequent hook is deliberate and cheap.
+  Hooks.on('visibilityRefresh', () => {
+    applyExploredFogBase();
   });
 
   return { registered: true, reason: null };
@@ -589,10 +831,22 @@ export function getFoundryRendererCensus() {
   const rtW = read('renderTexture.width', () => rt?.width ?? null);
   const rtH = read('renderTexture.height', () => rt?.height ?? null);
 
+  const filter = read('canvas.visibility.filter', () => c?.visibility?.filter ?? null);
   return {
-    // TRUE = Foundry re-renders its whole primary group into the cache every
-    // frame. Deliberate (Bug #18) — and the thing to measure.
+    // FALSE is the healthy state since 2026-08-15 (Bug #21): Foundry no longer
+    // re-renders the map. TRUE means the third lever is off and the whole-map
+    // re-render is back — the 27-fps state.
     primaryRenderable: read('primary.renderable', () => primary?.renderable ?? null),
+    // Which texture the fog filter's explored wash is reading. 'msa' is healthy.
+    exploredFogBaseOwner: read('fog filter primaryTexture owner', () => {
+      if (!filter?.uniforms) return 'no-filter';
+      const t = filter.uniforms.primaryTexture;
+      if (!t) return 'none';
+      if (t === exploredFogTexture) return 'msa';
+      if (t === rt) return 'foundry-primary-cache';
+      return 'other';
+    }),
+    exploredFogBase: { ...exploredFogBase },
     primaryCacheTexture: rtW && rtH ? { w: rtW, h: rtH, mpx: Math.round(((rtW * rtH) / 1e6) * 100) / 100 } : null,
     primaryChildren: kids.length,
     primaryChildrenRenderable: renderableChildren,
@@ -604,11 +858,13 @@ export function getFoundryRendererCensus() {
     ),
     readErrors,
     interpretation:
-      'primaryRenderable:true means Foundry is re-rendering primaryChildrenRenderable objects into a ' +
-      'primaryCacheTexture-sized render texture EVERY FRAME, in its own GL context — invisible to every MSA ' +
-      'perf zone, immune to every MSA effect toggle, and scaling with both resolution and floor (an upper ' +
-      "floor makes more of Foundry's own objects renderable). Reversible console A/B: " +
-      "`canvas.primary.renderable = false` suppresses it (Foundry's fog shader goes stale meanwhile — " +
-      'that is Bug #18 returning by choice, restored with `= true`).',
+      'HEALTHY since 2026-08-15 (Bug #21) = primaryRenderable:false AND exploredFogBaseOwner:"msa" — Foundry is ' +
+      "NOT re-rendering the map every frame, and its fog filter reads MSA's explored-fog base instead of a " +
+      'whole-map cache. primaryRenderable:true is the REGRESSED state: Foundry re-renders ' +
+      'primaryChildrenRenderable objects into a primaryCacheTexture-sized texture every frame in its own GL ' +
+      'context — invisible to every MSA perf zone, immune to every MSA effect toggle, scaling with both ' +
+      'resolution and floor (measured: 37.1ms vs 8.35ms per frame on an upper floor). ' +
+      'exploredFogBaseOwner:"foundry-primary-cache" means a canvas redraw re-adopted Foundry\'s texture and ' +
+      'the visibilityRefresh re-assert is not firing.',
   };
 }

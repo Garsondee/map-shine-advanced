@@ -85,6 +85,13 @@ export {
   // ⚖️ RECKONING (TEMPORARY): how much Foundry's OWN renderer is still doing —
   // the one large GPU consumer MSA's per-pass timestamps cannot see.
   getFoundryRendererCensus,
+  // THE THIRD LEVER (Bug #21): MSA owns the explored-fog wash, so Foundry never
+  // re-renders the map. On by default; these are the LOOK knob, not an on/off.
+  setExploredFogBase,
+  getExploredFogBase,
+  applyExploredFogBase,
+  resolveExploredFogBase,
+  DEFAULT_EXPLORED_FOG_BASE,
   decideArtSuppression,
   MSA_OWNED_GROUPS,
 } from './canvas-compositing.js';

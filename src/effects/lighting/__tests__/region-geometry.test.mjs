@@ -599,6 +599,28 @@ export function run(t) {
     // cancel every real DARKEN/OVERRIDE room's protection scene-wide.
     const brightenOnly = [{ mode: DARKNESS_ADJUST_MODES.BRIGHTEN, modifier: 0.9 }];
     ok('a BRIGHTEN-only region contributes no floor at all', computeMinimumDarknessFloor(brightenOnly) === null);
+
+    // ⚠️ THE SAME-DAY BUG: excluding BRIGHTEN by MODE was only half of it. An
+    // OVERRIDE authored at modifier 0 ("this courtyard is always full
+    // daylight") is just as bright, and it collapsed the minimum to 0 — which
+    // the first cut of deriveGlobalLightWindow turned into "disabled", killing
+    // outdoor daylight vision for the entire scene. The real question is "how
+    // dark does this region INSIST on staying", so floor 0 has no claim.
+    ok(
+      'an OVERRIDE region authored at 0 (a bright courtyard) contributes NO floor',
+      computeMinimumDarknessFloor([{ mode: DARKNESS_ADJUST_MODES.OVERRIDE, modifier: 0 }]) === null
+    );
+    ok(
+      'a DARKEN region authored at 0 (an authored no-op) contributes NO floor',
+      computeMinimumDarknessFloor([{ mode: DARKNESS_ADJUST_MODES.DARKEN, modifier: 0 }]) === null
+    );
+    ok(
+      'a bright OVERRIDE can no longer cancel a real dark room next to it',
+      computeMinimumDarknessFloor([
+        { mode: DARKNESS_ADJUST_MODES.OVERRIDE, modifier: 0 },
+        { mode: DARKNESS_ADJUST_MODES.DARKEN, modifier: 0.5 },
+      ]) === 0.5
+    );
     const mixed = [
       { mode: DARKNESS_ADJUST_MODES.BRIGHTEN, modifier: 0.9 },
       { mode: DARKNESS_ADJUST_MODES.DARKEN, modifier: 0.5 },

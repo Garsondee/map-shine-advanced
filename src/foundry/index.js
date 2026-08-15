@@ -131,6 +131,7 @@ export {
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
   readSceneGlobalLightRaw,
+  GLOBAL_LIGHT_DAYLIGHT_MAX,
 } from './scene-environment.js';
 
 // THE GAME-TIME READER — feeds world/day-clock.js (the world clock, in `synced`

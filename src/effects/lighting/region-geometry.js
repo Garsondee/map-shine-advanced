@@ -604,14 +604,28 @@ export function applyDarknessAdjustment(darkness01, mode, modifier) {
  * so it must never be the region that drags the scene-wide minimum down to
  * zero and silently cancels every genuine DARKEN/OVERRIDE room's protection.
  *
+ * ⚠️ AND SO IS ANY REGION WHOSE FLOOR COMES OUT AT ZERO, WHATEVER ITS MODE —
+ * A BUG FOUND 2026-08-15, THE SAME DAY THIS FUNCTION SHIPPED, AFTER THE
+ * AUTHOR RE-REPORTED THE ORIGINAL SYMPTOM AS STILL BROKEN. Excluding
+ * `BRIGHTEN` by MODE was only half the idea: an `OVERRIDE` region with
+ * `modifier: 0` (a courtyard authored as "always full daylight here") is
+ * semantically just as bright, and it collapsed this minimum to 0 — which
+ * `deriveGlobalLightWindow` then turned into a `<= 0` window and refused to
+ * open at all, silently disabling outdoor daylight vision for the WHOLE
+ * scene. A `DARKEN` with `modifier: 0` (an authored no-op) did the same. The
+ * question this function is really asking is "how dark does this region
+ * INSIST on staying", so a region that insists on nothing (floor 0) has no
+ * claim on the answer, regardless of which mode expressed it.
+ *
  * @param {Array<{mode: number, modifier: number}>} regions - active
  *   darkness-adjusting regions, e.g. `readActiveDarknessRegions().regions`
  *   (unfiltered by elevation/floor — a Global Illumination window is scene-
  *   wide, so it must stay safe for a region on ANY floor, not just the one
  *   currently rendered).
- * @returns {number|null} the minimum floor across every OVERRIDE/DARKEN
- *   region, or `null` if there are none (nothing to safely bound a window
- *   against).
+ * @returns {number|null} the minimum floor across every genuinely-darkening
+ *   region, or `null` if there are none. `null` means "no region makes a
+ *   darkness claim" — NOT "disable the feature"; see
+ *   `deriveGlobalLightWindow`, which treats it as "nothing to clamp against".
  */
 export function computeMinimumDarknessFloor(regions) {
   let minFloor = null;
@@ -619,6 +633,8 @@ export function computeMinimumDarknessFloor(regions) {
     if (!region) continue;
     if (region.mode !== DARKNESS_ADJUST_MODES.OVERRIDE && region.mode !== DARKNESS_ADJUST_MODES.DARKEN) continue;
     const floor = applyDarknessAdjustment(0, region.mode, region.modifier);
+    // floor <= 0 ⇒ this region is BRIGHT, not protective — see the header.
+    if (!(floor > 0)) continue;
     if (minFloor === null || floor < minFloor) minFloor = floor;
   }
   return minFloor;

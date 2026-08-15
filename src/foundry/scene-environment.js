@@ -359,23 +359,73 @@ export function shouldPublishDarkness({ darkness01, lastPublished01, nowMs, last
  */
 
 /**
+ * How dark it can get before Global Illumination stops granting ambient
+ * daylight vision. The window is `[0, max]` and Foundry compares it against
+ * the PER-POINT darkness (`getDarknessLevel`), so this one scalar has to sit
+ * ABOVE outdoor daylight and BELOW an authored dark interior.
+ *
+ * 0.25 = "a quarter of the way to pitch black". Noon outdoors is 0, so
+ * daylight vision holds through morning/afternoon and switches off around
+ * dusk, which is when torches become the point. The bench Mansion's own
+ * authored interiors sit at 0.5 (`DARKEN, modifier 0.5`), comfortably above
+ * this, so they stay protected — and any interior darker than the window is
+ * ERASED from global light by Foundry itself (`CanvasVisibility#
+ * refreshDynamicIllumination`, verified in the vendored v14 source: meshes
+ * whose darkness falls outside `[min,max]` get `BLEND_MODES.ERASE`).
+ */
+export const GLOBAL_LIGHT_DAYLIGHT_MAX = 0.25;
+
+/**
  * Pure derivation — see this section's own header for the full reasoning.
  *
+ * ⚠️ REWRITTEN 2026-08-15, SAME DAY, AFTER THE AUTHOR RE-REPORTED THE
+ * ORIGINAL SYMPTOM: *"I have a token, outside, scene darkness is 0, time of
+ * day is noon and the only area that is visible when I select them is a
+ * point light nearby, not the majority of the scene."* The first cut of this
+ * function returned `{enabled:false}` — i.e. DID NOTHING AT ALL — in two
+ * cases that between them cover most real scenes:
+ *
+ *   1. **No darkness-adjusting regions on the scene** (`minRegionFloor ===
+ *      null`). Nearly every Foundry scene has zero Regions. The first cut
+ *      called this the "SAFETY SLIDE default" — but a safety default that
+ *      makes the reported bug reproduce verbatim is not safety, it is the
+ *      bug. It also made the feature's existence depend on an unrelated
+ *      authoring choice nobody would connect to "can my token see outside".
+ *   2. **A region whose floor computed to ~0** — see
+ *      `computeMinimumDarknessFloor`, fixed alongside this.
+ *
+ * THE CORRECTION IS ALSO A SIMPLIFICATION, and that is the real lesson:
+ * Foundry ALREADY does per-region protection by itself, both for rendering
+ * (the `ERASE` blend above) and for the vision test (`testInsideLight` calls
+ * `getDarknessLevel(point)`, which samples the REGION's own mesh before
+ * falling back to the scene scalar). So this never needed to derive
+ * permission from the regions — it only needs to put the threshold in the
+ * right place and let Foundry's own mechanism do the per-area work. The
+ * region floor is now a CLAMP (keep the window under an unusually-shallow
+ * authored interior), not a precondition.
+ *
  * @param {number|null} minRegionFloor - `computeMinimumDarknessFloor`'s
- *   result: the lowest darkness any active OVERRIDE/DARKEN region reads at
- *   the scene's own brightest moment, or null if no such region exists.
- * @returns {{enabled: boolean, max: number|null}} `enabled:false` (do
- *   nothing) whenever there is no safe, non-degenerate window to open.
+ *   result, or null when no region makes a darkness claim. Only ever narrows
+ *   the window; never decides whether there is one.
+ * @returns {{enabled: boolean, max: number}} always enabled — the WINDOW,
+ *   compared against live darkness, is what turns daylight off at night, so
+ *   there is no case where the source itself needs disabling.
  */
 export function deriveGlobalLightWindow(minRegionFloor) {
-  if (!Number.isFinite(minRegionFloor)) return { enabled: false, max: null };
-  // Same margin as DARKNESS_PUBLISH_STEP, reused rather than inventing a
-  // second "how much darkness difference actually matters" constant — it
-  // exists for the identical reason here: floating-point noise and the sun
-  // model sweeping exactly THROUGH the boundary must not flicker the verdict.
-  const max = minRegionFloor - DARKNESS_PUBLISH_STEP;
-  if (max <= 0) return { enabled: false, max: null };
-  return { enabled: true, max: Math.min(1, max) };
+  let max = GLOBAL_LIGHT_DAYLIGHT_MAX;
+  if (Number.isFinite(minRegionFloor)) {
+    // Stay strictly under an authored interior, margined by the same step the
+    // darkness publish uses — reused rather than inventing a second "how much
+    // darkness difference matters" constant; it exists for the identical
+    // reason here (float noise, and the sun sweeping exactly THROUGH the
+    // boundary, must not flicker the verdict).
+    max = Math.min(max, minRegionFloor - DARKNESS_PUBLISH_STEP);
+  }
+  // A clamp to exactly 0 is still a USEFUL window, not a broken one: it admits
+  // a point whose darkness is 0, which is precisely noon outdoors. The first
+  // cut treated `max <= 0` as "give up", which threw away the one case the
+  // author was actually testing.
+  return { enabled: true, max: Math.min(1, Math.max(0, max)) };
 }
 
 /**
@@ -408,16 +458,27 @@ export function deriveGlobalLightWindow(minRegionFloor) {
 export function readSceneGlobalLightRaw() {
   try {
     const g = typeof canvas !== 'undefined' ? (canvas?.scene?.environment?.globalLight ?? null) : null;
-    const active = typeof canvas !== 'undefined' ? (canvas?.environment?.globalLightSource?.active ?? null) : null;
-    if (!g) return { enabled: null, min: null, max: null, active };
+    const src = typeof canvas !== 'undefined' ? (canvas?.environment?.globalLightSource ?? null) : null;
+    // THE LIVE SOURCE's own state — what Foundry is ACTUALLY deciding with
+    // right now, as opposed to the document fields above (which this fix never
+    // writes and which therefore never move). `liveMax`/`liveDisabled` are what
+    // `shouldPublishGlobalLightWindow` uses to notice that something else
+    // re-initialised the environment and wiped our window.
+    const live = {
+      active: src?.active ?? null,
+      liveDisabled: src?.data?.disabled ?? null,
+      liveMin: Number.isFinite(src?.data?.darkness?.min) ? src.data.darkness.min : null,
+      liveMax: Number.isFinite(src?.data?.darkness?.max) ? src.data.darkness.max : null,
+    };
+    if (!g) return { enabled: null, min: null, max: null, ...live };
     return {
       enabled: typeof g.enabled === 'boolean' ? g.enabled : null,
       min: Number.isFinite(g.darkness?.min) ? g.darkness.min : null,
       max: Number.isFinite(g.darkness?.max) ? g.darkness.max : null,
-      active,
+      ...live,
     };
   } catch {
-    return { enabled: null, min: null, max: null, active: null };
+    return { enabled: null, min: null, max: null, active: null, liveDisabled: null, liveMin: null, liveMax: null };
   }
 }
 
@@ -435,15 +496,49 @@ export function readSceneGlobalLightRaw() {
  * (contrast `shouldPublishDarkness`, where silence after one publish WAS the
  * bug — see that function's own header).
  *
- * @param {{enabled: boolean, max: number|null}} next - this frame's derived window.
- * @param {{enabled: boolean, max: number|null}|null} last - the last PUBLISHED window, or null if never.
+ * ⚠️ IT ALSO REPAIRS DRIFT, AND IT HAS TO. A change-only throttle silently
+ * assumes nobody else writes this value — and that assumption is false:
+ * `canvas.environment.initialize()` is called by Foundry itself (a Scene
+ * Config save, `animateDarkness`, any module doing the same), and
+ * `#configureEnvironment` rebuilds `globalLight` from the SCENE DOCUMENT,
+ * where `enabled` is still the GM-authored `false`. That silently wipes our
+ * window, and a throttle comparing only our own last-derived value against
+ * our own current one would never notice — the feature would work until the
+ * first unrelated environment refresh and then be off forever, which is
+ * indistinguishable from "the fix doesn't work". So `live` (what Foundry is
+ * ACTUALLY holding) is compared too, and a disagreement re-asserts.
+ *
+ * This is NOT the read-back loop `docs/planning/Environment.md §2.2` forbids:
+ * `live` never enters what MSA COMPUTES (`deriveGlobalLightWindow` is a pure
+ * function of the region floor). It only answers "did the value I already
+ * decided actually land?" — observing an output to re-assert it is not the
+ * same as folding it into the input, which is the distinction
+ * `publishSceneDarkness`'s own header already draws for `foundryDarkness01`.
+ *
+ * RATE-LIMITED, because a republish costs Foundry's own `refreshLighting +
+ * refreshVision`. If something genuinely fights us every frame, this settles
+ * to at most one re-assert per `DARKNESS_PUBLISH_MIN_INTERVAL_MS` instead of
+ * a per-frame perception storm (mission priority #1).
+ *
+ * @param {{enabled: boolean, max: number}} next - this frame's derived window.
+ * @param {{enabled: boolean, max: number}|null} last - the last PUBLISHED window, or null if never.
+ * @param {{liveDisabled: boolean|null, liveMax: number|null}} [live] - what
+ *   Foundry currently holds (`readSceneGlobalLightRaw`). Omit to skip drift repair.
+ * @param {number} [nowMs] @param {number} [lastPublishedAtMs] - rate limit for the drift path only.
  * @returns {boolean}
  */
-export function shouldPublishGlobalLightWindow(next, last) {
+export function shouldPublishGlobalLightWindow(next, last, live, nowMs, lastPublishedAtMs) {
   if (!last) return true;
   if (next.enabled !== last.enabled) return true;
-  if (!next.enabled) return false; // both disabled ⇒ nothing to compare
-  return Math.abs((next.max ?? 0) - (last.max ?? 0)) >= DARKNESS_PUBLISH_STEP;
+  if (Math.abs((next.max ?? 0) - (last.max ?? 0)) >= DARKNESS_PUBLISH_STEP) return true;
+
+  if (!live) return false;
+  const liveEnabled = live.liveDisabled === null || live.liveDisabled === undefined ? null : !live.liveDisabled;
+  const enabledDrifted = liveEnabled !== null && liveEnabled !== next.enabled;
+  const maxDrifted = Number.isFinite(live.liveMax) && Math.abs(live.liveMax - (next.max ?? 0)) >= DARKNESS_PUBLISH_STEP;
+  if (!enabledDrifted && !maxDrifted) return false;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(lastPublishedAtMs)) return true;
+  return nowMs - lastPublishedAtMs >= DARKNESS_PUBLISH_MIN_INTERVAL_MS;
 }
 
 /* -------------------------------------------- */

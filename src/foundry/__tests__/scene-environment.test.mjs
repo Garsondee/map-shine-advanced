@@ -15,6 +15,7 @@ import {
   DARKNESS_PUBLISH_MIN_INTERVAL_MS,
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
+  GLOBAL_LIGHT_DAYLIGHT_MAX,
 } from '../scene-environment.js';
 
 export function run(t) {
@@ -222,37 +223,52 @@ export function run(t) {
   // See `deriveGlobalLightWindow`'s own header: `publishSceneDarkness` fixes
   // the darkness LEVEL Foundry's vision reads, but `environment.globalLight.
   // enabled` is a SEPARATE gate (schema-default false) that a level fix alone
-  // can never flip — this closes that second gate, ONLY when a region gives
-  // it a floor to safely stay under.
+  // can never flip. This closes that second gate.
 
-  // ---- no protective region at all => do nothing, not a guess ------------
-  ok('null floor (no active region) => disabled', deriveGlobalLightWindow(null).enabled === false);
-  ok('null floor => max is null, not a fabricated number', deriveGlobalLightWindow(null).max === null);
-  ok('non-finite floor is treated the same as absent', deriveGlobalLightWindow(NaN).enabled === false);
-
-  // ---- a real floor opens a window strictly below it ----------------------
+  // ---- ⚠️ THE REGRESSION THAT SHIPPED AND WAS RE-REPORTED THE SAME DAY -----
+  // The first cut returned {enabled:false} whenever the scene had no
+  // darkness-adjusting Region — i.e. on nearly every real scene — which
+  // reproduced the author's original bug verbatim ("token outside at noon
+  // can only see a point light"). These pin BOTH no-region cases as ENABLED.
   {
-    const w = deriveGlobalLightWindow(0.5); // the actual bench Mansion's authored floor
-    ok('a real floor enables the window', w.enabled === true);
-    ok('the window stays STRICTLY under the floor, never touching it', w.max < 0.5);
+    const noRegions = deriveGlobalLightWindow(null);
+    ok('THE REGRESSION: a scene with NO darkness regions still enables daylight', noRegions.enabled === true);
+    ok('and gets the default daylight ceiling, not a fabricated null', noRegions.max === GLOBAL_LIGHT_DAYLIGHT_MAX);
+    ok('a non-finite floor behaves identically to absent', deriveGlobalLightWindow(NaN).enabled === true);
+  }
+
+  // ---- noon outdoors must ALWAYS be admitted — the reported scenario -------
+  // darkness01 at noon is 0, and Foundry admits a point when
+  // `darkness >= min && darkness <= max`. Whatever the regions say, 0 must
+  // never fall outside the window, or the author's exact test fails again.
+  for (const floor of [null, 1, 0.5, 0.25, 0.1, 0.01, 0]) {
+    const w = deriveGlobalLightWindow(floor);
     ok(
-      'the gap is exactly the shared darkness-step margin, not a bigger guess',
-      Math.abs(0.5 - w.max - DARKNESS_PUBLISH_STEP) < 1e-9
+      `noon (darkness 0) is inside the window for region floor ${JSON.stringify(floor)}`,
+      w.enabled === true && 0 >= 0 && 0 <= w.max
     );
   }
 
-  // ---- a degenerate/near-zero floor => still refuse rather than publish an
-  // empty or negative window (an OVERRIDE region authored at darkness~0 is a
-  // real if odd choice — "this room is never dark" — and must not crash the
-  // publish path or open a window wider than intended).
+  // ---- a protective interior is still kept strictly OUTSIDE the window -----
   {
-    const w = deriveGlobalLightWindow(DARKNESS_PUBLISH_STEP / 2);
-    ok('a floor at or below the safety margin disables rather than inverts', w.enabled === false && w.max === null);
+    const w = deriveGlobalLightWindow(0.5); // the bench Mansion's authored floor
+    ok('the bench interior floor (0.5) stays above the window — still protected', w.max < 0.5);
+    const shallow = deriveGlobalLightWindow(0.1);
+    ok('an unusually shallow interior floor (0.1) still clamps the window under it', shallow.max < 0.1);
   }
-  ok('a floor of exactly 0 disables cleanly', deriveGlobalLightWindow(0).enabled === false);
 
-  // ---- the window can never exceed 1, even for a very high floor ---------
-  ok('a floor of 1 clamps the window to at most 1', deriveGlobalLightWindow(1).max <= 1);
+  // ---- a BRIGHT region can no longer collapse the feature -----------------
+  // (computeMinimumDarknessFloor now filters floor<=0 out entirely, so this
+  // function should never see 0 — but if it does, it must degrade to a
+  // usable window, never to "disabled".)
+  {
+    const w = deriveGlobalLightWindow(0);
+    ok('a zero floor degrades to a usable window, never to disabled', w.enabled === true && w.max === 0);
+    ok('a zero-floor window still admits exactly-noon darkness', 0 <= w.max);
+  }
+
+  ok('the window never exceeds 1', deriveGlobalLightWindow(1).max <= 1);
+  ok('the window is never negative', deriveGlobalLightWindow(DARKNESS_PUBLISH_STEP / 2).max >= 0);
 
   // ---- THE CHANGE-ONLY THROTTLE: static almost all the time, by design ----
   {
@@ -263,14 +279,6 @@ export function run(t) {
     ok(
       'identical to the last publish => stays quiet (this is correct, not the darkness-throttle bug)',
       shouldPublishGlobalLightWindow({ enabled: true, max: 0.4 }, { enabled: true, max: 0.4 }) === false
-    );
-    ok(
-      'enabled flag flipping always republishes',
-      shouldPublishGlobalLightWindow({ enabled: false, max: null }, { enabled: true, max: 0.4 }) === true
-    );
-    ok(
-      'both sides disabled => nothing to compare, stays quiet',
-      shouldPublishGlobalLightWindow({ enabled: false, max: null }, { enabled: false, max: null }) === false
     );
     ok(
       'a meaningfully different max (a region edited live) republishes',
@@ -285,6 +293,43 @@ export function run(t) {
         { enabled: true, max: 0.4 },
         { enabled: true, max: 0.4 + DARKNESS_PUBLISH_STEP / 4 }
       ) === false
+    );
+  }
+
+  // ---- DRIFT REPAIR: something else re-initialised the environment --------
+  // Foundry rebuilds `globalLight` from the SCENE DOCUMENT on any
+  // `canvas.environment.initialize()` — a Scene Config save, animateDarkness,
+  // another module — which silently wipes our window back to enabled:false.
+  // A throttle comparing only our own values against our own values would
+  // never notice, and the feature would die at the first unrelated refresh.
+  {
+    const next = { enabled: true, max: 0.25 };
+    const last = { enabled: true, max: 0.25 };
+    const agreeing = { liveDisabled: false, liveMax: 0.25 };
+    ok(
+      'live state agreeing with what we published => stay quiet',
+      shouldPublishGlobalLightWindow(next, last, agreeing, 10000, 0) === false
+    );
+    const wiped = { liveDisabled: true, liveMax: 1 };
+    ok(
+      'THE DRIFT CASE: Foundry wiped our window back to disabled => re-assert',
+      shouldPublishGlobalLightWindow(next, last, wiped, 10000, 0) === true
+    );
+    ok(
+      'a drifted MAX alone (window widened back to the document default) => re-assert',
+      shouldPublishGlobalLightWindow(next, last, { liveDisabled: false, liveMax: 1 }, 10000, 0) === true
+    );
+    ok(
+      'drift repair is RATE-LIMITED — no per-frame perception storm if something fights us',
+      shouldPublishGlobalLightWindow(next, last, wiped, 100, 0) === false
+    );
+    ok(
+      'omitting live state entirely keeps the old change-only behaviour',
+      shouldPublishGlobalLightWindow(next, last) === false
+    );
+    ok(
+      'an unreadable live source (all nulls) never triggers a pointless republish',
+      shouldPublishGlobalLightWindow(next, last, { liveDisabled: null, liveMax: null }, 10000, 0) === false
     );
   }
 }

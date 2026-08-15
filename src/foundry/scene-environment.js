@@ -89,7 +89,9 @@ export function readSceneDarkness() {
 
 /**
  * ============================================================================
- * PUBLISH MSA'S OWN DARKNESS BACK TO FOUNDRY — the only write in this reader.
+ * PUBLISH MSA'S OWN DARKNESS TO FOUNDRY — the only write in this reader, and
+ * MSA is now the SOLE authority on `darknessLevel`. It never reads Foundry's
+ * copy back into its own computation.
  * ============================================================================
  *
  * ⚠️ THIS REVERSES A PREVIOUSLY-DOCUMENTED REFUSAL, ON THE AUTHOR'S OWN
@@ -100,20 +102,38 @@ export function readSceneDarkness() {
  * knowing what the current brightness is."*
  *
  * The refusal was recorded in `[[feedback_foundry_darkness_gate_is_a_second_
- * authority]]` and it was not arbitrary — it named a real defect that any naive
- * write-back has: `world/environment.js#buildEnvSnapshot` folds Foundry's
- * darkness into its own as `max(nightDarkness, darknessInput)`. Write MSA's
- * OUTPUT into that INPUT and the max can never come back down — sweep the
- * astrolabe toward dawn and the scene stays pinned at midnight forever. That is
- * a genuine one-way ratchet, not a theoretical concern.
+ * authority]]`, and `docs/planning/Environment.md §2.2` names the exact reason
+ * it existed: *"Darkness gets ONE direction of authority: an input we read, OR
+ * a value we own and never read back."* Two months of dated V2 scars sit behind
+ * that sentence (§0.3) — three separate incidents, one of them a read-back loop
+ * that pinned the scene dark.
  *
- * WHAT CHANGED IS NOT THE AUTHOR'S MIND ABOUT ARCHITECTURE, IT IS THAT THE
- * RATCHET HAS A CLEAN FIX: remember exactly what we last published, and refuse
- * to treat that same value as an independent input when it comes back
- * (`darknessInputExcludingOwnEcho` below). MSA reads only genuine GM intent;
- * its own echo is subtracted before the fold ever sees it. That turns
- * "read-back loop" into "publish, and ignore your own publication" — which is
- * the ordinary way a renderer mirrors state into a host it does not own.
+ * ⚠️ THE FIRST CUT OF THIS FIX (same day) GOT THAT LAW WRONG, AND IT IS WORTH
+ * RECORDING WHY RATHER THAN QUIETLY FIXING IT. It kept `world/environment.js`
+ * reading Foundry's `darknessLevel` as a live INPUT (`max(nightDarkness,
+ * darknessInput)`, the pre-existing V3 architecture — the FIRST branch of the
+ * law's either/or) and ADDED a write on top — both directions at once, exactly
+ * what §2.2 forbids. The write would have ratcheted darkness upward forever the
+ * instant Foundry's echo fed back into the same fold, so that cut added an
+ * "echo guard" (`darknessInputExcludingOwnEcho`, since deleted) — a
+ * remember-what-I-last-said, ignore-it-when-it-comes-back guard flag. That is
+ * structurally the SAME shape `world/day-clock.js`'s own header names as the
+ * pattern this project moved away from on purpose: *"a feedback loop held
+ * together by a guard flag... two modes with opposite READ directions and no
+ * WRITE direction removes the loop by construction: there is no flag anyone can
+ * forget, because there is nothing to guard."* A passing test that models one
+ * ratchet scenario is not the same guarantee as removing the loop.
+ *
+ * THE ACTUAL FIX: MSA now OWNS darkness outright — the second branch of §2.2's
+ * either/or, chosen because the author's own ask is for MSA's day/night to be
+ * the thing "game systems" see. `world/environment.js#buildEnvSnapshot` no
+ * longer receives a live `darknessInput` from this viewer at all (see
+ * `vt-pan-viewer.js`'s own call site); `darkness01` is purely `nightDarkness`,
+ * the sun model. `readSceneDarkness` below still runs, but ONLY to fill a
+ * diagnostic report field (`foundryDarkness01` — "what does Foundry currently
+ * hold, for comparison") — it is never again an argument to anything that
+ * computes MSA's own darkness. Observing a value for a human to read is not the
+ * same as folding it into your own output; only the second one is the loop.
  *
  * ⚠️ WHY THIS ALSO FIXES A SECOND, SEPARATELY-REPORTED BUG (*"Tokens which are
  * outside at noon believe they are currently in the dark… tokens seem to only
@@ -170,45 +190,6 @@ export function publishSceneDarkness(darkness01) {
     return { ok: false, published: null, reason: `canvas.environment.initialize threw: ${err?.message ?? err}` };
   }
 }
-
-/**
- * THE ECHO GUARD — pure, so the one piece of logic that keeps the write-back
- * from becoming a feedback bus is Node-testable rather than only observable as
- * "the scene got stuck dark once."
- *
- * Given what Foundry currently reports and what MSA last published, decide what
- * `buildEnvSnapshot`'s `darknessInput` should actually be. If the two match,
- * Foundry is simply echoing us and there is NO independent input — return 0, so
- * `max(nightDarkness, darknessInput)` is driven purely by the sun. If they
- * differ, something else (the GM's own darkness slider, another module, a scene
- * load) genuinely set it, and that IS a real input we must honour.
- *
- * ⚠️ THE TOLERANCE IS NOT A FUDGE FACTOR. `publishSceneDarkness` clamps and
- * Foundry stores the value verbatim, so an exact `===` would very nearly work —
- * but `AlphaField`'s own cleaning and any round-trip through a document can
- * return a value that differs in the last bit, and a guard that fails open ONE
- * frame reintroduces the ratchet permanently (the max never comes back down).
- * A tolerance smaller than any darkness step a human can perceive costs nothing
- * and cannot be defeated by float noise. The failure mode it deliberately
- * accepts — a GM setting darkness to EXACTLY MSA's current value has their
- * setting ignored — is indistinguishable from honouring it, because the two
- * numbers are the same.
- *
- * @param {number} foundryDarkness01 - what `readSceneDarkness` just reported.
- * @param {number|null} lastPublished01 - what `publishSceneDarkness` last wrote
- *   successfully, or `null` if MSA has never published (a fresh session, or
- *   publishing disabled) — in which case every reading is genuine GM intent.
- * @returns {number} the darkness to feed `buildEnvSnapshot` as `darknessInput`.
- */
-export function darknessInputExcludingOwnEcho(foundryDarkness01, lastPublished01) {
-  const read = Number.isFinite(foundryDarkness01) ? Math.min(1, Math.max(0, foundryDarkness01)) : 0;
-  if (!Number.isFinite(lastPublished01)) return read;
-  return Math.abs(read - lastPublished01) <= DARKNESS_ECHO_EPSILON ? 0 : read;
-}
-
-/** See `darknessInputExcludingOwnEcho`'s own "THE TOLERANCE IS NOT A FUDGE
- *  FACTOR" note. ~1/2000 of the full range — far below a perceptible step. */
-export const DARKNESS_ECHO_EPSILON = 5e-4;
 
 /**
  * How much darkness must move before it is worth paying Foundry's own

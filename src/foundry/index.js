@@ -102,19 +102,19 @@ export {
 export { registerCanvasTearDownWatchdog, isOrphanedTeardown } from './canvas-lifecycle.js';
 
 // THE SCENE-ENVIRONMENT READER — feeds world/environment.js#buildEnvSnapshot's
-// `darknessInput` + `ambientInput`; the one place canvas.scene.environment
-// .darknessLevel and the canvas.colors ambient palette are read.
+// `ambientInput`, and reads `canvas.scene.environment.darknessLevel` for
+// DIAGNOSTIC comparison only (MSA owns darkness outright — see
+// `publishSceneDarkness`'s own header; `darknessLevel` is no longer a live
+// INPUT to anything MSA computes).
 export {
   readSceneDarkness,
-  // THE ONE WRITE in the environment adapter (2026-08-15) — client-local, never
-  // a document update. Its two pure companions are exported alongside it
-  // because the write is only safe WITH them: the echo guard is what stops the
-  // read-back ratchet, and the throttle is what stops a per-frame
-  // refreshVision. See `publishSceneDarkness`'s own header.
+  // THE ONE WRITE in the environment adapter (2026-08-15) — client-local,
+  // never a document update. `shouldPublishDarkness` is exported alongside it
+  // because the write is only safe throttled — `publishSceneDarkness` itself
+  // ends in Foundry's own `refreshLighting + refreshVision`, which must not
+  // fire every frame. See `publishSceneDarkness`'s own header.
   publishSceneDarkness,
-  darknessInputExcludingOwnEcho,
   shouldPublishDarkness,
-  DARKNESS_ECHO_EPSILON,
   DARKNESS_PUBLISH_STEP,
   DARKNESS_PUBLISH_MIN_INTERVAL_MS,
   deriveDarkness,

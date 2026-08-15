@@ -171,7 +171,6 @@ import {
   // Foundry so game systems and Foundry's own vision stop reading a frozen
   // number. See `publishSceneDarkness`'s own header.
   publishSceneDarkness,
-  darknessInputExcludingOwnEcho,
   shouldPublishDarkness,
   readSceneAmbient,
   readGamePaused,
@@ -5651,13 +5650,19 @@ export async function startVtPanViewer({
       // with everything else when Foundry pauses, rather than being the one
       // system that carries on regardless. See world/day-clock.js#tick.
       const todHour = dayClock.tick(time.dtSec);
+      // ⚠️ READ FOR DIAGNOSTICS ONLY — NEVER FOLDED INTO `env.darkness01`.
+      // MSA OWNS darkness now (`docs/planning/Environment.md §2.2`'s "a value we
+      // own and never read back" branch — see `publishSceneDarkness`'s own
+      // header for why a first cut that ALSO fed this into the fold as a live
+      // input was the exact two-directions-at-once shape that law forbids, and
+      // why the "echo guard" that patched it was structurally the same
+      // guard-flag pattern `world/day-clock.js` already moved away from once).
+      // `darkness.darkness01` below reaches only `getEnvSnapshotInfo`'s
+      // `foundryDarkness01` field, for a human comparing "what MSA computed" to
+      // "what Foundry currently holds" — an OBSERVATION, never a computation
+      // input. That distinction is the whole difference between this and a
+      // feedback bus.
       const darkness = readSceneDarkness();
-      // THE ECHO GUARD (2026-08-15) — strip MSA's own last publication out of
-      // what Foundry is reporting, BEFORE it becomes an input. See
-      // `foundry/scene-environment.js#publishSceneDarkness` for the whole
-      // story, including why the previously-documented refusal to write back at
-      // all was correct about the ratchet and wrong about it being unfixable.
-      const darknessInput = darknessInputExcludingOwnEcho(darkness.darkness01, lastPublishedDarkness01);
       // The ambient palette Foundry itself renders from (canvas.colors) — read
       // through the ONE adapter so the light pass reproduces Foundry's ladder
       // rather than re-reading a global. `readSceneAmbient` never throws and
@@ -5693,7 +5698,12 @@ export async function startVtPanViewer({
           speed01: uWindSpeed01.value,
           gustiness01: uWindGustiness01.value,
         },
-        darknessInput,
+        // NO `darknessInput` — see this function's own comment just above.
+        // Omitting the key (rather than passing 0 explicitly) is deliberate:
+        // `buildEnvSnapshot`'s own default IS 0, so a future reader diffing this
+        // call against the function's signature sees "not supplied", not
+        // "supplied as zero", which would read as a considered choice about a
+        // GM input that no longer exists on this path.
         ambientInput: { daylight: ambient.daylight, darkness: ambient.darkness, brightest: ambient.brightest },
       });
 

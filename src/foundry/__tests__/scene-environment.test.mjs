@@ -10,9 +10,7 @@ import {
   deriveDarkness,
   deriveAmbient,
   FOUNDRY_FALLBACK_AMBIENT,
-  darknessInputExcludingOwnEcho,
   shouldPublishDarkness,
-  DARKNESS_ECHO_EPSILON,
   DARKNESS_PUBLISH_STEP,
   DARKNESS_PUBLISH_MIN_INTERVAL_MS,
 } from '../scene-environment.js';
@@ -135,47 +133,24 @@ export function run(t) {
     ok('but their reasons differ', a.reason !== b.reason);
   }
   // ══════════════════════════════════════════════════════════════════════
-  // THE DARKNESS WRITE-BACK's two pure guards (2026-08-15)
+  // THE DARKNESS WRITE-BACK's own pure guard (2026-08-15)
   // ══════════════════════════════════════════════════════════════════════
-  // These exist because `publishSceneDarkness` reverses a previously-documented
-  // refusal, and the refusal named a REAL defect (a read-back ratchet that pins
-  // the scene at midnight forever). The guards are what make the reversal safe,
-  // so they are the part that must be provably right rather than merely
-  // plausible — see that function's own header.
+  // `publishSceneDarkness` is the one write, and MSA owns darkness outright —
+  // it never reads Foundry's own copy back into what it computes (see that
+  // function's own header for the corrected design and the read-back-loop
+  // shape it replaces). With no read-back, there is no ratchet to guard
+  // against; the throttle below is the only guard this write still needs.
 
-  // ---- THE ECHO GUARD: our own publication is not an input ----------------
-  {
-    ok('never published ⇒ every reading is genuine GM intent', darknessInputExcludingOwnEcho(0.7, null) === 0.7);
-    ok('our own echo contributes nothing', darknessInputExcludingOwnEcho(0.7, 0.7) === 0);
-    ok(
-      'a float-noise round trip still reads as our echo',
-      darknessInputExcludingOwnEcho(0.7 + DARKNESS_ECHO_EPSILON / 2, 0.7) === 0
-    );
-    ok("a GM's genuinely different value survives", darknessInputExcludingOwnEcho(0.2, 0.7) === 0.2);
-    ok(
-      'a non-finite reading degrades to 0, never NaN into the fold',
-      darknessInputExcludingOwnEcho(undefined, 0.7) === 0
-    );
-  }
-
-  // ---- THE RATCHET ITSELF: the bug the guard exists to prevent ------------
-  // Reproduces the documented failure directly. `buildEnvSnapshot` folds as
-  // `max(nightDarkness, darknessInput)`. Sweep from midnight toward noon while
-  // Foundry echoes back what we last published: WITHOUT the guard the max can
-  // never come back down; WITH it, darkness tracks the sun.
-  {
-    const fold = (night, input) => Math.max(night, input);
-    let naive = 1;
-    let guarded = 1;
-    let published = 1;
-    for (const night of [0.8, 0.5, 0.2, 0]) {
-      naive = fold(night, naive); // the echo fed straight back in
-      guarded = fold(night, darknessInputExcludingOwnEcho(published, published));
-      published = guarded;
-    }
-    ok('WITHOUT the guard the scene ratchets and stays at midnight', naive === 1);
-    ok('WITH the guard darkness follows the sun back to noon', guarded === 0);
-  }
+  // ---- WHY THERE IS NO "ECHO GUARD" TEST HERE ANYMORE ---------------------
+  // An earlier cut of this fix DID read Foundry's darkness back into the same
+  // fold that produced the write (`max(nightDarkness, darknessInput)`), which
+  // ratchets: feed your own last output back in as an input and a max() can
+  // only ever climb. That cut added a guard-flag ("ignore my own echo") to
+  // patch it — the exact "feedback loop held together by a guard flag" shape
+  // `world/day-clock.js`'s own header names as the pattern this project
+  // deliberately moved away from. Removing the read-back entirely (rather than
+  // guarding it) removes the loop by construction, so there is nothing here
+  // left to pin a ratchet-reproduction test against.
 
   // ---- THE THROTTLE: fires when it must, stays quiet when it must ---------
   {

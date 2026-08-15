@@ -234,6 +234,18 @@ export { registerSettings, readSetting, writeSetting } from './settings-adapter.
 // Pure read; see the module header for the full mechanism.
 export { readTokenVisionDiagnostic } from './vision-diagnostics.js';
 
+// THE VISION-SOURCE READER — slice 1 of "MSA owns vision/fog" (Testament
+// Pillar 11, docs/planning/Vision-Fog-Ownership.md). CONSUMES Foundry's own
+// wall-sweep polygons; never reproduces the vision ruleset, which is what
+// keeps this compatible with any game system. Nothing renders from it yet.
+export {
+  readActiveVisionSources,
+  deriveVisionSource,
+  isUsablePolygon,
+  shouldGateVision,
+  MIN_POLYGON_FLOATS,
+} from './scene-vision.js';
+
 // V2 → V3 ANCHOR IMPORT — reads a scene's legacy `mapPointGroups` flags and
 // produces V3 anchor candidates (the Map Points successor). Boot hands them to
 // scene/anchor-authority.js. A leaf: it knows no anchor kinds — boot injects the

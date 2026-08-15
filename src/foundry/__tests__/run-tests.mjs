@@ -21,6 +21,7 @@ import { run as runSceneWallClip } from './scene-wall-clip.test.mjs';
 import { run as runSceneWalls } from './scene-walls.test.mjs';
 import { run as runSceneDoors } from './scene-doors.test.mjs';
 import { run as runSceneRegions } from './scene-regions.test.mjs';
+import { run as runSceneVision } from './scene-vision.test.mjs';
 import { run as runSceneExport } from './scene-export.test.mjs';
 import { run as runSceneOcclusionSources } from './scene-occlusion-sources.test.mjs';
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
@@ -77,6 +78,7 @@ const suites = [
   ['scene-walls', runSceneWalls],
   ['scene-doors', runSceneDoors],
   ['scene-regions', runSceneRegions],
+  ['scene-vision', runSceneVision],
   ['scene-export', runSceneExport],
   ['scene-occlusion-sources', runSceneOcclusionSources],
   ['scene-geometry', runSceneGeometry],

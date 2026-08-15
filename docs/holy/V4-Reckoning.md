@@ -199,6 +199,19 @@ call), and the whole-frame ratio meets the Testament's own comfort bar (First Fl
       camera seeing ground-floor art through real holes; author may veto/replace). Capture the
       parked pair on both floors, archive JSONs + screenshots, add the parked columns to the
       Multiplier Ledger.
+- [x] **R0.7 · ⚖️ The Reckoning Report button.** One debug-panel action (`reckoning-report`,
+      zone: performance) that dumps the campaign's observables to the clipboard in one press:
+      verdicts first (split starved / raw fallback / silent quota / depth-side engagement /
+      resolution + window caveats), then identity, floors, live census (split-material counts,
+      itemStates vs draw list, window scenes alive), `getEarlyZComposition()`, effects map, a
+      ~2.5 s armed profiler window of per-zone CPU/GPU ms, and the last multi-floor ranked
+      table. TEMPORARY — removed at R4 close. · done Claude Fable 5 2026-08-15 —
+      `src/diag/reckoning-report.js` (pure assembler + verdict brain, Node-tested:
+      `__tests__/reckoning-report.test.mjs`), viewer census getter + vt barrel export, boot
+      gather + registration; `npm run verify` green (9,197 tests). `BUILT (unverified)` — the
+      first live press is the verification, by design. NOTE: the boot/viewer wiring shares
+      files with the author's in-flight wind-gustiness work and rides the working tree until
+      that lands; the pure module + tests are committed.
 
 ### Phase R1 — The seeded strike *(the author's directive: transparency first)*
 
@@ -365,8 +378,12 @@ census's source data and every early pass's opening brief — `docs/planning/rec
 `SURVEY-inventory.md` (all 259 files, zones, caches, tools), `SURVEY-frame-anatomy.md` (the
 ordered pass list, render-target registry, 11 cost surprises D1–D11),
 `SURVEY-transparency-pipeline.md` (the opaque-vs-transparent fork, end to end),
-`SURVEY-floor-behavior.md` (the ground-vs-upper contrast table). Spot-verified at key sites, not
-countersigned line-by-line: treat them as maps, re-verify anything you build on.
+`SURVEY-floor-behavior.md` (the ground-vs-upper contrast table). Second sweep, same day, after
+the author's effects-off A/B: `SURVEY-effects-off-residue.md` (what no effect toggle reaches),
+`SURVEY-cache-lifecycle.md` (the stale-cache hypothesis killed + two real cache findings),
+`SURVEY-core-draw-population.md` (the three core scenes' anatomy, 9-tap fragment cost, the
+never-reaped world scene). Spot-verified at key sites, not countersigned line-by-line: treat
+them as maps, re-verify anything you build on.
 
 **Ground rules.** 259 runtime `.js` files under `src/` (excluding `__tests__/`), every one owned
 below; `tools/audit-coverage.mjs` (R0.4) enforces it. Two files are too big for one row and are
@@ -718,6 +735,54 @@ WHICH authority it read. Falsification: n/a — a standing audit question (Q8/Q1
 authored alpha/fade) and arguably a bonus win — but a drifted invariant comment is how the next
 regression hides. Fix is a comment/gate reconciliation, filed for a worker.
 
+### ADDENDUM — same day, after the author's effects-off A/B (2026-08-15, Fable)
+
+**The author's measurement (LIVE, their own eyes):** every effect disabled → ground floor
+≈120 fps, upper floor ≈20 fps (**6×**). Three more scout surveys followed
+(`SURVEY-effects-off-residue.md`, `SURVEY-cache-lifecycle.md`,
+`SURVEY-core-draw-population.md`). Consequences for the queue:
+
+- **Effects are EXONERATED as the primary carrier.** SL-2 (DoF), SL-3 (window light), SL-6
+  (anchor widening) demote to secondary taxes for the RATIO (they stay real costs when
+  enabled). The heretic wears infrastructure robes: the three geometry passes + the
+  un-gated CPU sweeps — none reachable by any effect toggle (there IS no "all effects"
+  master switch; the author toggled 15 per-effect enables).
+- **SL-1 addendum — the stale-cache hypothesis is DEAD, killed properly:** the compression
+  cache version lives in the KEY (`bc:v10:${src}`), so pre-v10 records are unaddressable and
+  a miss recompresses WITH the min-grid. Structurally impossible; the Testament's "v9
+  fail-open" line described the counterfactual the design avoided. Model exoneration —
+  see SURVEY-cache-lifecycle.md. The `noMinGrid` observable still matters: if it fires
+  live, the ARRIVAL chain broke (Bug #20's timing class), not the cache.
+- **SL-16 · The triple rasterization of the superset — S3, promoted to prime suspect.**
+  depthScene + depthPrepassScene are 1:1 twins of the visible world tiles sharing geometry;
+  the upper floor's superset (viewed + visible lower floors) pays every layer's fill THREE
+  times. The audit's own prior numbers: worldDraw 133 ms + depthDraw 44 ms upper vs ~12 ms
+  combined lower (Performance-Audit-2026-08 §15); §19's 18.1 avgFps matches the author's
+  ~20 fps.
+- **SL-17 · Whole-image `alwaysOpaque` — one bad pixel demotes 144 Mpx. S3.** `alphaStats.min`
+  is pre-split, whole-image: one transparent pixel anywhere in a 12000² layer forces the
+  discard depth shader on EVERY sub-tile in BOTH depth passes. S1a's per-cell split is the
+  counter — where it engages (the button measures exactly that).
+- **SL-18 · The 9-tap fragment + dual-attachment blended RMW — S2/S3.** Standard profile keeps
+  5-tap CAS (+depth query, +unconditional occlusion fetch that provably can't change most
+  pixels, +LOD-0 solidity, +outdoors) and both MRT attachments blend ⇒ ~24 B ROP per
+  overdrawn fragment per layer. Profile-gated, not effect-gated; **fails OPEN to expensive on
+  a settings-read throw and is decided once per material build.**
+- **SL-19 · Panning = full residency pass + 2N depth-proxy mesh allocations per frame — S3 on
+  touring routes.** Confirmed cadence: ≥1 screen-pixel camera move schedules the pass; two
+  full draw-list sorts; `sweepWorldSceneDepthWrites` traverses every mesh EVER added (nothing
+  is ever removed from the world scene); proxy rebuild allocates 2N meshes + signature
+  strings. Parked camera: zero (the filter works).
+- **SL-20 · Silent quota swallow in the compression cache — S2 for load/session cost.**
+  `cachePut().catch(()=>{})` eats QuotaExceededError; nine generations of version-keyed
+  records accumulate toward that quota and are never deleted. Signature (button verdict):
+  fresh encodes + zero hits on a revisited world.
+- **SL-21 · Instrument lies found this sweep (Law 6 queue):** the composition diagnostic
+  resolves TOKENS to their occlusion discs (different scene) while tokens draw full
+  whole-image quads in the world scene — a live lead for R0.2's 125× repair; fire's compute
+  bracketed under `light.drawFire`; the floor-attr sweep unzoned; `reapplyById` hand-map
+  missing lightning/fire/sunShadows (the EFFECT_REAPPLIERS class, 7th strike).
+
 **SL-15 · Hygiene basket (each verified 2026-08-15).** `isUpper` computed, zero consumers
 (scene-layers.js:317) · CONVENTIONS.md §1 declares a `gameplay/` directory that does not exist ·
 six `package.json` scripts point at a nonexistent `scripts/` tree (`build:tsl`, `release`,
@@ -759,6 +824,7 @@ showed; R0.1 must archive the FULL `MapShine.getMultiFloorReport()` and extend t
 | `light.drawPointLights` / pool update | ? | ? | unmeasured | candidate SL-6 (anchor widening) → R0.1 |
 | `depth.proxyRebuild` / `residency.pass` (CPU) | ? | ? | unmeasured | candidate SL-5 → R0.6 parked-vs-touring |
 | everything else in the full report | — | — | — | AWAITING R0.1 |
+| **AUTHOR LIVE A/B (2026-08-15): all 15 effects OFF** | ≈120 fps | ≈20 fps | **6×** | MEASURED (author's eyes) — effects exonerated as primary; carrier = geometry triad + un-gated CPU (SL-16..SL-19) |
 
 **Close rule (G4):** the campaign's perf claim closes only when every ratio >1.5× on the
 canonical pair is EXPLAINED-AND-FIXED or EXPLAINED-AND-ACCEPTED (author's call), and the

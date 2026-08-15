@@ -27,6 +27,7 @@ import { run as runSettingsPanel } from './settings-panel.test.mjs';
 import { run as runRenderFallback } from './render-fallback.test.mjs';
 import { run as runShaderRebuildProbe } from './shader-rebuild-probe.test.mjs';
 import { run as runPipelineRebuildProbe } from './pipeline-rebuild-probe.test.mjs';
+import { run as runReckoningReport } from './reckoning-report.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -68,6 +69,7 @@ const suites = [
   ['render-fallback', runRenderFallback],
   ['shader-rebuild-probe', runShaderRebuildProbe],
   ['pipeline-rebuild-probe', runPipelineRebuildProbe],
+  ['reckoning-report', runReckoningReport],
 ];
 
 for (const [name, fn] of suites) {

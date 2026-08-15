@@ -113,9 +113,35 @@ break anything — nothing consumes it yet.*
   - **Verification needs a controlled token** — the bench ships none;
     `tests/playwright/msa-token-vision-noon.spec.js` already creates and controls one.
 
-**Slice 3 — explored persistence.** A world-space accumulation buffer (≤2048²/floor,
-allocator-whitelisted), persisted through `FogExploration` on a throttle. ⚠️ **Slice 3
-must land WITH slice 4, never after** — see the safety note below.
+**Slice 3 — explored persistence. ✅ BUILT (in-session).** A world-space 2048²
+accumulation buffer, MAX-blended from the same fan scene through an ortho camera over the
+**scene** rect (not the padded canvas), never cleared except on a real scene change. The
+gate samples it back via the same screen→world→buffer UV mapping
+`sun-occlusion-render.js#buildSunVisibilityNode` already uses.
+
+> ⚠️ **THE EXPLORED ZONE CURRENTLY RENDERS BLACK, NOT DIM — AND THAT IS DELIBERATE, BUT IT
+> IS ALSO NOT DONE.** `exploredDimNode` is pinned to `0`. The reason is structural, not
+> laziness: the gate multiplies a **fully composited** frame, which already contains
+> tokens, candle flames and particles. Any non-zero dim would therefore show *live
+> content* at reduced brightness in areas the viewer cannot currently see — which is
+> precisely the 50%-opacity hole this whole pillar exists to close, and is the exact bug
+> Foundry itself has (`keyhole-fog-of-war-gap`). Showing a player **less** than Foundry
+> did is safe; showing more is not, so black is the only defensible interim.
+>
+> **What it costs:** players lose the familiar dim "remembered map" and see black outside
+> their current vision. Functionally safe, visually a regression against Foundry.
+>
+> **What finishes it (the next slice):** a content-free base to dim — i.e. gate
+> tokens/effects out of `buf:scene.color` at the *geometry* stage so the explored zone can
+> sample map-art-only, then raise `exploredDimNode`. That is per-object gating done at the
+> right layer, and it is the one remaining piece before this matches Foundry's look.
+
+**Cross-session persistence is NOT built.** The buffer is per-session; a reload starts
+unexplored. Foundry's own `FogExploration` document keeps saving throughout (suppressing
+`canvas.visibility` stops the group *rendering*, not `refreshVisibility` running and
+committing), so the saved data still exists — seeding MSA's buffer from
+`canvas.fog.exploration`'s stored image on scene load is a one-time texture load, not a
+per-frame readback, and is the natural follow-up.
 
 **Slice 4 — the takeover.** `canvas.visibility.renderable = false` behind a revert flag,
 MSA composites the three zones (unexplored / explored-not-visible / visible).

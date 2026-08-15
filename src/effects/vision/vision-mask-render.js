@@ -157,8 +157,17 @@ export function buildVisionLightMaterial({ THREE }) {
  * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`.
  * @returns {*} a NodeMaterial for a fullscreen quad.
  */
-export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, threshold }) {
-  const { texture, uv, float, vec4, select, max } = THREE.TSL;
+export function buildVisionGateMaterial({
+  THREE,
+  maskTexture,
+  illumTexture,
+  threshold,
+  exploredTexture,
+  uViewRect,
+  uExploredRect,
+  exploredDimNode,
+}) {
+  const { texture, uv, float, vec4, select, max, mix, vec2 } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
   const illum = texture(illumTexture).sample(uv());
@@ -173,10 +182,44 @@ export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, thre
   const lightPerception = mask.b.greaterThan(float(0.5));
   const revealed = insideLos.and(darkvision.or(lightPerception.and(litEnough)));
 
-  // HARD 1/0. No partial reveal: a shader that quietly half-reveals is a
-  // shader that quietly half-leaks. A soft fog edge is a presentation choice
-  // for a later slice to make on purpose.
-  const factor = select(revealed, float(1), float(0));
+  // ── THE THREE ZONES (slice 3) ──────────────────────────────────────────
+  // Foundry's own fog has three states and players depend on all three:
+  //   currently visible    → full brightness
+  //   explored, not visible→ DIM (the remembered map — you know the room is
+  //                          there, you just cannot see what is in it now)
+  //   never explored       → black
+  //
+  // ⚠️ WITHOUT THIS, "MSA owns fog" IS A GAMEPLAY REGRESSION, NOT JUST A LOOK
+  // ONE. Suppressing `canvas.visibility` removes Foundry's explored memory
+  // along with its live cone, so a two-zone gate (visible/black) would erase
+  // everything a player had already mapped the moment they looked away. That
+  // is why slice 3 had to land WITH the takeover rather than after it.
+  //
+  // ⚠️ THE DIM ZONE SHOWS THE MAP, NEVER THE CONTENTS. It is applied to the
+  // FULLY COMPOSITED frame, which already contains tokens, candle flames and
+  // particles — so dimming rather than blacking would leak a moving monster at
+  // reduced brightness, which is precisely the 50%-alpha hole this whole
+  // pillar exists to close. The dim factor is therefore applied to a
+  // SEPARATELY-SAMPLED base (the lit map without live content) only when that
+  // is available; until it is, `exploredDimNode` is 0 and the explored zone
+  // renders black — LESS information than Foundry, never more. Erring toward
+  // black is the only safe direction here.
+  const factor0 = select(revealed, float(1), float(0));
+  let factor = factor0;
+  if (exploredTexture && uViewRect && uExploredRect) {
+    // Screen UV → world position → explored-buffer UV. Identical mapping to
+    // `sun-occlusion-render.js#buildSunVisibilityNode`, reused rather than
+    // re-derived so the two cannot drift (and so a Y-flip mistake here would
+    // have to be a mistake there too, where it is already proven correct).
+    const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
+    const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
+    const eu = worldX.sub(uExploredRect.x).div(uExploredRect.z.sub(uExploredRect.x));
+    const ev = worldY.sub(uExploredRect.y).div(uExploredRect.w.sub(uExploredRect.y));
+    const explored = texture(exploredTexture).sample(vec2(eu.clamp(0, 1), ev.clamp(0, 1))).r;
+    const isExplored = explored.greaterThan(float(0.5));
+    // max(): a currently-visible pixel is never dimmed by also being explored.
+    factor = max(factor0, select(isExplored, exploredDimNode ?? float(0), float(0)));
+  }
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -258,6 +301,46 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     depth: false,
   };
   const renderTarget = allocator.create(rtName, rtDesc);
+
+  /**
+   * THE EXPLORED-AREA BUFFER (slice 3) — WORLD space, never cleared.
+   *
+   * ⚠️ WORLD-SPACE, NOT SCREEN-SPACE, AND THAT IS THE WHOLE DIFFICULTY. The
+   * live mask above is screen-space because it is consumed by a fullscreen
+   * gate. Exploration must survive the camera moving, so it is accumulated
+   * against the SCENE rect and sampled back through a screen→world→buffer UV
+   * mapping. A screen-space accumulation would smear a trail across the map
+   * every time the GM panned.
+   *
+   * ⚠️ NEVER CLEARED, BY DESIGN. Every other target here is cleared each
+   * frame; this one is the opposite — it MAX-accumulates forever, because
+   * "explored" is monotonic within a session. `resetExploration` exists for
+   * the one legitimate reason to wipe it (a scene change, or a GM resetting
+   * fog), and nothing else may clear it.
+   *
+   * 2048² is the world-res cap `docs/planning/Vision-Fog-Ownership.md` §4
+   * commits to, matching the sun-shadow field's own ladder — O(1) in map size,
+   * so a 12,000px map and a 2,000px map cost the same.
+   */
+  const exploredRtDesc = {
+    resolvedW: 2048,
+    resolvedH: 2048,
+    screenSized: false,
+    type: THREE.UnsignedByteType,
+    colorSpace: THREE.NoColorSpace,
+    // LINEAR here, unlike the live mask's NEAREST: the explored boundary is a
+    // remembered edge a player has already seen, so a soft ramp reads better
+    // than a 2048-texel staircase, and no information is gated on its exact
+    // position (the LIVE gate is what decides what is currently visible).
+    filter: 'linear',
+    depth: false,
+  };
+  const exploredTarget = allocator.create(`${rtName}.explored`, exploredRtDesc);
+  /** The world rect the explored buffer covers, as [x0,y0,x1,y1]. */
+  let exploredRect = [0, 0, 1, 1];
+  /** Ortho camera over `exploredRect` — rebuilt only when the rect changes. */
+  let exploredCamera = null;
+  let exploredNeedsClear = true;
 
   /** sourceId → {losMesh, lightMesh, uSightRadius} */
   const pool = new Map();
@@ -378,20 +461,83 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     }
 
     lastDrawn = drawn;
-    return { target: renderTarget, scene, clearColor: 0x000000, drawn };
+    return {
+      target: renderTarget,
+      scene,
+      clearColor: 0x000000,
+      drawn,
+      // The SECOND draw the host must perform: the same fan scene, into the
+      // world-space explored buffer, MAX-accumulated and NEVER cleared.
+      explored: {
+        target: exploredTarget,
+        camera: exploredCamera,
+        // Only the very first frame after a scene/rect change clears it;
+        // every later frame accumulates. Consumed-and-reset so the host
+        // cannot accidentally clear twice.
+        clearFirst: (() => {
+          const c = exploredNeedsClear;
+          exploredNeedsClear = false;
+          return c;
+        })(),
+      },
+    };
+  }
+
+  /**
+   * Point the explored buffer at a world rect (the scene rect). Rebuilds the
+   * ortho camera and schedules ONE clear.
+   *
+   * ⚠️ CALLING THIS WIPES EXPLORATION, so it must be driven by a real scene
+   * change and nothing else — not by a resize, not by a floor switch. Wiping
+   * exploration mid-session hands players back territory they had already
+   * mapped, which is a gameplay event, not a rendering one.
+   *
+   * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect
+   */
+  function setExploredRect(rect) {
+    const next = [rect.minX, rect.minY, rect.maxX, rect.maxY];
+    if (next.every((v, i) => v === exploredRect[i]) && exploredCamera) return;
+    exploredRect = next;
+    // Ortho over the world rect. Y is NOT flipped: MSA's world space is
+    // Foundry pixel space with +Y down, the same convention the light meshes
+    // use (`point-light-pool.js` positions with raw Foundry coords), so top =
+    // minY and bottom = maxY. Getting this backwards would mirror exploration
+    // vertically — the recurring Y-flip trap, avoided by matching the proven
+    // call site rather than reasoning from scratch.
+    exploredCamera = new THREE.OrthographicCamera(rect.minX, rect.maxX, rect.minY, rect.maxY, -1, 1);
+    exploredCamera.updateProjectionMatrix();
+    exploredNeedsClear = true;
+  }
+
+  /** The gate needs to know which world rect the buffer covers. */
+  function getExploredRect() {
+    return exploredRect;
+  }
+
+  /** Wipe exploration — a GM resetting fog, or a scene change. */
+  function resetExploration() {
+    exploredNeedsClear = true;
   }
 
   function dispose() {
     for (const [, entry] of pool) disposeEntry(entry);
     pool.clear();
     allocator.dispose(renderTarget);
+    allocator.dispose(exploredTarget);
   }
 
   /** For the Diagnostics report — a mask that silently stopped drawing must be
    *  visible as a number, not inferred from a dark screen
    *  (`feedback_diagnostics_must_land_in_perf_report`). */
   function getInfo() {
-    return { pooled: pool.size, meshesDrawn: lastDrawn, gated: lastGate };
+    return {
+      pooled: pool.size,
+      meshesDrawn: lastDrawn,
+      gated: lastGate,
+      // The explored buffer never clears, so "is it accumulating" cannot be
+      // read off a screenshot — report the rect it covers instead.
+      exploredRect: [...exploredRect],
+    };
   }
 
   return {
@@ -401,6 +547,12 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
       return renderTarget.texture;
     },
     sync,
+    setExploredRect,
+    getExploredRect,
+    resetExploration,
+    get exploredTexture() {
+      return exploredTarget.texture;
+    },
     dispose,
     getInfo,
   };

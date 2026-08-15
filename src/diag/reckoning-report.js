@@ -34,8 +34,14 @@
  * the zones explaining only ~17% of the upper-floor frame, which no field in v1
  * could say — plus `vram`, `wholeImage`, frame-gap percentiles, and the fixed
  * `floors` section (v1 called `.find` on the wrapper object, not its array).
+ * v3 (2026-08-15, same day again): v2's own half-resolution A/B proved the
+ * upper floor RESOLUTION-bound, which pointed at the one GPU consumer no MSA
+ * zone can see — Foundry's own PIXI context, still re-rendering the whole map
+ * into a canvas-sized cache texture every frame. Added the `foundryCanvas`
+ * census + its verdict, and pixel-rate normalisation so two captures at
+ * different canvas sizes can be compared at all.
  */
-export const RECKONING_REPORT_VERSION = 2;
+export const RECKONING_REPORT_VERSION = 3;
 
 /** Round to 4 decimal places — zone ms at 120fps needs the tail digits. */
 function r4(x) {
@@ -105,9 +111,14 @@ const OUTER_CPU_PREFIXES = ['pass.', 'tick.', 'sims.', 'residency.', 'depth.'];
  * speed — every ratio measured against it is a LOWER BOUND, not the true cost.
  *
  * @param {{frames?: number, durationMs?: number, rows?: Array<object>, gapSamples?: number[]|null}} zones
+ * @param {{megapixels?: number|null}} [opts] - canvas size, for the pixel-rate
+ *   fields. The 2026-08-15 half-resolution A/B is why these exist: comparing two
+ *   captures at different canvas sizes is meaningless without normalising, and
+ *   `msPerMegapixel` is what makes "is this resolution-bound?" answerable from
+ *   two dumps instead of arguable.
  * @returns {object|null}
  */
-export function summarizeAttribution(zones) {
+export function summarizeAttribution(zones, opts = {}) {
   if (!zones || !(zones.frames > 0) || !(zones.durationMs > 0)) return null;
   const rows = Array.isArray(zones.rows) ? zones.rows : [];
   const frameMsAvg = zones.durationMs / zones.frames;
@@ -145,10 +156,18 @@ export function summarizeAttribution(zones) {
   const capCandidate = [60, 90, 120, 144, 165, 240].find((hz) => Math.abs(fps - hz) / hz < 0.04);
   const refreshCapped = !!capCandidate && gpuSum < frameMsAvg * 0.6;
 
+  const megapixels = Number.isFinite(opts?.megapixels) && opts.megapixels > 0 ? r4(opts.megapixels) : null;
+
   return {
     frames: zones.frames,
     frameMsAvg: r4(frameMsAvg),
     fps,
+    megapixels,
+    // Normalised cost — the ONLY honest way to compare captures taken at
+    // different canvas sizes. If this holds roughly constant across a
+    // resolution change, the frame is resolution-bound.
+    frameMsPerMegapixel: megapixels ? r4(frameMsAvg / megapixels) : null,
+    gpuZoneMsPerMegapixel: megapixels ? r4(gpuSum / megapixels) : null,
     gpuZoneSumMsPerFrame: gpuSum,
     cpuOuterZoneSumMsPerFrame: cpuOuterSum,
     unaccountedMsPerFrame: unaccountedMs,
@@ -186,7 +205,28 @@ export function summarizeAttribution(zones) {
  */
 export function computeReckoningVerdicts(sections = {}) {
   const { census = null, earlyZ = null, zones = null, suspects = null, attribution = null, errors = [] } = sections;
+  const foundryCanvas = sections.foundryCanvas ?? null;
   const out = [];
+
+  // THE SECOND RENDERER (2026-08-15) — the leading explanation for a large
+  // unmeasured remainder. `canvas.primary.renderable === true` means Foundry's
+  // PIXI context re-renders every map object into a canvas-resolution render
+  // texture EVERY FRAME, on its own ticker, in its own GL context. MSA cannot
+  // see one microsecond of it, no effect toggle reaches it, it scales with
+  // resolution, and it scales with floor (an upper floor makes more of
+  // Foundry's own objects renderable). Deliberate since 2026-08-13 to keep
+  // Foundry's fog shader fed (Bug #18) — with the cost never measured.
+  if (foundryCanvas?.primaryRenderable === true) {
+    const mpx = foundryCanvas.primaryCacheTexture?.mpx ?? null;
+    out.push(
+      `🔴 FOUNDRY IS STILL RENDERING THE MAP TOO — \`canvas.primary.renderable\` is true, so PIXI re-renders ` +
+        `${foundryCanvas.primaryChildrenRenderable ?? '?'} of ${foundryCanvas.primaryChildren ?? '?'} primary objects into a ` +
+        `${mpx ?? '?'} Mpx cache texture EVERY FRAME, in Foundry's own GL context. Invisible to every zone here, ` +
+        'immune to every effect toggle, and it scales with BOTH resolution and floor. Deliberate (Bug #18, the fog ' +
+        'shader reads that cache) but never measured. Console A/B: `canvas.primary.renderable = false` for a few ' +
+        'seconds and re-press — fog goes stale meanwhile, and it is reversible with `= true`.'
+    );
+  }
   const floorIndex = census?.view?.floorIndex ?? sections.floors?.viewed ?? null;
 
   if (!census && !earlyZ) {
@@ -363,11 +403,15 @@ export function computeReckoningVerdicts(sections = {}) {
  */
 export function assembleReckoningReport({ generatedAt, sections = {} } = {}) {
   const { identity, floors, census, earlyZ, effects, suspects, zones, vram, wholeImage, multiFloorRanked } = sections;
+  const foundryCanvas = sections.foundryCanvas ?? null;
   const errors = sections.errors ?? [];
   // Derived here, not by the caller: the attribution math must exist for every
   // dump that has a profiler window, and a caller that forgets it would silently
   // ship the exact blind spot this field was added to close.
-  const attribution = summarizeAttribution(zones);
+  const px = census?.canvasPx ?? null;
+  const attribution = summarizeAttribution(zones, {
+    megapixels: px?.w > 0 && px?.h > 0 ? (px.w * px.h) / 1e6 : null,
+  });
   return {
     report: 'reckoning-report',
     version: RECKONING_REPORT_VERSION,
@@ -385,9 +429,11 @@ export function assembleReckoningReport({ generatedAt, sections = {} } = {}) {
       suspects,
       zones,
       attribution,
+      foundryCanvas,
       errors,
     }),
     attribution,
+    foundryCanvas,
     identity: identity ?? null,
     floors: floors ?? null,
     census: census ?? null,

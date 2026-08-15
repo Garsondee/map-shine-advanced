@@ -82,6 +82,9 @@ export {
   applyArtSuppression,
   restoreFoundryArt,
   getCanvasCompositingReport,
+  // ⚖️ RECKONING (TEMPORARY): how much Foundry's OWN renderer is still doing —
+  // the one large GPU consumer MSA's per-pass timestamps cannot see.
+  getFoundryRendererCensus,
   decideArtSuppression,
   MSA_OWNED_GROUPS,
 } from './canvas-compositing.js';

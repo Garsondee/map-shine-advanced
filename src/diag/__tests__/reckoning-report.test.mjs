@@ -138,6 +138,67 @@ export async function run(t) {
     );
   }
 
+  // --- THE RESOLUTION A/B, pinned to the author's own three captures ---------
+  // Upper floor at 7.32 Mpx ran 37.14 ms/frame; the SAME floor at 3.47 Mpx hit
+  // the 120 Hz cap. Normalised per megapixel the two land close together, which
+  // is what "resolution-bound" looks like in numbers rather than in argument.
+  {
+    const full = summarizeAttribution(
+      {
+        frames: 103,
+        durationMs: 3825.6,
+        rows: [{ id: 'geometry.worldDraw', cpuMsPerFrame: 0.22, gpuMsPerFrame: 8.3053 }],
+      },
+      { megapixels: (3840 * 1906) / 1e6 }
+    );
+    const half = summarizeAttribution(
+      {
+        frames: 473,
+        durationMs: 3972,
+        rows: [{ id: 'geometry.worldDraw', cpuMsPerFrame: 0.21, gpuMsPerFrame: 2.0282 }],
+      },
+      { megapixels: (2592 * 1338) / 1e6 }
+    );
+    ok('full-res megapixels computed', Math.abs(full.megapixels - 7.32) < 0.02);
+    ok('half-res megapixels computed', Math.abs(half.megapixels - 3.47) < 0.02);
+    ok('full-res frame ms/Mpx ≈ 5.07', Math.abs(full.frameMsPerMegapixel - 5.07) < 0.05);
+    ok('half-res IS capped, so its ms/Mpx is a ceiling ≈ 2.42', Math.abs(half.frameMsPerMegapixel - 2.42) < 0.05);
+    ok('half-res capture is refresh-capped', half.refreshCapped === true);
+    ok('full-res capture is NOT capped — it is the real cost', full.refreshCapped === false);
+    ok(
+      'no megapixels → null rates, never a fabricated number',
+      summarizeAttribution({ frames: 10, durationMs: 100, rows: [] }).frameMsPerMegapixel === null
+    );
+  }
+
+  // --- the second-renderer verdict ------------------------------------------
+  {
+    const loud = computeReckoningVerdicts({
+      foundryCanvas: {
+        primaryRenderable: true,
+        primaryChildren: 12,
+        primaryChildrenRenderable: 9,
+        primaryCacheTexture: { w: 3840, h: 1906, mpx: 7.32 },
+      },
+      errors: [],
+    });
+    ok(
+      'primary.renderable true → 🔴 second-renderer verdict, first',
+      loud[0].startsWith('🔴') && loud[0].includes('FOUNDRY IS STILL RENDERING')
+    );
+    ok('it names the object counts', loud[0].includes('9 of 12'));
+    ok('it names the cache size', loud[0].includes('7.32 Mpx'));
+    ok('it hands over the reversible console A/B', loud[0].includes('canvas.primary.renderable = false'));
+
+    const quiet = computeReckoningVerdicts({ foundryCanvas: { primaryRenderable: false }, errors: [] });
+    ok('suppressed → no second-renderer verdict', !quiet.some((v) => v.includes('FOUNDRY IS STILL RENDERING')));
+    const unknown = computeReckoningVerdicts({ foundryCanvas: null, errors: [] });
+    ok(
+      'missing census → no verdict either way, never a guess',
+      !unknown.some((v) => v.includes('FOUNDRY IS STILL RENDERING'))
+    );
+  }
+
   // --- summarizeZoneRows -----------------------------------------------------
   {
     const rows = summarizeZoneRows(

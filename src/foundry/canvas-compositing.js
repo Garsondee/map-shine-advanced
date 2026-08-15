@@ -539,3 +539,76 @@ export function getCanvasCompositingReport() {
       'chose Foundry rendering over a blank screen; read decision.reason for which fact forced it.',
   };
 }
+
+/**
+ * ⚖️ THE SECOND-RENDERER CENSUS (TEMPORARY — `docs/holy/V4-Reckoning.md`; remove
+ * with the Reckoning Report when its R4 gates close).
+ *
+ * HOW MUCH work Foundry's own renderer is still doing, as opposed to the seam
+ * report above which answers WHETHER its art is showing. Those are different
+ * questions and only the first one has ever been asked here.
+ *
+ * The PRIMARY-CACHE-FREEZE FIX in this file's header (2026-08-13, Bug #18)
+ * deliberately leaves `canvas.primary.renderable === true` so `CachedContainer#
+ * render()` keeps re-rendering every map object into `canvas.primary.
+ * renderTexture` each frame — at CANVAS RESOLUTION — purely so Foundry's own fog
+ * shader reads a live snapshot. That section states the cost honestly and ends
+ * "Measure before assuming it matters." This function is the measurement's raw
+ * material, and it is the one large GPU consumer MSA's own per-pass timestamps
+ * structurally cannot see: different context, different ticker.
+ *
+ * Every read is defensive — this runs against live Foundry, and a diagnostic
+ * that throws is worse than one that reports `null`.
+ *
+ * @returns {object} counts + sizes; `null` fields where Foundry did not answer.
+ */
+export function getFoundryRendererCensus() {
+  const readErrors = [];
+  const read = (label, fn) => {
+    try {
+      return fn();
+    } catch (err) {
+      readErrors.push(`${label}: ${err?.message ?? err}`);
+      return null;
+    }
+  };
+  const c = typeof canvas !== 'undefined' ? canvas : null;
+  const primary = read('canvas.primary', () => c?.primary ?? null);
+  const rt = read('canvas.primary.renderTexture', () => primary?.renderTexture ?? null);
+  const kids = read('canvas.primary.children', () => (Array.isArray(primary?.children) ? primary.children : [])) ?? [];
+
+  let renderableChildren = null;
+  if (kids.length > 0 || Array.isArray(kids)) {
+    renderableChildren = read('children renderable scan', () => {
+      let n = 0;
+      for (const child of kids) if (child?.renderable !== false && child?.visible !== false) n++;
+      return n;
+    });
+  }
+
+  const rtW = read('renderTexture.width', () => rt?.width ?? null);
+  const rtH = read('renderTexture.height', () => rt?.height ?? null);
+
+  return {
+    // TRUE = Foundry re-renders its whole primary group into the cache every
+    // frame. Deliberate (Bug #18) — and the thing to measure.
+    primaryRenderable: read('primary.renderable', () => primary?.renderable ?? null),
+    primaryCacheTexture: rtW && rtH ? { w: rtW, h: rtH, mpx: Math.round(((rtW * rtH) / 1e6) * 100) / 100 } : null,
+    primaryChildren: kids.length,
+    primaryChildrenRenderable: renderableChildren,
+    tickerStarted: read('app.ticker.started', () => c?.app?.ticker?.started ?? null),
+    tickerFps: read('app.ticker.FPS', () => (c?.app?.ticker?.FPS != null ? Math.round(c.app.ticker.FPS) : null)),
+    visibilityVisible: read('visibility.visible', () => c?.visibility?.visible ?? null),
+    rendererSize: read('app.renderer size', () =>
+      c?.app?.renderer?.width != null ? { w: c.app.renderer.width, h: c.app.renderer.height } : null
+    ),
+    readErrors,
+    interpretation:
+      'primaryRenderable:true means Foundry is re-rendering primaryChildrenRenderable objects into a ' +
+      'primaryCacheTexture-sized render texture EVERY FRAME, in its own GL context — invisible to every MSA ' +
+      'perf zone, immune to every MSA effect toggle, and scaling with both resolution and floor (an upper ' +
+      "floor makes more of Foundry's own objects renderable). Reversible console A/B: " +
+      "`canvas.primary.renderable = false` suppresses it (Foundry's fog shader goes stale meanwhile — " +
+      'that is Bug #18 returning by choice, restored with `= true`).',
+  };
+}

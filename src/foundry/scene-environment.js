@@ -84,6 +84,173 @@ export function readSceneDarkness() {
 }
 
 /* -------------------------------------------- */
+/*  Darkness WRITE-BACK (2026-08-15)            */
+/* -------------------------------------------- */
+
+/**
+ * ============================================================================
+ * PUBLISH MSA'S OWN DARKNESS BACK TO FOUNDRY — the only write in this reader.
+ * ============================================================================
+ *
+ * ⚠️ THIS REVERSES A PREVIOUSLY-DOCUMENTED REFUSAL, ON THE AUTHOR'S OWN
+ * INSTRUCTION (2026-08-15): *"When we change from day to night the scene gets
+ * darker which is good but the actual 'scene darkness' value doesn't change.
+ * We probably need to make sure that we accurately change the actual scene
+ * darkness when time of day changes in case things in game systems depend on
+ * knowing what the current brightness is."*
+ *
+ * The refusal was recorded in `[[feedback_foundry_darkness_gate_is_a_second_
+ * authority]]` and it was not arbitrary — it named a real defect that any naive
+ * write-back has: `world/environment.js#buildEnvSnapshot` folds Foundry's
+ * darkness into its own as `max(nightDarkness, darknessInput)`. Write MSA's
+ * OUTPUT into that INPUT and the max can never come back down — sweep the
+ * astrolabe toward dawn and the scene stays pinned at midnight forever. That is
+ * a genuine one-way ratchet, not a theoretical concern.
+ *
+ * WHAT CHANGED IS NOT THE AUTHOR'S MIND ABOUT ARCHITECTURE, IT IS THAT THE
+ * RATCHET HAS A CLEAN FIX: remember exactly what we last published, and refuse
+ * to treat that same value as an independent input when it comes back
+ * (`darknessInputExcludingOwnEcho` below). MSA reads only genuine GM intent;
+ * its own echo is subtracted before the fold ever sees it. That turns
+ * "read-back loop" into "publish, and ignore your own publication" — which is
+ * the ordinary way a renderer mirrors state into a host it does not own.
+ *
+ * ⚠️ WHY THIS ALSO FIXES A SECOND, SEPARATELY-REPORTED BUG (*"Tokens which are
+ * outside at noon believe they are currently in the dark… tokens seem to only
+ * be able to 'see' point lights"*). Verified by reading
+ * `client/canvas/groups/environment.mjs` in the vendored v14 source, not
+ * assumed:
+ *
+ *   - `EnvironmentCanvasGroup#initialize` assigns
+ *     `this.#darknessLevel = scene.environment.darknessLevel = dl` — so the
+ *     value game systems read off the scene genuinely moves (bug 1), and
+ *   - it then calls `canvas.perception.update({refreshPrimary: true,
+ *     refreshLighting: true, refreshVision: true})` — so every token's vision
+ *     is re-evaluated against the new darkness (bug 2), and
+ *   - `#configureGlobalLight` re-initialises the scene's `GlobalLightSource`,
+ *     whose own darkness activation window is what decides whether the map has
+ *     ambient daylight at all. With darkness frozen at whatever the document
+ *     happened to say, that window's verdict was frozen too — which is exactly
+ *     "it is noon on the astrolabe and Foundry still thinks it is night."
+ *
+ * ⚠️ CLIENT-LOCAL, NOT PERSISTED. This calls `canvas.environment.initialize`,
+ * NEVER `scene.update()`. The distinction is load-bearing: `scene.update()` is
+ * a document write that broadcasts to every connected client and writes to
+ * disk, and MSA's aesthetic clock is a LOCAL viewing preference — persisting it
+ * would have one GM's astrolabe drag rewrite the saved scene for everybody.
+ * `foundry/camera-path-player.js#writeDarkness01` deliberately does use
+ * `scene.update()`, because a camera path is an authored, shared artifact; this
+ * is not.
+ *
+ * ⚠️ THROTTLED BY THE CALLER, AND IT MUST BE. `initialize()` ends in a
+ * `refreshLighting + refreshVision` perception update — Foundry re-running its
+ * own lighting and every token's vision polygons. Calling this per frame during
+ * an astrolabe sweep would be a self-inflicted performance bug of exactly the
+ * kind mission priority #1 exists to prevent. See `shouldPublishDarkness`.
+ *
+ * @param {number} darkness01 - MSA's own resolved darkness, 0..1.
+ * @returns {{ok: boolean, published: number|null, reason: string|null}} — never
+ *   throws, same posture as every reader here: a Foundry API surprise must not
+ *   take a render frame down.
+ */
+export function publishSceneDarkness(darkness01) {
+  const value = Number(darkness01);
+  if (!Number.isFinite(value)) {
+    return { ok: false, published: null, reason: `darkness01 was ${JSON.stringify(darkness01)}, not a finite number` };
+  }
+  const clamped = Math.min(1, Math.max(0, value));
+  try {
+    const env = typeof canvas !== 'undefined' ? (canvas?.environment ?? null) : null;
+    if (!env || typeof env.initialize !== 'function') {
+      return { ok: false, published: null, reason: 'canvas.environment.initialize is unavailable' };
+    }
+    env.initialize({ environment: { darknessLevel: clamped } });
+    return { ok: true, published: clamped, reason: null };
+  } catch (err) {
+    return { ok: false, published: null, reason: `canvas.environment.initialize threw: ${err?.message ?? err}` };
+  }
+}
+
+/**
+ * THE ECHO GUARD — pure, so the one piece of logic that keeps the write-back
+ * from becoming a feedback bus is Node-testable rather than only observable as
+ * "the scene got stuck dark once."
+ *
+ * Given what Foundry currently reports and what MSA last published, decide what
+ * `buildEnvSnapshot`'s `darknessInput` should actually be. If the two match,
+ * Foundry is simply echoing us and there is NO independent input — return 0, so
+ * `max(nightDarkness, darknessInput)` is driven purely by the sun. If they
+ * differ, something else (the GM's own darkness slider, another module, a scene
+ * load) genuinely set it, and that IS a real input we must honour.
+ *
+ * ⚠️ THE TOLERANCE IS NOT A FUDGE FACTOR. `publishSceneDarkness` clamps and
+ * Foundry stores the value verbatim, so an exact `===` would very nearly work —
+ * but `AlphaField`'s own cleaning and any round-trip through a document can
+ * return a value that differs in the last bit, and a guard that fails open ONE
+ * frame reintroduces the ratchet permanently (the max never comes back down).
+ * A tolerance smaller than any darkness step a human can perceive costs nothing
+ * and cannot be defeated by float noise. The failure mode it deliberately
+ * accepts — a GM setting darkness to EXACTLY MSA's current value has their
+ * setting ignored — is indistinguishable from honouring it, because the two
+ * numbers are the same.
+ *
+ * @param {number} foundryDarkness01 - what `readSceneDarkness` just reported.
+ * @param {number|null} lastPublished01 - what `publishSceneDarkness` last wrote
+ *   successfully, or `null` if MSA has never published (a fresh session, or
+ *   publishing disabled) — in which case every reading is genuine GM intent.
+ * @returns {number} the darkness to feed `buildEnvSnapshot` as `darknessInput`.
+ */
+export function darknessInputExcludingOwnEcho(foundryDarkness01, lastPublished01) {
+  const read = Number.isFinite(foundryDarkness01) ? Math.min(1, Math.max(0, foundryDarkness01)) : 0;
+  if (!Number.isFinite(lastPublished01)) return read;
+  return Math.abs(read - lastPublished01) <= DARKNESS_ECHO_EPSILON ? 0 : read;
+}
+
+/** See `darknessInputExcludingOwnEcho`'s own "THE TOLERANCE IS NOT A FUDGE
+ *  FACTOR" note. ~1/2000 of the full range — far below a perceptible step. */
+export const DARKNESS_ECHO_EPSILON = 5e-4;
+
+/**
+ * How much darkness must move before it is worth paying Foundry's own
+ * `refreshLighting + refreshVision` for, and how often at most.
+ *
+ * ⚠️ BOTH GATES ARE NEEDED, AND THEY STOP DIFFERENT THINGS. The STEP stops a
+ * frozen clock from republishing forever (MSA's darkness is a float off a sun
+ * model — it is never bit-identical frame to frame, so an equality check alone
+ * would publish every frame at a standstill). The INTERVAL stops a fast
+ * astrolabe sweep from firing a perception update every frame while the value
+ * genuinely IS changing that fast. Either alone leaves the other case open.
+ *
+ * 1/64 is finer than Foundry's own darkness slider steps and far finer than any
+ * visible lighting change; 250 ms means a sweep publishes at most 4×/sec, which
+ * is a smooth ramp to the eye and a rounding error to the frame budget.
+ */
+export const DARKNESS_PUBLISH_STEP = 1 / 64;
+export const DARKNESS_PUBLISH_MIN_INTERVAL_MS = 250;
+
+/**
+ * Decide whether to publish this frame — pure, for the same reason the echo
+ * guard is: a throttle that silently never fires is a feature that silently
+ * never works, and this way that is a red test rather than a live mystery.
+ *
+ * @param {object} args
+ * @param {number} args.darkness01 - MSA's current resolved darkness.
+ * @param {number|null} args.lastPublished01 - last successfully published value, or null.
+ * @param {number} args.nowMs @param {number} args.lastPublishedAtMs
+ * @returns {boolean}
+ */
+export function shouldPublishDarkness({ darkness01, lastPublished01, nowMs, lastPublishedAtMs }) {
+  if (!Number.isFinite(darkness01)) return false;
+  // NEVER PUBLISHED YET ⇒ always publish, ignoring the interval. Otherwise a
+  // scene that loads and sits still keeps Foundry on the document's stale value
+  // until the author happens to move something — the exact "it's noon and the
+  // tokens are in the dark" symptom, just delayed.
+  if (!Number.isFinite(lastPublished01)) return true;
+  if (Math.abs(darkness01 - lastPublished01) < DARKNESS_PUBLISH_STEP) return false;
+  return nowMs - lastPublishedAtMs >= DARKNESS_PUBLISH_MIN_INTERVAL_MS;
+}
+
+/* -------------------------------------------- */
 /*  Ambient palette                             */
 /* -------------------------------------------- */
 

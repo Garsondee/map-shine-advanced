@@ -101,7 +101,13 @@
  * @module world/wind-access
  */
 
-import { sampleWind, computeWindTurbulence, deflectAroundWalls, WIND_SHADOW_DEPTH } from './wind-field.js';
+import {
+  sampleWind,
+  computeWindTurbulence,
+  computeGustEnvelope,
+  deflectAroundWalls,
+  WIND_SHADOW_DEPTH,
+} from './wind-field.js';
 
 /**
  * @typedef {object} WindGridSpec
@@ -142,9 +148,14 @@ import { sampleWind, computeWindTurbulence, deflectAroundWalls, WIND_SHADOW_DEPT
  *
  * @param {object} [spec]
  * @param {number} [spec.version] - bumped by the owner on every rebake.
- * @param {{directionDeg: *, speed01: *}} [spec.ambientWind] - live TSL uniform
- *   NODES (not numbers) for the prevailing breeze. Passed by reference, so a
- *   direction/speed change is picked up with no rebuild.
+ * @param {{directionDeg: *, speed01: *, gustiness01?: *}} [spec.ambientWind] -
+ *   live TSL uniform NODES (not numbers) for the prevailing breeze. Passed by
+ *   reference, so a direction/speed/gustiness change is picked up with no
+ *   rebuild. `gustiness01` (2026-08-15) drives the discrete travelling gust
+ *   envelope — see `world/wind-field.js#computeGustEnvelope`. Omitting it is
+ *   byte-identical to before gusts existed, and it is the ONE input here whose
+ *   change genuinely needs no rebake either: unlike `directionDeg` (which the
+ *   wind SHADOW is baked against), gustiness touches nothing on the CPU side.
  * @param {WindGridSpec} [spec.grid]
  * @param {*} [spec.opennessTexture] - RGBA half-float; B = `openness`,
  *   A = `exteriorOpenness`, R/G reserved zeros (see `sampleWind`'s own
@@ -277,6 +288,39 @@ export function createWindHandle({
     const memo = {};
     const once = (key, build) => (key in memo ? memo[key] : (memo[key] = build()));
 
+    /**
+     * THE GUST ENVELOPE, resolved ONCE for this kernel (2026-08-15) — three of
+     * the four things below need it (`coherent` scales by it, `turbulence` and
+     * `organic` cap against it), and it is four noise-ish ops. Memoized through
+     * the SAME `once` the parts use, so a kernel that touches only `organic`
+     * still pays for it exactly once and a kernel that touches none pays
+     * nothing.
+     *
+     * `undefined` — never a `float(1)` — when there is no gustiness to read, so
+     * every consumer below can branch at JS time and emit the identical graph
+     * it emitted before this existed (`tsl/no-uniform-gates`).
+     */
+    const gustEnvelope = () =>
+      ambientRef && ambientRef.gustiness01 !== undefined
+        ? once('gust', () =>
+            computeGustEnvelope(TSL, {
+              centerXY,
+              time,
+              directionDeg: ambientRef.directionDeg,
+              gustiness01: ambientRef.gustiness01,
+            })
+          )
+        : undefined;
+
+    /** The wind speed the turbulence cap measures against — GUSTED, matching
+     *  `sampleWind`'s own `cappedSpeed01`. See that function's "THE CAP GUSTS
+     *  WITH THE WIND" note for why the un-gusted dial is the wrong ceiling. */
+    const cappedSpeed01 = () => {
+      if (!ambientRef) return undefined;
+      const g = gustEnvelope();
+      return g === undefined ? ambientRef.speed01 : ambientRef.speed01.mul(g);
+    };
+
     return {
       openness,
       wallAwayDirX,
@@ -304,7 +348,17 @@ export function createWindHandle({
         return once('coherent', () => {
           if (!ambientRef) return vec2(0, 0);
           const rad = ambientRef.directionDeg.mul(float(Math.PI / 180));
-          const bias = vec2(cos(rad), sin(rad)).negate().mul(ambientRef.speed01);
+          let bias = vec2(cos(rad), sin(rad)).negate().mul(ambientRef.speed01);
+          // THE GUST ENVELOPE (2026-08-15) — the kernel's own copy of
+          // `sampleWind`'s identical step, in the identical PLACE in the chain
+          // (raw bias → gust → deflect → shadow). Both are held to that by the
+          // node↔kernel parity test, which is exactly why this term could not
+          // simply be left out of the compute path "for now": particles and
+          // gust ribbons would have gone on riding a wind that never gusted
+          // while every material around them did, and the test would have said
+          // so immediately. See `computeGustEnvelope`'s own header.
+          const gust = gustEnvelope();
+          if (gust !== undefined) bias = bias.mul(gust);
           const deflected = deflectAroundWalls(TSL, {
             vector: bias,
             awayDirX: wallAwayDirX,
@@ -330,7 +384,7 @@ export function createWindHandle({
             // open, which is the shape actually wanted.
             openness,
             exteriorOpenness: openness,
-            windSpeed01: ambientRef ? ambientRef.speed01 : undefined,
+            windSpeed01: cappedSpeed01(),
           })
         );
       },
@@ -348,7 +402,7 @@ export function createWindHandle({
             exposure: openness,
             openness,
             exteriorOpenness: openness,
-            windSpeed01: ambientRef ? ambientRef.speed01 : undefined,
+            windSpeed01: cappedSpeed01(),
           })
         );
       },

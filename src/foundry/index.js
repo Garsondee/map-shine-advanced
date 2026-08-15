@@ -96,6 +96,17 @@ export { registerCanvasTearDownWatchdog, isOrphanedTeardown } from './canvas-lif
 // .darknessLevel and the canvas.colors ambient palette are read.
 export {
   readSceneDarkness,
+  // THE ONE WRITE in the environment adapter (2026-08-15) — client-local, never
+  // a document update. Its two pure companions are exported alongside it
+  // because the write is only safe WITH them: the echo guard is what stops the
+  // read-back ratchet, and the throttle is what stops a per-frame
+  // refreshVision. See `publishSceneDarkness`'s own header.
+  publishSceneDarkness,
+  darknessInputExcludingOwnEcho,
+  shouldPublishDarkness,
+  DARKNESS_ECHO_EPSILON,
+  DARKNESS_PUBLISH_STEP,
+  DARKNESS_PUBLISH_MIN_INTERVAL_MS,
   deriveDarkness,
   readSceneAmbient,
   deriveAmbient,

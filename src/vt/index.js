@@ -34,6 +34,7 @@ export {
   setVtPanViewerWindDiagnosticParticles,
   setVtPanViewerWindGusts,
   setVtPanViewerWindAmbient,
+  setVtPanViewerWindGustiness,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
   setVtPanViewerTimeRate,
@@ -81,8 +82,14 @@ export {
   getVtPanViewerDoorPoolStats,
   getVtPanViewerWindBakeStats,
   // STAGE 1's revert flag (docs/planning/Stage-1-Shade-Once.md).
+  // Fire's own per-frame counts — wired 2026-08-15 to answer "are fire LIGHTS
+  // even being built on this floor" (see getFireStatus's own doc).
+  getVtPanViewerFireStatus,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
+  // ⚖️ RECKONING CENSUS (TEMPORARY — docs/holy/V4-Reckoning.md; remove with
+  // the Reckoning Report button when the campaign's R4 gates close).
+  getVtPanViewerReckoningCensus,
   // STAGE 2's revert flag — point-light batching (docs/planning/Point-Light-Batching-Design.md).
   setVtPanViewerPointLightBatching,
   getVtPanViewerPointLightBatching,
@@ -122,6 +129,10 @@ export { getSourceBitmap, releaseSourceBitmap, readPageBitmapPixels } from './de
 // level state, not viewer-dependent (works before/after the WebGPU viewer
 // starts), so this is imported directly rather than through _active.
 export { getPyramidStoreStats } from './pyramid-store.js';
+// ⚖️ RECKONING (TEMPORARY): the compression worker's request/hit/fail tallies,
+// module-level like the pyramid store above — the Reckoning Report reads them
+// to tell "warm v10 cache" from "silent quota failure re-encoding every session".
+export { getCompressedTextureStats } from './compressed-textures.js';
 // resolveRendererRequiredLimits: the boot heartbeat renderer (boot.js) needs
 // the SAME raised WebGPU texture cap as the VT viewer, or the flight recorder
 // (which reads the heartbeat's device) misreports the limit. Cross-zone, so it

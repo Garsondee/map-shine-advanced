@@ -167,6 +167,12 @@ import {
   computeQuadBounds,
   computeItemPlacement,
   readSceneDarkness,
+  // THE DARKNESS WRITE-BACK (2026-08-15) — MSA's own day/night, published to
+  // Foundry so game systems and Foundry's own vision stop reading a frozen
+  // number. See `publishSceneDarkness`'s own header.
+  publishSceneDarkness,
+  darknessInputExcludingOwnEcho,
+  shouldPublishDarkness,
   readSceneAmbient,
   readGamePaused,
   watchGamePaused,
@@ -308,6 +314,11 @@ import {
   // area-preserving, which is what makes vegetation's leaf flutter a genuine
   // "mass preserving" distortion rather than a stretch. See its own header.
   curlNoise2D,
+  // The shipped gustiness default — the uniform below initialises to it, so
+  // gusts are live from the FIRST frame rather than from whenever a UI control
+  // first happens to push a value (a startup-ordering dependency this way
+  // simply does not have).
+  WIND_DEFAULT_GUSTINESS01,
 } from '../world/index.js';
 
 /**
@@ -3015,6 +3026,21 @@ export async function startVtPanViewer({
     const uWindDirectionDeg = THREE.TSL.uniform(THREE.TSL.float(0));
     const uWindSpeed01 = THREE.TSL.uniform(THREE.TSL.float(0));
     /**
+     * GUSTINESS (2026-08-15) — the third live ambient uniform, driving the
+     * discrete travelling gust envelope (`world/wind-field.js#
+     * computeGustEnvelope`). `world/environment.js` has carried a
+     * `gustiness01` in its snapshot since the beginning with NOTHING reading
+     * it ([[feedback_unconsumed_api_rots_silently]]); this is the consumer.
+     *
+     * ⚠️ UNLIKE `uWindDirectionDeg`, THIS NEEDS NO REBAKE. Direction is a
+     * rebake trigger because the wind SHADOW is baked against it
+     * (`upwindShelter` is directional); gustiness touches no CPU-side bake at
+     * all, so `setWindGustiness` below simply writes the uniform. Routing it
+     * through `setWindAmbient` would have spent a full wall-raster + flood-fill
+     * on a value the bake cannot see.
+     */
+    const uWindGustiness01 = THREE.TSL.uniform(THREE.TSL.float(WIND_DEFAULT_GUSTINESS01));
+    /**
      * THE WIND HANDLE (world/wind-access.js, Wind.md §5.1) — the ONE object
      * every wind consumer receives. Rebuilt (never mutated) by `bakeWindField`
      * below; see its construction site for what goes in.
@@ -3666,7 +3692,7 @@ export async function startVtPanViewer({
         windHandleVersion += 1;
         windHandle = createWindHandle({
           version: windHandleVersion,
-          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01 },
+          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
           grid: {
             originX: gridSpec.minX,
             originY: gridSpec.minY,
@@ -3797,6 +3823,24 @@ export async function startVtPanViewer({
     }
 
     /** @param {number} directionDeg @param {number} speed01 */
+    /**
+     * GUSTINESS — the one ambient input that does NOT rebake (2026-08-15).
+     *
+     * Deliberately its own entry point rather than a third argument on
+     * `setWindAmbient`: that function's entire body past the two writes is
+     * `bakeWindField('ambient-change')`, and gustiness is invisible to the
+     * bake (the wind SHADOW is the only direction-dependent baked term, and it
+     * does not care how gusty the wind is). Folding this in would have made
+     * every gustiness change pay a wall-raster and a flood-fill for nothing —
+     * and worse, made that cost invisible at the call site.
+     *
+     * @param {number} gustiness01 - 0..1; non-finite values are ignored,
+     *   matching `setWindAmbient`'s own guard.
+     */
+    function setWindGustiness(gustiness01) {
+      if (Number.isFinite(gustiness01)) uWindGustiness01.value = Math.min(1, Math.max(0, gustiness01));
+    }
+
     function setWindAmbient(directionDeg, speed01) {
       if (Number.isFinite(directionDeg)) uWindDirectionDeg.value = directionDeg;
       if (Number.isFinite(speed01)) uWindSpeed01.value = Math.max(0, speed01);
@@ -3926,7 +3970,7 @@ export async function startVtPanViewer({
           // distinct from the consumer-facing shapes.
           restFieldTexture: windHandle.restFieldTexture,
           solidMaskTexture: windSolidMaskTexture,
-          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01 },
+          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
           cols: windHandle.grid.cols,
           rows: windHandle.grid.rows,
           cellSize: windHandle.grid.cellSize,
@@ -5525,6 +5569,25 @@ export async function startVtPanViewer({
     /** The env snapshot from the most recent frame, plus where darkness came
      * from — for getEnvSnapshotInfo() / the Diagnostics debug report. */
     let lastEnvSnapshot = null;
+    /**
+     * DARKNESS WRITE-BACK STATE (2026-08-15) — see
+     * `foundry/scene-environment.js#publishSceneDarkness`.
+     *
+     * `lastPublishedDarkness01` is BOTH the throttle's reference AND the echo
+     * guard's, deliberately one variable: they are two questions about the same
+     * fact ("what does Foundry currently hold because of us"), and keeping two
+     * copies is how they would drift into disagreeing. `null` = never
+     * published, which the echo guard reads as "every reading is genuine GM
+     * intent" and the throttle reads as "publish immediately".
+     */
+    let lastPublishedDarkness01 = null;
+    let lastPublishedDarknessAtMs = 0;
+    /** The last publish attempt's own result — surfaced in `getEnvSnapshotInfo`
+     *  so a FAILED write-back is visible in the report instead of presenting as
+     *  "Foundry just isn't updating" ([[feedback_instruments_must_not_lie]],
+     *  and [[feedback_diagnostics_must_land_in_perf_report]]: a diagnostic that
+     *  only exists in the console has little value). */
+    let lastDarknessPublishResult = null;
 
     // ── THE SKY ────────────────────────────────────────────────────────────
     // `todHour` HAS a real source as of 2026-07-23: the day clock
@@ -5573,6 +5636,12 @@ export async function startVtPanViewer({
       // system that carries on regardless. See world/day-clock.js#tick.
       const todHour = dayClock.tick(time.dtSec);
       const darkness = readSceneDarkness();
+      // THE ECHO GUARD (2026-08-15) — strip MSA's own last publication out of
+      // what Foundry is reporting, BEFORE it becomes an input. See
+      // `foundry/scene-environment.js#publishSceneDarkness` for the whole
+      // story, including why the previously-documented refusal to write back at
+      // all was correct about the ratchet and wrong about it being unfixable.
+      const darknessInput = darknessInputExcludingOwnEcho(darkness.darkness01, lastPublishedDarkness01);
       // The ambient palette Foundry itself renders from (canvas.colors) — read
       // through the ONE adapter so the light pass reproduces Foundry's ladder
       // rather than re-reading a global. `readSceneAmbient` never throws and
@@ -5582,13 +5651,71 @@ export async function startVtPanViewer({
       // permanently 0 and the atmospheric half of the shadow model could not
       // be exercised. Same posture: a debug lever over an acknowledged gap.
       const weather = cloudCoverOverride === null ? undefined : { cloudCover01: cloudCoverOverride };
+      // ⚠️ `wind` WAS NEVER PASSED AT ALL until 2026-08-15, so `env.wind` was
+      // permanently `DEFAULT_WIND` — {0, 0, 0} — no matter what the astrolabe
+      // was actually steering. Two consequences, both real:
+      //
+      //   1. `getTimeDialState` reports `windDirectionDeg: env.wind.directionDeg`,
+      //      and the astrolabe repaints its wind arrow from it several times a
+      //      second. So the arrow read due-north forever, whatever direction was
+      //      in force. (`windSpeed01` escaped only because boot.js happens to
+      //      re-override it after spreading the dial state — see its own "the
+      //      ONE value the dial owns rather than reads back" comment, which is
+      //      an accurate description of a workaround, not of a design.)
+      //   2. `gustiness01` had a home in the snapshot and no way to get there.
+      //
+      // The uniforms are the authority (they are what `setWindAmbient`/
+      // `setWindGustiness` write and what every shader reads), so the snapshot
+      // MIRRORS them rather than the reverse — the same one-way direction
+      // `world/environment.js`'s own header demands ("no read-back loop").
       const env = buildEnvSnapshot({
         time,
         todHour,
         weather,
-        darknessInput: darkness.darkness01,
+        wind: {
+          directionDeg: uWindDirectionDeg.value,
+          speed01: uWindSpeed01.value,
+          gustiness01: uWindGustiness01.value,
+        },
+        darknessInput,
         ambientInput: { daylight: ambient.daylight, darkness: ambient.darkness, brightest: ambient.brightest },
       });
+
+      // ── PUBLISH DARKNESS BACK TO FOUNDRY (2026-08-15) ────────────────────
+      // Two author-reported bugs, one cause and one cure — see
+      // `publishSceneDarkness`'s own header for the full account and the v14
+      // source reading behind it. In short: MSA has always rendered its own
+      // day/night while Foundry's `darknessLevel` sat frozen at whatever the
+      // scene document said, so (a) any game system asking Foundry how bright
+      // it is got the wrong answer, and (b) Foundry's own vision and global
+      // illumination were still deciding against a frozen number, which is why
+      // a token standing outside at noon was in the dark.
+      //
+      // THROTTLED — `initialize()` ends in a `refreshLighting + refreshVision`
+      // perception update, and this runs inside the per-frame env snapshot.
+      // `shouldPublishDarkness` is pure and Node-tested precisely because a
+      // throttle that never fires and a throttle that fires every frame are
+      // both silent failures.
+      if (
+        shouldPublishDarkness({
+          darkness01: env.darkness01,
+          lastPublished01: lastPublishedDarkness01,
+          nowMs: time.tMs,
+          lastPublishedAtMs: lastPublishedDarknessAtMs,
+        })
+      ) {
+        const published = publishSceneDarkness(env.darkness01);
+        // ⚠️ ONLY A SUCCESSFUL WRITE UPDATES THE GUARD. If the write failed
+        // (no canvas, an API surprise), Foundry still holds whatever it held —
+        // recording our INTENDED value as "what we published" would make the
+        // echo guard start subtracting a number that is not actually there, and
+        // MSA would ignore the GM's real darkness from then on.
+        if (published.ok) {
+          lastPublishedDarkness01 = published.published;
+          lastPublishedDarknessAtMs = time.tMs;
+        }
+        lastDarknessPublishResult = published;
+      }
       // THE SHADOW HANDLE — rebuilt only when the sky actually MOVED, not every
       // frame: it is an immutable value object, and churning a new one per
       // frame would defeat the version-compare its own consumers rely on.
@@ -7472,6 +7599,32 @@ export async function startVtPanViewer({
      * without lowering the peak (the peak is brought down separately, by
      * `VEG_FLUTTER_GALE_DAMP_FLOOR` and `VEG_FLUTTER_UV_CAP` above). */
     const VEG_FLUTTER_SPEED_CURVE = 2.2;
+    /**
+     * GUST WANDER — the spatial scale and churn rate of the extra curl-noise
+     * octave `buildVegetationSwayDisplacementNode` folds into each kind's lean
+     * (2026-08-15, author: *"preserve the direction largely but add a bit of
+     * turbulence"*). Its STRENGTH is the live `gustTurbulence` param; only the
+     * character is fixed here, the same split every other VEG_ constant here
+     * keeps.
+     *
+     * SIZED BETWEEN THE TWO SCALES ALREADY IN THE FIELD, deliberately. The
+     * wind's own outdoor turbulence octave spans ~667 px (`world/wind-field.js
+     * #WIND_TURBULENCE_OUTDOOR_SPACE_FREQ`) — weather-scale, so a whole stand
+     * of trees rides it together and it cannot separate neighbours. Leaf
+     * flutter runs at ~17-30 px (`kind.flutterSpaceFreq`) — below one plant, so
+     * it roughens a silhouette without ever moving a lean. Neither is the scale
+     * the report is about, which is a few plants at a time disagreeing about
+     * where the gust is going. ~250 px is a handful of `clumpSizePx`-sized
+     * clumps: big enough that a plant and its immediate neighbour still broadly
+     * agree ("preserve the direction largely"), small enough that a stand
+     * stops reading as one rigid sheet.
+     *
+     * The rate is close to the field's own outdoor churn (0.5) — this is about
+     * WHERE the wind is going, not how fast it flickers, and a fast angular
+     * churn here would read as vibration rather than as air.
+     */
+    const VEG_GUST_WANDER_SPACE_FREQ = 0.004;
+    const VEG_GUST_WANDER_RATE = 0.55;
 
     /**
      * A stable 0..1 hash of a QUANTIZED world position — the per-clump
@@ -7541,10 +7694,20 @@ export async function startVtPanViewer({
      * @returns {*} a vec2 node — world-px displacement, ALREADY capped
      *   (`VEG_MAX_DISPLACE_PX`). Add to `positionLocal.xy`, never use alone.
      */
-    function buildVegetationSwayDisplacementNode({ motion, kindSwayMul, sceneMin, sceneSize }) {
+    function buildVegetationSwayDisplacementNode({ motion, kind, kindSwayMul, sceneMin, sceneSize }) {
       const { vec2, float, positionLocal, sin, cos, length, pow, max, min, smoothstep, clamp } = THREE.TSL;
       const worldXY = vec2(positionLocal.x, positionLocal.y);
       const tSec = uGlobalTimeMs.mul(float(0.001));
+      // THE ARRIVAL LAG — see `effects/vegetation.js#VEGETATION_KINDS`'s own
+      // "THE THREE ARRIVAL/DECORRELATION CONSTANTS" header for the author
+      // report. `windLagFraction` is a BUILD-TIME per-kind constant (0 for
+      // trees, 1 for bushes) and `uGroundLagSec` is the live shared dial, so
+      // the multiply below folds to a constant 0 for every tree — the tree
+      // path emits the identical graph it always did, and no tree pays a
+      // uniform read for a mechanism that can never move it.
+      const lagFraction = Number.isFinite(kind?.windLagFraction) ? kind.windLagFraction : 0;
+      const windTime =
+        lagFraction === 0 ? uGlobalTimeMs : uGlobalTimeMs.sub(motion.uGroundLagSec.mul(float(1000 * lagFraction)));
       // Same expression as `buildVegetationMaterial`'s own `uGaleness` local —
       // recomputed here rather than threaded through, matching this file's own
       // established idiom for values needed in more than one `Fn()` scope (see
@@ -7553,23 +7716,56 @@ export async function startVtPanViewer({
       // scope cannot be referenced from another).
       const galenessRaw = windHandle.ambient ? windHandle.ambient.speed01 : float(0);
 
-      // (1) PER-CLUMP DECORRELATION.
+      // (1) PER-CLUMP DECORRELATION. `clumpHashSalt` (build-time, 0 for trees)
+      // is added to each salt so a tree and a bush sharing one clump cell no
+      // longer draw the IDENTICAL phase/amplitude/direction jitter — the
+      // "same time, same direction" half of the 2026-08-15 report, which
+      // neither the lag nor the wander below would have fixed on its own.
+      const hashSalt = Number.isFinite(kind?.clumpHashSalt) ? kind.clumpHashSalt : 0;
       const cell = worldXY.div(motion.uClumpSizePx).floor();
-      const phase = vegClumpHash(cell, 0).mul(motion.uClumpPhaseSpread);
+      const phase = vegClumpHash(cell, hashSalt).mul(motion.uClumpPhaseSpread);
       const ampJitter = float(1)
         .sub(motion.uClumpAmpSpread)
-        .add(vegClumpHash(cell, 37.7).mul(motion.uClumpAmpSpread.mul(float(2))));
-      const dirJitter = vegClumpHash(cell, 91.3)
+        .add(vegClumpHash(cell, 37.7 + hashSalt).mul(motion.uClumpAmpSpread.mul(float(2))));
+      const dirJitter = vegClumpHash(cell, 91.3 + hashSalt)
         .sub(float(0.5))
         .mul(motion.uClumpDirSpreadRad.mul(float(2)));
 
-      // THE FIELD — sampled at the clump cell's own centre (rigidity fix).
+      // THE FIELD — sampled at the clump cell's own centre (rigidity fix), at
+      // this kind's own RETARDED time (see `windTime` above): a bush reads the
+      // gust envelope, the turbulence and the direction the tree read a second
+      // ago, so a front rolls visibly DOWNWARD through the stand instead of the
+      // two layers merely being out of step on one shared beat.
       const cellCenterXY = cell.add(vec2(float(0.5), float(0.5))).mul(motion.uClumpSizePx);
-      const rawWindLean = windHandle.node(THREE.TSL, {
+      const fieldWindLean = windHandle.node(THREE.TSL, {
         centerXY: cellCenterXY,
-        time: uGlobalTimeMs,
+        time: windTime,
         exposure: float(1),
       });
+      // (1b) GUST WANDER (2026-08-15, author: *"preserve the direction largely
+      // but add a bit of turbulence"*) — one curl-noise octave, decorrelated
+      // per kind by `gustPhase`, added to the field's own vector BEFORE the
+      // speed cap and the direction normalize below, so it perturbs the LEAN
+      // ANGLE rather than merely jittering the amplitude.
+      //
+      // ⚠️ SCALED BY THE FIELD'S OWN LOCAL SPEED, never added flat. That is the
+      // same energy discipline `world/wind-field.js#computeWindTurbulence`'s
+      // own cap enforces and the reason the reported "calm indoors is more
+      // energetic than a gale outdoors" bug cannot come back through this
+      // door: at dead calm the field vector is ~0, so this term is ~0 too, at
+      // any `gustTurbulence` setting. Sampled at the SAME retarded time as the
+      // field itself — a wander that ran on live time while the lean ran on
+      // lagged time would put the two back out of physical agreement.
+      const wanderVec = curlNoise2D(THREE.TSL, {
+        p: cellCenterXY,
+        timeSec: windTime.mul(float(0.001)),
+        spaceFreq: VEG_GUST_WANDER_SPACE_FREQ,
+        rate: VEG_GUST_WANDER_RATE,
+        phaseX: Number.isFinite(kind?.gustPhase) ? kind.gustPhase : 0,
+        phaseY: Number.isFinite(kind?.gustPhase) ? -kind.gustPhase * 0.61 : 0,
+      });
+      const fieldSpeed = length(fieldWindLean);
+      const rawWindLean = fieldWindLean.add(wanderVec.mul(motion.uGustTurbulence).mul(fieldSpeed));
       const rawSpeed = length(rawWindLean);
       const speedCapScale = min(float(1), float(VEG_MAX_LOCAL_SPEED).div(max(rawSpeed, float(1e-4))));
       const windLean = rawWindLean.mul(speedCapScale);
@@ -7843,6 +8039,13 @@ export async function startVtPanViewer({
       const uClumpPhaseSpread = uniform(float(initialParams?.clumpPhaseSpread ?? 0));
       const uClumpAmpSpread = uniform(float(initialParams?.clumpAmpSpread ?? 0));
       const uClumpDirSpreadRad = uniform(float(((initialParams?.clumpDirSpread ?? 0) * Math.PI) / 180));
+      // WIND ARRIVAL (2026-08-15) — see `effects/vegetation.js#VEGETATION_KINDS`'s
+      // own "THE THREE ARRIVAL/DECORRELATION CONSTANTS" header. Both default to
+      // 0 when params are momentarily absent, matching every other additive
+      // amount here: a missing param degrades to "no effect" (both kinds back
+      // in lockstep, the pre-2026-08-15 look), never to a guessed one.
+      const uGroundLagSec = uniform(float(initialParams?.groundLagSec ?? 0));
+      const uGustTurbulence = uniform(float(initialParams?.gustTurbulence ?? 0));
       const uKindSwayMul = uniform(float(kind.swayMultiplier));
       // The prevailing strength dial (0..1) — drives the CHARACTER terms (bend,
       // rate) that must respond to "how windy is the scene" rather than to the
@@ -7902,7 +8105,10 @@ export async function startVtPanViewer({
             uClumpAmpSpread,
             uClumpDirSpreadRad,
             uEdgeFadeWidthPx,
+            uGroundLagSec,
+            uGustTurbulence,
           },
+          kind,
           kindSwayMul: uKindSwayMul,
           sceneMin: uSceneMin,
           sceneSize: uSceneSize,
@@ -7946,10 +8152,23 @@ export async function startVtPanViewer({
             // is what makes "Flutter frequency" a live, per-frame-tunable rate
             // rather than a number only a material rebuild could change.
             const flutterRate = uFlutterFrequency.add(galeness.mul(uFlutterGaleFrequency));
+            // THE SAME ARRIVAL LAG THE SWAY OBEYS (2026-08-15) — folded in here
+            // too, because flutter's own strength is driven by the LOCAL WIND
+            // SPEED sampled a few lines below. Leaving this stage on live time
+            // would have a bush's leaves start shimmering a full second before
+            // the bush itself started leaning: one plant, two disagreeing
+            // answers to "has the gust reached me yet". Trees carry
+            // `windLagFraction: 0`, so this folds away entirely for them and
+            // the tree's fragment graph is byte-identical to before.
+            const flutterLagFraction = Number.isFinite(kind?.windLagFraction) ? kind.windLagFraction : 0;
+            const flutterWindTime =
+              flutterLagFraction === 0
+                ? uGlobalTimeMs
+                : uGlobalTimeMs.sub(uGroundLagSec.mul(float(1000 * flutterLagFraction)));
             // ONE octave — the stated fragment-cost ceiling (4 noise evals).
             const flutterVec = curlNoise2D(THREE.TSL, {
               p: vec2(positionLocal.x, positionLocal.y),
-              timeSec: uGlobalTimeMs.mul(float(0.001)),
+              timeSec: flutterWindTime.mul(float(0.001)),
               spaceFreq: float(kind.flutterSpaceFreq).mul(uFlutterScale),
               rate: flutterRate,
               phaseX: 613,
@@ -7963,7 +8182,7 @@ export async function startVtPanViewer({
               length(
                 windHandle.node(THREE.TSL, {
                   centerXY: vec2(positionLocal.x, positionLocal.y),
-                  time: uGlobalTimeMs,
+                  time: flutterWindTime,
                   exposure: float(1),
                 })
               ),
@@ -8255,6 +8474,8 @@ export async function startVtPanViewer({
           uClumpAmpSpread,
           uClumpDirSpreadRad,
           uEdgeFadeWidthPx,
+          uGroundLagSec,
+          uGustTurbulence,
           // Pushed on placement change, not per frame — see its own header.
           uUvPerWorldPx,
         },
@@ -9352,6 +9573,15 @@ export async function startVtPanViewer({
       motion.uClumpAmpSpread.value = p.clumpAmpSpread ?? 0;
       motion.uClumpDirSpreadRad.value = ((p.clumpDirSpread ?? 0) * Math.PI) / 180;
       motion.uEdgeFadeWidthPx.value = Math.max(0, p.edgeFadeWidthPx ?? 0);
+      // ⚠️ GUARDED, because a motion bag built BEFORE these two existed is a
+      // real shape here: `buildVegetationMaterial` is not the only producer —
+      // the depth proxy closes over whatever bag the canopy handed it
+      // (`vegetationProxyNodeCache`), and this function is also called on
+      // `t.shadow.motion`. A bare write would throw on a stale bag and take
+      // the whole per-frame sync down with it, silently freezing EVERY
+      // vegetation knob rather than just these two.
+      if (motion.uGroundLagSec) motion.uGroundLagSec.value = Math.max(0, p.groundLagSec ?? 0);
+      if (motion.uGustTurbulence) motion.uGustTurbulence.value = Math.max(0, p.gustTurbulence ?? 0);
     }
 
     /**
@@ -11024,6 +11254,13 @@ export async function startVtPanViewer({
             const positionNode = Fn(() => {
               const displace = buildVegetationSwayDisplacementNode({
                 motion: overlay.motion,
+                // ⚠️ THE SAME `kind` THE CANOPY WAS BUILT WITH. The arrival lag
+                // and the gust wander MOVE THE SILHOUETTE, so a proxy built
+                // without them would rasterize a differently-blown canopy than
+                // the one on screen — the exact shimmering mismatch band this
+                // shared-node extraction exists to prevent (see
+                // `buildVegetationSwayDisplacementNode`'s own header).
+                kind: vegKind,
                 kindSwayMul: float(vegKind.swayMultiplier),
                 sceneMin,
                 sceneSize,
@@ -13545,6 +13782,73 @@ export async function startVtPanViewer({
         };
       },
       /**
+       * ⚖️ RECKONING CENSUS (TEMPORARY — docs/holy/V4-Reckoning.md, removed when
+       * its R4 gates close). The floor-composition observables the Reckoning
+       * Report button (boot.js / diag/reckoning-report.js) aggregates beside
+       * `getEarlyZComposition()`: what this session is actually drawing RIGHT
+       * NOW, counted from live state rather than inferred. The split-material
+       * counts are the direct "is commit 94362d5 engaged HERE" probe: a split
+       * colour tile whose depth proxy is a single material means the depth-side
+       * fix is absent or disengaged on this machine, whatever the code says.
+       * Read-only; allocates only its own result (a button press, not a frame).
+       */
+      getReckoningCensus() {
+        const itemsByKind = {};
+        const itemsByLevel = {};
+        let tileCount = 0;
+        let tilesVisible = 0;
+        let tileArrayMaterials = 0;
+        let itemsWithAlphaStats = 0;
+        let itemsWithMinGrid = 0;
+        let itemsMissingMinGrid = 0;
+        for (const state of itemStates.values()) {
+          const kind = state?.item?.kind ?? 'unknown';
+          itemsByKind[kind] = (itemsByKind[kind] ?? 0) + 1;
+          const level = state?.item?.levelId ?? 'none';
+          itemsByLevel[level] = (itemsByLevel[level] ?? 0) + 1;
+          const wi = state?.wholeImage;
+          if (!wi) continue;
+          if (wi.alphaStats) itemsWithAlphaStats++;
+          if (wi.alphaMinGrid) itemsWithMinGrid++;
+          else itemsMissingMinGrid++;
+          for (const t of wi.tiles ?? []) {
+            tileCount++;
+            if (t?.mesh?.visible) tilesVisible++;
+            if (Array.isArray(t?.mesh?.material)) tileArrayMaterials++;
+          }
+        }
+        let depthProxySplitMaterials = 0;
+        for (const e of depthProxyEntries) {
+          if (Array.isArray(e?.material ?? e?.mesh?.material)) depthProxySplitMaterials++;
+        }
+        let prepassSplitMaterials = 0;
+        for (const e of depthPrepassEntries) {
+          if (Array.isArray(e?.material ?? e?.mesh?.material)) prepassSplitMaterials++;
+        }
+        return {
+          view: { floorIndex: view?.floorIndex ?? null, halfSpanPx: view?.halfSpanPx ?? null },
+          targetHalfSpanPx,
+          world: world ? { width: world.width, height: world.height } : null,
+          canvasPx: renderer?.domElement ? { w: renderer.domElement.width, h: renderer.domElement.height } : null,
+          itemStatesSize: itemStates.size,
+          drawListSize: lastItems.length,
+          itemsByKind,
+          itemsByLevel,
+          itemsWithAlphaStats,
+          itemsWithMinGrid,
+          itemsMissingMinGrid,
+          tileCount,
+          tilesVisible,
+          tileArrayMaterials,
+          worldSceneChildren: scene?.children?.length ?? null,
+          depthSceneChildren: depthScene?.children?.length ?? null,
+          depthPrepassSceneChildren: depthPrepassScene?.children?.length ?? null,
+          depthProxySplitMaterials,
+          prepassSplitMaterials,
+          windowSurfacesAlive: windowSurfacesByFloor.size,
+        };
+      },
+      /**
        * Perf profile: arm/disarm PER-PASS GPU timing (diag/gpu-zone-timer.js).
        *
        * Unlike `setGpuProbe`, this does NOT throttle the render loop — timestamp
@@ -13913,6 +14217,28 @@ export async function startVtPanViewer({
        * disposePointLights — same split as the candle flame just above). */
       disposeLightning: lightningSubsystem.dispose,
       disposeFire: fireSubsystem.dispose,
+      /**
+       * FIRE'S OWN PER-FRAME COUNTS — `{engines, fires, lights, spawnPoints}`
+       * plus each engine's debug state.
+       *
+       * ⚠️ WIRED 2026-08-15, HAVING EXISTED UNCALLED. `fireSubsystem.getStatus`
+       * has been built and maintained since the subsystem landed, and a grep
+       * across `src/` found ZERO callers — the textbook shape of
+       * [[feedback_unconsumed_api_rots_silently]]. It is wired now because of
+       * the exact question it answers and nothing else could: the author reports
+       * *"Fire works and appears on upper floors but the light it produces
+       * doesn't"*, and the FIRST thing anyone must know is whether the light
+       * descriptors are being BUILT at all on that floor (`lights: 0` ⇒ the bug
+       * is upstream in `fire-subsystem.js`/`buildFireLightSources`; `lights > 0`
+       * ⇒ they are built and something downstream — the pool, the depth gate —
+       * is discarding them). Guessing between those two without the number is
+       * how a plausible diagnosis rots ([[feedback_plausible_diagnosis_rots]]).
+       *
+       * A getter, not a cached value: `lastStatus` is rewritten every `sync()`,
+       * and a snapshot taken at wiring time would report the startup frame
+       * forever.
+       */
+      getFireStatus: () => fireSubsystem.getStatus(),
       /** Tear down every door leaf mesh + cached door texture (door-graphics.js). */
       disposeDoorGraphics,
       /** Wind field debug overlay (diag/wind-field-overlay.js, Wind.md Tier 0):
@@ -13933,6 +14259,10 @@ export async function startVtPanViewer({
       /** Wind.md Tier 1 — set the live ambient direction/speed AND re-bake
        * the structure correction to match (see setWindAmbient's own header). */
       setWindAmbient,
+      /** Wind.md Tier 1 — how DISCRETE the wind is (0 = a steady push, 1 =
+       * deep lulls punctuated by gust fronts sweeping downwind). NO rebake,
+       * unlike `setWindAmbient` — see this function's own header. */
+      setWindGustiness,
       /** THE DAY CLOCK (world/day-clock.js) — the astrolabe's control surface.
        * `setTimeOfDay` snaps, `sweepTimeOfDay` walks there; `setTimeRate` is
        * game-hours per real minute (0 = frozen, the default); `setTimeMode`
@@ -14462,6 +14792,15 @@ export async function startVtPanViewer({
           status: 'future', // graph/passes.js's frame.snapshot — see this file's own header note
           env: lastEnvSnapshot.env,
           darknessSource: lastEnvSnapshot.darkness.source,
+          // THE WRITE-BACK's own state (2026-08-15) — three facts, because
+          // "darkness isn't updating in Foundry" has three different causes and
+          // a single boolean could not tell them apart: never attempted
+          // (`publishedDarkness01: null`), attempted and refused by Foundry
+          // (`darknessPublish.ok === false` + its reason), or published fine
+          // and something downstream is ignoring it.
+          publishedDarkness01: lastPublishedDarkness01,
+          publishedDarknessAtMs: lastPublishedDarknessAtMs,
+          darknessPublish: lastDarknessPublishResult,
           darknessReason: lastEnvSnapshot.darkness.reason,
           ambientSource: lastEnvSnapshot.ambient?.source ?? null,
           ambientReason: lastEnvSnapshot.ambient?.reason ?? null,
@@ -15565,6 +15904,21 @@ export function setVtPanViewerWindAmbient(directionDeg, speed01) {
 }
 
 /**
+ * Set how DISCRETE the wind is — 0 is a steady push, 1 is deep lulls broken by
+ * gust fronts sweeping downwind across the map
+ * (`world/wind-field.js#computeGustEnvelope`). Separate from
+ * {@link setVtPanViewerWindAmbient} because this one does NOT rebake: the wind
+ * shadow is the only direction-dependent baked term and gustiness is invisible
+ * to it, so this is safe to call as often as a slider drags.
+ * @param {number} gustiness01
+ */
+export function setVtPanViewerWindGustiness(gustiness01) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setWindGustiness(gustiness01);
+  return { gustiness01 };
+}
+
+/**
  * Set the hour of day (0..24), or `null` to reset to noon. Since 2026-07-23
  * this drives the REAL day clock (`world/day-clock.js`), not a debug lever over
  * an acknowledged gap — the sun, every shadow's direction and softness, the
@@ -16319,6 +16673,17 @@ export function getVtPanViewerSceneSettle() {
   return _active.getSceneSettle();
 }
 
+/**
+ * Fire's own per-frame counts — `{engines, fires, lights, spawnPoints, perEngine}`.
+ * See `getFireStatus`'s own doc inside the viewer for why this exists and the
+ * one question it was wired to answer.
+ * @returns {object} the status, or `{skipped:true}` when nothing is running.
+ */
+export function getVtPanViewerFireStatus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getFireStatus();
+}
+
 export function getVtPanViewerEarlyZComposition() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   // Returned FLAT, never re-wrapped in another `{ earlyZComposition: … }`:
@@ -16327,6 +16692,16 @@ export function getVtPanViewerEarlyZComposition() {
   // `state.tiles` — which made a real, engaged, byte-identical run report
   // itself as VACUOUS on 2026-08-10. The instrument was wrong, not the engine.
   return _active.getEarlyZComposition();
+}
+
+/**
+ * ⚖️ RECKONING CENSUS (TEMPORARY — docs/holy/V4-Reckoning.md). The live
+ * floor-composition counts the Reckoning Report button aggregates; see the
+ * viewer method's own doc. Call as part of `MapShine.reckoningReport()`.
+ */
+export function getVtPanViewerReckoningCensus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getReckoningCensus();
 }
 
 /**

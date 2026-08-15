@@ -127,6 +127,50 @@
  *   flutter (see `world/wind-field.js#curlNoise2D`). Larger = finer chatter. A
  *   bush's small leaves shimmer at a finer scale than a tree canopy's masses.
  *
+ * ============================================================================
+ * THE THREE ARRIVAL/DECORRELATION CONSTANTS (2026-08-15, author: *"Trees and
+ * bushes currently move the same amount at the same time in the same
+ * direction. This doesn't quite look realistic, we need to preserve the
+ * direction largely but add a bit of turbulence and change the phase slightly
+ * for bushes so that wind arrives for trees first and then a second later it
+ * hits ground level."*)
+ * ============================================================================
+ * Before these, a tree and a bush standing on the SAME spot were driven by a
+ * genuinely identical signal: `buildVegetationSwayDisplacementNode` sampled the
+ * shared field at the same world position, at the same instant, and hashed the
+ * same clump cell with the same salts. `swayMultiplier` scaled the RESULT, so
+ * one moved further than the other — but at the same moment, in the same
+ * direction, on the same beat. That is what reads as unnatural: real
+ * undergrowth is in a taller canopy's wind shadow and gets the gust late and
+ * broken up, not scaled down.
+ *
+ * Deliberately THREE per-kind CODE CONSTANTS + TWO SHARED params, not five
+ * per-kind params — the same "shared dial × per-kind code constant" split
+ * `swayMultiplier` and `flutterSpaceFreq` already use, and the reason this is
+ * not the V2 slider explosion returning. The author tunes "how late" and "how
+ * broken up" once; which kind is early and which is late is a physical fact
+ * about trees and bushes, not a creative choice.
+ *
+ * @property {number} windLagFraction - how much of the shared `groundLagSec`
+ *   param this kind waits before it feels a change in the wind. **TREE IS THE
+ *   REFERENCE AT 0** — it is up in the moving air and feels the gust first, so
+ *   its behaviour is byte-identical to before these constants existed, at any
+ *   `groundLagSec` setting. Bush is 1 (the full authored delay): the gust has
+ *   to get down past the canopy to reach it. This is a genuine TIME RETARD on
+ *   the field sample, not an oscillator phase offset — the bush feels the gust
+ *   envelope, the turbulence and the direction the tree felt a second ago, so
+ *   a front visibly rolls DOWNWARD through the vegetation rather than the two
+ *   layers merely being out of step on the same beat.
+ * @property {number} gustPhase - noise-space offset decorrelating this kind's
+ *   own added-turbulence octave (the shared `gustTurbulence` param) from the
+ *   other's, so "a bit of turbulence" reads as two layers wandering
+ *   independently rather than one wander applied twice.
+ * @property {number} clumpHashSalt - added to every `vegClumpHash` salt this
+ *   kind uses. Without it a tree and a bush occupying the same clump cell drew
+ *   the SAME phase, the SAME amplitude jitter and the SAME direction jitter
+ *   from the hash — the "same time, same direction" half of the report, and
+ *   the one part no amount of lag or turbulence would have fixed on its own.
+ *
  * @type {ReadonlyArray<VegetationKind>}
  */
 export const VEGETATION_KINDS = Object.freeze([
@@ -139,6 +183,13 @@ export const VEGETATION_KINDS = Object.freeze([
     // A canopy sits well above head height — long, soft shadow.
     shadowHeightPx: 70,
     flutterSpaceFreq: 0.035,
+    // THE REFERENCE LAYER — feels the wind the instant the field says so. 0
+    // makes every tree byte-identical to its pre-2026-08-15 behaviour no
+    // matter where `groundLagSec` is dialled, which is what makes this change
+    // safe to ship at a non-zero default.
+    windLagFraction: 0,
+    gustPhase: 271,
+    clumpHashSalt: 0,
   }),
   Object.freeze({
     id: 'bush',
@@ -149,6 +200,16 @@ export const VEGETATION_KINDS = Object.freeze([
     // Waist-high — a tight, comparatively crisp shadow hugging its own base.
     shadowHeightPx: 16,
     flutterSpaceFreq: 0.06,
+    // GROUND LEVEL — the full authored delay. The author's own words: *"wind
+    // arrives for trees first and then a second later it hits ground level."*
+    windLagFraction: 1,
+    // Prime-ish and far from the tree's, and from every phase pair already in
+    // use (`curlNoise2D`'s callers: 97/131, 401/-227, 613/-157) — two octaves
+    // that happened to land near each other would read as the same swirl.
+    gustPhase: -853,
+    // A large, arbitrary offset — `vegClumpHash` is a `sin`-based hash, so any
+    // salt far from the existing 0/37.7/91.3 gives an uncorrelated draw.
+    clumpHashSalt: 5417.3,
   }),
 ]);
 
@@ -329,6 +390,38 @@ export const VEGETATION_PARAMS = Object.freeze({
     category: 'Motion',
     label: 'Gale rate gain',
     help: 'Extra oscillation speed at full gale, as a multiple of the calm-wind frequency above — the difference between a gale that thrashes and one that just swings wider.',
+  },
+  // ── WIND ARRIVAL (2026-08-15) ───────────────────────────────────────────
+  // See VEGETATION_KINDS's own "THE THREE ARRIVAL/DECORRELATION CONSTANTS"
+  // header for the full report and the shared-dial × per-kind-constant split.
+  // These two are the SHARED half: how late, and how broken up.
+  groundLagSec: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    // The author's own number, verbatim: *"a second later it hits ground
+    // level."* Trees carry `windLagFraction: 0`, so this dial only ever moves
+    // undergrowth — at 0 the whole mechanism is off and both kinds are back
+    // in lockstep, which is the honest way to A/B it live.
+    default: 1,
+    category: 'Motion',
+    label: 'Ground arrival lag (s)',
+    help: 'How long a gust takes to work its way down from canopy height to ground level, in seconds. Trees feel the wind first and bushes get the same gust this much later — the whole reason a stand of vegetation reads as air moving through it rather than as one sheet flexing. 0 puts every layer back on the same instant.',
+  },
+  gustTurbulence: {
+    type: 'float',
+    min: 0,
+    max: 1.5,
+    step: 0.01,
+    // The author asked to *"preserve the direction largely"* — so this starts
+    // low. It is a proportion of the LOCAL wind speed, never an absolute add,
+    // so dead calm stays dead calm at any setting (the same energy discipline
+    // `world/wind-field.js#computeWindTurbulence`'s own cap enforces).
+    default: 0.3,
+    category: 'Motion',
+    label: 'Gust wander',
+    help: "How much each layer's lean wanders off the prevailing wind direction, as a fraction of the local wind strength. Small values keep a stand leaning together while stopping it reading as one rigid sheet; large values let neighbouring plants visibly disagree about which way the gust is going. Trees and bushes wander independently, so raising this separates the layers as well as roughening them. 0 = every plant leans exactly with the field.",
   },
   // LEAF FLUTTER (2026-07-23, author: "there needs to be mass preserving
   // distortions to give leaves a flutter which increases as the wind speed

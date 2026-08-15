@@ -52,6 +52,7 @@ import {
 import { buildPerfReport, summarizeTierComparison, formatOffenderSummaryText } from './diag/perf-report.js';
 import { buildVramInventory } from './diag/vram-inventory.js';
 import { createFrameProfiler } from './diag/frame-profiler.js';
+import { assembleReckoningReport, summarizeZoneRows } from './diag/reckoning-report.js';
 import { createProfiledFrameWaiter, createSceneSettleWaiter, runProfileSession } from './diag/perf-session.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
 // a second motion system — a fixed route is what makes two runs comparable.
@@ -135,7 +136,14 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const TIER_SETTLE_FRAMES = 90;
 import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
-import { ambientVectorFromWind, phaseBoundaryHours, resolveSky, applySkyEdit, computeSun } from './world/index.js';
+import {
+  ambientVectorFromWind,
+  phaseBoundaryHours,
+  resolveSky,
+  applySkyEdit,
+  computeSun,
+  WIND_DEFAULT_GUSTINESS01,
+} from './world/index.js';
 import {
   runVtLiveDecodeTest,
   startVtPanViewer,
@@ -156,6 +164,8 @@ import {
   setVtPanViewerWindDiagnosticParticles,
   setVtPanViewerWindGusts,
   setVtPanViewerWindAmbient,
+  setVtPanViewerWindGustiness,
+  getVtPanViewerFireStatus,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
   setVtPanViewerTimeRate,
@@ -210,8 +220,10 @@ import {
   getVtPanViewerDoorPoolStats,
   getVtPanViewerWindBakeStats,
   getPyramidStoreStats,
+  getCompressedTextureStats,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
+  getVtPanViewerReckoningCensus,
   setVtPanViewerPointLightBatching,
   getVtPanViewerPointLightBatching,
   setVtPanViewerPointLightMrtMerge,
@@ -2621,9 +2633,39 @@ function install() {
             color: fireReadout.params?.color ?? '#fdba35',
             windExposure: sampleWindExposureAt(f.x, f.y),
             outdoors01: sampleWindExposureAt(f.x, f.y),
-            // A painted fire sits on its floor's own ground. An anchor is what
+            // A painted fire sits on its floor's own GROUND. An anchor is what
             // you place when you want it up on a table.
-            elevation: activeFloorContext?.elevation ?? 0,
+            //
+            // ⚠️ THIS READ `activeFloorContext.elevation` UNTIL 2026-08-15, AND
+            // THAT IS NOT THE GROUND — it is the floor band's MIDPOINT. That
+            // field exists for a completely different question: it is the probe
+            // point `updateActiveFloorContext` computes to test which floor an
+            // ANCHOR's band membership falls in, deliberately placed *interior*
+            // to the band so an anchor bound to an adjacent floor never matches
+            // at a shared boundary. Reusing it as a painted fire's PHYSICAL
+            // HEIGHT is one number carrying two unrelated meanings
+            // ([[feedback_one_byte_two_quantities]]) — and the comment directly
+            // above it has said "ground" the whole time, so the code and its own
+            // stated intent had already drifted apart.
+            //
+            // `band[0]` is the floor's `elevationBottom` — the SAME quantity a
+            // candle resolves through `resolveAnchorElevationWorldUnits`
+            // (`floorBinding.bottom + params.elevation`, with a painted fire's
+            // "height off floor" being 0 by definition). So a painted fire and a
+            // candle standing on the same floorboards now report the same
+            // height, instead of the fire silently claiming to float half a
+            // storey up.
+            //
+            // ⚠️ NOT CLAIMED AS THE FIX FOR "fire's light doesn't reach upper
+            // floors" (author-reported, same day). It is a real defect on that
+            // exact path and it is worth closing, but `depth-authority.js#
+            // rankOfElevation` bisects to "the last item at or below this
+            // elevation", so with nothing authored between a floor's ground and
+            // its midpoint BOTH values resolve to the same rank — which means
+            // this cannot be assumed to be the reported symptom's cause. Saying
+            // otherwise would be exactly the plausible-diagnosis-that-rots this
+            // project has already paid for ([[feedback_plausible_diagnosis_rots]]).
+            elevation: activeFloorContext?.band?.[0] ?? activeFloorContext?.elevation ?? 0,
             // This fire HAS a painted shape to conform to — the render's mask
             // clip (fire-render.js) is keyed on this, not on `id`'s `mask:`
             // prefix, so the two never have a chance to silently disagree.
@@ -4012,6 +4054,159 @@ function install() {
   // Same escape hatch for the rapid diagonal stress sweep's own full report
   // (rapid-diagonal-stress-2026-08-12).
   MapShine.getRapidStressReport = () => lastRapidStressReport;
+
+  // FIRE'S PER-FRAME COUNTS (wired 2026-08-15) — `{engines, fires, lights,
+  // spawnPoints, perEngine}` for the CURRENTLY VIEWED floor. The one number
+  // that splits the author's *"fire appears on upper floors but its light
+  // doesn't"* report in half: switch to the upper floor and read `lights`.
+  // 0 with `fires > 0` ⇒ the descriptors are never built (look upstream, in
+  // `fire-subsystem.js`/`buildFireLightSources`); non-zero ⇒ they ARE built and
+  // something downstream is discarding them (the pool, or the depth-authority
+  // height gate). See `vt-pan-viewer.js#getFireStatus` for why guessing between
+  // those without the number is the failure mode, not the shortcut.
+  MapShine.getFireStatus = () => getVtPanViewerFireStatus();
+
+  // ═══ ⚖️ THE RECKONING REPORT (TEMPORARY — docs/holy/V4-Reckoning.md) ═══
+  // One press, one paste: the campaign's floor-mystery observables in a single
+  // clipboard dump (the panel machinery auto-copies every action's result —
+  // debug-panel.js's own design). Verdicts lead; raw sections follow. Gathering
+  // is per-section fail-soft: a broken section lands in `errors` and the rest of
+  // the dump still ships — a half-broken session is exactly when the button
+  // matters. The ~2.5 s pause is a REAL armed profiler window on the live frame
+  // (owner 'reckoning-report'; if the Live zone ranking HUD owns the profiler,
+  // arming throws its own explanatory error — recorded, degraded to the HUD's
+  // rolling window, flagged by the verdict layer). Remove this block + the
+  // diag/reckoning-report.js module when the Reckoning's R4 gates close.
+  const RECKONING_WINDOW_MS = 2500;
+  MapShine.reckoningReport = async () => {
+    const errors = [];
+    const grab = (label, fn) => {
+      try {
+        return fn();
+      } catch (e) {
+        errors.push(`${label}: ${e?.message ?? e}`);
+        return null;
+      }
+    };
+
+    const identity = grab('identity', () => ({
+      module: MODULE_ID,
+      version: game.modules?.get?.(MODULE_ID)?.version ?? 'unknown',
+      foundry: game.version ?? 'unknown',
+      scene: canvas?.scene?.name ?? null,
+      sceneId: canvas?.scene?.id ?? null,
+      screen: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio },
+    }));
+    const census = grab('census', () => getVtPanViewerReckoningCensus());
+    const earlyZ = grab('earlyZ', () => getVtPanViewerEarlyZComposition());
+    const floorsSection = grab('floors', () => {
+      const floors = getActiveSceneFloors(canvas?.scene) ?? [];
+      const viewed = census?.view?.floorIndex ?? 0;
+      return {
+        count: floors.length,
+        viewed,
+        visibleIndices: computeVisibleFloorIndices(floors, viewed),
+        activeFloorContext: activeFloorContext
+          ? {
+              floorIndex: activeFloorContext.floorIndex,
+              levelId: activeFloorContext.levelId ?? null,
+              elevation: activeFloorContext.elevation ?? null,
+            }
+          : null,
+        floors: floors.map((f) => ({
+          index: f.index,
+          id: f.id ?? null,
+          name: f.name ?? null,
+          bottom: f.elevation?.bottom ?? null,
+          top: f.elevation?.top ?? null,
+        })),
+      };
+    });
+    const effectsSection = grab('effects', () => {
+      const rows = effectRegistry.list().map((m) => {
+        const layers = deriveEffectLayers(m.id, (key) => readSetting(MODULE_ID, key));
+        return {
+          id: m.id,
+          enabled: resolveEffectEnabled(m, layers),
+          gm: layers.gmEnable ?? 'auto',
+          player: layers.playerEnable ?? 'auto',
+        };
+      });
+      return {
+        profile: readSetting(MODULE_ID, 'performanceProfile') ?? null,
+        reducePhotosensitive: readSetting(MODULE_ID, 'reducePhotosensitiveEffects') === true,
+        rows,
+      };
+    });
+    const suspects = grab('suspects', () => ({
+      dofEnabled: effectsSection?.rows?.find((r) => r.id === 'depthOfField')?.enabled ?? null,
+      windowSurfacesAlive: census?.windowSurfacesAlive ?? null,
+      multiFloorReportAvailable: !!lastMultiFloorSecondReport,
+      compressedWorker: getCompressedTextureStats(),
+    }));
+
+    // The armed window — the only await in the gather.
+    let zonesSection = null;
+    let armedHere = false;
+    let gpuArm = null;
+    try {
+      perfProfiler.arm({ owner: 'reckoning-report', settleFrames: 10 });
+      armedHere = true;
+    } catch (e) {
+      errors.push(`zones.arm: ${e?.message ?? e}`);
+    }
+    try {
+      gpuArm = setVtPanViewerGpuZoneTimer(true);
+    } catch (e) {
+      errors.push(`zones.gpuArm: ${e?.message ?? e}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, RECKONING_WINDOW_MS));
+    zonesSection = grab('zones.snapshot', () => {
+      const snap = perfProfiler.snapshot();
+      return {
+        frames: snap.frames,
+        durationMs: snap.durationMs,
+        settleFramesDiscarded: snap.settleFramesDiscarded,
+        gpuSupported: gpuArm?.armed === true,
+        rows: summarizeZoneRows(snap.zoneStats, snap.frames),
+        hitchZones: snap.hitchZones,
+        anomalies: snap.anomalies,
+      };
+    });
+    if (armedHere) {
+      try {
+        perfProfiler.disarm();
+      } catch (e) {
+        errors.push(`zones.disarm: ${e?.message ?? e}`);
+      }
+    }
+    try {
+      setVtPanViewerGpuZoneTimer(false);
+    } catch (e) {
+      errors.push(`zones.gpuDisarm: ${e?.message ?? e}`);
+    }
+
+    return assembleReckoningReport({
+      generatedAt: new Date().toISOString(),
+      sections: {
+        identity,
+        floors: floorsSection,
+        census,
+        earlyZ,
+        effects: effectsSection,
+        suspects,
+        zones: zonesSection,
+        multiFloorRanked: lastMultiFloorSecondReport?.ranked ?? null,
+        errors,
+      },
+    });
+  };
+  MapShine.debug.registerAction(
+    'reckoning-report',
+    '⚖️ The Reckoning Report (≈3 s capture)',
+    () => MapShine.reckoningReport(),
+    { zone: 'performance', primary: true }
+  );
 
   // Its own Show/Hide button lives inside perfHud.el now (2026-08-06) — no
   // external toggle action needed. Deliberately still separate from the ONE
@@ -5792,6 +5987,43 @@ function install() {
       const result = setVtPanViewerWindGusts(windGustsArmed);
       if (result?.skipped) windGustsArmed = false;
       return { armed: windGustsArmed, ...result };
+    },
+    { effect: 'wind' }
+  );
+
+  // GUSTINESS (2026-08-15, author: *"It would be nice if the wind model could
+  // create discreet wind gusts and therefore could be more unpredictable in
+  // terms of it's pattern."*) — see `world/wind-field.js#computeGustEnvelope`
+  // for the mechanism and for why the pre-existing `gust` local in `sampleWind`
+  // was never this.
+  //
+  // A SELECT, NOT A SLIDER, for two reasons that both happen to point the same
+  // way: the debug panel has no slider primitive at all (registerAction /
+  // registerSelect / registerPanel / registerReport is the whole vocabulary),
+  // and gustiness genuinely reads as four named weathers rather than as a
+  // continuum anyone would want to hunt through by hand. Same shape as the
+  // Overlay-density select below.
+  //
+  // ⚠️ NO REBAKE — `setVtPanViewerWindGustiness`, deliberately NOT
+  // `applyAmbientWind()`. Direction/speed rebake because the wind SHADOW is
+  // baked against direction; gustiness is invisible to every CPU-side bake, so
+  // routing it through the ambient setter would spend a full wall-raster and
+  // flood-fill on each change of this dropdown for no effect whatsoever.
+  let windGustinessValue = String(WIND_DEFAULT_GUSTINESS01);
+  MapShine.debug.registerSelect(
+    'wind-gustiness',
+    '🌬️ Gustiness',
+    [
+      { value: '0', label: 'Steady (no gusts)' },
+      { value: '0.2', label: 'Breezy' },
+      { value: String(WIND_DEFAULT_GUSTINESS01), label: 'Gusty (default)' },
+      { value: '0.75', label: 'Blustery' },
+      { value: '1', label: 'Squally (deep lulls)' },
+    ],
+    () => windGustinessValue,
+    (value) => {
+      windGustinessValue = value;
+      setVtPanViewerWindGustiness(Number(value));
     },
     { effect: 'wind' }
   );

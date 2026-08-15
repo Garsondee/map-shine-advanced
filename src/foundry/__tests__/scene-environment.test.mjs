@@ -6,7 +6,16 @@
  * is Node-tested, the live `canvas.scene` read is browser-only (verified via
  * a debug report, not here).
  */
-import { deriveDarkness, deriveAmbient, FOUNDRY_FALLBACK_AMBIENT } from '../scene-environment.js';
+import {
+  deriveDarkness,
+  deriveAmbient,
+  FOUNDRY_FALLBACK_AMBIENT,
+  darknessInputExcludingOwnEcho,
+  shouldPublishDarkness,
+  DARKNESS_ECHO_EPSILON,
+  DARKNESS_PUBLISH_STEP,
+  DARKNESS_PUBLISH_MIN_INTERVAL_MS,
+} from '../scene-environment.js';
 
 export function run(t) {
   const { ok } = t;
@@ -124,5 +133,76 @@ export function run(t) {
     const b = deriveAmbient({ daylight: null, darkness: null, brightest: null }, true);
     ok('both land on the fallback darkness', eqRgb(a.darkness, b.darkness));
     ok('but their reasons differ', a.reason !== b.reason);
+  }
+  // ══════════════════════════════════════════════════════════════════════
+  // THE DARKNESS WRITE-BACK's two pure guards (2026-08-15)
+  // ══════════════════════════════════════════════════════════════════════
+  // These exist because `publishSceneDarkness` reverses a previously-documented
+  // refusal, and the refusal named a REAL defect (a read-back ratchet that pins
+  // the scene at midnight forever). The guards are what make the reversal safe,
+  // so they are the part that must be provably right rather than merely
+  // plausible — see that function's own header.
+
+  // ---- THE ECHO GUARD: our own publication is not an input ----------------
+  {
+    ok('never published ⇒ every reading is genuine GM intent', darknessInputExcludingOwnEcho(0.7, null) === 0.7);
+    ok('our own echo contributes nothing', darknessInputExcludingOwnEcho(0.7, 0.7) === 0);
+    ok(
+      'a float-noise round trip still reads as our echo',
+      darknessInputExcludingOwnEcho(0.7 + DARKNESS_ECHO_EPSILON / 2, 0.7) === 0
+    );
+    ok("a GM's genuinely different value survives", darknessInputExcludingOwnEcho(0.2, 0.7) === 0.2);
+    ok(
+      'a non-finite reading degrades to 0, never NaN into the fold',
+      darknessInputExcludingOwnEcho(undefined, 0.7) === 0
+    );
+  }
+
+  // ---- THE RATCHET ITSELF: the bug the guard exists to prevent ------------
+  // Reproduces the documented failure directly. `buildEnvSnapshot` folds as
+  // `max(nightDarkness, darknessInput)`. Sweep from midnight toward noon while
+  // Foundry echoes back what we last published: WITHOUT the guard the max can
+  // never come back down; WITH it, darkness tracks the sun.
+  {
+    const fold = (night, input) => Math.max(night, input);
+    let naive = 1;
+    let guarded = 1;
+    let published = 1;
+    for (const night of [0.8, 0.5, 0.2, 0]) {
+      naive = fold(night, naive); // the echo fed straight back in
+      guarded = fold(night, darknessInputExcludingOwnEcho(published, published));
+      published = guarded;
+    }
+    ok('WITHOUT the guard the scene ratchets and stays at midnight', naive === 1);
+    ok('WITH the guard darkness follows the sun back to noon', guarded === 0);
+  }
+
+  // ---- THE THROTTLE: fires when it must, stays quiet when it must ---------
+  {
+    const base = { lastPublished01: 0.5, lastPublishedAtMs: 1000 };
+    ok(
+      'a first publish ignores the interval entirely',
+      shouldPublishDarkness({ darkness01: 0.5, lastPublished01: null, nowMs: 0, lastPublishedAtMs: 0 }) === true
+    );
+    ok(
+      'a frozen clock does not republish forever on float noise',
+      shouldPublishDarkness({ ...base, darkness01: 0.5 + DARKNESS_PUBLISH_STEP / 4, nowMs: 99999 }) === false
+    );
+    ok(
+      'a real move, after the interval, publishes',
+      shouldPublishDarkness({
+        ...base,
+        darkness01: 0.5 + DARKNESS_PUBLISH_STEP * 2,
+        nowMs: 1000 + DARKNESS_PUBLISH_MIN_INTERVAL_MS,
+      }) === true
+    );
+    ok(
+      'a real move DURING the interval waits — a fast sweep cannot fire refreshVision every frame',
+      shouldPublishDarkness({ ...base, darkness01: 1, nowMs: 1000 + DARKNESS_PUBLISH_MIN_INTERVAL_MS - 1 }) === false
+    );
+    ok(
+      'a non-finite darkness never publishes',
+      shouldPublishDarkness({ ...base, darkness01: NaN, nowMs: 99999 }) === false
+    );
   }
 }

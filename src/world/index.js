@@ -41,6 +41,12 @@ export {
   // renderer does — an instrument holding its own copy of this number is how it
   // starts reporting a wind the scene isn't actually showing.
   WIND_SHADOW_DEPTH,
+  // The discrete travelling gust envelope (2026-08-15) and its shipped
+  // default. The default is exported for the SAME reason WIND_SHADOW_DEPTH is:
+  // the uniform's initial value and the debug control's own default must be
+  // one number, not two copies that can drift.
+  computeGustEnvelope,
+  WIND_DEFAULT_GUSTINESS01,
 } from './wind-field.js';
 export { ambientVectorFromWind, computeWindBakeGridSpec, rasterizeWallsToGrid } from './wind-bake.js';
 export {

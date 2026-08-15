@@ -189,6 +189,157 @@ export const WALL_MOMENTUM_GUARD_HIGH = 1.0;
 // re-bake of the geometry.
 export const WIND_SHADOW_DEPTH = 0.85;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DISCRETE GUSTS (2026-08-15, author: *"It would be nice if the wind model
+// could create discreet wind gusts and therefore could be more unpredictable
+// in terms of it's pattern."*)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⚠️ WHAT WAS ACTUALLY MISSING, AND WHY THE EXISTING "gust" TERM ISN'T IT.
+// `sampleWind` has had a local called `gust` since day one:
+//
+//     const gust = perlin(vec2(t * WIND_GUST_RATE, 3)) * 0.5 + 0.5
+//
+// Two things disqualify it from being what was asked for. It is a function of
+// TIME ALONE, so it has the same value at every position on the map at a given
+// instant — a whole-scene brightness dial on the breeze, never a gust that
+// arrives somewhere. And it multiplies only the ORGANIC drift term, never the
+// COHERENT ambient — so the prevailing wind, the thing that actually drives
+// vegetation sway, particle motion and every downstream consumer, has never
+// gusted at all. It is a constant dial with noise painted on one small
+// component. That local is left exactly as it is; this is a second, separate
+// term layered on the part that was genuinely missing.
+//
+// ⚠️ `gustiness01` HAS EXISTED IN THE ENVIRONMENT SNAPSHOT THE WHOLE TIME AND
+// NOTHING READ IT (`world/environment.js`'s `DEFAULT_WIND` declares it,
+// `buildEnvSnapshot` clamps it, and a grep across `src/` finds zero consumers).
+// That is [[feedback_unconsumed_api_rots_silently]] verbatim: a well-formed
+// value, correctly plumbed to the edge of the system, driving nothing. This is
+// the consumer it was declared for.
+//
+// THREE PROPERTIES, and each is a deliberate answer to a word in the request:
+//
+//   "DISCREET" — the envelope is a THRESHOLDED noise, not a wobble. Most of the
+//     time it sits at `WIND_GUST_LULL`; a gust is a distinct, recognisable
+//     event that rises and passes. A smooth sinusoid modulating amplitude would
+//     have been much easier and would have read as breathing, not as weather.
+//   "UNPREDICTABLE IN ITS PATTERN" — the threshold is crossed by a noise field
+//     sampled in SPACE as well as time, so gusts are not scene-wide events on a
+//     shared clock. Two points far apart are in different gusts.
+//   "WIND MODEL" (not "wind look") — it scales the COHERENT term, so every
+//     consumer of the shared field inherits it with no wiring of its own, and
+//     the turbulence cap gusts with it (a gusting wind is more turbulent while
+//     the gust is passing — see `sampleWind`'s own call).
+//
+// AND ONE PROPERTY NOBODY ASKED FOR BUT THE GEOMETRY MAKES FREE: the pattern
+// TRAVELS DOWNWIND. The along-flow coordinate is advected by
+// `WIND_GUST_TRAVEL_PX_PER_SEC`, so a gust front genuinely sweeps across the
+// map — distant vegetation moves, then nearer vegetation, then you. That is
+// the same "wind arrives rather than exists" the vegetation arrival lag
+// (`effects/vegetation.js#VEGETATION_KINDS`) delivers vertically, here
+// delivered horizontally, and it costs one subtraction.
+
+/** How fast a gust front sweeps downwind, in world px/sec. ~900 px/s is about
+ *  9 grid squares a second on a 100 px map — fast enough to read as a gust
+ *  crossing rather than a pattern fading in place, slow enough to watch it
+ *  arrive. Tune-by-eye, same posture as every other look constant here. */
+export const WIND_GUST_TRAVEL_PX_PER_SEC = 900;
+/** World→noise scale ALONG the wind. ~1/0.00035 ≈ 2,900 px between gust
+ *  features — several rooms, so a gust is a weather event crossing the map, not
+ *  a local eddy (that is what `computeWindTurbulence`'s octaves already are). */
+export const WIND_GUST_SPACE_FREQ = 0.00035;
+/** Cross-wind scale, as a FRACTION of the along-wind one. Below 1 so a gust
+ *  front is broad and only gently wavy — a front is a line of weather, not a
+ *  blob. At 0 fronts would be perfectly straight infinite walls. */
+export const WIND_GUST_CROSS_FREQ_RATIO = 0.35;
+/** Where the noise has to reach before it counts as a gust at all, in the
+ *  0..1 remapped noise. Above the midpoint on purpose: that is what makes
+ *  lulls the DEFAULT state and a gust an event, which is the whole ask. */
+export const WIND_GUST_THRESHOLD = 0.58;
+/** Width of the smoothstep band above the threshold. NARROW = discrete (a gust
+ *  arrives and passes); wide would smear it back into the continuous wobble
+ *  this term exists to replace. */
+export const WIND_GUST_SHARPNESS = 0.25;
+/** The envelope between gusts, at FULL gustiness. Deliberately well below 1 —
+ *  the lull is half of what makes a gust read as a gust. */
+export const WIND_GUST_LULL = 0.55;
+/** The envelope AT a gust, at full gustiness. Above 1 because a real gust
+ *  exceeds the mean wind; the dial is the mean, not the ceiling. Chosen with
+ *  `WIND_GUST_LULL` so the time-average lands near 1 given how often the
+ *  threshold above is actually crossed — a gusty scene should not read as a
+ *  quieter scene. */
+export const WIND_GUST_PEAK = 2;
+/**
+ * THE SHIPPED DEFAULT gustiness, and the reason it is not 0.
+ *
+ * The mechanism is byte-identical-when-off by construction, so 0 would have
+ * been the risk-free ship — and would also have meant nobody ever sees it
+ * ([[feedback_default_on_new_features]]: new features ship ON, because a
+ * feature the author has to go and find is a feature that gets judged as
+ * missing). 0.45 is a real, visible gust pattern that still leaves a clearly
+ * prevailing wind, rather than the full-swing lulls of 1.
+ *
+ * Lives HERE, beside the constants that shape the envelope, so the uniform's
+ * initial value and the debug select's own default read the same number
+ * instead of two hand-kept copies drifting apart.
+ */
+export const WIND_DEFAULT_GUSTINESS01 = 0.45;
+
+/**
+ * THE GUST ENVELOPE — a 0..N multiplier on the COHERENT wind, travelling
+ * downwind. See the constants above for the full "what was missing" account.
+ *
+ * ⚠️ EXACTLY 1 WHEN `gustiness01` IS 0 OR ABSENT, by construction, not by a
+ * small-constant hope: the final `mix(1, shaped, gustiness01)` collapses to
+ * literally `float(1)` at 0, and the whole function is skipped at JS time when
+ * the argument is absent. A scene that never touches gustiness produces
+ * byte-identical output to before this existed — the same omission guarantee
+ * every other optional input in this file keeps (`tsl/no-uniform-gates`: the
+ * ABSENT case is a JS branch, not a uniform multiplied by zero).
+ *
+ * @param {*} TSL - THREE.TSL (needs `float, vec2, mx_noise_float, clamp, mix, smoothstep, cos, sin`).
+ * @param {object} args
+ * @param {*} args.centerXY - vec2 node, the WORLD position being sampled.
+ * @param {*} args.time - the shared clock (uGlobalTimeMs, ms).
+ * @param {*} args.directionDeg - float node, METEOROLOGICAL (the direction the
+ *   wind blows FROM) — the SAME convention and the SAME negation `sampleWind`
+ *   and `world/wind-bake.js#ambientVectorFromWind` use. Gusts travel WITH the
+ *   flow, so this is negated here exactly as the flow vector is; getting this
+ *   backwards would send fronts marching upwind, which is this project's own
+ *   recurring frame-of-reference bug class ([[feedback_y_flip_recurring_risk]]).
+ * @param {*} args.gustiness01 - float node, 0..1.
+ * @returns {*} a float node — 1 at gustiness 0, ranging between
+ *   `WIND_GUST_LULL` and `WIND_GUST_PEAK` at gustiness 1.
+ */
+export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustiness01 }) {
+  const { float, vec2, mx_noise_float: perlin, clamp, mix, smoothstep, cos, sin } = TSL;
+  const t = time.mul(float(0.001)); // ms → seconds, same conversion every other term here uses
+  const rad = directionDeg.mul(float(Math.PI / 180));
+  // THE FLOW direction (negated — meteorological in, flow out), and its
+  // perpendicular. Same two lines as `sampleWind`'s own coherent term, and they
+  // MUST stay the same: a gust front travelling at an angle to the wind it is
+  // modulating would read as two unrelated weather systems.
+  const flow = vec2(cos(rad), sin(rad)).negate();
+  const perp = vec2(flow.y.negate(), flow.x);
+  // ALONG-FLOW coordinate, advected downwind. Subtracting the travel term means
+  // a point reads the pattern value that started upwind of it — i.e. the
+  // pattern moves TOWARD the point, which is what "the gust arrives" means.
+  const along = centerXY.x
+    .mul(flow.x)
+    .add(centerXY.y.mul(flow.y))
+    .sub(t.mul(float(WIND_GUST_TRAVEL_PX_PER_SEC)));
+  const across = centerXY.x.mul(perp.x).add(centerXY.y.mul(perp.y));
+  const n = perlin(
+    vec2(along.mul(float(WIND_GUST_SPACE_FREQ)), across.mul(float(WIND_GUST_SPACE_FREQ * WIND_GUST_CROSS_FREQ_RATIO)))
+  );
+  const n01 = n.mul(float(0.5)).add(float(0.5)); // mx_noise_float is [-1,1]
+  // THE DISCRETENESS. Below the threshold this is flat 0 — a genuine lull, not
+  // a small value — and it climbs to 1 across a narrow band.
+  const gustShape = smoothstep(float(WIND_GUST_THRESHOLD), float(WIND_GUST_THRESHOLD + WIND_GUST_SHARPNESS), n01);
+  const shaped = mix(float(WIND_GUST_LULL), float(WIND_GUST_PEAK), gustShape);
+  return mix(float(1), shaped, clamp(gustiness01, float(0), float(1)));
+}
+
 /**
  * WALL-AVOIDANCE DEFLECTION (2026-07-23, author: "walls perpendicular to the
  * wind aren't preventing the wind from penetrating... the wind is pushing
@@ -544,8 +695,13 @@ export function computeWindTurbulence(TSL, { centerXY, time, openness, exteriorO
  *   scene/mask-catalog.js's raw `outdoors` value, NOT `skyReach` — that is a
  *   different, rain-occlusion-specific product; see boot.js#getCandleRenderState's
  *   own note — or 1 where no shelter data exists).
- * @param {{directionDeg: *, speed01: *}} [args.wind] - OPTIONAL (Tier 1): a
- *   live directional ambient bias, layered UNDER the existing organic
+ * @param {{directionDeg: *, speed01: *, gustiness01?: *}} [args.wind] - OPTIONAL
+ *   (Tier 1). `gustiness01` (2026-08-15) is OPTIONAL WITHIN THE OPTIONAL —
+ *   omitting it from an otherwise-present `wind` object is byte-identical to
+ *   before it existed, so a caller assembling this by hand (there should be
+ *   none left; `world/wind-access.js` owns assembly) cannot accidentally
+ *   enable gusts, only fail to. See {@link computeGustEnvelope}. A live
+ *   directional ambient bias, layered UNDER the existing organic
  *   drift/gust/flutter (never replacing it) — both float NODES (uniforms),
  *   so a debug lever or a future scene-wind authority can update them every
  *   frame with no material rebuild. Angle convention: METEOROLOGICAL — the
@@ -753,18 +909,48 @@ export function sampleWind(
     windShadow = sample.w;
   }
 
+  // THE GUST ENVELOPE (2026-08-15 — see `computeGustEnvelope`'s own header and
+  // the constant block above it for the full "what was actually missing"
+  // account). Resolved HERE, before turbulence, because BOTH the coherent term
+  // and the turbulence cap need it: a gust that made the prevailing wind surge
+  // while the turbulence ceiling stayed pinned to the un-gusted dial would let
+  // a gust arrive as a perfectly smooth push, which is the one thing a gust
+  // never is.
+  //
+  // ABSENT ⇒ `undefined`, and every consumer below branches on that at JS time
+  // rather than multiplying by a uniform 1 (`tsl/no-uniform-gates`) — so a
+  // caller with no gustiness concept emits the identical graph it always did.
+  const gustEnvelope =
+    wind && wind.gustiness01 !== undefined
+      ? computeGustEnvelope(TSL, {
+          centerXY,
+          time,
+          directionDeg: wind.directionDeg,
+          gustiness01: wind.gustiness01,
+        })
+      : undefined;
+
   // TURBULENCE (2026-07-23 — see `computeWindTurbulence`'s own header for
   // the two-octave/amplitude/wind-speed-link reasoning). `windSpeed01`
   // resolved here, not inside the shared function, because only THIS
   // function knows about the `wind` object's shape — see this function's
   // own `windSpeed01` param doc for why particle/gust callers pass a bare
   // speed value instead of the full `wind` object.
+  //
+  // THE CAP GUSTS WITH THE WIND. `computeWindTurbulence`'s own "⚠ THE ENERGY
+  // CAP" is the invariant "indoor turbulence never exceeds the real outdoor
+  // wind speed". Once the wind gusts, "the real outdoor wind speed" is a
+  // per-instant, per-position quantity, not the dial — so the cap has to
+  // follow it or the invariant quietly becomes "never exceeds the wind's
+  // long-run average", which is a different and weaker claim.
+  const cappedSpeed01 = windSpeed01 !== undefined ? windSpeed01 : wind ? wind.speed01 : undefined;
   const turbulence = computeWindTurbulence(TSL, {
     centerXY,
     time,
     openness,
     exteriorOpenness,
-    windSpeed01: windSpeed01 !== undefined ? windSpeed01 : wind ? wind.speed01 : undefined,
+    windSpeed01:
+      cappedSpeed01 !== undefined && gustEnvelope !== undefined ? cappedSpeed01.mul(gustEnvelope) : cappedSpeed01,
   });
   // EXPOSURE — indoors keeps a small residual draftiness; outdoors full sway.
   // Governs dir/flutter ONLY — turbulence (above) has its own, door-gated
@@ -810,6 +996,14 @@ export function sampleWind(
   if (wind) {
     const rad = wind.directionDeg.mul(float(Math.PI / 180));
     coherent = coherent.add(vec2(cos(rad), sin(rad)).negate().mul(wind.speed01));
+    // THE GUST, applied to the PREVAILING wind itself (2026-08-15) — this is
+    // the line that makes gusts reach every consumer of the field rather than
+    // being a look on one term. Applied to the RAW vector, BEFORE the wall
+    // deflection and the openness/shadow gating below, for the same reason the
+    // deflection goes first: a gust is a change in what is BLOWING, and
+    // deflection/shelter are what the geometry does to whatever is blowing.
+    // Scaling after the gates would let a gust punch through a sealed wall.
+    if (gustEnvelope !== undefined) coherent = coherent.mul(gustEnvelope);
   }
 
   // WALL-AVOIDANCE DEFLECTION (2026-07-23) — applied to the RAW coherent

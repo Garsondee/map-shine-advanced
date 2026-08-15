@@ -149,7 +149,9 @@ No new pass. Two more channels in a field the march already reads. The bridge sc
 **Phase 4 — registration, panel, instruments.**
 `effects/sun-shadows.js` manifest + params (the `ui-window-shadow.js` shape), `registerPanel` + `buildEffectCard`, the status report, pixel-probe channels.
 
-**Deferred rungs (recorded, not built):** a painted `_Height` mask so a GM can author per-building heights instead of one global; the authored `_Shadow` mask min-combined in as the highest-authority producer (one extra `min` once `buf:scene.vis` exists — the paintbrush finally promoted to canon, per Light-and-Shadow.md §4.2); cloud shadows as a fourth producer; lightning reusing the same field from a different direction (V2 got this free too, and it was the one thing it got right).
+**Deferred rungs (recorded, not built):** a painted `_Height` mask so a GM can author per-building heights instead of one global; the authored `_Shadow` mask min-combined in as the highest-authority producer (one extra `min` once `buf:scene.vis` exists — the paintbrush finally promoted to canon, per Light-and-Shadow.md §4.2); lightning reusing the same field from a different direction (V2 got this free too, and it was the one thing it got right).
+
+**⚠️ Cloud is NOT a fourth producer into this bake** — corrected 2026-08-01 after this line was written. This field only rebakes when the sun crosses a quantization step, a few times a minute, while clouds drift continuously; baking them would make them visibly jump. Cloud cover combines separately at the **read site** instead — `effects/shadow-access.js`'s `shadowAtmosphere()`. Full ruling: `Clouds.md` §4.1.
 
 ---
 

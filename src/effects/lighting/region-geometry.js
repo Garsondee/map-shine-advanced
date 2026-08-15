@@ -584,6 +584,47 @@ export function applyDarknessAdjustment(darkness01, mode, modifier) {
 }
 
 /**
+ * The lowest darkness value any active OVERRIDE/DARKEN region can EVER read,
+ * at the scene's own brightest possible moment (`darkness01=0`) — i.e. "how
+ * dark does this region insist on staying even at high noon." Built
+ * 2026-08-15 to answer a Foundry-vision question, not a rendering one: see
+ * `foundry/scene-environment.js#deriveGlobalLightWindow`'s own header for why
+ * a Global Illumination window needs this number.
+ *
+ * Reuses `applyDarknessAdjustment` at `darkness01=0` rather than re-deriving
+ * the arithmetic — both OVERRIDE and DARKEN collapse to exactly `modifier` at
+ * that point (`OVERRIDE` is base-independent by construction; `DARKEN`'s
+ * `1-(1-0)*(1-m) = m`), so this is the SAME formula this file already proved
+ * against Foundry's own source, not a second copy that could quietly drift
+ * from it (the class of bug named in `feedback_read_the_producer_never_
+ * invent_its_shape`).
+ *
+ * `BRIGHTEN` regions are deliberately EXCLUDED, not folded in as "floor=0":
+ * a brighten region (e.g. a skylight) is authored to let outdoor light IN,
+ * so it must never be the region that drags the scene-wide minimum down to
+ * zero and silently cancels every genuine DARKEN/OVERRIDE room's protection.
+ *
+ * @param {Array<{mode: number, modifier: number}>} regions - active
+ *   darkness-adjusting regions, e.g. `readActiveDarknessRegions().regions`
+ *   (unfiltered by elevation/floor — a Global Illumination window is scene-
+ *   wide, so it must stay safe for a region on ANY floor, not just the one
+ *   currently rendered).
+ * @returns {number|null} the minimum floor across every OVERRIDE/DARKEN
+ *   region, or `null` if there are none (nothing to safely bound a window
+ *   against).
+ */
+export function computeMinimumDarknessFloor(regions) {
+  let minFloor = null;
+  for (const region of Array.isArray(regions) ? regions : []) {
+    if (!region) continue;
+    if (region.mode !== DARKNESS_ADJUST_MODES.OVERRIDE && region.mode !== DARKNESS_ADJUST_MODES.DARKEN) continue;
+    const floor = applyDarknessAdjustment(0, region.mode, region.modifier);
+    if (minFloor === null || floor < minFloor) minFloor = floor;
+  }
+  return minFloor;
+}
+
+/**
  * Does a darkness-adjusting region's own elevation range overlap a floor's
  * elevation band? The elevation-gating half of the 2026-07-19 multi-floor
  * fix (see this module's own header SCOPE section for the full mechanism —

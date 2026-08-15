@@ -138,6 +138,7 @@ export {
   writeRegionPolygonPoints,
   applyDarknessAdjustment,
   computeRegionAdjustedDarkness,
+  computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
 } from './lighting/region-geometry.js';

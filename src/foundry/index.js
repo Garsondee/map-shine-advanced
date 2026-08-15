@@ -121,6 +121,16 @@ export {
   readSceneAmbient,
   deriveAmbient,
   FOUNDRY_FALLBACK_AMBIENT,
+  // THE GLOBAL ILLUMINATION WRITE-BACK (2026-08-15) — closes the SECOND,
+  // independent gate `publishSceneDarkness` above cannot close alone:
+  // Foundry's own `environment.globalLight.enabled` toggle, schema-default
+  // false on every scene. Published IN `publishSceneDarkness`'s own call
+  // (see its header) — a separate `publishGlobalLightWindow` existed briefly
+  // and was removed the same day after a live probe caught it stomping the
+  // darkness publish's own call, and vice versa.
+  deriveGlobalLightWindow,
+  shouldPublishGlobalLightWindow,
+  readSceneGlobalLightRaw,
 } from './scene-environment.js';
 
 // THE GAME-TIME READER — feeds world/day-clock.js (the world clock, in `synced`

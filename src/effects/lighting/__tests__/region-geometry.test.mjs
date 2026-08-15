@@ -17,6 +17,7 @@ import {
   writeRegionPolygonPoints,
   applyDarknessAdjustment,
   computeRegionAdjustedDarkness,
+  computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
 } from '../region-geometry.js';
@@ -571,5 +572,54 @@ export function run(t) {
       'FIXED: at the real MAX_REGION_POLYGON_POINTS cap, the far side of a complex building darkens correctly',
       pointInPolygon(farRight.x, farRight.y, currentFlat) === true
     );
+  }
+
+  // ======================================================================
+  // computeMinimumDarknessFloor (2026-08-15) — feeds the Global Illumination
+  // window fix in foundry/scene-environment.js#deriveGlobalLightWindow.
+  // ======================================================================
+  {
+    ok(
+      'no regions at all => null (nothing to safely bound a window against)',
+      computeMinimumDarknessFloor([]) === null
+    );
+    ok('a non-array input reads the same as empty, never throws', computeMinimumDarknessFloor(null) === null);
+
+    // The actual bench Mansion's own authored shape: DARKEN, modifier 0.5.
+    const bench = [{ mode: DARKNESS_ADJUST_MODES.DARKEN, modifier: 0.5 }];
+    ok('DARKEN(0.5) floors at exactly its own modifier', computeMinimumDarknessFloor(bench) === 0.5);
+
+    // OVERRIDE floors at its own modifier too — both formulas coincide at
+    // darkness01=0, which is the whole trick this function relies on.
+    const override = [{ mode: DARKNESS_ADJUST_MODES.OVERRIDE, modifier: 0.7 }];
+    ok('OVERRIDE(0.7) floors at exactly its own modifier', computeMinimumDarknessFloor(override) === 0.7);
+
+    // BRIGHTEN must NEVER contribute a floor — it is authored to let outdoor
+    // light IN (a skylight), so folding it in as floor=0 would silently
+    // cancel every real DARKEN/OVERRIDE room's protection scene-wide.
+    const brightenOnly = [{ mode: DARKNESS_ADJUST_MODES.BRIGHTEN, modifier: 0.9 }];
+    ok('a BRIGHTEN-only region contributes no floor at all', computeMinimumDarknessFloor(brightenOnly) === null);
+    const mixed = [
+      { mode: DARKNESS_ADJUST_MODES.BRIGHTEN, modifier: 0.9 },
+      { mode: DARKNESS_ADJUST_MODES.DARKEN, modifier: 0.5 },
+    ];
+    ok(
+      'mixed with a real DARKEN region, BRIGHTEN still contributes nothing — the DARKEN floor wins',
+      computeMinimumDarknessFloor(mixed) === 0.5
+    );
+
+    // Multiple protective regions => the SMALLEST floor, because the window
+    // must stay safely under EVERY one of them, not just the strictest.
+    const multi = [
+      { mode: DARKNESS_ADJUST_MODES.DARKEN, modifier: 0.5 },
+      { mode: DARKNESS_ADJUST_MODES.OVERRIDE, modifier: 0.2 },
+      { mode: DARKNESS_ADJUST_MODES.DARKEN, modifier: 0.8 },
+    ];
+    ok(
+      'the MINIMUM floor across every region wins, not the first/last/largest',
+      computeMinimumDarknessFloor(multi) === 0.2
+    );
+
+    ok('a null entry in the array is skipped, not thrown on', computeMinimumDarknessFloor([null, ...bench]) === 0.5);
   }
 }

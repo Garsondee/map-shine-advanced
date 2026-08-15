@@ -13,6 +13,8 @@ import {
   shouldPublishDarkness,
   DARKNESS_PUBLISH_STEP,
   DARKNESS_PUBLISH_MIN_INTERVAL_MS,
+  deriveGlobalLightWindow,
+  shouldPublishGlobalLightWindow,
 } from '../scene-environment.js';
 
 export function run(t) {
@@ -211,6 +213,78 @@ export function run(t) {
         nowMs: frozenNow + DARKNESS_PUBLISH_MIN_INTERVAL_MS,
         lastPublishedAtMs: frozenNow,
       }) === true
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE GLOBAL ILLUMINATION WRITE-BACK's own pure logic (2026-08-15)
+  // ══════════════════════════════════════════════════════════════════════
+  // See `deriveGlobalLightWindow`'s own header: `publishSceneDarkness` fixes
+  // the darkness LEVEL Foundry's vision reads, but `environment.globalLight.
+  // enabled` is a SEPARATE gate (schema-default false) that a level fix alone
+  // can never flip — this closes that second gate, ONLY when a region gives
+  // it a floor to safely stay under.
+
+  // ---- no protective region at all => do nothing, not a guess ------------
+  ok('null floor (no active region) => disabled', deriveGlobalLightWindow(null).enabled === false);
+  ok('null floor => max is null, not a fabricated number', deriveGlobalLightWindow(null).max === null);
+  ok('non-finite floor is treated the same as absent', deriveGlobalLightWindow(NaN).enabled === false);
+
+  // ---- a real floor opens a window strictly below it ----------------------
+  {
+    const w = deriveGlobalLightWindow(0.5); // the actual bench Mansion's authored floor
+    ok('a real floor enables the window', w.enabled === true);
+    ok('the window stays STRICTLY under the floor, never touching it', w.max < 0.5);
+    ok(
+      'the gap is exactly the shared darkness-step margin, not a bigger guess',
+      Math.abs(0.5 - w.max - DARKNESS_PUBLISH_STEP) < 1e-9
+    );
+  }
+
+  // ---- a degenerate/near-zero floor => still refuse rather than publish an
+  // empty or negative window (an OVERRIDE region authored at darkness~0 is a
+  // real if odd choice — "this room is never dark" — and must not crash the
+  // publish path or open a window wider than intended).
+  {
+    const w = deriveGlobalLightWindow(DARKNESS_PUBLISH_STEP / 2);
+    ok('a floor at or below the safety margin disables rather than inverts', w.enabled === false && w.max === null);
+  }
+  ok('a floor of exactly 0 disables cleanly', deriveGlobalLightWindow(0).enabled === false);
+
+  // ---- the window can never exceed 1, even for a very high floor ---------
+  ok('a floor of 1 clamps the window to at most 1', deriveGlobalLightWindow(1).max <= 1);
+
+  // ---- THE CHANGE-ONLY THROTTLE: static almost all the time, by design ----
+  {
+    ok(
+      'never published before => always publish',
+      shouldPublishGlobalLightWindow({ enabled: true, max: 0.4 }, null) === true
+    );
+    ok(
+      'identical to the last publish => stays quiet (this is correct, not the darkness-throttle bug)',
+      shouldPublishGlobalLightWindow({ enabled: true, max: 0.4 }, { enabled: true, max: 0.4 }) === false
+    );
+    ok(
+      'enabled flag flipping always republishes',
+      shouldPublishGlobalLightWindow({ enabled: false, max: null }, { enabled: true, max: 0.4 }) === true
+    );
+    ok(
+      'both sides disabled => nothing to compare, stays quiet',
+      shouldPublishGlobalLightWindow({ enabled: false, max: null }, { enabled: false, max: null }) === false
+    );
+    ok(
+      'a meaningfully different max (a region edited live) republishes',
+      shouldPublishGlobalLightWindow(
+        { enabled: true, max: 0.4 },
+        { enabled: true, max: 0.4 + DARKNESS_PUBLISH_STEP * 2 }
+      ) === true
+    );
+    ok(
+      'sub-margin float noise in max does not republish forever',
+      shouldPublishGlobalLightWindow(
+        { enabled: true, max: 0.4 },
+        { enabled: true, max: 0.4 + DARKNESS_PUBLISH_STEP / 4 }
+      ) === false
     );
   }
 }

@@ -142,6 +142,15 @@ export {
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
 } from './lighting/region-geometry.js';
+// THE VISION MASK's rules — slice 2 of "MSA owns vision/fog" (Pillar 11,
+// docs/planning/Vision-Fog-Ownership.md). Pure; the rasteriser that consumes
+// `decideRevealed` as its CPU twin is slice 2's remaining half.
+export {
+  decideRevealed,
+  reconcileVisionMeshPool,
+  decideFogGating,
+  REVEAL_ILLUMINATION_THRESHOLD,
+} from './vision/vision-mask.js';
 export {
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,

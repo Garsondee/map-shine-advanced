@@ -125,6 +125,16 @@ by Law 7): per-object gating so non-GM players cannot see live content in the
 explored-but-not-visible zone. Owning the mask makes this cheap — the same buffer gates
 MSA's own draws.
 
+> ⚠️ **NOW DEMONSTRATED LIVE, not just reasoned about (2026-08-15).** A verification run
+> with the takeover flag temporarily ON, on the bench Mansion, showed the map correctly
+> blacked out where unrevealed — **and candle flames, fire particles and light coronas
+> still drawn on top of the fog.** They are separate draws (`candleFlameScene`, the
+> particle engine, coloration) that never pass through the composite the vision gate sits
+> in, so gating the composite cannot reach them. This is exactly the per-object gating
+> this slice exists for, and it is the concrete reason the takeover flag cannot default on
+> yet: a player would see every lit candle through solid fog. The fix is to gate those
+> draws against the same `visionMask` texture, not to add a second mechanism.
+
 **Slice 6 — vision modes** (night vision et al.) as per-viewer grade presets.
 
 ## 5. ⚠️ SAFETY — the one ordering rule that must not be broken

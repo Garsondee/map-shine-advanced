@@ -66,6 +66,15 @@ async function readVisionState(page) {
     } catch (e) {
       out.tokenVisionReport = { error: String(e) };
     }
+    // PILLAR 11's own rasteriser — proves the mask is pooling and drawing even
+    // while the takeover flag is OFF and the composite ignores it.
+    try {
+      const raw = await window.MapShine?.debug?.runReport?.('vt-pan-viewer-diagnostics');
+      const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      out.visionMask = r?.visionMask ?? null;
+    } catch (e) {
+      out.visionMask = { error: String(e) };
+    }
     try {
       const canvas = window.canvas;
       const env = canvas?.environment;
@@ -290,13 +299,18 @@ test('what does a controlled token OUTSIDE at noon actually reveal?', async () =
         `visible=${state.visibilityGrid?.visibleCount}/${state.visibilityGrid?.total}`
     );
     console.log('[vision] token-vision REPORT verdict: ' + JSON.stringify(state.tokenVisionReport?.verdict, null, 2));
+    console.log('[vision] MASK RASTERISER: ' + JSON.stringify(state.visionMask));
     console.log(
-      '[vision] token-vision REPORT visionSources: ' + JSON.stringify(state.tokenVisionReport?.visionSources) +
-        ' | controlled: ' + JSON.stringify(state.tokenVisionReport?.controlledTokens?.map((t) => ({
-          detectionModesIsArray: t.detectionModesIsArray,
-          lightPerceptionPresent: t.lightPerceptionPresent,
-          lightPerceptionRange: t.lightPerceptionRange,
-        })))
+      '[vision] token-vision REPORT visionSources: ' +
+        JSON.stringify(state.tokenVisionReport?.visionSources) +
+        ' | controlled: ' +
+        JSON.stringify(
+          state.tokenVisionReport?.controlledTokens?.map((t) => ({
+            detectionModesIsArray: t.detectionModesIsArray,
+            lightPerceptionPresent: t.lightPerceptionPresent,
+            lightPerceptionRange: t.lightPerceptionRange,
+          }))
+        )
     );
 
     await page.screenshot({ path: path.join(OUT_DIR, 'token-vision-noon.png') });

@@ -170,6 +170,26 @@ export function readActiveVisionSources() {
 }
 
 /**
+ * Is THIS client a GM? The one live read of `game.user.isGM` outside
+ * `diag/debug-panel.js` (which owns its own for panel gating).
+ *
+ * ⚠️ FAILS TO `false` — i.e. to "treat me as a player" — on any read failure.
+ * That is the safe direction and the only defensible one: guessing GM wrongly
+ * hands an unguarded view to someone who should not have it, while guessing
+ * player wrongly merely fogs a GM's screen, which they will immediately
+ * notice and report. Never invert this.
+ *
+ * @returns {boolean}
+ */
+export function readIsGM() {
+  try {
+    return typeof game !== 'undefined' ? game?.user?.isGM === true : false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Is vision actually gating anything right now? Mirrors Foundry's own
  * `CanvasVisibility#refresh` verdict:
  * `visible = visionSources.some(s => s.active) || !game.user.isGM`.

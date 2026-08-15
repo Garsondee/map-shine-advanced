@@ -582,6 +582,53 @@ export function applyExploredFogBase() {
 }
 
 /**
+ * ============================================================================
+ * THE VISION/FOG TAKEOVER LEVER (Pillar 11) — hand `canvas.visibility` to MSA.
+ * ============================================================================
+ *
+ * The SAME single lever already used for `primary` and `effects`
+ * (`renderable = false`), applied to the third group the interface seam
+ * deliberately left with PIXI. See `docs/planning/Vision-Fog-Ownership.md`.
+ *
+ * ⚠️ THIS IS THE MOST DANGEROUS SWITCH IN THE MODULE AND IT DOES NOT DEGRADE
+ * GRACEFULLY. `canvas.visibility` IS the layer that hides things from players.
+ * Turning it off without a complete replacement does not dim or glitch — it
+ * shows every player the entire map, instantly, including everything the GM
+ * has never revealed. That is Testament Law 7 (player-facing information
+ * gating is sacred) and mission priority #2 (secrets safe from players), which
+ * is why its caller defaults OFF and why `restoreFoundryVisibility` exists as
+ * the paired revert (Law 5's safety slide).
+ *
+ * ⚠️ IT IS ALSO NOT SUFFICIENT ON ITS OWN. Suppressing this group removes
+ * EXPLORED-AREA MEMORY too, not just the live vision cone — Foundry's fog
+ * exploration renders through the same group. Until MSA's own explored-area
+ * persistence exists (slice 3), a session with this on shows a player only
+ * what they can see RIGHT NOW and nothing they have previously explored.
+ * That is a gameplay regression, not a rendering one, and it is the reason
+ * the plan requires slices 3 and 5 to land before the flag may default on.
+ *
+ * @param {boolean} on - true = MSA owns it, false = give it back to Foundry.
+ * @returns {{applied: boolean, reason: string}}
+ */
+export function setVisibilitySuppression(on) {
+  try {
+    const visibility = typeof canvas !== 'undefined' ? (canvas?.visibility ?? null) : null;
+    if (!visibility) return { applied: false, reason: 'no canvas.visibility yet' };
+    // FAIL TOWARD FOUNDRY: any doubt and the group keeps rendering. An extra
+    // fog layer is a cosmetic double-darken; a missing one is a secrets leak.
+    visibility.renderable = on !== true;
+    return {
+      applied: true,
+      reason:
+        on === true ? 'canvas.visibility suppressed — MSA owns vision/fog' : 'canvas.visibility restored to Foundry',
+    };
+  } catch (err) {
+    log.error('toggling canvas.visibility suppression failed', { err: err?.message ?? String(err) });
+    return { applied: false, reason: `threw: ${err?.message ?? err}` };
+  }
+}
+
+/**
  * Give the fog filter Foundry's own render texture back. Paired with
  * `restoreFoundryArt()` — if Foundry is drawing the map again, its fog should
  * read the map again.
@@ -701,6 +748,60 @@ export function restoreFoundryArt() {
 }
 
 /**
+ * §4 — FOUNDRY'S OWN TICKER MUST NOT LAG MSA'S (2026-08-15, "door icons
+ * wriggle when panning").
+ *
+ * Foundry hard-caps its PIXI ticker to the player's "Maximum Frame Rate"
+ * setting: `board.mjs#_configurePerformanceMode()` runs
+ * `this.app.ticker.maxFPS = PIXI.Ticker.shared.maxFPS = PIXI.Ticker.system.
+ * maxFPS = game.settings.get("core", "maxFPS")`, a NumberField clamped
+ * 10..60 (`client/game.mjs`, `initial: 60`) — 60 is the CEILING, not a
+ * default that can be raised in Foundry's own UI. MSA's render loop
+ * (`vt/vt-pan-viewer.js#renderFrame`) is uncapped and reads `canvas.stage`
+ * fresh every rAF tick on purpose (`syncFoundryCamera`: "a camera that lags
+ * is a camera that disagrees"), so on any display faster than 60Hz — this
+ * project's 120Hz target included — MSA repaints the map more often than
+ * Foundry repaints its OWN interface chrome (walls, selection borders, door
+ * control icons). The icon holds its screen position for an extra MSA frame
+ * while the map keeps sliding underneath it: exactly the "PIXI door icons
+ * wriggle" symptom, and it would hit every interface-layer object, not just
+ * doors.
+ *
+ * Fix: uncap the TICKER, not the setting. `game.settings.get('core',
+ * 'maxFPS')` still reads back whatever the player chose in Foundry's own
+ * config screen — only what `_configurePerformanceMode` derived from it
+ * changes, so nothing here fights the settings UI. `canvas.app.ticker` is
+ * created once by `Canvas#initialize` and lives for the whole client
+ * session (never rebuilt on a scene or floor switch), so a one-shot
+ * `Hooks.once('canvasReady', ...)` — AFTER `initialize()` has already run —
+ * covers every later scene.
+ *
+ * Known gap, deliberately not handled: if the player opens Foundry's
+ * Configure Settings > Performance panel mid-session and drags the maxFPS
+ * slider, its `onChange` reruns `_configurePerformanceMode()` and re-caps
+ * the ticker. Rare (nobody tunes that setting while playing) and cheap to
+ * notice (`tickerMaxFps` in `getFoundryRendererCensus()` below would read
+ * the cap again) — not worth a settings-change listener for a one-off.
+ *
+ * @returns {boolean} true if the ticker was actually uncapped
+ */
+export function uncapFoundryTicker() {
+  try {
+    const ticker = typeof canvas !== 'undefined' ? canvas?.app?.ticker : null;
+    if (!ticker) return false;
+    ticker.maxFPS = 0; // 0 == uncapped in PIXI.Ticker
+    return true;
+  } catch (err) {
+    console.error(
+      "[MSA] interface seam: uncapping Foundry's PIXI ticker failed — its own chrome (door/wall/token " +
+        "icons, selection borders) may visibly lag MSA's map while panning on a display faster than 60Hz:",
+      err
+    );
+    return false;
+  }
+}
+
+/**
  * Register the two hooks that make the seam work. MUST be called at module load
  * (Foundry's Canvas#initialize runs between the "setup" and "ready" hooks, and
  * `canvasConfig` fires inside it — see header §1: there is no second chance).
@@ -741,6 +842,12 @@ export function registerCanvasCompositing() {
   // the already-applied path, so riding a frequent hook is deliberate and cheap.
   Hooks.on('visibilityRefresh', () => {
     applyExploredFogBase();
+  });
+
+  // §4 — uncap Foundry's own ticker once, the first time its canvas is ready
+  // (see uncapFoundryTicker's header for why once is enough).
+  Hooks.once('canvasReady', () => {
+    uncapFoundryTicker();
   });
 
   return { registered: true, reason: null };
@@ -852,6 +959,11 @@ export function getFoundryRendererCensus() {
     primaryChildrenRenderable: renderableChildren,
     tickerStarted: read('app.ticker.started', () => c?.app?.ticker?.started ?? null),
     tickerFps: read('app.ticker.FPS', () => (c?.app?.ticker?.FPS != null ? Math.round(c.app.ticker.FPS) : null)),
+    // 0 = uncapped (the §4 fix in this file's header took), a positive number
+    // (10..60) means Foundry's ticker is still capped and its own chrome —
+    // door/wall/token icons — can visibly lag MSA's uncapped map on a
+    // display faster than that cap.
+    tickerMaxFps: read('app.ticker.maxFPS', () => c?.app?.ticker?.maxFPS ?? null),
     visibilityVisible: read('visibility.visible', () => c?.visibility?.visible ?? null),
     rendererSize: read('app.renderer size', () =>
       c?.app?.renderer?.width != null ? { w: c.app.renderer.width, h: c.app.renderer.height } : null

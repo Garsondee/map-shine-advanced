@@ -152,6 +152,11 @@ export {
   REVEAL_ILLUMINATION_THRESHOLD,
 } from './vision/vision-mask.js';
 export {
+  createVisionMaskSubsystem,
+  buildVisionLosMaterial,
+  buildVisionLightMaterial,
+} from './vision/vision-mask-render.js';
+export {
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,
   buildRegionPolygonMaterial,

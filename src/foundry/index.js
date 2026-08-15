@@ -92,6 +92,8 @@ export {
   applyExploredFogBase,
   resolveExploredFogBase,
   DEFAULT_EXPLORED_FOG_BASE,
+  // PILLAR 11 — hand canvas.visibility to MSA. Default OFF; see its own header.
+  setVisibilitySuppression,
   decideArtSuppression,
   MSA_OWNED_GROUPS,
 } from './canvas-compositing.js';
@@ -243,6 +245,7 @@ export {
   deriveVisionSource,
   isUsablePolygon,
   shouldGateVision,
+  readIsGM,
   MIN_POLYGON_FLOATS,
 } from './scene-vision.js';
 

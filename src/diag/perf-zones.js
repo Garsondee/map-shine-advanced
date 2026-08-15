@@ -654,6 +654,21 @@ export const ZONES = Object.freeze(
       false,
       'windowSurface.scene'
     ),
+    // PILLAR 11 — MSA's own vision/fog mask. Declared from the first frame the
+    // rasteriser exists, not from the day it becomes player-visible: a pass
+    // whose cost is only discovered after it ships is exactly what the
+    // Reckoning campaign exists to stop.
+    z(
+      'light.drawVisionMask',
+      'Vision mask draw',
+      'lighting',
+      'light.accumulate',
+      null,
+      'gpu',
+      'conditional',
+      false,
+      'visionMask.scene'
+    ),
     z(
       'light.drawColoration',
       'Coloration draw',
@@ -1190,6 +1205,19 @@ export const EFFECT_ZONING = Object.freeze({
     coverage: 'partial',
     why: "Its own debug-visualization draw is zoned (light.drawApertureShadow, added 2026-08-06 — the bracket already existed in code, only the declaration was missing). The REAL per-fragment gobo pattern cost is baked directly into point-light-pool.js's main light/coloration materials and is only measurable as part of the null-owned light.drawPointLights/light.drawColoration zones.",
   }),
+  // NOTE, 2026-08-15: Albedo Clarity (the CAS sharpen, "Sharpening" Make-panel
+  // card) deliberately has NO entry here. EFFECT_ZONING is scoped to
+  // effectRegistry manifests — perf-zones.test.mjs's own "every EFFECT_ZONING
+  // key is a registered effect id" check confirmed this the hard way (a real
+  // Node-test failure, not a guess) when a `coverage:'none'` entry was tried
+  // here for it. Clarity is deliberately NOT a registered effect (a global
+  // rendering-quality knob, not a placeable/scene-authored one — see
+  // vt/albedo-clarity.js's own header), so it structurally cannot satisfy
+  // that check, and adding one anyway would mean either weakening a real
+  // safety test or reversing that architecture decision under pressure from
+  // one check — neither is right. Its real, measured cost lives in its own
+  // dedicated report field instead: `diag/perf-sharpening-ab.js`'s
+  // structural A/B, landing in `perf-run-full` as `report.sharpeningAB`.
 });
 
 /** id -> ZoneDecl. Built once. */

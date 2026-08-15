@@ -440,7 +440,8 @@ function summarizeWholeImage({ itemStates, textureLimit, alphaGridStats, sunShad
  * @param {any} args.canvas @param {boolean} args.loopActive
  * @param {any} args.frameTimes @param {any[]} args.lastItems @param {Map} args.itemStates
  * @param {any[]} args.itemLoadErrors @param {any} args.cache @param {any} args.renderer
- * @param {number|null} args.shaderCompileMs @param {number} args.prefetchSkippedPacks
+ * @param {number|null} args.shaderCompileMs @param {number|null} [args.warmUpMs]
+ * @param {number|null} [args.warmUpPipelinesCreated] @param {number} args.prefetchSkippedPacks
  * @param {any} args.lastUpdate @param {number} args.passSeq @param {any[]} args.tokenPassLog
  * @param {number} args.canvasW @param {number} args.canvasH @param {number} args.drawBufW @param {number} args.drawBufH
  * @param {number} args.pixelRatio @param {any} args.mount @param {number} args.textureLimit
@@ -462,6 +463,8 @@ export function buildViewerDiagnostics({
   cache,
   renderer,
   shaderCompileMs,
+  warmUpMs = null,
+  warmUpPipelinesCreated = null,
   prefetchSkippedPacks,
   lastUpdate,
   passSeq,
@@ -530,6 +533,12 @@ export function buildViewerDiagnostics({
     // res:scene are not built, so the DECLARED pass is not fully live
     // even though this reading genuinely is.
     envSnapshot: _active?.getEnvSnapshotInfo?.() ?? { available: false },
+    // PILLAR 11 — MSA's own vision/fog mask. Reports the rasteriser's health
+    // (pooled/drawn/gating) SEPARATELY from `owningVision` (is the composite
+    // actually reading it), because "works but not wired in" and "wired in but
+    // draws nothing" are opposite problems one boolean would collapse into an
+    // indistinguishable "off" (`feedback_instruments_must_not_lie`).
+    visionMask: _active?.getVisionMaskInfo?.() ?? { available: false },
     // masks.occlusion (2026-07-18) — see graph/passes.js's own note for
     // the RADIAL-only scope. `elevationTable` should read something
     // other than [-Infinity] whenever an occludable token is on screen.
@@ -589,6 +598,17 @@ export function buildViewerDiagnostics({
     shaders: {
       parallelShaderCompile: !!renderer.backend?.extensions?.get?.('KHR_parallel_shader_compile'),
       precompileMs: shaderCompileMs,
+      // THE WARM-UP DRAW (vt-pan-viewer.js#warmUpDrawState) — the follow-up to
+      // precompileMs that reaches the seven scenes/post-passes compileAsync(
+      // scene, camera) cannot: depth, candle, wind overlay, specular, particle/
+      // gust, doors, and present itself. `warmUpPipelinesCreated` is the direct
+      // evidence it did real work rather than nothing — a run that creates 0
+      // new pipelines on a scene with real effects in it is a red flag, not a
+      // clean bill of health (a scene with genuinely nothing to warm reads the
+      // same as a warm-up that silently failed to reach anything, which is why
+      // this is reported as a number rather than a boolean "ran").
+      warmUpMs,
+      warmUpPipelinesCreated,
       // Program COUNT is the thing that explodes as effects land (N effects x
       // M variants), so it is watched from the start. Identical ShaderMaterial
       // source shares ONE program (three.module.js:36407 keys the cache on

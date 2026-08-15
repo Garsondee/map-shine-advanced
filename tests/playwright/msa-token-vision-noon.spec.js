@@ -254,8 +254,8 @@ test('what does a controlled token OUTSIDE at noon actually reveal?', async () =
     // earlier spec independently established as genuine outdoor space.
     const created = await page.evaluate(async () => {
       const rect = window.canvas.dimensions.sceneRect;
-      const x = Math.round(rect.x + rect.width * 0.06);
-      const y = Math.round(rect.y + rect.height * 0.06);
+      const x = Math.round(rect.x + rect.width * 0.5);
+      const y = Math.round(rect.y + rect.height * 0.5);
       // Clean up any token this spec left behind on a previous run, so the
       // scene never accumulates and a stale token can never be the one that
       // gets controlled.

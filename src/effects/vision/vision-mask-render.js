@@ -13,15 +13,17 @@
  * evaluated here
  * ─────────────────────────────────────────────────────────────────────────
  *
- *   R = inside LOS                (this source's wall-swept polygon)
- *   G = inside basicSight radius  (darkvision — illumination-INDEPENDENT)
- *   B = inside the lightPerception polygon
+ *   R = inside the SIGHT/FOV polygon (`visionSource.shape` — already bounded
+ *       by `sight.range` AND wall-clipped; darkvision, illumination-INDEPENDENT)
+ *   G = unused
+ *   B = inside the lightPerception polygon (`visionSource.light` — already
+ *       bounded by `lightRadius` AND wall-clipped)
  *
  * The composite finishes the rule, because the last clause needs MSA's own
  * per-pixel illumination and that lives in a DIFFERENT buffer
  * (`buf:scene.illum`) which this pass has no business sampling mid-rasterise:
  *
- *   revealed = R AND (G OR (B AND illum >= threshold))
+ *   revealed = R OR (B AND illum >= threshold)      ← UNION, never AND
  *
  * MAX blending unions the sources: two tokens each contribute their own
  * polygons and a pixel either token can see reads 1 in the right channel.
@@ -57,29 +59,22 @@ import { triangulateLightFan } from '../lighting/point-light-illumination.js';
 const NO_RADIUS_NORMALISATION = 1;
 
 /**
- * Build the material that stamps the LOS polygon (R) plus the darkvision disc
- * (G) in ONE draw.
+ * Build the material that stamps the SIGHT (FOV) polygon into R.
  *
- * G is computed per-fragment from `positionLocal` rather than by drawing a
- * second circle mesh: the LOS fan already covers every pixel darkvision could
- * reach (darkvision cannot see through walls either), so intersecting it with
- * a radius test in the shader is both exact and one fewer draw call.
+ * ⚠️ NO RADIUS UNIFORM, AND AN EARLIER VERSION'S ONE WAS BOTH REDUNDANT AND
+ * HARMFUL. `visionSource.shape` is Foundry's own sweep already bounded by
+ * `sight.range` AND clipped by walls, so the polygon IS the darkvision answer
+ * — re-testing the radius in the shader re-derived something we had already
+ * consumed. Worse, the first cut then ANDed this channel into the final rule,
+ * and a token with no darkvision has `sight.range = 0`, which makes
+ * `.shape` a degenerate speck (`PointEffectSource#_getPolygonConfiguration`
+ * builds it at `radius: 0`). The whole map went black. R is now simply
+ * "inside the FOV", and the rule UNIONS it — see `vision-mask.js`.
  *
- * @param {*} THREE @returns {{material: *, uSightRadius: *}}
+ * @param {*} THREE @returns {{material: *}}
  */
 export function buildVisionLosMaterial({ THREE }) {
-  const { uniform, float, vec4, positionLocal, select, length } = THREE.TSL;
-  const uSightRadius = uniform(float(0));
-
-  const distFromOrigin = length(positionLocal.xy);
-  // `> 0` guard first: a sightRadius of 0 means NO darkvision, and must not
-  // be read as "everything within 0 units", which a bare <= would make true
-  // exactly at the origin pixel. Cheap, and it keeps the CPU twin's own
-  // `sr > 0 && d <= sr` shape visible here.
-  const hasSight = uSightRadius.greaterThan(float(0));
-  const withinSight = distFromOrigin.lessThanEqual(uSightRadius);
-  const sightChannel = select(hasSight.and(withinSight), float(1), float(0));
-
+  const { float, vec4 } = THREE.TSL;
   const material = new THREE.NodeMaterial();
   material.transparent = false;
   material.depthTest = false;
@@ -92,8 +87,8 @@ export function buildVisionLosMaterial({ THREE }) {
   material.blendEquationAlpha = THREE.MaxEquation;
   material.blendSrcAlpha = THREE.OneFactor;
   material.blendDstAlpha = THREE.OneFactor;
-  material.fragmentNode = vec4(float(1), sightChannel, float(0), float(1));
-  return { material, uSightRadius };
+  material.fragmentNode = vec4(float(1), float(0), float(0), float(1));
+  return { material };
 }
 
 /**
@@ -146,9 +141,9 @@ export function buildVisionLightMaterial({ THREE }) {
  * pass may not sample the target it writes. The quad reads only the mask and
  * the illumination buffer, and the blend does the rest.
  *
- * The expression is `./vision-mask.js#decideRevealed`'s last three clauses —
- * that function remains the single definition and the CPU twin:
- *     revealed = R AND (G OR (B AND illum >= threshold))
+ * The expression mirrors `./vision-mask.js#decideRevealed` — that function
+ * remains the single definition and the CPU twin:
+ *     revealed = R OR (B AND illum >= threshold)      ← UNION, never AND
  *
  * @param {object} args
  * @param {*} args.THREE
@@ -177,10 +172,12 @@ export function buildVisionGateMaterial({
   const luminance = max(max(illum.r, illum.g), illum.b);
   const litEnough = luminance.greaterThanEqual(float(threshold));
 
-  const insideLos = mask.r.greaterThan(float(0.5));
-  const darkvision = mask.g.greaterThan(float(0.5));
-  const lightPerception = mask.b.greaterThan(float(0.5));
-  const revealed = insideLos.and(darkvision.or(lightPerception.and(litEnough)));
+  // UNION, not intersection — see  for the
+  // live bug that proved it (a no-darkvision token has a degenerate .shape,
+  // and ANDing against it blacked out the entire map).
+  const insideSight = mask.r.greaterThan(float(0.5));
+  const insideLight = mask.b.greaterThan(float(0.5));
+  const revealed = insideSight.or(insideLight.and(litEnough));
 
   // ── THE THREE ZONES (slice 3) ──────────────────────────────────────────
   // Foundry's own fog has three states and players depend on all three:
@@ -342,7 +339,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
   let exploredCamera = null;
   let exploredNeedsClear = true;
 
-  /** sourceId → {losMesh, lightMesh, uSightRadius} */
+  /** sourceId → {losMesh, lightMesh} */
   const pool = new Map();
   let lastDrawn = 0;
   let lastGate = null;
@@ -362,7 +359,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     lightMesh.renderOrder = 1;
     scene.add(losMesh);
     scene.add(lightMesh);
-    return { losMesh, lightMesh, uSightRadius: los.uSightRadius };
+    return { losMesh, lightMesh };
   }
 
   function disposeEntry(entry) {
@@ -436,7 +433,6 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
         writeFanGeometry(THREE, entry.losMesh, src.losPoints, src.x, src.y);
         entry.losMesh.position.set(src.x, src.y, 0);
         entry.losMesh.visible = true;
-        entry.uSightRadius.value = Number.isFinite(src.radius) ? src.radius : 0;
         drawn++;
       } else {
         entry.losMesh.visible = false;

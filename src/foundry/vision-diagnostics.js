@@ -115,6 +115,18 @@ function describeToken(tok) {
  * The whole picture, plus a verdict naming the failing gate.
  * @returns {object}
  */
+/**
+ * ⚠️ MUST MATCH `effects/vision/vision-mask.js#VISION_GATE_BUILD_TAG` BY
+ * VALUE. Cannot import it directly — `foundry/` is a leaf and may not import
+ * from `effects/` (`zones/one-door`) — so this is a second, independent
+ * literal, pinned equal to the first by
+ * `foundry/__tests__/scene-vision.test.mjs`'s own cross-file check. That test
+ * fails the moment these two strings disagree, which is what makes "bump
+ * both together" enforced rather than a comment asking nicely
+ * (`feedback_shared_field_two_meanings_two_registries`).
+ */
+export const REPORT_BUILD_TAG = 'r2-union-not-intersection-2026-08-15';
+
 export function readTokenVisionDiagnostic() {
   try {
     if (typeof canvas === 'undefined' || !canvas) return { available: false, reason: 'no canvas' };
@@ -187,8 +199,16 @@ export function readTokenVisionDiagnostic() {
           'so every lit area is masked away except lights flagged "Provides Vision".'
       );
     }
+    // ⚠️ STALE ONCE MSA OWNS VISION (Pillar 11). Foundry's Global
+    // Illumination stopped mattering the moment MSA started deciding 'lit'
+    // from its OWN per-pixel illumination, so an inactive global light is no
+    // longer a cause of anything — reporting it as CAUSE B sent the author
+    // chasing a dead end. Kept as an OBSERVATION only.
     if (globalLight.active === false) {
-      findings.push('CAUSE B (MSA): Global Illumination is NOT active, so there is no daylight shape to reveal.');
+      findings.push(
+        'NOTE (not a cause once MSA owns vision): Foundry Global Illumination is inactive. MSA decides lit from its own ' +
+          'per-pixel illumination, so this no longer gates anything.'
+      );
     } else if (globalLight.active && windowAdmitsNow === false) {
       findings.push(
         `CAUSE B (MSA): Global Illumination is active but its darkness window ${JSON.stringify(globalLight.window)} ` +
@@ -208,6 +228,16 @@ export function readTokenVisionDiagnostic() {
 
     return {
       available: true,
+      // ⚠️ MUST MATCH `effects/vision/vision-mask.js#VISION_GATE_BUILD_TAG`
+      // BY VALUE — cannot import it directly, `foundry/` is a leaf and may
+      // not import from `effects/` (`zones/one-door`). Two hand-typed copies
+      // of one fact is exactly the class of bug this project names
+      // (`feedback_shared_field_two_meanings_two_registries`); the guard is
+      // `scene-vision.test.mjs`'s own cross-file pin, which fails Node tests
+      // the moment these two strings disagree — bump BOTH, together, or the
+      // test tells you which one you forgot.
+      //
+      reportBuildTag: REPORT_BUILD_TAG,
       verdict: findings,
       scene: {
         tokenVision: canvas.scene?.tokenVision ?? null,

@@ -10,6 +10,13 @@
  * exercises none of this.
  */
 import { deriveVisionSource, isUsablePolygon, shouldGateVision, MIN_POLYGON_FLOATS } from '../scene-vision.js';
+import { REPORT_BUILD_TAG } from '../vision-diagnostics.js';
+// `effects/` sits above `foundry/` in the layering (`zones/one-door` —
+// foundry/ is a leaf and may not import effects/ in PRODUCTION code), but a
+// __tests__ file is verification code, not a runtime cross-zone import, so
+// pinning both tags equal HERE is what proves the two independent literals
+// (which production code genuinely cannot share) haven't silently drifted.
+import { VISION_GATE_BUILD_TAG } from '../../effects/vision/vision-mask.js';
 
 /** A minimal square LOS polygon, flat [x0,y0,...] the way Foundry emits it. */
 const SQUARE = [0, 0, 100, 0, 100, 100, 0, 100];
@@ -147,4 +154,19 @@ export function run(t) {
     shouldGateVision({ sourceCount: 0, isGM: false }) === true
   );
   ok('a player with a vision source is gated', shouldGateVision({ sourceCount: 2, isGM: false }) === true);
+
+  // ======================================================================
+  // ⚠️ THE CROSS-FILE BUILD-TAG PIN — see both tags' own doc comments
+  // ======================================================================
+  // `foundry/vision-diagnostics.js#REPORT_BUILD_TAG` and
+  // `effects/vision/vision-mask.js#VISION_GATE_BUILD_TAG` are two INDEPENDENT
+  // literals because `foundry/` may not import `effects/` in production code
+  // — but they describe the SAME fact (which cut of the reveal rule is live)
+  // and MUST agree, or a pasted-back diagnostic report can no longer be
+  // trusted to say which build actually produced it. This is the enforcement:
+  // bump one without the other and this test fails, by name, immediately.
+  ok(
+    'REPORT_BUILD_TAG and VISION_GATE_BUILD_TAG are the SAME string — bump both together or this fails',
+    REPORT_BUILD_TAG === VISION_GATE_BUILD_TAG
+  );
 }

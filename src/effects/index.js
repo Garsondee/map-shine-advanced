@@ -150,6 +150,7 @@ export {
   reconcileVisionMeshPool,
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
+  VISION_GATE_BUILD_TAG,
 } from './vision/vision-mask.js';
 export {
   createVisionMaskSubsystem,

@@ -72,6 +72,25 @@
 export const REVEAL_ILLUMINATION_THRESHOLD = 0.08;
 
 /**
+ * A literal, hand-bumped string identifying which cut of the reveal RULE is
+ * live — mirrors `boot.js`'s own `probeBuildTag` convention (the pixel
+ * probe's "is my fix even loaded" fix). Bumped every time `decideRevealed`'s
+ * actual logic changes, and reported from BOTH `foundry/vision-diagnostics.js`
+ * and the viewer's `getVisionMaskInfo` so the two can never silently drift
+ * into reporting two different tags for the SAME running build
+ * (`feedback_one_field_two_registries`'s own shape, avoided by having exactly
+ * ONE definition both readers import rather than two hand-typed copies).
+ *
+ * Exists because a report proving "the rasteriser is running" (pool size,
+ * mesh count) is NOT the same claim as "the CURRENT gate logic is running" —
+ * the rasteriser's own numbers look identical whether the gate material
+ * unions or intersects its inputs, and ES modules cache aggressively enough
+ * that "I just refreshed and retested" is not reliable proof of which build
+ * actually executed.
+ */
+export const VISION_GATE_BUILD_TAG = 'r2-union-not-intersection-2026-08-15';
+
+/**
  * THE CPU TWIN of the reveal shader. Pure, total, and the single definition
  * of the rule — see this module's header for each clause's Foundry origin.
  *
@@ -87,32 +106,36 @@ export const REVEAL_ILLUMINATION_THRESHOLD = 0.08;
  * @returns {boolean}
  */
 export function decideRevealed({
-  insideLos,
+  insideSightPolygon,
   insideLightPolygon,
-  distance,
-  sightRadius,
-  lightRadius,
   illumination,
   blinded = false,
   threshold = REVEAL_ILLUMINATION_THRESHOLD,
 }) {
-  // Walls first: nothing outside line of sight is ever revealed, by any route.
-  if (!insideLos) return false;
   // A blinded source reveals nothing at all — Foundry's own `!blinded` guard.
   if (blinded) return false;
 
-  const d = Number.isFinite(distance) ? distance : Infinity;
+  // ⚠️ THE TWO POLYGONS ARE UNIONED, **NOT** INTERSECTED — and getting this
+  // backwards is what made the first live build black out the entire map.
+  //
+  // Both polygons are ALREADY wall-clipped by Foundry's own sweep, and each is
+  // ALREADY bounded by its own radius. There is no third, separate
+  // "line of sight" polygon to intersect them against:
+  //   `visionSource.shape` is the FOV, bounded by `sight.range`
+  //   `visionSource.light` is light perception, bounded by `lightRadius`
+  // Foundry composites them as `vision.sight ∪ (vision.light ∩ mask)`
+  // (`CanvasVisibility#refreshVisibility`), so this must too.
+  //
+  // The bug that proved it: a token with NO darkvision has `sight.range = 0`,
+  // and `PointEffectSource#_getPolygonConfiguration` builds its polygon at
+  // `radius: 0` — so `.shape` is a DEGENERATE speck the size of the token.
+  // ANDing against that revealed only the token's own square and blacked out
+  // the whole scene, which is exactly what the author saw.
+  if (insideSightPolygon) return true; // darkvision: illumination-INDEPENDENT
 
-  // basicSight — illumination-INDEPENDENT. This is darkvision; gating it on
-  // brightness would delete the feature from every creature that has it.
-  const sr = Number.isFinite(sightRadius) ? sightRadius : sightRadius === Infinity ? Infinity : 0;
-  if (sr > 0 && d <= sr) return true;
-
-  // lightPerception — bounded by its own radius (Infinity by default), and
-  // gated on ACTUAL brightness rather than Foundry's binary in-a-light-polygon.
+  // lightPerception: the polygon is already range- and wall-limited, so the
+  // only extra question is whether the pixel is actually bright.
   if (!insideLightPolygon) return false;
-  const lr = lightRadius === Infinity ? Infinity : Number.isFinite(lightRadius) ? lightRadius : 0;
-  if (!(lr > 0) || d > lr) return false;
   const lum = Number.isFinite(illumination) ? illumination : 0;
   return lum >= threshold;
 }

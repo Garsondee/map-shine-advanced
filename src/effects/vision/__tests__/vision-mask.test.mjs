@@ -22,11 +22,8 @@ const UNLIT = 0.01;
 
 /** The reported scenario: a token with NO darkvision, standing outdoors at noon. */
 const outdoorNoon = (over = {}) => ({
-  insideLos: true,
-  insideLightPolygon: true,
-  distance: 5000,
-  sightRadius: 0, // no darkvision — the exact case the author reported
-  lightRadius: Infinity, // Foundry's default light perception
+  insideSightPolygon: false, // no darkvision — the exact case the author reported
+  insideLightPolygon: true, // Foundry's default unlimited light perception
   illumination: DAYLIGHT,
   ...over,
 });
@@ -47,15 +44,22 @@ export function run(t) {
   );
 
   // ======================================================================
-  // WALLS OUTRANK EVERYTHING — consumed from Foundry, never re-derived
+  // ⚠️ THE REGRESSION THAT BLACKED OUT THE WHOLE MAP, PINNED
   // ======================================================================
+  // The first live build ANDed the sight polygon into the rule:
+  //     revealed = insideSight AND (... OR (light AND lit))
+  // A token with no darkvision has `sight.range = 0`, and Foundry builds its
+  // FOV polygon at `radius: 0` — a degenerate speck the size of the token. So
+  // that AND made everything except the token's own square go black, which is
+  // exactly what the author saw. The two polygons are UNIONED, never
+  // intersected: each is already wall-clipped and already radius-bounded.
   ok(
-    'outside line of sight is NEVER revealed, however bright',
-    decideRevealed(outdoorNoon({ insideLos: false, illumination: 1 })) === false
+    'THE REGRESSION: no darkvision (empty sight polygon) still reveals lit ground',
+    decideRevealed(outdoorNoon({ insideSightPolygon: false })) === true
   );
   ok(
-    'outside line of sight is not rescued by darkvision either',
-    decideRevealed(outdoorNoon({ insideLos: false, sightRadius: 100000, distance: 1 })) === false
+    'and an empty sight polygon can never veto the light route',
+    decideRevealed({ insideSightPolygon: false, insideLightPolygon: true, illumination: DAYLIGHT }) === true
   );
 
   // ======================================================================
@@ -63,31 +67,24 @@ export function run(t) {
   // ======================================================================
   ok('a blinded source reveals nothing, even in daylight', decideRevealed(outdoorNoon({ blinded: true })) === false);
   ok(
-    'a blinded source reveals nothing even inside its own sight radius',
-    decideRevealed(outdoorNoon({ blinded: true, sightRadius: 10000, distance: 1 })) === false
+    'a blinded source reveals nothing even inside its own sight polygon',
+    decideRevealed(outdoorNoon({ blinded: true, insideSightPolygon: true })) === false
   );
 
   // ======================================================================
-  // basicSight IS ILLUMINATION-INDEPENDENT — this is what darkvision IS
+  // The SIGHT polygon IS illumination-independent — this is what darkvision IS
   // ======================================================================
   ok(
-    'darkvision reveals in PITCH DARKNESS inside its radius',
-    decideRevealed(outdoorNoon({ illumination: 0, sightRadius: 600, distance: 300 })) === true
+    'darkvision reveals in PITCH DARKNESS inside its own polygon',
+    decideRevealed(outdoorNoon({ illumination: 0, insideSightPolygon: true, insideLightPolygon: false })) === true
   );
   ok(
-    'darkvision does NOT reach past its own radius',
-    decideRevealed(
-      outdoorNoon({
-        illumination: 0,
-        sightRadius: 600,
-        distance: 601,
-        insideLightPolygon: true,
-      })
-    ) === false
+    'outside BOTH polygons nothing is revealed, however bright',
+    decideRevealed({ insideSightPolygon: false, insideLightPolygon: false, illumination: 1 }) === false
   );
   ok(
     'a token with no darkvision gets nothing from an unlit pixel',
-    decideRevealed(outdoorNoon({ illumination: UNLIT, sightRadius: 0 })) === false
+    decideRevealed(outdoorNoon({ illumination: UNLIT })) === false
   );
 
   // ======================================================================
@@ -95,7 +92,7 @@ export function run(t) {
   // "We don't want to universally reveal everything outdoors."
   // ======================================================================
   ok(
-    'a DARK outdoor pixel inside LOS and inside the light polygon is NOT revealed',
+    'a DARK outdoor pixel inside the light polygon is NOT revealed',
     decideRevealed(outdoorNoon({ illumination: UNLIT })) === false
   );
   ok(
@@ -111,28 +108,17 @@ export function run(t) {
     REVEAL_ILLUMINATION_THRESHOLD < 0.933
   );
   ok('and above pure black, so it is not a universal reveal', REVEAL_ILLUMINATION_THRESHOLD > 0);
+  ok(
+    'darkvision still beats an unlit pixel — the sight route ignores brightness',
+    decideRevealed(outdoorNoon({ illumination: UNLIT, insideSightPolygon: true })) === true
+  );
 
   // ======================================================================
-  // lightPerception radius still bounds the lit route
+  // Foundry already bounds each polygon — we never re-test a radius
   // ======================================================================
-  ok(
-    'a range-limited light perception does not reveal beyond its radius',
-    decideRevealed(outdoorNoon({ lightRadius: 500, distance: 501 })) === false
-  );
-  ok('and does reveal within it', decideRevealed(outdoorNoon({ lightRadius: 500, distance: 499 })) === true);
-  ok(
-    'lightRadius 0 (light perception disabled) kills the lit route entirely',
-    decideRevealed(outdoorNoon({ lightRadius: 0 })) === false
-  );
   ok(
     'outside the light polygon, brightness alone is not enough',
     decideRevealed(outdoorNoon({ insideLightPolygon: false })) === false
-  );
-
-  // ---- garbage in must never reveal ------------------------------------
-  ok(
-    'a NaN distance does not accidentally reveal',
-    decideRevealed(outdoorNoon({ distance: NaN, lightRadius: 500 })) === false
   );
   ok('a NaN illumination reads as unlit, not as lit', decideRevealed(outdoorNoon({ illumination: NaN })) === false);
 

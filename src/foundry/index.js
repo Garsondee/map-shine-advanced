@@ -234,7 +234,7 @@ export { registerSettings, readSetting, writeSetting } from './settings-adapter.
 // light?" by naming WHICH gate is failing (empty light mask vs inactive
 // global illumination), because on screen those two are pixel-identical.
 // Pure read; see the module header for the full mechanism.
-export { readTokenVisionDiagnostic } from './vision-diagnostics.js';
+export { readTokenVisionDiagnostic, REPORT_BUILD_TAG } from './vision-diagnostics.js';
 
 // THE VISION-SOURCE READER — slice 1 of "MSA owns vision/fog" (Testament
 // Pillar 11, docs/planning/Vision-Fog-Ownership.md). CONSUMES Foundry's own

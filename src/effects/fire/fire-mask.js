@@ -237,12 +237,73 @@ const ELONGATION_RATIO = 8;
  *   overrides this live — see `boot.js#getMaskDrivenFires`. Lower catches
  *   fainter/smaller paint (a soft-edged or downsampled-away small stroke);
  *   higher requires bolder paint before it registers at all.
+ * @param {number} [opts.rescueThreshold] - 0..1, and normally the SPAWN
+ *   threshold. See "⚠️ THE RESCUE PASS" below — this is not a second
+ *   sensitivity dial, it is the repair for a state where flames render with no
+ *   light. Omitted (or >= `paintThreshold`) ⇒ no rescue pass at all, and this
+ *   function is byte-identical to before it existed.
  * @returns {Array<{id:string,x:number,y:number,diameterPx:number,intensity:number}>}
  */
 export function extractFiresFromMask(
   grid,
-  { maxFires = MAX_FIRES, minDiameterPx = 8, paintThreshold = PAINT_THRESHOLD } = {}
+  { maxFires = MAX_FIRES, minDiameterPx = 8, paintThreshold = PAINT_THRESHOLD, rescueThreshold } = {}
 ) {
+  const strict = extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold });
+  if (strict.length > 0) return strict;
+  // ══════════════════════════════════════════════════════════════════════
+  // ⚠️ THE RESCUE PASS (2026-08-15) — THE INVARIANT: PAINT GOOD ENOUGH TO
+  // SPAWN FLAMES IS GOOD ENOUGH TO MAKE A LIGHT.
+  // ══════════════════════════════════════════════════════════════════════
+  // Author-reported, live: *"Fire works and appears on upper floors but the
+  // light it produces doesn't."* `MapShine.getFireStatus()` on the two floors
+  // named the mechanism exactly — ground `{fires: 6, lights: 6, spawnPoints:
+  // 85}`, upper `{fires: 0, lights: 0, spawnPoints: 2}`.
+  //
+  // ONE painted mask, TWO independent extractions, TWO DIFFERENT THRESHOLDS:
+  //   · this function decides what a FIRE is, at `PAINT_THRESHOLD` (0.25), and
+  //     a fire is the only thing that ever becomes a LIGHT
+  //     (`fire-geometry.js#buildFireLightSources` takes the fire list);
+  //   · `fire-spawn-points.js#extractFireSpawnPoints` decides where PARTICLES
+  //     are born, at `SPAWN_THRESHOLD` (0.18), and it is what makes flames
+  //     visible on screen.
+  //
+  // Because 0.18 < 0.25 — a relationship `boot.js`'s own
+  // `FIRE_SPAWN_TO_PAINT_THRESHOLD_RATIO` deliberately PRESERVES as the
+  // sensitivity slider moves — there is a whole band of paint alpha in which
+  // particles spawn and no fire exists at all. In that band the map shows
+  // flames that cannot cast light, cannot cluster, and cannot be tuned into
+  // existence by any control the author has. That is not faint paint behaving
+  // reasonably; it is two derived products of one authored input disagreeing
+  // about what the author painted, with only one of them wired to the light.
+  //
+  // WHY A RESCUE PASS RATHER THAN SIMPLY LOWERING `PAINT_THRESHOLD` TO MATCH.
+  // The strict threshold is doing real work at the top of the range: the ridge/
+  // elongation analysis below sizes a fire from confident paint, and a blanket
+  // drop to 0.18 would re-size and re-place fires on every map that currently
+  // works — including the author's own live Tower Bridge measurements this
+  // file's `minDiameterPx` comment records. Running strict FIRST and only
+  // reaching lower when it found NOTHING means every scene that has fires today
+  // is untouched, bit for bit, and the only behaviour that changes is the one
+  // that was broken: zero fires under paint that is demonstrably there.
+  //
+  // The guard is `< paintThreshold`, so a caller passing an equal-or-higher
+  // rescue value gets no second pass rather than a redundant identical one.
+  if (!Number.isFinite(rescueThreshold) || rescueThreshold >= paintThreshold) return strict;
+  return extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold: rescueThreshold });
+}
+
+/**
+ * The extraction itself, at ONE threshold. Split out of
+ * {@link extractFiresFromMask} 2026-08-15 so the rescue pass re-runs the
+ * IDENTICAL algorithm rather than a second, subtly-different copy of it — the
+ * twin-that-drifts failure this codebase has already paid for more than once
+ * ([[feedback_mode_forks_silently_drop_features]]). Body is verbatim.
+ *
+ * @param {{spec: object, data: Uint8Array}} grid
+ * @param {{maxFires: number, minDiameterPx: number, paintThreshold: number}} opts
+ * @returns {Array<{id:string,x:number,y:number,diameterPx:number,intensity:number}>}
+ */
+function extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold }) {
   const spec = grid?.spec ?? null;
   const data = grid?.data ?? null;
   if (!spec || !data) return [];

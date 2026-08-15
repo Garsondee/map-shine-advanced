@@ -252,10 +252,43 @@ export const WIND_GUST_SPACE_FREQ = 0.00035;
  *  front is broad and only gently wavy — a front is a line of weather, not a
  *  blob. At 0 fronts would be perfectly straight infinite walls. */
 export const WIND_GUST_CROSS_FREQ_RATIO = 0.35;
-/** Where the noise has to reach before it counts as a gust at all, in the
- *  0..1 remapped noise. Above the midpoint on purpose: that is what makes
- *  lulls the DEFAULT state and a gust an event, which is the whole ask. */
-export const WIND_GUST_THRESHOLD = 0.58;
+// ─────────────────────────────────────────────────────────────────────────────
+// GUST RATE FOLLOWS WIND SPEED (2026-08-15, author, after the first cut shipped
+// with gustiness as an independent dial): *"I think linking gustiness to overall
+// wind speed makes the most sense. At low wind values the gusts are extremely
+// few and far between but as wind speed increases the gap between wind blasts
+// gets shorter until at full wind speed you get a malestrom of strong wind
+// gusts all the time."*
+//
+// TWO LEVERS MOVE WITH SPEED, AND ONE DELIBERATELY DOES NOT.
+//
+//   1. THE THRESHOLD FALLS — from `..._CALM` (crossed rarely: isolated blasts
+//      with long quiet between) toward `..._GALE`. This is literally "the gap
+//      between wind blasts gets shorter".
+//   2. THE PATTERN GETS FINER — `..._SPACE_FREQ` is scaled up by
+//      `..._FREQ_GALE_SCALE`, so more gust fronts occupy the same stretch of
+//      map and they arrive in quicker succession. Travel speed rises too
+//      (`..._TRAVEL_CALM_SCALE`), because a gale's gusts genuinely move faster.
+//
+//   3. THE THRESHOLD DOES **NOT** GO TO ZERO AT FULL WIND, and that restraint
+//      is the whole difference between "a maelstrom of gusts" and "no gusts at
+//      all". Driving it to 0 would make `gustShape` saturate at 1 everywhere —
+//      a uniformly 2× wind with the variation flattened out of it, which is
+//      exactly what the author is NOT asking for. `..._GALE` sits near the
+//      noise's own median so blasts and brief lulls alternate rapidly. A gale
+//      is violent AND uneven; a constant is neither.
+/** The threshold at a dead calm — high, so a gust is a rare event. */
+export const WIND_GUST_THRESHOLD_CALM = 0.82;
+/** The threshold at full wind — near the noise median, so blasts arrive in
+ *  rapid succession while still genuinely alternating. See point 3 above for
+ *  why this is not 0. */
+export const WIND_GUST_THRESHOLD_GALE = 0.42;
+/** How much finer the gust pattern gets at full wind — more fronts across the
+ *  same map, i.e. a shorter gap between blasts. */
+export const WIND_GUST_FREQ_GALE_SCALE = 2.6;
+/** Travel-speed multiplier at a dead calm; reaches 1 at full wind. A gust that
+ *  crawls across the map at gale strength reads as fog, not wind. */
+export const WIND_GUST_TRAVEL_CALM_SCALE = 0.4;
 /** Width of the smoothstep band above the threshold. NARROW = discrete (a gust
  *  arrives and passes); wide would smear it back into the continuous wobble
  *  this term exists to replace. */
@@ -270,20 +303,26 @@ export const WIND_GUST_LULL = 0.55;
  *  quieter scene. */
 export const WIND_GUST_PEAK = 2;
 /**
- * THE SHIPPED DEFAULT gustiness, and the reason it is not 0.
+ * THE SHIPPED DEFAULT gustiness — now FULL, and the reason it moved.
  *
- * The mechanism is byte-identical-when-off by construction, so 0 would have
- * been the risk-free ship — and would also have meant nobody ever sees it
- * ([[feedback_default_on_new_features]]: new features ship ON, because a
- * feature the author has to go and find is a feature that gets judged as
- * missing). 0.45 is a real, visible gust pattern that still leaves a clearly
- * prevailing wind, rather than the full-swing lulls of 1.
+ * ⚠️ THIS PARAMETER CHANGED MEANING ON 2026-08-15 and the default had to follow.
+ * It shipped that morning as the only thing controlling gusts at all, so 0.45
+ * was a sensible "some gusting, not the full swing". Then the author's own
+ * correction — *"linking gustiness to overall wind speed makes the most
+ * sense"* — moved HOW OFTEN gusts arrive onto `speed01`, leaving this to mean
+ * only HOW PRONOUNCED a gust is when one does arrive.
+ *
+ * Under the new meaning 0.45 would be a permanent half-strength damper on a
+ * mechanism the wind dial is now supposed to govern end to end — quietly
+ * fighting the author's own steering. 1 is the neutral value for a
+ * pronouncedness dial: the gusts are as deep as the constants above describe,
+ * and how often they come is the wind's business.
  *
  * Lives HERE, beside the constants that shape the envelope, so the uniform's
  * initial value and the debug select's own default read the same number
  * instead of two hand-kept copies drifting apart.
  */
-export const WIND_DEFAULT_GUSTINESS01 = 0.45;
+export const WIND_DEFAULT_GUSTINESS01 = 1;
 
 /**
  * THE GUST ENVELOPE — a 0..N multiplier on the COHERENT wind, travelling
@@ -311,10 +350,17 @@ export const WIND_DEFAULT_GUSTINESS01 = 0.45;
  * @returns {*} a float node — 1 at gustiness 0, ranging between
  *   `WIND_GUST_LULL` and `WIND_GUST_PEAK` at gustiness 1.
  */
-export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustiness01 }) {
+export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustiness01, speed01 }) {
   const { float, vec2, mx_noise_float: perlin, clamp, mix, smoothstep, cos, sin } = TSL;
   const t = time.mul(float(0.001)); // ms → seconds, same conversion every other term here uses
   const rad = directionDeg.mul(float(Math.PI / 180));
+  // THE SPEED LINK — see the "GUST RATE FOLLOWS WIND SPEED" block above. Absent
+  // `speed01` ⇒ `float(0)`, i.e. the CALM end of every ramp: rare, slow, coarse
+  // gusts. That is the honest default for a caller with no wind-speed concept
+  // (it cannot claim a gale), and it keeps this function total rather than
+  // requiring a fourth mandatory argument every existing call site would have
+  // to grow.
+  const s = speed01 !== undefined ? clamp(speed01, float(0), float(1)) : float(0);
   // THE FLOW direction (negated — meteorological in, flow out), and its
   // perpendicular. Same two lines as `sampleWind`'s own coherent term, and they
   // MUST stay the same: a gust front travelling at an angle to the wind it is
@@ -324,18 +370,24 @@ export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustine
   // ALONG-FLOW coordinate, advected downwind. Subtracting the travel term means
   // a point reads the pattern value that started upwind of it — i.e. the
   // pattern moves TOWARD the point, which is what "the gust arrives" means.
-  const along = centerXY.x
-    .mul(flow.x)
-    .add(centerXY.y.mul(flow.y))
-    .sub(t.mul(float(WIND_GUST_TRAVEL_PX_PER_SEC)));
+  // Travel speed and pattern fineness BOTH ramp with wind speed (levers 1-2 in
+  // the block above this function): a gale's fronts sit closer together AND
+  // cross the map faster, which together are "the gap between wind blasts gets
+  // shorter".
+  const travelPxPerSec = float(WIND_GUST_TRAVEL_PX_PER_SEC).mul(mix(float(WIND_GUST_TRAVEL_CALM_SCALE), float(1), s));
+  const spaceFreq = float(WIND_GUST_SPACE_FREQ).mul(mix(float(1), float(WIND_GUST_FREQ_GALE_SCALE), s));
+  const along = centerXY.x.mul(flow.x).add(centerXY.y.mul(flow.y)).sub(t.mul(travelPxPerSec));
   const across = centerXY.x.mul(perp.x).add(centerXY.y.mul(perp.y));
-  const n = perlin(
-    vec2(along.mul(float(WIND_GUST_SPACE_FREQ)), across.mul(float(WIND_GUST_SPACE_FREQ * WIND_GUST_CROSS_FREQ_RATIO)))
-  );
+  const n = perlin(vec2(along.mul(spaceFreq), across.mul(spaceFreq.mul(float(WIND_GUST_CROSS_FREQ_RATIO)))));
   const n01 = n.mul(float(0.5)).add(float(0.5)); // mx_noise_float is [-1,1]
   // THE DISCRETENESS. Below the threshold this is flat 0 — a genuine lull, not
-  // a small value — and it climbs to 1 across a narrow band.
-  const gustShape = smoothstep(float(WIND_GUST_THRESHOLD), float(WIND_GUST_THRESHOLD + WIND_GUST_SHARPNESS), n01);
+  // a small value — and it climbs to 1 across a narrow band. The threshold
+  // FALLS with wind speed (lever 1): "extremely few and far between" at a
+  // breeze, blast after blast at full gale — and it deliberately stops short of
+  // 0, because a threshold of 0 saturates this to a constant and deletes the
+  // gusting entirely (lever 3).
+  const threshold = mix(float(WIND_GUST_THRESHOLD_CALM), float(WIND_GUST_THRESHOLD_GALE), s);
+  const gustShape = smoothstep(threshold, threshold.add(float(WIND_GUST_SHARPNESS)), n01);
   const shaped = mix(float(WIND_GUST_LULL), float(WIND_GUST_PEAK), gustShape);
   return mix(float(1), shaped, clamp(gustiness01, float(0), float(1)));
 }
@@ -927,6 +979,11 @@ export function sampleWind(
           time,
           directionDeg: wind.directionDeg,
           gustiness01: wind.gustiness01,
+          // THE SPEED LINK (2026-08-15) — how OFTEN gusts arrive now follows the
+          // prevailing wind, so a breeze gets rare isolated blasts and a gale
+          // gets blast after blast. See `computeGustEnvelope`'s own "GUST RATE
+          // FOLLOWS WIND SPEED" block.
+          speed01: wind.speed01,
         })
       : undefined;
 

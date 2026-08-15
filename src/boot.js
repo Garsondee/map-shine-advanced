@@ -2567,7 +2567,22 @@ function install() {
       return fireMaskCache.fires;
     }
     fireMaskBakeRuns += 1;
-    const fires = extractFiresFromMask(grid, { paintThreshold: sensitivity });
+    // `rescueThreshold` is the SPAWN cloud's own threshold, derived through the
+    // very ratio a few lines up that keeps the two in lockstep as the one
+    // sensitivity slider moves. See `extractFiresFromMask`'s own "⚠️ THE RESCUE
+    // PASS" for the live report this closes: paint in the band between the two
+    // thresholds spawned flame particles while producing zero fires, and a fire
+    // is the only thing that ever becomes a light — so the upper floor showed
+    // flames that could not light anything, with no control able to fix it.
+    //
+    // Passing it HERE rather than defaulting it inside `extractFiresFromMask`
+    // is deliberate: this is the one place that knows both thresholds are two
+    // views of a single authored question, and a default buried in the
+    // extractor would silently drift the moment the ratio here changed.
+    const fires = extractFiresFromMask(grid, {
+      paintThreshold: sensitivity,
+      rescueThreshold: sensitivity * FIRE_SPAWN_TO_PAINT_THRESHOLD_RATIO,
+    });
     fireMaskCache = { floorIndex, signature, version, sensitivity, fires };
     // Positions ride along, not just the count (2026-08-12) — a live report of
     // "two painted fireplaces, cohesion collapses them together" is otherwise
@@ -4077,7 +4092,11 @@ function install() {
   // arming throws its own explanatory error — recorded, degraded to the HUD's
   // rolling window, flagged by the verdict layer). Remove this block + the
   // diag/reckoning-report.js module when the Reckoning's R4 gates close.
-  const RECKONING_WINDOW_MS = 2500;
+  // 4 s, not 2.5 s (raised 2026-08-15 after the first live pair): the window is
+  // wall-clock, so a floor running at 16 fps returned only 29 measured frames
+  // against the ground floor's 291 — thin enough that the report had to caveat
+  // its own numbers. A slow floor is exactly where the numbers must be solid.
+  const RECKONING_WINDOW_MS = 4000;
   MapShine.reckoningReport = async () => {
     const errors = [];
     const grab = (label, fn) => {
@@ -4100,12 +4119,18 @@ function install() {
     const census = grab('census', () => getVtPanViewerReckoningCensus());
     const earlyZ = grab('earlyZ', () => getVtPanViewerEarlyZComposition());
     const floorsSection = grab('floors', () => {
-      const floors = getActiveSceneFloors(canvas?.scene) ?? [];
+      // `getActiveSceneFloors` returns a RESULT WRAPPER ({ok, floors, skipped}),
+      // not an array — v1 of this report called `.find` on the wrapper and lost
+      // the whole section to "floors.find is not a function" on both floors.
+      const res = getActiveSceneFloors(canvas?.scene);
+      const floors = res?.ok ? (res.floors ?? []) : [];
       const viewed = census?.view?.floorIndex ?? 0;
       return {
+        ok: res?.ok ?? false,
+        error: res?.ok ? null : (res?.error ?? 'unknown'),
         count: floors.length,
         viewed,
-        visibleIndices: computeVisibleFloorIndices(floors, viewed),
+        visibleIndices: computeVisibleFloorIndices(floors, viewed).map((f) => f?.index ?? f),
         activeFloorContext: activeFloorContext
           ? {
               floorIndex: activeFloorContext.floorIndex,
@@ -4117,8 +4142,49 @@ function install() {
           index: f.index,
           id: f.id ?? null,
           name: f.name ?? null,
-          bottom: f.elevation?.bottom ?? null,
-          top: f.elevation?.top ?? null,
+          bottom: f.elevationBottom ?? null,
+          top: f.elevationTop ?? null,
+          // WHICH other floors this one composites — the draw-list superset's
+          // own cause (foundry/active-scene-source.js#computeVisibleFloorIndices).
+          visibilityLevelIds: f.visibilityLevelIds ?? [],
+        })),
+        skipped: res?.skipped ?? [],
+      };
+    });
+    // THE TEXTURE/VRAM PICTURE — added after the first live pair showed ~83% of
+    // the upper-floor frame outside every zone. Driver-level VRAM paging is one
+    // of the few mechanisms that can cost that much while touching no pass
+    // timestamp, and it is invisible to every other field here.
+    const vtDiag = grab('vt.diagnostics', () => getVtPanViewerDiagnostics());
+    const vramSection = grab('vram', () =>
+      buildVramInventory({
+        targets: getVtPanViewerRenderTargets(),
+        vtEstimate: vtDiag?.wholeImage ?? null,
+        ceilingMb: 2500,
+      })
+    );
+    const wholeImageSection = grab('wholeImage', () => {
+      const wi = vtDiag?.wholeImage ?? null;
+      if (!wi) return null;
+      return {
+        itemCount: wi.itemCount ?? null,
+        ready: wi.ready ?? null,
+        errors: wi.errors ?? null,
+        estTextureVramMB: wi.estTextureVramMB ?? null,
+        textureLimit: wi.textureLimit ?? null,
+        perItem: (wi.perItem ?? []).map((p) => ({
+          id: p.id,
+          // Basename only — a full asset path per item triples the paste length
+          // for nothing; the id already disambiguates.
+          src: typeof p.src === 'string' ? p.src.split('/').pop() : p.src,
+          status: p.status,
+          error: p.error ?? null,
+          imageSize: p.imageSize ?? null,
+          grid: p.grid ?? null,
+          approxVramMB: p.approxVramMB ?? null,
+          visible: p.visible ?? null,
+          compressed: p.compressed ?? null,
+          alphaMin: p.alphaStats?.min ?? null,
         })),
       };
     });
@@ -4150,7 +4216,8 @@ function install() {
     let armedHere = false;
     let gpuArm = null;
     try {
-      perfProfiler.arm({ owner: 'reckoning-report', settleFrames: 10 });
+      // 5 settle frames, not 10: at 16 fps ten frames is 0.6 s of a 4 s window.
+      perfProfiler.arm({ owner: 'reckoning-report', settleFrames: 5 });
       armedHere = true;
     } catch (e) {
       errors.push(`zones.arm: ${e?.message ?? e}`);
@@ -4169,6 +4236,11 @@ function install() {
         settleFramesDiscarded: snap.settleFramesDiscarded,
         gpuSupported: gpuArm?.armed === true,
         rows: summarizeZoneRows(snap.zoneStats, snap.frames),
+        // The raw frame-to-frame intervals feed `summarizeAttribution`'s
+        // percentiles — the honest distribution behind the average, and the only
+        // way to tell "uniformly slow" from "fast with periodic 200ms stalls".
+        gapSamples: snap.gapSamples,
+        gapDropped: snap.gapDropped,
         hitchZones: snap.hitchZones,
         anomalies: snap.anomalies,
       };
@@ -4195,6 +4267,8 @@ function install() {
         earlyZ,
         effects: effectsSection,
         suspects,
+        vram: vramSection,
+        wholeImage: wholeImageSection,
         zones: zonesSection,
         multiFloorRanked: lastMultiFloorSecondReport?.ranked ?? null,
         errors,
@@ -4203,7 +4277,7 @@ function install() {
   };
   MapShine.debug.registerAction(
     'reckoning-report',
-    '⚖️ The Reckoning Report (≈3 s capture)',
+    '⚖️ The Reckoning Report (≈4 s capture)',
     () => MapShine.reckoningReport(),
     { zone: 'performance', primary: true }
   );
@@ -6009,16 +6083,27 @@ function install() {
   // baked against direction; gustiness is invisible to every CPU-side bake, so
   // routing it through the ambient setter would spend a full wall-raster and
   // flood-fill on each change of this dropdown for no effect whatsoever.
+  //
+  // ⚠️ RELABELLED THE SAME DAY IT SHIPPED, because the thing it controls
+  // changed. It began as the ONLY gust control; the author's own correction
+  // — *"linking gustiness to overall wind speed makes the most sense. At low
+  // wind values the gusts are extremely few and far between but as wind speed
+  // increases the gap between wind blasts gets shorter until at full wind speed
+  // you get a malestrom of strong wind gusts all the time"* — moved HOW OFTEN
+  // onto the wind dial itself. What is left here is HOW PRONOUNCED, and the
+  // label says so. A control whose name describes its old job is a lying
+  // instrument ([[feedback_instruments_must_not_lie]]), which is exactly the
+  // reasoning the Overlay-density control below already records for its own
+  // relabelling.
   let windGustinessValue = String(WIND_DEFAULT_GUSTINESS01);
   MapShine.debug.registerSelect(
     'wind-gustiness',
-    '🌬️ Gustiness',
+    '🌬️ Gust strength',
     [
-      { value: '0', label: 'Steady (no gusts)' },
-      { value: '0.2', label: 'Breezy' },
-      { value: String(WIND_DEFAULT_GUSTINESS01), label: 'Gusty (default)' },
-      { value: '0.75', label: 'Blustery' },
-      { value: '1', label: 'Squally (deep lulls)' },
+      { value: '0', label: 'Off — steady wind' },
+      { value: '0.35', label: 'Subtle' },
+      { value: '0.7', label: 'Strong' },
+      { value: String(WIND_DEFAULT_GUSTINESS01), label: 'Full (default) — rate follows wind speed' },
     ],
     () => windGustinessValue,
     (value) => {

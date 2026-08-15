@@ -205,4 +205,37 @@ export function run(t) {
       shouldPublishDarkness({ ...base, darkness01: NaN, nowMs: 99999 }) === false
     );
   }
+
+  // ---- THE LATCHED THROTTLE: the author's own live failure, pinned ---------
+  // 2026-08-15, live: "I set the scene to midnight on the astrolabe and then I
+  // check scene darkness which is still at 0 and should be at 1." Cause was not
+  // in this function — it was the CALLER passing `time.tMs` (SIM time, frozen
+  // while Foundry is paused) as `nowMs`. One publish happened at startup, the
+  // clock stopped, and `nowMs - lastPublishedAtMs` never again reached the
+  // interval. `core/frame-clock.js`'s own header warns about exactly this
+  // ("a consumer that reached for the obvious `tMs` would silently opt OUT of
+  // pause"); poll throttles must use `realMs`.
+  //
+  // This models a STOPPED clock — every later call sees the same `nowMs` the
+  // publish was stamped with — and asserts the shape of the failure, so that a
+  // future caller re-introducing a frozen clock fails here rather than live.
+  {
+    const frozenNow = 5000;
+    const latched = shouldPublishDarkness({
+      darkness01: 1, // midnight
+      lastPublished01: 0, // published once at noon, at startup
+      nowMs: frozenNow,
+      lastPublishedAtMs: frozenNow, // a clock that never advanced
+    });
+    ok('a frozen clock latches the throttle shut — the reported live failure', latched === false);
+    ok(
+      'the SAME call with a wall clock that really advanced does publish',
+      shouldPublishDarkness({
+        darkness01: 1,
+        lastPublished01: 0,
+        nowMs: frozenNow + DARKNESS_PUBLISH_MIN_INTERVAL_MS,
+        lastPublishedAtMs: frozenNow,
+      }) === true
+    );
+  }
 }

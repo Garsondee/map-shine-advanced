@@ -308,6 +308,11 @@ export function createWindHandle({
               time,
               directionDeg: ambientRef.directionDeg,
               gustiness01: ambientRef.gustiness01,
+              // Kept in step with `sampleWind`'s own call by the node↔kernel
+              // parity test — omitting this here would have particles gusting on
+              // a calm-weather rate while every material around them followed
+              // the wind.
+              speed01: ambientRef.speed01,
             })
           )
         : undefined;

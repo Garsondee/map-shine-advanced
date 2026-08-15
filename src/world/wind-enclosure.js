@@ -289,6 +289,47 @@ export function cropGridMargin(grid, paddedCols, paddedRows, marginCells) {
 export const DOOR_FALLOFF_REACH_CELLS = 120;
 
 /**
+ * HOW FAR THE WIND PUSHES IN, AS A FUNCTION OF HOW HARD IT IS BLOWING
+ * (2026-08-15, author: *"the amount of distance that wind 'invades' an interior
+ * has no relationship with the wind strength. At full wind I'd like the wind to
+ * actual penetrate double the distance and then that distance should fade
+ * towards very little as wind speed heads towards zero."*)
+ *
+ * ⚠️ WHAT WAS ACTUALLY WRONG: `DOOR_FALLOFF_REACH_CELLS` is a pure geometry
+ * constant, so the penetration DEPTH was identical at a dead calm and at a
+ * gale. Only the wind's MAGNITUDE scaled — a whisper reached exactly as far
+ * down a corridor as a storm, just faintly. That reads as a static field being
+ * dimmed rather than as air being pushed, which is precisely the observation.
+ *
+ * ⚠️ WHY THIS BELONGS IN THE BAKE AND NOT IN THE SHADER: `openness` is baked,
+ * and this scales the reach the bake measures against. That is affordable only
+ * because `setWindAmbient` ALREADY re-bakes on a speed change (it has to — the
+ * directional wind SHADOW is baked too), so speed was always a rebake trigger
+ * and this adds no new one. Doing it per-fragment instead would mean shipping
+ * the raw door DISTANCE to every consumer and re-deriving the falloff in each,
+ * which is exactly the duplicated-formula drift `wind-access.js` exists to stop.
+ *
+ * The endpoints are the author's own numbers: 2× at full wind, and "very
+ * little" (not zero — a fully-open doorway in a dead calm still exchanges a
+ * little air, and a hard 0 would make the doorway boundary a visible cliff) as
+ * speed approaches zero.
+ *
+ * @param {number} speed01 - the ambient wind speed, 0..1.
+ * @returns {number} a multiplier on {@link DOOR_FALLOFF_REACH_CELLS}.
+ */
+export function doorReachScaleForWindSpeed(speed01) {
+  const s = Number.isFinite(speed01) ? Math.min(1, Math.max(0, speed01)) : 0;
+  return DOOR_REACH_SCALE_CALM + (DOOR_REACH_SCALE_GALE - DOOR_REACH_SCALE_CALM) * s;
+}
+
+/** "Very little" at dead calm — see {@link doorReachScaleForWindSpeed}. At the
+ *  shipped 120-cell reach this is ~15 cells: air still creeps past an open
+ *  door, it just does not travel. */
+export const DOOR_REACH_SCALE_CALM = 0.12;
+/** "Double the distance" at full wind — the author's own number, verbatim. */
+export const DOOR_REACH_SCALE_GALE = 2;
+
+/**
  * THE GRADED PENETRATION FALLOFF (2026-07-22, docs/planning/Wind-Rethink.md
  * §4.2 step 4 / §5 q1, shipped same-day as binary openness after the
  * author's own live confirmation: "opening a door now floods the interior

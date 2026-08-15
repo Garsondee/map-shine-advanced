@@ -314,4 +314,64 @@ export function run(t) {
     const resized = { spec: { ...a.spec, width: a.spec.width * 3, height: a.spec.height * 3 }, data: a.data };
     t.ok('a resized world rect (same w/h/x/y) signs differently', fireMaskSignature(a) !== fireMaskSignature(resized));
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE RESCUE PASS — "fire appears but its light doesn't" (2026-08-15)
+  // ══════════════════════════════════════════════════════════════════════
+  // Author-reported live, and named exactly by MapShine.getFireStatus():
+  // ground floor {fires: 6, lights: 6, spawnPoints: 85}, upper floor
+  // {fires: 0, lights: 0, spawnPoints: 2}. Paint whose alpha sits between the
+  // SPAWN threshold (0.18) and the PAINT threshold (0.25) spawns flame
+  // particles while producing zero fires — and a fire is the only thing that
+  // ever becomes a light. See `extractFiresFromMask`'s own "⚠️ THE RESCUE PASS".
+  {
+    // 55/255 ≈ 0.216 — comfortably inside the dead band: above spawn's 0.18,
+    // below fire's 0.25. This is the alpha that made flames with no light.
+    const faint = (rows, alpha) => {
+      const h = rows.length;
+      const w = rows[0].length;
+      const data = new Uint8Array(w * h);
+      for (let r = 0; r < h; r++) {
+        for (let c = 0; c < w; c++) data[r * w + c] = rows[r][c] === '#' ? alpha : 0;
+      }
+      return { spec: { x: 0, y: 0, width: w * 10, height: h * 10, w, h, texelW: 10, texelH: 10 }, data };
+    };
+    const g = faint(['.....', '.###.', '.###.', '.###.', '.....'], 55);
+
+    const strictOnly = extractFiresFromMask(g, { minDiameterPx: 4, paintThreshold: 0.25 });
+    t.ok('THE BUG: faint-but-real paint yields ZERO fires at the strict threshold', strictOnly.length === 0);
+
+    const rescued = extractFiresFromMask(g, { minDiameterPx: 4, paintThreshold: 0.25, rescueThreshold: 0.18 });
+    t.ok('THE FIX: the rescue pass finds it, so a light can exist', rescued.length > 0);
+
+    // ---- and the fix must be INERT wherever fires already exist -----------
+    // Every scene that works today must be bit-identical, which is the whole
+    // reason this is a rescue pass rather than a lowered threshold.
+    const bold = gridFrom(['.....', '.###.', '.###.', '.###.', '.....']);
+    const before = extractFiresFromMask(bold, { minDiameterPx: 4, paintThreshold: 0.25 });
+    const after = extractFiresFromMask(bold, { minDiameterPx: 4, paintThreshold: 0.25, rescueThreshold: 0.18 });
+    t.ok('bold paint is unaffected — same count', before.length === after.length && before.length > 0);
+    t.ok(
+      'bold paint is unaffected — same ids, positions and diameters',
+      JSON.stringify(before) === JSON.stringify(after)
+    );
+
+    // ---- a rescue threshold at or above the strict one is a no-op ---------
+    const noRescue = extractFiresFromMask(g, { minDiameterPx: 4, paintThreshold: 0.25, rescueThreshold: 0.25 });
+    t.ok('an equal-or-higher rescue threshold runs no second pass', noRescue.length === 0);
+
+    // ---- genuinely blank paint stays blank --------------------------------
+    // The rescue pass must not mint fires out of nothing; it lowers the bar,
+    // it does not remove it.
+    const blank = faint(['.....', '.....', '.....'], 55);
+    t.ok(
+      'unpainted grid yields nothing, rescue pass or not',
+      extractFiresFromMask(blank, { minDiameterPx: 4, rescueThreshold: 0.18 }).length === 0
+    );
+    const belowBoth = faint(['.....', '.###.', '.###.', '.....'], 20); // 20/255 ≈ 0.078
+    t.ok(
+      'paint below the SPAWN threshold too is still rejected — the bar moved, it did not vanish',
+      extractFiresFromMask(belowBoth, { minDiameterPx: 4, paintThreshold: 0.25, rescueThreshold: 0.18 }).length === 0
+    );
+  }
 }

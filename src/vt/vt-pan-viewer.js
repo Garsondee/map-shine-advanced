@@ -300,6 +300,7 @@ import {
   opennessFalloffFromDistance,
   downsampleDistanceMin,
   DOOR_FALLOFF_REACH_CELLS,
+  doorReachScaleForWindSpeed,
   distanceFromNearestSolid,
   wallAvoidanceDirectionFromDistance,
   wallProximityFromDistance,
@@ -3500,8 +3501,15 @@ export async function startVtPanViewer({
         const fineDoorDistance = distanceFromDoorThreshold(fineOpen, fineOpenExterior, fineCols, fineRows);
         const doorDistance = downsampleDistanceMin(fineDoorDistance, cols, rows, OPENNESS_REFINE);
         const exteriorOpenness = downsampleMax(fineOpenExterior, cols, rows, OPENNESS_REFINE);
+        // WIND SPEED SETS HOW FAR IT PUSHES IN (2026-08-15) — see
+        // `world/wind-enclosure.js#doorReachScaleForWindSpeed` for the author's
+        // report and why this rides the bake rather than the shader. Reading
+        // `uWindSpeed01.value` (the uniform's number, not the node) for the same
+        // reason the wind SHADOW a few dozen lines below reads
+        // `uWindDirectionDeg.value`: this is plain CPU arithmetic, and both are
+        // baked against the ambient that `setWindAmbient` re-bakes on.
         const opennessArray = opennessFalloffFromDistance(doorDistance, exteriorOpenness, {
-          reachCells: DOOR_FALLOFF_REACH_CELLS * OPENNESS_REFINE,
+          reachCells: DOOR_FALLOFF_REACH_CELLS * OPENNESS_REFINE * doorReachScaleForWindSpeed(uWindSpeed01.value),
         });
 
         // RGBA — B carries openness (the SAME channel `windReach` used
@@ -5588,6 +5596,14 @@ export async function startVtPanViewer({
      *  and [[feedback_diagnostics_must_land_in_perf_report]]: a diagnostic that
      *  only exists in the console has little value). */
     let lastDarknessPublishResult = null;
+    /** How many publish ATTEMPTS have been made. Separate from "did the last one
+     *  succeed" because the author's first live test ("scene darkness is still
+     *  at 0") had exactly one attempt — a successful one — followed by a latched
+     *  throttle. A success flag alone said "working"; the count is what
+     *  distinguishes "published once and stopped" from "publishing every time
+     *  it should" ([[feedback_absent_zone_row_is_a_measurement]] — the number of
+     *  times a conditional actually fired IS the measurement). */
+    let darknessPublishAttempts = 0;
 
     // ── THE SKY ────────────────────────────────────────────────────────────
     // `todHour` HAS a real source as of 2026-07-23: the day clock
@@ -5696,11 +5712,30 @@ export async function startVtPanViewer({
       // `shouldPublishDarkness` is pure and Node-tested precisely because a
       // throttle that never fires and a throttle that fires every frame are
       // both silent failures.
+      //
+      // ⚠️ `realMs`, NOT `tMs` — AND THE FIRST CUT GOT THIS WRONG, WHICH IS THE
+      // WHOLE BUG THE AUTHOR REPORTED (2026-08-15: *"I set the scene to midnight
+      // on the astrolabe and then I check scene darkness which is still at 0 and
+      // should be at 1."*). `tMs` is SIM time: scaled, and frozen while Foundry
+      // is paused. So the very first frame published (correctly, at whatever the
+      // startup hour was), stamped `lastPublishedAtMs` with a sim clock that then
+      // stopped advancing, and every later check computed `nowMs -
+      // lastPublishedAtMs ≈ 0 < 250` — the throttle latched shut forever and no
+      // amount of dragging the astrolabe could ever reopen it.
+      //
+      // `core/frame-clock.js`'s own header names this exact trap and this exact
+      // remedy: *"the ones that need wall time (hitch detection, poll throttles,
+      // the GPU probe) say `realMs`"*, warning that *"a consumer that reached for
+      // the obvious `tMs` would silently opt OUT of pause"*. A publish throttle
+      // is a poll throttle. `env.time.realMs` (not the raw tick) because the
+      // snapshot applies the `Number.isFinite` fallback for a clock that has not
+      // produced one yet.
+      const darknessNowMs = env.time.realMs;
       if (
         shouldPublishDarkness({
           darkness01: env.darkness01,
           lastPublished01: lastPublishedDarkness01,
-          nowMs: time.tMs,
+          nowMs: darknessNowMs,
           lastPublishedAtMs: lastPublishedDarknessAtMs,
         })
       ) {
@@ -5712,9 +5747,10 @@ export async function startVtPanViewer({
         // MSA would ignore the GM's real darkness from then on.
         if (published.ok) {
           lastPublishedDarkness01 = published.published;
-          lastPublishedDarknessAtMs = time.tMs;
+          lastPublishedDarknessAtMs = darknessNowMs;
         }
         lastDarknessPublishResult = published;
+        darknessPublishAttempts += 1;
       }
       // THE SHADOW HANDLE — rebuilt only when the sky actually MOVED, not every
       // frame: it is an immutable value object, and churning a new one per
@@ -14801,6 +14837,13 @@ export async function startVtPanViewer({
           publishedDarkness01: lastPublishedDarkness01,
           publishedDarknessAtMs: lastPublishedDarknessAtMs,
           darknessPublish: lastDarknessPublishResult,
+          darknessPublishAttempts,
+          // What Foundry is holding RIGHT NOW, read back independently of
+          // anything MSA remembers. Three numbers side by side —
+          // `env.darkness01` (what MSA wants), `publishedDarkness01` (what MSA
+          // thinks it wrote), `foundryDarkness01` (what Foundry actually has) —
+          // are what turn "darkness isn't working" into one glance.
+          foundryDarkness01: readSceneDarkness().darkness01,
           darknessReason: lastEnvSnapshot.darkness.reason,
           ambientSource: lastEnvSnapshot.ambient?.source ?? null,
           ambientReason: lastEnvSnapshot.ambient?.reason ?? null,

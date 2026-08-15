@@ -5,6 +5,9 @@
  * style (a hand-built solid mask on a small grid).
  */
 import {
+  doorReachScaleForWindSpeed,
+  DOOR_REACH_SCALE_CALM,
+  DOOR_REACH_SCALE_GALE,
   floodFillOpenFromBoundary,
   summarizeEnclosure,
   downsampleMax,
@@ -647,5 +650,33 @@ export function run(t) {
     }
 
     ok('the reach constant is a sane positive number of cells', WIND_SHADOW_REACH_CELLS > 1);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // PENETRATION DEPTH FOLLOWS WIND SPEED (2026-08-15)
+  // ══════════════════════════════════════════════════════════════════════
+  // Author: "the amount of distance that wind 'invades' an interior has no
+  // relationship with the wind strength. At full wind I'd like the wind to
+  // actual penetrate double the distance and then that distance should fade
+  // towards very little as wind speed heads towards zero."
+  {
+    ok('full wind doubles the reach — the number the author asked for', doorReachScaleForWindSpeed(1) === 2);
+    ok('dead calm reaches "very little"', doorReachScaleForWindSpeed(0) === DOOR_REACH_SCALE_CALM);
+    ok('and "very little" is NOT nothing — a hard 0 would make the doorway a visible cliff', DOOR_REACH_SCALE_CALM > 0);
+    ok(
+      'monotonic across the range — more wind never reaches less far',
+      [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1].every(
+        (v, i, a) => i === 0 || doorReachScaleForWindSpeed(v) > doorReachScaleForWindSpeed(a[i - 1])
+      )
+    );
+    ok(
+      'half wind lands between the endpoints',
+      doorReachScaleForWindSpeed(0.5) > DOOR_REACH_SCALE_CALM && doorReachScaleForWindSpeed(0.5) < DOOR_REACH_SCALE_GALE
+    );
+    // Out-of-range and junk clamp rather than producing a negative or NaN
+    // reach, which downstream would silently become "no penetration anywhere".
+    ok('over-range clamps to the gale end', doorReachScaleForWindSpeed(9) === DOOR_REACH_SCALE_GALE);
+    ok('negative clamps to the calm end', doorReachScaleForWindSpeed(-3) === DOOR_REACH_SCALE_CALM);
+    ok('a non-finite speed reads as calm, never NaN', doorReachScaleForWindSpeed(undefined) === DOOR_REACH_SCALE_CALM);
   }
 }

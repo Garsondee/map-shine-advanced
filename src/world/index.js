@@ -58,6 +58,10 @@ export {
   opennessFalloffFromDistance,
   downsampleDistanceMin,
   DOOR_FALLOFF_REACH_CELLS,
+  // How far the wind pushes IN scales with how hard it blows (2026-08-15).
+  doorReachScaleForWindSpeed,
+  DOOR_REACH_SCALE_CALM,
+  DOOR_REACH_SCALE_GALE,
   distanceFromNearestSolid,
   wallAvoidanceDirectionFromDistance,
   wallProximityFromDistance,

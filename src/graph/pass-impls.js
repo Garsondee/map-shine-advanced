@@ -161,6 +161,19 @@ export const PASS_IMPLS = Object.freeze({
       'InstancedBufferGeometry, positions straight from the arena — additively into scene.lit, guarding ' +
       'the clear like the candle flame. Same invocability caveat as geometry.world.',
   },
+  'vision.gate': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-08-15 (Testament Pillar 11): runVisionGatePass (a closure inside ' +
+      'startVtPanViewer, in the local passImpls map runPassPlan walks) multiplies ONE fullscreen quad ' +
+      'over scene.lit, hiding everything the viewer may not see. Its ORDER is the feature — after every ' +
+      'additive draw (a live run proved gating the composite alone left candle flames and fire ' +
+      'particles drawing through the fog) and before post.bloom (so a hidden light cannot smear across ' +
+      'it). Same invocability caveat as geometry.world.',
+  },
   'surface.response': {
     fn: startVtPanViewer,
     module: 'vt/index.js',

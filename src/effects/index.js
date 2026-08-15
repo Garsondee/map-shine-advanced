@@ -155,6 +155,7 @@ export {
   createVisionMaskSubsystem,
   buildVisionLosMaterial,
   buildVisionLightMaterial,
+  buildVisionGateMaterial,
 } from './vision/vision-mask-render.js';
 export {
   buildRegionRectangleMaterial,

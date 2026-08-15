@@ -22,7 +22,13 @@ export function run(t) {
     // — the second post-stage effect, deliberately not folded into post.bloom
     // or the still-unbuilt post.grade seam. Widen deliberately again if a real
     // pass genuinely earns rung 16; don't just bump the number to silence this.
-    t.ok('a sane number of passes (10-15, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 15);
+    // Widened to 16 for 'vision.gate' (Testament Pillar 11) — a genuinely new
+    // rung, not a fold-in: it is the player-facing information gate and it MUST
+    // sit between surface.particles and post.bloom (after every additive draw so
+    // candles/particles cannot leak through it, before bloom so a hidden light
+    // cannot smear across the fog). Neither neighbour could absorb it without
+    // losing one of those two orderings.
+    t.ok('a sane number of passes (10-16, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 16);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

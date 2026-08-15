@@ -125,6 +125,77 @@ export function buildVisionLightMaterial({ THREE }) {
 }
 
 /**
+ * Build the FULLSCREEN GATE — one MULTIPLY quad that finishes the reveal rule
+ * over the whole composited frame.
+ *
+ * ⚠️ WHY THIS IS A SEPARATE FULLSCREEN PASS AND NOT A TERM IN THE COMPOSITE
+ * MATERIAL — found live, not reasoned about. The first cut put the gate inside
+ * `environmental-light.js`'s composite. A verification run showed the map
+ * correctly blacked out where unrevealed AND candle flames, fire particles and
+ * light coronas drawing straight through the fog: they are ADDITIVE draws that
+ * land on `scene.lit` AFTER the composite quad and therefore never pass
+ * through it. Gating "the composite" gates the map and nothing else. Only a
+ * pass that runs after every contributor can gate every contributor.
+ *
+ * ⚠️ AND IT MUST RUN BEFORE BLOOM. Bloom reads `scene.lit` and smears bright
+ * pixels outward; gating afterwards would let a hidden candle bloom across the
+ * fog and betray its position through a wall. Gate first, then bloom only ever
+ * sees what the viewer is allowed to see.
+ *
+ * MULTIPLY (rather than reading `scene.lit` and writing it back) because a
+ * pass may not sample the target it writes. The quad reads only the mask and
+ * the illumination buffer, and the blend does the rest.
+ *
+ * The expression is `./vision-mask.js#decideRevealed`'s last three clauses —
+ * that function remains the single definition and the CPU twin:
+ *     revealed = R AND (G OR (B AND illum >= threshold))
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.maskTexture - this subsystem's own R/G/B mask.
+ * @param {*} args.illumTexture - `buf:scene.illum`, MSA's own per-pixel brightness.
+ * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`.
+ * @returns {*} a NodeMaterial for a fullscreen quad.
+ */
+export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, threshold }) {
+  const { texture, uv, float, vec4, select, max } = THREE.TSL;
+
+  const mask = texture(maskTexture).sample(uv());
+  const illum = texture(illumTexture).sample(uv());
+  // The SAME illumination the composite lit the frame with — deliberately not
+  // a second, differently-derived brightness, so "bright enough to see" and
+  // "bright enough to look lit" can never disagree on screen.
+  const luminance = max(max(illum.r, illum.g), illum.b);
+  const litEnough = luminance.greaterThanEqual(float(threshold));
+
+  const insideLos = mask.r.greaterThan(float(0.5));
+  const darkvision = mask.g.greaterThan(float(0.5));
+  const lightPerception = mask.b.greaterThan(float(0.5));
+  const revealed = insideLos.and(darkvision.or(lightPerception.and(litEnough)));
+
+  // HARD 1/0. No partial reveal: a shader that quietly half-reveals is a
+  // shader that quietly half-leaks. A soft fog edge is a presentation choice
+  // for a later slice to make on purpose.
+  const factor = select(revealed, float(1), float(0));
+
+  const material = new THREE.NodeMaterial();
+  material.transparent = true;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.blending = THREE.CustomBlending;
+  // dst * src — the classic multiply. Alpha is left alone (OneFactor/
+  // ZeroFactor would stamp the quad's own alpha over the scene's).
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrc = THREE.ZeroFactor;
+  material.blendDst = THREE.SrcColorFactor;
+  material.blendEquationAlpha = THREE.AddEquation;
+  material.blendSrcAlpha = THREE.ZeroFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(factor, factor, factor, float(1));
+  return material;
+}
+
+/**
  * Write a fan-triangulated polygon into a mesh's geometry, reusing the
  * existing attribute array whenever it still fits.
  *

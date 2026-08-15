@@ -94,12 +94,30 @@ export function run(t) {
     // LIVE plan) — it reads buf:scene.depth, which is unaffected by ordering
     // relative to bloom either way, but runs AFTER bloom so a bloomed bright
     // light seen through a lower-floor hole blurs along with everything else.
+    // `vision.gate` joined 2026-08-15 (Testament Pillar 11) between
+    // surface.particles and post.bloom. BOTH neighbours are load-bearing and
+    // are asserted separately below — this is not a pass that could sit
+    // anywhere convenient.
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,post.bloom,post.dof,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,vision.gate,post.bloom,post.dof,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',
       ids.indexOf('surface.response') > ids.indexOf('light.accumulate')
+    );
+    // ⚠️ THESE TWO PIN A PLAYER-SAFETY ORDERING, NOT A PREFERENCE (Law 7).
+    // A live run with the gate inside the composite material showed the map
+    // correctly dark while candle flames and fire particles drew straight
+    // through the fog — they are additive draws that never pass through it.
+    ok(
+      'vision.gate runs AFTER surface.particles — else candles/particles draw through the fog',
+      ids.indexOf('vision.gate') > ids.indexOf('surface.particles')
+    );
+    // And before bloom, or a hidden light smears across the fog and betrays
+    // its position through a wall.
+    ok(
+      'vision.gate runs BEFORE post.bloom — else a hidden light blooms across the fog',
+      ids.indexOf('vision.gate') < ids.indexOf('post.bloom')
     );
   }
 

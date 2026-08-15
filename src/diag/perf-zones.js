@@ -670,6 +670,17 @@ export const ZONES = Object.freeze(
       'visionMask.scene'
     ),
     z(
+      'vision.gate',
+      'Vision gate (fog multiply)',
+      'lighting',
+      'surface.particles',
+      null,
+      'gpu',
+      'conditional',
+      false,
+      'visionGateQuad'
+    ),
+    z(
       'light.drawColoration',
       'Coloration draw',
       'lighting',

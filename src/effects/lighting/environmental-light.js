@@ -311,14 +311,8 @@ export function buildEnvironmentalLightMaterials({
   attrTexture,
   depthTexture,
   depthFlagsTexture,
-  // THE VISION MASK (Pillar 11) — `effects/vision/vision-mask-render.js`'s
-  // R/G/B channel texture, or omitted entirely. Omitting it compiles a
-  // BYTE-IDENTICAL shader to before this parameter existed, which is what
-  // keeps slice 2 provably inert until the takeover flag turns it on.
-  visionMaskTexture,
-  visionRevealThreshold,
 }) {
-  const { uniform, texture, uv, vec3, vec4, float, mix, select, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+  const { uniform, texture, uv, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SKY LIGHT (docs/planning/Sky.md) — atmosphere as LIGHT, not a grade.
@@ -498,43 +492,16 @@ export function buildEnvironmentalLightMaterials({
   // environmental GRADE does it correctly in the present pass; see Grade.md §2.)
   const finalSrgb = litSrgb.add(colorationTexNode.rgb); // gamma-space ADD, Foundry parity (see essay above)
 
-  // ── THE VISION GATE (Pillar 11) ────────────────────────────────────────
-  // Applied to the FINISHED colour, AFTER coloration is added, and that
-  // placement is deliberate rather than convenient: coloration is an ADDITIVE
-  // term, so gating only `illum` (where `uiShadowVisNode` correctly sits —
-  // it is a shadow, which dims light) would leave a light's own colour
-  // glowing through solid fog. Anything a player must not see has to be
-  // multiplied at the END, once, or it leaks through whichever term was
-  // added later. Law 7.
-  //
-  // Finishes `vision-mask.js#decideRevealed` — that function is the single
-  // definition of the rule and its CPU twin; this is the same expression with
-  // the illumination clause it could not evaluate on the CPU:
-  //     revealed = R AND (G OR (B AND illum >= threshold))
-  // R = inside LOS, G = inside darkvision radius (illumination-INDEPENDENT,
-  // which is what darkvision IS), B = inside the light-perception polygon.
-  //
-  // A JS-time branch: with no mask texture this whole block vanishes and the
-  // shader is byte-identical to before the feature existed.
-  let gatedSrgb = finalSrgb;
-  if (visionMaskTexture) {
-    const maskNode = texture(visionMaskTexture).sample(uv());
-    // The illumination used here is the SAME `illumTexNode` the composite
-    // already lights with — deliberately not a second sample of some other
-    // brightness, so "bright enough to see" and "bright enough to look lit"
-    // can never disagree on screen.
-    const luminance = illumTexNode.rgb.r.max(illumTexNode.rgb.g).max(illumTexNode.rgb.b);
-    const litEnough = luminance.greaterThanEqual(float(visionRevealThreshold ?? 0.08));
-    const revealed = maskNode.r
-      .greaterThan(float(0.5))
-      .and(maskNode.g.greaterThan(float(0.5)).or(maskNode.b.greaterThan(float(0.5)).and(litEnough)));
-    // Hard 1/0 — no partial reveal. A soft fog EDGE is a presentation choice
-    // that belongs to a later slice and must be made explicitly; a shader
-    // that quietly half-reveals is a shader that quietly half-leaks.
-    gatedSrgb = finalSrgb.mul(select(revealed, float(1), float(0)));
-  }
-
-  const litLinear = sRGBTransferEOTF(gatedSrgb);
+  // ⚠️ THE VISION GATE IS DELIBERATELY *NOT* HERE — it lives in its own
+  // `vision.gate` fullscreen pass (`effects/vision/vision-mask-render.js#
+  // buildVisionGateMaterial`). An earlier cut DID put it in this material and
+  // a live run proved it insufficient: the map went correctly dark while
+  // candle flames, fire particles and light coronas drew straight through the
+  // fog, because those are ADDITIVE draws that land on `scene.lit` AFTER this
+  // quad and never pass through it. Gating "the composite" gates the map and
+  // nothing else. Do not re-add it here — a gate covering only the map is the
+  // exact shape of the leak Law 7 exists to prevent.
+  const litLinear = sRGBTransferEOTF(finalSrgb);
   const compositeMaterial = new THREE.NodeMaterial();
   compositeMaterial.depthTest = false;
   compositeMaterial.depthWrite = false;

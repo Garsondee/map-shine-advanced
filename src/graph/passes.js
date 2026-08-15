@@ -265,7 +265,11 @@ export const PASSES = [
     // quietly unable to express a consumer for a buffer that has existed since
     // increment 3. Found while designing `surface.response`'s tier-4 read of it
     // (docs/planning/Specular.md §7.2).
-    creates: ['buf:scene.illum', 'buf:scene.coloration'],
+    // buf:scene.visionMask is created here because the Pillar-11 rasteriser
+    // runs inside this pass's own render sequence (right after the illum
+    // guard is restored) — declaring it on vision.gate instead would be a
+    // reads-before-creates lie the graph validator correctly refuses.
+    creates: ['buf:scene.illum', 'buf:scene.coloration', 'buf:scene.visionMask'],
     // `reads` stays narrowed to res:env even now that point lights are live
     // (2026-07-18): light DATA comes from a direct foundry/scene-lights.js
     // adapter read (canvas.effects.lightSources), the same shortcut
@@ -450,6 +454,28 @@ export const PASSES = [
       '2026-07-21 (first slice: ambient dust): ONE InstancedBufferGeometry draw of the engine scene, ' +
       'additively into scene.lit, as a viewer closure in the local passImpls map (mirrors the candle ' +
       'flame). Per-pixel gating is a higher rung.',
+  },
+  {
+    id: 'vision.gate',
+    stage: 'surface',
+    kind: 'gpu',
+    status: 'live',
+    owns: 'docs/planning/Vision-Fog-Ownership.md (Testament Pillar 11) — the player-facing information gate',
+    creates: [],
+    reads: ['buf:scene.visionMask', 'buf:scene.illum'],
+    modifies: ['buf:scene.color'],
+    absorbs: ['FogOfWarEffectV2(gate half)'],
+    note:
+      'ONE fullscreen MULTIPLY over scene.lit, and its POSITION in the order is the whole point. It ' +
+      'runs AFTER every additive draw (composite, candle flames, lightning, fire, specular, ' +
+      'particles) and BEFORE post.bloom. After, because gating only the composite provably leaks: a ' +
+      'live run with the gate in the composite material showed the map correctly dark while candle ' +
+      'flames and fire particles drew straight through the fog — they are separate draws that never ' +
+      'pass through it. Before bloom, because bloom would otherwise smear a hidden candle`s light ' +
+      'across the fog and leak its position anyway. A multiply quad (rather than a read-modify-write ' +
+      'of scene.lit) because a pass may not sample the target it writes. Law 7: vision is never ' +
+      'cached, baked or approximated, and the gate is hard 1/0 — a soft fog EDGE is a later, ' +
+      'deliberate presentation choice, never a sampling accident here.',
   },
   {
     id: 'post.bloom',

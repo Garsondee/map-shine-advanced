@@ -89,10 +89,29 @@ every active vision source (origin, LOS polygon points, light-perception polygon
 radius, blinded state, elevation/level). Node-testable, no rendering. *This slice cannot
 break anything — nothing consumes it yet.*
 
-**Slice 2 — the mask render.** Triangulate the polygons (precedent:
-`effects/lighting/point-light-illumination.js#triangulateLightFan`, already rasterises
-Foundry LOS polygons every frame) into an MSA "currently visible" RT, joined with
-illumination per §3.
+**Slice 2 — the mask render.** Split in two once building started:
+
+- **2a — the RULE. ✅ DONE** (`861f745`), `effects/vision/vision-mask.js`.
+  `decideRevealed` is the pure CPU TWIN the shader must match, plus the pool
+  reconciliation and a fail-closed gating decision. 33 assertions. Written BEFORE the
+  shader deliberately: Law 7 makes this player-facing information, so the rule gets pinned
+  in Node where a divergence fails loudly, rather than being discovered by a player seeing
+  something they shouldn't.
+- **2b — the RASTERISER.** Not started. Fan-triangulate each source's polygons and draw
+  into a "currently visible" R8 target, then evaluate `decideRevealed`'s clauses per pixel
+  against `buf:scene.illum`.
+  - **Reuse, do not reinvent:** `point-light-illumination.js#triangulateLightFan(points,
+    ox, oy, radius, outArray)` already fan-triangulates exactly these Foundry polygons
+    every frame. Call it with **`radius = 1`** to get plain local-space offsets (it
+    divides by radius to reach the light shader's unit-circle space, which the mask does
+    not want), and position the mesh at the source origin.
+  - **Build it as a self-contained subsystem** (`createVisionMaskSubsystem({THREE,
+    allocator, …})` with `update()`/`dispose()`), matching water/lightning. That keeps the
+    `vt-pan-viewer.js` touch down to a few lines — worth insisting on, because that file
+    is a ~15k-line god object the author edits concurrently, and hunk-level collisions
+    there are a recorded hazard (`feedback_git_staging_hazard`).
+  - **Verification needs a controlled token** — the bench ships none;
+    `tests/playwright/msa-token-vision-noon.spec.js` already creates and controls one.
 
 **Slice 3 — explored persistence.** A world-space accumulation buffer (≤2048²/floor,
 allocator-whitelisted), persisted through `FogExploration` on a throttle. ⚠️ **Slice 3

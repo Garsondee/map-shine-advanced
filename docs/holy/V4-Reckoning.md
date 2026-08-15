@@ -166,6 +166,16 @@ call), and the whole-frame ratio meets the Testament's own comfort bar (First Fl
 
 ### Phase R0 — Arm the instruments *(no theories allowed until this is done)*
 
+- [x] **R0.1a · The S1a verdict, answered early by the button** · done Claude Fable 5 2026-08-15 —
+      not the planned `perf-run-full` touring capture, but a decisive answer from the author's own
+      Reckoning Report pair (parked, effects off, both floors): the S1a depth-side split is
+      **engaged** (1221 interior / 759 boundary cells, split materials on both the depth proxies
+      and the prepass twins, zero `noMinGrid`) and its two zones collapsed — `geometry.depthDraw`
+      6.87→1.32 ms, `geometry.earlyZPrepass` 6.45→1.82 ms. Bug #20 → `BUILT (verified engaged)`.
+      **The upper-floor gap SURVIVED the fix** and its cause is now F-R0.1.1 (83% of the frame
+      unmeasured). Conditions differ from the baseline (parked/effects-off vs touring/effects-on),
+      so this is a verdict on ENGAGEMENT, not a clean before/after — R0.1 below still owes the
+      matched capture.
 - [ ] **R0.1 · The S1a verdict capture.** `perf-run-full`, bench Mansion, BOTH floors, same
       touring route as the v0.6.1 baseline, idle machine. Archive the JSON + the full
       `MapShine.getMultiFloorReport()` output under `docs/planning/perf-reports/`. Seed the
@@ -212,6 +222,22 @@ call), and the whole-frame ratio meets the Testament's own comfort bar (First Fl
       first live press is the verification, by design. NOTE: the boot/viewer wiring shares
       files with the author's in-flight wind-gustiness work and rides the working tree until
       that lands; the pure module + tests are committed.
+
+- [ ] **R0.8 · NAME THE UNMEASURED 83% (F-R0.1.1) — the campaign's new lead.**
+      Everything else in R1/R2 is now secondary: a 50 ms/frame cost that no zone sees outranks
+      every zone in the table. The candidate list, each with its own cheap discriminator:
+      **(a) resolution/fill** — shrink the Foundry window to ~half width and re-press; if the
+      remainder scales with pixels it is fill/bandwidth, if it barely moves it is not;
+      **(b) Foundry's own PIXI canvas still rendering underneath** — it costs GPU time in NO MSA
+      zone and has more to draw on an upper floor (check the `interface-seam` and
+      `pixi-residency-report` reports on both floors);
+      **(c) VRAM pressure / driver paging** — report v2's `vram` + `wholeImage.perItem` blocks
+      (8 GB card, 18000² world, 5 visible tiles upstairs vs 2);
+      **(d) work between passes no timestamp covers** — texture uploads, mip generation, pipeline
+      compiles (v2's frame-gap percentiles separate "uniformly slow" from "periodic stalls": the
+      18-of-29 hitch count says stalls);
+      **(e) the heartbeat's second WebGPU device** (SL-9).
+      Report v2 gathers the evidence for (b)-(d) automatically; (a) is one window resize.
 
 ### Phase R1 — The seeded strike *(the author's directive: transparency first)*
 
@@ -799,7 +825,12 @@ finding). All S0 for the multiplier; all worth a worker's afternoon.
 
 | F-id | Row | One line | Suspicion | Status | Filed |
 | --- | --- | --- | --- | --- | --- |
-| — | — | *(opens empty; R0.1 seeds it)* | — | — | — |
+| **F-R0.1.1** | R-01/R-38 | **~83% of the upper-floor frame is outside EVERY measured zone** — 61.5 ms/frame, GPU passes sum 10.7 ms, outer CPU 2.9 ms. 18 of 29 frames hitched >50 ms with **no zone open**. | **S4 (measured)** | MEASURED — mechanism UNKNOWN, the campaign's lead | 2026-08-15 Fable, author's live pair |
+| F-R0.1.2 | R-03/R-10 | Bug #20's S1a depth-side fix is ENGAGED and effective: depthDraw 6.87→1.32 ms, earlyZPrepass 6.45→1.82 ms; 1221 interior / 759 boundary cells; zero `noMinGrid`. | S0 (was S3) | EXONERATED as the primary carrier · Bug #20 → `BUILT (verified engaged)` | 2026-08-15 |
+| F-R0.1.3 | R-01/R-38 | **Ground floor is REFRESH-CAPPED at 120 Hz** (8.33 ms/frame, only ~3.0 ms GPU) — its frame time is a ceiling, so every ground-vs-upper ratio to date is a LOWER BOUND. The true gap may be far worse than 6×. | S4 | MEASURED — invalidates the "6×" as a ceiling figure | 2026-08-15 |
+| F-R0.1.4 | R-06/R-07 | **Two items FAIL compression** (`compressedWorker.failed: 2`) and fall back to raw decode: no alphaStats at all ⇒ full-footprint blended+discard in all three geometry passes, forever, on both floors. Cause unknown. | S3 | CONFIRMED present, cause unknown | 2026-08-15 |
+| F-R0.1.5 | R-01 | Fullscreen passes that CANNOT care about floor count still slowed 1.8–4× upstairs (`present.blit` 0.80→1.45, `light.drawIllum` 0.35→1.39, `light.drawComposite` 0.40→1.07, `light.drawRegions` 0.32→0.73 on an empty scene). A systemic slowdown, not per-layer fill. | S4 | MEASURED — strongest structural clue to F-R0.1.1 | 2026-08-15 |
+| F-R0.1.6 | R-38/R-39 | The report's own `floors` section died on both presses (`getActiveSceneFloors` returns a `{ok,floors}` wrapper, not an array) — an instrument defect found by its own first use. | instrumentation | FIXED same day (report v2) | 2026-08-15 |
 
 **Status chain:** SUSPECTED → MEASURED → CONFIRMED → FIX BUILT (unverified) → LIVE · or
 EXONERATED at any point. Only the author's eyes write LIVE.
@@ -824,7 +855,41 @@ showed; R0.1 must archive the FULL `MapShine.getMultiFloorReport()` and extend t
 | `light.drawPointLights` / pool update | ? | ? | unmeasured | candidate SL-6 (anchor widening) → R0.1 |
 | `depth.proxyRebuild` / `residency.pass` (CPU) | ? | ? | unmeasured | candidate SL-5 → R0.6 parked-vs-touring |
 | everything else in the full report | — | — | — | AWAITING R0.1 |
-| **AUTHOR LIVE A/B (2026-08-15): all 15 effects OFF** | ≈120 fps | ≈20 fps | **6×** | MEASURED (author's eyes) — effects exonerated as primary; carrier = geometry triad + un-gated CPU (SL-16..SL-19) |
+| **AUTHOR LIVE A/B (2026-08-15): all 15 effects OFF** | ≈120 fps | ≈20 fps | **6×** | MEASURED (author's eyes) — effects exonerated as primary |
+
+### THE RECKONING PAIR — 2026-08-15, parked camera, all effects off, 3840×1906
+
+*The campaign's first real instrument reading. Both presses in the author's own
+session, same viewpoint, ~30 s apart. This table supersedes the v0.6.1 rows above
+for everything it covers.*
+
+| Measure | Ground (floor 0) | Upper (floor 1) | Ratio |
+| --- | --- | --- | --- |
+| frame time · fps | 8.33 ms · **120 fps (REFRESH-CAPPED)** | 61.5 ms · **16.3 fps** | **7.4×** — and a LOWER BOUND (F-R0.1.3) |
+| **GPU zones, summed** | ~3.0 ms | ~10.7 ms | 3.6× |
+| outer CPU zones, summed | ~2.9 ms | ~2.9 ms | 1.0× |
+| **UNMEASURED REMAINDER** | ~5.3 ms (inside the vsync wait) | **~50.8 ms — 83% of the frame** | **the finding** |
+| frames hitching >50 ms | 0 of 291 | **18 of 29**, zero zones open | — |
+| `geometry.worldDraw` | 0.715 ms | 2.922 ms | 4.1× |
+| `geometry.earlyZPrepass` | 0.062 ms | 1.815 ms | 29× (of a tiny base) |
+| `geometry.depthDraw` | 0.090 ms | 1.322 ms | 14.7× (of a tiny base) |
+| `present.blit` (fullscreen quad) | 0.803 ms | 1.451 ms | **1.8× — cannot depend on floor count** |
+| `light.drawIllum` (fullscreen quad) | 0.348 ms | 1.390 ms | **4.0× — same** |
+| `light.drawComposite` (fullscreen quad) | 0.402 ms | 1.071 ms | **2.7× — same** |
+| `light.drawRegions` (empty scene) | 0.318 ms | 0.728 ms | **2.3× — an EMPTY scene** |
+| visible tiles · draw list | 2 · 6 | 5 · 10 | 2.5× · 1.7× |
+| S1a split cells (interior/boundary) | 0 / 0 (art fully opaque → `interior`) | **1221 / 759 — engaged** | — |
+
+**How to read it.** The geometry triad rose, but from a base so small it cannot
+carry a 50 ms deficit: the three passes together are ~6 ms of a 61.5 ms frame.
+Meanwhile fullscreen quads at a fixed resolution — including one drawing an
+EMPTY scene — got 1.8–4× slower, which no amount of extra map layers explains.
+That signature (everything slower, most of the frame unattributed, hitches with
+no zone open) points AWAY from per-layer fill cost and toward something
+systemic: work between passes that no timestamp covers, driver-level VRAM
+paging, Foundry's own PIXI canvas still rendering underneath, or GPU stalls.
+**Report v2 was built the same day to name it** (attribution block, frame-gap
+percentiles, VRAM inventory, per-item texture table).
 
 **Close rule (G4):** the campaign's perf claim closes only when every ratio >1.5× on the
 canonical pair is EXPLAINED-AND-FIXED or EXPLAINED-AND-ACCEPTED (author's call), and the

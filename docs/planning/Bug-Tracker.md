@@ -50,7 +50,7 @@ building on any of this.
 | 17 | Feature: shared sun-brightness ceiling for `_Window` + a moonlight floor for night | window / lighting / design | `OPEN` — design proposal, no code yet |
 | 18 | Selecting a token shows a frozen, screen-locked second copy of the map inside explored fog | fog-of-war / art suppression | `BUILT (unverified)` — fix live-tested, author hasn't looked yet |
 | 19 | Painted `_Fire` region doesn't register on First Floor even with visible white paint | fire / mask extraction | `OPEN` (root cause) — workaround `BUILT`, live-tested |
-| 20 | First Floor runs at ~half Ground floor's framerate — `geometry.depthDraw`/`geometry.earlyZPrepass` cost ~10x more there | depth authority / early-Z | `BUILT (unverified)` — pixel-diff clean, author hasn't looked yet |
+| 20 | First Floor runs at ~half Ground floor's framerate — `geometry.depthDraw`/`geometry.earlyZPrepass` cost ~10x more there | depth authority / early-Z | `BUILT (verified engaged)` 2026-08-15 — split live on the author's machine, both zones ~4-5× cheaper; upper-floor gap persists from a DIFFERENT cause (Reckoning F-R0.1.1) |
 
 ---
 
@@ -1997,3 +1997,32 @@ author asked to stop the live-test loop and will verify this themselves.
 
 First Floor's frame time approaches Ground floor's for equivalent content,
 and the author's own eyes confirm nothing looks different on either floor.
+
+### ✅ 2026-08-15 — THE FIX IS ENGAGED AND THE TWO ZONES COLLAPSED (measured live)
+
+The author's own Reckoning Report pair (both floors, parked camera, all effects
+disabled — `docs/holy/V4-Reckoning.md` R0.7) finally measured the shipped fix:
+
+| Zone (First Floor) | v0.6.1 baseline | 2026-08-15 | change |
+| --- | --- | --- | --- |
+| `geometry.depthDraw` | 6.866 ms | **1.322 ms** | ~5.2× cheaper |
+| `geometry.earlyZPrepass` | 6.446 ms | **1.815 ms** | ~3.6× cheaper |
+
+Non-vacuity from the same dump — the split is genuinely live, not merely
+present: `splitInteriorCells: 1221`, `splitBoundaryCells: 759`,
+`depthProxySplitMaterials: 2`, `prepassSplitMaterials: 2`,
+`s1aBlockedNoMinGrid: 0`, `earlyZComposition: true`. Ground floor, same press:
+`splitInteriorCells: 0` — correct, its art is fully opaque and takes the
+cheaper whole-item `interior` path instead.
+
+**Honest caveat, not hidden:** the two captures differ in more than the fix
+(baseline = touring route with effects ON; this = parked camera with effects
+OFF), so the ratio above is not a clean A/B. What IS clean: the split is
+engaged on the author's own machine, and these two zones are no longer the
+frame's dominant cost on either floor.
+
+**Status → `BUILT (verified engaged)`.** It does not promote to LIVE until the
+author confirms the look, and it does NOT close the upper-floor performance
+problem: the same pair showed ~83% of the upper-floor frame falling outside
+every measured zone, which is now the campaign's lead (Reckoning F-R0.1.1).
+This bug's mechanism is discharged; the remaining gap is a different animal.

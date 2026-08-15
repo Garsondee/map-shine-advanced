@@ -28,8 +28,14 @@
  * @module diag/reckoning-report
  */
 
-/** Bumped when the report's shape changes, so a pasted dump names its own era. */
-export const RECKONING_REPORT_VERSION = 1;
+/**
+ * Bumped when the report's shape changes, so a pasted dump names its own era.
+ * v2 (2026-08-15, same day): added `attribution` — the first live pair showed
+ * the zones explaining only ~17% of the upper-floor frame, which no field in v1
+ * could say — plus `vram`, `wholeImage`, frame-gap percentiles, and the fixed
+ * `floors` section (v1 called `.find` on the wrapper object, not its array).
+ */
+export const RECKONING_REPORT_VERSION = 2;
 
 /** Round to 4 decimal places — zone ms at 120fps needs the tail digits. */
 function r4(x) {
@@ -72,6 +78,99 @@ export function summarizeZoneRows(zoneStats, frames) {
   return rows;
 }
 
+/** Percentile of an unsorted numeric array. null on empty — never lies as 0. */
+export function percentileOf(samples, p) {
+  if (!Array.isArray(samples) || samples.length === 0) return null;
+  const s = samples.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (s.length === 0) return null;
+  const i = Math.min(s.length - 1, Math.max(0, Math.round(p * (s.length - 1))));
+  return r4(s[i]);
+}
+
+/** Zone-id prefixes that are OUTER brackets — they never nest inside another zone. */
+const OUTER_CPU_PREFIXES = ['pass.', 'tick.', 'sims.', 'residency.', 'depth.'];
+
+/**
+ * THE ATTRIBUTION MATH — the question that matters most and that the first
+ * version of this report could not ask: **how much of the frame do the
+ * instruments actually explain?**
+ *
+ * The 2026-08-15 live pair answered it brutally: on the upper floor the measured
+ * GPU passes summed to ~11 ms of a ~61 ms frame. A cost with no zone is a cost
+ * nobody can fix, and every ranked-zone table silently presents itself as if it
+ * covered the frame. This makes the unexplained remainder a first-class number.
+ *
+ * Also flags the **refresh cap**: a floor sitting exactly on 8.33/16.67 ms with
+ * a small GPU sum is vsync-limited, so its frame time is a CEILING on its real
+ * speed — every ratio measured against it is a LOWER BOUND, not the true cost.
+ *
+ * @param {{frames?: number, durationMs?: number, rows?: Array<object>, gapSamples?: number[]|null}} zones
+ * @returns {object|null}
+ */
+export function summarizeAttribution(zones) {
+  if (!zones || !(zones.frames > 0) || !(zones.durationMs > 0)) return null;
+  const rows = Array.isArray(zones.rows) ? zones.rows : [];
+  const frameMsAvg = zones.durationMs / zones.frames;
+
+  let gpuSum = 0;
+  let cpuOuterSum = 0;
+  const gpuBlindZones = [];
+  for (const r of rows) {
+    if (Number.isFinite(r.gpuMsPerFrame)) gpuSum += r.gpuMsPerFrame;
+    if (OUTER_CPU_PREFIXES.some((p) => r.id.startsWith(p)) && Number.isFinite(r.cpuMsPerFrame)) {
+      cpuOuterSum += r.cpuMsPerFrame;
+    }
+    // A zone that ISSUES GPU WORK but reports no GPU number means its timestamp
+    // never resolved — the ranked table under-reports it rather than saying so.
+    // Matched by what the zone DOES (draw/blit/prepass), not by its prefix: a
+    // `*Sync` zone legitimately has no GPU time and must not be flagged.
+    // (First cut tested `id.includes('raw') === false` to exclude a case that
+    // does not exist — and silently excluded every zone with "draw" in its name,
+    // which is all of them. Caught by the test pinned to the real dump.)
+    if (/draw|blit|prepass/i.test(r.id)) {
+      if (!Number.isFinite(r.gpuMsPerFrame) && Number.isFinite(r.cpuMsPerFrame) && r.cpuMsPerFrame > 0) {
+        gpuBlindZones.push(r.id);
+      }
+    }
+  }
+  gpuSum = r4(gpuSum);
+  cpuOuterSum = r4(cpuOuterSum);
+  // The frame is (roughly) max(CPU, GPU) plus whatever neither bracket saw.
+  const explained = Math.max(gpuSum, cpuOuterSum);
+  const unaccountedMs = r4(Math.max(0, frameMsAvg - explained));
+
+  const fps = r4(1000 / frameMsAvg);
+  // Refresh-cap detection: within 4% of a common panel rate AND the GPU sum is
+  // well under the frame budget ⇒ we are waiting on the display, not the work.
+  const capCandidate = [60, 90, 120, 144, 165, 240].find((hz) => Math.abs(fps - hz) / hz < 0.04);
+  const refreshCapped = !!capCandidate && gpuSum < frameMsAvg * 0.6;
+
+  return {
+    frames: zones.frames,
+    frameMsAvg: r4(frameMsAvg),
+    fps,
+    gpuZoneSumMsPerFrame: gpuSum,
+    cpuOuterZoneSumMsPerFrame: cpuOuterSum,
+    unaccountedMsPerFrame: unaccountedMs,
+    unaccountedPct: r4((unaccountedMs / frameMsAvg) * 100),
+    explainedPct: r4((explained / frameMsAvg) * 100),
+    refreshCapped,
+    refreshCapHz: refreshCapped ? capCandidate : null,
+    gpuBlindZones,
+    frameGapMs: Array.isArray(zones.gapSamples)
+      ? {
+          p50: percentileOf(zones.gapSamples, 0.5),
+          p95: percentileOf(zones.gapSamples, 0.95),
+          max: percentileOf(zones.gapSamples, 1),
+          count: zones.gapSamples.length,
+        }
+      : null,
+    note:
+      'gpuZoneSum is the sum of per-pass GPU timestamps (nested brackets may overlap slightly). ' +
+      'unaccounted = frame time minus the larger of the CPU-outer and GPU sums: work no zone measured.',
+  };
+}
+
 /**
  * The report's brain: turn the gathered sections into ranked human verdicts.
  * Every rule is null-tolerant — a missing section yields at most an ℹ️ note,
@@ -86,12 +185,47 @@ export function summarizeZoneRows(zoneStats, frames) {
  * @returns {string[]}
  */
 export function computeReckoningVerdicts(sections = {}) {
-  const { census = null, earlyZ = null, zones = null, suspects = null, errors = [] } = sections;
+  const { census = null, earlyZ = null, zones = null, suspects = null, attribution = null, errors = [] } = sections;
   const out = [];
   const floorIndex = census?.view?.floorIndex ?? sections.floors?.viewed ?? null;
 
   if (!census && !earlyZ) {
     out.push('🔴 Viewer sections missing entirely — is the MSA viewer running on this scene?');
+  }
+
+  // ATTRIBUTION FIRST — a ranked zone table that explains 17% of the frame will
+  // still look authoritative, and did (2026-08-15). Say the remainder out loud
+  // before any zone gets blamed for anything.
+  if (attribution) {
+    if (attribution.unaccountedPct >= 40) {
+      out.push(
+        `🔴 ${attribution.unaccountedPct}% OF THE FRAME IS UNMEASURED — ${attribution.unaccountedMsPerFrame} ms of ` +
+          `${attribution.frameMsAvg} ms sits outside every zone (GPU passes sum to ` +
+          `${attribution.gpuZoneSumMsPerFrame} ms, outer CPU to ${attribution.cpuOuterZoneSumMsPerFrame} ms). ` +
+          'Do NOT blame any zone in the table below until this remainder is named: candidates are work between ' +
+          'passes (texture uploads, mip generation, pipeline compiles), driver-level VRAM paging, Foundry/PIXI ' +
+          'still rendering underneath, or GPU stalls no pass timestamp covers.'
+      );
+    } else if (attribution.unaccountedPct >= 20) {
+      out.push(
+        `🟠 ${attribution.unaccountedPct}% of the frame (${attribution.unaccountedMsPerFrame} ms) is outside every ` +
+          'measured zone — the ranked table below is incomplete by that much.'
+      );
+    }
+    if (attribution.refreshCapped) {
+      out.push(
+        `🟠 This floor is REFRESH-CAPPED at ~${attribution.refreshCapHz} Hz (${attribution.frameMsAvg} ms/frame with ` +
+          `only ${attribution.gpuZoneSumMsPerFrame} ms of GPU work) — its frame time is a CEILING, not its cost. ` +
+          'Every ground-vs-upper ratio measured against it is a LOWER BOUND on the real gap.'
+      );
+    }
+    if (attribution.gpuBlindZones.length > 0) {
+      out.push(
+        `🟠 ${attribution.gpuBlindZones.length} draw zone(s) reported CPU time but NO GPU timestamp ` +
+          `(${attribution.gpuBlindZones.slice(0, 6).join(', ')}${attribution.gpuBlindZones.length > 6 ? ', …' : ''}) — ` +
+          'their GPU cost is missing from the table, not zero.'
+      );
+    }
   }
 
   if (earlyZ && earlyZ.earlyZComposition === false) {
@@ -228,21 +362,40 @@ export function computeReckoningVerdicts(sections = {}) {
  * @returns {object}
  */
 export function assembleReckoningReport({ generatedAt, sections = {} } = {}) {
-  const { identity, floors, census, earlyZ, effects, suspects, zones, multiFloorRanked, errors = [] } = sections;
+  const { identity, floors, census, earlyZ, effects, suspects, zones, vram, wholeImage, multiFloorRanked } = sections;
+  const errors = sections.errors ?? [];
+  // Derived here, not by the caller: the attribution math must exist for every
+  // dump that has a profiler window, and a caller that forgets it would silently
+  // ship the exact blind spot this field was added to close.
+  const attribution = summarizeAttribution(zones);
   return {
     report: 'reckoning-report',
     version: RECKONING_REPORT_VERSION,
     generatedAt: generatedAt ?? null,
     readMe:
-      'THE RECKONING REPORT (temporary — docs/holy/V4-Reckoning.md). Verdicts first, raw sections after. ' +
+      'THE RECKONING REPORT (temporary — docs/holy/V4-Reckoning.md). Verdicts first, then attribution ' +
+      '(how much of the frame the zones actually explain), then raw sections. ' +
       'Press on BOTH floors from the same camera position and paste both dumps.',
-    verdicts: computeReckoningVerdicts({ identity, floors, census, earlyZ, effects, suspects, zones, errors }),
+    verdicts: computeReckoningVerdicts({
+      identity,
+      floors,
+      census,
+      earlyZ,
+      effects,
+      suspects,
+      zones,
+      attribution,
+      errors,
+    }),
+    attribution,
     identity: identity ?? null,
     floors: floors ?? null,
     census: census ?? null,
     earlyZ: earlyZ ?? null,
     effects: effects ?? null,
     suspects: suspects ?? null,
+    vram: vram ?? null,
+    wholeImage: wholeImage ?? null,
     zones: zones ?? null,
     multiFloorRanked: multiFloorRanked ?? null,
     errors,

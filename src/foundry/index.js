@@ -228,6 +228,12 @@ export {
 // settings.js derives; knows nothing about effects itself.
 export { registerSettings, readSetting, writeSetting } from './settings-adapter.js';
 
+// THE TOKEN-VISION DIAGNOSTIC — answers "why can this token only see a point
+// light?" by naming WHICH gate is failing (empty light mask vs inactive
+// global illumination), because on screen those two are pixel-identical.
+// Pure read; see the module header for the full mechanism.
+export { readTokenVisionDiagnostic } from './vision-diagnostics.js';
+
 // V2 → V3 ANCHOR IMPORT — reads a scene's legacy `mapPointGroups` flags and
 // produces V3 anchor candidates (the Map Points successor). Boot hands them to
 // scene/anchor-authority.js. A leaf: it knows no anchor kinds — boot injects the

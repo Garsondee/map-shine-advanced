@@ -58,6 +58,14 @@ test.setTimeout(300000);
 async function readVisionState(page) {
   return page.evaluate(async () => {
     const out = {};
+    // THE NEW `token-vision` REPORT — validated here so it can never ship as a
+    // diagnostic that throws or reports nonsense on a real scene.
+    try {
+      const raw = await window.MapShine?.debug?.runReport?.('token-vision');
+      out.tokenVisionReport = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      out.tokenVisionReport = { error: String(e) };
+    }
     try {
       const canvas = window.canvas;
       const env = canvas?.environment;
@@ -280,6 +288,15 @@ test('what does a controlled token OUTSIDE at noon actually reveal?', async () =
     console.log(
       `[vision] AS AUTHORED: globalActive=${state.globalLight?.active} window=${JSON.stringify(state.globalLight?.darknessWindow)} ` +
         `visible=${state.visibilityGrid?.visibleCount}/${state.visibilityGrid?.total}`
+    );
+    console.log('[vision] token-vision REPORT verdict: ' + JSON.stringify(state.tokenVisionReport?.verdict, null, 2));
+    console.log(
+      '[vision] token-vision REPORT visionSources: ' + JSON.stringify(state.tokenVisionReport?.visionSources) +
+        ' | controlled: ' + JSON.stringify(state.tokenVisionReport?.controlledTokens?.map((t) => ({
+          detectionModesIsArray: t.detectionModesIsArray,
+          lightPerceptionPresent: t.lightPerceptionPresent,
+          lightPerceptionRange: t.lightPerceptionRange,
+        })))
     );
 
     await page.screenshot({ path: path.join(OUT_DIR, 'token-vision-noon.png') });

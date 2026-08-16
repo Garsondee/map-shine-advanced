@@ -1114,6 +1114,31 @@ storm flash) as authored content.
         ⚠️ `npm run verify` red at structure (`no-gpu-readback`, `time/one-clock` 41 vs 38) —
         PROVEN pre-existing by stashing only `src/world/` and reproducing both identically.
         Task stays OPEN: 6 slices remain. Task list unchanged (worker role).
+      · ease retune Claude Opus 5 2026-08-16 (`168e7d4`) — author-called after slice 1 measured
+        its own shipped pacing: a cover change took ~6 min to look done and ~18 to settle. Root
+        cause was a UNITS disagreement, not taste — the table held exponential time constants
+        while its numbers read as durations. Fields are now `durationUpSec`/`durationDownSec`
+        ("time to look done", 95%), with `tau = duration / SETTLE_TAUS` derived in one place.
+        Cover 45s in / 60s out; shape axes 90s; epsilons perceptual (1/500 = half an 8-bit
+        step). MEASURED after: 44.9s to look done / 93.2s to settle, the "looks done" column
+        agreeing with the declared duration to a tenth of a second. Five drift guards added.
+        Weather-Manager.md §4.1 rewritten with the numbers and why the original was wrong.
+      · slice 2/7 Claude Opus 5 2026-08-16 (`168bdcb` core, `c13117b` UI) — `world/weather-data.js`:
+        13 named skies as a frozen closed list, each a point in axis space, shape levers chosen
+        so cirrus/cumulus/stratus are genuinely distinguishable. ⭐ THE LABEL IS DERIVED, never
+        stored — `matchArchetype` recomputes from targets on every edit and `setPreset` was
+        DELETED, so a scene cannot sit at cover 0.2 still calling itself `overcast`; the bad
+        state is unrepresentable rather than discouraged. Fails OPEN to `clear` with a reason,
+        so a typo cannot storm-lock a map. `astrolabe.js` gains the FACE (inner disc painted as
+        the current sky; blob shape carries the type ramp) and the HORIZON (13 one-click skies
+        in severity order, uniform grid). Both painters dirty-checked against this file's own
+        709ms/35.6s innerHTML regression. Absent-vs-custom distinguished in the shelf.
+        510 assertions in `src/world` (9,691 repo-wide, 0 failed); the row-distinguishability
+        guard SABOTAGE-TESTED (making `mackerel` identical to `fair-cumulus` failed, naming the
+        collision). VERIFIED BY LOOKING: five dials rendered in a throwaway DOM harness, all
+        five skies visually distinct, clicks confirmed firing the right ids; harness deleted.
+        ⚠️ `onArchetypeChange` is NOT wired to the engine — that needs `boot.js`, which carries
+        other uncommitted work. The shelf renders and reports; it changes nothing yet.
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

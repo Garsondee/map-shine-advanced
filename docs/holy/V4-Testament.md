@@ -1347,6 +1347,42 @@ storm flash) as authored content.
         request. And the BUFFER is hardware-verified while the OVERLAY DRAW is
         not: the meshes join the world scene inside the geometry MRT scope,
         which the precipitation bench cannot reproduce.
+      · P4 THE IMPRESSION CURTAIN — `BUILT (unverified)` 2026-08-16. Rain reads at
+        every zoom: a translucent analytic veil (zero textures, zero RTs) carries
+        the picture when drops go sub-pixel, and the specimen tier SLEEPS as a
+        JS `if` below the species' own `zoomSleepPxPerBody` — which kills
+        zoom-out mush BY DESIGN, because what you see at distance was never made
+        of dots. `effects/precipitation/squall-field.js` + `curtain-render.js`.
+        ⭐ ONE FIELD, THREE CONSUMERS — the veil's alpha, the falling bodies'
+        visibility and the splash rate all read the SAME banded expression, which
+        also closes the `squallField` factor P2 deliberately left missing rather
+        than faking. Its travelling half IS the wind door's own
+        `computeGustEnvelope`, so squalls are the same events the vegetation
+        bends to, at a larger wavelength.
+        ⚠️ AND THE TWO ZONES DISAGREE ABOUT THE COMPASS BY 90° — wind-field's
+        flow is −(cos,sin) and precipitation's drive is (−sin,cos), each correct
+        for its own consumers because each was calibrated separately. The curtain
+        reconciles them with a DERIVED, Node-pinned rotation (plus a negative
+        control so nobody deletes it as a no-op); the underlying debt stays filed
+        against `wind-field.js`, because fixing it there retunes shipped looks.
+        ⚠️ THREE BENCH FINDINGS, ALL STRUCTURAL. The cell was 5× too coarse (a
+        wavelength wider than most maps, so a "banded" field measured as a smooth
+        5% gradient); it MULTIPLIED a zero-mean noise instead of modulating, so a
+        downpour averaged half strength everywhere and reached full nowhere; and
+        I measured ALONG the bands and concluded "flat", because the cell is
+        stretched in the travel direction. The scenario now walks rows
+        perpendicular to the bands and counts REVERSALS as well as spread — a
+        spread alone cannot tell a band from a gradient, and would have passed
+        the too-coarse ramp.
+        ⚠️ TWO OF MY OWN OLDER SCENARIOS BROKE, CORRECTLY: they said "this layer
+        only" while switching off two of three layers, so once a third tier
+        existed they measured a full-frame veil. A layer isolator that names two
+        of three layers is not an isolator.
+        ⚠️ NOT WIRED: the `sky-flash` boost. The frame resolver computes it and
+        the rows carry V2's ×6/×4; the render state passes a literal `flash01: 0`
+        with a comment saying so. The missing piece is the seam from slice 4's
+        sky-flash EVENT envelope, which lands with that consumer.
+        41 bench checks green across 9 scenarios; 10,435 assertions.
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

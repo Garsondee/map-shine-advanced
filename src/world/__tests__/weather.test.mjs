@@ -282,21 +282,21 @@ export function run(t) {
     t.ok('ownerVersion mirrors it', mgr.toSnapshotWeather().ownerVersion === mgr.read().version);
   }
 
-  // ---- LAW 1 / slice-1 scope: almanac is refused, loudly -------------------------
+  // ---- LAW 1: both modes are real (the walk landed in slice 3) -------------------
   {
     const mgr = createWeatherManager();
     t.ok(
       'both modes are named in the closed list',
       WEATHER_MODES.includes('director') && WEATHER_MODES.includes('almanac')
     );
-    t.ok('setMode(almanac) is REFUSED while the walk is unbuilt', mgr.setMode('almanac') === false);
-    t.ok('...and the mode genuinely did not change', mgr.read().mode === 'director');
+    t.ok('setMode(almanac) is now ACCEPTED — the walk is built', mgr.setMode('almanac') === true);
+    t.ok('...and the mode genuinely changed', mgr.read().mode === 'almanac');
     t.ok('setMode(director) is accepted', mgr.setMode('director') === true);
     t.ok(
       'an unknown mode falls back to director rather than inventing a third',
       createWeatherManager({ mode: 'chaos' }).read().mode === 'director'
     );
-    t.ok('the status report says the walk is not built', mgr.getStatus().almanacBuilt === false);
+    t.ok('the status report says the walk IS built', mgr.getStatus().almanacBuilt === true);
   }
 
   // ---- freezing: nobody scribbles on the manager's state -------------------------

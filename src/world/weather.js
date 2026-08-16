@@ -40,13 +40,44 @@
  * the same discipline that keeps the cloud design's zoom regimes a ladder rung
  * instead of a fork.
  *
- * ⚠️ SLICE 1 SHIPS DIRECTOR ONLY. `setMode('almanac')` is REJECTED (returns
- * false) rather than silently accepted, because a mode that is stored but does
- * nothing is `feedback_seam_default_hides_unwired` wearing a mode's clothes: the
- * UI would read back "almanac" and the sky would sit perfectly still. A loud
- * refusal is the honest state until the walk lands. This mirrors
- * `world/day-clock.js#setHour`, which refuses in `synced` mode for the same
- * reason.
+ * ⚠️ SLICES 1-2 SHIPPED DIRECTOR ONLY. `setMode('almanac')` was REJECTED
+ * (returned false) through slice 2, because a mode that is stored but does
+ * nothing is `feedback_seam_default_hides_unwired` wearing a mode's clothes.
+ * Slice 3 (below) is what makes the refusal no longer necessary — `almanac` is
+ * now a real, ticking walk, not a label. The refusal shape survives as the
+ * pattern for the NEXT half-built mode this project ever adds: `setMode` for
+ * an unbuilt option should say so loudly, exactly as `day-clock.js#setHour`
+ * does for `synced`, rather than accept a value that does nothing.
+ *
+ * ============================================================================
+ * SLICE 3 — THE ALMANAC: a semi-Markov walk over the archetype table
+ * (Weather-Manager.md §5.2-§5.4)
+ * ============================================================================
+ *
+ * A biome (`world/weather-biomes.js`) is a GRAPH over the 13 archetypes
+ * (`world/weather-data.js`): edges, each with a weight and an optional
+ * time-of-day curve. On entering a node the walk draws a DWELL (a triangular
+ * sample from that archetype's `{min, mean, max}` game-hours) from a seeded,
+ * snapshot/restore-able generator (`world/weather-rng.js`); when the dwell
+ * expires it re-rolls among the outgoing edges, weighted by `weight ×
+ * todCurve(hour)`, and applies the winner's axes through the SAME
+ * `setTargets`/ease pipeline director mode always used (LAW 1, unbroken).
+ *
+ * ⚠️ PINS are the one place Almanac and Director diverge in BEHAVIOUR, never
+ * in MECHANISM: dragging an axis slider in Almanac mode marks that axis
+ * pinned, and the walk's own automatic transitions then skip it — the GM's
+ * hand-tuned value survives until explicitly released. A GM's shelf click is
+ * the opposite gesture (a full, deliberate override): it clears every pin and
+ * tells the walk to adopt the clicked archetype as its new current node
+ * immediately, redrawing a fresh dwell — "the Almanac takes requests."
+ *
+ * ⚠️ THE FORECAST IS A CLONE, NEVER A PEEK AT LIVE STATE. `forecast()` snapshots
+ * the live RNG (`fromState(rng.getState())`) and replays the identical walk
+ * logic on the CLONE — the live generator, current node and dwell are never
+ * touched. That is what makes "running the walk ahead without applying it"
+ * free rather than a second, parallel implementation that could disagree with
+ * the real one. One function, `advanceWalk` below, drives both the live tick
+ * and every forecast call.
  *
  * ============================================================================
  * ⚠️ THE CLOCK RULING — EASES RUN ON REAL TIME (Weather-Manager.md §4.1)
@@ -117,6 +148,9 @@
  */
 
 import { resolveArchetype, matchArchetype } from './weather-data.js';
+import { resolveBiome, evalTodCurve } from './weather-biomes.js';
+import { createRng, fromState, triangular, weightedPick } from './weather-rng.js';
+import { normalizeHour } from './sun.js';
 
 /**
  * The two authority modes. A CLOSED LIST — an unknown mode string falls back to
@@ -258,10 +292,22 @@ export const WEATHER_AXIS_NAMES = Object.freeze(Object.keys(WEATHER_AXES));
 export const DEFAULT_PRESET = 'clear';
 
 /**
+ * Fallback dwell used only if a biome row and the shared defaults both somehow
+ * miss an archetype (cannot happen through the validated table in
+ * `weather-biomes.js`, but a manager must not throw over a malformed biome
+ * some future caller hands it directly).
+ */
+const FALLBACK_DWELL_HOURS = Object.freeze({ min: 1, mean: 3, max: 8 });
+
+/** Volatility multiplier bounds — a quarter-speed to 4x-speed dwell scale. */
+const VOLATILITY_MIN = 0.25;
+const VOLATILITY_MAX = 4;
+
+/**
  * Create the weather manager.
  *
  * @param {object} [options]
- * @param {string} [options.mode] - 'director' (only mode built in slice 1).
+ * @param {string} [options.mode] - 'director' | 'almanac'.
  * @param {string} [options.transitionSpeed] - key of {@link TRANSITION_SPEEDS}.
  * @param {object} [options.initial] - starting axis values; each falls back
  *   INDEPENDENTLY to its own default, so one bad stored field cannot discard a
@@ -270,13 +316,26 @@ export const DEFAULT_PRESET = 'clear';
  *   ⚠️ There is no `preset` option, deliberately: the label is derived from
  *   these axes, so restoring a persisted sky restores its NAME for free and
  *   there is no second stored field that could contradict the first.
+ * @param {number|string} [options.seed] - the Almanac's RNG seed. Fixed by
+ *   default so two managers created identically draw the identical walk —
+ *   deterministic unless a caller supplies its own `hashSeed(sceneId, epoch)`
+ *   (`world/weather-rng.js`) for genuine per-scene variety.
+ * @param {string} [options.biome] - starting biome id, if any.
+ * @param {number} [options.volatility] - starting dwell-time multiplier.
  * @returns {object} the manager.
  */
-export function createWeatherManager({ mode = 'director', transitionSpeed = 'brisk', initial = null } = {}) {
+export function createWeatherManager({
+  mode = 'director',
+  transitionSpeed = 'brisk',
+  initial = null,
+  seed = 'msa-weather-default-seed',
+  biome = null,
+  volatility = 1,
+} = {}) {
   let currentMode = normalizeMode(mode);
   let speedName = normalizeSpeed(transitionSpeed);
 
-  /** Where each axis is HEADED (the GM's hand, or slice 3's walk). */
+  /** Where each axis is HEADED (the GM's hand, or the Almanac's walk). */
   const targets = {};
   /** Where each axis actually IS this frame — what consumers read. */
   const state = {};
@@ -289,6 +348,29 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
 
   /** The archetype these axes sit on, derived — see the `setPreset` note. */
   let currentPreset = matchArchetype(targets);
+
+  // ── THE ALMANAC'S OWN STATE ──────────────────────────────────────────────
+  /** Which axes the GM's own hand is currently protecting from the walk. */
+  const pinnedAxes = new Set();
+  /** The active climate, or `null` — Almanac mode with no biome chosen is a
+   * legitimate idle state (the walk simply never advances), not an error. */
+  let activeBiome = null;
+  let almanacVolatility = clampVolatility(volatility);
+  let almanacSeed = seed;
+  let almanacRng = createRng(seed);
+  /** The graph node the walk currently considers itself standing on — may
+   * differ from `currentPreset` the moment a pin holds one axis away from
+   * that node's own row; `currentPreset` is honest about the pixel, this is
+   * honest about where the WALK thinks it is for transition purposes. */
+  let almanacCurrentNodeId = null;
+  /** Game-hours until the walk reconsiders. `null` before the first node is
+   * ever chosen. */
+  let almanacDwellRemainingHours = null;
+
+  if (biome) {
+    const res = resolveBiome(biome);
+    activeBiome = res.biome;
+  }
 
   /**
    * Bumped on CONFIGURATION changes (a target moved, the mode or speed changed,
@@ -313,6 +395,59 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
   }
 
   /**
+   * The ONE place a raw value becomes a real target: axis range/fallback
+   * first (`clampAxis`), then the active biome's `clamps` on top if Almanac
+   * mode has one bound for this axis. "Clamps bound everything"
+   * (Weather-Manager.md §5.2) means every write path funnels through here —
+   * the walk's own picks, a GM's shelf click, and a GM's own slider drag
+   * while a gloom-locked biome like `shadowfell-verge` is active.
+   * @param {string} name @param {*} raw @returns {number}
+   */
+  function resolveTargetValue(name, raw) {
+    let v = clampAxis(name, raw);
+    const clamp = currentMode === 'almanac' ? activeBiome?.clamps?.[name] : null;
+    if (clamp) {
+      const spec = WEATHER_AXES[name];
+      const lo = Number.isFinite(clamp.min) ? clamp.min : spec.min;
+      const hi = Number.isFinite(clamp.max) ? clamp.max : spec.max;
+      v = Math.min(hi, Math.max(lo, v));
+    }
+    return v;
+  }
+
+  /**
+   * Draw one dwell, in game-hours, for `nodeId` under the active biome (or
+   * the shared defaults, or the last-resort fallback — see
+   * {@link FALLBACK_DWELL_HOURS}'s own note on why a manager must not throw
+   * over a malformed biome).
+   * @param {{next: () => number}} rng @param {string} nodeId @returns {number}
+   */
+  function sampleDwell(rng, nodeId) {
+    const d = activeBiome?.dwellHours?.[nodeId] ?? FALLBACK_DWELL_HOURS;
+    const hours = triangular(rng, d.min, d.mean, d.max);
+    // Floored well above zero: volatility scales dwell, and a caller passing
+    // an extreme value must not be able to produce a zero/negative dwell that
+    // would spin the transition loop.
+    return Math.max(0.05, hours * almanacVolatility);
+  }
+
+  /**
+   * Apply one archetype's axes to `targets`, optionally skipping pinned ones.
+   * The single place BOTH the walk's automatic picks and a GM's shelf click
+   * write axis values, so `resolveTargetValue`'s clamp logic runs exactly once
+   * per write regardless of which caller triggered it.
+   * @param {string} nodeId @param {boolean} skipPinned
+   */
+  function applyNodeAxes(nodeId, skipPinned) {
+    const res = resolveArchetype(nodeId);
+    for (const [key, raw] of Object.entries(res.archetype.axes)) {
+      if (!Object.hasOwn(WEATHER_AXES, key)) continue;
+      if (skipPinned && pinnedAxes.has(key)) continue;
+      targets[key] = resolveTargetValue(key, raw);
+    }
+  }
+
+  /**
    * ⚠️ A CLOSURE, NOT A `this` METHOD — and `tick`/`jumpTo` below call THIS
    * rather than `this.read()`. `world/day-clock.js` is destructured at its call
    * site in `vt-pan-viewer.js`, and a `this.`-dependent method that survives
@@ -329,7 +464,78 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
       targets: Object.freeze({ ...targets }),
       settling: isSettling(),
       version,
+      // Which axes the GM's own hand is protecting from the walk — the
+      // astrolabe's pin icons read this directly.
+      pinnedAxes: Object.freeze([...pinnedAxes]),
     });
+  }
+
+  /**
+   * Advance the Almanac's walk by `dtGameHours`, starting the graph search at
+   * `hour` (for time-of-day-biased transitions) — internal, called from
+   * {@link tick} on the LIVE rng/node/dwell, and from {@link forecast} on a
+   * CLONE of them. One function drives both, so the live sky and its own
+   * forecast can never silently disagree about what the walk would do.
+   *
+   * Loops rather than applying a single step, because a large `dtGameHours`
+   * (a GM fast-forwarding the clock, or a forecast projecting hours ahead)
+   * can cross more than one dwell boundary in a single call. Capped at
+   * `maxSteps` as a defensive bound, not a realistic one — reaching it would
+   * mean dwells averaging under a few minutes over the whole horizon.
+   *
+   * @param {object} args
+   * @param {{next: () => number}} args.rng
+   * @param {string|null} args.currentNodeId
+   * @param {number} args.dwellRemainingHours
+   * @param {number} args.startHour
+   * @param {number} args.dtGameHours
+   * @param {number} [args.maxSteps]
+   * @returns {{currentNodeId: string|null, dwellRemainingHours: number, transitions: Array<{archetypeId: string, atGameHoursFromNow: number}>}}
+   */
+  function advanceWalk({ rng, currentNodeId, dwellRemainingHours, startHour, dtGameHours, maxSteps = 50 }) {
+    const transitions = [];
+    let nodeId = currentNodeId;
+    let dwell = dwellRemainingHours;
+
+    if (!activeBiome) return { currentNodeId: null, dwellRemainingHours: 0, transitions };
+
+    if (nodeId == null) {
+      nodeId = weightedPick(rng, Object.keys(activeBiome.archetypeWeights), (id) => activeBiome.archetypeWeights[id]);
+      if (nodeId == null) return { currentNodeId: null, dwellRemainingHours: 0, transitions };
+      dwell = sampleDwell(rng, nodeId);
+      transitions.push({ archetypeId: nodeId, atGameHoursFromNow: 0 });
+    }
+
+    let remaining = Math.max(0, dtGameHours);
+    let hoursElapsed = 0;
+    let steps = 0;
+    while (remaining > 0 && steps < maxSteps) {
+      if (dwell > remaining) {
+        dwell -= remaining;
+        remaining = 0;
+        break;
+      }
+      remaining -= dwell;
+      hoursElapsed += dwell;
+      const hourAtTransition = normalizeHour(startHour + hoursElapsed);
+      const edges = activeBiome.transitions.filter((e) => e.from === nodeId);
+      const next = weightedPick(rng, edges, (e) => e.weight * evalTodCurve(e.todCurve, hourAtTransition));
+      if (next == null) {
+        // No live edge right now — should not happen on a validated,
+        // strongly-connected graph, but fail open by holding on the same
+        // node and redrawing rather than spinning or throwing.
+        dwell = sampleDwell(rng, nodeId);
+        steps++;
+        continue;
+      }
+      nodeId = next.to;
+      dwell = sampleDwell(rng, nodeId);
+      transitions.push({ archetypeId: nodeId, atGameHoursFromNow: hoursElapsed });
+      steps++;
+    }
+    dwell -= remaining;
+
+    return { currentNodeId: nodeId, dwellRemainingHours: dwell, transitions };
   }
 
   return {
@@ -339,11 +545,50 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
      * @param {number} dtRealSec - the WALL delta (`env.time.realDtSec`). See
      *   this module's header for why it is not the sim delta, and why that is
      *   not the sim-clock throttle trap.
+     * @param {object} [almanacInputs] - present only for a caller that wants
+     *   the Almanac to actually walk. Absent entirely, the walk simply never
+     *   advances (safe for every Director-only call site, and LAW 5's spirit:
+     *   no wiring, no surprise motion) — it is not almanac mode alone that
+     *   drives the walk, it is almanac mode PLUS these inputs.
+     * @param {number} [almanacInputs.dtGameHours] - GAME time elapsed this
+     *   tick (the walk's own clock — see this module's header for why it is
+     *   deliberately not `dtRealSec`). Negative/backward time is taken as its
+     *   magnitude: the walk still counts down, it does not count UP.
+     * @param {number} [almanacInputs.hour] - the current hour of day, 0..24,
+     *   for time-of-day-biased transitions.
      * @returns {Readonly<object>} the same value as {@link read}.
      */
-    tick(dtRealSec) {
+    tick(dtRealSec, almanacInputs) {
       const dt = Number.isFinite(dtRealSec) && dtRealSec > 0 ? dtRealSec : 0;
       const scale = TRANSITION_SPEEDS[speedName];
+
+      // ⭐ THE WALK — game time, strictly separate from the real-time ease
+      // below. Only runs with a real biome active; an Almanac mode with no
+      // biome chosen is an intentional idle state, not a bug to work around.
+      if (currentMode === 'almanac' && activeBiome) {
+        const dtGameHours = Number.isFinite(almanacInputs?.dtGameHours) ? Math.abs(almanacInputs.dtGameHours) : 0;
+        if (dtGameHours > 0) {
+          const hour = Number.isFinite(almanacInputs?.hour) ? normalizeHour(almanacInputs.hour) : 12;
+          const result = advanceWalk({
+            rng: almanacRng,
+            currentNodeId: almanacCurrentNodeId,
+            dwellRemainingHours: almanacDwellRemainingHours ?? 0,
+            startHour: hour,
+            dtGameHours,
+          });
+          almanacCurrentNodeId = result.currentNodeId;
+          almanacDwellRemainingHours = result.dwellRemainingHours;
+          if (result.transitions.length > 0) {
+            // Only the FINAL node in a multi-step jump needs to render — the
+            // intermediate ones are real (a forecast projecting the same
+            // horizon would show them), they just never became the live sky.
+            const finalId = result.transitions[result.transitions.length - 1].archetypeId;
+            applyNodeAxes(finalId, true);
+            currentPreset = matchArchetype(targets);
+            version++;
+          }
+        }
+      }
 
       for (const name of WEATHER_AXIS_NAMES) {
         const target = targets[name];
@@ -364,6 +609,13 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
      * that vanishes quietly is how a control ends up wired to nothing while
      * every test stays green (`feedback_seam_default_hides_unwired`).
      *
+     * ⚠️ IN ALMANAC MODE THIS PINS EVERY AXIS NAMED IN `patch`. Dragging a
+     * slider is the GM's hand on the wheel — the walk will not touch that
+     * axis again until {@link unpinAxis}/{@link unpinAllAxes} releases it.
+     * Pins regardless of whether the value actually moved: releasing a
+     * slider back to where the walk already had it is still a deliberate
+     * touch, not a no-op.
+     *
      * @param {object} patch - axis name → value.
      * @returns {Readonly<{applied: string[], rejected: string[], version: number}>}
      */
@@ -377,11 +629,12 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
           rejected.push(key);
           continue;
         }
-        const next = clampAxis(key, raw);
+        const next = resolveTargetValue(key, raw);
         if (next !== targets[key]) {
           targets[key] = next;
           applied.push(key);
         }
+        if (currentMode === 'almanac') pinnedAxes.add(key);
       }
       if (applied.length > 0) {
         // ⚠️ THE LABEL IS DERIVED, NEVER REMEMBERED. A hand edit that moves the
@@ -393,16 +646,23 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
         currentPreset = matchArchetype(targets);
         version++;
       }
-      return Object.freeze({ applied, rejected, version, preset: currentPreset });
+      return Object.freeze({ applied, rejected, version, preset: currentPreset, pinnedAxes: [...pinnedAxes] });
     },
 
     /**
-     * Apply a named sky (docs/planning/Weather-Manager.md §3.2) — the astrolabe
-     * shelf's one gesture, and slice 3's walk will use the identical call.
+     * Apply a named sky (docs/planning/Weather-Manager.md §3.2) — the
+     * astrolabe shelf's one gesture in EITHER mode.
      *
      * Sets every axis the row declares AND the label, together, so the two can
      * never disagree. Fails OPEN to `clear` on an unknown id and reports it: a
      * typo must not storm-lock a scene, but it must not be silent either.
+     *
+     * ⚠️ IN ALMANAC MODE THIS IS "THE ALMANAC TAKES REQUESTS"
+     * (Weather-Manager.md §5.2): a full, deliberate override. It clears EVERY
+     * pin — there is nothing left to protect once the whole sky was just
+     * hand-picked — and tells the walk to adopt the clicked archetype as its
+     * new current graph node immediately, redrawing a fresh dwell, rather than
+     * waiting for whatever dwell was already in flight to expire.
      *
      * @param {string} id
      * @param {object} [options]
@@ -413,18 +673,16 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
     applyArchetype(id, { immediate = false } = {}) {
       const res = resolveArchetype(id);
       const axes = res.archetype.axes;
-      if (immediate) {
-        for (const [key, raw] of Object.entries(axes)) {
-          if (!Object.hasOwn(WEATHER_AXES, key)) continue;
-          const next = clampAxis(key, raw);
-          targets[key] = next;
-          state[key] = next;
-        }
-      } else {
-        for (const [key, raw] of Object.entries(axes)) {
-          if (!Object.hasOwn(WEATHER_AXES, key)) continue;
-          targets[key] = clampAxis(key, raw);
-        }
+      pinnedAxes.clear();
+      for (const [key, raw] of Object.entries(axes)) {
+        if (!Object.hasOwn(WEATHER_AXES, key)) continue;
+        const next = resolveTargetValue(key, raw);
+        targets[key] = next;
+        if (immediate) state[key] = next;
+      }
+      if (currentMode === 'almanac') {
+        almanacCurrentNodeId = res.archetype.id;
+        almanacDwellRemainingHours = activeBiome ? sampleDwell(almanacRng, res.archetype.id) : null;
       }
       // Derived from the targets just written, exactly like `setTargets` — one
       // rule for what the label means, not two.
@@ -449,7 +707,7 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
       let touched = false;
       for (const [key, raw] of Object.entries(p)) {
         if (!Object.hasOwn(WEATHER_AXES, key)) continue;
-        const next = clampAxis(key, raw);
+        const next = resolveTargetValue(key, raw);
         if (next !== targets[key] || next !== state[key]) touched = true;
         targets[key] = next;
         state[key] = next;
@@ -462,13 +720,15 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
     },
 
     /**
-     * @param {string} m
-     * @returns {boolean} whether the mode was accepted. `almanac` is refused
-     *   until slice 3 builds the walk — see this module's header.
+     * @param {string} m - 'director' | 'almanac'.
+     * @returns {boolean} whether the mode was accepted. Both are real as of
+     *   slice 3 — this always returns true for a recognised mode name now,
+     *   kept boolean because `world/day-clock.js#setMode` shaped this and a
+     *   future half-built mode should refuse the exact same way slice 1-2's
+     *   `almanac` once did.
      */
     setMode(m) {
       const next = normalizeMode(m);
-      if (next === 'almanac') return false;
       if (next === currentMode) return true;
       currentMode = next;
       version++;
@@ -495,6 +755,149 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
     // the setter makes that state unrepresentable rather than merely
     // discouraged, which is the V2 autopsy's own prescription: make the wrong
     // move unavailable.
+
+    /**
+     * Choose the Almanac's climate. Fails OPEN — an unknown id clears the
+     * biome to `null` (the walk goes idle) rather than keeping a stale one or
+     * inventing a fake default, since "no biome chosen" is itself a
+     * legitimate, honest state. `null`/`undefined` explicitly clears it.
+     *
+     * Always resets the walk's own node/dwell: a fresh biome means a fresh
+     * starting point, drawn (on the next {@link tick}) from ITS OWN
+     * `archetypeWeights`, not inherited from whatever climate was active
+     * before.
+     *
+     * @param {string|null} id
+     * @returns {Readonly<{ok: boolean, biomeId: string|null, reason: string|null}>}
+     */
+    setBiome(id) {
+      almanacCurrentNodeId = null;
+      almanacDwellRemainingHours = null;
+      if (id === null || id === undefined) {
+        activeBiome = null;
+        version++;
+        return Object.freeze({ ok: true, biomeId: null, reason: null });
+      }
+      const res = resolveBiome(id);
+      activeBiome = res.biome;
+      version++;
+      return Object.freeze({ ok: res.ok, biomeId: activeBiome?.id ?? null, reason: res.reason });
+    },
+
+    /**
+     * How fast the Almanac's dwells pass — a multiplier, clamped to
+     * [{@link VOLATILITY_MIN}, {@link VOLATILITY_MAX}]. 1 = the biome's own
+     * authored pacing; 2 = twice as restless; 0.5 = twice as settled.
+     * @param {number} v @returns {number} the value actually in force.
+     */
+    setVolatility(v) {
+      const next = clampVolatility(v);
+      if (next !== almanacVolatility) {
+        almanacVolatility = next;
+        version++;
+      }
+      return almanacVolatility;
+    },
+
+    /**
+     * Reseed the Almanac's RNG. Two payoffs (Weather-Manager.md §5.4): a
+     * reproducible bug report ("seed 8829102 did this at hour 14"), and a
+     * GM-facing "reshuffle" gesture that doesn't require touching the biome.
+     * Does NOT reset the walk's current node/dwell — only the FUTURE draws
+     * change; the sky does not jump the instant this is called.
+     * @param {number|string} seed
+     * @returns {number|string} the seed now in force.
+     */
+    setSeed(seed) {
+      almanacSeed = seed;
+      almanacRng = createRng(seed);
+      version++;
+      return almanacSeed;
+    },
+
+    /**
+     * Pin one axis explicitly, without touching its value — the same
+     * protection {@link setTargets} grants a dragged slider, for a ROH
+     * control (or a test) that wants to protect an axis without also moving
+     * it.
+     * @param {string} name @returns {boolean} true if it is a real axis.
+     */
+    pinAxis(name) {
+      if (!Object.hasOwn(WEATHER_AXES, name)) return false;
+      if (!pinnedAxes.has(name)) {
+        pinnedAxes.add(name);
+        version++;
+      }
+      return true;
+    },
+
+    /**
+     * Release the GM's hand from one axis, letting the walk touch it again on
+     * its next transition (not immediately — pinning/unpinning is a bookkeeping
+     * change, not a target change, so it does not itself move anything).
+     * @param {string} name @returns {boolean} true if it had been pinned.
+     */
+    unpinAxis(name) {
+      const had = pinnedAxes.delete(name);
+      if (had) version++;
+      return had;
+    },
+
+    /** Release every pin at once. @returns {number} how many were released. */
+    unpinAllAxes() {
+      const n = pinnedAxes.size;
+      if (n > 0) {
+        pinnedAxes.clear();
+        version++;
+      }
+      return n;
+    },
+
+    /**
+     * Project the walk forward WITHOUT touching live state — "the forecast is
+     * free" (Weather-Manager.md §5.4). Clones the live RNG
+     * (`fromState(rng.getState())`) and replays {@link advanceWalk} on the
+     * clone; the live generator, node and dwell are never advanced by this
+     * call, so calling it every frame for a UI readout costs nothing the live
+     * sky will ever notice.
+     *
+     * Honestly empty (`available: false`, with a reason) rather than
+     * fabricated when there is nothing to project — no biome chosen, not in
+     * Almanac mode, or a non-positive horizon. A frozen clock's forecast
+     * should read "—", not a guess.
+     *
+     * @param {number} gameHoursAhead
+     * @param {object} [options]
+     * @param {number} [options.hour] - the CURRENT hour of day (0..24) to
+     *   start the projection from.
+     * @param {number} [options.maxSteps] - defensive cap, see `advanceWalk`.
+     * @returns {Readonly<{available: boolean, reason: string|null, transitions: ReadonlyArray<Readonly<{archetypeId: string, atGameHoursFromNow: number}>>}>}
+     */
+    forecast(gameHoursAhead, { hour = 12, maxSteps = 20 } = {}) {
+      if (currentMode !== 'almanac') {
+        return Object.freeze({ available: false, reason: 'not in almanac mode', transitions: Object.freeze([]) });
+      }
+      if (!activeBiome) {
+        return Object.freeze({ available: false, reason: 'no biome selected', transitions: Object.freeze([]) });
+      }
+      if (!(gameHoursAhead > 0)) {
+        return Object.freeze({ available: false, reason: 'non-positive horizon', transitions: Object.freeze([]) });
+      }
+      const clone = fromState(almanacRng.getState());
+      const result = advanceWalk({
+        rng: clone,
+        currentNodeId: almanacCurrentNodeId,
+        dwellRemainingHours: almanacDwellRemainingHours ?? 0,
+        startHour: normalizeHour(hour),
+        dtGameHours: gameHoursAhead,
+        maxSteps,
+      });
+      return Object.freeze({
+        available: true,
+        reason: null,
+        transitions: Object.freeze(result.transitions.map((t) => Object.freeze({ ...t }))),
+      });
+    },
 
     /**
      * The manager's whole state, frozen — what the snapshot and the astrolabe
@@ -551,7 +954,20 @@ export function createWeatherManager({ mode = 'director', transitionSpeed = 'bri
         preset: currentPreset,
         version,
         settling: isSettling(),
-        almanacBuilt: false,
+        almanacBuilt: true,
+        // The Almanac's own state — biome, pace, the walk's current graph
+        // node and dwell countdown, and every pinned axis. `seed` is included
+        // deliberately: the whole point of a reproducible bug report
+        // (Weather-Manager.md §5.4) is that this number is visible somewhere
+        // a report can quote it.
+        almanac: Object.freeze({
+          biomeId: activeBiome?.id ?? null,
+          volatility: almanacVolatility,
+          seed: almanacSeed,
+          currentNodeId: almanacCurrentNodeId,
+          dwellRemainingHours: almanacDwellRemainingHours,
+          pinnedAxes: Object.freeze([...pinnedAxes]),
+        }),
         axes: Object.freeze(axes),
       });
     },
@@ -611,6 +1027,12 @@ function normalizeMode(m) {
 /** @param {string} s @returns {string} */
 function normalizeSpeed(s) {
   return Object.hasOwn(TRANSITION_SPEEDS, s) ? s : 'brisk';
+}
+
+/** @param {*} v @returns {number} */
+function clampVolatility(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(VOLATILITY_MAX, Math.max(VOLATILITY_MIN, n)) : 1;
 }
 
 // (`normalizePreset` lived here in slice 1 and was deleted in slice 2 along with

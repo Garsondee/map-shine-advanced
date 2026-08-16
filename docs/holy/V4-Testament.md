@@ -1094,10 +1094,13 @@ distinct from Pillar 11's information fog), WeatherParticlesV2 (rain/snow → Pi
 archetypes driven by this pillar's wind), WeatherLightningEffectV2 (sky-flash = a grade+light
 preset), LightningEffectV2 (bolts), AshCloudEffectV2/AshDisturbanceEffectV2 (ash weather →
 particle archetypes + wind coupling), SkyColorEffectV2 (→ Pillar 10's environmental grade).
-State: wind built/mostly untested; clouds DESIGN ONLY; lightning BUILT (unverified); mist,
-rain, snow, ash MISSING.
+State: wind built/mostly untested; clouds DESIGN ONLY; weather manager DESIGN ONLY
+(2026-08-16, Fable); lightning BUILT (unverified); mist, rain, snow, ash MISSING.
 **DoD:** one map demonstrates a full weather state (wind + cloud shadow + precipitation +
 storm flash) as authored content.
+- [ ] Weather Manager — the env snapshot's weather owner: Director + Almanac modes, event
+      overlays, moon + sky-illuminant compositor, astrolabe Horizon/Omens UI — per
+      `docs/planning/Weather-Manager.md` (slices 1–7 there; slices 1–2 are the foundation).
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

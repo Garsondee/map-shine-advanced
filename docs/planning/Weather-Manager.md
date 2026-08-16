@@ -151,21 +151,43 @@ The `thunderstorm` row is why deck 2 (Clouds.md rung 2) earns its place: a storm
 
 ### 4.1 The ease engine
 
-Every authored axis moves toward its target through a per-axis slew with its own time constant — V2's one universally-praised behaviour ("clouds never pop", `SPRITE_FADE_DURATION_SEC = 10`) generalised to the entire weather state:
+Every authored axis moves toward its target through a per-axis slew with its own duration — V2's one universally-praised behaviour ("clouds never pop", `SPRITE_FADE_DURATION_SEC = 10`) generalised to the entire weather state.
 
-| Axis | τ up | τ down | Why asymmetric |
+> ### ⚠️ RETUNED 2026-08-16 — durations, not time constants (author-instructed)
+>
+> **This table originally specified τ, the exponential time constant, and its numbers were an order of magnitude too slow.** τ = 120 s means 63% of the way there after two minutes and roughly *six minutes* before a cover change looks finished; with a `1e-4` arrival epsilon the axis reported `settling` for about **eighteen minutes**. Slice 1 shipped that faithfully, measured it, and the author called the pass: retune.
+>
+> Two things changed, and the second matters more than the first:
+>
+> 1. **The unit is now a DURATION — "how long until this looks done" (95%, i.e. 3τ).** The engine derives `tau = duration / SETTLE_TAUS` in one place (`world/weather.js#tauForDuration`). A number in this table now means what a reader assumes it means; before, the table and the code disagreed about the units of every row in it.
+> 2. **The magnitudes came down.** The *direction asymmetry* was never the problem and is untouched.
+>
+> The epsilons are now perceptual too: `1/500` on a unit axis is half a step of 8-bit output, so the arrival snap is invisible by construction rather than by taste.
+
+| Axis | duration in | duration out | Why asymmetric |
 | --- | --- | --- | --- |
-| cover | 120 s | 150 s | skies build slightly faster than they scrub clean |
-| type / altitude / scale | 240 s | 240 s | a sky does not flip genus quickly; slowest movers |
-| precip | 45 s | 90 s | rain arrives brisk, tapers long |
-| wind setpoint | 20 s | 90 s | **V2's accelerate-fast/decelerate-slow, kept verbatim** (`cloud-wind-advection.js` asymmetry — the thing that made V2 feel like weather) |
-| fog | 300 s | 200 s | creeps in, burns off a little faster |
-| storm | 60 s | 60 s | |
-| temperature | 600 s | 600 s | thermal mass |
+| **cover** | **45 s** | **60 s** | skies build slightly faster than they scrub clean. Fast enough to land inside a scene beat, slow enough that the light visibly *changes* rather than cutting |
+| **type / altitude / scale** | **90 s** | **90 s** | the SHAPE axes move at half cover's pace — a sky does not change genus as readily as it fills in, and keeping these slower is what stops an archetype switch reading as one instantaneous restyle |
+| precip *(slice 7)* | 30 s | 60 s | rain arrives brisk, tapers long |
+| wind setpoint *(slice 7)* | 15 s | 60 s | **V2's accelerate-fast/decelerate-slow, kept** (`cloud-wind-advection.js` asymmetry — the thing that made V2 feel like weather) |
+| fog *(slice 7)* | 120 s | 90 s | creeps in, burns off a little faster |
+| storm *(slice 4)* | 45 s | 45 s | |
+| temperature *(slice 7)* | 240 s | 240 s | thermal mass — genuinely the slowest thing here |
+
+**Measured** after the retune, not estimated (`brisk`, cover, at 60 fps):
+
+| Transition | Looks done | Fully settled |
+| --- | --- | --- |
+| clear → overcast | **44.9 s** (declared 45) | 93.2 s |
+| overcast → clear | **59.9 s** (declared 60) | 124.3 s |
+| clear → overcast, `realistic` ×3 | 134.8 s | 279.7 s |
+| any, `instant` | 0 s | 0 s |
+
+Against roughly **6 minutes to look done and 18 to settle** before the retune. The "looks done" column matching the declared duration to a tenth of a second is the point of the duration semantics — that agreement is what the old τ table did not have. The full-settle tail is longer than the visible transition and that is expected: it is the exponential running down to the perceptual epsilon, invisible on screen but honestly reported by `settling`. A regression guard on the up-transition lives in `__tests__/weather.test.mjs`.
 
 **Clock ruling (⚠️ the named trap lives here):** eases run on **real time** — they are presentation pacing, same family as V2's 10 s sprite fade. The Almanac's WALK runs on **game time** (§5.4). UI throttles use `realMs`, never `tMs` (`feedback_throttle_on_sim_clock_latches_when_paused`). And because a GM can crank `rateHoursPerMinute` to 60, the manager enforces a **real-time floor between target changes (~45 s)**: time-lapse shows sped clouds via drift, never strobing weather.
 
-A GM-facing **transition-speed** control scales all τ: `instant` (scene setup) · `brisk` (×1, Director default) · `realistic` (×3, Almanac default).
+A GM-facing **transition-speed** control scales every duration: `instant` (scene setup, a genuine snap — zero, not a small number) · `brisk` (×1, **Director default, deliberately the fast one** — the GM authoring a map needs to see the sky they clicked) · `realistic` (×3, Almanac default, where nobody is waiting on the result).
 
 ### 4.2 Fronts — the realistic shape of a big change (ladder rung, not slice 1)
 

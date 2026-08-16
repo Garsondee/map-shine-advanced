@@ -12,6 +12,7 @@
 import {
   createWeatherManager,
   easeToward,
+  tauForDuration,
   clampAxis,
   WEATHER_AXES,
   WEATHER_AXIS_NAMES,
@@ -42,11 +43,33 @@ export function run(t) {
           Number.isFinite(s.min) &&
           Number.isFinite(s.max) &&
           Number.isFinite(s.fallback) &&
-          s.tauUpSec > 0 &&
-          s.tauDownSec > 0 &&
+          s.durationUpSec > 0 &&
+          s.durationDownSec > 0 &&
           s.epsilon > 0
         );
       })
+    );
+    // ⚠️ THE RETUNE GUARD (author-instructed, 2026-08-16). The first cut stored
+    // exponential TIME CONSTANTS in these fields while the doc's numbers read as
+    // durations, so a cover change took ~6 minutes to look done. These bounds
+    // are not style — they are the difference between a control that responds
+    // and one a GM reports as broken. Anything slower than a minute-and-a-half
+    // to LOOK done should be a deliberate, argued change, not a drift.
+    t.ok(
+      'no axis takes longer than 90s to look done at brisk',
+      WEATHER_AXIS_NAMES.every((n) => WEATHER_AXES[n].durationUpSec <= 90 && WEATHER_AXES[n].durationDownSec <= 90)
+    );
+    t.ok(
+      'cover — the one axis with live consumers — lands inside a scene beat',
+      WEATHER_AXES.cloudCover01.durationUpSec <= 60
+    );
+    t.ok(
+      'every axis still builds faster than (or as fast as) it clears',
+      WEATHER_AXIS_NAMES.every((n) => WEATHER_AXES[n].durationUpSec <= WEATHER_AXES[n].durationDownSec)
+    );
+    t.ok(
+      'epsilons are PERCEPTUAL: a unit axis snaps below 8-bit resolution',
+      WEATHER_AXES.cloudCover01.epsilon <= 1 / 255 && WEATHER_AXES.cloudCover01.epsilon > 0
     );
     t.ok(
       'every axis declares its consumer status (the unconsumed-API rule, machine-readable)',
@@ -100,28 +123,53 @@ export function run(t) {
       seen.every((v) => v <= 1)
     );
     t.ok('ease actually moves', seen[seen.length - 1] > 0.2);
-    t.ok('...but 60s is not yet arrival at tau=120', seen[seen.length - 1] < 1);
-
-    // ~63% at one tau is the definition of the time constant; assert it holds,
-    // so a future change to the ease SHAPE cannot silently redefine what the
-    // documented tau numbers mean.
-    const mgr2 = createWeatherManager();
-    mgr2.setTargets({ cloudCover01: 1 });
-    const at120 = runFor(mgr2, 120).pop();
-    t.ok('one tau lands near 63% (the ease shape is genuinely exponential)', at120 > 0.6 && at120 < 0.66);
   }
 
-  // ---- it ARRIVES (the epsilon snap) ------------------------------------------
+  // ---- ⭐ DURATION MEANS WHAT IT SAYS -------------------------------------------
+  // The assertion the whole retune rests on: a declared `durationUpSec` of 45
+  // must actually produce a sky that LOOKS overcast 45 seconds later. When these
+  // fields held raw time constants, 45 would have meant ~29% — which is what
+  // made the control feel broken.
   {
     const mgr = createWeatherManager();
     mgr.setTargets({ cloudCover01: 1 });
-    runFor(mgr, 1500);
+    const atDuration = runFor(mgr, WEATHER_AXES.cloudCover01.durationUpSec).pop();
+    t.ok(
+      'at the declared duration the transition is ~95% done (visually finished)',
+      atDuration > 0.93 && atDuration < 0.97
+    );
+
+    // Half way through it should be well past half — an exponential front-loads,
+    // which is what makes weather read as "arriving" rather than "sliding".
+    const mgr2 = createWeatherManager();
+    mgr2.setTargets({ cloudCover01: 1 });
+    const atHalf = runFor(mgr2, WEATHER_AXES.cloudCover01.durationUpSec / 2).pop();
+    t.ok('the curve front-loads (past 3/4 at the half-way mark)', atHalf > 0.75);
+
+    t.ok('tauForDuration is the one conversion, and it is duration/3', tauForDuration(90) === 30);
+    t.ok('a zero duration means snap, not divide-by-zero', tauForDuration(0) === 0);
+  }
+
+  // ---- it ARRIVES, and in a time a human would tolerate ------------------------
+  {
+    const mgr = createWeatherManager();
+    mgr.setTargets({ cloudCover01: 1 });
+    // Find the frame it genuinely settles on, rather than asserting against an
+    // arbitrary long horizon — the number itself is the thing under test.
+    let elapsed = 0;
+    const step = 1 / 60;
+    while (mgr.read().settling && elapsed < 600) {
+      mgr.tick(step);
+      elapsed += step;
+    }
     const r = mgr.read();
     t.ok('an exponential with an arrival epsilon reaches its target exactly', r.state.cloudCover01 === 1);
     t.ok('...and settling goes false, so a gated consumer cannot hang forever', r.settling === false);
+    // Pre-retune this took ~18 real minutes. The bound is the regression guard.
+    t.ok(`⭐ full settle is under two minutes (measured ${elapsed.toFixed(1)}s)`, elapsed < 120);
   }
 
-  // ---- direction-dependent tau ------------------------------------------------
+  // ---- direction-dependent duration -------------------------------------------
   {
     const up = createWeatherManager();
     up.setTargets({ cloudCover01: 1 });

@@ -82,17 +82,33 @@
  * target and come back, which on a full-screen ambient multiply would read as a
  * flicker rather than as weather.
  *
- * `tau` is direction-dependent (`tauUpSec` vs `tauDownSec`) because real weather
- * is not symmetric — skies build a little faster than they scrub clean, and V2's
- * one genuinely great dynamic (wind accelerating fast and decelerating ~7x
- * lazier, `cloud-wind-advection.js`) is this same asymmetry. Slice 1 carries the
- * cloud axes; the wind setpoint inherits the mechanism when it lands.
+ * ⚠️ AXES DECLARE A **DURATION**, NOT A TAU (author-instructed retune,
+ * 2026-08-16). The first cut of this table stored the exponential time constant
+ * directly, and the numbers Weather-Manager.md §4.1 proposed were read as if
+ * they were durations — they are not. A tau of 120s means ~63% of the way
+ * there in two minutes and roughly SIX before the change looks finished; a GM
+ * clearing an overcast sky waited about twenty minutes for it to land exactly.
+ * That is not "clouds never pop", it is a control that looks broken.
+ *
+ * So the table now declares `durationUpSec`/`durationDownSec` — *how long the
+ * transition takes to LOOK done* — and the engine derives `tau = duration /
+ * SETTLE_TAUS`. A config number now means what a reader assumes it means, which
+ * is the same honesty rule this codebase applies to its instruments
+ * (`feedback_instruments_must_not_lie`), applied to a tuning table.
+ *
+ * The DIRECTION asymmetry survives the retune unchanged, because it was never
+ * the problem: skies build a little faster than they scrub clean, and V2's one
+ * genuinely great dynamic (wind accelerating fast and decelerating ~7x lazier,
+ * `cloud-wind-advection.js`) is this same asymmetry. Only the magnitudes moved.
  *
  * An exponential asymptotes and never technically arrives, so each axis declares
  * an `epsilon` and snaps the remainder — otherwise `settling` would never go
  * false and any consumer gated on "has the weather stopped moving" would hang
  * forever. `world/day-clock.js#SYNC_ARRIVAL_HOURS` solved the identical problem
- * for the same reason.
+ * for the same reason. ⚠️ Those epsilons are now PERCEPTUAL rather than
+ * arbitrary: `1/500` on a unit axis is half a step of 8-bit output, so the
+ * snap is provably invisible. The first cut used `1e-4`, which is ~25x below
+ * anything renderable and bought nothing but a longer tail of `settling: true`.
  *
  * Pure and Node-testable: it holds state but takes every input as an argument
  * and touches nothing global — no Foundry, no clock, no DOM.
@@ -108,12 +124,28 @@
 export const WEATHER_MODES = Object.freeze(['director', 'almanac']);
 
 /**
- * How fast transitions run, as a multiplier on every axis `tau`.
+ * How many time constants count as "the transition has visibly finished".
+ *
+ * Three is the standard engineering answer — `1 - e^-3` is 95%, and the last 5%
+ * of a cloud-cover change is not something an eye can find on a lit map. This is
+ * the ONE place the duration→tau conversion lives, so a future change to what
+ * "done" means cannot land in one axis and miss the others.
+ */
+export const SETTLE_TAUS = 3;
+
+/**
+ * How fast transitions run, as a multiplier on every axis's declared duration.
  *
  * `instant` is not a small number, it is ZERO — a genuine snap, for scene setup
- * and for `jumpTo`'s own path. A "very small tau" would still take frames to
- * land and would make a scene load visibly settle, which is an artefact of
+ * and for `jumpTo`'s own path. A "very small duration" would still take frames
+ * to land and would make a scene load visibly settle, which is an artefact of
  * nothing.
+ *
+ * ⚠️ `brisk` is the DIRECTOR default and it is deliberately the fast one. The
+ * GM authoring a map needs to see the sky they clicked; the GM running a session
+ * wants weather to arrive inside a scene beat. `realistic` is there for the
+ * Almanac, where nobody is waiting on the result and a sky taking its time is
+ * the whole point.
  */
 export const TRANSITION_SPEEDS = Object.freeze({
   instant: 0,
@@ -123,6 +155,17 @@ export const TRANSITION_SPEEDS = Object.freeze({
 
 /** @type {readonly string[]} */
 export const TRANSITION_SPEED_NAMES = Object.freeze(Object.keys(TRANSITION_SPEEDS));
+
+/**
+ * Perceptual arrival thresholds — how close counts as arrived.
+ *
+ * `UNIT` is half a step of 8-bit output: a 0..1 axis this close to its target
+ * cannot change a rendered pixel, so snapping the remainder is invisible by
+ * construction rather than by taste. `LENGTH_PX` is one world pixel, which is
+ * below the resolution of anything that consumes an altitude or a feature size.
+ */
+export const AXIS_EPSILON_UNIT = 1 / 500;
+export const AXIS_EPSILON_LENGTH_PX = 1;
 
 /**
  * THE AXIS TABLE — the state vector, as data.
@@ -148,9 +191,12 @@ export const WEATHER_AXES = Object.freeze({
     min: 0,
     max: 1,
     fallback: 0,
-    tauUpSec: 120,
-    tauDownSec: 150,
-    epsilon: 1e-4,
+    // A front arriving overhead: fast enough to land inside a scene beat, slow
+    // enough that the light visibly CHANGES rather than cutting. Clearing is
+    // lazier than building — the asymmetry V2's wind advection got right.
+    durationUpSec: 45,
+    durationDownSec: 60,
+    epsilon: AXIS_EPSILON_UNIT,
     consumerStatus: 'live',
     /** effects/shadow-access.js (softens + fades every caster),
      *  effects/sky-access.js (kills the key, lifts the fill, raises the veil),
@@ -161,9 +207,12 @@ export const WEATHER_AXES = Object.freeze({
     min: 0,
     max: 1,
     fallback: 0.5,
-    tauUpSec: 240,
-    tauDownSec: 240,
-    epsilon: 1e-4,
+    // The SHAPE axes move at half the speed of cover, in both directions. A sky
+    // does not change genus as readily as it fills in, and keeping these slower
+    // is what stops an archetype switch reading as one instantaneous restyle.
+    durationUpSec: 90,
+    durationDownSec: 90,
+    epsilon: AXIS_EPSILON_UNIT,
     consumerStatus: 'pending',
     /** The cirrus(0) → cumulus(0.5) → stratus(1) ramp, Clouds.md §3.1. */
     consumers: 'world/cloud-field.js (not built)',
@@ -172,11 +221,9 @@ export const WEATHER_AXES = Object.freeze({
     min: 100,
     max: 6000,
     fallback: 1400,
-    tauUpSec: 240,
-    tauDownSec: 240,
-    // World pixels, not a 0..1 — half a pixel of residual is already far below
-    // anything the shadow offset could express.
-    epsilon: 0.5,
+    durationUpSec: 90,
+    durationDownSec: 90,
+    epsilon: AXIS_EPSILON_LENGTH_PX,
     consumerStatus: 'pending',
     /** Clouds.md's ONE knob: shadow offset, softness, parallax, drift, sky hidden. */
     consumers: 'world/cloud-field.js (not built)',
@@ -185,9 +232,9 @@ export const WEATHER_AXES = Object.freeze({
     min: 50,
     max: 8000,
     fallback: 1100,
-    tauUpSec: 240,
-    tauDownSec: 240,
-    epsilon: 0.5,
+    durationUpSec: 90,
+    durationDownSec: 90,
+    epsilon: AXIS_EPSILON_LENGTH_PX,
     consumerStatus: 'pending',
     consumers: 'world/cloud-field.js (not built)',
   }),
@@ -299,8 +346,8 @@ export function createWeatherManager({
         const current = state[name];
         if (current === target) continue;
         const spec = WEATHER_AXES[name];
-        const tau = (target > current ? spec.tauUpSec : spec.tauDownSec) * scale;
-        state[name] = easeToward(current, target, tau, dt, spec.epsilon);
+        const duration = (target > current ? spec.durationUpSec : spec.durationDownSec) * scale;
+        state[name] = easeToward(current, target, tauForDuration(duration), dt, spec.epsilon);
       }
       return read();
     },
@@ -463,6 +510,16 @@ export function createWeatherManager({
       });
     },
   };
+}
+
+/**
+ * The exponential time constant that makes a transition LOOK finished after
+ * `durationSec`. The single home of the duration→tau conversion — see
+ * {@link SETTLE_TAUS}.
+ * @param {number} durationSec @returns {number}
+ */
+export function tauForDuration(durationSec) {
+  return durationSec > 0 ? durationSec / SETTLE_TAUS : 0;
 }
 
 /**

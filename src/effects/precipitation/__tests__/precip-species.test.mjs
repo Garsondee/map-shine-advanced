@@ -104,7 +104,7 @@ export function run(t) {
       snow.fall.flutter !== null && rain.fall.flutter === null
     );
     t.ok('⭐ snow spins and rain does not', snow.fall.spin !== null && rain.fall.spin === null);
-    t.ok('rain streaks with speed; a flake stays square', rain.body.streakPerPxS > 0 && snow.body.streakPerPxS === 0);
+    t.ok('rain streaks far more per unit speed than a flake does', rain.body.streakPerPxS > snow.body.streakPerPxS * 3);
     // ⚠️ A REGRESSION PIN, not a style check. The first cut of this field read
     // the harvest ledger's `0.0065×0.25` as a product and drew 1.2–8.2 SCREEN
     // px specks instead of rain; the shader lab measured it and the sweep

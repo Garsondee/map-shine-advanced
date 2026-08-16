@@ -279,9 +279,27 @@ export const PRECIP_SPECIES = Object.freeze({
     body: Object.freeze({
       mode: 'flake',
       sizePx: Object.freeze([2.2, 6.5]),
-      /** A flake does not streak: it tumbles. Zero length-per-speed keeps the
-       * quad square no matter how hard the wind blows it sideways. */
-      streakPerPxS: 0,
+      /**
+       * ⚠️ NO LONGER ZERO, AND THE ZERO WAS THE BUG THE AUTHOR REPORTED
+       * (*"snow isn't yet affected by wind"*).
+       *
+       * A flake tumbles rather than streaking, so this began at 0 — "the quad
+       * stays square no matter how hard the wind blows it sideways." That is
+       * true of a flake at REST and wrong for a flake being driven: it also
+       * removed the only visual signature wind has on snow. Flakes DID drift
+       * correctly the whole time (the kernel's wind term is species-scaled and
+       * snow's `windCarry01` is the highest in the table) — but a round dot
+       * moving sideways looks identical to a round dot standing still, and
+       * because bodies respawn uniformly the population's DENSITY never shifts
+       * either. Correct motion, invisible.
+       *
+       * Small and deliberately far below rain's 0.0065: at snow's own fall
+       * speed this is a fraction of a pixel and a flake still reads as round,
+       * but as wind drives its apparent speed up the quad smears along the way
+       * it is going — which is both what a wind-blown flake actually looks
+       * like and the cue that was missing.
+       */
+      streakPerPxS: 0.0016,
       headRgba: Object.freeze([1.0, 1.0, 1.0, 0.95]),
       tailRgba: Object.freeze([0.86, 0.9, 0.98, 0.75]),
       brightnessSkewExp: 0.85,

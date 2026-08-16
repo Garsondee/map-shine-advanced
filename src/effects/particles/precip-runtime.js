@@ -146,6 +146,17 @@ const SPAWN_MARGIN_FRAC = 0.25;
 const BIRTH_FADE_MS = 90;
 
 /**
+ * Lateral chaos amplitude as a FRACTION of a body's own fall speed.
+ *
+ * Chosen so rain's amplitude is unchanged from the absolute constant it
+ * replaces (`34 px × chaosScale 3.5 = 119 px/s` at rain's ~3300 px/s mid
+ * speed ⇒ `119 / (3300 × 3.5)`), making this a re-basing of V2's harvested
+ * number rather than a retune of it. See its use site for why absolute px/s
+ * could not work across species.
+ */
+const CHAOS_PER_SPEED = 0.0103;
+
+/**
  * Build one precipitation engine for ONE species.
  *
  * @param {object} deps
@@ -440,6 +451,27 @@ export function createPrecipEngine({
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
 
   /**
+   * ⭐ THE DIRECTION THE WIND PUSHES THINGS, from `directionDeg`.
+   *
+   * ⚠️ `directionDeg` IS METEOROLOGICAL — it names the direction the wind blows
+   * **FROM**, not toward. `world/wind-field.js` says so in its own angle-
+   * convention block ("East" means an east wind, blowing FROM the east TOWARD
+   * the west) and its sampler negates accordingly:
+   * `vec2(cos, sin).negate().mul(speed01)`.
+   *
+   * This runtime did NOT negate, so precipitation was driven in exactly the
+   * OPPOSITE direction from every other consumer of the same field — the
+   * author's report: *"Wind arrow points south but rain gets pushed to the
+   * east."* A second hand-written reading of a shared convention, which is
+   * `feedback_shared_field_two_meanings_two_registries` wearing a compass.
+   *
+   * One helper, both call sites (the kernel's drift and the draw's convergence
+   * shift), so the two can never disagree with each other OR with the field.
+   * @param {*} rad - `directionDeg` already in radians.
+   */
+  const windToward = (rad) => vec2(cos(rad), sin(rad)).negate();
+
+  /**
    * WHERE A BODY IS ACTUALLY DRAWN — V2's `M(h) = D/(D−h)` applied to its world
    * position. Returns `{xy, persp}` so a caller can reuse the magnification for
    * sizing without repeating the divide.
@@ -584,7 +616,7 @@ export function createPrecipEngine({
       .mul(float(WIND_CARRY))
       .mul(uWindTiltDeg)
       .mul(float(Math.PI / 180));
-    const windVec = vec2(cos(windRad), sin(windRad)).mul(tiltRadSim.tan()).mul(speed).mul(uFallSlant01);
+    const windVec = windToward(windRad).mul(tiltRadSim.tan()).mul(speed).mul(uFallSlant01);
     // 2. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
     //    offset per body so neighbours never move in lockstep (the ember
     //    lesson: a pure function of position and time makes a swarm drift as
@@ -597,7 +629,24 @@ export function createPrecipEngine({
         .add(sin(tSec.mul(float(10)).add(phase.mul(float(1.7)))).mul(float(0.4))),
       sin(tSec.mul(float(0.9)).add(phase.mul(float(2.3)))).mul(float(0.5))
     )
-      .mul(float(34))
+      // ⚠️ SCALED BY THE BODY'S OWN FALL SPEED, not an absolute px/s.
+      //
+      // V2's chaos amplitude (28-100 px) was authored for RAIN, which falls at
+      // 1400-5200 px/s. Carried across as a constant it swamps anything slower:
+      // MEASURED, snow's wind-driven drift is 52 px/s against 119 px/s of
+      // chaos — a ratio of 0.44, so turbulence simply drowned the wind and
+      // flakes ignored it. Rain's ratio is 9.0, which is why rain looked fine
+      // and only snow was reported dead ("snow isn't yet affected by wind").
+      //
+      // Expressing it as a FRACTION OF FALL SPEED makes it scale-free: every
+      // species gets the same proportional jitter, and a slow species is no
+      // longer dominated by a number picked for a fast one. `CHAOS_PER_SPEED`
+      // is set so rain's amplitude is unchanged at the shipped `chaosScale`,
+      // i.e. this is a re-basing rather than a retune. Snow's own character
+      // comes from `flutter`, which is authored in absolute px BECAUSE a
+      // flake's sway is a real physical width rather than a ratio.
+      .mul(speed)
+      .mul(float(CHAOS_PER_SPEED))
       .mul(uChaosScale);
 
     // 3. Flutter — snow only. The paper-fall sway (V2 `:1556-1663`), and the
@@ -858,7 +907,9 @@ export function createPrecipEngine({
       .mul(uWindTiltDeg)
       .mul(float(Math.PI / 180));
     const windRadDraw = uWindDirDeg.mul(float(Math.PI / 180));
-    const windOffset = vec2(cos(windRadDraw), sin(windRadDraw)).mul(tiltRad.tan()).mul(uCamHeight).mul(uFallSlant01);
+    // ⚠️ UPWIND — the vanishing point sits BEHIND the tilted fall lines, so it
+    // moves opposite to the direction the rain is driven.
+    const windOffset = windToward(windRadDraw).negate().mul(tiltRad.tan()).mul(uCamHeight).mul(uFallSlant01);
     const convergence = uCamCentre.add(windOffset);
     // Pure radial about the shifted point. `uParallaxStreak01` blends between
     // the raw world drift (0) and this (1) — kept as an escape hatch for a
@@ -914,7 +965,23 @@ export function createPrecipEngine({
       const rx = corner.x.mul(ca).sub(corner.y.mul(sa));
       const ry = corner.x.mul(sa).add(corner.y.mul(ca));
       across = rx.mul(width);
-      along = ry.mul(width);
+      // ⚠️ `length`, NOT `width`, ON THE ALONG AXIS — and using `width` here
+      // was why snow could not respond to wind at ANY setting.
+      //
+      // This branch discarded `length` entirely, so a flake was always a
+      // perfect square: `streakPerPxS` could never reach it, and the ONLY
+      // visual signature wind has on a round body is exactly that smear.
+      // Flakes drifted correctly the whole time (snow has the highest
+      // `windCarry01` in the table) — but a round dot moving sideways looks
+      // identical to one standing still, and uniform respawn keeps the
+      // population's density flat too, so nothing on screen changed. The
+      // author's report was precise: *"snow isn't yet affected by wind."*
+      //
+      // A dead-calm flake still reads as round because snow's own
+      // `streakPerPxS` is a quarter of rain's and its fall speed is an order
+      // of magnitude lower — `length` and `width` are then near-identical.
+      // The stretch only appears once something is genuinely driving it.
+      along = ry.mul(length);
     }
 
     const offset = vec2(dir.x.mul(along).add(perp.x.mul(across)), dir.y.mul(along).add(perp.y.mul(across)));

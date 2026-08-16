@@ -1101,6 +1101,19 @@ storm flash) as authored content.
 - [ ] Weather Manager — the env snapshot's weather owner: Director + Almanac modes, event
       overlays, moon + sky-illuminant compositor, astrolabe Horizon/Omens UI — per
       `docs/planning/Weather-Manager.md` (slices 1–7 there; slices 1–2 are the foundation).
+      · slice 1/7 Claude Opus 5 2026-08-16 (`e0e8589`) — `world/weather.js`: the axis table
+        as data, the direction-dependent ease (cannot overshoot, epsilon-snaps so `settling`
+        genuinely ends), Director mode, `almanac` REFUSED until slice 3 builds the walk, and
+        `hasOwner`/`ownerVersion` on `env.weather`. LAW 5 asserted, not assumed: a fresh
+        director manager is byte-identical to `DEFAULT_WEATHER` on every axis. 461 assertions
+        in `src/world` (9,642 repo-wide, 0 failed); the two load-bearing assertions were
+        SABOTAGE-TESTED (breaking the LAW 5 default failed 7 checks; moving `version++` into
+        the ease loop failed 3). ⚠️ Viewer/boot wiring is written and working in the tree but
+        UNCOMMITTED — `vt-pan-viewer.js` holds ~1,533 insertions of other in-flight work and
+        `feedback_git_staging_hazard` forbids sweeping it; symbols named in `e0e8589`'s body.
+        ⚠️ `npm run verify` red at structure (`no-gpu-readback`, `time/one-clock` 41 vs 38) —
+        PROVEN pre-existing by stashing only `src/world/` and reproducing both identically.
+        Task stays OPEN: 6 slices remain. Task list unchanged (worker role).
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

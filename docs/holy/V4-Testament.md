@@ -1214,6 +1214,40 @@ storm flash) as authored content.
         9,963 assertions green repo-wide (0 failed); `esbuild src/boot.js --bundle` re-verified
         (5.3MB, exit 0); structure unchanged from baseline. Task stays OPEN: slices 4-7 remain,
         and the Omens tray/ToD-arcs/season/seed UI are named gaps, not oversights.
+      · slice 4/7 Claude Sonnet 5 2026-08-16 (`3506fe5`) — EVENTS. New
+        `world/weather-events.js`: the 9-kind closed list (§6.2's table) each with authored
+        envelope/intensity/overrides defaults; `envelopePhase` (attack→sustain→release→done,
+        numeric or `'held'` sustain, an explicit release ALWAYS wins over the natural schedule
+        from any phase — mid-attack or mid-sustain, a GM cutting a storm short does not need to
+        know which); `composeOverride` lerps the RESULT of an op rather than toward a
+        hardcoded neutral, so `set` (which has none) needs no special case.
+        ⭐ THE CENTRAL GUARANTEE: events are a READ-TIME OVERLAY, never a second write path onto
+        `state` — `toSnapshotWeather()`/`getStatus()` compose+re-clamp a COPY, so `read()` (the
+        astrolabe's sliders, a GM's own hand) never disagrees with an active event, and ending
+        one early needs no ease-engine "catch up". `version` bumps on add/release/remove, never
+        on envelope ramping — the ease's own discipline, extended.
+        Only `ash-storm` moves a pixel this slice (`cover→max(0.85)`, `type→stratus`, both
+        LIVE-consumed axes today). The other 8 are fully mechanical — addable, they ramp, they
+        clean up on schedule — but carry empty overrides, honestly: `blood-moon`/`eclipse` need
+        the moon/`env.skyKey` (slice 5), `aurora`/`volcanic-unrest`/`mana-storm` need the patchy
+        illuminant (slice 6), `gloom`/`radiance`/`sky-flash` need a veil/fill override surface
+        on `sky-access.js` that does not exist yet.
+        Console-first, same posture `setWeatherMode` shipped under before any UI:
+        `MapShine.addWeatherEvent`/`releaseWeatherEvent`/`removeWeatherEvent`/
+        `getWeatherActiveEvents`. `getTimeDialState()` carries `weatherActiveEvents` for a
+        future astrolabe tray — unconsumed for now and said so in comment, the same "ship the
+        data, mark the gap" pattern `weather-biomes.js`'s `frontScripts` already uses.
+        873 assertions in `src/world` (10,054 repo-wide, 0 failed) across two new suites (pure
+        math + manager wiring). FOUR load-bearing guarantees SABOTAGE-TESTED: state-purity
+        (writing composed values back into `state` failed 2 named assertions), release-always-
+        wins (broke 6), sequential fold order (broke 2, in both directions), version-bump
+        discipline (broke 1). `esbuild src/boot.js --bundle` re-verified clean (5.3MB, exit 0).
+        Structure unchanged from baseline (`no-gpu-readback` 1, `time/one-clock` 41 vs bound 38
+        — both proven pre-existing in earlier passes, not this one).
+        ⚠️ NO LIVE FOUNDRY HARNESS RUN THIS PASS: console/API-only, no astrolabe change, and the
+        one pixel-changing path it adds is the exact `toSnapshotWeather()` function every
+        consumer already reads, live-proven in slices 1-3 — a judgment call, stated rather than
+        silently skipped. Task stays OPEN: slices 5-7 remain.
 - [ ] Precipitation — the falling weather entire: FALL (compute bodies + the analytic curtain
       field), ARRIVAL (ground splashes, water rings, roof-edge drips, hail bounces), STAY (the
       mantle — persistent snow/ash/puddles, fire-melt halos, footprints); species as data rows,

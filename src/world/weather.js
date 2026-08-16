@@ -305,10 +305,110 @@ export const WEATHER_AXES = Object.freeze({
     consumerStatus: 'pending',
     consumers: 'world/cloud-field.js (not built)',
   }),
+
+  // ── PRECIPITATION (P1, docs/planning/Precipitation.md) ────────────────────
+  // The unconsumed-axis rule discharged: these ship in the slice that wires
+  // their first real consumer, which is `effects/particles/precip-runtime.js`.
+  precip01: Object.freeze({
+    min: 0,
+    max: 1,
+    fallback: 0,
+    // Weather-Manager.md §4.1's own row: rain arrives brisk and tapers long.
+    // A shower that took as long to start as the cloud deck does would read as
+    // the sky deciding rather than as weather arriving.
+    durationUpSec: 30,
+    durationDownSec: 60,
+    epsilon: AXIS_EPSILON_UNIT,
+    consumerStatus: 'live',
+    consumers: 'effects/precipitation (the FALL), wetness integrator (P3)',
+  }),
+  temperature01: Object.freeze({
+    min: 0,
+    max: 1,
+    fallback: 0.55,
+    // ⚠️ THE SLOWEST AXIS IN THE TABLE, and deliberately: thermal mass is real.
+    // A map does not go from snowing to raining inside a scene beat, and the
+    // derived `precipKind` flip that rides this axis would otherwise strobe
+    // between species every time a GM nudged the slider.
+    durationUpSec: 240,
+    durationDownSec: 240,
+    epsilon: AXIS_EPSILON_UNIT,
+    consumerStatus: 'live',
+    consumers: 'precipKind derivation (below), wetness dry-rate (P3)',
+  }),
 });
 
 /** @type {readonly string[]} */
 export const WEATHER_AXIS_NAMES = Object.freeze(Object.keys(WEATHER_AXES));
+
+/**
+ * WHAT IS FALLING — a closed list (`Precipitation.md` §2.2 + Weather-Manager.md
+ * §2.1's `precipKindAuthored` enum).
+ *
+ * ⚠️ THIS IS DELIBERATELY **NOT** AN ENTRY IN {@link WEATHER_AXES}, and the
+ * reason is structural rather than stylistic: every axis in that table is
+ * EASED, and `easeToward` interpolates a NUMBER. There is no meaningful value
+ * 40% of the way between `snow` and `ash`. Storing an enum in a table whose
+ * whole contract is "this value slews continuously toward its target" would be
+ * `feedback_one_byte_two_quantities` in its purest form — so the kind lives
+ * beside the axes as its own setting, and the BLEND between two kinds is
+ * expressed the way a blend should be: as a weight (see
+ * {@link derivePrecipKind}'s `mixWeight`).
+ */
+export const PRECIP_KINDS = Object.freeze(['auto', 'rain', 'snow', 'sleet', 'hail', 'ash', 'embers']);
+
+/**
+ * The temperature band across which `auto` yields SLEET.
+ *
+ * ⚠️ A BAND, NOT A THRESHOLD, and this is a recorded amendment rather than a
+ * choice made here: Weather-Manager.md §2.2 originally derived `precipKind` as
+ * `temperature01 < 0.25 ? snow : rain` — one hard edge. `Precipitation.md` §2.5
+ * asked for a band, and §2.2 was amended to match. A single threshold means a
+ * GM dragging temperature past 0.25 sees the entire sky change species between
+ * one frame and the next; a band gives the mix weight somewhere to ramp, which
+ * is what makes sleet a real state rather than a label.
+ *
+ * ⚠️ THE BAND IS CLOSED AT BOTH ENDS (`<=` / `>=` below), because
+ * `feedback_half_open_band_excludes_its_own_member` is a named bug class here:
+ * a half-open band would make `temperature01 === 0.30` yield pure rain with a
+ * mix weight of 1, i.e. the one input that should be MOST sleet-like reading as
+ * not sleet at all.
+ */
+export const PRECIP_SLEET_BAND = Object.freeze({ coldEdge: 0.2, warmEdge: 0.3 });
+
+/**
+ * Derive what is actually falling, and (inside the sleet band) how the two
+ * species mix.
+ *
+ * ONE derivation, ONE place (Weather-Manager.md §2.2's rule) — the runtime,
+ * the UI and any future front script all read this rather than each re-deriving
+ * from temperature, which is how two consumers end up disagreeing about what
+ * the weather is.
+ *
+ * @param {string} authored - a member of {@link PRECIP_KINDS}. Anything but
+ *   `auto` WINS OUTRIGHT: a GM who said "snow" gets snow at any temperature,
+ *   because `feedback_derived_never_overwrites_authored` is LAW 4 upstream and
+ *   an authored kind is the author's hand on the wheel.
+ * @param {number} temperature01
+ * @returns {Readonly<{kind: string, mixWeight: number, authored: boolean}>}
+ *   `mixWeight` is how much of the COLD species is in the mix: 1 = all snow,
+ *   0 = all rain, and only ever between the two inside the band. It is 0 for
+ *   every non-sleet answer, so a consumer can multiply by it unconditionally.
+ */
+export function derivePrecipKind(authored, temperature01) {
+  const t = Number.isFinite(temperature01) ? Math.min(1, Math.max(0, temperature01)) : 0.55;
+  if (PRECIP_KINDS.includes(authored) && authored !== 'auto') {
+    return Object.freeze({ kind: authored, mixWeight: authored === 'snow' ? 1 : 0, authored: true });
+  }
+  const { coldEdge, warmEdge } = PRECIP_SLEET_BAND;
+  if (t < coldEdge) return Object.freeze({ kind: 'snow', mixWeight: 1, authored: false });
+  if (t > warmEdge) return Object.freeze({ kind: 'rain', mixWeight: 0, authored: false });
+  // Inside the band, inclusive of both edges. The weight runs 1 (all snow) at
+  // the cold edge to 0 (all rain) at the warm one.
+  const span = warmEdge - coldEdge;
+  const w = span > 0 ? 1 - (t - coldEdge) / span : 0.5;
+  return Object.freeze({ kind: 'sleet', mixWeight: Math.min(1, Math.max(0, w)), authored: false });
+}
 
 /**
  * The archetype label carried through to `env.weather.preset`.
@@ -412,6 +512,13 @@ export function createWeatherManager({
    * order is preserved — `applyEventOverrides` folds events in that order. */
   const activeEvents = new Map();
   let nextAutoEventId = 1;
+
+  /**
+   * What the GM said is falling, or `auto` to let temperature decide. Beside
+   * the axes rather than in them — see {@link PRECIP_KINDS}' own note on why an
+   * enum cannot be an eased axis.
+   */
+  let precipKindAuthored = 'auto';
 
   /**
    * ⚠️ A CLOSURE, NOT A `this` METHOD — see {@link read}'s own note just below
@@ -1101,6 +1208,26 @@ export function createWeatherManager({
     },
 
     /**
+     * Say what is falling, or `'auto'` to let `temperature01` decide (the
+     * default). Fails OPEN to `auto` on an unknown kind and reports it — the
+     * same shape every other closed-list setter here uses.
+     * @param {string} kind - a member of {@link PRECIP_KINDS}.
+     * @returns {Readonly<{ok: boolean, kind: string, reason: string|null}>}
+     */
+    setPrecipKindAuthored(kind) {
+      if (!PRECIP_KINDS.includes(kind)) {
+        precipKindAuthored = 'auto';
+        version++;
+        return Object.freeze({ ok: false, kind: 'auto', reason: `unknown precip kind '${kind}' — fell back to auto` });
+      }
+      if (kind !== precipKindAuthored) {
+        precipKindAuthored = kind;
+        version++;
+      }
+      return Object.freeze({ ok: true, kind: precipKindAuthored, reason: null });
+    },
+
+    /**
      * Diagnostics/UI list of every active event and where its envelope
      * currently is. `intensity01` (the authored dial) and `progress01` (the
      * envelope's own ramp) are reported SEPARATELY rather than pre-multiplied
@@ -1149,9 +1276,20 @@ export function createWeatherManager({
       for (const name of WEATHER_AXIS_NAMES) {
         composed[name] = clampAxis(name, composed[name]);
       }
+      // ⚠️ DERIVED FROM THE COMPOSED TEMPERATURE, not the base one — an event
+      // that drives the map cold must actually change what falls out of the
+      // sky, or the overlay would be visible in every term except the one a
+      // player would name first.
+      const precip = derivePrecipKind(precipKindAuthored, composed.temperature01);
       return Object.freeze({
         preset: currentPreset,
         ...composed,
+        // What is FALLING (Precipitation.md §2.5's band). `precipKind` is the
+        // species id a consumer renders; `precipMixWeight` is how much of the
+        // COLD species is in it, which is only ever non-trivial for `sleet`.
+        precipKind: precip.kind,
+        precipMixWeight: precip.mixWeight,
+        precipKindAuthored,
         hasOwner: true,
         ownerVersion: version,
       });
@@ -1201,6 +1339,17 @@ export function createWeatherManager({
         // exactly which, and why that is honest rather than a gap).
         events: Object.freeze({
           active: Object.freeze(listActiveEvents()),
+        }),
+        // P1 — what is falling, and every factor that decided it. Printed
+        // separately rather than as one answer because
+        // `feedback_count_silent_preconditions` applies to a derivation too:
+        // "it is raining" and "it is raining BECAUSE temperature is 0.55 and
+        // nobody authored a kind" are different amounts of information.
+        precipitation: Object.freeze({
+          ...derivePrecipKind(precipKindAuthored, state.temperature01),
+          authoredKind: precipKindAuthored,
+          temperature01: state.temperature01,
+          sleetBand: PRECIP_SLEET_BAND,
         }),
       });
     },

@@ -62,6 +62,8 @@ export {
   releaseVtPanViewerWeatherEvent,
   removeVtPanViewerWeatherEvent,
   getVtPanViewerWeatherActiveEvents,
+  setVtPanViewerWeatherTargets,
+  setVtPanViewerPrecipKind,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   setVtPanViewerWindForceThaw,

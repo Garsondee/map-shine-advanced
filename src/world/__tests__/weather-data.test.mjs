@@ -17,6 +17,7 @@ import {
   resolveArchetype,
   isApplicableArchetype,
   matchArchetype,
+  ARCHETYPE_OWNED_AXES,
 } from '../weather-data.js';
 import { createWeatherManager, WEATHER_AXES, WEATHER_AXIS_NAMES, DEFAULT_PRESET } from '../weather.js';
 
@@ -34,14 +35,50 @@ export function run(t) {
       WEATHER_ARCHETYPES.every((a) => a.id && a.label && a.icon && a.blurb && a.axes)
     );
     t.ok(
-      'every row sets EVERY axis — a partial row would leave the sky half-changed',
-      WEATHER_ARCHETYPES.every((a) => WEATHER_AXIS_NAMES.every((n) => Number.isFinite(a.axes[n])))
+      'every row sets EVERY archetype-owned axis — a partial row would leave the sky half-changed',
+      WEATHER_ARCHETYPES.every((a) => ARCHETYPE_OWNED_AXES.every((n) => Number.isFinite(a.axes[n])))
     );
     t.ok(
       'every axis value is inside that axis’s declared range',
       WEATHER_ARCHETYPES.every((a) =>
-        WEATHER_AXIS_NAMES.every((n) => a.axes[n] >= WEATHER_AXES[n].min && a.axes[n] <= WEATHER_AXES[n].max)
+        ARCHETYPE_OWNED_AXES.every((n) => a.axes[n] >= WEATHER_AXES[n].min && a.axes[n] <= WEATHER_AXES[n].max)
       )
+    );
+    // ⚠️ AN ARCHETYPE IS A SKY, NOT A CLIMATE — so it deliberately does NOT set
+    // `temperature01`. Weather-Manager.md §3.2's own note on the `snow` row
+    // says it: *"precipKind derives `snow` from temperature — no separate
+    // archetype table for winter"*. A `steady-rain` row that also forced the
+    // map warm would make the shelf overwrite the biome's climate every click,
+    // and picking `snow` in a desert would silently freeze it.
+    t.ok(
+      'no row sets temperature01 — that is climate, and the shelf must not overwrite it',
+      WEATHER_ARCHETYPES.every((a) => a.axes.temperature01 === undefined)
+    );
+    t.ok(
+      'ARCHETYPE_OWNED_AXES is a real subset of the axis table, not a stale copy',
+      ARCHETYPE_OWNED_AXES.every((n) => WEATHER_AXIS_NAMES.includes(n)) &&
+        ARCHETYPE_OWNED_AXES.length < WEATHER_AXIS_NAMES.length
+    );
+    // ⭐ THE PAYOFF: the wet rows actually carry precipitation, so a shelf click
+    // rains rather than only greying the sky.
+    t.ok(
+      'the wet archetypes carry real precipitation',
+      WEATHER_ARCHETYPES.find((a) => a.id === 'steady-rain').axes.precip01 > 0.5 &&
+        WEATHER_ARCHETYPES.find((a) => a.id === 'thunderstorm').axes.precip01 > 0.7 &&
+        WEATHER_ARCHETYPES.find((a) => a.id === 'drizzle').axes.precip01 > 0
+    );
+    t.ok(
+      'and the dry ones carry none — a clear sky must not drizzle',
+      ['clear', 'streaks', 'high-veil', 'fair-cumulus', 'mackerel', 'broken', 'overcast', 'gale', 'fog'].every(
+        (id) => WEATHER_ARCHETYPES.find((a) => a.id === id).axes.precip01 === 0
+      )
+    );
+    t.ok(
+      'drizzle is genuinely lighter than steady rain, which is lighter than a thunderstorm',
+      WEATHER_ARCHETYPES.find((a) => a.id === 'drizzle').axes.precip01 <
+        WEATHER_ARCHETYPES.find((a) => a.id === 'steady-rain').axes.precip01 &&
+        WEATHER_ARCHETYPES.find((a) => a.id === 'steady-rain').axes.precip01 <
+          WEATHER_ARCHETYPES.find((a) => a.id === 'thunderstorm').axes.precip01
     );
     t.ok('no row is called `custom` — that is a label, not a sky', !WEATHER_ARCHETYPE_IDS.includes(CUSTOM_PRESET));
   }

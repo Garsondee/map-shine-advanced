@@ -558,6 +558,22 @@ export {
 export { buildFireMaterial, buildFireGeometry, fireSizeClass, fireSizeClassDiameter } from './fire/fire-render.js';
 export { extractFiresFromMask, fireMaskSignature, chamferDistance } from './fire/fire-mask.js';
 export { createFireSubsystem } from './fire/fire-subsystem.js';
+// PRECIPITATION (P1, docs/planning/Precipitation.md) — the FALL. ⚠️ BUILT and
+// shader-lab-verified, but NOT drawing into the live frame yet: LAW 3 (rain
+// indoors must be unrepresentable) needs the sky-reach gate first, and
+// `graph/passes.js` declares that seam. Exported now rather than later because
+// this zone's door is how boot.js reaches it at all, and a module that lands
+// without its door is the `graph/reachable-from-boot` debt this repo ratchets.
+export { createPrecipitationSubsystem, resolveActiveSpecies } from './precipitation/precip-subsystem.js';
+export {
+  PRECIP_SPECIES,
+  PRECIP_SPECIES_IDS,
+  PRECIP_SPECIES_PLANNED,
+  resolveSpecies,
+  isBuiltSpecies,
+  resolveSpeciesFrame,
+  evalCurve,
+} from './precipitation/precip-species.js';
 // THE SPRITE — V2's four bird's-eye flame archetypes plus the colour spec they
 // are drawn with (docs/planning/Fire.md). Exported through the zone door rather
 // than imported directly by the runtime that will consume it, per `zones/

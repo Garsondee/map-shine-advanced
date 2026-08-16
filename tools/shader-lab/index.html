@@ -156,7 +156,8 @@
       #sunShadowView,
       #apertureGoboView,
       #windowGlassView,
-      #candleView {
+      #candleView,
+      #precipView {
         background: #000;
         image-rendering: pixelated;
         border: 1px solid #444;
@@ -172,7 +173,8 @@
       #apertureGoboStatus,
       #windowGlassStatus,
       #candleStatus,
-      #fireStatus {
+      #fireStatus,
+      #precipStatus {
         white-space: pre-wrap;
         font-size: 11px;
         max-height: 200px;
@@ -248,6 +250,11 @@
         <div id="candleLegend"></div>
         <div id="candleStatus">loading…</div>
       </div>
+      <div id="precipLeft" style="display: none">
+        <canvas id="precipView" width="1024" height="768"></canvas>
+        <div id="precipLegend">not initialised</div>
+        <div id="precipStatus">loading…</div>
+      </div>
       <div id="fireLeft" style="display: none">
         <canvas id="fireView" width="512" height="512"></canvas>
         <div id="fireLegend">no probe rendered yet</div>
@@ -273,6 +280,7 @@
           <option value="block-compress">BC1/BC7 encoder — real-hardware decode parity (rung 1)</option>
           <option value="albedo-clarity">Albedo Clarity — CAS sharpen vs. BC1 noise (rung 1)</option>
           <option value="fire">Fire — slab-integral noise cost (rung 1)</option>
+          <option value="precip">Precipitation — the FALL, rain + snow (rung 1)</option>
         </select>
       </fieldset>
       <div id="specPanel" style="display: none">
@@ -613,6 +621,89 @@
           </div>
         </fieldset>
       </div>
+      <div id="precipPanel" style="display: none">
+        <fieldset>
+          <legend>Precipitation — scenario</legend>
+          <select id="precipScenario"></select>
+          <button id="precipRun">Run scenario</button>
+          <div style="font-size: 11px; color: #888; margin-top: 6px">
+            Real <code>createPrecipEngine</code> + real species table on real WebGPU. Synthetic world/wind/backdrop.
+            <strong>No sky-reach gate yet</strong> — bodies fall everywhere, including where a roof would stop them.
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Species</legend>
+          <select id="precipSpecies"></select>
+          <label style="margin-left: 8px">Paused <input type="checkbox" id="precipPaused" style="flex: 0" /></label>
+          <button id="precipStep">Step 16ms</button>
+        </fieldset>
+        <fieldset>
+          <legend>Weather axes — the weather manager owns these in production</legend>
+          <label
+            >precip01 <span id="precipPrecipVal"></span
+            ><input type="range" id="precipPrecip" min="0" max="1" step="0.01" value="0.6"
+          /></label>
+          <label
+            >stormActivity01 <span id="precipStormVal"></span
+            ><input type="range" id="precipStorm" min="0" max="1" step="0.01" value="0"
+          /></label>
+          <label
+            >dayFactor01 <span id="precipDayVal"></span
+            ><input type="range" id="precipDay" min="0" max="1" step="0.01" value="1"
+          /></label>
+          <label
+            >flash01 (sky-flash) <span id="precipFlashVal"></span
+            ><input type="range" id="precipFlash" min="0" max="1" step="0.01" value="0"
+          /></label>
+          <label
+            >wind speed01 <span id="precipWindSpeedVal"></span
+            ><input type="range" id="precipWindSpeed" min="0" max="1" step="0.01" value="0.25"
+          /></label>
+          <label
+            >wind dir° <span id="precipWindDirVal"></span
+            ><input type="range" id="precipWindDir" min="0" max="360" step="1" value="90"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Look dials — the effect owns these</legend>
+          <label
+            >⭐ fallSlant01 <span id="precipSlantVal"></span
+            ><input type="range" id="precipSlant" min="0" max="1" step="0.01" value="0.62"
+          /></label>
+          <div style="font-size: 11px; color: #888; margin: -2px 0 6px">
+            0 = physically pure vertical fall (correct, and nearly invisible from directly above) · 1 = fully slanted.
+            This is the dial nobody knows the right value of yet.
+          </div>
+          <label
+            >slant dir° <span id="precipSlantDirVal"></span
+            ><input type="range" id="precipSlantDir" min="0" max="360" step="1" value="90"
+          /></label>
+          <label
+            >sizeScale <span id="precipSizeVal"></span
+            ><input type="range" id="precipSize" min="0.1" max="8" step="0.1" value="1"
+          /></label>
+          <label
+            >⭐ streakScale <span id="precipStreakVal"></span
+            ><input type="range" id="precipStreak" min="0" max="16" step="0.1" value="1"
+          /></label>
+          <div style="font-size: 11px; color: #888; margin: -2px 0 6px">
+            Multiplier on the species' <code>streakPerPxS</code>. 1.0 = the table's number, which measured 1.2–8.2
+            SCREEN px — a speck, not a streak. Sweep to find the real value.
+          </div>
+          <label
+            >chaosScale <span id="precipChaosVal"></span
+            ><input type="range" id="precipChaos" min="0" max="4" step="0.05" value="1"
+          /></label>
+          <label
+            >camera height (M(h) strength) <span id="precipCamHVal"></span
+            ><input type="range" id="precipCamH" min="200" max="4000" step="50" value="1000"
+          /></label>
+          <label
+            >zoom <span id="precipZoomVal"></span
+            ><input type="range" id="precipZoom" min="0.15" max="2" step="0.05" value="1"
+          /></label>
+        </fieldset>
+      </div>
       <div id="compositePanel" style="display: none">
         <fieldset>
           <legend>Composite scenario (rung 3)</legend>
@@ -759,6 +850,7 @@
     <script type="module" src="/tools/shader-lab/albedo-clarity-lab.js"></script>
     <script type="module" src="/tools/shader-lab/candle-lab.js"></script>
     <script type="module" src="/tools/shader-lab/fire-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/precip-lab.js"></script>
     <!-- LAST: owns the view column, so its answer wins over every bench's own
          (see view-visibility.js's header for why that is one file's job). -->
     <script type="module" src="/tools/shader-lab/view-visibility.js"></script>

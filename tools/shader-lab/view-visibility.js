@@ -54,6 +54,7 @@ const VIEW_BY_EFFECT = Object.freeze({
   'window-glass': 'windowGlassLeft',
   candle: 'candleLeft',
   fire: 'fireLeft',
+  precip: 'precipLeft',
 });
 
 const ALL_CONTAINERS = [...new Set(Object.values(VIEW_BY_EFFECT))];

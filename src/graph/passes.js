@@ -455,6 +455,17 @@ export const PASSES = [
       'additively into scene.lit, as a viewer closure in the local passImpls map (mirrors the candle ' +
       'flame). Per-pixel gating is a higher rung.',
   },
+  // ⚠️ PRECIPITATION IS NOT DECLARED HERE YET, and that is a considered
+  // omission rather than an oversight. P1's FALL runtime is built and
+  // shader-lab-verified (2026-08-16), but its draw has no place in the frame
+  // until Precipitation.md LAW 3's sky-reach gate exists — and a first attempt
+  // at a `seam` row here was REFUSED BY THIS FILE'S OWN VALIDATOR, correctly:
+  // it named `res:precip`/`res:skyReach`, which no pass creates. A pass row
+  // whose resources are imaginary is a worse record than no row, because the
+  // graph would then validate against a fiction. The honest gap is recorded
+  // where the code actually is (`effects/precipitation/precip-subsystem.js`'s
+  // header, its `getStatus().wired`, and the `effects/index.js` export note).
+  // The row lands in the commit that lands the gate, naming real resources.
   {
     id: 'vision.gate',
     stage: 'surface',

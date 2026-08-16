@@ -217,6 +217,8 @@ import {
   releaseVtPanViewerWeatherEvent,
   removeVtPanViewerWeatherEvent,
   getVtPanViewerWeatherActiveEvents,
+  setVtPanViewerWeatherTargets,
+  setVtPanViewerPrecipKind,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   resetVtPanViewerFrameStats,
@@ -440,6 +442,14 @@ import {
   createApertureGoboRegistration,
   APERTURE_GOBO_PARAMS,
   APERTURE_GOBO_DEBUG_CHANNELS,
+  // PRECIPITATION (P1) — the species table + its response model. The
+  // SUBSYSTEM is deliberately not imported yet: it has no draw pass to hang
+  // on until the sky-reach gate lands (LAW 3), and importing a factory nobody
+  // calls is the same unwired-seam debt in a different coat.
+  PRECIP_SPECIES,
+  PRECIP_SPECIES_IDS,
+  resolveSpecies,
+  resolveSpeciesFrame,
 } from './effects/index.js';
 import {
   buildSunShadowsReport,
@@ -833,6 +843,28 @@ MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
 // for it yet. See `world/weather-events.js`'s own header for exactly which of
 // the 9 built-ins move a pixel this slice (only `ash-storm` — the rest need
 // slice 5/6's machinery).
+// PRECIPITATION (P1, docs/planning/Precipitation.md) — console-first, the same
+// posture every weather lever above shipped under.
+//
+// ⚠️ `MapShine.setPrecip(0.8)` MOVES A REAL AXIS TODAY but does not yet draw a
+// single drop: the FALL runtime is built and shader-lab-verified, and the
+// remaining gap is LAW 3's sky-reach gate (rain must be unrepresentable
+// indoors), declared as a seam in `graph/passes.js`. The axis is live now
+// because the weather manager owns it and `steady-rain` on the astrolabe shelf
+// already sets it — `MapShine.getPrecipitation()` reports exactly that state
+// rather than letting "I set it and nothing happened" look like a bug.
+MapShine.setPrecip = (v) => setVtPanViewerWeatherTargets({ precip01: v });
+MapShine.setTemperature = (v) => setVtPanViewerWeatherTargets({ temperature01: v });
+MapShine.setPrecipKind = setVtPanViewerPrecipKind;
+MapShine.getPrecipitation = () => ({
+  species: PRECIP_SPECIES_IDS,
+  drawing: false,
+  note: 'the FALL is built + lab-verified; the sky-reach gate (LAW 3) is what stands between this and pixels',
+  table: PRECIP_SPECIES,
+  resolveSpecies,
+  resolveSpeciesFrame,
+});
+
 MapShine.addWeatherEvent = addVtPanViewerWeatherEvent;
 MapShine.releaseWeatherEvent = releaseVtPanViewerWeatherEvent;
 MapShine.removeWeatherEvent = removeVtPanViewerWeatherEvent;

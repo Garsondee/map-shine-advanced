@@ -34,7 +34,9 @@ function runFor(mgr, seconds, stepSec = 1 / 60, axis = 'cloudCover01') {
 export function run(t) {
   // ---- the axis table itself -------------------------------------------------
   {
-    t.ok('four cloud axes ship in slice 1', WEATHER_AXIS_NAMES.length === 4);
+    // Four cloud axes (slice 1) + precip01/temperature01 (P1, the slice that
+    // wired their first real consumer — the unconsumed-axis rule in action).
+    t.ok('six axes ship: four cloud + two precipitation', WEATHER_AXIS_NAMES.length === 6);
     t.ok(
       'every axis declares a full spec',
       WEATHER_AXIS_NAMES.every((n) => {
@@ -56,8 +58,20 @@ export function run(t) {
     // and one a GM reports as broken. Anything slower than a minute-and-a-half
     // to LOOK done should be a deliberate, argued change, not a drift.
     t.ok(
-      'no axis takes longer than 90s to look done at brisk',
-      WEATHER_AXIS_NAMES.every((n) => WEATHER_AXES[n].durationUpSec <= 90 && WEATHER_AXES[n].durationDownSec <= 90)
+      'no SKY axis takes longer than 90s to look done at brisk',
+      ['cloudCover01', 'cloudType01', 'cloudAltitudePx', 'cloudScalePx', 'precip01'].every(
+        (n) => WEATHER_AXES[n].durationUpSec <= 90 && WEATHER_AXES[n].durationDownSec <= 90
+      )
+    );
+    // ⚠️ `temperature01` is DELIBERATELY exempt from the guard above and is the
+    // only exemption. Thermal mass is real: a map does not go from snowing to
+    // raining inside a scene beat, and since the derived `precipKind` flips on
+    // this axis, a fast temperature would strobe the whole sky between species
+    // every time a GM nudged the slider. The guard is scoped rather than
+    // widened so a future axis cannot quietly inherit the exemption.
+    t.ok(
+      'temperature is the one axis allowed to be slower, and it IS slower',
+      WEATHER_AXES.temperature01.durationUpSec > 90
     );
     t.ok(
       'cover — the one axis with live consumers — lands inside a scene beat',

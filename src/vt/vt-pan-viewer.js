@@ -6863,6 +6863,26 @@ export async function startVtPanViewer({
     }
 
     /**
+     * ⭐ THE GENERAL AXIS SETTER (P1). Every earlier lever here drives ONE
+     * named axis (`setCloudCover`), which was right while there were four and
+     * is wrong now there are six and more coming — a per-axis wrapper per axis
+     * is a hand-maintained dispatch list, and this project has a named bug
+     * class for those (`feedback_hand_maintained_dispatch_list_forgets_new_effects`).
+     * `setTargets` already reports unknown keys rather than dropping them, so
+     * a typo here is loud rather than silent.
+     * @param {object} patch @returns {object}
+     */
+    function setWeatherTargets(patch) {
+      const res = weather.setTargets(patch);
+      weatherEverApplied = true;
+      return { ...res, state: weather.read().state };
+    }
+    /** @param {string} kind @returns {object} */
+    function setPrecipKind(kind) {
+      return weather.setPrecipKindAuthored(kind);
+    }
+
+    /**
      * THE SKY-LIGHT LEVER, 0..1 (docs/planning/Sky.md §8). `0` — the default —
      * makes the sky light a mathematical no-op, preserving the
      * pixel-identical-to-Foundry-at-noon parity check exactly. `1` is the full
@@ -15853,6 +15873,10 @@ export async function startVtPanViewer({
       removeWeatherEvent,
       /** Every currently-active event and where its envelope is. */
       getWeatherActiveEvents,
+      /** Set any weather axis by name — the general form of setCloudCover. */
+      setWeatherTargets,
+      /** What is falling: 'auto' | rain | snow | sleet | hail | ash | embers. */
+      setPrecipKind,
       /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
       setSkyRealism,
       /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
@@ -18045,6 +18069,22 @@ export function removeVtPanViewerWeatherEvent(id) {
 export function getVtPanViewerWeatherActiveEvents() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getWeatherActiveEvents();
+}
+
+/**
+ * Set any weather axis by name — the general form of `setVtPanViewerCloudCover`
+ * (P1 needs `precip01`/`temperature01`, and a per-axis wrapper per axis is a
+ * hand-maintained dispatch list waiting to forget the next one).
+ * @param {object} patch @returns {object}
+ */
+export function setVtPanViewerWeatherTargets(patch) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setWeatherTargets(patch);
+}
+/** @param {string} kind @returns {object} */
+export function setVtPanViewerPrecipKind(kind) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setPrecipKind(kind);
 }
 
 /**

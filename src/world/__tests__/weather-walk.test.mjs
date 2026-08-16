@@ -384,9 +384,24 @@ export function run(t) {
     const mgr = createWeatherManager({ mode: 'almanac', biome: 'desert' });
     mgr.tick(1 / 60, { dtGameHours: 1, hour: 12 });
     const w = mgr.toSnapshotWeather();
-    const expectedKeys = [...Object.keys(WEATHER_AXES), 'preset', 'hasOwner', 'ownerVersion'];
+    // ⚠️ `precipKind`/`precipMixWeight`/`precipKindAuthored` are DERIVED
+    // fields, not almanac internals — they are the one thing consumers cannot
+    // compute themselves without re-implementing the sleet band, which is
+    // exactly the duplication Weather-Manager.md §2.2's "one derivation, one
+    // place" rule forbids. They are listed explicitly rather than the check
+    // being loosened to a subset, so this assertion still fails loudly the day
+    // an ALMANAC field tries to sneak into the snapshot.
+    const expectedKeys = [
+      ...Object.keys(WEATHER_AXES),
+      'preset',
+      'hasOwner',
+      'ownerVersion',
+      'precipKind',
+      'precipMixWeight',
+      'precipKindAuthored',
+    ];
     t.ok(
-      'the snapshot shape is exactly the axes + preset + owner fields, nothing almanac-shaped',
+      'the snapshot shape is exactly the axes + preset + owner + derived-precip fields, nothing almanac-shaped',
       Object.keys(w).sort().join(',') === expectedKeys.sort().join(',')
     );
   }

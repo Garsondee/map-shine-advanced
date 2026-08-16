@@ -65,6 +65,13 @@ export const DEFAULT_WEATHER = Object.freeze({
   cloudType01: 0.5,
   cloudAltitudePx: 1400,
   cloudScalePx: 1100,
+  // ── PRECIPITATION (P1) ────────────────────────────────────────────────────
+  // `precip01` is above, and has ridden this object with no consumer since it
+  // was written; `effects/precipitation` is finally that consumer.
+  // `temperature01` joins it because the derived `precipKind` needs an input —
+  // 0.55 is a mild default WELL clear of the sleet band, so a map that never
+  // sets it rains rather than sitting ambiguously on a species boundary.
+  temperature01: 0.55,
   // ── THE OWNER CONTRACT ────────────────────────────────────────────────────
   // `false` means NOBODY WROTE THIS — the values above are the module's own
   // defaults, not a weather owner's answer. Without this flag `cloudCover01: 0`

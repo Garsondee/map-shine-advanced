@@ -85,96 +85,173 @@ export const WEATHER_ARCHETYPES = Object.freeze([
     label: 'Clear',
     icon: '☀',
     blurb: 'Cloudless. Hard architectural shadows, maximum colour.',
-    axes: Object.freeze({ cloudCover01: 0, cloudType01: 0.5, cloudAltitudePx: 1400, cloudScalePx: 1100 }),
+    axes: Object.freeze({ cloudCover01: 0, cloudType01: 0.5, cloudAltitudePx: 1400, cloudScalePx: 1100, precip01: 0 }),
   }),
   Object.freeze({
     id: 'streaks',
     label: 'Cirrus',
     icon: '🪶',
     blurb: 'High streaks, drifting fast. Faint soft bands cross the map.',
-    axes: Object.freeze({ cloudCover01: 0.25, cloudType01: 0.0, cloudAltitudePx: 2800, cloudScalePx: 4000 }),
+    axes: Object.freeze({
+      cloudCover01: 0.25,
+      cloudType01: 0.0,
+      cloudAltitudePx: 2800,
+      cloudScalePx: 4000,
+      precip01: 0,
+    }),
   }),
   Object.freeze({
     id: 'high-veil',
     label: 'Veil',
     icon: '🌤',
     blurb: 'Cirrostratus. A milky halo sky — wide, gentle dimming.',
-    axes: Object.freeze({ cloudCover01: 0.35, cloudType01: 0.05, cloudAltitudePx: 3000, cloudScalePx: 4200 }),
+    axes: Object.freeze({
+      cloudCover01: 0.35,
+      cloudType01: 0.05,
+      cloudAltitudePx: 3000,
+      cloudScalePx: 4200,
+      precip01: 0,
+    }),
   }),
   Object.freeze({
     id: 'fair-cumulus',
     label: 'Fair',
     icon: '⛅',
     blurb: 'Fair-weather cumulus. Crisp island shadows sailing across the map.',
-    axes: Object.freeze({ cloudCover01: 0.35, cloudType01: 0.5, cloudAltitudePx: 1400, cloudScalePx: 1100 }),
+    axes: Object.freeze({
+      cloudCover01: 0.35,
+      cloudType01: 0.5,
+      cloudAltitudePx: 1400,
+      cloudScalePx: 1100,
+      precip01: 0,
+    }),
   }),
   Object.freeze({
     id: 'mackerel',
     label: 'Mackerel',
     icon: '🐟',
     blurb: 'Altocumulus. Fine dappled grain, medium-soft.',
-    axes: Object.freeze({ cloudCover01: 0.5, cloudType01: 0.4, cloudAltitudePx: 1900, cloudScalePx: 350 }),
+    axes: Object.freeze({ cloudCover01: 0.5, cloudType01: 0.4, cloudAltitudePx: 1900, cloudScalePx: 350, precip01: 0 }),
   }),
   Object.freeze({
     id: 'broken',
     label: 'Broken',
     icon: '🌥',
     blurb: 'Stratocumulus. Moving HOLES of light — the most dramatic sky here.',
-    axes: Object.freeze({ cloudCover01: 0.65, cloudType01: 0.7, cloudAltitudePx: 900, cloudScalePx: 700 }),
+    axes: Object.freeze({ cloudCover01: 0.65, cloudType01: 0.7, cloudAltitudePx: 900, cloudScalePx: 700, precip01: 0 }),
   }),
   Object.freeze({
     id: 'overcast',
     label: 'Overcast',
     icon: '☁',
     blurb: 'Flat grey lid. No cloud shadows — it is all shadow.',
-    axes: Object.freeze({ cloudCover01: 0.95, cloudType01: 0.9, cloudAltitudePx: 700, cloudScalePx: 5000 }),
+    axes: Object.freeze({
+      cloudCover01: 0.95,
+      cloudType01: 0.9,
+      cloudAltitudePx: 700,
+      cloudScalePx: 5000,
+      precip01: 0,
+    }),
   }),
   Object.freeze({
     id: 'fog',
     label: 'Fog',
     icon: '🌫',
     blurb: 'Stratus at ground level. Shadows nearly gone; the air itself glows.',
-    axes: Object.freeze({ cloudCover01: 0.7, cloudType01: 1.0, cloudAltitudePx: 300, cloudScalePx: 6000 }),
+    axes: Object.freeze({ cloudCover01: 0.7, cloudType01: 1.0, cloudAltitudePx: 300, cloudScalePx: 6000, precip01: 0 }),
   }),
   Object.freeze({
     id: 'drizzle',
     label: 'Drizzle',
     icon: '🌦',
     blurb: 'Light nimbostratus. Silver gloom, wet sheen rising.',
-    axes: Object.freeze({ cloudCover01: 1.0, cloudType01: 0.95, cloudAltitudePx: 550, cloudScalePx: 5000 }),
+    axes: Object.freeze({
+      cloudCover01: 1.0,
+      cloudType01: 0.95,
+      cloudAltitudePx: 550,
+      cloudScalePx: 5000,
+      precip01: 0.3,
+    }),
   }),
   Object.freeze({
     id: 'steady-rain',
     label: 'Rain',
     icon: '🌧',
     blurb: 'Nimbostratus. Dark, saturated, every glint dead.',
-    axes: Object.freeze({ cloudCover01: 1.0, cloudType01: 1.0, cloudAltitudePx: 500, cloudScalePx: 5000 }),
+    axes: Object.freeze({
+      cloudCover01: 1.0,
+      cloudType01: 1.0,
+      cloudAltitudePx: 500,
+      cloudScalePx: 5000,
+      precip01: 0.7,
+    }),
   }),
   Object.freeze({
     id: 'snow',
     label: 'Snow',
     icon: '❄',
     blurb: 'Cold nimbostratus. Bright and flat.',
-    axes: Object.freeze({ cloudCover01: 0.9, cloudType01: 0.95, cloudAltitudePx: 600, cloudScalePx: 4500 }),
+    axes: Object.freeze({
+      cloudCover01: 0.9,
+      cloudType01: 0.95,
+      cloudAltitudePx: 600,
+      cloudScalePx: 4500,
+      precip01: 0.6,
+    }),
   }),
   Object.freeze({
     id: 'gale',
     label: 'Gale',
     icon: '💨',
     blurb: 'Dry windstorm. Fast ragged streaks — the motion IS the look.',
-    axes: Object.freeze({ cloudCover01: 0.3, cloudType01: 0.3, cloudAltitudePx: 2200, cloudScalePx: 2600 }),
+    axes: Object.freeze({
+      cloudCover01: 0.3,
+      cloudType01: 0.3,
+      cloudAltitudePx: 2200,
+      cloudScalePx: 2600,
+      precip01: 0,
+    }),
   }),
   Object.freeze({
     id: 'thunderstorm',
     label: 'Storm',
     icon: '⛈',
     blurb: 'Cumulonimbus. A dark cell with its anvil streaming downwind.',
-    axes: Object.freeze({ cloudCover01: 0.8, cloudType01: 0.6, cloudAltitudePx: 900, cloudScalePx: 1600 }),
+    axes: Object.freeze({
+      cloudCover01: 0.8,
+      cloudType01: 0.6,
+      cloudAltitudePx: 900,
+      cloudScalePx: 1600,
+      precip01: 0.85,
+    }),
   }),
 ]);
 
 /** @type {readonly string[]} — the closed list, in shelf order. */
 export const WEATHER_ARCHETYPE_IDS = Object.freeze(WEATHER_ARCHETYPES.map((a) => a.id));
+
+/**
+ * The axes an archetype ROW is allowed to set — a sky, not a climate.
+ *
+ * ⚠️ `temperature01` IS DELIBERATELY ABSENT. Weather-Manager.md §3.2's own note
+ * on the `snow` row states the rule: *"precipKind derives `snow` from
+ * temperature — no separate archetype table for winter"*. A `steady-rain` row
+ * that also forced the map warm would make every shelf click overwrite the
+ * biome's climate, and clicking `snow` in a desert would silently freeze it.
+ * Climate belongs to the biome and to the GM; the shelf picks what the SKY is
+ * doing.
+ *
+ * Exported so the test asserts this boundary against ONE list rather than
+ * restating it — two copies of "which axes an archetype owns" is
+ * `feedback_shared_field_two_meanings_two_registries` waiting to happen.
+ */
+export const ARCHETYPE_OWNED_AXES = Object.freeze([
+  'cloudCover01',
+  'cloudType01',
+  'cloudAltitudePx',
+  'cloudScalePx',
+  'precip01',
+]);
 
 /** Index for O(1) lookup. Built once; the table is frozen so it cannot drift. */
 const BY_ID = new Map(WEATHER_ARCHETYPES.map((a) => [a.id, a]));

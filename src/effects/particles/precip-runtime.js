@@ -186,6 +186,15 @@ const WIND_OFFSET_MAX_CAM_HEIGHTS = 3;
 const ROUGHNESS = 0.3;
 
 /**
+ * How hard a lit body brightens per unit of scene luminance.
+ *
+ * Deliberately modest: the point is a GLINT as a drop crosses a lamp's pool,
+ * not rain that outshines the lamp. Above ~3 a torch turns its whole column of
+ * rain into a white bar, which reads as a bug rather than as light.
+ */
+const ILLUM_GAIN = 2.2;
+
+/**
  * Build one precipitation engine for ONE species.
  *
  * @param {object} deps
@@ -218,6 +227,13 @@ export function createPrecipEngine({
   windHandle = TIER0_WIND_HANDLE,
   pxPerMeter = 100,
   openSkyTexture = null,
+  /**
+   * ⭐ P7's LUXURY RUNG (§3.5) — `buf:scene.illum`, so a body picks up the
+   * light it is passing through. Injected from vt/ like every other screen
+   * buffer; absent ⇒ the whole term compiles OUT (a JS branch, not a uniform
+   * set to zero), so a caller that does not supply it pays nothing at all.
+   */
+  illumTexture = null,
 }) {
   const TSL = THREE.TSL;
   const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } = TSL;
@@ -532,6 +548,23 @@ export function createPrecipEngine({
    * perspective.
    */
   const uViewScale = uniform(float(1));
+  /**
+   * ⭐ THE VIEW's WORLD RECT — what turns a body's world position into a screen
+   * UV, and therefore the ONE thing the illum lookup needs beyond the texture.
+   * The same mapping `water-render.js` uses against the same buffers; a second
+   * hand-rolled screen mapping is how two effects end up sampling different
+   * pixels for the same place.
+   */
+  const uViewRect = uniform(vec4(0, 0, 1, 1));
+  /** 0 = unlit sprites (V2's proven scalar model alone), 1 = full pickup. */
+  const uIllumLit01 = uniform(float(0.85));
+  /**
+   * ⚠️ A SEPARATE `texture()` NODE, AND SAMPLED WITH A **SCREEN** UV — this is
+   * the exact case `feedback_shared_texture_node_carries_the_wrong_uv` is about.
+   * `buf:scene.illum` is screen-sized; sampling it with a mask-rect mapping (as
+   * the sky gate does) would read a completely unrelated pixel.
+   */
+  const illumTex = illumTexture ? TSL.texture(illumTexture) : null;
   // Construction-time constant, not a uniform: `pxPerMeter` cannot change mid-session.
   const windPxPerSec = float(pxPerMeter * 3.2);
 
@@ -1132,7 +1165,44 @@ export function createPrecipEngine({
     // `z` carries alive × the birth fade — both are pure opacity multipliers,
     // and packing them costs no extra varying (storage reads are vertex-stage
     // only, so every fragment input has to fit in this one vec4).
-    return vec4(fall01, c.x, visible, skyGate);
+    /**
+     * ⭐ P7 — THE BODY PICKS UP THE LIGHT IT IS PASSING THROUGH (§3.5's luxury
+     * rung): *"rain glitters passing a torch, snow glows crossing a lantern's
+     * pool."*
+     *
+     * ⚠️ SAMPLED PER **BODY**, IN THE VERTEX STAGE, NOT PER PIXEL. §3.5 budgets
+     * it as "one texture read in the draw material", and a body is a handful of
+     * pixels — so a per-vertex read is 4 samples per sprite against hundreds
+     * per-fragment at heavy rain, for a difference nobody can see on something
+     * this small. It also lands where the storage reads already are.
+     *
+     * ⚠️ AND IT **BRIGHTENS ONLY** — `max(1, …)`, never a multiply that can go
+     * below 1. An unlit corner of the map must not make rain DARKER than the
+     * scalar day/night model already says it is: that model is V2's harvested
+     * taste and it is already correct for ambient. This adds the torch, it does
+     * not take over the lighting (`feedback_calibrated_term_stays_calibrated`).
+     */
+    if (!illumTex) return vec4(fall01, c.x, visible, skyGate);
+    const su = pDrawn.x.sub(uViewRect.x).div(uViewRect.z.sub(uViewRect.x).max(float(1)));
+    const sv = pDrawn.y.sub(uViewRect.y).div(uViewRect.w.sub(uViewRect.y).max(float(1)));
+    const inView = su
+      .greaterThanEqual(float(0))
+      .and(su.lessThanEqual(float(1)))
+      .and(sv.greaterThanEqual(float(0)))
+      .and(sv.lessThanEqual(float(1)));
+    const illum = illumTex.sample(vec2(su.clamp(float(0), float(1)), sv.clamp(float(0), float(1)))).rgb;
+    // Luminance, not a channel — a red torch must brighten a drop as much as a
+    // white one of the same power, or coloured lights would silently dim rain.
+    const lum = illum.x
+      .mul(float(0.2126))
+      .add(illum.y.mul(float(0.7152)))
+      .add(illum.z.mul(float(0.0722)));
+    const pickup = mix(
+      float(1),
+      float(1).max(lum.mul(float(ILLUM_GAIN))),
+      uIllumLit01.mul(inView.select(float(1), float(0)))
+    );
+    return vec4(fall01, c.x.mul(pickup), visible, skyGate);
   })().toVarying('vPrecipBody');
 
   const material = new THREE.NodeMaterial();
@@ -1326,6 +1396,8 @@ export function createPrecipEngine({
   const HEAD = S?.body.headRgba ?? [1, 1, 1, 1];
   const TAIL = S?.body.tailRgba ?? [1, 1, 1, 1];
   const SOFT = S?.body.softness01 ?? 0.5;
+  /** Above bloom's threshold ⇒ this body is a light source. Build-time. */
+  const EMISSIVE = S?.body.emissive01 ?? 0;
 
   material.colorNode = Fn(() => {
     const bright = vBody.y;
@@ -1334,6 +1406,17 @@ export function createPrecipEngine({
     // so the same expression serves both bodies without a branch.
     const t = uv().y;
     const rgb = mix(vec3(TAIL[0], TAIL[1], TAIL[2]), vec3(HEAD[0], HEAD[1], HEAD[2]), t);
+    /**
+     * ⭐ P7 — `body.emissive01` FINALLY HAS A CONSUMER. P6 shipped `spore` and
+     * `mote` carrying values authored ABOVE bloom's 4.0 threshold (§3.5: an
+     * emissive body that wants to glow must be authored above it, not hoped)
+     * and said plainly that nothing read them. This is the read.
+     *
+     * ⚠️ A BUILD-TIME BRANCH ON A FROZEN ROW VALUE, so every water species
+     * compiles to exactly the expression it had before — rain pays literally
+     * nothing for spore's glow (Effects.md Law 4).
+     */
+    if (EMISSIVE > 0) return rgb.mul(bright).mul(uRgbMul).mul(float(EMISSIVE));
     return rgb.mul(bright).mul(uRgbMul);
   })();
 
@@ -1551,6 +1634,13 @@ export function createPrecipEngine({
     },
 
     /** @param {{minX:number,minY:number,maxX:number,maxY:number}} rect */
+    /** The VIEW's world rect — what maps a body's world position to a screen UV
+     * for the illum pickup. Pushed per frame beside the spawn rect. */
+    setViewRect(rect) {
+      if (!rect) return;
+      uViewRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+    },
+
     setWorldRect(rect) {
       if (!rect) return;
       uRectMin.value.set(rect.minX, rect.minY);
@@ -1605,6 +1695,7 @@ export function createPrecipEngine({
       // how the two pictures end up disagreeing about where the squall is.
       if (Number.isFinite(t.curtainBandDepth)) uSquallDepth.value = Math.max(0, Math.min(1, t.curtainBandDepth));
       if (Number.isFinite(t.curtainBandScale)) uSquallScale.value = Math.max(0.01, t.curtainBandScale);
+      if (Number.isFinite(t.illumLit01)) uIllumLit01.value = Math.max(0, Math.min(1, t.illumLit01));
       if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
       if (Number.isFinite(t.cameraHeight)) camHeightBase = Math.max(1, t.cameraHeight);
     },

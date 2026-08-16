@@ -3090,6 +3090,8 @@ export async function startVtPanViewer({
       // function's own "GETTERS VS VALUES" header.
       getWindHandle: () => windHandle,
       openSkyTexture: precipOpenSkyTexture,
+      // ⭐ P7's LUXURY RUNG (§3.5) — rain glitters passing a torch.
+      illumTexture: sceneIllum.texture,
       // ── THE MANTLE (P3) ──
       createMantleTarget: createMantleRenderTarget,
       disposeMantleTarget: disposeMantleRenderTarget,

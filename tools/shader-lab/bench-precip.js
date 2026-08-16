@@ -193,6 +193,19 @@ class PrecipDriver {
    * Row 0 = minY, matching `MaskGrid`'s own convention and the `flipY: false`
    * default every other bake in this project relies on.
    */
+  /** The synthetic torch — see its use site. Dark left, bright right. */
+  buildIllumTexture() {
+    const THREE = this.THREE;
+    if (this._illumTexture) return this._illumTexture;
+    const data = new Uint8Array([0, 0, 0, 255, 255, 250, 225, 255, 0, 0, 0, 255, 255, 250, 225, 255]);
+    const tex = new THREE.DataTexture(data, 2, 2, THREE.RGBAFormat);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
+    this._illumTexture = tex;
+    return tex;
+  }
+
   buildSkyReachTexture() {
     const THREE = this.THREE;
     if (this._skyReachTexture) return this._skyReachTexture;
@@ -275,8 +288,15 @@ class PrecipDriver {
         windHandle: this.wind,
         renderOrder: 10,
         openSkyTexture,
+        // ⭐ P7 — a synthetic "torch": a 2×2 texture whose LEFT half is dark and
+        // RIGHT half is bright, so a body's pickup is decidable by which side of
+        // the frame it is on. Asymmetric on purpose: a uniform light would make
+        // "it brightened" and "everything brightened" indistinguishable, which
+        // is the flip-calibration trap two benches here have already recorded.
+        illumTexture: this.buildIllumTexture(),
       });
       engine.setWorldRect(WORLD);
+      engine.setViewRect(WORLD);
       // The lab's synthetic "scene" is the whole world rect, so the clip is
       // armed but never bites — proving the code path runs without changing
       // any existing scenario's numbers.
@@ -1345,6 +1365,94 @@ export function createPrecipBench({ THREE, log }) {
         ],
         inputs: { hoursSnowing: 4, hoursThawing: 7.5 },
         stats: { atStart, snowed, indoors, thawing, thawed, texels: `${mantle.texW}x${mantle.texH}` },
+        artifacts: [],
+      };
+    },
+  });
+
+  /**
+   * ⭐ P7 — THE LUXURY RUNG (§3.5). A body picks up the light it passes through.
+   *
+   * ⚠️ MEASURED AS A LEFT/RIGHT DIFFERENCE, not as "did the frame get
+   * brighter". The synthetic illum is dark on one side and bright on the other,
+   * so a term that lit EVERYTHING equally (the easy bug — sampling a constant,
+   * or the wrong uv, or clamping to a single texel) fails just as loudly as one
+   * that lights nothing.
+   */
+  scenarios.set('bodies-pick-up-the-light-they-pass', {
+    name: 'bodies-pick-up-the-light-they-pass',
+    summary: 'rain brightens crossing a lit patch, never darkens in an unlit one.',
+    async run() {
+      driver.setSpecies('rain');
+      driver.set({
+        fall: true,
+        arrival: false,
+        curtain: false,
+        skyGate: false,
+        precip01: 0.9,
+        windSpeed01: 0,
+        curtainBandDepth: 0,
+      });
+
+      /**
+       * ⚠⚠ AVERAGED OVER SEVERAL SAMPLES, AND THAT IS NOT PADDING. Every
+       * `measureRegion` ADVANCES the simulation, so two readings are two
+       * DIFFERENT random populations of drops — the same scene measured twice
+       * differs by a few percent purely from which bodies happen to be where.
+       *
+       * This scenario passed alone at 4.7% drift and failed at 8.2% when run
+       * after the others, against an 8% bar: not a regression, just the
+       * instrument's own noise floor crossing a line drawn below it. The honest
+       * fix is to BEAT the noise (average it down) rather than widen the bar
+       * until it stops complaining — widening would have left a real 8% bug
+       * undetectable ever after (`feedback_calibration_needs_a_contrast_guard`).
+       */
+      const LEFT = { u0: 0.02, u1: 0.45, v0: 0.05, v1: 0.95 };
+      const RIGHT = { u0: 0.55, u1: 0.98, v0: 0.05, v1: 0.95 };
+      const meanOf = async (rect, samples, settle) => {
+        let sum = 0;
+        for (let k = 0; k < samples; k++) sum += (await driver.measureRegion(rect, k === 0 ? settle : 6)).meanLuma;
+        return sum / samples;
+      };
+
+      driver.engine.setTuning({ illumLit01: 0 });
+      const offL = { meanLuma: await meanOf(LEFT, 5, 30) };
+      const offR = { meanLuma: await meanOf(RIGHT, 5, 2) };
+
+      driver.engine.setTuning({ illumLit01: 1 });
+      const onL = { meanLuma: await meanOf(LEFT, 5, 30) };
+      const onR = { meanLuma: await meanOf(RIGHT, 5, 2) };
+
+      driver.engine.setTuning({ illumLit01: 0.85 });
+      driver.set({ arrival: true, curtain: true, precip01: 0.6, curtainBandDepth: 0.8 });
+
+      return {
+        checks: [
+          evaluate('the-lit-side-brightens', () => ({
+            ok: onR.meanLuma > offR.meanLuma * 1.15,
+            measured: { off: +offR.meanLuma.toFixed(4), on: +onR.meanLuma.toFixed(4) },
+            expected: '> 15% brighter under the torch',
+          })),
+          // ⚠️ THE CHECK THAT CATCHES A WRONG UV. A constant or mis-mapped sample
+          // lights both halves equally and would sail through the check above.
+          evaluate('the-unlit-side-is-untouched', () => {
+            const drift = Math.abs(onL.meanLuma - offL.meanLuma) / Math.max(1e-6, offL.meanLuma);
+            return {
+              ok: drift < 0.05,
+              measured: +drift.toFixed(4),
+              expected: '< 5% change where there is no light — a wrong uv lights BOTH halves',
+            };
+          }),
+          // ⭐ IT BRIGHTENS ONLY. An unlit corner must not make rain DARKER than
+          // V2's scalar day/night model already says it is.
+          evaluate('darkness-never-dims-the-rain', () => ({
+            ok: onL.meanLuma >= offL.meanLuma * 0.95,
+            measured: { off: +offL.meanLuma.toFixed(4), on: +onL.meanLuma.toFixed(4) },
+            expected: 'the unlit side is never dimmer than with the term off',
+          })),
+        ],
+        inputs: { illumLit01: [0, 1] },
+        stats: { offL, offR, onL, onR },
         artifacts: [],
       };
     },

@@ -108,6 +108,9 @@ export function createPrecipitationSubsystem({
   getWindHandle = () => null,
   getPxPerMeter = () => 100,
   openSkyTexture = null,
+  /** ⭐ P7 (§3.5) — `buf:scene.illum`, so a body picks up the light it passes
+   * through. Absent ⇒ the term compiles out of every engine. */
+  illumTexture = null,
   renderOrder = 0,
   // ── THE MANTLE (P3) ──
   /** The ALLOCATOR DOOR for the mantle's ping-pong pair, injected exactly as
@@ -288,6 +291,7 @@ export function createPrecipitationSubsystem({
       pxPerMeter: getPxPerMeter() ?? 100,
       renderOrder,
       openSkyTexture,
+      illumTexture,
     });
     // ⚠️ A LATE-BUILT ENGINE MUST INHERIT THE CURRENT STATE. Engines are built
     // lazily (a clear map allocates nothing), so `snow` may first appear hours
@@ -465,6 +469,10 @@ export function createPrecipitationSubsystem({
       // note at `getPrecipRenderState`'s own `worldRect` in vt-pan-viewer.js.
       const rect = worldRect ?? st.worldRect ?? null;
       if (rect) engine.setWorldRect(rect);
+      // The VIEW rect, for P7's illum pickup — the same rect, named for the
+      // other job it does, so a reader is not left wondering which mapping a
+      // screen-space sample uses.
+      if (rect) engine.setViewRect(rect);
       // The SCENE's bounds, distinct from the view rect above — rain must not
       // fall in the void around the map (the author saw exactly that on the
       // Mansion). Pushed per frame because it is one uniform write and a scene

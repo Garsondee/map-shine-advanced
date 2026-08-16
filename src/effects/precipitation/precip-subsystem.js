@@ -31,6 +31,7 @@
  */
 import { createPrecipEngine } from '../particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../particles/precip-splash-runtime.js';
+import { createMantleRuntime } from './mantle-runtime.js';
 import { PRECIP_SPECIES, PRECIP_SPECIES_IDS, resolveSpeciesFrame, isBuiltSpecies } from './precip-species.js';
 import { createLogger } from '../../core/log.js';
 
@@ -106,6 +107,31 @@ export function createPrecipitationSubsystem({
   getPxPerMeter = () => 100,
   openSkyTexture = null,
   renderOrder = 0,
+  // ── THE MANTLE (P3) ──
+  /** The ALLOCATOR DOOR for the mantle's ping-pong pair, injected exactly as
+   * `effects/fluid` takes `createSimRenderTarget`. Absent ⇒ no mantle, and the
+   * subsystem says so in `getStatus()` rather than half-building one. */
+  createMantleTarget = null,
+  disposeMantleTarget = null,
+  /**
+   * `(quad, target) => void` — the viewer's own bind/render/restore for the
+   * mantle's integrator. Injected for the same reason the target factory is:
+   * `renderer-state/graph-only` walls `effects/` from renderer state, because
+   * a zone that binds a target owes every other zone a restore it cannot be
+   * trusted to make.
+   */
+  renderMantleStep = null,
+  /**
+   * Called ONCE with the mantle's two overlay meshes, so the caller can add
+   * them to the WORLD scene.
+   *
+   * ⚠️ THE SUBSYSTEM DOES NOT REACH INTO THE SCENE ITSELF. The mantle has to
+   * draw INSIDE the world's flat sort (over ground art, under tokens — see
+   * `mantle-runtime.js`'s `renderOrder` note), and only the viewer owns that
+   * list. A subsystem that grabbed `scene` would be a second authority over
+   * draw order.
+   */
+  onMantleMeshes = null,
 }) {
   /** @type {Map<string, object>} speciesId → FALL engine, built lazily. */
   const engines = new Map();
@@ -128,7 +154,16 @@ export function createPrecipitationSubsystem({
   /** The floor's baked sky-reach texture + its world rect, held so an engine
    * built LATER (a species that first appears mid-session) still gets it. */
   let skyReach = { texture: null, rect: null };
+  let fireMask = { texture: null, rect: null };
   let lastTuning = null;
+  /** ONE mantle, for the floor currently in view. Built lazily on the first
+   * frame that has real scene bounds — the buffer is sized from them, so
+   * building earlier would size it from a placeholder. */
+  let mantle = null;
+  let mantleReason =
+    createMantleTarget && renderMantleStep
+      ? 'not built yet — waiting for scene bounds'
+      : 'no target allocator or render step injected';
 
   /** Build one species' engine on first use — a clear map never allocates. */
   function engineFor(speciesId) {
@@ -185,6 +220,50 @@ export function createPrecipitationSubsystem({
     return engine;
   }
 
+  /**
+   * Build the mantle on the first frame that has real scene bounds, then step
+   * it. Called EVERY frame; the runtime's own cadence decides when work
+   * actually happens.
+   */
+  function stepMantle(dtRealSec, st, weather, precip01) {
+    if (!createMantleTarget || !renderMantleStep) return;
+    const bounds = st.sceneBounds ?? null;
+    if (!mantle) {
+      if (!bounds || !(bounds.maxX > bounds.minX)) {
+        mantleReason = 'waiting for scene bounds';
+        return;
+      }
+      mantle = createMantleRuntime({
+        THREE,
+        createTarget: createMantleTarget,
+        disposeTarget: disposeMantleTarget,
+        renderStep: renderMantleStep,
+        worldRect: bounds,
+        openSkyTexture,
+      });
+      mantle.setMasks({ skyReach, fireMask });
+      if (lastTuning) mantle.setTuning(lastTuning);
+      onMantleMeshes?.(mantle.meshes);
+      mantleReason = null;
+      log.info(`built the mantle (${mantle.texW}×${mantle.texH} texels over the scene rect)`);
+    }
+
+    // ⚠️ THE **DERIVED** SPECIES DECIDES WHAT ACCUMULATES, not the falling
+    // engine — which is why this resolves the kind again rather than reading
+    // `activeSpeciesId`. On a clear day nothing is falling and `activeSpeciesId`
+    // is null, but the mantle still needs a `stay` of null to keep melting; and
+    // during a thaw the ground remembers snow while rain is what is falling.
+    const kind = resolveActiveSpecies(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
+    const stay = precip01 > 0 && kind.speciesId ? (PRECIP_SPECIES[kind.speciesId].stay ?? null) : null;
+    mantle.setSurface(stay);
+    mantle.step(dtRealSec, st.todHour, {
+      stay,
+      precip01,
+      temperature01: weather.temperature01 ?? 0.55,
+      cloudCover01: weather.cloudCover01 ?? 0,
+    });
+  }
+
   return {
     /**
      * Advance one frame. Safe to call every frame from the moment the viewer
@@ -200,6 +279,17 @@ export function createPrecipitationSubsystem({
       }
       const weather = st.weather ?? {};
       const precip01 = Number.isFinite(weather.precip01) ? weather.precip01 : 0;
+
+      // ⭐ THE MANTLE STEPS FIRST, AND **BEFORE** THE CLEAR-DAY EARLY-OUT BELOW.
+      //
+      // ⚠️ THAT ORDER IS LOAD-BEARING. Everything else in this subsystem is
+      // allowed to stop dead when `precip01` hits zero — that is LAW 5, and a
+      // clear day must cost nothing. The mantle is the exception, because its
+      // whole subject is what happens AFTER the weather: snow melts, puddles
+      // dry, footprints heal. Returning early would freeze the world's memory
+      // at whatever the last rainy frame left, and a scene would carry its
+      // snow through a summer.
+      stepMantle(dtRealSec, st, weather, precip01);
 
       // ⚠️ A JS `if`, never a uniform set to zero (Effects.md Law 4). A clear
       // day must not allocate an engine, dispatch a kernel or submit a draw.
@@ -325,7 +415,24 @@ export function createPrecipitationSubsystem({
       // its splashes still used the last floor's bake is exactly the kind of
       // half-applied state that reads as "the gate is flaky".
       for (const [id, engine] of splashEngines) results[`${id}:arrive`] = engine.setSkyReachTexture(texture, rect);
+      // The mantle gates ACCUMULATION on the same mask — snow must not pile up
+      // under a roof any more than it may fall through one.
+      if (mantle) results.mantle = mantle.setMasks({ skyReach, fireMask });
       return results;
+    },
+
+    /**
+     * ⭐ THE FIRE MASK — the mantle's melt halo (§5.2). Nothing else in
+     * precipitation reads it.
+     *
+     * ⚠️ THE HALO COSTS NOTHING TO AUTHOR: the fire mask's own falloff IS the
+     * halo's shape, so a hearth clears its own ring of snow and nobody draws
+     * one. Disarming leaves NO fire anywhere, which is the fail-open direction
+     * here — absent data must not melt a map.
+     */
+    setFireMaskTexture(texture, rect) {
+      fireMask = { texture: texture ?? null, rect: rect ?? null };
+      return mantle ? mantle.setMasks({ skyReach, fireMask }) : { sky: false, fire: false };
     },
 
     /** Live look tuning, for the debug panel and the console. Both engine
@@ -334,6 +441,7 @@ export function createPrecipitationSubsystem({
       lastTuning = { ...(lastTuning ?? {}), ...(t ?? {}) };
       for (const engine of engines.values()) engine.setTuning(t);
       for (const engine of splashEngines.values()) engine.setTuning(t);
+      mantle?.setTuning(t);
     },
 
     /**
@@ -364,6 +472,11 @@ export function createPrecipitationSubsystem({
          * rain" are different failures with different causes, and one merged
          * block would name neither. */
         arrival: Object.fromEntries([...splashEngines].map(([id, e]) => [id, e.debugState()])),
+        /** ⭐ THE STAY (P3), reported separately again — the mantle runs on a
+         * clear day when both the other families are switched off entirely, so
+         * folding it into their status would make "nothing is falling" look
+         * like "nothing is happening". */
+        mantle: mantle ? mantle.debugState() : { built: false, reason: mantleReason },
       };
     },
   };

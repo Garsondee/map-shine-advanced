@@ -14,6 +14,7 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runSpecies } from './precip-species.test.mjs';
+import { run as runMantle } from './mantle-model.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -42,7 +43,10 @@ const t = {
   },
 };
 
-const suites = [['precip-species', runSpecies]];
+const suites = [
+  ['precip-species', runSpecies],
+  ['mantle-model', runMantle],
+];
 for (const [name, fn] of suites) {
   const before = failed;
   fn(t);

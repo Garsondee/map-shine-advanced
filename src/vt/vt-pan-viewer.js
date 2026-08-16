@@ -2089,6 +2089,59 @@ export async function startVtPanViewer({
       allocator.dispose(rt);
     }
 
+    /**
+     * ⭐ THE MANTLE's ping-pong half (Precipitation.md §5.1) — here rather than
+     * in `effects/precipitation/mantle-runtime.js` for the same `gpu/allocator-
+     * only` reason fluid's sits here: the allocator is the ONE place render
+     * targets come from, so it can account for every byte on the device.
+     *
+     * ⚠️ RGBA8 + **NEAREST**, and both are deliberate. RGBA8 because a stain
+     * buffer needs 256 levels of depth, not 65,536 — §5.1 budgets ~8 MB and a
+     * HalfFloat pair would be four times that for a precision nobody can see.
+     * NEAREST because this is a ping-pong INTEGRATOR: a linear read of the
+     * previous state would blur the mantle a little on every single step, so a
+     * snow line would soften into a gradient over a few game minutes — the
+     * texels must round-trip exactly. The overlay's own softness comes from its
+     * coverage threshold, not from the sampler.
+     */
+    function createMantleRenderTarget(width, height) {
+      return allocator.create('precipMantle', {
+        resolvedW: width,
+        resolvedH: height,
+        type: THREE.UnsignedByteType,
+        format: THREE.RGBAFormat,
+        colorSpace: THREE.NoColorSpace,
+        filter: 'nearest',
+        depth: false,
+      });
+    }
+    function disposeMantleRenderTarget(rt) {
+      allocator.dispose(rt);
+    }
+
+    /**
+     * The mantle's integrator step — bind, render, restore. Lives HERE because
+     * `renderer-state/graph-only` walls `effects/` from `renderer.setRenderTarget`:
+     * renderer state is global, and a zone that binds a target owes every other
+     * zone a restore it cannot be trusted to make.
+     *
+     * ⚠️ **MRT MUST BE UNBOUND**, and this is the detail that would have cost a
+     * silent blank buffer. `MRTNode` matches its keys against the bound target's
+     * TEXTURE NAMES; the mantle target has none of them, and a key with no match
+     * yields an EMPTY output struct — no fragment output at all. The mantle's
+     * OVERLAY materials do carry an `mrtNode` (they draw into the geometry
+     * pass's MRT); the integrator must not inherit one.
+     */
+    function renderMantleStep(quad, target) {
+      const prevTarget = renderer.getRenderTarget();
+      const prevMRT = renderer.getMRT?.() ?? null;
+      renderer.setMRT?.(null);
+      renderer.setRenderTarget(target);
+      quad.render(renderer);
+      renderer.setRenderTarget(prevTarget);
+      renderer.setMRT?.(prevMRT);
+    }
+
     const sunShadows = createSunShadowSubsystem({
       THREE,
       allocator,
@@ -2467,6 +2520,12 @@ export async function startVtPanViewer({
         maxY: grid.spec.y + grid.spec.height,
       };
       uFireMaskRect.value.set(fireMaskRect.minX, fireMaskRect.minY, fireMaskRect.maxX, fireMaskRect.maxY);
+      // ⭐ THE MANTLE's MELT HALO (Precipitation.md §5.2) rides the SAME bake.
+      // Snow retreats around every burning hearth and nobody authors the ring:
+      // the fire mask's own falloff IS its shape. Handed over here rather than
+      // at a second bake site, so there can never be a floor whose fire is lit
+      // for the light pass and absent for the snow.
+      precipitationSubsystem?.setFireMaskTexture(tex, fireMaskRect);
       lastFireMaskBakeResult = { ok: true, floorIndex, cols: w, rows: h, rect: fireMaskRect };
       return lastFireMaskBakeResult;
     }
@@ -2946,6 +3005,18 @@ export async function startVtPanViewer({
       // function's own "GETTERS VS VALUES" header.
       getWindHandle: () => windHandle,
       openSkyTexture: precipOpenSkyTexture,
+      // ── THE MANTLE (P3) ──
+      createMantleTarget: createMantleRenderTarget,
+      disposeMantleTarget: disposeMantleRenderTarget,
+      renderMantleStep,
+      // ⚠️ THE MESHES JOIN THE **WORLD** SCENE, not a private one. The mantle
+      // has to sit inside the flat sort law — over ground art and water, under
+      // tokens and doors — and only this list can express that. Rendering it as
+      // its own pass after the world would put snow on top of the tokens
+      // standing in it.
+      onMantleMeshes: (meshes) => {
+        for (const mesh of meshes) scene.add(mesh);
+      },
       getPxPerMeter: () => readGridDistancePixels().distancePixels,
       // ⚠️ DRAWN AFTER the lit composite (precipitation is in FRONT of the
       // world, roofs included) and BEFORE the vision gate — MSA owns vision
@@ -2969,6 +3040,10 @@ export async function startVtPanViewer({
           // the map. `dimensions.sceneRect` is the same rect the view clamp
           // already uses, so there is no second idea of "where the map is".
           sceneBounds: dimensions?.sceneRect ?? null,
+          // ⭐ THE MANTLE's clock (§5.2). WRAPPING 0..24, and the runtime unwraps
+          // it — see `mantle-model.js#gameHourDelta`, which owns midnight and the
+          // backward-clock case so no caller has to.
+          todHour: env.time?.todHour ?? null,
           // The SAME `dayFactor01` the shadow handle and the daylight tint
           // read — never a second "is it dark" derivation.
           dayFactor01: env.sun?.dayFactor01 ?? 1,

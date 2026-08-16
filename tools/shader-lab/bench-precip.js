@@ -66,6 +66,7 @@
 import { evaluate, saveCanvasPng } from './contract.js';
 import { createPrecipEngine } from '../../src/effects/particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../../src/effects/particles/precip-splash-runtime.js';
+import { createMantleRuntime } from '../../src/effects/precipitation/mantle-runtime.js';
 import {
   PRECIP_SPECIES,
   PRECIP_SPECIES_IDS,
@@ -246,6 +247,9 @@ class PrecipDriver {
     // owner; in production this comes from the viewer, which lives in vt/.
     const openSkyTexture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
     openSkyTexture.needsUpdate = true;
+    // Held so the mantle scenario can take the SAME placeholder the engines
+    // do — one representation of "no data", shared, exactly as in production.
+    this.openSkyTexture = openSkyTexture;
 
     for (const id of PRECIP_SPECIES_IDS) {
       const engine = createPrecipEngine({
@@ -1002,6 +1006,149 @@ export function createPrecipBench({ THREE, log }) {
         inputs: { windSpeed01: [0, 1] },
         stats: { calm, gale, calmWind, galeWind, ratio },
         artifacts: png ? [png] : [],
+      };
+    },
+  });
+
+  /**
+   * ⭐ P3 — THE MANTLE (§5). The world's memory of weather, measured by READING
+   * THE BUFFER rather than by looking at the overlay.
+   *
+   * ⚠️ THIS IS THE ONE PART OF PRECIPITATION NOBODY CAN ITERATE ON BY LOOKING:
+   * a mantle bug takes GAME HOURS to appear. So the scenario drives the
+   * integrator with synthetic game-hour deltas and reads the texels back
+   * directly — "the snow channel rose from 0.02 to 0.71 over four game hours"
+   * is a finding; "the courtyard looks whiter" is a hypothesis.
+   *
+   * The Node suite proves the RATES; this proves the GPU actually integrates
+   * them, which is the half Node structurally cannot see (a TSL graph that
+   * fails to construct renders nothing, silently, with every test green).
+   */
+  scenarios.set('mantle-remembers-the-weather', {
+    name: 'mantle-remembers-the-weather',
+    summary: 'snow accumulates where sky reaches, melts when it warms, and never lies under a roof.',
+    async run() {
+      const THREE = driver.THREE;
+      const renderer = driver.renderer;
+      const targets = [];
+      const mantle = createMantleRuntime({
+        THREE,
+        createTarget: (w, h) => {
+          const rt = new THREE.RenderTarget(w, h, {
+            depthBuffer: false,
+            stencilBuffer: false,
+            type: THREE.UnsignedByteType,
+            format: THREE.RGBAFormat,
+            minFilter: THREE.NearestFilter,
+            magFilter: THREE.NearestFilter,
+          });
+          targets.push(rt);
+          return rt;
+        },
+        // The same bind/render/restore the viewer injects — including the MRT
+        // unbind, so the lab exercises the production path rather than a
+        // simpler one.
+        renderStep: (quad, target) => {
+          const prev = renderer.getRenderTarget();
+          const prevMRT = renderer.getMRT?.() ?? null;
+          renderer.setMRT?.(null);
+          renderer.setRenderTarget(target);
+          quad.render(renderer);
+          renderer.setRenderTarget(prev);
+          renderer.setMRT?.(prevMRT);
+        },
+        worldRect: WORLD,
+        openSkyTexture: driver.openSkyTexture,
+      });
+      mantle.setMasks({ skyReach: { texture: driver.buildSkyReachTexture(), rect: WORLD } });
+
+      const snowStay = PRECIP_SPECIES.snow.stay;
+      /** Read the mantle at one world point, as 0..1 per channel. */
+      const probe = async (uvx, uvy) => {
+        const rt = mantle.debugTarget();
+        const px = Math.min(rt.width - 1, Math.max(0, Math.round(uvx * (rt.width - 1))));
+        const py = Math.min(rt.height - 1, Math.max(0, Math.round(uvy * (rt.height - 1))));
+        const raw = await renderer.readRenderTargetPixelsAsync(rt, px, py, 1, 1);
+        return { snow: raw[0] / 255, dust: raw[1] / 255, puddle: raw[2] / 255 };
+      };
+      /** Advance `hours` of GAME time in `steps` integrator ticks. */
+      const advance = (hours, steps, inputs) => {
+        for (let i = 1; i <= steps; i++) {
+          // Each call carries enough REAL time to pass the cadence gate.
+          mantle.step(1, (i * hours) / steps, inputs);
+        }
+      };
+
+      // ── a cold blizzard over open ground ──
+      const freezing = { stay: snowStay, precip01: 1, temperature01: 0.05, cloudCover01: 1 };
+      mantle.seed({ ...freezing, hoursOfWeather: 0 });
+      const atStart = await probe(0.17, 0.77);
+      advance(4, 40, freezing);
+      const snowed = await probe(0.17, 0.77);
+      // The synthetic building sits at u 0.10-0.40, v 0.12-0.45.
+      const indoors = await probe(0.25, 0.3);
+
+      // ── then a mild, humid thaw ──
+      //
+      // ⚠️ MEASURED **DURING** THE THAW, NOT AFTER IT, and the first cut got
+      // this wrong: it probed at full heat under a clear sky after four hours
+      // and found no puddle, then called that a failure. It was not — at
+      // `dryPerHour`'s maximum the meltwater evaporates about as fast as it
+      // arrives, and four hours later the ground is legitimately dry. The
+      // instrument was looking for a transient after it had passed
+      // (`feedback_measure_the_output_not_the_equation`'s cousin: a correct
+      // model can still be measured at the wrong moment). A mild humid thaw is
+      // also the more representative weather.
+      const thaw = { stay: null, precip01: 0, temperature01: 0.6, cloudCover01: 0.7 };
+      advance(1.5, 15, thaw);
+      const thawing = await probe(0.17, 0.77);
+      advance(6, 60, thaw);
+      const thawed = await probe(0.17, 0.77);
+
+      for (const rt of targets) rt.dispose();
+
+      return {
+        checks: [
+          evaluate('the-buffer-starts-empty', () => ({
+            ok: atStart.snow < 0.05,
+            measured: atStart,
+            expected: 'snow < 0.05 with zero hours of weather behind it',
+          })),
+          // ⚠️ THE CHECK A BROKEN TSL GRAPH CANNOT PASS. A graph that throws at
+          // build renders nothing while every Node test stays green.
+          evaluate('snow-accumulates-over-game-hours', () => ({
+            ok: snowed.snow > 0.5,
+            measured: Number(snowed.snow.toFixed(3)),
+            expected: '> 0.5 after 4 game hours of blizzard',
+          })),
+          evaluate('law3-no-snow-under-a-roof', () => ({
+            ok: indoors.snow < 0.05,
+            measured: Number(indoors.snow.toFixed(3)),
+            expected: '< 0.05 inside the building, while the courtyard is deep',
+          })),
+          evaluate('warmth-melts-it-away-again', () => ({
+            ok: thawed.snow < snowed.snow * 0.35,
+            measured: { before: Number(snowed.snow.toFixed(3)), after: Number(thawed.snow.toFixed(3)) },
+            expected: 'under 35% of the drift survives 4 warm hours',
+          })),
+          // ⭐ MELTWATER BECOMES PUDDLE — the one transfer between channels, and
+          // what stops a thaw reading as snow simply being deleted.
+          evaluate('meltwater-becomes-puddle-while-it-melts', () => ({
+            ok: thawing.puddle > 0.02 && thawing.snow < snowed.snow,
+            measured: { snow: Number(thawing.snow.toFixed(3)), puddle: Number(thawing.puddle.toFixed(3)) },
+            expected: 'mid-thaw: the snow channel is falling AND the puddle channel is above zero',
+          })),
+          // …and the water goes too. A puddle that cannot dry is a permanent
+          // scar on a map.
+          evaluate('and-then-the-water-dries-too', () => ({
+            ok: thawed.puddle < thawing.puddle,
+            measured: { midThaw: Number(thawing.puddle.toFixed(3)), later: Number(thawed.puddle.toFixed(3)) },
+            expected: 'the puddle drains once there is no more meltwater feeding it',
+          })),
+        ],
+        inputs: { hoursSnowing: 4, hoursThawing: 7.5 },
+        stats: { atStart, snowed, indoors, thawing, thawed, texels: `${mantle.texW}x${mantle.texH}` },
+        artifacts: [],
       };
     },
   });

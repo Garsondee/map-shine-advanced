@@ -34,6 +34,16 @@ export {
   TRANSITION_SPEEDS,
   TRANSITION_SPEED_NAMES,
   DEFAULT_PRESET,
+  // ⭐ THE PRECIPITATION AXES (P1) and the sleet BAND — the band crosses the
+  // zone because `effects/precipitation/mantle-model.js` must decide "is it
+  // cold enough for this to LIE" using the SAME edges the manager uses to
+  // decide "is it cold enough for this to FALL". Two copies of that number is
+  // how a map ends up snowing onto ground that instantly melts it
+  // (`feedback_shared_field_two_meanings_two_registries`), so it rides the door
+  // rather than being restated.
+  PRECIP_KINDS,
+  PRECIP_SLEET_BAND,
+  derivePrecipKind,
 } from './weather.js';
 // THE ARCHETYPE TABLE (slice 2) — the astrolabe's shelf renders straight from
 // this, so the row order, icons and blurbs are one edit here rather than two.

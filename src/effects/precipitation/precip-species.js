@@ -68,6 +68,8 @@
  * `feedback_gate_polarity_must_fail_open`: a broken table must never
  * storm-lock a scene, and it must never be silent either).
  */
+import { SNOW_RATE_PER_HOUR, PUDDLE_RATE_PER_HOUR } from './mantle-model.js';
+
 export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow']);
 
 /**
@@ -382,6 +384,36 @@ export const PRECIP_SPECIES = Object.freeze({
       ]),
     }),
 
+    /**
+     * ⭐ THE STAY (P3) — Precipitation.md §5.
+     *
+     * ⚠️ RAIN FEEDS **NO MANTLE CHANNEL**, and `channel: null` is a real
+     * answer rather than a missing one. §2.2's own Stay column for rain reads
+     * *"none (drives the scalar `wetness01` integrator + puddles)"* — rain
+     * leaves standing water, not a blanket. Giving it a channel would make a
+     * downpour deposit a substance, which is the shape of the bug where every
+     * species must feed something.
+     */
+    stay: Object.freeze({
+      channel: null,
+      /** No blanket accumulates, so the blanket rate is zero and says so. */
+      ratePerHour: 0,
+      /** …but water POOLS — the `puddle01` channel, filled at this rate at
+       * `precip01 = 1`. Read off the row rather than assumed from the id, so
+       * sleet and hail can pool at their own rates later without a branch
+       * appearing in the model. */
+      puddleRatePerHour: PUDDLE_RATE_PER_HOUR,
+      meltBy: Object.freeze({ temperature: false, fire: false }),
+      surface: Object.freeze({
+        /** Wet stone DARKENS and SHINES; it does not tint. The multiply is
+         * toward this, and the roughness drop is §5.3's filed REQUEST to the
+         * specular system rather than something this row can apply itself. */
+        tint: Object.freeze([0.62, 0.66, 0.72]),
+        sparkle01: 0,
+        roughnessDelta: -0.45,
+      }),
+    }),
+
     /** Capacity at max tier. V2 shipped `maxParticles: 15000` for rain and it
      * looked right; the arena reserves this once and `liveCount` does the
      * tiering (Particles.md §10 — tier changes are then free). */
@@ -494,6 +526,35 @@ export const PRECIP_SPECIES = Object.freeze({
     arrive: Object.freeze({
       kind: 'settle',
       smearWithWind: false,
+    }),
+
+    /**
+     * ⭐ THE STAY (P3) — and §2.2 calls this row *"THE persistence feature"*.
+     * Snow is the one species whose whole point is that it is still there an
+     * hour later.
+     */
+    stay: Object.freeze({
+      channel: 'snow',
+      ratePerHour: SNOW_RATE_PER_HOUR,
+      /** Snow does not pool while it is snow. What melts becomes water, and
+       * that transfer is the integrator's job, not a second deposit rate. */
+      puddleRatePerHour: 0,
+      /** ⭐ BOTH SINKS, and `fire` is the one that costs nothing to author: the
+       * fire mask's derived grid already exists, so snow retreats in a halo
+       * around every burning hearth for free. */
+      meltBy: Object.freeze({ temperature: true, fire: true }),
+      surface: Object.freeze({
+        /** Snow BRIGHTENS — an albedo lerp toward this, not a multiply.
+         * Slightly blue rather than pure white: unlit snow reads as grey
+         * without the cool bias, and a pure-white lerp bleaches the art. */
+        tint: Object.freeze([0.93, 0.95, 1.0]),
+        /** Crystalline glitter, for the specular system's high tiers. */
+        sparkle01: 0.65,
+        /** Fresh snow is rough, unlike wet stone — opposite sign to rain's,
+         * which is exactly why the two are separate channels with separate
+         * blend ops rather than one “cover” value. */
+        roughnessDelta: 0.25,
+      }),
     }),
 
     capacity: 20000,

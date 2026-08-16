@@ -140,9 +140,17 @@ export function run(t) {
         return a.bounces === undefined && a.restSec === undefined && a.waterRing === undefined;
       })
     );
+    // ⭐ `stay` LANDED WITH P3's MANTLE, same discipline as `arrive` — the
+    // block appears in the commit that builds its reader. Its own contents are
+    // proven in `mantle-model.test.mjs`, beside the integrator that consumes
+    // them; here we only assert the SCHEDULE.
     t.ok(
-      'no row carries a `stay` block yet — P3 adds it with the mantle',
-      PRECIP_SPECIES_IDS.every((id) => PRECIP_SPECIES[id].stay === undefined)
+      'every row carries a `stay` block — P3 shipped it with the mantle',
+      PRECIP_SPECIES_IDS.every((id) => PRECIP_SPECIES[id].stay?.surface)
+    );
+    t.ok(
+      'every `stay.channel` is a known channel or an explicit null',
+      PRECIP_SPECIES_IDS.every((id) => [null, 'snow', 'dust'].includes(PRECIP_SPECIES[id].stay.channel))
     );
   }
 

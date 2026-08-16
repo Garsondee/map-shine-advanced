@@ -2965,6 +2965,10 @@ export async function startVtPanViewer({
           // reference resolves to nothing and throws only when a drop first
           // falls. The rect is passed into `sync()` per frame instead, exactly
           // as fire's own subsystem takes it.
+          // ⭐ THE SCENE'S OWN BOUNDS — rain must not fall in the void around
+          // the map. `dimensions.sceneRect` is the same rect the view clamp
+          // already uses, so there is no second idea of "where the map is".
+          sceneBounds: dimensions?.sceneRect ?? null,
           // The SAME `dayFactor01` the shadow handle and the daylight tint
           // read — never a second "is it dark" derivation.
           dayFactor01: env.sun?.dayFactor01 ?? 1,

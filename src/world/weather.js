@@ -871,6 +871,13 @@ export function createWeatherManager({
         targets[key] = next;
         if (immediate) state[key] = next;
       }
+      // ⭐ A ROW MAY NAME WHAT FALLS, and one does (`snow`). Rows that do not
+      // reset the manager to `auto`, so a shelf click always fully describes
+      // the sky it just chose — clicking `steady-rain` after `snow` hands
+      // control back to `temperature01` instead of leaving the map frozen.
+      // See the `snow` row's own note for why this is authored rather than
+      // done by having the row set temperature.
+      precipKindAuthored = PRECIP_KINDS.includes(res.archetype.precipKind) ? res.archetype.precipKind : 'auto';
       if (currentMode === 'almanac') {
         almanacCurrentNodeId = res.archetype.id;
         almanacDwellRemainingHours = activeBiome ? sampleDwell(almanacRng, res.archetype.id) : null;

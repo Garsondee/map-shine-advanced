@@ -185,6 +185,11 @@ export function createPrecipitationSubsystem({
       // note at `getPrecipRenderState`'s own `worldRect` in vt-pan-viewer.js.
       const rect = worldRect ?? st.worldRect ?? null;
       if (rect) engine.setWorldRect(rect);
+      // The SCENE's bounds, distinct from the view rect above — rain must not
+      // fall in the void around the map (the author saw exactly that on the
+      // Mansion). Pushed per frame because it is one uniform write and a scene
+      // change would otherwise need its own invalidation path.
+      if (st.sceneBounds !== undefined) engine.setSceneBounds(st.sceneBounds);
       engine.setFrame(
         resolveSpeciesFrame(
           PRECIP_SPECIES[speciesId],

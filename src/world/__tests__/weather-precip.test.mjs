@@ -157,6 +157,36 @@ export function run(t) {
     );
   }
 
+  // ---- ⭐ THE SHELF: clicking a named sky must deliver what it promises ---------
+  // Author-reported: *"I can't get snow to appear by clicking on the snow
+  // button."* It set a snow SKY (cover 0.9, precip 0.6) but `precipKind` is
+  // DERIVED from `temperature01`, archetypes deliberately never set temperature
+  // (a sky is not a climate), and the 0.55 default is well clear of the sleet
+  // band — so snow fell as rain. The row now AUTHORS its kind, which LAW 4
+  // says beats the derivation.
+  {
+    const mgr = createWeatherManager();
+    mgr.applyArchetype('snow', { immediate: true });
+    const snowy = mgr.toSnapshotWeather();
+    t.ok('⭐ clicking SNOW actually yields snow', snowy.precipKind === 'snow');
+    t.ok('...and says it was authored, not derived', snowy.precipKindAuthored === 'snow');
+    t.ok('...and it is genuinely precipitating', snowy.precip01 > 0);
+    t.ok(
+      '...without the row having overwritten the climate',
+      mgr.read().targets.temperature01 === WEATHER_AXES.temperature01.fallback
+    );
+
+    // ⚠️ THE OTHER HALF: a row that does NOT name a kind must RESET to auto,
+    // or the map stays frozen forever after one snow click.
+    mgr.applyArchetype('steady-rain', { immediate: true });
+    const wet = mgr.toSnapshotWeather();
+    t.ok('⭐ clicking STEADY-RAIN afterwards returns control to temperature', wet.precipKindAuthored === 'auto');
+    t.ok('...and it rains rather than staying snow', wet.precipKind === 'rain');
+
+    mgr.applyArchetype('clear', { immediate: true });
+    t.ok('clicking CLEAR stops the precipitation entirely', mgr.toSnapshotWeather().precip01 === 0);
+  }
+
   // ---- events compose onto temperature, and that changes what falls -------------
   {
     const mgr = createWeatherManager();

@@ -191,6 +191,27 @@ export const WEATHER_ARCHETYPES = Object.freeze([
     label: 'Snow',
     icon: '❄',
     blurb: 'Cold nimbostratus. Bright and flat.',
+    /**
+     * ⭐ THE ONE ROW THAT NAMES WHAT FALLS, and it has to.
+     *
+     * ⚠️ WITHOUT THIS, CLICKING "SNOW" PRODUCES RAIN — reported by the author,
+     * and it was my bug. `precipKind` derives from `temperature01`, archetypes
+     * deliberately do NOT set temperature (a sky is not a climate — see
+     * `ARCHETYPE_OWNED_AXES`), and the default 0.55 is well above the sleet
+     * band. So the snow SKY arrived with rain falling out of it.
+     *
+     * The fix is not to let the row set temperature — that would make every
+     * shelf click overwrite the biome's climate, which is the thing
+     * `ARCHETYPE_OWNED_AXES` exists to prevent. It is to let the row AUTHOR the
+     * kind: `precipKindAuthored` already beats the derivation outright (LAW 4,
+     * authored never overwritten by derived), and "snow" as a named sky
+     * genuinely does mean frozen precipitation regardless of the thermometer.
+     *
+     * Every other row omits this and therefore resets the manager to `auto`,
+     * so clicking `steady-rain` after `snow` returns control to temperature
+     * rather than leaving the map stuck on snow.
+     */
+    precipKind: 'snow',
     axes: Object.freeze({
       cloudCover01: 0.9,
       cloudType01: 0.95,

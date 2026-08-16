@@ -321,6 +321,27 @@ export function createPrecipEngine({
   // service's own documented rule, and it is the difference between a map with
   // no ingested art rendering weather and one silently rendering none
   // (`feedback_gate_polarity_must_fail_open`).
+  /**
+   * ⭐ THE SCENE'S OWN BOUNDS — precipitation must not fall off the map.
+   *
+   * Author, seeing it live: *"clip precipitation so that it doesn't appear
+   * outside of the bounds of the scene."* Bodies spawn over the VIEW rect plus
+   * a margin (so a pan never reveals an empty band), and the view legitimately
+   * extends past the map edge into the void around it — so without this, rain
+   * falls in the black surround, which is where the author first saw it.
+   *
+   * ⚠️ A DRAW CLIP, NOT A SPAWN CLAMP, and deliberately: shrinking the spawn
+   * rect to the scene would thin the population near the edges (fewer bodies
+   * per unit area where the rect was cut) and re-introduce exactly the
+   * pan-reveals-a-band artefact the margin exists to prevent. Killing the
+   * body's OPACITY at the boundary costs one comparison and keeps the
+   * population uniform.
+   *
+   * `w <= 0` means "no bounds supplied" and disables the clip entirely — the
+   * same fail-open polarity as the sky gate: a viewer that never calls
+   * `setSceneBounds` rains everywhere rather than nowhere.
+   */
+  const uSceneRect = uniform(vec4(0, 0, 0, 0));
   const uSkyReachRect = uniform(vec4(0, 0, 1, 1));
   const uSkyReachHasBake = uniform(float(0));
   /**
@@ -634,6 +655,28 @@ export function createPrecipEngine({
     // first derivative at t=0 and reads as a flicker at these lifetimes.
     const birthEase = birthFade.mul(birthFade).mul(float(3).sub(birthFade.mul(float(2))));
 
+    // ⚠️ THE DRAWN POSITION AND THE SCENE CLIP ARE COMPUTED BEFORE THE SKY-GATE
+    // EARLY-OUT BELOW, because clipping to the map is INDEPENDENT of whether a
+    // sky-reach texture was ever injected. A first cut computed them after, so
+    // a viewer with no gate armed (the ordinary case on an un-ingested floor)
+    // silently lost its scene clip too — one absent input disabling an
+    // unrelated guarantee.
+    const pDrawn = parallaxOf(position.element(i), c.w).xy;
+    const hasBounds = uSceneRect.z.sub(uSceneRect.x).greaterThan(float(0));
+    const edgeBand = float(64);
+    const inX = pDrawn.x
+      .sub(uSceneRect.x)
+      .div(edgeBand)
+      .clamp(float(0), float(1))
+      .mul(uSceneRect.z.sub(pDrawn.x).div(edgeBand).clamp(float(0), float(1)));
+    const inY = pDrawn.y
+      .sub(uSceneRect.y)
+      .div(edgeBand)
+      .clamp(float(0), float(1))
+      .mul(uSceneRect.w.sub(pDrawn.y).div(edgeBand).clamp(float(0), float(1)));
+    const sceneClip = hasBounds.select(inX.mul(inY), float(1));
+    const visible = alive.mul(birthEase).mul(sceneClip);
+
     // ⭐ THE SKY-REACH GATE, sampled at the body's DRAWN (parallaxed) position.
     // Computed HERE because `position.element(i)` is a storage read and storage
     // reads are VERTEX-STAGE ONLY on this renderer; the result crosses to the
@@ -659,9 +702,9 @@ export function createPrecipEngine({
     // a second texture; it refines this, it does not replace it.
     // No placeholder injected ⇒ no gate in the graph at all ⇒ a constant 1,
     // which is exactly the fail-open answer (rain everywhere).
-    if (!skyReachTex) return vec4(fall01, c.x, alive.mul(birthEase), float(1));
+    if (!skyReachTex) return vec4(fall01, c.x, visible, float(1));
 
-    const p = parallaxOf(position.element(i), c.w).xy;
+    const p = pDrawn;
     const uvx = p.x.sub(uSkyReachRect.x).div(uSkyReachRect.z.sub(uSkyReachRect.x).max(float(1)));
     const uvy = p.y.sub(uSkyReachRect.y).div(uSkyReachRect.w.sub(uSkyReachRect.y).max(float(1)));
     // Outside the baked rect there is no data, and no data means KEEP RAINING
@@ -682,7 +725,7 @@ export function createPrecipEngine({
     // `z` carries alive × the birth fade — both are pure opacity multipliers,
     // and packing them costs no extra varying (storage reads are vertex-stage
     // only, so every fragment input has to fit in this one vec4).
-    return vec4(fall01, c.x, alive.mul(birthEase), skyGate);
+    return vec4(fall01, c.x, visible, skyGate);
   })().toVarying('vPrecipBody');
 
   const material = new THREE.NodeMaterial();
@@ -969,6 +1012,29 @@ export function createPrecipEngine({
       uSkyReachRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
       uSkyReachHasBake.value = 1;
       return { armed: true, rect };
+    },
+
+    /**
+     * The SCENE's own bounds — precipitation fades out beyond them so rain
+     * never falls in the void around the map. See {@link uSceneRect}'s note
+     * for why this is a draw clip rather than a spawn clamp.
+     *
+     * ⚠️ DISTINCT FROM `setWorldRect`, which is the VIEW rect (where bodies
+     * spawn, and which follows the camera). Conflating them would either stop
+     * the rain the moment the camera left the map centre, or clip nothing at
+     * all — two rects, two questions, deliberately two calls.
+     *
+     * Passing `null` disables the clip (rain everywhere), the same fail-open
+     * polarity the sky gate uses.
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} rect
+     */
+    setSceneBounds(rect) {
+      if (!rect || !(rect.maxX > rect.minX)) {
+        uSceneRect.value.set(0, 0, 0, 0);
+        return { clipped: false };
+      }
+      uSceneRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+      return { clipped: true, rect };
     },
 
     /** @param {{minX:number,minY:number,maxX:number,maxY:number}} rect */

@@ -233,6 +233,10 @@ class PrecipDriver {
         openSkyTexture,
       });
       engine.setWorldRect(WORLD);
+      // The lab's synthetic "scene" is the whole world rect, so the clip is
+      // armed but never bites — proving the code path runs without changing
+      // any existing scenario's numbers.
+      engine.setSceneBounds(WORLD);
       engine.init(this.renderer);
       this.engines.set(id, engine);
     }

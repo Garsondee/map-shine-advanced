@@ -170,6 +170,11 @@ export function createPrecipitationSubsystem({
    * frame that has real scene bounds — the buffer is sized from them, so
    * building earlier would size it from a placeholder. */
   let mantle = null;
+  /** Set by `notifyFloorChanged`, consumed by the next `stepMantle` — see that
+   * method for why the seed cannot run at the call site. */
+  let pendingReseed = null;
+  /** Which floor's mask the gate currently holds — `null` until a bake says. */
+  let gateFloorIndex = null;
   let mantleReason =
     createMantleTarget && renderMantleStep
       ? 'not built yet — waiting for scene bounds'
@@ -331,6 +336,14 @@ export function createPrecipitationSubsystem({
       onMantleMeshes?.(mantle.meshes);
       mantleReason = null;
       log.info(`built the mantle (${mantle.texW}×${mantle.texH} texels over the scene rect)`);
+    }
+
+    // A floor change queued a re-derive — run it now that a render step is in
+    // hand. See `notifyFloorChanged`.
+    if (pendingReseed) {
+      mantle.seed({ ...pendingReseed });
+      log.info(`mantle re-seeded for floor ${pendingReseed.floorIndex}`);
+      pendingReseed = null;
     }
 
     // ⚠️ THE **DERIVED** SPECIES DECIDES WHAT ACCUMULATES, not the falling
@@ -504,8 +517,9 @@ export function createPrecipitationSubsystem({
      * authority's products version moves, NEVER per frame.
      * @param {*} texture @param {object} rect
      */
-    setSkyReachTexture(texture, rect) {
+    setSkyReachTexture(texture, rect, floorIndex = null) {
       skyReach = { texture: texture ?? null, rect: rect ?? null };
+      if (floorIndex !== null) gateFloorIndex = floorIndex;
       const results = {};
       for (const [id, engine] of engines) results[id] = engine.setSkyReachTexture(texture, rect);
       // ⚠️ THE ARRIVAL ENGINES TOO. Both read the same mask and both would
@@ -534,6 +548,37 @@ export function createPrecipitationSubsystem({
     setFireMaskTexture(texture, rect) {
       fireMask = { texture: texture ?? null, rect: rect ?? null };
       return mantle ? mantle.setMasks({ skyReach, fireMask }) : { sky: false, fire: false };
+    },
+
+    /**
+     * ⭐ THE VIEWED FLOOR CHANGED — re-derive everything that belongs to a floor.
+     *
+     * ⚠️ THE MANTLE IS THE ONLY THING HERE THAT HOLDS FLOOR-SPECIFIC STATE.
+     * The fall, the splashes and the curtain are stateless with respect to the
+     * floor: they re-read the sky-reach texture the viewer just re-baked and
+     * are correct on the next frame. The mantle is a BUFFER — its texels are
+     * this floor's snow — so without this the roof would wear the courtyard's
+     * drifts.
+     *
+     * Re-seeding rather than clearing, because §5.5's derive-from-weather IS
+     * the mantle's normal load path (it is deliberately never serialized), so a
+     * floor change lands on a floor whose snow already looks like the weather
+     * that has been falling on it.
+     */
+    notifyFloorChanged(floorIndex) {
+      if (!mantle) return { reseeded: false, reason: 'no mantle built yet' };
+      const st = getPrecipRenderState?.() ?? null;
+      const weather = st?.weather ?? {};
+      const precip01 = Number.isFinite(weather.precip01) ? weather.precip01 : 0;
+      const kind = resolveActiveSpecies(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
+      const stay = precip01 > 0 && kind.speciesId ? (PRECIP_SPECIES[kind.speciesId].stay ?? null) : null;
+      // ⚠️ THE SEED IS DEFERRED TO THE NEXT `sync`, NOT RUN HERE. This is
+      // called from the viewer's mask-rebake chokepoint, which is not inside a
+      // render pass — and the seed needs the injected render step. Flagging it
+      // keeps the renderer-state discipline intact instead of reaching for a
+      // renderer this zone is walled from.
+      pendingReseed = { floorIndex, stay, precip01, temperature01: weather.temperature01 ?? 0.55 };
+      return { reseeded: 'pending', floorIndex };
     },
 
     /** Live look tuning, for the debug panel and the console. Both engine
@@ -585,6 +630,12 @@ export function createPrecipitationSubsystem({
          * which one is carrying the picture. */
         curtain: Object.fromEntries([...curtains].map(([id, c]) => [id, c.debugState()])),
         zoom: lastZoom ? { ...lastZoom } : { awake: specimenAwake, reason: 'no viewport width reported — fails awake' },
+        /** ⭐ WHICH FLOOR THE LAW 3 GATE IS ACTUALLY ON. Reported because its
+         * ABSENCE is what let a stale gate survive three slices: every status
+         * field said "armed", none said "armed against WHAT", and a mask baked
+         * for the ground floor looks identical to a correct one from here
+         * (`feedback_instruments_must_not_lie`). */
+        gateFloor: gateFloorIndex,
       };
     },
   };

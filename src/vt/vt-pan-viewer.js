@@ -2119,6 +2119,64 @@ export async function startVtPanViewer({
       allocator.dispose(rt);
     }
 
+    /** What the last per-floor rebake did — for the debug panel and the
+     * precipitation status. "Which floor is the gate actually on" must be
+     * answerable without a screenshot; it was NOT, which is most of why the
+     * stale-gate bug survived three slices (`feedback_instruments_must_not_lie`).
+     * Declared ABOVE its writer so there is no TDZ to reason about. */
+    let lastPerFloorMaskRebake = null;
+
+    /**
+     * ⭐ EVERY PER-FLOOR MASK BAKE, IN ONE PLACE — and it exists because the
+     * hand-maintained alternative has now been forgotten FOUR TIMES.
+     *
+     * ⚠️ THE BUG THAT CREATED IT, reported live by the author: *"we're masking
+     * things correctly on the ground floor, but then I go up and the situation
+     * remains the same — there should be new surfaces which are no longer
+     * occluded by the things above them. Then I moved to the rooftop level and
+     * particles don't appear above those roofs either."*
+     *
+     * Exactly right, and the cause was ONE MISSING LINE. The floor-change
+     * chokepoint re-baked the wind field, `_Outdoors` and the fire mask — and
+     * not precipitation's sky-reach. So the gate kept the GROUND FLOOR's mask
+     * forever: every upper floor was judged by the roofs of the floor below,
+     * and the rooftop was judged by a building that, from up there, is not
+     * above anything at all. The derivation was right the whole time
+     * (`mask-derive.js` computes `coverAbove` per floor from `owner > floor.
+     * index`); nothing ever asked it for the new floor.
+     *
+     * ⚠️ AND IT IS `feedback_hand_maintained_dispatch_list_forgets_new_effects`
+     * FOR THE FOURTH TIME IN THIS ONE SUBSYSTEM — the weather axis table, the
+     * env snapshot's allow-list, the scene store, and now this. Adding a fifth
+     * line to a list of four call sites would have been the same bug waiting
+     * for the next consumer, so the LIST is what got fixed: a new per-floor
+     * bake has one place to be added, and every chokepoint already calls here.
+     *
+     * @param {number} floorIndex
+     * @param {string} reason - carried into the return so a stale gate can be
+     *   traced to the moment it should have been refreshed.
+     */
+    function rebakePerFloorMasks(floorIndex, reason) {
+      const idx = Number.isFinite(floorIndex) ? floorIndex : 0;
+      // The SKY's `_Outdoors` gate — a cellar and the street above it have
+      // entirely different ideas about what is open sky.
+      const outdoors = bakeOutdoorsTexture(idx);
+      // Fire's mask-clip gate, per-floor for the identical reason.
+      const fire = bakeFireMaskTexture(idx);
+      // ⭐ PRECIPITATION's LAW 3 gate. One texture, FOUR consumers — the fall,
+      // the splashes, the curtain and the mantle's accumulation — every one of
+      // which was reading the wrong floor's roofs until this line existed.
+      const skyReach = bakePrecipSkyReachTexture(idx);
+      lastPerFloorMaskRebake = { floorIndex: idx, reason, outdoors, fire, skyReach };
+      // ⭐ THE MANTLE IS PER-FLOOR TOO. Its buffer holds THIS floor's snow, so a
+      // floor change must re-derive it — otherwise the roof wears the
+      // courtyard's drifts. §5.5's seeding is exactly the right tool: the
+      // mantle was never serialized, so re-deriving is its normal path rather
+      // than a special case.
+      precipitationSubsystem?.notifyFloorChanged?.(idx);
+      return lastPerFloorMaskRebake;
+    }
+
     /**
      * The mantle's integrator step — bind, render, restore. Lives HERE because
      * `renderer-state/graph-only` walls `effects/` from `renderer.setRenderTarget`:
@@ -2964,7 +3022,7 @@ export async function startVtPanViewer({
         precipSkyReachTexture?.dispose();
         precipSkyReachTexture = null;
         precipSkyReachRect = null;
-        precipitationSubsystem?.setSkyReachTexture(null, null);
+        precipitationSubsystem?.setSkyReachTexture(null, null, floorIndex);
         lastPrecipSkyReachBake = { ok: false, floorIndex, reason: 'no skyReach product for this floor' };
         return lastPrecipSkyReachBake;
       }
@@ -2990,7 +3048,10 @@ export async function startVtPanViewer({
         maxX: grid.spec.x + grid.spec.width,
         maxY: grid.spec.y + grid.spec.height,
       };
-      precipitationSubsystem?.setSkyReachTexture(tex, precipSkyReachRect);
+      // ⚠️ THE FLOOR RIDES ALONG so the status can say which floor the gate
+      // is on. Its absence is what let the stale-gate bug survive: every
+      // field said "armed", none said "armed against WHAT".
+      precipitationSubsystem?.setSkyReachTexture(tex, precipSkyReachRect, floorIndex);
       lastPrecipSkyReachBake = { ok: true, floorIndex, cols: w, rows: h, rect: precipSkyReachRect };
       return lastPrecipSkyReachBake;
     }
@@ -3606,14 +3667,7 @@ export async function startVtPanViewer({
         // sitting on its 1×1 placeholder until something unrelated happens to
         // edit a mask. The wind's own "not a change, don't rebake" reasoning is
         // unaffected and unchanged.
-        bakeOutdoorsTexture(view?.floorIndex ?? 0);
-        // Fire's mask-clip gate is derived from the same masks and wants the
-        // same earliest-observation bake, for the same reason.
-        bakeFireMaskTexture(view?.floorIndex ?? 0);
-        // PRECIPITATION's LAW 3 gate reads the SAME derived products, so it goes
-        // stale at the SAME moment. A missed rebake here would leave the previous
-        // floor's roofs standing over this one's open ground.
-        bakePrecipSkyReachTexture(view?.floorIndex ?? 0);
+        rebakePerFloorMasks(view?.floorIndex ?? 0, 'first-mask-observation');
         return;
       }
       if (v === lastSeenMaskVersion) return;
@@ -3622,14 +3676,7 @@ export async function startVtPanViewer({
       // The sky's gate is derived from the same masks, so it goes stale at
       // exactly the same moments. One trigger, two bakes — never two polls that
       // could drift into disagreeing about which mask version is current.
-      bakeOutdoorsTexture(view?.floorIndex ?? 0);
-      // Same masks, same staleness moment, same reasoning as the sky above —
-      // a live edit to a `_Fire` region must reach the flame's own clip.
-      bakeFireMaskTexture(view?.floorIndex ?? 0);
-      // PRECIPITATION's LAW 3 gate reads the SAME derived products, so it goes
-      // stale at the SAME moment. A missed rebake here would leave the previous
-      // floor's roofs standing over this one's open ground.
-      bakePrecipSkyReachTexture(view?.floorIndex ?? 0);
+      rebakePerFloorMasks(view?.floorIndex ?? 0, 'mask-change');
     }
 
     // ------------------------------------------------------------------
@@ -8161,6 +8208,14 @@ export async function startVtPanViewer({
         // `envLight.setSunShadowFloorIndex` loop in the frame body uses it —
         // so water and the ambient fill can never disagree about which floor a
         // field belongs to.
+        //
+        // ⚠️ TWO SEAMS, NOT ONE, AND THEY ANSWER DIFFERENT QUESTIONS: this
+        // texture only decides whether the lookup is COMPILED (a scene with
+        // shadows at all), while the resolver below decides which field this
+        // floor READS this frame. Slot 0 always exists once the subsystem is
+        // built, so the gate compiles for every floor including ones that have
+        // no slot of their own yet.
+        sunShadowTexture: sunShadows.fields[0]?.texture ?? null,
         getSunShadowSlot: (fi) => {
           for (const field of sunShadows.fields) {
             if (field.getFloorIndex() !== fi) continue;
@@ -13898,9 +13953,11 @@ export async function startVtPanViewer({
       // ideas about what is open sky. Leaving it stale would light the floor
       // below through the floor above's windows — the same class of bug the
       // wind rebake above was added to fix, and the same chokepoint fixes it.
-      bakeOutdoorsTexture(floorIndex);
-      // Fire's mask-clip gate is per-floor for the identical reason.
-      bakeFireMaskTexture(floorIndex);
+      // ⚠️ THE SITE THE AUTHOR'S BUG LIVED IN. This used to name
+      // `bakeOutdoorsTexture` and `bakeFireMaskTexture` individually and had no
+      // line at all for precipitation, so climbing a floor left the sky-reach
+      // gate on the floor below's roofs. See `rebakePerFloorMasks`.
+      rebakePerFloorMasks(floorIndex, 'floor-change');
       await scheduleResidencyUpdate();
       return true;
     }
@@ -14284,10 +14341,10 @@ export async function startVtPanViewer({
     // to discover a scene's masks in the first place — waiting on it here would
     // leave the sky reading the fully-outdoors placeholder for up to that
     // interval on every fresh load, for no reason.
-    bakeOutdoorsTexture(clampedInitialFloor);
-    // Same reasoning: a fresh load must not leave every fire on its 1×1
-    // fully-painted placeholder (unclipped) until the version poll catches up.
-    bakeFireMaskTexture(clampedInitialFloor);
+    // A fresh load must not leave the sky reading its fully-outdoors
+    // placeholder, every fire on its unclipped 1×1, or precipitation's LAW 3
+    // gate disarmed, until the version poll catches up.
+    rebakePerFloorMasks(clampedInitialFloor, 'initial-load');
 
     // THE INITIAL LOAD, walked explicitly so it can be REPORTED.
     //

@@ -388,10 +388,52 @@ export function createPrecipEngine({
    */
   const skyReachTex = openSkyPixel ? TSL.texture(openSkyPixel) : null;
 
-  // Live by reference — a `setWindAmbient` change reaches the kernel with no
-  // resync code, the contract all three existing runtimes rely on.
-  const uWindSpeed01 = windHandle?.ambient ? windHandle.ambient.speed01 : float(0);
-  const uWindDirDeg = windHandle?.ambient ? windHandle.ambient.directionDeg : float(0);
+  /**
+   * ⭐ THE ENGINE'S **OWN** WIND UNIFORMS, PUSHED PER FRAME — not the wind
+   * handle's, bound by reference.
+   *
+   * ⚠️ THIS IS A BUG FIX WITH A LIVE REPORT BEHIND IT: *"Wind doesn't seem to
+   * affect it at all currently."* The three sibling runtimes bind
+   * `windHandle.ambient.speed01` directly, which is correct FOR THEM because
+   * they are built once beside a handle that outlives them. Precipitation
+   * builds its engines LAZILY (a clear map allocates nothing), and
+   * `vt-pan-viewer.js`'s `windHandle` is a `let` that gets REASSIGNED when the
+   * wind field bakes — so an engine built before a bake, or after a different
+   * one, holds a dead handle's uniforms forever. Nothing throws; the rain
+   * simply never leans, which is exactly what was reported.
+   *
+   * Owning the uniforms and pushing values every frame makes engine lifetime
+   * and handle lifetime independent, which is the actual invariant this
+   * runtime needs. One extra uniform write per frame, and the whole
+   * captured-a-stale-reference class stops applying
+   * (`feedback_unconsumed_api_rots_silently`'s cousin: a binding that is still
+   * live but no longer connected to anything that changes).
+   */
+  const uWindSpeed01 = uniform(float(0));
+  const uWindDirDeg = uniform(float(0));
+
+  /**
+   * ⭐ HOW FAR THE FALL TILTS AT FULL WIND, IN DEGREES — the one number that
+   * makes wind visible on precipitation.
+   *
+   * ⚠️ IT REPLACES A VELOCITY RATIO THAT COULD NEVER WORK, and the arithmetic
+   * is worth keeping because it is a units bug, not a tuning one. The wind
+   * field speaks in `pxPerMeter × 3.2` ⇒ **320 px/s at a full gale**, a scale
+   * calibrated for foliage sway. Rain falls at **1400-5200 px/s** — V2's
+   * harvested numbers, which were SCREEN-space under a perspective camera, not
+   * world-space. Feeding one into the other gives a tilt of
+   * `atan(144 / 3300)` = **2.5°** at maximum wind: measured in the shader lab,
+   * and exactly the author's report that *"wind doesn't seem to affect it at
+   * all."* No gain on the velocity fixes that honestly — the two quantities are
+   * calibrated in different frames.
+   *
+   * An ANGLE is the quantity that actually transfers. It is also the natural
+   * authoring unit ("a gale drives rain over at 40°"), it is bounded by
+   * construction, and the vanishing point of lines tilted by θ sits at
+   * `tan(θ)·D` from the nadir — so the convergence shift falls straight out of
+   * it with no second calibration to get wrong.
+   */
+  const uWindTiltDeg = uniform(float(40));
   // Construction-time constant, not a uniform: `pxPerMeter` cannot change mid-session.
   const windPxPerSec = float(pxPerMeter * 3.2);
 
@@ -528,8 +570,21 @@ export function createPrecipEngine({
     //    That is what lets this runtime skip the wind-grid buffer entirely
     //    (see the storage arithmetic in the header). Species-scaled: rain
     //    leans, snow is carried.
+    // ⚠️ THE SAME TILT ANGLE THE DRAW USES, not a second calibration. A drop
+    // falling at `speed` along a line tilted by θ drifts horizontally at
+    // `speed · tan(θ)` — so ONE angle drives both how far downwind the body
+    // actually travels and where its streak converges. Deriving them
+    // separately is precisely the two-terms-disagreeing bug this runtime has
+    // already paid for twice; here they cannot disagree because there is one
+    // θ. (`windPxPerSec` is consequently unused by precipitation: the wind
+    // field's foliage-calibrated px/s is the wrong frame for a body falling at
+    // thousands of px/s — see `uWindTiltDeg`.)
     const windRad = uWindDirDeg.mul(float(Math.PI / 180));
-    const windVec = vec2(cos(windRad), sin(windRad)).mul(uWindSpeed01).mul(windPxPerSec).mul(float(WIND_CARRY));
+    const tiltRadSim = uWindSpeed01
+      .mul(float(WIND_CARRY))
+      .mul(uWindTiltDeg)
+      .mul(float(Math.PI / 180));
+    const windVec = vec2(cos(windRad), sin(windRad)).mul(tiltRadSim.tan()).mul(speed).mul(uFallSlant01);
     // 2. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
     //    offset per body so neighbours never move in lockstep (the ember
     //    lesson: a pure function of position and time makes a swarm drift as
@@ -795,7 +850,15 @@ export function createPrecipEngine({
     // interacts with wind exactly as the author asked, because wind is the
     // dominant contributor to `vel`.
     const fallSpeed = c.z.mul(uSpeedMul).max(float(1));
-    const windOffset = vel.mul(uCamHeight).div(fallSpeed).mul(uFallSlant01);
+    // ⭐ THE CONVERGENCE SHIFT, FROM THE TILT ANGLE. Lines tilted by θ have
+    // their vanishing point `tan(θ)·D` from the nadir — see `uWindTiltDeg` for
+    // why an angle rather than the velocity ratio this used to divide.
+    const tiltRad = uWindSpeed01
+      .mul(float(WIND_CARRY))
+      .mul(uWindTiltDeg)
+      .mul(float(Math.PI / 180));
+    const windRadDraw = uWindDirDeg.mul(float(Math.PI / 180));
+    const windOffset = vec2(cos(windRadDraw), sin(windRadDraw)).mul(tiltRad.tan()).mul(uCamHeight).mul(uFallSlant01);
     const convergence = uCamCentre.add(windOffset);
     // Pure radial about the shifted point. `uParallaxStreak01` blends between
     // the raw world drift (0) and this (1) — kept as an escape hatch for a
@@ -967,8 +1030,18 @@ export function createPrecipEngine({
      *   because the GM slowed the game clock), so this is the WALL delta.
      * @param {number} timeMs
      */
-    step(renderer, dtSec, timeMs) {
+    step(renderer, dtSec, timeMs, wind) {
       if (!S) return;
+      // Re-read the wind EVERY frame from whatever handle the caller currently
+      // holds — see `uWindSpeed01`'s note on why this cannot be a build-time
+      // binding. A caller that passes nothing keeps the last values rather
+      // than snapping the rain upright.
+      if (wind?.ambient) {
+        const sp = wind.ambient.speed01?.value;
+        const dg = wind.ambient.directionDeg?.value;
+        if (Number.isFinite(sp)) uWindSpeed01.value = sp;
+        if (Number.isFinite(dg)) uWindDirDeg.value = dg;
+      }
       uDtSec.value = Math.max(0, Math.min(0.1, dtSec || 0));
       uTimeMs.value = timeMs || 0;
       if (!seeded) this.init(renderer);
@@ -1077,6 +1150,7 @@ export function createPrecipEngine({
       if (Number.isFinite(t.slantDirDeg)) uSlantDirDeg.value = t.slantDirDeg;
       if (Number.isFinite(t.chaosScale)) uChaosScale.value = t.chaosScale;
       if (Number.isFinite(t.streakScale)) uStreakScale.value = Math.max(0, t.streakScale);
+      if (Number.isFinite(t.windTiltDeg)) uWindTiltDeg.value = Math.max(0, Math.min(85, t.windTiltDeg));
       if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
       if (Number.isFinite(t.cameraHeight)) uCamHeight.value = Math.max(1, t.cameraHeight);
     },
@@ -1104,6 +1178,7 @@ export function createPrecipEngine({
           slantDirDeg: uSlantDirDeg.value,
           chaosScale: uChaosScale.value,
           streakScale: uStreakScale.value,
+          windTiltDeg: uWindTiltDeg.value,
           parallaxStreak01: uParallaxStreak01.value,
           cameraHeight: uCamHeight.value,
         },

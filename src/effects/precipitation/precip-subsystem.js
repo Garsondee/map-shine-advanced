@@ -202,7 +202,12 @@ export function createPrecipitationSubsystem({
           st.tierScale ?? 1
         )
       );
-      engine.step(renderer, dtRealSec, nowMs);
+      // ⚠️ THE HANDLE IS RE-READ EVERY FRAME, not captured at engine build.
+      // `vt-pan-viewer.js`'s `windHandle` is reassigned when the wind field
+      // bakes, and these engines are built lazily — so a captured reference
+      // goes dead silently and the rain stops leaning. See the runtime's
+      // `uWindSpeed01` note.
+      engine.step(renderer, dtRealSec, nowMs, getWindHandle());
     },
 
     /** The scene the draw pass renders, or null when nothing is falling. */

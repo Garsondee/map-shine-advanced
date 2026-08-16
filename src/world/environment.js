@@ -200,6 +200,32 @@ export function buildEnvSnapshot({
       // not a formality.
       cloudAltitudePx: clampPositive(w.cloudAltitudePx, DEFAULT_WEATHER.cloudAltitudePx),
       cloudScalePx: clampPositive(w.cloudScalePx, DEFAULT_WEATHER.cloudScalePx),
+      // ── PRECIPITATION (P1) ────────────────────────────────────────────────
+      //
+      // ⚠️ THIS BLOCK IS A HAND-MAINTAINED ALLOW-LIST, AND IT ALREADY FORGOT
+      // ONCE. `precip01`/`temperature01` were added to `WEATHER_AXES` and the
+      // derived `precipKind` computed correctly in the manager — but this list
+      // did not grow, so the snapshot silently dropped them. `env.weather
+      // .precipKind` arrived `undefined`, the precipitation subsystem fell back
+      // to its `?? 'rain'` default, and the author's report was exact: *"I still
+      // can't get snow to appear by clicking the button for snow."* Every Node
+      // test passed, because they all tested the manager rather than the seam.
+      //
+      // That is `feedback_hand_maintained_dispatch_list_forgets_new_effects` in
+      // its purest form. The guard is now a TEST — `environment.test.mjs`
+      // asserts every axis in `WEATHER_AXES` appears here — so the next axis
+      // added without wiring fails a check instead of a scene.
+      temperature01: clamp01(w.temperature01),
+      /** What is actually falling. DERIVED upstream (one derivation, one place
+       * — Weather-Manager.md §2.2), passed through as a string rather than
+       * re-derived here, because a second derivation is how two consumers end
+       * up disagreeing about the weather. */
+      precipKind: typeof w.precipKind === 'string' ? w.precipKind : 'rain',
+      /** How much of the COLD species is in a sleet mix, 0..1. */
+      precipMixWeight: clamp01(w.precipMixWeight),
+      /** What the GM said should fall, or `auto`. Carried for diagnostics —
+       * consumers read `precipKind`. */
+      precipKindAuthored: typeof w.precipKindAuthored === 'string' ? w.precipKindAuthored : 'auto',
       hasOwner: w.hasOwner === true,
       ownerVersion: Number.isFinite(Number(w.ownerVersion)) ? Number(w.ownerVersion) : 0,
     },

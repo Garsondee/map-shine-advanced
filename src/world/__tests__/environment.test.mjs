@@ -4,10 +4,45 @@
  * darkness has exactly one derivation with the max(night, GM) authority rule.
  */
 import { buildEnvSnapshot, DEFAULT_WEATHER, DEFAULT_WIND, DEFAULT_AMBIENT } from '../environment.js';
+import { WEATHER_AXIS_NAMES, createWeatherManager } from '../weather.js';
 
 const time = (over = {}) => ({ frame: 1, tMs: 1000, dtSec: 0.016, ...over });
 
 export function run(t) {
+  // ---- ⭐ THE SEAM GUARD: every axis the manager owns must SURVIVE the snapshot
+  //
+  // This exists because the snapshot's weather block is a hand-maintained
+  // allow-list and it forgot once, in a way no other test could see. `precip01`
+  // and `temperature01` were added to `WEATHER_AXES`, the manager derived
+  // `precipKind` correctly, every manager test passed — and the snapshot
+  // silently dropped all three, so clicking the astrolabe's SNOW button
+  // produced rain on a live map for two commits
+  // (`feedback_hand_maintained_dispatch_list_forgets_new_effects`).
+  //
+  // Asserting against `WEATHER_AXIS_NAMES` rather than a second hardcoded list
+  // is the whole point: the next axis added without wiring fails HERE.
+  {
+    const mgr = createWeatherManager();
+    mgr.jumpTo({ precip01: 0.5, temperature01: 0.1 });
+    const env = buildEnvSnapshot({ time: time(), todHour: 12, weather: mgr.toSnapshotWeather() });
+    const missing = WEATHER_AXIS_NAMES.filter((n) => env.weather[n] === undefined);
+    t.ok(
+      `⭐ every WEATHER_AXES axis reaches env.weather (missing: ${missing.join(',') || 'none'})`,
+      missing.length === 0
+    );
+    t.ok('...and their VALUES survive rather than being defaulted away', env.weather.precip01 === 0.5);
+    // The derived fields are not axes, so name them explicitly — they are the
+    // ones a consumer actually branches on.
+    t.ok('the DERIVED precipKind survives the seam', env.weather.precipKind === 'snow');
+    t.ok('...as does its mix weight', Number.isFinite(env.weather.precipMixWeight));
+    t.ok('...and the authored kind, for diagnostics', typeof env.weather.precipKindAuthored === 'string');
+    // Fail-open: an un-owned snapshot must still name a kind rather than
+    // handing a consumer `undefined` to fall back from.
+    const unowned = buildEnvSnapshot({ time: time(), todHour: 12 });
+    t.ok('an unowned snapshot still names a precipKind', typeof unowned.weather.precipKind === 'string');
+    t.ok('...and is dry', unowned.weather.precip01 === 0);
+  }
+
   // ---- shape + freezing ------------------------------------------------------
   {
     const env = buildEnvSnapshot({ time: time(), todHour: 12 });

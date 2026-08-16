@@ -130,6 +130,7 @@ class PrecipDriver {
       slantDirDeg: 90,
       chaosScale: 3.5,
       streakScale: 1.1,
+      windTiltDeg: 40,
       parallaxStreak01: 1,
       cameraHeight: 2000,
       // view
@@ -290,6 +291,7 @@ class PrecipDriver {
         slantDirDeg: s.slantDirDeg,
         chaosScale: s.chaosScale,
         streakScale: s.streakScale,
+        windTiltDeg: s.windTiltDeg,
         parallaxStreak01: s.parallaxStreak01,
         cameraHeight: s.cameraHeight,
       });
@@ -335,7 +337,7 @@ class PrecipDriver {
     this._virtualNowMs += dt;
     const engine = this.engine;
     if (!engine) return null;
-    engine.step(this.renderer, dt / 1000, this._virtualNowMs);
+    engine.step(this.renderer, dt / 1000, this._virtualNowMs, this.wind);
     // Render EVERY engine's scene: the inactive one is hidden (liveCount 0 ⇒
     // mesh.visible false), so this costs nothing and keeps the draw path
     // identical whether one species or two are live — which is what production

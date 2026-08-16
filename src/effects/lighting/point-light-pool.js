@@ -659,10 +659,11 @@ function createLightEntry({
  *   lightScene: object, colorationScene: object, apertureShadowScene: object,
  *   mergedScene: object,
  *   lightMeshes: Map, candleWallClipCache: Map, lightningWallClipCache: Map,
+ *   fireWallClipCache: Map,
  *   update: (darkness01: number, activeRegions: object[], env: object, darknessRealism01: number, currentFloor: object) => number,
  *   getApertureGoboReadout: () => {totalFound: number, dropped: number, litLights: number, enabled: boolean},
  *   getBatchingReadout: () => object,
- *   getWallClipCacheStats: () => {candle: object, lightning: object, regular: object, apertureWalls: object},
+ *   getWallClipCacheStats: () => {candle: object, lightning: object, fire: object, regular: object, apertureWalls: object},
  *   invalidateBatchedWindMaterials: () => void,
  *   dispose: () => void,
  * }}
@@ -691,15 +692,18 @@ export function createPointLightPool({
   // renderer, byte-identical — the safety-slide default, never an opt-in
   // surprise.
   getPointLightBatchingEnabled = () => false,
-  // WALL-SEGMENT CACHE INVALIDATION (2026-08-09) — a GETTER for the same
-  // reason `getWindHandle` is (see this file's own "GETTERS VS VALUES"
-  // trap): boot.js owns the counter and bumps it on createWall/updateWall/
-  // deleteWall; this pool just reads whatever it currently says. Defaulted
-  // so a caller with no wall-change context (tests, future fixtures) still
-  // constructs a working pool — see `apertureSegCache`'s own comment below
-  // for why a version that never advances is a correct, if permanently
-  // uncached-against-edits, degraded mode rather than a crash.
-  getApertureWallVersion = () => 0,
+  // WALL-STRUCTURE VERSION (2026-08-09, renamed 2026-08-15 from
+  // `getApertureWallVersion` — it now gates FOUR caches, not just
+  // `apertureSegCache`, see `lastSeenWallStructureVersion`'s own doc) — a
+  // GETTER for the same reason `getWindHandle` is (see this file's own
+  // "GETTERS VS VALUES" trap): boot.js owns the counter and bumps it on
+  // createWall/updateWall/deleteWall; this pool just reads whatever it
+  // currently says. Defaulted so a caller with no wall-change context
+  // (tests, future fixtures) still constructs a working pool — see
+  // `apertureSegCache`'s own comment below for why a version that never
+  // advances is a correct, if permanently uncached-against-edits, degraded
+  // mode rather than a crash.
+  getWallStructureVersion = () => 0,
   uGlobalTimeMs,
   resolveExpectedDepth,
   // PERF-INSTRUMENTATION-AUDIT-2026-08-12 — this file had ZERO internal
@@ -906,6 +910,23 @@ export function createPointLightPool({
    * avoids recomputing the wall sweep every single frame a bolt flickers). */
   const lightningWallClipCache = new Map();
 
+  /** sourceId -> {floorId, radius, points, source, reason} — the FOURTH
+   * sibling of `candleWallClipCache` (2026-08-15 — "lights aren't occluded
+   * by walls" investigation). `fire-geometry.js#buildFireLightSources`'s own
+   * header claims a fire light "inherits... wall clipping... for free" from
+   * this pool — that was never true: `fireCirclePolygon` (fire-geometry.js)
+   * builds a naive, unclipped circle, and unlike candleLights/lightningLights
+   * a few dozen lines down, nothing in this pool ever replaced it with
+   * Foundry's real wall-clipped shape. A fire near or inside a building bled
+   * its light through every surrounding wall, unconditionally — not an edge
+   * case, every fire, always. Keyed on `(floorId, radius)`, matching
+   * `candleWallClipCache` (NOT lightning's stable-radius trick): fire's own
+   * header documents its light baseline as "deliberately stable across
+   * frames, matching candle's own split" — the flicker lives entirely in the
+   * GPU animation now, so the descriptor's `radius` does not jitter the way
+   * lightning's visual radius does. */
+  const fireWallClipCache = new Map();
+
   /** Persistent scratch array for the per-frame `lights` merge below (perf
    * pass, 2026-08-13) — `[...a, ...b, ...c, ...d]` allocates a brand-new
    * array every frame regardless of whether any source changed; `.length = 0`
@@ -951,7 +972,7 @@ export function createPointLightPool({
 
   /** {floorId, wallVersion, segments, frames}|null — the aperture-flagged
    * wall segment list, recomputed only when the current floor or the wall
-   * structure (createWall/updateWall/deleteWall, via `getApertureWallVersion`)
+   * structure (createWall/updateWall/deleteWall, via `getWallStructureVersion`)
    * actually changed (2026-08-09, PERF: `readSceneWallSegments` walks every
    * wall on the scene and `findAperturesForLight`'s own perf comment already
    * established the per-light scan needs pre-filtering — this closes the
@@ -972,20 +993,39 @@ export function createPointLightPool({
    * from scratch every frame — see that call site's own comment. */
   let apertureSegCache = null;
 
-  /** LIFETIME hit/miss/eviction counters for the four caches above, one key
-   * each — perf-instrumentation-audit-2026-08-12. Same "mutated in place,
-   * exposed via a plain getter" shape as `apertureGoboReadout`/
-   * `batchingReadout` (this file's own precedent), except these are
-   * cumulative across the pool's whole lifetime rather than reset every
-   * `update()` — matching `depth-proxy-material-pool.js`'s own convention
-   * (the report samples start/end around a measurement window and reports
-   * the DELTA, since a lifetime total alone says nothing about what
-   * happened during any one window). `apertureWalls` has no `evictions`
-   * key: it is a single nullable object, not a Map — there is nothing to
-   * evict, only replace, which a miss already counts. */
+  /** The wall-structure version (`getWallStructureVersion()`) as of the LAST
+   * `update()` call — 2026-08-15, the "lights aren't occluded by walls" fix.
+   * `candleWallClipCache`/`lightningWallClipCache`/`fireWallClipCache`/
+   * `regularLightWallClipCache` are each keyed on (floor, radius[, position])
+   * ONLY — none of those fields describe the WALLS themselves, so a light
+   * that never moves or resizes kept its wall-clipped polygon from BEFORE a
+   * nearby wall was added, removed, or reconfigured (e.g. turned into or out
+   * of a window) for the rest of the session. `apertureSegCache` just above
+   * already solved this correctly for the wall-SEGMENT list (its own key
+   * includes `wallVersion`); this is the same "the version changed, throw
+   * the whole cache away" shape applied to the four SHAPE caches that never
+   * got it. Initialized to a value the real counter can never produce on
+   * frame 1 (it starts at 0 and only increments), so the very first
+   * `update()` call always runs one — harmless, since every cache starts
+   * empty — invalidation pass. See `update()`'s own top-of-function check. */
+  let lastSeenWallStructureVersion = -1;
+
+  /** LIFETIME hit/miss/eviction counters for the five caches above, one key
+   * each — perf-instrumentation-audit-2026-08-12 (`fire` added 2026-08-15
+   * alongside `fireWallClipCache`). Same "mutated in place, exposed via a
+   * plain getter" shape as `apertureGoboReadout`/`batchingReadout` (this
+   * file's own precedent), except these are cumulative across the pool's
+   * whole lifetime rather than reset every `update()` — matching
+   * `depth-proxy-material-pool.js`'s own convention (the report samples
+   * start/end around a measurement window and reports the DELTA, since a
+   * lifetime total alone says nothing about what happened during any one
+   * window). `apertureWalls` has no `evictions` key: it is a single
+   * nullable object, not a Map — there is nothing to evict, only replace,
+   * which a miss already counts. */
   const wallClipCacheStats = {
     candle: { hits: 0, misses: 0, evictions: 0 },
     lightning: { hits: 0, misses: 0, evictions: 0 },
+    fire: { hits: 0, misses: 0, evictions: 0 },
     regular: { hits: 0, misses: 0, evictions: 0 },
     apertureWalls: { hits: 0, misses: 0 },
   };
@@ -1081,6 +1121,30 @@ export function createPointLightPool({
     // by the SAME floor value — one read, both consumers, never two floor
     // values disagreeing about which is "current" this frame.
     const currentFloorId = currentFloor?.id ?? null;
+
+    // WALL-CLIP CACHE INVALIDATION ON WALL EDIT (2026-08-15 — see
+    // `lastSeenWallStructureVersion`'s own declaration for the full
+    // mechanism/why this exists). Checked ONCE per frame, before anything
+    // below reads from candleWallClipCache/lightningWallClipCache/
+    // fireWallClipCache/regularLightWallClipCache: if a createWall/
+    // updateWall/deleteWall happened since the last frame, every one of
+    // those four caches is thrown away wholesale, so every active light
+    // recomputes its TRUE wall-clipped polygon against the walls as they
+    // exist NOW rather than as they existed whenever that light's shape was
+    // first cached. Walls change on editing-cadence, not frame-cadence (the
+    // same observation `apertureSegCache`'s own invalidation already leans
+    // on), so this costs nothing in the steady state — one wall edit costs
+    // one frame of "recompute every active light," which is the honest
+    // price of no longer silently drawing light through a wall that changed.
+    const wallStructureVersion = getWallStructureVersion();
+    if (wallStructureVersion !== lastSeenWallStructureVersion) {
+      lastSeenWallStructureVersion = wallStructureVersion;
+      candleWallClipCache.clear();
+      lightningWallClipCache.clear();
+      fireWallClipCache.clear();
+      regularLightWallClipCache.clear();
+    }
+
     // darkness01 gates each light's OWN activation window (LightData.darkness
     // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
     // header for why this lives in the reader, not here). `regularLightWallClipCache`
@@ -1275,6 +1339,57 @@ export function createPointLightPool({
     // list ever reaches the pool.
     const fireLights = getFireLightSources ? (getFireLightSources() ?? []) : [];
 
+    // WALL-CLIPPING fire lights (2026-08-15 — same class of bug as the
+    // 2026-07-20 candle fix, never applied here despite `fire-geometry.js#
+    // buildFireLightSources`'s own header claiming fire "inherits... wall
+    // clipping... for free" from this pool. It never did: `fireCirclePolygon`
+    // is a naive circle with zero wall awareness, and until this fix nothing
+    // downstream ever replaced it — a fire near or inside a building bled its
+    // light through every surrounding wall, unconditionally, every frame.
+    // Same shape as the candle loop above: `computeCandleWallClippedShape`
+    // reuses Foundry's own `ClockwiseSweepPolygon` (correctly handles a
+    // `light:PROXIMITY` aperture/window wall too — Foundry's sweep, not a
+    // second hand-rolled clipper), cached on `(floorId, radius)` since fire's
+    // own light baseline is documented as frame-stable like candle's, never
+    // lightning's jittering visual radius.
+    for (const fire of fireLights) {
+      let cached = fireWallClipCache.get(fire.sourceId);
+      if (!cached || cached.floorId !== currentFloorId || cached.radius !== fire.radius) {
+        wallClipCacheStats.fire.misses += 1;
+        const result = computeCandleWallClippedShape({
+          x: fire.x,
+          y: fire.y,
+          radius: fire.radius,
+          levelId: currentFloorId,
+        });
+        cached = { floorId: currentFloorId, radius: fire.radius, ...result };
+        fireWallClipCache.set(fire.sourceId, cached);
+      } else {
+        wallClipCacheStats.fire.hits += 1;
+      }
+      if (cached.points) fire.shapePoints = cached.points;
+      // cached.points === null: the fire KEEPS its own naive-circle
+      // shapePoints (buildFireLightSources' own fallback) untouched — same
+      // posture as candle/lightning's identical fallback branch above.
+    }
+    // Prune stale entries the same way lightning's own cache does (candle's
+    // does not — see `fireWallClipCache`'s own declaration for why fire
+    // follows lightning's precedent instead): a fire cluster's `sourceId` is
+    // derived from the SORTED set of fire-source ids currently merged into it
+    // (`fire-geometry.js#clusterFireSources`), which can change as individual
+    // fires flicker across a clustering boundary — an unpruned cache would
+    // accumulate one dead entry per abandoned cluster shape for the rest of
+    // the session.
+    if (fireWallClipCache.size) {
+      const liveFireIds = new Set(fireLights.map((f) => f.sourceId));
+      for (const id of fireWallClipCache.keys()) {
+        if (!liveFireIds.has(id)) {
+          fireWallClipCache.delete(id);
+          wallClipCacheStats.fire.evictions += 1;
+        }
+      }
+    }
+
     lightsScratch.length = 0;
     for (const l of foundryLights) lightsScratch.push(l);
     for (const l of candleLights) lightsScratch.push(l);
@@ -1312,14 +1427,14 @@ export function createPointLightPool({
     // deleteWall (editing-cadence, not frame-cadence — the exact same
     // observation §5.8 already made for sun-shadow/water's bake gates), so
     // this is cached against (current floor, wall-structure version) and
-    // only recomputed when either changed. `getApertureWallVersion` is a
+    // only recomputed when either changed. `getWallStructureVersion` is a
     // GETTER bumped by boot.js on those three hooks — see this function's own
     // param doc for why capturing the number instead would freeze the cache
     // forever at whatever version existed when the pool was constructed.
     let apertureWallSegments = [];
     let apertureWallFrames = null;
     if (apertureGoboState.enabled) {
-      const wallVersion = getApertureWallVersion();
+      const wallVersion = getWallStructureVersion();
       if (
         !apertureSegCache ||
         apertureSegCache.floorId !== currentFloorId ||
@@ -2224,6 +2339,7 @@ export function createPointLightPool({
     return {
       candle: { ...wallClipCacheStats.candle },
       lightning: { ...wallClipCacheStats.lightning },
+      fire: { ...wallClipCacheStats.fire },
       regular: { ...wallClipCacheStats.regular },
       apertureWalls: { ...wallClipCacheStats.apertureWalls },
     };
@@ -2281,6 +2397,7 @@ export function createPointLightPool({
     lightMeshes,
     candleWallClipCache,
     lightningWallClipCache,
+    fireWallClipCache,
     update,
     getApertureGoboReadout,
     getBatchingReadout,

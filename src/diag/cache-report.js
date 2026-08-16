@@ -419,12 +419,17 @@ const RAW_CACHE_ADAPTERS = {
   },
 };
 
-/** label/ownerEffectId for each of `pointLightWallClip`'s four sub-caches —
- * one raw object, four rows, so this is handled outside the single-row
+/** label/ownerEffectId for each of `pointLightWallClip`'s five sub-caches —
+ * one raw object, five rows, so this is handled outside the single-row
  * adapter map above. */
 const POINT_LIGHT_WALL_CLIP_SUB = {
   candle: { label: 'Point light: candle wall-clip cache', ownerEffectId: 'candleFlame' },
   lightning: { label: 'Point light: lightning wall-clip cache', ownerEffectId: 'lightning' },
+  fire: {
+    label: 'Point light: fire wall-clip cache',
+    ownerEffectId: 'fire',
+    note: "Added 2026-08-15 — fire lights were never wall-clipped at all before this (fireCirclePolygon's own naive circle, unconditionally); zero hits/misses here on a build that predates the fix, not a healthy cache.",
+  },
   regular: {
     label: 'Point light: real-light wall-clip cache',
     note: 'The 9.9%-of-a-frame cost light.pointLightWallClip now zones directly — see that zone for the CPU cost this cache exists to avoid.',

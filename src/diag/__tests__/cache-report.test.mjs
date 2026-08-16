@@ -351,7 +351,9 @@ export function run(t) {
   }
 
   // ======================================================================
-  // pointLightWallClip — ONE raw object fans out into FOUR rows
+  // pointLightWallClip — ONE raw object fans out into FIVE rows (`fire`
+  // added 2026-08-15 alongside `fireWallClipCache` — the "fire lights were
+  // never wall-clipped at all" fix)
   // ======================================================================
   {
     const rows = buildCacheRows({
@@ -360,6 +362,7 @@ export function run(t) {
           pointLightWallClip: {
             candle: { hits: 0, misses: 0, evictions: 0 },
             lightning: { hits: 0, misses: 0, evictions: 0 },
+            fire: { hits: 0, misses: 0, evictions: 0 },
             regular: { hits: 0, misses: 0, evictions: 0 },
             apertureWalls: { hits: 0, misses: 0 },
           },
@@ -368,6 +371,7 @@ export function run(t) {
           pointLightWallClip: {
             candle: { hits: 300, misses: 4, evictions: 0 },
             lightning: { hits: 12, misses: 8, evictions: 1 },
+            fire: { hits: 45, misses: 6, evictions: 1 },
             regular: { hits: 5000, misses: 60, evictions: 2 },
             apertureWalls: { hits: 590, misses: 3 },
           },
@@ -376,16 +380,20 @@ export function run(t) {
     });
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     ok(
-      'four distinct rows come out of the one raw object',
+      'five distinct rows come out of the one raw object',
       [
         'pointLightWallClip.candle',
         'pointLightWallClip.lightning',
+        'pointLightWallClip.fire',
         'pointLightWallClip.regular',
         'pointLightWallClip.apertureWalls',
       ].every((id) => byId[id])
     );
     ok('candle row is owned by candleFlame', byId['pointLightWallClip.candle'].ownerEffectId === 'candleFlame');
     ok('lightning row is owned by lightning', byId['pointLightWallClip.lightning'].ownerEffectId === 'lightning');
+    ok('fire row is owned by fire', byId['pointLightWallClip.fire'].ownerEffectId === 'fire');
+    ok('fire.hits delta is correct (45-0)', byId['pointLightWallClip.fire'].hits === 45);
+    ok('fire.evictions delta is correct (1-0)', byId['pointLightWallClip.fire'].evictions === 1);
     ok(
       'regular (real Foundry lights) row has no single owning effect',
       byId['pointLightWallClip.regular'].ownerEffectId === null

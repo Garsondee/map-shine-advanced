@@ -315,7 +315,7 @@ export function createAnchorAuthority({ log }) {
    * cache-invalidation signal for a caller (boot.js's `get*RenderState`
    * seams) that wants to memoize a derived per-anchor array instead of
    * re-mapping it every frame — the same "read a version, skip work when it
-   * hasn't moved" shape `getApertureWallVersion`/`getMaskAuthorityVersion`
+   * hasn't moved" shape `getWallStructureVersion`/`getMaskAuthorityVersion`
    * already establish elsewhere in this codebase.
    * @returns {number}
    */

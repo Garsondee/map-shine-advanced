@@ -826,8 +826,21 @@ export function deriveFireSeed(x, y) {
  *
  * The shape matches `candle-flame-geometry.js#buildOneLightSource` exactly, so
  * the viewer's existing pool needs no new branch — a fire light is just another
- * authored point light, and it inherits region-aware ambient, wall clipping,
- * the soft edge, coloration and MAX-blending for free.
+ * authored point light, and it inherits region-aware ambient, the soft edge,
+ * coloration and MAX-blending for free.
+ *
+ * ⚠️ WALL CLIPPING WAS NOT ACTUALLY FREE — this header claimed it was for
+ * some time, and it was wrong. `shapePoints` below (`fireCirclePolygon`) is a
+ * bare, unclipped circle; unlike candle/lightning, nothing in `point-light-
+ * pool.js` ever replaced it with a real wall-aware shape until 2026-08-15
+ * (`fireWallClipCache`, mirroring the candle fix's own `computeCandleWall
+ * ClippedShape` call) — every fire near or inside a building bled its light
+ * straight through every surrounding wall, unconditionally, until that fix.
+ * A light DOES now get wall-clipped, but it happens entirely on the point-
+ * light-pool.js side, keyed on `sourceId`/`radius`/the receiving floor — this
+ * builder still hands back a naive circle every frame, same as before; it is
+ * simply no longer the shape that ends up on screen once a wall stands
+ * between the fire and a receiver.
  *
  * ⚠️ THE BASELINE IS DELIBERATELY STABLE ACROSS FRAMES, MATCHING CANDLE'S OWN
  * SPLIT. `luminosity01`/`alpha01` used to bake a live per-frame pulse from

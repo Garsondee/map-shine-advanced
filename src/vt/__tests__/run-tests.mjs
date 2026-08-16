@@ -23,6 +23,7 @@ import { run as runCoverageMesh } from './coverage-mesh.test.mjs';
 import { run as runSettle } from './settle.test.mjs';
 import { run as runCompressedTextures } from './compressed-textures.test.mjs';
 import { run as runDepthProxyMaterialPool } from './depth-proxy-material-pool.test.mjs';
+import { run as runAlbedoClarity } from './albedo-clarity.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -74,6 +75,7 @@ const suites = [
   ['settle', runSettle],
   ['compressed-textures', runCompressedTextures],
   ['depth-proxy-material-pool', runDepthProxyMaterialPool],
+  ['albedo-clarity', runAlbedoClarity],
 ];
 
 for (const [name, fn] of suites) {

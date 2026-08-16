@@ -347,6 +347,23 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
     get leafCount() {
       return doorLeaves.size;
     },
+    /**
+     * SCENE READINESS (vt/settle.js probe `doorTextures`) — how many door
+     * textures are mid-flight right now.
+     *
+     * `'failed'` is a terminal state exactly like a real entry, so a door whose
+     * art 404s stops being counted instead of holding readiness open forever —
+     * which matters more than it used to, because a floor change now waits on
+     * readiness with the previous floor still on screen and no curtain to
+     * escalate to.
+     */
+    pendingTextureCount() {
+      let n = 0;
+      for (const v of doorTextureCache.values()) {
+        if (v === 'pending') n++;
+      }
+      return n;
+    },
     sync: syncDoorGraphics,
     dispose: disposeDoorGraphics,
     /** POOL HEALTH — doorTextureCache/doorLeaves' own hit/miss counters. See

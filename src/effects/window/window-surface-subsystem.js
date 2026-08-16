@@ -477,10 +477,49 @@ export function createWindowSurfaceSubsystem({
     /** The dedicated scene `runLightAccumulatePass` renders. */
     scene,
     sync,
+    /**
+     * FLOOR-PREPARE HOOK (2026-08-16, live author report: switching up a
+     * floor, "a second later the _Windows effect pops into view"). Starts the
+     * SAME mask fetch `sync()` would, but on its own, deliberately WITHOUT the
+     * rest of `sync()`'s per-frame work (`resolveExpectedDepth`/
+     * `setExpectedDepth`, which reads `depthAuthority.rankOf(...)` for
+     * whichever floor is passed).
+     *
+     * That distinction is load-bearing, not cosmetic. `vt-pan-viewer.js#
+     * prepareFloor` calls this for the TARGET floor while `view.floorIndex`
+     * still points at the floor genuinely on screen — depth authority has not
+     * been rebuilt for the target floor yet (that happens at COMMIT, inside
+     * the residency pass `prepareFloor` deliberately does not run early; see
+     * its own header for why). Calling the full `sync()` here would ask
+     * depth authority to rank a floor it does not know about yet and push
+     * whatever it returned onto this floor's own quad — harmless today only
+     * because the quad is not drawn until `view.floorIndex` actually matches,
+     * but it is a wrong value sitting in real state for no reason, and this
+     * effect already lists two live bugs that started exactly there
+     * (`ensureMaskImage`'s own header, and the depth-authority-gate comment a
+     * few lines above it). `ensureMaskImage` has no such dependency — it
+     * only reads `getWindowMaskUrl(floorIndex)`, a scene-wide catalog lookup,
+     * unrelated to which floor is currently viewed — so calling it alone is
+     * the narrowest fix that actually closes the gap.
+     *
+     * Idempotent and safe to call before this floor's OWN subsystem instance
+     * would otherwise have been constructed — `getWindowSurfaceForFloor`
+     * lazily builds it either way, and constructing floor N's instance here
+     * does not touch floor M's (a SEPARATE Map entry — this effect is
+     * per-floor by construction, unlike specular's single shared instance,
+     * which is why THIS effect gets this hook and specular does not).
+     */
+    prefetchMask: ensureMaskImage,
     /** True when there is genuinely something to draw — lets the pass take a
      * true JS early-return rather than issuing a render call for a hidden
      * mesh (Effects.md Law 4: gating by uniform is not gating). */
     hasContent: () => mesh.visible,
+    /**
+     * SCENE READINESS (vt/settle.js probe `windowMaskLoad`) — is a cookie-mask
+     * fetch in flight right now? See water-surface-subsystem's own copy of this
+     * accessor for why `loading` is the safe thing to gate on.
+     */
+    isLoadingMask: () => loading,
     getStatus() {
       return {
         visible: mesh.visible,

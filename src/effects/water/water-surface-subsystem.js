@@ -446,6 +446,52 @@ export function createWaterSurfaceSubsystem({
 
   return {
     sync,
+    /**
+     * FLOOR-PREPARE HOOK (2026-08-16, live author report on window light's
+     * OWN copy of this fix — same effect shape, same gap here). Starts the
+     * SAME mask fetch `sync()` would, deliberately WITHOUT the rest of
+     * `sync()`'s per-frame work: the tier gate (which can REBUILD `surface`'s
+     * materials, disposing the current ones) and the depth-authority expected-
+     * depth push (`resolveExpectedDepth`, which reads `depthAuthority.rankOf`
+     * for whichever floor is passed).
+     *
+     * `vt-pan-viewer.js#prepareFloor` calls this for the TARGET floor while
+     * `view.floorIndex` still points at the floor genuinely on screen — depth
+     * authority has not been rebuilt for the target floor yet (that happens at
+     * COMMIT, inside the residency pass `prepareFloor` deliberately does not
+     * run early). Calling the FULL `sync()` here would be worse than window's
+     * own version of this problem: it could REBUILD this floor's water
+     * materials against a tier resolved for... whichever floor's settings
+     * happen to be current, disposing/recreating GPU objects for a mesh that
+     * is not even drawn yet. `ensureMaskImage` has no such dependency — it
+     * only reads `getWaterMaskUrl(floorIndex)`, a scene-wide catalog lookup —
+     * so calling it alone is the narrowest fix that actually closes the gap.
+     *
+     * Safe to call before this floor's own subsystem instance would otherwise
+     * exist: water is per-floor by construction (`waterSurfacesByFloor`, a
+     * separate Map entry per floor), unlike specular's single shared
+     * instance — which is why THIS effect gets this hook and specular does
+     * not (see specular's own `readiness.why` in `effects/specular/
+     * specular.js` for that distinction stated the other way round).
+     */
+    prefetchMask: ensureMaskImage,
+    /**
+     * SCENE READINESS (vt/settle.js probe `waterSurfaceMask`) — is a mask image
+     * fetch in flight right now?
+     *
+     * A separate one-line accessor rather than a field on `getStatus()` because
+     * readiness polls this several times a second and `getStatus()` builds a
+     * whole diagnostic object including `waterBody.getWaterBounds()`.
+     *
+     * Safe to gate a load on, in the way a "has it baked yet?" flag would NOT
+     * be: `loading` is set false in BOTH the `.then` and the `.catch` above, so
+     * a failed mask can never leave readiness waiting forever — and it reads
+     * false before the first request too, so an effect that is switched off (and
+     * therefore never asks for a mask) is not mistaken for one that is still
+     * loading. Both halves matter now that a floor change holds the previous
+     * floor on screen instead of raising a curtain.
+     */
+    isLoadingMask: () => loading,
     /** For the `water-body` report — merged into the body pack's own status. */
     getStatus() {
       return {

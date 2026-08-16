@@ -576,6 +576,13 @@ export function createSpecularSurfaceSubsystem({
      * true JS early-return rather than issuing a render call for a hidden mesh
      * (Effects.md Law 4: gating by uniform is not gating). */
     hasContent: () => mesh.visible,
+    /**
+     * SCENE READINESS (vt/settle.js probe `specularMaskLoad`) — is a mask image
+     * fetch in flight right now? See water-surface-subsystem's own copy of this
+     * accessor for why `loading` is the safe thing to gate on and a
+     * "has it baked yet?" flag would not be.
+     */
+    isLoadingMask: () => loading,
     getStatus() {
       return {
         visible: mesh.visible,

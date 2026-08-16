@@ -142,6 +142,25 @@ const SPAWN_MARGIN_FRAC = 0.12;
 const GROWTH_BEZIER = Object.freeze([0.4, 4.0, 7.0, 9.0]);
 
 /**
+ * How much of the QUAD's along-wind axis the smear dial actually buys.
+ *
+ * ⚠️ DELIBERATELY SMALL, AND THE SMALLNESS IS THE MODEL. From directly above
+ * a splash is a stationary impact, not a moving object — so wind must not blur
+ * it along its travel. At the shipped `smearGain` of 1.0 a FULL GALE elongates
+ * the footprint by 1.35×, which reads as an egg. Everything else wind does to
+ * a splash is the ASYMMETRY in the fragment (centre offset + downwind rim
+ * brightening), which is the real geometry of a slanted impact.
+ */
+const ELONGATION_PER_SMEAR = 0.35;
+
+/**
+ * How far the crown's centre shifts downwind inside the quad, per unit of
+ * smear — as a fraction of the quad's half-extent. This is the term that
+ * actually makes a wind-struck splash look wind-struck.
+ */
+const CENTRE_BIAS_PER_SMEAR = 0.3;
+
+/**
  * How much of the wind's air speed a splash inherits as ground drift.
  *
  * V2 attached an `ApplyForce` to each splash system, so the sheet of water
@@ -241,9 +260,16 @@ export function createPrecipSplashEngine({
    * rather than folded into the archetype peaks, so the four stay recognisably
    * V2's numbers. */
   const uPeakBoost = uniform(float(2.75));
-  /** ⭐ WIND SMEAR (§4.1) — *"lashing against the ground is precisely an impact
-   * that cannot stay round"*. Multiplies the quad's along-wind axis. */
-  const uSmearGain = uniform(float(1.6));
+  /**
+   * ⭐ WIND SMEAR (§4.1) — *"lashing against the ground is precisely an impact
+   * that cannot stay round"*.
+   *
+   * ⚠️ IT IS NO LONGER A QUAD STRETCH FACTOR. It is the STRENGTH of the whole
+   * wind-asymmetry model — see `positionNode` for why an affine elongation was
+   * the wrong phenomenon rather than a wrong magnitude. `1` is the shipped
+   * strength; the two constants it feeds keep a full gale legible from above.
+   */
+  const uSmearGain = uniform(float(1));
   const uWindSpeed01 = uniform(float(0));
   const uWindDirDeg = uniform(float(0));
   /** The wind field's own px/s at full gale — the fall's calibration, shared by
@@ -581,22 +607,48 @@ export function createPrecipSplashEngine({
     const sizePx = c.y.mul(growth(t)).mul(uSizeScale);
     const local = positionGeometry.xy.mul(sizePx);
 
-    // ⭐ WIND SMEAR (§4.1). The quad's axes are the WIND's, and the along-wind
-    // axis stretches with wind speed. Building the basis from the wind vector
-    // means the elongation always points where the rain is going, with no
-    // second angle to keep in sync.
-    //
-    // ⚠️ THE SHAPE's OWN RANDOM ROTATION IS NOT HERE — it rides `phase` in the
-    // fragment. Two rotations competing for one quad is how a smear ends up
-    // perpendicular to the wind on half the population; giving the quad to the
-    // wind and the shape to the hash makes that unrepresentable.
+    /**
+     * ⭐ WIND SMEAR (§4.1), REBUILT FOR A TOP-DOWN VIEW.
+     *
+     * ⚠️ THE FIRST CUT WAS A MOTION BLUR AND THE AUTHOR CAUGHT IT ON SIGHT:
+     * *"the splashes are weirdly elongated — remember the top down
+     * perspective."* It scaled the whole quad along the wind by
+     * `1 + speed01 × gain`, which at any real gale drew 3–4× ellipses — long
+     * horizontal lozenges lying on the ground.
+     *
+     * ⚠️ AND IT IS THE **WRONG PHENOMENON**, NOT A TOO-LARGE NUMBER. An affine
+     * stretch along a direction of travel is what a SIDE view of a fast-moving
+     * object looks like. A splash does not travel: it is a stationary impact
+     * seen from directly above, and from there wind does not blur it — wind
+     * makes it **ASYMMETRIC**. The drop arrives at a slant, so the crown is
+     * thrown further and lower DOWNWIND and stays short upwind. Turning the
+     * gain down would have made a small motion blur; the fix is a different
+     * model.
+     *
+     * So the wind now does three modest things instead of one violent one:
+     *   1. a gentle elongation (`× 0.35` — a full gale is 1.35, an egg not a
+     *      streak), area-compensated across;
+     *   2. the crown's CENTRE shifts downwind inside the quad, so the ring
+     *      reaches further that way — the actual geometry of a slanted impact;
+     *   3. the downwind rim brightens, because that is where the water went.
+     *
+     * (2) and (3) live in the fragment and read `uWindSmear01` DIRECTLY rather
+     * than through a varying: the bias is per-FRAME, identical for every body,
+     * so spending a varying slot on it would be paying per-vertex for a
+     * uniform.
+     *
+     * ⚠️ THE SHAPE's OWN RANDOM ROTATION IS STILL NOT HERE — it rides `phase`
+     * in the fragment. Two rotations competing for one quad is how an asymmetry
+     * ends up pointing upwind on half the population; giving the quad to the
+     * wind and the shape to the hash makes that unrepresentable.
+     */
     const w = windToward(windRad());
-    const smear = float(1).add(uWindSpeed01.mul(uSmearGain));
+    const elong = float(1).add(uWindSpeed01.mul(uSmearGain).mul(float(ELONGATION_PER_SMEAR)));
     // Area is roughly preserved: what the along-wind axis gains, the across
     // axis gives back. A quad that only grows would make a gale read as bigger
-    // splashes rather than as smeared ones.
-    const across = float(1).div(smear.sqrt().max(float(0.001)));
-    const e1 = w.mul(smear);
+    // splashes rather than as wind-struck ones.
+    const across = float(1).div(elong.sqrt().max(float(0.001)));
+    const e1 = w.mul(elong);
     const e2 = vec2(w.y.negate(), w.x).mul(across);
     const offset = e1.mul(local.x).add(e2.mul(local.y));
 
@@ -634,8 +686,32 @@ export function createPrecipSplashEngine({
     const phase = vB.z;
     const t = vB.w;
 
-    // Quad-local, −1..1 in both axes.
-    const p = uv().sub(float(0.5)).mul(float(2));
+    /**
+     * Quad-local, −1..1 in both axes. The quad's +x IS the downwind direction
+     * (`positionNode` builds its basis from the wind vector), so every
+     * wind-asymmetry term below is just "which side of local x am I on" — no
+     * second angle, nothing to keep in sync.
+     */
+    const p0 = uv().sub(float(0.5)).mul(float(2));
+
+    /**
+     * ⭐ THE CROWN'S CENTRE SITS DOWNWIND OF THE IMPACT POINT.
+     *
+     * A drop driven by wind arrives at a slant, so its crown is thrown further
+     * that way and stays short upwind. Offsetting the shape's centre inside the
+     * quad reproduces exactly that: the ring reaches further downwind and
+     * crowds the upwind rim, from a viewpoint directly above.
+     *
+     * ⚠️ THIS IS WHAT REPLACED AN AFFINE STRETCH OF THE WHOLE SPRITE, which the
+     * author identified on sight as *"weirdly elongated — remember the top down
+     * perspective."* A stretch along the wind is motion blur; a splash is not
+     * moving. See `positionNode` for the full argument.
+     *
+     * `uWindSmear01` is a per-FRAME uniform, identical for every body, so it is
+     * read here directly rather than crossing as a varying.
+     */
+    const bias = uWindSpeed01.mul(uSmearGain).mul(float(CENTRE_BIAS_PER_SMEAR)).clamp(float(0), float(0.55));
+    const p = p0.sub(vec2(bias, 0));
     const d = p.length();
     const theta = atan(p.y, p.x);
 
@@ -686,6 +762,24 @@ export function createPrecipSplashEngine({
     ring.assign(ring.mul(beadWave.pow(float(1).add(roughen.mul(float(3.5))))));
 
     /**
+     * ⭐ THE DOWNWIND RIM IS BRIGHTER, because that is where the water went.
+     *
+     * The third and last of the wind-asymmetry terms. `p.x / |p|` is +1 on the
+     * downwind rim and −1 upwind (the quad's +x is the wind's direction), so
+     * this lifts one side and dims the other by the same fraction — a splash
+     * that has been struck from one side, rather than a round one that has been
+     * squashed. Costs one divide and no varying.
+     */
+    const sideCos = p.x.div(d.max(float(0.001)));
+    ring.assign(
+      ring.mul(
+        float(1)
+          .add(bias.mul(float(1.1)).mul(sideCos))
+          .clamp(float(0.15), float(1.9))
+      )
+    );
+
+    /**
      * The inner puddle (V2's fourth tile) — the film of water the impact
      * leaves, inside the crown.
      *
@@ -722,7 +816,13 @@ export function createPrecipSplashEngine({
 
     // Never let anything reach the quad's corner — a hard edge at the quad
     // boundary is the one artefact that gives a billboard away as a square.
-    const clip = float(1).sub(d.sub(float(0.9)).div(float(0.1)).clamp(float(0), float(1)));
+    //
+    // ⚠️ MEASURED FROM THE **QUAD's** CENTRE (`p0`), NOT THE SHAPE's SHIFTED ONE.
+    // Using the biased `d` would move the clip circle downwind along with the
+    // crown, so the far rim would be sliced flat by the quad edge on windy
+    // frames while the near side floated free — the exact hard edge this line
+    // exists to prevent, reintroduced by the fix for something else.
+    const clip = float(1).sub(p0.length().sub(float(0.9)).div(float(0.1)).clamp(float(0), float(1)));
     shape.assign(shape.mul(clip));
 
     return shape.mul(alpha);
@@ -945,7 +1045,11 @@ export function createPrecipSplashEngine({
         wind: {
           speed01: uWindSpeed01.value,
           directionDeg: uWindDirDeg.value,
-          smear: 1 + uWindSpeed01.value * uSmearGain.value,
+          // Both halves of the top-down asymmetry model, separately — the
+          // elongation is deliberately near 1 and the BIAS is what carries the
+          // look, so one merged "smear" number would hide which is which.
+          elongation: 1 + uWindSpeed01.value * uSmearGain.value * ELONGATION_PER_SMEAR,
+          centreBias: Math.min(0.55, uWindSpeed01.value * uSmearGain.value * CENTRE_BIAS_PER_SMEAR),
         },
         tuning: {
           sizeScale: uSizeScale.value,

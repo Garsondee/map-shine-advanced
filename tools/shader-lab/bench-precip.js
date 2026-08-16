@@ -155,7 +155,7 @@ class PrecipDriver {
       splashSizeScale: 1,
       splashAlphaScale: 1,
       splashPeakBoost: 2.75,
-      splashSmearGain: 1.6,
+      splashSmearGain: 1,
       splashRateScale: 1,
       // view
       zoom: 1,
@@ -464,7 +464,7 @@ class PrecipDriver {
     const r = this.readout();
     el.textContent =
       `${r.speciesId}  live=${r.liveCount}/${r.capacity}  storage=${r.storageBuffers}/8 buffers  t=${(r.virtualNowMs / 1000).toFixed(1)}s\n` +
-      `arrival: ${r.arrival?.splashes ? `${r.arrival.liveCount}/${r.arrival.capacity} splashes  smear=${r.arrival.wind.smear.toFixed(2)}x` : 'none — this species settles, it does not splash'}\n` +
+      `arrival: ${r.arrival?.splashes ? `${r.arrival.liveCount}/${r.arrival.capacity} splashes  elong=${r.arrival.wind.elongation.toFixed(2)}x bias=${r.arrival.wind.centreBias.toFixed(2)}` : 'none — this species settles, it does not splash'}\n` +
       `axes: precip=${r.axes.precip01.toFixed(2)} storm=${r.axes.stormActivity01.toFixed(2)} day=${r.axes.dayFactor01.toFixed(2)} flash=${r.axes.flash01.toFixed(2)}\n` +
       `look: slant=${r.tuning.fallSlant01.toFixed(2)} size=${r.tuning.sizeScale.toFixed(2)} streak=${r.tuning.streakScale.toFixed(2)} chaos=${r.tuning.chaosScale.toFixed(2)} camH=${r.tuning.cameraHeight}\n` +
       (r.skyGate?.armed
@@ -959,16 +959,16 @@ export function createPrecipBench({ THREE, log }) {
    */
   scenarios.set('arrival-smears-with-wind', {
     name: 'arrival-smears-with-wind',
-    summary: 'the splash quad elongates along the wind vector without inflating its area.',
+    summary: 'wind makes an impact ASYMMETRIC (crown thrown downwind), it does not motion-blur it.',
     async run({ runId }) {
       driver.setSpecies('rain');
       driver.set({ fall: false, arrival: true, skyGate: false, precip01: 0.9, windSpeed01: 0 });
       const calm = await driver.measureCoverage(40);
-      const calmSmear = driver.splashEngines.get('rain').debugState().wind.smear;
+      const calmWind = driver.splashEngines.get('rain').debugState().wind;
 
       driver.set({ windSpeed01: 1 });
       const gale = await driver.measureCoverage(40);
-      const galeSmear = driver.splashEngines.get('rain').debugState().wind.smear;
+      const galeWind = driver.splashEngines.get('rain').debugState().wind;
       const png = await saveCanvasPng(runId, 'splash-smear-gale.png', driver.canvas);
 
       driver.set({ fall: true, windSpeed01: 0.25, precip01: 0.6 });
@@ -976,15 +976,22 @@ export function createPrecipBench({ THREE, log }) {
       const ratio = calm.litPixels > 0 ? gale.litPixels / calm.litPixels : 0;
       return {
         checks: [
-          evaluate('calm-is-round', () => ({
-            ok: Math.abs(calmSmear - 1) < 1e-6,
-            measured: calmSmear,
-            expected: 'exactly 1.0 at zero wind — no smear without a reason',
+          evaluate('calm-is-round-and-centred', () => ({
+            ok: Math.abs(calmWind.elongation - 1) < 1e-6 && Math.abs(calmWind.centreBias) < 1e-6,
+            measured: calmWind,
+            expected: 'elongation exactly 1, bias exactly 0 — no asymmetry without a reason',
           })),
-          evaluate('gale-elongates', () => ({
-            ok: galeSmear > 2,
-            measured: galeSmear,
-            expected: '> 2x at full wind',
+          // ⭐ THE ASYMMETRY IS THE LOOK, THE ELONGATION IS NOT. Asserting both
+          // BOUNDS on the stretch is the point: the author rejected the first
+          // model on sight as *"weirdly elongated — remember the top down
+          // perspective"*, and a top-down splash is a stationary impact, so an
+          // affine stretch along the wind is motion blur for an object that
+          // never moved. A test that only demanded "more than 1" would pass the
+          // 4x lozenge that was wrong.
+          evaluate('gale-biases-far-more-than-it-stretches', () => ({
+            ok: galeWind.centreBias > 0.25 && galeWind.elongation > 1.2 && galeWind.elongation < 1.6,
+            measured: galeWind,
+            expected: 'bias > 0.25 while elongation stays inside 1.2..1.6 (an egg, never a streak)',
           })),
           evaluate('area-is-compensated-not-inflated', () => ({
             ok: ratio > 0.6 && ratio < 1.8,
@@ -993,7 +1000,7 @@ export function createPrecipBench({ THREE, log }) {
           })),
         ],
         inputs: { windSpeed01: [0, 1] },
-        stats: { calm, gale, calmSmear, galeSmear, ratio },
+        stats: { calm, gale, calmWind, galeWind, ratio },
         artifacts: png ? [png] : [],
       };
     },

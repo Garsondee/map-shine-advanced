@@ -757,12 +757,13 @@
             ><input type="range" id="precipSplashPeak" min="0.5" max="8" step="0.05" value="2.75"
           /></label>
           <label
-            >wind smear gain <span id="precipSplashSmearVal"></span
-            ><input type="range" id="precipSplashSmear" min="0" max="6" step="0.05" value="1.6"
+            >wind asymmetry <span id="precipSplashSmearVal"></span
+            ><input type="range" id="precipSplashSmear" min="0" max="3" step="0.05" value="1"
           /></label>
           <div class="hint">
-            "Lashing against the ground" is an impact that cannot stay round — the quad stretches along the wind and
-            gives the area back across it, so a gale smears without inflating.
+            "Cannot stay round" means ASYMMETRIC, not elongated: from directly above a splash is a stationary impact,
+            so wind throws its crown downwind (off-centre + a brighter downwind rim) rather than motion-blurring it.
+            A full gale widens the footprint only ~1.35×.
           </div>
         </fieldset>
       </div>

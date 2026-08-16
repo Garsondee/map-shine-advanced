@@ -269,8 +269,19 @@ export const PRECIP_SPECIES = Object.freeze({
       splashArchetype01: 0.5,
       /** Width of the window `splashArchetype01` centres. 1 = the whole table. */
       archetypeSpread: 1,
-      /** ⭐ §4.1 — *"lashing against the ground is precisely an impact that
-       * cannot stay round"*. The quad elongates along the wind vector. */
+      /**
+       * ⭐ §4.1 — *"lashing against the ground is precisely an impact that
+       * cannot stay round"*.
+       *
+       * ⚠️ "CANNOT STAY ROUND" MEANS ASYMMETRIC, NOT ELONGATED. The first
+       * implementation read it as an affine stretch along the wind and the
+       * author rejected it on sight: *"weirdly elongated — remember the top
+       * down perspective."* From directly above a splash is a STATIONARY
+       * impact, so stretching it along a direction of travel is motion blur for
+       * something that never moved. Wind instead throws the crown DOWNWIND —
+       * off-centre, brighter on that rim, barely wider. See
+       * `precip-splash-runtime.js#positionNode`.
+       */
       smearWithWind: true,
       /** V2 ran `maxParticles: 2000` on each of four splash systems. A CEILING,
        * not a population — see `splashesPerMegapixel`. */

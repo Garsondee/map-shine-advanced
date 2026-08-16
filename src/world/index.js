@@ -20,6 +20,19 @@ export {
   DEFAULT_RATE_HOURS_PER_MINUTE,
 } from './day-clock.js';
 export { resolveSky, applySkyEdit, normalizeSky, DEFAULT_SKY } from './sky-settings.js';
+// THE WEATHER MANAGER (docs/planning/Weather-Manager.md) — the env snapshot's
+// weather owner, which this door has said "eventually" about since it was
+// written. Slice 1: the cloud axes + the ease engine + director mode.
+export {
+  createWeatherManager,
+  easeToward,
+  clampAxis,
+  WEATHER_MODES,
+  WEATHER_AXES,
+  WEATHER_AXIS_NAMES,
+  TRANSITION_SPEEDS,
+  TRANSITION_SPEED_NAMES,
+} from './weather.js';
 // THE WIND HANDLE (Wind.md §5.1) — the ONE door to the field for everything
 // outside world/. `sampleWind` itself is deliberately NOT re-exported here any
 // more: it needs five hand-assembled inputs, and hand-assembling them is the

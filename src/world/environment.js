@@ -41,12 +41,40 @@ import { computeSun, normalizeHour, DEFAULT_SUN_CONFIG } from './sun.js';
 /**
  * Neutral defaults: clear, windless noon. A scene with no weather state reads
  * as V2's own "canonical fresh-scene default: clear noon".
+ *
+ * ⚠️ THESE DEFAULTS ARE LOAD-BEARING (Weather-Manager.md LAW 5, 2026-08-16).
+ * `world/weather.js` mirrors every value here, so that a running manager in
+ * `director` mode on a clear archetype produces a snapshot IDENTICAL to one
+ * built with no weather argument at all. That equality is what lets the manager
+ * default ON without changing how a single existing scene renders — and it is
+ * asserted directly in `__tests__/environment.test.mjs`, not merely hoped for.
+ * If a default moves here, it moves in `WEATHER_AXES` in the same commit.
  */
 export const DEFAULT_WEATHER = Object.freeze({
   preset: 'clear',
   precip01: 0,
   cloudCover01: 0,
   wetness01: 0,
+  // ── THE CLOUD AXES (weather manager slice 1) ──────────────────────────────
+  // Carried on the call sheet; `world/cloud-field.js` does not exist yet, so
+  // nothing reads these three today. That is deliberate and it is REPORTED
+  // rather than hidden: `WEATHER_AXES[name].consumerStatus` says `'pending'`
+  // for each, and the env diagnostics print it. Precedent is directly above —
+  // `precip01`/`wetness01` have ridden this object with no consumer since it
+  // was written; the difference now is that the absence is machine-readable.
+  cloudType01: 0.5,
+  cloudAltitudePx: 1400,
+  cloudScalePx: 1100,
+  // ── THE OWNER CONTRACT ────────────────────────────────────────────────────
+  // `false` means NOBODY WROTE THIS — the values above are the module's own
+  // defaults, not a weather owner's answer. Without this flag `cloudCover01: 0`
+  // is ambiguous between "the sky is genuinely clear" and "the manager was
+  // never wired", which is the same pixel and two completely different bugs
+  // (`feedback_seam_default_hides_unwired`, the contract `windHandle.hasBake`
+  // already carries). `ownerVersion` bumps on INTENT changes, never on eased
+  // motion — see `world/weather.js`'s own note on why.
+  hasOwner: false,
+  ownerVersion: 0,
 });
 
 export const DEFAULT_WIND = Object.freeze({
@@ -158,6 +186,15 @@ export function buildEnvSnapshot({
       precip01: clamp01(w.precip01),
       cloudCover01: clamp01(w.cloudCover01),
       wetness01: clamp01(w.wetness01),
+      cloudType01: clamp01(w.cloudType01),
+      // World pixels, not 0..1 — clamped to a positive length rather than to a
+      // unit range. A zero or negative altitude would make the cloud shadow's
+      // `h / tan(elevation)` offset degenerate, so the floor is a real bound,
+      // not a formality.
+      cloudAltitudePx: clampPositive(w.cloudAltitudePx, DEFAULT_WEATHER.cloudAltitudePx),
+      cloudScalePx: clampPositive(w.cloudScalePx, DEFAULT_WEATHER.cloudScalePx),
+      hasOwner: w.hasOwner === true,
+      ownerVersion: Number.isFinite(Number(w.ownerVersion)) ? Number(w.ownerVersion) : 0,
     },
     wind: {
       directionDeg: ((Number(wd.directionDeg) % 360) + 360) % 360,
@@ -172,6 +209,18 @@ export function buildEnvSnapshot({
 function clamp01(x) {
   const n = Number(x);
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+}
+
+/**
+ * A strictly-positive length in world pixels, falling back when the input is
+ * not a usable number. Unlike {@link clamp01} a bad value here CANNOT default
+ * to 0 — zero is a degenerate altitude/scale, and a silent 0 would divide the
+ * cloud-shadow offset by nothing.
+ * @param {*} x @param {number} fallback @returns {number}
+ */
+function clampPositive(x, fallback) {
+  const n = Number(x);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 /**

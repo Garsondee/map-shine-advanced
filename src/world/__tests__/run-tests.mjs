@@ -13,6 +13,7 @@ import { run as runSun } from './sun.test.mjs';
 import { run as runEnvironment } from './environment.test.mjs';
 import { run as runDayClock } from './day-clock.test.mjs';
 import { run as runSkySettings } from './sky-settings.test.mjs';
+import { run as runWeather } from './weather.test.mjs';
 import { run as runWindField } from './wind-field.test.mjs';
 import { run as runWindBake } from './wind-bake.test.mjs';
 import { run as runWindSim } from './wind-sim.test.mjs';
@@ -51,6 +52,7 @@ const suites = [
   ['environment', runEnvironment],
   ['day-clock', runDayClock],
   ['sky-settings', runSkySettings],
+  ['weather', runWeather],
   ['wind-field', runWindField],
   ['wind-bake', runWindBake],
   ['wind-sim', runWindSim],

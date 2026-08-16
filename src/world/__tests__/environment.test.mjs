@@ -111,6 +111,51 @@ export function run(t) {
     t.ok('pure: identical inputs produce identical snapshots', JSON.stringify(a) === JSON.stringify(b));
   }
 
+  // ---- THE WEATHER AXES + THE OWNER CONTRACT (manager slice 1) ----------------
+  {
+    const bare = buildEnvSnapshot({ time: time(), todHour: 12 });
+    t.ok(
+      'the cloud axes ride the call sheet',
+      ['cloudType01', 'cloudAltitudePx', 'cloudScalePx'].every((k) => k in bare.weather)
+    );
+    t.ok(
+      'no weather argument => hasOwner false: NOBODY WROTE THIS',
+      bare.weather.hasOwner === false && bare.weather.ownerVersion === 0
+    );
+    t.ok(
+      'a caller passing weather but not the flag is still ownerless (the flag is opt-IN)',
+      buildEnvSnapshot({ time: time(), todHour: 12, weather: { cloudCover01: 0.5 } }).weather.hasOwner === false
+    );
+    t.ok(
+      'an owner declaring itself is carried through with its version',
+      buildEnvSnapshot({
+        time: time(),
+        todHour: 12,
+        weather: { hasOwner: true, ownerVersion: 7 },
+      }).weather.hasOwner === true
+    );
+
+    // ⚠️ Altitude/scale are LENGTHS. A bad value must not become 0 — that would
+    // make the cloud shadow's `h / tan(elevation)` offset degenerate rather than
+    // merely wrong (`feedback_derived_zero_collides_with_configured_zero`).
+    const junk = buildEnvSnapshot({
+      time: time(),
+      todHour: 12,
+      weather: { cloudAltitudePx: 0, cloudScalePx: NaN, cloudType01: 5 },
+    });
+    t.ok(
+      'a zero altitude falls back, never lands as 0',
+      junk.weather.cloudAltitudePx === DEFAULT_WEATHER.cloudAltitudePx
+    );
+    t.ok('a NaN scale falls back too', junk.weather.cloudScalePx === DEFAULT_WEATHER.cloudScalePx);
+    t.ok('cloudType01 still clamps to 0..1 like any unit axis', junk.weather.cloudType01 === 1);
+    t.ok(
+      'a real positive length passes straight through',
+      buildEnvSnapshot({ time: time(), todHour: 12, weather: { cloudAltitudePx: 2800 } }).weather.cloudAltitudePx ===
+        2800
+    );
+  }
+
   // the exported defaults are themselves frozen vocabulary
   t.ok('DEFAULT_WEATHER frozen', Object.isFrozen(DEFAULT_WEATHER));
   t.ok('DEFAULT_WIND frozen', Object.isFrozen(DEFAULT_WIND));

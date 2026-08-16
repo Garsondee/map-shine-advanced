@@ -6126,7 +6126,7 @@ export async function startVtPanViewer({
      * from the arena, never a scene object per particle.
      */
     /**
-     * ⭐ PRECIPITATION — THE FALL (Precipitation.md §3), drawn over the lit
+     * ⭐ PRECIPITATION — THE FALL (§3) and THE ARRIVAL (§4), drawn over the lit
      * world.
      *
      * ⚠️ ITS POSITION IN THE PLAN IS THE WHOLE OF §3.5's draw rule, and both
@@ -6136,15 +6136,23 @@ export async function startVtPanViewer({
      * never leak into unexplored fog. It writes `buf:scene.color` and touches
      * no Pillar-11 vision input at all.
      *
+     * ⚠️ IT DRAWS AN ORDERED LIST, NOT ONE SCENE (P2). Splashes and the falling
+     * curtain are two scenes, and THREE sorts within a scene but never across
+     * two `render()` calls — so the ORDER of `subsystem.scenes` is the depth
+     * order, and it is decided in the subsystem that knows which is on the
+     * ground. Binding once and looping is also why the splash carpet costs one
+     * extra `render()` and no extra target bind.
+     *
      * `hasContent` is false on a clear day, so LAW 5 costs one boolean rather
      * than a bind and a submitted draw (Effects.md Law 4).
      */
     function runSurfacePrecipitationPass() {
-      if (!precipitationSubsystem.hasContent) return;
+      const scenes = precipitationSubsystem.scenes;
+      if (!scenes.length) return;
       const prevAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
-      renderer.render(precipitationSubsystem.scene, camera);
+      for (const s of scenes) renderer.render(s, camera);
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
     }

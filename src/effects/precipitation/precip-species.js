@@ -32,16 +32,20 @@
  * ============================================================================
  *
  * §2.1's full schema has `arrive` (splash/bounce/settle) and `stay` (the
- * mantle channel). **Neither is here**, because `feedback_unconsumed_api_rots_
- * silently` is a named disease in this project and a weather system is its
+ * mantle channel). Neither was here in P1, because `feedback_unconsumed_api_
+ * rots_silently` is a named disease in this project and a weather system is its
  * natural host. `world/weather.js`'s own axis table solved the identical
  * problem the same way — slice 1 shipped four cloud axes, not all eleven, and
  * every row carries a machine-readable `consumerStatus`.
  *
- * So: P2 adds `arrive` to these rows in the commit that builds splashes. P3
- * adds `stay` in the commit that builds the mantle. A reviewer can tell what
- * is real by whether the field exists at all, which is a stronger signal than
- * a comment nobody reads.
+ * ⭐ **`arrive` LANDED WITH P2** (2026-08-16), in the same commit as
+ * `effects/particles/precip-splash-runtime.js` — the discipline working as
+ * designed rather than an exception to it. `stay` is still absent and P3 adds
+ * it with the mantle. So are `bounces` (P5), `restSec` (P3) and `waterRing`
+ * (§4.2's water-hit splashes): the block that exists carries EXACTLY the
+ * fields something reads today. A reviewer can tell what is real by whether
+ * the field exists at all, which is a stronger signal than a comment nobody
+ * reads — and the regression test asserts that boundary in both directions.
  *
  * ============================================================================
  * THE NUMBERS ARE V2's, AND THAT IS THE POINT
@@ -239,6 +243,134 @@ export const PRECIP_SPECIES = Object.freeze({
       flashRgbMul: 4,
     }),
 
+    /**
+     * ⭐ THE ARRIVAL (P2) — Precipitation.md §4.1.
+     *
+     * ⚠️ THIS BLOCK APPEARED IN THE COMMIT THAT BUILT ITS CONSUMER, which is
+     * this module's own stated policy (see the header): a reviewer can tell
+     * what is real by whether the field EXISTS. §2.1's schema also lists
+     * `bounces` (hail, P5), `restSec` (P3's settle) and `waterRing` (§4.2's
+     * water-hit splashes) — all three are still absent for the same reason,
+     * and adding them "for completeness" is exactly the
+     * `feedback_unconsumed_api_rots_silently` disease this discipline exists
+     * to prevent.
+     */
+    arrive: Object.freeze({
+      /** The discriminator `precip-splash-runtime.js` builds against. Snow
+       * settles, hail bounces; neither is a weak splash. */
+      kind: 'splash',
+      /**
+       * §2.1: *"which of the four V2 splash looks dominates"* — a position on
+       * the archetype axis, not a hard pick. `0.5` with the default spread
+       * gives all four in equal quarters, which is V2's own behaviour: its
+       * four systems shipped near-identical intensity scales (8.45 / 8.7 /
+       * 9.1 / 9.25, `legacy/core/WeatherController.js:356-385`).
+       */
+      splashArchetype01: 0.5,
+      /** Width of the window `splashArchetype01` centres. 1 = the whole table. */
+      archetypeSpread: 1,
+      /** ⭐ §4.1 — *"lashing against the ground is precisely an impact that
+       * cannot stay round"*. The quad elongates along the wind vector. */
+      smearWithWind: true,
+      /** V2 ran `maxParticles: 2000` on each of four splash systems. A CEILING,
+       * not a population — see `splashesPerMegapixel`. */
+      capacity: 8000,
+      /**
+       * ⭐ HOW MANY SPLASHES ARE ALIVE PER MEGAPIXEL OF VIEW, at full precip.
+       * THE RATE LIVES HERE, and it is per-AREA rather than a flat count.
+       *
+       * ⚠️ THE FIRST CUT DERIVED THE POPULATION FROM THE CAPACITY
+       * (`liveCount = capacity × countFrac`) AND IT WAS A FOAM BATH — 2,430
+       * overlapping splashes across a 2000×1500 view, measured at 71% of the
+       * frame lit. The mistake is worth naming because it is not a tuning
+       * error: **a cap is a ceiling, not a population**. V2's own numbers say
+       * so out loud — `maxParticles: 2000` per tile with
+       * `emissionOverTime = 200 × intensity × …`, i.e. the count was always
+       * `rate × life`, and the cap only ever bit under LOD collapse.
+       *
+       * ⚠️ AND IT MUST BE PER-AREA, because a splash is SCENERY. The falling
+       * curtain keeps a constant SCREEN density (it is an atmospheric layer
+       * between the eye and the map, so `uViewScale` holds its apparent pace).
+       * Water on flagstones is the opposite: its density belongs to the
+       * GROUND, so zooming out must reveal more splashes over more stone, not
+       * spread the same few thinner. A flat count would make a zoom look like
+       * a change in the weather.
+       *
+       * Tuned in `bench-precip` against the four archetypes' own sizes; the
+       * capacity above still caps it, so a very wide view degrades by thinning
+       * rather than by allocating.
+       */
+      splashesPerMegapixel: 42,
+      /**
+       * ⭐ V2's FOUR HAND-TUNED TILES, transcribed — the `id` of each is V2's
+       * own comment for that tile, verbatim, because the names are the tuning
+       * record: *"thin clean ring"* tells you what 0.09 ring width means in a
+       * way the number cannot.
+       *
+       * ⚠️ THE LIFE AND SIZE COLUMNS ARE V2's; THE SHAPE COLUMNS ARE NEW. V2
+       * drew these from a 2×2 sprite atlas, so there is no harvested number
+       * for "how thick is the rim" — the atlas WAS that number. The five shape
+       * knobs re-author the same four looks as a continuum
+       * (`precip-splash-runtime.js` explains the space); they are the one part
+       * of this row that is authored rather than harvested, and they are
+       * marked as such so nobody cites them as V2's taste later.
+       */
+      archetypes: Object.freeze([
+        Object.freeze({
+          id: 'thin-clean-ring',
+          lifeSecMin: 0.2,
+          lifeSecMax: 0.35,
+          sizePxMin: 8,
+          sizePxMax: 16,
+          peakAlpha: 0.14,
+          ringR: 0.78,
+          ringW: 0.09,
+          roughen01: 0.05,
+          disc01: 0,
+          spikes: 7,
+        }),
+        Object.freeze({
+          id: 'thick-broken-ring',
+          lifeSecMin: 0.09,
+          lifeSecMax: 0.22,
+          sizePxMin: 2,
+          sizePxMax: 3,
+          peakAlpha: 0.14,
+          ringR: 0.66,
+          ringW: 0.26,
+          roughen01: 0.7,
+          disc01: 0.12,
+          spikes: 9,
+        }),
+        Object.freeze({
+          id: 'droplets',
+          lifeSecMin: 0.2,
+          lifeSecMax: 0.79,
+          sizePxMin: 6,
+          sizePxMax: 27,
+          peakAlpha: 0.33,
+          ringR: 0.74,
+          ringW: 0.13,
+          roughen01: 1,
+          disc01: 0,
+          spikes: 6,
+        }),
+        Object.freeze({
+          id: 'inner-puddle',
+          lifeSecMin: 0.305,
+          lifeSecMax: 1.4,
+          sizePxMin: 10,
+          sizePxMax: 24,
+          peakAlpha: 0.08,
+          ringR: 0.62,
+          ringW: 0.2,
+          roughen01: 0.1,
+          disc01: 1,
+          spikes: 5,
+        }),
+      ]),
+    }),
+
     /** Capacity at max tier. V2 shipped `maxParticles: 15000` for rain and it
      * looked right; the arena reserves this once and `liveCount` does the
      * tiering (Particles.md §10 — tier changes are then free). */
@@ -335,6 +467,22 @@ export const PRECIP_SPECIES = Object.freeze({
       nightRgbMul: 0.24,
       flashAlphaMul: 6,
       flashRgbMul: 4,
+    }),
+
+    /**
+     * ⭐ SNOW ARRIVES BY **SETTLING**, AND THAT IS THE WHOLE BLOCK.
+     *
+     * ⚠️ A SETTLE IS NOT A WEAK SPLASH. The splash engine's discriminator is
+     * `arrive.kind`, not *"does this row have an arrive block"* — testing for
+     * the block's existence would have made snow throw water. Snow's real
+     * arrival (rest a few seconds as a body, then hand off to the mantle,
+     * §2.2) is P3's, and the fields that describe it (`restSec`, the mantle
+     * channel) land in the commit that builds it. What exists today is the one
+     * fact P2 genuinely consumes: snow does not splash.
+     */
+    arrive: Object.freeze({
+      kind: 'settle',
+      smearWithWind: false,
     }),
 
     capacity: 20000,

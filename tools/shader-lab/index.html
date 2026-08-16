@@ -719,6 +719,52 @@
             ><input type="range" id="precipZoom" min="0.15" max="2" step="0.05" value="1"
           /></label>
         </fieldset>
+        <fieldset>
+          <legend>⭐ THE ARRIVAL — ground splashes (P2, §4.1)</legend>
+          <div class="hint" style="margin-bottom: 6px">
+            Statistical, not tracked: no drop knows about any splash. The rate is
+            <code>precip01 × skyReach</code>, and the four looks are V2's own tiles — thin clean ring, thick broken
+            ring, droplets, inner puddle — re-authored as one continuous per-fragment shape.
+          </div>
+          <label style="display: flex; gap: 6px; align-items: center"
+            >show the falling curtain
+            <input type="checkbox" id="precipShowFall" style="flex: 0" checked
+          /></label>
+          <label style="display: flex; gap: 6px; align-items: center"
+            >show the splashes <input type="checkbox" id="precipShowArrival" style="flex: 0" checked
+          /></label>
+          <div class="hint" style="margin-bottom: 6px">
+            Turn the curtain OFF to judge the splashes alone — a combined frame cannot attribute a pixel.
+          </div>
+          <label
+            >splash rate ×<span id="precipSplashRateVal"></span
+            ><input type="range" id="precipSplashRate" min="0" max="4" step="0.05" value="1"
+          /></label>
+          <div class="hint" style="margin-bottom: 6px">
+            Multiplies the row's <code>splashesPerMegapixel</code> (42). Per-AREA, not a flat count: zooming out
+            reveals more splashes over more ground rather than spreading the same few thinner.
+          </div>
+          <label
+            >splash size ×<span id="precipSplashSizeVal"></span
+            ><input type="range" id="precipSplashSize" min="0.2" max="3" step="0.05" value="1"
+          /></label>
+          <label
+            >splash alpha ×<span id="precipSplashAlphaVal"></span
+            ><input type="range" id="precipSplashAlpha" min="0" max="4" step="0.05" value="1"
+          /></label>
+          <label
+            >peak boost (V2: 2.75) <span id="precipSplashPeakVal"></span
+            ><input type="range" id="precipSplashPeak" min="0.5" max="8" step="0.05" value="2.75"
+          /></label>
+          <label
+            >wind smear gain <span id="precipSplashSmearVal"></span
+            ><input type="range" id="precipSplashSmear" min="0" max="6" step="0.05" value="1.6"
+          /></label>
+          <div class="hint">
+            "Lashing against the ground" is an impact that cannot stay round — the quad stretches along the wind and
+            gives the area back across it, so a gale smears without inflating.
+          </div>
+        </fieldset>
       </div>
       <div id="compositePanel" style="display: none">
         <fieldset>

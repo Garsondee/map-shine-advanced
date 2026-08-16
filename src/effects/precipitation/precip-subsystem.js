@@ -12,24 +12,25 @@
  * — a thin coordinator whose runtime lives in `effects/particles/` because the
  * `particles/allocator-only` wall requires every `instancedArray` call to.
  *
- * ⚠️ IT DOES NOT YET DRAW INTO THE LIVE FRAME, AND THAT IS DELIBERATE.
- * `Precipitation.md` LAW 3 is not optional: *"rain indoors is unrepresentable,
- * not discouraged"*. The sky-reach gate (`scene/sky-reach-access.js`, a door
- * built FOR this feature — its own 2026-07-24 header quotes the author saying
- * *"Rain will ask isCovered"*) is the next slice's work. Submitting this
- * subsystem's draw into `buf:scene.color` before that gate exists would put
- * rain inside every building on every map, which is a worse failure than not
- * shipping it yet.
+ * ⚠️ TWO ENGINE FAMILIES PER SPECIES, NOT ONE (P2). The FALL
+ * (`precip-runtime.js`) and the ARRIVAL (`precip-splash-runtime.js`) are
+ * separate engines with separate arenas and separate scenes, coordinated here:
+ * one resolved frame drives both, one sky-reach texture arms both, and the
+ * `scenes` getter fixes their DRAW ORDER, which is the one thing neither
+ * engine can settle for itself.
  *
- * So this ships REACHABLE but not DRAWING: `boot.js` can build it, the console
- * can inspect it, `graph/passes.js` declares the gap as a `seam`, and the
- * shader lab renders the identical engines against a synthetic world. The one
- * thing nobody can do yet is see it in a real scene — which is exactly what
- * the status says.
+ * ⚠️ ITS HEADER USED TO SAY *"it does not yet draw into the live frame"*. That
+ * was true for exactly one slice and is now false in two ways — the gate
+ * shipped, and so did the draw. Recorded rather than silently deleted because
+ * a stale "not yet" is the most expensive comment in a codebase: it tells a
+ * reader not to look (`feedback_plausible_diagnosis_rots`). What LAW 3 demanded
+ * — *"rain indoors is unrepresentable, not discouraged"* — is now enforced by
+ * `scene/sky-reach-access.js`'s bake, sampled by BOTH engines.
  *
  * @module effects/precipitation/precip-subsystem
  */
 import { createPrecipEngine } from '../particles/precip-runtime.js';
+import { createPrecipSplashEngine } from '../particles/precip-splash-runtime.js';
 import { PRECIP_SPECIES, PRECIP_SPECIES_IDS, resolveSpeciesFrame, isBuiltSpecies } from './precip-species.js';
 import { createLogger } from '../../core/log.js';
 
@@ -106,11 +107,24 @@ export function createPrecipitationSubsystem({
   openSkyTexture = null,
   renderOrder = 0,
 }) {
-  /** @type {Map<string, object>} speciesId → engine, built lazily. */
+  /** @type {Map<string, object>} speciesId → FALL engine, built lazily. */
   const engines = new Map();
+  /**
+   * @type {Map<string, object>} speciesId → ARRIVAL engine (P2), built lazily.
+   *
+   * ⚠️ A SECOND MAP, NOT A FIELD ON THE FALL ENGINE. The two are separate
+   * engines with separate arenas (`precip-splash-runtime.js` argues why), and a
+   * species that does not splash — snow — gets an entry that reports
+   * `ok: false` and is never stepped, rather than no entry at all. That
+   * distinction is what makes "snow has no splashes" a MEASUREMENT in
+   * `getStatus()` instead of an absence somebody has to interpret
+   * (`feedback_absent_zone_row_is_a_measurement`).
+   */
+  const splashEngines = new Map();
   let activeSpeciesId = null;
   let lastReason = null;
   const seededEngines = new Set();
+  const seededSplashEngines = new Set();
   /** The floor's baked sky-reach texture + its world rect, held so an engine
    * built LATER (a species that first appears mid-session) still gets it. */
   let skyReach = { texture: null, rect: null };
@@ -140,6 +154,34 @@ export function createPrecipitationSubsystem({
     if (lastTuning) engine.setTuning(lastTuning);
     engines.set(speciesId, engine);
     log.info(`built '${speciesId}' engine (capacity ${engine.capacity})`);
+    return engine;
+  }
+
+  /**
+   * Build one species' ARRIVAL engine on first use.
+   *
+   * ⚠️ THE SAME REPLAY OF CURRENT STATE AS THE FALL, and it is not copy-paste
+   * caution: the splash gate is the SAME sky-reach texture, and a splash
+   * carpet arriving ungated for one frame puts water on the floor of every
+   * building — a more obviously wrong picture than ungated rain, because
+   * indoor floors are exactly where the eye is.
+   */
+  function splashEngineFor(speciesId) {
+    if (splashEngines.has(speciesId)) return splashEngines.get(speciesId);
+    const engine = createPrecipSplashEngine({
+      THREE,
+      speciesId,
+      windHandle: getWindHandle() ?? undefined,
+      // ⚠️ BEHIND the fall, deliberately. Splashes are ON the ground and the
+      // rain is between them and the eye; drawing them after would put water
+      // in front of the drops that caused it.
+      renderOrder: renderOrder - 1,
+      openSkyTexture,
+    });
+    if (skyReach.texture) engine.setSkyReachTexture(skyReach.texture, skyReach.rect);
+    if (lastTuning) engine.setTuning(lastTuning);
+    splashEngines.set(speciesId, engine);
+    log.info(`built '${speciesId}' arrival engine (splashes: ${engine.ok}, capacity ${engine.capacity})`);
     return engine;
   }
 
@@ -190,27 +232,70 @@ export function createPrecipitationSubsystem({
       // Mansion). Pushed per frame because it is one uniform write and a scene
       // change would otherwise need its own invalidation path.
       if (st.sceneBounds !== undefined) engine.setSceneBounds(st.sceneBounds);
-      engine.setFrame(
-        resolveSpeciesFrame(
-          PRECIP_SPECIES[speciesId],
-          {
-            precip01,
-            stormActivity01: weather.stormActivity01 ?? 0,
-            dayFactor01: st.dayFactor01 ?? 1,
-            flash01: st.flash01 ?? 0,
-          },
-          st.tierScale ?? 1
-        )
+      // ⚠️ RESOLVED ONCE AND HANDED TO BOTH ENGINES. The splash rate is not a
+      // second opinion about how much rain there is — it is THE SAME NUMBER
+      // the drops are drawn from, so the carpet thins exactly as the curtain
+      // does. A private curve here could disagree with what the player can see
+      // falling, which is the `feedback_shared_field_two_meanings_two_
+      // registries` shape wearing a raincoat.
+      const frame = resolveSpeciesFrame(
+        PRECIP_SPECIES[speciesId],
+        {
+          precip01,
+          stormActivity01: weather.stormActivity01 ?? 0,
+          dayFactor01: st.dayFactor01 ?? 1,
+          flash01: st.flash01 ?? 0,
+        },
+        st.tierScale ?? 1
       );
+      engine.setFrame(frame);
       // ⚠️ THE HANDLE IS RE-READ EVERY FRAME, not captured at engine build.
       // `vt-pan-viewer.js`'s `windHandle` is reassigned when the wind field
       // bakes, and these engines are built lazily — so a captured reference
       // goes dead silently and the rain stops leaning. See the runtime's
       // `uWindSpeed01` note.
       engine.step(renderer, dtRealSec, nowMs, getWindHandle());
+
+      // ── THE ARRIVAL (P2) ──
+      // ⚠️ BUILT ONLY FOR A SPECIES THAT ACTUALLY SPLASHES. `createPrecipSplash
+      // Engine` refuses on `arrive.kind !== 'splash'` and reports `ok: false`,
+      // so snow allocates an engine that draws nothing — cheap, once, and it
+      // keeps "snow has no splashes" answerable from `getStatus()`.
+      const splash = splashEngineFor(speciesId);
+      if (splash.ok) {
+        if (!seededSplashEngines.has(speciesId)) {
+          splash.init(renderer);
+          seededSplashEngines.add(speciesId);
+        }
+        if (rect) splash.setWorldRect(rect);
+        if (st.sceneBounds !== undefined) splash.setSceneBounds(st.sceneBounds);
+        splash.setFrame(frame);
+        splash.step(renderer, dtRealSec, nowMs, getWindHandle());
+      }
     },
 
-    /** The scene the draw pass renders, or null when nothing is falling. */
+    /**
+     * The scenes the draw pass renders, IN ORDER, or an empty array when
+     * nothing is falling.
+     *
+     * ⚠️ PLURAL, AND THE ORDER IS THE POINT. Splashes are on the ground and
+     * the rain is between them and the eye. `renderOrder` alone cannot settle
+     * it — these are two SCENES, and THREE sorts within a scene, never across
+     * two `render()` calls. The order this array is built in IS the depth
+     * order, which is why it lives here rather than at the call site.
+     */
+    get scenes() {
+      if (!activeSpeciesId) return [];
+      const out = [];
+      const splash = splashEngines.get(activeSpeciesId);
+      if (splash?.ok && splash.debugState().visible) out.push(splash.scene);
+      const fall = engines.get(activeSpeciesId);
+      if (fall?.debugState().visible) out.push(fall.scene);
+      return out;
+    },
+
+    /** The FALL's scene alone — kept for the shader lab, which renders the
+     * curtain in isolation to measure streak geometry. */
     get scene() {
       return activeSpeciesId ? (engines.get(activeSpeciesId)?.scene ?? null) : null;
     },
@@ -222,9 +307,7 @@ export function createPrecipitationSubsystem({
      * subsystem that knows rather than duplicated at the call site.
      */
     get hasContent() {
-      if (!activeSpeciesId) return false;
-      const engine = engines.get(activeSpeciesId);
-      return Boolean(engine?.debugState().visible);
+      return this.scenes.length > 0;
     },
 
     /**
@@ -237,13 +320,20 @@ export function createPrecipitationSubsystem({
       skyReach = { texture: texture ?? null, rect: rect ?? null };
       const results = {};
       for (const [id, engine] of engines) results[id] = engine.setSkyReachTexture(texture, rect);
+      // ⚠️ THE ARRIVAL ENGINES TOO. Both read the same mask and both would
+      // otherwise be armed independently — a fall gated on this floor while
+      // its splashes still used the last floor's bake is exactly the kind of
+      // half-applied state that reads as "the gate is flaky".
+      for (const [id, engine] of splashEngines) results[`${id}:arrive`] = engine.setSkyReachTexture(texture, rect);
       return results;
     },
 
-    /** Live look tuning, for the debug panel and the console. */
+    /** Live look tuning, for the debug panel and the console. Both engine
+     * families read the same object; each picks out the keys it owns. */
     setTuning(t) {
       lastTuning = { ...(lastTuning ?? {}), ...(t ?? {}) };
       for (const engine of engines.values()) engine.setTuning(t);
+      for (const engine of splashEngines.values()) engine.setTuning(t);
     },
 
     /**
@@ -270,6 +360,10 @@ export function createPrecipitationSubsystem({
         builtEngines: [...engines.keys()],
         availableSpecies: PRECIP_SPECIES_IDS,
         engines: Object.fromEntries([...engines].map(([id, e]) => [id, e.debugState()])),
+        /** ⭐ THE ARRIVAL, REPORTED SEPARATELY (P2). "No splashes" and "no
+         * rain" are different failures with different causes, and one merged
+         * block would name neither. */
+        arrival: Object.fromEntries([...splashEngines].map(([id, e]) => [id, e.debugState()])),
       };
     },
   };

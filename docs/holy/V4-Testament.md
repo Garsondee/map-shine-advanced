@@ -1281,6 +1281,35 @@ storm flash) as authored content.
         while rain managed 1072 — exactly inverted).
         ⚠️ REMAINING IN P1's own scope: the §3.1 height comparison (a drop above a bridge deck
         should still render) needs the cover-HEIGHT field baked as a second texture.
+      · P2 THE ARRIVAL — `BUILT (unverified)` 2026-08-16. Ground splashes land on the map,
+        gated by the same sky-reach bake as the fall, and smear along the wind.
+        `effects/particles/precip-splash-runtime.js` (the 5th runtime, 5 of the 8 guaranteed
+        storage buffers) + `arrive` on the species rows + the `scenes` ordering in the
+        subsystem, because two scenes cannot be depth-sorted against each other and splashes
+        must draw UNDER the curtain that caused them. STATISTICAL, not tracked (§4.1): no drop
+        knows about any splash — V2's own per-drop queue was capped at 512/frame, i.e. already
+        statistical under load, so the coupling bought nothing and cost a failure class.
+        V2's FOUR hand-tuned atlas tiles are transcribed by name from
+        `legacy/core/WeatherController.js:355-386` (*"thin clean ring"*, *"thick broken ring"*,
+        *"droplets-only"*, *"inner puddle"*) and re-authored as ONE continuous per-fragment
+        shape, so the four are corners of a five-knob space rather than four sprites.
+        10,269 assertions; bench `precip` grew 2 scenarios / 9 checks, all green, including
+        0 splash pixels under the test roof and a smear that elongates without inflating area.
+        ⚠️ THREE THINGS THE BENCH CAUGHT THAT NODE STRUCTURALLY CANNOT. (1) A MISSING
+        `material.side = DoubleSide` — the flipped camera inverts winding, so the engine
+        reported `liveCount: 1080`, ran its kernels, passed every test and drew ZERO pixels
+        (`feedback_doubleside_invisible_to_status_reports`, now the 5th time). (2) The
+        population was derived from the arena CAPACITY and came out a foam bath — 71% of the
+        frame lit; **a cap is a ceiling, not a population**, and the rate is now per-MEGAPIXEL
+        because a splash is scenery whose density belongs to the ground, not atmosphere whose
+        density belongs to the screen. (3) A single `cos(n·θ)` is exactly n-fold symmetric, so
+        the droplets archetype rendered as a geometric rosette; two COPRIME integer harmonics
+        break the symmetry without leaving the radial seam a non-integer multiple would.
+        ⚠️ NOT SHIPPED IN P2 AND NOT PRETENDED: water-hit splashes (need the water mask
+        injected as a second gate texture), the `rainAgitation01` request against Water.md's
+        ladder (deliberately still a request — an input nothing reads is rot on the far side of
+        a seam), and §4.1's `squallField` (P4 owns it; the rate is `precip01 × skyReach` and the
+        runtime says so rather than faking it with a private noise).
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

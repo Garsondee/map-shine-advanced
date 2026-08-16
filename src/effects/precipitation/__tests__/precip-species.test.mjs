@@ -116,16 +116,83 @@ export function run(t) {
         Object.values(s.respond).every((c) => ['linear', 'pow', 'threshold'].includes(c.kind))
       );
     }
-    // ⚠️ P1 ships fall/body/respond/light ONLY. `arrive` (P2) and `stay` (P3)
-    // must be genuinely ABSENT, not present-and-empty — see the module header.
+    // ⚠️ THE SCHEDULE IS AN ASSERTION, IN BOTH DIRECTIONS. `arrive` landed
+    // with P2's splashes and must now EXIST on every row; `stay` is P3's and
+    // must still be genuinely ABSENT, not present-and-empty (see the module
+    // header). Only asserting the absent half would let a future slice add an
+    // empty `arrive` back and call it progress.
     t.ok(
-      'no row carries an `arrive` block yet — P2 adds it with the splashes',
-      PRECIP_SPECIES_IDS.every((id) => PRECIP_SPECIES[id].arrive === undefined)
+      'every row carries an `arrive` block — P2 shipped it with the splashes',
+      PRECIP_SPECIES_IDS.every((id) => PRECIP_SPECIES[id].arrive?.kind)
+    );
+    t.ok(
+      'every `arrive.kind` is in the closed list',
+      PRECIP_SPECIES_IDS.every((id) => ['splash', 'bounce', 'settle', 'none'].includes(PRECIP_SPECIES[id].arrive.kind))
+    );
+    // ⚠️ THE FIELDS P2 DOES NOT CONSUME MUST STILL BE ABSENT. `bounces` is
+    // P5's, `restSec` is P3's, `waterRing` is §4.2's — all three are in §2.1's
+    // schema and none has a reader today. This is the same rot guard as the
+    // `stay` line below, aimed one level deeper.
+    t.ok(
+      'no row carries `bounces`/`restSec`/`waterRing` yet — P3/P5/§4.2 add them with their readers',
+      PRECIP_SPECIES_IDS.every((id) => {
+        const a = PRECIP_SPECIES[id].arrive;
+        return a.bounces === undefined && a.restSec === undefined && a.waterRing === undefined;
+      })
     );
     t.ok(
       'no row carries a `stay` block yet — P3 adds it with the mantle',
       PRECIP_SPECIES_IDS.every((id) => PRECIP_SPECIES[id].stay === undefined)
     );
+  }
+
+  // ---- THE ARRIVAL: V2's four splash tiles, transcribed ----------------------
+  {
+    const a = PRECIP_SPECIES.rain.arrive;
+    t.ok('rain splashes', a.kind === 'splash');
+    // ⚠️ SNOW SETTLES, AND THE SPLASH ENGINE READS `kind`, NOT THE BLOCK'S
+    // EXISTENCE. A discriminator that only says "has an arrive block" would
+    // make snow throw water — the exact `feedback_gate_and_self_exclusion_
+    // answer_different_questions` shape.
+    t.ok('snow settles, it does not splash', PRECIP_SPECIES.snow.arrive.kind === 'settle');
+    t.ok('snow carries no splash archetypes at all', PRECIP_SPECIES.snow.arrive.archetypes === undefined);
+
+    t.ok('rain ships V2’s four tiles', a.archetypes.length === 4);
+    t.ok('rain’s splash capacity is V2’s 2000 × 4', a.capacity === 8000);
+    t.ok('rain splashes smear with wind (§4.1)', a.smearWithWind === true);
+    for (const arch of a.archetypes) {
+      t.ok(`${arch.id}: life is a real interval`, arch.lifeSecMax > arch.lifeSecMin && arch.lifeSecMin > 0);
+      t.ok(`${arch.id}: size is a real interval`, arch.sizePxMax >= arch.sizePxMin && arch.sizePxMin > 0);
+      // ⚠️ A PEAK ABOVE 1 WOULD BE A SECOND OPACITY AUTHORITY. The ground
+      // boost (V2's 2.75×) is a runtime DIAL applied on top; folding it into
+      // the row would make these numbers stop being V2's harvested peaks and
+      // nobody could tell which reading a future edit was changing.
+      t.ok(`${arch.id}: peak alpha stays a fraction`, arch.peakAlpha > 0 && arch.peakAlpha <= 1);
+      t.ok(`${arch.id}: the ring sits inside the quad`, arch.ringR > 0 && arch.ringR < 1);
+      t.ok(
+        `${arch.id}: shape knobs are normalised`,
+        arch.roughen01 >= 0 && arch.roughen01 <= 1 && arch.disc01 >= 0 && arch.disc01 <= 1
+      );
+      t.ok(`${arch.id}: spikes is a positive frequency`, arch.spikes > 0);
+    }
+    // ⚠️ THE FOUR MUST ACTUALLY DIFFER. Four rows carrying one look is the
+    // failure this table exists to avoid, and it is invisible to every
+    // per-row check above (`feedback_sibling_ranks_need_mutual_comparison`).
+    const shapeKeys = new Set(a.archetypes.map((x) => `${x.ringR}|${x.ringW}|${x.roughen01}|${x.disc01}`));
+    t.ok('the four archetypes are four DIFFERENT shapes', shapeKeys.size === 4);
+    t.ok('exactly one archetype is the filled inner puddle', a.archetypes.filter((x) => x.disc01 >= 0.9).length === 1);
+
+    // ⭐ THE WINDOW MATH `precip-splash-runtime.js#archetypeIndex` runs, pinned
+    // in Node because the shader copy is browser-only. At the shipped centre
+    // and spread every archetype must be reachable — a window that silently
+    // excluded a tile would be a 25% population loss nobody could see.
+    const reached = new Set();
+    for (let k = 0; k < 400; k++) {
+      const h = (k + 0.5) / 400;
+      const tPick = Math.min(0.9999, Math.max(0, a.splashArchetype01 + (h - 0.5) * a.archetypeSpread));
+      reached.add(Math.floor(tPick * 4));
+    }
+    t.ok('all four tiles are reachable at the shipped centre/spread', reached.size === 4);
   }
 
   // ---- rain vs snow: the differences that ARE the design ----------------------

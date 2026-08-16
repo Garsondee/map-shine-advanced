@@ -99,6 +99,12 @@ function syncControlsFromState() {
     ['precipChaos', 'precipChaosVal', s.chaosScale, 2],
     ['precipCamH', 'precipCamHVal', s.cameraHeight, 0],
     ['precipZoom', 'precipZoomVal', s.zoom, 2],
+    // ⭐ THE ARRIVAL (P2)
+    ['precipSplashRate', 'precipSplashRateVal', s.splashRateScale, 2],
+    ['precipSplashSize', 'precipSplashSizeVal', s.splashSizeScale, 2],
+    ['precipSplashAlpha', 'precipSplashAlphaVal', s.splashAlphaScale, 2],
+    ['precipSplashPeak', 'precipSplashPeakVal', s.splashPeakBoost, 2],
+    ['precipSplashSmear', 'precipSplashSmearVal', s.splashSmearGain, 2],
   ];
   for (const [inputId, valId, value, digits] of pairs) {
     const input = document.getElementById(inputId);
@@ -167,6 +173,19 @@ function wire() {
   wireRange('precipChaos', 'precipChaosVal', 'chaosScale');
   wireRange('precipCamH', 'precipCamHVal', 'cameraHeight', { digits: 0 });
   wireRange('precipZoom', 'precipZoomVal', 'zoom');
+
+  // ── THE ARRIVAL (P2) — splash dials + the two layer isolators ──
+  wireRange('precipSplashRate', 'precipSplashRateVal', 'splashRateScale');
+  wireRange('precipSplashSize', 'precipSplashSizeVal', 'splashSizeScale');
+  wireRange('precipSplashAlpha', 'precipSplashAlphaVal', 'splashAlphaScale');
+  wireRange('precipSplashPeak', 'precipSplashPeakVal', 'splashPeakBoost');
+  wireRange('precipSplashSmear', 'precipSplashSmearVal', 'splashSmearGain');
+  document.getElementById('precipShowFall')?.addEventListener('change', (e) => {
+    bench.driver.set({ fall: e.target.checked });
+  });
+  document.getElementById('precipShowArrival')?.addEventListener('change', (e) => {
+    bench.driver.set({ arrival: e.target.checked });
+  });
 
   document.getElementById('precipPaused')?.addEventListener('change', (e) => {
     bench.driver.set({ paused: e.target.checked });

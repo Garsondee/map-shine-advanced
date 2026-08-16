@@ -402,6 +402,7 @@ Counts to design against (not to promise): heavy rain ~30–60k specimen rows; s
 | --- | --- | --- |
 | **P1** | `rain` + `snow` specimen FALL: runtime + species table + skyReach gate + ambient wind + M(h) + day/night scalars. **Ships `precip01`/`precipKindAuthored`/`temperature01` axes in the manager** (their first real consumer — the unconsumed-axis rule finally satisfied) + astrolabe quick slider via the manager | it rains on the Mansion; snow falls when cold; interiors stay dry |
 | **P2** | ARRIVAL statistics: ground splashes (4 archetypes), water-hit splashes over the water mask, wind smear. Water `rainAgitation` request filed | rain lands *on* things |
+| ↳ | **`BUILT (unverified)` 2026-08-16** — `effects/particles/precip-splash-runtime.js`, `arrive` on the species rows, two bench scenarios (9 checks, green). **Ground splashes + wind smear shipped; water-hit splashes and the `rainAgitation` request did NOT** — see the note below | |
 | **P3** | THE STAY v1: mantle buffer (snow + puddle channels), melt by temperature + fire halo, trample stamps, scalar wetness → specular request | ⭐ snow persists; footprints; hearths keep their ground |
 | **P4** | IMPRESSION curtain + squall modulation + zoom gates + storm choreography (flash boost, gust lean) | blizzards and downpours read at every zoom |
 | **P5** | Drips (decode-time edges + the tail) + `hail`/`sleet` phase machinery | the roofline sings; hail bounces |
@@ -409,6 +410,14 @@ Counts to design against (not to promise): heavy rain ~30–60k specimen rows; s
 | **P7** | Luxuries by measurement: illum-lit bodies, DoF-by-height, debris motes, mantle sparkle | the shelf you raid when the frame budget says yes |
 
 P1 is the Weather-Manager slice-7 keystone and is independently shippable; every later slice is additive.
+
+**⚠️ WHAT P2 LEFT ON THE TABLE, stated so nobody reads the row as finished.** Ground splashes and wind smear are built and green on the bench; §4.2's two halves are not:
+
+- **Water-hit splashes** (the sparse near-zoom sprites over the water mask, V2 peak 0.55) need a SECOND gate texture injected — the water mask, alongside the sky-reach bake. That is real wiring through `vt-pan-viewer.js`'s bake sites, not a parameter, so it waits for its own commit rather than shipping half-armed.
+- **The `rainAgitation01` REQUEST against `Water.md`'s ladder** is deliberately still just a request. Computing the value and handing it to the env snapshot today would create an input nothing reads — `feedback_unconsumed_api_rots_silently` on the far side of a seam, which is the same disease the species table's `arrive`/`stay` schedule exists to avoid. It lands with water's consumer.
+- **§4.1's `squallField(x,y)`** is P4's; the rate is `precip01 × skyReach` until then, and the runtime says so rather than approximating it with a private noise.
+
+Consequently the species rows carry `arrive.kind`/`splashArchetype01`/`smearWithWind` and the four archetypes — and still carry **no** `waterRing`, `bounces` or `restSec`, each of which is asserted absent by `precip-species.test.mjs` until its own reader exists.
 
 **Ledger accounting:** these slices are how three of Pillar 9's open lines close ("Rain + snow as particle archetypes with wind coupling" ← P1; "Atmospheric mist… NEVER touching vision" ← P4's curtain + the manager's `fogDensity01`; "Ash weather preset" ← P6 — and P6 makes it *content*, so the "else cut" clause need never fire), and how Pillar 12's Compression-Ledger row (`WeatherParticles`, `AshCloud`/`AshDisturbance`, `WaterSplashes` droplets → "Pillar 12 archetypes on one particle engine") is discharged for the weather-shaped entries. Pillar 9's DoD scene — wind + cloud shadow + precipitation + storm flash on one authored map — is P4's exit criterion wearing its Sunday name.
 

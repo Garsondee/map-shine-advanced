@@ -43,24 +43,29 @@
  * ============================================================================
  *
  * REAL, imported from `src/` and never transcribed (AGENTS.md §6):
- *   - `createPrecipEngine` — the actual production runtime, its actual kernels,
- *     its actual draw material.
+ *   - `createPrecipEngine` — the actual production FALL runtime, its actual
+ *     kernels, its actual draw material.
+ *   - `createPrecipSplashEngine` — the actual production ARRIVAL runtime (P2),
+ *     drawn in production's own order (splashes under the curtain) through the
+ *     one `_drawLayers` method every measurement also goes through.
  *   - `PRECIP_SPECIES` / `resolveSpeciesFrame` — the actual species table and
- *     the actual response curves.
+ *     the actual response curves. The splash rate is the SAME resolved frame
+ *     the curtain gets, which is the coupling §4.1 asks for.
  *
  * SYNTHETIC, and named as such so no claim overreaches:
  *   - the world rect (a plain 2000×1500 box, not a real map's bounds)
  *   - the backdrop (a flat dark quad, so bodies are visible at all)
  *   - the wind (a hand-set ambient handle, not the real wind field)
- *   - NO sky-reach gate yet — that is task 19, and until it lands this bench
- *     shows rain falling everywhere including "indoors", which is CORRECT for
- *     what it currently measures and wrong for production. Stated here so a
- *     reader cannot mistake this bench's picture for a finished feature.
+ *   - the sky-reach texture (`buildSkyReachTexture` — a hand-drawn building and
+ *     canopy, not a real floor's bake). The GATE ITSELF is real and armed: both
+ *     the fall and the arrival sample it, and `skyGate: false` is the
+ *     fail-open state rather than a missing feature.
  *
  * @module tools/shader-lab/bench-precip
  */
 import { evaluate, saveCanvasPng } from './contract.js';
 import { createPrecipEngine } from '../../src/effects/particles/precip-runtime.js';
+import { createPrecipSplashEngine } from '../../src/effects/particles/precip-splash-runtime.js';
 import {
   PRECIP_SPECIES,
   PRECIP_SPECIES_IDS,
@@ -100,8 +105,15 @@ class PrecipDriver {
     this.renderer = null;
     this.camera = null;
     this.canvas = null;
-    /** speciesId → engine. Both are built up front so switching is instant. */
+    /** speciesId → FALL engine. Both are built up front so switching is instant. */
     this.engines = new Map();
+    /**
+     * speciesId → ARRIVAL engine (P2). Built for BOTH species deliberately,
+     * even though snow's reports `ok: false` and draws nothing — that is the
+     * assertion `arrival-only-rain-splashes` reads, and building it only for
+     * rain would make "snow has no splashes" unfalsifiable here.
+     */
+    this.splashEngines = new Map();
     this.activeSpecies = 'rain';
     this._rafId = null;
     this._active = true;
@@ -133,6 +145,18 @@ class PrecipDriver {
       windAirSpeedPxS: 2600,
       parallaxStreak01: 1,
       cameraHeight: 2000,
+      // ⭐ THE ARRIVAL (P2) — splash look dials + the two layer isolators.
+      // `fall`/`arrival` exist so a measurement can attribute a pixel: a
+      // scenario that could not switch the curtain OFF would be reading the
+      // sum of two effects and calling it one (`feedback_aggregate_cannot_
+      // name_the_source`).
+      fall: true,
+      arrival: true,
+      splashSizeScale: 1,
+      splashAlphaScale: 1,
+      splashPeakBoost: 2.75,
+      splashSmearGain: 1.6,
+      splashRateScale: 1,
       // view
       zoom: 1,
       paused: false,
@@ -240,6 +264,24 @@ class PrecipDriver {
       engine.setSceneBounds(WORLD);
       engine.init(this.renderer);
       this.engines.set(id, engine);
+
+      // ⭐ THE ARRIVAL, on the SAME synthetic world and the SAME open-sky
+      // placeholder. Sharing the placeholder is deliberate: production shares
+      // one too, and a lab that gave each engine its own texture could not
+      // catch a bug where two consumers of one texture disagree about it.
+      const splash = createPrecipSplashEngine({
+        THREE,
+        speciesId: id,
+        worldRect: WORLD,
+        capacity: Math.min(LAB_CAPACITY, 3000),
+        windHandle: this.wind,
+        renderOrder: 9,
+        openSkyTexture,
+      });
+      splash.setWorldRect(WORLD);
+      splash.setSceneBounds(WORLD);
+      if (splash.ok) splash.init(this.renderer);
+      this.splashEngines.set(id, splash);
     }
 
     this.applyState();
@@ -295,6 +337,25 @@ class PrecipDriver {
         parallaxStreak01: s.parallaxStreak01,
         cameraHeight: s.cameraHeight,
       });
+
+      // ⭐ THE ARRIVAL gets the SAME resolved frame the curtain did — that is
+      // the coupling under test, not a lab convenience. `setFrame` divides by
+      // the species' own capacity, so handing it the lab-scaled `liveCount`
+      // would understate the splash rate by the lab/production ratio; it takes
+      // the UNSCALED frame and the lab caps its own arena instead.
+      const splash = this.splashEngines.get(id);
+      if (splash?.ok) {
+        splash.setFrame(frame);
+        splash.setSkyReachTexture(s.skyGate ? this.buildSkyReachTexture() : null, WORLD);
+        splash.setTuning({
+          splashSizeScale: s.splashSizeScale,
+          splashAlphaScale: s.splashAlphaScale,
+          splashPeakBoost: s.splashPeakBoost,
+          splashSmearGain: s.splashSmearGain,
+          splashRateScale: s.splashRateScale,
+          windAirSpeedPxS: s.windAirSpeedPxS,
+        });
+      }
     }
   }
 
@@ -311,6 +372,7 @@ class PrecipDriver {
     this.camera.updateProjectionMatrix();
     const rect = { minX: cx - halfW, maxX: cx + halfW, minY: cy - halfH, maxY: cy + halfH };
     for (const engine of this.engines.values()) engine.setWorldRect(rect);
+    for (const engine of this.splashEngines.values()) engine.setWorldRect(rect);
   }
 
   set(partial) {
@@ -338,12 +400,29 @@ class PrecipDriver {
     const engine = this.engine;
     if (!engine) return null;
     engine.step(this.renderer, dt / 1000, this._virtualNowMs, this.wind);
-    // Render EVERY engine's scene: the inactive one is hidden (liveCount 0 ⇒
-    // mesh.visible false), so this costs nothing and keeps the draw path
-    // identical whether one species or two are live — which is what production
-    // will actually do when sleet blends them.
-    this.renderer.render(engine.scene, this.camera);
+    const splash = this.splashEngines.get(this.activeSpecies);
+    if (splash?.ok) splash.step(this.renderer, dt / 1000, this._virtualNowMs, this.wind);
+
+    this._drawLayers();
     return this.readout();
+  }
+
+  /**
+   * ⭐ THE ONE PLACE THE PICTURE IS DEFINED — the on-screen frame and every
+   * measurement go through it, so a scenario can never measure a different
+   * composition from the one the author is looking at.
+   *
+   * ⚠️ SPLASHES FIRST, THEN THE CURTAIN — production's order
+   * (`precipitationSubsystem.scenes`), not this file's convenience. Two scenes
+   * cannot be depth-sorted against each other, so the order of the two
+   * `render()` calls IS the depth order, and a lab that drew them the other way
+   * round would look right here and wrong on the map.
+   */
+  _drawLayers() {
+    const engine = this.engine;
+    const splash = this.splashEngines.get(this.activeSpecies);
+    if (this.state.arrival && splash?.ok) this.renderer.render(splash.scene, this.camera);
+    if (this.state.fall && engine) this.renderer.render(engine.scene, this.camera);
   }
 
   _frame(realMs) {
@@ -366,6 +445,10 @@ class PrecipDriver {
       speciesId: this.activeSpecies,
       virtualNowMs: Math.round(this._virtualNowMs),
       ...(engine?.debugState() ?? {}),
+      // ⭐ SEPARATE, never merged into the fall's block. "No splashes" and "no
+      // rain" are different failures with different causes.
+      arrival: this.splashEngines.get(this.activeSpecies)?.debugState() ?? null,
+      layers: { fall: this.state.fall, arrival: this.state.arrival },
       axes: {
         precip01: this.state.precip01,
         stormActivity01: this.state.stormActivity01,
@@ -381,6 +464,7 @@ class PrecipDriver {
     const r = this.readout();
     el.textContent =
       `${r.speciesId}  live=${r.liveCount}/${r.capacity}  storage=${r.storageBuffers}/8 buffers  t=${(r.virtualNowMs / 1000).toFixed(1)}s\n` +
+      `arrival: ${r.arrival?.splashes ? `${r.arrival.liveCount}/${r.arrival.capacity} splashes  smear=${r.arrival.wind.smear.toFixed(2)}x` : 'none — this species settles, it does not splash'}\n` +
       `axes: precip=${r.axes.precip01.toFixed(2)} storm=${r.axes.stormActivity01.toFixed(2)} day=${r.axes.dayFactor01.toFixed(2)} flash=${r.axes.flash01.toFixed(2)}\n` +
       `look: slant=${r.tuning.fallSlant01.toFixed(2)} size=${r.tuning.sizeScale.toFixed(2)} streak=${r.tuning.streakScale.toFixed(2)} chaos=${r.tuning.chaosScale.toFixed(2)} camH=${r.tuning.cameraHeight}\n` +
       (r.skyGate?.armed
@@ -412,12 +496,14 @@ class PrecipDriver {
       this._measureRt = new THREE.RenderTarget(W, H, { depthBuffer: false, stencilBuffer: false });
     }
     for (let i = 0; i < frames; i++) this.advance(16);
-    const engine = this.engine;
     const prevTarget = this.renderer.getRenderTarget();
     this.renderer.setRenderTarget(this._measureRt);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.clear();
-    if (engine) this.renderer.render(engine.scene, this.camera);
+    // ⚠️ THE SAME COMPOSITION THE SCREEN SHOWS — see `_drawLayers`. A
+    // measurement that drew only the curtain while the panel showed both would
+    // report a number nobody could reproduce by looking.
+    this._drawLayers();
     const raw = await this.renderer.readRenderTargetPixelsAsync(this._measureRt, 0, 0, W, H);
     this.renderer.setRenderTarget(prevTarget);
     this.renderer.setClearColor(0x11151c, 1);
@@ -469,12 +555,14 @@ class PrecipDriver {
       this._measureRt = new THREE.RenderTarget(W, H, { depthBuffer: false, stencilBuffer: false });
     }
     for (let i = 0; i < frames; i++) this.advance(16);
-    const engine = this.engine;
     const prevTarget = this.renderer.getRenderTarget();
     this.renderer.setRenderTarget(this._measureRt);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.clear();
-    if (engine) this.renderer.render(engine.scene, this.camera);
+    // ⚠️ THE SAME COMPOSITION THE SCREEN SHOWS — see `_drawLayers`. A
+    // measurement that drew only the curtain while the panel showed both would
+    // report a number nobody could reproduce by looking.
+    this._drawLayers();
     const raw = await this.renderer.readRenderTargetPixelsAsync(this._measureRt, 0, 0, W, H);
     this.renderer.setRenderTarget(prevTarget);
     this.renderer.setClearColor(0x11151c, 1);
@@ -757,6 +845,156 @@ export function createPrecipBench({ THREE, log }) {
         inputs: { buildingUv: BUILDING_UV, openSkyUv: OPEN_SKY_UV },
         stats: { open, gated, openWhole, gatedWhole, outside },
         artifacts: [pngOpen, pngGated].filter(Boolean),
+      };
+    },
+  });
+
+  /**
+   * ⭐ P2 — THE ARRIVAL. Splashes exist, land only where sky reaches, follow
+   * the SAME rate the curtain does, and smear with the wind.
+   *
+   * ⚠️ EVERY CHECK MEASURES THE SPLASH LAYER ALONE (`fall: false`). A combined
+   * frame cannot attribute a pixel, and the whole point of §4.1 is that the
+   * splash population is its own statistical process — measuring the sum would
+   * let a dead splash engine pass on the rain's pixels
+   * (`feedback_aggregate_cannot_name_the_source`).
+   */
+  scenarios.set('arrival-splashes-land-where-sky-reaches', {
+    name: 'arrival-splashes-land-where-sky-reaches',
+    summary: 'the splash layer draws, thins with precip01, obeys the sky gate, and never fires for snow.',
+    async run({ runId }) {
+      driver.setSpecies('rain');
+      // Splashes ONLY — the curtain is off for every measurement below.
+      driver.set({ fall: false, arrival: true, skyGate: false, precip01: 0.9, windSpeed01: 0 });
+      const heavy = await driver.measureCoverage(40);
+      const pngHeavy = await saveCanvasPng(runId, 'splash-heavy.png', driver.canvas);
+
+      driver.set({ precip01: 0.25 });
+      const light = await driver.measureCoverage(40);
+
+      driver.set({ precip01: 0 });
+      const clear = await driver.measureCoverage(20);
+
+      // LAW 3 on the ARRIVAL: water must not appear on an indoor floor.
+      driver.set({ precip01: 0.9, skyGate: false });
+      const roofOpen = await driver.measureRegion(BUILDING_UV, 40);
+      driver.set({ skyGate: true });
+      const roofGated = await driver.measureRegion(BUILDING_UV, 40);
+      const outside = await driver.measureRegion(OPEN_SKY_UV, 10);
+      const pngGated = await saveCanvasPng(runId, 'splash-gated.png', driver.canvas);
+
+      // Snow settles; it must produce no arrival engine work at all.
+      driver.setSpecies('snow');
+      driver.set({ skyGate: false, precip01: 0.9 });
+      const snowSplash = await driver.measureCoverage(30);
+      const snowState = driver.splashEngines.get('snow').debugState();
+
+      driver.setSpecies('rain');
+      driver.set({ fall: true, precip01: 0.6, skyGate: false });
+
+      return {
+        checks: [
+          evaluate('splashes-draw-at-all', () => ({
+            ok: heavy.litPixels > 200,
+            measured: heavy.litPixels,
+            expected: '> 200 lit px with the curtain OFF',
+          })),
+          // ⚠️ THE ONE CHECK A BROKEN TSL GRAPH CANNOT PASS. A graph that
+          // throws at build renders NOTHING while every Node test stays green
+          // and the bundle stays clean — the exact failure that cost P1 a live
+          // session (`TSL.texture(null)`).
+          evaluate('rate-follows-precip01', () => ({
+            ok: heavy.litPixels > light.litPixels * 1.5,
+            measured: { heavy: heavy.litPixels, light: light.litPixels },
+            expected: 'heavy > 1.5x light',
+          })),
+          evaluate('law5-clear-day-draws-no-splashes', () => ({
+            ok: clear.litPixels === 0,
+            measured: clear.litPixels,
+            expected: '0 — a JS if, not a uniform set to zero',
+          })),
+          evaluate('law3-no-splashes-indoors', () => {
+            const before = roofOpen.litPixels;
+            const after = roofGated.litPixels;
+            const remaining = before > 0 ? after / before : 0;
+            return {
+              ok: remaining < 0.08,
+              measured: { before, after, remaining: Number(remaining.toFixed(3)) },
+              expected: '< 8% of the ungated splashes survive under the roof',
+            };
+          }),
+          evaluate('the-gate-is-local-not-a-global-dimmer', () => ({
+            ok: outside.litPixels > 100,
+            measured: outside.litPixels,
+            expected: '> 100 — open sky keeps its splashes',
+          })),
+          // ⚠️ READS THE ENGINE'S OWN VERDICT **AND** THE PIXELS. `ok:false`
+          // alone would pass even if the engine drew anyway, and zero pixels
+          // alone would pass if snow's splashes were merely invisible. Two
+          // different failures, two assertions.
+          evaluate('snow-settles-it-does-not-splash', () => ({
+            ok: snowState.splashes === false && snowSplash.litPixels === 0,
+            measured: { splashes: snowState.splashes, litPixels: snowSplash.litPixels },
+            expected: 'engine refuses AND draws nothing',
+          })),
+        ],
+        inputs: { buildingUv: BUILDING_UV, openSkyUv: OPEN_SKY_UV },
+        stats: { heavy, light, clear, roofOpen, roofGated, outside, snowSplash, snowState },
+        artifacts: [pngHeavy, pngGated].filter(Boolean),
+      };
+    },
+  });
+
+  /**
+   * ⭐ WIND SMEAR (§4.1) — *"lashing against the ground is precisely an impact
+   * that cannot stay round"*.
+   *
+   * ⚠️ MEASURED AS AN AREA CHANGE, NOT AN EYEBALLED SHAPE. The quad stretches
+   * along the wind and shrinks across it by `1/√smear`, so a correct
+   * implementation moves total coverage very little while the LOOK changes a
+   * lot — which means the honest assertions are (a) the reported smear factor
+   * tracks wind speed, and (b) coverage does not COLLAPSE or EXPLODE, i.e. the
+   * area compensation is really there. A naive "coverage grows with wind" check
+   * would pass on a bug that only stretched.
+   */
+  scenarios.set('arrival-smears-with-wind', {
+    name: 'arrival-smears-with-wind',
+    summary: 'the splash quad elongates along the wind vector without inflating its area.',
+    async run({ runId }) {
+      driver.setSpecies('rain');
+      driver.set({ fall: false, arrival: true, skyGate: false, precip01: 0.9, windSpeed01: 0 });
+      const calm = await driver.measureCoverage(40);
+      const calmSmear = driver.splashEngines.get('rain').debugState().wind.smear;
+
+      driver.set({ windSpeed01: 1 });
+      const gale = await driver.measureCoverage(40);
+      const galeSmear = driver.splashEngines.get('rain').debugState().wind.smear;
+      const png = await saveCanvasPng(runId, 'splash-smear-gale.png', driver.canvas);
+
+      driver.set({ fall: true, windSpeed01: 0.25, precip01: 0.6 });
+
+      const ratio = calm.litPixels > 0 ? gale.litPixels / calm.litPixels : 0;
+      return {
+        checks: [
+          evaluate('calm-is-round', () => ({
+            ok: Math.abs(calmSmear - 1) < 1e-6,
+            measured: calmSmear,
+            expected: 'exactly 1.0 at zero wind — no smear without a reason',
+          })),
+          evaluate('gale-elongates', () => ({
+            ok: galeSmear > 2,
+            measured: galeSmear,
+            expected: '> 2x at full wind',
+          })),
+          evaluate('area-is-compensated-not-inflated', () => ({
+            ok: ratio > 0.6 && ratio < 1.8,
+            measured: Number(ratio.toFixed(3)),
+            expected: '0.6..1.8 — the across-wind axis gives back what the along-wind axis takes',
+          })),
+        ],
+        inputs: { windSpeed01: [0, 1] },
+        stats: { calm, gale, calmSmear, galeSmear, ratio },
+        artifacts: png ? [png] : [],
       };
     },
   });

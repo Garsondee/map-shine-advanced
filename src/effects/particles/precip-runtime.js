@@ -61,45 +61,50 @@
  * coming down AT the map" read.
  *
  * ============================================================================
- * ⭐⭐ THE AUTHOR'S RULING ON THE LOOK — `fallSlant01 = 0` (2026-08-16)
+ * ⭐⭐ HOW WIND MEETS THE FALL — one vanishing point, moved (2026-08-16)
  * ============================================================================
  *
- * ⚠️ I ARGUED THE OPPOSITE, IN THIS COMMENT, AND I WAS WRONG. The original text
- * here claimed a drop falling straight down under a top-down camera is
- * *"physically correct and visually dead"*, and used that to justify
- * `uFallSlant01` — a fake world-XY translation added on top of the fall so the
- * rain would visibly move. Three rounds of the author's verdicts killed it:
+ * ⚠️ THE FIRST MODEL HERE WAS WRONG AND THIS COMMENT ARGUED FOR IT. It claimed
+ * a drop falling straight down under a top-down camera is *"physically correct
+ * and visually dead"*, and on that basis invented `uFallSlant01` as a fake
+ * world-XY translation so the rain would visibly move. Four verdicts from the
+ * author, each a different face of the same fault:
  *
  *   1. *"aligned as if they were moving from north to south, not as if they
  *      were falling downwards"*
  *   2. *"some raindrops are falling down and some are moving sideways"*
  *   3. *"the streak doesn't align with bird's eye view perspective downwards"*
+ *   4. *"even the mildest use of it makes the rain look like it's travelling in
+ *      a rain streak shape but travelling sideways — we need to rethink the
+ *      interaction between precipitation and wind"*
  *
- * All three are the same complaint from different angles, and the slant was
- * the cause every time: any nonzero slant translates the drop ACROSS the map,
- * so its streak becomes a vector LYING IN THE MAP PLANE. That reads as
- * something skating over the ground, never as something falling at you — and
- * no amount of retuning length or splay fixes a mark pointing the wrong way.
+ * ⚠️ (4) IS THE ONE THAT NAMED THE REAL DEFECT, and *"even the mildest"* is the
+ * clue: the fault was not a magnitude, it was two terms with different SPATIAL
+ * PROFILES being summed. The radial (perspective) term is zero at the view
+ * centre and grows with distance; a wind/slant velocity is constant everywhere.
+ * So the middle of the frame was always wind-dominated and the edges radial,
+ * with a ring between where they cancelled and bodies pointed anywhere. Any
+ * nonzero weight puts that ring SOMEWHERE — which is why tuning it only moved
+ * the problem, and why three attempts each traded one complaint for another.
  *
- * ⭐ THE SETTLED ANSWER IS THE PHYSICALLY HONEST ONE: `fallSlant01 = 0` (the
- * drop does not translate at all — real rain falls straight down) with
- * `parallaxStreak01 = 1` (the streak aligns fully with the M(h) collapse). All
- * of the visible motion is then the genuine bird's-eye convergence toward the
- * nadir: a drop directly beneath the camera is a growing DOT, and drops
- * further out streak radially, longer the further they are. That is what
- * looking down through rain actually looks like, and it needed no invented
- * term — the invented term was the bug.
+ * ⭐ THE RESOLUTION IS GEOMETRIC, NOT A DIAL. Parallel lines converge to ONE
+ * vanishing point. Vertical rain converges to the nadir; wind-tilted rain is
+ * still parallel lines, so it still converges to a single point — that point
+ * just moves off-nadir. Wind therefore belongs in WHERE everything converges,
+ * never in a competing velocity. Equating the two forms gives the shift in
+ * closed form, `offset = vel · D / fallSpeed`: how far downwind a drop drifts
+ * while falling the camera's own height. Derived, not tuned, and the whole
+ * frame is consistent BY CONSTRUCTION because there is only one term left.
  *
- * The dial survives (0..1, still swept in the lab) because `ash`, `sand` and a
- * hurricane's near-horizontal sheets genuinely DO travel across the map, and
- * they will want it. Rain and snow do not.
+ * `uFallSlant01` survives with an honest meaning — how strongly that
+ * convergence point is displaced — and now does what the author asked of it:
+ * it interacts with wind, because wind is what dominates `vel`.
  *
- * ⚠️ `chaosScale` 1 → 3.5 and `PERSPECTIVE_CAMERA_HEIGHT` 1000 → 2000 came from
- * the same session: with the slant gone, per-body turbulence is what stops the
- * radial pattern reading as a rigid starburst, and a taller camera (gentler
- * M(h)) keeps the splay from becoming hyperspace. All five values were found
- * together on the author's own hands in the lab panel — they trade against
- * each other, and no one of them is meaningful alone.
+ * ⚠️ `chaosScale` 1 → 3.5 and `PERSPECTIVE_CAMERA_HEIGHT` 1000 → 2000 are the
+ * author's own values, found on his hands in the lab panel: per-body turbulence
+ * is what stops a radial pattern reading as a rigid starburst, and a taller
+ * camera (gentler M(h)) keeps the splay short of hyperspace. Every dial here
+ * trades against the others; none is meaningful alone.
  *
  * @module effects/particles/precip-runtime
  */
@@ -239,7 +244,7 @@ export function createPrecipEngine({
    * from directly above); 1 = fully slanted (V2's downpour). Deliberately a
    * uniform so the lab can sweep it live.
    */
-  const uFallSlant01 = uniform(float(0));
+  const uFallSlant01 = uniform(float(1));
   /** Which way "downhill" is, in world degrees. Screen-down under the flipped
    * camera. Separate from the WIND direction on purpose: rain slants with the
    * wind AND has a base bias, and collapsing them would make a calm day's rain
@@ -642,50 +647,64 @@ export function createPrecipEngine({
 
     const width = c.y.mul(uSizeScale).mul(alive).mul(persp);
 
-    // ⭐ ALIGN THE STREAK TO ITS APPARENT (SCREEN) MOTION, NOT ITS WORLD DRIFT.
+    // ⭐⭐ WIND SHIFTS THE VANISHING POINT — IT DOES NOT ADD A SECOND VELOCITY.
     //
-    // Author, seeing the first live rain: *"drops are aligned as if they were
-    // moving from north to south, not aligned as if they were falling
-    // downwards."* Exactly right, and the cause was a missing term rather than
-    // a wrong constant: the streak pointed along `vel`, the kernel's WORLD
-    // drift, which is very nearly the same fixed direction for every body — so
-    // the whole population read as sliding across the map in formation.
+    // Author, 2026-08-16, after the slant was zeroed: *"Fall slant is a good
+    // idea, it should interact with wind, but so far even the mildest use of it
+    // makes the rain look like it's travelling in a rain streak shape but
+    // travelling sideways. We need to rethink the interaction between
+    // precipitation and wind."*
     //
-    // What a drop falling TOWARD a top-down camera actually does on screen is
-    // move RADIALLY, and that motion is not in `vel` at all — it lives in the
-    // M(h) collapse, which happens here in the draw. Differentiating the
-    // apparent position `A = C + (P − C)·M`, with `M = D/(D − h)` and
-    // `dh/dt = −fallSpeed`:
+    // ⚠️ THE DIAGNOSIS IS A SCALING MISMATCH, and it explains why *even the
+    // mildest* slant looked wrong rather than merely "a bit much". The previous
+    // model summed two terms with completely different spatial profiles:
     //
     //     dA/dt = vel·M  −  (P − C)·M²·fallSpeed / D
-    //             └─drift─┘  └──────── the radial term ────────┘
+    //             └ CONSTANT ┘  └─ grows with |P − C| ─┘
     //
-    // The second term points INWARD (toward the view centre) because the drop
-    // is descending, and it grows with distance from centre — so bodies near
-    // the middle streak along the wind while bodies at the edges streak
-    // radially, which is precisely the "flying through it" read that was
-    // missing. It is one extra term, derived rather than tuned, and it costs a
-    // multiply-add.
+    // The radial term is ZERO at the view centre and huge at the edges; the
+    // wind term is the same everywhere. So the middle of the frame was always
+    // wind-dominated (streaks pointing sideways in formation) while the edges
+    // were radial — with a ring between them where the two cancelled and bodies
+    // pointed in essentially arbitrary directions. No weighting fixes that,
+    // because the two profiles cross SOMEWHERE for any nonzero weight. Tuning
+    // `uParallaxStreak01` only moved the bad ring around.
     //
-    // ⚠️ Guarded against a zero-length result (a dead-calm frame at fallSlant 0
-    // for a body sitting exactly on the view centre), which would make the
-    // normalize produce NaN and silently vanish the whole batch.
-    // ⚠️ THE RADIAL TERM IS **WEIGHTED**, AND IT HAS TO BE. Taken at full
-    // strength it does not read as rain at all — measured at the default
-    // geometry it is roughly TEN TIMES the world drift out at the frame edges
-    // (|P−C|≈1000, M=2.5, fallSpeed≈5200, D=1000 ⇒ ~32,000 px/s of radial
-    // against ~3,000 of drift), and the whole population collapses into a
-    // hyperspace starfield radiating from a vanishing point. That is the
-    // correct derivative of a genuinely wide-angle lens; it is not a rainstorm.
+    // ⭐ THE FIX COMES FROM THE GEOMETRY, NOT A DIAL. Parallel lines converge to
+    // ONE vanishing point under perspective. Vertical rain converges to the
+    // nadir — the point directly under the camera. Wind-TILTED rain is still a
+    // family of parallel lines, so it still converges to a single point; that
+    // point simply moves off-nadir, upwind. So wind belongs in WHERE everything
+    // converges, not in a competing velocity.
     //
-    // `uParallaxStreak01` is therefore a LOOK dial, not a physical constant: 0
-    // = every streak parallel (the author's *"moving from north to south"*
-    // complaint), 1 = full derived radial (hyperspace). The default is a bias
-    // strong enough that edge drops visibly splay while the population still
-    // reads as falling in one direction.
-    const fallSpeed = c.z.mul(uSpeedMul);
-    const radial = centre.sub(uCamCentre).mul(persp).mul(persp).mul(fallSpeed).div(uCamHeight).mul(uParallaxStreak01);
-    const apparentVel = vel.mul(persp).sub(radial);
+    // Setting the old expression equal to a pure radial about a shifted centre:
+    //
+    //     vel·M − (P−C)·M²·v/D  ≡  −(P − C − offset)·M²·v/D
+    //     ⇒ offset = vel·D / (M·v)
+    //
+    // Evaluated at the ground (M ≈ 1) that is `offset = vel · D / fallSpeed` —
+    // and it has a clean physical reading: **how far downwind a drop drifts
+    // while falling the camera's own height**. One number, derived, no taste in
+    // it. Every body then radiates from ONE shifted point, so the pattern is
+    // consistent across the whole frame BY CONSTRUCTION — there is no longer a
+    // ring where two terms fight, because there is only one term.
+    //
+    // `uFallSlant01` survives and now means something honest: how strongly the
+    // fall's own tilt (wind included) displaces that convergence point. It
+    // interacts with wind exactly as the author asked, because wind is the
+    // dominant contributor to `vel`.
+    const fallSpeed = c.z.mul(uSpeedMul).max(float(1));
+    const windOffset = vel.mul(uCamHeight).div(fallSpeed).mul(uFallSlant01);
+    const convergence = uCamCentre.add(windOffset);
+    // Pure radial about the shifted point. `uParallaxStreak01` blends between
+    // the raw world drift (0) and this (1) — kept as an escape hatch for a
+    // species that genuinely should read as travelling across the map (sand,
+    // hurricane sheets), NOT as a balance dial any more. Rain and snow want 1.
+    const radial = centre.sub(convergence).mul(persp).mul(persp).mul(fallSpeed).div(uCamHeight);
+    const apparentVel = mix(vel.mul(persp), radial.negate(), uParallaxStreak01);
+    // ⚠️ Guarded against a zero-length result (a body sitting exactly on the
+    // convergence point), which would make the normalize produce NaN and
+    // silently vanish the whole batch.
     const speedLen = apparentVel.length().max(float(1e-4));
     const dir = vec2(apparentVel.x.div(speedLen), apparentVel.y.div(speedLen));
 

@@ -126,7 +126,7 @@ class PrecipDriver {
       windDirDeg: 90,
       // look dials (effect-owned)
       sizeScale: 1.1,
-      fallSlant01: 0,
+      fallSlant01: 1,
       slantDirDeg: 90,
       chaosScale: 3.5,
       streakScale: 1.1,

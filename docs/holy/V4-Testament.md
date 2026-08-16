@@ -1188,10 +1188,32 @@ storm flash) as authored content.
         to the same value from completely different prior walks converge on an identical future.
         `esbuild src/boot.js --bundle` re-verified clean (5.3MB, exit 0) after every commit in
         this pass — not assumed, per the broken-master lesson two entries above.
-        ⚠️ NOT BUILT THIS PASS, stated rather than silent: the astrolabe has no Almanac UI yet
-        (mode toggle, biome picker, volatility slider, forecast strip, pin icons — console levers
-        only); front scripts (`frontScripts` recorded as data, not fired); `eventRates` recorded
-        as data, nothing consumes them (slice 4 territory). Task stays OPEN: slices 4-7 remain.
+        ⚠️ NOT BUILT THIS PASS (closed the same day — see the entry directly below): the
+        astrolabe had no Almanac UI yet; front scripts/`eventRates` remain data-only (slice 4).
+      · slice 3 UI Claude Sonnet 5 2026-08-16 (`553020d` persistence, `6d325d8` astrolabe) —
+        closes the gap directly above. Persistence: `sky-settings.js` gains
+        `weatherMode`/`weatherBiome`/`weatherVolatility`, same independent-fallback pattern as
+        every field there; `weatherBiome:null` is a legal, honest value (idle), fails open at
+        the storage boundary like `resolveBiome` does one layer down. `applyLookToEngines`
+        restores mode+biome BEFORE the archetype/cover restore — order matters, since
+        `applyArchetype`'s walk-adoption needs the right biome already active.
+        Astrolabe: MODE TOGGLE (FOH, a `Weather` select mirroring the Clock control's shape) ·
+        FORECAST PANEL (FOH, mode-gated, next-transition-only, GAME hours never real minutes —
+        `rateHoursPerMinute` defaults to 0 even in aesthetic mode, so real-time has no meaning
+        to convert into) + 🎲 surprise-me · BIOME + PACE (ROH, folded; season/seed deliberately
+        NOT added — no consumer yet / console-only respectively) · THE PIN GLYPH (FOH, the one
+        axis with a live slider a pin can protect).
+        ⭐ A REAL BUG FOUND BY LOOKING, NOT BY TESTING: rendered the dial in a throwaway browser
+        harness and MEASURED the pin glyph landing 180+px outside its own row's box
+        (`getBoundingClientRect()`, not eyeballed). Root cause: `sliderRow`'s `<input
+        type=range>` has a default `min-width:auto` resolving to its own ~129px intrinsic
+        track width, which `flex:1` cannot shrink below — a standard flexbox gotcha that
+        affected every existing slider row (Wind included) in a narrow container, not just the
+        new button. Fixed with one `min-width:0`. No Node test could have caught this — it
+        needs a real box model, which only a browser has.
+        9,963 assertions green repo-wide (0 failed); `esbuild src/boot.js --bundle` re-verified
+        (5.3MB, exit 0); structure unchanged from baseline. Task stays OPEN: slices 4-7 remain,
+        and the Omens tray/ToD-arcs/season/seed UI are named gaps, not oversights.
 - [ ] Precipitation — the falling weather entire: FALL (compute bodies + the analytic curtain
       field), ARRIVAL (ground splashes, water rings, roof-edge drips, hail bounces), STAY (the
       mantle — persistent snow/ash/puddles, fire-melt halos, footprints); species as data rows,

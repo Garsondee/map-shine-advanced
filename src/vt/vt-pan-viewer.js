@@ -7012,6 +7012,21 @@ export async function startVtPanViewer({
     // the quad WAS the screen and its UV WAS the world position. That only
     // worked because those two spaces were conflated, which stops being true the
     // moment anything has to sit at a specific spot in a padded canvas.
+    //
+    // ⚠️ `camera.position`/`.quaternion` are NEVER touched and stay at the
+    // identity default (origin, looking down -Z) for this camera's entire
+    // life — panning/zooming is done ENTIRELY by rewriting the frustum
+    // (left/right/top/bottom) above, never by moving the camera through
+    // world space. That keeps culling/raycasting correct (Three derives them
+    // from projectionMatrix * matrixWorldInverse, which is still right), but
+    // it means `camera.position`, `camera.matrixWorld`, and anything Three
+    // derives from them (the TSL `cameraPosition` builtin, `THREE.LOD`,
+    // `CubeCamera`, `AudioListener`, a distance-to-eye post effect) do NOT
+    // represent "where the view currently is" — they always read world
+    // origin. Any new view-dependent code must take the live `viewRect` /
+    // `ViewState` as an explicit parameter (the convention every existing
+    // subsystem already follows — see water/specular/window's own
+    // `sync(floorIndex, viewRect)`), never read it off this camera object.
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
 
     // buf:scene.depth's OWN dedicated camera — NEVER the shared world camera

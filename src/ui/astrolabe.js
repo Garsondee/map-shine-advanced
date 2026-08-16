@@ -48,8 +48,32 @@
  * engines. A dial that kept its own copy of the hour would be the 939th
  * parameter mirror (Environment.md §2.4).
  *
+ * ============================================================================
+ * FOUR NAMED REGIONS (docs/planning/Weather-Manager.md §9, 2026-08-16)
+ * ============================================================================
+ *
+ *   THE RING     the hour circle — unchanged, and deliberately so. The author
+ *                kept it explicitly ("I'd still like a circle for selecting the
+ *                hour as I think that works nicely") while granting a rethink of
+ *                everything around it.
+ *   THE FACE     the dial's inner disc, painted as the CURRENT SKY. Cover greys
+ *                it; the cloud shapes follow `cloudType01`, so a cirrus sky and
+ *                a stratus sky do not look alike at a glance.
+ *   THE HORIZON  the archetype shelf — one click per named sky.
+ *   THE OMENS    the events tray (slice 4). Not built; no placeholder drawn,
+ *                because an empty tray is a control that does nothing.
+ *
+ * ⚠️ The Face and the Horizon read `world/weather-data.js` DIRECTLY rather than
+ * being handed the table. That is not a violation of this file's view-only rule:
+ * an archetype row is frozen VOCABULARY (like `TIME_RATE_STEPS` right below),
+ * not state. Mirroring it here would be the failure the header warns about;
+ * mirroring the LIVE weather would be too, and that still arrives through
+ * `update(state)` like everything else.
+ *
  * @module ui/astrolabe
  */
+
+import { WEATHER_ARCHETYPES, CUSTOM_PRESET } from '../world/index.js';
 
 /** Ring geometry, in the dial's own 0..300 coordinate space. */
 const FACE = 300;
@@ -239,6 +263,34 @@ export function createAstrolabe(opts) {
   const handle = svgEl('circle', { r: 9, fill: `rgb(${CYAN})`, stroke: '#0b1220', 'stroke-width': 2 });
   svg.appendChild(handle);
 
+  // (c2) ── THE FACE — the dial's inner disc, painted as the current sky ────
+  //
+  // Drawn BEFORE the arrow so the arrow stays on top: the wind direction is a
+  // reading a GM acts on, the sky is atmosphere behind it.
+  //
+  // Three blobs, not a texture. Their SHAPE carries `cloudType01` — wide thin
+  // streaks at the cirrus end, round billows in the middle, one flat sheet at
+  // the stratus end — so two skies with the same COVER still look different,
+  // which is the whole reason the type axis exists. Their opacity carries
+  // cover. No blur filter: at this size the soft fill reads fine and an SVG
+  // filter would be re-rasterised on every repaint of a dial that repaints
+  // every frame it is visible.
+  const faceGroup = svgEl('g');
+  const faceDisc = svgEl('circle', { cx: C, cy: C, r: R_INNER - 5, fill: '#4a7fb5' });
+  faceGroup.appendChild(faceDisc);
+  /** Blob centres, in FACE space, hand-placed so they read as a sky not a grid. */
+  const FACE_BLOBS = Object.freeze([
+    Object.freeze({ dx: -34, dy: -30, s: 1.0 }),
+    Object.freeze({ dx: 30, dy: -6, s: 0.82 }),
+    Object.freeze({ dx: -12, dy: 34, s: 0.9 }),
+  ]);
+  const faceClouds = FACE_BLOBS.map((b) => {
+    const e = svgEl('ellipse', { cx: C + b.dx, cy: C + b.dy, rx: 30, ry: 18, fill: '#ffffff', opacity: 0 });
+    faceGroup.appendChild(e);
+    return e;
+  });
+  svg.appendChild(faceGroup);
+
   // (d) the wind arrow, centred
   const arrow = svgEl('g');
   arrow.appendChild(
@@ -312,6 +364,71 @@ export function createAstrolabe(opts) {
   // Beside the dial: WIND, because the arrow is meaningless without a magnitude
   // and the two are one gesture; and CLOUD, because weather changes during play.
   liveCol.append(windRow.el, cloudRow.el);
+
+  // ── THE HORIZON — the archetype shelf ───────────────────────────────────
+  //
+  // One click per named sky. This is the control the author called "one of the
+  // fun controls", and it is FOH by the project's own test: a GM absolutely
+  // changes the weather mid-session.
+  //
+  // ⚠️ ORDER IS INFORMATION. The rows arrive from `weather-data.js` already
+  // sorted by how much sky is in the way, so the shelf reads left-to-right as
+  // severity and a GM can find a sky by feel rather than by hunting a name.
+  // This renders the table's own order and never re-sorts it — two orderings
+  // would be two answers to "which sky is heavier".
+  const horizonWrap = styled('div', { display: 'flex', flexDirection: 'column', gap: '4px' });
+  const horizonHead = styled('div', {
+    display: 'flex',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: '6px',
+  });
+  const horizonLabel = styled('span', { color: MUTED, fontSize: '10px', fontWeight: '600' });
+  horizonLabel.textContent = 'Sky';
+  const horizonName = styled('span', {
+    color: TEXT,
+    fontSize: '10px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  });
+  horizonHead.append(horizonLabel, horizonName);
+  // A GRID, not a wrapping flex row. With 13 skies a `flex-wrap` layout fills
+  // the first line and then stretches whatever is left across the second, so the
+  // shelf renders as nine small buttons above four wide ones — the sizes imply a
+  // grouping that does not exist. A fixed column count keeps every sky the same
+  // size, which is the truth: none of them is more important than the others.
+  const shelf = styled('div', {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(7, 1fr)',
+    gap: '3px',
+  });
+
+  /** id → button, so `update` can light the current one without a re-render. */
+  const shelfButtons = new Map();
+  for (const a of WEATHER_ARCHETYPES) {
+    const b = styled('button', {
+      padding: '3px 0',
+      fontSize: '13px',
+      lineHeight: '1.1',
+      cursor: 'pointer',
+      borderRadius: '5px',
+      border: `1px solid rgba(${CYAN},0.16)`,
+      background: 'rgba(20,28,44,0.72)',
+      color: TEXT,
+      userSelect: 'none',
+    });
+    b.type = 'button';
+    b.textContent = a.icon;
+    // The blurb IS the row's own — one edit in the data file, not two.
+    b.title = `${a.label} — ${a.blurb}`;
+    b.setAttribute('aria-label', a.label);
+    b.addEventListener('click', () => opts.onArchetypeChange?.(a.id));
+    shelf.appendChild(b);
+    shelfButtons.set(a.id, b);
+  }
+  horizonWrap.append(horizonHead, shelf);
+  root.appendChild(horizonWrap);
 
   // Folded away: sky light, atmosphere, time rate, the clock mode and the sky
   // scope. All set-once tuning.
@@ -431,6 +548,91 @@ export function createAstrolabe(opts) {
   setStatus('');
   root.appendChild(status);
 
+  // ── PAINTING THE FACE + THE HORIZON ──────────────────────────────────────
+  //
+  // ⚠️ BOTH ARE DIRTY-CHECKED, and that is not premature optimisation — it is
+  // this exact file's own scar. `syncTuningSummary` above documents an
+  // unconditional `innerHTML` rewrite that cost a live-measured 709ms across a
+  // 35.6s capture (docs/planning/Trace-Analysis-2026-08-11.md §3), because
+  // `update()` runs every frame the dial is visible. The Face's cover changes
+  // continuously while an ease runs, so it is quantised to ~1/200 before being
+  // compared: below that step nothing on a 200px dial can change.
+
+  /** Last painted Face signature. `null` forces the first paint. */
+  let lastFaceKey = null;
+  /**
+   * The sky, as the dial sees it. Clear blue → overcast grey by cover; the
+   * blobs' SHAPE carries the type ramp so cirrus and stratus never look alike.
+   * @param {object} s
+   */
+  function paintFace(s) {
+    const cover = Math.max(0, Math.min(1, s.cloudCover01 ?? 0));
+    const type = Math.max(0, Math.min(1, s.cloudType01 ?? 0.5));
+    // Night should not read as a bright blue day disc.
+    const day = Math.max(0, Math.min(1, s.dayFactor01 ?? 1));
+    const key = `${Math.round(cover * 200)}|${Math.round(type * 60)}|${Math.round(day * 40)}`;
+    if (key === lastFaceKey) return;
+    lastFaceKey = key;
+
+    // The disc: a lit blue that greys with cover and darkens with night.
+    const clearRgb = [74, 127, 181];
+    const greyRgb = [138, 148, 163];
+    const nightRgb = [16, 22, 38];
+    const lit = clearRgb.map((c, i) => c + (greyRgb[i] - c) * cover);
+    const disc = lit.map((c, i) => nightRgb[i] + (c - nightRgb[i]) * (0.25 + 0.75 * day));
+    faceDisc.setAttribute('fill', `rgb(${disc.map((c) => Math.round(c)).join(',')})`);
+
+    // The blobs. `type` 0 = cirrus (wide, thin, pale), 0.5 = cumulus (round,
+    // bright), 1 = stratus (very wide, flat, dull) — the same ramp the cloud
+    // field will read, shown here as silhouette rather than as a number.
+    const rx = 22 + type * 26 + (1 - Math.abs(type - 0.5) * 2) * 6;
+    const ry = 6 + (1 - Math.abs(type - 0.5) * 2) * 16 + (1 - type) * 2;
+    const cloudLight = Math.round(255 - type * 70);
+    for (let i = 0; i < faceClouds.length; i++) {
+      const b = FACE_BLOBS[i];
+      const e = faceClouds[i];
+      e.setAttribute('rx', (rx * b.s).toFixed(1));
+      e.setAttribute('ry', (ry * b.s).toFixed(1));
+      e.setAttribute('fill', `rgb(${cloudLight},${cloudLight},${Math.min(255, cloudLight + 6)})`);
+      // Cover drives presence. Capped below 1 so the arrow stays readable over
+      // a fully overcast dial — a control you cannot read is worse than a dial
+      // that is slightly less literal.
+      e.setAttribute('opacity', (cover * (0.72 - i * 0.06) * (0.4 + 0.6 * day)).toFixed(3));
+    }
+  }
+
+  /** Last lit shelf button id. */
+  let lastShelfId = null;
+  /**
+   * Light the button matching the current sky, and name it.
+   *
+   * The name comes from `s.preset`, which the weather manager DERIVES from
+   * where the axes actually are — so a hand-dragged Cloud slider lights nothing
+   * and reads "Custom", rather than leaving `Overcast` lit over a sky that is
+   * no longer overcast.
+   * @param {object} s
+   */
+  function paintHorizon(s) {
+    // ⚠️ ABSENT ≠ CUSTOM. A caller that has not wired `preset` yet must not be
+    // reported as "hand-tuned" — that is a specific, meaningful state and
+    // claiming it for "nobody told me" is the same lie `hasOwner` exists to
+    // prevent one layer down (`feedback_seam_default_hides_unwired`). Unwired
+    // lights nothing and names nothing; `custom` lights nothing and says so.
+    const id = typeof s.preset === 'string' ? s.preset : null;
+    if (id === lastShelfId) return;
+    lastShelfId = id;
+
+    for (const [btnId, btn] of shelfButtons) {
+      const on = btnId === id;
+      btn.style.background = on ? `rgba(${CYAN},0.22)` : 'rgba(20,28,44,0.72)';
+      btn.style.borderColor = on ? `rgba(${CYAN},0.75)` : `rgba(${CYAN},0.16)`;
+      btn.style.opacity = on ? '1' : '0.72';
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    const row = id === null ? null : WEATHER_ARCHETYPES.find((a) => a.id === id);
+    horizonName.textContent = row ? row.label : id === CUSTOM_PRESET ? 'Custom — hand-tuned' : '';
+  }
+
   // ---- gestures ------------------------------------------------------------
   // Time ring and wind arrow share one pointer pipeline, routed by where the
   // press landed: inside the ring band ⇒ time, inside the hub ⇒ wind.
@@ -537,6 +739,8 @@ export function createAstrolabe(opts) {
 
     windRow.set(speed);
     cloudRow.set(Math.max(0, Math.min(1, s.cloudCover01 ?? 0)));
+    paintFace(s);
+    paintHorizon(s);
     skyRow.set(Math.max(0, Math.min(1, s.skyRealism01 ?? 0)));
     skyRow.setReadout((s.skyRealism01 ?? 0) === 0 ? 'off' : `${Math.round((s.skyRealism01 ?? 0) * 100)}%`);
     syncTuningSummary();

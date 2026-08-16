@@ -208,7 +208,13 @@ import {
   mapElevation,
   buildElevationTable,
 } from '../scene/occlusion.js';
-import { buildEnvSnapshot, createDayClock, createWeatherManager, WEATHER_AXES } from '../world/index.js';
+import {
+  buildEnvSnapshot,
+  createDayClock,
+  createWeatherManager,
+  WEATHER_AXES,
+  shortestHourDelta,
+} from '../world/index.js';
 import {
   buildEnvironmentalLightMaterials,
   blendSunVisibilityAcrossFloors,
@@ -6335,6 +6341,23 @@ export async function startVtPanViewer({
     /** Who last moved a weather target — see `setCloudCover`'s own doc. */
     let weatherSource = 'default';
     /**
+     * ⭐ THE ALMANAC'S OWN CLOCK INPUT (Weather-Manager.md §5.4, slice 3).
+     *
+     * `null` until the first frame, so the walk's very first tick sees a
+     * `dtGameHours` of 0 rather than a bogus jump from an uninitialised hour.
+     *
+     * ⚠️ DERIVED FROM THE OBSERVED HOUR DELTA, NOT FROM THE DAY CLOCK'S DRIFT
+     * RATE. The rate only describes free drift; a `syncTo` walk (a time-stop
+     * button, or `synced` mode tracking Foundry's own clock) moves the hour at
+     * `walkRate` instead, a private constant this module has no access to.
+     * `shortestHourDelta(last, now)` is correct regardless of WHICH mechanism
+     * moved the hour — it just reads what actually happened, the same
+     * "measure the output, not the equation" posture this project always
+     * takes over deriving a number from an upstream config value it doesn't
+     * own.
+     */
+    let lastWeatherHour = null;
+    /**
      * ⚠️ THE FIRST WRITE JUMPS, EVERY LATER WRITE EASES.
      *
      * `boot.js#applyLookToEngines` calls `setCloudCover(...)` on EVERY sky
@@ -6402,13 +6425,23 @@ export async function startVtPanViewer({
       const ambient = readSceneAmbient();
       // ⭐ THE WEATHER OWNER, ticked (docs/planning/Weather-Manager.md §4.1).
       //
-      // ⚠️ ON THE **REAL** DELTA, NOT THE SIM ONE — the opposite of the day
-      // clock two lines above, deliberately. An ease is PRESENTATION PACING
-      // (the same family as V2's 10s sprite fade); a GM slowing the world down
-      // should not stretch a weather transition to ten minutes. The walk that
-      // lands in slice 3 integrates GAME time for the opposite reason, and the
-      // module header spells out why neither is the sim-clock throttle trap.
-      const weatherState = weather.tick(time.realDtSec);
+      // ⚠️ THE EASE runs on the **REAL** delta, not the sim one — the opposite
+      // of the day clock two lines above, deliberately. An ease is
+      // PRESENTATION PACING (the same family as V2's 10s sprite fade); a GM
+      // slowing the world down should not stretch a weather transition to ten
+      // minutes.
+      //
+      // ⭐ THE ALMANAC'S WALK (slice 3) is the opposite and deliberately so —
+      // it integrates GAME time, via the observed hour delta computed above
+      // this function's own doc comment on `lastWeatherHour` explains. Passed
+      // unconditionally: `weather.tick` only ever advances the walk when it is
+      // BOTH in `almanac` mode AND has a biome chosen, so a Director-mode or
+      // biome-less caller passing this every frame costs nothing and changes
+      // nothing — the same "no wiring, no surprise motion" safety the module
+      // itself documents.
+      const dtGameHours = lastWeatherHour === null ? 0 : shortestHourDelta(lastWeatherHour, todHour);
+      lastWeatherHour = todHour;
+      const weatherState = weather.tick(time.realDtSec, { dtGameHours, hour: todHour });
       const weatherForSnapshot = weather.toSnapshotWeather();
       // ⚠️ `wind` WAS NEVER PASSED AT ALL until 2026-08-15, so `env.wind` was
       // permanently `DEFAULT_WIND` — {0, 0, 0} — no matter what the astrolabe
@@ -6769,6 +6802,34 @@ export async function startVtPanViewer({
       weatherSource = source;
       const r = weather.read();
       return { ...res, settling: r.settling, source: weatherSource, targets: r.targets };
+    }
+
+    /**
+     * ⭐ THE ALMANAC'S CONSOLE LEVERS (slice 3) — shipped console-first, the
+     * same posture `setSunHour`/`setCloudCover` used before either had real
+     * UI: an atmospheric model nobody can exercise is a model nobody can
+     * trust (`feedback_instruments_must_not_lie`). The Horizon shelf's biome
+     * picker (not yet built) will call the identical functions.
+     */
+    function setWeatherMode(mode) {
+      const ok = weather.setMode(mode);
+      return { ok, mode: weather.read().mode };
+    }
+    /** @param {string|null} id @returns {object} */
+    function setWeatherBiome(id) {
+      return weather.setBiome(id);
+    }
+    /** @param {number} v @returns {number} the volatility actually in force. */
+    function setWeatherVolatility(v) {
+      return weather.setVolatility(v);
+    }
+    /** @param {number|string} seed @returns {number|string} the seed now in force. */
+    function setWeatherSeed(seed) {
+      return weather.setSeed(seed);
+    }
+    /** @param {number} hoursAhead @returns {object} */
+    function getWeatherForecast(hoursAhead) {
+      return weather.forecast(hoursAhead, { hour: lastWeatherHour ?? 12 });
     }
 
     /**
@@ -15742,6 +15803,16 @@ export async function startVtPanViewer({
       /** Apply a NAMED sky — all four cloud axes at once, from the archetype
        * table. docs/planning/Weather-Manager.md §3.2. */
       setWeatherArchetype,
+      /** 'director' | 'almanac'. docs/planning/Weather-Manager.md §5. */
+      setWeatherMode,
+      /** The Almanac's climate — null clears it (the walk goes idle). */
+      setWeatherBiome,
+      /** The Almanac's dwell-time multiplier, 0.25..4. */
+      setWeatherVolatility,
+      /** Reseed the Almanac's RNG — a reproducible-bug-report / "reshuffle" lever. */
+      setWeatherSeed,
+      /** Project the walk ahead without touching live state. */
+      getWeatherForecast,
       /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
       setSkyRealism,
       /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
@@ -17841,6 +17912,39 @@ export function setVtPanViewerCloudCover(cover01, source) {
 export function setVtPanViewerWeatherArchetype(id, source) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setWeatherArchetype(id, source);
+}
+
+/**
+ * ⭐ THE ALMANAC (docs/planning/Weather-Manager.md §5) — console-first, the
+ * same posture `setSunHour`/`setCloudCover` shipped under before either had
+ * real UI. `MapShine.setWeatherMode('almanac')` +
+ * `MapShine.setWeatherBiome('desert')` is enough to watch a whole climate
+ * walk itself with no astrolabe control yet built for either.
+ * @param {string} mode @returns {object}
+ */
+export function setVtPanViewerWeatherMode(mode) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setWeatherMode(mode);
+}
+/** @param {string|null} id @returns {object} */
+export function setVtPanViewerWeatherBiome(id) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setWeatherBiome(id);
+}
+/** @param {number} v @returns {number|{skipped:true}} */
+export function setVtPanViewerWeatherVolatility(v) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setWeatherVolatility(v);
+}
+/** @param {number|string} seed @returns {number|string|{skipped:true}} */
+export function setVtPanViewerWeatherSeed(seed) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setWeatherSeed(seed);
+}
+/** @param {number} hoursAhead @returns {object} */
+export function getVtPanViewerWeatherForecast(hoursAhead) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getWeatherForecast(hoursAhead);
 }
 
 /**

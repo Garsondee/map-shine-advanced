@@ -207,6 +207,11 @@ import {
   setVtPanViewerGradeEnvStrength,
   setVtPanViewerCloudCover,
   setVtPanViewerWeatherArchetype,
+  setVtPanViewerWeatherMode,
+  setVtPanViewerWeatherBiome,
+  setVtPanViewerWeatherVolatility,
+  setVtPanViewerWeatherSeed,
+  getVtPanViewerWeatherForecast,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   resetVtPanViewerFrameStats,
@@ -788,16 +793,33 @@ MapShine.getGeometryComposition = getVtPanViewerGeometryComposition;
 // THE SKY'S DEBUG LEVERS (2026-07-23) — `MapShine.setSunHour(6.5)` /
 // `MapShine.setCloudCover(0.9)`, and `null` on either to restore the default.
 //
-// ⚠ NEITHER IS A REAL SOURCE, and the env diagnostics report says so. There is
-// still no calendar and no weather owner; `updateEnvSnapshot` still treats
-// their absence as an acknowledged gap. These exist because the shadow model
-// (effects/shadow-access.js) derives dawn elongation, cloud softening and night
-// fading from exactly these two inputs — and a model nobody can exercise is a
-// model nobody can trust (feedback_instruments_must_not_lie). With them, the
-// whole atmospheric ladder is checkable today: 6.5 → long soft shadows,
-// 12 → short crisp ones, cloud 0.9 → almost none.
+// ⚠️ CORRECTED 2026-08-16 — there IS a weather owner now (`world/weather.js`,
+// Weather-Manager.md), and `setCloudCover` is one of its real write paths, not
+// a lever over an acknowledged gap: it sets the manager's `cloudCover01`
+// TARGET and the ease ships it there for real, same as the astrolabe's Cloud
+// slider. There is still no CALENDAR (nothing auto-evolves cloud cover over
+// time — that is the Almanac's job, see the levers just below), so `todHour`
+// remains genuinely hand-set. This note used to say neither lever was real;
+// that stopped being true the day the weather owner shipped and nobody came
+// back to fix the comment (`feedback_plausible_diagnosis_rots`, applied to
+// documentation rather than a diagnosis this time). With them, the whole
+// atmospheric ladder is still checkable the same way it always was: 6.5 →
+// long soft shadows, 12 → short crisp ones, cloud 0.9 → almost none.
 MapShine.setSunHour = setVtPanViewerSunHour;
 MapShine.setCloudCover = setVtPanViewerCloudCover;
+MapShine.setWeatherArchetype = setVtPanViewerWeatherArchetype;
+
+// THE ALMANAC'S CONSOLE LEVERS (slice 3) — console-first, the same posture the
+// two levers just above shipped under before either had real UI:
+// `MapShine.setWeatherMode('almanac')` then `MapShine.setWeatherBiome('desert')`
+// is enough to watch a whole climate walk itself with no astrolabe control yet
+// built for either. `getWeatherForecast(hoursAhead)` is read-only and touches
+// no live state at all — safe to call from the console just to look.
+MapShine.setWeatherMode = setVtPanViewerWeatherMode;
+MapShine.setWeatherBiome = setVtPanViewerWeatherBiome;
+MapShine.setWeatherVolatility = setVtPanViewerWeatherVolatility;
+MapShine.setWeatherSeed = setVtPanViewerWeatherSeed;
+MapShine.getWeatherForecast = getVtPanViewerWeatherForecast;
 
 /**
  * Boot's own logger. Everything this file says goes through `core/log.js`, which

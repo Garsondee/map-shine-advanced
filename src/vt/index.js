@@ -64,6 +64,8 @@ export {
   getVtPanViewerWeatherActiveEvents,
   setVtPanViewerWeatherTargets,
   setVtPanViewerPrecipKind,
+  getVtPanViewerPrecipitationStatus,
+  setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   setVtPanViewerWindForceThaw,

@@ -28,7 +28,14 @@ export function run(t) {
     // candles/particles cannot leak through it, before bloom so a hidden light
     // cannot smear across the fog). Neither neighbour could absorb it without
     // losing one of those two orderings.
-    t.ok('a sane number of passes (10-16, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 16);
+    // ⚠️ CEILING RAISED 16 → 17 (2026-08-16, `surface.precipitation`). This is
+    // a real budget, not a formality: the promise was ~10-12 passes and every
+    // addition should cost an argument. Precipitation earns one because its
+    // position is load-bearing in BOTH directions (after every additive light
+    // draw, before the vision gate) — no existing pass could absorb it without
+    // losing one of those orderings, which is the same test `vision.gate`
+    // itself had to pass.
+    t.ok('a sane number of passes (10-17, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 17);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

@@ -219,6 +219,8 @@ import {
   getVtPanViewerWeatherActiveEvents,
   setVtPanViewerWeatherTargets,
   setVtPanViewerPrecipKind,
+  getVtPanViewerPrecipitationStatus,
+  setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   resetVtPanViewerFrameStats,
@@ -856,14 +858,22 @@ MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
 MapShine.setPrecip = (v) => setVtPanViewerWeatherTargets({ precip01: v });
 MapShine.setTemperature = (v) => setVtPanViewerWeatherTargets({ temperature01: v });
 MapShine.setPrecipKind = setVtPanViewerPrecipKind;
+/**
+ * Every factor deciding whether a drop is visible right now — the live status,
+ * plus the species table for reference. Reach for this FIRST when rain is not
+ * appearing: it names which of `enabled` / `precip01` / species / sky-gate /
+ * `liveCount` is the zero, rather than leaving a bisect
+ * (`feedback_count_silent_preconditions`).
+ */
 MapShine.getPrecipitation = () => ({
+  ...getVtPanViewerPrecipitationStatus(),
   species: PRECIP_SPECIES_IDS,
-  drawing: false,
-  note: 'the FALL is built + lab-verified; the sky-reach gate (LAW 3) is what stands between this and pixels',
   table: PRECIP_SPECIES,
   resolveSpecies,
   resolveSpeciesFrame,
 });
+/** Live look dials — the ones the shader lab sweeps. */
+MapShine.setPrecipitationTuning = setVtPanViewerPrecipitationTuning;
 
 MapShine.addWeatherEvent = addVtPanViewerWeatherEvent;
 MapShine.releaseWeatherEvent = releaseVtPanViewerWeatherEvent;
@@ -2941,6 +2951,31 @@ function install() {
   const getFireMaskGrid = (floorIndex) => {
     try {
       return maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  // PRECIPITATION'S SKY-REACH SEAM (P1, 2026-08-16) — `skyReach` is the DERIVED
+  // product `outdoors ∧ ¬coverAbove`, and it is the input LAW 3 rests on: rain
+  // must be unrepresentable indoors. Handed to `vt/` to bake as a texture so
+  // the FALL's draw can fade bodies over covered ground.
+  //
+  // ⚠️ ASKED FOR BY NAME HERE AND NOWHERE ELSE. `scene/sky-reach-access.js` is
+  // the CPU service for the same question and exists precisely because two
+  // consumers reaching for raw products picked DIFFERENT ONES once already
+  // (the 2026-07-21 candle/wind `skyReach`-vs-`outdoors` split). This is the
+  // GPU half of that one question; it must never become "grab outdoors and
+  // hope", which is a genuinely different mask (a walled room with no roof is
+  // indoors AND has open sky).
+  //
+  // Swallowed like `_Fire` above rather than thrown like `_Outdoors`: a floor
+  // whose art has not streamed yet yields null, the gate stays disarmed, and
+  // disarmed means RAINING (fail-open). A throw here would stop the weather on
+  // exactly the maps that have not finished loading.
+  const getSkyReachGrid = (floorIndex) => {
+    try {
+      return maskAuthority.getDerived('skyReach', floorIndex)?.grid ?? null;
     } catch {
       return null;
     }
@@ -7752,6 +7787,7 @@ function install() {
         // unwired/torture-fixture default of `() => null` leaves every fire
         // unclipped (the fail-open default `bakeFireMaskTexture` already has).
         getFireMaskGrid,
+        getSkyReachGrid,
         // THE WATER BODY PACK's mask + cross-floor seams (Water.md §5.1) —
         // same real-scene-only reasoning; unwired means no floor has water, so
         // the jump flood never runs (inert by construction, not by a flag).

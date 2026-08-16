@@ -256,6 +256,7 @@ import {
   candleTierPlan,
   createLightningSubsystem,
   createFireSubsystem,
+  createPrecipitationSubsystem,
   createFireParticleEngine,
   createDoorGraphicsSubsystem,
   KNOWN_DEFERRED_ANIMATIONS,
@@ -949,6 +950,7 @@ export async function startVtPanViewer({
   probeMaskAuthorityLiveAt,
   getOutdoorsMaskGrid,
   getFireMaskGrid,
+  getSkyReachGrid,
   getCasterHeightField,
   getShadowFloorPlan,
   getSunShadowRenderState,
@@ -1009,6 +1011,11 @@ export async function startVtPanViewer({
   // grid and every fire fail-open (unclipped) — the same "renders exactly as
   // it did before this feature existed" shape as `getOutdoorsMaskGrid` above.
   getFireMaskGrid ??= () => null;
+  // PRECIPITATION's sky-reach seam (LAW 3). Same "behaves exactly as it did
+  // before this feature existed" shape as the two above — absent means the
+  // gate never arms, and a disarmed gate RAINS (fail-open), which is the
+  // correct behaviour for a floor whose art has not streamed.
+  getSkyReachGrid ??= () => null;
   // SUN SHADOWS' two seams. `null`/disabled leaves the shadow field baked white
   // (a provable no-op) rather than leaving it unwritten — the ambient fill
   // always samples it, so "off" has to be a written value. Un-wired callers
@@ -2857,6 +2864,105 @@ export async function startVtPanViewer({
       profiler,
     });
 
+    // ========================================================================
+    // PRECIPITATION — THE FALL (docs/planning/Precipitation.md P1)
+    // ========================================================================
+    /**
+     * The 1×1 open-sky placeholder the sky-reach gate falls back to. Built
+     * HERE because `gpu/textures-in-vt-only` keeps every `new THREE.*Texture`
+     * inside `vt/` — `precip-runtime.js` takes it as an injected dependency
+     * for exactly that reason, and its own note explains why white (=1.0=
+     * "sky fully open") makes the fail-open default the literal content of
+     * the texture rather than a branch that must remember to be safe.
+     */
+    const precipOpenSkyTexture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+    precipOpenSkyTexture.needsUpdate = true;
+
+    let precipSkyReachRect = null;
+    let precipSkyReachTexture = null;
+    let lastPrecipSkyReachBake = { ok: false, reason: 'never baked' };
+
+    /**
+     * Bake this floor's `skyReach` grid into the texture LAW 3's gate samples.
+     * Same RGBA-replicate-of-one-byte shape as `bakeOutdoorsTexture` and
+     * `bakeFireMaskTexture`; row 0 = minY (`MaskGrid`'s convention) and
+     * `DataTexture` defaults to `flipY:false`, so uv.v=0 samples row 0 = minY —
+     * the same one-direction agreement those two already document.
+     *
+     * ⚠️ LINEAR, not nearest. The coarse grid box-averages, so a roof's fringe
+     * texels carry partial coverage; sampling them sharply would draw a
+     * one-texel staircase along every roofline. LAW 3 asks for a FADE, and
+     * `feedback_sdf_does_not_draw_the_edge` is the same lesson fire's own mask
+     * records — a coarse gate was never meant to draw a crisp edge.
+     */
+    function bakePrecipSkyReachTexture(floorIndex) {
+      const grid = getSkyReachGrid(floorIndex);
+      if (!grid?.spec || !grid?.data) {
+        // Absent is the ORDINARY case on a floor whose art has not streamed.
+        // Disarm rather than keep a stale other-floor gate — a disarmed gate
+        // rains everywhere, which is the honest fail-open answer; a stale one
+        // would put a previous floor's roofs over this one's open ground.
+        precipSkyReachTexture?.dispose();
+        precipSkyReachTexture = null;
+        precipSkyReachRect = null;
+        precipitationSubsystem?.setSkyReachTexture(null, null);
+        lastPrecipSkyReachBake = { ok: false, floorIndex, reason: 'no skyReach product for this floor' };
+        return lastPrecipSkyReachBake;
+      }
+      const { w, h } = grid.spec;
+      if (!(w > 0 && h > 0)) {
+        lastPrecipSkyReachBake = { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
+        return lastPrecipSkyReachBake;
+      }
+      const data = new Uint8Array(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        const v = grid.data[i] ?? 255;
+        data[i * 4 + 0] = v;
+        data[i * 4 + 1] = v;
+        data[i * 4 + 2] = v;
+        data[i * 4 + 3] = 255;
+      }
+      const tex = createMaskDataTexture(data, w, h, 'linear', false);
+      precipSkyReachTexture?.dispose();
+      precipSkyReachTexture = tex;
+      precipSkyReachRect = {
+        minX: grid.spec.x,
+        minY: grid.spec.y,
+        maxX: grid.spec.x + grid.spec.width,
+        maxY: grid.spec.y + grid.spec.height,
+      };
+      precipitationSubsystem?.setSkyReachTexture(tex, precipSkyReachRect);
+      lastPrecipSkyReachBake = { ok: true, floorIndex, cols: w, rows: h, rect: precipSkyReachRect };
+      return lastPrecipSkyReachBake;
+    }
+
+    const precipitationSubsystem = createPrecipitationSubsystem({
+      THREE,
+      windHandle,
+      openSkyTexture: precipOpenSkyTexture,
+      getPxPerMeter: () => readGridDistancePixels().distancePixels,
+      // ⚠️ DRAWN AFTER the lit composite (precipitation is in FRONT of the
+      // world, roofs included) and BEFORE the vision gate — MSA owns vision
+      // now, and rain must never leak into unexplored fog (Precipitation.md
+      // §3.5's draw-order rule). The frame loop enforces the ordering; this is
+      // the within-stage tiebreak.
+      renderOrder: 20,
+      getPrecipRenderState: () => {
+        const env = lastEnvSnapshot?.env ?? null;
+        if (!env) return null;
+        return {
+          enabled: true,
+          weather: env.weather,
+          worldRect: windSpawnRect,
+          // The SAME `dayFactor01` the shadow handle and the daylight tint
+          // read — never a second "is it dark" derivation.
+          dayFactor01: env.sun?.dayFactor01 ?? 1,
+          flash01: 0, // sky-flash's own consumer is a later slice.
+          tierScale: 1,
+        };
+      },
+    });
+
     const pointLights = createPointLightPool({
       THREE,
       getWindHandle: () => windHandle,
@@ -3408,6 +3514,10 @@ export async function startVtPanViewer({
         // Fire's mask-clip gate is derived from the same masks and wants the
         // same earliest-observation bake, for the same reason.
         bakeFireMaskTexture(view?.floorIndex ?? 0);
+        // PRECIPITATION's LAW 3 gate reads the SAME derived products, so it goes
+        // stale at the SAME moment. A missed rebake here would leave the previous
+        // floor's roofs standing over this one's open ground.
+        bakePrecipSkyReachTexture(view?.floorIndex ?? 0);
         return;
       }
       if (v === lastSeenMaskVersion) return;
@@ -3420,6 +3530,10 @@ export async function startVtPanViewer({
       // Same masks, same staleness moment, same reasoning as the sky above —
       // a live edit to a `_Fire` region must reach the flame's own clip.
       bakeFireMaskTexture(view?.floorIndex ?? 0);
+      // PRECIPITATION's LAW 3 gate reads the SAME derived products, so it goes
+      // stale at the SAME moment. A missed rebake here would leave the previous
+      // floor's roofs standing over this one's open ground.
+      bakePrecipSkyReachTexture(view?.floorIndex ?? 0);
     }
 
     // ------------------------------------------------------------------
@@ -5923,6 +6037,22 @@ export async function startVtPanViewer({
         renderer.render(fireSubsystem.scene, camera);
         renderer.autoClearColor = prevFireAutoClear;
         profiler?.end(Z.lightDrawFire);
+      }
+      // ⭐ PRECIPITATION — THE FALL, drawn over the lit world.
+      //
+      // ⚠️ ITS POSITION IN THIS ORDER IS THE WHOLE OF Precipitation.md §3.5's
+      // draw rule: AFTER every additive light draw (it is in FRONT of the
+      // world, roofs included) and BEFORE the vision gate below — MSA owns
+      // vision now, and rain must never leak into unexplored fog. It writes
+      // `buf:scene.color` and touches no Pillar-11 vision input at all.
+      //
+      // `hasContent` is false on a clear day, so LAW 5 costs one boolean here
+      // rather than a submitted draw call (Effects.md Law 4).
+      if (precipitationSubsystem.hasContent) {
+        const prevPrecipAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(precipitationSubsystem.scene, camera);
+        renderer.autoClearColor = prevPrecipAutoClear;
       }
       // THE WIND FIELD DEBUG OVERLAY — same guarded-additive draw as the
       // candle flame just above (same target, same camera, same "don't wipe
@@ -11519,6 +11649,21 @@ export async function startVtPanViewer({
         );
         profiler?.end(Z.lightDrawFire);
       }
+      // PRECIPITATION — its compute step, in the same no-target-bound block as
+      // fire and the two wind engines above, and for the same reason.
+      //
+      // ⚠️ REAL SECONDS, not the sim delta. Rain is presentation pacing, the
+      // same family as the weather manager's own eases: a GM slowing the world
+      // clock must not make the rain fall in slow motion. `realDtSec` is the
+      // wall delta; `env.time.dtSec` is the sim one, and using it here would be
+      // a genuine bug in the other direction.
+      if (view && precipitationSubsystem) {
+        precipitationSubsystem.sync(
+          renderer,
+          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value
+        );
+      }
       // Re-derive the camera from the live view EVERY frame: this is what makes
       // a drag track the cursor at display rate without waiting on streaming,
       // and it is the single place the Y-flip is applied (see updateCamera).
@@ -15809,6 +15954,17 @@ export async function startVtPanViewer({
        * forever.
        */
       getFireStatus: () => fireSubsystem.getStatus(),
+      /** PRECIPITATION's own status — every factor that decides whether a drop
+       * is visible, plus the sky-reach bake's own result. */
+      getPrecipitationStatus: () => ({
+        ...precipitationSubsystem.getStatus(),
+        skyReachBake: lastPrecipSkyReachBake,
+      }),
+      /** Live look tuning (fallSlant01, parallaxStreak01, streakScale, ...). */
+      setPrecipitationTuning: (t) => {
+        precipitationSubsystem.setTuning(t);
+        return precipitationSubsystem.getStatus();
+      },
       /** Tear down every door leaf mesh + cached door texture (door-graphics.js). */
       disposeDoorGraphics,
       /** Wind field debug overlay (diag/wind-field-overlay.js, Wind.md Tier 0):
@@ -18085,6 +18241,16 @@ export function setVtPanViewerWeatherTargets(patch) {
 export function setVtPanViewerPrecipKind(kind) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setPrecipKind(kind);
+}
+/** @returns {object} every factor deciding whether a drop is visible. */
+export function getVtPanViewerPrecipitationStatus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getPrecipitationStatus();
+}
+/** @param {object} t @returns {object} */
+export function setVtPanViewerPrecipitationTuning(t) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setPrecipitationTuning(t);
 }
 
 /**

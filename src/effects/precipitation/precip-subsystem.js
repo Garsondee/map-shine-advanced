@@ -85,12 +85,23 @@ export function resolveActiveSpecies(precipKind, mixWeight = 0) {
  * @param {number} [deps.pxPerMeter]
  * @returns {object}
  */
-export function createPrecipitationSubsystem({ THREE, getPrecipRenderState, windHandle, pxPerMeter = 100 }) {
+export function createPrecipitationSubsystem({
+  THREE,
+  getPrecipRenderState,
+  windHandle,
+  pxPerMeter = 100,
+  openSkyTexture = null,
+  renderOrder = 0,
+}) {
   /** @type {Map<string, object>} speciesId → engine, built lazily. */
   const engines = new Map();
   let activeSpeciesId = null;
   let lastReason = null;
-  let seeded = false;
+  const seededEngines = new Set();
+  /** The floor's baked sky-reach texture + its world rect, held so an engine
+   * built LATER (a species that first appears mid-session) still gets it. */
+  let skyReach = { texture: null, rect: null };
+  let lastTuning = null;
 
   /** Build one species' engine on first use — a clear map never allocates. */
   function engineFor(speciesId) {
@@ -100,10 +111,18 @@ export function createPrecipitationSubsystem({ THREE, getPrecipRenderState, wind
       speciesId,
       windHandle,
       pxPerMeter,
-      // Above the lit composite (precipitation is in front of the world,
-      // including roofs) — the real number is set when the draw is wired.
-      renderOrder: 0,
+      renderOrder,
+      openSkyTexture,
     });
+    // ⚠️ A LATE-BUILT ENGINE MUST INHERIT THE CURRENT STATE. Engines are built
+    // lazily (a clear map allocates nothing), so `snow` may first appear hours
+    // into a session — long after the floor's sky-reach texture was baked and
+    // the author moved the look dials. Replaying both here is what stops a
+    // species switch from arriving ungated and untuned; the alternative is a
+    // burst of rain through every roof for one frame, which is precisely the
+    // kind of thing nobody reproduces on demand.
+    if (skyReach.texture) engine.setSkyReachTexture(skyReach.texture, skyReach.rect);
+    if (lastTuning) engine.setTuning(lastTuning);
     engines.set(speciesId, engine);
     log.info(`built '${speciesId}' engine (capacity ${engine.capacity})`);
     return engine;
@@ -138,9 +157,13 @@ export function createPrecipitationSubsystem({ THREE, getPrecipRenderState, wind
       if (!speciesId) return;
 
       const engine = engineFor(speciesId);
-      if (!seeded) {
+      // ⚠️ PER-ENGINE, not one shared flag. A single `seeded` boolean meant the
+      // FIRST species to run consumed it and every later one drew from
+      // uninitialised buffers — every body at the world origin, which reads as
+      // "snow is broken" rather than as a missing seed call.
+      if (!seededEngines.has(speciesId)) {
         engine.init(renderer);
-        seeded = true;
+        seededEngines.add(speciesId);
       }
       if (st.worldRect) engine.setWorldRect(st.worldRect);
       engine.setFrame(
@@ -163,8 +186,34 @@ export function createPrecipitationSubsystem({ THREE, getPrecipRenderState, wind
       return activeSpeciesId ? (engines.get(activeSpeciesId)?.scene ?? null) : null;
     },
 
+    /**
+     * Is there anything to draw at all? The frame loop's guard, mirroring
+     * `fireSubsystem.hasContent` — a clear day must not submit a draw call
+     * (Effects.md Law 4), and checking here keeps that decision in the
+     * subsystem that knows rather than duplicated at the call site.
+     */
+    get hasContent() {
+      if (!activeSpeciesId) return false;
+      const engine = engines.get(activeSpeciesId);
+      return Boolean(engine?.debugState().visible);
+    },
+
+    /**
+     * Hand this floor's baked sky-reach texture to every engine — LAW 3's
+     * input. Cheap and idempotent; call on floor switch or when the mask
+     * authority's products version moves, NEVER per frame.
+     * @param {*} texture @param {object} rect
+     */
+    setSkyReachTexture(texture, rect) {
+      skyReach = { texture: texture ?? null, rect: rect ?? null };
+      const results = {};
+      for (const [id, engine] of engines) results[id] = engine.setSkyReachTexture(texture, rect);
+      return results;
+    },
+
     /** Live look tuning, for the debug panel and the console. */
     setTuning(t) {
+      lastTuning = { ...(lastTuning ?? {}), ...(t ?? {}) };
       for (const engine of engines.values()) engine.setTuning(t);
     },
 
@@ -175,11 +224,15 @@ export function createPrecipitationSubsystem({ THREE, getPrecipRenderState, wind
      */
     getStatus() {
       const st = getPrecipRenderState?.() ?? null;
+      const engine = activeSpeciesId ? engines.get(activeSpeciesId) : null;
       return {
-        wired: false,
-        wiredNote:
-          'BUILT + lab-verified, NOT drawing into the live frame yet: the sky-reach gate (LAW 3, ' +
-          'rain must be unrepresentable indoors) lands first. graph/passes.js declares the seam.',
+        wired: true,
+        // ⚠️ EVERY FACTOR, NOT ONE BOOLEAN. "No rain is visible" has half a
+        // dozen causes — disabled, precip01 zero, an unbuilt species, the sky
+        // gate covering the view, a zero live count — and a single flag names
+        // none of them (`feedback_count_silent_preconditions`).
+        skyGate: engine?.debugState().skyGate ?? null,
+        hasContent: this.hasContent,
         enabled: st?.enabled !== false,
         precip01: st?.weather?.precip01 ?? null,
         precipKind: st?.weather?.precipKind ?? null,

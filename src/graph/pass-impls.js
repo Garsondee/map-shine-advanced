@@ -150,6 +150,18 @@ export const PASS_IMPLS = Object.freeze({
       'driven like the wind sim, not by runPassPlan. Not separately invocable: the loop lives inside ' +
       'startVtPanViewer, same caveat as geometry.world.',
   },
+  'surface.precipitation': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-08-16 (P1: rain + snow): createPrecipitationSubsystem steps its compute kernel ' +
+      'in the sims block beside fire, then the frame loop draws its scene over the lit world — after ' +
+      'every additive light draw, before vision.gate, guarding the clear like the candle flame. ' +
+      'Gated on `hasContent`, so a clear day submits nothing. Same invocability caveat as ' +
+      'geometry.world: the loop lives inside startVtPanViewer.',
+  },
   'surface.particles': {
     fn: startVtPanViewer,
     module: 'vt/index.js',

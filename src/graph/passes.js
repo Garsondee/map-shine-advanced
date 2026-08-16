@@ -455,17 +455,37 @@ export const PASSES = [
       'additively into scene.lit, as a viewer closure in the local passImpls map (mirrors the candle ' +
       'flame). Per-pixel gating is a higher rung.',
   },
-  // ⚠️ PRECIPITATION IS NOT DECLARED HERE YET, and that is a considered
-  // omission rather than an oversight. P1's FALL runtime is built and
-  // shader-lab-verified (2026-08-16), but its draw has no place in the frame
-  // until Precipitation.md LAW 3's sky-reach gate exists — and a first attempt
-  // at a `seam` row here was REFUSED BY THIS FILE'S OWN VALIDATOR, correctly:
-  // it named `res:precip`/`res:skyReach`, which no pass creates. A pass row
-  // whose resources are imaginary is a worse record than no row, because the
-  // graph would then validate against a fiction. The honest gap is recorded
-  // where the code actually is (`effects/precipitation/precip-subsystem.js`'s
-  // header, its `getStatus().wired`, and the `effects/index.js` export note).
-  // The row lands in the commit that lands the gate, naming real resources.
+  {
+    id: 'surface.precipitation',
+    stage: 'surface',
+    kind: 'gpu',
+    status: 'live',
+    owns: 'docs/planning/Precipitation.md §3 (THE FALL — specimen tier, P1)',
+    creates: [],
+    // ⚠️ `res:env` ONLY, and this row is the second attempt at declaring it.
+    // The first named `res:precip`/`res:skyReach` and was REFUSED BY THIS
+    // FILE'S OWN VALIDATOR — no pass creates either. That refusal was correct
+    // and worth recording: a pass row whose resources are imaginary is a worse
+    // record than no row, because the graph then validates against a fiction.
+    // The sky-reach texture is a subsystem-owned bake (like the sun-shadow
+    // field and fire's mask clip), not a graph resource, so it does not appear
+    // here — same as those two.
+    reads: ['res:env'],
+    modifies: ['buf:scene.color'],
+    absorbs: ['WeatherParticles(rain draw)', 'RainStreakGeometry', 'SnowGeometry'],
+    note:
+      'Instanced streaks/flakes over the lit world. ⚠️ ITS POSITION IS THE RULE (§3.5): AFTER every ' +
+      'additive light draw — precipitation is in FRONT of the world, roofs included — and BEFORE ' +
+      'vision.gate below, because MSA owns vision now and rain must never leak into unexplored fog. ' +
+      'LAW 3 (rain indoors is unrepresentable) is enforced in the DRAW, not the sim: the kernel stays ' +
+      'spatially uniform (no per-slot texture read, preserving 6-of-8 storage headroom) while the ' +
+      'draw samples a baked skyReach texture at each body’s DRAWN position and fades it out. ' +
+      'Sampling the GROUND position instead left 61% of the rain inside a test building — the sprite ' +
+      'is M(h)-parallaxed away from its ground point, so the two disagree; measured in ' +
+      "tools/shader-lab bench 'precip', scenario law3-no-rain-indoors. A clear day (precip01 = 0) " +
+      'submits no draw at all (Effects.md Law 4). Runtime: a closure in the viewer, mirroring ' +
+      'surface.particles and the candle flame.',
+  },
   {
     id: 'vision.gate',
     stage: 'surface',

@@ -98,8 +98,13 @@ export function run(t) {
     // surface.particles and post.bloom. BOTH neighbours are load-bearing and
     // are asserted separately below — this is not a pass that could sit
     // anywhere convenient.
+    // `surface.precipitation` joined 2026-08-16 (P1) between surface.particles
+    // and vision.gate, and BOTH neighbours are load-bearing for it too: AFTER
+    // every additive light draw because rain is in front of the world (roofs
+    // included), and BEFORE the vision gate because MSA owns vision now and
+    // rain must never leak into unexplored fog (Precipitation.md §3.5).
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,vision.gate,post.bloom,post.dof,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,surface.precipitation,vision.gate,post.bloom,post.dof,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

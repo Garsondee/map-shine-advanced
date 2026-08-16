@@ -70,7 +70,7 @@
  */
 import { SNOW_RATE_PER_HOUR, PUDDLE_RATE_PER_HOUR } from './mantle-model.js';
 
-export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow', 'hail']);
+export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow', 'hail', 'ash', 'sand', 'spore', 'petal', 'mote']);
 
 /**
  * Species ids named by `Precipitation.md` §2.2 that are NOT built yet, and the
@@ -83,11 +83,15 @@ export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow', 'hail']);
  * points and blends, not future rows. See this module's header.
  */
 export const PRECIP_SPECIES_PLANNED = Object.freeze({
-  ash: 'P6 — needs the dust mantle channel + ember companion population',
-  sand: 'P6 — mostly the impression curtain (P4), not a specimen row',
-  spore: 'P6 — the magical shelf',
-  petal: 'P6 — the magical shelf',
-  mote: 'P6 — the generic magical carrier',
+  /**
+   * ⭐ EMPTY, AS OF P6 (2026-08-16) — every id §2.2 names is now a real row.
+   *
+   * ⚠️ THE MAP STAYS, and emptying it rather than deleting it is the point. It
+   * is what distinguishes *"unknown species"* from *"designed, scheduled, not
+   * built yet"*, and the next species anyone designs needs that distinction on
+   * its first day (`feedback_absent_zone_row_is_a_measurement`). An empty
+   * schedule is a state worth being able to express.
+   */
 });
 
 /**
@@ -558,6 +562,317 @@ export const PRECIP_SPECIES = Object.freeze({
     /** Pellets are the biggest bodies in the table, so hail stays legible
      * furthest out. */
     zoomSleepPxPerBody: 1.6,
+  }),
+
+  /**
+   * ⭐ THE EXOTIC SHELF (P6) — AND THESE FIVE ROWS ARE LAW 1's PROOF.
+   *
+   * §2.4 stakes the whole design on a claim: *"if a new species ever needs
+   * CODE, the schema failed."* Everything below — ash, sand, spore, petal, mote
+   * — is DATA ONLY. Not one line of runtime, kernel, draw or subsystem changed
+   * to add them; they fall, lean, gate on sky reach, band with the squall, light
+   * by day and night, and feed the mantle because the fields they fill were
+   * already read.
+   *
+   * ⚠️ WHERE THE SCHEMA DID NEED SOMETHING, IT IS NAMED RATHER THAN QUIETLY
+   * PATCHED — a proof with an unmentioned exception is not a proof:
+   *
+   *  · `ash`'s **ember companion population** (§2.2: grey flakes PLUS a sparse
+   *    additive glow, which V2 ran as a literal pair of systems) needs the
+   *    subsystem to run TWO species at once. It cannot — it picks one — and that
+   *    same missing capability is why `sleet` still renders as its dominant
+   *    half. ONE gap, TWO features waiting on it. `ember` is deliberately still
+   *    not a row: fire owns embers rising FROM fires, weather owns them falling
+   *    from the sky, and unifying them is a named disease here.
+   *  · `body.emissive01` has **no consumer yet** — the draw multiplies a
+   *    per-body brightness and never adds. So `spore` and `mote` are correctly
+   *    coloured and correctly moving, and do not yet glow past bloom's
+   *    threshold. Carried because the value is real and its consumer is a known
+   *    rung (§3.5), not because it does anything today.
+   */
+  ash: Object.freeze({
+    id: 'ash',
+    label: 'Ash',
+    phase: 'dust',
+    fall: Object.freeze({
+      /** Slower than snow — ash is lighter than water and rides every eddy. */
+      speedPxS: Object.freeze([26, 74]),
+      /** Nearly wind-borne: a volcanic fall drifts sideways as much as down. */
+      windCarry01: 0.92,
+      flutter: Object.freeze({ hzMin: 0.4, hzMax: 1.1, ampPxMin: 55, ampPxMax: 130 }),
+      spin: Object.freeze({ radSMin: 1.4, radSMax: 3.2, windScaleCalm: 0.5, windScaleStorm: 3.5 }),
+      spawnHeightPx: 950,
+      gravityMul: Object.freeze([0.8, 1.3]),
+    }),
+    body: Object.freeze({
+      mode: 'flake',
+      sizePx: Object.freeze([1.8, 5.4]),
+      streakPerPxS: 0.0022,
+      /** ⚠️ DARK. Every species before this one is BRIGHTER than the map; ash is
+       * the first that is darker, and that is precisely why `dust` is a separate
+       * mantle channel with a MULTIPLY blend rather than snow's lerp. */
+      headRgba: Object.freeze([0.34, 0.31, 0.29, 0.9]),
+      tailRgba: Object.freeze([0.19, 0.18, 0.18, 0.6]),
+      brightnessSkewExp: 0.9,
+      emissive01: 0,
+      softness01: 0.7,
+    }),
+    respond: Object.freeze({
+      count: Object.freeze({ kind: 'linear', from: 0, to: 1 }),
+      length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
+      speed: Object.freeze({ kind: 'linear', from: 0.9, to: 1.15 }),
+      /** Ash greys the air far sooner than rain does — that IS the phenomenon. */
+      veil: Object.freeze({ kind: 'threshold', at: 0.2, from: 0, to: 1 }),
+    }),
+    respondStorm: Object.freeze({ flutter: Object.freeze({ kind: 'linear', from: 1, to: 0.3 }) }),
+    arrive: Object.freeze({ kind: 'settle', smearWithWind: false }),
+    stay: Object.freeze({
+      /** ⭐ THE `dust` CHANNEL's FIRST REAL CUSTOMER. The mantle has integrated it
+       * since P3 and nothing fed it until now — which is why P3's own tests
+       * assert that rain and snow both deposit zero dust. */
+      channel: 'dust',
+      ratePerHour: 0.55,
+      puddleRatePerHour: 0,
+      meltBy: Object.freeze({ temperature: false, fire: false }),
+      surface: Object.freeze({ tint: Object.freeze([0.36, 0.34, 0.32]), sparkle01: 0, roughnessDelta: 0.3 }),
+    }),
+    light: Object.freeze({
+      dayAlphaMul: 1.5,
+      dayRgbMul: 0.55,
+      nightAlphaMul: 0.4,
+      nightRgbMul: 0.22,
+      flashAlphaMul: 4,
+      flashRgbMul: 3,
+    }),
+    capacity: 18000,
+    zoomSleepPxPerBody: 1.1,
+  }),
+
+  sand: Object.freeze({
+    id: 'sand',
+    label: 'Sand',
+    phase: 'dust',
+    fall: Object.freeze({
+      /** ⚠️ §2.2: *"near-horizontal — wind IS the fall."* The lowest fall speed
+       * in the table against the highest `windCarry01`, so at any real wind a
+       * grain's motion is almost entirely lateral. Nothing in the runtime
+       * special-cases that; it falls out of two numbers. */
+      speedPxS: Object.freeze([14, 46]),
+      windCarry01: 1,
+      flutter: Object.freeze({ hzMin: 1.4, hzMax: 2.6, ampPxMin: 18, ampPxMax: 52 }),
+      spin: null,
+      spawnHeightPx: 700,
+      gravityMul: Object.freeze([0.85, 1.2]),
+    }),
+    body: Object.freeze({
+      mode: 'streak',
+      sizePx: Object.freeze([0.5, 1.9]),
+      /** Grains DART — the highest stretch per unit speed in the table, which is
+       * what makes a sandstorm read as speed rather than as falling. */
+      streakPerPxS: 0.02,
+      headRgba: Object.freeze([0.86, 0.72, 0.46, 0.85]),
+      tailRgba: Object.freeze([0.62, 0.5, 0.31, 0.4]),
+      brightnessSkewExp: 0.8,
+      emissive01: 0,
+      softness01: 0.25,
+    }),
+    respond: Object.freeze({
+      count: Object.freeze({ kind: 'pow', exp: 1.6, from: 0, to: 1 }),
+      length: Object.freeze({ kind: 'linear', from: 0.8, to: 1.4 }),
+      speed: Object.freeze({ kind: 'linear', from: 0.9, to: 1.3 }),
+      /** ⭐ THE EARLIEST VEIL IN THE TABLE. §2.2: sand is *"mostly IMPRESSION"* —
+       * the curtain IS the sandstorm and the grains are near-zoom detail, so the
+       * veil starts almost immediately. */
+      veil: Object.freeze({ kind: 'threshold', at: 0.08, from: 0, to: 1 }),
+    }),
+    arrive: Object.freeze({ kind: 'none', smearWithWind: false }),
+    stay: Object.freeze({
+      channel: 'dust',
+      ratePerHour: 0.3,
+      puddleRatePerHour: 0,
+      meltBy: Object.freeze({ temperature: false, fire: false }),
+      surface: Object.freeze({ tint: Object.freeze([0.78, 0.66, 0.44]), sparkle01: 0.2, roughnessDelta: 0.2 }),
+    }),
+    light: Object.freeze({
+      dayAlphaMul: 1.7,
+      dayRgbMul: 0.6,
+      nightAlphaMul: 0.3,
+      nightRgbMul: 0.2,
+      flashAlphaMul: 3,
+      flashRgbMul: 2.5,
+    }),
+    capacity: 24000,
+    zoomSleepPxPerBody: 0.5,
+  }),
+
+  spore: Object.freeze({
+    id: 'spore',
+    label: 'Spores',
+    phase: 'magic',
+    fall: Object.freeze({
+      /** The slowest thing the sky sends — spores hang. */
+      speedPxS: Object.freeze([8, 26]),
+      windCarry01: 1,
+      flutter: Object.freeze({ hzMin: 0.25, hzMax: 0.7, ampPxMin: 70, ampPxMax: 190 }),
+      spin: Object.freeze({ radSMin: 0.4, radSMax: 1.2, windScaleCalm: 0.6, windScaleStorm: 2 }),
+      spawnHeightPx: 820,
+      gravityMul: Object.freeze([0.7, 1.35]),
+    }),
+    body: Object.freeze({
+      mode: 'flake',
+      sizePx: Object.freeze([1.6, 4.2]),
+      streakPerPxS: 0.0009,
+      headRgba: Object.freeze([0.66, 1.0, 0.78, 0.95]),
+      tailRgba: Object.freeze([0.3, 0.72, 0.5, 0.55]),
+      brightnessSkewExp: 0.55,
+      /** ⚠️ AUTHORED ABOVE BLOOM's 4.0 THRESHOLD ON PURPOSE (§3.5: an emissive
+       * body that wants to glow must be authored above it, not hoped) — but
+       * NOTHING READS THIS YET. See the shelf's header. */
+      emissive01: 5.5,
+      softness01: 0.95,
+    }),
+    respond: Object.freeze({
+      count: Object.freeze({ kind: 'pow', exp: 1.4, from: 0, to: 1 }),
+      length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
+      speed: Object.freeze({ kind: 'linear', from: 0.9, to: 1.1 }),
+      /** Spores never veil — they are sparse points of light, and a green fog is
+       * a different effect entirely. */
+      veil: Object.freeze({ kind: 'threshold', at: 1, from: 0, to: 0 }),
+    }),
+    arrive: Object.freeze({ kind: 'settle', smearWithWind: false }),
+    stay: Object.freeze({
+      /** §2.2: *"optional faint dust tint"* — optional means a rate near zero,
+       * not an absent channel, so a long fey drift does eventually mark ground. */
+      channel: 'dust',
+      ratePerHour: 0.05,
+      puddleRatePerHour: 0,
+      meltBy: Object.freeze({ temperature: false, fire: true }),
+      surface: Object.freeze({ tint: Object.freeze([0.72, 0.9, 0.76]), sparkle01: 0.5, roughnessDelta: 0 }),
+    }),
+    light: Object.freeze({
+      /** ⚠️ BRIGHTER AT NIGHT THAN BY DAY — the only row that inverts the pair,
+       * and the correct inversion for a light SOURCE rather than a lit object.
+       * Every other species is water catching the sun. */
+      dayAlphaMul: 0.9,
+      dayRgbMul: 0.7,
+      nightAlphaMul: 1.4,
+      nightRgbMul: 1.1,
+      flashAlphaMul: 1.2,
+      flashRgbMul: 1.1,
+    }),
+    capacity: 9000,
+    zoomSleepPxPerBody: 1,
+  }),
+
+  petal: Object.freeze({
+    id: 'petal',
+    label: 'Petals',
+    phase: 'magic',
+    fall: Object.freeze({
+      /** Snow's dynamics with a warmer palette (§2.2) — which is exactly what a
+       * data table lets you say without a line of code. */
+      speedPxS: Object.freeze([34, 96]),
+      windCarry01: 0.88,
+      flutter: Object.freeze({ hzMin: 0.45, hzMax: 0.95, ampPxMin: 60, ampPxMax: 140 }),
+      /** Faster tumbling than snow's — a petal is a flat sail. */
+      spin: Object.freeze({ radSMin: 1.8, radSMax: 3.6, windScaleCalm: 0.5, windScaleStorm: 3 }),
+      spawnHeightPx: 880,
+      gravityMul: Object.freeze([0.8, 1.25]),
+    }),
+    body: Object.freeze({
+      mode: 'flake',
+      sizePx: Object.freeze([3, 7.5]),
+      streakPerPxS: 0.0018,
+      headRgba: Object.freeze([1.0, 0.82, 0.9, 0.95]),
+      tailRgba: Object.freeze([0.92, 0.6, 0.74, 0.7]),
+      brightnessSkewExp: 0.75,
+      emissive01: 0,
+      /** Softer than a flake but not a blur — a petal has an edge. */
+      softness01: 0.55,
+    }),
+    respond: Object.freeze({
+      count: Object.freeze({ kind: 'linear', from: 0, to: 1 }),
+      length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
+      speed: Object.freeze({ kind: 'linear', from: 0.9, to: 1.15 }),
+      veil: Object.freeze({ kind: 'threshold', at: 0.8, from: 0, to: 0.4 }),
+    }),
+    respondStorm: Object.freeze({ flutter: Object.freeze({ kind: 'linear', from: 1, to: 0.4 }) }),
+    arrive: Object.freeze({ kind: 'settle', smearWithWind: false }),
+    /** §2.2's Stay column for petal reads *"none"* — blossom is swept away, it
+     * does not become terrain. `channel: null` is the row saying so. */
+    stay: Object.freeze({
+      channel: null,
+      ratePerHour: 0,
+      puddleRatePerHour: 0,
+      meltBy: Object.freeze({ temperature: false, fire: false }),
+      surface: Object.freeze({ tint: Object.freeze([0.95, 0.8, 0.86]), sparkle01: 0, roughnessDelta: 0 }),
+    }),
+    light: Object.freeze({
+      dayAlphaMul: 1.5,
+      dayRgbMul: 0.6,
+      nightAlphaMul: 0.4,
+      nightRgbMul: 0.3,
+      flashAlphaMul: 5,
+      flashRgbMul: 3.5,
+    }),
+    capacity: 12000,
+    zoomSleepPxPerBody: 1.4,
+  }),
+
+  /**
+   * ⭐ THE GENERIC MAGICAL CARRIER (§2.2: *"palette/emissive/curl fully
+   * data-driven"*) — the row a slice-4 EVENT skins. `mana-storm` glitter,
+   * `gloom` flecks and `radiance` sparks are this row with a different palette,
+   * which is exactly why they are not three rows.
+   */
+  mote: Object.freeze({
+    id: 'mote',
+    label: 'Motes',
+    phase: 'magic',
+    fall: Object.freeze({
+      speedPxS: Object.freeze([18, 70]),
+      windCarry01: 0.75,
+      flutter: Object.freeze({ hzMin: 0.6, hzMax: 1.8, ampPxMin: 30, ampPxMax: 110 }),
+      spin: Object.freeze({ radSMin: 0.8, radSMax: 2.4, windScaleCalm: 0.5, windScaleStorm: 2.5 }),
+      spawnHeightPx: 860,
+      gravityMul: Object.freeze([0.75, 1.3]),
+    }),
+    body: Object.freeze({
+      mode: 'flake',
+      sizePx: Object.freeze([1.2, 3.6]),
+      streakPerPxS: 0.0012,
+      /** Neutral-bright by default: a carrier is meant to be RE-TINTED, and a
+       * strongly-coloured default would fight every skin laid over it. */
+      headRgba: Object.freeze([0.95, 0.95, 1.0, 0.9]),
+      tailRgba: Object.freeze([0.7, 0.72, 0.9, 0.5]),
+      brightnessSkewExp: 0.5,
+      emissive01: 4.5,
+      softness01: 0.9,
+    }),
+    respond: Object.freeze({
+      count: Object.freeze({ kind: 'linear', from: 0, to: 1 }),
+      length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
+      speed: Object.freeze({ kind: 'linear', from: 0.85, to: 1.2 }),
+      veil: Object.freeze({ kind: 'threshold', at: 1, from: 0, to: 0 }),
+    }),
+    arrive: Object.freeze({ kind: 'none', smearWithWind: false }),
+    stay: Object.freeze({
+      channel: null,
+      ratePerHour: 0,
+      puddleRatePerHour: 0,
+      meltBy: Object.freeze({ temperature: false, fire: false }),
+      surface: Object.freeze({ tint: Object.freeze([0.9, 0.9, 1.0]), sparkle01: 0.3, roughnessDelta: 0 }),
+    }),
+    light: Object.freeze({
+      dayAlphaMul: 0.85,
+      dayRgbMul: 0.75,
+      nightAlphaMul: 1.5,
+      nightRgbMul: 1.2,
+      flashAlphaMul: 1.5,
+      flashRgbMul: 1.3,
+    }),
+    capacity: 10000,
+    zoomSleepPxPerBody: 0.9,
   }),
 
   snow: Object.freeze({

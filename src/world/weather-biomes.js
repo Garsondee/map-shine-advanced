@@ -139,6 +139,11 @@ export const DEFAULT_DWELL_HOURS = Object.freeze({
   drizzle: Object.freeze({ min: 1, mean: 3, max: 6 }),
   'steady-rain': Object.freeze({ min: 1, mean: 3, max: 7 }),
   snow: Object.freeze({ min: 2, mean: 6, max: 14 }),
+  /** ⚠️ THE SHORTEST DWELL IN THE TABLE, shorter even than a thunderstorm. A
+   * hail cell is a few minutes of bombardment, not a weather that settles in —
+   * and the Almanac walking INTO a long hailstorm would be a punishing scene
+   * nobody asked for. It is a passing event by construction. */
+  hailstorm: Object.freeze({ min: 0.2, mean: 0.6, max: 1.5 }),
   gale: Object.freeze({ min: 1, mean: 3, max: 6 }),
   thunderstorm: Object.freeze({ min: 0.5, mean: 1.5, max: 3 }),
 });

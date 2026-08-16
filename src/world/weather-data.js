@@ -221,6 +221,34 @@ export const WEATHER_ARCHETYPES = Object.freeze([
     }),
   }),
   Object.freeze({
+    id: 'hailstorm',
+    label: 'Hailstorm',
+    icon: '🧊',
+    blurb: 'Hard convective cell. Stones, not sheets — they bounce and lie.',
+    /**
+     * ⭐ NAMES ITS KIND, for exactly the reason `snow` above does and with the
+     * same consequence if omitted: `precipKind` derives from `temperature01`,
+     * archetypes deliberately do not set temperature (a sky is not a climate),
+     * and the default 0.55 would hand this row plain rain. A named "hailstorm"
+     * sky genuinely means stones whatever the thermometer says.
+     */
+    precipKind: 'hail',
+    axes: Object.freeze({
+      /** A convective cell is towering and broken, not the flat overcast a
+       * nimbostratus row gets — high type, high cover, but not total. */
+      cloudCover01: 0.85,
+      cloudType01: 1,
+      cloudAltitudePx: 900,
+      cloudScalePx: 3200,
+      /** ⚠️ DELIBERATELY BELOW `thunderstorm`'s 0.85. Hail's own count curve is
+       * the steepest in the species table (`exp: 2.4` — hail does not arrive as
+       * a light even scatter), so this axis buys far more stones than the same
+       * number would buy raindrops. A downpour's value here would be a
+       * bombardment. */
+      precip01: 0.7,
+    }),
+  }),
+  Object.freeze({
     id: 'gale',
     label: 'Gale',
     icon: '💨',

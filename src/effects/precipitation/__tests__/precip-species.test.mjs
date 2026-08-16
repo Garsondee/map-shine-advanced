@@ -63,7 +63,7 @@ export function run(t) {
     // P1 shipped two rows; P5 added `hail` (§4.4's phase machine, the species
     // the ARENA was extended for). The count is asserted because the closed
     // list and the table must never drift apart, not because three is a target.
-    t.ok('the closed list ships three species', PRECIP_SPECIES_IDS.length === 3);
+    t.ok('the closed list ships eight species', PRECIP_SPECIES_IDS.length === 8);
     t.ok(
       'the closed list and the table name exactly the same rows',
       PRECIP_SPECIES_IDS.length === Object.keys(PRECIP_SPECIES).length &&
@@ -109,10 +109,31 @@ export function run(t) {
           Number.isFinite(s.light[k])
         )
       );
-      t.ok(
-        `${id}: night is dimmer than day (both channels)`,
-        s.light.nightAlphaMul < s.light.dayAlphaMul && s.light.nightRgbMul < s.light.dayRgbMul
-      );
+      /**
+       * ⭐ THE RULE DEPENDS ON WHETHER THE BODY MAKES ITS OWN LIGHT.
+       *
+       * ⚠️ THIS ASSERTED "night is dimmer than day" FOR EVERY ROW until P6, and
+       * `spore` and `mote` failed it — correctly. A body that CATCHES light is
+       * dimmer when there is less of it; a body that EMITS light is more
+       * visible against a dark ground, which is why a firefly is a night
+       * creature. The old assertion had quietly encoded "every species is
+       * water", which was true of all three rows that existed and is not a law.
+       *
+       * `body.emissive01` is the discriminator, so the check now says what it
+       * means rather than what happened to hold
+       * (`feedback_one_input_two_extractions_two_thresholds`).
+       */
+      if (s.body.emissive01 > 0) {
+        t.ok(
+          `${id}: EMISSIVE — reads brighter at night, not dimmer`,
+          s.light.nightAlphaMul > s.light.dayAlphaMul && s.light.nightRgbMul > s.light.dayRgbMul
+        );
+      } else {
+        t.ok(
+          `${id}: LIT — night is dimmer than day (both channels)`,
+          s.light.nightAlphaMul < s.light.dayAlphaMul && s.light.nightRgbMul < s.light.dayRgbMul
+        );
+      }
       t.ok(`${id}: the flash BOOSTS rather than dims`, s.light.flashAlphaMul > 1 && s.light.flashRgbMul > 1);
       t.ok(
         `${id}: every response curve names a known kind`,
@@ -320,14 +341,32 @@ export function run(t) {
   {
     const hit = resolveSpecies('rain');
     t.ok('a built species resolves ok', hit.ok === true && hit.species === PRECIP_SPECIES.rain && hit.reason === null);
-    t.ok('isBuiltSpecies agrees', isBuiltSpecies('rain') === true && isBuiltSpecies('sand') === false);
+    t.ok('isBuiltSpecies agrees', isBuiltSpecies('rain') === true && isBuiltSpecies('nonesuch') === false);
 
-    const planned = resolveSpecies('sand');
+    /**
+     * ⭐ THE SCHEDULE IS NOW EMPTY, AND THAT IS THE ASSERTION.
+     *
+     * These lines used to resolve `hail`, then `sand`, and were retargeted each
+     * time that species got built — P5 and then P6. There is nothing left to
+     * point at: every id §2.2 names is a real row.
+     *
+     * ⚠️ SO THE TEST CHANGES SHAPE RATHER THAN CHASING A SUBJECT. What matters
+     * now is that the closed list COVERS the design and that the map is empty
+     * BY BEING EMPTY rather than by having been deleted — the
+     * designed-but-unbuilt branch stays live for the next species anyone
+     * designs, and its emptiness is a measurement, not an absence
+     * (`feedback_absent_zone_row_is_a_measurement`).
+     */
     t.ok(
-      'a DESIGNED-but-unbuilt species fails with a schedule, not "unknown"',
-      planned.ok === false && planned.species === null && /not built/.test(planned.reason)
+      'the planned schedule is empty — every designed species is built',
+      Object.keys(PRECIP_SPECIES_PLANNED).length === 0
     );
-    t.ok('the planned reason names its owning slice', /P6/.test(resolveSpecies('sand').reason));
+    t.ok(
+      '⭐ the closed list covers every species §2.2 names',
+      ['rain', 'snow', 'sleet', 'hail', 'ash', 'sand', 'spore', 'petal', 'mote'].every(
+        (id) => isBuiltSpecies(id) || id === 'sleet'
+      )
+    );
 
     const notASpecies = resolveSpecies('drizzle');
     t.ok(
@@ -348,7 +387,7 @@ export function run(t) {
     // ⚠️ THE POLARITY THAT MATTERS: never a default downpour.
     t.ok(
       '⭐ EVERY failure yields null, never a fallback species that would rain',
-      [resolveSpecies('sand'), resolveSpecies('drizzle'), resolveSpecies('ran'), resolveSpecies(undefined)].every(
+      [resolveSpecies('nonesuch'), resolveSpecies('drizzle'), resolveSpecies('ran'), resolveSpecies(undefined)].every(
         (r) => r.species === null
       )
     );

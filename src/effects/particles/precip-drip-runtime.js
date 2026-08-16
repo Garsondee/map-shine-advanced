@@ -158,6 +158,9 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
    * dotted rule, while a real eave sheds along its whole lip. */
   const uEdgeJitterPx = uniform(float(26));
   const uStreakScale = uniform(float(1));
+  /** ⭐ How much of the radial (falling-toward-you) term steers the streak.
+   * *"We want perspective, just not too much of it."* See its use site. */
+  const uParallax01 = uniform(float(0.3));
   const uSizeScale = uniform(float(1));
   const uAlphaMul = uniform(float(1));
   const uRgbMul = uniform(float(1));
@@ -335,9 +338,30 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
      */
     const rad = uWindDirDeg.mul(float(Math.PI / 180));
     const drift = windToward(rad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12));
-    // Outward from the camera centre, scaled by how fast the body is falling
-    // and by the magnification it currently has.
-    const radial = drawn.sub(uCamCentre).mul(persp).mul(c.z).div(uCamHeight);
+    /**
+     * Outward from the camera centre, scaled by how fast the body is falling
+     * and by the magnification it currently has.
+     *
+     * ⚠️ **DIALLED WELL BELOW 1, AND THE FULL-STRENGTH VERSION WAS REPORTED.**
+     * Author: *"could do with a less extreme perspective angle. Moving the
+     * camera currently causes them to fall at a very sharp angle which doesn't
+     * make much sense with the top down view. We want perspective, just not too
+     * much of it."*
+     *
+     * The term is proportional to DISTANCE FROM THE CAMERA CENTRE and is
+     * unbounded, so a drip near the edge of a wide view gets a radial many
+     * times its own fall speed and points almost straight outward — and because
+     * the centre moves with the camera, panning swings every streak on screen.
+     * Physically it is what a real perspective camera does; at MSA's
+     * near-orthographic top-down read it is simply too much, which is the
+     * author's point exactly.
+     *
+     * A blend rather than a smaller camera height: `uCamHeight` also sets the
+     * MAGNIFICATION (how much a drip grows as it falls), and that part reads
+     * well. This scales only the streak's steering, so the fall still converges
+     * while the angle stays gentle.
+     */
+    const radial = drawn.sub(uCamCentre).mul(persp).mul(c.z).div(uCamHeight).mul(uParallax01);
     const apparent = drift.add(radial);
     const len = apparent.length().max(float(1e-4));
     const dir = vec2(apparent.x.div(len), apparent.y.div(len));
@@ -472,6 +496,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     setTuning(t = {}) {
       if (Number.isFinite(t.dripSizeScale)) uSizeScale.value = t.dripSizeScale;
       if (Number.isFinite(t.dripStreakScale)) uStreakScale.value = t.dripStreakScale;
+      if (Number.isFinite(t.dripParallax01)) uParallax01.value = Math.max(0, Math.min(1, t.dripParallax01));
       if (Number.isFinite(t.dripEdgeJitterPx)) uEdgeJitterPx.value = Math.max(0, t.dripEdgeJitterPx);
       if (Number.isFinite(t.cameraHeight)) uCamHeight.value = Math.max(1, t.cameraHeight);
       if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = t.windAirSpeedPxS;

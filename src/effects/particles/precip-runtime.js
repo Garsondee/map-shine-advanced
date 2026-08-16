@@ -642,8 +642,34 @@ export function createPrecipEngine({
     // V2 `:1466` — `pow(rand, 0.72)`: a mid-tone skew with rare bright glints,
     // NOT a uniform distribution. Most of why V2's rain read as a real curtain.
     const brightness = hash11(entropy.mul(float(1.7))).pow(float(SKEW_EXP));
-    const sizePx = mix(float(SIZE_MIN), float(SIZE_MAX), hash11(entropy.mul(float(2.3)).add(float(11))));
-    const speed = mix(float(SPEED_MIN), float(SPEED_MAX), hash11(entropy.mul(float(3.1)).add(float(29)))).mul(
+    /**
+     * ⭐ SIZE AND SPEED SHARE ONE HASH — A BIG DROP FALLS FAST.
+     *
+     * ⚠️ THEY USED TO BE INDEPENDENT, AND THAT IS WHAT THE AUTHOR KEPT SEEING:
+     * *"there are still some rain drops which are double width and fall slower
+     * and more strangely."* Precisely. With independent hashes every
+     * combination existed, including the one that cannot occur in nature and
+     * looks worst on screen — the WIDEST body (3.6 px) at the SLOWEST speed. A
+     * streak's length comes from its speed, so that body is short AND fat: a
+     * blob, sitting among proper streaks, at a different angle because a slow
+     * drop leans differently.
+     *
+     * Correlating them is both the fix and the physics: terminal velocity rises
+     * with drop size, so a fat drop is a FAST drop and the slow ones are the
+     * fine ones that read as mist. Nothing needs clamping or rejecting — the
+     * bad combination simply stops being representable, which is the shape of
+     * fix this project prefers to a tuned threshold.
+     *
+     * The `pow(0.7)` skews the shared draw toward the small/slow end, because a
+     * curtain is mostly fine rain with occasional fat drops rather than an even
+     * mix.
+     */
+    const mass = hash11(entropy.mul(float(2.3)).add(float(11))).pow(float(0.7));
+    const sizePx = mix(float(SIZE_MIN), float(SIZE_MAX), mass);
+    // A small INDEPENDENT jitter on top, so two drops of the same size still
+    // separate over their lives — the variety `gravityMul` was always for,
+    // without re-introducing the slow-fat body it used to permit.
+    const speed = mix(float(SPEED_MIN), float(SPEED_MAX), mass).mul(
       mix(float(GRAV_MIN), float(GRAV_MAX), hash11(entropy.mul(float(4.7)).add(float(53))))
     );
     return { brightness, sizePx, speed };

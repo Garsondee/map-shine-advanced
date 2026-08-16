@@ -15,6 +15,7 @@ import { run as runDayClock } from './day-clock.test.mjs';
 import { run as runSkySettings } from './sky-settings.test.mjs';
 import { run as runWeather } from './weather.test.mjs';
 import { run as runWeatherData } from './weather-data.test.mjs';
+import { run as runWeatherRng } from './weather-rng.test.mjs';
 import { run as runWindField } from './wind-field.test.mjs';
 import { run as runWindBake } from './wind-bake.test.mjs';
 import { run as runWindSim } from './wind-sim.test.mjs';
@@ -55,6 +56,7 @@ const suites = [
   ['sky-settings', runSkySettings],
   ['weather', runWeather],
   ['weather-data', runWeatherData],
+  ['weather-rng', runWeatherRng],
   ['wind-field', runWindField],
   ['wind-bake', runWindBake],
   ['wind-sim', runWindSim],

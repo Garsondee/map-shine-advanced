@@ -459,17 +459,37 @@ export function createPrecipEngine({
    * the west) and its sampler negates accordingly:
    * `vec2(cos, sin).negate().mul(speed01)`.
    *
-   * This runtime did NOT negate, so precipitation was driven in exactly the
-   * OPPOSITE direction from every other consumer of the same field — the
-   * author's report: *"Wind arrow points south but rain gets pushed to the
-   * east."* A second hand-written reading of a shared convention, which is
-   * `feedback_shared_field_two_meanings_two_registries` wearing a compass.
+   * ⚠️ AND IT IS A **+90° ROTATION**, NOT A NEGATION — I got this wrong twice
+   * and the second attempt is instructive. The first cut used a bare
+   * `vec2(cos, sin)`; reading the field's `.negate()` I "fixed" it by negating
+   * too, which is a 180° flip. The author's next report was that precipitation
+   * ran *"90 degrees clockwise of the wind direction — wind heading north, snow
+   * goes east; wind east, snow goes south."* Two data points is enough to solve
+   * exactly: in this engine's Y-DOWN world (the camera is flipped, `top = minY`,
+   * so +Y is SOUTH and +X is EAST) those observations are precisely
+   * `precip = cw90(heading)`, so the true heading is `ccw90` of what the code
+   * produced — which reduces to `(−sin, cos)`, i.e. the raw angle turned +90°.
+   *
+   * ⚠️ THE LESSON: a DIRECTION being wrong does not tell you the CORRECTION is
+   * a sign. Negation fixes 180°; a rotation error needs a rotation. Reaching
+   * for `.negate()` because the reference code contained one was pattern-
+   * matching, not derivation — the two conventions differ by more than a sign
+   * and the honest move was to solve it from observations, as above.
+   *
+   * ⚠️ STILL A SECOND HAND-WRITTEN READING OF A SHARED CONVENTION, which is the
+   * root problem (`feedback_shared_field_two_meanings_two_registries` wearing a
+   * compass). The real fix is for `world/wind-field.js` to EXPORT a
+   * direction→vector helper that every consumer calls, so there is one
+   * implementation to be right or wrong. Filed rather than done here because it
+   * touches shipped consumers (vegetation, gusts, the overlay) whose current
+   * look is calibrated against their own readings, and silently rotating those
+   * is not a change to make in a precipitation commit.
    *
    * One helper, both call sites (the kernel's drift and the draw's convergence
-   * shift), so the two can never disagree with each other OR with the field.
+   * shift), so those two can never disagree with each other.
    * @param {*} rad - `directionDeg` already in radians.
    */
-  const windToward = (rad) => vec2(cos(rad), sin(rad)).negate();
+  const windToward = (rad) => vec2(sin(rad).negate(), cos(rad));
 
   /**
    * WHERE A BODY IS ACTUALLY DRAWN — V2's `M(h) = D/(D−h)` applied to its world

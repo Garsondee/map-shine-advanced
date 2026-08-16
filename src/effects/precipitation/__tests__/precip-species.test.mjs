@@ -20,9 +20,44 @@ import {
   isBuiltSpecies,
   evalCurve,
   resolveSpeciesFrame,
+  windTowardVector,
 } from '../precip-species.js';
 
 export function run(t) {
+  // ---- ⭐ THE COMPASS: which way precipitation is driven -----------------------
+  // Pinned because the shader version is browser-only TSL, so a rotation error
+  // in it can ONLY be caught by a human on a live map — which is how this was
+  // found TWICE, wrong in two different ways (a missing rotation, then a
+  // negation that fixed 180 degrees of a 90-degree error). Y-DOWN world: +X is
+  // EAST, +Y is SOUTH (the camera is flipped, top = minY).
+  {
+    const dir = (d) => {
+      const v = windTowardVector(d);
+      return Math.abs(v.x) > Math.abs(v.y) ? (v.x > 0 ? 'EAST' : 'WEST') : v.y > 0 ? 'SOUTH' : 'NORTH';
+    };
+    t.ok('directionDeg 0 drives precipitation SOUTH', dir(0) === 'SOUTH');
+    t.ok('directionDeg 90 drives it WEST', dir(90) === 'WEST');
+    t.ok('directionDeg 180 drives it NORTH', dir(180) === 'NORTH');
+    t.ok('directionDeg 270 drives it EAST', dir(270) === 'EAST');
+    // The property that actually failed live: turning the wind must turn the
+    // rain the SAME way, not 90 degrees off it.
+    const a = windTowardVector(0),
+      b = windTowardVector(90);
+    const crossZ = a.x * b.y - a.y * b.x;
+    t.ok('⭐ +90 deg of wind rotates the drive by exactly +90 deg', Math.abs(crossZ - 1) < 1e-9);
+    t.ok(
+      'the vector is unit length at every angle',
+      [0, 37, 90, 211, 359].every((d) => {
+        const v = windTowardVector(d);
+        return Math.abs(Math.hypot(v.x, v.y) - 1) < 1e-9;
+      })
+    );
+    t.ok(
+      'a non-finite angle yields a finite vector rather than NaN',
+      Number.isFinite(windTowardVector(NaN).x) && Number.isFinite(windTowardVector(NaN).y)
+    );
+  }
+
   // ---- the closed list vs the table ------------------------------------------
   {
     t.ok('P1 ships exactly two species', PRECIP_SPECIES_IDS.length === 2);

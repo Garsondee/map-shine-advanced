@@ -451,3 +451,26 @@ function clamp01(v) {
   if (!Number.isFinite(n)) return 0;
   return Math.min(1, Math.max(0, n));
 }
+
+/**
+ * ⭐ THE DIRECTION PRECIPITATION IS DRIVEN, from the wind field's
+ * `directionDeg` — the CPU twin of `precip-runtime.js#windToward`.
+ *
+ * ⚠️ IT EXISTS SO THE MAPPING IS TESTABLE. The shader version is browser-only
+ * TSL, so a compass error in it can only be caught by a human looking at a
+ * live map — which is exactly how this one was found, twice, after being wrong
+ * in two different ways (a missing rotation, then a negation that fixed 180°
+ * of a 90° error). Node can now pin all four cardinals.
+ *
+ * Y-DOWN world space: +X is EAST, +Y is SOUTH (the camera is flipped,
+ * `top = minY`). Keep this in lockstep with the shader helper — they are one
+ * rule with two implementations, which is a debt this pays down only by being
+ * asserted against.
+ *
+ * @param {number} directionDeg
+ * @returns {{x: number, y: number}} unit vector precipitation travels along.
+ */
+export function windTowardVector(directionDeg) {
+  const r = ((Number(directionDeg) || 0) * Math.PI) / 180;
+  return { x: -Math.sin(r), y: Math.cos(r) };
+}

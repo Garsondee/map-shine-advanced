@@ -565,6 +565,15 @@ export { createFireSubsystem } from './fire/fire-subsystem.js';
 // this zone's door is how boot.js reaches it at all, and a module that lands
 // without its door is the `graph/reachable-from-boot` debt this repo ratchets.
 export { createPrecipitationSubsystem, resolveActiveSpecies } from './precipitation/precip-subsystem.js';
+
+// ⭐ P5's ROOFLINE (Precipitation.md §4.3) — pure grid→world-points, so the
+// Y-flip that killed V2's drips is a Node assertion rather than a runtime vote.
+export {
+  extractDripEdges,
+  dripEdgeSignature,
+  MAX_DRIP_POINTS,
+  DEFAULT_DECK_HEIGHT_PX,
+} from './precipitation/drip-edges.js';
 export {
   PRECIP_SPECIES,
   PRECIP_SPECIES_IDS,

@@ -33,6 +33,7 @@ import { createPrecipEngine } from '../particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../particles/precip-splash-runtime.js';
 import { createMantleRuntime } from './mantle-runtime.js';
 import { createPrecipCurtain } from './curtain-render.js';
+import { createPrecipDripEngine } from '../particles/precip-drip-runtime.js';
 import { PRECIP_SPECIES, PRECIP_SPECIES_IDS, resolveSpeciesFrame, isBuiltSpecies } from './precip-species.js';
 import { createLogger } from '../../core/log.js';
 
@@ -175,6 +176,13 @@ export function createPrecipitationSubsystem({
   let pendingReseed = null;
   /** Which floor's mask the gate currently holds — `null` until a bake says. */
   let gateFloorIndex = null;
+  /** ⭐ THE ROOFLINE (P5). ONE engine — unlike the fall/splash/curtain there is
+   * nothing species-specific about a drip: water off an eave is water off an
+   * eave whether the sky is sending rain or sleet. Snow does not drip (it
+   * settles), which the rate below expresses by reading `precip01` only while a
+   * LIQUID species is falling. */
+  let drips = null;
+  let dripReason = 'no roofline supplied yet';
   let mantleReason =
     createMantleTarget && renderMantleStep
       ? 'not built yet — waiting for scene bounds'
@@ -253,6 +261,15 @@ export function createPrecipitationSubsystem({
       },
       st.tierScale ?? 1
     );
+  }
+
+  /** Advance the roofline. Cheap when there is no roofline and no tail. */
+  function stepDrips(renderer, dtRealSec, nowMs, precip01, st, weather) {
+    if (!drips) return;
+    const species = PRECIP_SPECIES.rain;
+    drips.setFrame(dtRealSec, precip01, frameFor(species, weather, st, Math.max(precip01, 0.001)));
+    if (!drips.hasContent) return;
+    drips.step(renderer, dtRealSec, nowMs, getWindHandle());
   }
 
   /** Build one species' engine on first use — a clear map never allocates. */
@@ -389,6 +406,17 @@ export function createPrecipitationSubsystem({
       // snow through a summer.
       stepMantle(dtRealSec, st, weather, precip01);
 
+      // ⭐ THE DRIPS STEP **BEFORE** THE CLEAR-DAY EARLY-OUT, like the mantle and
+      // for the same reason: their whole character is the TAIL that outlives the
+      // rain by minutes. Returning early on `precip01 === 0` would silence the
+      // roofline the instant the sky cleared, which is precisely the signal
+      // §4.3 says is the cheapest "the world is wet" cue there is.
+      //
+      // ⚠️ LIQUID ONLY. Snow settles on a roof, it does not run off it, so the
+      // tail is fed by rain and sleet and never by a blizzard.
+      const liquid = (weather.precipKind ?? 'rain') !== 'snow';
+      stepDrips(renderer, dtRealSec, nowMs, liquid ? precip01 : 0, st, weather);
+
       // ⚠️ A JS `if`, never a uniform set to zero (Effects.md Law 4). A clear
       // day must not allocate an engine, dispatch a kernel or submit a draw.
       if (!(precip01 > 0)) {
@@ -482,8 +510,16 @@ export function createPrecipitationSubsystem({
      * order, which is why it lives here rather than at the call site.
      */
     get scenes() {
-      if (!activeSpeciesId) return [];
       const out = [];
+      // ⚠️ THE DRIPS ARE CHECKED EVEN WITH NO ACTIVE SPECIES. A first cut
+      // early-returned here on `!activeSpeciesId`, which is TRUE the moment the
+      // rain stops — and that is exactly when the tail is the only thing left
+      // to draw. The one layer whose whole purpose is outliving the weather
+      // cannot be gated on the weather.
+      if (!activeSpeciesId) {
+        if (drips?.hasContent) out.push(drips.scene);
+        return out;
+      }
       // GROUND → FAR AIR → NEAR AIR. Splashes lie on the map; the curtain is
       // the rain in the distance; the bodies are the rain in front of you.
       const splash = splashEngines.get(activeSpeciesId);
@@ -492,6 +528,10 @@ export function createPrecipitationSubsystem({
       if (curtain?.hasContent) out.push(curtain.scene);
       const fall = engines.get(activeSpeciesId);
       if (fall?.debugState().visible) out.push(fall.scene);
+      // ⭐ THE ROOFLINE LAST — nearest the eye. A drip hangs off an edge that is
+      // ABOVE the viewed floor, so it is in front of the rain falling past it,
+      // and it must keep drawing when nothing else does (the tail).
+      if (drips?.hasContent) out.push(drips.scene);
       return out;
     },
 
@@ -551,6 +591,27 @@ export function createPrecipitationSubsystem({
     },
 
     /**
+     * ⭐ THE ROOFLINE, from `drip-edges.js#extractDripEdges`. Call on floor
+     * change or when the mask authority's products version moves; NEVER per
+     * frame. Handing `null` or an empty set silences the drips, which is the
+     * correct answer for a floor with nothing overhead — a rooftop's eaves are
+     * below you, not above.
+     */
+    setDripEdges(edges) {
+      if (!edges || !(edges.count > 0)) {
+        dripReason = 'no roof edges on this floor';
+        drips?.setSpawnPoints({ points: new Float32Array(0), count: 0 });
+        return { count: 0, reason: dripReason };
+      }
+      if (!drips) {
+        drips = createPrecipDripEngine({ THREE, renderOrder: renderOrder + 1 });
+        if (lastTuning) drips.setTuning(lastTuning);
+      }
+      dripReason = null;
+      return drips.setSpawnPoints(edges);
+    },
+
+    /**
      * ⭐ THE VIEWED FLOOR CHANGED — re-derive everything that belongs to a floor.
      *
      * ⚠️ THE MANTLE IS THE ONLY THING HERE THAT HOLDS FLOOR-SPECIFIC STATE.
@@ -588,6 +649,7 @@ export function createPrecipitationSubsystem({
       for (const engine of engines.values()) engine.setTuning(t);
       for (const engine of splashEngines.values()) engine.setTuning(t);
       mantle?.setTuning(t);
+      drips?.setTuning(t);
       for (const curtain of curtains.values()) curtain.setTuning(t);
     },
 
@@ -636,6 +698,11 @@ export function createPrecipitationSubsystem({
          * for the ground floor looks identical to a correct one from here
          * (`feedback_instruments_must_not_lie`). */
         gateFloor: gateFloorIndex,
+        /** ⭐ THE ROOFLINE (P5), reported separately — it is the one layer that
+         * runs when everything else is off, so folding it into the rest would
+         * make "still dripping four minutes after the rain" look like "the
+         * precipitation axis is stuck". */
+        drips: drips ? drips.debugState() : { built: false, reason: dripReason },
       };
     },
   };

@@ -153,7 +153,7 @@ import { resolveElevationFloorIndex, compareLayerKeys } from '../scene/layer-ord
 // this ratchet's current bound), this is a NEW import: it goes through
 // `scene/index.js` from the start rather than adding a further direct
 // reach-into-internals.
-import { createDepthAuthority } from '../scene/index.js';
+import { createDepthAuthority, CASTER_HEIGHT_SCALE_PX } from '../scene/index.js';
 import {
   computeCameraFrustum,
   worldToNdc,
@@ -307,6 +307,7 @@ import {
   identityCubeLut,
   profileRank,
   GLOBAL_SETTING_KEYS,
+  extractDripEdges,
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC } from '../core/frame-clock.js';
 import {
@@ -951,6 +952,8 @@ export async function startVtPanViewer({
   getOutdoorsMaskGrid,
   getFireMaskGrid,
   getSkyReachGrid,
+  getCoverAboveGrid,
+  getCasterHeightGrid,
   getCasterHeightField,
   getShadowFloorPlan,
   getSunShadowRenderState,
@@ -1016,6 +1019,10 @@ export async function startVtPanViewer({
   // gate never arms, and a disarmed gate RAINS (fail-open), which is the
   // correct behaviour for a floor whose art has not streamed.
   getSkyReachGrid ??= () => null;
+  // P5's roofline inputs — absent means no drips, which is the honest
+  // answer for a floor with nothing overhead.
+  getCoverAboveGrid ??= () => null;
+  getCasterHeightGrid ??= () => null;
   // SUN SHADOWS' two seams. `null`/disabled leaves the shadow field baked white
   // (a provable no-op) rather than leaving it unwritten — the ambient fill
   // always samples it, so "off" has to be a written value. Un-wired callers
@@ -2167,7 +2174,24 @@ export async function startVtPanViewer({
       // the splashes, the curtain and the mantle's accumulation — every one of
       // which was reading the wrong floor's roofs until this line existed.
       const skyReach = bakePrecipSkyReachTexture(idx);
-      lastPerFloorMaskRebake = { floorIndex: idx, reason, outdoors, fire, skyReach };
+      // ⭐ THE ROOFLINE (P5, §4.3) — extracted from THIS floor's `coverAbove`, so
+      // climbing a floor re-sings a different set of eaves and the rooftop
+      // (nothing above it) correctly falls silent. It rides the same chokepoint
+      // as everything else per-floor precisely so it cannot be the fifth thing
+      // somebody forgets.
+      const roofline = extractDripEdges(getCoverAboveGrid(idx), {
+        heightGrid: getCasterHeightGrid(idx),
+        heightScalePx: CASTER_HEIGHT_SCALE_PX,
+      });
+      precipitationSubsystem?.setDripEdges(roofline);
+      lastPerFloorMaskRebake = {
+        floorIndex: idx,
+        reason,
+        outdoors,
+        fire,
+        skyReach,
+        roofline: { count: roofline.count, edgeTexels: roofline.edgeTexels, heightSource: roofline.heightSource },
+      };
       // ⭐ THE MANTLE IS PER-FLOOR TOO. Its buffer holds THIS floor's snow, so a
       // floor change must re-derive it — otherwise the roof wears the
       // courtyard's drifts. §5.5's seeding is exactly the right tool: the

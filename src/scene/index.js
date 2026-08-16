@@ -54,6 +54,9 @@ export {
   derivedKindById,
   assembleLayerDescriptors,
   extractionPlanForLayer,
+  // ⭐ P5's drip extractor needs it to turn a caster-height BYTE back into
+  // world px — the deck altitude each drip is born at.
+  CASTER_HEIGHT_SCALE_PX,
 } from './mask-catalog.js';
 export { createMaskAuthority, RequiredMaskMissingError } from './mask-authority.js';
 // THE SKY-REACH SERVICE (scene/sky-reach-access.js's header is the map) — the

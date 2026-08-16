@@ -2981,6 +2981,35 @@ function install() {
     }
   };
 
+  /**
+   * ⭐ THE ROOFLINE's INPUT (P5, §4.3). `coverAbove` is *"is there opaque art
+   * above me on this floor"*, so its BOUNDARY is exactly a roof/canopy edge —
+   * which means drips need no new mask and no new authoring at all, and are
+   * automatically right for whatever the artist drew.
+   *
+   * Swallowed like `skyReach` above and for the same reason: a floor whose art
+   * has not streamed yet yields null, the roofline stays empty, and an empty
+   * roofline simply does not drip. Failing SILENT is correct here (unlike the
+   * rain gate, where failing open means raining) — a drip in the wrong place is
+   * worse than no drip, which is the whole V2 lesson this feature carries.
+   */
+  const getCoverAboveGrid = (floorIndex) => {
+    try {
+      return maskAuthority.getDerived('coverAbove', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** The deck ALTITUDE at each roofline point, so a bridge drips from bridge
+   * height and an awning from awning height (§4.3) with nothing authored. */
+  const getCasterHeightGrid = (floorIndex) => {
+    try {
+      return maskAuthority.getDerived('casterHeight', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   // WATER's four mask-authority seams — see effects/water/water-seams.js for
   // why they ask different questions at deliberately different resolutions.
   // `getWaterBackgroundItemId` is the depth-authority migration's own seam
@@ -7814,6 +7843,8 @@ function install() {
         // unclipped (the fail-open default `bakeFireMaskTexture` already has).
         getFireMaskGrid,
         getSkyReachGrid,
+        getCoverAboveGrid,
+        getCasterHeightGrid,
         // THE WATER BODY PACK's mask + cross-floor seams (Water.md §5.1) —
         // same real-scene-only reasoning; unwired means no floor has water, so
         // the jump flood never runs (inert by construction, not by a flag).

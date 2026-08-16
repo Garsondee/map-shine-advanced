@@ -6745,6 +6745,32 @@ function install() {
       setVtPanViewerWeatherArchetype(sky.weatherArchetype, 'sky-settings');
     } else {
       setVtPanViewerCloudCover(sky.cloudCover01, 'sky-settings');
+      // ⚠️ ONLY on the `custom` branch, and for exactly the reason the comment
+      // above gives for cover: a NAMED row already carries its own `precip01`,
+      // so restoring the stored one on top would let a shelf sky and a stale
+      // hand-set shower disagree about how hard it is raining.
+      setVtPanViewerWeatherTargets({ precip01: sky.precip01 });
+    }
+    // ⭐ CLIMATE RESTORE — unconditional, unlike precipitation above, BECAUSE
+    // temperature is deliberately NOT archetype-owned (`ARCHETYPE_OWNED_AXES`:
+    // a sky is not a climate). No row will ever restore it, so if this line is
+    // absent a wintry map silently thaws on every refresh and its snow turns
+    // to rain — which is exactly the half-persistence the author reported.
+    setVtPanViewerWeatherTargets({ temperature01: sky.temperature01 });
+    // ⚠️ THE AUTHORED KIND, AND ONLY WHEN IT IS AN EXPLICIT PIN. `applyArchetype`
+    // above already set this — to the row's own kind for `snow`, to `auto` for
+    // every other row — so restoring the stored value unconditionally would
+    // stomp that: a saved `snow` scene would reload, apply the snow ROW (kind
+    // = snow), then immediately be reset to `auto` by a stored default and
+    // start raining. The Snow button, broken again, by the restore path.
+    //
+    // `auto` is the DEFAULT, so it carries no information about intent — only
+    // a non-auto value means "the GM pinned this", and only that is worth
+    // outranking the row (`feedback_derived_zero_collides_with_configured_zero`
+    // in its enum form: the default value and a deliberate choice must not be
+    // the same token if one is supposed to win).
+    if (sky.precipKindAuthored && sky.precipKindAuthored !== 'auto') {
+      setVtPanViewerPrecipKind(sky.precipKindAuthored);
     }
     setVtPanViewerSkyRealism(sky.realism01);
     // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — its strength drives the

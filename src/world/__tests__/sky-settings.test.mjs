@@ -7,8 +7,56 @@
  * says which one it gave.
  */
 import { resolveSky, applySkyEdit, normalizeSky, DEFAULT_SKY } from '../sky-settings.js';
+import { WEATHER_AXIS_NAMES } from '../weather.js';
+import { ARCHETYPE_OWNED_AXES } from '../weather-data.js';
 
 export function run(t) {
+  // ---- ⭐ WEATHER MUST SURVIVE A REFRESH (author-requested persistence) -------
+  //
+  // The store is a THIRD hand-maintained list of "what a weather is" (after the
+  // axis table and the env snapshot), and it forgot the P1 axes: a shelf click
+  // survived a reload because the archetype id carries its own precip, while a
+  // hand-set shower or a cold map evaporated. The last assertion is the real
+  // guard — it checks against `WEATHER_AXIS_NAMES` rather than a fourth copy of
+  // the list, so the next axis added without wiring fails HERE.
+  {
+    const round = normalizeSky({ todHour: 3.5, precip01: 0.7, temperature01: 0.12, precipKindAuthored: 'snow' });
+    t.ok('⭐ precip01 round-trips', round.precip01 === 0.7);
+    t.ok('⭐ temperature01 round-trips — the ONLY thing that remembers a wintry map', round.temperature01 === 0.12);
+    t.ok('⭐ the authored precip kind round-trips', round.precipKindAuthored === 'snow');
+    t.ok('todHour still round-trips', round.todHour === 3.5);
+    t.ok(
+      'a defaulted sky is dry and temperate',
+      normalizeSky({}).precip01 === 0 && normalizeSky({}).temperature01 === 0.55
+    );
+    t.ok(
+      'an unknown stored kind fails open to auto, never storm-locking a species',
+      normalizeSky({ precipKindAuthored: 'sleeeet' }).precipKindAuthored === 'auto'
+    );
+    t.ok(
+      'out-of-range values clamp rather than reaching a uniform',
+      normalizeSky({ precip01: 9 }).precip01 === 1 && normalizeSky({ temperature01: -3 }).temperature01 === 0
+    );
+    // ⚠️ THE INVARIANT IS "HAS A RESTORE PATH", NOT "IS IN THE STORE" — a first
+    // cut asserted the latter and correctly fired on `cloudType01`/
+    // `cloudAltitudePx`/`cloudScalePx`, which are ARCHETYPE-OWNED: the store
+    // keeps the row's ID and `applyArchetype` restores all four cloud axes from
+    // it, so storing them again would be the two-authorities bug
+    // `DEFAULT_SKY.weatherArchetype` already warns about. Every axis must have
+    // exactly one way home; this checks that none has NONE.
+    const stranded = WEATHER_AXIS_NAMES.filter(
+      (n) => normalizeSky({})[n] === undefined && !ARCHETYPE_OWNED_AXES.includes(n)
+    );
+    t.ok(
+      `⭐ every WEATHER_AXES axis has a restore path — stored or archetype-owned (stranded: ${stranded.join(',') || 'none'})`,
+      stranded.length === 0
+    );
+    t.ok(
+      '...and the two that are NEITHER cloud-shape nor archetype-owned are the ones the store had to grow',
+      normalizeSky({}).temperature01 !== undefined && !ARCHETYPE_OWNED_AXES.includes('temperature01')
+    );
+  }
+
   const close = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
   // ---- the default: one sky for the campaign -------------------------------

@@ -40,7 +40,7 @@
 import { normalizeHour } from './sun.js';
 import { DAY_CLOCK_MODES, DEFAULT_TOD_HOUR, DEFAULT_RATE_HOURS_PER_MINUTE } from './day-clock.js';
 import { DEFAULT_ARCHETYPE_ID, CUSTOM_PRESET, isApplicableArchetype } from './weather-data.js';
-import { WEATHER_MODES } from './weather.js';
+import { WEATHER_MODES, PRECIP_KINDS } from './weather.js';
 import { isKnownBiome } from './weather-biomes.js';
 
 /**
@@ -93,6 +93,32 @@ export const DEFAULT_SKY = Object.freeze({
   /** The Almanac's dwell-time multiplier, 0.25..4. Meaningless in `director`
    * mode; stored anyway so switching back to `almanac` remembers the pace. */
   weatherVolatility: 1,
+  /**
+   * ⭐ PRECIPITATION, PERSISTED (P1). Author: *"you should make it so that the
+   * time of day and weather persist on a scene between foundry refreshes."*
+   *
+   * ⚠️ THESE THREE WERE THE GAP. `todHour`, the archetype, the mode and the
+   * biome already rode the scene flag — but `precip01`/`temperature01` joined
+   * `WEATHER_AXES` in P1 and nobody added them here, so weather only
+   * HALF-persisted: a shelf click survived a refresh (because the archetype id
+   * carries its own precip), while a hand-set shower or a cold map evaporated.
+   * `feedback_hand_maintained_dispatch_list_forgets_new_effects` again, in a
+   * third place — the axis table, the env snapshot and now the store each keep
+   * their own list of what a weather is.
+   *
+   * ⚠️ `precip01` is authoritative ONLY when `weatherArchetype` is `custom`,
+   * exactly like `cloudCover01` above and for the same reason: a named row
+   * already carries its own precip, and storing both invites the two to
+   * disagree about what the sky is doing.
+   */
+  precip01: 0,
+  /** Cold → hot. NOT archetype-owned (a sky is not a climate), so this is the
+   * ONLY thing that remembers a map is wintry — and it is what decides whether
+   * `auto` precipitation falls as rain or snow. */
+  temperature01: 0.55,
+  /** `auto` | rain | snow | sleet | hail | ash | embers. Stored so a GM who
+   * pinned "always snow" gets it back; `auto` hands control to temperature. */
+  precipKindAuthored: 'auto',
   /** 0 = exact Foundry parity (the sky light is a no-op), 1 = full model.
    * See effects/sky-access.js for why the default cannot be anything else. */
   realism01: 0,
@@ -136,6 +162,14 @@ export function normalizeSky(raw) {
     weatherBiome:
       r.weatherBiome === null || isKnownBiome(r.weatherBiome) ? (r.weatherBiome ?? null) : DEFAULT_SKY.weatherBiome,
     weatherVolatility: clampRange(r.weatherVolatility, 0.25, 4, DEFAULT_SKY.weatherVolatility),
+    precip01: clampRange(r.precip01, 0, 1, DEFAULT_SKY.precip01),
+    temperature01: clampRange(r.temperature01, 0, 1, DEFAULT_SKY.temperature01),
+    // Fails open to `auto` on an unknown kind — the closed list lives in
+    // `world/weather.js`, and a stored value from a future version must hand
+    // control back to the derivation rather than storm-lock a species.
+    precipKindAuthored: PRECIP_KINDS.includes(r.precipKindAuthored)
+      ? r.precipKindAuthored
+      : DEFAULT_SKY.precipKindAuthored,
     realism01: clampRange(r.realism01, 0, 1, DEFAULT_SKY.realism01),
     gradeEnvStrength: clampRange(r.gradeEnvStrength, 0, 1, DEFAULT_SKY.gradeEnvStrength),
   });

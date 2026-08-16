@@ -564,7 +564,7 @@ export { createFireSubsystem } from './fire/fire-subsystem.js';
 // `graph/passes.js` declares that seam. Exported now rather than later because
 // this zone's door is how boot.js reaches it at all, and a module that lands
 // without its door is the `graph/reachable-from-boot` debt this repo ratchets.
-export { createPrecipitationSubsystem, resolveActiveSpecies } from './precipitation/precip-subsystem.js';
+export { createPrecipitationSubsystem, resolveActivePopulations } from './precipitation/precip-subsystem.js';
 
 // ⭐ P5's ROOFLINE (Precipitation.md §4.3) — pure grid→world-points, so the
 // Y-flip that killed V2's drips is a Node assertion rather than a runtime vote.

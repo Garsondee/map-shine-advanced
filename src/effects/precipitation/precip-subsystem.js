@@ -34,7 +34,13 @@ import { createPrecipSplashEngine } from '../particles/precip-splash-runtime.js'
 import { createMantleRuntime } from './mantle-runtime.js';
 import { createPrecipCurtain } from './curtain-render.js';
 import { createPrecipDripEngine } from '../particles/precip-drip-runtime.js';
-import { PRECIP_SPECIES, PRECIP_SPECIES_IDS, resolveSpeciesFrame, isBuiltSpecies } from './precip-species.js';
+import {
+  PRECIP_SPECIES,
+  PRECIP_SPECIES_IDS,
+  PRECIP_COMPANIONS,
+  resolveSpeciesFrame,
+  isBuiltSpecies,
+} from './precip-species.js';
 import { createLogger } from '../../core/log.js';
 
 const log = createLogger('precip-subsystem');
@@ -42,39 +48,86 @@ const log = createLogger('precip-subsystem');
 /**
  * Which BUILT species a derived `precipKind` renders as.
  *
- * ⚠️ `sleet` MAPS TO A PAIR, NOT TO A ROW — it is a blend (Precipitation.md
- * §2.2), and the manager already hands us `precipMixWeight` telling us how much
- * of the COLD half is in it. P1 renders the dominant half and records the gap;
- * P5 splits the population per-particle by seed, which is the real answer.
- * Mapping it to `snow` outright would make a 0.49-weight sleet render as pure
- * rain and a 0.51 as pure snow — a hard flip in the middle of the band the
- * band exists to smooth.
+ * ⚠️ `sleet` IS NOT IN THIS MAP AT ALL, and that is the point: it is a BLEND,
+ * so it resolves to a weighted PAIR in `resolveActivePopulations` rather than
+ * to any single row here. A `sleet: 'snow'` entry would be the hard flip the
+ * temperature band exists to smooth.
  */
 const KIND_TO_SPECIES = Object.freeze({
   rain: 'rain',
   snow: 'snow',
-  sleet: null, // resolved by mix weight — see resolveActiveSpecies
+  sleet: null, // a blend — see resolveActivePopulations
   hail: 'hail', // P5 — §4.4's phase machine
-  ash: null, // P6
-  embers: null, // P6
+  ash: 'ash', // P6 — and it brings the ember companion with it
+  /** ⚠️ `embers` AS A WEATHER KIND STAYS UNMAPPED. The manager's closed list
+   * still names it (a GM may say "embers are falling"), but weather's embers
+   * are ASH's companion, not a thing that falls alone — so this reports the
+   * honest "not built" rather than quietly summoning a bare ember population
+   * that would look like orange snow with nothing burning. */
+  embers: null,
 });
 
 /**
- * Which species should draw, given what the manager says is falling.
- * @param {string} precipKind @param {number} mixWeight
- * @returns {{speciesId: string|null, reason: string|null}}
+ * ⭐ WHICH POPULATIONS SHOULD DRAW — plural, weighted.
+ *
+ * ⚠️ THIS REPLACED A FUNCTION THAT RETURNED **ONE** SPECIES, AND THE SINGULAR
+ * WAS ONE GAP BLOCKING TWO FEATURES. `sleet` had to render as its dominant
+ * half — so a 0.49-weight sleet was pure rain and a 0.51 pure snow, a hard flip
+ * in the exact middle of the band the band exists to smooth — and `ash` could
+ * not bring the ember companion §2.2 describes, because there was nowhere to
+ * put a second population. One missing plural, two broken features.
+ *
+ * A weight is a FRACTION OF THE FRAME's OWN `liveCount`, not a second
+ * intensity: the manager's `precip01` still decides how much weather there is,
+ * and these decide how it is divided. That keeps one axis in charge and makes
+ * the blend continuous — sleet at 0.5 is genuinely half and half, and it walks
+ * smoothly to either end.
+ *
+ * @param {string} precipKind
+ * @param {number} mixWeight - 0 = the warm half, 1 = the cold half.
+ * @returns {{populations: Array<{speciesId: string, weight: number}>, reason: string|null}}
  */
-export function resolveActiveSpecies(precipKind, mixWeight = 0) {
+export function resolveActivePopulations(precipKind, mixWeight = 0) {
+  const w = Number.isFinite(mixWeight) ? Math.min(1, Math.max(0, mixWeight)) : 0;
+
   if (precipKind === 'sleet') {
-    // The dominant half, until P5 can genuinely interleave both populations.
-    return { speciesId: mixWeight >= 0.5 ? 'snow' : 'rain', reason: 'sleet renders as its dominant half until P5' };
+    // ⭐ GENUINELY INTERLEAVED (§2.2: *"wet heavy flakes among glassy
+    // streaks"*). Both populations run at once, and the band's weight splits
+    // them — which is what makes crossing the band a dissolve rather than a
+    // switch.
+    const out = [];
+    if (1 - w > 0.01) out.push({ speciesId: 'rain', weight: 1 - w });
+    if (w > 0.01) out.push({ speciesId: 'snow', weight: w });
+    // ⚠️ THE 0.01 FLOOR IS NOT TIDINESS: a population at weight 0.004 still
+    // builds an engine, seeds an arena and dispatches a kernel to draw
+    // sub-single-body counts nobody can see. At the band's very edges sleet
+    // IS just rain, or just snow, and saying so costs one comparison.
+    return { populations: out, reason: null };
   }
+
   const mapped = KIND_TO_SPECIES[precipKind];
-  if (mapped && isBuiltSpecies(mapped)) return { speciesId: mapped, reason: null };
-  if (Object.hasOwn(KIND_TO_SPECIES, precipKind)) {
-    return { speciesId: null, reason: `'${precipKind}' is a real kind but its species is not built yet` };
+  if (!mapped || !isBuiltSpecies(mapped)) {
+    if (Object.hasOwn(KIND_TO_SPECIES, precipKind)) {
+      return { populations: [], reason: `'${precipKind}' is a real kind but its species is not built yet` };
+    }
+    return { populations: [], reason: `unknown precip kind '${precipKind}'` };
   }
-  return { speciesId: null, reason: `unknown precip kind '${precipKind}'` };
+
+  const populations = [{ speciesId: mapped, weight: 1 }];
+
+  /**
+   * ⭐ THE COMPANION (§2.2's ash + ember pair, V2's `ashSystem` +
+   * `ashEmberSystem`). Declared BY THE PARENT ROW, so summoning one is data
+   * rather than a branch here — and `ember` stays out of the closed kind list,
+   * which is what keeps fire's embers and the sky's embers two different
+   * things with one boundary.
+   */
+  const companion = PRECIP_SPECIES[mapped]?.companion ?? null;
+  if (companion?.speciesId && companion.weight > 0) {
+    populations.push({ speciesId: companion.speciesId, weight: companion.weight });
+  }
+
+  return { populations, reason: null };
 }
 
 /**
@@ -154,7 +207,9 @@ export function createPrecipitationSubsystem({
   const splashEngines = new Map();
   /** @type {Map<string, object>} speciesId → IMPRESSION curtain (P4). */
   const curtains = new Map();
-  let activeSpeciesId = null;
+  /** ⭐ EVERY population drawing this frame, weighted. Plural since the
+   * dual-population capability landed — see `resolveActivePopulations`. */
+  let activePopulations = [];
   /**
    * ⭐ THE ZOOM GATE (P4, §3.4 job 1 + Effects.md Law 7). False when bodies are
    * smaller than the species' `zoomSleepPxPerBody` on screen — the specimen
@@ -264,6 +319,53 @@ export function createPrecipitationSubsystem({
       },
       st.tierScale ?? 1
     );
+  }
+
+  /**
+   * Advance ONE population — its fall engine and its splash engine.
+   *
+   * ⚠️ EXTRACTED WHEN `sync` WENT PLURAL. It was inline while there was only
+   * ever one species; with two it either becomes a function or becomes a
+   * copy-paste that drifts — the splash gets a fix the fall does not, or a rect
+   * push is added to one and forgotten on the other, which is exactly the
+   * hand-maintained-list disease this codebase has now paid for four times.
+   */
+  function stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs) {
+    const engine = engineFor(speciesId);
+    // ⚠️ PER-ENGINE, not one shared flag. A single `seeded` boolean meant the
+    // FIRST species to run consumed it and every later one drew from
+    // uninitialised buffers — every body at the world origin. With two
+    // populations live at once that bug would now fire on the FIRST frame of
+    // every sleet rather than only on a species switch.
+    if (!seededEngines.has(speciesId)) {
+      engine.init(renderer);
+      seededEngines.add(speciesId);
+    }
+    if (rect) {
+      engine.setWorldRect(rect);
+      // The VIEW rect, for P7's illum pickup — the same rect, named for the
+      // other job it does.
+      engine.setViewRect(rect);
+    }
+    if (st.sceneBounds !== undefined) engine.setSceneBounds(st.sceneBounds);
+    engine.setFrame(frame);
+    // ⚠️ THE HANDLE IS RE-READ EVERY FRAME, not captured at engine build — the
+    // viewer reassigns it when the wind field bakes, and a captured reference
+    // goes dead silently.
+    engine.step(renderer, dtRealSec, nowMs, getWindHandle());
+
+    // ── THE ARRIVAL (P2) ── built only for a species that actually splashes;
+    // snow, hail and ember all get an engine that reports `ok: false`.
+    const splash = splashEngineFor(speciesId);
+    if (!splash.ok) return;
+    if (!seededSplashEngines.has(speciesId)) {
+      splash.init(renderer);
+      seededSplashEngines.add(speciesId);
+    }
+    if (rect) splash.setWorldRect(rect);
+    if (st.sceneBounds !== undefined) splash.setSceneBounds(st.sceneBounds);
+    splash.setFrame(frame);
+    splash.step(renderer, dtRealSec, nowMs, getWindHandle());
   }
 
   /** Advance the roofline. Cheap when there is no roofline and no tail. */
@@ -376,8 +478,22 @@ export function createPrecipitationSubsystem({
     // `activeSpeciesId`. On a clear day nothing is falling and `activeSpeciesId`
     // is null, but the mantle still needs a `stay` of null to keep melting; and
     // during a thaw the ground remembers snow while rain is what is falling.
-    const kind = resolveActiveSpecies(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
-    const stay = precip01 > 0 && kind.speciesId ? (PRECIP_SPECIES[kind.speciesId].stay ?? null) : null;
+    /**
+     * ⚠️ THE **HEAVIEST** POPULATION FEEDS THE MANTLE, and that is a stated
+     * simplification rather than an oversight. A half-and-half sleet genuinely
+     * deposits both slush and water, and `resolveMantleStep` takes ONE `stay` —
+     * so a true blend needs the model to integrate an array, which is a change
+     * to the mantle's own arithmetic and belongs in a commit that can test it.
+     * Taking the dominant half keeps the ground consistent with what is mostly
+     * falling on it, and the error is largest exactly at 0.5 where both answers
+     * are half wrong anyway.
+     */
+    const resolvedPops = resolveActivePopulations(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
+    const heaviest = resolvedPops.populations.reduce((a, b) => (b.weight > a.weight ? b : a), {
+      speciesId: null,
+      weight: 0,
+    });
+    const stay = precip01 > 0 && heaviest.speciesId ? (PRECIP_SPECIES[heaviest.speciesId]?.stay ?? null) : null;
     mantle.setSurface(stay);
     mantle.step(dtRealSec, st.todHour, {
       stay,
@@ -397,7 +513,7 @@ export function createPrecipitationSubsystem({
     sync(renderer, dtRealSec, nowMs, worldRect) {
       const st = getPrecipRenderState?.() ?? null;
       if (!st || st.enabled === false) {
-        activeSpeciesId = null;
+        activePopulations = [];
         return;
       }
       const weather = st.weather ?? {};
@@ -428,86 +544,61 @@ export function createPrecipitationSubsystem({
       // ⚠️ A JS `if`, never a uniform set to zero (Effects.md Law 4). A clear
       // day must not allocate an engine, dispatch a kernel or submit a draw.
       if (!(precip01 > 0)) {
-        activeSpeciesId = null;
+        activePopulations = [];
         return;
       }
 
-      const { speciesId, reason } = resolveActiveSpecies(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
-      lastReason = reason;
-      activeSpeciesId = speciesId;
-      if (!speciesId) return;
+      const resolved = resolveActivePopulations(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
+      lastReason = resolved.reason;
+      activePopulations = resolved.populations;
+      if (activePopulations.length === 0) return;
 
-      const species = PRECIP_SPECIES[speciesId];
       const rectForZoom = worldRect ?? st.worldRect ?? null;
-      updateZoomGate(species, rectForZoom, st.viewportWidthPx);
+      // ⚠️ THE ZOOM GATE READS THE **DOMINANT** POPULATION. It asks "is a body
+      // big enough on screen to be worth drawing", and with two populations
+      // that has two answers — sleet's flakes stay legible after its streaks do
+      // not. Gating each separately would let one half of a blend vanish while
+      // the other kept drawing, which reads as the weather changing species at
+      // a zoom threshold. The heaviest population decides for both.
+      const dominant = activePopulations.reduce((a, b) => (b.weight > a.weight ? b : a));
+      updateZoomGate(PRECIP_SPECIES[dominant.speciesId], rectForZoom, st.viewportWidthPx);
 
-      // ⭐ THE CURTAIN (P4) — stepped whether or not the specimens are awake,
-      // because it is what carries the picture when they are not.
-      const curtain = curtainFor(speciesId, st.sceneBounds ?? null);
-      if (curtain) {
-        curtain.setFrame(frameFor(species, weather, st, precip01));
-        curtain.step(nowMs, getWindHandle());
-      }
-
-      // ⚠️ THE SPECIMEN TIER SLEEPS AS A JS `if` — no engine built, no kernel
-      // dispatched, no draw submitted (Effects.md Law 7). A uniform set to zero
-      // would still pay the dispatch and the fill, which is exactly the cost
-      // the zoom gate exists to avoid.
-      if (!specimenAwake) return;
-
-      const engine = engineFor(speciesId);
-      // ⚠️ PER-ENGINE, not one shared flag. A single `seeded` boolean meant the
-      // FIRST species to run consumed it and every later one drew from
-      // uninitialised buffers — every body at the world origin, which reads as
-      // "snow is broken" rather than as a missing seed call.
-      if (!seededEngines.has(speciesId)) {
-        engine.init(renderer);
-        seededEngines.add(speciesId);
-      }
-      // The rect comes in as a per-frame ARGUMENT rather than off the render
-      // state, because the viewer computes it inside its frame loop — see the
-      // note at `getPrecipRenderState`'s own `worldRect` in vt-pan-viewer.js.
       const rect = worldRect ?? st.worldRect ?? null;
-      if (rect) engine.setWorldRect(rect);
-      // The VIEW rect, for P7's illum pickup — the same rect, named for the
-      // other job it does, so a reader is not left wondering which mapping a
-      // screen-space sample uses.
-      if (rect) engine.setViewRect(rect);
-      // The SCENE's bounds, distinct from the view rect above — rain must not
-      // fall in the void around the map (the author saw exactly that on the
-      // Mansion). Pushed per frame because it is one uniform write and a scene
-      // change would otherwise need its own invalidation path.
-      if (st.sceneBounds !== undefined) engine.setSceneBounds(st.sceneBounds);
-      // ⚠️ RESOLVED ONCE AND HANDED TO EVERY CONSUMER. The splash rate is not a
-      // second opinion about how much rain there is — it is THE SAME NUMBER
-      // the drops are drawn from, so the carpet thins exactly as the curtain
-      // does. A private curve here could disagree with what the player can see
-      // falling, which is the `feedback_shared_field_two_meanings_two_
-      // registries` shape wearing a raincoat.
-      const frame = frameFor(species, weather, st, precip01);
-      engine.setFrame(frame);
-      // ⚠️ THE HANDLE IS RE-READ EVERY FRAME, not captured at engine build.
-      // `vt-pan-viewer.js`'s `windHandle` is reassigned when the wind field
-      // bakes, and these engines are built lazily — so a captured reference
-      // goes dead silently and the rain stops leaning. See the runtime's
-      // `uWindSpeed01` note.
-      engine.step(renderer, dtRealSec, nowMs, getWindHandle());
 
-      // ── THE ARRIVAL (P2) ──
-      // ⚠️ BUILT ONLY FOR A SPECIES THAT ACTUALLY SPLASHES. `createPrecipSplash
-      // Engine` refuses on `arrive.kind !== 'splash'` and reports `ok: false`,
-      // so snow allocates an engine that draws nothing — cheap, once, and it
-      // keeps "snow has no splashes" answerable from `getStatus()`.
-      const splash = splashEngineFor(speciesId);
-      if (splash.ok) {
-        if (!seededSplashEngines.has(speciesId)) {
-          splash.init(renderer);
-          seededSplashEngines.add(speciesId);
+      for (const { speciesId, weight } of activePopulations) {
+        const species = PRECIP_SPECIES[speciesId] ?? PRECIP_COMPANIONS[speciesId] ?? null;
+        if (!species) continue;
+
+        /**
+         * ⭐ THE WEIGHT LANDS ON `liveCount` AND NOWHERE ELSE.
+         *
+         * Everything else about a population — its speeds, its colours, its
+         * response curves, its splash rate — is the species' own and must not
+         * be scaled: half a sleet is HALF AS MANY raindrops, not raindrops at
+         * half brightness falling half as fast. Scaling the frame's other
+         * multipliers would have been the easy mistake and it would have made
+         * the blend read as a fade rather than as an interleave.
+         */
+        const base = frameFor(species, weather, st, precip01);
+        const frame = { ...base, liveCount: Math.round(base.liveCount * weight) };
+
+        // ⭐ THE CURTAIN (P4) — stepped whether or not the specimens are awake,
+        // because it is what carries the picture when they are not.
+        const curtain = curtainFor(speciesId, st.sceneBounds ?? null);
+        if (curtain) {
+          // ⚠️ THE VEIL TAKES THE WEIGHT TOO, or a half-and-half sleet would
+          // draw TWO full-strength veils stacked and read twice as thick as
+          // either weather alone.
+          curtain.setFrame({ ...base, veil01: base.veil01 * weight });
+          curtain.step(nowMs, getWindHandle());
         }
-        if (rect) splash.setWorldRect(rect);
-        if (st.sceneBounds !== undefined) splash.setSceneBounds(st.sceneBounds);
-        splash.setFrame(frame);
-        splash.step(renderer, dtRealSec, nowMs, getWindHandle());
+
+        // ⚠️ THE SPECIMEN TIER SLEEPS AS A JS `continue` — no engine built, no
+        // kernel dispatched, no draw submitted (Effects.md Law 7). A uniform
+        // set to zero would still pay the dispatch and the fill.
+        if (!specimenAwake) continue;
+
+        stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs);
       }
     },
 
@@ -524,22 +615,34 @@ export function createPrecipitationSubsystem({
     get scenes() {
       const out = [];
       // ⚠️ THE DRIPS ARE CHECKED EVEN WITH NO ACTIVE SPECIES. A first cut
-      // early-returned here on `!activeSpeciesId`, which is TRUE the moment the
+      // early-returned here on an empty population list, which is TRUE the moment the
       // rain stops — and that is exactly when the tail is the only thing left
       // to draw. The one layer whose whole purpose is outliving the weather
       // cannot be gated on the weather.
-      if (!activeSpeciesId) {
+      if (activePopulations.length === 0) {
         if (drips?.hasContent) out.push(drips.scene);
         return out;
       }
-      // GROUND → FAR AIR → NEAR AIR. Splashes lie on the map; the curtain is
-      // the rain in the distance; the bodies are the rain in front of you.
-      const splash = splashEngines.get(activeSpeciesId);
-      if (splash?.ok && splash.debugState().visible) out.push(splash.scene);
-      const curtain = curtains.get(activeSpeciesId);
-      if (curtain?.hasContent) out.push(curtain.scene);
-      const fall = engines.get(activeSpeciesId);
-      if (fall?.debugState().visible) out.push(fall.scene);
+      /**
+       * GROUND → FAR AIR → NEAR AIR — and with two populations that ordering is
+       * BY LAYER, NOT BY SPECIES. All the splashes first, then all the veils,
+       * then all the bodies, because a sleet's snow must not draw its whole
+       * stack on top of the rain's. Grouping by species would put one weather
+       * entirely in front of the other, which is precisely what an interleave
+       * is not.
+       */
+      for (const { speciesId } of activePopulations) {
+        const splash = splashEngines.get(speciesId);
+        if (splash?.ok && splash.debugState().visible) out.push(splash.scene);
+      }
+      for (const { speciesId } of activePopulations) {
+        const curtain = curtains.get(speciesId);
+        if (curtain?.hasContent) out.push(curtain.scene);
+      }
+      for (const { speciesId } of activePopulations) {
+        const fall = engines.get(speciesId);
+        if (fall?.debugState().visible) out.push(fall.scene);
+      }
       // ⭐ THE ROOFLINE LAST — nearest the eye. A drip hangs off an edge that is
       // ABOVE the viewed floor, so it is in front of the rain falling past it,
       // and it must keep drawing when nothing else does (the tail).
@@ -550,7 +653,7 @@ export function createPrecipitationSubsystem({
     /** The FALL's scene alone — kept for the shader lab, which renders the
      * curtain in isolation to measure streak geometry. */
     get scene() {
-      return activeSpeciesId ? (engines.get(activeSpeciesId)?.scene ?? null) : null;
+      return activePopulations[0] ? (engines.get(activePopulations[0].speciesId)?.scene ?? null) : null;
     },
 
     /**
@@ -643,8 +746,9 @@ export function createPrecipitationSubsystem({
       const st = getPrecipRenderState?.() ?? null;
       const weather = st?.weather ?? {};
       const precip01 = Number.isFinite(weather.precip01) ? weather.precip01 : 0;
-      const kind = resolveActiveSpecies(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
-      const stay = precip01 > 0 && kind.speciesId ? (PRECIP_SPECIES[kind.speciesId].stay ?? null) : null;
+      const pops = resolveActivePopulations(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0).populations;
+      const top = pops.reduce((a, b) => (b.weight > a.weight ? b : a), { speciesId: null, weight: 0 });
+      const stay = precip01 > 0 && top.speciesId ? (PRECIP_SPECIES[top.speciesId]?.stay ?? null) : null;
       // ⚠️ THE SEED IS DEFERRED TO THE NEXT `sync`, NOT RUN HERE. This is
       // called from the viewer's mask-rebake chokepoint, which is not inside a
       // render pass — and the seed needs the injected render step. Flagging it
@@ -672,7 +776,7 @@ export function createPrecipitationSubsystem({
      */
     getStatus() {
       const st = getPrecipRenderState?.() ?? null;
-      const engine = activeSpeciesId ? engines.get(activeSpeciesId) : null;
+      const engine = activePopulations[0] ? engines.get(activePopulations[0].speciesId) : null;
       return {
         wired: true,
         // ⚠️ EVERY FACTOR, NOT ONE BOOLEAN. "No rain is visible" has half a
@@ -684,7 +788,7 @@ export function createPrecipitationSubsystem({
         enabled: st?.enabled !== false,
         precip01: st?.weather?.precip01 ?? null,
         precipKind: st?.weather?.precipKind ?? null,
-        activeSpeciesId,
+        activePopulations: activePopulations.map((p) => `${p.speciesId}×${p.weight.toFixed(2)}`),
         reason: lastReason,
         builtEngines: [...engines.keys()],
         availableSpecies: PRECIP_SPECIES_IDS,

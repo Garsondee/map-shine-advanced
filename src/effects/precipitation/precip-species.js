@@ -625,6 +625,22 @@ export const PRECIP_SPECIES = Object.freeze({
       veil: Object.freeze({ kind: 'threshold', at: 0.2, from: 0, to: 1 }),
     }),
     respondStorm: Object.freeze({ flutter: Object.freeze({ kind: 'linear', from: 1, to: 0.3 }) }),
+    /**
+     * ⭐ THE EMBER COMPANION (§2.2) — *"grey flakes + a sparse companion
+     * population of glowing ember motes (additive, wind-twitchy). V2 ran
+     * exactly this pair (`ashSystem` + `ashEmberSystem`)."*
+     *
+     * ⚠️ A WEIGHT, NOT A COUNT. The companion's population is this fraction of
+     * whatever the parent's own response curve produced, so an ash-storm that
+     * thickens brings more sparks with it for free and a dying one takes them
+     * away — one axis, both populations, no second intensity to keep in sync
+     * (`feedback_shared_field_two_meanings_two_registries`).
+     *
+     * Sparse on purpose: embers are the exception in a fall of ash, and a
+     * one-to-one pairing would read as orange snow.
+     */
+    companion: Object.freeze({ speciesId: 'ember', weight: 0.08 }),
+
     arrive: Object.freeze({ kind: 'settle', smearWithWind: false }),
     stay: Object.freeze({
       /** ⭐ THE `dust` CHANNEL's FIRST REAL CUSTOMER. The mantle has integrated it
@@ -1015,7 +1031,98 @@ export const PRECIP_SPECIES = Object.freeze({
 });
 
 /**
- * Resolve a species id. Fails OPEN to *no precipitation* with a reason — the
+ * ⭐ COMPANION SPECIES — rows that exist only because another row summons them.
+ *
+ * ⚠️ SEPARATE FROM `PRECIP_SPECIES` ON PURPOSE, AND THE SEPARATION IS THE
+ * DESIGN. §2.2 is emphatic: *"`ember` is deliberately NOT a top-level species:
+ * fire's own effect owns embers rising FROM fires. Weather owns embers falling
+ * from the SKY as `ash`'s companion population. Same word, two owners, one
+ * boundary — stated here so nobody unifies them into a shared mesh and
+ * reintroduces the `feedback_shared_field_two_meanings_two_registries`
+ * disease."*
+ *
+ * Keeping `ember` out of `PRECIP_SPECIES_IDS` makes that boundary
+ * STRUCTURAL rather than a comment: the manager's closed kind list cannot name
+ * it, `derivePrecipKind` cannot produce it, a GM cannot pick it, and a stored
+ * scene flag cannot restore it. The only way an ember falls from the sky is
+ * because ash brought it — which is exactly the rule.
+ *
+ * It also keeps the table's own invariant intact ("the closed list and the
+ * table name exactly the same rows"), which a hidden extra entry would have
+ * quietly broken.
+ */
+export const PRECIP_COMPANIONS = Object.freeze({
+  ember: Object.freeze({
+    id: 'ember',
+    label: 'Embers',
+    phase: 'magic',
+    fall: Object.freeze({
+      /** Slower even than ash — an ember is a rising, dying thing that has run
+       * out of lift, so it drifts rather than falls. */
+      speedPxS: Object.freeze([18, 52]),
+      windCarry01: 0.95,
+      /** ⭐ WIND-TWITCHY (§2.2). The highest flutter frequency in either table:
+       * an ember jitters where a flake sways, which is most of what makes the
+       * pair read as fire-borne rather than as two kinds of snow. */
+      flutter: Object.freeze({ hzMin: 1.6, hzMax: 3.4, ampPxMin: 22, ampPxMax: 64 }),
+      spin: null,
+      spawnHeightPx: 900,
+      gravityMul: Object.freeze([0.7, 1.4]),
+    }),
+    body: Object.freeze({
+      mode: 'flake',
+      sizePx: Object.freeze([1.1, 2.8]),
+      streakPerPxS: 0.0016,
+      /** Hot core to cooling tail — the one palette in either table that is a
+       * TEMPERATURE rather than a material. */
+      headRgba: Object.freeze([1.0, 0.72, 0.32, 0.95]),
+      tailRgba: Object.freeze([0.85, 0.25, 0.08, 0.5]),
+      brightnessSkewExp: 0.45,
+      /** Above bloom's 4.0 threshold — an ember that does not bloom is an
+       * orange dot (§3.5: authored above it, never hoped). */
+      emissive01: 6.5,
+      softness01: 0.85,
+    }),
+    respond: Object.freeze({
+      count: Object.freeze({ kind: 'linear', from: 0, to: 1 }),
+      length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
+      speed: Object.freeze({ kind: 'linear', from: 0.9, to: 1.2 }),
+      /** Embers never veil — they are the sparks IN the ash's veil. */
+      veil: Object.freeze({ kind: 'threshold', at: 1, from: 0, to: 0 }),
+    }),
+    arrive: Object.freeze({ kind: 'none', smearWithWind: false }),
+    /** An ember burns out; it leaves nothing. `channel: null` says so. */
+    stay: Object.freeze({
+      channel: null,
+      ratePerHour: 0,
+      puddleRatePerHour: 0,
+      meltBy: Object.freeze({ temperature: false, fire: false }),
+      surface: Object.freeze({ tint: Object.freeze([1, 0.8, 0.6]), sparkle01: 0, roughnessDelta: 0 }),
+    }),
+    light: Object.freeze({
+      /** A light SOURCE — brighter at night, like `spore` and `mote`. */
+      dayAlphaMul: 0.8,
+      dayRgbMul: 0.8,
+      nightAlphaMul: 1.6,
+      nightRgbMul: 1.3,
+      flashAlphaMul: 1.2,
+      flashRgbMul: 1.1,
+    }),
+    capacity: 6000,
+    zoomSleepPxPerBody: 0.8,
+  }),
+});
+
+/**
+ * Resolve a species id, INCLUDING companions.
+ *
+ * ⚠️ A COMPANION RESOLVES HERE BUT IS STILL UNSELECTABLE, because selection
+ * goes through the manager's `PRECIP_KINDS` closed list and the subsystem's
+ * `KIND_TO_SPECIES`, neither of which names one. This lookup exists so the
+ * ENGINE BUILDER can construct the row a parent summoned; it is not a door
+ * into the weather.
+ *
+ * Fails OPEN to *no precipitation* with a reason — the
  * same shape `resolveArchetype`/`resolveBiome`/`resolveEventKind` use one zone
  * over, so every table in this system refuses a bad id identically.
  *
@@ -1031,6 +1138,9 @@ export const PRECIP_SPECIES = Object.freeze({
 export function resolveSpecies(id) {
   if (Object.hasOwn(PRECIP_SPECIES, id)) {
     return Object.freeze({ ok: true, species: PRECIP_SPECIES[id], reason: null });
+  }
+  if (Object.hasOwn(PRECIP_COMPANIONS, id)) {
+    return Object.freeze({ ok: true, species: PRECIP_COMPANIONS[id], reason: null });
   }
   if (Object.hasOwn(PRECIP_SPECIES_PLANNED, id)) {
     return Object.freeze({

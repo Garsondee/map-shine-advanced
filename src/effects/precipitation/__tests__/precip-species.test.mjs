@@ -22,6 +22,7 @@ import {
   resolveSpeciesFrame,
   windTowardVector,
 } from '../precip-species.js';
+import { resolveActivePopulations } from '../precip-subsystem.js';
 
 export function run(t) {
   // ---- ⭐ THE COMPASS: which way precipitation is driven -----------------------
@@ -176,6 +177,87 @@ export function run(t) {
       'every `stay.channel` is a known channel or an explicit null',
       PRECIP_SPECIES_IDS.every((id) => [null, 'snow', 'dust'].includes(PRECIP_SPECIES[id].stay.channel))
     );
+  }
+
+  // ---- ⭐ THE DUAL-POPULATION CAPABILITY ---------------------------------------
+  {
+    const of = (kind, w) => resolveActivePopulations(kind, w);
+    const idsOf = (r) => r.populations.map((p) => p.speciesId).sort();
+    const weightOf = (r, id) => r.populations.find((p) => p.speciesId === id)?.weight ?? 0;
+
+    // ⭐ SLEET IS GENUINELY BOTH — the whole reason this capability exists.
+    const mid = of('sleet', 0.5);
+    t.ok('sleet at the band’s middle runs BOTH populations', idsOf(mid).join(',') === 'rain,snow');
+    t.ok(
+      '…and splits them evenly',
+      Math.abs(weightOf(mid, 'rain') - 0.5) < 1e-9 && Math.abs(weightOf(mid, 'snow') - 0.5) < 1e-9
+    );
+
+    /**
+     * ⚠️ THE BUG THIS REPLACED: a resolver returning ONE species made a
+     * 0.49-weight sleet pure rain and a 0.51 pure snow — a hard flip in the
+     * exact middle of the band the band exists to smooth. Continuity across
+     * that point is now something the suite can actually assert.
+     */
+    const warmSide = of('sleet', 0.49);
+    const coldSide = of('sleet', 0.51);
+    t.ok(
+      '⭐ crossing the band’s middle is CONTINUOUS, not a flip',
+      Math.abs(weightOf(warmSide, 'snow') - weightOf(coldSide, 'snow')) < 0.05
+    );
+    t.ok(
+      'both sides of the middle still run both populations',
+      idsOf(warmSide).length === 2 && idsOf(coldSide).length === 2
+    );
+
+    // …and the ENDS collapse to one, because at the edges sleet IS just rain or
+    // just snow — and a population at weight 0.004 still builds an engine,
+    // seeds an arena and dispatches a kernel nobody can see the result of.
+    t.ok('the warm end is rain alone', idsOf(of('sleet', 0)).join(',') === 'rain');
+    t.ok('the cold end is snow alone', idsOf(of('sleet', 1)).join(',') === 'snow');
+    t.ok(
+      'weights always sum to 1 — the blend divides the weather, it does not add to it',
+      [0, 0.2, 0.5, 0.8, 1].every(
+        (w) => Math.abs(of('sleet', w).populations.reduce((n, p) => n + p.weight, 0) - 1) < 1e-9
+      )
+    );
+
+    // ⭐ ASH BRINGS ITS EMBERS (§2.2's `ashSystem` + `ashEmberSystem` pair).
+    const ash = of('ash', 0);
+    t.ok('ash runs two populations', idsOf(ash).join(',') === 'ash,ember');
+    t.ok('the parent is at full strength', weightOf(ash, 'ash') === 1);
+    // ⚠️ SPARSE. A one-to-one pairing would read as orange snow.
+    t.ok('the companion is sparse', weightOf(ash, 'ember') > 0 && weightOf(ash, 'ember') < 0.2);
+    t.ok(
+      'the companion comes from the ROW, not from a branch here',
+      PRECIP_SPECIES.ash.companion.speciesId === 'ember'
+    );
+
+    /**
+     * ⭐ AND `ember` IS STRUCTURALLY UNSELECTABLE — §2.2's boundary between
+     * fire's embers (rising FROM fires) and weather's (falling from the sky)
+     * made mechanical rather than left as a comment. The closed list cannot
+     * name it, so no GM, no derivation and no stored scene flag can summon one.
+     */
+    t.ok('ember is not a selectable species', !PRECIP_SPECIES_IDS.includes('ember'));
+    t.ok('ember is not in the main table', !Object.hasOwn(PRECIP_SPECIES, 'ember'));
+    t.ok(
+      '…but it resolves, so the engine builder can construct what ash summoned',
+      resolveSpecies('ember').ok === true
+    );
+    t.ok(
+      'the `embers` KIND stays unbuilt rather than summoning a bare population',
+      of('embers', 0).populations.length === 0
+    );
+
+    // A species with no companion runs alone.
+    t.ok('plain species run alone', of('rain', 0).populations.length === 1 && of('hail', 0).populations.length === 1);
+    // Failures still yield NOTHING, never a fallback that would rain.
+    t.ok(
+      'an unknown kind yields no populations, with a reason',
+      of('nonesuch', 0).populations.length === 0 && /unknown/.test(of('nonesuch', 0).reason)
+    );
+    t.ok('a non-finite weight is treated as the warm end', of('sleet', NaN).populations[0].speciesId === 'rain');
   }
 
   // ---- THE ARRIVAL: V2's four splash tiles, transcribed ----------------------

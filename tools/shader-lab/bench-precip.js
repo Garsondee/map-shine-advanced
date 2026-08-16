@@ -993,7 +993,16 @@ export function createPrecipBench({ THREE, log }) {
 
       // Snow settles; it must produce no arrival engine work at all.
       driver.setSpecies('snow');
-      driver.set({ skyGate: false, precip01: 0.9 });
+      /**
+       * ⚠️ THE ISOLATION IS RE-STATED HERE, NOT INHERITED FROM THE TOP OF THE
+       * SCENARIO. This block passed alone and failed in sequence (1,377 splash
+       * pixels for a species with no splashes), because it was relying on layer
+       * flags set sixty lines earlier and unchanged by any of the four
+       * `driver.set` calls between — a dependency on scenario ORDER that no
+       * reader could see. A measurement's preconditions belong at the
+       * measurement (`feedback_count_silent_preconditions`).
+       */
+      driver.set({ fall: false, arrival: true, curtain: false, skyGate: false, precip01: 0.9, curtainBandDepth: 0 });
       const snowSplash = await driver.measureCoverage(30);
       const snowState = driver.splashEngines.get('snow').debugState();
 
@@ -1395,33 +1404,38 @@ export function createPrecipBench({ THREE, log }) {
       });
 
       /**
-       * ⚠⚠ AVERAGED OVER SEVERAL SAMPLES, AND THAT IS NOT PADDING. Every
-       * `measureRegion` ADVANCES the simulation, so two readings are two
-       * DIFFERENT random populations of drops — the same scene measured twice
-       * differs by a few percent purely from which bodies happen to be where.
+       * ⭐ A **PAIRED** MEASUREMENT: the same population, measured twice, with
+       * only the uniform changed between the two reads.
        *
-       * This scenario passed alone at 4.7% drift and failed at 8.2% when run
-       * after the others, against an 8% bar: not a regression, just the
-       * instrument's own noise floor crossing a line drawn below it. The honest
-       * fix is to BEAT the noise (average it down) rather than widen the bar
-       * until it stops complaining — widening would have left a real 8% bug
-       * undetectable ever after (`feedback_calibration_needs_a_contrast_guard`).
+       * ⚠️ TWO EARLIER SHAPES OF THIS CHECK WERE BOTH WRONG, and the reason is
+       * worth keeping. Every `measureRegion` ADVANCES the simulation, so two
+       * ordinary reads are two DIFFERENT random populations of drops — and rain
+       * is sparse and recycles in ~0.24 s, so a region's mean luma genuinely
+       * swings by over 10% from one moment to the next. The first cut compared
+       * two such reads (drifted 4.7% alone, 8.2% in sequence); the second
+       * averaged five reads each and drifted THIRTEEN percent, because samples
+       * six frames apart are correlated and averaging correlated samples buys
+       * almost nothing.
+       *
+       * The fix is not more samples — it is removing the variable. Settling
+       * once and then measuring with `frames = 0` means both reads see the
+       * IDENTICAL bodies in the identical places, so the difference between
+       * them is the term under test and nothing else. An exact instrument
+       * instead of a quieter one (`feedback_measure_the_output_not_the_equation`).
        */
       const LEFT = { u0: 0.02, u1: 0.45, v0: 0.05, v1: 0.95 };
       const RIGHT = { u0: 0.55, u1: 0.98, v0: 0.05, v1: 0.95 };
-      const meanOf = async (rect, samples, settle) => {
-        let sum = 0;
-        for (let k = 0; k < samples; k++) sum += (await driver.measureRegion(rect, k === 0 ? settle : 6)).meanLuma;
-        return sum / samples;
-      };
+
+      // Settle ONCE. Nothing below advances the sim.
+      await driver.measureCoverage(40);
 
       driver.engine.setTuning({ illumLit01: 0 });
-      const offL = { meanLuma: await meanOf(LEFT, 5, 30) };
-      const offR = { meanLuma: await meanOf(RIGHT, 5, 2) };
+      const offL = await driver.measureRegion(LEFT, 0);
+      const offR = await driver.measureRegion(RIGHT, 0);
 
       driver.engine.setTuning({ illumLit01: 1 });
-      const onL = { meanLuma: await meanOf(LEFT, 5, 30) };
-      const onR = { meanLuma: await meanOf(RIGHT, 5, 2) };
+      const onL = await driver.measureRegion(LEFT, 0);
+      const onR = await driver.measureRegion(RIGHT, 0);
 
       driver.engine.setTuning({ illumLit01: 0.85 });
       driver.set({ arrival: true, curtain: true, precip01: 0.6, curtainBandDepth: 0.8 });
@@ -1438,15 +1452,15 @@ export function createPrecipBench({ THREE, log }) {
           evaluate('the-unlit-side-is-untouched', () => {
             const drift = Math.abs(onL.meanLuma - offL.meanLuma) / Math.max(1e-6, offL.meanLuma);
             return {
-              ok: drift < 0.05,
+              ok: drift < 0.02,
               measured: +drift.toFixed(4),
-              expected: '< 5% change where there is no light — a wrong uv lights BOTH halves',
+              expected: '< 2% — a paired read, so a wrong uv lighting BOTH halves has nowhere to hide',
             };
           }),
           // ⭐ IT BRIGHTENS ONLY. An unlit corner must not make rain DARKER than
           // V2's scalar day/night model already says it is.
           evaluate('darkness-never-dims-the-rain', () => ({
-            ok: onL.meanLuma >= offL.meanLuma * 0.95,
+            ok: onL.meanLuma >= offL.meanLuma * 0.995,
             measured: { off: +offL.meanLuma.toFixed(4), on: +onL.meanLuma.toFixed(4) },
             expected: 'the unlit side is never dimmer than with the term off',
           })),

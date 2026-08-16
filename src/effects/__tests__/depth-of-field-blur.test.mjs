@@ -7,7 +7,11 @@
  * zero is what leaves the current floor's own pixels byte-identical under
  * NormalBlending (`depth-of-field-render.js`'s own header) — a wrong default
  * here would mean the "never touch the current floor" promise silently
- * breaks for some input, not just an off-by-a-bit blur amount.
+ * breaks for some input, not just an off-by-a-bit blur amount. Below the
+ * viewed floor it is now a hard, strength-independent 1 (always a full
+ * replace) — `strength` moved to `computeDofMipSample`, where it scales the
+ * blur RADIUS instead of the composite's alpha, so it no longer produces a
+ * sharp/blurred ghosting cross-fade at anything short of full strength.
  */
 import { computeDofFloorsBelow, computeDofMipSample, computeDofAlpha } from '../depth-of-field-blur.js';
 
@@ -128,31 +132,71 @@ export function run(t) {
         return monotonic;
       })()
     );
+    ok(
+      'strength scales the RADIUS: half strength halves the lod reached at a given distance',
+      (() => {
+        const s = computeDofMipSample({ floorsBelow: 2, strength: 0.5, blurPerFloor: 1, maxBlur: 1, mipCount: 5 });
+        return s.lod === 1;
+      })()
+    );
+    ok(
+      'strength=0 holds every below-floor pixel at lod 0 — a real "no blur" switch, not an opacity of 0',
+      computeDofMipSample({ floorsBelow: 50, strength: 0, blurPerFloor: 2, maxBlur: 1, mipCount: 4 }).lod === 0
+    );
+    ok(
+      'strength is clamped into [0,1] — an out-of-range stored value cannot over- or under-shoot the ramp',
+      computeDofMipSample({ floorsBelow: 3, strength: 5, blurPerFloor: 1, maxBlur: 1, mipCount: 5 }).lod ===
+        computeDofMipSample({ floorsBelow: 3, strength: 1, blurPerFloor: 1, maxBlur: 1, mipCount: 5 }).lod &&
+        computeDofMipSample({ floorsBelow: 3, strength: -5, blurPerFloor: 1, maxBlur: 1, mipCount: 5 }).lod === 0
+    );
+    ok(
+      'a non-finite strength defaults to 1 (the schema default), never a silent zero — a broken param must not ' +
+        'read as "effect off"',
+      (() => {
+        const withNaN = computeDofMipSample({
+          floorsBelow: 3,
+          strength: NaN,
+          blurPerFloor: 1,
+          maxBlur: 1,
+          mipCount: 5,
+        });
+        const withOne = computeDofMipSample({ floorsBelow: 3, strength: 1, blurPerFloor: 1, maxBlur: 1, mipCount: 5 });
+        return withNaN.lod === withOne.lod;
+      })()
+    );
+    ok(
+      'an omitted strength (a caller not yet passing it) also degrades to 1, not 0',
+      computeDofMipSample({ floorsBelow: 2, blurPerFloor: 1, maxBlur: 1, mipCount: 5 }).lod === 2
+    );
   }
 
   // ── computeDofAlpha — THE "NEVER TOUCH THE CURRENT FLOOR" GUARANTEE ─────
   {
-    ok('zero floors below -> alpha is EXACTLY 0', computeDofAlpha({ floorsBelow: 0, strength: 1 }) === 0);
     ok(
-      'zero floors below is alpha 0 even at max strength and even with garbage strength',
-      computeDofAlpha({ floorsBelow: 0, strength: 1 }) === 0 &&
-        computeDofAlpha({ floorsBelow: 0, strength: NaN }) === 0 &&
-        computeDofAlpha({ floorsBelow: 0, strength: -5 }) === 0
+      'zero floors below -> alpha is EXACTLY 0 even with a nonzero lod',
+      computeDofAlpha({ floorsBelow: 0, lod: 2 }) === 0
     );
     ok(
       'a negative floorsBelow (should never happen, but total) is also alpha 0',
-      computeDofAlpha({ floorsBelow: -1, strength: 1 }) === 0
-    );
-    ok('one floor below at full strength -> alpha 1', computeDofAlpha({ floorsBelow: 1, strength: 1 }) === 1);
-    ok('one floor below at half strength -> alpha 0.5', computeDofAlpha({ floorsBelow: 1, strength: 0.5 }) === 0.5);
-    ok(
-      'strength is clamped into [0,1] — an out-of-range stored value cannot over- or under-shoot',
-      computeDofAlpha({ floorsBelow: 1, strength: 5 }) === 1 && computeDofAlpha({ floorsBelow: 1, strength: -5 }) === 0
+      computeDofAlpha({ floorsBelow: -1, lod: 2 }) === 0
     );
     ok(
-      'a non-finite strength on a BELOW-floor pixel defaults to 1 (the schema default), never a silent zero — ' +
-        'a broken param must not read as "effect off"',
-      computeDofAlpha({ floorsBelow: 2, strength: NaN }) === 1
+      'a floor below with a nonzero lod -> alpha is EXACTLY 1, a full replace, never a fractional cross-fade',
+      computeDofAlpha({ floorsBelow: 1, lod: 0.01 }) === 1 && computeDofAlpha({ floorsBelow: 5, lod: 3 }) === 1
+    );
+    ok(
+      'a floor below but lod EXACTLY 0 (strength/blurPerFloor/maxBlur all landed the ramp at zero) -> alpha 0 — ' +
+        'mip0 is a softened half-res sample, not a sharp source, so "no blur requested" must mean "untouched," ' +
+        'not "replaced by the least-blurred mip anyway"',
+      computeDofAlpha({ floorsBelow: 1, lod: 0 }) === 0
+    );
+    ok(
+      'end-to-end: every slider at 0 (strength, blurPerFloor, maxBlur) drives lod to 0, and that ' +
+        'lod-of-0 disables the replace outright — the actual bug this test set exists to catch',
+      (() => {
+        const { lod } = computeDofMipSample({ floorsBelow: 3, strength: 0, blurPerFloor: 0, maxBlur: 0, mipCount: 4 });
+        return computeDofAlpha({ floorsBelow: 3, lod }) === 0;
+      })()
     );
   }
 }

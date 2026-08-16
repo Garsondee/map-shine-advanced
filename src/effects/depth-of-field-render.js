@@ -154,17 +154,23 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
     const isBelow = present.and(floorIndexHere.lessThan(uViewedFloorIndex));
     const floorsBelow = select(isBelow, uViewedFloorIndex.sub(floorIndexHere), float(0));
 
-    // Mirrors computeDofMipSample.
-    const lod = floorsBelow.mul(uBlurPerFloor).clamp(0.0, float(topLod).mul(uMaxBlur));
+    // Mirrors computeDofMipSample — uStrength scales the RADIUS (how far the
+    // lod ramp climbs), not the composite's alpha below. That is what makes
+    // low strength read as "less blurred" instead of "sharp/blurred ghosting."
+    const lod = floorsBelow.mul(uBlurPerFloor).mul(uStrength).clamp(0.0, float(topLod).mul(uMaxBlur));
     const lod0 = lod.floor();
     const lod1 = lod0.add(1.0).min(float(topLod));
     const frac = lod.sub(lod0);
     const blurredColor = mix(pickMip(lod0), pickMip(lod1), frac);
 
-    // Mirrors computeDofAlpha — a hard cut (0 or `strength`), never a ramp;
-    // see that function's own doc for why the floor-index boundary needs no
-    // spatial feathering.
-    const alpha = select(floorsBelow.greaterThan(0.0), uStrength, float(0));
+    // Mirrors computeDofAlpha — a hard cut (0 or 1), never a ramp and never
+    // `strength`-scaled: a below-floor pixel is always a full replace by ONE
+    // coherent (blurred-per-uStrength) sample, never a cross-fade with the
+    // sharp source. Also requires lod>0: mip0 is a half-res, pre-softened
+    // sample, not a sharp source, so strength/blurPerFloor/maxBlur landing
+    // the ramp at exactly 0 must disable the replace outright, or "every
+    // slider at zero" would still visibly blur via mip0's own softness.
+    const alpha = select(floorsBelow.greaterThan(0.0).and(lod.greaterThan(0.0)), float(1.0), float(0.0));
 
     return vec4(blurredColor, alpha);
   })();

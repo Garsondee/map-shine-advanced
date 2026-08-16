@@ -1831,7 +1831,8 @@ export async function startVtPanViewer({
     // exact empty-struct WGSL error this produced. `describeSceneAttrMrt`
     // gives this target a second, real 'attr' attachment so the match
     // succeeds; its contents are simply never read by anything.
-    const describeSceneColorMapOnlyMrt = () => describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
+    const describeSceneColorMapOnlyMrt = () =>
+      describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
     const sceneColorMapOnly = allocator.create('scene.colorMapOnly', describeSceneColorMapOnlyMrt());
 
     // ========================================================================
@@ -5817,9 +5818,12 @@ export async function startVtPanViewer({
             } catch (err) {
               renderer.setRenderTarget(null);
               lastSnapshotError = String(err?.message ?? err);
-              log.error('explored-snapshot publish failed — live/black-explored fog keeps working, dim zone will not update', {
-                err: lastSnapshotError,
-              });
+              log.error(
+                'explored-snapshot publish failed — live/black-explored fog keeps working, dim zone will not update',
+                {
+                  err: lastSnapshotError,
+                }
+              );
             }
           }
         }
@@ -6743,6 +6747,28 @@ export async function startVtPanViewer({
         settling: r.settling,
         source: weatherSource,
       };
+    }
+
+    /**
+     * Apply a NAMED sky (docs/planning/Weather-Manager.md §3.2) — the
+     * astrolabe's Horizon shelf, and the scene-load restore path.
+     *
+     * Sets all four cloud axes together, which is the whole reason archetypes
+     * exist: the alternative is four `setCloudCover`-shaped calls that could
+     * each half-apply. Fails OPEN to `clear` inside the manager and returns the
+     * reason, so a stored id from a future version cannot storm-lock a scene.
+     *
+     * Same first-write-jumps rule as `setCloudCover` and for the same reason —
+     * a scene load lands its sky instead of fading in from clear.
+     *
+     * @param {string} id @param {string} [source] @returns {object}
+     */
+    function setWeatherArchetype(id, source = 'console') {
+      const res = weather.applyArchetype(id, { immediate: !weatherEverApplied });
+      weatherEverApplied = true;
+      weatherSource = source;
+      const r = weather.read();
+      return { ...res, settling: r.settling, source: weatherSource, targets: r.targets };
     }
 
     /**
@@ -15713,6 +15739,9 @@ export async function startVtPanViewer({
        * BOTH the sky light and the shadow handle from one number. Sets a
        * TARGET; the weather manager eases the sky there. */
       setCloudCover,
+      /** Apply a NAMED sky — all four cloud axes at once, from the archetype
+       * table. docs/planning/Weather-Manager.md §3.2. */
+      setWeatherArchetype,
       /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
       setSkyRealism,
       /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
@@ -16212,6 +16241,29 @@ export async function startVtPanViewer({
           windSpeed01: env.wind.speed01,
           timeScale: lastEnvSnapshot.timeScale ?? 1,
           paused: lastEnvSnapshot.paused === true,
+          // THE WEATHER, for the astrolabe's Face and Horizon
+          // (docs/planning/Weather-Manager.md §9). All three come from the
+          // EASED snapshot rather than from the manager's targets, so the dial
+          // shows the sky the map is actually rendering.
+          //
+          // ⚠️ `preset` is the manager's DERIVED label — it reports `custom`
+          // the moment a hand edit moves the axes off a named row, which is
+          // what stops the shelf lighting a button that no longer describes
+          // the sky. The dial does not compute it and must not.
+          preset: env.weather.preset,
+          cloudType01: env.weather.cloudType01,
+          // ⚠️ THE EASED COVER, DELIBERATELY SEPARATE FROM THE SLIDER'S VALUE.
+          // `boot.js` sets the dial's `cloudCover01` from the STORED target, so
+          // the slider responds the instant a GM releases it. The Face has the
+          // opposite job — it must show the sky the map is actually rendering,
+          // which during a transition is somewhere behind that. Same
+          // targets-vs-state split the manager itself keeps; collapsing them
+          // would make one of the two lie for the whole ease.
+          cloudCoverEased01: env.weather.cloudCover01,
+          // The Face darkens at night. `dayFactor01` is the same signal the
+          // shadow handle and the daylight tint already read — not a second
+          // "is it dark" derivation.
+          dayFactor01: env.sun.dayFactor01,
         };
       },
 
@@ -16260,7 +16312,8 @@ export async function startVtPanViewer({
         //     (an exception on some LATER frame, or the gate stopped passing)
         //   snapshotError non-null             → the most recent attempt threw
         snapshotPublishCount,
-        snapshotPublishMsSinceLast: lastSnapshotPublishAt > 0 ? Math.round(performance.now() - lastSnapshotPublishAt) : null,
+        snapshotPublishMsSinceLast:
+          lastSnapshotPublishAt > 0 ? Math.round(performance.now() - lastSnapshotPublishAt) : null,
         snapshotError: lastSnapshotError,
         // A REAL pixel out of exploredSnapshotTarget, not just proof the
         // publish draw executed — see `probeSnapshotColor`'s own doc.
@@ -17777,6 +17830,17 @@ export function setVtPanViewerTimeMode(mode) {
 export function setVtPanViewerCloudCover(cover01, source) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setCloudCover(cover01, source);
+}
+
+/**
+ * Apply a NAMED sky from the archetype table — all four cloud axes at once
+ * (docs/planning/Weather-Manager.md §3.2). The astrolabe's Horizon shelf and
+ * the scene-load restore both come through here.
+ * @param {string} id @param {string} [source] @returns {object}
+ */
+export function setVtPanViewerWeatherArchetype(id, source) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setWeatherArchetype(id, source);
 }
 
 /**

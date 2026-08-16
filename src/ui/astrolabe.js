@@ -566,7 +566,10 @@ export function createAstrolabe(opts) {
    * @param {object} s
    */
   function paintFace(s) {
-    const cover = Math.max(0, Math.min(1, s.cloudCover01 ?? 0));
+    // The EASED cover when the caller supplies it — the Face shows the sky the
+    // map is rendering, not the target the slider is already showing. Falls
+    // back to the slider's value for a caller that has not wired the split.
+    const cover = Math.max(0, Math.min(1, s.cloudCoverEased01 ?? s.cloudCover01 ?? 0));
     const type = Math.max(0, Math.min(1, s.cloudType01 ?? 0.5));
     // Night should not read as a bright blue day disc.
     const day = Math.max(0, Math.min(1, s.dayFactor01 ?? 1));

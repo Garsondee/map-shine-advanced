@@ -39,6 +39,7 @@
 
 import { normalizeHour } from './sun.js';
 import { DAY_CLOCK_MODES, DEFAULT_TOD_HOUR, DEFAULT_RATE_HOURS_PER_MINUTE } from './day-clock.js';
+import { DEFAULT_ARCHETYPE_ID, CUSTOM_PRESET, isApplicableArchetype } from './weather-data.js';
 
 /**
  * The scene's LOOK block — everything about time, weather and colour a scene can
@@ -56,8 +57,25 @@ export const DEFAULT_SKY = Object.freeze({
   todHour: DEFAULT_TOD_HOUR,
   /** Game-hours per real minute. 0 = frozen (the default; see day-clock.js). */
   rateHoursPerMinute: DEFAULT_RATE_HOURS_PER_MINUTE,
-  /** 0..1 overcast. */
+  /** 0..1 overcast. Authoritative ONLY when `weatherArchetype` is `custom` —
+   * see that field. */
   cloudCover01: 0,
+  /**
+   * THE NAMED SKY (docs/planning/Weather-Manager.md §3.2) — an archetype id, or
+   * `custom` for a sky hand-tuned off every named row.
+   *
+   * ⚠️ THIS AND `cloudCover01` ARE NOT TWO COPIES OF ONE FACT, and the split is
+   * deliberate: exactly one of them is authoritative at a time. A named
+   * archetype carries ALL FOUR cloud axes, so storing its id restores the whole
+   * sky — storing cover alongside it would be a second, lower-resolution
+   * account of the same thing, free to disagree the moment a row's values are
+   * tuned (`feedback_shared_field_two_meanings_two_registries`). `custom` is
+   * the one state cover has to describe, because there is no row to name.
+   *
+   * The restore rule, in `boot.js#applyLookToEngines`: a real id applies the
+   * ROW; `custom` applies the stored COVER. Never both.
+   */
+  weatherArchetype: DEFAULT_ARCHETYPE_ID,
   /** 0 = exact Foundry parity (the sky light is a no-op), 1 = full model.
    * See effects/sky-access.js for why the default cannot be anything else. */
   realism01: 0,
@@ -87,6 +105,14 @@ export function normalizeSky(raw) {
     todHour: Number.isFinite(Number(r.todHour)) ? normalizeHour(r.todHour) : DEFAULT_SKY.todHour,
     rateHoursPerMinute: clampRange(r.rateHoursPerMinute, -60, 60, DEFAULT_SKY.rateHoursPerMinute),
     cloudCover01: clampRange(r.cloudCover01, 0, 1, DEFAULT_SKY.cloudCover01),
+    // A stored id from a future version (or a typo) falls back to `clear`
+    // rather than being kept and failing later — the same fail-open posture
+    // `resolveArchetype` takes, applied at the storage boundary so a bad value
+    // never even reaches the manager.
+    weatherArchetype:
+      r.weatherArchetype === CUSTOM_PRESET || isApplicableArchetype(r.weatherArchetype)
+        ? r.weatherArchetype
+        : DEFAULT_SKY.weatherArchetype,
     realism01: clampRange(r.realism01, 0, 1, DEFAULT_SKY.realism01),
     gradeEnvStrength: clampRange(r.gradeEnvStrength, 0, 1, DEFAULT_SKY.gradeEnvStrength),
   });

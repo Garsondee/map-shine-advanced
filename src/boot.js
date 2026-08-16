@@ -206,6 +206,7 @@ import {
   setVtPanViewerSkyRealism,
   setVtPanViewerGradeEnvStrength,
   setVtPanViewerCloudCover,
+  setVtPanViewerWeatherArchetype,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   resetVtPanViewerFrameStats,
@@ -6542,8 +6543,20 @@ function install() {
         // never decides WHICH scope it is writing to — `applySkyEdit` does, from
         // the one precedence rule. A UI that picked the target itself would be a
         // second copy of that rule, free to disagree with it.
+        // Dragging Cloud moves the sky OFF whatever named row it was on, so the
+        // stored archetype becomes `custom` in the same write. Leaving it
+        // naming the old row would persist a sky that claims to be `overcast`
+        // at cover 0.2 — the exact lie the manager's derived label prevents at
+        // runtime, reintroduced through the store. One edit, both fields.
         onCloudChange: (v, committed) => {
-          if (committed) void editSky({ cloudCover01: v });
+          if (committed) void editSky({ cloudCover01: v, weatherArchetype: 'custom' });
+        },
+        // THE HORIZON SHELF (docs/planning/Weather-Manager.md §9) — one click,
+        // one named sky. Stores the ID, not the four axis values: the row IS
+        // the authored intent, and re-deriving the axes from it on load means a
+        // future tweak to a row reaches every scene that chose it.
+        onArchetypeChange: (id) => {
+          void editSky({ weatherArchetype: id });
         },
         onSkyRealismChange: (v, committed) => {
           if (committed) void editSky({ realism01: v });
@@ -6586,7 +6599,15 @@ function install() {
     setVtPanViewerTimeMode(sky.mode);
     setVtPanViewerTimeRate(sky.rateHoursPerMinute);
     if (sky.mode === 'aesthetic') setVtPanViewerSunHour(sky.todHour);
-    setVtPanViewerCloudCover(sky.cloudCover01, 'sky-settings');
+    // THE WEATHER RESTORE RULE — exactly ONE of these two is authoritative,
+    // never both (see `DEFAULT_SKY.weatherArchetype`'s own note). A named sky
+    // applies its whole ROW, so all four cloud axes come back; only a
+    // hand-tuned `custom` sky is described by the stored cover.
+    if (sky.weatherArchetype && sky.weatherArchetype !== 'custom') {
+      setVtPanViewerWeatherArchetype(sky.weatherArchetype, 'sky-settings');
+    } else {
+      setVtPanViewerCloudCover(sky.cloudCover01, 'sky-settings');
+    }
     setVtPanViewerSkyRealism(sky.realism01);
     // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — its strength drives the
     // automatic ToD/weather look + cloud desaturation. (The ARTISTIC grade is a
@@ -7919,9 +7940,7 @@ function install() {
   // an empty mask (token config / game system) is pixel-identical to an
   // inactive global light (MSA's own concern). This names WHICH gate is
   // failing. Control a token first, then run it.
-  MapShine.debug.registerReport('token-vision', 'Token vision: why is it dark?', () =>
-    readTokenVisionDiagnostic()
-  );
+  MapShine.debug.registerReport('token-vision', 'Token vision: why is it dark?', () => readTokenVisionDiagnostic());
 
   // THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I need a
   // button to activate pixel probe and the ability to click on the screen

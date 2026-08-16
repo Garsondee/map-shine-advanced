@@ -51,6 +51,7 @@ export {
   setVtPanViewerSkyRealism,
   setVtPanViewerGradeEnvStrength,
   setVtPanViewerCloudCover,
+  setVtPanViewerWeatherArchetype,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   setVtPanViewerWindForceThaw,

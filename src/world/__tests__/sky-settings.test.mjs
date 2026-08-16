@@ -145,4 +145,60 @@ export function run(t) {
     const messy = normalizeSky({ gradeEnvStrength: 5 });
     t.ok('an out-of-range env strength clamps', messy.gradeEnvStrength === 1);
   }
+
+  // ---- THE NAMED SKY (weather manager slice 2) --------------------------------
+  // `weatherArchetype` and `cloudCover01` are NOT two copies of one fact —
+  // exactly one is authoritative at a time. These pin that contract, because the
+  // failure mode if it slips is a scene that reloads claiming to be `overcast`
+  // while sitting at cover 0.2.
+  {
+    t.ok('a fresh sky is `clear`, matching DEFAULT_WEATHER', DEFAULT_SKY.weatherArchetype === 'clear');
+
+    t.ok(
+      'a real archetype id survives normalisation',
+      normalizeSky({ weatherArchetype: 'thunderstorm' }).weatherArchetype === 'thunderstorm'
+    );
+    t.ok(
+      '`custom` is a legal stored value — it is the one state cover must describe',
+      normalizeSky({ weatherArchetype: 'custom' }).weatherArchetype === 'custom'
+    );
+
+    // Fail OPEN at the STORAGE boundary, so a bad value never reaches the
+    // manager at all — a scene stored by a future version with a sky this build
+    // does not know must open, not storm-lock.
+    t.ok(
+      'an unknown id falls back to clear',
+      normalizeSky({ weatherArchetype: 'hurricane-of-frogs' }).weatherArchetype === 'clear'
+    );
+    t.ok(
+      '...as do non-strings',
+      normalizeSky({ weatherArchetype: 42 }).weatherArchetype === 'clear' &&
+        normalizeSky({ weatherArchetype: null }).weatherArchetype === 'clear'
+    );
+
+    // One corrupt field must not discard the rest of an authored sky.
+    const partial = normalizeSky({ weatherArchetype: 'nope', todHour: 19.5, cloudCover01: 0.4 });
+    t.ok(
+      'a bad archetype leaves the hour and cover intact',
+      partial.todHour === 19.5 && close(partial.cloudCover01, 0.4)
+    );
+
+    // It rides the SAME world/scene precedence as everything else here.
+    const scoped = resolveSky({
+      world: { weatherArchetype: 'fog' },
+      scene: { weatherArchetype: 'gale' },
+      sceneOverrides: true,
+    });
+    t.ok('a scene can own its own sky name', scoped.sky.weatherArchetype === 'gale');
+    t.ok(
+      '...and inherits the world sky when it does not',
+      resolveSky({ world: { weatherArchetype: 'fog' } }).sky.weatherArchetype === 'fog'
+    );
+
+    const edit = applySkyEdit({ world: {} }, { weatherArchetype: 'snow' });
+    t.ok(
+      'an archetype edit targets the world with no override',
+      edit.target === 'world' && edit.sky.weatherArchetype === 'snow'
+    );
+  }
 }

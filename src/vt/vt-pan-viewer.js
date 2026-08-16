@@ -6838,6 +6838,31 @@ export async function startVtPanViewer({
     }
 
     /**
+     * ⭐ EVENTS (slice 4, Weather-Manager.md §6) — console-first, same posture
+     * as the Almanac's own levers just above: `MapShine.addWeatherEvent({kind:
+     * 'ash-storm'})` is enough to watch cloud cover/type roll in with no
+     * astrolabe control built for it yet. See `world/weather-events.js`'s own
+     * header for exactly which of the 9 built-ins move a pixel this slice
+     * (only `ash-storm` — the rest need slice 5/6's machinery).
+     * @param {object} spec @returns {object}
+     */
+    function addWeatherEvent(spec) {
+      return weather.addEvent(spec);
+    }
+    /** @param {string} id @returns {boolean} */
+    function releaseWeatherEvent(id) {
+      return weather.releaseEvent(id);
+    }
+    /** @param {string} id @returns {boolean} */
+    function removeWeatherEvent(id) {
+      return weather.removeEvent(id);
+    }
+    /** @returns {ReadonlyArray<object>} */
+    function getWeatherActiveEvents() {
+      return weather.getActiveEvents();
+    }
+
+    /**
      * THE SKY-LIGHT LEVER, 0..1 (docs/planning/Sky.md §8). `0` — the default —
      * makes the sky light a mathematical no-op, preserving the
      * pixel-identical-to-Foundry-at-noon parity check exactly. `1` is the full
@@ -15820,6 +15845,14 @@ export async function startVtPanViewer({
       getWeatherForecast,
       /** Release the Almanac's hold-off on one axis — the astrolabe's pin glyph. */
       unpinWeatherAxis,
+      /** Start a weather event (slice 4). docs/planning/Weather-Manager.md §6. */
+      addWeatherEvent,
+      /** Begin an event's release ramp early — works from any phase. */
+      releaseWeatherEvent,
+      /** Remove an event immediately, no release ramp. */
+      removeWeatherEvent,
+      /** Every currently-active event and where its envelope is. */
+      getWeatherActiveEvents,
       /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
       setSkyRealism,
       /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
@@ -16363,6 +16396,12 @@ export async function startVtPanViewer({
           // own dwells (rarely over a day, see `DEFAULT_DWELL_HOURS`) mean
           // something is usually actually inside it.
           weatherForecastNext: weather.forecast(48, { hour: env.time.todHour }).transitions[0] ?? null,
+          // ⭐ EVENTS (slice 4) — no astrolabe tray reads this yet (an empty
+          // tray is a control that does nothing, `feedback_debug_ui_one_
+          // action_one_control`), but it rides along now so that UI's own
+          // slice does not need to come back through vt-pan-viewer.js just to
+          // plumb one more field. `getStatus()`'s door, spared the axis table.
+          weatherActiveEvents: weather.getActiveEvents(),
         };
       },
 
@@ -17978,6 +18017,34 @@ export function getVtPanViewerWeatherForecast(hoursAhead) {
 export function unpinVtPanViewerWeatherAxis(name) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.unpinWeatherAxis(name);
+}
+
+/**
+ * ⭐ EVENTS (slice 4, Weather-Manager.md §6) — console-first, same posture as
+ * the Almanac's own levers just above. `MapShine.addWeatherEvent({kind:
+ * 'ash-storm'})` is enough to watch cloud cover/type roll in with no
+ * astrolabe control built for it yet. See `world/weather-events.js`'s own
+ * header for exactly which of the 9 built-ins move a pixel this slice.
+ * @param {object} spec @returns {object|{skipped:true}}
+ */
+export function addVtPanViewerWeatherEvent(spec) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.addWeatherEvent(spec);
+}
+/** @param {string} id @returns {boolean|{skipped:true}} */
+export function releaseVtPanViewerWeatherEvent(id) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.releaseWeatherEvent(id);
+}
+/** @param {string} id @returns {boolean|{skipped:true}} */
+export function removeVtPanViewerWeatherEvent(id) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.removeWeatherEvent(id);
+}
+/** @returns {ReadonlyArray<object>|{skipped:true}} */
+export function getVtPanViewerWeatherActiveEvents() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getWeatherActiveEvents();
 }
 
 /**

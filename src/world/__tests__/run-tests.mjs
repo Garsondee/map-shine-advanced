@@ -18,6 +18,8 @@ import { run as runWeatherData } from './weather-data.test.mjs';
 import { run as runWeatherRng } from './weather-rng.test.mjs';
 import { run as runWeatherBiomes } from './weather-biomes.test.mjs';
 import { run as runWeatherWalk } from './weather-walk.test.mjs';
+import { run as runWeatherEvents } from './weather-events.test.mjs';
+import { run as runWeatherEventsIntegration } from './weather-events-integration.test.mjs';
 import { run as runWindField } from './wind-field.test.mjs';
 import { run as runWindBake } from './wind-bake.test.mjs';
 import { run as runWindSim } from './wind-sim.test.mjs';
@@ -61,6 +63,8 @@ const suites = [
   ['weather-rng', runWeatherRng],
   ['weather-biomes', runWeatherBiomes],
   ['weather-walk', runWeatherWalk],
+  ['weather-events', runWeatherEvents],
+  ['weather-events-integration', runWeatherEventsIntegration],
   ['wind-field', runWindField],
   ['wind-bake', runWindBake],
   ['wind-sim', runWindSim],

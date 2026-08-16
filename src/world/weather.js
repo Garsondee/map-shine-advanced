@@ -80,6 +80,36 @@
  * and every forecast call.
  *
  * ============================================================================
+ * SLICE 4 — EVENTS: A READ-TIME OVERLAY, NEVER A SECOND WRITE PATH
+ * (Weather-Manager.md §6.1-§6.2, `world/weather-events.js`)
+ * ============================================================================
+ *
+ * An event (`ash-storm`, `eclipse`, ...) is a closed-list drama that rides on
+ * top of whatever `state` already is, for a while. It is deliberately NOT
+ * implemented by writing into `targets`/`state` the way the walk and the GM's
+ * own hand do: `weather-events.js#applyEventOverrides` is a PURE function
+ * called only at snapshot/status read time, and this module's own `state` is
+ * never touched by an event. Two reasons:
+ *
+ *   1. If an event wrote into `state`, ending it early (`removeEvent`, or a
+ *      release cut short) would need the ease engine to "catch up" from
+ *      wherever the event left the axis back to the walk/director's true
+ *      target — a second kind of motion the arrival-snap/epsilon logic above
+ *      was never built to reason about, and a discontinuity waiting to happen.
+ *   2. `feedback_composite_only_terms_miss_shared_buffers`'s own lesson,
+ *      generalised: compose at the READ site, never corrupt the STORED value.
+ *      The walk's own continuity (and a GM's pinned slider) must stay exactly
+ *      as true while an ash-storm is blowing as the moment before it started.
+ *
+ * So `read()` (what the astrolabe's sliders show) stays pure — a GM dragging
+ * `cloudCover01` during an ash-storm is editing the BASE value, not fighting
+ * a temporarily event-inflated number. Only `toSnapshotWeather()` (what
+ * shaders/consumers read) and `getStatus()` (diagnostics) show the composed,
+ * re-clamped view. `version` does not bump on an event's own envelope ramp,
+ * for the identical reason it does not bump on the ease: that is motion, not
+ * a configuration change (see `version`'s own doc below).
+ *
+ * ============================================================================
  * ⚠️ THE CLOCK RULING — EASES RUN ON REAL TIME (Weather-Manager.md §4.1)
  * ============================================================================
  *
@@ -151,6 +181,7 @@ import { resolveArchetype, matchArchetype } from './weather-data.js';
 import { resolveBiome, evalTodCurve } from './weather-biomes.js';
 import { createRng, fromState, triangular, weightedPick } from './weather-rng.js';
 import { normalizeHour } from './sun.js';
+import { resolveEventKind, envelopePhase, applyEventOverrides, OVERRIDE_OPS } from './weather-events.js';
 
 /**
  * The two authority modes. A CLOSED LIST — an unknown mode string falls back to
@@ -372,6 +403,43 @@ export function createWeatherManager({
     activeBiome = res.biome;
   }
 
+  // ── SLICE 4 — EVENTS' OWN STATE ──────────────────────────────────────────
+  /** Real seconds since this manager was created — the events' own clock
+   * (envelopes are presentation pacing, same family as the ease; see this
+   * module's SLICE 4 header for why events use `dtRealSec`, not game time). */
+  let elapsedRealSec = 0;
+  /** id → { spec, startedAtRealSec, releasedAtRealSec }. A `Map` so insertion
+   * order is preserved — `applyEventOverrides` folds events in that order. */
+  const activeEvents = new Map();
+  let nextAutoEventId = 1;
+
+  /**
+   * ⚠️ A CLOSURE, NOT A `this` METHOD — see {@link read}'s own note just below
+   * for why: `getStatus` below calls THIS directly rather than
+   * `this.getActiveEvents()`.
+   * @returns {Array<{id: string, kind: string, intensity01: number, phase: string, progress01: number, elapsedRealSec: number}>}
+   */
+  function listActiveEvents() {
+    const out = [];
+    for (const [id, ev] of activeEvents) {
+      const elapsedSinceStart = elapsedRealSec - ev.startedAtRealSec;
+      const elapsedSinceRelease = ev.releasedAtRealSec == null ? null : elapsedRealSec - ev.releasedAtRealSec;
+      const { phase, progress01 } = envelopePhase(ev.spec.envelope, elapsedSinceStart, elapsedSinceRelease);
+      if (phase === 'done') continue;
+      out.push(
+        Object.freeze({
+          id,
+          kind: ev.spec.kind,
+          intensity01: ev.spec.intensity01,
+          phase,
+          progress01,
+          elapsedRealSec: elapsedSinceStart,
+        })
+      );
+    }
+    return out;
+  }
+
   /**
    * Bumped on CONFIGURATION changes (a target moved, the mode or speed changed,
    * a jump landed) — NOT on eased motion.
@@ -561,6 +629,22 @@ export function createWeatherManager({
     tick(dtRealSec, almanacInputs) {
       const dt = Number.isFinite(dtRealSec) && dtRealSec > 0 ? dtRealSec : 0;
       const scale = TRANSITION_SPEEDS[speedName];
+      elapsedRealSec += dt;
+
+      // Sweep events whose envelope has fully finished (attack+sustain+release
+      // all elapsed, or a release ramp that has run out) — otherwise a scene
+      // that fires a lot of one-shot sky-flashes would grow `activeEvents`
+      // forever. Reads the SAME `envelopePhase` the read-time overlay uses, so
+      // "still active" can never disagree between the sweep and the snapshot.
+      if (activeEvents.size > 0) {
+        for (const [id, ev] of activeEvents) {
+          const elapsedSinceStart = elapsedRealSec - ev.startedAtRealSec;
+          const elapsedSinceRelease = ev.releasedAtRealSec == null ? null : elapsedRealSec - ev.releasedAtRealSec;
+          if (envelopePhase(ev.spec.envelope, elapsedSinceStart, elapsedSinceRelease).phase === 'done') {
+            activeEvents.delete(id);
+          }
+        }
+      }
 
       // ⭐ THE WALK — game time, strictly separate from the real-time ease
       // below. Only runs with a real biome active; an Almanac mode with no
@@ -899,6 +983,136 @@ export function createWeatherManager({
       });
     },
 
+    // ── SLICE 4 — EVENTS (Weather-Manager.md §6.1-§6.2) ──────────────────────
+
+    /**
+     * Start an event. Fails OPEN on a bad `kind` or a duplicate `id` — the
+     * same shape {@link setBiome}/{@link applyArchetype} use for an unknown
+     * archetype/biome id: `ok:false` with a reason, never a throw, because a
+     * typo in a GM macro or a front script must not be able to crash a scene.
+     *
+     * Every field of `spec` besides `kind` is optional and falls back
+     * INDEPENDENTLY to `EVENT_KIND_DEFAULTS[kind]`'s own value — identical to
+     * how `initial` axis values fall back per-field in this function's own
+     * options. An `overrides` array the caller supplies REPLACES the kind's
+     * default wholesale (they are recipes, not patches — merging two override
+     * arrays item-by-item has no sensible meaning when their `axis`es differ).
+     * Any override naming an axis outside {@link WEATHER_AXIS_NAMES} is
+     * dropped and reported in `droppedOverrides`, not silently ignored
+     * (`feedback_seam_default_hides_unwired`).
+     *
+     * @param {object} spec
+     * @param {string} spec.kind - one of {@link EVENT_KINDS}.
+     * @param {string} [spec.id] - defaults to an auto-generated `"kind-N"`.
+     * @param {number} [spec.intensity01]
+     * @param {{attackSec?: number, sustainSec?: number|'held', releaseSec?: number}} [spec.envelope]
+     * @param {Array<{axis: string, op: string, value: number}>} [spec.overrides]
+     * @param {boolean} [spec.a11yFlash]
+     * @param {string} [spec.precipKindOverride]
+     * @param {string} [spec.particleArchetype]
+     * @param {object} [spec.illuminant]
+     * @returns {Readonly<{ok: boolean, id: string|null, reason: string|null, droppedOverrides: string[], version: number}>}
+     */
+    addEvent(spec) {
+      const s = spec && typeof spec === 'object' ? spec : {};
+      const resolved = resolveEventKind(s.kind);
+      if (!resolved.ok) {
+        return Object.freeze({ ok: false, id: null, reason: resolved.reason, droppedOverrides: [], version });
+      }
+      const id = typeof s.id === 'string' && s.id.length > 0 ? s.id : `${s.kind}-${nextAutoEventId++}`;
+      if (activeEvents.has(id)) {
+        return Object.freeze({
+          ok: false,
+          id: null,
+          reason: `event id '${id}' already active`,
+          droppedOverrides: [],
+          version,
+        });
+      }
+      const d = resolved.defaults;
+      const envelope = {
+        attackSec: Number.isFinite(s.envelope?.attackSec) ? s.envelope.attackSec : d.envelope.attackSec,
+        sustainSec:
+          s.envelope?.sustainSec === 'held' || Number.isFinite(s.envelope?.sustainSec)
+            ? s.envelope.sustainSec
+            : d.envelope.sustainSec,
+        releaseSec: Number.isFinite(s.envelope?.releaseSec) ? s.envelope.releaseSec : d.envelope.releaseSec,
+      };
+      const rawOverrides = Array.isArray(s.overrides) ? s.overrides : d.overrides;
+      const droppedOverrides = [];
+      const overrides = [];
+      for (const ov of rawOverrides) {
+        if (
+          !ov ||
+          !Object.hasOwn(WEATHER_AXES, ov.axis) ||
+          !OVERRIDE_OPS.includes(ov.op) ||
+          !Number.isFinite(Number(ov.value))
+        ) {
+          droppedOverrides.push(ov?.axis ?? '?');
+          continue;
+        }
+        overrides.push({ axis: ov.axis, op: ov.op, value: Number(ov.value) });
+      }
+      const eventSpec = Object.freeze({
+        kind: s.kind,
+        intensity01: clamp01(Number.isFinite(s.intensity01) ? s.intensity01 : d.intensity01),
+        envelope: Object.freeze(envelope),
+        overrides: Object.freeze(overrides),
+        illuminant: s.illuminant ?? d.illuminant,
+        precipKindOverride: s.precipKindOverride ?? d.precipKindOverride,
+        particleArchetype: s.particleArchetype ?? d.particleArchetype,
+        a11yFlash: typeof s.a11yFlash === 'boolean' ? s.a11yFlash : d.a11yFlash,
+      });
+      activeEvents.set(id, { spec: eventSpec, startedAtRealSec: elapsedRealSec, releasedAtRealSec: null });
+      version++;
+      return Object.freeze({ ok: true, id, reason: null, droppedOverrides, version });
+    },
+
+    /**
+     * Begin an event's release ramp early — works from ANY phase (attack,
+     * sustain, or an already-numeric-sustain event that hasn't reached it
+     * yet), not just a `'held'` one: a GM cutting an ash-storm short mid-build
+     * should not need to know which phase it was in. Idempotent — releasing
+     * an already-releasing event does not restart its ramp.
+     * @param {string} id
+     * @returns {boolean} true if `id` is active and this call started (or had
+     *   already started) its release; false if `id` is not active.
+     */
+    releaseEvent(id) {
+      const ev = activeEvents.get(id);
+      if (!ev) return false;
+      if (ev.releasedAtRealSec == null) {
+        ev.releasedAtRealSec = elapsedRealSec;
+        version++;
+      }
+      return true;
+    },
+
+    /**
+     * Remove an event immediately, with no release ramp — for programmatic
+     * cleanup (tests, a scene unload) rather than a dramatic end.
+     * @param {string} id
+     * @returns {boolean} true if it had been active.
+     */
+    removeEvent(id) {
+      const had = activeEvents.delete(id);
+      if (had) version++;
+      return had;
+    },
+
+    /**
+     * Diagnostics/UI list of every active event and where its envelope
+     * currently is. `intensity01` (the authored dial) and `progress01` (the
+     * envelope's own ramp) are reported SEPARATELY rather than pre-multiplied
+     * — `feedback_count_silent_preconditions`'s "print every factor" applied
+     * here too: a mild-but-fully-ramped-in event and a strong-but-still-
+     * attacking one can share one product while meaning opposite things.
+     * @returns {ReadonlyArray<Readonly<{id: string, kind: string, intensity01: number, phase: string, progress01: number, elapsedRealSec: number}>>}
+     */
+    getActiveEvents() {
+      return Object.freeze(listActiveEvents());
+    },
+
     /**
      * The manager's whole state, frozen — what the snapshot and the astrolabe
      * both read, so the dial can never show something the render disagrees with.
@@ -920,12 +1134,24 @@ export function createWeatherManager({
      * pixel, two completely different bugs, and this project has already paid
      * for that ambiguity once (`feedback_seam_default_hides_unwired`).
      *
+     * ⚠️ THIS is where events actually apply (see this module's SLICE 4
+     * header) — `applyEventOverrides` composes onto a COPY of `state`, then
+     * every axis is re-clamped into its own declared range (an `add`/`mul`
+     * override, or two events stacking, can walk an axis past its bound; the
+     * ease engine's own writes never can, so only this path needs the pass).
+     * `preset` stays the pure, un-composed label — LAW 2 already forbids any
+     * consumer branching on it, and an ash-storm boosting cover must not make
+     * the UI believe the GM picked `overcast`.
      * @returns {Readonly<object>}
      */
     toSnapshotWeather() {
+      const composed = applyEventOverrides(state, [...activeEvents.values()], elapsedRealSec);
+      for (const name of WEATHER_AXIS_NAMES) {
+        composed[name] = clampAxis(name, composed[name]);
+      }
       return Object.freeze({
         preset: currentPreset,
-        ...state,
+        ...composed,
         hasOwner: true,
         ownerVersion: version,
       });
@@ -969,6 +1195,13 @@ export function createWeatherManager({
           pinnedAxes: Object.freeze([...pinnedAxes]),
         }),
         axes: Object.freeze(axes),
+        // SLICE 4 — every event still active, and which axes it is actually
+        // touching right now (empty for the six kinds still waiting on
+        // slice 5/6's machinery — see `weather-events.js`'s own header for
+        // exactly which, and why that is honest rather than a gap).
+        events: Object.freeze({
+          active: Object.freeze(listActiveEvents()),
+        }),
       });
     },
   };
@@ -1033,6 +1266,13 @@ function normalizeSpeed(s) {
 function clampVolatility(v) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.min(VOLATILITY_MAX, Math.max(VOLATILITY_MIN, n)) : 1;
+}
+
+/** @param {*} v @returns {number} */
+function clamp01(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
 }
 
 // (`normalizePreset` lived here in slice 1 and was deleted in slice 2 along with

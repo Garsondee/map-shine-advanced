@@ -213,6 +213,10 @@ import {
   setVtPanViewerWeatherSeed,
   getVtPanViewerWeatherForecast,
   unpinVtPanViewerWeatherAxis,
+  addVtPanViewerWeatherEvent,
+  releaseVtPanViewerWeatherEvent,
+  removeVtPanViewerWeatherEvent,
+  getVtPanViewerWeatherActiveEvents,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   resetVtPanViewerFrameStats,
@@ -822,6 +826,17 @@ MapShine.setWeatherVolatility = setVtPanViewerWeatherVolatility;
 MapShine.setWeatherSeed = setVtPanViewerWeatherSeed;
 MapShine.getWeatherForecast = getVtPanViewerWeatherForecast;
 MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
+
+// EVENTS (slice 4, Weather-Manager.md §6) — console-first, same posture as the
+// Almanac's own levers just above. `MapShine.addWeatherEvent({kind:'ash-storm'})`
+// is enough to watch cloud cover/type roll in with no astrolabe control built
+// for it yet. See `world/weather-events.js`'s own header for exactly which of
+// the 9 built-ins move a pixel this slice (only `ash-storm` — the rest need
+// slice 5/6's machinery).
+MapShine.addWeatherEvent = addVtPanViewerWeatherEvent;
+MapShine.releaseWeatherEvent = releaseVtPanViewerWeatherEvent;
+MapShine.removeWeatherEvent = removeVtPanViewerWeatherEvent;
+MapShine.getWeatherActiveEvents = getVtPanViewerWeatherActiveEvents;
 
 /**
  * Boot's own logger. Everything this file says goes through `core/log.js`, which

@@ -72,6 +72,18 @@
 export const REVEAL_ILLUMINATION_THRESHOLD = 0.08;
 
 /**
+ * How brightly the "explored, not currently visible" memory zone shows —
+ * 0..1, multiplying the remembered map-only colour (`vision-mask-render.js`'s
+ * `exploredSnapshotTarget`). A taste knob, not a rules-visible number the way
+ * `REVEAL_ILLUMINATION_THRESHOLD` is: it never changes what a player CAN see,
+ * only how brightly the memory of what they already saw is rendered. Picked
+ * to read clearly as "remembered, not live" without going so dark the map
+ * layout becomes illegible — Foundry's own default explored-fog alpha sits
+ * in the same neighbourhood.
+ */
+export const EXPLORED_DIM_FACTOR = 0.35;
+
+/**
  * A literal, hand-bumped string identifying which cut of the reveal RULE is
  * live — mirrors `boot.js`'s own `probeBuildTag` convention (the pixel
  * probe's "is my fix even loaded" fix). Bumped every time `decideRevealed`'s

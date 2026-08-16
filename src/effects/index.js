@@ -150,6 +150,7 @@ export {
   reconcileVisionMeshPool,
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
+  EXPLORED_DIM_FACTOR,
   VISION_GATE_BUILD_TAG,
 } from './vision/vision-mask.js';
 export {
@@ -157,6 +158,8 @@ export {
   buildVisionLosMaterial,
   buildVisionLightMaterial,
   buildVisionGateMaterial,
+  buildVisionExploredDimMaterial,
+  buildVisionSnapshotPublishMaterial,
 } from './vision/vision-mask-render.js';
 export {
   buildRegionRectangleMaterial,

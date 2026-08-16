@@ -13,6 +13,7 @@ import {
   reconcileVisionMeshPool,
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
+  EXPLORED_DIM_FACTOR,
 } from '../vision-mask.js';
 
 /** A lit-daylight pixel, calibrated from the author's own probe (0.933-0.945). */
@@ -182,4 +183,19 @@ export function run(t) {
     'a failed read for a GM still leaves the GM unblinded',
     decideFogGating({ sourceCount: 0, isGM: true, readFailed: true }).gate === false
   );
+
+  // ======================================================================
+  // EXPLORED_DIM_FACTOR — a sanity pin, not a rules test
+  // ======================================================================
+  // Unlike REVEAL_ILLUMINATION_THRESHOLD this is a taste knob (it never
+  // changes what a player CAN see, only how brightly an already-permitted
+  // memory renders) — the REAL safety property for the dim-explored zone is
+  // architectural (captureMapOnlySnapshot excludes token/vegetationOverlay
+  // meshes from the scene it draws, so there is no fragment for the dim
+  // multiply to ever leak) and is verified by reading vt-pan-viewer.js plus
+  // live bench testing, not by a pure function this suite can call. This pin
+  // only catches the cheap slip — a stray extra digit turning "dim" into
+  // "full bright" or "invisible".
+  ok('the dim factor actually dims (below full brightness)', EXPLORED_DIM_FACTOR < 1);
+  ok('and is not so dark the remembered map would be illegible (above zero)', EXPLORED_DIM_FACTOR > 0);
 }

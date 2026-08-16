@@ -120,6 +120,41 @@ export function buildVisionLightMaterial({ THREE }) {
 }
 
 /**
+ * THE REVEAL TEST, shared by every material in this file that needs it — the
+ * live gate, the explored-dim quad, and the snapshot publish quad all ask the
+ * exact same question ("is this ALREADY-SAMPLED mask/illum pair revealed?"),
+ * each from a DIFFERENT uv (screen-space for the gate, reprojected for the
+ * other two). Sharing this instead of hand-copying it three times is what
+ * keeps Law 7 honest: a future change to the rule that only reaches one copy
+ * is exactly the silent-divergence shape this exists to prevent.
+ *
+ * Mirrors `./vision-mask.js#decideRevealed` — that function remains the
+ * single CPU-side definition:
+ *     revealed = R OR (B AND illum >= threshold)      ← UNION, never AND
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.mask - an ALREADY-SAMPLED vec4 from this subsystem's R/G/B mask.
+ * @param {*} args.illum - an ALREADY-SAMPLED vec4 from `buf:scene.illum`.
+ * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`.
+ * @returns {*} a boolean TSL node.
+ */
+function buildRevealedNode({ THREE, mask, illum, threshold }) {
+  const { float, max } = THREE.TSL;
+  // The SAME illumination the composite lit the frame with — deliberately not
+  // a second, differently-derived brightness, so "bright enough to see" and
+  // "bright enough to look lit" can never disagree on screen.
+  const luminance = max(max(illum.r, illum.g), illum.b);
+  const litEnough = luminance.greaterThanEqual(float(threshold));
+  // UNION, not intersection — a no-darkvision token has a degenerate .shape,
+  // and ANDing against it once blacked out the entire map (the regression
+  // `vision-mask.js#decideRevealed`'s own header documents in full).
+  const insideSight = mask.r.greaterThan(float(0.5));
+  const insideLight = mask.b.greaterThan(float(0.5));
+  return insideSight.or(insideLight.and(litEnough));
+}
+
+/**
  * Build the FULLSCREEN GATE — one MULTIPLY quad that finishes the reveal rule
  * over the whole composited frame.
  *
@@ -141,9 +176,15 @@ export function buildVisionLightMaterial({ THREE }) {
  * pass may not sample the target it writes. The quad reads only the mask and
  * the illumination buffer, and the blend does the rest.
  *
- * The expression mirrors `./vision-mask.js#decideRevealed` — that function
- * remains the single definition and the CPU twin:
- *     revealed = R OR (B AND illum >= threshold)      ← UNION, never AND
+ * ⚠️ PURELY THE LIVE ZONE NOW (currently visible → 1, everything else → 0).
+ * The explored-dim zone moved OUT to `buildVisionExploredDimMaterial` below,
+ * a SEPARATE additive quad — a single multiply cannot express "replace with a
+ * DIFFERENT colour", only "scale what is already here", and the dim zone
+ * needs the former (see that function's own header for the full mechanism).
+ * This quad still correctly zeroes the dim zone to black FIRST — it has no
+ * `isExplored` clause at all, so an explored-but-not-visible pixel already
+ * has `revealed = false` and gets multiplied to black here, which is exactly
+ * the clean base the dim quad's ADD then paints onto.
  *
  * @param {object} args
  * @param {*} args.THREE
@@ -152,71 +193,13 @@ export function buildVisionLightMaterial({ THREE }) {
  * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`.
  * @returns {*} a NodeMaterial for a fullscreen quad.
  */
-export function buildVisionGateMaterial({
-  THREE,
-  maskTexture,
-  illumTexture,
-  threshold,
-  exploredTexture,
-  uViewRect,
-  uExploredRect,
-  exploredDimNode,
-}) {
-  const { texture, uv, float, vec4, select, max, mix, vec2 } = THREE.TSL;
+export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, threshold }) {
+  const { texture, uv, float, vec4, select } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
   const illum = texture(illumTexture).sample(uv());
-  // The SAME illumination the composite lit the frame with — deliberately not
-  // a second, differently-derived brightness, so "bright enough to see" and
-  // "bright enough to look lit" can never disagree on screen.
-  const luminance = max(max(illum.r, illum.g), illum.b);
-  const litEnough = luminance.greaterThanEqual(float(threshold));
-
-  // UNION, not intersection — see  for the
-  // live bug that proved it (a no-darkvision token has a degenerate .shape,
-  // and ANDing against it blacked out the entire map).
-  const insideSight = mask.r.greaterThan(float(0.5));
-  const insideLight = mask.b.greaterThan(float(0.5));
-  const revealed = insideSight.or(insideLight.and(litEnough));
-
-  // ── THE THREE ZONES (slice 3) ──────────────────────────────────────────
-  // Foundry's own fog has three states and players depend on all three:
-  //   currently visible    → full brightness
-  //   explored, not visible→ DIM (the remembered map — you know the room is
-  //                          there, you just cannot see what is in it now)
-  //   never explored       → black
-  //
-  // ⚠️ WITHOUT THIS, "MSA owns fog" IS A GAMEPLAY REGRESSION, NOT JUST A LOOK
-  // ONE. Suppressing `canvas.visibility` removes Foundry's explored memory
-  // along with its live cone, so a two-zone gate (visible/black) would erase
-  // everything a player had already mapped the moment they looked away. That
-  // is why slice 3 had to land WITH the takeover rather than after it.
-  //
-  // ⚠️ THE DIM ZONE SHOWS THE MAP, NEVER THE CONTENTS. It is applied to the
-  // FULLY COMPOSITED frame, which already contains tokens, candle flames and
-  // particles — so dimming rather than blacking would leak a moving monster at
-  // reduced brightness, which is precisely the 50%-alpha hole this whole
-  // pillar exists to close. The dim factor is therefore applied to a
-  // SEPARATELY-SAMPLED base (the lit map without live content) only when that
-  // is available; until it is, `exploredDimNode` is 0 and the explored zone
-  // renders black — LESS information than Foundry, never more. Erring toward
-  // black is the only safe direction here.
-  const factor0 = select(revealed, float(1), float(0));
-  let factor = factor0;
-  if (exploredTexture && uViewRect && uExploredRect) {
-    // Screen UV → world position → explored-buffer UV. Identical mapping to
-    // `sun-occlusion-render.js#buildSunVisibilityNode`, reused rather than
-    // re-derived so the two cannot drift (and so a Y-flip mistake here would
-    // have to be a mistake there too, where it is already proven correct).
-    const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
-    const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
-    const eu = worldX.sub(uExploredRect.x).div(uExploredRect.z.sub(uExploredRect.x));
-    const ev = worldY.sub(uExploredRect.y).div(uExploredRect.w.sub(uExploredRect.y));
-    const explored = texture(exploredTexture).sample(vec2(eu.clamp(0, 1), ev.clamp(0, 1))).r;
-    const isExplored = explored.greaterThan(float(0.5));
-    // max(): a currently-visible pixel is never dimmed by also being explored.
-    factor = max(factor0, select(isExplored, exploredDimNode ?? float(0), float(0)));
-  }
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
+  const factor = select(revealed, float(1), float(0));
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -232,6 +215,196 @@ export function buildVisionGateMaterial({
   material.blendSrcAlpha = THREE.ZeroFactor;
   material.blendDstAlpha = THREE.OneFactor;
   material.fragmentNode = vec4(factor, factor, factor, float(1));
+  return material;
+}
+
+/**
+ * Build the EXPLORED-DIM QUAD — a SECOND fullscreen pass, ADDITIVE-blended,
+ * that paints the remembered map into the zone `buildVisionGateMaterial`
+ * just multiplied to black.
+ *
+ * ── THE THREE ZONES (slice 3, finished here) ────────────────────────────
+ * Foundry's own fog has three states and players depend on all three:
+ *   currently visible     → full brightness (the gate quad's factor=1 no-op)
+ *   explored, not visible → DIM remembered map (THIS quad)
+ *   never explored        → black (the gate quad's factor=0, nothing added)
+ *
+ * ⚠️ WHY ADD, NOT REPLACE — a pass may not sample the target it writes, so
+ * there is no "read scene.lit, overwrite with snapshot colour" available
+ * here. But the gate quad ALREADY multiplied this exact zone to exactly
+ * black (0,0,0) — see that function's own header — so ADDING the dimmed
+ * snapshot colour on top achieves an identical result to a true replace,
+ * via ordinary blend arithmetic: `0 + snapshotColour*dim = snapshotColour*dim`.
+ *
+ * ⚠️ WHY THIS CANNOT LEAK LIVE CONTENT, UNLIKE THE FIRST ATTEMPT AT THIS
+ * (`docs/planning/Vision-Fog-Ownership.md` §4 slice 3's boxed note). It reads
+ * `exploredSnapshotTexture`, which is populated EXCLUSIVELY from
+ * `captureMapOnlySnapshot()` (`vt-pan-viewer.js`) — a render of floor-art
+ * meshes ONLY, tokens and vegetation overlays never submitted to that draw at
+ * all. There is no fragment in that source buffer a token could have written,
+ * so there is nothing here for the dim multiply to leak.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.maskTexture @param {*} args.illumTexture @param {number} args.threshold - SAME as the gate quad, own reveal test.
+ * @param {*} args.exploredTexture - the boolean "ever seen" buffer (slice 3).
+ * @param {*} args.exploredSnapshotTexture - the remembered floor-art colour (this slice).
+ * @param {*} args.uViewRect - current camera's world-space view rect, [x0,y0,x1,y1] as a vec4-like.
+ * @param {*} args.uExploredRect - the explored buffers' own world rect.
+ * @param {number} [args.dimFactor] - `EXPLORED_DIM_FACTOR`.
+ * @returns {*} a NodeMaterial for a fullscreen quad.
+ */
+export function buildVisionExploredDimMaterial({
+  THREE,
+  maskTexture,
+  illumTexture,
+  threshold,
+  exploredTexture,
+  exploredSnapshotTexture,
+  uViewRect,
+  uExploredRect,
+  dimFactor,
+}) {
+  const { texture, uv, float, vec3, vec4, select, mix, vec2 } = THREE.TSL;
+
+  const mask = texture(maskTexture).sample(uv());
+  const illum = texture(illumTexture).sample(uv());
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
+
+  // Screen UV → world position → explored-buffer UV. Identical mapping to
+  // `sun-occlusion-render.js#buildSunVisibilityNode`, reused rather than
+  // re-derived so the two cannot drift (and so a Y-flip mistake here would
+  // have to be a mistake there too, where it is already proven correct).
+  const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
+  const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
+  const eu = worldX.sub(uExploredRect.x).div(uExploredRect.z.sub(uExploredRect.x));
+  const ev = worldY.sub(uExploredRect.y).div(uExploredRect.w.sub(uExploredRect.y));
+  const bufferUv = vec2(eu.clamp(0, 1), ev.clamp(0, 1));
+  const isExplored = texture(exploredTexture).sample(bufferUv).r.greaterThan(float(0.5));
+  const snapshotColor = texture(exploredSnapshotTexture).sample(bufferUv).rgb;
+
+  const shouldDim = isExplored.and(revealed.not());
+  const outColor = select(shouldDim, snapshotColor.mul(float(dimFactor)), vec3(0, 0, 0));
+
+  const material = new THREE.NodeMaterial();
+  material.transparent = true;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.blending = THREE.CustomBlending;
+  // dst + src — plain additive. The gate quad already zeroed this exact zone,
+  // so adding here is a replace in every pixel that matters (see header).
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.AddEquation;
+  material.blendSrcAlpha = THREE.ZeroFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(outColor, float(0));
+  return material;
+}
+
+/**
+ * Build the SNAPSHOT PUBLISH QUAD — a SCREEN-space fullscreen draw, bound
+ * directly to `exploredSnapshotTarget`, that writes
+ * `captureMapOnlySnapshot()`'s screen-space capture into it.
+ *
+ * ⚠️ REBUILT 2026-08-16 AS A FULLSCREEN QUAD, NOT A WORLD-SPACE MESH — the
+ * first cut positioned/scaled a `PlaneGeometry` to span the scene rect,
+ * rendered it through `exploredCamera`, and derived screen coordinates from
+ * its camera-projected `positionWorld` inside the shader. That version
+ * published data (`snapshotPublishCount` climbed, no errors) but a live
+ * pixel-probe proved it was wrong: `exploredSnapshotTarget` read back
+ * near-black at the controlled token's own position while the SAME world
+ * position's real albedo (a SEPARATE, independent diagnostic tool) read
+ * bright and warm. Three rounds of re-deriving that mesh/camera/
+ * `positionWorld` chain by hand found nothing provably wrong in it — which
+ * is itself the reason not to trust it further. This version removes the
+ * whole chain: `uv()` is NATURALLY 0..1 across whatever target is bound
+ * (`exploredSnapshotTarget`, via a plain `QuadMesh`, exactly like the other
+ * two quads in this pass), so world position comes from the SAME kind of
+ * `mix(rect.x, rect.z, uv().x)` the dim quad already uses successfully —
+ * one degree of transform fewer, and the ONE degree that was never proven
+ * elsewhere in this file.
+ *
+ * ⚠️ STILL A WORLD ↔ SCREEN ROUND TRIP, JUST ONE HOP SHORTER — this quad's
+ * OWN `uv()` → world (via `uExploredRect`) → screen (via `uViewRect`), where
+ * the old version's mesh-projected `positionWorld` stood in for the first
+ * hop. Same two uniforms as the dim quad, opposite final direction — get
+ * that backwards and the memory paints in the wrong place, the recurring
+ * shape `feedback_y_flip_recurring_risk` warns about, just on a different
+ * axis pair.
+ *
+ * ⚠️ THE ON-SCREEN BOUNDS CHECK IS NOT OPTIONAL. `texture().sample()` clamps
+ * out-of-range UV to the edge texel rather than returning "nothing" — without
+ * an explicit check, every world texel OUTSIDE the current view would sample
+ * and re-write whatever colour sits at the screen's own edge, smearing it
+ * across the entire unseen map on every publish tick.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.mapOnlyTexture - `scene.colorMapOnly`, tokens/overlays excluded by construction.
+ * @param {*} args.maskTexture @param {*} args.illumTexture @param {number} args.threshold - SAME reveal test as the other two quads.
+ * @param {*} args.uViewRect - current camera's world-space view rect.
+ * @param {*} args.uExploredRect - the explored buffers' own world rect — what THIS quad's `uv()` spans.
+ * @returns {*} a NodeMaterial for a fullscreen quad bound to `exploredSnapshotTarget`.
+ */
+export function buildVisionSnapshotPublishMaterial({
+  THREE,
+  mapOnlyTexture,
+  maskTexture,
+  illumTexture,
+  threshold,
+  uViewRect,
+  uExploredRect,
+}) {
+  const { texture, uv, float, vec3, vec4, select, mix, vec2, step, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+
+  // This quad's own uv() → world position, via the SAME uExploredRect
+  // mapping `buildVisionExploredDimMaterial`'s READ direction already uses
+  // (screen→world there samples uExploredRect the same way this WRITE
+  // direction does) — proven shape, just consumed here instead of there.
+  const worldX = mix(uExploredRect.x, uExploredRect.z, uv().x);
+  const worldY = mix(uExploredRect.y, uExploredRect.w, uv().y);
+
+  // world → screen: the inverse of `mix(uViewRect.x, uViewRect.z, someUV)`.
+  const screenU = worldX.sub(uViewRect.x).div(uViewRect.z.sub(uViewRect.x));
+  const screenV = worldY.sub(uViewRect.y).div(uViewRect.w.sub(uViewRect.y));
+  const screenUv = vec2(screenU, screenV);
+
+  // Explicit on-screen test — see header. step(edge,x) is 0 below edge, 1 at/above.
+  const onScreen = step(float(0), screenU)
+    .mul(step(screenU, float(1)))
+    .mul(step(float(0), screenV))
+    .mul(step(screenV, float(1)));
+
+  const mask = texture(maskTexture).sample(screenUv);
+  const illum = texture(illumTexture).sample(screenUv);
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
+  const shouldWrite = revealed.and(onScreen.greaterThan(float(0.5)));
+
+  // LIT, NOT RAW ALBEDO — `captureMapOnlySnapshot()` re-renders the SAME
+  // materials `geometry.world` uses, which output raw albedo; the
+  // composite's own brightness comes from a LATER, separate multiply by
+  // `buf:scene.illum` (`environmental-light.js`) that capture never gets.
+  // Mirrors that module's OWN composite exactly — `illum` is already
+  // sampled above for the reveal test, reused here for brightness too:
+  // `EOTF( OETF(albedo) × illum )`, in gamma space (`buf:scene.illum` is
+  // Foundry's own sRGB ambient — that module's header).
+  const rawMapColor = texture(mapOnlyTexture).sample(screenUv).rgb;
+  const litMapColor = sRGBTransferEOTF(sRGBTransferOETF(rawMapColor).mul(illum.rgb));
+  const outColor = select(shouldWrite, litMapColor, vec3(0, 0, 0));
+
+  const material = new THREE.NodeMaterial();
+  material.transparent = true;
+  material.depthTest = false;
+  material.depthWrite = false;
+  // NormalBlending's zero-alpha-leaves-destination-untouched trick
+  // (`vt/scene-attr.js`'s own header has the full mechanism) — a texel this
+  // frame does not confirm as on-screen-and-revealed keeps whatever it held
+  // from the last frame that DID confirm it, which is the persistence this
+  // whole buffer exists for.
+  material.blending = THREE.NormalBlending;
+  material.fragmentNode = vec4(outColor, select(shouldWrite, float(1), float(0)));
   return material;
 }
 
@@ -278,16 +451,33 @@ function writeFanGeometry(THREE, mesh, points, ox, oy) {
  * @param {*} args.THREE
  * @param {*} args.allocator - `graph/three-allocator.js`'s instance.
  * @param {string} [args.rtName]
+ * @param {number} [args.resolvedW] - initial drawing-buffer width, device pixels.
+ * @param {number} [args.resolvedH] - initial drawing-buffer height, device pixels.
  * @returns {{scene: *, texture: *, renderTarget: *, update: Function, dispose: Function, getInfo: Function}}
  */
-export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.mask' }) {
+export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.mask', resolvedW = 1, resolvedH = 1 }) {
   const scene = new THREE.Scene();
+  // ⚠️ `resolvedW`/`resolvedH` ARE NOT OPTIONAL DECORATION.
+  // `ThreeAllocator.describe()` reads `desc.resolvedW | 0` for a
+  // `screenSized: true` target's ACTUAL initial size — `screenSized: true` is
+  // only a LAW-CHECK flag (`enforceKeyholeLaw`'s ceiling is `LAW_MAX_SCREEN_
+  // DIM`, not the drawing buffer), never an instruction to derive the size
+  // from anywhere. Omitting these silently creates a 1×1 target (`Math.max(1,
+  // undefined | 0)`) that renders nothing useful and stays that way until the
+  // next `resize()` call — found live 2026-08-15 chasing a report of the gate
+  // going solid black: every OTHER `screenSized: true` target in this
+  // codebase is created through a `describeX = () => ({..., resolvedW:
+  // drawBufW, resolvedH: drawBufH})` closure; this was the one built as a
+  // static object literal instead, so it never got a real size, at
+  // construction OR ever after.
   const rtDesc = {
     // SCREEN-SIZED: this mask is consumed by the fullscreen composite at
     // `uv()`, and is drawn with the SAME world camera as the light pass, so
     // it shares the screen's own resolution rather than claiming a world-space
     // budget of its own.
     screenSized: true,
+    resolvedW,
+    resolvedH,
     type: THREE.UnsignedByteType,
     colorSpace: THREE.NoColorSpace,
     // NEAREST: every channel is a boolean. Linear filtering would invent
@@ -333,6 +523,58 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     depth: false,
   };
   const exploredTarget = allocator.create(`${rtName}.explored`, exploredRtDesc);
+
+  /**
+   * THE EXPLORED SNAPSHOT (slice: dim explored zone) — finishes what slice 3
+   * left at `exploredDimNode = 0`. See `vision-mask.js`'s own header and
+   * `docs/planning/Vision-Fog-Ownership.md` §4 slice 3's boxed note for why a
+   * naive dim was rejected: the gate multiplies the FULLY COMPOSITED frame,
+   * so any non-zero dim there would show live tokens/candles/particles at
+   * reduced brightness in areas the viewer cannot currently see — a leak,
+   * not a look. The fix the doc names is "gate tokens/effects OUT of
+   * `buf:scene.color` AT THE GEOMETRY STAGE".
+   *
+   * WORLD-space, PERSISTENT (never cleared except on scene change, same
+   * trigger as `exploredTarget` above), holds the last-seen floor-art colour.
+   * The caller (`vt-pan-viewer.js`, which owns the world-draw item list) is
+   * responsible for:
+   *   1. Capturing a "map-only" pass — the SAME `geometry.world` scene,
+   *      SAME main camera, SAME already-built materials, with every
+   *      token/vegetationOverlay-kind mesh's `.visible` temporarily false —
+   *      into a screen-sized scratch target. Reusing the real, already-built
+   *      materials (rather than a parallel material this subsystem would
+   *      have to construct and keep in sync with `buildWholeImageMaterial`)
+   *      is deliberate: it is the low-risk direction, and it means a token
+   *      is EXCLUDED BY CONSTRUCTION — it is never in the scene this draw
+   *      walks, not merely masked out after the fact.
+   *   2. "Publishing" that screen-space capture into THIS world-space target
+   *      via a fullscreen quad through `exploredCamera`, gated per-fragment
+   *      on the SAME reveal test the live gate uses (so an unexplored room
+   *      can never be peeked into permanent memory) and outputting
+   *      `vec4(0,0,0,0)` elsewhere — the same "zero alpha leaves the
+   *      destination untouched" NormalBlending trick `vt/scene-attr.js`
+   *      already relies on for its own safe default, reused rather than
+   *      reinvented. `buildVisionSnapshotPublishMaterial` below builds that
+   *      quad's material; this module only owns the persistent target itself.
+   * A texel this buffer has painted once stays painted forever (until the
+   * next repaint from that same world position), which is exactly
+   * "remembered", and it can NEVER hold a token or a candle flame because
+   * those meshes are never in the capture this publishes from.
+   */
+  const exploredSnapshotRtDesc = {
+    resolvedW: 2048,
+    resolvedH: 2048,
+    screenSized: false,
+    type: THREE.UnsignedByteType,
+    colorSpace: THREE.NoColorSpace,
+    // LINEAR: this holds real remembered colour, not a boolean — a blocky
+    // 2048-texel staircase across painted map art would be an obvious tell,
+    // same reasoning `exploredRtDesc` already gives for its own boundary.
+    filter: 'linear',
+    depth: false,
+  };
+  const exploredSnapshotTarget = allocator.create(`${rtName}.exploredSnapshot`, exploredSnapshotRtDesc);
+
   /** The world rect the explored buffer covers, as [x0,y0,x1,y1]. */
   let exploredRect = [0, 0, 1, 1];
   /** Ortho camera over `exploredRect` — rebuilt only when the rect changes. */
@@ -457,6 +699,11 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     }
 
     lastDrawn = drawn;
+    // Consumed ONCE, shared by `explored` and `snapshot` below — a scene
+    // change wipes both the boolean "ever seen" buffer and the remembered
+    // colour together, since they describe the same underlying concept.
+    const clearFirst = exploredNeedsClear;
+    exploredNeedsClear = false;
     return {
       target: renderTarget,
       scene,
@@ -467,14 +714,17 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
       explored: {
         target: exploredTarget,
         camera: exploredCamera,
-        // Only the very first frame after a scene/rect change clears it;
-        // every later frame accumulates. Consumed-and-reset so the host
-        // cannot accidentally clear twice.
-        clearFirst: (() => {
-          const c = exploredNeedsClear;
-          exploredNeedsClear = false;
-          return c;
-        })(),
+        clearFirst,
+      },
+      // THE PUBLISH DRAW (dim-explored slice) — see `exploredSnapshotTarget`'s
+      // own header for the full mechanism — REBUILT 2026-08-16 as a plain
+      // screen-space fullscreen quad (no `camera` field needed here any
+      // more; the quad's own `uv()` covers `exploredSnapshotTarget`
+      // directly, the same way `explored.target` above is written by real
+      // geometry through a camera but this one no longer is).
+      snapshot: {
+        target: exploredSnapshotTarget,
+        clearFirst,
       },
     };
   }
@@ -515,11 +765,38 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     exploredNeedsClear = true;
   }
 
+  /**
+   * Re-enforce the live mask's SCREEN-SIZED contract at the new drawing-buffer
+   * size, on window resize / sidebar toggle / Foundry relayout. Reuses the
+   * SAME `rtDesc` object `create()` was given above — never a hand-copied
+   * duplicate — so this can't drift into resizing the target against a
+   * description that no longer matches what it was actually created with,
+   * and so `enforceKeyholeLaw` checks it against the descriptor this target
+   * really owns.
+   *
+   * ⚠️ THE EXPLORED BUFFER IS DELIBERATELY NOT HERE. It is `screenSized:
+   * false` (a fixed 2048² world-res budget, see its own doc comment above) —
+   * resizing it with the drawing buffer would be exactly the "a world-res
+   * target smuggled past the screen-sized law" bug `enforceKeyholeLaw`
+   * exists to catch, not a fix.
+   *
+   * @param {number} w @param {number} h - new drawing-buffer size, device pixels.
+   */
+  function resize(w, h) {
+    // Keep `rtDesc` truthful, not just the live target — it is the SAME
+    // object `enforceKeyholeLaw` checks against on every future call, and the
+    // one place `resolvedW`/`resolvedH` were wrong in the first place.
+    rtDesc.resolvedW = w;
+    rtDesc.resolvedH = h;
+    allocator.resize(renderTarget, w, h, rtDesc);
+  }
+
   function dispose() {
     for (const [, entry] of pool) disposeEntry(entry);
     pool.clear();
     allocator.dispose(renderTarget);
     allocator.dispose(exploredTarget);
+    allocator.dispose(exploredSnapshotTarget);
   }
 
   /** For the Diagnostics report — a mask that silently stopped drawing must be
@@ -533,7 +810,52 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
       // The explored buffer never clears, so "is it accumulating" cannot be
       // read off a screenshot — report the rect it covers instead.
       exploredRect: [...exploredRect],
+      // The live mask's OWN current size — added 2026-08-15 chasing a report
+      // of the gate going solid black after resize/pan/zoom. Sits next to
+      // the viewer's own `drawBufSize` in `getVisionMaskInfo` so a mismatch
+      // between the two is a subtraction, not an inference
+      // (`feedback_diagnostics_must_land_in_perf_report`: a number nobody
+      // printed cannot be checked from a pasted-back report).
+      maskSize: [renderTarget.width, renderTarget.height],
     };
+  }
+
+  /**
+   * ONE real pixel out of `exploredSnapshotTarget`, at a given WORLD
+   * position — added 2026-08-16 chasing a live report of "explored areas
+   * still render solid black" AFTER `snapshotPublishCount` already proved
+   * the publish draw runs, every ~250ms, with no thrown error. That only
+   * proves the DRAW CALL executes, not that it writes anything a player
+   * would see — `feedback_measure_the_output_not_the_equation`'s own
+   * lesson, hit again one layer deeper. This measures the actual buffer.
+   *
+   * ⚠️ THE SAME px/py MAPPING AS THE GATE'S OWN `eu`/`ev` (re-derived
+   * independently here, from the camera's own OrthographicCamera(left=
+   * minX, right=maxX, TOP=minY, BOTTOM=maxY, ...) construction in
+   * `setExploredRect` — worldY=minY is the camera's TOP, and WebGPU's raw
+   * `readRenderTargetPixelsAsync` copy is ALSO top-origin row 0
+   * (`vt-pan-viewer.js`'s own proven PROBE_CORNERS finding) — so DIRECT,
+   * un-flipped, agrees with the shader's texture sample by construction, not
+   * by assumption. `UnsignedByteType` returns plain 0-255 bytes, no
+   * half-float decode needed (same as `vt-pan-viewer.js`'s own depth
+   * self-test query target, `type: THREE.UnsignedByteType` too).
+   *
+   * Deliberately NOT wired into any per-frame path — a GPU readback is a
+   * real, if small, stall, so this is called from an already-throttled,
+   * even-slower diagnostic tick, never from the render loop itself.
+   *
+   * @param {object} args
+   * @param {*} args.renderer @param {number} args.worldX @param {number} args.worldY
+   * @returns {Promise<{r:number,g:number,b:number,readAt:{x:number,y:number}}>}
+   */
+  async function probeSnapshotColor({ renderer, worldX, worldY }) {
+    const [minX, minY, maxX, maxY] = exploredRect;
+    const eu = Math.min(1, Math.max(0, (worldX - minX) / (maxX - minX)));
+    const ev = Math.min(1, Math.max(0, (worldY - minY) / (maxY - minY)));
+    const px = Math.round(eu * (exploredSnapshotTarget.width - 1));
+    const py = Math.round(ev * (exploredSnapshotTarget.height - 1));
+    const raw = await renderer.readRenderTargetPixelsAsync(exploredSnapshotTarget, px, py, 1, 1, 0, 0);
+    return { r: raw[0], g: raw[1], b: raw[2], readAt: { x: px, y: py } };
   }
 
   return {
@@ -543,11 +865,16 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
       return renderTarget.texture;
     },
     sync,
+    resize,
+    probeSnapshotColor,
     setExploredRect,
     getExploredRect,
     resetExploration,
     get exploredTexture() {
       return exploredTarget.texture;
+    },
+    get exploredSnapshotTexture() {
+      return exploredSnapshotTarget.texture;
     },
     dispose,
     getInfo,

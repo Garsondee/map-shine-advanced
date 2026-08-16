@@ -130,7 +130,7 @@ class PrecipDriver {
       slantDirDeg: 90,
       chaosScale: 3.5,
       streakScale: 1.1,
-      windTiltDeg: 40,
+      windAirSpeedPxS: 2600,
       parallaxStreak01: 1,
       cameraHeight: 2000,
       // view
@@ -291,7 +291,7 @@ class PrecipDriver {
         slantDirDeg: s.slantDirDeg,
         chaosScale: s.chaosScale,
         streakScale: s.streakScale,
-        windTiltDeg: s.windTiltDeg,
+        windAirSpeedPxS: s.windAirSpeedPxS,
         parallaxStreak01: s.parallaxStreak01,
         cameraHeight: s.cameraHeight,
       });

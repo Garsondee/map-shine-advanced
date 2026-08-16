@@ -444,7 +444,7 @@ export function createPrecipEngine({
    * `tan(θ)·D` from the nadir — so the convergence shift falls straight out of
    * it with no second calibration to get wrong.
    */
-  const uWindTiltDeg = uniform(float(40));
+  const uWindAirSpeed = uniform(float(2600));
   // Construction-time constant, not a uniform: `pxPerMeter` cannot change mid-session.
   const windPxPerSec = float(pxPerMeter * 3.2);
 
@@ -622,32 +622,49 @@ export function createPrecipEngine({
     //    That is what lets this runtime skip the wind-grid buffer entirely
     //    (see the storage arithmetic in the header). Species-scaled: rain
     //    leans, snow is carried.
-    // ⚠️ THE SAME TILT ANGLE THE DRAW USES, not a second calibration. A drop
-    // falling at `speed` along a line tilted by θ drifts horizontally at
-    // `speed · tan(θ)` — so ONE angle drives both how far downwind the body
-    // actually travels and where its streak converges. Deriving them
-    // separately is precisely the two-terms-disagreeing bug this runtime has
-    // already paid for twice; here they cannot disagree because there is one
-    // θ. (`windPxPerSec` is consequently unused by precipitation: the wind
-    // field's foliage-calibrated px/s is the wrong frame for a body falling at
-    // thousands of px/s — see `uWindTiltDeg`.)
+    // ⚠️ THE DRIFT IS COMPUTED ONCE, HERE, and the draw DERIVES its convergence
+    // shift from this same `vel` — so how far downwind a body actually travels
+    // and where its streak points cannot disagree. Deriving them separately is
+    // the two-terms-disagreeing bug this runtime has already paid for three
+    // times. (`windPxPerSec` is unused by precipitation: the wind field's
+    // foliage-calibrated 320 px/s is the wrong frame for a body falling at
+    // thousands — see `uWindAirSpeed`.)
     const windRad = uWindDirDeg.mul(float(Math.PI / 180));
-    const tiltRadSim = uWindSpeed01
-      .mul(float(WIND_CARRY))
-      .mul(uWindTiltDeg)
-      .mul(float(Math.PI / 180));
-    const windVec = windToward(windRad).mul(tiltRadSim.tan()).mul(speed).mul(uFallSlant01);
+    // ⭐ AIR-SPEED FIRST. A body's horizontal speed tracks the AIR's speed
+    // scaled by how much of it the body catches (`windCarry01`) — it is NOT a
+    // function of its own fall speed.
+    //
+    // ⚠️ DERIVING IT FROM FALL SPEED WAS BACKWARDS, and the author measured it:
+    // *"At full wind strength snow barely moves... that goes double for snow."*
+    // A tilt-first model gave a snowflake (75 px/s) a 51 px/s drift in a full
+    // gale while rain managed 1072 — but a flake is NEARLY WIND-BORNE and
+    // should OUTRUN a raindrop sideways, not crawl. Air-speed-first: snow
+    // 2210 px/s, rain 1170. The tilt is then DERIVED (snow ~88°, i.e. nearly
+    // horizontal — which is what a blizzard actually looks like) rather than
+    // dialled, so it can never disagree with the body's real travel.
+    const windVec = windToward(windRad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(WIND_CARRY));
     // 2. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
     //    offset per body so neighbours never move in lockstep (the ember
     //    lesson: a pure function of position and time makes a swarm drift as
     //    one rigid body no matter how strong the field is).
     const tSec = uTimeMs.mul(float(0.001));
     const phase = s.mul(float(12.9));
+    // ⚠️ BOTH AXES CARRY THE SAME TWO-FREQUENCY SHAPE AND THE SAME AMPLITUDE.
+    // The first cut gave X two terms summing to ±1.0 and Y a single ±0.5 — a
+    // 2:1 bias that read exactly as the author described: *"snow chaotically
+    // drifts only left and right instead of all four directions."* V2's
+    // dual-frequency sway was authored for a body already falling down-screen,
+    // where a lateral-only jitter is right; under a top-down camera there is no
+    // privileged lateral axis and the jitter has to be isotropic. Y uses its
+    // own phase offsets so the two axes stay decorrelated — equal amplitude,
+    // not a circle.
     const chaos = vec2(
       sin(tSec.mul(float(3.5)).add(phase))
         .mul(float(0.6))
         .add(sin(tSec.mul(float(10)).add(phase.mul(float(1.7)))).mul(float(0.4))),
-      sin(tSec.mul(float(0.9)).add(phase.mul(float(2.3)))).mul(float(0.5))
+      sin(tSec.mul(float(3.1)).add(phase.mul(float(2.3))))
+        .mul(float(0.6))
+        .add(sin(tSec.mul(float(8.7)).add(phase.mul(float(0.9)))).mul(float(0.4)))
     )
       // ⚠️ SCALED BY THE BODY'S OWN FALL SPEED, not an absolute px/s.
       //
@@ -690,8 +707,26 @@ export function createPrecipEngine({
 
     const nextPos = pos.add(drift.mul(uDtSec));
 
-    // ── RESPAWN — height reaching the ground IS the landing ──
-    const landed = nextH.lessThanEqual(float(0));
+    // ── RESPAWN — landing, OR being blown out of the spawn rect ──
+    //
+    // ⚠️ THE SECOND CONDITION IS WHY SNOW DEPOPULATED IN WIND, and it is a
+    // lifetime problem rather than a speed one. A body used to respawn ONLY on
+    // landing. Rain lands in ~0.24s so it never travels far, but SNOW falls for
+    // ~12 SECONDS — so any real wind carries a flake thousands of px, far past
+    // the padded spawn rect, and it keeps drifting out there forever while the
+    // upwind side of the view empties. Measured: snow's population in a centre
+    // probe collapsed 268 → 6 at full wind, at EVERY air speed tried, which is
+    // the tell that no amount of tuning was going to fix it.
+    //
+    // Recycling a body the moment it leaves the rect keeps the population
+    // uniform under any wind, at any species lifetime, for one comparison —
+    // and it composes with the birth fade, so a recycled body eases in rather
+    // than popping at the upwind edge.
+    const halfSpan = uRectSize.mul(float(0.5 + SPAWN_MARGIN_FRAC));
+    const rectCentre = uRectMin.add(uRectSize.mul(float(0.5)));
+    const fromCentre = nextPos.sub(rectCentre).abs();
+    const escaped = fromCentre.x.greaterThan(halfSpan.x).or(fromCentre.y.greaterThan(halfSpan.y));
+    const landed = nextH.lessThanEqual(float(0)).or(escaped);
     // Bounded entropy: seed plus the body's OWN position, never the raw
     // unbounded clock (the dot engine's fix-8 — `sin()`'s float32 precision
     // collapses at large arguments and `uTimeMs` grows all session, which
@@ -920,16 +955,24 @@ export function createPrecipEngine({
     // dominant contributor to `vel`.
     const fallSpeed = c.z.mul(uSpeedMul).max(float(1));
     // ⭐ THE CONVERGENCE SHIFT, FROM THE TILT ANGLE. Lines tilted by θ have
-    // their vanishing point `tan(θ)·D` from the nadir — see `uWindTiltDeg` for
+    // their vanishing point `tan(θ)·D` from the nadir — see `uWindAirSpeed` for
     // why an angle rather than the velocity ratio this used to divide.
-    const tiltRad = uWindSpeed01
-      .mul(float(WIND_CARRY))
-      .mul(uWindTiltDeg)
-      .mul(float(Math.PI / 180));
-    const windRadDraw = uWindDirDeg.mul(float(Math.PI / 180));
-    // ⚠️ UPWIND — the vanishing point sits BEHIND the tilted fall lines, so it
-    // moves opposite to the direction the rain is driven.
-    const windOffset = windToward(windRadDraw).negate().mul(tiltRad.tan()).mul(uCamHeight).mul(uFallSlant01);
+    // ⭐ THE CONVERGENCE SHIFT IS `vel · D / fallSpeed` — the EXACT algebraic
+    // equivalent of the two-term derivative, so the single-term form stays
+    // faithful rather than approximating it. Two corrections live here:
+    //
+    //  · IT IS DOWNWIND. A previous cut negated it ("the vanishing point sits
+    //    behind the fall lines"), which broke the equivalence and pointed every
+    //    streak the wrong way — the author's *"rain streaks don't align with
+    //    their wind driven direction; they end up pointing sideways when pushed
+    //    by wind."* The algebra admits no sign choice: substituting
+    //    `offset = vel·D/(M·v)` into `−(P−C−offset)·M²·v/D` reproduces
+    //    `vel·M − (P−C)·M²·v/D` only with the POSITIVE offset. I reasoned about
+    //    where a vanishing point "should" be instead of doing the substitution.
+    //  · THE TILT IS DERIVED from the drift now rather than dialled, so the
+    //    streak's direction and the body's actual travel cannot disagree —
+    //    they are the same quantity.
+    const windOffset = vel.mul(uCamHeight).div(fallSpeed).mul(uFallSlant01);
     const convergence = uCamCentre.add(windOffset);
     // Pure radial about the shifted point. `uParallaxStreak01` blends between
     // the raw world drift (0) and this (1) — kept as an escape hatch for a
@@ -1237,7 +1280,7 @@ export function createPrecipEngine({
       if (Number.isFinite(t.slantDirDeg)) uSlantDirDeg.value = t.slantDirDeg;
       if (Number.isFinite(t.chaosScale)) uChaosScale.value = t.chaosScale;
       if (Number.isFinite(t.streakScale)) uStreakScale.value = Math.max(0, t.streakScale);
-      if (Number.isFinite(t.windTiltDeg)) uWindTiltDeg.value = Math.max(0, Math.min(85, t.windTiltDeg));
+      if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = Math.max(0, t.windAirSpeedPxS);
       if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
       if (Number.isFinite(t.cameraHeight)) uCamHeight.value = Math.max(1, t.cameraHeight);
     },
@@ -1265,7 +1308,7 @@ export function createPrecipEngine({
           slantDirDeg: uSlantDirDeg.value,
           chaosScale: uChaosScale.value,
           streakScale: uStreakScale.value,
-          windTiltDeg: uWindTiltDeg.value,
+          windAirSpeedPxS: uWindAirSpeed.value,
           parallaxStreak01: uParallaxStreak01.value,
           cameraHeight: uCamHeight.value,
         },

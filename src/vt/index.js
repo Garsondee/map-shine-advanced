@@ -18,6 +18,13 @@ export {
   getVtPanViewerDiagnostics,
   getVtPanViewerRenderTargets,
   setVtPanViewerFloor,
+  // FLOOR PREPARE/COMMIT (2026-08-15) — prepareVtPanViewerFloor front-loads a
+  // floor switch's art before setVtPanViewerFloor above does the actual
+  // (now-instant) commit; cancelVtPanViewerFloorPrepare abandons one in
+  // flight. See prepareFloor's own doc in vt-pan-viewer.js.
+  prepareVtPanViewerFloor,
+  cancelVtPanViewerFloorPrepare,
+  prewarmVtPanViewerAdjacentFloors,
   setVtPanViewerGpuProbe,
   // PER-PASS GPU TIMING (docs/planning/Performance.md). Distinct from the probe
   // above: that one measures the WHOLE frame and must throttle the loop to do
@@ -111,15 +118,23 @@ export {
   soakZoomStep,
   setDarknessRealism,
   getDarknessRealism,
-  // ALBEDO CLARITY — the zoom-out sharpness repair (see buildAlbedoClarityNode's
-  // section header in vt-pan-viewer.js). Exposed so the look is tunable live
-  // rather than only at a rebuild.
-  setAlbedoClarity,
-  getAlbedoClarity,
-  resetAlbedoClarity,
+  // ALBEDO CLARITY structural fork — the diagnostic-only override the
+  // sharpening structural A/B uses to get a real measured GPU-ms delta
+  // between the two compiled shader graphs. See shouldUseFullAlbedoClarity's
+  // own doc in vt-pan-viewer.js. NOT the live-tuning API (that's below, from
+  // albedo-clarity.js) — this one needs a viewer restart to take effect.
+  setVtPanViewerAlbedoClarityForce,
+  getVtPanViewerAlbedoClarityForce,
   setUiShadow,
   getUiShadow,
 } from './vt-pan-viewer.js';
+// ALBEDO CLARITY — the zoom-out sharpness repair (see this module's own
+// header for the full design account). Split out of vt-pan-viewer.js
+// 2026-08-15 so the shader lab can import the real node-building functions
+// directly, without pulling in vt-pan-viewer.js's Foundry-coupled transitive
+// imports. Exposed here so the look is tunable live rather than only at a
+// rebuild.
+export { setAlbedoClarity, getAlbedoClarity, resetAlbedoClarity, ALBEDO_CLARITY_PARAMS } from './albedo-clarity.js';
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 // readPageBitmapPixels: the mask authority's injected page-pixel reader —
 // per-page CPU extraction is decode machinery, so it lives with the decoder.

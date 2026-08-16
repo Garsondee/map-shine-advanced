@@ -24,8 +24,14 @@ import {
   failLoad,
   recordTick,
   describeLoad,
+  hardRevealDue,
   shouldShowForScene,
 } from '../load-progress.js';
+// The ONE pure function in the browser-only overlay — the blocker list's cap.
+// Imported here rather than given its own suite because it is one formatter and
+// a second file would be a second thing for `run-tests.mjs`'s dispatch list to
+// forget ([[feedback_test_dispatch_list_forgets_new_files]]).
+import { formatBlockerLines } from '../loading-screen.js';
 
 export function run(t) {
   const { ok } = t;
@@ -308,5 +314,75 @@ export function run(t) {
     ok('MASKS phase is timed like any other', s.phases[1].phase === LOAD_PHASES.MASKS && s.phases[1].durMs === 15);
     ok('MASKS closed exactly when ART opened', s.phases[1].endMs === 20);
     ok('the active phase is now ART, reporting ITS own title', describeLoad(s, 20).title === 'Streaming map art');
+  }
+
+  // --- THE WARM-UP HOLD ----------------------------------------------------
+  // The gap this whole change exists to close: author, 2026-08-15 — "the
+  // loading screen goes away and then it's a good long time, 10 to 20 seconds,
+  // before the scene has settled and FPS is safe for playing."
+  {
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.WARMING, { nowMs: 0 });
+    ok('WARMING has a human title', describeLoad(s, 0).title === 'Warming up');
+    ok('DEVICE has one too', describeLoad(beginPhase(mk(0), LOAD_PHASES.DEVICE, { nowMs: 0 }), 0).title !== undefined);
+
+    reportProgress(s, LOAD_PHASES.WARMING, {
+      blockers: ['textures still being GPU-compressed (3)', 'GPU shader pipelines still compiling (2)'],
+      nowMs: 10,
+    });
+    const d = describeLoad(s, 10);
+    ok('blockers reach the description', d.blockers.length === 2);
+    ok('...naming the stage, not just a count', /GPU-compressed/.test(d.blockers[0]));
+    // Mutating the state must not rewrite a description someone already holds.
+    s.blockers.push('a third thing');
+    ok('describeLoad hands out a COPY of the blockers', d.blockers.length === 2);
+  }
+
+  // --- THE DEADLINE, AND WHY IT IS NOT A LIE -------------------------------
+  {
+    const s = mk(0);
+    ok('a fresh load is not due for a forced reveal', hardRevealDue(s, 100, 1000) === false);
+    ok('one that has run past the deadline is', hardRevealDue(s, 1000, 1000) === true);
+
+    const done = mk(0);
+    completeLoad(done, 50);
+    ok(
+      'a load that already finished is never "due" (it would fake a forced reveal)',
+      hardRevealDue(done, 9999, 1000) === false
+    );
+    const failed = mk(0);
+    failLoad(failed, 'boom', 50);
+    ok('nor is one that failed', hardRevealDue(failed, 9999, 1000) === false);
+    ok('a missing state does not throw', hardRevealDue(null, 1, 1) === false);
+  }
+  {
+    // A FORCED REVEAL IS NOT A FINISHED LOAD. This is the §7 "Ready!" lie's
+    // last hiding place: lift the curtain on a timer and call it success.
+    const s = mk(0);
+    reportProgress(s, LOAD_PHASES.WARMING, { blockers: ['map layers still loading (2)'], nowMs: 10 });
+    completeLoad(s, 30000, { forced: true });
+    const d = describeLoad(s, 30000);
+    ok('a forced reveal does not say "Ready"', d.title !== 'Ready');
+    ok('...and says what it is still doing', /still working/i.test(d.title));
+    ok('...and does not claim 100%', d.fraction === null);
+    ok('...and keeps naming what was unfinished', d.blockers.length === 1);
+    ok('...and is flagged for the summary', d.forcedReveal === true && s.forcedReveal === true);
+
+    const clean = mk(0);
+    reportProgress(clean, LOAD_PHASES.WARMING, { blockers: ['something'], nowMs: 10 });
+    completeLoad(clean, 500);
+    const cd = describeLoad(clean, 500);
+    ok('a genuine completion still says Ready', cd.title === 'Ready' && cd.fraction === 1);
+    ok('...and carries no leftover blockers', cd.blockers.length === 0 && cd.forcedReveal === false);
+  }
+
+  // --- the blocker list is capped, and SAYS it is --------------------------
+  {
+    ok('an empty list renders as nothing', formatBlockerLines([]) === '');
+    ok('a null list does not throw', formatBlockerLines(null) === '');
+    const four = ['a', 'b', 'c', 'd'];
+    ok('a list at the cap is shown whole', formatBlockerLines(four) === 'a\nb\nc\nd');
+    const seven = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    ok('an over-cap list never silently truncates', /…and 3 more/.test(formatBlockerLines(seven)));
   }
 }

@@ -14,3 +14,10 @@ export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialo
 export { installAnchorMode } from './anchor-mode.js';
 export { installAnchorViewMode } from './anchor-view-mode.js';
 export { showPerfProgress, hidePerfProgress, formatPerfProgressText } from './perf-progress-overlay.js';
+export {
+  beginFloorTransition,
+  updateFloorTransitionProgress,
+  endFloorTransition,
+  formatFloorTransitionHeadline,
+  formatFloorTransitionBlockers,
+} from './floor-transition.js';

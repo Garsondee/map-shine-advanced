@@ -57,10 +57,27 @@ import {
   failLoad,
   recordTick,
   describeLoad,
+  hardRevealDue,
   shouldShowForScene,
 } from './load-progress.js';
 
 const OVERLAY_ID = 'msa-loading-screen';
+
+/**
+ * How long a load must have been running before the "Show me anyway" button
+ * appears.
+ *
+ * Not zero, because a button that flashes for 200ms on a warm load is noise
+ * that trains people to ignore it. Not the hard deadline either, because by
+ * then the curtain lifts on its own and the button would have nothing left to
+ * offer. Five seconds is roughly "this is taking longer than usual" — the point
+ * at which offering an escape is a kindness rather than a distraction.
+ */
+export const SHOW_SKIP_AFTER_MS = 5000;
+
+/** How many blockers to list before summarising the rest. A wall of text is as
+ * unreadable as "still loading"; the first few name the stage, which is the job. */
+const MAX_BLOCKERS_SHOWN = 4;
 
 /**
  * THIS FILE'S ONE CLOCK READ.
@@ -84,6 +101,8 @@ const now = () => performance.now();
 
 /** The scene whose load was last STARTED — the floor-switch guard's memory. */
 let lastStartedSceneId = null;
+/** Set by the "Show me anyway" button. Cleared when a new load begins. */
+let forcedRevealRequested = false;
 /** @type {ReturnType<typeof createLoadState>|null} */
 let state = null;
 let els = null;
@@ -165,12 +184,70 @@ function buildOverlay() {
   const note = document.createElement('div');
   Object.assign(note.style, { fontSize: '11px', color: '#ffd9a0', minHeight: '16px', textAlign: 'center' });
 
+  // WHAT IT IS ACTUALLY WAITING FOR — `vt/settle.js`'s named blockers, one per
+  // line. This is the difference between a load that hangs for twenty minutes
+  // being a mystery and being a one-line diagnosis ("textures still being
+  // GPU-compressed (3)"), which is the entire reason settle.js names its
+  // blockers instead of counting them.
+  const blockers = document.createElement('div');
+  Object.assign(blockers.style, {
+    fontSize: '11px',
+    opacity: '0.62',
+    textAlign: 'center',
+    lineHeight: '1.6',
+    maxWidth: '380px',
+    minHeight: '16px',
+  });
+
   const elapsed = document.createElement('div');
   Object.assign(elapsed.style, { fontSize: '11px', opacity: '0.5' });
 
-  root.append(title, scene, pulse, barOuter, detail, note, elapsed);
+  // THE ESCAPE HATCH. A curtain gated on real readiness can be held up by a
+  // dead worker or a 404'd mask, and the person behind it has no map, no way to
+  // change scene and no recourse. `HARD_REVEAL_MS` lifts it eventually; this is
+  // for the case where "eventually" is already too long. Pressing it does not
+  // claim the load finished — the summary records a forced reveal and the
+  // blockers keep naming themselves afterwards.
+  const skip = document.createElement('button');
+  skip.type = 'button';
+  skip.textContent = 'Show me anyway';
+  Object.assign(skip.style, {
+    display: 'none',
+    marginTop: '2px',
+    padding: '5px 12px',
+    font: '12px/1.2 Signika, sans-serif',
+    color: '#cfe8ff',
+    background: 'rgba(143,214,255,0.10)',
+    border: '1px solid rgba(143,214,255,0.35)',
+    borderRadius: '4px',
+    cursor: 'pointer',
+  });
+  skip.addEventListener('click', () => {
+    forcedRevealRequested = true;
+    // Disabled, not hidden: a button that vanishes on click leaves the user
+    // unsure whether it registered, and the reveal itself is not instant — the
+    // wait loop notices on its next poll.
+    skip.disabled = true;
+    skip.textContent = 'Showing…';
+    skip.style.cursor = 'default';
+  });
+
+  root.append(title, scene, pulse, barOuter, detail, note, blockers, elapsed, skip);
   resolveHost().appendChild(root);
-  return { root, title, scene, pulse, pulseCtx: pulse.getContext('2d'), barOuter, barInner, detail, note, elapsed };
+  return {
+    root,
+    title,
+    scene,
+    pulse,
+    pulseCtx: pulse.getContext('2d'),
+    barOuter,
+    barInner,
+    detail,
+    note,
+    blockers,
+    elapsed,
+    skip,
+  };
 }
 
 /** Draw the liveness pulse. Called ONLY from rAF — its stopping is the signal. */
@@ -192,6 +269,20 @@ function drawPulse(ctx, tMs) {
   ctx.fillRect(x, 0, dashW, h);
 }
 
+/**
+ * Render the blocker list. Capped, and the cap SAYS so rather than silently
+ * truncating — the same rule every ring in `diag/` follows, and for the same
+ * reason: a list that quietly drops entries reads as a complete list.
+ * @param {string[]} list @returns {string}
+ */
+export function formatBlockerLines(list) {
+  if (!Array.isArray(list) || list.length === 0) return '';
+  if (list.length <= MAX_BLOCKERS_SHOWN) return list.join('\n');
+  const shown = list.slice(0, MAX_BLOCKERS_SHOWN);
+  const rest = list.length - MAX_BLOCKERS_SHOWN;
+  return `${shown.join('\n')}\n…and ${rest} more`;
+}
+
 function paint(nowMs) {
   if (!state || !els) return;
   const d = describeLoad(state, nowMs);
@@ -199,7 +290,11 @@ function paint(nowMs) {
   els.scene.textContent = state.sceneName ?? '';
   els.detail.textContent = d.detail ?? '';
   els.note.textContent = d.stallNote ?? '';
+  els.blockers.style.whiteSpace = 'pre-line';
+  els.blockers.textContent = formatBlockerLines(d.blockers);
   els.elapsed.textContent = `${(d.elapsedMs / 1000).toFixed(1)}s`;
+  // Appears only once the load is genuinely slow — see SHOW_SKIP_AFTER_MS.
+  if (!d.complete && !d.error && d.elapsedMs >= SHOW_SKIP_AFTER_MS) els.skip.style.display = 'block';
   // Hidden, not zeroed, when there is nothing honest to show.
   if (d.fraction === null) {
     els.barOuter.style.visibility = 'hidden';
@@ -235,6 +330,7 @@ export function beginSceneLoad({ sceneId, sceneName }) {
   // that same scene. Keying off completion would make a failed load flash a
   // curtain on every subsequent floor change.
   lastStartedSceneId = sceneId;
+  forcedRevealRequested = false; // a new load gets a new decision
 
   endSceneLoad({ silent: true }); // never stack two curtains
   // ONE clock reading for the load's start AND its first phase: sampling twice
@@ -270,6 +366,40 @@ export function beginSceneLoadPhase(phaseId, opts) {
 }
 
 /**
+ * MAY THE CALLER STOP WAITING FOR READINESS?
+ *
+ * The curtain owns this decision rather than the boot sequence, because the
+ * curtain owns the two things it depends on: the load's own clock (for the
+ * deadline) and the "Show me anyway" button. Boot polls this; it does not need
+ * to know that either exists.
+ *
+ * Returns true when there is NO curtain at all — a floor switch or a redraw,
+ * where `beginSceneLoad` declined. That is deliberate and load-bearing: a
+ * caller with no curtain up must never be made to block on readiness by this
+ * function, because there would be nothing on screen explaining the wait and no
+ * button to escape it. Floor changes get their own hold, with their own UI and
+ * their own cancel ([[ui/floor-transition]]).
+ *
+ * @returns {{stop: boolean, reason: string}}
+ */
+export function shouldStopWaitingForReady() {
+  if (!state) return { stop: true, reason: 'no curtain is up — nothing is being hidden by waiting' };
+  if (forcedRevealRequested) return { stop: true, reason: 'the author asked to see it anyway' };
+  if (hardRevealDue(state, now())) return { stop: true, reason: 'the reveal deadline elapsed' };
+  return { stop: false, reason: 'still waiting for the scene to be ready' };
+}
+
+/**
+ * Publish what readiness is currently waiting for, so the curtain can name it.
+ * A no-op with no curtain up, like every other reporter here.
+ * @param {string[]} blockers @param {string|null} [detail]
+ */
+export function reportSceneLoadBlockers(blockers, detail = null) {
+  if (!state) return;
+  reportProgress(state, LOAD_PHASES.WARMING, { blockers, detail, nowMs: now() });
+}
+
+/**
  * The load finished. Lifts the curtain and returns a summary worth keeping.
  *
  * `worstStallMs` is reported rather than swallowed: a load that completes but froze
@@ -279,7 +409,7 @@ export function beginSceneLoadPhase(phaseId, opts) {
  * @param {{error?:string|null, silent?:boolean}} [args]
  * @returns {object|null} the summary, or null if nothing was loading.
  */
-export function endSceneLoad({ error = null, silent = false } = {}) {
+export function endSceneLoad({ error = null, silent = false, forced = false } = {}) {
   if (rafHandle !== null) {
     cancelAnimationFrame(rafHandle);
     rafHandle = null;
@@ -291,12 +421,19 @@ export function endSceneLoad({ error = null, silent = false } = {}) {
     // number frozen at whenever the load ended without anything saying so.
     const endedAt = now();
     if (error) failLoad(state, error, endedAt);
-    else completeLoad(state, endedAt);
+    else completeLoad(state, endedAt, { forced });
     summary = {
       sceneId: state.sceneId,
       sceneName: state.sceneName,
       totalMs: Math.round((state.finishedAtMs ?? endedAt) - state.startedAtMs),
       worstStallMs: Math.round(state.worstStallMs),
+      // A FORCED REVEAL IS NOT A FINISHED LOAD, and the summary is the thing
+      // that ends up in the flight recorder and the perf report — so it says so,
+      // and it keeps the list of what was still running. Reading `totalMs`
+      // without this would give a load that "took 30.0s" when what actually
+      // happened is that we stopped waiting at 30s.
+      forcedReveal: !!state.forcedReveal,
+      unfinished: state.forcedReveal ? [...state.blockers] : [],
       // THE LOAD STORY, per phase — "reading the scene took 12ms, streaming art
       // took 2.4s, the first frame took 180ms" instead of one undifferentiated
       // total. Rides into the flight recorder's export for free: this summary is

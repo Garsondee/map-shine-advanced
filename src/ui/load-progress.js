@@ -81,8 +81,47 @@ export const STALL_THRESHOLD_MS = 250;
  */
 export const STALL_NOTE_VISIBLE_MS = 3000;
 
+/**
+ * How long the curtain may block the view before it lifts regardless.
+ *
+ * ## Why a deadline exists at all, when the whole point was to stop lifting early
+ *
+ * Because a curtain that never lifts is worse than a slow scene. Gating on real
+ * readiness (`vt/settle.js`) means gating on counters that a dead BC worker, a
+ * 404'd mask or an unplugged probe can hold above zero forever — and the person
+ * on the other side of that has no way to reach the map, no way to switch scene,
+ * and no information. This campaign is supposed to end "Ready!" being a lie; it
+ * is not supposed to replace it with a locked door.
+ *
+ * So past this, the curtain lifts and the unresolved blockers move to a corner
+ * note. Nothing is claimed to have finished — the blockers keep naming
+ * themselves, and the load summary records that the reveal was forced. That is
+ * the honest trade: we stop BLOCKING without ever saying the work is done.
+ *
+ * ⚠️ THIS IS THE COLD-LOAD CURTAIN ONLY. A floor change has no deadline and no
+ * curtain to escalate to — it holds the previous floor on screen for as long as
+ * it takes (author decision, 2026-08-15), which is safe precisely because the
+ * previous floor is a complete picture and a half-built one is not.
+ *
+ * 30s is above the ~10s the plan targets for the torture scene and well under
+ * the point where someone assumes the tab has died; it is a patience budget,
+ * not a measurement, and nothing derives from it.
+ */
+export const HARD_REVEAL_MS = 30000;
+
 /** @enum {string} The phases of a scene load, in order. */
 export const LOAD_PHASES = Object.freeze({
+  /**
+   * Asking the adapter for its limits and creating the WebGPU device.
+   *
+   * Its own phase since 2026-08-15 because it was previously invisible: it runs
+   * inside `startVtPanViewer` before anything reports progress, so on a cold
+   * driver it is seconds of curtain with the previous phase's label still on
+   * screen. That is the same unlabeled-wait shape that earned MASKS its own
+   * phase in 2026-07-17 — a wait a user cannot name is a wait they assume is a
+   * freeze.
+   */
+  DEVICE: 'device',
   /** Reading Scene documents into a draw list. Effectively instant. */
   SCENE: 'scene',
   /** Finding which authored mask files exist per floor (foundry/mask-discovery.js).
@@ -96,13 +135,29 @@ export const LOAD_PHASES = Object.freeze({
   ART: 'art',
   /** Waiting for the first real frame to paint. */
   FIRST_FRAME: 'firstFrame',
+  /**
+   * THE PHASE THAT USED TO HAPPEN BEHIND THE LIFTED CURTAIN.
+   *
+   * A painted first frame is not a playable scene. Between it and one lie the
+   * things nothing was counting: pipelines compiling lazily on first draw
+   * (`compileAsync(scene, camera)` reaches one of the viewer's eight scenes),
+   * effects doing their first bake, adjacent-floor art still compressing. That
+   * gap is the 10–20 seconds the author reported as *"the loading screen goes
+   * away and then it's a good long time before FPS is safe for playing"*.
+   *
+   * This phase IS that gap, now inside the curtain, with `vt/settle.js` naming
+   * what it is waiting for instead of a spinner implying nothing is happening.
+   */
+  WARMING: 'warming',
 });
 
 const PHASE_LABELS = Object.freeze({
+  [LOAD_PHASES.DEVICE]: 'Starting the graphics device',
   [LOAD_PHASES.SCENE]: 'Reading the scene',
   [LOAD_PHASES.MASKS]: 'Finding masks',
   [LOAD_PHASES.ART]: 'Streaming map art',
   [LOAD_PHASES.FIRST_FRAME]: 'Drawing the first frame',
+  [LOAD_PHASES.WARMING]: 'Warming up',
 });
 
 /**
@@ -163,6 +218,23 @@ export function createLoadState({ sceneId, sceneName, nowMs }) {
     total: null,
     detail: null,
     complete: false,
+    /**
+     * Named things readiness is still waiting for, straight from
+     * `vt/settle.js`'s `waitingFor` — the whole reason WARMING is worth
+     * showing rather than hiding. A LIST, not a joined string: "still loading"
+     * is what we had and it is useless at 3 a.m., and the difference between
+     * one blocker and five is the difference between "nearly there" and
+     * "something is wrong".
+     * @type {string[]}
+     */
+    blockers: [],
+    /**
+     * True when the curtain lifted on the deadline rather than on readiness.
+     * Kept distinct from `complete` for the same reason `error` is: a forced
+     * reveal is not a finished load, and the summary must not be readable as
+     * one. See {@link HARD_REVEAL_MS}.
+     */
+    forcedReveal: false,
     error: null,
     finishedAtMs: null,
     lastTickMs: null,
@@ -225,7 +297,7 @@ export function beginPhase(state, phaseId, { total = null, detail = null, nowMs 
  * @param {{done?:number, total?:number|null, detail?:string|null, nowMs?:number}} opts
  * @returns {LoadState}
  */
-export function reportProgress(state, phaseId, { done, total, detail, nowMs } = {}) {
+export function reportProgress(state, phaseId, { done, total, detail, blockers, nowMs } = {}) {
   // A progress report for a phase we are not in IS a phase transition — and it
   // must be timed like one, or a phase entered only this way would be the one
   // phase with no duration.
@@ -233,7 +305,30 @@ export function reportProgress(state, phaseId, { done, total, detail, nowMs } = 
   if (typeof done === 'number') state.done = done;
   if (total !== undefined) state.total = total;
   if (detail !== undefined) state.detail = detail;
+  if (blockers !== undefined) state.blockers = Array.isArray(blockers) ? blockers : [];
   return state;
+}
+
+/**
+ * Has the curtain been up long enough that it must lift regardless?
+ *
+ * A pure function with its own tests rather than a `Date.now()` comparison
+ * buried in the overlay, for the same reason `shouldShowForScene` is: it is the
+ * single thing standing between a slow load and a locked door, and a rule that
+ * important should be checkable without a browser.
+ *
+ * A finished or failed load is never "due" — the deadline is about a load still
+ * in flight, and returning true for one that already ended would make the
+ * summary claim a forced reveal that never happened.
+ *
+ * @param {LoadState} state @param {number} nowMs
+ * @param {number} [deadlineMs] - defaults to {@link HARD_REVEAL_MS}.
+ * @returns {boolean}
+ */
+export function hardRevealDue(state, nowMs, deadlineMs = HARD_REVEAL_MS) {
+  if (!state || state.complete || state.error) return false;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(state.startedAtMs)) return false;
+  return nowMs - state.startedAtMs >= deadlineMs;
 }
 
 /**
@@ -241,12 +336,18 @@ export function reportProgress(state, phaseId, { done, total, detail, nowMs } = 
  * header on why it must never be inferred from counters.
  * @param {LoadState} state @param {number} nowMs @returns {LoadState}
  */
-export function completeLoad(state, nowMs) {
+export function completeLoad(state, nowMs, { forced = false } = {}) {
   closeOpenPhase(state, nowMs);
   state.complete = true;
   state.phase = null;
   state.detail = null;
   state.finishedAtMs = nowMs;
+  // A forced reveal KEEPS its blockers. They are the only record of what was
+  // still running when the curtain came up, and clearing them here would turn
+  // "we stopped waiting" into "it finished" — the exact substitution this
+  // module exists to refuse.
+  state.forcedReveal = !!forced;
+  if (!forced) state.blockers = [];
   return state;
 }
 
@@ -314,12 +415,27 @@ export function describeLoad(state, nowMs) {
       fraction: null,
       elapsedMs,
       stallNote: null,
+      blockers: [],
       complete: false,
+      forcedReveal: false,
       error: state.error,
     };
   }
   if (state.complete) {
-    return { title: 'Ready', detail: null, fraction: 1, elapsedMs, stallNote: null, complete: true, error: null };
+    // "Ready" is reserved for a load that actually became ready. A forced
+    // reveal says so and keeps naming what was still running — the alternative
+    // is the §7 "Ready!" lie wearing a 30-second timer.
+    return {
+      title: state.forcedReveal ? 'Still working — showing you the map anyway' : 'Ready',
+      detail: null,
+      fraction: state.forcedReveal ? null : 1,
+      elapsedMs,
+      stallNote: null,
+      blockers: state.forcedReveal ? [...state.blockers] : [],
+      complete: true,
+      forcedReveal: !!state.forcedReveal,
+      error: null,
+    };
   }
 
   const title = PHASE_LABELS[state.phase] ?? 'Preparing';
@@ -352,7 +468,12 @@ export function describeLoad(state, nowMs) {
     fraction,
     elapsedMs,
     stallNote,
+    // Copied, not handed out by reference: `state.blockers` is mutated in place
+    // every settle sample, and a caller that held onto this array would find its
+    // "what was it stuck on" snapshot rewriting itself.
+    blockers: [...state.blockers],
     complete: false,
+    forcedReveal: false,
     error: null,
   };
 }

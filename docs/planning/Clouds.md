@@ -288,7 +288,7 @@ Rungs 1..N must be non-decreasing in cost class; tier 0 is exempt (the admission
 | **4** | `billows` | C8 | quality | Worley billows, silver lining, powder — cumulus reads as cumulus |
 | **5** | `boil` | C8 | extreme | the third noise axis advances: clouds **change shape** as they cross, not merely translate |
 
-**Deferred rungs** (recorded, not built): lightning-lit deck (⚠️ flips `a11y.photosensitive` to **true** — a full-screen flash is exactly what that flag protects); precipitation coupling (rain falls from dense cells, not uniformly); moonlit night clouds; volumetric tops (R4) as an `extreme` alternative to rung 4; cloud shadows *on* clouds (a high deck shadowing a lower one).
+**Deferred rungs** (recorded, not built): lightning-lit deck (⚠️ flips `a11y.photosensitive` to **true** — a full-screen flash is exactly what that flag protects); precipitation coupling (rain falls from dense cells, not uniformly — *the consumer side is now designed: `Precipitation.md` §3.4's curtain field reads this field's density as its cell factor when the field lands; nothing new in the shadow path*); moonlit night clouds; volumetric tops (R4) as an `extreme` alternative to rung 4; cloud shadows *on* clouds (a high deck shadowing a lower one).
 
 **Params: 8, where V2 had 70** (`cloud-control-schema.js`) and 60 fields on `this.params`. `cloudType01`, `cover01` *(read from `env.weather`, not a second control)*, `altitudePx`, `scalePx`, `opacity01`, `driftOffsetDeg` (wind shear), `zoomFadeStart/End`, `debugView`. Everything V2 exposed to steer a sprite simulator — pool size, sprite scale/opacity ranges, spawn arcs, roam bounds, orbit strength, drift responsiveness, decel factor, max speed — has no referent here.
 

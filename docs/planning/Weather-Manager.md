@@ -78,7 +78,7 @@ frame clock ──→ day-clock (todHour) ──→ sun = f(hour)        moon = 
 | `cloudType01` | 0..1 | 0 cirrus · 0.5 cumulus · 1 stratus — **exactly Clouds.md's one dial** | cloud field (future) |
 | `cloudAltitudePx` | px | deck altitude — Clouds.md's ONE knob (offset, softness, parallax, drift, sky hidden) | cloud field (future) |
 | `cloudScalePx` | px | feature size (streak length / cell size) | cloud field (future) |
-| `precip01` | 0..1 | precipitation intensity | particle archetypes (future), wetness integrator (day one) |
+| `precip01` | 0..1 | precipitation intensity | **`Precipitation.md` (the owning design — FALL/ARRIVAL/STAY)**, wetness integrator (day one) |
 | `precipKindAuthored` | enum | `auto` \| `rain` \| `snow` \| `sleet` \| `hail` \| `ash` \| `embers` — **closed list** | manager's own derivation (day one) |
 | `windSetpoint01` + `windSetpointDeg` | 0..1, deg | handed to the wind authority as its ambient target | wind (existing) |
 | `fogDensity01` | 0..1 | visual mist. **NEVER Pillar 11's information fog. Never vision.** | mist effect (future), sky veil (day one) |
@@ -93,7 +93,7 @@ frame clock ──→ day-clock (todHour) ──→ sun = f(hour)        moon = 
 | Derived | From | Rule |
 | --- | --- | --- |
 | `wetness01` | precip history, temperature | integrator: wets in ~2 min of steady rain; dries over ~20–40 min scaled by temperature and cover (V2's own good idea, kept: wetting fast, drying slow, and it was *derived*, never authored) |
-| `precipKind` | `precipKindAuthored`, temperature, events | `auto` ⇒ `temperature01 < 0.25 ? snow : rain` (one threshold, one place); events may override (ash storm ⇒ `ash`) |
+| `precipKind` | `precipKindAuthored`, temperature, events | `auto` ⇒ snow below `temperature01` 0.20, rain above 0.30, **`sleet` with a mix weight ramping across the band between** (one derivation, one place — band refinement per `Precipitation.md` §2.5; the enum already contains `sleet`); events may override (ash storm ⇒ `ash`) |
 | `env.moon` | hour, phase, config | §7.2 |
 | `env.skyKey` | sun, moon, events, weather | the ONE dominant directional light — §7.3. Shadow-access reads THIS, not `env.sun`, once §7 lands |
 | sky light block | all of the above | key/fill/veil strengths+colours, patchy overlay list — §7 |
@@ -426,7 +426,7 @@ Cost: the manager is a few dozen scalar eases and one table lookup per tick — 
 | **4** | Events core + the no-new-renderer built-ins: eclipse, blood-moon, gloom/radiance, sky-flash (grade+light preset, a11y-gated) | Testament's storm-preset line starts closing |
 | **5** | Moon + illuminant compositor + `env.skyKey` + dominant-key handover in shadow-access | Night becomes a place — and the window-ceiling bug's moonlight wish gets its input |
 | **6** | Patchy-illuminant primitive + aurora/volcanic/mana presets | The showpieces |
-| **7** | Precip→particles wiring, wetness→specular/water, front scripts, the full `thunderstorm` choreography | Pillar 9's DoD scene: wind + cloud shadow + precipitation + storm flash, authored |
+| **7** | Precip→particles wiring, wetness→specular/water, front scripts, the full `thunderstorm` choreography — **the precipitation half is fully designed in `Precipitation.md`** (its P1 slice is this slice's keystone and ships `precip01`/`precipKindAuthored`/`temperature01` as those axes' first real consumers) | Pillar 9's DoD scene: wind + cloud shadow + precipitation + storm flash, authored |
 
 Slices 1–2 are one pure module, one data table, one UI region — and independently shippable. Clouds.md's own slices interleave freely (its slice 1–2 can land before, between, or after).
 

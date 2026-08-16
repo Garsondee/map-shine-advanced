@@ -1192,14 +1192,25 @@ storm flash) as authored content.
         (mode toggle, biome picker, volatility slider, forecast strip, pin icons — console levers
         only); front scripts (`frontScripts` recorded as data, not fired); `eventRates` recorded
         as data, nothing consumes them (slice 4 territory). Task stays OPEN: slices 4-7 remain.
+- [ ] Precipitation — the falling weather entire: FALL (compute bodies + the analytic curtain
+      field), ARRIVAL (ground splashes, water rings, roof-edge drips, hail bounces), STAY (the
+      mantle — persistent snow/ash/puddles, fire-melt halos, footprints); species as data rows,
+      gated by sky-reach, wind-coupled through the one door — per
+      `docs/planning/Precipitation.md` (Fable, 2026-08-16; slices P1–P7 there). P1 is
+      Weather-Manager slice 7's keystone and ships `precip01`/`precipKindAuthored`/
+      `temperature01` as those axes' first real consumers. Closes the rain/snow, mist, and
+      ash lines below as it lands, plus Pillar 12's weather-shaped archetype rows
+      (WeatherParticles, AshCloud/AshDisturbance, WaterSplashes droplets).
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).
-- [ ] Rain + snow as particle archetypes with wind coupling. — *reinvention: content, not effects*
-- [ ] Atmospheric mist (visual fog) as a grade/particle hybrid — NEVER touching vision.
+- [ ] Rain + snow as particle archetypes with wind coupling. — *reinvention: content, not effects; owning design: `Precipitation.md` (P1)*
+- [ ] Atmospheric mist (visual fog) as a grade/particle hybrid — NEVER touching vision. — *owning design: `Precipitation.md` (P4 curtain + the manager's `fogDensity01`)*
 - [ ] Storm preset: WeatherLightning reborn as a sky-flash grade+light event.
 - [ ] Ash weather preset (cloud + disturbance) if any shipped map wants it — else cut with
-      the author's blessing.
+      the author's blessing. — *owning design: `Precipitation.md` (P6 — `ash`+embers as
+      species rows + the `ash-storm` event skin, so the preset is content and the cut clause
+      need never fire)*
 
 ### Pillar 10 — Atmosphere & Grade *(the great compressor)* — PAR, engine partly designed
 Absorbs — this is where V2's "feature" count collapses: ColorCorrectionEffectV2,

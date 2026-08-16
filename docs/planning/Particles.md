@@ -92,6 +92,8 @@
 
 ## 8. Declaration sketch
 
+> **2026-08-16:** the weather family this sketch gestures at now has its owning design — `docs/planning/Precipitation.md`: the species table (rain/snow/sleet/hail/ash/sand/spore as data rows), the FALL/ARRIVAL/STAY split, the sky-reach gate, the mantle (persistent snow), and a fourth runtime plan (`precip-runtime.js`, the first whose behaviors compile from a data table — the real first step toward §9's compiler). This sketch stands as the registration shape it will use.
+
 ```js
 export const RAIN = {
   id: 'weather.rain',

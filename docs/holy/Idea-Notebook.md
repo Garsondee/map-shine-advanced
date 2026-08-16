@@ -114,6 +114,28 @@ exists, because they all already sample one field.
 Hard part: a travelling front is genuinely temporal state, and the wind field is currently a
 mostly-static bake plus cheap noise. Giving it real memory is where the cost would land.
 
+### Rain streaking down windows
+**— Fable, 2026-08-16. Parked while designing `Precipitation.md` (its §4.3 names walls and
+windows as v1 non-goals — top-down reads almost no wall area).**
+
+If MSA ever renders interiors looking *out* (or window glass ever becomes a visible surface
+at scale), rain-tracing rivulets on glass is the classic intimacy shot: droplets wander,
+merge, and shed trails that refract the light behind them. The window aperture system already
+knows where glass is. Hard part: the payoff is proportional to visible glass area, which a
+bird's-eye map keeps near zero — this idea waits for a camera or a map style that changes
+that arithmetic, not for engineering.
+
+### Saving the snow with the scene
+**— Fable, 2026-08-16. Parked while designing `Precipitation.md` (its §5.5 rebuilds the
+mantle from weather history on load instead).**
+
+The mantle (persistent snow/ash/puddle cover) could serialize into the scene so a session
+ends ankle-deep and *resumes* ankle-deep, footprints included — the campaign's weather
+becoming part of its geography. Why it's parked: it commits MSA to a save format for derived
+state, and the current mission priority is releasing maps frequently — a rebuilt-from-history
+mantle gets 90% of the feeling with zero format risk. Worth revisiting if players ever
+remark that "the snow forgot us."
+
 ---
 
 ## 🎭 PERFORMANCE — THE UNPROVEN IDEAS

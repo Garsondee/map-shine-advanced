@@ -157,6 +157,14 @@ const BIRTH_FADE_MS = 90;
 const CHAOS_PER_SPEED = 0.0103;
 
 /**
+ * The view span every world-space length in this runtime is calibrated
+ * against. A view this wide behaves exactly as the tuned numbers describe;
+ * wider or narrower views scale proportionally so the weather keeps its
+ * apparent pace and size. See {@link uViewScale}.
+ */
+const REFERENCE_VIEW_SPAN_PX = 2000;
+
+/**
  * Build one precipitation engine for ONE species.
  *
  * @param {object} deps
@@ -247,6 +255,9 @@ export function createPrecipEngine({
   // ── THE PERSPECTIVE PAIR — see this module's header ──────────────────────
   const uCamCentre = uniform(vec2(0, 0));
   const uCamHeight = uniform(float(PERSPECTIVE_CAMERA_HEIGHT));
+  /** The unscaled base;  multiplies it by the view scale so the
+   * magnification stays constant across zoom. A tuning setter writes THIS. */
+  let camHeightBase = PERSPECTIVE_CAMERA_HEIGHT;
 
   // ── THE FRAME'S DERIVED SCALARS (from `resolveSpeciesFrame`) ─────────────
   // Every one is a MULTIPLIER over the species row's own V2-derived constant,
@@ -445,6 +456,31 @@ export function createPrecipEngine({
    * it with no second calibration to get wrong.
    */
   const uWindAirSpeed = uniform(float(2600));
+
+  /**
+   * ⭐ ZOOM INVARIANCE — the view's span relative to {@link REFERENCE_VIEW_SPAN}.
+   *
+   * ⚠️ WITHOUT THIS, PRECIPITATION IS GLUED TO THE WORLD RATHER THAN TO THE
+   * CAMERA. Author: *"When I zoom in and out the snow (and probably rain)
+   * doesn't quite move how I'd expect."* Every length here was WORLD px — fall
+   * speed, wind speed, body size, spawn height — so zoomed in, a drop crossed
+   * the small view in a blink; zoomed out, the same drop crawled. The M(h)
+   * DISPLACEMENT was already invariant (it is a constant 32% of the view at any
+   * span, measured), which is why this reads as a subtle wrongness rather than
+   * an obvious break: the geometry was right and the TIMING was not.
+   *
+   * Precipitation is an ATMOSPHERIC LAYER between the viewer and the map, not
+   * scenery painted on it. A curtain of rain should hold its apparent scale and
+   * pace as the camera moves, the way it does out of a window. So every length
+   * this runtime owns is multiplied by the view's own span — which is exactly
+   * how V2 got its zoom-invariance (it zoomed by FOV with the camera distance
+   * fixed, so `h/D` never changed).
+   *
+   * ⚠️ IT SCALES `uCamHeight` AND the spawn height TOGETHER, so `h/D` — and
+   * therefore the parallax magnification — is untouched. This changes PACE, not
+   * perspective.
+   */
+  const uViewScale = uniform(float(1));
   // Construction-time constant, not a uniform: `pxPerMeter` cannot change mid-session.
   const windPxPerSec = float(pxPerMeter * 3.2);
 
@@ -535,6 +571,10 @@ export function createPrecipEngine({
   const SIZE_MIN = S ? S.body.sizePx[0] : 0;
   const SIZE_MAX = S ? S.body.sizePx[1] : 0;
   const SPAWN_H = S ? S.fall.spawnHeightPx : 1;
+  /** Spawn height and camera height BOTH ride uViewScale, so the parallax
+   * magnification h/D is identical at every zoom — this changes pace, not
+   * perspective. See uViewScale. */
+  const spawnH = () => float(SPAWN_H).mul(uViewScale);
   const WIND_CARRY = S ? S.fall.windCarry01 : 0;
   const SKEW_EXP = S ? S.body.brightnessSkewExp : 1;
   const STREAK_PER_PXS = S ? S.body.streakPerPxS : 0;
@@ -571,10 +611,10 @@ export function createPrecipEngine({
     // rain that lands together and leaves the sky empty until the next sheet —
     // a pulsing curtain rather than steady weather. Fire staggers AGE for the
     // same reason; here height is the lifecycle, so height is what staggers.
-    const h0 = hash11(fi.mul(float(7.3)).add(float(2.2))).mul(float(SPAWN_H));
+    const h0 = hash11(fi.mul(float(7.3)).add(float(2.2))).mul(spawnH());
     custom.element(i).assign(vec4(c.brightness, c.sizePx, c.speed, h0));
     lifeBuf.element(i).assign(
-      float(SPAWN_H)
+      spawnH()
         .div(c.speed.max(float(1)))
         .mul(float(1000))
     );
@@ -588,10 +628,33 @@ export function createPrecipEngine({
     const s = seed.element(i);
     const c = custom.element(i).toVar();
 
-    const speed = c.z.mul(uSpeedMul);
+    const speed = c.z.mul(uSpeedMul).mul(uViewScale);
 
     // ── THE FALL: height integrates DOWN. This is the lifecycle. ──
-    const nextH = c.w.sub(speed.mul(uDtSec));
+    // The body clock and its per-body phase, hoisted ABOVE the vertical churn
+    // that now needs them — declaring them further down threw `Cannot access
+    // tSec before initialization` at graph-build time, which TSL reports only
+    // to the console (feedback_bundling_does_not_prove_construction_order).
+    const tSec = uTimeMs.mul(float(0.001));
+    const phase = s.mul(float(12.9));
+
+    // ⭐ TURBULENCE IN THE THIRD AXIS. Author: *"ideally it would be turbulent
+    // in full 3D."* Height is the axis a top-down camera cannot show directly —
+    // but it is NOT invisible here, because M(h) turns it into size and radial
+    // position. A body that bobs vertically therefore pulses slightly larger
+    // and smaller and shifts in and out from the view centre, which is exactly
+    // the depth cue that was missing while X and Y jittered on their own.
+    //
+    // A MODULATION OF THE FALL RATE rather than an added displacement: real
+    // turbulence speeds a body up and slows it down through the column, and
+    // doing it this way cannot push a body back above its spawn height or
+    // stall it into a hover. Clamped well short of 1 so the fall never
+    // reverses — a drop that rose would read as a bug, not as weather.
+    const vertChurn = sin(tSec.mul(float(2.3)).add(phase.mul(float(1.31))))
+      .mul(float(0.45))
+      .mul(uChaosScale)
+      .clamp(float(-0.8), float(0.8));
+    const nextH = c.w.sub(speed.mul(float(1).add(vertChurn)).mul(uDtSec));
 
     // ── THE VISIBLE DRIFT (world XY) ──
     //
@@ -642,13 +705,11 @@ export function createPrecipEngine({
     // 2210 px/s, rain 1170. The tilt is then DERIVED (snow ~88°, i.e. nearly
     // horizontal — which is what a blizzard actually looks like) rather than
     // dialled, so it can never disagree with the body's real travel.
-    const windVec = windToward(windRad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(WIND_CARRY));
+    const windVec = windToward(windRad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(uViewScale).mul(float(WIND_CARRY));
     // 2. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
     //    offset per body so neighbours never move in lockstep (the ember
     //    lesson: a pure function of position and time makes a swarm drift as
     //    one rigid body no matter how strong the field is).
-    const tSec = uTimeMs.mul(float(0.001));
-    const phase = s.mul(float(12.9));
     // ⚠️ BOTH AXES CARRY THE SAME TWO-FREQUENCY SHAPE AND THE SAME AMPLITUDE.
     // The first cut gave X two terms summing to ±1.0 and Y a single ±0.5 — a
     // 2:1 bias that read exactly as the author described: *"snow chaotically
@@ -693,16 +754,28 @@ export function createPrecipEngine({
     if (hasFlutter) {
       const fHz = mix(float(FLUTTER.hzMin), float(FLUTTER.hzMax), hash11(s.mul(float(5.9))));
       const fAmp = mix(float(FLUTTER.ampPxMin), float(FLUTTER.ampPxMax), hash11(s.mul(float(6.7)).add(float(3))));
-      // Perpendicular to the slant, so a flake weaves ACROSS its fall line
-      // rather than stuttering along it.
-      const across = vec2(cos(slantRad.add(float(Math.PI / 2))), sin(slantRad.add(float(Math.PI / 2))));
-      drift = drift.add(
-        across.mul(
-          sin(tSec.mul(fHz).mul(float(6.2832)).add(phase))
-            .mul(fAmp)
-            .mul(uFlutterMul)
-        )
+      // ⚠️ THE SWAY IS 2-D NOW, AND SINGLE-AXIS WAS THE BUG THE AUTHOR SAW.
+      // It used to weave only along ONE fixed axis (perpendicular to
+      // `slantDirDeg`), which under a side view is right — a leaf falling past
+      // a window swings across your line of sight. From DIRECTLY ABOVE there is
+      // no such privileged axis, and the result was exactly the report: *"snow
+      // still moves left and right when falling, but never up or down... locked
+      // to being turbulent in a single axis."* Two decorrelated phases at
+      // slightly different rates trace an open Lissajous rather than a line,
+      // so a flake genuinely wanders the plane. `slantRad` is no longer
+      // consulted here at all.
+      const swayA = sin(tSec.mul(fHz).mul(float(6.2832)).add(phase));
+      const swayB = sin(
+        tSec
+          .mul(fHz)
+          .mul(float(6.2832 * 0.77))
+          .add(phase.mul(float(1.9)))
+          .add(float(1.3))
       );
+      // The two sways ARE the vector — multiplying by a third copy of `swayA`
+      // (as a first cut did) would collapse the pair back onto one axis and
+      // undo the whole point.
+      drift = drift.add(vec2(swayA, swayB).mul(fAmp).mul(uFlutterMul).mul(uViewScale));
     }
 
     const nextPos = pos.add(drift.mul(uDtSec));
@@ -742,14 +815,12 @@ export function createPrecipEngine({
     velocity.element(i).assign(drift);
     custom
       .element(i)
-      .assign(
-        landed.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, float(SPAWN_H)), vec4(c.x, c.y, c.z, nextH))
-      );
+      .assign(landed.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, spawnH()), vec4(c.x, c.y, c.z, nextH)));
     const agedMs = age.element(i).add(uDtSec.mul(float(1000)));
     age.element(i).assign(landed.select(float(0), agedMs));
     lifeBuf.element(i).assign(
       landed.select(
-        float(SPAWN_H)
+        spawnH()
           .div(fresh.speed.max(float(1)))
           .mul(float(1000)),
         lifeBuf.element(i)
@@ -785,9 +856,7 @@ export function createPrecipEngine({
   const vBody = Fn(() => {
     const i = instanceIndex;
     const c = custom.element(i);
-    const fall01 = float(1)
-      .sub(c.w.div(float(SPAWN_H)))
-      .clamp(float(0), float(1));
+    const fall01 = float(1).sub(c.w.div(spawnH())).clamp(float(0), float(1));
     const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
 
     // ⭐ THE BIRTH FADE — the author's own diagnosis, and it was right:
@@ -905,7 +974,7 @@ export function createPrecipEngine({
     // miss 61% of the rain it should have stopped.
     const { xy: parallaxed, persp } = parallaxOf(centre, c.w);
 
-    const width = c.y.mul(uSizeScale).mul(alive).mul(persp);
+    const width = c.y.mul(uSizeScale).mul(uViewScale).mul(alive).mul(persp);
 
     // ⭐⭐ WIND SHIFTS THE VANISHING POINT — IT DOES NOT ADD A SECOND VELOCITY.
     //
@@ -1246,6 +1315,15 @@ export function createPrecipEngine({
       uRectMin.value.set(rect.minX, rect.minY);
       uRectSize.value.set(Math.max(1, rect.maxX - rect.minX), Math.max(1, rect.maxY - rect.minY));
       uCamCentre.value.set((rect.minX + rect.maxX) * 0.5, (rect.minY + rect.maxY) * 0.5);
+      // ⭐ ZOOM INVARIANCE — see `uViewScale`. Every length this runtime owns
+      // (fall speed, wind speed, body size, spawn height, camera height) is
+      // expressed relative to the view's own span, so the weather keeps its
+      // apparent pace and scale as the camera moves instead of being glued to
+      // the world. `uCamHeight` scales here too, which is what keeps `h/D` —
+      // and therefore the parallax — identical at every zoom.
+      const span = Math.max(1, Math.max(rect.maxX - rect.minX, rect.maxY - rect.minY));
+      uViewScale.value = span / REFERENCE_VIEW_SPAN_PX;
+      uCamHeight.value = camHeightBase * uViewScale.value;
     },
 
     /**
@@ -1282,7 +1360,7 @@ export function createPrecipEngine({
       if (Number.isFinite(t.streakScale)) uStreakScale.value = Math.max(0, t.streakScale);
       if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = Math.max(0, t.windAirSpeedPxS);
       if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
-      if (Number.isFinite(t.cameraHeight)) uCamHeight.value = Math.max(1, t.cameraHeight);
+      if (Number.isFinite(t.cameraHeight)) camHeightBase = Math.max(1, t.cameraHeight);
     },
 
     /** What the debug panel and the lab legend print. */

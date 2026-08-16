@@ -313,7 +313,7 @@ Almost everything the brief asks for here **already falls out of shipped or lock
 
 ## 9. The astrolabe, reimagined — four regions, one instrument
 
-Selecting weather should feel like choosing a *sky*, not filling a form. The circle stays — and the instrument grows around it. Named regions so future UI work shares a vocabulary:
+Selecting weather should feel like choosing a *sky*, not filling a form. The circle stays — and the instrument grows around it. Named regions so future UI work shares a vocabulary (**names author-confirmed 2026-08-16**: Director/Almanac modes; Ring/Face/Horizon/Omens regions):
 
 ```
         ╭──────────────────────────────╮
@@ -337,7 +337,7 @@ Selecting weather should feel like choosing a *sky*, not filling a form. The cir
         └──────────────────────────────┘  progress + dismiss.
 ```
 
-- **The forecast strip is the Almanac's killer feature** — free because the walk is seeded/deterministic (§5.4). Frozen clock shows "—" honestly.
+- **The forecast strip is the Almanac's killer feature** — free because the walk is seeded/deterministic (§5.4). **Visible by default (author-ruled 2026-08-16)**; the 🎲 surprise-me toggle is the opt-out. Frozen clock shows "—" honestly.
 - **Pin-on-touch:** dragging Cloud/Wind (which stay, as quick sliders) in Almanac mode pins that axis with a visible 📌; the walk steers around pins. One action, one control.
 - **ToD-likelihood arcs** (optional rung): in Almanac mode the Ring can tint its storm-prone hours faintly — the biome's character made visible on the hour circle. ROH toggle; default off to keep the Ring clean.
 - **FOH:** Ring, Face, Horizon, mode+forecast, Omens triggers, quick sliders, transition-speed. **ROH:** full axis inspector with pins, biome picker + volatility/season/seed, event envelope tuning, per-axis τ, the state-vector JSON, forecast timeline. FOH ≠ ROH per the standing rule; nothing appears in both dressed differently.

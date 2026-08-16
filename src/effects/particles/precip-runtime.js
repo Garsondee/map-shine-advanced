@@ -135,6 +135,17 @@ const PERSPECTIVE_CAMERA_HEIGHT = 2000;
 const SPAWN_MARGIN_FRAC = 0.25;
 
 /**
+ * How long a newly (re)spawned body takes to reach full opacity, in ms.
+ *
+ * Short enough to be invisible as a fade — at a rain body's ~0.15-0.6s life
+ * this is a fraction of it — but long enough to cover the ONE frame after a
+ * respawn in which the body's stored velocity was integrated at its previous
+ * position while its streak is drawn from its new one. See the birth-fade note
+ * at its use site for why that frame exists at all.
+ */
+const BIRTH_FADE_MS = 90;
+
+/**
  * Build one precipitation engine for ONE species.
  *
  * @param {object} deps
@@ -468,17 +479,37 @@ export function createPrecipEngine({
     const nextH = c.w.sub(speed.mul(uDtSec));
 
     // ── THE VISIBLE DRIFT (world XY) ──
-    // 1. The slant — how much of the fall shows up as screen motion. See the
-    //    header: without it a top-down camera sees rain as a zoom, not a fall.
+    //
+    // ⚠️ THERE IS NO "SLANT" TERM HERE ANY MORE, AND ITS REMOVAL IS A BUG FIX.
+    // `uFallSlant01` used to ALSO push every body along `uSlantDirDeg` in world
+    // space, on top of its (new, correct) job of displacing the convergence
+    // point in the draw. One uniform, two meanings, in two files' worth of
+    // arithmetic — `feedback_shared_field_two_meanings_two_registries` exactly.
+    //
+    // The symptom was precise and the author named it: *"The middle of the
+    // perspective should be in the middle of the camera view. Currently that is
+    // happening to the south of the camera."* With `slantDirDeg = 90` (south)
+    // the kernel shoved every drop southward; the draw then derives the
+    // convergence offset from `vel`, so that shove dragged the vanishing point
+    // south with it. The perspective centre could never sit under the camera
+    // while this term existed, at ANY dial setting.
+    //
+    // Rain falls straight down. WIND is what moves it sideways — that is the
+    // whole model now, and `uSlantDirDeg` survives only as the direction a
+    // future species (`sand`, hurricane sheets) might want to bias toward.
+    //
+    // ⚠️ `slantRad` survives ONLY as an axis for snow's flutter to weave
+    // ACROSS (below). It no longer contributes any translation of its own —
+    // deleting it outright broke the flake sway at graph-build time, which is
+    // the sort of thing a TSL graph reports only in the console.
     const slantRad = uSlantDirDeg.mul(float(Math.PI / 180));
-    const slant = vec2(cos(slantRad), sin(slantRad)).mul(speed).mul(uFallSlant01);
-    // 2. The wind — a single ambient vector, not a per-particle field sample.
+    // 1. The wind — a single ambient vector, not a per-particle field sample.
     //    That is what lets this runtime skip the wind-grid buffer entirely
     //    (see the storage arithmetic in the header). Species-scaled: rain
     //    leans, snow is carried.
     const windRad = uWindDirDeg.mul(float(Math.PI / 180));
     const windVec = vec2(cos(windRad), sin(windRad)).mul(uWindSpeed01).mul(windPxPerSec).mul(float(WIND_CARRY));
-    // 3. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
+    // 2. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
     //    offset per body so neighbours never move in lockstep (the ember
     //    lesson: a pure function of position and time makes a swarm drift as
     //    one rigid body no matter how strong the field is).
@@ -493,10 +524,10 @@ export function createPrecipEngine({
       .mul(float(34))
       .mul(uChaosScale);
 
-    // 4. Flutter — snow only. The paper-fall sway (V2 `:1556-1663`), and the
+    // 3. Flutter — snow only. The paper-fall sway (V2 `:1556-1663`), and the
     //    whole character of a flake: without it snow falls like slow rain,
     //    which reads as ash. Collapses in a blizzard via `uFlutterMul`.
-    let drift = slant.add(windVec).add(chaos);
+    let drift = windVec.add(chaos);
     if (hasFlutter) {
       const fHz = mix(float(FLUTTER.hzMin), float(FLUTTER.hzMax), hash11(s.mul(float(5.9))));
       const fAmp = mix(float(FLUTTER.ampPxMin), float(FLUTTER.ampPxMax), hash11(s.mul(float(6.7)).add(float(3))));
@@ -579,6 +610,30 @@ export function createPrecipEngine({
       .clamp(float(0), float(1));
     const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
 
+    // ⭐ THE BIRTH FADE — the author's own diagnosis, and it was right:
+    // *"could it be that when they spawn they spend a single frame without an
+    // angle? Could we fade them in from birth so that by the time they appear
+    // they've settled?"*
+    //
+    // ⚠️ THE MECHANISM IS SLIGHTLY DIFFERENT FROM THE GUESS, AND THE FIX IS THE
+    // SAME ONE. A respawned body does get a velocity on its first frame, so it
+    // is never literally angle-less — but that velocity was integrated at its
+    // OLD position while its streak is drawn from its NEW one, and the body
+    // teleports across the rect between the two. For one frame the direction it
+    // points and the place it points from disagree, which is exactly the
+    // "certain percentage at the wrong angle" — a steady ~1/lifetime fraction
+    // of the population, scattered, never the same bodies twice.
+    //
+    // Fading in over the first `BIRTH_FADE_MS` makes that frame invisible
+    // instead of trying to make it correct: by the time a body is opaque its
+    // velocity and position describe the same motion. It also removes the pop
+    // of a full-brightness streak appearing from nothing, which is V2's
+    // universally-praised "clouds never pop" instinct applied one layer down.
+    const birthFade = age.element(i).div(float(BIRTH_FADE_MS)).clamp(float(0), float(1));
+    // Smoothstep rather than linear: a linear ramp from zero still has a hard
+    // first derivative at t=0 and reads as a flicker at these lifetimes.
+    const birthEase = birthFade.mul(birthFade).mul(float(3).sub(birthFade.mul(float(2))));
+
     // ⭐ THE SKY-REACH GATE, sampled at the body's DRAWN (parallaxed) position.
     // Computed HERE because `position.element(i)` is a storage read and storage
     // reads are VERTEX-STAGE ONLY on this renderer; the result crosses to the
@@ -604,7 +659,7 @@ export function createPrecipEngine({
     // a second texture; it refines this, it does not replace it.
     // No placeholder injected ⇒ no gate in the graph at all ⇒ a constant 1,
     // which is exactly the fail-open answer (rain everywhere).
-    if (!skyReachTex) return vec4(fall01, c.x, alive, float(1));
+    if (!skyReachTex) return vec4(fall01, c.x, alive.mul(birthEase), float(1));
 
     const p = parallaxOf(position.element(i), c.w).xy;
     const uvx = p.x.sub(uSkyReachRect.x).div(uSkyReachRect.z.sub(uSkyReachRect.x).max(float(1)));
@@ -624,7 +679,10 @@ export function createPrecipEngine({
     // literal identity rather than a value that merely happens to be safe.
     const skyGate = mix(float(1), sampled, gate);
 
-    return vec4(fall01, c.x, alive, skyGate);
+    // `z` carries alive × the birth fade — both are pure opacity multipliers,
+    // and packing them costs no extra varying (storage reads are vertex-stage
+    // only, so every fragment input has to fit in this one vec4).
+    return vec4(fall01, c.x, alive.mul(birthEase), skyGate);
   })().toVarying('vPrecipBody');
 
   const material = new THREE.NodeMaterial();

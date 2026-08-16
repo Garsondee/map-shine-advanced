@@ -271,6 +271,7 @@
           <option value="scene-depth">Depth authority — order-independent occlusion (rung 4)</option>
           <option value="window-glass">Window glass — refraction / RGB dispersion (rung 1)</option>
           <option value="block-compress">BC1/BC7 encoder — real-hardware decode parity (rung 1)</option>
+          <option value="albedo-clarity">Albedo Clarity — CAS sharpen vs. BC1 noise (rung 1)</option>
           <option value="fire">Fire — slab-integral noise cost (rung 1)</option>
         </select>
       </fieldset>
@@ -511,6 +512,14 @@
           <div id="blockCompressStatus">loading…</div>
         </fieldset>
       </div>
+      <div id="albedoClarityPanel" style="display: none">
+        <fieldset>
+          <legend>Albedo Clarity — CAS sharpen vs. BC1 noise (rung 1)</legend>
+          <select id="albedoClarityScenario"></select>
+          <button id="albedoClarityRun">Run scenario</button>
+          <div id="albedoClarityStatus">loading…</div>
+        </fieldset>
+      </div>
       <div id="apertureGoboPanel" style="display: none">
         <fieldset>
           <legend>Aperture gobo — wall/window/light (rung 3)</legend>
@@ -747,6 +756,7 @@
     <script type="module" src="/tools/shader-lab/point-lights-lab.js"></script>
     <script type="module" src="/tools/shader-lab/window-glass-lab.js"></script>
     <script type="module" src="/tools/shader-lab/block-compress-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/albedo-clarity-lab.js"></script>
     <script type="module" src="/tools/shader-lab/candle-lab.js"></script>
     <script type="module" src="/tools/shader-lab/fire-lab.js"></script>
     <!-- LAST: owns the view column, so its answer wins over every bench's own

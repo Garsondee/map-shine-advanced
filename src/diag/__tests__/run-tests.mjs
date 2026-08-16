@@ -14,6 +14,7 @@ import { run as runPerfZones } from './perf-zones.test.mjs';
 import { run as runPerfReport } from './perf-report.test.mjs';
 import { run as runCacheReport } from './cache-report.test.mjs';
 import { run as runPerfStructuralAB } from './perf-structural-ab.test.mjs';
+import { run as runPerfSharpeningAB } from './perf-sharpening-ab.test.mjs';
 import { run as runVramInventory } from './vram-inventory.test.mjs';
 import { run as runFrameProfiler } from './frame-profiler.test.mjs';
 import { run as runGpuZoneTimer } from './gpu-zone-timer.test.mjs';
@@ -56,6 +57,7 @@ const suites = [
   ['perf-report', runPerfReport],
   ['cache-report', runCacheReport],
   ['perf-structural-ab', runPerfStructuralAB],
+  ['perf-sharpening-ab', runPerfSharpeningAB],
   ['vram-inventory', runVramInventory],
   ['frame-profiler', runFrameProfiler],
   ['gpu-zone-timer', runGpuZoneTimer],

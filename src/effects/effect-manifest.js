@@ -82,6 +82,137 @@ export function validateAuthoring(a) {
   return errors;
 }
 
+/** The three honest answers to "does this effect have first-run work?". */
+const READINESS_COVERAGE = ['full', 'partial', 'none'];
+
+/**
+ * DOES THIS EFFECT HAVE WORK THE LOADING SCREEN MUST WAIT FOR — required, 2026-08-15.
+ *
+ * ## Why this is REQUIRED and lives here, rather than being an optional side table
+ *
+ * `EFFECT_ZONING` (diag/perf-zones.js) already tried the optional-side-table
+ * shape for the neighbouring question ("is this effect's cost instrumented?"),
+ * and its own comments record the result twice over: `window` and `fire` owned
+ * real zones with no entry at all and *"silently defaulted to
+ * zoneCoverage:'full'"* — its comment calls that *"a live instance of
+ * feedback_instruments_must_not_lie, not a hypothetical"* — and `specular` had
+ * gone the same way months earlier. A check that only fires when someone
+ * remembers to add a row cannot catch the person who forgot the row.
+ *
+ * So this is a required field on the manifest, validated by the same call that
+ * already refuses a manifest with no `a11y` flag. A new effect cannot be
+ * declared without answering the question, and answering it wrong is a red test
+ * rather than a scene that reports "Ready" while the effect is still baking.
+ *
+ * ## Two questions, deliberately not one field
+ *
+ * `firstRunWork` — does this effect do ANY lazy one-time work at all?
+ * `coverage` — how much of that work a named PROBE counts.
+ *
+ * The first draft collapsed these into one field and it was wrong within the
+ * hour. Several effects (fire's particle engines, lightning's material, the
+ * sun-shadow smear, fluid's tube net) do real, expensive first-run work that is
+ * nonetheless a bad fit for a probe: it runs SYNCHRONOUSLY inside a frame, so
+ * there is no in-flight window to observe, and the flag that would express it
+ * — "has it built yet?" — is a gate that fails CLOSED on a scene which simply
+ * contains no fire, holding readiness open forever
+ * ([[feedback_gate_polarity_must_fail_open]]). Those are covered instead by
+ * settle.js's global criteria, which catch exactly the two things a
+ * synchronous bake produces: a bigger pipeline set and one long frame.
+ *
+ * With one field, saying that honestly required writing `coverage: 'none'`,
+ * which read as "this effect has no first-run work" — a denial of the very
+ * thing the note went on to describe. Two fields let both answers be true.
+ *
+ * - `firstRunWork: false` — genuinely nothing lazy: no target, no bake, no
+ *   asset, no material built on first draw. `why` has to make that case,
+ *   because it is the answer that costs nothing to write and is wrong most of
+ *   the time. Forces `coverage: 'none'`.
+ * - `coverage: 'full'` — every piece of first-run work is counted by the named
+ *   probes; the curtain will wait for all of it.
+ * - `coverage: 'partial'` — some is; `why` must say what is not, and why not.
+ * - `coverage: 'none'` with `firstRunWork: true` — the work is real and is
+ *   covered globally rather than per-effect. `why` must say which global
+ *   criterion catches it.
+ *
+ * `probes` are `vt/settle.js` probe ids — the same strings the subsystem passes
+ * to `registerReadinessProbe`. Shape only is checked here: that a named probe is
+ * actually registered at runtime is a different kind of claim, checked by the
+ * live registry (which throws on a duplicate) and reported as a declared-but-
+ * never-registered probe in the perf report rather than being asserted in Node
+ * against a registry that does not exist yet.
+ *
+ * @param {{coverage?: string, why?: string, probes?: string[]}} [r]
+ * @returns {string[]} problems, empty when fine.
+ */
+export function validateReadiness(r) {
+  if (r === undefined || r === null) {
+    return [
+      'readiness is required — declare { firstRunWork, coverage, why, probes } saying whether this effect has ' +
+        'first-run work (a lazy render target, a bake, a mask load, a material built on first draw) and how much ' +
+        'of it is counted. An effect with uncounted first-run work is the scene reporting "Ready" while it is ' +
+        'still building itself (vt/settle.js).',
+    ];
+  }
+  const errors = [];
+  if (typeof r !== 'object' || Array.isArray(r)) return ['readiness must be an object'];
+
+  if (typeof r.firstRunWork !== 'boolean') {
+    errors.push(
+      'readiness.firstRunWork must be a boolean: does this effect do ANY lazy one-time work (target, bake, ' +
+        'asset load, material built on first draw)? It is deliberately separate from `coverage`, which says how ' +
+        'much of that work a PROBE counts — plenty of real first-run work is genuinely better covered by ' +
+        "settle.js's global pipeline-growth and frame-steadiness criteria than by a per-effect probe, and " +
+        'collapsing the two questions into one field made an honest answer to the second look like a denial ' +
+        'of the first.'
+    );
+  }
+  if (!READINESS_COVERAGE.includes(r.coverage)) {
+    errors.push(`readiness.coverage ${JSON.stringify(r.coverage)} must be one of: ${READINESS_COVERAGE.join(', ')}`);
+  }
+  if (typeof r.why !== 'string' || r.why.length < 20) {
+    errors.push(
+      'readiness.why must be a real sentence saying what first-run work this effect does (or making the case ' +
+        'that it does none) — the field exists to be read by whoever is staring at a load that will not finish.'
+    );
+  }
+
+  const probes = r.probes;
+  if (r.firstRunWork === false && r.coverage !== 'none') {
+    errors.push(
+      `readiness declares no first-run work but coverage ${JSON.stringify(r.coverage)} — there is nothing to ` +
+        'cover. Fix whichever half is wrong.'
+    );
+  }
+  if (r.coverage === 'none') {
+    // A probe list under `coverage:'none'` is a contradiction, not a harmless
+    // extra: one of the two is wrong and there is no way to tell which.
+    if (Array.isArray(probes) && probes.length > 0) {
+      errors.push(
+        `readiness.coverage is 'none' but ${probes.length} probe(s) are named — coverage 'none' means no probe ` +
+          'counts this effect. Fix whichever half is wrong.'
+      );
+    }
+  } else if (!Array.isArray(probes) || probes.length === 0) {
+    errors.push(
+      `readiness.coverage is ${JSON.stringify(r.coverage)}, so readiness.probes must name at least one ` +
+        'vt/settle.js probe id. Coverage that names nothing is a claim with no receipt.'
+    );
+  } else {
+    const seen = new Set();
+    for (const p of probes) {
+      if (typeof p !== 'string' || !/^[a-z][a-zA-Z0-9]*$/.test(p)) {
+        errors.push(`readiness.probes entry ${JSON.stringify(p)} must be a camelCase probe id`);
+      } else if (seen.has(p)) {
+        errors.push(`readiness.probes names '${p}' twice`);
+      } else {
+        seen.add(p);
+      }
+    }
+  }
+  return errors;
+}
+
 /**
  * Validate an effect manifest as data. Returns every problem at once (like the
  * sibling validators) so a bad declaration is fixed in one pass, not N.
@@ -121,6 +252,8 @@ export function validateEffectManifest(m) {
   if (!ps.ok) for (const e of ps.errors) fail(`params.${e}`);
 
   for (const e of validateAuthoring(m.authoring)) fail(e);
+
+  for (const e of validateReadiness(m.readiness)) fail(e);
 
   if (!Array.isArray(m.tiers) || m.tiers.length === 0) {
     fail('tiers must be a non-empty array (tier 0 is the coarse pin — Effects.md §1)');

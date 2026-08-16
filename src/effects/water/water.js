@@ -242,6 +242,12 @@ export const WATER = Object.freeze({
   visualWeight: 0.8,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'partial',
+    why: 'Two pieces of lazy first-run work, and only one of them is probeable. COUNTED: the surface mask-image fetch (ensureMaskImage), genuinely async, with a mid-flight flag that clears on success AND on failure — exposed as prefetchMask specifically so vt-pan-viewer.js#prepareFloor can start it during floor-prepare, deliberately WITHOUT the rest of sync() (which also resolves the tier gate and can REBUILD materials, and pushes a depth-authority-derived uniform that is not safe to compute for a floor that is not yet viewed). Fixed 2026-08-16 after window light\'s own identical gap was live-reported ("pops into view a second later" on a floor switch) — before this, nothing asked for either effect\'s mask until the first real frame rendered on the new floor. NOT COUNTED: the body’s three RGBA16F targets (~25MB at 3x the mask grid) and its jump-flood, which run SYNCHRONOUSLY inside the first sync() that has water in it — there is no pending window to observe, and the flag that would express it ("has it baked yet?") is a gate that fails CLOSED when the effect is switched off, holding readiness open forever for an effect that will never bake. The bake is covered instead by settle.js’s global criteria: it grows the pipeline set and it produces a frame-time hitch, and either one restarts the quiet clock.',
+    probes: ['waterSurfaceMask'],
+  }),
   params: WATER_PARAMS,
   // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
   // brush already loaded with this mask (validateAuthoring, effect-manifest.js).

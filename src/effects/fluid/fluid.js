@@ -145,6 +145,11 @@ export const FLUID = Object.freeze({
   visualWeight: 0.3,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'none',
+    why: 'Bakes its tube net and pack from the mask on first use — the work behind the light.fluidNetBake zone, declared cadence “bake” for exactly this reason — but synchronously, inside the frame, with nothing in flight to count and no flag that clears on a scene which simply has no fluid in it. Covered by settle.js’s frame-steadiness and pipeline-growth criteria.',
+  }),
   params: FLUID_PARAMS,
   // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
   // brush already loaded with this mask (validateAuthoring, effect-manifest.js).

@@ -638,6 +638,11 @@ export const LIGHTNING = Object.freeze({
   visualWeight: 0.65,
   a11y: Object.freeze({ photosensitive: true }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'none',
+    why: 'Builds its material, geometry and mesh on first use and rebuilds them on every tier change (ensureMaterial(quality)) — first-run work that can recur mid-session, but synchronous, with no pending window to probe and no safe flag (a scene with no lightning would never build, and a "not built yet" probe would never clear). Each build grows the pipeline set, so settle.js’s global pipeline-growth criterion sees it.',
+  }),
   params: LIGHTNING_PARAMS,
   // ============================================================================
   // THE LADDER — V2 had NO performance tiers for this effect at all (always

@@ -146,6 +146,11 @@ export const GRADE = Object.freeze({
   visualWeight: 0.75,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: false,
+    coverage: 'none',
+    why: 'Folded into the present composite shader with a placeholder identity 3D LUT built at graph time — nothing is fetched or baked today. ⚠️ THIS ANSWER EXPIRES: the bundled .cube asset load (deferredRungs, Grade.md §15) is exactly a first-run fetch+upload, so whoever builds that rung must flip this to “full” and add a probe, or the curtain will lift while the LUT is still loading and the scene will visibly re-grade itself afterwards.',
+  }),
   params: GRADE_LOOK_PARAMS,
   tiers: Object.freeze([
     Object.freeze({

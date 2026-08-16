@@ -232,6 +232,11 @@ export const BLOOM = Object.freeze({
   visualWeight: 0.7,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: false,
+    coverage: 'none',
+    why: 'A post chain over buffers the frame graph already owns: it allocates no targets, loads no assets and bakes nothing of its own. Its only genuine first-run cost is pipeline compilation on first draw, and that is covered globally by settle.js’s pipeline-growth criterion rather than per-effect — a per-effect probe here would count the same compile twice.',
+  }),
   params: BLOOM_PARAMS,
   tiers: Object.freeze([
     Object.freeze({

@@ -332,6 +332,12 @@ export const WINDOW = Object.freeze({
   visualWeight: 0.65,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'partial',
+    why: 'Builds a dedicated scene, mesh and material PER FLOOR, lazily, via sync() — which ALSO pushes a depth-authority-derived uniform every call, so sync() itself cannot safely run for a floor that is not yet the viewed one. The cookie-mask fetch (ensureMaskImage) has no such dependency, so vt-pan-viewer.js#prepareFloor calls it directly (exposed as prefetchMask) during floor-prepare, ahead of sync() ever running for that floor — fixed 2026-08-16 after a live report that the effect visibly popped in a beat after a floor switch, because nothing used to ask for this mask until the first real frame rendered on the new floor. COUNTED: that fetch (async, clears on success and failure). NOT COUNTED: the scene/mesh/material construction itself, which is synchronous — see water’s readiness note for why the flag that would express it fails closed when the effect is off.',
+    probes: ['windowMaskLoad'],
+  }),
   params: WINDOW_PARAMS,
   // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
   // brush already loaded with this mask (validateAuthoring, effect-manifest.js).

@@ -729,6 +729,12 @@ export const SPECULAR = Object.freeze({
   visualWeight: 0.7,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'partial',
+    why: 'COUNTED: the mask-image fetch (ensureMaskImage), async, with a mid-flight flag that clears on success and on failure alike. NOT COUNTED: the island-pack bake it feeds (surface.specularIslandBake), which is synchronous — see water’s own readiness note for why a "has it baked yet?" flag is the wrong shape here (it fails closed when the effect is off). settle.js’s pipeline-growth and frame-steadiness criteria cover the bake globally.',
+    probes: ['specularMaskLoad'],
+  }),
   params: SPECULAR_PARAMS,
   // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
   // brush already loaded with this mask (validateAuthoring, effect-manifest.js).

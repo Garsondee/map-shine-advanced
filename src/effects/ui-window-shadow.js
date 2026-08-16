@@ -136,6 +136,11 @@ export const UI_WINDOW_SHADOW = Object.freeze({
   // Does not flash — but the flag is declared so the accessibility gate is real
   // for the flashing effects (lightning, animated light) that come later.
   a11y: Object.freeze({ photosensitive: false }),
+  readiness: Object.freeze({
+    firstRunWork: false,
+    coverage: 'none',
+    why: 'A uniform push and nothing else — it has no draw call at all by design (the v6 perf fix removed its extra pass), so there is no target, no asset, no bake and no pipeline of its own to wait for.',
+  }),
   // Off by default below Extreme (expensive). See the header.
   enabledFromProfile: 'extreme',
   params: UI_SHADOW_PARAMS,

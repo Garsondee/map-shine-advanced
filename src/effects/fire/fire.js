@@ -441,6 +441,11 @@ export const FIRE = Object.freeze({
   visualWeight: 1.0,
   a11y: Object.freeze({ photosensitive: true }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'none',
+    why: 'Builds its flame/ember/smoke particle engines lazily on the first sync that has something to burn (ensureEngines) — real first-run work, but SYNCHRONOUS, with no pending window a probe could observe, and a "has it built yet?" flag would hold readiness open forever on a scene with no fire in it. It is covered globally instead, and well: each engine’s TSL compute kernels grow the pipeline set, which is precisely the class renderer.compileAsync(scene, camera) structurally cannot reach and precisely what settle.js’s pipeline-growth criterion was added to catch.',
+  }),
   params: FIRE_PARAMS,
   authoring: Object.freeze({ paint: 'fire' }),
 

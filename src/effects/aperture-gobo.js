@@ -336,6 +336,11 @@ export const APERTURE_GOBO = Object.freeze({
   visualWeight: 0.35,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: false,
+    coverage: 'none',
+    why: 'The gobo pattern is baked into point-light-pool.js’s own light and coloration materials rather than into anything this effect owns, so it allocates no target and loads no asset. Its one draw of its own is a debug visualization, off by default.',
+  }),
   params: APERTURE_GOBO_PARAMS,
   tiers: Object.freeze([
     Object.freeze({

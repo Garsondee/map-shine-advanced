@@ -46,7 +46,7 @@ export const DOF_PARAMS = Object.freeze({
     default: 0.5,
     category: 'Look',
     label: 'Strength',
-    help: 'Overall blend intensity of the below-floor blur. 0 = invisible; 1 = the blurred floors fully replace their sharp source.',
+    help: "Overall amount of blur applied to floors below the one you're viewing — scales the blur radius, not its opacity. 0 = no extra blur (floors below sample the least-blurred mip); 1 = the full ramp set by Blur per floor and Maximum blur. A below-floor pixel is always a full replace, never a sharp/blurred cross-fade.",
   },
 
   // ── Extent (reach / spread) ───────────────────────────────────────────────
@@ -128,6 +128,11 @@ export const DEPTH_OF_FIELD = Object.freeze({
   visualWeight: 0.55,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: false,
+    coverage: 'none',
+    why: 'A post chain over frame-graph-owned buffers — no lazy target, no asset, no bake. Its first draw compiles pipelines, which the global pipeline-growth criterion covers. Worth noting for whoever changes this: the whole pass switches on and off with the viewed floor, so its FIRST draw can be a floor switch rather than scene load.',
+  }),
   params: DOF_PARAMS,
   tiers: Object.freeze([
     Object.freeze({

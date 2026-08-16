@@ -67,6 +67,12 @@ export const DOOR_GRAPHICS = Object.freeze({
   visualWeight: 0.75,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'full',
+    why: 'Loads one texture per distinct door-graphic URL on first use (ensureDoorTexture). Small individually, but a scene with many distinct door art assets loads them all after the curtain would otherwise have lifted, and doors are re-scoped on every floor change.',
+    probes: ['doorTextures'],
+  }),
   params: DOOR_GRAPHICS_PARAMS,
   tiers: Object.freeze([
     Object.freeze({

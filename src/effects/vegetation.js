@@ -576,6 +576,12 @@ export const VEGETATION = Object.freeze({
   visualWeight: 0.6,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'full',
+    why: 'Its first-run work is a per-item overlay stream (fetch, decode, upload, its own GPU fence) — which vt/settle.js has counted since it was written, as vegetationOverlaysLoading. Named here rather than left implicit: the counter existing is not the same as this effect having declared that the counter is what covers it.',
+    probes: ['vegetationOverlaysLoading'],
+  }),
   params: VEGETATION_PARAMS,
   // HOW YOU ADD IT TO A MAP — the ＋ in this effect's card header opens the
   // brush already loaded with this mask (validateAuthoring, effect-manifest.js).

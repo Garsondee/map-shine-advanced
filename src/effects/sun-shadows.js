@@ -273,6 +273,11 @@ export const SUN_SHADOWS = Object.freeze({
   // in a pass that already runs, and the expensive part is a bake that happens
   // a few times a minute.
   enabledFromProfile: 'performance',
+  readiness: Object.freeze({
+    firstRunWork: true,
+    coverage: 'none',
+    why: 'Bakes a layer-smear field per floor into a fixed pool of six slots (maybeBake), sized from the performance tier — real first-run work, and it recurs on a floor switch, but it runs synchronously inside the frame. `bakeSerial` is a staleness counter, not an async queue, so there is nothing in flight to count. Covered by settle.js’s frame-steadiness criterion, which is exactly the shape of what a smear bake costs: one visibly long frame.',
+  }),
   params: SUN_SHADOW_PARAMS,
   // ============================================================================
   // THE LADDER (built 2026-07-29, re-based 2026-08-02 onto the layer-smear

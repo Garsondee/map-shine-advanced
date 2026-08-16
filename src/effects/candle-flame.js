@@ -202,6 +202,11 @@ export const CANDLE_FLAME = Object.freeze({
   visualWeight: 0.5,
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
+  readiness: Object.freeze({
+    firstRunWork: false,
+    coverage: 'none',
+    why: 'Its flame scene, material and geometry are built during startVtPanViewer’s own startup chain — before the render loop is armed and therefore inside the window the curtain already covers — and its per-frame work is reconciling meshes against the render-state seam, not allocating. Nothing is fetched or baked lazily.',
+  }),
   params: CANDLE_FLAME_PARAMS,
   // ============================================================================
   // THE LADDER — REWRITTEN 2026-07-29 against what this effect ACTUALLY does.

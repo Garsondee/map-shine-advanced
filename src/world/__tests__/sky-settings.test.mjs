@@ -201,4 +201,56 @@ export function run(t) {
       edit.target === 'world' && edit.sky.weatherArchetype === 'snow'
     );
   }
+
+  // ---- THE ALMANAC'S OWN FIELDS (weather manager slice 3 UI) --------------------
+  {
+    t.ok(
+      'a fresh sky is director mode with no biome',
+      DEFAULT_SKY.weatherMode === 'director' && DEFAULT_SKY.weatherBiome === null
+    );
+
+    t.ok('a real mode survives normalisation', normalizeSky({ weatherMode: 'almanac' }).weatherMode === 'almanac');
+    t.ok('an unknown mode falls back to director', normalizeSky({ weatherMode: 'chaos' }).weatherMode === 'director');
+
+    t.ok('a real biome id survives normalisation', normalizeSky({ weatherBiome: 'desert' }).weatherBiome === 'desert');
+    t.ok(
+      '`null` is a LEGAL stored value — no biome chosen is honest, not an error',
+      normalizeSky({ weatherBiome: null }).weatherBiome === null
+    );
+    t.ok(
+      'an unknown biome id fails open to null, never keeps a fake/stale climate',
+      normalizeSky({ weatherBiome: 'atlantis' }).weatherBiome === null
+    );
+    t.ok('undefined also resolves to no biome', normalizeSky({}).weatherBiome === null);
+
+    t.ok('volatility clamps to the max', normalizeSky({ weatherVolatility: 999 }).weatherVolatility === 4);
+    t.ok('volatility clamps to the min', normalizeSky({ weatherVolatility: 0.001 }).weatherVolatility === 0.25);
+    t.ok('a garbage volatility falls back to 1', normalizeSky({ weatherVolatility: 'fast' }).weatherVolatility === 1);
+
+    // One corrupt Almanac field must not discard the rest of an authored sky —
+    // same independent-fallback contract every other field here already has.
+    const partial = normalizeSky({ weatherMode: 'nonsense', weatherBiome: 'desert', weatherVolatility: 2 });
+    t.ok(
+      'a bad mode leaves biome and volatility intact',
+      partial.weatherMode === 'director' && partial.weatherBiome === 'desert' && partial.weatherVolatility === 2
+    );
+
+    // Rides the SAME world/scene precedence as everything else.
+    const scoped = resolveSky({
+      world: { weatherMode: 'almanac', weatherBiome: 'desert' },
+      scene: { weatherMode: 'almanac', weatherBiome: 'boreal-tundra' },
+      sceneOverrides: true,
+    });
+    t.ok('a scene can walk a different climate than the world', scoped.sky.weatherBiome === 'boreal-tundra');
+    t.ok(
+      '...and inherits the world climate when it does not',
+      resolveSky({ world: { weatherMode: 'almanac', weatherBiome: 'desert' } }).sky.weatherBiome === 'desert'
+    );
+
+    const edit = applySkyEdit({ world: {} }, { weatherMode: 'almanac', weatherBiome: 'tropical-monsoon' });
+    t.ok(
+      'an Almanac edit targets the world with no override, and both fields land together',
+      edit.target === 'world' && edit.sky.weatherMode === 'almanac' && edit.sky.weatherBiome === 'tropical-monsoon'
+    );
+  }
 }

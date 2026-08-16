@@ -40,6 +40,8 @@
 import { normalizeHour } from './sun.js';
 import { DAY_CLOCK_MODES, DEFAULT_TOD_HOUR, DEFAULT_RATE_HOURS_PER_MINUTE } from './day-clock.js';
 import { DEFAULT_ARCHETYPE_ID, CUSTOM_PRESET, isApplicableArchetype } from './weather-data.js';
+import { WEATHER_MODES } from './weather.js';
+import { isKnownBiome } from './weather-biomes.js';
 
 /**
  * The scene's LOOK block — everything about time, weather and colour a scene can
@@ -76,6 +78,21 @@ export const DEFAULT_SKY = Object.freeze({
    * ROW; `custom` applies the stored COVER. Never both.
    */
   weatherArchetype: DEFAULT_ARCHETYPE_ID,
+  /**
+   * 'director' | 'almanac' (Weather-Manager.md §5). Persisted like everything
+   * else here: a GM who set a scene walking through `desert` should find it
+   * still walking on reload, not silently reset to a held sky.
+   */
+  weatherMode: 'director',
+  /**
+   * The Almanac's climate, or `null` (no biome chosen — the walk stays idle
+   * even in `almanac` mode, a legitimate state per `world/weather.js#setBiome`,
+   * never a fake default climate).
+   */
+  weatherBiome: null,
+  /** The Almanac's dwell-time multiplier, 0.25..4. Meaningless in `director`
+   * mode; stored anyway so switching back to `almanac` remembers the pace. */
+  weatherVolatility: 1,
   /** 0 = exact Foundry parity (the sky light is a no-op), 1 = full model.
    * See effects/sky-access.js for why the default cannot be anything else. */
   realism01: 0,
@@ -113,6 +130,12 @@ export function normalizeSky(raw) {
       r.weatherArchetype === CUSTOM_PRESET || isApplicableArchetype(r.weatherArchetype)
         ? r.weatherArchetype
         : DEFAULT_SKY.weatherArchetype,
+    weatherMode: WEATHER_MODES.includes(r.weatherMode) ? r.weatherMode : DEFAULT_SKY.weatherMode,
+    // `null` is a real, legal value here (no biome chosen) — the same
+    // fail-open posture `resolveBiome` takes, applied at the storage boundary.
+    weatherBiome:
+      r.weatherBiome === null || isKnownBiome(r.weatherBiome) ? (r.weatherBiome ?? null) : DEFAULT_SKY.weatherBiome,
+    weatherVolatility: clampRange(r.weatherVolatility, 0.25, 4, DEFAULT_SKY.weatherVolatility),
     realism01: clampRange(r.realism01, 0, 1, DEFAULT_SKY.realism01),
     gradeEnvStrength: clampRange(r.gradeEnvStrength, 0, 1, DEFAULT_SKY.gradeEnvStrength),
   });

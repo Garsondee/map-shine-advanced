@@ -3044,6 +3044,12 @@ export async function startVtPanViewer({
           // it — see `mantle-model.js#gameHourDelta`, which owns midnight and the
           // backward-clock case so no caller has to.
           todHour: env.time?.todHour ?? null,
+          // ⭐ THE ZOOM GATE's denominator (P4, §3.4 job 1). With the view rect
+          // this yields world-px-per-screen-px, and therefore how big a drop
+          // actually is on screen — which is what decides whether the specimen
+          // tier is worth drawing at all. Absent ⇒ the gate fails AWAKE; an
+          // absent measurement must never silently delete the weather.
+          viewportWidthPx: renderer?.domElement?.clientWidth ?? renderer?.domElement?.width ?? null,
           // The SAME `dayFactor01` the shadow handle and the daylight tint
           // read — never a second "is it dark" derivation.
           dayFactor01: env.sun?.dayFactor01 ?? 1,
@@ -8143,6 +8149,25 @@ export async function startVtPanViewer({
           // this floor's water across the entire screen the instant its rank
           // is momentarily unresolved — window's own third live bug, ported.
           return rank === null ? null : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+        },
+        // THE CAST-SHADOW SEAM (2026-08-16) — author: *"Sun glint needs to be
+        // defeated by shadows."* `sunShadows.fields` is the same fixed-length
+        // per-floor slot array `envLight` already reads (its own
+        // `sunShadowSlots`), asked here for the ONE slot holding this water's
+        // own floor. Resolved per frame rather than captured: a residency pass
+        // reassigns which floor a slot holds, on its own cadence.
+        //
+        // `getFloorIndex()` is the slot's own live answer, exactly as the
+        // `envLight.setSunShadowFloorIndex` loop in the frame body uses it —
+        // so water and the ambient fill can never disagree about which floor a
+        // field belongs to.
+        getSunShadowSlot: (fi) => {
+          for (const field of sunShadows.fields) {
+            if (field.getFloorIndex() !== fi) continue;
+            const rect = field.getRect();
+            return rect ? { texture: field.texture, rect } : null;
+          }
+          return null;
         },
       });
     }

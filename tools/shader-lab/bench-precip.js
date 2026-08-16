@@ -67,6 +67,7 @@ import { evaluate, saveCanvasPng } from './contract.js';
 import { createPrecipEngine } from '../../src/effects/particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../../src/effects/particles/precip-splash-runtime.js';
 import { createMantleRuntime } from '../../src/effects/precipitation/mantle-runtime.js';
+import { createPrecipCurtain } from '../../src/effects/precipitation/curtain-render.js';
 import {
   PRECIP_SPECIES,
   PRECIP_SPECIES_IDS,
@@ -115,6 +116,8 @@ class PrecipDriver {
      * rain would make "snow has no splashes" unfalsifiable here.
      */
     this.splashEngines = new Map();
+    /** speciesId → IMPRESSION curtain (P4). */
+    this.curtains = new Map();
     this.activeSpecies = 'rain';
     this._rafId = null;
     this._active = true;
@@ -153,6 +156,13 @@ class PrecipDriver {
       // name_the_source`).
       fall: true,
       arrival: true,
+      // ⭐ THE IMPRESSION TIER (P4) — a third isolator, same reason as the other
+      // two: a measurement must be able to say WHICH layer lit a pixel.
+      curtain: true,
+      curtainStrength: 1,
+      curtainBandDepth: 0.8,
+      curtainBandScale: 1,
+      gustiness01: 0.6,
       splashSizeScale: 1,
       splashAlphaScale: 1,
       splashPeakBoost: 2.75,
@@ -238,6 +248,11 @@ class PrecipDriver {
       ambient: {
         speed01: THREE.TSL.uniform(THREE.TSL.float(this.state.windSpeed01)),
         directionDeg: THREE.TSL.uniform(THREE.TSL.float(this.state.windDirDeg)),
+        // ⭐ P4 — the squall field's travelling half IS the wind door's gust
+        // envelope, so the synthetic handle has to carry gustiness too. Without
+        // it the bands would be the slow cell alone: correct, and completely
+        // still, which is not a squall.
+        gustiness01: THREE.TSL.uniform(THREE.TSL.float(this.state.gustiness01)),
       },
     };
 
@@ -286,6 +301,15 @@ class PrecipDriver {
       splash.setSceneBounds(WORLD);
       if (splash.ok) splash.init(this.renderer);
       this.splashEngines.set(id, splash);
+
+      const curtain = createPrecipCurtain({
+        THREE,
+        speciesId: id,
+        worldRect: WORLD,
+        renderOrder: 9.5,
+        openSkyTexture,
+      });
+      this.curtains.set(id, curtain);
     }
 
     this.applyState();
@@ -311,6 +335,7 @@ class PrecipDriver {
     if (this.wind) {
       this.wind.ambient.speed01.value = s.windSpeed01;
       this.wind.ambient.directionDeg.value = s.windDirDeg;
+      this.wind.ambient.gustiness01.value = s.gustiness01;
     }
     for (const [id, engine] of this.engines) {
       const row = PRECIP_SPECIES[id];
@@ -340,6 +365,8 @@ class PrecipDriver {
         windAirSpeedPxS: s.windAirSpeedPxS,
         parallaxStreak01: s.parallaxStreak01,
         cameraHeight: s.cameraHeight,
+        curtainBandDepth: s.curtainBandDepth,
+        curtainBandScale: s.curtainBandScale,
       });
 
       // ⭐ THE ARRIVAL gets the SAME resolved frame the curtain did — that is
@@ -347,6 +374,19 @@ class PrecipDriver {
       // the species' own capacity, so handing it the lab-scaled `liveCount`
       // would understate the splash rate by the lab/production ratio; it takes
       // the UNSCALED frame and the lab caps its own arena instead.
+      // The curtain takes the SAME resolved frame the bodies do — `veil01` is
+      // the species' own threshold curve, so drizzle hands zero here.
+      const curtain = this.curtains.get(id);
+      if (curtain) {
+        curtain.setFrame(active ? frame : { veil01: 0, rgbMul: 1, alphaMul: 1 });
+        curtain.setSkyReachTexture(s.skyGate ? this.buildSkyReachTexture() : null, WORLD);
+        curtain.setTuning({
+          curtainStrength: s.curtainStrength,
+          curtainBandDepth: s.curtainBandDepth,
+          curtainBandScale: s.curtainBandScale,
+        });
+      }
+
       const splash = this.splashEngines.get(id);
       if (splash?.ok) {
         splash.setFrame(frame);
@@ -357,6 +397,7 @@ class PrecipDriver {
           splashPeakBoost: s.splashPeakBoost,
           splashSmearGain: s.splashSmearGain,
           splashRateScale: s.splashRateScale,
+          curtainBandDepth: s.curtainBandDepth,
           windAirSpeedPxS: s.windAirSpeedPxS,
         });
       }
@@ -406,6 +447,7 @@ class PrecipDriver {
     engine.step(this.renderer, dt / 1000, this._virtualNowMs, this.wind);
     const splash = this.splashEngines.get(this.activeSpecies);
     if (splash?.ok) splash.step(this.renderer, dt / 1000, this._virtualNowMs, this.wind);
+    this.curtains.get(this.activeSpecies)?.step(this._virtualNowMs, this.wind);
 
     this._drawLayers();
     return this.readout();
@@ -425,7 +467,10 @@ class PrecipDriver {
   _drawLayers() {
     const engine = this.engine;
     const splash = this.splashEngines.get(this.activeSpecies);
+    const curtain = this.curtains.get(this.activeSpecies);
+    // GROUND → FAR AIR → NEAR AIR, exactly production's `scenes` order.
     if (this.state.arrival && splash?.ok) this.renderer.render(splash.scene, this.camera);
+    if (this.state.curtain && curtain?.hasContent) this.renderer.render(curtain.scene, this.camera);
     if (this.state.fall && engine) this.renderer.render(engine.scene, this.camera);
   }
 
@@ -452,7 +497,8 @@ class PrecipDriver {
       // ⭐ SEPARATE, never merged into the fall's block. "No splashes" and "no
       // rain" are different failures with different causes.
       arrival: this.splashEngines.get(this.activeSpecies)?.debugState() ?? null,
-      layers: { fall: this.state.fall, arrival: this.state.arrival },
+      curtain: this.curtains.get(this.activeSpecies)?.debugState() ?? null,
+      layers: { fall: this.state.fall, arrival: this.state.arrival, curtain: this.state.curtain },
       axes: {
         precip01: this.state.precip01,
         stormActivity01: this.state.stormActivity01,
@@ -577,15 +623,23 @@ class PrecipDriver {
     const y1 = Math.min(H, Math.ceil(uvRect.v1 * H));
     let lit = 0;
     let total = 0;
+    let sum = 0;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         const i = (y * W + x) * 4;
         const luma = (raw[i] * 0.2126 + raw[i + 1] * 0.7152 + raw[i + 2] * 0.0722) / 255;
         total++;
+        sum += luma;
         if (luma > 0.02) lit++;
       }
     }
-    return { litPixels: lit, totalPixels: total, region: { x0, x1, y0, y1 } };
+    // ⚠️ `meanLuma` WAS MISSING UNTIL P4 NEEDED IT, and its absence is a lesson
+    // rather than an oversight. COVERAGE cannot see a band: a full-strength veil
+    // lights every pixel in every band AND every lull, so `litPixels` reads
+    // 100% either way and "is it banded?" is unanswerable. Intensity is the
+    // only axis the question lives on — the instrument has to measure the
+    // quantity the claim is about (`feedback_measure_the_output_not_the_equation`).
+    return { litPixels: lit, totalPixels: total, meanLuma: total > 0 ? sum / total : 0, region: { x0, x1, y0, y1 } };
   }
 
   // ⚠️ THERE IS DELIBERATELY NO `readBodies()`. A first cut of this file had
@@ -730,11 +784,17 @@ export function createPrecipBench({ THREE, log }) {
       const artifacts = [];
       for (const id of PRECIP_SPECIES_IDS) {
         driver.setSpecies(id);
-        driver.set({ precip01: 0.8, windSpeed01: 0.3 });
+        // ⚠️ THE SPECIMEN TIER ALONE. This compares rain's streaks against
+        // snow's flakes, and a full-frame veil drawn over both compresses the
+        // difference toward zero — measured: relDiff fell from 0.73 to 0.083
+        // the moment P4's curtain existed. The bodies are the subject; the
+        // curtain is a different claim with its own scenario.
+        driver.set({ precip01: 0.8, windSpeed01: 0.3, fall: true, arrival: false, curtain: false });
         results[id] = await driver.measureCoverage(40);
         const png = await saveCanvasPng(runId, `${id}.png`, driver.canvas);
         if (png) artifacts.push(png);
       }
+      driver.set({ arrival: true, curtain: true });
       return {
         checks: [
           ...PRECIP_SPECIES_IDS.map((id) =>
@@ -868,8 +928,14 @@ export function createPrecipBench({ THREE, log }) {
     summary: 'the splash layer draws, thins with precip01, obeys the sky gate, and never fires for snow.',
     async run({ runId }) {
       driver.setSpecies('rain');
-      // Splashes ONLY — the curtain is off for every measurement below.
-      driver.set({ fall: false, arrival: true, skyGate: false, precip01: 0.9, windSpeed01: 0 });
+      // ⚠️ SPLASHES ONLY, AND `curtain: false` IS LOAD-BEARING. This scenario
+      // predates P4 and said "the curtain is off" while only switching off the
+      // FALL — so once the impression tier existed, `snow-settles-it-does-not-
+      // splash` measured a full-frame veil and reported 196,608 splash pixels
+      // for a species that has no splashes at all. A layer isolator that names
+      // two of three layers is not an isolator
+      // (`feedback_aggregate_cannot_name_the_source`, in my own instrument).
+      driver.set({ fall: false, arrival: true, curtain: false, skyGate: false, precip01: 0.9, windSpeed01: 0 });
       const heavy = await driver.measureCoverage(40);
       const pngHeavy = await saveCanvasPng(runId, 'splash-heavy.png', driver.canvas);
 
@@ -966,7 +1032,7 @@ export function createPrecipBench({ THREE, log }) {
     summary: 'wind makes an impact ASYMMETRIC (crown thrown downwind), it does not motion-blur it.',
     async run({ runId }) {
       driver.setSpecies('rain');
-      driver.set({ fall: false, arrival: true, skyGate: false, precip01: 0.9, windSpeed01: 0 });
+      driver.set({ fall: false, arrival: true, curtain: false, skyGate: false, precip01: 0.9, windSpeed01: 0 });
       const calm = await driver.measureCoverage(40);
       const calmWind = driver.splashEngines.get('rain').debugState().wind;
 
@@ -1006,6 +1072,119 @@ export function createPrecipBench({ THREE, log }) {
         inputs: { windSpeed01: [0, 1] },
         stats: { calm, gale, calmWind, galeWind, ratio },
         artifacts: png ? [png] : [],
+      };
+    },
+  });
+
+  /**
+   * ⭐ P4 — THE IMPRESSION CURTAIN (§3.4). Three jobs, three checks each.
+   *
+   * ⚠️ MEASURED WITH THE OTHER TWO LAYERS OFF. The curtain's whole claim is
+   * that it carries the picture ALONE when the specimens sleep, so a
+   * measurement that included them would be reading the sum and calling it the
+   * veil (`feedback_aggregate_cannot_name_the_source`).
+   */
+  scenarios.set('curtain-carries-the-distance', {
+    name: 'curtain-carries-the-distance',
+    summary: 'the veil draws only above the veil threshold, bands with the wind, and stops at a roof.',
+    async run({ runId }) {
+      driver.setSpecies('rain');
+      driver.set({ fall: false, arrival: false, curtain: true, skyGate: false, windSpeed01: 0.5, gustiness01: 0.7 });
+
+      // §2.3: the veil curve is a THRESHOLD — a downpour greys the air, drizzle
+      // does not. Rain's threshold sits at 0.5.
+      driver.set({ precip01: 0.3 });
+      const drizzle = await driver.measureCoverage(20);
+      driver.set({ precip01: 1 });
+      const downpour = await driver.measureCoverage(20);
+      const pngVeil = await saveCanvasPng(runId, 'curtain.png', driver.canvas);
+
+      /**
+       * The bands must be BANDS — a flat veil is fog, not a squall.
+       *
+       * ⚠️ MEASURED **ACROSS** THE BANDS, AND THE FIRST CUT MEASURED **ALONG**
+       * THEM AND CONCLUDED "FLAT". The cell is anisotropically stretched in the
+       * travel direction (§3.4 — weather arrives in lines), so at the bench's
+       * wind the bands run east-west and vary north-south. Two patches compared
+       * left-to-right therefore sit inside the SAME band and differ by under
+       * 1%, which reads as a broken field and is really a broken measurement.
+       * A strip of ten ROWS shows two to three bands.
+       */
+      const rows = [];
+      for (let k = 0; k < 10; k++) {
+        rows.push(await driver.measureRegion({ u0: 0.05, u1: 0.95, v0: k / 10, v1: (k + 1) / 10 }, 1));
+      }
+      const lumas = rows.map((r) => r.meanLuma);
+
+      // LAW 3 at the curtain: no veil over a roof.
+      driver.set({ skyGate: true });
+      const gated = await driver.measureRegion(BUILDING_UV, 20);
+      driver.set({ skyGate: false });
+      const ungated = await driver.measureRegion(BUILDING_UV, 20);
+
+      // Depth 0 must be the IDENTITY — a flat, full-strength veil, not a blank
+      // one. That is what `mix(1, raw, depth)` buys and it is easy to get
+      // backwards.
+      driver.set({ curtainBandDepth: 0 });
+      const flat = await driver.measureCoverage(15);
+      driver.set({ curtainBandDepth: 0.8, fall: true, arrival: true, precip01: 0.6, windSpeed01: 0.25 });
+
+      return {
+        checks: [
+          evaluate('veil-is-silent-below-its-threshold', () => ({
+            ok: drizzle.litPixels === 0,
+            measured: drizzle.litPixels,
+            expected: '0 — drizzle does not grey the air (§2.3)',
+          })),
+          // ⚠️ THE CHECK A BROKEN TSL GRAPH CANNOT PASS.
+          evaluate('downpour-draws-a-veil', () => ({
+            ok: downpour.litPixels > 20000,
+            measured: downpour.litPixels,
+            expected: '> 20k lit px with BOTH particle tiers switched off',
+          })),
+          evaluate('the-veil-is-banded-not-flat', () => {
+            const mn = Math.min(...lumas);
+            const mx = Math.max(...lumas);
+            const spread = (mx - mn) / Math.max(1e-6, (mx + mn) / 2);
+            return {
+              ok: spread > 0.15,
+              measured: Number(spread.toFixed(3)),
+              expected: '> 15% peak-to-trough across ten rows perpendicular to the bands',
+            };
+          }),
+          // ⚠️ A SPREAD ALONE CANNOT TELL A BAND FROM A GRADIENT — a smooth ramp
+          // across the frame scores exactly as well as a squall does. Counting
+          // REVERSALS is what distinguishes them, and it is the check that would
+          // have caught the first (5× too coarse) cell frequency, which measured
+          // as a monotonic ramp with no bands in it at all.
+          evaluate('they-are-bands-not-a-gradient', () => {
+            let turns = 0;
+            for (let i = 2; i < lumas.length; i++) {
+              if (Math.sign(lumas[i] - lumas[i - 1]) !== Math.sign(lumas[i - 1] - lumas[i - 2])) turns++;
+            }
+            return { ok: turns >= 2, measured: turns, expected: '>= 2 reversals (a ramp has 0)' };
+          }),
+          evaluate('law3-no-veil-over-a-roof', () => {
+            const remaining = ungated.litPixels > 0 ? gated.litPixels / ungated.litPixels : 0;
+            return {
+              ok: remaining < 0.1,
+              measured: { ungated: ungated.litPixels, gated: gated.litPixels },
+              expected: '< 10% of the veil survives over the building',
+            };
+          }),
+          // ⚠️ DEPTH 0 IS THE IDENTITY (a full flat veil), NOT NOTHING. The
+          // field lerps FROM 1, so turning the bands off leaves exactly the
+          // un-banded behaviour every consumer had before P4 — which is what
+          // lets the dial reach zero without the weather going out.
+          evaluate('zero-band-depth-is-the-identity-not-a-blank', () => ({
+            ok: flat.litPixels >= downpour.litPixels,
+            measured: { banded: downpour.litPixels, flat: flat.litPixels },
+            expected: 'a flat field covers at least as much as a banded one',
+          })),
+        ],
+        inputs: { veilThreshold: 0.5, buildingUv: BUILDING_UV },
+        stats: { drizzle, downpour, rowLumas: lumas.map((v) => Number(v.toFixed(4))), gated, ungated, flat },
+        artifacts: pngVeil ? [pngVeil] : [],
       };
     },
   });

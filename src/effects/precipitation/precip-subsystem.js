@@ -32,6 +32,7 @@
 import { createPrecipEngine } from '../particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../particles/precip-splash-runtime.js';
 import { createMantleRuntime } from './mantle-runtime.js';
+import { createPrecipCurtain } from './curtain-render.js';
 import { PRECIP_SPECIES, PRECIP_SPECIES_IDS, resolveSpeciesFrame, isBuiltSpecies } from './precip-species.js';
 import { createLogger } from '../../core/log.js';
 
@@ -147,7 +148,16 @@ export function createPrecipitationSubsystem({
    * (`feedback_absent_zone_row_is_a_measurement`).
    */
   const splashEngines = new Map();
+  /** @type {Map<string, object>} speciesId → IMPRESSION curtain (P4). */
+  const curtains = new Map();
   let activeSpeciesId = null;
+  /**
+   * ⭐ THE ZOOM GATE (P4, §3.4 job 1 + Effects.md Law 7). False when bodies are
+   * smaller than the species' `zoomSleepPxPerBody` on screen — the specimen
+   * tier then SLEEPS and the curtain carries the picture alone.
+   */
+  let specimenAwake = true;
+  let lastZoom = null;
   let lastReason = null;
   const seededEngines = new Set();
   const seededSplashEngines = new Set();
@@ -164,6 +174,81 @@ export function createPrecipitationSubsystem({
     createMantleTarget && renderMantleStep
       ? 'not built yet — waiting for scene bounds'
       : 'no target allocator or render step injected';
+
+  /**
+   * ⭐ Build one species' curtain on first use. Sized from the SCENE bounds, so
+   * like the mantle it waits for them rather than being built against a
+   * placeholder rect it would then have to rebuild.
+   */
+  function curtainFor(speciesId, sceneBounds) {
+    if (curtains.has(speciesId)) return curtains.get(speciesId);
+    if (!sceneBounds || !(sceneBounds.maxX > sceneBounds.minX)) return null;
+    const curtain = createPrecipCurtain({
+      THREE,
+      speciesId,
+      worldRect: sceneBounds,
+      // BETWEEN the splashes (renderOrder-1) and the falling bodies
+      // (renderOrder): the curtain is the FAR rain, the bodies are the NEAR
+      // rain. See its own header.
+      renderOrder: renderOrder - 0.5,
+      openSkyTexture,
+    });
+    if (skyReach.texture) curtain.setSkyReachTexture(skyReach.texture, skyReach.rect);
+    if (lastTuning) curtain.setTuning(lastTuning);
+    curtains.set(speciesId, curtain);
+    log.info(`built '${speciesId}' curtain over the scene rect`);
+    return curtain;
+  }
+
+  /**
+   * ⭐ THE ZOOM GATE — is a body big enough on screen to be worth drawing?
+   *
+   * §3.4 job 1: zoomed out until drops are sub-pixel, the specimen tier sleeps
+   * and the curtain alone says *"raining over there"*. This is what makes that
+   * a JS `if` rather than a uniform set to zero (Effects.md Law 7), and it is
+   * what kills zoom-out mush BY DESIGN: what you see at distance was never made
+   * of dots.
+   *
+   * ⚠️ FAILS **AWAKE**. With no viewport width reported there is no way to
+   * know how big a body is, and the honest answer to "should I stop drawing the
+   * rain" without evidence is NO — an absent measurement must not silently
+   * delete the weather.
+   */
+  function updateZoomGate(species, viewRect, viewportWidthPx) {
+    if (!species || !viewRect || !(viewportWidthPx > 0)) {
+      specimenAwake = true;
+      lastZoom = null;
+      return;
+    }
+    const worldPxPerScreenPx = Math.max(1e-6, (viewRect.maxX - viewRect.minX) / viewportWidthPx);
+    // The body's WIDEST dimension — `zoomSleepPxPerBody` is calibrated against
+    // sub-pixel widths (rain 0.6, snow 1.2), which is why a streak's LENGTH is
+    // deliberately not what is measured: a streak stays legible as a line long
+    // after its width has vanished, and it is the width that aliases.
+    const screenPxPerBody = species.body.sizePx[1] / worldPxPerScreenPx;
+    specimenAwake = screenPxPerBody >= species.zoomSleepPxPerBody;
+    lastZoom = { worldPxPerScreenPx, screenPxPerBody, threshold: species.zoomSleepPxPerBody, awake: specimenAwake };
+  }
+
+  /**
+   * The frame's response scalars — ONE resolve, every consumer.
+   *
+   * ⚠️ THE CURTAIN READS THE SAME ONE, which is what keeps `veil01` and the
+   * body count describing the same weather. Two resolves is two opinions about
+   * how hard it is raining, free to disagree by a frame.
+   */
+  function frameFor(species, weather, st, precip01) {
+    return resolveSpeciesFrame(
+      species,
+      {
+        precip01,
+        stormActivity01: weather.stormActivity01 ?? 0,
+        dayFactor01: st.dayFactor01 ?? 1,
+        flash01: st.flash01 ?? 0,
+      },
+      st.tierScale ?? 1
+    );
+  }
 
   /** Build one species' engine on first use — a clear map never allocates. */
   function engineFor(speciesId) {
@@ -303,6 +388,24 @@ export function createPrecipitationSubsystem({
       activeSpeciesId = speciesId;
       if (!speciesId) return;
 
+      const species = PRECIP_SPECIES[speciesId];
+      const rectForZoom = worldRect ?? st.worldRect ?? null;
+      updateZoomGate(species, rectForZoom, st.viewportWidthPx);
+
+      // ⭐ THE CURTAIN (P4) — stepped whether or not the specimens are awake,
+      // because it is what carries the picture when they are not.
+      const curtain = curtainFor(speciesId, st.sceneBounds ?? null);
+      if (curtain) {
+        curtain.setFrame(frameFor(species, weather, st, precip01));
+        curtain.step(nowMs, getWindHandle());
+      }
+
+      // ⚠️ THE SPECIMEN TIER SLEEPS AS A JS `if` — no engine built, no kernel
+      // dispatched, no draw submitted (Effects.md Law 7). A uniform set to zero
+      // would still pay the dispatch and the fill, which is exactly the cost
+      // the zoom gate exists to avoid.
+      if (!specimenAwake) return;
+
       const engine = engineFor(speciesId);
       // ⚠️ PER-ENGINE, not one shared flag. A single `seeded` boolean meant the
       // FIRST species to run consumed it and every later one drew from
@@ -322,22 +425,13 @@ export function createPrecipitationSubsystem({
       // Mansion). Pushed per frame because it is one uniform write and a scene
       // change would otherwise need its own invalidation path.
       if (st.sceneBounds !== undefined) engine.setSceneBounds(st.sceneBounds);
-      // ⚠️ RESOLVED ONCE AND HANDED TO BOTH ENGINES. The splash rate is not a
+      // ⚠️ RESOLVED ONCE AND HANDED TO EVERY CONSUMER. The splash rate is not a
       // second opinion about how much rain there is — it is THE SAME NUMBER
       // the drops are drawn from, so the carpet thins exactly as the curtain
       // does. A private curve here could disagree with what the player can see
       // falling, which is the `feedback_shared_field_two_meanings_two_
       // registries` shape wearing a raincoat.
-      const frame = resolveSpeciesFrame(
-        PRECIP_SPECIES[speciesId],
-        {
-          precip01,
-          stormActivity01: weather.stormActivity01 ?? 0,
-          dayFactor01: st.dayFactor01 ?? 1,
-          flash01: st.flash01 ?? 0,
-        },
-        st.tierScale ?? 1
-      );
+      const frame = frameFor(species, weather, st, precip01);
       engine.setFrame(frame);
       // ⚠️ THE HANDLE IS RE-READ EVERY FRAME, not captured at engine build.
       // `vt-pan-viewer.js`'s `windHandle` is reassigned when the wind field
@@ -377,8 +471,12 @@ export function createPrecipitationSubsystem({
     get scenes() {
       if (!activeSpeciesId) return [];
       const out = [];
+      // GROUND → FAR AIR → NEAR AIR. Splashes lie on the map; the curtain is
+      // the rain in the distance; the bodies are the rain in front of you.
       const splash = splashEngines.get(activeSpeciesId);
       if (splash?.ok && splash.debugState().visible) out.push(splash.scene);
+      const curtain = curtains.get(activeSpeciesId);
+      if (curtain?.hasContent) out.push(curtain.scene);
       const fall = engines.get(activeSpeciesId);
       if (fall?.debugState().visible) out.push(fall.scene);
       return out;
@@ -418,6 +516,9 @@ export function createPrecipitationSubsystem({
       // The mantle gates ACCUMULATION on the same mask — snow must not pile up
       // under a roof any more than it may fall through one.
       if (mantle) results.mantle = mantle.setMasks({ skyReach, fireMask });
+      // The curtain gates on the same mask — a veil over a hall is rain the
+      // player can see indoors just as surely as a drop is.
+      for (const [id, c] of curtains) results[`${id}:curtain`] = c.setSkyReachTexture(texture, rect);
       return results;
     },
 
@@ -442,6 +543,7 @@ export function createPrecipitationSubsystem({
       for (const engine of engines.values()) engine.setTuning(t);
       for (const engine of splashEngines.values()) engine.setTuning(t);
       mantle?.setTuning(t);
+      for (const curtain of curtains.values()) curtain.setTuning(t);
     },
 
     /**
@@ -477,6 +579,12 @@ export function createPrecipitationSubsystem({
          * folding it into their status would make "nothing is falling" look
          * like "nothing is happening". */
         mantle: mantle ? mantle.debugState() : { built: false, reason: mantleReason },
+        /** ⭐ THE IMPRESSION TIER (P4), reported separately — the whole point of
+         * the zoom gate is that the specimen and impression tiers are live at
+         * DIFFERENT times, so one merged "is precipitation visible" would hide
+         * which one is carrying the picture. */
+        curtain: Object.fromEntries([...curtains].map(([id, c]) => [id, c.debugState()])),
+        zoom: lastZoom ? { ...lastZoom } : { awake: specimenAwake, reason: 'no viewport width reported — fails awake' },
       };
     },
   };

@@ -112,6 +112,7 @@ import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
 import { createWindHandle } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
+import { buildSquallField } from '../precipitation/squall-field.js';
 
 const log = createLogger('precip-runtime');
 const TIER0_WIND_HANDLE = createWindHandle();
@@ -456,6 +457,15 @@ export function createPrecipEngine({
    * it with no second calibration to get wrong.
    */
   const uWindAirSpeed = uniform(float(2600));
+  /**
+   * ⭐ THE SQUALL FIELD's inputs (P4, §3.4 job 2). `gustiness01` is the wind
+   * door's own axis; `squallDepth` at 0 makes the field a constant 1, i.e.
+   * EXACTLY the un-banded population this engine had before P4 — the identity,
+   * not a value that merely looks unchanged.
+   */
+  const uGustiness01 = uniform(float(0));
+  const uSquallDepth = uniform(float(0.8));
+  const uSquallScale = uniform(float(1));
 
   /**
    * ⭐ ZOOM INVARIANCE — the view's span relative to {@link REFERENCE_VIEW_SPAN}.
@@ -903,7 +913,33 @@ export function createPrecipEngine({
       .clamp(float(0), float(1))
       .mul(uSceneRect.w.sub(pDrawn.y).div(edgeBand).clamp(float(0), float(1)));
     const sceneClip = hasBounds.select(inX.mul(inY), float(1));
-    const visible = alive.mul(birthEase).mul(sceneClip);
+
+    /**
+     * ⭐ THE SQUALL BANDS, IN THE BODIES (P4, §3.4 job 2).
+     *
+     * ⚠️ THE **SAME** FIELD THE CURTAIN DRAWS, from the same module, not a
+     * second noise that happens to look similar. §3.4: *"One field, two
+     * consumers, no fork."* If they ever diverge, a downpour shows a dense band
+     * of drops falling through a thin patch of veil — worse than no bands.
+     *
+     * ⚠️ AND IT MODULATES **OPACITY**, WHICH **IS** DENSITY HERE — the same
+     * statistical identity the sky gate already relies on: a uniform spatial
+     * process times a multiplicative visibility mask yields visible density
+     * proportional to the mask. Biasing the SPAWN instead would need the field
+     * in the compute stage plus a rejection loop, and would thin the population
+     * at the rect edge in exactly the way `SPAWN_MARGIN_FRAC` exists to prevent.
+     */
+    const squall = buildSquallField(TSL, {
+      worldXY: pDrawn,
+      timeMs: uTimeMs,
+      directionDeg: uWindDirDeg,
+      speed01: uWindSpeed01,
+      gustiness01: uGustiness01,
+      bandDepth: uSquallDepth,
+      scale: uSquallScale,
+    });
+
+    const visible = alive.mul(birthEase).mul(sceneClip).mul(squall);
 
     // ⭐ THE SKY-REACH GATE, sampled at the body's DRAWN (parallaxed) position.
     // Computed HERE because `position.element(i)` is a storage read and storage
@@ -1238,8 +1274,12 @@ export function createPrecipEngine({
       if (wind?.ambient) {
         const sp = wind.ambient.speed01?.value;
         const dg = wind.ambient.directionDeg?.value;
+        const gu = wind.ambient.gustiness01?.value;
         if (Number.isFinite(sp)) uWindSpeed01.value = sp;
         if (Number.isFinite(dg)) uWindDirDeg.value = dg;
+        // The squall field's travelling half IS the wind door's gust envelope,
+        // so it needs the same gustiness the vegetation bends to.
+        if (Number.isFinite(gu)) uGustiness01.value = gu;
       }
       uDtSec.value = Math.max(0, Math.min(0.1, dtSec || 0));
       uTimeMs.value = timeMs || 0;
@@ -1359,6 +1399,11 @@ export function createPrecipEngine({
       if (Number.isFinite(t.chaosScale)) uChaosScale.value = t.chaosScale;
       if (Number.isFinite(t.streakScale)) uStreakScale.value = Math.max(0, t.streakScale);
       if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = Math.max(0, t.windAirSpeedPxS);
+      // ⭐ THE SAME DIAL THE CURTAIN READS — one control for one phenomenon.
+      // Two band-depth sliders, one for the veil and one for the bodies, is
+      // how the two pictures end up disagreeing about where the squall is.
+      if (Number.isFinite(t.curtainBandDepth)) uSquallDepth.value = Math.max(0, Math.min(1, t.curtainBandDepth));
+      if (Number.isFinite(t.curtainBandScale)) uSquallScale.value = Math.max(0.01, t.curtainBandScale);
       if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
       if (Number.isFinite(t.cameraHeight)) camHeightBase = Math.max(1, t.cameraHeight);
     },
@@ -1387,6 +1432,7 @@ export function createPrecipEngine({
           chaosScale: uChaosScale.value,
           streakScale: uStreakScale.value,
           windAirSpeedPxS: uWindAirSpeed.value,
+          squallDepth: uSquallDepth.value,
           parallaxStreak01: uParallaxStreak01.value,
           cameraHeight: uCamHeight.value,
         },

@@ -111,6 +111,7 @@ import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
 import { createWindHandle } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
+import { buildSquallField } from '../precipitation/squall-field.js';
 
 const log = createLogger('precip-splash');
 const TIER0_WIND_HANDLE = createWindHandle();
@@ -243,6 +244,21 @@ export function createPrecipSplashEngine({
 
   // ── UNIFORMS ─────────────────────────────────────────────────────────────
   const uDtSec = uniform(0);
+  /**
+   * ⭐ THE CLOCK, WHICH P2 DELIBERATELY DID NOT HAVE AND P4 GAVE A CONSUMER.
+   *
+   * P2 removed this uniform on purpose: nothing read it (a splash's whole life
+   * is its own age, and the respawn entropy is bounded by POSITION, never by
+   * the clock — see the update kernel). Keeping an unread uniform would have
+   * been `feedback_unconsumed_api_rots_silently`. It is back because the squall
+   * field genuinely needs a clock: its bands TRAVEL, and a still band is not a
+   * squall.
+   *
+   * ⚠️ IT IS STILL NOT SAFE FOR ENTROPY. The kernel's note stands — `sin()`'s
+   * float32 precision collapses as this grows all session. It feeds the noise
+   * field (which advects a coordinate, not a hash) and nothing else.
+   */
+  const uTimeMs = uniform(float(0));
   const uRectMin = uniform(vec2(worldRect.minX, worldRect.minY));
   const uRectSize = uniform(vec2(worldRect.maxX - worldRect.minX, worldRect.maxY - worldRect.minY));
   /** How many slots the DRAW shows — §4.1's rate, since life is fixed per
@@ -275,6 +291,17 @@ export function createPrecipSplashEngine({
   /** The wind field's own px/s at full gale — the fall's calibration, shared by
    * value. Only the DRIFT reads it; the smear reads `speed01` directly. */
   const uWindAirSpeed = uniform(float(2600));
+  /**
+   * ⭐ §4.1's THIRD RATE FACTOR, FINALLY PRESENT. This engine's header has said
+   * since P2 that `rate ∝ precip01 × skyReach × squallField` was missing its
+   * squall term and that inventing a local noise would be a second, private
+   * answer to a question P4 was about to answer properly. P4 answered it:
+   * `squall-field.js` is that field, and the curtain and the falling bodies
+   * read the same one.
+   */
+  const uGustiness01 = uniform(float(0));
+  const uSquallDepth = uniform(float(0.8));
+  const uSquallScale = uniform(float(1));
 
   // ── THE GATES ────────────────────────────────────────────────────────────
   /** `w <= 0` disables the clip — the same fail-open polarity as the fall: a
@@ -526,6 +553,19 @@ export function createPrecipSplashEngine({
    * are pure opacity multipliers, and folding them costs nothing while keeping
    * the second varying's `w` free for `life01`, which the shape genuinely needs.
    */
+  /** The squall band at a world position — the SAME field the curtain draws
+   * and the falling bodies fade with. */
+  const squallAt = (worldXY) =>
+    buildSquallField(TSL, {
+      worldXY,
+      timeMs: uTimeMs,
+      directionDeg: uWindDirDeg,
+      speed01: uWindSpeed01,
+      gustiness01: uGustiness01,
+      bandDepth: uSquallDepth,
+      scale: uSquallScale,
+    });
+
   const vA = Fn(() => {
     const i = instanceIndex;
     const c = custom.element(i);
@@ -545,6 +585,10 @@ export function createPrecipSplashEngine({
     // The scene clip — splashes must not appear in the void around the map.
     // Same 64px feather as the fall so the two fade out together at the edge
     // rather than one cutting while the other ramps.
+    //
+    // ⚠️ NO PARALLAX ON `p`: a splash is at h = 0, so its ground position and
+    // its drawn position are the same point. Both the scene clip, the sky gate
+    // and the squall band therefore ask about the place the water actually is.
     const p = position.element(i);
     const hasBounds = uSceneRect.z.sub(uSceneRect.x).greaterThan(float(0));
     const band = float(64);
@@ -570,7 +614,15 @@ export function createPrecipSplashEngine({
     // position are THE SAME POINT — the two engines agree by construction
     // rather than by coincidence, which is why this is stated instead of
     // copied.
-    if (!skyReachTex) return vec4(alpha, pick(K_RING_R, hot), pick(K_RING_W, hot), pick(K_ROUGHEN, hot));
+    // ⚠️ THE SQUALL APPLIES ON **BOTH** PATHS. A first cut folded it in after
+    // the sky-gate early-out, so a viewer with no bake armed (the ordinary case
+    // on an un-ingested floor) silently lost its bands too — one absent input
+    // disabling an unrelated guarantee, which is the same shape the fall
+    // runtime already fixed once for its scene clip.
+    if (!skyReachTex) {
+      alpha.assign(alpha.mul(squallAt(p)));
+      return vec4(alpha, pick(K_RING_R, hot), pick(K_RING_W, hot), pick(K_ROUGHEN, hot));
+    }
 
     const uvx = p.x.sub(uSkyReachRect.x).div(uSkyReachRect.z.sub(uSkyReachRect.x).max(float(1)));
     const uvy = p.y.sub(uSkyReachRect.y).div(uSkyReachRect.w.sub(uSkyReachRect.y).max(float(1)));
@@ -584,6 +636,10 @@ export function createPrecipSplashEngine({
     // `mix(1, sampled, gate)` — with no bake, or outside the rect, exactly 1.
     // Absence means KEEP SPLASHING, the same polarity the whole system uses.
     alpha.assign(alpha.mul(mix(float(1), sampled, gate)));
+    // ⭐ AND THE SQUALL BAND — the third factor of §4.1's rate. Opacity IS rate
+    // here for the same statistical reason `skyReach` is: a uniform spatial
+    // process times a multiplicative mask.
+    alpha.assign(alpha.mul(squallAt(p)));
 
     return vec4(alpha, pick(K_RING_R, hot), pick(K_RING_W, hot), pick(K_ROUGHEN, hot));
   })().toVarying('vSplashA');
@@ -942,15 +998,16 @@ export function createPrecipSplashEngine({
       if (src?.ambient) {
         const sp = src.ambient.speed01?.value;
         const dg = src.ambient.directionDeg?.value;
+        const gu = src.ambient.gustiness01?.value;
         if (Number.isFinite(sp)) uWindSpeed01.value = sp;
         if (Number.isFinite(dg)) uWindDirDeg.value = dg;
+        if (Number.isFinite(gu)) uGustiness01.value = gu;
       }
-      // ⚠️ `timeMs` IS ACCEPTED AND DELIBERATELY UNUSED — the signature matches
-      // the four sibling runtimes so a caller never has to remember which of
-      // them wants a clock. Nothing here reads one: a splash's whole life is
-      // its own age, and the respawn entropy is bounded by POSITION rather
-      // than by the clock (see the update kernel's note on why that matters).
       uDtSec.value = Math.max(0, Math.min(0.1, dtSec || 0));
+      // Read by the SQUALL FIELD only — its bands travel. Never by the respawn
+      // entropy, which is bounded by position for the precision reason the
+      // update kernel documents at length.
+      uTimeMs.value = timeMs || 0;
       if (!seeded) this.init(renderer);
       // A JS `if`, never a uniform set to zero (Effects.md Law 4) — LAW 5's
       // teeth: no rain means no dispatch and no draw.
@@ -1029,6 +1086,10 @@ export function createPrecipSplashEngine({
         applyCount();
       }
       if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = t.windAirSpeedPxS;
+      // ONE dial for one phenomenon — the veil, the bodies and the splashes all
+      // read this same number.
+      if (Number.isFinite(t.curtainBandDepth)) uSquallDepth.value = Math.max(0, Math.min(1, t.curtainBandDepth));
+      if (Number.isFinite(t.curtainBandScale)) uSquallScale.value = Math.max(0.01, t.curtainBandScale);
     },
 
     /** Every factor separately — "no splashes are visible" has half a dozen

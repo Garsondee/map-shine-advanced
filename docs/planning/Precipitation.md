@@ -406,6 +406,7 @@ Counts to design against (not to promise): heavy rain ~30–60k specimen rows; s
 | **P3** | THE STAY v1: mantle buffer (snow + puddle channels), melt by temperature + fire halo, trample stamps, scalar wetness → specular request | ⭐ snow persists; footprints; hearths keep their ground |
 | ↳ | **`BUILT (unverified)` 2026-08-16** — `effects/precipitation/mantle-model.js` + `mantle-runtime.js`, `stay` on the species rows, one bench scenario (6 checks, green) that reads the BUFFER back. **Trample stamps did NOT ship** — see the note below | |
 | **P4** | IMPRESSION curtain + squall modulation + zoom gates + storm choreography (flash boost, gust lean) | blizzards and downpours read at every zoom |
+| ↳ | **`BUILT (unverified)` 2026-08-16** — `effects/precipitation/squall-field.js` + `curtain-render.js`, the field wired into all THREE consumers, the zoom gate, one bench scenario (6 checks, green). **Storm choreography's flash boost is NOT wired** — see the note below | |
 | **P5** | Drips (decode-time edges + the tail) + `hail`/`sleet` phase machinery | the roofline sings; hail bounces |
 | **P6** | The exotic shelf: `ash`+embers, `sand`, `spore`/`petal`/`mote` skins + event/biome bindings (`ash-storm`, feywild petal-fall) + dust mantle channel | burning cities, sandstorms, the feywild |
 | **P7** | Luxuries by measurement: illum-lit bodies, DoF-by-height, debris motes, mantle sparkle | the shelf you raid when the frame budget says yes |
@@ -417,6 +418,13 @@ P1 is the Weather-Manager slice-7 keystone and is independently shippable; every
 - **Water-hit splashes** (the sparse near-zoom sprites over the water mask, V2 peak 0.55) need a SECOND gate texture injected — the water mask, alongside the sky-reach bake. That is real wiring through `vt-pan-viewer.js`'s bake sites, not a parameter, so it waits for its own commit rather than shipping half-armed.
 - **The `rainAgitation01` REQUEST against `Water.md`'s ladder** is deliberately still just a request. Computing the value and handing it to the env snapshot today would create an input nothing reads — `feedback_unconsumed_api_rots_silently` on the far side of a seam, which is the same disease the species table's `arrive`/`stay` schedule exists to avoid. It lands with water's consumer.
 - **§4.1's `squallField(x,y)`** is P4's; the rate is `precip01 × skyReach` until then, and the runtime says so rather than approximating it with a private noise.
+
+**⚠️ WHAT P4 LEFT ON THE TABLE.** §3.4's three jobs are all built — the distance stand-in, the spatial modulator (the SAME field scales the falling bodies AND the splash rate, which also closes P2's stated `squallField` gap), and the heavy-weather wall via the depth/scale dials. The zoom gate is a real JS `if` at the subsystem, so the specimen tier costs nothing when it sleeps. Two things are not built:
+
+- **The `sky-flash` boost is not wired.** `resolveSpeciesFrame` already computes it (V2's `alpha ×6, rgb ×4`), the species rows carry it, and the render state passes `flash01: 0` — a literal zero with a comment saying so. What is missing is the seam from slice 4's `sky-flash` weather EVENT envelope to that number. It is a wiring job, not a look job, and it lands with the event consumer rather than as a private clock here.
+- **The gust LEAN** already exists from P1 (bodies tilt with the wind); what P4 does not add is a per-gust *surge* in lean, which would need the gust envelope in the fall kernel rather than only in the visibility term.
+
+⭐ **And one finding worth carrying forward:** `world/wind-field.js`'s flow convention and precipitation's drive convention differ by **90°**, and both are "correct" for their own consumers because each was calibrated separately against the map. The curtain reconciles them with a derived, Node-pinned rotation (`gustDirectionForPrecip`) rather than a tuned one — but the underlying debt (one exported helper every consumer calls) is still filed against `wind-field.js`, because repairing it there would retune shipped looks.
 
 **⚠️ WHAT P3 v1 LEFT ON THE TABLE.** Every row of §5.2's table is built and integrating — accumulate, ambient melt, ⭐ fire melt, dry, recover — plus §5.5's seeding and §5.3's two-mesh overlay. Two things are not:
 

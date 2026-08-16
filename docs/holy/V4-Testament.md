@@ -1310,6 +1310,43 @@ storm flash) as authored content.
         ladder (deliberately still a request — an input nothing reads is rot on the far side of
         a seam), and §4.1's `squallField` (P4 owns it; the rate is `precip01 × skyReach` and the
         runtime says so rather than faking it with a private noise).
+      · P3 THE STAY — `BUILT (unverified)` 2026-08-16. The world remembers the
+        weather: snow lies where sky reaches, melts as the day warms, and
+        ⭐ RETREATS IN A HALO AROUND EVERY BURNING HEARTH — which cost nothing to
+        author, because the fire mask's derived grid already existed and its own
+        falloff IS the halo's shape. `effects/precipitation/mantle-model.js`
+        (pure, every rate, Node-tested) + `mantle-runtime.js` (one RGBA8
+        world-space buffer per floor, ping-pong at 4 Hz, two overlay meshes in
+        the world's flat sort). Channels one-byte-one-quantity: snow / dust /
+        puddle / trample. Every row of §5.2 integrates, plus §5.5's seeding.
+        CADENCE IS REAL TIME, AMOUNT IS GAME TIME — a paused game hands a zero
+        delta and the mantle freezes, which is the integrator pattern rather
+        than the sim-clock-throttle latch. Two meshes because snow BRIGHTENS and
+        dust MULTIPLIES, following water-render.js's discipline including the
+        white `attr` MRT override the multiply needs (blend state is not
+        per-attachment; `attr · 0` would erase floorId/outdoors/presence under a
+        floor-wide quad). 10,329 assertions; bench `mantle-remembers-the-weather`
+        READS THE TEXELS BACK through a full blizzard→thaw→dry cycle.
+        ⚠️ THE BUG, AND ITS LESSON IS WHERE IT WAS. `gameHourDelta` was extracted
+        BECAUSE unwrapping a 0..24 clock is subtle — and then not tested. A
+        `+ 36` where `+ 24` belonged shifted every delta by half a day, so an
+        ordinary tick resolved to zero and THE MANTLE INTEGRATED NOTHING while
+        every rate beside it was correct and every Node assertion passed. Named
+        in memory as `feedback_extracted_because_tricky_then_untested`: the act
+        of extracting a helper for being tricky IS the test list.
+        ⚠️ THREE STRUCTURE WALLS TRIPPED AND ALL THREE WERE FIXED, NOT EXEMPTED —
+        the integrator's render is now injected from vt/ (`renderer-state/
+        graph-only`), it uses `THREE.QuadMesh` not a hand-rolled quad, and the
+        sleet band rides `world/index.js` (which also stops the mantle and the
+        manager disagreeing about what "freezing" means).
+        ⚠️ NOT SHIPPED AND NOT PRETENDED: trample stamps. The channel exists,
+        integrates and HEALS; nothing writes it. Trample is the one row of §5.2
+        that is not an integrator — it needs a token-motion seam — and a channel
+        that heals but never dents reads as "footprints are broken" rather than
+        "footprints are next". §5.3's specular roughness ask is likewise still a
+        request. And the BUFFER is hardware-verified while the OVERLAY DRAW is
+        not: the meshes join the world scene inside the geometry MRT scope,
+        which the precipitation bench cannot reproduce.
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

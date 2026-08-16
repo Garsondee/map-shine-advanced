@@ -129,6 +129,7 @@ export function createPrecipEngine({
   renderOrder = 0,
   windHandle = TIER0_WIND_HANDLE,
   pxPerMeter = 100,
+  openSkyTexture = null,
 }) {
   const TSL = THREE.TSL;
   const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, fract, uv, mix, positionGeometry } = TSL;
@@ -229,6 +230,86 @@ export function createPrecipEngine({
    * swept dial with the table holding the value the sweep actually chose.
    */
   const uStreakScale = uniform(float(1));
+  /**
+   * How much of the derived RADIAL (falling-toward-you) motion steers a
+   * streak's direction. See the derivation at its use site in `positionNode`.
+   * 0 = every streak parallel; 1 = the full, physically-derived splay, which
+   * measured as hyperspace rather than rain.
+   */
+  const uParallaxStreak01 = uniform(float(0.12));
+
+  // ── ⭐ THE SKY-REACH GATE (Precipitation.md LAW 3) ────────────────────────
+  //
+  // *"Rain indoors is unrepresentable, not discouraged."* `scene/sky-reach-
+  // access.js` was built FOR this feature — its own 2026-07-24 header quotes
+  // the author: *"repairing sky reach because it needs to be an API / service
+  // for other things like rain drops."*
+  //
+  // ⚠️ IT IS A **RENDER** GATE, NOT A SIM GATE, and that split is deliberate
+  // (§3.1). The kernel stays spatially uniform — the cheapest possible sim,
+  // with no per-slot texture read, because sampling a texture from a COMPUTE
+  // stage is unproven on this renderer and the storage-slot budget is precious
+  // (this runtime's 6-of-8 headroom is reserved for P2's splashes and P5's
+  // drips). The DRAW samples a baked `skyReach` texture at the body's ground
+  // position instead, where fragment/vertex sampling is ordinary — exactly
+  // fire's `bakeFireMaskTexture` precedent.
+  //
+  // ⚠️ IT **FADES**, IT DOES NOT STEP. A streak legitimately crosses an indoor
+  // texel while its own body is over an outdoor one, and a hard cut would
+  // chop drops in half along every roofline
+  // (`feedback_silent_cap_corrupts_hard_boundary`).
+  //
+  // ⚠️ POLARITY: THE ABSENCE DEFAULT IS **1**, NOT 0. `uSkyReachHasBake` is 0
+  // until a real texture arrives, and the gate then multiplies by 1 — missing
+  // data means *keep raining*, never *mysteriously stop*. That is the sky-reach
+  // service's own documented rule, and it is the difference between a map with
+  // no ingested art rendering weather and one silently rendering none
+  // (`feedback_gate_polarity_must_fail_open`).
+  const uSkyReachRect = uniform(vec4(0, 0, 1, 1));
+  const uSkyReachHasBake = uniform(float(0));
+  /**
+   * ⚠️ THE PLACEHOLDER IS A 1×1 **WHITE** TEXEL, IT IS NOT A DUMMY, AND THE
+   * CALLER OWNS IT.
+   *
+   * Three things shaped it:
+   *
+   *  1. `TSL.texture(null)` THROWS — *"expects a valid instance of
+   *     THREE.Texture()"* — and it does so at GRAPH-BUILD time, inside a node
+   *     the renderer swallows: the material silently rendered NOTHING, armed
+   *     or disarmed, with the error only visible in the console. That is
+   *     `feedback_bundling_does_not_prove_construction_order`'s family — a
+   *     clean build and a green Node suite cannot see a TSL graph that failed
+   *     to construct. The shader-lab bench caught it in one frame.
+   *  2. White is 1.0 is *"the sky is fully open"*, so the fail-open default is
+   *     the LITERAL CONTENT of the placeholder rather than a separate branch
+   *     that has to remember to be safe. Disarming the gate restores this
+   *     texture, so there is exactly one representation of "no data" and it
+   *     already means keep raining.
+   *  3. ⚠️ IT IS **INJECTED**, not built here, because `gpu/textures-in-vt-only`
+   *     (tools/verify-structure.mjs) forbids `new THREE.*Texture` outside vt/.
+   *     Four bytes is obviously not the 345 MB `LightCovers.webp` that rule was
+   *     written for — but the wall does not read sizes, and arguing the
+   *     exception at the call site is exactly how a wall stops meaning
+   *     anything. `effects/specular/specular-render.js` already takes its own
+   *     1×1 placeholder the same way; this follows it.
+   *
+   * With no texture supplied the gate simply never arms (`setSkyReachTexture`
+   * refuses), which is the fail-open state — a caller that forgets gets rain
+   * everywhere, never a silently sealed sky.
+   */
+  const openSkyPixel = openSkyTexture ?? null;
+  /**
+   * ⚠️ A SEPARATE `texture()` NODE PER CONSUMER. A shared node carries the
+   * wrong uv (`feedback_shared_texture_node_carries_the_wrong_uv`) — this one
+   * is sampled at a WORLD position mapped into the mask rect, never `uv()`.
+   *
+   * ⚠️ NULL WHEN NO PLACEHOLDER WAS INJECTED, and the gate is then compiled
+   * OUT of the graph entirely rather than built around a null (which is the
+   * exact throw described above). A build-time branch, not a runtime one —
+   * Effects.md Law 4 — because whether a caller supplies the placeholder
+   * cannot change during the engine's life.
+   */
+  const skyReachTex = openSkyPixel ? TSL.texture(openSkyPixel) : null;
 
   // Live by reference — a `setWindAmbient` change reaches the kernel with no
   // resync code, the contract all three existing runtimes rely on.
@@ -238,6 +319,28 @@ export function createPrecipEngine({
   const windPxPerSec = float(pxPerMeter * 3.2);
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
+
+  /**
+   * WHERE A BODY IS ACTUALLY DRAWN — V2's `M(h) = D/(D−h)` applied to its world
+   * position. Returns `{xy, persp}` so a caller can reuse the magnification for
+   * sizing without repeating the divide.
+   *
+   * ⚠️ ONE EXPRESSION, TWO CONSUMERS, DELIBERATELY EXTRACTED. `positionNode`
+   * places the sprite with it and the sky-reach gate samples with it — and the
+   * whole reason that gate needed fixing was that those two disagreed. A second
+   * hand-written copy is exactly how they would silently drift apart again
+   * (`feedback_shared_field_two_meanings_two_registries`, in shader form).
+   *
+   * Clamped well short of D: a body reaching the camera plane would divide by
+   * zero and smear across the entire screen.
+   *
+   * @param {*} worldXY @param {*} heightW
+   */
+  const parallaxOf = (worldXY, heightW) => {
+    const h = heightW.clamp(float(0), uCamHeight.mul(float(0.6)));
+    const persp = uCamHeight.div(uCamHeight.sub(h));
+    return { xy: uCamCentre.add(worldXY.sub(uCamCentre).mul(persp)), persp };
+  };
 
   /**
    * Where a body is (re)born: uniform over the view rect plus a margin, so
@@ -415,7 +518,13 @@ export function createPrecipEngine({
    * VERTEX-STAGE ONLY on this renderer, so anything the fragment wants must
    * cross as a varying, and all three existing runtimes pack rather than
    * multiply. `x` = fall progress 0..1 (1 = just about to land), `y` =
-   * brightness, `z` = the alive flag, `w` = seed.
+   * brightness, `z` = the alive flag, `w` = THE SKY-REACH GATE.
+   *
+   * ⚠️ `w` USED TO CARRY THE SEED and now carries the gate, because the seed
+   * turned out never to be read in the fragment stage at all — the only
+   * consumer (a flake's spin) lives in `positionNode`, which is vertex-stage
+   * and reads the storage buffer directly. Spending a varying slot on a value
+   * nothing downstream reads, while the gate needed one, was the trade to make.
    */
   const vBody = Fn(() => {
     const i = instanceIndex;
@@ -424,7 +533,53 @@ export function createPrecipEngine({
       .sub(c.w.div(float(SPAWN_H)))
       .clamp(float(0), float(1));
     const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
-    return vec4(fall01, c.x, alive, seed.element(i));
+
+    // ⭐ THE SKY-REACH GATE, sampled at the body's DRAWN (parallaxed) position.
+    // Computed HERE because `position.element(i)` is a storage read and storage
+    // reads are VERTEX-STAGE ONLY on this renderer; the result crosses to the
+    // fragment as a varying, the same packing discipline all three sibling
+    // runtimes use.
+    //
+    // ⚠️ DRAWN POSITION, NOT GROUND POSITION — a deliberate divergence from
+    // Precipitation.md §3.1's wording, and it was MEASURED rather than argued.
+    // Sampling the ground position left 61% of the rain still drawn inside the
+    // test building; a controlled sweep of `cameraHeight` (which is exactly a
+    // sweep of M(h)) collapsed that residual to **0.0% at M≈1.1 and back to
+    // ~20-60% at M=2.5**, isolating the cause completely: the gate was asking
+    // about one place and the viewer was looking at another.
+    //
+    // Ground position is the right answer for a real perspective camera, where
+    // a drop high above a roof genuinely is visible beside it. MSA's camera is
+    // ORTHOGRAPHIC and M(h) is a per-body depth-cue rather than real geometry —
+    // so the only position with a viewer-facing meaning is the one the sprite
+    // is drawn at, and LAW 3's requirement is itself a viewer-facing claim:
+    // *the player must not SEE rain indoors*. §3.1's own follow-on (compare the
+    // body's height against the deck's altitude, so a drop above a bridge still
+    // renders) remains the next rung and needs the cover-HEIGHT field baked as
+    // a second texture; it refines this, it does not replace it.
+    // No placeholder injected ⇒ no gate in the graph at all ⇒ a constant 1,
+    // which is exactly the fail-open answer (rain everywhere).
+    if (!skyReachTex) return vec4(fall01, c.x, alive, float(1));
+
+    const p = parallaxOf(position.element(i), c.w).xy;
+    const uvx = p.x.sub(uSkyReachRect.x).div(uSkyReachRect.z.sub(uSkyReachRect.x).max(float(1)));
+    const uvy = p.y.sub(uSkyReachRect.y).div(uSkyReachRect.w.sub(uSkyReachRect.y).max(float(1)));
+    // Outside the baked rect there is no data, and no data means KEEP RAINING
+    // (the absence-default-1 rule) — so an out-of-bounds body reads 1 rather
+    // than clamping onto whatever the nearest edge texel happens to hold.
+    const inside = uvx
+      .greaterThanEqual(float(0))
+      .and(uvx.lessThanEqual(float(1)))
+      .and(uvy.greaterThanEqual(float(0)))
+      .and(uvy.lessThanEqual(float(1)));
+    const sampled = skyReachTex.sample(vec2(uvx.clamp(float(0), float(1)), uvy.clamp(float(0), float(1)))).r;
+    const gate = uSkyReachHasBake.mul(inside.select(float(1), float(0)));
+    // `mix(1, sampled, gate)` — with no bake, or outside the rect, this is
+    // exactly 1. One expression, no branch, and the fail-open case is the
+    // literal identity rather than a value that merely happens to be safe.
+    const skyGate = mix(float(1), sampled, gate);
+
+    return vec4(fall01, c.x, alive, skyGate);
   })().toVarying('vPrecipBody');
 
   const material = new THREE.NodeMaterial();
@@ -439,30 +594,79 @@ export function createPrecipEngine({
     // no fill rate, and needing no separate draw range.
     const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
 
-    // ── PERSPECTIVE — V2's `M(h) = D/(D−h)`, applied per body ──
-    // Clamped well short of D: a body that reached the camera plane would
-    // divide by zero and smear across the whole screen.
-    const h = c.w.clamp(float(0), uCamHeight.mul(float(0.6)));
-    const persp = uCamHeight.div(uCamHeight.sub(h));
-    const parallaxed = uCamCentre.add(centre.sub(uCamCentre).mul(persp));
+    // ── PERSPECTIVE — the SHARED expression, not a second copy ──
+    // `parallaxOf` is the one place M(h) lives; the sky-reach gate samples
+    // through it too, and them disagreeing is the exact bug that made the gate
+    // miss 61% of the rain it should have stopped.
+    const { xy: parallaxed, persp } = parallaxOf(centre, c.w);
 
     const width = c.y.mul(uSizeScale).mul(alive).mul(persp);
-    // A streak's LENGTH comes from its speed — one number
-    // (`streakPerPxS`) turns fast drops into lines and slow ones into dots,
-    // for free. A flake's `streakPerPxS` is 0, so it stays square no matter
-    // how hard the wind drives it.
-    const length = width.add(
-      c.z.mul(float(STREAK_PER_PXS)).mul(uStreakScale).mul(uLengthMul).mul(uSizeScale).mul(persp)
-    );
 
-    // Align the quad to the direction of travel. `vel` is the visible world
-    // drift the kernel just integrated, so a streak always points along the
-    // way it is actually going — including when the wind swings it.
-    // ⚠️ Guarded against a zero-length velocity (a dead-calm frame at
-    // fallSlant 0), which would make `normalize` produce NaN and silently
-    // vanish the whole batch.
-    const speedLen = vel.length().max(float(1e-4));
-    const dir = vec2(vel.x.div(speedLen), vel.y.div(speedLen));
+    // ⭐ ALIGN THE STREAK TO ITS APPARENT (SCREEN) MOTION, NOT ITS WORLD DRIFT.
+    //
+    // Author, seeing the first live rain: *"drops are aligned as if they were
+    // moving from north to south, not aligned as if they were falling
+    // downwards."* Exactly right, and the cause was a missing term rather than
+    // a wrong constant: the streak pointed along `vel`, the kernel's WORLD
+    // drift, which is very nearly the same fixed direction for every body — so
+    // the whole population read as sliding across the map in formation.
+    //
+    // What a drop falling TOWARD a top-down camera actually does on screen is
+    // move RADIALLY, and that motion is not in `vel` at all — it lives in the
+    // M(h) collapse, which happens here in the draw. Differentiating the
+    // apparent position `A = C + (P − C)·M`, with `M = D/(D − h)` and
+    // `dh/dt = −fallSpeed`:
+    //
+    //     dA/dt = vel·M  −  (P − C)·M²·fallSpeed / D
+    //             └─drift─┘  └──────── the radial term ────────┘
+    //
+    // The second term points INWARD (toward the view centre) because the drop
+    // is descending, and it grows with distance from centre — so bodies near
+    // the middle streak along the wind while bodies at the edges streak
+    // radially, which is precisely the "flying through it" read that was
+    // missing. It is one extra term, derived rather than tuned, and it costs a
+    // multiply-add.
+    //
+    // ⚠️ Guarded against a zero-length result (a dead-calm frame at fallSlant 0
+    // for a body sitting exactly on the view centre), which would make the
+    // normalize produce NaN and silently vanish the whole batch.
+    // ⚠️ THE RADIAL TERM IS **WEIGHTED**, AND IT HAS TO BE. Taken at full
+    // strength it does not read as rain at all — measured at the default
+    // geometry it is roughly TEN TIMES the world drift out at the frame edges
+    // (|P−C|≈1000, M=2.5, fallSpeed≈5200, D=1000 ⇒ ~32,000 px/s of radial
+    // against ~3,000 of drift), and the whole population collapses into a
+    // hyperspace starfield radiating from a vanishing point. That is the
+    // correct derivative of a genuinely wide-angle lens; it is not a rainstorm.
+    //
+    // `uParallaxStreak01` is therefore a LOOK dial, not a physical constant: 0
+    // = every streak parallel (the author's *"moving from north to south"*
+    // complaint), 1 = full derived radial (hyperspace). The default is a bias
+    // strong enough that edge drops visibly splay while the population still
+    // reads as falling in one direction.
+    const fallSpeed = c.z.mul(uSpeedMul);
+    const radial = centre.sub(uCamCentre).mul(persp).mul(persp).mul(fallSpeed).div(uCamHeight).mul(uParallaxStreak01);
+    const apparentVel = vel.mul(persp).sub(radial);
+    const speedLen = apparentVel.length().max(float(1e-4));
+    const dir = vec2(apparentVel.x.div(speedLen), apparentVel.y.div(speedLen));
+
+    // ⭐ AND ITS LENGTH COMES FROM THE SAME APPARENT SPEED — the fix for the
+    // author's *"some raindrops are falling down and some are moving sideways"*.
+    //
+    // The first cut derived LENGTH from `c.z`, the body's full 3-D fall speed,
+    // while deriving DIRECTION from its much smaller SCREEN motion. Those two
+    // disagree by construction, and the failure mode is precise: when a body's
+    // apparent motion is small, its direction is dominated by whatever wind and
+    // chaos happen to be doing — but the streak was still drawn at full length.
+    // The result is long streaks pointing in essentially arbitrary directions,
+    // which is exactly what "some are moving sideways" looks like.
+    //
+    // Deriving both from `apparentVel` makes the streak an honest motion blur:
+    // a body falling straight at the camera has near-zero screen motion and
+    // draws as a DOT (correct — that is what falling toward you looks like from
+    // directly above), and a body genuinely travelling across the map draws a
+    // streak along the way it is actually going. One quantity, one direction,
+    // no disagreement possible.
+    const length = width.add(speedLen.mul(float(STREAK_PER_PXS)).mul(uStreakScale).mul(uLengthMul).mul(uSizeScale));
     // Perpendicular, for the width axis.
     const perp = vec2(dir.y.negate(), dir.x);
 
@@ -542,7 +746,12 @@ export function createPrecipEngine({
       // cloud, the higher power a tighter pellet (which is what hail will want).
       edge = soft.pow(mix(float(3), float(1.1), float(SOFT))).clamp(float(0), float(1));
     }
-    return alpha.mul(edge).mul(bright).mul(uAlphaMul).mul(alive);
+    // ⭐ LAW 3 lands HERE, as a plain multiply: a body over a covered texel
+    // fades to nothing. Multiplied unconditionally because the no-bake case is
+    // exactly 1 (see the gate's own note) — an `if` would be a second place the
+    // polarity could be got backwards.
+    const skyGate = vBody.w;
+    return alpha.mul(edge).mul(bright).mul(uAlphaMul).mul(alive).mul(skyGate);
   })();
 
   material.transparent = true;
@@ -610,6 +819,41 @@ export function createPrecipEngine({
       renderer.compute(updateKernel);
     },
 
+    /**
+     * Hand the engine this floor's baked sky-reach texture — LAW 3's input.
+     * Cheap and idempotent: call it when the mask authority's products version
+     * moves or the floor changes, NEVER per frame.
+     *
+     * ⚠️ PASSING `null` DISARMS THE GATE (back to raining everywhere) rather
+     * than sealing the sky. That is the fail-open polarity again, at the API
+     * boundary this time: a floor whose art has not streamed yet must rain, not
+     * silently stop. A caller that wants no rain sets `precip01` to 0 — the
+     * axis that MEANS that — instead of starving the gate.
+     *
+     * @param {*} texture - a `THREE.Texture`, or null to disarm.
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}} [rect] - the
+     *   WORLD rect the texture spans. Required with a texture; without it the
+     *   sample would map world coordinates through a meaningless box.
+     */
+    setSkyReachTexture(texture, rect) {
+      if (!openSkyPixel) {
+        // No placeholder was injected, so the graph has no texture to fall
+        // back to and arming would sample whatever the node was built with.
+        // Refuse loudly and stay fail-open (raining) rather than half-arm.
+        return { armed: false, reason: 'no openSkyTexture injected — the gate cannot arm (see its own note)' };
+      }
+      if (!texture || !rect) {
+        // Back to the 1×1 open-sky texel, never to `null` — see its own note.
+        skyReachTex.value = openSkyPixel;
+        uSkyReachHasBake.value = 0;
+        return { armed: false, reason: texture ? 'no rect supplied' : 'no texture supplied' };
+      }
+      skyReachTex.value = texture;
+      uSkyReachRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+      uSkyReachHasBake.value = 1;
+      return { armed: true, rect };
+    },
+
     /** @param {{minX:number,minY:number,maxX:number,maxY:number}} rect */
     setWorldRect(rect) {
       if (!rect) return;
@@ -650,6 +894,7 @@ export function createPrecipEngine({
       if (Number.isFinite(t.slantDirDeg)) uSlantDirDeg.value = t.slantDirDeg;
       if (Number.isFinite(t.chaosScale)) uChaosScale.value = t.chaosScale;
       if (Number.isFinite(t.streakScale)) uStreakScale.value = Math.max(0, t.streakScale);
+      if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
       if (Number.isFinite(t.cameraHeight)) uCamHeight.value = Math.max(1, t.cameraHeight);
     },
 
@@ -663,12 +908,20 @@ export function createPrecipEngine({
         liveCount: uActiveCount.value,
         visible: mesh.visible,
         storageBuffers: 6,
+        // ⚠️ LAW 3's own status, printed rather than assumed. `false` here means
+        // rain is falling everywhere including indoors — which is the honest
+        // fail-open state, not a silent one.
+        skyGate: {
+          armed: uSkyReachHasBake.value === 1,
+          rect: uSkyReachHasBake.value === 1 ? { ...uSkyReachRect.value } : null,
+        },
         tuning: {
           sizeScale: uSizeScale.value,
           fallSlant01: uFallSlant01.value,
           slantDirDeg: uSlantDirDeg.value,
           chaosScale: uChaosScale.value,
           streakScale: uStreakScale.value,
+          parallaxStreak01: uParallaxStreak01.value,
           cameraHeight: uCamHeight.value,
         },
         frame: lastFrame,

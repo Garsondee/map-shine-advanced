@@ -94,6 +94,7 @@ function syncControlsFromState() {
     ['precipSize', 'precipSizeVal', s.sizeScale, 2],
     ['precipSlant', 'precipSlantVal', s.fallSlant01, 2],
     ['precipSlantDir', 'precipSlantDirVal', s.slantDirDeg, 0],
+    ['precipSplay', 'precipSplayVal', s.parallaxStreak01, 2],
     ['precipStreak', 'precipStreakVal', s.streakScale, 2],
     ['precipChaos', 'precipChaosVal', s.chaosScale, 2],
     ['precipCamH', 'precipCamHVal', s.cameraHeight, 0],
@@ -161,6 +162,7 @@ function wire() {
   wireRange('precipSize', 'precipSizeVal', 'sizeScale');
   wireRange('precipSlant', 'precipSlantVal', 'fallSlant01');
   wireRange('precipSlantDir', 'precipSlantDirVal', 'slantDirDeg', { digits: 0 });
+  wireRange('precipSplay', 'precipSplayVal', 'parallaxStreak01');
   wireRange('precipStreak', 'precipStreakVal', 'streakScale');
   wireRange('precipChaos', 'precipChaosVal', 'chaosScale');
   wireRange('precipCamH', 'precipCamHVal', 'cameraHeight', { digits: 0 });
@@ -168,6 +170,9 @@ function wire() {
 
   document.getElementById('precipPaused')?.addEventListener('change', (e) => {
     bench.driver.set({ paused: e.target.checked });
+  });
+  document.getElementById('precipSkyGate')?.addEventListener('change', (e) => {
+    bench.driver.set({ skyGate: e.target.checked });
   });
   document.getElementById('precipStep')?.addEventListener('click', () => {
     // One 16ms step by hand — the virtual clock's whole point, and the way to

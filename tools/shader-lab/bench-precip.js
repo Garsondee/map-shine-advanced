@@ -79,6 +79,17 @@ const WORLD = Object.freeze({ minX: 0, minY: 0, maxX: 2000, maxY: 1500 });
 const LAB_CAPACITY = 4000;
 
 /**
+ * Where the synthetic building and a known-open patch sit, in 0..1 UV of the
+ * world rect — see `buildSkyReachTexture` for why both are deliberately
+ * off-centre. Kept slightly INSIDE the building's own edges (0.10-0.40 →
+ * 0.14-0.36) so the measurement never straddles the fade at its rim and
+ * reports a partial as a failure.
+ */
+const BUILDING_UV = Object.freeze({ u0: 0.14, u1: 0.36, v0: 0.16, v1: 0.41 });
+/** A patch with nothing over it, far from both the building and the canopy. */
+const OPEN_SKY_UV = Object.freeze({ u0: 0.05, u1: 0.3, v0: 0.62, v1: 0.92 });
+
+/**
  * The animated driver. One renderer, one canvas, one engine per species,
  * advanced by an explicit delta.
  */
@@ -119,11 +130,64 @@ class PrecipDriver {
       slantDirDeg: 90,
       chaosScale: 1,
       streakScale: 1,
+      parallaxStreak01: 0.12,
       cameraHeight: 1000,
       // view
       zoom: 1,
       paused: false,
+      // ⭐ LAW 3 — the synthetic roof. See buildSkyReachTexture.
+      skyGate: false,
     };
+    this._skyReachTexture = null;
+  }
+
+  /**
+   * A SYNTHETIC sky-reach texture: open sky (255) everywhere except one solid
+   * rectangular "building" and one soft-edged "canopy", both deliberately
+   * OFF-CENTRE in both axes.
+   *
+   * ⚠️ THE ASYMMETRY IS THE POINT, not decoration. A centred test feature
+   * cannot calibrate a flip — `bench-floor-lighting.js` and
+   * `bench-block-compress.js` have BOTH recorded this exact trap (a centred
+   * fixture reported `mismatchesSameOrder: 0, mismatchesFlipped: 0` and the
+   * orientation check passed while telling you nothing). With the building at
+   * a known non-centre position, "the dry patch is in the wrong corner" is a
+   * visible, diagnosable failure rather than an invisible one.
+   *
+   * Row 0 = minY, matching `MaskGrid`'s own convention and the `flipY: false`
+   * default every other bake in this project relies on.
+   */
+  buildSkyReachTexture() {
+    const THREE = this.THREE;
+    if (this._skyReachTexture) return this._skyReachTexture;
+    const W = 128;
+    const H = 96;
+    const data = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const u = x / (W - 1);
+        const v = y / (H - 1);
+        let open = 255;
+        // A hard-edged building: x 0.10-0.40, y 0.12-0.45 (low-left, off-centre
+        // in BOTH axes so a flip in either is visible).
+        if (u > 0.1 && u < 0.4 && v > 0.12 && v < 0.45) open = 0;
+        // A soft canopy up and right: a radial falloff, so the FADE (rather
+        // than a step) is visible at its rim — LAW 3 says fades, never steps.
+        const dx = (u - 0.72) / 0.18;
+        const dy = (v - 0.7) / 0.18;
+        const d = Math.hypot(dx, dy);
+        if (d < 1) open = Math.min(open, Math.round(255 * Math.min(1, d * d)));
+        const i = (y * W + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = open;
+        data[i + 3] = 255;
+      }
+    }
+    const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
+    this._skyReachTexture = tex;
+    return tex;
   }
 
   async init(canvas) {
@@ -151,6 +215,13 @@ class PrecipDriver {
       },
     };
 
+    // The 1×1 open-sky placeholder the gate falls back to. Created HERE
+    // because `gpu/textures-in-vt-only` forbids `new THREE.*Texture` inside
+    // `effects/` — see `precip-runtime.js`'s own note. A lab is a legitimate
+    // owner; in production this comes from the viewer, which lives in vt/.
+    const openSkyTexture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+    openSkyTexture.needsUpdate = true;
+
     for (const id of PRECIP_SPECIES_IDS) {
       const engine = createPrecipEngine({
         THREE,
@@ -159,6 +230,7 @@ class PrecipDriver {
         capacity: LAB_CAPACITY,
         windHandle: this.wind,
         renderOrder: 10,
+        openSkyTexture,
       });
       engine.setWorldRect(WORLD);
       engine.init(this.renderer);
@@ -206,12 +278,15 @@ class PrecipDriver {
       // rather than being 4x too sparse.
       const scaled = { ...frame, liveCount: Math.round((frame.liveCount / row.capacity) * LAB_CAPACITY) };
       engine.setFrame(scaled);
+      // LAW 3's gate, armed/disarmed live so the difference is one click.
+      engine.setSkyReachTexture(s.skyGate ? this.buildSkyReachTexture() : null, WORLD);
       engine.setTuning({
         sizeScale: s.sizeScale,
         fallSlant01: s.fallSlant01,
         slantDirDeg: s.slantDirDeg,
         chaosScale: s.chaosScale,
         streakScale: s.streakScale,
+        parallaxStreak01: s.parallaxStreak01,
         cameraHeight: s.cameraHeight,
       });
     }
@@ -302,7 +377,9 @@ class PrecipDriver {
       `${r.speciesId}  live=${r.liveCount}/${r.capacity}  storage=${r.storageBuffers}/8 buffers  t=${(r.virtualNowMs / 1000).toFixed(1)}s\n` +
       `axes: precip=${r.axes.precip01.toFixed(2)} storm=${r.axes.stormActivity01.toFixed(2)} day=${r.axes.dayFactor01.toFixed(2)} flash=${r.axes.flash01.toFixed(2)}\n` +
       `look: slant=${r.tuning.fallSlant01.toFixed(2)} size=${r.tuning.sizeScale.toFixed(2)} streak=${r.tuning.streakScale.toFixed(2)} chaos=${r.tuning.chaosScale.toFixed(2)} camH=${r.tuning.cameraHeight}\n` +
-      `⚠️ SYNTHETIC: no sky-reach gate yet — rain falls everywhere, including where a roof would stop it.`;
+      (r.skyGate?.armed
+        ? `🏠 SKY-REACH GATE ARMED (synthetic roof) — LAW 3: no rain over the building or under the canopy.`
+        : `⚠️ sky-reach gate DISARMED — rain falls everywhere, including where a roof would stop it (fail-open).`);
   }
 
   /**
@@ -318,8 +395,13 @@ class PrecipDriver {
    */
   async measureCoverage(frames = 30) {
     const THREE = this.THREE;
-    const W = 256;
-    const H = 192;
+    // ⚠️ 512×384, not 256×192. The first cut counted TENS of lit pixels inside
+    // the gate's test footprint, which is noise, not a measurement — two runs
+    // of the identical scene differed by more than the effect being tested.
+    // Quadrupling the pixel count is the cheapest way to make a sparse,
+    // thin-bodied effect actually resolvable.
+    const W = 512;
+    const H = 384;
     if (!this._measureRt) {
       this._measureRt = new THREE.RenderTarget(W, H, { depthBuffer: false, stencilBuffer: false });
     }
@@ -346,6 +428,66 @@ class PrecipDriver {
     }
     const totalPixels = raw.length / 4;
     return { litPixels: lit, totalPixels, meanLuma: sum / totalPixels };
+  }
+
+  /**
+   * Coverage inside ONE sub-rectangle of the frame, in 0..1 UV of the world.
+   *
+   * ⚠️ EXISTS BECAUSE A WHOLE-FRAME NUMBER CANNOT ANSWER A LOCAL QUESTION.
+   * "Did the roof stop the rain" and "did the rain get dimmer" produce the same
+   * few-percent drop in whole-frame coverage
+   * (`feedback_aggregate_cannot_name_the_source`), so the gate's own scenario
+   * measures the footprint it should have emptied and a patch it should not
+   * have touched, separately.
+   *
+   * ⚠️ THE V FLIP IS EXPLICIT AND CALIBRATED AGAINST THE CAMERA, not assumed.
+   * The bench's camera is deliberately flipped (`top = minY`, matching
+   * production), so world +Y runs DOWN the readback rows. A UV rect quoted in
+   * world terms therefore maps to readback rows directly — but stating it is
+   * the difference between a check that means something and one that passes by
+   * luck (`feedback_y_flip_recurring_risk`, bitten five times in this project).
+   *
+   * @param {{u0:number,u1:number,v0:number,v1:number}} uvRect
+   * @param {number} [frames=30]
+   */
+  async measureRegion(uvRect, frames = 30) {
+    const THREE = this.THREE;
+    // ⚠️ 512×384, not 256×192. The first cut counted TENS of lit pixels inside
+    // the gate's test footprint, which is noise, not a measurement — two runs
+    // of the identical scene differed by more than the effect being tested.
+    // Quadrupling the pixel count is the cheapest way to make a sparse,
+    // thin-bodied effect actually resolvable.
+    const W = 512;
+    const H = 384;
+    if (!this._measureRt) {
+      this._measureRt = new THREE.RenderTarget(W, H, { depthBuffer: false, stencilBuffer: false });
+    }
+    for (let i = 0; i < frames; i++) this.advance(16);
+    const engine = this.engine;
+    const prevTarget = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this._measureRt);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    if (engine) this.renderer.render(engine.scene, this.camera);
+    const raw = await this.renderer.readRenderTargetPixelsAsync(this._measureRt, 0, 0, W, H);
+    this.renderer.setRenderTarget(prevTarget);
+    this.renderer.setClearColor(0x11151c, 1);
+
+    const x0 = Math.max(0, Math.floor(uvRect.u0 * W));
+    const x1 = Math.min(W, Math.ceil(uvRect.u1 * W));
+    const y0 = Math.max(0, Math.floor(uvRect.v0 * H));
+    const y1 = Math.min(H, Math.ceil(uvRect.v1 * H));
+    let lit = 0;
+    let total = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = (y * W + x) * 4;
+        const luma = (raw[i] * 0.2126 + raw[i + 1] * 0.7152 + raw[i + 2] * 0.0722) / 255;
+        total++;
+        if (luma > 0.02) lit++;
+      }
+    }
+    return { litPixels: lit, totalPixels: total, region: { x0, x1, y0, y1 } };
   }
 
   // ⚠️ THERE IS DELIBERATELY NO `readBodies()`. A first cut of this file had
@@ -519,6 +661,96 @@ export function createPrecipBench({ THREE, log }) {
         inputs: { species: PRECIP_SPECIES_IDS },
         stats: results,
         artifacts,
+      };
+    },
+  });
+
+  /**
+   * ⭐ LAW 3 — rain indoors must be UNREPRESENTABLE. The gate's own scenario,
+   * and the one that has to pass before this effect is allowed to draw into a
+   * real scene at all.
+   *
+   * Measures COVERAGE INSIDE the synthetic building's own footprint rather than
+   * whole-frame coverage: a whole-frame drop of a few percent is exactly what a
+   * slightly-dimmer downpour also looks like, so it could not tell "the roof
+   * works" from "the alpha changed" (`feedback_aggregate_cannot_name_the_source`).
+   */
+  scenarios.set('law3-no-rain-indoors', {
+    name: 'law3-no-rain-indoors',
+    summary: 'the sky-reach gate empties the building footprint, fades under the canopy, and fails OPEN when absent.',
+    async run({ runId }) {
+      driver.setSpecies('rain');
+      driver.set({ precip01: 0.9, windSpeed01: 0.15, zoom: 1, skyGate: false });
+      const open = await driver.measureRegion(BUILDING_UV, 30);
+      const openWhole = await driver.measureCoverage(2);
+      const disarmed = driver.engine.debugState().skyGate;
+      const pngOpen = await saveCanvasPng(runId, 'gate-disarmed.png', driver.canvas);
+
+      driver.set({ skyGate: true });
+      const gated = await driver.measureRegion(BUILDING_UV, 30);
+      const gatedWhole = await driver.measureCoverage(2);
+      const armed = driver.engine.debugState().skyGate;
+      const outside = await driver.measureRegion(OPEN_SKY_UV, 2);
+      const pngGated = await saveCanvasPng(runId, 'gate-armed.png', driver.canvas);
+
+      return {
+        checks: [
+          evaluate('gate-reports-disarmed-before-a-texture-arrives', () => ({
+            ok: disarmed.armed === false,
+            measured: disarmed.armed,
+            expected: false,
+          })),
+          // ⚠️ THE POLARITY CHECK, and the more important half of LAW 3's
+          // contract: absence must mean KEEP RAINING. A gate that failed
+          // CLOSED would make every un-ingested map silently dry, which looks
+          // exactly like "the effect is off" and would be found by a user
+          // rather than by this bench.
+          evaluate('⭐ fails OPEN — no texture means rain everywhere, not nowhere', () => ({
+            ok: open.litPixels > 0,
+            measured: open.litPixels,
+            expected: '> 0 inside the footprint while disarmed',
+          })),
+          evaluate('gate-reports-armed-once-a-texture-arrives', () => ({
+            ok: armed.armed === true,
+            measured: armed.armed,
+            expected: true,
+          })),
+          // ⚠️ THE BAR IS 5%, AND IT MEASURED **0**. Getting here took one real
+          // bug fix rather than a loosened assertion, and the history is worth
+          // keeping: the first cut sampled the gate at the body's GROUND
+          // position (Precipitation.md §3.1's wording) and left **61%** of the
+          // rain still drawn inside the building. A controlled sweep of
+          // `cameraHeight` — which is exactly a sweep of M(h) — collapsed the
+          // residual to 0.0% at M≈1.1 and restored it at M=2.5, isolating the
+          // cause with no guesswork: the gate asked about one place while the
+          // viewer looked at another. Sampling the DRAWN position fixed it
+          // outright. A tolerance wide enough to pass the broken version would
+          // have shipped rain falling through roofs.
+          evaluate('⭐ LAW 3: no rain inside the building', () => ({
+            ok: gated.litPixels <= open.litPixels * 0.05,
+            measured: {
+              before: open.litPixels,
+              after: gated.litPixels,
+              residualPct: Number(((100 * gated.litPixels) / Math.max(1, open.litPixels)).toFixed(1)),
+            },
+            expected: 'at most 5% of the ungated count',
+          })),
+          // Non-vacuity: the gate must empty the ROOF, not the whole frame.
+          evaluate('detector-is-not-vacuous-open-sky-still-rains', () => ({
+            ok: outside.litPixels > 0,
+            measured: outside.litPixels,
+            expected: '> 0 outside the footprint while armed',
+            note: 'proves the dry footprint is the gate working, not the effect switching itself off',
+          })),
+          evaluate('the-frame-as-a-whole-still-rains', () => ({
+            ok: gatedWhole.litPixels > openWhole.litPixels * 0.4,
+            measured: { before: openWhole.litPixels, after: gatedWhole.litPixels },
+            expected: 'most of the frame unaffected — a roof is local',
+          })),
+        ],
+        inputs: { buildingUv: BUILDING_UV, openSkyUv: OPEN_SKY_UV },
+        stats: { open, gated, openWhole, gatedWhole, outside },
+        artifacts: [pngOpen, pngGated].filter(Boolean),
       };
     },
   });

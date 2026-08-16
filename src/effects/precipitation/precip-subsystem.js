@@ -88,8 +88,21 @@ export function resolveActiveSpecies(precipKind, mixWeight = 0) {
 export function createPrecipitationSubsystem({
   THREE,
   getPrecipRenderState,
-  windHandle,
-  pxPerMeter = 100,
+  // ⚠️ GETTERS, NOT VALUES, AND THIS IS A TDZ FIX WITH A LIVE FAILURE BEHIND
+  // IT. A first cut took `windHandle`/`pxPerMeter` as plain values. Both are
+  // declared FURTHER DOWN `startVtPanViewer` than this factory is called, so
+  // reading them here threw `ReferenceError: Cannot access 'windHandle' before
+  // initialization` — the whole renderer failed to start and fell back to
+  // Foundry's.
+  //
+  // ⚠️ 10,204 GREEN ASSERTIONS AND A CLEAN esbuild BUNDLE DID NOT SEE IT. That
+  // is `feedback_bundling_does_not_prove_construction_order` exactly: bundling
+  // proves the imports resolve, not that the declarations run in an order that
+  // works. Only booting the real thing found it. Every sibling subsystem here
+  // takes `getWindHandle`/`getPxPerMeter` closures for precisely this reason,
+  // and the arrow is not invoked until an engine is first built.
+  getWindHandle = () => null,
+  getPxPerMeter = () => 100,
   openSkyTexture = null,
   renderOrder = 0,
 }) {
@@ -109,8 +122,10 @@ export function createPrecipitationSubsystem({
     const engine = createPrecipEngine({
       THREE,
       speciesId,
-      windHandle,
-      pxPerMeter,
+      // Resolved HERE, at first engine build — long after `startVtPanViewer`
+      // has finished declaring them. See the constructor's own TDZ note.
+      windHandle: getWindHandle() ?? undefined,
+      pxPerMeter: getPxPerMeter() ?? 100,
       renderOrder,
       openSkyTexture,
     });
@@ -135,7 +150,7 @@ export function createPrecipitationSubsystem({
      * draws nothing (LAW 5's teeth).
      * @param {*} renderer @param {number} dtRealSec @param {number} nowMs
      */
-    sync(renderer, dtRealSec, nowMs) {
+    sync(renderer, dtRealSec, nowMs, worldRect) {
       const st = getPrecipRenderState?.() ?? null;
       if (!st || st.enabled === false) {
         activeSpeciesId = null;
@@ -165,7 +180,11 @@ export function createPrecipitationSubsystem({
         engine.init(renderer);
         seededEngines.add(speciesId);
       }
-      if (st.worldRect) engine.setWorldRect(st.worldRect);
+      // The rect comes in as a per-frame ARGUMENT rather than off the render
+      // state, because the viewer computes it inside its frame loop — see the
+      // note at `getPrecipRenderState`'s own `worldRect` in vt-pan-viewer.js.
+      const rect = worldRect ?? st.worldRect ?? null;
+      if (rect) engine.setWorldRect(rect);
       engine.setFrame(
         resolveSpeciesFrame(
           PRECIP_SPECIES[speciesId],

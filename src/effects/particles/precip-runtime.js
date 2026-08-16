@@ -69,6 +69,18 @@
  * zoom), 1 = fully slanted (reads as a downpour). It is a UNIFORM, not a
  * constant, precisely so the shader lab can sweep it and the author can pick.
  *
+ * ⚠️ RETUNED 0.62 → 0.30 (2026-08-16) ON THE AUTHOR'S LIVE VERDICT: *"it's
+ * currently falling with the streak facing south instead of downwards."* That
+ * is exactly what too much slant looks like from directly above — the drop
+ * genuinely translates across the map, so its streak becomes a long vector
+ * LYING IN THE MAP PLANE pointing south rather than a mark falling toward the
+ * viewer. Less slant plus a shorter streak (`uStreakScale`) turns each body
+ * into a short foreshortened dash, which is what falling AT a top-down camera
+ * actually looks like. ⚠️ All three dials were swept TOGETHER in the lab,
+ * because they trade against each other: drop the slant alone and the radial
+ * term (`uParallaxStreak01`) takes over and splays instead — which is the
+ * author's other reported failure, *"some are moving sideways"*.
+ *
  * @module effects/particles/precip-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
@@ -207,7 +219,7 @@ export function createPrecipEngine({
    * from directly above); 1 = fully slanted (V2's downpour). Deliberately a
    * uniform so the lab can sweep it live.
    */
-  const uFallSlant01 = uniform(float(0.62));
+  const uFallSlant01 = uniform(float(0.3));
   /** Which way "downhill" is, in world degrees. Screen-down under the flipped
    * camera. Separate from the WIND direction on purpose: rain slants with the
    * wind AND has a base bias, and collapsing them would make a calm day's rain
@@ -229,14 +241,22 @@ export function createPrecipEngine({
    * stretch. Rather than silently pick the other reading, the stretch is now a
    * swept dial with the table holding the value the sweep actually chose.
    */
-  const uStreakScale = uniform(float(1));
+  /**
+   * ⚠️ 0.5, AND THAT IS A CHANGE OF BASIS RATHER THAN A TASTE TWEAK. The
+   * species table's `streakPerPxS` (0.0065) is V2's number for length per unit
+   * of FALL speed; this runtime now derives length from APPARENT (screen)
+   * speed, which at the shipped slant is a fraction of it. Halving here
+   * re-expresses V2's factor in the new basis instead of editing the harvested
+   * constant, so the table keeps meaning what its own comment says it means.
+   */
+  const uStreakScale = uniform(float(0.5));
   /**
    * How much of the derived RADIAL (falling-toward-you) motion steers a
    * streak's direction. See the derivation at its use site in `positionNode`.
    * 0 = every streak parallel; 1 = the full, physically-derived splay, which
    * measured as hyperspace rather than rain.
    */
-  const uParallaxStreak01 = uniform(float(0.12));
+  const uParallaxStreak01 = uniform(float(0.03));
 
   // ── ⭐ THE SKY-REACH GATE (Precipitation.md LAW 3) ────────────────────────
   //

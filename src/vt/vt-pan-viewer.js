@@ -2938,7 +2938,13 @@ export async function startVtPanViewer({
 
     const precipitationSubsystem = createPrecipitationSubsystem({
       THREE,
-      windHandle,
+      // ⚠️ A GETTER, NOT A VALUE — `windHandle` is declared FURTHER DOWN this
+      // function, and passing it directly threw `Cannot access 'windHandle'
+      // before initialization` on a live boot, taking the whole renderer down
+      // to the Foundry fallback. Same TDZ-safe closure pattern as
+      // `getWindHandle` on the point-light pool and fire below; see this
+      // function's own "GETTERS VS VALUES" header.
+      getWindHandle: () => windHandle,
       openSkyTexture: precipOpenSkyTexture,
       getPxPerMeter: () => readGridDistancePixels().distancePixels,
       // ⚠️ DRAWN AFTER the lit composite (precipitation is in FRONT of the
@@ -2953,7 +2959,12 @@ export async function startVtPanViewer({
         return {
           enabled: true,
           weather: env.weather,
-          worldRect: windSpawnRect,
+          // ⚠️ NO `worldRect` HERE. The obvious thing — reading `windSpawnRect`
+          // — does not work and would not fail at build time: it is declared
+          // INSIDE the frame loop, a different scope from this closure, so the
+          // reference resolves to nothing and throws only when a drop first
+          // falls. The rect is passed into `sync()` per frame instead, exactly
+          // as fire's own subsystem takes it.
           // The SAME `dayFactor01` the shadow handle and the daylight tint
           // read — never a second "is it dark" derivation.
           dayFactor01: env.sun?.dayFactor01 ?? 1,
@@ -6038,22 +6049,12 @@ export async function startVtPanViewer({
         renderer.autoClearColor = prevFireAutoClear;
         profiler?.end(Z.lightDrawFire);
       }
-      // ⭐ PRECIPITATION — THE FALL, drawn over the lit world.
-      //
-      // ⚠️ ITS POSITION IN THIS ORDER IS THE WHOLE OF Precipitation.md §3.5's
-      // draw rule: AFTER every additive light draw (it is in FRONT of the
-      // world, roofs included) and BEFORE the vision gate below — MSA owns
-      // vision now, and rain must never leak into unexplored fog. It writes
-      // `buf:scene.color` and touches no Pillar-11 vision input at all.
-      //
-      // `hasContent` is false on a clear day, so LAW 5 costs one boolean here
-      // rather than a submitted draw call (Effects.md Law 4).
-      if (precipitationSubsystem.hasContent) {
-        const prevPrecipAutoClear = renderer.autoClearColor;
-        renderer.autoClearColor = false;
-        renderer.render(precipitationSubsystem.scene, camera);
-        renderer.autoClearColor = prevPrecipAutoClear;
-      }
+      // (PRECIPITATION does NOT draw here. It is a declared pass and runs from
+      // `runPassPlan` via `runSurfacePrecipitationPass` — see that function.
+      // A first cut hand-placed its draw in this block, which put it in the
+      // wrong stage AND left `surface.precipitation` planned-but-unimplemented;
+      // `runPassPlan` threw on every frame saying exactly that, which is the
+      // gate working.)
       // THE WIND FIELD DEBUG OVERLAY — same guarded-additive draw as the
       // candle flame just above (same target, same camera, same "don't wipe
       // what compositeQuad/the flame already drew" guard). OFF by default.
@@ -6120,6 +6121,30 @@ export async function startVtPanViewer({
      * plan runs; this only draws: ONE InstancedBufferGeometry, positions straight
      * from the arena, never a scene object per particle.
      */
+    /**
+     * ⭐ PRECIPITATION — THE FALL (Precipitation.md §3), drawn over the lit
+     * world.
+     *
+     * ⚠️ ITS POSITION IN THE PLAN IS THE WHOLE OF §3.5's draw rule, and both
+     * neighbours are load-bearing: AFTER `surface.particles` and every additive
+     * light draw, because precipitation is in FRONT of the world including
+     * roofs; BEFORE `vision.gate`, because MSA owns vision now and rain must
+     * never leak into unexplored fog. It writes `buf:scene.color` and touches
+     * no Pillar-11 vision input at all.
+     *
+     * `hasContent` is false on a clear day, so LAW 5 costs one boolean rather
+     * than a bind and a submitted draw (Effects.md Law 4).
+     */
+    function runSurfacePrecipitationPass() {
+      if (!precipitationSubsystem.hasContent) return;
+      const prevAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      renderer.render(precipitationSubsystem.scene, camera);
+      renderer.autoClearColor = prevAutoClear;
+      renderer.setRenderTarget(null);
+    }
+
     function runSurfaceParticlesPass() {
       const drawParticles = windParticlesEnabled && particleEngine?.scene;
       const drawGusts = windGustsEnabled && gustEngine?.scene;
@@ -6354,6 +6379,7 @@ export async function startVtPanViewer({
       'light.accumulate': runLightAccumulatePass,
       'surface.response': runSurfaceResponsePass,
       'surface.particles': runSurfaceParticlesPass,
+      'surface.precipitation': runSurfacePrecipitationPass,
       'vision.gate': runVisionGatePass,
       'post.bloom': runPostBloomPass,
       'post.dof': runPostDofPass,
@@ -11661,7 +11687,8 @@ export async function startVtPanViewer({
         precipitationSubsystem.sync(
           renderer,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
-          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          windSpawnRect
         );
       }
       // Re-derive the camera from the live view EVERY frame: this is what makes

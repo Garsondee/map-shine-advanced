@@ -37,7 +37,7 @@ const {
   waitForCanvasReady,
   waitForMapShineReady,
   ensureActiveScene,
-  unpauseIfPaused
+  unpauseIfPaused,
 } = require('./map-shine-utils');
 
 // Log in as a DEDICATED bench user, not the human's Gamemaster. Foundry allows one session
@@ -63,8 +63,8 @@ const OUT_DIR = path.join(process.cwd(), 'tests', 'playwright-artifacts', 'look'
  * the cold cost and would drown any real change in compression noise. This directory keeps the
  * cache; delete it to force a genuine cold-start measurement.
  */
-const PROFILE_DIR = process.env.MSA_LOOK_PROFILE
-  || path.join(process.cwd(), 'tests', 'playwright-artifacts', 'chrome-profile');
+const PROFILE_DIR =
+  process.env.MSA_LOOK_PROFILE || path.join(process.cwd(), 'tests', 'playwright-artifacts', 'chrome-profile');
 
 const LABEL = process.env.MSA_LOOK_LABEL || 'mansion';
 /** Extra dwell AFTER the loading screen clears, to let residency and effects settle. */
@@ -73,10 +73,28 @@ const SETTLE_SECONDS = Number(process.env.MSA_LOOK_SECONDS || 8);
 const LOAD_TIMEOUT_MS = Number(process.env.MSA_LOOK_LOAD_TIMEOUT_MS || 600000);
 const VIEWPORT = {
   width: Number(process.env.PERF_VIEWPORT_W || 1920),
-  height: Number(process.env.PERF_VIEWPORT_H || 1080)
+  height: Number(process.env.PERF_VIEWPORT_H || 1080),
 };
 const REPORTS = (process.env.MSA_LOOK_REPORTS || 'perf-profile,loading-screen-state')
-  .split(',').map((s) => s.trim()).filter(Boolean);
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+/**
+ * JS to run IN THE PAGE after the art has loaded and settled, before fps is
+ * measured and the screenshot taken. The hook this harness was missing: it can
+ * boot a real map and photograph it, but it had no way to ASK for a state — so
+ * verifying any effect that is off by default (weather, precipitation, an
+ * event) meant either a hand-driven session or a whole new spec duplicating
+ * the boot.
+ *
+ * Its return value lands in the run's JSON as `evalResult`, so a check can be
+ * asserted rather than merely eyeballed in the PNG.
+ *
+ *   MSA_LOOK_EVAL="MapShine.setPrecip(0.9); return MapShine.getPrecipitation()"
+ */
+const EVAL_SNIPPET = process.env.MSA_LOOK_EVAL || '';
+/** Extra dwell AFTER the snippet, so an eased axis has time to actually arrive. */
+const EVAL_SETTLE_SECONDS = Number(process.env.MSA_LOOK_EVAL_SECONDS || 6);
 
 test.setTimeout(LOAD_TIMEOUT_MS + 180000);
 
@@ -104,7 +122,7 @@ async function waitForMapArtLoaded(page, timeoutMs) {
           elapsedMs: r?.current?.elapsedMs ?? null,
           complete: r?.current?.complete === true,
           error: r?.current?.error ?? null,
-          phase: (r?.currentPhases || []).filter((p) => p.endMs === null).map((p) => p.phase)[0] ?? null
+          phase: (r?.currentPhases || []).filter((p) => p.endMs === null).map((p) => p.phase)[0] ?? null,
         };
       } catch (e) {
         return { showing: true, title: `report-failed: ${String(e)}` };
@@ -116,13 +134,16 @@ async function waitForMapArtLoaded(page, timeoutMs) {
 
     const waited = Date.now() - start;
     if (waited > timeoutMs) {
-      const hint = st?.phase === 'firstFrame'
-        ? ' — stuck in the "firstFrame" phase, which means requestAnimationFrame is not running: '
-          + 'the browser window is almost certainly not compositing (minimised, hidden, or headless '
-          + 'without a GPU). This is a harness problem, NOT an MSA hang.'
-        : '';
-      throw new Error(`Map art did not finish loading after ${Math.round(waited / 1000)}s `
-        + `(phase=${st?.phase} title="${st?.title}")${hint}`);
+      const hint =
+        st?.phase === 'firstFrame'
+          ? ' — stuck in the "firstFrame" phase, which means requestAnimationFrame is not running: ' +
+            'the browser window is almost certainly not compositing (minimised, hidden, or headless ' +
+            'without a GPU). This is a harness problem, NOT an MSA hang.'
+          : '';
+      throw new Error(
+        `Map art did not finish loading after ${Math.round(waited / 1000)}s ` +
+          `(phase=${st?.phase} title="${st?.title}")${hint}`
+      );
     }
 
     if (waited - lastLog > 10000) {
@@ -147,9 +168,9 @@ test('look at the MSA scene and capture evidence', async () => {
     channel: 'chrome',
     headless: false,
     viewport: VIEWPORT,
-    args: ['--no-first-run', '--no-default-browser-check']
+    args: ['--no-first-run', '--no-default-browser-check'],
   });
-  const page = context.pages()[0] || await context.newPage();
+  const page = context.pages()[0] || (await context.newPage());
 
   // Console errors are collected from the very first navigation — a shader or boot failure
   // announces itself here long before it is visible in a screenshot.
@@ -184,7 +205,7 @@ test('look at the MSA scene and capture evidence', async () => {
         vendor: a.info?.vendor ?? null,
         architecture: a.info?.architecture ?? null,
         maxTextureDimension2D: a.limits?.maxTextureDimension2D ?? null,
-        maxBufferSize: a.limits?.maxBufferSize ?? null
+        maxBufferSize: a.limits?.maxBufferSize ?? null,
       };
     });
     expect(gpu.adapter, 'a real WebGPU adapter is required or nothing below means anything').toBe(true);
@@ -199,18 +220,50 @@ test('look at the MSA scene and capture evidence', async () => {
     // Then a short dwell so residency streaming and effect warm-up settle before measuring.
     await page.waitForTimeout(SETTLE_SECONDS * 1000);
 
+    // THE STATE HOOK — see EVAL_SNIPPET's own note. Runs after settle so it
+    // acts on a fully-loaded scene, and before fps/screenshot so both measure
+    // the state it asked for rather than the default one.
+    let evalResult = null;
+    if (EVAL_SNIPPET) {
+      console.log(`[look] running MSA_LOOK_EVAL (${EVAL_SNIPPET.length} chars)…`);
+      try {
+        evalResult = await page.evaluate(async (src) => {
+          // ⚠️ ASYNC, so a snippet can AWAIT. Weather axes EASE — `precip01`
+          // takes ~30s to look done — so the useful question is almost never
+          // "what is true the instant I set it". A synchronous-only hook can
+          // set a target and can never observe it arrive, which is exactly the
+          // reading that made a working system look inert on its first run.
+          // eslint-disable-next-line no-new-func
+          const fn = new Function(`return (async () => { ${src} })()`);
+          const out = await fn();
+          // Structured-clone safety: a snippet returning a live object graph
+          // (a THREE scene, a texture) would reject at the bridge and look
+          // like the snippet itself failed.
+          return JSON.parse(JSON.stringify(out ?? null, (k, v) => (typeof v === 'function' ? '[fn]' : v)));
+        }, EVAL_SNIPPET);
+        console.log(`[look] eval -> ${JSON.stringify(evalResult)?.slice(0, 600)}`);
+      } catch (e) {
+        evalResult = { error: String(e?.message ?? e) };
+        console.log(`[look] eval FAILED: ${evalResult.error}`);
+      }
+      await page.waitForTimeout(EVAL_SETTLE_SECONDS * 1000);
+    }
+
     // Measure frame rate from the page itself rather than trusting a profiler that may be
     // disarmed: 60 raw rAF ticks, wall-clock timed.
-    const fps = await page.evaluate(() => new Promise((resolve) => {
-      let frames = 0;
-      const t0 = performance.now();
-      const tick = () => {
-        frames += 1;
-        if (frames >= 60) resolve(Math.round((frames * 1000) / (performance.now() - t0)));
-        else requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    }));
+    const fps = await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          let frames = 0;
+          const t0 = performance.now();
+          const tick = () => {
+            frames += 1;
+            if (frames >= 60) resolve(Math.round((frames * 1000) / (performance.now() - t0)));
+            else requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        })
+    );
 
     const sceneState = await page.evaluate(() => ({
       msaVersion: window.MapShine?.version ?? null,
@@ -219,13 +272,13 @@ test('look at the MSA scene and capture evidence', async () => {
       levels: (window.canvas?.scene?.levels ?? []).map((l) => ({
         name: l.name,
         bottom: l.elevation?.bottom ?? null,
-        background: (l.background?.src || '').split('/').pop() || null
+        background: (l.background?.src || '').split('/').pop() || null,
       })),
       canvas: (() => {
         const c = document.querySelector('canvas#msa-vt-pan-viewer-canvas');
         return c ? { width: c.width, height: c.height } : null;
       })(),
-      devicePixelRatio: window.devicePixelRatio
+      devicePixelRatio: window.devicePixelRatio,
     }));
 
     // MSA's own reports — the same instruments that produced the numbers in
@@ -257,15 +310,21 @@ test('look at the MSA scene and capture evidence', async () => {
       mapArtLoadMs: loadState.elapsedMs ?? null,
       profileDir: PROFILE_DIR,
       fps,
+      // What MSA_LOOK_EVAL asked for and what it answered — so a run is
+      // self-describing rather than a PNG somebody must remember the flags for.
+      evalSnippet: EVAL_SNIPPET || null,
+      evalResult,
       gpu,
       scene: sceneState,
       consoleErrors: consoleErrors.slice(0, 40),
-      reports
+      reports,
     };
     fs.writeFileSync(path.join(OUT_DIR, `${LABEL}.json`), JSON.stringify(summary, null, 2));
 
-    console.log(`[look] fps=${fps} gpu=${gpu.vendor}/${gpu.architecture} scene="${sceneState.scene}" `
-      + `floors=${sceneState.levels.length} errors=${consoleErrors.length}`);
+    console.log(
+      `[look] fps=${fps} gpu=${gpu.vendor}/${gpu.architecture} scene="${sceneState.scene}" ` +
+        `floors=${sceneState.levels.length} errors=${consoleErrors.length}`
+    );
     console.log(`[look] artifacts written to ${OUT_DIR}`);
   } finally {
     await context.close().catch(() => {});

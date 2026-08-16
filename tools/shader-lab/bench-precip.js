@@ -126,11 +126,11 @@ class PrecipDriver {
       windDirDeg: 90,
       // look dials (effect-owned)
       sizeScale: 1,
-      fallSlant01: 0.62,
+      fallSlant01: 0.3,
       slantDirDeg: 90,
       chaosScale: 1,
-      streakScale: 1,
-      parallaxStreak01: 0.12,
+      streakScale: 0.5,
+      parallaxStreak01: 0.03,
       cameraHeight: 1000,
       // view
       zoom: 1,

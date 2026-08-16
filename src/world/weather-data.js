@@ -221,6 +221,49 @@ export const WEATHER_ARCHETYPES = Object.freeze([
     }),
   }),
   Object.freeze({
+    id: 'sleet',
+    label: 'Sleet',
+    icon: '🌧',
+    blurb: 'The messy middle. Wet flakes among glassy streaks, both at once.',
+    /**
+     * ⭐ THE ONLY ROW THAT NAMES A **BLEND**, and the reason it exists is
+     * testability: `sleet` is normally reached by walking `temperature01` into
+     * the narrow band between `coldEdge 0.2` and `warmEdge 0.3`, which is not
+     * something anyone can do from a shelf. Without a button the dual-population
+     * interleave is unverifiable by the only person whose eyes decide whether it
+     * looks right — and an effect nobody can look at is an effect nobody can
+     * promote past `BUILT (unverified)`.
+     */
+    precipKind: 'sleet',
+    axes: Object.freeze({
+      cloudCover01: 0.95,
+      cloudType01: 0.9,
+      cloudAltitudePx: 700,
+      cloudScalePx: 4200,
+      precip01: 0.65,
+    }),
+  }),
+  Object.freeze({
+    id: 'ashfall',
+    label: 'Ashfall',
+    icon: '🌋',
+    blurb: 'Volcanic unrest. Grey flakes and a few live embers among them.',
+    /** ⭐ ASH BRINGS ITS EMBER COMPANION — the other half of the dual-population
+     * capability, and likewise unreachable without a button: no temperature and
+     * no biome walk produces `ash`, because ash is an EVENT's weather rather
+     * than a climate's. */
+    precipKind: 'ash',
+    axes: Object.freeze({
+      /** A sodium-gloom sky rather than a rain one — high cover, low altitude,
+       * huge cells, which is what an ash pall looks like from underneath. */
+      cloudCover01: 0.98,
+      cloudType01: 0.55,
+      cloudAltitudePx: 500,
+      cloudScalePx: 6000,
+      precip01: 0.55,
+    }),
+  }),
+  Object.freeze({
     id: 'hailstorm',
     label: 'Hailstorm',
     icon: '🧊',

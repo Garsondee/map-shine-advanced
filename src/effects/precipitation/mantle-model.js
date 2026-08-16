@@ -209,7 +209,7 @@ export function gameHourDelta(prevHour, nowHour) {
  *   a paused game, which is exactly why nothing moves then.
  * @returns {Readonly<object>} the uniform set, all finite, all clamped.
  */
-export function resolveMantleStep({ stay, precip01, temperature01, cloudCover01 = 0, dtGameHours }) {
+export function resolveMantleStep({ stay, stays, precip01, temperature01, cloudCover01 = 0, dtGameHours }) {
   const p = clamp01(precip01);
   const temp = clamp01(temperature01);
   const cover = clamp01(cloudCover01);
@@ -220,22 +220,57 @@ export function resolveMantleStep({ stay, precip01, temperature01, cloudCover01 
   // cannot teleport.
   const dt = Number.isFinite(dtGameHours) ? Math.min(1, Math.max(0, dtGameHours)) : 0;
 
-  const channel = stay?.channel ?? null;
-  const rate = Number.isFinite(stay?.ratePerHour) ? stay.ratePerHour : 0;
-  const puddleRate = Number.isFinite(stay?.puddleRatePerHour) ? stay.puddleRatePerHour : 0;
+  /**
+   * ⭐ EVERY LIVE POPULATION DEPOSITS, WEIGHTED — and the singular used to be a
+   * stated shortcut.
+   *
+   * A half-and-half sleet genuinely leaves BOTH slush and water on the ground.
+   * Until the dual-population capability landed this took ONE `stay` and the
+   * subsystem handed it the heaviest half, so the ground reflected whichever
+   * species happened to be winning and the error was largest at exactly 0.5 —
+   * where both answers are half wrong.
+   *
+   * ⚠️ THE SUM IS OVER **DEPOSITS**, NOT OVER SINKS. Melt, drying and trample
+   * recovery are properties of the WEATHER and the GROUND (temperature, cloud
+   * cover, fire), not of what is falling — so they are computed once from the
+   * axes rather than averaged across populations. Weighting them would make a
+   * 30/70 sleet melt at 70% of the rate a thaw actually delivers, which is a
+   * category error: two things falling does not make the sun weaker.
+   *
+   * `stay` (singular) is still accepted so every existing caller and the whole
+   * Node suite keep working unchanged; it is simply the one-population case.
+   */
+  const rows = Array.isArray(stays) && stays.length > 0 ? stays : [{ stay, weight: 1 }];
+  let snowGain = 0;
+  let dustGain = 0;
+  let puddleGain = 0;
+  let buryGain = 0;
+  for (const row of rows) {
+    const st = row?.stay ?? null;
+    const wt = Number.isFinite(row?.weight) ? Math.max(0, row.weight) : 1;
+    if (!st || wt <= 0) continue;
+    const rate = Number.isFinite(st.ratePerHour) ? st.ratePerHour : 0;
+    const puddleRate = Number.isFinite(st.puddleRatePerHour) ? st.puddleRatePerHour : 0;
+    if (st.channel === 'snow') {
+      snowGain += rate * p * wt;
+      buryGain += rate * p * wt * BURY_RATE_MUL;
+    }
+    if (st.channel === 'dust') dustGain += rate * p * wt;
+    puddleGain += puddleRate * p * wt;
+  }
 
   return Object.freeze({
     dtGameHours: dt,
     /** Depth per hour added to `snow01` where sky reaches. Zero unless the
      * ACTIVE species feeds that channel — rain falling in a snowy scene must
      * not thicken the drifts it is washing away. */
-    snowGainPerHour: channel === 'snow' ? rate * p : 0,
+    snowGainPerHour: snowGain,
     /** Same, for `dust01` (ash/sand — P6's species, the channel is ready). */
-    dustGainPerHour: channel === 'dust' ? rate * p : 0,
+    dustGainPerHour: dustGain,
     /** Puddle fill. Read off the species row rather than assumed from `rain`,
      * so sleet and (later) hail can pool at their own rates without a branch
      * appearing here. */
-    puddleGainPerHour: puddleRate * p,
+    puddleGainPerHour: puddleGain,
     /** Ambient melt, from the manager's temperature axis — its first VISIBLE
      * SPATIAL consumer (until now temperature only chose what fell). */
     meltPerHour: meltPerHour(temp),
@@ -247,7 +282,7 @@ export function resolveMantleStep({ stay, precip01, temperature01, cloudCover01 
     /** Footprints heal. */
     trampleRecoverPerHour: 1 / TRAMPLE_RECOVER_HOURS,
     /** Falling snow fills prints faster than it raises the surface. */
-    trampleBuryPerHour: channel === 'snow' ? rate * p * BURY_RATE_MUL : 0,
+    trampleBuryPerHour: buryGain,
   });
 }
 

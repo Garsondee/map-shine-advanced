@@ -459,6 +459,14 @@ export const PRECIP_SPECIES = Object.freeze({
     fall: Object.freeze({
       /** The fastest thing the table sends — mass beats drag. */
       speedPxS: Object.freeze([4200, 7400]),
+      /**
+       * ⭐ ALMOST NO TURBULENCE — author: *"hail shouldn't be turbulent in the
+       * way that snow is turbulent as it has enough weight to drop much more
+       * cleanly downwards, though it can be blown by the wind."* Both halves
+       * are here: `chaos01` near zero kills the wander, while `windCarry01`
+       * below keeps it blowable. Two different phenomena, two numbers.
+       */
+      chaos01: 0.08,
       /** ⭐ NEAR-BALLISTIC (§2.2's `~0.1`). A hailstone is the one thing the
        * wind barely touches, which is most of why it reads as heavy: the
        * whole sky leans and the hail comes straight down through it. */
@@ -506,14 +514,26 @@ export const PRECIP_SPECIES = Object.freeze({
     bounce: Object.freeze({
       /** 1–2 visible pop-ups, per stone, chosen by its own hash. */
       countRange: Object.freeze([1, 2]),
-      /** How high the first pop-up reaches, as a fraction of the spawn
-       * height. Small: a bounce is a hop, not a second fall. */
-      firstPeakFrac: 0.085,
+      /** How high the first pop-up reaches, as a fraction of the spawn height.
+       * Small: a bounce is a hop, not a second fall. Raised from 0.085 — it was
+       * contributing a 2.7% size change, which is below the threshold of
+       * anything. The SKITTER does most of the work, but the pop should at
+       * least be measurable. */
+      firstPeakFrac: 0.22,
       /** …and how much of that the NEXT one keeps. Damped, §4.4's "smaller
        * each time". */
       damping: 0.45,
       /** Seconds per pop-up. Fast — a slow bounce reads as a balloon. */
       popSec: 0.34,
+      /**
+       * ⭐ HOW FAR A STONE SKITTERS SIDEWAYS ON EACH POP-UP, px/s.
+       *
+       * ⚠️ THIS IS THE CUE THAT MAKES A BOUNCE VISIBLE AT ALL. A pop-up changes
+       * only M(h), and at this peak against a 2,000 px camera that is under 3%
+       * of size — invisible. A real stone bounces off at an ANGLE, and lateral
+       * motion is the one thing a top-down camera reads perfectly.
+       */
+      skitterPxS: 340,
       /** ⭐ §4.4: *"a resting pellet fading over ~10 s"*. THE detail that makes
        * hail feel like an event rather than an effect: the ground is briefly
        * covered in stones that are still there when you look back. */

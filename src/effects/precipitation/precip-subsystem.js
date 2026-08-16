@@ -489,6 +489,29 @@ export function createPrecipitationSubsystem({
      * are half wrong anyway.
      */
     const resolvedPops = resolveActivePopulations(weather.precipKind ?? 'rain', weather.precipMixWeight ?? 0);
+    /**
+     * ⭐ EVERY POPULATION FEEDS THE GROUND, WEIGHTED — no longer just the
+     * heaviest. A half-and-half sleet genuinely leaves both slush and standing
+     * water, and the old shortcut's error was LARGEST at exactly the 0.5 the
+     * temperature band spends most of its time near.
+     */
+    const stays =
+      precip01 > 0
+        ? resolvedPops.populations
+            .map((pop) => ({
+              stay: (PRECIP_SPECIES[pop.speciesId] ?? PRECIP_COMPANIONS[pop.speciesId])?.stay ?? null,
+              weight: pop.weight,
+            }))
+            .filter((row) => row.stay)
+        : [];
+    /**
+     * ⚠️ THE SURFACE **LOOK** STILL COMES FROM ONE ROW, and that is not the
+     * same shortcut. A tint is a COLOUR, not a rate: lerping snow's blue-white
+     * with rain's wet-grey yields a third colour belonging to neither weather,
+     * whereas summing two deposit RATES is just how much fell. Quantities add;
+     * appearances do not (`feedback_blend_neutral_element_is_per_blend`'s
+     * cousin). The heaviest population owns the appearance.
+     */
     const heaviest = resolvedPops.populations.reduce((a, b) => (b.weight > a.weight ? b : a), {
       speciesId: null,
       weight: 0,
@@ -496,6 +519,7 @@ export function createPrecipitationSubsystem({
     const stay = precip01 > 0 && heaviest.speciesId ? (PRECIP_SPECIES[heaviest.speciesId]?.stay ?? null) : null;
     mantle.setSurface(stay);
     mantle.step(dtRealSec, st.todHour, {
+      stays,
       stay,
       precip01,
       temperature01: weather.temperature01 ?? 0.55,

@@ -249,6 +249,19 @@ export function createPrecipEngine({
   const S = resolved.species;
   const isStreak = S ? S.body.mode === 'streak' : false;
   /**
+   * ⭐ A HARD PELLET — `mote` mode, and its absence was the other half of the
+   * hail report: *"looks like snow flakes."*
+   *
+   * ⚠️ THE DRAW USED TO HAVE **TWO** BRANCHES, streak and everything-else, and
+   * everything-else was written for a FLAKE. That was fine while snow was the
+   * only non-streak — and then P6 made the flake branch a deliberately
+   * irregular crystal (the author's own ask), at which point every `mote`
+   * species inherited a snowflake silhouette. A binary branch quietly became a
+   * wrong answer the moment a third body mode existed
+   * (`feedback_mode_forks_silently_drop_features`).
+   */
+  const isPellet = S ? S.body.mode === 'mote' : false;
+  /**
    * ⭐ DOES THIS SPECIES WALK A PHASE MACHINE? (§4.4). BUILD-TIME, like every
    * other species branch — a body never changes species mid-life, so a stone's
    * bounce logic is compiled only into hail's own kernel and rain pays nothing.
@@ -294,6 +307,18 @@ export function createPrecipEngine({
   const PHASE_BOUNCE_1 = 1;
   const PHASE_REST = 3;
   const PHASE_FADE = 4;
+  /**
+   * Where a uniform hash falls among the phases, weighted by how long each
+   * lasts — so a fresh seed IS the steady state. Computed from the row's own
+   * numbers on the CPU (a life is `fall + bounces + rest + fade`), never
+   * hand-typed, so retuning `restSec` moves these with it.
+   */
+  const PHASE_FALL_SEC = S ? S.fall.spawnHeightPx / ((S.fall.speedPxS[0] + S.fall.speedPxS[1]) / 2) : 0;
+  const PHASE_BOUNCE_SEC = B ? B.popSec * ((B.countRange[0] + B.countRange[1]) / 2) : 0;
+  const PHASE_TOTAL_SEC = B ? PHASE_FALL_SEC + PHASE_BOUNCE_SEC + B.restSec + B.fadeSec : 1;
+  const PHASE_SPLIT_BOUNCE = B ? PHASE_FALL_SEC / PHASE_TOTAL_SEC : 1;
+  const PHASE_SPLIT_REST = B ? (PHASE_FALL_SEC + PHASE_BOUNCE_SEC) / PHASE_TOTAL_SEC : 1;
+  const PHASE_SPLIT_FADE = B ? (PHASE_FALL_SEC + PHASE_BOUNCE_SEC + B.restSec) / PHASE_TOTAL_SEC : 1;
 
   // ── UNIFORMS ─────────────────────────────────────────────────────────────
   const uDtSec = uniform(0);
@@ -660,6 +685,22 @@ export function createPrecipEngine({
    * perspective. See uViewScale. */
   const spawnH = () => float(SPAWN_H).mul(uViewScale);
   const WIND_CARRY = S ? S.fall.windCarry01 : 0;
+  /**
+   * ⭐ HOW TURBULENT THIS SPECIES IS, 0..1 — and its ABSENCE was a reported bug.
+   *
+   * ⚠️ AUTHOR, LIVE: *"hail shouldn't be turbulent in the way that snow is
+   * turbulent as it has enough weight to drop much more cleanly downwards."*
+   * Exactly right, and the old model made hail the WORST offender: chaos is
+   * scaled by a body's own fall SPEED (so the amplitude stays proportional
+   * across species), and hail is the fastest thing in the table — so the
+   * heaviest species got the most wander. Backwards.
+   *
+   * Speed-scaling is still the right base (it is what let one constant serve
+   * rain and snow at two orders of magnitude apart), but MASS has to be able to
+   * damp it. A hailstone is dense enough to punch through the eddies a
+   * raindrop rides.
+   */
+  const CHAOS_01 = Number.isFinite(S?.fall.chaos01) ? S.fall.chaos01 : 1;
   const SKEW_EXP = S ? S.body.brightnessSkewExp : 1;
   const STREAK_PER_PXS = S ? S.body.streakPerPxS : 0;
   const FLUTTER = S?.fall.flutter ?? { hzMin: 0, hzMax: 0, ampPxMin: 0, ampPxMax: 0 };
@@ -729,7 +770,42 @@ export function createPrecipEngine({
         .mul(float(1000))
     );
     age.element(i).assign(float(0));
-    if (hasPhases) phaseBuf.element(i).assign(float(PHASE_FALL));
+    if (hasPhases) {
+      /**
+       * ⭐ THE **PHASE** MUST STAGGER, NOT JUST THE HEIGHT — and this was a real
+       * bug the bench caught by measuring a region six times and getting the
+       * IDENTICAL number every time.
+       *
+       * ⚠️ HEIGHT-STAGGER IS ENOUGH ONLY WHEN THE FALL **IS** THE LIFE. Rain's
+       * whole existence is its descent, so spreading birth heights spreads
+       * everything. A hailstone falls for ~0.1 s and then REST alone lasts 9 —
+       * so staggering height spread the population across a tenth of a second
+       * and then all four thousand stones marched through bounce, rest and fade
+       * in lockstep: the ground filled at once, sat perfectly still, and
+       * emptied at once. Measured as a frozen population, which is exactly what
+       * it was.
+       *
+       * The fix seeds each stone at a random point along the WHOLE life
+       * timeline, with the phases weighted by their own durations — so the
+       * initial population is already the steady-state distribution (mostly
+       * resting, a few falling) rather than a cohort that has to churn its way
+       * into one.
+       */
+      const u = hash11(fi.mul(float(3.9)).add(float(61)));
+      const ord = u
+        .greaterThanEqual(float(PHASE_SPLIT_REST))
+        .select(
+          u.greaterThanEqual(float(PHASE_SPLIT_FADE)).select(float(PHASE_FADE), float(PHASE_REST)),
+          u.greaterThanEqual(float(PHASE_SPLIT_BOUNCE)).select(float(PHASE_BOUNCE_1), float(PHASE_FALL))
+        );
+      phaseBuf.element(i).assign(ord.add(hash11(fi.mul(float(6.7)).add(float(83))).mul(float(0.9999))));
+      // A stone seeded mid-REST is ON THE GROUND, not up in the sky where the
+      // height stagger put it — or the first frame shows a sheet of hail
+      // hanging at every altitude while claiming to be settled.
+      custom
+        .element(i)
+        .assign(vec4(c.brightness, c.sizePx, c.speed, ord.lessThan(float(PHASE_REST)).select(h0, float(0))));
+    }
   })().compute(capacity);
 
   // ── UPDATE KERNEL ────────────────────────────────────────────────────────
@@ -858,6 +934,7 @@ export function createPrecipEngine({
       // flake's sway is a real physical width rather than a ratio.
       .mul(speed)
       .mul(float(CHAOS_PER_SPEED))
+      .mul(float(CHAOS_01))
       .mul(uChaosScale);
 
     // 3. Flutter — snow only. The paper-fall sway (V2 `:1556-1663`), and the
@@ -891,7 +968,9 @@ export function createPrecipEngine({
       drift = drift.add(vec2(swayA, swayB).mul(fAmp).mul(uFlutterMul).mul(uViewScale));
     }
 
-    const nextPos = pos.add(drift.mul(uDtSec));
+    // `.toVar()` because the phase machine may REPLACE it — a bouncing stone
+    // skitters sideways, and a resting one does not move at all.
+    const nextPos = pos.add(drift.mul(uDtSec)).toVar();
 
     // ── RESPAWN — landing, OR being blown out of the spawn rect ──
     //
@@ -977,6 +1056,45 @@ export function createPrecipEngine({
         nextH.max(float(0)),
         resolvedOrd.lessThan(float(PHASE_REST)).select(arcH, float(0))
       );
+
+      /**
+       * ⭐ THE BOUNCE NEEDS A **LATERAL** CUE, AND WITHOUT ONE IT WAS INVISIBLE.
+       *
+       * ⚠️ AUTHOR, LIVE: *"I see no evidence of bouncing yet."* The phase
+       * machine was walking correctly — I proved that by watching the population
+       * cycle — but the only thing a pop-up changed was M(h), and at the old 53
+       * px peak against a 2,000 px camera that is a **2.7% size change**.
+       * Nothing anyone can see. I verified the MECHANISM and never asked whether
+       * the mechanism was LEGIBLE, which is the whole difference between a body
+       * that bounces and a bounce you can watch.
+       *
+       * From directly above, height alone has almost no vocabulary. What DOES
+       * read is that a real hailstone never bounces straight up — it SKITTERS
+       * off at an angle. Giving each pop-up a lateral kick is both the physics
+       * and the one cue this camera shows perfectly: the stone lands, skips,
+       * lands again, and stops. The direction is a per-stone hash so it is
+       * stable across the whole bounce, and it damps with the same factor the
+       * arc height uses, so a second skip is visibly shorter than the first.
+       */
+      const skitterAngle = hash11(s.mul(float(8.3)).add(float(41))).mul(float(Math.PI * 2));
+      const skitterSpeed = float(B.skitterPxS).mul(
+        float(B.damping).pow(resolvedOrd.sub(float(PHASE_BOUNCE_1)).max(float(0)))
+      );
+      const bouncing = resolvedOrd
+        .greaterThanEqual(float(PHASE_BOUNCE_1))
+        .and(resolvedOrd.lessThan(float(PHASE_REST)))
+        .select(float(1), float(0));
+      const skitter = vec2(cos(skitterAngle), sin(skitterAngle)).mul(skitterSpeed).mul(bouncing);
+
+      /**
+       * ⭐ AND IT MUST **SETTLE IN PLACE** — author: *"finally settles in
+       * place."* During REST and FADE the stone is lying on the ground, so wind
+       * drift and lateral chaos have to STOP. They were still being integrated,
+       * which left a "resting" pellet sliding gently across the flagstones for
+       * nine seconds. A resting body that moves is not resting.
+       */
+      const notResting = resolvedOrd.greaterThanEqual(float(PHASE_REST)).select(float(0), float(1));
+      nextPos.assign(pos.add(drift.mul(notResting).add(skitter).mul(uDtSec)));
 
       phaseBuf.element(i).assign(resolvedOrd.add(resolvedProg.clamp(float(0), float(0.9999))));
       // A stone's life ends when the FADE finishes — or if it leaves the rect.
@@ -1444,6 +1562,25 @@ export function createPrecipEngine({
       // Taper the tail so a streak fades out behind its head instead of
       // ending in a flat cut — the difference between rain and a dashed line.
       edge = edge.mul(t.mul(float(0.65)).add(float(0.35)));
+    } else if (isPellet) {
+      /**
+       * ⭐ A HARD, ROUND PELLET — ice, not a crystal.
+       *
+       * The same radial falloff a flake gets, with NONE of the angular
+       * roughness and a much tighter exponent: a hailstone is a smooth lump
+       * that catches a highlight, and the one thing it must not look like is
+       * the snow it keeps being mistaken for. `softness01` is 0.12 on the hail
+       * row, so this lands near the hard end of the same curve.
+       */
+      const d = uv().sub(float(0.5)).length().mul(float(2)).clamp(float(0), float(1));
+      const soft = float(1).sub(d);
+      edge = soft.pow(mix(float(6), float(1.6), float(SOFT))).clamp(float(0), float(1));
+      // A brighter core, off-centre — the wet highlight on a stone. Cheap, and
+      // it is most of what separates "ice" from "grey circle".
+      const hi = float(1)
+        .sub(uv().sub(vec2(0.42, 0.42)).length().mul(float(3.4)))
+        .clamp(float(0), float(1));
+      edge = edge.add(hi.pow(float(2)).mul(float(0.45))).clamp(float(0), float(1));
     } else {
       /**
        * ⭐ A ROUGH, IRREGULAR CRYSTAL — NOT A ROUND DOT.

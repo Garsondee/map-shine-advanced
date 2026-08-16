@@ -164,6 +164,84 @@ export function run(t) {
     t.ok('full warmth out-melts the heaviest snowfall', hot.meltPerHour > hot.snowGainPerHour);
   }
 
+  // ---- ⭐ A BLEND DEPOSITS FROM **EVERY** POPULATION ---------------------------
+  {
+    const half = resolveMantleStep({
+      stays: [
+        { stay: rainStay, weight: 0.5 },
+        { stay: snowStay, weight: 0.5 },
+      ],
+      precip01: 1,
+      temperature01: cold,
+      dtGameHours: 1,
+    });
+    const allSnow = resolveMantleStep({ stay: snowStay, precip01: 1, temperature01: cold, dtGameHours: 1 });
+    const allRain = resolveMantleStep({ stay: rainStay, precip01: 1, temperature01: cold, dtGameHours: 1 });
+
+    // ⚠️ THE BUG THIS REPLACED: the mantle took ONE `stay` and the subsystem
+    // handed it the HEAVIEST population, so a sleet left only slush or only
+    // water on the ground — and the error was largest at exactly 0.5, which is
+    // where the temperature band spends most of its time.
+    t.ok(
+      '⭐ a half-and-half sleet deposits BOTH slush and water',
+      half.snowGainPerHour > 0 && half.puddleGainPerHour > 0
+    );
+    t.ok('…each at half the single-species rate', Math.abs(half.snowGainPerHour - allSnow.snowGainPerHour / 2) < 1e-9);
+    t.ok('…and likewise for the puddles', Math.abs(half.puddleGainPerHour - allRain.puddleGainPerHour / 2) < 1e-9);
+    // Snow's bury term rides the same weight, or fresh sleet would fill
+    // footprints as fast as a full blizzard does.
+    t.ok('the bury rate is weighted too', Math.abs(half.trampleBuryPerHour - allSnow.trampleBuryPerHour / 2) < 1e-9);
+
+    /**
+     * ⚠️ THE **SINKS** ARE NOT WEIGHTED, and that is the load-bearing half of
+     * this design. Melt, drying and trample recovery are properties of the
+     * WEATHER and the GROUND — temperature, cloud cover, fire — not of what
+     * happens to be falling. Averaging them across populations would make a
+     * 30/70 sleet melt at 70% of the rate a thaw actually delivers: two things
+     * falling does not make the sun weaker.
+     */
+    const warmBlend = resolveMantleStep({
+      stays: [
+        { stay: rainStay, weight: 0.3 },
+        { stay: snowStay, weight: 0.7 },
+      ],
+      precip01: 1,
+      temperature01: warm,
+      dtGameHours: 1,
+    });
+    const warmSingle = resolveMantleStep({ stay: snowStay, precip01: 1, temperature01: warm, dtGameHours: 1 });
+    t.ok(
+      'melt is unweighted — two species falling does not weaken the sun',
+      warmBlend.meltPerHour === warmSingle.meltPerHour
+    );
+    t.ok('drying is unweighted for the same reason', warmBlend.dryPerHour === warmSingle.dryPerHour);
+    t.ok('fire melt is unweighted', warmBlend.fireMeltPerHour === warmSingle.fireMeltPerHour);
+
+    // The singular form must still work — every existing caller uses it, and it
+    // is simply the one-population case.
+    t.ok(
+      'the singular `stay` still behaves exactly as before',
+      allSnow.snowGainPerHour > 0 && allRain.puddleGainPerHour > 0
+    );
+    t.ok(
+      'an empty population list deposits nothing',
+      resolveMantleStep({ stays: [], precip01: 1, temperature01: cold, dtGameHours: 1 }).snowGainPerHour === 0
+    );
+    // A companion with no `stay` contributes nothing rather than throwing.
+    t.ok(
+      'a population with a null stay is skipped',
+      resolveMantleStep({
+        stays: [
+          { stay: null, weight: 1 },
+          { stay: snowStay, weight: 1 },
+        ],
+        precip01: 1,
+        temperature01: cold,
+        dtGameHours: 1,
+      }).snowGainPerHour === allSnow.snowGainPerHour
+    );
+  }
+
   // ---- puddles always dry, and the sun dries them faster ----------------------
   {
     t.ok('hot and clear dries fastest', dryPerHour(1, 0) > dryPerHour(1, 1));

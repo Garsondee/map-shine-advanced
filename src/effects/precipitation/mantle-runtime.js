@@ -475,7 +475,9 @@ export function createMantleRuntime({
      *   drives the amount, unwrapped by `gameHourDelta` — a paused game hands
      *   the same number every call, so the delta is zero and the mantle freezes.
      *   That is the integrator pattern, not a throttle.
-     * @param {object} inputs - `{stay, precip01, temperature01, cloudCover01}`.
+     * @param {object} inputs - `{stays, stay, precip01, temperature01, cloudCover01}`.
+     *   `stays` is the WEIGHTED list (a blend deposits from every population);
+     *   `stay` is the one-population form every existing caller still uses.
      */
     step(dtRealSec, todHour, inputs) {
       if (!read || !write || !renderStep) return null;

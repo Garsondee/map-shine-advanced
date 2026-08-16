@@ -1460,9 +1460,20 @@ export function createPrecipBench({ THREE, log }) {
           // ⭐ IT BRIGHTENS ONLY. An unlit corner must not make rain DARKER than
           // V2's scalar day/night model already says it is.
           evaluate('darkness-never-dims-the-rain', () => ({
-            ok: onL.meanLuma >= offL.meanLuma * 0.995,
+            /**
+             * ⚠️ AN **ABSOLUTE** FLOOR, NOT A RELATIVE ONE, and the difference
+             * matters here. The unlit region's mean luma is ~0.0014 — about a
+             * third of ONE 8-bit step — so a single pixel rounding the other way
+             * swings it by half a percent and a 0.5% relative bar fails on
+             * readback quantisation rather than on dimming. The property under
+             * test is guaranteed by construction (`max(1, …)` cannot return
+             * less than 1); what this guards is that somebody later replaces
+             * that with a plain multiply. An absolute epsilon well under one
+             * quantum catches exactly that and nothing else.
+             */
+            ok: onL.meanLuma >= offL.meanLuma - 0.0005,
             measured: { off: +offL.meanLuma.toFixed(4), on: +onL.meanLuma.toFixed(4) },
-            expected: 'the unlit side is never dimmer than with the term off',
+            expected: 'the unlit side is never dimmer than with the term off (absolute, sub-quantum epsilon)',
           })),
         ],
         inputs: { illumLit01: [0, 1] },

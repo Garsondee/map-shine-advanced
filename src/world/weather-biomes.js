@@ -144,6 +144,14 @@ export const DEFAULT_DWELL_HOURS = Object.freeze({
    * and the Almanac walking INTO a long hailstorm would be a punishing scene
    * nobody asked for. It is a passing event by construction. */
   hailstorm: Object.freeze({ min: 0.2, mean: 0.6, max: 1.5 }),
+  /** Sleet is a TRANSITION — it is what a sky does on its way between rain and
+   * snow — so it does not settle in for long. */
+  sleet: Object.freeze({ min: 0.5, mean: 1.5, max: 4 }),
+  /** ⚠️ LONG, and deliberately unlike every other row: an ash pall is not
+   * weather passing through, it is a region's condition for days. The Almanac
+   * will never walk into it (no biome lists it), so this dwell only governs a
+   * GM who chose it — and they chose it because they want it to stay. */
+  ashfall: Object.freeze({ min: 6, mean: 24, max: 72 }),
   gale: Object.freeze({ min: 1, mean: 3, max: 6 }),
   thunderstorm: Object.freeze({ min: 0.5, mean: 1.5, max: 3 }),
 });

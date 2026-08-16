@@ -77,6 +77,13 @@ const TAIL_DURATION_SEC = 300;
 const TAIL_STRENGTH = 260 / 300;
 /** A whisper of curl (§4.3) — enough that a column of drips is not a ruler. */
 const CURL_PX = 7;
+/**
+ * World px of streak per (px/s) of apparent speed — rain's own `streakPerPxS`
+ * (0.0065) scaled down, because a drip falls at 0.64× rain's speed from a few
+ * hundred px rather than from 780, so the same factor would make it a dash the
+ * length of the building it fell off.
+ */
+const STREAK_PER_PXS = 0.0034;
 
 /**
  * @param {object} deps
@@ -131,6 +138,26 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   const uWindDirDeg = uniform(float(0));
   const uWindSpeed01 = uniform(float(0));
   const uWindAirSpeed = uniform(float(2600));
+  /**
+   * ⭐ THE PERSPECTIVE PAIR — AND THEIR ABSENCE WAS THE BIGGEST DRIP BUG.
+   *
+   * ⚠️ AUTHOR, LIVE: *"they spawn and then despawn without visibly moving
+   * much… they don't appear to drop downwards."* Exactly right, and the cause is
+   * that under a TOP-DOWN camera **falling is not a Y translation**. A drop
+   * descending toward the ground moves toward the CAMERA, which reads as the
+   * M(h) magnification collapsing from its birth height to 1 — the fall runtime
+   * has done this since P1 and this engine simply never applied it. Its bodies
+   * aged, their height counted down correctly, and they sat still while doing
+   * it. A drip that does not converge is a drip that does not fall.
+   */
+  const uCamCentre = uniform(vec2(0, 0));
+  const uCamHeight = uniform(float(2000));
+  /** ⭐ *"I don't mind if the roof drip edge is a bit more fuzzy."* — how far a
+   * drip may be born from its extracted edge point, in world px. The roofline
+   * is a coarse grid's boundary; a line of drips exactly on it reads as a
+   * dotted rule, while a real eave sheds along its whole lip. */
+  const uEdgeJitterPx = uniform(float(26));
+  const uStreakScale = uniform(float(1));
   const uSizeScale = uniform(float(1));
   const uAlphaMul = uniform(float(1));
   const uRgbMul = uniform(float(1));
@@ -149,6 +176,18 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     return spawnPoints.element(idx.toInt());
   };
 
+  /** ⭐ THE FUZZY EAVE. A disc of jitter around the extracted point, so drips
+   * shed along a lip rather than from a row of dots on a coarse grid boundary. */
+  const jitterAround = (xy, entropy) => {
+    const a1 = hash11(entropy.mul(float(9.7)).add(float(3.3))).mul(float(Math.PI * 2));
+    // sqrt of the radius hash — a uniform hash would crowd the centre, which
+    // would defeat the point by re-concentrating drips on the exact texel.
+    const r = hash11(entropy.mul(float(4.1)).add(float(19.7)))
+      .sqrt()
+      .mul(uEdgeJitterPx);
+    return xy.add(vec2(cos(a1), sin(a1)).mul(r));
+  };
+
   const bodyConstants = (entropy) => {
     const brightness = hash11(entropy.mul(float(1.7))).pow(float(0.8));
     const sizePx = mix(float(SIZE_PX[0]), float(SIZE_PX[1]), hash11(entropy.mul(float(2.3)).add(float(11))));
@@ -164,7 +203,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     seed.element(i).assign(fi);
     const p = pickPoint(fi);
     const b = bodyConstants(fi);
-    position.element(i).assign(p.xy);
+    position.element(i).assign(jitterAround(p.xy, fi));
     // ⚠️ HEIGHTS STAGGERED ACROSS THE COLUMN, not all at the deck — otherwise
     // the whole roofline releases one synchronised sheet of drips that lands
     // together and leaves the eaves silent until the next. The fall staggers
@@ -197,16 +236,33 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     // Landed, or outlived its life. Both end it; the life is the backstop for a
     // drip whose deck height is large enough that it would otherwise streak.
     const done = nextH.lessThanEqual(float(0)).or(nextAge.greaterThanEqual(lifeBuf.element(i)));
-    // Bounded entropy from seed + POSITION, never the raw clock — `sin()`'s
-    // float32 precision collapses as `uTimeMs` grows all session.
+    /**
+     * ⚠️ **A POSITION-ONLY ENTROPY IS A FIXED POINT HERE**, and the author saw
+     * it: *"they spawn at very predictable spots around the sky reach perimeter
+     * and always seem to use the same exact spots."*
+     *
+     * The fall runtime derives its respawn entropy from seed + position, which
+     * is right THERE because a falling body respawns to a fresh CONTINUOUS
+     * position. A drip respawns onto one of N **discrete** roofline points — so
+     * the entropy computed at point P selects point P again, forever. Every
+     * body converges onto one eave within a few lives and the rest of the
+     * roofline goes silent.
+     *
+     * ⭐ GENERALISABLE: **bounded-by-position entropy stops being an entropy the
+     * moment position is quantised.** The fix mixes in the body's own LIFE
+     * duration, which is re-randomised on every respawn, so successive lives of
+     * one slot land on different points — while staying bounded and
+     * `sin()`-safe, unlike the raw clock the fall documents at length.
+     */
     const entropy = s
       .mul(float(0.61))
       .add(nextPos.x.mul(float(0.011)))
-      .add(nextPos.y.mul(float(0.013)));
+      .add(nextPos.y.mul(float(0.013)))
+      .add(lifeBuf.element(i).mul(float(0.0007)));
     const fresh = bodyConstants(entropy);
     const p = pickPoint(entropy);
 
-    position.element(i).assign(done.select(p.xy, nextPos));
+    position.element(i).assign(done.select(jitterAround(p.xy, entropy), nextPos));
     custom
       .element(i)
       .assign(done.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, p.z), vec4(c.x, c.y, c.z, nextH)));
@@ -251,10 +307,49 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   material.positionNode = Fn(() => {
     const i = instanceIndex;
     const c = custom.element(i);
-    // A drip is a tiny streak: taller than it is wide, along its fall.
-    const size = c.y.mul(uSizeScale);
+    const centre = position.element(i);
+
+    /**
+     * ⭐ M(h) — THE FALL, MADE VISIBLE. Same expression the fall runtime uses:
+     * a body at height h is magnified by `D / (D − h)` about the camera centre,
+     * so as h counts down to 0 the sprite converges on the ground point it is
+     * falling toward. THIS is what "dropping downwards" looks like from above,
+     * and its absence is why the drips sat still.
+     */
+    const persp = uCamHeight.div(uCamHeight.sub(c.w.min(uCamHeight.mul(float(0.82)))));
+    const drawn = uCamCentre.add(centre.sub(uCamCentre).mul(persp));
+
+    /**
+     * ⭐ THE STREAK POINTS WHERE THE DRIP IS ACTUALLY GOING.
+     *
+     * ⚠️ AUTHOR, LIVE: *"drips all currently present as stubby north/south
+     * facing lines… they are moved by the wind but don't end up pointing in the
+     * wind direction like rain does."* Both symptoms, one cause: the quad was
+     * elongated along a FIXED local axis (`local.y × 3.2`), so every drip on
+     * the map was a vertical dash no matter which way it travelled.
+     *
+     * The apparent velocity has two parts, exactly as rain's does: the
+     * horizontal drift (wind + curl), and the RADIAL term — the outward
+     * movement the M(h) collapse itself produces, which is what makes a drop
+     * read as coming down at you rather than sliding sideways.
+     */
+    const rad = uWindDirDeg.mul(float(Math.PI / 180));
+    const drift = windToward(rad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12));
+    // Outward from the camera centre, scaled by how fast the body is falling
+    // and by the magnification it currently has.
+    const radial = drawn.sub(uCamCentre).mul(persp).mul(c.z).div(uCamHeight);
+    const apparent = drift.add(radial);
+    const len = apparent.length().max(float(1e-4));
+    const dir = vec2(apparent.x.div(len), apparent.y.div(len));
+    const perp = vec2(dir.y.negate(), dir.x);
+
+    // Length grows with apparent speed, exactly like rain's streak — a drip
+    // that has just left the eave is a dot, one halfway down is a line.
+    const width = c.y.mul(uSizeScale).mul(persp);
+    const length = width.mul(float(1.6)).add(len.mul(float(STREAK_PER_PXS)).mul(uStreakScale).mul(persp));
     const local = positionGeometry.xy;
-    return vec3(position.element(i).add(vec2(local.x.mul(size), local.y.mul(size).mul(float(3.2)))), float(zDepth));
+    const offset = perp.mul(local.x.mul(width)).add(dir.mul(local.y.mul(length)));
+    return vec3(drawn.add(offset), float(zDepth));
   })();
 
   material.colorNode = Fn(() => vec3(0.72, 0.8, 0.95).mul(vDrip.y).mul(uRgbMul))();
@@ -302,6 +397,13 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
      * @param {{points: Float32Array, count: number}} edges - from
      *   `effects/precipitation/drip-edges.js#extractDripEdges`, stride 3.
      */
+    /** The view's own centre — M(h) magnifies ABOUT it, so a stale one makes
+     * every drip converge on where the camera used to be. Pushed per frame by
+     * the subsystem, exactly as the fall's is. */
+    setCamera(centreX, centreY) {
+      if (Number.isFinite(centreX) && Number.isFinite(centreY)) uCamCentre.value.set(centreX, centreY);
+    },
+
     setSpawnPoints(edges) {
       const src = edges?.points ?? null;
       const n = Math.min(maxSpawnPoints, Math.max(0, edges?.count ?? 0));
@@ -369,6 +471,9 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
 
     setTuning(t = {}) {
       if (Number.isFinite(t.dripSizeScale)) uSizeScale.value = t.dripSizeScale;
+      if (Number.isFinite(t.dripStreakScale)) uStreakScale.value = t.dripStreakScale;
+      if (Number.isFinite(t.dripEdgeJitterPx)) uEdgeJitterPx.value = Math.max(0, t.dripEdgeJitterPx);
+      if (Number.isFinite(t.cameraHeight)) uCamHeight.value = Math.max(1, t.cameraHeight);
       if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = t.windAirSpeedPxS;
     },
 

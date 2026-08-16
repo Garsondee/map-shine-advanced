@@ -60,7 +60,10 @@ export function run(t) {
 
   // ---- the closed list vs the table ------------------------------------------
   {
-    t.ok('P1 ships exactly two species', PRECIP_SPECIES_IDS.length === 2);
+    // P1 shipped two rows; P5 added `hail` (§4.4's phase machine, the species
+    // the ARENA was extended for). The count is asserted because the closed
+    // list and the table must never drift apart, not because three is a target.
+    t.ok('the closed list ships three species', PRECIP_SPECIES_IDS.length === 3);
     t.ok(
       'the closed list and the table name exactly the same rows',
       PRECIP_SPECIES_IDS.length === Object.keys(PRECIP_SPECIES).length &&
@@ -317,14 +320,14 @@ export function run(t) {
   {
     const hit = resolveSpecies('rain');
     t.ok('a built species resolves ok', hit.ok === true && hit.species === PRECIP_SPECIES.rain && hit.reason === null);
-    t.ok('isBuiltSpecies agrees', isBuiltSpecies('rain') === true && isBuiltSpecies('hail') === false);
+    t.ok('isBuiltSpecies agrees', isBuiltSpecies('rain') === true && isBuiltSpecies('sand') === false);
 
-    const planned = resolveSpecies('hail');
+    const planned = resolveSpecies('sand');
     t.ok(
       'a DESIGNED-but-unbuilt species fails with a schedule, not "unknown"',
       planned.ok === false && planned.species === null && /not built/.test(planned.reason)
     );
-    t.ok('the planned reason names its owning slice', /P5/.test(resolveSpecies('hail').reason));
+    t.ok('the planned reason names its owning slice', /P6/.test(resolveSpecies('sand').reason));
 
     const notASpecies = resolveSpecies('drizzle');
     t.ok(
@@ -345,7 +348,7 @@ export function run(t) {
     // ⚠️ THE POLARITY THAT MATTERS: never a default downpour.
     t.ok(
       '⭐ EVERY failure yields null, never a fallback species that would rain',
-      [resolveSpecies('hail'), resolveSpecies('drizzle'), resolveSpecies('ran'), resolveSpecies(undefined)].every(
+      [resolveSpecies('sand'), resolveSpecies('drizzle'), resolveSpecies('ran'), resolveSpecies(undefined)].every(
         (r) => r.species === null
       )
     );

@@ -74,7 +74,73 @@ export const PARTICLE_ATTRIBUTES = Object.freeze([
   Object.freeze({ name: 'life', type: 'float' }), // total lifespan (set at spawn)
   Object.freeze({ name: 'seed', type: 'float' }), // per-particle RNG seed, stable for life
   Object.freeze({ name: 'custom', type: 'vec4' }), // per-system packed extras
+  /**
+   * ⭐ THE PHASE SLOT (2026-08-16, author-authorised: *"I don't mind if you add
+   * more things to it — extend the arena"*).
+   *
+   * A body that changes BEHAVIOUR during its life needs somewhere to say which
+   * behaviour it is in, and `custom`'s four floats are fully spoken for in
+   * every runtime that has one (precipitation: brightness / size / speed /
+   * height). Hail is the first system to need it — §4.4's
+   * `fall → bounce(×1–2) → rest → fade` cannot be reconstructed from age
+   * alone, because the same age means different things depending on how many
+   * bounces a stone has already spent.
+   *
+   * ⚠️ IT IS **ONE FLOAT CARRYING TWO QUANTITIES BY DESIGN**, which is normally
+   * a named bug class here (`feedback_one_byte_two_quantities`) — so the split
+   * is a documented ENCODING rather than an accident: the integer part is the
+   * phase ordinal, the fraction is that phase's own progress 0..1. They are two
+   * views of ONE fact ("where in its life is this body"), not two independent
+   * facts sharing a slot, and every reader goes through `phaseOf`/`phaseProgress`
+   * rather than doing its own arithmetic.
+   *
+   * ⚠️ COST, MEASURED NOT ESTIMATED: +4 bytes per particle (**44 → 48**), i.e.
+   * 9% more arena memory for every runtime, whether it uses the slot or not.
+   * That is the honest price of a shared layout. At the default 96 MB budget
+   * the capacity moves 2.29M → 2.10M slots — still two orders of magnitude more
+   * than any effect actually reserves (the largest is snow's 20k).
+   * `BYTES_PER_PARTICLE`
+   * is DERIVED from this table, so every budget, capacity and report updated
+   * itself; nothing needed hand-editing, which is the whole reason the table is
+   * the single source.
+   *
+   * ⚠️ A runtime that never references `phase` never BINDS it, so the
+   * 8-storage-buffers-per-stage floor is untouched for the five runtimes that
+   * do not use it (the splash engine already proves this by skipping
+   * `velocity`).
+   */
+  Object.freeze({ name: 'phase', type: 'float' }), // life-stage ordinal + progress
 ]);
+
+/**
+ * ⭐ THE PHASE ENCODING, as functions rather than as a convention.
+ *
+ * `phase = ordinal + progress`, where `ordinal` is an integer life-stage and
+ * `progress` is 0..1 within it. Written here, beside the attribute, so a second
+ * system adopting phases inherits the encoding instead of inventing a second
+ * one (`feedback_shared_field_two_meanings_two_registries`).
+ *
+ * These are the CPU twins — the shader does the same two operations inline,
+ * and they exist so the arithmetic is Node-testable at all.
+ *
+ * @param {number} phase @returns {number}
+ */
+export function phaseOf(phase) {
+  const n = Number(phase);
+  return Number.isFinite(n) ? Math.floor(Math.max(0, n)) : 0;
+}
+/** @param {number} phase @returns {number} */
+export function phaseProgress(phase) {
+  const n = Number(phase);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(1, n - Math.floor(n));
+}
+/** @param {number} ordinal @param {number} progress01 @returns {number} */
+export function makePhase(ordinal, progress01) {
+  const o = Math.max(0, Math.floor(Number(ordinal) || 0));
+  const p = Math.min(0.9999, Math.max(0, Number(progress01) || 0));
+  return o + p;
+}
 
 /** Exact bytes one particle occupies across all buffers. Derived, never typed. */
 export const BYTES_PER_PARTICLE = PARTICLE_ATTRIBUTES.reduce((n, a) => n + TSL_TYPE_BYTES[a.type], 0);

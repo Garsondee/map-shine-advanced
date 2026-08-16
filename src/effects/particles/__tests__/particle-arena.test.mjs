@@ -13,6 +13,13 @@ import {
 } from '../particle-arena.js';
 
 export function run(t) {
+  // ⚠️ EVERY BUDGET BELOW IS `BYTES_PER_PARTICLE × N`, NEVER A LITERAL. These
+  // read `44 *` until 2026-08-16, when the arena gained its `phase` attribute
+  // for hail and the layout became 48 — at which point nine budgets silently
+  // bought fewer slots than their comments claimed and four assertions failed.
+  // The module's own header says "Derived, never typed" about
+  // `BYTES_PER_PARTICLE`; the SUITE was the one place still typing it.
+
   // ---- the layout is exact and frozen --------------------------------------
   {
     t.ok('PARTICLE_ATTRIBUTES is frozen', Object.isFrozen(PARTICLE_ATTRIBUTES));
@@ -20,8 +27,31 @@ export function run(t) {
       'each attribute descriptor is frozen',
       PARTICLE_ATTRIBUTES.every((a) => Object.isFrozen(a))
     );
-    // vec2+vec2+float+float+float+vec4 = 8+8+4+4+4+16 = 44.
-    t.ok(`BYTES_PER_PARTICLE is the exact sum of the layout (got ${BYTES_PER_PARTICLE})`, BYTES_PER_PARTICLE === 44);
+    /**
+     * ⚠️ THE SUM IS COMPUTED FROM THE TABLE, NOT RESTATED AS A LITERAL. This
+     * asserted `=== 44` until the arena gained its `phase` float for hail
+     * (2026-08-16) — and a hard-coded total is a SECOND declaration of the
+     * layout that can disagree with the first, which is the whole thing
+     * `BYTES_PER_PARTICLE` being derived exists to prevent. What is worth
+     * pinning is the PROPERTY (the total is exactly the sum of the parts, with
+     * no padding), not today's number.
+     */
+    const TYPE_BYTES = { float: 4, vec2: 8, vec3: 12, vec4: 16 };
+    const expected = PARTICLE_ATTRIBUTES.reduce((n, a) => n + TYPE_BYTES[a.type], 0);
+    t.ok(
+      `BYTES_PER_PARTICLE is the exact sum of the layout (got ${BYTES_PER_PARTICLE}, layout says ${expected})`,
+      BYTES_PER_PARTICLE === expected
+    );
+    // ⚠️ NO `vec3` — WebGPU pads it to 16, which would make the sum above a
+    // lie. The layout comment claims alignment-friendliness; this checks it.
+    t.ok(
+      'no attribute is a vec3 (WebGPU pads it to 16)',
+      PARTICLE_ATTRIBUTES.every((a) => a.type !== 'vec3')
+    );
+    t.ok(
+      'every attribute names a known type',
+      PARTICLE_ATTRIBUTES.every((a) => TYPE_BYTES[a.type] > 0)
+    );
   }
 
   // ---- describe: budget -> capacity, pure ----------------------------------
@@ -34,13 +64,13 @@ export function run(t) {
     );
     t.ok('describe carries the attribute layout through', d.attributes === PARTICLE_ATTRIBUTES);
 
-    const small = describeParticleArena({ budgetBytes: 44 * 100 });
+    const small = describeParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 100 });
     t.ok('a small explicit budget derives the expected capacity', small.capacity === 100);
   }
 
   // ---- reserve: contiguous, non-overlapping, first from 0 ------------------
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 1000 }); // 1000 slots
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 1000 }); // 1000 slots
     t.ok('a fresh arena starts fully available', a.available === 1000 && a.used === 0);
 
     const r1 = a.reserve(100);
@@ -55,14 +85,14 @@ export function run(t) {
 
   // ---- reserve(0) is a harmless no-op handle -------------------------------
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 10 });
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 10 });
     const z = a.reserve(0);
     t.ok('reserve(0) yields an empty handle and consumes nothing', z.capacity === 0 && a.used === 0);
   }
 
   // ---- over-budget throws LOUD, with the numbers ---------------------------
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 10 }); // only 10 slots
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 10 }); // only 10 slots
     a.reserve(8);
     t.throws('reserving past the budget throws', () => a.reserve(5), 'particle budget');
     let msg = '';
@@ -77,7 +107,7 @@ export function run(t) {
 
   // ---- release returns space and lets it be re-reserved --------------------
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 1000 });
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 1000 });
     const r = a.reserve(400);
     t.ok('used reflects the reservation', a.used === 400);
     a.release(r);
@@ -88,7 +118,7 @@ export function run(t) {
 
   // ---- first-fit fills a hole; coalescing merges neighbours ----------------
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 300 });
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 300 });
     const A = a.reserve(100); // [0,100)
     const B = a.reserve(100); // [100,200)
     const C = a.reserve(100); // [200,300)
@@ -110,7 +140,7 @@ export function run(t) {
 
   // ---- churn does not leak: everything released -> arena is whole again -----
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 500 });
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 500 });
     const handles = [];
     for (let i = 0; i < 5; i++) handles.push(a.reserve(50));
     for (const h of handles) a.release(h);
@@ -122,7 +152,7 @@ export function run(t) {
 
   // ---- a double-release is reported, not silently corrupting ----------------
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 100 });
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 100 });
     const r = a.reserve(40);
     a.release(r);
     const usedBefore = a.used;
@@ -132,7 +162,7 @@ export function run(t) {
 
   // ---- allocateBuffers is present (browser-only; not run here) --------------
   {
-    const a = new ParticleArena({ budgetBytes: 44 * 10 });
+    const a = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * 10 });
     t.ok('allocateBuffers exists as the one GPU-allocation door', typeof a.allocateBuffers === 'function');
     t.ok('buffers are null until allocated', a.buffers === null);
   }

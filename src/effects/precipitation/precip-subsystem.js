@@ -54,7 +54,7 @@ const KIND_TO_SPECIES = Object.freeze({
   rain: 'rain',
   snow: 'snow',
   sleet: null, // resolved by mix weight — see resolveActiveSpecies
-  hail: null, // P5
+  hail: 'hail', // P5 — §4.4's phase machine
   ash: null, // P6
   embers: null, // P6
 });
@@ -264,8 +264,12 @@ export function createPrecipitationSubsystem({
   }
 
   /** Advance the roofline. Cheap when there is no roofline and no tail. */
-  function stepDrips(renderer, dtRealSec, nowMs, precip01, st, weather) {
+  function stepDrips(renderer, dtRealSec, nowMs, precip01, st, weather, viewRect) {
     if (!drips) return;
+    // ⚠️ THE CAMERA CENTRE, EVERY FRAME. M(h) magnifies ABOUT it, so a stale
+    // centre makes every drip converge on where the camera used to be — the
+    // same push the fall engine already gets from `setWorldRect`.
+    if (viewRect) drips.setCamera((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
     const species = PRECIP_SPECIES.rain;
     drips.setFrame(dtRealSec, precip01, frameFor(species, weather, st, Math.max(precip01, 0.001)));
     if (!drips.hasContent) return;
@@ -415,7 +419,7 @@ export function createPrecipitationSubsystem({
       // ⚠️ LIQUID ONLY. Snow settles on a roof, it does not run off it, so the
       // tail is fed by rain and sleet and never by a blizzard.
       const liquid = (weather.precipKind ?? 'rain') !== 'snow';
-      stepDrips(renderer, dtRealSec, nowMs, liquid ? precip01 : 0, st, weather);
+      stepDrips(renderer, dtRealSec, nowMs, liquid ? precip01 : 0, st, weather, worldRect ?? st.worldRect ?? null);
 
       // ⚠️ A JS `if`, never a uniform set to zero (Effects.md Law 4). A clear
       // day must not allocate an engine, dispatch a kernel or submit a draw.

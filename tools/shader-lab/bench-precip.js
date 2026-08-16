@@ -935,7 +935,25 @@ export function createPrecipBench({ THREE, log }) {
       // for a species that has no splashes at all. A layer isolator that names
       // two of three layers is not an isolator
       // (`feedback_aggregate_cannot_name_the_source`, in my own instrument).
-      driver.set({ fall: false, arrival: true, curtain: false, skyGate: false, precip01: 0.9, windSpeed01: 0 });
+      // ⚠️ `curtainBandDepth: 0` IS PART OF THE ISOLATION, not tuning. P4 wired
+      // the squall field into the splash rate (§4.1's third factor), so a fixed
+      // probe region now sits in whichever BAND the field happens to put there
+      // — and when P4's default depth rose to 0.8 this scenario's open-sky probe
+      // landed in a lull and collapsed from 961 lit px to 39, because thinning
+      // the splashes pushes their already-faint pixels under the detector's
+      // 0.02 luma floor. A THRESHOLD CLIFF, not a linear scaling, and it made a
+      // correct system look broken. The field has its own scenario; this one is
+      // about the GATE, so it flattens the field to its identity (depth 0 = a
+      // full, even rate) and measures the one variable it names.
+      driver.set({
+        fall: false,
+        arrival: true,
+        curtain: false,
+        skyGate: false,
+        precip01: 0.9,
+        windSpeed01: 0,
+        curtainBandDepth: 0,
+      });
       const heavy = await driver.measureCoverage(40);
       const pngHeavy = await saveCanvasPng(runId, 'splash-heavy.png', driver.canvas);
 
@@ -960,7 +978,7 @@ export function createPrecipBench({ THREE, log }) {
       const snowState = driver.splashEngines.get('snow').debugState();
 
       driver.setSpecies('rain');
-      driver.set({ fall: true, precip01: 0.6, skyGate: false });
+      driver.set({ fall: true, precip01: 0.6, skyGate: false, curtainBandDepth: 0.8 });
 
       return {
         checks: [

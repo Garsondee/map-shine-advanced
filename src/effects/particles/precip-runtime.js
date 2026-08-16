@@ -166,6 +166,26 @@ const CHAOS_PER_SPEED = 0.0103;
 const REFERENCE_VIEW_SPAN_PX = 2000;
 
 /**
+ * How far downwind the convergence point may run, in camera heights.
+ *
+ * The wind offset is `vel × D / fallSpeed`, which diverges for a slow body —
+ * see its use site for the live report that produced this cap. Three camera
+ * heights is far enough that even a strongly-leaning drop keeps its lean, and
+ * near enough that the streak never degenerates into "point at the wind".
+ */
+const WIND_OFFSET_MAX_CAM_HEIGHTS = 3;
+
+/**
+ * How deeply a flake's silhouette is notched by the angular harmonics — the
+ * difference between a snowball and a crystal.
+ *
+ * ⚠️ WELL SHORT OF 1. At 0.5 a notch reaches the centre and the shape turns
+ * inside out into a star of disconnected spikes, which is a *different* cartoon
+ * rather than no cartoon. 0.3 keeps a recognisable body with a ragged rim.
+ */
+const ROUGHNESS = 0.3;
+
+/**
  * Build one precipitation engine for ONE species.
  *
  * @param {object} deps
@@ -200,7 +220,7 @@ export function createPrecipEngine({
   openSkyTexture = null,
 }) {
   const TSL = THREE.TSL;
-  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, fract, uv, mix, positionGeometry } = TSL;
+  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } = TSL;
 
   // ⚠️ FAILS OPEN TO NOTHING, LOUDLY. An unknown species must not silently
   // become rain — `precip-species.js#resolveSpecies` returns `null` on purpose
@@ -212,6 +232,13 @@ export function createPrecipEngine({
   if (!resolved.ok) log.warn(`species '${speciesId}' refused — ${resolved.reason}. This engine will draw nothing.`);
   const S = resolved.species;
   const isStreak = S ? S.body.mode === 'streak' : false;
+  /**
+   * ⭐ DOES THIS SPECIES WALK A PHASE MACHINE? (§4.4). BUILD-TIME, like every
+   * other species branch — a body never changes species mid-life, so a stone's
+   * bounce logic is compiled only into hail's own kernel and rain pays nothing.
+   */
+  const hasPhases = Boolean(S?.bounce);
+  const B = S?.bounce ?? null;
   const hasFlutter = S ? S.fall.flutter !== null : false;
   const hasSpin = S ? S.fall.spin !== null : false;
 
@@ -237,6 +264,20 @@ export function createPrecipEngine({
    * descent: `w` reaching 0 IS the landing, and is what triggers respawn.
    */
   const custom = buffers.custom;
+  /**
+   * ⭐ THE PHASE SLOT (§4.4) — `ordinal + progress`, the arena's own encoding.
+   *
+   * ORDINALS: `0` falling · `1` first pop-up · `2` second pop-up · `3` resting on
+   * the ground · `4` fading. A stone with one bounce skips 2.
+   *
+   * ⚠️ ONLY REFERENCED WHEN `hasPhases`, so rain and snow never bind this
+   * buffer and stay at 6 of the 8-per-stage floor. Hail binds 7.
+   */
+  const phaseBuf = buffers.phase;
+  const PHASE_FALL = 0;
+  const PHASE_BOUNCE_1 = 1;
+  const PHASE_REST = 3;
+  const PHASE_FADE = 4;
 
   // ── UNIFORMS ─────────────────────────────────────────────────────────────
   const uDtSec = uniform(0);
@@ -629,6 +670,7 @@ export function createPrecipEngine({
         .mul(float(1000))
     );
     age.element(i).assign(float(0));
+    if (hasPhases) phaseBuf.element(i).assign(float(PHASE_FALL));
   })().compute(capacity);
 
   // ── UPDATE KERNEL ────────────────────────────────────────────────────────
@@ -664,7 +706,9 @@ export function createPrecipEngine({
       .mul(float(0.45))
       .mul(uChaosScale)
       .clamp(float(-0.8), float(0.8));
-    const nextH = c.w.sub(speed.mul(float(1).add(vertChurn)).mul(uDtSec));
+    // `.toVar()` because the phase machine below REPLACES it for a species with
+    // life stages (a bouncing stone's height follows an arc, not the fall).
+    const nextH = c.w.sub(speed.mul(float(1).add(vertChurn)).mul(uDtSec)).toVar();
 
     // ── THE VISIBLE DRIFT (world XY) ──
     //
@@ -809,7 +853,77 @@ export function createPrecipEngine({
     const rectCentre = uRectMin.add(uRectSize.mul(float(0.5)));
     const fromCentre = nextPos.sub(rectCentre).abs();
     const escaped = fromCentre.x.greaterThan(halfSpan.x).or(fromCentre.y.greaterThan(halfSpan.y));
-    const landed = nextH.lessThanEqual(float(0)).or(escaped);
+    /**
+     * ⭐ THE PHASE MACHINE (§4.4) — hail only, build-time.
+     *
+     * `fall → bounce(×1–2) → rest → fade`, walked in the body's OWN slot so a
+     * stone is continuous through all of it. §4.4: *"sparse discrete arrivals
+     * are the one place per-body continuity matters."*
+     *
+     * ⚠️ THE POP-UP IS DRIVEN BY PHASE **PROGRESS**, NOT BY AN INTEGRATED
+     * VELOCITY. `h = peak × sin(π · p)` is an exact arc that starts at the
+     * ground, reaches `peak` at the midpoint and returns to the ground at
+     * p = 1 — so a bounce can never drift below the floor or fail to come back
+     * down, which an integrated velocity with a damped restitution absolutely
+     * can once dt varies. It also needs no second storage slot for vertical
+     * speed. The arc is the STATE; the phase is the clock.
+     *
+     * ⚠️ AND IT RE-USES M(h), which is the whole reason a bounce reads at all
+     * from directly above: the stone's magnification pops up and settles again,
+     * so it visibly leaves the ground rather than sliding. §4.4 asks for exactly
+     * that ("a damped pop-up re-using the M(h) transform, smaller each time").
+     */
+    let landed = nextH.lessThanEqual(float(0)).or(escaped);
+    if (hasPhases) {
+      const ph = phaseBuf.element(i);
+      const ord = ph.floor();
+      const prog = ph.sub(ord);
+      // How many pop-ups this stone gets, from its own stable hash.
+      const bounces = hash11(s.mul(float(6.1)).add(float(31)))
+        .mul(float(B.countRange[1] - B.countRange[0] + 1))
+        .floor()
+        .add(float(B.countRange[0]))
+        .min(float(2));
+
+      // ── FALLING ── the ordinary height integration, until it reaches 0.
+      const fallingDone = nextH.lessThanEqual(float(0));
+      // ── BOUNCING/RESTING/FADING ── progress advances at that stage's own rate.
+      const stageSec = ord
+        .lessThan(float(PHASE_REST))
+        .select(float(B.popSec), ord.equal(float(PHASE_REST)).select(float(B.restSec), float(B.fadeSec)));
+      const nextProg = prog.add(uDtSec.div(stageSec.max(float(0.01))));
+      const stageDone = nextProg.greaterThanEqual(float(1));
+
+      // The pop-up arc, damped once per bounce ordinal.
+      const peak = spawnH()
+        .mul(float(B.firstPeakFrac))
+        .mul(float(B.damping).pow(ord.sub(float(PHASE_BOUNCE_1)).max(float(0))));
+      const arcH = peak.mul(nextProg.clamp(float(0), float(1)).mul(float(Math.PI)).sin());
+
+      // Where does this stage hand off to? A stone that has used all its
+      // bounces goes to REST; REST goes to FADE; FADE ends the life.
+      const afterBounce = ord.greaterThanEqual(bounces).select(float(PHASE_REST), ord.add(float(1)));
+      const nextOrd = ord
+        .equal(float(PHASE_FALL))
+        .select(float(PHASE_BOUNCE_1), ord.lessThan(float(PHASE_REST)).select(afterBounce, ord.add(float(1))));
+
+      const isFalling = ord.equal(float(PHASE_FALL));
+      const advance = isFalling.select(fallingDone.select(float(1), float(0)), stageDone.select(float(1), float(0)));
+      const resolvedOrd = advance.greaterThan(float(0.5)).select(nextOrd, ord);
+      const resolvedProg = advance.greaterThan(float(0.5)).select(float(0), isFalling.select(float(0), nextProg));
+
+      // The height each phase dictates: falling integrates, a bounce follows
+      // its arc, rest and fade sit on the ground.
+      const phaseH = isFalling.select(
+        nextH.max(float(0)),
+        resolvedOrd.lessThan(float(PHASE_REST)).select(arcH, float(0))
+      );
+
+      phaseBuf.element(i).assign(resolvedOrd.add(resolvedProg.clamp(float(0), float(0.9999))));
+      // A stone's life ends when the FADE finishes — or if it leaves the rect.
+      landed = ord.equal(float(PHASE_FADE)).and(stageDone).or(escaped);
+      nextH.assign(phaseH);
+    }
     // Bounded entropy: seed plus the body's OWN position, never the raw
     // unbounded clock (the dot engine's fix-8 — `sin()`'s float32 precision
     // collapses at large arguments and `uTimeMs` grows all session, which
@@ -828,6 +942,9 @@ export function createPrecipEngine({
       .assign(landed.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, spawnH()), vec4(c.x, c.y, c.z, nextH)));
     const agedMs = age.element(i).add(uDtSec.mul(float(1000)));
     age.element(i).assign(landed.select(float(0), agedMs));
+    // A respawned stone starts falling again — the phase must reset with it, or
+    // it would be reborn mid-bounce at the top of the sky.
+    if (hasPhases) phaseBuf.element(i).assign(landed.select(float(PHASE_FALL), phaseBuf.element(i)));
     lifeBuf.element(i).assign(
       landed.select(
         spawnH()
@@ -1077,7 +1194,31 @@ export function createPrecipEngine({
     //  · THE TILT IS DERIVED from the drift now rather than dialled, so the
     //    streak's direction and the body's actual travel cannot disagree —
     //    they are the same quantity.
-    const windOffset = vel.mul(uCamHeight).div(fallSpeed).mul(uFallSlant01);
+    /**
+     * ⚠️ **CLAMPED, AND THE UNCLAMPED VERSION WAS A REPORTED BUG.** Author,
+     * live: *"some raindrops seem to fall a lot slower than other raindrops,
+     * unrealistically slow. These raindrops seem to be very resistant to
+     * pointing the correct direction."* Two symptoms, and this is the second's
+     * cause.
+     *
+     * The offset is `vel × D / fallSpeed` — physically right (a slow drop
+     * spends longer in the air, so the wind carries it further and its
+     * vanishing point sits further downwind), but it diverges as `fallSpeed`
+     * shrinks. The slowest drops therefore got a convergence point hundreds of
+     * screen-widths away, which makes `centre − convergence` point almost
+     * exactly along the WIND for them while every faster drop points radially.
+     * They were not resisting the correct direction so much as computing a
+     * different one.
+     *
+     * Capping the offset at a few camera-heights keeps the physical ordering
+     * (slower still leans further) and removes the runaway. A cap rather than a
+     * softer curve because the runaway is the whole problem and a curve would
+     * only move the speed at which it starts.
+     */
+    const rawWindOffset = vel.mul(uCamHeight).div(fallSpeed).mul(uFallSlant01);
+    const offsetLen = rawWindOffset.length().max(float(1e-4));
+    const cappedLen = offsetLen.min(uCamHeight.mul(float(WIND_OFFSET_MAX_CAM_HEIGHTS)));
+    const windOffset = rawWindOffset.mul(cappedLen.div(offsetLen));
     const convergence = uCamCentre.add(windOffset);
     // Pure radial about the shifted point. `uParallaxStreak01` blends between
     // the raw world drift (0) and this (1) — kept as an escape hatch for a
@@ -1195,13 +1336,47 @@ export function createPrecipEngine({
       // ending in a flat cut — the difference between rain and a dashed line.
       edge = edge.mul(t.mul(float(0.65)).add(float(0.35)));
     } else {
-      // Radial falloff — a soft round dot, which is what a flake actually is
-      // (V2's own snow sprite was an authored blur; this is that, minus the
-      // texture fetch, exactly as fire's ember does it).
-      const d = uv().sub(float(0.5)).length().mul(float(2)).clamp(float(0), float(1));
+      /**
+       * ⭐ A ROUGH, IRREGULAR CRYSTAL — NOT A ROUND DOT.
+       *
+       * ⚠️ AUTHOR: *"I don't want them to look like cartoon snow drops, but
+       * rougher more random shapes feels like a good idea."* The previous
+       * expression was a clean radial falloff, i.e. exactly a cartoon drop —
+       * every flake on the map the same circle at a different size.
+       *
+       * The fix is the SPLASH's lesson reused (P2): perturb the radius with
+       * **two coprime integer harmonics** of the angle. Integer because `atan`
+       * wraps at ±π and any other multiple leaves a hard radial seam; COPRIME
+       * (`n` and `n+1`) because a single harmonic is exactly n-fold symmetric
+       * and would produce the six-petal rosette that made the droplets
+       * archetype read as a snowflake — which is a wonderful irony here, since
+       * a real flake should be irregular, not a paper cut-out.
+       *
+       * The per-body phase and harmonic come from `brightness`, which already
+       * crosses as a varying and is already an arbitrary per-body identity.
+       * Reusing it correlates a flake's shape with its brightness; that is a
+       * correlation between two RANDOM values, which is still random-looking,
+       * and it costs no extra varying slot on a stage that has none to spare.
+       */
+      const p = uv().sub(float(0.5)).mul(float(2));
+      const theta = atan(p.y, p.x);
+      const phase = bright.mul(float(43.7));
+      // 5..8 arms, per body — a range rather than a constant, so a drift of
+      // flakes is not one crystal repeated.
+      const arms = bright.mul(float(4)).floor().add(float(5));
+      const rough = cos(theta.mul(arms).add(phase))
+        .mul(float(0.62))
+        .add(cos(theta.mul(arms.add(float(1))).add(phase.mul(float(1.7)))).mul(float(0.38)));
+      // The radius the falloff measures against, wobbled. Bounded well away
+      // from 0 so a deep notch cannot invert the shape inside out.
+      const rr = float(1).add(rough.mul(float(ROUGHNESS)));
+      const d = p
+        .length()
+        .div(rr.max(float(0.35)))
+        .clamp(float(0), float(1));
       const soft = float(1).sub(d);
-      // `softness01` picks how quickly the dot falls off: squared is a gentle
-      // cloud, the higher power a tighter pellet (which is what hail will want).
+      // `softness01` picks how quickly it falls off: squared is a gentle cloud,
+      // the higher power a tighter pellet (which is what hail wants).
       edge = soft.pow(mix(float(3), float(1.1), float(SOFT))).clamp(float(0), float(1));
     }
     // ⭐ LAW 3 lands HERE, as a plain multiply: a body over a covered texel
@@ -1417,7 +1592,13 @@ export function createPrecipEngine({
         capacity,
         liveCount: uActiveCount.value,
         visible: mesh.visible,
-        storageBuffers: 6,
+        /** ⚠️ COUNTED, NOT ASSUMED. Rain and snow bind 6; hail binds 7 because
+         * it references the arena's `phase` slot. A hard-coded 6 would have
+         * under-reported the one species that is actually near the
+         * 8-per-stage floor — exactly the reading a future "can I add a buffer?"
+         * question depends on. */
+        storageBuffers: hasPhases ? 7 : 6,
+        phases: hasPhases,
         // ⚠️ LAW 3's own status, printed rather than assumed. `false` here means
         // rain is falling everywhere including indoors — which is the honest
         // fail-open state, not a silent one.

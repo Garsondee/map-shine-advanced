@@ -70,7 +70,7 @@
  */
 import { SNOW_RATE_PER_HOUR, PUDDLE_RATE_PER_HOUR } from './mantle-model.js';
 
-export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow']);
+export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow', 'hail']);
 
 /**
  * Species ids named by `Precipitation.md` §2.2 that are NOT built yet, and the
@@ -83,7 +83,6 @@ export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow']);
  * points and blends, not future rows. See this module's header.
  */
 export const PRECIP_SPECIES_PLANNED = Object.freeze({
-  hail: 'P5 — needs the bounce phase machine',
   ash: 'P6 — needs the dust mantle channel + ember companion population',
   sand: 'P6 — mostly the impression curtain (P4), not a specimen row',
   spore: 'P6 — the magical shelf',
@@ -168,10 +167,25 @@ export const PRECIP_SPECIES = Object.freeze({
        * the collapse from ~4.5× magnification down to 1× as it falls IS the
        * "rain is coming down AT the map" read (§3.2). */
       spawnHeightPx: 780,
-      /** V2's per-drop gravity multiplier `:1450` — 0.72..1.48. Applied on
-       * top of `speedPxS` so two drops of the same base speed still separate
-       * over their lives. */
-      gravityMul: Object.freeze([0.72, 1.48]),
+      /**
+       * A per-drop nudge on top of `speedPxS`, so two drops of the same base
+       * speed still separate over their lives.
+       *
+       * ⚠️ **NARROWED FROM V2's 0.72..1.48 AFTER A LIVE REPORT**, and the
+       * reason is compounding rather than taste. Author: *"some raindrops seem
+       * to fall a lot slower than other raindrops, unrealistically slow."*
+       * `speedPxS` is already a 3.7× range (1400..5200); multiplying a second
+       * 2.06× range on top of it produced a **7.6× spread**, with the slowest
+       * drops at ~1,000 px/s — below V2's own floor, which the range was
+       * supposedly reproducing.
+       *
+       * That is the `0.0065 × 0.25` transcription trap again (memory:
+       * keyhole-precipitation-p1-built BUG 1): two harvested numbers stacked
+       * because both were written down, when only one of them was the spread.
+       * `speedPxS` is the authority on how fast rain falls; this is variety
+       * ON TOP of it, so it is now ±10%.
+       */
+      gravityMul: Object.freeze([0.9, 1.1]),
     }),
 
     body: Object.freeze({
@@ -423,6 +437,127 @@ export const PRECIP_SPECIES = Object.freeze({
      * to zero (Effects.md Law 4). Rain streaks stay legible small, so this
      * sits low. */
     zoomSleepPxPerBody: 0.6,
+  }),
+
+  /**
+   * ⭐ HAIL (P5, §4.4) — the species the ARENA was extended for.
+   *
+   * §4.4: *"Sparse discrete arrivals are the one place per-body continuity
+   * matters: a hailstone must visibly BOUNCE."* Every other species is a
+   * statistical population where no individual is followed; a hailstone is
+   * followed, through `fall → bounce(×1–2) → rest → fade`, in its own slot.
+   */
+  hail: Object.freeze({
+    id: 'hail',
+    label: 'Hail',
+    phase: 'solid',
+
+    fall: Object.freeze({
+      /** The fastest thing the table sends — mass beats drag. */
+      speedPxS: Object.freeze([4200, 7400]),
+      /** ⭐ NEAR-BALLISTIC (§2.2's `~0.1`). A hailstone is the one thing the
+       * wind barely touches, which is most of why it reads as heavy: the
+       * whole sky leans and the hail comes straight down through it. */
+      windCarry01: 0.1,
+      flutter: null,
+      spin: null,
+      /** Lower than rain's: hail arrives, it does not drift in. A shorter
+       * M(h) budget makes the approach fast and hard. */
+      spawnHeightPx: 620,
+      gravityMul: Object.freeze([0.95, 1.08]),
+    }),
+
+    body: Object.freeze({
+      /** A hard pellet, not a streak and not a soft flake — `mote` takes the
+       * radial falloff with the TIGHT exponent (`softness01` low). */
+      mode: 'mote',
+      sizePx: Object.freeze([3.4, 7.2]),
+      /** Barely stretched: a stone is a stone at any speed. Not zero, so a
+       * full-speed descent still reads as motion rather than as a hovering
+       * dot. */
+      streakPerPxS: 0.0006,
+      headRgba: Object.freeze([1.0, 1.0, 1.0, 1.0]),
+      tailRgba: Object.freeze([0.86, 0.9, 0.96, 0.9]),
+      brightnessSkewExp: 0.6,
+      emissive01: 0,
+      /** HARD-edged. This is the low end of the softness scale the flake
+       * branch's exponent already spans. */
+      softness01: 0.12,
+    }),
+
+    respond: Object.freeze({
+      /** Even sparser than drizzle at the bottom — a few stones, then many.
+       * Hail does not arrive as a light even scatter. */
+      count: Object.freeze({ kind: 'pow', exp: 2.4, from: 0, to: 1 }),
+      length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
+      speed: Object.freeze({ kind: 'linear', from: 0.9, to: 1.15 }),
+      /** Hail does not grey the air — it is discrete by nature, and a veil of
+       * it would be exactly the impression tier lying about what is falling. */
+      veil: Object.freeze({ kind: 'threshold', at: 0.95, from: 0, to: 0.25 }),
+    }),
+
+    /** ⭐ §4.4's PHASE MACHINE, as data. The runtime reads these; the ordinals
+     * themselves live in `precip-runtime.js` beside the kernel that walks
+     * them. */
+    bounce: Object.freeze({
+      /** 1–2 visible pop-ups, per stone, chosen by its own hash. */
+      countRange: Object.freeze([1, 2]),
+      /** How high the first pop-up reaches, as a fraction of the spawn
+       * height. Small: a bounce is a hop, not a second fall. */
+      firstPeakFrac: 0.085,
+      /** …and how much of that the NEXT one keeps. Damped, §4.4's "smaller
+       * each time". */
+      damping: 0.45,
+      /** Seconds per pop-up. Fast — a slow bounce reads as a balloon. */
+      popSec: 0.34,
+      /** ⭐ §4.4: *"a resting pellet fading over ~10 s"*. THE detail that makes
+       * hail feel like an event rather than an effect: the ground is briefly
+       * covered in stones that are still there when you look back. */
+      restSec: 9,
+      fadeSec: 1.6,
+    }),
+
+    arrive: Object.freeze({
+      /** ⚠️ NOT `splash`. A hailstone bounces; it does not throw water. The
+       * splash engine reads this discriminator and builds nothing. */
+      kind: 'bounce',
+      smearWithWind: false,
+    }),
+
+    stay: Object.freeze({
+      /** §2.2: *"brief white speckle, melts fast above freezing"*. It feeds
+       * the SNOW channel because a scatter of ice is what that channel
+       * renders — a third channel for "ice" would be two names for one blend
+       * op. */
+      channel: 'snow',
+      /** Far slower than snowfall: hail bounces and scatters, it does not
+       * blanket. */
+      ratePerHour: 0.12,
+      puddleRatePerHour: 0.1,
+      meltBy: Object.freeze({ temperature: true, fire: true }),
+      surface: Object.freeze({
+        tint: Object.freeze([0.95, 0.97, 1.0]),
+        sparkle01: 0.8,
+        roughnessDelta: 0.15,
+      }),
+    }),
+
+    light: Object.freeze({
+      dayAlphaMul: 1.62,
+      dayRgbMul: 0.5,
+      nightAlphaMul: 0.34,
+      nightRgbMul: 0.24,
+      flashAlphaMul: 6,
+      flashRgbMul: 4,
+    }),
+
+    /** Far fewer bodies than rain — hail is sparse and each stone is followed
+     * through four life stages, so a slot is occupied for ~12 s rather than
+     * ~0.2 s. Capacity is population × dwell, and the dwell is enormous here. */
+    capacity: 4000,
+    /** Pellets are the biggest bodies in the table, so hail stays legible
+     * furthest out. */
+    zoomSleepPxPerBody: 1.6,
   }),
 
   snow: Object.freeze({

@@ -1257,6 +1257,30 @@ storm flash) as authored content.
       `temperature01` as those axes' first real consumers. Closes the rain/snow, mist, and
       ash lines below as it lands, plus Pillar 12's weather-shaped archetype rows
       (WeatherParticles, AshCloud/AshDisturbance, WaterSplashes droplets).
+      · P1/P7 THE FALL — ⭐ **AUTHOR-CONFIRMED LIVE** 2026-08-16 (`2df3c40`..`87f0176`).
+        Rain and snow fall on the bench Mansion, gated by real sky reach (*"I can confirm that
+        rain falls where it should"*), driven by real wind, clipped to the scene, with the
+        astrolabe's SNOW button producing snow. `effects/precipitation/` (species table as data
+        rows, subsystem) + `effects/particles/precip-runtime.js` (the 4th runtime, 6 of the 8
+        guaranteed storage buffers) + `surface.precipitation` as a live pass between
+        surface.particles and vision.gate — both neighbours load-bearing (§3.5: in FRONT of the
+        world including roofs, BEHIND the vision gate so rain never leaks into unexplored fog).
+        `precip01`/`temperature01` joined WEATHER_AXES and all 13 archetypes carry §3.2's precip
+        column, so a shelf click rains. 10,225 assertions; `tools/shader-lab` bench `precip` with
+        5 scenarios incl. LAW 3 measuring 0 rain inside a test building.
+        ⚠️ THE LOOK TOOK NINE ROUNDS OF THE AUTHOR'S EYES, and every fix was structural rather
+        than tuned — the pattern is the finding. Named in memory as
+        `feedback_constant_term_summed_with_positional_term`: a CONSTANT term summed with one
+        that SCALES WITH POSITION cannot be balanced by a weight (one owns the centre, the other
+        the edges, garbage in the ring between), and *"even the mildest use looks wrong"* is the
+        tell that a fault is structural, not a magnitude. Also caught live and invisible to
+        10k green assertions: a TDZ crash that dropped the whole renderer to Foundry's fallback,
+        a hand-maintained env-snapshot allow-list that silently ate `precipKind` (snow could
+        never appear), a wind compass that was a ROTATION error where I twice reached for a sign
+        flip, and horizontal motion derived from FALL speed (a flake crawled at 51 px/s in a gale
+        while rain managed 1072 — exactly inverted).
+        ⚠️ REMAINING IN P1's own scope: the §3.1 height comparison (a drop above a bridge deck
+        should still render) needs the cover-HEIGHT field baked as a second texture.
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

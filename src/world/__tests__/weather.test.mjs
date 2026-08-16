@@ -276,9 +276,9 @@ export function run(t) {
     mgr.setTargets({ cloudCover01: 1 });
     t.ok('re-setting the SAME target is not a change', mgr.read().version === v1);
 
-    mgr.setPreset('overcast');
-    t.ok('the preset label bumps it', mgr.read().version === v1 + 1);
-    t.ok('...and is carried through to the snapshot', mgr.toSnapshotWeather().preset === 'overcast');
+    mgr.applyArchetype('overcast');
+    t.ok('applying an archetype bumps it', mgr.read().version === v1 + 1);
+    t.ok('...and the label reaches the snapshot', mgr.toSnapshotWeather().preset === 'overcast');
     t.ok('ownerVersion mirrors it', mgr.toSnapshotWeather().ownerVersion === mgr.read().version);
   }
 

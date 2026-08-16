@@ -26,13 +26,26 @@ export { resolveSky, applySkyEdit, normalizeSky, DEFAULT_SKY } from './sky-setti
 export {
   createWeatherManager,
   easeToward,
+  tauForDuration,
   clampAxis,
   WEATHER_MODES,
   WEATHER_AXES,
   WEATHER_AXIS_NAMES,
   TRANSITION_SPEEDS,
   TRANSITION_SPEED_NAMES,
+  DEFAULT_PRESET,
 } from './weather.js';
+// THE ARCHETYPE TABLE (slice 2) — the astrolabe's shelf renders straight from
+// this, so the row order, icons and blurbs are one edit here rather than two.
+export {
+  WEATHER_ARCHETYPES,
+  WEATHER_ARCHETYPE_IDS,
+  DEFAULT_ARCHETYPE_ID,
+  CUSTOM_PRESET,
+  resolveArchetype,
+  isApplicableArchetype,
+  matchArchetype,
+} from './weather-data.js';
 // THE WIND HANDLE (Wind.md §5.1) — the ONE door to the field for everything
 // outside world/. `sampleWind` itself is deliberately NOT re-exported here any
 // more: it needs five hand-assembled inputs, and hand-assembling them is the

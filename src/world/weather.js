@@ -116,6 +116,8 @@
  * @module world/weather
  */
 
+import { resolveArchetype, matchArchetype } from './weather-data.js';
+
 /**
  * The two authority modes. A CLOSED LIST — an unknown mode string falls back to
  * `director` rather than producing a fourth, undocumented behaviour
@@ -248,8 +250,10 @@ export const WEATHER_AXIS_NAMES = Object.freeze(Object.keys(WEATHER_AXES));
  *
  * ⚠️ LAW 2: this is a LABEL OF INTENT for the UI and for diagnostics. No
  * shader, effect or handle may branch on it — they read axes, which are numbers
- * that can also be 0.3. Slice 2's archetype shelf sets it; slice 1 only carries
- * it so the field has one home rather than two.
+ * that can also be 0.3.
+ *
+ * ⚠️ It is DERIVED, never stored independently (slice 2). See the note where
+ * `setPreset` used to be.
  */
 export const DEFAULT_PRESET = 'clear';
 
@@ -262,18 +266,15 @@ export const DEFAULT_PRESET = 'clear';
  * @param {object} [options.initial] - starting axis values; each falls back
  *   INDEPENDENTLY to its own default, so one bad stored field cannot discard a
  *   scene's whole authored sky (`world/sky-settings.js#normalizeSky`'s rule).
- * @param {string} [options.preset] - starting archetype label.
+ *
+ *   ⚠️ There is no `preset` option, deliberately: the label is derived from
+ *   these axes, so restoring a persisted sky restores its NAME for free and
+ *   there is no second stored field that could contradict the first.
  * @returns {object} the manager.
  */
-export function createWeatherManager({
-  mode = 'director',
-  transitionSpeed = 'brisk',
-  initial = null,
-  preset = DEFAULT_PRESET,
-} = {}) {
+export function createWeatherManager({ mode = 'director', transitionSpeed = 'brisk', initial = null } = {}) {
   let currentMode = normalizeMode(mode);
   let speedName = normalizeSpeed(transitionSpeed);
-  let currentPreset = normalizePreset(preset);
 
   /** Where each axis is HEADED (the GM's hand, or slice 3's walk). */
   const targets = {};
@@ -285,6 +286,9 @@ export function createWeatherManager({
     targets[name] = v;
     state[name] = v;
   }
+
+  /** The archetype these axes sit on, derived — see the `setPreset` note. */
+  let currentPreset = matchArchetype(targets);
 
   /**
    * Bumped on CONFIGURATION changes (a target moved, the mode or speed changed,
@@ -379,8 +383,54 @@ export function createWeatherManager({
           applied.push(key);
         }
       }
-      if (applied.length > 0) version++;
-      return Object.freeze({ applied, rejected, version });
+      if (applied.length > 0) {
+        // ⚠️ THE LABEL IS DERIVED, NEVER REMEMBERED. A hand edit that moves the
+        // sky off its named row must stop calling it that row — otherwise a
+        // scene sits at cover 0.2 still claiming to be `overcast`, the shelf
+        // lights the wrong button, and the stored label and the stored axes are
+        // two authorities for one fact (`feedback_shared_field_two_meanings_two_registries`,
+        // in miniature). Recomputing from TARGETS is cheap and cannot drift.
+        currentPreset = matchArchetype(targets);
+        version++;
+      }
+      return Object.freeze({ applied, rejected, version, preset: currentPreset });
+    },
+
+    /**
+     * Apply a named sky (docs/planning/Weather-Manager.md §3.2) — the astrolabe
+     * shelf's one gesture, and slice 3's walk will use the identical call.
+     *
+     * Sets every axis the row declares AND the label, together, so the two can
+     * never disagree. Fails OPEN to `clear` on an unknown id and reports it: a
+     * typo must not storm-lock a scene, but it must not be silent either.
+     *
+     * @param {string} id
+     * @param {object} [options]
+     * @param {boolean} [options.immediate] - land it now instead of easing
+     *   (scene load). Same argument `jumpTo` makes for the hour.
+     * @returns {Readonly<{ok: boolean, preset: string, reason: string|null, version: number}>}
+     */
+    applyArchetype(id, { immediate = false } = {}) {
+      const res = resolveArchetype(id);
+      const axes = res.archetype.axes;
+      if (immediate) {
+        for (const [key, raw] of Object.entries(axes)) {
+          if (!Object.hasOwn(WEATHER_AXES, key)) continue;
+          const next = clampAxis(key, raw);
+          targets[key] = next;
+          state[key] = next;
+        }
+      } else {
+        for (const [key, raw] of Object.entries(axes)) {
+          if (!Object.hasOwn(WEATHER_AXES, key)) continue;
+          targets[key] = clampAxis(key, raw);
+        }
+      }
+      // Derived from the targets just written, exactly like `setTargets` — one
+      // rule for what the label means, not two.
+      currentPreset = matchArchetype(targets);
+      version++;
+      return Object.freeze({ ok: res.ok, preset: currentPreset, reason: res.reason, version });
     },
 
     /**
@@ -404,7 +454,10 @@ export function createWeatherManager({
         targets[key] = next;
         state[key] = next;
       }
-      if (touched) version++;
+      if (touched) {
+        currentPreset = matchArchetype(targets);
+        version++;
+      }
       return read();
     },
 
@@ -435,20 +488,13 @@ export function createWeatherManager({
       return speedName;
     },
 
-    /**
-     * Set the archetype LABEL. Carries intent for the UI; nothing renders from
-     * it (LAW 2). Slice 2's shelf sets this alongside the axes it applies.
-     * @param {string} name
-     * @returns {string} the label in force.
-     */
-    setPreset(name) {
-      const next = normalizePreset(name);
-      if (next !== currentPreset) {
-        currentPreset = next;
-        version++;
-      }
-      return currentPreset;
-    },
+    // ⚠️ THERE IS DELIBERATELY NO `setPreset`. Slice 1 had one; slice 2 deleted
+    // it the moment archetypes became real. The label is DERIVED from where the
+    // axes are (`matchArchetype`), so a setter could only ever be used to make
+    // it lie — to claim `overcast` over a sky sitting at cover 0.2. Removing
+    // the setter makes that state unrepresentable rather than merely
+    // discouraged, which is the V2 autopsy's own prescription: make the wrong
+    // move unavailable.
 
     /**
      * The manager's whole state, frozen — what the snapshot and the astrolabe
@@ -567,8 +613,7 @@ function normalizeSpeed(s) {
   return Object.hasOwn(TRANSITION_SPEEDS, s) ? s : 'brisk';
 }
 
-/** @param {*} name @returns {string} */
-function normalizePreset(name) {
-  const s = typeof name === 'string' ? name.trim() : '';
-  return s.length > 0 ? s : DEFAULT_PRESET;
-}
+// (`normalizePreset` lived here in slice 1 and was deleted in slice 2 along with
+// `setPreset` — with the label derived from the axes there is no longer any
+// path by which an arbitrary string reaches it, so a normaliser for one would
+// be an API with no caller.)

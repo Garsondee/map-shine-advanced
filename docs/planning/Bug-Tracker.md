@@ -52,6 +52,8 @@ building on any of this.
 | 19 | Painted `_Fire` region doesn't register on First Floor even with visible white paint | fire / mask extraction | `OPEN` (root cause) — workaround `BUILT`, live-tested |
 | 20 | First Floor runs at ~half Ground floor's framerate — `geometry.depthDraw`/`geometry.earlyZPrepass` cost ~10x more there | depth authority / early-Z | `BUILT (verified engaged)` 2026-08-15 — split live on the author's machine, both zones ~4-5× cheaper; upper-floor gap persists from a DIFFERENT cause (Reckoning F-R0.1.1) |
 | **21** | **Foundry re-renders the whole map every frame for a consumer that usually isn't running — the upper floor's real cost (27 fps → 120 fps when suppressed)** | interface seam / fog / perf | `BUILT (unverified)` 2026-08-15 — third lever + MSA-owned explored-fog wash, on by default, no flag |
+| **22** | **Water renders above things that should be masking it, worse on upper floors — no depth-authority participation, single-floor bake** | water / depth authority | `BUILT (unverified)` 2026-08-15 — Node suite + live smoke-test green; no `_Water` mask on the bench map to confirm the occlusion itself |
+| **23** | **Fire lights were never wall-clipped at all; candle/lightning/some real-light wall-clip caches never invalidated on a live wall edit** | lighting / point lights / walls | `BUILT (unverified)` 2026-08-15 — Node suite green; no live wall-edit repro yet |
 
 ---
 
@@ -2138,4 +2140,191 @@ frame's dominant cost on either floor.
 author confirms the look, and it does NOT close the upper-floor performance
 problem: the same pair showed ~83% of the upper-floor frame falling outside
 every measured zone, which is now the campaign's lead (Reckoning F-R0.1.1).
+
+---
+
+## 22. Water renders above things that should be masking it, worse on upper floors
+
+**Status:** `BUILT (unverified)` · **Found:** 2026-08-15 (author, live report) ·
+**Docs:** `src/effects/water/water-render.js` header, `keyhole-depth-authority-design`
+
+### Symptom
+
+Author, live: "The water effect seems to be completely unaware of the depth
+authority or there are some very serious mistakes in how it works with
+layering. It's relatively okay (but not perfect) on the ground floor but when
+I move up floors I see water rendering above things that should be masking it."
+
+### Root cause — confirmed by reading the current code, not inferred
+
+Two bugs, both real, both predating the depth-authority lock-in
+(`keyhole-depth-authority-sole-system-decision`, 2026-08-04) and both already
+fixed for OTHER effects but never ported to water:
+
+1. **Paint-order-only occlusion.** `water-render.js`'s own header ("THERE IS
+   NO `buf:scene.attr` READ HERE") and `water-surface-subsystem.js`'s own
+   header ("RENDER ORDER 0.5... index 0 of the sorted list [is] always the
+   floor background") both assumed water's resolved floor is always the
+   LOWEST floor in whatever multi-floor composite the current frame draws —
+   true only on a single floor, false the moment a lower floor is ALSO
+   composited (any multi-floor scene, viewed from anywhere but the single
+   lowest floor). Water predates the depth authority (built 2026-07-26 to
+   2026-08-01); specular and window hit the identical symptom on this same
+   system and were migrated onto `buf:scene.depth` months ago — water never
+   was.
+2. **Single-floor bake.** `waterBody.maybeBake`/`waterSurface.sync` were
+   called with `view.floorIndex` alone — the exact bug pattern already fixed
+   for sun shadows (2026-08-02) and window light (2026-08-09), and explicitly
+   named as an unconfirmed suspect for water in
+   `feedback_single_floor_bake_vs_multi_floor_render` before this session.
+
+### Fix (mirrors window light's 2026-08-09 fix almost exactly — same two bugs, same effect shape)
+
+- `getWaterBackgroundItemId(floorIndex)` seam (`water-seams.js`), byte-for-byte
+  `getSpecularBackgroundItemId`/`getWindowBackgroundItemId`'s own shape.
+- `water-render.js`: `step(uExpectedDepth, depthHere)` against
+  `buf:scene.depth`, gating BOTH tier-0 meshes toward their own blend's
+  neutral element (white for the multiply mesh, zero for the additive one)
+  wherever something already ranks above water's own floor.
+- `water-body-subsystem.js`/`water-surface-subsystem.js`: one instance PER
+  REAL FLOOR now (`waterBodiesByFloor`/`waterSurfacesByFloor` in
+  `vt-pan-viewer.js`), lazily created, pruned when a floor drops from the
+  scene's own floor list — mirrors `windowSurfacesByFloor` exactly.
+- **One deliberate divergence from specular/window:** `resolveExpectedDepth`
+  returns `null` (not `0`) for "unresolved", and the mesh's own visibility is
+  gated on that — because water's meshes live in the shared main `scene` and
+  draw unconditionally every frame, with no per-floor render call a loop can
+  skip the way window's own frame-loop does. Copying window's fail-open-to-0
+  posture verbatim would have reproduced window's own THIRD live bug (an
+  unresolved floor's content broadcasting across the whole screen).
+
+### Proof
+
+`npm run verify` green: 9310 assertions (was 9295; +15 new, covering the
+depth gate's construction at every tier and the unwired-caller paths in
+`water-render.test.mjs`), structure rules unchanged (29 rules, 9 ratcheted).
+Live-smoke-tested via `npx playwright test tests/playwright/msa-look.spec.js`
+against the real Foundry+Chrome+RTX-3070 harness: scene renders correctly,
+MSA active, 61fps steady in the live HUD (consistent with the project's own
+67fps calibration baseline), no water-related console errors among the run's
+37 (all four tile-decode failures and all 33 "404" resources are pre-existing
+content issues, unrelated to this change — none reference water, depth
+authority, or any file this fix touched).
+
+**Not yet done:** the bench mansion map (`FoundryVTT`'s `msa-bench-world`) has
+no authored `_Water` mask at all, so the cross-floor MASKING fix itself — the
+actual reported symptom — has not been seen with real water content, only
+proven not to crash or regress an ordinary scene. Needs the author's own eyes
+on their real multi-floor water scene before LIVE.
+
+### Fixed when
+
+The author looks at a real multi-floor scene with water and confirms upper
+floors correctly occlude water the same way the ground floor already does.
 This bug's mechanism is discharged; the remaining gap is a different animal.
+
+## 23. Fire lights were never wall-clipped at all; three wall-clip caches never invalidated on a live wall edit
+
+**Status:** `BUILT (unverified)` · **Found:** 2026-08-15 (author asked for a
+careful audit of light-vs-wall occlusion, specifically flagging `_Fire`/
+`_Candle`) · **Docs:** `src/effects/lighting/point-light-pool.js` header,
+`src/effects/fire/fire-geometry.js` header
+
+### Symptom
+
+Author's own framing: *"I think it's causing issues where lights aren't being
+occluded by walls if that same light also touches a transparent window...
+Be aware of `_Fire` and `_Candle` effects that could also be having these
+issues."* No specific live screenshot yet — this was found by reading the
+current wall/light pipeline end to end, not from a reported repro.
+
+### Root cause — confirmed by reading the current code, not inferred
+
+The aperture-gobo window-pattern effect itself was checked first (it's the
+obvious "light + window" suspect, with 19 prior rounds of bug history) and is
+clean: since round 10 (`keyhole-aperture-gobo`) it multiplies directly into
+each light's own MAX-blended falloff, mathematically bounded between "no
+effect" and "this light's own ambient floor" — it cannot brighten past what
+the base, already wall-clipped polygon produced, so it cannot leak light
+through a solid wall by construction.
+
+The real bugs are upstream of that, in how each light TYPE gets its
+wall-clipped shape in the first place:
+
+1. **Fire lights were never wall-clipped, ever, unconditionally.**
+   `fire-geometry.js#buildFireLightSources` builds `shapePoints` from
+   `fireCirclePolygon` — a bare circle, position+radius only. Its own header
+   claimed a fire light "inherits... wall clipping... for free" from the
+   shared point-light pool, matching candle/lightning's shape exactly — true
+   of every OTHER field, false of this one: `point-light-pool.js#update()`
+   had an explicit wall-clip loop (`computeCandleWallClippedShape` +
+   `candleWallClipCache`) for `candleLights` and an equivalent one for
+   `lightningLights`, but `fireLights` were pushed straight into the shared
+   `lights` array with no clip step at all. Any fire near or inside a
+   building bled its light through every surrounding wall — not an edge
+   case, the unconditional default.
+2. **Three wall-clip SHAPE caches never invalidated on a real wall edit.**
+   `candleWallClipCache`/`lightningWallClipCache` (`point-light-pool.js`) and
+   `regularLightWallClipCache` (populated via `foundry/scene-lights.js#
+   wallClipCacheEntryMatches`, used whenever Foundry's own darkness gate
+   disagrees with MSA's model — routine in Aesthetic mode, the default) were
+   each keyed on the LIGHT's own floor/radius/position only. None of those
+   fields describe the WALLS. A candle, lightning strike, or such a real
+   light that never moved kept its wall-clipped polygon from BEFORE a nearby
+   wall was added, removed, or reconfigured (e.g. turned into or out of a
+   `light:PROXIMITY` window) for the rest of the session. The fix for this
+   already existed in the same file for a DIFFERENT cache —
+   `apertureSegCache` (the aperture-gobo wall-segment list) was correctly
+   keyed on `(floorId, wallVersion)` via a `getApertureWallVersion()` getter
+   boot.js bumps on every `createWall`/`updateWall`/`deleteWall` — it was
+   simply never threaded into the three shape caches that needed it too.
+
+### Fix
+
+- **`fire-geometry.js`/`point-light-pool.js`:** new `fireWallClipCache`, and
+  a wall-clip loop for `fireLights` mirroring the candle loop exactly (same
+  `computeCandleWallClippedShape` call, same `(floorId, radius)` cache key —
+  fire's own light baseline is documented as frame-stable like candle's,
+  never lightning's jittering visual radius), plus eviction against fire's
+  own live `sourceId` set (needed because a fire cluster's id is derived from
+  the sorted set of fire sources merged into it, which can change frame to
+  frame as fires flicker across a clustering boundary — candle's cache has no
+  such churn and was left without eviction, unchanged).
+- **`boot.js`/`vt-pan-viewer.js`/`point-light-pool.js`:** renamed
+  `apertureWallVersion`/`getApertureWallVersion` → `wallStructureVersion`/
+  `getWallStructureVersion` — the old name became a lie the moment it started
+  gating caches that have nothing to do with apertures specifically.
+- **`point-light-pool.js#update()`:** a new `lastSeenWallStructureVersion`
+  check, once per frame, before anything reads from any of the four shape
+  caches — if the wall-structure version changed since the last frame,
+  `candleWallClipCache`/`lightningWallClipCache`/`fireWallClipCache`/
+  `regularLightWallClipCache` are all cleared wholesale, so every active
+  light recomputes its true wall-clipped polygon against the walls as they
+  exist now. Walls change on editing cadence, not frame cadence (the same
+  reasoning `apertureSegCache`'s own gate already relied on), so this costs
+  nothing in the steady state.
+- **`diag/cache-report.js`:** a `fire` row added to `POINT_LIGHT_WALL_CLIP_SUB`
+  (owner `fire`) so the new cache's hit/miss/eviction counters actually land
+  in the perf report rather than existing only as an unread getter.
+
+### Proof
+
+`npm run verify` green: lint clean (no new warnings), format clean on every
+edited file, `verify:structure` 29 rules pass (9 ratcheted), whole-repo Node
+suite 9497 assertions passed / 0 failed (22 suites). A new `fire` case was
+added to `cache-report.test.mjs`'s existing `pointLightWallClip` fan-out test.
+
+**Not yet done:** this module's own `update()`/`createLightEntry` orchestrate
+real THREE meshes and have never been Node-tested directly (documented in
+`point-light-pool.test.mjs`'s own header as a deliberate, viewer-adjacent
+"verified live, not in Node" boundary) — nothing above proves the fix LOOKS
+right on a real scene. No live repro exists yet either, since this was found
+by audit rather than a reported symptom.
+
+### Fixed when
+
+The author places a fire and a candle near/inside a building on a real scene
+and confirms neither bleeds light through a solid wall, then edits a wall
+near an already-placed, unmoved candle/fire/light (e.g. adds a new wall, or
+flips an existing wall's Light sense to/from Proximity) and confirms the
+light's occlusion updates without needing to move or resize it.

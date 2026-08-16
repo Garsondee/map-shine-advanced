@@ -2722,3 +2722,123 @@ the author's own LIVE verdict** — built, verified by `npm run verify`, and mea
 this worker; the two-word doctrine still applies. Recommend a fresh machine/browser restart before
 trusting any further WHOLE-FRAME number from this session — the zone-level numbers don't need one,
 the frame-level ones do.
+
+---
+
+**P-012 — Sharpening (Albedo Clarity) has no task in this plan: given a real UI, a real disable
+switch, and accurate cost tracking, on the author's own direct instruction.** Filed by Claude
+Sonnet 5, 2026-08-15, acting as a worker under the Covenant (a worker may not add plan tasks).
+
+Author directive, this session: the CAS zoom-out sharpen was console-only, possibly visually
+misaligned, and untracked in `perf-run-full`. Asked for a Make-panel tab, an attractive-but-smooth
+look, and accurate cost tracking. Proceeded under "the author's word overrides the queue" — no
+existing Book I/II task named this effect.
+
+*What was built and proven:*
+- **Extracted `vt/albedo-clarity.js`** out of `vt-pan-viewer.js` (schema + state + the two
+  node-building functions, now exported) — the shader lab needs to import the real functions
+  directly, and importing all of `vt-pan-viewer.js` risked pulling in Foundry-coupled transitive
+  imports a standalone lab page has no business loading. `shouldUseFullAlbedoClarity()` (genuinely
+  Foundry-settings-coupled) stayed in `vt-pan-viewer.js` on purpose.
+- **Diagnosed the "too harsh/ringing" report with real instruments, not guesses.** Built
+  `tools/shader-lab/bench-albedo-clarity.js` (3 scenarios, real BC1 encoder, real GPU). The leading
+  hypothesis (CAS amplifying BC1 quantization noise in flat regions) measured out **negligible**
+  (~1.01–1.03× on real hardware) — a real, kept negative result, not silently discarded. Climbed to
+  the real harness next (`tests/playwright-artifacts/look/run-albedo-clarity-look-test.mjs`, real
+  bench Mansion, on/off/high-sharpness captures at two zoom levels) and found the REAL mechanism by
+  eye: at sharpness 0.4, every edge in the scene shows dramatic rainbow fringing. Traced to source:
+  `buildAlbedoClarityNode`'s ringing guard (`amp`/`w`) is computed as `vec3` — PER CHANNEL — so R/G/B
+  each get an independently-computed sharpen weight; confirmed numerically in the lab on a real
+  coloured edge (R/G/B changed by −43%/−83%/−53% at the same boundary texel at the shipped default).
+  Two candidate luma-locked fixes were tried and did NOT cleanly resolve the divergence in testing
+  (the gamma-2.0 round trip complicates a uniform luma delta) — **left the algorithm UNCHANGED**
+  rather than ship an unverified fix (`feedback_defensive_fix_needs_same_proof_as_bug`). The finding
+  is preserved as a real, re-runnable regression scenario
+  (`chromatic-fringing-on-a-coloured-edge`, deliberately reporting `fail` today, same convention
+  `bench-floor-lighting.js`'s own "MUST FAIL, TODAY" scenario uses) for whoever builds the real fix.
+- **`ALBEDO_CLARITY_PARAMS`** (6 knobs: sharpness/gateLo/gateHi/farLo/farHi/farFloor) + a real
+  "Sharpening" card in the Make (Workshop) panel (`boot.js`), following Wind's *mechanics* (a direct
+  get/set pair, no `effectRegistry`) with Grade's *substance* (a real schema + a real enable
+  toggle) — deliberately NOT promoted into the full effect-registry/manifest/cascade system, a
+  decision independently reached by two research passes and then CONFIRMED by
+  `params/no-dead-controls`/`perf-zones.test.mjs`'s own "every EFFECT_ZONING key is a registered
+  effect id" check (tried adding one, got a real, correct test failure, removed it — documented
+  inline rather than silently worked around).
+- **A real disable switch**, `enabled` on `_albedoClarity`: instant on screen (writes the live
+  uniform to 0, keeps the stored sharpness for re-enabling) and — extending
+  `shouldUseFullAlbedoClarity()` — compiles the taps back out entirely on the next material build,
+  same "next scene load" cadence the existing performance-tier gate already established.
+- **A real measured GPU-ms cost**, landing in `perf-run-full` as `report.sharpeningAB`
+  (`src/diag/perf-sharpening-ab.js`) — a NEW restart-based structural A/B, not a rider on
+  `perf-structural-ab.js`'s own orchestration loop (named "sensitive, well-tested measurement code"
+  by this Testament; only its pure, already-exported math is reused). Necessary because
+  `shouldUseFullAlbedoClarity()` is a material-build-time shader-graph fork with no rebuild-in-place
+  path below a full `stopVtPanViewer`/`startVtPanViewer` cycle (confirmed by grepping every
+  `registerAction` for a lighter alternative — there isn't one). Bolted onto the finished report
+  after every `runProfileSession` sweep (same shape `multiFloor`/`rapidStressSweep` already use),
+  NOT threaded through `buildPerfReport` — that path runs up to 3× per `perf-run-full` call, which
+  would have meant 12+ restarts instead of 4. Gated OFF by default
+  (`MapShine.setSharpeningAbEnabled(true)` to arm it) — the real cost of 4 full viewer restarts has
+  never been measured live before this session, so the first real capture with it enabled IS the
+  timing experiment that decides the default.
+
+*Evidence:* `npm run verify` green throughout (9,457 tests, +52 new — 2 new suites,
+`vt/__tests__/albedo-clarity.test.mjs` and `diag/__tests__/perf-sharpening-ab.test.mjs`, both
+registered in their directory's `run-tests.mjs`, not just written). The restore-path test caught a
+real bug before it shipped: the fake harness modelled `restartViewerWithAlbedoClarityForce`'s
+documented resolved-`{ok:false}` failure shape, and the first draft's `.catch()`-only error
+handling missed it entirely — fixed to check both the resolved result and a genuine throw.
+
+*The first live capture, 2026-08-15:* `perf-run-full` with the A/B armed ran clean end-to-end
+(`ok:true`, all 4 restarts succeeded, camera held) in **458s total** (the whole report — base
+route, floor-2 route, rapid-stress route, multi-floor sweep, rapid-stress sweep, AND this new
+phase; no isolated before/after wall-clock split was captured this run, so that total should
+not be read as "the A/B alone costs 458s" — a real gap, named rather than implied away). The
+measurement itself did exactly what `compareAbBlocks` is built to do when a run is genuinely
+inconclusive: **`verdict: "within-noise"`**, delta 0.211ms against a 0.809ms noise floor
+(needed 1.5×, i.e. ≥1.21ms, to call it either way) — its own `note` says so in plain words:
+*"NO VERDICT... that is not 'no difference' — it is 'this run could not tell'."* One real,
+usable data point survived anyway: `geometry.worldDraw` itself — the exact zone hosting the
+5-tap CAS graph — measured 3.513ms (full CAS) vs 3.515ms (flat read), a −0.001ms "delta" that
+is effectively zero on hardware nowhere near idle (this dev machine, mid-session, not the
+quiet-machine precondition `feedback_playwright_fps_not_yet_trustworthy` already names for
+trusting an FPS number — the same caution applies here). Read plainly: **the CAS sharpen may
+simply be cheap on this hardware** (plausible — this project's own perf audit already found
+bandwidth is not the binding constraint by roughly 16×, so five extra texture taps landing
+inside an already-bandwidth-slack budget costing near-zero is not a surprising outcome) —
+but this ONE run cannot promote that from "plausible" to "measured," and says so honestly
+rather than rounding a coin-flip into a verdict. `MapShine.setSharpeningAbEnabled` stays
+OFF by default pending a re-run on a genuinely idle machine, per the mandate the harness itself
+was built under. One incidental finding worth naming, not burying: a single `THREE.Error
+resolving queries: AbortError... Buffer was unmapped before mapping was resolved` surfaced in
+console output from `WebGPURenderer.dispose()` during one of the four restarts — non-fatal
+(the run completed `ok:true` regardless) but the first time this codebase has torn down and
+rebuilt the renderer four times in rapid succession, and a real signal that
+`stopVtPanViewer`'s disposal path has at least one in-flight-GPU-resource race under that
+specific stress. Not chased further this session — named for whoever next touches restart
+teardown.
+
+The Make-panel card and disable switch, independently confirmed live: `railBtnFound:true`,
+`cardFound:true` in the DOM at first check, and — because that check's own full-panel
+screenshot cut off before scrolling to an `order:91` card sitting below Bloom, a gap caught by
+looking at the actual pixels rather than trusting the DOM query alone — a second, scroll-
+targeted capture confirms the card renders with real live values, not a broken or empty shell.
+The toggle round-trip (`enabled:true → false → true`) held every other field
+(`sharpness/gateLo/gateHi/farLo/farHi/farFloor`) exactly steady across both flips — no
+cross-talk with unrelated state.
+
+**Honest caveats, named rather than buried:**
+- The chromatic-fringing root cause is real, characterised, and NOT fixed — the shipped look is
+  unchanged from before this session (byte-identical unless the author says otherwise), and the new
+  Sharpening card's live Sharpness slider is the interim answer: the author can now dial it to taste
+  against a real scene directly, rather than waiting on a fix.
+- The 458s figure above is the WHOLE report, not the A/B phase isolated — a clean before/after
+  wall-clock split (arm it off, time a run; arm it on, time a run; subtract) is the next thing
+  needed before deciding whether this default should flip to on, alongside the idle-machine
+  re-run the noise floor itself is asking for.
+- `docs/planning/Bug-Tracker.md` and several `src/effects/*.js` files show as modified in this
+  working tree from a clearly separate, concurrent session (not this petition's work) — flagged so
+  a future reader of `git blame` on this commit range isn't confused about attribution.
+
+Not yet the author's own LIVE verdict on the look — `BUILT (unverified)` until Ingram loads the
+real Mansion and looks at the new card / the (unchanged) sharpen look himself.

@@ -1154,6 +1154,44 @@ storm flash) as authored content.
         someone else's growth silently resets the high-water mark, and that is the author's
         call), and `no-gpu-readback` 1 from the vision work's `readRenderTargetPixelsAsync`,
         which needs either a blessed exemption or a different mechanism.
+      · slice 3/7 Claude Sonnet 5 2026-08-16 (`3f4994f` RNG, `bc82907` biomes, `3f4709a` walk,
+        `2adebcc` live wiring) — THE ALMANAC. `world/weather-rng.js`: seeded, snapshot/restore-
+        able mulberry32 (`hashSeed`/`createRng`/`fromState`/`triangular`/`weightedPick`) — the
+        one real bug it caught itself before shipping: `min===max` (a deliberately FIXED dwell)
+        was being folded into "corrupt input" and silently bumped to a fake 1-unit range.
+        `world/weather-biomes.js`: 5 ToD curves (closed list; `nocturnalCalm` is a TROUGH
+        crossing midnight, the other four are peaks) biasing transition weight, never gating it;
+        10 named biomes as real graphs over the 13 archetypes — `desert` has no edge to
+        `steady-rain`/`snow` AT ALL, "a realistic set of states" is structural, not a runtime
+        temperature check. Every graph validated STRONGLY CONNECTED (no dead ends, no islands)
+        at authoring time; `shadowfell-verge` has no `clear` node and enforces its "permanent
+        gloom" via a `clamps.cloudCover01.min=0.6` floor instead. `world/weather.js`: the
+        semi-Markov walk itself (dwell countdown → weighted transition pick → apply through the
+        SAME setTargets/ease path Director always used, LAW 1 unbroken), PINS (a dragged slider
+        protects that axis from the walk; a shelf click clears every pin and makes the walk
+        ADOPT the click, "the Almanac takes requests"), and a `forecast()` that clones the live
+        RNG state so projecting ahead touches nothing live. `almanac` mode ACCEPTED for the
+        first time (slices 1-2 correctly refused it — nothing was behind it yet).
+        Live-wired same day: `dtGameHours` derived from the OBSERVED hour delta
+        (`shortestHourDelta`), not the day clock's private drift rate, so it stays correct
+        under a `syncTo` walk too. Console levers shipped to `MapShine.*` before any UI —
+        `setWeatherArchetype` also reached the console for the first time in this pass, having
+        shipped in slice 2 with no lever at all.
+        768 assertions in `src/world` (9,949 repo-wide, 0 failed). FIVE load-bearing guarantees
+        SABOTAGE-TESTED: forecast reading the live RNG instead of a clone, pins ignored, the
+        walk advancing at `dtGameHours=0` (the paused-session guarantee), the walk reaching a
+        node with no real edge to it, and biome clamps never applying — all five failed a named
+        assertion when broken. Two statistical checks: a 4000-tick desert run made every single
+        transition across a real graph edge (zero exceptions); a 3000-tick run's dominant
+        tick-count matched desert's own heaviest `archetypeWeight` (clear, authored at 0.72,
+        landed >50% of ticks). Cross-history determinism checked directly: two managers reseeded
+        to the same value from completely different prior walks converge on an identical future.
+        `esbuild src/boot.js --bundle` re-verified clean (5.3MB, exit 0) after every commit in
+        this pass — not assumed, per the broken-master lesson two entries above.
+        ⚠️ NOT BUILT THIS PASS, stated rather than silent: the astrolabe has no Almanac UI yet
+        (mode toggle, biome picker, volatility slider, forecast strip, pin icons — console levers
+        only); front scripts (`frontScripts` recorded as data, not fired); `eventRates` recorded
+        as data, nothing consumes them (slice 4 territory). Task stays OPEN: slices 4-7 remain.
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

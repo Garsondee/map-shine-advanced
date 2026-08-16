@@ -212,6 +212,7 @@ import {
   setVtPanViewerWeatherVolatility,
   setVtPanViewerWeatherSeed,
   getVtPanViewerWeatherForecast,
+  unpinVtPanViewerWeatherAxis,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   resetVtPanViewerFrameStats,
@@ -820,6 +821,7 @@ MapShine.setWeatherBiome = setVtPanViewerWeatherBiome;
 MapShine.setWeatherVolatility = setVtPanViewerWeatherVolatility;
 MapShine.setWeatherSeed = setVtPanViewerWeatherSeed;
 MapShine.getWeatherForecast = getVtPanViewerWeatherForecast;
+MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
 
 /**
  * Boot's own logger. Everything this file says goes through `core/log.js`, which
@@ -6580,6 +6582,28 @@ function install() {
         onArchetypeChange: (id) => {
           void editSky({ weatherArchetype: id });
         },
+        // ⭐ THE MODE TOGGLE (Weather-Manager.md §5, §9). Goes through the SAME
+        // `editSky` path as everything else on this dial — the mode is per-
+        // world/per-scene exactly like the hour and the cloud slider are.
+        onWeatherModeChange: (mode) => {
+          void editSky({ weatherMode: mode });
+        },
+        // THE ALMANAC'S CLIMATE (ROH). `null` from the "— none (idle) —"
+        // option is a real, honest edit, not a no-op — see
+        // `DEFAULT_SKY.weatherBiome`'s own note on why idle is legitimate.
+        onWeatherBiomeChange: (id) => {
+          void editSky({ weatherBiome: id });
+        },
+        onWeatherVolatilityChange: (v, committed) => {
+          if (committed) void editSky({ weatherVolatility: v });
+        },
+        // THE PIN GLYPH. Unpinning is live SESSION state (the manager's own
+        // `pinnedAxes` Set), not a persisted sky field — releasing a pin lets
+        // the walk touch that axis again on its own next transition; it does
+        // not itself move anything, so there is nothing here to persist.
+        onUnpinCloudCover: () => {
+          unpinVtPanViewerWeatherAxis('cloudCover01');
+        },
         onSkyRealismChange: (v, committed) => {
           if (committed) void editSky({ realism01: v });
         },
@@ -6621,6 +6645,16 @@ function install() {
     setVtPanViewerTimeMode(sky.mode);
     setVtPanViewerTimeRate(sky.rateHoursPerMinute);
     if (sky.mode === 'aesthetic') setVtPanViewerSunHour(sky.todHour);
+    // ⭐ THE ALMANAC'S OWN MODE + CLIMATE, restored BEFORE the weather-archetype
+    // restore just below — order matters here. `setWeatherArchetype`/
+    // `setCloudCover` route through `weather.applyArchetype`, which (in
+    // `almanac` mode) makes the walk ADOPT whatever it's given as its current
+    // node. That adoption has to land against the RIGHT mode and biome, or a
+    // scene saved mid-walk would restore its sky correctly but its Almanac
+    // bookkeeping against the previous scene's climate.
+    setVtPanViewerWeatherMode(sky.weatherMode);
+    setVtPanViewerWeatherBiome(sky.weatherBiome);
+    setVtPanViewerWeatherVolatility(sky.weatherVolatility);
     // THE WEATHER RESTORE RULE — exactly ONE of these two is authoritative,
     // never both (see `DEFAULT_SKY.weatherArchetype`'s own note). A named sky
     // applies its whole ROW, so all four cloud axes come back; only a
@@ -6744,6 +6778,12 @@ function install() {
           cloudCover01: skyScope.sky?.cloudCover01 ?? 0,
           skyRealism01: skyScope.sky?.realism01 ?? 0,
           gradeEnvStrength: skyScope.sky?.gradeEnvStrength ?? 0,
+          // The Almanac's own config rides the SAME resolved-scope rule as
+          // everything else above — the mode select and biome picker must
+          // show the store actually in force, not a copy the dial keeps.
+          weatherMode: skyScope.sky?.weatherMode ?? 'director',
+          weatherBiome: skyScope.sky?.weatherBiome ?? null,
+          weatherVolatility: skyScope.sky?.weatherVolatility ?? 1,
           sceneOverrides: skyScope.sceneOverrides === true,
         });
       }

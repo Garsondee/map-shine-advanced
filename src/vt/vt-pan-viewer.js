@@ -6831,6 +6831,11 @@ export async function startVtPanViewer({
     function getWeatherForecast(hoursAhead) {
       return weather.forecast(hoursAhead, { hour: lastWeatherHour ?? 12 });
     }
+    /** Release the Almanac's hold-off on one axis — the astrolabe's pin glyph.
+     * @param {string} name @returns {boolean} true if it had been pinned. */
+    function unpinWeatherAxis(name) {
+      return weather.unpinAxis(name);
+    }
 
     /**
      * THE SKY-LIGHT LEVER, 0..1 (docs/planning/Sky.md §8). `0` — the default —
@@ -15813,6 +15818,8 @@ export async function startVtPanViewer({
       setWeatherSeed,
       /** Project the walk ahead without touching live state. */
       getWeatherForecast,
+      /** Release the Almanac's hold-off on one axis — the astrolabe's pin glyph. */
+      unpinWeatherAxis,
       /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
       setSkyRealism,
       /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
@@ -16288,9 +16295,16 @@ export async function startVtPanViewer({
        * THE DIAL STATE — a lean, per-frame read for the astrolabe, kept
        * separate from `getEnvSnapshotInfo` below on purpose: that one assembles
        * the whole Diagnostics blob (fresh Foundry reads, the shadow atmosphere,
-       * source/reason strings) and the dial repaints every frame. Nine numbers,
-       * all already computed, no allocation beyond the literal.
+       * source/reason strings) and the dial repaints every frame.
        * `null` before the first frame — the caller simply skips a repaint.
+       *
+       * ⚠️ NO LONGER STRICTLY ZERO-ALLOCATION, and said so rather than left
+       * stale (this comment used to claim it was): `weather.forecast()` clones
+       * the Almanac's RNG and replays its walk. Cheap in the DEFAULT case —
+       * `director` mode returns at the mode check before any of that runs —
+       * and bounded even in `almanac` mode (`maxSteps`), but it is real work,
+       * not a free field read, and a future session measuring this dial
+       * should know why.
        */
       /** Zero-allocation sibling of `getTimeDialState` below, for a caller
        * that only needs the ONE scalar (`refreshCandleIgnition`'s ungated
@@ -16335,6 +16349,20 @@ export async function startVtPanViewer({
           // shadow handle and the daylight tint already read — not a second
           // "is it dark" derivation.
           dayFactor01: env.sun.dayFactor01,
+          // ⭐ THE ALMANAC (slice 3 UI) — read from the manager directly rather
+          // than `lastEnvSnapshot`, since neither pins nor the forecast are
+          // part of the env snapshot (LAW 2: consumers read axes, not this).
+          // This is diagnostics/UI-shape data, the same door `getStatus()`
+          // already opened, just spared the whole per-axis status payload a
+          // 60fps dial repaint has no use for.
+          weatherPinnedAxes: weather.read().pinnedAxes,
+          // Only the NEXT transition — a whole timeline is explicitly ROH
+          // (Weather-Manager.md §9) and not built. 48 game-hours is a plain,
+          // reasoned "near future" window: long enough to warn of a change a
+          // GM would want to narrate ahead of, short enough that the walk's
+          // own dwells (rarely over a day, see `DEFAULT_DWELL_HOURS`) mean
+          // something is usually actually inside it.
+          weatherForecastNext: weather.forecast(48, { hour: env.time.todHour }).transitions[0] ?? null,
         };
       },
 
@@ -17945,6 +17973,11 @@ export function setVtPanViewerWeatherSeed(seed) {
 export function getVtPanViewerWeatherForecast(hoursAhead) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getWeatherForecast(hoursAhead);
+}
+/** @param {string} name @returns {boolean|{skipped:true}} */
+export function unpinVtPanViewerWeatherAxis(name) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.unpinWeatherAxis(name);
 }
 
 /**

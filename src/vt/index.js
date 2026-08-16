@@ -57,6 +57,7 @@ export {
   setVtPanViewerWeatherVolatility,
   setVtPanViewerWeatherSeed,
   getVtPanViewerWeatherForecast,
+  unpinVtPanViewerWeatherAxis,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   setVtPanViewerWindForceThaw,

@@ -46,6 +46,9 @@ export {
   isApplicableArchetype,
   matchArchetype,
 } from './weather-data.js';
+// THE BIOME TABLE (slice 3) — the astrolabe's biome picker renders straight
+// from this, same reasoning as the archetype table just above.
+export { WEATHER_BIOMES, WEATHER_BIOME_IDS, resolveBiome, isKnownBiome } from './weather-biomes.js';
 // THE WIND HANDLE (Wind.md §5.1) — the ONE door to the field for everything
 // outside world/. `sampleWind` itself is deliberately NOT re-exported here any
 // more: it needs five hand-assembled inputs, and hand-assembling them is the

@@ -73,7 +73,7 @@
  * @module ui/astrolabe
  */
 
-import { WEATHER_ARCHETYPES, CUSTOM_PRESET } from '../world/index.js';
+import { WEATHER_ARCHETYPES, CUSTOM_PRESET, WEATHER_BIOMES } from '../world/index.js';
 
 /** Ring geometry, in the dial's own 0..300 coordinate space. */
 const FACE = 300;
@@ -349,6 +349,28 @@ export function createAstrolabe(opts) {
   // V2 gave each of those its own slider and they could disagree about how
   // cloudy it was.
   const cloudRow = sliderRow('Cloud', 0, 1, 0.01, (v, committed) => opts.onCloudChange?.(v, committed));
+  // ── THE PIN GLYPH — the only axis with a live FOH control that the Almanac
+  // can ALSO pin (type/altitude/scale have no direct slider yet; they only
+  // ever move as part of a whole archetype row). Visible only while
+  // `cloudCover01` is genuinely pinned; clicking it releases the walk's hold.
+  // A small, honest state indicator on an already-live control, not the "full
+  // axis inspector" Weather-Manager.md §9 keeps in ROH.
+  const cloudPin = styled('button', {
+    flex: '0 0 auto',
+    display: 'none',
+    padding: '0 4px',
+    fontSize: '11px',
+    lineHeight: '1',
+    cursor: 'pointer',
+    border: 'none',
+    background: 'transparent',
+    color: `rgb(${CYAN})`,
+  });
+  cloudPin.type = 'button';
+  cloudPin.textContent = '📌';
+  cloudPin.title = 'Pinned — the Almanac will not change this. Click to release.';
+  cloudPin.addEventListener('click', () => opts.onUnpinCloudCover?.());
+  cloudRow.el.appendChild(cloudPin);
   // THE SKY LIGHT's own lever. At 0 the outdoor light is a mathematical no-op
   // and the scene renders pixel-identical to Foundry — which is why it is the
   // default and why this control has to exist for anyone to see the feature.
@@ -430,6 +452,75 @@ export function createAstrolabe(opts) {
   horizonWrap.append(horizonHead, shelf);
   root.appendChild(horizonWrap);
 
+  // ── THE MODE TOGGLE — Director | Almanac (Weather-Manager.md §5, §9) ──────
+  // FOH: a GM absolutely flips this mid-session ("let it walk for a while").
+  // A `<select>`, matching the Clock mode control's own shape below — this
+  // project's established idiom for a small closed choice on the dial.
+  const weatherModeRow = styled('div', { display: 'flex', alignItems: 'center', gap: '6px' });
+  const weatherModeLabel = styled('span', { flex: '0 0 auto', minWidth: '62px', color: MUTED });
+  weatherModeLabel.textContent = 'Weather';
+  const weatherModeSelect = styled('select', {
+    flex: '1',
+    background: 'rgba(20,28,44,0.9)',
+    color: TEXT,
+    border: `1px solid rgba(${CYAN},0.28)`,
+    borderRadius: '4px',
+    padding: '2px 4px',
+    font: 'inherit',
+  });
+  for (const [value, label] of [
+    ['director', 'Director — you choose the sky'],
+    ['almanac', 'Almanac — the sky chooses itself'],
+  ]) {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    weatherModeSelect.appendChild(o);
+  }
+  weatherModeSelect.addEventListener('change', () => opts.onWeatherModeChange?.(weatherModeSelect.value));
+  weatherModeRow.append(weatherModeLabel, weatherModeSelect);
+  root.appendChild(weatherModeRow);
+
+  // ── THE ALMANAC PANEL — forecast + surprise-me. Visible ONLY in almanac
+  // mode: an active countdown for a mode that isn't running would be actively
+  // misleading, not just unused (the inactive biome/volatility ROH controls
+  // below are a different case — dormant, not misleading, so they stay put).
+  const almanacPanel = styled('div', { display: 'none', flexDirection: 'column', gap: '3px' });
+  const forecastRow = styled('div', {
+    fontSize: '10px',
+    color: MUTED,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  });
+  const surpriseRow = styled('label', {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+    cursor: 'pointer',
+    userSelect: 'none',
+    fontSize: '10px',
+    color: MUTED,
+  });
+  const surpriseBox = document.createElement('input');
+  surpriseBox.type = 'checkbox';
+  surpriseBox.style.accentColor = `rgb(${CYAN})`;
+  const surpriseText = styled('span', {});
+  surpriseText.textContent = '🎲 Surprise me (hide the forecast)';
+  surpriseRow.append(surpriseBox, surpriseText);
+  // ⚠️ LOCAL, SESSION-ONLY UI STATE — deliberately NOT persisted. Whether a
+  // GM wants foreknowledge is a personal reading preference for a control they
+  // are looking at right now, not a fact about the SCENE the way the weather
+  // itself is. Persisting it would be a second, needless field for something
+  // that resets harmlessly to "visible" (the author-ruled default) every load.
+  let surpriseMe = false;
+  surpriseBox.addEventListener('change', () => {
+    surpriseMe = surpriseBox.checked;
+    lastForecastKey = null; // force the next update() to repaint immediately
+  });
+  almanacPanel.append(forecastRow, surpriseRow);
+  root.appendChild(almanacPanel);
+
   // Folded away: sky light, atmosphere, time rate, the clock mode and the sky
   // scope. All set-once tuning.
   const tuning = document.createElement('details');
@@ -454,7 +545,64 @@ export function createAstrolabe(opts) {
     padding: '2px 8px 8px',
   });
   tuning.append(tuningSummary, tuningBody);
-  tuningBody.append(skyRow.el, atmoRow.el, rateRow.el);
+
+  // ── THE ALMANAC'S ROH TUNING — biome + volatility (Weather-Manager.md §9:
+  // "biome picker + volatility/season/seed" is explicitly ROH, unlike the mode
+  // toggle and forecast just above). Dormant rather than misleading when
+  // Director mode is active — left visible rather than conditionally hidden,
+  // since an unused dropdown reads as "not relevant right now", not as a lie
+  // the way an active-looking forecast countdown would.
+  //
+  // ⚠️ NOT HERE: season and seed. `tempByHour01`/`seasonMods` are recorded on
+  // every biome row but nothing consumes them yet (the same "ship the data,
+  // mark pending" pattern as slice 1's shape axes) — a season control with no
+  // effect would be exactly the kind of promise `feedback_seam_default_hides_unwired`
+  // warns about. Seed stays console-only (`MapShine.setWeatherSeed`) for the
+  // same reason: reseeding needs a source of fresh entropy, and inventing one
+  // here risks tripping the `time/one-clock` wall for a control this pass
+  // does not need.
+  const biomeRow = styled('div', { display: 'flex', alignItems: 'center', gap: '6px' });
+  const biomeLabel = styled('span', { flex: '0 0 auto', minWidth: '62px', color: MUTED });
+  biomeLabel.textContent = 'Climate';
+  const biomeSelectEl = styled('select', {
+    flex: '1',
+    background: 'rgba(20,28,44,0.9)',
+    color: TEXT,
+    border: `1px solid rgba(${CYAN},0.28)`,
+    borderRadius: '4px',
+    padding: '2px 4px',
+    font: 'inherit',
+  });
+  const NONE_BIOME = '';
+  const noneOpt = document.createElement('option');
+  noneOpt.value = NONE_BIOME;
+  noneOpt.textContent = '— none (idle) —';
+  biomeSelectEl.appendChild(noneOpt);
+  for (const b of WEATHER_BIOMES) {
+    const o = document.createElement('option');
+    o.value = b.id;
+    o.textContent = b.label;
+    o.title = b.blurb;
+    biomeSelectEl.appendChild(o);
+  }
+  biomeSelectEl.addEventListener('change', () => {
+    opts.onWeatherBiomeChange?.(biomeSelectEl.value === NONE_BIOME ? null : biomeSelectEl.value);
+  });
+  const biomeSelect = {
+    el: biomeRow,
+    /** @param {string|null} id */
+    syncTo(id) {
+      const next = id ?? NONE_BIOME;
+      if (biomeSelectEl.value !== next) biomeSelectEl.value = next;
+    },
+  };
+  biomeRow.append(biomeLabel, biomeSelectEl);
+
+  const volatilityRow = sliderRow('Pace', 0.25, 4, 0.25, (v, committed) =>
+    opts.onWeatherVolatilityChange?.(v, committed)
+  );
+
+  tuningBody.append(biomeSelect.el, volatilityRow.el, skyRow.el, atmoRow.el, rateRow.el);
 
   /**
    * ⚠️ THE COST OF FOLDING SKY LIGHT AWAY, PAID BACK IN THE SUMMARY.
@@ -636,6 +784,62 @@ export function createAstrolabe(opts) {
     horizonName.textContent = row ? row.label : id === CUSTOM_PRESET ? 'Custom — hand-tuned' : '';
   }
 
+  /** Last painted mode. `null` forces the first paint. */
+  let lastWeatherModeKey = null;
+  /**
+   * The mode select, the pin glyph, and the Almanac panel's visibility all key
+   * off the SAME two facts (mode, pinned axes) — one function, so they cannot
+   * independently drift out of sync with each other.
+   * @param {object} s
+   */
+  function paintWeatherMode(s) {
+    const mode = s.weatherMode === 'almanac' ? 'almanac' : 'director';
+    const pinned = Array.isArray(s.weatherPinnedAxes) && s.weatherPinnedAxes.includes('cloudCover01');
+    const key = `${mode}|${pinned}`;
+    if (key === lastWeatherModeKey) return;
+    lastWeatherModeKey = key;
+
+    if (weatherModeSelect.value !== mode) weatherModeSelect.value = mode;
+    almanacPanel.style.display = mode === 'almanac' ? 'flex' : 'none';
+    // The pin glyph can only ever mean something in Almanac mode — Director
+    // mode never reads `pinnedAxes` at all, so showing it there would be a
+    // control promising a protection nothing is enforcing.
+    cloudPin.style.display = mode === 'almanac' && pinned ? 'inline-block' : 'none';
+  }
+
+  /** Last painted forecast string. `null` forces the first paint (and the
+   * surprise-me checkbox resets it directly — see that handler). */
+  let lastForecastKey = null;
+  /**
+   * The next upcoming transition, in GAME hours — never real minutes. A
+   * real-time estimate would need a nonzero clock rate to mean anything at
+   * all (`rateHoursPerMinute` defaults to 0, frozen, even in `aesthetic`
+   * mode), so game-hours is the one unit that is always well-defined
+   * regardless of how — or whether — the GM's clock is running.
+   * @param {object} s
+   */
+  function paintForecast(s) {
+    if (s.weatherMode !== 'almanac') return; // panel is hidden; nothing to paint
+    const next = s.weatherForecastNext ?? null;
+    const key = `${surpriseMe}|${next ? next.archetypeId + ':' + next.atGameHoursFromNow.toFixed(2) : 'none'}`;
+    if (key === lastForecastKey) return;
+    lastForecastKey = key;
+
+    if (surpriseMe) {
+      forecastRow.textContent = '🎲 —';
+      return;
+    }
+    if (!next) {
+      forecastRow.textContent = 'Forecast: steady for now';
+      return;
+    }
+    const row = WEATHER_ARCHETYPES.find((a) => a.id === next.archetypeId);
+    const label = row ? `${row.icon} ${row.label}` : next.archetypeId;
+    const h = next.atGameHoursFromNow;
+    const eta = h < 1 ? `~${Math.max(1, Math.round(h * 60))}m` : `~${h < 10 ? h.toFixed(1) : Math.round(h)}h`;
+    forecastRow.textContent = `Forecast: → ${label} in ${eta}`;
+  }
+
   // ---- gestures ------------------------------------------------------------
   // Time ring and wind arrow share one pointer pipeline, routed by where the
   // press landed: inside the ring band ⇒ time, inside the hub ⇒ wind.
@@ -744,6 +948,11 @@ export function createAstrolabe(opts) {
     cloudRow.set(Math.max(0, Math.min(1, s.cloudCover01 ?? 0)));
     paintFace(s);
     paintHorizon(s);
+    paintWeatherMode(s);
+    paintForecast(s);
+    biomeSelect.syncTo(s.weatherBiome ?? null);
+    volatilityRow.set(Math.max(0.25, Math.min(4, s.weatherVolatility ?? 1)));
+    volatilityRow.setReadout(`×${(s.weatherVolatility ?? 1).toFixed(2)}`);
     skyRow.set(Math.max(0, Math.min(1, s.skyRealism01 ?? 0)));
     skyRow.setReadout((s.skyRealism01 ?? 0) === 0 ? 'off' : `${Math.round((s.skyRealism01 ?? 0) * 100)}%`);
     syncTuningSummary();
@@ -840,7 +1049,17 @@ function sliderRow(label, min, max, step, onChange) {
   const el = styled('div', { display: 'flex', alignItems: 'center', gap: '6px' });
   const name = styled('span', { flex: '0 0 auto', minWidth: '62px', color: MUTED });
   name.textContent = label;
-  const input = styled('input', { flex: '1', accentColor: `rgb(${CYAN})` });
+  // ⚠️ `minWidth: '0'` IS LOAD-BEARING, not decoration. A flex item's default
+  // `min-width` is `auto`, not `0` — for a native `<input type="range">` that
+  // resolves to the control's own intrinsic track width (~129px, MEASURED, not
+  // guessed), and `flex: 1` cannot shrink a child below its own min-width no
+  // matter how little room the row actually has. Without this override, the
+  // slider silently refuses to shrink and pushes everything after it — in this
+  // case the readout, and the pin glyph below it needs — outside the row's own
+  // box (found by rendering this panel and measuring, not by reading the CSS:
+  // the pin button's `getBoundingClientRect()` came back over 180px past its
+  // own row's right edge before this fix).
+  const input = styled('input', { flex: '1', minWidth: '0', accentColor: `rgb(${CYAN})` });
   input.type = 'range';
   input.min = String(min);
   input.max = String(max);

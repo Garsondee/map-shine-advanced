@@ -60,26 +60,46 @@
  * swarm converging toward the ground as it shrinks is the whole "rain is
  * coming down AT the map" read.
  *
- * ⚠️ AND THAT ALONE IS NOT ENOUGH, WHICH IS WHY `uFallSlant01` EXISTS. A drop
- * falling straight down under a camera looking straight down is *genuinely*
- * near-motionless on screen — physically correct and visually dead. Real rain
- * slants, and V2 gave its rain a large screen-space fall component on top of
- * the perspective. `uFallSlant01` is how much of the fall speed becomes
- * visible world-XY motion: 0 = pure vertical (physically pure, reads as a
- * zoom), 1 = fully slanted (reads as a downpour). It is a UNIFORM, not a
- * constant, precisely so the shader lab can sweep it and the author can pick.
+ * ============================================================================
+ * ⭐⭐ THE AUTHOR'S RULING ON THE LOOK — `fallSlant01 = 0` (2026-08-16)
+ * ============================================================================
  *
- * ⚠️ RETUNED 0.62 → 0.30 (2026-08-16) ON THE AUTHOR'S LIVE VERDICT: *"it's
- * currently falling with the streak facing south instead of downwards."* That
- * is exactly what too much slant looks like from directly above — the drop
- * genuinely translates across the map, so its streak becomes a long vector
- * LYING IN THE MAP PLANE pointing south rather than a mark falling toward the
- * viewer. Less slant plus a shorter streak (`uStreakScale`) turns each body
- * into a short foreshortened dash, which is what falling AT a top-down camera
- * actually looks like. ⚠️ All three dials were swept TOGETHER in the lab,
- * because they trade against each other: drop the slant alone and the radial
- * term (`uParallaxStreak01`) takes over and splays instead — which is the
- * author's other reported failure, *"some are moving sideways"*.
+ * ⚠️ I ARGUED THE OPPOSITE, IN THIS COMMENT, AND I WAS WRONG. The original text
+ * here claimed a drop falling straight down under a top-down camera is
+ * *"physically correct and visually dead"*, and used that to justify
+ * `uFallSlant01` — a fake world-XY translation added on top of the fall so the
+ * rain would visibly move. Three rounds of the author's verdicts killed it:
+ *
+ *   1. *"aligned as if they were moving from north to south, not as if they
+ *      were falling downwards"*
+ *   2. *"some raindrops are falling down and some are moving sideways"*
+ *   3. *"the streak doesn't align with bird's eye view perspective downwards"*
+ *
+ * All three are the same complaint from different angles, and the slant was
+ * the cause every time: any nonzero slant translates the drop ACROSS the map,
+ * so its streak becomes a vector LYING IN THE MAP PLANE. That reads as
+ * something skating over the ground, never as something falling at you — and
+ * no amount of retuning length or splay fixes a mark pointing the wrong way.
+ *
+ * ⭐ THE SETTLED ANSWER IS THE PHYSICALLY HONEST ONE: `fallSlant01 = 0` (the
+ * drop does not translate at all — real rain falls straight down) with
+ * `parallaxStreak01 = 1` (the streak aligns fully with the M(h) collapse). All
+ * of the visible motion is then the genuine bird's-eye convergence toward the
+ * nadir: a drop directly beneath the camera is a growing DOT, and drops
+ * further out streak radially, longer the further they are. That is what
+ * looking down through rain actually looks like, and it needed no invented
+ * term — the invented term was the bug.
+ *
+ * The dial survives (0..1, still swept in the lab) because `ash`, `sand` and a
+ * hurricane's near-horizontal sheets genuinely DO travel across the map, and
+ * they will want it. Rain and snow do not.
+ *
+ * ⚠️ `chaosScale` 1 → 3.5 and `PERSPECTIVE_CAMERA_HEIGHT` 1000 → 2000 came from
+ * the same session: with the slant gone, per-body turbulence is what stops the
+ * radial pattern reading as a rigid starburst, and a taller camera (gentler
+ * M(h)) keeps the splay from becoming hyperspace. All five values were found
+ * together on the author's own hands in the lab panel — they trade against
+ * each other, and no one of them is meaningful alone.
  *
  * @module effects/particles/precip-runtime
  */
@@ -99,7 +119,7 @@ const TIER0_WIND_HANDLE = createWindHandle();
  * they describe the same V2 camera but are free to diverge if one look needs
  * it, and a shared constant would make that divergence a cross-effect edit.
  */
-const PERSPECTIVE_CAMERA_HEIGHT = 1000;
+const PERSPECTIVE_CAMERA_HEIGHT = 2000;
 
 /**
  * How far outside the view rect bodies keep spawning, as a fraction of the
@@ -208,7 +228,7 @@ export function createPrecipEngine({
   // nobody can calibrate. Fire's dial convention, kept.
   const uSpeedMul = uniform(float(1));
   const uLengthMul = uniform(float(1));
-  const uSizeScale = uniform(float(1));
+  const uSizeScale = uniform(float(1.1));
   const uAlphaMul = uniform(float(1));
   const uRgbMul = uniform(float(1));
   const uFlutterMul = uniform(float(1));
@@ -219,7 +239,7 @@ export function createPrecipEngine({
    * from directly above); 1 = fully slanted (V2's downpour). Deliberately a
    * uniform so the lab can sweep it live.
    */
-  const uFallSlant01 = uniform(float(0.3));
+  const uFallSlant01 = uniform(float(0));
   /** Which way "downhill" is, in world degrees. Screen-down under the flipped
    * camera. Separate from the WIND direction on purpose: rain slants with the
    * wind AND has a base bias, and collapsing them would make a calm day's rain
@@ -227,7 +247,7 @@ export function createPrecipEngine({
   const uSlantDirDeg = uniform(float(90));
   /** Turbulence strength — V2's dual-frequency lateral chaos (`:1450-1505`),
    * as one scalar the lab can sweep. */
-  const uChaosScale = uniform(float(1));
+  const uChaosScale = uniform(float(3.5));
   /**
    * Multiplier on the species' own `streakPerPxS`. 1.0 = exactly the table's
    * number, the same distance-from-reference convention every dial here uses.
@@ -249,14 +269,14 @@ export function createPrecipEngine({
    * re-expresses V2's factor in the new basis instead of editing the harvested
    * constant, so the table keeps meaning what its own comment says it means.
    */
-  const uStreakScale = uniform(float(0.5));
+  const uStreakScale = uniform(float(1.1));
   /**
    * How much of the derived RADIAL (falling-toward-you) motion steers a
    * streak's direction. See the derivation at its use site in `positionNode`.
    * 0 = every streak parallel; 1 = the full, physically-derived splay, which
    * measured as hyperspace rather than rain.
    */
-  const uParallaxStreak01 = uniform(float(0.03));
+  const uParallaxStreak01 = uniform(float(1));
 
   // ── ⭐ THE SKY-REACH GATE (Precipitation.md LAW 3) ────────────────────────
   //

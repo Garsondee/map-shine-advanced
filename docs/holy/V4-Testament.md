@@ -1137,8 +1137,23 @@ storm flash) as authored content.
         guard SABOTAGE-TESTED (making `mackerel` identical to `fair-cumulus` failed, naming the
         collision). VERIFIED BY LOOKING: five dials rendered in a throwaway DOM harness, all
         five skies visually distinct, clicks confirmed firing the right ids; harness deleted.
-        ⚠️ `onArchetypeChange` is NOT wired to the engine — that needs `boot.js`, which carries
-        other uncommitted work. The shelf renders and reports; it changes nothing yet.
+        Shelf wiring landed same day (`5648f85`) once the working tree was committed: click →
+        `editSky` → `applyArchetype`, with `sky-settings.weatherArchetype` storing the ID rather
+        than four numbers, authoritative INSTEAD of `cloudCover01` and never alongside it (a row
+        carries all four axes; `custom` is the one state cover must describe). Dragging the Cloud
+        slider writes cover + `custom` in one edit, so the STORE cannot hold the lie the runtime
+        label already prevents. Dial split: slider shows the target, Face shows `cloudCoverEased01`.
+        9,700 assertions green.
+      · ⚠️ REPO-WIDE, found during this work and fixed in `4e8d008`: **`master` HEAD did not
+        build.** `vt-pan-viewer.js:179` imported `publishGlobalLightWindow`, which
+        `foundry/index.js` only mentions in a comment; proven by bundling an isolated
+        `git worktree` of HEAD. Only the uncommitted tree ran. The ~55-file working tree was
+        committed in nine themed commits (`f6cfbd2`..`aede3a7`) at the author's instruction;
+        a clean checkout now bundles (5.5 MB, exit 0). ⚠️ Structure is STILL red and was NOT
+        papered over: `time/one-clock` 41 vs bound 38 (I did not raise the bound — re-freezing
+        someone else's growth silently resets the high-water mark, and that is the author's
+        call), and `no-gpu-readback` 1 from the vision work's `readRenderTargetPixelsAsync`,
+        which needs either a blessed exemption or a different mechanism.
 - [ ] Wind field LIVE verdict (bench: vegetation + particles both reading the same field).
 - [ ] Lightning bolts LIVE verdict.
 - [ ] Clouds v1 per the existing design doc (layer + drift + cloud shadows on the world).

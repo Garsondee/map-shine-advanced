@@ -60,6 +60,10 @@ import { resolveRendererRequiredLimits, planImageTiles, WEBGPU_SPEC_MIN_TEXTURE_
 // PIXI zoomed out" fix). The encoder core is block-compress.js (Node-tested).
 // Intra-zone (vt/), no door.
 import { mipChainByteLength } from './block-compress.js';
+// The CAS zoom-out sharpness repair — split into its own module 2026-08-15 so
+// the shader lab (which cannot load this file's Foundry-coupled transitive
+// imports) can import the real node-building functions directly. Intra-zone.
+import { buildAlbedoClarityNode, buildFlatAlbedoNode, isAlbedoClarityEnabled } from './albedo-clarity.js';
 // The BC-compression client (worker + IndexedDB cache). Opaque whole images come
 // back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
@@ -70,7 +74,7 @@ import {
   getCompressedTextureStats,
   PRIORITY_INTERACTIVE,
 } from './compressed-textures.js';
-import { createSettleTracker } from './settle.js';
+import { createSettleTracker, createReadinessRegistry, READINESS_STAGE } from './settle.js';
 import {
   buildCoverageCellMask,
   buildCoverageIndices,
@@ -176,9 +180,13 @@ import {
   // gate the darkness write-back above cannot close by itself. See
   // `deriveGlobalLightWindow`'s own header.
   deriveGlobalLightWindow,
-  publishGlobalLightWindow,
   shouldPublishGlobalLightWindow,
   readSceneGlobalLightRaw,
+  // THE VISION-SOURCE READER (Pillar 11) — consumes Foundry's own wall-swept
+  // polygons; never reproduces the vision ruleset.
+  readActiveVisionSources,
+  readIsGM,
+  setVisibilitySuppression,
   readSceneAmbient,
   readGamePaused,
   watchGamePaused,
@@ -200,7 +208,7 @@ import {
   mapElevation,
   buildElevationTable,
 } from '../scene/occlusion.js';
-import { buildEnvSnapshot, createDayClock } from '../world/index.js';
+import { buildEnvSnapshot, createDayClock, createWeatherManager, WEATHER_AXES } from '../world/index.js';
 import {
   buildEnvironmentalLightMaterials,
   blendSunVisibilityAcrossFloors,
@@ -214,6 +222,16 @@ import {
   computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
+  // THE VISION MASK (Pillar 11) — the rasteriser, plus the rule's threshold.
+  // `decideRevealed` itself is the CPU twin the composite shader mirrors.
+  createVisionMaskSubsystem,
+  buildVisionGateMaterial,
+  buildVisionExploredDimMaterial,
+  buildVisionSnapshotPublishMaterial,
+  VISION_GATE_BUILD_TAG,
+  decideFogGating,
+  REVEAL_ILLUMINATION_THRESHOLD,
+  EXPLORED_DIM_FACTOR,
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,
   buildRegionPolygonMaterial,
@@ -879,20 +897,22 @@ export async function startVtPanViewer({
   // the torture fixture, which deliberately does not profile — so every call
   // below is optional-chained rather than assuming a profiler exists.
   profiler = null,
-  // APERTURE-GOBO WALL-SEGMENT CACHE INVALIDATION (2026-08-09) — a GETTER,
-  // exactly like `getWindHandle`'s own "getters vs values" trap (this file's
-  // header): boot.js is the only place allowed to register the raw
-  // createWall/updateWall/deleteWall hooks (`foundry/adapter-only`), so it
-  // owns the counter and bumps it; point-light-pool.js reads it once per
-  // frame to decide whether its cached, aperture-filtered wall segments are
-  // still good for the current floor. Defaulted (not required) so the
-  // torture/soak fixture below — which passes no wall/document context at
-  // all — still constructs a working pool; a version that never advances
-  // just means the cache never invalidates, which is correct for a fixture
-  // with no walls that ever change.
-  getApertureWallVersion = () => 0,
+  // WALL-STRUCTURE VERSION (2026-08-09, renamed 2026-08-15 from
+  // `getApertureWallVersion` — see boot.js's own declaration for why) — a
+  // GETTER, exactly like `getWindHandle`'s own "getters vs values" trap
+  // (this file's header): boot.js is the only place allowed to register the
+  // raw createWall/updateWall/deleteWall hooks (`foundry/adapter-only`), so
+  // it owns the counter and bumps it; point-light-pool.js reads it once per
+  // frame to decide whether its cached, aperture-filtered wall segments AND
+  // its candle/lightning/fire/regular-light wall-CLIP SHAPE caches are still
+  // good for the current floor. Defaulted (not required) so the torture/soak
+  // fixture below — which passes no wall/document context at all — still
+  // constructs a working pool; a version that never advances just means
+  // those caches never invalidate, which is correct for a fixture with no
+  // walls that ever change.
+  getWallStructureVersion = () => 0,
   // VIDEO-CAPTURE FRAME CAP (2026-08-10, author-requested) — a GETTER, same
-  // "getters vs values" reasoning as getApertureWallVersion just above:
+  // "getters vs values" reasoning as getWallStructureVersion just above:
   // foundry/camera-path-player.js's play state changes on its own schedule,
   // not this function's, so renderFrame must read it live each tick rather
   // than capture a stale snapshot at construction time. Defaulted to a
@@ -1309,6 +1329,12 @@ export async function startVtPanViewer({
     // On WebGL2 or when there's no adapter, this stays undefined and three
     // picks its defaults; a device that genuinely can't be created still trips
     // the safety slide below.
+    // NAME THE DEVICE WAIT. `resolveRendererRequiredLimits` queries the adapter
+    // and `renderer.init()` creates the WebGPU device — on a cold driver that
+    // is seconds, and until now it happened with the previous phase's label
+    // still on screen and no counter moving. An unlabeled wait reads as a
+    // freeze; this is the same fix MASKS got in 2026-07-17.
+    onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'asking the GPU for its limits' });
     const requiredLimits = await resolveRendererRequiredLimits();
     // `trackTimestamp: true` REQUESTS the per-render-pass GPU timer. It is a
     // CONSTRUCTOR-ONLY flag (three.webgpu.js:64637) that three then ANDs with the
@@ -1318,7 +1344,14 @@ export async function startVtPanViewer({
     // well. Requesting it here does NOT turn measurement on; see the two lines
     // after init().
     const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits, trackTimestamp: true });
+    onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'creating the graphics device' });
     await renderer.init(); // REQUIRED before any use — the backend is chosen here
+    onLoadProgress?.({
+      phase: 'device',
+      done: 1,
+      total: 1,
+      detail: renderer.backend?.isWebGPUBackend ? 'WebGPU' : 'WebGL2',
+    });
     // CAPTURE THE CAPABILITY, THEN PARK THE FLAG. Post-init the flag is
     // `requested && hasFeature`, so this one read is the honest answer to "can
     // this device time passes at all". Setting it back to false immediately means
@@ -1329,6 +1362,27 @@ export async function startVtPanViewer({
       renderer.backend.__msaTimestampCapable = renderer.backend.trackTimestamp === true;
       renderer.backend.trackTimestamp = false;
     }
+
+    /**
+     * THE READINESS REGISTRY (vt/settle.js) — every subsystem that can still be
+     * busy after the loading screen would otherwise lift registers here.
+     *
+     * DECLARED THIS EARLY ON PURPOSE. It is a `const` in a ~17k-line closure
+     * whose subsystems are constructed at wildly scattered line numbers, and a
+     * `const` has a temporal dead zone: a subsystem built at line 5,000 reaching
+     * for a registry declared at line 10,000 is a live ReferenceError, which is
+     * exactly how `bakeWindField` and the particle engine were both caught
+     * (see their own comments near `setAnimationLoop`). Right after
+     * `renderer.init()` is the earliest point at which anything exists to
+     * measure, so nothing downstream can be too early.
+     *
+     * The built-in streaming counters are seeded reading zero and bound to
+     * their real sources by `bindStreamingReadinessProbes()` below, once the
+     * closures they read actually exist.
+     */
+    const readiness = createReadinessRegistry();
+    /** Pack (mask/coarse-pin) pages requested but not yet uploaded. See requestDecodeUpload. */
+    let packPagesInFlight = 0;
 
     // PIXEL-RATIO PARITY (2026-07-19 — "MSA mushes the artwork's pen outlines
     // away when zoomed out; PIXI keeps them crisp"). This used to hard-code
@@ -1761,6 +1815,25 @@ export async function startVtPanViewer({
       describePointLightMergedMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH })
     );
 
+    // `scene.colorMapOnly` — the dim-explored-zone slice's map-only capture.
+    //
+    // ⚠️ MUST BE MRT-SHAPED, THE SAME AS `scene.color` ITSELF — NOT a plain
+    // `describeSceneColor()` single attachment (found live, WGSL compile
+    // errors on every vision pipeline: "structures must have at least one
+    // member"). `buildWholeImageMaterial`'s REAL WRITERS (base map/tile art —
+    // `vt/scene-attr.js`'s own header) carry their OWN `material.mrtNode`,
+    // independent of whatever the renderer-global MRT is set to (a
+    // PER-MATERIAL override that MERGES OVER, never conditional on, the
+    // global). Rendering those SAME, unmodified materials (deliberately reused
+    // — see `captureMapOnlySnapshot()`'s own header) into a target with no
+    // attachment named 'attr' leaves their own mrtNode's key unmatched, and
+    // an MRT output struct with EVERY key unmatched has ZERO members — the
+    // exact empty-struct WGSL error this produced. `describeSceneAttrMrt`
+    // gives this target a second, real 'attr' attachment so the match
+    // succeeds; its contents are simply never read by anything.
+    const describeSceneColorMapOnlyMrt = () => describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
+    const sceneColorMapOnly = allocator.create('scene.colorMapOnly', describeSceneColorMapOnlyMrt());
+
     // ========================================================================
     // UI-SHADOW — open Foundry windows cast a soft offset shadow (2026-07-20).
     // ========================================================================
@@ -2091,6 +2164,77 @@ export async function startVtPanViewer({
       return body;
     }
 
+    // ── THE VISION MASK (Pillar 11, docs/planning/Vision-Fog-Ownership.md) ──
+    /**
+     * MSA OWNS VISION/FOG — **ON BY DEFAULT**, on the author's explicit
+     * instruction (2026-08-15: *"always ship as on by default, not behind a
+     * button or console command"*), which matches the project's standing
+     * `feedback_default_on_new_features` posture.
+     *
+     * There is deliberately NO user-facing toggle. The revert lever Law 5
+     * requires is the ERROR PATH instead of a switch: `runVisionGatePass`
+     * hands `canvas.visibility` straight back to Foundry the moment MSA cannot
+     * gate correctly, which is a better safety slide than a button nobody
+     * presses in the ten seconds a live session gives them.
+     *
+     * ⚠️ WHAT THIS TURNS ON, stated plainly because it is the most
+     * consequential default in the module: Foundry's own `canvas.visibility`
+     * is suppressed and MSA draws the fog. A bug here does not look like a
+     * missing effect — it shows players the map. That is why the gate is hard
+     * 1/0 with no partial reveal, why it runs after every additive draw and
+     * before bloom, and why `decideRevealed` is Node-tested as a CPU twin
+     * rather than trusted to the shader alone (Law 7).
+     */
+    let visionOwnershipEnabled = true;
+    /** The last gating decision + why — for the Diagnostics report. "Fog is
+     *  wrong" has several causes (no sources, a failed read, a GM shortcut)
+     *  that all look like the same screen, so the REASON is reported, not just
+     *  the boolean (`feedback_instruments_must_not_lie`). */
+    let lastVisionGating = null;
+    /** Non-null once the gate has failed and fog was handed back to Foundry —
+     *  surfaced in the report so a silent fallback is never invisible. */
+    let lastVisionGateError = null;
+    /** `performance.now()` of the last map-only capture + snapshot publish —
+     *  see `SNAPSHOT_PUBLISH_INTERVAL_MS`'s own note for why this is
+     *  throttled rather than run every frame. Starts at 0 so the FIRST vision
+     *  frame always publishes immediately, not after one full interval. */
+    let lastSnapshotPublishAt = 0;
+    /** Total successful capture+publish ticks this session — the report's
+     *  own proof the mechanism ever RAN, not just that it was wired in
+     *  (`feedback_diagnostics_must_land_in_perf_report`: a claim nobody can
+     *  check from a pasted-back report is worth nothing when a live symptom
+     *  needs diagnosing without testing it live). */
+    let snapshotPublishCount = 0;
+    /** Non-null once a capture/publish tick has thrown — surfaced so a
+     *  silent failure of THIS specific mechanism is distinguishable from
+     *  "never ran" and from "ran fine" purely by reading the report. */
+    let lastSnapshotError = null;
+    /** Most recent `visionMask.probeSnapshotColor()` result (or an error
+     *  string) — a REAL pixel read, not just "the draw ran". Updated
+     *  fire-and-forget, roughly every 2.5s (see its own call site), never
+     *  awaited from the render loop — a GPU readback is a real stall, this
+     *  diagnostic is not worth paying it on every publish tick. */
+    let lastSnapshotPixelProbe = null;
+    /** Most recent `probeMapOnlyGrid()` result (or an error string) — see
+     *  that function's own doc. Same fire-and-forget, same cadence as
+     *  `lastSnapshotPixelProbe`, fired alongside it. */
+    let lastMapOnlyProbe = null;
+    // Exploring is a slow, deliberate action (a player walks over SECONDS,
+    // not milliseconds) — a snapshot that lags real position by up to this
+    // long is visually indistinguishable during normal play, and this is
+    // what keeps `captureMapOnlySnapshot()`'s extra world-draw (performance
+    // priority #1) off the steady-state per-frame budget entirely.
+    const SNAPSHOT_PUBLISH_INTERVAL_MS = 250;
+    // resolvedW/resolvedH: the REAL initial drawing-buffer size, not the
+    // subsystem's own 1×1 default — a screenSized target with no real size at
+    // create() renders nothing useful until its first resize() call, and (see
+    // reallocateScreenSizedTargets below) had none at all until 2026-08-15.
+    const visionMask = createVisionMaskSubsystem({ THREE, allocator, resolvedW: drawBufW, resolvedH: drawBufH });
+    /** The world rect the explored buffer covers, pushed to the gate shader.
+     *  Kept in lockstep with `visionMask.setExploredRect` — two copies of one
+     *  rect is exactly how a sampling offset gets born, so both are written
+     *  from the SAME call site below and nowhere else. */
+    const uVisionExploredRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
@@ -2118,6 +2262,76 @@ export async function startVtPanViewer({
       depthFlagsTexture: sceneDepth.texture ?? null,
     });
     envLight.setOutdoorsRect(outdoorsRect);
+
+    /**
+     * The fullscreen vision gate quad (Pillar 11). Built ONCE — its material
+     * embeds the mask, explored and illum textures by identity, and all three
+     * are stable for the viewer's lifetime.
+     *
+     * ⚠️ CONSTRUCTED **AFTER** `envLight`, AND THAT ORDER IS LOAD-BEARING, NOT
+     * TIDINESS. It reads `envLight.uViewRect` — a real TSL uniform NODE, which
+     * must EXIST at material-build time (unlike a per-frame value, a node
+     * cannot be deferred behind a getter). Placing this above the
+     * `const envLight` declaration threw
+     * `ReferenceError: Cannot access 'envLight' before initialization` on the
+     * author's live server and dropped MSA to the Foundry fallback — the exact
+     * TDZ trap this file's own "GETTERS VS VALUES" header already documents
+     * for `getWindHandle`, hit again from the other direction.
+     *
+     * ⚠️ AND `npm run verify` CANNOT CATCH THIS. esbuild resolves the import
+     * graph, the Node suites never construct the viewer, and a TDZ violation
+     * is a RUNTIME error inside one function body. Only starting the real
+     * viewer finds it. "Bundles clean" says nothing whatsoever about
+     * construction order.
+     */
+    const visionGateQuad = new THREE.QuadMesh(
+      buildVisionGateMaterial({
+        THREE,
+        maskTexture: visionMask.texture,
+        illumTexture: sceneIllum.texture,
+        threshold: REVEAL_ILLUMINATION_THRESHOLD,
+      })
+    );
+    // THE EXPLORED-DIM QUAD (finishes slice 3) — a SECOND fullscreen pass,
+    // additive-blended, run immediately after `visionGateQuad` above so it
+    // paints the remembered map into the exact zone that quad just
+    // multiplied to black. See `buildVisionExploredDimMaterial`'s own header
+    // for why this had to be a separate quad rather than a term in the first
+    // one, and why it cannot leak live content the way a naive version once
+    // would have (`docs/planning/Vision-Fog-Ownership.md` §4 slice 3's boxed
+    // note).
+    const visionExploredDimQuad = new THREE.QuadMesh(
+      buildVisionExploredDimMaterial({
+        THREE,
+        maskTexture: visionMask.texture,
+        illumTexture: sceneIllum.texture,
+        threshold: REVEAL_ILLUMINATION_THRESHOLD,
+        exploredTexture: visionMask.exploredTexture,
+        exploredSnapshotTexture: visionMask.exploredSnapshotTexture,
+        uViewRect: envLight.uViewRect,
+        uExploredRect: uVisionExploredRect,
+        dimFactor: EXPLORED_DIM_FACTOR,
+      })
+    );
+    // THE SNAPSHOT PUBLISH QUAD — a plain screen-space `QuadMesh`, SAME
+    // convention as `visionGateQuad`/`visionExploredDimQuad` above, just
+    // bound to `exploredSnapshotTarget` instead of `scene.lit` when rendered
+    // (see the vision block below). REBUILT 2026-08-16 from a world-space
+    // mesh/camera/positionWorld chain that published data without error but
+    // was PROVEN wrong by a live pixel-probe — see the material's own header
+    // for the full account of why this shape is trusted more, not just
+    // simpler.
+    const visionSnapshotPublishQuad = new THREE.QuadMesh(
+      buildVisionSnapshotPublishMaterial({
+        THREE,
+        mapOnlyTexture: sceneColorMapOnly.texture,
+        maskTexture: visionMask.texture,
+        illumTexture: sceneIllum.texture,
+        threshold: REVEAL_ILLUMINATION_THRESHOLD,
+        uViewRect: envLight.uViewRect,
+        uExploredRect: uVisionExploredRect,
+      })
+    );
     // No one-time initial rect push needed any more (2026-08-02): each slot's
     // OWN `uRect` uniform already starts at the same (0,0,1,1) placeholder the
     // single field used to, and gets its real rect the moment ITS OWN first
@@ -2639,7 +2853,7 @@ export async function startVtPanViewer({
     const pointLights = createPointLightPool({
       THREE,
       getWindHandle: () => windHandle,
-      getApertureWallVersion,
+      getWallStructureVersion,
       envLight,
       blendSunVisibilityAcrossFloors,
       sceneColor,
@@ -4852,6 +5066,143 @@ export async function startVtPanViewer({
       renderer.setClearDepth(prevClearDepth);
       profiler?.end(Z.geomDepthRestore);
     }
+
+    /**
+     * THE MAP-ONLY CAPTURE (dim-explored-zone slice) — re-renders `scene`
+     * through the SAME `camera`, with every token/vegetationOverlay mesh
+     * temporarily hidden, into `scene.colorMapOnly`. Called from the vision
+     * block in `runLightAccumulatePass`, on a throttle — NOT every frame.
+     *
+     * ⚠️ WHY REUSE `scene`/`camera` AND THE REAL MATERIALS RATHER THAN BUILD
+     * A PARALLEL ONE. The alternative — a second, purpose-built material that
+     * independently re-samples each item's albedo — would have to be kept in
+     * sync with `buildWholeImageMaterial` by hand forever (clarity, solidity
+     * alpha, occlusion reject, uv scale...) and is exactly the kind of
+     * hand-maintained duplicate that silently drifts. Toggling `.visible` for
+     * one extra `render()` call costs a property write per hidden mesh and
+     * touches nothing about how any material builds its own output.
+     *
+     * ⚠️ TOKENS ARE EXCLUDED BY CONSTRUCTION, NOT BY A MASK. A hidden mesh is
+     * never submitted to the draw at all — there is no fragment for a later
+     * shader to accidentally reveal. This is what makes the eventual dim
+     * reveal (`vision-mask.js`'s own header) safe to raise above 0: the
+     * buffer this reads from structurally cannot contain a token.
+     *
+     * ⚠️ DOORS ARE ALSO EXCLUDED, deliberately conservative rather than
+     * proven necessary: `renderDoorGraphicsInto()` is simply never called
+     * here. A door's open/closed state is dynamic in the same sense a token's
+     * position is, and this capture has no cheap way to tell "this door leaf
+     * is effectively permanent scenery" from "this door just changed state" —
+     * so it stays out, same as tokens, until a reason to special-case it
+     * shows up.
+     *
+     * Saves and restores each hidden mesh's PRIOR `.visible` value (never
+     * forces `true`) — a mesh already invisible for its own reason (off
+     * residency window, isolate-item debug mode, a GM-hidden token) must stay
+     * invisible after this returns, exactly as it was before this ran.
+     */
+    function captureMapOnlySnapshot() {
+      const restore = [];
+      for (const item of lastItems) {
+        if (item.kind === 'token') {
+          const tiles = itemStates.get(item.id)?.wholeImage?.tiles;
+          for (const t of tiles ?? []) {
+            if (!t.mesh) continue;
+            restore.push([t.mesh, t.mesh.visible]);
+            t.mesh.visible = false;
+          }
+        } else if (item.kind === 'vegetationOverlay') {
+          const hostState = itemStates.get(item.vegHostItemId);
+          const overlay = hostState?.vegetationOverlays?.[item.vegKindId];
+          if (!overlay?.mesh) continue;
+          restore.push([overlay.mesh, overlay.mesh.visible]);
+          overlay.mesh.visible = false;
+        }
+      }
+
+      // ⚠️ MUST BE `sceneAttrZeroMrt`, NOT `null` (found live — see
+      // `sceneColorMapOnly`'s own descriptor comment for the full WGSL-error
+      // account). The floor-art materials this reuses carry their OWN
+      // `material.mrtNode`, independent of the renderer-global value — `null`
+      // here does not stop THEIR override from trying to write an 'attr'
+      // attachment this target didn't have. `sceneAttrZeroMrt` is the SAME
+      // renderer-global default `runGeometryWorldPass` itself sets, and
+      // `sceneColorMapOnly` now carries the matching real 'attr' attachment,
+      // so both the per-material override and the safe-default fallback find
+      // a home. Scoped, never left set — same save/restore discipline as
+      // every other MRT touch in this file.
+      const previousMRT = renderer.getMRT();
+      renderer.setMRT(sceneAttrZeroMrt);
+      const prevCaptureClear = renderer.getClearColor(new THREE.Color());
+      const prevCaptureAlpha = renderer.getClearAlpha();
+      renderer.setRenderTarget(sceneColorMapOnly);
+      // ⚠️ ALPHA 1, NOT 0 — every material this reuses is `transparent:
+      // true` (buf:scene.attr's own header confirms this for the whole
+      // unified world draw), so a soft edge or any authored fade blends
+      // NORMALLY (dst*(1-srcA) + src*srcA) against whatever this clears to.
+      // The REAL draw (runGeometryWorldPass, `scene.color`) never starts
+      // from a zero-alpha target — clearing to 0 here was an unreasoned
+      // default, not a deliberate choice, and is the first suspect for a
+      // live report of this capture reading back near-black even at a
+      // position that is provably currently revealed. Costs nothing: this
+      // target's own alpha is never read by anything downstream (the
+      // publish quad samples `.rgb` only).
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear(true, false, false);
+      renderer.render(scene, camera);
+      renderer.setClearColor(prevCaptureClear, prevCaptureAlpha);
+      renderer.setRenderTarget(null);
+      renderer.setMRT(previousMRT);
+
+      for (const [mesh, wasVisible] of restore) mesh.visible = wasVisible;
+    }
+
+    /**
+     * A coarse 5-point grid readback of `scene.colorMapOnly` — added
+     * 2026-08-16 chasing a live report where `exploredSnapshotTarget` itself
+     * read back near-black (r:3,g:3,b:1) even sampled at the controlled
+     * token's own guaranteed-currently-revealed position. That result alone
+     * cannot distinguish "the capture itself is empty" from "the capture is
+     * fine but the publish/reprojection step loses it" — this settles which.
+     *
+     * ⚠️ DELIBERATELY SCREEN-CENTRE-RELATIVE, NOT WORLD-POSITION-TARGETED —
+     * unlike `probeSnapshotColor` (which needs an exact world→buffer mapping
+     * and therefore inherits that mapping's Y-convention risk), this only
+     * needs to answer "is ANYTHING non-black in the current capture", so it
+     * samples fixed screen UVs (0.5,0.5 plus the four quarter-points) where a
+     * mis-oriented Y axis still lands inside the same on-screen content —
+     * cheaper to get right than a second exact-position derivation.
+     *
+     * `sceneColorMapOnly`'s attachment 0 is `HalfFloatType` (`scene.color`'s
+     * own shape, `describeSceneAttrMrt`'s own comment) — half-float bytes,
+     * decoded with `THREE.DataUtils.fromHalfFloat`, the SAME decode this
+     * file's own scene.color self-test probe already uses and for the same
+     * reason (a hand-rolled second decoder is how one decode bug becomes two
+     * that disagree).
+     */
+    async function probeMapOnlyGrid() {
+      const w = sceneColorMapOnly.width;
+      const h = sceneColorMapOnly.height;
+      const points = [
+        { name: 'center', u: 0.5, v: 0.5 },
+        { name: 'q1', u: 0.25, v: 0.25 },
+        { name: 'q2', u: 0.75, v: 0.25 },
+        { name: 'q3', u: 0.25, v: 0.75 },
+        { name: 'q4', u: 0.75, v: 0.75 },
+      ];
+      const samples = [];
+      for (const p of points) {
+        const px = Math.round(p.u * (w - 1));
+        const py = Math.round(p.v * (h - 1));
+        const raw = await renderer.readRenderTargetPixelsAsync(sceneColorMapOnly, px, py, 1, 1, 0, 0);
+        const r = THREE.DataUtils.fromHalfFloat(raw[0]);
+        const g = THREE.DataUtils.fromHalfFloat(raw[1]);
+        const b = THREE.DataUtils.fromHalfFloat(raw[2]);
+        samples.push({ name: p.name, rgb: [+r.toFixed(3), +g.toFixed(3), +b.toFixed(3)] });
+      }
+      return samples;
+    }
+
     function runPresentCompositePass() {
       // THE SUN-SHADOW DEBUG VIEW (author, 2026-07-26) — when a view is picked
       // it REPLACES the present entirely rather than blending over it: the
@@ -4926,11 +5277,6 @@ export async function startVtPanViewer({
       const raisedBackground = maxRgb(background, lastGlobalLightFloor);
 
       envLight.setAmbient(raisedBackground);
-      // THE SKY LIGHT's screen→world gate needs THIS frame's camera rect. Pushed
-      // here, beside setAmbient, because the two are the same kind of thing —
-      // per-frame scalars the illumination pass reads — and separating them is
-      // how one of them ends up updated on a different cadence from the other.
-      if (view) envLight.setViewRect(viewToWorldRect(view, canvasW / canvasH));
       profiler?.end(Z.lightAmbient);
 
       // SUN SHADOWS — re-march ONLY if the quantised sun, the masks, a floor
@@ -5300,6 +5646,198 @@ export async function startVtPanViewer({
       }
       profiler?.end(Z.lightDrawWindow);
       renderer.autoClearColor = previousAutoClearColor;
+
+      // ── THE VISION MASK (Pillar 11) ────────────────────────────────────
+      // Drawn AFTER the illum sequence's autoClearColor guard is restored,
+      // because this pass owns a DIFFERENT target and genuinely wants a fresh
+      // clear every frame — a stale vision mask is the one failure the
+      // composite cannot detect (it cannot tell last frame's buffer from this
+      // frame's), so `update()` clears explicitly rather than inheriting
+      // whatever the previous sequence left the flag as.
+      //
+      // Runs even when the takeover flag is OFF: the mask is then simply not
+      // sampled by the composite (it was not compiled in), but keeping the
+      // rasteriser live means its cost, pool health and gating decision are
+      // all observable in the report BEFORE anyone flips the flag — the
+      // alternative is discovering it never worked on the day it becomes
+      // player-visible.
+      profiler?.begin(Z.lightDrawVisionMask);
+      {
+        const visionRead = readActiveVisionSources();
+        const gating = decideFogGating({
+          sourceCount: visionRead.sources.length,
+          isGM: readIsGM(),
+          readFailed: visionRead.source === 'default' && visionRead.reason !== null,
+        });
+        lastVisionGating = { ...gating, sourceCount: visionRead.sources.length, readReason: visionRead.reason };
+        // ⚠️ BEFORE `sync()`, NOT AFTER. `setExploredRect` is what schedules
+        // the one-shot clear, and `sync()` is what CONSUMES that flag into
+        // `explored.clearFirst`. Setting the rect afterwards would delay every
+        // wipe by a frame — so a scene change would accumulate one frame of
+        // the NEW scene's exploration into the OLD scene's buffer before
+        // clearing it.
+        //
+        // ⚠️ THE **SCENE** RECT, NOT THE PADDED CANVAS. `dimensions.width/
+        // height` are the padded canvas (~1.5× the art, with the art inset at
+        // `sceneRect`), so binding to those would spend most of the 2048²
+        // explored buffer on empty padding and shrink the real map's own
+        // resolution for nothing — the same distinction the wind bake grid
+        // already had to be corrected for (see its own call site).
+        {
+          const sr = dimensions.sceneRect;
+          visionMask.setExploredRect({
+            minX: sr.x,
+            minY: sr.y,
+            maxX: sr.x + sr.width,
+            maxY: sr.y + sr.height,
+          });
+          const r = visionMask.getExploredRect();
+          uVisionExploredRect.value.set(r[0], r[1], r[2], r[3]);
+        }
+        // `sync` only reconciles geometry and RETURNS the draw to perform —
+        // it deliberately never touches the renderer (`renderer-state/
+        // graph-only`; the structure check caught an earlier cut of it binding
+        // its own target, and the wall was right). The frame host does the
+        // binding, exactly as it already does for regionScene/lightScene.
+        const visionDraw = visionMask.sync({
+          sources: visionRead.sources,
+          gate: gating.gate,
+        });
+        renderer.setRenderTarget(visionDraw.target);
+        const prevVisionClear = renderer.getClearColor(new THREE.Color());
+        const prevVisionAlpha = renderer.getClearAlpha();
+        renderer.setClearColor(visionDraw.clearColor, 1);
+        renderer.clear(true, false, false);
+        // An ungated frame wants the WHITE clear and nothing else — every mesh
+        // is hidden, so rendering the scene would be a no-op draw call. Skip it
+        // rather than pay for it on every GM frame.
+        if (visionDraw.drawn > 0) renderer.render(visionDraw.scene, camera);
+        renderer.setClearColor(prevVisionClear, prevVisionAlpha);
+        renderer.setRenderTarget(null);
+
+        // ── EXPLORED-AREA ACCUMULATION (slice 3) ────────────────────────
+        // The SAME fan scene, drawn again through a world-space ortho camera
+        // into a buffer that is NEVER cleared. That second draw is what gives
+        // players a remembered map: suppressing `canvas.visibility` takes
+        // Foundry's explored memory away along with its live cone, so without
+        // this the moment a player looked away everything they had mapped
+        // would go black.
+        //
+        // Bound to the SCENE rect (not the view rect) so panning cannot smear
+        // exploration across the map — and re-bound only when the scene
+        // dimensions actually change, because re-binding wipes exploration.
+        const exploredDraw = visionDraw.explored;
+        if (exploredDraw?.camera && gating.gate) {
+          renderer.setRenderTarget(exploredDraw.target);
+          if (exploredDraw.clearFirst) {
+            const prevExpClear = renderer.getClearColor(new THREE.Color());
+            renderer.setClearColor(0x000000, 1);
+            renderer.clear(true, false, false);
+            renderer.setClearColor(prevExpClear, prevVisionAlpha);
+          }
+          // NEVER auto-clear: this buffer accumulates for the whole session.
+          const prevExpAuto = renderer.autoClearColor;
+          renderer.autoClearColor = false;
+          if (visionDraw.drawn > 0) renderer.render(visionDraw.scene, exploredDraw.camera);
+          renderer.autoClearColor = prevExpAuto;
+          renderer.setRenderTarget(null);
+        }
+
+        // ── EXPLORED SNAPSHOT PUBLISH (dim-explored-zone slice) ──────────
+        // Throttled (see `SNAPSHOT_PUBLISH_INTERVAL_MS`'s own note) and
+        // skipped entirely when nothing is currently revealed (`drawn ===
+        // 0`) — with an empty mask the publish quad's own reveal test would
+        // be false everywhere anyway, so the capture would cost a full extra
+        // world-draw for zero writes.
+        if (exploredDraw?.camera && gating.gate && visionDraw.drawn > 0) {
+          const now = performance.now();
+          if (now - lastSnapshotPublishAt >= SNAPSHOT_PUBLISH_INTERVAL_MS) {
+            lastSnapshotPublishAt = now;
+            // ⚠️ ISOLATED, NEVER LEFT SILENT. This is new, unverified-live
+            // code (2026-08-16) reusing real materials against a target they
+            // were never built for — exactly the class of thing that threw a
+            // real WGSL error once already during this same build. A throw
+            // here must not take down the rest of the vision block (the live
+            // mask/gate must keep working even if the dim-explored slice
+            // specifically breaks), and must not be invisible either — see
+            // `lastSnapshotError`'s own doc.
+            try {
+              // Step 1: token/vegetationOverlay-excluded capture, screen-space,
+              // through the MAIN camera — see that function's own header.
+              captureMapOnlySnapshot();
+              // Step 2: publish it into the persistent world-space snapshot —
+              // a plain fullscreen quad now (see `visionSnapshotPublishQuad`'s
+              // own construction comment), gated on the SAME reveal test the
+              // live gate uses, built into the publish material itself.
+              const snapshotDraw = visionDraw.snapshot;
+              renderer.setRenderTarget(snapshotDraw.target);
+              if (snapshotDraw.clearFirst) {
+                const prevSnapClear = renderer.getClearColor(new THREE.Color());
+                renderer.setClearColor(0x000000, 1);
+                renderer.clear(true, false, false);
+                renderer.setClearColor(prevSnapClear, prevVisionAlpha);
+              }
+              // NEVER auto-clear: persistent, same as the boolean buffer above.
+              const prevSnapAuto = renderer.autoClearColor;
+              renderer.autoClearColor = false;
+              visionSnapshotPublishQuad.render(renderer);
+              renderer.autoClearColor = prevSnapAuto;
+              renderer.setRenderTarget(null);
+              snapshotPublishCount++;
+              lastSnapshotError = null;
+              // Every ~10th tick (~2.5s at the 250ms throttle) — see
+              // `lastSnapshotPixelProbe`'s own doc for why this is NOT every
+              // tick. Fire-and-forget: never await a GPU readback from the
+              // render loop. Sampled at the FIRST active vision source's own
+              // world position — the controlled token's own feet — which is
+              // guaranteed `revealed:true` THIS frame, so a black result here
+              // can only mean the write path, never "nothing is visible
+              // right now".
+              if (snapshotPublishCount % 10 === 0 && visionRead.sources[0]) {
+                const probeSrc = visionRead.sources[0];
+                visionMask
+                  .probeSnapshotColor({ renderer, worldX: probeSrc.x, worldY: probeSrc.y })
+                  .then((result) => {
+                    lastSnapshotPixelProbe = { ...result, sampledAt: { x: probeSrc.x, y: probeSrc.y }, ok: true };
+                  })
+                  .catch((err) => {
+                    lastSnapshotPixelProbe = { ok: false, error: String(err?.message ?? err) };
+                  });
+                // Fired the SAME tick, at the CAPTURE side rather than the
+                // published side — see `probeMapOnlyGrid`'s own doc for why
+                // this settles capture-vs-publish without a second round.
+                probeMapOnlyGrid()
+                  .then((samples) => {
+                    lastMapOnlyProbe = { ok: true, samples };
+                  })
+                  .catch((err) => {
+                    lastMapOnlyProbe = { ok: false, error: String(err?.message ?? err) };
+                  });
+              }
+            } catch (err) {
+              renderer.setRenderTarget(null);
+              lastSnapshotError = String(err?.message ?? err);
+              log.error('explored-snapshot publish failed — live/black-explored fog keeps working, dim zone will not update', {
+                err: lastSnapshotError,
+              });
+            }
+          }
+        }
+
+        // THE TAKEOVER ITSELF. Re-asserted every frame rather than once at
+        // startup, deliberately: Foundry re-creates and re-enables its own
+        // groups on scene changes, floor switches and `canvasReady`, so a
+        // one-shot suppression silently comes undone — the same lesson the
+        // art-suppression seam already learned (`applyArtSuppression` is
+        // re-asserted too). Cheap: it is a boolean assignment.
+        //
+        // ⚠️ Only ever suppresses while the flag is ON. When OFF this hands
+        // the group straight back to Foundry, which is the safety slide —
+        // never a state where neither renderer is drawing fog.
+        setVisibilitySuppression(visionOwnershipEnabled);
+      }
+      profiler?.end(Z.lightDrawVisionMask);
+
       // COLORATION (increment 3, 2026-07-19) — its OWN target. The FIRST
       // render() call below relies on the ordinary "first render() after
       // setRenderTarget clears" behaviour (autoClearColor restored above),
@@ -5468,6 +6006,62 @@ export async function startVtPanViewer({
     }
 
     /**
+     * vision.gate (docs/planning/Vision-Fog-Ownership.md, Testament Pillar 11)
+     * — ONE fullscreen MULTIPLY over `scene.lit` that hides everything the
+     * viewer is not allowed to see.
+     *
+     * ⚠️ ITS POSITION IN THE FRAME IS THE FEATURE. It runs AFTER every
+     * additive contributor (composite, candle flames, lightning, fire,
+     * specular, particles) because a live run with the gate inside the
+     * composite material showed the map correctly dark while candle flames and
+     * fire particles drew straight through the fog — they never pass through
+     * that quad. And it runs BEFORE `post.bloom`, because bloom smears bright
+     * pixels outward and would otherwise let a hidden candle's glow bleed
+     * across the fog and betray its position through a wall.
+     *
+     * ⚠️ NO EARLY RETURN WHEN "NOTHING IS GATED". Unlike every other optional
+     * pass here, this one always draws while gating is on: the mask itself
+     * already encodes "reveal everything" (cleared to white) for a GM with
+     * nothing selected, so skipping the draw and skipping the gate are NOT the
+     * same thing — the first would leave the previous frame's fog on screen.
+     * The only skip is when MSA does not own vision at all.
+     */
+    function runVisionGatePass() {
+      if (!visionOwnershipEnabled || !visionGateQuad) return;
+      try {
+        profiler?.begin(Z.visionGate);
+        renderer.setRenderTarget(sceneLit);
+        const prevGateAutoClear = renderer.autoClearColor;
+        // MUST NOT CLEAR: this multiplies into a fully-composited scene. A
+        // clear here would erase the entire frame and leave a black screen —
+        // the same trap the illum sequence documents at length.
+        renderer.autoClearColor = false;
+        visionGateQuad.render(renderer);
+        // THEN the dim quad, additive, into the SAME target the gate quad
+        // just multiplied — order matters (see that material's own header):
+        // it relies on the live zone already being exactly black here.
+        visionExploredDimQuad?.render(renderer);
+        renderer.autoClearColor = prevGateAutoClear;
+        renderer.setRenderTarget(null);
+        profiler?.end(Z.visionGate);
+      } catch (err) {
+        // ⚠️ THE SAFETY SLIDE, AS AN ERROR PATH RATHER THAN A BUTTON (Law 5).
+        // If MSA cannot draw the fog, the failure mode must NOT be "no fog" —
+        // that shows every player the whole map. Hand `canvas.visibility`
+        // straight back to Foundry and stop claiming ownership, permanently
+        // for this session: a gate that threw once will throw every frame, and
+        // a per-frame retry would be a stutter AND a strobing information
+        // leak. Foundry's own fog is a complete, working fallback.
+        visionOwnershipEnabled = false;
+        setVisibilitySuppression(false);
+        lastVisionGateError = String(err?.message ?? err);
+        log.error('vision gate failed — handing fog back to Foundry for this session', {
+          err: lastVisionGateError,
+        });
+      }
+    }
+
+    /**
      * post.bloom (docs/planning/Bloom.md) — the dual-filter bloom pyramid, run
      * AFTER surface.particles (scene.lit fully composited) and BEFORE
      * present.composite (the grade). Reads scene.lit, builds the blur pyramid
@@ -5620,6 +6214,7 @@ export async function startVtPanViewer({
       'light.accumulate': runLightAccumulatePass,
       'surface.response': runSurfaceResponsePass,
       'surface.particles': runSurfaceParticlesPass,
+      'vision.gate': runVisionGatePass,
       'post.bloom': runPostBloomPass,
       'post.dof': runPostDofPass,
       'present.composite': runPresentCompositePass,
@@ -5695,9 +6290,11 @@ export async function startVtPanViewer({
      * because the region set it derives from is static almost all the time.
      */
     let lastPublishedGlobalLightWindow = null;
-    /** Mirrors `lastDarknessPublishResult`'s own reasoning — a failed write-back
-     *  must be visible in the report, not indistinguishable from "nothing to do". */
-    let lastGlobalLightPublishResult = null;
+    /** What Foundry actually held for Global Illumination on the most recent
+     *  frame — captured during the publish decision so the report shows the
+     *  same reading the throttle acted on, rather than a fresh read taken at
+     *  report time that could disagree with it. */
+    let lastFoundryGlobalLight = null;
     /** This frame's raw `computeMinimumDarknessFloor` result — refreshed every
      *  frame regardless of the publish throttle, so the report can answer
      *  "why is it disabled" (no protective region vs. floor too low) without
@@ -5713,12 +6310,43 @@ export async function startVtPanViewer({
     const dayClock = createDayClock();
     /** Unsubscribe for the world-clock watcher — only live in `synced` mode. */
     let worldTimeUnsub = null;
-    /** Cloud cover 0..1 — now a real authored value from the sky settings
-     * (world- or scene-scoped), not the debug lever it was. `null` = nothing
-     * has set it, so the DEFAULT_WEATHER clear sky answers. */
-    let cloudCoverOverride = null;
-    /** Who last set `cloudCoverOverride` — see `setCloudCover`'s own doc. */
-    let cloudCoverSource = 'default';
+    /**
+     * ⭐ THE WEATHER MANAGER (docs/planning/Weather-Manager.md, slice 1) — the
+     * env snapshot's weather OWNER, which until 2026-08-16 did not exist.
+     *
+     * What this replaces: a bare `cloudCoverOverride` scalar that was written
+     * straight into `buildEnvSnapshot({weather})` with no easing and no other
+     * axis reachable at all. `world/environment.js` has accepted a `weather`
+     * argument since the day it was written and nothing ever owned it — the gap
+     * `effects/sky-access.js` and `effects/shadow-access.js` both name in their
+     * own headers.
+     *
+     * The visible change: cover now EASES instead of stepping. A GM dragging the
+     * astrolabe's Cloud slider sets a TARGET; the sky walks there over ~2
+     * minutes (tau 120s up / 150s down, `brisk`), which is V2's one universally
+     * praised weather behaviour — clouds never pop — generalised to the whole
+     * state vector.
+     */
+    const weather = createWeatherManager();
+    /** Who last moved a weather target — see `setCloudCover`'s own doc. */
+    let weatherSource = 'default';
+    /**
+     * ⚠️ THE FIRST WRITE JUMPS, EVERY LATER WRITE EASES.
+     *
+     * `boot.js#applyLookToEngines` calls `setCloudCover(...)` on EVERY sky
+     * resolve, and the first of those is the scene load. Easing there would make
+     * an overcast scene visibly fade in from clear every time it opened — an
+     * artefact of nothing, exactly the argument `world/day-clock.js#jumpTo`
+     * already makes for the hour. So the first application lands instantly and
+     * everything after it is a real transition.
+     *
+     * Known limit, stated rather than hidden: this keys off the VIEWER's
+     * lifetime, so it is correct for a scene load only insofar as a scene change
+     * restarts the viewer (it does today — `startVtPanViewer` runs per canvas
+     * build). If that ever stops being true, a scene switch would ease its
+     * weather in instead of jumping, and this flag is where to look.
+     */
+    let weatherEverApplied = false;
     /** The sky-light lever, 0..1. 0 = exact Foundry parity (a mathematical
      * no-op) — see effects/sky-access.js for why the default cannot be else. */
     let skyRealism01 = 0;
@@ -5768,10 +6396,16 @@ export async function startVtPanViewer({
       // rather than re-reading a global. `readSceneAmbient` never throws and
       // reports source/reason exactly like `readSceneDarkness`.
       const ambient = readSceneAmbient();
-      // Weather was previously never passed AT ALL, so `cloudCover01` was
-      // permanently 0 and the atmospheric half of the shadow model could not
-      // be exercised. Same posture: a debug lever over an acknowledged gap.
-      const weather = cloudCoverOverride === null ? undefined : { cloudCover01: cloudCoverOverride };
+      // ⭐ THE WEATHER OWNER, ticked (docs/planning/Weather-Manager.md §4.1).
+      //
+      // ⚠️ ON THE **REAL** DELTA, NOT THE SIM ONE — the opposite of the day
+      // clock two lines above, deliberately. An ease is PRESENTATION PACING
+      // (the same family as V2's 10s sprite fade); a GM slowing the world down
+      // should not stretch a weather transition to ten minutes. The walk that
+      // lands in slice 3 integrates GAME time for the opposite reason, and the
+      // module header spells out why neither is the sim-clock throttle trap.
+      const weatherState = weather.tick(time.realDtSec);
+      const weatherForSnapshot = weather.toSnapshotWeather();
       // ⚠️ `wind` WAS NEVER PASSED AT ALL until 2026-08-15, so `env.wind` was
       // permanently `DEFAULT_WIND` — {0, 0, 0} — no matter what the astrolabe
       // was actually steering. Two consequences, both real:
@@ -5792,7 +6426,7 @@ export async function startVtPanViewer({
       const env = buildEnvSnapshot({
         time,
         todHour,
-        weather,
+        weather: weatherForSnapshot,
         wind: {
           directionDeg: uWindDirectionDeg.value,
           speed01: uWindSpeed01.value,
@@ -5840,47 +6474,65 @@ export async function startVtPanViewer({
       // is a poll throttle. `env.time.realMs` (not the raw tick) because the
       // snapshot applies the `Number.isFinite` fallback for a clock that has not
       // produced one yet.
+      // ── GLOBAL ILLUMINATION'S WINDOW (2026-08-15) — computed here, PUBLISHED
+      // below IN THE SAME CALL AS DARKNESS, never a separate one. This is the
+      // second, independent gate behind "a token outside at noon thinks it's
+      // in the dark" — see `deriveGlobalLightWindow`'s own header for the
+      // full account of why the darkness-level publish alone cannot fix this,
+      // and `publishSceneDarkness`'s own header for why a SEPARATE publish
+      // call for this was a real, live-caught bug (it stomped, and was
+      // stomped by, the darkness call below every time only one of the two
+      // fired). Unfiltered by elevation/floor on purpose: Global Illumination
+      // is one scene-wide toggle, so the window must stay safe for a
+      // darkness-adjusting region on ANY floor, not just the one
+      // `view.floorIndex` currently renders.
+      const { regions: allActiveDarknessRegions } = readActiveDarknessRegions();
+      const minDarknessRegionFloor = computeMinimumDarknessFloor(allActiveDarknessRegions);
+      lastMinDarknessRegionFloor = minDarknessRegionFloor;
+      const nextGlobalLightWindow = deriveGlobalLightWindow(minDarknessRegionFloor);
       const darknessNowMs = env.time.realMs;
+      // `liveGlobalLight` is read so the throttle can notice that something
+      // ELSE re-initialised the environment and wiped our window back to the
+      // scene document's own `enabled:false` — see
+      // `shouldPublishGlobalLightWindow`'s own header for why a change-only
+      // throttle is not sufficient here, and why observing our own output to
+      // RE-ASSERT it is not the read-back loop §2.2 forbids.
+      const liveGlobalLight = readSceneGlobalLightRaw();
+      lastFoundryGlobalLight = liveGlobalLight;
+      const globalLightWindowChanged = shouldPublishGlobalLightWindow(
+        nextGlobalLightWindow,
+        lastPublishedGlobalLightWindow,
+        liveGlobalLight,
+        darknessNowMs,
+        lastPublishedDarknessAtMs
+      );
+
+      // OR'd with the window's own change flag: darkness may sit still for a
+      // long time (a static time of day), and if a GM edits a region's
+      // modifier during that stillness, the window needs to publish on ITS
+      // own schedule too — see `shouldPublishGlobalLightWindow`'s own header.
       if (
         shouldPublishDarkness({
           darkness01: env.darkness01,
           lastPublished01: lastPublishedDarkness01,
           nowMs: darknessNowMs,
           lastPublishedAtMs: lastPublishedDarknessAtMs,
-        })
+        }) ||
+        globalLightWindowChanged
       ) {
-        const published = publishSceneDarkness(env.darkness01);
-        // ⚠️ ONLY A SUCCESSFUL WRITE UPDATES THE GUARD. If the write failed
+        const published = publishSceneDarkness(env.darkness01, nextGlobalLightWindow);
+        // ⚠️ ONLY A SUCCESSFUL WRITE UPDATES EITHER GUARD. If the write failed
         // (no canvas, an API surprise), Foundry still holds whatever it held —
-        // recording our INTENDED value as "what we published" would make the
-        // echo guard start subtracting a number that is not actually there, and
-        // MSA would ignore the GM's real darkness from then on.
+        // recording our INTENDED values as "what we published" would make
+        // each guard start comparing against a number that was never actually
+        // written, and MSA would stop noticing real future changes.
         if (published.ok) {
           lastPublishedDarkness01 = published.published;
           lastPublishedDarknessAtMs = darknessNowMs;
+          lastPublishedGlobalLightWindow = nextGlobalLightWindow;
         }
         lastDarknessPublishResult = published;
         darknessPublishAttempts += 1;
-      }
-
-      // ── PUBLISH GLOBAL ILLUMINATION'S WINDOW (2026-08-15) ────────────────
-      // The SECOND, independent gate behind "a token outside at noon thinks
-      // it's in the dark" — see `deriveGlobalLightWindow`'s own header for
-      // the full account of why the darkness-level publish above cannot fix
-      // this alone. Unfiltered by elevation/floor on purpose: Global
-      // Illumination is one scene-wide toggle, so the window must stay safe
-      // for a darkness-adjusting region on ANY floor, not just the one
-      // `view.floorIndex` currently renders.
-      const { regions: allActiveDarknessRegions } = readActiveDarknessRegions();
-      const minDarknessRegionFloor = computeMinimumDarknessFloor(allActiveDarknessRegions);
-      lastMinDarknessRegionFloor = minDarknessRegionFloor;
-      const nextGlobalLightWindow = deriveGlobalLightWindow(minDarknessRegionFloor);
-      if (shouldPublishGlobalLightWindow(nextGlobalLightWindow, lastPublishedGlobalLightWindow)) {
-        const publishedWindow = publishGlobalLightWindow(minDarknessRegionFloor);
-        if (publishedWindow.ok) {
-          lastPublishedGlobalLightWindow = { enabled: publishedWindow.enabled, max: publishedWindow.max };
-        }
-        lastGlobalLightPublishResult = publishedWindow;
       }
 
       // THE SHADOW HANDLE — rebuilt only when the sky actually MOVED, not every
@@ -5933,8 +6585,17 @@ export async function startVtPanViewer({
         dayClock: clock,
         timeScale: time.timeScale,
         paused: time.paused,
-        cloudSource:
-          cloudCoverOverride === null ? 'default:no-weather-owner-yet' : `${cloudCoverSource}:${cloudCoverOverride}`,
+        // ⚠️ `cloudSource` USED TO READ `default:no-weather-owner-yet`. There is
+        // an owner now, so that string would be a lie — and an instrument that
+        // lies about whether a subsystem exists is the exact thing
+        // `feedback_instruments_must_not_lie` was written about. It now reports
+        // who last moved the target and where the EASED value actually is, which
+        // are different numbers while a transition runs.
+        cloudSource: `${weatherSource}:${weatherState.state.cloudCover01.toFixed(3)}→${weatherState.targets.cloudCover01.toFixed(3)}`,
+        // The whole weather block, including each axis's consumer status, so a
+        // perf/env dump can state "this axis is carried but nothing reads it"
+        // rather than leaving it as tribal knowledge.
+        weather: weather.getStatus(),
         shadow: { version: shadowHandleVersion, ...shadowHandle.atmosphere },
       };
       return env;
@@ -6056,10 +6717,32 @@ export async function startVtPanViewer({
      * @returns {object}
      */
     function setCloudCover(cover01, source = 'console') {
-      cloudCoverOverride =
-        cover01 === null || cover01 === undefined ? null : Math.min(1, Math.max(0, Number(cover01) || 0));
-      cloudCoverSource = cloudCoverOverride === null ? 'default' : source;
-      return { cloudCoverOverride, source: cloudCoverSource };
+      // `null`/`undefined` still means "back to the clear-sky default" — the
+      // contract `MapShine.setCloudCover(null)` and boot's own reset path both
+      // already rely on. It resolves to the AXIS default rather than to a
+      // literal 0 so there is one home for that number (`world/weather.js`),
+      // not two that could drift apart.
+      const target = cover01 === null || cover01 === undefined ? WEATHER_AXES.cloudCover01.fallback : cover01;
+
+      // First write = scene load ⇒ land it; later writes = a real edit ⇒ ease.
+      // See `weatherEverApplied`'s own declaration for why this lives here and
+      // not in boot.js.
+      if (weatherEverApplied) weather.setTargets({ cloudCover01: target });
+      else weather.jumpTo({ cloudCover01: target });
+      weatherEverApplied = true;
+
+      weatherSource = source;
+      const r = weather.read();
+      return {
+        // Kept under its historical name: `MapShine.setCloudCover` prints this
+        // at the console and `boot.js` logs it. It now reports the TARGET, which
+        // is what the caller just asked for; `cloudCoverEased` is where the sky
+        // actually is this frame, and the two differ for the whole transition.
+        cloudCoverOverride: r.targets.cloudCover01,
+        cloudCoverEased: r.state.cloudCover01,
+        settling: r.settling,
+        source: weatherSource,
+      };
     }
 
     /**
@@ -7306,6 +7989,59 @@ export async function startVtPanViewer({
       }
       return surface;
     }
+
+    // ── PER-EFFECT READINESS PROBES ─────────────────────────────────────────
+    // Registered HERE, at the one point where all four owners exist
+    // (`doorGraphics`, `specularSurface`, and the two per-floor maps), and
+    // registered ONCE EACH rather than per instance: water and window build a
+    // subsystem PER FLOOR, so a probe registered at construction would collide
+    // on its own id the moment a second floor was visited (the registry throws
+    // on a duplicate, which would turn a floor switch into a hard failure).
+    // One probe that scans the live map is also the honest reading — readiness
+    // asks about the scene, not about one floor's instance.
+    //
+    // WHAT IS AND IS NOT COUNTED HERE is declared per effect in each manifest's
+    // `readiness` block, with the reasoning; the short version is that these
+    // four are the ASYNC first-run work, where "in flight" is a real observable
+    // state that clears on failure as well as success. The synchronous bakes
+    // (water's jump-flood, specular's island pack, the sun-shadow smear,
+    // fluid's tube net) are deliberately NOT probed: they have no in-flight
+    // window, and the flag that would express them — "has it baked yet?" —
+    // fails CLOSED on a scene that simply contains no water/fluid/fire, which
+    // would hold readiness open forever ([[feedback_gate_polarity_must_fail_open]]).
+    // settle.js's pipeline-growth and frame-steadiness criteria cover those.
+    readiness.register({
+      id: 'waterSurfaceMask',
+      label: 'water shoreline masks still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => {
+        let n = 0;
+        for (const s of waterSurfacesByFloor.values()) if (s?.isLoadingMask?.()) n++;
+        return n;
+      },
+    });
+    readiness.register({
+      id: 'specularMaskLoad',
+      label: 'specular masks still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => (specularSurface?.isLoadingMask?.() ? 1 : 0),
+    });
+    readiness.register({
+      id: 'windowMaskLoad',
+      label: 'window cookie masks still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => {
+        let n = 0;
+        for (const s of windowSurfacesByFloor.values()) if (s?.isLoadingMask?.()) n++;
+        return n;
+      },
+    });
+    readiness.register({
+      id: 'doorTextures',
+      label: 'door graphics still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => doorGraphics?.pendingTextureCount?.() ?? 0,
+    });
 
     /**
      * THE VEGETATION-SHADOW SUBSYSTEM (extraction step 2 of docs/planning/
@@ -10109,6 +10845,10 @@ export async function startVtPanViewer({
     let view = null; // set once the first item is loaded
     /** Wall-clock cost of the pre-first-draw shader precompile; null if it failed. */
     let shaderCompileMs = null;
+    /** Wall-clock cost of the most recent {@link warmUpDrawState} call; null if it has not run or failed. */
+    let warmUpMs = null;
+    /** Pipeline-cache growth (`readPipelineCount()` before → after) the most recent warm-up caused — the direct evidence it did real work, not zero. */
+    let warmUpPipelinesCreated = null;
     const frameTimes = [];
     let lastError = null;
 
@@ -10207,9 +10947,20 @@ export async function startVtPanViewer({
      * far finer than the multi-second stages it is watching, and continuous
      * (so a work spike between two external polls is still seen).
      */
-    const settleTracker = createSettleTracker();
+    const settleTracker = createSettleTracker({ hitchMs: HITCH_THRESHOLD_MS });
     let settleFrameCount = 0;
     const SETTLE_SAMPLE_EVERY_FRAMES = 10;
+    /**
+     * The worst frame gap since the LAST settle sample — not since the session
+     * started. settle.js compares this against `HITCH_THRESHOLD_MS` to decide
+     * whether the scene is steady enough to call playable.
+     *
+     * Reset at each sample on purpose: an all-time worst never decays, so one
+     * hitch during the cold load would make the scene permanently unsettleable
+     * and the curtain would never lift on its own. What matters is whether the
+     * frames in the window we are judging were clean.
+     */
+    let maxFrameGapSinceSettleSampleMs = 0;
 
     let earlyZComposition = true;
     /**
@@ -10373,6 +11124,11 @@ export async function startVtPanViewer({
       lightDrawPointsMerged: profiler?.indexOf('light.drawPointLightsMerged') ?? -1,
       lightDrawApertureShadow: profiler?.indexOf('light.drawApertureShadow') ?? -1,
       lightDrawWindow: profiler?.indexOf('light.drawWindowLight') ?? -1,
+      // Pillar 11's own cost, measured from the first frame it exists rather
+      // than from the day it becomes player-visible — a pass whose price is
+      // only discovered after it ships is the reason the Reckoning exists.
+      lightDrawVisionMask: profiler?.indexOf('light.drawVisionMask') ?? -1,
+      visionGate: profiler?.indexOf('vision.gate') ?? -1,
       lightDrawColoration: profiler?.indexOf('light.drawColoration') ?? -1,
       lightDrawColorationMergedBlit: profiler?.indexOf('light.drawColorationMergedBlit') ?? -1,
       lightDrawComposite: profiler?.indexOf('light.drawComposite') ?? -1,
@@ -10468,6 +11224,12 @@ export async function startVtPanViewer({
         const gapMs = now - lastFrameStartMs;
         frameGapTimes.push(gapMs);
         if (frameGapTimes.length > 300) frameGapTimes.shift();
+        // SCENE READINESS' steadiness criterion reads this. Accumulated here,
+        // against the same gap this file already computes, rather than derived
+        // later from `frameGapTimes` — that ring is capped at 300 and a settle
+        // sample landing after a long stall could find its own window's worst
+        // frame already shifted out.
+        if (gapMs > maxFrameGapSinceSettleSampleMs) maxFrameGapSinceSettleSampleMs = gapMs;
         if (gapMs > HITCH_THRESHOLD_MS) {
           hitchLog.push({
             atMs: Math.round(now),
@@ -10625,6 +11387,29 @@ export async function startVtPanViewer({
       // and it is the single place the Y-flip is applied (see updateCamera).
       profiler?.begin(Z.tickCamera);
       updateCamera();
+      // envLight's SHARED screen→world rect — MOVED HERE 2026-08-15, one call
+      // ahead of the pass plan below, not left beside `setAmbient` inside
+      // `runLightAccumulatePass` where it used to live. THE BUG THIS FIXES:
+      // water's own depth-authority occlusion gate (`water-render.js`) reads
+      // this SAME uniform to map `positionWorld` to a `buf:scene.depth`
+      // screen UV — but water's mesh draws inside `geometry.world`
+      // (`runGeometryWorldPass`'s own `renderer.render(scene, camera)`),
+      // which the pass graph runs BEFORE `light.accumulate`
+      // (`runLightAccumulatePass`) even starts. Left at its old call site,
+      // water's draw call would always encode with WHATEVER `uViewRect` held
+      // at the END OF THE PREVIOUS FRAME — a real, constant one-frame-stale
+      // camera rect, invisible while panning slowly (a one-frame delta is
+      // sub-pixel) and increasingly visible the faster the camera moves,
+      // exactly the "lags behind during rapid panning, around tokens and
+      // where we're masking the water" the author reported live 2026-08-15.
+      // Specular and window never had this problem — both draw AFTER
+      // `light.accumulate` starts (specular in its own post-lighting scene;
+      // window from inside `light.accumulate` itself), so the OLD call site
+      // was already fresh by the time either of them read it. Moving the
+      // ONE shared push earlier fixes it for every consumer, present and
+      // future, rather than special-casing water's own earlier pass — see
+      // `keyhole-water-depth-authority-migration.md` for the fuller account.
+      if (view) envLight.setViewRect(viewToWorldRect(view, canvasW / canvasH));
       profiler?.end(Z.tickCamera);
 
       // TWO PASSES, FOR REAL (2026-07-17), NOW GRAPH-DRIVEN (2026-07-18).
@@ -10688,6 +11473,31 @@ export async function startVtPanViewer({
      * resetting the stale binding cache first (see atlas.js for the full root cause).
      */
     async function requestDecodeUpload(pack, pages, pinClass) {
+      // CLOSING settle.js's ONE DECLARED HOLE (2026-08-15). `maskPagesPending`
+      // has been listed in SETTLE_WORK_KEYS since the day it was written while
+      // nothing ever supplied it — "absent by omission, not by a claim that it
+      // is always zero", as the old collector said out loud. This is the
+      // accessor it was waiting for, and it lives HERE rather than on the page
+      // cache because this is the only place that knows a page has been asked
+      // for but not yet uploaded: `cache.isResident` answers "is it here now",
+      // never "is one on its way".
+      //
+      // Counted in PAGES, not calls, so the blocker reads "mask pages still
+      // streaming (48)" — a number that visibly falls — instead of a bare 1
+      // that sits there for the whole batch.
+      packPagesInFlight += pages.length;
+      try {
+        return await requestDecodeUploadUnguarded(pack, pages, pinClass);
+      } finally {
+        // `finally`, so a throw cannot strand the counter above zero and wedge
+        // readiness for the rest of the session. This is the one failure mode
+        // that would turn a diagnostic into a hang.
+        packPagesInFlight = Math.max(0, packPagesInFlight - pages.length);
+      }
+    }
+
+    /** @see requestDecodeUpload — this is its body; that is the counting wrapper. */
+    async function requestDecodeUploadUnguarded(pack, pages, pinClass) {
       // Pass 1: reserve cache slots (pin) and collect the pages that actually
       // need decoding (not already resident). cache.request is sync + GL-free.
       const toDecode = []; // { page, slot }
@@ -11289,42 +12099,176 @@ export async function startVtPanViewer({
     }
 
     /**
-     * The live half of SCENE SETTLE (vt/settle.js has the rule and the why).
-     * Reads the REAL outstanding-work counters from the subsystems that own
-     * them — never a proxy for them, and never a timer.
+     * The live half of SCENE READINESS (vt/settle.js has the rule and the why).
+     * Binds each seeded streaming probe to the subsystem that actually owns the
+     * number — never a proxy for it, and never a timer.
      *
-     * ONE HONEST GAP, named rather than faked: `maskPagesPending` has no
-     * accessor on the page cache today, so it is not reported and the settle
-     * decision does not include it. Mask pages are coarse (256²) and stream
-     * far faster than the whole-image chain that dominates a cold load, so
-     * this is a real but small hole — recorded here so a future reader knows
-     * it is absent by omission, not by a claim that it is always zero
-     * (`feedback_instruments_must_not_lie`).
+     * WHY BINDING RATHER THAN ONE `collectSettleWork()` RETURNING AN OBJECT
+     * (rewritten 2026-08-15): the old collector was a single function building
+     * one literal with seven fields, which meant the list of "things that count
+     * as outstanding work" lived in one place, maintained by hand, far away
+     * from every subsystem it described. That is the shape that has already
+     * cost this project six effects out of `EFFECT_REAPPLIERS` — and it had
+     * already cost this very function one counter, `maskPagesPending`, declared
+     * in `SETTLE_WORK_KEYS` and never supplied. A registry cannot fix
+     * forgetfulness on its own, but it moves the declaration next to the code
+     * that knows the answer, which is where it stops being forgettable.
+     *
+     * Called once, after the closures below exist. Everything that is NOT
+     * streaming (per-effect bakes, and anything added later) registers itself
+     * rather than being added here.
      */
-    function collectSettleWork() {
-      let itemsLoading = 0;
-      let vegetationOverlaysLoading = 0;
-      for (const state of itemStates.values()) {
-        if (state?.wholeImage?.status === 'loading') itemsLoading++;
-        const overlays = state?.vegetationOverlays;
-        if (overlays) {
+    function bindStreamingReadinessProbes() {
+      readiness.bind('itemsLoading', () => {
+        let n = 0;
+        for (const state of itemStates.values()) {
+          if (state?.wholeImage?.status === 'loading') n++;
+        }
+        return n;
+      });
+      readiness.bind('vegetationOverlaysLoading', () => {
+        let n = 0;
+        for (const state of itemStates.values()) {
+          const overlays = state?.vegetationOverlays;
+          if (!overlays) continue;
           for (const key of Object.keys(overlays)) {
-            if (overlays[key]?.status === 'loading') vegetationOverlaysLoading++;
+            if (overlays[key]?.status === 'loading') n++;
           }
         }
+        return n;
+      });
+      readiness.bind('bcCompressOutstanding', () => getCompressedTextureStats()?.pending ?? 0);
+      readiness.bind('decodesInFlight', () => {
+        const sem = getDecodeStats()?.semaphore ?? null;
+        return sem?.active ?? sem?.inFlight ?? 0;
+      });
+      readiness.bind('decodeQueueDepth', () => {
+        const sem = getDecodeStats()?.semaphore ?? null;
+        return sem?.queued ?? sem?.waiting ?? 0;
+      });
+      // The hole that was declared-but-never-supplied for months. See
+      // requestDecodeUpload for why the counter lives there.
+      readiness.bind('maskPagesPending', () => packPagesInFlight);
+      readiness.bind('residencyInFlight', () => residencyInFlight);
+      readiness.bind('residencyDirty', () => residencyDirty);
+    }
+
+    /**
+     * How many distinct GPU pipelines three has built this session, or null if
+     * the renderer does not expose its pipeline cache.
+     *
+     * THIS IS A SET SIZE, NOT A COMPILE COUNT, and the difference is worth
+     * stating because `diag/pipeline-rebuild-probe.js` exists precisely to
+     * measure the thing this cannot: a render object whose pipeline is RELEASED
+     * and rebuilt in the same call nets to zero size change here. That probe
+     * gets it right by wrapping `Pipelines.getForRender` — which is why it is a
+     * probe you arm for a measurement window and not something that runs in
+     * every session: it puts a wrapper on a per-render-object hot path.
+     *
+     * Readiness cannot pay that. It needs an always-on reading, and it is
+     * asking a genuinely easier question — "has the pipeline set stopped
+     * GROWING?" — for which a size is the honest answer at O(1) and zero
+     * hot-path cost. During a cold load essentially every compile is a new
+     * pipeline, so the blind spot (steady-state churn that nets to zero) is
+     * outside the window this is used in, and the frame-steadiness criterion
+     * is the backstop that catches it anyway: a compile that this misses still
+     * produces the hitch that one sees.
+     *
+     * `caches` holds compute pipelines too (three.webgpu.js `_getComputeCacheKey`
+     * writes the same Map), so the TSL particle/gust/wind kernels — the ones
+     * `compileAsync(scene, camera)` structurally cannot reach — are counted.
+     */
+    function readPipelineCount() {
+      const caches = renderer?._pipelines?.caches;
+      return caches instanceof Map ? caches.size : null;
+    }
+
+    /**
+     * WARM-UP DRAW — force whatever `runPassPlan` would draw to actually get
+     * drawn, off the critical path of the first frame a person is watching.
+     *
+     * ============================================================================
+     * THE GAP THIS CLOSES, EXACTLY
+     * ============================================================================
+     * `renderer.compileAsync(scene, camera)` (a few hundred lines up) compiles
+     * ONE scene — the world geometry. It cannot reach `depthScene`,
+     * `depthPrepassScene`, `candleFlameScene`, `windOverlayScene`,
+     * `specularSurface.scene`, `particleEngine.scene`, `gustEngine.scene`, the
+     * door scene, or any post-pass (bloom/DoF/present) — every one of those
+     * compiles lazily on ITS OWN first real draw call, which is why effects like
+     * window light and a floor's overhead tiles can visibly "arrive" a beat
+     * after the curtain has already lifted: their pipeline had never been asked
+     * to exist until the exact frame a person was first looking at it
+     * (`feedback_absent_zone_row_is_a_measurement` — a pass that has not run
+     * yet reads as "no cost", not as "unmeasured cost still coming").
+     *
+     * `runPassPlan(framePlan.ids, passImpls, ...)` is not a parallel mechanism —
+     * it is the LITERAL SAME call `renderFrame` makes every real frame (a few
+     * hundred lines down). Calling it here, once, before the loop starts,
+     * exercises every scene and every post-pass a real frame would, through the
+     * exact same code, which is what makes this warm-up trustworthy: there is
+     * no second definition of "what a frame draws" for it to drift from.
+     *
+     * ============================================================================
+     * WHY THIS NEVER TOUCHES THE VISIBLE CANVAS
+     * ============================================================================
+     * Every pass EXCEPT `present.composite` explicitly re-binds its OWN target
+     * (`sceneDepth`, `sceneLit`, the bloom/DoF mips, ...) before it draws, and
+     * resets to `null` only as a "return to a known default" cleanup —
+     * confirmed by reading each pass function, not assumed. `present.composite`
+     * is the ONE pass that draws real content into whatever `null` currently
+     * means (the swapchain), and it does so by INHERITING null from the
+     * previous pass's cleanup rather than binding anything itself.
+     *
+     * So `includePresent` controls exactly one thing: whether `'present.
+     * composite'` is even in the id list handed to `runPassPlan`.
+     *   - COLD LOAD (`includePresent: true`, the default): safe to let it draw
+     *     to the real canvas, because nothing is looking at MSA's canvas yet —
+     *     the curtain is up and Foundry's own canvas is still the visible one;
+     *     `syncInterfaceSeam('scene load')` (boot.js) does not run until AFTER
+     *     this whole startup chain resolves. Warming present.composite's own
+     *     pipeline here, against the real target, is strictly correct — no
+     *     throwaway target could match the swapchain's format as exactly.
+     *   - FLOOR PREPARE (`includePresent: false`): the OLD floor is genuinely on
+     *     screen. Excluding present.composite means NOTHING this call touches
+     *     is ever presented — every other pass writes only into internal
+     *     offscreen targets that a REAL frame overwrites completely on its next
+     *     tick, so a warm-up draw can never leave visible garbage behind.
+     *     present.composite's own pipeline doesn't need re-warming per floor
+     *     anyway: its shader is agnostic to which floor's pixels are sitting in
+     *     the buffers it blends — only the CONTENT differs, never the pipeline.
+     *
+     * ============================================================================
+     * WHY THIS IS A REAL STALL, ON PURPOSE, AND WHY THAT IS CORRECT
+     * ============================================================================
+     * Ordinary `renderer.render()` calls (what every pass impl uses) always take
+     * the SYNCHRONOUS `device.createRenderPipeline` branch — never the async one
+     * `compileAsync` reaches by passing its own `promises` array
+     * (`diag/pipeline-rebuild-probe.js`'s header traces this exact fork in three's
+     * source). So a genuinely new pipeline compiling during this call blocks the
+     * main thread for real. That is the same trade `compileAsync`'s own comment
+     * already accepts a few hundred lines up: better a measured stall here,
+     * where `warmUpMs` reports it and the curtain is still watching, than an
+     * invisible one inside the first frame the user is already looking at.
+     *
+     * Failure is caught and swallowed, same posture as `compileAsync` just
+     * above: warming up is an optimisation, never a reason a scene fails to load.
+     *
+     * @param {{includePresent?: boolean}} [opts]
+     */
+    function warmUpDrawState({ includePresent = true } = {}) {
+      const ids = includePresent ? framePlan.ids : framePlan.ids.filter((id) => id !== 'present.composite');
+      const before = readPipelineCount();
+      try {
+        const t0 = performance.now();
+        runPassPlan(ids, passImpls, {}, undefined);
+        warmUpMs = Math.round(performance.now() - t0);
+      } catch (err) {
+        log.warn('warm-up draw failed — pipelines will compile lazily on first real draw:', err);
+        warmUpMs = null;
       }
-      const bc = getCompressedTextureStats();
-      const dec = getDecodeStats();
-      const sem = dec?.semaphore ?? null;
-      return {
-        itemsLoading,
-        vegetationOverlaysLoading,
-        bcCompressOutstanding: bc?.pending ?? 0,
-        decodesInFlight: sem?.active ?? sem?.inFlight ?? 0,
-        decodeQueueDepth: sem?.queued ?? sem?.waiting ?? 0,
-        residencyInFlight,
-        residencyDirty,
-      };
+      const after = readPipelineCount();
+      warmUpPipelinesCreated = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
     }
 
     /**
@@ -11335,7 +12279,19 @@ export async function startVtPanViewer({
      * @param {number} nowMs - the current frame's own start time.
      */
     function sampleSceneSettle(nowMs) {
-      return settleTracker.sample(collectSettleWork(), nowMs, settleFrameCount);
+      const { raw, keys, unavailable } = readiness.collect();
+      const result = settleTracker.sample(raw, nowMs, settleFrameCount, {
+        keys,
+        unavailable,
+        maxFrameGapMs: maxFrameGapSinceSettleSampleMs,
+        pipelineCompileCount: readPipelineCount(),
+      });
+      // Consumed, so start the next window clean. Done AFTER the sample, never
+      // before: zeroing first would hand the tracker a window it had not been
+      // shown yet, and the hitch it was meant to catch would fall between two
+      // samples and be judged by neither.
+      maxFrameGapSinceSettleSampleMs = 0;
+      return result;
     }
 
     function rebuildSceneDepthProxies(items) {
@@ -12417,10 +13373,23 @@ export async function startVtPanViewer({
     // Shared by the real keydown handler AND the soak harness (MapShine.soakHooks.pan)
     // — one code path applies a key, so a soak run exercises exactly what a real
     // user's keypress would, not a separate simulated approximation of it.
+    //
+    // FLOOR-SWITCH KEYS ROUTE THROUGH setFloorIndex, NOT A RAW ASSIGNMENT
+    // (fixed 2026-08-15). `applyKey` answers pan/zoom/floor-switch through ONE
+    // pure function, but only a FLOOR change needs the bakes and the settle
+    // reset `setFloorIndex` carries — a pan or a zoom genuinely is just "move
+    // the view, then resync residency", the two lines this function still does
+    // itself below. Before this fix, EVERY kind of key change (including a
+    // floor switch) took that same generic path, which is exactly how the
+    // standalone torture-fixture's digit keys and `MapShine.soak(n)`'s
+    // `soakSwitchFloorStep` were changing floors without a wind rebake, without
+    // an outdoors/fire mask rebake, and without resetting the settle tracker —
+    // see setFloorIndex's own comment for the fuller account.
     async function applyKeyAndUpdate(key) {
       const ctx = { world, floorCount };
       const next = applyKey(view, key, ctx);
       if (next === view) return false;
+      if (next.floorIndex !== view.floorIndex) return setFloorIndex(next.floorIndex);
       view = next;
       await scheduleResidencyUpdate();
       return true;
@@ -12484,14 +13453,24 @@ export async function startVtPanViewer({
       // happened to fire, which is exactly why this stayed invisible on
       // every single-floor test (there is no other floor for it to go stale
       // against) and only surfaced on the real multi-floor scene. This is
-      // the ONE place `view.floorIndex` changes after startup (verified: no
-      // other call site reassigns it), so it is the correct, complete
-      // chokepoint — every floor switch, whichever UI path triggered it
-      // (keyboard/digit key, debug panel, or boot.js's `canvasReady`
-      // same-scene sync), now re-derives the wall scoping. Synchronous and
-      // cheap enough to run unconditionally (same cost as any other rebake);
-      // `bakeWindField` never throws (catches and logs internally), so this
-      // cannot turn a floor switch into a hard failure.
+      // THE ONE PLACE `view.floorIndex` CHANGES after startup — and, unlike an
+      // earlier version of this exact comment, that claim now needs a second
+      // fix behind it to be true. `applyKeyAndUpdate` (below) used to reassign
+      // `view` directly on a floor-switch key, which meant the standalone
+      // torture-fixture keyboard path and `MapShine.soak(n)`'s
+      // `soakSwitchFloorStep` both changed floors WITHOUT this function's
+      // bakes or its settle reset — a real defect, found 2026-08-15 auditing
+      // this exact claim against the live call graph rather than trusting the
+      // words already written here. `applyKeyAndUpdate` now detects a
+      // floor-index change and calls THIS function instead of assigning
+      // `view` itself — see its own comment for why. So: every floor switch,
+      // whichever UI path triggered it (keyboard/digit key, debug panel,
+      // `MapShine.soak`, or boot.js's `canvasReady` same-scene sync via
+      // `prepareFloor`'s commit step below), now genuinely re-derives the
+      // wall scoping. Synchronous and cheap enough to run unconditionally
+      // (same cost as any other rebake); `bakeWindField` never throws
+      // (catches and logs internally), so this cannot turn a floor switch
+      // into a hard failure.
       bakeWindField('floor-change');
       // The SKY's `_Outdoors` gate is per-floor for exactly the same reason the
       // wind bake is: a cellar and the street above it have entirely different
@@ -12503,6 +13482,198 @@ export async function startVtPanViewer({
       bakeFireMaskTexture(floorIndex);
       await scheduleResidencyUpdate();
       return true;
+    }
+
+    /**
+     * Bumped on every `prepareFloor` call and on every `cancelFloorPrepare`
+     * call. A prepare captures its own generation once and compares before
+     * every `await` it crosses — a stale prepare (superseded by a second
+     * floor-switch request, or explicitly cancelled) simply stops making
+     * further progress reports and returns `{ok:false, reason:'superseded'}`
+     * rather than fighting a newer prepare or racing ahead to commit a floor
+     * nobody asked for any more.
+     *
+     * Nothing already fetched is thrown away when a prepare goes stale —
+     * `itemStates`/BC-compressed textures follow this file's own "hide, never
+     * dispose" doctrine, so an abandoned prepare's bytes stay cached for
+     * whichever floor eventually gets asked for again.
+     */
+    let floorPrepareGeneration = 0;
+
+    /** Invalidate any prepare currently in flight. Safe to call with nothing running. */
+    function cancelFloorPrepare() {
+      floorPrepareGeneration++;
+    }
+
+    /**
+     * FLOOR PREPARE — load, BC-compress, and construct floor N's meshes
+     * WITHOUT touching anything about the currently-viewed floor. The
+     * companion `setFloorIndex` above is the COMMIT half: once this resolves
+     * `{ok:true}`, floor N's opaque albedo already exists on the GPU, so
+     * `setFloorIndex`'s own `scheduleResidencyUpdate()` call resolves on its
+     * synchronous fast path (nothing left to fetch) instead of its async one —
+     * which is what makes the commit an actual "uniform write + working-set
+     * shift" (Keyhole §4.5) rather than the multi-second art-still-cooking
+     * window that prompted this whole campaign.
+     *
+     * ============================================================================
+     * WHY THIS NEVER CALLS scheduleResidencyUpdate() ITSELF
+     * ============================================================================
+     * That is precisely where the "hide items no longer wanted" pass lives
+     * (`updateResidencyUnguarded`'s stale-release loop), keyed off
+     * `view.floorIndex` — and prepare's entire point is to run BEFORE
+     * `view.floorIndex` changes, so the currently-visible floor's meshes must
+     * never be touched by it. `ensureItemLoaded`/`ensureWholeImageMeshes` are
+     * the two lower-level primitives that pass this whole class safely: each
+     * only ever mutates the ONE item/state it is given — no iteration over
+     * `itemStates` as a whole, no depth-authority rebuild, no visibility
+     * change to anything else. A newly-built whole-image mesh defaults to
+     * `mesh.visible = false` at construction (verified by reading
+     * `ensureWholeImageMeshes`'s own body) and nothing in this function ever
+     * flips that — which is the entire mechanism behind "build the new
+     * floor's meshes hidden". No new visibility-gating code was needed; not
+     * calling the function that shows things was enough.
+     *
+     * ============================================================================
+     * THE SECRETS FIX, MECHANICALLY (why front-loading this is sufficient)
+     * ============================================================================
+     * `updateResidencyUnguarded` hides the outgoing floor's items and shows
+     * the incoming floor's items in ONE synchronous pass — no `await` sits
+     * between the hide loop and the show loop (confirmed by reading the
+     * function). A browser can only ever present a frame using state that
+     * exists the instant a synchronous task yields back to the event loop, so
+     * if the SAME synchronous pass both hides M and shows N, no frame can ever
+     * be drawn with M hidden and N not yet visible — PROVIDED N's items are
+     * already fully resident when that pass runs, so its "show" half has
+     * nothing left to await. That is exactly what this function guarantees
+     * before it resolves. The plan called for a NEW hold inside the
+     * stale-release loop itself; reading it closely showed the ordering
+     * already provides the guarantee, and the real gap was that nothing used
+     * to front-load the art before commit — this function is that front-load,
+     * not a change to the hide/show pass at all.
+     *
+     * Also fixes the OTHER half of gap #11 (old art briefly lit by the new
+     * floor's outdoors/fire gates): `setFloorIndex`'s bakes run synchronously
+     * immediately after the view flip, with the SAME "no await in between"
+     * property — the visible mismatch was never about those bakes racing the
+     * flip, it was about the RESIDENCY SWAP after them taking seconds on a
+     * cold floor while the gates had already moved. Once this function has
+     * already made that swap resolve instantly, the mismatch window collapses
+     * to the same unobservable single JS tick.
+     *
+     * @param {number} floorIndex
+     * @param {(p: {phase:'items'|'compress', done:number, total:number}) => void} [onProgress]
+     * @returns {Promise<{ok:boolean, reason?:string}>}
+     */
+    async function prepareFloor(floorIndex, onProgress) {
+      const myGeneration = ++floorPrepareGeneration;
+      const isStale = () => myGeneration !== floorPrepareGeneration;
+
+      const items = buildItems(floorIndex);
+
+      // PHASE 1 — dimensions + placement + mask packs (ensureItemLoaded is
+      // exactly the primitive the initial cold load uses for this, per item).
+      onProgress?.({ phase: 'items', done: 0, total: items.length });
+      for (let i = 0; i < items.length; i++) {
+        if (isStale()) return { ok: false, reason: 'superseded' };
+        const item = items[i];
+        try {
+          await ensureItemLoaded(item);
+        } catch (err) {
+          // A single broken item must not abandon the whole prepare — the
+          // SAME posture the initial load's own item loop takes.
+          log.error(`prepareFloor(${floorIndex}): item "${item.id}" failed:`, err);
+        }
+        onProgress?.({ phase: 'items', done: i + 1, total: items.length });
+      }
+      if (isStale()) return { ok: false, reason: 'superseded' };
+
+      // PHASE 2 — the REQUIRED blocker. Kick off (or reuse — idempotent)
+      // whole-image BC compression for every item that has one, then AWAIT
+      // it. This is the exact wait `startVtPanViewer` already does for the
+      // viewed floor at cold load; the floor-switch path never had it, which
+      // is the direct cause of "the upper floor's background/overhead sit
+      // invisible for a minute-plus after a floor switch with zero on-screen
+      // explanation" (2026-07-18, quoted verbatim in that cold-load block).
+      const compressing = [];
+      for (const item of items) {
+        const state = itemStates.get(item.id);
+        if (!state) continue; // this item's own load failed above; already logged
+        ensureWholeImageMeshes(state, item);
+        if (state.wholeImage?.loadPromise) compressing.push({ item, wi: state.wholeImage });
+      }
+      onProgress?.({ phase: 'compress', done: 0, total: compressing.length });
+      for (let i = 0; i < compressing.length; i++) {
+        if (isStale()) return { ok: false, reason: 'superseded' };
+        await compressing[i].wi.loadPromise; // always resolves — see wi.loadPromise's own doc
+        onProgress?.({ phase: 'compress', done: i + 1, total: compressing.length });
+      }
+      if (isStale()) return { ok: false, reason: 'superseded' };
+
+      // PHASE 3 (added 2026-08-16, live author report: switching up a floor,
+      // "a second later the _Windows effect pops into view") — water and
+      // window's own per-floor cookie/shoreline masks. Their subsystem
+      // instances are PER FLOOR (`waterSurfacesByFloor`/`windowSurfacesByFloor`
+      // — a separate object per floor, not one shared instance), which is
+      // exactly what makes it SAFE to construct and start loading floor N's
+      // copy here without touching whatever floor M's own instance currently
+      // has resident: two different Map entries, two different meshes drawn
+      // into two different dedicated scenes, gated on `view.floorIndex`
+      // elsewhere. `prefetchMask` (each subsystem's own export) is the FETCH
+      // ONLY, deliberately not the full per-frame `sync()` — see each
+      // subsystem's own doc for why `sync()` itself is unsafe to call this
+      // early (it also touches `depthAuthority`, which does not know about
+      // floor N yet, and — for water — can REBUILD materials).
+      //
+      // Without this phase, NOTHING ever asked for these masks until the
+      // first REAL frame rendered with `view.floorIndex` already flipped to
+      // N — i.e., after commit, after the floor was already visually on
+      // screen — which is exactly the reported symptom: the map appeared,
+      // then window light popped in roughly however long the image fetch took.
+      const maskWaits = [
+        { label: 'water', surface: getWaterSurfaceForFloor(floorIndex) },
+        { label: 'window', surface: getWindowSurfaceForFloor(floorIndex) },
+      ];
+      for (const { surface } of maskWaits) surface.prefetchMask(floorIndex);
+      onProgress?.({ phase: 'masks', done: 0, total: maskWaits.length });
+      // POLLED, not event-driven — neither subsystem exposes its internal
+      // fetch as an awaitable promise (both are fire-and-forget, watched via
+      // `isLoadingMask()` everywhere else in this codebase too; see
+      // vt/settle.js's own probes). A short, fixed poll interval rather than
+      // reusing READY_POLL_MS (boot.js) — that constant lives one zone over
+      // and importing it here would be the exact kind of cross-zone reach
+      // `zones/one-door` exists to forbid; this interval answers a much
+      // smaller question (two booleans) and 40ms is comfortably finer than
+      // any mask fetch is fast enough for the difference to matter.
+      const MASK_POLL_MS = 40;
+      for (;;) {
+        if (isStale()) return { ok: false, reason: 'superseded' };
+        const stillLoading = maskWaits.filter(({ surface }) => surface.isLoadingMask());
+        if (stillLoading.length === 0) break;
+        onProgress?.({ phase: 'masks', done: maskWaits.length - stillLoading.length, total: maskWaits.length });
+        await new Promise((r) => setTimeout(r, MASK_POLL_MS));
+      }
+      onProgress?.({ phase: 'masks', done: maskWaits.length, total: maskWaits.length });
+      if (isStale()) return { ok: false, reason: 'superseded' };
+
+      // ⚠ KNOWN, DOCUMENTED GAP, not a silent omission: vegetation overlays
+      // (`ensureVegetationOverlay`/`refreshVegetationOverlay`) and per-effect
+      // lazy work (specular's island bake, the sun-shadow smear, fire/
+      // lightning's material/engine construction) are NOT front-loaded here.
+      // Vegetation overlays are already counted by `vt/settle.js`
+      // (`vegetationOverlaysLoading`) and will still stream in after commit,
+      // same as today. The per-effect bakes are all SYNCHRONOUS (no in-flight
+      // window to front-load into — see each manifest's own `readiness.why`
+      // for the specific reasoning) and several live on SHARED, not
+      // per-floor, subsystem instances (specular is one `const`, not a
+      // per-floor map) — warming floor N's copy of a shared subsystem here
+      // would mean re-syncing it away from whatever floor M currently has
+      // resident, risking a visible reload flicker on the STILL-VISIBLE old
+      // floor. Water and window were the SAME shape and are now fixed above
+      // (PHASE 3) precisely because their subsystems ARE per-floor — this
+      // gap is what's left once that distinction is applied; it is not a
+      // catch-all "everything else is fine".
+      return { ok: true };
     }
 
     const ZOOM_IN_KEYS = new Set(['+', '=', 'PageUp']);
@@ -12614,6 +13785,7 @@ export async function startVtPanViewer({
       allocator.resize(sceneIllum, drawBufW, drawBufH, describeSceneColor());
       allocator.resize(sceneLit, drawBufW, drawBufH, describeSceneColor());
       allocator.resize(sceneColoration, drawBufW, drawBufH, describeSceneColor());
+      allocator.resize(sceneColorMapOnly, drawBufW, drawBufH, describeSceneColorMapOnlyMrt());
       allocator.resize(
         scenePointLightMerged,
         drawBufW,
@@ -12643,6 +13815,15 @@ export async function startVtPanViewer({
       // occlusionMask.texture, screenUV)` node keeps pointing at the right
       // object — verified against the vendored source before relying on it.
       allocator.resize(occlusionMask.rt, drawBufW, drawBufH, describeOcclusionMask());
+      // buf:scene.visionMask tracks the drawing buffer too (screenSized:
+      // true, same law) — the subsystem owns its own descriptor, so this is
+      // a one-line call rather than a hand-copied describe*() here. Found
+      // missing 2026-08-15 while chasing a live report of the gate going
+      // solid black after the player panned/zoomed: every OTHER
+      // screen-sized target above was already in this list, this one never
+      // was, so it stayed frozen at whatever size existed when the viewer
+      // first constructed while everything it composites against moved on.
+      visionMask.resize(drawBufW, drawBufH);
       await scheduleResidencyUpdate().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
     }
     function onResize() {
@@ -12704,6 +13885,14 @@ export async function startVtPanViewer({
     // the session — this loop (and prewarm, started further below) is where
     // NEW packs first request their coarse pin, and that request reads
     // `currentCoarseBudget` (item 1b). Must happen before either.
+    // READINESS PROBES, BOUND BEFORE THE FIRST BYTE IS REQUESTED. The seeded
+    // probes read zero until this runs, and the loading curtain starts asking
+    // `getSceneReady()` during the ART phase — i.e. BEFORE the render loop
+    // exists. Binding after the load would mean the curtain's first readings
+    // said "nothing outstanding" while the whole scene was streaming, which is
+    // the exact premature-completion lie this campaign is about, just moved one
+    // layer down.
+    bindStreamingReadinessProbes();
     refreshCoarsePinBudget();
     const initialItems = buildItems(view.floorIndex);
     onLoadProgress?.({ done: 0, total: initialItems.length, detail: null });
@@ -12895,6 +14084,15 @@ export async function startVtPanViewer({
     }
     if (windGustsEnabled) constructGustEngineIfNeeded();
 
+    // THE WARM-UP DRAW (2026-08-15) — see warmUpDrawState's own header for the
+    // full reasoning. Placed HERE, after particle/gust construction and after
+    // every bake, so their TSL compute kernels and every effect's live state
+    // are real by the time this runs — deliberately the LAST thing before the
+    // loop starts, so it warms exactly what the loop is about to draw.
+    // includePresent defaults true: nothing is looking at MSA's canvas yet
+    // (see the function's own header for why that is safe here specifically).
+    warmUpDrawState();
+
     loopActive = true;
     renderer.setAnimationLoop(renderFrame);
 
@@ -12929,18 +14127,36 @@ export async function startVtPanViewer({
     // above — since those were DISPATCHED first, they keep priority. Still
     // fire-and-forget: no onLoadProgress call, because the curtain is already
     // down and a background prewarm succeeding or failing must not reopen it.
-    for (let f = 0; f < floorCount; f++) {
-      if (f === clampedInitialFloor) continue;
-      const adjacent = Math.abs(f - clampedInitialFloor) === 1;
-      Promise.resolve()
-        .then(async () => {
-          for (const item of buildItems(f)) {
-            const state = await ensureItemLoaded(item);
-            if (adjacent) ensureWholeImageMeshes(state, item);
-          }
-        })
-        .catch((err) => console.warn(`[vt-pan-viewer] prewarm floor ${f} failed:`, err));
+    //
+    // NAMED AND RE-CALLABLE (2026-08-15) — this used to be an inline loop that
+    // ran exactly once, keyed to the INITIAL floor. After a real floor switch
+    // (0→1), floor 2 was never prewarmed and stayed cold forever — the ±1
+    // window never moved. Extracted so `commitFloorSwitch` below (and boot.js,
+    // after every real floor-switch commit) can re-run it centred on
+    // WHEREVER the viewer just landed, keeping the SAME floor-switch-is-fast
+    // property true for the second hop, not just the first. Deliberately a
+    // SEPARATE mechanism from `prepareFloor`'s generation-counter-guarded
+    // path — prewarm must never be able to cancel a real, user-initiated
+    // prepare just because it happens to target the same floor; the two
+    // idempotent primitives it calls (`ensureItemLoaded`/
+    // `ensureWholeImageMeshes`) are safe to race against a real prepare
+    // regardless (the SECOND caller to reach an item just finds it already
+    // loading/loaded and does nothing further).
+    function prewarmAdjacentFloors(centerFloorIndex) {
+      for (let f = 0; f < floorCount; f++) {
+        if (f === centerFloorIndex) continue;
+        const adjacent = Math.abs(f - centerFloorIndex) === 1;
+        Promise.resolve()
+          .then(async () => {
+            for (const item of buildItems(f)) {
+              const state = await ensureItemLoaded(item);
+              if (adjacent) ensureWholeImageMeshes(state, item);
+            }
+          })
+          .catch((err) => log.warn(`prewarm floor ${f} failed:`, err));
+      }
     }
+    prewarmAdjacentFloors(clampedInitialFloor);
 
     // capture:true — see onKeyDown's comment. Must run before Foundry's own
     // window-level keydown listener (registered at Foundry boot, bubble phase).
@@ -13847,8 +15063,20 @@ export async function startVtPanViewer({
           settleTracker.read() ?? {
             settled: false,
             quietForMs: 0,
+            framesSinceQuiet: 0,
             blockers: [],
             totalOutstanding: 0,
+            // Every criterion reads `unavailable`, not `pass` — nothing has been
+            // measured yet, and an unmeasured criterion must never be reported
+            // as a satisfied one ([[feedback_absent_zone_row_is_a_measurement]]).
+            criteria: {
+              work: 'unavailable',
+              quiet: 'unavailable',
+              frames: 'unavailable',
+              steadiness: 'unavailable',
+              pipelines: 'unavailable',
+            },
+            unavailable: [],
             waitingFor: ['the first settle sample (no frame has rendered yet)'],
             sampledAtMs: null,
           }
@@ -14482,7 +15710,8 @@ export async function startVtPanViewer({
       /** Alias for setTimeOfDay, kept so existing notes/habits still work. */
       setSunHour,
       /** Cloud cover 0..1 — a real authored value now (sky settings), feeding
-       * BOTH the sky light and the shadow handle from one number. */
+       * BOTH the sky light and the shadow handle from one number. Sets a
+       * TARGET; the weather manager eases the sky there. */
       setCloudCover,
       /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
       setSkyRealism,
@@ -14990,6 +16219,64 @@ export async function startVtPanViewer({
        * report. `status:'future'` here mirrors graph/passes.js's own status
        * for this pass: res:view/res:scene are not built, so the pass as
        * declared is not fully live even though this piece genuinely is. */
+      /**
+       * PILLAR 11 — the vision/fog mask's own state, for the Diagnostics
+       * report. Reports the RASTERISER's health (is it pooling, is it drawing)
+       * SEPARATELY from whether it is actually gating the composite, because
+       * "the mask works but is not wired in" and "the mask is wired in but
+       * draws nothing" are opposite problems that a single boolean would
+       * collapse into one indistinguishable "off".
+       */
+      getVisionMaskInfo: () => ({
+        // PROVES which cut of the reveal rule this running viewer compiled —
+        // see `vision-mask.js#VISION_GATE_BUILD_TAG`'s own doc. Rasteriser
+        // health (pooled/meshesDrawn below) looks IDENTICAL whether the gate
+        // unions or intersects its inputs, so only this tag can settle "is
+        // the fix actually loaded" without guessing.
+        gateBuildTag: VISION_GATE_BUILD_TAG,
+        // Is the composite actually reading the mask? This is compiled in at
+        // material-build time, so it does NOT change without a viewer restart.
+        owningVision: visionOwnershipEnabled,
+        // ...and the rasteriser runs regardless, so its numbers are real even
+        // while `owningVision` is false. That is deliberate: the cost and the
+        // pool health are observable BEFORE the flag is ever flipped.
+        ...visionMask.getInfo(),
+        // THE viewer's OWN current drawing-buffer size, next to `maskSize`
+        // above — the two falling out of sync is exactly the resize-list
+        // omission found and fixed 2026-08-15; this is what makes a future
+        // recurrence provable from a single pasted report instead of a guess.
+        drawBufSize: [drawBufW, drawBufH],
+        gating: lastVisionGating,
+        // Non-null = MSA gave fog back to Foundry after a failure. A silent
+        // safety-slide is still a regression the author must be able to see.
+        gateError: lastVisionGateError,
+        // THE DIM-EXPLORED-ZONE SLICE's own health (2026-08-16) — added
+        // specifically so a report pasted back settles "did this mechanism
+        // ever run" without needing to test it live. Three numbers, three
+        // different failure shapes:
+        //   snapshotPublishCount === 0        → never ran at all (the outer
+        //     gate at the call site — gate/drawn/throttle — never passed)
+        //   snapshotPublishMsSinceLast large   → ran before, then stopped
+        //     (an exception on some LATER frame, or the gate stopped passing)
+        //   snapshotError non-null             → the most recent attempt threw
+        snapshotPublishCount,
+        snapshotPublishMsSinceLast: lastSnapshotPublishAt > 0 ? Math.round(performance.now() - lastSnapshotPublishAt) : null,
+        snapshotError: lastSnapshotError,
+        // A REAL pixel out of exploredSnapshotTarget, not just proof the
+        // publish draw executed — see `probeSnapshotColor`'s own doc.
+        // {r,g,b} all near 0 at a position that's revealed RIGHT NOW means
+        // the WRITE path is broken; a report where this is real colour but
+        // the player still sees black means the READ path (the dim quad) is
+        // the one to look at next.
+        snapshotPixelProbe: lastSnapshotPixelProbe,
+        // The CAPTURE side, screen-space, fired the same tick — a grid that's
+        // ALL near-zero here means captureMapOnlySnapshot() itself is empty
+        // (look at the clear-alpha/material/MRT setup); real colour here
+        // while snapshotPixelProbe stays black means the publish quad's own
+        // world<->screen reprojection is the one losing it.
+        mapOnlyProbe: lastMapOnlyProbe,
+      }),
+
       getEnvSnapshotInfo: () => {
         if (!lastEnvSnapshot) return { available: false, status: 'future' };
         return {
@@ -15016,12 +16303,16 @@ export async function startVtPanViewer({
           darknessReason: lastEnvSnapshot.darkness.reason,
           // THE GLOBAL ILLUMINATION WRITE-BACK's own state (2026-08-15) — the
           // SECOND gate behind "token outside at noon is in the dark"; see
-          // `deriveGlobalLightWindow`'s own header. Same three-facts shape as
-          // the darkness fields above: what MSA published, whether the write
-          // itself succeeded, and what Foundry is holding right now.
+          // `deriveGlobalLightWindow`'s own header. No separate `...Publish`
+          // result field here — this window is carried IN `darknessPublish`
+          // above (one call, one result; see `publishSceneDarkness`'s own
+          // header for why a second call was a real, live-caught bug).
           publishedGlobalLightWindow: lastPublishedGlobalLightWindow,
-          globalLightPublish: lastGlobalLightPublishResult,
-          foundryGlobalLight: readSceneGlobalLightRaw(),
+          // ⚠️ `enabled`/`min`/`max` are the SCENE DOCUMENT (never written by
+          // this fix, so `enabled:false` here is EXPECTED and not a failure);
+          // `active`/`liveMax` are what Foundry is actually deciding with.
+          // Read `active` to answer "is ambient daylight vision on right now".
+          foundryGlobalLight: lastFoundryGlobalLight ?? readSceneGlobalLightRaw(),
           minDarknessRegionFloor: lastMinDarknessRegionFloor,
           ambientSource: lastEnvSnapshot.ambient?.source ?? null,
           ambientReason: lastEnvSnapshot.ambient?.reason ?? null,
@@ -15043,6 +16334,18 @@ export async function startVtPanViewer({
           // source fields name whether a value is a real input or a debug lever,
           // so a lever can never be mistaken for a real source.
           cloudSource: lastEnvSnapshot.cloudSource ?? null,
+          // ⭐ THE WEATHER OWNER (docs/planning/Weather-Manager.md, slice 1).
+          // Mode, transition speed, and every axis's value/target/settling
+          // state — plus each axis's `consumerStatus`, so this report can say
+          // "carried, but nothing reads it yet" out loud instead of leaving a
+          // reader to infer it (`feedback_unconsumed_api_rots_silently`).
+          // Landing it HERE rather than behind a console getter is the standing
+          // rule: a `MapShine.get*` nobody runs has "little value"
+          // (`feedback_diagnostics_must_land_in_perf_report`).
+          weather: lastEnvSnapshot.weather ?? null,
+          // Whether a real owner fed this frame's weather at all — the flag that
+          // separates "the sky is clear" from "nobody wired the manager".
+          weatherHasOwner: lastEnvSnapshot.env?.weather?.hasOwner ?? false,
           shadowAtmosphere: lastEnvSnapshot.shadow ?? null,
           // THE SKY LIGHT (docs/planning/Sky.md), reported in full because "is
           // it doing anything" was previously answerable only by eyeballing the
@@ -15675,6 +16978,14 @@ export async function startVtPanViewer({
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
       zoomStep, // exposed so MapShine.soakHooks.zoom drives one real, bounded, eased zoom step (see its own doc)
       setFloorIndex, // exposed so an external (Foundry-driven) floor sync is as cheap as a keypress, never a full restart
+      // THE PREPARE/COMMIT PAIR (2026-08-15) — `prepareFloor` front-loads floor
+      // N's art so the eventual `setFloorIndex` call resolves instantly; see
+      // `prepareFloor`'s own doc for why that is the secrets fix, not a
+      // separate mechanism. `cancelFloorPrepare` invalidates whatever prepare
+      // is currently in flight — safe to call with nothing running.
+      prepareFloor,
+      cancelFloorPrepare,
+      prewarmAdjacentFloors, // exposed so a real floor-switch commit can re-scope the ±1 window to wherever the viewer just landed
       // Re-ask buildItems and reconcile. The draw list is derived from live
       // Foundry documents, but NOTHING here watches them — updateResidency only
       // runs when the VIEW changes, so creating a token while the camera sits
@@ -15850,6 +17161,8 @@ export async function startVtPanViewer({
           cache,
           renderer,
           shaderCompileMs,
+          warmUpMs,
+          warmUpPipelinesCreated,
           prefetchSkippedPacks,
           lastUpdate,
           passSeq,
@@ -15992,6 +17305,52 @@ export async function setVtPanViewerFloor(floorIndex) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   const changed = await _active.setFloorIndex(floorIndex);
   return { changed, ..._active.getDiagnostics() };
+}
+
+/**
+ * PREPARE a floor switch without touching what's on screen. See
+ * `prepareFloor`'s own doc (inside `startVtPanViewer`) for the full mechanism
+ * and why it is what makes the eventual commit safe against the secrets leak.
+ *
+ * `{skipped:true}` when no viewer is running — there is nothing to prepare a
+ * floor switch FOR, and a caller (boot.js) should read that the same way it
+ * already reads every other `skipped` result from this module: as "there is no
+ * viewer", not as a failed prepare.
+ *
+ * @param {number} floorIndex
+ * @param {(p: {phase:string, done:number, total:number}) => void} [onProgress]
+ * @returns {Promise<{ok:boolean, reason?:string}|{skipped:true, reason:string}>}
+ */
+export async function prepareVtPanViewerFloor(floorIndex, onProgress) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.prepareFloor(floorIndex, onProgress);
+}
+
+/**
+ * Abandon whichever `prepareVtPanViewerFloor` call is currently in flight.
+ * Safe to call with nothing running (a no-op, not an error) — a caller that
+ * always cancels-before-preparing (the natural pattern for "the user pressed a
+ * different floor button") should never need to check first.
+ */
+export function cancelVtPanViewerFloorPrepare() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.cancelFloorPrepare();
+  return { cancelled: true };
+}
+
+/**
+ * Re-run the ±1 background prewarm centred on `floorIndex`. Fire-and-forget on
+ * the CALLER's side too — this resolves once every item on every non-center
+ * floor has at least started loading, but nobody needs to await that for it to
+ * be doing its job; boot.js calls this `.catch()`-guarded and unawaited after
+ * every real floor-switch commit. `{skipped:true}` when no viewer is running,
+ * same convention as every other accessor here.
+ * @param {number} floorIndex
+ */
+export async function prewarmVtPanViewerAdjacentFloors(floorIndex) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.prewarmAdjacentFloors(floorIndex);
+  return { started: true };
 }
 
 /**
@@ -16185,75 +17544,6 @@ function makeOutdoorsPlaceholderTexture(THREE) {
   return tex;
 }
 
-// ===========================================================================
-// ALBEDO CLARITY — "when I zoom out the dark outlines get mushed and the image
-// goes low-contrast; PIXI stays sharp" (author, 2026-07-28). This is the THIRD
-// round on this one complaint. The mip chain and pixel-ratio parity (both
-// 2026-07-19) were the first two — both real fixes, both still not enough.
-//
-// WHY THE FIRST TWO COULD NOT CLOSE IT. Both asked "which mip level does MSA
-// sample?" and made that answer match PIXI. Neither asked what minification
-// COSTS once the level is already right — and the answer is that a correctly
-// prefiltered minified image is genuinely, unavoidably softer than its source.
-// Each texel of a level-2 mip is the average of 16 source texels, so a one-texel
-// ink outline that was solid black becomes one sixteenth of a light grey cell.
-// That is not a sampler bug. It is what prefiltering IS, and PIXI pays it too.
-//
-// MEASURED FIRST, so this is not a fourth plausible story (memory:
-// feedback_measure_the_output_not_the_equation, feedback_plausible_diagnosis_rots).
-// Running the project's OWN BC1 encoder over synthetic pen art at LOD 1.4 — the
-// author's actual zoom-out — against a simulated PIXI chain:
-//   PIXI (gamma mips, no BC, gamma filter)   RMS contrast 44.8
-//   MSA  (gamma mips, BC1,  linear filter)   RMS contrast 41.2   (-8%)
-//   isolate BC1 only                         RMS contrast 48.0   (BC1 RAISES it)
-//   isolate sRGB-vs-gamma filtering          RMS contrast 37.9   (-15%)
-// BC1 was exonerated outright; the filtering colour space is real but small.
-// The whole MSA-vs-PIXI texture-path gap is ~8% — nowhere near what the author
-// is describing. So the loss is inherent to minification, and no better sampler
-// can recover it. Something has to PUT THE CONTRAST BACK.
-//
-// THE TECHNIQUE: AMD FidelityFX CAS (Contrast Adaptive Sharpening) — the modern
-// standard for precisely this. It restores local contrast without the haloing a
-// plain unsharp mask produces and without amplifying flat-area noise. Its `amp`
-// term eases the sharpening off as a neighbourhood approaches black or white,
-// which is exactly what keeps ink outlines from ringing into haloes.
-//
-// THREE THINGS THAT MAKE THIS A REPAIR RATHER THAN A BLANKET SHARPEN:
-//
-//  1. THE KERNEL IS SCREEN-SPACE, NOT TEXTURE-SPACE. The four taps sit at
-//     ±dFdx/±dFdy — exactly one OUTPUT pixel away, at every zoom. A
-//     texture-space kernel would sharpen a fixed count of texels and so change
-//     character as you zoom; this one always sharpens what the display actually
-//     resolves. The derivatives are taken in strictly uniform control flow (no
-//     branch above them): divergent-flow derivatives are undefined behaviour,
-//     the trap water-body.js carries its own warning about.
-//
-//  2. IT ENGAGES ONLY UNDER MINIFICATION. `texelsPerPixel` is the real
-//     footprint read off those derivatives, and the gate is 0 at 1:1, ramping
-//     in as the art begins to minify. At or above 1:1 there is no lost detail
-//     to recover and sharpening would only add ringing — which is why zoomed-in
-//     views come out of this completely untouched.
-//
-//  3. IT SHARPENS IN A PERCEPTUAL SPACE, NOT LINEAR LIGHT. Samples arrive
-//     linear (the art is an sRGB-format texture, so the hardware decodes before
-//     it filters). Sharpening there would fight the eye: linear-light
-//     differences are not what "contrast" means to a viewer, and dark ink on
-//     light paper — the exact case in question — is where the two spaces
-//     diverge hardest. A gamma-2.0 round trip (sqrt in, square out) is a
-//     branch-free stand-in for sRGB at a fraction of a real transfer pair's
-//     cost, and it puts the CAS maths in the same space PIXI's whole renderer
-//     happens to work in.
-//
-// ALPHA IS DELIBERATELY LEFT ALONE. Ringing a cutout's alpha would fringe every
-// prop silhouette against the floor showing through it — a worse artefact than
-// the softness being repaired.
-// ===========================================================================
-
-/** Live clarity settings. ONE shared uniform pair drives every whole-image
- * material (memory: keyhole-vt-pan-viewer-extraction trap 2 — shared uniforms
- * must stay shared; per-material copies would make the setter update only
- * whichever material happened to be built last). Default ON, per
- * feedback_default_on_new_features. */
 /**
  * ANISOTROPIC FILTERING for art textures — the other half of the 2026-07-28
  * zoom-out sharpness work, and free real estate WebGPU was already offering.
@@ -16276,195 +17566,6 @@ function makeOutdoorsPlaceholderTexture(THREE) {
  * the class memory:feedback_seam_default_hides_unwired exists to catch.
  */
 const ART_TEXTURE_ANISOTROPY = 16;
-
-const ALBEDO_CLARITY_DEFAULTS = {
-  /** CAS sharpening strength. 0 = off; 0.2 is stock FidelityFX CAS at maximum.
-   * Pen-and-ink map art tolerates — and wants — a little more than photographic
-   * content, so the default sits just above stock. Range 0..0.5. */
-  sharpness: 0.22,
-  /** Minification (source texels per output pixel) where sharpening starts. 1.0
-   * = the moment the art stops being pixel-exact. */
-  gateLo: 1.0,
-  /** Minification where sharpening reaches full strength. */
-  gateHi: 1.8,
-  /**
-   * THE FAR ROLL-OFF (author, 2026-07-28: "large zoom out makes areas look a bit
-   * pixelated"). Past a point, every screen pixel is showing roughly one mip
-   * texel, so there is no sub-pixel detail left to recover and sharpening starts
-   * emphasising the texel grid itself instead — which reads as pixelation. These
-   * two ease the strength back down toward `farFloor` once minification passes
-   * `farLo`, reaching it at `farHi`.
-   *
-   * For scale: on the author's 6750² ground, the whole map on screen is about
-   * 5.4 texels per pixel, so the default keeps FULL strength through every
-   * normal zoom and only backs off beyond a whole-map view.
-   */
-  farLo: 6.0,
-  farHi: 16.0,
-  /** Fraction of `sharpness` still applied at and beyond `farHi`. 1 = no
-   * roll-off at all; 0 = sharpening fully off at extreme zoom-out. */
-  farFloor: 0.35,
-};
-const _albedoClarity = { ...ALBEDO_CLARITY_DEFAULTS };
-/** @type {{ sharpen: any, gate: any }|null} */
-let _albedoClarityUniforms = null;
-
-/**
- * The shared clarity uniforms, created on first use (THREE arrives by parameter
- * throughout this file — it is dynamically imported inside the factory, so a
- * module-level `uniform(...)` at load time is not available).
- * @param {*} THREE @returns {{ sharpen: any, gate: any }}
- */
-function albedoClarityUniforms(THREE) {
-  if (_albedoClarityUniforms === null) {
-    const { uniform, float, vec4 } = THREE.TSL;
-    _albedoClarityUniforms = {
-      sharpen: uniform(float(_albedoClarity.sharpness)),
-      // (gateLo, gateHi, farLo, farHi) — the ramp-in pair and the roll-off pair.
-      gate: uniform(vec4(_albedoClarity.gateLo, _albedoClarity.gateHi, _albedoClarity.farLo, _albedoClarity.farHi)),
-      farFloor: uniform(float(_albedoClarity.farFloor)),
-    };
-  }
-  return _albedoClarityUniforms;
-}
-
-/**
- * Tune albedo clarity live — no rebuild, no scene reload (the uniforms are
- * shared, so one write reaches every item on screen).
- * @param {{sharpness?:number, gateLo?:number, gateHi?:number}} next
- * @returns {{sharpness:number, gateLo:number, gateHi:number, applied:boolean}}
- *   `applied:false` means no material has been built yet, so the values are
- *   stored and will be picked up when one is — NOT that the call was ignored
- *   (memory: feedback_instruments_must_not_lie).
- */
-export function setAlbedoClarity(next = {}) {
-  if (Number.isFinite(next.sharpness)) _albedoClarity.sharpness = Math.max(0, Math.min(0.5, next.sharpness));
-  if (Number.isFinite(next.gateLo)) _albedoClarity.gateLo = Math.max(0, next.gateLo);
-  if (Number.isFinite(next.gateHi)) _albedoClarity.gateHi = Math.max(0.01, next.gateHi);
-  if (Number.isFinite(next.farLo)) _albedoClarity.farLo = Math.max(0, next.farLo);
-  if (Number.isFinite(next.farHi)) _albedoClarity.farHi = Math.max(0.01, next.farHi);
-  if (Number.isFinite(next.farFloor)) _albedoClarity.farFloor = Math.max(0, Math.min(1, next.farFloor));
-  // Keep both ramps well-ordered whichever end the caller moved. A smoothstep
-  // with hi <= lo is a hard step, which would pop as you zoom rather than fade.
-  if (_albedoClarity.gateHi <= _albedoClarity.gateLo) _albedoClarity.gateHi = _albedoClarity.gateLo + 0.01;
-  if (_albedoClarity.farHi <= _albedoClarity.farLo) _albedoClarity.farHi = _albedoClarity.farLo + 0.01;
-  if (_albedoClarityUniforms) {
-    _albedoClarityUniforms.sharpen.value = _albedoClarity.sharpness;
-    _albedoClarityUniforms.gate.value.set(
-      _albedoClarity.gateLo,
-      _albedoClarity.gateHi,
-      _albedoClarity.farLo,
-      _albedoClarity.farHi
-    );
-    _albedoClarityUniforms.farFloor.value = _albedoClarity.farFloor;
-  }
-  return { ..._albedoClarity, applied: _albedoClarityUniforms !== null };
-}
-
-/** Restore every clarity control to its shipped default — the way back from a
- * tuning session that went somewhere odd. */
-export function resetAlbedoClarity() {
-  return setAlbedoClarity(ALBEDO_CLARITY_DEFAULTS);
-}
-
-/** Current albedo-clarity settings, plus whether they are actually bound to a
- * live material yet. @returns {{sharpness:number, gateLo:number, gateHi:number, applied:boolean}} */
-export function getAlbedoClarity() {
-  return { ..._albedoClarity, applied: _albedoClarityUniforms !== null };
-}
-
-/**
- * Sample `tex` through the clarity filter: five screen-space taps, CAS in a
- * perceptual space, gated to minification. See this section's header for why
- * each of those three clauses is load-bearing.
- *
- * @param {*} THREE
- * @param {*} tex - the art texture (already sRGB-decoded on sample by the
- *   hardware, so `rgb` arrives LINEAR and leaves LINEAR — this is drop-in for a
- *   bare `texture(tex, uv)` and changes nothing downstream).
- * @param {*} uvNode - the FINAL uv node (uvScale already applied).
- * @param {*} uTexSizeNode - vec2 of the texture's own texel dimensions, i.e.
- *   what `uv * this` converts a UV derivative into a texel count. For the
- *   block-compressed path that is the PADDED size, because uv 1.0 addresses the
- *   padded width — not the logical width the uvScale crops back to.
- * @returns {{rgb:any, a:any}} linear rgb + the untouched source alpha.
- */
-function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
-  const TSL = THREE.TSL;
-  const { vec3, float, texture, dFdx, dFdy } = TSL;
-  const { sharpen: uSharpen, gate: uGate, farFloor: uFarFloor } = albedoClarityUniforms(THREE);
-
-  // UNIFORM CONTROL FLOW: nothing may branch above these two lines.
-  const duvdx = dFdx(uvNode).toVar();
-  const duvdy = dFdy(uvNode).toVar();
-
-  // Source texels covered by one output pixel. >1 = minifying = detail is being
-  // averaged away = there is something for the sharpen to put back.
-  const fx = duvdx.mul(uTexSizeNode);
-  const fy = duvdy.mul(uTexSizeNode);
-  const texelsPerPixel = TSL.max(fx.dot(fx), fy.dot(fy)).sqrt().toVar();
-  // Ramp IN as the art starts to minify, then ease back toward `farFloor` at
-  // extreme zoom-out, where a screen pixel already shows about one mip texel and
-  // sharpening would emphasise the texel grid rather than recover detail.
-  // mix() in FUNCTION form deliberately: `a.mix(b, t)` silently evaluates as
-  // mix(b, t, a) (memory: reference_tsl_method_chaining_trap).
-  const rampIn = TSL.smoothstep(uGate.x, uGate.y, texelsPerPixel);
-  const rollOff = TSL.smoothstep(uGate.z, uGate.w, texelsPerPixel);
-  const gate = rampIn.mul(TSL.mix(float(1), uFarFloor, rollOff)).toVar();
-
-  const c = texture(tex, uvNode).toVar();
-  const sL = texture(tex, uvNode.sub(duvdx));
-  const sR = texture(tex, uvNode.add(duvdx));
-  const sU = texture(tex, uvNode.sub(duvdy));
-  const sD = texture(tex, uvNode.add(duvdy));
-
-  // Linear → gamma-2.0. The max() guards sqrt against a negative that a future
-  // HDR-ish albedo source could introduce; on 8-bit art it never fires.
-  const enc = (s) => TSL.max(s.rgb, vec3(0)).sqrt();
-  const eC = enc(c).toVar();
-  const eL = enc(sL);
-  const eR = enc(sR);
-  const eU = enc(sU);
-  const eD = enc(sD);
-
-  // CAS. `amp` is the ringing brake: it falls to zero as the neighbourhood
-  // approaches black OR white, so a solid ink line next to bare paper — the
-  // highest-contrast case there is — gets restored without gaining a halo.
-  const mn = TSL.min(eC, TSL.min(TSL.min(eL, eR), TSL.min(eU, eD)));
-  const mx = TSL.max(eC, TSL.max(TSL.max(eL, eR), TSL.max(eU, eD)));
-  const amp = TSL.saturate(TSL.min(mn, vec3(1).sub(mx)).div(TSL.max(mx, vec3(1e-4)))).sqrt();
-
-  // w is NEGATIVE (neighbours subtracted) and the reciprocal renormalises, so a
-  // flat neighbourhood comes through exactly unchanged: (e + 4ew)/(1+4w) = e.
-  const w = amp.mul(uSharpen).mul(gate).negate();
-  const rcp = vec3(1).div(w.mul(4).add(1));
-  const sharpened = eC.add(eL.add(eR).add(eU).add(eD).mul(w)).mul(rcp);
-
-  // Gamma-2.0 → linear. Downstream sees exactly the units it always did.
-  const lin = TSL.max(sharpened, vec3(0));
-  return { rgb: lin.mul(lin), a: c.a };
-}
-
-/**
- * The bare 1-tap read `buildAlbedoClarityNode` degenerates to whenever
- * `uSharpen` is 0: `w = amp*0*gate = 0` ⇒ `rcp = 1` ⇒ `sharpened = eC` ⇒
- * `lin.mul(lin) = max(c.rgb,0).sqrt()² = max(c.rgb,0)`. Every one of the 4
- * neighbour taps, the two `dFdx`/`dFdy` derivative reads, and the CAS
- * contrast math is provably unreachable in that case — this function is
- * that same output with the unreachable work actually removed, not merely
- * multiplied by zero (a shader with an unconditional discard/branch still
- * pays for the code inside it regardless of the runtime value feeding it —
- * `buildSceneDepthWriterMaterial`'s own `alwaysOpaque` is the identical
- * argument applied to a different function, `scene-depth.js`).
- *
- * @param {*} THREE @param {*} tex @param {*} uvNode
- * @returns {{rgb:any, a:any}} SAME shape as `buildAlbedoClarityNode`'s own.
- */
-function buildFlatAlbedoNode(THREE, tex, uvNode) {
-  const { vec3, texture, max } = THREE.TSL;
-  const c = texture(tex, uvNode);
-  return { rgb: max(c.rgb, vec3(0)), a: c.a };
-}
 
 /**
  * ALBEDO CLARITY AS A REAL PERFORMANCE TIER (2026-08-09, PERF audit §18's own
@@ -16496,12 +17597,25 @@ function buildFlatAlbedoNode(THREE, tex, uvNode) {
  * mid-session is not expected to retroactively cheapen an already-compiled
  * material, matching the precedent rather than inventing a new promise.
  *
+ * ⚠️ 2026-08-15 — TWO ADDITIONS, both composing with the profile check rather
+ * than replacing it:
+ *   1. `isAlbedoClarityEnabled()` (`vt/albedo-clarity.js`) — the Make-panel
+ *      card's own on/off toggle. Persistent and user-facing; ANDed in so a
+ *      disabled state also compiles out the taps, same "next material build"
+ *      cadence as the profile gate above (not a new inconsistency).
+ *   2. `_albedoClarityForce` below — a DIAGNOSTIC-ONLY override, checked
+ *      first and short-circuiting everything else, used exclusively by the
+ *      sharpening structural A/B to get a real measured GPU-ms delta between
+ *      the two compiled shader graphs. `null` (the default) means "no
+ *      override, resolve normally" — every existing session sees no change.
+ *
  * @returns {boolean} true when this build should use the full sharpen.
  */
 function shouldUseFullAlbedoClarity() {
+  if (_albedoClarityForce !== null) return _albedoClarityForce;
   try {
     const profile = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile);
-    return profileRank(profile) >= 2; // 2 === 'standard', the default rank
+    return profileRank(profile) >= 2 && isAlbedoClarityEnabled(); // 2 === 'standard', the default rank
   } catch {
     // A settings read can fail before Foundry's own registry is ready (the
     // shader-lab bench, a probe built before `game.settings` exists). Falls
@@ -16510,6 +17624,39 @@ function shouldUseFullAlbedoClarity() {
     // mistaken for a deliberate quality choice.
     return true;
   }
+}
+
+/** @type {boolean|null} The sharpening A/B's diagnostic override — see
+ * `shouldUseFullAlbedoClarity`'s own doc. Module-level, not `_active`-scoped:
+ * `shouldUseFullAlbedoClarity` is read DURING `startVtPanViewer`'s own
+ * construction, before `_active` exists, so an instance-scoped flag would have
+ * nowhere to live at the moment it's needed — this plain `let`, like
+ * `_albedoClarity` itself in `vt/albedo-clarity.js`, survives a restart for
+ * free. */
+let _albedoClarityForce = null;
+
+/**
+ * DIAGNOSTIC-ONLY: force the CAS shader variant for the NEXT material build,
+ * regardless of performance profile or the user's own enabled toggle. Used
+ * exclusively by the sharpening structural A/B (`diag/perf-sharpening-ab.js`)
+ * to get a real measured GPU-ms delta between the full and flat compiled
+ * shader graphs — never a live-tuning path (that is `setAlbedoClarity`,
+ * instant, no rebuild needed). Setting this alone changes nothing on screen;
+ * it only takes effect once the viewer restarts and rebuilds materials under
+ * the new value. Distinct name from `setAlbedoClarity` on purpose — that one
+ * tunes live CAS uniform parameters, this one forces the compiled-shader-graph
+ * fork; conflating them would be the same mistake this doc already warns
+ * against for `shouldUseFullAlbedoClarity` itself.
+ * @param {boolean|null} mode - true=full CAS, false=flat 1-tap, null=clear (resolve normally)
+ */
+export function setVtPanViewerAlbedoClarityForce(mode) {
+  _albedoClarityForce = mode === true || mode === false ? mode : null;
+}
+
+/** The sharpening A/B's own override read-back — so it can restore exactly
+ * what it found, never guess. @returns {{forced: boolean|null}} */
+export function getVtPanViewerAlbedoClarityForce() {
+  return { forced: _albedoClarityForce };
 }
 
 /**
@@ -16826,8 +17973,8 @@ export function getVtPanViewerVegetationProxyCacheStats() {
   return _active.getVegetationProxyCacheStats();
 }
 
-/** CACHE HEALTH — the point-light pool's four wall-clip caches (candle,
- * lightning, real Foundry lights, aperture-gobo wall segments). See
+/** CACHE HEALTH — the point-light pool's five wall-clip caches (candle,
+ * lightning, fire, real Foundry lights, aperture-gobo wall segments). See
  * `point-light-pool.js#getWallClipCacheStats`'s own doc. */
 export function getVtPanViewerPointLightWallClipCacheStats() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };

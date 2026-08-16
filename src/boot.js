@@ -36,6 +36,13 @@ import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
 import { createPerfLab, runSweep, runSweepStructuralAB } from './diag/perf-lab.js';
+// ALBEDO CLARITY STRUCTURAL A/B (2026-08-15) — deliberately imported DIRECTLY
+// here rather than threaded through perf-session.js/buildPerfReport the way
+// perf-structural-ab.js's own runStructuralAB is: runProfileSession runs up
+// to 3 times per perf-run-full call, so following that exact path would mean
+// 12+ viewer restarts. Called once, as its own Phase 4, after every sweep in
+// the perf-run-full action body below. See that file's own header.
+import { runSharpeningAB } from './diag/perf-sharpening-ab.js';
 import { describeWindBake } from './diag/wind-probe.js';
 // THE PERFORMANCE INSTRUMENT (docs/planning/Performance.md). The taxonomy and
 // the report brain are pure and land ahead of the profiler that will feed them,
@@ -64,6 +71,9 @@ import {
   isCameraPathPlayingCapped,
 } from './foundry/index.js';
 import { buildLiveSceneExport, sceneExportFilename } from './foundry/index.js';
+// THE TOKEN-VISION DIAGNOSTIC — see its own module header, and the
+// `token-vision` report registration below.
+import { readTokenVisionDiagnostic } from './foundry/index.js';
 
 /**
  * The benchmark route's duration. 60s at a steady traverse (author, 2026-07-28)
@@ -121,6 +131,19 @@ const MIN_ACTION_PAUSE_MS = 5000;
  * restore is a real floor load too, not a free no-op.
  */
 const FLOOR_CHANGE_SETTLE_BUFFER_MS = 15000;
+
+/**
+ * How often the scene-load hold re-asks whether the scene is ready.
+ *
+ * The same 250ms `diag/perf-session.js`'s own settle waiter uses, and a
+ * deliberate reuse rather than a second constant meaning the same thing: two
+ * numbers that both answer "how often do we check if the scene has settled"
+ * are two numbers that will eventually disagree
+ * ([[feedback_probed_constants_vs_derived]]). Fine-grained next to the
+ * multi-second stages being watched, and cheap — each poll is one object read
+ * of the LAST settle sample, never a fresh measurement.
+ */
+const READY_POLL_MS = 250;
 /** Plain fixed-duration wait — no clock read, just a timer (time/one-clock
  * is about READING the current time, which this never does). @param {number} ms */
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -151,6 +174,14 @@ import {
   getVtPanViewerDiagnostics,
   getVtPanViewerRenderTargets,
   setVtPanViewerFloor,
+  prepareVtPanViewerFloor,
+  // The orchestration below never calls this directly — `prepareFloor`
+  // already self-invalidates any prepare it supersedes (every call bumps its
+  // own generation counter). It is imported for `ui/floor-transition.js`'s
+  // Cancel button: the one caller with a genuine "the author decided to stay
+  // on this floor, not switch to another" to express.
+  cancelVtPanViewerFloorPrepare,
+  prewarmVtPanViewerAdjacentFloors,
   setVtPanViewerGpuProbe,
   setVtPanViewerGpuZoneTimer,
   getVtPanViewerGpuZoneStatus,
@@ -199,6 +230,9 @@ import {
   setAlbedoClarity,
   getAlbedoClarity,
   resetAlbedoClarity,
+  ALBEDO_CLARITY_PARAMS,
+  setVtPanViewerAlbedoClarityForce,
+  getVtPanViewerAlbedoClarityForce,
   setUiShadow,
   getUiShadow,
   sampleVtPanViewerIllumPixel,
@@ -335,6 +369,8 @@ import {
   beginSceneLoad,
   beginSceneLoadPhase,
   reportSceneLoadProgress,
+  reportSceneLoadBlockers,
+  shouldStopWaitingForReady,
   endSceneLoad,
   getLoadingScreenState,
   resetLoadingSceneMemory,
@@ -349,6 +385,9 @@ import {
   showPerfProgress,
   hidePerfProgress,
   formatPerfProgressText,
+  beginFloorTransition,
+  updateFloorTransitionProgress,
+  endFloorTransition,
 } from './ui/index.js';
 import {
   SORT_LAYERS,
@@ -488,13 +527,17 @@ MapShine.THREE = THREE; // single Three instance for the whole V3 tree
 // vt-pan-viewer.js#setDarknessRealism / environmental-light.js.
 MapShine.setDarknessRealism = setDarknessRealism;
 MapShine.getDarknessRealism = getDarknessRealism;
-// ALBEDO CLARITY (2026-07-28, author-requested tuning surface): the zoom-out
-// sharpness repair. `MapShine.setAlbedoClarity({ sharpness, gateLo, gateHi,
-// farLo, farHi, farFloor })` — every field optional, takes effect on the next
-// frame with no reload (the uniforms are shared across every item on screen).
-// `getAlbedoClarity()` reports the live values plus whether they are bound to a
-// built material yet; `resetAlbedoClarity()` restores the shipped defaults.
-// See buildAlbedoClarityNode's section header in vt-pan-viewer.js.
+// ALBEDO CLARITY (2026-07-28, author-requested tuning surface; real UI added
+// 2026-08-15 — "Sharpening" card, Make panel): the zoom-out sharpness repair.
+// `MapShine.setAlbedoClarity({ sharpness, gateLo, gateHi, farLo, farHi,
+// farFloor, enabled })` — every field optional, takes effect on the next
+// frame with no reload (the uniforms are shared across every item on screen);
+// `enabled:false` zeroes the visible contribution instantly but only compiles
+// the taps back out on the NEXT material build (see shouldUseFullAlbedoClarity
+// in vt-pan-viewer.js). `getAlbedoClarity()` reports the live values plus
+// whether they are bound to a built material yet; `resetAlbedoClarity()`
+// restores the shipped defaults. See vt/albedo-clarity.js's own header for
+// the full design account.
 MapShine.setAlbedoClarity = setAlbedoClarity;
 MapShine.getAlbedoClarity = getAlbedoClarity;
 MapShine.resetAlbedoClarity = resetAlbedoClarity;
@@ -680,6 +723,39 @@ MapShine.getPointLightMeshPoolStats = getVtPanViewerPointLightMeshPoolStats;
 // call, answered from real outstanding-work counters instead of a stopwatch,
 // and it names what it is still waiting for. See vt/settle.js.
 MapShine.getSceneSettle = getVtPanViewerSceneSettle;
+/**
+ * IS THIS SCENE SAFE TO LOOK AT AND SAFE TO PLAY? — the one public readiness
+ * signal, and the thing every "wait for it" in this project should ask.
+ *
+ * A thin, stable name over `getSceneSettle()`, which is where the rule actually
+ * lives. It exists as its own door for two reasons:
+ *
+ *   1. `settled` is a word about STREAMING; `ready` is the question everyone
+ *      downstream is actually asking, including the Playwright harness, which
+ *      currently answers it with `waitForTimeout(8000)` after a comment
+ *      admitting the module-booted flag *"only confirms the MODULE booted"*.
+ *      Every hard-coded sleep in `tests/` is a guess standing in for this call.
+ *   2. It gives the readiness contract a name that does not move if the
+ *      implementation does.
+ *
+ * `waitingFor` is always populated when `ready` is false — an unfinished wait
+ * that cannot say what it is waiting for is a stopwatch with extra steps.
+ */
+MapShine.getSceneReady = () => {
+  const s = getVtPanViewerSceneSettle();
+  return {
+    ready: s?.settled === true,
+    waitingFor: s?.waitingFor ?? ['the viewer has not started'],
+    blockers: s?.blockers ?? [],
+    // Which criteria were actually evaluated vs never measured — so a caller
+    // can tell a passed check from an absent one
+    // ([[feedback_absent_zone_row_is_a_measurement]]).
+    criteria: s?.criteria ?? null,
+    unavailable: s?.unavailable ?? [],
+    quietForMs: s?.quietForMs ?? 0,
+    sampledAtMs: s?.sampledAtMs ?? null,
+  };
+};
 // WORLD-DRAW COMPOSITION (2026-08-12, Testament Track B.1) — geometry.worldDraw
 // is one opaque renderer.render() call with no internal timing seam (see
 // getGeometryComposition's own doc in vt-pan-viewer.js). This names what's
@@ -3117,6 +3193,19 @@ function install() {
   // for exactly this reason, a few hundred lines up); this pair is what
   // actually makes a measurement window pay none of it.
   let debugPanelVisibleBeforeHide = false;
+  // SHARPENING A/B KILL SWITCH (2026-08-15) — OFF by default, deliberately
+  // the opposite default from multiFloor/rapidStressSweep (both unconditional
+  // phases of this same action). Those two have a KNOWN-acceptable cost;
+  // this one is four full viewer restarts and has never been timed live —
+  // the first real capture with it on IS the timing experiment that decides
+  // whether to flip this default (see runSharpeningAB's own header). Console
+  // only, same "one action, one control" reasoning `runEarlyZSweepAB` is
+  // already built on a few hundred lines down — no panel toggle for this.
+  let sharpeningAbEnabled = false;
+  MapShine.setSharpeningAbEnabled = (on) => {
+    sharpeningAbEnabled = on === true;
+    return { enabled: sharpeningAbEnabled };
+  };
   const profileHarness = {
     isGpuProbeArmed: () => getVtPanViewerDiagnostics?.()?.gpuProbe?.active === true,
     profilerOwner: () => perfProfiler.owner(),
@@ -3351,6 +3440,56 @@ function install() {
     // See `structuralToggleHooks`'s own declaration (above `perfHarness`) for
     // the full rationale — shared between both harnesses, not duplicated.
     ...structuralToggleHooks,
+    // ALBEDO CLARITY STRUCTURAL A/B (2026-08-15, diag/perf-sharpening-ab.js)
+    // — NOT part of structuralToggleHooks's generic id-dispatch shape, and
+    // deliberately so: that dispatcher's "flip the toggle, wait N frames"
+    // settle model is wrong here (shouldUseFullAlbedoClarity is a real
+    // shader-graph fork baked in at MATERIAL BUILD time — see that
+    // function's own doc in vt-pan-viewer.js — no amount of frame-waiting
+    // rebuilds an already-compiled material). Only `profileHarness` gets
+    // these two: `perfHarness` has no armProfiler/waitFrames/GPU-zone-timer
+    // primitives to measure with, so there is nothing for it to do with them.
+    readAlbedoClarityForce: () => getVtPanViewerAlbedoClarityForce()?.forced ?? null,
+    /**
+     * Force the CAS shader variant, then actually make it stick: restart the
+     * real-scene viewer on the CURRENTLY VIEWED floor (no material rebuild
+     * exists below a full stop/start — confirmed by grepping every
+     * `registerAction` in this file for a lighter alternative; there isn't
+     * one). No re-entrancy guard exists on `startVtPanViewer` itself, so
+     * `stopVtPanViewer()` is called explicitly, every time, before the next
+     * start — never assumed. Camera position survives for free: a real-scene
+     * start always passes `followFoundryCamera: true`, and the viewer's own
+     * `syncFoundryCamera()` overwrites its view from `canvas.stage` on the
+     * very first tick, so there is nothing here to capture or restore.
+     * @param {boolean|null} mode
+     * @returns {Promise<{ok: boolean, error?: string}>}
+     */
+    restartViewerWithAlbedoClarityForce: async (mode) => {
+      setVtPanViewerAlbedoClarityForce(mode);
+      const sceneDoc = getActiveSceneDoc();
+      const floorsResult = getActiveSceneFloors(sceneDoc);
+      if (!floorsResult.ok) {
+        return { ok: false, error: floorsResult.error ?? 'could not read this scene’s floors' };
+      }
+      const floorIndex = resolveFloorDescriptor(sceneDoc, floorsResult.floors);
+      stopVtPanViewer();
+      const result = await startRealSceneViewer(floorIndex);
+      if (result?.ok === false) return result;
+      // EVENT-DRIVEN wait first (same instrument the multi-floor phase already
+      // trusts), THEN the same fixed margin a real floor change gets — a full
+      // restart reconstructs strictly more than a floor switch does (the
+      // occlusion mask, scene depth, water body, sun shadows, specular,
+      // window light, point-light pool, door graphics — everything), so it
+      // earns at least the same buffer, never less.
+      await waitForSceneSettled({
+        onProgress: (s) =>
+          showPerfProgress(
+            `sharpening A/B — viewer restarted, settling (${(s?.waitingFor ?? []).join(', ') || 'starting'})`
+          ),
+      }).catch(() => {});
+      await pause(FLOOR_CHANGE_SETTLE_BUFFER_MS);
+      return result;
+    },
   };
 
   const perfHud = createPerfHud({
@@ -3746,6 +3885,46 @@ function install() {
         hidePerfProgress();
       }
       lastPerfProfile.rapidStressSweep = rapidStressSweep;
+
+      // PHASE 4: SHARPENING A/B (2026-08-15) — same shape as multiFloor/
+      // rapidStressSweep above (runs once, AFTER every runProfileSession
+      // camera sweep, bolted onto the finished report — NOT threaded through
+      // buildPerfReport the way structuralAB is, because runProfileSession
+      // itself runs up to 3 times per perf-run-full call; following that
+      // exact pattern here would mean 12+ viewer restarts, not 4). Gated
+      // behind the console-only kill switch declared above profileHarness —
+      // see that declaration for why this phase, unlike its two siblings, is
+      // NOT unconditional.
+      let sharpeningAB = null;
+      if (sharpeningAbEnabled) {
+        try {
+          showPerfProgress('sharpening A/B — restarting the viewer to compare CAS variants (this is slow)…');
+          sharpeningAB = await runSharpeningAB(profileHarness, {
+            onProgress: (phase, detail) => {
+              log.info(`perf report: ${phase}${detail ? ` — ${detail}` : ''}`);
+              showPerfProgress(formatPerfProgressText(phase, detail));
+            },
+          });
+        } catch (err) {
+          log.error('perf report: sharpening A/B phase failed — everything above is still valid:', err);
+          sharpeningAB = {
+            ran: false,
+            skipped: 'threw',
+            note: `sharpening A/B phase threw: ${err?.message ?? err}`,
+            toggles: [],
+          };
+        } finally {
+          hidePerfProgress();
+        }
+      } else {
+        sharpeningAB = {
+          ran: false,
+          skipped: 'disabled-by-default',
+          note: 'Off by default — the real cost of 4 viewer restarts has never been timed live. Enable with MapShine.setSharpeningAbEnabled(true) before running perf-run-full.',
+          toggles: [],
+        };
+      }
+      lastPerfProfile.sharpeningAB = sharpeningAB;
 
       // Feed the sweep's OWN rich per-effect table (perf-lab.js's tested
       // renderer) from the SAME run, via the raw sweep buildPerfReport echoes
@@ -6041,6 +6220,92 @@ function install() {
     order: 90,
   });
 
+  // ALBEDO CLARITY (2026-08-15) — the zoom-out sharpness repair's first real
+  // UI, replacing the console-only `MapShine.setAlbedoClarity(...)` it shipped
+  // with. Follows Wind's MECHANICS (a direct getAlbedoClarity()/
+  // setAlbedoClarity() pair, no effectRegistry — this is a global rendering-
+  // quality knob, not a placeable/scene-authored effect) with Grade's
+  // SUBSTANCE (a real populated schema + a real enable toggle). Order sits
+  // right beside Grade's (90) — both are whole-image quality knobs, neither
+  // has an `add` affordance (nothing to place or paint).
+  function buildAlbedoClarityPanel({ attachments } = {}) {
+    const schema = ALBEDO_CLARITY_PARAMS;
+    // Explicit per-key dispatch, not a blind `[id]` passthrough — schema and
+    // real consumer (setAlbedoClarity/buildAlbedoClarityNode) both live in
+    // vt/albedo-clarity.js, so this IS the "referenced somewhere else"
+    // params/no-dead-controls needs to see each key is genuinely wired, not
+    // just a comment claiming so (the check strips comments on purpose).
+    const getValue = (id) => {
+      const state = getAlbedoClarity();
+      switch (id) {
+        case 'sharpness':
+          return state.sharpness;
+        case 'gateLo':
+          return state.gateLo;
+        case 'gateHi':
+          return state.gateHi;
+        case 'farLo':
+          return state.farLo;
+        case 'farHi':
+          return state.farHi;
+        case 'farFloor':
+          return state.farFloor;
+        default:
+          return undefined;
+      }
+    };
+    const onChange = (id, value) => {
+      switch (id) {
+        case 'sharpness':
+          setAlbedoClarity({ sharpness: value });
+          break;
+        case 'gateLo':
+          setAlbedoClarity({ gateLo: value });
+          break;
+        case 'gateHi':
+          setAlbedoClarity({ gateHi: value });
+          break;
+        case 'farLo':
+          setAlbedoClarity({ farLo: value });
+          break;
+        case 'farHi':
+          setAlbedoClarity({ farHi: value });
+          break;
+        case 'farFloor':
+          setAlbedoClarity({ farFloor: value });
+          break;
+        default:
+          break;
+      }
+    };
+
+    return buildEffectCard({
+      id: 'albedoClarity',
+      diagnostics: attachments,
+      icon: '🔎',
+      title: 'Sharpening',
+      subtitle: 'CAS contrast restore for zoomed-out art (Albedo Clarity)',
+      status: () => collapsedStatusLine({ enabled: getAlbedoClarity().enabled }),
+      schema,
+      // The one control worth touching mid-session — would the author drag
+      // this while looking at a live scene? Yes for Sharpness, no for five
+      // zoom-threshold constants (feedback_foh_roh_must_differ's judgement
+      // test). Everything else falls to ROH under Technical.
+      fohKeys: ['sharpness'],
+      getValue,
+      onChange,
+      enabled: getAlbedoClarity().enabled,
+      onToggleEnabled: (next) => setAlbedoClarity({ enabled: next }),
+      // no `add` — nothing to place/paint, matches Grade/Bloom's shape.
+    });
+  }
+
+  MapShine.debug.registerPanel('albedo-clarity-panel', 'Sharpening', buildAlbedoClarityPanel, {
+    zone: 'workshop',
+    effect: 'albedoClarity',
+    order: 91,
+  });
+
   // THE WIND FIELD DEBUG OVERLAY (2026-07-21, docs/planning/Wind.md Tier 0 —
   // "a way to visualise the field early on"). A live grid of arrows sampling
   // the EXACT SAME `sampleWind()` the candle flame/light now both read (see
@@ -6491,29 +6756,40 @@ function install() {
   });
   if (!wallWatch.registered) log.warn(`wind auto-rebake not wired — ${wallWatch.reason}`);
 
-  // APERTURE-GOBO WALL-SEGMENT CACHE INVALIDATION (2026-08-09, Performance-
-  // Audit-2026-08.md §12 — the deferred half of §5.1/§6.8's pre-filter fix).
-  // point-light-pool.js used to call `readSceneWallSegments` — a full walk of
-  // every wall on the scene — every single frame, even though wall geometry
-  // only changes on these three hooks. A SECOND, independent watcher rather
-  // than folding into `wallWatch` above, same posture as `watchDoorOpenings`
-  // just below being its own subscription: two consumers of the same raw
-  // hooks with genuinely different jobs (one rebakes a wind grid, one just
-  // bumps a counter) should not be coupled through a shared callback. No
-  // coalescing needed here (unlike `wallWatch`'s queueMicrotask) — bumping an
-  // integer is O(1), so even a many-hooks-in-one-tick bulk edit costs nothing
-  // extra; the pool only ever reads the FINAL value, once, on its next frame.
+  // WALL-STRUCTURE VERSION (2026-08-09, Performance-Audit-2026-08.md §12 —
+  // the deferred half of §5.1/§6.8's pre-filter fix). point-light-pool.js
+  // used to call `readSceneWallSegments` — a full walk of every wall on the
+  // scene — every single frame, even though wall geometry only changes on
+  // these three hooks. A SECOND, independent watcher rather than folding
+  // into `wallWatch` above, same posture as `watchDoorOpenings` just below
+  // being its own subscription: two consumers of the same raw hooks with
+  // genuinely different jobs (one rebakes a wind grid, one just bumps a
+  // counter) should not be coupled through a shared callback. No coalescing
+  // needed here (unlike `wallWatch`'s queueMicrotask) — bumping an integer is
+  // O(1), so even a many-hooks-in-one-tick bulk edit costs nothing extra;
+  // consumers only ever read the FINAL value, once, on their next frame.
   // Registered here — once, for this module's whole lifetime — rather than
   // inside `startRealSceneViewer`/`createPointLightPool`: that path is a
   // confirmed real restart pair (`stopVtPanViewer`/`startVtPanViewer`), and
   // `watchSceneWallStructure` has no unsubscribe, so registering it there
   // would leak one more set of listeners per scene switch.
-  let apertureWallVersion = 0;
-  const apertureWallWatch = watchSceneWallStructure(() => {
-    apertureWallVersion++;
+  //
+  // ⚠️ ORIGINALLY NAMED `apertureWallVersion` — RENAMED 2026-08-15. Started
+  // life feeding only the aperture-gobo wall-SEGMENT cache (below), but that
+  // name became a lie the moment point-light-pool.js's own candle/lightning/
+  // fire/regular-light wall-CLIP SHAPE caches started reading it too (the
+  // "lights aren't occluded by walls" investigation found those four caches
+  // never invalidated on a real wall edit at all — see this file's own
+  // `createPointLightPool` call site). One counter, any wall CRUD — every
+  // consumer of "did the walls change" reads the SAME value now.
+  let wallStructureVersion = 0;
+  const wallStructureWatch = watchSceneWallStructure(() => {
+    wallStructureVersion++;
   });
-  if (!apertureWallWatch.registered) {
-    log.warn(`aperture-gobo wall-segment cache not wired — ${apertureWallWatch.reason}`);
+  if (!wallStructureWatch.registered) {
+    log.warn(
+      `wall-structure version not wired (wall-clip caches will never invalidate) — ${wallStructureWatch.reason}`
+    );
   }
 
   // WIND.MD TIER 2 — THE TRANSIENT SIM (2026-07-21). A door opening fires a
@@ -7203,7 +7479,7 @@ function install() {
       ...(await startVtPanViewer({
         THREE,
         buildItems,
-        getApertureWallVersion: () => apertureWallVersion,
+        getWallStructureVersion: () => wallStructureVersion,
         // FOUNDRY OWNS ALL INPUT on a real scene (keyhole-input-model-decision):
         // pointer-events:none, no MSA input handlers, and the view follows
         // canvas.stage instead of tracking its own camera. The torture fixture
@@ -7235,7 +7511,13 @@ function install() {
         // function at all (see the canvasReady handler), and these calls no-op
         // when nothing is loading — so the reporting path needs no knowledge of
         // whether a curtain is up.
-        onLoadProgress: ({ done, total, detail }) => reportSceneLoadProgress(LOAD_PHASES.ART, { done, total, detail }),
+        // `phase` is OPTIONAL and defaults to ART, so every existing call site
+        // in the viewer keeps meaning exactly what it meant. It exists so the
+        // device-creation step — seconds on a cold driver, and previously
+        // reported under whatever label happened to still be on screen — can
+        // name itself (LOAD_PHASES.DEVICE's own doc has the reasoning).
+        onLoadProgress: ({ done, total, detail, phase }) =>
+          reportSceneLoadProgress(phase ?? LOAD_PHASES.ART, { done, total, detail }),
         // THE DEVICE-LOST SAFETY SLIDE'S seam half (see startVtPanViewer's
         // onDeviceLost handler): when the GPU device is lost, the viewer removes
         // its own dead canvas and announces — but only boot.js, the composition
@@ -7629,6 +7911,17 @@ function install() {
   // shader's slot count), and the current light/tuning. Pure — safe for the
   // flight recorder to run on every export.
   MapShine.debug.registerReport('ui-shadow-status', 'UI window shadows', () => getUiShadow());
+
+  // THE TOKEN-VISION DIAGNOSTIC (2026-08-15) — "why can this token only see a
+  // point light?", asked and answered in ONE report instead of a screenshot
+  // plus five correlated numbers. Built after the same symptom was reported
+  // three times: the revealed area is `vision.light ∩ vision.light.mask`, and
+  // an empty mask (token config / game system) is pixel-identical to an
+  // inactive global light (MSA's own concern). This names WHICH gate is
+  // failing. Control a token first, then run it.
+  MapShine.debug.registerReport('token-vision', 'Token vision: why is it dark?', () =>
+    readTokenVisionDiagnostic()
+  );
 
   // THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I need a
   // button to activate pixel probe and the ability to click on the screen
@@ -8644,17 +8937,102 @@ function install() {
         const targetFloorIndex = resolveFloorDescriptor(sceneDoc, floorsResult.floors);
 
         if (lastRealSceneId === sceneDoc.id && getVtPanViewerDiagnostics().active) {
-          // A floor switch. No curtain was raised for it and none is lifted —
+          // A floor switch. No curtain is raised for it and none is lifted —
           // beginSceneLoad already declined, so there is nothing here to undo.
           // "Floor changes without loading screens" is this branch existing.
-          // Re-point the marker overlay at the newly-active floor's candles.
+          //
+          // PREPARE, THEN COMMIT (2026-08-15). The old floor stays fully drawn
+          // — nothing below this comment and above the commit block touches
+          // `activeFloorContext`, doors, or `view.floorIndex` — while
+          // `prepareVtPanViewerFloor` loads and BC-compresses the target
+          // floor's art. See `prepareFloor`'s own doc (vt-pan-viewer.js) for
+          // why front-loading this is what stops a half-built upper floor
+          // ever being visible: it is not a new visibility gate, it is making
+          // sure the EXISTING hide/show pass has nothing left to wait for by
+          // the time it runs.
+          //
+          // No curtain, no deadline, no escalation — the author's explicit
+          // call (this session): however long a cold floor takes, the OLD
+          // floor is what stays on screen. `ui/floor-transition.js`'s own
+          // Cancel button is the only way out (`cancelVtPanViewerFloorPrepare`
+          // — an in-progress `canvasReady` firing a second time for a
+          // DIFFERENT floor already invalidates the first prepare the same
+          // way, since `prepareFloor`'s generation counter bumps on every
+          // call regardless of who's calling).
+          //
+          // `fromFloorIndex` is `activeFloorContext?.floorIndex` READ HERE,
+          // BEFORE anything below moves it — by the time this hook fires,
+          // Foundry's OWN `canvas.level` has already moved to the target
+          // floor (confirmed by reading `Scene#view`/`canvas.draw` — this is
+          // WHY the held-floor's placeables can look mismatched during a slow
+          // prepare, a known, not-yet-built follow-up), so `activeFloorContext`
+          // is the only thing in this file still honestly pointing at the
+          // floor still on screen.
+          beginFloorTransition({
+            fromFloorIndex: activeFloorContext?.floorIndex ?? null,
+            toFloorIndex: targetFloorIndex,
+            onCancel: cancelVtPanViewerFloorPrepare,
+          });
+          const prepared = await prepareVtPanViewerFloor(targetFloorIndex, (p) => {
+            log.debug?.(`floor ${targetFloorIndex} prepare: ${p.phase} ${p.done}/${p.total}`);
+            // Read from THE READINESS SIGNAL (MapShine.getSceneReady, task 3),
+            // not from `p` — `p` is prepareFloor's own coarse phase/count, but
+            // `waitingFor` is the SAME named-blocker list the cold-load curtain
+            // shows, already human-labelled ("textures still being
+            // GPU-compressed (3)") by vt/settle.js. Reusing it here means this
+            // overlay never invents its own second vocabulary for the same
+            // facts.
+            updateFloorTransitionProgress(MapShine.getSceneReady?.().waitingFor ?? []);
+          });
+          endFloorTransition(); // always — success, failure, or cancel all end here the same way
+          if (!prepared.ok) {
+            // Superseded by a newer floor-switch request (a rapid second
+            // `canvasReady`), or cancelled via the overlay's own button — the
+            // newer request (or the author's own choice to stay put) owns
+            // this outcome, so this firing simply stops here. The old floor
+            // is untouched; there is nothing to undo.
+            log.info(`floor ${targetFloorIndex} prepare did not complete (${prepared.reason}) — leaving floor as-is.`);
+            return;
+          }
+
+          // COMMIT — everything floor N needs is already GPU-resident, so
+          // every step below is fast and, per prepareFloor's own analysis, the
+          // hide/show swap lands within one synchronous pass with nothing left
+          // to await. `activeFloorContext` and `view.floorIndex` move together
+          // here, in this order, with no `await` between them — moving
+          // `activeFloorContext` any earlier (the ordering this branch used
+          // BEFORE this fix) would re-point every per-frame anchor
+          // filter (fire/candle/lightning) and door scoping at floor N while
+          // floor M's art was still what the user was looking at, for however
+          // long prepare took — invisible today only because there was no
+          // prepare step to expose the gap.
           updateActiveFloorContext(floorsResult.floors, targetFloorIndex);
-          // Re-scope door graphics to the newly-active floor (its levelId now
-          // sits in activeFloorContext); the viewer reaps the old floor's leaves.
           refreshDoors();
           const result = await setVtPanViewerFloor(targetFloorIndex);
+          // EFFECT_REAPPLIERS NEVER RAN ON A FLOOR SWITCH BEFORE THIS (its own
+          // four triggers were 'ready' / 'scene load' / 'settings change' /
+          // 'perf tier report restore') — per-floor correctness rested
+          // entirely on each effect's own per-frame memo re-reading
+          // `activeFloorContext` by closure. Added here rather than left as a
+          // gap: a floor switch is exactly the kind of state change this list
+          // exists to react to, and every entry already tolerates being
+          // called with nothing to do (reapplyAll's own try/catch-per-entry).
+          reapplyAll('floor switch');
           log.info(`real-scene VT viewer synced to floor ${targetFloorIndex} (same scene).`, result);
           syncInterfaceSeam('floor switch');
+
+          // CONTINUOUS PREWARM, RE-SCOPED TO THE NEW FLOOR (2026-08-15). The
+          // startup-only ±1 prewarm loop (see startVtPanViewer's own comment)
+          // is keyed to whichever floor was active at BOOT — after 0→1, floor
+          // 2 was never prewarmed and stayed cold forever. Re-running it here,
+          // now scoped to the floor we just committed to, is what keeps
+          // "switch to an adjacent floor" fast on the SECOND hop too, not just
+          // the first. Fire-and-forget, same posture as the original: a
+          // background prewarm succeeding or failing must never affect this
+          // (already-completed) switch.
+          prewarmVtPanViewerAdjacentFloors(targetFloorIndex).catch((err) =>
+            log.warn(`adjacent-floor prewarm from floor ${targetFloorIndex} failed:`, err)
+          );
           return;
         }
 
@@ -8680,6 +9058,37 @@ function install() {
         // race — `startVtPanViewer`'s own resource setup is what would need
         // re-entrancy protection to make even THAT free, a separate, larger
         // change this fix does not attempt.
+        /**
+         * Hold until the scene is genuinely ready, publishing what it is
+         * waiting for as it goes.
+         *
+         * POLLED, NOT EVENT-DRIVEN, deliberately: the settle sample is taken
+         * inside the render loop on its own frame cadence (`time/one-clock` —
+         * the loop owns the clock), so there is no event to subscribe to and
+         * inventing one would mean a second clock reading outside the loop.
+         * 250ms matches `perf-session.js`'s own settle waiter rather than
+         * declaring a second interval that means the same thing.
+         *
+         * Always terminates: `shouldStopWaitingForReady` returns true on the
+         * deadline, on the "Show me anyway" button, and immediately when no
+         * curtain is up at all.
+         */
+        async function waitForSceneReady() {
+          for (;;) {
+            const settle = getVtPanViewerSceneSettle();
+            if (settle?.settled === true) return { ready: true, reason: 'settled' };
+            // No viewer means nothing to wait FOR — waiting would be a hang with
+            // a friendly face. This is unreachable on the path below (we only
+            // get here after startRealSceneViewer succeeded) but it is the kind
+            // of precondition that stops being true when someone adds a caller.
+            if (settle?.skipped) return { ready: false, reason: settle.reason ?? 'viewer not running' };
+            const stop = shouldStopWaitingForReady();
+            if (stop.stop) return { ready: false, reason: stop.reason, waitingFor: settle?.waitingFor ?? [] };
+            reportSceneLoadBlockers(settle?.waitingFor ?? []);
+            await new Promise((r) => setTimeout(r, READY_POLL_MS));
+          }
+        }
+
         const result = await startRealSceneViewer(targetFloorIndex);
         if (result.ok === false) {
           log.warn(`real-scene VT viewer did not start:`, result.error);
@@ -8705,13 +9114,39 @@ function install() {
         // canvas is not verifiably transparent; this is just the right MOMENT.
         syncInterfaceSeam('scene load');
 
-        const summary = endSceneLoad();
+        // ── THE WARM-UP HOLD (2026-08-15) ───────────────────────────────────
+        // A painted first frame is where this used to stop, and it was the
+        // wrong finish line. Author: *"the loading screen goes away and then
+        // it's a good long time — 10 to 20 seconds — before the scene has
+        // settled and FPS is safe for playing."* Everything in that gap was
+        // real work nobody was waiting for: pipelines compiling lazily on first
+        // draw, effects doing their first bake, adjacent-floor art still
+        // compressing.
+        //
+        // So the curtain now stays up through it, and `vt/settle.js` decides
+        // when it comes down: no outstanding work, held quiet, frames actually
+        // advancing, no new pipeline compiled and no frame over the hitch
+        // threshold inside that window. The blockers are published to the
+        // curtain every poll, so a load that will not finish says WHICH stage
+        // is stuck instead of spinning.
+        //
+        // Bounded three ways, because a curtain that never lifts is worse than
+        // a slow scene: the hard deadline, the "Show me anyway" button, and
+        // `shouldStopWaitingForReady` returning true outright when no curtain
+        // is up at all (a floor switch must never be made to block here — it
+        // has its own hold, with its own UI).
+        beginSceneLoadPhase(LOAD_PHASES.WARMING);
+        const readyOutcome = await waitForSceneReady();
+        const summary = endSceneLoad({ forced: !readyOutcome.ready });
         if (summary) {
           // worstStallMs is surfaced, not swallowed: a load that completes but
-          // froze the main thread for seconds is a bug with a receipt.
+          // froze the main thread for seconds is a bug with a receipt. Same for
+          // a forced reveal — it is not a successful load and must not read as
+          // one in the log any more than it does in the summary.
           log.info(
-            `scene load complete in ${summary.totalMs}ms` +
-              (summary.worstStallMs > 0 ? ` (worst main-thread stall: ${summary.worstStallMs}ms)` : ''),
+            `scene load ${summary.forcedReveal ? 'REVEALED UNFINISHED' : 'complete'} in ${summary.totalMs}ms` +
+              (summary.worstStallMs > 0 ? ` (worst main-thread stall: ${summary.worstStallMs}ms)` : '') +
+              (summary.forcedReveal ? ` — still waiting on: ${summary.unfinished.join(', ') || 'unknown'}` : ''),
             summary
           );
         }

@@ -815,6 +815,47 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P8 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; a store link, and a genuine
+astronomy-vs-chrome bug in the landscape scene).** Two asks:
+
+1. **A "Maps" button, linking to the author's real Foundry VTT store page**
+   (foundryvtt.store/creators/mythica-machina, supplied directly by the author — not
+   guessed), landed in `#remoteFoot` as a real `<a>` next to Patreon. This pushed the footer
+   to 5 buttons in one ~372px row, which promptly produced a REAL horizontal scrollbar —
+   flex items default to a min-width of their own content, so "Baseline"/"Patreon" simply
+   refused to shrink and the row measured 440px of buttons+gaps against a 372px budget.
+   Fixed with `min-width:0` (lets them actually shrink) plus an ellipsis safety net (not
+   currently needed — all 5 fit clean at 69.2px/60.4px comfortable/compact — but cheap
+   insurance against the next button added to this row). Confirmed zero scrollbar at both
+   densities after the fix, not just "should be fine now."
+2. **The sun going invisible at noon — root-caused, not just patched.** The author's diagnosis
+   was exactly right: the clock/phase/date/wind text block sat centred in the scene, and the
+   sun's own orbit (`orbitXY()`, unchanged) peaks at viewBox y=38 out of 160 — almost exactly
+   where the text block's own top edge already was. Measured, not assumed: even AFTER moving
+   the clock into its own pill near the ring's inner edge and pushing date/wind down (both
+   built per the author's exact instructions), the sun's screen position still geometrically
+   overlaps the clock pill's bounding box at every hour from roughly 10:00 to 16:00 —
+   repositioning alone was not enough on its own. So a second, independent mechanism carries
+   the actual guarantee: a masked
+   "topper" — sun+moon clones in a new `.sceneTopper` SVG sitting AFTER `.sceneText` in DOM
+   order (verified: all three of `.scene`/`.sceneText`/`.sceneTopper` are `z-index:auto`, so
+   source order alone decides paint order — no z-index arithmetic to get wrong later) —
+   masked to the sky region via `#skyMask` (a white rect minus the SAME two terrain paths as
+   `#mtnFar`/`#hillNear`, so landscape still hides it exactly where it always did), with
+   opacity READ BACK from the real sun/moon's own already-cloud-damped value rather than
+   re-derived, so clouds still dim it identically and the two can never drift apart. Net
+   effect: chrome can never win against the sun again, landscape and clouds still can,
+   exactly the author's rule. Verified via live attribute inspection (transform/opacity
+   match, mask resolves to the correct element, no ID collisions) — a true rendered-pixel
+   screenshot wasn't available this session, noted honestly rather than claimed.
+3. **Sun brightened**, per the ask: a layered outer+inner glow plus a near-brighter core,
+   replacing the old single flat gradient + pale disc — defined once and shared by both the
+   base sun and its topper clone via the same `url(#id)` gradients, so they can't visually
+   drift into looking like two different suns depending on which one happens to be showing.
+4. **Bonus done: stars now rotate**, one full turn per 24 game-hours, pivoting on the same
+   point the sun/moon already orbit — the whole sky reads as turning on one axis instead of
+   three unrelated motions.
+
 **P7 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; three "little gaps" — camera path,
 scene health, motion tiles — plus a footer pass).** Four asks; the middle one changed shape
 mid-round on the author's own correction, which is the most important thing in this entry.

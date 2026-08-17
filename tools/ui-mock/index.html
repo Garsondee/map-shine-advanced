@@ -413,18 +413,38 @@ html[data-reduce-flash="1"] .tab[data-flash] .supp{display:block}
   border:1px solid rgba(255,255,255,.10);
   box-shadow:inset 0 0 18px rgba(0,0,0,.55), 0 0 0 4px var(--bg1)}
 #astro .scene svg{width:100%; height:100%; display:block}
-#astro .sceneText{position:absolute; inset:90px; display:flex; flex-direction:column;
-  align-items:center; justify-content:center; gap:3px; text-align:center}
-#astro .sceneText .time{font-size:2.1rem; font-weight:700; letter-spacing:.01em;
-  color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.75), 0 0 18px rgba(0,0,0,.6);
+/* THE SUN GUARANTEE (author's ask, round 11): a second small SVG,
+   .sceneTopper — sun+moon clones, defined alongside .scene's own markup —
+   sits ABOVE .sceneText in DOM order and masked to the sky region (see
+   #skyMask: everything except the terrain silhouette). UI chrome can never
+   win against the sun/moon now; clouds and landscape still can, exactly
+   the author's rule — clouds via the SAME cloudDamp opacity the base sun
+   already computes (read back, not re-derived), terrain via the mask. */
+#astro .sceneTopper{position:absolute; inset:90px; border-radius:50%; overflow:hidden;
   pointer-events:none}
-#astro .sceneText .phase{font-size:.68rem; letter-spacing:.32em; margin-left:.32em;
+/* THE CLOCK moved into its own pill at the TOP of the scene, overlapping
+   the ring's own inner edge, instead of camping in the dead centre where
+   the sun's own noon peak already lives — that overlap (not a z-index
+   slip) was WHY noon made the sun disappear; the mask above is the belt,
+   this reposition is the suspenders. Date + wind moved to the BOTTOM of
+   the same box via justify-content:space-between, which is what actually
+   frees the whole middle band for the sky to read in. */
+#astro .sceneText{position:absolute; inset:90px; display:flex; flex-direction:column;
+  align-items:center; justify-content:space-between; text-align:center; pointer-events:none}
+.sceneClock{display:flex; align-items:baseline; gap:6px; margin-top:4px;
+  padding:4px 12px; border-radius:999px; background:rgba(10,14,26,.55);
+  backdrop-filter:blur(3px); border:1px solid rgba(255,255,255,.14)}
+#astro .sceneText .time{font-size:1.5rem; font-weight:700; letter-spacing:.01em;
+  color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.75), 0 0 12px rgba(0,0,0,.6)}
+#astro .sceneText .phase{font-size:.6rem; letter-spacing:.28em;
   color:rgba(255,255,255,.88); text-transform:uppercase;
-  text-shadow:0 1px 3px rgba(0,0,0,.8); pointer-events:none}
-/* date + wind now live INSIDE the dial (author's ask) — two small pill
-   buttons under the clock, same dark-glass language as the rest of the UI,
-   legible over whatever the scene is doing behind them. */
-#npDateChip, #windPick{display:flex; align-items:center; gap:5px; margin-top:2px;
+  text-shadow:0 1px 3px rgba(0,0,0,.8)}
+.sceneLower{display:flex; flex-direction:column; align-items:center; gap:4px;
+  margin-bottom:4px; pointer-events:auto}
+/* date + wind live at the BOTTOM of the dial now (moved down, per above) —
+   same dark-glass pill language as the rest of the UI, legible over
+   whatever the scene is doing behind them. */
+#npDateChip, #windPick{display:flex; align-items:center; gap:5px;
   padding:3px 9px; border-radius:999px; background:rgba(10,14,26,.55);
   backdrop-filter:blur(3px); border:1px solid rgba(255,255,255,.14);
   color:rgba(255,255,255,.92); font-size:.68rem; transition:background var(--t-micro)}
@@ -570,7 +590,15 @@ html[data-reduce-flash="1"] .tab[data-flash] .supp{display:block}
    .cornerCluster above; #impulses and its dedicated button chrome are gone) */
 #remoteFoot{display:flex; gap:6px; border-top:1px solid var(--line);
   margin-top:0; padding-top:8px}
-#remoteFoot .btn{flex:1; justify-content:center; font-size:.72rem}
+/* five buttons across a ~372px row is tighter than flex:1 handles on its
+   own — a flex item's default min-width is its CONTENT's width, so
+   "Baseline"/"Patreon" refused to shrink and pushed the row into a real
+   horizontal scrollbar (measured: 440px of buttons+gaps in a 372px row).
+   min-width:0 lets them actually shrink; the ellipsis is the safety net
+   for whatever doesn't fit even then. */
+#remoteFoot .btn{flex:1; justify-content:center; font-size:.66rem; padding:6px 5px;
+  min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+#remoteFoot .btn .ico{flex:none}
 /* bug-report + Patreon, round 2 — the secondary/.hbtn treatment above read
    as an afterthought (author's own words), so both are full .btn now, same
    flex:1 as Baseline/Safety: the row is four buttons of one kind, not two
@@ -1103,8 +1131,10 @@ html[data-density="compact"] #remote .body{gap:5px; padding:6px 12px 8px}
    26px/4px-gap grid (reaching ~56px) would clip the ring. Shrunk to
    22px/3px (reaching ~47px) and re-verified against the same formula. */
 html[data-density="compact"] #astro{width:280px; height:280px; margin:0 auto}
-html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText{inset:60px}
-html[data-density="compact"] #astro .sceneText .time{font-size:1.5rem}
+html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText,
+html[data-density="compact"] #astro .sceneTopper{inset:60px}
+html[data-density="compact"] #astro .sceneText .time{font-size:1.25rem}
+html[data-density="compact"] .sceneClock{padding:3px 10px}
 html[data-density="compact"] .cornerCluster{grid-template-columns:repeat(2, 22px);
   grid-template-rows:repeat(2, 22px); gap:3px}
 html[data-density="compact"] .tab{width:22px; height:22px; border-radius:7px}
@@ -1321,6 +1351,20 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
               <stop offset="0" stop-color="rgba(255,214,120,.62)"/>
               <stop offset="1" stop-color="rgba(255,190,90,0)"/>
             </radialGradient>
+            <!-- brighter, glowing sun (author's ask, round 11): a wide soft
+                 outer bloom plus a tighter, brighter inner glow plus a
+                 near-white core reads as radiant rather than a flat pale
+                 disc. Shared via url(#id) with .sceneTopper's clone below —
+                 one definition, both places, so they can never drift apart
+                 into looking like two different suns. */
+            <radialGradient id="sunGlowOuter">
+              <stop offset="0" stop-color="rgba(255,224,140,.4)"/>
+              <stop offset="1" stop-color="rgba(255,190,90,0)"/>
+            </radialGradient>
+            <radialGradient id="sunGlowInner">
+              <stop offset="0" stop-color="rgba(255,246,208,.9)"/>
+              <stop offset="1" stop-color="rgba(255,214,120,0)"/>
+            </radialGradient>
             <radialGradient id="moonGlow">
               <stop offset="0" stop-color="rgba(210,225,255,.42)"/>
               <stop offset="1" stop-color="rgba(190,210,255,0)"/>
@@ -1329,10 +1373,20 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
                  slides most of the way clear at gibbous/full phases and reads as
                  a separate dark blob floating beside the moon instead of ON it -->
             <clipPath id="moonClip"><circle r="5.4"/></clipPath>
+            <!-- THE SUN GUARANTEE's mask: the sky region, i.e. everything
+                 EXCEPT the terrain silhouette below — the same two paths as
+                 #mtnFar/#hillNear further down, kept in sync by hand since
+                 SVG can't reference a sibling path's `d` as a mask shape
+                 directly. White=shows, black=hides (default luminance mask). -->
+            <mask id="skyMask">
+              <rect width="160" height="160" fill="#fff"/>
+              <path fill="#000" d="M0 99 L15 78 L27 89 L41 70 L57 87 L71 76 L86 91 L99 72 L113 87 L127 80 L141 93 L153 84 L160 95 L160 160 L0 160 Z"/>
+              <path fill="#000" d="M0 108 Q26 97 52 105 Q80 113 108 103 Q134 94 160 106 L160 160 L0 160 Z"/>
+            </mask>
           </defs>
           <rect width="160" height="160" fill="url(#skyGrad)"/>
           <g id="starG" opacity="0"></g>
-          <g id="sunG"><circle r="19" fill="url(#sunGlow)"/><circle r="7.5" fill="#ffeaad"/></g>
+          <g id="sunG"><circle r="24" fill="url(#sunGlowOuter)"/><circle r="13" fill="url(#sunGlowInner)"/><circle r="8.5" fill="#fff6d8"/></g>
           <g id="moonG"><circle r="13" fill="url(#moonGlow)"/>
             <circle r="5.4" fill="#e9efff"/>
             <circle id="moonShade" r="5.4" fill="#0b1024" clip-path="url(#moonClip)"/></g>
@@ -1413,19 +1467,38 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
         </svg>
       </div>
       <div class="sceneText">
-        <div class="time num" id="clockTxt">14:00</div>
-        <div class="phase" id="phaseTxt">DAY</div>
-        <button id="npDateChip" title="Change the date">
-          <span id="npDateText">—</span>
-        </button>
-        <button id="windPick" title="Wind direction — drifts on its own; click to set it manually">
-          <svg class="ico wIco"><use href="#i-wind"/></svg>
-          <span class="wtier" id="windTier">Light</span>
-          <span class="wdir" id="windDirTxt">SSW</span>
-          <span class="autoDot" title="Evolving on its own"></span>
-        </button>
+        <div class="sceneClock">
+          <div class="time num" id="clockTxt">14:00</div>
+          <div class="phase" id="phaseTxt">DAY</div>
+        </div>
+        <div class="sceneLower">
+          <button id="npDateChip" title="Change the date">
+            <span id="npDateText">—</span>
+          </button>
+          <button id="windPick" title="Wind direction — drifts on its own; click to set it manually">
+            <svg class="ico wIco"><use href="#i-wind"/></svg>
+            <span class="wtier" id="windTier">Light</span>
+            <span class="wdir" id="windDirTxt">SSW</span>
+            <span class="autoDot" title="Evolving on its own"></span>
+          </button>
+        </div>
       </div>
-    </div>
+      <!-- THE SUN GUARANTEE — sun+moon clones, masked to the sky region
+           (#skyMask, defined in .scene's own <defs> above) and positioned/
+           faded from renderScene() in lockstep with the real #sunG/#moonG.
+           Sitting AFTER .sceneText in DOM order (no z-index games needed)
+           means chrome can never cover them; the mask means terrain still
+           can, and reading cloudDamp's opacity back off the real sun means
+           clouds still can too — author's exact rule, "nothing but clouds
+           and landscape can obscure the sun." -->
+      <svg class="sceneTopper" viewBox="0 0 160 160" aria-hidden="true" preserveAspectRatio="xMidYMid slice">
+        <g id="sunTopG" mask="url(#skyMask)">
+          <circle r="24" fill="url(#sunGlowOuter)"/><circle r="13" fill="url(#sunGlowInner)"/><circle r="8.5" fill="#fff6d8"/>
+        </g>
+        <g id="moonTopG" mask="url(#skyMask)">
+          <circle r="13" fill="url(#moonGlow)"/><circle r="5.4" fill="#e9efff"/>
+        </g>
+      </svg>
     </div>
 
     <!-- the slim caption the old bordered Now Playing card collapsed into —
@@ -1516,6 +1589,9 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
         <svg class="ico"><use href="#i-bug"/></svg>Bug</button>
       <button class="btn" id="patreonBtn" title="Support on Patreon">
         <svg class="ico"><use href="#i-heart"/></svg>Patreon</button>
+      <a class="btn" id="mapsBtn" href="https://www.foundryvtt.store/creators/mythica-machina"
+        target="_blank" rel="noopener" title="Browse maps on the Foundry VTT store">
+        <svg class="ico"><use href="#i-map"/></svg>Maps</a>
     </div>
   </div>
 </section>
@@ -2142,18 +2218,31 @@ function renderScene(h, moonAge) {
 
   $('#sunG').setAttribute('transform', `translate(${sun.x.toFixed(2)} ${sun.y.toFixed(2)})`);
   $('#sunG').setAttribute('opacity', (clamp((sun.elev + .22) * 6, 0, 1) * cloudDamp).toFixed(2));
+  /* THE SUN GUARANTEE's topper clone — same transform, opacity READ BACK
+     off the real sun (not re-derived) so cloud damping can never drift
+     between the two. The #skyMask on this element (see its own markup) is
+     what still lets terrain hide it; nothing else can. */
+  $('#sunTopG').setAttribute('transform', $('#sunG').getAttribute('transform'));
+  $('#sunTopG').setAttribute('opacity', $('#sunG').getAttribute('opacity'));
 
   const moonHour = (h + moonAge * 24) % 24;
   const mo = orbitXY(moonHour);
   $('#moonG').setAttribute('transform', `translate(${mo.x.toFixed(2)} ${mo.y.toFixed(2)})`);
   $('#moonG').setAttribute('opacity',
     (clamp((mo.elev + .18) * 5, 0, 1) * (.35 + .65 * night) * cloudDamp).toFixed(2));
+  $('#moonTopG').setAttribute('transform', $('#moonG').getAttribute('transform'));
+  $('#moonTopG').setAttribute('opacity', $('#moonG').getAttribute('opacity'));
   /* phase by an offset shade disc: centred = new, fully clear = full */
   const illum = (1 - Math.cos(moonAge * 2 * Math.PI)) / 2;
   $('#moonShade').setAttribute('cx', (11 * illum * (moonAge < .5 ? 1 : -1)).toFixed(2));
   $('#moonShade').setAttribute('fill', rgb(mix3(sky.top, sky.mid, .5)));
 
   $('#starG').setAttribute('opacity', (night * .9 * cloudDamp).toFixed(2));
+  /* BONUS: real stars wheel overhead rather than sitting frozen — one full
+     turn per 24 game-hours, pivoting on the same point the sun/moon orbit
+     (SCENE_CX, SCENE_HORIZON_Y), so the whole sky reads as turning around
+     a single axis rather than three unrelated motions. */
+  $('#starG').setAttribute('transform', `rotate(${(h * 15).toFixed(1)} ${SCENE_CX} ${SCENE_HORIZON_Y})`);
 
   /* weather on the scene: fog hazes the ground, rain/snow are a few static
      streaks (the split mirrors Now Playing's own rain-vs-snow read), lightning

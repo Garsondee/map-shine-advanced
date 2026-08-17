@@ -815,6 +815,71 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P3 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; the astrolabe's role changes again,
+further than P2's — Fable's call, not mine).** Author reviewed the landscape build (P2) and
+sent back a second, larger request: the dial as the Remote's literal centrepiece, wide enough
+to outgrow the panel, absorbing Now Playing and every wing icon into itself. Built and
+verified in the mock:
+
+1. **The astrolabe now bleeds PAST the panel's own outer width, not just its content
+   column.** 420px dial in a 402px panel (comfortable), 330px in a 352px compact panel —
+   `.room{overflow:hidden}` (shared chrome, already in place) clips it exactly at the room's
+   rounded edge, so it reads as "barely contained" rather than broken. Confirmed by measuring
+   the astro's rect against the room's: both edges genuinely exceed the room's bounds.
+2. **Every wing icon — flow, speed, jump, the five moment-shots — is now a small tab
+   nested into the dial's own rim**, not a flanking column. Each tab's centre sits at 93% of
+   the astro's radius (z-index 1, astro at 5), so roughly 30% tucks behind the opaque dial
+   and the rest pokes past it as the visible, clickable crescent — "arranged in a circle…
+   falling behind it… never overlap and block it," close to verbatim. Positions are computed
+   from the astro's LIVE rendered radius (`placeRadialTabs()`), re-run on every density
+   toggle, specifically so Comfortable/Compact can never drift apart the way two sets of
+   hand-placed constants would.
+3. **Now Playing lost its own bordered card entirely.** Date moved inside the dial's own
+   text block (now four lines: time / phase / date / wind — wind relocated here too, not
+   onto a tab, since it needed to show its actual reading, not just an icon). What's left —
+   the Holding/Fading headline, watch count, Snap/Hold — is a slim borderless caption
+   directly under the astrolabe, unified with it rather than a second competing box. npLabel
+   and npSub merged into one line (`Fading to Storm — 8s left, day · overcast`) since the
+   two-line form no longer had a card to live in.
+4. **Lightning retired the room-wide flash.** The old full-viewport white overlay never
+   fires now, for the ambient/automatic storm ticker OR the manual Strike button — only the
+   scene's own flash pulses. Confirmed by monkey-patching `Element.prototype.animate` and
+   checking it never touches `#flash`.
+5. **Scene weather now moves.** Rain, snow and a new ash layer (ash had no scene
+   representation before this round — `state.ch.ash` existed but went nowhere visible) use a
+   two-copy seamless-scroll technique so the loop point never visibly jumps; fog gets a slow
+   side-to-side sway that doesn't need one. All governed by the SAME `html[data-reduce-motion]`
+   / `prefers-reduced-motion` rules already in place — no new exemption needed.
+6. **The debug strip is allowed to wrap** (author's explicit permission) instead of
+   truncating its rightmost button — `flex-wrap` plus tighter compact padding.
+7. **The handle stopped disappearing at noon.** It was gold on a ring whose noon arc is
+   also gold; now it's a white shape with a dark outline, legible at every hour.
+8. **A confirmed, root-caused fix, not a design call:** `#remote .body{overflow-y:auto}`
+   with no explicit `overflow-x` was hitting the CSS spec's forced-auto rule (setting one
+   overflow axis to non-visible forces the OTHER to `auto` too), so any crowded state grew a
+   real horizontal scrollbar. Added `overflow-x:hidden` across all three rooms + both search
+   overlays. This one I'm confident is simply correct, not a taste call — noting it here only
+   because it's load-bearing for #1 above (the bleed relies on exactly this clipping
+   behaviour existing on purpose, not by accident).
+
+**A debugging detour worth recording as its own trap:** a console error
+(`ui-mock/index.html:3333:3, "Cannot read properties of null (reading 'append')"`) appeared
+on every fresh navigation and looked alarming. Direct invocation of every boot function,
+`frame()`, and every plausible `.append()` call target all came back clean; `window.__mock`
+was always set (proving the main script ran to completion). The error was only unmasked as
+stale tooling residue by navigating to a page with ZERO application script
+(`http://localhost:8137/`, the bare directory listing) and observing the IDENTICAL error
+still reported — proof it couldn't be live. **Lesson for any future session debugging a
+"reproducible" error in this harness: if a console error survives navigation to an unrelated
+page, it's a stale entry in the read-tool's own log buffer, not a current bug** — worth
+that one confirmation before spending real time chasing it.
+
+**For Fable:** does the astrolabe's new role (wider than the panel, absorbing Now Playing,
+radial tabs) get written into §4.1 as the Remote's canonical description now, superseding
+both what P2 already changed and the original spec? I think this is now far enough from the
+original "one beautiful control" reading that it deserves a real look rather than accreting
+through a third petition on the same point.
+
 **P2 — filed by Claude Opus 5, 2026-08-17 (worker tier per the Covenant's "if not certain
 you are Fable-class, you are a worker"; mock only, nothing in `src/`).** Author's round-4
 direction, five parts — all built and measured in `tools/ui-mock/index.html`:

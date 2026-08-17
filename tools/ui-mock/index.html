@@ -286,48 +286,65 @@ html[data-frame="1"] #frame1080{display:block}
    THE REMOTE
    ========================================================================== */
 #remote{top:16px; right:16px; width:402px; max-height:calc(100vh - 32px)}
+/* overflow-x:hidden is NOT decorative — CSS forces overflow-x to auto the
+   moment overflow-y is anything but visible (spec behaviour, not a browser
+   bug), so ANY element even 1px too wide silently grew a horizontal
+   scrollbar here. .room{overflow:hidden} above already clips at the panel's
+   OUTER rounded edge, which is exactly what lets the astrolabe below bleed
+   past .body's own content width on purpose without the page ever scrolling
+   sideways for it. */
 #remote .body{padding:7px 15px 9px; display:flex; flex-direction:column;
-  gap:6px; overflow-y:auto; scrollbar-width:thin}
+  gap:6px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin}
 
-/* now playing */
-#nowPlaying{display:flex; align-items:center; gap:10px; padding:7px 10px;
-  background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-card)}
-#npDateChip{display:flex; align-items:center; gap:4px; margin-top:1px; padding:0;
-  color:var(--ink2); font-size:.64rem; align-self:flex-start; transition:color var(--t-micro)}
-#npDateChip:hover{color:var(--shine)}
-#npDateChip .ico{width:.95em; height:.95em}
-#npDateChip .chev{width:.8em; height:.8em; opacity:.6}
-#nowPlaying .ring{width:34px; height:34px; flex:none; position:relative}
+/* now playing — collapsed into a slim, borderless CAPTION under the
+   astrolabe (round 6: it used to be its own bordered card with its own row
+   for the date; both are gone — date lives inside the dial now, §astro
+   below, and this is one line, not three). */
+#nowCaption{display:flex; align-items:center; gap:8px; padding:2px 4px 0; min-width:0}
+#nowCaption .ring{width:22px; height:22px; flex:none; position:relative}
 /* > only — the progress-ring SVG is a direct child of .ring; the glyph SVG
    sits one level deeper inside .glyph and must NOT inherit this rotation
    (this bare descendant selector is exactly how the weather icon went
    sideways — both svgs live under .ring, and the rule couldn't tell them apart) */
-#nowPlaying .ring > svg{width:100%; height:100%; transform:rotate(-90deg)}
-#nowPlaying .ring .track{stroke:var(--bg3); fill:none; stroke-width:3}
-#nowPlaying .ring .prog{stroke:var(--shine); fill:none; stroke-width:3;
+#nowCaption .ring > svg{width:100%; height:100%; transform:rotate(-90deg)}
+#nowCaption .ring .track{stroke:var(--bg3); fill:none; stroke-width:3}
+#nowCaption .ring .prog{stroke:var(--shine); fill:none; stroke-width:3;
   stroke-linecap:round; transition:stroke-dashoffset .2s linear}
-#nowPlaying .ring .glyph{position:absolute; inset:0; display:grid; place-items:center;
+#nowCaption .ring .glyph{position:absolute; inset:0; display:grid; place-items:center;
   color:var(--shine)}
-#npLabel{font-weight:600; font-size:.8rem}
-#npSub{color:var(--ink2); font-size:.7rem}
-#npCancel{margin-left:auto; display:none; flex-direction:column; gap:2px}
-#nowPlaying.fading #npCancel{display:flex}
+#nowCaption .ring .glyph .ico{width:13px; height:13px}
+#npLabel{font-weight:600; font-size:.74rem; color:var(--ink1); flex:1; min-width:0}
+#nowCaption.fading #npLabel{color:var(--ink0)}
+#npCancel{display:none; flex-direction:column; gap:2px; flex:none}
+#nowCaption.fading #npCancel{display:flex}
 
-/* astrolabe + wings */
-#astroRow{position:relative; margin-top:0; flex:none}
-#astro{position:relative; width:232px; height:232px; margin:0 auto}
-.wing{position:absolute; top:50%; transform:translateY(-50%); display:flex;
-  flex-direction:column; gap:5px; z-index:2}
-#wingL{left:0} #wingR{right:0}
-.mini{width:38px; height:38px; border-radius:11px; display:grid; place-items:center;
-  background:var(--bg2); border:1px solid var(--line); color:var(--ink2);
-  transition:all var(--t-micro); position:relative}
-.mini .ico{width:16px; height:16px}
-.mini.txt{font-size:.58rem; letter-spacing:.04em; color:var(--ink1); font-weight:600}
-.mini:hover{border-color:var(--line-strong); color:var(--ink0); transform:translateY(-1px)}
-.mini[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
+/* astrolabe + radial tabs */
+#astroRow{position:relative; margin-top:2px; flex:none}
+/* THE BLEED (author's ask, round 6): the dial is now WIDER than the panel
+   itself, not just its content column. .room{overflow:hidden} (shared panel
+   chrome, top of file) clips it exactly at the room's own rounded edge, so
+   it reads as "barely contained" rather than broken — nothing special is
+   needed to achieve that beyond sizing it past the room and centring it;
+   the existing chrome does the rest. */
+#astro{position:relative; width:420px; height:420px; margin:0 -24px; z-index:5}
+#radialTabs{position:absolute; inset:0; z-index:1}
+/* Every wing item, wind included in earlier rounds, now nests INTO the
+   circle's own rim as a small tab (author's ask): each button's centre sits
+   just inside the astro's outer edge, so ~30% of it tucks BEHIND the dial
+   (z-index 1, below astro's z-index 5) and ~70% pokes past as the visible,
+   clickable crescent — "arranged in a circle... falling behind it... never
+   overlap and block it," literally. Position is computed in JS
+   (placeRadialTabs()) since it depends on the astro's actual rendered
+   radius, which differs by density and must be recomputed on toggle. */
+.tab{position:absolute; left:50%; top:50%; width:32px; height:32px; border-radius:10px;
+  display:grid; place-items:center; background:var(--bg2); border:1px solid var(--line);
+  color:var(--ink2); transition:background var(--t-micro), color var(--t-micro),
+  border-color var(--t-micro); box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.tab .ico{width:15px; height:15px}
+.tab.txt{font-size:.56rem; letter-spacing:.03em; color:var(--ink1); font-weight:600}
+.tab:hover{border-color:var(--line-strong); color:var(--ink0); z-index:6}
+.tab[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
   background:var(--shine-soft)}
-.mini .sub{position:absolute; bottom:1px; right:3px; font-size:.5rem; color:var(--ink2)}
 /* THE RIM — the clock, and the dial's dominant element. Wider band than round 2
    (47px vs 31px) with the interior pulled in, per the author's call. NOON at TOP:
    hour h sits at ((h-12)/24)*360deg, clockwise. */
@@ -350,40 +367,41 @@ html[data-frame="1"] #frame1080{display:block}
   letter-spacing:.13em; text-anchor:middle; dominant-baseline:middle;
   fill:rgba(255,255,255,.82); paint-order:stroke;
   stroke:rgba(6,9,20,.55); stroke-width:2.4; stroke-linejoin:round}
-#astro .handle{filter:drop-shadow(0 0 calc(7px * var(--glow-on)) var(--shine-glow))}
-#astro .handle rect{fill:var(--shine)}
-#astro .handle circle{fill:var(--shine)}
+/* A gold handle vanished against the ring's own gold noon arc — it needs to
+   read at EVERY hour, so it's white with a dark outline (an outlined marker,
+   not a colour-matched one) plus a soft shadow for lift off dark hours too. */
+#astro .handle{filter:drop-shadow(0 1px 3px rgba(0,0,0,.6))}
+#astro .handle rect{fill:#fff; stroke:rgba(10,14,28,.65); stroke-width:1.4}
 
 /* THE LANDSCAPE — replaces the dark hub. A vector scene lit by the same hour the
    rim shows: sky gradient, sun/moon on a real arc that sets behind the terrain,
    clouds fading with cover, stars at night. */
-#astro .scene{position:absolute; inset:50px; border-radius:50%; overflow:hidden;
+#astro .scene{position:absolute; inset:90px; border-radius:50%; overflow:hidden;
   border:1px solid rgba(255,255,255,.10);
   box-shadow:inset 0 0 18px rgba(0,0,0,.55), 0 0 0 4px var(--bg1)}
 #astro .scene svg{width:100%; height:100%; display:block}
-#astro .sceneText{position:absolute; inset:50px; display:flex; flex-direction:column;
-  align-items:center; justify-content:center; gap:1px; pointer-events:none; text-align:center}
-#astro .sceneText .time{font-size:1.62rem; font-weight:700; letter-spacing:.01em;
-  color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.75), 0 0 18px rgba(0,0,0,.6)}
-#astro .sceneText .phase{font-size:.6rem; letter-spacing:.32em; margin-left:.32em;
+#astro .sceneText{position:absolute; inset:90px; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:3px; text-align:center}
+#astro .sceneText .time{font-size:2.1rem; font-weight:700; letter-spacing:.01em;
+  color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.75), 0 0 18px rgba(0,0,0,.6);
+  pointer-events:none}
+#astro .sceneText .phase{font-size:.68rem; letter-spacing:.32em; margin-left:.32em;
   color:rgba(255,255,255,.88); text-transform:uppercase;
-  text-shadow:0 1px 3px rgba(0,0,0,.8)}
-
-/* THE WIND ROW — bigger dial, and the readout is a real button (author's ask) */
-/* Wind, collapsed to one compact row (author's ask): direction isn't checked
-   often, so it earns a dropdown-weight control, not a dial. No drag target
-   any more — the ONLY manual input is the compass popover; between picks the
-   system evolves it on its own (the .autoDot pulse says so). */
-#windPick{width:100%; display:flex; align-items:center; gap:7px; padding:5px 9px;
-  border-radius:8px; border:1px solid var(--line); background:var(--bg2);
-  color:var(--ink0); font-size:.76rem; transition:all var(--t-micro)}
-#windPick:hover{border-color:var(--c-atmos); background:var(--bg3)}
-#windPick .wIco{color:var(--c-atmos); width:1.05em; height:1.05em}
-#windPick .wtier{color:var(--ink2)}
-#windPick .wdir{font-weight:650; color:var(--c-atmos); min-width:26px; text-align:left}
-#windPick .autoDot{width:5px; height:5px; border-radius:50%;
-  background:var(--c-atmos); animation:pulse 2.6s ease-in-out infinite}
-#windPick .chev{margin-left:auto; color:var(--ink2); width:.9em; height:.9em}
+  text-shadow:0 1px 3px rgba(0,0,0,.8); pointer-events:none}
+/* date + wind now live INSIDE the dial (author's ask) — two small pill
+   buttons under the clock, same dark-glass language as the rest of the UI,
+   legible over whatever the scene is doing behind them. */
+#npDateChip, #windPick{display:flex; align-items:center; gap:5px; margin-top:2px;
+  padding:3px 9px; border-radius:999px; background:rgba(10,14,26,.55);
+  backdrop-filter:blur(3px); border:1px solid rgba(255,255,255,.14);
+  color:rgba(255,255,255,.92); font-size:.68rem; transition:background var(--t-micro)}
+#npDateChip:hover, #windPick:hover{background:rgba(10,14,26,.75)}
+#npDateChip .ico{width:.85em; height:.85em; opacity:.8}
+#windPick .wIco{width:.9em; height:.9em; color:#bcdcff}
+#windPick .wtier{display:none}
+#windPick .wdir{font-weight:650}
+#windPick .autoDot{width:4px; height:4px; border-radius:50%;
+  background:#bcdcff; animation:pulse 2.6s ease-in-out infinite}
 
 /* the compass picker */
 #compassPop{position:fixed; z-index:360; display:none; padding:12px;
@@ -460,7 +478,8 @@ html[data-frame="1"] #frame1080{display:block}
 #cueCard{flex:1; background:var(--bg2); border:1px solid var(--line);
   border-radius:var(--r-card); padding:7px 10px; display:flex; flex-direction:column; gap:2px;
   min-width:0}
-#cueCard .k{font-size:.62rem; letter-spacing:.2em; color:var(--ink2); text-transform:uppercase}
+#cueCard .cueline{display:flex; align-items:baseline; gap:6px; min-width:0}
+#cueCard .k{font-size:.6rem; letter-spacing:.16em; color:var(--ink2); text-transform:uppercase; flex:none}
 #cueCard .name{font-weight:650; font-size:.8rem; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis}
 #cueCard .meta{display:flex; gap:8px; align-items:center; color:var(--ink2); font-size:.68rem}
@@ -642,9 +661,23 @@ html[data-live="1"] #map{transform:scale(1.06)}
   50%{filter:brightness(1.18) saturate(1.3) blur(1.5px)}}
 #map.passage-cut{animation:passagePulse 1.1s ease-in-out infinite}
 
+/* scene weather, animated (round 6) — two-copy seamless scroll: the wrapper
+   moves by exactly one cycle's span, so the loop point is invisible (the
+   already-established html[data-reduce-motion] / prefers-reduced-motion
+   rules above are generic `*` selectors and already cover these for free). */
+@keyframes scrollDown80{to{transform:translate(-3px,80px)}}
+@keyframes scrollDown70{to{transform:translate(-1px,70px)}}
+@keyframes scrollUp60{to{transform:translate(1px,-60px)}}
+@keyframes fogSway{0%,100%{transform:translateX(-4px)} 50%{transform:translateX(4px)}}
+#rainScroll{animation:scrollDown80 .6s linear infinite}
+#snowScroll{animation:scrollDown70 4s linear infinite}
+#ashScroll{animation:scrollUp60 7s linear infinite}
+#sceneFog{animation:fogSway 15s ease-in-out infinite}
+
 /* the debug dress */
 #debugStrip{border:1px dashed color-mix(in oklab, var(--c-system) 45%, transparent);
   border-radius:10px; padding:5px 11px; display:flex; align-items:center; gap:11px;
+  flex-wrap:wrap; row-gap:4px;
   font-family:var(--mono); font-size:.65rem; color:var(--ink2)}
 #debugStrip .tag{color:var(--c-system); letter-spacing:.18em; font-weight:700;
   display:flex; gap:5px; align-items:center}
@@ -697,7 +730,7 @@ html[data-remote="pill"] #pill{display:flex}
 #searchBox .ico{color:var(--ink2)}
 #searchBox kbd{font-size:.6rem; background:var(--bg3); border:1px solid var(--line);
   border-radius:4px; padding:1px 5px; color:var(--ink2)}
-.deptscroll{flex:1; overflow-y:auto; padding:16px 18px 24px; scrollbar-width:thin}
+.deptscroll{flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 18px 24px; scrollbar-width:thin}
 
 /* category strip */
 #catStrip{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px}
@@ -843,7 +876,7 @@ html[data-remote="pill"] #pill{display:flex}
 #player{top:50%; left:50%; transform:translate(-50%,-50%); width:520px;
   max-height:calc(100vh - 40px)}
 #player .body{padding:16px 18px 20px; display:flex; flex-direction:column; gap:14px;
-  overflow-y:auto}
+  overflow-y:auto; overflow-x:hidden}
 #player .friendly{color:var(--ink1); font-size:.8rem}
 
 /* ============================================================================
@@ -907,13 +940,19 @@ html[data-density="compact"] #cards{gap:9px}
    Remote as small as it can be and still work, not a second layout. */
 html[data-density="compact"] #remote{width:352px}
 html[data-density="compact"] #remote .body{gap:5px; padding:6px 12px 8px}
-html[data-density="compact"] #astro, html[data-density="compact"] #astroRow{width:194px; height:194px}
-html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText{inset:42px}
-html[data-density="compact"] #astro .sceneText .time{font-size:1.3rem}
-html[data-density="compact"] .wing{gap:4px}
-html[data-density="compact"] .mini{width:32px; height:32px; border-radius:9px}
-html[data-density="compact"] #nowPlaying{padding:5px 8px; gap:7px}
-html[data-density="compact"] #nowPlaying .ring{width:28px; height:28px}
+/* the astro itself SHRINKS in compact — but stays wider than the (now also
+   narrower) panel, same bleed principle as Comfortable, just smaller numbers.
+   #radialTabs needs no override: it always fills #astroRow, and JS recomputes
+   every tab's position from the astro's LIVE rendered size on every density
+   toggle (placeRadialTabs(), called from setDensity()) rather than trusting
+   a second set of hand-placed constants that could drift from these. */
+html[data-density="compact"] #astro{width:330px; height:330px; margin:0 -21px}
+html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText{inset:68px}
+html[data-density="compact"] #astro .sceneText .time{font-size:1.5rem}
+html[data-density="compact"] .tab{width:26px; height:26px; border-radius:8px}
+html[data-density="compact"] .tab .ico{width:12px; height:12px}
+html[data-density="compact"] #nowCaption{padding:1px 3px 0; gap:6px}
+html[data-density="compact"] #nowCaption .ring{width:18px; height:18px}
 html[data-density="compact"] #tempo button{padding:3px 0}
 html[data-density="compact"] #moods{gap:3px}
 html[data-density="compact"] #moods button{padding:2px 1px}
@@ -921,8 +960,13 @@ html[data-density="compact"] .fader .track{height:56px}
 html[data-density="compact"] #cueCard{padding:5px 8px}
 html[data-density="compact"] #goBtn{width:64px; font-size:.86rem}
 html[data-density="compact"] #impulses button{padding:4px 3px; font-size:.66rem}
-html[data-density="compact"] #debugStrip{padding:3px 9px; font-size:.6rem}
-html[data-density="compact"] #windPick{padding:3px 8px}
+/* the debug strip is explicitly ALLOWED to grow taller here (author's ask)
+   — it was truncating "export" rather than wrapping; flex-wrap (now on the
+   base rule above) plus this tighter padding gives it room to become two
+   rows instead of clipping the third button off the edge */
+html[data-density="compact"] #debugStrip{padding:4px 8px; font-size:.6rem; gap:8px}
+html[data-density="compact"] #npDateChip, html[data-density="compact"] #windPick{
+  padding:2px 7px; font-size:.62rem}
 </style>
 </head>
 <body>
@@ -1043,34 +1087,6 @@ html[data-density="compact"] #windPick{padding:3px 8px}
 
   <div class="body">
 
-    <div id="nowPlaying" aria-live="polite">
-      <div class="ring">
-        <svg viewBox="0 0 36 36"><circle class="track" cx="18" cy="18" r="15.5"/>
-          <circle class="prog" id="npRing" cx="18" cy="18" r="15.5"
-            stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
-        <span class="glyph"><svg class="ico" id="npGlyph"><use href="#i-sun"/></svg></span>
-      </div>
-      <div style="min-width:0">
-        <div id="npLabel">Holding — Afternoon, light rain</div>
-        <div id="npSub" class="num">world is steady</div>
-        <button id="npDateChip" title="Change the date">
-          <svg class="ico"><use href="#i-calendar"/></svg><span id="npDateText">—</span>
-          <svg class="chev ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg>
-        </button>
-      </div>
-      <div id="npRight">
-        <div id="npStatus">
-          <span class="live"><span class="dot"></span>LIVE</span>
-          <span class="watch" title="Connected players — their screens follow this world state">
-            <svg class="ico"><use href="#i-user"/></svg>3</span>
-        </div>
-        <div id="npCancel">
-          <button class="btn sm" id="fadeSnap" title="Jump to the end of the fade">Snap</button>
-          <button class="btn sm" id="fadeHold" title="Stop here, keep current values">Hold</button>
-        </div>
-      </div>
-    </div>
-
     <div id="directorStrip" role="group" aria-label="Director — cutscene controls">
       <div class="drow"><b style="color:#ff8a76; letter-spacing:.18em; font-size:.68rem">DIRECTOR</b>
         <span style="color:var(--ink2)">players' cameras follow yours; their UI falls away</span></div>
@@ -1085,8 +1101,18 @@ html[data-density="compact"] #windPick{padding:3px 8px}
       <button id="takeoverBtn" title="Go live — every player screen becomes your frame">● TAKE OVER</button>
     </div>
 
+    <!-- The astrolabe now BLEEDS past the panel's own width on purpose
+         (author's ask) — .room{overflow:hidden} (shared chrome) clips it
+         cleanly at the panel's rounded edge, so the circle reads as "barely
+         contained" rather than broken. #radialTabs holds every wing item —
+         wind included — placed by JS in a full ring, z-BEHIND the dial, so
+         each is mostly hidden under it and only its outer edge pokes past
+         the rim as a tab (see placeRadialTabs()). Now Playing's status has
+         moved in too: date sits under the clock inside the scene; the rest
+         (Holding/Fading text, watch count, Snap/Hold) is #nowCaption right
+         below, unified with the dial instead of its own bordered card. -->
     <div id="astroRow">
-    <div class="wing" id="wingL" role="group" aria-label="Time controls"></div>
+    <div id="radialTabs" role="group" aria-label="Time and mood controls"></div>
     <div id="astro">
       <div class="ring" id="astroRing" role="slider" aria-label="Time of day"
            aria-valuemin="0" aria-valuemax="24" aria-valuenow="14" tabindex="0"
@@ -1150,24 +1176,66 @@ html[data-density="compact"] #windPick{padding:3px 8px}
             <path d="M124 108 l5-12 5 12 Z"/><path d="M132 111 l4-9 4 9 Z"/>
           </g>
           <path id="ground" d="M0 116 Q80 111 160 118 L160 160 L0 160 Z"/>
-          <!-- weather reads on the scene too (author's ask): fog hazes the
-               ground, rain/snow are a few static streaks, lightning is a brief
-               flash — simple signifiers, not a second animation system. -->
+          <!-- weather reads on the scene too, and now MOVES (round 6): each
+               layer is two identical copies, one shifted a full cycle above
+               (rain/snow) or below (ash, which rises) the other, inside a
+               wrapper whose CSS animation shifts both together by exactly
+               one cycle-length and loops — the classic seamless-scroll
+               trick, so nothing visibly jumps at the wrap point. Fog doesn't
+               need it (a slow side-to-side sway never has to hide a seam). -->
           <rect id="sceneFog" x="0" y="66" width="160" height="94" fill="#dde6f0" opacity="0"/>
           <g id="sceneRain" opacity="0" stroke="#bcd7f5" stroke-width="1.4" stroke-linecap="round">
-            <line x1="18" y1="14" x2="12" y2="34"/><line x1="42" y1="24" x2="36" y2="44"/>
-            <line x1="66" y1="10" x2="60" y2="30"/><line x1="90" y1="28" x2="84" y2="48"/>
-            <line x1="114" y1="16" x2="108" y2="36"/><line x1="138" y1="30" x2="132" y2="50"/>
-            <line x1="28" y1="52" x2="22" y2="72"/><line x1="76" y1="48" x2="70" y2="68"/>
-            <line x1="124" y1="54" x2="118" y2="74"/><line x1="150" y1="20" x2="144" y2="40"/>
+            <g class="scrollUnit" id="rainScroll">
+              <g class="cycleA">
+                <line x1="18" y1="14" x2="12" y2="34"/><line x1="42" y1="24" x2="36" y2="44"/>
+                <line x1="66" y1="10" x2="60" y2="30"/><line x1="90" y1="28" x2="84" y2="48"/>
+                <line x1="114" y1="16" x2="108" y2="36"/><line x1="138" y1="30" x2="132" y2="50"/>
+                <line x1="28" y1="52" x2="22" y2="72"/><line x1="76" y1="48" x2="70" y2="68"/>
+                <line x1="124" y1="54" x2="118" y2="74"/><line x1="150" y1="20" x2="144" y2="40"/>
+              </g>
+              <g class="cycleB" transform="translate(0,-80)">
+                <line x1="18" y1="14" x2="12" y2="34"/><line x1="42" y1="24" x2="36" y2="44"/>
+                <line x1="66" y1="10" x2="60" y2="30"/><line x1="90" y1="28" x2="84" y2="48"/>
+                <line x1="114" y1="16" x2="108" y2="36"/><line x1="138" y1="30" x2="132" y2="50"/>
+                <line x1="28" y1="52" x2="22" y2="72"/><line x1="76" y1="48" x2="70" y2="68"/>
+                <line x1="124" y1="54" x2="118" y2="74"/><line x1="150" y1="20" x2="144" y2="40"/>
+              </g>
+            </g>
           </g>
           <g id="sceneSnow" opacity="0" fill="#ffffff">
-            <circle cx="16" cy="20" r="1.3"/><circle cx="38" cy="38" r="1"/>
-            <circle cx="58" cy="16" r="1.2"/><circle cx="80" cy="30" r="1"/>
-            <circle cx="100" cy="14" r="1.3"/><circle cx="122" cy="34" r="1"/>
-            <circle cx="144" cy="18" r="1.2"/><circle cx="27" cy="56" r="1"/>
-            <circle cx="70" cy="50" r="1.2"/><circle cx="112" cy="52" r="1"/>
-            <circle cx="150" cy="46" r="1.2"/><circle cx="8" cy="44" r="1"/>
+            <g class="scrollUnit" id="snowScroll">
+              <g class="cycleA">
+                <circle cx="16" cy="20" r="1.3"/><circle cx="38" cy="38" r="1"/>
+                <circle cx="58" cy="16" r="1.2"/><circle cx="80" cy="30" r="1"/>
+                <circle cx="100" cy="14" r="1.3"/><circle cx="122" cy="34" r="1"/>
+                <circle cx="144" cy="18" r="1.2"/><circle cx="27" cy="56" r="1"/>
+                <circle cx="70" cy="50" r="1.2"/><circle cx="112" cy="52" r="1"/>
+                <circle cx="150" cy="46" r="1.2"/><circle cx="8" cy="44" r="1"/>
+              </g>
+              <g class="cycleB" transform="translate(0,-70)">
+                <circle cx="16" cy="20" r="1.3"/><circle cx="38" cy="38" r="1"/>
+                <circle cx="58" cy="16" r="1.2"/><circle cx="80" cy="30" r="1"/>
+                <circle cx="100" cy="14" r="1.3"/><circle cx="122" cy="34" r="1"/>
+                <circle cx="144" cy="18" r="1.2"/><circle cx="27" cy="56" r="1"/>
+                <circle cx="70" cy="50" r="1.2"/><circle cx="112" cy="52" r="1"/>
+                <circle cx="150" cy="46" r="1.2"/><circle cx="8" cy="44" r="1"/>
+              </g>
+            </g>
+          </g>
+          <!-- ash RISES, so its scroll runs the opposite direction (see CSS) -->
+          <g id="sceneAsh" opacity="0" fill="#e8a56b">
+            <g class="scrollUnit" id="ashScroll">
+              <g class="cycleA">
+                <circle cx="24" cy="100" r="1"/><circle cx="52" cy="112" r="1.3"/>
+                <circle cx="80" cy="96" r="1"/><circle cx="108" cy="114" r="1.2"/>
+                <circle cx="136" cy="102" r="1"/><circle cx="14" cy="118" r="1.1"/>
+              </g>
+              <g class="cycleB" transform="translate(0,60)">
+                <circle cx="24" cy="100" r="1"/><circle cx="52" cy="112" r="1.3"/>
+                <circle cx="80" cy="96" r="1"/><circle cx="108" cy="114" r="1.2"/>
+                <circle cx="136" cy="102" r="1"/><circle cx="14" cy="118" r="1.1"/>
+              </g>
+            </g>
           </g>
           <rect id="sceneFlash" x="0" y="0" width="160" height="160" fill="#fff" opacity="0"/>
         </svg>
@@ -1175,19 +1243,41 @@ html[data-density="compact"] #windPick{padding:3px 8px}
       <div class="sceneText">
         <div class="time num" id="clockTxt">14:00</div>
         <div class="phase" id="phaseTxt">DAY</div>
+        <button id="npDateChip" title="Change the date">
+          <span id="npDateText">—</span>
+        </button>
+        <button id="windPick" title="Wind direction — drifts on its own; click to set it manually">
+          <svg class="ico wIco"><use href="#i-wind"/></svg>
+          <span class="wtier" id="windTier">Light</span>
+          <span class="wdir" id="windDirTxt">SSW</span>
+          <span class="autoDot" title="Evolving on its own"></span>
+        </button>
       </div>
     </div>
-    <div class="wing" id="wingR" role="group" aria-label="Moment shots"></div>
     </div>
 
-    <button id="windPick" title="Wind direction — drifts on its own; click to set it manually">
-      <svg class="ico wIco"><use href="#i-wind"/></svg>
-      <span class="wtier" id="windTier">Light</span>
-      <span class="wdir" id="windDirTxt">SSW</span>
-      <span class="autoDot" title="Evolving on its own"></span>
-      <span style="flex:1"></span>
-      <svg class="chev ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg>
-    </button>
+    <!-- the slim caption the old bordered Now Playing card collapsed into —
+         co-located with the astrolabe, not a second box competing with it -->
+    <div id="nowCaption" aria-live="polite">
+      <div class="ring">
+        <svg viewBox="0 0 36 36"><circle class="track" cx="18" cy="18" r="15.5"/>
+          <circle class="prog" id="npRing" cx="18" cy="18" r="15.5"
+            stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
+        <span class="glyph"><svg class="ico" id="npGlyph"><use href="#i-sun"/></svg></span>
+      </div>
+      <div id="npLabel">Holding — Afternoon, light rain</div>
+      <div id="npRight">
+        <div id="npStatus">
+          <span class="live"><span class="dot"></span>LIVE</span>
+          <span class="watch" title="Connected players — their screens follow this world state">
+            <svg class="ico"><use href="#i-user"/></svg>3</span>
+        </div>
+        <div id="npCancel">
+          <button class="btn sm" id="fadeSnap" title="Jump to the end of the fade">Snap</button>
+          <button class="btn sm" id="fadeHold" title="Stop here, keep current values">Hold</button>
+        </div>
+      </div>
+    </div>
 
     <div>
       <div class="blocklabel"><svg class="ico"><use href="#i-clock"/></svg>Fade time
@@ -1197,6 +1287,8 @@ html[data-density="compact"] #windPick{padding:3px 8px}
 
     <div>
       <div class="blocklabel"><svg class="ico"><use href="#i-cloud"/></svg><span id="wxTitle">Moods</span>
+        <button id="wxBrowseBtn" title="Browse all weather">
+          <svg class="ico"><use href="#i-search"/></svg><span id="wxBrowseLabel">67</span></button>
         <div class="modeseg" role="group" aria-label="Weather mode">
           <button id="wxDirect" aria-pressed="true"
             title="Direct — you state the destination; chips are destinations, faders are trims">Direct</button>
@@ -1204,10 +1296,6 @@ html[data-density="compact"] #windPick{padding:3px 8px}
             title="Drift — you state the climate; the sky wanders inside its bounds on its own">Drift</button>
         </div></div>
       <div id="moods" style="margin-top:6px"></div>
-      <button class="btn sm" id="wxBrowseBtn"
-        style="width:100%; justify-content:center; margin-top:5px; gap:8px">
-        <svg class="ico"><use href="#i-search"/></svg><span id="wxBrowseLabel">Browse all weather</span>
-      </button>
     </div>
 
     <div>
@@ -1225,8 +1313,7 @@ html[data-density="compact"] #windPick{padding:3px 8px}
       </div>
       <div id="cueRow">
         <div id="cueCard">
-          <span class="k">Next</span>
-          <span class="name" id="cueName">Act I — Golden Afternoon</span>
+          <div class="cueline"><span class="k">Next</span><span class="name" id="cueName">Act I — Golden Afternoon</span></div>
           <span class="meta" id="cueMeta"></span>
         </div>
         <button id="goBtn" title="Fire the next cue"><span>GO</span>
@@ -1905,6 +1992,7 @@ function renderScene(h, moonAge) {
   const wet = state.ch.rain, frz = state.ch.freeze;
   $('#sceneRain').setAttribute('opacity', (wet * (1 - frz) * .8).toFixed(2));
   $('#sceneSnow').setAttribute('opacity', (wet * frz * .9).toFixed(2));
+  $('#sceneAsh').setAttribute('opacity', (clamp(state.ch.ash, 0, 1) * .85).toFixed(2));
 
   for (const [id, pal] of Object.entries(TERRAIN)) {
     let c = mix3(pal.night, pal.day, day);
@@ -2052,7 +2140,8 @@ function buildWeatherBoard() {
   const total = direct
     ? FACETS.reduce((n, f) => n + f.items.length, 0) + WX_NAMED_ALL.length
     : CLIMATES_ALL.length;
-  $('#wxBrowseLabel').textContent = `Browse all ${direct ? 'weather' : 'climates'} (${total})`;
+  $('#wxBrowseLabel').textContent = total;
+  $('#wxBrowseBtn').title = `Browse all ${total} ${direct ? 'weather types' : 'climates'}`;
   $('#wxPickInput').placeholder = direct
     ? 'Search weather — try "gale", "ashfall", "freezing"…'
     : 'Search climates — try "alpine", "rainforest", "tundra"…';
@@ -2219,11 +2308,14 @@ $('#cueListBtn').onclick = () => {
   $('#cueListBtn').textContent = open ? 'hide list ▴' : 'show list ▾';
 };
 
+/* Lightning lives in the SCENE now, never the room (author's ask, round 6:
+   "lightning flashes brighten the UI but we want to avoid that"). #flash —
+   the old full-viewport white overlay — is retired from this call entirely;
+   the astrolabe's own sky is now the only thing that flashes, for both the
+   ambient storm ticker below AND the manual Strike button. The element and
+   its CSS stay in the DOM, unused, rather than deleted mid-session. */
 function flash() {
   if (state.reduceFlash) return;
-  const f = $('#flash');
-  f.animate([{opacity:0},{opacity:.85},{opacity:0},{opacity:.5},{opacity:0}],
-            { duration:420, easing:'ease-out' });
   const sf = $('#sceneFlash');
   sf.animate([{opacity:0},{opacity:.9},{opacity:.15},{opacity:.6},{opacity:0}],
              { duration:420, easing:'ease-out' });
@@ -2261,16 +2353,24 @@ $('#fadeHold').onclick = () => cancelFades(false);
 $('#collapseBtn').onclick = () => document.documentElement.dataset.remote = 'pill';
 $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
 
-/* ── the wings — quick-taps flanking the astrolabe ──────────────────────── */
-{ const L = $('#wingL');
-  const flowB = el('button', 'mini', icon('play'));
+/* ── the radial tabs — every wing item nested into the dial's own rim
+   (author's ask, round 6). Same 8 items, same handlers, as the old two
+   flanking columns; only WHERE they live changed. Built once into an
+   ordered array, then placeRadialTabs() (below) positions them — called
+   here at boot AND again from setDensity() whenever the astro's own size
+   changes, since the placement depends on its LIVE rendered radius. ──── */
+const radialTabButtons = [];
+{
+  const flowB = el('button', 'tab', icon('play'));
   flowB.title = 'Let time flow — the clock runs at the chosen speed';
   flowB.setAttribute('aria-pressed', 'false');
   flowB.onclick = () => { state.flow = !state.flow;
     flowB.setAttribute('aria-pressed', String(state.flow));
     flowB.innerHTML = icon(state.flow ? 'pause' : 'play');
     toast(state.flow ? `Time flows — ${SPEED_LABELS[state.speedIx]}` : 'Time holds', 'clock'); };
-  const spdB = el('button', 'mini txt', SPEED_LABELS[state.speedIx]);
+  radialTabButtons.push(flowB);
+
+  const spdB = el('button', 'tab txt', SPEED_LABELS[state.speedIx]);
   spdB.title = 'Time speed — how fast the world clock runs';
   spdB.onclick = e => {
     const pop = $('#speedPop'); pop.innerHTML = '';
@@ -2292,11 +2392,13 @@ $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
     pop.style.left = clamp(r.left, 8, innerWidth - box.width - 8) + 'px';
     pop.style.top = clamp(r.top - box.height / 2, 8, innerHeight - box.height - 8) + 'px';
   };
-  const jumpB = el('button', 'mini', icon('calendar'));
+  radialTabButtons.push(spdB);
+
+  const jumpB = el('button', 'tab', icon('calendar'));
   jumpB.title = 'Jump — dawn, dusk, +1 day, +1 week, or set a date';
   jumpB.onclick = e => openJumpPop(e.currentTarget);
-  L.append(flowB, spdB, jumpB);
-  const R = $('#wingR');
+  radialTabButtons.push(jumpB);
+
   [ ['sun',   'Golden hour — one-tap scene beat, eased at fade time',
       () => easeTo({ hour:17.1, clouds:.18, rain:0, fog:.06, bolt:0 }, tempoS(), 'Golden hour')],
     ['moon',  'Moonlit night — clear, still, silver',
@@ -2307,9 +2409,40 @@ $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
       () => toast('Planned — kill the sky light, let the candles carry the room', 'candle')],
     ['bloom', 'Aurora — planned: curtains of light for northern skies',
       () => toast('Planned — curtains of light for northern skies', 'bloom')],
-  ].forEach(([ic, tip, fn]) => { const b = el('button', 'mini', icon(ic));
-    b.title = tip; b.onclick = fn; R.append(b); });
+  ].forEach(([ic, tip, fn]) => { const b = el('button', 'tab', icon(ic));
+    b.title = tip; b.onclick = fn; radialTabButtons.push(b); });
+
+  $('#radialTabs').append(...radialTabButtons);
 }
+/**
+ * Position every radial tab around the astro's LIVE rendered circle: centred
+ * on an arc from -160° to +160° (the open 40° at the bottom is deliberate —
+ * that's where #nowCaption sits, and a tab pointing straight down would
+ * compete with it). Each tab's CENTRE lands just inside the rim (astroR *
+ * .93) so ~30% tucks behind the dial (z-index 1 vs astro's 5) and the rest
+ * pokes past it as the visible, clickable crescent. Re-run on density
+ * toggle — hand-placed constants would silently drift from the astro's
+ * actual size the moment Comfortable/Compact diverge from what was measured
+ * when this was written, which is exactly the trap a LIVE measurement avoids.
+ */
+function placeRadialTabs() {
+  const astro = $('#astro'), host = $('#radialTabs');
+  if (!astro || !host) return;
+  const ar = astro.getBoundingClientRect(), hr = host.getBoundingClientRect();
+  const cx = ar.left + ar.width / 2 - hr.left, cy = ar.top + ar.height / 2 - hr.top;
+  const astroR = ar.width / 2;
+  const n = radialTabButtons.length, span = 320, start = -160;
+  radialTabButtons.forEach((b, i) => {
+    const deg = n > 1 ? start + (span * i) / (n - 1) : 0;
+    const rad = deg * Math.PI / 180;
+    const R = astroR * .93;
+    const x = cx + R * Math.sin(rad), y = cy - R * Math.cos(rad);
+    b.style.left = x + 'px'; b.style.top = y + 'px';
+    b.style.transform = 'translate(-50%,-50%)';
+  });
+}
+placeRadialTabs();
+addEventListener('resize', placeRadialTabs);
 
 /* ── the jump popover + set-a-date overlay ──────────────────────────────── */
 function nextDayHour(targetHour) {
@@ -2347,7 +2480,7 @@ document.addEventListener('pointerdown', e => {
   if (pop.classList.contains('open') && !pop.contains(e.target) && e.target.id !== 'npDateChip'
       && !e.target.closest('#npDateChip')) pop.classList.remove('open');
   const sp = $('#speedPop');
-  if (sp.classList.contains('open') && !sp.contains(e.target) && !e.target.closest('#wingL'))
+  if (sp.classList.contains('open') && !sp.contains(e.target) && !e.target.closest('#radialTabs'))
     sp.classList.remove('open');
 });
 $('#npDateChip').onclick = e => openJumpPop(e.currentTarget);
@@ -3015,6 +3148,9 @@ function setDensity(compact) {
   document.documentElement.dataset.density = compact ? 'compact' : 'comfortable';
   $('#densityTgl').setAttribute('aria-checked', String(compact));
   $('#densityTglRemote').setAttribute('aria-pressed', String(compact));
+  // the astro's own size just changed under the compact CSS above — recompute
+  // every tab's position from its new LIVE radius rather than trust stale ones
+  placeRadialTabs();
 }
 $('#densityTgl').onclick = () => setDensity(document.documentElement.dataset.density !== 'compact');
 $('#densityTglRemote').onclick = () => setDensity(document.documentElement.dataset.density !== 'compact');
@@ -3142,7 +3278,7 @@ function frame(now) {
   }
 
   /* now playing + pill */
-  const np = $('#nowPlaying');
+  const np = $('#nowCaption');
   const weatherWord =
     state.ch.rain > .65 ? (state.ch.freeze > .5 ? 'heavy snow' : 'a storm') :
     state.ch.rain > .18 ? (state.ch.freeze > .5 ? 'snowfall' : 'light rain') :
@@ -3161,20 +3297,23 @@ function frame(now) {
   $('#fadeSnap').title = state.passage
     ? 'Skip ahead — the date is already set; this only skips the visual passage'
     : 'Jump to the end of the fade';
+  /* Now Playing lost its own line (author's ask, round 6): what was
+     npLabel + npSub on two rows is now ONE compact line — "Fading to
+     Storm — 8s left · day, overcast" — em-dash separating the headline
+     from its detail instead of a second <div>. */
   if (state.passage) {
     np.classList.add('fading');
     const p = state.passage, total = (p.sweepMs + p.cutMs) / 1000;
     $('#npRing').style.strokeDashoffset = (97.4 * (1 - passageProgress)).toFixed(1);
     $('#npGlyph').firstElementChild?.setAttribute('href', '#i-clock');
+    const left = `${Math.max(0, total - (now - p.startedAt) / 1000).toFixed(0)}s left`;
     if (passageCutting) {
       const tickFrac = clamp((now - p.startedAt - p.sweepMs) / Math.max(p.cutMs, 1), 0, 1);
       const tickDay = Math.round(lerp(p.fromDay + p.policy.cycles, p.toDay, tickFrac));
-      $('#npLabel').textContent = `Passage — ${p.policy.tag}`;
+      $('#npLabel').textContent = `Passage — ${p.policy.tag} — ${left}, the days tick past`;
       $('#npDateText').textContent = formatDate(tickDay, true) + ' …';
-      $('#npSub').textContent = `${Math.max(0, total - (now - p.startedAt) / 1000).toFixed(0)}s left · the days tick past`;
     } else {
-      $('#npLabel').textContent = `Passage — ${p.policy.tag}`;
-      $('#npSub').textContent = `${Math.max(0, total - (now - p.startedAt) / 1000).toFixed(0)}s left · watching it happen`;
+      $('#npLabel').textContent = `Passage — ${p.policy.tag} — ${left}, watching it happen`;
     }
   } else if (fading && state.fadeLabel) {
     np.classList.add('fading');
@@ -3182,20 +3321,19 @@ function frame(now) {
     const total = Math.max(...Object.values(state.fades).map(f => f.dur), 1) / 1000;
     const prog = clamp(1 - remain / total, 0, 1);
     $('#npRing').style.strokeDashoffset = (97.4 * (1 - prog)).toFixed(1);
-    $('#npLabel').textContent = `Fading to ${state.fadeLabel}`;
-    $('#npSub').textContent = `${remain.toFixed(0)}s left · ${phaseOf(h).toLowerCase()}, ${weatherWord}`;
+    $('#npLabel').textContent =
+      `Fading to ${state.fadeLabel} — ${remain.toFixed(0)}s left, ${phaseOf(h).toLowerCase()} · ${weatherWord}`;
   } else {
     np.classList.remove('fading');
     $('#npRing').style.strokeDashoffset = 97.4;
     const phaseWord = phaseOf(h).charAt(0) + phaseOf(h).slice(1).toLowerCase();
+    const flowNote = state.flow ? `time flows ${SPEED_LABELS[state.speedIx]}` : null;
     if (state.wxMode === 'drift' && state.climate) {
-      $('#npLabel').textContent = `Drifting — ${state.climate.label}, ${weatherWord}`;
-      $('#npSub').textContent = (state.flow ? `time flows ${SPEED_LABELS[state.speedIx]} · ` : '')
-        + 'the sky wanders its bounds';
+      $('#npLabel').textContent = `Drifting — ${state.climate.label}, ${weatherWord}`
+        + ` — ${flowNote ? flowNote + ', ' : ''}the sky wanders its bounds`;
     } else {
-      $('#npLabel').textContent = `Holding — ${phaseWord}, ${weatherWord}`;
-      $('#npSub').textContent = state.flow
-        ? `time flows ${SPEED_LABELS[state.speedIx]}` : 'world is steady';
+      $('#npLabel').textContent = `Holding — ${phaseWord}, ${weatherWord}`
+        + (flowNote ? ` — ${flowNote}` : '');
     }
   }
 

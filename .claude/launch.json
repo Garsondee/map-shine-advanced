@@ -7,6 +7,12 @@
       "runtimeArgs": ["tools/shader-lab/serve.mjs"],
       "port": 8934,
       "autoPort": true
+    },
+    {
+      "name": "ui-mock",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "http-server", "-p", "8137", "-c-1", "--silent", "."],
+      "port": 8137
     }
   ]
 }

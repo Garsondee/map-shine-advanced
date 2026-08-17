@@ -1,0 +1,1961 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="comfortable">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MSA UI Mock — LANTERN</title>
+<style>
+/* ============================================================================
+   LANTERN — token sets (docs/holy/UI-Testament.md §6). Values here are the
+   calibration draft that seeds src/ui/tokens.js at U0. Everything below reads
+   ONLY these custom properties — the mock obeys `ui/tokens-only` in spirit.
+   ========================================================================== */
+:root{
+  --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "Cascadia Mono", ui-monospace, Consolas, monospace;
+  --r-ctl: 6px; --r-card: 10px; --r-room: 14px;
+  --sp1: 4px; --sp2: 8px; --sp3: 12px; --sp4: 16px; --sp5: 24px;
+  --t-micro: 120ms; --t-move: 200ms; --t-room: 320ms;
+  --ease: cubic-bezier(.22,.7,.3,1);
+  font-size: 16px;
+}
+html[data-theme="dark"]{
+  --bg0:#14161d; --bg1:#191c25; --bg2:#20242f; --bg3:#272c3a;
+  --line:rgba(196,208,232,.13); --line-strong:rgba(196,208,232,.24);
+  --ink0:#ecEFf5; --ink1:#a8b1c2; --ink2:#78829a;
+  --shine:#e7c368; --shine-soft:rgba(231,195,104,.16); --shine-glow:rgba(231,195,104,.38);
+  --ok:#4bd48c; --warn:#edb64f; --fail:#ef6d5a; --info:#58a6f2;
+  --c-gameplay:#3fd3b4; --c-lighting:#f0b64a; --c-atmos:#5aa9f2;
+  --c-surface:#b48af5; --c-particles:#f28a4a; --c-post:#ef6aa8; --c-system:#8fa0b8;
+  --glass:rgba(25,28,37,.86); --glass-blur:14px;
+  --shadow1:0 2px 10px rgba(0,0,0,.35); --shadow2:0 8px 30px rgba(0,0,0,.45);
+  --shadow3:0 18px 60px rgba(0,0,0,.55);
+  --glow-on:1;
+  --map-bright:1;
+}
+html[data-theme="light"]{
+  --bg0:#e8eaf0; --bg1:#f2f4f8; --bg2:#ffffff; --bg3:#eef1f6;
+  --line:rgba(30,42,70,.14); --line-strong:rgba(30,42,70,.28);
+  --ink0:#1d2333; --ink1:#4c5670; --ink2:#7d869c;
+  --shine:#a5761c; --shine-soft:rgba(165,118,28,.13); --shine-glow:rgba(165,118,28,.30);
+  --ok:#178f55; --warn:#a97b14; --fail:#c44432; --info:#2a72c8;
+  --c-gameplay:#0f9c80; --c-lighting:#b07f14; --c-atmos:#2a72c8;
+  --c-surface:#7a4fd0; --c-particles:#c25c1a; --c-post:#c23a78; --c-system:#5d6c86;
+  --glass:rgba(246,248,251,.92); --glass-blur:14px;
+  --shadow1:0 2px 10px rgba(30,40,70,.14); --shadow2:0 8px 30px rgba(30,40,70,.18);
+  --shadow3:0 18px 60px rgba(30,40,70,.22);
+  --glow-on:1;
+  --map-bright:1;
+}
+html[data-theme="hc"]{
+  --bg0:#000000; --bg1:#0a0a0c; --bg2:#131318; --bg3:#1c1c24;
+  --line:rgba(255,255,255,.38); --line-strong:rgba(255,255,255,.6);
+  --ink0:#ffffff; --ink1:#e6e6ee; --ink2:#b8b8c8;
+  --shine:#ffd75e; --shine-soft:rgba(255,215,94,.22); --shine-glow:rgba(255,215,94,.5);
+  --ok:#39e58c; --warn:#ffc93c; --fail:#ff7a63; --info:#6cb8ff;
+  --c-gameplay:#31e8c2; --c-lighting:#ffc93c; --c-atmos:#6cb8ff;
+  --c-surface:#c89cff; --c-particles:#ff9a5c; --c-post:#ff7ab8; --c-system:#b8c4d8;
+  --glass:rgba(6,6,9,.94); --glass-blur:8px;
+  --shadow1:0 0 0 1px var(--line); --shadow2:0 0 0 1px var(--line-strong);
+  --shadow3:0 0 0 2px var(--line-strong);
+  --glow-on:1;
+  --map-bright:1;
+}
+html[data-theme="soft"]{
+  --bg0:#1a1c21; --bg1:#1f2127; --bg2:#26282f; --bg3:#2d3038;
+  --line:rgba(190,196,210,.10); --line-strong:rgba(190,196,210,.20);
+  --ink0:#d8dbe2; --ink1:#9aa0ad; --ink2:#6f7583;
+  --shine:#c2a878; --shine-soft:rgba(194,168,120,.12); --shine-glow:rgba(194,168,120,.0);
+  --ok:#7fb99a; --warn:#c2a878; --fail:#c08a80; --info:#89a7c8;
+  --c-gameplay:#7ab8a9; --c-lighting:#c2a878; --c-atmos:#8aa8c8;
+  --c-surface:#a794c8; --c-particles:#c2977a; --c-post:#c088a5; --c-system:#98a2b2;
+  --glass:rgba(31,33,39,.9); --glass-blur:10px;
+  --shadow1:0 2px 8px rgba(0,0,0,.25); --shadow2:0 6px 20px rgba(0,0,0,.3);
+  --shadow3:0 12px 40px rgba(0,0,0,.35);
+  --glow-on:0;
+  --map-bright:.92;
+}
+
+/* ==== reset & base ======================================================= */
+*{box-sizing:border-box; margin:0; padding:0}
+html,body{height:100%; overflow:hidden}
+body{
+  font-family:var(--font); color:var(--ink0); background:var(--bg0);
+  font-size:.8125rem; line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+}
+button,input,select{font:inherit; color:inherit}
+button{cursor:pointer; background:none; border:none}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--shine); outline-offset:2px; border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.ico{width:1.1em; height:1.1em; fill:none; stroke:currentColor; stroke-width:1.8;
+     stroke-linecap:round; stroke-linejoin:round; vertical-align:-0.18em; flex:none}
+[hidden]{display:none !important}
+
+html[data-reduce-motion="1"] *, html[data-reduce-motion="1"] *::before, html[data-reduce-motion="1"] *::after{
+  animation-duration:0.001s !important; transition-duration:0.001s !important;
+}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:0.001s !important; transition-duration:0.001s !important;}
+}
+
+/* ============================================================================
+   THE LIVING BACKDROP — a stylised scene the Remote visibly commands.
+   ========================================================================== */
+#map{position:fixed; inset:0; overflow:hidden; background:#101218;
+     filter:brightness(var(--map-bright))}
+#map .parch{position:absolute; inset:-2%;
+  background:
+    radial-gradient(1200px 800px at 30% 40%, #232733 0%, transparent 60%),
+    radial-gradient(1000px 900px at 75% 70%, #1d2028 0%, transparent 55%),
+    linear-gradient(160deg, #171a22 0%, #12141b 100%);
+}
+#map .grid{position:absolute; inset:0; opacity:.5;
+  background-image:
+    linear-gradient(rgba(140,160,200,.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(140,160,200,.055) 1px, transparent 1px);
+  background-size:64px 64px;
+}
+#map svg.rooms{position:absolute; inset:0; width:100%; height:100%;
+  stroke:rgba(150,170,210,.15); fill:rgba(150,170,210,.028); stroke-width:2}
+#map .pool{position:absolute; left:6%; bottom:8%; width:26vw; height:18vw;
+  max-width:520px; max-height:360px;
+  background:radial-gradient(closest-side, rgba(70,140,220,.42), rgba(60,120,200,.18) 55%, transparent 72%);
+  border-radius:48% 52% 55% 45% / 55% 48% 52% 45%;
+  filter:blur(6px);
+  animation:poolShimmer 7s ease-in-out infinite alternate;
+}
+@keyframes poolShimmer{from{transform:scale(1) rotate(0.001deg); opacity:.85}
+                       to{transform:scale(1.04) rotate(0.001deg); opacity:1}}
+#map .glow{position:absolute; width:180px; height:180px; border-radius:50%;
+  background:radial-gradient(closest-side, rgba(255,176,84,.5), rgba(255,140,50,.16) 55%, transparent 75%);
+  filter:blur(4px); transform:translate(-50%,-50%);
+  animation:flick 2.4s ease-in-out infinite;
+}
+#map .glow.g2{animation-duration:3.1s; animation-delay:.6s}
+#map .glow.g3{animation-duration:2.7s; animation-delay:1.2s}
+#map .glow.hearth{width:300px; height:300px; animation-duration:3.8s}
+@keyframes flick{0%,100%{opacity:.78; transform:translate(-50%,-50%) scale(1)}
+  38%{opacity:.95; transform:translate(-50%,-50%) scale(1.05)}
+  62%{opacity:.7; transform:translate(-50%,-50%) scale(.97)}}
+#map .stamp{position:absolute; width:120px; height:120px; border-radius:50%;
+  background:radial-gradient(closest-side, rgba(255,170,80,.55), rgba(255,130,40,.18) 55%, transparent 75%);
+  filter:blur(3px); transform:translate(-50%,-50%) scale(.2); opacity:0;
+  animation:stampIn .5s var(--ease) forwards, flick 2.6s ease-in-out .5s infinite}
+@keyframes stampIn{to{transform:translate(-50%,-50%) scale(1); opacity:1}}
+#cloudShade{position:absolute; inset:-20%; opacity:0; pointer-events:none;
+  background:
+    radial-gradient(600px 380px at 20% 30%, rgba(0,0,10,.5), transparent 70%),
+    radial-gradient(700px 420px at 70% 60%, rgba(0,0,10,.45), transparent 70%),
+    radial-gradient(500px 300px at 45% 85%, rgba(0,0,10,.4), transparent 70%);
+  animation:drift 60s linear infinite;
+}
+@keyframes drift{from{transform:translateX(-4%)}to{transform:translateX(4%)}}
+#rain,#snow{position:absolute; inset:-10%; opacity:0; pointer-events:none}
+#rain{background-image:repeating-linear-gradient(var(--rain-tilt,12deg),
+    transparent 0 7px, rgba(170,200,255,.26) 7px 8px, transparent 8px 22px);
+  animation:rainFall .5s linear infinite}
+@keyframes rainFall{from{background-position:0 0}to{background-position:-14px 90px}}
+#snow{background-image:
+    radial-gradient(2px 2px at 20% 30%, rgba(240,246,255,.8), transparent 60%),
+    radial-gradient(1.6px 1.6px at 60% 70%, rgba(240,246,255,.7), transparent 60%),
+    radial-gradient(2.4px 2.4px at 80% 20%, rgba(240,246,255,.8), transparent 60%),
+    radial-gradient(1.8px 1.8px at 40% 85%, rgba(240,246,255,.65), transparent 60%);
+  background-size:220px 220px; animation:snowFall 6s linear infinite}
+@keyframes snowFall{from{background-position:0 -220px}to{background-position:30px 0}}
+#fogLayer{position:absolute; inset:-5%; opacity:0; pointer-events:none;
+  background:
+    radial-gradient(60% 45% at 50% 60%, rgba(190,205,225,.5), transparent 80%),
+    radial-gradient(45% 35% at 20% 40%, rgba(190,205,225,.4), transparent 80%);
+  filter:blur(30px); animation:drift 45s linear infinite alternate}
+#tod{position:absolute; inset:0; pointer-events:none; mix-blend-mode:multiply}
+#flash{position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; z-index:400}
+#vignette{position:absolute; inset:0; pointer-events:none;
+  background:radial-gradient(120% 90% at 50% 45%, transparent 55%, rgba(5,6,10,.55) 100%)}
+
+/* ============================================================================
+   DEMO BAR — mock-only chrome
+   ========================================================================== */
+#demoBar{position:fixed; top:10px; left:12px; z-index:300;
+  display:flex; align-items:center; gap:var(--sp2);
+  background:var(--glass); backdrop-filter:blur(var(--glass-blur));
+  border:1px solid var(--line); border-radius:999px; padding:5px 10px;
+  box-shadow:var(--shadow1); font-size:.75rem}
+#demoBar .brand{display:flex; align-items:center; gap:6px; color:var(--shine);
+  font-weight:600; letter-spacing:.06em; padding:0 4px}
+#demoBar .brand small{color:var(--ink2); font-weight:400; letter-spacing:.12em}
+#demoBar .seg{display:flex; background:var(--bg2); border:1px solid var(--line);
+  border-radius:999px; padding:2px}
+#demoBar .seg button{padding:3px 12px; border-radius:999px; color:var(--ink1)}
+#demoBar .seg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine);
+  box-shadow:inset 0 0 0 1px var(--shine-glow)}
+#demoBar select{background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
+  padding:3px 6px; color:var(--ink0); font-size:.72rem}
+#demoBar .iconbtn{width:26px; height:26px; display:grid; place-items:center;
+  border-radius:50%; color:var(--ink1)}
+#demoBar .iconbtn:hover{background:var(--bg3); color:var(--ink0)}
+#demoBar .iconbtn[aria-pressed="true"]{color:var(--shine); background:var(--shine-soft)}
+
+#frame1080{position:fixed; z-index:290; border:2px dashed var(--shine-glow);
+  pointer-events:none; display:none}
+#frame1080 .tag{position:absolute; top:-24px; left:0; color:var(--shine);
+  font-size:.72rem; letter-spacing:.08em; background:var(--glass);
+  padding:2px 8px; border-radius:6px; border:1px solid var(--line)}
+html[data-frame="1"] #frame1080{display:block}
+
+/* ============================================================================
+   SHARED PANEL CHROME
+   ========================================================================== */
+.room{position:fixed; z-index:100; background:var(--glass);
+  backdrop-filter:blur(var(--glass-blur));
+  border:1px solid var(--line); border-radius:var(--r-room);
+  box-shadow:var(--shadow3); display:flex; flex-direction:column; overflow:hidden}
+.room-head{display:flex; align-items:center; gap:var(--sp2);
+  padding:10px 14px; border-bottom:1px solid var(--line); cursor:grab; user-select:none;
+  flex:none}
+.room-head:active{cursor:grabbing}
+.room-head .rtitle{font-weight:600; letter-spacing:.14em; font-size:.72rem;
+  color:var(--ink1); text-transform:uppercase; display:flex; gap:8px; align-items:center}
+.room-head .rtitle .ico{color:var(--shine)}
+.room-head .spacer{flex:1}
+.hbtn{width:24px; height:24px; display:grid; place-items:center; border-radius:6px;
+  color:var(--ink2)}
+.hbtn:hover{background:var(--bg3); color:var(--ink0)}
+
+.btn{display:inline-flex; align-items:center; gap:6px; padding:6px 12px;
+  background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
+  color:var(--ink0); transition:background var(--t-micro), border-color var(--t-micro)}
+.btn:hover{background:var(--bg3); border-color:var(--line-strong)}
+.btn.gold{background:var(--shine-soft); border-color:var(--shine-glow); color:var(--shine)}
+.btn.danger:hover{border-color:var(--fail); color:var(--fail)}
+.btn.sm{padding:3px 9px; font-size:.72rem}
+
+.chip{display:inline-flex; align-items:center; gap:5px; padding:4px 10px;
+  border:1px solid var(--line); border-radius:999px; background:var(--bg2);
+  color:var(--ink1); font-size:.72rem; transition:all var(--t-micro)}
+.chip:hover{border-color:var(--line-strong); color:var(--ink0)}
+.chip[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
+  background:var(--shine-soft)}
+
+.toggle{position:relative; width:34px; height:19px; border-radius:999px;
+  background:var(--bg3); border:1px solid var(--line); flex:none;
+  transition:background var(--t-micro)}
+.toggle::after{content:""; position:absolute; top:2px; left:2px; width:13px; height:13px;
+  border-radius:50%; background:var(--ink2); transition:all var(--t-micro)}
+.toggle[aria-checked="true"]{background:var(--shine-soft); border-color:var(--shine-glow)}
+.toggle[aria-checked="true"]::after{left:17px; background:var(--shine)}
+
+.select{background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
+  padding:4px 8px; color:var(--ink0); font-size:.75rem}
+
+.hslider{-webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:2px;
+  background:linear-gradient(90deg, var(--acc,var(--shine)) 0 var(--fill,50%), var(--bg3) var(--fill,50%) 100%);
+  border:1px solid var(--line)}
+.hslider::-webkit-slider-thumb{-webkit-appearance:none; width:14px; height:14px; border-radius:50%;
+  background:var(--ink0); border:2px solid var(--acc,var(--shine)); cursor:pointer;
+  box-shadow:0 0 calc(8px * var(--glow-on)) var(--acc,var(--shine))}
+
+/* ============================================================================
+   THE REMOTE
+   ========================================================================== */
+#remote{top:16px; right:16px; width:402px; max-height:calc(100vh - 32px)}
+#remote .body{padding:var(--sp3) var(--sp4) var(--sp4); display:flex; flex-direction:column;
+  gap:var(--sp3); overflow-y:auto; scrollbar-width:thin}
+
+/* now playing */
+#nowPlaying{display:flex; align-items:center; gap:10px; padding:8px 10px;
+  background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-card)}
+#nowPlaying .ring{width:34px; height:34px; flex:none; position:relative}
+#nowPlaying .ring svg{width:100%; height:100%; transform:rotate(-90deg)}
+#nowPlaying .ring .track{stroke:var(--bg3); fill:none; stroke-width:3}
+#nowPlaying .ring .prog{stroke:var(--shine); fill:none; stroke-width:3;
+  stroke-linecap:round; transition:stroke-dashoffset .2s linear}
+#nowPlaying .ring .glyph{position:absolute; inset:0; display:grid; place-items:center;
+  color:var(--shine)}
+#npLabel{font-weight:600; font-size:.8rem}
+#npSub{color:var(--ink2); font-size:.7rem}
+#npCancel{margin-left:auto; display:none; flex-direction:column; gap:2px}
+#nowPlaying.fading #npCancel{display:flex}
+
+/* astrolabe */
+#astro{position:relative; width:258px; height:258px; margin:2px auto 0; flex:none}
+#astro .ring{position:absolute; inset:0; border-radius:50%;
+  /* midnight at TOP (0deg), noon at bottom (180deg): hour h sits at h*15deg */
+  background:conic-gradient(from 0deg,
+    #1b2340 0deg,   #232a52 60deg,  #6a5a8c 82deg,  #d99a6a 97deg,
+    #f2c76e 112deg, #f7e3a0 150deg, #ffefc2 180deg, #f7e3a0 210deg,
+    #f2c76e 248deg, #e08a5a 262deg, #7a5a7c 285deg, #232a52 308deg, #1b2340 360deg);
+  -webkit-mask:radial-gradient(closest-side, transparent 74%, #000 75%, #000 98%, transparent 99%);
+          mask:radial-gradient(closest-side, transparent 74%, #000 75%, #000 98%, transparent 99%);
+  box-shadow:0 0 calc(30px * var(--glow-on)) rgba(231,195,104,.12);
+  cursor:pointer}
+#astro .ticks{position:absolute; inset:0; pointer-events:none}
+#astro .ticks line{stroke:rgba(255,255,255,.35); stroke-width:1}
+#astro .ticks text{fill:var(--ink2); font-size:8.5px; text-anchor:middle; font-family:var(--font)}
+#astro .sun{position:absolute; top:50%; left:50%; width:22px; height:22px; margin:-11px;
+  border-radius:50%; pointer-events:none;
+  background:radial-gradient(circle at 35% 35%, #fff7dd, var(--shine) 60%, #c89b3c);
+  box-shadow:0 0 calc(16px * var(--glow-on)) var(--shine-glow), 0 0 4px rgba(0,0,0,.4)}
+#astro .moon{position:absolute; top:50%; left:50%; width:14px; height:14px; margin:-7px;
+  border-radius:50%; pointer-events:none; opacity:.85;
+  background:radial-gradient(circle at 60% 35%, #eef2ff, #9aa7c8 65%, #6a7694)}
+#astro .hub{position:absolute; inset:50px; border-radius:50%;
+  background:radial-gradient(circle at 50% 30%, var(--bg3), var(--bg1) 75%);
+  border:1px solid var(--line); display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:2px; text-align:center}
+#astro .hub .time{font-size:1.5rem; font-weight:650; letter-spacing:.02em}
+#astro .hub .phase{font-size:.62rem; letter-spacing:.34em; color:var(--shine);
+  text-transform:uppercase; margin-left:.34em}
+#astro .hub .winddesc{font-size:.66rem; color:var(--ink2); display:flex; gap:5px; align-items:center}
+#astro .hub .winddesc .dirarrow{display:inline-grid; place-items:center;
+  width:16px; height:16px; border-radius:50%;
+  background:color-mix(in oklab, var(--c-atmos) 18%, transparent);
+  color:var(--c-atmos); transition:transform var(--t-micro)}
+#astro .hub .winddesc .dirarrow svg{width:11px; height:11px}
+#astro .windgrab{position:absolute; inset:50px; border-radius:50%; cursor:grab}
+#astro .windgrab:active{cursor:grabbing}
+
+/* fade time */
+.blocklabel{font-size:.64rem; letter-spacing:.22em; text-transform:uppercase;
+  color:var(--ink2); display:flex; align-items:center; gap:6px}
+.blocklabel .ico{color:var(--shine)}
+.blocklabel .hint{margin-left:auto; letter-spacing:.02em; text-transform:none;
+  color:var(--ink2); opacity:.8}
+#tempo{display:grid; grid-template-columns:repeat(6,1fr); gap:4px}
+#tempo button{padding:7px 0; border-radius:8px; border:1px solid var(--line);
+  background:var(--bg2); color:var(--ink1); font-size:.74rem; font-weight:600;
+  transition:all var(--t-micro)}
+#tempo button:hover{border-color:var(--line-strong); color:var(--ink0)}
+#tempo button[aria-pressed="true"]{background:var(--shine-soft); border-color:var(--shine-glow);
+  color:var(--shine); box-shadow:0 0 calc(12px * var(--glow-on)) var(--shine-soft)}
+
+/* moods */
+#moods{display:grid; grid-template-columns:repeat(4,1fr); gap:5px}
+#moods button{display:flex; flex-direction:column; align-items:center; gap:3px;
+  padding:7px 2px 6px; border-radius:9px; border:1px solid var(--line);
+  background:var(--bg2); color:var(--ink1); font-size:.66rem;
+  transition:all var(--t-micro)}
+#moods button .ico{width:1.25em; height:1.25em; color:var(--c-atmos)}
+#moods button:hover{border-color:var(--line-strong); color:var(--ink0); transform:translateY(-1px)}
+#moods button[aria-pressed="true"]{border-color:var(--c-atmos); color:var(--ink0);
+  background:color-mix(in oklab, var(--c-atmos) 12%, var(--bg2))}
+
+/* faders */
+#faders{display:flex; justify-content:space-between; padding:2px 2px 0}
+.fader{display:flex; flex-direction:column; align-items:center; gap:5px; width:46px}
+.fader .track{position:relative; width:26px; height:150px; border-radius:13px;
+  background:var(--bg2); border:1px solid var(--line); cursor:pointer; overflow:visible}
+.fader .fill{position:absolute; left:2px; right:2px; bottom:2px; border-radius:11px;
+  background:linear-gradient(180deg, color-mix(in oklab, var(--acc) 85%, white 12%), var(--acc));
+  opacity:.9; min-height:4px;
+  box-shadow:0 0 calc(10px * var(--glow-on)) color-mix(in oklab, var(--acc) 60%, transparent)}
+.fader .thumb{position:absolute; left:-3px; right:-3px; height:4px; border-radius:2px;
+  background:var(--ink0); box-shadow:0 1px 4px rgba(0,0,0,.5)}
+.fader .ghost{position:absolute; left:-5px; right:-5px; height:0;
+  border-top:2px dashed color-mix(in oklab, var(--acc) 80%, white 10%); opacity:0;
+  transition:opacity var(--t-micro)}
+.fader.fading .ghost{opacity:.9}
+.fader .val{position:absolute; top:-22px; left:50%; transform:translateX(-50%);
+  background:var(--bg3); border:1px solid var(--line); border-radius:5px;
+  font-size:.62rem; padding:1px 5px; opacity:0; transition:opacity var(--t-micro);
+  pointer-events:none; white-space:nowrap}
+.fader:hover .val, .fader.drag .val{opacity:1}
+.fader .flabel{display:flex; flex-direction:column; align-items:center; gap:1px;
+  color:var(--ink2); font-size:.62rem}
+.fader .flabel .ico{width:1.3em; height:1.3em; color:var(--acc)}
+
+/* cue deck */
+#cueDeck{display:flex; flex-direction:column; gap:6px}
+#cueRow{display:flex; gap:8px; align-items:stretch}
+#cueCard{flex:1; background:var(--bg2); border:1px solid var(--line);
+  border-radius:var(--r-card); padding:8px 10px; display:flex; flex-direction:column; gap:3px;
+  min-width:0}
+#cueCard .k{font-size:.62rem; letter-spacing:.2em; color:var(--ink2); text-transform:uppercase}
+#cueCard .name{font-weight:650; font-size:.8rem; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis}
+#cueCard .meta{display:flex; gap:8px; align-items:center; color:var(--ink2); font-size:.68rem}
+#cueCard .meta .ico{color:var(--c-atmos)}
+#goBtn{width:74px; border-radius:var(--r-card); border:1px solid var(--shine-glow);
+  background:linear-gradient(180deg, color-mix(in oklab, var(--shine) 26%, var(--bg2)), var(--bg2));
+  color:var(--shine); font-weight:800; letter-spacing:.18em; font-size:.9rem;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+  transition:all var(--t-micro);
+  box-shadow:0 0 calc(18px * var(--glow-on)) var(--shine-soft)}
+#goBtn:hover{box-shadow:0 0 calc(26px * var(--glow-on)) var(--shine-glow)}
+#goBtn:active{transform:scale(.96)}
+#goBtn:disabled{opacity:.4; box-shadow:none; cursor:default}
+#cueList{display:none; flex-direction:column; gap:3px; border:1px solid var(--line);
+  border-radius:var(--r-card); padding:6px; background:var(--bg1); max-height:150px; overflow-y:auto}
+#cueDeck.open #cueList{display:flex}
+#cueList .cue{display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:7px;
+  color:var(--ink1); font-size:.74rem; text-align:left}
+#cueList .cue:hover{background:var(--bg2); color:var(--ink0)}
+#cueList .cue.done{opacity:.45; text-decoration:line-through}
+#cueList .cue.next{color:var(--shine)}
+#cueList .cue .dur{margin-left:auto; color:var(--ink2); font-size:.66rem}
+
+/* impulses + footer */
+#impulses{display:flex; gap:6px}
+#impulses button{flex:1; display:flex; align-items:center; justify-content:center; gap:6px;
+  padding:8px 4px; border-radius:9px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--ink1); font-size:.72rem; position:relative; transition:all var(--t-micro)}
+#impulses button:hover{border-color:var(--warn); color:var(--ink0)}
+#impulses button:active{transform:scale(.95)}
+#impulses button .ico{color:var(--warn)}
+#impulses button .supp{position:absolute; top:-6px; right:-4px; background:var(--bg3);
+  border:1px solid var(--fail); color:var(--fail); border-radius:999px; font-size:.6rem;
+  padding:0 5px; display:none}
+html[data-reduce-flash="1"] #impulses button[data-flash] .supp{display:block}
+#remoteFoot{display:flex; gap:6px; padding-top:2px; border-top:1px solid var(--line);
+  margin-top:2px; padding-top:10px}
+#remoteFoot .btn{flex:1; justify-content:center; font-size:.72rem}
+
+/* collapsed pill */
+#pill{position:fixed; top:16px; right:16px; z-index:100; display:none; align-items:center;
+  gap:10px; padding:8px 14px; border-radius:999px; background:var(--glass);
+  backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line);
+  box-shadow:var(--shadow2); cursor:pointer}
+#pill .ico{color:var(--shine)}
+#pill .ptime{font-weight:700; font-size:.85rem}
+#pill .pw{color:var(--ink2); font-size:.72rem}
+html[data-remote="pill"] #remote{display:none}
+html[data-remote="pill"] #pill{display:flex}
+
+/* ============================================================================
+   THE STUDIO
+   ========================================================================== */
+#studio{top:44px; left:24px; width:1180px; height:800px;
+  max-width:calc(100vw - 460px); max-height:calc(100vh - 60px);
+  min-width:760px; min-height:520px; resize:both}
+#studio .frame{display:flex; flex:1; min-height:0}
+#rail{width:58px; flex:none; border-right:1px solid var(--line); display:flex;
+  flex-direction:column; align-items:center; padding:10px 0; gap:4px}
+#rail button{width:42px; height:42px; display:grid; place-items:center; border-radius:11px;
+  color:var(--ink2); position:relative; transition:all var(--t-micro)}
+#rail button .ico{width:19px; height:19px}
+#rail button:hover{background:var(--bg3); color:var(--ink0)}
+#rail button[aria-pressed="true"]{color:var(--dept-acc, var(--shine));
+  background:color-mix(in oklab, var(--dept-acc, var(--shine)) 14%, transparent)}
+#rail button[aria-pressed="true"]::before{content:""; position:absolute; left:-9px; top:9px;
+  bottom:9px; width:3px; border-radius:2px; background:var(--dept-acc, var(--shine))}
+#rail .railspacer{flex:1}
+#rail .devtag{font-size:.56rem; color:var(--ink2); letter-spacing:.12em; margin-top:2px}
+#deptBody{flex:1; min-width:0; display:flex; flex-direction:column}
+.depthead{flex:none; display:flex; align-items:center; gap:10px; padding:12px 18px 10px;
+  border-bottom:1px solid var(--line)}
+.depthead h2{font-size:.95rem; font-weight:650; display:flex; gap:9px; align-items:center}
+.depthead h2 .ico{color:var(--dept-acc, var(--shine)); width:1.15em; height:1.15em}
+.depthead .sub{color:var(--ink2); font-size:.72rem}
+.depthead .spacer{flex:1}
+#searchBox{display:flex; align-items:center; gap:6px; background:var(--bg2);
+  border:1px solid var(--line); border-radius:999px; padding:5px 12px; width:250px}
+#searchBox input{background:none; border:none; width:100%; font-size:.76rem; color:var(--ink0)}
+#searchBox .ico{color:var(--ink2)}
+#searchBox kbd{font-size:.6rem; background:var(--bg3); border:1px solid var(--line);
+  border-radius:4px; padding:1px 5px; color:var(--ink2)}
+.deptscroll{flex:1; overflow-y:auto; padding:16px 18px 24px; scrollbar-width:thin}
+
+/* category strip */
+#catStrip{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px}
+#catStrip .chip .dot{width:8px; height:8px; border-radius:50%; background:var(--cat)}
+#catStrip .chip[aria-pressed="true"]{border-color:var(--cat); color:var(--ink0);
+  background:color-mix(in oklab, var(--cat) 12%, var(--bg2))}
+
+/* effect cards */
+#cards{display:grid; grid-template-columns:repeat(auto-fill, minmax(490px, 1fr)); gap:14px;
+  align-items:start}
+.card{background:var(--bg1); border:1px solid var(--line); border-radius:var(--r-card);
+  overflow:hidden; position:relative; box-shadow:var(--shadow1)}
+.card::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+  background:var(--acc)}
+.card.dim{opacity:.6}
+.card-head{display:flex; align-items:center; gap:9px; padding:10px 12px 10px 15px}
+.card-head .ico.eff{color:var(--acc); width:1.25em; height:1.25em}
+.card-head .cname{font-weight:650; font-size:.85rem}
+.card-head .cat{font-size:.62rem; color:var(--acc); letter-spacing:.14em;
+  text-transform:uppercase; opacity:.85}
+.card-head .spacer{flex:1}
+.badge{display:inline-flex; align-items:center; gap:4px; font-size:.64rem; padding:2px 7px;
+  border-radius:999px; border:1px solid var(--line); color:var(--ink2); background:var(--bg2)}
+.badge.warn{border-color:color-mix(in oklab, var(--warn) 55%, transparent); color:var(--warn)}
+.badge.okb{border-color:color-mix(in oklab, var(--ok) 45%, transparent); color:var(--ok)}
+.scope{font-size:.64rem; color:var(--ink2); display:inline-flex; gap:4px; align-items:center;
+  border:1px dashed var(--line); border-radius:6px; padding:2px 6px; cursor:help}
+.card-tools{display:flex; gap:2px}
+.card-tools button{width:24px; height:24px; display:grid; place-items:center; border-radius:6px;
+  color:var(--ink2)}
+.card-tools button:hover{background:var(--bg3); color:var(--ink0)}
+.card-tools button[aria-pressed="true"]{color:var(--shine)}
+.maskrow{display:flex; align-items:center; gap:8px; margin:0 12px 8px 15px; padding:6px 10px;
+  border-radius:8px; font-size:.7rem; background:var(--bg2); border:1px solid var(--line);
+  color:var(--ink2)}
+.maskrow.found{color:var(--ok); border-color:color-mix(in oklab, var(--ok) 30%, transparent)}
+.maskrow.missing{color:var(--warn); border-color:color-mix(in oklab, var(--warn) 40%, transparent)}
+.maskrow code{font-family:var(--mono); font-size:.66rem; background:var(--bg3);
+  padding:1px 5px; border-radius:4px}
+.foh{padding:4px 14px 12px 15px; display:flex; flex-direction:column; gap:9px}
+.foh .presetrow{display:flex; align-items:center; gap:8px}
+.foh .presetrow .select{flex:1}
+.dial{display:grid; grid-template-columns:110px 1fr 44px; align-items:center; gap:10px}
+.dial label{font-size:.76rem; color:var(--ink1)}
+.dial output{font-size:.72rem; color:var(--ink2); text-align:right}
+.roh{border-top:1px solid var(--line)}
+.roh > summary{list-style:none; cursor:pointer; padding:8px 15px; font-size:.72rem;
+  color:var(--ink2); display:flex; align-items:center; gap:6px; letter-spacing:.06em}
+.roh > summary::-webkit-details-marker{display:none}
+.roh > summary .tw{transition:transform var(--t-micro)}
+.roh[open] > summary .tw{transform:rotate(90deg)}
+.roh > summary:hover{color:var(--ink0); background:var(--bg2)}
+.rohgroups{padding:2px 15px 14px; display:flex; flex-direction:column; gap:10px}
+.rohcat{border:1px solid var(--line); border-radius:8px; overflow:hidden}
+.rohcat > .rc-h{font-size:.64rem; letter-spacing:.2em; text-transform:uppercase;
+  color:var(--ink2); padding:6px 10px; background:var(--bg2)}
+.rohcat .rows{padding:8px 10px; display:flex; flex-direction:column; gap:8px}
+.prow{display:grid; grid-template-columns:150px 1fr 46px; gap:10px; align-items:center}
+.prow label{font-size:.72rem; color:var(--ink1); cursor:help}
+.prow output{font-size:.68rem; color:var(--ink2); text-align:right}
+.prow .colorline{display:flex; gap:6px; align-items:center}
+.prow input[type=color]{width:34px; height:22px; border:1px solid var(--line); border-radius:5px;
+  background:none; padding:1px; cursor:pointer}
+.prow.hl{animation:hl 1.6s var(--ease)}
+@keyframes hl{0%{background:var(--shine-soft); box-shadow:0 0 0 4px var(--shine-soft)}
+  100%{background:transparent; box-shadow:none}}
+.readout{font-family:var(--mono); font-size:.68rem; color:var(--ink2)}
+
+/* painter */
+#tileGrid{display:grid; grid-template-columns:repeat(auto-fill, minmax(150px,1fr)); gap:12px;
+  margin-bottom:16px}
+.tile{display:flex; flex-direction:column; align-items:center; gap:8px; padding:18px 8px 14px;
+  background:var(--bg1); border:1px solid var(--line); border-radius:12px;
+  transition:all var(--t-micro); color:var(--ink1)}
+.tile .ico{width:30px; height:30px; color:var(--acc)}
+.tile:hover{transform:translateY(-2px); border-color:var(--acc); color:var(--ink0);
+  box-shadow:0 6px calc(24px * var(--glow-on)) color-mix(in oklab, var(--acc) 25%, transparent)}
+.tile[aria-pressed="true"]{border-color:var(--acc);
+  background:color-mix(in oklab, var(--acc) 10%, var(--bg1)); color:var(--ink0)}
+.tile b{font-size:.8rem}
+.tile small{color:var(--ink2); font-size:.64rem}
+#brushPanel{border:1px solid var(--line); border-radius:var(--r-card); padding:14px;
+  background:var(--bg1); display:flex; flex-direction:column; gap:12px}
+#brushPanel .rowline{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+#brushPanel .seg{display:flex; background:var(--bg2); border:1px solid var(--line);
+  border-radius:8px; padding:2px; gap:1px}
+#brushPanel .seg button{padding:4px 10px; border-radius:6px; font-size:.72rem; color:var(--ink1)}
+#brushPanel .seg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
+#paintHint{border:1px dashed var(--line-strong); border-radius:9px; padding:9px 12px;
+  color:var(--ink2); font-size:.74rem; display:flex; gap:8px; align-items:center}
+#paintHint .ico{color:var(--shine)}
+
+/* cues dept */
+#cueBuild{display:flex; flex-direction:column; gap:10px; max-width:760px}
+.cueitem{display:flex; align-items:center; gap:10px; background:var(--bg1);
+  border:1px solid var(--line); border-radius:var(--r-card); padding:10px 12px}
+.cueitem .order{display:flex; flex-direction:column; gap:1px}
+.cueitem .order button{width:18px; height:14px; display:grid; place-items:center;
+  color:var(--ink2); font-size:.6rem}
+.cueitem .order button:hover{color:var(--ink0)}
+.cueitem .cnum{width:26px; height:26px; border-radius:50%; background:var(--bg2);
+  border:1px solid var(--line); display:grid; place-items:center; font-size:.72rem;
+  color:var(--shine); flex:none}
+.cueitem .cinfo{flex:1; min-width:0}
+.cueitem .cname{font-weight:600; font-size:.8rem}
+.cueitem .cglyphs{display:flex; gap:5px; color:var(--ink2); margin-top:2px}
+.cueitem .cglyphs .ico{width:1em; height:1em}
+.cueitem .select{width:auto}
+
+/* system dept */
+.sysgrid{display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:start;
+  max-width:980px}
+.syscard{background:var(--bg1); border:1px solid var(--line); border-radius:var(--r-card);
+  padding:14px; display:flex; flex-direction:column; gap:11px}
+.syscard h3{font-size:.74rem; letter-spacing:.18em; text-transform:uppercase; color:var(--ink2);
+  display:flex; gap:7px; align-items:center}
+.syscard h3 .ico{color:var(--c-system)}
+.sysrow{display:flex; align-items:center; gap:10px; font-size:.78rem}
+.sysrow .grow{flex:1}
+.sysrow small{color:var(--ink2)}
+.sysrow.locked{opacity:.55}
+.sysrow .lockwhy{font-size:.66rem; color:var(--warn)}
+#profileSeg{display:grid; grid-template-columns:repeat(5,1fr); gap:4px}
+#profileSeg button{padding:6px 2px; font-size:.68rem; border-radius:7px;
+  border:1px solid var(--line); background:var(--bg2); color:var(--ink1)}
+#profileSeg button[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
+  background:var(--shine-soft)}
+
+/* lab */
+.labbanner{border:1px dashed var(--line-strong); border-radius:9px; padding:8px 12px;
+  color:var(--ink2); font-size:.72rem; margin-bottom:14px; display:flex; gap:8px;
+  align-items:center}
+.labbanner .ico{color:var(--c-system)}
+#gallery{display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px}
+.gcell{background:var(--bg1); border:1px solid var(--line); border-radius:10px; padding:12px;
+  display:flex; flex-direction:column; gap:9px}
+.gcell h4{font-size:.68rem; letter-spacing:.16em; text-transform:uppercase; color:var(--ink2)}
+.gcell .grow-line{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+
+/* ============================================================================
+   PLAYER FACE
+   ========================================================================== */
+#player{top:50%; left:50%; transform:translate(-50%,-50%); width:520px;
+  max-height:calc(100vh - 40px)}
+#player .body{padding:16px 18px 20px; display:flex; flex-direction:column; gap:14px;
+  overflow-y:auto}
+#player .friendly{color:var(--ink1); font-size:.8rem}
+
+/* ============================================================================
+   SEARCH PALETTE / TOASTS / MISC
+   ========================================================================== */
+#palette{position:fixed; inset:0; z-index:350; display:none; align-items:flex-start;
+  justify-content:center; padding-top:14vh; background:rgba(6,8,14,.45)}
+#palette.open{display:flex}
+#palette .box{width:560px; max-width:92vw; background:var(--glass);
+  backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line-strong);
+  border-radius:14px; box-shadow:var(--shadow3); overflow:hidden}
+#palette .pin{display:flex; gap:9px; align-items:center; padding:12px 16px;
+  border-bottom:1px solid var(--line)}
+#palette .pin input{flex:1; background:none; border:none; font-size:.95rem; color:var(--ink0)}
+#palette .results{max-height:320px; overflow-y:auto; padding:6px}
+#palette .hit{display:flex; align-items:center; gap:9px; padding:8px 11px; border-radius:8px;
+  width:100%; text-align:left; color:var(--ink1); font-size:.78rem}
+#palette .hit:hover, #palette .hit.sel{background:var(--bg2); color:var(--ink0)}
+#palette .hit .crumb{margin-left:auto; color:var(--ink2); font-size:.64rem}
+#palette .hit .dot{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none}
+#toasts{position:fixed; bottom:18px; left:50%; transform:translateX(-50%); z-index:380;
+  display:flex; flex-direction:column; gap:6px; align-items:center}
+.toast{background:var(--glass); backdrop-filter:blur(var(--glass-blur));
+  border:1px solid var(--line-strong); border-radius:10px; padding:8px 16px;
+  font-size:.76rem; box-shadow:var(--shadow2); animation:toastIn var(--t-move) var(--ease)}
+@keyframes toastIn{from{opacity:0; transform:translateY(8px)}to{opacity:1}}
+.toast .ico{color:var(--shine)}
+
+#confirmPop{position:fixed; z-index:390; background:var(--glass);
+  backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line-strong);
+  border-radius:12px; box-shadow:var(--shadow3); padding:14px 16px; width:270px;
+  display:none; flex-direction:column; gap:10px}
+#confirmPop.open{display:flex}
+#confirmPop p{font-size:.78rem; color:var(--ink1)}
+#confirmPop .rowline{display:flex; gap:8px; justify-content:flex-end}
+
+/* pop-out mini card */
+.popout{position:fixed; z-index:200; width:430px; background:var(--glass);
+  backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line-strong);
+  border-radius:var(--r-card); box-shadow:var(--shadow3); overflow:hidden}
+.popout .card{box-shadow:none; border:none; border-radius:0; background:transparent}
+
+/* density */
+html[data-density="compact"] .foh{gap:5px; padding-bottom:8px}
+html[data-density="compact"] .prow{gap:6px}
+html[data-density="compact"] .rohcat .rows{padding:5px 8px; gap:5px}
+html[data-density="compact"] #cards{gap:9px}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ ICON SPRITE (LANTERN draft set) ═══════════════ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5 5l1.7 1.7M17.3 17.3 19 19M19 5l-1.7 1.7M6.7 17.3 5 19"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5Z"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M6.5 18a4.5 4.5 0 1 1 .8-8.9 6 6 0 0 1 11.4 1.9A3.5 3.5 0 0 1 18 18Z"/></symbol>
+    <symbol id="i-rain" viewBox="0 0 24 24"><path d="M6.5 14a4.5 4.5 0 1 1 .8-8.9 6 6 0 0 1 11.4 1.9A3.5 3.5 0 0 1 18 14Z"/><path d="m8 17-1 3M13 17l-1 3M18 17l-1 3"/></symbol>
+    <symbol id="i-fog" viewBox="0 0 24 24"><path d="M4 10h16M2.5 14h19M5 18h14"/></symbol>
+    <symbol id="i-wind" viewBox="0 0 24 24"><path d="M3 8h9a2.5 2.5 0 1 0-2.4-3M3 12h15a2.5 2.5 0 1 1-2.4 3M3 16h7a2 2 0 1 1-1.9 2.6"/></symbol>
+    <symbol id="i-snow" viewBox="0 0 24 24"><path d="M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9M12 3l-2 2m2-2 2 2M12 21l-2-2m2 2 2-2M4.2 7.5l.7 2.7m-.7-2.7 2.7-.7M19.8 16.5l-.7-2.7m.7 2.7-2.7.7M4.2 16.5l2.7.7m-2.7-.7.7-2.7M19.8 7.5l-2.7-.7m2.7.7-.7 2.7"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 5 13.5h5L10.5 22 19 10h-5.5Z"/></symbol>
+    <symbol id="i-ash" viewBox="0 0 24 24"><circle cx="7" cy="16" r="1.2"/><circle cx="12" cy="9" r="1.2"/><circle cx="16.5" cy="15" r="1.2"/><circle cx="10" cy="19.5" r="1.2"/><circle cx="17" cy="5.5" r="1.2"/><path d="M4 5.5c2 1.5 4-1 6 .5"/></symbol>
+    <symbol id="i-fire" viewBox="0 0 24 24"><path d="M12 21c-3.6 0-6-2.3-6-5.6 0-2.7 2-4.6 3.2-6.5.6-1 .9-2 .8-3.4 2.9 1.3 4.4 3 4.6 5.4.8-.4 1.3-1.1 1.5-2.2C17.6 10.3 18 12.5 18 15c0 3.6-2.4 6-6 6Z"/><path d="M12 21c-1.6 0-2.7-1.1-2.7-2.8 0-1.6 1.3-2.6 2.1-3.9.6.9 3.3 1.8 3.3 4 0 1.6-1.1 2.7-2.7 2.7Z"/></symbol>
+    <symbol id="i-water" viewBox="0 0 24 24"><path d="M12 3.5c3.5 4.2 6 7.4 6 10.5a6 6 0 1 1-12 0c0-3.1 2.5-6.3 6-10.5Z"/><path d="M9.2 14.5a3 3 0 0 0 2.4 3"/></symbol>
+    <symbol id="i-candle" viewBox="0 0 24 24"><path d="M9.5 11h5V21h-5Z"/><path d="M12 8.8c-1.2 0-2-.9-2-2 0-1.3 1.2-2 2-3.8.8 1.8 2 2.5 2 3.8 0 1.1-.8 2-2 2Z"/></symbol>
+    <symbol id="i-dust" viewBox="0 0 24 24"><path d="M12 4.5l.9 2.7 2.7.9-2.7.9-.9 2.7-.9-2.7-2.7-.9 2.7-.9ZM18.5 13l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6ZM7 14.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7Z"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.6"/></symbol>
+    <symbol id="i-gem" viewBox="0 0 24 24"><path d="M7 4h10l4 5-9 11L3 9Z"/><path d="M3 9h18M12 20 8.5 9l2-5m3.5 16L15.5 9l-2-5"/></symbol>
+    <symbol id="i-bloom" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 4v2.5M12 17.5V20M4 12h2.5M17.5 12H20M6.3 6.3l1.8 1.8M15.9 15.9l1.8 1.8M17.7 6.3l-1.8 1.8M8.1 15.9l-1.8 1.8"/></symbol>
+    <symbol id="i-brush" viewBox="0 0 24 24"><path d="M15.5 3.5 20 8l-8.5 8.5c-1 1-2.5 1.3-3.7.7-1.5-.7-3.2-.2-4.3.8 1-1.6.4-3-.2-4.6-.5-1.2-.1-2.6.9-3.6Z"/><path d="m12.5 6.5 4.5 4.5"/></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24"><path d="M9 4 3.5 6v14L9 18l6 2 5.5-2V4L15 6ZM9 4v14m6-12v14"/></symbol>
+    <symbol id="i-clap" viewBox="0 0 24 24"><path d="M3.5 10h17V20h-17ZM3.5 10 5 5l15.5 2.5-1 2.5M8 5.5 6.5 9.7m6-3.2L11 10m6-2.7L15.5 10"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.8 13 5.4a7 7 0 0 1 2.3.9l2.6-1 1.8 1.8-1 2.6c.4.7.7 1.5.9 2.3l2.6 1v2.5l-2.6 1a7 7 0 0 1-.9 2.3l1 2.6-1.8 1.8-2.6-1a7 7 0 0 1-2.3.9l-1 2.6h-2.5l-1-2.6a7 7 0 0 1-2.3-.9l-2.6 1-1.8-1.8 1-2.6a7 7 0 0 1-.9-2.3l-2.6-1v-2.5l2.6-1c.2-.8.5-1.6.9-2.3l-1-2.6L7.1 5.3l2.6 1a7 7 0 0 1 2.3-.9l1-2.6Z"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9.5 3h5M10.5 3v5.5L4.8 18a2.2 2.2 0 0 0 2 3.2h10.4a2.2 2.2 0 0 0 2-3.2L13.5 8.5V3"/><path d="M7.5 15h9"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="m12 2.8 2.6 5.7 6 .7-4.5 4.1 1.2 6-5.3-3.1-5.3 3.1 1.2-6L3.4 9.2l6-.7Z"/></symbol>
+    <symbol id="i-popout" viewBox="0 0 24 24"><path d="M13 5h6v6M19 5l-8 8M10 5H6.5A2.5 2.5 0 0 0 4 7.5v10A2.5 2.5 0 0 0 6.5 20h10a2.5 2.5 0 0 0 2.5-2.5V14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15L20 12Z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.8 20 6v6c0 5-3.4 8.3-8 9.2C7.4 20.3 4 17 4 12V6Z"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="m3.5 11 8.5-7.5L20.5 11M6 9.5V20h12V9.5"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4.5 18.5a9 9 0 1 1 15 0"/><path d="M12 14.5 16.5 9"/><circle cx="12" cy="14.5" r="1.6"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c1.3-3.6 4-5.5 7.5-5.5s6.2 1.9 7.5 5.5"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0 0 18c1.5 0 2.2-.9 2.2-1.9 0-.9-.5-1.4-.5-2.2 0-1.1.9-1.9 2-1.9H17a4.5 4.5 0 0 0 4.5-4.5C21.5 6.4 17.2 3 12 3Z"/><circle cx="7.5" cy="10.5" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="16.5" cy="10.5" r="1.2"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 13 9 5 9-5M3 17.5l9 5 9-5"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M5.5 5.5l13 13m0-13-13 13"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m4.5 12.5 5 5L19.5 7"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5 22 20H2Z"/><path d="M12 9.5v5M12 17.2v.6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/></symbol>
+    <symbol id="i-frame" viewBox="0 0 24 24"><path d="M7 3.5v17M17 3.5v17M3.5 7h17M3.5 17h17"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7M6 3.5v3.2h3.2"/></symbol>
+    <symbol id="i-health" viewBox="0 0 24 24"><path d="M3 12h4l2-5 3.5 10 2.5-7 1.5 2H21"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2.5"/><path d="M9 7l1.5-2.8h3L15 7"/><circle cx="12" cy="13.3" r="3.4"/></symbol>
+  </defs>
+</svg>
+
+<!-- ═══════════════ THE LIVING BACKDROP ═══════════════ -->
+<div id="map" aria-hidden="true">
+  <div class="parch"></div>
+  <div class="grid"></div>
+  <svg class="rooms" preserveAspectRatio="none" viewBox="0 0 1600 900">
+    <rect x="180" y="120" width="520" height="330" rx="6"/>
+    <rect x="760" y="200" width="380" height="420" rx="6"/>
+    <rect x="330" y="510" width="360" height="260" rx="6"/>
+    <path d="M700 260h60M700 330h60M560 450v60M1140 400h120M900 620v90"/>
+  </svg>
+  <div class="pool" id="poolGlow"></div>
+  <div class="glow g1" style="left:24%; top:26%"></div>
+  <div class="glow g2" style="left:56%; top:38%"></div>
+  <div class="glow g3" style="left:38%; top:66%"></div>
+  <div class="glow hearth" style="left:66%; top:30%"></div>
+  <div id="cloudShade"></div>
+  <div id="fogLayer"></div>
+  <div id="rain"></div>
+  <div id="snow"></div>
+  <div id="tod"></div>
+  <div id="vignette"></div>
+</div>
+<div id="flash"></div>
+
+<!-- ═══════════════ DEMO BAR ═══════════════ -->
+<nav id="demoBar" aria-label="Mock controls">
+  <span class="brand"><svg class="ico"><use href="#i-candle"/></svg>MAP&nbsp;SHINE <small>LANTERN&nbsp;MOCK</small></span>
+  <div class="seg" role="group" aria-label="Surface">
+    <button id="tabRemote" aria-pressed="true">Remote</button>
+    <button id="tabStudio" aria-pressed="false">Studio</button>
+    <button id="tabPlayer" aria-pressed="false">Player</button>
+  </div>
+  <select id="themeSel" aria-label="Theme">
+    <option value="dark">Lantern Dark</option>
+    <option value="light">Lantern Light</option>
+    <option value="hc">High Contrast</option>
+    <option value="soft">Soft</option>
+  </select>
+  <button class="iconbtn" id="frameBtn" aria-pressed="false" title="Toggle 1920×1080 containment frame">
+    <svg class="ico"><use href="#i-frame"/></svg></button>
+  <button class="iconbtn" id="resetBtn" title="Reset demo">
+    <svg class="ico"><use href="#i-reset"/></svg></button>
+</nav>
+<div id="frame1080"><span class="tag">1920 × 1080 — everything must live in here</span></div>
+
+<!-- ═══════════════ THE REMOTE ═══════════════ -->
+<section class="room" id="remote" aria-label="Map Shine Remote">
+  <header class="room-head" data-drag="remote">
+    <span class="rtitle"><svg class="ico"><use href="#i-candle"/></svg>Remote</span>
+    <span class="spacer"></span>
+    <button class="hbtn" id="collapseBtn" title="Collapse to pill">
+      <svg class="ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg></button>
+  </header>
+  <div class="body">
+
+    <div id="nowPlaying" aria-live="polite">
+      <div class="ring">
+        <svg viewBox="0 0 36 36"><circle class="track" cx="18" cy="18" r="15.5"/>
+          <circle class="prog" id="npRing" cx="18" cy="18" r="15.5"
+            stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
+        <span class="glyph"><svg class="ico" id="npGlyph"><use href="#i-sun"/></svg></span>
+      </div>
+      <div>
+        <div id="npLabel">Holding — Afternoon, light rain</div>
+        <div id="npSub" class="num">world is steady</div>
+      </div>
+      <div id="npCancel">
+        <button class="btn sm" id="fadeSnap" title="Jump to the end of the fade">Snap</button>
+        <button class="btn sm" id="fadeHold" title="Stop here, keep current values">Hold</button>
+      </div>
+    </div>
+
+    <div id="astro">
+      <div class="ring" id="astroRing" role="slider" aria-label="Time of day"
+           aria-valuemin="0" aria-valuemax="24" aria-valuenow="14" tabindex="0"></div>
+      <svg class="ticks" viewBox="0 0 258 258" aria-hidden="true">
+        <g id="tickG"></g>
+        <text x="129" y="16">MIDNIGHT</text><text x="129" y="250">NOON</text>
+        <text x="14" y="133" style="writing-mode:vertical-rl">DUSK</text>
+        <text x="247" y="133" style="writing-mode:vertical-rl">DAWN</text>
+      </svg>
+      <div class="sun" id="sunOrb"></div>
+      <div class="moon" id="moonOrb"></div>
+      <div class="hub">
+        <div class="time num" id="clockTxt">14:00</div>
+        <div class="phase" id="phaseTxt">DAY</div>
+        <div class="winddesc" title="Wind — drag inside the dial to steer it">
+          <span class="dirarrow" id="windDirIco"><svg viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2.6" stroke-linecap="round"
+            stroke-linejoin="round"><path d="M12 20V5M7 10l5-5 5 5"/></svg></span>
+          <span id="windTxt">Light · SSW</span></div>
+      </div>
+      <div class="windgrab" id="windGrab" role="slider" aria-label="Wind direction"
+           aria-valuemin="0" aria-valuemax="359" aria-valuenow="205" tabindex="0"
+           title="Drag to set wind direction"></div>
+    </div>
+
+    <div>
+      <div class="blocklabel"><svg class="ico"><use href="#i-clock"/></svg>Fade time
+        <span class="hint" id="tempoHint">changes ease over 1m</span></div>
+      <div id="tempo" role="group" aria-label="Fade time" style="margin-top:6px"></div>
+    </div>
+
+    <div>
+      <div class="blocklabel"><svg class="ico"><use href="#i-cloud"/></svg>Moods</div>
+      <div id="moods" style="margin-top:6px"></div>
+    </div>
+
+    <div>
+      <div class="blocklabel"><svg class="ico"><use href="#i-gauge"/></svg>Channels</div>
+      <div id="faders" style="margin-top:8px"></div>
+    </div>
+
+    <div id="cueDeck">
+      <div class="blocklabel"><svg class="ico"><use href="#i-clap"/></svg>Cues
+        <button class="hint" id="cueListBtn" style="background:none;border:none;cursor:pointer;color:var(--ink2)">show list ▾</button>
+      </div>
+      <div id="cueRow">
+        <div id="cueCard">
+          <span class="k">Next</span>
+          <span class="name" id="cueName">Act I — Golden Afternoon</span>
+          <span class="meta" id="cueMeta"></span>
+        </div>
+        <button id="goBtn" title="Fire the next cue"><span>GO</span>
+          <svg class="ico"><use href="#i-play"/></svg></button>
+      </div>
+      <div id="cueList" role="list"></div>
+    </div>
+
+    <div>
+      <div class="blocklabel"><svg class="ico"><use href="#i-bolt"/></svg>Impulses</div>
+      <div id="impulses" style="margin-top:6px">
+        <button id="impStrike" data-flash title="Strike lightning now">
+          <svg class="ico"><use href="#i-bolt"/></svg>Strike
+          <span class="supp" title="Suppressed for clients with Reduce flash on">✕1</span></button>
+        <button id="impThunder" title="Roll thunder (a shiver through the scene)">
+          <svg class="ico"><use href="#i-cloud"/></svg>Thunder</button>
+        <button id="impGust" title="Send a gust across the map">
+          <svg class="ico"><use href="#i-wind"/></svg>Gust</button>
+      </div>
+    </div>
+
+    <div id="remoteFoot">
+      <button class="btn" id="baselineBtn" title="Fade everything back to this scene's authored baseline">
+        <svg class="ico"><use href="#i-home"/></svg>Baseline</button>
+      <button class="btn danger" id="safetyBtn" title="Hand rendering back to Foundry">
+        <svg class="ico"><use href="#i-shield"/></svg>Safety</button>
+    </div>
+  </div>
+</section>
+
+<button id="pill" title="Expand the Remote" aria-label="Expand the Remote">
+  <svg class="ico" id="pillGlyph"><use href="#i-sun"/></svg>
+  <span class="ptime num" id="pillTime">14:00</span>
+  <span class="pw" id="pillW">light rain</span>
+  <svg class="ico" style="color:var(--ink2)"><use href="#i-chev" /></svg>
+</button>
+
+<!-- ═══════════════ THE STUDIO ═══════════════ -->
+<section class="room" id="studio" aria-label="Map Shine Studio" hidden>
+  <header class="room-head" data-drag="studio">
+    <span class="rtitle"><svg class="ico"><use href="#i-brush"/></svg>Studio</span>
+    <span class="spacer"></span>
+    <label style="display:flex;gap:6px;align-items:center;font-size:.68rem;color:var(--ink2)">
+      density <button class="toggle" id="densityTgl" role="switch" aria-checked="false"
+        title="Compact density"></button></label>
+    <button class="hbtn" id="studioClose" title="Close Studio"><svg class="ico"><use href="#i-x"/></svg></button>
+  </header>
+  <div class="frame">
+    <nav id="rail" aria-label="Departments"></nav>
+    <div id="deptBody"></div>
+  </div>
+</section>
+
+<!-- ═══════════════ PLAYER FACE ═══════════════ -->
+<section class="room" id="player" aria-label="Performance and Graphics" hidden>
+  <header class="room-head" data-drag="player">
+    <span class="rtitle"><svg class="ico"><use href="#i-gauge"/></svg>Performance &amp; Graphics</span>
+    <span class="spacer"></span>
+    <button class="hbtn" id="playerClose" title="Close"><svg class="ico"><use href="#i-x"/></svg></button>
+  </header>
+  <div class="body" id="playerBody"></div>
+</section>
+
+<!-- ═══════════════ OVERLAYS ═══════════════ -->
+<div id="palette" role="dialog" aria-label="Search everything">
+  <div class="box">
+    <div class="pin"><svg class="ico" style="color:var(--ink2)"><use href="#i-search"/></svg>
+      <input id="palInput" placeholder="Search every control — try “foam”, “flicker”, “bloom”…" autocomplete="off">
+      <kbd>esc</kbd></div>
+    <div class="results" id="palResults"></div>
+  </div>
+</div>
+<div id="confirmPop" role="alertdialog" aria-label="Confirm safety slide">
+  <p><b>Hand rendering back to Foundry?</b><br>Map Shine steps aside instantly; the scene
+  stays playable on Foundry's own renderer.</p>
+  <div class="rowline">
+    <button class="btn sm" id="safetyNo">Cancel</button>
+    <button class="btn sm danger" id="safetyYes">Hand it back</button>
+  </div>
+</div>
+<div id="toasts" aria-live="polite"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   MSA UI MOCK — LANTERN. Everything below is throwaway demo logic, but it
+   honours the Testament's shapes: cards are GENERATED from declared schema
+   data, the Remote writes through one fade engine, and a11y toggles are real.
+   ═══════════════════════════════════════════════════════════════════════════ */
+(() => {
+'use strict';
+const $  = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+const el = (tag, cls, html) => { const n = document.createElement(tag);
+  if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp  = (a, b, t) => a + (b - a) * t;
+const fmt2  = v => String(v).padStart(2, '0');
+const icon  = (id, extra='') => `<svg class="ico" ${extra}><use href="#i-${id}"/></svg>`;
+
+/* ── declared data — the mock's "schema" ────────────────────────────────── */
+const CATS = {
+  gameplay:  { label:'Gameplay',   acc:'var(--c-gameplay)'  },
+  lighting:  { label:'Lighting',   acc:'var(--c-lighting)'  },
+  atmos:     { label:'Atmosphere', acc:'var(--c-atmos)'     },
+  surface:   { label:'Surface',    acc:'var(--c-surface)'   },
+  particles: { label:'Particles',  acc:'var(--c-particles)' },
+  post:      { label:'Post',       acc:'var(--c-post)'      },
+};
+const CHANNELS = [
+  { id:'rain',   label:'Rain',      icon:'rain',  tint:'#58a6f2' },
+  { id:'clouds', label:'Clouds',    icon:'cloud', tint:'#9aa7bb' },
+  { id:'fog',    label:'Fog',       icon:'fog',   tint:'#a9b8c9' },
+  { id:'wind',   label:'Wind',      icon:'wind',  tint:'#7fd8c9' },
+  { id:'freeze', label:'Freeze',    icon:'snow',  tint:'#9fd7f2' },
+  { id:'bolt',   label:'Lightning', icon:'bolt',  tint:'#f2e37f' },
+  { id:'ash',    label:'Ash',       icon:'ash',   tint:'#c9967a' },
+];
+const MOODS = [
+  { id:'clear',    label:'Clear',    icon:'sun',   t:{ rain:0,   clouds:.06, fog:.02, bolt:0,  freeze:0 } },
+  { id:'breezy',   label:'Breezy',   icon:'wind',  t:{ rain:0,   clouds:.18, fog:0,   wind:.55, bolt:0 } },
+  { id:'overcast', label:'Overcast', icon:'cloud', t:{ rain:.04, clouds:.85, fog:.06, bolt:0 } },
+  { id:'mist',     label:'Mist',     icon:'fog',   t:{ rain:0,   clouds:.5,  fog:.45, bolt:0 } },
+  { id:'rain',     label:'Rain',     icon:'rain',  t:{ rain:.55, clouds:.8,  fog:.1,  bolt:.05, freeze:0 } },
+  { id:'storm',    label:'Storm',    icon:'bolt',  t:{ rain:.85, clouds:.95, fog:.12, wind:.7, bolt:.65, freeze:0 } },
+  { id:'snow',     label:'Snow',     icon:'snow',  t:{ rain:.6,  clouds:.8,  fog:.15, wind:.35, freeze:.9, bolt:0 } },
+  { id:'fogbank',  label:'Fog',      icon:'fog',   t:{ rain:0,   clouds:.6,  fog:.8,  wind:.1, bolt:0 } },
+];
+const CUES = [
+  { name:'Act I — Golden Afternoon',  fade:10,   glyphs:['sun','wind'],
+    t:{ hour:16.6, rain:0, clouds:.16, fog:.03, wind:.3, bolt:0, freeze:0 } },
+  { name:'Act II — The Storm Breaks', fade:60,   glyphs:['rain','bolt','wind'],
+    t:{ hour:18.4, rain:.85, clouds:.95, fog:.1, wind:.75, bolt:.7, freeze:0 } },
+  { name:'Act III — Dead of Night',   fade:300,  glyphs:['moon','fog'],
+    t:{ hour:0.6, rain:.15, clouds:.35, fog:.35, wind:.2, bolt:0, freeze:0 } },
+];
+const TEMPO = [
+  { label:'Now', s:0 }, { label:'10s', s:10 }, { label:'1m', s:60 },
+  { label:'5m', s:300 }, { label:'15m', s:900 }, { label:'1h', s:3600 },
+];
+/* demo compression: long fades play shorter, honestly labelled */
+const demoDur = s => s <= 10 ? s : 6 + 4 * Math.log10(s / 10);
+
+const P = (label, cat, min, max, val, opts={}) =>
+  ({ type:'float', label, cat, min, max, val, ...opts });
+const EFFECTS = [
+  { id:'water', name:'Water', icon:'water', cat:'surface', enabled:true,
+    mask:{ found:true, suffix:'_Water' }, scope:'scene', health:0, tier:4,
+    presets:['Mountain Lake','Mill Pond','Storm Coast','Sewer'],
+    foh:['depth','liveliness','clarity','foam'],
+    params:{
+      depth:      P('Depth','FOH',0,1,.62,{tip:'One slider: shallows to abyss — colour, murk and shadow follow.'}),
+      liveliness: P('Liveliness','FOH',0,1,.45,{tip:'How much the surface moves.'}),
+      clarity:    P('Clarity','FOH',0,1,.7,{tip:'Silt and sediment vs glass-clear water.'}),
+      foam:       P('Foam','FOH',0,1,.5,{tip:'Shoreline wash and whitecaps.'}),
+      enabled:    { type:'bool', label:'Enabled', cat:'Presence', val:true },
+      tint:       { type:'color', label:'Water tint', cat:'Look', val:'#3d7fb8' },
+      murk:       P('Murk density','Look',0,2,.8),
+      sparkle:    P('Sun sparkle','Look',0,1,.55),
+      waveSpeed:  P('Wave speed','Motion',0,4,.79),
+      chop:       P('Micro-chop','Motion',0,1,.71),
+      scalePx:    P('Wave scale (px)','Extent',8,256,96,{step:1}),
+      shoreReach: P('Shore reach','Extent',0,1,.65),
+      windInf:    P('Wind influence','Response',0,1,.8,{tip:'How hard the sky leans on the surface.'}),
+      rainRipple: P('Rain ripples','Response',0,1,.6),
+      samples:    P('March samples','Technical',4,32,12,{step:1}),
+      debugView:  { type:'enum', label:'Debug view', cat:'Technical', val:'off',
+                    options:['off','depth','foam','gates'] },
+    }},
+  { id:'fire', name:'Fire', icon:'fire', cat:'particles', enabled:true,
+    mask:{ found:true, suffix:'_Fire' }, scope:'scene', health:1, tier:3,
+    presets:['Hearth','Brazier','Wildfire','Embers'],
+    foh:['intensity','wildness','warmth'],
+    params:{
+      intensity: P('Intensity','FOH',0,1,.7,{tip:'From embers to blaze.'}),
+      wildness:  P('Wildness','FOH',0,1,.4,{tip:'Calm candle-steady vs leaping flames.'}),
+      warmth:    P('Warmth','FOH',0,1,.6,{tip:'Colour temperature of flame and glow.'}),
+      enabled:   { type:'bool', label:'Enabled', cat:'Presence', val:true },
+      count:     P('Particles / source','Flame',8,256,96,{step:1}),
+      flameH:    P('Flame height','Flame',0,2,1),
+      emberRate: P('Ember rate','Ember',0,1,.35),
+      emberLife: P('Ember life (s)','Ember',.5,6,2.4),
+      smokeAmt:  P('Smoke amount','Smoke',0,1,.3),
+      lightR:    P('Light reach','Light',0,2,1.1,{tip:'How far the cast light travels.'}),
+      cohesion:  P('Cohesion','Motion',0,1,.8,{tip:'Pull toward the bright core of each blob.'}),
+      windBend:  P('Wind bend','Response',0,1,.5),
+      unreadX:   P('Legacy spark bias','Technical',0,1,.2,
+                   {tip:'⚠ mock demo: declared but never read — the health badge is watching.'}),
+    }},
+  { id:'candles', name:'Candle Flames', icon:'candle', cat:'lighting', enabled:true,
+    mask:{ found:true, suffix:'(anchors)' }, scope:'scene', health:0, tier:2,
+    presets:['Chapel','Tavern','Séance'],
+    foh:['glow','flicker'],
+    params:{
+      glow:    P('Glow','FOH',0,1,.65,{tip:'Halo size and strength.'}),
+      flicker: P('Flicker','FOH',0,1,.5,{tip:'Stillness to guttering.'}),
+      enabled: { type:'bool', label:'Enabled', cat:'Presence', val:true },
+      hue:     { type:'color', label:'Flame colour', cat:'Look', val:'#ffb054' },
+      height:  P('Flame height','Look',0,2,1),
+      sway:    P('Draught sway','Response',0,1,.35),
+    }},
+  { id:'bloom', name:'Bloom', icon:'bloom', cat:'post', enabled:true,
+    mask:null, scope:'world', health:0, tier:1,
+    presets:['Subtle','Dreamy','Radiant'],
+    foh:['strength','radius'],
+    params:{
+      strength: P('Strength','FOH',0,2,.6,{tip:'How much bright things sing.'}),
+      radius:   P('Radius','FOH',0,1,.4),
+      enabled:  { type:'bool', label:'Enabled', cat:'Presence', val:true },
+      threshold:P('Threshold','Technical',0,1,.75),
+    }},
+  { id:'fow', name:'Fog of War', icon:'eye', cat:'gameplay', enabled:true,
+    mask:{ found:true, suffix:'(vision)' }, scope:'scene', health:0, tier:2,
+    presets:['Classic','Soft memory'],
+    foh:['softness'],
+    params:{
+      softness: P('Edge softness','FOH',0,1,.5,{tip:'Hard mask edge vs feathered sight line.'}),
+      enabled:  { type:'bool', label:'Enabled', cat:'Presence', val:true },
+      memory:   P('Explored memory','Look',0,1,.7),
+    }},
+  { id:'specular', name:'Specular', icon:'gem', cat:'surface', enabled:false,
+    mask:{ found:false, suffix:'_Specular' }, scope:'scene', health:0, tier:0,
+    presets:[], foh:['shine'],
+    params:{
+      shine:   P('Shine','FOH',0,1,.5,{tip:'Metal and polish catching the sun.'}),
+      enabled: { type:'bool', label:'Enabled', cat:'Presence', val:false },
+    }},
+];
+const CAT_ORDER = ['Presence','Look','Flame','Ember','Smoke','Light','Motion','Extent','Response','Technical'];
+
+/* ── state ──────────────────────────────────────────────────────────────── */
+const state = {
+  hour:14, windDir:205,
+  ch:{ rain:.25, clouds:.4, fog:.08, wind:.3, freeze:0, bolt:0, ash:0 },
+  baseline:{ hour:14, rain:0, clouds:.25, fog:.05, wind:.2, freeze:0, bolt:0, ash:0 },
+  tempoIx:2, cueIx:0, mood:null,
+  fades:{},            // key -> {from,to,start,dur,label}
+  fadeLabel:null, fadeUntil:0,
+  dept:'effects', painterArmed:null, pinned:new Set(),
+  reduceFlash:false, textScale:1,
+};
+
+/* ── fade engine (mock) — one writer, rAF deriver ───────────────────────── */
+const easeC = t => t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2;
+function easeTo(targets, seconds, label) {
+  const dur = demoDur(seconds) * 1000, now = performance.now();
+  for (const [k, to] of Object.entries(targets)) {
+    const from = k === 'hour' ? state.hour : state.ch[k];
+    if (from == null || Math.abs(from - to) < .001) continue;
+    state.fades[k] = { from, to, start:now, dur:Math.max(dur, 1) };
+  }
+  if (Object.keys(state.fades).length) {
+    state.fadeLabel = label; state.fadeUntil = now + Math.max(dur, 1);
+  }
+  if (seconds === 0) tickFades(performance.now() + 5);
+}
+function tickFades(now) {
+  let live = false;
+  for (const [k, f] of Object.entries(state.fades)) {
+    const t = clamp((now - f.start) / f.dur, 0, 1);
+    let v;
+    if (k === 'hour') {
+      let d = ((f.to - f.from + 36) % 24) - 12;           // shortest way round
+      v = (f.from + d * easeC(t) + 24) % 24; state.hour = v;
+    } else { v = lerp(f.from, f.to, easeC(t)); state.ch[k] = v; }
+    if (t >= 1) delete state.fades[k]; else live = true;
+  }
+  if (!live && state.fadeLabel) { state.fadeLabel = null; toastOnce('fade', 'Fade complete'); }
+  return live;
+}
+function cancelFades(snap) {
+  const now = performance.now();
+  for (const [k, f] of Object.entries(state.fades)) {
+    if (snap) { if (k === 'hour') state.hour = f.to; else state.ch[k] = f.to; }
+    delete state.fades[k];
+  }
+  state.fadeLabel = null;
+}
+
+/* ── toasts ─────────────────────────────────────────────────────────────── */
+let lastToast = {};
+function toast(msg, ic='candle') {
+  const t = el('div', 'toast', icon(ic) + ' ' + msg);
+  $('#toasts').append(t); setTimeout(() => t.remove(), 2600);
+}
+function toastOnce(key, msg) {
+  if (performance.now() - (lastToast[key] || 0) < 1500) return;
+  lastToast[key] = performance.now(); toast(msg);
+}
+
+/* ── astrolabe ──────────────────────────────────────────────────────────── */
+const phaseOf = h => h < 5 ? 'NIGHT' : h < 8 ? 'DAWN' : h < 17 ? 'DAY'
+                   : h < 20 ? 'DUSK' : 'NIGHT';
+const hourAngle = h => (h / 24) * 360 + 180;   // 0h at bottom? 0h top=midnight: midnight up
+{ const g = $('#tickG'); let ticks = '';
+  for (let i = 0; i < 24; i++) {
+    const a = (i / 24) * 2 * Math.PI, R = 129, r1 = i % 6 ? 121 : 117, r2 = 126;
+    ticks += `<line x1="${R + r1 * Math.sin(a)}" y1="${R - r1 * Math.cos(a)}"
+                    x2="${R + r2 * Math.sin(a)}" y2="${R - r2 * Math.cos(a)}"/>`;
+  } g.innerHTML = ticks; }
+function placeOrb(elm, hour, r) {
+  const a = (hour / 24) * 2 * Math.PI;                    // midnight at top
+  elm.style.transform =
+    `translate(${r * Math.sin(a)}px, ${-r * Math.cos(a)}px)`;
+}
+const WINDWORDS = ['Calm','Light','Moderate','Strong','Gale'];
+const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+function dragAngle(target, cb) {
+  let on = false;
+  const move = e => { if (!on) return;
+    const r = target.getBoundingClientRect(),
+      dx = e.clientX - (r.left + r.width/2), dy = e.clientY - (r.top + r.height/2);
+    cb((Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360); };
+  target.addEventListener('pointerdown', e => { on = true; target.setPointerCapture(e.pointerId); move(e); });
+  target.addEventListener('pointermove', move);
+  target.addEventListener('pointerup',   () => on = false);
+}
+dragAngle($('#astroRing'), a => { cancelFades(false); state.hour = (a / 360) * 24; });
+dragAngle($('#windGrab'), a => { state.windDir = a; });
+$('#astroRing').addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowDown')  state.hour = (state.hour + 23.75) % 24;
+  if (e.key === 'ArrowRight' || e.key === 'ArrowUp')   state.hour = (state.hour + .25) % 24;
+});
+$('#windGrab').addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft')  state.windDir = (state.windDir + 345) % 360;
+  if (e.key === 'ArrowRight') state.windDir = (state.windDir + 15) % 360;
+});
+
+/* ── tempo, moods, faders, cues, impulses ───────────────────────────────── */
+{ const t = $('#tempo');
+  TEMPO.forEach((s, i) => {
+    const b = el('button', null, s.label);
+    b.setAttribute('aria-pressed', String(i === state.tempoIx));
+    b.title = s.s === 0 ? 'Changes cut instantly' : `Changes ease over ${s.label}`;
+    b.onclick = () => { state.tempoIx = i;
+      $$('#tempo button').forEach((x, j) => x.setAttribute('aria-pressed', String(j === i)));
+      $('#tempoHint').textContent = s.s === 0 ? 'changes cut instantly'
+        : `changes ease over ${s.label}` + (s.s > 10 ? ' · demo-compressed' : '');
+    };
+    t.append(b);
+  }); }
+const tempoS = () => TEMPO[state.tempoIx].s;
+
+{ const m = $('#moods');
+  MOODS.forEach(md => {
+    const b = el('button', null, icon(md.icon) + `<span>${md.label}</span>`);
+    b.title = `Fade the sky to ${md.label} at the chosen fade time`;
+    b.onclick = () => { state.mood = md.id;
+      $$('#moods button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+      easeTo(md.t, tempoS(), md.label); };
+    m.append(b);
+  }); }
+
+const faderEls = {};
+{ const wrap = $('#faders');
+  CHANNELS.forEach(c => {
+    const f = el('div', 'fader');
+    f.style.setProperty('--acc', c.tint);
+    f.innerHTML = `
+      <div class="track" role="slider" aria-label="${c.label}" aria-valuemin="0"
+           aria-valuemax="100" tabindex="0">
+        <div class="fill"></div><div class="thumb"></div><div class="ghost"></div>
+        <span class="val num"></span>
+      </div>
+      <div class="flabel">${icon(c.icon)}<span>${c.label}</span></div>`;
+    wrap.append(f);
+    const track = $('.track', f);
+    const set = (clientY, fade) => {
+      const r = track.getBoundingClientRect();
+      const v = clamp(1 - (clientY - r.top) / r.height, 0, 1);
+      if (fade && tempoS() > 0) easeTo({ [c.id]: v }, tempoS(), c.label);
+      else { delete state.fades[c.id]; state.ch[c.id] = v; }
+    };
+    let dragging = false;
+    track.addEventListener('pointerdown', e => { dragging = true; f.classList.add('drag');
+      track.setPointerCapture(e.pointerId); set(e.clientY, false); });
+    track.addEventListener('pointermove', e => dragging && set(e.clientY, false));
+    track.addEventListener('pointerup', e => { dragging = false; f.classList.remove('drag'); });
+    track.addEventListener('keydown', e => {
+      const step = e.shiftKey ? .01 : .05;
+      if (e.key === 'ArrowUp')   state.ch[c.id] = clamp(state.ch[c.id] + step, 0, 1);
+      if (e.key === 'ArrowDown') state.ch[c.id] = clamp(state.ch[c.id] - step, 0, 1);
+    });
+    track.title = `${c.label} — drag to set now; click-drag then release stays live.\nMood chips and cues fade this at the chosen fade time.`;
+    faderEls[c.id] = f;
+  }); }
+
+function renderCueDeck() {
+  const cue = CUES[state.cueIx];
+  $('#cueName').textContent = cue ? cue.name : 'End of cue list';
+  $('#cueMeta').innerHTML = cue
+    ? `${icon('clock')} fades over ${cue.fade >= 60 ? (cue.fade/60) + 'm' : cue.fade + 's'}
+       &nbsp; ${cue.glyphs.map(g => icon(g)).join('')}`
+    : 'restart from the list below';
+  $('#goBtn').disabled = !cue;
+  const list = $('#cueList'); list.innerHTML = '';
+  CUES.forEach((c, i) => {
+    const b = el('button', 'cue' + (i < state.cueIx ? ' done' : i === state.cueIx ? ' next' : ''),
+      `${icon('clap')} ${c.name}<span class="dur num">${c.fade >= 60 ? (c.fade/60)+'m' : c.fade+'s'}</span>`);
+    b.onclick = () => { state.cueIx = i; fireCue(); };
+    list.append(b);
+  });
+  const r = el('button', 'cue', icon('reset') + ' Restart cue stack');
+  r.onclick = () => { state.cueIx = 0; renderCueDeck(); };
+  list.append(r);
+}
+function fireCue() {
+  const cue = CUES[state.cueIx]; if (!cue) return;
+  easeTo(cue.t, cue.fade, cue.name);
+  toast(`GO — ${cue.name}`, 'play');
+  state.cueIx++; renderCueDeck();
+}
+$('#goBtn').onclick = fireCue;
+$('#cueListBtn').onclick = () => {
+  const open = $('#cueDeck').classList.toggle('open');
+  $('#cueListBtn').textContent = open ? 'hide list ▴' : 'show list ▾';
+};
+
+function flash() {
+  if (state.reduceFlash) return;
+  const f = $('#flash');
+  f.animate([{opacity:0},{opacity:.85},{opacity:0},{opacity:.5},{opacity:0}],
+            { duration:420, easing:'ease-out' });
+}
+$('#impStrike').onclick = () => { flash();
+  toast(state.reduceFlash ? 'Strike fired — flash suppressed on this client' : 'Lightning strike', 'bolt'); };
+$('#impThunder').onclick = () => {
+  $('#map').animate([{filter:'brightness(1)'},{filter:'brightness(.82)'},{filter:'brightness(1)'}],
+    { duration:600 }); toast('Thunder rolls', 'cloud'); };
+$('#impGust').onclick = () => {
+  const from = state.ch.wind; state.ch.wind = clamp(from + .35, 0, 1);
+  easeTo({ wind:from }, 4, 'Gust'); toast('A gust sweeps the map', 'wind'); };
+let strikeTimer = 0;
+
+$('#baselineBtn').onclick = () => {
+  const { hour, ...rest } = state.baseline;
+  easeTo({ hour, ...rest }, tempoS(), 'Baseline');
+  state.mood = null; $$('#moods button').forEach(x => x.setAttribute('aria-pressed','false'));
+  toast('Fading back to the scene baseline', 'home');
+};
+$('#fadeSnap').onclick = () => cancelFades(true);
+$('#fadeHold').onclick = () => cancelFades(false);
+
+{ const pop = $('#confirmPop');
+  $('#safetyBtn').onclick = e => {
+    const r = e.currentTarget.getBoundingClientRect();
+    pop.style.left = clamp(r.left - 140, 8, innerWidth - 286) + 'px';
+    pop.style.top  = (r.top - 118) + 'px';
+    pop.classList.add('open'); $('#safetyNo').focus();
+  };
+  $('#safetyNo').onclick = () => pop.classList.remove('open');
+  $('#safetyYes').onclick = () => { pop.classList.remove('open');
+    toast('Foundry renderer restored (mock) — Map Shine stands down', 'shield'); }; }
+
+$('#collapseBtn').onclick = () => document.documentElement.dataset.remote = 'pill';
+$('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
+
+/* ── STUDIO ─────────────────────────────────────────────────────────────── */
+const DEPTS = [
+  { id:'effects', label:'Effects', icon:'water',  acc:'var(--shine)' },
+  { id:'painter', label:'Painter', icon:'brush',  acc:'var(--c-particles)' },
+  { id:'scene',   label:'Scene',   icon:'map',    acc:'var(--c-atmos)' },
+  { id:'cues',    label:'Cues',    icon:'clap',   acc:'var(--c-post)' },
+  { id:'system',  label:'System',  icon:'gear',   acc:'var(--c-system)' },
+  { id:'lab',     label:'Lab',     icon:'flask',  acc:'var(--c-system)', dev:true },
+];
+{ const rail = $('#rail');
+  DEPTS.forEach(d => {
+    if (d.dev) rail.append(el('div', 'railspacer'));
+    const b = el('button', null, icon(d.icon));
+    b.title = d.label + (d.dev ? ' (dev-gated)' : '');
+    b.style.setProperty('--dept-acc', d.acc);
+    b.setAttribute('aria-pressed', String(d.id === state.dept));
+    b.onclick = () => { state.dept = d.id;
+      $$('#rail button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+      renderDept(); };
+    rail.append(b);
+    if (d.dev) rail.append(el('div', 'devtag', 'DEV'));
+  }); }
+
+function deptHead(d, extra='') {
+  return `<div class="depthead" style="--dept-acc:${d.acc}">
+    <h2>${icon(d.icon)}${d.label}</h2><span class="sub">${extra}</span>
+    <span class="spacer"></span>
+    <div id="searchBox"><svg class="ico"><use href="#i-search"/></svg>
+      <input id="searchInline" placeholder="Search every control…" aria-label="Search">
+      <kbd>/</kbd></div></div>`;
+}
+
+/* widgets — the mock's type→widget table */
+function widget(effect, key, def) {
+  const wrap = el('div');
+  if (def.type === 'bool') {
+    const t = el('button', 'toggle'); t.setAttribute('role','switch');
+    t.setAttribute('aria-checked', String(def.val));
+    t.onclick = () => { def.val = !def.val; t.setAttribute('aria-checked', String(def.val));
+      if (key === 'enabled') { effect.enabled = def.val; renderDept(); } };
+    return t;
+  }
+  if (def.type === 'color') {
+    const w = el('span', 'colorline');
+    const inp = el('input'); inp.type = 'color'; inp.value = def.val;
+    const lab = el('span', 'readout', def.val);
+    inp.oninput = () => { def.val = inp.value; lab.textContent = inp.value; poke(effect, key, inp.value); };
+    w.append(inp, lab); return w;
+  }
+  if (def.type === 'enum') {
+    const s = el('select', 'select');
+    def.options.forEach(o => s.append(el('option', null, o)));
+    s.value = def.val; s.onchange = () => def.val = s.value;
+    return s;
+  }
+  const inp = el('input', 'hslider'); inp.type = 'range';
+  inp.min = def.min; inp.max = def.max; inp.step = def.step || .01; inp.value = def.val;
+  const upd = () => inp.style.setProperty('--fill',
+    (100 * (inp.value - def.min) / (def.max - def.min)) + '%');
+  upd();
+  inp.oninput = () => { def.val = +inp.value; upd();
+    inp.closest('.dial,.prow')?.querySelector('output')
+       ?.replaceChildren(document.createTextNode((+inp.value).toFixed(def.step >= 1 ? 0 : 2)));
+    poke(effect, key, def.val); };
+  return inp;
+}
+/* the mock's little delight: some FOH dials visibly steer the backdrop */
+function poke(effect, key, v) {
+  if (effect.id === 'water' && key === 'depth')
+    $('#poolGlow').style.filter = `blur(6px) saturate(${.7 + v}) brightness(${1.25 - v * .6})`;
+  if (effect.id === 'fire' && key === 'intensity')
+    $$('#map .glow, #map .stamp').forEach(g => g.style.opacity = .35 + v * .65);
+  if (effect.id === 'candles' && key === 'glow')
+    $$('#map .glow').forEach(g => g.style.transform = `translate(-50%,-50%) scale(${.7 + v * .8})`);
+  if (effect.id === 'bloom' && key === 'strength')
+    $('#map').style.setProperty('--map-bright', String(1 + v * .12));
+}
+
+function buildCard(effect, { popout=false } = {}) {
+  const cat = CATS[effect.cat];
+  const card = el('article', 'card' + (effect.enabled ? '' : ' dim'));
+  card.style.setProperty('--acc', cat.acc);
+  card.dataset.effect = effect.id;
+
+  const scopeMap = { scene:['map','Saved with this scene'],
+                     world:['gear','World-based: shared by every scene'],
+                     client:['user','Only on this computer'] };
+  const [sIco, sTip] = scopeMap[effect.scope];
+  const head = el('div', 'card-head', `
+    ${icon(effect.icon, 'class="ico eff"')}
+    <span><span class="cname">${effect.name}</span><br><span class="cat">${cat.label}</span></span>
+    <span class="spacer"></span>
+    ${effect.health ? `<span class="badge warn" title="${effect.health} declared control(s) never read this session — suspected dead. Click for the Lab report.">${icon('health')}${effect.health}</span>` : ''}
+    <span class="badge" title="Quality tier the governor chose">T${effect.tier}</span>
+    <span class="scope" title="${sTip}">${icon(sIco)}${effect.scope}</span>`);
+  const tools = el('div', 'card-tools');
+  const pinB = el('button', null, icon('pin'));
+  pinB.title = 'Pin to top';
+  pinB.setAttribute('aria-pressed', String(state.pinned.has(effect.id)));
+  pinB.onclick = () => { state.pinned.has(effect.id) ? state.pinned.delete(effect.id)
+    : state.pinned.add(effect.id); renderDept(); };
+  const popB = el('button', null, icon('popout'));
+  popB.title = 'Pop out for side-by-side tuning';
+  popB.onclick = () => popOut(effect);
+  const paintB = el('button', null, icon('brush'));
+  paintB.title = `Paint ${effect.name} on the map`;
+  paintB.onclick = () => { state.dept = 'painter'; state.painterArmed = effect.id;
+    $$('#rail button').forEach((x, i) => x.setAttribute('aria-pressed', String(DEPTS[i]?.id === 'painter')));
+    renderDept(); };
+  tools.append(pinB, popB);
+  if (effect.mask && effect.mask.suffix.startsWith('_')) tools.append(paintB);
+  head.append(tools);
+  card.append(head);
+
+  if (effect.mask) {
+    const m = el('div', 'maskrow ' + (effect.mask.found ? 'found' : 'missing'),
+      effect.mask.found
+        ? `${icon('check')} <code>${effect.mask.suffix}</code> mask found`
+        : `${icon('warn')} Needs a <code>${effect.mask.suffix}</code> mask — paint one
+           <button class="btn sm" style="margin-left:auto">${icon('brush')} Paint</button>
+           or ship <code>Map${effect.mask.suffix}.webp</code>`);
+    if (!effect.mask.found) $('.btn', m).onclick = paintB.onclick;
+    card.append(m);
+  }
+
+  const foh = el('div', 'foh');
+  if (effect.presets.length) {
+    const pr = el('div', 'presetrow');
+    const sel = el('select', 'select');
+    sel.append(el('option', null, '— preset —'));
+    effect.presets.forEach(p => sel.append(el('option', null, p)));
+    sel.title = 'A preset is a validated snapshot — a starting point; dials nudge from there';
+    sel.onchange = () => sel.value !== '— preset —' && toast(`Preset “${sel.value}” applied to ${effect.name}`);
+    pr.append(sel);
+    foh.append(pr);
+  }
+  effect.foh.forEach(k => {
+    const def = effect.params[k];
+    const row = el('div', 'dial');
+    const lab = el('label', null, def.label); if (def.tip) lab.title = def.tip;
+    const out = el('output', 'num', (+def.val).toFixed(2));
+    row.append(lab, widget(effect, k, def), out);
+    foh.append(row);
+  });
+  card.append(foh);
+
+  /* ROH = the complement, categorised — the partition law, honoured in a mock */
+  const rohKeys = Object.keys(effect.params).filter(k => !effect.foh.includes(k));
+  if (rohKeys.length) {
+    const roh = el('details', 'roh');
+    roh.innerHTML = `<summary>${icon('chev','class="ico tw"')} Advanced
+      <span style="margin-left:auto;color:var(--ink2)">${rohKeys.length} controls</span></summary>`;
+    const groups = el('div', 'rohgroups');
+    const cats = [...new Set(rohKeys.map(k => effect.params[k].cat))]
+      .sort((a, b) => CAT_ORDER.indexOf(a) - CAT_ORDER.indexOf(b));
+    cats.forEach(cn => {
+      const g = el('div', 'rohcat', `<div class="rc-h">${cn}</div>`);
+      const rows = el('div', 'rows');
+      rohKeys.filter(k => effect.params[k].cat === cn).forEach(k => {
+        const def = effect.params[k];
+        const row = el('div', 'prow'); row.dataset.param = k;
+        const lab = el('label', null, def.label);
+        lab.title = def.tip || `${def.label} — harvested help text rides here as the tooltip`;
+        const out = el('output', 'num',
+          def.type === 'float' ? (+def.val).toFixed(def.step >= 1 ? 0 : 2) : '');
+        row.append(lab, widget(effect, k, def), out);
+        rows.append(row);
+      });
+      g.append(rows); groups.append(g);
+    });
+    roh.append(groups);
+    card.append(roh);
+  }
+  return card;
+}
+function popOut(effect) {
+  const w = el('div', 'popout');
+  const head = el('header', 'room-head',
+    `<span class="rtitle">${icon(effect.icon)}${effect.name}</span><span class="spacer"></span>`);
+  const x = el('button', 'hbtn', icon('x')); x.title = 'Close';
+  x.onclick = () => w.remove();
+  head.append(x); w.append(head, buildCard(effect, { popout:true }));
+  w.style.left = clamp(120 + Math.random() * 200, 8, innerWidth - 450) + 'px';
+  w.style.top  = clamp(120 + Math.random() * 160, 8, innerHeight - 300) + 'px';
+  document.body.append(w);
+  makeDraggable(head, w);
+}
+
+/* department renderers */
+function renderDept() {
+  const body = $('#deptBody');
+  const d = DEPTS.find(x => x.id === state.dept);
+  body.innerHTML = '';
+
+  if (d.id === 'effects') {
+    body.innerHTML = deptHead(d, `${EFFECTS.length} registered — every card generated from its schema`);
+    const scroll = el('div', 'deptscroll');
+    const strip = el('div'); strip.id = 'catStrip';
+    const all = el('button', 'chip', 'All'); all.setAttribute('aria-pressed','true');
+    strip.append(all);
+    Object.entries(CATS).forEach(([id, c]) => {
+      const b = el('button', 'chip', `<span class="dot"></span>${c.label}`);
+      b.style.setProperty('--cat', c.acc);
+      b.onclick = () => { $$('#catStrip .chip').forEach(x => x.setAttribute('aria-pressed','false'));
+        b.setAttribute('aria-pressed','true'); drawCards(id); };
+      strip.append(b);
+    });
+    all.onclick = () => { $$('#catStrip .chip').forEach(x => x.setAttribute('aria-pressed','false'));
+      all.setAttribute('aria-pressed','true'); drawCards(null); };
+    const grid = el('div'); grid.id = 'cards';
+    scroll.append(strip, grid); body.append(scroll);
+    const drawCards = f => { grid.innerHTML = '';
+      const list = EFFECTS.filter(e => !f || e.cat === f)
+        .sort((a, b) => (state.pinned.has(b.id) ? 1 : 0) - (state.pinned.has(a.id) ? 1 : 0));
+      list.forEach(e => grid.append(buildCard(e))); };
+    drawCards(null);
+  }
+
+  if (d.id === 'painter') {
+    body.innerHTML = deptHead(d, 'click a tile → the brush arms itself → paint on the map');
+    const scroll = el('div', 'deptscroll');
+    const tg = el('div'); tg.id = 'tileGrid';
+    EFFECTS.filter(e => e.mask?.suffix.startsWith('_') || ['candles','fow'].includes(e.id))
+      .forEach(e => {
+        const t = el('button', 'tile',
+          `${icon(e.icon)}<b>${e.name}</b><small>${e.mask?.suffix || 'anchors'}</small>`);
+        t.style.setProperty('--acc', CATS[e.cat].acc);
+        t.setAttribute('aria-pressed', String(state.painterArmed === e.id));
+        t.onclick = () => { state.painterArmed = e.id; renderDept();
+          toast(`Brush armed — painting ${e.name}`, 'brush'); };
+        tg.append(t);
+      });
+    scroll.append(tg);
+    const armed = EFFECTS.find(e => e.id === state.painterArmed);
+    const bp = el('div'); bp.id = 'brushPanel';
+    bp.innerHTML = `
+      <div class="rowline"><b style="display:flex;gap:7px;align-items:center">
+        ${icon('brush')} ${armed ? 'Painting ' + armed.name : 'Pick an effect tile above'}</b>
+        ${armed ? `<code class="readout">${armed.mask?.suffix || '(anchors)'}</code>` : ''}
+        <span style="flex:1"></span>
+        <span class="rowline" style="gap:6px"><small style="color:var(--ink2)">floor</small>
+          <span class="seg"><button>G</button><button aria-pressed="true">1</button><button>2</button></span></span>
+      </div>
+      <div class="rowline">
+        <span class="seg" role="group" aria-label="Tool">
+          ${['Brush','Spray','Erase','Point','Line','Polygon'].map((t, i) =>
+            `<button aria-pressed="${i===0}">${t}</button>`).join('')}
+        </span>
+        <label class="rowline" style="gap:8px; flex:1; min-width:170px">
+          <small style="color:var(--ink2)">size</small>
+          <input class="hslider" type="range" min="4" max="128" value="42" style="--fill:30%">
+        </label>
+        <label class="rowline" style="gap:8px; flex:1; min-width:170px">
+          <small style="color:var(--ink2)">softness</small>
+          <input class="hslider" type="range" min="0" max="1" step=".01" value=".6" style="--fill:60%">
+        </label>
+        <label class="rowline" style="gap:6px"><small style="color:var(--ink2)">snap</small>
+          <button class="toggle" role="switch" aria-checked="false"></button></label>
+      </div>
+      <div id="paintHint">${icon('map')}
+        ${armed ? `<b>Try it:</b>&nbsp;click anywhere on the map behind this window —
+          each click stamps living ${armed.name.toLowerCase()} into the scene. Esc exits.`
+        : 'LEFT paints · RIGHT pans (Foundry keeps its own gestures) · Esc exits with an unsaved-changes guard.'}
+      </div>`;
+    $$('#brushPanel .seg', bp).forEach(seg => $$('button', seg).forEach(b =>
+      b.onclick = () => { $$('button', seg).forEach(x => x.setAttribute('aria-pressed','false'));
+        b.setAttribute('aria-pressed','true'); }));
+    scroll.append(bp); body.append(scroll);
+  }
+
+  if (d.id === 'scene') {
+    body.innerHTML = deptHead(d, 'the authored resting look, and everything the map ships with');
+    const scroll = el('div', 'deptscroll');
+    scroll.innerHTML = `
+      <div class="sysgrid">
+        <div class="syscard"><h3>${icon('home')}Baseline</h3>
+          <div class="sysrow"><span class="grow">What “Baseline” on the Remote fades back to.</span></div>
+          <div class="sysrow"><span class="readout grow">14:00 · clear sky · light wind · candles lit</span>
+            <button class="btn sm gold">${icon('camera')} Capture current look</button></div>
+        </div>
+        <div class="syscard"><h3>${icon('map')}Scene presets</h3>
+          <div class="sysrow" style="flex-wrap:wrap; gap:6px">
+            ${['Baseline','Furnace Forge','Wizard’s Lair','Storm Horror'].map(p =>
+              `<button class="chip">${p}</button>`).join('')}</div>
+          <div class="sysrow"><small>A preset is validated data — one that names a ghost param refuses to load.</small></div>
+        </div>
+        <div class="syscard"><h3>${icon('layers')}Levels</h3>
+          <div class="sysrow"><span class="grow">Ground · First floor · Attic</span>
+            <button class="btn sm">Edit bands</button></div>
+        </div>
+        <div class="syscard"><h3>${icon('gem')}Masks aboard</h3>
+          <div class="sysrow"><span class="readout grow">_Water ✓ · _Fire ✓ · _Windows ✓ · _Specular —</span>
+            <button class="btn sm">Mask board</button></div>
+        </div>
+      </div>`;
+    body.append(scroll);
+  }
+
+  if (d.id === 'cues') {
+    body.innerHTML = deptHead(d, 'captured moments with a fade time — fired from the Remote with GO');
+    const scroll = el('div', 'deptscroll');
+    const wrap = el('div'); wrap.id = 'cueBuild';
+    const cap = el('button', 'btn gold',
+      `${icon('camera')} Capture current look as a cue`);
+    cap.style.alignSelf = 'flex-start';
+    cap.onclick = () => {
+      CUES.push({ name:`Captured — ${$('#clockTxt').textContent}`, fade:tempoS() || 10,
+        glyphs:['camera'], t:{ hour:state.hour, ...state.ch } });
+      renderDept(); renderCueDeck(); toast('Cue captured from the live scene', 'camera');
+    };
+    wrap.append(cap);
+    CUES.forEach((c, i) => {
+      const item = el('div', 'cueitem');
+      item.innerHTML = `
+        <span class="order"><button title="Move up">▲</button><button title="Move down">▼</button></span>
+        <span class="cnum num">${i + 1}</span>
+        <span class="cinfo"><span class="cname">${c.name}</span>
+          <span class="cglyphs">${c.glyphs.map(g => icon(g)).join('')} </span></span>
+        <select class="select" title="Fade time">${['10s','30s','1m','5m','20m','1h']
+          .map(o => `<option${(c.fade >= 60 ? (c.fade/60)+'m' : c.fade+'s') === o ? ' selected' : ''}>${o}</option>`)
+          .join('')}</select>
+        <button class="btn sm" title="Fire this cue now to check it">Test</button>`;
+      $$('.order button', item)[0].onclick = () => { if (i) { [CUES[i-1], CUES[i]] = [CUES[i], CUES[i-1]]; renderDept(); renderCueDeck(); } };
+      $$('.order button', item)[1].onclick = () => { if (i < CUES.length-1) { [CUES[i+1], CUES[i]] = [CUES[i], CUES[i+1]]; renderDept(); renderCueDeck(); } };
+      $('.btn', item).onclick = () => { easeTo(c.t, Math.min(c.fade, 10), c.name); toast(`Testing “${c.name}”`, 'clap'); };
+      wrap.append(item);
+    });
+    scroll.append(wrap); body.append(scroll);
+  }
+
+  if (d.id === 'system') {
+    body.innerHTML = deptHead(d, 'this department, restyled, is exactly what a player sees');
+    const scroll = el('div', 'deptscroll');
+    scroll.append(buildSystemCards(true));
+    body.append(scroll);
+  }
+
+  if (d.id === 'lab') {
+    body.innerHTML = deptHead(d, 'dev-gated — customers never wander in');
+    const scroll = el('div', 'deptscroll');
+    scroll.innerHTML = `<div class="labbanner">${icon('flask')} The Lab keeps the debug
+      registry: reports, actions, Pixel Probe, the perf lab — and the <b>Widget Gallery</b>
+      below, the UI's shader-lab: every canon widget, every state, judged here first.</div>`;
+    const g = el('div'); g.id = 'gallery';
+    g.innerHTML = `
+      <div class="gcell"><h4>Sliders</h4>
+        <input class="hslider" type="range" value="60" style="--fill:60%">
+        <input class="hslider" type="range" value="30" style="--fill:30%; --acc:var(--c-atmos)">
+        <input class="hslider" type="range" value="80" disabled style="--fill:80%; opacity:.4"></div>
+      <div class="gcell"><h4>Toggles &amp; segmented</h4>
+        <div class="grow-line"><button class="toggle" aria-checked="true"></button>
+          <button class="toggle" aria-checked="false"></button>
+          <span class="seg" style="display:inline-flex;background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:2px">
+            <button style="padding:3px 10px" aria-pressed="true" class="chip" >A</button>
+            <button style="padding:3px 10px" class="chip">B</button></span></div></div>
+      <div class="gcell"><h4>Chips &amp; badges</h4>
+        <div class="grow-line"><button class="chip" aria-pressed="true">Active</button>
+          <button class="chip">Idle</button>
+          <span class="badge okb">${icon('check')} mask found</span>
+          <span class="badge warn">${icon('health')} 2 unread</span>
+          <span class="badge">T4</span></div></div>
+      <div class="gcell"><h4>Scope glyphs</h4>
+        <div class="grow-line"><span class="scope">${icon('map')}scene</span>
+          <span class="scope">${icon('gear')}world</span>
+          <span class="scope">${icon('user')}client</span></div>
+        <small style="color:var(--ink2)">Law 6 — where a value lives is visible where you change it.</small></div>
+      <div class="gcell"><h4>Buttons</h4>
+        <div class="grow-line"><button class="btn">Quiet</button>
+          <button class="btn gold">${icon('play')} Primary</button>
+          <button class="btn danger">${icon('warn')} Danger</button></div></div>
+      <div class="gcell"><h4>Status rows</h4>
+        <div class="maskrow found" style="margin:0">${icon('check')} <code>_Water</code> mask found</div>
+        <div class="maskrow missing" style="margin:0">${icon('warn')} Needs a <code>_Specular</code> mask</div></div>
+      <div class="gcell"><h4>Progress ring</h4>
+        <div class="grow-line"><span style="width:34px;height:34px;display:inline-block">
+          <svg viewBox="0 0 36 36" style="transform:rotate(-90deg)">
+            <circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--bg3)" stroke-width="3"/>
+            <circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--shine)" stroke-width="3"
+              stroke-linecap="round" stroke-dasharray="97.4" stroke-dashoffset="30"/></svg></span>
+          <small style="color:var(--ink2)">the one always-animated element — it IS information</small></div></div>
+      <div class="gcell"><h4>Reports (registry stub)</h4>
+        <div class="sysrow"><span class="grow">Pixel Probe</span><button class="btn sm">Run</button></div>
+        <div class="sysrow"><span class="grow">Cache report</span><button class="btn sm">Run</button></div>
+        <div class="sysrow"><span class="grow">Export everything</span><button class="btn sm gold">Export</button></div></div>`;
+    scroll.append(g); body.append(scroll);
+  }
+
+  /* inline search hooks the same palette */
+  const si = $('#searchInline');
+  if (si) { si.addEventListener('focus', () => openPalette(si.value));
+    si.addEventListener('input', () => openPalette(si.value)); }
+}
+
+/* system cards shared by Studio SYSTEM dept and the player face */
+function buildSystemCards(gmView) {
+  const wrap = el('div', 'sysgrid');
+  const perf = el('div', 'syscard');
+  perf.innerHTML = `<h3>${icon('gauge')}Performance</h3>
+    <div id="profileSeg" role="group" aria-label="Performance profile">
+      ${['Low','Perf','Standard','Quality','Extreme'].map((p, i) =>
+        `<button aria-pressed="${i===2}" title="One choice sets every effect's quality tier">${p}</button>`).join('')}
+    </div>
+    <div class="sysrow"><small>One choice sets every effect's tier — the front door of performance.</small></div>`;
+  $$('#profileSeg button', perf).forEach(b => b.onclick = () => {
+    $$('#profileSeg button', perf).forEach(x => x.setAttribute('aria-pressed','false'));
+    b.setAttribute('aria-pressed','true'); toast(`Profile: ${b.textContent}`, 'gauge'); });
+
+  const fx = el('div', 'syscard');
+  fx.innerHTML = `<h3>${icon('bloom')}Effects on this computer</h3>` +
+    EFFECTS.map(e => {
+      const un = e.id === 'specular';
+      return `<div class="sysrow ${un ? 'locked' : ''}">
+        ${icon(e.icon)} <span class="grow">${e.name}</span>
+        ${un ? `<span class="lockwhy">${icon('lock')} needs a _Specular mask</span>`
+             : `<button class="toggle" role="switch" aria-checked="${e.enabled}"></button>`}
+      </div>`; }).join('') +
+    `<div class="sysrow"><small>Off here never touches the GM's scene — it is your machine's choice.</small></div>`;
+  $$('.toggle', fx).forEach(t => t.onclick = () =>
+    t.setAttribute('aria-checked', String(t.getAttribute('aria-checked') !== 'true')));
+
+  const a11y = el('div', 'syscard');
+  a11y.innerHTML = `<h3>${icon('eye')}Comfort &amp; access</h3>
+    <div class="sysrow"><span class="grow">Reduce flashing <small>(hard override — outranks the GM)</small></span>
+      <button class="toggle" id="rfTgl" role="switch" aria-checked="${state.reduceFlash}"></button></div>
+    <div class="sysrow"><span class="grow">Reduce motion</span>
+      <button class="toggle" id="rmTgl" role="switch"
+        aria-checked="${document.documentElement.dataset.reduceMotion === '1'}"></button></div>
+    <div class="sysrow"><span class="grow">Text size</span>
+      <input class="hslider" id="tsSlider" type="range" min=".9" max="1.3" step=".05"
+        value="${state.textScale}" style="width:130px; --fill:${(state.textScale - .9)/.4*100}%">
+      <span class="readout num" id="tsOut">${Math.round(state.textScale * 100)}%</span></div>
+    <div class="sysrow"><span class="grow">Theme</span>
+      <select class="select" id="themeSel2">
+        ${['dark','light','hc','soft'].map(t =>
+          `<option value="${t}"${document.documentElement.dataset.theme === t ? ' selected' : ''}>
+            ${{dark:'Lantern Dark',light:'Lantern Light',hc:'High Contrast',soft:'Soft'}[t]}</option>`).join('')}
+      </select></div>`;
+  const wire = () => {
+    $('#rfTgl', a11y).onclick = e => { state.reduceFlash = !state.reduceFlash;
+      e.currentTarget.setAttribute('aria-checked', String(state.reduceFlash));
+      document.documentElement.dataset.reduceFlash = state.reduceFlash ? '1' : '0'; };
+    $('#rmTgl', a11y).onclick = e => {
+      const on = document.documentElement.dataset.reduceMotion !== '1';
+      document.documentElement.dataset.reduceMotion = on ? '1' : '0';
+      e.currentTarget.setAttribute('aria-checked', String(on)); };
+    $('#tsSlider', a11y).oninput = e => { state.textScale = +e.target.value;
+      e.target.style.setProperty('--fill', ((state.textScale - .9) / .4 * 100) + '%');
+      $('#tsOut', a11y).textContent = Math.round(state.textScale * 100) + '%';
+      document.documentElement.style.fontSize = (16 * state.textScale) + 'px'; };
+    $('#themeSel2', a11y).onchange = e => { document.documentElement.dataset.theme = e.target.value;
+      $('#themeSel').value = e.target.value; };
+  };
+  queueMicrotask(wire);
+
+  wrap.append(perf, fx, a11y);
+  if (gmView) {
+    const pol = el('div', 'syscard');
+    pol.innerHTML = `<h3>${icon('candle')}Player light policy <span class="scope" style="margin-left:auto">${icon('gear')}world</span></h3>` +
+      ['Torch','Flashlight','Night Vision','Low-light','Infravision','Active IR'].map((m, i) =>
+        `<div class="sysrow">${icon('candle')} <span class="grow">${m}</span>
+          <select class="select">${['Allowed','Global','Disallowed'].map((o, j) =>
+            `<option${j === (i > 2 ? 2 : 0) ? ' selected' : ''}>${o}</option>`).join('')}</select></div>`).join('') +
+      `<div class="sysrow"><small>Players only see this department — and none of the rest of the Studio
+        is even built into their client (Law 10).</small>
+        <button class="btn sm" id="viewAsPlayer">${icon('user')} View as player</button></div>`;
+    queueMicrotask(() => $('#viewAsPlayer', pol).onclick = () => showSurface('player'));
+    wrap.append(pol);
+  }
+  return wrap;
+}
+
+/* player face */
+function renderPlayer() {
+  const b = $('#playerBody');
+  b.innerHTML = `<p class="friendly">These settings only change how the map looks and runs
+    <b>on your computer</b> — your GM's scene is never touched. If the map feels slow,
+    start with the profile.</p>`;
+  const cards = buildSystemCards(false);
+  cards.style.gridTemplateColumns = '1fr';
+  b.append(cards);
+}
+
+/* ── search palette ─────────────────────────────────────────────────────── */
+const INDEX = [];
+EFFECTS.forEach(e => Object.entries(e.params).forEach(([k, d]) =>
+  INDEX.push({ effect:e, key:k, label:d.label, cat:d.cat, tip:d.tip || '' })));
+function openPalette(q='') {
+  const pal = $('#palette'); pal.classList.add('open');
+  const inp = $('#palInput'); if (document.activeElement !== inp) { inp.value = q; inp.focus(); }
+  drawHits(inp.value);
+}
+function drawHits(q) {
+  const res = $('#palResults'); res.innerHTML = '';
+  const ql = q.trim().toLowerCase();
+  const hits = !ql ? INDEX.slice(0, 8) : INDEX.filter(h =>
+    (h.label + ' ' + h.effect.name + ' ' + h.tip).toLowerCase().includes(ql)).slice(0, 12);
+  if (!hits.length) { res.append(el('div', 'hit', 'Nothing sings to that tune.')); return; }
+  hits.forEach((h, i) => {
+    const b = el('button', 'hit' + (i === 0 ? ' sel' : ''),
+      `<span class="dot" style="--acc:${CATS[h.effect.cat].acc}"></span>
+       <b>${h.label}</b><span style="color:var(--ink2)">· ${h.effect.name}</span>
+       <span class="crumb">${h.cat}</span>`);
+    b.onclick = () => { $('#palette').classList.remove('open');
+      showSurface('studio'); state.dept = 'effects';
+      $$('#rail button').forEach((x, j) => x.setAttribute('aria-pressed', String(DEPTS[j]?.id === 'effects')));
+      renderDept();
+      requestAnimationFrame(() => {
+        const card = $(`.card[data-effect="${h.effect.id}"]`); if (!card) return;
+        const det = $('.roh', card); if (det) det.open = true;
+        const row = $(`.prow[data-param="${h.key}"]`, card) || card;
+        row.scrollIntoView({ block:'center', behavior:'smooth' });
+        row.classList.remove('hl'); void row.offsetWidth; row.classList.add('hl');
+      }); };
+    res.append(b);
+  });
+}
+$('#palInput').addEventListener('input', e => drawHits(e.target.value));
+document.addEventListener('keydown', e => {
+  if (e.key === '/' && !e.target.matches('input,select,textarea')) { e.preventDefault(); openPalette(); }
+  if (e.key === 'Escape') { $('#palette').classList.remove('open');
+    $('#confirmPop').classList.remove('open');
+    if (state.painterArmed) { state.painterArmed = null;
+      if (state.dept === 'painter' && !$('#studio').hidden) renderDept();
+      toast('Painter disarmed', 'brush'); } }
+});
+
+/* paint stamping on the living map */
+$('#map').addEventListener('pointerdown', e => {
+  if (!state.painterArmed) return;
+  const eff = EFFECTS.find(x => x.id === state.painterArmed);
+  const s = el('div', 'stamp');
+  s.style.left = e.clientX + 'px'; s.style.top = e.clientY + 'px';
+  if (eff.id === 'water') s.style.background =
+    'radial-gradient(closest-side, rgba(80,150,230,.55), rgba(60,120,200,.16) 55%, transparent 75%)';
+  if (eff.id === 'fow') s.style.background =
+    'radial-gradient(closest-side, rgba(180,200,230,.28), transparent 70%)';
+  $('#map').append(s);
+});
+
+/* ── surfaces, dragging, chrome ─────────────────────────────────────────── */
+function showSurface(which) {
+  $('#studio').hidden = which !== 'studio';
+  $('#player').hidden = which !== 'player';
+  ['Remote','Studio','Player'].forEach(n =>
+    $('#tab' + n).setAttribute('aria-pressed', String(n.toLowerCase() === which)));
+  if (which === 'studio') renderDept();
+  if (which === 'player') renderPlayer();
+}
+$('#tabRemote').onclick = () => { document.documentElement.dataset.remote = 'full'; showSurface('remote'); };
+$('#tabStudio').onclick = () => showSurface('studio');
+$('#tabPlayer').onclick = () => showSurface('player');
+$('#studioClose').onclick = () => showSurface('remote');
+$('#playerClose').onclick = () => showSurface('remote');
+
+function makeDraggable(handle, panel) {
+  let sx, sy, sl, st, on = false;
+  handle.addEventListener('pointerdown', e => {
+    if (e.target.closest('button,select,input,label')) return;
+    on = true; handle.setPointerCapture(e.pointerId);
+    const r = panel.getBoundingClientRect(); sx = e.clientX; sy = e.clientY; sl = r.left; st = r.top;
+    panel.style.right = 'auto'; panel.style.transform = 'none';
+  });
+  handle.addEventListener('pointermove', e => { if (!on) return;
+    const r = panel.getBoundingClientRect();
+    panel.style.left = clamp(sl + e.clientX - sx, 0, innerWidth  - r.width)  + 'px';
+    panel.style.top  = clamp(st + e.clientY - sy, 0, innerHeight - r.height) + 'px'; });
+  handle.addEventListener('pointerup', () => on = false);
+}
+$$('.room-head[data-drag]').forEach(h => makeDraggable(h, h.closest('.room')));
+
+$('#themeSel').onchange = e => document.documentElement.dataset.theme = e.target.value;
+$('#densityTgl').onclick = e => {
+  const on = document.documentElement.dataset.density !== 'compact';
+  document.documentElement.dataset.density = on ? 'compact' : 'comfortable';
+  e.currentTarget.setAttribute('aria-checked', String(on)); };
+$('#frameBtn').onclick = e => {
+  const on = document.documentElement.dataset.frame !== '1';
+  document.documentElement.dataset.frame = on ? '1' : '0';
+  e.currentTarget.setAttribute('aria-pressed', String(on));
+  const f = $('#frame1080');
+  f.style.width = '1920px'; f.style.height = '1080px';
+  f.style.left = Math.max(0, (innerWidth - 1920) / 2) + 'px';
+  f.style.top  = Math.max(0, (innerHeight - 1080) / 2) + 'px'; };
+$('#resetBtn').onclick = () => location.reload();
+
+/* ── the render loop — backdrop + readouts derive from state ────────────── */
+const todColor = h => {
+  /* keyframes: hour → [r,g,b,alpha] multiply tint */
+  const K = [[0,[24,34,80,.62]], [4.5,[28,38,88,.6]], [6.5,[190,120,90,.28]],
+             [9,[255,244,220,.06]], [13,[255,252,240,.02]], [16.5,[255,230,180,.1]],
+             [18.5,[210,110,70,.3]], [20.5,[40,44,96,.55]], [24,[24,34,80,.62]]];
+  let a = K[0], b = K[K.length - 1];
+  for (let i = 0; i < K.length - 1; i++) if (h >= K[i][0] && h <= K[i+1][0]) { a = K[i]; b = K[i+1]; break; }
+  const t = (h - a[0]) / Math.max(b[0] - a[0], .001);
+  const v = a[1].map((x, i) => lerp(x, b[1][i], t));
+  return `rgba(${v[0]|0},${v[1]|0},${v[2]|0},${v[3].toFixed(3)})`;
+};
+let lastStrikeRoll = 0;
+function frame(now) {
+  const fading = tickFades(now);
+
+  /* astrolabe + clock */
+  const h = state.hour;
+  $('#clockTxt').textContent = `${fmt2(Math.floor(h))}:${fmt2(Math.floor((h % 1) * 60))}`;
+  $('#phaseTxt').textContent = phaseOf(h);
+  $('#astroRing').setAttribute('aria-valuenow', h.toFixed(1));
+  placeOrb($('#sunOrb'), h, 113);
+  placeOrb($('#moonOrb'), (h + 12) % 24, 113);
+  $('#windDirIco').style.transform = `rotate(${state.windDir}deg)`;
+  $('#windGrab').setAttribute('aria-valuenow', Math.round(state.windDir));
+  const wTier = WINDWORDS[Math.min(4, Math.floor(state.ch.wind * 5))];
+  $('#windTxt').textContent = `${wTier} · ${DIRS[Math.round(state.windDir / 22.5) % 16]}`;
+
+  /* faders */
+  CHANNELS.forEach(c => {
+    const f = faderEls[c.id], v = state.ch[c.id];
+    $('.fill', f).style.height = `calc(${(v * 100).toFixed(1)}% - 4px)`;
+    $('.thumb', f).style.bottom = `calc(${(v * 100).toFixed(1)}% - 2px)`;
+    $('.val', f).textContent = Math.round(v * 100);
+    $('.track', f).setAttribute('aria-valuenow', Math.round(v * 100));
+    const fd = state.fades[c.id];
+    f.classList.toggle('fading', !!fd);
+    if (fd) $('.ghost', f).style.bottom = `${(fd.to * 100).toFixed(1)}%`;
+  });
+
+  /* now playing + pill */
+  const np = $('#nowPlaying');
+  const weatherWord =
+    state.ch.rain > .65 ? (state.ch.freeze > .5 ? 'heavy snow' : 'a storm') :
+    state.ch.rain > .18 ? (state.ch.freeze > .5 ? 'snowfall' : 'light rain') :
+    state.ch.fog  > .45 ? 'thick fog' :
+    state.ch.clouds > .6 ? 'overcast skies' : 'clear skies';
+  const glyph =
+    state.ch.bolt > .4 ? 'bolt' : state.ch.rain > .25 ? (state.ch.freeze > .5 ? 'snow' : 'rain') :
+    state.ch.fog > .45 ? 'fog' : (h > 6 && h < 19 ? 'sun' : 'moon');
+  $('#npGlyph').firstElementChild?.setAttribute('href', '#i-' + glyph);
+  $('#pillGlyph').firstElementChild?.setAttribute('href', '#i-' + glyph);
+  $('#pillTime').textContent = $('#clockTxt').textContent;
+  $('#pillW').textContent = weatherWord;
+  if (fading && state.fadeLabel) {
+    np.classList.add('fading');
+    const remain = Math.max(0, state.fadeUntil - now) / 1000;
+    const total = Math.max(...Object.values(state.fades).map(f => f.dur), 1) / 1000;
+    const prog = clamp(1 - remain / total, 0, 1);
+    $('#npRing').style.strokeDashoffset = (97.4 * (1 - prog)).toFixed(1);
+    $('#npLabel').textContent = `Fading to ${state.fadeLabel}`;
+    $('#npSub').textContent = `${remain.toFixed(0)}s left · ${phaseOf(h).toLowerCase()}, ${weatherWord}`;
+  } else {
+    np.classList.remove('fading');
+    $('#npRing').style.strokeDashoffset = 97.4;
+    $('#npLabel').textContent = `Holding — ${phaseOf(h).charAt(0) + phaseOf(h).slice(1).toLowerCase()}, ${weatherWord}`;
+    $('#npSub').textContent = 'world is steady';
+  }
+
+  /* backdrop */
+  const wet = state.ch.rain, frz = state.ch.freeze;
+  $('#rain').style.opacity = (wet * (1 - frz) * .85).toFixed(2);
+  $('#snow').style.opacity = (wet * frz * .9).toFixed(2);
+  $('#rain').style.setProperty('--rain-tilt', `${8 + state.ch.wind * 24}deg`);
+  $('#fogLayer').style.opacity = (state.ch.fog * .95).toFixed(2);
+  $('#cloudShade').style.opacity = (state.ch.clouds * .75).toFixed(2);
+  $('#tod').style.background = todColor(h);
+  const night = (h < 6 || h > 19) ? 1 : (h < 8 ? (8 - h) / 2 : h > 17 ? (h - 17) / 2 : 0);
+  $$('#map .glow, #map .stamp').forEach(g => g.style.filter =
+    `blur(4px) brightness(${.75 + night * .5})`);
+  if (state.ch.bolt > .35 && now - lastStrikeRoll > 900) {
+    lastStrikeRoll = now;
+    if (Math.random() < state.ch.bolt * .12) flash();
+  }
+
+  requestAnimationFrame(frame);
+}
+
+/* ── boot ───────────────────────────────────────────────────────────────── */
+renderCueDeck();
+renderDept();
+document.documentElement.dataset.reduceFlash = '0';
+requestAnimationFrame(frame);
+toast('LANTERN mock — drag the dial, pick a fade time, press GO', 'candle');
+})();
+</script>
+</body>
+</html>

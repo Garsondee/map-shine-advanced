@@ -815,6 +815,59 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P7 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; three "little gaps" — camera path,
+scene health, motion tiles — plus a footer pass).** Four asks; the middle one changed shape
+mid-round on the author's own correction, which is the most important thing in this entry.
+
+1. **Footer buttons, bigger/brighter/bolder.** Bug and Patreon were `.hbtn` afterthoughts
+   (P6's own "secondary weight" call, which the author overturned this round). Both are full
+   `.btn` now, same `flex:1` as Baseline/Safety — measured identical at 88×30.7px, all four,
+   so "the whole row consistent" is a real number, not just a description. Patreon carries a
+   warm coral→orange gradient + glow on top of that shared base, the one control the author
+   named as needing to invite a click rather than blend in; Bug gets a milder amber tint —
+   promoted, not competing with Patreon for attention.
+2. **Camera path — built wrong, then rebuilt against the real thing.** First pass invented a
+   library of multiple named, reusable paths with hand-typed X%/Y%/zoom waypoints and a live
+   `#map` preview — plausible-looking, and wrong: the author corrected mid-round that this
+   already ships in V3 (`src/ui/camera-path-dialog.js`, `src/foundry/camera-path.js`), one
+   path per SCENE, not a library. Read the real source and rebuilt against it: keyframes
+   (`x,y,scale,holdMs,cutBefore`) instead of invented waypoints, path-level settings
+   (`sweepMs`, `easing` — cosine/linear/trapezoidal, not CSS keywords — fade in/out, hide
+   UI/layers, letterbox, long-jump fade-cut, a darkness ramp tied to playback), the real
+   7-item preset list, Preview/Recapture per keyframe, Play/Stop/Save. Per the author's own
+   scope correction ("just the UI... doesn't need to be functional"), buttons are real and
+   clickable but don't reproduce the actual capture/play/save wiring — there's no live
+   Foundry canvas in a mock to capture a view from. **A real bug surfaced and died with the
+   rewrite, worth recording anyway:** the first version recreated a fresh blank "draft" path
+   object on every single re-render while authoring a NEW path, silently discarding anything
+   just added the moment a reorder/add/delete triggered the next render — caught by scripted
+   interaction (add a waypoint, check the count came back wrong), not by reading the code.
+   Root cause: conflating "no id yet" with "no stable object yet" in the same conditional.
+   The lesson (draft objects need to survive their OWN re-render, not just look like a normal
+   object between renders) is filed even though the buggy code itself is gone.
+3. **Scene health — genuinely new, no existing version to reference,** per the author's own
+   framing ("design something that feels correct since we don't have a good version of that
+   yet"). A summary chip (N/8 ready) plus a per-system checklist (water/fire/vegetation/
+   windows/shadows/weather/darkness/fog-of-war) each with an ok/warn/missing badge and a
+   one-line reason. Explicitly mock data throughout — this mock has no real masks to
+   inspect — same honesty pattern as the debug strip's labelled "Mock value" vram figure.
+4. **Motion tiles — researched from V2 first** (`legacy/scene/tile-motion-manager.js` +
+   `legacy/ui/tile-motion-dialog.js`), not invented. V2 itself splits this into two surfaces:
+   a heavy per-tile Tweakpane dialog (author every parameter) and a light global transport
+   strip in its Control Panel (play/pause what's already authored). Kept that same shape:
+   a Studio popover (Scene department → new "Motion tiles" card → Configure) carries the full
+   schema — 2 modes, 4 transform types (rotation/orbit/pingPong/sine) with the correct
+   conditional fields per type verified live (switching type swaps the field set; switching
+   mode to Texture correctly drops the Pivot section entirely, matching V2's own behaviour) —
+   and one of P5's six open corner-expansion slots on the Remote (`#cornerBR`, first slot)
+   becomes a real play/pause toggle for the global transport, exactly the kind of use those
+   slots were held open for. **One deliberate, small improvement over the ported original:**
+   V2's PingPong type has a "Loop Mode" dropdown reading literally "Loop" / "PingPong" — the
+   research flagged this as a confirmed real V2 UX trap, where "Loop" actually means teleport-
+   back-to-start and you must pick the OTHER option for an actual bounce. Relabelled here as
+   "Teleport back to start" / "Bounce back smoothly" — states the behaviour instead of naming
+   itself. Everything else ports the schema as researched, per [[feedback_port_faithfully_then_modernize_opportunistically]].
+
 **P6 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; header chrome — title, minimize/
 close, and two always-visible links the author says the current UI already carries elsewhere
 and needs a home for here).** Four asks, built and verified:

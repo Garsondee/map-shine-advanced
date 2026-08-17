@@ -571,12 +571,20 @@ html[data-reduce-flash="1"] .tab[data-flash] .supp{display:block}
 #remoteFoot{display:flex; gap:6px; border-top:1px solid var(--line);
   margin-top:0; padding-top:8px}
 #remoteFoot .btn{flex:1; justify-content:center; font-size:.72rem}
-/* bug-report + Patreon (author's ask: always-visible comfy homes) — a
-   visibly SECONDARY weight next to Baseline/Safety's prominent buttons on
-   purpose, not a fourth flex:1 sibling, since they're not core GM actions */
-#remoteFoot .hbtn{align-self:center; flex:none;
-  border:1px solid var(--line); border-radius:var(--r-ctl)}
-#remoteFoot .hbtn:hover{border-color:var(--line-strong)}
+/* bug-report + Patreon, round 2 — the secondary/.hbtn treatment above read
+   as an afterthought (author's own words), so both are full .btn now, same
+   flex:1 as Baseline/Safety: the row is four buttons of one kind, not two
+   important ones and two decorations. Bug gets a mild warm tint (it's
+   asking for attention, but not competing with Patreon for it). Patreon
+   carries its own gradient + glow on top of the shared .btn base — the one
+   the author explicitly wants to invite a click, not blend into the rest. */
+#bugBtn{border-color:color-mix(in oklab, var(--warn) 45%, var(--line))}
+#bugBtn .ico{color:var(--warn)}
+#bugBtn:hover{border-color:var(--warn)}
+#patreonBtn{background:linear-gradient(135deg, #ff5c8a, #ff8a5c); border-color:transparent;
+  color:#fff; font-weight:700; box-shadow:0 0 calc(14px * var(--glow-on)) rgba(255,92,138,.45)}
+#patreonBtn .ico{color:#fff}
+#patreonBtn:hover{filter:brightness(1.08)}
 
 /* weather mode segmented */
 .modeseg{display:inline-flex; margin-left:auto; background:var(--bg2);
@@ -668,6 +676,95 @@ html[data-live="1"] #map{transform:scale(1.06)}
 #speedPop button b{min-width:34px}
 #speedPop button small{color:var(--ink2); font-weight:400}
 #jumpPop hr{border:none; border-top:1px solid var(--line); margin:3px 4px}
+
+/* camera paths + scene health — two richer popovers off the header's
+   "planned" icons (author's ask). Same family as #jumpPop/#speedPop above,
+   just wider, since both hold real list content rather than a menu. */
+#camPathPop, #healthPop, #motionPop{position:fixed; z-index:220; display:none;
+  flex-direction:column; gap:8px; width:322px; max-height:min(560px, calc(100vh - 32px));
+  overflow-y:auto; padding:12px; background:var(--glass); backdrop-filter:blur(var(--glass-blur));
+  border:1px solid var(--line-strong); border-radius:14px; box-shadow:var(--shadow3)}
+#camPathPop.open, #healthPop.open, #motionPop.open{display:flex}
+/* motionPop opens from inside Studio, not off a Remote header icon, so it
+   has no anchor button to hang off of the way the other two do — centres
+   on the viewport instead. */
+#motionPop{left:50%; top:50%; transform:translate(-50%, -50%)}
+.pophead{display:flex; align-items:center; gap:8px}
+.pophead h3{font-size:.82rem; display:flex; align-items:center; gap:8px; flex:1}
+.pophead h3 .ico{color:var(--shine)}
+.popHint{color:var(--ink2); font-size:.72rem}
+
+/* ── camera paths — mirrors the REAL panel already shipping in src/ui/
+   camera-path-dialog.js (author's correction: this exists in V3, reference
+   it rather than invent a shape). One path per SCENE (not a named library
+   — an earlier draft here invented multiple reusable named paths, which
+   isn't how the real feature works, and was replaced). Same fields, same
+   buttons, dressed in LANTERN instead of the dev-panel's raw chrome. Per
+   the author's "just the UI, doesn't need to be functional" — buttons are
+   real and clickable but don't need bulletproof state management. ── */
+.cpPresetRow{display:flex; gap:6px}
+.cpPresetRow select{flex:1}
+.cpKeyframe{border:1px solid var(--line); border-radius:9px; padding:7px 9px;
+  background:var(--bg2); display:flex; flex-direction:column; gap:6px}
+.cpKfHead{display:flex; align-items:center; gap:6px}
+.cpKfHead b{font-size:.76rem; color:var(--shine); min-width:20px}
+.cpKfHead .spacer{flex:1}
+.cpKfHead button{width:24px; height:24px; border-radius:6px; display:grid; place-items:center;
+  color:var(--ink2); font-size:.72rem}
+.cpKfHead button:hover:not(:disabled){background:var(--bg3); color:var(--ink0)}
+.cpKfHead button:disabled{opacity:.3}
+.cpFieldRow{display:flex; align-items:center; gap:8px; font-size:.7rem; color:var(--ink1)}
+.cpFieldRow .fLabel{flex:1; min-width:0}
+.cpFieldRow small{display:block; color:var(--ink2); font-size:.64rem; font-weight:400}
+.cpFieldRow input[type="number"]{width:64px; background:var(--bg1); border:1px solid var(--line);
+  border-radius:6px; color:var(--ink0); font-size:.72rem; padding:3px 6px; flex:none}
+.cpFieldRow select{background:var(--bg1); border:1px solid var(--line); border-radius:6px;
+  color:var(--ink0); font-size:.72rem; padding:3px 6px; flex:none}
+.cpSection{border-top:1px solid var(--line); padding-top:8px; display:flex;
+  flex-direction:column; gap:7px}
+.cpSection .sectionLabel{font-size:.64rem; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--ink2)}
+.cpSubgroup{margin-left:12px; padding-left:8px; border-left:2px solid var(--line);
+  display:flex; flex-direction:column; gap:7px}
+.cpEditorFoot{display:flex; gap:8px}
+.cpEditorFoot .btn{flex:1; justify-content:center}
+#cpStatus{font-size:.68rem; color:var(--ink2); text-align:center}
+
+/* ── scene health ── */
+#healthSummaryRow{display:flex; align-items:center; justify-content:space-between;
+  padding:8px 10px; border-radius:10px; background:var(--bg2); border:1px solid var(--line)}
+#healthSummaryRow b{font-size:.8rem}
+.healthListWrap{display:flex; flex-direction:column; gap:5px}
+.healthRow{display:flex; align-items:center; gap:10px; padding:7px 9px; border-radius:9px;
+  border:1px solid var(--line); background:var(--bg2)}
+.healthRow .healthInfo{flex:1; display:flex; flex-direction:column; gap:1px; min-width:0}
+.healthRow .healthInfo b{font-size:.76rem}
+.healthRow .healthInfo small{color:var(--ink2); font-size:.68rem}
+.healthBadge{width:20px; height:20px; border-radius:50%; display:grid; place-items:center;
+  font-size:.68rem; font-weight:800; flex:none}
+.healthRow.ok .healthBadge{background:color-mix(in oklab, var(--ok) 22%, transparent); color:var(--ok)}
+.healthRow.warn .healthBadge{background:color-mix(in oklab, var(--warn) 22%, transparent); color:var(--warn)}
+.healthRow.missing .healthBadge{background:color-mix(in oklab, var(--fail) 22%, transparent); color:var(--fail)}
+
+/* ── motion tiles — ported from V2's real control schema
+   (legacy/scene/tile-motion-manager.js + legacy/ui/tile-motion-dialog.js),
+   not invented, per the same "reference what's real" correction as camera
+   path. V2 split this into a heavy per-tile Tweakpane dialog plus a light
+   global transport strip in its Control Panel; kept that same two-surface
+   shape here — this popover is the per-tile authoring half (Studio), a
+   single corner slot on the Remote is the other (see .cornerCluster JS). */
+.motionTileRow{display:flex; align-items:center; gap:8px}
+.motionTileRow select{flex:1}
+.motionStatusBadge{padding:1px 7px; border-radius:999px; font-size:.62rem; font-weight:700;
+  text-transform:uppercase; letter-spacing:.04em; flex:none}
+.motionStatusBadge.ready{background:color-mix(in oklab, var(--ok) 22%, transparent); color:var(--ok)}
+.motionStatusBadge.active{background:color-mix(in oklab, var(--shine) 22%, transparent); color:var(--shine)}
+.motionStatusBadge.disabled{background:var(--bg3); color:var(--ink2)}
+.motionTransportRow{display:grid; grid-template-columns:repeat(4,1fr); gap:6px}
+.motionTransportRow button{padding:6px 4px; border-radius:8px; border:1px solid var(--line);
+  background:var(--bg2); color:var(--ink1); font-size:.68rem}
+.motionTransportRow button:hover{border-color:var(--line-strong); color:var(--ink0)}
+.motionTransportRow button.danger:hover{border-color:var(--fail); color:var(--fail)}
 
 /* the date-jump overlay — steppers, not a full calendar grid (proportionate to how
    often an ABSOLUTE date jump is actually needed; relative jumps live in the wing) */
@@ -1118,7 +1215,7 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
     <span class="spacer"></span>
     <button class="hbtn" id="dirBtn" title="Director — take over every camera, letterbox the scene, run a cutscene">
       <svg class="ico"><use href="#i-clap"/></svg></button>
-    <button class="hbtn" id="camPathBtn" title="Camera paths — authored sweeps the Director can follow (planned)">
+    <button class="hbtn" id="camPathBtn" title="Camera path — author a cinematic keyframe sweep for this scene">
       <svg class="ico"><use href="#i-camera"/></svg></button>
     <button class="hbtn dbg" id="healthBtn" title="Scene health — masks + effects readiness at a glance (planned)">
       <svg class="ico"><use href="#i-health"/></svg></button>
@@ -1163,7 +1260,7 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
         <label>aspect <select class="select" id="dirAspect">
           <option>2.39:1</option><option>2.0:1</option><option>16:9</option></select></label>
         <label>follow <select class="select" id="dirFollow">
-          <option>My view</option><option>Selected token</option><option>Camera path A</option></select></label>
+          <option>My view</option><option>Selected token</option><option>Camera path</option></select></label>
         <label>hide UI <button class="toggle" id="dirHideUi" role="switch" aria-checked="true"
           title="Fade Foundry chrome and panels on player clients"></button></label>
       </div>
@@ -1415,10 +1512,10 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
         <svg class="ico"><use href="#i-home"/></svg>Baseline</button>
       <button class="btn danger" id="safetyBtn" title="Hand rendering back to Foundry">
         <svg class="ico"><use href="#i-shield"/></svg>Safety</button>
-      <button class="hbtn" id="bugBtn" title="Report a bug">
-        <svg class="ico"><use href="#i-bug"/></svg></button>
-      <button class="hbtn" id="patreonBtn" title="Support on Patreon">
-        <svg class="ico"><use href="#i-heart"/></svg></button>
+      <button class="btn" id="bugBtn" title="Report a bug">
+        <svg class="ico"><use href="#i-bug"/></svg>Bug</button>
+      <button class="btn" id="patreonBtn" title="Support on Patreon">
+        <svg class="ico"><use href="#i-heart"/></svg>Patreon</button>
     </div>
   </div>
 </section>
@@ -1477,6 +1574,9 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
 </div>
 <div id="jumpPop" role="menu" aria-label="Jump time"></div>
 <div id="speedPop" role="menu" aria-label="Time speed"></div>
+<div id="camPathPop" role="dialog" aria-label="Camera paths"></div>
+<div id="healthPop" role="dialog" aria-label="Scene health"></div>
+<div id="motionPop" role="dialog" aria-label="Motion tiles"></div>
 <div id="compassPop" role="dialog" aria-label="Wind direction">
   <span class="chead">Wind from</span>
   <div id="compassRose"><div class="cmid"></div></div>
@@ -2512,7 +2612,24 @@ $('#patreonBtn').onclick = () => toast('Opens Patreon in a new tab (planned)', '
     b.onclick = () => toast('Reserved for a future quick-access shortcut', 'gear');
     return b; };
   $('#cornerBL').append(ghostSlot(), ghostSlot(), ghostSlot());
-  $('#cornerBR').append(ghostSlot(), ghostSlot(), ghostSlot());
+
+  /* one ghost slot claimed for real: the global motion-tiles transport,
+     the Remote-side half of the two-surface split V2 itself used (its own
+     Control Panel carried a live Start/Pause/Stop strip separate from the
+     heavy per-tile dialog — see the motion-tiles popover for that half).
+     motionGlobalPlaying/renderMotionPop are declared further down this
+     same script; safe to reference here since this only runs on a click,
+     long after the whole file has finished its first pass. */
+  const motionToggleB = el('button', 'tab', icon('play'));
+  motionToggleB.title = 'Motion tiles — play or pause every animated tile on this scene';
+  motionToggleB.setAttribute('aria-pressed', 'false');
+  motionToggleB.onclick = () => {
+    motionGlobalPlaying = !motionGlobalPlaying;
+    motionToggleB.setAttribute('aria-pressed', String(motionGlobalPlaying));
+    motionToggleB.innerHTML = icon(motionGlobalPlaying ? 'pause' : 'play');
+    toast(motionGlobalPlaying ? 'Motion tiles playing' : 'Motion tiles paused', 'play');
+  };
+  $('#cornerBR').append(motionToggleB, ghostSlot(), ghostSlot());
 }
 
 /* ── the jump popover + set-a-date overlay ──────────────────────────────── */
@@ -2553,6 +2670,15 @@ document.addEventListener('pointerdown', e => {
   const sp = $('#speedPop');
   if (sp.classList.contains('open') && !sp.contains(e.target) && !e.target.closest('.tabCol'))
     sp.classList.remove('open');
+  const cp = $('#camPathPop');
+  if (cp.classList.contains('open') && !cp.contains(e.target) && !e.target.closest('#camPathBtn'))
+    cp.classList.remove('open');
+  const hp = $('#healthPop');
+  if (hp.classList.contains('open') && !hp.contains(e.target) && !e.target.closest('#healthBtn'))
+    hp.classList.remove('open');
+  const mp = $('#motionPop');
+  if (mp.classList.contains('open') && !mp.contains(e.target) && !e.target.closest('#motionConfigBtn'))
+    mp.classList.remove('open');
 });
 $('#npDateChip').onclick = e => openJumpPop(e.currentTarget);
 
@@ -2637,8 +2763,376 @@ $('#debugBtn').onclick = e => {
 $('#dbgHud').onclick    = () => toast('Planned — per-zone frame costs drawn over the map', 'gauge');
 $('#dbgProbe').onclick  = () => toast('Planned — click 3 points, sample the compositor', 'search');
 $('#dbgExport').onclick = () => toast('Planned — one flight-recorder bundle, every report', 'flask');
-$('#camPathBtn').onclick = () => toast('Planned — authored camera sweeps the Director can follow', 'camera');
-$('#healthBtn').onclick  = () => toast('Planned — mask + effect readiness at a glance', 'health');
+/* ── shared popover form helpers — camera path AND motion tiles below both
+   build the same labeled-row-of-checkboxes/numbers shape, so it's one set
+   of builders, not two copies drifting apart. */
+function numInput(val, opts) { const i = el('input'); i.type = 'number';
+  Object.assign(i, opts); i.value = val; return i; }
+function fieldRow(labelHtml, inputEl, unit) {
+  const row = el('div', 'cpFieldRow');
+  row.append(el('span', 'fLabel', labelHtml), inputEl);
+  if (unit) row.append(el('span', null, unit));
+  return row;
+}
+function checkRow(labelText, checked, onchange) {
+  const row = el('div', 'cpFieldRow');
+  const c = el('input'); c.type = 'checkbox'; c.checked = checked; c.onchange = onchange;
+  row.append(c, el('span', 'fLabel', labelText));
+  return row;
+}
+
+/* ── camera path — author's correction: this already exists in V3
+   (src/ui/camera-path-dialog.js), so it's ported from the real fields
+   rather than invented. ONE path per SCENE (not a named library — an
+   earlier draft here imagined multiple reusable named paths; that isn't
+   how the real feature works, and is gone). Same keyframe shape, same
+   path-level settings, same preset list and buttons as the real panel —
+   dressed in LANTERN instead of its raw dev-panel chrome. Per the author,
+   "just the UI... doesn't need to be functional": every control is real
+   and clickable, but this doesn't reproduce the real capture/play/save
+   wiring (no live Foundry canvas to capture a view FROM, in a mock). */
+const CP_PRESETS = [
+  { id: 'full', label: 'Full Map Sweep (4-stage cinematic)' },
+  { id: 's_to_n', label: 'South to North' },
+  { id: 'n_to_s', label: 'North to South' },
+  { id: 'w_to_e', label: 'West to East' },
+  { id: 'e_to_w', label: 'East to West' },
+  { id: 'sw_to_ne', label: 'Southwest to Northeast (diagonal)' },
+  { id: 'ne_to_sw', label: 'Northeast to Southwest (diagonal)' },
+];
+const CP_EASINGS = ['cosine', 'linear', 'trapezoidal'];
+state.camPath = {
+  keyframes: [
+    { x: 1200, y: 800, scale: 1.0, holdMs: 0, cutBefore: false },
+    { x: 3400, y: 1500, scale: 1.4, holdMs: 400, cutBefore: false },
+    { x: 2100, y: 2600, scale: 1.1, holdMs: 0, cutBefore: true },
+  ],
+  settings: { sweepMs: 4000, easing: 'cosine', fadeInMs: 600, fadeOutMs: 600,
+    hideUi: true, hideLayers: true, letterbox: false, longJumpFadeCut: true,
+    darknessRamp: { enabled: false, start01: 0, end01: 1 } },
+};
+function renderCpKeyframe(path, kf, i) {
+  const wrap = el('div', 'cpKeyframe');
+  const head = el('div', 'cpKfHead');
+  head.append(el('b', null, `#${i + 1}`), el('span', 'spacer'));
+  const previewBtn = el('button', null, icon('play'));
+  previewBtn.title = 'Snap the live view to this keyframe (no save)';
+  previewBtn.onclick = () => toast(`Preview — keyframe #${i + 1}`, 'camera');
+  const recaptureBtn = el('button', null, icon('camera'));
+  recaptureBtn.title = 'Overwrite this keyframe with the current live view';
+  recaptureBtn.onclick = () => toast(`Recaptured — keyframe #${i + 1}`, 'camera');
+  const up = el('button', null, '↑'); up.title = 'Move earlier'; up.disabled = i === 0;
+  up.onclick = () => { [path.keyframes[i - 1], path.keyframes[i]] = [path.keyframes[i], path.keyframes[i - 1]];
+    renderCamPathPop(); };
+  const down = el('button', null, '↓'); down.title = 'Move later';
+  down.disabled = i === path.keyframes.length - 1;
+  down.onclick = () => { [path.keyframes[i + 1], path.keyframes[i]] = [path.keyframes[i], path.keyframes[i + 1]];
+    renderCamPathPop(); };
+  const del = el('button', null, '✕'); del.title = 'Remove this keyframe';
+  del.onclick = () => { path.keyframes.splice(i, 1); renderCamPathPop(); };
+  head.append(previewBtn, recaptureBtn, up, down, del);
+  wrap.append(head);
+
+  const holdRow = el('div', 'cpFieldRow');
+  const holdInput = el('input'); holdInput.type = 'number'; holdInput.min = 0; holdInput.step = 100;
+  holdInput.value = kf.holdMs;
+  holdInput.oninput = () => { kf.holdMs = Math.max(0, parseInt(holdInput.value) || 0); };
+  holdRow.append(el('span', 'fLabel', 'Hold'), holdInput, el('span', null, 'ms'));
+  wrap.append(holdRow);
+
+  const cutRow = el('div', 'cpFieldRow');
+  const cutCheck = el('input'); cutCheck.type = 'checkbox'; cutCheck.checked = kf.cutBefore;
+  cutCheck.onchange = () => { kf.cutBefore = cutCheck.checked; };
+  cutRow.append(cutCheck, el('span', 'fLabel', 'Hard cut in'
+    + '<small>New shot: instant snap + hold, no pan from the previous keyframe</small>'));
+  wrap.append(cutRow);
+  return wrap;
+}
+function renderCpSettings(s) {
+  const sec = el('div', 'cpSection');
+  sec.append(el('div', 'sectionLabel', 'Playback settings'));
+
+  sec.append(fieldRow('Sweep', numInput(s.sweepMs, { min: 100, step: 100 }), 'ms'));
+  const easeSel = el('select');
+  easeSel.innerHTML = CP_EASINGS.map(e => `<option ${e === s.easing ? 'selected' : ''}>${e}</option>`).join('');
+  easeSel.onchange = () => { s.easing = easeSel.value; };
+  sec.append(fieldRow('Easing', easeSel));
+  sec.append(fieldRow('Fade in', numInput(s.fadeInMs, { min: 0, step: 100 }), 'ms'));
+  sec.append(fieldRow('Fade out', numInput(s.fadeOutMs, { min: 0, step: 100 }), 'ms'));
+  sec.append(checkRow('Hide Foundry UI while playing', s.hideUi, e => { s.hideUi = e.target.checked; }));
+  sec.append(checkRow('Hide grid / drawings / notes', s.hideLayers, e => { s.hideLayers = e.target.checked; }));
+  sec.append(checkRow('Letterbox bars (cinematic look)', s.letterbox, e => { s.letterbox = e.target.checked; }));
+  sec.append(checkRow('Long jumps fade-cut, not whip-pan', s.longJumpFadeCut,
+    e => { s.longJumpFadeCut = e.target.checked; }));
+  sec.append(checkRow('Darkness ramp (mood shift while playing)', s.darknessRamp.enabled,
+    e => { s.darknessRamp.enabled = e.target.checked; }));
+  const rampGroup = el('div', 'cpSubgroup');
+  rampGroup.append(fieldRow('Start<small>0 = day, 1 = night</small>',
+    numInput(s.darknessRamp.start01, { min: 0, max: 1, step: .05 })));
+  rampGroup.append(fieldRow('End', numInput(s.darknessRamp.end01, { min: 0, max: 1, step: .05 })));
+  sec.append(rampGroup);
+  return sec;
+}
+function renderCamPathPop() {
+  const pop = $('#camPathPop');
+  pop.innerHTML = '';
+  const path = state.camPath;
+  pop.append(el('div', 'pophead', `<h3>${icon('camera')}Camera Path</h3>`));
+
+  const presetRow = el('div', 'cpPresetRow');
+  const presetSel = el('select', 'select');
+  presetSel.innerHTML = CP_PRESETS.map(p => `<option value="${p.id}">${p.label}</option>`).join('');
+  const genBtn = el('button', 'btn sm', 'Generate');
+  genBtn.title = 'Auto-frame a starting sweep from this scene’s own dimensions';
+  genBtn.onclick = () => toast(`Generated — ${presetSel.selectedOptions[0].text}`, 'camera');
+  presetRow.append(presetSel, genBtn);
+  pop.append(presetRow);
+
+  const addBtn = el('button', 'btn sm', '+ Add keyframe from current view');
+  addBtn.onclick = () => { path.keyframes.push({ x: 0, y: 0, scale: 1, holdMs: 0, cutBefore: false });
+    renderCamPathPop(); toast('Keyframe captured from the live view', 'camera'); };
+  pop.append(addBtn);
+
+  path.keyframes.forEach((kf, i) => pop.append(renderCpKeyframe(path, kf, i)));
+  pop.append(renderCpSettings(path.settings));
+
+  const foot = el('div', 'cpEditorFoot');
+  const playBtn = el('button', 'btn', '▶ Play');
+  playBtn.onclick = () => {
+    if (path.keyframes.length < 2) { $('#cpStatus').textContent = 'Add at least 2 keyframes to play a path.'; return; }
+    $('#cpStatus').textContent = 'Playing…'; toast('Playing the camera path (mock)', 'camera');
+  };
+  const stopBtn = el('button', 'btn', '■ Stop');
+  stopBtn.onclick = () => { $('#cpStatus').textContent = 'Stopped.'; };
+  const saveBtn = el('button', 'btn gold', '💾 Save');
+  saveBtn.onclick = () => { $('#cpStatus').textContent = 'Saved.';
+    toast('Camera path saved to this scene', 'camera'); };
+  foot.append(playBtn, stopBtn, saveBtn);
+  pop.append(foot);
+  pop.append(el('div', null, '<span id="cpStatus"></span>'));
+}
+function openCamPathPop(anchor) {
+  renderCamPathPop();
+  const pop = $('#camPathPop');
+  pop.classList.add('open');
+  const r = anchor.getBoundingClientRect(), box = pop.getBoundingClientRect();
+  pop.style.left = clamp(r.right - box.width, 8, innerWidth - box.width - 8) + 'px';
+  pop.style.top = clamp(r.bottom + 8, 8, innerHeight - box.height - 8) + 'px';
+}
+$('#camPathBtn').onclick = e => openCamPathPop(e.currentTarget);
+
+/* ── motion tiles — ported from V2's real schema (legacy/scene/
+   tile-motion-manager.js + legacy/ui/tile-motion-dialog.js), same
+   correction as camera path: reference what's real, don't invent a
+   shape. V2 split this into a heavy per-tile Tweakpane dialog and a
+   light global transport strip in its Control Panel — this popover is
+   the per-tile half (opened from Scene's "Motion tiles" card); the
+   Remote's own transport lives as one repurposed corner slot (below,
+   near the other .cornerCluster wiring). One small, deliberate
+   improvement over V2 while porting: V2's PingPong "Loop Mode" dropdown
+   read "Loop" / "PingPong" — a real V2 UX trap the research flagged,
+   where "Loop" actually meant "teleport back to start" and you had to
+   pick the OTHER option to get an actual bounce. Relabelled here to say
+   what each one does instead of just naming itself. */
+const MOTION_TYPES = ['rotation', 'orbit', 'pingPong', 'sine'];
+const MOTION_EASINGS = ['linear', 'easeInSine', 'easeOutSine', 'easeInOutSine', 'easeInOutCubic',
+  'easeInOutBack', 'easeOutBounce', 'easeInOutElastic', 'clockwork', 'clockwork-chaos'];
+const MOTION_TILES = [
+  { id: 't1', label: 'Hanging lantern', status: 'active', enabled: true,
+    shadowProjectionEnabled: true, renderAboveTokens: false, mode: 'transform', parent: 'None',
+    pivot: { x: 0, y: -40, snapToGrid: false },
+    motion: { type: 'sine', speed: 0, phase: 0, rotationEasing: 'linear', easeStrength: 1,
+      clockworkSteps: 8, clockworkHold: .55, clockworkJank: 0, loopMode: 'loop', radius: 0,
+      pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 }, amplitudeX: 0, amplitudeY: 0, amplitudeRot: 6 },
+    textureMotion: { scrollU: 0, scrollV: 0, rotateSpeed: 0, pivotU: .5, pivotV: .5 } },
+  { id: 't2', label: 'Banner', status: 'ready', enabled: true,
+    shadowProjectionEnabled: false, renderAboveTokens: false, mode: 'transform', parent: 'None',
+    pivot: { x: 0, y: -80, snapToGrid: true },
+    motion: { type: 'sine', speed: 0, phase: 30, rotationEasing: 'linear', easeStrength: 1,
+      clockworkSteps: 8, clockworkHold: .55, clockworkJank: 0, loopMode: 'loop', radius: 0,
+      pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 }, amplitudeX: 14, amplitudeY: 0, amplitudeRot: 3 },
+    textureMotion: { scrollU: 0, scrollV: 0, rotateSpeed: 0, pivotU: .5, pivotV: .5 } },
+  { id: 't3', label: 'Waterwheel', status: 'disabled', enabled: false,
+    shadowProjectionEnabled: false, renderAboveTokens: true, mode: 'transform', parent: 'None',
+    pivot: { x: 0, y: 0, snapToGrid: false },
+    motion: { type: 'rotation', speed: 40, phase: 0, rotationEasing: 'clockwork', easeStrength: .8,
+      clockworkSteps: 12, clockworkHold: .6, clockworkJank: .1, loopMode: 'loop', radius: 0,
+      pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 }, amplitudeX: 0, amplitudeY: 0, amplitudeRot: 0 },
+    textureMotion: { scrollU: 0, scrollV: .2, rotateSpeed: 0, pivotU: .5, pivotV: .5 } },
+];
+let motionSelectedId = MOTION_TILES[0].id;
+let motionGlobalPlaying = false;
+function pointFieldRow(labelText, point) {
+  const row = el('div', 'cpFieldRow');
+  row.append(el('span', 'fLabel', labelText));
+  const xIn = numInput(point.x, { min: -5000, max: 5000 }); xIn.style.width = '48px';
+  const yIn = numInput(point.y, { min: -5000, max: 5000 }); yIn.style.width = '48px';
+  xIn.oninput = () => { point.x = parseFloat(xIn.value) || 0; };
+  yIn.oninput = () => { point.y = parseFloat(yIn.value) || 0; };
+  row.append(xIn, yIn);
+  return row;
+}
+function renderMotionPop() {
+  const pop = $('#motionPop');
+  pop.innerHTML = '';
+  const tile = MOTION_TILES.find(t => t.id === motionSelectedId);
+  pop.append(el('div', 'pophead', `<h3>${icon('play')}Motion Tiles</h3>`));
+
+  const pickRow = el('div', 'motionTileRow');
+  const tileSel = el('select', 'select');
+  tileSel.innerHTML = MOTION_TILES.map(t =>
+    `<option value="${t.id}" ${t.id === motionSelectedId ? 'selected' : ''}>${t.label}</option>`).join('');
+  tileSel.onchange = () => { motionSelectedId = tileSel.value; renderMotionPop(); };
+  pickRow.append(tileSel, el('span', `motionStatusBadge ${tile.status}`, tile.status));
+  pop.append(pickRow);
+
+  pop.append(checkRow('Enabled', tile.enabled, e => { tile.enabled = e.target.checked; }));
+  pop.append(checkRow('Shadow projection', tile.shadowProjectionEnabled,
+    e => { tile.shadowProjectionEnabled = e.target.checked; }));
+  const roatBtn = checkRow('Render above tokens', tile.renderAboveTokens,
+    e => { tile.renderAboveTokens = e.target.checked; });
+  roatBtn.title = 'Forces roof-style draw order for this tile — independent of Foundry’s own overhead classification';
+  pop.append(roatBtn);
+
+  const motionSec = el('div', 'cpSection');
+  motionSec.append(el('div', 'sectionLabel', 'Transform Motion'));
+  const modeSel = el('select');
+  modeSel.innerHTML = ['transform', 'texture'].map(m => `<option ${m === tile.mode ? 'selected' : ''}>${m}</option>`).join('');
+  modeSel.onchange = () => { tile.mode = modeSel.value; renderMotionPop(); };
+  motionSec.append(fieldRow('Mode', modeSel));
+
+  if (tile.mode === 'transform') {
+    const m = tile.motion;
+    const typeSel = el('select');
+    typeSel.innerHTML = MOTION_TYPES.map(t => `<option ${t === m.type ? 'selected' : ''}>${t}</option>`).join('');
+    typeSel.onchange = () => { m.type = typeSel.value; renderMotionPop(); };
+    motionSec.append(fieldRow('Transform type', typeSel));
+    motionSec.append(fieldRow('Speed', numInput(m.speed, { min: -720, max: 720 }), 'deg/sec'));
+    motionSec.append(fieldRow('Phase', numInput(m.phase, { min: -360, max: 360 }), 'deg'));
+
+    if (m.type === 'rotation') {
+      const easeSel = el('select');
+      easeSel.innerHTML = MOTION_EASINGS.map(e => `<option ${e === m.rotationEasing ? 'selected' : ''}>${e}</option>`).join('');
+      easeSel.onchange = () => { m.rotationEasing = easeSel.value; renderMotionPop(); };
+      motionSec.append(fieldRow('Rotation ease', easeSel));
+      motionSec.append(fieldRow('Ease strength', numInput(m.easeStrength, { min: 0, max: 1, step: .01 })));
+      motionSec.append(fieldRow('Random / jank', numInput(m.clockworkJank, { min: 0, max: 1, step: .01 })));
+      if (m.rotationEasing.startsWith('clockwork')) {
+        motionSec.append(fieldRow('Clockwork steps', numInput(m.clockworkSteps, { min: 1, max: 48 })));
+        motionSec.append(fieldRow('Clockwork hold', numInput(m.clockworkHold, { min: 0, max: .95, step: .01 })));
+      }
+    }
+    if (m.type === 'orbit' || m.type === 'pingPong') {
+      const loopSel = el('select');
+      loopSel.innerHTML = m.type === 'pingPong'
+        ? '<option value="loop">Teleport back to start</option><option value="pingPong">Bounce back smoothly</option>'
+        : '<option value="loop">Loop</option><option value="pingPong">Ping-pong</option>';
+      loopSel.value = m.loopMode;
+      loopSel.onchange = () => { m.loopMode = loopSel.value; };
+      motionSec.append(fieldRow('Loop mode', loopSel));
+    }
+    if (m.type === 'orbit') motionSec.append(fieldRow('Radius', numInput(m.radius, { min: 0, max: 5000 }), 'px'));
+    if (m.type === 'pingPong') {
+      motionSec.append(pointFieldRow('Point A', m.pointA));
+      motionSec.append(pointFieldRow('Point B', m.pointB));
+    }
+    if (m.type === 'sine') {
+      motionSec.append(fieldRow('Amp X', numInput(m.amplitudeX, { min: -5000, max: 5000 }), 'px'));
+      motionSec.append(fieldRow('Amp Y', numInput(m.amplitudeY, { min: -5000, max: 5000 }), 'px'));
+      motionSec.append(fieldRow('Amp rotation', numInput(m.amplitudeRot, { min: -720, max: 720 }), 'deg'));
+    }
+  } else {
+    const tm = tile.textureMotion;
+    motionSec.append(fieldRow('Scroll U', numInput(tm.scrollU, { min: -4, max: 4, step: .01 }), 'rep/sec'));
+    motionSec.append(fieldRow('Scroll V', numInput(tm.scrollV, { min: -4, max: 4, step: .01 }), 'rep/sec'));
+    motionSec.append(fieldRow('Rotate speed', numInput(tm.rotateSpeed, { min: -720, max: 720 }), 'deg/sec'));
+    motionSec.append(fieldRow('Pivot U', numInput(tm.pivotU, { min: 0, max: 1, step: .01 })));
+    motionSec.append(fieldRow('Pivot V', numInput(tm.pivotV, { min: 0, max: 1, step: .01 })));
+  }
+  pop.append(motionSec);
+
+  if (tile.mode === 'transform') {
+    const pivotSec = el('div', 'cpSection');
+    pivotSec.append(el('div', 'sectionLabel', 'Pivot'));
+    pivotSec.append(fieldRow('Pivot X', numInput(tile.pivot.x, { min: -5000, max: 5000 }), 'px'));
+    pivotSec.append(fieldRow('Pivot Y', numInput(tile.pivot.y, { min: -5000, max: 5000 }), 'px'));
+    pivotSec.append(checkRow('Snap to grid', tile.pivot.snapToGrid, e => { tile.pivot.snapToGrid = e.target.checked; }));
+    const btnRow = el('div', 'cpEditorFoot');
+    const centerBtn = el('button', 'btn sm', 'Set = Center');
+    centerBtn.onclick = () => toast('Pivot set to the tile’s centre', 'gear');
+    const pickBtn = el('button', 'btn sm', 'Pick on Canvas');
+    pickBtn.title = 'Arms a one-shot click-to-place pick on the map — Esc cancels';
+    pickBtn.onclick = () => toast('Click a point on the map to set the pivot — Esc cancels', 'gear');
+    btnRow.append(centerBtn, pickBtn);
+    pivotSec.append(btnRow);
+    const parentSel = el('select');
+    parentSel.innerHTML = '<option>None</option>' + MOTION_TILES.filter(t => t.id !== tile.id)
+      .map(t => `<option ${t.label === tile.parent ? 'selected' : ''}>${t.label}</option>`).join('');
+    parentSel.onchange = () => { tile.parent = parentSel.value; };
+    pivotSec.append(fieldRow('Parent', parentSel));
+    pop.append(pivotSec);
+  }
+
+  const transportSec = el('div', 'cpSection');
+  transportSec.append(el('div', 'sectionLabel', `Global transport — ${motionGlobalPlaying ? 'Playing' : 'Stopped'}`));
+  const row = el('div', 'motionTransportRow');
+  const startBtn = el('button', null, 'Start');
+  startBtn.onclick = () => { motionGlobalPlaying = true; renderMotionPop(); };
+  const stopBtn = el('button', null, 'Stop');
+  stopBtn.onclick = () => { motionGlobalPlaying = false; renderMotionPop(); };
+  const resetBtn = el('button', 'danger', 'Reset Phase');
+  resetBtn.onclick = () => toast('Phase reset — every animated tile resynced', 'reset');
+  const refreshBtn = el('button', null, 'Refresh');
+  refreshBtn.onclick = () => toast('Tile list refreshed from the scene', 'reset');
+  row.append(startBtn, stopBtn, resetBtn, refreshBtn);
+  transportSec.append(row);
+  transportSec.append(el('div', 'popHint', 'Saved to this scene’s flags · GM only'));
+  pop.append(transportSec);
+}
+function openMotionPop() {
+  renderMotionPop();
+  $('#motionPop').classList.add('open');
+}
+
+/* ── scene health ─────────────────────────────────────────────────────────
+   Mock data throughout — this mock has no real masks to inspect, so these
+   rows illustrate the READOUT the real diagnostic will populate, the same
+   spirit as the debug strip's "Mock value" vram figure. */
+const SCENE_HEALTH = [
+  { name: 'Water', status: 'ok', detail: '3 bodies · foam + depth bound' },
+  { name: 'Fire', status: 'ok', detail: '12 emitters · masks bound' },
+  { name: 'Vegetation', status: 'warn', detail: 'height model missing on 2 objects · falling back to flat' },
+  { name: 'Windows', status: 'ok', detail: '8 apertures mapped' },
+  { name: 'Shadows', status: 'ok', detail: 'layer smear bound to the sun' },
+  { name: 'Weather', status: 'ok', detail: 'precipitation masks ready' },
+  { name: 'Darkness', status: 'missing', detail: 'no darkness mask authored · Foundry default lighting only' },
+  { name: 'Fog of war', status: 'warn', detail: 'not yet built for this scene' },
+];
+function openHealthPop(anchor) {
+  renderHealthPop();
+  const pop = $('#healthPop');
+  pop.classList.add('open');
+  const r = anchor.getBoundingClientRect(), box = pop.getBoundingClientRect();
+  pop.style.left = clamp(r.right - box.width, 8, innerWidth - box.width - 8) + 'px';
+  pop.style.top = clamp(r.bottom + 8, 8, innerHeight - box.height - 8) + 'px';
+}
+function renderHealthPop() {
+  const pop = $('#healthPop');
+  pop.innerHTML = '';
+  pop.append(el('div', 'pophead', `<h3>${icon('health')}Scene Health</h3>`));
+  const okCount = SCENE_HEALTH.filter(s => s.status === 'ok').length;
+  pop.append(el('div', 'healthSummaryRow',
+    `<b>${okCount}/${SCENE_HEALTH.length} systems ready</b><span class="popHint">this scene · mock data</span>`));
+  const list = el('div', 'healthListWrap');
+  SCENE_HEALTH.forEach(s => {
+    const badge = { ok: '✓', warn: '!', missing: '✕' }[s.status];
+    list.append(el('div', `healthRow ${s.status}`,
+      `<div class="healthInfo"><b>${s.name}</b><small>${s.detail}</small></div>
+       <span class="healthBadge">${badge}</span>`));
+  });
+  pop.append(list);
+}
+$('#healthBtn').onclick = e => openHealthPop(e.currentTarget);
 
 /* ── STUDIO ─────────────────────────────────────────────────────────────── */
 const DEPTS = [
@@ -2935,8 +3429,13 @@ function renderDept() {
           <div class="sysrow"><span class="readout grow">_Water ✓ · _Fire ✓ · _Windows ✓ · _Specular —</span>
             <button class="btn sm">Mask board</button></div>
         </div>
+        <div class="syscard"><h3>${icon('play')}Motion tiles</h3>
+          <div class="sysrow"><span class="readout grow">2 of 6 tiles animated · lantern sways, banner ripples</span>
+            <button class="btn sm" id="motionConfigBtn">Configure</button></div>
+        </div>
       </div>`;
     body.append(scroll);
+    $('#motionConfigBtn').onclick = openMotionPop;
   }
 
   if (d.id === 'cues') {

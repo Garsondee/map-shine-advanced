@@ -248,6 +248,16 @@ html[data-frame="1"] #frame1080{display:block}
   color:var(--ink2)}
 .hbtn:hover{background:var(--bg3); color:var(--ink0)}
 .hbtn[aria-pressed="true"]{color:var(--shine); background:var(--shine-soft)}
+.hbtn.danger:hover{background:color-mix(in oklab, var(--fail) 16%, transparent); color:var(--fail)}
+/* the minimize chevron flips by CSS alone, driven off the same aria-pressed
+   the button's own toggle state already sets — no inline style juggling */
+/* SVG <use> rotates around the referenced symbol's OWN (0,0) by default —
+   its viewBox origin, not its visual centre — so an un-anchored rotate()
+   here swings the chevron's actual stroke out of the button's visible
+   box entirely rather than just spinning it in place. fill-box anchors
+   the rotation to the rendered shape's own bounding box instead. */
+#minimizeBtn use{transform-box:fill-box; transform-origin:center; transform:rotate(-90deg)}
+#minimizeBtn[aria-pressed="true"] use{transform:rotate(90deg)}
 
 .btn{display:inline-flex; align-items:center; gap:6px; padding:6px 12px;
   background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
@@ -561,6 +571,12 @@ html[data-reduce-flash="1"] .tab[data-flash] .supp{display:block}
 #remoteFoot{display:flex; gap:6px; border-top:1px solid var(--line);
   margin-top:0; padding-top:8px}
 #remoteFoot .btn{flex:1; justify-content:center; font-size:.72rem}
+/* bug-report + Patreon (author's ask: always-visible comfy homes) — a
+   visibly SECONDARY weight next to Baseline/Safety's prominent buttons on
+   purpose, not a fourth flex:1 sibling, since they're not core GM actions */
+#remoteFoot .hbtn{align-self:center; flex:none;
+  border:1px solid var(--line); border-radius:var(--r-ctl)}
+#remoteFoot .hbtn:hover{border-color:var(--line-strong)}
 
 /* weather mode segmented */
 .modeseg{display:inline-flex; margin-left:auto; background:var(--bg2);
@@ -624,7 +640,7 @@ html[data-live="1"] #npStatus .live{display:flex}
   background:var(--glass); backdrop-filter:blur(var(--glass-blur));
   border:1px solid rgba(255,107,92,.4); box-shadow:var(--shadow2); font-size:.74rem}
 html[data-live="1"] #dirHud{display:flex}
-html[data-live="1"] #remote, html[data-live="1"] #pill{display:none}
+html[data-live="1"] #remote{display:none}
 html[data-live="1"] #map{transform:scale(1.06)}
 #map{transition:transform 9s var(--ease)}
 #dirHud .dot{width:8px; height:8px; border-radius:50%; background:#ff6b5c;
@@ -721,16 +737,26 @@ html[data-live="1"] #map{transform:scale(1.06)}
 .spark i.bad{background:var(--fail)}
 html[data-debug="0"] .dbg{display:none !important}
 
-/* collapsed pill */
-#pill{position:fixed; top:16px; right:16px; z-index:100; display:none; align-items:center;
-  gap:10px; padding:8px 14px; border-radius:999px; background:var(--glass);
-  backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line);
-  box-shadow:var(--shadow2); cursor:pointer}
-#pill .ico{color:var(--shine)}
-#pill .ptime{font-weight:700; font-size:.85rem}
-#pill .pw{color:var(--ink2); font-size:.72rem}
-html[data-remote="pill"] #remote{display:none}
-html[data-remote="pill"] #pill{display:flex}
+/* minimize / close (author's ask, round 9 — replaces the old collapse-to-
+   pill above: one clear pair instead of three overlapping ways to get the
+   Remote out of the way). Minimize folds the panel down to just its own
+   header — #mockStrip and .body hide, .room-head stays, #remote's own
+   flex-column height shrinks to fit since nothing forces an explicit
+   height on it. Close hides the whole section outright, on the premise
+   that the real product reopens it from Foundry's own scene controls —
+   this mock has no such control to simulate, so #reopenBtn below is
+   dev-only scaffolding standing in for that click, not a design element. */
+html[data-remote="minimized"] #mockStrip,
+html[data-remote="minimized"] #remote .body{display:none}
+html[data-remote="closed"] #remote{display:none}
+#reopenBtn{display:none; position:fixed; left:16px; bottom:16px; z-index:100;
+  align-items:center; gap:8px; padding:8px 14px; border-radius:999px;
+  border:1px dashed color-mix(in oklab, var(--c-system) 45%, transparent);
+  background:var(--glass); backdrop-filter:blur(var(--glass-blur));
+  color:var(--ink1); font-size:.74rem; box-shadow:var(--shadow2); cursor:pointer}
+#reopenBtn:hover{color:var(--ink0); border-color:var(--c-system)}
+#reopenBtn .ico{color:var(--shine)}
+html[data-remote="closed"] #reopenBtn.dbg{display:flex}
 
 /* ============================================================================
    THE STUDIO
@@ -1054,6 +1080,8 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
     <symbol id="i-camera" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2.5"/><path d="M9 7l1.5-2.8h3L15 7"/><circle cx="12" cy="13.3" r="3.4"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 5.5v13M15.5 5.5v13"/></symbol>
     <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="15" rx="2.2"/><path d="M3.5 10h17M8 3.5v4M16 3.5v4"/><circle cx="8.3" cy="14.3" r="1"/><circle cx="12" cy="14.3" r="1"/><circle cx="15.7" cy="14.3" r="1"/></symbol>
+    <symbol id="i-bug" viewBox="0 0 24 24"><ellipse cx="12" cy="13.5" rx="5" ry="6.2"/><path d="M12 7.3v12.4M7.3 10.2l-3-2M16.7 10.2l3-2M6.5 14h-3M17.5 14h3M7.3 17.8l-3 2M16.7 17.8l3 2M9.3 6 8 4M14.7 6 16 4"/></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.3S3.6 14.9 3.6 9.1a5 5 0 0 1 8.4-3.6 5 5 0 0 1 8.4 3.6c0 5.8-8.4 11.2-8.4 11.2Z"/></symbol>
   </defs>
 </svg>
 
@@ -1086,7 +1114,7 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
 <!-- ═══════════════ THE REMOTE ═══════════════ -->
 <section class="room" id="remote" aria-label="Map Shine Remote">
   <header class="room-head" data-drag="remote">
-    <span class="rtitle"><svg class="ico"><use href="#i-candle"/></svg>Remote</span>
+    <span class="rtitle"><svg class="ico"><use href="#i-candle"/></svg>Map Shine Advanced</span>
     <span class="spacer"></span>
     <button class="hbtn" id="dirBtn" title="Director — take over every camera, letterbox the scene, run a cutscene">
       <svg class="ico"><use href="#i-clap"/></svg></button>
@@ -1097,8 +1125,12 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
     <button class="hbtn" id="densityTglRemote" aria-pressed="false"
       title="Compact density — shrink every room for maximum screen space">
       <svg class="ico"><use href="#i-layers"/></svg></button>
-    <button class="hbtn" id="collapseBtn" title="Collapse to pill">
-      <svg class="ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg></button>
+    <button class="hbtn" id="minimizeBtn" aria-pressed="false"
+      title="Minimize — fold everything but the header out of the way">
+      <svg class="ico"><use href="#i-chev"/></svg></button>
+    <button class="hbtn danger" id="closeBtn"
+      title="Close — hide entirely; reopen from Foundry's own scene controls">
+      <svg class="ico"><use href="#i-x"/></svg></button>
   </header>
 
   <div id="mockStrip" aria-label="Mock controls">
@@ -1383,15 +1415,21 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
         <svg class="ico"><use href="#i-home"/></svg>Baseline</button>
       <button class="btn danger" id="safetyBtn" title="Hand rendering back to Foundry">
         <svg class="ico"><use href="#i-shield"/></svg>Safety</button>
+      <button class="hbtn" id="bugBtn" title="Report a bug">
+        <svg class="ico"><use href="#i-bug"/></svg></button>
+      <button class="hbtn" id="patreonBtn" title="Support on Patreon">
+        <svg class="ico"><use href="#i-heart"/></svg></button>
     </div>
   </div>
 </section>
 
-<button id="pill" title="Expand the Remote" aria-label="Expand the Remote">
-  <svg class="ico" id="pillGlyph"><use href="#i-sun"/></svg>
-  <span class="ptime num" id="pillTime">14:00</span>
-  <span class="pw" id="pillW">light rain</span>
-  <svg class="ico" style="color:var(--ink2)"><use href="#i-chev" /></svg>
+<!-- MOCK-ONLY: the real product reopens Map Shine from Foundry's own
+     scene-control button (author's ask); this file has no such control
+     to click, so this dashed dev-only chip stands in for it — same
+     "testing equipment, not product chrome" language as #debugStrip. -->
+<button id="reopenBtn" class="dbg"
+  title="Mock-only stand-in for Foundry's own scene-control button, which reopens Map Shine Advanced in the real product">
+  <svg class="ico"><use href="#i-candle"/></svg>Reopen Map Shine
 </button>
 
 <!-- ═══════════════ THE STUDIO ═══════════════ -->
@@ -2374,8 +2412,30 @@ $('#fadeHold').onclick = () => cancelFades(false);
   $('#safetyYes').onclick = () => { pop.classList.remove('open');
     toast('Foundry renderer restored (mock) — Map Shine stands down', 'shield'); }; }
 
-$('#collapseBtn').onclick = () => document.documentElement.dataset.remote = 'pill';
-$('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
+/* minimize / close / reopen — see the CSS comment above .cornerCluster's
+   old neighbour (the retired #pill block) for why there are two states
+   here, not three. minimizeBtn's own aria-pressed IS the state; the
+   chevron and the tooltip both just read off it rather than keeping a
+   second flag in sync by hand. */
+$('#minimizeBtn').onclick = () => {
+  const willMinimize = document.documentElement.dataset.remote !== 'minimized';
+  document.documentElement.dataset.remote = willMinimize ? 'minimized' : 'full';
+  $('#minimizeBtn').setAttribute('aria-pressed', String(willMinimize));
+  $('#minimizeBtn').title = willMinimize
+    ? 'Expand — bring the panel back'
+    : 'Minimize — fold everything but the header out of the way';
+};
+$('#closeBtn').onclick = () => {
+  document.documentElement.dataset.remote = 'closed';
+  toast('Map Shine Advanced closed — reopen from Foundry’s own scene controls', 'candle');
+};
+$('#reopenBtn').onclick = () => {
+  document.documentElement.dataset.remote = 'full';
+  $('#minimizeBtn').setAttribute('aria-pressed', 'false');
+  $('#minimizeBtn').title = 'Minimize — fold everything but the header out of the way';
+};
+$('#bugBtn').onclick = () => toast('Opens the bug tracker (planned)', 'bug');
+$('#patreonBtn').onclick = () => toast('Opens Patreon in a new tab (planned)', 'heart');
 
 /* ── the four corners — every wing item + the old Impulses section nested
    into the dial's own empty corners (author's ask, round 8: no more
@@ -3318,9 +3378,6 @@ function frame(now) {
     state.ch.bolt > .4 ? 'bolt' : state.ch.rain > .25 ? (state.ch.freeze > .5 ? 'snow' : 'rain') :
     state.ch.fog > .45 ? 'fog' : (h > 6 && h < 19 ? 'sun' : 'moon');
   $('#npGlyph').firstElementChild?.setAttribute('href', '#i-' + glyph);
-  $('#pillGlyph').firstElementChild?.setAttribute('href', '#i-' + glyph);
-  $('#pillTime').textContent = $('#clockTxt').textContent;
-  $('#pillW').textContent = weatherWord;
   $('#npDateText').textContent = formatDate(state.day, true);
   $('#fadeHold').style.display = state.passage ? 'none' : '';
   $('#fadeSnap').textContent = state.passage ? 'Skip ▸▸' : 'Snap';

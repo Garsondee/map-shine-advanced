@@ -815,6 +815,65 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P6 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; header chrome — title, minimize/
+close, and two always-visible links the author says the current UI already carries elsewhere
+and needs a home for here).** Four asks, built and verified:
+
+1. **The compact-density toggle the author asked to see "in the main header as a button
+   with a tooltip" already satisfied that description** — `#densityTglRemote` has lived in
+   `.room-head` with `title="Compact density — shrink every room for maximum screen space"`
+   since an earlier round. No change made; noted rather than silently skipped, since the
+   author may have been listing a requirement without having checked whether it already
+   landed, and I'd rather say so than have it look overlooked.
+2. **Minimize + close replace the old collapse-to-pill mechanic outright, not alongside
+   it.** The author described a complete two-option system ("you can either minimise or
+   close it") with no third state mentioned, so keeping the pill too would have left three
+   overlapping ways to get the Remote out of the way. Minimize hides `#mockStrip` and
+   `.body`, leaving only `.room-head` — confirmed by measuring the panel's own height
+   post-click (51.4px, matching the header alone) rather than trusting the CSS by eye. Close
+   hides `#remote` outright, on the premise that the real product reopens it from a Foundry
+   scene-control button this mock doesn't have; a dashed, `.dbg`-gated `#reopenBtn` stands in
+   for that click so the mock stays testable, using the same "equipment, not product chrome"
+   visual language `#debugStrip` already established.
+3. **Title changed from "Remote" to "Map Shine Advanced"** — the room's own branding, not
+   the mockStrip's Remote/Studio/Player surface-switcher tab, which stays "Remote" since it
+   names which MODE you're viewing, not the product itself; renaming that tab too would have
+   broken its parallel with "Studio"/"Player." Fits without wrapping or clipping — measured,
+   not assumed, given the new title is nearly 3× longer than the old one sitting in the same
+   row as up to 6 icon buttons: `head.scrollWidth > head.clientWidth` came back false at both
+   densities.
+4. **Bug-report and Patreon buttons added to `#remoteFoot`**, deliberately NOT as a third and
+   fourth `flex:1` sibling next to Baseline/Safety — they're `.hbtn`-styled (the same small
+   icon-button language as the header) so their visual weight reads as secondary to the two
+   primary safety actions, not competing with them. New `i-bug` and `i-heart` symbols added to
+   the sprite; Patreon gets a generic heart rather than any attempt at reproducing their actual
+   logotype, which I don't have accurate reference for and shouldn't fabricate from memory.
+   Neither button navigates anywhere real — both show a toast — since I don't have and won't
+   guess the actual bug-tracker or Patreon URLs.
+
+**Two bugs shipped mid-round and caught before commit, both worth recording as a pair — same
+lesson, two different tools:**
+- Removing the old `#pill` element left `$('#pillGlyph').firstElementChild?.setAttribute(...)`
+  still running every frame against a selector that now returns null — the `?.` guarded the
+  property access, not the `$(...)` call in front of it. A genuinely NEW console error this
+  time, not the familiar stale one — caught by not assuming a shipped error is automatically
+  the old residue just because this session has seen stale ones before, and confirmed real by
+  checking the cited line against the live source before treating it as noise.
+- The minimize chevron's `rotate(-90deg)` swung the icon out of its own button's visible box
+  entirely — SVG `<use>` rotates around the referenced symbol's viewBox origin (0,0) by
+  default, not its visual centre, which a plain `transform:rotate()` never overrides. Invisible
+  in a normal screenshot (nothing there to see), only surfaced by zooming into the header and
+  noticing a button-shaped gap between two icons that should have had a third. Fixed with
+  `transform-box:fill-box; transform-origin:center`, then confirmed geometrically rather than
+  re-eyeballed: the rotated shape's on-screen centre measured at 51%/50% of the button's own
+  box. **Neither bug would have been caught by the DOM-existence checks I lean on most —
+  `.append()` on a live element and a `transform` that "applies" are both structurally
+  successful; only the console (for the first) and an actual zoomed look (for the second)
+  caught them.**
+
+Containment re-verified at 1920×1080 after all of the above: zero internal scroll, zero
+horizontal scrollbar, matching every round since the fix in P3.
+
 **P5 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; retracts P4's crown-tab placement
 in favour of the author's own corner-cluster sketch — one round later, not because P4 broke,
 but because the author found a structurally simpler answer).** Author's sketch this round:

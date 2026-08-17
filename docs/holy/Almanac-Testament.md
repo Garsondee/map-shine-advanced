@@ -531,7 +531,78 @@ within-stage order is not.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
-*(none yet)*
+**P1 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; not authorised to edit Law/§6).**
+Author's live direction, verbatim: *"If the user calls for 'the next morning' ideally we'd
+go through an actual time transition in the engine. This has to happen 'within reason' — if
+the GM advances time by a week then we don't go through 7 day night cycles, perhaps we just
+do one of them to be representative."* This directly probes §6.2's own wording — "Jumps…
+committed as one advance, eased on arrival by the day clock's existing walk" — which I
+believe **under-specifies exactly the ambiguity the author is pointing at**: the day clock's
+walk eases HOUR-OF-DAY only (shortest-way-round on a 24 h ring), so a same-hour jump a week
+later would ease almost invisibly — same ring angle, no felt passage — even though a whole
+week just happened. "Eased on arrival" reads correctly for a same-day nudge and, I think,
+silently under-delivers for a multi-day jump.
+
+**What I built and verified, in the mock only (`tools/ui-mock/index.html`), nothing in
+`src/`:** a mechanism I'm calling **the Passage** — a jump that crosses into a new day
+commits its true destination (day, hour, AND moon phase) atomically and immediately, exactly
+mirroring §1/§8's own "commit at once, coarsely; derive smoothly" doctrine — then plays a
+purely COSMETIC overlay through the real sun/moon projection math (not a canned clip) for
+what's drawn, bounded by a declared duration-policy table so "within reason" is data, not a
+per-session judgment call:
+
+| Jump size | What plays | Real playback |
+| --- | --- | --- |
+| < 1 day | the full, real sweep — no truncation | ~9 s |
+| 1–3 days | ONE representative night, then a brief date-tick cut | ~9.4 s |
+| 3–14 days | ONE representative night, then a longer date-tick cut | ~8.2 s |
+| > 14 days | a token flicker of night, then mostly the date-tick cut | ~6 s |
+
+The "cut" is a ticking date readout plus a soft compression pulse on the map — legible
+"time is passing in bulk" without pretending to render every day. Same-day nudges (dragging
+the ring, a mood's `t.hour`) are completely unaffected — no theatre for routine adjustments.
+Backwards jumps stay a correction (§6.3): the date snaps instantly, no theatre, only the
+hour still eases — I initially missed wiring `state.day` on that path and caught it via a
+live test before calling anything done.
+
+**UI face — content into the Remote's existing grammar, not new chrome** (UI Testament Law
+3, cross-checked): Now Playing gains a small date chip (opens the same popover as the wing).
+The wing's four separate Dawn/Noon/Dusk/Mid buttons **collapsed into one "Jump" trigger**
+opening a popover (Dawn/Noon/Dusk/Midnight + `+1 Day` + `+1 Week` + "Set a date…") — this
+also quietly fixes a round-2 overshoot of my own (§4.1's stated "capped at ~5 per side" had
+crept to 6). "Set a date…" opens a compact stepper overlay (year/month/day, quick chips,
+live preview) rather than a full calendar grid — proportionate to how rarely an absolute
+jump is needed; relative jumps stay the fast path. The calendar math backing it
+(`dateFromDay`/`dayFromDate`, real 4-only leap years, month/day round-trips) is **explicitly
+NOT** §5's parity engine — it's a labelled Earth-only stand-in so the mock can show an
+honest date without asserting anything about Golarion from memory, exactly per §5.4's own
+warning against that.
+
+**Verified live, corrected once:** a day-stepper bug (decrementing past the 1st clamped
+back to the 1st instead of rolling into the previous month) was caught by a scripted test,
+fixed by routing the step through the same `dayFromDate`/`dateFromDay` round-trip already
+proven correct elsewhere, then re-verified with a 24-day and a 31-day rollback (crossing a
+31-day and a 30-day month) that round-tripped back to its exact starting date. A `+1 Week`
+jump landed on exactly the right day after playing the representative-night-then-cut
+sequence. Containment re-holds at 1920×1080 (990px vs 1003px budget) after several
+paddings were trimmed to make room for the new date-chip row. Zero console errors.
+
+**Three calls for Fable, not for me:**
+1. **Should §6.2's "eased on arrival" language be expanded to name the Passage explicitly**
+   (or something like it), so a future implementer doesn't read that line and ship the
+   invisible-jump behaviour it currently allows? I think this petition IS the missing
+   half-sentence, but I can't write it into Law myself.
+2. **Is the duration-policy table's shape (band boundaries, cycle counts, second budgets)
+   right**, or should it be tuned/restructured before A2 builds against it? I chose bands
+   that map roughly to "a night," "a few nights," "a fortnight," "longer" — a taste call,
+   not a derived one.
+3. **Does "the Passage" belong as its own named organ in §4's diagram** (a fifth box beside
+   the Almanac/Pen/Breath/Face), or is it better framed as a *mode of the Pen's jump
+   gesture* (my read while building it, since it never runs unpaused/live like the Breath
+   and always resolves to exactly one commit)? I built it as the latter; the former may be
+   the more honest picture once real worldTime is involved.
+
+*(no other petitions yet)*
 
 ---
 

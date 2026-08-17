@@ -328,31 +328,46 @@ html[data-frame="1"] #frame1080{display:block}
    here depends on overflow:hidden to look intentional — while staying the
    dominant element in the panel (340px across a 372px content column). */
 #astro{position:relative; width:340px; height:340px; margin:0 auto; z-index:5}
-/* THE CROWN — every wing item, wind included in earlier rounds, sits in one
-   of two straight columns flanking the dial, watch-crown style (author's
-   sketch, this round). Each column shrink-wraps its 32px tabs and is pulled
-   outward by exactly half a tab's width, so it straddles the dial's own
-   edge dead centre — half tucks behind the ring, half pokes past it, fully
-   clear of the room's clip edge with real margin this time. Pure CSS, no
-   per-density JS recompute — placeRadialTabs() existed only to chase the
-   dial's LIVE size; pinning a column to the dial's own box via left/right
-   insets makes the browser's box model do that job for free, at every size. */
-.tabCol{position:absolute; top:50%; transform:translateY(-50%); display:flex;
-  flex-direction:column; gap:6px}
-.tabCol.left{left:-16px}
-.tabCol.right{right:-16px}
-/* tabCol sits FIRST in #astro's DOM, before .ring/.scene — with no z-index
-   on any of them, that alone (not layering trickery) paints the ring over
-   each tab's inner half and leaves the outer half on top of it. */
-.tab{position:relative; width:32px; height:32px; border-radius:10px; flex:none;
+/* THE FOUR CORNERS — round 8: crown tabs are gone (author's own sketch this
+   time — straddling the rim was clever but two rounds of fighting its
+   clearance was enough). A circle inscribed in its own box leaves its four
+   corners genuinely empty; that's real estate, not a trick. Each corner
+   gets a tight 2×2 grid with the one cell closest to the dial's centre left
+   unfilled — geometrically confirmed clear of the ring, not eyeballed: at
+   340px (radius 170) the ring's edge crosses each corner's diagonal at
+   ~49.8px from that corner, comfortably past the ~56px an L of three 26px
+   slots reaches. grid-template-areas encodes the L directly — the "." in
+   each string IS the cell closest to the ring, and which physical cell
+   that is changes per corner (top-right's inner column is its LEFT one,
+   not its right), which is the whole reason this isn't one shared rule. */
+.cornerCluster{position:absolute; display:grid; grid-template-columns:repeat(2, 26px);
+  grid-template-rows:repeat(2, 26px); gap:4px}
+.cornerCluster.tl{top:0; left:0; grid-template-areas:"a b" "c ."}
+.cornerCluster.tr{top:0; right:0; grid-template-areas:"a b" ". c"}
+.cornerCluster.bl{bottom:0; left:0; grid-template-areas:"a ." "b c"}
+.cornerCluster.br{bottom:0; right:0; grid-template-areas:". a" "b c"}
+.cornerCluster .tab:nth-child(1){grid-area:a}
+.cornerCluster .tab:nth-child(2){grid-area:b}
+.cornerCluster .tab:nth-child(3){grid-area:c}
+.tab{position:relative; width:26px; height:26px; border-radius:8px; flex:none;
   display:grid; place-items:center; background:var(--bg2); border:1px solid var(--line);
   color:var(--ink2); transition:background var(--t-micro), color var(--t-micro),
-  border-color var(--t-micro); box-shadow:0 2px 6px rgba(0,0,0,.35)}
-.tab .ico{width:15px; height:15px}
-.tab.txt{font-size:.56rem; letter-spacing:.03em; color:var(--ink1); font-weight:600}
+  border-color var(--t-micro), opacity var(--t-micro); box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.tab .ico{width:13px; height:13px}
+.tab.txt{font-size:.52rem; letter-spacing:.03em; color:var(--ink1); font-weight:600}
 .tab:hover{border-color:var(--line-strong); color:var(--ink0)}
 .tab[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
   background:var(--shine-soft)}
+.tab .supp{position:absolute; top:-6px; right:-4px; background:var(--bg3);
+  border:1px solid var(--fail); color:var(--fail); border-radius:999px; font-size:.55rem;
+  padding:0 4px; display:none; line-height:1.3}
+html[data-reduce-flash="1"] .tab[data-flash] .supp{display:block}
+/* honest empty slots, not fake buttons — author's ask: "something
+   accessible," so these stay real, focusable, clickable (never disabled),
+   just visibly quieter than an assigned control. */
+.tab.ghost{background:transparent; border-style:dashed; border-color:var(--line);
+  color:var(--ink2); box-shadow:none; opacity:.5; font-size:.85rem; font-weight:300}
+.tab.ghost:hover{opacity:.85; border-color:var(--line-strong); color:var(--ink1)}
 /* THE RIM — the clock, and the dial's dominant element. Wider band than round 2
    (47px vs 31px) with the interior pulled in, per the author's call. NOON at TOP:
    hour h sits at ((h-12)/24)*360deg, clockwise. */
@@ -541,18 +556,8 @@ html[data-frame="1"] #frame1080{display:block}
 #cueList .cue.next{color:var(--shine)}
 #cueList .cue .dur{margin-left:auto; color:var(--ink2); font-size:.66rem}
 
-/* impulses + footer */
-#impulses{display:flex; gap:6px}
-#impulses button{flex:1; display:flex; align-items:center; justify-content:center; gap:6px;
-  padding:5px 4px; border-radius:9px; border:1px solid var(--line); background:var(--bg2);
-  color:var(--ink1); font-size:.72rem; position:relative; transition:all var(--t-micro)}
-#impulses button:hover{border-color:var(--warn); color:var(--ink0)}
-#impulses button:active{transform:scale(.95)}
-#impulses button .ico{color:var(--warn)}
-#impulses button .supp{position:absolute; top:-6px; right:-4px; background:var(--bg3);
-  border:1px solid var(--fail); color:var(--fail); border-radius:999px; font-size:.6rem;
-  padding:0 5px; display:none}
-html[data-reduce-flash="1"] #impulses button[data-flash] .supp{display:block}
+/* footer (Impulses moved into the dial's corner clusters, round 8 — see
+   .cornerCluster above; #impulses and its dedicated button chrome are gone) */
 #remoteFoot{display:flex; gap:6px; border-top:1px solid var(--line);
   margin-top:0; padding-top:8px}
 #remoteFoot .btn{flex:1; justify-content:center; font-size:.72rem}
@@ -970,16 +975,17 @@ html[data-density="compact"] #cards{gap:9px}
 html[data-density="compact"] #remote{width:352px}
 html[data-density="compact"] #remote .body{gap:5px; padding:6px 12px 8px}
 /* the astro itself SHRINKS in compact, still fully contained (no bleed).
-   .tabCol needs no override at all — left:-16px/right:-16px is relative to
-   the dial's own box, which the browser already recomputes the instant
-   #astro's width changes; that's the whole point of doing this in CSS
-   instead of a JS function tied to a resize/toggle listener. */
+   The corner grids DO need an override this time — at 280px (radius 140)
+   the safe corner-diagonal point moves to ~41px from each corner, so the
+   26px/4px-gap grid (reaching ~56px) would clip the ring. Shrunk to
+   22px/3px (reaching ~47px) and re-verified against the same formula. */
 html[data-density="compact"] #astro{width:280px; height:280px; margin:0 auto}
 html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText{inset:60px}
-html[data-density="compact"] .tabCol{gap:4px}
 html[data-density="compact"] #astro .sceneText .time{font-size:1.5rem}
-html[data-density="compact"] .tab{width:26px; height:26px; border-radius:8px}
-html[data-density="compact"] .tab .ico{width:12px; height:12px}
+html[data-density="compact"] .cornerCluster{grid-template-columns:repeat(2, 22px);
+  grid-template-rows:repeat(2, 22px); gap:3px}
+html[data-density="compact"] .tab{width:22px; height:22px; border-radius:7px}
+html[data-density="compact"] .tab .ico{width:11px; height:11px}
 html[data-density="compact"] #nowCaption{padding:1px 3px 0; gap:6px}
 html[data-density="compact"] #nowCaption .ring{width:18px; height:18px}
 html[data-density="compact"] #tempo button{padding:3px 0}
@@ -1132,20 +1138,25 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
       <button id="takeoverBtn" title="Go live — every player screen becomes your frame">● TAKE OVER</button>
     </div>
 
-    <!-- The astrolabe is a fully contained circle again (round 7: the bleed
-         past .room's own edge was ALSO clipping the wing tabs almost
-         entirely, and the author flagged the ring itself as reading
-         "clipped"). Every wing item — wind included — now lives in one of
-         two straight columns, .tabCol.left / .tabCol.right, built as the
-         FIRST children of #astro so plain DOM order tucks their inner half
-         behind .ring with no z-index needed (see the .tabCol comment in
-         CSS). Now Playing's status still lives in the dial: date sits under
-         the clock inside the scene; the rest (Holding/Fading text, watch
-         count, Snap/Hold) is #nowCaption right below it. -->
+    <!-- The astrolabe is a fully contained circle (round 7). Round 8: the
+         crown tabs straddling its rim are retired too — author's own
+         sketch this time — in favour of the FOUR CORNERS a circle leaves
+         empty inside its own bounding box. Each corner is a tight 2×2 grid
+         (.cornerCluster, see CSS) holding up to 3 real slots: TL is the
+         time-progression controls (flow/speed/jump — NOT time-of-day jumps,
+         since dragging the ring already does that), TR is the three
+         Impulses (moved here from their own section below, which is why
+         that section is gone). BL/BR are honest empty future-expansion
+         slots — present and clickable, never disabled. Now Playing's
+         status still lives in the dial: date sits under the clock inside
+         the scene; the rest (Holding/Fading text, watch count, Snap/Hold)
+         is #nowCaption right below it. -->
     <div id="astroRow">
     <div id="astro">
-      <div class="tabCol left" id="tabColLeft" role="group" aria-label="Time controls"></div>
-      <div class="tabCol right" id="tabColRight" role="group" aria-label="Mood presets"></div>
+      <div class="cornerCluster tl" id="cornerTL" role="group" aria-label="Time controls"></div>
+      <div class="cornerCluster tr" id="cornerTR" role="group" aria-label="Impulses"></div>
+      <div class="cornerCluster bl" id="cornerBL" role="group" aria-label="Reserved for future controls"></div>
+      <div class="cornerCluster br" id="cornerBR" role="group" aria-label="Reserved for future controls"></div>
       <div class="ring" id="astroRing" role="slider" aria-label="Time of day"
            aria-valuemin="0" aria-valuemax="24" aria-valuenow="14" tabindex="0"
            title="Drag the rim to set the hour"></div>
@@ -1353,19 +1364,6 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
           <svg class="ico"><use href="#i-play"/></svg></button>
       </div>
       <div id="cueList" role="list"></div>
-    </div>
-
-    <div>
-      <div class="blocklabel"><svg class="ico"><use href="#i-bolt"/></svg>Impulses</div>
-      <div id="impulses" style="margin-top:6px">
-        <button id="impStrike" data-flash title="Strike lightning now">
-          <svg class="ico"><use href="#i-bolt"/></svg>Strike
-          <span class="supp" title="Suppressed for clients with Reduce flash on">✕1</span></button>
-        <button id="impThunder" title="Roll thunder (a shiver through the scene)">
-          <svg class="ico"><use href="#i-cloud"/></svg>Thunder</button>
-        <button id="impGust" title="Send a gust across the map">
-          <svg class="ico"><use href="#i-wind"/></svg>Gust</button>
-      </div>
     </div>
 
     <div id="debugStrip" class="dbg" role="group" aria-label="Debug equipment">
@@ -2354,14 +2352,6 @@ function flash() {
   sf.animate([{opacity:0},{opacity:.9},{opacity:.15},{opacity:.6},{opacity:0}],
              { duration:420, easing:'ease-out' });
 }
-$('#impStrike').onclick = () => { flash();
-  toast(state.reduceFlash ? 'Strike fired — flash suppressed on this client' : 'Lightning strike', 'bolt'); };
-$('#impThunder').onclick = () => {
-  $('#map').animate([{filter:'brightness(1)'},{filter:'brightness(.82)'},{filter:'brightness(1)'}],
-    { duration:600 }); toast('Thunder rolls', 'cloud'); };
-$('#impGust').onclick = () => {
-  const from = state.ch.wind; state.ch.wind = clamp(from + .35, 0, 1);
-  easeTo({ wind:from }, 4, 'Gust'); toast('A gust sweeps the map', 'wind'); };
 let strikeTimer = 0;
 
 $('#baselineBtn').onclick = () => {
@@ -2387,13 +2377,15 @@ $('#fadeHold').onclick = () => cancelFades(false);
 $('#collapseBtn').onclick = () => document.documentElement.dataset.remote = 'pill';
 $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
 
-/* ── the crown tabs — every wing item nested into the dial's own rim,
-   watch-crown style (author's sketch, round 7). Left column is TIME
-   controls, right is MOOD presets — a real grouping, not just an even
-   split, so which side to check is guessable. Built straight into their
-   host columns; positioning is pure CSS (.tabCol, above) since it only
-   needs the dial's own box, not a live-measured radius, so there is no
-   placement function left to re-run on resize or density toggle. ──── */
+/* ── the four corners — every wing item + the old Impulses section nested
+   into the dial's own empty corners (author's ask, round 8: no more
+   straddling the rim). TL is the 3 TIME-PROGRESSION controls (flow/speed/
+   jump — explicitly NOT time-of-day jumps; the ring already does that by
+   hand). TR is the 3 Impulses, moved here wholesale from their own section
+   (Strike keeps its exact flash()+suppression-badge behaviour). BL/BR are
+   genuine future-expansion slots — present, titled, clickable, never
+   disabled, per the author's own "accessible" ask. Positioning is pure CSS
+   (.cornerCluster, above); nothing here needs to know its own live size. ── */
 {
   const flowB = el('button', 'tab', icon('play'));
   flowB.title = 'Let time flow — the clock runs at the chosen speed';
@@ -2430,21 +2422,37 @@ $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
   jumpB.title = 'Jump — dawn, dusk, +1 day, +1 week, or set a date';
   jumpB.onclick = e => openJumpPop(e.currentTarget);
 
-  $('#tabColLeft').append(flowB, spdB, jumpB);
+  $('#cornerTL').append(flowB, spdB, jumpB);
 
-  const moodTabs = [ ['sun',   'Golden hour — one-tap scene beat, eased at fade time',
-      () => easeTo({ hour:17.1, clouds:.18, rain:0, fog:.06, bolt:0 }, tempoS(), 'Golden hour')],
-    ['moon',  'Moonlit night — clear, still, silver',
-      () => easeTo({ hour:0.4, clouds:.15, rain:0, fog:.12, bolt:0 }, tempoS(), 'Moonlit night')],
-    ['bolt',  'Ominous — the sky turns before the storm does',
-      () => easeTo({ clouds:.92, wind:.55, bolt:.35, rain:.15 }, tempoS(), 'Something comes')],
-    ['candle','Candlelit — planned: kill the sky, the candles carry the room',
-      () => toast('Planned — kill the sky light, let the candles carry the room', 'candle')],
-    ['bloom', 'Aurora — planned: curtains of light for northern skies',
-      () => toast('Planned — curtains of light for northern skies', 'bloom')],
-  ].map(([ic, tip, fn]) => { const b = el('button', 'tab', icon(ic));
-    b.title = tip; b.onclick = fn; return b; });
-  $('#tabColRight').append(...moodTabs);
+  const strikeB = el('button', 'tab', icon('bolt'));
+  strikeB.dataset.flash = '';
+  strikeB.title = 'Strike lightning now';
+  const suppB = el('span', 'supp', '✕1');
+  suppB.title = 'Suppressed for clients with Reduce flash on';
+  strikeB.append(suppB);
+  strikeB.onclick = () => { flash();
+    toast(state.reduceFlash ? 'Strike fired — flash suppressed on this client' : 'Lightning strike', 'bolt'); };
+
+  const thunderB = el('button', 'tab', icon('cloud'));
+  thunderB.title = 'Roll thunder (a shiver through the scene)';
+  thunderB.onclick = () => {
+    $('#map').animate([{filter:'brightness(1)'},{filter:'brightness(.82)'},{filter:'brightness(1)'}],
+      { duration:600 }); toast('Thunder rolls', 'cloud'); };
+
+  const gustB = el('button', 'tab', icon('wind'));
+  gustB.title = 'Send a gust across the map';
+  gustB.onclick = () => {
+    const from = state.ch.wind; state.ch.wind = clamp(from + .35, 0, 1);
+    easeTo({ wind:from }, 4, 'Gust'); toast('A gust sweeps the map', 'wind'); };
+
+  $('#cornerTR').append(strikeB, thunderB, gustB);
+
+  const ghostSlot = () => { const b = el('button', 'tab ghost', '+');
+    b.title = 'Reserved — a future quick-access shortcut';
+    b.onclick = () => toast('Reserved for a future quick-access shortcut', 'gear');
+    return b; };
+  $('#cornerBL').append(ghostSlot(), ghostSlot(), ghostSlot());
+  $('#cornerBR').append(ghostSlot(), ghostSlot(), ghostSlot());
 }
 
 /* ── the jump popover + set-a-date overlay ──────────────────────────────── */

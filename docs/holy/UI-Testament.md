@@ -815,6 +815,61 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P5 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; retracts P4's crown-tab placement
+in favour of the author's own corner-cluster sketch — one round later, not because P4 broke,
+but because the author found a structurally simpler answer).** Author's sketch this round:
+12 small slots nested into the dial's four corners instead of two flanking columns. Built and
+verified:
+
+1. **The crown-tab columns (P4) are retired too.** Not a bug this time — P4's clearance
+   measurements held up. The author proposed something that doesn't need clearance math at
+   all: a circle inscribed in its own box leaves its four corners genuinely empty, and that's
+   real estate a button never has to overlap the ring to use.
+2. **Four `.cornerCluster` grids, one per corner, 2×2 with the innermost cell always left
+   empty.** `grid-template-areas` encodes the L-shape directly (the `.` IS the omitted cell),
+   and which physical cell counts as "innermost" is DIFFERENT per corner (top-right's near
+   column is its LEFT one, not its right) — derived from the circle's own equation, not
+   eyeballed: at 340px/radius 170, the ring's edge crosses each corner's diagonal at ~49.8px
+   from that corner. **Measured against the live DOM, not trusted from the arithmetic alone:**
+   the worst filled cell's closest point to the dial's centre came back at 183.7px
+   (`getBoundingClientRect()`, comfortable) — 13.7px of real clearance — and 10.2px at compact
+   (280px dial). All four corners, both densities, checked individually rather than assumed
+   symmetric.
+3. **Only 6 of the 12 slots are assigned, by the author's own accounting.** TL holds the
+   three time-PROGRESSION controls (flow/speed/jump) — explicitly not time-of-day shortcuts,
+   since the ring already sets a specific hour by hand. TR holds the three Impulses
+   (Strike/Thunder/Gust), moved here wholesale from their own dedicated section, which is now
+   deleted outright — saving a header and a row, exactly as the author asked. BL and BR (6
+   slots) are genuine future-expansion slots: present, titled, and CLICKABLE — never
+   `disabled` — per the author's explicit "something accessible" ask; each shows a small toast
+   naming what it is (reserved, not yet assigned) rather than sitting inert.
+4. **The five mood-preset shortcuts from P3/P4 (sun/moon/bolt/candle/bloom) are gone, not
+   relocated.** The author's own reasoning: dragging the ring already reaches any time of day
+   these buttons jumped to, so a dedicated shortcut duplicated the primary control rather than
+   adding to it. Nothing is permanently lost — "Storm" already exists as a Mood chip below,
+   and any of the 6 open future slots can carry a revived version of these if wanted back.
+5. **Text re-measured at the smaller size, not assumed to still fit.** Shrinking the tab
+   from 32px to 26px (22px compact) meant re-checking the speed button's longest label
+   ("×0.5"): 18px wide against a 24px inner width comfortable, 20px compact — fits at both,
+   confirmed by measuring actual rendered text against the live button box.
+6. **Containment re-holds with room to spare**: at 1920×1080 the Remote now runs with ZERO
+   internal scroll (890px content in an 890px available body — an exact fit) where it
+   previously needed to scroll internally. Impulses' removal gave back a header and a row's
+   worth of height, exactly as the author predicted.
+
+Filed as its own petition rather than folded into P4, since P4 is now itself partially
+superseded — a petition circling the same control for a third straight round is a signal on
+its own (see below).
+
+**For Fable, again:** the astrolabe's surrounding-controls layout has changed in P3, P4, and
+P5 — three different shapes in three rounds, each replacing the last after contact with a
+real screen. I don't think §4.1 should canonise any of these yet. If there's a Law-level
+lesson here it may be less about which shape wins and more about process: this control
+specifically seems to need a build-and-look round before its geometry is trusted. Worth
+considering whether dial-adjacent layout changes should get a mandatory look-in-hand check
+before the petition is filed, not after — though I'd flag that as a suggestion for Fable to
+weigh, not something I'm certain belongs in the checklist as Law.
+
 **P4 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; retracts part of P3's own design
 under the author's direct correction — not a new direction, a fix to one that didn't survive
 contact with a real screen).** Author sent back a screenshot plus a hand-drawn sketch: the

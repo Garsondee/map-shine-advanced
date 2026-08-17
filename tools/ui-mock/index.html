@@ -260,8 +260,8 @@ html[data-frame="1"] #frame1080{display:block}
    THE REMOTE
    ========================================================================== */
 #remote{top:16px; right:16px; width:402px; max-height:calc(100vh - 32px)}
-#remote .body{padding:10px 16px 12px; display:flex; flex-direction:column;
-  gap:10px; overflow-y:auto; scrollbar-width:thin}
+#remote .body{padding:9px 16px 11px; display:flex; flex-direction:column;
+  gap:9px; overflow-y:auto; scrollbar-width:thin}
 
 /* now playing */
 #nowPlaying{display:flex; align-items:center; gap:10px; padding:7px 10px;
@@ -345,8 +345,8 @@ html[data-frame="1"] #frame1080{display:block}
 
 /* moods */
 #moods{display:grid; grid-template-columns:repeat(4,1fr); gap:5px}
-#moods button{display:flex; flex-direction:column; align-items:center; gap:3px;
-  padding:5px 2px 4px; border-radius:9px; border:1px solid var(--line);
+#moods button{display:flex; flex-direction:column; align-items:center; gap:2px;
+  padding:4px 2px 3px; border-radius:9px; border:1px solid var(--line);
   background:var(--bg2); color:var(--ink1); font-size:.66rem;
   transition:all var(--t-micro)}
 #moods button .ico{width:1.25em; height:1.25em; color:var(--c-atmos)}
@@ -357,7 +357,7 @@ html[data-frame="1"] #frame1080{display:block}
 /* faders */
 #faders{display:flex; justify-content:space-between; padding:2px 2px 0}
 .fader{display:flex; flex-direction:column; align-items:center; gap:5px; width:46px}
-.fader .track{position:relative; width:26px; height:132px; border-radius:13px;
+.fader .track{position:relative; width:26px; height:120px; border-radius:13px;
   background:var(--bg2); border:1px solid var(--line); cursor:pointer; overflow:visible}
 .fader .fill{position:absolute; left:2px; right:2px; bottom:2px; border-radius:11px;
   background:linear-gradient(180deg, color-mix(in oklab, var(--acc) 85%, white 12%), var(--acc));
@@ -695,21 +695,31 @@ html[data-remote="pill"] #pill{display:flex}
 /* ============================================================================
    SEARCH PALETTE / TOASTS / MISC
    ========================================================================== */
-#palette{position:fixed; inset:0; z-index:350; display:none; align-items:flex-start;
+/* .searchOverlay is the shared shell for BOTH the Studio's "search everything"
+   palette and the Remote's weather picker — one canon component, two datasets
+   (Testament Law 8: the canon is the only toolkit). */
+.searchOverlay{position:fixed; inset:0; z-index:350; display:none; align-items:flex-start;
   justify-content:center; padding-top:14vh; background:rgba(6,8,14,.45)}
-#palette.open{display:flex}
-#palette .box{width:560px; max-width:92vw; background:var(--glass);
+.searchOverlay.open{display:flex}
+.searchOverlay .box{width:560px; max-width:92vw; background:var(--glass);
   backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line-strong);
   border-radius:14px; box-shadow:var(--shadow3); overflow:hidden}
-#palette .pin{display:flex; gap:9px; align-items:center; padding:12px 16px;
+.searchOverlay .pin{display:flex; gap:9px; align-items:center; padding:12px 16px;
   border-bottom:1px solid var(--line)}
-#palette .pin input{flex:1; background:none; border:none; font-size:.95rem; color:var(--ink0)}
-#palette .results{max-height:320px; overflow-y:auto; padding:6px}
-#palette .hit{display:flex; align-items:center; gap:9px; padding:8px 11px; border-radius:8px;
+.searchOverlay .pin input{flex:1; background:none; border:none; font-size:.95rem; color:var(--ink0)}
+.searchOverlay .results{max-height:380px; overflow-y:auto; padding:6px}
+.searchOverlay .grouphead{padding:9px 11px 4px; font-size:.62rem; letter-spacing:.18em;
+  text-transform:uppercase; color:var(--ink2); display:flex; align-items:center; gap:7px}
+.searchOverlay .grouphead .cnt{margin-left:auto; color:var(--ink2); opacity:.7}
+.searchOverlay .hit{display:flex; align-items:center; gap:9px; padding:7px 11px; border-radius:8px;
   width:100%; text-align:left; color:var(--ink1); font-size:.78rem}
-#palette .hit:hover, #palette .hit.sel{background:var(--bg2); color:var(--ink0)}
-#palette .hit .crumb{margin-left:auto; color:var(--ink2); font-size:.64rem}
-#palette .hit .dot{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none}
+.searchOverlay .hit:hover, .searchOverlay .hit.sel{background:var(--bg2); color:var(--ink0)}
+.searchOverlay .hit .crumb{margin-left:auto; color:var(--ink2); font-size:.64rem}
+.searchOverlay .hit .dot{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none}
+.searchOverlay .hit .htext{display:flex; flex-direction:column; gap:1px; min-width:0}
+.searchOverlay .hit .htext b{font-weight:600}
+.searchOverlay .hit .htext .sub{color:var(--ink2); font-size:.66rem; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis}
 #toasts{position:fixed; bottom:18px; left:50%; transform:translateX(-50%); z-index:380;
   display:flex; flex-direction:column; gap:6px; align-items:center}
 .toast{background:var(--glass); backdrop-filter:blur(var(--glass-blur));
@@ -934,6 +944,10 @@ html[data-density="compact"] #cards{gap:9px}
             title="Drift — you state the climate; the sky wanders inside its bounds on its own">Drift</button>
         </div></div>
       <div id="moods" style="margin-top:6px"></div>
+      <button class="btn sm" id="wxBrowseBtn"
+        style="width:100%; justify-content:center; margin-top:5px; gap:8px">
+        <svg class="ico"><use href="#i-search"/></svg><span id="wxBrowseLabel">Browse all weather</span>
+      </button>
     </div>
 
     <div>
@@ -1024,12 +1038,20 @@ html[data-density="compact"] #cards{gap:9px}
 </section>
 
 <!-- ═══════════════ OVERLAYS ═══════════════ -->
-<div id="palette" role="dialog" aria-label="Search everything">
+<div id="palette" class="searchOverlay" role="dialog" aria-label="Search everything">
   <div class="box">
     <div class="pin"><svg class="ico" style="color:var(--ink2)"><use href="#i-search"/></svg>
       <input id="palInput" placeholder="Search every control — try “foam”, “flicker”, “bloom”…" autocomplete="off">
       <kbd>esc</kbd></div>
     <div class="results" id="palResults"></div>
+  </div>
+</div>
+<div id="wxPicker" class="searchOverlay" role="dialog" aria-label="Browse weather">
+  <div class="box">
+    <div class="pin"><svg class="ico" style="color:var(--ink2)"><use href="#i-search"/></svg>
+      <input id="wxPickInput" placeholder="Search weather…" autocomplete="off">
+      <kbd>esc</kbd></div>
+    <div class="results" id="wxPickResults"></div>
   </div>
 </div>
 <div id="confirmPop" role="alertdialog" aria-label="Confirm safety slide">
@@ -1085,6 +1107,10 @@ const CHANNELS = [
   { id:'bolt',   label:'Lightning', icon:'bolt',  tint:'#f2e37f' },
   { id:'ash',    label:'Ash',       icon:'ash',   tint:'#c9967a' },
 ];
+/* Favourites — the fast row. Unchanged footprint from round 1/2 on purpose:
+   the Remote's "few controls" discipline holds even as the CATALOGUE grows
+   underneath it (Testament Law 3). Everything below MOODS is reached through
+   Browse, never by adding another button to this row. */
 const MOODS = [
   { id:'clear',    label:'Clear',    icon:'sun',   t:{ rain:0,   clouds:.06, fog:.02, bolt:0,  freeze:0 } },
   { id:'breezy',   label:'Breezy',   icon:'wind',  t:{ rain:0,   clouds:.18, fog:0,   wind:.55, bolt:0 } },
@@ -1094,6 +1120,95 @@ const MOODS = [
   { id:'storm',    label:'Storm',    icon:'bolt',  t:{ rain:.85, clouds:.95, fog:.12, wind:.7, bolt:.65, freeze:0 } },
   { id:'snow',     label:'Snow',     icon:'snow',  t:{ rain:.6,  clouds:.8,  fog:.15, wind:.35, freeze:.9, bolt:0 } },
   { id:'fogbank',  label:'Fog',      icon:'fog',   t:{ rain:0,   clouds:.6,  fog:.8,  wind:.1, bolt:0 } },
+];
+/* The rest of the catalogue — reached only through Browse (§ weather picker,
+   below). Named Weather = full-scene presets, one tap sets every channel,
+   same shape as MOODS (a mood IS a named-weather item; these are its
+   siblings that didn't earn a favourites slot). */
+const WX_NAMED_MORE = [
+  { id:'drizzle',    label:'Drizzle',        icon:'rain',  t:{ rain:.15, clouds:.55, fog:.08, bolt:0 } },
+  { id:'downpour',   label:'Downpour',       icon:'rain',  t:{ rain:.95, clouds:.95, fog:.15, wind:.3, bolt:.1 } },
+  { id:'blizzard',   label:'Blizzard',       icon:'snow',  t:{ rain:.9,  clouds:.95, fog:.25, wind:.85, freeze:1, bolt:0 } },
+  { id:'thunder',    label:'Thunderstorm',   icon:'bolt',  t:{ rain:.8,  clouds:.95, fog:.1,  wind:.6, bolt:.75, freeze:0 } },
+  { id:'sandstorm',  label:'Sandstorm',      icon:'ash',   t:{ rain:0,   clouds:.5,  fog:.6,  wind:.85, ash:.8, freeze:0, bolt:0 } },
+  { id:'heatwave',   label:'Heatwave',       icon:'sun',   t:{ rain:0,   clouds:.04, fog:0,   wind:.08, freeze:0, bolt:0 } },
+  { id:'ashfall',    label:'Ashfall',        icon:'ash',   t:{ rain:0,   clouds:.6,  fog:.2,  wind:.2, ash:.9, bolt:0 } },
+  { id:'aurora',     label:'Aurora Night',   icon:'moon',  t:{ hour:.2,  rain:0, clouds:.1, fog:.05, wind:.15, freeze:.3, bolt:0 } },
+  { id:'frostfair',  label:'Frost Fair',     icon:'snow',  t:{ rain:0,   clouds:.3,  fog:.15, wind:.15, freeze:.85, bolt:0 } },
+  { id:'squall',     label:'Squall Line',    icon:'wind',  t:{ rain:.7,  clouds:.9,  fog:.1,  wind:.9, bolt:.3 } },
+  { id:'tropical',   label:'Tropical Storm', icon:'bolt',  t:{ rain:.85, clouds:.9,  fog:.2,  wind:.8, bolt:.5, freeze:0 } },
+  { id:'monsoon',    label:'Monsoon',        icon:'rain',  t:{ rain:.9,  clouds:.95, fog:.25, wind:.4, bolt:.2, freeze:0 } },
+  { id:'dustbowl',   label:'Dust Bowl',      icon:'ash',   t:{ rain:0,   clouds:.35, fog:.45, wind:.7, ash:.6, freeze:0 } },
+  { id:'golden',     label:'Golden Drizzle', icon:'sun',   t:{ hour:16.8, rain:.15, clouds:.3, fog:.05, wind:.15, bolt:0 } },
+  { id:'foggydawn',  label:'Foggy Dawn',     icon:'fog',   t:{ hour:6.4, rain:0, clouds:.4, fog:.7, wind:.05, bolt:0 } },
+  { id:'hoarfrost',  label:'Hoarfrost Morn', icon:'snow',  t:{ hour:7,   rain:0, clouds:.2, fog:.35, wind:.05, freeze:.9, bolt:0 } },
+];
+const WX_NAMED_ALL = [...MOODS, ...WX_NAMED_MORE];
+
+/* Channel-level facets — the SMALLER CHUNKS: a facet adjusts one axis of
+   the scene without claiming to be a whole "mood". Each item is a PARTIAL
+   target (easeTo only touches the keys given — see the Fade Engine), so
+   picking "Gale" nudges wind alone and leaves rain/sky/temperature exactly
+   where they were. `primary` names the facet's home channel so its accent
+   colour is BORROWED from that channel's own tint (one source of truth,
+   never a hand-picked second palette). */
+const chTint = id => CHANNELS.find(c => c.id === id)?.tint || 'var(--shine)';
+const FACETS = [
+  { id:'precip', label:'Precipitation', icon:'rain', primary:'rain', items:[
+    { id:'dry',      label:'Dry',           t:{ rain:0 } },
+    { id:'drizzle',  label:'Drizzle',       t:{ rain:.12 } },
+    { id:'lightrain',label:'Light Rain',    t:{ rain:.3 } },
+    { id:'rain',     label:'Rain',          t:{ rain:.55 } },
+    { id:'heavyrain',label:'Heavy Rain',    t:{ rain:.75 } },
+    { id:'downpour', label:'Downpour',      t:{ rain:.95 } },
+    { id:'sleet',    label:'Sleet',         t:{ rain:.6, freeze:.45 } },
+    { id:'lightsnow',label:'Light Snow',    t:{ rain:.35, freeze:.85 } },
+    { id:'snow',     label:'Snow',          t:{ rain:.6, freeze:.9 } },
+    { id:'blizzard', label:'Blizzard',      t:{ rain:.9, freeze:1, wind:.8 } },
+    { id:'hail',     label:'Hail',          t:{ rain:.7, freeze:.6, bolt:.15 } },
+    { id:'freezerain',label:'Freezing Rain',t:{ rain:.5, freeze:.35 } },
+  ]},
+  { id:'sky', label:'Sky', icon:'cloud', primary:'clouds', items:[
+    { id:'clear',    label:'Clear',          t:{ clouds:.05 } },
+    { id:'hazy',     label:'Hazy',           t:{ clouds:.25 } },
+    { id:'scattered',label:'Scattered',      t:{ clouds:.4 } },
+    { id:'broken',   label:'Broken',         t:{ clouds:.6 } },
+    { id:'overcast', label:'Overcast',       t:{ clouds:.85 } },
+    { id:'solid',    label:'Solid Grey',     t:{ clouds:1 } },
+  ]},
+  { id:'visibility', label:'Visibility', icon:'fog', primary:'fog', items:[
+    { id:'clearair', label:'Clear Air',      t:{ fog:0 } },
+    { id:'haze',     label:'Light Haze',     t:{ fog:.15 } },
+    { id:'mist',     label:'Mist',           t:{ fog:.3 } },
+    { id:'fog',      label:'Fog',            t:{ fog:.55 } },
+    { id:'densefog', label:'Dense Fog',      t:{ fog:.8 } },
+    { id:'smoke',    label:'Smoke Haze',     t:{ fog:.4, ash:.3 } },
+    { id:'dust',     label:'Dust Storm',     t:{ fog:.5, ash:.7, wind:.6 } },
+  ]},
+  { id:'wind', label:'Wind', icon:'wind', primary:'wind', items:[
+    { id:'calm',     label:'Calm',           t:{ wind:.05 } },
+    { id:'lightbreeze',label:'Light Breeze', t:{ wind:.2 } },
+    { id:'breezy',   label:'Breezy',         t:{ wind:.35 } },
+    { id:'windy',    label:'Windy',          t:{ wind:.5 } },
+    { id:'strong',   label:'Strong Wind',    t:{ wind:.65 } },
+    { id:'gale',     label:'Gale',           t:{ wind:.8 } },
+    { id:'stormforce',label:'Storm Force',   t:{ wind:.95 } },
+  ]},
+  { id:'temperature', label:'Temperature', icon:'snow', primary:'freeze', items:[
+    { id:'scorching',label:'Scorching',      t:{ freeze:0, clouds:.05 } },
+    { id:'warm',     label:'Warm',           t:{ freeze:0, clouds:.2 } },
+    { id:'mild',     label:'Mild',           t:{ freeze:.1 } },
+    { id:'cool',     label:'Cool',           t:{ freeze:.25 } },
+    { id:'cold',     label:'Cold',           t:{ freeze:.5 } },
+    { id:'freezing', label:'Freezing',       t:{ freeze:.75 } },
+    { id:'arctic',   label:'Arctic',         t:{ freeze:1 } },
+  ]},
+  { id:'electrical', label:'Electrical', icon:'bolt', primary:'bolt', items:[
+    { id:'still',    label:'Still',          t:{ bolt:0 } },
+    { id:'distant',  label:'Distant Flickers',t:{ bolt:.15, clouds:.5 } },
+    { id:'active',   label:'Active Storm',   t:{ bolt:.45, clouds:.75, wind:.4 } },
+    { id:'severe',   label:'Severe Storm',   t:{ bolt:.75, clouds:.95, wind:.7, rain:.6 } },
+  ]},
 ];
 const CUES = [
   { name:'Act I — Golden Afternoon',  fade:10,   glyphs:['sun','wind'],
@@ -1339,6 +1454,24 @@ const CLIMATES = [
   { id:'volcanic', label:'Volcanic', icon:'fire',
     b:{ rain:[0,.2],  clouds:[.4,.9],  fog:[.1,.4],  wind:[.1,.5],  freeze:[0,0],  bolt:[0,.3],  ash:[.3,.9] } },
 ];
+/* The rest of the biomes — reached through Browse, same discipline as
+   WX_NAMED_MORE above: the favourites row (CLIMATES, 6) never grows. */
+const CLIMATES_MORE = [
+  { id:'rainforest', label:'Rainforest',    icon:'rain',
+    b:{ rain:[.3,.95], clouds:[.6,1],  fog:[.2,.6],  wind:[0,.3],  freeze:[0,0],  bolt:[.1,.5], ash:[0,0] } },
+  { id:'mediterranean', label:'Mediterranean', icon:'sun',
+    b:{ rain:[0,.3],   clouds:[.1,.6], fog:[0,.15],  wind:[.15,.55],freeze:[0,0], bolt:[0,.1],  ash:[0,0] } },
+  { id:'steppe', label:'Steppe', icon:'wind',
+    b:{ rain:[0,.35],  clouds:[.15,.6],fog:[0,.2],   wind:[.3,.85],freeze:[0,.3], bolt:[0,.15], ash:[0,0] } },
+  { id:'tundra', label:'Tundra', icon:'snow',
+    b:{ rain:[0,.4],   clouds:[.3,.8], fog:[.1,.4],  wind:[.3,.9], freeze:[.75,1],bolt:[0,0],   ash:[0,0] } },
+  { id:'swamp', label:'Swamp', icon:'fog',
+    b:{ rain:[.15,.7], clouds:[.4,.9], fog:[.3,.75], wind:[0,.25], freeze:[0,0],  bolt:[.05,.3],ash:[0,0] } },
+  { id:'highland', label:'Highland', icon:'wind',
+    b:{ rain:[.1,.6],  clouds:[.3,.85],fog:[.15,.5], wind:[.35,.85],freeze:[.2,.7],bolt:[0,.2],  ash:[0,0] } },
+];
+const CLIMATES_ALL = [...CLIMATES, ...CLIMATES_MORE];
+
 function buildWeatherBoard() {
   const m = $('#moods'); m.innerHTML = '';
   const direct = state.wxMode === 'direct';
@@ -1350,26 +1483,101 @@ function buildWeatherBoard() {
     b.title = direct
       ? `Fade the sky to ${md.label} at the chosen fade time`
       : `Let the sky wander inside ${md.label}'s bounds — brackets appear on the faders`;
-    b.onclick = () => {
-      if (direct) { state.mood = md.id; easeTo(md.t, tempoS(), md.label); }
-      else {
-        state.climate = md;
-        const t = {};
-        for (const [k, [lo, hi]] of Object.entries(md.b)) t[k] = lo + Math.random() * (hi - lo);
-        easeTo(t, tempoS(), `${md.label} climate`);
-        state.nextWalk = performance.now() + 6000;
-      }
-      $$('#moods button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
-    };
+    b.onclick = () => { applyNamedOrClimate(md, direct); };
     if ((direct && state.mood === md.id) || (!direct && state.climate?.id === md.id))
       b.setAttribute('aria-pressed', 'true');
     m.append(b);
   });
+  const total = direct
+    ? FACETS.reduce((n, f) => n + f.items.length, 0) + WX_NAMED_ALL.length
+    : CLIMATES_ALL.length;
+  $('#wxBrowseLabel').textContent = `Browse all ${direct ? 'weather' : 'climates'} (${total})`;
+  $('#wxPickInput').placeholder = direct
+    ? 'Search weather — try "gale", "ashfall", "freezing"…'
+    : 'Search climates — try "alpine", "rainforest", "tundra"…';
+}
+function applyNamedOrClimate(md, direct) {
+  if (direct) { state.mood = md.id; easeTo(md.t, tempoS(), md.label); }
+  else {
+    state.climate = md;
+    const t = {};
+    for (const [k, [lo, hi]] of Object.entries(md.b)) t[k] = lo + Math.random() * (hi - lo);
+    easeTo(t, tempoS(), `${md.label} climate`);
+    state.nextWalk = performance.now() + 6000;
+  }
+  buildWeatherBoard();
 }
 $('#wxDirect').onclick = () => { state.wxMode = 'direct'; buildWeatherBoard(); };
 $('#wxDrift').onclick = () => { state.wxMode = 'drift'; buildWeatherBoard();
   if (!state.climate) toast('Pick a climate — the sky keeps itself busy inside its bounds', 'cloud'); };
 buildWeatherBoard();
+
+/* ── the weather picker — the "fine gradient" browser (author's ask,
+   2026-08-17 round 3): search + grouped-by-facet list, one component
+   shared with the Studio's palette via .searchOverlay (Law 8). ────────── */
+const CH_LABEL = Object.fromEntries(CHANNELS.map(c => [c.id, c.label]));
+function describeTarget(t) {
+  const parts = Object.entries(t)
+    .filter(([k]) => k !== 'hour')
+    .sort((a, b) => b[1] - a[1])
+    .filter(([, v]) => v > .04)
+    .slice(0, 3)
+    .map(([k, v]) => `${CH_LABEL[k] || k} ${Math.round(v * 100)}%`);
+  return parts.length ? parts.join(' · ') : 'calm, clear';
+}
+function wxIndexFor(mode) {
+  if (mode === 'drift') return CLIMATES_ALL.map(c => ({
+    id:'climate:' + c.id, label:c.label, icon:c.icon, group:'Climates',
+    acc:'var(--c-atmos)', sub:Object.keys(c.b).filter(k => c.b[k][1] - c.b[k][0] > .02)
+      .map(k => CH_LABEL[k]).slice(0, 3).join(' · ') || 'steady',
+    item:c, kind:'climate' }));
+  const out = [];
+  WX_NAMED_ALL.forEach(n => out.push({ id:'named:' + n.id, label:n.label, icon:n.icon,
+    group:'Named Weather', acc:'var(--shine)', sub:describeTarget(n.t), item:n, kind:'named' }));
+  FACETS.forEach(f => f.items.forEach(it => out.push({ id:f.id + ':' + it.id, label:it.label,
+    icon:f.icon, group:f.label, acc:chTint(f.primary), sub:describeTarget(it.t),
+    item:it, kind:'facet', facetGroup:f.label })));
+  return out;
+}
+function applyWxHit(h) {
+  if (h.kind === 'climate') { applyNamedOrClimate(h.item, false); toast(`Drifting inside ${h.item.label}`, h.icon); }
+  else if (h.kind === 'named') {
+    state.mood = MOODS.some(m => m.id === h.item.id) ? h.item.id : null;
+    easeTo(h.item.t, tempoS(), h.item.label);
+    buildWeatherBoard();
+    toast(`Fading to ${h.item.label}`, h.icon);
+  } else {
+    state.mood = null;
+    easeTo(h.item.t, tempoS(), h.item.label);
+    buildWeatherBoard();
+    toast(`${h.facetGroup} → ${h.item.label}`, h.icon);
+  }
+}
+function openWxPicker(q = '') {
+  const p = $('#wxPicker'); p.classList.add('open');
+  const inp = $('#wxPickInput'); if (document.activeElement !== inp) { inp.value = q; inp.focus(); }
+  drawWxHits(inp.value);
+}
+function drawWxHits(q) {
+  const res = $('#wxPickResults'); res.innerHTML = '';
+  const idx = wxIndexFor(state.wxMode);
+  const ql = q.trim().toLowerCase();
+  const hits = !ql ? idx : idx.filter(h =>
+    (h.label + ' ' + h.group + ' ' + h.sub).toLowerCase().includes(ql));
+  if (!hits.length) { res.append(el('div', 'hit', 'Nothing under that name — try a channel like "wind" or "cold".')); return; }
+  let lastGroup = null;
+  hits.forEach(h => {
+    if (h.group !== lastGroup) { lastGroup = h.group;
+      const n = hits.filter(x => x.group === h.group).length;
+      res.append(el('div', 'grouphead', `${h.group}<span class="cnt">${n}</span>`)); }
+    const b = el('button', 'hit', `<span class="dot" style="--acc:${h.acc}"></span>${icon(h.icon)}
+      <span class="htext"><b>${h.label}</b><span class="sub">${h.sub}</span></span>`);
+    b.onclick = () => { applyWxHit(h); $('#wxPicker').classList.remove('open'); };
+    res.append(b);
+  });
+}
+$('#wxBrowseBtn').onclick = () => openWxPicker();
+$('#wxPickInput').addEventListener('input', e => drawWxHits(e.target.value));
 
 const faderEls = {};
 { const wrap = $('#faders');
@@ -2072,6 +2280,7 @@ $('#palInput').addEventListener('input', e => drawHits(e.target.value));
 document.addEventListener('keydown', e => {
   if (e.key === '/' && !e.target.matches('input,select,textarea')) { e.preventDefault(); openPalette(); }
   if (e.key === 'Escape') { $('#palette').classList.remove('open');
+    $('#wxPicker').classList.remove('open');
     $('#confirmPop').classList.remove('open');
     if (state.painterArmed) { state.painterArmed = null;
       if (state.dept === 'painter' && !$('#studio').hidden) renderDept();

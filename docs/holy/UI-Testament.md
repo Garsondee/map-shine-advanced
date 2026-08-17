@@ -815,7 +815,49 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
-*(none yet)*
+**P1 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; not authorised to edit Law/§4.1).**
+Author's live direction: *"Make it support a lot more weather types… how could you break
+weather into smaller chunks?… a dropdown [for] a fine gradient of every weather and climate
+type… will need its own UI."* Built in the mock (`tools/ui-mock/index.html`), verified live
+— **findings, and two calls that belong to Fable, not to me:**
+
+- **What was built.** The weather board's favourites rows (MOODS ×8, CLIMATES ×6) are
+  UNCHANGED — still the fast, bounded, one-glance path §4.1 already describes. Underneath
+  them, a `🔍 Browse all weather` button opens a picker (shares its shell with the Studio's
+  search palette via a new `.searchOverlay` canon class — Law 8 reuse, not a new widget) that
+  browses **six channel-level FACETS** (Precipitation ×12, Sky ×6, Visibility ×7, Wind ×7,
+  Temperature ×7, Electrical ×4 — each item a *partial* target touching one axis only, e.g.
+  picking "Gale" nudges wind alone) plus **16 more Named Weather presets** (full-scene
+  combos, the same shape as a mood) in Direct mode, or all **12 climates** (6 new biomes
+  added: Rainforest, Mediterranean, Steppe, Tundra, Swamp, Highland) in Drift mode. Search
+  matches label+group+description, so a query like "wind" surfaces both the Wind facet AND
+  any Electrical/named item whose description mentions wind — cross-cutting, not siloed.
+  67 Direct entries + 12 climates = 79 weather constructs total, up from 14.
+- **Verified live:** containment at 1920×1080 (995px vs 1003px budget, fits), search +
+  grouping + apply for a facet ("Gale" → exactly the Wind group, one hit, partial nudge),
+  a Named Weather item ("Ashfall" → correct 3-term description, full-scene fade), a climate
+  pick from Drift's full 12 (favourites-row press-state correctly clears when the pick isn't
+  one of the 6 favourites), Escape-to-close. Zero console errors.
+- **Call 1 for Fable: does the picker count as new "Remote chrome"?** Law 3 says the Remote
+  "grows by content, never by chrome," with new content declaring into the fixed grammar. I
+  read the picker as *content growing the weather board's own entry* (same button-row slot,
+  same mode toggle, same Fade Engine writes) rather than a new top-level Remote element — but
+  that's a judgment call about where the grammar's boundary sits, and boundary calls are
+  Fable's per the Covenant. If ruled OUT of bounds, the natural fallback is hosting the full
+  catalogue as a Studio → Scene reference ("Weather Almanac") instead, with the Remote
+  keeping only the favourites rows.
+- **Call 2 for Fable: is this the right facet taxonomy?** Precipitation / Sky / Visibility /
+  Wind / Temperature / Electrical was chosen to map cleanly onto the seven `CHANNELS` the
+  engine already exposes (rain, clouds, fog, wind, freeze, bolt, ash — ash rides under
+  Visibility rather than getting its own facet). Worth a countersign glance before it's
+  treated as settled: are these the right six buckets long-term, and does Temperature riding
+  the `freeze` channel alone (there is no separate heat axis in the current channel set) read
+  honestly or need a tooltip caveat once this leaves the mock.
+- **Logged idea, not built:** tightening a single facet's bracket *within* an active Drift
+  climate (e.g. "keep Alpine, but pin wind higher") without replacing the whole climate —
+  deferred as scope creep on this round; flagging so it isn't lost.
+
+*(no other petitions yet)*
 
 ---
 

@@ -531,6 +531,27 @@ within-stage order is not.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P2 — filed by Claude Opus 5, 2026-08-17 (worker tier; recording an author decision, not
+making one).** **§11 fork 1 — "Ratio detents" — has been ANSWERED by the author**, verbatim:
+*"For time automatically advancing we need more gradients of 0.5, 1, 2, 3, 4, 5 and then 10.
+10x advancement of time is probably as quick as you'd ever want that to be."* Per Covenant
+rule 5 the author's word rewrites any Law, so this supersedes §7's provisional
+**Hold · Real · Session · Brisk · Montage** naming and §11.1's "the numbers are yours."
+
+Built in the mock accordingly: seven detents as **true multipliers of real time**, each
+labelled with what it actually costs at the table — ×0.5 a day in 48 h · ×1 in 24 h · ×2 in
+12 h · ×3 in 8 h · ×4 in 6 h · ×5 in 4.8 h · **×10 in 2.4 h**. Note ×3 lands almost exactly
+on §7's own worked example (*"3 real hours ≈ 8 game hours"*), so the charge's "Session"
+ratio survives as a number even though the name did not. Seven detents is too many to cycle
+on a wing button, so the wing now opens a small menu; the mock applies a **disclosed** 60×
+demo boost (tooltip: *"the mock runs 60× faster so you can watch it"*) because at a truthful
+×1 nothing visibly moves inside a demo — same disclosure discipline as `demoDur()`.
+
+**For Fable:** §7's named-detent sentence and §11.1 both need rewriting around the author's
+numbers; I have not touched either. Worth deciding at the same time whether the named tiers
+(Hold/Real/Session/…) survive *as labels on top of* the numeric detents, or are dropped —
+the mock currently shows numbers only.
+
 **P1 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; not authorised to edit Law/§6).**
 Author's live direction, verbatim: *"If the user calls for 'the next morning' ideally we'd
 go through an actual time transition in the engine. This has to happen 'within reason' — if

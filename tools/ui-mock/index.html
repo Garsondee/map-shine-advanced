@@ -175,27 +175,27 @@ html[data-reduce-motion="1"] *, html[data-reduce-motion="1"] *::before, html[dat
   background:radial-gradient(120% 90% at 50% 45%, transparent 55%, rgba(5,6,10,.55) 100%)}
 
 /* ============================================================================
-   DEMO BAR — mock-only chrome
+   THE MOCK STRIP — was a floating demo bar; now folded into the Remote's own
+   header (author's ask). Deliberately dressed as SCAFFOLDING (dashed rule, slate
+   tint) so nobody mistakes surface-switching or theme-testing for product UI.
    ========================================================================== */
-#demoBar{position:fixed; top:10px; left:12px; z-index:300;
-  display:flex; align-items:center; gap:var(--sp2);
-  background:var(--glass); backdrop-filter:blur(var(--glass-blur));
-  border:1px solid var(--line); border-radius:999px; padding:5px 10px;
-  box-shadow:var(--shadow1); font-size:.75rem}
-#demoBar .brand{display:flex; align-items:center; gap:6px; color:var(--shine);
-  font-weight:600; letter-spacing:.06em; padding:0 4px}
-#demoBar .brand small{color:var(--ink2); font-weight:400; letter-spacing:.12em}
-#demoBar .seg{display:flex; background:var(--bg2); border:1px solid var(--line);
+#mockStrip{display:flex; align-items:center; gap:6px; padding:4px 10px; flex:none;
+  border-bottom:1px solid var(--line); font-size:.72rem;
+  border-top:1px dashed color-mix(in oklab, var(--c-system) 32%, transparent);
+  background:color-mix(in oklab, var(--c-system) 7%, transparent)}
+#mockStrip .seg{display:flex; background:var(--bg2); border:1px solid var(--line);
   border-radius:999px; padding:2px}
-#demoBar .seg button{padding:3px 12px; border-radius:999px; color:var(--ink1)}
-#demoBar .seg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine);
+#mockStrip .seg button{padding:2px 9px; border-radius:999px; color:var(--ink1);
+  font-size:.7rem}
+#mockStrip .seg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine);
   box-shadow:inset 0 0 0 1px var(--shine-glow)}
-#demoBar select{background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
-  padding:3px 6px; color:var(--ink0); font-size:.72rem}
-#demoBar .iconbtn{width:26px; height:26px; display:grid; place-items:center;
-  border-radius:50%; color:var(--ink1)}
-#demoBar .iconbtn:hover{background:var(--bg3); color:var(--ink0)}
-#demoBar .iconbtn[aria-pressed="true"]{color:var(--shine); background:var(--shine-soft)}
+#mockStrip select{background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
+  padding:2px 4px; color:var(--ink0); font-size:.68rem; max-width:104px}
+#mockStrip .iconbtn{width:23px; height:23px; display:grid; place-items:center;
+  border-radius:6px; color:var(--ink1); flex:none}
+#mockStrip .iconbtn:hover{background:var(--bg3); color:var(--ink0)}
+#mockStrip .iconbtn[aria-pressed="true"]{color:var(--shine); background:var(--shine-soft)}
+#mockStrip .ico{width:14px; height:14px}
 
 #frame1080{position:fixed; z-index:290; border:2px dashed var(--shine-glow);
   pointer-events:none; display:none}
@@ -212,7 +212,7 @@ html[data-frame="1"] #frame1080{display:block}
   border:1px solid var(--line); border-radius:var(--r-room);
   box-shadow:var(--shadow3); display:flex; flex-direction:column; overflow:hidden}
 .room-head{display:flex; align-items:center; gap:var(--sp2);
-  padding:10px 14px; border-bottom:1px solid var(--line); cursor:grab; user-select:none;
+  padding:8px 14px; border-bottom:1px solid var(--line); cursor:grab; user-select:none;
   flex:none}
 .room-head:active{cursor:grabbing}
 .room-head .rtitle{font-weight:600; letter-spacing:.14em; font-size:.72rem;
@@ -260,8 +260,8 @@ html[data-frame="1"] #frame1080{display:block}
    THE REMOTE
    ========================================================================== */
 #remote{top:16px; right:16px; width:402px; max-height:calc(100vh - 32px)}
-#remote .body{padding:8px 16px 10px; display:flex; flex-direction:column;
-  gap:8px; overflow-y:auto; scrollbar-width:thin}
+#remote .body{padding:7px 15px 9px; display:flex; flex-direction:column;
+  gap:6px; overflow-y:auto; scrollbar-width:thin}
 
 /* now playing */
 #nowPlaying{display:flex; align-items:center; gap:10px; padding:7px 10px;
@@ -285,7 +285,7 @@ html[data-frame="1"] #frame1080{display:block}
 
 /* astrolabe + wings */
 #astroRow{position:relative; margin-top:0; flex:none}
-#astro{position:relative; width:258px; height:258px; margin:0 auto}
+#astro{position:relative; width:232px; height:232px; margin:0 auto}
 .wing{position:absolute; top:50%; transform:translateY(-50%); display:flex;
   flex-direction:column; gap:5px; z-index:2}
 #wingL{left:0} #wingR{right:0}
@@ -298,41 +298,86 @@ html[data-frame="1"] #frame1080{display:block}
 .mini[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
   background:var(--shine-soft)}
 .mini .sub{position:absolute; bottom:1px; right:3px; font-size:.5rem; color:var(--ink2)}
+/* THE RIM — the clock, and the dial's dominant element. Wider band than round 2
+   (47px vs 31px) with the interior pulled in, per the author's call. NOON at TOP:
+   hour h sits at ((h-12)/24)*360deg, clockwise. */
 #astro .ring{position:absolute; inset:0; border-radius:50%;
-  /* NOON at TOP (author's call): hour h sits at ((h-12)/24)*360deg, clockwise */
   background:conic-gradient(from 0deg,
     #ffefc2 0deg,   #f7e3a0 30deg,  #f2c76e 68deg,  #e08a5a 83deg,
     #7a5a7c 105deg, #232a52 128deg, #1b2340 180deg, #232a52 232deg,
     #6a5a8c 262deg, #d99a6a 277deg, #f2c76e 292deg, #f7e3a0 330deg, #ffefc2 360deg);
-  -webkit-mask:radial-gradient(closest-side, transparent 74%, #000 75%, #000 98%, transparent 99%);
-          mask:radial-gradient(closest-side, transparent 74%, #000 75%, #000 98%, transparent 99%);
+  -webkit-mask:radial-gradient(closest-side, transparent 60%, #000 61%, #000 99%, transparent 100%);
+          mask:radial-gradient(closest-side, transparent 60%, #000 61%, #000 99%, transparent 100%);
   box-shadow:0 0 calc(30px * var(--glow-on)) rgba(231,195,104,.12);
-  cursor:pointer}
-#astro .ticks{position:absolute; inset:0; pointer-events:none}
-#astro .ticks line{stroke:rgba(255,255,255,.35); stroke-width:1}
-#astro .ticks text{fill:var(--ink2); font-size:8.5px; text-anchor:middle; font-family:var(--font)}
-#astro .sun{position:absolute; top:50%; left:50%; width:22px; height:22px; margin:-11px;
-  border-radius:50%; pointer-events:none;
-  background:radial-gradient(circle at 35% 35%, #fff7dd, var(--shine) 60%, #c89b3c);
-  box-shadow:0 0 calc(16px * var(--glow-on)) var(--shine-glow), 0 0 4px rgba(0,0,0,.4)}
-#astro .moon{position:absolute; top:50%; left:50%; width:15px; height:15px; margin:-7.5px;
-  border-radius:50%; cursor:help; opacity:.85;
-  background:radial-gradient(circle at 60% 35%, #eef2ff, #9aa7c8 65%, #6a7694)}
-#astro .hub{position:absolute; inset:50px; border-radius:50%;
-  background:radial-gradient(circle at 50% 30%, var(--bg3), var(--bg1) 75%);
-  border:1px solid var(--line); display:flex; flex-direction:column; align-items:center;
-  justify-content:center; gap:2px; text-align:center}
-#astro .hub .time{font-size:1.5rem; font-weight:650; letter-spacing:.02em}
-#astro .hub .phase{font-size:.62rem; letter-spacing:.34em; color:var(--shine);
-  text-transform:uppercase; margin-left:.34em}
-#astro .hub .winddesc{font-size:.66rem; color:var(--ink2); display:flex; gap:5px; align-items:center}
-#astro .hub .winddesc .dirarrow{display:inline-grid; place-items:center;
-  width:16px; height:16px; border-radius:50%;
-  background:color-mix(in oklab, var(--c-atmos) 18%, transparent);
-  color:var(--c-atmos); transition:transform var(--t-micro)}
-#astro .hub .winddesc .dirarrow svg{width:11px; height:11px}
-#astro .windgrab{position:absolute; inset:50px; border-radius:50%; cursor:grab}
-#astro .windgrab:active{cursor:grabbing}
+  cursor:grab}
+#astro .ring:active{cursor:grabbing}
+/* rim art: ticks hug the OUTER edge, labels sit in the band's clear middle, so
+   the two can never collide (the round-2 legibility complaint). */
+#astro .rimArt{position:absolute; inset:0; pointer-events:none; overflow:visible}
+#astro .rimArt line{stroke:rgba(255,255,255,.3); stroke-width:1}
+#astro .rimArt line.major{stroke:rgba(255,255,255,.6); stroke-width:1.6}
+#astro .rimArt text{font-size:8px; font-family:var(--font); font-weight:700;
+  letter-spacing:.13em; text-anchor:middle; dominant-baseline:middle;
+  fill:rgba(255,255,255,.82); paint-order:stroke;
+  stroke:rgba(6,9,20,.55); stroke-width:2.4; stroke-linejoin:round}
+#astro .handle{filter:drop-shadow(0 0 calc(7px * var(--glow-on)) var(--shine-glow))}
+#astro .handle rect{fill:var(--shine)}
+#astro .handle circle{fill:var(--shine)}
+
+/* THE LANDSCAPE — replaces the dark hub. A vector scene lit by the same hour the
+   rim shows: sky gradient, sun/moon on a real arc that sets behind the terrain,
+   clouds fading with cover, stars at night. */
+#astro .scene{position:absolute; inset:50px; border-radius:50%; overflow:hidden;
+  border:1px solid rgba(255,255,255,.10);
+  box-shadow:inset 0 0 18px rgba(0,0,0,.55), 0 0 0 4px var(--bg1)}
+#astro .scene svg{width:100%; height:100%; display:block}
+#astro .sceneText{position:absolute; inset:50px; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:1px; pointer-events:none; text-align:center}
+#astro .sceneText .time{font-size:1.62rem; font-weight:700; letter-spacing:.01em;
+  color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.75), 0 0 18px rgba(0,0,0,.6)}
+#astro .sceneText .phase{font-size:.6rem; letter-spacing:.32em; margin-left:.32em;
+  color:rgba(255,255,255,.88); text-transform:uppercase;
+  text-shadow:0 1px 3px rgba(0,0,0,.8)}
+
+/* THE WIND ROW — bigger dial, and the readout is a real button (author's ask) */
+#windRow{display:flex; align-items:center; gap:9px; padding:4px 8px;
+  background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-card)}
+#windDial{width:36px; height:36px; flex:none; border-radius:50%; position:relative;
+  background:radial-gradient(circle at 50% 40%, var(--bg3), var(--bg1));
+  border:1px solid var(--line); cursor:grab; display:grid; place-items:center}
+#windDial:active{cursor:grabbing}
+#windDial svg{width:34px; height:34px; overflow:visible}
+#windDial .rose{stroke:rgba(255,255,255,.14); stroke-width:1}
+#windDial .needle{fill:var(--c-atmos);
+  filter:drop-shadow(0 0 calc(5px * var(--glow-on)) var(--c-atmos))}
+#windDial .tail{fill:color-mix(in oklab, var(--c-atmos) 35%, transparent)}
+#windPick{flex:1; display:flex; align-items:center; gap:7px; padding:6px 9px;
+  border-radius:8px; border:1px solid var(--line); background:var(--bg1);
+  color:var(--ink0); font-size:.78rem; transition:all var(--t-micro)}
+#windPick:hover{border-color:var(--c-atmos); background:var(--bg3)}
+#windPick .wtier{color:var(--ink2)}
+#windPick .wdir{font-weight:650; color:var(--c-atmos); min-width:30px}
+#windPick .chev{margin-left:auto; color:var(--ink2); width:.9em; height:.9em}
+
+/* the compass picker */
+#compassPop{position:fixed; z-index:360; display:none; padding:12px;
+  background:var(--glass); backdrop-filter:blur(var(--glass-blur));
+  border:1px solid var(--line-strong); border-radius:14px; box-shadow:var(--shadow3);
+  flex-direction:column; gap:8px; align-items:center}
+#compassPop.open{display:flex}
+#compassPop .chead{font-size:.6rem; letter-spacing:.2em; text-transform:uppercase;
+  color:var(--ink2)}
+#compassRose{position:relative; width:190px; height:190px}
+#compassRose .cbtn{position:absolute; transform:translate(-50%,-50%);
+  min-width:28px; padding:3px 5px; border-radius:6px; font-size:.62rem; font-weight:650;
+  color:var(--ink2); border:1px solid transparent; background:transparent;
+  transition:all var(--t-micro)}
+#compassRose .cbtn:hover{color:var(--ink0); background:var(--bg2); border-color:var(--line)}
+#compassRose .cbtn.card{color:var(--ink1); font-size:.7rem}
+#compassRose .cbtn[aria-pressed="true"]{color:var(--c-atmos); border-color:var(--c-atmos);
+  background:color-mix(in oklab, var(--c-atmos) 14%, transparent)}
+#compassRose .cmid{position:absolute; inset:52px; border-radius:50%;
+  border:1px dashed var(--line); pointer-events:none}
 
 /* fade time */
 .blocklabel{font-size:.64rem; letter-spacing:.22em; text-transform:uppercase;
@@ -350,8 +395,8 @@ html[data-frame="1"] #frame1080{display:block}
 
 /* moods */
 #moods{display:grid; grid-template-columns:repeat(4,1fr); gap:5px}
-#moods button{display:flex; flex-direction:column; align-items:center; gap:2px;
-  padding:4px 2px 3px; border-radius:9px; border:1px solid var(--line);
+#moods button{display:flex; flex-direction:column; align-items:center; gap:1px;
+  padding:3px 2px 2px; border-radius:9px; border:1px solid var(--line);
   background:var(--bg2); color:var(--ink1); font-size:.66rem;
   transition:all var(--t-micro)}
 #moods button .ico{width:1.25em; height:1.25em; color:var(--c-atmos)}
@@ -362,7 +407,7 @@ html[data-frame="1"] #frame1080{display:block}
 /* faders */
 #faders{display:flex; justify-content:space-between; padding:2px 2px 0}
 .fader{display:flex; flex-direction:column; align-items:center; gap:5px; width:46px}
-.fader .track{position:relative; width:26px; height:108px; border-radius:13px;
+.fader .track{position:relative; width:26px; height:80px; border-radius:13px;
   background:var(--bg2); border:1px solid var(--line); cursor:pointer; overflow:visible}
 .fader .fill{position:absolute; left:2px; right:2px; bottom:2px; border-radius:11px;
   background:linear-gradient(180deg, color-mix(in oklab, var(--acc) 85%, white 12%), var(--acc));
@@ -394,15 +439,45 @@ html[data-frame="1"] #frame1080{display:block}
   text-overflow:ellipsis}
 #cueCard .meta{display:flex; gap:8px; align-items:center; color:var(--ink2); font-size:.68rem}
 #cueCard .meta .ico{color:var(--c-atmos)}
-#goBtn{width:74px; border-radius:var(--r-card); border:1px solid var(--shine-glow);
-  background:linear-gradient(180deg, color-mix(in oklab, var(--shine) 26%, var(--bg2)), var(--bg2));
-  color:var(--shine); font-weight:800; letter-spacing:.18em; font-size:.9rem;
-  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
-  transition:all var(--t-micro);
-  box-shadow:0 0 calc(18px * var(--glow-on)) var(--shine-soft)}
-#goBtn:hover{box-shadow:0 0 calc(26px * var(--glow-on)) var(--shine-glow)}
-#goBtn:active{transform:scale(.96)}
-#goBtn:disabled{opacity:.4; box-shadow:none; cursor:default}
+/* GO — a transport key, not a link. Domed face, lit rim, real travel on press. */
+#goBtn{width:80px; border-radius:12px; position:relative; overflow:hidden; isolation:isolate;
+  border:1px solid color-mix(in oklab, var(--shine) 58%, transparent);
+  background:
+    radial-gradient(115% 75% at 50% -8%, color-mix(in oklab, var(--shine) 46%, transparent), transparent 72%),
+    linear-gradient(180deg, color-mix(in oklab, var(--shine) 20%, var(--bg3)) 0%,
+                            var(--bg2) 72%, color-mix(in oklab, var(--shine) 7%, var(--bg1)) 100%);
+  color:var(--shine); font-weight:900; letter-spacing:.22em; font-size:1.02rem;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;
+  text-shadow:0 0 14px var(--shine-glow), 0 1px 0 rgba(0,0,0,.45);
+  transition:transform var(--t-micro), box-shadow var(--t-micro), filter var(--t-micro);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, var(--shine) 52%, transparent),
+    inset 0 -10px 16px -10px color-mix(in oklab, var(--shine) 55%, transparent),
+    inset 0 0 0 1px rgba(255,255,255,.04),
+    0 3px 0 -1px color-mix(in oklab, var(--shine) 22%, var(--bg0)),
+    0 5px 14px color-mix(in oklab, var(--shine) 20%, transparent),
+    0 0 calc(20px * var(--glow-on)) var(--shine-soft)}
+/* a slow sheen that sweeps the face while a cue is armed — reads as "ready" */
+#goBtn::after{content:""; position:absolute; inset:-40% -120%; z-index:-1;
+  background:linear-gradient(74deg, transparent 42%,
+    color-mix(in oklab, var(--shine) 30%, transparent) 50%, transparent 58%);
+  animation:goSheen 4.6s ease-in-out infinite}
+@keyframes goSheen{0%,72%{transform:translateX(-58%)}100%{transform:translateX(58%)}}
+#goBtn .ico{width:1.15em; height:1.15em; fill:currentColor; stroke:none; opacity:.92}
+#goBtn:hover{filter:brightness(1.09);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, var(--shine) 62%, transparent),
+    inset 0 -10px 16px -10px color-mix(in oklab, var(--shine) 65%, transparent),
+    0 3px 0 -1px color-mix(in oklab, var(--shine) 26%, var(--bg0)),
+    0 6px 18px color-mix(in oklab, var(--shine) 26%, transparent),
+    0 0 calc(30px * var(--glow-on)) var(--shine-glow)}
+#goBtn:active{transform:translateY(2px);
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,.45),
+    inset 0 0 0 1px color-mix(in oklab, var(--shine) 30%, transparent),
+    0 1px 0 -1px color-mix(in oklab, var(--shine) 18%, var(--bg0))}
+#goBtn:disabled{opacity:.32; filter:saturate(.4); box-shadow:none; cursor:default}
+#goBtn:disabled::after{display:none}
 #cueList{display:none; flex-direction:column; gap:3px; border:1px solid var(--line);
   border-radius:var(--r-card); padding:6px; background:var(--bg1); max-height:150px; overflow-y:auto}
 #cueDeck.open #cueList{display:flex}
@@ -416,7 +491,7 @@ html[data-frame="1"] #frame1080{display:block}
 /* impulses + footer */
 #impulses{display:flex; gap:6px}
 #impulses button{flex:1; display:flex; align-items:center; justify-content:center; gap:6px;
-  padding:6px 4px; border-radius:9px; border:1px solid var(--line); background:var(--bg2);
+  padding:5px 4px; border-radius:9px; border:1px solid var(--line); background:var(--bg2);
   color:var(--ink1); font-size:.72rem; position:relative; transition:all var(--t-micro)}
 #impulses button:hover{border-color:var(--warn); color:var(--ink0)}
 #impulses button:active{transform:scale(.95)}
@@ -479,8 +554,6 @@ html[data-live="1"] #npStatus .live{display:flex}
   border:1px solid rgba(255,107,92,.4); box-shadow:var(--shadow2); font-size:.74rem}
 html[data-live="1"] #dirHud{display:flex}
 html[data-live="1"] #remote, html[data-live="1"] #pill{display:none}
-html[data-live="1"] #demoBar{opacity:.15}
-html[data-live="1"] #demoBar:hover{opacity:1}
 html[data-live="1"] #map{transform:scale(1.06)}
 #map{transition:transform 9s var(--ease)}
 #dirHud .dot{width:8px; height:8px; border-radius:50%; background:#ff6b5c;
@@ -494,16 +567,19 @@ html[data-live="1"] #map{transform:scale(1.06)}
 #dirRelease:hover{border-color:#ff6b5c; color:#ff8a76}
 
 /* the jump popover — Dawn/Noon/Dusk/Mid + Day/Week + Set-a-date, one wing slot */
-#jumpPop{position:fixed; z-index:220; display:none; flex-direction:column; gap:2px;
+#jumpPop, #speedPop{position:fixed; z-index:220; display:none; flex-direction:column; gap:2px;
   min-width:190px; padding:6px; background:var(--glass); backdrop-filter:blur(var(--glass-blur));
   border:1px solid var(--line-strong); border-radius:12px; box-shadow:var(--shadow3)}
-#jumpPop.open{display:flex}
-#jumpPop .jhead{font-size:.6rem; letter-spacing:.18em; text-transform:uppercase;
+#jumpPop.open, #speedPop.open{display:flex}
+#jumpPop .jhead, #speedPop .jhead{font-size:.6rem; letter-spacing:.18em; text-transform:uppercase;
   color:var(--ink2); padding:5px 8px 3px}
-#jumpPop button{display:flex; align-items:center; gap:9px; padding:7px 8px; border-radius:7px;
-  color:var(--ink1); font-size:.76rem; text-align:left}
-#jumpPop button .ico{width:1.1em; height:1.1em; color:var(--shine)}
-#jumpPop button:hover{background:var(--bg2); color:var(--ink0)}
+#jumpPop button, #speedPop button{display:flex; align-items:center; gap:9px; padding:7px 8px;
+  border-radius:7px; color:var(--ink1); font-size:.76rem; text-align:left}
+#jumpPop button .ico, #speedPop button .ico{width:1.1em; height:1.1em; color:var(--shine)}
+#jumpPop button:hover, #speedPop button:hover{background:var(--bg2); color:var(--ink0)}
+#speedPop button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
+#speedPop button b{min-width:34px}
+#speedPop button small{color:var(--ink2); font-weight:400}
 #jumpPop hr{border:none; border-top:1px solid var(--line); margin:3px 4px}
 
 /* the date-jump overlay — steppers, not a full calendar grid (proportionate to how
@@ -876,27 +952,6 @@ html[data-density="compact"] #cards{gap:9px}
 </div>
 <div id="flash"></div>
 
-<!-- ═══════════════ DEMO BAR ═══════════════ -->
-<nav id="demoBar" aria-label="Mock controls">
-  <span class="brand"><svg class="ico"><use href="#i-candle"/></svg>MAP&nbsp;SHINE <small>LANTERN&nbsp;MOCK</small></span>
-  <div class="seg" role="group" aria-label="Surface">
-    <button id="tabRemote" aria-pressed="true">Remote</button>
-    <button id="tabStudio" aria-pressed="false">Studio</button>
-    <button id="tabPlayer" aria-pressed="false">Player</button>
-  </div>
-  <select id="themeSel" aria-label="Theme">
-    <option value="dark">Lantern Dark</option>
-    <option value="light">Lantern Light</option>
-    <option value="hc">High Contrast</option>
-    <option value="soft">Soft</option>
-  </select>
-  <button class="iconbtn" id="frameBtn" aria-pressed="false" title="Toggle 1920×1080 containment frame">
-    <svg class="ico"><use href="#i-frame"/></svg></button>
-  <button class="iconbtn" id="debugBtn" aria-pressed="true" title="Debug dress — the author's equipment. Default ON for now; flips OFF at release (Testament §4.6)">
-    <svg class="ico"><use href="#i-flask"/></svg></button>
-  <button class="iconbtn" id="resetBtn" title="Reset demo">
-    <svg class="ico"><use href="#i-reset"/></svg></button>
-</nav>
 <div id="frame1080"><span class="tag">1920 × 1080 — everything must live in here</span></div>
 
 <!-- ═══════════════ THE REMOTE ═══════════════ -->
@@ -913,6 +968,28 @@ html[data-density="compact"] #cards{gap:9px}
     <button class="hbtn" id="collapseBtn" title="Collapse to pill">
       <svg class="ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg></button>
   </header>
+
+  <div id="mockStrip" aria-label="Mock controls">
+    <div class="seg" role="group" aria-label="Surface">
+      <button id="tabRemote" aria-pressed="true">Remote</button>
+      <button id="tabStudio" aria-pressed="false">Studio</button>
+      <button id="tabPlayer" aria-pressed="false">Player</button>
+    </div>
+    <span style="flex:1"></span>
+    <select id="themeSel" aria-label="Theme" title="LANTERN theme">
+      <option value="dark">Dark</option>
+      <option value="light">Light</option>
+      <option value="hc">Contrast</option>
+      <option value="soft">Soft</option>
+    </select>
+    <button class="iconbtn" id="frameBtn" aria-pressed="false" title="Toggle the 1920×1080 containment frame">
+      <svg class="ico"><use href="#i-frame"/></svg></button>
+    <button class="iconbtn" id="debugBtn" aria-pressed="true" title="Debug dress — the author's equipment. Default ON for now; flips OFF at release (Testament §4.6)">
+      <svg class="ico"><use href="#i-flask"/></svg></button>
+    <button class="iconbtn" id="resetBtn" title="Reset the mock">
+      <svg class="ico"><use href="#i-reset"/></svg></button>
+  </div>
+
   <div class="body">
 
     <div id="nowPlaying" aria-live="polite">
@@ -961,29 +1038,91 @@ html[data-density="compact"] #cards{gap:9px}
     <div class="wing" id="wingL" role="group" aria-label="Time controls"></div>
     <div id="astro">
       <div class="ring" id="astroRing" role="slider" aria-label="Time of day"
-           aria-valuemin="0" aria-valuemax="24" aria-valuenow="14" tabindex="0"></div>
-      <svg class="ticks" viewBox="0 0 258 258" aria-hidden="true">
+           aria-valuemin="0" aria-valuemax="24" aria-valuenow="14" tabindex="0"
+           title="Drag the rim to set the hour"></div>
+      <svg class="rimArt" viewBox="0 0 244 244" aria-hidden="true">
         <g id="tickG"></g>
-        <text x="129" y="16">NOON</text><text x="129" y="250">MIDNIGHT</text>
-        <text x="14" y="133" style="writing-mode:vertical-rl">DAWN</text>
-        <text x="247" y="133" style="writing-mode:vertical-rl">DUSK</text>
+        <!-- labels sit at r=90. DAWN/DUSK read ACROSS the dial, so their text
+             extends RADIALLY (r≈77–103) — that, not the centre, is what has to
+             clear the ticks and the sweeping handle. -->
+        <text x="122" y="32">NOON</text><text x="122" y="212">MIDNIGHT</text>
+        <text x="32" y="122">DAWN</text><text x="212" y="122">DUSK</text>
+        <!-- the grip rides the TICK band (r 108–118.5). Measured, not assumed:
+             DAWN/DUSK reach r=105, so anything starting below ~106 sweeps over
+             their text. Sitting among the ticks also reads as pointing AT the
+             scale, which is what a dial hand should do. -->
+        <g class="handle" id="handleG">
+          <rect x="116.5" y="3.5" width="11" height="10.5" rx="5.5"/>
+        </g>
       </svg>
-      <div class="sun" id="sunOrb"></div>
-      <div class="moon" id="moonOrb"></div>
-      <div class="hub">
+
+      <!-- THE LANDSCAPE: lit by the same hour the rim shows. Sun and moon ride a
+           real arc through this sky and set behind the terrain; clouds fade with
+           cover; stars come out. Terrain is drawn AFTER the orbs, so the horizon
+           occludes them naturally — no clipping trickery needed. -->
+      <div class="scene">
+        <svg viewBox="0 0 160 160" aria-hidden="true" preserveAspectRatio="xMidYMid slice">
+          <defs>
+            <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop id="skyTop" offset="0"    stop-color="#2a6fbc"/>
+              <stop id="skyMid" offset="0.62" stop-color="#63a3d8"/>
+              <stop id="skyBot" offset="1"    stop-color="#a8cdea"/>
+            </linearGradient>
+            <radialGradient id="sunGlow">
+              <stop offset="0" stop-color="rgba(255,214,120,.62)"/>
+              <stop offset="1" stop-color="rgba(255,190,90,0)"/>
+            </radialGradient>
+            <radialGradient id="moonGlow">
+              <stop offset="0" stop-color="rgba(210,225,255,.42)"/>
+              <stop offset="1" stop-color="rgba(190,210,255,0)"/>
+            </radialGradient>
+          </defs>
+          <rect width="160" height="160" fill="url(#skyGrad)"/>
+          <g id="starG" opacity="0"></g>
+          <g id="sunG"><circle r="19" fill="url(#sunGlow)"/><circle r="7.5" fill="#ffeaad"/></g>
+          <g id="moonG"><circle r="13" fill="url(#moonGlow)"/>
+            <circle r="5.4" fill="#e9efff"/>
+            <circle id="moonShade" r="5.4" fill="#0b1024"/></g>
+          <g id="cloudG" opacity="0">
+            <path d="M18 46q5-9 14-6 4-8 13-5 7 1 8 8 8 0 8 6H14q-1-3 4-3Z"/>
+            <path d="M92 33q4-8 12-5 4-7 12-4 6 1 7 7 7 0 7 6H88q-1-3 4-4Z"/>
+            <path d="M52 66q4-6 10-4 3-6 10-3 5 1 6 6 6 0 6 5H49q-1-3 3-4Z"/>
+          </g>
+          <path id="mtnFar"  d="M0 99 L15 78 L27 89 L41 70 L57 87 L71 76 L86 91 L99 72 L113 87 L127 80 L141 93 L153 84 L160 95 L160 160 L0 160 Z"/>
+          <path id="hillNear" d="M0 108 Q26 97 52 105 Q80 113 108 103 Q134 94 160 106 L160 160 L0 160 Z"/>
+          <g id="treeG">
+            <path d="M22 112 l5-13 5 13 Z"/><path d="M30 115 l4-10 4 10 Z"/>
+            <path d="M124 108 l5-12 5 12 Z"/><path d="M132 111 l4-9 4 9 Z"/>
+          </g>
+          <path id="ground" d="M0 116 Q80 111 160 118 L160 160 L0 160 Z"/>
+        </svg>
+      </div>
+      <div class="sceneText">
         <div class="time num" id="clockTxt">14:00</div>
         <div class="phase" id="phaseTxt">DAY</div>
-        <div class="winddesc" title="Wind — drag inside the dial to steer it">
-          <span class="dirarrow" id="windDirIco"><svg viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" stroke-width="2.6" stroke-linecap="round"
-            stroke-linejoin="round"><path d="M12 20V5M7 10l5-5 5 5"/></svg></span>
-          <span id="windTxt">Light · SSW</span></div>
       </div>
-      <div class="windgrab" id="windGrab" role="slider" aria-label="Wind direction"
-           aria-valuemin="0" aria-valuemax="359" aria-valuenow="205" tabindex="0"
-           title="Drag to set wind direction"></div>
     </div>
     <div class="wing" id="wingR" role="group" aria-label="Moment shots"></div>
+    </div>
+
+    <div id="windRow">
+      <button id="windDial" role="slider" aria-label="Wind direction"
+              aria-valuemin="0" aria-valuemax="359" aria-valuenow="205" tabindex="0"
+              title="Drag to steer the wind">
+        <svg viewBox="0 0 40 40">
+          <circle class="rose" cx="20" cy="20" r="15" fill="none"/>
+          <g id="windNeedle" transform-origin="20 20">
+            <path class="tail" d="M20 30 l-3.4 6 h6.8 Z"/>
+            <path class="needle" d="M20 5 l5.6 12.5 h-11.2 Z"/>
+            <circle class="needle" cx="20" cy="20" r="2.2"/>
+          </g>
+        </svg>
+      </button>
+      <button id="windPick" title="Pick a wind direction">
+        <span class="wtier" id="windTier">Light</span>
+        <span class="wdir" id="windDirTxt">SSW</span>
+        <svg class="chev ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg>
+      </button>
     </div>
 
     <div>
@@ -1112,6 +1251,11 @@ html[data-density="compact"] #cards{gap:9px}
   </div>
 </div>
 <div id="jumpPop" role="menu" aria-label="Jump time"></div>
+<div id="speedPop" role="menu" aria-label="Time speed"></div>
+<div id="compassPop" role="dialog" aria-label="Wind direction">
+  <span class="chead">Wind from</span>
+  <div id="compassRose"><div class="cmid"></div></div>
+</div>
 <div id="datePop" role="dialog" aria-label="Set the date">
   <div class="box">
     <h3><svg class="ico"><use href="#i-calendar"/></svg>Set the date</h3>
@@ -1418,14 +1562,23 @@ const state = {
      that cross into a new day. null = no jump theatre playing right now. */
   passage:null,
   /* time flow: the world clock can RUN */
-  flow:false, speedIx:0,
+  flow:false, speedIx:1,   // ×1 — the honest default; the wing menu offers 0.5→10
   /* weather board mode */
   wxMode:'direct', climate:null, nextWalk:0,
   /* director */
   dirLive:false,
 };
-const SPEEDS = [1, 6, 30];          // game-minutes per real second
-const SPEED_LABELS = ['×1', '×6', '×30'];
+/* Time-flow ratios as TRUE multipliers of real time (author's call, round 4):
+   ×10 is the practical ceiling — a whole day in 2.4 real hours. A day takes
+   24/N real hours at ratio N, which is the number the tooltip quotes.
+   DEMO_TIME_BOOST is mock-only and DISCLOSED wherever the ratio is shown: at a
+   truthful ×1 you would watch the clock for an hour to see the light move, and
+   the point of this mock is to feel the sweep. Same disclosure discipline as
+   demoDur()'s compressed fades. */
+const SPEEDS = [0.5, 1, 2, 3, 4, 5, 10];
+const SPEED_LABELS = ['×0.5', '×1', '×2', '×3', '×4', '×5', '×10'];
+const DEMO_TIME_BOOST = 60;
+const dayInRealHours = n => (24 / n) % 1 === 0 ? `${24 / n} h` : `${(24 / n).toFixed(1)} h`;
 const LUNAR_DAYS = 29.53;
 const MOON_PHASES = ['New moon','Waxing crescent','First quarter','Waxing gibbous',
   'Full moon','Waning gibbous','Last quarter','Waning crescent'];
@@ -1582,16 +1735,105 @@ function toastOnce(key, msg) {
 /* ── astrolabe ──────────────────────────────────────────────────────────── */
 const phaseOf = h => h < 5 ? 'NIGHT' : h < 8 ? 'DAWN' : h < 17 ? 'DAY'
                    : h < 20 ? 'DUSK' : 'NIGHT';
+/* Ticks hug the rim's OUTER edge only (r 112/108 → 121 of a 244 box) so they can
+   never reach the labels sitting at r≈95 — the round-2 overlap, designed out. */
 { const g = $('#tickG'); let ticks = '';
   for (let i = 0; i < 24; i++) {
-    const a = (i / 24) * 2 * Math.PI, R = 129, r1 = i % 6 ? 121 : 117, r2 = 126;
-    ticks += `<line x1="${R + r1 * Math.sin(a)}" y1="${R - r1 * Math.cos(a)}"
-                    x2="${R + r2 * Math.sin(a)}" y2="${R - r2 * Math.cos(a)}"/>`;
+    const a = (i / 24) * 2 * Math.PI, C = 122, major = i % 6 === 0;
+    const r1 = major ? 108 : 113, r2 = 121;
+    ticks += `<line class="${major ? 'major' : ''}"
+                    x1="${(C + r1 * Math.sin(a)).toFixed(2)}" y1="${(C - r1 * Math.cos(a)).toFixed(2)}"
+                    x2="${(C + r2 * Math.sin(a)).toFixed(2)}" y2="${(C - r2 * Math.cos(a)).toFixed(2)}"/>`;
   } g.innerHTML = ticks; }
-function placeOrb(elm, hour, r) {
-  const a = ((hour - 12) / 24) * 2 * Math.PI;             // NOON at top (author's call)
-  elm.style.transform =
-    `translate(${r * Math.sin(a)}px, ${-r * Math.cos(a)}px)`;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   THE LANDSCAPE SCENE — vector geometry lit by the hour (author's idea).
+   Sun and moon ride one circular arc centred on the HORIZON, so they rise at
+   one edge, cross the sky and set at the other; the terrain is painted over
+   them, so "behind the horizon" is z-order, not a special case.
+   ══════════════════════════════════════════════════════════════════════════ */
+const SCENE_HORIZON_Y = 100, SCENE_CX = 80, SCENE_ORBIT_R = 62;
+/** Place a celestial body for a given hour. h=6 rises left, 12 top, 18 sets right. */
+function orbitXY(hour) {
+  const th = ((hour - 6) / 24) * 2 * Math.PI;
+  return { x: SCENE_CX - SCENE_ORBIT_R * Math.cos(th),
+           y: SCENE_HORIZON_Y - SCENE_ORBIT_R * Math.sin(th),
+           elev: Math.sin(th) };           // >0 = above the horizon
+}
+/** Sky keyframes: [hour, top, mid, bottom]. Interpolated, wrapping at 24. */
+const SKY_KEYS = [
+  [0,    [7,12,34],   [12,19,48],   [20,28,62]],
+  [5,    [10,17,48],  [26,35,80],   [58,58,98]],
+  [6.5,  [29,43,92],  [106,90,134], [232,160,94]],
+  [8,    [47,95,158], [111,159,208],[188,216,238]],
+  [12,   [42,111,188],[99,163,216], [168,205,234]],
+  [16,   [47,111,180],[120,168,212],[203,216,230]],
+  [18,   [42,76,140], [160,106,122],[240,160,90]],
+  [19.5, [20,32,74],  [70,50,94],   [176,96,62]],
+  [21,   [10,17,48],  [20,28,62],   [34,40,76]],
+  [24,   [7,12,34],   [12,19,48],   [20,28,62]],
+];
+const rgb = c => `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const mix3 = (a, b, t) => [lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t)];
+function skyFor(h) {
+  let a = SKY_KEYS[0], b = SKY_KEYS[SKY_KEYS.length - 1];
+  for (let i = 0; i < SKY_KEYS.length - 1; i++)
+    if (h >= SKY_KEYS[i][0] && h <= SKY_KEYS[i + 1][0]) { a = SKY_KEYS[i]; b = SKY_KEYS[i + 1]; break; }
+  const t = (h - a[0]) / Math.max(b[0] - a[0], .0001);
+  return { top: mix3(a[1], b[1], t), mid: mix3(a[2], b[2], t), bot: mix3(a[3], b[3], t) };
+}
+/* Terrain palettes: night → day, lerped by daylight, then warmed near the horizon
+   sun so golden hour actually reads on the hills. */
+const TERRAIN = {
+  mtnFar:   { night:[13,20,40],  day:[104,126,158] },
+  hillNear: { night:[10,16,32],  day:[74,106,82]  },
+  treeG:    { night:[6,10,20],   day:[41,66,47]   },
+  ground:   { night:[8,13,24],   day:[86,114,70]  },
+};
+{ /* a fixed, unrandomised star field so it never twinkles into a new layout */
+  const pts = [[18,26],[34,14],[52,30],[68,18],[86,25],[103,13],[119,29],[136,20],
+               [27,44],[59,50],[92,44],[126,48],[44,62],[110,64],[75,8],[150,36]];
+  $('#starG').innerHTML = pts.map(([x, y], i) =>
+    `<circle cx="${x}" cy="${y}" r="${i % 3 === 0 ? 1.1 : .75}" fill="#fff"/>`).join('');
+}
+/** Paint the whole scene for an hour + the current sky state. */
+function renderScene(h, moonAge) {
+  const sky = skyFor(((h % 24) + 24) % 24);
+  $('#skyTop').setAttribute('stop-color', rgb(sky.top));
+  $('#skyMid').setAttribute('stop-color', rgb(sky.mid));
+  $('#skyBot').setAttribute('stop-color', rgb(sky.bot));
+
+  const sun = orbitXY(h);
+  const day = clamp((sun.elev + .18) / .55, 0, 1);          // 0 night → 1 full day
+  /* stars/moon-brightness fade STEEPLY around the horizon: at sunrise proper the
+     sky has already washed them out, so this curve is tighter than `day`'s. */
+  const night = 1 - clamp((sun.elev + .12) / .18, 0, 1);
+  const golden = clamp(1 - Math.abs(sun.elev) / .28, 0, 1); // near the horizon
+  const warm = [244, 168, 96];
+
+  $('#sunG').setAttribute('transform', `translate(${sun.x.toFixed(2)} ${sun.y.toFixed(2)})`);
+  $('#sunG').setAttribute('opacity', clamp((sun.elev + .22) * 6, 0, 1).toFixed(2));
+
+  const moonHour = (h + moonAge * 24) % 24;
+  const mo = orbitXY(moonHour);
+  $('#moonG').setAttribute('transform', `translate(${mo.x.toFixed(2)} ${mo.y.toFixed(2)})`);
+  $('#moonG').setAttribute('opacity', (clamp((mo.elev + .18) * 5, 0, 1) * (.35 + .65 * night)).toFixed(2));
+  /* phase by an offset shade disc: centred = new, fully clear = full */
+  const illum = (1 - Math.cos(moonAge * 2 * Math.PI)) / 2;
+  $('#moonShade').setAttribute('cx', (11 * illum * (moonAge < .5 ? 1 : -1)).toFixed(2));
+  $('#moonShade').setAttribute('fill', rgb(mix3(sky.top, sky.mid, .5)));
+
+  $('#starG').setAttribute('opacity', (night * .9).toFixed(2));
+
+  for (const [id, pal] of Object.entries(TERRAIN)) {
+    let c = mix3(pal.night, pal.day, day);
+    c = mix3(c, warm, golden * .34 * day);
+    $('#' + id).setAttribute('fill', rgb(c));
+  }
+  /* clouds take the sky's own light so they never float as grey cut-outs */
+  const cl = $('#cloudG');
+  cl.setAttribute('opacity', (state.ch.clouds * .85).toFixed(2));
+  cl.setAttribute('fill', rgb(mix3(mix3(sky.mid, [255,255,255], .55), warm, golden * .4)));
 }
 const WINDWORDS = ['Calm','Light','Moderate','Strong','Gale'];
 const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
@@ -1607,14 +1849,42 @@ function dragAngle(target, cb) {
 }
 dragAngle($('#astroRing'), a => { cancelFades(false);
   state.hour = ((a / 360) * 24 + 12) % 24; });
-dragAngle($('#windGrab'), a => { state.windDir = a; });
+dragAngle($('#windDial'), a => { state.windDir = a; });
 $('#astroRing').addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowDown')  state.hour = (state.hour + 23.75) % 24;
   if (e.key === 'ArrowRight' || e.key === 'ArrowUp')   state.hour = (state.hour + .25) % 24;
 });
-$('#windGrab').addEventListener('keydown', e => {
+$('#windDial').addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft')  state.windDir = (state.windDir + 345) % 360;
   if (e.key === 'ArrowRight') state.windDir = (state.windDir + 15) % 360;
+});
+
+/* ── the compass picker — 16 points, click to set (author's ask: the readout
+      next to the sock must be clickable and choose a direction) ───────────── */
+{ const rose = $('#compassRose');
+  DIRS.forEach((d, i) => {
+    const ang = (i / 16) * 2 * Math.PI, r = 78;
+    const b = el('button', 'cbtn' + (i % 4 === 0 ? ' card' : ''), d);
+    b.style.left = `${50 + (r / 1.9) * Math.sin(ang)}%`;
+    b.style.top  = `${50 - (r / 1.9) * Math.cos(ang)}%`;
+    b.dataset.deg = i * 22.5;
+    b.title = `Wind from the ${d}`;
+    b.onclick = () => { state.windDir = i * 22.5; $('#compassPop').classList.remove('open');
+      toast(`Wind from the ${d}`, 'wind'); };
+    rose.append(b);
+  });
+}
+$('#windPick').onclick = e => {
+  const p = $('#compassPop'), r = e.currentTarget.getBoundingClientRect();
+  p.classList.add('open');
+  const box = p.getBoundingClientRect();
+  p.style.left = clamp(r.left + r.width / 2 - box.width / 2, 8, innerWidth - box.width - 8) + 'px';
+  p.style.top = clamp(r.top - box.height - 8, 8, innerHeight - box.height - 8) + 'px';
+};
+document.addEventListener('pointerdown', e => {
+  const p = $('#compassPop');
+  if (p.classList.contains('open') && !p.contains(e.target) && !e.target.closest('#windPick'))
+    p.classList.remove('open');
 });
 
 /* ── tempo, moods, faders, cues, impulses ───────────────────────────────── */
@@ -1886,11 +2156,28 @@ $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
     flowB.setAttribute('aria-pressed', String(state.flow));
     flowB.innerHTML = icon(state.flow ? 'pause' : 'play');
     toast(state.flow ? `Time flows — ${SPEED_LABELS[state.speedIx]}` : 'Time holds', 'clock'); };
-  const spdB = el('button', 'mini txt', SPEED_LABELS[0]);
-  spdB.title = 'Time speed — game-minutes per real second';
-  spdB.onclick = () => { state.speedIx = (state.speedIx + 1) % SPEEDS.length;
-    spdB.textContent = SPEED_LABELS[state.speedIx];
-    if (state.flow) toast(`Time flows — ${SPEED_LABELS[state.speedIx]}`, 'clock'); };
+  const spdB = el('button', 'mini txt', SPEED_LABELS[state.speedIx]);
+  spdB.title = 'Time speed — how fast the world clock runs';
+  spdB.onclick = e => {
+    const pop = $('#speedPop'); pop.innerHTML = '';
+    pop.append(el('div', 'jhead', 'Time speed'));
+    SPEEDS.forEach((s, i) => {
+      const b = el('button', null,
+        `<b>${SPEED_LABELS[i]}</b><small>a day in ${dayInRealHours(s)}</small>`);
+      b.setAttribute('aria-pressed', String(i === state.speedIx));
+      b.title = `${s} game-second${s === 1 ? '' : 's'} per real second — a full day/night in `
+        + `${dayInRealHours(s)} of play. (The mock runs ${DEMO_TIME_BOOST}× faster so you can watch it.)`;
+      b.onclick = () => { state.speedIx = i; spdB.textContent = SPEED_LABELS[i];
+        pop.classList.remove('open');
+        if (state.flow) toast(`Time flows — ${SPEED_LABELS[i]}, a day in ${dayInRealHours(s)}`, 'clock'); };
+      pop.append(b);
+    });
+    const r = e.currentTarget.getBoundingClientRect();
+    pop.classList.add('open');
+    const box = pop.getBoundingClientRect();
+    pop.style.left = clamp(r.left, 8, innerWidth - box.width - 8) + 'px';
+    pop.style.top = clamp(r.top - box.height / 2, 8, innerHeight - box.height - 8) + 'px';
+  };
   const jumpB = el('button', 'mini', icon('calendar'));
   jumpB.title = 'Jump — dawn, dusk, +1 day, +1 week, or set a date';
   jumpB.onclick = e => openJumpPop(e.currentTarget);
@@ -1945,6 +2232,9 @@ document.addEventListener('pointerdown', e => {
   const pop = $('#jumpPop');
   if (pop.classList.contains('open') && !pop.contains(e.target) && e.target.id !== 'npDateChip'
       && !e.target.closest('#npDateChip')) pop.classList.remove('open');
+  const sp = $('#speedPop');
+  if (sp.classList.contains('open') && !sp.contains(e.target) && !e.target.closest('#wingL'))
+    sp.classList.remove('open');
 });
 $('#npDateChip').onclick = e => openJumpPop(e.currentTarget);
 
@@ -2637,7 +2927,8 @@ let lastStrikeRoll = 0, lastFrame = 0, fpsWinStart = 0, fpsFrames = 0;
 function frame(now) {
   const dt = lastFrame ? Math.min(now - lastFrame, 100) : 16; lastFrame = now;
   if (state.flow && !state.fades.hour && !state.passage) {
-    const raw = state.hour + dt / 1000 * SPEEDS[state.speedIx] / 60;
+    // ratio is game-seconds per real-second; /3600 converts to hours
+    const raw = state.hour + dt / 1000 * SPEEDS[state.speedIx] * DEMO_TIME_BOOST / 3600;
     state.day += Math.floor(raw / 24);
     state.hour = raw % 24;
   }
@@ -2680,27 +2971,30 @@ function frame(now) {
   $('#clockTxt').textContent = `${fmt2(Math.floor(h))}:${fmt2(Math.floor((h % 1) * 60))}`;
   $('#phaseTxt').textContent = phaseOf(h);
   $('#astroRing').setAttribute('aria-valuenow', h.toFixed(1));
-  placeOrb($('#sunOrb'), h, 113);
-  { const moon = $('#moonOrb');
-    /* during a Passage the moon's TRUE phase is already committed (fired
-       atomically with the day) — so it visibly walks a small cosmetic arc
-       here purely so the sweep doesn't look like the moon "already knew". */
-    const moonAgeShown = state.passage
-      ? ((state.passage.fromMoonAge + passageMoonOffset / LUNAR_DAYS) % 1 + 1) % 1
-      : state.moonAge;
-    /* phase offset: new moon rides with the sun, full moon opposes it */
-    placeOrb(moon, (h + moonAgeShown * 24) % 24, 113);
-    const ill = (1 - Math.cos(moonAgeShown * 2 * Math.PI)) / 2;
-    const t = Math.cos(moonAgeShown * 2 * Math.PI);
-    moon.style.boxShadow =
-      `inset ${(t * 9).toFixed(1)}px 0 ${(2 + 3 * Math.abs(t)).toFixed(1)}px rgba(8,12,28,.96)`;
-    moon.style.opacity = (.22 + .78 * ill).toFixed(2);
-    moon.title = `${moonPhaseName(moonAgeShown)} — day ${(moonAgeShown * LUNAR_DAYS).toFixed(1)} of ${LUNAR_DAYS}`;
-  }
-  $('#windDirIco').style.transform = `rotate(${state.windDir}deg)`;
-  $('#windGrab').setAttribute('aria-valuenow', Math.round(state.windDir));
+  /* the rim's handle — the one grip for time (author's ask) */
+  $('#handleG').setAttribute('transform', `rotate(${(((h - 12) / 24) * 360).toFixed(2)} 122 122)`);
+
+  /* during a Passage the moon's TRUE phase is already committed (fired
+     atomically with the day) — so it visibly walks a small cosmetic arc here
+     purely so the sweep doesn't look like the moon "already knew". */
+  const moonAgeShown = state.passage
+    ? ((state.passage.fromMoonAge + passageMoonOffset / LUNAR_DAYS) % 1 + 1) % 1
+    : state.moonAge;
+  renderScene(h, moonAgeShown);
+  $('#astro .scene').title =
+    `${moonPhaseName(moonAgeShown)} — day ${(moonAgeShown * LUNAR_DAYS).toFixed(1)} of ${LUNAR_DAYS}`;
+  /* clouds drift on the wind, so the scene answers the faders too */
+  { const drift = (now / 1000) * (2 + state.ch.wind * 22) * (state.windDir > 180 ? -1 : 1);
+    $('#cloudG').setAttribute('transform', `translate(${(drift % 210 - 25).toFixed(1)} 0)`); }
+
+  $('#windNeedle').setAttribute('transform', `rotate(${state.windDir.toFixed(1)} 20 20)`);
+  $('#windDial').setAttribute('aria-valuenow', Math.round(state.windDir));
   const wTier = WINDWORDS[Math.min(4, Math.floor(state.ch.wind * 5))];
-  $('#windTxt').textContent = `${wTier} · ${DIRS[Math.round(state.windDir / 22.5) % 16]}`;
+  const wDir = DIRS[Math.round(state.windDir / 22.5) % 16];
+  $('#windTier').textContent = wTier;
+  $('#windDirTxt').textContent = wDir;
+  $$('#compassRose .cbtn').forEach(b =>
+    b.setAttribute('aria-pressed', String(+b.dataset.deg === Math.round(state.windDir / 22.5) % 16 * 22.5)));
 
   /* faders */
   CHANNELS.forEach(c => {
@@ -2825,6 +3119,16 @@ renderDept();
 document.documentElement.dataset.reduceFlash = '0';
 requestAnimationFrame(frame);
 toast('LANTERN mock — drag the dial, pick a fade time, press GO', 'candle');
+
+/* ── verification hook ───────────────────────────────────────────────────
+   Browsers pause requestAnimationFrame whenever the page is hidden, which is
+   exactly the state an automated/headless check runs in — so the whole frame
+   loop (and with it the landscape) is unobservable from a script without this.
+   Exposing the real functions (never a copy of their maths — the copy would
+   only ever prove itself) lets a check drive and read the ACTUAL renderer.
+   Costs nothing at runtime and ships with the mock deliberately. */
+window.__mock = { state, renderScene, orbitXY, skyFor, frame, formatDate, dateFromDay,
+                  dayFromDate, firePassage, SPEEDS, SPEED_LABELS, DIRS, phaseOf };
 })();
 </script>
 </body>

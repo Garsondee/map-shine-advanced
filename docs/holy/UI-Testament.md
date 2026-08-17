@@ -815,6 +815,63 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P2 — filed by Claude Opus 5, 2026-08-17 (worker tier per the Covenant's "if not certain
+you are Fable-class, you are a worker"; mock only, nothing in `src/`).** Author's round-4
+direction, five parts — all built and measured in `tools/ui-mock/index.html`:
+
+1. **The demo bar folded into the Remote's header.** The floating mock bar is gone; its
+   controls now live in a `#mockStrip` row directly under the header, deliberately dressed
+   as scaffolding (dashed rule, slate tint) so surface-switching and theme-testing never
+   read as product UI. Costs 30px of chrome, which is why §4.1's content had to be trimmed
+   (below).
+2. **⚠️ THE ASTROLABE IS NOW A LANDSCAPE DIAL — this is a real change to what §4.1
+   describes, and the reason this petition exists.** The author's idea, verbatim: *"get rid
+   of the darker internal bit and… create a simple vector geometry landscape scene… the sun
+   and moon would travel around like the real sun and moon might, going behind the horizon
+   at night… a shape for clouds which you fade in or out depending on the amount of cloud
+   cover."* Built exactly so: the dark hub is replaced by a vector scene (sky gradient over
+   nine hour-keyframes, mountains, hills, conifers, ground, a fixed star field) whose sun
+   and moon ride ONE circular arc centred on the horizon — rising at the left edge, crossing
+   the sky, setting at the right — with the terrain painted *after* them, so "behind the
+   horizon" is z-order rather than a special case. Clouds fade with `ch.clouds` and drift on
+   `ch.wind`. **The dial now shows the world instead of describing it**, which I think is a
+   genuinely better answer to §4.1's "one beautiful control that sets the mood" than the
+   readout hub was — but replacing the hero control's interior is not a worker's call to
+   make permanent, so: **does §4.1's astrolabe description get rewritten around the
+   landscape, and does the scene count as Remote *content* (my read — it renders existing
+   state, drives nothing new) or as new chrome under Law 3?**
+3. **Rim widened, interior reduced** (author's ask): the band goes 31px → 45px (mask
+   60%→99% of the radius, was 74%→98%); the interior disc drops 158px → 132px. Overall
+   diameter 258 → 232 to pay for the new rows.
+4. **Label legibility fixed by measurement, not eyeballing.** The author reported labels
+   overlapping the tick markers. Ticks now hug the outer edge only (r 108–121) and labels
+   sit in the band's clear middle (r≈90). ⚠️ **A scar worth recording:** my first assertion
+   compared label *centre* radii and passed — but DAWN/DUSK read *across* the dial, so their
+   text extends **radially** (r 75–105), and the sweeping handle at r 104 was clipping them.
+   Re-measured with real `getBBox()` corner-and-edge extents; the handle moved into the tick
+   band (r 108–118.6, 3 units clear). Same shape as
+   `feedback_test_expectation_from_an_assumed_distribution`: the check restated my
+   assumption instead of measuring the thing.
+5. **Wind promoted out of the hub** (it had nowhere to live once the landscape took the
+   interior): a dedicated row with a 36px compass dial (drag to steer) and a **clickable
+   readout** opening a 16-point compass picker — the author's *"be able to click on the text
+   next to it and select a new direction"*. **GO** was rebuilt as a transport key: domed
+   face, lit rim, 2px of real travel on press, and a slow sheen while a cue is armed.
+
+**Verified live** (`document.hidden` pauses rAF in an automated pane, so the mock gained a
+small documented `window.__mock` hook exposing the *real* functions — never a copy, which
+would only prove itself): sun highest at noon, rises left / sets right, below horizon and
+hidden at midnight; **full moon high at midnight and below at noon** (correct astronomy);
+stars 0.9 at deep night → 0.3 at the horizon → 0 by 07:00 (I tightened this curve after
+measuring 0.75 at sunrise, which was too bright); clouds 0→0.85 with cover; moon phase shade
+centred at new, fully clear at full, quarters on opposite limbs. Containment re-holds at
+1920×1080: **962px content vs a 971px budget**. Zero console errors.
+
+**Open question beyond the above:** the mock strip is scaffolding that ships in no product,
+yet it counts against the containment budget and forced real trims (fader tracks 108→80px).
+Should the Charter §11 measurement explicitly exclude disclosed mock chrome, or is
+squeezing the product to fit its own scaffolding the honest discipline? I left it counted.
+
 **P1 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; not authorised to edit Law/§4.1).**
 Author's live direction: *"Make it support a lot more weather types… how could you break
 weather into smaller chunks?… a dropdown [for] a fine gradient of every weather and climate

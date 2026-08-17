@@ -207,6 +207,31 @@ html[data-frame="1"] #frame1080{display:block}
 /* ============================================================================
    SHARED PANEL CHROME
    ========================================================================== */
+/* A visible scroll rail everywhere a room can overflow (author's ask: a way
+   to move up/down when content runs taller than the screen). `scrollbar-width`
+   above is Firefox-only — Chromium ignores it entirely and falls back to the
+   OS default, which on many systems is invisible until hover. That silence
+   IS the bug: the mechanism already worked, nobody could tell it was there. */
+.room .body, .deptscroll, #player .body, .searchOverlay .results{
+  scrollbar-color: var(--line-strong) transparent;
+}
+.room .body::-webkit-scrollbar, .deptscroll::-webkit-scrollbar,
+#player .body::-webkit-scrollbar, .searchOverlay .results::-webkit-scrollbar{
+  width:8px;
+}
+.room .body::-webkit-scrollbar-track, .deptscroll::-webkit-scrollbar-track,
+#player .body::-webkit-scrollbar-track, .searchOverlay .results::-webkit-scrollbar-track{
+  background:transparent;
+}
+.room .body::-webkit-scrollbar-thumb, .deptscroll::-webkit-scrollbar-thumb,
+#player .body::-webkit-scrollbar-thumb, .searchOverlay .results::-webkit-scrollbar-thumb{
+  background:var(--line-strong); border-radius:999px; border:2px solid transparent;
+  background-clip:padding-box;
+}
+.room .body::-webkit-scrollbar-thumb:hover, .deptscroll::-webkit-scrollbar-thumb:hover,
+#player .body::-webkit-scrollbar-thumb:hover, .searchOverlay .results::-webkit-scrollbar-thumb:hover{
+  background:var(--shine-glow); background-clip:padding-box;
+}
 .room{position:fixed; z-index:100; background:var(--glass);
   backdrop-filter:blur(var(--glass-blur));
   border:1px solid var(--line); border-radius:var(--r-room);
@@ -222,6 +247,7 @@ html[data-frame="1"] #frame1080{display:block}
 .hbtn{width:24px; height:24px; display:grid; place-items:center; border-radius:6px;
   color:var(--ink2)}
 .hbtn:hover{background:var(--bg3); color:var(--ink0)}
+.hbtn[aria-pressed="true"]{color:var(--shine); background:var(--shine-soft)}
 
 .btn{display:inline-flex; align-items:center; gap:6px; padding:6px 12px;
   background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
@@ -272,7 +298,11 @@ html[data-frame="1"] #frame1080{display:block}
 #npDateChip .ico{width:.95em; height:.95em}
 #npDateChip .chev{width:.8em; height:.8em; opacity:.6}
 #nowPlaying .ring{width:34px; height:34px; flex:none; position:relative}
-#nowPlaying .ring svg{width:100%; height:100%; transform:rotate(-90deg)}
+/* > only — the progress-ring SVG is a direct child of .ring; the glyph SVG
+   sits one level deeper inside .glyph and must NOT inherit this rotation
+   (this bare descendant selector is exactly how the weather icon went
+   sideways — both svgs live under .ring, and the rule couldn't tell them apart) */
+#nowPlaying .ring > svg{width:100%; height:100%; transform:rotate(-90deg)}
 #nowPlaying .ring .track{stroke:var(--bg3); fill:none; stroke-width:3}
 #nowPlaying .ring .prog{stroke:var(--shine); fill:none; stroke-width:3;
   stroke-linecap:round; transition:stroke-dashoffset .2s linear}
@@ -340,23 +370,19 @@ html[data-frame="1"] #frame1080{display:block}
   text-shadow:0 1px 3px rgba(0,0,0,.8)}
 
 /* THE WIND ROW — bigger dial, and the readout is a real button (author's ask) */
-#windRow{display:flex; align-items:center; gap:9px; padding:4px 8px;
-  background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-card)}
-#windDial{width:36px; height:36px; flex:none; border-radius:50%; position:relative;
-  background:radial-gradient(circle at 50% 40%, var(--bg3), var(--bg1));
-  border:1px solid var(--line); cursor:grab; display:grid; place-items:center}
-#windDial:active{cursor:grabbing}
-#windDial svg{width:34px; height:34px; overflow:visible}
-#windDial .rose{stroke:rgba(255,255,255,.14); stroke-width:1}
-#windDial .needle{fill:var(--c-atmos);
-  filter:drop-shadow(0 0 calc(5px * var(--glow-on)) var(--c-atmos))}
-#windDial .tail{fill:color-mix(in oklab, var(--c-atmos) 35%, transparent)}
-#windPick{flex:1; display:flex; align-items:center; gap:7px; padding:6px 9px;
-  border-radius:8px; border:1px solid var(--line); background:var(--bg1);
-  color:var(--ink0); font-size:.78rem; transition:all var(--t-micro)}
+/* Wind, collapsed to one compact row (author's ask): direction isn't checked
+   often, so it earns a dropdown-weight control, not a dial. No drag target
+   any more — the ONLY manual input is the compass popover; between picks the
+   system evolves it on its own (the .autoDot pulse says so). */
+#windPick{width:100%; display:flex; align-items:center; gap:7px; padding:5px 9px;
+  border-radius:8px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--ink0); font-size:.76rem; transition:all var(--t-micro)}
 #windPick:hover{border-color:var(--c-atmos); background:var(--bg3)}
+#windPick .wIco{color:var(--c-atmos); width:1.05em; height:1.05em}
 #windPick .wtier{color:var(--ink2)}
-#windPick .wdir{font-weight:650; color:var(--c-atmos); min-width:30px}
+#windPick .wdir{font-weight:650; color:var(--c-atmos); min-width:26px; text-align:left}
+#windPick .autoDot{width:5px; height:5px; border-radius:50%;
+  background:var(--c-atmos); animation:pulse 2.6s ease-in-out infinite}
 #windPick .chev{margin-left:auto; color:var(--ink2); width:.9em; height:.9em}
 
 /* the compass picker */
@@ -870,11 +896,33 @@ html[data-remote="pill"] #pill{display:flex}
   border-radius:var(--r-card); box-shadow:var(--shadow3); overflow:hidden}
 .popout .card{box-shadow:none; border:none; border-radius:0; background:transparent}
 
-/* density */
+/* density — Studio (existing) */
 html[data-density="compact"] .foh{gap:5px; padding-bottom:8px}
 html[data-density="compact"] .prow{gap:6px}
 html[data-density="compact"] .rohcat .rows{padding:5px 8px; gap:5px}
 html[data-density="compact"] #cards{gap:9px}
+/* density — the Remote (author's ask: same "maximum screen real estate"
+   logic, everywhere). Every number here is a further squeeze on top of the
+   already-tight Comfortable defaults — Compact is for someone who wants the
+   Remote as small as it can be and still work, not a second layout. */
+html[data-density="compact"] #remote{width:352px}
+html[data-density="compact"] #remote .body{gap:5px; padding:6px 12px 8px}
+html[data-density="compact"] #astro, html[data-density="compact"] #astroRow{width:194px; height:194px}
+html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText{inset:42px}
+html[data-density="compact"] #astro .sceneText .time{font-size:1.3rem}
+html[data-density="compact"] .wing{gap:4px}
+html[data-density="compact"] .mini{width:32px; height:32px; border-radius:9px}
+html[data-density="compact"] #nowPlaying{padding:5px 8px; gap:7px}
+html[data-density="compact"] #nowPlaying .ring{width:28px; height:28px}
+html[data-density="compact"] #tempo button{padding:3px 0}
+html[data-density="compact"] #moods{gap:3px}
+html[data-density="compact"] #moods button{padding:2px 1px}
+html[data-density="compact"] .fader .track{height:56px}
+html[data-density="compact"] #cueCard{padding:5px 8px}
+html[data-density="compact"] #goBtn{width:64px; font-size:.86rem}
+html[data-density="compact"] #impulses button{padding:4px 3px; font-size:.66rem}
+html[data-density="compact"] #debugStrip{padding:3px 9px; font-size:.6rem}
+html[data-density="compact"] #windPick{padding:3px 8px}
 </style>
 </head>
 <body>
@@ -965,6 +1013,9 @@ html[data-density="compact"] #cards{gap:9px}
       <svg class="ico"><use href="#i-camera"/></svg></button>
     <button class="hbtn dbg" id="healthBtn" title="Scene health — masks + effects readiness at a glance (planned)">
       <svg class="ico"><use href="#i-health"/></svg></button>
+    <button class="hbtn" id="densityTglRemote" aria-pressed="false"
+      title="Compact density — shrink every room for maximum screen space">
+      <svg class="ico"><use href="#i-layers"/></svg></button>
     <button class="hbtn" id="collapseBtn" title="Collapse to pill">
       <svg class="ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg></button>
   </header>
@@ -1076,13 +1127,17 @@ html[data-density="compact"] #cards{gap:9px}
               <stop offset="0" stop-color="rgba(210,225,255,.42)"/>
               <stop offset="1" stop-color="rgba(190,210,255,0)"/>
             </radialGradient>
+            <!-- clips the shade disc to the moon body — without this, the shade
+                 slides most of the way clear at gibbous/full phases and reads as
+                 a separate dark blob floating beside the moon instead of ON it -->
+            <clipPath id="moonClip"><circle r="5.4"/></clipPath>
           </defs>
           <rect width="160" height="160" fill="url(#skyGrad)"/>
           <g id="starG" opacity="0"></g>
           <g id="sunG"><circle r="19" fill="url(#sunGlow)"/><circle r="7.5" fill="#ffeaad"/></g>
           <g id="moonG"><circle r="13" fill="url(#moonGlow)"/>
             <circle r="5.4" fill="#e9efff"/>
-            <circle id="moonShade" r="5.4" fill="#0b1024"/></g>
+            <circle id="moonShade" r="5.4" fill="#0b1024" clip-path="url(#moonClip)"/></g>
           <g id="cloudG" opacity="0">
             <path d="M18 46q5-9 14-6 4-8 13-5 7 1 8 8 8 0 8 6H14q-1-3 4-3Z"/>
             <path d="M92 33q4-8 12-5 4-7 12-4 6 1 7 7 7 0 7 6H88q-1-3 4-4Z"/>
@@ -1095,6 +1150,26 @@ html[data-density="compact"] #cards{gap:9px}
             <path d="M124 108 l5-12 5 12 Z"/><path d="M132 111 l4-9 4 9 Z"/>
           </g>
           <path id="ground" d="M0 116 Q80 111 160 118 L160 160 L0 160 Z"/>
+          <!-- weather reads on the scene too (author's ask): fog hazes the
+               ground, rain/snow are a few static streaks, lightning is a brief
+               flash — simple signifiers, not a second animation system. -->
+          <rect id="sceneFog" x="0" y="66" width="160" height="94" fill="#dde6f0" opacity="0"/>
+          <g id="sceneRain" opacity="0" stroke="#bcd7f5" stroke-width="1.4" stroke-linecap="round">
+            <line x1="18" y1="14" x2="12" y2="34"/><line x1="42" y1="24" x2="36" y2="44"/>
+            <line x1="66" y1="10" x2="60" y2="30"/><line x1="90" y1="28" x2="84" y2="48"/>
+            <line x1="114" y1="16" x2="108" y2="36"/><line x1="138" y1="30" x2="132" y2="50"/>
+            <line x1="28" y1="52" x2="22" y2="72"/><line x1="76" y1="48" x2="70" y2="68"/>
+            <line x1="124" y1="54" x2="118" y2="74"/><line x1="150" y1="20" x2="144" y2="40"/>
+          </g>
+          <g id="sceneSnow" opacity="0" fill="#ffffff">
+            <circle cx="16" cy="20" r="1.3"/><circle cx="38" cy="38" r="1"/>
+            <circle cx="58" cy="16" r="1.2"/><circle cx="80" cy="30" r="1"/>
+            <circle cx="100" cy="14" r="1.3"/><circle cx="122" cy="34" r="1"/>
+            <circle cx="144" cy="18" r="1.2"/><circle cx="27" cy="56" r="1"/>
+            <circle cx="70" cy="50" r="1.2"/><circle cx="112" cy="52" r="1"/>
+            <circle cx="150" cy="46" r="1.2"/><circle cx="8" cy="44" r="1"/>
+          </g>
+          <rect id="sceneFlash" x="0" y="0" width="160" height="160" fill="#fff" opacity="0"/>
         </svg>
       </div>
       <div class="sceneText">
@@ -1105,25 +1180,14 @@ html[data-density="compact"] #cards{gap:9px}
     <div class="wing" id="wingR" role="group" aria-label="Moment shots"></div>
     </div>
 
-    <div id="windRow">
-      <button id="windDial" role="slider" aria-label="Wind direction"
-              aria-valuemin="0" aria-valuemax="359" aria-valuenow="205" tabindex="0"
-              title="Drag to steer the wind">
-        <svg viewBox="0 0 40 40">
-          <circle class="rose" cx="20" cy="20" r="15" fill="none"/>
-          <g id="windNeedle" transform-origin="20 20">
-            <path class="tail" d="M20 30 l-3.4 6 h6.8 Z"/>
-            <path class="needle" d="M20 5 l5.6 12.5 h-11.2 Z"/>
-            <circle class="needle" cx="20" cy="20" r="2.2"/>
-          </g>
-        </svg>
-      </button>
-      <button id="windPick" title="Pick a wind direction">
-        <span class="wtier" id="windTier">Light</span>
-        <span class="wdir" id="windDirTxt">SSW</span>
-        <svg class="chev ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg>
-      </button>
-    </div>
+    <button id="windPick" title="Wind direction — drifts on its own; click to set it manually">
+      <svg class="ico wIco"><use href="#i-wind"/></svg>
+      <span class="wtier" id="windTier">Light</span>
+      <span class="wdir" id="windDirTxt">SSW</span>
+      <span class="autoDot" title="Evolving on its own"></span>
+      <span style="flex:1"></span>
+      <svg class="chev ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg>
+    </button>
 
     <div>
       <div class="blocklabel"><svg class="ico"><use href="#i-clock"/></svg>Fade time
@@ -1153,6 +1217,10 @@ html[data-density="compact"] #cards{gap:9px}
 
     <div id="cueDeck">
       <div class="blocklabel"><svg class="ico"><use href="#i-clap"/></svg>Cues
+        <button class="hint" id="captureCueBtn" style="background:none; border:none; cursor:pointer;
+          color:var(--shine); display:flex; align-items:center; gap:4px; margin-left:auto"
+          title="Capture the world exactly as it is right now — hour, weather, everything — as a new cue">
+          <svg class="ico" style="width:.95em; height:.95em"><use href="#i-camera"/></svg>Capture</button>
         <button class="hint" id="cueListBtn" style="background:none;border:none;cursor:pointer;color:var(--ink2)">show list ▾</button>
       </div>
       <div id="cueRow">
@@ -1811,19 +1879,32 @@ function renderScene(h, moonAge) {
   const golden = clamp(1 - Math.abs(sun.elev) / .28, 0, 1); // near the horizon
   const warm = [244, 168, 96];
 
+  /* clouds don't just decorate — they OCCLUDE (author's ask): heavy cover
+     dampens sun, moon and stars alike, on top of whichever is already up. */
+  const cloudDamp = 1 - clamp(state.ch.clouds, 0, 1) * .72;
+
   $('#sunG').setAttribute('transform', `translate(${sun.x.toFixed(2)} ${sun.y.toFixed(2)})`);
-  $('#sunG').setAttribute('opacity', clamp((sun.elev + .22) * 6, 0, 1).toFixed(2));
+  $('#sunG').setAttribute('opacity', (clamp((sun.elev + .22) * 6, 0, 1) * cloudDamp).toFixed(2));
 
   const moonHour = (h + moonAge * 24) % 24;
   const mo = orbitXY(moonHour);
   $('#moonG').setAttribute('transform', `translate(${mo.x.toFixed(2)} ${mo.y.toFixed(2)})`);
-  $('#moonG').setAttribute('opacity', (clamp((mo.elev + .18) * 5, 0, 1) * (.35 + .65 * night)).toFixed(2));
+  $('#moonG').setAttribute('opacity',
+    (clamp((mo.elev + .18) * 5, 0, 1) * (.35 + .65 * night) * cloudDamp).toFixed(2));
   /* phase by an offset shade disc: centred = new, fully clear = full */
   const illum = (1 - Math.cos(moonAge * 2 * Math.PI)) / 2;
   $('#moonShade').setAttribute('cx', (11 * illum * (moonAge < .5 ? 1 : -1)).toFixed(2));
   $('#moonShade').setAttribute('fill', rgb(mix3(sky.top, sky.mid, .5)));
 
-  $('#starG').setAttribute('opacity', (night * .9).toFixed(2));
+  $('#starG').setAttribute('opacity', (night * .9 * cloudDamp).toFixed(2));
+
+  /* weather on the scene: fog hazes the ground, rain/snow are a few static
+     streaks (the split mirrors Now Playing's own rain-vs-snow read), lightning
+     hooks the SAME flash() the map/impulses already use — one trigger. */
+  $('#sceneFog').setAttribute('opacity', (clamp(state.ch.fog, 0, 1) * .5).toFixed(2));
+  const wet = state.ch.rain, frz = state.ch.freeze;
+  $('#sceneRain').setAttribute('opacity', (wet * (1 - frz) * .8).toFixed(2));
+  $('#sceneSnow').setAttribute('opacity', (wet * frz * .9).toFixed(2));
 
   for (const [id, pal] of Object.entries(TERRAIN)) {
     let c = mix3(pal.night, pal.day, day);
@@ -1837,6 +1918,23 @@ function renderScene(h, moonAge) {
 }
 const WINDWORDS = ['Calm','Light','Moderate','Strong','Gale'];
 const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+/* Wind direction is SYSTEM-DRIVEN by default (author's ask): it wanders on
+   its own, continuously, whether or not anyone ever opens the compass. Two
+   incommensurate sine terms read as an organic drift without needing real
+   noise or any state beyond the clock — cheap and deterministic. A manual
+   pick just re-anchors state.windDir; the drift keeps running from there
+   (it is never "pinned" — the compass popover is a nudge, not a lock). */
+function tickWindDrift(now, dtMs) {
+  const t = now / 1000;
+  const wobble = Math.sin(t * .021 + 1.7) * .5 + Math.sin(t * .0073 + 4.2) * .3;
+  // Tuned against a 6-sample sweep across different starting phases, not one
+  // lucky window (a single 5-minute sample first read as "fine" at ~13°/min
+  // net, but that number hid the oscillation cancelling itself out — the
+  // ACTUAL 1-minute swings averaged 26°/min across phases, visibly animating).
+  // This lands the same sweep at ~3°/min average: felt checking back after a
+  // few minutes, invisible in the moment.
+  state.windDir = (state.windDir + wobble * dtMs / 1000 * .13 + 360) % 360;
+}
 function dragAngle(target, cb) {
   let on = false;
   const move = e => { if (!on) return;
@@ -1849,14 +1947,14 @@ function dragAngle(target, cb) {
 }
 dragAngle($('#astroRing'), a => { cancelFades(false);
   state.hour = ((a / 360) * 24 + 12) % 24; });
-dragAngle($('#windDial'), a => { state.windDir = a; });
 $('#astroRing').addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowDown')  state.hour = (state.hour + 23.75) % 24;
   if (e.key === 'ArrowRight' || e.key === 'ArrowUp')   state.hour = (state.hour + .25) % 24;
 });
-$('#windDial').addEventListener('keydown', e => {
-  if (e.key === 'ArrowLeft')  state.windDir = (state.windDir + 345) % 360;
-  if (e.key === 'ArrowRight') state.windDir = (state.windDir + 15) % 360;
+/* wind has no drag target any more — § round-5: the system drives it (see
+   tickWindDrift in frame()); the compass popover is the only manual input. */
+$('#windPick').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') $('#windPick').click();
 });
 
 /* ── the compass picker — 16 points, click to set (author's ask: the readout
@@ -2096,6 +2194,19 @@ function renderCueDeck() {
   r.onclick = () => { state.cueIx = 0; renderCueDeck(); };
   list.append(r);
 }
+/* Shared by the Studio's CUES department AND the Remote's own Capture button
+   (author's ask: a way to record the current settings as a cue from the main
+   Remote, not just from a department three clicks away). One function, two
+   entry points — the usual anti-mirror discipline. */
+function captureCueFromLive() {
+  CUES.push({ name:`Captured — ${$('#clockTxt').textContent}`, fade:tempoS() || 10,
+    glyphs:['camera'], t:{ hour:state.hour, ...state.ch } });
+  renderCueDeck();
+  if (state.dept === 'cues' && !$('#studio').hidden) renderDept();
+  toast('Cue captured from the live scene', 'camera');
+}
+$('#captureCueBtn').onclick = () => captureCueFromLive();
+
 function fireCue() {
   const cue = CUES[state.cueIx]; if (!cue) return;
   easeTo(cue.t, cue.fade, cue.name);
@@ -2113,6 +2224,9 @@ function flash() {
   const f = $('#flash');
   f.animate([{opacity:0},{opacity:.85},{opacity:0},{opacity:.5},{opacity:0}],
             { duration:420, easing:'ease-out' });
+  const sf = $('#sceneFlash');
+  sf.animate([{opacity:0},{opacity:.9},{opacity:.15},{opacity:.6},{opacity:0}],
+             { duration:420, easing:'ease-out' });
 }
 $('#impStrike').onclick = () => { flash();
   toast(state.reduceFlash ? 'Strike fired — flash suppressed on this client' : 'Lightning strike', 'bolt'); };
@@ -2628,11 +2742,7 @@ function renderDept() {
     const cap = el('button', 'btn gold',
       `${icon('camera')} Capture current look as a cue`);
     cap.style.alignSelf = 'flex-start';
-    cap.onclick = () => {
-      CUES.push({ name:`Captured — ${$('#clockTxt').textContent}`, fade:tempoS() || 10,
-        glyphs:['camera'], t:{ hour:state.hour, ...state.ch } });
-      renderDept(); renderCueDeck(); toast('Cue captured from the live scene', 'camera');
-    };
+    cap.onclick = () => captureCueFromLive();
     wrap.append(cap);
     CUES.forEach((c, i) => {
       const item = el('div', 'cueitem');
@@ -2897,10 +3007,17 @@ function makeDraggable(handle, panel) {
 $$('.room-head[data-drag]').forEach(h => makeDraggable(h, h.closest('.room')));
 
 $('#themeSel').onchange = e => document.documentElement.dataset.theme = e.target.value;
-$('#densityTgl').onclick = e => {
-  const on = document.documentElement.dataset.density !== 'compact';
-  document.documentElement.dataset.density = on ? 'compact' : 'comfortable';
-  e.currentTarget.setAttribute('aria-checked', String(on)); };
+/* ONE density switch, TWO handles (author's ask: the whole UI should offer
+   the same "shrink everything" the Studio already had, not just its own
+   corner of it) — both toggles read/write the same root attribute, so
+   flipping either one moves both, from wherever the GM happens to be. */
+function setDensity(compact) {
+  document.documentElement.dataset.density = compact ? 'compact' : 'comfortable';
+  $('#densityTgl').setAttribute('aria-checked', String(compact));
+  $('#densityTglRemote').setAttribute('aria-pressed', String(compact));
+}
+$('#densityTgl').onclick = () => setDensity(document.documentElement.dataset.density !== 'compact');
+$('#densityTglRemote').onclick = () => setDensity(document.documentElement.dataset.density !== 'compact');
 $('#frameBtn').onclick = e => {
   const on = document.documentElement.dataset.frame !== '1';
   document.documentElement.dataset.frame = on ? '1' : '0';
@@ -2926,6 +3043,7 @@ const todColor = h => {
 let lastStrikeRoll = 0, lastFrame = 0, fpsWinStart = 0, fpsFrames = 0;
 function frame(now) {
   const dt = lastFrame ? Math.min(now - lastFrame, 100) : 16; lastFrame = now;
+  tickWindDrift(now, dt);
   if (state.flow && !state.fades.hour && !state.passage) {
     // ratio is game-seconds per real-second; /3600 converts to hours
     const raw = state.hour + dt / 1000 * SPEEDS[state.speedIx] * DEMO_TIME_BOOST / 3600;
@@ -2987,8 +3105,7 @@ function frame(now) {
   { const drift = (now / 1000) * (2 + state.ch.wind * 22) * (state.windDir > 180 ? -1 : 1);
     $('#cloudG').setAttribute('transform', `translate(${(drift % 210 - 25).toFixed(1)} 0)`); }
 
-  $('#windNeedle').setAttribute('transform', `rotate(${state.windDir.toFixed(1)} 20 20)`);
-  $('#windDial').setAttribute('aria-valuenow', Math.round(state.windDir));
+  $('#windPick').setAttribute('aria-valuenow', Math.round(state.windDir));
   const wTier = WINDWORDS[Math.min(4, Math.floor(state.ch.wind * 5))];
   const wDir = DIRS[Math.round(state.windDir / 22.5) % 16];
   $('#windTier').textContent = wTier;
@@ -3128,7 +3245,8 @@ toast('LANTERN mock — drag the dial, pick a fade time, press GO', 'candle');
    only ever prove itself) lets a check drive and read the ACTUAL renderer.
    Costs nothing at runtime and ships with the mock deliberately. */
 window.__mock = { state, renderScene, orbitXY, skyFor, frame, formatDate, dateFromDay,
-                  dayFromDate, firePassage, SPEEDS, SPEED_LABELS, DIRS, phaseOf };
+                  dayFromDate, firePassage, SPEEDS, SPEED_LABELS, DIRS, phaseOf, tickWindDrift,
+                  captureCueFromLive };
 })();
 </script>
 </body>

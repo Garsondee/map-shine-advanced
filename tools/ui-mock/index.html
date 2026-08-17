@@ -1378,7 +1378,16 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
                  #mtnFar/#hillNear further down, kept in sync by hand since
                  SVG can't reference a sibling path's `d` as a mask shape
                  directly. White=shows, black=hides (default luminance mask). -->
-            <mask id="skyMask">
+            <!-- maskUnits/x/y/width/height set EXPLICITLY: the default
+                 (objectBoundingBox, ±10% of the MASKED element's own local
+                 bbox) sizes the mask's clipping window off the small,
+                 untransformed sun circle itself, not the 160×160 scene —
+                 against a target that also carries a translate(), that
+                 combination only let a quarter of the mask's rect+paths
+                 show through. userSpaceOnUse + an explicit 0..160 region
+                 pins the window to the SAME coordinate space the content
+                 already uses, independent of whatever it's masking. -->
+            <mask id="skyMask" maskUnits="userSpaceOnUse" x="0" y="0" width="160" height="160">
               <rect width="160" height="160" fill="#fff"/>
               <path fill="#000" d="M0 99 L15 78 L27 89 L41 70 L57 87 L71 76 L86 91 L99 72 L113 87 L127 80 L141 93 L153 84 L160 95 L160 160 L0 160 Z"/>
               <path fill="#000" d="M0 108 Q26 97 52 105 Q80 113 108 103 Q134 94 160 106 L160 160 L0 160 Z"/>
@@ -1492,11 +1501,23 @@ html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px
            clouds still can too — author's exact rule, "nothing but clouds
            and landscape can obscure the sun." -->
       <svg class="sceneTopper" viewBox="0 0 160 160" aria-hidden="true" preserveAspectRatio="xMidYMid slice">
-        <g id="sunTopG" mask="url(#skyMask)">
-          <circle r="24" fill="url(#sunGlowOuter)"/><circle r="13" fill="url(#sunGlowInner)"/><circle r="8.5" fill="#fff6d8"/>
-        </g>
-        <g id="moonTopG" mask="url(#skyMask)">
-          <circle r="13" fill="url(#moonGlow)"/><circle r="5.4" fill="#e9efff"/>
+        <!-- the mask sits on a STATIC wrapper, not on sunTopG/moonTopG
+             themselves — author's report ("only the bottom-right quarter is
+             bright") traced to putting mask="" directly on an element that
+             ALSO carries its own transform="translate()": the mask's
+             userSpaceOnUse region then gets re-anchored to THAT element's
+             own (moving) coordinate system instead of the scene's fixed
+             one, so the terrain cutout silently drifted with the sun
+             instead of staying put. A mask on a non-transformed parent,
+             with the moving sun/moon as its children, keeps the mask's
+             coordinate system permanently equal to the scene's own. -->
+        <g mask="url(#skyMask)">
+          <g id="sunTopG">
+            <circle r="24" fill="url(#sunGlowOuter)"/><circle r="13" fill="url(#sunGlowInner)"/><circle r="8.5" fill="#fff6d8"/>
+          </g>
+          <g id="moonTopG">
+            <circle r="13" fill="url(#moonGlow)"/><circle r="5.4" fill="#e9efff"/>
+          </g>
         </g>
       </svg>
     </div>

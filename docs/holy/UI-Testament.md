@@ -856,6 +856,24 @@ astronomy-vs-chrome bug in the landscape scene).** Two asks:
    point the sun/moon already orbit — the whole sky reads as turning on one axis instead of
    three unrelated motions.
 
+**P8 addendum, same day:** the author reported the fix in #2 shipped broken — *"Only the
+bottom right quarter of the sun is bright."* First patch (adding explicit `maskUnits=
+"userSpaceOnUse" x="0" y="0" width="160" height="160"` to `#skyMask`) was the right idea but
+not the actual bug: `mask="url(#skyMask)"` was applied DIRECTLY to `#sunTopG`/`#moonTopG`,
+the same elements JS also sets `transform="translate(...)"` on every frame — a documented SVG
+gotcha where a mask's coordinate system re-anchors to that element's own (moving) space rather
+than staying fixed to the scene, however explicit the mask's own region is declared. Real fix:
+moved `mask="url(#skyMask)"` onto a new, permanently untransformed wrapper `<g>`, with
+`#sunTopG`/`#moonTopG` (and their per-frame translate) nested INSIDE it — the mask's user
+space is now the wrapper's, which never moves, so it stays locked to the scene's own
+coordinates regardless of where the sun/moon travel. Confirmed structurally (wrapper has no
+transform of its own; both clones are its children) and partially via reconstructed-canvas
+pixel sampling at a high sun elevation (a full, round, symmetric glow, not a quarter) — **but
+not via an actual live screenshot**, since the browser pane's screenshot tool was unavailable
+for the entire back half of this round despite repeated attempts. Flagging that gap explicitly
+rather than claiming a confirmation I don't have — worth the author's own eyes before calling
+this fully closed.
+
 **P7 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; three "little gaps" — camera path,
 scene health, motion tiles — plus a footer pass).** Four asks; the middle one changed shape
 mid-round on the author's own correction, which is the most important thing in this entry.

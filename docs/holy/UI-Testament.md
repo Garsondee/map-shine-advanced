@@ -815,6 +815,56 @@ the partition test and card behaviour must stay green through the move.
 *Workers: state the task, the finding, the smallest change that would unblock you. Do not
 edit the plan.*
 
+**P4 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; retracts part of P3's own design
+under the author's direct correction — not a new direction, a fix to one that didn't survive
+contact with a real screen).** Author sent back a screenshot plus a hand-drawn sketch: the
+crown-tab idea was right, the execution wasn't. Root cause, then the rebuild:
+
+1. **The radial tabs were never actually visible — confirmed by measurement, not
+   impression.** P3's tabs sat at `astroR * .93` (195px from centre, comfortable) with a
+   16px half-width, so their outer edge reached 211.3px — only 1.3px past the dial's own
+   210px radius. Almost the entire tab sat *under* the opaque ring graphic (z-index 1 vs
+   astro's 5), which is exactly what the author's screenshot showed: a complete, tab-free
+   circle. The room's own clip edge added a second ceiling on top of that, since P3's bleed
+   was tuned to land the dial's edge exactly at the room's boundary — there was no space
+   left outside the dial for anything to poke into even if the first problem were fixed.
+2. **The bleed-past-the-panel technique is retired.** It was the load-bearing cause of #1
+   (zero clearance left for anything to escape the dial into), and the author separately
+   flagged the ring itself as reading "clipped" — two independent complaints, one root
+   cause. The dial is fully CONTAINED now: 340px in a 372px content column (comfortable),
+   280px in a 326px column (compact) — still the dominant element in the panel, nothing
+   about it depends on `.room{overflow:hidden}` to look intentional.
+3. **Every wing item now lives in one of two straight columns flanking the dial —
+   watch-crown style, per the author's sketch.** Left column is the three TIME controls
+   (flow/speed/jump), right is the five MOOD presets (sun/moon/bolt/candle/bloom) — a real
+   grouping, not an even split, so which side to check is guessable. Each column is pure
+   CSS: shrink-wraps its 32px tabs (26px compact) and sits at `left:-16px` / `right:-16px`
+   relative to the dial's own box, straddling its edge dead centre. DOM order alone (tabCol
+   first, before `.ring`) tucks the inner half behind the dial — no z-index, no JS. This also
+   deletes `placeRadialTabs()` entirely: there is no live-radius measurement left to chase,
+   since the column is pinned to the dial's own box and the browser recomputes that for free
+   at every density. **Measured after building, not assumed:** both columns clear the room's
+   real clip edge by 10–20px at every density tested, and clear the DAWN/DUSK rim labels by
+   8–11px radially — verified via `getBoundingClientRect()`/`getBBox()` against the live DOM,
+   the same discipline P3's bug should have gotten and didn't.
+4. **The weather-browse chip got a word.** Round 6 compacted it to a bare magnifying glass
+   and a number; the author called it out as too subtle to read as a control. It's a full
+   chip now — icon, "Browse", and the count as its own small badge — reusing the existing
+   chip visual language rather than inventing a new one.
+5. **The debug strip grew a live FPS health bar**, at the author's explicit request to keep
+   pace with what the real module's debug HUD already does. A fixed row of 24 bars (never
+   rebuilt, just restyled in place), colour-coded ok/warn/fail against a 90fps ceiling,
+   updating on the exact same 500ms window that already drove the fps/ms text — confirmed by
+   driving `frame()` directly and checking both change together.
+
+**This answers P3's own question to Fable, and changes the answer:** P3 asked whether the
+bled/radial-tab astrolabe should be written into §4.1 as canonical. It shouldn't — not
+because Fable should prefer this version by default, but because P3's version didn't
+actually work when measured, and this petition replaces it before anyone builds on top of
+it. If §4.1 gets written this round, it should describe THIS shape (contained dial, crown
+columns) — or, given how much the astrolabe has moved in three straight petitions, Fable may
+reasonably conclude it isn't settled enough to canonise yet.
+
 **P3 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; the astrolabe's role changes again,
 further than P2's — Fable's call, not mine).** Author reviewed the landscape build (P2) and
 sent back a second, larger request: the dial as the Remote's literal centrepiece, wide enough

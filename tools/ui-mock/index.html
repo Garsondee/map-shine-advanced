@@ -320,29 +320,37 @@ html[data-frame="1"] #frame1080{display:block}
 
 /* astrolabe + radial tabs */
 #astroRow{position:relative; margin-top:2px; flex:none}
-/* THE BLEED (author's ask, round 6): the dial is now WIDER than the panel
-   itself, not just its content column. .room{overflow:hidden} (shared panel
-   chrome, top of file) clips it exactly at the room's own rounded edge, so
-   it reads as "barely contained" rather than broken — nothing special is
-   needed to achieve that beyond sizing it past the room and centring it;
-   the existing chrome does the rest. */
-#astro{position:relative; width:420px; height:420px; margin:0 -24px; z-index:5}
-#radialTabs{position:absolute; inset:0; z-index:1}
-/* Every wing item, wind included in earlier rounds, now nests INTO the
-   circle's own rim as a small tab (author's ask): each button's centre sits
-   just inside the astro's outer edge, so ~30% of it tucks BEHIND the dial
-   (z-index 1, below astro's z-index 5) and ~70% pokes past as the visible,
-   clickable crescent — "arranged in a circle... falling behind it... never
-   overlap and block it," literally. Position is computed in JS
-   (placeRadialTabs()) since it depends on the astro's actual rendered
-   radius, which differs by density and must be recomputed on toggle. */
-.tab{position:absolute; left:50%; top:50%; width:32px; height:32px; border-radius:10px;
+/* Round 6's edge-bleed (dial wider than the panel, clipped by .room's own
+   edge) is retired: the tabs' poke-out crescent and the room's clip line
+   landed within ~1px of each other once the numbers were actually run,
+   which is why they read as invisible, and the author flagged the dial
+   itself as looking clipped. The dial is now fully CONTAINED — nothing
+   here depends on overflow:hidden to look intentional — while staying the
+   dominant element in the panel (340px across a 372px content column). */
+#astro{position:relative; width:340px; height:340px; margin:0 auto; z-index:5}
+/* THE CROWN — every wing item, wind included in earlier rounds, sits in one
+   of two straight columns flanking the dial, watch-crown style (author's
+   sketch, this round). Each column shrink-wraps its 32px tabs and is pulled
+   outward by exactly half a tab's width, so it straddles the dial's own
+   edge dead centre — half tucks behind the ring, half pokes past it, fully
+   clear of the room's clip edge with real margin this time. Pure CSS, no
+   per-density JS recompute — placeRadialTabs() existed only to chase the
+   dial's LIVE size; pinning a column to the dial's own box via left/right
+   insets makes the browser's box model do that job for free, at every size. */
+.tabCol{position:absolute; top:50%; transform:translateY(-50%); display:flex;
+  flex-direction:column; gap:6px}
+.tabCol.left{left:-16px}
+.tabCol.right{right:-16px}
+/* tabCol sits FIRST in #astro's DOM, before .ring/.scene — with no z-index
+   on any of them, that alone (not layering trickery) paints the ring over
+   each tab's inner half and leaves the outer half on top of it. */
+.tab{position:relative; width:32px; height:32px; border-radius:10px; flex:none;
   display:grid; place-items:center; background:var(--bg2); border:1px solid var(--line);
   color:var(--ink2); transition:background var(--t-micro), color var(--t-micro),
   border-color var(--t-micro); box-shadow:0 2px 6px rgba(0,0,0,.35)}
 .tab .ico{width:15px; height:15px}
 .tab.txt{font-size:.56rem; letter-spacing:.03em; color:var(--ink1); font-weight:600}
-.tab:hover{border-color:var(--line-strong); color:var(--ink0); z-index:6}
+.tab:hover{border-color:var(--line-strong); color:var(--ink0)}
 .tab[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
   background:var(--shine-soft)}
 /* THE RIM — the clock, and the dial's dominant element. Wider band than round 2
@@ -556,6 +564,19 @@ html[data-reduce-flash="1"] #impulses button[data-flash] .supp{display:block}
   letter-spacing:.1em; color:var(--ink2); text-transform:uppercase}
 .modeseg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
 
+/* the weather-browse chip — round 6 shrank this to a bare icon+number and
+   it read as decoration, not a control (author's ask: make it obviously
+   clickable). Full chip chrome plus its own word, not just a glyph. */
+#wxBrowseBtn{display:inline-flex; align-items:center; gap:5px;
+  padding:3px 9px 3px 8px; border:1px solid var(--line); border-radius:999px;
+  background:var(--bg2); color:var(--ink1); font-size:.68rem; font-weight:600;
+  transition:background var(--t-micro), border-color var(--t-micro), color var(--t-micro)}
+#wxBrowseBtn:hover{border-color:var(--shine-glow); color:var(--ink0); background:var(--bg3)}
+#wxBrowseBtn .ico{width:12px; height:12px}
+#wxBrowseBtn .count{padding:0 6px; border-radius:999px; background:var(--bg3);
+  color:var(--ink2); font-size:.62rem; font-weight:700}
+#wxBrowseBtn:hover .count{color:var(--ink1)}
+
 /* drift brackets on faders */
 .fader .bkt{position:absolute; left:-4px; right:-4px; pointer-events:none; opacity:0;
   border-top:1px dashed color-mix(in oklab, var(--acc) 70%, transparent);
@@ -685,6 +706,14 @@ html[data-live="1"] #map{transform:scale(1.06)}
 #debugStrip .dbtn{padding:2px 9px; border:1px solid var(--line); border-radius:6px;
   color:var(--ink1); font-family:var(--mono); font-size:.62rem}
 #debugStrip .dbtn:hover{border-color:var(--c-system); color:var(--ink0)}
+/* live FPS health bar — the real module's debug HUD already carries one of
+   these and it earns its keep at a glance; kept here rather than dropped
+   when everything else about this strip got rearranged. */
+.spark{display:flex; align-items:flex-end; gap:1px; height:15px; width:52px; flex:none}
+.spark i{flex:1; min-width:1px; height:20%; border-radius:1px 1px 0 0;
+  background:var(--ok); transition:height .25s ease, background .25s ease}
+.spark i.warn{background:var(--warn)}
+.spark i.bad{background:var(--fail)}
 html[data-debug="0"] .dbg{display:none !important}
 
 /* collapsed pill */
@@ -940,14 +969,14 @@ html[data-density="compact"] #cards{gap:9px}
    Remote as small as it can be and still work, not a second layout. */
 html[data-density="compact"] #remote{width:352px}
 html[data-density="compact"] #remote .body{gap:5px; padding:6px 12px 8px}
-/* the astro itself SHRINKS in compact — but stays wider than the (now also
-   narrower) panel, same bleed principle as Comfortable, just smaller numbers.
-   #radialTabs needs no override: it always fills #astroRow, and JS recomputes
-   every tab's position from the astro's LIVE rendered size on every density
-   toggle (placeRadialTabs(), called from setDensity()) rather than trusting
-   a second set of hand-placed constants that could drift from these. */
-html[data-density="compact"] #astro{width:330px; height:330px; margin:0 -21px}
-html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText{inset:68px}
+/* the astro itself SHRINKS in compact, still fully contained (no bleed).
+   .tabCol needs no override at all — left:-16px/right:-16px is relative to
+   the dial's own box, which the browser already recomputes the instant
+   #astro's width changes; that's the whole point of doing this in CSS
+   instead of a JS function tied to a resize/toggle listener. */
+html[data-density="compact"] #astro{width:280px; height:280px; margin:0 auto}
+html[data-density="compact"] #astro .scene, html[data-density="compact"] #astro .sceneText{inset:60px}
+html[data-density="compact"] .tabCol{gap:4px}
 html[data-density="compact"] #astro .sceneText .time{font-size:1.5rem}
 html[data-density="compact"] .tab{width:26px; height:26px; border-radius:8px}
 html[data-density="compact"] .tab .ico{width:12px; height:12px}
@@ -967,6 +996,8 @@ html[data-density="compact"] #impulses button{padding:4px 3px; font-size:.66rem}
 html[data-density="compact"] #debugStrip{padding:4px 8px; font-size:.6rem; gap:8px}
 html[data-density="compact"] #npDateChip, html[data-density="compact"] #windPick{
   padding:2px 7px; font-size:.62rem}
+html[data-density="compact"] #wxBrowseBtn{padding:2px 7px 2px 6px; font-size:.62rem}
+html[data-density="compact"] #wxBrowseBtn .count{font-size:.58rem; padding:0 5px}
 </style>
 </head>
 <body>
@@ -1101,19 +1132,20 @@ html[data-density="compact"] #npDateChip, html[data-density="compact"] #windPick
       <button id="takeoverBtn" title="Go live — every player screen becomes your frame">● TAKE OVER</button>
     </div>
 
-    <!-- The astrolabe now BLEEDS past the panel's own width on purpose
-         (author's ask) — .room{overflow:hidden} (shared chrome) clips it
-         cleanly at the panel's rounded edge, so the circle reads as "barely
-         contained" rather than broken. #radialTabs holds every wing item —
-         wind included — placed by JS in a full ring, z-BEHIND the dial, so
-         each is mostly hidden under it and only its outer edge pokes past
-         the rim as a tab (see placeRadialTabs()). Now Playing's status has
-         moved in too: date sits under the clock inside the scene; the rest
-         (Holding/Fading text, watch count, Snap/Hold) is #nowCaption right
-         below, unified with the dial instead of its own bordered card. -->
+    <!-- The astrolabe is a fully contained circle again (round 7: the bleed
+         past .room's own edge was ALSO clipping the wing tabs almost
+         entirely, and the author flagged the ring itself as reading
+         "clipped"). Every wing item — wind included — now lives in one of
+         two straight columns, .tabCol.left / .tabCol.right, built as the
+         FIRST children of #astro so plain DOM order tucks their inner half
+         behind .ring with no z-index needed (see the .tabCol comment in
+         CSS). Now Playing's status still lives in the dial: date sits under
+         the clock inside the scene; the rest (Holding/Fading text, watch
+         count, Snap/Hold) is #nowCaption right below it. -->
     <div id="astroRow">
-    <div id="radialTabs" role="group" aria-label="Time and mood controls"></div>
     <div id="astro">
+      <div class="tabCol left" id="tabColLeft" role="group" aria-label="Time controls"></div>
+      <div class="tabCol right" id="tabColRight" role="group" aria-label="Mood presets"></div>
       <div class="ring" id="astroRing" role="slider" aria-label="Time of day"
            aria-valuemin="0" aria-valuemax="24" aria-valuenow="14" tabindex="0"
            title="Drag the rim to set the hour"></div>
@@ -1287,8 +1319,9 @@ html[data-density="compact"] #npDateChip, html[data-density="compact"] #windPick
 
     <div>
       <div class="blocklabel"><svg class="ico"><use href="#i-cloud"/></svg><span id="wxTitle">Moods</span>
-        <button id="wxBrowseBtn" title="Browse all weather">
-          <svg class="ico"><use href="#i-search"/></svg><span id="wxBrowseLabel">67</span></button>
+        <button id="wxBrowseBtn" title="Browse every weather type or climate">
+          <svg class="ico"><use href="#i-search"/></svg>Browse
+          <span id="wxBrowseLabel" class="count">67</span></button>
         <div class="modeseg" role="group" aria-label="Weather mode">
           <button id="wxDirect" aria-pressed="true"
             title="Direct — you state the destination; chips are destinations, faders are trims">Direct</button>
@@ -1337,6 +1370,7 @@ html[data-density="compact"] #npDateChip, html[data-density="compact"] #windPick
 
     <div id="debugStrip" class="dbg" role="group" aria-label="Debug equipment">
       <span class="tag"><svg class="ico"><use href="#i-flask"/></svg>DEBUG</span>
+      <span class="spark" id="dbgSpark" title="FPS health, last ~12s"></span>
       <span class="stat">fps <b id="dbgFps" class="num">—</b></span>
       <span class="stat"><b id="dbgMs" class="num">—</b>ms</span>
       <span class="stat" title="Mock value — the real strip reads the VRAM ledger">vram <b>3.2/8G</b></span>
@@ -2353,13 +2387,13 @@ $('#fadeHold').onclick = () => cancelFades(false);
 $('#collapseBtn').onclick = () => document.documentElement.dataset.remote = 'pill';
 $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
 
-/* ── the radial tabs — every wing item nested into the dial's own rim
-   (author's ask, round 6). Same 8 items, same handlers, as the old two
-   flanking columns; only WHERE they live changed. Built once into an
-   ordered array, then placeRadialTabs() (below) positions them — called
-   here at boot AND again from setDensity() whenever the astro's own size
-   changes, since the placement depends on its LIVE rendered radius. ──── */
-const radialTabButtons = [];
+/* ── the crown tabs — every wing item nested into the dial's own rim,
+   watch-crown style (author's sketch, round 7). Left column is TIME
+   controls, right is MOOD presets — a real grouping, not just an even
+   split, so which side to check is guessable. Built straight into their
+   host columns; positioning is pure CSS (.tabCol, above) since it only
+   needs the dial's own box, not a live-measured radius, so there is no
+   placement function left to re-run on resize or density toggle. ──── */
 {
   const flowB = el('button', 'tab', icon('play'));
   flowB.title = 'Let time flow — the clock runs at the chosen speed';
@@ -2368,7 +2402,6 @@ const radialTabButtons = [];
     flowB.setAttribute('aria-pressed', String(state.flow));
     flowB.innerHTML = icon(state.flow ? 'pause' : 'play');
     toast(state.flow ? `Time flows — ${SPEED_LABELS[state.speedIx]}` : 'Time holds', 'clock'); };
-  radialTabButtons.push(flowB);
 
   const spdB = el('button', 'tab txt', SPEED_LABELS[state.speedIx]);
   spdB.title = 'Time speed — how fast the world clock runs';
@@ -2392,14 +2425,14 @@ const radialTabButtons = [];
     pop.style.left = clamp(r.left, 8, innerWidth - box.width - 8) + 'px';
     pop.style.top = clamp(r.top - box.height / 2, 8, innerHeight - box.height - 8) + 'px';
   };
-  radialTabButtons.push(spdB);
 
   const jumpB = el('button', 'tab', icon('calendar'));
   jumpB.title = 'Jump — dawn, dusk, +1 day, +1 week, or set a date';
   jumpB.onclick = e => openJumpPop(e.currentTarget);
-  radialTabButtons.push(jumpB);
 
-  [ ['sun',   'Golden hour — one-tap scene beat, eased at fade time',
+  $('#tabColLeft').append(flowB, spdB, jumpB);
+
+  const moodTabs = [ ['sun',   'Golden hour — one-tap scene beat, eased at fade time',
       () => easeTo({ hour:17.1, clouds:.18, rain:0, fog:.06, bolt:0 }, tempoS(), 'Golden hour')],
     ['moon',  'Moonlit night — clear, still, silver',
       () => easeTo({ hour:0.4, clouds:.15, rain:0, fog:.12, bolt:0 }, tempoS(), 'Moonlit night')],
@@ -2409,40 +2442,10 @@ const radialTabButtons = [];
       () => toast('Planned — kill the sky light, let the candles carry the room', 'candle')],
     ['bloom', 'Aurora — planned: curtains of light for northern skies',
       () => toast('Planned — curtains of light for northern skies', 'bloom')],
-  ].forEach(([ic, tip, fn]) => { const b = el('button', 'tab', icon(ic));
-    b.title = tip; b.onclick = fn; radialTabButtons.push(b); });
-
-  $('#radialTabs').append(...radialTabButtons);
+  ].map(([ic, tip, fn]) => { const b = el('button', 'tab', icon(ic));
+    b.title = tip; b.onclick = fn; return b; });
+  $('#tabColRight').append(...moodTabs);
 }
-/**
- * Position every radial tab around the astro's LIVE rendered circle: centred
- * on an arc from -160° to +160° (the open 40° at the bottom is deliberate —
- * that's where #nowCaption sits, and a tab pointing straight down would
- * compete with it). Each tab's CENTRE lands just inside the rim (astroR *
- * .93) so ~30% tucks behind the dial (z-index 1 vs astro's 5) and the rest
- * pokes past it as the visible, clickable crescent. Re-run on density
- * toggle — hand-placed constants would silently drift from the astro's
- * actual size the moment Comfortable/Compact diverge from what was measured
- * when this was written, which is exactly the trap a LIVE measurement avoids.
- */
-function placeRadialTabs() {
-  const astro = $('#astro'), host = $('#radialTabs');
-  if (!astro || !host) return;
-  const ar = astro.getBoundingClientRect(), hr = host.getBoundingClientRect();
-  const cx = ar.left + ar.width / 2 - hr.left, cy = ar.top + ar.height / 2 - hr.top;
-  const astroR = ar.width / 2;
-  const n = radialTabButtons.length, span = 320, start = -160;
-  radialTabButtons.forEach((b, i) => {
-    const deg = n > 1 ? start + (span * i) / (n - 1) : 0;
-    const rad = deg * Math.PI / 180;
-    const R = astroR * .93;
-    const x = cx + R * Math.sin(rad), y = cy - R * Math.cos(rad);
-    b.style.left = x + 'px'; b.style.top = y + 'px';
-    b.style.transform = 'translate(-50%,-50%)';
-  });
-}
-placeRadialTabs();
-addEventListener('resize', placeRadialTabs);
 
 /* ── the jump popover + set-a-date overlay ──────────────────────────────── */
 function nextDayHour(targetHour) {
@@ -2480,7 +2483,7 @@ document.addEventListener('pointerdown', e => {
   if (pop.classList.contains('open') && !pop.contains(e.target) && e.target.id !== 'npDateChip'
       && !e.target.closest('#npDateChip')) pop.classList.remove('open');
   const sp = $('#speedPop');
-  if (sp.classList.contains('open') && !sp.contains(e.target) && !e.target.closest('#radialTabs'))
+  if (sp.classList.contains('open') && !sp.contains(e.target) && !e.target.closest('.tabCol'))
     sp.classList.remove('open');
 });
 $('#npDateChip').onclick = e => openJumpPop(e.currentTarget);
@@ -3148,9 +3151,6 @@ function setDensity(compact) {
   document.documentElement.dataset.density = compact ? 'compact' : 'comfortable';
   $('#densityTgl').setAttribute('aria-checked', String(compact));
   $('#densityTglRemote').setAttribute('aria-pressed', String(compact));
-  // the astro's own size just changed under the compact CSS above — recompute
-  // every tab's position from its new LIVE radius rather than trust stale ones
-  placeRadialTabs();
 }
 $('#densityTgl').onclick = () => setDensity(document.documentElement.dataset.density !== 'compact');
 $('#densityTglRemote').onclick = () => setDensity(document.documentElement.dataset.density !== 'compact');
@@ -3177,6 +3177,28 @@ const todColor = h => {
   return `rgba(${v[0]|0},${v[1]|0},${v[2]|0},${v[3].toFixed(3)})`;
 };
 let lastStrikeRoll = 0, lastFrame = 0, fpsWinStart = 0, fpsFrames = 0;
+
+/* FPS health bar — a fixed row of bars reused in place (never rebuilt),
+   scaled against a 90fps ceiling since this is a health read, not a
+   monitor-refresh readout, and colour-coded the same ok/warn/fail as the
+   rest of the debug dress. */
+const FPS_SPARK_N = 24;
+const fpsSparkHist = new Array(FPS_SPARK_N).fill(60);
+const fpsSparkBars = (() => {
+  const host = $('#dbgSpark'); if (!host) return [];
+  const bars = [];
+  for (let i = 0; i < FPS_SPARK_N; i++) { const b = el('i'); host.append(b); bars.push(b); }
+  return bars;
+})();
+function renderFpsSpark() {
+  fpsSparkHist.forEach((v, i) => {
+    const bar = fpsSparkBars[i]; if (!bar) return;
+    bar.style.height = (clamp(v / 90, .06, 1) * 100).toFixed(0) + '%';
+    bar.className = v >= 50 ? '' : v >= 30 ? 'warn' : 'bad';
+  });
+}
+renderFpsSpark();
+
 function frame(now) {
   const dt = lastFrame ? Math.min(now - lastFrame, 100) : 16; lastFrame = now;
   tickWindDrift(now, dt);
@@ -3353,7 +3375,7 @@ function frame(now) {
     if (Math.random() < state.ch.bolt * .12) flash();
   }
 
-  /* debug dress: live fps / frame-ms */
+  /* debug dress: live fps / frame-ms, plus the rolling health bar */
   fpsFrames++;
   if (now - fpsWinStart > 500) {
     if (fpsWinStart) {
@@ -3361,6 +3383,8 @@ function frame(now) {
       const de = $('#dbgFps');
       if (de) { de.textContent = fps.toFixed(0);
         $('#dbgMs').textContent = (1000 / Math.max(fps, 1)).toFixed(1); }
+      fpsSparkHist.push(fps); fpsSparkHist.shift();
+      renderFpsSpark();
     }
     fpsWinStart = now; fpsFrames = 0;
   }

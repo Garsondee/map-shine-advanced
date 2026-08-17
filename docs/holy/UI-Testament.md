@@ -146,10 +146,13 @@ The part every session rereads. Each law exists because V2 died of its absence.
    not a code-review nitpick.
 2. **THE HOUSES PARTITION.** A param renders in the FOH strip *or* the ROH complement, never
    both. (Two unsynced controls for one value shipped once, 2026-07-26. Never again.)
-3. **THE REMOTE GROWS BY CONTENT, NEVER BY CHROME.** Its grammar is fixed: hero dial · fade
-   time · channels · moods · cues · impulses · Now Playing. A new effect joins by *declaring
-   into* that grammar. If a feature needs a new Remote zone, it goes to the Studio instead —
-   or it petitions this Testament.
+3. **THE REMOTE GROWS BY CONTENT, NEVER BY CHROME.** Its grammar is fixed: Now Playing ·
+   hero dial + wings · fade time · the weather board (Direct/Drift) · channels · cues ·
+   impulses · the Director · the debug dress (dev-gated). A new effect joins by *declaring
+   into* that grammar (a wing tap, a mood, a climate, an impulse, a cue). If a feature needs
+   a new Remote zone, it goes to the Studio instead — or it petitions this Testament.
+   *(Grammar list amended by Fable 5, 2026-08-17, at the author's direction: wings, weather
+   modes, Director, debug dress added.)*
 4. **EVERY REMOTE CHANGE IS A FADE.** All Remote writes pass through the Fade Engine (§4.2);
    "now" is simply `over: 0`. Active fades are visible, cancellable, snappable — and they
    survive a reload.
@@ -186,11 +189,11 @@ table. Concise, tactile, beautiful. Everything reachable in one glance, one gest
 
 | Piece | What it is | Source of truth |
 | --- | --- | --- |
-| **Now Playing** | One strip: time glyph + weather glyph + active-fade progress ring + drift badge. The single-glance answer to "what is the world doing?" | derived from world state + Fade Engine |
-| **The astrolabe** | The hero. Time ring (sun-model-derived), wind arrow + strength. Already built; re-homed, re-skinned in LANTERN. | `src/ui/astrolabe.js` |
+| **Now Playing** | One strip: time glyph + weather glyph + active-fade progress ring + drift badge + connection cluster (players watching, Director LIVE dot). The single-glance answer to "what is the world doing, and who sees it?" | derived from world state + Fade Engine + sync bridge |
+| **The astrolabe + wings** | The hero. Time ring (sun-model-derived, **noon at the top** — author's call 2026-08-17), wind readout, and a **true moon**: it advances ~50 min later per day on its own lunar cycle and renders its **phase** (crescent → full → crescent), dimming toward new. Flanking the dial, two **wings** of quick-taps reclaim the dead corners: **left wing = time** (play/pause time flow, time speed, Dawn/Noon/Dusk/Midnight — each eased at the tempo), **right wing = moment-shots** (Golden hour, Moonlit, Ominous, … one-tap scene beats). Wings are declared content, capped at ~5 per side. | `src/ui/astrolabe.js` + `world/sun.js` + moon model |
 | **Fade Time** | A segmented tempo control, always visible: **Now · 10s · 1m · 5m · 15m · 1h** (+ press-and-hold for custom). Every subsequent gesture — chip tap, fader drag, dial turn — eases over the selected tempo. *This is the author's "ease across a minute…an hour" made structural: tempo is a mode you set once, not a dialog you answer every time.* | Fade Engine default `over` |
-| **Mood chips** | One-tap looks: Clear · Overcast · Drizzle · Rain · Storm · Snow · Fog · … Curated, scene-editable, declared as preset data. A chip is a *destination*; Fade Time is how long the journey takes. | preset declarations |
-| **Channel faders** | The environment vector, tinted per channel: precipitation · clouds · fog · wind speed · wind direction · freeze · lightning · ash (+ gustiness on the wind fader). **Render only channels whose engine is live** (Law 5). Dragging shows a ghost tick at the target and the fade running toward it — V2's fader preview, kept. | `world/` engines |
+| **The weather board — TWO MODES, one grammar** | A `Direct \| Drift` segmented control heads the board, because the two weather aims V2 discovered are different *verbs over the same nouns*: **Direct** — the GM states a destination: mood chips (Clear · Rain · Storm · Snow · …) are *destinations*, faders are *trims*, Fade Time is the journey. **Drift** — the GM states an *envelope*: climate chips (Coastal · Moorland · Alpine · Desert · Jungle · Volcanic · …) set per-channel bounds; the sky wanders inside them on its own; the faders grow **min/max brackets** with the live tick wandering between (V2's split-bounds faders, reborn). Same chips row, same faders, two verbs — never two boards. | preset + climate declarations |
+| **Channel faders** | The environment vector, tinted per channel: precipitation · clouds · fog · wind speed · wind direction · freeze · lightning · ash (+ gustiness on the wind fader). **Render only channels whose engine is live** (Law 5). Dragging shows a ghost tick at the target and the fade running toward it — V2's fader preview, kept. In Drift mode each fader wears its climate's bracket. | `world/` engines |
 | **Cue deck** | The next staged cue as a card + **GO**. GO fires the cue with *its* authored fade time (overriding the tempo bar). A drawer lists the scene's full cue stack; tap any to jump. §4.3. | cue declarations |
 | **Impulses** | One-shot buttons: strike lightning here · thunder · gust. Declared by effects (§4.4), curated to a single row. Impulses are instant by nature — they ignore Fade Time. | impulse declarations |
 
@@ -268,7 +271,57 @@ one line — curation is a scene-level pick, not a scroll.
 override. The Remote shows a small badge on flash-class impulses when any connected client
 suppresses them — the GM should know the strike won't reach everyone.
 
-### 4.5 What the Remote will NOT be — signed refusals
+### 4.5 THE DIRECTOR — cutscene mode *(author's charge, 2026-08-17: its own section)*
+
+> *"The ability to take over everyone's cameras, put letterboxes in front of the scene and
+> create cutscenes by taking away the players' UI and forcing them to focus on what you are
+> trying to show them."*
+
+The Remote's most theatrical power: for a held moment, every screen at the table becomes
+**one screen, and the GM is holding the camera.**
+
+**The model — broadcast the direction, derive the picture** (the Fade Engine doctrine
+applied to cameras): the GM's client writes a single **direction record** to the scene —
+`{ live, aspect, follow, hideUi, startedAt }` — and every player client *derives* its own
+presentation from it. No per-frame camera streaming; a follow target plus local smoothing.
+
+- **Follow sources** (the `follow` field): `my-view` (players track the GM's pan/zoom,
+  smoothed), `token:<id>` (camera locks to an actor — the dragon lands, everyone watches
+  the dragon), `path:<id>` (an authored camera path plays — the V3 camera-path system is
+  the engine; the Director is its stage).
+- **Letterbox**: cinema bars slide in to the chosen aspect (2.39:1 default · 2.0:1 · 16:9 ·
+  off). The bars are the *signal* — players instantly read "cutscene" with zero text.
+- **UI fall-away**: Foundry chrome and MSA panels on player clients fade to black-glass;
+  input is suspended for the duration. The GM keeps the Director HUD only.
+- **The Director HUD**: when LIVE, the GM's own Remote folds into a slim floating bar —
+  ● REC-red LIVE dot · aspect · follow source · watching-count · **GO** (cues fire
+  mid-cutscene; a cutscene is usually *made of* cues) · **RELEASE**. Nothing else. The GM
+  is directing, not configuring.
+- **Arming**: a 🎬 header button opens the Director strip (aspect · follow · hide-UI ·
+  TAKE OVER). Take-over is deliberate — one press arms it live; RELEASE returns every
+  client smoothly (camera eases home, bars slide out, UI fades back).
+- **Safety & agency**: RELEASE is instant and always one press. Player clients regain full
+  control on disconnect/timeout of the direction record (fail-open — a crashed GM must
+  never hold a table hostage; the gate-polarity law applies to people too). Whether players
+  get a hold-Esc opt-out is the author's fork (§11). Reduce-motion clients get cuts, not
+  glides; reduce-flash still outranks everything on strike-bearing cutscenes.
+- **Cues are the script, the Director is the camera.** A future cue type may carry a
+  direction (`cue.direct = {follow, aspect}`) so one GO does both. Declared data, validated
+  like everything else.
+
+Stage: **U9**. The mock demonstrates the GM side today: strip, take-over, letterbox, the
+ken-burns drift, the HUD, release.
+
+### 4.6 THE DEBUG DRESS — the author's zone, worn openly for now
+
+A dev-gated strip at the Remote's foot (and dev-gated rail entries elsewhere): live FPS ·
+frame-ms · VRAM · one-tap Perf HUD / Pixel Probe / Cache report / Export. Styled apart —
+monospace, slate, a 🔬 tag — so it always reads as *equipment*, never product. Governed by
+one global debug flag: **default ON while the module is the author's instrument; flipped
+OFF as a release step (U8) so GMs never meet it.** The flag hides dev chrome everywhere at
+once (remote strip, Lab rail slot, extra header tools) — one switch, not a scavenger hunt.
+
+### 4.7 What the Remote will NOT be — signed refusals
 
 - **No per-effect controls.** Not one. Effect tuning is the Studio's job; the Remote speaks
   only the fixed grammar. (The moment "just one water slider" lands here, Law 3 is dead.)
@@ -645,14 +698,65 @@ its token values seed `src/ui/tokens.js` at U0.
 - **Exit gate:** lightning strikes from the Remote; the suppression badge is truthful
   against a second logged-in client.
 
+### UM.2 — REFINEMENT ROUND *(author-directed 2026-08-17, same day)*
+Author's verdict on UM round 1: *"really really impressed… let's give this one more push."*
+Directives: noon at the top; a true moon (own rate + phases); layout thought-experiments
+with winners applied; a more elegant two-mode weather answer; more buttons than the system
+uses (expansion planning) in the red-marked dead zones; the debug dress, default ON; the
+Director as its own plan section; keep refining the visual language.
+- [x] Astrolabe flipped noon-up; gradient, ticks, orbs, labels all follow
+      · done Fable 5 2026-08-17 — placement math verified: 14:00 → (+56.5,−97.9) upper-right,
+      02:00 → lower-left; NOON/MIDNIGHT/DAWN/DUSK labels swapped; gradient bright-at-top
+- [x] The true moon: lunar-cycle model (own rate, ~50 min/day lag), rendered phases,
+      dim-toward-new, phase name on hover
+      · done Fable 5 2026-08-17 — 29.53-day cycle accumulated from signed hour-motion;
+      phase offset rides the ring (new≈with sun, full≈opposed); terminator via inset
+      shadow; title reads "Waxing gibbous — day 11.2 of 29.53". ⚠ shadow AESTHETICS not
+      yet seen by any eye (pane hidden) — judge on open
+- [x] Wings: left = time (flow play/pause, speed ×1/×6/×30, four phase quick-taps eased at
+      tempo); right = moment-shots (Golden hour · Moonlit · Ominous live; Candlelit ·
+      Aurora honest stubs); header micro-buttons (Director, camera path, health)
+      · done Fable 5 2026-08-17 — 6 left + 5 right, in the author's red-marked flanks
+- [x] Weather board two-mode: Direct/Drift segmented, 6 climate chips, fader min/max
+      brackets, self-walking sky in Drift (silent 5–10s wanders inside bounds)
+      · done Fable 5 2026-08-17 — mode swap rebuilds chips from declared data; Now Playing
+      reads "Drifting — Moorland, light rain"
+- [x] Debug dress: global flag default ON, Remote strip (live FPS/ms/VRAM + tool taps),
+      dev-gated rail slots, demo-bar toggle
+      · done Fable 5 2026-08-17 — toggling the flag provably hides the strip AND the Lab
+      rail slot in one stroke
+- [x] Director demo: strip (aspect/follow/hide-UI/TAKE OVER), letterbox, HUD with GO +
+      RELEASE, smooth return
+      · done Fable 5 2026-08-17 — letterbox math pixel-exact ((720−1280/2.39)/2 = 92.2px
+      measured); LIVE hides the Remote, shows the HUD, dims mock chrome; release restores.
+      Containment re-proven after growth: body 1000px vs 1003px budget at 1080p — fits
+      with zero internal scroll
+- **Exit gate:** unchanged — the author's eyes, now on round 2.
+
 ### U8 — POLISH & KEYBINDINGS
 - [ ] Foundry keybindings: toggle Remote · toggle Studio · GO (first keybindings the module
       has ever had — V2 shipped none)
 - [ ] Onboarding: first-open Getting Started card per room (small, dismissible, never modal)
 - [ ] Sound/clunk pass (author fork §11), reduced-motion audit, text-scale audit at 1.3×
+- [ ] **Flip the debug flag default to OFF** (§4.6) — the release step that undresses the
+      author's equipment before GMs arrive
 - [ ] A docs pass: `docs/planning/UI.md` updated to point here as spec-of-record
 - **Exit gate:** a full real session run start-to-finish on Remote + hotkeys, and the
   author's word that it *felt good* — the charge's own criterion.
+
+### U9 — THE DIRECTOR *(§4.5; the table becomes one screen)*
+- [ ] Direction record: schema + scene-flag broadcast + fail-open expiry (a crashed GM
+      never holds the table; derived, never streamed)
+- [ ] Player-side presentation: letterbox to aspect, UI fall-away, input suspension,
+      smooth camera follow (`my-view` smoothing · `token` lock · `path` playback via the
+      camera-path system)
+- [ ] GM side: 🎬 strip (aspect · follow · hide-UI · TAKE OVER) + the LIVE HUD (REC ·
+      watching count · GO · RELEASE); Remote folds away while live
+- [ ] Release choreography: camera eases home, bars out, UI back — and the reduce-motion
+      variant (cuts, not glides)
+- [ ] Cue integration: `cue.direct` — one GO moves the sky AND the camera
+- **Exit gate:** a second logged-in client experiences a full cutscene — take-over,
+  a cue fired mid-scene, release — and the author calls the *player-side* feel right.
 
 ---
 
@@ -690,6 +794,11 @@ its token values seed `src/ui/tokens.js` at U0.
 7. ~~Mock first?~~ **RESOLVED 2026-08-17 — the author said the word.** The mock is now
    stage **UM**, blocking U0, so design proceeds without touching `src/` while other work
    is in flight there.
+8. **Director: do players get an opt-out?** A hold-Esc "look away" during cutscenes
+   (agency) vs the GM's framing being absolute (drama). Also: default letterbox aspect,
+   and whether take-over warns players with a 1s "curtain rising" beat first.
+9. **When the debug flag flips OFF by default** — at first outside GM, or at first sold
+   map. (The flip itself is a U8 task; the *when* is yours.)
 
 **Risks, named:** *(a)* The Remote's restraint will be tested within a month — someone will
 want "just one" effect slider on it; Law 3 exists for that day. *(b)* The Fade Engine's
@@ -721,6 +830,15 @@ edit the plan.*
   first** (stage UM added, blocking U0), so UI design runs without touching `src/` while
   other work is in flight. Two directives recorded: the 1080p containment law (Charter §11)
   and *"make it look nice in 4K, since that is what my monitor is."*
+- **2026-08-17, round 2** — Author on UM round 1: *"really really impressed."* Directed the
+  refinement round (UM.2) and the **Director** (§4.5, stage U9). **Layout experiments run
+  and logged:** two-column remote (both halves cramp at 402px — rejected) · tabbed remote
+  (a session surface must not hide its buttons — rejected) · weather XY-pad (orphans
+  clouds/fog/wind; second truth beside the faders — logged for someday) · sky-ring around
+  the astrolabe (overloads the hero, shrinks hit targets — rejected) · **corner satellites
+  (wings + header micro-buttons) + two-mode weather board — APPLIED.** Law 3's grammar
+  list amended accordingly; §4.5 Director and §4.6 debug dress added; noon-up astrolabe
+  and the true moon written into §4.1.
 
 ---
 

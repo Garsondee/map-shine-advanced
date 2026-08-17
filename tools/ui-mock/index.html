@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark" data-density="comfortable">
+<html lang="en" data-theme="dark" data-density="comfortable" data-debug="1" data-live="0">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -260,11 +260,11 @@ html[data-frame="1"] #frame1080{display:block}
    THE REMOTE
    ========================================================================== */
 #remote{top:16px; right:16px; width:402px; max-height:calc(100vh - 32px)}
-#remote .body{padding:var(--sp3) var(--sp4) var(--sp4); display:flex; flex-direction:column;
-  gap:var(--sp3); overflow-y:auto; scrollbar-width:thin}
+#remote .body{padding:10px 16px 12px; display:flex; flex-direction:column;
+  gap:10px; overflow-y:auto; scrollbar-width:thin}
 
 /* now playing */
-#nowPlaying{display:flex; align-items:center; gap:10px; padding:8px 10px;
+#nowPlaying{display:flex; align-items:center; gap:10px; padding:7px 10px;
   background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-card)}
 #nowPlaying .ring{width:34px; height:34px; flex:none; position:relative}
 #nowPlaying .ring svg{width:100%; height:100%; transform:rotate(-90deg)}
@@ -278,14 +278,27 @@ html[data-frame="1"] #frame1080{display:block}
 #npCancel{margin-left:auto; display:none; flex-direction:column; gap:2px}
 #nowPlaying.fading #npCancel{display:flex}
 
-/* astrolabe */
-#astro{position:relative; width:258px; height:258px; margin:2px auto 0; flex:none}
+/* astrolabe + wings */
+#astroRow{position:relative; margin-top:0; flex:none}
+#astro{position:relative; width:258px; height:258px; margin:0 auto}
+.wing{position:absolute; top:50%; transform:translateY(-50%); display:flex;
+  flex-direction:column; gap:5px; z-index:2}
+#wingL{left:0} #wingR{right:0}
+.mini{width:38px; height:38px; border-radius:11px; display:grid; place-items:center;
+  background:var(--bg2); border:1px solid var(--line); color:var(--ink2);
+  transition:all var(--t-micro); position:relative}
+.mini .ico{width:16px; height:16px}
+.mini.txt{font-size:.58rem; letter-spacing:.04em; color:var(--ink1); font-weight:600}
+.mini:hover{border-color:var(--line-strong); color:var(--ink0); transform:translateY(-1px)}
+.mini[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
+  background:var(--shine-soft)}
+.mini .sub{position:absolute; bottom:1px; right:3px; font-size:.5rem; color:var(--ink2)}
 #astro .ring{position:absolute; inset:0; border-radius:50%;
-  /* midnight at TOP (0deg), noon at bottom (180deg): hour h sits at h*15deg */
+  /* NOON at TOP (author's call): hour h sits at ((h-12)/24)*360deg, clockwise */
   background:conic-gradient(from 0deg,
-    #1b2340 0deg,   #232a52 60deg,  #6a5a8c 82deg,  #d99a6a 97deg,
-    #f2c76e 112deg, #f7e3a0 150deg, #ffefc2 180deg, #f7e3a0 210deg,
-    #f2c76e 248deg, #e08a5a 262deg, #7a5a7c 285deg, #232a52 308deg, #1b2340 360deg);
+    #ffefc2 0deg,   #f7e3a0 30deg,  #f2c76e 68deg,  #e08a5a 83deg,
+    #7a5a7c 105deg, #232a52 128deg, #1b2340 180deg, #232a52 232deg,
+    #6a5a8c 262deg, #d99a6a 277deg, #f2c76e 292deg, #f7e3a0 330deg, #ffefc2 360deg);
   -webkit-mask:radial-gradient(closest-side, transparent 74%, #000 75%, #000 98%, transparent 99%);
           mask:radial-gradient(closest-side, transparent 74%, #000 75%, #000 98%, transparent 99%);
   box-shadow:0 0 calc(30px * var(--glow-on)) rgba(231,195,104,.12);
@@ -297,8 +310,8 @@ html[data-frame="1"] #frame1080{display:block}
   border-radius:50%; pointer-events:none;
   background:radial-gradient(circle at 35% 35%, #fff7dd, var(--shine) 60%, #c89b3c);
   box-shadow:0 0 calc(16px * var(--glow-on)) var(--shine-glow), 0 0 4px rgba(0,0,0,.4)}
-#astro .moon{position:absolute; top:50%; left:50%; width:14px; height:14px; margin:-7px;
-  border-radius:50%; pointer-events:none; opacity:.85;
+#astro .moon{position:absolute; top:50%; left:50%; width:15px; height:15px; margin:-7.5px;
+  border-radius:50%; cursor:help; opacity:.85;
   background:radial-gradient(circle at 60% 35%, #eef2ff, #9aa7c8 65%, #6a7694)}
 #astro .hub{position:absolute; inset:50px; border-radius:50%;
   background:radial-gradient(circle at 50% 30%, var(--bg3), var(--bg1) 75%);
@@ -323,7 +336,7 @@ html[data-frame="1"] #frame1080{display:block}
 .blocklabel .hint{margin-left:auto; letter-spacing:.02em; text-transform:none;
   color:var(--ink2); opacity:.8}
 #tempo{display:grid; grid-template-columns:repeat(6,1fr); gap:4px}
-#tempo button{padding:7px 0; border-radius:8px; border:1px solid var(--line);
+#tempo button{padding:6px 0; border-radius:8px; border:1px solid var(--line);
   background:var(--bg2); color:var(--ink1); font-size:.74rem; font-weight:600;
   transition:all var(--t-micro)}
 #tempo button:hover{border-color:var(--line-strong); color:var(--ink0)}
@@ -333,7 +346,7 @@ html[data-frame="1"] #frame1080{display:block}
 /* moods */
 #moods{display:grid; grid-template-columns:repeat(4,1fr); gap:5px}
 #moods button{display:flex; flex-direction:column; align-items:center; gap:3px;
-  padding:7px 2px 6px; border-radius:9px; border:1px solid var(--line);
+  padding:5px 2px 4px; border-radius:9px; border:1px solid var(--line);
   background:var(--bg2); color:var(--ink1); font-size:.66rem;
   transition:all var(--t-micro)}
 #moods button .ico{width:1.25em; height:1.25em; color:var(--c-atmos)}
@@ -344,7 +357,7 @@ html[data-frame="1"] #frame1080{display:block}
 /* faders */
 #faders{display:flex; justify-content:space-between; padding:2px 2px 0}
 .fader{display:flex; flex-direction:column; align-items:center; gap:5px; width:46px}
-.fader .track{position:relative; width:26px; height:150px; border-radius:13px;
+.fader .track{position:relative; width:26px; height:132px; border-radius:13px;
   background:var(--bg2); border:1px solid var(--line); cursor:pointer; overflow:visible}
 .fader .fill{position:absolute; left:2px; right:2px; bottom:2px; border-radius:11px;
   background:linear-gradient(180deg, color-mix(in oklab, var(--acc) 85%, white 12%), var(--acc));
@@ -369,7 +382,7 @@ html[data-frame="1"] #frame1080{display:block}
 #cueDeck{display:flex; flex-direction:column; gap:6px}
 #cueRow{display:flex; gap:8px; align-items:stretch}
 #cueCard{flex:1; background:var(--bg2); border:1px solid var(--line);
-  border-radius:var(--r-card); padding:8px 10px; display:flex; flex-direction:column; gap:3px;
+  border-radius:var(--r-card); padding:7px 10px; display:flex; flex-direction:column; gap:2px;
   min-width:0}
 #cueCard .k{font-size:.62rem; letter-spacing:.2em; color:var(--ink2); text-transform:uppercase}
 #cueCard .name{font-weight:650; font-size:.8rem; white-space:nowrap; overflow:hidden;
@@ -398,7 +411,7 @@ html[data-frame="1"] #frame1080{display:block}
 /* impulses + footer */
 #impulses{display:flex; gap:6px}
 #impulses button{flex:1; display:flex; align-items:center; justify-content:center; gap:6px;
-  padding:8px 4px; border-radius:9px; border:1px solid var(--line); background:var(--bg2);
+  padding:7px 4px; border-radius:9px; border:1px solid var(--line); background:var(--bg2);
   color:var(--ink1); font-size:.72rem; position:relative; transition:all var(--t-micro)}
 #impulses button:hover{border-color:var(--warn); color:var(--ink0)}
 #impulses button:active{transform:scale(.95)}
@@ -407,9 +420,85 @@ html[data-frame="1"] #frame1080{display:block}
   border:1px solid var(--fail); color:var(--fail); border-radius:999px; font-size:.6rem;
   padding:0 5px; display:none}
 html[data-reduce-flash="1"] #impulses button[data-flash] .supp{display:block}
-#remoteFoot{display:flex; gap:6px; padding-top:2px; border-top:1px solid var(--line);
-  margin-top:2px; padding-top:10px}
+#remoteFoot{display:flex; gap:6px; border-top:1px solid var(--line);
+  margin-top:0; padding-top:8px}
 #remoteFoot .btn{flex:1; justify-content:center; font-size:.72rem}
+
+/* weather mode segmented */
+.modeseg{display:inline-flex; margin-left:auto; background:var(--bg2);
+  border:1px solid var(--line); border-radius:999px; padding:2px; gap:2px}
+.modeseg button{padding:2px 10px; border-radius:999px; font-size:.62rem;
+  letter-spacing:.1em; color:var(--ink2); text-transform:uppercase}
+.modeseg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
+
+/* drift brackets on faders */
+.fader .bkt{position:absolute; left:-4px; right:-4px; pointer-events:none; opacity:0;
+  border-top:1px dashed color-mix(in oklab, var(--acc) 70%, transparent);
+  border-bottom:1px dashed color-mix(in oklab, var(--acc) 70%, transparent);
+  background:color-mix(in oklab, var(--acc) 7%, transparent);
+  transition:opacity var(--t-micro)}
+.fader.drift .bkt{opacity:.85}
+
+/* now-playing right cluster */
+#npRight{margin-left:auto; display:flex; align-items:center; gap:9px}
+#npStatus{display:flex; flex-direction:column; align-items:flex-end; gap:3px;
+  font-size:.64rem; color:var(--ink2)}
+#npStatus .watch{display:flex; align-items:center; gap:4px}
+#npStatus .live{display:none; align-items:center; gap:5px; color:#ff6b5c;
+  font-weight:700; letter-spacing:.14em; font-size:.6rem}
+#npStatus .live .dot{width:7px; height:7px; border-radius:50%; background:#ff6b5c;
+  animation:pulse 1.2s ease-in-out infinite}
+html[data-live="1"] #npStatus .live{display:flex}
+@keyframes pulse{50%{opacity:.35}}
+
+/* the director */
+#directorStrip{display:none; flex-direction:column; gap:9px; padding:10px 12px;
+  border:1px solid color-mix(in oklab, #ff6b5c 30%, var(--line));
+  border-radius:var(--r-card);
+  background:color-mix(in oklab, #ff6b5c 5%, var(--bg2))}
+#directorStrip.open{display:flex}
+#directorStrip .drow{display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+  font-size:.7rem; color:var(--ink1)}
+#directorStrip .drow label{display:flex; gap:5px; align-items:center}
+#takeoverBtn{width:100%; padding:9px; border-radius:9px; font-weight:800;
+  letter-spacing:.2em; font-size:.78rem; border:1px solid #ff6b5c66; color:#ff8a76;
+  background:linear-gradient(180deg, rgba(255,107,92,.14), transparent);
+  transition:all var(--t-micro)}
+#takeoverBtn:hover{box-shadow:0 0 calc(18px * var(--glow-on)) rgba(255,107,92,.25)}
+.lbar{position:fixed; left:0; right:0; height:0; background:#000; z-index:250;
+  transition:height 1.1s var(--ease)}
+#lbTop{top:0} #lbBot{bottom:0}
+#dirHud{position:fixed; bottom:16px; left:50%; transform:translateX(-50%); z-index:260;
+  display:none; align-items:center; gap:12px; padding:8px 18px; border-radius:999px;
+  background:var(--glass); backdrop-filter:blur(var(--glass-blur));
+  border:1px solid rgba(255,107,92,.4); box-shadow:var(--shadow2); font-size:.74rem}
+html[data-live="1"] #dirHud{display:flex}
+html[data-live="1"] #remote, html[data-live="1"] #pill{display:none}
+html[data-live="1"] #demoBar{opacity:.15}
+html[data-live="1"] #demoBar:hover{opacity:1}
+html[data-live="1"] #map{transform:scale(1.06)}
+#map{transition:transform 9s var(--ease)}
+#dirHud .dot{width:8px; height:8px; border-radius:50%; background:#ff6b5c;
+  animation:pulse 1.2s infinite}
+#dirHud b{letter-spacing:.16em; color:#ff8a76}
+#dirHud .meta{color:var(--ink2)}
+#dirGo{padding:5px 15px; border-radius:999px; border:1px solid var(--shine-glow);
+  color:var(--shine); font-weight:800; letter-spacing:.16em; background:var(--shine-soft)}
+#dirRelease{padding:5px 15px; border-radius:999px; border:1px solid var(--line-strong);
+  color:var(--ink0); background:var(--bg2)}
+#dirRelease:hover{border-color:#ff6b5c; color:#ff8a76}
+
+/* the debug dress */
+#debugStrip{border:1px dashed color-mix(in oklab, var(--c-system) 45%, transparent);
+  border-radius:10px; padding:6px 11px; display:flex; align-items:center; gap:11px;
+  font-family:var(--mono); font-size:.65rem; color:var(--ink2)}
+#debugStrip .tag{color:var(--c-system); letter-spacing:.18em; font-weight:700;
+  display:flex; gap:5px; align-items:center}
+#debugStrip .stat b{color:var(--ink0); font-weight:600}
+#debugStrip .dbtn{padding:2px 9px; border:1px solid var(--line); border-radius:6px;
+  color:var(--ink1); font-family:var(--mono); font-size:.62rem}
+#debugStrip .dbtn:hover{border-color:var(--c-system); color:var(--ink0)}
+html[data-debug="0"] .dbg{display:none !important}
 
 /* collapsed pill */
 #pill{position:fixed; top:16px; right:16px; z-index:100; display:none; align-items:center;
@@ -696,6 +785,7 @@ html[data-density="compact"] #cards{gap:9px}
     <symbol id="i-health" viewBox="0 0 24 24"><path d="M3 12h4l2-5 3.5 10 2.5-7 1.5 2H21"/></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2.5"/><path d="M9 7l1.5-2.8h3L15 7"/><circle cx="12" cy="13.3" r="3.4"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 5.5v13M15.5 5.5v13"/></symbol>
   </defs>
 </svg>
 
@@ -739,6 +829,8 @@ html[data-density="compact"] #cards{gap:9px}
   </select>
   <button class="iconbtn" id="frameBtn" aria-pressed="false" title="Toggle 1920×1080 containment frame">
     <svg class="ico"><use href="#i-frame"/></svg></button>
+  <button class="iconbtn" id="debugBtn" aria-pressed="true" title="Debug dress — the author's equipment. Default ON for now; flips OFF at release (Testament §4.6)">
+    <svg class="ico"><use href="#i-flask"/></svg></button>
   <button class="iconbtn" id="resetBtn" title="Reset demo">
     <svg class="ico"><use href="#i-reset"/></svg></button>
 </nav>
@@ -749,6 +841,12 @@ html[data-density="compact"] #cards{gap:9px}
   <header class="room-head" data-drag="remote">
     <span class="rtitle"><svg class="ico"><use href="#i-candle"/></svg>Remote</span>
     <span class="spacer"></span>
+    <button class="hbtn" id="dirBtn" title="Director — take over every camera, letterbox the scene, run a cutscene">
+      <svg class="ico"><use href="#i-clap"/></svg></button>
+    <button class="hbtn" id="camPathBtn" title="Camera paths — authored sweeps the Director can follow (planned)">
+      <svg class="ico"><use href="#i-camera"/></svg></button>
+    <button class="hbtn dbg" id="healthBtn" title="Scene health — masks + effects readiness at a glance (planned)">
+      <svg class="ico"><use href="#i-health"/></svg></button>
     <button class="hbtn" id="collapseBtn" title="Collapse to pill">
       <svg class="ico"><use href="#i-chev" style="transform:rotate(90deg)"/></svg></button>
   </header>
@@ -765,20 +863,43 @@ html[data-density="compact"] #cards{gap:9px}
         <div id="npLabel">Holding — Afternoon, light rain</div>
         <div id="npSub" class="num">world is steady</div>
       </div>
-      <div id="npCancel">
-        <button class="btn sm" id="fadeSnap" title="Jump to the end of the fade">Snap</button>
-        <button class="btn sm" id="fadeHold" title="Stop here, keep current values">Hold</button>
+      <div id="npRight">
+        <div id="npStatus">
+          <span class="live"><span class="dot"></span>LIVE</span>
+          <span class="watch" title="Connected players — their screens follow this world state">
+            <svg class="ico"><use href="#i-user"/></svg>3</span>
+        </div>
+        <div id="npCancel">
+          <button class="btn sm" id="fadeSnap" title="Jump to the end of the fade">Snap</button>
+          <button class="btn sm" id="fadeHold" title="Stop here, keep current values">Hold</button>
+        </div>
       </div>
     </div>
 
+    <div id="directorStrip" role="group" aria-label="Director — cutscene controls">
+      <div class="drow"><b style="color:#ff8a76; letter-spacing:.18em; font-size:.68rem">DIRECTOR</b>
+        <span style="color:var(--ink2)">players' cameras follow yours; their UI falls away</span></div>
+      <div class="drow">
+        <label>aspect <select class="select" id="dirAspect">
+          <option>2.39:1</option><option>2.0:1</option><option>16:9</option></select></label>
+        <label>follow <select class="select" id="dirFollow">
+          <option>My view</option><option>Selected token</option><option>Camera path A</option></select></label>
+        <label>hide UI <button class="toggle" id="dirHideUi" role="switch" aria-checked="true"
+          title="Fade Foundry chrome and panels on player clients"></button></label>
+      </div>
+      <button id="takeoverBtn" title="Go live — every player screen becomes your frame">● TAKE OVER</button>
+    </div>
+
+    <div id="astroRow">
+    <div class="wing" id="wingL" role="group" aria-label="Time controls"></div>
     <div id="astro">
       <div class="ring" id="astroRing" role="slider" aria-label="Time of day"
            aria-valuemin="0" aria-valuemax="24" aria-valuenow="14" tabindex="0"></div>
       <svg class="ticks" viewBox="0 0 258 258" aria-hidden="true">
         <g id="tickG"></g>
-        <text x="129" y="16">MIDNIGHT</text><text x="129" y="250">NOON</text>
-        <text x="14" y="133" style="writing-mode:vertical-rl">DUSK</text>
-        <text x="247" y="133" style="writing-mode:vertical-rl">DAWN</text>
+        <text x="129" y="16">NOON</text><text x="129" y="250">MIDNIGHT</text>
+        <text x="14" y="133" style="writing-mode:vertical-rl">DAWN</text>
+        <text x="247" y="133" style="writing-mode:vertical-rl">DUSK</text>
       </svg>
       <div class="sun" id="sunOrb"></div>
       <div class="moon" id="moonOrb"></div>
@@ -795,6 +916,8 @@ html[data-density="compact"] #cards{gap:9px}
            aria-valuemin="0" aria-valuemax="359" aria-valuenow="205" tabindex="0"
            title="Drag to set wind direction"></div>
     </div>
+    <div class="wing" id="wingR" role="group" aria-label="Moment shots"></div>
+    </div>
 
     <div>
       <div class="blocklabel"><svg class="ico"><use href="#i-clock"/></svg>Fade time
@@ -803,7 +926,13 @@ html[data-density="compact"] #cards{gap:9px}
     </div>
 
     <div>
-      <div class="blocklabel"><svg class="ico"><use href="#i-cloud"/></svg>Moods</div>
+      <div class="blocklabel"><svg class="ico"><use href="#i-cloud"/></svg><span id="wxTitle">Moods</span>
+        <div class="modeseg" role="group" aria-label="Weather mode">
+          <button id="wxDirect" aria-pressed="true"
+            title="Direct — you state the destination; chips are destinations, faders are trims">Direct</button>
+          <button id="wxDrift" aria-pressed="false"
+            title="Drift — you state the climate; the sky wanders inside its bounds on its own">Drift</button>
+        </div></div>
       <div id="moods" style="margin-top:6px"></div>
     </div>
 
@@ -839,6 +968,17 @@ html[data-density="compact"] #cards{gap:9px}
         <button id="impGust" title="Send a gust across the map">
           <svg class="ico"><use href="#i-wind"/></svg>Gust</button>
       </div>
+    </div>
+
+    <div id="debugStrip" class="dbg" role="group" aria-label="Debug equipment">
+      <span class="tag"><svg class="ico"><use href="#i-flask"/></svg>DEBUG</span>
+      <span class="stat">fps <b id="dbgFps" class="num">—</b></span>
+      <span class="stat"><b id="dbgMs" class="num">—</b>ms</span>
+      <span class="stat" title="Mock value — the real strip reads the VRAM ledger">vram <b>3.2/8G</b></span>
+      <span style="flex:1"></span>
+      <button class="dbtn" id="dbgHud" title="Perf HUD — per-zone frame costs over the map (planned)">HUD</button>
+      <button class="dbtn" id="dbgProbe" title="Pixel probe — click 3 map points, sample the compositor (planned)">probe</button>
+      <button class="dbtn" id="dbgExport" title="Export everything — the flight-recorder bundle (planned)">export</button>
     </div>
 
     <div id="remoteFoot">
@@ -901,6 +1041,14 @@ html[data-density="compact"] #cards{gap:9px}
   </div>
 </div>
 <div id="toasts" aria-live="polite"></div>
+<div class="lbar" id="lbTop" aria-hidden="true"></div>
+<div class="lbar" id="lbBot" aria-hidden="true"></div>
+<div id="dirHud" role="toolbar" aria-label="Director — live">
+  <span class="dot"></span><b>LIVE</b>
+  <span class="meta" id="dirHudMeta">2.39:1 · My view · 3 watching</span>
+  <button id="dirGo" title="Fire the next cue — cutscenes are made of cues">GO ▸</button>
+  <button id="dirRelease" title="Release cameras and UI back to the players">RELEASE</button>
+</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1059,7 +1207,21 @@ const state = {
   fadeLabel:null, fadeUntil:0,
   dept:'effects', painterArmed:null, pinned:new Set(),
   reduceFlash:false, textScale:1,
+  /* the true moon: its own cycle, phases, ~50 min/day lag */
+  moonAge:.38, prevHour:14,
+  /* time flow: the world clock can RUN */
+  flow:false, speedIx:0,
+  /* weather board mode */
+  wxMode:'direct', climate:null, nextWalk:0,
+  /* director */
+  dirLive:false,
 };
+const SPEEDS = [1, 6, 30];          // game-minutes per real second
+const SPEED_LABELS = ['×1', '×6', '×30'];
+const LUNAR_DAYS = 29.53;
+const MOON_PHASES = ['New moon','Waxing crescent','First quarter','Waxing gibbous',
+  'Full moon','Waning gibbous','Last quarter','Waning crescent'];
+const moonPhaseName = a => MOON_PHASES[Math.round(a * 8) % 8];
 
 /* ── fade engine (mock) — one writer, rAF deriver ───────────────────────── */
 const easeC = t => t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2;
@@ -1112,7 +1274,6 @@ function toastOnce(key, msg) {
 /* ── astrolabe ──────────────────────────────────────────────────────────── */
 const phaseOf = h => h < 5 ? 'NIGHT' : h < 8 ? 'DAWN' : h < 17 ? 'DAY'
                    : h < 20 ? 'DUSK' : 'NIGHT';
-const hourAngle = h => (h / 24) * 360 + 180;   // 0h at bottom? 0h top=midnight: midnight up
 { const g = $('#tickG'); let ticks = '';
   for (let i = 0; i < 24; i++) {
     const a = (i / 24) * 2 * Math.PI, R = 129, r1 = i % 6 ? 121 : 117, r2 = 126;
@@ -1120,7 +1281,7 @@ const hourAngle = h => (h / 24) * 360 + 180;   // 0h at bottom? 0h top=midnight:
                     x2="${R + r2 * Math.sin(a)}" y2="${R - r2 * Math.cos(a)}"/>`;
   } g.innerHTML = ticks; }
 function placeOrb(elm, hour, r) {
-  const a = (hour / 24) * 2 * Math.PI;                    // midnight at top
+  const a = ((hour - 12) / 24) * 2 * Math.PI;             // NOON at top (author's call)
   elm.style.transform =
     `translate(${r * Math.sin(a)}px, ${-r * Math.cos(a)}px)`;
 }
@@ -1136,7 +1297,8 @@ function dragAngle(target, cb) {
   target.addEventListener('pointermove', move);
   target.addEventListener('pointerup',   () => on = false);
 }
-dragAngle($('#astroRing'), a => { cancelFades(false); state.hour = (a / 360) * 24; });
+dragAngle($('#astroRing'), a => { cancelFades(false);
+  state.hour = ((a / 360) * 24 + 12) % 24; });
 dragAngle($('#windGrab'), a => { state.windDir = a; });
 $('#astroRing').addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowDown')  state.hour = (state.hour + 23.75) % 24;
@@ -1162,15 +1324,52 @@ $('#windGrab').addEventListener('keydown', e => {
   }); }
 const tempoS = () => TEMPO[state.tempoIx].s;
 
-{ const m = $('#moods');
-  MOODS.forEach(md => {
+/* the weather board — TWO MODES over one grammar (Testament §4.1) */
+const CLIMATES = [
+  { id:'coastal',  label:'Coastal',  icon:'water',
+    b:{ rain:[0,.5],  clouds:[.2,.8],  fog:[0,.35],  wind:[.25,.7], freeze:[0,0],  bolt:[0,.15], ash:[0,0] } },
+  { id:'moorland', label:'Moorland', icon:'fog',
+    b:{ rain:[.1,.6], clouds:[.4,.95], fog:[.15,.6], wind:[.2,.6],  freeze:[0,.1], bolt:[0,.1],  ash:[0,0] } },
+  { id:'alpine',   label:'Alpine',   icon:'snow',
+    b:{ rain:[0,.55], clouds:[.2,.7],  fog:[0,.3],   wind:[.3,.8],  freeze:[.6,1], bolt:[0,0],   ash:[0,0] } },
+  { id:'desert',   label:'Desert',   icon:'sun',
+    b:{ rain:[0,.05], clouds:[0,.25],  fog:[0,0],    wind:[.1,.6],  freeze:[0,0],  bolt:[0,0],   ash:[0,.08] } },
+  { id:'jungle',   label:'Jungle',   icon:'rain',
+    b:{ rain:[.2,.9], clouds:[.5,1],   fog:[.1,.5],  wind:[0,.4],   freeze:[0,0],  bolt:[0,.4],  ash:[0,0] } },
+  { id:'volcanic', label:'Volcanic', icon:'fire',
+    b:{ rain:[0,.2],  clouds:[.4,.9],  fog:[.1,.4],  wind:[.1,.5],  freeze:[0,0],  bolt:[0,.3],  ash:[.3,.9] } },
+];
+function buildWeatherBoard() {
+  const m = $('#moods'); m.innerHTML = '';
+  const direct = state.wxMode === 'direct';
+  $('#wxTitle').textContent = direct ? 'Moods' : 'Climates';
+  $('#wxDirect').setAttribute('aria-pressed', String(direct));
+  $('#wxDrift').setAttribute('aria-pressed', String(!direct));
+  (direct ? MOODS : CLIMATES).forEach(md => {
     const b = el('button', null, icon(md.icon) + `<span>${md.label}</span>`);
-    b.title = `Fade the sky to ${md.label} at the chosen fade time`;
-    b.onclick = () => { state.mood = md.id;
+    b.title = direct
+      ? `Fade the sky to ${md.label} at the chosen fade time`
+      : `Let the sky wander inside ${md.label}'s bounds — brackets appear on the faders`;
+    b.onclick = () => {
+      if (direct) { state.mood = md.id; easeTo(md.t, tempoS(), md.label); }
+      else {
+        state.climate = md;
+        const t = {};
+        for (const [k, [lo, hi]] of Object.entries(md.b)) t[k] = lo + Math.random() * (hi - lo);
+        easeTo(t, tempoS(), `${md.label} climate`);
+        state.nextWalk = performance.now() + 6000;
+      }
       $$('#moods button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
-      easeTo(md.t, tempoS(), md.label); };
+    };
+    if ((direct && state.mood === md.id) || (!direct && state.climate?.id === md.id))
+      b.setAttribute('aria-pressed', 'true');
     m.append(b);
-  }); }
+  });
+}
+$('#wxDirect').onclick = () => { state.wxMode = 'direct'; buildWeatherBoard(); };
+$('#wxDrift').onclick = () => { state.wxMode = 'drift'; buildWeatherBoard();
+  if (!state.climate) toast('Pick a climate — the sky keeps itself busy inside its bounds', 'cloud'); };
+buildWeatherBoard();
 
 const faderEls = {};
 { const wrap = $('#faders');
@@ -1180,6 +1379,7 @@ const faderEls = {};
     f.innerHTML = `
       <div class="track" role="slider" aria-label="${c.label}" aria-valuemin="0"
            aria-valuemax="100" tabindex="0">
+        <div class="bkt"></div>
         <div class="fill"></div><div class="thumb"></div><div class="ghost"></div>
         <span class="val num"></span>
       </div>
@@ -1276,6 +1476,81 @@ $('#fadeHold').onclick = () => cancelFades(false);
 $('#collapseBtn').onclick = () => document.documentElement.dataset.remote = 'pill';
 $('#pill').onclick = () => document.documentElement.dataset.remote = 'full';
 
+/* ── the wings — quick-taps flanking the astrolabe ──────────────────────── */
+{ const L = $('#wingL');
+  const flowB = el('button', 'mini', icon('play'));
+  flowB.title = 'Let time flow — the clock runs at the chosen speed';
+  flowB.setAttribute('aria-pressed', 'false');
+  flowB.onclick = () => { state.flow = !state.flow;
+    flowB.setAttribute('aria-pressed', String(state.flow));
+    flowB.innerHTML = icon(state.flow ? 'pause' : 'play');
+    toast(state.flow ? `Time flows — ${SPEED_LABELS[state.speedIx]}` : 'Time holds', 'clock'); };
+  const spdB = el('button', 'mini txt', SPEED_LABELS[0]);
+  spdB.title = 'Time speed — game-minutes per real second';
+  spdB.onclick = () => { state.speedIx = (state.speedIx + 1) % SPEEDS.length;
+    spdB.textContent = SPEED_LABELS[state.speedIx];
+    if (state.flow) toast(`Time flows — ${SPEED_LABELS[state.speedIx]}`, 'clock'); };
+  L.append(flowB, spdB);
+  [['Dawn', 6.5], ['Noon', 12], ['Dusk', 18], ['Mid', 0]].forEach(([lab, hr]) => {
+    const b = el('button', 'mini txt', lab);
+    b.title = `Ease the clock to ${lab === 'Mid' ? 'midnight' : lab.toLowerCase()} at the chosen fade time`;
+    b.onclick = () => easeTo({ hour: hr }, tempoS(), lab === 'Mid' ? 'Midnight' : lab);
+    L.append(b);
+  });
+  const R = $('#wingR');
+  [ ['sun',   'Golden hour — one-tap scene beat, eased at fade time',
+      () => easeTo({ hour:17.1, clouds:.18, rain:0, fog:.06, bolt:0 }, tempoS(), 'Golden hour')],
+    ['moon',  'Moonlit night — clear, still, silver',
+      () => easeTo({ hour:0.4, clouds:.15, rain:0, fog:.12, bolt:0 }, tempoS(), 'Moonlit night')],
+    ['bolt',  'Ominous — the sky turns before the storm does',
+      () => easeTo({ clouds:.92, wind:.55, bolt:.35, rain:.15 }, tempoS(), 'Something comes')],
+    ['candle','Candlelit — planned: kill the sky, the candles carry the room',
+      () => toast('Planned — kill the sky light, let the candles carry the room', 'candle')],
+    ['bloom', 'Aurora — planned: curtains of light for northern skies',
+      () => toast('Planned — curtains of light for northern skies', 'bloom')],
+  ].forEach(([ic, tip, fn]) => { const b = el('button', 'mini', icon(ic));
+    b.title = tip; b.onclick = fn; R.append(b); });
+}
+
+/* ── the director — cutscene mode (Testament §4.5) ──────────────────────── */
+{ const strip = $('#directorStrip');
+  $('#dirBtn').onclick = () => strip.classList.toggle('open');
+  const ratioOf = () => ({ '2.39:1':2.39, '2.0:1':2, '16:9':16/9 })[$('#dirAspect').value];
+  const layLb = () => {
+    const on = document.documentElement.dataset.live === '1';
+    const hpx = on ? Math.max(0, (innerHeight - innerWidth / ratioOf()) / 2) : 0;
+    $('#lbTop').style.height = hpx + 'px'; $('#lbBot').style.height = hpx + 'px';
+  };
+  $('#takeoverBtn').onclick = () => {
+    document.documentElement.dataset.live = '1';
+    strip.classList.remove('open');
+    $('#dirHudMeta').textContent =
+      `${$('#dirAspect').value} · ${$('#dirFollow').value} · 3 watching`;
+    layLb();
+    toast('LIVE — every player screen is your frame now', 'clap');
+  };
+  $('#dirRelease').onclick = () => {
+    document.documentElement.dataset.live = '0'; layLb();
+    toast('Released — cameras and UI returned to the players', 'clap');
+  };
+  $('#dirGo').onclick = fireCue;
+  $('#dirAspect').onchange = layLb;
+  addEventListener('resize', layLb);
+}
+
+/* ── the debug dress (Testament §4.6 — default ON, undressed at release) ── */
+$('#debugBtn').onclick = e => {
+  const on = document.documentElement.dataset.debug !== '1';
+  document.documentElement.dataset.debug = on ? '1' : '0';
+  e.currentTarget.setAttribute('aria-pressed', String(on));
+  toast(on ? 'Debug dress on — the author\'s equipment shows' : 'Debug dress off — what a GM will see', 'flask');
+};
+$('#dbgHud').onclick    = () => toast('Planned — per-zone frame costs drawn over the map', 'gauge');
+$('#dbgProbe').onclick  = () => toast('Planned — click 3 points, sample the compositor', 'search');
+$('#dbgExport').onclick = () => toast('Planned — one flight-recorder bundle, every report', 'flask');
+$('#camPathBtn').onclick = () => toast('Planned — authored camera sweeps the Director can follow', 'camera');
+$('#healthBtn').onclick  = () => toast('Planned — mask + effect readiness at a glance', 'health');
+
 /* ── STUDIO ─────────────────────────────────────────────────────────────── */
 const DEPTS = [
   { id:'effects', label:'Effects', icon:'water',  acc:'var(--shine)' },
@@ -1290,6 +1565,7 @@ const DEPTS = [
     if (d.dev) rail.append(el('div', 'railspacer'));
     const b = el('button', null, icon(d.icon));
     b.title = d.label + (d.dev ? ' (dev-gated)' : '');
+    if (d.dev) b.classList.add('dbg');
     b.style.setProperty('--dept-acc', d.acc);
     b.setAttribute('aria-pressed', String(d.id === state.dept));
     b.onclick = () => { state.dept = d.id;
@@ -1873,9 +2149,17 @@ const todColor = h => {
   const v = a[1].map((x, i) => lerp(x, b[1][i], t));
   return `rgba(${v[0]|0},${v[1]|0},${v[2]|0},${v[3].toFixed(3)})`;
 };
-let lastStrikeRoll = 0;
+let lastStrikeRoll = 0, lastFrame = 0, fpsWinStart = 0, fpsFrames = 0;
 function frame(now) {
+  const dt = lastFrame ? Math.min(now - lastFrame, 100) : 16; lastFrame = now;
+  if (state.flow && !state.fades.hour)
+    state.hour = (state.hour + dt / 1000 * SPEEDS[state.speedIx] / 60) % 24;
   const fading = tickFades(now);
+  /* the moon rides its own cycle — accumulate signed hour-motion */
+  let dH = state.hour - state.prevHour;
+  if (dH > 12) dH -= 24; else if (dH < -12) dH += 24;
+  state.moonAge = ((state.moonAge + dH / (24 * LUNAR_DAYS)) % 1 + 1) % 1;
+  state.prevHour = state.hour;
 
   /* astrolabe + clock */
   const h = state.hour;
@@ -1883,7 +2167,16 @@ function frame(now) {
   $('#phaseTxt').textContent = phaseOf(h);
   $('#astroRing').setAttribute('aria-valuenow', h.toFixed(1));
   placeOrb($('#sunOrb'), h, 113);
-  placeOrb($('#moonOrb'), (h + 12) % 24, 113);
+  { const moon = $('#moonOrb');
+    /* phase offset: new moon rides with the sun, full moon opposes it */
+    placeOrb(moon, (h + state.moonAge * 24) % 24, 113);
+    const ill = (1 - Math.cos(state.moonAge * 2 * Math.PI)) / 2;
+    const t = Math.cos(state.moonAge * 2 * Math.PI);
+    moon.style.boxShadow =
+      `inset ${(t * 9).toFixed(1)}px 0 ${(2 + 3 * Math.abs(t)).toFixed(1)}px rgba(8,12,28,.96)`;
+    moon.style.opacity = (.22 + .78 * ill).toFixed(2);
+    moon.title = `${moonPhaseName(state.moonAge)} — day ${(state.moonAge * LUNAR_DAYS).toFixed(1)} of ${LUNAR_DAYS}`;
+  }
   $('#windDirIco').style.transform = `rotate(${state.windDir}deg)`;
   $('#windGrab').setAttribute('aria-valuenow', Math.round(state.windDir));
   const wTier = WINDWORDS[Math.min(4, Math.floor(state.ch.wind * 5))];
@@ -1899,7 +2192,23 @@ function frame(now) {
     const fd = state.fades[c.id];
     f.classList.toggle('fading', !!fd);
     if (fd) $('.ghost', f).style.bottom = `${(fd.to * 100).toFixed(1)}%`;
+    /* drift brackets: the climate's authored envelope */
+    const bounds = (state.wxMode === 'drift' && state.climate) ? state.climate.b[c.id] : null;
+    if (bounds && bounds[1] - bounds[0] > .005) { f.classList.add('drift');
+      const bkt = $('.bkt', f);
+      bkt.style.bottom = (bounds[0] * 100) + '%';
+      bkt.style.top = (100 - bounds[1] * 100) + '%';
+    } else f.classList.remove('drift');
   });
+  /* drift mode: the sky wanders its bounds on its own */
+  if (state.wxMode === 'drift' && state.climate && now > state.nextWalk && !state.fadeLabel) {
+    const b = state.climate.b;
+    const keys = Object.keys(b).filter(k => b[k][1] - b[k][0] > .01);
+    const k = keys[(Math.random() * keys.length) | 0];
+    if (k) easeTo({ [k]: b[k][0] + Math.random() * (b[k][1] - b[k][0]) },
+                  6 + Math.random() * 6, null);
+    state.nextWalk = now + 4500 + Math.random() * 5500;
+  }
 
   /* now playing + pill */
   const np = $('#nowPlaying');
@@ -1926,8 +2235,16 @@ function frame(now) {
   } else {
     np.classList.remove('fading');
     $('#npRing').style.strokeDashoffset = 97.4;
-    $('#npLabel').textContent = `Holding — ${phaseOf(h).charAt(0) + phaseOf(h).slice(1).toLowerCase()}, ${weatherWord}`;
-    $('#npSub').textContent = 'world is steady';
+    const phaseWord = phaseOf(h).charAt(0) + phaseOf(h).slice(1).toLowerCase();
+    if (state.wxMode === 'drift' && state.climate) {
+      $('#npLabel').textContent = `Drifting — ${state.climate.label}, ${weatherWord}`;
+      $('#npSub').textContent = (state.flow ? `time flows ${SPEED_LABELS[state.speedIx]} · ` : '')
+        + 'the sky wanders its bounds';
+    } else {
+      $('#npLabel').textContent = `Holding — ${phaseWord}, ${weatherWord}`;
+      $('#npSub').textContent = state.flow
+        ? `time flows ${SPEED_LABELS[state.speedIx]}` : 'world is steady';
+    }
   }
 
   /* backdrop */
@@ -1944,6 +2261,18 @@ function frame(now) {
   if (state.ch.bolt > .35 && now - lastStrikeRoll > 900) {
     lastStrikeRoll = now;
     if (Math.random() < state.ch.bolt * .12) flash();
+  }
+
+  /* debug dress: live fps / frame-ms */
+  fpsFrames++;
+  if (now - fpsWinStart > 500) {
+    if (fpsWinStart) {
+      const fps = fpsFrames * 1000 / (now - fpsWinStart);
+      const de = $('#dbgFps');
+      if (de) { de.textContent = fps.toFixed(0);
+        $('#dbgMs').textContent = (1000 / Math.max(fps, 1)).toFixed(1); }
+    }
+    fpsWinStart = now; fpsFrames = 0;
   }
 
   requestAnimationFrame(frame);

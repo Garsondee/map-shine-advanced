@@ -1120,6 +1120,13 @@ export const RULES = [
       // this move — diag/effect-controls.js already did its half at U0).
       `${sep}diag${sep}debug-panel.js`,
       `${sep}diag${sep}debug-panel-controls.js`,
+      // Camera-path keyframe/settings fields (sweepMs/easing/fadeIn/hold/
+      // cutBefore/…) are `camera-path.js`'s own CameraKeyframe/
+      // CameraPathSettings typedefs, not a params-schema.js declaration —
+      // the SAME reasoning already covers ui/camera-path-dialog.js's own
+      // grandfathered checkboxes just above (U2's Remote popover is a
+      // faithful re-skin of that exact dialog's fields, not a new schema).
+      `${sep}ui${sep}rooms${sep}remote${sep}camera-path-popover.js`,
     ],
     why:
       'V2 had ONE good declarative control system and 266 hand-written Tweakpane calls beside it ' +

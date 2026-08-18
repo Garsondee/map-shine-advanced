@@ -15,6 +15,12 @@ import { installTokens, THEMES } from '../../src/ui/tokens.js';
 import { installStudio, installPlayer } from '../../src/ui/index.js';
 import { validateCue, validateCueStack, orderedCues } from '../../src/core/cues-schema.js';
 import { computeEasedValue, isEntryExpired } from '../../src/world/index.js';
+// U6 (docs/holy/UI-Testament.md §9) — the REAL water schema/dials, not a
+// hand-rolled stand-in, so this harness proves the real dial content (all
+// five authored dials, their real drives/ranges) and the real read-tracking
+// mechanism end to end, not just the card shell around a fake.
+import { WATER_PARAMS, WATER_DIALS } from '../../src/effects/water/water.js';
+import { wrapForReadTracking, getParamHealth } from '../../src/diag/param-read-health.js';
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
@@ -233,78 +239,23 @@ const studio = installStudio({
 // correctly with the GM-only "Table Defaults" section absent.
 const player = installPlayer({ getSystemPanelCtx: () => getSystemPanelCtx() });
 
-// ---- water-shaped view-model: mirrors boot.js's real registerEffectCard('water', ...) exactly in structure ----
-const waterState = {
-  enabled: true,
-  params: { depth: 0.6, pollution: 0.1, opacity: 0.85, foam: 0.4, flowAngleDeg: 180, flowSpeedPx: 12, tint: '#3a7ea8' },
-};
-const WATER_SCHEMA = {
-  depth: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    default: 0.5,
-    category: 'Look',
-    label: 'Depth',
-    help: 'How deep the water reads.',
-  },
-  pollution: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    default: 0,
-    category: 'Look',
-    label: 'Pollution',
-    help: 'Murkiness tint.',
-  },
-  opacity: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    default: 0.8,
-    category: 'Look',
-    label: 'Opacity',
-    help: 'How much the bed shows through.',
-  },
-  foam: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    default: 0.3,
-    category: 'Look',
-    label: 'Foam',
-    help: 'Surface break amount.',
-  },
-  flowAngleDeg: {
-    type: 'angle',
-    default: 180,
-    category: 'Motion',
-    label: 'Flow direction',
-    help: 'Which way the water travels — the compass dial.',
-  },
-  flowSpeedPx: {
-    type: 'float',
-    min: 0,
-    max: 60,
-    step: 1,
-    default: 10,
-    category: 'Motion',
-    label: 'Flow speed',
-    help: 'How fast it travels.',
-  },
-  tint: {
-    type: 'color',
-    space: 'srgb',
-    default: '#3a7ea8',
-    category: 'Technical',
-    label: 'Tint',
-    help: 'Base colour.',
-  },
-};
+// ---- water-shaped view-model: mirrors boot.js's real registerEffectCard('water', ...), now using the REAL schema/dials (U6) ----
+const waterState = { enabled: true, params: {} };
+for (const [key, decl] of Object.entries(WATER_PARAMS)) waterState.params[key] = decl.default;
+
+// Simulate a partial render-path read, exactly the shape water-registration.
+// js#getRenderState() produces every frame in production — touch MOST params
+// through the tracked proxy, but deliberately skip a few (chop, caustics) so
+// this harness visibly proves U6's own exit gate: "a deliberately orphaned
+// param shows up wearing its badge within one session."
+{
+  const tracked = wrapForReadTracking('water', waterState.params);
+  for (const key of Object.keys(WATER_PARAMS)) {
+    if (key === 'chop' || key === 'caustics') continue; // left deliberately unread
+    void tracked[key];
+  }
+}
+
 studio.registerEffectCard('water', () => ({
   id: 'water',
   icon: 'water',
@@ -317,8 +268,10 @@ studio.registerEffectCard('water', () => ({
   onPresetPick: (name) => {
     document.getElementById('log').textContent = `preset picked: ${name}`;
   },
-  schema: WATER_SCHEMA,
+  schema: WATER_PARAMS,
   fohKeys: ['depth', 'pollution', 'opacity', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+  dialsSchema: WATER_DIALS,
+  health: getParamHealth('water', WATER_PARAMS),
   getValue: (id) => waterState.params[id],
   onChange: (id, value) => {
     waterState.params[id] = value;

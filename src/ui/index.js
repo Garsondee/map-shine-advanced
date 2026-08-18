@@ -59,3 +59,9 @@ export { installStudio } from './rooms/studio/shell.js';
 // Fade Time/weather board/cue deck are later checkpoints in the same stage
 // (see Petition P11).
 export { installRemote } from './rooms/remote/shell.js';
+
+// THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — one small window,
+// client scope only, "Performance & Graphics". See Petition P17 for what
+// this stage does and does not cover (player-light is a missing renderer,
+// not a UI gap).
+export { installPlayer } from './rooms/player-shell.js';

@@ -30,6 +30,7 @@ import { renderEffectsDepartment, closeAllPopouts } from './effects-department.j
 import { renderPainterDepartment } from './painter-department.js';
 import { renderSceneDepartment } from './scene-department.js';
 import { renderCuesDepartment } from './cues-department.js';
+import { renderSystemDepartment } from './system-department.js';
 import { renderLabDepartment } from './lab-department.js';
 import { installSearchPalette, buildSearchIndex } from './search-palette.js';
 
@@ -40,11 +41,12 @@ const STYLE_ID = 'msa-studio-style';
  * The six departments, fixed set (Law 9). `dev:true` marks LAB — gated on
  * `isGM()` for U1 (the OLD panel's own current real gate; the fuller "debug
  * dress" flag the Testament describes is later work, not yet built anywhere
- * in `src/` — see Petition P10). `render` is `null` for the three
- * departments whose own stage hasn't landed yet (SYSTEM=U5); clicking it
- * shows an honest "lands in a later stage" placeholder rather than either
- * hiding the tab (Law 9's set is fixed from day one) or faking content that
- * doesn't exist yet. CUES (U3) and PAINTER (U4) landed.
+ * in `src/` — see Petition P10). Every department now has a real `render` —
+ * U1 shipped three ("lands in a later stage") placeholders, since filled in
+ * by CUES (U3), PAINTER (U4), and SYSTEM (U5) — but the `render: null` /
+ * `stage` fallback path (below, in `render()`) stays: it's what the NEXT new
+ * department (a future Law-9 amendment) would show before its own stage
+ * lands, not a one-time U1 scaffold to delete.
  * @type {ReadonlyArray<{id: string, label: string, icon: string, accVar: string, dev?: boolean, render: (Function|null), stage?: string}>}
  */
 const DEPTS = Object.freeze([
@@ -52,7 +54,7 @@ const DEPTS = Object.freeze([
   { id: 'painter', label: 'Painter', icon: 'brush', accVar: '--c-particles', render: renderPainterDepartment },
   { id: 'scene', label: 'Scene', icon: 'map', accVar: '--c-atmos', render: renderSceneDepartment },
   { id: 'cues', label: 'Cues', icon: 'clap', accVar: '--c-post', render: renderCuesDepartment },
-  { id: 'system', label: 'System', icon: 'gear', accVar: '--c-system', render: null, stage: 'U5' },
+  { id: 'system', label: 'System', icon: 'gear', accVar: '--c-system', render: renderSystemDepartment },
   { id: 'lab', label: 'Lab', icon: 'flask', accVar: '--c-system', dev: true, render: renderLabDepartment },
 ]);
 

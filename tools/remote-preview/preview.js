@@ -328,6 +328,11 @@ const remote = installRemote({
       fakeSky.gradeEnvStrength = v;
       log(`atmosphere -> ${v}`);
     },
+    getTemperature: () => fakeSky.temperature01 ?? 0.55,
+    onTemperatureCommit: (v) => {
+      fakeSky.temperature01 = v;
+      log(`temperature -> ${v}`);
+    },
     getSceneOverride: () => fakeSky.sceneOverride === true,
     onSceneOverrideCommit: (enabled) => {
       fakeSky.sceneOverride = enabled;

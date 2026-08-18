@@ -1135,6 +1135,21 @@ function install() {
       onSkyRealismCommit: (v) => void editSky({ realism01: v }),
       getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,
       onGradeEnvStrengthCommit: (v) => void editSky({ gradeEnvStrength: v }),
+      // Temperature (2026-08-18 fix — author pressing again on "still
+      // missing a lot of sliders"; re-checked WEATHER_AXES fresh rather than
+      // repeating the old finding unverified). `temperature01` genuinely IS
+      // `consumerStatus:'live'` (precipKind derivation, wetness dry-rate) —
+      // unlike cloudType01/cloudAltitudePx/cloudScalePx, which are still
+      // honestly `'pending'` (world/cloud-field.js does not exist, grepped
+      // again, still true) — but has been `MapShine.setTemperature`
+      // console-only since it shipped, zero UI slider anywhere. Own commit
+      // path, same reason Sky Light/Atmosphere need one: `ARCHETYPE_OWNED_
+      // AXES` deliberately excludes temperature ("a sky is not a climate"),
+      // so stamping `weatherArchetype:'custom'` on a temperature drag (what
+      // LIVE_CHANNELS' own onAxisCommit does) would wrongly un-light the
+      // active mood chip over an edit that has nothing to do with it.
+      getTemperature: () => skyScope.sky?.temperature01 ?? 0.55,
+      onTemperatureCommit: (v) => void editSky({ temperature01: v }),
       getSceneOverride: () => skyScope.sceneOverrides === true,
       // The cloud pin glyph (2026-08-18 fix — gap-audit against the old
       // astrolabe.js's own Cloud row). `weatherPinnedAxes` already rides the

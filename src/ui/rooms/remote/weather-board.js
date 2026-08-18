@@ -10,11 +10,11 @@
  * LABELS its own toggle "Direct"/"Drift", exactly the discipline the plan
  * flagged before U2 started ("the mock already dodges this correctly").
  *
- * ⚠️ ONLY `cloudCover01` and `precip01` GET FADERS — `WEATHER_AXES`' own
- * `consumerStatus` names exactly these two (plus `temperature01`, which has
- * no dedicated mock-named channel and stays on the astrolabe's own tuning
- * drawer for now) as `'live'`; `cloudType01`/`cloudAltitudePx`/
- * `cloudScalePx` are `'pending'` and are not rendered at all here — Law 5,
+ * ⚠️ ONLY `cloudCover01`, `precip01`, AND (2026-08-18) `temperature01` GET
+ * FADERS — `WEATHER_AXES`' own `consumerStatus` names exactly these three
+ * as `'live'`; `cloudType01`/`cloudAltitudePx`/`cloudScalePx` are still
+ * honestly `'pending'` (re-checked fresh, `world/cloud-field.js` still does
+ * not exist) and are not rendered at all here — Law 5,
  * `tools/verify-structure.mjs#ui/no-dead-axis` holds the line structurally.
  * The mock's own 7-channel list (rain/clouds/fog/wind/freeze/bolt/ash) is
  * NOT reproduced whole: fog/freeze/ash have no live axis, lightning is an
@@ -119,11 +119,21 @@ const LIVE_CHANNELS = Object.freeze([
   { axis: 'precip01', label: 'Rain', help: 'How hard it is coming down.' },
 ]);
 
-/** Sky Light + Atmosphere (2026-08-18 fix — gap-audit against the old
- * astrolabe.js's own tuning-drawer sliders, entirely missing from the new
- * Remote before this). NOT weather axes — no archetype/biome relationship,
- * so each gets its own `ctx` getter/commit pair rather than folding into
- * `LIVE_CHANNELS`/`onAxisCommit` above. */
+/** Sky Light + Atmosphere + Temperature — each gets its own `ctx` getter/
+ * commit pair rather than folding into `LIVE_CHANNELS`/`onAxisCommit`
+ * above, for two DIFFERENT reasons that land on the same shape:
+ *   - Sky Light/Atmosphere (2026-08-18 fix — gap-audit against the old
+ *     astrolabe.js's own tuning-drawer sliders) aren't weather axes at
+ *     all — no archetype/biome relationship to stamp `'custom'` against.
+ *   - Temperature (2026-08-18 fix — author pressing again on "still
+ *     missing sliders"; `WEATHER_AXES.temperature01` re-checked fresh,
+ *     confirmed `consumerStatus:'live'`) genuinely IS a weather axis, but
+ *     `ARCHETYPE_OWNED_AXES` deliberately excludes it ("a sky is not a
+ *     climate") — `LIVE_CHANNELS`' own `onAxisCommit` stamping
+ *     `weatherArchetype:'custom'` on every commit would be WRONG here,
+ *     wrongly un-lighting the active mood chip over an edit that has
+ *     nothing to do with it.
+ */
 const ENV_CHANNELS = Object.freeze([
   {
     key: 'skyRealism',
@@ -138,6 +148,13 @@ const ENV_CHANNELS = Object.freeze([
     help: 'Environmental colour-grade strength.',
     getValue: 'getGradeEnvStrength',
     onCommit: 'onGradeEnvStrengthCommit',
+  },
+  {
+    key: 'temperature',
+    label: 'Temperature',
+    help: 'Cold to hot — also decides whether precipitation falls as rain or snow.',
+    getValue: 'getTemperature',
+    onCommit: 'onTemperatureCommit',
   },
 ]);
 
@@ -424,15 +441,24 @@ export function renderWeatherBoard(container, ctx) {
         buildParamControl(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) })
       );
     }
-    // Scene override (2026-08-18 fix) — the old astrolabe.js's own "this
-    // scene has its own sky" checkbox. Real bool param via the SAME
-    // buildParamControl door every other row here uses, not a hand-built
-    // checkbox.
+    // Scene override — copy rewritten 2026-08-18 (author, verbatim: "'This
+    // scene has it's own sky' is... esoteric. What the hell do you mean by
+    // that?"). The control is real and needed (MSA sky settings live at
+    // the WORLD level by default, shared by every scene — this is the one
+    // switch that lets a specific scene, e.g. "the volcano lair," pin its
+    // own weather independent of whatever the world is doing elsewhere);
+    // the old label named the STATE without ever naming the CONSEQUENCE of
+    // flipping it, which is what actually needed explaining. Real bool
+    // param via the SAME buildParamControl door every other row here uses.
     if (typeof ctx.getSceneOverride === 'function') {
       faderHost.appendChild(
         buildParamControl(
           'sceneOverride',
-          { type: 'bool', label: 'This scene has its own sky', help: 'Per-scene sky, not the world default.' },
+          {
+            type: 'bool',
+            label: 'Scene overrides the world sky',
+            help: 'On: changes you make here only affect this scene. Off: they change the shared sky every scene uses by default.',
+          },
           { value: ctx.getSceneOverride(), onChange: (v) => ctx.onSceneOverrideCommit?.(v) }
         )
       );

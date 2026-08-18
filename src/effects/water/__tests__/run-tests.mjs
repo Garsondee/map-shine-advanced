@@ -22,6 +22,7 @@ import { run as runWaterField } from './water-field.test.mjs';
 import { run as runWaterSampling } from './water-sampling.test.mjs';
 import { run as runWaterBounds } from './water-bounds.test.mjs';
 import { run as runWaterShore } from './water-shore.test.mjs';
+import { run as runWaterRegistration } from './water-registration.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -52,6 +53,7 @@ const t = {
 
 const suites = [
   ['water', runWater],
+  ['water-registration', runWaterRegistration],
   ['water-floor', runWaterFloor],
   ['water-body', runWaterBody],
   ['water-flow-solve', runWaterFlowSolve],

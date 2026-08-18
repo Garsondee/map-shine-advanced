@@ -26,6 +26,13 @@ import { WATER, WATER_PARAMS, WATER_DEBUG_CHANNELS } from './water.js';
 // Intra-zone: the ONE hex→linear decoder, already shared by the candle. A
 // second copy is how two effects end up disagreeing about what '#173d47' means.
 import { hexToRgb01 } from '../candle-flame-geometry.js';
+// U6 (docs/holy/UI-Testament.md §9): the read-tracking proxy. Wrapped HERE,
+// at getRenderState() — the boundary water-surface-subsystem.js#sync() and
+// water-flow-subsystem.js actually read through — never at registration's
+// storage handoff above, and never at getReadout() (the UI card's OWN
+// accessor, read every render regardless of what the shader touches). See
+// param-read-health.js's own header for why the seam matters.
+import { wrapForReadTracking } from '../../diag/param-read-health.js';
 
 /**
  * @param {object} args
@@ -111,16 +118,32 @@ export function createWaterRegistration({
    * because that is what a colour picker speaks, and the shader wants linear —
    * doing the conversion at the one boundary between them keeps every other
    * consumer from having to know which space it is holding.
+   *
+   * ⚠️ U6's read-tracking wrap goes HERE, and the shape below is load-bearing,
+   * not cosmetic. `params` used to be built as `{...p, tint: ...}` — a plain
+   * spread would invoke every own-key GET on `p` in one shot (spread reads
+   * `[[OwnPropertyKeys]]` then `[[Get]]`s each), which — if `p` were the
+   * tracked proxy — would mark all 24 params "read" on frame one regardless
+   * of what `sync()` goes on to actually touch. `Object.create(tracked)` is a
+   * PROTOTYPE delegation instead: a key that is never accessed by name is
+   * never GET, so laziness survives through to the real per-key reads in
+   * `water-surface-subsystem.js#sync()`/`water-flow-subsystem.js`. `tint`
+   * itself is read explicitly (`tracked.tint`, not `p.tint`) so decoding it
+   * still counts as "the renderer observed this param" — it would otherwise
+   * sit forever as an own property on the wrapper, never touching the proxy,
+   * and show up as a permanently false "orphaned" param despite being read
+   * every single frame.
    */
   function getRenderState() {
     const p = readout.params ?? {};
+    const tracked = wrapForReadTracking('water', p);
+    const rawTint = tracked.tint;
     return {
       enabled: readout.enabled,
       perfTier: readout.perfTier,
-      params: {
-        ...p,
-        tint: typeof p.tint === 'string' ? hexToRgb01(p.tint) : undefined,
-      },
+      params: Object.assign(Object.create(tracked), {
+        tint: typeof rawTint === 'string' ? hexToRgb01(rawTint) : undefined,
+      }),
       debugChannel,
     };
   }

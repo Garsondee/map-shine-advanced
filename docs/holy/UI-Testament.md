@@ -3276,6 +3276,123 @@ confirmed via `git status --porcelain` before staging.*
 
 ---
 
+**P30 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; a live author
+report with an annotated screenshot, seven distinct asks in one message).**
+Verbatim: *"Mood buttons don't work yet. We're still missing a lot of
+sliders. The FPS tracker is nice, green should be anything above 60 fps.
+Yellow should be anything above 35 fps. Anything below 25 fps should be red.
+Blend between these. Sun is in front of the pill and time text. 'This scene
+has it's own sky' is... well that's just down right esoteric. What the hell
+do you mean by that? Maybe that control needs to go. Go button needs a lot
+of work too, throw away the current go button concept and just make
+something nicer. No animation on the go button it's distracting."*
+
+1. ⚠️ **"Mood buttons don't work" was real, but not where it looked.**
+   Live-tested `fadeToArchetype` directly first rather than assuming the
+   report was right or wrong — it fires and logs correctly (`fading ->
+   Storm over 0ms`). Traced further: `fadeWeatherToArchetype()` in
+   `boot.js` calls `void editSky({ weatherArchetype: 'custom' })`
+   synchronously the INSTANT a fade starts, not on arrival — so
+   `activeArchetype === archetype.id` (`renderChips`' own highlight check)
+   goes false for every chip, including the one just clicked. The author's
+   own screenshot showed Fade Time = 10s selected: clicking any mood chip
+   made the entire row go dark for the full 10 seconds with zero sign the
+   click registered. A real, understandable "doesn't work," from a real
+   mechanism working correctly underneath.
+2. **Added `data-pending="true"`** to `weather-board.js#renderChips()` — a
+   new state, deliberately distinct from `aria-pressed` (reserved for what
+   the sky actually IS, per the file's own existing comment), sourced from
+   `ctx.getFadingArchetypeId()` (new, in both `boot.js` and
+   `tools/remote-preview/preview.js`), which reuses the SAME
+   `fadeState`/`pendingArchetypeCompletions` P29's Now Playing label
+   already reads — no second tracking mechanism. Dashed gold border + tint
+   (`shell.js`'s new `[data-pending="true"]` rule) while a fade is in
+   flight toward that chip; clears on arrival or mode switch. Live-verified:
+   click Storm at a 10s fade → `data-pending` appears on Storm alone,
+   `aria-pressed` stays false on all eight chips → after the fade,
+   `data-pending` clears and `aria-pressed="true"` lands on Storm, matching
+   a real `arrived -> thunderstorm` log line.
+3. **FPS sparkline recoloured to the author's own exact spec** (green
+   ≥60fps, yellow ≥35fps, red <25fps, continuous blend between). Built as
+   `debug-strip.js#fpsBlendColor` — deliberately a SEPARATE model from
+   `perf-strip.js`'s shared `healthLevel(ratio, ...)`, which grades fps as a
+   fraction of THIS DISPLAY's own detected refresh rate (right for the old
+   panel's one summary bar, wrong for a fixed author-specified absolute
+   scale across 24 samples). Reads the LIVE `--ok`/`--warn`/`--fail`
+   LANTERN tokens via `getComputedStyle` (new `hexToRgb` helper) rather than
+   hardcoding RGB, so the sparkline stays theme-correct across all four
+   themes like everything else in this room. `boot.js` now pushes raw
+   `stats.fps` alongside the existing `ratio`/`level` fields into
+   `fpsSparkHistory` — two legitimate consumers off one sample, not a
+   second sampling path. Live-verified: bars read `rgb(75,212,140)` (green)
+   at high fps, sweeping down through `rgb(212,187,88)`/`rgb(237,168,81)`
+   (amber) to `rgb(239,109,90)` (red) at low fps across the harness's sweep
+   fixture — a genuine blend, not discrete jumps.
+4. **Sun z-order fixed.** `astrolabe-dial.js` was calling
+   `root.appendChild(sceneText)` immediately after building it, BEFORE
+   `sceneTopper` (the sun/moon "guarantee" masked layer) was built and
+   appended afterward — later-appended siblings paint on top in the shared
+   stacking context, so the topper painted over the clock pill. Moved
+   `sceneText`'s append to after `topper`'s. Live-verified via a DOM-order
+   query: `scene → scenetopper (svg) → scenetext`, topper strictly before
+   text now.
+5. **"This scene has its own sky" rewritten, not removed** — the author's
+   complaint was clarity, not the control's existence (a real, working
+   `sceneOverride` flag; no reason to delete a working toggle over confusing
+   copy). New label: *"Scene overrides the world sky."* New help text
+   explains the CONSEQUENCE of each state (*"On: changes you make here only
+   affect this scene. Off: they change the shared sky every scene uses by
+   default"*) rather than just re-naming the state. ⚠️ A wording/clarity
+   judgment call, named as one — same worker-tier curation posture P19/P28
+   already took, worth the author's countersign if the read is wrong.
+6. **GO button fully redesigned, no animation.** The entire prior CSS
+   (6-layer box-shadow stack, gradient-on-gradient background, an infinite
+   4.6s `@keyframes msaGoSheen` sheen loop) deleted, not muted — the
+   author's own instruction was to throw the concept away, not soften it.
+   Replaced with a flat solid-tint button
+   (`color-mix(in oklab, var(--shine) 20%, var(--bg2))`), a lighter tint on
+   hover, a 1px press-down on `:active`, no animation anywhere across
+   idle/hover/active/disabled. Live-verified via computed style:
+   `animationName: 'none'`, `animationDuration: '0s'`,
+   `backgroundImage: 'none'`.
+7. **Missing sliders — re-audited `WEATHER_AXES` fresh rather than
+   repeating the prior round's finding unverified.** `cloudType01`/
+   `cloudAltitudePx`/`cloudScalePx` remain genuinely
+   `consumerStatus:'pending'` (re-grepped, `world/cloud-field.js` still
+   doesn't exist — governed by wall `ui/no-dead-axis`, correctly absent,
+   not a gap). But `temperature01` — `consumerStatus:'live'` (drives
+   precipKind derivation and wetness dry-rate) yet
+   `MapShine.setTemperature`-console-only since it shipped — had zero UI
+   slider anywhere. Shipped as a new Temperature slider in `ENV_CHANNELS`
+   (its own commit path via `boot.js#onTemperatureCommit`, NOT
+   `LIVE_CHANNELS`'s shared stamping path) after tracing
+   `ARCHETYPE_OWNED_AXES`'s own deliberate exclusion of temperature (*"a
+   sky is not a climate"*) — a temperature drag must not stamp
+   `weatherArchetype:'custom'` and wrongly un-light an active mood chip
+   over an edit unrelated to which archetype is active.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on all six
+touched files (two more rounds of this session's own recurring
+backtick-inside-CSS-comment trap hit and fixed — `shell.js`'s
+header-right/chip-grid comment and its GO-button redesign comment, both
+re-checked via a full-file backtick grep against the template literal's
+span). `node tools/run-tests.mjs`: 27 suites, 11512 passed, 0 failed,
+unchanged — no test-covered logic touched, this round is DOM/CSS plus two
+new ctx passthroughs. `node tools/verify-structure.mjs`: the same two
+pre-existing violations only (`no-gpu-readback` in
+`vision-mask-render.js`, `time/one-clock` at 41/38); confirmed via `git
+diff` that every new `boot.js` line this round is a comment or an addition,
+none matching either violation. Live-verified in the browser via
+`tools/remote-preview/`: mood-chip pending/arrival cycle, sun-behind-pill
+DOM order, FPS blend across the harness's sine-sweep fixture, the GO
+button's zero-animation computed style, the rewritten checkbox copy, and
+the new Temperature slider all confirmed as described above. **Not
+verified: the author's own live Foundry session**, same standing gap as
+P21–P29. The concurrent water-flow session's own files remain completely
+untouched, confirmed via `git status --porcelain` before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

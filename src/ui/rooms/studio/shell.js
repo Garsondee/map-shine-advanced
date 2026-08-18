@@ -27,6 +27,7 @@
 import { installTokens } from '../../tokens.js';
 import { installIconSprite, iconMarkup } from '../../widgets/icon-sprite.js';
 import { renderEffectsDepartment, closeAllPopouts } from './effects-department.js';
+import { renderPainterDepartment } from './painter-department.js';
 import { renderSceneDepartment } from './scene-department.js';
 import { renderCuesDepartment } from './cues-department.js';
 import { renderLabDepartment } from './lab-department.js';
@@ -40,15 +41,15 @@ const STYLE_ID = 'msa-studio-style';
  * `isGM()` for U1 (the OLD panel's own current real gate; the fuller "debug
  * dress" flag the Testament describes is later work, not yet built anywhere
  * in `src/` — see Petition P10). `render` is `null` for the three
- * departments whose own stage hasn't landed yet (PAINTER=U4, SYSTEM=U5);
- * clicking one of those shows an honest "lands in a later stage"
- * placeholder rather than either hiding the tab (Law 9's set is fixed from
- * day one) or faking content that doesn't exist yet. CUES (U3) landed.
+ * departments whose own stage hasn't landed yet (SYSTEM=U5); clicking it
+ * shows an honest "lands in a later stage" placeholder rather than either
+ * hiding the tab (Law 9's set is fixed from day one) or faking content that
+ * doesn't exist yet. CUES (U3) and PAINTER (U4) landed.
  * @type {ReadonlyArray<{id: string, label: string, icon: string, accVar: string, dev?: boolean, render: (Function|null), stage?: string}>}
  */
 const DEPTS = Object.freeze([
   { id: 'effects', label: 'Effects', icon: 'water', accVar: '--shine', render: renderEffectsDepartment },
-  { id: 'painter', label: 'Painter', icon: 'brush', accVar: '--c-particles', render: null, stage: 'U4' },
+  { id: 'painter', label: 'Painter', icon: 'brush', accVar: '--c-particles', render: renderPainterDepartment },
   { id: 'scene', label: 'Scene', icon: 'map', accVar: '--c-atmos', render: renderSceneDepartment },
   { id: 'cues', label: 'Cues', icon: 'clap', accVar: '--c-post', render: renderCuesDepartment },
   { id: 'system', label: 'System', icon: 'gear', accVar: '--c-system', render: null, stage: 'U5' },

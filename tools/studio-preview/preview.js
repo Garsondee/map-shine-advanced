@@ -161,6 +161,16 @@ requestAnimationFrame(function tick() {
   requestAnimationFrame(tick);
 });
 
+// ---- THE PAINTER DEPARTMENT'S OWN STAND-IN (U4) ---------------------------
+// Two fake tiles, one "found" one not, matching the real listPaintableEffects
+// shape exactly ({id,title,suffixes,found}) -- there's no real painter or
+// mask-authority to launch in this harness, so armBrush just logs, same
+// "throwaway orchestration, real shape" precedent as the rest of this file.
+const FAKE_PAINTABLE = [
+  { id: 'fire', title: 'Fire', suffixes: ['_Fire'], found: false },
+  { id: 'water', title: 'Water', suffixes: ['_Water'], found: true },
+];
+
 const studio = installStudio({
   debugPanel: fakeDebugPanel,
   listCues: () => orderedCues(cueStack),
@@ -171,6 +181,10 @@ const studio = installStudio({
   revertCueTest: () => revertCueTest(),
   isCueTestActive: () => isCueTestActive(),
   validateCue: (cue) => validateCue(cue, resolveType),
+  listPaintableEffects: () => FAKE_PAINTABLE,
+  armBrush: (effectId) => {
+    document.getElementById('log').textContent = `armBrush('${effectId}') -- no real painter in this harness`;
+  },
 });
 
 // ---- water-shaped view-model: mirrors boot.js's real registerEffectCard('water', ...) exactly in structure ----

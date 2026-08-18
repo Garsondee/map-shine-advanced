@@ -953,24 +953,52 @@ export function installDebugPanel(MapShine) {
   // The "Export everything" button + quick-reach primaries + the accordion
   // folders. Only entries routed to the Lab (zoneOf === 'lab', the default)
   // render here — the handful routed to product zones show up there instead.
-  function renderLab() {
+  /**
+   * The Lab zone's whole body, built (never attached) — the Studio's own LAB
+   * department mounts this same output (UI-Testament.md U1: "today's debug
+   * panel registry mounted whole, dev-gated").
+   *
+   * `getStatusEl` defaults to this panel's own status bar, so the zero-arg
+   * call `renderBody()` already makes (below) is byte-identical to before
+   * this function returned instead of appending. A caller mounting this body
+   * SOMEWHERE ELSE — a different room, a different status readout — passes
+   * its own getter instead; `createControlBuilders` already takes one as a
+   * parameter (debug-panel-controls.js), so a second, independently-scoped
+   * builder set is a real call, not a workaround. `reports`/`actions`/
+   * `controls`/`buildRoutedPanels`/`FOLDERS` stay shared on purpose — the
+   * Studio's Lab shows the SAME registrations, not a second registry.
+   * @param {{getStatusEl?: () => (HTMLElement|null)}} [opts]
+   * @returns {HTMLElement}
+   */
+  function renderLab({ getStatusEl } = {}) {
+    const root = document.createElement('div');
+    const {
+      makeButton: mb,
+      makeRunnable: mr,
+      makeControl: mc,
+      folderOf: fo,
+    } = getStatusEl
+      ? createControlBuilders({ runReport, copyToClipboard, getStatusEl, FOLDERS })
+      : { makeButton, makeRunnable, makeControl, folderOf };
+    const readStatusEl = getStatusEl ?? (() => statusEl);
+
     const quick = document.createElement('div');
     Object.assign(quick.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
 
     // THE ONE BUTTON — the author's ask: one click to export every log + report.
     if (typeof MapShine.flight?.export === 'function') {
-      const exportBtn = makeButton('⬇  Export everything', { rgb: '167,255,196', flexBasis: '100%', weight: '700' });
+      const exportBtn = mb('⬇  Export everything', { rgb: '167,255,196', flexBasis: '100%', weight: '700' });
       exportBtn.addEventListener('click', async () => {
-        statusEl.textContent = 'Building the bundle — running every read-only report…';
+        readStatusEl().textContent = 'Building the bundle — running every read-only report…';
         exportBtn.disabled = true;
         try {
           const r = await MapShine.flight.export();
-          statusEl.textContent = r.ok
+          readStatusEl().textContent = r.ok
             ? `✔ Downloaded ${r.filename} — ${(r.bytes / 1024).toFixed(0)}KB, ${r.reports} reports` +
               `${r.failures ? `, ⚠ ${r.failures} report(s) threw (captured in the bundle)` : ''}.`
             : `✘ Bundle built but the download failed: ${r.error}`;
         } catch (e) {
-          statusEl.textContent = `✘ Export threw: ${e?.message || e}`;
+          readStatusEl().textContent = `✘ Export threw: ${e?.message || e}`;
         } finally {
           // An export that fails must not leave the button dead — the recovery
           // path would be "reload Foundry", which wipes the very session being
@@ -987,8 +1015,8 @@ export function installDebugPanel(MapShine) {
       buckets.get(fid).push(el);
     };
     const place = (id, entry, skin) => {
-      const fid = folderOf(id, entry);
-      const btn = makeRunnable(id, entry.label, skin);
+      const fid = fo(id, entry);
+      const btn = mr(id, entry.label, skin);
       if (fid === '__primary__') {
         // Vital tools (Pixel Probe, Performance) sit in the quick-reach row.
         btn.style.flexGrow = '1';
@@ -1000,11 +1028,10 @@ export function installDebugPanel(MapShine) {
     };
     for (const [id, entry] of reports) if (zoneOf(id, entry) === 'lab') place(id, entry, REPORT_SKIN);
     for (const [id, entry] of actions) if (zoneOf(id, entry) === 'lab') place(id, entry, ACTION_SKIN);
-    for (const [id, entry] of controls)
-      if (zoneOf(id, entry) === 'lab') push(entry.group ?? 'levers', makeControl(id, entry));
+    for (const [id, entry] of controls) if (zoneOf(id, entry) === 'lab') push(entry.group ?? 'levers', mc(id, entry));
 
-    bodyEl.appendChild(quick);
-    for (const el of buildRoutedPanels('lab')) bodyEl.appendChild(el);
+    root.appendChild(quick);
+    for (const el of buildRoutedPanels('lab')) root.appendChild(el);
 
     const order = FOLDERS.map((f) => f.id);
     for (const fid of buckets.keys()) if (!order.includes(fid) && fid !== '__more__') order.push(fid);
@@ -1017,8 +1044,9 @@ export function installDebugPanel(MapShine) {
       const items = buckets.get(fid);
       if (!items || !items.length) continue;
       const { title, icon } = metaOf(fid);
-      bodyEl.appendChild(makeFolder(fid, icon, title, items));
+      root.appendChild(makeFolder(fid, icon, title, items));
     }
+    return root;
   }
 
   /**
@@ -1220,6 +1248,12 @@ export function installDebugPanel(MapShine) {
     runReport,
     copyToClipboard,
     attachPanel,
+    // The Lab zone's body, built (never attached) — the Studio's own LAB
+    // department mount point (ui/rooms/studio/lab-department.js). Same
+    // registries as this panel's own Lab zone (reports/actions/controls/
+    // panels), a fresh, independently-scoped set of control builders when
+    // the caller passes its own getStatusEl (see renderLab's own doc).
+    renderLabBody: (opts) => renderLab(opts),
     updatePerfStrip,
     // Whole-panel visibility — driven by the scene-controls toolbar button
     // (foundry/scene-controls-button.js) and the panel's own Close button.

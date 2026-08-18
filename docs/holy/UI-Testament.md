@@ -2545,6 +2545,133 @@ touched file individually before staging.*
 
 ---
 
+**P22 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; the corner-cluster
+fix — a second live author bug report, same session, after seeing P21's own
+fix render).** The author's report, verbatim, alongside a screenshot of the
+live Remote and a second labelled "NEW" of the mock: *"Not bad, but the
+buttons around the astrolabe are wrongly positioned... you should look at the
+NEW and compare it to the current so that you can see what is different and
+keep moving towards a perfect reproduction (even if you have to make sliders
+and buttons that don't work yet)."* P21 fixed the dial itself; this is a
+genuinely separate component and a genuinely separate bug — `astrolabe-
+panel.js`'s four corner clusters, wrapping the dial, never actually ported
+from the mock at all, confirmed by reading its own CSS: `.msa-corner{display:
+grid; grid-auto-flow:column}` has no template whatsoever, so the grid just
+auto-placed each button into a new implicit column — a flat ~86px-wide 1×3
+strip, not the mock's compact 56×56px 2×2 L-shape tucked into the dial's own
+empty corner triangle. The file's own header already correctly cited Petition
+P5's real design (four corner clusters, one cell each left empty); the CSS
+implementing that citation was never actually written.
+
+1. **Ported the mock's own `.cornerCluster` rule verbatim** — `grid-
+   template-columns/rows:repeat(2,26px)` plus a per-corner `grid-template-
+   areas` L-shape (`"a b" "c ."` for TL, mirrored per corner) and `nth-
+   child`→`grid-area` mapping, replacing the untemplated stub. Live-measured
+   via the standalone preview harness (screenshot tooling still unavailable
+   in this environment, same gap P21 named): all four corners render at
+   exactly 56×56px, `grid-template-areas` matches the mock string-for-string
+   per corner, and the dial-host/dial-slot both measure exactly 340×340px —
+   confirming the existing `.msa-astro-dial-host` wrapper (audited, not
+   assumed, since it wraps the corners AND the dial rather than the mock's
+   flatter `#astro`-holds-everything structure) introduces zero extra sizing,
+   so the same absolute `top:0/left:0` etc. lands exactly where the mock's
+   own math already proved clear of the ring (Round 8's 49.8px diagonal
+   clearance, cited directly in the new CSS comment rather than re-derived).
+2. ⚠️ **The TL corner's speed button was silently dead — found by grep, not
+   assumed working.** `ctx.onScrollToRateControl?.()` was referenced only in
+   `astrolabe-panel.js` itself; boot.js never supplied it. Every click did
+   nothing, no error, no explanation — a live-styled (non-`planned`) control
+   silently failing Law 5. `feedback_unconsumed_api_rots_silently`'s exact
+   shape, the same class of bug P20 caught in `core/impulse-schema.js`.
+   Rebuilt as a real popover over `TIME_RATE_STEPS` (already the old debug
+   panel's own rate vocabulary — no second one invented), wired through a new
+   `ctx.onSetFlowRate` to the SAME `editSky({rateHoursPerMinute})` path the
+   old panel's rate slider already writes through.
+3. **The TL corner's other two icons were simply wrong**, not just
+   unstyled: `flowBtn` used a `sun` icon with no `aria-pressed` at all
+   (mock: `play`/`pause`, toggling, `aria-pressed` reflecting state);
+   `jumpBtn` used `clock` (mock: `calendar`). Both corrected; `flowBtn` now
+   swaps icon and `aria-pressed` on every toggle, and a new `syncFlowState()`
+   handle — returned by `renderAstrolabePanel`, exposed as `shell.js`'s
+   `syncAstrolabePanel()`, called every tick from `pumpAstrolabe` — keeps
+   both TL buttons honest against a rate change from elsewhere (the old
+   panel's own slider, another client), the same "never polls, told" shape
+   `refreshWeatherBoard`/`refreshCueDeck` already use.
+4. **The speed badge reads a REMEMBERED rate, not the raw live one, by
+   deliberate design** — production's single-field model uses
+   `rateHoursPerMinute:0` itself to mean "paused" (unlike the mock's own two-
+   field `state.flow`/`state.speedIx`, fully independent). Showing the live
+   value verbatim would flash the badge to a meaningless fallback on every
+   pause; `getFlowRate` now returns the live rate if playing, else
+   `lastNonZeroRateHoursPerMinute` (already the toggle's own remembered
+   value) — the badge always shows what flow will actually resume at.
+5. **`IMPULSES` reordered to `[strike, thunder, gust]`**, matching the
+   mock's own `#cornerTR` append order (bolt, cloud, wind) exactly —
+   production had shipped `[strike, gust, thunder]` since U7. One shared
+   declaration (§9, P20's own point) means reordering it once reorders both
+   the Remote's corner and the Studio's CUES list identically, not a per-
+   surface patch.
+6. ⚠️⚠️ **CAUGHT LIVE, NOT BY EYE: a menu-item click silently reopened its
+   own parent popover.** Selecting a speed left a stray `<div class="msa-
+   jump-menu">` still attached as a SECOND child of the button, sitting
+   alongside the freshly-synced label — found via `childNodes` inspection
+   showing 2 entries where 1 was expected, not a visual glance. Root cause:
+   a menu item's own click handler never called `stopPropagation()`, so the
+   click bubbled item→menu→button and re-triggered the BUTTON's own "open a
+   fresh menu" listener — DOM event propagation paths are computed at
+   dispatch time and don't change when a handler removes an ancestor
+   mid-bubble, so `menu.remove()` succeeding didn't stop the stale path from
+   still reaching the button. This is not a new bug this round introduced in
+   isolation — the identical unguarded pattern already existed in the jump-
+   to popover (present since U2, P11), just never noticed, plausibly because
+   a silently-reopened menu that a user's next unrelated click immediately
+   dismisses again reads as "huh, weird" rather than a reproducible bug.
+   Fixed in both popovers' item handlers, not just the new one.
+7. **Both preview harnesses' own separate impulse fixtures reordered to
+   match** — `tools/remote-preview/` and `tools/studio-preview/` each carry
+   their OWN hardcoded `IMPULSES` array (deliberately, per Petition P11's own
+   "cheap eyes, no live Foundry" design), not a shared import from boot.js —
+   left unreordered, the harnesses would have quietly stopped matching the
+   very production order this round just fixed.
+
+*Verification note: `npx eslint` clean on every file touched — ONE real
+mistake caught by it first, not assumed clean: a code comment used inline
+backticks around `grid-auto-flow:column` while itself sitting inside
+`shell.js`'s own backtick-delimited CSS template string, prematurely
+terminating it and turning the rest of the stylesheet into unparseable JS
+("Unexpected token grid"). Fixed by dropping the inner backticks; the
+cascading "installRemote not found" errors in two OTHER files vanished with
+it, confirming they were symptoms of the same parse failure, not separate
+bugs. `npx prettier --check` flagged `astrolabe-panel.js` alone; `--write`
+fixed it. `node tools/run-tests.mjs`: 27 suites, ALL GREEN throughout (count
+kept climbing across re-runs from the concurrent water session's own
+unrelated commits, not this round's doing — cross-checked by file scope on
+every jump). `node tools/verify-structure.mjs`: mid-round, a THIRD finding
+appeared — `graph/reachable-from-boot`'s ratchet broke 3-vs-2, naming
+`src/effects/water/water-sim.js` (among two already-known-tolerated files).
+Confirmed via `git status` as the concurrent water session's own brand-new,
+untracked, in-progress file (`water-sim.js` + `water-sim.test.mjs`, neither
+staged nor touched by any commit this round) — not this work's to fix,
+named rather than silently absorbed or silently ignored. Live-verified in
+the browser via `tools/remote-preview/`: all four corners' computed
+`grid-template-areas`/sizing match the mock exactly; `flowBtn`'s box-shadow,
+`speedBtn`'s font-size/weight, and `.msa-ghost-slot`'s transparent/dashed
+treatment all match the mock's own computed values exactly; clicking
+`flowBtn` correctly swaps icon+`aria-pressed`; the speed popover opens with
+all 5 real `TIME_RATE_STEPS`, the current rate correctly marked
+`aria-pressed`, and picking a different one updates the badge cleanly with
+no stray menu left behind, post-fix. **Not verified, same standing gap as
+P21: the author's own live Foundry session** — this round's proof is the
+preview harness plus exact computed-style cross-checks against the mock,
+not a look inside the real Remote. The concurrent water-flow session's own
+files (everything under `src/effects/water/`, `vt-pan-viewer.js`,
+`docs/planning/Water-Simulation-Turn.md`, `tools/shader-lab/bench-water.js`,
+plus this round's newly-observed `water-sim.js`/`water-sim.test.mjs`) remain
+completely untouched, confirmed by diffing every touched file individually
+before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

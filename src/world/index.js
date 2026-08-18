@@ -169,3 +169,24 @@ export {
   EARTH_CALENDAR,
   GOLARION_LORE_STRICT_CALENDAR,
 } from './almanac.js';
+
+// THE FADE ENGINE (docs/holy/UI-Testament.md §4.2, U2) — pure curve/merge/
+// resume/expiry math over a flat Record<key, FadeEntry>. Zero knowledge of
+// effects or Foundry; fade-registry.js is the door that makes an arbitrary
+// effect's schema fadeable without this file (or that one) learning its name.
+export {
+  FADEABLE_TYPES,
+  CURVES,
+  isFadeableType,
+  shapeProgress,
+  rawProgress,
+  progressOf,
+  isEntryExpired,
+  computeEasedValue,
+  mergeFadeState,
+  pruneExpired,
+  cancelEntry,
+  snapEntry,
+  deriveAllValues,
+} from './fade-engine.js';
+export { schemaFadeSource, createFadeSourceRegistry } from './fade-registry.js';

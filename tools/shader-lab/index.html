@@ -46,7 +46,8 @@
         height: auto;
         display: block;
       }
-      #profile {
+      #profile,
+      #waterProfile {
         background: #111;
         border: 1px solid #444;
         width: 100%;
@@ -157,7 +158,8 @@
       #apertureGoboView,
       #windowGlassView,
       #candleView,
-      #precipView {
+      #precipView,
+      #waterView {
         background: #000;
         image-rendering: pixelated;
         border: 1px solid #444;
@@ -174,7 +176,8 @@
       #windowGlassStatus,
       #candleStatus,
       #fireStatus,
-      #precipStatus {
+      #precipStatus,
+      #waterStatus {
         white-space: pre-wrap;
         font-size: 11px;
         max-height: 200px;
@@ -260,6 +263,12 @@
         <div id="fireLegend">no probe rendered yet</div>
         <div id="fireStatus">loading…</div>
       </div>
+      <div id="waterLeft" style="display: none">
+        <canvas id="waterView" width="768" height="768"></canvas>
+        <canvas id="waterProfile" width="768" height="120"></canvas>
+        <div id="waterLegend">not initialised</div>
+        <div id="waterStatus">loading…</div>
+      </div>
     </div>
     <div id="controls">
       <fieldset>
@@ -281,6 +290,7 @@
           <option value="albedo-clarity">Albedo Clarity — CAS sharpen vs. BC1 noise (rung 1)</option>
           <option value="fire">Fire — slab-integral noise cost (rung 1)</option>
           <option value="precip">Precipitation — the FALL, rain + snow (rung 1)</option>
+          <option value="water">Water — shore foam instrument (rung 4)</option>
         </select>
       </fieldset>
       <div id="specPanel" style="display: none">
@@ -767,6 +777,80 @@
           </div>
         </fieldset>
       </div>
+      <div id="waterPanel" style="display: none">
+        <fieldset>
+          <legend>Scenario (real JFA bake + real buildWaterSurfaceMaterial)</legend>
+          <select id="waterScenario">
+            <option value="river-bake-produces-real-sdf" selected>river-bake-produces-real-sdf</option>
+            <option value="tier4-gate-ladder-no-dead-term">tier4-gate-ladder-no-dead-term</option>
+            <option value="shore-foam-has-real-coverage">shore-foam-has-real-coverage</option>
+          </select>
+          <button id="waterRun">Run scenario</button>
+          <button id="waterLadder">Run gate ladder (console)</button>
+        </fieldset>
+        <fieldset>
+          <legend>Debug channel — WATER_DEBUG_CHANNELS 1-18, computation order</legend>
+          <select id="waterChannel"></select>
+          <div class="hint">The first BLACK channel (or, for a remapped one, the first away from 0.5 grey) is the culprit.</div>
+        </fieldset>
+        <fieldset>
+          <legend>Depth / volume</legend>
+          <label
+            >opacity <span id="waterOpacityVal"></span
+            ><input type="range" id="waterOpacity" min="0" max="1" step="0.01" value="0.62"
+          /></label>
+          <label
+            >absorption <span id="waterAbsorptionVal"></span
+            ><input type="range" id="waterAbsorption" min="0" max="4" step="0.05" value="1.4"
+          /></label>
+          <label
+            >depthScalePx <span id="waterDepthScaleVal"></span
+            ><input type="range" id="waterDepthScale" min="16" max="512" step="4" value="256"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Motion + foam (tier 2/4)</legend>
+          <label
+            >foam (crest) <span id="waterFoamVal"></span
+            ><input type="range" id="waterFoam" min="0" max="1" step="0.01" value="0.35"
+          /></label>
+          <label
+            >flow speed px/s <span id="waterFlowSpeedVal"></span
+            ><input type="range" id="waterFlowSpeed" min="0" max="300" step="5" value="60"
+          /></label>
+          <label
+            >flow direction° <span id="waterFlowAngleVal"></span
+            ><input type="range" id="waterFlowAngle" min="0" max="360" step="5" value="180"
+          /></label>
+          <label
+            >chop <span id="waterChopVal"></span
+            ><input type="range" id="waterChop" min="0" max="2" step="0.05" value="0.4"
+          /></label>
+          <label
+            >swash foam <span id="waterSwashFoamVal"></span
+            ><input type="range" id="waterSwashFoam" min="0" max="2" step="0.05" value="0.55"
+          /></label>
+          <label
+            >break foam <span id="waterBreakFoamVal"></span
+            ><input type="range" id="waterBreakFoam" min="0" max="2" step="0.05" value="0.7"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Light + view</legend>
+          <label
+            >caustics <span id="waterCausticsVal"></span
+            ><input type="range" id="waterCaustics" min="0" max="2" step="0.05" value="1"
+          /></label>
+          <label
+            >zoom <span id="waterZoomVal"></span
+            ><input type="range" id="waterZoom" min="0.2" max="1" step="0.05" value="1"
+          /></label>
+          <label
+            >time (s) <span id="waterTimeVal"></span
+            ><input type="range" id="waterTime" min="0" max="60" step="0.5" value="0"
+          /></label>
+        </fieldset>
+      </div>
       <div id="compositePanel" style="display: none">
         <fieldset>
           <legend>Composite scenario (rung 3)</legend>
@@ -914,6 +998,7 @@
     <script type="module" src="/tools/shader-lab/candle-lab.js"></script>
     <script type="module" src="/tools/shader-lab/fire-lab.js"></script>
     <script type="module" src="/tools/shader-lab/precip-lab.js"></script>
+    <script type="module" src="/tools/shader-lab/water-lab.js"></script>
     <!-- LAST: owns the view column, so its answer wins over every bench's own
          (see view-visibility.js's header for why that is one file's job). -->
     <script type="module" src="/tools/shader-lab/view-visibility.js"></script>

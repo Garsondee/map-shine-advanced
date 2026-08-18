@@ -206,6 +206,13 @@ const remote = installRemote({
     pushUpdate();
   },
   getPosture: () => fakeSky.mode,
+  // The Clock-mode pill (2026-08-18 fix) — mirrors boot.js's own
+  // onSetMode exactly.
+  onSetMode: (mode) => {
+    fakeSky.mode = mode;
+    log(`clock -> ${mode}`);
+    remote.syncAstrolabePanel();
+  },
   isFlowPlaying: () => fakeSky.rateHoursPerMinute > 0,
   onFlowToggle: () => {
     if (fakeSky.rateHoursPerMinute > 0) {

@@ -143,3 +143,27 @@ export {
   DOOR_IMPULSE_MIN_RADIUS_PX,
 } from './wind-sim.js';
 export { buildWindSimMaterials } from './wind-sim-gpu.js';
+
+// THE ALMANAC (docs/holy/Almanac-Testament.md) — worldTime <-> calendar
+// components, themed date formatting, moon phase. Pure; the CalendarData
+// subclass that actually INSTALLS the true-gregorian calendars into Foundry
+// lives in foundry/calendar-install.js (foundry/ cannot import world/, so it
+// calls core/gregorian-math.js directly — this door only carries the
+// Almanac's own public surface to the REST of src/, e.g. the eventual Face).
+export {
+  projectWorldTime,
+  composeWorldTime,
+  validateCalendarConfig,
+  CALENDAR_ENGINES,
+  moonPhaseAt,
+  PHASE_NAMES,
+  formatThemedDate,
+  formatThemedTime,
+  ordinalString,
+  CALENDARS,
+  CALENDAR_IDS,
+  getCalendar,
+  GOLARION_PARITY_CALENDAR,
+  EARTH_CALENDAR,
+  GOLARION_LORE_STRICT_CALENDAR,
+} from './almanac.js';

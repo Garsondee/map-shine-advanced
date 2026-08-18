@@ -26,6 +26,7 @@ import { run as runWindBake } from './wind-bake.test.mjs';
 import { run as runWindSim } from './wind-sim.test.mjs';
 import { run as runWindEnclosure } from './wind-enclosure.test.mjs';
 import { run as runWindAccess } from './wind-access.test.mjs';
+import { run as runAlmanac } from './almanac.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -72,6 +73,7 @@ const suites = [
   ['wind-sim', runWindSim],
   ['wind-enclosure', runWindEnclosure],
   ['wind-access', runWindAccess],
+  ['almanac', runAlmanac],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

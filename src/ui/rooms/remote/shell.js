@@ -266,44 +266,25 @@ function injectStyle() {
 #${ROOM_ID} .msa-cue-name{font-weight:650; font-size:.8rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 #${ROOM_ID} .msa-cue-meta{display:flex; gap:8px; align-items:center; color:var(--ink2); font-size:.68rem}
 #${ROOM_ID} .msa-cue-meta .ico{color:var(--c-atmos)}
-#${ROOM_ID} .msa-cue-go{width:80px; border-radius:12px; position:relative; overflow:hidden; isolation:isolate;
-  border:1px solid color-mix(in oklab, var(--shine) 58%, transparent);
-  background:
-    radial-gradient(115% 75% at 50% -8%, color-mix(in oklab, var(--shine) 46%, transparent), transparent 72%),
-    linear-gradient(180deg, color-mix(in oklab, var(--shine) 20%, var(--bg3)) 0%,
-                            var(--bg2) 72%, color-mix(in oklab, var(--shine) 7%, var(--bg1)) 100%);
-  color:var(--shine); font-weight:900; letter-spacing:.22em; font-size:1.02rem;
+/* Redesigned 2026-08-18 (author, verbatim: "throw away the current go
+   button concept and just make something nicer. No animation... it's
+   distracting"). The old design was a domed-transport-key skeuomorph —
+   six stacked box-shadow layers plus an after-element sheen sliding across
+   it on an infinite 4.6s loop, the single most V2-throwback-heavy surface
+   in an otherwise flat LANTERN room. Replaced with the SAME flat,
+   solid-fill language every other pill/card here already uses (the mode
+   pill, a cue list row) — one solid tint, one border, no gradients stacked
+   on gradients, no perpetual motion. */
+#${ROOM_ID} .msa-cue-go{width:80px; border-radius:var(--r-card); border:1px solid var(--shine);
+  background:color-mix(in oklab, var(--shine) 20%, var(--bg2));
+  color:var(--shine); font-weight:800; letter-spacing:.14em; font-size:.92rem;
   display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;
-  text-shadow:0 0 14px var(--shine-glow), 0 1px 0 rgba(0,0,0,.45);
-  transition:transform var(--t-micro), box-shadow var(--t-micro), filter var(--t-micro);
-  cursor:pointer; pointer-events:auto;
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, var(--shine) 52%, transparent),
-    inset 0 -10px 16px -10px color-mix(in oklab, var(--shine) 55%, transparent),
-    inset 0 0 0 1px rgba(255,255,255,.04),
-    0 3px 0 -1px color-mix(in oklab, var(--shine) 22%, var(--bg0)),
-    0 5px 14px color-mix(in oklab, var(--shine) 20%, transparent),
-    0 0 calc(20px * var(--glow-on)) var(--shine-soft)}
-#${ROOM_ID} .msa-cue-go::after{content:""; position:absolute; inset:-40% -120%; z-index:-1;
-  background:linear-gradient(74deg, transparent 42%,
-    color-mix(in oklab, var(--shine) 30%, transparent) 50%, transparent 58%);
-  animation:msaGoSheen 4.6s ease-in-out infinite}
-@keyframes msaGoSheen{0%,72%{transform:translateX(-58%)}100%{transform:translateX(58%)}}
-#${ROOM_ID} .msa-cue-go .ico{width:1.15em; height:1.15em; fill:currentColor; stroke:none; opacity:.92}
-#${ROOM_ID} .msa-cue-go:hover{filter:brightness(1.09);
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, var(--shine) 62%, transparent),
-    inset 0 -10px 16px -10px color-mix(in oklab, var(--shine) 65%, transparent),
-    0 3px 0 -1px color-mix(in oklab, var(--shine) 26%, var(--bg0)),
-    0 6px 18px color-mix(in oklab, var(--shine) 26%, transparent),
-    0 0 calc(30px * var(--glow-on)) var(--shine-glow)}
-#${ROOM_ID} .msa-cue-go:active{transform:translateY(2px);
-  box-shadow:
-    inset 0 2px 6px rgba(0,0,0,.45),
-    inset 0 0 0 1px color-mix(in oklab, var(--shine) 30%, transparent),
-    0 1px 0 -1px color-mix(in oklab, var(--shine) 18%, var(--bg0))}
-#${ROOM_ID} .msa-cue-go:disabled{opacity:.32; filter:saturate(.4); box-shadow:none; cursor:default}
-#${ROOM_ID} .msa-cue-go:disabled::after{display:none}
+  transition:background var(--t-micro), transform var(--t-micro);
+  cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-cue-go .ico{width:1.05em; height:1.05em; fill:currentColor; stroke:none}
+#${ROOM_ID} .msa-cue-go:hover{background:color-mix(in oklab, var(--shine) 30%, var(--bg2))}
+#${ROOM_ID} .msa-cue-go:active{transform:translateY(1px)}
+#${ROOM_ID} .msa-cue-go:disabled{opacity:.32; background:var(--bg2); border-color:var(--line); color:var(--ink2); cursor:default}
 #${ROOM_ID} .msa-cue-status{min-height:14px; font-size:.68rem; color:var(--fail); text-align:center}
 #${ROOM_ID} .msa-cue-list{display:none; flex-direction:column; gap:3px; border:1px solid var(--line);
   border-radius:var(--r-card); padding:6px; background:var(--bg1); max-height:150px; overflow-y:auto}

@@ -107,18 +107,52 @@ function injectStyle() {
   color:rgba(255,255,255,.92); font-size:.68rem; transition:background var(--t-micro);
   cursor:pointer}
 #${ROOM_ID} .msa-astro-pill:hover{background:rgba(10,14,26,.75)}
-#${ROOM_ID} .msa-corner{position:absolute; display:grid; grid-auto-flow:column; gap:4px; z-index:2}
-#${ROOM_ID} .msa-corner-tl{top:0; left:0}
-#${ROOM_ID} .msa-corner-tr{top:0; right:0}
-#${ROOM_ID} .msa-corner-bl{bottom:0; left:0}
-#${ROOM_ID} .msa-corner-br{bottom:0; right:0}
-#${ROOM_ID} .msa-corner button{width:26px; height:26px; display:grid; place-items:center; border-radius:8px;
-  color:var(--ink2); background:var(--bg2); border:1px solid var(--line); cursor:pointer; pointer-events:auto}
-#${ROOM_ID} .msa-corner button:hover{background:var(--bg3); color:var(--ink0)}
+/* THE FOUR CORNERS (2026-08-18 fix, same author report as astrolabe-dial.js's
+   own header: "the buttons around the astrolabe are wrongly positioned").
+   Ported from the mock's own .cornerCluster rules verbatim, not re-derived —
+   the ORIGINAL port here was grid-auto-flow:column, which has no template
+   at all and just auto-places each button into a new implicit column: a
+   flat 1x3 strip roughly 86px wide, not the mock's compact 56x56 2x2 L-shape
+   tucked into the dial's own empty corner triangle. grid-template-areas
+   encodes the L directly — the "." in each string IS the cell closest to
+   the ring, and which physical cell that is changes per corner (top-right's
+   inner column is its LEFT one, not its right) — see tools/ui-mock/
+   index.html's own comment on this same rule for the geometry proof
+   (49.8px diagonal clearance at 340px/radius170, comfortably past a 3x26px
+   L's ~56px reach). #astro in the mock is exactly the 340x340 box these
+   corners anchor to directly; here they anchor to .msa-astro-dial-host,
+   which wraps the (also exactly 340x340) dial slot with zero extra sizing
+   of its own, so the same absolute top:0/left:0 etc. lands in the same
+   place. */
+#${ROOM_ID} .msa-corner{position:absolute; display:grid; grid-template-columns:repeat(2, 26px);
+  grid-template-rows:repeat(2, 26px); gap:4px; z-index:2}
+#${ROOM_ID} .msa-corner-tl{top:0; left:0; grid-template-areas:"a b" "c ."}
+#${ROOM_ID} .msa-corner-tr{top:0; right:0; grid-template-areas:"a b" ". c"}
+#${ROOM_ID} .msa-corner-bl{bottom:0; left:0; grid-template-areas:"a ." "b c"}
+#${ROOM_ID} .msa-corner-br{bottom:0; right:0; grid-template-areas:". a" "b c"}
+#${ROOM_ID} .msa-corner button:nth-child(1){grid-area:a}
+#${ROOM_ID} .msa-corner button:nth-child(2){grid-area:b}
+#${ROOM_ID} .msa-corner button:nth-child(3){grid-area:c}
+#${ROOM_ID} .msa-corner button{position:relative; width:26px; height:26px; display:grid; place-items:center;
+  border-radius:8px; color:var(--ink2); background:var(--bg2); border:1px solid var(--line); cursor:pointer;
+  pointer-events:auto; box-shadow:0 2px 6px rgba(0,0,0,.35)}
+#${ROOM_ID} .msa-corner button:hover{border-color:var(--line-strong); color:var(--ink0)}
 #${ROOM_ID} .msa-corner button.msa-planned{border-style:dashed; border-color:var(--fail); color:var(--fail)}
-#${ROOM_ID} .msa-corner .ico{width:15px; height:15px}
-#${ROOM_ID} .msa-ghost-slot{opacity:.5}
-#${ROOM_ID} .msa-ghost-slot:hover{opacity:.85}
+#${ROOM_ID} .msa-corner button[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine);
+  background:var(--shine-soft)}
+#${ROOM_ID} .msa-corner .ico{width:13px; height:13px}
+/* the TL speed badge — a "×N" TEXT tab, not a fourth icon (mock's own
+   .tab.txt); still a .msa-corner button in every other respect (size,
+   grid-area placement, hover/pressed states) so it needs no separate rule
+   for those. */
+#${ROOM_ID} .msa-corner button.msa-corner-txt{font-size:.52rem; letter-spacing:.03em; color:var(--ink1);
+  font-weight:600}
+/* honest empty slots, not fake buttons — matches the mock's own .tab.ghost:
+   transparent, dashed, no shadow, quieter than an assigned control but
+   never disabled. */
+#${ROOM_ID} .msa-corner button.msa-ghost-slot{background:transparent; border-style:dashed;
+  border-color:var(--line); color:var(--ink2); box-shadow:none; opacity:.5; font-size:.85rem; font-weight:300}
+#${ROOM_ID} .msa-corner button.msa-ghost-slot:hover{opacity:.85; border-color:var(--line-strong)}
 #${ROOM_ID} .msa-jump-menu{position:absolute; top:100%; left:0; margin-top:4px; display:flex; flex-direction:column;
   background:var(--glass); backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line-strong);
   border-radius:8px; box-shadow:var(--shadow2, var(--shadow3)); padding:4px; min-width:120px; z-index:10}
@@ -260,13 +294,17 @@ function plannedFooterBtn(text, plannedReason) {
 /**
  * @param {{debugPanel?: object, mountAstrolabeDial: (el: HTMLElement) => void,
  *   getPosture: () => string, isFlowPlaying: () => boolean, onFlowToggle: () => void,
+ *   getFlowRate?: () => number, onSetFlowRate?: (rate: number) => void,
  *   weatherBoard?: object, onBaseline?: (overMs: number) => void, cueDeck?: object,
  *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} [opts]
  *   `weatherBoard`/`cueDeck`, when supplied, are passed straight through as
  *   `renderWeatherBoard`/`renderCueDeck`'s own `ctx` (weather-board.js,
  *   cue-deck.js) — this file never inspects their shape, only whether they
  *   exist. `impulses` (U7) is handed straight to `astrolabe-panel.js`'s own
- *   TR corner unchanged, same reasoning.
+ *   TR corner unchanged, same reasoning. `getFlowRate`/`onSetFlowRate`
+ *   (2026-08-18 fix) back the TL corner's real speed popover — see
+ *   astrolabe-panel.js's own header for why this replaced a silently-dead
+ *   `onScrollToRateControl` callback.
  */
 export function installRemote(opts = {}) {
   installTokens();
@@ -322,6 +360,8 @@ export function installRemote(opts = {}) {
   let weatherBoardHandle = null;
   /** @type {{refresh: () => void}|null} */
   let cueDeckHandle = null;
+  /** @type {{syncFlowState: () => void}|null} */
+  let astrolabePanelHandle = null;
 
   function buildBody() {
     if (bodyBuilt) return;
@@ -338,11 +378,13 @@ export function installRemote(opts = {}) {
     // order).
     body.appendChild(nowPlaying);
 
-    renderAstrolabePanel(body, {
+    astrolabePanelHandle = renderAstrolabePanel(body, {
       mountAstrolabeDial: opts.mountAstrolabeDial ?? (() => {}),
       getPosture: opts.getPosture ?? (() => 'director'),
       isFlowPlaying: opts.isFlowPlaying ?? (() => false),
       onFlowToggle: opts.onFlowToggle ?? (() => {}),
+      getFlowRate: opts.getFlowRate ?? (() => 0),
+      onSetFlowRate: opts.onSetFlowRate ?? (() => {}),
       impulses: opts.impulses ?? [],
     });
 
@@ -446,6 +488,14 @@ export function installRemote(opts = {}) {
      * no cue deck was supplied. */
     refreshCueDeck() {
       cueDeckHandle?.refresh();
+    },
+    /** Re-sync the TL corner's flow/speed buttons (icon, aria-pressed, "×N"
+     * label) against the live rate — boot.js's pumpAstrolabe calls this every
+     * tick, matching refreshWeatherBoard/refreshCueDeck's own "never polls,
+     * it's told" shape, so the buttons can't go stale when the rate changes
+     * from elsewhere (the old panel's own rate slider, another client). */
+    syncAstrolabePanel() {
+      astrolabePanelHandle?.syncFlowState();
     },
   };
   room._msaRemoteController = controller;

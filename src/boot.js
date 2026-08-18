@@ -1135,6 +1135,15 @@ function install() {
       getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,
       onGradeEnvStrengthCommit: (v) => void editSky({ gradeEnvStrength: v }),
       getSceneOverride: () => skyScope.sceneOverrides === true,
+      // The cloud pin glyph (2026-08-18 fix — gap-audit against the old
+      // astrolabe.js's own Cloud row). `weatherPinnedAxes` already rides the
+      // dial-state snapshot pumpAstrolabe reads every tick (vt-pan-viewer.js
+      // own `weather.read().pinnedAxes`) — pulled fresh here rather than
+      // pushed, matching every other weatherBoard getter's own shape, not a
+      // second live-update channel. `unpinVtPanViewerWeatherAxis` is the
+      // SAME function the old panel's own `onUnpinCloudCover` already calls.
+      getCloudPinned: () => Boolean(getVtPanViewerTimeDialState()?.weatherPinnedAxes?.includes('cloudCover01')),
+      onUnpinCloudCover: () => unpinVtPanViewerWeatherAxis('cloudCover01'),
       onSceneOverrideCommit: async (enabled) => {
         const result = await setSceneSkyOverride(enabled, skyScope.sky);
         if (!result.ok) log.warn(`scene sky override not changed: ${result.reason}`);
@@ -7733,7 +7742,18 @@ function install() {
       },
       onTimeStop: (hour) => {
         sweepVtPanViewerTimeOfDay(hour);
-        void editSky({ todHour: hour });
+        // Persisting todHour only means anything in aesthetic mode
+        // (2026-08-18 fix, same reasoning as the ring-lock fix/Petition P26):
+        // `applyLookToEngines` never reads `sky.todHour` back out except
+        // when `sky.mode==='aesthetic'`, so writing it here regardless of
+        // posture silently corrupted the persisted value in Follow/Almanac
+        // until the next Aesthetic switch, with no compensating benefit --
+        // the sweep above already gives the GM their visible feedback either
+        // way. Unlike the ring drag, this control was never caller-guarded
+        // (the old SVG dial's time-stop dots have no `ringLocked` check at
+        // all, on purpose -- they stay clickable in every mode), so the
+        // gate has to live here instead.
+        if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
       },
       onTimeRateChange: (rate) => void editSky({ rateHoursPerMinute: rate }),
       onTimeModeChange: (mode) => void editSky({ mode }),

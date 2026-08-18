@@ -53,3 +53,9 @@ export { tierChip, scopeGlyph, healthBadge } from './widgets/badges.js';
 // `registerPanel` for the old panel — see rooms/studio/shell.js's own header
 // for why the Studio never imports effects/ or talks to effectRegistry itself.
 export { installStudio } from './rooms/studio/shell.js';
+
+// THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — Now Playing, the
+// astrolabe + corner clusters, and the camera-path popover this checkpoint;
+// Fade Time/weather board/cue deck are later checkpoints in the same stage
+// (see Petition P11).
+export { installRemote } from './rooms/remote/shell.js';

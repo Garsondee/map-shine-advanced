@@ -3207,6 +3207,75 @@ staging.*
 
 ---
 
+**P29 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; an autonomous-loop
+tick continuing the parity work — no new author message since P28, acting
+on the standing "continue with the next most critical pieces" instruction,
+picking a well-scoped item off the open gap list rather than the one
+genuinely needing the author's own design call, wind editing).** Went
+looking at Gap 13 (richer sticky-status text) and found the real gap was one
+level up from where the audit pointed.
+
+1. ⚠️⚠️ **TWO UNCONSUMED APIS, BOTH ALREADY BUILT, NEITHER EVER CALLED.**
+   `shell.js#updateNowPlaying({glyph, label})` has existed since U2, fully
+   wired to repaint the Remote's own "Now Playing" line — grepped `boot.js`
+   for every call site: zero. The label has sat frozen at its hardcoded
+   `"Steady"` default forever, live, in production, since the Remote first
+   shipped. Separately, `world/fade-engine.js`'s own `FadeEntry.label` field
+   doc already named this exact destination — *"shown on the Now Playing
+   ring's hover"* — written at U2 time, never actually wired to it either.
+   Two names for the same unfinished thread, found by reading one after the
+   other rather than stopping at the first.
+2. **Built `boot.js#buildNowPlayingLabel(dial, nowMs)`** — two real states,
+   both from data the engine already carries: a weather archetype fade
+   genuinely in flight (`fadeState`'s own `label`/`startedAtMs`/`overMs`,
+   the exact fields the doc comment above already promised) renders
+   `"Fading to {label} — {N}s left"`; the settled default renders
+   `"Holding — {phase}"`, using a newly-`export`ed `phaseDisplayName`
+   (`ui/astrolabe.js`, threaded through `ui/index.js`'s own door — it was
+   already a correct, tested, private helper, just never reachable from
+   outside that file). Called from `pumpAstrolabe`'s existing ~10Hz
+   throttled block, no new timer.
+3. ⚠️ **Deliberately NOT the mock's own full composition.** Read the mock's
+   real `#npLabel` logic before writing anything (`"Holding — Afternoon,
+   light rain"`, and three OTHER states: a whole-day "Passage" sweep, a
+   Drift-mode climate phrase, a `weatherWord` precip-description taxonomy).
+   `state.passage` has no production equivalent at all (grepped, zero hits)
+   — a real, separate feature, not a text-formatting gap. The `weatherWord`
+   phrase taxonomy and the Drift-mode phrasing are their own scoped
+   follow-up, not invented here under time pressure. Two states shipped
+   honestly beat four states with two of them faked.
+4. **`tools/remote-preview/preview.js` mirrors the same two-state logic**,
+   plus two synchronous calls (fade-start, and right after `remote.open()`)
+   for the same reason `fadeToArchetype`'s own existing calls already need
+   them: this pane's `requestAnimationFrame` doesn't reliably fire without
+   OS focus, so a gesture giving itself immediate feedback is what actually
+   makes a change observable here. ⚠️ Caught my own test-methodology miss
+   mid-round: first tried triggering a fade with Fade Time still on its
+   "Now" (0ms) default and read "Holding — Day" right back — not a bug, a
+   0ms fade has no window to observe as "in flight" at all. Re-tested with a
+   real duration (1m) before concluding anything, per this project's own
+   standing "re-test from a known state" lesson.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on every file
+(prettier's own `--write` reflowed one long line in `boot.js`, re-verified
+after). `node tools/run-tests.mjs`: 27 suites, 11512 passed, 0 failed,
+unchanged — no test-covered logic touched. `node tools/verify-structure.mjs`:
+the same two pre-existing violations only; the new `performance.now()` call
+added to `tools/remote-preview/preview.js` was checked explicitly against
+the `time/one-clock` wall's own violation list (grepped for
+`preview.js`/`remote-preview`, zero hits) — confirmed `tools/` sits outside
+that wall's scope entirely, not just unlucky to dodge it. Live-verified in
+the browser via `tools/remote-preview/`: fresh load shows "Holding — Day"
+immediately (not the stale "Steady" default); a real-duration archetype
+fade shows "Fading to Clear — 60s left" and the countdown genuinely
+advances in real time (watched it read 37s left later in the same session,
+not just asserted from source); console clean throughout. **Not verified:
+the author's own live Foundry session**, same standing gap as P21–P28. The
+concurrent water-flow session's own files remain completely untouched,
+confirmed via `git status --porcelain` before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

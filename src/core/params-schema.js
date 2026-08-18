@@ -113,6 +113,36 @@ const FORBIDDEN_IN_CONTRACT = Object.freeze(['throttle', 'expanded', 'advanced',
  */
 export const PARAM_STATUS = Object.freeze(['live', 'planned']);
 
+/**
+ * The Fade Engine's own closed curve vocabulary (docs/holy/UI-Testament.md
+ * §4.2, `world/fade-engine.js`). Declared HERE rather than in `world/` so
+ * `core/cues-schema.js` (U3 — a cue's own `curve` field needs the identical
+ * closed list to validate against) never has to import `world/` at all
+ * (confirmed empirically: no `core/` file imports `world/` anywhere in this
+ * codebase — `world/` depends on `core/`, never the reverse). One list, two
+ * consumers, rather than two copies that could quietly drift apart the day
+ * a curve is renamed in one and not the other.
+ */
+export const FADE_CURVES = Object.freeze(['linear', 'ease', 'smoothstep', 'hold-snap']);
+
+/**
+ * Types with a continuous "between" two values — a strict subset of
+ * {@link PARAM_TYPES}. `text` (what is halfway between two strings?),
+ * `curve` (blending two arbitrary point lists is its own, unscoped
+ * feature), and `action` (a button press has no value to hold) are
+ * excluded. Declared here for the identical reason `FADE_CURVES` is —
+ * `core/cues-schema.js` (U3) needs the SAME fadeability answer
+ * `world/fade-engine.js` already computes, without either importing
+ * `world/` or re-deriving a second copy of the exclusion list.
+ * @type {readonly string[]}
+ */
+export const FADEABLE_PARAM_TYPES = Object.freeze(['float', 'int', 'bool', 'color', 'enum', 'vec2', 'vec3', 'angle']);
+
+/** @param {string} type @returns {boolean} */
+export function isFadeableParamType(type) {
+  return FADEABLE_PARAM_TYPES.includes(type);
+}
+
 /** @typedef {{type: string, default?: unknown, min?: number, max?: number, step?: number, values?: string[], label?: string, help?: string, status?: 'live'|'planned', plannedReason?: string}} ParamDecl */
 
 /**

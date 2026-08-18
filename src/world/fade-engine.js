@@ -63,25 +63,24 @@
  * @module world/fade-engine
  */
 
+import { FADEABLE_PARAM_TYPES, isFadeableParamType, FADE_CURVES } from '../core/params-schema.js';
+
 /**
- * Types that have a continuous "between" two values — a strict subset of
- * `core/params-schema.js#PARAM_TYPES`. `text` (what is halfway between two
- * strings?), `curve` (blending two arbitrary point lists is its own,
- * unscoped feature), and `action` (a button press has no value to hold) are
- * excluded on purpose — a fade that targets one of these is invalid, the
- * same "fails at author time, not at the table" rule the Testament already
- * sets for cues (§4.3). See `isFadeableType`.
+ * Re-exported under this module's own established names (this file's every
+ * existing consumer — `fade-registry.js`, its own test suite, `world/
+ * index.js`, boot.js — already imports `FADEABLE_TYPES`/`isFadeableType`/
+ * `CURVES` from HERE) — the canonical declarations moved to
+ * `core/params-schema.js` so `core/cues-schema.js` (U3) can use the
+ * identical fadeability/curve answers without `core/` ever importing
+ * `world/` (confirmed empirically: no `core/` file does, anywhere in this
+ * codebase — `world/` depends on `core/`, never the reverse). One true
+ * list each, two consumers, never two copies free to drift apart.
  * @type {readonly string[]}
  */
-export const FADEABLE_TYPES = Object.freeze(['float', 'int', 'bool', 'color', 'enum', 'vec2', 'vec3', 'angle']);
-
-/** @param {string} type @returns {boolean} */
-export function isFadeableType(type) {
-  return FADEABLE_TYPES.includes(type);
-}
-
+export const FADEABLE_TYPES = FADEABLE_PARAM_TYPES;
+export const isFadeableType = isFadeableParamType;
 /** @type {readonly string[]} */
-export const CURVES = Object.freeze(['linear', 'ease', 'smoothstep', 'hold-snap']);
+export const CURVES = FADE_CURVES;
 
 /** @param {number} t @returns {number} */
 function clamp01(t) {

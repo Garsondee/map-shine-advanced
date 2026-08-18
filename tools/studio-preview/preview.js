@@ -217,8 +217,39 @@ function getSystemPanelCtx() {
   };
 }
 
+// ---- IMPULSES (U7) — real shape, fake fire() (no live viewer here) --------
+const IMPULSES = [
+  {
+    id: 'strike',
+    label: 'Strike',
+    icon: 'bolt',
+    flashClass: true,
+    fire: () => {
+      document.getElementById('log').textContent = 'Strike fired (preview stand-in)';
+      return { ok: true, message: 'Strike fired (preview stand-in).' };
+    },
+  },
+  {
+    id: 'gust',
+    label: 'Gust',
+    icon: 'wind',
+    fire: () => {
+      document.getElementById('log').textContent = 'Gust fired (preview stand-in)';
+      return { ok: true, message: 'Gust fired (preview stand-in).' };
+    },
+  },
+  {
+    id: 'thunder',
+    label: 'Thunder',
+    icon: 'cloud',
+    status: 'planned',
+    plannedReason: 'No audio subsystem exists anywhere in this codebase yet.',
+  },
+];
+
 const studio = installStudio({
   debugPanel: fakeDebugPanel,
+  impulses: IMPULSES,
   listCues: () => orderedCues(cueStack),
   captureCue: (name) => captureCueFromLive(name),
   updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),

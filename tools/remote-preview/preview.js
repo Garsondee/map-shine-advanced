@@ -161,7 +161,32 @@ function fireCueById(id) {
   return { ok: true, reason: null };
 }
 
+// ---- IMPULSES (U7) — real shape, fake fire() (no live viewer here) --------
+const IMPULSES = [
+  {
+    id: 'strike',
+    label: 'Strike',
+    icon: 'bolt',
+    flashClass: true,
+    fire: () => (log('Strike fired (preview stand-in)'), { ok: true, message: 'Strike fired (preview stand-in).' }),
+  },
+  {
+    id: 'gust',
+    label: 'Gust',
+    icon: 'wind',
+    fire: () => (log('Gust fired (preview stand-in)'), { ok: true, message: 'Gust fired (preview stand-in).' }),
+  },
+  {
+    id: 'thunder',
+    label: 'Thunder',
+    icon: 'cloud',
+    status: 'planned',
+    plannedReason: 'No audio subsystem exists anywhere in this codebase yet.',
+  },
+];
+
 const remote = installRemote({
+  impulses: IMPULSES,
   mountAstrolabeDial: (container) => {
     remoteDialInstance = createAstrolabe({
       phaseBands: FAKE_PHASE_BANDS,

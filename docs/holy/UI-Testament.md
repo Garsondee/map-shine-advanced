@@ -2846,6 +2846,90 @@ confirmed by diffing every touched file individually before staging.*
 
 ---
 
+**P25 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; the parity audit
+— the author set a new, explicit end state).** Verbatim: *"continue with the
+next most critical pieces of the UI. The goal is to get to the point where
+all the original remote's controls are wired in correctly so that we can
+remove the old one and replace it entirely with the new one."* This is the
+first round with a NAMED FINISH LINE, not an open-ended "keep working" —
+worth recording as its own kind of instruction. Ran a full old-vs-new
+control inventory first (`ui/astrolabe.js` + `buildAstrolabeOptions` in
+`boot.js` against every file in `ui/rooms/remote/`), then verified the
+single most consequential finding directly against `world/day-clock.js`
+before building anything, rather than trusting the audit's own claim on
+faith.
+
+1. ⚠️⚠️ **THE MOST CRITICAL FINDING: Play/Pause and Speed were non-
+   functional in EVERY reachable state.** `astrolabe-panel.js` gated both
+   on `isPenArmed()` (posture `'almanac'` only) — but `world/day-clock.js`'s
+   own rate branch and `canSetHour` both gate on `currentMode==='aesthetic'`
+   exclusively (confirmed by reading the file directly, not assumed from
+   the audit). Net effect: blocked in Aesthetic (the default) by a check
+   that shouldn't apply to them, inert-even-if-reachable in Almanac (where
+   rate drives nothing). Root cause: the new Remote never ported the old
+   astrolabe.js's own real Clock-mode selector (Aesthetic/Follow/Almanac,
+   `modeSelect` → `onTimeModeChange` → `editSky({mode})`) — there was no way
+   to even SEE or reach Aesthetic from the new Remote, let alone gate
+   correctly against it.
+2. **Built the Clock-mode control** — a 3-way segmented pill (matching the
+   Direct/Drift precedent in `weather-board.js`, not the old system's native
+   `<select>`) sitting above the dial, wired to the SAME `editSky({mode})`
+   one-liner the old panel's own select already calls. Re-gated flow/speed
+   on `posture==='aesthetic'` instead of `isPenArmed()`; Jump-to's own
+   `isPenArmed()`/'almanac' gate is correct as-is and stays untouched.
+   Live-verified end to end: blocked with the correct new message in
+   Almanac, switching to Aesthetic un-blocks it for real (`aria-pressed`
+   correctly flips false→true, icon swaps play→pause).
+3. **The wind pill's own speed was silently dropped** —
+   `astrolabe-dial.js#update()`'s JSDoc documented `windSpeed01` as an
+   accepted field, boot.js's real pump passed it every tick, but the
+   function body never read it. Fixed to match the old panel's own
+   `wind-panel` status format exactly ("NE · 30%" / "calm") — read-only for
+   now; editing wind is separate, bigger work (Gap below).
+4. **Four more real controls, previously entirely absent from the new
+   Remote, now live:** Sky Light and Atmosphere join the Channels section
+   (their OWN commit path, not `LIVE_CHANNELS`/`onAxisCommit`, which also
+   stamps `weatherArchetype:'custom'` — correct for weather axes, wrong for
+   these two); Pace joins the Moods/Climates block, rendering ONLY in
+   Drift/Almanac mode (meaningless in Direct, matching the old panel's own
+   grouping beside Climate); Scene override ("this scene has its own sky")
+   is a real bool param through the same `buildParamControl` door every
+   other row already uses. All four wired to the exact same real functions
+   (`editSky`/`setSceneSkyOverride`) the old astrolabe instance already
+   calls — one path, never a second one that could disagree.
+5. **Explicitly NOT attempted this round, named from the audit rather than
+   silently dropped:** wind direction/speed EDITING (the old dial's hub-drag
+   gesture has no equivalent surface on the new dial — its hub is now
+   covered by the landscape art; needs either a repurposed gesture or a new
+   popover, real follow-up work); the 8 ring time-stops (dawn/noon/dusk/etc.
+   quick-snap, `sweepVtPanViewerTimeOfDay`); ring-lock protection (the old
+   dial refuses drag and dims when `canSetHour===false`; the new one drags
+   unconditionally — latent until Follow mode sees real use, since Gap 1
+   made it effectively unreachable before this round); the Almanac forecast
+   readout + "surprise me" toggle; the Clouds fader's pin/unpin glyph; and
+   richer sticky-status text. All real, all scoped, none rushed into this
+   pass.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on every file
+touched. `node tools/run-tests.mjs`: 27 suites, 11512 passed, 0 failed, ALL
+GREEN. `node tools/verify-structure.mjs`: the same two pre-existing
+violations only. Live-verified in the browser via `tools/remote-preview/`:
+the clock-mode pill's `aria-pressed` state and the flow-gate's actual
+blocked/unblocked behavior both confirmed before AND after the fix (not
+just after); all 5 Channels rows render with correct labels/values; Pace
+confirmed absent in Direct and present with the correct value in Drift,
+checked from a clean Direct state specifically after an earlier check's own
+click ordering produced a misleading result (caught by re-testing from a
+known state, not by trusting the first number); the scene-override checkbox
+and a Sky Light slider both commit and log correctly. **Not verified: the
+author's own live Foundry session**, same standing gap as P21–P24 — and
+per §9's own two-word rule, that is what actually promotes any of this from
+`BUILT` to `LIVE`, not this note. The concurrent water-flow session's own
+files remain completely untouched, confirmed by diffing every touched file
+individually before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

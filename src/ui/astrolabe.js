@@ -644,9 +644,15 @@ export function createAstrolabe(opts) {
     padding: '2px 4px',
     font: 'inherit',
   });
+  // Renamed 'synced' -> 'follow', and 'almanac' added — the Almanac
+  // Testament's three postures (world/day-clock.js#ALMANAC_POSTURES). A
+  // stored legacy 'synced' migrates to 'follow' at the ONE coercion boundary
+  // (sky-settings.js#normalizeSky), so this dropdown never needs to know the
+  // old name exists.
   for (const [value, label] of [
     ['aesthetic', 'Aesthetic — the dial sets the look'],
-    ['synced', "Synced — Foundry's world clock drives it"],
+    ['follow', "Follow — Foundry's world clock drives it"],
+    ['almanac', 'Almanac — Foundry’s clock drives it, and the GM can advance it'],
   ]) {
     const o = document.createElement('option');
     o.value = value;
@@ -934,7 +940,15 @@ export function createAstrolabe(opts) {
     const phaseName = phaseDisplayName(s.phase, s.rising);
     // A readout that looks like a world clock but is not one is a lying
     // instrument. In aesthetic mode it says so, every frame.
-    phaseText.textContent = s.mode === 'synced' ? phaseName : `${phaseName} · aesthetic`;
+    //
+    // ⚠️ Checks FOR 'aesthetic' (to show the badge), not for a specific
+    // non-aesthetic value — 'synced' renamed to 'follow' and 'almanac' was
+    // added (Almanac Testament §1/world/day-clock.js#ALMANAC_POSTURES); a
+    // check written the other way round (`s.mode === 'synced'`) would have
+    // shown the "lying instrument" disclaimer in EVERY posture once 'synced'
+    // stopped being the value in play — the opposite of this comment's own
+    // intent, and silently so (nothing throws; the badge just never leaves).
+    phaseText.textContent = s.mode === 'aesthetic' ? `${phaseName} · aesthetic` : phaseName;
 
     arrowPivot.setAttribute(
       'transform',

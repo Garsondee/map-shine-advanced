@@ -38,7 +38,7 @@
  */
 
 import { normalizeHour } from './sun.js';
-import { DAY_CLOCK_MODES, DEFAULT_TOD_HOUR, DEFAULT_RATE_HOURS_PER_MINUTE } from './day-clock.js';
+import { ALMANAC_POSTURES, DEFAULT_TOD_HOUR, DEFAULT_RATE_HOURS_PER_MINUTE } from './day-clock.js';
 import { DEFAULT_ARCHETYPE_ID, CUSTOM_PRESET, isApplicableArchetype } from './weather-data.js';
 import { WEATHER_MODES, PRECIP_KINDS } from './weather.js';
 import { isKnownBiome } from './weather-biomes.js';
@@ -53,7 +53,10 @@ import { isKnownBiome } from './weather-biomes.js';
  * silently disagree.
  */
 export const DEFAULT_SKY = Object.freeze({
-  /** 'aesthetic' | 'synced' — see world/day-clock.js. */
+  /** 'aesthetic' | 'follow' | 'almanac' — the Almanac posture, see
+   * world/day-clock.js#ALMANAC_POSTURES. (Named `synced` before the Almanac
+   * Testament, 2026-08-17 — `normalizeSky` migrates a stored `'synced'` to
+   * `'follow'` transparently, below.) */
   mode: 'aesthetic',
   /** 0..24. Ignored in `synced` mode, where Foundry's world clock supplies it. */
   todHour: DEFAULT_TOD_HOUR,
@@ -144,7 +147,7 @@ export const DEFAULT_SKY = Object.freeze({
 export function normalizeSky(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
   return Object.freeze({
-    mode: DAY_CLOCK_MODES.includes(r.mode) ? r.mode : DEFAULT_SKY.mode,
+    mode: normalizePosture(r.mode),
     todHour: Number.isFinite(Number(r.todHour)) ? normalizeHour(r.todHour) : DEFAULT_SKY.todHour,
     rateHoursPerMinute: clampRange(r.rateHoursPerMinute, -60, 60, DEFAULT_SKY.rateHoursPerMinute),
     cloudCover01: clampRange(r.cloudCover01, 0, 1, DEFAULT_SKY.cloudCover01),
@@ -219,6 +222,21 @@ export function resolveSky({ world, scene, sceneOverrides } = {}) {
 export function applySkyEdit(inputs, patch) {
   const { sky, source } = resolveSky(inputs);
   return Object.freeze({ target: source, sky: normalizeSky({ ...sky, ...(patch ?? {}) }) });
+}
+
+/**
+ * THE `mode` MIGRATION BOUNDARY (Almanac Testament §1) — `normalizeSky` is
+ * this whole module's ONE coercion point (its own doc: *"Coerce anything
+ * into a valid sky block"*), so putting the `'synced'` → `'follow'` rename
+ * exactly here means every existing consumer gets it for free, forever, with
+ * zero changes anywhere else — the same "fix it at the one boundary" shape
+ * `weatherArchetype`/`precipKindAuthored` already use for their own
+ * fail-open fallbacks just above.
+ * @param {*} raw @returns {'aesthetic'|'follow'|'almanac'}
+ */
+function normalizePosture(raw) {
+  if (raw === 'synced') return 'follow'; // the migration, and the ONLY place it happens
+  return ALMANAC_POSTURES.includes(raw) ? raw : DEFAULT_SKY.mode;
 }
 
 /** @param {*} v @param {number} lo @param {number} hi @param {number} fallback @returns {number} */

@@ -141,6 +141,29 @@ export function run(t) {
       realism01: null,
     });
     t.ok('an unknown mode falls back', messy.mode === 'aesthetic');
+    // ---- the Almanac posture migration (Almanac Testament §1) -------------
+    t.ok(
+      "a stored legacy 'synced' migrates transparently to 'follow'",
+      normalizeSky({ mode: 'synced' }).mode === 'follow'
+    );
+    t.ok(
+      "'follow' (the new name) survives normalisation unchanged",
+      normalizeSky({ mode: 'follow' }).mode === 'follow'
+    );
+    t.ok(
+      "'almanac' (the new third posture) survives normalisation",
+      normalizeSky({ mode: 'almanac' }).mode === 'almanac'
+    );
+    t.ok("'aesthetic' is untouched by the migration", normalizeSky({ mode: 'aesthetic' }).mode === 'aesthetic');
+    {
+      // The migration must not disturb a scene's OTHER authored values — same
+      // independent-fallback contract every other field here already has.
+      const migrated = normalizeSky({ mode: 'synced', todHour: 19.5, cloudCover01: 0.4 });
+      t.ok(
+        'migrating mode leaves the hour and cover intact',
+        migrated.todHour === 19.5 && close(migrated.cloudCover01, 0.4)
+      );
+    }
     t.ok('a non-numeric hour falls back to noon', messy.todHour === 12);
     t.ok('an absurd rate clamps', messy.rateHoursPerMinute === 60);
     t.ok('a negative cloud clamps', messy.cloudCover01 === 0);

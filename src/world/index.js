@@ -18,6 +18,8 @@ export {
   DAY_CLOCK_MODES,
   DEFAULT_TOD_HOUR,
   DEFAULT_RATE_HOURS_PER_MINUTE,
+  ALMANAC_POSTURES,
+  postureToDayClockMode,
 } from './day-clock.js';
 export { resolveSky, applySkyEdit, normalizeSky, DEFAULT_SKY } from './sky-settings.js';
 // THE WEATHER MANAGER (docs/planning/Weather-Manager.md) — the env snapshot's

@@ -38,6 +38,18 @@
  * directions and no WRITE direction removes the loop by construction: there is
  * no flag anyone can forget, because there is nothing to guard.
  *
+ * ⚠️ SUPERSEDED, LAWFULLY, 2026-08-17 (`docs/holy/Almanac-Testament.md` §1) —
+ * the author re-asked, in so many words, for MSA to hold a pen on `game.time`
+ * after all. What survives here UNCHANGED is the loop-proofing, not the
+ * blanket "never write" rule: this file itself STILL never writes (that
+ * would reintroduce exactly the guard-flag shape above) — the write now
+ * lives entirely separately, in `foundry/time-authority.js`, gated to fire
+ * ONLY on a GM gesture or a cadence tick, NEVER from inside a time-read hook.
+ * `'synced'` is renamed `'follow'` at the ALMANAC POSTURE layer (see
+ * `ALMANAC_POSTURES` below); THIS module's own two-value `DAY_CLOCK_MODES`
+ * stays exactly as it was — day-clock.js still knows only two READ postures,
+ * on purpose, per the Testament's own §1: *"the pen is a separate faculty."*
+ *
  * ============================================================================
  * EASED, NOT SNAPPED
  * ============================================================================
@@ -56,8 +68,49 @@
 
 import { normalizeHour } from './sun.js';
 
-/** The two authority modes. See the header for why there is no third. */
+/** The two authority modes THIS module knows. See the header for why there is
+ * still no third HERE — the third posture lives one layer up. */
 export const DAY_CLOCK_MODES = Object.freeze(['aesthetic', 'synced']);
+
+/**
+ * THE THREE ALMANAC POSTURES (`docs/holy/Almanac-Testament.md` §1/§4) — a
+ * superset of {@link DAY_CLOCK_MODES}, owned one layer above this file
+ * (`world/sky-settings.js`'s `sky.mode` field carries it; `foundry/time-
+ * authority.js` reads it to decide whether the Pen is armed). `'follow'` and
+ * `'almanac'` BOTH read `worldTime` — day-clock's own `'synced'` mode — and
+ * only `'almanac'` additionally arms writes. day-clock.js itself never sees
+ * this 3-way value; {@link postureToDayClockMode} is the one translation
+ * point, called at the one boundary that needs day-clock's narrower
+ * vocabulary (`vt-pan-viewer.js#setTimeMode`) — never upstream of it, so
+ * every OTHER consumer (the astrolabe's own display, the Pen's arming check)
+ * keeps seeing the true posture.
+ *
+ * ⚠️ Unrelated name collision, noted so nobody "fixes" it: `world/sky-
+ * settings.js`'s `weatherMode` field ALSO has a value literally spelled
+ * `'almanac'` (the Weather Manager's own director/almanac split, Weather-
+ * Manager.md §5 — whether weather is GM-directed or auto-walking a climate).
+ * Two different fields, two unrelated concepts, one shared English word. The
+ * Almanac Testament names this posture `'almanac'` explicitly; that is not a
+ * worker's call to rename.
+ */
+export const ALMANAC_POSTURES = Object.freeze(['aesthetic', 'follow', 'almanac']);
+
+/**
+ * The one translation point from a 3-way posture to day-clock's 2-way mode.
+ * By the time this is called, `posture` will already have passed through
+ * `sky-settings.js#normalizeSky`'s own coercion (the ONE boundary where
+ * garbage gets a default) — the unrecognised-input branch below is a
+ * defensive belt-and-braces case, not a path real input should reach.
+ * @param {string} posture - one of {@link ALMANAC_POSTURES}, or anything.
+ * @returns {'aesthetic'|'synced'} `'follow'`/`'almanac'` both read
+ *   worldTime (day-clock's `'synced'`); unrecognised input fails to
+ *   `'aesthetic'` — the SAME direction `normalizeMode` already fails in,
+ *   deliberately kept consistent rather than picking a second convention.
+ */
+export function postureToDayClockMode(posture) {
+  if (posture === 'follow' || posture === 'almanac') return 'synced';
+  return 'aesthetic';
+}
 
 /**
  * Default hour for a scene nobody has set — noon, the same "canonical

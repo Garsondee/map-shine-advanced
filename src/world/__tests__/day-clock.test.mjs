@@ -6,7 +6,14 @@
  * write-back feedback loop from being reintroduced by someone who thinks
  * "surely the dial should also move the world clock".
  */
-import { createDayClock, shortestHourDelta, DAY_CLOCK_MODES, DEFAULT_RATE_HOURS_PER_MINUTE } from '../day-clock.js';
+import {
+  createDayClock,
+  shortestHourDelta,
+  DAY_CLOCK_MODES,
+  DEFAULT_RATE_HOURS_PER_MINUTE,
+  ALMANAC_POSTURES,
+  postureToDayClockMode,
+} from '../day-clock.js';
 
 export function run(t) {
   const close = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -149,5 +156,37 @@ export function run(t) {
     t.ok('a non-finite delta is ignored', c.read().todHour === 12);
     c.tick(-5);
     t.ok('a negative delta never runs the clock backwards', c.read().todHour === 12);
+  }
+
+  // ---- ALMANAC_POSTURES / postureToDayClockMode (Almanac Testament §1) -----
+  {
+    t.ok('there are exactly three postures', ALMANAC_POSTURES.length === 3);
+    t.ok(
+      'the three are exactly aesthetic/follow/almanac',
+      ['aesthetic', 'follow', 'almanac'].every((p) => ALMANAC_POSTURES.includes(p))
+    );
+    t.ok('ALMANAC_POSTURES is frozen', Object.isFrozen(ALMANAC_POSTURES));
+
+    t.ok("aesthetic posture -> day-clock's aesthetic mode", postureToDayClockMode('aesthetic') === 'aesthetic');
+    t.ok("follow posture -> day-clock's synced mode", postureToDayClockMode('follow') === 'synced');
+    t.ok(
+      "almanac posture -> day-clock's synced mode too (both READ the same way)",
+      postureToDayClockMode('almanac') === 'synced'
+    );
+    t.ok(
+      'follow and almanac are indistinguishable to day-clock — by design (the pen is a separate faculty)',
+      postureToDayClockMode('follow') === postureToDayClockMode('almanac')
+    );
+    t.ok(
+      'garbage input fails to aesthetic — the SAME direction normalizeMode already fails in',
+      postureToDayClockMode('nonsense') === 'aesthetic' && postureToDayClockMode(undefined) === 'aesthetic'
+    );
+
+    // The translated mode must actually drive the day clock correctly —
+    // proves the two functions compose, not just that each looks right alone.
+    const c = createDayClock({ todHour: 12, mode: postureToDayClockMode('almanac') });
+    t.ok('a clock constructed from the translated almanac posture is ring-locked', c.read().canSetHour === false);
+    const c2 = createDayClock({ todHour: 12, mode: postureToDayClockMode('aesthetic') });
+    t.ok('a clock constructed from the translated aesthetic posture is ring-free', c2.read().canSetHour === true);
   }
 }

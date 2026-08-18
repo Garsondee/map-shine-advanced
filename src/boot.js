@@ -166,6 +166,9 @@ import {
   applySkyEdit,
   computeSun,
   WIND_DEFAULT_GUSTINESS01,
+  CALENDARS,
+  CALENDAR_IDS,
+  projectWorldTime,
 } from './world/index.js';
 import {
   runVtLiveDecodeTest,
@@ -376,6 +379,10 @@ import {
   writeSceneSky,
   setSceneSkyOverride,
   watchSceneSky,
+  registerCalendarSetting,
+  installActiveCalendar,
+  standDownPf2eDarknessSync,
+  buildAlmanacDiagnosticsReport,
 } from './foundry/index.js';
 import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
 import { buildSettingsPanel } from './diag/settings-panel.js';
@@ -6963,6 +6970,19 @@ function install() {
           weatherBiome: skyScope.sky?.weatherBiome ?? null,
           weatherVolatility: skyScope.sky?.weatherVolatility ?? 1,
           sceneOverrides: skyScope.sceneOverrides === true,
+          // ⚠️ THE SAME RULE APPLIES TO `mode`, and here it is load-bearing,
+          // not just cosmetic: `dial.mode` comes from `dayClock.read().mode`,
+          // which only ever says 'aesthetic'/'synced' — 'follow' AND
+          // 'almanac' both collapse to 'synced' at that layer, by design
+          // (Almanac Testament §1). Showing the dial's collapsed value in
+          // the mode dropdown would mean 'almanac' displays as "Synced", and
+          // if that dropdown's own change handler ever re-fired against its
+          // OWN displayed value, it would silently WRITE 'follow' over a
+          // true 'almanac' posture — downgrading the Pen's arming with no
+          // visible cause. Reading the TRUE posture from the resolved sky
+          // scope instead (exactly like weatherMode/weatherBiome above)
+          // closes that hole the same way it is already closed for them.
+          mode: skyScope.sky?.mode ?? 'aesthetic',
         });
       }
     }
@@ -6984,6 +7004,38 @@ function install() {
       return { ...result, note: describeWindBake(result) };
     },
     { effect: 'wind' }
+  );
+
+  // THE ALMANAC DIAGNOSTIC REPORT (docs/holy/Almanac-Testament.md, stage
+  // A2) — the author's own ask, 2026-08-17: *"build a button which will
+  // output a report/test the system so that when I do get a chance to
+  // actually test it I can use that to get you the data you need."* Every
+  // argument here is something ONLY boot.js can hand in — see almanac-
+  // diagnostics.js's own header for why `foundry/` cannot gather these itself.
+  MapShine.debug.registerReport(
+    'almanac-diagnostics',
+    '🗓 Almanac Diagnostics',
+    () =>
+      buildAlmanacDiagnosticsReport({
+        calendars: CALENDARS,
+        projectWorldTime,
+        posture: skyScope.sky?.mode,
+        dayClockTodHour: getVtPanViewerTimeDialState()?.todHour ?? null,
+      }),
+    { zone: 'lab' }
+  );
+
+  // An ACTION, never a report — registerReport's own contract is that the
+  // flight recorder runs EVERY registered report automatically on export,
+  // and a stand-down WRITES a scene flag. GM-gated inside
+  // standDownPf2eDarknessSync itself; this button is the deliberate
+  // "consent" gesture the Almanac Testament §6.4 names, nothing fires on
+  // its own.
+  MapShine.debug.registerAction(
+    'pf2e-darkness-standdown',
+    '🌑 Stand down pf2e darkness sync (this scene)',
+    () => standDownPf2eDarknessSync(),
+    { zone: 'lab' }
   );
 
   // AUTO-REBAKE ON WALL/DOOR CHANGE (2026-07-21) — closes Wind.md Tier 1's
@@ -9494,6 +9546,26 @@ function install() {
         log.error('sky settings registration failed:', err);
       }
 
+      // THE ALMANAC (docs/holy/Almanac-Testament.md, stage A1) — installs the
+      // active calendar into CONFIG.time so game.time.components is calendar-
+      // aware for MSA and every other module in the world alike. Same "same
+      // init hook, own try/catch" placement as the two blocks above — a second
+      // `Hooks.once('init', ...)` here would be a NEW `foundry/adapter-only`
+      // ratchet violation (see this file's own comment on that a few lines up).
+      // CONFIG.time.worldCalendarConfig/Class is what GameTime's OWN
+      // constructor reads when IT builds itself (inside Foundry's `setup`,
+      // after this `init` hook has run) — installActiveCalendar does NOT call
+      // game.time.initializeCalendar() itself at this point (game.time does
+      // not exist yet); it only sets CONFIG.time here.
+      try {
+        registerCalendarSetting(MODULE_ID, CALENDAR_IDS, {
+          onChange: () => installActiveCalendar({ calendars: CALENDARS, moduleId: MODULE_ID }),
+        });
+        installActiveCalendar({ calendars: CALENDARS, moduleId: MODULE_ID });
+      } catch (err) {
+        log.error('calendar installation failed:', err);
+      }
+
       // THE LEFT-PALETTE BUTTON (author request, 2026-07-20). One toggle tool
       // for both GM and player — whether it shows the full shell or just
       // Settings is decided inside the panel itself (debug-panel.js's own
@@ -9526,6 +9598,17 @@ function install() {
       });
     });
     Hooks.once('ready', () => {
+      // A `ready`-time safety net for the calendar install above: by `ready`,
+      // game.time definitely exists AND every other module's `init` (pf2e's
+      // included) has definitely already registered its own settings — an
+      // ordering guarantee this file cannot make about MSA's OWN `init` firing
+      // relative to pf2e's. Idempotent: if the `init`-time install already
+      // read pf2e's settings successfully, this repeats the identical result.
+      try {
+        installActiveCalendar({ calendars: CALENDARS, moduleId: MODULE_ID });
+      } catch (err) {
+        log.error('calendar installation (ready-time re-check) failed:', err);
+      }
       bootHeartbeat().catch((err) => log.error('bootHeartbeat failed:', err));
       // Resolve EVERY effect through the FULL cascade from the now-readable
       // settings. Each resolves to whatever its manifest's `enabledFromProfile`

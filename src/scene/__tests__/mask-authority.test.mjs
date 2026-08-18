@@ -839,4 +839,126 @@ export async function run(t) {
     t.ok('floorsWithMasks is null for the same reason', partial.floorsWithMasks === null);
     t.ok('failures is null when the field itself is absent', partial.failures === null);
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE BRUSH'S OWN INGEST DOOR — ingestPaintedMask (2026-08-18): a painted
+  // layer composites as an extra, FLOOR-scoped source (not item-scoped —
+  // a painted layer has no single owning item), self-alpha (its own byte
+  // value doubles as its own coverage, so an unpainted texel can never
+  // erase a file's own content there), always LAST in draw order so the
+  // author's most recent in-app edit wins wherever painted.
+  //
+  // A fresh, independent authority + fixture, same reasoning every other
+  // isolated block in this file already gives.
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const paintAuthority = createMaskAuthority({ readPageImageData: (bitmap) => bitmap, log });
+    // CENTER-anchored, matching every other item placement fixture in this
+    // file (`worldToItemUv`'s own default anchorX/anchorY is 0.5) — x,y is
+    // the item's own CENTRE, not its top-left corner. For a 0..100 scene
+    // this item covers the whole rect, same as `compPlacements` above does.
+    const paintPlacements = { 'level:P0:background': { x: 50, y: 50, width: 100, height: 100 } };
+    const resetPaintScene = (items) =>
+      paintAuthority.reset({
+        sceneKey: 'paint-test',
+        dimensions: { width: 100, height: 100, sceneRect: { x: 0, y: 0, width: 100, height: 100 } },
+        floors: [{ index: 0, id: 'P0', name: 'Ground', ceilingElevation: 10 }],
+        items,
+        resolvePlacement: (item) => paintPlacements[item.id],
+      });
+    resetPaintScene([
+      { id: 'level:P0:background', kind: 'levelBackground', levelId: 'P0', hidden: false, key: { elevation: 0 } },
+    ]);
+
+    // A tiny 10x10 painted grid over the SAME 0..100 scene rect (10 world
+    // units/texel) — "paint the left half" is exactly texel columns 0..4.
+    const paintGrid = (fillFn) => {
+      const spec = { x: 0, y: 0, width: 100, height: 100, w: 10, h: 10, texelW: 10, texelH: 10 };
+      const data = new Uint8Array(100);
+      for (let gy = 0; gy < 10; gy++) for (let gx = 0; gx < 10; gx++) data[gy * 10 + gx] = fillFn(gx, gy);
+      return { spec, data };
+    };
+    const fireByteAt = (wx, wy) => Math.round(paintAuthority.sampleWorld('fire', 0, wx, wy) * 255);
+
+    t.throws(
+      'ingestPaintedMask on an unknown kind throws toward the catalog',
+      () =>
+        paintAuthority.ingestPaintedMask(
+          0,
+          'nonsense',
+          paintGrid(() => 255)
+        ),
+      'mask-catalog'
+    );
+
+    // 1. PAINTED-ONLY: no file at all for 'fire' on this floor.
+    t.ok('no paint yet -> fire absent everywhere (the catalog default, 0)', fireByteAt(50, 50) === 0);
+    paintAuthority.ingestPaintedMask(
+      0,
+      'fire',
+      paintGrid((gx) => (gx < 5 ? 255 : 0))
+    ); // left half painted
+    t.ok('painted-only: the painted (left) half now reads fire', fireByteAt(25, 50) === 255);
+    t.ok('painted-only: the never-painted (right) half stays absent', fireByteAt(75, 50) === 0);
+
+    // 2. PAINTED ON TOP OF A FILE: the file covers the WHOLE floor; painting
+    // only the right half must leave the LEFT half's file value untouched —
+    // painting somewhere must never erase what a file authored elsewhere.
+    const table = { worldWidthPx: 100, worldHeightPx: 100, maxMip: 3 };
+    paintAuthority.ingestDecodedPage({
+      ownerId: 'level:P0:background',
+      layerName: 'fire', // standalone (non-packed) layer -> the 'r' channel (mask-catalog.js#extractionPlanForLayer)
+      table,
+      page: { mip: 3, px: 0, py: 0 },
+      contentWindow: fullWindow(8),
+      bitmap: syntheticPage(8, { r: 128 }), // half-intensity fire everywhere
+    });
+    paintAuthority.ingestPaintedMask(
+      0,
+      'fire',
+      paintGrid((gx) => (gx >= 5 ? 255 : 0))
+    ); // repaint: only the RIGHT half now
+    t.ok("unpainted (left) half still reads the FILE's own value untouched", Math.abs(fireByteAt(25, 50) - 128) <= 1);
+    t.ok(
+      'painted (right) half fully overwrites the file value there (self-alpha 255 = fully opaque)',
+      fireByteAt(75, 50) === 255
+    );
+
+    // 3. SELF-ALPHA NO-OP: an all-zero (fully erased) painted layer must not
+    // disturb the file's own content anywhere — the load-bearing safety
+    // property this whole design exists for.
+    paintAuthority.ingestPaintedMask(
+      0,
+      'fire',
+      paintGrid(() => 0)
+    );
+    t.ok(
+      'an all-unpainted layer composites as a total no-op — the file value reads everywhere again',
+      Math.abs(fireByteAt(75, 50) - 128) <= 1 && Math.abs(fireByteAt(25, 50) - 128) <= 1
+    );
+
+    // 4. EXPLICIT CLEAR: grid=null forgets the painted source entirely.
+    paintAuthority.ingestPaintedMask(
+      0,
+      'fire',
+      paintGrid(() => 255)
+    );
+    t.ok('paint lands before the explicit clear', fireByteAt(50, 50) === 255);
+    paintAuthority.ingestPaintedMask(0, 'fire', null);
+    t.ok(
+      'grid=null clears the painted source — the file value shows again, not the stale paint',
+      Math.abs(fireByteAt(50, 50) - 128) <= 1
+    );
+
+    // 5. A SCENE RESET wipes paintedIngests wholesale, same as every other
+    // ingest bucket in this file.
+    paintAuthority.ingestPaintedMask(
+      0,
+      'fire',
+      paintGrid(() => 255)
+    );
+    t.ok('paint lands before reset', fireByteAt(50, 50) === 255);
+    resetPaintScene([]); // a fresh scene, no items, no file, no prior paint
+    t.ok('a scene reset wipes previously-painted content — fire reads absent again', fireByteAt(50, 50) === 0);
+  }
 }

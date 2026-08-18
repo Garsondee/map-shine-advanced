@@ -258,6 +258,11 @@ export function createMaskAuthority({ readPageImageData, log }) {
       discovery: null, // mask-discovery result
       descriptorsByItemId: new Map(), // item.id (ANY kind) -> viewer layer descriptors
       ingests: new Map(), // `${itemId}/${contentId}` -> {content, placement}
+      // THE BRUSH'S OWN DOOR (2026-08-18) — see `ingestPaintedMask`'s own doc.
+      // A THIRD ingest source, alongside file discovery and the VT decode
+      // stream, keyed by FLOOR (not item — a painted layer covers the whole
+      // scene rect, it has no single owning item the way a Level/Tile does).
+      paintedIngests: new Map(), // `${floorIndex}/${kindId}` -> {content, alpha, placement}
     };
   }
 
@@ -507,6 +512,75 @@ export function createMaskAuthority({ readPageImageData, log }) {
     }
   }
 
+  /**
+   * THE BRUSH'S OWN INGEST DOOR (2026-08-18) — `ui/paint-mode.js`'s in-app
+   * painter hands its own in-memory `MaskGrid` straight here, closing the
+   * gap this file's own header used to name as two-doors-only: a painted
+   * layer is neither a discovered file nor a decoded VT page, so faking it
+   * through one of those two shapes (a synthetic page/bitmap) would mean
+   * reverse-engineering `vt/decode-pool.js`'s own pack geometry for no real
+   * reason — `scene/paint-mask.js`'s own header already establishes that a
+   * painted layer is a `MaskGrid` "sized over the scene rect... the SAME
+   * grid type the mask authority uses for its derived products", so it
+   * needs its own door, not a disguise.
+   *
+   * FLOOR-SCOPED, not item-scoped, unlike every other source in this file:
+   * a painted layer covers the WHOLE scene rect (`ui/paint-mode.js` masks
+   * are per-floor, never per-item), so it is keyed `${floorIndex}/${kindId}`
+   * and composited as one extra, synthetic "host" in `sourcesFor` below —
+   * appended LAST in draw order, so the author's own most recent in-app
+   * edit wins over file-based content wherever painted, the identical
+   * "later host overwrites earlier" law `compositeItemOverwrite`'s own doc
+   * already states for Tiles.
+   *
+   * SELF-ALPHA: the grid's own byte value is ALSO passed as its own alpha.
+   * An unpainted texel (byte 0) is therefore fully TRANSPARENT under
+   * `compositeItemOverwrite`'s existing "transparent means unpainted" law
+   * (2026-08-02) — the file/earlier source shows through completely
+   * unchanged there — while a fully-painted texel (byte 255) fully
+   * overwrites. A painted layer has no separate alpha channel of its own to
+   * carry (unlike a real mask FILE, whose alpha rides alongside its colour
+   * channel from the same decode), so its own coverage value is the only
+   * honest stand-in — and it means the author's brush can only ever ADD
+   * fire (or whatever kind) on top of a file, never silently blank out
+   * everything the file painted outside the stroke.
+   *
+   * `grid=null`/`undefined` forgets this floor+kind's painted content
+   * entirely. Most callers never need that: an ALL-UNPAINTED grid (every
+   * byte 0) already composites as a total no-op under self-alpha, so
+   * `ui/paint-mode.js`'s own save() simply re-ingests every in-memory
+   * layer on every save, painted-empty ones included, and a fully-erased
+   * layer stops affecting anything on its own, automatically.
+   *
+   * @param {number} floorIndex
+   * @param {string} kindId - a `rasterize: true` mask-catalog kind.
+   * @param {{spec: {x:number,y:number,width:number,height:number,w:number,h:number}, data: Uint8Array}|null|undefined} grid
+   */
+  function ingestPaintedMask(floorIndex, kindId, grid) {
+    const kind = maskKindById(kindId);
+    if (!kind) throw new Error(`unknown mask kind '${kindId}' — declare it in scene/mask-catalog.js`);
+    const key = `${floorIndex}/${kindId}`;
+    if (!grid?.spec || !grid?.data) {
+      if (scene.paintedIngests.delete(key)) touch();
+      return;
+    }
+    const content = { w: grid.spec.w, h: grid.spec.h, data: grid.data };
+    scene.paintedIngests.set(key, {
+      content,
+      alpha: content, // self-alpha — see this function's own doc
+      placement: {
+        x: grid.spec.x,
+        y: grid.spec.y,
+        width: grid.spec.width,
+        height: grid.spec.height,
+        anchorX: 0,
+        anchorY: 0,
+        rotation: 0,
+      },
+    });
+    touch();
+  }
+
   /** The floor's background item, specifically. @param {{id:string}} floor */
   function backgroundItemOf(floor) {
     for (const item of scene.items.values()) {
@@ -631,8 +705,8 @@ export function createMaskAuthority({ readPageImageData, log }) {
       // footprint (never a MAX — see that function's own doc). A host with
       // no ingest for this particular kind simply contributes nothing to
       // it; it may still contribute to a DIFFERENT kind.
-      const sourcesFor = (kindId) =>
-        hosts
+      const sourcesFor = (kindId) => {
+        const fileSources = hosts
           // `ownerId`/`kind` ride along so `mask-derive.js#describeAuthoredSources`
           // can NAME a source in the report. A ledger of anonymous rows answers
           // "one of these is wrong" and not "this one is" — which is the
@@ -642,6 +716,13 @@ export function createMaskAuthority({ readPageImageData, log }) {
             return ingest ? { ...ingest, ownerId: item.id, ownerKind: item.kind } : null;
           })
           .filter((ingest) => ingest?.content && ingest?.placement);
+        // THE PAINTED LAYER, if any, composites LAST — see `ingestPaintedMask`'s
+        // own doc for why (the author's own most recent in-app edit wins).
+        // FLOOR-scoped, not item-scoped, so this is looked up once per floor
+        // here rather than per host above.
+        const painted = scene.paintedIngests.get(`${floor.index}/${kindId}`);
+        return painted ? [...fileSources, { ...painted, ownerId: 'painted', ownerKind: 'painted' }] : fileSources;
+      };
       const authored = {};
       for (const kind of extraRasterized) {
         // `absentValue` rides even when NOTHING authored this kind — the
@@ -1102,6 +1183,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
     layersForItem,
     ingestDecodedPage,
     ingestItemAlpha,
+    ingestPaintedMask,
     /**
      * Set the caster-height inputs (docs/planning/Sun-Shadows.md §3.1). Marks
      * the products dirty only when something ACTUALLY changed — this is called

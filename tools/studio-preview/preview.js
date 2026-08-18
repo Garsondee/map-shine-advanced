@@ -13,6 +13,8 @@
  */
 import { installTokens, THEMES } from '../../src/ui/tokens.js';
 import { installStudio } from '../../src/ui/index.js';
+import { validateCue, validateCueStack, orderedCues } from '../../src/core/cues-schema.js';
+import { computeEasedValue, isEntryExpired } from '../../src/world/index.js';
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
@@ -33,7 +35,143 @@ const fakeDebugPanel = {
   },
 };
 
-const studio = installStudio({ debugPanel: fakeDebugPanel });
+// ---- THE CUES DEPARTMENT'S OWN ENGINE STAND-IN (U3) -----------------------
+// Real core/cues-schema.js functions (validateCue/validateCueStack/
+// orderedCues), real world/fade-engine.js math (computeEasedValue/
+// isEntryExpired) — only the orchestration (cueStack, the fake weather
+// store, wallClockMs's preview-only performance.now() stand-in) is
+// throwaway glue, matching remote-preview/preview.js's own established
+// precedent for fadeToArchetype/tickFades. Studio preview has no astrolabe/
+// sky visualization, so a test-fire's effect is only visible via the
+// readout below, not a rendered sky.
+const fakeWeather = { cloudCover01: 0.3, precip01: 0.1 };
+function resolveType(key) {
+  const [ns, field] = key.split('.');
+  return ns === 'weather' && field in fakeWeather ? 'float' : undefined;
+}
+function readLive(key) {
+  const [ns, field] = key.split('.');
+  return ns === 'weather' ? (fakeWeather[field] ?? 0) : 0;
+}
+function writeLive(key, value) {
+  const [ns, field] = key.split('.');
+  if (ns === 'weather') fakeWeather[field] = value;
+}
+function paintWeatherReadout() {
+  const el = document.getElementById('weatherReadout');
+  if (el)
+    el.textContent = `cloudCover01=${fakeWeather.cloudCover01.toFixed(2)}  precip01=${fakeWeather.precip01.toFixed(2)}`;
+}
+paintWeatherReadout();
+
+let cueStack = [];
+/** @type {{targets: object, startedAtMs: number}|null} */
+let cueTestPreview = null;
+/** @type {Record<string, number>|null} */
+let cueTestSnapshot = null;
+
+async function captureCueFromLive(name, overMs = 5000, curve = 'ease') {
+  const id = `cue-${performance.now()}`;
+  const targets = {};
+  for (const field of ['cloudCover01', 'precip01']) {
+    targets[`weather.${field}`] = { to: readLive(`weather.${field}`), overMs, curve };
+  }
+  const order = cueStack.length === 0 ? 0 : Math.max(...cueStack.map((c) => c.order)) + 1;
+  const candidate = { id, name, order, targets };
+  const nextStack = [...cueStack, candidate];
+  const check = validateCueStack(nextStack, resolveType);
+  if (!check.ok) return { ok: false, reason: check.errors.join('; '), cue: null };
+  cueStack = nextStack;
+  document.getElementById('log').textContent = `captured cue: ${name}`;
+  return { ok: true, reason: null, cue: candidate };
+}
+function updateCueFadeMs(id, overMs) {
+  const ix = cueStack.findIndex((c) => c.id === id);
+  if (ix === -1) return { ok: false, reason: `no cue with id '${id}'` };
+  const targets = {};
+  for (const [key, t] of Object.entries(cueStack[ix].targets)) targets[key] = { ...t, overMs };
+  const nextStack = cueStack.map((c, i) => (i === ix ? { ...c, targets } : c));
+  const check = validateCueStack(nextStack, resolveType);
+  if (!check.ok) return { ok: false, reason: check.errors.join('; ') };
+  cueStack = nextStack;
+  return { ok: true, reason: null };
+}
+function moveCueOrder(id, direction) {
+  const ordered = orderedCues(cueStack);
+  const ix = ordered.findIndex((c) => c.id === id);
+  if (ix === -1) return { ok: false, reason: `no cue with id '${id}'` };
+  const neighbourIx = ix + direction;
+  if (neighbourIx < 0 || neighbourIx >= ordered.length) return { ok: true, reason: null };
+  const a = ordered[ix];
+  const b = ordered[neighbourIx];
+  cueStack = cueStack.map((c) => {
+    if (c.id === a.id) return { ...c, order: b.order };
+    if (c.id === b.id) return { ...c, order: a.order };
+    return c;
+  });
+  return { ok: true, reason: null };
+}
+function testFireCue(id) {
+  const cue = cueStack.find((c) => c.id === id);
+  if (!cue) return { ok: false, reason: `no cue with id '${id}'` };
+  if (cueTestSnapshot) return { ok: false, reason: 'a test is already active — revert it first' };
+  const check = validateCue(cue, resolveType);
+  if (!check.ok) return { ok: false, reason: check.errors.join('; ') };
+  const CAP_MS = 4000;
+  const snapshot = {};
+  const targets = {};
+  for (const [key, t] of Object.entries(cue.targets)) {
+    const from = readLive(key);
+    snapshot[key] = from;
+    targets[key] = { from, to: t.to, type: resolveType(key), curve: t.curve, overMs: Math.min(t.overMs, CAP_MS) };
+  }
+  cueTestSnapshot = snapshot;
+  cueTestPreview = { targets, startedAtMs: performance.now() };
+  document.getElementById('log').textContent = `testing cue: ${cue.name}`;
+  return { ok: true, reason: null };
+}
+function revertCueTest() {
+  if (!cueTestSnapshot) return { ok: false, reason: 'nothing to revert' };
+  const targets = {};
+  for (const [key, value] of Object.entries(cueTestSnapshot)) {
+    targets[key] = { from: readLive(key), to: value, type: resolveType(key), curve: 'ease', overMs: 400 };
+  }
+  cueTestSnapshot = null;
+  cueTestPreview = { targets, startedAtMs: performance.now() };
+  document.getElementById('log').textContent = 'reverted test';
+  return { ok: true, reason: null };
+}
+function isCueTestActive() {
+  return cueTestSnapshot !== null;
+}
+function pumpCueTestPreview(nowMs) {
+  if (!cueTestPreview) return;
+  const { targets, startedAtMs } = cueTestPreview;
+  let allDone = true;
+  for (const [key, target] of Object.entries(targets)) {
+    const entry = { ...target, startedAtMs };
+    writeLive(key, computeEasedValue(entry, nowMs));
+    if (!isEntryExpired(entry, nowMs)) allDone = false;
+  }
+  if (allDone) cueTestPreview = null;
+  paintWeatherReadout();
+}
+requestAnimationFrame(function tick() {
+  pumpCueTestPreview(performance.now());
+  requestAnimationFrame(tick);
+});
+
+const studio = installStudio({
+  debugPanel: fakeDebugPanel,
+  listCues: () => orderedCues(cueStack),
+  captureCue: (name) => captureCueFromLive(name),
+  updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),
+  moveCueOrder: (id, direction) => moveCueOrder(id, direction),
+  testFireCue: (id) => testFireCue(id),
+  revertCueTest: () => revertCueTest(),
+  isCueTestActive: () => isCueTestActive(),
+  validateCue: (cue) => validateCue(cue, resolveType),
+});
 
 // ---- water-shaped view-model: mirrors boot.js's real registerEffectCard('water', ...) exactly in structure ----
 const waterState = {

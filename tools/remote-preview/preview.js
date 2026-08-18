@@ -21,6 +21,7 @@ import {
   isEntryExpired,
   createFadeSourceRegistry,
 } from '../../src/world/index.js';
+import { validateCue, orderedCues, cueToFadePatch } from '../../src/core/cues-schema.js';
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
@@ -117,6 +118,49 @@ function tickFades() {
   requestAnimationFrame(tickFades);
 }
 
+// ---- THE CUE DECK'S OWN SEED DATA (U3) ------------------------------------
+// The Remote has no capture UI of its own (that's the CUES department's
+// job, see tools/studio-preview/) — these two are throwaway harness seed
+// data, matching the mock's own 3-entry CUES demo fixture in spirit, not
+// real captured state. fireCueById uses the REAL validateCue/cueToFadePatch
+// (core/cues-schema.js) feeding the SAME real mergeFadeState this file's
+// own fadeToArchetype already uses above.
+const cueStack = [
+  {
+    id: 'demo-golden',
+    name: 'Act I — Golden Afternoon',
+    order: 0,
+    targets: {
+      'weather.cloudCover01': { to: 0.15, overMs: 10000, curve: 'ease' },
+      'weather.precip01': { to: 0, overMs: 10000, curve: 'ease' },
+    },
+  },
+  {
+    id: 'demo-storm',
+    name: 'Act II — The Storm Breaks',
+    order: 1,
+    targets: {
+      'weather.cloudCover01': { to: 0.95, overMs: 60000, curve: 'ease' },
+      'weather.precip01': { to: 0.85, overMs: 60000, curve: 'ease' },
+    },
+  },
+];
+function fireCueById(id) {
+  const cue = cueStack.find((c) => c.id === id);
+  if (!cue) return { ok: false, reason: `no cue with id '${id}'` };
+  const check = validateCue(cue, () => 'float'); // preview: every weather.* key is a float
+  if (!check.ok) return { ok: false, reason: check.errors.join('; ') };
+  const nowMs = performance.now(); // preview-only stand-in for wallClockMs()
+  const patch = cueToFadePatch(
+    cue,
+    (key) => fadeRegistry.readLive(key),
+    () => 'float'
+  );
+  fadeState = mergeFadeState(fadeState, patch, nowMs);
+  log(`cue fired -> ${cue.name}`);
+  return { ok: true, reason: null };
+}
+
 const remote = installRemote({
   mountAstrolabeDial: (container) => {
     remoteDialInstance = createAstrolabe({
@@ -176,6 +220,10 @@ const remote = installRemote({
   onBaseline: (overMs) => {
     fadeToArchetype('clear', overMs); // preview stand-in: "baseline" = clear sky
     log(`baseline -> fading to clear over ${overMs}ms`);
+  },
+  cueDeck: {
+    listCues: () => orderedCues(cueStack),
+    fireCue: (id) => fireCueById(id),
   },
 });
 

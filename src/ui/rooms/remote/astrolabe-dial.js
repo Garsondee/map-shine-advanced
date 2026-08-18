@@ -394,7 +394,14 @@ export function buildAstrolabeDial(opts = {}) {
   windBtn.addEventListener('click', () => opts.onWindClick?.());
   lowerRow.append(dateBtn, windBtn);
   sceneText.append(clockPill, lowerRow);
-  root.appendChild(sceneText);
+  // NOT appended here (2026-08-18 fix — author: "Sun is in front of the
+  // pill and time text") — sceneTopper below is a SIBLING absolute layer
+  // painted for the sun/moon to stay visible over the TERRAIN, and DOM
+  // order (not z-index) decides paint order between same-stacking-context
+  // absolute siblings here. Appending sceneText before topper put the sun's
+  // own guarantee layer on top of the clock pill too, an overlap the mask
+  // (clipped to sky-minus-terrain) has no knowledge of and can't prevent.
+  // sceneText goes on AFTER topper instead, so the pill always wins.
 
   // ---- sceneTopper: the sun/moon guarantee — never covered by chrome ------
   const topper = svgEl('svg', {
@@ -416,6 +423,7 @@ export function buildAstrolabeDial(opts = {}) {
   maskedG.append(sunTopG, moonTopG);
   topper.appendChild(maskedG);
   root.appendChild(topper);
+  root.appendChild(sceneText);
 
   // ---- drag-to-set-hour on the ring -----------------------------------------
   // `locked` mirrors ui/astrolabe.js's own `ringLocked` (2026-08-18 fix —

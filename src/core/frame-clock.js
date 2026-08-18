@@ -68,6 +68,31 @@ export const DEFAULT_MAX_DT_SEC = 0.1;
  */
 export const DEFAULT_PAUSE_RAMP_SEC = 5;
 
+/**
+ * A THIRD kind of time, neither `tMs` (sim, scaled, resets to 0 per session)
+ * nor `realMs` (wall, unscaled, but STILL relative to this page's own
+ * navigation start — `performance.now()`'s epoch, not a real date). The Fade
+ * Engine (`world/fade-engine.js`, docs/holy/UI-Testament.md §4.2) needs a
+ * timestamp that means the SAME thing on a DIFFERENT client and after THIS
+ * client reloads — "a one-hour dusk must outlive an F5", and one GM's
+ * `startedAtMs` has to be interpretable by every OTHER connected client's own
+ * independent page load. Neither `tMs` nor `performance.now()`-based
+ * `realMs` can do that: both restart at ~0 every navigation, so comparing
+ * one client's `realMs` to another's (or to its own, post-reload) answers a
+ * different question than "how long has this actually been running".
+ * `Date.now()` — real Unix epoch milliseconds — is the only clock that
+ * survives both a reload and a second client, which is exactly why THIS
+ * export exists here rather than at the fade engine's own call site:
+ * `time/one-clock` (tools/verify-structure.mjs) restricts `Date.now()`/
+ * `performance.now()` to this file (and `diag/`) for the identical reason
+ * V2's `core/time.js` lost the fight the first time — one sanctioned door,
+ * not a raw clock call wherever a file happens to need one.
+ * @returns {number} milliseconds since the Unix epoch.
+ */
+export function wallClockMs() {
+  return Date.now();
+}
+
 /** Below this the world counts as stopped (`paused` true, `tMs` effectively frozen). */
 const STOPPED_EPSILON = 1e-6;
 

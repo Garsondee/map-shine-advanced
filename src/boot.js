@@ -1049,7 +1049,30 @@ function install() {
   // describes: the painter's Floor stepper drives `setVtPanViewerFloor`
   // directly and has no other way to keep fire/candle/lightning/doors
   // pointed at the floor it just switched to.
-  MapShine.__painter = installPainter(MapShine, { onFloorChanged: syncActiveFloorContext });
+  // THE BRUSH→RENDER BRIDGE's boot.js half (2026-08-18) — every in-app
+  // painted layer, fed straight to maskAuthority.ingestPaintedMask so the
+  // SAME lazy recompute every other mask consumer already relies on picks
+  // it up on its own next read (fire/water/window/specular/fluid/
+  // vegetation all already read maskAuthority.getDerived(kindId,
+  // floorIndex) — none of them needed a single line changed for this).
+  function ingestPaintedLayers(layersByKey) {
+    for (const [key, layer] of Object.entries(layersByKey ?? {})) {
+      const sep = key.lastIndexOf('::');
+      if (sep === -1) continue;
+      const kindId = key.slice(0, sep);
+      const floorIndex = Number(key.slice(sep + 2));
+      if (!Number.isFinite(floorIndex)) continue;
+      try {
+        maskAuthority.ingestPaintedMask(floorIndex, kindId, layer);
+      } catch (err) {
+        log.error(`painted-mask ingest failed for '${key}':`, err);
+      }
+    }
+  }
+  MapShine.__painter = installPainter(MapShine, {
+    onFloorChanged: syncActiveFloorContext,
+    onLayersChanged: (layersByKey) => ingestPaintedLayers(layersByKey),
+  });
   // ANCHOR MODE (2026-07-22) — click-to-place/click-to-edit for discrete point
   // effects (candles today). Installed once, entered per-effect via the
   // Workshop panel below; stays effect-agnostic (ui/anchor-mode.js's own header).
@@ -5127,12 +5150,16 @@ function install() {
       label: suffixes.length === 1 ? `\u{1F58C} Paint ${suffixes[0]}` : '\u{1F58C} Paint',
       title:
         `Opens the brush on the floor you are viewing, with ${suffixes.join(' / ')} ready to paint. ` +
-        // ⚠️ CORRECTED (U4 research, 2026-08-18): this used to claim "it reads
-        // the mask live" — false. mask-authority.js's own ingest API has
-        // exactly two doors (real files on disk, and the VT pager's decoded-
-        // page stream); the painter's Save writes to a scene flag neither
-        // reads. Painting genuinely saves the stroke; nothing renders it yet.
-        'Paint where the effect belongs — this saves to the scene, but no effect reads a painted mask back live yet.',
+        // ⚠️ CORRECTED TWICE (U4 research, 2026-08-18; the brush→render
+        // bridge, same day). This used to claim "it reads the mask live" —
+        // false at the time: mask-authority.js's own ingest API had exactly
+        // two doors (real files on disk, the VT pager's decoded-page
+        // stream), and the painter's Save wrote to a scene flag neither
+        // read. `ingestPaintedMask` (scene/mask-authority.js) is now a
+        // THIRD door, fed on every Save — the effect genuinely updates, on
+        // Save, not yet live mid-stroke (see ui/paint-mode.js's own header
+        // for that named, separate follow-up).
+        'Paint where the effect belongs, then Save — the effect updates on Save (not yet live mid-stroke).',
       onAdd: () => MapShine.__painter?.enter({ kind: kinds[0] }),
     };
   }
@@ -9614,16 +9641,7 @@ function install() {
    * which are bias-remapped around a 0.5 NEUTRAL and would make a "> 0.02"
    * coverage test meaningless). Walks tier order so a reader can still apply
    * "the first one that drops to zero coverage names the culprit rung". */
-  const WATER_HEALTH_SWEEP_CHANNELS = [
-    'mask',
-    'inside',
-    'depth01',
-    'foamCrest',
-    'breakFoam',
-    'foamTail',
-    'maskProximityFoam',
-    'totalFoam',
-  ];
+  const WATER_HEALTH_SWEEP_CHANNELS = ['mask', 'inside', 'depth01', 'foamCrest', 'breakFoam', 'foamTail', 'totalFoam'];
   /** Mirrors `water-field.js#WATER_FOAM_SHORE_PX` (140) — crest/break/tail
    * foam are ALL gated to within this many world-px of a shore, never a
    * general open-water effect. Not imported (boot.js reaches the water zone
@@ -10613,6 +10631,16 @@ function install() {
         }
         lastRealSceneId = sceneDoc.id;
         log.info(`real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
+        // THE BRUSH→RENDER BRIDGE'S OWN SCENE-LOAD RE-INGEST — deliberately
+        // HERE, not inside `hydrateFromScene()` itself (called far above, at
+        // the top of this same hook): `startRealSceneViewer` just above is
+        // what calls `maskAuthority.reset()` for THIS scene, which wipes
+        // `paintedIngests` wholesale. Re-ingesting only now, after reset has
+        // definitely already run, is what keeps a previously-saved painted
+        // mask visible after a reload instead of silently discarding it the
+        // instant reset() ran (see ui/paint-mode.js#hydrateFromScene's own
+        // doc for the ordering hazard this avoids).
+        ingestPaintedLayers(MapShine.__painter?.getLayers?.());
 
         // LIFT ONLY WHEN THERE IS SOMETHING TO SEE. startVtPanViewer has resolved,
         // so every coarse pin is resident and the render loop is armed — but no

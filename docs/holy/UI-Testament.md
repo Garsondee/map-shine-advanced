@@ -2035,6 +2035,107 @@ stage" placeholder, the subtitle and honest not-wired-live notice both render, b
 (one `found`, one not) show the correct status line, and clicking a tile calls `armBrush` with the
 correct effect id. The concurrent water-flow session's own files remain completely untouched.*
 
+**P17 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U5 — the Player face — researched before
+building, following the exact same discipline U4's own petition established, and turning up an
+even bigger gap in one specific piece).** §9's own U5 checklist has four items; three are real and
+shipped this round, one (player-light) is confirmed unbuildable in this pass's own scope.
+
+1. **§5.5's "player-light allowances" line assumes a rendering effect that does not exist anywhere
+   in this engine.** Grepped every plausible name (`PlayerLightEffect`, `playerLightMode`,
+   `playerLightAllowance`, `floorCompositorV2`) across all of `src/` — the only hits are inside
+   `legacy/` (5,029 lines of V2 GLSL never rebuilt, plus a 234-line allowance module and a 298-line
+   picker dialog, BOTH built on dead plumbing: raw `game.settings` calls bypassing
+   `foundry/settings-adapter.js`, a whole-blob `scene.getFlag(MODULE_ID,'controlState')` read the
+   V2 postmortem itself names as the disease `effect-cascade.js` replaced, and a picker that
+   reaches for `window.MapShine.floorCompositorV2` — a global that does not exist in V3's
+   `graph/`-based pipeline and would fail the instant a player actually picked a mode) — and one
+   forward-looking `absorbs: [...]` list entry on `light.accumulate`, a pass whose own status note
+   scopes it to "AMBIENT/EXTERIOR only... point lights... are later rungs." This is a BIGGER gap
+   than U4's own missing render path (P16) — not a missing wire, a missing multi-thousand-line
+   TSL rendering feature (torch glow, a flashlight beam/cookie, a night-vision post chain) with a
+   UI and an allowance system on top of it. Not attempted this round. Left named for the author's
+   own call, exactly as U4's own missing ingest path was.
+2. **The other three checklist items are real, and two completed a previously half-built a11y
+   feature rather than starting one from zero.** `ui/tokens.js` already shipped full CSS for
+   `[data-theme]` (all 4 LANTERN themes, contrast-gated) and `[data-reduce-motion="1"]` (plus the
+   OS-level `prefers-reduced-motion` media query, free) — but NOTHING in `src/` ever set either
+   attribute, and no setting existed to drive them. Added `GLOBAL_SETTING_KEYS.theme`/
+   `.reducedMotion` (`effects/effect-settings.js`, two new descriptors, existing tests' own
+   count assertions updated to match — 3→5 global descriptors, +2 new assertions covering the new
+   descriptors' own shape) and `applyUiPreferences()` (`boot.js`), the one place
+   `document.documentElement.dataset.theme`/`.reduceMotion` are ever written — called once at
+   `init` (so a returning player's last choice applies immediately, not only after their next
+   edit) and again from the settings adapter's own `onChange`. Reduce-photosensitive (already
+   fully live since 2026-07-29) needed nothing new. Text-scale is NOT built this round — it needs
+   new CSS infrastructure (nothing like a `--text-scale` token exists anywhere), a smaller, more
+   self-contained follow-up than player-light but still a real one, named rather than rushed in.
+3. **`ui/rooms/system-panel.js` — ONE generated component tree, per §5.5's own doctrine, held
+   literally.** Reuses `effects/effect-settings.js`'s real key conventions and
+   `effects/effect-cascade.js`'s real resolution order verbatim — boot.js's `getSystemPanelCtx()`
+   supplies already-derived plain data, the identical "this file imports nothing from effects/"
+   rule `diag/settings-panel.js`'s own header states, upheld here against the LANTERN widget canon
+   instead of that file's hand-rolled DOM. `isGM()` gates the whole "Table Defaults" section, never
+   a second layout — live-verified: the Studio's own SYSTEM department (fake `isGM:true`) renders
+   the GM section, the standalone Player room (hard-coded `isGM:()=>false`) renders the identical
+   tree WITHOUT it, confirmed by checking for the literal absence of "Table Defaults" text in the
+   Player room's own DOM, not just assumed from the code. A locked row (a11y-forced-off) gets a
+   REAL `select.disabled = true`, not `status:'planned'` — that convention is documented to leave
+   controls "fully interactive... never disabled" (`param-control.js`'s own doc), the wrong tool
+   for a row whose value genuinely cannot take effect; live-verified by toggling reduce-
+   photosensitive and confirming Fire's own row disables itself with the correct tooltip, in BOTH
+   rooms (shared settings store).
+4. **The per-effect toggle's own help text says "final say," not "within GM bounds."**
+   `effect-cascade.js#resolveEffectEnabled`'s own comment states outright: "Player (client)
+   override — final say, subject only to a11y below" — a player's own On/Off wins over a GM's
+   table default in EITHER direction, deliberate and already shipping in `effect-settings.js`'s own
+   descriptor hint text (*"On/Off is your final say"*) before this round touched anything. §9's
+   "within GM bounds" phrasing describes different behaviour than seven existing test files already
+   pin. Not changed — changing a heavily-tested, heavily-depended-on resolver's precedence based on
+   one worker session's reading of a loose checklist phrase is exactly the kind of call this
+   project's own governance reserves for the author, not a worker petition. This panel's own help
+   text states the REAL behaviour; the Testament's own wording is flagged here for Fable's next
+   pass, not silently overridden in either direction.
+5. **`ui/rooms/player-shell.js` — the smallest room this project has built, deliberately.** No
+   rail, no departments, one titled window ("Performance & Graphics"), `isGM` hard-coded `false`
+   regardless of who opens it — even a GM previewing their own table's player view sees the player
+   view, not their own GM section; Law 10 held by construction (the GM branch inside
+   `system-panel.js` never runs here, not hidden after being built). A fifth scene-controls
+   toolbar tool (`registerPlayerButton`, `order:104`) opens it, `visible:true` like the ORIGINAL
+   panel's own button — the one precedent for a non-GM-gated tool among the four that came before.
+6. **A pre-existing Law 10 tension, found while researching, named rather than silently fixed.**
+   `installStudio`/`installRemote` are called unconditionally in `boot.js` — their FULL DOM trees
+   (EFFECTS/PAINTER/SCENE/CUES/LAB, the astrolabe, camera path) are constructed in a PLAYER's own
+   browser today, merely `hidden`, not absent — confirmed by reading `rooms/studio/shell.js` in
+   full (`document.body.appendChild(room)` with `room.hidden = true`, unconditional). Law 10 says
+   "GM chrome is never built into a player client's DOM... not `display:none`" — this predates U5
+   by several checkpoints and is a real, if low-severity (nothing secret lives in that DOM, only
+   authoring UI a player has no route to reach), gap between the letter of the Law and the actual
+   boot sequence. NOT fixed this round: gating either eager call site behind `isGM()` is a genuine
+   behavioural change to two already-shipped, already-petitioned rooms, deserving its own scoped
+   pass and sign-off, not a drive-by inside U5's own commit. Named plainly rather than left for a
+   future session to rediscover from scratch.
+
+*Verification note: `npx eslint`, `npx prettier --check` clean on every file touched or created
+(`boot.js`, `effects/effect-settings.js`, `effects/__tests__/effect-registration.test.mjs`,
+`foundry/{index,scene-controls-button}.js`, `ui/index.js`,
+`ui/rooms/{system-panel,player-shell,studio/{shell,system-department}}.js`,
+`tools/studio-preview/{preview.js,index.html}`). `node tools/run-tests.mjs`: 27 suites, 11263
+assertions, ALL GREEN (+2 over P16, exactly the two new settings-descriptor assertions;
+`describeEffectSettings`'s own count assertions updated in the same commit as the new
+descriptors, not left stale). `node tools/verify-structure.mjs`: the same two pre-existing
+violations, unchanged. Live-verified in the browser (`javascript_tool`, same non-composited-pane
+workaround as P15/P16): the Studio's SYSTEM department renders the master switch, profile,
+accessibility (including the two new controls), per-effect list, and GM-only Table Defaults
+section; the standalone Player room renders the identical tree with Table Defaults CONFIRMED
+ABSENT (checked for the literal string, not assumed); toggling reduce-photosensitive live-locks
+Fire's own row (real `select.disabled`, dimmed, correct tooltip) in both rooms off one shared
+settings store. Not independently live-verified this round: `applyUiPreferences()`'s own DOM
+writes (`dataset.theme`/`dataset.reduceMotion`) — the preview harness has no equivalent of
+boot.js's own `init`/settings-adapter wiring to exercise that specific function outside a real
+Foundry session; the function itself is three lines reading two already-tested settings keys, a
+narrower gap than U4's own unverified exit gate. The concurrent water-flow session's own files
+remain completely untouched.*
+
 ---
 
 ## 13. STATUS LOG

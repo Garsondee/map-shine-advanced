@@ -33,6 +33,11 @@ const fakeSky = {
   windSpeed01: 0.3,
   cloudCover01: 0.2,
   mode: 'almanac',
+  // Realistically empty by default -- nothing in this harness simulates the
+  // Almanac's own autonomous weather walk that pins/unpins axes for real.
+  // To see the pin glyph, set `__preview.fakeSky.weatherPinnedAxes =
+  // ['cloudCover01']` from devtools, then `__preview.remote.refreshWeatherBoard()`.
+  weatherPinnedAxes: [],
 };
 // Mirrors boot.js's own lastNonZeroRateHoursPerMinute — the speed badge
 // shows what flow will resume at, not the raw live rate (which is 0 while
@@ -298,6 +303,12 @@ const remote = installRemote({
       fakeSky.sceneOverride = enabled;
       log(`scene override -> ${enabled}`);
     },
+    getCloudPinned: () => fakeSky.weatherPinnedAxes.includes('cloudCover01'),
+    onUnpinCloudCover: () => {
+      fakeSky.weatherPinnedAxes = fakeSky.weatherPinnedAxes.filter((a) => a !== 'cloudCover01');
+      log('cloud cover unpinned');
+      remote.refreshWeatherBoard();
+    },
   },
   onBaseline: (overMs) => {
     fadeToArchetype('clear', overMs); // preview stand-in: "baseline" = clear sky
@@ -331,6 +342,14 @@ setInterval(() => {
 }, 250);
 
 requestAnimationFrame(tickFades);
+
+// A console-debug door (2026-08-18 fix), same spirit as the UI mock's own
+// documented `window.__mock` hook — `fakeSky` is otherwise module-private,
+// and a few of its fields (weatherPinnedAxes chief among them) have no real
+// UI trigger in this harness at all, since nothing here simulates the
+// Almanac's own autonomous weather walk. Set `__preview.fakeSky.<field>`,
+// then call `__preview.remote.refreshWeatherBoard()` to repaint.
+window.__preview = { fakeSky, remote };
 
 document.getElementById('toggleBtn').addEventListener('click', () => remote.toggle());
 

@@ -409,36 +409,182 @@ within-stage order is not.
   ✠ *Claude Fable 5, 2026-08-17 — this Testament is that judgement.*
 
 ### A1 — THE ALMANAC CORE *(pure math + the installed calendar)*
-- [ ] `world/almanac.js` (or `world/calendar/`): the true-Gregorian engine (§5.2) — matched
+- [x] `world/almanac.js` (or `world/calendar/`): the true-Gregorian engine (§5.2) — matched
       `_decomposeTimeYears`/`componentsToTime` overrides, `epochOffsetSeconds`, round-trip
       property tests
-- [ ] Calendar data files: Golarion-parity (5 themes), Earth, Golarion-lore-strict, the
+      · done Sonnet 5 2026-08-17 — `core/gregorian-math.js` (the engine lives in `core/`, not
+      `world/`: `foundry/` cannot import `world/`, confirmed empirically zero existing
+      `src/foundry/**` file does, so the math both `foundry/calendar-install.js`'s subclass
+      and `world/almanac.js`'s own formatting need sits in the one door-exempt zone). Hinnant
+      civil-calendar arithmetic, cross-validated against an independent oracle
+      (`Date#setUTCFullYear`, confirmed to bypass the legacy 2-digit-year remap) across 4000+
+      randomised round-trips plus hand-picked leap/century/negative-year probes — caught and
+      fixed one real transcription bug live (a C++ truncating-division idiom wrongly layered
+      under an already-flooring `Math.floor`, off-by-one on every negative year) before this
+      line was written. `core/__tests__/gregorian-math.test.mjs`: 129/129 green.
+- [x] Calendar data files: Golarion-parity (5 themes), Earth, Golarion-lore-strict, the
       custom schema — data only
-- [ ] Golden fixtures per §5.3, generated from PF2E's shipped math, pinned; century
+      · done Sonnet 5 2026-08-17 — `world/calendar/calendar-schema.js` (validator, mirrors
+      Foundry's own CalendarData schema + MSA's `engine`/`epochOffsetSeconds`/`themes`
+      extensions) + `world/calendar/calendars/{golarion-parity,earth,golarion-lore-strict,
+      gregorian-shape}.js`. Golarion-parity's 5 themes (AR/IC/AG/AD/CE) + month/weekday name
+      dictionaries transcribed verbatim from the PF2E research receipts, AG's own
+      "Seconday"/"Thirday" spellings included. `world/calendar/__tests__/run-tests.mjs` +
+      `calendars/__tests__/run-tests.mjs`: 59/59 green.
+- [x] Golden fixtures per §5.3, generated from PF2E's shipped math, pinned; century
       non-leap (2100) and Calistril-29 cases present
-- [ ] Foundry installation: MSA world setting for calendar choice; `CONFIG.time` set + 
+      · done Sonnet 5 2026-08-17 — `world/calendar/__tests__/generate-pf2e-fixtures.mjs`
+      (checked-in, rerunnable; uses ONLY the Date oracle + the verbatim name tables, never
+      this project's own engine) produced 50 pinned rows (10 target dates × 5 themes) in
+      `fixtures/pf2e-parity-fixtures.mjs`, covering the epoch itself, ordinary + /400 leap Feb
+      29s, the 2100 century-non-leap Feb28→Mar1 rollover (both sides of the second),
+      year-boundary continuity, and deep-negative worldTime (year 1). `pf2e-parity.test.mjs`
+      feeds every row through the REAL production path (calendar config + engine + formatter)
+      and asserts exact date-line AND component match, plus a compose-recovers-worldTime
+      round-trip: 44/44 green, including the explicit Calistril-29 and century-boundary
+      assertions the Testament names by name.
+- [x] Foundry installation: MSA world setting for calendar choice; `CONFIG.time` set + 
       `initializeCalendar()` at init on every client; under pf2e the epoch/theme are READ
       from `pf2e.worldClock` (never duplicated)
-- [ ] Moon-phase projection from worldTime (§5.4), fixture-tested
+      · done Sonnet 5 2026-08-17 — `foundry/calendar-install.js`: `registerCalendarSetting`
+      (one world-scoped enum setting, reactive `onChange`) + `installActiveCalendar` (reads
+      `pf2e.worldClock` live via `readSetting` when pf2e is the active system — epoch +
+      theme, never copied into MSA's own setting; falls back to MSA's setting otherwise,
+      epoch fixed at 0 by deliberate scope choice, documented in-file). Builds a
+      `CalendarData` subclass over `core/gregorian-math.js` for true-Gregorian calendars;
+      hands Foundry's own stock class straight through, unmodified, for the declarative
+      lore-strict calendar. Wired into `boot.js`'s EXISTING `init` hook (no second
+      `Hooks.once('init', ...)` — would itself violate `foundry/adapter-only`'s ratchet, per
+      that file's own comment) plus a `ready`-time idempotent re-check (a safety net against
+      unverified hook-ordering between MSA's and pf2e's own `init` handling). Takes the
+      calendar DATA REGISTRY as an argument from `boot.js` rather than importing `world/`
+      itself — `foundry/` cannot, by the same leaf rule as the engine above.
+      ⚠️ **UNVERIFIED WITHOUT LIVE FOUNDRY, flagged in-file:** the exact global access path
+      (`foundry.data.CalendarData`, this file's best-evidenced guess, not a direct receipt)
+      and whether `this.months.values[i].days` etc, read off a real instance, resolve to
+      plain JS values matching what the pure engine expects. `npm run lint`/`format:check`
+      clean; `verify:structure` clean for every file this task touched (confirmed by direct
+      grep — the two `verify:structure` failures present in the tree right now are in
+      `effects/vision/vision-mask-render.js` and scattered pre-existing `performance.now()`/
+      `Date.now()` call sites across files this task never opened; `boot.js` itself already
+      carried 313 lines of unrelated uncommitted diff before this task's ~25-line addition,
+      confirmed via `git diff --stat`, and was already listed modified in this session's
+      opening `gitStatus` — not this task's debt to fix or explain away).
+
+      ⚑→✓ **LIVE CRASH, CAUGHT AND FIXED same-session, 2026-08-17 (Sonnet 5).** The author's
+      OWN live test hit it within one turn of A2 landing: `GameTime`'s constructor threw
+      `Cannot read properties of null (reading 'values')` inside Foundry's base
+      `CalendarData#timeToComponents`, at `Game.setupGame` — a HARD CRASH taking the entire
+      world down before anything else could load, not a calendar-only failure. Root cause:
+      `toFoundryCalendarConfig` passed `seasons: null` straight through for `golarion-parity`
+      (and `golarion-lore-strict`) — which is EXACTLY the trap this Testament's own §3.1
+      already receipted (*"months/seasons are declared nullable:true but dereferenced
+      unconditionally... A months:null calendar throws on construction. The nullability is a
+      lie"*), documented during A0's research and then walked into anyway while writing this
+      exact function, because the function was never cross-checked against that same
+      receipt before being called "done." Fixed: `seasons` now defaults to `{values: []}`,
+      never `null`, for ANY calendar (built-in or future custom) at the one adapter boundary
+      that already exists for exactly this purpose. A regression guard now exists that would
+      have caught this BEFORE it ever reached a browser: `foundry/__tests__/calendar-
+      install.test.mjs` runs every shipped calendar through the real function and asserts
+      `seasons` is never null — 18 new assertions, `foundry/` suite now 998/998, 10,872/10,872
+      repo-wide, zero regressions. The standing lesson, for memory: **research receipts must
+      be cross-checked against your OWN new code, not just filed** — a documented trap and a
+      built adapter sat in the same document/session without ever being compared.
+      · done Sonnet 5 2026-08-17 — `world/calendar/moon.js#moonPhaseAt`: pure, config-driven
+      (`{synodicDays, phaseAnchorSeconds}`), ships NO Golarion-specific data (deliberately —
+      the Testament's own caution against asserting the moon's name/period from memory is an
+      A4 concern, not A1's). Tested for periodicity, monotonicity within a cycle, correct
+      wrap for worldTime before the anchor, and determinism (same input → byte-identical
+      output, the whole point of replacing the mock's stateful hour-accumulation with a pure
+      projection). `world/calendar/__tests__/run-tests.mjs`: included in the 44/44 green run above.
 - **Exit gate:** on the bench harness, MSA's projected date (console/report readout — no UI
   yet) equals the PF2E World Clock's displayed date and time, live, on a world whose
   `worldCreatedOn` is mid-year.
+  **NOT YET ATTEMPTED this session — see Petition P2.** R0 (Node-tested fixture parity
+  against an independent oracle, 10,783/10,783 assertions green repo-wide, zero regressions)
+  is thoroughly closed; R1 (the live bench check this gate actually asks for) needs a Fable-
+  class judgement call on a safety question a worker is not positioned to make alone.
 
 ### A2 — THE PEN *(gestures write; nothing loops)*
-- [ ] Posture setting (`aesthetic`/`follow`/`almanac`) replacing the two-mode setting;
+- [x] Posture setting (`aesthetic`/`follow`/`almanac`) replacing the two-mode setting;
       migration for existing worlds (old `synced` → `follow`); per-scene aesthetic override
       kept
-- [ ] `foundry/time-authority.js` behind the adapter wall: whole-second `advance()`,
+      · done Sonnet 5 2026-08-17 — `world/day-clock.js#ALMANAC_POSTURES` (the 3-way
+      superset) + `postureToDayClockMode` (the ONE translation point to day-clock's own,
+      still-2-way `DAY_CLOCK_MODES` — unchanged, per §1's "day-clock.js itself still knows
+      only two read postures"). The migration lives at `world/sky-settings.js#normalizeSky`
+      (the module's own single coercion boundary): a stored `'synced'` becomes `'follow'`
+      transparently, for every existing consumer, forever, with zero call-site changes.
+      Per-scene override untouched (rides the SAME `resolveSky`/`applySkyEdit` precedence
+      every other sky field already uses). Wired through 3 surgical, precedent-following
+      edits: `vt-pan-viewer.js#setTimeMode` translates posture→day-clock-mode before calling
+      `dayClock.setMode()` (without this, `setMode('almanac')` would silently fall back to
+      `'aesthetic'` — a real bug caught before it shipped, not after); `boot.js`'s existing
+      `astrolabe.update({...dial,...})` override block gains `mode: skyScope.sky?.mode`,
+      the EXACT pattern already used for `weatherMode`/`weatherBiome` two lines above it
+      (fixes a real risk: the dial's OWN collapsed 2-way mode would have shown 'almanac' as
+      "Synced", and a re-fired dropdown could have silently downgraded it); `astrolabe.js`'s
+      mode dropdown gains the 'almanac' option, and a SEPARATE latent bug in its phase-text
+      "aesthetic" badge (checked `=== 'synced'`, which would never match again post-rename,
+      showing the badge in every posture) was found and fixed in the same pass. 972/972
+      world/ assertions green (+15 new), zero regressions. Noted for the record: `world/sky-
+      settings.js`'s PRE-EXISTING `weatherMode` field already has an unrelated value ALSO
+      spelled `'almanac'` (the Weather Manager's own director/almanac split) — a same-word,
+      different-field, different-concept collision, documented in-code, not renamed (the
+      Testament names this posture `'almanac'` explicitly).
+- [x] `foundry/time-authority.js` behind the adapter wall: whole-second `advance()`,
       GM gate, encounter hold, negative-as-correction
+      · done Sonnet 5 2026-08-17 — every gate lives INSIDE `advance()` itself (not just in a
+      caller's UI check): finite-delta check, `isPenArmed(posture)` (posture handed in by the
+      caller — `foundry/` cannot import `world/sky-settings.js#resolveSky`, same leaf-boundary
+      finding `core/gregorian-math.js`/`calendar-install.js` already made twice; `boot.js`'s
+      own live `skyScope` is the supplier), `readIsGM()` (`foundry/scene-vision.js`, reused,
+      not reinvented), `readCombatActive()` (new — `game.combat?.started`, receipted from
+      PF2E's OWN shipped source already in this session's A0 evidence, not guessed from
+      Foundry core). Negative deltas pass every gate identically (no special-cased "is this a
+      correction" enforcement yet — the asymmetry §6.3 wants ("never from the Breath") has no
+      Breath to enforce against until A3; a `source` tag on every call is already in place so
+      A3 can add that rule with no API change). Whole-second: `Math.round`, never a fraction
+      committed. An in-memory audit ring buffer (50 entries, sequence-numbered — NOT wall-
+      clock-timestamped, since neither this file nor boot.js may call `Date.now()`/
+      `performance.now()` under `time/one-clock`; a monotonic sequence number proves "one
+      gesture, one advance" without sampling a clock at all) records EVERY attempt, refused
+      or not — proven a refused attempt is still audited, with the right delta and source tag,
+      in Node. `jumpToHour`/`advanceDays`/`advanceWeeks` convenience wrappers built and
+      tested (arithmetic verified correct — visible in the audit log's `delta` field even
+      though the write itself is refused with no live `game` — see the honest testing-scope
+      note in the test file's own header). 980/980 foundry/ assertions green (+43 new across
+      this bullet + the two below), zero regressions.
 - [ ] Astrolabe: drag=preview / release=commit; calendar ring (days); week advance; jumps
       (dawn/noon/dusk/midnight via the sun model, +1 day, +1 week)
 - [ ] The PF2E `syncDarkness` stand-down flow (§6.4) — detect, announce, consented per-scene
       disable; a bench test proving no second darkness write fires after stand-down
-- [ ] Day clock reconcile-on-cadence (the silent 30 s sync-pull trap, §3.1) — not
+- [x] Day clock reconcile-on-cadence (the silent 30 s sync-pull trap, §3.1) — not
       hook-only
+      · done Sonnet 5 2026-08-17 — `foundry/game-time.js#watchWorldTimeOfDay` gains a
+      `setInterval(emit, RECONCILE_INTERVAL_MS)` (5000ms — comfortably under Foundry's own
+      receipted 30s `GameTime#sync()` cadence) alongside the existing `updateWorldTime` hook
+      subscription, reusing the SAME `emit()` closure; the returned unsubscribe tears down
+      BOTH. Every existing caller (`vt-pan-viewer.js#setTimeMode`'s subscription) gets the
+      fix for free — zero call-site changes, exactly the design goal. The constant itself is
+      Node-tested (positive, comfortably under 30s); the live interval/hook machinery is
+      untestable in Node without a Foundry mock, same honestly-declared limitation this
+      file's OWN pre-existing tests already accept for every sibling Foundry-touching
+      function here.
 - **Exit gate:** the author scrubs a week forward and a day back on the astrolabe on the
   live harness; the PF2E clock agrees at every stop; darkness never double-writes; ⚑ if any
   gesture writes more than one advance.
+  **NOT met — needs the live harness, per the author's own 2026-08-17 direction this session
+  ("do not worry about live testing for the moment"). What the author's OWN ask produced
+  instead: `MapShine.debug.registerReport('almanac-diagnostics', ...)` — ONE button
+  (Studio/Lab zone) covering calendar-install status, a live PF2E parity comparison (both
+  from settings AND, defensively probed, `game.pf2e.worldClock`'s own live getters side by
+  side), the Pen's full status incl. the audit log, the darkness stand-down status, and day-
+  clock reconcile health — built specifically so a single click, once the author reaches the
+  bench, hands back everything this gate and Petition P2 both still need. See Petition P3 for
+  the two remaining checkbox gaps and why they were left open rather than checked with
+  caveats.
 
 ### A3 — THE BREATH *(compression; the charge's living light)*
 - [ ] `world/time-flow.js`: run condition, wall-clock accumulation, quantum + ceiling
@@ -622,6 +768,91 @@ paddings were trimmed to make room for the new date-chip row. Zero console error
    gesture* (my read while building it, since it never runs unpaused/live like the Breath
    and always resolves to exactly one commit)? I built it as the latter; the former may be
    the more honest picture once real worldTime is involved.
+
+**P2 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; not authorised to declare an exit
+gate met or edit one).** A1's exit gate asks for a LIVE bench check: MSA's projected date
+beside the real PF2E World Clock, on a running Foundry+pf2e world. I did not attempt it this
+session, and want that decision on the record rather than silently absent from the
+checklist.
+
+**Why I stopped short.** Three independent signals pointed the same way: (1) `boot.js`
+already carried 313 lines of uncommitted, unrelated diff before my own ~25-line addition
+(confirmed via `git diff --stat`) and was already listed modified in this session's OPENING
+`gitStatus`, before I touched anything; (2) this session's own system reminders repeatedly
+flagged OTHER files being modified concurrently, "either by the user or a linter," across the
+whole time I was working; (3) `.claude/launch.json` has no Foundry launch config at all (only
+`shader-lab` and `ui-mock`) — reaching a live Foundry+pf2e world would mean attaching to or
+restarting something outside this session's own tooling, with no clean, scoped way to do it.
+Project memory itself carries a standing rule for exactly this shape of situation
+(`feedback_git_staging_hazard`: *"GIT: INGRAM LIVE-EDITS — never git add -A; shared function
+⇒ STOP and ask"*). Reloading or restarting a live Foundry session that may have someone else's
+in-progress state felt like the same category of risk one layer up, and not a call I should
+make unilaterally as a worker mid-checklist.
+
+**What IS closed, and how thoroughly.** R0 is not a token gesture: 129 assertions on the pure
+engine alone (4000+ randomised round-trip properties, hand-picked leap/century/negative-year
+cases, all cross-checked against the `Date#setUTCFullYear` oracle — never the code under
+test, never memory), 50 pinned PF2E-parity fixture rows generated independently and matched
+exactly through the real production path, 10,783 assertions green repo-wide with zero
+regressions. Every claim in A1's other four bullets is receipted in its own evidence line
+above. What is NOT closed is specifically and only the live half of the exit gate's own
+wording — "on the bench harness... live."
+
+**One call for Fable, or for the author directly:** is a live bench run safe to attempt right
+now, given whatever is actually in flight in this working tree — and if so, is there a
+`.claude/launch.json` entry that should exist for a Foundry+pf2e bench world so a future
+session (worker or Fable) has a clean, scoped way to reach it instead of guessing at how to
+attach to one? I did not want to invent that entry myself mid-task without knowing what bench
+world/port the author already uses for this (`reference_live_foundry_harness.md` in memory
+names a "bench Mansion" world but not a repeatable launch command).
+
+**P3 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; two A2 checkboxes left
+deliberately open rather than checked with caveats — a worker narrowing scope belongs on
+the record, not inside a checkmark that reads as "done, don't look again").**
+
+**1. The astrolabe bullet.** The author's own steer this session was explicit: *"do not
+worry about live testing for the moment, but build a button..."* — read as permission to
+prioritize the backend + the diagnostic instrument over new live UI this pass, but the
+astrolabe bullet names THREE things (drag=preview/release=commit, a calendar ring, jump
+buttons), and I judged them to fall on different sides of a real boundary this Testament
+itself draws (§9's own authority line: *"the astrolabe and its wings are ITS chrome [the UI
+Testament's] — this Testament supplies their content"*):
+- Drag=preview/release=commit for the HOUR ring **already existed**, confirmed correct by
+  direct code reading (`src/ui/astrolabe.js`'s `onTimeChange(hour, committed)` callback +
+  `boot.js`'s `editSky` only firing on `committed===true`) — nothing to build here.
+- A calendar-ring (days) and jump buttons for +1 day/+1 week are NEW VISUAL CHROME. The real
+  astrolabe (unlike the UI-Testament mock) has no "wings" or fourth region at all today
+  (confirmed absent by direct grep+read, not assumed from memory) — adding either would be a
+  genuine astrolabe redesign, which I read as the parallel UI-Testament session's call to
+  make, not mine to make solo mid-Almanac-stage.
+- So I built the CAPABILITY (`jumpToHour`/`advanceDays`/`advanceWeeks` in `time-authority.js`
+  — generic primitives taking any target hour/day-count, no sun-model awareness baked in on
+  purpose) and tested its arithmetic, but wired NO new astrolabe buttons to call them.
+
+**Question for Fable or the author:** is that boundary right, or should A2 have included
+the visual wiring regardless of which Testament nominally owns astrolabe chrome? If the
+latter, the capability is already built and tested — only the button-and-wiring remains.
+
+**2. The syncDarkness stand-down bullet's "announce" half.** Built: DETECT
+(`readPf2eDarknessSyncStatus`, mirrors PF2E's own precedence exactly, Node-tested) and the
+GATED WRITE (`standDownPf2eDarknessSync`, GM-only, scene-flag idiom matching `anchor-
+adapter.js`'s established shape) — exposed as a debug-panel ACTION (`🌑 Stand down pf2e
+darkness sync`), which IS the "consent" gesture the Testament names (§6.4: a deliberate
+click, never automatic). What is NOT built: a PROACTIVE announcement — §6.4's literal
+wording is *"Entering `almanac` posture on a scene where... MSA announces it"*, i.e.
+something that notices the conflict and tells the GM the moment they arm the Pen, not
+something the GM has to think to go look for. Today the ONLY way to learn the conflict
+exists is to open the diagnostic report and read the `pf2eDarknessStanddown` section. A
+proactive announcement is fundamentally a UI/notification concern (a toast, a Remote badge)
+— the SAME "is this mine to build solo" question as the astrolabe bullet above, and for the
+same reason I left it undone rather than half-building UI chrome outside this stage's clear
+authority. The bullet ALSO names *"a bench test proving no second darkness write fires
+after stand-down"* — inherently live-only, not attempted this session per the author's own
+steer.
+
+**Both gaps are covered by the SAME instrument**, for whatever that is worth: the almanac-
+diagnostics report shows the darkness-conflict status on demand today, and would show a
+live-verified "no second write" result the moment someone runs it after a real stand-down.
 
 *(no other petitions yet)*
 

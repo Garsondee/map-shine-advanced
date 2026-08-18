@@ -8,9 +8,26 @@
  * (`legacy/core/foundry-time-phases.js`) and it is harvested here rather than
  * re-derived.
  */
-import { deriveHourFromComponents, DEFAULT_CALENDAR_UNITS } from '../game-time.js';
+import { deriveHourFromComponents, DEFAULT_CALENDAR_UNITS, RECONCILE_INTERVAL_MS } from '../game-time.js';
 
 export function run(t) {
+  // ---- the reconcile-on-cadence constant (Almanac Testament §3.1/§9 A2) ---
+  // `watchWorldTimeOfDay` itself needs a live `Hooks`/`setInterval` to
+  // exercise (untestable in Node without mocking Foundry globals, the same
+  // limitation this file's OWN pre-existing tests already accept for every
+  // other Foundry-touching function here) — but the constant that governs
+  // it is a real, checkable fact: it must be well under Foundry's own 30s
+  // sync-pull cadence, or the "fix" would still leave drift visible for
+  // most of every cycle.
+  t.ok(
+    'RECONCILE_INTERVAL_MS is a positive, finite number',
+    Number.isFinite(RECONCILE_INTERVAL_MS) && RECONCILE_INTERVAL_MS > 0
+  );
+  t.ok(
+    "RECONCILE_INTERVAL_MS is comfortably under Foundry's own 30s sync-pull cadence",
+    RECONCILE_INTERVAL_MS <= 15000
+  );
+
   const close = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
   // ---- the Earth calendar ---------------------------------------------------

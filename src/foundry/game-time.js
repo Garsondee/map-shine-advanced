@@ -50,6 +50,17 @@
  * @module foundry/game-time
  */
 
+/**
+ * THE RECONCILE-ON-CADENCE INTERVAL (Almanac Testament §3.1/§9 A2) —
+ * `watchWorldTimeOfDay`'s periodic safety net against the silent 30 s
+ * sync-pull trap below. Well under Foundry's own 30 s `GameTime#sync()`
+ * cadence (`client/helpers/time.mjs:24`, `SYNC_INTERVAL_MS = 1000*30`,
+ * receipted in the Almanac Testament §3.1) so drift is caught promptly
+ * rather than merely "eventually" — and cheap enough to not matter: each
+ * tick is one `game.time.components` read, not a network call.
+ */
+export const RECONCILE_INTERVAL_MS = 5000;
+
 /** Earth defaults, used when a world declares no calendar of its own. */
 export const DEFAULT_CALENDAR_UNITS = Object.freeze({
   hoursPerDay: 24,
@@ -178,12 +189,25 @@ export function watchGamePaused(onChange) {
 /**
  * Watch Foundry's world clock, reported as an MSA hour.
  *
- * Fires once immediately (same reasoning as `watchGamePaused`), then on every
- * `updateWorldTime`. An unreadable clock does NOT fire — the caller is left
- * holding its previous hour rather than being handed a guess.
+ * Fires once immediately (same reasoning as `watchGamePaused`), then on
+ * every `updateWorldTime` HOOK, **and** on a periodic cadence
+ * ({@link RECONCILE_INTERVAL_MS}). The cadence is not decoration — Foundry's
+ * `GameTime#sync()` runs a background pull every 30 s that can overwrite
+ * `worldTime` WITHOUT firing `updateWorldTime` at all (Almanac Testament
+ * §3.1's receipt against the vendored source: `client/helpers/time.mjs`'s
+ * `sync()` assigns `#time.worldTime` directly, never calling
+ * `onUpdateWorldTime`, which is the ONLY place the hook fires from). A
+ * consumer that only listens for the hook silently drifts for as long as
+ * nothing else happens to touch time — this closes that gap for EVERY
+ * existing caller (`vt-pan-viewer.js#setTimeMode`'s subscription included)
+ * with zero call-site changes, because the fix lives at the one place this
+ * value is read from, not at each place it is consumed.
+ *
+ * An unreadable clock does NOT fire — the caller is left holding its
+ * previous hour rather than being handed a guess.
  *
  * @param {(todHour: number) => void} onChange
- * @returns {() => void} unsubscribe.
+ * @returns {() => void} unsubscribe — tears down BOTH the hook and the interval.
  */
 export function watchWorldTimeOfDay(onChange) {
   if (typeof onChange !== 'function') return () => {};
@@ -198,11 +222,19 @@ export function watchWorldTimeOfDay(onChange) {
   }
   if (typeof Hooks === 'undefined') return () => {};
   const id = Hooks.on('updateWorldTime', () => emit());
+  const intervalId = typeof setInterval === 'function' ? setInterval(emit, RECONCILE_INTERVAL_MS) : null;
   return () => {
     try {
       Hooks.off('updateWorldTime', id);
     } catch (err) {
       void err;
+    }
+    if (intervalId !== null) {
+      try {
+        clearInterval(intervalId);
+      } catch (err) {
+        void err;
+      }
     }
   };
 }

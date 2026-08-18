@@ -147,6 +147,7 @@ export {
   watchWorldTimeOfDay,
   deriveHourFromComponents,
   DEFAULT_CALENDAR_UNITS,
+  RECONCILE_INTERVAL_MS,
 } from './game-time.js';
 
 // SKY PERSISTENCE — where the world sky and a scene's own sky are STORED.
@@ -307,3 +308,36 @@ export {
   collectExportTexturePaths,
   sceneExportFilename,
 } from './scene-export.js';
+
+// THE CALENDAR INSTALLER (docs/holy/Almanac-Testament.md, stage A1) — builds
+// and installs the active CalendarData into CONFIG.time. Takes the calendar
+// DATA REGISTRY as an argument (world/index.js's own door) rather than
+// importing world/ itself — see calendar-install.js's own header for why.
+export { registerCalendarSetting, installActiveCalendar } from './calendar-install.js';
+
+// THE COMBAT-STATE READER (Almanac Testament, stage A2) — the Pen's
+// "combat holds the pen" gate.
+export { readCombatActive } from './combat-state.js';
+
+// THE PF2E DARKNESS STAND-DOWN (Almanac Testament §6.4, stage A2) — detects
+// PF2E's own darkness-sync on the active scene and, GM-gated, retires it so
+// MSA's own darkness publish (scene-environment.js, already LIVE) is the
+// one writer.
+export {
+  readPf2eDarknessSyncStatus,
+  standDownPf2eDarknessSync,
+  isPf2eDarknessSyncActive,
+} from './pf2e-darkness-standdown.js';
+
+// THE PEN (Almanac Testament §6, stage A2) — the only place
+// `game.time.advance()` is called. `advance` takes the resolved Almanac
+// posture as an argument (boot.js's own `skyScope`) rather than resolving it
+// itself — `foundry/` cannot import `world/sky-settings.js#resolveSky`, the
+// same leaf-boundary reason `calendar-install.js` already documents.
+export { advance, isPenArmed, getAdvanceAuditLog, jumpToHour, advanceDays, advanceWeeks } from './time-authority.js';
+
+// THE ALMANAC DIAGNOSTIC REPORT (stage A2, the author's own ask 2026-08-17)
+// — one object covering every open exit-gate question this Testament stage
+// can be asked live. See almanac-diagnostics.js's own header for why it
+// takes so much as arguments.
+export { buildAlmanacDiagnosticsReport } from './almanac-diagnostics.js';

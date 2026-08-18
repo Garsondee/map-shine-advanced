@@ -15,6 +15,11 @@ import { run as runDrawListDocuments } from './draw-list-documents.test.mjs';
 import { run as runMaskDiscovery } from './mask-discovery.test.mjs';
 import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
 import { run as runGameTime } from './game-time.test.mjs';
+import { run as runCombatState } from './combat-state.test.mjs';
+import { run as runPf2eDarknessStanddown } from './pf2e-darkness-standdown.test.mjs';
+import { run as runTimeAuthority } from './time-authority.test.mjs';
+import { run as runAlmanacDiagnostics } from './almanac-diagnostics.test.mjs';
+import { run as runCalendarInstall } from './calendar-install.test.mjs';
 import { run as runSceneEnvironment } from './scene-environment.test.mjs';
 import { run as runSceneLights } from './scene-lights.test.mjs';
 import { run as runSceneWallClip } from './scene-wall-clip.test.mjs';
@@ -72,6 +77,11 @@ const suites = [
   ['mask-discovery', runMaskDiscovery],
   ['pixi-proxy-textures', runPixiProxyTextures],
   ['game-time', runGameTime],
+  ['combat-state', runCombatState],
+  ['pf2e-darkness-standdown', runPf2eDarknessStanddown],
+  ['time-authority', runTimeAuthority],
+  ['almanac-diagnostics', runAlmanacDiagnostics],
+  ['calendar-install', runCalendarInstall],
   ['scene-environment', runSceneEnvironment],
   ['scene-lights', runSceneLights],
   ['scene-wall-clip', runSceneWallClip],

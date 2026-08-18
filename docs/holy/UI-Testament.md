@@ -1784,6 +1784,83 @@ derived drift brackets, a real fader commit, Baseline, and the fade-start/mid-fa
 sequence — including the one bug this round found and fixed. The concurrent water-flow
 session's own files remain completely untouched.*
 
+**P14 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U3 — Cues — schema plus a
+console-first engine, following the author's own "get this UI migration DONE, GO").** No
+Studio capture flow and no Remote cue deck exist yet — that's this checkpoint's own honestly-
+named gap, not glossed over (#5 below). What's real: an authored cue can be captured, validated,
+fired, and persisted, end to end, today, from the console.
+
+1. **`core/cues-schema.js` — a cue is a named, ordered, PARTIAL fade-target map,** the exact
+   `Record<key, {to, overMs, curve}>` shape a mood-chip click already builds ad-hoc
+   (`boot.js#fadeWeatherToArchetype`, P13), now with a stable id, a name, and a place in a
+   stack. `validateCue`/`validateCueStack` check structure, per-target legality (`to` present,
+   `overMs ≥ 0`, `curve` one of `FADE_CURVES`), AND that every target key actually resolves to a
+   fadeable type via an injected `resolveType` — the Testament's own §4.3 claim, "a cue that
+   targets a param the schema doesn't declare fails at author time, not at the table," is a
+   literal, tested assertion (`cues-schema.test.mjs`, "the exact author-time failure §4.3
+   promises"), not a paraphrase. `orderedCues` is the one place deck order gets decided, never
+   re-sorted differently elsewhere. `cueToFadePatch` turns an authored cue into a
+   `mergeFadeState`-ready patch namespaced `cue:<id>` — never collides with a mood chip's own
+   ad-hoc gesture id.
+2. **`core/params-schema.js` now owns `FADE_CURVES`/`FADEABLE_PARAM_TYPES`/`isFadeableParamType`
+   — relocated FROM `world/fade-engine.js`, not duplicated.** `core/` has zero dependents on
+   `world/` anywhere in this codebase — confirmed by grep before writing a line of
+   `cues-schema.js`, not assumed — so a cue's curve/type legality (a `core/` concern) couldn't
+   import them from where P12 originally put them. `world/fade-engine.js` re-exports both under
+   their original names (`CURVES`, `FADEABLE_TYPES`, `isFadeableType`); every existing caller,
+   including P12's own test suite, kept working unchanged — a pure relocate-with-re-export, zero
+   behavioral change, confirmed by the full suite staying green across the move. Flagging this
+   sub-change for explicit note, per U0's own standing rule that `params-schema.js` edits get
+   named individually: this ADDS three new exported names to the file, it does not touch
+   `FORBIDDEN_IN_CONTRACT` or any existing param's contract.
+3. **`foundry/cues-persistence.js` — one scene flag, mirrors `fade-persistence.js` exactly.**
+   Cues travel with the scene that authored them (§4.3: "a sold map ships with its authored
+   moments"), same posture as every other `foundry/` persistence module — GM-only writes, a
+   failure returns `{ok:false, reason}`, never throws.
+4. **The engine door: `MapShine.captureCue`/`fireCue`/`listCues`, live today** — the same
+   "console-first" precedent `getWind`/`setWind` already set (P-prior, next to `setSunHour`/
+   `setCloudCover`). `captureCueFromLive(name, overMs, curve)` snapshots the CURRENT live value
+   of every key `fadeSourceRegistry` can currently read as the new cue's `to`, appends to the
+   scene's stack, validates the WHOLE stack (a bad capture must not silently corrupt an
+   otherwise-good one), and only persists if clean. `fireCueById(id)` re-validates before arming
+   — "invalid cue refuses to arm," §9's own U3 checklist line, literally what the function does,
+   not a description of intent — then merges a `cueToFadePatch` into the SAME `fadeState`
+   P12/P13 already built, through the SAME `mergeFadeState`/`pumpWeatherFades`/`writeFadeState`
+   path a mood-chip click uses. No second fade mechanism; cues are a second AUTHOR of the one
+   that already exists. `cueStack` hydrates on `canvasReady`, scene-scoped and re-loaded on a
+   scene switch, mirroring `fadeState`'s own P13 pattern exactly, including a `watchCueStack`
+   re-arm for a second GM's own concurrent edit.
+5. **Named honestly: today, a cue can only target what's actually registered — the two weather
+   axes, nothing else.** `world/fade-registry.js`'s own `schemaFadeSource` wrapper is genuinely
+   generic (proven in P12's own tests against a fake, never-before-described effect schema), but
+   `boot.js` itself has only ever called `fadeSourceRegistry.registerSource('weather', …)` — no
+   effect's own `{schema, getValue, onChange}` triple has been wrapped and registered yet. "Any
+   configuration to any other" is a property of the ENGINE, verified; it is not yet a property of
+   what's actually reachable from a live scene. Registering more effects as fade sources is a
+   real, scoped follow-up (mechanical per source, per the design), not done this pass.
+6. **§9's own U3 exit gate — "stage three cues for a real scene, run them at the table with GO
+   alone" — is not reachable yet, and isn't claimed as met.** There is no capture UI (only a
+   console function), no deck (only `listCues()`), no GO button. What IS verified: `node --check`
+   on the edited `boot.js`, the full pure-core contract for `cues-schema.js` (39 assertions:
+   structural rejection, every per-target rejection including the author-time-failure claim,
+   stack-level duplicate id/order detection with per-cue error prefixing, `orderedCues`,
+   `cueToFadePatch`), and that `graph/reachable-from-boot` — broken by P12's own interruption
+   point, `core/cues-schema.js` having no real importer yet — is clean again now that `boot.js`
+   is one. A live, real-Foundry console smoke test (capture a cue from a real scene's live
+   weather, list it, fire it, watch the sky actually ease) was **not** run this session — named
+   as the gap it is, not claimed.
+
+*Verification note: `npx eslint`, `npx prettier --check` clean on every file touched
+(`boot.js`, `core/cues-schema.js`, `core/params-schema.js`, `core/__tests__/cues-schema.test.mjs`,
+`foundry/cues-persistence.js`, `foundry/index.js`). `node tools/run-tests.mjs`: 27 suites, 11253
+assertions (+39 over P13, exactly `cues-schema.test.mjs`'s own count) — ALL GREEN.
+`node tools/verify-structure.mjs`: `graph/reachable-from-boot` clean (confirming `boot.js` is now
+a real importer of `core/cues-schema.js`); the same two pre-existing violations P11 first named
+and P13 re-confirmed (`no-gpu-readback` in `vision-mask-render.js`, `time/one-clock`'s ratchet)
+remain, re-confirmed this round via `git show HEAD` on every flagged file and line — none are in
+this checkpoint's own diff, none were touched this session. The concurrent water-flow session's
+own files remain completely untouched.*
+
 ---
 
 ## 13. STATUS LOG

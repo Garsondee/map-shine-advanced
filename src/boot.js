@@ -5619,14 +5619,17 @@ function install() {
     'fluid-panel',
     'Fluid',
     ({ attachments }) => {
-      const readout = fluid.getReadout();
+      // A GETTER, NOT A CAPTURED VALUE — see the water panel's own note above
+      // for the live bug this shape caused (the 📋 button exported build-time
+      // defaults while the sliders showed the author's real values).
+      const readLive = () => fluid.getReadout();
       return buildEffectCard({
         id: 'fluid',
         diagnostics: attachments,
         icon: '🧪',
         title: 'Fluid',
         subtitle: 'tiers 0–5 — placement · tube · flow · film · fill · structure',
-        status: () => collapsedStatusLine({ enabled: readout.enabled }),
+        status: () => collapsedStatusLine({ enabled: readLive().enabled }),
         schema: FLUID_PARAMS,
         // FOH is a strict, SMALL subset (feedback_foh_roh_must_differ). The
         // test is "would they change it mid-session, or only while tuning?" —
@@ -5636,9 +5639,10 @@ function install() {
         // `slugWidth` are GONE (fluid.js's own comment on `flowSpeed`
         // explains why), not merely demoted to ROH.
         fohKeys: ['tint', 'glow', 'flowSpeed', 'iridescence'],
-        getValue: (id) => readout.params?.[id] ?? FLUID_PARAMS[id]?.default,
+        getValue: (id) => readLive().params?.[id] ?? FLUID_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setFluid({ [id]: value }),
-        enabled: readout.enabled,
+        enabled: readLive().enabled,
+        getEnabled: () => readLive().enabled,
         onToggleEnabled: (next) => MapShine.setFluid({ enabled: next }),
         add: paintAffordance('fluid'),
       });
@@ -5777,14 +5781,17 @@ function install() {
     'specular-panel',
     'Metal & shine',
     ({ attachments }) => {
-      const readout = specular.getReadout();
+      // A GETTER, NOT A CAPTURED VALUE — see the water panel's own note above
+      // for the live bug this shape caused (the 📋 button exported build-time
+      // defaults while the sliders showed the author's real values).
+      const readLive = () => specular.getReadout();
       return buildEffectCard({
         id: 'specular',
         diagnostics: attachments,
         icon: '✨',
         title: 'Metal & shine',
         subtitle: 'an animated shimmer field · per-object parallax',
-        status: () => collapsedStatusLine({ enabled: readout.enabled }),
+        status: () => collapsedStatusLine({ enabled: readLive().enabled }),
         schema: SPECULAR_PARAMS,
         // FOH is a strict, SMALL subset, never the whole schema
         // (feedback_foh_roh_must_differ). The test is "would a GM change this
@@ -5814,9 +5821,10 @@ function install() {
         // flat schema cannot hold "one declaration, three live value sets", so
         // they were never able to go through `fohKeys`/`schema` at all.
         fohKeys: ['strength', 'incidentSteepness', 'shimmerGain', 'parallaxStrength', 'islandSpread'],
-        getValue: (id) => readout.params?.[id] ?? SPECULAR_PARAMS[id]?.default,
+        getValue: (id) => readLive().params?.[id] ?? SPECULAR_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setSpecular({ [id]: value }),
-        enabled: readout.enabled,
+        enabled: readLive().enabled,
+        getEnabled: () => readLive().enabled,
         onToggleEnabled: (next) => MapShine.setSpecular({ enabled: next }),
         add: paintAffordance('specular'),
         extra: [buildSpecularDebugSelect()],
@@ -5934,22 +5942,26 @@ function install() {
     'window-light-panel',
     'Window light',
     ({ attachments }) => {
-      const readout = windowLight.getReadout();
+      // A GETTER, NOT A CAPTURED VALUE — see the water panel's own note above
+      // for the live bug this shape caused (the 📋 button exported build-time
+      // defaults while the sliders showed the author's real values).
+      const readLive = () => windowLight.getReadout();
       return buildEffectCard({
         id: 'window',
         diagnostics: attachments,
         icon: '🪟',
         title: 'Window light',
         subtitle: 'the painted mask, read as light — no aperture, no time of day yet',
-        status: () => collapsedStatusLine({ enabled: readout.enabled }),
+        status: () => collapsedStatusLine({ enabled: readLive().enabled }),
         schema: WINDOW_PARAMS,
         // Both controls are FOH — the schema is small enough that there is no
         // ROH tier yet (feedback_foh_roh_must_differ still applies: this is
         // "the whole thing", not "the important half").
         fohKeys: ['strength', 'contrast'],
-        getValue: (id) => readout.params?.[id] ?? WINDOW_PARAMS[id]?.default,
+        getValue: (id) => readLive().params?.[id] ?? WINDOW_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWindowLight({ [id]: value }),
-        enabled: readout.enabled,
+        enabled: readLive().enabled,
+        getEnabled: () => readLive().enabled,
         onToggleEnabled: (next) => MapShine.setWindowLight({ enabled: next }),
         add: paintAffordance('window'),
         extra: [buildWindowLightDebugSelect()],
@@ -6021,19 +6033,23 @@ function install() {
     'aperture-gobo-panel',
     'Window light pattern',
     ({ attachments }) => {
-      const readout = apertureGobo.getReadout();
+      // A GETTER, NOT A CAPTURED VALUE — see the water panel's own note above
+      // for the live bug this shape caused (the 📋 button exported build-time
+      // defaults while the sliders showed the author's real values).
+      const readLive = () => apertureGobo.getReadout();
       return buildEffectCard({
         id: 'apertureGobo',
         diagnostics: attachments,
         icon: '🪟',
         title: 'Window light pattern',
         subtitle: 'a point light shaped by a real aperture wall — no mask, no painting',
-        status: () => collapsedStatusLine({ enabled: readout.enabled }),
+        status: () => collapsedStatusLine({ enabled: readLive().enabled }),
         schema: APERTURE_GOBO_PARAMS,
         fohKeys: ['strength', 'cols', 'rows', 'softness'],
-        getValue: (id) => readout.params?.[id] ?? APERTURE_GOBO_PARAMS[id]?.default,
+        getValue: (id) => readLive().params?.[id] ?? APERTURE_GOBO_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setApertureGobo({ [id]: value }),
-        enabled: readout.enabled,
+        enabled: readLive().enabled,
+        getEnabled: () => readLive().enabled,
         onToggleEnabled: (next) => MapShine.setApertureGobo({ enabled: next }),
         extra: [buildApertureGoboDebugSelect()],
       });
@@ -6045,7 +6061,13 @@ function install() {
     'aperture-gobo',
     'Window light pattern (why is it not visible?)',
     () => {
-      const readout = apertureGobo.getReadout();
+      // ⚠️ THIS ONE WAS NEVER BUGGY — a REPORT's factory re-runs on every
+      // invocation, so a capture here is already live, unlike the PANEL
+      // factories above (which build a card whose closures outlive the read).
+      // It uses the accessor form anyway so `panels/no-captured-readout` can
+      // stay a bright line with zero adjudicated exceptions: a rule a reader
+      // has to reason about is a rule that eventually gets reasoned around.
+      const readLive = () => apertureGobo.getReadout();
       // `apertureGobo` is a PLAIN VALUE here, already resolved by
       // `vt-pan-viewer-diagnostics.js#buildViewerDiagnostics` (the same
       // bridge `pointLights` uses) — not a function to call. A prior version
@@ -6059,9 +6081,9 @@ function install() {
       // reaching around it a second way.
       const info = getVtPanViewerDiagnostics?.()?.apertureGobo ?? null;
       return {
-        enabled: readout.enabled,
+        enabled: readLive().enabled,
         debugChannel: apertureGobo.getDebugChannel(),
-        params: readout.params,
+        params: readLive().params,
         // THE MOST LIKELY FIRST-RUN OUTCOME (Aperture-Gobo.md §9.1): this
         // effect SHAPES light Foundry already lets through a wall — it
         // cannot create light through a wall Foundry says is opaque. "0

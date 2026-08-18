@@ -207,15 +207,23 @@ function nextUid() {
  * @param {(hour: number, committed: boolean) => void} opts.onTimeChange - ring drag.
  * @param {() => void} [opts.onDateClick]
  * @param {() => void} [opts.onWindClick] - opens the compass popover.
+ * @param {() => void} [opts.onLockedAttempt] - fired when a drag/key gesture
+ *   is attempted while `canSetHour` is false (see `update`'s own doc) instead
+ *   of being silently swallowed — Law 5, matching `ui/astrolabe.js`'s own
+ *   `flashStatus` on a locked-ring press.
  * @returns {{root: HTMLElement, update: (state: {
  *   hour: number, phase?: string, dateText?: string,
  *   windDirectionDeg?: number, windSpeed01?: number, cloudCover01?: number,
+ *   canSetHour?: boolean,
  * }) => void}}
  */
 export function buildAstrolabeDial(opts = {}) {
   const ns = nextUid();
   const root = styled('div', { position: 'relative', width: '340px', height: '340px', flex: '0 0 auto' });
   root.className = 'msa-astro-dial';
+  // Set by `update()`, read by the drag-gesture block below — both live in
+  // this same function's scope, so no indirection is needed to share it.
+  let locked = false;
 
   // ---- the ring: a static conic-gradient colour wheel + a rotating handle --
   const ring = styled('div', { position: 'absolute', inset: '0', borderRadius: '50%' });
@@ -410,6 +418,16 @@ export function buildAstrolabeDial(opts = {}) {
   root.appendChild(topper);
 
   // ---- drag-to-set-hour on the ring -----------------------------------------
+  // `locked` mirrors ui/astrolabe.js's own `ringLocked` (2026-08-18 fix —
+  // gap-audit Gap 12: this ring never carried a lock at all, so a drag in
+  // Follow/Almanac mode silently persisted a `todHour` the engines then
+  // ignored — `boot.js#applyLookToEngines` only calls `setVtPanViewerSunHour`
+  // in `sky.mode === 'aesthetic'`, but `editSky`'s own merge has no such
+  // guard, so the stored hour drifted from what the GM actually saw with no
+  // visible sign anything was wrong, confirmed by reading day-clock.js's
+  // `setHour`/`applyLookToEngines` directly rather than assumed from the old
+  // panel's own, differently-shaped lock). Gated at gesture-START only, same
+  // fidelity as the old file's own `onDown` check — not re-polled mid-drag.
   {
     let dragging = false;
     const move = (e) => {
@@ -422,12 +440,17 @@ export function buildAstrolabeDial(opts = {}) {
       opts.onTimeChange?.(hour, false);
     };
     ring.addEventListener('pointerdown', (e) => {
+      if (locked) {
+        opts.onLockedAttempt?.();
+        return;
+      }
       dragging = true;
       ring.setPointerCapture(e.pointerId);
       move(e);
     });
     ring.addEventListener('pointermove', move);
     ring.addEventListener('pointerup', (e) => {
+      if (!dragging) return;
       dragging = false;
       const r = ring.getBoundingClientRect();
       const dx = e.clientX - (r.left + r.width / 2);
@@ -438,6 +461,10 @@ export function buildAstrolabeDial(opts = {}) {
     ring.addEventListener('keydown', (e) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
       e.preventDefault();
+      if (locked) {
+        opts.onLockedAttempt?.();
+        return;
+      }
       const dir = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -0.25 : 0.25;
       const current = Number(ring.getAttribute('aria-valuenow') ?? 12);
       opts.onTimeChange?.((current + dir + 24) % 24, true);
@@ -450,12 +477,22 @@ export function buildAstrolabeDial(opts = {}) {
 
   /**
    * @param {{hour: number, phase?: string, dateText?: string,
-   *   windDirectionDeg?: number, windSpeed01?: number, cloudCover01?: number}} [state]
+   *   windDirectionDeg?: number, windSpeed01?: number, cloudCover01?: number,
+   *   canSetHour?: boolean}} [state]
    */
   function update(state = {}) {
     const hour = Number.isFinite(state.hour) ? state.hour : 12;
     ring.setAttribute('aria-valuenow', hour.toFixed(1));
     handleG.setAttribute('transform', `rotate(${hourToDialDeg(hour)} ${RIM_C} ${RIM_C})`);
+
+    // Fails OPEN, same as ui/astrolabe.js's own `s.canSetHour === false`
+    // check — an absent field (an older/thinner caller, a not-yet-ready
+    // frame) must never read as "locked," or the ring would freeze for a
+    // reason nobody asked for (feedback_gate_polarity_must_fail_open).
+    locked = state.canSetHour === false;
+    ring.style.cursor = locked ? 'not-allowed' : 'pointer';
+    ring.setAttribute('aria-disabled', String(locked));
+    rimArt.style.opacity = locked ? '0.55' : '1';
 
     const sky = skyFor(hour);
     skyTop.setAttribute('stop-color', rgb(sky.top));

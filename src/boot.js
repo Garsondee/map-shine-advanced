@@ -1060,12 +1060,16 @@ function install() {
     // own header for the full story). The old debug panel keeps
     // `createAstrolabe()` unchanged, several lines below — a real,
     // side-by-side split, not a replacement.
-    mountAstrolabeDial: (container) => {
+    mountAstrolabeDial: (container, dialCtx) => {
       remoteAstrolabe = buildAstrolabeDial({
         onTimeChange: (hour, committed) => {
           setVtPanViewerSunHour(hour);
           if (committed) void editSky({ todHour: hour });
         },
+        // Ring-lock explanation (2026-08-18 fix) — astrolabe-panel.js supplies
+        // this, routed through the Remote's own shared status line, same
+        // Law-5 shape as the TL corner's explainUnarmed/explainNotAesthetic.
+        onLockedAttempt: dialCtx?.onLockedAttempt,
       });
       container.appendChild(remoteAstrolabe.root);
     },
@@ -8054,6 +8058,13 @@ function install() {
             windDirectionDeg: payload.windDirectionDeg,
             windSpeed01: payload.windSpeed01,
             cloudCover01: payload.cloudCoverEased01,
+            // Ring-lock (2026-08-18 fix) — already on `payload` via the
+            // `...dial` spread above (vt-pan-viewer.js's own
+            // `canSetHour: clock?.canSetHour !== false`); the old panel's
+            // `astrolabe.update(payload)` call a few lines up already reads
+            // this same field, this is the Remote's own dial catching up to
+            // it, not a new source of truth.
+            canSetHour: payload.canSetHour,
           });
           // Keeps the TL corner's flow/speed buttons honest against
           // whatever actually changed rateHoursPerMinute — the old panel's

@@ -345,7 +345,8 @@ function buildCornerBR(onStatus) {
 
 /**
  * @param {HTMLElement} container
- * @param {{mountAstrolabeDial: (el: HTMLElement) => void, getPosture: () => string,
+ * @param {{mountAstrolabeDial: (el: HTMLElement, dialCtx: {onLockedAttempt: () => void}) => void,
+ *   getPosture: () => string,
  *   onSetMode?: (mode: string) => void, isFlowPlaying: () => boolean,
  *   onFlowToggle: () => void, getFlowRate?: () => number,
  *   onSetFlowRate?: (rate: number) => void,
@@ -367,6 +368,18 @@ export function renderAstrolabePanel(container, ctx) {
   const onStatus = (text) => {
     statusLine.textContent = text ?? '';
   };
+  // The ring's own lock explanation (2026-08-18 fix, gap-audit Gap 12) —
+  // same underlying gate as buildCornerTL's own `explainNotAesthetic`
+  // (`canSetHour`/rate both key off `currentMode==='aesthetic'`,
+  // day-clock.js), worded for a drag/key attempt rather than a flow toggle
+  // since the two land on genuinely different verbs ("set the hour" vs.
+  // "run"). Kept as its own small closure rather than shared with
+  // buildCornerTL's copy — the wording is deliberately different, and
+  // sharing it would leave one of the two contexts saying the wrong verb.
+  const explainRingLocked = () =>
+    onStatus(
+      `The dial is locked to Foundry's own clock — set the Clock above to Aesthetic to drag it directly (currently '${ctx.getPosture()}').`
+    );
 
   const clockMode = buildClockModeRow(ctx);
 
@@ -377,7 +390,7 @@ export function renderAstrolabePanel(container, ctx) {
 
   const dialSlot = document.createElement('div');
   dialSlot.className = 'msa-astro-dial-slot';
-  ctx.mountAstrolabeDial(dialSlot);
+  ctx.mountAstrolabeDial(dialSlot, { onLockedAttempt: explainRingLocked });
   dialHost.appendChild(dialSlot);
 
   wrap.append(clockMode.el, dialHost, statusLine);

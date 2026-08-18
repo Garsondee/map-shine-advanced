@@ -353,7 +353,8 @@ function plannedFooterBtn(text, plannedReason) {
 }
 
 /**
- * @param {{debugPanel?: object, mountAstrolabeDial: (el: HTMLElement) => void,
+ * @param {{debugPanel?: object,
+ *   mountAstrolabeDial: (el: HTMLElement, dialCtx: {onLockedAttempt: () => void}) => void,
  *   getPosture: () => string, onSetMode?: (mode: string) => void,
  *   isFlowPlaying: () => boolean, onFlowToggle: () => void,
  *   getFlowRate?: () => number, onSetFlowRate?: (rate: number) => void,

@@ -950,7 +950,25 @@ function install() {
   // doc) so its LAB department can mount the SAME reports/actions/panels
   // registry `installDebugPanel` just built, and so its rail can gate LAB
   // on the same `isGM()` the old panel already uses.
-  MapShine.__studio = installStudio({ debugPanel: MapShine.debug });
+  //
+  // The CUES ctx functions below are closure references, not eager reads —
+  // installStudio() itself runs NOW, but cueStack/fadeSourceRegistry/the
+  // cue engine functions are all declared further down this SAME install()
+  // body. Safe because shell.js only calls dept.render() (and therefore
+  // only invokes these) on an actual user click into the CUES tab, long
+  // after install() has finished running once — the identical pattern
+  // installRemote's own weatherBoard ctx already uses just below.
+  MapShine.__studio = installStudio({
+    debugPanel: MapShine.debug,
+    listCues: () => orderedCues(cueStack),
+    captureCue: (name) => captureCueFromLive(name),
+    updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),
+    moveCueOrder: (id, direction) => moveCueOrder(id, direction),
+    testFireCue: (id) => testFireCue(id),
+    revertCueTest: () => revertCueTest(),
+    isCueTestActive: () => isCueTestActive(),
+    validateCue: (cue) => validateCue(cue, fadeSourceRegistry.typeOf),
+  });
   // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — side-by-side with
   // both the old panel and the Studio. Every callback below is a closure
   // reference, not an eager read — installRemote() itself runs NOW (this
@@ -994,6 +1012,14 @@ function install() {
       onAxisCommit: (axisName, value) => void editSky({ [axisName]: value, weatherArchetype: 'custom' }),
     },
     onBaseline: (overMs) => fadeWeatherToBaseline(overMs),
+    // THE CUE DECK (U3) — same closure-reference safety as weatherBoard
+    // just above. fireCue is the ONLY mutation the deck itself calls
+    // (GO / a jump-list click); capture/reorder/test-fire are the CUES
+    // department's own job (installStudio above), never the Remote's.
+    cueDeck: {
+      listCues: () => orderedCues(cueStack),
+      fireCue: (id) => fireCueById(id),
+    },
   });
   // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
   // debug panel and returns a hydrate hook the canvasReady handler calls to pull
@@ -7145,6 +7171,7 @@ function install() {
     cueStack = nextStack;
     const result = await writeCueStack(cueStack);
     if (!result.ok) log.warn(`captureCue: stored locally but not persisted: ${result.reason}`);
+    MapShine.__remote?.refreshCueDeck();
     return { ok: true, reason: null, cue: candidate };
   }
 
@@ -7170,15 +7197,163 @@ function install() {
     return { ok: true, reason: null };
   }
 
-  // CUES' CONSOLE DOOR (U3) — no Studio capture flow or Remote deck UI yet
-  // (a real follow-up, not silently built here), but every lever below is
-  // genuinely live today, matching setSunHour/setCloudCover/getWind/setWind's
-  // own "console-first" precedent above. `MapShine.listCues()` reads the
-  // CURRENT scene's own stack — empty until canvasReady has actually hydrated
-  // it, or until captureCue has authored the first one.
+  /**
+   * Set every target of one cue to the SAME new fade time (the CUES
+   * department's own per-card control, U3) — re-validates the WHOLE stack
+   * before persisting, exactly like captureCueFromLive.
+   * @param {string} id @param {number} overMs @returns {{ok: boolean, reason: string|null}}
+   */
+  function updateCueFadeMs(id, overMs) {
+    const ix = cueStack.findIndex((c) => c.id === id);
+    if (ix === -1) return { ok: false, reason: `no cue with id '${id}' in this scene's stack` };
+    const targets = {};
+    for (const [key, t] of Object.entries(cueStack[ix].targets)) targets[key] = { ...t, overMs };
+    const nextStack = cueStack.map((c, i) => (i === ix ? { ...c, targets } : c));
+    const check = validateCueStack(nextStack, fadeSourceRegistry.typeOf);
+    if (!check.ok) return { ok: false, reason: check.errors.join('; ') };
+    cueStack = nextStack;
+    void writeCueStack(cueStack);
+    MapShine.__remote?.refreshCueDeck();
+    return { ok: true, reason: null };
+  }
+
+  /**
+   * Swap a cue's own `order` with its neighbour's (the deck/jump-list
+   * sequence, `core/cues-schema.js#orderedCues`) — direction is -1 (up,
+   * earlier) or +1 (down, later). A no-op at either end of the stack, not
+   * an error — there's nothing wrong with already being first or last.
+   * @param {string} id @param {-1|1} direction @returns {{ok: boolean, reason: string|null}}
+   */
+  function moveCueOrder(id, direction) {
+    const ordered = orderedCues(cueStack);
+    const ix = ordered.findIndex((c) => c.id === id);
+    if (ix === -1) return { ok: false, reason: `no cue with id '${id}' in this scene's stack` };
+    const neighbourIx = ix + direction;
+    if (neighbourIx < 0 || neighbourIx >= ordered.length) return { ok: true, reason: null }; // already at an end
+    const a = ordered[ix];
+    const b = ordered[neighbourIx];
+    const nextStack = cueStack.map((c) => {
+      if (c.id === a.id) return { ...c, order: b.order };
+      if (c.id === b.id) return { ...c, order: a.order };
+      return c;
+    });
+    const check = validateCueStack(nextStack, fadeSourceRegistry.typeOf);
+    if (!check.ok) return { ok: false, reason: check.errors.join('; ') };
+    cueStack = nextStack;
+    void writeCueStack(cueStack);
+    MapShine.__remote?.refreshCueDeck();
+    return { ok: true, reason: null };
+  }
+
+  // ── CUE TEST-FIRE + INSTANT REVERT (§5.4) — deliberately isolated from
+  // fadeState/pendingArchetypeCompletions, NEVER via mergeFadeState/
+  // writeFadeState. A test that overwrote fadeState[key] directly would
+  // hijack whatever REAL, concurrent gesture (a mood-chip fade, another
+  // cue) already owns that key — pendingArchetypeCompletions tracks
+  // completion by counting that gesture's OWN entries in fadeState, so a
+  // hijacked key would either fire that gesture's completion early (wrong
+  // archetype lands) or strand it pending forever. A preview must never be
+  // able to corrupt a real fade's own bookkeeping, so it never touches
+  // fadeState at all — it drives fadeSourceRegistry.write() directly,
+  // riding the SAME per-frame pump (pumpCueTestPreview, called from
+  // pumpAstrolabe below) rather than a second requestAnimationFrame loop
+  // (time/one-clock). Never persisted — a test is this GM's own client
+  // only, the saved scene and every other client never see it.
+  /** @type {{targets: Record<string, {from: unknown, to: unknown, type: string, curve: string, overMs: number}>, startedAtMs: number}|null} */
+  let cueTestPreview = null;
+  /** @type {Record<string, unknown>|null} pre-test live values, for revert. */
+  let cueTestSnapshot = null;
+
+  function pumpCueTestPreview(nowMs) {
+    if (!cueTestPreview) return;
+    const { targets, startedAtMs } = cueTestPreview;
+    let allDone = true;
+    for (const [key, target] of Object.entries(targets)) {
+      const entry = { ...target, startedAtMs };
+      fadeSourceRegistry.write(key, computeEasedValue(entry, nowMs));
+      if (!isEntryExpired(entry, nowMs)) allDone = false;
+    }
+    if (allDone) cueTestPreview = null;
+  }
+
+  /**
+   * Preview a cue's targets for real (its own curve, capped so a 20-minute
+   * cue still previews in a few seconds) — never persisted. Snapshots the
+   * PRE-test live values first, so revertCueTest() can restore them exactly.
+   * @param {string} id @returns {{ok: boolean, reason: string|null}}
+   */
+  function testFireCue(id) {
+    const cue = cueStack.find((c) => c.id === id);
+    if (!cue) return { ok: false, reason: `no cue with id '${id}' in this scene's stack` };
+    // Refuse a SECOND test while one is already live — re-snapshotting now
+    // would read the FIRST test's own mid-flight values as "the original",
+    // so a later revert would restore the wrong thing. One test at a time,
+    // enforced here rather than trusted to the UI.
+    if (cueTestSnapshot) return { ok: false, reason: 'a test is already active — revert it first' };
+    const check = validateCue(cue, fadeSourceRegistry.typeOf);
+    if (!check.ok) return { ok: false, reason: check.errors.join('; ') };
+    const PREVIEW_CAP_MS = 4000; // a test never takes longer than this to actually see
+    const snapshot = {};
+    const targets = {};
+    for (const [key, t] of Object.entries(cue.targets)) {
+      const from = fadeSourceRegistry.readLive(key);
+      snapshot[key] = from;
+      targets[key] = {
+        from,
+        to: t.to,
+        type: fadeSourceRegistry.typeOf(key),
+        curve: t.curve,
+        overMs: Math.min(t.overMs, PREVIEW_CAP_MS),
+      };
+    }
+    cueTestSnapshot = snapshot;
+    cueTestPreview = { targets, startedAtMs: wallClockMs() };
+    return { ok: true, reason: null };
+  }
+
+  /** Instantly (well — 400ms, never a jarring snap) restore whatever was
+   * live immediately before the last testFireCue(). A no-op, not an error,
+   * when there is nothing to revert. */
+  function revertCueTest() {
+    if (!cueTestSnapshot) return { ok: false, reason: 'nothing to revert' };
+    const targets = {};
+    for (const [key, value] of Object.entries(cueTestSnapshot)) {
+      targets[key] = {
+        from: fadeSourceRegistry.readLive(key),
+        to: value,
+        type: fadeSourceRegistry.typeOf(key),
+        curve: 'ease',
+        overMs: 400,
+      };
+    }
+    cueTestSnapshot = null;
+    cueTestPreview = { targets, startedAtMs: wallClockMs() };
+    return { ok: true, reason: null };
+  }
+
+  /** Whether a test-fire preview is currently live on THIS client — the
+   * CUES department re-derives its own "Revert" affordance from this on
+   * every render rather than tracking its own local state, so it stays
+   * correct even after navigating to another department and back mid-test.
+   * @returns {boolean} */
+  function isCueTestActive() {
+    return cueTestSnapshot !== null;
+  }
+
+  // CUES' CONSOLE DOOR (U3) — no Remote deck UI yet (a real follow-up, not
+  // silently built here), but every lever below is genuinely live today,
+  // matching setSunHour/setCloudCover/getWind/setWind's own "console-first"
+  // precedent above. `MapShine.listCues()` reads the CURRENT scene's own
+  // stack — empty until canvasReady has actually hydrated it, or until
+  // captureCue has authored the first one.
   MapShine.captureCue = (name, overMs, curve) => captureCueFromLive(name, overMs, curve);
   MapShine.fireCue = (id) => fireCueById(id);
   MapShine.listCues = () => orderedCues(cueStack);
+  MapShine.updateCueFadeMs = (id, overMs) => updateCueFadeMs(id, overMs);
+  MapShine.moveCueOrder = (id, direction) => moveCueOrder(id, direction);
+  MapShine.testFireCue = (id) => testFireCue(id);
+  MapShine.revertCueTest = () => revertCueTest();
+  MapShine.isCueTestActive = () => isCueTestActive();
 
   /**
    * The per-tick half of the Fade Engine: pushes every active entry's eased
@@ -7547,6 +7722,10 @@ function install() {
     // (pumpWeatherFades's own doc explains why). Piggybacks this rAF loop's
     // real timestamp rather than a second requestAnimationFrame registration.
     pumpWeatherFades(nowMs);
+    // A cue TEST preview (§5.4) rides this exact same timestamp too — see
+    // pumpCueTestPreview's own doc for why it must never become a second
+    // requestAnimationFrame loop.
+    pumpCueTestPreview(nowMs);
     // THREE conditions, all must hold: (1) `isConnected` — the panel builds
     // the dial once and the shell detaches it when another zone is showing;
     // (2) NOT explicitly hidden — `isPanelVisible() === false` after
@@ -10145,10 +10324,12 @@ function install() {
         } catch (err) {
           log.error('cue stack (canvasReady) failed:', err);
         }
+        MapShine.__remote?.refreshCueDeck();
         cuesUnsub?.();
         cuesUnsub = watchCueStack(() => {
           const { cues } = readCueStack();
           cueStack = cues;
+          MapShine.__remote?.refreshCueDeck();
         });
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) {

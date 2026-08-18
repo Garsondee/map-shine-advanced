@@ -24,6 +24,7 @@
 import { jumpToHour, advanceDays, advanceWeeks, isPenArmed } from '../../../foundry/index.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { buildImpulseButton } from '../../widgets/impulse-button.js';
+import { TIME_RATE_STEPS } from '../../astrolabe.js';
 
 /** Dawn/Noon/Dusk/Midnight — matches the mock's own #jumpPop quick-taps. */
 const HOUR_JUMPS = Object.freeze([
@@ -64,6 +65,10 @@ function ghostSlotBtn(onClick) {
   return btn;
 }
 
+/** Non-zero steps only — 0 is "paused," owned entirely by the play/pause
+ * toggle below, matching TIME_RATE_STEPS' own "0 = paused" convention. */
+const FLOW_SPEED_STEPS = TIME_RATE_STEPS.filter((s) => s > 0);
+
 /**
  * TL — time progression: play/pause the flow, a speed picker, and jump
  * shortcuts wired to the REAL Almanac Pen. THE FIRST REAL UI CALLER of
@@ -73,8 +78,22 @@ function ghostSlotBtn(onClick) {
  * "nothing broken is silent") rather than trusting a caller-side check
  * alone; `advance()` itself re-checks regardless, but the UI owes the GM the
  * same honesty the engine enforces.
+ *
+ * Matches the mock's own three TL tabs exactly (icon play/pause, a "×N" TEXT
+ * badge — not a fourth icon — for speed, calendar for jump) rather than the
+ * three generic icon buttons this corner shipped with originally (2026-08-18
+ * fix, same author report as astrolabe-dial.js's own header: "the buttons
+ * around the astrolabe are wrongly positioned"). The speed badge was ALSO a
+ * silently-dead control before this fix — `ctx.onScrollToRateControl` was
+ * referenced here but never once supplied by boot.js, so every click did
+ * nothing (`feedback_unconsumed_api_rots_silently`'s exact shape, caught by
+ * grepping for the callback's only other use before assuming it worked).
+ * Rebuilt as a real popover over the same TIME_RATE_STEPS the old debug
+ * panel's own rate slider already uses, wired to the SAME `editSky` path via
+ * `ctx.onSetFlowRate` — one real vocabulary, not a second invented one.
  * @param {{getPosture: () => string, isFlowPlaying: () => boolean,
- *   onFlowToggle: () => void, onStatus: (text: string) => void}} ctx
+ *   onFlowToggle: () => void, getFlowRate?: () => number,
+ *   onSetFlowRate?: (rate: number) => void, onStatus: (text: string) => void}} ctx
  */
 function buildCornerTL(ctx) {
   const el = cornerBox('msa-corner-tl');
@@ -88,13 +107,68 @@ function buildCornerTL(ctx) {
   // is TIME_RATE_STEPS' own 0 entry, "playing" is whatever non-zero rate was
   // last set (the existing "Time rate" slider's own model, matched here
   // rather than inventing a second, driftable flow flag).
-  const flowBtn = iconBtn('sun', ctx.isFlowPlaying() ? 'Pause time flow' : 'Play time flow', () => {
-    if (!armed()) return explainUnarmed();
-    ctx.onFlowToggle();
-    flowBtn.title = ctx.isFlowPlaying() ? 'Pause time flow' : 'Play time flow';
-  });
+  const flowBtn = iconBtn(
+    ctx.isFlowPlaying() ? 'pause' : 'play',
+    ctx.isFlowPlaying() ? 'Pause time flow' : 'Play time flow',
+    () => {
+      if (!armed()) return explainUnarmed();
+      ctx.onFlowToggle();
+      syncFlowBtn();
+    }
+  );
+  flowBtn.setAttribute('aria-pressed', String(ctx.isFlowPlaying()));
+  function syncFlowBtn() {
+    const playing = ctx.isFlowPlaying();
+    flowBtn.innerHTML = iconMarkup(playing ? 'pause' : 'play');
+    flowBtn.title = playing ? 'Pause time flow' : 'Play time flow';
+    flowBtn.setAttribute('aria-pressed', String(playing));
+  }
 
-  const jumpBtn = iconBtn('clock', 'Jump to…', async () => {
+  const speedBtn = document.createElement('button');
+  speedBtn.type = 'button';
+  speedBtn.className = 'msa-corner-txt';
+  speedBtn.title = 'Time speed — how fast the world clock runs';
+  speedBtn.style.position = 'relative';
+  function syncSpeedBtn() {
+    const rate = ctx.getFlowRate?.() ?? 0;
+    speedBtn.textContent = `×${rate > 0 ? rate : FLOW_SPEED_STEPS[0]}`;
+  }
+  speedBtn.addEventListener('click', () => {
+    if (!armed()) return explainUnarmed();
+    const current = ctx.getFlowRate?.() ?? 0;
+    const menu = document.createElement('div');
+    menu.className = 'msa-jump-menu';
+    for (const step of FLOW_SPEED_STEPS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = `×${step}`;
+      b.setAttribute('aria-pressed', String(step === current));
+      b.addEventListener('click', (e) => {
+        // Without this, the click bubbles from b -> menu -> speedBtn, and
+        // speedBtn's OWN listener (below) re-opens a fresh menu right after
+        // this one is removed — a real bug, caught live (a stray menu <div>
+        // still attached to speedBtn's children after picking a speed),
+        // not assumed safe just because menu.remove() "looked" sufficient.
+        e.stopPropagation();
+        menu.remove();
+        ctx.onSetFlowRate?.(step);
+        syncSpeedBtn();
+        syncFlowBtn();
+      });
+      menu.appendChild(b);
+    }
+    speedBtn.appendChild(menu);
+    const closeOnOutside = (e) => {
+      if (!menu.contains(e.target) && e.target !== speedBtn) {
+        menu.remove();
+        document.removeEventListener('pointerdown', closeOnOutside, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOnOutside, true), 0);
+  });
+  syncSpeedBtn();
+
+  const jumpBtn = iconBtn('calendar', 'Jump to…', async () => {
     if (!armed()) return explainUnarmed();
     // A minimal inline picker — the mock's #jumpPop is a small flyout; here a
     // native-feeling menu of buttons keeps this file free of a second popover
@@ -105,7 +179,12 @@ function buildCornerTL(ctx) {
       const b = document.createElement('button');
       b.type = 'button';
       b.textContent = j.label;
-      b.addEventListener('click', async () => {
+      // stopPropagation, same reason as the speed popover's own item
+      // handler above: unguarded, this click bubbles to jumpBtn's own
+      // listener and silently reopens a fresh menu right after this one is
+      // removed (a real, pre-existing bug this same fix closes here too).
+      b.addEventListener('click', async (e) => {
+        e.stopPropagation();
         menu.remove();
         const r = await jumpToHour(j.hour, { posture: ctx.getPosture(), source: 'remote-corner-tl' });
         ctx.onStatus(r.ok ? `Jumped to ${j.label.toLowerCase()}.` : `Jump refused: ${r.reason}`);
@@ -119,7 +198,8 @@ function buildCornerTL(ctx) {
       const b = document.createElement('button');
       b.type = 'button';
       b.textContent = label;
-      b.addEventListener('click', async () => {
+      b.addEventListener('click', async (e) => {
+        e.stopPropagation();
         menu.remove();
         const fn = label === '+1 Day' ? advanceDays : advanceWeeks;
         const r = await fn(n, { posture: ctx.getPosture(), source: 'remote-corner-tl' });
@@ -138,16 +218,14 @@ function buildCornerTL(ctx) {
   });
   jumpBtn.style.position = 'relative';
 
-  const speedBtn = iconBtn('clock', 'Flow speed', () => {
-    // Speed is already a real astrolabe control (the "Time rate" slider in
-    // the dial below) — this corner slot mirrors it for reach, not a second
-    // source of truth. Clicking scrolls the dial's own rate row into view
-    // rather than duplicating the state.
-    ctx.onScrollToRateControl?.();
-  });
-
   el.append(flowBtn, speedBtn, jumpBtn);
-  return el;
+  return {
+    el,
+    sync: () => {
+      syncFlowBtn();
+      syncSpeedBtn();
+    },
+  };
 }
 
 /**
@@ -194,8 +272,15 @@ function buildCornerBR(onStatus) {
 /**
  * @param {HTMLElement} container
  * @param {{mountAstrolabeDial: (el: HTMLElement) => void, getPosture: () => string,
- *   isFlowPlaying: () => boolean, onFlowToggle: () => void,
+ *   isFlowPlaying: () => boolean, onFlowToggle: () => void, getFlowRate?: () => number,
+ *   onSetFlowRate?: (rate: number) => void,
  *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} ctx
+ * @returns {{syncFlowState: () => void}} `syncFlowState` re-reads
+ *   `isFlowPlaying`/`getFlowRate` and repaints the TL corner — boot.js's own
+ *   `pumpAstrolabe` calls this every tick, the same "never polls on its own,
+ *   it's told" shape `shell.js#refreshWeatherBoard`/`refreshCueDeck` already
+ *   use, so the flow/speed buttons can't go stale when the rate changes from
+ *   elsewhere (the old panel's own rate slider, another connected client).
  */
 export function renderAstrolabePanel(container, ctx) {
   const wrap = document.createElement('div');
@@ -209,12 +294,8 @@ export function renderAstrolabePanel(container, ctx) {
 
   const dialHost = document.createElement('div');
   dialHost.className = 'msa-astro-dial-host';
-  dialHost.append(
-    buildCornerTL({ ...ctx, onStatus }),
-    buildCornerTR(ctx.impulses, onStatus),
-    buildCornerBL(onStatus),
-    buildCornerBR(onStatus)
-  );
+  const cornerTL = buildCornerTL({ ...ctx, onStatus });
+  dialHost.append(cornerTL.el, buildCornerTR(ctx.impulses, onStatus), buildCornerBL(onStatus), buildCornerBR(onStatus));
 
   const dialSlot = document.createElement('div');
   dialSlot.className = 'msa-astro-dial-slot';
@@ -223,4 +304,6 @@ export function renderAstrolabePanel(container, ctx) {
 
   wrap.append(dialHost, statusLine);
   container.appendChild(wrap);
+
+  return { syncFlowState: cornerTL.sync };
 }

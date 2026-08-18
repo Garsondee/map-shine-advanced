@@ -160,6 +160,7 @@ const TIER_SETTLE_FRAMES = 90;
 import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
 import { wallClockMs } from './core/frame-clock.js';
+import { validateCue, validateCueStack, orderedCues, cueToFadePatch } from './core/cues-schema.js';
 import {
   ambientVectorFromWind,
   phaseBoundaryHours,
@@ -399,6 +400,9 @@ import {
   readFadeState,
   writeFadeState,
   watchFadeState,
+  readCueStack,
+  writeCueStack,
+  watchCueStack,
   registerCalendarSetting,
   installActiveCalendar,
   standDownPf2eDarknessSync,
@@ -7097,6 +7101,85 @@ function install() {
     void writeFadeState(fadeState);
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // CUES (U3, docs/holy/UI-Testament.md §4.3) — console-first engine wiring.
+  // No Studio capture flow or Remote deck yet (a natural follow-up, the
+  // same "core first, room second" pacing U2 already used) — but every
+  // function below is REAL: MapShine.captureCue/fireCue/listCues are
+  // genuinely callable today, validated exactly like an authored cue would
+  // be once a real capture UI exists. A cue's own targets currently cover
+  // only the SAME two weather axes the board's own faders do — the only
+  // keys anything has registered with fadeSourceRegistry so far; a
+  // capture UI reaching further just needs more registered sources, not a
+  // change here (world/fade-registry.js's own whole point).
+  // ══════════════════════════════════════════════════════════════════════
+  /** @type {import('./core/cues-schema.js').Cue[]} loaded from the scene flag on canvasReady. */
+  let cueStack = [];
+  let cuesUnsub = null;
+
+  /**
+   * "Capture-then-name" (§4.3) — snapshot the CURRENT live weather values
+   * as a new cue's targets, append it to the stack, validate the WHOLE
+   * stack (a bad capture must not silently corrupt an otherwise-good
+   * stack), and only persist if it's clean.
+   * @param {string} name @param {number} [overMs] @param {string} [curve]
+   * @returns {Promise<{ok: boolean, reason: string|null, cue: object|null}>}
+   */
+  async function captureCueFromLive(name, overMs = 5000, curve = 'ease') {
+    if (typeof name !== 'string' || name.length === 0) {
+      return { ok: false, reason: 'a cue needs a name', cue: null };
+    }
+    const id = `cue-${wallClockMs()}`;
+    const targets = {};
+    for (const field of ['cloudCover01', 'precip01']) {
+      targets[`weather.${field}`] = { to: fadeSourceRegistry.readLive(`weather.${field}`), overMs, curve };
+    }
+    const order = cueStack.length === 0 ? 0 : Math.max(...cueStack.map((c) => c.order)) + 1;
+    const candidate = { id, name, order, targets };
+    const nextStack = [...cueStack, candidate];
+    const check = validateCueStack(nextStack, fadeSourceRegistry.typeOf);
+    if (!check.ok) {
+      log.error('captureCue: the captured cue failed validation:', check.errors);
+      return { ok: false, reason: check.errors.join('; '), cue: null };
+    }
+    cueStack = nextStack;
+    const result = await writeCueStack(cueStack);
+    if (!result.ok) log.warn(`captureCue: stored locally but not persisted: ${result.reason}`);
+    return { ok: true, reason: null, cue: candidate };
+  }
+
+  /**
+   * Fire a cue by id — the Remote's future GO button, callable from the
+   * console today. Re-validates before arming ("invalid cue refuses to
+   * arm", §9's own U3 checklist) rather than trusting whatever is sitting
+   * in the stack.
+   * @param {string} id @returns {{ok: boolean, reason: string|null}}
+   */
+  function fireCueById(id) {
+    const cue = cueStack.find((c) => c.id === id);
+    if (!cue) return { ok: false, reason: `no cue with id '${id}' in this scene's stack` };
+    const check = validateCue(cue, fadeSourceRegistry.typeOf);
+    if (!check.ok) {
+      log.error(`fireCue '${id}': refused to arm — invalid:`, check.errors);
+      return { ok: false, reason: check.errors.join('; ') };
+    }
+    const nowMs = wallClockMs();
+    const patch = cueToFadePatch(cue, fadeSourceRegistry.readLive, fadeSourceRegistry.typeOf);
+    fadeState = mergeFadeState(fadeState, patch, nowMs);
+    void writeFadeState(fadeState);
+    return { ok: true, reason: null };
+  }
+
+  // CUES' CONSOLE DOOR (U3) — no Studio capture flow or Remote deck UI yet
+  // (a real follow-up, not silently built here), but every lever below is
+  // genuinely live today, matching setSunHour/setCloudCover/getWind/setWind's
+  // own "console-first" precedent above. `MapShine.listCues()` reads the
+  // CURRENT scene's own stack — empty until canvasReady has actually hydrated
+  // it, or until captureCue has authored the first one.
+  MapShine.captureCue = (name, overMs, curve) => captureCueFromLive(name, overMs, curve);
+  MapShine.fireCue = (id) => fireCueById(id);
+  MapShine.listCues = () => orderedCues(cueStack);
+
   /**
    * The per-tick half of the Fade Engine: pushes every active entry's eased
    * value LIVE (cheap, in-memory) every animation frame, and persists a
@@ -10050,6 +10133,22 @@ function install() {
           const { state } = readFadeState();
           fadeState = state;
           MapShine.__remote?.refreshWeatherBoard();
+        });
+        // THE CUE STACK'S OWN SCENE LOAD (U3) — scene-scoped exactly like the
+        // fade state above; a sold map's authored cues travel WITH its scene,
+        // so a scene SWITCH must re-load this scene's own stack, never carry
+        // the previous scene's cues forward.
+        try {
+          const { cues, reason } = readCueStack();
+          cueStack = cues;
+          if (reason) log.info(`cue stack (canvasReady): ${reason}`); // "no active scene" etc. — benign
+        } catch (err) {
+          log.error('cue stack (canvasReady) failed:', err);
+        }
+        cuesUnsub?.();
+        cuesUnsub = watchCueStack(() => {
+          const { cues } = readCueStack();
+          cueStack = cues;
         });
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) {

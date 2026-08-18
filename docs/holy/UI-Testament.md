@@ -1969,6 +1969,72 @@ against a real Foundry scene**, named honestly as the literal remaining gap, mat
 exit-gate note for the identical reason. The concurrent water-flow session's own files remain
 completely untouched.*
 
+**P16 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U4's honest slice, plus a finding that
+changes what U4's own exit gate actually requires).** Before building, researched whether the
+plan's own claim — U4 is "almost entirely an entry-point change," `ui/paint-mode.js` "already
+built and live" — was actually true against current `src/`, rather than trusting it. **It was not
+true, and the gap is load-bearing, not cosmetic.**
+
+1. **§9's own U4 exit gate — "from a scene with no fire, the author is painting burning fire
+   within five seconds of clicking the tile" — cannot be met by any UI, however fast it's built,
+   because painted strokes have no path into the render pipeline.** Read `scene/mask-authority.js`
+   in full: its own architecture comment names exactly two ingest doors — real files discovered on
+   disk (`foundry/mask-discovery.js`) and the VT pager's decoded-page stream — and the code has no
+   third. The painter's own Save (`foundry/paint-adapter.js#savePaintedMasks`) writes to a scene
+   flag (`paintedMasks`) that is read in exactly two places in the whole codebase: the painter's
+   own re-open-and-re-edit hydration, and the export bundler. Nothing in the render/effect pipeline
+   ever reads it. Paint `_Fire`, click Save, and the fire pass never sees it — confirmed by tracing
+   every reference to the flag, not inferred.
+2. **This is not a new discovery — it's an old one that got dropped.** `docs/planning/Authoring-
+   and-Distribution.md`, written the SAME DAY as `Control-Panel.md`'s own "paint fire, see fire"
+   line, lists in its own "New to build" section: *"the brush→DataTexture path (the mask
+   authority's known-but-unbuilt DataTexture ingest... whose first consumer this becomes)."* Every
+   OTHER piece named alongside it that day has since shipped (the paint UI, the embed codec, Mode A
+   persistence) — this one piece never has. `Control-Panel.md` §5.2 and this Testament's own U4
+   both inherited the aspirational sentence without the caveat sitting one section below it in the
+   original doc. Named here so it stops propagating silently into a THIRD document.
+3. **What's real and shipped this round, independent of that gap:** `ui/rooms/studio/painter-
+   department.js` — a tile grid, one tile per effect that actually declares `authoring.paint`
+   (fire/water/window/specular/fluid/vegetation — confirmed exhaustively by grep, exactly 6, not
+   the 9 `MASK_KINDS` has; `shadow`/`outdoors` have no owning effect, Law 5's "nothing dead is
+   drawn" applied here the same way `ui/no-dead-axis` applies it to weather axes). Each tile shows
+   the effect's own title, mask suffix(es), and a REAL found/missing status for the floor you're
+   currently viewing (`maskAuthority.authoredStatus`, the same query water's own Studio card
+   already uses) — and clicking it genuinely arms the real brush via the SAME `paintAffordance`
+   function the old debug panel and water's card already call, so the tile grid, the card
+   shortcuts, and the old panel can never disagree about which mask kind a given effect opens.
+   `authoring.paint`'s real shape is `{paint: string|string[]}` — thinner than U4's own checklist
+   line implies (`{effectId, maskId, tools, brushDefaults}`); `tools`/`brushDefaults` don't exist
+   in the manifest schema or the validator anywhere in `src/`, named rather than invented to make
+   the checklist's own wording look satisfied.
+4. **A real, small, honest correction shipped alongside the new work, not left for later:**
+   `paintAffordance`'s own tooltip said *"Paint where the effect belongs; it reads the mask
+   live"* — false, per point 1, and it was already reaching users through the OLD debug panel's
+   paint buttons (fire/vegetation/water/fluid/specular/window, all six) before this round touched
+   it. Corrected in place to state plainly what Save actually does and doesn't do yet.
+5. **§9's U4 checklist's OWN second bullet — "Card 🖌 shortcut arms the brush for that effect's
+   mask" — is only reachable for water today**, because only water has a real Studio EFFECTS
+   card (`registerEffectCard` has exactly one call site, named as its own honest gap in P10 and
+   still true). The other five paintable effects' own card shortcuts will appear automatically,
+   with zero new code, the day a future session wires their cards — `effects-department.js`
+   already renders `onPaint` generically whenever a card model supplies it. Not built this round,
+   named as a dependency on P10's own already-flagged gap rather than re-flagged as new.
+6. **Named, not taken on unprompted:** building the missing brush→mask-authority ingest path (a
+   new ingestion door on `mask-authority.js`, and either a live synthetic-page feed or Mode B
+   bake-to-file, which itself doesn't exist) is a genuine, separate, cross-cutting rendering
+   feature — not a UI wiring task, not something a worker-tier session should decide to take on as
+   a side effect of a UI migration checkpoint. Left for the author's own prioritization call.
+
+*Verification note: `npx eslint`, `npx prettier --check` clean on every file touched
+(`boot.js`, `ui/rooms/studio/{shell,painter-department}.js`, `tools/studio-preview/preview.js`).
+`node tools/run-tests.mjs`: 27 suites, 11261 assertions, ALL GREEN, unchanged in count (UI wiring
++ a tooltip correction, no new pure-core surface). `node tools/verify-structure.mjs`: the same two
+pre-existing violations, unchanged. Live-verified in the browser (`javascript_tool`, same
+non-composited-pane workaround as P15): the Painter rail tab opens with no "lands in a later
+stage" placeholder, the subtitle and honest not-wired-live notice both render, both fixture tiles
+(one `found`, one not) show the correct status line, and clicking a tile calls `armBrush` with the
+correct effect id. The concurrent water-flow session's own files remain completely untouched.*
+
 ---
 
 ## 13. STATUS LOG

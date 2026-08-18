@@ -214,6 +214,7 @@ import {
   createWeatherManager,
   WEATHER_AXES,
   shortestHourDelta,
+  postureToDayClockMode,
 } from '../world/index.js';
 import {
   buildEnvironmentalLightMaterials,
@@ -7046,8 +7047,17 @@ export async function startVtPanViewer({
       }
     }
 
-    function setTimeMode(mode) {
-      const applied = dayClock.setMode(mode);
+    // `mode` here is the ALMANAC POSTURE ('aesthetic'|'follow'|'almanac',
+    // world/day-clock.js#ALMANAC_POSTURES) — day-clock's OWN `setMode` only
+    // understands its narrower 'aesthetic'|'synced' vocabulary, so this is
+    // the one translation point (Almanac Testament §1: "day-clock.js itself
+    // still knows only two read postures"). 'follow' and 'almanac' both
+    // become 'synced' here — indistinguishable to the day clock on purpose;
+    // whether the Pen is ARMED is a separate question, answered by
+    // foundry/time-authority.js reading the true posture directly, never by
+    // asking the day clock (which structurally cannot tell them apart).
+    function setTimeMode(posture) {
+      const applied = dayClock.setMode(postureToDayClockMode(posture));
       if (worldTimeUnsub) {
         worldTimeUnsub();
         worldTimeUnsub = null;

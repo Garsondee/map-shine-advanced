@@ -3,6 +3,7 @@ import { run as runParams } from './params-schema.test.mjs';
 import { run as runFrameClock } from './frame-clock.test.mjs';
 import { run as runGregorianMath } from './gregorian-math.test.mjs';
 import { run as runCuesSchema } from './cues-schema.test.mjs';
+import { run as runDialsSchema } from './dials-schema.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -23,6 +24,7 @@ const suites = [
   ['frame-clock', runFrameClock],
   ['gregorian-math', runGregorianMath],
   ['cues-schema', runCuesSchema],
+  ['dials-schema', runDialsSchema],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

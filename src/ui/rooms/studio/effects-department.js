@@ -17,6 +17,7 @@
  */
 
 import { buildParamControl } from '../../widgets/param-control.js';
+import { buildDialControl } from '../../widgets/dial-control.js';
 import { rohGroups, collapsedStatusLine } from '../../widgets/param-groups.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { tierChip, scopeGlyph, healthBadge } from '../../widgets/badges.js';
@@ -120,6 +121,9 @@ function buildStudioEffectCard(model) {
   }
   head.append(
     healthBadge({
+      declared: model.health?.declared,
+      read: model.health?.read,
+      onClick: model.health ? model.onOpenHealthReport : undefined,
       plannedReason:
         model.healthPlannedReason ?? 'Control-health (declared − read) waits on the U6 read-tracking proxy.',
     })
@@ -223,13 +227,34 @@ function buildStudioEffectCard(model) {
     presetRow.append(select);
     foh.append(presetRow);
   }
-  for (const key of model.fohKeys ?? []) {
-    const decl = model.schema?.[key];
-    if (!decl) continue;
-    const row = buildParamControl(key, decl, { value: model.getValue(key), onChange: (v) => model.onChange(key, v) });
-    row.dataset.msaParam = key;
-    row.classList.add('msa-param-row');
-    foh.append(row);
+  // U6: authored dials REPLACE the raw fohKeys strip where an effect
+  // declares them — `fohKeys` remains the fallback (and, unchanged, the
+  // ROH-exclusion set below regardless of which form FOH takes; a dial's
+  // driven params can still be hand-tuned in Advanced).
+  const dialIds = model.dialsSchema ? Object.keys(model.dialsSchema) : [];
+  if (dialIds.length > 0) {
+    const currentValues = {};
+    for (const key of Object.keys(model.schema ?? {})) currentValues[key] = model.getValue(key);
+    for (const dialId of dialIds) {
+      const decl = model.dialsSchema[dialId];
+      const dialRow = buildDialControl(dialId, decl, {
+        paramValues: currentValues,
+        onChange: (driven) => {
+          for (const [paramKey, value] of Object.entries(driven)) model.onChange(paramKey, value);
+        },
+      });
+      dialRow.classList.add('msa-dial-row');
+      foh.append(dialRow);
+    }
+  } else {
+    for (const key of model.fohKeys ?? []) {
+      const decl = model.schema?.[key];
+      if (!decl) continue;
+      const row = buildParamControl(key, decl, { value: model.getValue(key), onChange: (v) => model.onChange(key, v) });
+      row.dataset.msaParam = key;
+      row.classList.add('msa-param-row');
+      foh.append(row);
+    }
   }
   card.append(foh);
 
@@ -276,6 +301,16 @@ function buildStudioEffectCard(model) {
  * @property {{suffix:string,found:boolean}} [mask]
  * @property {string[]} [presets] @property {(name:string)=>void} [onPresetPick]
  * @property {Record<string,object>} schema @property {string[]} fohKeys
+ * @property {Record<string,import('../../../core/dials-schema.js').DialDecl>} [dialsSchema] -
+ *   U6: authored macro dials, replacing the raw fohKeys strip when present
+ *   (`ui/widgets/dial-control.js`). Validate with `validateDialsSchema`
+ *   against `schema` before shipping — see water.js's own `WATER_DIALS`.
+ * @property {{declared:number,read:number,orphaned:string[]}} [health] -
+ *   U6: `diag/param-read-health.js#getParamHealth` output, computed FRESH
+ *   per model-factory call (never cached — matches `getValue`'s own rule).
+ * @property {()=>void} [onOpenHealthReport] - set by renderEffectsDepartment,
+ *   not by the model factory; deep-links the health badge to the LAB
+ *   department's Control Health report.
  * @property {(paramId:string)=>unknown} getValue
  * @property {(paramId:string,value:unknown)=>void} onChange
  * @property {boolean} [enabled] @property {(next:boolean)=>void} [onToggleEnabled]
@@ -347,6 +382,14 @@ export function renderEffectsDepartment(container, ctx) {
     .sort((a, b) => (pinned.has(b.id) ? 1 : 0) - (pinned.has(a.id) ? 1 : 0));
   for (const { model } of visible) {
     model.onRequestRerender = () => renderEffectsDepartment(container, ctx);
+    // U6: the health badge's own click target — "deep-links to the Lab
+    // report" (UI-Testament.md §9's own U6 checklist wording). Switches the
+    // Studio to LAB, where the Control Health report boot.js registers
+    // lives; does not yet auto-run that report on arrival (no stable hook
+    // into debug-panel.js's rendered report list from outside it today —
+    // named as a real, small follow-up in the U6 Petition, not silently
+    // claimed as full automation).
+    model.onOpenHealthReport = () => ctx.switchDepartment?.('lab');
     // Detaches to a floating mini-panel for side-by-side lookdev (Testament
     // §5.2). Synthesised here, not per-effect data — every card gets one.
     model.onPopOut = () => {

@@ -258,6 +258,21 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
     railButtons.set(dept.id, btn);
   }
 
+  /**
+   * Switch the active department and re-render — the ONE place `state.dept`
+   * changes (the rail's own click handler, the search palette's `onOpenCard`,
+   * and U6's health-badge deep-link all call this rather than each keeping
+   * their own copy of the "update state + sync rail aria-pressed + render()"
+   * dance).
+   * @param {string} id - a DEPTS entry's id (e.g. `'lab'`).
+   */
+  function switchDepartment(id) {
+    if (!DEPTS.some((d) => d.id === id)) return;
+    state.dept = id;
+    for (const [bid, b] of railButtons) b.setAttribute('aria-pressed', String(bid === state.dept));
+    render();
+  }
+
   function render() {
     deptBody.innerHTML = '';
     const dept = DEPTS.find((d) => d.id === state.dept);
@@ -276,6 +291,7 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
     const subtitle = dept.render(scroll, {
       effectCardFactories,
       openCardById: (effectId, paramId) => palette?.flashParam(effectId, paramId),
+      switchDepartment,
       debugPanel,
       ...roomCtx,
     });
@@ -332,9 +348,7 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
     buildIndex: () => buildSearchIndex(effectCardFactories),
     onOpenCard: (_effectId) => {
       controller.open();
-      state.dept = 'effects';
-      for (const [id, b] of railButtons) b.setAttribute('aria-pressed', String(id === state.dept));
-      render();
+      switchDepartment('effects');
     },
   });
 

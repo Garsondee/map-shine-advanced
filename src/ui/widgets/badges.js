@@ -5,22 +5,20 @@
  * control.js) because none of them render a PARAM — they describe the
  * EFFECT the card belongs to.
  *
- * ⚠️ ONLY THE TIER CHIP IS LIVE DATA TODAY. `resolveAndApply`'s
- * `perfTier`/`maxPerfTier`/`perfTierSource` are real (effects/effect-
- * cascade.js#resolveEffectTier) — this is genuinely "the tier the profile
- * cascade resolved," not yet "the tier the governor chose" (effect-
- * manifest.js's own header still calls the governor "(future)"); the chip's
- * label says the former.
+ * ⚠️ `scopeGlyph` STAYS `status:'planned'` FOR EVERY CARD — a full scene/
+ * world/client scope per param does not exist yet (only a world/client
+ * duality exists today, for an effect's own enable state, not "where does
+ * the Studio believe THIS param lives"). `tierChip` was already live
+ * (`resolveAndApply`'s `perfTier`/`maxPerfTier`/`perfTierSource`, effects/
+ * effect-cascade.js#resolveEffectTier).
  *
- * `scopeGlyph` and `healthBadge` are built as REAL, reusable widgets — but
- * every card mounts them `status:'planned'` for now, because what they would
- * show does not exist yet: a full scene/world/client scope per param (only
- * a world/client duality exists today, for an effect's own enable state,
- * not "where does the Studio believe THIS param lives") and the U6 read-
- * tracking proxy behind the health count. Building the chrome now and
- * wiring it later (once true) is cheaper than reworking card layout twice,
- * and it is the same convention the rest of the canon already uses for an
- * honestly-not-yet-real control.
+ * `healthBadge` GAINED REAL DATA AT U6 (2026-08-18) — `diag/param-read-
+ * health.js`'s `declared`/`read` counts. A caller that has them passes
+ * `{declared, read, onClick}`; a caller that does not (any effect not yet
+ * wired to the read-tracking proxy) passes `{plannedReason}` and gets the
+ * exact same dashed, muted chip this widget always rendered — the fallback
+ * this module's own header used to describe as the ONLY path is now real,
+ * not deleted.
  *
  * @module ui/widgets/badges
  */
@@ -77,11 +75,38 @@ export function scopeGlyph({ plannedReason }) {
 }
 
 /**
- * The health badge — planned chrome for U1; the real signal is U6's
- * read-tracking proxy (declared − read).
- * @param {{plannedReason: string}} args
+ * The health badge — "declared − read" (U6, `diag/param-read-health.js`).
+ *
+ * Real when the caller has `declared`/`read` counts (an effect wired to the
+ * read-tracking proxy, e.g. water's `getRenderState()`); falls back to the
+ * original dashed `status:'planned'` chip when it does not (an effect not
+ * yet wired — most of them, today). The two states use visually DIFFERENT
+ * language on purpose: `planned` is the dashed `--fail` chip every other
+ * not-yet-real control already uses; a live badge with orphaned params uses
+ * `--warn` instead — "some controls haven't been observed read yet" is an
+ * investigate-if-curious signal, not the same claim as "this doesn't work".
+ *
+ * @param {{declared?: number, read?: number, onClick?: () => void, plannedReason?: string}} args
  * @returns {HTMLElement}
  */
-export function healthBadge({ plannedReason }) {
-  return chip(`${iconMarkup('health', 'style="width:9px;height:9px"')} ?`, { planned: true, title: plannedReason });
+export function healthBadge({ declared, read, onClick, plannedReason } = {}) {
+  if (typeof declared !== 'number' || typeof read !== 'number') {
+    return chip(`${iconMarkup('health', 'style="width:9px;height:9px"')} ?`, { planned: true, title: plannedReason });
+  }
+  const orphaned = Math.max(0, declared - read);
+  const el = chip(`${iconMarkup('health', 'style="width:9px;height:9px"')} ${read}/${declared}`);
+  if (orphaned > 0) {
+    el.style.borderColor = 'var(--warn, #e0a940)';
+    el.style.color = 'var(--warn, #e0a940)';
+  }
+  el.title =
+    orphaned > 0
+      ? `${read} of ${declared} params observed reaching the renderer this session — ${orphaned} not yet observed ` +
+        '(may be a genuinely orphaned control, or simply not exercised yet). Click for the full Control Health report.'
+      : `${read} of ${declared} params observed reaching the renderer this session — every declared param has been read.`;
+  if (typeof onClick === 'function') {
+    el.style.cursor = 'pointer';
+    el.addEventListener('click', onClick);
+  }
+  return el;
 }

@@ -174,7 +174,7 @@ export {
 } from './lighting/region-darkness.js';
 export { buildGradePass } from './grade/grade-pass.js';
 export { buildWaterPass, buildFluidSimPass } from './water/water-pass.js';
-export { WATER, WATER_PARAMS, WATER_DEBUG_CHANNELS, WATER_PRESETS, waterPreset } from './water/water.js';
+export { WATER, WATER_PARAMS, WATER_DIALS, WATER_DEBUG_CHANNELS, WATER_PRESETS, waterPreset } from './water/water.js';
 export { resolveWaterFloor } from './water/water-floor.js';
 // THE BODY PACK (docs/planning/Water.md §5.1) — one jump-flood signed distance
 // field, baked on mask change. The subsystem owns the targets and the version

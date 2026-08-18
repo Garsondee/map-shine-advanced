@@ -10,10 +10,11 @@
  * session, and tier 3's four (sunGlint, skySheen, glossiness, viewerHeight).
  */
 import { validateParamsSchema } from '../../../core/params-schema.js';
+import { validateDialsSchema } from '../../../core/dials-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
-import { WATER, WATER_PARAMS, WATER_PRESETS, waterPreset } from '../water.js';
+import { WATER, WATER_PARAMS, WATER_DIALS, WATER_PRESETS, waterPreset } from '../water.js';
 import { WATER_BANK_INFLUENCE, WATER_TIER2_FLOW_ANGLE_DEG } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
 import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
@@ -24,6 +25,19 @@ export function run(t) {
   // --- the declaration validates ------------------------------------------
   ok('WATER_PARAMS is a valid params schema', validateParamsSchema(WATER_PARAMS).ok);
   ok('WATER is a valid manifest', validateEffectManifest(WATER).ok);
+  // U6's real half of the `dials/valid-reference` wall (core/dials-schema.
+  // test.mjs carries the synthetic-fixture half) — every WATER_DIALS `drives`
+  // target must exist in WATER_PARAMS, in range, non-angle. A future edit
+  // narrowing e.g. `chop`'s max below the Shine dial's `to[1]=1.1` fails
+  // HERE, not silently in a live card.
+  {
+    const dialsResult = validateDialsSchema(WATER_DIALS, WATER_PARAMS);
+    ok(`WATER_DIALS validates against WATER_PARAMS (${dialsResult.errors.join('; ')})`, dialsResult.ok);
+    ok(
+      'WATER_DIALS declares between 3 and 5 dials (U6 exit gate)',
+      Object.keys(WATER_DIALS).length >= 3 && Object.keys(WATER_DIALS).length <= 5
+    );
+  }
   ok("the effect's id is water", WATER.id === 'water');
   ok(
     'water does not flash (a11y photosensitive false) — tier 0 has no flicker at all',

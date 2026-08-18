@@ -323,6 +323,103 @@ export const WATER_PARAMS = Object.freeze({
 });
 
 /**
+ * THE FOH DIALS (U6, docs/holy/UI-Testament.md §9, Effects-UI.md §3) — five
+ * plain-language macro controls replacing the six raw `fohKeys` sliders in
+ * the Studio card's front strip (`fohKeys` stays the ROH-exclusion set and
+ * the fallback for any effect with no dials schema — see `ui/rooms/studio/
+ * effects-department.js`). Each is validated against `WATER_PARAMS` by
+ * `core/dials-schema.js#validateDialsSchema` in `water.test.mjs`, the
+ * `dials/valid-reference` wall's own real-content half.
+ *
+ * ⚠️ `flowAngleDeg` AND `tint` ARE DELIBERATELY UNCOVERED. `flowAngleDeg` is
+ * an `angle` type — `validateDialsSchema` refuses it as a drive target on
+ * principle (no fixed range a `to` window can clamp into; see dials-
+ * schema.js's own header). `tint` is `color`-typed for the identical
+ * structural reason. Both stay reachable through ROH only — direction and
+ * colour-trim are already single, already-plain-language controls in their
+ * own right (see their own `help` text above), not knobs a macro dial would
+ * meaningfully simplify further.
+ *
+ * ⚠️ `opacity` IS ALSO DELIBERATELY UNCOVERED — a curation choice, not an
+ * oversight. It was one of the original six `fohKeys` (a flat "top 6" list
+ * chosen before dials existed), but its own help text calls it a stopgap
+ * ("the map art beneath is doing the work a proper volume/absorption rung
+ * will do later"), not one of the five creative levers an author reaches
+ * for most. Effects-UI.md's own vision for a dial strip is a SMALLER,
+ * curated set replacing the flat list, not a 1:1 rename of every promoted
+ * key — opacity drops to ROH-only under that standard. Worth the author's
+ * own countersign if they disagree (see the U6 Petition).
+ *
+ * Every `drives` window is deliberately CO-INCREASING with its own dial
+ * (higher dial position -> higher param value) — `resolveDialDrives`/
+ * `validateDialsSchema` only support `to[0] < to[1]` today, so an inverse
+ * relationship (e.g. "Clarity" lowering `pollution` as it rises) is out of
+ * v1 scope on purpose, not a gap discovered by accident.
+ * @type {Record<string, import('../../core/dials-schema.js').DialDecl>}
+ */
+export const WATER_DIALS = Object.freeze({
+  murkiness: {
+    label: 'Murkiness',
+    help: 'From a clear stream to thick, silty sludge — clean water at one end, a large polluted town river at the other.',
+    range: [0, 1],
+    default: 0.6,
+    drives: {
+      pollution: { to: [0, 1], curve: 'linear' },
+      // Murkier water also shows more of its OWN colour rather than acting
+      // as a clear filter (inscatter's own help text) — a real but smaller
+      // secondary effect, so it ramps in mostly toward the muddy end.
+      inscatter: { to: [0.1, 0.5], curve: 'ease-in' },
+    },
+  },
+  depth: {
+    label: 'Depth',
+    help: 'How deep this whole body reads, from a shallow ford to a dark abyss — and how fast the bed disappears as it deepens.',
+    range: [0, 1],
+    default: 0.45,
+    drives: {
+      depth: { to: [0, 1], curve: 'linear' },
+      absorption: { to: [2.5, 4.5], curve: 'linear' },
+    },
+  },
+  shine: {
+    label: 'Shine',
+    help: 'Whether the water glitters in daylight or lies dull and flat — the two knobs that decide whether it sparkles at all.',
+    range: [0, 1],
+    default: 0.55,
+    drives: {
+      // A window centred on chop's own calibrated sweet spot (default 0.86
+      // of a 0..1.5 range) rather than the curve shape doing that work —
+      // pushing chop past its peak tips the wavelets broad and dull again
+      // (chop's own help text), so the dial's own travel is pre-narrowed to
+      // stay inside the useful band.
+      chop: { to: [0.4, 1.1], curve: 'linear' },
+      glossiness: { to: [0.6, 0.911], curve: 'linear' },
+    },
+  },
+  foaminess: {
+    label: 'Foaminess',
+    help: 'How much white water shows: at the shore, against anything the current pushes on, and trailing away downstream.',
+    range: [0, 1],
+    default: 0.8,
+    drives: {
+      foam: { to: [0, 1], curve: 'linear' },
+      swashFoam: { to: [0, 1], curve: 'linear' },
+      breakFoam: { to: [0, 1], curve: 'linear' },
+      foamTrail: { to: [0, 1], curve: 'linear' },
+    },
+  },
+  flow: {
+    label: 'Flow',
+    help: 'How fast the surface travels downstream — still for a pond, brisk for a lazy river, fast for rapids. Set direction in Advanced.',
+    range: [0, 400],
+    default: 90,
+    drives: {
+      flowSpeedPx: { to: [0, 400], curve: 'linear' },
+    },
+  },
+});
+
+/**
  * The manifest — the effect as data (Effects.md §2 shape). `tiers` lists only
  * what is ACTUALLY BUILT (mirrors bloom.js's own precedent: tier 0 there,
  * nothing further, until later tiers land for real). Tiers 1–8 are recorded

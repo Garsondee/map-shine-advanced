@@ -12,7 +12,7 @@
  * http://localhost:8934/tools/studio-preview/index.html
  */
 import { installTokens, THEMES } from '../../src/ui/tokens.js';
-import { installStudio } from '../../src/ui/index.js';
+import { installStudio, installPlayer } from '../../src/ui/index.js';
 import { validateCue, validateCueStack, orderedCues } from '../../src/core/cues-schema.js';
 import { computeEasedValue, isEntryExpired } from '../../src/world/index.js';
 
@@ -171,6 +171,46 @@ const FAKE_PAINTABLE = [
   { id: 'water', title: 'Water', suffixes: ['_Water'], found: true },
 ];
 
+// ---- THE SYSTEM PANEL'S OWN STAND-IN (U5) ----------------------------------
+// A tiny fake settings store (plain object) standing in for game.settings --
+// real GLOBAL_SETTING_KEYS values, real effectEnableKey convention, real
+// ENABLE_OVERRIDES/PERFORMANCE_PROFILES vocab, imported directly since this
+// harness has no zones/one-door wall to cross (it's tools/, not src/).
+const fakeSettingsStore = {
+  msaEnabled: true,
+  performanceProfile: 'standard',
+  reducePhotosensitiveEffects: false,
+  reducedMotion: false,
+  uiTheme: 'dark',
+  'fire.playerEnable': 'auto',
+  'fire.gmEnable': 'auto',
+  'water.playerEnable': 'on',
+  'water.gmEnable': 'auto',
+};
+const FAKE_EFFECT_ROWS = [
+  { id: 'fire', title: 'Fire', photosensitive: true, playerKey: 'fire.playerEnable', gmKey: 'fire.gmEnable' },
+  { id: 'water', title: 'Water', photosensitive: false, playerKey: 'water.playerEnable', gmKey: 'water.gmEnable' },
+];
+function getSystemPanelCtx() {
+  return {
+    read: (key) => fakeSettingsStore[key],
+    write: (key, value) => {
+      fakeSettingsStore[key] = value;
+      document.getElementById('log').textContent = `setting ${key} -> ${value}`;
+    },
+    profiles: ['low', 'performance', 'standard', 'quality', 'extreme'].map((v) => ({ value: v, label: v })),
+    enableChoices: ['auto', 'on', 'off'].map((v) => ({ value: v, label: v })),
+    effectRows: FAKE_EFFECT_ROWS,
+    keys: {
+      msaEnabled: 'msaEnabled',
+      profile: 'performanceProfile',
+      reducePhotosensitive: 'reducePhotosensitiveEffects',
+      reducedMotion: 'reducedMotion',
+      theme: 'uiTheme',
+    },
+  };
+}
+
 const studio = installStudio({
   debugPanel: fakeDebugPanel,
   listCues: () => orderedCues(cueStack),
@@ -185,7 +225,13 @@ const studio = installStudio({
   armBrush: (effectId) => {
     document.getElementById('log').textContent = `armBrush('${effectId}') -- no real painter in this harness`;
   },
+  getSystemPanelCtx: () => getSystemPanelCtx(),
 });
+
+// The Player room (U5) -- same fake ctx, isGM hard-false inside installPlayer
+// itself (never read from anywhere), proving the SAME generated tree renders
+// correctly with the GM-only "Table Defaults" section absent.
+const player = installPlayer({ getSystemPanelCtx: () => getSystemPanelCtx() });
 
 // ---- water-shaped view-model: mirrors boot.js's real registerEffectCard('water', ...) exactly in structure ----
 const waterState = {
@@ -323,6 +369,7 @@ studio.registerEffectCard('bloom', () => ({
 }));
 
 document.getElementById('toggleBtn').addEventListener('click', () => studio.toggle());
+document.getElementById('playerBtn').addEventListener('click', () => player.toggle());
 
 let themeIdx = 0;
 document.getElementById('themeBtn').addEventListener('click', () => {

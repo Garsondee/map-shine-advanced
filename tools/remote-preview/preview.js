@@ -1,18 +1,18 @@
 /**
  * Remote Preview — U2's own "cheap eyes before Foundry eyes" rung, mirroring
  * tools/studio-preview/ for U1. Mounts the REAL `installRemote()` with a
- * REAL `createAstrolabe()` dial (imported directly, same as boot.js does)
- * fed FAKE phase bands and no-op engine callbacks — proving the shell,
- * corner clusters, and camera-path popover all render and wire correctly
- * without a live Foundry canvas, which only boot.js's own real integration
- * can ultimately prove (see Petition P11's honesty note on that gap).
+ * REAL `buildAstrolabeDial()` dial (imported directly, same as boot.js
+ * does, since the 2026-08-18 fix — see astrolabe-dial.js's own header) fed
+ * no-op engine callbacks — proving the shell, corner clusters, dial, and
+ * camera-path popover all render and wire correctly without a live Foundry
+ * canvas, which only boot.js's own real integration can ultimately prove
+ * (see Petition P11's honesty note on that gap).
  *
  * Run: node tools/shader-lab/serve.mjs, then open
  * http://localhost:8934/tools/remote-preview/index.html
  */
 import { installTokens, THEMES } from '../../src/ui/tokens.js';
-import { installRemote } from '../../src/ui/index.js';
-import { createAstrolabe } from '../../src/ui/astrolabe.js';
+import { installRemote, buildAstrolabeDial } from '../../src/ui/index.js';
 import {
   WEATHER_ARCHETYPES,
   mergeFadeState,
@@ -25,21 +25,6 @@ import { validateCue, orderedCues, cueToFadePatch } from '../../src/core/cues-sc
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
-
-// ---- fake phase bands, real ringArcPath math (astrolabe.js's own) --------
-const FAKE_PHASE_BANDS = [
-  { key: 'night', startHour: 0, endHour: 5 },
-  { key: 'astronomical', startHour: 5, endHour: 5.5 },
-  { key: 'nautical', startHour: 5.5, endHour: 6 },
-  { key: 'civil', startHour: 6, endHour: 6.5 },
-  { key: 'golden', startHour: 6.5, endHour: 7.5 },
-  { key: 'day', startHour: 7.5, endHour: 16.5 },
-  { key: 'golden', startHour: 16.5, endHour: 17.5 },
-  { key: 'civil', startHour: 17.5, endHour: 18 },
-  { key: 'nautical', startHour: 18, endHour: 18.5 },
-  { key: 'astronomical', startHour: 18.5, endHour: 19 },
-  { key: 'night', startHour: 19, endHour: 24 },
-];
 
 const fakeSky = {
   todHour: 14,
@@ -187,40 +172,45 @@ const IMPULSES = [
 
 const remote = installRemote({
   impulses: IMPULSES,
+  // 2026-08-18 fix: the Remote's OWN dial (astrolabe-dial.js), matching the
+  // approved mock for real instead of the old createAstrolabe()'s
+  // pre-LANTERN styling — see that module's own header for the full story.
   mountAstrolabeDial: (container) => {
-    remoteDialInstance = createAstrolabe({
-      phaseBands: FAKE_PHASE_BANDS,
+    const pushUpdate = () =>
+      remoteDialInstance.update({
+        hour: fakeSky.todHour,
+        phase: 'day',
+        windDirectionDeg: fakeSky.windDirectionDeg,
+        windSpeed01: fakeSky.windSpeed01,
+        cloudCover01: fakeSky.cloudCover01,
+      });
+    remoteDialInstance = buildAstrolabeDial({
+      // Production tracks a drag live via pumpAstrolabe's own continuous
+      // ~10Hz repaint loop reading the viewer's real env snapshot back —
+      // this harness has no such loop, so it pushes the update synchronously
+      // instead. Same visible result (the dial follows the pointer), simpler
+      // plumbing for a harness with no frame loop to piggyback on.
       onTimeChange: (hour, committed) => {
         fakeSky.todHour = hour;
         log(`time -> ${hour.toFixed(2)} (committed=${committed})`);
+        pushUpdate();
       },
-      onTimeStop: (hour) => log(`time stop -> ${hour}`),
-      onTimeRateChange: (rate) => {
-        fakeSky.rateHoursPerMinute = rate;
-        log(`rate -> ${rate}`);
-      },
-      onTimeModeChange: (mode) => log(`mode -> ${mode}`),
-      onWindDirectionChange: (deg) => (fakeSky.windDirectionDeg = deg),
-      onWindSpeedChange: (v) => (fakeSky.windSpeed01 = v),
-      onCloudChange: (v) => (fakeSky.cloudCover01 = v),
-      onArchetypeChange: (id) => log(`archetype -> ${id}`),
-      onWeatherModeChange: (m) => log(`weather mode -> ${m}`),
-      onWeatherBiomeChange: (id) => log(`biome -> ${id}`),
-      onWeatherVolatilityChange: () => {},
-      onUnpinCloudCover: () => {},
-      onSkyRealismChange: () => {},
-      onGradeEnvChange: () => {},
-      onSceneOverrideChange: () => {},
     });
     container.appendChild(remoteDialInstance.root);
-    remoteDialInstance.update({ ...fakeSky, canSetHour: true, phase: 'day', rising: true });
+    pushUpdate();
   },
   getPosture: () => fakeSky.mode,
   isFlowPlaying: () => fakeSky.rateHoursPerMinute > 0,
   onFlowToggle: () => {
     fakeSky.rateHoursPerMinute = fakeSky.rateHoursPerMinute > 0 ? 0 : 1;
     log(`flow -> ${fakeSky.rateHoursPerMinute > 0 ? 'playing' : 'paused'}`);
-    remoteDialInstance?.update({ ...fakeSky, canSetHour: true, phase: 'day', rising: true });
+    remoteDialInstance?.update({
+      hour: fakeSky.todHour,
+      phase: 'day',
+      windDirectionDeg: fakeSky.windDirectionDeg,
+      windSpeed01: fakeSky.windSpeed01,
+      cloudCover01: fakeSky.cloudCover01,
+    });
   },
   weatherBoard: {
     getWeatherMode: () => (fakeSky.weatherMode === 'almanac' ? 'almanac' : 'director'),

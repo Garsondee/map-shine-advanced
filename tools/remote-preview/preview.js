@@ -258,6 +258,28 @@ const remote = installRemote({
       fakeSky.weatherArchetype = 'custom';
       log(`${axisName} -> ${value}`);
     },
+    // Pace, Sky Light, Atmosphere, Scene override (2026-08-18 fix) — mirrors
+    // boot.js's own real wiring exactly.
+    getWeatherVolatility: () => fakeSky.weatherVolatility ?? 1,
+    onWeatherVolatilityCommit: (v) => {
+      fakeSky.weatherVolatility = v;
+      log(`pace -> x${v}`);
+    },
+    getSkyRealism: () => fakeSky.realism01 ?? 0,
+    onSkyRealismCommit: (v) => {
+      fakeSky.realism01 = v;
+      log(`sky light -> ${v}`);
+    },
+    getGradeEnvStrength: () => fakeSky.gradeEnvStrength ?? 0,
+    onGradeEnvStrengthCommit: (v) => {
+      fakeSky.gradeEnvStrength = v;
+      log(`atmosphere -> ${v}`);
+    },
+    getSceneOverride: () => fakeSky.sceneOverride === true,
+    onSceneOverrideCommit: (enabled) => {
+      fakeSky.sceneOverride = enabled;
+      log(`scene override -> ${enabled}`);
+    },
   },
   onBaseline: (overMs) => {
     fadeToArchetype('clear', overMs); // preview stand-in: "baseline" = clear sky

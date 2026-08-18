@@ -29,6 +29,7 @@ const TOOL_NAME = 'map-shine-advanced';
 const ANCHOR_VIEW_TOOL_NAME = 'map-shine-anchor-view';
 const STUDIO_TOOL_NAME = 'map-shine-studio';
 const REMOTE_TOOL_NAME = 'map-shine-remote';
+const PLAYER_TOOL_NAME = 'map-shine-player';
 
 /**
  * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
@@ -201,6 +202,48 @@ export function registerRemoteButton({ isActive, onToggle }) {
  */
 export function syncRemoteButtonState(active) {
   const tool = ui?.controls?.controls?.tokens?.tools?.[REMOTE_TOOL_NAME];
+  if (!tool) return;
+  tool.active = !!active;
+  ui.controls.render(true);
+}
+
+/**
+ * THE PLAYER TOGGLE (U5, docs/holy/UI-Testament.md §5.5) — a FIFTH tool in
+ * the same `tokens.tools` record, the identical mechanism proven four times
+ * over above (`order: 104`, right after the Remote's `103`).
+ *
+ * `visible: true`, matching the OLD panel's own `TOOL_NAME` button — the
+ * Player room's own content is never GM-only regardless of who opens it
+ * (`ui/rooms/player-shell.js`'s own header explains why), so there is no
+ * reason to hide this button from a GM the way Anchor View/Studio/Remote's
+ * own real GM-authoring surfaces correctly are.
+ * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
+ */
+export function registerPlayerButton({ isActive, onToggle }) {
+  Hooks.on('getSceneControlButtons', (controls) => {
+    const tokenControls = controls?.tokens;
+    if (!tokenControls?.tools) return;
+    if (Object.prototype.hasOwnProperty.call(tokenControls.tools, PLAYER_TOOL_NAME)) return;
+    tokenControls.tools[PLAYER_TOOL_NAME] = {
+      name: PLAYER_TOOL_NAME,
+      title: 'Performance & Graphics (new UI, in progress)',
+      icon: 'fas fa-sliders',
+      toggle: true,
+      order: 104,
+      visible: true,
+      active: isActive(),
+      onChange: (_event, active) => onToggle(active),
+    };
+  });
+}
+
+/** Re-sync this toggle's highlight when the Player room closes itself (its
+ * own Close button) rather than via a click on this exact toolbar button —
+ * mirrors `syncRemoteButtonState` exactly.
+ * @param {boolean} active
+ */
+export function syncPlayerButtonState(active) {
+  const tool = ui?.controls?.controls?.tokens?.tools?.[PLAYER_TOOL_NAME];
   if (!tool) return;
   tool.active = !!active;
   ui.controls.render(true);

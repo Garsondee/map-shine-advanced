@@ -1861,6 +1861,114 @@ remain, re-confirmed this round via `git show HEAD` on every flagged file and li
 this checkpoint's own diff, none were touched this session. The concurrent water-flow session's
 own files remain completely untouched.*
 
+**P15 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U3's remaining two checklist items —
+the Studio CUES department and the Remote cue deck — following the author's own "get this UI
+migration DONE, GO").** §9's own U3 checklist is now FOUR for four: schema+validation (P14),
+persistence (P14), the CUES department, and the Remote deck — all built, not three of four with
+the UI named as a gap.
+
+1. **The CUES department (`ui/rooms/studio/cues-department.js`) — capture, reorder, edit fade
+   time, test-fire, revert, all real.** Ported layout from the mock's `#cueBuild`/`.cueitem`, but
+   two mock affordances turned out to be UNWIRED in the mock ITSELF (checked, not assumed): the
+   per-cue fade-time `<select>` has no `onchange` handler anywhere in the mock's own source, and
+   Capture never actually asks for a name at all (`.cname` is static text). This file fixes both
+   for real rather than porting the mock's own gaps forward: the select is wired to a new
+   `updateCueFadeMs(id, overMs)` (re-validates the WHOLE stack before persisting, same shape as
+   every other mutator), and Capture asks via a native `window.prompt()` — a deliberate, named
+   choice over inventing a new LANTERN dialog for one field, with a cancelled/empty prompt still
+   capturing under a clock-stamped default name so a one-click "capture the moment" gesture can
+   never dead-end. Curve stays DISPLAY-only (a small badge) — the mock has no curve editor either,
+   and adding one is a real, scoped follow-up, not silently skipped. A validity badge (⚠, tooltip
+   = the actual `validateCue` errors) renders per cue, schema-checked live against the real
+   registry, not a static assumption that captured cues are always valid.
+2. **A real collision, found by tracing the data flow before writing code, not live-caught after
+   shipping it.** Test-fire's first design routed a preview through the SAME `fadeState`/
+   `mergeFadeState`/`writeFadeState` path a real cue-fire uses. Tracing `pumpWeatherFades`'s own
+   completion logic (`pendingArchetypeCompletions`, P13) against that design surfaced a genuine
+   bug before it existed: a test that overwrote `fadeState[key]` would hijack whatever REAL,
+   concurrent gesture already owned that key, filing that gesture's own completion either too
+   early (wrong archetype lands) or never (stranded pending forever) — the "replace, don't queue"
+   law working exactly as designed, against the wrong caller. Fixed by architecture, not a guard
+   rail: a cue-test preview (`cueTestPreview`/`testFireCue`/`revertCueTest`/`pumpCueTestPreview`,
+   `boot.js`) never touches `fadeState` at all — it drives `fadeSourceRegistry.write()` directly,
+   riding the SAME per-frame timestamp `pumpWeatherFades` already gets (`pumpAstrolabe`'s own
+   `nowMs`) rather than a second `requestAnimationFrame` registration (`time/one-clock`). Never
+   persisted — a test is this GM's own client only. A second, narrower guard rejects a SECOND
+   `testFireCue` while one is already live (`cueTestSnapshot` non-null) — re-snapshotting mid-test
+   would capture the FIRST test's own animating values as "the original," making revert restore
+   the wrong thing; live-verified in the browser (two rapid Test clicks: the second is refused,
+   the first's own preview and revert both still work correctly, confirmed via the strip staying
+   present and the weather readout unaffected by the second click).
+3. **The Remote cue deck (`ui/rooms/remote/cue-deck.js`) — next-cue card, GO, jump list,
+   restart.** Ported from the mock's `#cueDeck`/`#cueRow`/`#cueCard`/`#goBtn`/`#cueList`,
+   including the domed GO button's own sheen animation (renamed keyframes to `msaGoSheen`,
+   global scope, avoiding a collision with any later same-named rule). `nextIx` is this file's
+   OWN local, positional, unpersisted pointer — §4.3 says outright "sessions are not linear,"
+   and there is no server-side "the active cue is #2" concept for a fired cue to begin with (a
+   finding from wiring the engine half, P14). One real edge case caught and fixed BEFORE it
+   shipped, not after: `nextIx === stack.length` (just fired the last cue — "End of cue list",
+   GO disabled) is a LEGITIMATE terminal state, but a first draft's own clamp
+   (`nextIx >= stack.length → 0`) would have silently wrapped it back to the first cue on every
+   repaint, making "End of cue list" undisplayable. Fixed to `nextIx > stack.length` (only a
+   genuinely impossible index, e.g. the stack shrank under a stale pointer, gets recovered) — the
+   correct version is what's live-verified below (jump-fire the last cue → GO correctly disables,
+   "End of cue list" correctly shows).
+4. **`updateCueFadeMs`/`moveCueOrder` (`boot.js`) — the SAME shape as `captureCueFromLive`.** Both
+   re-validate the WHOLE resulting stack before persisting (a bad edit must not silently corrupt
+   an otherwise-good stack) and both call `MapShine.__remote?.refreshCueDeck()` on success, so a
+   GM editing the stack in the Studio sees the Remote's own deck (open at the same time) repaint
+   without polling — the identical "one writer, many derivers, never polls" shape
+   `refreshWeatherBoard()` already established for weather. `moveCueOrder` swaps two cues' own
+   `order` VALUES (not array position) — the deck/jump-list's real sequence key, per
+   `core/cues-schema.js#orderedCues`'s own contract.
+5. **Named honestly, not silently added or silently missing:** deleting a cue is NOT built this
+   round — not part of §9's own U3 checklist wording, a real, likely near-term follow-up rather
+   than scope creep taken on unasked. Curve is not editable per cue (point 1). A second GM's own
+   "next" pointer on their own open Remote does not sync when THIS client fires or reorders a cue
+   elsewhere — inherent to `nextIx` being positional and local by design (point 3), not a bug to
+   chase.
+6. **Both preview harnesses extended with a real, if throwaway, orchestration layer — not stubs.**
+   `tools/studio-preview/` and `tools/remote-preview/` both now exercise the REAL
+   `core/cues-schema.js` functions (`validateCue`/`validateCueStack`/`orderedCues`/
+   `cueToFadePatch`) and REAL `world/fade-engine.js` math (`computeEasedValue`/`isEntryExpired`)
+   against fake weather stores — only the closure glue (`cueStack`, `wallClockMs`'s
+   `performance.now()` preview stand-in) is throwaway, matching `remote-preview`'s own established
+   `fadeToArchetype`/`tickFades` precedent (P11). This is what made the live verification below
+   possible without a real Foundry scene.
+
+*Verification note: `npx eslint`, `npx prettier --check` clean on every file touched or created
+(`boot.js`, `ui/rooms/studio/{shell,cues-department}.js`, `ui/rooms/remote/{shell,cue-deck}.js`,
+`tools/studio-preview/{preview.js,index.html}`, `tools/remote-preview/preview.js`).
+`node tools/run-tests.mjs`: 27 suites, 11261 assertions, ALL GREEN — unchanged in count from P14
+(this checkpoint is UI wiring + preview-harness orchestration, not new pure-core surface; the one
+transient failure seen mid-session, `water-shore.test.mjs`, was the concurrent water-flow
+session's own WIP, confirmed via `git status` showing it modified/uncommitted outside this
+checkpoint's diff, and gone on the next run). `node tools/verify-structure.mjs`: the same two
+pre-existing violations (`no-gpu-readback`, `time/one-clock`), re-confirmed unchanged; `tools/` is
+outside this wall's scan scope, so the preview harnesses' own `performance.now()` calls (matching
+P11's already-established stand-in pattern) don't and shouldn't appear.
+**Live-verified in the browser (`javascript_tool` DOM inspection — the sandboxed pane stayed
+non-composited/`document.hidden` throughout this session, per the standing limitation, so clicks
+and state were verified directly rather than via screenshot):** Studio — capture (multiple, unique
+orders), reorder (▲ swaps two cues' own order), fade-time edit (select → re-render shows the new
+label), validity display (no false ⚠ on valid cues), test-fire (strip appears, `isCueTestActive`
+flips), revert (strip clears, state resets), the double-test guard (second Test click refused,
+first test's own state untouched). Remote — initial next-cue card, jump-list expand (correct
+next/done classes), GO (advances, marks done, log confirms the real engine call), jump-list
+click-to-fire (jumps AND fires in one click), Restart (resets to the first cue), and the terminal
+"End of cue list" state (GO disabled) — the exact case point 3's fix targets. **Not verified: the
+actual EASED ANIMATION progressing frame-by-frame** — the pane's own non-compositing limitation
+means `requestAnimationFrame` never advances during this session's checks (confirmed via
+`document.hidden`/`visibilityState` mid-test), so only the WIRING (click → real function calls →
+correct resulting state, no exceptions) was directly observed; the underlying easing math itself
+is separately and exhaustively proven by `fade-engine.test.mjs`'s own reload-mid-fade tests, which
+use an arbitrary far-future `nowMs` with no `requestAnimationFrame` dependency at all. **§9's own
+U3 exit gate — "the author stages three cues for a real scene and runs them at the table with GO
+alone" — is now mechanically reachable (all four checklist items genuinely built) but not yet run
+against a real Foundry scene**, named honestly as the literal remaining gap, matching P13's own
+exit-gate note for the identical reason. The concurrent water-flow session's own files remain
+completely untouched.*
+
 ---
 
 ## 13. STATUS LOG

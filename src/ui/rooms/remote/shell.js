@@ -222,6 +222,8 @@ function injectStyle() {
   border-color:var(--shine); color:var(--shine)}
 #${ROOM_ID} .msa-wx-faders{display:flex; flex-direction:column; gap:6px}
 #${ROOM_ID} .msa-wx-bracket{font-size:.62rem; color:var(--ink2); margin-left:6px; white-space:nowrap}
+#${ROOM_ID} .msa-wx-pin{flex:0 0 auto; margin-left:6px; padding:0 4px; font-size:.68rem; line-height:1;
+  cursor:pointer; border:none; background:transparent; color:var(--shine)}
 #${ROOM_ID} .msa-cue-deck{display:flex; flex-direction:column; gap:6px}
 #${ROOM_ID} .msa-cue-label{font-size:.64rem; letter-spacing:.22em; text-transform:uppercase;
   color:var(--ink2); display:flex; align-items:center; gap:6px}

@@ -138,6 +138,7 @@ function driftBracket(biome, axisName) {
  *   getSkyRealism?: () => number, onSkyRealismCommit?: (v: number) => void,
  *   getGradeEnvStrength?: () => number, onGradeEnvStrengthCommit?: (v: number) => void,
  *   getSceneOverride?: () => boolean, onSceneOverrideCommit?: (enabled: boolean) => void,
+ *   getCloudPinned?: () => boolean, onUnpinCloudCover?: () => void,
  * }} ctx
  * @returns {{ getFadeOverMs: () => number, refresh: () => void }}
  */
@@ -220,12 +221,20 @@ export function renderWeatherBoard(container, ctx) {
     paintMode();
     renderChips();
     renderPace();
+    // 2026-08-18 fix, caught live while testing the cloud-pin glyph: neither
+    // mode button ever called renderFaders(), so the pin glyph (Almanac-only)
+    // and the drift-bracket note (also Almanac-only, driftBracket()) both
+    // stayed however they last were until some OTHER trigger rebuilt the
+    // fader rows — a biome-chip click already does this (see renderChips'
+    // own biome handler above), the mode toggle itself just never did.
+    renderFaders();
   });
   driftBtn.addEventListener('click', () => {
     ctx.onWeatherModeChange('almanac');
     paintMode();
     renderChips();
     renderPace();
+    renderFaders();
   });
 
   function renderChips() {
@@ -281,6 +290,22 @@ export function renderWeatherBoard(container, ctx) {
           note.title = `${biome.label} can wander this ${channel.label.toLowerCase()} range on its own in Drift mode.`;
           row.appendChild(note);
         }
+      }
+      // THE CLOUD PIN GLYPH (2026-08-18 fix — gap-audit against the old
+      // astrolabe.js's own Cloud row, astrolabe.js:358-373). The only axis
+      // the Almanac can pin today (weather.js's own `pinnedAxes`) — visible
+      // only in Drift mode while genuinely pinned, same two facts astrolabe.js
+      // keys off, so it can't say "pinned" when Direct mode makes the concept
+      // meaningless. Same `row.appendChild` shape as the drift-bracket note
+      // just above, not a new attachment mechanism.
+      if (mode === 'almanac' && channel.axis === 'cloudCover01' && ctx.getCloudPinned?.()) {
+        const pin = document.createElement('button');
+        pin.type = 'button';
+        pin.className = 'msa-wx-pin';
+        pin.textContent = '📌';
+        pin.title = 'Pinned — the Almanac will not change this. Click to release.';
+        pin.addEventListener('click', () => ctx.onUnpinCloudCover?.());
+        row.appendChild(pin);
       }
       faderHost.appendChild(row);
     }

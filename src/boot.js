@@ -1070,6 +1070,10 @@ function install() {
       container.appendChild(remoteAstrolabe.root);
     },
     getPosture: () => skyScope.sky?.mode,
+    // The Clock-mode pill (2026-08-18 fix) — exactly the old astrolabe.js
+    // instance's own `onTimeModeChange` (see its own registerPanel call
+    // below), the SAME editSky path, not a second one.
+    onSetMode: (mode) => void editSky({ mode }),
     // Play/pause IS the rate (astrolabe-panel.js's own note) — 'playing'
     // means whatever the current rate is, is non-zero.
     isFlowPlaying: () => (skyScope.sky?.rateHoursPerMinute ?? 0) > 0,

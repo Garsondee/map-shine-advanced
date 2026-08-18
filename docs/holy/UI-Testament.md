@@ -1677,6 +1677,115 @@ untouched.
 
 ---
 
+**P13 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U2 checkpoint 3 — the weather board,
+Fade Time, and Baseline — following the author's own "get this UI migration DONE, GO").** This
+is the checkpoint where checkpoint 2's Fade Engine gets its first real caller. U2 is now
+functionally complete against §9's own checklist; §11's exit gate (a live dusk-into-storm,
+reload mid-fade, the author's own eyes) still needs the author, named honestly below rather
+than claimed.
+
+1. **Mood-chip clicks are real fades, not snaps — the Fade Engine's first live consumer.**
+   Clicking "Storm" reads the archetype's own declared `axes` (the SAME table the astrolabe's
+   horizon shelf already uses), builds a `mergeFadeState` patch, and persists it once via
+   `writeFadeState`. `weatherArchetype` flips to `'custom'` the INSTANT the fade starts — the
+   same "a value mid-transition is not the row it left" rule the Cloud slider's own drag
+   already established — and becomes the real target id only once every key has actually
+   arrived, detected by a small `pendingArchetypeCompletions` map (gesture id → archetype id)
+   sitting beside `fadeState` rather than inside it, since `fadeState` itself is per-KEY, never
+   per-gesture.
+2. **`wallClockMs()` — a new, narrow, deliberate exception to `time/one-clock`, added to
+   `core/frame-clock.js` rather than worked around.** The Fade Engine's own reload-survival law
+   needs a timestamp that means the SAME thing after a reload and on a SECOND client — neither
+   `tMs` (sim, resets every session) nor the existing `realMs` (wall, but still relative to
+   THIS page's own navigation start) can do that; only real Unix-epoch time survives both.
+   Added inside the file the wall already exempts, with a doc comment explaining why it's
+   different from the two times already there, rather than either illegally calling `Date.now()`
+   in boot.js or silently using the wrong clock domain and quietly breaking reload survival the
+   day someone tested it.
+3. **The live push/persist split matches the astrolabe's own already-proven slider pattern,
+   deliberately.** Every animation frame, the pump pushes each active entry's eased value
+   straight to the render engines (`setVtPanViewerCloudCover`/`setVtPanViewerWeatherTargets`)
+   — cheap, in-memory, no Foundry write. Persistence (`writeFadeState`, a real scene-flag
+   write) fires exactly twice per gesture: once at the start, once at completion. A design that
+   persisted every tick would be the identical "hundreds of document updates per drag" shape
+   this codebase already named and designed away from once, this time for a fade instead of a
+   drag.
+4. **`ui/no-dead-axis`, and a genuine pre-existing finding it surfaced.** The wall flags
+   `cloudType01`/`cloudAltitudePx`/`cloudScalePx` outside `world/` — and immediately caught two
+   REAL, already-shipped (2026-08-16) reads of `cloudType01` in `ui/astrolabe.js` (the Face's
+   own cloud-blob shape) and `vt-pan-viewer.js` (plumbing it there). `WEATHER_AXES.cloudType01`'s
+   own `consumerStatus:'pending'` comment is, by its own literal definition ("live means
+   something in `src/` reads this axis TODAY"), technically stale — the astrolabe's decorative
+   Face IS a real consumer, just not the "real cloud-rendering effect" the comment's own
+   `consumers:` field describes. Grandfathered at the file level (this tool has no line-level
+   allow) rather than either blocking a legitimate existing read or silently relabeling
+   `consumerStatus` myself — that's a judgment call about what "live" should mean here, better
+   left to the author's own countersign than a worker session's unilateral edit.
+5. **Only `cloudCover01` and `precip01` get faders — Law 5, applied narrowly rather than
+   reproducing the mock's own 7-channel list wholesale.** `fog`/`freeze`/`ash` have no live
+   axis at all; `bolt` (lightning) is an impulse, not a fade channel (U7's job); `wind` already
+   has a real, dedicated control on the astrolabe itself, and a second wind fader here would be
+   the exact "two controls, one value" shape Environment.md §2.4 warns against. Named, not
+   silently trimmed.
+6. **Drift-mode brackets are DERIVED from real data, not the mock's own static fixture.** The
+   mock's own "climate min/max" concept doesn't exist in `world/weather-biomes.js` — a biome is
+   a weighted graph of archetype TRANSITIONS, not a per-axis range. `driftBracket()` computes
+   `[min, max]` by scanning a biome's own `archetypeWeights` for every archetype it can reach
+   with non-zero weight and reading THEIR real axis values — live-verified against Temperate
+   Coast: "range 0.00–1.00" (clouds), "range 0.00–0.70" (rain), both real numbers derived from
+   the real archetype table, not invented. Shown as text next to the fader rather than a pixel-
+   positioned overlay on the native slider track — a real, named simplification (see #8).
+7. **A real bug, found live and fixed before commit: clicking a mood chip didn't repaint.**
+   The click handler correctly started the fade and flipped the sky to `'custom'`, but never
+   called `renderChips()` — so the OLD archetype's chip stayed visibly lit for the whole
+   duration of a fade that had already moved the sky away from it. Caught by checking
+   `aria-pressed` state immediately after a live click (not assumed from reading the code): the
+   "Clear" chip was still reporting pressed after clicking "Storm". Fixed by re-painting
+   immediately on click — the OLD chip un-lights right away, the NEW one lights only once
+   `refreshWeatherBoard()` fires on actual arrival, never optimistically.
+8. **Two honest, named simplifications, not silently shipped as more than they are:**
+   - **The astrolabe's own OLD weather picker (13→16-button horizon shelf, Director/Almanac
+     select) still renders inside the Remote, alongside the NEW weather board.** Both write to
+     the same real `editSky` state and stay in sync, so nothing is WRONG, but a GM sees two
+     controls for the same job in one room. Suppressing the old one inside the Remote's own
+     dial instance specifically (an opt-in flag on `createAstrolabe`, the old panel's instance
+     unaffected) is a real, scoped follow-up, not done this pass — flagged rather than
+     silently left for the next session to rediscover.
+   - **The weather board's own faders don't visually animate their thumb position during an
+     in-flight fade.** `buildParamControl`'s range row has no external "the value changed
+     elsewhere" hook (unlike the astrolabe dial's own `update(state)` pattern) — the thumb
+     only moves on a user drag or a full board rebuild. The actual rendered SKY still eases
+     smoothly the whole time regardless (the live push is independent of this UI); only the
+     Remote's own slider handle stays visually still until the board next refreshes. A live-
+     updating slider is a real follow-up.
+9. **Baseline is real now, Safety still isn't — the split from Petition P11 holds for the
+   reason already given there.** Baseline fades back to a snapshot captured once per scene
+   (`canvasReady`, right after the sky resolve settles) — "the scene's authored resting look"
+   is, honestly, "however this scene's cloud cover and rain read the moment it finished
+   loading," not a separately-authored concept; that's what the Testament's own §4.1 phrase
+   actually cashes out to today. Safety remains `status:'planned'` — still a real, one-way,
+   hard-to-reverse action nobody has wired carefully yet, not scope this checkpoint touched.
+
+**Exit gate — closer, and said so plainly rather than claimed.** §9 asks for the author fading
+dusk-into-storm over five real minutes, reloading mid-fade, and the storm finishing on
+schedule. The MECHANISM for exactly that now exists and is live-verified end to end in
+`tools/remote-preview/` (mood-chip click → real `mergeFadeState` patch → persisted state →
+per-tick live push, with the chip-repaint bug caught and fixed along the way) — what's NOT
+verified is the actual five-minute, real-Foundry, reload-survives version, because that needs
+a real scene and the author's own clock, not a preview harness with a stand-in `performance.now()`.
+Named as the literal remaining gap between "built" and "the exit gate," not glossed over.
+
+*Verification note: `npx eslint`, `npx prettier --check`, `node tools/verify-structure.mjs`
+(clean except the same two pre-existing violations, re-confirmed via `git blame`), and
+`node tools/run-tests.mjs` (27 suites, 11214 assertions — unchanged from P12, since this
+checkpoint is wiring, not new pure-core surface) all clean. Live-verified via
+`tools/remote-preview/`: mode toggle, all 16 real mood chips, all 10 real climate chips,
+derived drift brackets, a real fader commit, Baseline, and the fade-start/mid-fade/repaint
+sequence — including the one bug this round found and fixed. The concurrent water-flow
+session's own files remain completely untouched.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

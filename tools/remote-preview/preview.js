@@ -260,7 +260,28 @@ const remote = installRemote({
     listCues: () => orderedCues(cueStack),
     fireCue: (id) => fireCueById(id),
   },
+  // THE DEBUG ROW (2026-08-18 fix) — production pushes a real snapshot via
+  // MapShine.__remote.updateDebugStrip() from bootHeartbeat(); this harness
+  // has no such loop, so a fake ~250ms tick stands in below, same spirit as
+  // tickFades' own preview-only stand-in for the real pump.
+  debugStrip: {
+    onProbe: () => log('probe armed (preview stand-in)'),
+    onExport: () => log('export fired (preview stand-in)'),
+  },
 });
+
+const fakeSparkHistory = [];
+setInterval(() => {
+  const ratio = 0.7 + Math.random() * 0.3;
+  fakeSparkHistory.push({ ratio, level: ratio < 0.6 ? 'warn' : 'ok' });
+  if (fakeSparkHistory.length > 24) fakeSparkHistory.shift();
+  remote.updateDebugStrip({
+    fpsText: `${(ratio * 120).toFixed(0)}fps`,
+    msText: (1000 / (ratio * 120)).toFixed(1),
+    vramText: '1.2/2.5G',
+    sparkHistory: fakeSparkHistory,
+  });
+}, 250);
 
 requestAnimationFrame(tickFades);
 

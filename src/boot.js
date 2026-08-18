@@ -384,6 +384,8 @@ import {
   syncStudioButtonState,
   registerRemoteButton,
   syncRemoteButtonState,
+  registerPlayerButton,
+  syncPlayerButtonState,
   watchSceneWallStructure,
   watchDoorOpenings,
   readSceneDoors,
@@ -436,6 +438,7 @@ import {
   endFloorTransition,
   installStudio,
   installRemote,
+  installPlayer,
 } from './ui/index.js';
 import {
   SORT_LAYERS,
@@ -975,6 +978,12 @@ function install() {
     // disagree about which kind a given effect opens.
     listPaintableEffects: () => listPaintableEffects(),
     armBrush: (effectId) => paintAffordance(effectId)?.onAdd?.(),
+    // THE SYSTEM DEPARTMENT (U5) — getSystemPanelCtx is declared much
+    // further down install() (it closes over PROFILE_CHOICE_LIST/
+    // ENABLE_CHOICE_LIST, built right next to the old settings panel's own
+    // registration) — the identical closure-reference safety every other
+    // ctx function on this call already relies on.
+    getSystemPanelCtx: () => getSystemPanelCtx(),
   });
   // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — side-by-side with
   // both the old panel and the Studio. Every callback below is a closure
@@ -1028,6 +1037,11 @@ function install() {
       fireCue: (id) => fireCueById(id),
     },
   });
+  // THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — safe to construct
+  // unconditionally for every client, GM or not (its own header explains
+  // why: unlike Studio/Remote, nothing inside it is ever GM-only). Same
+  // closure-reference safety as installStudio's own getSystemPanelCtx above.
+  MapShine.__player = installPlayer({ getSystemPanelCtx: () => getSystemPanelCtx() });
   // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
   // debug panel and returns a hydrate hook the canvasReady handler calls to pull
   // any saved paint for the newly-loaded scene (docs/planning/Authoring-and-Distribution.md).
@@ -9053,6 +9067,58 @@ function install() {
     { zone: 'settings', order: -100 } // pin above anything else ever routed to Settings
   );
 
+  /**
+   * The SAME flattened, effect-agnostic shape `buildSettingsPanel`'s own
+   * `deps` just above already use, reusing the SAME `PROFILE_CHOICE_LIST`/
+   * `ENABLE_CHOICE_LIST`/`effectRows` construction so the old panel and the
+   * new SYSTEM department/Player room can never disagree about what an
+   * effect's row looks like. `ui/rooms/system-panel.js` calls this fresh on
+   * every one of ITS OWN internal re-renders (never caches it), so this
+   * itself never needs to be memoized either — `effectRegistry.list()` is
+   * read fresh here for the identical reason the old panel's own buildFn
+   * reads it fresh (a captured list risks missing an effect registered
+   * after this point in `install()`).
+   * @returns {object} the ctx `ui/rooms/system-panel.js#renderSystemPanel` expects (minus `isGM`).
+   */
+  function getSystemPanelCtx() {
+    return {
+      read: (key) => readSetting(MODULE_ID, key),
+      write: (key, value) => writeSetting(MODULE_ID, key, value),
+      profiles: PROFILE_CHOICE_LIST,
+      enableChoices: ENABLE_CHOICE_LIST,
+      effectRows: effectRegistry.list().map((m) => ({
+        id: m.id,
+        title: m.title ?? m.id,
+        photosensitive: m.a11y?.photosensitive === true,
+        playerKey: effectEnableKey(m.id, 'player'),
+        gmKey: effectEnableKey(m.id, 'gm'),
+      })),
+      keys: {
+        msaEnabled: GLOBAL_SETTING_KEYS.msaEnabled,
+        profile: GLOBAL_SETTING_KEYS.profile,
+        reducePhotosensitive: GLOBAL_SETTING_KEYS.reducePhotosensitive,
+        reducedMotion: GLOBAL_SETTING_KEYS.reducedMotion,
+        theme: GLOBAL_SETTING_KEYS.theme,
+      },
+    };
+  }
+
+  /**
+   * Apply the two U5 a11y settings to the document root — the ONE place
+   * `dataset.theme`/`dataset.reduceMotion` ever get set. `ui/tokens.js`'s
+   * own injected CSS already has real rules keyed off both attributes
+   * (every room's colours key off `[data-theme]`; `[data-reduce-motion="1"]`
+   * suppresses transitions) — this function is the missing other half that
+   * actually WRITES them, completing what was previously CSS with nothing
+   * driving it. Called once at canvasReady and again from the settings
+   * adapter's own onChange (below), never polled.
+   */
+  function applyUiPreferences() {
+    document.documentElement.dataset.theme = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.theme) || 'dark';
+    document.documentElement.dataset.reduceMotion =
+      readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.reducedMotion) === true ? '1' : '0';
+  }
+
   // A PASSIVE READOUT proving the reader is finding windows rather than silently
   // doing nothing (feedback_instruments_must_not_lie): how many framed windows
   // were detected last frame, how many are actually casting (capped at the
@@ -9555,7 +9621,6 @@ function install() {
     'foamCrest',
     'breakFoam',
     'foamTail',
-    'obstacleFoam',
     'maskProximityFoam',
     'totalFoam',
   ];
@@ -10661,8 +10726,20 @@ function install() {
             // hand-listed six, which is what let bloom, water, fluid, specular
             // and window light miss this trigger entirely.
             reapplyAll('settings change');
+            // U5's own two a11y settings (theme/reduced-motion) aren't an
+            // EFFECT_REAPPLIERS entry — they drive the UI chrome, not the
+            // rendered map — so they get their own explicit re-apply here
+            // rather than silently riding along inside reapplyAll.
+            applyUiPreferences();
+            MapShine.__player?.refresh();
           },
         });
+        // Apply once immediately too — `init` runs before any settings
+        // CHANGE could ever fire, so without this the theme/reduce-motion
+        // data attributes would stay at their bare HTML default (unset)
+        // until the first edit, ignoring whatever a returning player last
+        // chose.
+        applyUiPreferences();
       } catch (err) {
         log.error('MSA settings registration failed:', err);
       }
@@ -10757,6 +10834,18 @@ function install() {
         },
       });
       MapShine.__remote?.onOpenChange((open) => syncRemoteButtonState(open));
+
+      // THE PLAYER TOGGLE (U5) — the fifth tool, visible:true unlike the
+      // three GM-only ones above (foundry/scene-controls-button.js#
+      // registerPlayerButton's own doc explains why this one differs).
+      registerPlayerButton({
+        isActive: () => MapShine.__player?.isOpen() ?? false,
+        onToggle: (active) => {
+          if (active) MapShine.__player?.open();
+          else MapShine.__player?.close();
+        },
+      });
+      MapShine.__player?.onOpenChange((open) => syncPlayerButtonState(open));
     });
     Hooks.once('ready', () => {
       // A `ready`-time safety net for the calendar install above: by `ready`,

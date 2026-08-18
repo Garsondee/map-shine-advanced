@@ -2672,6 +2672,96 @@ before staging.*
 
 ---
 
+**P23 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; the drag +
+DEBUG-row round — a third live look the same session, both a mock and a
+"WIP" screenshot labelled explicitly this time).** The author's report,
+verbatim: *"Buttons around the astrolabe are still misplaced, no
+performance section, I can't drag the header around to move it, lots of UI
+elements aren't in place yet. Keep working."* Three distinct threads:
+
+1. ⚠️ **The corner-cluster complaint was RE-INVESTIGATED, not re-assumed
+   fixed.** Confirmed P22's own commits are still the latest touch to
+   `shell.js`/`astrolabe-panel.js` (not reverted), confirmed no second,
+   conflicting `.msa-corner` rule exists anywhere in `src/` (grepped), and
+   re-derived the WIP screenshot's own geometry by hand: the TL cluster's
+   measured footprint and its offset from the ring's own bounding-box corner
+   both matched the mock's design within normal screenshot-measurement
+   tolerance. No code defect found this round to explain "still misplaced."
+   Named honestly rather than claimed fixed a second time: the likely
+   explanations are a stale build on the author's own client, or a
+   proportion/framing difference this environment's continuing lack of a
+   working screenshot tool can't resolve with confidence — not a re-guess
+   at a fix with nothing new to test against.
+2. **`ui/widgets/draggable.js` (new)** ports the mock's own `makeDraggable()`
+   verbatim — one shared implementation for Remote, Studio, AND Player
+   rather than three copies that could drift, following this session's own
+   established "one implementation, not a second that could disagree"
+   discipline (P20's Gust promotion, P11's Baseline/Safety split). ⚠️ **Found
+   in the process, not assumed: Studio's own `.room-head` already shipped
+   the mock's `cursor:grab`/`:active{cursor:grabbing}` CSS with ZERO
+   listener behind it** — looked draggable, silently did nothing, the exact
+   "looks live, does nothing" shape Law 5 exists to catch. Player had
+   neither the cursor nor the listener. Both wired for real now, off the
+   same shared function. Ignores pointerdown on the header's own interactive
+   children so minimize/close/camera-path/etc. stay clickable — verified
+   live, not assumed from reading the mock's own equivalent guard.
+3. **`ui/rooms/remote/debug-strip.js` (new)** ports the mock's own
+   `#debugStrip` — whose OWN tooltips already read "(planned)" on HUD/probe/
+   export and "Mock value — the real strip reads the VRAM ledger" on its
+   vram figure, an explicit acknowledgment this round only had to act on,
+   not discover. fps/ms/vram/the 24-bar sparkline are REAL:
+   `diag/perf-strip.js#buildPerfStripModel` — already the old panel's own
+   model builder — reshapes the SAME heartbeat stats object boot.js already
+   computes every ~250ms, never a second, independently-tuned health
+   computation. `probe`/`export` call real, already-shipping
+   `MapShine.armPixelProbe`/`MapShine.flight.export`. `HUD` stays honestly
+   `planned`: `diag/perf-hud.js#createPerfHud` is real but reachable only
+   through the old panel's `registerPanel` mechanism today — matching the
+   mock's own tooltip rather than overreaching past it.
+4. ⚠️⚠️ **CAUGHT BY ESLINT, NOT BY EYE: the first wiring attempt referenced a
+   variable with no real scope to live in.** `bootHeartbeat()` is a
+   standalone top-level function, textually separate from `install()` and
+   with NO lexical access to its locals — unlike `lastNonZeroRateHoursPerMinute`
+   and every other closure-safety pattern this session has relied on so far,
+   which all live INSIDE `install()`'s own body. A first draft declared
+   `debugStripSnapshot` beside `lastNonZeroRateHoursPerMinute` assuming the
+   identical safety applied; `no-undef` at the heartbeat's own usage site
+   caught it before a single commit landed. Redesigned to PUSH a fresh
+   snapshot as `updateDebugStrip(snapshot)`'s own argument each tick,
+   matching `remoteAstrolabe.update(payload)`'s already-established shape,
+   rather than a pull through a shared variable that was never actually
+   shared.
+5. **Both the Remote and Studio preview harnesses' own drag wiring, and the
+   Remote's own fake ~250ms DEBUG tick, verified live** — `pointerdown`/
+   `pointermove`/`pointerup` dispatched programmatically moved each room by
+   exactly the simulated pointer delta, `right`/`bottom` correctly cleared
+   in favour of `left`/`top`; the minimize button still fired correctly
+   afterward (the interactive-child guard holds); all 24 spark bars filled
+   with real varying heights within two ticks; probe/export both logged
+   their stand-in confirmations on click.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on every file
+touched (one real `no-undef` caught and fixed pre-commit, finding 4 above).
+`node tools/run-tests.mjs`: 27 suites, 11508 passed, 0 failed, ALL GREEN.
+`node tools/verify-structure.mjs`: the same two pre-existing violations only
+— the water session's own transient `graph/reachable-from-boot` break (seen
+mid-round in the prior petition) had already resolved itself by this round's
+own final check, confirmed as that session's own progress via `git diff`,
+not this work's to fix either way. Live-verified in the browser via both
+`tools/remote-preview/` and `tools/studio-preview/` (finding 5, above), zero
+console errors on either. **Not verified: the author's own live Foundry
+session**, same standing gap named in P21/P22 — and per finding 1 above,
+specifically NOT re-claimed fixed for the corner-cluster complaint this
+round without something new to point at. The concurrent water-flow
+session's own files (everything under `src/effects/water/`, `src/diag/
+perf-zones.js`'s new water-sim zone, `src/effects/index.js`'s new
+`createWaterSimSubsystem` export, `vt-pan-viewer.js`, `docs/planning/
+Water-Simulation-Turn.md`, `tools/shader-lab/bench-water.js`) remain
+completely untouched, confirmed by diffing every touched file individually
+before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

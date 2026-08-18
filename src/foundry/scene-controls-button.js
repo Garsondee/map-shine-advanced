@@ -27,6 +27,7 @@
 
 const TOOL_NAME = 'map-shine-advanced';
 const ANCHOR_VIEW_TOOL_NAME = 'map-shine-anchor-view';
+const STUDIO_TOOL_NAME = 'map-shine-studio';
 
 /**
  * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
@@ -112,6 +113,51 @@ export function registerAnchorViewModeButton({ isActive, onToggle }) {
  */
 export function syncAnchorViewModeButtonState(active) {
   const tool = ui?.controls?.controls?.tokens?.tools?.[ANCHOR_VIEW_TOOL_NAME];
+  if (!tool) return;
+  tool.active = !!active;
+  ui.controls.render(true);
+}
+
+/**
+ * THE STUDIO TOGGLE (U1, docs/holy/UI-Testament.md §9) — a THIRD tool in the
+ * same `tokens.tools` record, the identical low-risk mechanism proven twice
+ * already above (`order: 102`, right after Anchor View's `101`). This is the
+ * side-by-side rollout switch: the old panel's own button stays exactly as
+ * it is, this one opens the new Studio next to it, and nothing about either
+ * button's own behaviour changes based on the other existing.
+ *
+ * GM-ONLY, matching Anchor View's own reasoning: the Studio is an authoring
+ * surface (EFFECTS/PAINTER/SCENE/CUES/LAB) with no player-facing content of
+ * its own yet — SYSTEM (U5), "restyled, IS the player face" per the
+ * Testament, is a separate, later surface, not a reason to show a GM-only
+ * shell's toggle to a non-GM today.
+ * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
+ */
+export function registerStudioButton({ isActive, onToggle }) {
+  Hooks.on('getSceneControlButtons', (controls) => {
+    const tokenControls = controls?.tokens;
+    if (!tokenControls?.tools) return;
+    if (Object.prototype.hasOwnProperty.call(tokenControls.tools, STUDIO_TOOL_NAME)) return;
+    tokenControls.tools[STUDIO_TOOL_NAME] = {
+      name: STUDIO_TOOL_NAME,
+      title: 'MSA Studio (new UI, in progress)',
+      icon: 'fas fa-palette',
+      toggle: true,
+      order: 102,
+      visible: game.user?.isGM === true,
+      active: isActive(),
+      onChange: (_event, active) => onToggle(active),
+    };
+  });
+}
+
+/** Re-sync this toggle's highlight when the Studio closes itself (its own
+ * Close button) rather than via a click on this exact toolbar button —
+ * mirrors `syncControlPanelButtonState` exactly.
+ * @param {boolean} active
+ */
+export function syncStudioButtonState(active) {
+  const tool = ui?.controls?.controls?.tokens?.tools?.[STUDIO_TOOL_NAME];
   if (!tool) return;
   tool.active = !!active;
   ui.controls.render(true);

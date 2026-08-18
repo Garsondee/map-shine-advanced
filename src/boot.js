@@ -366,6 +366,8 @@ import {
   syncControlPanelButtonState,
   registerAnchorViewModeButton,
   syncAnchorViewModeButtonState,
+  registerStudioButton,
+  syncStudioButtonState,
   watchSceneWallStructure,
   watchDoorOpenings,
   readSceneDoors,
@@ -410,6 +412,7 @@ import {
   beginFloorTransition,
   updateFloorTransitionProgress,
   endFloorTransition,
+  installStudio,
 } from './ui/index.js';
 import {
   SORT_LAYERS,
@@ -918,6 +921,13 @@ function install() {
   installFlightRecorder(MapShine);
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
   installDebugPanel(MapShine);
+  // THE STUDIO (U1, docs/holy/UI-Testament.md §5, §9) — the new LANTERN
+  // Studio shell, side-by-side with the panel above during rollout. Takes
+  // `MapShine.debug` explicitly (never a global read — see shell.js's own
+  // doc) so its LAB department can mount the SAME reports/actions/panels
+  // registry `installDebugPanel` just built, and so its rail can gate LAB
+  // on the same `isGM()` the old panel already uses.
+  MapShine.__studio = installStudio({ debugPanel: MapShine.debug });
   // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
   // debug panel and returns a hydrate hook the canvasReady handler calls to pull
   // any saved paint for the newly-loaded scene (docs/planning/Authoring-and-Distribution.md).
@@ -5802,6 +5812,54 @@ function install() {
     { zone: 'workshop', effect: 'water', order: 30 }
   );
 
+  // THE STUDIO'S OWN WATER CARD (U1, docs/holy/UI-Testament.md §9's exit
+  // gate names water specifically) — same real functions/data as the panel
+  // above, through registerEffectCard (never a second registry; see ui/
+  // rooms/studio/shell.js's own header for why the Studio never imports
+  // effects/ or effectRegistry directly). `filterCategory` is this
+  // session's own proposal for the category strip — no per-effect taxonomy
+  // exists in src/ yet; see Petition P10.
+  MapShine.__studio?.registerEffectCard('water', () => {
+    const readLive = () => water.getReadout();
+    const maskStatus = (() => {
+      try {
+        return maskAuthority.authoredStatus(activeFloorContext?.levelId, 'water');
+      } catch (_) {
+        return null;
+      }
+    })();
+    return {
+      id: 'water',
+      icon: 'water',
+      title: 'Water',
+      accVar: '--c-atmos',
+      filterCategory: 'surface',
+      tier: {
+        tier: readLive().perfTier,
+        maxTier: readLive().maxPerfTier,
+        source: readLive().perfTierSource,
+      },
+      mask: { suffix: maskKindById('water')?.suffixes?.[0] ?? '_Water', found: maskStatus?.source === 'authored' },
+      presets: Object.keys(WATER_PRESETS),
+      onPresetPick: (name) => {
+        const params = waterPreset(name);
+        if (!params) {
+          log.error(`water preset '${name}' not found — see WATER_PRESETS in effects/water/water.js`);
+          return;
+        }
+        MapShine.setWater(params);
+      },
+      schema: WATER_PARAMS,
+      fohKeys: ['depth', 'pollution', 'opacity', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+      getValue: (id) => readLive().params?.[id] ?? WATER_PARAMS[id]?.default,
+      onChange: (id, value) => MapShine.setWater({ [id]: value }),
+      enabled: readLive().enabled,
+      onToggleEnabled: (next) => MapShine.setWater({ enabled: next }),
+      onPaint: paintAffordance('water')?.onAdd,
+      status: () => collapsedStatusLine({ enabled: readLive().enabled }),
+    };
+  });
+
   // FLUID (docs/planning/Fluid.md) — goo in glass tubes.
   MapShine.debug.registerPanel(
     'fluid-panel',
@@ -10068,6 +10126,18 @@ function install() {
           else MapShine.__anchorViewMode.exit();
         },
       });
+
+      // THE STUDIO TOGGLE (U1) — the third tool, side-by-side rollout: opens
+      // the new Studio next to the old panel, changes nothing about either
+      // existing button (foundry/scene-controls-button.js#registerStudioButton).
+      registerStudioButton({
+        isActive: () => MapShine.__studio?.isOpen() ?? false,
+        onToggle: (active) => {
+          if (active) MapShine.__studio?.open();
+          else MapShine.__studio?.close();
+        },
+      });
+      MapShine.__studio?.onOpenChange((open) => syncStudioButtonState(open));
     });
     Hooks.once('ready', () => {
       // A `ready`-time safety net for the calendar install above: by `ready`,

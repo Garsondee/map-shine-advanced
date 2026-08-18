@@ -295,6 +295,10 @@ export { registerControlPanelButton, syncControlPanelButtonState } from './scene
 // THE ANCHOR VIEW TOGGLE — a second, GM-only tool just below the MSA button
 // that opens ui/anchor-view-mode.js (see scene-controls-button.js's own doc).
 export { registerAnchorViewModeButton, syncAnchorViewModeButtonState } from './scene-controls-button.js';
+// THE STUDIO TOGGLE (U1) — a third, GM-only tool that opens the new LANTERN
+// Studio side-by-side with the old panel during rollout (see scene-controls-
+// button.js's own doc for why this is the same proven mechanism, twice over).
+export { registerStudioButton, syncStudioButtonState } from './scene-controls-button.js';
 
 // THE SCENE EXPORTER (2026-08-10, author directive) — the one human-operated
 // bridge to an assistant working on a SEPARATE, disposable bench world: the

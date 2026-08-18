@@ -12,7 +12,7 @@
  * http://localhost:8934/tools/remote-preview/index.html
  */
 import { installTokens, THEMES } from '../../src/ui/tokens.js';
-import { installRemote, buildAstrolabeDial } from '../../src/ui/index.js';
+import { installRemote, buildAstrolabeDial, phaseDisplayName } from '../../src/ui/index.js';
 import {
   WEATHER_ARCHETYPES,
   mergeFadeState,
@@ -90,6 +90,25 @@ function fadeToArchetype(archetypeId, overMs) {
   pendingCompletions.set(gestureId, archetypeId);
   fakeSky.weatherArchetype = 'custom';
   log(`fading -> ${archetype.label} over ${overMs}ms`);
+  // Synchronous, not just the tickFades() rAF loop below — this pane's own
+  // requestAnimationFrame doesn't reliably fire without OS focus
+  // (feedback_sandboxed_browser_pane_lacks_os_focus), so a direct gesture
+  // giving itself immediate feedback (same shape every other harness action
+  // in this file already uses) is what actually makes this testable here.
+  remote.updateNowPlaying({ label: buildNowPlayingLabel(nowMs) });
+}
+// Mirrors boot.js's own buildNowPlayingLabel exactly (2026-08-18 fix) --
+// same two real states (weather fade in flight / settled default), same
+// narrower-than-the-mock scope. `'day'` matches every other pushUpdate()
+// call in this harness, which has no real phase computation either.
+function buildNowPlayingLabel(nowMs) {
+  const fading = Object.entries(fadeState).find(([key, e]) => key.startsWith('weather.') && !isEntryExpired(e, nowMs));
+  if (fading) {
+    const entry = fading[1];
+    const remainS = Math.max(0, Math.round((entry.startedAtMs + entry.overMs - nowMs) / 1000));
+    return `Fading to ${entry.label ?? 'a new sky'} — ${remainS}s left`;
+  }
+  return `Holding — ${phaseDisplayName('day', true)}`;
 }
 function tickFades() {
   const nowMs = performance.now();
@@ -109,6 +128,7 @@ function tickFades() {
   }
   fadeState = pruneExpired(fadeState, nowMs);
   if (anyCompleted) remote.refreshWeatherBoard();
+  remote.updateNowPlaying({ label: buildNowPlayingLabel(nowMs) });
   requestAnimationFrame(tickFades);
 }
 
@@ -361,3 +381,11 @@ document.getElementById('themeBtn').addEventListener('click', () => {
 });
 
 remote.open();
+// AFTER open(), not before — updateNowPlaying's own `if (!bodyBuilt) return`
+// guard (shell.js) no-ops any call before the Remote's lazy first build,
+// and open() is what triggers that build. An immediate first paint, not
+// just the rAF loop above — same reasoning as fadeToArchetype's own
+// synchronous call (this pane's own rAF doesn't reliably fire without OS
+// focus), so the label shows real text from the very first render rather
+// than staying on shell.js's own hardcoded "Steady" default.
+remote.updateNowPlaying({ label: buildNowPlayingLabel(performance.now()) });

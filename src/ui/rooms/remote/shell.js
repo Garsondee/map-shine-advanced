@@ -331,10 +331,12 @@ function injectStyle() {
 #${ROOM_ID} .msa-debug-btn:hover{border-color:var(--c-system); color:var(--ink0)}
 #${ROOM_ID} .msa-debug-btn.msa-planned{border-style:dashed; border-color:var(--fail); color:var(--fail)}
 #${ROOM_ID} .msa-debug-spark{display:flex; align-items:flex-end; gap:1px; height:15px; width:52px; flex:none}
+/* Background is set per-bar, inline, by debug-strip.js's own fpsBlendColor
+   (2026-08-18 fix, author's explicit fps-threshold spec) -- a continuous
+   blend has no fixed set of classes to define here; the background colour
+   rule below is only the pre-first-update default. */
 #${ROOM_ID} .msa-debug-spark i{flex:1; min-width:1px; height:20%; border-radius:1px 1px 0 0;
   background:var(--ok); transition:height .25s ease, background .25s ease}
-#${ROOM_ID} .msa-debug-spark i.warn{background:var(--warn)}
-#${ROOM_ID} .msa-debug-spark i.bad{background:var(--fail)}
 #${ROOM_ID} .msa-remote-foot{display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; border-top:1px solid var(--line); flex:none}
 #${ROOM_ID} .msa-remote-foot a, #${ROOM_ID} .msa-remote-foot button{flex:1 1 auto; min-width:0; text-align:center;
   padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--bg2); color:var(--ink1);

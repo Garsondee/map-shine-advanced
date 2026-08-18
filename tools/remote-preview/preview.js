@@ -360,12 +360,18 @@ const remote = installRemote({
 
 const fakeSparkHistory = [];
 setInterval(() => {
-  const ratio = 0.7 + Math.random() * 0.3;
-  fakeSparkHistory.push({ ratio, level: ratio < 0.6 ? 'warn' : 'ok' });
+  // Widened range (2026-08-18 fix) -- 0.7-1.0 never dipped low enough to
+  // exercise fpsBlendColor's own yellow/red bands (35/25fps), so the fixed
+  // 0-1.4 sweep below covers "well above 60" through "well below 25" over
+  // one slow cycle, giving the harness something real to demonstrate the
+  // author's own fps-threshold spec against.
+  const ratio = 0.1 + ((Math.sin(performance.now() / 4000) + 1) / 2) * 1.3;
+  const fps = ratio * 90;
+  fakeSparkHistory.push({ ratio, level: ratio < 0.6 ? 'warn' : 'ok', fps });
   if (fakeSparkHistory.length > 24) fakeSparkHistory.shift();
   remote.updateDebugStrip({
-    fpsText: `${(ratio * 120).toFixed(0)}fps`,
-    msText: (1000 / (ratio * 120)).toFixed(1),
+    fpsText: `${fps.toFixed(0)}fps`,
+    msText: (1000 / fps).toFixed(1),
     vramText: '1.2/2.5G',
     sparkHistory: fakeSparkHistory,
   });

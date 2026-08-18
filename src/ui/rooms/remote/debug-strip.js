@@ -33,6 +33,42 @@ import { iconMarkup } from '../../widgets/icon-sprite.js';
 
 const SPARK_N = 24;
 
+/** @param {string} hex @returns {[number,number,number]} */
+function hexToRgb(hex) {
+  const h = (hex ?? '').trim().replace('#', '');
+  const full = h.length === 3 ? h.replace(/(.)/g, '$1$1') : h;
+  const n = parseInt(full, 16);
+  return Number.isFinite(n) ? [(n >> 16) & 255, (n >> 8) & 255, n & 255] : [127, 151, 186];
+}
+/** @param {[number,number,number]} a @param {[number,number,number]} b @param {number} t 0..1 */
+function lerpRgb(a, b, t) {
+  return a.map((v, i) => Math.round(v + (b[i] - v) * t));
+}
+
+/**
+ * fps → a themed colour, blended continuously (2026-08-18 fix; author's own
+ * explicit spec: "green above 60fps... yellow above 35fps... below 25fps
+ * red... blend between these"). Reads the LIVE `--ok`/`--warn`/`--fail`
+ * LANTERN tokens (not hardcoded hex), so the sparkline stays theme-correct
+ * across all four themes like everything else in this room — deliberately
+ * its OWN model, not `perf-strip.js`'s shared `healthLevel` (which grades
+ * fps as a fraction of THIS display's own detected refresh rate — the right
+ * call for the old panel's one bar summarizing overall session health, not
+ * for a fixed, display-agnostic scale across 24 history samples).
+ * @param {[number,number,number]} ok @param {[number,number,number]} warn
+ * @param {[number,number,number]} fail @param {number} fps
+ * @returns {string} `rgb(r,g,b)`
+ */
+function fpsBlendColor(ok, warn, fail, fps) {
+  if (!Number.isFinite(fps)) return `rgb(${ok.join(',')})`;
+  let rgb;
+  if (fps >= 60) rgb = ok;
+  else if (fps >= 35) rgb = lerpRgb(warn, ok, (fps - 35) / 25);
+  else if (fps >= 25) rgb = lerpRgb(fail, warn, (fps - 25) / 10);
+  else rgb = fail;
+  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+}
+
 function dbtn(text, title, onClick) {
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -109,12 +145,20 @@ export function renderDebugStrip(container, ctx) {
     msStat.innerHTML = `<b>${snapshot.msText ?? '—'}</b>ms`;
     vramStat.innerHTML = `vram <b>${snapshot.vramText ?? '—'}</b>`;
     const hist = snapshot.sparkHistory ?? [];
+    // Read the LIVE theme tokens once per update, not once per bar (24x)
+    // (2026-08-18 fix — see fpsBlendColor's own doc for why this needs to
+    // be its own absolute-fps model rather than perf-strip.js's shared
+    // refresh-rate-relative one).
+    const rootStyle = getComputedStyle(document.documentElement);
+    const ok = hexToRgb(rootStyle.getPropertyValue('--ok'));
+    const warn = hexToRgb(rootStyle.getPropertyValue('--warn'));
+    const fail = hexToRgb(rootStyle.getPropertyValue('--fail'));
     for (let i = 0; i < SPARK_N; i++) {
       const sample = hist[i];
       const bar = bars[i];
       const pct = Number.isFinite(sample?.ratio) ? Math.max(6, Math.min(100, sample.ratio * 100)) : 6;
       bar.style.height = `${pct.toFixed(0)}%`;
-      bar.className = sample?.level === 'critical' ? 'bad' : sample?.level === 'warn' ? 'warn' : '';
+      bar.style.background = fpsBlendColor(ok, warn, fail, sample?.fps);
     }
   }
 

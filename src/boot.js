@@ -11416,7 +11416,13 @@ async function bootHeartbeat() {
         // never a second computation. fpsSparkHistory is FIFO-capped at 24,
         // matching the mock's own FPS_SPARK_N.
         const model = buildPerfStripModel(stats);
-        fpsSparkHistory.push({ ratio: model.fps.ratio, level: model.fps.level });
+        // `fps` (raw, 2026-08-18 fix) rides alongside ratio/level — the old
+        // panel's own bar reads `ratio` (relative to THIS display's own
+        // refresh rate, the deliberately-chosen model for a single bar), but
+        // the Remote's sparkline bars want the author's own absolute
+        // thresholds instead (debug-strip.js's own fpsBlendColor). Two
+        // consumers, two legitimate models, same underlying sample.
+        fpsSparkHistory.push({ ratio: model.fps.ratio, level: model.fps.level, fps: stats.fps });
         if (fpsSparkHistory.length > 24) fpsSparkHistory.shift();
         // PUSHED, not stored — bootHeartbeat() is a standalone top-level
         // function with no lexical access to install()'s own locals (unlike

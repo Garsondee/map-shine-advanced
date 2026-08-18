@@ -28,6 +28,7 @@
  */
 
 import { iconMarkup } from '../../widgets/icon-sprite.js';
+import { buildImpulseButton } from '../../widgets/impulse-button.js';
 
 /** The Remote's own TEMPO list (fade-time.js), duplicated as plain data
  * here rather than imported — this file needs {label, ms} pairs for a
@@ -88,6 +89,7 @@ function styledButton(html, { gold = false } = {}) {
  *   revertCueTest: () => {ok: boolean, reason: string|null},
  *   isCueTestActive: () => boolean,
  *   validateCue: (cue: object) => {ok: boolean, errors: string[]},
+ *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>,
  * }} ctx
  * @returns {string} department subtitle.
  */
@@ -279,6 +281,33 @@ export function renderCuesDepartment(container, ctx) {
       item.append(order, cnum, info, fadeSelect, curveBadge, testBtn);
       wrap.append(item);
     });
+
+    // ---- IMPULSES (U7, §4.4) — the Studio's full list -----------------------
+    // A DIFFERENT concept from the cue stack above, sharing this department
+    // only because both are "something the GM fires from the Remote" (a
+    // worker-tier placement call, not dictated by the Testament — worth the
+    // author's own countersign if CUES is the wrong home; see the U7
+    // Petition). Cues fade; impulses "ignore Fade Time" by their own
+    // definition (§4.1's grammar table) — kept visually separate, never
+    // blended into the cue list itself.
+    const impulses = ctx.impulses ?? [];
+    if (impulses.length > 0) {
+      const sep = document.createElement('div');
+      sep.style.cssText = 'border-top:1px solid var(--line); margin:4px 0';
+      const heading = document.createElement('div');
+      heading.textContent = 'IMPULSES — instant, ignore Fade Time';
+      heading.style.cssText =
+        'font-size:.68rem; letter-spacing:.1em; text-transform:uppercase; color:var(--ink2); margin-top:4px';
+      const row = document.createElement('div');
+      Object.assign(row.style, { display: 'flex', flexWrap: 'wrap', gap: '8px' });
+      const statusEl = document.createElement('div');
+      statusEl.style.cssText = 'font-size:.7rem; color:var(--ink2); min-height:14px';
+      const onStatus = (text) => {
+        statusEl.textContent = text ?? '';
+      };
+      for (const decl of impulses) row.append(buildImpulseButton(decl, { onStatus, showLabel: true }));
+      wrap.append(sep, heading, row, statusEl);
+    }
 
     container.innerHTML = '';
     container.append(wrap);

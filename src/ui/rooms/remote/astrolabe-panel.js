@@ -23,6 +23,7 @@
 
 import { jumpToHour, advanceDays, advanceWeeks, isPenArmed } from '../../../foundry/index.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
+import { buildImpulseButton } from '../../widgets/impulse-button.js';
 
 /** Dawn/Noon/Dusk/Midnight — matches the mock's own #jumpPop quick-taps. */
 const HOUR_JUMPS = Object.freeze([
@@ -150,21 +151,19 @@ function buildCornerTL(ctx) {
 }
 
 /**
- * TR — Impulses (Strike/Thunder/Gust). `status:'planned'` chrome this
- * checkpoint, on purpose: the mock already wired these to mock-only
- * animations, but the plan for this migration explicitly stages REAL
- * impulse wiring (effects/lightning.js, wind's ambient term) as U7's job,
- * not U2's — see Petition P11. Marked, not silently built early.
+ * TR — Impulses. U7 (docs/holy/UI-Testament.md §9): renders whatever
+ * `ctx.impulses` declares — Law 1 ("every control is a generated
+ * projection of a declaration"), so this corner never hand-lists Strike/
+ * Thunder/Gust by name and cannot silently miss a future fourth impulse.
+ * An empty/absent list renders the corner empty rather than inventing
+ * placeholder chrome — Law 5's "nothing to show" case.
+ * @param {Array<import('../../../core/impulse-schema.js').ImpulseDecl>} impulses
+ * @param {(text: string) => void} onStatus
  */
-function buildCornerTR(onStatus) {
+function buildCornerTR(impulses, onStatus) {
   const el = cornerBox('msa-corner-tr');
   el.setAttribute('aria-label', 'Impulses');
-  const reason = 'Impulses fire for real in a later stage (U7) — this is chrome, not a working button yet.';
-  el.append(
-    plannedIconBtn('bolt', 'Strike', reason, () => onStatus(reason)),
-    plannedIconBtn('cloud', 'Thunder', reason, () => onStatus(reason)),
-    plannedIconBtn('wind', 'Gust', reason, () => onStatus(reason))
-  );
+  for (const decl of impulses ?? []) el.append(buildImpulseButton(decl, { onStatus }));
   return el;
 }
 
@@ -195,7 +194,8 @@ function buildCornerBR(onStatus) {
 /**
  * @param {HTMLElement} container
  * @param {{mountAstrolabeDial: (el: HTMLElement) => void, getPosture: () => string,
- *   isFlowPlaying: () => boolean, onFlowToggle: () => void}} ctx
+ *   isFlowPlaying: () => boolean, onFlowToggle: () => void,
+ *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} ctx
  */
 export function renderAstrolabePanel(container, ctx) {
   const wrap = document.createElement('div');
@@ -211,7 +211,7 @@ export function renderAstrolabePanel(container, ctx) {
   dialHost.className = 'msa-astro-dial-host';
   dialHost.append(
     buildCornerTL({ ...ctx, onStatus }),
-    buildCornerTR(onStatus),
+    buildCornerTR(ctx.impulses, onStatus),
     buildCornerBL(onStatus),
     buildCornerBR(onStatus)
   );

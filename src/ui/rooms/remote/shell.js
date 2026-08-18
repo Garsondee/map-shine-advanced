@@ -212,11 +212,13 @@ function plannedFooterBtn(text, plannedReason) {
 /**
  * @param {{debugPanel?: object, mountAstrolabeDial: (el: HTMLElement) => void,
  *   getPosture: () => string, isFlowPlaying: () => boolean, onFlowToggle: () => void,
- *   weatherBoard?: object, onBaseline?: (overMs: number) => void, cueDeck?: object}} [opts]
+ *   weatherBoard?: object, onBaseline?: (overMs: number) => void, cueDeck?: object,
+ *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} [opts]
  *   `weatherBoard`/`cueDeck`, when supplied, are passed straight through as
  *   `renderWeatherBoard`/`renderCueDeck`'s own `ctx` (weather-board.js,
  *   cue-deck.js) — this file never inspects their shape, only whether they
- *   exist.
+ *   exist. `impulses` (U7) is handed straight to `astrolabe-panel.js`'s own
+ *   TR corner unchanged, same reasoning.
  */
 export function installRemote(opts = {}) {
   installTokens();
@@ -293,6 +295,7 @@ export function installRemote(opts = {}) {
       getPosture: opts.getPosture ?? (() => 'director'),
       isFlowPlaying: opts.isFlowPlaying ?? (() => false),
       onFlowToggle: opts.onFlowToggle ?? (() => {}),
+      impulses: opts.impulses ?? [],
     });
 
     if (opts.weatherBoard) {

@@ -3393,6 +3393,100 @@ untouched, confirmed via `git status --porcelain` before staging.*
 
 ---
 
+**P31 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; an autonomous-loop
+tick continuing the parity work — no new author message since P30, acting
+on the standing "keep working on the UI, keep pushing things forwards"
+instruction, picking a well-scoped item off the open gap list rather than
+wind editing/ring time-stops, both of which explicitly need the author's
+own design call per P29/P30's own notes).** Went looking at the old
+astrolabe.js's own real, already-working Almanac forecast — a
+`forecastRow` + `surpriseRow` pair, never ported to the new Remote at all.
+
+1. ⚠️ **A NAMING COLLISION THIS TESTAMENT ALREADY WARNED ABOUT, confirmed
+   the hard way.** The old panel's own visibility gate reads
+   `s.weatherMode !== 'almanac'` — and `almanac` here is `world/weather.js`'s
+   WALK-mode string (Director/Almanac, i.e. this session's own Direct/Drift),
+   completely unrelated to `astrolabe-panel.js`'s OWN `CLOCK_MODES`
+   `'almanac'` posture (Aesthetic/Follow/Almanac). Almost gated the new
+   forecast row on the Clock-mode control before tracing `weatherMode`'s
+   real origin through `weather-board.js`'s own header comment (*"NAMING:
+   the persisted value is `weatherMode: 'director'|'almanac'`... unrelated
+   to the Testament's OWN later cutscene 'Director'"*) and confirming
+   `world/weather.js#forecast()`'s own first line-of-code gate is
+   `currentMode !== 'almanac'` — the SAME weather-walk mode, not the clock.
+   Gated correctly on `ctx.getWeatherMode() === 'almanac'` (Drift), the
+   file's own established `renderPace()` gate.
+2. **`ctx.getForecast()` (boot.js) is a zero-new-engine-work read** —
+   `weather.forecast()` (world/weather.js) already projects the walk
+   forward for free by cloning the live RNG, and
+   `getVtPanViewerTimeDialState()` already surfaces its next transition as
+   `weatherForecastNext` (`vt-pan-viewer.js`, built for the OLD panel's
+   Almanac slice) — the SAME door `getCloudPinned` already reaches through
+   for a different field. No new plumbing between the engine and boot.js at
+   all, only a UI surface that was never built.
+3. **`weather-board.js#renderForecast()`** — a faithful port of the old
+   panel's own `paintForecast` wording (*"Forecast: → {icon} {label} in
+   {eta}"*, `"steady for now"` when null, the <1h-vs-hours ETA split),
+   deliberately preserving its one small imprecision rather than silently
+   "fixing" it: `forecast()` returns the identical `null` for "genuinely
+   steady" and for "not available at all" (e.g. no climate chosen yet) — the
+   old panel never distinguished the two either, so this doesn't invent a
+   distinction the underlying data can't back.
+4. ⚠️ **THE SURPRISE-ME TOGGLE TRIPPED `ui/canon-only`'s OWN RATCHET ON
+   FIRST BUILD, caught by the verification pass, not shipped blind.** First
+   built as a hand-rolled `input.type='checkbox'` (matching the old panel's
+   own vanilla-DOM code almost verbatim) — `node tools/verify-structure.mjs`
+   immediately flagged it: 14 violations against a bound of 13. Re-read the
+   wall's own carve-out (*"a one-off UI choice... is not a param and does
+   not need it"*) and judged "surprise me" does NOT qualify — it is a
+   persistent-looking toggle a GM revisits every session, not a filter or a
+   preset pick. Rebuilt through the SAME `buildParamControl` door the
+   Scene-override checkbox already uses. Its own `row()` is a full-width
+   flex element with several properties set as INLINE styles (`styled()`'s
+   own `Object.assign(el.style, ...)`) — fighting those from a stylesheet
+   class would need `!important`; stacked it as its own line below the
+   forecast text instead, the same one-control-per-row shape every other
+   control in this file already uses, not a special case squeezed inline.
+5. ⚠️ **TWO MISSED CALL SITES, caught live, not by reading the diff.** The
+   first live test showed "Forecast: steady for now" even after clicking a
+   real climate chip — `renderForecast()` had only been wired into
+   `directBtn`/`driftBtn`/`refresh()`, not either of the two places a biome
+   selection itself happens (the favourites chip's own click handler, and
+   the weather-picker's `onPickBiome`). Exactly the shape P27's own
+   Direct/Drift `renderFaders()` gap took — the mode toggle isn't the only
+   thing that changes what should be on screen. Both sites now call
+   `renderForecast()` too.
+6. **`tools/remote-preview/preview.js`'s own fixture caught itself failing
+   quietly.** First fixture used `archetypeId: 'storm'` — not a real id
+   (`world/weather-data.js`'s table uses `'thunderstorm'`) — so the archetype
+   lookup silently fell through to its own raw-id fallback, rendering
+   `"Forecast: → storm in ~3.5h"` with no icon and the wrong case instead of
+   `"⛈ Storm"`. Caught by reading the live DOM text after clicking a climate
+   chip, not assumed correct because the code looked right. Fixed to a real
+   id, honestly commented as a static demo (this harness doesn't run the
+   real RNG walk).
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on all four
+touched files. `node tools/run-tests.mjs`: 27 suites, 11512 passed, 0
+failed, unchanged — no test-covered logic touched, this is DOM plus one
+read-only ctx passthrough. `node tools/verify-structure.mjs`: the same two
+pre-existing violations only — `ui/canon-only` confirmed back at its
+existing bound (13) after the buildParamControl rebuild, not silently left
+broken. Live-verified in the browser via `tools/remote-preview/`: Direct
+mode shows no forecast row at all; Drift mode with no climate chosen reads
+"Forecast: steady for now"; picking a climate (either the favourites chip
+or the Browse picker) updates it to "Forecast: → ⛈ Storm in ~3.5h" real
+icon+label formatting confirmed via DOM read, not screenshot guessing;
+Surprise me toggles the text to "🎲 —" and back; switching back to Direct
+removes the whole block cleanly (confirmed `.msa-wx-forecast-text` is
+`null` in the DOM, not just visually hidden). Console clean throughout.
+**Not verified: the author's own live Foundry session**, same standing gap
+as P21–P30. The concurrent water-flow session's own files remain
+completely untouched, confirmed via `git status --porcelain` before
+staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

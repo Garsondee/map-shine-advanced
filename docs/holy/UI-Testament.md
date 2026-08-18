@@ -3018,6 +3018,100 @@ staging.*
 
 ---
 
+**P27 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; an autonomous-loop
+tick continuing the parity audit — no new author message since P26, acting
+on the standing "continue with the next most critical pieces" instruction
+against the remaining Tier-2 gap list P25 itself named).** Investigated Gap
+11 (ring time-stops) first and stopped short of building it: the mock never
+depicted this control at all (grepped `tools/ui-mock/index.html`, zero
+hits), so unlike every other item this migration has ported, there is no
+author-approved visual precedent to build against — and the one obvious
+placement (folding it into the TL corner's existing "Jump to…" menu) would
+wrongly conflate two genuinely different mechanisms under one button (Jump
+uses the Almanac Pen, server-authoritative, `'almanac'`-only; time-stops use
+`sweepTimeOfDay`, a local aesthetic sweep, deliberately ungated in every
+mode). Left named, not guessed at. Two smaller, unambiguous items got built
+instead, both found by reading the OLD system's real source before writing
+anything:
+
+1. ⚠️ **A REAL BUG IN ALREADY-SHIPPING CODE, not a new-Remote gap** — found
+   while researching Gap 11. `boot.js`'s shared `buildAstrolabeOptions()`
+   (used by BOTH the old panel and, per its own header comment, the new
+   Remote's dial) has an `onTimeStop` handler that calls
+   `editSky({todHour: hour})` unconditionally, exactly the same shape
+   Petition P26 already fixed for the ring drag — and `applyLookToEngines`
+   only ever reads `sky.todHour` back out in `'aesthetic'` mode, so the
+   write silently corrupts the persisted value in Follow/Almanac until the
+   next Aesthetic switch. Unlike the ring drag, this one was never
+   caller-guarded: the OLD SVG dial's time-stop dots have no `ringLocked`
+   check at all (confirmed by reading `astrolabe.js` directly — they're
+   deliberately always-clickable, matching `sweepTimeOfDay`'s own "always
+   accepted" semantics, since that same function is also how synced mode
+   catches up to Foundry's real time). Fixed by gating only the `editSky`
+   call on `sky.mode==='aesthetic'`, leaving the visible sweep itself
+   unconditional — no loss of the real, intended behaviour, just the
+   silent corruption removed. **Could not be live-verified**: neither
+   `tools/remote-preview/` nor `tools/studio-preview/` constructs the OLD
+   panel's own `createAstrolabe(buildAstrolabeOptions())` instance (grepped
+   both, zero hits) — this fix is traced by precise code reading and the
+   full Node suite staying green, not by a DOM click test. Named honestly
+   rather than claimed.
+2. **The cloud pin/unpin glyph, ported for real** (Gap 10 — old:
+   `astrolabe.js:358-373` → `onUnpinCloudCover` → `boot.js`). Attached to
+   the Clouds row inside `weather-board.js#renderFaders()`'s `LIVE_CHANNELS`
+   loop, the exact same `row.appendChild()` shape the Drift-bracket note
+   already uses there — no new attachment mechanism invented. Visible only
+   in Drift mode while `weather.read().pinnedAxes` genuinely contains
+   `cloudCover01` (the real field the dial-state snapshot already carries
+   every tick), click calls the SAME `unpinVtPanViewerWeatherAxis` the old
+   panel's own glyph already calls.
+3. ⚠️⚠️ **CAUGHT LIVE, NOT BY EYE: the Direct/Drift mode buttons never
+   called `renderFaders()` at all.** First live test of the pin glyph
+   (force-pin via a new `window.__preview` debug door in the harness — see
+   below — then click Drift) showed the glyph simply never appearing;
+   clicking Direct afterward left it VISIBLE, still showing pinned. Traced
+   to `directBtn`/`driftBtn`'s own click handlers, which call
+   `paintMode()`/`renderChips()`/`renderPace()` but never `renderFaders()` —
+   a pre-existing gap since whichever round first split those functions
+   apart, invisible until now because nothing before this glyph depended on
+   the fader rows repainting on the MODE click itself (the Drift-bracket
+   note only ever needed a biome-CHIP click, which already calls
+   `renderFaders()` inside its own handler). Fixed by adding the one missing
+   call to both mode handlers. This is a strict improvement for the
+   pre-existing bracket note too, not just the new glyph — re-tested from a
+   clean reload after the fix, both directions, before trusting the result
+   (P25's own "re-test from a known state" lesson applied again).
+4. **`tools/remote-preview/preview.js` gained a small `window.__preview`
+   debug door** (`{fakeSky, remote}`), same spirit as the UI mock's own
+   documented `window.__mock` hook — `weatherPinnedAxes` has no real UI
+   trigger in this harness at all (nothing simulates the Almanac's own
+   autonomous weather walk that would pin/unpin it for real), so testing it
+   needed a way to poke the fixture's module-private state directly. Useful
+   beyond this one field for future rounds.
+5. **Explicitly NOT touched:** ring time-stops (named above), wind
+   direction/speed editing, the Almanac forecast readout, richer status
+   text, the Remote/Studio/Player switcher bar.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on every file
+touched (re-checked after each of the two rounds of edits this petition
+made, not just the first). `node tools/run-tests.mjs`: 27 suites, 11512
+passed, 0 failed, unchanged from P26 — no test-covered logic in either fix.
+`node tools/verify-structure.mjs`: the same two pre-existing violations
+only, confirmed by `git diff` against every flagged line, checked again
+after the mode-toggle fix specifically. Live-verified in the browser via
+`tools/remote-preview/`: the pin glyph's presence/title/text/parent-row all
+confirmed correct on first showing; unpin click confirmed to clear the
+underlying state, log the action, and remove the glyph; the mode-toggle
+fix re-tested from a fresh reload in both directions (Drift→shows,
+Direct→hides) rather than trusting the first, misleading result; console
+clean throughout, no stale-residue false alarm this round. The `onTimeStop`
+fix is NOT live-verified (see finding 1) — named, not hidden. **Not
+verified: the author's own live Foundry session**, same standing gap as
+P21–P26. The concurrent water-flow session's own files remain completely
+untouched, confirmed via `git status --porcelain` before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

@@ -2762,6 +2762,90 @@ before staging.*
 
 ---
 
+**P24 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; a FOURTH live
+look, same session — this time a genuine root-cause on the corner
+complaint, not another "no defect found").** The author's report, verbatim,
+with a hand-annotated screenshot pointing at the TR corner: *"Top right
+section of three buttons isn't currently correct and we're still missing
+some sliders... The 'remote/studio/player' bar isn't in yet... Fade time
+isn't added yet. Lots of header stuff isn't there yet... give a small but
+reliable amount of space between elements. We want concise but currently
+buttons/sections are touching each other which is ugly."*
+
+1. ⚠️⚠️ **THE TR CORNER BUG, FOUND FOR REAL THIS TIME.** P22/P23's own
+   re-checks measured the CONTAINER geometry (56×56px, correct
+   `grid-template-areas` string) and stopped there — never checking that
+   every corner's actual CHILDREN matched the `button:nth-child(N)`
+   selector's own assumption. They didn't: `ui/widgets/impulse-button.js`
+   wraps its `<button>` in a `<span class="wrap">` (needed so the
+   suppression badge can `position:absolute` against it) — TR's three
+   DIRECT children are spans, never bare buttons. The selector required the
+   child ITSELF to be a `<button>`, so it silently never matched TR at all;
+   its three items fell through to the grid's own auto-placement, which
+   fills cells in DOM order INCLUDING the area's own `.` gap — landing wind
+   at bottom-left instead of the intended bottom-right. TL/BL/BR never
+   showed this because every button there is built directly via `iconBtn()`.
+   Confirmed live before fixing (`getComputedStyle(el).gridArea` read
+   `"auto"` on every TR child, not `a`/`b`/`c`), confirmed live after
+   (`"a"`/`"b"`/`"c"` correctly, wind now bottom-right). Fixed by widening
+   the selector to `.msa-corner > :nth-child(N)` — matches whatever element
+   is actually the direct child, button or span.
+2. **The "touching" complaint was checked systematically, not patched by
+   guessing.** Read the mock's own gap values for mood chips (`#moods{gap:
+   5px}`), the debug strip (`gap:11px; row-gap:4px`), and the fade-time row
+   (`#tempo{gap:4px}`) directly from `tools/ui-mock/index.html` — all three
+   ALREADY matched production exactly. The real gaps were structural, not
+   numeric: no `.msa-remote-sep` divider ever separated the DEBUG row from
+   CUES above it (weather and cues both get one; debug never did), and
+   THREE section headers the mock uses to give each block its own visual
+   rhythm — Fade Time, Moods/Climates, Channels — didn't exist in production
+   at all, so sections ran together with nothing but a bare 12px flex gap
+   between them.
+3. **The weather board's block-label headers (`ui/rooms/remote/weather-
+   board.js`)**, ported from the mock's own `.blocklabel`, close finding 2
+   AND the author's separate "Fade time isn't added yet" report at once —
+   same missing piece, two different symptoms. Fixed the DOM order to match
+   the mock exactly in the same pass: Fade Time first, THEN Moods, THEN
+   Channels (production had Moods/the mode toggle first — a real ordering
+   miss found while reading the mock's own markup, not assumed same as
+   before). The Direct/Drift toggle now lives INSIDE the Moods/Climates
+   label's own row (mock: title + `.modeseg` share one line via
+   `margin-left:auto`), a compact pill instead of its own full-width row —
+   and the title itself now swaps "Moods"/"Climates" with the mode, matching
+   `#wxTitle`'s own behavior, live-verified via a simulated Drift click.
+4. **Explicitly NOT attempted this round, named rather than rushed:** the
+   Remote/Studio/Player switcher bar the author named directly ("isn't in
+   yet") — a real, clearly-wanted feature, not a question needing the
+   author's confirmation, but architecturally bigger than this round's other
+   items (it would mean each room's own switcher opening the OTHER two real
+   room controllers, not the mock's own single-page client-side toggle — a
+   cross-room wiring question worth its own scoped pass) — and the mock's
+   remaining 5 CHANNELS sliders (Fog/Wind/Freeze/Lightning/Ash), which have
+   no live axis to read from today (confirmed against `WEATHER_AXES`' own
+   `consumerStatus`, same finding P11/U2 already made) — building them
+   honestly needs either real backing work or a deliberate `planned` slider
+   design, neither attempted here rather than rushed into this pass.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on every file
+touched. `node tools/run-tests.mjs`: 27 suites, 11508 passed, 0 failed, ALL
+GREEN (unchanged from P23 — this round touched no test-covered logic, pure
+UI). `node tools/verify-structure.mjs`: the same two pre-existing violations
+only. Live-verified in the browser via `tools/remote-preview/`: TR's three
+children resolve to the correct `grid-area`s and correct on-screen
+positions post-fix; all three block-labels render in the correct order with
+correct text; the Fade Time hint updates live on a simulated click; the
+Moods/Climates title swaps correctly on a simulated Direct/Drift toggle.
+⚠️ **A stale-console-residue false alarm hit TWICE this round** — the exact
+"error survives navigation to an unrelated page" trap named in Round 6/7 of
+this Testament's own memory record — confirmed both times by checking that
+the page's own DOM/controls actually worked before trusting the reported
+error at all, not by re-theorizing from the error text. **Not verified: the
+author's own live Foundry session**, same standing gap as P21–P23. The
+concurrent water-flow session's own files remain completely untouched,
+confirmed by diffing every touched file individually before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

@@ -58,6 +58,7 @@ import {
 } from './diag/perf-zones.js';
 import { buildPerfReport, summarizeTierComparison, formatOffenderSummaryText } from './diag/perf-report.js';
 import { buildVramInventory } from './diag/vram-inventory.js';
+import { buildPerfStripModel } from './diag/perf-strip.js';
 import { createFrameProfiler } from './diag/frame-profiler.js';
 import { assembleReckoningReport, summarizeZoneRows } from './diag/reckoning-report.js';
 import { createProfiledFrameWaiter, createSceneSettleWaiter, runProfileSession } from './diag/perf-session.js';
@@ -1121,6 +1122,16 @@ function install() {
     cueDeck: {
       listCues: () => orderedCues(cueStack),
       fireCue: (id) => fireCueById(id),
+    },
+    // THE DEBUG ROW (2026-08-18 fix) — fps/ms/vram/sparkline are PUSHED by
+    // bootHeartbeat() straight into MapShine.__remote.updateDebugStrip(), not
+    // pulled through this ctx (that standalone top-level function has no
+    // lexical access to install()'s own locals, unlike weatherBoard/cueDeck's
+    // closures above). Only the two real, one-line MapShine.* actions live
+    // here.
+    debugStrip: {
+      onProbe: () => void MapShine.armPixelProbe(3),
+      onExport: () => void MapShine.flight?.export(),
     },
   });
   // THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — safe to construct
@@ -11218,6 +11229,12 @@ async function bootHeartbeat() {
     const gaps = [];
     let lastT = null;
     let worstGapMs = 0;
+    // THE DEBUG ROW's own history (2026-08-18 fix) — 24 samples, matching the
+    // mock's own FPS_SPARK_N exactly. Real ratio/level per tick, straight off
+    // diag/perf-strip.js#buildPerfStripModel (the SAME model the old panel's
+    // strip already builds from this identical stats object) — never a second,
+    // independently-tuned health computation.
+    const fpsSparkHistory = [];
     // All-time MINIMUM frame gap — the standard proxy for the display's own
     // refresh rate (browsers expose no such API). All-time, not rolling, for
     // the same reason `worstGapMs` above is all-time: it only needs to see ONE
@@ -11260,7 +11277,7 @@ async function bootHeartbeat() {
         const backend = renderer.backend?.isWebGPUBackend ? 'webgpu' : renderer.backend ? 'webgl2' : 'unknown';
         const heapInfo = performance.memory;
 
-        MapShine.debug?.updatePerfStrip({
+        const stats = {
           fps,
           avgGapMs: avg,
           recentWorstMs: recentWorst,
@@ -11281,6 +11298,28 @@ async function bootHeartbeat() {
           renderInfo: readVtPanViewerRenderInfo(),
           backend,
           version: MapShine.version ?? VERSION,
+        };
+        MapShine.debug?.updatePerfStrip(stats);
+
+        // THE REMOTE'S DEBUG ROW (2026-08-18 fix) — same `stats`,
+        // buildPerfStripModel's own pure reshape (the old panel's strip
+        // already builds this identical model from this identical object),
+        // never a second computation. fpsSparkHistory is FIFO-capped at 24,
+        // matching the mock's own FPS_SPARK_N.
+        const model = buildPerfStripModel(stats);
+        fpsSparkHistory.push({ ratio: model.fps.ratio, level: model.fps.level });
+        if (fpsSparkHistory.length > 24) fpsSparkHistory.shift();
+        // PUSHED, not stored — bootHeartbeat() is a standalone top-level
+        // function with no lexical access to install()'s own locals (unlike
+        // lastNonZeroRateHoursPerMinute, this can't be a shared closure
+        // variable), so the fresh snapshot goes straight into
+        // updateDebugStrip's own argument, matching remoteAstrolabe.update's
+        // own push shape.
+        MapShine.__remote?.updateDebugStrip?.({
+          fpsText: model.fps.valueText,
+          msText: avg.toFixed(1),
+          vramText: model.vram.valueText,
+          sparkHistory: fpsSparkHistory,
         });
       }
     });

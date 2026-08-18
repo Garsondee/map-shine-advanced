@@ -159,6 +159,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const TIER_SETTLE_FRAMES = 90;
 import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
+import { wallClockMs } from './core/frame-clock.js';
 import {
   ambientVectorFromWind,
   phaseBoundaryHours,
@@ -169,6 +170,18 @@ import {
   CALENDARS,
   CALENDAR_IDS,
   projectWorldTime,
+  // THE FADE ENGINE (U2, docs/holy/UI-Testament.md §4.2) — pure core +
+  // registry. mergeFadeState/pruneExpired/computeEasedValue/isEntryExpired
+  // are the per-tick pump's own math; createFadeSourceRegistry is the door
+  // that lets the weather board (this checkpoint's one real consumer) and
+  // any future effect (a later checkpoint's) become fadeable without this
+  // file learning a new name each time.
+  mergeFadeState,
+  pruneExpired,
+  computeEasedValue,
+  isEntryExpired,
+  createFadeSourceRegistry,
+  WEATHER_ARCHETYPES,
 } from './world/index.js';
 import {
   runVtLiveDecodeTest,
@@ -383,6 +396,9 @@ import {
   writeSceneSky,
   setSceneSkyOverride,
   watchSceneSky,
+  readFadeState,
+  writeFadeState,
+  watchFadeState,
   registerCalendarSetting,
   installActiveCalendar,
   standDownPf2eDarknessSync,
@@ -957,6 +973,23 @@ function install() {
         void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || 1 });
       }
     },
+    // THE WEATHER BOARD (U2 checkpoint 3) — every field below is a closure
+    // reference to state/functions declared further down this SAME install()
+    // body (fadeSourceRegistry, fadeWeatherToArchetype, skyScope, editSky).
+    // Safe for the identical reason mountAstrolabeDial above already is:
+    // nothing here EXECUTES until the Remote's body actually renders, well
+    // after install() has finished defining everything once.
+    weatherBoard: {
+      getWeatherMode: () => (skyScope.sky?.weatherMode === 'almanac' ? 'almanac' : 'director'),
+      onWeatherModeChange: (mode) => void editSky({ weatherMode: mode }),
+      getWeatherBiome: () => skyScope.sky?.weatherBiome ?? null,
+      onWeatherBiomeChange: (id) => void editSky({ weatherBiome: id }),
+      getWeatherArchetype: () => skyScope.sky?.weatherArchetype ?? 'custom',
+      fadeToArchetype: (archetypeId, overMs) => fadeWeatherToArchetype(archetypeId, overMs),
+      getAxisValue: (axisName) => fadeSourceRegistry.readLive(`weather.${axisName}`),
+      onAxisCommit: (axisName, value) => void editSky({ [axisName]: value, weatherArchetype: 'custom' }),
+    },
+    onBaseline: (overMs) => fadeWeatherToBaseline(overMs),
   });
   // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
   // debug panel and returns a hydrate hook the canvasReady handler calls to pull
@@ -6958,6 +6991,154 @@ function install() {
   /** Unsubscribe for the scene-sky watcher (a second GM's edit reaching here). */
   let skyUnsub = null;
   void skyUnsub; // held for a future teardown path; the watcher lives for the session
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE FADE ENGINE'S LIVE WIRING (U2 checkpoint 3, docs/holy/UI-Testament.md
+  // §4.2) — the weather board's mood chips are this checkpoint's FIRST real
+  // consumer of world/fade-engine.js. `fadeSourceRegistry` is built with
+  // function declarations below it still safely referenced (same hoisting
+  // safety as buildAstrolabeOptions, above): nothing CALLS readLive/write
+  // until a fade actually starts, well after skyScope/editSky exist.
+  // ══════════════════════════════════════════════════════════════════════
+
+  /** id -> {typeOf, readLive, write}. 'weather' is this checkpoint's only
+   * registered source; a future effect becomes fadeable by registering its
+   * OWN {schema, getValue, onChange} (world/fade-registry.js#schemaFadeSource)
+   * — no change here when that day comes. */
+  const fadeSourceRegistry = createFadeSourceRegistry();
+  fadeSourceRegistry.registerSource('weather', {
+    keys: () => ['cloudCover01', 'precip01'],
+    typeOf: () => 'float',
+    readLive: (field) => skyScope.sky?.[field] ?? 0,
+    // LIVE push only — matches the astrolabe's own slider-drag preview
+    // ("applies live every pointermove... PERSISTS only on release"). A
+    // per-tick editSky() call here would scene-flag-write every frame of
+    // every fade — the exact "hundreds of document updates per drag" this
+    // codebase already named and designed away from once already.
+    write: (field, value) => {
+      if (field === 'cloudCover01') setVtPanViewerCloudCover(value, 'fade-engine');
+      else if (field === 'precip01') setVtPanViewerWeatherTargets({ precip01: value });
+    },
+  });
+
+  /** Record<'weather.cloudCover01'|'weather.precip01', FadeEntry> — scene-
+   * scoped, reloaded from the scene flag on every canvasReady (below). */
+  let fadeState = {};
+  /** gestureId -> the archetype id it's fading TOWARD ('custom' for a
+   * Baseline fade, which has no named row to relight), so the per-tick pump
+   * knows what to persist once every key sharing that gesture has arrived.
+   * Bookkeeping ONLY — fadeState itself holds per-KEY entries, never groups. */
+  const pendingArchetypeCompletions = new Map();
+  /** Captured once per scene — "the scene's authored resting look" the
+   * Baseline button fades back to. `null` until the first canvasReady for
+   * this scene has run. */
+  let baselineWeatherSnapshot = null;
+  /** Unsubscribe for the scene-fade watcher (a second GM's fade reaching
+   * here) — re-armed on every canvasReady, mirroring skyUnsub's own shape. */
+  let fadeUnsub = null;
+
+  /**
+   * Start a REAL fade toward a named archetype's own declared axis values.
+   * `weatherArchetype` flips to 'custom' immediately (the SAME "a value
+   * mid-transition is not the row it left" rule the Cloud slider's own drag
+   * already established) and only becomes the target's real id once every
+   * key has actually arrived (see pumpWeatherFades).
+   * @param {string} archetypeId @param {number} overMs
+   */
+  function fadeWeatherToArchetype(archetypeId, overMs) {
+    const archetype = WEATHER_ARCHETYPES.find((a) => a.id === archetypeId);
+    if (!archetype) return;
+    const nowMs = wallClockMs();
+    const gestureId = `archetype:${archetypeId}:${nowMs}`;
+    const targets = {};
+    for (const field of ['cloudCover01', 'precip01']) {
+      const to = archetype.axes?.[field];
+      if (!Number.isFinite(to)) continue;
+      targets[`weather.${field}`] = {
+        to,
+        type: 'float',
+        overMs,
+        curve: 'ease',
+        from: fadeSourceRegistry.readLive(`weather.${field}`),
+      };
+    }
+    if (Object.keys(targets).length === 0) return;
+    fadeState = mergeFadeState(fadeState, { id: gestureId, label: archetype.label, targets }, nowMs);
+    pendingArchetypeCompletions.set(gestureId, archetypeId);
+    void editSky({ weatherArchetype: 'custom' });
+    void writeFadeState(fadeState);
+  }
+
+  /**
+   * The Remote's Baseline button. A no-op (logged, never a silent swallow)
+   * if no baseline was ever captured for this scene.
+   * @param {number} overMs
+   */
+  function fadeWeatherToBaseline(overMs) {
+    if (!baselineWeatherSnapshot) {
+      log.warn('Baseline: no captured resting look for this scene yet.');
+      return;
+    }
+    const nowMs = wallClockMs();
+    const gestureId = `baseline:${nowMs}`;
+    const targets = {};
+    for (const [field, to] of Object.entries(baselineWeatherSnapshot)) {
+      targets[`weather.${field}`] = {
+        to,
+        type: 'float',
+        overMs,
+        curve: 'ease',
+        from: fadeSourceRegistry.readLive(`weather.${field}`),
+      };
+    }
+    fadeState = mergeFadeState(fadeState, { id: gestureId, label: 'Baseline', targets }, nowMs);
+    pendingArchetypeCompletions.set(gestureId, 'custom'); // no named row to relight
+    void editSky({ weatherArchetype: 'custom' });
+    void writeFadeState(fadeState);
+  }
+
+  /**
+   * The per-tick half of the Fade Engine: pushes every active entry's eased
+   * value LIVE (cheap, in-memory) every animation frame, and persists a
+   * gesture's completion exactly ONCE, the moment every key it touched has
+   * actually arrived. Runs UNCONDITIONALLY (unlike pumpAstrolabe's own dial
+   * repaint below) — an in-flight weather fade must keep affecting the
+   * rendered sky even while the Remote is closed; closing a panel must
+   * never pause the world.
+   * @param {number} nowMs
+   */
+  function pumpWeatherFades(nowMs) {
+    const keys = Object.keys(fadeState);
+    if (keys.length === 0) return;
+    for (const key of keys) {
+      const entry = fadeState[key];
+      if (isEntryExpired(entry, nowMs)) continue;
+      fadeSourceRegistry.write(key, computeEasedValue(entry, nowMs));
+    }
+    let anyCompleted = false;
+    for (const [gestureId, archetypeId] of pendingArchetypeCompletions) {
+      const ownEntries = Object.values(fadeState).filter((e) => e.id === gestureId);
+      if (ownEntries.length > 0 && ownEntries.every((e) => isEntryExpired(e, nowMs))) {
+        pendingArchetypeCompletions.delete(gestureId);
+        if (archetypeId !== 'custom') void editSky({ weatherArchetype: archetypeId });
+        anyCompleted = true;
+      }
+    }
+    // Re-render the weather board on an actual arrival, not every tick —
+    // `refreshWeatherBoard` rebuilds the whole board (chips + faders), which
+    // is real DOM churn every rAF frame would be wasteful for.
+    //
+    // ⚠️ NAMED GAP: buildParamControl's slider has no external "the value
+    // changed elsewhere" hook (unlike the astrolabe dial's own update(state)
+    // pattern) — its thumb only moves on a user drag or a full rebuild. So
+    // while a mood-chip fade is IN FLIGHT, the fader THUMB stays wherever it
+    // was until this refresh fires at completion; the actual rendered SKY
+    // still eases smoothly the whole time regardless (fadeSourceRegistry's
+    // own per-tick write, above, is independent of this UI). A live-updating
+    // slider is a real follow-up, not silently claimed as done here.
+    if (anyCompleted) MapShine.__remote?.refreshWeatherBoard();
+    fadeState = pruneExpired(fadeState, nowMs);
+  }
   const applyAmbientWind = () => setVtPanViewerWindAmbient(windDirectionDeg, windSpeed01);
 
   // WIND'S CONSOLE/UI DOOR (U2) — the astrolabe's own dial already steers
@@ -7229,7 +7410,13 @@ function install() {
   // `watchSceneSky` only calls `Hooks.on('updateScene', ...)` — that never
   // touches `game`, so it is safe to register immediately, unlike the setting
   // below. Left here, beside where the callback it wraps is defined.
-  skyUnsub = watchSceneSky(resolveAndApplySky);
+  // Also re-syncs the weather board's own chip/mode highlighting — a SECOND
+  // GM's sky edit must reach THIS client's Remote too, "one writer, many
+  // derivers" applied to the UI, not just the render.
+  skyUnsub = watchSceneSky(() => {
+    resolveAndApplySky();
+    MapShine.__remote?.refreshWeatherBoard();
+  });
 
   // registerSkySettings → registerSettings → `game.settings.register`, and
   // `game.settings` does not exist until Foundry's `init` hook fires — calling
@@ -7272,6 +7459,11 @@ function install() {
     // open. Cheap on every frame that ISN'T a crossing (one computeSun call +
     // a boolean compare) — see refreshCandleIgnition's own doc.
     refreshCandleIgnition();
+    // ALSO UNGATED — an in-flight weather fade must keep landing on the
+    // rendered sky whether or not the Remote happens to be open right now
+    // (pumpWeatherFades's own doc explains why). Piggybacks this rAF loop's
+    // real timestamp rather than a second requestAnimationFrame registration.
+    pumpWeatherFades(nowMs);
     // THREE conditions, all must hold: (1) `isConnected` — the panel builds
     // the dial once and the shell detaches it when another zone is showing;
     // (2) NOT explicitly hidden — `isPanelVisible() === false` after
@@ -9834,6 +10026,31 @@ function install() {
         } catch (err) {
           log.error('sky resolve (canvasReady) failed:', err);
         }
+        // THE FADE ENGINE'S OWN SCENE LOAD (U2 checkpoint 3) — fade state is
+        // scene-scoped exactly like the sky, so a scene SWITCH must re-load
+        // it here too, not carry the previous scene's in-flight fades into
+        // this one. Baseline's own snapshot is captured fresh every load,
+        // AFTER resolveAndApplySky above has settled skyScope to what this
+        // scene actually authored — "the resting look" this scene ships
+        // with, not whatever the last scene happened to leave in memory.
+        try {
+          const { state, reason } = readFadeState();
+          fadeState = state;
+          if (reason) log.info(`fade state (canvasReady): ${reason}`); // "no active scene" etc. — benign, not an error
+          pendingArchetypeCompletions.clear();
+          baselineWeatherSnapshot = {
+            cloudCover01: skyScope.sky?.cloudCover01 ?? 0,
+            precip01: skyScope.sky?.precip01 ?? 0,
+          };
+        } catch (err) {
+          log.error('fade state (canvasReady) failed:', err);
+        }
+        fadeUnsub?.();
+        fadeUnsub = watchFadeState(() => {
+          const { state } = readFadeState();
+          fadeState = state;
+          MapShine.__remote?.refreshWeatherBoard();
+        });
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) {
           log.warn(`real-scene VT viewer: ${floorsResult.error}`);

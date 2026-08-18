@@ -1255,7 +1255,85 @@ type… will need its own UI."* Built in the mock (`tools/ui-mock/index.html`), 
   climate (e.g. "keep Alpine, but pin wind higher") without replacing the whole climate —
   deferred as scope creep on this round; flagging so it isn't lost.
 
-*(no other petitions yet)*
+**P9 — filed by Claude Sonnet 5, 2026-08-17 (worker tier; the FIRST round to touch real
+`src/` product code for this migration — the mock is done, author said "replace the existing
+UI with this one," a plan was written and approved via plan mode, U0 is now BUILT).**
+
+U0's own checklist (§9) is complete against its literal bullets, with two honest deviations and
+one real, named gap:
+
+1. **`src/ui/tokens.js`** — all four theme token sets ported from the mock's `:root`/
+   `html[data-theme]` block, plus `installTokens()`/`tokensCSS()`/`getThemeTokens()`. Named
+   `installTokens`, not the Testament's own `applyTheme()` — matched the established
+   idempotent-by-id `injectStyle()` pattern already live in `ui/camera-path-dialog.js` instead
+   of inventing a second naming convention for the same shape.
+2. **The contrast gate (`ui/__tests__/tokens.test.mjs`) is green across all four themes** —
+   and caught a real problem on the way: light theme's gold accent (`--shine:#a5761c`, the
+   mock's own draft value) measured 3.47:1 against the actual backdrop it renders on in real
+   use (composited over its own `--shine-soft` wash, not a bare surface — the first draft of
+   this test checked the wrong pairing and had to be corrected before it could be trusted).
+   Short of WCAG AA's 4.5:1. Darkened to `#876117` — same hue, ~82% of the original value,
+   now measuring 4.81:1 — and said so in a code comment with the arithmetic shown, since this
+   is the one place this round changed a mock-authored colour rather than porting it verbatim.
+   Worth a countersign glance: is this shade still "the mock's gold" to your eye, or does the
+   mock's OWN light theme want the same correction for consistency?
+3. **All 40 icons ported** (the mock had already grown past the Testament's speculative
+   "~24" by the time this round started) — `ui/widgets/icon-sprite.js`.
+4. **The type→widget table extracted** — `buildParamControl`/`buildInheritableRangeRow`/the
+   compass helpers → `ui/widgets/param-control.js`; `groupParamsByCategory`/`rohGroups`/
+   `collapsedStatusLine`/`buildSettingsSnapshot`/`createSectionStore` → `ui/widgets/param-
+   groups.js`. `diag/effect-controls.js` re-exports both unchanged (behaviour identical,
+   partition test still green, confirmed live: 11000+ assertions across the whole repo stayed
+   green through the move). **One clarification the Testament's own §9 wording doesn't quite
+   make explicit:** `buildEffectCard` itself — the old panel's `<details>` accordion shell —
+   did NOT move. Read the mock's real Studio `buildCard` (pin/popout/paint tools, a mask-found/
+   missing row, health/tier/scope badges) against it side by side; they are genuinely different
+   shells, not a reskin of one another. U1's EFFECTS department will build its own shell
+   reusing the widgets extracted here, not inherit this one. Flagging in case "extract the
+   type→widget table" was read as "and also move the card shell" — it wasn't done, on purpose.
+5. **Widget-canon core states — partially.** `:focus-visible` (a real ring, purely additive,
+   deliberately NOT paired with the mock's own `:focus{outline:none}` reset — that reset is
+   unscoped and would strip the OLD debug-panel's default focus outlines the moment any new
+   room calls `installTokens()` on the same page during side-by-side rollout; it wants a real
+   room-container to scope against, which doesn't exist yet) and reduced-motion (both the
+   `@media` query and the inert `data-reduce-motion` attribute variant) are live. **Real,
+   named gap, not silently skipped: keyboard STEP behaviour is NOT built** — Shift=fine/
+   PgUp-Dn=coarse on sliders, arrow-key bearing adjustment on the compass dial (currently
+   pointer-only), tab-order/Esc handling. Charter §7.3's full ask is bigger than U0's other six
+   bullets and reads as its own scoped follow-up rather than something to rush into this round.
+6. **Wall `ui/tokens-only` + sabotage test**, live in `tools/verify-structure.mjs` — the same
+   ONE-WRITER doctrine as grade/residency/shadow/wind, applied for the first time
+   *preventatively* (LANTERN has no V2 corpse to cite, since it didn't exist before U0; the
+   sabotage test's `from` field says so rather than dressing a synthetic case up as historical).
+7. **Exit gate — met with a scope note.** §9's own bullet asks for the gallery rendering
+   "inside Foundry"; what's built and live-verified this round is a **standalone** gallery at
+   `tools/widget-gallery/` (served by the already-existing `tools/shader-lab/serve.mjs` — no
+   second dev server), matching the verification doctrine's own ladder (§10: Node tests →
+   gallery → live Foundry → author's eyes) where "inside Foundry" is the NEXT rung, not this
+   one — nothing in `src/` consumes these widgets live yet for a Foundry check to even be
+   possible. Verified thoroughly within that scope: DOM structure/labels/tooltips read back
+   correct for every widget type; all 4 themes clicked through with real COMPUTED styles
+   checked via script after each (body background, a slider's `accentColor`, and the planned-
+   control's `border-left` all matched their theme's real token hex, not just "should" match);
+   zero console errors across reloads. The rendered pixels themselves were not screenshotted —
+   the browser pane's screenshot tool was unavailable again this round (same gap as P8) — so
+   the computed-style checks are offered as the honest substitute they are, not as equivalent
+   to an author's own look.
+8. **New, not in the Testament's original U0 text: the control-readiness convention**
+   (`status:'live'|'planned'` + `plannedReason` on `core/params-schema.js`, dashed `--fail`
+   edge + `◇ planned` glyph + combined tooltip in the widget canon, never `disabled`) — this
+   round's own plan reconciled the author's fresh ask ("mark [unwired buttons]... with a
+   tooltip") against U6's later, more automated `ctx.params` read-tracking design, and built
+   the honest, hand-authored half now rather than waiting for U6. Worth a countersign on
+   whether U6, when it lands, should fold this in or keep the two signals visually distinct as
+   planned (a numbered corner pill for U6's auto-detected count vs. this whole-control edge
+   glow for a hand-declared admission).
+
+*Verification note, same honesty as every round before this one: `node tools/run-tests.mjs`
+stayed at 0 failed throughout (27 suites, 11000+ assertions, including everything the
+concurrent water/almanac work in this same tree touched this session) — this round never
+silently absorbed unrelated failures into its own scope, and never claimed a rung it didn't
+climb.*
 
 ---
 

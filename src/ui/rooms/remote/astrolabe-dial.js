@@ -499,7 +499,13 @@ export function buildAstrolabeDial(opts = {}) {
     clockPhase.textContent = (state.phase ?? '').toUpperCase();
     dateText.textContent = state.dateText ?? '—';
     const dir = Number.isFinite(state.windDirectionDeg) ? state.windDirectionDeg : 0;
-    windDirText.textContent = compassLabel(dir);
+    // Speed was accepted in this function's own JSDoc but never actually
+    // read here (2026-08-18 fix; gap-audit against the old astrolabe.js's
+    // real wind slider) — arrived every tick, silently dropped. Matches the
+    // old panel's own "wind-panel" status format exactly (boot.js), not a
+    // new convention.
+    const speed01 = Number.isFinite(state.windSpeed01) ? state.windSpeed01 : 0;
+    windDirText.textContent = speed01 > 0 ? `${compassLabel(dir)} · ${Math.round(speed01 * 100)}%` : 'calm';
   }
 
   return { root, update };

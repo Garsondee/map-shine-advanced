@@ -372,6 +372,23 @@ export const ZONES = Object.freeze(
       true,
       'waterSurface.sync'
     ),
+    // Runs AFTER light.waterSurfaceSync, not alongside light.waterBodyBake —
+    // the solidity seed samples the SAME full-resolution image the surface
+    // pack loads (`water-flow.js`'s own header), so it has nothing to bake
+    // until that load has landed at least once (water-flow-subsystem.js's
+    // own `maybeBake` reports 'no full-resolution mask loaded for this floor
+    // yet' every poll until then, never silently).
+    z(
+      'light.waterFlowBake',
+      'Water flow pack (solidity) bake',
+      'lighting',
+      'light.accumulate',
+      'water',
+      'both',
+      'bake',
+      false,
+      'waterFlow.maybeBake'
+    ),
     z(
       'light.fluidSurfaceSync',
       'Fluid surface sync',
@@ -1179,7 +1196,7 @@ export const EFFECT_ZONING = Object.freeze({
   }),
   water: Object.freeze({
     coverage: 'partial',
-    why: 'The JFA body bake and the surface sync are zoned, but the tier-0 surface is a drawable at renderOrder 0.5 inside geometry.world (surface.water is still a seam), so its draw cost cannot be separated.',
+    why: 'The JFA body bake, the surface sync, and the flow-pack solidity bake are zoned, but the tier-0 surface is a drawable at renderOrder 0.5 inside geometry.world (surface.water is still a seam), so its draw cost cannot be separated.',
   }),
   uiWindowShadow: Object.freeze({
     coverage: 'full',

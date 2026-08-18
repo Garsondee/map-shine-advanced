@@ -445,6 +445,66 @@ export async function run(t) {
     );
   }
 
+  // --- `authoredGridSpecs`: per-KIND resolution, water's own escape from the
+  // shared 512px point-sample grid a small painted feature can fall between
+  // texel centres of (WATER_GRID_MAX_DIM's own doc has the live incident) ---
+  {
+    const fineSpec = computeMaskGridSpec({ x: 0, y: 0, width: 100, height: 100 }, 20); // 20x20, texel 5 — 2x gspec
+    const twoKindFloors = [
+      {
+        index: 0,
+        ceilingElevation: 10,
+        outdoors: [],
+        authored: {
+          water: {
+            sources: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 200) }],
+            absentValue: 0,
+          },
+          // A SIBLING kind, deliberately absent from `authoredGridSpecs` below
+          // — proves the override is scoped to the ONE kind named, not every
+          // authored kind on the floor.
+          otherKind: {
+            sources: [{ placement: { x: 25, y: 50, width: 50, height: 100 }, content: makeUniformContent(1, 200) }],
+            absentValue: 0,
+          },
+        },
+      },
+    ];
+    const split = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [],
+      floors: twoKindFloors,
+      outdoorsAbsentValue: 1,
+      authoredGridSpecs: { water: fineSpec },
+    });
+    t.ok(
+      'the named kind rasterizes at ITS OWN spec, not the shared gridSpec',
+      split[0].authored.water.spec.w === fineSpec.w && split[0].authored.water.spec.w !== gspec.w
+    );
+    t.ok(
+      'a sibling kind absent from authoredGridSpecs keeps the shared gridSpec, unaffected',
+      split[0].authored.otherKind.spec.w === gspec.w
+    );
+    t.ok(
+      'the finer grid reads the SAME authored content, just at higher resolution — not a different result',
+      split[0].authored.water.data[10 * 20 + 5] === 200
+    );
+
+    // Omitting `authoredGridSpecs` entirely (the default `{}`) must be
+    // byte-for-byte identical to never having added the parameter — the
+    // regression guard for every OTHER caller of `deriveFloorProducts`.
+    const noOverride = deriveFloorProducts({
+      gridSpec: gspec,
+      items: [],
+      floors: twoKindFloors,
+      outdoorsAbsentValue: 1,
+    });
+    t.ok(
+      'omitting authoredGridSpecs preserves the pre-existing shared-gridSpec behaviour for water too',
+      noOverride[0].authored.water.spec.w === gspec.w
+    );
+  }
+
   // --- sampling + stats ----------------------------------------------------
   t.ok('sampleMaskGridWorld reads the covering texel', sampleMaskGridWorld(f0.coverAbove, 25, 55) === 255);
   t.ok(

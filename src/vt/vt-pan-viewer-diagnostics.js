@@ -564,6 +564,12 @@ export function buildViewerDiagnostics({
     // comparison is this phase's whole exit criterion). `resolve.floorIndex:
     // null` means no floor has an authored water mask — not an error.
     waterBody: _active?.getWaterBodyInfo?.() ?? { available: false },
+    // THE CURRENT CAMERA'S WORLD RECT (2026-08-17) — any diagnostic that
+    // samples points must intersect against THIS, not a baked body's own
+    // (possibly much larger) world AABB, or every sample off-camera reads as
+    // a false zero instead of "not measured" (see water-health's own coverage
+    // sweep, which shipped this exact bug its first time out).
+    viewWorldRect: _active?.getViewWorldRect?.() ?? null,
     // SHINE (2026-07-26, docs/planning/Specular.md) — tiers 0-3. Read
     // `maskImage` FIRST: 'not loaded' means the viewed floor has no authored
     // specular file at all, so the effect is inert BY DESIGN and nothing below

@@ -321,3 +321,115 @@ export function buildWindowLightReport({ floorIndex, viewer, maskAuthority, read
       'the CURRENT design, not a bug to chase.',
   };
 }
+
+/**
+ * THE WATER HEALTH REPORT — "absolutely anything and everything to do with
+ * foam health and water health in general" (author, 2026-08-17, asked for
+ * after a live round where a tier-gate theory was reported with confidence
+ * and turned out to rest on an unchecked premise — the request was for one
+ * button that measures instead of a session that keeps guessing).
+ *
+ * This is the STATIC half: the cascade, the tier ladder's own admission of
+ * what is and is not built yet, and every resident floor's bake/surface
+ * status — everything answerable WITHOUT touching the GPU. `boot.js
+ * #probeWaterFoamHealth` is the other half this function cannot be (a pure
+ * builder cannot await a frame or read a render target): a real pixel-
+ * readback coverage sweep over the viewed floor's own water body, using the
+ * same debug-channel-probe pattern `probeSpecularChannelsAt` established —
+ * `keyhole-diagnostic-tools.md` named water as one of the two obvious next
+ * effects for it. That function calls this one for the static half and
+ * merges its own `coverage` block on top, so the two travel as one report.
+ *
+ * @param {object} args
+ * @param {number} args.floorIndex - the currently viewed floor.
+ * @param {object|null} args.viewer - `getVtPanViewerDiagnostics()`, or null.
+ * @param {object} args.maskAuthority - `scene/mask-authority.js`'s instance.
+ * @param {{enabled: boolean, params: object|null, perfTier: number|null}} args.readout
+ *   - water's own cascade-resolved readout (`water.getReadout()`).
+ * @param {Array<{n: number, fromProfile?: string}>} args.tiers - `WATER.tiers`,
+ *   read directly rather than hand-typed, so "what's built" can never drift
+ *   from the manifest the way a comment could.
+ * @param {Array<{n: number, id: string, label: string}>} args.debugChannels - `WATER_DEBUG_CHANNELS`.
+ * @param {string} args.generatedAt
+ * @returns {object}
+ */
+export function buildWaterHealthReport({
+  floorIndex,
+  viewer,
+  maskAuthority,
+  readout,
+  tiers,
+  debugChannels,
+  generatedAt,
+}) {
+  const allFloors = Array.isArray(viewer?.waterBody) ? viewer.waterBody : null;
+  const currentFloor = allFloors ? (allFloors.find((f) => f.floorIndex === floorIndex) ?? null) : null;
+  const builtMaxTier = Math.max(0, (Array.isArray(tiers) ? tiers.length : 1) - 1);
+
+  // The Water-Testament's ladder (docs/holy/Water-Testament.md §5) names every
+  // rung past what is coded; it lives in prose there, not in a data structure
+  // this could read directly. Hand-typed, but harmless if it drifts stale:
+  // `builtMaxTier` above is the REAL fact (read from the manifest), and this
+  // list is only ever consulted for rungs ABOVE it — it can describe a future
+  // that never arrives, but it can never contradict what is actually built.
+  const PLANNED_LADDER = [
+    { n: 5, name: 'refraction', note: 'a DEPENDENT screen read of buf:scene.color, offset by slope × thickness' },
+    { n: 6, name: 'reflection', note: 'a short screen-space march along the wave normal' },
+    { n: 7, name: 'sim: memory (C7)', note: 'foam that persists and decays instead of being recomputed every frame' },
+    { n: 8, name: 'sim: interactive (C7)', note: 'wake/ripple response to moving bodies' },
+    { n: 9, name: 'spray (C8)', note: 'particle spray thrown from breaking foam' },
+  ];
+  const notYetImplemented = PLANNED_LADDER.filter((r) => r.n > builtMaxTier).map(
+    (r) => `tier ${r.n} (${r.name}): ${r.note} — NOT IN THIS BUILD YET, planned per the Water-Testament`
+  );
+
+  return {
+    report: 'water-health',
+    generatedAt,
+    viewedFloor: floorIndex,
+    effect: {
+      enabled: readout?.enabled ?? 'unresolved',
+      perfTier: readout?.perfTier ?? null,
+      params: readout?.params ?? 'not resolved yet',
+    },
+    ladder: {
+      builtMaxTier,
+      // Mirrors `water-surface-subsystem.js#getStatus()`'s own two fields —
+      // repeated here (not merely cross-referenced) so this section alone
+      // answers the tier question even if only THIS block gets pasted into
+      // chat, which is exactly how these reports get used in practice.
+      resolvedTier: currentFloor?.surface?.perfTier ?? readout?.perfTier ?? null,
+      inertControls:
+        currentFloor?.surface?.inertControls ?? 'unknown — viewer not started, or this floor has not synced yet',
+      notYetImplemented,
+    },
+    authoredWaterFloors: maskAuthority.floorsWithAuthored('water'),
+    floors: allFloors ?? (viewer ? [] : 'viewer not started'),
+    debugChannelCatalog: (Array.isArray(debugChannels) ? debugChannels : []).map((c) => ({
+      n: c.n,
+      id: c.id,
+      label: c.label,
+    })),
+    interpretation:
+      'READ `ladder` FIRST, before anything downstream. `ladder.inertControls` names any control that is ' +
+      'draggable but compiled out at the CURRENT resolved tier — a live symptom this explains needs no further ' +
+      'diagnosis, only a profile change. `ladder.notYetImplemented` lists rungs the Water-Testament plans but this ' +
+      'build has not written yet (refraction is the common one people go looking for) — absence there is a ' +
+      'roadmap fact, not a bug. THEN `floors`: each entry is one resident floor`s OWN bake + surface state. ' +
+      '`authoredWaterFloors` is keyed on PROVENANCE (a mask file exists and has paint), never on the grid being ' +
+      'non-empty, so a floor missing from it has no water content at all — check that before suspecting the bake. ' +
+      'Per floor, `resolve.reason` names which floor`s mask was actually baked (including cross-floor borrowing) ' +
+      'and `bakes` vs `polls` should be single-digit-vs-thousands (if they track each other the version-poll gate ' +
+      'is broken and every frame pays for a jump flood). `surface.visible: false` alongside a healthy bake means ' +
+      'the resolved floor`s mask holds no water at all — correct, not a failure. `surface.maskImage` "not loaded" ' +
+      'means this floor has no authored water file at all, full stop. `flow` is the S2 solidity pack ' +
+      '(docs/planning/Water-Simulation-Turn.md) — it has no visible effect on its own yet, so read it only when ' +
+      'diagnosing S2+ work: `flow: "not baked"` means this floor`s flow subsystem has not been constructed at ' +
+      'all (rare — the same floor list drives it and `surface`); `flow.lastBake.skipped: true` with reason "no ' +
+      'full-resolution mask loaded for this floor yet" is normal and temporary, waiting on `surface`s own async ' +
+      'image load; any OTHER skipped reason, or `flow.bakes: 0` while `surface.maskImage` shows loaded, is worth ' +
+      'chasing. If a `coverage` section is present below ' +
+      '(added by the live GPU sweep, not by this static half), READ IT LAST and let it override any conclusion ' +
+      'drawn from the fields above — those describe what SHOULD render; coverage measures what actually did.',
+  };
+}

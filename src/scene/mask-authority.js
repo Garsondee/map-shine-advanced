@@ -102,6 +102,7 @@ import {
   sampleMaskGridWorld,
   extractContentWindow,
   sampleAuthoredSourcesAt,
+  WATER_GRID_MAX_DIM,
 } from './mask-derive.js';
 import { compareLayerKeys, maskHostFloorIndices } from './layer-order.js';
 
@@ -668,6 +669,14 @@ export function createMaskAuthority({ readPageImageData, log }) {
       // `scene.gridSpec` doubles as the rect input here: `computeMaskGridSpec`
       // only reads `.x/.y/.width/.height`, all of which it already carries.
       casterGridSpec: casterSpec.gridMaxDim > 0 ? computeMaskGridSpec(scene.gridSpec, casterSpec.gridMaxDim) : null,
+      // WATER'S OWN RESOLUTION (2026-08-17) — see `WATER_GRID_MAX_DIM`'s own
+      // doc in mask-derive.js: the shared 512px grid POINT-samples, so a rock
+      // painted as a small hole in a large map's `_Water` mask can fall
+      // between texel centres and never seed the shore-distance field at all.
+      // Fixed (not tier-gated, unlike the caster spec above) — this is a
+      // content-fidelity floor, not a perf/quality trade, and the bake is
+      // already off the frame budget (`water-body-subsystem.js §1`).
+      authoredGridSpecs: { water: computeMaskGridSpec(scene.gridSpec, WATER_GRID_MAX_DIM) },
       items,
       floors,
       outdoorsAbsentValue: outdoorsKind?.absentValue ?? 1,

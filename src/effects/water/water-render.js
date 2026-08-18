@@ -128,8 +128,11 @@
  * `buildWaterSurfaceMaterial` now takes `tier` and gates each rung's EXPENSIVE
  * read with a plain JS `if` around its node construction — the body-pack
  * texture fetch (tier 1's depth ramp + wet band), `buildWaterSurfaceField`
- * (tier 2), `buildWaterSpecular` (tier 3). Below a rung's threshold the term it
- * would have produced is a literal neutral default (`float(0)`, `float(1)`,
+ * (tier 2, which ALSO carries tier 4's shoaling/caustics booleans — see that
+ * function's own header for why both live inside tier 2's fetch rather than a
+ * separate tier-4 block), `buildWaterSpecular` (tier 3), `buildWaterFilamentFoam`
+ * (tier 4's one genuinely independent piece). Below a rung's threshold the term
+ * it would have produced is a literal neutral default (`float(0)`, `float(1)`,
  * `vec3(0,0,0)`) wired in instead — never computed, never sampled, never bound
  * — so the compiled shader for a `low`-profile machine is genuinely smaller,
  * not merely quieter (§7's own test: compare tier 0 and tier N shader length).
@@ -138,9 +141,10 @@
  * resolved-tier change, mirroring candle flame's own quality-tier material
  * rebuild (`vt-pan-viewer.js#candleFlameMat`).
  *
- * TIERS 4-8 (`Water.md` §6, `WATER.deferredRungs` in `water.js`) are NOT built
+ * TIERS 5-8 (`Water.md` §6, `WATER.deferredRungs` in `water.js`) are NOT built
  * — see the scaffold comment beside `activeTier` below for where each one's
- * `if (activeTier >= N)` block lands the day its own code does.
+ * `if (activeTier >= N)` block lands the day its own code does. TIER 4
+ * (`shore` — filament foam, wave shoaling, caustics) landed 2026-08-16.
  *
  * ============================================================================
  * ⚠️ CORRECTION, 2026-08-15 — PAINT ORDER ALONE WAS NEVER SUFFICIENT, AND THE
@@ -177,6 +181,55 @@
  * `water-seams.js#getWaterBackgroundItemId` for the rest of the migration.
  *
  * ============================================================================
+ * 2026-08-16 — THREE AUTHOR-REPORTED FIXES, ALL STRUCTURAL, ALL IN THIS FILE
+ * ============================================================================
+ * Recorded together because they arrived together and because each is a
+ * different shape of the same underlying mistake: **a soft answer standing in
+ * for a hard boundary.**
+ *
+ *   1. **WATER OUTSIDE THE MAP** — *"water can appear outside the bounds of the
+ *      actual map"*. The mesh is padded 64 px past the measured water AABB, and
+ *      the mask fetch CLAMPS its UV, which does not stop at the rect — it
+ *      extrudes the edge row across everything beyond it. Fixed in two places
+ *      that fail differently: `water-body-subsystem.js#clipRectToMask` keeps the
+ *      GEOMETRY inside the authored rect, and `inRect` below makes any fragment
+ *      that still lands outside contribute nothing to either mesh.
+ *   2. **HARD EDGES IN THE WHITE THINGS** — *"unusual hard edges appearing that
+ *      don't make sense"*, traced as a staircase through open water. Two causes,
+ *      both amplifiers on the coarse body pack: the bank warp applied at full
+ *      strength at the medial axis, where the shore tangent is meaningless
+ *      (`water-field.js#WATER_BANK_REACH_PX`), and plain bilinear's C0 crease at
+ *      every one of the pack's ~21-world-px texel boundaries, pushed through a
+ *      wet-band smoothstep, a foam threshold and a GGX lobe
+ *      (`water-sampling.js`). Neither is a resolution problem and neither is
+ *      fixed by a finer field — that round trip was already made and recorded.
+ *   3. **THE GLINT SHONE INSIDE BUILDINGS** — *"sun glint needs to be defeated
+ *      by shadows"*. `Water.md` §7 has listed sun occlusion as one of water's
+ *      seven handles since the design was written, and tier 3's own ladder row
+ *      says "gated by `buf:scene.illum` and `buf:scene.vis`"; the gate simply
+ *      never got built. It was not obviously missing because the glint DOES ride
+ *      the ambient fill's own `sunVis` downstream — but a lobe that reaches ten
+ *      times the buffer's white point is still blown out after a 0.3× ambient.
+ *      See `water-light.js#WATER_TIER3_SHADOW_RESPONSE`.
+ *
+ * Also here: the flow direction became a COMPASS (`water-field.js#
+ * waterFlowVector`), which meant confronting that the old heading ran clockwise
+ * from +x on a Y-down screen while its help text claimed otherwise, AND that
+ * the advection was added to the noise domain rather than subtracted, so every
+ * river had been running backwards.
+ *
+ * SAME SESSION, ONE RUNG FURTHER: TIER 4 (`shore`) LANDED — `Water.md` §6's own
+ * text for this rung ("no derivatives, no divergent-flow UB") was written down
+ * before any of it existed, and building it turned that into three real
+ * decisions rather than one: shoaling and caustics have to live inside tier 2's
+ * OWN fetch (see `water-field.js`'s header — tier 3 has already consumed
+ * `field.slope` by the time a separate `if (activeTier >= 4)` block would run),
+ * caustics reads the field's Jacobian from two EXPLICIT world-space taps of the
+ * already-safe warped domain rather than a screen-space derivative, and its
+ * calibration constant (`WATER_CAUSTICS_K`) was swept against 65,536 real
+ * samples of the actual GPU noise before shipping — the same measure-first
+ * discipline tier 3's own invisible-ship cost this codebase once already.
+ * ============================================================================
  * ⚠️ THERE IS NO `buf:scene.attr` READ HERE — STILL TRUE, DIFFERENT REASON
  * ============================================================================
  * Water.md §6 and `graph/passes.js` both describe tier 0's occlusion — "the
@@ -205,6 +258,7 @@
 
 import {
   buildWaterSurfaceField,
+  waterFlowVector,
   WATER_TIER2_WAVE_SCALE_PX,
   WATER_TIER2_FLOW_SPEED_PX,
   WATER_TIER2_FLOW_ANGLE_DEG,
@@ -217,7 +271,17 @@ import {
   WATER_TIER3_SKY_SHEEN,
   WATER_TIER3_GLOSSINESS,
   WATER_TIER3_VIEWER_HEIGHT,
+  WATER_TIER3_SHADOW_RESPONSE,
 } from './water-light.js';
+import { buildSmoothTexelUv } from './water-sampling.js';
+import { buildWaterShoreFoam, waterFoamReachPx } from './water-shore.js';
+import { buildDebugChannelColor } from '../debug-channel-select.js';
+import { WATER_DEBUG_CHANNELS } from './water.js';
+// Intra-zone: the ONE hex→byte decoder, already shared by the candle and by
+// water's own registration (`water-registration.js`'s tint decode). A second
+// copy is how two effects end up disagreeing about what a hex string means.
+import { hexToRgb01 } from '../candle-flame-geometry.js';
+import { hsb2rgb } from '../lighting/animations/tsl-noise-toolkit.js';
 
 /**
  * Tier 0's flat body colour. A muted blue-green with a deliberate green bias:
@@ -232,7 +296,50 @@ export const WATER_TIER0_TINT = Object.freeze([0.09, 0.24, 0.28]);
 /** Tier 0's surface opacity. Below 1 so the riverbed art painted underneath
  * still reads through — the map's own bed is doing the work a volume rung will
  * later do properly. */
-export const WATER_TIER0_OPACITY = 0.62;
+export const WATER_TIER0_OPACITY = 1;
+
+/**
+ * THE DEPTH×POLLUTION COLOUR REFERENCE (2026-08-17, Water-Testament S1) — four
+ * real colours, not an invented gradient. `depth` blends shallow→deep WITHIN
+ * one pole; `pollution` blends between the two poles. Every water colour on
+ * screen is a bilinear read of these four, before `tint`'s own minority trim.
+ *
+ * References, not vibes — the same discipline `Water-Testament.md` §2.2/§2.7
+ * already cites (NOAA/USGS): CLEAR follows the round-trip-light explanation
+ * for why shallow tropical water reads pale and warm while depth goes dark
+ * blue as nothing returns; POLLUTED follows the silt/sediment account (brown-
+ * grey, opaque, scatters) rather than a chemical-toxin green — the author's
+ * own target is a medieval town river (mud, waste, algae), not a fantasy
+ * poison pool.
+ */
+export const WATER_COLOR_CLEAR_SHALLOW_HEX = '#BEE8DC';
+export const WATER_COLOR_CLEAR_DEEP_HEX = '#0C3947';
+export const WATER_COLOR_POLLUTED_SHALLOW_HEX = '#736B45';
+export const WATER_COLOR_POLLUTED_DEEP_HEX = '#191708';
+
+/**
+ * How much of `tint`'s OWN colour survives once `depth`/`pollution` derive
+ * the base — a minority hand-tune, never the primary source again. See
+ * `tint`'s own schema help (water.js) for the author-facing framing.
+ */
+export const WATER_TINT_TRIM_WEIGHT = 0.35;
+
+/** How much `depth` (0..1) rescales the absorption coefficient — Water-
+ * Testament §3.3's own named range. */
+export const WATER_DEPTH_ABSORPTION_RANGE = Object.freeze([0.5, 2.6]);
+/** How much `depth` (0..1) rescales the in-scatter strength — same source. */
+export const WATER_DEPTH_INSCATTER_RANGE = Object.freeze([0.6, 1.8]);
+/** How much EXTRA absorption `pollution` (0..1) adds on top of `depth`'s own
+ * scale — sludge is murkier per world-px, independent of how deep the body
+ * reads overall (a shallow polluted puddle can still hide its own bed). */
+export const WATER_POLLUTION_ABSORPTION_RANGE = Object.freeze([1.0, 1.6]);
+
+/** Tier 1's shipped defaults for the two new S1 params — Water-Testament
+ * §3.3's own calibration target (`depth`) and the author's own "large
+ * polluted medieval town river" lean (`pollution`). Matches `water.js`'s
+ * schema defaults; a change lands in both places or in neither. */
+export const WATER_TIER1_DEPTH = 0.45;
+export const WATER_TIER1_POLLUTION = 0.6;
 
 /**
  * Where the mask's RED channel is thresholded into presence, and over how wide
@@ -268,7 +375,7 @@ export const WATER_TIER0_OPACITY = 0.62;
  * "no water painted" at 8-bit quantisation anyway.
  */
 export const WATER_PRESENCE_EDGE0 = 2 / 255;
-export const WATER_PRESENCE_EDGE1 = 48 / 255;
+export const WATER_PRESENCE_EDGE1 = 0.5;
 
 /**
  * TIER 1 — ABSORPTION. How fast light is lost with depth (Beer–Lambert's σ,
@@ -306,7 +413,7 @@ export const WATER_PRESENCE_EDGE1 = 48 / 255;
  * Deep, opaque water is still one slider away for authors who want a lightless
  * tarn — it is just no longer the default for a shallow ford.
  */
-export const WATER_TIER1_ABSORPTION = 1.4;
+export const WATER_TIER1_ABSORPTION = 3.2;
 
 /**
  * TIER 1 — how much light the water sends back toward the viewer, 0..1, on top
@@ -320,7 +427,7 @@ export const WATER_TIER1_ABSORPTION = 1.4;
  * turbid, silty, or deliberately stylised water; drop it to 0 for water that is
  * purely a coloured filter over whatever is underneath.
  */
-export const WATER_TIER1_INSCATTER = 0.3;
+export const WATER_TIER1_INSCATTER = 0.18;
 
 /**
  * TIER 1 — HOW FAR FROM THE BANK THE WATER REACHES FULL DEPTH, world px.
@@ -355,7 +462,7 @@ export const WATER_TIER1_INSCATTER = 0.3;
  * SDF. 256 px default suits a river a few hundred px wide; a wide lake wants
  * more, a stream less.
  */
-export const WATER_TIER1_DEPTH_SCALE_PX = 256;
+export const WATER_TIER1_DEPTH_SCALE_PX = 312;
 
 /**
  * TIER 2 — how strongly the surface field varies optical depth, as a fraction.
@@ -382,12 +489,12 @@ export const WATER_TIER2_TURBIDITY = 0.45;
  * is good at — the same reasoning that says the SDF must NOT draw the edge
  * says it SHOULD draw this.
  */
-export const WATER_TIER1_WET_BAND_PX = 34;
+export const WATER_TIER1_WET_BAND_PX = 84;
 
 /** TIER 1 — how dark the wet band goes at the waterline, 0..1. A NEUTRAL
  * multiply (`dst · (1 − wet)`), never a tint — see the header. Subtle on
  * purpose: damp sand is a shade darker, not a painted outline. */
-export const WATER_TIER1_WET_STRENGTH = 0.35;
+export const WATER_TIER1_WET_STRENGTH = 0.38;
 
 /**
  * THE RUNG AN UNWIRED OR ABSENT `tier` FALLS BACK TO — today's shipped look
@@ -403,6 +510,31 @@ export const WATER_TIER1_WET_STRENGTH = 0.35;
  * (`feedback_shared_field_two_meanings_two_registries`).
  */
 export const WATER_DEFAULT_TIER = 3;
+
+/** TIER 4 — the default SWASH strength: waves running up the beach and draining
+ * back. An ADDITION to tier 2's own crest foam, never a replacement. */
+export const WATER_TIER4_SWASH_FOAM = 1;
+
+/** TIER 4 — the default BREAK-FOAM strength: the flow driven into a bank, on the
+ * upstream face of every obstacle. Higher than the swash by default because it
+ * is the one the author named directly (*"the shoreline and break near obstacles
+ * foam"*) and because it is naturally one-sided, so it never covers as much of
+ * the shore as the swash does. */
+export const WATER_TIER4_BREAK_FOAM = 1;
+
+/** TIER 4 — the default caustics strength, as a fraction of
+ * `WATER_CAUSTICS_K`'s own calibrated value. 1.0 is the measured operating
+ * point (`water-field.js#WATER_CAUSTICS_K`'s own doc has the sweep); this is a
+ * MULTIPLIER an author can pull back for a stiller, less busy bed. */
+export const WATER_TIER4_CAUSTICS = 0.33;
+
+/**
+ * How strongly break foam STREAMS DOWNSTREAM from where it was made
+ * (`water-shore.js#WATER_TAIL_TAPS`) — the stateless stand-in for the foam
+ * MEMORY the Water Testament names as its single highest-value finding.
+ * Matches `WATER_PARAMS.foamTrail`; a Node test pins the two equal.
+ */
+export const WATER_TIER4_FOAM_TRAIL = 0.8;
 
 /**
  * The tier-0 surface material.
@@ -439,14 +571,29 @@ export const WATER_DEFAULT_TIER = 3;
  *   JS-`if` gates rungs 1-3's node construction (Effects.md Law 4) — see the
  *   header's "TIER GATING" section. Absent/non-finite falls back to
  *   {@link WATER_DEFAULT_TIER}, today's shipped look, never tier 0.
- * @returns {{absorbMaterial:*, inscatterMaterial:*, maskTexNode:*, bodyTexNode:*|null,
+ * @param {*} [args.flowPackTexture] - `res:waterFlow`'s own finished pack
+ *   (`water-flow.js`, S2 solidity + S3 velocity/speed01 — RG velocity
+ *   normalised to a free-stream speed of 1, B speed01, A solidity), for the
+ *   `flowSolidity`/`flowVelocity` debug channels ONLY — nothing downstream
+ *   reads this yet. Unlike `depthTexture`, absent/null does NOT compile the
+ *   read out: the caller (`water-surface-subsystem.js`) always supplies a
+ *   real (if 1×1 placeholder) texture object here, the same contract
+ *   `maskTexture` itself already keeps, because this reads at EVERY tier and
+ *   has no JS-time fact to gate on the way a tier number or an optional pass
+ *   attachment does.
+ * @returns {{absorbMaterial:*, inscatterMaterial:*, debugMaterial:*, maskTexNode:*, maskTexNodes:Array<*>,
+ *   bodyTexNode:*|null, flowPackTexNode:*,
  *   setMaskRect:(r:object)=>void, setTint:(rgb:readonly number[])=>void,
- *   setOpacity:(v:number)=>void, setExpectedDepth:(v:number)=>void,
- *   floorGateCompiled:boolean, tier:number}} TWO materials, for two meshes over the
- *   same geometry — see the header. The caller draws `absorbMaterial` first.
- *   `bodyTexNode` is `null` below tier 1 (never sampled, so nothing to re-point
- *   on a bake regrid — callers must guard the same way `water-surface-
- *   subsystem.js#sync` does).
+ *   setOpacity:(v:number)=>void, setDepth:(v:number)=>void, setPollution:(v:number)=>void,
+ *   setExpectedDepth:(v:number)=>void,
+ *   setDebugChannel:(n:number)=>void, floorGateCompiled:boolean, tier:number}} TWO
+ *   materials for the shipping draw, plus a THIRD (`debugMaterial`) no mesh shows
+ *   until `setDebugChannel` picks a channel > 0 — see `water.js#WATER_DEBUG_CHANNELS`
+ *   and the instrument's own comment above the `return` below. The caller draws
+ *   `absorbMaterial` first, then `inscatterMaterial`. `bodyTexNode` is `null` below
+ *   tier 1 (never sampled, so nothing to re-point on a bake regrid — callers must
+ *   guard the same way `water-surface-subsystem.js#sync` does). `flowPackTexNode`
+ *   is NEVER null (unlike `bodyTexNode`) — see `args.flowPackTexture`'s own doc.
  */
 export function buildWaterSurfaceMaterial({
   THREE,
@@ -454,8 +601,11 @@ export function buildWaterSurfaceMaterial({
   maskRect,
   bodyTexture,
   bodyRect,
+  bodyTexSize,
   tint = WATER_TIER0_TINT,
   opacity = WATER_TIER0_OPACITY,
+  depth = WATER_TIER1_DEPTH,
+  pollution = WATER_TIER1_POLLUTION,
   absorption = WATER_TIER1_ABSORPTION,
   depthScalePx = WATER_TIER1_DEPTH_SCALE_PX,
   inscatterAmount = WATER_TIER1_INSCATTER,
@@ -475,10 +625,22 @@ export function buildWaterSurfaceMaterial({
   skySheen = WATER_TIER3_SKY_SHEEN,
   glossiness = WATER_TIER3_GLOSSINESS,
   viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
+  shadowResponse = WATER_TIER3_SHADOW_RESPONSE,
   chop = WATER_TIER3_CHOP,
   tier = WATER_DEFAULT_TIER,
   // ── THE DEPTH-AUTHORITY GATE (2026-08-15) ──────────────────────────────────
   depthTexture = null,
+  // ── THE SUN-SHADOW GATE (2026-08-16) ───────────────────────────────────────
+  sunShadowTexture = null,
+  // ── THE FLOW PACK'S PREVIEW (2026-08-17, S2 solidity + S3 velocity) ────────
+  flowPackTexture = null,
+  // ── TIER 4 (2026-08-16) ─────────────────────────────────────────────────
+  swashFoam = WATER_TIER4_SWASH_FOAM,
+  breakFoam = WATER_TIER4_BREAK_FOAM,
+  caustics = WATER_TIER4_CAUSTICS,
+  foamTrail = WATER_TIER4_FOAM_TRAIL,
+  // ── THE INSTRUMENT (2026-08-16, Water-Testament W0) ─────────────────────
+  debugChannel = 0,
 }) {
   // THE GATE. Clamped/coerced ONCE, here, so every `if (activeTier >= N)`
   // below reads a known-good integer regardless of what a caller passed —
@@ -502,27 +664,91 @@ export function buildWaterSurfaceMaterial({
     exp,
     log,
     max,
+    min,
     dot,
     mrt,
     step,
     mix,
+    atan,
   } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
   const uBodyRect = uniform(vec4(bodyRect.minX, bodyRect.minY, bodyRect.maxX, bodyRect.maxY));
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uOpacity = uniform(float(opacity));
+  const uDepth = uniform(float(depth));
+  const uPollution = uniform(float(pollution));
   const uAbsorption = uniform(float(absorption));
   const uDepthScalePx = uniform(float(depthScalePx));
   const uInscatter = uniform(float(inscatterAmount));
+  // THE FOUR REFERENCE COLOURS, decoded ONCE per material build via the ONE
+  // shared hex decoder — never author-tunable, so plain node constants
+  // (not uniforms): nothing ever pushes a new `.value` at them.
+  const clearShallowRgb = hexToRgb01(WATER_COLOR_CLEAR_SHALLOW_HEX);
+  const clearDeepRgb = hexToRgb01(WATER_COLOR_CLEAR_DEEP_HEX);
+  const pollutedShallowRgb = hexToRgb01(WATER_COLOR_POLLUTED_SHALLOW_HEX);
+  const pollutedDeepRgb = hexToRgb01(WATER_COLOR_POLLUTED_DEEP_HEX);
+  const colorClearShallow = vec3(clearShallowRgb[0], clearShallowRgb[1], clearShallowRgb[2]);
+  const colorClearDeep = vec3(clearDeepRgb[0], clearDeepRgb[1], clearDeepRgb[2]);
+  const colorPollutedShallow = vec3(pollutedShallowRgb[0], pollutedShallowRgb[1], pollutedShallowRgb[2]);
+  const colorPollutedDeep = vec3(pollutedDeepRgb[0], pollutedDeepRgb[1], pollutedDeepRgb[2]);
+  // `depth` RESCALES how aggressively the ladder's own absorption/in-scatter
+  // read (Water-Testament §3.3's named ranges) — it does not replace
+  // `absorption`/`inscatter`, which stay real ROH trims on top.
+  const depthAbsorptionScale = mix(
+    float(WATER_DEPTH_ABSORPTION_RANGE[0]),
+    float(WATER_DEPTH_ABSORPTION_RANGE[1]),
+    uDepth
+  );
+  const depthInscatterScale = mix(float(WATER_DEPTH_INSCATTER_RANGE[0]), float(WATER_DEPTH_INSCATTER_RANGE[1]), uDepth);
+  // `pollution` adds ITS OWN murk on top — sludge is harder to see through per
+  // world-px independent of how deep the body reads overall.
+  const pollutionAbsorptionScale = mix(
+    float(WATER_POLLUTION_ABSORPTION_RANGE[0]),
+    float(WATER_POLLUTION_ABSORPTION_RANGE[1]),
+    uPollution
+  );
+  // The SINGLE representative colour absorption reads its hue from — a
+  // material property of the water, not something that should vary shallow-
+  // to-deep within one body. `tint` blends in as a genuine minority trim
+  // (`WATER_TINT_TRIM_WEIGHT`), never the primary source again.
+  const derivedDeepColor = mix(colorClearDeep, colorPollutedDeep, uPollution);
+  const sigmaColorSource = mix(derivedDeepColor, uTint, float(WATER_TINT_TRIM_WEIGHT));
   const uWaveScalePx = uniform(float(waveScalePx));
   const uFlowSpeedPx = uniform(float(flowSpeedPx));
-  const uFlowAngleRad = uniform(float((flowAngleDeg * Math.PI) / 180));
+  // THE FLOW, AS A VECTOR — converted from the author's compass bearing on the
+  // CPU (`waterFlowVector`), never as `cos`/`sin` in the shader. That is where a
+  // Y-flip hides, and this project has paid for one five times; a plain JS
+  // function is something a Node test can pin against all eight cardinals.
+  const flow0 = waterFlowVector(flowAngleDeg);
+  const uFlowDir = uniform(vec2(flow0[0], flow0[1]));
   const uFoam = uniform(float(foam));
+  // THE BODY PACK's OWN SIZE IN TEXELS — for the smooth (C2) reconstruction
+  // that stops its ~21-world-px grid from creasing every steep read downstream
+  // (`water-sampling.js`). Seeded at the real grid the caller has, and re-pushed
+  // on every regrid; 1×1 is only ever the pre-first-bake placeholder, which is
+  // never sampled because the mesh is hidden until a bake lands.
+  const uBodyTexSize = uniform(vec2(bodyTexSize?.[0] ?? 1, bodyTexSize?.[1] ?? 1));
   const uChop = uniform(float(chop));
   const uTurbidity = uniform(float(WATER_TIER2_TURBIDITY));
+  // ── TIER 4 (2026-08-16) ─────────────────────────────────────────────────
+  const uSwashFoam = uniform(float(swashFoam));
+  const uBreakFoam = uniform(float(breakFoam));
+  const uCaustics = uniform(float(caustics));
+  const uFoamTrail = uniform(float(foamTrail));
+  // THE FOAM BAND's REACH, derived from the author's own `depthScalePx` on the
+  // CPU — see `water-shore.js#WATER_FOAM_SHORE_FRACTION` for why a fraction of a
+  // body-scale length rather than a bare pixel constant is the entire answer to
+  // "ponds through ocean shorelines". Re-derived in `setDepthScalePx` so the two
+  // can never disagree about the body's size.
+  const uFoamReachPx = uniform(float(waterFoamReachPx(depthScalePx)));
   const uWetBandPx = uniform(float(wetBandPx));
   const uWetStrength = uniform(float(wetStrength));
+  // THE INSTRUMENT's OWN SELECTOR — never a param (see `water.js#
+  // WATER_DEBUG_CHANNELS`'s header), pushed by the caller from render state
+  // beside `enabled`. 0 means "the caller never re-points this", which is
+  // exactly the `debugMaterial` OFF state — see `setDebugChannel`.
+  const uDebugChannel = uniform(float(debugChannel));
   // The upper edge of the presence band is authorable (WATER_PARAMS
   // `shorelineDepth`); the lower edge is not — it is the "is anything painted
   // here at all" floor, and exposing a knob that can be raised above the upper
@@ -549,12 +775,57 @@ export function buildWaterSurfaceMaterial({
   const maskU = positionWorld.x.sub(uMaskRect.x).div(spanX);
   const maskV = positionWorld.y.sub(uMaskRect.y).div(spanY);
   const maskTexNode = texture(maskTexture, vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1)));
+  // ⚠️ EVERY `texture(maskTexture, …)` NODE THIS FUNCTION BUILDS MUST LAND IN
+  // THIS ARRAY (2026-08-17, `feedback_texture_nodes_must_be_repointed_
+  // together`). The material is built against a 1×1 PLACEHOLDER
+  // (`water-surface-subsystem.js`'s own `createMaskTexture` call) and the
+  // real image re-points asynchronously — `water-body.js#prevTexNodes`
+  // already names the rule ("EVERY node must be re-pointed together"); this
+  // is the site that broke it. A node created and never pushed here samples
+  // the placeholder FOREVER, silently, and reads as "confidently land" —
+  // exactly the bug that turned the author's river solid white.
+  const maskTexNodes = [maskTexNode];
+
+  // ── WATER STOPS AT THE EDGE OF THE MAP (2026-08-16) ──────────────────────
+  // Author, live, with an arrow drawn at a band of water sitting in the black
+  // ABOVE the map art: *"I also noticed that water can appear outside the
+  // bounds of the actual map."*
+  //
+  // ⚠️ **A UV CLAMP IS NOT A BOUNDARY — IT IS AN EXTRUSION.** The two lines
+  // above clamp `maskU/maskV` into 0..1 so the fetch stays legal, and that is
+  // all a clamp can do: outside the rect it keeps returning the EDGE row's
+  // value. Where a river runs off the top of the map, the mask's top row reads
+  // "water" all the way across, so the clamp smears that row upward across the
+  // full width for as far as the mesh reaches — and the mesh reaches
+  // `WATER_BOUNDS_PAD_PX` (64 px) past the measured water AABB, which at the
+  // map's edge is 64 px past the map. Clamping the geometry (done, same day, in
+  // `water-body-subsystem.js`) fixes the case that was reported; this fixes the
+  // CLASS, because the mesh is only one of the ways a fragment can land outside
+  // the authored rect — a mask rect narrower than the body rect would do it
+  // too, and so would any future rung that widens the quad.
+  //
+  // MEMBERSHIP, NOT A THRESHOLD (`feedback_membership_beats_derived_threshold`):
+  // "is this world point inside the authored rect" is a question the rect can
+  // answer exactly, so it is asked directly rather than inferred from what the
+  // clamped sample happened to return. `step` twice per axis, no branch, and
+  // the boundary is the rect's own edge with no inset — the outermost texel is
+  // real authored data, and CLAMP_TO_EDGE returns it faithfully; it is only
+  // BEYOND the rect that the clamp starts inventing.
+  const inRect = step(float(0), maskU)
+    .mul(step(maskU, float(1)))
+    .mul(step(float(0), maskV))
+    .mul(step(maskV, float(1)));
 
   // THE SHORELINE. A narrow threshold on the LINEAR-filtered high-res mask, so
   // the crispness is the file's own and the ramp is whatever the author
   // painted — see WATER_PRESENCE_EDGE0/1 for why this is a threshold rather
   // than using the value directly.
-  const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r);
+  //
+  // `inRect` multiplies in HERE, at the single definition of "is there water at
+  // this pixel", rather than at the two composites — so every downstream term
+  // (depth, foam, in-scatter, the reflection, and the wet band via `1 − inside`)
+  // inherits the boundary from one place instead of four that could drift.
+  const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r).mul(inRect);
 
   // WORLD → body-pack UV, and AT MOST one fetch of it (tier 1+ only, see
   // below). The body pack's R is the SIGNED distance to shore in world px —
@@ -579,9 +850,20 @@ export function buildWaterSurfaceMaterial({
   if (activeTier >= 1) {
     const bodyU = positionWorld.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
     const bodyV = positionWorld.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
+    // ⚠️ SMOOTH (C2) RECONSTRUCTION, NOT PLAIN BILINEAR (2026-08-16) — see
+    // `water-sampling.js` for the author-reported staircase edges this removes
+    // and for why a finer field is the wrong fix. The remap passes exactly
+    // through every texel centre, so no distance this pack reports changes; only
+    // the CREASES between texels do, and it is those the steep reads below (a
+    // 34 px wet band over ~1.6 texels, the foam crest, tier 3's GGX lobe) were
+    // amplifying into visible edges. Costs no extra fetch.
+    const bodyUv = buildSmoothTexelUv(THREE.TSL, {
+      uvNode: vec2(clamp(bodyU, 0, 1), clamp(bodyV, 0, 1)),
+      uTexSize: uBodyTexSize,
+    });
     // The NODE is kept, not just its `.r` — the caller re-points `.value` when a
     // regrid recreates the target, and a swizzle cannot be re-pointed.
-    bodyTexNode = texture(bodyTexture, vec2(clamp(bodyU, 0, 1), clamp(bodyV, 0, 1)));
+    bodyTexNode = texture(bodyTexture, bodyUv);
     // `sdf` is purely internal to this block: 1a/1b are its only two readers,
     // and both live here.
     const sdf = bodyTexNode.r;
@@ -603,35 +885,72 @@ export function buildWaterSurfaceMaterial({
     // Multiplied by `1 − inside` so it exists only OUTSIDE the water: without
     // that the band would also darken the first few px of water itself,
     // which reads as a dirty rim rather than a wet shore.
+    //
+    // ⚠️ `inRect` HAS TO BE APPLIED SEPARATELY HERE, and only here. Every other
+    // term inherits the map boundary through `inside`; this one reads
+    // `1 − inside`, which is 1 exactly where `inside` is 0 — so folding the
+    // boundary into `inside` alone would have left the damp-ground band as the
+    // ONE term still free to draw past the edge of the map, which is the same
+    // bug wearing its own inverse (`feedback_gate_and_self_exclusion_answer_
+    // different_questions`).
     wetBand = float(1)
       .sub(smoothstep(float(0), max(uWetBandPx, float(1)), sdf))
       .mul(float(1).sub(inside))
+      .mul(inRect)
       .mul(uWetStrength);
   }
 
-  // ── BEER–LAMBERT, PER CHANNEL — pure ALU on `uTint`/`uAbsorption` uniforms,
-  // never a texture read, so σ costs the same at every tier and stays outside
-  // the gate above. What the gate controls is `depthRamp`, which σ is about to
-  // be multiplied against via `depth01` below.
+  // ── THE DEPTH×POLLUTION COLOUR RAMP (2026-08-17, Water-Testament S1) ─────
+  // `structuralDepth01` is the mask's own painted brightness times the
+  // GEOMETRIC shore taper (`depthRamp`, neutral 1 below tier 1) — the
+  // author's literal instruction ("treat the brightness of the mask as the
+  // depth") taken as far as it can honestly go before the ladder adds a real
+  // taper on top. Deliberately WITHOUT `opacity`/`turbid` (unlike `depth01`
+  // below): those answer "how much LAW effect", this answers "how deep does
+  // this pixel structurally read" — a colour question, not an optics one.
+  const structuralDepth01 = maskTexNode.r.mul(depthRamp).mul(inside);
+  const waterColorRamp = mix(
+    mix(colorClearShallow, colorClearDeep, structuralDepth01),
+    mix(colorPollutedShallow, colorPollutedDeep, structuralDepth01),
+    uPollution
+  );
+  // Same minority `tint` trim as the absorption colour, so a hand-tune nudges
+  // the WHOLE look consistently rather than just the deep read.
+  const inscatterColorSource = mix(waterColorRamp, uTint, float(WATER_TINT_TRIM_WEIGHT));
+
+  // ── BEER–LAMBERT, PER CHANNEL — pure ALU on `sigmaColorSource`/`uAbsorption`
+  // uniforms, never a texture read, so σ costs the same at every tier and
+  // stays outside the gate above. What the gate controls is `depthRamp`,
+  // which σ is about to be multiplied against via `depth01` below.
   //
-  // σ_rgb = absorption · −log(tint) / mean(−log tint), i.e. THE TINT IS READ AS
-  // A TRANSMITTANCE COLOUR. The first version used `1 − tint`, which is the
-  // same idea and far too weak to see: on the default tint it spreads the
-  // channels only ±14%, and `exp()` then flattens what little spread there was,
-  // making the per-channel result numerically indistinguishable from the scalar
-  // one it replaced. `−log` is the relationship Beer–Lambert actually inverts
-  // and it nearly doubles the spread (red:blue 1.9× against 1.27×), which is
-  // the difference between a hue shift you can see and one only the maths knows
-  // about.
+  // σ_rgb = absorption · −log(colour) / mean(−log colour), i.e. THE COLOUR IS
+  // READ AS A TRANSMITTANCE COLOUR. The first version used `1 − tint`, which
+  // is the same idea and far too weak to see: on the default tint it spreads
+  // the channels only ±14%, and `exp()` then flattens what little spread
+  // there was, making the per-channel result numerically indistinguishable
+  // from the scalar one it replaced. `−log` is the relationship Beer–Lambert
+  // actually inverts and it nearly doubles the spread (red:blue 1.9× against
+  // 1.27×), which is the difference between a hue shift you can see and one
+  // only the maths knows about.
+  //
+  // ⚠️ 2026-08-17: THE FLAT `uTint` THAT USED TO FEED THIS IS WHY IN-SCATTER
+  // (below) READ AS PAINT — see that term's own updated comment. σ itself
+  // stays keyed to ONE representative colour on purpose (absorption is a
+  // material property of the water, not something that should vary shallow-
+  // to-deep within a single body) — `sigmaColorSource` is that colour, now
+  // DERIVED from `pollution` (a material fact) plus a minority `tint` trim,
+  // instead of `tint` alone.
   //
   // Normalising by the mean keeps "how deep it reads" and "what colour it is"
   // independent controls — see WATER_TIER1_ABSORPTION. Both floors are load
-  // bearing: the inner one stops `log(0)` on a pure black tint, and the outer
-  // one stops a 0/0 on a pure WHITE tint, which correctly yields σ = 0 —
-  // colourless water that absorbs nothing and is simply invisible.
-  const absorbHue = log(max(uTint, vec3(2e-3, 2e-3, 2e-3))).negate();
+  // bearing: the inner one stops `log(0)` on a pure black colour, and the
+  // outer one stops a 0/0 on a pure WHITE colour, which correctly yields
+  // σ = 0 — colourless water that absorbs nothing and is simply invisible.
+  const absorbHue = log(max(sigmaColorSource, vec3(2e-3, 2e-3, 2e-3))).negate();
   const absorbMean = max(dot(absorbHue, vec3(1 / 3, 1 / 3, 1 / 3)), float(1e-4));
-  const sigma = absorbHue.div(absorbMean).mul(uAbsorption);
+  // `depth`/`pollution` RESCALE the magnitude (Water-Testament §3.3); `absorption`
+  // stays a real ROH trim multiplying the same result, exactly as before.
+  const sigma = absorbHue.div(absorbMean).mul(uAbsorption).mul(depthAbsorptionScale).mul(pollutionAbsorptionScale);
   // `opacity` scales the OPTICAL DEPTH, not the finished colour. That matters:
   // lerping the transmittance toward 1 (the first attempt) drags every channel
   // toward each other and destroys the hue separation the line above just
@@ -652,7 +971,13 @@ export function buildWaterSurfaceMaterial({
   // `tangentXY` reads `bodyTexNode`, which is only non-null once
   // `activeTier >= 2` (rungs are cumulative — tier 2 can never be reached
   // without tier 1 already being affordable, effect-cascade.js#resolveEffectTier).
-  let field = { foam: float(0), turbidity: float(0), slope: null };
+  let field = {
+    foam: float(0),
+    turbidity: float(0),
+    slope: null,
+    domainOffset: vec2(0, 0),
+    causticBrightness: float(0),
+  };
   if (activeTier >= 2) {
     field = buildWaterSurfaceField({
       TSL: THREE.TSL,
@@ -663,13 +988,21 @@ export function buildWaterSurfaceMaterial({
       insideWater: inside,
       uWaveScalePx,
       uFlowSpeedPx,
-      uFlowAngleRad,
+      uFlowDir,
       uFoam,
       // TIER 3's WAVE NORMAL rides tier 2's fetch — see `water-light.js`'s
       // header for why its absence made rung 3 measure invisible. Passed here
       // rather than inside the tier-3 block below because the FETCH belongs to
       // tier 2; only its third reading is tier 3's.
       uChop,
+      // TIER 4's SHOALING AND CAUSTICS ALSO RIDE TIER 2's FETCH — see
+      // `water-field.js`'s own header on why both must live inside this call
+      // rather than in a separate `if (activeTier >= 4)` block: shoaling has to
+      // amplify slope BEFORE tier 3 (built next) reads it, and caustics needs
+      // the SAME warped domain plus two more taps of it. Plain JS booleans,
+      // Effects.md Law 4 — below tier 4 neither branch is even entered.
+      shoaling: activeTier >= 4,
+      caustics: activeTier >= 4,
     });
   }
 
@@ -696,17 +1029,34 @@ export function buildWaterSurfaceMaterial({
   // parameters put you in the regime where the equation says "you cannot see
   // the bottom".
   //
-  // Two changes keep it honest AND keep it water:
+  // Three changes keep it honest AND keep it water:
   //   · `absorption` now defaults to a value that leaves the bed VISIBLE, which
   //     is what makes the multiply mean anything (see WATER_TIER1_ABSORPTION).
   //   · in-scatter is scaled by its own control, defaulting well below 1. Real
   //     shallow water returns very little light toward a viewer directly above
   //     it; a full-strength term is a deep-ocean look applied to a ford.
+  //   · ⚠️ 2026-08-17 — THE REAL FIX. The two points above make the CONSTANT
+  //     smaller; they cannot stop it being a constant, because it was reading
+  //     one flat `uTint` regardless of position. Once `depth01` saturates
+  //     (any confidently-painted open water, which is most of a real river's
+  //     surface), `1 − mean(bedTransmit)` saturates to 1 too, and the WHOLE
+  //     term collapses to `uTint × uInscatter` — a single colour painted over
+  //     everything, independent of how deep THAT pixel actually reads. That is
+  //     "opaque blue paint" by construction, and no amount of retuning
+  //     `absorption`/`inscatter` can fix a term that no longer has position in
+  //     it once saturated. The fix is not a smaller constant, it is not a
+  //     constant: `inscatterColorSource` (`waterColorRamp` + the `tint` trim,
+  //     above) varies with `structuralDepth01` AND `pollution` at every pixel,
+  //     so even fully saturated in-scatter still reads shallow-pale near the
+  //     bank and deep-dark mid-channel instead of one flat wash.
   //
   // Keyed off the transmittance BEFORE the wet band touches it, so damp ground
   // (which has no volume above it) can never in-scatter — the precise line
   // where the blue-margin bug lived.
-  const inscatter = uTint.mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3)))).mul(uInscatter);
+  const inscatter = inscatterColorSource
+    .mul(float(1).sub(dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3))))
+    .mul(uInscatter)
+    .mul(depthInscatterScale);
 
   // ── TIER 3: SUN + SKY SPECULAR ───────────────────────────────────────────
   // See `water-light.js` for the physics and the header above for why this
@@ -729,8 +1079,13 @@ export function buildWaterSurfaceMaterial({
     setSkySheen() {},
     setGlossiness() {},
     setViewerHeight() {},
+    setShadowResponse() {},
+    setSunShadowRect() {},
+    setSunShadowMix() {},
     outdoorsGateCompiled: false,
     normalCompiled: false,
+    sunShadowCompiled: false,
+    sunShadowTexNode: null,
   };
   if (activeTier >= 3) {
     specular = buildWaterSpecular({
@@ -744,6 +1099,15 @@ export function buildWaterSurfaceMaterial({
       skySheen,
       glossiness,
       viewerHeight,
+      shadowResponse,
+      // THE SUN-SHADOW GATE (2026-08-16). A JS-time branch, Law 4: with no
+      // field texture the whole lookup is compiled OUT, and the rung renders
+      // exactly as it did before shadows reached water. `Water.md` §7 has
+      // listed "sun occlusion" as one of water's seven handles since the design
+      // was written, and tier 3's own ladder row says "gated by
+      // `buf:scene.illum` and `buf:scene.vis`" — this is the half of that row
+      // that shipped missing.
+      sunShadowTexture,
       // THE WAVE NORMAL. Non-null here by construction — rungs are cumulative,
       // so reaching tier 3 means tier 2 built the field above. Passing it is
       // what separates a visible rung from the flat 0.0084 wash this shipped
@@ -752,17 +1116,276 @@ export function buildWaterSurfaceMaterial({
     });
   }
 
+  // ── TIER 4: SHORE — swash + break foam, on top of tier 2's own crest foam ─
+  // Shoaling and caustics are ALREADY DONE (they rode tier 2's own fetch
+  // above — see that call site's comment for why). Shoreline foam is the one
+  // piece of tier 4 with no upstream dependency, so it is the one piece that
+  // genuinely belongs in its own `if` block, the same shape tiers 1-3 use.
+  //
+  // ⚠️ NEUTRAL below tier 4: `float(0)`, so `totalFoam` below is byte-
+  // identical to tier 2/3's own `field.foam` when this tier is not affordable
+  // — Law 2's "adds, never substitutes" made checkable the same way tier 3's
+  // stub object makes ITS absence checkable.
+  // ⚠️ THE WHOLE OBJECT IS KEPT, not just `.foam` — `d01`/`lace`/`swashBand`/
+  // `breakFacing` are dead weight to the shipping render but are exactly the
+  // four taps `WATER_DEBUG_CHANNELS` needs to localise a dead term the way
+  // this rung's own two 2026-08-16 bugs would have been caught in minutes
+  // instead of a live report. The neutral defaults below (all `float(0)`,
+  // i.e. "at the waterline / no structure / no wave / facing away") describe
+  // the same "this term does not exist yet" state the debug channels' own
+  // "reads" text promises below tier 4.
+  let shore = {
+    foam: float(0),
+    breakOnly: float(0),
+    tailOnly: float(0),
+    d01: float(0),
+    lace: float(0),
+    swashBand: float(0),
+    breakFacing: float(0),
+  };
+  if (activeTier >= 4) {
+    shore = buildWaterShoreFoam({
+      TSL: THREE.TSL,
+      worldXY: vec2(positionWorld.x, positionWorld.y),
+      timeMsNode: timeMsNode ?? float(0),
+      // The SAME safe domain shift tier 2's own fetch used — see
+      // `water-shore.js`'s header for why re-deriving this independently
+      // (even correctly) would be a second copy of a thing this file has
+      // already shipped two bugs in.
+      domainOffset: field.domainOffset,
+      // THE SHORE NORMAL's SOURCE — break foam rotates this tangent 90° to ask
+      // "is the current heading into my nearest bank". Non-null here by
+      // construction: rungs are cumulative, so reaching tier 4 means tier 1
+      // built `bodyTexNode`.
+      tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
+      flowDir: uFlowDir,
+      shoreDist,
+      insideWater: inside,
+      uReachPx: uFoamReachPx,
+      uSwash: uSwashFoam,
+      uBreak: uBreakFoam,
+      uTrail: uFoamTrail,
+      // THE TAIL'S BODY-PACK TAP. Built HERE because this is where the body
+      // rect, the grid size and the smooth (C2) reconstruction all already
+      // live — `water-shore.js` re-deriving any of that would be a second copy
+      // of the mapping this file has already shipped bugs in. Takes a WORLD
+      // offset so the caller never has to know the UV convention at all.
+      sampleBodyAt: (offsetXY) => {
+        const at = vec2(positionWorld.x.add(offsetXY.x), positionWorld.y.add(offsetXY.y));
+        const u = at.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
+        const v = at.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
+        // ⚠️ CLAMPED, and here the clamp is CORRECT rather than an extrusion
+        // (`feedback_uv_clamp_is_an_extrusion_not_a_boundary`): a tap that
+        // marches off the body rect is asking about water outside the baked
+        // field, and the edge texel's own "no shore near here" answer is the
+        // honest one. Nothing downstream treats it as membership — `inside`,
+        // at THIS pixel, is what gates the result.
+        return texture(
+          bodyTexture,
+          buildSmoothTexelUv(THREE.TSL, {
+            uvNode: vec2(clamp(u, 0, 1), clamp(v, 0, 1)),
+            uTexSize: uBodyTexSize,
+          })
+        );
+      },
+    });
+  }
+  // ── OBSTACLE-PROXIMITY FOAM (2026-08-17) — LOCAL disturbance from ANY solid
+  // thing near this water pixel, read straight off `buf:scene.depth` — the
+  // ALREADY-EXISTING depth authority every occlusion test in this file
+  // already samples, never a new scheme
+  // (`keyhole-depth-authority-sole-system-decision`).
+  //
+  // WHY THIS EXISTS: the mask-SDF shore foam above only knows about shapes
+  // the AUTHORED WATER MASK captures, at whatever resolution it derives at
+  // — and a raster mask, at ANY resolution, can miss a small isolated
+  // obstacle a point-sample grid simply never lands on
+  // (`WATER_GRID_MAX_DIM`'s own doc has the live incident this session: a
+  // rock, correctly painted, still produced zero shore-foam because the
+  // derivation grid's point-samples kept missing it). The depth buffer has
+  // no such limit — it is whatever the renderer actually drew there THIS
+  // FRAME, at full resolution: a rock, a crate, a token, anything the depth
+  // authority already ranks above water. Sampling it directly makes
+  // obstacle detection EXACT and SIZE-INDEPENDENT instead of raster-
+  // resolution-limited, and it needs no mask authoring at all.
+  //
+  // WHY A FIXED RING OF TAPS, NEVER A DYNAMIC LOOP OVER ITEM DATA: this
+  // project has one CONFIRMED, still-unexplained, LIVE-FOUNDRY failure from
+  // exactly that shape — a `uniformArray` read through a `Loop` in the
+  // FRAGMENT stage turned the entire scene solid black, root cause never
+  // found (`keyhole-uniformarray-indexed-read-unexplained-failures`;
+  // `docs/planning/Point-Light-Batching-Design.md` §0 rule 1, and its own §2:
+  // "the two lawful carriers" are packed attributes or A BAKED TEXTURE
+  // SAMPLED BY COMPUTED UV — `buf:scene.depth` already IS that texture,
+  // built for occlusion, reused here rather than inventing a second one).
+  // `WATER_OBSTACLE_RING_TAPS` taps at FIXED, JS-computed angles is the
+  // exact same "unrolled at build time" shape `water-shore.js#WATER_TAIL_
+  // TAPS` already uses safely, four screens up this same file's own
+  // sibling module — no `Loop()`, no dynamic index, nothing this project
+  // has ever seen fail.
+  const WATER_OBSTACLE_RING_TAPS = 8;
+  /** World px from this pixel to each ring tap — deliberately NOT tied to
+   * `depthScalePx` (unlike the shore reach above): a rock's own local wake
+   * does not get physically bigger because the river it sits in is wider.
+   * Small on purpose — this is "right next to something solid", not a wide
+   * splash zone. */
+  const WATER_OBSTACLE_REACH_PX = 56;
+  let obstacleFoam = float(0);
+  if (activeTier >= 4 && depthTexture && uViewRect) {
+    const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
+    const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
+    let hits = float(0);
+    for (let i = 0; i < WATER_OBSTACLE_RING_TAPS; i++) {
+      const angle = (i / WATER_OBSTACLE_RING_TAPS) * Math.PI * 2;
+      const tapWorldX = positionWorld.x.add(float(Math.cos(angle) * WATER_OBSTACLE_REACH_PX));
+      const tapWorldY = positionWorld.y.add(float(Math.sin(angle) * WATER_OBSTACLE_REACH_PX));
+      const tapU = clamp(tapWorldX.sub(uViewRect.x).div(viewSpanX), float(0), float(1));
+      const tapV = clamp(tapWorldY.sub(uViewRect.y).div(viewSpanY), float(0), float(1));
+      const depthAtTap = texture(depthTexture, vec2(tapU, tapV));
+      // Inverted from the occlusion gate's own `notOccluded` test below: THIS
+      // asks "did something rank above water AT THE TAP" — the opposite
+      // question, at an offset point instead of this pixel's own.
+      const occludedAtTap = float(1).sub(step(uExpectedDepth, depthAtTap));
+      hits = hits.add(occludedAtTap);
+    }
+    // Fraction of the ring that found something solid, 0..1. Gated by
+    // `inside` alone, deliberately NOT by this pixel's own occlusion — a
+    // wake sits ON the water NEXT TO an obstacle, not under one, so this
+    // pixel being itself unoccluded is the case that matters, not a
+    // precondition to check.
+    obstacleFoam = hits.div(float(WATER_OBSTACLE_RING_TAPS)).mul(inside);
+  }
+
+  // ── MASK-PROXIMITY FOAM (2026-08-17) — the DIRECT fix for a painted hole a
+  // downsampled derivation grid can miss, at ANY resolution: read the SAME
+  // full-resolution mask image tier 0 already samples (`maskTexNode`, above
+  // — the author's own `.webp`, `WATER_GRID_MAX_DIM`'s coarse derivation
+  // never touches this one), in a ring, instead of asking the coarse body-
+  // pack SDF "is there a shore nearby". A hole in this texture is real,
+  // full-resolution, painted data — bilinear-sampled, so even a feature
+  // smaller than one ring step still contributes SOME signal instead of
+  // being silently skipped between taps. This is what makes a rock a few
+  // texels across in the DERIVED grid — and therefore invisible to
+  // `shore`/`obstacleFoam` above — still register: this ring never asks the
+  // derivation grid a question at all.
+  //
+  // Deliberately NOT gated on `depthTexture`/`uViewRect` (unlike the block
+  // above) — it needs neither, so a floor with the depth-authority gate
+  // unwired for any reason still gets this from tier 4 alone.
+  //
+  // ⚠️⚠️ RE-ENABLED 2026-08-17, ROOT CAUSE FOUND AND FIXED. Was disabled the
+  // same day after the author reported the water rendering ENTIRELY WHITE —
+  // `maskProximityFoam` read EXACTLY equal to `inside` at every point, which
+  // meant `maskHits.div(N)` was a CONSTANT 1 regardless of any tap. The
+  // threshold formula below (a crisp `step` at the presence floor) was
+  // already correct; the actual defect was structural and one layer up:
+  // EVERY one of these 8 taps is its OWN `texture(maskTexture, …)` node, and
+  // the material is built against a 1×1 BLACK PLACEHOLDER
+  // (`water-surface-subsystem.js`) — the real image re-points exactly ONE
+  // node (`maskTexNode.value`) when it loads. These 8 were never in that
+  // list, so they sampled the placeholder forever: R=0 at every tap, every
+  // pixel, always "land" (`feedback_texture_nodes_must_be_repointed_
+  // together`). Fixed by pushing every tap's own node into `maskTexNodes`
+  // (declared beside `maskTexNode`, above) so the subsystem re-points all of
+  // them together — see that array's own comment for the full account.
+  let maskProximityFoam = float(0);
+  if (activeTier >= 4) {
+    let maskHits = float(0);
+    for (let i = 0; i < WATER_OBSTACLE_RING_TAPS; i++) {
+      const angle = (i / WATER_OBSTACLE_RING_TAPS) * Math.PI * 2;
+      const tapWorldX = positionWorld.x.add(float(Math.cos(angle) * WATER_OBSTACLE_REACH_PX));
+      const tapWorldY = positionWorld.y.add(float(Math.sin(angle) * WATER_OBSTACLE_REACH_PX));
+      // SAME world→mask-UV formula as `maskU`/`maskV` above, at the tap's
+      // offset position instead of this fragment's own.
+      const tapMaskU = clamp(tapWorldX.sub(uMaskRect.x).div(spanX), float(0), float(1));
+      const tapMaskV = clamp(tapWorldY.sub(uMaskRect.y).div(spanY), float(0), float(1));
+      // ⚠️ PUSHED to `maskTexNodes` BEFORE anything else touches it — see that
+      // array's own header. A tap added here without this line is the exact
+      // regression this comment exists to prevent.
+      const tapMaskTexNode = texture(maskTexture, vec2(tapMaskU, tapMaskV));
+      maskTexNodes.push(tapMaskTexNode);
+      const tapMaskR = tapMaskTexNode.r;
+      // `WATER_PRESENCE_EDGE0` ALONE, a crisp `step` — NOT `uPresenceEdge1`
+      // (`shorelineDepth`, the WIDTH of the soft antialiased ramp AT the
+      // actual shore edge — unrelated to "is this land"; a wide-ramp version
+      // of this line was a SECOND, now-moot bug found and fixed the same day
+      // before the re-pointing defect was isolated as the real cause).
+      const tapIsLand = float(1).sub(step(float(WATER_PRESENCE_EDGE0), tapMaskR));
+      maskHits = maskHits.add(tapIsLand);
+    }
+    maskProximityFoam = maskHits.div(float(WATER_OBSTACLE_RING_TAPS)).mul(inside);
+  }
+
+  // ── FLOW PACK: DEBUG PREVIEW (2026-08-17, S2 solidity + S3 velocity,
+  // water-flow.js) ──────────────────────────────────────────────────────────
+  // `res:waterFlow`'s own finished pack — RG velocity (normalised, free-
+  // stream speed = 1.0), B speed01, A solidity — baked at the flow grid's own
+  // (coarser) resolution. Read here ONLY for the `flowSolidity`/`flowVelocity`
+  // debug channels (`water.js#WATER_DEBUG_CHANNELS`) — nothing downstream
+  // consumes it yet; S4 is the phase that gives it a real, visible consumer
+  // (swash/break/streak rewired onto real velocity). Un-gated by tier (unlike
+  // the two rings above): the pack is not a foam-ladder concept, it exists at
+  // every tier's own underlying bake, so there is no tier number this could
+  // meaningfully wait for.
+  //
+  // SAME world→UV formula as `maskU`/`maskV`, reused rather than re-derived:
+  // the flow grid covers the IDENTICAL rect the mask image does
+  // (`water-flow-subsystem.js` bakes over `waterBody.getRect()`, the exact
+  // rect `uMaskRect` already holds), so no separate rect uniform is needed.
+  //
+  // ⚠️ THIS IS NOT `maskTexNodes` — it samples a DIFFERENT texture
+  // (`flowPackTexture`, not `maskTexture`), re-pointed on a DIFFERENT
+  // cadence (the flow pack's own bake, not the mask's load). It gets its OWN
+  // placeholder-then-re-point discipline, one level up
+  // (`water-surface-subsystem.js#setFlowPackTexture`) — see
+  // `args.flowPackTexture`'s own doc for why the caller must always supply a
+  // real texture object here, never JS `null`.
+  const flowPackTexNode = texture(flowPackTexture, vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1)));
+  // Direction → hue, speed01 → value (HSV, full saturation) — `hsb2rgb` is
+  // this project's own tested wrapper around the vendored `mx_hsvtorgb`
+  // (`tsl-noise-toolkit.js`), reused rather than a second hue-sector formula.
+  // `atan(vy, vx)` is TSL's own 2-argument form, verified elsewhere in this
+  // codebase to compile to `atan2` (`region-darkness.js`'s own citation) —
+  // `(angle + π) / 2π` wraps it into hue's own [0,1] range. Inside solid,
+  // velocity is forced to exactly (0,0) (B2's own `×(1−solid)` mask), so
+  // `atan(0,0)` is a defined-but-arbitrary hue that never shows: `value`
+  // (speed01) is ALSO exactly 0 there, and HSV value 0 is black regardless of
+  // hue — no special-casing needed for the "inside a rock" case.
+  const flowVelocityHue = atan(flowPackTexNode.g, flowPackTexNode.r)
+    .add(float(Math.PI))
+    .div(float(Math.PI * 2));
+  const flowVelocityColor = hsb2rgb(THREE.TSL, flowVelocityHue, float(1), flowPackTexNode.b);
+
+  // THE ONE FOAM TOTAL every downstream term reads from here on — tier 2's
+  // crest foam PLUS tier 4's shoreline foam, clamped once. Law 2: an ADD, never
+  // a substitution; `field.foam` itself is untouched, so a caller that only
+  // wants tier 2's own number still has it. `shore.foam`/`obstacleFoam`/
+  // `maskProximityFoam` are MAX'd together first, not added: all three answer
+  // "is something solid near here", just from three different sources
+  // (painted-mask SDF, depth buffer, painted-mask direct read) — where a rock
+  // happens to be caught by more than one, that is one obstacle, not several.
+  const totalFoam = min(field.foam.add(max(max(shore.foam, obstacleFoam), maskProximityFoam)), float(1));
+
+  // ── TIER 4: CAUSTICS' OWN AUTHOR-FACING GAIN ─────────────────────────────
+  // `field.causticBrightness` already carries the calibrated
+  // `WATER_CAUSTICS_K` internally (see that constant's own doc for the real
+  // GPU sweep it was tuned against) — this is a SEPARATE multiplier on top,
+  // so an author can pull the whole effect back without retuning the physics
+  // constant underneath it. `max(0, ...)`: a negative gain would flip
+  // brightening into darkening and darkening into brightening, which is not
+  // "less caustics", it is a different, wrong effect.
+  const causticGain = max(uCaustics, float(0));
+  const causticExcess = field.causticBrightness.mul(causticGain);
+
   // ============================================================================
-  // TIERS 4-8 — NOT YET BUILT. THIS IS WHERE THEY GO (Effects.md §0 / §2)
+  // TIERS 5-8 — NOT YET BUILT. THIS IS WHERE THEY GO (Effects.md §0 / §2)
   // ============================================================================
   // Named, ordered and costed in `WATER.deferredRungs` (water.js) and
   // `Water.md` §6; nothing below is code, only the landing strip a real rung
   // gets the day its own module lands. Each becomes an
   // `if (activeTier >= N) { ... }` block in this exact position, CUMULATIVE
-  // with everything above it — tiers 1-3 just established the pattern.
+  // with everything above it — tiers 1-4 just established the pattern.
   //
-  //   tier 4  shore       C4  SDF shoreline foam filaments + wave shoaling +
-  //                           caustics from the surface field's Jacobian
   //   tier 5  refraction  C5  DEPENDENT read of buf:scene.color, offset by
   //                           slope × thickness — the first rung whose
   //                           coordinate comes from another read
@@ -777,14 +1400,11 @@ export function buildWaterSurfaceMaterial({
   //   tier 8  spray       C8  splash/spray particles through the one particle
   //                           engine — geometry, the top of the ladder
   //
-  // None of the five has a `fromProfile` yet — that is a real design decision
-  // for whoever builds it, not a placeholder to guess at here. What IS already
-  // true: `quality` and `extreme` (effect-cascade.js#PERFORMANCE_PROFILES) buy
-  // NOTHING beyond tier 3 today (WATER.tiers tops out at `standard`), so the
-  // first of these five rungs to declare `fromProfile: 'quality'` or
-  // `'extreme'` is what finally gives those two profiles a water of their own
-  // — the same way candle flame's tier 4 (`perCandle`, `fromProfile: 'extreme'`)
-  // does for candles.
+  // None of the four has a `fromProfile` yet — that is a real design decision
+  // for whoever builds it, not a placeholder to guess at here. Tier 4
+  // (`fromProfile: 'quality'`, water.js) is the first rung to buy `quality`/
+  // `extreme` a water of their own; the first of THESE four to declare
+  // `'extreme'` on its own account is what gives extreme a look past tier 4.
   // ============================================================================
 
   // Shared by both meshes. Split out so the two materials cannot drift apart on
@@ -855,16 +1475,52 @@ export function buildWaterSurfaceMaterial({
   // FOAM OCCLUDES, so it appears in BOTH passes and as the complement in each:
   // it hides the bed (a further multiply by `1 − foam`) and it emits white
   // (an add). Splitting it any other way would let foam brighten the bed it is
-  // supposed to be covering.
-  const foamHide = float(1).sub(field.foam);
+  // supposed to be covering. Reads `totalFoam` (tier 2 + tier 4's filaments),
+  // never `field.foam` alone, past this point — see that variable's own
+  // comment for why (Law 2: one foam total, or foam and its own occlusion
+  // could disagree about how much of the bed is covered).
+  // ── FOAM HAS A THICKNESS, AND IT HIDES LESS THAN IT GLOWS (2026-08-17) ───
+  // Author: *"I can see it, but it's currently very primitive."* One cause was
+  // that `totalFoam` drove BOTH how much bed the foam hides and how bright it
+  // is, through the SAME linear factor — so every foam pixel was the same flat
+  // white paint at a different alpha, and the only structure available was the
+  // lace texture's own.
+  //
+  // Real foam does not work that way. A thin scatter of bubbles throws light
+  // back very efficiently (bright) while hiding almost nothing behind it
+  // (translucent); a thick raft is opaque. So the two curves separate, and the
+  // separation IS the sense of thickness:
+  //
+  //   COVER = f²        rises SLOWLY  — thin foam is see-through
+  //   GLOW  = f·(2 − f) rises QUICKLY — thin foam still catches the light
+  //
+  // At f = 0.3 that is 9% of the bed hidden against 51% brightness: a bright
+  // veil you can see the water through, which is what the shallow edges of a
+  // foam patch actually look like. Both reach exactly 1 at f = 1, so the
+  // thickest foam is still fully opaque white and nothing overshoots. Two
+  // multiplies, no transcendental, no new texture read.
+  const foamCover = totalFoam.mul(totalFoam);
+  const foamGlow = totalFoam.mul(float(2).sub(totalFoam));
+  const foamHide = float(1).sub(foamCover);
 
   const absorbMaterial = new THREE.NodeMaterial();
-  const absorbColor = bedTransmit.mul(float(1).sub(wetBand)).mul(foamHide);
+  // CAUSTICS BRIGHTEN THE BED, MULTIPLICATIVELY — the correct mesh for them:
+  // a caustic does not add new light to the scene, it REDISTRIBUTES the light
+  // already reaching the bed, which is exactly what multiplying the bed's own
+  // transmitted colour (rather than adding a separate glow) expresses. Placed
+  // AFTER the wet band and foam hide, so caustics never brighten damp ground
+  // (no volume above it to refract through) or the underside of foam (which
+  // scatters, it does not focus).
+  const absorbColor = bedTransmit.mul(float(1).sub(wetBand)).mul(foamHide).mul(float(1).add(causticExcess));
   // OCCLUDED → `vec3(1,1,1)`, the multiply's OWN neutral element (see the
   // header on why white, not black — [[feedback_blend_neutral_element_is_per_blend]]):
   // whatever already won this pixel passes through completely untouched,
   // never darkened by a water pass that should not be there at all.
-  absorbMaterial.colorNode = vec4(mix(vec3(1, 1, 1), absorbColor, notOccluded), 1);
+  //
+  // Named (not inlined) because debug channel 17 (`absorbFinal`) reads this
+  // exact expression — see the instrument below.
+  const absorbFinalColor = mix(vec3(1, 1, 1), absorbColor, notOccluded);
+  absorbMaterial.colorNode = vec4(absorbFinalColor, 1);
   configureShared(absorbMaterial);
   absorbMaterial.blendSrc = THREE.ZeroFactor;
   absorbMaterial.blendDst = THREE.SrcColorFactor;
@@ -893,14 +1549,14 @@ export function buildWaterSurfaceMaterial({
   // OCCLUDED → the WHOLE term scaled toward 0, the add's own neutral element —
   // an occluded water pixel must emit no light at all, not merely skip its
   // bed multiply.
-  inscatterMaterial.colorNode = vec4(
-    inscatter
-      .mul(foamHide)
-      .add(field.foam.mul(float(0.85)))
-      .add(reflection)
-      .mul(notOccluded),
-    1
-  );
+  // Named (not inlined) because debug channel 18 (`inscatterFinal`) reads
+  // this exact expression — see the instrument below.
+  const inscatterFinalColor = inscatter
+    .mul(foamHide)
+    .add(foamGlow.mul(float(0.85)))
+    .add(reflection)
+    .mul(notOccluded);
+  inscatterMaterial.colorNode = vec4(inscatterFinalColor, 1);
   configureShared(inscatterMaterial);
   inscatterMaterial.blendSrc = THREE.OneFactor;
   inscatterMaterial.blendDst = THREE.OneFactor;
@@ -910,11 +1566,112 @@ export function buildWaterSurfaceMaterial({
   // that this one was checked rather than left to luck.
   inscatterMaterial.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
 
+  // ── THE INSTRUMENT (2026-08-16, Water-Testament W0) — a third material no
+  // mesh draws until asked ──────────────────────────────────────────────────
+  // `water.js#WATER_DEBUG_CHANNELS` holds the why and the reading guide for
+  // every channel below. Free when off: at channel 0 `water-surface-
+  // subsystem.js#refreshVisibility` attaches this material to no mesh, so the
+  // selector is not in a draw call at all — the same structural (not merely
+  // promised) zero cost `specular-render.js#SPECULAR_DEBUG_CHANNELS` uses.
+  //
+  // Three channels are DISPLAY-REMAPPED so a value outside [0,1] reads as a
+  // picture instead of clipping silently: `depth01` can exceed 1 once
+  // turbidity brightens it, and `turbidity`/`causticExcess` are SIGNED around
+  // a "no effect" zero — both biased so 0.5 grey means neutral, then clamped
+  // so the bias itself cannot invert past white/black. Every other channel
+  // below is its raw node, unclamped, on purpose: a value legitimately
+  // outside [0,1] on one of THOSE is itself the finding.
+  const depth01Display = clamp(depth01, float(0), float(1));
+  const bedVisibility = dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3));
+  const turbidityDisplay = clamp(field.turbidity.mul(float(0.5)).add(float(0.5)), float(0), float(1));
+  const causticDisplay = clamp(causticExcess.mul(float(0.5)).add(float(0.5)), float(0), float(1));
+  const debugNodes = {
+    quad: vec3(1, 0, 1),
+    mask: vec3(maskTexNode.r, maskTexNode.r, maskTexNode.r),
+    inside: vec3(inside, inside, inside),
+    shoreDist01: vec3(depthRamp, depthRamp, depthRamp),
+    depth01: vec3(depth01Display, depth01Display, depth01Display),
+    bedVisibility: vec3(bedVisibility, bedVisibility, bedVisibility),
+    turbidity: vec3(turbidityDisplay, turbidityDisplay, turbidityDisplay),
+    foamCrest: vec3(field.foam, field.foam, field.foam),
+    foamD01: vec3(shore.d01, shore.d01, shore.d01),
+    worleyLace: vec3(shore.lace, shore.lace, shore.lace),
+    swashBand: vec3(shore.swashBand, shore.swashBand, shore.swashBand),
+    breakFacing: vec3(shore.breakFacing, shore.breakFacing, shore.breakFacing),
+    breakFoam: vec3(shore.breakOnly, shore.breakOnly, shore.breakOnly),
+    foamTail: vec3(shore.tailOnly, shore.tailOnly, shore.tailOnly),
+    totalFoam: vec3(totalFoam, totalFoam, totalFoam),
+    causticExcess: vec3(causticDisplay, causticDisplay, causticDisplay),
+    // RAW tier-3 output, ungated by `inside`/`foamHide` — isolating "does
+    // tier 3 itself produce signal" from "does the water gate multiply it
+    // correctly", the same split channels 8 and 12 already draw for foam.
+    // Channel 18 (`inscatterFinal`) is the gated readback of this same term.
+    reflection: specular.reflection,
+    absorbFinal: absorbFinalColor,
+    inscatterFinal: inscatterFinalColor,
+    obstacleFoam: vec3(obstacleFoam, obstacleFoam, obstacleFoam),
+    maskProximityFoam: vec3(maskProximityFoam, maskProximityFoam, maskProximityFoam),
+    // `.a`, NOT `.r` — S3's pack moved solidity to the ALPHA channel to make
+    // room for RG velocity + B speed01 (`buildWaterProjectPackMaterial`'s own
+    // B4 doc); reading `.r` here now would show VELOCITY-X mislabelled as
+    // solidity, exactly the kind of channel-layout drift this project's own
+    // `feedback_shared_field_two_meanings_two_registries` bug class names.
+    flowSolidity: vec3(flowPackTexNode.a, flowPackTexNode.a, flowPackTexNode.a),
+    flowVelocity: flowVelocityColor,
+  };
+  // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
+  // header for the twelve specular rounds this trap cost before anyone dumped
+  // the real WGSL. Water shares `bodyTexNode`/`field`/`shore` across many of
+  // the channels above; a `select()` fold would assign each shared `.toVar()`
+  // in whichever branch the graph walk reached first and leave every other
+  // channel reading it as an unassigned zero.
+  const debugColor = buildDebugChannelColor(THREE.TSL, {
+    channels: WATER_DEBUG_CHANNELS,
+    nodes: debugNodes,
+    uDebugChannel,
+    label: 'water',
+  });
+  const debugMaterial = new THREE.NodeMaterial();
+  debugMaterial.colorNode = vec4(debugColor, 1);
+  configureShared(debugMaterial);
+  // OPAQUE where the effect ADDS: a diagnostic whose "this is zero" answer
+  // rendered as *nothing added* would reproduce the very ambiguity it exists
+  // to remove.
+  debugMaterial.blendSrc = THREE.OneFactor;
+  debugMaterial.blendDst = THREE.ZeroFactor;
+  // ⚠️ `attr` TOO — and unlike the two real meshes above, REPLACE (One/Zero)
+  // has no value that means "leave the destination alone": `absorbMaterial`
+  // could pick WHITE as multiply's neutral and `inscatterMaterial` could rely
+  // on add's zero-is-neutral default, but a replace blend always overwrites
+  // `attr` with whatever this material's own `attr` output is, full stop —
+  // there is no "don't touch it" available on either backend (blend state is
+  // not per-attachment on WebGL2, so `attr` cannot quietly keep a gentler
+  // blend while `colorNode` replaces). Explicit zero, not an unexamined
+  // renderer-global default, so a future reader sees this was CHECKED: while
+  // any non-zero debug channel is on screen, `attr` reads zero under the
+  // water AABB. Accepted rather than avoided — this material never ships in
+  // the normal render path (Water-Testament W0), and nothing consumes `attr`
+  // as part of reading the SAME diagnostic the picker is open for.
+  debugMaterial.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
+
   return {
     absorbMaterial,
     inscatterMaterial,
+    debugMaterial,
     maskTexNode,
+    /** EVERY `texture(maskTexture, …)` node this material built, `maskTexNode`
+     * included (always first) — the caller re-points ALL of them together
+     * when the real image loads, never `maskTexNode` alone. See this array's
+     * own declaration for why one node re-pointed and the rest forgotten is
+     * exactly the bug that shipped. */
+    maskTexNodes,
     bodyTexNode,
+    /** The `flowSolidity`/`flowVelocity` debug channels' shared single fetch
+     * — NEVER `null` (contrast `bodyTexNode`), because `flowPackTexture` is
+     * always a real (if placeholder) texture object; see that param's own
+     * doc. The caller re-points this via `setFlowPackTexture`, on its own
+     * cadence, independent of every `maskTexNodes` re-point. */
+    flowPackTexNode,
     /** The rung this material graph was actually BUILT at (Effects.md Law 4) —
      * for the debug report and for the caller's own rebuild-on-change check
      * (`water-surface-subsystem.js`). */
@@ -925,11 +1682,26 @@ export function buildWaterSurfaceMaterial({
     setBodyRect(r) {
       uBodyRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
     },
+    /** The body pack's size IN TEXELS — pushed on every regrid alongside
+     * `setBodyRect`, because the smooth reconstruction in `water-sampling.js`
+     * is phase-locked to the grid and a stale size would put its eased fraction
+     * out of step with the hardware filter it exists to correct.
+     * @param {number} w @param {number} h */
+    setBodyTexSize(w, h) {
+      uBodyTexSize.value.set(Number.isFinite(w) && w > 0 ? w : 1, Number.isFinite(h) && h > 0 ? h : 1);
+    },
     setAbsorption(v) {
       uAbsorption.value = v;
     },
+    /** WATER_PARAMS `depthScalePx`. ⚠️ ALSO re-derives tier 4's foam reach —
+     * `water-shore.js#WATER_FOAM_SHORE_FRACTION` makes the shoreline foam band a
+     * FRACTION of this length so a pond and an ocean shore both work from the
+     * one knob an author already sets. Deriving it in the same setter is what
+     * stops the two drifting into disagreeing about the body's size
+     * (`feedback_shared_field_two_meanings_two_registries`). */
     setDepthScalePx(v) {
       uDepthScalePx.value = v;
+      uFoamReachPx.value = waterFoamReachPx(v);
     },
     setInscatter(v) {
       uInscatter.value = v;
@@ -940,8 +1712,14 @@ export function buildWaterSurfaceMaterial({
     setFlowSpeedPx(v) {
       uFlowSpeedPx.value = v;
     },
+    /** WATER_PARAMS `flowAngleDeg` — a COMPASS BEARING (0 = north/up the
+     * screen, clockwise), naming the direction the water travels TOWARD. The
+     * heading→vector conversion happens here, on the CPU, in `waterFlowVector`
+     * — one tested implementation, never a second reading of the convention in
+     * a shader. @param {number} v */
     setFlowAngleDeg(v) {
-      uFlowAngleRad.value = (v * Math.PI) / 180;
+      const dir = waterFlowVector(v);
+      uFlowDir.value.set(dir[0], dir[1]);
     },
     setFoam(v) {
       uFoam.value = v;
@@ -958,6 +1736,31 @@ export function buildWaterSurfaceMaterial({
     },
     setWetStrength(v) {
       uWetStrength.value = v;
+    },
+    // ── TIER 4 ────────────────────────────────────────────────────────────
+    /** WATER_PARAMS `swashFoam` — waves running up the beach and draining back. */
+    setSwashFoam(v) {
+      uSwashFoam.value = v;
+    },
+    /** WATER_PARAMS `breakFoam` — the flow driven into a bank, on the upstream
+     * face of every obstacle. The author's own *"break near obstacles"*. */
+    setBreakFoam(v) {
+      uBreakFoam.value = v;
+    },
+    /** WATER_PARAMS `foamTrail` — the stateless downstream-tail stand-in
+     * (`WATER_TIER4_FOAM_TRAIL`, `water-shore.js#WATER_TAIL_TAPS`). Was wired
+     * into `uFoamTrail`/`buildWaterShoreFoam`'s `uTrail` at construction but
+     * never actually exposed here, so `water-surface-subsystem.js#sync`'s
+     * `surface.setFoamTrail(...)` call threw on every frame — the slider
+     * moved and was saved, and nothing downstream ever heard about it. */
+    setFoamTrail(v) {
+      uFoamTrail.value = v;
+    },
+    /** WATER_PARAMS `caustics` — a gain on top of the calibrated
+     * `WATER_CAUSTICS_K`, never the constant itself (see that constant's own
+     * doc for why it is measured, not authored). */
+    setCaustics(v) {
+      uCaustics.value = v;
     },
     // ── TIER 3 ────────────────────────────────────────────────────────────
     /** The camera's world rect centre — pushed per frame, never gated. */
@@ -980,9 +1783,35 @@ export function buildWaterSurfaceMaterial({
     setViewerHeight(v) {
       specular.setViewerHeight(v);
     },
+    /** WATER_PARAMS `shadowResponse` — how completely a cast shadow puts out
+     * the sun glint. @param {number} v */
+    setShadowResponse(v) {
+      specular.setShadowResponse(v);
+    },
+    /** THE SUN-SHADOW FIELD's world rect, for the floor this water sits on.
+     * Pushed by the subsystem whenever the slot it borrows moves. */
+    setSunShadowRect(r) {
+      specular.setSunShadowRect(r);
+    },
+    /** 1 when a real sun-shadow field is bound for THIS floor, 0 when none is
+     * — see `water-light.js#setSunShadowMix` for why "no field" must read as
+     * full sun rather than as full shadow. */
+    setSunShadowMix(v) {
+      specular.setSunShadowMix(v);
+    },
+    /** The tier-3 shadow field's own texture node, so the caller can re-point
+     * `.value` at whichever per-floor slot currently matches. `null` below tier
+     * 3 or when the gate compiled out — callers must guard, the same way they
+     * already guard `bodyTexNode`. */
+    sunShadowTexNode: specular.sunShadowTexNode ?? null,
     /** For the debug report — whether the outdoors branch is real on this
      * scene or compiled to the indoors constant. */
     outdoorsGateCompiled: specular.outdoorsGateCompiled,
+    /** For the debug report — `false` means the sun glint is NOT defeated by
+     * cast shadows on this scene (no field texture reached the build), which is
+     * silent on screen: the water simply keeps glinting inside a building's
+     * shadow, which is what the author reported. */
+    sunShadowCompiled: specular.sunShadowCompiled ?? false,
     /** For the debug report — whether tier 3 got a real wave normal. See
      * `water-light.js#normalCompiled`: `false` is the measured-invisible
      * configuration, and it fails silently. */
@@ -992,6 +1821,17 @@ export function buildWaterSurfaceMaterial({
     },
     setOpacity(v) {
       uOpacity.value = v;
+    },
+    /** WATER_PARAMS `depth` — how deep the whole body reads (Water-Testament
+     * §3.3). Rescales absorption/in-scatter magnitude; does not touch colour
+     * selection directly (that is `structuralDepth01`, computed per-pixel). */
+    setDepth(v) {
+      uDepth.value = v;
+    },
+    /** WATER_PARAMS `pollution` — clear (0) to sludge (1). Blends the whole
+     * colour ramp AND adds its own murk on top of `depth`'s absorption scale. */
+    setPollution(v) {
+      uPollution.value = v;
     },
     /** THE DEPTH-AUTHORITY GATE's own push — `computeTieSafeExpectedDepth(rank,
      * maxRank)` for THIS floor's own background item's rank, on the SAME
@@ -1016,6 +1856,15 @@ export function buildWaterSurfaceMaterial({
     setShorelineDepth(v) {
       const safe = Number.isFinite(v) ? v : WATER_PRESENCE_EDGE1;
       uPresenceEdge1.value = Math.max(WATER_PRESENCE_EDGE0 * 2, safe);
+    },
+    /** THE INSTRUMENT's OWN SELECTOR (Water-Testament W0) — which
+     * `debugMaterial` channel shows. 0 = off, and the CALLER is what makes 0
+     * free: it must DETACH the material rather than leave it attached showing
+     * channel 0's own (undefined) picture — see `water-surface-subsystem.js#
+     * refreshVisibility`. Never a param, never persisted; travels on render
+     * state beside `enabled`. @param {number} n */
+    setDebugChannel(n) {
+      uDebugChannel.value = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
     },
   };
 }

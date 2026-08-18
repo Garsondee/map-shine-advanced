@@ -434,7 +434,11 @@ import {
 import {
   createWaterSeams,
   createWaterRegistration,
+  WATER,
   WATER_PARAMS,
+  WATER_DEBUG_CHANNELS,
+  WATER_PRESETS,
+  waterPreset,
   createFluidSeams,
   createFluidRegistration,
   FLUID_PARAMS,
@@ -463,6 +467,7 @@ import {
 import {
   buildSunShadowsReport,
   buildWaterBodyReport,
+  buildWaterHealthReport,
   buildSpecularReport,
   buildWindowLightReport,
 } from './diag/effect-status-reports.js';
@@ -5584,31 +5589,214 @@ function install() {
   // see its header for why this one is a module while the other four effects
   // still inline the identical block.
   MapShine.setWater = water.setWater;
+  /** `MapShine.setWaterDebug(9)` — the console twin of the picker below
+   * (Water-Testament W0). */
+  MapShine.setWaterDebug = water.setDebugChannel;
   MapShine.setFluid = fluid.setFluid;
+
+  /**
+   * THE DEBUG-CHANNEL PICKER — water's own copy of `buildSpecularDebugSelect()`
+   * (Water-Testament W0), one dropdown that makes the shader say which of its
+   * terms is the dead one (`effects/water/water.js#WATER_DEBUG_CHANNELS` holds
+   * the why and the per-channel reading guide).
+   *
+   * It sits on the card rather than behind a report because the answer is a
+   * PICTURE, not a number: "channel 9 is black" locates the bug in one glance,
+   * where a report can only ever tell you what the JS side believes. The
+   * channels walk the product roughly in COMPUTATION order — the first BLACK
+   * one (or, for a remapped channel, the first away from its documented
+   * neutral) is the culprit — so this is a ladder to descend, not a menu to
+   * browse.
+   *
+   * Same `msa-effect-preset-select` idiom as specular's picker, and it does
+   * NOT reset itself after a change the way a preset picker does: a
+   * diagnostic you are reading has to stay selected while you look at it.
+   * @returns {HTMLSelectElement}
+   */
+  function buildWaterDebugSelect() {
+    const select = document.createElement('select');
+    select.className = 'msa-effect-preset-select';
+    select.title = 'Show one shader intermediate instead of the effect — the first BLACK channel is the culprit';
+    for (const ch of WATER_DEBUG_CHANNELS) {
+      const opt = document.createElement('option');
+      opt.value = String(ch.n);
+      opt.textContent = ch.label;
+      // The reading guide, on hover — so "what does black here mean" is
+      // answered where the author is looking, not in a doc they would have to
+      // go and find mid-investigation.
+      opt.title = ch.reads;
+      select.appendChild(opt);
+    }
+    select.value = String(water.getDebugChannel());
+    select.addEventListener('change', () => {
+      MapShine.setWaterDebug(Number(select.value));
+    });
+    return select;
+  }
+
+  /**
+   * THE NAMED-LOOK PICKER — `water.js#WATER_PRESETS`, applied through the same
+   * `setWater` write path a slider drag uses, so a preset is indistinguishable
+   * from having moved every control by hand.
+   *
+   * Resets to the placeholder after applying, exactly as the grade card's own
+   * picker does and unlike the DEBUG-channel select beside it: a preset is a
+   * one-shot ACTION whose result then belongs to the sliders, whereas a debug
+   * channel is a MODE you are currently reading and must stay selected while
+   * you look at it. Same widget, opposite semantics, on purpose.
+   */
+  function buildWaterPresetSelect() {
+    const select = document.createElement('select');
+    select.className = 'msa-effect-preset-select';
+    select.title = 'Apply a named, author-approved water look — every control at once';
+    const prettify = (n) => n.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Preset…';
+    select.appendChild(placeholder);
+    for (const name of Object.keys(WATER_PRESETS)) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = prettify(name);
+      select.appendChild(opt);
+    }
+    select.addEventListener('change', () => {
+      const name = select.value;
+      select.value = '';
+      if (!name) return;
+      const params = waterPreset(name);
+      // `waterPreset` returns null rather than falling back to the defaults —
+      // see its own doc for why a silent fallback would be indistinguishable
+      // from a preset that happens to match them.
+      if (!params) {
+        log.error(`water preset '${name}' not found — see WATER_PRESETS in effects/water/water.js`);
+        return;
+      }
+      MapShine.setWater(params);
+      // The card reads its slider positions at BUILD time, so without this the
+      // controls would keep showing the pre-preset values while the water
+      // rendered the new ones — the same build-time-vs-live split that made the
+      // 📋 button lie, wearing its other face.
+      MapShine.debug?.refreshControls?.();
+    });
+    return select;
+  }
+
+  /**
+   * ⚠️ THE INERT-CONTROL WARNING — the loudest thing on the water card when the
+   * resolved rung is below the rung a shipped control belongs to.
+   *
+   * ============================================================================
+   * WHY THIS EXISTS (2026-08-17, and it cost a whole development cycle)
+   * ============================================================================
+   * Tier 4 (`shore`) declares `fromProfile: 'quality'`; `DEFAULT_PERFORMANCE_
+   * PROFILE` is `'standard'`. So on a default install EVERY tier-4 term —
+   * shore swash, break foam, foam trails, caustics, wave shoaling — is compiled
+   * out by Effects.md Law 4, exactly as designed. What was NOT designed is that
+   * their five sliders stayed on the card, fully draggable, writing values into
+   * uniforms no compiled shader reads.
+   *
+   * The author dragged foam, swash and break to maximum, saw only tier 2's
+   * crest foam, and reported *"Foam is set to full and I can't see any"* and
+   * *"it doesn't seem to have changed"* — both completely accurate, and neither
+   * diagnosable from anything the UI said. Two sessions of shore-foam work were
+   * measured green on a bench that sets `tier = 4` explicitly while the live map
+   * could not run a line of it (`feedback_bench_must_build_inputs_like_
+   * production`, arriving through the tier ladder rather than through the data).
+   *
+   * `params/no-dead-controls` walls a param with no CONSUMING SOURCE. This is
+   * the sibling it cannot see: a param whose consumer exists, compiles, and is
+   * gated off at runtime by a profile the author never knowingly chose. The
+   * wall cannot catch that statically, so the card says it out loud instead.
+   */
+  /** @param {() => object} readLive - the card's own live readout accessor.
+   *   Passed in rather than captured: the `panels/no-captured-readout` wall
+   *   caught this function's first draft doing `water.getReadout()` directly,
+   *   which is the wall working on the very session that built it. A build-time
+   *   read would be doubly wrong here — this widget exists to report a LIVE
+   *   gate, so freezing it would make the honesty warning itself go stale the
+   *   moment the author raised their profile. */
+  function buildWaterTierWarning(readLive) {
+    const wrap = document.createElement('div');
+    const tier = readLive().perfTier;
+    // `null` = the cascade has not resolved yet (the pre-resolve window
+    // `water-registration.js` documents). Say nothing rather than accuse a
+    // profile of something before anything has been resolved at all.
+    if (!Number.isFinite(tier) || tier >= 4) return wrap;
+    Object.assign(wrap.style, {
+      flexBasis: '100%',
+      border: '1px solid rgba(255,180,90,0.45)',
+      background: 'rgba(255,180,90,0.10)',
+      borderRadius: '7px',
+      padding: '7px 9px',
+      font: '11px/1.45 Signika, sans-serif',
+      color: '#ffcf9a',
+    });
+    // NAMED, not "some controls" — the whole failure was that the author could
+    // not tell WHICH sliders were inert, so the one thing this must not do is
+    // be vague about it.
+    wrap.innerHTML =
+      `<b>Rung ${tier} of 4 — shore foam is switched off.</b><br>` +
+      'Shore swash, Break foam, Foam trails and Caustics all belong to rung 4, which needs the ' +
+      '<b>Quality</b> graphics profile (you are on a lower one). Their sliders still move, but nothing reads ' +
+      'them at this rung. Raise the profile in <i>Graphics &amp; Performance</i> to switch them on.';
+    return wrap;
+  }
+
   MapShine.debug.registerPanel(
     'water-panel',
     'Water',
     ({ attachments }) => {
-      const readout = water.getReadout();
+      // ⚠️ A GETTER, NOT A CAPTURED VALUE (2026-08-17) — see
+      // `effect-controls.js#buildSettingsSnapshot`'s own header. `getReadout()`
+      // returns a NEW object on every cascade resolve, so a `const readout =`
+      // captured here freezes at whatever was resolved when the card was BUILT.
+      // Nothing calls `refreshControls()` on a param change (a mid-drag DOM
+      // rebuild would yank the slider out from under the pointer), so that
+      // capture never refreshed — while the sliders still LOOKED right, because
+      // an `<input type=range>` holds the dragged value in its own native DOM
+      // state. The 📋 copy button reads `getValue`, so it exported the
+      // build-time snapshot: a flawless set of schema defaults, which the author
+      // pasted in good faith and which I then reported back as "already the
+      // defaults". `feedback_instruments_must_not_lie`, and it cost a round trip.
+      const readLive = () => water.getReadout();
       return buildEffectCard({
         id: 'water',
         diagnostics: attachments,
         icon: '🌊',
         title: 'Water',
-        subtitle: 'tiers 0–3 — placement · volume · motion · light',
-        status: () => collapsedStatusLine({ enabled: readout.enabled }),
+        subtitle: 'tiers 0–4 — placement · volume · motion · light · shore',
+        status: () => collapsedStatusLine({ enabled: readLive().enabled }),
         schema: WATER_PARAMS,
         // FOH is a strict, SMALL subset, never the whole schema
-        // (feedback_foh_roh_must_differ). These three are the mid-session
-        // questions: what colour, how much shows through, how fast it hides
-        // the bed. The other three are ROH — `shorelineDepth`'s minimum
-        // visibly breaks the edge, and the wet-margin pair is set-once detail.
-        fohKeys: ['tint', 'opacity', 'absorption', 'foam'],
-        getValue: (id) => readout.params?.[id] ?? WATER_PARAMS[id]?.default,
+        // (feedback_foh_roh_must_differ). These six are the mid-session
+        // questions — what colour, how much shows through, how fast it hides
+        // the bed, how broken the surface is, and (2026-08-16, on the author's
+        // own ask: *"I have a map with a river and I need to be able to set the
+        // direction the water is travelling in"*) which way it runs and how
+        // fast. The direction control is the `angle` type, so it renders as a
+        // compass dial rather than a 0–360 slider whose two ends are the same
+        // heading — see `core/params-schema.js`'s note on why that is a TYPE
+        // and not a widget hint.
+        //
+        // Six is Effects-UI.md §3.2's ceiling, reached deliberately rather than
+        // drifted into. REVISED 2026-08-17 (Water-Testament S1): `depth` and
+        // `pollution` now answer the "what does this water look like" question
+        // more directly than `tint`/`absorption` ever did — those two demote to
+        // ROH as hand-tune trims (see their own updated schema help) so the
+        // FOH surface stays at the cap instead of growing past it. Everything
+        // that stays ROH — the shoreline threshold whose minimum visibly breaks
+        // the edge, the wet-margin pair, the whole Light group, the wave
+        // geometry — still passes the same judgement test the ORIGINAL six did,
+        // just no longer includes color.
+        fohKeys: ['depth', 'pollution', 'opacity', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+        getValue: (id) => readLive().params?.[id] ?? WATER_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
-        enabled: readout.enabled,
+        enabled: readLive().enabled,
+        getEnabled: () => readLive().enabled,
         onToggleEnabled: (next) => MapShine.setWater({ enabled: next }),
         add: paintAffordance('water'),
+        extra: [buildWaterTierWarning(readLive), buildWaterPresetSelect(), buildWaterDebugSelect()],
       });
     },
     { zone: 'workshop', effect: 'water', order: 30 }
@@ -8712,6 +8900,268 @@ function install() {
     },
     { effect: 'apertureGobo' }
   );
+
+  // ==========================================================================
+  // THE WATER HEALTH REPORT (2026-08-17) — "a report button for water which
+  // outputs absolutely anything and everything to do with foam health and
+  // water health in general," asked for directly after a live round where a
+  // tier-gate theory was delivered with confidence and turned out to rest on
+  // an unchecked premise ("I was at extreme quality the entire time"). The
+  // fix for a session that keeps guessing is an instrument that measures.
+  //
+  // `probeSpecularChannelsAt`'s pattern (this file, above), adapted from
+  // "3 CLICKED points" to an AUTOMATIC GRID across the viewed floor's own
+  // water bounds — the author asked for coverage "in general", not "click
+  // where you think it's broken". `buildWaterHealthReport` (effect-status-
+  // reports.js) supplies the static half (cascade, tier ladder, per-floor
+  // bake/mask status); this adds the one thing a pure builder cannot be: a
+  // real GPU pixel readback, in the SAME mean/max/coverage vocabulary
+  // `tools/shader-lab/bench-water.js#gateLadder` already uses for the
+  // synthetic bench, so a live number here is directly comparable to a bench
+  // number — which is exactly the comparison this whole session was missing.
+  // ==========================================================================
+
+  /** The channels worth sweeping — presence/foam terms only, each genuinely
+   * "0 = absent, brighter = more present" (unlike `turbidity`/`causticExcess`,
+   * which are bias-remapped around a 0.5 NEUTRAL and would make a "> 0.02"
+   * coverage test meaningless). Walks tier order so a reader can still apply
+   * "the first one that drops to zero coverage names the culprit rung". */
+  const WATER_HEALTH_SWEEP_CHANNELS = [
+    'mask',
+    'inside',
+    'depth01',
+    'foamCrest',
+    'breakFoam',
+    'foamTail',
+    'obstacleFoam',
+    'maskProximityFoam',
+    'totalFoam',
+  ];
+  /** Mirrors `water-field.js#WATER_FOAM_SHORE_PX` (140) — crest/break/tail
+   * foam are ALL gated to within this many world-px of a shore, never a
+   * general open-water effect. Not imported (boot.js reaches the water zone
+   * through the effects barrel, and this one constant is not on it) —
+   * duplicated on purpose, exactly like the debug-channel catalog's own
+   * `reads` prose duplicates shader knowledge for report purposes. If it
+   * drifts, the failure mode is a sub-optimally-dense grid, not a wrong one.
+   * @type {number} */
+  const WATER_HEALTH_FOAM_REACH_PX = 140;
+  /** ⚠️ FIRST LIVE RUN, SECOND BUG (2026-08-17): a fixed 5×5 grid over a
+   * SMALL on-screen slice (the common case once the view-rect fix above
+   * landed) spaced its points ~160px apart — wider than the 140px band every
+   * foam term is gated to, so it could stride clean over the entire band and
+   * report a confident, wrong "zero everywhere" that was actually "missed
+   * the strip". Grid density is now ADAPTIVE: enough rows/cols that the
+   * SHORTER swept dimension gets samples roughly `WATER_HEALTH_FOAM_REACH_PX
+   * / 3` apart (≥3 samples across any foam band the sweep crosses at all),
+   * floored at 5 (this file's original minimum) and capped at 10 (100
+   * points × 7 channels — a real cost, accepted the same way
+   * `runAllTiersPerfReport` accepts minutes for a report the author is
+   * already waiting on) so a huge on-screen span cannot make one run
+   * unbounded. @param {{minX:number,minY:number,maxX:number,maxY:number}} rect
+   * @returns {number} */
+  function waterHealthGridSizeFor(rect) {
+    const shortSpan = Math.min(rect.maxX - rect.minX, rect.maxY - rect.minY);
+    const bySpacing = Math.ceil(shortSpan / (WATER_HEALTH_FOAM_REACH_PX / 3));
+    return Math.max(5, Math.min(10, bySpacing));
+  }
+
+  /** An evenly spaced grid strictly INSIDE `bounds` — never on the edge, where
+   * antialiasing/rounding could sample a texel just outside the body and read
+   * a false zero. @param {{minX:number,minY:number,maxX:number,maxY:number}} bounds
+   * @param {number} n @returns {Array<{x:number,y:number}>} */
+  function buildWaterHealthGrid(bounds, n) {
+    const pts = [];
+    for (let row = 0; row < n; row++) {
+      for (let col = 0; col < n; col++) {
+        const fx = (col + 0.5) / n;
+        const fy = (row + 0.5) / n;
+        pts.push({
+          x: bounds.minX + fx * (bounds.maxX - bounds.minX),
+          y: bounds.minY + fy * (bounds.maxY - bounds.minY),
+        });
+      }
+    }
+    return pts;
+  }
+
+  /** `waitForSpecularChannelToRender`'s own pattern, aimed at water's selector
+   * instead — see that function's header for why two rAF ticks. @param {number} n */
+  async function waitForWaterChannelToRender(n) {
+    water.setDebugChannel(n);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  /**
+   * Run the full sweep and merge it onto `buildWaterHealthReport`'s static
+   * half. ALWAYS restores the debug channel in a `finally`, even on a mid-
+   * sweep throw — a diagnostic left stuck on is a second bug wearing the
+   * first one's clothes (`probeSpecularChannelsAt`'s own rule, unchanged).
+   * @returns {Promise<object>}
+   */
+  async function probeWaterFoamHealth() {
+    const generatedAt = new Date().toISOString();
+    const floorIndex = activeFloorContext?.floorIndex ?? 0;
+    const viewer = getVtPanViewerDiagnostics?.() ?? null;
+    const base = buildWaterHealthReport({
+      floorIndex,
+      viewer,
+      maskAuthority,
+      readout: water.getReadout(),
+      tiers: WATER.tiers,
+      debugChannels: WATER_DEBUG_CHANNELS,
+      generatedAt,
+    });
+
+    if (!viewer) {
+      return { ...base, coverage: { swept: false, reason: 'viewer not started' } };
+    }
+    const currentFloor = Array.isArray(viewer?.waterBody)
+      ? viewer.waterBody.find((f) => f.floorIndex === floorIndex)
+      : null;
+    const bounds = currentFloor?.surface?.bounds ?? null;
+    if (!bounds) {
+      return {
+        ...base,
+        coverage: {
+          swept: false,
+          reason:
+            'this floor has no water bounds to sweep — no authored water mask resolved here ' +
+            '(see `floors[].resolve.reason` above for why, and `authoredWaterFloors` for which floors have one at all)',
+        },
+      };
+    }
+
+    // ⚠️ THE BUG ITS OWN FIRST LIVE RUN SHIPPED (2026-08-17): a grid spread
+    // over the water body's FULL world AABB, unconditionally — on any body
+    // wider than the current camera (this is the common case, not the
+    // exception, on a real map), every point falls off-screen and the whole
+    // sweep reports `pointsOnScreen: 0` on every channel. Honest (coveragePct
+    // came back `null`, not a fabricated zero) but useless. Fixed by
+    // intersecting the body's bounds against `viewer.viewWorldRect` — the
+    // SAME rect the renderer itself is using this frame — before laying out
+    // the grid, so every point this generates is provably on screen.
+    const view = viewer?.viewWorldRect ?? null;
+    const sweepRect = view
+      ? {
+          minX: Math.max(bounds.minX, view.minX),
+          minY: Math.max(bounds.minY, view.minY),
+          maxX: Math.min(bounds.maxX, view.maxX),
+          maxY: Math.min(bounds.maxY, view.maxY),
+        }
+      : bounds;
+    if (!view || sweepRect.minX >= sweepRect.maxX || sweepRect.minY >= sweepRect.maxY) {
+      return {
+        ...base,
+        coverage: {
+          swept: false,
+          reason: view
+            ? 'the camera is not currently looking at this floor`s water body at all (its world bounds and the ' +
+              'current view rect do not overlap) — pan/zoom onto the water and re-run'
+            : 'no current view rect available (viewer not rendering a frame yet) — cannot know what is on screen',
+          bounds,
+          viewWorldRect: view,
+        },
+      };
+    }
+
+    const gridSize = waterHealthGridSizeFor(sweepRect);
+    const points = buildWaterHealthGrid(sweepRect, gridSize);
+    const restoreTo = water.getDebugChannel();
+    /** @type {Record<string, object>} */
+    const byChannel = {};
+    let offScreenCount = 0;
+    showPerfProgress(formatPerfProgressText('water health sweep', `0/${WATER_HEALTH_SWEEP_CHANNELS.length} channels`));
+    try {
+      let done = 0;
+      for (const id of WATER_HEALTH_SWEEP_CHANNELS) {
+        const channel = WATER_DEBUG_CHANNELS.find((c) => c.id === id);
+        // A renumbered channel list should never silently drop an id from the
+        // sweep — mirrors `probeSpecularChannelsAt`'s own guard.
+        if (!channel) continue;
+        await waitForWaterChannelToRender(channel.n);
+        const readback = await MapShine.probePixels(points);
+        const onScreenReads = readback.filter((p) => p.onScreen && p.buffers?.lit?.rgba);
+        offScreenCount = Math.max(offScreenCount, points.length - onScreenReads.length);
+        // Reuses `specularProbeLuma` (Rec.709 luma of a decoded rgba) rather
+        // than a second copy of the same one-line formula — this project's
+        // own rule for a shared pure helper (see `water-registration.js`'s
+        // `hexToRgb01` reuse for the identical reasoning).
+        const lumas = onScreenReads.map((p) => specularProbeLuma(p.buffers.lit.rgba));
+        // A CONTROL this pass cannot touch (mirrors `probeSpecularChannelsAt`):
+        // if EVERY point reads the same albedo, the readback — not the shader
+        // — is what to distrust below.
+        const distinctControlAlbedo = new Set(onScreenReads.map((p) => JSON.stringify(p.buffers?.albedo?.rgba ?? null)))
+          .size;
+        byChannel[id] = {
+          n: channel.n,
+          pointsRequested: points.length,
+          pointsOnScreen: onScreenReads.length,
+          meanLuma: lumas.length ? +(lumas.reduce((a, b) => a + b, 0) / lumas.length).toFixed(4) : null,
+          maxLuma: lumas.length ? +Math.max(...lumas).toFixed(4) : null,
+          // Fraction of ON-SCREEN samples reading meaningfully non-zero — the
+          // SAME vocabulary `bench-water.js#gateLadder` reports for the
+          // synthetic fixture, so this live number is comparable to it term
+          // for term instead of needing its own separate reading.
+          coveragePct: lumas.length ? +((lumas.filter((v) => v > 0.02).length / lumas.length) * 100).toFixed(1) : null,
+          distinctControlAlbedo,
+        };
+        done += 1;
+        showPerfProgress(
+          formatPerfProgressText('water health sweep', `${done}/${WATER_HEALTH_SWEEP_CHANNELS.length} channels (${id})`)
+        );
+      }
+    } finally {
+      await waitForWaterChannelToRender(restoreTo);
+      hidePerfProgress();
+    }
+
+    return {
+      ...base,
+      coverage: {
+        swept: true,
+        gridSize: `${gridSize}×${gridSize}`,
+        // `sweptRect` is what the grid actually covers (camera view ∩ body
+        // bounds); `bodyBounds` is the WHOLE body, for scale — if they are far
+        // apart in size, this sweep saw only a fraction of the water and a
+        // "no foam" verdict here does not speak for the rest of it.
+        sweptRect: sweepRect,
+        bodyBounds: bounds,
+        // Loud rather than a silently partial sweep
+        // (`feedback_publish_what_the_instrument_cannot_see`): a body bigger
+        // than the current viewport only gets measured where it is ON SCREEN.
+        note:
+          offScreenCount > 0
+            ? `${offScreenCount}/${points.length} grid points fell off-screen and were NOT measured — zoom/pan so ` +
+              'the whole body is visible and re-run for full coverage.'
+            : `all ${points.length} grid points were on-screen for every channel. sweptRect covers ` +
+              `${((((sweepRect.maxX - sweepRect.minX) * (sweepRect.maxY - sweepRect.minY)) / ((bounds.maxX - bounds.minX) * (bounds.maxY - bounds.minY) || 1)) * 100).toFixed(1)}% ` +
+              `of the full water body's area — re-run at different zoom/pan to sample the rest.`,
+        channels: byChannel,
+      },
+      interpretation:
+        base.interpretation +
+        ' ⚠️ THE COVERAGE SWEEP (real GPU pixel readback, not a guess): read `coverage.channels.totalFoam.coveragePct` ' +
+        'FIRST — that is the one number the shipped composite actually draws, a measured percentage of the grid ' +
+        'reading visibly non-zero foam. Non-zero `mask`/`inside` coverage with zero `totalFoam` coverage means water ' +
+        'IS drawing but the foam terms specifically are dying downstream — compare `foamCrest` (tier 2, always on) ' +
+        'against `breakFoam`/`foamTail` (tier 4) to see which rung stopped contributing, same as ' +
+        "`bench-water.js`'s own CHAIN classification. Zero coverage on EVERY channel including `mask` means nothing " +
+        'is drawing here at all — that points back at `floors`/`authoredWaterFloors` above, not at the shader. A ' +
+        '`distinctControlAlbedo` of 1 on a multi-point sweep means the probe itself is suspect (reading one stale ' +
+        'texel repeatedly) — mistrust the numbers above it before mistrusting the shader.',
+    };
+  }
+
+  MapShine.debug.registerAction(
+    'water-health',
+    '🌊🩺 Water Health Report (foam + everything)',
+    () => probeWaterFoamHealth(),
+    { effect: 'water' }
+  );
+  // Console-callable too (mirrors probePixels/probeWindAndParticles) — the
+  // debug-panel button is the primary path, this is the fast ad-hoc one.
+  MapShine.getWaterHealthReport = probeWaterFoamHealth;
 
   // THE THIRD GROUP (2026-07-17, ghost-hunting round 3). Five theories dead by
   // direct evidence tonight, in order: environmentRenderable:false (not

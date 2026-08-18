@@ -60,9 +60,41 @@
  */
 export function buildSunVisibilityNode(TSL, { uViewRect, uShadowRect, shadowTexNode }) {
   if (!shadowTexNode) return null;
-  const { uv, vec2, mix } = TSL;
+  const { uv, mix } = TSL;
+  // SCREEN → WORLD, then the shared world→field lookup below. Split in two on
+  // 2026-08-16 so a world-space caller (water's tier-3 quad) can enter at the
+  // second half instead of hand-writing "world XY → shadow UV → sample" a
+  // second time — the identical seam `environmental-light.js` already draws
+  // between `buildOutdoorsGate` and `buildWorldSpaceOutdoorsGate`, and for the
+  // identical reason: two copies of one mapping is how two consumers of one
+  // frame end up disagreeing about where a world point is.
   const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
   const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
+  return buildWorldSpaceSunVisibilityNode(TSL, { worldX, worldY, uShadowRect, shadowTexNode });
+}
+
+/**
+ * THE SAME READ, for a caller that already knows its WORLD position — a
+ * world-space quad (water's surface) rather than a fullscreen pass.
+ *
+ * ⚠️ NOT interchangeable with the screen-space form above: a world-space quad's
+ * own `uv()` spans the QUAD, not the screen, so entering at `buildSunVisibility
+ * Node` from a cropped AABB mesh would sample the shadow field through the
+ * wrong mapping entirely (`feedback_shared_texture_node_carries_the_wrong_uv`,
+ * the same trap water's depth-authority gate already documents for
+ * `screenUV()`).
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.worldX @param {*} args.worldY - float nodes, world px.
+ * @param {*} args.uShadowRect - vec4 uniform, the rect the shadow field covers.
+ * @param {*} args.shadowTexNode - the baked field's texture node, or null.
+ * @returns {*|null} scalar node, 1 = full sun. `null` when no field was given,
+ *   so the whole lookup compiles OUT rather than multiplying by a one.
+ */
+export function buildWorldSpaceSunVisibilityNode(TSL, { worldX, worldY, uShadowRect, shadowTexNode }) {
+  if (!shadowTexNode) return null;
+  const { vec2 } = TSL;
   const u = worldX.sub(uShadowRect.x).div(uShadowRect.z.sub(uShadowRect.x));
   const v = worldY.sub(uShadowRect.y).div(uShadowRect.w.sub(uShadowRect.y));
   return shadowTexNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;

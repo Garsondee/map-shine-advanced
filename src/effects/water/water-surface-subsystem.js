@@ -100,6 +100,24 @@ const log = createLogger('WaterSurface');
  *   `step(0, depthHere)` being true everywhere) — so `null` instead feeds
  *   `refreshVisibility` below, which hides the WHOLE mesh rather than letting
  *   the shader gate fail open pixel-by-pixel.
+ * @param {*} [args.sunShadowTexture] - ANY sun-shadow slot's texture, purely so
+ *   the gate can be compiled into the material at build time (Law 4's JS-time
+ *   branch). Never the field this floor actually reads — see
+ *   `args.getSunShadowSlot` for that, and `buildSurfaceForTier` for why
+ *   building against "my own floor's slot" would be the worse bug.
+ * @param {(floorIndex: number) => {texture: *, rect: object}|null} [args.getSunShadowSlot] -
+ *   THE CAST-SHADOW SEAM (2026-08-16). Given the floor this instance draws on,
+ *   the sun-shadow field currently baked FOR that floor, or `null` when no slot
+ *   holds it. Composed in `vt-pan-viewer.js` from `sunShadows.fields` — an
+ *   array of per-floor slots whose floor attribution a residency pass can
+ *   REASSIGN at runtime, which is why this is a per-frame question and not a
+ *   construction argument.
+ *
+ *   ⚠️ ABSENT = TODAY'S BEHAVIOUR, WHICH IS A GLINT THAT SHINES INSIDE
+ *   BUILDINGS. The material compiles the gate out entirely when no field
+ *   reaches it (Law 4), so an unwired caller is not merely ungated, it is
+ *   byte-identical to before this existed. `getStatus().sunShadow` is what
+ *   makes that state visible rather than silent.
  * @returns {{sync: (floorIndex: number, viewRect?: object|null) => void,
  *   getStatus: () => object, dispose: () => void}}
  */
@@ -119,6 +137,8 @@ export function createWaterSurfaceSubsystem({
   getSkyHandle,
   depthTexture = null,
   resolveExpectedDepth,
+  sunShadowTexture = null,
+  getSunShadowSlot,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
@@ -129,6 +149,7 @@ export function createWaterSurfaceSubsystem({
   // fixture, a caller predating this migration), water renders exactly as it
   // did before, gated by paint order alone.
   resolveExpectedDepth ??= () => 0;
+  getSunShadowSlot ??= () => null;
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
   geometry.setIndex(Array.from(QUAD_INDICES));
@@ -141,6 +162,28 @@ export function createWaterSurfaceSubsystem({
   let maskInfo = null;
   let loadedUrl = null;
   let loading = false;
+  /** A 1×1 "fully open, no flow" (RGBA all zero) placeholder for the
+   * `flowSolidity`/`flowVelocity` debug channels — see
+   * `buildWaterSurfaceMaterial`'s own `flowPackTexture` doc for why this
+   * parameter, unlike `maskTexture`, must NEVER be JS `null`.
+   *
+   * ⚠️ ALL-ZERO BYTES, NOT `[0,0,0,255]` LIKE `maskTexture`'s OWN
+   * PLACEHOLDER — S3 moved solidity to the ALPHA channel
+   * (`buildWaterProjectPackMaterial`'s own B4 doc), and a byte alpha of 255
+   * normalises to solidity=1 (FULLY SOLID), the opposite of "quiet, invisible
+   * failure" this placeholder exists to be. `[0,0,0,0]` reads as open water,
+   * zero velocity, zero speed — the one byte pattern that is simultaneously
+   * the correct silent default for all four channels at once.
+   *
+   * Unlike `maskTexture` this is a PERMANENT fallback, not a one-shot
+   * placeholder: a floor with no water never gets a real flow bake either,
+   * so `setFlowPackTexture` can legitimately keep falling back to this for
+   * the subsystem's whole lifetime — never disposed until `dispose()`. */
+  const flowPackPlaceholder = createMaskTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear');
+  /** The texture object currently bound, by IDENTITY — see
+   * `setFlowPackTexture`'s own doc. Starts equal to the placeholder so the
+   * FIRST real bake is correctly seen as a change. */
+  let boundFlowPackTexture = flowPackPlaceholder;
   /** The bake generation the geometry was cropped for (-1 = never). */
   let builtForBake = -1;
   /** The resolved-params signature last pushed, so a quiet frame is one string
@@ -151,6 +194,10 @@ export function createWaterSurfaceSubsystem({
    * clock or the weather does, unlike the eye, which moves every pan. */
   let lastSkyKey = '';
   let enabled = true;
+  /** Which debug intermediate is on screen (`water.js#WATER_DEBUG_CHANNELS`,
+   * Water-Testament W0) — 0 = the effect as it ships. Mirrors `specular-
+   * surface-subsystem.js`'s own copy. */
+  let debugChannel = 0;
   /** THE PERFORMANCE TIER THE CURRENT MATERIALS WERE BUILT AT (Effects.md Law
    * 4 — a tier is a JS `if` at graph-BUILD time, so a tier CHANGE means a new
    * node graph, which means new materials, never a live uniform toggle on the
@@ -173,10 +220,27 @@ export function createWaterSurfaceSubsystem({
    *
    * `lastExpectedDepth !== null` (2026-08-15) — see `resolveExpectedDepth`'s
    * own doc for why an unresolved floor hides the WHOLE mesh here rather than
-   * letting the shader-side gate fail open pixel-by-pixel. */
+   * letting the shader-side gate fail open pixel-by-pixel.
+   *
+   * ⚠️ THE DEBUG SWAP (2026-08-16, Water-Testament W0) also lives here now —
+   * mirrors `specular-surface-subsystem.js`'s own single-mesh swap
+   * (`mesh.material = debugChannel > 0 ? surface.debugMaterial : ...`),
+   * generalised to water's PAIR: the ABSORB mesh simply hides at a non-zero
+   * channel (a multiply pass has nothing to contribute to a diagnostic
+   * reading, which is already opaque), and the IN-SCATTER mesh's own
+   * `.material` is repointed at `surface.debugMaterial` rather than a THIRD
+   * mesh being added — one less geometry slot to keep in step with every
+   * bake regrid, and `debugMaterial` carries its own OPAQUE blend state
+   * (`water-render.js`), so the swap needs nothing beyond the assignment
+   * itself. At channel 0 `surface.debugMaterial` is attached to no mesh,
+   * which is what makes the instrument genuinely free rather than merely
+   * cheap. */
   function refreshVisibility() {
-    const show = enabled && !!waterBody.getWaterBounds() && !!loadedUrl && lastExpectedDepth !== null;
-    for (const m of meshes) m.visible = show;
+    const bakedReady = enabled && !!waterBody.getWaterBounds() && !!loadedUrl && lastExpectedDepth !== null;
+    const showDebug = bakedReady && debugChannel > 0;
+    meshes[0].visible = bakedReady && !showDebug;
+    meshes[1].material = showDebug ? surface.debugMaterial : surface.inscatterMaterial;
+    meshes[1].visible = bakedReady;
   }
 
   /** Build (or, called again from `sync`, REBUILD) the two tier-gated
@@ -189,6 +253,11 @@ export function createWaterSurfaceSubsystem({
       THREE,
       maskTexture,
       maskRect: waterBody.getRect(),
+      // The body pack's grid, for the smooth (C2) reconstruction that stops its
+      // ~21-world-px texels creasing every steep read on top of it
+      // (`water-sampling.js`). Re-pushed on every bake below, since a regrid
+      // moves the texel centres this is phase-locked to.
+      bodyTexSize: waterBody.getGridSize?.() ?? [1, 1],
       // TIER 1's wet band reads the SDF. The body texture is null until the
       // first bake allocates the targets, and the material only samples it
       // (from tier 1 up) once the mesh is visible — which requires a
@@ -213,7 +282,99 @@ export function createWaterSurfaceSubsystem({
       // fine on a tier change like everything else here; only `uExpectedDepth`
       // (pushed per-frame in `sync`, below) actually varies per floor.
       depthTexture,
+      // THE FLOW PACK'S PREVIEW (2026-08-17, S2 solidity + S3 velocity) —
+      // ALWAYS a real texture (never null), starting at
+      // `flowPackPlaceholder` and re-pointed by `setFlowPackTexture` on its
+      // own cadence, entirely independent of this rebuild. See
+      // `buildWaterSurfaceMaterial`'s own `flowPackTexture` doc for why this
+      // one does NOT follow `bodyTexture`'s "null compiles it out" shape.
+      flowPackTexture: boundFlowPackTexture,
+      // THE CAST-SHADOW GATE (2026-08-16). ⚠️ THIS DECIDES ONLY WHETHER THE
+      // LOOKUP EXISTS IN THE COMPILED SHADER — it is NOT the field this floor
+      // reads. That is a per-frame push (`syncSunShadow` below), because which
+      // floor a slot holds is a residency-pass decision that changes at
+      // runtime. Building against `getSunShadowSlot(floorIndex)` instead would
+      // be the subtler and worse bug: a floor with no slot AT CONSTRUCTION
+      // TIME would compile the gate out permanently and then never obey a
+      // shadow again, however many slots it was later given. Any slot's texture
+      // is a correct thing to build against — they are a fixed-length array
+      // allocated once, all the same format and size, so re-pointing between
+      // them is a bind-group update and never a pipeline rebuild.
+      sunShadowTexture,
     });
+  }
+
+  /** THE FIELD currently bound, by OBJECT IDENTITY, and the rect pushed with
+   * it. Two values rather than one string, deliberately: **every slot covers
+   * the SAME caster rect**, so a rect-only key would compare equal across a
+   * floor→slot reassignment and silently leave this floor's water reading
+   * another floor's shadows (`feedback_one_input_two_extractions_two_
+   * thresholds`, and the reason it is worth naming is that the wrong version
+   * of this looks completely reasonable). `null`/`''` = nothing pushed yet,
+   * which must always push. */
+  let boundShadowTexture = null;
+  let boundShadowRectKey = '';
+
+  /**
+   * Point this floor's material at the sun-shadow field baked for THIS floor.
+   *
+   * ⚠️ WHY THIS IS PER-FRAME AND NOT PER-BUILD. `sunShadows.fields` is a
+   * fixed-length array of SLOTS, and which floor each slot holds is decided by
+   * a residency pass on its own cadence — a floor switch, a scene change, a
+   * pan. Caching this on the params key or the bake generation would be the
+   * exact `feedback_residency_sync_vs_render_loop` shape water has already been
+   * bitten by twice (the sliders that did nothing until the camera moved; the
+   * visibility that went stale on a rank flip): three inputs on three cadences,
+   * gated on one of them.
+   * @param {number} floorIndex
+   */
+  function syncSunShadow(floorIndex) {
+    const slot = getSunShadowSlot(floorIndex);
+    const texture = slot?.texture ?? null;
+    const rectKey = slot?.rect ? `${slot.rect.minX},${slot.rect.minY},${slot.rect.maxX},${slot.rect.maxY}` : 'none';
+    if (texture === boundShadowTexture && rectKey === boundShadowRectKey) return;
+    boundShadowTexture = texture;
+    boundShadowRectKey = rectKey;
+    if (!texture) {
+      // NO FIELD FOR THIS FLOOR → FULL SUN, never full shadow. See
+      // `water-light.js#setSunShadowMix`: this floor may simply have no baked
+      // slot right now, and a river that went black on a residency reshuffle is
+      // a far worse failure than a glint that outstays its shadow.
+      surface.setSunShadowMix(0);
+      return;
+    }
+    // The node is null below tier 3 / when the gate compiled out — guarded the
+    // same way `bodyTexNode` is, never assumed.
+    if (surface.sunShadowTexNode) surface.sunShadowTexNode.value = texture;
+    surface.setSunShadowRect(slot.rect);
+    surface.setSunShadowMix(surface.sunShadowTexNode ? 1 : 0);
+  }
+
+  /**
+   * Point the `flowSolidity`/`flowVelocity` debug channels at THIS floor's
+   * own flow pack texture — called from the frame loop right after
+   * `waterFlow.maybeBake()`, every frame, unconditionally; the identity
+   * check below makes a quiet frame one `===` compare.
+   *
+   * ⚠️ WHY THIS IS SEPARATE FROM EVERY OTHER RE-POINT IN THIS FILE. The mask
+   * (`maskTexNodes`) and the body pack (`bodyTexNode`) each change on THEIR
+   * OWN bake, and this is a THIRD, independent cadence (the flow pack's own
+   * bake) — folding it into either existing check would make a quiet flow
+   * frame silently skip a real mask/body change, or the reverse.
+   *
+   * `texture ?? flowPackPlaceholder`, never a bare `null` re-point: this
+   * parameter's whole contract (`buildWaterSurfaceMaterial`'s own doc) is
+   * that it is NEVER JS `null`, because — unlike `bodyTexNode` — nothing here
+   * keeps the debug channel's mesh-visibility gated on a completed flow bake,
+   * so a null-valued texture node could actually be sampled on the GPU the
+   * instant an author picks this channel before the first bake lands.
+   * @param {*|null|undefined} texture
+   */
+  function setFlowPackTexture(texture) {
+    const t = texture ?? flowPackPlaceholder;
+    if (t === boundFlowPackTexture) return;
+    boundFlowPackTexture = t;
+    if (surface.flowPackTexNode) surface.flowPackTexNode.value = t;
   }
 
   let surface = buildSurfaceForTier(builtForTier);
@@ -263,7 +424,15 @@ export function createWaterSurfaceSubsystem({
           mb: +(loaded.bytes / (1024 * 1024)).toFixed(1),
         };
         loadedUrl = url;
-        surface.maskTexNode.value = loaded.texture;
+        // ⚠️ EVERY node in `maskTexNodes`, not `maskTexNode` alone
+        // (`feedback_texture_nodes_must_be_repointed_together`) — the
+        // material is built against a 1×1 placeholder and ANY
+        // `texture(maskTexture, …)` node this material owns keeps sampling
+        // it forever unless re-pointed here. `maskTexNode` is the first
+        // entry of this same array (`water-render.js`'s own guarantee), so
+        // this one loop is a strict superset of the old single assignment,
+        // never a behaviour change for anything that already worked.
+        for (const node of surface.maskTexNodes) node.value = loaded.texture;
         // The mask file is placed exactly like the level background it rides
         // with, which is the same rect the derivation grid covers — verified
         // live (both read 2700,1350→13350,6300 on the author's scene).
@@ -311,6 +480,7 @@ export function createWaterSurfaceSubsystem({
       meshes[1].material = surface.inscatterMaterial;
       prev.absorbMaterial?.dispose?.(); // free the superseded materials on a tier change
       prev.inscatterMaterial?.dispose?.();
+      prev.debugMaterial?.dispose?.(); // the THIRD material built every rebuild, same as the other two
       builtForTier = resolvedTier;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
@@ -318,6 +488,13 @@ export function createWaterSurfaceSubsystem({
       // object.
       lastParamsKey = '';
       lastSkyKey = '';
+      // ⚠️ THE SHADOW SLOT IS ONE OF THEM, and forgetting it here would be
+      // silent: a tier change would leave the new material's shadow mix at its
+      // constructor 0 (full sun) for as long as the slot happened not to move,
+      // i.e. the glint would quietly stop obeying shadows after any profile
+      // change (`feedback_new_effect_forgotten`'s shape, one object over).
+      boundShadowTexture = null;
+      boundShadowRectKey = '';
     }
 
     // THE DEPTH-AUTHORITY GATE's OWN EXPECTED DEPTH (2026-08-15). Pushed
@@ -338,6 +515,11 @@ export function createWaterSurfaceSubsystem({
     lastExpectedDepth = resolveExpectedDepth(floorIndex);
     surface.setExpectedDepth(lastExpectedDepth ?? 0);
     refreshVisibility();
+
+    // THE CAST-SHADOW SLOT — same cadence and the same reasoning as the line
+    // above: an input that changes on the depth authority's/residency pass's
+    // own clock, never on water's.
+    syncSunShadow(floorIndex);
 
     // THE EYE. Pushed every frame and NEVER gated on anything — mirrors
     // `specular-surface-subsystem.js`'s identical reasoning: this is the whole
@@ -376,8 +558,11 @@ export function createWaterSurfaceSubsystem({
     const p = state.params ?? {};
     const key = [
       state.enabled ? 1 : 0,
+      state.debugChannel ?? 0,
       p.tint,
       p.opacity,
+      p.depth,
+      p.pollution,
       p.shorelineDepth,
       p.absorption,
       p.depthScalePx,
@@ -393,11 +578,18 @@ export function createWaterSurfaceSubsystem({
       p.skySheen,
       p.glossiness,
       p.viewerHeight,
+      p.shadowResponse,
+      p.swashFoam,
+      p.breakFoam,
+      p.foamTrail,
+      p.caustics,
     ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
       if (Array.isArray(p.tint)) surface.setTint(p.tint);
       if (Number.isFinite(p.opacity)) surface.setOpacity(p.opacity);
+      if (Number.isFinite(p.depth)) surface.setDepth(p.depth);
+      if (Number.isFinite(p.pollution)) surface.setPollution(p.pollution);
       if (Number.isFinite(p.shorelineDepth)) surface.setShorelineDepth(p.shorelineDepth);
       if (Number.isFinite(p.absorption)) surface.setAbsorption(p.absorption);
       if (Number.isFinite(p.depthScalePx)) surface.setDepthScalePx(p.depthScalePx);
@@ -413,6 +605,13 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.skySheen)) surface.setSkySheen(p.skySheen);
       if (Number.isFinite(p.glossiness)) surface.setGlossiness(p.glossiness);
       if (Number.isFinite(p.viewerHeight)) surface.setViewerHeight(p.viewerHeight);
+      if (Number.isFinite(p.shadowResponse)) surface.setShadowResponse(p.shadowResponse);
+      if (Number.isFinite(p.swashFoam)) surface.setSwashFoam(p.swashFoam);
+      if (Number.isFinite(p.breakFoam)) surface.setBreakFoam(p.breakFoam);
+      if (Number.isFinite(p.foamTrail)) surface.setFoamTrail(p.foamTrail);
+      if (Number.isFinite(p.caustics)) surface.setCaustics(p.caustics);
+      debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
+      surface.setDebugChannel(debugChannel);
       enabled = state.enabled !== false;
       refreshVisibility();
     }
@@ -429,6 +628,15 @@ export function createWaterSurfaceSubsystem({
     // water-render.js's header), so this is guarded rather than assumed.
     if (waterBody.texture && surface.bodyTexNode) surface.bodyTexNode.value = waterBody.texture;
     surface.setBodyRect(waterBody.getRect());
+    // ⚠️ THE GRID SIZE RIDES THE SAME BAKE GATE AS THE RECT, and must: the
+    // smooth reconstruction (`water-sampling.js`) is phase-locked to the texel
+    // centres, so a regrid that moved the rect but left the size stale would
+    // put the eased fraction out of step with the hardware filter it exists to
+    // correct — which reads as the creases coming back, not as an error.
+    {
+      const [gw, gh] = waterBody.getGridSize?.() ?? [1, 1];
+      surface.setBodyTexSize(gw, gh);
+    }
     const positions = buildQuadPositions([
       { x: bounds.minX, y: bounds.minY },
       { x: bounds.maxX, y: bounds.minY },
@@ -492,14 +700,42 @@ export function createWaterSurfaceSubsystem({
      * floor on screen instead of raising a curtain.
      */
     isLoadingMask: () => loading,
+    /**
+     * THE FULL-RESOLUTION mask texture itself (2026-08-17, water-flow's own
+     * seam) — `null` until a REAL image has loaded (`loadedUrl` unset), never
+     * the 1×1 placeholder every OTHER consumer of `maskTexture` builds
+     * against. Exists so `water-flow-subsystem.js`'s solidity bake can REBUILD
+     * against the real texture directly rather than re-pointing a node built
+     * before it existed — the same "rebuild, don't repoint" discipline
+     * `feedback_texture_nodes_must_be_repointed_together` names as the safer
+     * of the two lawful options, applied here from the start instead of
+     * learned the expensive way a second time.
+     */
+    getFullResMaskTexture: () => (loadedUrl ? maskTexture : null),
+    setFlowPackTexture,
     /** For the `water-body` report — merged into the body pack's own status. */
     getStatus() {
       return {
-        visible: meshes[0].visible,
+        // ⚠️ `meshes[1].visible`, NOT `meshes[0]` — since the debug swap
+        // (2026-08-16) the ABSORB mesh (`meshes[0]`) is DELIBERATELY hidden
+        // whenever a debug channel is showing (see `refreshVisibility`), so
+        // it alone would report `false` — "nothing is drawing" — while the
+        // instrument's own picture is genuinely on screen. `meshes[1]` stays
+        // the visible carrier in both states, real or diagnostic; read
+        // alongside `debugChannel` below to know WHICH.
+        visible: meshes[1].visible,
         // Both, listed: tier 1 made water two draws, and "the multiply is
         // showing but the add is not" is a state the old single number could
-        // not have reported.
+        // not have reported. At a non-zero `debugChannel` the multiply's own
+        // renderOrder is still listed even though that mesh is hidden — this
+        // is the mesh PAIR's own layering contract, not a live picture of
+        // what is currently visible (see `visible` above for that).
         renderOrder: meshes.map((m) => m.renderOrder).join(' + '),
+        // Non-zero means the author is looking at a DIAGNOSTIC, not at the
+        // effect — reported so a channel can never be silently left on and
+        // then mistaken for a rendering bug (mirrors `specular-surface-
+        // subsystem.js`'s own field).
+        debugChannel,
         builtForBake,
         // THE TIER GATE'S OWN HONESTY CHECK (`feedback_instruments_must_not_
         // lie`) — `perfTier` is what the cascade RESOLVED; `builtForTier` is
@@ -508,6 +744,20 @@ export function createWaterSurfaceSubsystem({
         // between a resolve and its rebuild; agreeing every other frame is
         // the proof the rebuild-on-change wiring is actually running.
         perfTier: builtForTier,
+        // ⚠️ WHAT THE TIER COSTS THE AUTHOR, IN THEIR OWN VOCABULARY (2026-08-17).
+        // `perfTier: 3` is a true statement that answered nobody's question: the
+        // author had five live sliders doing nothing and no way to connect that
+        // to a number. Tier 4 needs the `quality` profile, so on a default
+        // `standard` install every shore-foam term is compiled out while its
+        // controls stay draggable — reported as *"Foam is set to full and I
+        // can't see any"*. A report that states the gate but not its
+        // CONSEQUENCE is the passive half of `feedback_instruments_must_not_lie`.
+        inertControls:
+          builtForTier >= 4
+            ? 'none — every shipped water control is live at this rung'
+            : 'swashFoam, breakFoam, foamTrail, caustics (+ wave shoaling) are ALL compiled out: ' +
+              'they are rung 4, which needs the quality profile. Their sliders still move and are still ' +
+              'saved; nothing reads them until the profile is raised.',
         bounds: waterBody.getWaterBounds(),
         // `null` means the hi-res mask has not loaded, and the surface is
         // therefore hidden BY DESIGN — the SDF is not asked to draw the edge
@@ -529,6 +779,14 @@ export function createWaterSurfaceSubsystem({
         // scene means water is back to paint-order-only occlusion, the exact
         // "renders above things that should mask it" bug this migration fixed.
         floorGateCompiled: surface.floorGateCompiled,
+        // THE CAST-SHADOW GATE (2026-08-16). Two independent things can go
+        // wrong and they look identical on screen (a glint that ignores a
+        // building), so both are reported: `compiled` false means no field
+        // texture ever reached the material — the gate is not in the shader at
+        // all — while `slot` reading 'none' means the gate IS compiled but this
+        // floor has no baked field right now, so it is deliberately passing
+        // full sun. `feedback_identical_symptom_two_gates_needs_a_discriminator`.
+        sunShadow: { compiled: surface.sunShadowCompiled, slot: boundShadowRectKey || 'not synced' },
         // The raw (possibly-null) resolve — `null` means this floor's own
         // background item has no rank right now (not currently composited, or
         // a transient residency-pass race), and IS why `visible` reads false
@@ -542,7 +800,9 @@ export function createWaterSurfaceSubsystem({
       geometry.dispose(); // shared by both meshes — disposed once, not per mesh
       surface.absorbMaterial?.dispose?.();
       surface.inscatterMaterial?.dispose?.();
+      surface.debugMaterial?.dispose?.();
       maskTexture?.dispose?.();
+      flowPackPlaceholder?.dispose?.();
     },
   };
 }

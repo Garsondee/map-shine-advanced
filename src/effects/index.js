@@ -174,7 +174,7 @@ export {
 } from './lighting/region-darkness.js';
 export { buildGradePass } from './grade/grade-pass.js';
 export { buildWaterPass, buildFluidSimPass } from './water/water-pass.js';
-export { WATER, WATER_PARAMS } from './water/water.js';
+export { WATER, WATER_PARAMS, WATER_DEBUG_CHANNELS, WATER_PRESETS, waterPreset } from './water/water.js';
 export { resolveWaterFloor } from './water/water-floor.js';
 // THE BODY PACK (docs/planning/Water.md §5.1) — one jump-flood signed distance
 // field, baked on mask change. The subsystem owns the targets and the version
@@ -194,6 +194,10 @@ export {
   WATER_DEFAULT_TIER,
 } from './water/water-render.js';
 export { createWaterSurfaceSubsystem } from './water/water-surface-subsystem.js';
+// THE FLOW PACK (docs/planning/Water-Simulation-Turn.md §3 Layer B / §4 S2) —
+// area-averaged solidity over the SAME full-resolution mask the surface pack
+// loads, baked once that texture exists. `water-flow.js` is its TSL half.
+export { createWaterFlowSubsystem } from './water/water-flow-subsystem.js';
 export { createWaterSeams } from './water/water-seams.js';
 export { createWaterRegistration } from './water/water-registration.js';
 // SHINE (docs/planning/Specular.md) — `surface.response`. An ANIMATED FIELD of
@@ -556,7 +560,7 @@ export {
   FIRE_FUELS,
 } from './fire/fire-geometry.js';
 export { buildFireMaterial, buildFireGeometry, fireSizeClass, fireSizeClassDiameter } from './fire/fire-render.js';
-export { extractFiresFromMask, fireMaskSignature, chamferDistance } from './fire/fire-mask.js';
+export { extractFiresFromMask, extractFiresWithLabels, fireMaskSignature, chamferDistance } from './fire/fire-mask.js';
 export { createFireSubsystem } from './fire/fire-subsystem.js';
 // PRECIPITATION (P1, docs/planning/Precipitation.md) — the FALL. ⚠️ BUILT and
 // shader-lab-verified, but NOT drawing into the live frame yet: LAW 3 (rain

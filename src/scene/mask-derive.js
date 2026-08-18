@@ -46,6 +46,38 @@
 export const MASK_GRID_MAX_DIM = 512;
 
 /**
+ * WATER'S OWN, INDEPENDENT grid resolution (2026-08-17) — see
+ * `deriveFloorProducts`'s `authoredGridSpecs` param for the mechanism, and
+ * `effects/water/water-body-subsystem.js`'s header for the consumer.
+ *
+ * `MASK_GRID_MAX_DIM` (512) is a POINT-sample grid: `compositeItemOverwrite`
+ * takes exactly one bilinear sample at each output texel's centre, no area
+ * coverage. `fire-spawn-points.js` already names the consequence for a small
+ * painted feature on a large map ("a real 42-55px hearth is two or three
+ * texels"); water's shore-foam machinery hit the SAME wall from the geometry
+ * side — a single rock painted as a hole in the `_Water` mask can be smaller
+ * than the ~21px/texel spacing a 10,650px-wide map gets at 512, so the point
+ * sample simply never lands on it and the shore-distance field it feeds never
+ * learns the rock exists (`water-body.js`'s JFA is exact GIVEN a seed; it
+ * cannot seed a hole no texel ever sampled). The SAME coarseness also
+ * quantises every OTHER shore's tangent/distance to ~21px steps, which is
+ * what a foam band driven by it reads as "blocky, predictable, no grain" even
+ * where it does show up — one root cause for two symptoms.
+ *
+ * 2048 is not a new budget — it is the Keyhole allocator's own existing hard
+ * cap (`water-body-subsystem.js §3`'s own citation), just spent on the MASK
+ * water derives from instead of leaving that stuck at the shared 512 while
+ * fire/sky-reach/outdoors/specular keep their own resolution unaffected
+ * (`deriveFloorProducts`'s `casterGridSpec` already proves this exact
+ * per-consumer-resolution shape for the sun-shadow caster channels — this is
+ * the same pattern, generalised to any authored kind, applied to `water`).
+ * At this map's aspect that is ~2048×952, ~5.2 world-px/texel — a rock this
+ * small a point-sample could still theoretically straddle, but the odds drop
+ * from "usually misses" to "would need to be smaller than a d20".
+ */
+export const WATER_GRID_MAX_DIM = 2048;
+
+/**
  * @typedef {object} MaskGridSpec
  * @property {number} x - world minX of the covered rect.
  * @property {number} y - world minY of the covered rect.
@@ -735,9 +767,17 @@ export function rasterizeAuthored(gridSpec, sources, absentValue) {
  *   at, independent of `gridSpec` — omit to reuse `gridSpec` (today's
  *   behaviour, byte-for-byte). sun-occlusion.js's `casterGridDim` tier axis is
  *   why this exists: raising a SUN-SHADOW-ONLY grid's resolution here costs
- *   nothing for `coverAbove`/`skyReach`/`outdoors`/`water`/etc., which all stay
- *   on `gridSpec` and share its (deliberately fixed) budget with every other
- *   consumer of `MASK_GRID_MAX_DIM`.
+ *   nothing for `coverAbove`/`skyReach`/`outdoors`/etc., which stay on
+ *   `gridSpec` and share its (deliberately fixed) budget with every other
+ *   consumer of `MASK_GRID_MAX_DIM` that does not ask for its own.
+ * @param {Record<string, MaskGridSpec>} [args.authoredGridSpecs] - per-KIND
+ *   resolution overrides for the generic `rasterize: true` loop (the one
+ *   `water` today comes through) — `{water: computeMaskGridSpec(rect,
+ *   WATER_GRID_MAX_DIM)}`, keyed by `mask-catalog.js` kind id, omitted keys
+ *   fall back to `gridSpec` exactly as before. Same shape as `casterGridSpec`
+ *   one level down — generalised because the caster channels are not the only
+ *   authored kind a POINT-sampled 512px grid can silently lose a small
+ *   painted feature from (`WATER_GRID_MAX_DIM`'s own doc has the incident).
  * @returns {DerivedFloorProducts[]}
  */
 export function deriveFloorProducts({
@@ -747,6 +787,7 @@ export function deriveFloorProducts({
   outdoorsAbsentValue,
   casterHeights = null,
   casterGridSpec = null,
+  authoredGridSpecs = {},
 }) {
   const casterSpecActive = casterGridSpec ?? gridSpec;
   const products = [];
@@ -899,9 +940,14 @@ export function deriveFloorProducts({
     // Every OTHER `rasterize: true` kind (mask-catalog.js) — `water` today.
     // Same rasterizer, no derivation on top: the consumer is a GPU bake, and
     // the authority's job ends at "here is the authored value on the grid".
+    // `authoredGridSpecs[kindId]` (present for `water` — see
+    // `WATER_GRID_MAX_DIM`'s own doc) rasterizes THAT kind at its own,
+    // independent resolution; every kind absent from the map keeps today's
+    // byte-for-byte behaviour on the shared `gridSpec`.
     const authored = {};
     for (const [kindId, input] of Object.entries(floor.authored ?? {})) {
-      authored[kindId] = rasterizeAuthored(gridSpec, input?.sources, input?.absentValue ?? 0);
+      const kindGridSpec = authoredGridSpecs[kindId] ?? gridSpec;
+      authored[kindId] = rasterizeAuthored(kindGridSpec, input?.sources, input?.absentValue ?? 0);
     }
     const authoredSources = Object.fromEntries(
       Object.entries(floor.authored ?? {}).map(([id, input]) => [

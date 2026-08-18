@@ -54,6 +54,19 @@
  *     costume. `string + options` IS `enum`.
  *   - 1 (`audioStrikePath`, a file path) was a genuine free-text value → `text`.
  * So exactly one of the seventeen needed a string type, and it is a path.
+ *
+ * ⚠️ `angle` IS A VALUE TYPE, NOT A WIDGET REQUEST (added 2026-08-16, water's
+ * flow direction). The rule above — "a float is a float; whether it gets a
+ * slider is the renderer's decision" — is exactly why this is a TYPE and not a
+ * `widget: 'compass'` field on a float (`widget` is in FORBIDDEN_IN_CONTRACT and
+ * stays there). What makes an angle a different KIND of value is arithmetic, not
+ * appearance: **it is CYCLIC**. 359 and 1 are two degrees apart, so an
+ * out-of-range write must WRAP, never clamp — a float param clamps 370 to its
+ * max, which silently turns "ten degrees past north" into "west", and it clamps
+ * −5 to 0 rather than to 355. No min/max is declared (the range IS 0..360 by
+ * definition; declaring it would invite a partial range that cannot be cyclic).
+ * The renderer's freedom is untouched: a compass dial is one way to draw an
+ * angle, a numeric spinner is another, and this declaration asks for neither.
  */
 export const PARAM_TYPES = Object.freeze([
   'float',
@@ -66,6 +79,7 @@ export const PARAM_TYPES = Object.freeze([
   'vec3',
   'curve',
   'action',
+  'angle',
 ]);
 
 /**
@@ -234,6 +248,13 @@ function describeRange(d) {
     if (!Array.isArray(d.values) || d.values.length === 0) return 'enum needs a non-empty `values` array';
     if (new Set(d.values).size !== d.values.length) return 'enum `values` must be unique';
   }
+  // AN ANGLE MAY NOT DECLARE A RANGE. Its range is 0..360 by definition and its
+  // out-of-range policy is WRAP, not clamp — a declared `min`/`max` would be a
+  // second, disagreeing statement about both. A half-circle "angle" is not an
+  // angle; it is a float with a unit, and should say so.
+  if (d.type === 'angle' && ('min' in d || 'max' in d)) {
+    return 'an angle is cyclic over 0..360 — declaring min/max asks for a clamp it does not have';
+  }
   return null;
 }
 
@@ -268,6 +289,20 @@ export function validateParamValue(decl, value) {
       const hi = decl.max ?? Infinity;
       const clampedValue = Math.min(hi, Math.max(lo, n));
       return { ok: true, value: clampedValue, clamped: clampedValue !== n };
+    }
+    case 'angle': {
+      // WRAP, NEVER CLAMP — see the `angle` note on PARAM_TYPES. `clamped` stays
+      // FALSE even when the value moved, and that is deliberate rather than
+      // sloppy: `clamped` means "your intent was reduced to fit", and 370 → 10
+      // reduces nothing. It is the same heading. Reporting it as clamped would
+      // make `validateParamsSchema` reject a perfectly legal default of 360.
+      const n = Number(value);
+      if (!Number.isFinite(n))
+        return { ok: false, error: `expected a finite number of degrees, got ${JSON.stringify(value)}` };
+      // `((n % 360) + 360) % 360` — the second modulo is what makes negatives
+      // land in [0,360) instead of (−360,0]; JS's `%` keeps the sign of its left
+      // operand, so the naive single modulo turns −5 into −5, not 355.
+      return { ok: true, value: ((n % 360) + 360) % 360, clamped: false };
     }
     case 'bool':
       if (typeof value !== 'boolean') return { ok: false, error: `expected a boolean, got ${JSON.stringify(value)}` };

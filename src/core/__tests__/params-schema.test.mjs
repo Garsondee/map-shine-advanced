@@ -6,6 +6,7 @@
 import {
   PARAM_TYPES,
   COLOR_SPACES,
+  PARAM_STATUS,
   validateParamsSchema,
   validateParamValue,
   serializeParams,
@@ -256,5 +257,96 @@ export function run(t) {
     // DISK boundary, hand-writing constraints it could only guess at because it
     // never read the schema. This is that job, done at the front door, loudly.
     t.ok('the whole sanitizer job is two return values', Array.isArray(rejected) && typeof values === 'object');
+  }
+
+  // ---- 9. `angle` WRAPS. It does not clamp. --------------------------------
+  // Added 2026-08-16 with water's flow-direction compass. The reason this is a
+  // TYPE rather than `widget: 'compass'` on a float is arithmetic, not looks:
+  // an angle is CYCLIC, and every assertion here is a thing a float gets wrong.
+  {
+    const HEADING = { type: 'angle', default: 180, label: 'Flow direction' };
+    t.ok('an angle declaration validates', validateParamsSchema({ heading: HEADING }).ok);
+
+    t.ok('370° wraps to 10°, it is not clamped to a maximum', validateParamValue(HEADING, 370).value === 10);
+    t.ok('−5° wraps to 355°, not to 0', validateParamValue(HEADING, -5).value === 355);
+    t.ok('exactly 360° is 0° — one heading, one stored value', validateParamValue(HEADING, 360).value === 0);
+    t.ok('720° is 0° — the wrap is a modulo, not one subtraction', validateParamValue(HEADING, 720).value === 0);
+    t.ok('−370° is 350°', validateParamValue(HEADING, -370).value === 350);
+    t.ok('an ordinary heading passes through untouched', validateParamValue(HEADING, 217).value === 217);
+
+    // `clamped` means "your intent was reduced to fit". Wrapping reduces
+    // nothing — 370 and 10 are the SAME heading — and reporting it as clamped
+    // would make `validateParamsSchema` reject a legal default of 360.
+    t.ok('a wrapped write is NOT reported as clamped', validateParamValue(HEADING, 370).clamped === false);
+    t.ok(
+      'so a schema whose default is 360 is legal, not "outside its own range"',
+      validateParamsSchema({ h: { type: 'angle', default: 360, label: 'H' } }).ok
+    );
+
+    t.ok('a non-number is still an error, not a silent 0', validateParamValue(HEADING, 'south').ok === false);
+    t.ok('and so is NaN', validateParamValue(HEADING, NaN).ok === false);
+
+    // An angle's range IS the circle. Declaring min/max is a second, disagreeing
+    // statement about both the range and the out-of-range policy — a half-circle
+    // "angle" is a float with a unit and should say so.
+    const withRange = validateParamsSchema({ h: { type: 'angle', min: 0, max: 180, default: 90, label: 'H' } });
+    t.ok('declaring min/max on an angle FAILS the schema', withRange.ok === false);
+    t.ok(
+      '...and says why, in terms of the clamp it does not have',
+      withRange.errors.some((e) => /cyclic/.test(e))
+    );
+  }
+
+  // ---- 10. CONTROL READINESS: status/plannedReason (added 2026-08-17, the
+  // LANTERN UI migration's U0) — an honest, day-one admission that a control
+  // has no effect yet, so the migration can ship every room without silently
+  // pretending an unwired knob works. --------------------------------------
+  {
+    const base = { type: 'float', min: 0, max: 1, default: 0.5, label: 'X' };
+
+    t.ok(
+      'PARAM_STATUS is frozen vocabulary of exactly live/planned',
+      Object.isFrozen(PARAM_STATUS) && PARAM_STATUS.length === 2
+    );
+    t.ok(
+      'status is entirely OPTIONAL — the overwhelming majority of params say nothing here',
+      validateParamsSchema({ x: base }).ok
+    );
+
+    t.ok("status:'live' is legal and explicit", validateParamsSchema({ x: { ...base, status: 'live' } }).ok);
+    t.ok(
+      "status:'planned' WITH a reason is legal",
+      validateParamsSchema({
+        x: { ...base, status: 'planned', plannedReason: 'Motion tiles has no src/ runtime yet.' },
+      }).ok
+    );
+
+    t.ok('REJECTS a bogus status', !validateParamsSchema({ x: { ...base, status: 'coming-soon' } }).ok);
+    t.ok(
+      "REJECTS status:'planned' with NO reason — a red badge nobody can explain",
+      !validateParamsSchema({ x: { ...base, status: 'planned' } }).ok
+    );
+    t.ok(
+      '...and an EMPTY reason is the same failure as no reason at all',
+      !validateParamsSchema({ x: { ...base, status: 'planned', plannedReason: '' } }).ok
+    );
+    t.ok(
+      "REJECTS a plannedReason left on a control with no status:'planned' — a stale claim once the control ships",
+      !validateParamsSchema({ x: { ...base, plannedReason: 'stale text nobody will ever see' } }).ok
+    );
+    t.ok(
+      '...the same rejection fires even when status is explicitly live',
+      !validateParamsSchema({ x: { ...base, status: 'live', plannedReason: 'should not be here' } }).ok
+    );
+
+    // `status`/`plannedReason` must NOT trip the renderer/view-state rejection
+    // `throttle`/`expanded`/etc get — this is a fact about the value ("does
+    // writing it do anything"), the same category as default/min/max.
+    const withBoth = { x: { ...base, status: 'planned', plannedReason: 'No src/ backing yet.' } };
+    const r = validateParamsSchema(withBoth);
+    t.ok(
+      'status/plannedReason are NOT forbidden-in-contract fields',
+      !r.errors.some((e) => /renderer\/view state|not part of the contract/i.test(e))
+    );
   }
 }

@@ -1049,13 +1049,75 @@ footprint and the light it feeds into the pool.
 ### Pillar 5 — Water — PRIMITIVE *(author: "probably in need of the most work")*
 Absorbs: WaterEffectV2, water-shader, water-screen-occlusion, WaterSplashesEffectV2 (splash
 particles → Pillar 12 archetype; splash structural shadow → Pillar 3).
-State: JFA body SDF + sun/sky GGX BUILT; author verdict "very rough."
+State: tiers 0–4 BUILT (placement/volume/motion/light/shore — JFA body SDF, sun/sky GGX, shore
+filaments/shoaling/caustics); author verdict "very rough" (2026-07-27), upgraded 2026-08-16 to
+*"my settings are starting to look good"* — the first positive verdict this pillar has had.
 **DoD:** author ships a map whose water they're proud of.
-- [ ] Water look campaign — its own planning doc, author-led reference art first (what does
-      "done" look like? gather V2 captures + dream references BEFORE coding).
-- [ ] Shoreline/edge treatment on real Mansion water.
-- [ ] Surface animation tier that survives zoom-out (clarity doctrine applies to water too).
-- [ ] Splash/interaction pass (tokens, weather) — Pillar 12 archetypes.
+- [x] **Depth-authority migration + per-floor bake** — 2026-08-15, bug 22. `BUILT (unverified)`:
+      the bench map has no `_Water` mask, so cross-floor masking has never been SEEN with real
+      water.
+- [x] **The four defects of 2026-08-16** (bugs 24–27), all `BUILT (unverified)`, all found by
+      the author on their own river map:
+      · **water drew past the edge of the map** — a 64 px AABB pad met a UV clamp, and a clamp
+        is not a boundary, it is an EXTRUSION of the mask's edge row. Fixed in two places that
+        fail differently (geometry clipped to the mask rect; an in-rect fragment gate).
+      · **staircase edges in the white surface detail** — two amplifiers of the body pack's
+        ~21-world-px texel grid: a bank warp applied at full strength where the shore tangent
+        is meaningless (the medial axis), and plain bilinear's C0 crease pushed through a wet
+        band, a foam threshold and a GGX lobe. NOT a resolution problem: `WATER_BODY_SUPERSAMPLE`
+        already made that round trip in July.
+      · **the sun glint shone inside buildings** — the `buf:scene.vis` gate `Water.md` §6/§7
+        have specified since the design was written, finally built. It was not obviously
+        missing because the glint DID ride the ambient fill's `sunVis` — but a lobe reaching
+        10× the buffer's white point is still blown out after a 0.3× ambient.
+      · **every river ran backwards, on a heading that was not a compass** — the travel was
+        ADDED to the noise domain (a pattern moves opposite to its domain) and the angle ran
+        clockwise from +x on a Y-down screen. Now an `angle` param type + a compass dial FOH,
+        with one Node-pinned heading→vector helper.
+- [x] **Tier 4 `shore`** — 2026-08-16, `BUILT (unverified)`, then REWORKED the same day after
+      the author's live look. Effects.md Law 4/2 compliant:
+      · ⚠️ **FIRST CUT SHIPPED TWO REAL BUGS, BOTH AUTHOR-FOUND.** (1) Caustics had no
+        `insideWater` gate, and they multiply the ABSORPTION mesh — a `dst·src` blend whose
+        neutral element is exactly 1 — over the water's whole AABB: *"moving patterns across the
+        whole ground floor, indoors and outside... everywhere that isn't water too."* "Zero where
+        the surface is flat" was never the promise that mattered; "zero outside the water" is.
+        (2) The foam filaments were INVISIBLE — measured at a **41.6% grey wash**, because the
+        ridge width was calibrated against an ASSUMED uniform noise distribution and the real one
+        (measured on-device: RMS 0.281, median |x| 0.197) is peaked at zero. **The unit test
+        asserted the band was a "minority" using the same assumption, so it passed.**
+      · **shoreline foam, rebuilt on research** (`docs/planning/Water-Foam.md` — ten searches,
+        Sea of Thieves / SideFX whitewater / Cyanilux / Alisavakis / NOAA / oceanography):
+        SWASH bands that TRAVEL shoreward (periodic in `shoreDist − time`), BREAK foam from
+        `max(−dot(flowDir, shoreNormal), 0)` — one-sided, on the upstream face of every obstacle
+        and the outside of every bend, from the tangent already in the bake — and a CELLULAR
+        (Worley cell-wall) structure instead of ridges, because real foam is a net with holes,
+        not veins. Foam reach is a FRACTION of `depthScalePx`, which is the whole answer to the
+        author's "ponds through ocean shorelines" range. ADDS to tier 2's foam, never replaces.
+      · **wave shoaling** — Green's-law amplification of the SAME `n.y`/`n.z` pair tier 2 already
+        shares between crest and slope, folded INSIDE tier 2's own fetch (not a separate tier-4
+        block) so tier 3's specular sees steeper water at the shore for free, with no ordering
+        hazard and no second uniform.
+      · **caustics** — the surface field's own Jacobian, from two EXTRA world-space taps of the
+        SAME already-safe warped domain (never a screen-space derivative — `Water.md` §6's own
+        "no derivatives, no divergent-flow UB"). The focal constant (`WATER_CAUSTICS_K`) was swept
+        against 65,536 REAL samples of the actual GPU noise before shipping (not guessed): the
+        first estimate was ~10× too small and would have shipped invisible, tier 3's own exact
+        failure shape, caught this time by measuring first.
+      New `angle`-sibling params `filamentFoam`/`caustics` (ROH); `quality`/`extreme` profiles get
+      a water of their own for the first time. `npm test`: 10,435 → 10,577 assertions.
+- ✠ **THE CAMPAIGN NOW LIVES IN ITS OWN HOLY DOCUMENT: `docs/holy/Water-Testament.md`**
+      *(Fable 5, 2026-08-16, at the author's command — full research digest + the W0–W12
+      checklist: instruments → depth axis → wind covenant → species (pond/lake/river/ocean as
+      data rows) → complete stateless foam → swell/shoaling → murk/particulates → foam MEMORY
+      (the ⭐ rung) → refraction+light shafts → interactive sim → spray → multi-body/authored
+      flow → polish/a11y/perf.)* Every open item that previously sat here — the look campaign,
+      zoom-survival, splashes, foam memory, refraction — is absorbed there with cost classes
+      and exit criteria. This pillar's DoD is unchanged and is that Testament's W12 exit.
+      ⚠️ Superseded and struck: the "author a `_Water` mask into the bench Mansion" item —
+      the author ruled it out 2026-08-16 (*"No. I will continue to test on the map that is
+      working instead of changing the mansion. Let me do the testing, you focus on the
+      coding."*). Verification doctrine is now Water-Testament §5: shader-lab bench + debug
+      channels are the coder's eyes; the author's map is the only LIVE gate.
 
 ### Pillar 6 — Fluid *(pipes, tubes)* — AHEAD
 Absorbs: FluidEffectV2. Tiers 0–4 LIVE (twice-confirmed); tier 5 BUILT.

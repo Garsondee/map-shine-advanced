@@ -22,7 +22,7 @@
  * @module effects/water/water-registration
  */
 
-import { WATER, WATER_PARAMS } from './water.js';
+import { WATER, WATER_PARAMS, WATER_DEBUG_CHANNELS } from './water.js';
 // Intra-zone: the ONE hex→linear decoder, already shared by the candle. A
 // second copy is how two effects end up disagreeing about what '#173d47' means.
 import { hexToRgb01 } from '../candle-flame-geometry.js';
@@ -37,7 +37,7 @@ import { hexToRgb01 } from '../candle-flame-geometry.js';
  * @param {(effectId: string, scope: string) => string} args.effectEnableKey
  * @param {{error: Function}} args.log
  * @returns {{reapply: () => void, getRenderState: () => object, setWater: (partial?: object) => void,
- *   getReadout: () => object}}
+ *   setDebugChannel: (n: number) => object, getDebugChannel: () => number, getReadout: () => object}}
  */
 export function createWaterRegistration({
   effectRegistry,
@@ -78,6 +78,19 @@ export function createWaterRegistration({
    * persisted. Mirrors `bloomLiveOverride`. */
   const liveOverride = {};
 
+  /**
+   * WHICH DEBUG INTERMEDIATE IS ON SCREEN (`water.js#WATER_DEBUG_CHANNELS`,
+   * Water-Testament W0).
+   *
+   * Deliberately NOT a param and NOT in `liveOverride`: it is not a property of
+   * a material or of the world, it must never be generated onto the FOH/ROH
+   * card as a look control, and it must never persist to a setting — a
+   * diagnostic that survived a reload would eventually be mistaken for the
+   * effect. It travels on the render state beside `enabled`, and dies with the
+   * session. Mirrors `specular-registration.js`'s own copy exactly.
+   */
+  let debugChannel = 0;
+
   effectRegistry.register(WATER, (resolved) => {
     // `perfTier` (effect-cascade.js#resolveEffectTier, resolved for EVERY
     // effect at the registry door) is carried onto the readout the same way
@@ -108,6 +121,7 @@ export function createWaterRegistration({
         ...p,
         tint: typeof p.tint === 'string' ? hexToRgb01(p.tint) : undefined,
       },
+      debugChannel,
     };
   }
 
@@ -139,5 +153,39 @@ export function createWaterRegistration({
     if (changed) reapply();
   }
 
-  return { reapply, getRenderState, setWater, getReadout: () => readout };
+  /**
+   * `MapShine.setWaterDebug(9)` — show one shader intermediate instead of the
+   * effect. 0 restores the normal render. See `water.js#WATER_DEBUG_CHANNELS`
+   * for what each one answers.
+   *
+   * Needs no `reapply()`: it is not part of the cascade at all, and every
+   * per-floor surface subsystem reads it off `getRenderState()` on its next
+   * `sync()` — which happens every frame, before the draw.
+   *
+   * @param {number} n
+   * @returns {{debugChannel: number, channel: object|null}}
+   */
+  function setDebugChannel(n) {
+    const next = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+    const channel = WATER_DEBUG_CHANNELS.find((c) => c.n === next) ?? null;
+    if (!channel) {
+      // Loud rather than clamped: silently snapping to the nearest valid
+      // channel would show the author a DIFFERENT intermediate than the one
+      // they asked for, and they would read the result as an answer about the
+      // one they named (`feedback_instruments_must_not_lie`).
+      log.error(`setWaterDebug: no channel ${next} — valid: ${WATER_DEBUG_CHANNELS.map((c) => c.n).join(', ')}`);
+      return { debugChannel, channel: WATER_DEBUG_CHANNELS.find((c) => c.n === debugChannel) ?? null };
+    }
+    debugChannel = next;
+    return { debugChannel, channel };
+  }
+
+  return {
+    reapply,
+    getRenderState,
+    setWater,
+    setDebugChannel,
+    getDebugChannel: () => debugChannel,
+    getReadout: () => readout,
+  };
 }

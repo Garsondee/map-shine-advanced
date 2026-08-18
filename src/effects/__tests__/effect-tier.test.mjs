@@ -336,10 +336,18 @@ export function run(t) {
   );
   ok('performance additionally buys tier 2 (motion)', resolveEffectTier(WATER, { profile: 'performance' }).tier === 2);
   ok(
-    "water's ladder tops out at tier 3 (standard) today — quality and extreme buy nothing more YET, which " +
-      "is exactly where Water.md's deferred rungs 4-8 (shore/refraction/reflection/sim/spray) land once built",
-    resolveEffectTier(WATER, { profile: 'quality' }).tier === WATER_DEFAULT_TIER &&
-      resolveEffectTier(WATER, { profile: 'extreme' }).tier === WATER_DEFAULT_TIER
+    'standard (the default) buys tier 3 (light) — one rung short of the top, same as WATER_DEFAULT_TIER',
+    resolveEffectTier(WATER, { profile: 'standard' }).tier === 3 && WATER_DEFAULT_TIER === 3
+  );
+  ok(
+    'quality buys tier 4 (shore) — the FIRST rung to give quality/extreme a water of their own ' +
+      "(2026-08-16; Water.md's remaining deferred rungs 5-8 — refraction/reflection/sim/spray — are what " +
+      'would push extreme past quality some day, and today do not)',
+    resolveEffectTier(WATER, { profile: 'quality' }).tier === 4
+  );
+  ok(
+    "water's ladder tops out at tier 4 today — extreme buys nothing MORE than quality yet",
+    resolveEffectTier(WATER, { profile: 'extreme' }).tier === resolveEffectTier(WATER, { profile: 'quality' }).tier
   );
   ok(
     'a low-profile machine genuinely gets a CHEAPER water than the default (fewer rungs bought)',

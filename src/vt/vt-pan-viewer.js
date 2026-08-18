@@ -290,6 +290,7 @@ import {
   buildPointLightMergedBlitMaterial,
   createWaterBodySubsystem,
   createWaterSurfaceSubsystem,
+  createWaterFlowSubsystem,
   createFluidSurfaceSubsystem,
   createSpecularSurfaceSubsystem,
   createWindowSurfaceSubsystem,
@@ -5646,6 +5647,8 @@ export async function startVtPanViewer({
       const liveWaterFloorIndices = new Set(waterFloors.map((f) => f.index));
       for (const [floorIndex, body] of waterBodiesByFloor) {
         if (!liveWaterFloorIndices.has(floorIndex)) {
+          waterFlowsByFloor.get(floorIndex)?.dispose();
+          waterFlowsByFloor.delete(floorIndex);
           waterSurfacesByFloor.get(floorIndex)?.dispose();
           waterSurfacesByFloor.delete(floorIndex);
           body.dispose();
@@ -5669,6 +5672,23 @@ export async function startVtPanViewer({
         for (const floor of waterFloors) getWaterSurfaceForFloor(floor.index).sync(floor.index, waterViewRect);
       }
       profiler?.end(Z.lightWaterSync);
+      // THE FLOW PACK — runs AFTER the surface sync above, not beside the body
+      // bake: it samples the SAME full-resolution texture the surface pack
+      // just (maybe) loaded, so it has nothing to do until that exists. Same
+      // per-floor cadence discipline as the body bake — see
+      // `water-flow-subsystem.js`'s own header.
+      profiler?.begin(Z.lightWaterFlowBake);
+      for (const floor of waterFloors) {
+        const flow = getWaterFlowForFloor(floor.index);
+        flow.maybeBake();
+        // THE `flowSolidity`/`flowVelocity` DEBUG CHANNELS' OWN re-point
+        // (2026-08-17, S2+S3) — cheap every frame (one identity compare
+        // inside), and independent of both the mask-load re-point and the
+        // body-pack re-point above; see
+        // `water-surface-subsystem.js#setFlowPackTexture`'s own doc.
+        getWaterSurfaceForFloor(floor.index).setFlowPackTexture(flow.texture);
+      }
+      profiler?.end(Z.lightWaterFlowBake);
       // FLUID: same cadence, same shape — cheap to call, one string compare when
       // nothing changed, and it owns its own mask-url change detection.
       profiler?.begin(Z.lightFluidSync);
@@ -8260,6 +8280,44 @@ export async function startVtPanViewer({
         waterSurfacesByFloor.set(floorIndex, surface);
       }
       return surface;
+    }
+
+    // ── THE WATER FLOW PACK (docs/planning/Water-Simulation-Turn.md §3 Layer
+    // B / §4 S2): `res:waterFlow` — area-averaged solidity over the SAME
+    // full-resolution mask the surface pack above just loaded. ONE INSTANCE
+    // PER FLOOR, same reason as `waterBodiesByFloor`/`waterSurfacesByFloor`
+    // just above — see `water-flow-subsystem.js`'s own header. Constructed
+    // with THIS floor's own `waterSurface`/`waterBody` handles already
+    // resolved, exactly like `waterSurface` above is paired to its own
+    // `waterBody` — so there is no floor-crossing question left for this
+    // subsystem to answer, only "has my sibling's texture changed".
+    const waterFlowsByFloor = new Map();
+    function createWaterFlowForFloor(floorIndex) {
+      return createWaterFlowSubsystem({
+        THREE,
+        allocator,
+        waterSurface: getWaterSurfaceForFloor(floorIndex),
+        waterBody: getWaterBodyForFloor(floorIndex),
+        // The SAME reused save/bind/render/restore triplet the body pack's
+        // own flood already drives — see `waterBodiesByFloor`'s own header
+        // for why this alias is not sun-specific despite its name.
+        renderWaterPass: renderSunShadowPass,
+        // NEAREST would matter for a mid-flood offset VECTOR (the JFA
+        // ping-pong pair's own reason); the 1×1 zero-pressure placeholder is
+        // a single constant, so the filter is irrelevant — 'linear' only for
+        // consistency with every other flow-pack target.
+        createFlowTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
+        getWaterRenderState,
+      });
+    }
+    /** Lazily create-or-reuse this floor's own flow pack. @param {number} floorIndex */
+    function getWaterFlowForFloor(floorIndex) {
+      let flow = waterFlowsByFloor.get(floorIndex);
+      if (!flow) {
+        flow = createWaterFlowForFloor(floorIndex);
+        waterFlowsByFloor.set(floorIndex, flow);
+      }
+      return flow;
     }
 
     // ── FLUID, tiers 0-4 (docs/planning/Fluid.md) ──────────────────────────
@@ -11596,6 +11654,7 @@ export async function startVtPanViewer({
       lightSunBake: profiler?.indexOf('light.sunShadowBake') ?? -1,
       lightWaterBake: profiler?.indexOf('light.waterBodyBake') ?? -1,
       lightWaterSync: profiler?.indexOf('light.waterSurfaceSync') ?? -1,
+      lightWaterFlowBake: profiler?.indexOf('light.waterFlowBake') ?? -1,
       lightFluidSync: profiler?.indexOf('light.fluidSurfaceSync') ?? -1,
       lightRegions: profiler?.indexOf('light.regionSetup') ?? -1,
       lightPointUpdate: profiler?.indexOf('light.pointLightUpdate') ?? -1,
@@ -16095,13 +16154,16 @@ export async function startVtPanViewer({
         sunShadows.dispose();
       },
       /** Tear down EVERY floor's own water.body (the two jump-flood ping-pong
-       * targets + the three bake materials + the mask DataTexture) and surface
-       * (mesh + geometry + two NodeMaterials + the high-res mask DataTexture) —
-       * one instance per floor since 2026-08-15 (`waterBodiesByFloor`'s own
+       * targets + the three bake materials + the mask DataTexture), surface
+       * (mesh + geometry + two NodeMaterials + the high-res mask DataTexture),
+       * and flow pack (the solidity render target + its seed material) — one
+       * instance per floor since 2026-08-15 (`waterBodiesByFloor`'s own
        * header). Same per-Stop/Restart VRAM-leak reasoning as every other entry
        * in this list — three RGBA16F world-space targets, per floor, is the
        * largest single allocation water makes. */
       disposeWaterBody() {
+        for (const flow of waterFlowsByFloor.values()) flow.dispose();
+        waterFlowsByFloor.clear();
         for (const surface of waterSurfacesByFloor.values()) surface.dispose();
         waterSurfacesByFloor.clear();
         fluidSurface.dispose();
@@ -17323,7 +17385,23 @@ export async function startVtPanViewer({
             // crop is not working and water is paying fullscreen cost for a
             // river.
             surface: waterSurfacesByFloor.get(floorIndex)?.getStatus() ?? 'not synced',
+            // THE FLOW PACK's own state (2026-08-17, S2) — `not baked` here
+            // with a healthy `surface` above means the solidity bake simply
+            // has not run yet this session (it waits on the surface's own
+            // full-resolution texture — see `water-flow-subsystem.js`), not
+            // that anything is broken.
+            flow: waterFlowsByFloor.get(floorIndex)?.getStatus() ?? 'not baked',
           })),
+      /**
+       * THE CURRENT CAMERA'S WORLD RECT (2026-08-17) — for any diagnostic that
+       * needs to sample points that are actually ON SCREEN, not merely inside
+       * some baked body's own (possibly much larger) world AABB. `null` before
+       * the first frame has a `view`. Same `viewToWorldRect(view, canvasW /
+       * canvasH)` every per-frame sync call already uses (see `runLightAccumulate
+       * Pass`'s own `waterViewRect`) — reused, not re-derived, so this can never
+       * disagree with what the renderer itself is actually looking at.
+       */
+      getViewWorldRect: () => (view ? viewToWorldRect(view, canvasW / canvasH) : null),
       /**
        * FLUID's own chain state — every link, so "why do I see nothing" is
        * answered by reading ONE report rather than by another round trip with

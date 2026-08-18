@@ -133,6 +133,20 @@
  * @module effects/water/water-light
  */
 
+// INTRA-ZONE, and an IMPORT rather than an injected seam — deliberately, and
+// the two halves of that choice have different reasons. Importing at all:
+// `Water.md` §7 has listed "sun occlusion → `buf:scene.vis`" as one of water's
+// seven handles since the design was written, and there must be exactly ONE
+// implementation of "world XY → shadow-field UV → sample" (this project has
+// already paid for two copies of a screen↔world mapping drifting apart). Not
+// injecting it, the way `buildOutdoorsGate` is: an injected seam that nobody
+// wires renders perfectly on its default and every downstream control is dead
+// (`feedback_seam_default_hides_unwired`, which is exactly how water's own
+// render-state seam shipped inert once already). An import cannot be unwired.
+// The module is 100 lines, imports nothing itself, and takes TSL as an
+// argument — nothing about importing it costs what injection was buying.
+import { buildWorldSpaceSunVisibilityNode } from '../lighting/sun-occlusion-render.js';
+
 /** Water's own Fresnel-at-normal-incidence, from its IOR (~1.33) — see the
  * header for why this is NOT specular's 0.04 general-dielectric average. */
 export const WATER_F0 = 0.02;
@@ -141,8 +155,8 @@ export const WATER_F0 = 0.02;
  * same value, same reason — see the header. */
 export const WATER_MIN_ROUGHNESS = 0.089;
 
-export const WATER_TIER3_SUN_GLINT = 1;
-export const WATER_TIER3_SKY_SHEEN = 1;
+export const WATER_TIER3_SUN_GLINT = 2;
+export const WATER_TIER3_SKY_SHEEN = 0.54;
 
 /**
  * 0 = a rough, scattered highlight; 1 = a tight mirror disc.
@@ -174,7 +188,7 @@ export const WATER_TIER3_SKY_SHEEN = 1;
  * them equal; specular shipped that exact drift once (`SPECULAR_DEFAULT_
  * SHIMMER_GAIN`) and it is why the test exists.
  */
-export const WATER_TIER3_GLOSSINESS = 0.755;
+export const WATER_TIER3_GLOSSINESS = 0.911;
 
 /** THE EYE HEIGHT, as a multiple of the VISIBLE WIDTH — never world px. Same
  * quantity, same reasoning, and the same default as
@@ -184,7 +198,7 @@ export const WATER_TIER3_GLOSSINESS = 0.755;
  * Owned independently rather than shared with shine's own setting: this is a
  * LOOK parameter each effect's author tunes separately, not a graph resource
  * two consumers must agree on (unlike `uViewRect`, which IS shared, below). */
-export const WATER_TIER3_VIEWER_HEIGHT = 1.5;
+export const WATER_TIER3_VIEWER_HEIGHT = 1;
 
 /** How strongly a CLEAR sky brightens toward the sun's own azimuth, as a
  * fraction. Not a param — see `specular-render.js#SKY_DIRECTIONAL`'s identical
@@ -192,6 +206,52 @@ export const WATER_TIER3_VIEWER_HEIGHT = 1.5;
  * find, and `sky-access.js` already drives the key's strength to zero under
  * cloud, so nothing extra needs to know about weather. */
 const SKY_DIRECTIONAL = 0.6;
+
+/**
+ * HOW COMPLETELY A CAST SHADOW PUTS OUT THE SUN GLINT, 0..1. Default **1** —
+ * fully — because that is the physics and it is what the author asked for.
+ *
+ * Author, 2026-08-16: *"Sun glint needs to be defeated by shadows, in fact we
+ * need to adjust the presentation of water with shadows in general."*
+ *
+ * ⚠️ **THE GLINT IS A MIRROR IMAGE OF THE SUN, NOT A BRIGHTNESS.** Everything
+ * else water emits is albedo, and albedo in shadow is handled downstream for
+ * free: water draws into `buf:scene.color` BEFORE lighting, so
+ * `environmental-light.js` multiplies the whole pass by an ambient fill that
+ * already carries `sunVis`. That is why this was not obviously missing — the
+ * glint WAS being attenuated, by the same ~0.12..1 factor as the ground beside
+ * it. But a specular lobe at `alpha = 0.06` routinely reaches ten times the
+ * buffer's white point, and 10 × 0.3 is still blown out: the highlight visibly
+ * survived shadows it should not exist inside at all
+ * (`feedback_saturated_curve_cannot_transmit_variation`). An occluded surface
+ * cannot reflect a sun it cannot see, at any ambient level, so the sun term
+ * needs its OWN full gate rather than a share of the ambient's.
+ *
+ * ⚠️ A KNOWN, DELIBERATE DOUBLE-COUNT, stated rather than hidden: because this
+ * rung's output is treated as albedo by the pass that lights it, a gated glint
+ * is multiplied by `sunVis` twice — once here, once in the ambient fill. At
+ * full sun (`sunVis = 1`) that is exactly a no-op, and in full shadow both
+ * factors want zero, so the error lives only in the penumbra, where it makes
+ * the glint fade a little early. The alternative is moving tier 3 out to a
+ * post-lighting scene of its own, which is precisely the trade
+ * `water-render.js`'s header rejects (it would cost water its free paint-order
+ * occlusion). Correct-looking and cheap beats exactly-right and structural,
+ * here, and the number is one slider away for an author who disagrees.
+ */
+export const WATER_TIER3_SHADOW_RESPONSE = 1;
+
+/**
+ * How much of the SKY sheen a cast shadow takes with it. Not a param, and much
+ * smaller than the sun's own gate, because it answers a different question: a
+ * point in a building's shadow still sees most of the sky dome — that is what
+ * makes shadows blue rather than black — so a sheen that vanished with the sun
+ * would be wrong in the other direction. What it genuinely loses is the sun's
+ * own aureole, the bright patch of sky AROUND the disc, which is what
+ * `SKY_DIRECTIONAL` models. 0.5 leaves the isotropic dome reflecting and takes
+ * half the directional part, applied through `shadowResponse` like the glint so
+ * one slider still governs the whole shadow behaviour.
+ */
+const SKY_SHEEN_SHADOW_SHARE = 0.5;
 
 /**
  * The KEY LIGHT's unit 3-vector, from a surface toward the sun — a byte-for-
@@ -234,6 +294,12 @@ export function waterKeyLightDirection(key) {
  * @param {number} [args.viewerHeight]
  * @param {number} [args.sunGlint]
  * @param {number} [args.skySheen]
+ * @param {number} [args.shadowResponse] - how completely a cast shadow puts the
+ *   sun glint out ({@link WATER_TIER3_SHADOW_RESPONSE}).
+ * @param {*} [args.sunShadowTexture] - the sun-shadow field for the floor this
+ *   water sits on (`sun-shadow-subsystem.js`'s per-floor slots). Absent/null
+ *   compiles the whole gate OUT — a JS-time branch, Effects.md Law 4 — which is
+ *   exactly the pre-2026-08-16 behaviour: a glint that shines inside buildings.
  * @param {*} [args.slopeXY] - a vec2 node: the surface's own gradient
  *   (rise/run) from `water-field.js`. **This is what makes the rung visible at
  *   all** — see the header. Absent yields the flat `N = (0,0,1)` this module
@@ -256,15 +322,18 @@ export function buildWaterSpecular({
   viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
   sunGlint = WATER_TIER3_SUN_GLINT,
   skySheen = WATER_TIER3_SKY_SHEEN,
+  shadowResponse = WATER_TIER3_SHADOW_RESPONSE,
+  sunShadowTexture = null,
   slopeXY = null,
 }) {
-  const { vec2, vec3, float, uniform, clamp, max, dot, normalize, sqrt, mix } = TSL;
+  const { vec2, vec3, vec4, float, uniform, texture, clamp, max, dot, normalize, sqrt, mix } = TSL;
 
   const uViewCentre = uniform(vec2(0, 0));
   const uViewerHeight = uniform(float(viewerHeight));
   const uGlossiness = uniform(float(glossiness));
   const uSunGlint = uniform(float(sunGlint));
   const uSkySheen = uniform(float(skySheen));
+  const uShadowResponse = uniform(float(shadowResponse));
   /** The KEY LIGHT's unit 3-vector, assembled ONCE in JS from the sky handle
    * (`waterKeyLightDirection`), never from the hour — `env/one-sun`. */
   const uKeyDir = uniform(vec3(0, 0, 1));
@@ -344,11 +413,49 @@ export function buildWaterSpecular({
     return schlick(vDotH).mul(brdf).mul(radiance);
   }
 
+  // ── THE CAST-SHADOW GATE (2026-08-16) ────────────────────────────────────
+  // A JS-time branch on the field texture (Effects.md Law 4): no field, no
+  // lookup in the compiled shader at all, and the rung renders exactly as it
+  // did before shadows reached water.
+  //
+  // `uSunShadowMix` is NOT a tier gate wearing a uniform (`tsl/no-uniform-
+  // gates`) — it answers a question a compiled shader genuinely cannot: "is a
+  // field bound for the floor this water is on RIGHT NOW". The slots are
+  // per-floor and reassigned by a residency pass at runtime, so the caller
+  // re-points this material's texture node at whichever slot currently matches
+  // and drops the mix to 0 on the frames when none does. Fail direction is
+  // deliberate and is the opposite of the depth gate's: **no shadow data must
+  // read as FULL SUN, never as full shadow** — an unresolved floor that went
+  // dark would put a black river on screen, which is a far worse failure than a
+  // glint that briefly outstays a shadow (`feedback_gate_polarity_must_fail_
+  // open`).
+  const sunShadowTexNode = sunShadowTexture ? texture(sunShadowTexture) : null;
+  const uSunShadowRect = uniform(vec4(0, 0, 1, 1));
+  const uSunShadowMix = uniform(float(0));
+  const shadowVis = buildWorldSpaceSunVisibilityNode(TSL, {
+    worldX: positionWorld.x,
+    worldY: positionWorld.y,
+    uShadowRect: uSunShadowRect,
+    shadowTexNode: sunShadowTexNode,
+  });
+  // 1 = this pixel sees the sun. `mix(1, field, bound)` folds the "is a field
+  // bound" question and the field itself into one expression with no branch.
+  const sunVis = shadowVis ? mix(float(1), clamp(shadowVis, 0, 1), uSunShadowMix) : float(1);
+  // `shadowResponse` interpolates between "shadows are ignored" (0, the
+  // pre-2026-08-16 look) and "a shadow puts the glint out completely" (1).
+  const sunShadowFactor = mix(float(1), sunVis, uShadowResponse);
+
   // ── THE SUN DISC — this is what carries the sweep as the camera pans;
   // Fresnel alone barely moves under a near-normal-incidence top-down view,
   // but the lobe is sharp, so a small change in N·H is a large change in
   // brightness (the exact finding `docs/planning/Specular.md` §4.1 records).
-  const sunSpec = lobe(uKeyDir, uKeyColor.mul(uKeyStrength)).mul(uSunGlint);
+  //
+  // ⚠️ GATED BY THE CAST SHADOW, at FULL strength — a surface cannot mirror a
+  // sun it cannot see. See `WATER_TIER3_SHADOW_RESPONSE` for why the ambient
+  // fill's own `sunVis` (which this term was already riding, downstream) was
+  // never enough: a lobe that reaches ten times the buffer's white point is
+  // still blown out after a 0.3× ambient.
+  const sunSpec = lobe(uKeyDir, uKeyColor.mul(uKeyStrength)).mul(uSunGlint).mul(sunShadowFactor);
 
   // THE SKY DOME. The reflection vector is `R = 2(N·V)N − V`.
   //
@@ -365,8 +472,19 @@ export function buildWaterSpecular({
   // vanishes — normalising would manufacture a direction out of nothing there.
   const reflectFull = normalNode.mul(dot(normalNode, viewDir).mul(float(2))).sub(viewDir);
   const reflectXY = vec2(reflectFull.x, reflectFull.y);
+  //
+  // ⚠️ THE AUREOLE IS SHADOWED; THE DOME IS NOT. The `1 +` is the isotropic
+  // dome — the sky a point sees in every direction, which a building's shadow
+  // barely touches (it is why shadows are blue and not black) — and the term
+  // added to it is the bright patch of sky AROUND the sun's own disc, which a
+  // building DOES block along with the disc itself. So the shadow factor rides
+  // the directional term only, at `SKY_SHEEN_SHADOW_SHARE` of its strength.
+  // Gating the whole sheen would have made shadowed water read as a hole.
+  const aureoleShadow = mix(float(1), sunShadowFactor, float(SKY_SHEEN_SHADOW_SHARE));
   const domeGradient = max(
-    float(1).add(dot(reflectXY, vec2(uKeyDir.x, uKeyDir.y)).mul(float(SKY_DIRECTIONAL)).mul(uKeyStrength)),
+    float(1).add(
+      dot(reflectXY, vec2(uKeyDir.x, uKeyDir.y)).mul(float(SKY_DIRECTIONAL)).mul(uKeyStrength).mul(aureoleShadow)
+    ),
     float(0)
   );
   const skySpec = schlick(nDotV).mul(uFillColor).mul(uFillStrength).mul(domeGradient).mul(uSkySheen);
@@ -416,9 +534,38 @@ export function buildWaterSpecular({
     setSkySheen(v) {
       uSkySheen.value = v;
     },
+    /** WATER_PARAMS `shadowResponse`. Clamped to 0..1: above 1 the `mix` would
+     * extrapolate past full darkness into a NEGATIVE glint, which subtracts
+     * light from the water and reads as a black smear rather than as a shadow.
+     * @param {number} v */
+    setShadowResponse(v) {
+      uShadowResponse.value = Math.min(1, Math.max(0, Number.isFinite(v) ? v : WATER_TIER3_SHADOW_RESPONSE));
+    },
+    /** The world rect the currently-bound sun-shadow slot covers. Pushed by the
+     * caller whenever the slot it borrows changes — never derived here, because
+     * the SLOT is what moves, and only the caller knows which one it took.
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}} r */
+    setSunShadowRect(r) {
+      uSunShadowRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
+    },
+    /** 1 when a real field is bound for this water's own floor, 0 when none is.
+     * See the gate's own comment for why 0 must mean FULL SUN: this water's
+     * floor may simply have no baked slot this frame, and a river that went
+     * black on a residency reshuffle is a far worse failure than a glint that
+     * outstays its shadow for a frame. @param {number} v */
+    setSunShadowMix(v) {
+      uSunShadowMix.value = Math.min(1, Math.max(0, Number.isFinite(v) ? v : 0));
+    },
+    /** The field's texture node, so the caller can re-point `.value` at
+     * whichever per-floor slot matches. `null` when the gate compiled out. */
+    sunShadowTexNode,
     /** For the debug report — whether the outdoors branch is real on this
      * scene or compiled to the indoors constant. */
     outdoorsGateCompiled: !!outdoorsNode,
+    /** For the debug report — `false` means no cast shadow can reach the glint
+     * on this scene, which fails SILENTLY: the water keeps sparkling inside a
+     * building's shadow and every other status field reads healthy. */
+    sunShadowCompiled: !!shadowVis,
     /** For the debug report — whether a REAL wave normal reached this rung, or
      * it compiled the flat `(0,0,1)` fallback. `false` here means the rung is
      * back in its measured-invisible configuration, which is silent on screen
@@ -465,6 +612,11 @@ export function buildWaterSpecular({
  * @param {number} a.keyStrength @param {number} [a.fillStrength]
  * @param {number[]} [a.slope] - `[dz/dx, dz/dy]`. Omit for the flat-normal
  *   (pre-fix) behaviour.
+ * @param {number} [a.sunVis] - the baked sun-shadow field's value here, 1 = full
+ *   sun. Defaults to 1, so every measurement taken before shadows reached this
+ *   rung (and every pinned regression value in `water-light.test.mjs`) means
+ *   exactly what it always meant.
+ * @param {number} [a.shadowResponse] - {@link WATER_TIER3_SHADOW_RESPONSE}.
  * @returns {{sun: number, sky: number, total: number, nDotV: number}} scene-
  *   colour units, the same 0..1-ish scale `buf:scene.color` carries.
  */
@@ -478,6 +630,8 @@ export function waterTier3Cpu({
   glossiness = WATER_TIER3_GLOSSINESS,
   sunGlint = WATER_TIER3_SUN_GLINT,
   skySheen = WATER_TIER3_SKY_SHEEN,
+  shadowResponse = WATER_TIER3_SHADOW_RESPONSE,
+  sunVis = 1,
   keyDir,
   keyStrength,
   fillStrength = 0,
@@ -518,15 +672,25 @@ export function waterTier3Cpu({
     return 0.5 / Math.max(gv + gl, 1e-6);
   };
 
+  // THE CAST-SHADOW GATE, transcribed from the TSL block of the same name —
+  // `mix(1, sunVis, response)`, spelled out in plain arithmetic.
+  const response = Math.min(1, Math.max(0, shadowResponse));
+  const sunShadowFactor = 1 + (clamp01(sunVis) - 1) * response;
+
   const H = unit([keyDir[0] + V[0], keyDir[1] + V[1], keyDir[2] + V[2]]);
   const nDotL = clamp01(dot3(N, keyDir));
   const brdf = ggx(dot3(N, H)) * visibility(nDotL) * nDotL;
-  const sun = schlick(clamp01(dot3(V, H))) * brdf * keyStrength * sunGlint;
+  const sun = schlick(clamp01(dot3(V, H))) * brdf * keyStrength * sunGlint * sunShadowFactor;
 
   // `R = 2(N·V)N − V`, then the un-normalised azimuthal preference.
   const nv2 = 2 * dot3(N, V);
   const R = [N[0] * nv2 - V[0], N[1] * nv2 - V[1], N[2] * nv2 - V[2]];
-  const domeGradient = Math.max(1 + (R[0] * keyDir[0] + R[1] * keyDir[1]) * SKY_DIRECTIONAL * keyStrength, 0);
+  // The aureole — and only the aureole — carries the shadow. See the TSL twin.
+  const aureoleShadow = 1 + (sunShadowFactor - 1) * SKY_SHEEN_SHADOW_SHARE;
+  const domeGradient = Math.max(
+    1 + (R[0] * keyDir[0] + R[1] * keyDir[1]) * SKY_DIRECTIONAL * keyStrength * aureoleShadow,
+    0
+  );
   const sky = schlick(nDotV) * fillStrength * domeGradient * skySheen;
 
   return { sun, sky, total: sun + sky, nDotV };

@@ -13,8 +13,10 @@ import { validateParamsSchema } from '../../../core/params-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
-import { WATER, WATER_PARAMS } from '../water.js';
-import { WATER_BANK_INFLUENCE } from '../water-field.js';
+import { WATER, WATER_PARAMS, WATER_PRESETS, waterPreset } from '../water.js';
+import { WATER_BANK_INFLUENCE, WATER_TIER2_FLOW_ANGLE_DEG } from '../water-field.js';
+import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
+import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
 
 export function run(t) {
   const { ok, throws } = t;
@@ -76,6 +78,20 @@ export function run(t) {
     WATER.deferredRungs.every((r) => typeof r.name === 'string' && typeof r.note === 'string' && r.n === undefined)
   );
 
+  // --- tier 4 (shore), landed 2026-08-16 — asserted unconditionally, not
+  // "if built" like tiers 1-3 above, because it now genuinely is.
+  ok('tier 4 exists and is numbered correctly', WATER.tiers[4]?.n === 4);
+  ok("tier 4 is named 'shore', matching Water.md §6", WATER.tiers[4]?.name === 'shore');
+  ok('tier 4 is C4 — the staircase continues past tier 3s C3', WATER.tiers[4]?.cost.class === 'C4');
+  ok(
+    "tier 4 is the FIRST rung to buy quality/extreme a water of their own — standard's own ceiling is tier 3",
+    WATER.tiers[4]?.fromProfile === 'quality' && WATER.tiers[3]?.fromProfile === 'standard'
+  );
+  ok(
+    "deferredRungs no longer lists 'shore' now that it is built — one entry, one place",
+    !WATER.deferredRungs.some((r) => r.name === 'shore')
+  );
+
   // --- it flows through the ONE door (the velocity test in miniature) -----
   {
     const reg = createEffectRegistry();
@@ -118,4 +134,167 @@ export function run(t) {
     'the bank warp is a FRACTION of one noise cell (a value ≥ 1 can shear the surface)',
     WATER_BANK_INFLUENCE > 0 && WATER_BANK_INFLUENCE < 1
   );
+
+  // --- the flow direction is an ANGLE, and its default agrees with the code
+  // TWO PLACES STORE EACH OF THESE, which is the drift `chop`/`glossiness`
+  // already have pins for and which specular shipped for real once
+  // (`SPECULAR_DEFAULT_SHIMMER_GAIN`). A schema default that disagrees with the
+  // render module's constant means the panel opens showing one number while the
+  // shader runs another — silent, and only visible as "the slider does nothing
+  // until I touch it".
+  ok(
+    'flow direction is declared as an `angle`, so it wraps instead of clamping',
+    WATER_PARAMS.flowAngleDeg.type === 'angle'
+  );
+  ok(
+    "...and an angle declares no min/max — its range is the circle (see params-schema's own rule)",
+    !('min' in WATER_PARAMS.flowAngleDeg) && !('max' in WATER_PARAMS.flowAngleDeg)
+  );
+  ok(
+    'the schema default and WATER_TIER2_FLOW_ANGLE_DEG are the SAME heading',
+    WATER_PARAMS.flowAngleDeg.default === WATER_TIER2_FLOW_ANGLE_DEG
+  );
+  ok(
+    'the shadow response default matches WATER_TIER3_SHADOW_RESPONSE',
+    WATER_PARAMS.shadowResponse.default === WATER_TIER3_SHADOW_RESPONSE
+  );
+  ok(
+    'shadows fully defeat the glint OUT OF THE BOX — the author asked for the physics, not an option',
+    WATER_PARAMS.shadowResponse.default === 1
+  );
+  // The help text is what an author reads instead of this file. If it stops
+  // naming the compass, the control silently becomes "some number of degrees
+  // from somewhere", which is exactly the state the old `flowAngleDeg` was in.
+  ok(
+    'the flow-direction help still explains the compass and which way north is',
+    /compass/i.test(WATER_PARAMS.flowAngleDeg.help) && /north/i.test(WATER_PARAMS.flowAngleDeg.help)
+  );
+
+  // --- tier 4's two params exist, are the right type, and agree with the
+  // render module's own defaults — the identical drift check every other
+  // tier-4-and-below param above already has.
+  ok(
+    'swashFoam is declared as a plain float, 0..1',
+    WATER_PARAMS.swashFoam.type === 'float' && WATER_PARAMS.swashFoam.min === 0 && WATER_PARAMS.swashFoam.max === 1
+  );
+  ok(
+    'swashFoam schema default matches WATER_TIER4_SWASH_FOAM (water-render.js)',
+    WATER_PARAMS.swashFoam.default === WATER_TIER4_SWASH_FOAM
+  );
+  ok(
+    'breakFoam is declared as a plain float, 0..1',
+    WATER_PARAMS.breakFoam.type === 'float' && WATER_PARAMS.breakFoam.min === 0 && WATER_PARAMS.breakFoam.max === 1
+  );
+  ok(
+    'breakFoam schema default matches WATER_TIER4_BREAK_FOAM (water-render.js)',
+    WATER_PARAMS.breakFoam.default === WATER_TIER4_BREAK_FOAM
+  );
+  // The author named this one directly (*"the shoreline and break near obstacles
+  // foam"*) and it is the term that reads as a river FLOWING rather than as a
+  // pond with an outline, so it ships on at a strength you can actually see.
+  ok('break foam is on by default and clearly visible, not a token amount', WATER_PARAMS.breakFoam.default >= 0.5);
+  // Its help must say the flow drives it: at flow speed 0 it silently does
+  // nothing, and an author would reasonably read that as a broken slider.
+  ok('the break-foam help warns that it follows the flow direction', /flow/i.test(WATER_PARAMS.breakFoam.help));
+  ok(
+    'caustics is declared as a plain float, 0..1',
+    WATER_PARAMS.caustics.type === 'float' && WATER_PARAMS.caustics.min === 0 && WATER_PARAMS.caustics.max === 1
+  );
+  // ⚠️ THE `=== 1` HALF IS GONE (2026-08-17). It asserted the shipped default
+  // was the FULLY-calibrated gain — true when written, and an over-reach: the
+  // gain is an author-facing multiplier layered ON TOP of the calibrated
+  // `WATER_CAUSTICS_K` precisely so a scene can pull the effect back without
+  // retuning the physics underneath (see that constant's own doc). The author
+  // set 0.33 on their own river, which is the control being used exactly as
+  // designed. What still MUST hold — and is the only thing this ever needed to
+  // defend — is that the two storage sites agree.
+  ok(
+    'caustics schema default matches WATER_TIER4_CAUSTICS (water-render.js) — one number, two homes',
+    WATER_PARAMS.caustics.default === WATER_TIER4_CAUSTICS
+  );
+  ok(
+    '...and the gain stays inside its own declared range, so the calibrated K is never scaled past it',
+    WATER_TIER4_CAUSTICS >= WATER_PARAMS.caustics.min && WATER_TIER4_CAUSTICS <= WATER_PARAMS.caustics.max
+  );
+  // === 🎨 NAMED PRESETS ====================================================
+  // A preset is raw param data with no schema behind it, which makes it the
+  // easiest thing in this effect to rot silently: rename a param, retype one,
+  // tighten a range, and the preset keeps "working" while quietly writing a key
+  // nothing reads or a value the shader clamps. `setWater` rejects an unknown
+  // key at runtime with a console error — invisible in a screenshot, which is
+  // how the author would meet it. These assertions are the build-time wall.
+  {
+    const names = Object.keys(WATER_PRESETS);
+    ok('there is at least one named preset', names.length > 0);
+
+    for (const name of names) {
+      const preset = WATER_PRESETS[name];
+      const keys = Object.keys(preset);
+
+      const unknown = keys.filter((k) => !Object.prototype.hasOwnProperty.call(WATER_PARAMS, k));
+      ok(
+        `preset '${name}': every key is a real WATER_PARAMS key${unknown.length ? ` (unknown: ${unknown})` : ''}`,
+        unknown.length === 0
+      );
+
+      // COMPLETE, not a diff — see WATER_PRESETS' own header for why a partial
+      // preset would silently change meaning every time a default moved.
+      const missing = Object.keys(WATER_PARAMS).filter((k) => !(k in preset));
+      ok(
+        `preset '${name}': covers EVERY param, so it is an anchor not a diff${missing.length ? ` (missing: ${missing})` : ''}`,
+        missing.length === 0
+      );
+
+      const badType = keys.filter((k) => {
+        const decl = WATER_PARAMS[k];
+        if (decl.type === 'color') return typeof preset[k] !== 'string';
+        return typeof preset[k] !== 'number' || !Number.isFinite(preset[k]);
+      });
+      ok(
+        `preset '${name}': every value has its param's own type${badType.length ? ` (wrong: ${badType})` : ''}`,
+        badType.length === 0
+      );
+
+      // ⚠️ IN RANGE, because out-of-range is the failure that does NOT throw:
+      // the schema clamps on write, so a preset storing 1.4 for a 0..1 param
+      // applies as 1 and the author sees a look nobody authored.
+      const outOfRange = keys.filter((k) => {
+        const decl = WATER_PARAMS[k];
+        if (typeof preset[k] !== 'number') return false;
+        if (decl.min !== undefined && preset[k] < decl.min) return true;
+        if (decl.max !== undefined && preset[k] > decl.max) return true;
+        return false;
+      });
+      ok(
+        `preset '${name}': every value is inside its param's declared range${outOfRange.length ? ` (out: ${outOfRange})` : ''}`,
+        outOfRange.length === 0
+      );
+    }
+
+    ok(
+      'waterPreset returns a COPY, so a caller cannot mutate the frozen table',
+      waterPreset(names[0]) !== WATER_PRESETS[names[0]]
+    );
+    ok('...with the same contents', waterPreset(names[0]).opacity === WATER_PRESETS[names[0]].opacity);
+    ok('an unknown preset name returns null, never a silent defaults fallback', waterPreset('no-such-preset') === null);
+
+    // The author's approved look is currently ALSO the shipped defaults. That
+    // is true today and deliberately not asserted as a permanent fact — the
+    // whole reason the preset exists is to outlive the next default change.
+    ok(
+      "the author's own river preset is present under its documented name",
+      Object.prototype.hasOwnProperty.call(WATER_PRESETS, 'pollutedTownRiver')
+    );
+  }
+
+  // === 🪞 THE GLOSSINESS CEILING IS THE ROUGHNESS FLOOR ====================
+  // `roughness = clamp(1 − glossiness, WATER_MIN_ROUGHNESS, 1)`, so any
+  // glossiness above `1 − WATER_MIN_ROUGHNESS` is indistinguishable from it.
+  // The schema's max is that value, typed out because this module imports
+  // nothing; this is the pin that stops the two drifting (2026-08-17).
+  ok(
+    'the glossiness ceiling equals 1 − WATER_MIN_ROUGHNESS — no inert top to the slider',
+    Math.abs(WATER_PARAMS.glossiness.max - (1 - WATER_MIN_ROUGHNESS)) < 1e-9
+  );
+  ok('the glossiness code constant IS the schema default', WATER_PARAMS.glossiness.default === WATER_TIER3_GLOSSINESS);
 }

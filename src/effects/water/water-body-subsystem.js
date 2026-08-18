@@ -104,6 +104,30 @@ const log = createLogger('WaterBody');
 const WATER_BOUNDS_PAD_PX = 64;
 
 /**
+ * Intersect a padded water AABB with the rect the mask actually covers — pure,
+ * exported, and Node-tested, because the bug it fixes was VISIBLE ON SCREEN and
+ * invisible to every status field water reports (`getStatus().bounds` printed
+ * the escaped rect and looked entirely reasonable).
+ *
+ * Returns `null` for an empty intersection rather than an inverted rect: a
+ * degenerate quad is the shape that renders as a stripe or as nothing depending
+ * on winding, which is a far worse failure than an honest "no bounds".
+ *
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} padded
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} mask
+ * @returns {{minX:number,minY:number,maxX:number,maxY:number}|null}
+ */
+export function clipRectToMask(padded, mask) {
+  if (!padded || !mask) return padded ?? null;
+  const minX = Math.max(padded.minX, mask.minX);
+  const minY = Math.max(padded.minY, mask.minY);
+  const maxX = Math.min(padded.maxX, mask.maxX);
+  const maxY = Math.min(padded.maxY, mask.maxY);
+  if (!(maxX > minX && maxY > minY)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+/**
  * @param {object} args
  * @param {*} args.THREE
  * @param {{create: Function, dispose: Function}} args.allocator - `graph/three-allocator.js`.
@@ -356,17 +380,39 @@ export function createWaterBodySubsystem({
     materials.resolve.setFarDistance(Math.hypot(grid.spec.width, grid.spec.height));
 
     // Texel AABB → WORLD AABB, padded by the shoreline's own soft reach so the
-    // mesh never clips its own antialiased edge. `null` when the mask holds no
-    // water at all, which the consumer reads as "draw nothing" — an empty
-    // bound, never a degenerate zero-size quad.
+    // mesh never clips its own antialiased edge, then CLIPPED BACK TO THE MASK
+    // RECT. `null` when the mask holds no water at all, which the consumer
+    // reads as "draw nothing" — an empty bound, never a degenerate zero-size
+    // quad.
+    //
+    // ⚠️ **THE PAD USED TO ESCAPE THE MAP, AND THE AUTHOR SAW IT** (2026-08-16,
+    // with an arrow drawn at a band of water floating in the black above the
+    // map art): *"I also noticed that water can appear outside the bounds of
+    // the actual map."* A river that runs off the edge of the map has its
+    // measured AABB flush against the mask's own edge, and this pad then pushes
+    // the MESH 64 px past it. The surface shader clamps its mask UV to stay
+    // legal, and a clamp does not stop at a boundary — it EXTRUDES the edge row
+    // outward — so those 64 px sampled the map's outermost row of water texels
+    // and drew water across the full width of the void beyond the map.
+    //
+    // The pad is still right for its own job (an interior shoreline needs the
+    // room); what was missing is that the mask rect is a HARD boundary and the
+    // pad is a soft one. `clipRectToMask` intersects them. `water-render.js`'s
+    // own `inRect` gate closes the same hole from the other side — belt and
+    // braces, deliberately, because they fail differently: this one keeps the
+    // GEOMETRY honest (and so costs nothing to rasterise), that one keeps any
+    // FRAGMENT that still lands outside from contributing.
     waterBounds =
       maxTx >= minTx
-        ? {
-            minX: grid.spec.x + minTx * grid.spec.texelW - WATER_BOUNDS_PAD_PX,
-            minY: grid.spec.y + minTy * grid.spec.texelH - WATER_BOUNDS_PAD_PX,
-            maxX: grid.spec.x + (maxTx + 1) * grid.spec.texelW + WATER_BOUNDS_PAD_PX,
-            maxY: grid.spec.y + (maxTy + 1) * grid.spec.texelH + WATER_BOUNDS_PAD_PX,
-          }
+        ? clipRectToMask(
+            {
+              minX: grid.spec.x + minTx * grid.spec.texelW - WATER_BOUNDS_PAD_PX,
+              minY: grid.spec.y + minTy * grid.spec.texelH - WATER_BOUNDS_PAD_PX,
+              maxX: grid.spec.x + (maxTx + 1) * grid.spec.texelW + WATER_BOUNDS_PAD_PX,
+              maxY: grid.spec.y + (maxTy + 1) * grid.spec.texelH + WATER_BOUNDS_PAD_PX,
+            },
+            maskRect
+          )
         : null;
     return { ok: true, cols: w, rows: h, waterTexels: maxTx >= minTx ? 'present' : 'none' };
   }
@@ -476,6 +522,22 @@ export function createWaterBodySubsystem({
     /** The world rect the pack covers — the mask grid's own rect. */
     getRect() {
       return { ...maskRect };
+    },
+    /**
+     * The pack's size IN TEXELS — the FLOOD's own dimensions, which is what the
+     * `bodyRt` texture actually is (`WATER_BODY_SUPERSAMPLE ×` the mask grid).
+     *
+     * Exposed for `water-sampling.js`'s smooth reconstruction, which is
+     * phase-locked to the grid: it has to know where the texel centres are, and
+     * inferring them from the world rect would need the texel size, which is a
+     * second derivation of the same fact. `[1, 1]` before the first bake — a
+     * placeholder that is never sampled, because the surface mesh stays hidden
+     * until a bake lands.
+     * @returns {[number, number]}
+     */
+    getGridSize() {
+      const [w, h] = gridKey.split('x').map(Number);
+      return w > 0 && h > 0 ? [w, h] : [1, 1];
     },
     /**
      * The water's own world AABB, or `null` when this floor has no water at

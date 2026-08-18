@@ -43,6 +43,7 @@
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import { buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
 import { buildWaterSurfaceMaterial, WATER_DEFAULT_TIER } from '../water-render.js';
+import { WATER_DEBUG_CHANNELS } from '../water.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -79,7 +80,7 @@ export function run(t) {
 
   // ── EVERY RUNG CONSTRUCTS — the reason this file exists ─────────────────
   const built = {};
-  for (const tier of [0, 1, 2, 3]) {
+  for (const tier of [0, 1, 2, 3, 4]) {
     let result = null;
     let err = null;
     try {
@@ -90,14 +91,14 @@ export function run(t) {
     ok(`tier ${tier}: the TSL graph CONSTRUCTS without throwing (${err ? err.message : 'clean'})`, err === null);
     built[tier] = result;
   }
-  if (!built[3]) return; // everything below would cascade meaninglessly
+  if (!built[4]) return; // everything below would cascade meaninglessly
 
   // ── WATER IS TWO MESHES AT EVERY TIER ──────────────────────────────────
   // Half a water surface (absorption with no in-scatter, or the reverse) is a
   // far worse failure than none and reads as a shader bug — the subsystem's
   // own `refreshVisibility` says so. A tier that dropped one would be exactly
   // that, silently.
-  for (const tier of [0, 1, 2, 3]) {
+  for (const tier of [0, 1, 2, 3, 4]) {
     const b = built[tier];
     ok(`tier ${tier}: returns BOTH materials`, !!b.absorbMaterial && !!b.inscatterMaterial);
     ok(
@@ -145,7 +146,7 @@ export function run(t) {
   // this file now has: `floorGateCompiled` is the one structural consequence
   // Node can observe (same reasoning as `bodyTexNode === null` above — a
   // uniform-based "gate" could not produce a JS-visible false here).
-  for (const tier of [0, 1, 2, 3]) {
+  for (const tier of [0, 1, 2, 3, 4]) {
     let err = null;
     let withDepth = null;
     try {
@@ -164,7 +165,7 @@ export function run(t) {
   }
   ok(
     'no depthTexture at all (the pre-migration / unwired shape) compiles the gate OUT, not merely open',
-    built[3].floorGateCompiled === false
+    built[4].floorGateCompiled === false
   );
   {
     // depthTexture present but uViewRect absent must ALSO compile the gate
@@ -253,8 +254,16 @@ export function run(t) {
     'setOpacity',
     'setShorelineDepth',
     'setExpectedDepth',
+    'setBodyTexSize',
+    'setShadowResponse',
+    'setSunShadowRect',
+    'setSunShadowMix',
+    'setSwashFoam',
+    'setBreakFoam',
+    'setCaustics',
+    'setDebugChannel',
   ];
-  for (const tier of [0, 1, 2, 3]) {
+  for (const tier of [0, 1, 2, 3, 4]) {
     const b = built[tier];
     const missing = SETTERS.filter((k) => typeof b[k] !== 'function');
     ok(
@@ -274,9 +283,245 @@ export function run(t) {
       b.setViewerHeight(1.5);
       b.setViewCentre(10, 20);
       b.setChop(0.4);
+      b.setShadowResponse(1);
+      b.setSunShadowRect({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
+      b.setSunShadowMix(1);
+      b.setBodyTexSize(512, 238);
+      b.setSwashFoam(0.3);
+      b.setBreakFoam(0.7);
+      b.setCaustics(1);
     } catch (e) {
       err = e;
     }
     ok(`tier 0 tolerates every tier-3 setter being called on it (${err ? err.message : 'clean'})`, err === null);
+  }
+
+  // ══ THE CAST-SHADOW GATE (2026-08-16) ══════════════════════════════════
+  // Author: *"Sun glint needs to be defeated by shadows."* The gate is a
+  // JS-time branch on the field texture (Law 4), which means it creates a
+  // FIFTH structurally different graph — exactly the multiplication this
+  // file's own header says is the reason it exists. A shadow field only
+  // reaches water on a scene that bakes one, so on any other scene this
+  // branch would never be constructed at all until a player opened the wrong
+  // map.
+  {
+    let err = null;
+    let b = null;
+    try {
+      b = buildWaterSurfaceMaterial(args({ tier: 3, sunShadowTexture: stubTexture() }));
+    } catch (e) {
+      err = e;
+    }
+    ok(`tier 3 WITH a sun-shadow field constructs (${err ? err.message : 'clean'})`, err === null);
+    if (b) {
+      ok('...and reports the shadow gate as compiled', b.sunShadowCompiled === true);
+      ok(
+        '...and hands back the texture node, so the caller can re-point it at whichever per-floor slot matches',
+        !!b.sunShadowTexNode
+      );
+      let setErr = null;
+      try {
+        b.setSunShadowRect({ minX: 2700, minY: 1350, maxX: 13350, maxY: 6300 });
+        b.setSunShadowMix(1);
+        b.setShadowResponse(0.5);
+      } catch (e) {
+        setErr = e;
+      }
+      ok(`...and every shadow setter is callable (${setErr ? setErr.message : 'clean'})`, setErr === null);
+    }
+  }
+  // WITHOUT a field the whole lookup must be compiled OUT, not multiplied by a
+  // one (`tsl/no-uniform-gates`) — and it must SAY so, because the failure is
+  // silent on screen: the water simply keeps glinting inside buildings while
+  // every other status field reads healthy.
+  ok(
+    'tier 3 with NO shadow field reports the gate compiled-out rather than pretending',
+    built[3].sunShadowCompiled === false
+  );
+  ok(
+    '...and hands back a null texture node, so a caller cannot re-point a gate that is not there',
+    built[3].sunShadowTexNode === null
+  );
+  // Below tier 3 the stub must answer the same way — a subsystem that believed
+  // a tier-1 material had a shadow node would push into `undefined.value`.
+  ok(
+    'tier 1 (no lobe at all) also reports no shadow gate',
+    built[1].sunShadowCompiled === false && built[1].sunShadowTexNode === null
+  );
+
+  // ══ TIER 4 — SHORE (2026-08-16) ═════════════════════════════════════════
+  // Filament foam is a genuinely new fetch built INSIDE `if (activeTier >= 4)`
+  // in this file; shoaling and caustics ride tier 2's own fetch (see
+  // `water-field.js`'s header on why) and are proven structurally instead —
+  // there is no separate JS branch for them to point at here, so the proof is
+  // that tier 4's graph constructs AT ALL with `sunShadowTexture` present too
+  // (the FIFTH distinct graph shape this file now builds) and that turning the
+  // tier down removes the ONE piece that IS its own branch.
+  ok('tier 4 reports the tier it was built at', built[4].tier === 4);
+  ok(
+    'tier 4 still returns both meshes — filaments/shoaling/caustics only ADD (Law 2), never replace one',
+    !!built[4].absorbMaterial && !!built[4].inscatterMaterial
+  );
+  ok(
+    'tier 4 still carries a real wave normal — shoaling amplifies slope, it does not remove it',
+    built[4].normalCompiled === true
+  );
+  {
+    // The SAME construction proof "THE GATE ACTUALLY GATES" ran for the
+    // body-pack fetch at tier 1 — filament foam's OWN fetch needs the same
+    // proof. `buildWaterFilamentFoam` is called only inside `if (activeTier >=
+    // 4)`, so there is no direct field on the returned object to read (unlike
+    // `bodyTexNode`) — the honest structural check available in Node is that
+    // tier 4 constructs cleanly with every optional input present AND absent,
+    // which is what the loops above and below already establish; recorded
+    // here as the section that groups tier 4's own assertions rather than
+    // scattering them through tier 3's.
+    let err = null;
+    let b = null;
+    try {
+      b = buildWaterSurfaceMaterial(args({ tier: 4, sunShadowTexture: stubTexture(), depthTexture: stubTexture() }));
+    } catch (e) {
+      err = e;
+    }
+    ok(`tier 4 constructs with EVERY optional input present (${err ? err.message : 'clean'})`, err === null);
+    if (b) {
+      ok('...and the shadow gate compiles alongside filaments/shoaling/caustics', b.sunShadowCompiled === true);
+      ok('...and the depth-authority gate does too', b.floorGateCompiled === true);
+    }
+  }
+  {
+    // A caller with the pre-tier-4 shape (no `filamentFoam`/`caustics` in its
+    // args) must still get tier 4's defaults, not a throw — `water-surface-
+    // subsystem.js#buildSurfaceForTier` predates this rung by weeks and does
+    // not know these keys exist.
+    let err = null;
+    let b = null;
+    try {
+      b = buildWaterSurfaceMaterial(args({ tier: 4 }));
+    } catch (e) {
+      err = e;
+    }
+    ok(
+      `tier 4 with NO filament/caustics args supplied still constructs (${err ? err.message : 'clean'})`,
+      err === null
+    );
+    if (b) {
+      let setErr = null;
+      try {
+        b.setSwashFoam(0.5);
+        b.setBreakFoam(0.6);
+        b.setCaustics(0.7);
+      } catch (e) {
+        setErr = e;
+      }
+      ok(`...and both tier-4 setters are callable (${setErr ? setErr.message : 'clean'})`, setErr === null);
+    }
+  }
+
+  // ══ `maskTexNodes` MUST CONTAIN EVERY `texture(maskTexture, …)` NODE
+  // (2026-08-17, `feedback_texture_nodes_must_be_repointed_together`) ═══════
+  // The live incident this guards: the material is built against a 1×1
+  // placeholder, the real image re-points exactly the nodes in THIS array,
+  // and the mask-proximity ring (tier 4) once created 8 nodes that were
+  // never added to it — they sampled the placeholder forever and turned the
+  // author's whole river white. This does not catch every possible future
+  // instance of the mistake (a ninth tap someone forgets to push would still
+  // slip past a length check), but it does pin the two facts that make the
+  // CURRENT fix real: the array exists and grows with the ring that needs it.
+  {
+    const belowRing = buildWaterSurfaceMaterial(args({ tier: 3 }));
+    ok('maskTexNodes is an array', Array.isArray(belowRing.maskTexNodes));
+    ok(
+      "maskTexNodes[0] IS maskTexNode (same node, not a copy) — the subsystem's re-point loop must reach the exact object the shader reads",
+      belowRing.maskTexNodes[0] === belowRing.maskTexNode
+    );
+    ok('below tier 4, only the base sample exists — the ring has not built yet', belowRing.maskTexNodes.length === 1);
+
+    const atRing = buildWaterSurfaceMaterial(args({ tier: 4 }));
+    ok(
+      `at tier 4, the base sample PLUS all 8 ring taps are present (got ${atRing.maskTexNodes.length})`,
+      atRing.maskTexNodes.length === 9
+    );
+  }
+
+  // ══ `flowPackTexNode` IS NEVER NULL, UNLIKE `bodyTexNode` (2026-08-17,
+  // S2/S3) — the debug channels it feeds have no bake-generation to gate
+  // mesh visibility on, so a null-valued node here could actually be sampled
+  // on the GPU rather than merely existing-but-unreached. ══════════════════
+  {
+    const noFlowArg = buildWaterSurfaceMaterial(args({ tier: 0 }));
+    ok('flowPackTexNode exists even at tier 0 (unconditional, not tier-gated)', !!noFlowArg.flowPackTexNode);
+    ok(
+      'flowPackTexNode still constructs cleanly with no flowPackTexture argument at all',
+      !!noFlowArg.flowPackTexNode.isTextureNode || !!noFlowArg.flowPackTexNode
+    );
+
+    const withFlowArg = buildWaterSurfaceMaterial(args({ tier: 4, flowPackTexture: stubTexture() }));
+    ok('flowPackTexNode exists at tier 4 too', !!withFlowArg.flowPackTexNode);
+  }
+
+  // ══ THE DEBUG CHANNELS (2026-08-16, Water-Testament W0) — THE INSTRUMENT
+  // MUST NOT LIE ══════════════════════════════════════════════════════════
+  // `water.js#WATER_DEBUG_CHANNELS` explains why this exists at all (two live
+  // "it is not visible" bugs against a zero-wide instrument, the same week).
+  // Mirrors `specular-render.test.mjs`'s own copy of this block.
+  //
+  // The builder ALREADY throws at construction on a channel with no node —
+  // which means tier 4's own construction, in the very first loop of this
+  // file, is silently also asserting that every declared channel is wired.
+  // Said out loud here so a future reader does not "simplify" that throw
+  // into a skip.
+  ok('it returns a THIRD material for the debug channels', !!built[4].debugMaterial);
+  ok(
+    'the debug material is its own object, never an alias of either real mesh',
+    built[4].debugMaterial !== built[4].absorbMaterial && built[4].debugMaterial !== built[4].inscatterMaterial
+  );
+  ok(
+    'the debug material is a real NodeMaterial with a colorNode',
+    built[4].debugMaterial.isNodeMaterial && !!built[4].debugMaterial.colorNode
+  );
+  // ⚠️ OPAQUE (One/Zero), where BOTH real meshes blend against the bed. A
+  // diagnostic whose "this factor is zero" answer rendered as *nothing
+  // touched* would reproduce exactly the ambiguity it was built to remove —
+  // black has to be legible AS black, not as an unchanged bed showing through.
+  ok(
+    'the debug material REPLACES rather than blends: One / Zero',
+    built[4].debugMaterial.blendSrc === THREE.OneFactor && built[4].debugMaterial.blendDst === THREE.ZeroFactor
+  );
+  ok('the debug material is DoubleSide like its siblings', built[4].debugMaterial.side === THREE.DoubleSide);
+  // ⚠️ UNLIKE specular's single-attachment target, water's real meshes DO
+  // override `attr` (see `absorbMaterial`'s own comment on why a multiply
+  // blend would otherwise erase it) — so the debug material needs its OWN
+  // explicit override too, not an absence. A REPLACE blend has no neutral
+  // value on `attr` either, so this pins the deliberate, documented choice
+  // (explicit zero) rather than an unexamined renderer-global default.
+  ok(
+    'the debug material ALSO overrides its attr MRT — REPLACE has no neutral value to fall back on',
+    !!built[4].debugMaterial.mrtNode
+  );
+  ok(
+    'setDebugChannel exists — the subsystem calls it by name every sync',
+    typeof built[4].setDebugChannel === 'function'
+  );
+
+  for (const tier of [0, 1, 2, 3, 4]) {
+    let debugSetterError = null;
+    try {
+      for (const ch of WATER_DEBUG_CHANNELS) built[tier].setDebugChannel(ch.n);
+      built[tier].setDebugChannel(NaN);
+      built[tier].setDebugChannel(-3);
+      built[tier].setDebugChannel(0);
+    } catch (err) {
+      debugSetterError = err;
+    }
+    ok(
+      `tier ${tier}: every declared channel (plus junk) survives setDebugChannel (${debugSetterError ? debugSetterError.message : 'clean'})`,
+      debugSetterError === null
+    );
+    // Every tier builds a debug material — the instrument has to work at
+    // whichever rung the cascade actually resolved, not just at the top of
+    // the ladder (tiers 0-3's own neutral stubs feed it the same way they
+    // feed the two real meshes).
+    ok(`tier ${tier}: still returns a debug material`, !!built[tier].debugMaterial);
   }
 }

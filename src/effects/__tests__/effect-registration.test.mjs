@@ -380,7 +380,7 @@ export function run(t) {
     const descriptors = describeEffectSettings([UI_WINDOW_SHADOW]);
     const byKey = (k) => descriptors.find((d) => d.key === k);
 
-    ok('one effect → 3 global + 2 per-effect descriptors', descriptors.length === 5);
+    ok('one effect → 5 global + 2 per-effect descriptors', descriptors.length === 7);
 
     const master = byKey(GLOBAL_SETTING_KEYS.msaEnabled);
     ok(
@@ -407,6 +407,21 @@ export function run(t) {
       a11y?.scope === 'client' && a11y?.kind === 'bool' && a11y?.default === false
     );
 
+    const reducedMotion = byKey(GLOBAL_SETTING_KEYS.reducedMotion);
+    ok(
+      'reduced-motion (U5) is a client bool defaulting off',
+      reducedMotion?.scope === 'client' && reducedMotion?.kind === 'bool' && reducedMotion?.default === false
+    );
+
+    const theme = byKey(GLOBAL_SETTING_KEYS.theme);
+    ok(
+      'theme (U5) is a client enum defaulting to dark, with all four LANTERN themes as choices',
+      theme?.scope === 'client' &&
+        theme?.kind === 'enum' &&
+        theme?.default === 'dark' &&
+        ['dark', 'light', 'hc', 'soft'].every((t) => t in theme.choices)
+    );
+
     const gm = byKey(effectEnableKey('uiWindowShadow', 'gm'));
     ok('the GM enable is WORLD-scoped, defaulting to auto', gm?.scope === 'world' && gm?.default === 'auto');
     const player = byKey(effectEnableKey('uiWindowShadow', 'player'));
@@ -423,7 +438,7 @@ export function run(t) {
       'every descriptor is config:true (shows in Foundry Settings)',
       descriptors.every((d) => d.config === true)
     );
-    ok('no manifests → just the 3 global descriptors', describeEffectSettings([]).length === 3);
+    ok('no manifests → just the 5 global descriptors', describeEffectSettings([]).length === 5);
     ok(
       'the master off-switch exists even with zero effects registered — it gates BEFORE the cascade',
       describeEffectSettings([]).some((d) => d.key === GLOBAL_SETTING_KEYS.msaEnabled)

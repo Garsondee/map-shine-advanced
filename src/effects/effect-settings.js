@@ -33,6 +33,15 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
   profile: 'performanceProfile',
   /** Accessibility: reduce photosensitive effects (client) — the hard override (§2). */
   reducePhotosensitive: 'reducePhotosensitiveEffects',
+  /** Accessibility: reduced motion (client) — drives `html[data-reduce-motion]`,
+   * which `ui/tokens.js`'s own injected CSS already has rules for (it also
+   * already respects the OS-level `prefers-reduced-motion` media query for
+   * free; this is the explicit, in-game opt-in on TOP of that, for a player
+   * whose OS setting doesn't reflect what they want inside one game). */
+  reducedMotion: 'reducedMotion',
+  /** The LANTERN theme (client) — one of `ui/tokens.js#THEMES`. Drives
+   * `html[data-theme]`, which every room's own injected CSS already keys off. */
+  theme: 'uiTheme',
 });
 
 /**
@@ -112,6 +121,30 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Reduce photosensitive effects',
       hint: 'Turn off flashing / animated-light effects for photosensitivity. This wins over every other setting, including a GM forcing an effect on.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.reducedMotion,
+      scope: 'client',
+      kind: 'bool',
+      default: false,
+      config: true,
+      name: 'Map Shine — Reduced motion',
+      hint: "Turn off panel/UI transitions and sweeps (not the map's own effects — this is about the interface around it, not the scene).",
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.theme,
+      scope: 'client',
+      kind: 'enum',
+      // Kept as a literal list rather than importing ui/tokens.js#THEMES —
+      // effects/ has no door into ui/ (the dependency runs the other way,
+      // same reasoning core/cues-schema.js's own header gives for not
+      // importing world/). Four values, rarely added to; if THEMES ever
+      // grows, update both.
+      choices: choiceLabels(['dark', 'light', 'hc', 'soft']),
+      default: 'dark',
+      config: true,
+      name: 'Map Shine — Theme',
+      hint: 'The look of the Remote/Studio/Player panels themselves.',
     },
   ];
 

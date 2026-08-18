@@ -45,3 +45,11 @@ export {
   collapsedStatusLine,
   buildSettingsSnapshot,
 } from './widgets/param-groups.js';
+export { tierChip, scopeGlyph, healthBadge } from './widgets/badges.js';
+
+// THE STUDIO (U1, docs/holy/UI-Testament.md §5, §9) — department rail +
+// EFFECTS/SCENE/LAB. `registerEffectCard` is the door boot.js calls through,
+// once per effect, at the same place it already calls diag/debug-panel.js's
+// `registerPanel` for the old panel — see rooms/studio/shell.js's own header
+// for why the Studio never imports effects/ or talks to effectRegistry itself.
+export { installStudio } from './rooms/studio/shell.js';

@@ -9,6 +9,7 @@
  * Effects-UI.md, Authoring-and-Distribution.md).
  */
 export { createAstrolabe } from './astrolabe.js';
+export { buildAstrolabeDial } from './rooms/remote/astrolabe-dial.js';
 export { installPainter } from './paint-mode.js';
 export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialog.js';
 export { installAnchorMode } from './anchor-mode.js';

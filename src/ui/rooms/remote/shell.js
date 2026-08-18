@@ -57,8 +57,56 @@ function injectStyle() {
   background:var(--bg2); border:1px solid var(--line); border-radius:999px; font-size:.74rem; color:var(--ink1)}
 #${ROOM_ID} .msa-now-playing .ico{color:var(--shine); width:16px; height:16px}
 #${ROOM_ID} .msa-astro-wrap{display:flex; flex-direction:column; gap:6px; align-items:center}
-#${ROOM_ID} .msa-astro-dial-host{position:relative; display:grid; place-items:center; padding:36px}
+/* NO padding (2026-08-18 fix) — the mock's own #astro has none: the four
+   corner clusters are OF the 340px box, geometrically confirmed clear of
+   the ring itself (see astrolabe-dial.js's own header), not a margin
+   outside it. The old 36px padding pushed all four corners flush against
+   the ROOM's own edge instead of tucking them into the dial's own empty
+   corners, a second, smaller mismatch from the approved design found
+   alongside the dial's own visual rebuild. */
+#${ROOM_ID} .msa-astro-dial-host{position:relative; display:grid; place-items:center}
 #${ROOM_ID} .msa-astro-dial-slot{position:relative; z-index:1}
+/* THE DIAL ITSELF (2026-08-18 fix) — ported from tools/ui-mock/index.html's
+   own #astro/.ring/.rimArt/.scene/.sceneText/.sceneTopper rules, verbatim
+   where the author already hand-tuned exact colours/shadows/positions.
+   See ui/rooms/remote/astrolabe-dial.js's own header for why this exists:
+   the U2 re-home used ui/astrolabe.js's OWN pre-LANTERN styling unchanged. */
+#${ROOM_ID} .msa-astro-ring{position:absolute; inset:0; border-radius:50%;
+  background:conic-gradient(from 0deg,
+    #ffefc2 0deg,   #f7e3a0 30deg,  #f2c76e 68deg,  #e08a5a 83deg,
+    #7a5a7c 105deg, #232a52 128deg, #1b2340 180deg, #232a52 232deg,
+    #6a5a8c 262deg, #d99a6a 277deg, #f2c76e 292deg, #f7e3a0 330deg, #ffefc2 360deg);
+  -webkit-mask:radial-gradient(closest-side, transparent 60%, #000 61%, #000 99%, transparent 100%);
+          mask:radial-gradient(closest-side, transparent 60%, #000 61%, #000 99%, transparent 100%);
+  box-shadow:0 0 30px rgba(231,195,104,.12); cursor:grab; touch-action:none}
+#${ROOM_ID} .msa-astro-ring:active{cursor:grabbing}
+#${ROOM_ID} .msa-astro-rimart{position:absolute; inset:0; pointer-events:none; overflow:visible; width:340px; height:340px}
+#${ROOM_ID} .msa-astro-rimart line{stroke:rgba(255,255,255,.3); stroke-width:1}
+#${ROOM_ID} .msa-astro-rimart line.major{stroke:rgba(255,255,255,.6); stroke-width:1.6}
+#${ROOM_ID} .msa-astro-rimart text{font-size:8px; font-family:var(--font); font-weight:700;
+  letter-spacing:.13em; text-anchor:middle; dominant-baseline:middle;
+  fill:rgba(255,255,255,.82); paint-order:stroke;
+  stroke:rgba(6,9,20,.55); stroke-width:2.4; stroke-linejoin:round}
+#${ROOM_ID} .msa-astro-handle{filter:drop-shadow(0 1px 3px rgba(0,0,0,.6))}
+#${ROOM_ID} .msa-astro-handle rect{fill:#fff; stroke:rgba(10,14,28,.65); stroke-width:1.4}
+#${ROOM_ID} .msa-astro-scene{position:absolute; inset:90px; border-radius:50%; overflow:hidden;
+  border:1px solid rgba(255,255,255,.10);
+  box-shadow:inset 0 0 18px rgba(0,0,0,.55), 0 0 0 4px var(--bg1)}
+#${ROOM_ID} .msa-astro-scene svg{width:100%; height:100%; display:block}
+#${ROOM_ID} .msa-astro-scenetopper{position:absolute; inset:90px; border-radius:50%; overflow:hidden; pointer-events:none}
+#${ROOM_ID} .msa-astro-clockpill{display:flex; align-items:baseline; gap:6px; margin-top:4px;
+  padding:4px 12px; border-radius:999px; background:rgba(10,14,26,.55);
+  backdrop-filter:blur(3px); border:1px solid rgba(255,255,255,.14)}
+#${ROOM_ID} .msa-astro-time{font-size:1.5rem; font-weight:700; letter-spacing:.01em;
+  color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.75), 0 0 12px rgba(0,0,0,.6)}
+#${ROOM_ID} .msa-astro-phase{font-size:.6rem; letter-spacing:.28em;
+  color:rgba(255,255,255,.88); text-transform:uppercase; text-shadow:0 1px 3px rgba(0,0,0,.8)}
+#${ROOM_ID} .msa-astro-pill{display:flex; align-items:center; gap:5px;
+  padding:3px 9px; border-radius:999px; background:rgba(10,14,26,.55);
+  backdrop-filter:blur(3px); border:1px solid rgba(255,255,255,.14);
+  color:rgba(255,255,255,.92); font-size:.68rem; transition:background var(--t-micro);
+  cursor:pointer}
+#${ROOM_ID} .msa-astro-pill:hover{background:rgba(10,14,26,.75)}
 #${ROOM_ID} .msa-corner{position:absolute; display:grid; grid-auto-flow:column; gap:4px; z-index:2}
 #${ROOM_ID} .msa-corner-tl{top:0; left:0}
 #${ROOM_ID} .msa-corner-tr{top:0; right:0}

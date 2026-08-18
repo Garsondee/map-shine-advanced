@@ -432,6 +432,7 @@ import {
   installAnchorMode,
   installAnchorViewMode,
   createAstrolabe,
+  buildAstrolabeDial,
   showPerfProgress,
   hidePerfProgress,
   formatPerfProgressText,
@@ -1046,8 +1047,20 @@ function install() {
   // that deferral exists at all.
   MapShine.__remote = installRemote({
     impulses: IMPULSES,
+    // 2026-08-18 fix (author report: "the astrolabe looks completely
+    // different... the CSS and layout are not the same yet") — the Remote
+    // gets its OWN dial, matching the approved mock for real, instead of
+    // `createAstrolabe()`'s pre-LANTERN styling (see astrolabe-dial.js's
+    // own header for the full story). The old debug panel keeps
+    // `createAstrolabe()` unchanged, several lines below — a real,
+    // side-by-side split, not a replacement.
     mountAstrolabeDial: (container) => {
-      remoteAstrolabe = createAstrolabe(buildAstrolabeOptions());
+      remoteAstrolabe = buildAstrolabeDial({
+        onTimeChange: (hour, committed) => {
+          setVtPanViewerSunHour(hour);
+          if (committed) void editSky({ todHour: hour });
+        },
+      });
       container.appendChild(remoteAstrolabe.root);
     },
     getPosture: () => skyScope.sky?.mode,
@@ -7971,7 +7984,23 @@ function install() {
           mode: skyScope.sky?.mode ?? 'aesthetic',
         };
         if (astrolabe?.root?.isConnected) astrolabe.update(payload);
-        if (remoteAstrolabe?.root?.isConnected) remoteAstrolabe.update(payload);
+        // The Remote's own dial (2026-08-18 fix) takes a narrower shape than
+        // the old panel's bundled payload — no weather-shelf/mode-select
+        // fields, since weather-board.js already owns those for the Remote.
+        // `cloudCoverEased01`, not `cloudCover01`: the scene must show the
+        // sky the map is ACTUALLY rendering, matching `dial`'s own doc above
+        // on why the two are deliberately kept separate. `dateText` has no
+        // real source yet (see astrolabe-dial.js's own header) — omitted,
+        // the dial's own `?? '—'` fallback shows honestly, not faked.
+        if (remoteAstrolabe?.root?.isConnected) {
+          remoteAstrolabe.update({
+            hour: payload.todHour,
+            phase: payload.phase,
+            windDirectionDeg: payload.windDirectionDeg,
+            windSpeed01: payload.windSpeed01,
+            cloudCover01: payload.cloudCoverEased01,
+          });
+        }
       }
     }
     // Ends BEFORE the reschedule below — scheduling next frame's callback is

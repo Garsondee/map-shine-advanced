@@ -2930,6 +2930,94 @@ individually before staging.*
 
 ---
 
+**P26 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; continuing P25's
+own gap list — Gap 12, ring-lock protection, which P25's own finding 5
+already named as "latent until Follow mode sees real use, since Gap 1 made
+it effectively unreachable before this round" — Gap 1 is now fixed, so this
+stopped being latent the moment P25 shipped).** Not a cosmetic follow-up:
+reading `world/day-clock.js` directly (not assumed from the old panel's own
+lock) showed dragging the new dial's ring in Follow/Almanac mode silently
+persisted a stale `todHour` into the resolved sky scope even though the
+visible sun correctly never moved — a real, if quiet, correctness bug in
+the exact shape this Testament keeps finding: a control that LOOKS inert
+but isn't.
+
+1. ⚠️ **THE MECHANISM, TRACED END TO END BEFORE WRITING ANY FIX.**
+   `day-clock.js#setHour` already rejects outright outside `'aesthetic'`
+   (`if (currentMode !== 'aesthetic') return false`), and
+   `boot.js#applyLookToEngines` only calls `setVtPanViewerSunHour` when
+   `sky.mode === 'aesthetic'` — so the visible sun was always safe. But
+   `editSky`'s own merge (`applySkyEdit`) has no such guard: a drag's
+   `editSky({todHour: hour})` on release still overwrote the PERSISTED
+   `todHour` in world/scene sky settings regardless of posture, with no
+   visible sign anything had happened. A GM dragging what looked like a
+   dead dial in Follow mode would later switch to Aesthetic and watch the
+   sun jump to wherever they last absent-mindedly dragged, not where they
+   left it — silent now, confusing later.
+2. **Built the lock, matching `ui/astrolabe.js`'s own `ringLocked` fidelity
+   level exactly.** `astrolabe-dial.js#update()` gained a `canSetHour`
+   field (already computed by day-clock, already threaded to the OLD
+   panel's own `update(payload)` call via its `...dial` spread — the
+   Remote's own `remoteAstrolabe.update()` call in `pumpAstrolabe` simply
+   wasn't reading the same field yet). Gated at gesture-START only
+   (`pointerdown`/`keydown`), not re-polled mid-drag — the old file's own
+   `onDown`/`onMove` split does the same, not a lower bar invented here.
+   Visual match: `rimArt` opacity 0.55, `cursor:not-allowed`,
+   `aria-disabled` — same values the old ring already uses.
+3. **The explanation, routed through the existing status line, not a new
+   one.** `mountAstrolabeDial`'s call signature widened to
+   `(el, {onLockedAttempt})`; boot.js and the remote-preview fixture both
+   pass it straight to `buildAstrolabeDial`; `astrolabe-panel.js` supplies
+   a ring-specific `explainRingLocked` reading the live posture. Kept
+   deliberately SEPARATE from `buildCornerTL`'s own `explainNotAesthetic`
+   despite both keying off the identical `currentMode==='aesthetic'` gate
+   — the two verbs differ ("drag the hour" vs. "run the flow"), and a
+   shared string would leave one of the two contexts saying the wrong
+   thing. Two small purpose-built closures, not one premature shared one.
+4. **Caught a three-site fixture gap before calling the harness fixed.**
+   `tools/remote-preview/preview.js` re-declares the dial's update payload
+   at three separate call sites (initial mount, the Clock-mode handler,
+   the flow-toggle handler) — grepped for every `remoteDialInstance.update(`
+   call before considering the fixture done, not just the one or two sites
+   touched first, and found the flow-toggle site had been missed on the
+   first pass. Left uncorrected it would have silently flickered the ring
+   back to "unlocked" on every play/pause click while actually locked —
+   the exact one-field-forgotten-at-some-call-sites shape this project's
+   own memory keeps naming, caught here before it shipped rather than
+   after.
+5. **Explicitly NOT touched this round:** every other item on P25's own
+   Tier-2 list — wind direction/speed editing, the 8 ring time-stops, the
+   Almanac forecast readout, the Clouds fader's pin/unpin glyph, richer
+   sticky-status text — and the separately-deferred Remote/Studio/Player
+   switcher bar from P24. No scope crept beyond the one gap this petition
+   names.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on every file
+touched. `node tools/run-tests.mjs`: 27 suites, 11512 passed, 0 failed, ALL
+GREEN — unchanged from P25; no new test file was added, matching this
+project's own established boundary (`src/ui/__tests__/run-tests.mjs`'s own
+header: "Pure logic — no DOM... browser-only and verified live" —
+confirmed `ui/astrolabe.js`'s own identical `ringLocked` feature carries
+zero Node coverage today either, by reading its test file directly rather
+than assuming). `node tools/verify-structure.mjs`: the same two
+pre-existing violations only, confirmed by `git diff`-ing this round's own
+changes against every flagged line — none belong to this round. Live-
+verified in the browser via `tools/remote-preview/`, all four transitions
+checked by dispatching real `PointerEvent`s against the live DOM rather
+than asserted from source alone: the harness's default Almanac posture
+starts the ring locked (cursor/opacity/`aria-disabled` all correct) before
+any interaction; switching to Aesthetic unlocks it INSTANTLY (no drag
+needed first) and a real drag then succeeds (hour 14→12, logged);
+switching to Follow re-locks it instantly and a real drag attempt is
+refused (hour unchanged, the live posture named correctly in the status
+line, the refusal logged); console clean throughout, no stale-residue false
+alarm this round. **Not verified: the author's own live Foundry session**,
+same standing gap as P21–P25. The concurrent water-flow session's own files
+remain completely untouched, confirmed via `git status --porcelain` before
+staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

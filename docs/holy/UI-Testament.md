@@ -2341,6 +2341,121 @@ untouched, confirmed by `git status` before and after every commit.*
 
 ---
 
+**P20 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U7 — Impulses + Remote
+Declarations — continuing the author's own standing "GO, get this UI migration DONE"
+instruction, picked up via an autonomous-loop tick after U6 landed).** Strike and Gust
+fire for real, from both the Remote's corner and the Studio's full list, off ONE shared
+declaration; Thunder stays honestly `planned` (no audio engine exists to give it);
+the cross-client suppression badge stays honestly `planned` too (no socket exists to
+give it truthful data) — exactly the two sub-pieces the original plan itself named as
+allowed to stay unbuilt. The exit gate's Remote half is met and live-verified; its
+"truthful against a second client" half cannot be, for reasons stated plainly, not
+skipped quietly.
+
+1. **`core/impulse-schema.js` reuses `params-schema.js#PARAM_STATUS`, not a second
+   `'live'|'planned'` enum** — an impulse's readiness is the identical question a
+   param's already is, applied to a button instead of a slider.
+   `validateImpulseDecl`/`validateImpulseList` mirror `validateCue`/`validateCueStack`'s
+   own shape (a per-item check plus a stack-level duplicate-id check) rather than
+   inventing a third validator style for a third declaration kind.
+2. ⚠️ **CAUGHT BY THE STRUCTURE WALL, NOT BY EYE: the schema was built and never
+   wired to anything real.** `tools/verify-structure.mjs#graph/reachable-from-boot`
+   failed after the first full verification pass — `core/impulse-schema.js` was
+   referenced only inside JSDoc `@param` type comments (which create no real import
+   edge) everywhere it was used, so nothing under `src/boot.js` actually imported it.
+   The exact "unconsumed API rots silently" shape this project has named before, this
+   time caught before a single commit landed rather than found later. Fixed for real,
+   not just to satisfy the checker: `boot.js` now imports `validateImpulseList`
+   directly and calls it against the real `IMPULSES` array the moment it's declared,
+   logging loudly on failure — a typo'd status value or a future duplicate id is now
+   caught at load time, which is also just a better thing for this code to do
+   regardless of the wall.
+3. **Lightning's `forceStrike()` existed since the effect landed, with a doc comment
+   claiming a caller that did not exist.** Read `lightning-subsystem.js` in full
+   before touching it: `forceStrike`'s own JSDoc said it was "used by... boot.js's
+   debug action" — grepping every call site in `src/` found exactly one, the
+   disconnected `tools/shader-lab/lightning-lab.js` harness driving its OWN separate
+   subsystem instance, never the live viewer's. `boot.js` never called it. Corrected
+   the comment in the same commit that made it true (`feedback_instruments_must_not_
+   lie`, applied to a doc comment rather than a runtime instrument) rather than
+   leaving a stale claim next to newly-real code.
+4. **`vt-pan-viewer.js`'s own public API needed one new re-export, following an
+   already-established pattern exactly.** Every other "reach into the live viewer
+   singleton" function (`triggerVtPanViewerWindDoorImpulse`, `rebakeVtPanViewerWindField`,
+   …) is a module-level function checking a private `_active` reference and
+   delegating to an instance method, `{skipped:true, reason}` if nothing is running.
+   `forceVtPanViewerLightningStrike` is the same shape, added beside its nearest
+   sibling rather than inventing a new access pattern. An early draft tried to also
+   detect "no lightning anchors placed on this floor" at this layer by referencing a
+   `hasLightningAnchors` method that does not exist anywhere in this codebase —
+   caught before shipping (dead code with an empty body, invented rather than found)
+   and replaced with an honest static caveat in `boot.js#strikeLightning`'s own
+   message instead of a fabricated detection.
+5. **Gust is a promotion, not new engineering.** `wind-test-gust` (a pre-existing
+   debug action) already built a synthetic wall segment square to the live ambient
+   wind direction and fed it through the real Tier-2 impulse path
+   (`triggerVtPanViewerWindDoorImpulse`) — extracted into `gustWindFromAmbient()` so
+   the debug action and `MapShine.gustWind()` (the Remote's real impulse) call
+   exactly one implementation, never two that could quietly drift.
+6. ⚠️ **The suppression badge needs genuine new plumbing, confirmed by grep, not
+   assumed unbuilt.** No `game.socket` channel is open anywhere in `src/`
+   (`module.json` permits one; none exists). `reducePhotosensitiveEffects` is a
+   Foundry `scope:'client'` setting — architecturally invisible to any OTHER
+   client's `game.settings.get()`, not merely unbuilt by choice. A truthful
+   cross-client count needs either a real socket broadcast or each client mirroring
+   its setting onto its own User document for others to aggregate — real, scoped,
+   named work, not attempted this round. `ui/widgets/impulse-button.js` renders an
+   honestly-`planned` glyph on flash-class impulses instead. Suppression ITSELF
+   needs no new work: `effect-cascade.js#resolveEffectEnabled`'s existing a11y gate
+   already keeps a flash from rendering on a suppressed client regardless of what
+   this widget knows — the gap is narrower than "does it work", it is only "can the
+   GM see that it worked".
+7. **Thunder stays `planned` for a reason confirmed by grep, not assumed:** zero
+   audio infrastructure (`AudioContext`, any sound-playing call) exists anywhere in
+   `src/` — `lightning.js`'s own header already documents that V2's strike-audio
+   hook was "a literal empty stub." Built as a second real visual effect instead
+   (re-triggering the origin flash) would be dishonest — two buttons that do the
+   identical thing is not two impulses.
+8. **The "channel-mapping... join the vector, don't grow it" bullet was already
+   satisfied before this round, confirmed rather than assumed.** `weather-board.js`'s
+   own comment and Petition P13 already exclude `bolt` from the fader vector as "an
+   impulse, not a fade channel (U7's job)" — no second taxonomy needed inventing;
+   this round makes that comment's forward reference true rather than aspirational.
+9. **The Studio's full list lives in CUES, a worker-tier placement call, not a
+   Testament directive** — worth the author's own countersign if wrong. Impulses
+   and cues share only "something the GM fires from the Remote"; cues fade,
+   impulses explicitly do not (§4.1). Kept in a visually separate section (its own
+   heading, its own status line) rather than blended into the cue list, so the
+   distinction reads even though they share a department.
+10. **Both `tools/remote-preview/` and `tools/studio-preview/` prove the SAME real
+    widget (`ui/widgets/impulse-button.js`) in both hosts** — live-verified: 3
+    impulses render in each with correct live/planned states, the suppression glyph
+    renders only on Strike (`flashClass:true`), clicking Strike/Gust fires their
+    (preview-stand-in) handlers and shows the resulting status message, clicking
+    Thunder shows its honest reason, and the Studio's list additionally confirms
+    `showLabel:true` renders visible text ("Strike"/"Gust"/"Thunder") the Remote's
+    icon-only corner correctly omits.
+
+*Verification note: `npx eslint`, `npx prettier --check` clean on every file touched
+(prettier auto-fixed 3 files on first pass, re-verified clean after).
+`node tools/run-tests.mjs`: 27 suites, 11422 assertions, ALL GREEN (+24 over P19).
+`node tools/verify-structure.mjs`: FAILED on first run (finding 2, above —
+`graph/reachable-from-boot` ratchet broken 3-vs-2) — fixed for real, re-verified: the
+same two pre-existing violations only (`no-gpu-readback`, `time/one-clock`'s ratchet,
+41 against a bound of 38 — both confirmed via `git blame`/clean working-tree status to
+predate this round and this project entirely, unrelated to this work). Live-verified
+in the browser via both preview harnesses (finding 10, above) — zero console errors
+on either. **Not verified, and cannot be from this session's tooling: the exit gate's
+own "truthful against a second logged-in client" half** — that needs the socket/user-
+flag plumbing finding 6 names as real, un-built follow-up work, not something to fake
+a demonstration of. The concurrent water-flow session's own files
+(`water-body*`/`water-flow*`/`water-render.js`/`water-shore.js`/`water.js`'s own
+further edits since P19, their new `water-flow-subsystem.test.mjs`,
+`docs/planning/Water-Simulation-Turn.md`, `tools/shader-lab/bench-water.js`) remain
+completely untouched, confirmed by hunk-count diffing before every commit.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

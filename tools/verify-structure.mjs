@@ -1090,6 +1090,50 @@ export const RULES = [
       'for the pattern (ACCENT/MUTED/etc), including why the fallback matters: it is what keeps the ' +
       "OLD debug-panel's appearance unchanged by widgets that are also, simultaneously, theme-aware.",
   },
+
+  // ===================================================================
+  // THE CANON IS THE ONLY TOOLKIT (Law 8, U1, docs/holy/UI-Testament.md §8,
+  // §9 — explicitly a RATCHET there, not a zero-tolerance wall, and this is
+  // why: scoped to the THREE input types the type→widget dispatch already
+  // owns (range/checkbox/color), the honest first scan found 13 EXISTING,
+  // legitimate hits across ui/astrolabe.js, ui/camera-path-dialog.js, diag/
+  // settings-panel.js and diag/effect-controls.js — every one of them a
+  // one-off UI toggle (a dialog's own "hide UI while playing" checkbox, a
+  // card's own enable dot) with NO param schema behind it, not a duplicated
+  // buildRangeRow/buildCheckboxRow. A checkbox is not always a param, and
+  // nothing about `input.type = 'checkbox'` can say which kind it is on its
+  // own — that ambiguity is real, not a regex that needs sharpening, so the
+  // 13 are frozen in structure-ratchets.json rather than either allow-listed
+  // one by one (which would grow forever) or left to hard-fail a scan this
+  // rule cannot actually adjudicate. What the ratchet DOES catch: the count
+  // growing — a 14th hand-rolled range/checkbox/color outside the canon,
+  // which is exactly as likely to be the real disease as one of the
+  // original 13 was NOT.
+  // ===================================================================
+  {
+    id: 'ui/canon-only',
+    ratchet: true,
+    pattern: /\.type\s*=\s*['"](range|checkbox|color)['"]/,
+    allow: [
+      `${sep}ui${sep}widgets${sep}`,
+      // Grandfathered until re-homed (U1's own checklist does not ask for
+      // this move — diag/effect-controls.js already did its half at U0).
+      `${sep}diag${sep}debug-panel.js`,
+      `${sep}diag${sep}debug-panel-controls.js`,
+    ],
+    why:
+      'V2 had ONE good declarative control system and 266 hand-written Tweakpane calls beside it ' +
+      '(ui/no-handwritten-controls, above) because nothing made the second path more expensive than ' +
+      'the first. The canon fixes that for the NEW system too, but only if a second `input.type = ' +
+      "'range'` two rooms away from param-control.js stays as cheap to write as it is expensive to " +
+      'find later — the same lesson, aimed at the thing this project is building right now instead of ' +
+      'the thing it already buried.',
+    instead:
+      'ui/widgets/param-control.js#buildParamControl already dispatches float/int/angle/bool/color/enum ' +
+      'to a real widget from a param declaration. A control that represents a SCHEMA VALUE goes through ' +
+      'it, in ui/widgets/ or one of the two grandfathered diag files. A control that represents a one-off ' +
+      'UI choice — which effect to filter by, which preset to apply — is not a param and does not need it.',
+  },
 ];
 
 // ---------------------------------------------------------------------------

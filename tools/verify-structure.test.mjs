@@ -465,6 +465,15 @@ const V2_CORPSES = [
     code: "  '--shine': '#ffcc00',",
     note: 'a second file redeclaring a token — today matching ui/tokens.js, tomorrow drifted from it',
   },
+  // `ui/canon-only` has no V2 corpse either — the NEW canon it protects
+  // didn't exist before U0/U1. Shaped like a hand-rolled copy of
+  // buildRangeRow appearing in a room file instead of a buildParamControl call.
+  {
+    rule: 'ui/canon-only',
+    from: 'synthetic — no V2 precedent; the LANTERN widget canon did not exist before U0',
+    code: "const slider = document.createElement('input'); slider.type = 'range';",
+    note: 'a hand-rolled range input outside the canon — the exact shape buildRangeRow already is',
+  },
 ];
 
 /** Lines that must NOT trip a rule (guards against a wall crying wolf). */
@@ -946,6 +955,52 @@ export function run(t) {
         "an UNRELATED custom property (not in LANTERN's vocabulary) never trips it",
         !rule.pattern.test("'--totally-unrelated-thing': '3px',")
       );
+    }
+  }
+
+  // ---- ui/canon-only: the door (ui/widgets/ + the two grandfathered diag
+  // files) is open, the wall bites the three input types the canon owns, and
+  // it does NOT bite the legitimate structural `<button>`/`<select>`/text-
+  // `<input>` construction every Studio room file actually contains --------
+  {
+    const rule = RULES.find((r) => r.id === 'ui/canon-only');
+    t.ok("'ui/canon-only' exists", !!rule);
+    if (rule) {
+      const widgetsRel = `src${sep}ui${sep}widgets${sep}param-control.js`;
+      const debugPanelRel = `src${sep}diag${sep}debug-panel.js`;
+      t.ok(
+        'the canon itself may build these three input types (the door is open)',
+        rule.allow.some((a) => widgetsRel.includes(a))
+      );
+      t.ok(
+        'the grandfathered old panel may too, until re-homed',
+        rule.allow.some((a) => debugPanelRel.includes(a))
+      );
+      t.ok(
+        'ui/widgets/param-control.js exists on disk',
+        existsSync(join(ROOT, 'src', 'ui', 'widgets', 'param-control.js'))
+      );
+
+      for (const type of ['range', 'checkbox', 'color']) {
+        t.ok(
+          `a hand-rolled input.type = '${type}' outside the canon trips the wall`,
+          rule.pattern.test(`el.type = '${type}';`)
+        );
+      }
+      t.ok('double-quoted works too, not just single', rule.pattern.test('el.type = "range";'));
+
+      // Real lines from this session's own new Studio room files — the wall
+      // must stay silent on all of them, or every room file becomes an
+      // instant, permanent exception.
+      const realStructuralLines = [
+        "enableBtn.type = 'button';",
+        "closeBtn.type = 'button';",
+        "const select = document.createElement('select');",
+        "input.placeholder = 'Search every control — try “opacity”, “glow”, “direction”…';",
+      ];
+      for (const line of realStructuralLines) {
+        t.ok(`ALLOWS real Studio room code: ${line}`, !rule.pattern.test(line));
+      }
     }
   }
 

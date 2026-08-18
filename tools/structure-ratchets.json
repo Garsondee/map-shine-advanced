@@ -7,5 +7,6 @@
   "time/one-clock": 38,
   "zones/one-door": 8,
   "graph/reachable-from-boot": 2,
-  "params/one-owner": 0
+  "params/one-owner": 0,
+  "ui/canon-only": 13
 }

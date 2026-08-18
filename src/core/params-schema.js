@@ -80,7 +80,26 @@ export const COLOR_SPACES = Object.freeze(['srgb', 'linear']);
 /** Fields that are the RENDERER's or the USER's, never the contract's. */
 const FORBIDDEN_IN_CONTRACT = Object.freeze(['throttle', 'expanded', 'advanced', 'folder', 'widget', 'colorType']);
 
-/** @typedef {{type: string, default?: unknown, min?: number, max?: number, step?: number, values?: string[], label?: string, help?: string}} ParamDecl */
+/**
+ * The control-readiness vocabulary (docs/holy/UI-Testament.md, U0). `live` is
+ * the default and the overwhelming majority — most params ARE wired. `planned`
+ * is a day-one, hand-authored admission that this specific control has no
+ * effect yet, so the migration to the LANTERN UI can ship every room at once
+ * without silently pretending an unwired knob works (the author's own ask:
+ * "mark them... with a tooltip explaining that these features aren't ready to
+ * be hooked up yet"). This is deliberately NOT in `FORBIDDEN_IN_CONTRACT`: "does
+ * writing this value currently do anything" is a fact about the value, the same
+ * category as `default`/`min`/`max`, not a renderer/view-state concern like
+ * `throttle` or `expanded`.
+ *
+ * This is a DIFFERENT signal from Testament U6's later `ctx.params` read-
+ * tracking proxy: that one is an automated, ongoing detector for a control
+ * that quietly stopped being read; this one is a manual, day-one admission
+ * made at authoring time. Neither should auto-flip the other.
+ */
+export const PARAM_STATUS = Object.freeze(['live', 'planned']);
+
+/** @typedef {{type: string, default?: unknown, min?: number, max?: number, step?: number, values?: string[], label?: string, help?: string, status?: 'live'|'planned', plannedReason?: string}} ParamDecl */
 
 /**
  * Validate an effect's params declaration. Pure; Node-testable today, months
@@ -127,6 +146,23 @@ export function validateParamsSchema(schema) {
     // strongly wanted — it becomes free tooltips in every surface.
     if (typeof d.label !== 'string' || d.label.length === 0) {
       fail(`${key}: needs a human label (the UI is GENERATED — there is no hand-written folder to name it)`);
+    }
+
+    // CONTROL READINESS (U0): `status` is optional and defaults to live, so
+    // the overwhelming majority of params say nothing here. When declared, it
+    // must be honest and self-consistent — `planned` with no reason is a red
+    // badge nobody can explain, and a `plannedReason` left on a param that is
+    // actually `live` is a stale claim a future reader has no way to notice.
+    if ('status' in d && !PARAM_STATUS.includes(d.status)) {
+      fail(`${key}: status '${d.status}' is not one of: ${PARAM_STATUS.join(', ')}`);
+    }
+    if (d.status === 'planned' && (typeof d.plannedReason !== 'string' || d.plannedReason.length === 0)) {
+      fail(`${key}: status 'planned' needs a plannedReason — one sentence on why this control does nothing yet`);
+    }
+    if ('plannedReason' in d && d.status !== 'planned') {
+      fail(
+        `${key}: a plannedReason with no status:'planned' is a stale claim — either the control shipped and the reason should go, or the status was never set`
+      );
     }
 
     // A COLOUR MUST DECLARE ITS SPACE. Harvest finding (2026-07-17): V2 had 39

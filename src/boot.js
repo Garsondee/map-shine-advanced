@@ -294,7 +294,7 @@ import {
   LIGHTNING_PARAMS,
   FIRE,
   FIRE_PARAMS,
-  extractFiresFromMask,
+  extractFiresWithLabels,
   fireMaskSignature,
   extractFireSpawnPoints,
   DOOR_GRAPHICS,
@@ -2657,7 +2657,20 @@ function install() {
   let fireMaskBakeSkips = 0;
   let fireSpawnBakeRuns = 0;
   let fireSpawnBakeSkips = 0;
-  let fireMaskCache = { floorIndex: null, signature: 0, version: -1, sensitivity: null, fires: [] };
+  let fireMaskCache = {
+    floorIndex: null,
+    signature: 0,
+    version: -1,
+    sensitivity: null,
+    fires: [],
+    // The connected-component field `fire-spawn-points.js#applyCohesion`
+    // needs (getFireMaskLabelGrid, below) — populated ATOMICALLY with `fires`
+    // in the same cache-miss branch, so they can never independently go
+    // stale relative to each other; the existing signature/version/
+    // sensitivity key above already covers both.
+    nearestLabel: null,
+    spec: null,
+  };
   /**
    * THE SPAWN CLOUD — the same painted grid, as the flat point buffer the
    * particle kernels index (`SPAWN_KINDS.extracted`).
@@ -2747,11 +2760,17 @@ function install() {
     // is deliberate: this is the one place that knows both thresholds are two
     // views of a single authored question, and a default buried in the
     // extractor would silently drift the moment the ratio here changed.
-    const fires = extractFiresFromMask(grid, {
+    //
+    // `extractFiresWithLabels`, not `extractFiresFromMask` — identical fires,
+    // same strict/rescue orchestration, but also hands back the connected-
+    // component field `applyCohesion` needs to know which painted blob a
+    // spawn point belongs to (`getFireMaskLabelGrid`, below). This function
+    // still returns `fires` alone; nothing downstream of it sees a shape change.
+    const { fires, nearestLabel, spec } = extractFiresWithLabels(grid, {
       paintThreshold: sensitivity,
       rescueThreshold: sensitivity * FIRE_SPAWN_TO_PAINT_THRESHOLD_RATIO,
     });
-    fireMaskCache = { floorIndex, signature, version, sensitivity, fires };
+    fireMaskCache = { floorIndex, signature, version, sensitivity, fires, nearestLabel, spec };
     // Positions ride along, not just the count (2026-08-12) — a live report of
     // "two painted fireplaces, cohesion collapses them together" is otherwise
     // unanswerable without a console dump: this line alone says whether
@@ -2762,6 +2781,23 @@ function install() {
       fires.map((f) => ({ id: f.id, x: Math.round(f.x), y: Math.round(f.y), diameterPx: Math.round(f.diameterPx) }))
     );
     return fires;
+  };
+  /**
+   * `applyCohesion`'s label-scoped grouping needs the SAME connected-component
+   * field `getMaskDrivenFires` already computed for this floor's `fires` —
+   * never a second, independently-thresholded guess. Reads whatever
+   * `fireMaskCache` currently holds rather than re-deriving anything; the
+   * caller (`getFireRenderState`, below) always calls `getMaskDrivenFires`
+   * first, so the cache is warm for the current floor by the time this runs.
+   * Defensively returns `null` on any mismatch (wrong floor, never populated)
+   * rather than ever serving a stale floor's labels.
+   *
+   * @param {number} floorIndex
+   * @returns {{nearestLabel: Int32Array, spec: object}|null}
+   */
+  const getFireMaskLabelGrid = (floorIndex) => {
+    if (fireMaskCache.floorIndex !== floorIndex || !fireMaskCache.nearestLabel) return null;
+    return { nearestLabel: fireMaskCache.nearestLabel, spec: fireMaskCache.spec };
   };
 
   // See `candleAnchorMemo`'s own doc for the general shape/reason. Fire's
@@ -2896,6 +2932,11 @@ function install() {
       // sprite is born on one of these points.
       spawnCloud: fireReadout.enabled ? getFireSpawnCloud(floorIndex) : null,
       fires: fireAnchorMemo.fires,
+      // `fire-spawn-points.js#applyCohesion`'s label-scoped grouping — see
+      // `getFireMaskLabelGrid`'s own doc. Safe to read unconditionally here:
+      // `maskFiresSource` above already called `getMaskDrivenFires(floorIndex)`
+      // this same invocation, so the cache is warm for this exact floor.
+      fireLabelGrid: fireReadout.enabled ? getFireMaskLabelGrid(floorIndex) : null,
     };
   };
 

@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Remote Preview</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        font:
+          13px/1.5 system-ui,
+          sans-serif;
+        background: #14161d;
+        color: #eceff5;
+      }
+      #bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 500;
+        display: flex;
+        gap: 8px;
+        padding: 8px 12px;
+        background: #191c25;
+        border-bottom: 1px solid #333;
+      }
+      #bar button {
+        font: inherit;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <b>Remote Preview</b>
+      <button id="toggleBtn" type="button">Toggle Remote</button>
+      <button id="themeBtn" type="button">Cycle theme</button>
+      <span id="log" style="margin-left: 12px; opacity: 0.7"></span>
+    </div>
+    <script type="module" src="/tools/remote-preview/preview.js"></script>
+  </body>
+</html>

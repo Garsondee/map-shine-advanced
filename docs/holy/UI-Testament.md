@@ -1466,6 +1466,126 @@ untouched by every commit this petition describes, per [[feedback_git_staging_ha
 
 ---
 
+**P11 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U2 checkpoint 1 of 3 — Remote
+shell, astrolabe re-home, camera path popover — following the author's own "go ahead and start
+U2" after Petition P10).** Per U2's own pacing note (§11's "roughly 15 checkpoints... U2 splits
+naturally into three"), this petition covers ONLY the first: the Fade Engine itself (§9's own
+first U2 bullet) is NOT started — everything below is real, but nothing here eases anything
+yet.
+
+1. **Corner clusters, not wings.** §4.1's prose still describes flanking "wings"; a dedicated
+   research pass over the mock (`tools/ui-mock/index.html`, the concrete source once built)
+   found that shape retired in round 8, replaced by four corner clusters sitting in the
+   astrolabe's own empty corners — the SAME design Petition P5 already shipped for the Studio
+   side of this Testament, confirmed still current. Built against what the mock actually has,
+   not the older Law text — matching this project's own "the mock is the concrete,
+   author-reviewed source" doctrine (§10). Worth a countersign on whether §4.1 should be
+   corrected to say "corners" now that a worker has traced the actual supersession.
+2. **TL is wired to the REAL Almanac Pen — the first UI caller `foundry/time-authority.js`
+   has ever had.** `jumpToHour`/`advanceDays`/`advanceWeeks` had zero callers outside the
+   diagnostics report before this round (confirmed by grep, not assumed). Play/pause is
+   modelled as this system's own rate-based reality (`TIME_RATE_STEPS[0] === 0` already means
+   "frozen" — there is no separate boolean anywhere else in the codebase), not a second,
+   driftable flow flag. Every gesture checks `isPenArmed(getPosture())` and explains itself in
+   plain language when refused — live-verified: a jump attempt in the preview harness (no real
+   `game.time`) returned *"Jump refused: game.time.worldTime is not available"*, not a crash or
+   a silent no-op.
+3. **TR (Impulses) and BR's motion-toggle ship `status:'planned'`, on purpose, even though the
+   mock has them wired to mock-only animations.** The approved plan stages real impulse wiring
+   (`effects/lightning.js`, wind's ambient term) as U7's job, not U2's; Motion Tiles still has
+   no `src/` runtime at all (V2-only, confirmed multiple times this Testament). Faithfully
+   reproducing the mock's LAYOUT while being honest that the BEHAVIOUR isn't real yet — matching
+   the author's own original instruction from the start of this whole migration ("mark them in
+   red... with a tooltip").
+4. **The astrolabe is a genuine second LIVE instance, not a clone or a read-only mirror.**
+   `boot.js`'s ~90-line `astrolabe` options object (real handlers into `editSky`,
+   `applyAmbientWind`, the weather manager) is now `buildAstrolabeOptions()`, a hoisted function
+   called TWICE — once for the old panel's own instance, once for the Remote's — so both
+   read/write the exact same closure state and can never drift into two copies of the wiring.
+   `pumpAstrolabe`'s per-frame repaint now updates whichever of the two DOM trees is actually
+   connected, computing one payload rather than two. **A real ordering bug surfaced and got
+   fixed before commit, worth recording:** the first extraction attempt made `astrolabeOptions`
+   a plain object built at `installRemote()`'s own (early) call site — a genuine
+   temporal-dead-zone hazard, since `editSky`/`skyScope` are declared much later in the same
+   `install()` closure. Function declarations are hoisted (body included) but don't EXECUTE
+   until called, so wrapping the same object in a function and deferring both the function call
+   AND the Remote's own body-render to first `open()` (matching Studio's own already-proven lazy
+   pattern) resolved it cleanly — confirmed via `node --check` plus the full suite staying green
+   throughout, not just asserted.
+5. **Named, real gaps in the astrolabe re-home, not silently carried over:** the mock's true
+   moon (phase-rendered, ~50min/day lag) exists ONLY in the mock — `ui/astrolabe.js` has no
+   moon code at all, confirmed by reading the live file, not assumed from the Testament's own
+   UM.2 log entry (which describes the MOCK's moon, not this file's). Also NOT ported: the
+   mock's own two-mode Direct/Drift weather board (§4.1's own grammar) — the live astrolabe
+   still carries its OLDER weather UI (a 13-button archetype shelf, a Director/Almanac select,
+   biome/volatility ROH) verbatim, which is genuinely useful and genuinely real, but is not
+   the Testament's newer design. Building the new weather board is explicitly checkpoint 3's
+   job, not something to rush into this pass by half-porting it onto the wrong control.
+6. **Camera path popover — a faithful re-skin, confirmed field-for-field against the real
+   source.** Every handler is the exact function `ui/camera-path-dialog.js` (the OLD dialog,
+   left completely untouched, still reachable from the old panel) already calls — presets,
+   settings shape and defaults, the honest "no active canvas" refusal — LANTERN tokens and the
+   floating-window shell already proven by the Studio's own pop-out are the only things that
+   changed. Live-verified: opening it with no live Foundry canvas correctly reports "Loaded 0
+   keyframe(s)" and refuses "+Add keyframe" with an honest message, matching the real dialog's
+   own behaviour rather than crashing or fabricating data.
+7. **Footer — Baseline and Safety both ship `status:'planned'`, each for a specific, real
+   reason, not a placeholder default.** Baseline has nothing to ease WITH until the Fade Engine
+   exists (checkpoint 2). Safety is more consequential than it looks: `diag/render-fallback.js
+   #engageFoundryFallback` is real, but it is a ONE-WAY action within a session — it tears down
+   MSA's live canvas with no `clearFoundryFallback` counterpart to resurrect it, so the only way
+   back is a reload. Wiring a hard-to-reverse safety action correctly needs its own careful
+   pass, not a rushed add during a shell checkpoint — held back deliberately rather than wired
+   in haste. Bug/Patreon/Maps are all three REAL links this round (not the mock's own
+   toast-stubs) — the same three URLs `diag/debug-panel.js#buildFooter` and V2's own
+   `tweakpane-manager.js` already use (`github.com/.../issues`,
+   `patreon.com/c/MythicaMachina`, `foundryvtt.store/creators/mythica-machina`), ported forward
+   rather than re-guessed.
+8. **`MapShine.getWind()/setWind()`**, matching `setSunHour`/`setCloudCover`'s own shape —
+   the astrolabe's dial already steered wind live; these two just open that same door on the
+   public API rather than leaving it dial-only, going through the identical `applyAmbientWind`
+   commit path, never a second write route.
+9. **`registerRemoteButton` — a FOURTH tool in the same `tokens.tools` record**, `order:103`,
+   the identical mechanism proven three times already. GM-only for this checkpoint (everything
+   the Remote renders today is GM session control, not the Testament's later Player face,
+   §5.5/U5) — its own toolbar tooltip says *"MSA Remote (new UI, in progress)"*.
+10. **A process gap, caught and named rather than quietly fixed and moved past.** This round
+    ran `node tools/verify-structure.mjs` directly for the first time this Testament — every
+    prior round's "verification note" only ever ran `tools/run-tests.mjs`, which exercises the
+    verifier's OWN sabotage tests (`verify-structure.test.mjs`), not a live scan of the real
+    tree. Running it surfaced a real, narrow violation already sitting in the previous round's
+    OWN committed code (`masks/authority-only` on `boot.js`'s water card — a `?? '_Water'`
+    fallback literal, indistinguishable from a catalog bypass to the wall's regex, and dead
+    code besides: `'water'` is a permanent catalog entry, the fallback could never fire).
+    Fixed in its own commit. Two OTHER failing rules (`no-gpu-readback` on
+    `vision-mask-render.js`, `time/one-clock`'s ratchet at 41/38) were checked via `git blame`
+    before touching anything and confirmed pre-existing — 2026-08-16 and 2026-07-25
+    respectively, both well before this session, neither in a file this migration has any
+    other reason to touch — named here rather than silently left for the next person to
+    rediscover, and NOT fixed, since doing so would be unrelated scope creep into vision/paint
+    code. `npm run verify:structure` (not just `run-tests.mjs`) is now this round's own
+    standing checklist item for every future petition.
+
+**Exit gate — not close, and said so plainly.** §9 asks for the author fading dusk-into-storm
+over five real minutes, reloading mid-fade, and the storm finishing on schedule — that needs
+the Fade Engine, which does not exist yet. What's verified this round, live, in
+`tools/remote-preview/` (same `tools/shader-lab/serve.mjs`, no second server): the shell's
+open/close/minimize (header stays, body+footer hide, confirmed via computed `display`); the
+real astrolabe dial mounted and repainting; all four corner clusters present with correct
+titles (confirmed via direct DOM inspection after `read_page`'s own accessibility-tree
+listing under-reported two of them — a tool quirk, not a real gap, cross-checked before
+trusting it either way); the Pen-gated jump menu; the camera-path popover end to end; the
+planned/real footer split; zero new console errors (one stale historical entry, confirmed
+dead by direct re-test, same as every round since it first appeared).
+
+*Verification note: `npx eslint`, `npx prettier --check`, `node tools/verify-structure.mjs`,
+and `node tools/run-tests.mjs` (27 suites, 11101 assertions) all clean against everything this
+petition describes. The concurrent water-flow session's own files were checked and left
+completely untouched by every commit here, same discipline as every round since
+[[feedback_git_staging_hazard]] was written.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

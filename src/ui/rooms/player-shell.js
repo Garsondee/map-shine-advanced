@@ -27,6 +27,7 @@
 
 import { installTokens } from '../tokens.js';
 import { installIconSprite, iconMarkup } from '../widgets/icon-sprite.js';
+import { makeDraggable } from '../widgets/draggable.js';
 import { renderSystemPanel } from './system-panel.js';
 
 const ROOM_ID = 'msa-player';
@@ -42,7 +43,8 @@ function injectStyle() {
   border:1px solid var(--line); border-radius:var(--r-room); box-shadow:var(--shadow3);
   display:flex; flex-direction:column; overflow:hidden; z-index:100; font:12px/1.4 var(--font); color:var(--ink0)}
 #${ROOM_ID} .msa-player-head{display:flex; align-items:center; gap:var(--sp2); padding:8px 14px;
-  border-bottom:1px solid var(--line); flex:none}
+  border-bottom:1px solid var(--line); flex:none; cursor:grab; user-select:none}
+#${ROOM_ID} .msa-player-head:active{cursor:grabbing}
 #${ROOM_ID} .msa-player-title{font-weight:600; letter-spacing:.1em; font-size:.72rem; text-transform:uppercase;
   color:var(--ink1); display:flex; gap:8px; align-items:center}
 #${ROOM_ID} .msa-player-title .ico{color:var(--shine)}
@@ -108,6 +110,7 @@ export function installPlayer(opts = {}) {
 
   room.append(head, body);
   document.body.appendChild(room);
+  makeDraggable(head, room);
 
   const openChangeListeners = new Set();
   const controller = {

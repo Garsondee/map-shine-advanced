@@ -26,6 +26,7 @@
 
 import { installTokens } from '../../tokens.js';
 import { installIconSprite, iconMarkup } from '../../widgets/icon-sprite.js';
+import { makeDraggable } from '../../widgets/draggable.js';
 import { renderEffectsDepartment, closeAllPopouts } from './effects-department.js';
 import { renderPainterDepartment } from './painter-department.js';
 import { renderSceneDepartment } from './scene-department.js';
@@ -232,6 +233,10 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
 
   room.append(head, frame);
   document.body.appendChild(room);
+  // 2026-08-18 fix: .room-head already carried the mock's own cursor:grab
+  // CSS (line ~105) with no listener behind it — looked draggable, silently
+  // did nothing. Wired for real now, shared with the Remote/Player rooms.
+  makeDraggable(head, room);
 
   const railButtons = new Map();
   for (const dept of DEPTS) {

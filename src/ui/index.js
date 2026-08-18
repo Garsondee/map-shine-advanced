@@ -29,6 +29,7 @@ export {
 // migration adds from here on.
 export { installTokens, getThemeTokens, tokensCSS, THEMES } from './tokens.js';
 export { installIconSprite, iconMarkup, ICONS } from './widgets/icon-sprite.js';
+export { makeDraggable } from './widgets/draggable.js';
 export {
   styled,
   buildParamControl,

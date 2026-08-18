@@ -44,6 +44,51 @@ import { WEATHER_ARCHETYPES, WEATHER_BIOMES } from '../../../world/index.js';
 import { buildParamControl } from '../../widgets/param-control.js';
 import { createFadeTimeControl } from './fade-time.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
+import { installWeatherPicker, buildWeatherIndex } from './weather-picker.js';
+
+/**
+ * THE FAVOURITES CURATION (2026-08-18 fix; author's own screenshot
+ * comparison: "Climate buttons need to be better organised. We need the
+ * extra opening room of climate choices."). `WEATHER_ARCHETYPES`/
+ * `WEATHER_BIOMES` carry no favourite/featured flag — there is no data-level
+ * source of truth to derive this split from, so this is a WORKER-TIER
+ * judgment call, named as one rather than presented as derived, and worth
+ * the author's countersign if the read is wrong (same posture Petition P19
+ * already took for water's own FOH dial curation).
+ *
+ * Direct: 8 of 16, spanning the severity gradient `WEATHER_ARCHETYPES`' own
+ * shelf order already encodes (clear → thickening → raining → extreme) —
+ * clear/fair/overcast/fog/rain/snow/gale/storm reads as "the greatest hits"
+ * rather than an arbitrary slice. The remaining 8 (thinner-cloud variants,
+ * blends, disaster-specific rows) are exactly as real, just one click
+ * further away via Browse.
+ */
+export const FAVOURITE_ARCHETYPE_IDS = Object.freeze([
+  'clear',
+  'fair-cumulus',
+  'overcast',
+  'fog',
+  'steady-rain',
+  'snow',
+  'gale',
+  'thunderstorm',
+]);
+
+/**
+ * Drift: 6 of 10 — the biomes that read as useful in almost any campaign
+ * (temperate coast/plains/desert/tundra/monsoon/mountain), leaving the four
+ * more setting-specific ones (Moorland Mire, Volcanic Waste, Feywild Glade,
+ * Shadowfell Verge) for Browse, which fits their own flavour: reach for them
+ * when a scene specifically calls for the unusual, not by default.
+ */
+export const FAVOURITE_BIOME_IDS = Object.freeze([
+  'temperate-coast',
+  'continental-plains',
+  'desert',
+  'boreal-tundra',
+  'tropical-monsoon',
+  'high-mountain',
+]);
 
 /**
  * The mock's own ".blocklabel" — icon + title + an optional right-aligned
@@ -173,6 +218,15 @@ export function renderWeatherBoard(container, ctx) {
   // own separate full-width row above the chips.
   const moodsTitle = document.createElement('span');
   moodsTitle.textContent = 'Moods';
+  // Browse (2026-08-18 fix) — the mock's own #wxBrowseBtn: icon + "Browse" +
+  // a live count of the FULL catalog, opening weather-picker.js's overlay.
+  // Mock places it beside the mode toggle in the same header row, not its
+  // own row — matched here via a small wrapper `headerRight`, since
+  // blockLabel() only takes one trailing element.
+  const browseBtn = document.createElement('button');
+  browseBtn.type = 'button';
+  browseBtn.className = 'msa-wx-browse';
+  browseBtn.innerHTML = `${iconMarkup('search')}<span>Browse</span><span class="msa-wx-browse-count"></span>`;
   const modeRow = document.createElement('div');
   modeRow.className = 'msa-wx-modeseg';
   modeRow.setAttribute('role', 'group');
@@ -186,6 +240,9 @@ export function renderWeatherBoard(container, ctx) {
   driftBtn.textContent = 'Drift';
   driftBtn.title = 'You set a climate — the sky wanders inside it on its own.';
   modeRow.append(directBtn, driftBtn);
+  const headerRight = document.createElement('div');
+  headerRight.className = 'msa-wx-header-right';
+  headerRight.append(browseBtn, modeRow);
   const chipRow = document.createElement('div');
   chipRow.className = 'msa-wx-chips';
   // Pace (2026-08-18 fix) — the old astrolabe.js's own weatherVolatility
@@ -195,7 +252,33 @@ export function renderWeatherBoard(container, ctx) {
   // renderFaders() already uses for the drift-bracket notes.
   const paceHost = document.createElement('div');
   const moodsBlock = document.createElement('div');
-  moodsBlock.append(blockLabel('cloud', moodsTitle, modeRow), chipRow, paceHost);
+  moodsBlock.append(blockLabel('cloud', moodsTitle, headerRight), chipRow, paceHost);
+
+  // THE BROWSE OVERLAY — one instance per board, built here (not threaded
+  // through ctx) same as fadeTime just above: a sibling-imported sub-widget
+  // this file owns outright, not a boot.js-owned engine mount point (that
+  // distinction is astrolabe-panel.js's own, for its DIAL specifically —
+  // weather-board.js already reaches world/index.js directly for the same
+  // two tables this picker searches).
+  const weatherPicker = installWeatherPicker({
+    getWeatherMode: ctx.getWeatherMode,
+    onPickArchetype: (id) => {
+      ctx.fadeToArchetype(id, fadeTime.getOverMs());
+      renderChips();
+    },
+    onPickBiome: (id) => {
+      ctx.onWeatherBiomeChange(id);
+      renderChips();
+      renderFaders();
+    },
+  });
+  browseBtn.addEventListener('click', () => weatherPicker.open());
+  function syncBrowseBtn() {
+    const mode = ctx.getWeatherMode();
+    const total = buildWeatherIndex(mode).length;
+    browseBtn.querySelector('.msa-wx-browse-count').textContent = String(total);
+    browseBtn.title = `Browse all ${total} ${mode === 'almanac' ? 'climates' : 'weather types'}`;
+  }
 
   // ---- CHANNELS block — label is real regardless of how many of the 7
   // mock channels have live backing today (LIVE_CHANNELS, above): "Channels"
@@ -221,6 +304,7 @@ export function renderWeatherBoard(container, ctx) {
     paintMode();
     renderChips();
     renderPace();
+    syncBrowseBtn();
     // 2026-08-18 fix, caught live while testing the cloud-pin glyph: neither
     // mode button ever called renderFaders(), so the pin glyph (Almanac-only)
     // and the drift-bracket note (also Almanac-only, driftBracket()) both
@@ -234,6 +318,7 @@ export function renderWeatherBoard(container, ctx) {
     paintMode();
     renderChips();
     renderPace();
+    syncBrowseBtn();
     renderFaders();
   });
 
@@ -242,7 +327,11 @@ export function renderWeatherBoard(container, ctx) {
     const mode = ctx.getWeatherMode();
     if (mode === 'almanac') {
       const activeBiome = ctx.getWeatherBiome();
-      for (const biome of WEATHER_BIOMES) {
+      // FAVOURITE_BIOME_IDS' own order (declared above), not WEATHER_BIOMES'
+      // — the shelf order is a UI-layer curation choice, decoupled from the
+      // data table's own order.
+      const favourites = FAVOURITE_BIOME_IDS.map((id) => WEATHER_BIOMES.find((b) => b.id === id)).filter(Boolean);
+      for (const biome of favourites) {
         const btn = chip(biome.label, biome.blurb, () => {
           ctx.onWeatherBiomeChange(biome.id);
           renderChips();
@@ -253,7 +342,10 @@ export function renderWeatherBoard(container, ctx) {
       }
     } else {
       const activeArchetype = ctx.getWeatherArchetype();
-      for (const archetype of WEATHER_ARCHETYPES) {
+      const favourites = FAVOURITE_ARCHETYPE_IDS.map((id) => WEATHER_ARCHETYPES.find((a) => a.id === id)).filter(
+        Boolean
+      );
+      for (const archetype of favourites) {
         const btn = chip(`${archetype.icon} ${archetype.label}`, archetype.blurb, () => {
           ctx.fadeToArchetype(archetype.id, fadeTime.getOverMs());
           // Re-paint NOW, not just on arrival: the sky is already 'custom'
@@ -363,6 +455,7 @@ export function renderWeatherBoard(container, ctx) {
   renderChips();
   renderFaders();
   renderPace();
+  syncBrowseBtn();
 
   return {
     getFadeOverMs: fadeTime.getOverMs,
@@ -371,6 +464,7 @@ export function renderWeatherBoard(container, ctx) {
       renderChips();
       renderFaders();
       renderPace();
+      syncBrowseBtn();
     },
   };
 }

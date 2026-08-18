@@ -205,18 +205,38 @@ function injectStyle() {
 #${ROOM_ID} .msa-fade-time button[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 16%, transparent);
   border-color:var(--shine); color:var(--shine)}
 /* Now INLINE in the Moods/Climates blocklabel row (mock: #wxTitle +
-   .modeseg share one line via margin-left:auto below), not its own
-   full-width row above the chips — a compact pill, not two equal-width
-   buttons filling the room. */
-#${ROOM_ID} .msa-wx-modeseg{display:inline-flex; margin-left:auto; background:var(--bg2);
+   #wxBrowseBtn + .modeseg share one line), not its own full-width row above
+   the chips — a compact pill, not two equal-width buttons filling the room.
+   msa-wx-header-right (2026-08-18 fix — author: "Climate buttons need to
+   be better organised. We need the extra opening room of climate choices.")
+   is the flex group blockLabel's own single trailing-slot now holds
+   Browse + the mode pill together; the auto-margin that used to sit
+   directly on msa-wx-modeseg moved up to this wrapper. */
+#${ROOM_ID} .msa-wx-header-right{display:flex; align-items:center; gap:8px; margin-left:auto}
+#${ROOM_ID} .msa-wx-browse{display:inline-flex; align-items:center; gap:5px; padding:3px 9px;
+  border-radius:999px; border:1px solid var(--line); background:var(--bg2); color:var(--ink2);
+  font-size:.62rem; font-weight:600; letter-spacing:.04em; cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-wx-browse svg{width:11px; height:11px}
+#${ROOM_ID} .msa-wx-browse:hover{background:var(--bg3); color:var(--ink0); border-color:var(--shine-glow)}
+#${ROOM_ID} .msa-wx-browse-count{padding:0 6px; border-radius:999px; background:var(--bg3); color:var(--ink1);
+  font-size:.6rem}
+#${ROOM_ID} .msa-wx-modeseg{display:inline-flex; background:var(--bg2);
   border:1px solid var(--line); border-radius:999px; padding:2px; gap:2px}
 #${ROOM_ID} .msa-wx-modeseg button{padding:2px 10px; border-radius:999px; border:none; background:none;
   color:var(--ink2); font-size:.62rem; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
   cursor:pointer; pointer-events:auto}
 #${ROOM_ID} .msa-wx-modeseg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
-#${ROOM_ID} .msa-wx-chips{display:flex; flex-wrap:wrap; gap:5px}
-#${ROOM_ID} .msa-wx-chip{padding:5px 9px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
-  color:var(--ink1); font-size:.7rem; cursor:pointer; pointer-events:auto}
+/* A real grid, not a wrapping flex row (2026-08-18 fix, same author report
+   as the header-right change above — the old flex-wrap row left the LAST
+   row of an odd count dangling half-empty, reading as unorganised). 4
+   columns matches the mock's own favourites layout; the favourites subset
+   (weather-board.js's FAVOURITE_ARCHETYPE_IDS/FAVOURITE_BIOME_IDS, 8/6
+   items) fills it evenly rather than wrapping raggedly the way all 16/10
+   used to. */
+#${ROOM_ID} .msa-wx-chips{display:grid; grid-template-columns:repeat(4, 1fr); gap:5px}
+#${ROOM_ID} .msa-wx-chip{padding:5px 6px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--ink1); font-size:.68rem; cursor:pointer; pointer-events:auto; text-align:center;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 #${ROOM_ID} .msa-wx-chip:hover{background:var(--bg3)}
 #${ROOM_ID} .msa-wx-chip[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 18%, transparent);
   border-color:var(--shine); color:var(--shine)}

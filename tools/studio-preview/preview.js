@@ -218,6 +218,8 @@ function getSystemPanelCtx() {
 }
 
 // ---- IMPULSES (U7) — real shape, fake fire() (no live viewer here) --------
+// Order matches boot.js's own IMPULSES exactly (strike, thunder, gust —
+// 2026-08-18 fix, mirroring the mock's #cornerTR).
 const IMPULSES = [
   {
     id: 'strike',
@@ -230,6 +232,13 @@ const IMPULSES = [
     },
   },
   {
+    id: 'thunder',
+    label: 'Thunder',
+    icon: 'cloud',
+    status: 'planned',
+    plannedReason: 'No audio subsystem exists anywhere in this codebase yet.',
+  },
+  {
     id: 'gust',
     label: 'Gust',
     icon: 'wind',
@@ -237,13 +246,6 @@ const IMPULSES = [
       document.getElementById('log').textContent = 'Gust fired (preview stand-in)';
       return { ok: true, message: 'Gust fired (preview stand-in).' };
     },
-  },
-  {
-    id: 'thunder',
-    label: 'Thunder',
-    icon: 'cloud',
-    status: 'planned',
-    plannedReason: 'No audio subsystem exists anywhere in this codebase yet.',
   },
 ];
 

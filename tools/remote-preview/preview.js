@@ -34,6 +34,10 @@ const fakeSky = {
   cloudCover01: 0.2,
   mode: 'almanac',
 };
+// Mirrors boot.js's own lastNonZeroRateHoursPerMinute — the speed badge
+// shows what flow will resume at, not the raw live rate (which is 0 while
+// paused), same reasoning as boot.js's own getFlowRate comment.
+let lastNonZeroRate = 1;
 
 let remoteDialInstance = null;
 
@@ -147,6 +151,8 @@ function fireCueById(id) {
 }
 
 // ---- IMPULSES (U7) — real shape, fake fire() (no live viewer here) --------
+// Order matches boot.js's own IMPULSES exactly (strike, thunder, gust —
+// 2026-08-18 fix, mirroring the mock's #cornerTR).
 const IMPULSES = [
   {
     id: 'strike',
@@ -156,17 +162,17 @@ const IMPULSES = [
     fire: () => (log('Strike fired (preview stand-in)'), { ok: true, message: 'Strike fired (preview stand-in).' }),
   },
   {
-    id: 'gust',
-    label: 'Gust',
-    icon: 'wind',
-    fire: () => (log('Gust fired (preview stand-in)'), { ok: true, message: 'Gust fired (preview stand-in).' }),
-  },
-  {
     id: 'thunder',
     label: 'Thunder',
     icon: 'cloud',
     status: 'planned',
     plannedReason: 'No audio subsystem exists anywhere in this codebase yet.',
+  },
+  {
+    id: 'gust',
+    label: 'Gust',
+    icon: 'wind',
+    fire: () => (log('Gust fired (preview stand-in)'), { ok: true, message: 'Gust fired (preview stand-in).' }),
   },
 ];
 
@@ -202,8 +208,14 @@ const remote = installRemote({
   getPosture: () => fakeSky.mode,
   isFlowPlaying: () => fakeSky.rateHoursPerMinute > 0,
   onFlowToggle: () => {
-    fakeSky.rateHoursPerMinute = fakeSky.rateHoursPerMinute > 0 ? 0 : 1;
+    if (fakeSky.rateHoursPerMinute > 0) {
+      lastNonZeroRate = fakeSky.rateHoursPerMinute;
+      fakeSky.rateHoursPerMinute = 0;
+    } else {
+      fakeSky.rateHoursPerMinute = lastNonZeroRate;
+    }
     log(`flow -> ${fakeSky.rateHoursPerMinute > 0 ? 'playing' : 'paused'}`);
+    remote.syncAstrolabePanel();
     remoteDialInstance?.update({
       hour: fakeSky.todHour,
       phase: 'day',
@@ -211,6 +223,14 @@ const remote = installRemote({
       windSpeed01: fakeSky.windSpeed01,
       cloudCover01: fakeSky.cloudCover01,
     });
+  },
+  // The TL corner's speed badge (2026-08-18 fix) — mirrors boot.js's own
+  // getFlowRate/onSetFlowRate exactly, same resume-safe reasoning.
+  getFlowRate: () => (fakeSky.rateHoursPerMinute > 0 ? fakeSky.rateHoursPerMinute : lastNonZeroRate),
+  onSetFlowRate: (rate) => {
+    lastNonZeroRate = rate;
+    fakeSky.rateHoursPerMinute = rate;
+    log(`speed -> x${rate}`);
   },
   weatherBoard: {
     getWeatherMode: () => (fakeSky.weatherMode === 'almanac' ? 'almanac' : 'director'),

@@ -54,6 +54,12 @@ building on any of this.
 | **21** | **Foundry re-renders the whole map every frame for a consumer that usually isn't running — the upper floor's real cost (27 fps → 120 fps when suppressed)** | interface seam / fog / perf | `BUILT (unverified)` 2026-08-15 — third lever + MSA-owned explored-fog wash, on by default, no flag |
 | **22** | **Water renders above things that should be masking it, worse on upper floors — no depth-authority participation, single-floor bake** | water / depth authority | `BUILT (unverified)` 2026-08-15 — Node suite + live smoke-test green; no `_Water` mask on the bench map to confirm the occlusion itself |
 | **23** | **Fire lights were never wall-clipped at all; candle/lightning/some real-light wall-clip caches never invalidated on a live wall edit** | lighting / point lights / walls | `BUILT (unverified)` 2026-08-15 — Node suite green; no live wall-edit repro yet |
+| **24** | **Water draws past the edge of the map — a padded AABB plus a UV clamp extrudes the mask's edge row into the void** | water / bounds | `BUILT (unverified)` 2026-08-16 — geometry clipped + an in-rect fragment gate; Node-tested |
+| **25** | **Hard, staircase-shaped edges in the white surface detail on water** | water / body pack | `BUILT (unverified)` 2026-08-16 — two amplifiers of the coarse field's texel grid, both removed |
+| **26** | **Sun glint is not defeated by shadows — water sparkles inside a building's shadow** | water / tier 3 / sun shadows | `BUILT (unverified)` 2026-08-16 — the gate `Water.md` §7 always specified, finally built |
+| **27** | **The flow direction control was neither a compass nor pointing the right way — every river ran backwards** | water / tier 2 / params UI | `BUILT (unverified)` 2026-08-16 — compass `angle` type + a Node-pinned heading→vector helper |
+| **28** | **A small painted fire blob near a bigger one could be silently suppressed to zero — peak separation pooled across unrelated blobs instead of scoping per component** | fire / mask extraction | `BUILT (unverified)` 2026-08-16 — Node-tested; bug #19's floor-specific ingest asymmetry is separate and still open |
+| **29** | **Only 3/20 painted fires produced flames (sensitivity too strict for real small/faint paint); fixing that made fires read diffuse with no hot core (cohesion rebuilt on connected-component identity)** | fire / mask sensitivity / cohesion | `LIVE` — author-confirmed 2026-08-17, `maskSensitivity` default 0.2→0.05, `flameCohesion` default 0→0.5 |
 
 ---
 
@@ -2328,3 +2334,334 @@ and confirms neither bleeds light through a solid wall, then edits a wall
 near an already-placed, unmoved candle/fire/light (e.g. adds a new wall, or
 flips an existing wall's Light sense to/from Proximity) and confirms the
 light's occlusion updates without needing to move or resize it.
+
+---
+
+## 24–27. The water session, 2026-08-16 — four author-reported defects, one afternoon
+
+**Status:** all four `BUILT (unverified)` · **Found:** 2026-08-16, author, live on
+their own river map, with two annotated screenshots · **Docs:** `docs/planning/Water.md`,
+`src/effects/water/water-render.js` header ("2026-08-16 — THREE AUTHOR-REPORTED FIXES")
+
+Grouped rather than split into four sections because three of them are the same
+mistake in three costumes: **a soft answer standing in for a hard boundary.**
+
+### 24. Water draws past the edge of the map
+
+**Symptom.** *"I also noticed that water can appear outside the bounds of the
+actual map."* A band of water tint sitting in the black ABOVE the map art,
+spanning the full width, with an arrow drawn at it.
+
+**Root cause — CONFIRMED by reading the code, not inferred.** Two correct
+decisions that are wrong together. `water-body-subsystem.js#WATER_BOUNDS_PAD_PX`
+grows the measured water AABB by 64 px so the surface mesh never clips its own
+antialiased shoreline — right for an interior shore, and at the map's own edge
+those 64 px are outside the map. The surface shader then samples its mask
+through `clamp(maskU, 0, 1)`, and **a UV clamp is not a boundary, it is an
+extrusion**: beyond the rect it keeps returning the edge row. A river running
+off the top of the map has water in every texel of that row, so the clamp
+smeared it across the full width of the void.
+
+Notable: **every status field read healthy.** `getStatus().bounds` printed the
+escaped rect, and nothing about it looks wrong unless you also happen to know
+the mask rect.
+
+**Fix, in two places that fail differently.** `clipRectToMask` (pure, exported,
+Node-tested against all four edges plus the empty-intersection case) intersects
+the padded AABB with the mask rect, so the GEOMETRY never leaves the map — the
+cheap half, since a fragment that is never rasterised costs nothing. And an
+`inRect` membership gate in `water-render.js` folds into `inside`, the single
+definition of "is there water at this pixel", so any fragment that still lands
+outside contributes nothing to either mesh. The wet band needs the gate applied
+separately and explicitly: it reads `1 − inside`, so it is the one term that is
+STRONGEST exactly where `inside` is 0.
+
+### 25. Hard, staircase-shaped edges in the white surface detail
+
+**Symptom.** *"I have noticed in the white things on top of water that there are
+some unusual hard edges appearing that don't make sense too."* Traced in red as
+a stepped line running through open water, following no feature of the map.
+
+**Root cause — two independent amplifiers of the same coarse field.** The body
+pack (`res:waterBody`) is a 512-long-side field with `WATER_BODY_SUPERSAMPLE = 1`,
+stretched across a map up to 10,650 px wide: **one texel is ~21 world px.**
+
+1. **The bank warp was applied at full strength where the tangent is
+   meaningless.** BA stores the direction of the NEAREST shore point, so at a
+   river's medial axis it jumps to a different bank's direction. Correction #4's
+   projection cancels the pure SIGN flip and nothing else — two banks that are
+   not parallel do not differ by a sign. Across one texel the noise-domain offset
+   could swing by `2 × 0.35 × waveScale` ≈ 154 px, most of a cell of unrelated
+   noise in a few screen pixels. `water-body.js`'s own header has prescribed the
+   cure since the pack was designed (`bankInfluence = 1 − smoothstep(0,
+   bankReachPx, |sdf|)`) and this rung never built it. Now `WATER_BANK_REACH_PX`.
+2. **Plain bilinear is C0.** Its value is continuous across a texel boundary and
+   its GRADIENT is not: every texel edge is a crease. Water then amplifies those
+   creases three times over — a 34 px wet band that crosses its whole ramp inside
+   1.6 texels, the foam crest threshold, and tier 3's GGX lobe at `alpha = 0.06`.
+   Fixed with the standard smooth-bilinear remap (`water-sampling.js`): ease the
+   fractional texel position through Perlin's quintic before sampling, which
+   makes the reconstruction C2 at the cost of ~10 ALU and **no extra fetch**.
+   Texel centres are fixed points, so no distance the pack reports changes.
+
+⚠️ **NOT a resolution problem, and a finer field is not the fix** —
+`WATER_BODY_SUPERSAMPLE` already made the 1 → 3 → 1 round trip in 2026-07-26 and
+its own doc ends "a finer field will NOT sharpen an edge".
+
+### 26. Sun glint is not defeated by shadows
+
+**Symptom.** *"Sun glint needs to be defeated by shadows, in fact we need to
+adjust the presentation of water with shadows in general."*
+
+**Root cause.** The gate was specified and never built. `Water.md` §7 lists "sun
+occlusion → `buf:scene.vis`" as one of water's seven handles, and §6's tier-3 row
+says "gated by `buf:scene.illum` and `buf:scene.vis`". Tier 3 shipped with the
+outdoors gate only.
+
+**Why it was not obvious.** The glint WAS already being attenuated by shadow —
+water draws into `buf:scene.color` before lighting, so the ambient fill (which
+carries `sunVis`) multiplies the whole pass. But a specular lobe at `alpha = 0.06`
+routinely reaches ten times the buffer's white point, and 10 × 0.3 is still blown
+out. The highlight visibly survived shadows it should not exist inside at all —
+`feedback_saturated_curve_cannot_transmit_variation`.
+
+**Fix.** `buildWorldSpaceSunVisibilityNode` extracted from the existing
+fullscreen reader (one implementation of "world XY → shadow-field UV → sample",
+the same seam `buildOutdoorsGate`/`buildWorldSpaceOutdoorsGate` already draws),
+sampled at water's own `positionWorld`, gating `sunSpec` at full strength through
+a new `shadowResponse` param (default 1). The sky sheen is deliberately only
+half-gated and only on its DIRECTIONAL term: a shadowed point still sees most of
+the sky dome, which is why real shadows read blue rather than black. Measured in
+the CPU twin: in full shadow the glint is exactly 0 everywhere and the whole
+surface drops below the "a sheen" band, while the sheen survives at more than
+half its lit value and the dome FLATTENS rather than merely darkening.
+
+**A known, deliberate double-count**, stated rather than hidden: the gated glint
+is multiplied by `sunVis` twice (here, and again by the ambient fill downstream),
+because this rung's output is treated as albedo by the pass that lights it. At
+full sun that is exactly a no-op and in full shadow both factors want zero; the
+error lives only in the penumbra. The alternative is moving tier 3 to a
+post-lighting scene, which costs water its free paint-order occlusion.
+
+### 27. The flow direction was neither a compass nor pointing the right way
+
+**Symptom / request.** *"I have a map with a river and I need to be able to set
+the direction the water is travelling in... we need to make this direction
+control a compass control so that the user can easily select 'south' and it needs
+to be front of house."*
+
+**Root cause — two bugs found while building the compass, neither reported.**
+
+1. `current = (cos θ, sin θ)`, documented as *"0 being to the right of the
+   screen"*. True for 0 and wrong everywhere else: this renderer's world space is
+   **Y-DOWN** (`vt-pan-viewer.js#updateCamera` — the frustum's `top = minY`), so
+   the heading ran CLOCKWISE on screen while reading like ordinary anticlockwise
+   degrees.
+2. The travel was **added** to the noise sample coordinate. Sampling at `x + d`
+   shows what lives at `x + d`, so the pattern moves by `−d`: **every river ran
+   backwards.** Invisible on its own — a moving surface looks like a moving
+   surface — and only detectable once a control claims a direction.
+
+**Fix.** A new `angle` PARAM TYPE (`core/params-schema.js`), which is a type and
+not a widget hint because an angle is CYCLIC: an out-of-range write must wrap, and
+a float clamps 370 to its max, turning "ten degrees past north" into "west". The
+compass dial in `diag/effect-controls.js` falls out of the type, with an
+eight-point magnet so "south" is exactly 180 rather than 176. `waterFlowVector` is
+the ONE heading→vector conversion, in plain JS, Node-pinned against all eight
+cardinals in the language the author uses ("south is down the screen"), and the
+domain offset is negated. The convention is KINEMATIC (the direction water travels
+toward), deliberately opposite to `world/wind-field.js`'s meteorological
+"blows from".
+
+### Proof
+
+`npm test` green: 10,435 assertions / 0 failed across 24 suites (was 10,329),
+water's own suite 158 → 221. New Node suites: `water-field.test.mjs` (the
+compass), `water-sampling.test.mjs` (the reconstruction's fixed points, its
+stay-in-texel bound, and a finite-difference measurement showing plain bilinear
+creases where the smooth remap does not), `water-bounds.test.mjs` (the clip).
+`water-render.test.mjs` now constructs the FIFTH graph shape (tier 3 + a shadow
+field). `water-light.test.mjs`'s CPU twin measures the shadow gate in scene-colour
+units. Lint clean, format clean.
+
+⚠️ `npm run verify:structure` fails on this tree — **pre-existing and not from
+this work**, confirmed by running it against a pristine `git archive HEAD`: the
+same two rules fail identically there (`no-gpu-readback` at
+`vision-mask-render.js:857`, and `time/one-clock` at 41 against a bound of 38).
+
+### Fixed when
+
+The author looks at their river map and confirms: the water stops at the map
+edge; the white surface detail has no staircase edges; the glitter stops at the
+edge of a bridge's or a tower's shadow; and setting the compass to south makes
+the river visibly run down the page.
+
+---
+
+## 28. A small painted fire blob near a bigger one could be silently suppressed to zero
+
+**Status:** `BUILT (unverified)` · **Found:** 2026-08-16, while auditing
+`extractFiresFromMask` against a real, densely-multi-blob `_Fire` mask
+(`example_map/town river bridge/Tower_Bridge_Middle_Fire.webp`, ~20 separate
+painted regions) the author supplied as a stress test · **Docs:**
+`src/effects/fire/fire-mask.js`
+
+### Symptom / request
+
+*"The fire isn't being created for each of the blobs of white in this mask and
+they should each get their own fire effect... fix it so that every single one
+of the white blobs would end up in a valid spot for fire particles."* Not a
+live repro on this specific file — direct testing of the real asset through
+the unmodified algorithm found it already producing one fire per blob (20
+blobs in, 20 fires out, 0 dropped) at the resolution the mask authority
+actually derives at. The bug below was found auditing the algorithm for the
+GUARANTEE the request asks for, not reproduced by the supplied file itself.
+
+### Root cause — CONFIRMED, reading the peak-selection loop
+
+`extractFiresAtThreshold`'s ridge-walk keeps one flat `taken` list of every
+peak placed so far and suppresses a new candidate if it falls within
+`PEAK_SEPARATION` (1.7×) of ANY of them — with no check that the two peaks
+belong to the same connected component. That spacing exists to keep ONE
+elongated blob's own multi-peak ridge walk from bunching duplicate fires down
+its spine (the "row of small flames" case); it was never meant to compare
+peaks from two DIFFERENT, disconnected blobs. A compact (non-elongated) blob
+only ever gets a single suppression attempt — `blobLabelTaken` blocks a
+second try once one is taken — so a small blob whose only candidate peak
+lands within a much bigger, unrelated neighbour's suppression radius (which
+scales with the LARGER of the two, `Math.max(radiusTexels, t.r) * 1.7`) is
+silenced permanently and contributes no fire at all, in direct contradiction
+of this file's own header: "SCOPED PER CONNECTED COMPONENT, not pooled across
+the whole grid." No existing test placed two differently-sized, disconnected
+blobs near each other, so nothing caught it.
+
+### Fix
+
+`fire-mask.js`'s `taken` entries now carry their component `label`, and the
+suppression loop skips any entry whose label doesn't match the candidate's —
+a same-blob ridge walk still spaces itself exactly as before (unchanged
+byte-for-byte on every single-component test), but a different blob's already
+-placed peak can no longer suppress it.
+
+### Proof
+
+New Node case in `fire-mask.test.mjs`: a 9×9 blob (peak radius ~5 texels,
+~8.5-texel suppression reach) one empty column away from a 2×2 blob (peak
+radius 1 texel) — close enough that the small blob's only candidate fell
+inside the big blob's suppression radius. Confirmed by hand-tracing the old
+code that this synthetic case reproduces the bug exactly (the small blob's
+peak is suppressed by the big blob's, at every one of its 4 candidate
+texels); after the fix both blobs fire. Whole-repo Node suite green (10,597
+assertions / 0 failed, 24 suites — fire's own suite 431 → 433). Lint clean,
+format clean on both touched files.
+
+`npm run verify:structure` still fails on this tree on the same two
+pre-existing rules #24–27 already confirmed independent of any single day's
+work (`no-gpu-readback` at `vision-mask-render.js:857`, `time/one-clock` at 41
+against a bound of 38) — untouched by this change.
+
+### Open question — a genuinely different, already-tracked bug
+
+Bug #19 (`_Fire` not registering on First Floor despite visible white paint)
+is UNRELATED to the fix above — that mechanism is in the live packed-channel/
+mip ingest path (`vt/decode-pool.js#compositePackedTexels`), confirmed
+floor-specific and still open. Direct testing of the real Mansion
+`Ground_Fire.webp` / `First-Floor_Fire.webp` assets through the same clean
+algorithm used here shows both produce fire correctly in isolation (6 fires
+and 1 fire respectively) — reinforcing #19's own conclusion that the
+remaining asymmetry lives upstream of `fire-mask.js`, in Foundry's live
+ingest, not in extraction. Needs the live harness to take further; static
+reading alone cannot reach it.
+
+### Fixed when
+
+The author paints a scene with several small, physically separate fire spots
+near a much larger painted region and confirms every one of them lights,
+regardless of how close it sits to the big one.
+
+---
+
+## 29. Only 3 of ~20 painted fires produced flames; fixing that made every fire look diffuse with no hot core
+
+**Status:** `LIVE` — author-confirmed 2026-08-17 on the real Tower Bridge
+scene · **Found:** 2026-08-16/17, live · **Docs:** `src/effects/fire/fire.js`,
+`src/effects/fire/fire-spawn-points.js`
+
+### Symptom, live
+
+*"I noticed that only three of the valid `_Fire` areas were producing flame
+particles."* On the same Tower Bridge mask Bug #28 above audited (~20
+painted regions). Then, after the workaround below: *"Changing mask
+sensitivity to 0.05 seems to help... but that means the fires don't actually
+have a hot core and end up too diffuse to look right."*
+
+### Part 1 — most of the mask's real paint is faint or small
+
+`maskSensitivity` (`FIRE_PARAMS`) defaulted to 0.2. Most of this mask's ~20
+painted regions are small or softly-edged strokes that read well under 0.25
+grey once averaged into the derived grid's ~20-29 px texels — only the
+handful of boldest regions cleared the default bar. **Fix:** default dropped
+to 0.05 (`fire.js`), which the author confirmed lit every valid region.
+
+### Part 2 — with more, fainter spawn points, cohesion is what makes a fire read as a fire
+
+Spreading spawn points across every faint texel too (not just the confident
+core) is exactly right for *finding* every painted region, but it means each
+fire's particles now scatter across its whole footprint uniformly, with
+nothing pulling density toward wherever the paint is actually brightest. That
+is the "diffuse, no hot core" report — and `flameCohesion` existed for
+precisely this, but had been broken and OFF by default since it shipped
+(its own help text: *"a good idea, currently buggy... defaults off"*) because
+"belongs to" was a raw nearest-fire-by-distance guess with no idea which
+painted blob a point actually came from — the exact same bug SHAPE Bug #28
+found and fixed one layer down, in `fire-mask.js`'s peak-separation logic.
+
+**Fix — `applyCohesion` rebuilt on connected-component identity, not
+distance** (`fire-spawn-points.js`):
+- `fire-mask.js` gained `extractFiresWithLabels()` (additive; the existing
+  `extractFiresFromMask()` is unchanged and still returns a plain array) —
+  every fire now carries the `label` of the blob it came from, and a
+  `nearestLabel` field extends labels a few texels into the antialiased
+  fringe between the SPAWN and PAINT thresholds (a new `propagateLabels`,
+  the same two-pass relaxation `chamferDistance` already runs, but
+  propagating a label instead of a bare distance).
+- A spawn point resolves its OWN label by direct O(1) grid lookup — its
+  candidate fires are structurally exactly `firesByLabel.get(its own label)`,
+  never a distance comparison across labels. A point with no confirmed label
+  nearby (fringe too far from any real paint) is left untouched rather than
+  assigned an invented target; a label whose only fire got dropped upstream
+  (`maxFires`/`minDiameterPx`) is treated the same way, never reassigned to
+  a surviving neighbour.
+- The pull TARGET is the brightness-weighted centroid of a blob's own spawn
+  points (`Σ pos·brightness / Σ brightness`), not the fire's geometric ridge-
+  peak position — this is what "toward the brightest part" actually means.
+  `fires[i].x/.y` themselves are never touched; they still feed light
+  placement and sprite geometry everywhere else.
+- `applyCohesion` takes an optional 4th argument (the label grid); every
+  existing caller that omits it keeps the exact old nearest-of-all-fires
+  behaviour, so nothing else in the codebase needed to change.
+- Wired boot.js → `fire-subsystem.js`'s one call site.
+
+`flameCohesion`'s default moved 0 → **0.5** (2026-08-17, author-confirmed
+live) — cohesion is no longer an experimental opt-in, it is the correct ship
+state now that "belongs to" is a structural guarantee instead of a guess.
+
+### Proof
+
+New Node cases: `fire-mask.test.mjs` (label assignment on every existing
+blob/elongation/suppression fixture, plus new fringe-propagation fixtures —
+a solid core with a fringe ring resolves the ring to the core's own label,
+two separated cores' fringes never bleed into each other). `fire-spawn-
+points.test.mjs` (the core cross-contamination case reusing Bug #28's own
+9×9-beside-2×2 fixture: 100% of the small blob's points converge on its own
+centroid at cohesion=1, zero pulled toward the big one, and vice versa;
+brightness-weighted targeting measured numerically against the ridge-peak
+position; anchor-fire safety; unconfirmed-point and label-without-fire both
+left untouched). Whole-repo Node suite green throughout (10,597 → 10,674
+assertions, 0 failed). Lint clean, format clean on every touched file.
+
+### Fixed when
+
+Already fixed — author confirmed live 2026-08-17: every torch on the Tower
+Bridge scene fires, and cohesion at its new default gives each one a visible
+bright core without any of them smearing toward or merging with a neighbour.

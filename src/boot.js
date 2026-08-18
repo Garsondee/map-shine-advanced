@@ -5839,7 +5839,12 @@ function install() {
         maxTier: readLive().maxPerfTier,
         source: readLive().perfTierSource,
       },
-      mask: { suffix: maskKindById('water')?.suffixes?.[0] ?? '_Water', found: maskStatus?.source === 'authored' },
+      // No `?? '_...'` fallback: 'water' is a permanent scene/mask-catalog.js
+      // entry (verify-structure.mjs#masks/authority-only correctly flags a
+      // literal suffix here as indistinguishable from a catalog bypass, and
+      // the fallback was dead code anyway — the lookup cannot fail for a
+      // hardcoded, always-registered kind id).
+      mask: { suffix: maskKindById('water')?.suffixes?.[0], found: maskStatus?.source === 'authored' },
       presets: Object.keys(WATER_PRESETS),
       onPresetPick: (name) => {
         const params = waterPreset(name);

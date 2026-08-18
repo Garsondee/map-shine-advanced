@@ -978,6 +978,11 @@ function install() {
   // long after install() has finished running once (the same closure-
   // reference safety every other ctx function passed to installStudio/
   // installRemote below already relies on).
+  // Order matches the mock's own #cornerTR exactly (strike, thunder, gust —
+  // bolt/cloud/wind, 2026-08-18 fix): this is the ONE shared declaration
+  // both the Remote's corner and the Studio's CUES list render off, so
+  // reordering it here re-orders both surfaces identically rather than
+  // patching a per-surface display order.
   const IMPULSES = [
     {
       id: 'strike',
@@ -989,18 +994,18 @@ function install() {
       fire: () => MapShine.strikeLightning(),
     },
     {
-      id: 'gust',
-      label: 'Gust',
-      icon: 'wind',
-      fire: () => MapShine.gustWind(),
-    },
-    {
       id: 'thunder',
       label: 'Thunder',
       icon: 'cloud',
       status: 'planned',
       plannedReason:
         'No audio subsystem exists anywhere in this codebase yet (checked before building, not assumed) — Thunder has nothing real to trigger.',
+    },
+    {
+      id: 'gust',
+      label: 'Gust',
+      icon: 'wind',
+      fire: () => MapShine.gustWind(),
     },
   ];
   // Fail loud at boot, not silently at first click — the same discipline
@@ -1075,6 +1080,22 @@ function install() {
       } else {
         void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || 1 });
       }
+    },
+    // The TL corner's speed badge (2026-08-18 fix) — real TIME_RATE_STEPS,
+    // the SAME editSky path the old debug panel's own rate slider already
+    // writes through, not a second speed vocabulary. Reads the REMEMBERED
+    // rate, not the raw live one: production's single-field model uses 0
+    // itself to mean "paused" (unlike the mock's own two-field state, which
+    // keeps speed and play/pause fully independent), so showing the live
+    // value verbatim would flash the badge to a meaningless fallback on
+    // every pause instead of the speed flow will actually resume at.
+    getFlowRate: () => {
+      const live = skyScope.sky?.rateHoursPerMinute ?? 0;
+      return live > 0 ? live : lastNonZeroRateHoursPerMinute || 1;
+    },
+    onSetFlowRate: (rate) => {
+      lastNonZeroRateHoursPerMinute = rate;
+      void editSky({ rateHoursPerMinute: rate });
     },
     // THE WEATHER BOARD (U2 checkpoint 3) — every field below is a closure
     // reference to state/functions declared further down this SAME install()
@@ -8000,6 +8021,12 @@ function install() {
             windSpeed01: payload.windSpeed01,
             cloudCover01: payload.cloudCoverEased01,
           });
+          // Keeps the TL corner's flow/speed buttons honest against
+          // whatever actually changed rateHoursPerMinute — the old panel's
+          // own rate slider, another connected client — not just this
+          // corner's own clicks (2026-08-18 fix, shell.js's own note on
+          // syncAstrolabePanel).
+          MapShine.__remote?.syncAstrolabePanel?.();
         }
       }
     }

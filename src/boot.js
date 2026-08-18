@@ -465,6 +465,7 @@ import {
   createWaterRegistration,
   WATER,
   WATER_PARAMS,
+  WATER_DIALS,
   WATER_DEBUG_CHANNELS,
   WATER_PRESETS,
   waterPreset,
@@ -500,6 +501,8 @@ import {
   buildSpecularReport,
   buildWindowLightReport,
 } from './diag/effect-status-reports.js';
+import { getParamHealth } from './diag/param-read-health.js';
+import { beginUiTick, endUiTick } from './diag/ui-perf.js';
 
 const MODULE_ID = 'map-shine-advanced';
 
@@ -6024,12 +6027,46 @@ function install() {
       },
       schema: WATER_PARAMS,
       fohKeys: ['depth', 'pollution', 'opacity', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+      // U6 (docs/holy/UI-Testament.md §9): five authored dials replace this
+      // fohKeys strip in the FOH — fohKeys itself stays, both as the ROH-
+      // exclusion set (rohGroups reads it unconditionally) and as the
+      // fallback for every OTHER effect that has no dials schema yet.
+      dialsSchema: WATER_DIALS,
+      // Computed FRESH on every card render, never cached — the same
+      // "getValue must read live state" rule this card's own comment above
+      // already states for readLive(). health.read only ever grows within a
+      // session (param-read-health.js's own doc); a freshly opened scene
+      // honestly shows a low count until the surface's first sync().
+      health: getParamHealth('water', WATER_PARAMS),
       getValue: (id) => readLive().params?.[id] ?? WATER_PARAMS[id]?.default,
       onChange: (id, value) => MapShine.setWater({ [id]: value }),
       enabled: readLive().enabled,
       onToggleEnabled: (next) => MapShine.setWater({ enabled: next }),
       onPaint: paintAffordance('water')?.onAdd,
       status: () => collapsedStatusLine({ enabled: readLive().enabled }),
+    };
+  });
+
+  // THE CONTROL HEALTH REPORT (U6, docs/holy/UI-Testament.md §9) — what the
+  // Studio water card's health badge deep-links to. `READ_TRACKED_EFFECTS`
+  // is deliberately a small, explicit, extend-as-you-go map rather than a
+  // derived enumeration: `param-read-health.js`'s own tracked-reads Map has
+  // no way to know a SCHEMA (each effect owns its own), so this report is
+  // honest only about what is actually listed here — water today, more as
+  // future petitions wire their own `getRenderState()`-equivalent (see
+  // water-registration.js's own U6 comment for the wrapping pattern).
+  const READ_TRACKED_EFFECTS = { water: WATER_PARAMS };
+  MapShine.debug.registerReport('control-health', 'Control health (declared vs read)', () => {
+    const effects = {};
+    for (const [effectId, schema] of Object.entries(READ_TRACKED_EFFECTS)) {
+      effects[effectId] = getParamHealth(effectId, schema);
+    }
+    return {
+      note:
+        'declared = params in the schema. read = observed reaching the RENDERER this session (getRenderState(), ' +
+        'never the UI card display) — a read is never later un-read. An orphaned param may be genuinely dead, or ' +
+        'simply not yet exercised this session (e.g. before the surface has synced once).',
+      effects,
     };
   });
 
@@ -7787,6 +7824,16 @@ function install() {
   // function took no parameter at all and silently discarded the one rAF
   // already hands every callback.
   const pumpAstrolabe = (nowMs) => {
+    // U6's Law 11 row (docs/holy/UI-Testament.md §9): this whole function IS
+    // the Studio/Remote's real steady-state per-frame UI cost — candle
+    // ignition, weather-fade pumping, cue-preview pumping run UNGATED every
+    // frame; the astrolabe repaint below adds itself in on top whenever its
+    // own throttle/visibility gate opens. Wrapping the WHOLE body (rather
+    // than just the throttled block) means the mean/max split in the perf
+    // report HONESTLY shows that variability rather than hiding it behind a
+    // narrower bracket. `diag/ui-perf.js`'s own header explains why this is
+    // a self-measuring accumulator, not a perf-zones.js zone.
+    const uiTickStartedAt = beginUiTick();
     // UNGATED, unlike the astrolabe repaint below: candles must keep
     // responding to the clock whether or not a GM currently has the dial
     // open. Cheap on every frame that ISN'T a crossing (one computeSun call +
@@ -7859,6 +7906,10 @@ function install() {
         if (remoteAstrolabe?.root?.isConnected) remoteAstrolabe.update(payload);
       }
     }
+    // Ends BEFORE the reschedule below — scheduling next frame's callback is
+    // not part of THIS frame's UI work, and including it would count the
+    // same fixed rAF-registration cost on every single sample for no signal.
+    endUiTick(uiTickStartedAt);
     requestAnimationFrame(pumpAstrolabe);
   };
   requestAnimationFrame(pumpAstrolabe);

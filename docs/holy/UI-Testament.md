@@ -2219,6 +2219,128 @@ this round. The concurrent water-flow session's own files remain completely unto
 
 ---
 
+**P19 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U6 — Dials + Control-Health, the
+Effects-UI endgame, the last item on the author's own standing "continue the UI migration"
+instruction).** Water's FOH strip is five authored dials, not six raw sliders; a live health
+badge shows real declared/read counts and deep-links to a new Lab report; the Studio/Remote's
+own steady-state cost is a row in the perf report. All four checklist items land; the exit gate
+is met and demonstrated, not just asserted.
+
+1. **`core/dials-schema.js` gates on TYPE, not just `angle`.** The obvious trap — reject `angle`
+   drive targets because they wrap rather than clamp — is only half the real rule. A `color`
+   param has no `min`/`max` either (it declares `space`), so a type check that only excludes
+   `angle` would let a dial silently write a raw float into a colour picker's storage slot; same
+   failure for `bool`/`enum`/`text`/`vec2`/`vec3`/`curve`/`action`. `validateDialsSchema` gates
+   POSITIVE instead — only `float`/`int` accepted — so a ninth param type added next month is
+   excluded by construction, not by someone remembering to extend a blocklist. Caught before
+   shipping: the first draft only checked `angle`; a synthetic `tint`/`enabled` sabotage test
+   written against the SAME draft immediately proved a `color` target would have passed.
+2. **One bisection, not four hand-derived curve inverses.** A dial's displayed position has no
+   ground truth to read back — "a dial is a computed multi-write, not a new storage location"
+   (Effects-UI.md §3.1) — so `dialPositionFromParams` has to invert whichever curve the PRIMARY
+   drive declared. `linear`/`ease-in`/`ease-out` all have clean closed forms; `smoothstep`'s cubic
+   does not. Rather than three closed-form inverses plus one iterative fallback (a seam an author
+   could not eyeball for consistency), all four curves invert through the same 22-iteration
+   bisection — correct for anything monotonic on [0,1], which all four are, and cheap enough next
+   to a DOM rebuild that the extra iterations are noise. Round-tripped for all four curves at five
+   probe positions each in `dials-schema.test.mjs`.
+3. **Water's five: Murkiness, Depth, Shine, Foaminess, Flow — `flowAngleDeg`, `tint`, AND
+   `opacity` deliberately stay ROH-only.** The first two are the type gate (finding 1) working as
+   intended. `opacity` is a curation call, not a gap: it was one of the ORIGINAL six `fohKeys` (a
+   flat "top 6" list chosen before dials existed), but its own help text already calls it a
+   stopgap ("the map art beneath is doing the work a proper volume/absorption rung will do
+   later") — not one of the five levers an author reaches for most. Effects-UI.md's own vision is
+   a smaller CURATED set replacing the flat list, not a 1:1 promotion of every already-promoted
+   key, so opacity drops. Worth the author's own countersign if the read is wrong. `Foaminess`
+   drives all four foam-family params (`foam`/`swashFoam`/`breakFoam`/`foamTrail`) at once — the
+   most defensible multi-drive dial of the five, since all four already share the identical [0,1]
+   "how much foam" domain by their own schema declarations.
+4. **THREE read-classes touch a resolved params object; only one is "the renderer consumed
+   this," and the Testament's own boundary warning was correct but the mechanism took real
+   tracing to find.** `effects/registry.js#resolveAndApply`'s `apply(resolved)` is storage
+   handoff — every effect just stores the whole object, no per-key signal. The FOH/ROH card's
+   `getValue` reads `getReadout().params?.[id]` every render regardless of what the shader
+   touches — wrapping there would mark a param "read" the instant its slider is drawn. Only
+   `water-registration.js#getRenderState()` — what `water-surface-subsystem.js#sync()` and
+   `water-flow-subsystem.js` actually call once per frame — is the renderer's own read closure.
+   Confirmed water's OWN cache-key builder reads every param by explicit dotted name
+   (`p.tint`, `p.opacity`, `p.depth`, …), never `Object.keys`/`JSON.stringify`, before trusting a
+   prototype-chain object would work there — checked, not assumed.
+5. **A plain object spread would have made the signal permanently, silently wrong — caught by
+   reasoning through the JS semantics before writing the fix, not after a bug report.**
+   `getRenderState()`'s old shape was `{...p, tint: decoded}`. `{...proxy}` invokes the `get`
+   trap once for every own enumerable key (spread reads `[[OwnPropertyKeys]]` then `[[Get]]`s
+   each) — wrapping `p` in the tracking proxy BEFORE that spread would have marked all 24 water
+   params "read" on frame one, forever, regardless of what `sync()` actually went on to touch. Not
+   a hypothetical: `fluid-registration.js`/`window-registration.js` have the IDENTICAL spread
+   shape today and are NOT yet wrapped — named here as a real follow-up, not silently left. Fixed
+   for water via `Object.assign(Object.create(tracked), {tint: decoded})` — prototype delegation,
+   not a spread, so an unaccessed key is never GET. `tint` itself is read explicitly
+   (`tracked.tint`, not `p.tint`) inside `getRenderState()` so decoding it still counts as
+   "observed" — it would otherwise sit forever as an own, unproxied property and read as
+   permanently orphaned despite being consumed every frame.
+6. **The exit gate, demonstrated live, not just asserted green.** `tools/studio-preview/preview.js`
+   (the "cheap eyes before Foundry eyes" harness) now mounts the REAL `WATER_PARAMS`/`WATER_DIALS`
+   and simulates a `getRenderState()`-shaped partial read — every param touched except `chop` and
+   `caustics`. Live in the browser: the health badge reads **`22/24`**, its tooltip names "2 not
+   yet observed," and `chop`/`caustics` are the two params NOT counted — the deliberately orphaned
+   param, wearing its badge, within one session, exactly as written. Dragging the Foaminess dial to
+   its max wrote all four driven params (confirmed via the last `onChange` log line,
+   `water.foamTrail -> 1`); a forced re-render afterward showed the dial's own position correctly
+   recovered from the now-updated param state — the write/read round-trip, not just the write.
+   Bloom (no `dialsSchema`) was checked alongside water and correctly still renders its raw
+   `fohKeys` slider with the original planned health chip — the fallback path holds.
+7. **The health badge deep-links to LAB, not yet to the specific report — named as the real,
+   smaller scope, not silently overclaimed.** `shell.js` gained `switchDepartment(id)`
+   (generalising the search palette's own inline dept-switch dance into the one place `state.dept`
+   changes); the badge's `onClick` calls it. Auto-running the registered `'control-health'` report
+   the instant LAB opens needs a stable hook into `debug-panel.js`'s rendered report list from
+   OUTSIDE it, which does not exist today — a real, small, separately-scoped follow-up, not
+   claimed as done. Also found while building this: no toast/notification component exists
+   anywhere in `src/` despite the original UM plan's own note assuming one for planned-badge
+   clicks — that assumption was never actually built; not something this petition fixes, named so
+   a future session does not go looking for it.
+8. **Law 11's row is NOT a `perf-zones.js` zone, and forcing it into one would have been a
+   category error, not a shortcut.** Every `'frame'`-stage zone (`tick.camera`, `tick.
+   continuousInputs`, …) lives INSIDE `renderFrame`'s own pass-plan loop, validated against
+   `graph/passes.js`'s real pass/stage graph. `boot.js#pumpAstrolabe` is architecturally a
+   SEPARATE, independent `requestAnimationFrame` registration — fade/cue-preview pumping were
+   folded into it specifically to avoid a second independent loop beside the render loop (its own
+   pre-existing comment says so). Declaring a zone with `stage:'frame', pass:null` for work that
+   is not actually inside `renderFrame` would misstate WHERE the cost lives even if the number
+   were honest. `diag/ui-perf.js` mirrors `perf-hud.js`'s own "IT MEASURES ITSELF" idiom instead —
+   a self-contained accumulator, `beginUiTick`/`endUiTick` bracketing `pumpAstrolabe`'s WHOLE body
+   (ending before the `requestAnimationFrame` reschedule, so the fixed rAF-registration cost never
+   pollutes every sample) — and `perf-report.js` gained an optional `uiPerf` input read as plain
+   data, staying clock-free per its own header.
+9. **A small, worth-recording correction to the checklist's own wording.** "The read-tracking
+   `ctx.params` proxy" (this section's own second bullet) reads as if `ctx.params` were an
+   existing identifier to find and wrap. It is not — no `ctx` object of that shape exists anywhere
+   in the render path; `water-surface-subsystem.js#sync(floorIndex, viewRect)` takes no `ctx`
+   argument at all, and gets its params by calling `getWaterRenderState()` internally. The phrase
+   was generic shorthand for "the params object handed to a consuming context," confirmed by
+   checking the real call signature before designing around a name that turned out not to exist.
+
+*Verification note: `npx eslint`, `npx prettier --check` clean on every file touched (prettier
+auto-fixed 6 files on first pass, re-verified clean after). `node tools/run-tests.mjs`: 27 suites,
+11398 assertions, ALL GREEN (+124 over P18). `node tools/verify-structure.mjs`: the same two
+pre-existing violations (`no-gpu-readback` in `vision-mask-render.js`; `time/one-clock`'s ratchet,
+now 41 against a bound of 38) — the ratchet's growth traced via `git blame` to commits weeks
+before this session and to the concurrent water-flow session's own `decode-pool.js`/`frame-
+graph.js` work, not to anything touched here. Live-verified in the browser via `tools/studio-
+preview/preview.js` (finding 6, above) — dial rendering, dial writes, the health badge's real
+count, the LAB deep-link, and the fohKeys/planned-badge fallback for an effect with no dials, all
+confirmed with zero console errors. **Not yet wired: fluid's and window's own read-tracking**
+(finding 5) — both have the identical unfixed spread, named rather than silently left; **not yet
+built: auto-running the Control Health report on LAB arrival** (finding 7) — the badge's deep-link
+stops at switching departments. Seven commits, each hand-verified against `git diff` (in two
+cases, `git apply --cached` against a hand-extracted single hunk) to contain only this work — the
+concurrent water-flow session's own `water-body`/`water-flow`/`water-render`/`water-shore` files,
+`docs/planning/Water-Simulation-Turn.md`, and `tools/shader-lab/bench-water.js` remain completely
+untouched, confirmed by `git status` before and after every commit.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

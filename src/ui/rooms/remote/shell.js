@@ -8,16 +8,14 @@
  * and is correctly NOT ported — Foundry's scene-controls toggle is this
  * room's real open/close door, same as Studio's.
  *
- * ⚠️ SAFETY AND BASELINE SHIP `status:'planned'` THIS CHECKPOINT, ON PURPOSE.
- * Baseline needs the Fade Engine (U2's OWN next checkpoint, not built yet —
- * "ease back to the resting look" has nothing to ease WITH today). Safety
- * needs `diag/render-fallback.js#engageFoundryFallback` wired to MSA's real,
- * live canvas reference and is a ONE-WAY action within a session (no
- * `clearFoundryFallback` counterpart resurrects a torn-down canvas — a
- * reload is the only way back) — exactly the kind of hard-to-reverse action
- * this project's own safety posture says to wire carefully and deliberately,
- * not while racing through a shell pass. Marked, not silently faked or
- * silently skipped. See Petition P11.
+ * ⚠️ SAFETY STILL SHIPS `status:'planned'` (Baseline is real as of U2
+ * checkpoint 3 — see below). `diag/render-fallback.js#engageFoundryFallback`
+ * is a real, ONE-WAY action within a session (no `clearFoundryFallback`
+ * counterpart resurrects a torn-down canvas — a reload is the only way
+ * back) — exactly the kind of hard-to-reverse action this project's own
+ * safety posture says to wire carefully and deliberately, not alongside
+ * everything else in a single pass. Marked, not silently faked or silently
+ * skipped. See Petitions P11/P13.
  *
  * @module ui/rooms/remote/shell
  */
@@ -26,6 +24,7 @@ import { installTokens } from '../../tokens.js';
 import { installIconSprite, iconMarkup } from '../../widgets/icon-sprite.js';
 import { installCameraPathPopover } from './camera-path-popover.js';
 import { renderAstrolabePanel } from './astrolabe-panel.js';
+import { renderWeatherBoard } from './weather-board.js';
 
 const ROOM_ID = 'msa-remote';
 const STYLE_ID = 'msa-remote-style';
@@ -78,6 +77,27 @@ function injectStyle() {
   background:none; border:none; color:var(--ink0); cursor:pointer; font-size:.72rem}
 #${ROOM_ID} .msa-jump-menu button:hover{background:var(--bg3)}
 #${ROOM_ID} .msa-astro-status{min-height:14px; font-size:.68rem; color:var(--ink2); text-align:center}
+#${ROOM_ID} .msa-remote-sep{height:1px; background:var(--line); margin:2px 0}
+#${ROOM_ID} .msa-wx-host{display:flex; flex-direction:column; gap:10px}
+#${ROOM_ID} .msa-fade-time{display:grid; grid-template-columns:repeat(6, 1fr); gap:4px}
+#${ROOM_ID} .msa-fade-time button{padding:5px 4px; border-radius:7px; border:1px solid var(--line);
+  background:var(--bg2); color:var(--ink2); font-size:.68rem; cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-fade-time button:hover{background:var(--bg3); color:var(--ink0)}
+#${ROOM_ID} .msa-fade-time button[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 16%, transparent);
+  border-color:var(--shine); color:var(--shine)}
+#${ROOM_ID} .msa-wx-modeseg{display:grid; grid-template-columns:1fr 1fr; gap:4px}
+#${ROOM_ID} .msa-wx-modeseg button{padding:6px; border-radius:7px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--ink2); font-size:.72rem; font-weight:600; cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-wx-modeseg button[aria-pressed="true"]{background:color-mix(in oklab, var(--c-atmos) 18%, transparent);
+  border-color:var(--c-atmos); color:var(--c-atmos)}
+#${ROOM_ID} .msa-wx-chips{display:flex; flex-wrap:wrap; gap:5px}
+#${ROOM_ID} .msa-wx-chip{padding:5px 9px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--ink1); font-size:.7rem; cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-wx-chip:hover{background:var(--bg3)}
+#${ROOM_ID} .msa-wx-chip[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 18%, transparent);
+  border-color:var(--shine); color:var(--shine)}
+#${ROOM_ID} .msa-wx-faders{display:flex; flex-direction:column; gap:6px}
+#${ROOM_ID} .msa-wx-bracket{font-size:.62rem; color:var(--ink2); margin-left:6px; white-space:nowrap}
 #${ROOM_ID} .msa-remote-foot{display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; border-top:1px solid var(--line); flex:none}
 #${ROOM_ID} .msa-remote-foot a, #${ROOM_ID} .msa-remote-foot button{flex:1 1 auto; min-width:0; text-align:center;
   padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--bg2); color:var(--ink1);
@@ -126,7 +146,11 @@ function plannedFooterBtn(text, plannedReason) {
 
 /**
  * @param {{debugPanel?: object, mountAstrolabeDial: (el: HTMLElement) => void,
- *   getPosture: () => string, isFlowPlaying: () => boolean, onFlowToggle: () => void}} [opts]
+ *   getPosture: () => string, isFlowPlaying: () => boolean, onFlowToggle: () => void,
+ *   weatherBoard?: object, onBaseline?: (overMs: number) => void}} [opts]
+ *   `weatherBoard`, when supplied, is passed straight through as
+ *   `renderWeatherBoard`'s own `ctx` (weather-board.js) — this file never
+ *   inspects its shape, only whether it exists.
  */
 export function installRemote(opts = {}) {
   installTokens();
@@ -178,6 +202,8 @@ export function installRemote(opts = {}) {
   let bodyBuilt = false;
   let npGlyph = null;
   let npLabel = null;
+  /** @type {{getFadeOverMs: () => number, refresh: () => void}|null} */
+  let weatherBoardHandle = null;
 
   function buildBody() {
     if (bodyBuilt) return;
@@ -200,13 +226,32 @@ export function installRemote(opts = {}) {
       isFlowPlaying: opts.isFlowPlaying ?? (() => false),
       onFlowToggle: opts.onFlowToggle ?? (() => {}),
     });
+
+    if (opts.weatherBoard) {
+      const sep2 = document.createElement('div');
+      sep2.className = 'msa-remote-sep';
+      const wxHost = document.createElement('div');
+      wxHost.className = 'msa-wx-host';
+      body.append(sep2, wxHost);
+      weatherBoardHandle = renderWeatherBoard(wxHost, opts.weatherBoard);
+    }
   }
 
   // ---- footer ------------------------------------------------------------
   const foot = document.createElement('div');
   foot.className = 'msa-remote-foot';
+  const baselineBtn = opts.onBaseline
+    ? (() => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = '⟲ Baseline';
+        btn.title = "Fade back to the scene's authored resting look, over the current Fade Time.";
+        btn.addEventListener('click', () => opts.onBaseline(weatherBoardHandle?.getFadeOverMs() ?? 0));
+        return btn;
+      })()
+    : plannedFooterBtn('⟲ Baseline', 'Fading back to the authored resting look needs the Fade Engine — not built yet.');
   foot.append(
-    plannedFooterBtn('⟲ Baseline', 'Fading back to the authored resting look needs the Fade Engine — not built yet.'),
+    baselineBtn,
     plannedFooterBtn(
       '⛑ Safety',
       'The MSA→Foundry safety slide is a real, one-way mechanism (diag/render-fallback.js) not yet wired to a manual button — see Petition P11.'
@@ -257,6 +302,15 @@ export function installRemote(opts = {}) {
       if (!bodyBuilt) return;
       if (glyph) npGlyph.innerHTML = iconMarkup(glyph);
       if (label) npLabel.textContent = label;
+    },
+    /** Re-sync the weather board's chip/mode highlighting — boot.js calls
+     * this when a fade completes (the archetype label only becomes "true"
+     * once arrived) and whenever another client's own edit reaches this one
+     * (watchSceneSky/watchFadeState), matching "one writer, many derivers":
+     * this file never polls, it's told when to repaint. No-op before the
+     * body exists or when no weather board was supplied. */
+    refreshWeatherBoard() {
+      weatherBoardHandle?.refresh();
     },
   };
   room._msaRemoteController = controller;

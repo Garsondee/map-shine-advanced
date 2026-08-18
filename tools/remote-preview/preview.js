@@ -13,6 +13,14 @@
 import { installTokens, THEMES } from '../../src/ui/tokens.js';
 import { installRemote } from '../../src/ui/index.js';
 import { createAstrolabe } from '../../src/ui/astrolabe.js';
+import {
+  WEATHER_ARCHETYPES,
+  mergeFadeState,
+  pruneExpired,
+  computeEasedValue,
+  isEntryExpired,
+  createFadeSourceRegistry,
+} from '../../src/world/index.js';
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
@@ -45,6 +53,68 @@ let remoteDialInstance = null;
 
 function log(text) {
   document.getElementById('log').textContent = text;
+}
+
+// ---- THE REAL FADE ENGINE, fed a fake weather store ----------------------
+// Every function below (mergeFadeState/computeEasedValue/isEntryExpired/
+// pruneExpired/createFadeSourceRegistry) is the ACTUAL production code —
+// only fakeSky and the tick loop stand in for boot.js's real skyScope/
+// editSky/requestAnimationFrame wiring, proving the real fade math end to
+// end in a browser, not just Node.
+fakeSky.precip01 = 0;
+fakeSky.weatherArchetype = 'clear';
+const fadeRegistry = createFadeSourceRegistry();
+fadeRegistry.registerSource('weather', {
+  keys: () => ['cloudCover01', 'precip01'],
+  typeOf: () => 'float',
+  readLive: (field) => fakeSky[field] ?? 0,
+  write: (field, value) => {
+    fakeSky[field] = value;
+  },
+});
+let fadeState = {};
+const pendingCompletions = new Map();
+function fadeToArchetype(archetypeId, overMs) {
+  const archetype = WEATHER_ARCHETYPES.find((a) => a.id === archetypeId);
+  if (!archetype) return;
+  const nowMs = performance.now(); // preview-only stand-in for wallClockMs()
+  const gestureId = `archetype:${archetypeId}:${nowMs}`;
+  const targets = {};
+  for (const field of ['cloudCover01', 'precip01']) {
+    const to = archetype.axes?.[field];
+    if (!Number.isFinite(to)) continue;
+    targets[`weather.${field}`] = {
+      to,
+      type: 'float',
+      overMs,
+      curve: 'ease',
+      from: fadeRegistry.readLive(`weather.${field}`),
+    };
+  }
+  fadeState = mergeFadeState(fadeState, { id: gestureId, label: archetype.label, targets }, nowMs);
+  pendingCompletions.set(gestureId, archetypeId);
+  fakeSky.weatherArchetype = 'custom';
+  log(`fading -> ${archetype.label} over ${overMs}ms`);
+}
+function tickFades() {
+  const nowMs = performance.now();
+  for (const [key, entry] of Object.entries(fadeState)) {
+    if (isEntryExpired(entry, nowMs)) continue;
+    fadeRegistry.write(key, computeEasedValue(entry, nowMs));
+  }
+  let anyCompleted = false;
+  for (const [gestureId, archetypeId] of pendingCompletions) {
+    const own = Object.values(fadeState).filter((e) => e.id === gestureId);
+    if (own.length > 0 && own.every((e) => isEntryExpired(e, nowMs))) {
+      pendingCompletions.delete(gestureId);
+      fakeSky.weatherArchetype = archetypeId;
+      log(`arrived -> ${archetypeId}`);
+      anyCompleted = true;
+    }
+  }
+  fadeState = pruneExpired(fadeState, nowMs);
+  if (anyCompleted) remote.refreshWeatherBoard();
+  requestAnimationFrame(tickFades);
 }
 
 const remote = installRemote({
@@ -83,7 +153,33 @@ const remote = installRemote({
     log(`flow -> ${fakeSky.rateHoursPerMinute > 0 ? 'playing' : 'paused'}`);
     remoteDialInstance?.update({ ...fakeSky, canSetHour: true, phase: 'day', rising: true });
   },
+  weatherBoard: {
+    getWeatherMode: () => (fakeSky.weatherMode === 'almanac' ? 'almanac' : 'director'),
+    onWeatherModeChange: (mode) => {
+      fakeSky.weatherMode = mode;
+      log(`weather mode -> ${mode}`);
+    },
+    getWeatherBiome: () => fakeSky.weatherBiome ?? null,
+    onWeatherBiomeChange: (id) => {
+      fakeSky.weatherBiome = id;
+      log(`biome -> ${id}`);
+    },
+    getWeatherArchetype: () => fakeSky.weatherArchetype,
+    fadeToArchetype: (archetypeId, overMs) => fadeToArchetype(archetypeId, overMs),
+    getAxisValue: (axisName) => fadeRegistry.readLive(`weather.${axisName}`),
+    onAxisCommit: (axisName, value) => {
+      fakeSky[axisName] = value;
+      fakeSky.weatherArchetype = 'custom';
+      log(`${axisName} -> ${value}`);
+    },
+  },
+  onBaseline: (overMs) => {
+    fadeToArchetype('clear', overMs); // preview stand-in: "baseline" = clear sky
+    log(`baseline -> fading to clear over ${overMs}ms`);
+  },
 });
+
+requestAnimationFrame(tickFades);
 
 document.getElementById('toggleBtn').addEventListener('click', () => remote.toggle());
 

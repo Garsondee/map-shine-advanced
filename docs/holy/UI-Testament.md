@@ -1586,6 +1586,97 @@ completely untouched by every commit here, same discipline as every round since
 
 ---
 
+**P12 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U2 checkpoint 2 — the Fade Engine's
+pure core — the author's own direct design brief: "it needs to be able to fade between any one
+configuration to any other configuration of effects... automatically expands as we add more
+effects").** `world/fade-engine.js`, `world/fade-registry.js`, `foundry/fade-persistence.js`.
+No UI wiring yet — the Remote's Fade Time control, channel faders, and Baseline button are
+checkpoint 3's job, consuming what's built here; this petition is the core alone.
+
+1. **The record shape is ONE flat map, not §4.2's own `channels{}`/`params{}` split — a
+   deliberate departure, not a silent one, made under the author's explicit invitation to
+   design this properly.** `Record<string, FadeEntry>`, keyed by a namespaced string
+   (`'water.depth'`, `'weather.cloudCover01'`). Building against the two-field sketch first and
+   then trying to generalize it added a real seam exactly where the author asked for none: "any
+   configuration to any other" doesn't care whether a knob happens to live on a world axis or
+   an effect, so splitting them into two maps a caller has to reason about separately buys
+   nothing. Worth an explicit countersign — this is a real change to written Law, argued for
+   here, not assumed.
+2. **"Automatically expands" is a literal, tested property, not a design intention.** The
+   mechanism: every effect that wants a Studio card already builds an `{schema, getValue,
+   onChange}` triple (`registerEffectCard`'s own contract, `schema` keyed by
+   `core/params-schema.js#PARAM_TYPES`). `fade-registry.js#schemaFadeSource` wraps that EXACT
+   triple, unchanged, into a fade source — there is no second, fade-specific registration to
+   forget. `createFadeSourceRegistry` resolves a namespaced key (`'water.depth'`) by splitting
+   on the first `.` and deferring entirely to that namespace's own source; the registry itself
+   never learns what a "water" or a "depth" is. **Proven, not asserted:** the test suite
+   registers a THIRD, invented-on-the-spot fake effect AFTER the registry already has two real
+   ones, using nothing but the same generic wrapper, and confirms it is immediately, fully
+   fadeable — "a 16th effect needs zero new code here" is a passing assertion, not a claim in a
+   comment.
+3. **Type-aware interpolation, dispatched off the SAME type vocabulary every param already
+   declares** (`core/params-schema.js#PARAM_TYPES`) — this is the other half of "auto-expands":
+   a new EFFECT never needs a line here, only a new value TYPE would (the last one, `angle`,
+   landed 2026-08-16, and nothing about the Fade Engine existed to update when it did). Eight
+   of eleven declared types are continuously fadeable (`FADEABLE_TYPES`); `text`/`curve`/
+   `action` are not (no continuous "between" a string, an arbitrary point list, or a button
+   press) and are rejected — the same "fails at author time, not at the table" rule the
+   Testament already sets for cues (§4.3). `angle` gets a real shortest-arc wrap (350→10 sweeps
+   the 20° way, never the 340° way) — the exact same "signed delta, then wrap" shape
+   `params-schema.js`'s own single-value WRITE already uses, applied here to a continuous blend
+   instead. `bool`/`enum` hold their `from` for the whole window and snap to `to` only at
+   completion — a defensible, simple default, not the only reasonable one; worth a countersign
+   if a mid-fade flip is ever wanted instead.
+4. **Curves:** `'ease'` is Foundry's own cosine ease (`CanvasAnimation.easeInOutCosine`,
+   already this codebase's convention per `camera-path.js`), not reinvented; `'smoothstep'` is
+   the classic polynomial, visibly distinct from `'ease'` rather than a second name for the
+   same formula; `'hold-snap'` waits at `from` for the whole window and cuts to `to` only once
+   it closes.
+5. **Reload survival holds by construction, not by a resume routine that could be forgotten.**
+   Every function is pure over `(entry, nowMs)`; `startedAtMs` is the only state, wall-clock,
+   baked into the entry itself. The test suite proves this the honest way — it calls
+   `computeEasedValue` ONCE with a `nowMs` far past the fade's start, with NOTHING in between
+   (no simulated tick loop) — a real reload has no intermediate calls either, and if the
+   function needed one, this test would have caught it failing to resume correctly.
+6. **"Replace, don't queue" and "disjoint channels coexist", both as one pure function and both
+   tested against each other in the same case:** interrupting an ALREADY-fading key mid-flight
+   captures its CURRENT eased value (not the original `from`, not a fresh live re-read) as the
+   new fade's `from`; a fade on an unrelated key in the same call leaves the interrupted key's
+   own entry byte-identical (`===`, not just deep-equal) to prove it was genuinely untouched,
+   not merely unchanged in value.
+7. **Scene-flag persistence, scene-only — no world-scope store, unlike sky.** A fade is a
+   table/session moment; the Testament's own §4.1 Baseline button ("fade back to the scene's
+   authored resting look") is itself just another target configuration, not a second
+   persistent store to keep in sync with this one. `foundry/fade-persistence.js` mirrors
+   `sky-persistence.js`'s exact shape (GM-only writes report `{ok, reason}` rather than
+   throwing; a `watchFadeState` hook filtered to the active scene and this module's own flag).
+8. **Two real test-writing bugs, caught before commit, worth naming honestly rather than
+   quietly fixing:** one assertion used `t.ok(name, () => {...})` — a FUNCTION reference, always
+   truthy regardless of what it returns, so the assertion could never have failed no matter
+   what the code did. Caught by re-reading the test harness's own `ok(name, cond)` signature
+   before trusting the result, not by the test itself (it was passing). A second assertion used
+   strict `===` against a decimal literal for a float lerp result that IEEE-754 arithmetic
+   naturally lands a `0.0000000000000002` away from — fixed to an epsilon comparison, matching
+   the pattern already used elsewhere in the same file.
+9. **Not built this checkpoint, on purpose:** nothing calls `mergeFadeState`/`writeFadeState`
+   from `boot.js` yet — no live `MapShine.startFade(...)`, no Baseline button wired, no Fade
+   Time segmented control, no channel faders. §9's own U2 checklist splits "pure core +
+   persistence" from "Remote shell: ... Fade Time ... channel faders" as separate bullets, and
+   this petition covers only the first; checkpoint 3 is the UI consumer.
+
+**Verification note, honestly scoped to what this checkpoint actually is:** this is a pure,
+non-DOM, non-Foundry module — there is no live/browser rung to climb for it yet, unlike every
+UI-facing petition before this one; the Node test suite IS the ceiling of what's meaningfully
+verifiable before checkpoint 3 gives it something to render. `node tools/run-tests.mjs`: 27
+suites, 11201 assertions (100 new, all in `fade-engine.test.mjs`/`fade-registry.test.mjs`), 0
+failed. `node tools/verify-structure.mjs`: clean except the same two pre-existing, unrelated
+violations already named in Petition P11 (`no-gpu-readback`, `time/one-clock`) — re-confirmed
+via `git blame` as untouched by this checkpoint, not re-litigated here. `npx eslint`/`npx
+prettier --check` clean. The concurrent water-flow session's own files remain completely
+untouched.
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

@@ -474,6 +474,15 @@ const V2_CORPSES = [
     code: "const slider = document.createElement('input'); slider.type = 'range';",
     note: 'a hand-rolled range input outside the canon — the exact shape buildRangeRow already is',
   },
+  // `ui/no-dead-axis` has no V2 corpse either — WEATHER_AXES' own
+  // consumerStatus field is new this Testament. Shaped like a Remote-side
+  // fader reaching for a pending axis by name instead of one already live.
+  {
+    rule: 'ui/no-dead-axis',
+    from: 'synthetic — no V2 precedent; WEATHER_AXES consumerStatus did not exist before slice 1',
+    code: "buildParamControl('cloudType01', axisParamDecl('cloudType01'), io)",
+    note: 'a fader for a pending axis outside world/ — exactly what Law 5 says must not render at all',
+  },
 ];
 
 /** Lines that must NOT trip a rule (guards against a wall crying wolf). */
@@ -1001,6 +1010,33 @@ export function run(t) {
       for (const line of realStructuralLines) {
         t.ok(`ALLOWS real Studio room code: ${line}`, !rule.pattern.test(line));
       }
+    }
+  }
+
+  // ---- ui/no-dead-axis: the door (world/) is open, the wall bites the three
+  // PENDING axis names, and it does NOT bite the three already-live ones or
+  // any unrelated weather text — a wall that flagged cloudCover01 would make
+  // the astrolabe's own real, live Cloud slider permanently un-committable.
+  {
+    const rule = RULES.find((r) => r.id === 'ui/no-dead-axis');
+    t.ok("'ui/no-dead-axis' exists", !!rule);
+    if (rule) {
+      const weatherRel = `src${sep}world${sep}weather.js`;
+      t.ok(
+        'world/ itself may name every axis, live or pending (the door is open)',
+        rule.allow.some((a) => weatherRel.includes(a))
+      );
+
+      for (const pending of ['cloudType01', 'cloudAltitudePx', 'cloudScalePx']) {
+        t.ok(`the pending axis '${pending}' trips the wall`, rule.pattern.test(`editSky({ ${pending}: 0.5 })`));
+      }
+      for (const live of ['cloudCover01', 'precip01', 'temperature01']) {
+        t.ok(`the LIVE axis '${live}' never trips it`, !rule.pattern.test(`editSky({ ${live}: 0.5 })`));
+      }
+      t.ok(
+        'unrelated weather text (a substring, not the whole identifier) never trips it',
+        !rule.pattern.test("label.textContent = 'Cloud type is not the same as cloud cover';")
+      );
     }
   }
 

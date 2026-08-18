@@ -1141,6 +1141,53 @@ export const RULES = [
       'it, in ui/widgets/ or one of the two grandfathered diag files. A control that represents a one-off ' +
       'UI choice — which effect to filter by, which preset to apply — is not a param and does not need it.',
   },
+
+  // ===================================================================
+  // ui/no-dead-axis — docs/holy/UI-Testament.md §4.7: "No dead channels. A
+  // fader for an engine that isn't live yet is not rendered greyed — it is
+  // not rendered." A DIFFERENT posture from the status:'planned' convention
+  // above: `WEATHER_AXES` in world/weather.js already carries this fact per
+  // axis (`consumerStatus:'pending'`) — this wall just makes it impossible
+  // for a `ui/` file to name one of the pending axes directly, the same
+  // "the catalog is the one legal home of this knowledge" shape
+  // masks/authority-only already enforces for mask suffixes.
+  //
+  // The list is a snapshot, not derived from weather.js at lint-time (this
+  // tool has no import graph, only regex over text) — when an axis's
+  // consumerStatus flips to 'live', delete it from this list in the SAME
+  // commit that wires its first real consumer. An axis that's ALREADY live
+  // (cloudCover01, precip01, temperature01) is correctly absent below: this
+  // wall only ever names the ones still waiting.
+  // ===================================================================
+  {
+    id: 'ui/no-dead-axis',
+    pattern: /\b(cloudType01|cloudAltitudePx|cloudScalePx)\b/,
+    allow: [
+      `${sep}world${sep}`,
+      // NOT a fader — the astrolabe's own decorative Face already reads
+      // cloudType01 today to shape its cloud-blob silhouette (cirrus/
+      // cumulus/stratus), pre-dating this wall (2026-08-16). That makes
+      // WEATHER_AXES.cloudType01's OWN `consumerStatus:'pending'` comment
+      // technically stale by its own literal definition ("live means
+      // something in src/ reads this axis TODAY") — a real, if narrow,
+      // pre-existing finding worth the author's countersign (Petition
+      // P13), not something this wall silently papers over or a worker
+      // session unilaterally re-labels. Grandfathered at the FILE level
+      // (coarser than ideal — a line-level allow isn't a shape this tool
+      // supports) rather than blocking a legitimate, already-shipped read.
+      `${sep}ui${sep}astrolabe.js`,
+      `${sep}vt${sep}vt-pan-viewer.js`,
+    ],
+    why:
+      "A fader wired to an axis nothing renders yet is a promise the UI can't keep — the exact " +
+      'V2 shape of a slider that moves a number nobody downstream reads. Law 5 answers this by not ' +
+      'rendering the control AT ALL rather than greying it out, which only works if nothing in ui/ ' +
+      'can reach for one of these three names in the first place.',
+    instead:
+      "Render a channel fader only for an axis this list doesn't name (check world/weather.js#WEATHER_AXES's " +
+      "own consumerStatus if unsure). If the axis you need isn't live yet, its consumer is the thing to " +
+      'build first — the fader follows, not the other way round.',
+  },
 ];
 
 // ---------------------------------------------------------------------------

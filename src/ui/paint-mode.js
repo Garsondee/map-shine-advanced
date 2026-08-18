@@ -47,6 +47,16 @@
  * and a live draft preview. Deferred: retained/editable vector shapes + a
  * Select tool, bake-to-file (Mode B), the package gate.
  *
+ * ⚠️ PAINT → RENDER, ON SAVE (2026-08-18) — "paint fire, see fire" is now
+ * genuinely true, on Save. `deps.onLayersChanged` (see `installPainter`'s
+ * own param doc) hands boot.js the live layer set, which feeds
+ * `scene/mask-authority.js#ingestPaintedMask` — the door that file's own
+ * header used to name as two-doors-only (file discovery, VT decode) before
+ * this. NOT yet live mid-stroke, before Save: that would mean hooking the
+ * per-frame preview loop (`paint-mode-canvas.js#loop`, tuned for cheap
+ * dirty-rect-only repaints) rather than the already-explicit Save action, a
+ * real, separate, higher-risk follow-up — named, not silently claimed.
+ *
  * @module ui/paint-mode
  */
 
@@ -89,8 +99,23 @@ const PAINTABLE_KINDS = MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.
  *   kept burning on the floor below, the newly-painted floor's own region
  *   never ignited). Optional so tests/tools that construct the painter
  *   without a full boot() still work.
+ * @param {(layersByKey: Record<string, import('../scene/mask-derive.js').MaskGrid>)=>void} [deps.onLayersChanged] -
+ *   THE BRUSH→RENDER BRIDGE (2026-08-18) — told the CURRENT, COMPLETE
+ *   in-memory layer set (every `"<kind>::<floor>"` key this painter knows
+ *   about, painted-empty ones included) right after a successful `save()`
+ *   makes it the scene's own authoritative content. boot.js's own consumer
+ *   feeds each layer straight to `maskAuthority.ingestPaintedMask(floorIndex,
+ *   kindId, layer)` — see that function's own doc for why a painted-empty
+ *   layer is safe to re-ingest unconditionally (self-alpha composites it as
+ *   a no-op) rather than this file needing to track and separately signal
+ *   "was cleared". ⚠️ NOT fired from `hydrateFromScene()` — see that
+ *   method's own doc for why (a scene-load ordering hazard); the caller
+ *   reads `getLayers()` and calls the bridge itself there instead. NOT
+ *   called on every brush stamp either — see this module's own header for
+ *   why live, mid-stroke ingest is a deliberately separate, not-yet-built
+ *   follow-up.
  */
-export function installPainter(MapShine, { onFloorChanged = null } = {}) {
+export function installPainter(MapShine, { onFloorChanged = null, onLayersChanged = null } = {}) {
   const state = {
     active: false,
     ctx: null,
@@ -550,6 +575,13 @@ export function installPainter(MapShine, { onFloorChanged = null } = {}) {
     state.dirtySinceSave = false;
     state.refreshToolbar?.();
     notify(msg, heavy.length ? 'warn' : 'info');
+    // THE BRUSH→RENDER BRIDGE — see this module's own header. Every
+    // in-memory layer, not just `payload`'s own non-empty subset: a layer
+    // the author just cleared to fully-empty must still reach
+    // ingestPaintedMask so it can stop overriding the render (self-alpha
+    // makes an all-zero layer a no-op there, automatically — see that
+    // function's own doc).
+    onLayersChanged?.(state.layers);
   }
 
   // ---- preview loop ------------------------------------------------------
@@ -574,7 +606,17 @@ export function installPainter(MapShine, { onFloorChanged = null } = {}) {
      * card's ＋ button goes through. Private until 2026-07-27; a card that wants
      * to send you straight to painting ITS mask needs to be able to say so. */
     enter,
-    /** Called from boot's canvasReady: pull any painted masks saved on this scene. */
+    /**
+     * Called from boot's canvasReady: pull any painted masks saved on this
+     * scene. ⚠️ Does NOT itself call `onLayersChanged` — `canvasReady`'s own
+     * handler calls `maskAuthority.reset()` (via `startRealSceneViewer`)
+     * AFTER this, several hundred lines later in the same hook, and a
+     * `reset()` wipes `paintedIngests` wholesale for the new scene. Firing
+     * the bridge here would feed the OLD scene's (soon-to-be-discarded)
+     * authority state and be silently lost the moment `reset()` ran. The
+     * caller reads `getLayers()` (below) and calls the bridge itself, AFTER
+     * its own `reset()` — see boot.js's own canvasReady handler.
+     */
     hydrateFromScene() {
       const ctx = readPaintContext();
       if (!ctx.ready) return { loaded: false };
@@ -593,6 +635,13 @@ export function installPainter(MapShine, { onFloorChanged = null } = {}) {
       state.dirtySinceSave = false; // freshly loaded from the scene = clean
       for (const key of Object.keys(layers)) markFull(key);
       return { loaded: Object.keys(layers).length > 0, mismatched };
+    },
+    /** The CURRENT in-memory layer set — read-only, for a caller that needs
+     * to re-feed it to `onLayersChanged`'s own consumer at a moment this
+     * file cannot safely call that callback itself (see `hydrateFromScene`'s
+     * own doc for the one caller that needs this, and why). */
+    getLayers() {
+      return state.layers;
     },
     /** POOL HEALTH — see gridCachePoolStats' own declaration for the exact
      * hit/miss doctrine. */

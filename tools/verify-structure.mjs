@@ -894,6 +894,32 @@ export const RULES = [
   // ===================================================================
   // THE QUARANTINE — src/ never imports legacy/. (Keyhole.md §5)
   // ===================================================================
+  // AN EFFECT PANEL READS LIVE STATE — never a readout captured at card-build
+  // time. (Built 2026-08-17 with the fix, at zero, the same
+  // wall-and-room-in-one-commit precedent `masks/authority-only` set.)
+  // ===================================================================
+  {
+    id: 'panels/no-captured-readout',
+    // `const readout = anything.getReadout()` — the exact shape every effect
+    // panel used. A live accessor (`const readLive = () => x.getReadout()`)
+    // does not match, because the arrow makes it a FUNCTION, not a snapshot.
+    pattern: /\b(?:const|let|var)\s+\w*\s*=\s*[\w.]+\.getReadout\s*\(\s*\)/,
+    allow: [],
+    why:
+      'Every boot.js effect panel opened `const readout = effect.getReadout()` and closed getValue ' +
+      'over that object. A cascade resolve REPLACES the readout with a new object and nothing calls ' +
+      'refreshControls() on a param change, so the capture froze at card-build time. The card still ' +
+      'LOOKED right — an <input type=range> holds the dragged value in its own native DOM state — ' +
+      'while the 📋 copy button exported the build-time values: a flawless, plausible set of schema ' +
+      'defaults the author pasted in good faith, costing a full round trip (2026-08-17). An ' +
+      'instrument that returns a confident wrong answer is worse than one that fails.',
+    instead:
+      'Capture an ACCESSOR, not a value: `const readLive = () => effect.getReadout();` then ' +
+      '`getValue: (id) => readLive().params?.[id] ?? SCHEMA[id]?.default` and ' +
+      '`getEnabled: () => readLive().enabled`. See effect-controls.js#buildSettingsSnapshot.',
+  },
+
+  // ===================================================================
   {
     id: 'quarantine/no-legacy-imports',
     pattern: /from\s+['"][^'"]*legacy\/|import\s*\(\s*['"][^'"]*legacy\//,
@@ -1028,6 +1054,41 @@ export const RULES = [
       "once, converts it to a comparable depth value, and compares against buf:scene.depth's stored " +
       'sample — one line, no new bits, no new byte. See point-light-illumination.js#buildDepthHeightGateNode ' +
       'for the worked example, and docs/planning/Depth-Buffer.md §9e for the full account.',
+  },
+
+  // ===================================================================
+  // ONE TOKEN TABLE — the LANTERN UI migration (U0, docs/holy/UI-Testament.md
+  // §9). Preventative, not a V2 corpse: this project has hit "one concept, N
+  // homes" for grade (112 uniforms, 3 families), weather (938 keys, 6 writers),
+  // wind inputs (copy-pasted at 4 call sites) and shadow (a second darkening
+  // system) often enough that the fix, this time, is to make the SECOND home
+  // unwriteable before a first one has the chance to appear. A hand-typed
+  // `--shine:#e7c368` in some future room file is the exact same disease as
+  // those four, one commit before it would have had a name.
+  // ===================================================================
+  {
+    id: 'ui/tokens-only',
+    // A QUOTED LANTERN token name immediately followed by `:` is a JS object
+    // key — i.e. a DECLARATION (`'--shine': '#e7c368'`), the shape every entry
+    // in ui/tokens.js's THEME_TOKENS/SHARED objects uses. A *usage* of the
+    // same token (`var(--shine, ...)`, CSS `var(--shine)`) never has a quote
+    // immediately before the name, so this cannot trip on the hundreds of
+    // legitimate reads the widget canon and every room will contain.
+    pattern:
+      /['"]--(?:bg[0-3]|line(?:-strong)?|ink[0-2]|shine(?:-soft|-glow)?|ok|warn|fail|info|c-(?:gameplay|lighting|atmos|surface|particles|post|system)|glass(?:-blur)?|shadow[1-3]|glow-on|map-bright|r-(?:ctl|card|room)|sp[1-5]|t-(?:micro|move|room)|ease|font|mono)['"]\s*:/,
+    allow: [`${sep}ui${sep}tokens.js`],
+    why:
+      'A CSS custom property is only as trustworthy as its writers are singular — a second file ' +
+      'declaring `--shine` (even with the same value, today) is a second source of truth that WILL ' +
+      'drift the first time only one of the two gets edited, and nothing before this wall would notice ' +
+      'either the duplication or the drift. Every other doctrine in this file (grade, weather, wind, ' +
+      'shadow, depth) is the same lesson learned after the drift already cost a debugging session — ' +
+      'this is the one instance in the codebase where the lesson is applied before the first incident.',
+    instead:
+      'ui/tokens.js#getThemeTokens/installTokens is the ONE place a LANTERN token is declared. Every ' +
+      'other file only READS one, via `var(--token-name, <fallback>)` — see ui/widgets/param-control.js ' +
+      'for the pattern (ACCENT/MUTED/etc), including why the fallback matters: it is what keeps the ' +
+      "OLD debug-panel's appearance unchanged by widgets that are also, simultaneously, theme-aware.",
   },
 ];
 

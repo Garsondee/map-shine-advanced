@@ -150,6 +150,14 @@ const V2_CORPSES = [
     note: 'the swallow disease reached even the healthiest two-line function in the file',
   },
 
+  // --- the instrument that lied about the author's own settings
+  {
+    rule: 'panels/no-captured-readout',
+    from: 'every effect panel in boot.js, until the 📋 button exported defaults the author never set',
+    code: '      const readout = water.getReadout();',
+    note: 'a resolve replaces the readout object, so the capture froze at card-build time while the sliders still looked right',
+  },
+
   // --- the quarantine
   {
     rule: 'quarantine/no-legacy-imports',
@@ -444,6 +452,18 @@ const V2_CORPSES = [
     from: "boot.js's own candle/lightning anchor mapping — the grandfathered, still-load-bearing call",
     code: 'elevationRank: resolveAnchorElevationRank(a.floorBinding, lastKnownFloors),',
     note: 'proves the pattern actually matches the real grandfathered call, not just a hypothetical shape',
+  },
+  // `ui/tokens-only` has no V2 corpse to cite — LANTERN is new, built at U0
+  // (docs/holy/UI-Testament.md §9), so there is no legacy/ line where this
+  // mistake already happened. `from` says so honestly rather than dressing a
+  // synthetic case up as a historical one; the shape mirrors ui/tokens.js's
+  // own THEME_TOKENS object exactly, which is what a copy-pasted "just add the
+  // token here too" edit in some other file would actually look like.
+  {
+    rule: 'ui/tokens-only',
+    from: 'synthetic — no V2 precedent; LANTERN did not exist before U0',
+    code: "  '--shine': '#ffcc00',",
+    note: 'a second file redeclaring a token — today matching ui/tokens.js, tomorrow drifted from it',
   },
 ];
 
@@ -896,6 +916,37 @@ export function run(t) {
       'the REAL codebase has zero dead controls today (no ratchet needed)',
       findDeadControlsInTexts(realFiles).length === 0
     );
+  }
+
+  // ---- ui/tokens-only: the ONE DOOR (ui/tokens.js itself) must be open, and
+  // the wall must not bite the hundreds of legitimate `var(--token, ...)`
+  // READS the widget canon and every room actually contain -----------------
+  {
+    const rule = RULES.find((r) => r.id === 'ui/tokens-only');
+    t.ok("'ui/tokens-only' exists", !!rule);
+    if (rule) {
+      const tokensRel = `src${sep}ui${sep}tokens.js`;
+      t.ok(
+        'the token table itself may declare tokens (the door is open)',
+        rule.allow.some((a) => tokensRel.includes(a))
+      );
+      t.ok('ui/tokens.js exists on disk', existsSync(join(ROOT, 'src', 'ui', 'tokens.js')));
+      t.ok(
+        'a second declaration site with the SAME value still trips the wall (today-identical is still a second writer)',
+        rule.pattern.test("'--bg0': '#14161d',")
+      );
+      // The whole reason `param-control.js` exists post-U0: hundreds of reads
+      // like this, none of which are a declaration.
+      t.ok(
+        'a var(--token, fallback) READ never trips the wall',
+        !rule.pattern.test("const ACCENT = 'var(--shine, rgb(143,214,255))';")
+      );
+      t.ok('a bare CSS var() usage never trips it either', !rule.pattern.test('color: var(--ink1);'));
+      t.ok(
+        "an UNRELATED custom property (not in LANTERN's vocabulary) never trips it",
+        !rule.pattern.test("'--totally-unrelated-thing': '3px',")
+      );
+    }
   }
 
   // Every corpse in the list must map to a real rule (no orphan citations).

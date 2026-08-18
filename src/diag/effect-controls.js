@@ -1,11 +1,22 @@
 /**
- * EFFECT CONTROLS — the generic, schema-driven FOH/ROH renderer every
- * registered effect's debug-panel card is built from (docs/planning/
- * Effects-UI.md). ONE `core/params-schema.js` declaration drives both a small
- * approachable strip (front of house) and a full, categorised technical
- * section (rear of house, behind an "Advanced" disclosure) — no control is
- * ever hand-wired to a specific effect, because every widget here is a
- * `type → element` mapping read straight off the param's own declaration.
+ * EFFECT CONTROLS — the OLD debug-panel's own card shell: the `<details>`/
+ * `<summary>` collapsed scan row, the copy-to-clipboard button, and the
+ * Advanced disclosure that wraps categorised ROH groups + this effect's own
+ * diagnostics. `buildEffectCard` is this module's reason to exist; everything
+ * it depends on that is NOT specific to this panel's own visual shape —
+ * the type→widget mapping and the pure category/FOH-ROH/snapshot logic — was
+ * extracted to `ui/widgets/param-control.js` and `ui/widgets/param-groups.js`
+ * at U0 (docs/holy/UI-Testament.md §9) and is re-exported below unchanged, so
+ * every existing import of THIS module keeps working without modification.
+ *
+ * ⚠️ WHY THE SPLIT LANDED WHERE IT DID. The Studio's own EFFECTS department
+ * (U1) needs the widgets and the pure logic but does NOT reuse `buildEffectCard`
+ * itself — its card shell has real structural differences from this one (pin/
+ * popout/paint tool buttons, a mask-found/missing row, health/tier/scope
+ * badges — none of which this shell has), matching `tools/ui-mock/index.html`'s
+ * own `buildCard`, not this file's `<details>` accordion. Moving
+ * `buildEffectCard` "for reuse" would have meant moving code with exactly one
+ * caller today and a shape the new shell doesn't actually want.
  *
  * This is deliberately PLAIN DOM, not Tweakpane: Tweakpane isn't vendored yet
  * (`ui/no-handwritten-controls`, tools/verify-structure.mjs, only matches
@@ -15,400 +26,54 @@
  * existing precedent, not a new exception). Swapping in the real Tweakpane/
  * ApplicationV2 pair later means changing the RENDERER, not the schema.
  *
- * `groupParamsByCategory` is pure (Node-tested); everything below it builds
- * DOM and is verified live, the same split every other UI module in this
- * project draws (e.g. `scene/paint-mask.js` pure vs `ui/paint-mode.js` glue).
- *
  * @module diag/effect-controls
  */
 
-/**
- * The fixed ROH category order (Effects-UI.md §2), with `Light` added
- * alongside it — candles and every other lighting effect already declare
- * params under it (`effects/candle-flame.js`), and "colour/reach/animation
- * richness of the light this effect casts" doesn't sit naturally under Look
- * (the effect's own visible surface) or Response (couplings to the world).
- * A param with an unrecognised/absent category falls to Technical — visible,
- * never lost (Effects-UI.md §2's own rule).
- *
- * ⚠️ THE FALLBACK IS A SAFETY NET, NOT A PLACE TO PUT THINGS — and it had
- * quietly become one. `Detail` (fluid's marbling), `Shape` (water's four
- * geometry/threshold knobs) and `Outdoor` (specular's sun bias) were all
- * deliberately authored — `specular.test.mjs` even asserts the last one by
- * name, with a comment explaining why an "Indoor" twin would be an empty group.
- * None of the three was in this list, so `groupParamsByCategory` swept all six
- * params into Technical: the declaration said one thing, the panel drew
- * another, and every test stayed green because the tests checked the
- * DECLARATION while the loss happened in the RENDERER. The categories are
- * real; the vocabulary was just closed against them.
- *
- * Order runs outward from the effect's own surface: what it looks like →
- * what it emits → what it does → how big it is → what it answers to → the
- * machinery. Adding a category here is cheap; an empty one never renders.
- * @type {ReadonlyArray<string>}
- */
-export const CATEGORY_ORDER = Object.freeze([
-  'Presence',
-  'Look',
-  'Detail',
-  // Fire's per-layer SURFACE groups (2026-08-09). A particle fire has three
-  // independent bodies — the flame, the sparks and the plume — each with its own
-  // count, lifetime, size and brightness, and lumping ~19 controls into 'Look'
-  // makes the card unusable for the tuning it exists to support. They sit inside
-  // the surface block because that is what they are, which keeps the canonical
-  // surface → emission → behaviour → size → couplings → machinery run intact.
-  'Flame',
-  'Ember',
-  'Smoke',
-  'Light',
-  'Motion',
-  // Perspective strength — a BEHAVIOUR of the particles, belonging to none of
-  // the three bodies above.
-  'Depth',
-  'Shape',
-  'Extent',
-  'Outdoor',
-  'Response',
-  'Technical',
-]);
+// Through the ui/ zone's ONE door (zones/one-door) — diag/ is a different
+// zone, so this reaches ui/widgets/* via ../ui/index.js, never the files directly.
+import {
+  styled,
+  buildParamControl,
+  buildInheritableRangeRow,
+  COMPASS_POINTS,
+  COMPASS_SNAP_DEG,
+  wrapDeg,
+  nearestCompassPoint,
+  CATEGORY_ORDER,
+  groupParamsByCategory,
+  rohGroups,
+  createSectionStore,
+  collapsedStatusLine,
+  buildSettingsSnapshot,
+} from '../ui/index.js';
 
-/**
- * Sort a params schema into the fixed category order, pure — the ROH's
- * navigation structure, shared by every effect's card. Categories with zero
- * params are omitted (never an empty accordion group). Within a category,
- * params keep the schema's own declared order (the author's authoring order
- * is meaningful; this never re-sorts alphabetically).
- * @param {Record<string, object>} schema
- * @returns {Array<{category: string, keys: string[]}>}
- */
-export function groupParamsByCategory(schema) {
-  const buckets = new Map(CATEGORY_ORDER.map((c) => [c, []]));
-  for (const [key, decl] of Object.entries(schema ?? {})) {
-    const cat = CATEGORY_ORDER.includes(decl?.category) ? decl.category : 'Technical';
-    buckets.get(cat).push(key);
-  }
-  return CATEGORY_ORDER.map((category) => ({ category, keys: buckets.get(category) })).filter((g) => g.keys.length > 0);
-}
-
-/**
- * A tiny open/closed registry for disclosure sections, keyed by a stable string.
- *
- * ⚠️ WHY THIS IS NOT DOM STATE. `debug-panel.js`'s `renderBody()` does
- * `bodyEl.innerHTML = ''` and rebuilds every card from scratch — on every
- * registration, every zone switch, and every `refreshControls()` (which fires on
- * a preset pick, a candle add/remove, and the interface-seam sync). So an
- * `<details open>` attribute cannot survive: the element holding it is thrown
- * away. Before this store existed, opening "Advanced", nudging a slider that
- * happened to refresh, and watching it slam shut was the normal experience.
- *
- * It lives HERE rather than in the panel because view state is the renderer's
- * business — `core/params-schema.js` says exactly that, and its
- * `FORBIDDEN_IN_CONTRACT` list (which rejects `expanded`/`advanced`/`folder` on a
- * param declaration) exists to keep it out of the contract. Module scope, not
- * closure scope, because that is what outlives `innerHTML = ''`.
- *
- * Pure and exported so the invariant that matters — two cards never share one
- * key — is a Node test rather than something a future refactor quietly undoes.
- * @returns {{isOpen: (key: string) => boolean, setOpen: (key: string, next: boolean) => void, keys: () => string[]}}
- */
-export function createSectionStore() {
-  const open = new Set();
-  return {
-    isOpen: (key) => open.has(key),
-    setOpen: (key, next) => {
-      if (next) open.add(key);
-      else open.delete(key);
-    },
-    keys: () => [...open].sort(),
-  };
-}
+// Re-exported unchanged — every existing import of this module (debug-panel.js,
+// debug-panel-controls.js, effect-controls.test.mjs, boot.js's effect panels)
+// reaches these through here today, and that keeps working through the U0 move.
+export {
+  buildParamControl,
+  buildInheritableRangeRow,
+  COMPASS_POINTS,
+  COMPASS_SNAP_DEG,
+  wrapDeg,
+  nearestCompassPoint,
+  CATEGORY_ORDER,
+  groupParamsByCategory,
+  rohGroups,
+  createSectionStore,
+  collapsedStatusLine,
+  buildSettingsSnapshot,
+};
 
 /** The panel's live section state. One per module load, deliberately. */
 const sections = createSectionStore();
 
-/**
- * The one-line derived readout on a COLLAPSED card's header — the whole reason a
- * collapsed accordion is useful rather than merely short. With ten cards folded
- * shut, this is the only thing distinguishing "working", "off", and "wired but
- * it will never draw because the mask you'd paint into does not exist yet".
- *
- * It is a READOUT, not a param (Params.md §3.6.2) — derived at render time from
- * whatever the effect's own state object already knows.
- *
- * Pure and exported because formatting is where lying instruments are born
- * (`feedback_instruments_must_not_lie`): "0 candles" and "no candles yet" are
- * different claims, and `undefined` must produce silence, never "undefined".
- *
- * @param {object} [a]
- * @param {boolean} [a.enabled] - false wins over everything: an off effect's
- *   counts and missing pieces are not what you need to be told.
- * @param {string} [a.missing] - what is absent, phrased as a noun to follow "no"
- *   (e.g. `'_Specular mask on this floor'`).
- * @param {number} [a.count] - how many instances this effect is drawing.
- * @param {string} [a.noun] - singular noun for `count` (e.g. `'candle'`).
- * @returns {string} '' when there is nothing worth saying — the caller renders
- *   nothing at all rather than an empty element taking up the row.
- */
-export function collapsedStatusLine({ enabled, count, noun, missing } = {}) {
-  if (enabled === false) return 'off';
-  if (typeof missing === 'string' && missing.length > 0) return `no ${missing}`;
-  if (Number.isFinite(count) && typeof noun === 'string' && noun.length > 0) {
-    if (count === 0) return `no ${noun}s placed yet`;
-    return `${count} ${noun}${count === 1 ? '' : 's'}`;
-  }
-  return '';
-}
-
-// ---- shared visual language (mirrors debug-panel.js's palette) -----------
+// ---- shared visual language (this shell's own chrome only — the widgets
+// imported above own their OWN theme-aware colours now; these stay exactly
+// as they were before the U0 extraction, since re-theming this panel's
+// borders/copy-button/section-labels is out of scope for that move) --------
 const CYAN = '143,214,255';
-const TEXT = '#dcecff';
 const MUTED = '#8fa3c4';
-
-function styled(tag, style) {
-  const el = document.createElement(tag);
-  Object.assign(el.style, style);
-  return el;
-}
-
-function row() {
-  return styled('label', {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '7px',
-    flexBasis: '100%',
-    font: '10.5px/1.3 Signika, sans-serif',
-    color: TEXT,
-    pointerEvents: 'auto',
-  });
-}
-
-function labelSpan(decl, id) {
-  const s = styled('span', { flex: '0 0 auto', minWidth: '108px', opacity: '0.9' });
-  s.textContent = decl?.label ?? id;
-  return s;
-}
-
-function formatNum(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return String(v);
-  return Math.abs(n) >= 100 ? Math.round(n).toString() : Math.round(n * 100) / 100 + '';
-}
-
-/**
- * A float/int param → a labelled range slider + a live numeric readout. The
- * readout updates on every drag tick (`input`); the actual write commits on
- * release (`change`) — live enough to feel responsive, cheap enough that a
- * per-candle edit (which persists to the scene on every commit) never spams
- * a write per pixel of drag.
- */
-function buildRangeRow(id, decl, { value, onChange }) {
-  const wrap = row();
-  wrap.title = decl.help ?? '';
-  const input = styled('input', { flex: '1', accentColor: `rgb(${CYAN})`, pointerEvents: 'auto' });
-  input.type = 'range';
-  input.min = String(decl.min ?? 0);
-  input.max = String(decl.max ?? 1);
-  input.step = String(decl.step ?? (decl.type === 'int' ? 1 : 0.01));
-  input.value = String(value);
-  const readout = styled('span', {
-    minWidth: '38px',
-    textAlign: 'right',
-    color: MUTED,
-    fontVariantNumeric: 'tabular-nums',
-  });
-  readout.textContent = formatNum(value);
-  input.addEventListener('input', () => {
-    readout.textContent = formatNum(input.value);
-  });
-  input.addEventListener('change', () => {
-    onChange(decl.type === 'int' ? parseInt(input.value, 10) : parseFloat(input.value));
-  });
-  wrap.append(labelSpan(decl, id), input, readout);
-  return wrap;
-}
-
-/** A bool param → a labelled checkbox, committing immediately (a checkbox has no "drag"). */
-function buildCheckboxRow(id, decl, { value, onChange }) {
-  const wrap = row();
-  wrap.title = decl.help ?? '';
-  const input = styled('input', { pointerEvents: 'auto' });
-  input.type = 'checkbox';
-  input.checked = value === true;
-  input.addEventListener('change', () => onChange(input.checked));
-  wrap.append(labelSpan(decl, id), input);
-  return wrap;
-}
-
-/** A color param → a labelled native colour swatch/picker (#rrggbb, matches core/params-schema.js's one storage shape). */
-function buildColorRow(id, decl, { value, onChange }) {
-  const wrap = row();
-  wrap.title = decl.help ?? '';
-  const input = styled('input', { pointerEvents: 'auto', width: '36px', height: '20px', padding: '0', border: 'none' });
-  input.type = 'color';
-  input.value = typeof value === 'string' ? value : (decl.default ?? '#ffaa00');
-  input.addEventListener('change', () => onChange(input.value));
-  wrap.append(labelSpan(decl, id), input);
-  return wrap;
-}
-
-/** An enum param → a labelled dropdown of its declared values. */
-function buildEnumRow(id, decl, { value, onChange }) {
-  const wrap = row();
-  wrap.title = decl.help ?? '';
-  const select = styled('select', {
-    flex: '1',
-    pointerEvents: 'auto',
-    background: 'rgba(10,14,22,0.9)',
-    border: `1px solid rgba(${CYAN},0.4)`,
-    borderRadius: '5px',
-    color: '#cfe8ff',
-    font: '10.5px/1.2 Signika, sans-serif',
-    padding: '3px',
-  });
-  for (const v of decl.values ?? []) {
-    const opt = document.createElement('option');
-    opt.value = v;
-    // OPTIONAL `valueLabels` (2026-07-26): a param whose enum ids are machine
-    // strings ('shadow-skyreach') can hand over readable ones ("Shadows —
-    // sky-reach only") without the id itself having to be prose. Falls back to
-    // the id, so every existing enum renders exactly as before.
-    opt.textContent = decl.valueLabels?.[v] ?? v;
-    select.append(opt);
-  }
-  select.value = value;
-  select.addEventListener('change', () => onChange(select.value));
-  wrap.append(labelSpan(decl, id), select);
-  return wrap;
-}
-
-/** A graceful fallback for a param type this renderer has no rich widget for
- * yet (text/vec2/vec3/curve/action — none of which candles use) — a plain
- * readout rather than a silent gap or a throw, so a future effect with an
- * exotic param still gets SOMETHING instead of a missing control. */
-function buildReadonlyRow(id, decl, value) {
-  const wrap = row();
-  wrap.title = decl?.help ?? '';
-  const val = styled('span', { color: MUTED });
-  val.textContent = typeof value === 'object' ? JSON.stringify(value) : String(value);
-  wrap.append(labelSpan(decl, id), val);
-  return wrap;
-}
-
-/**
- * The ONE type→widget dispatch — every future effect's params render through
- * this, never a hand-built control (Effects-UI.md §2's tripwire, applied here
- * in plain DOM instead of Tweakpane).
- * @param {string} id @param {object} decl @param {{value: unknown, onChange: (v: unknown) => void}} io
- * @returns {HTMLElement}
- */
-export function buildParamControl(id, decl, io) {
-  switch (decl?.type) {
-    case 'float':
-    case 'int':
-      return buildRangeRow(id, decl, io);
-    case 'bool':
-      return buildCheckboxRow(id, decl, io);
-    case 'color':
-      return buildColorRow(id, decl, io);
-    case 'enum':
-      return buildEnumRow(id, decl, io);
-    default:
-      return buildReadonlyRow(id, decl, io.value);
-  }
-}
-
-/**
- * An "inherit or override" row — a slider that shows the EFFECTIVE value
- * (shared default, or a per-instance override if one is active) plus a small
- * reset icon that clears the override, restoring inheritance. The general
- * shape for ANY per-instance knob with a shared effect-wide default and an
- * optional per-instance override (scene/anchor-catalog.js's `useCustomX`/
- * `customX` pairs) — built here once so a future effect's own per-instance
- * overrides (the candle anchor edit popup is the first user, `ui/anchor-
- * mode.js`) get the identical UX for free, never a bespoke slider per effect.
- *
- * @param {object} args
- * @param {string} args.label @param {string} [args.help]
- * @param {number} args.min @param {number} args.max @param {number} [args.step]
- * @param {number} args.effectiveValue - the value to show/drag (the caller has already resolved shared-vs-override).
- * @param {boolean} args.isOverridden
- * @param {(value: number) => void} args.onDrag - the dragged value on commit; the caller is responsible for turning the override ON alongside it.
- * @param {() => void} args.onResetToShared - the reset icon was clicked; the caller turns the override OFF.
- * @returns {HTMLElement}
- */
-export function buildInheritableRangeRow({
-  label,
-  help,
-  min,
-  max,
-  step,
-  effectiveValue,
-  isOverridden,
-  onDrag,
-  onResetToShared,
-}) {
-  const wrap = row();
-  wrap.title = help ?? '';
-  const labelEl = styled('span', { flex: '0 0 auto', minWidth: '92px', opacity: '0.9' });
-  labelEl.textContent = label + (isOverridden ? ' •' : '');
-  const input = styled('input', { flex: '1', accentColor: `rgb(${CYAN})`, pointerEvents: 'auto' });
-  input.type = 'range';
-  input.min = String(min);
-  input.max = String(max);
-  input.step = String(step ?? 1);
-  input.value = String(effectiveValue);
-  const readout = styled('span', {
-    minWidth: '38px',
-    textAlign: 'right',
-    color: MUTED,
-    fontVariantNumeric: 'tabular-nums',
-  });
-  readout.textContent = formatNum(effectiveValue);
-  input.addEventListener('input', () => {
-    readout.textContent = formatNum(input.value);
-  });
-  input.addEventListener('change', () => onDrag(parseFloat(input.value)));
-  const resetBtn = styled('button', {
-    pointerEvents: 'auto',
-    border: 'none',
-    background: 'transparent',
-    cursor: isOverridden ? 'pointer' : 'default',
-    color: isOverridden ? `rgb(${CYAN})` : 'rgba(143,214,255,0.25)',
-    fontSize: '12px',
-    padding: '0 2px',
-  });
-  resetBtn.type = 'button';
-  resetBtn.textContent = '↺';
-  resetBtn.title = isOverridden ? 'Match all candles' : 'Already matching all candles';
-  resetBtn.disabled = !isOverridden;
-  resetBtn.addEventListener('click', () => onResetToShared());
-  wrap.append(labelEl, input, readout, resetBtn);
-  return wrap;
-}
-
-/**
- * The copy-button's payload — pure, so the SHAPE is Node-tested even though the
- * button itself is DOM. Covers the WHOLE schema, not just whatever FOH/ROH
- * happened to promote — the FOH/ROH split is a presentation concern, and the
- * point of this snapshot is a complete "here is everything, paste it to
- * Claude" that never depends on which card sections happen to be open.
- *
- * @param {object} a
- * @param {string} a.id - the effect id, e.g. `'fire'`.
- * @param {string} [a.title] - falls back to `id` when absent.
- * @param {boolean} [a.enabled] - omitted from the payload entirely when the
- *   caller has no concept of enabled/disabled (undefined, not false).
- * @param {Record<string, object>} a.schema
- * @param {(paramId: string) => unknown} a.getValue
- * @returns {{effect: string, title: string, enabled?: boolean, values: Record<string, unknown>}}
- */
-export function buildSettingsSnapshot({ id, title, enabled, schema, getValue }) {
-  const values = {};
-  for (const key of Object.keys(schema ?? {})) values[key] = getValue(key);
-  const snapshot = { effect: id, title: title ?? id, values };
-  if (enabled !== undefined) snapshot.enabled = enabled;
-  return snapshot;
-}
 
 /**
  * Copy text to the clipboard, with the same async-API-then-`execCommand`
@@ -452,7 +117,7 @@ async function copyTextToClipboard(text) {
  * "every effect panel remembers to add its own" the same way every other rule
  * in this file does.
  */
-function buildCopyButton({ id, title, schema, getValue, enabled }) {
+function buildCopyButton({ id, title, schema, getValue, enabled, getEnabled }) {
   const idleGlyph = '📋';
   const btn = styled('button', {
     pointerEvents: 'auto',
@@ -471,7 +136,14 @@ function buildCopyButton({ id, title, schema, getValue, enabled }) {
   shieldFromSummary(btn);
   let resetTimer = null;
   btn.addEventListener('click', async () => {
-    const snapshot = buildSettingsSnapshot({ id, title, enabled, schema, getValue });
+    // ⚠️ READ AT CLICK TIME, NEVER AT BUILD TIME. `getValue` is the card's own
+    // live accessor, so it is already correct AS LONG AS the caller did not
+    // capture its source — the 2026-08-17 bug was exactly that capture, one
+    // level up in `boot.js`. `getEnabled` exists so the one value that is NOT
+    // routed through `getValue` cannot go stale on its own either; the static
+    // `enabled` remains the fallback for a caller that has no live getter.
+    const liveEnabled = typeof getEnabled === 'function' ? getEnabled() : enabled;
+    const snapshot = buildSettingsSnapshot({ id, title, enabled: liveEnabled, schema, getValue });
     const ok = await copyTextToClipboard(JSON.stringify(snapshot, null, 2));
     clearTimeout(resetTimer);
     btn.textContent = ok ? '✓ Copied' : '✗ Failed';
@@ -495,42 +167,6 @@ function sectionLabel(text) {
   });
   el.textContent = text;
   return el;
-}
-
-/**
- * THE ROH HALF OF THE SPLIT: every category group MINUS whatever FOH promoted.
- *
- * ⚠️ ROH IS THE COMPLEMENT OF FOH, NOT THE WHOLE SCHEMA. `buildEffectCard`
- * originally walked every key here, so a promoted key rendered TWICE — once in
- * the strip and again under Advanced — as two independent DOM controls over one
- * param, neither of which re-rendered when the other moved. That is how it was
- * caught: the author's water panel showed Opacity 0.62 in the strip and 1 under
- * Advanced, on the same frame (2026-07-26), with the last-dragged one silently
- * winning. It also defeated the point of the split, which the standing FOH/ROH
- * rule puts as *"why are you using the same controls for both?"* — a curated
- * strip means nothing if everything appears in both halves.
- *
- * Pure and exported so that rule is a Node test rather than something a future
- * card refactor can quietly undo: `buildEffectCard` itself is DOM and therefore
- * only browser-verified (CONVENTIONS §4), which is exactly why the part with
- * the invariant in it lives out here.
- *
- * @param {Record<string, object>} schema
- * @param {string[]} [fohKeys] - the promoted subset. Absent/empty → ROH is the
- *   whole schema, which is the correct degenerate case: an effect with no
- *   curated strip keeps every control, it does not lose them.
- * @returns {{category: string, keys: string[]}[]} Groups in CATEGORY_ORDER,
- *   never containing an empty one — a category whose every key was promoted
- *   yields no group at all rather than a bare heading.
- */
-export function rohGroups(schema, fohKeys) {
-  const promoted = new Set(fohKeys ?? []);
-  const out = [];
-  for (const { category, keys } of groupParamsByCategory(schema)) {
-    const rest = keys.filter((id) => !promoted.has(id));
-    if (rest.length > 0) out.push({ category, keys: rest });
-  }
-  return out;
 }
 
 /**
@@ -631,6 +267,7 @@ export function buildEffectCard({
   getValue,
   onChange,
   enabled,
+  getEnabled,
   onToggleEnabled,
   add,
   extra,
@@ -639,7 +276,7 @@ export function buildEffectCard({
 }) {
   if (typeof id !== 'string' || id.length === 0) {
     throw new Error(
-      'buildEffectCard: `id` is required — it is the open-state key, and two cards sharing one is silent.'
+      'buildEffectCard: `id` is required — it is the open-state key, and two cards silently sharing one is a far worse failure than a loud one.'
     );
   }
 
@@ -743,7 +380,7 @@ export function buildEffectCard({
   // degenerate case of a card with no params at all, the same "never render
   // an empty thing" rule Advanced already follows below.
   if (schema && Object.keys(schema).length > 0) {
-    head.append(buildCopyButton({ id, title, schema, getValue, enabled }));
+    head.append(buildCopyButton({ id, title, schema, getValue, enabled, getEnabled }));
   }
   card.append(head);
 

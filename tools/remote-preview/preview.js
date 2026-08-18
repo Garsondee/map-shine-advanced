@@ -181,7 +181,7 @@ const remote = installRemote({
   // 2026-08-18 fix: the Remote's OWN dial (astrolabe-dial.js), matching the
   // approved mock for real instead of the old createAstrolabe()'s
   // pre-LANTERN styling — see that module's own header for the full story.
-  mountAstrolabeDial: (container) => {
+  mountAstrolabeDial: (container, dialCtx) => {
     const pushUpdate = () =>
       remoteDialInstance.update({
         hour: fakeSky.todHour,
@@ -189,6 +189,11 @@ const remote = installRemote({
         windDirectionDeg: fakeSky.windDirectionDeg,
         windSpeed01: fakeSky.windSpeed01,
         cloudCover01: fakeSky.cloudCover01,
+        // Mirrors day-clock.js's own `canSetHour: currentMode === 'aesthetic'`
+        // (2026-08-18 fix, ring-lock gap-audit Gap 12) — `fakeSky.mode` is
+        // this harness's stand-in for the resolved posture, same field
+        // getPosture() below already reads.
+        canSetHour: fakeSky.mode === 'aesthetic',
       });
     remoteDialInstance = buildAstrolabeDial({
       // Production tracks a drag live via pumpAstrolabe's own continuous
@@ -201,6 +206,10 @@ const remote = installRemote({
         log(`time -> ${hour.toFixed(2)} (committed=${committed})`);
         pushUpdate();
       },
+      onLockedAttempt: () => {
+        log('ring drag refused — clock mode is not Aesthetic');
+        dialCtx?.onLockedAttempt?.();
+      },
     });
     container.appendChild(remoteDialInstance.root);
     pushUpdate();
@@ -212,6 +221,14 @@ const remote = installRemote({
     fakeSky.mode = mode;
     log(`clock -> ${mode}`);
     remote.syncAstrolabePanel();
+    remoteDialInstance?.update({
+      hour: fakeSky.todHour,
+      phase: 'day',
+      windDirectionDeg: fakeSky.windDirectionDeg,
+      windSpeed01: fakeSky.windSpeed01,
+      cloudCover01: fakeSky.cloudCover01,
+      canSetHour: fakeSky.mode === 'aesthetic',
+    });
   },
   isFlowPlaying: () => fakeSky.rateHoursPerMinute > 0,
   onFlowToggle: () => {
@@ -229,6 +246,7 @@ const remote = installRemote({
       windDirectionDeg: fakeSky.windDirectionDeg,
       windSpeed01: fakeSky.windSpeed01,
       cloudCover01: fakeSky.cloudCover01,
+      canSetHour: fakeSky.mode === 'aesthetic',
     });
   },
   // The TL corner's speed badge (2026-08-18 fix) — mirrors boot.js's own

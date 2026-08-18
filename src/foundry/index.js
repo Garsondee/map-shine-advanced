@@ -164,6 +164,12 @@ export {
   SKY_NAMESPACE,
 } from './sky-persistence.js';
 
+// FADE PERSISTENCE (docs/holy/UI-Testament.md §4.2, U2) — the one scene flag
+// a fade's live state lives under. Decides nothing about curves or easing —
+// world/fade-engine.js owns that, purely and Node-tested; this only reads
+// and writes, mirroring sky-persistence.js's own shape.
+export { readFadeState, writeFadeState, watchFadeState } from './fade-persistence.js';
+
 // THE LIGHT-SOURCE READER — feeds light.accumulate's point-light illumination
 // rung; the one place canvas.effects.lightSources is read. Also the scene's
 // own Global Illumination config (canvas.scene.environment.globalLight) —

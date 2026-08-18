@@ -3112,6 +3112,101 @@ untouched, confirmed via `git status --porcelain` before staging.*
 
 ---
 
+**P28 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; a live author
+report with a side-by-side WIP/mock comparison, not an audit finding).**
+Verbatim: *"Climate buttons need to be better organised. We need the extra
+opening room of climate choices."* The screenshot showed the Moods section
+as a flat, unstructured wall of all 16 real archetypes wrapping raggedly
+(final row: one lone chip) — the mock's own screenshot showed a small
+favourites row plus a "🔍 Browse 67" button opening a searchable overlay for
+everything else. Read the mock's real `#wxPicker` implementation
+(`openWxPicker`/`drawWxHits`/`wxIndexFor`) before building anything.
+
+1. ⚠️ **NOT A 1:1 PORT — the mock's own catalog doesn't exist in
+   production.** The mock's 67-item Browse catalog is `FACETS` (6
+   channel-facet partial presets) + `WX_NAMED_ALL`, a dimension never built
+   into `world/` (grepped — zero hits, same finding P11/U2 already made for
+   the channel faders). What's real today is exactly `WEATHER_ARCHETYPES`
+   (16) and `WEATHER_BIOMES` (10). Built the overlay against THOSE, honestly
+   smaller than the mock's own, rather than padding it out to match.
+2. **`ui/widgets/search-overlay.js` (new)** — the shared `.searchOverlay`
+   shell, promoted out of `ui/rooms/studio/search-palette.js`, whose own
+   header already flagged this exact deferral at U1 time ("shared shell
+   shape; only this module's own consumer exists in src/ so far"). The
+   weather picker is the second real consumer the comment was written for —
+   Law 8 applies now, not before. Hit-rendering logic stays per-consumer
+   (a Studio param row and a weather archetype share nothing generic left to
+   factor out); only DOM/CSS shell + open/close/escape/focus plumbing moved.
+   `search-palette.js` refactored to call it, external signature unchanged,
+   its own `.hl` flash-animation CSS (a Studio-specific concept the shell
+   knows nothing about) stayed put.
+3. **`ui/rooms/remote/weather-picker.js` (new)** — searches the real 16/10
+   flat (no group headers: the mock grouped by facet, but no real facet axis
+   exists on `WEATHER_ARCHETYPES`/`WEATHER_BIOMES` to group by honestly;
+   inventing one would be a second, UI-only taxonomy with nothing behind
+   it). Archetype hits show the real emoji icon; biome hits show none —
+   matching `weather-board.js`'s own existing chip rendering for each,
+   which already treats them differently for the same reason (biomes carry
+   no icon field). Applies through `ctx.fadeToArchetype`/
+   `ctx.onWeatherBiomeChange` — the SAME two functions the favourites chips
+   already call, never a second path.
+4. ⚠️ **THE FAVOURITES SPLIT IS A WORKER-TIER CURATION CALL, named as one.**
+   `WEATHER_ARCHETYPES`/`WEATHER_BIOMES` carry no favourite/featured flag —
+   there is no data-level source of truth for "which 8 (of 16) / 6 (of 10)
+   go inline." Chose clear/fair/overcast/fog/rain/snow/gale/storm (spans the
+   severity gradient the archetype table's own shelf order already encodes)
+   and temperate-coast/continental-plains/desert/boreal-tundra/
+   tropical-monsoon/high-mountain (the "useful in almost any campaign"
+   subset, leaving the four more setting-specific biomes for Browse). Worth
+   the author's countersign if the read is wrong — same posture P19 already
+   took for water's own FOH dial curation.
+5. **`.msa-wx-chips` is a real 4-column grid now**, not a wrapping flex row
+   — the author's own "better organised" complaint had a second, structural
+   half beyond the favourites split: an uneven trailing row reads as
+   unorganised regardless of item count. `.msa-wx-header-right` groups
+   Browse + the Direct/Drift pill into one flex cluster occupying the
+   blockLabel's single trailing slot (mock: both share one header line).
+6. **Zero boot.js or `tools/remote-preview/preview.js` changes needed.**
+   `weather-board.js` constructs `installWeatherPicker` directly (same
+   pattern as `fadeTime = createFadeTimeControl()` a few lines above it, not
+   `mountAstrolabeDial`'s boot.js-owned-engine-mount pattern — this file
+   already reaches `world/index.js` directly for the same two tables), and
+   its callbacks route through ctx fields (`fadeToArchetype`/
+   `onWeatherBiomeChange`) that both boot.js and the preview fixture already
+   supplied for the existing chips. Confirmed live rather than assumed.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on every file
+(one round of the session's own recurring backtick-inside-CSS-comment trap
+hit and fixed before this note — `shell.js`'s new header-right comment).
+`node tools/run-tests.mjs`: 27 suites, 11512 passed, 0 failed, unchanged —
+no test-covered logic touched (this is all DOM, same established boundary
+as every other Remote UI round). `node tools/verify-structure.mjs`: the
+same two pre-existing violations only, confirmed via `git diff` against
+every flagged line across all five touched/new files. Live-verified in the
+browser via `tools/remote-preview/` AND `tools/studio-preview/` (a real
+regression check on the shared-widget extraction, not just the new
+feature): Direct mode shows the exact 8 favourite chips in order, Browse
+shows "16"/"Browse all 16 weather types", opens the full 16-item list,
+search-filters correctly ("ash" → 1 hit), a click applies via the real
+fixture (`fading -> Ashfall over 0ms` logged) and closes; Drift mode shows
+the exact 6 favourite chips, Browse shows "10 climates" with the correct
+placeholder swap, a biome click applies (`biome -> shadowfell-verge`
+logged); Escape closes from either mode. Studio's own search-palette
+(`/` key) still opens with the correct aria-label/placeholder/8-item
+default browse, still filters correctly ("foam" → 5 real water-param hits),
+still closes on click — the shell survived the extraction intact. **One
+piece honestly NOT verifiable here**: `flashParam`'s own
+`requestAnimationFrame`-gated card-scroll/highlight — blocked by this
+pane's own previously-documented limitation (rAF does not reliably fire
+without OS focus, `feedback_sandboxed_browser_pane_lacks_os_focus`), not a
+new gap this round introduced; that method's body was not touched by the
+refactor at all. **Not verified: the author's own live Foundry session**,
+same standing gap as P21–P27. The concurrent water-flow session's own files
+remain completely untouched, confirmed via `git status --porcelain` before
+staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

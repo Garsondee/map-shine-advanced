@@ -145,7 +145,10 @@ function fireListSignature(fires) {
 /**
  * @param {object} deps
  * @param {*} deps.THREE - injected.
- * @param {() => object} deps.getFireRenderState - `{enabled, params, perfTier, fires[], spawnCloud}`.
+ * @param {() => object} deps.getFireRenderState - `{enabled, params, perfTier,
+ *   fires[], spawnCloud, fireLabelGrid}`. `fireLabelGrid` (optional, `null` if
+ *   unwired) feeds `applyCohesion`'s label-scoped grouping — see that
+ *   function's own header.
  *   ⚠️ REQUIRED, deliberately NOT defaulted — `feedback_seam_default_hides_unwired`:
  *   water shipped its render-state seam declared, defaulted and never passed,
  *   and the ONLY symptom was that every control silently did nothing while all
@@ -286,6 +289,11 @@ export function createFireSubsystem({
     const fires = Array.isArray(state.fires) ? state.fires : [];
     const cloud = state.spawnCloud ?? null;
     const hasPaint = (cloud?.count ?? 0) > 0;
+    // `applyCohesion`'s label-scoped grouping (2026-08-16) — see that
+    // function's own header. `null` (a floor with no mask-derived fires at
+    // all, or the seam simply unwired) falls back to its legacy nearest-of-
+    // all behaviour, unchanged.
+    const labelGrid = state.fireLabelGrid ?? null;
 
     if (!state.enabled || !renderer || (!hasPaint && fires.length === 0)) {
       for (const { engine } of engines) engine.scene.visible = false;
@@ -344,7 +352,10 @@ export function createFireSubsystem({
       const cohesion = runtime.perKind?.[kind]?.cohesion ?? 0;
       if (cloudChanged || lastCohesionByEngine.get(engine) !== cohesion) {
         if (!transformedByKind.has(kind)) {
-          transformedByKind.set(kind, cloud && cohesion ? applyCohesion(cloud, fires, cohesion) : effectiveCloud);
+          transformedByKind.set(
+            kind,
+            cloud && cohesion ? applyCohesion(cloud, fires, cohesion, labelGrid) : effectiveCloud
+          );
         }
         engine.setSpawnPoints(transformedByKind.get(kind));
         lastCohesionByEngine.set(engine, cohesion);

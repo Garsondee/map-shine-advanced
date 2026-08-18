@@ -186,6 +186,119 @@ function labelComponents(data, w, h, threshold) {
 }
 
 /**
+ * How far (in texels) an UNLABELLED texel may reach for a real neighbour's
+ * label before {@link propagateLabels} gives up on it. Wide enough to cover a
+ * normal antialiased brush edge (the gap between the SPAWN threshold
+ * `fire-spawn-points.js` reads and the higher PAINT threshold `labelComponents`
+ * above was run at), narrow enough that two genuinely separate painted
+ * strokes cannot bridge through their own fringes into one. Unmeasured
+ * against real art yet — same "needs live validation" status `PEAK_SEPARATION`/
+ * `ELONGATION_RATIO` started at.
+ */
+const LABEL_FRINGE_TEXELS = 3;
+
+/**
+ * Extend every UNLABELLED texel (`labelComponents` said -1 — it didn't clear
+ * the PAINT threshold) with the label of its nearest LABELLED neighbour,
+ * capped at {@link LABEL_FRINGE_TEXELS}. Exists for cohesion
+ * (`fire-spawn-points.js#applyCohesion`): a spawn point sits at the lower
+ * SPAWN threshold, so plenty of real, author-painted antialiased edge never
+ * clears the stricter PAINT threshold `labelComponents` needs — but that
+ * paint still structurally belongs to whichever confirmed blob it borders,
+ * and cohesion needs to know which one, not just "unpainted".
+ *
+ * The SAME two-pass forward/backward relaxation {@link chamferDistance} runs
+ * (same weights, same idiom), propagating a LABEL alongside distance instead
+ * of just distance — but deliberately NOT the same function.
+ * {@link chamferDistance} treats the grid's own edge as a synthetic
+ * unpainted (distance 0) neighbour, which is right for measuring how wide a
+ * blob reads at its own border; a label has nothing valid to invent at an
+ * edge (there is no such thing as "the edge's blob"), so a missing neighbour
+ * here is simply skipped rather than substituted.
+ *
+ * A texel that never gets within the bound of any labelled texel — an entire
+ * painted stroke too faint to clear PAINT threshold anywhere, the rescue
+ * pass's own territory — is left at -1: there is no confirmed fire to hand
+ * it to, and inventing one would be worse than leaving it alone.
+ *
+ * @param {Int32Array} labels - from `labelComponents`; -1 = not labelled.
+ * @param {number} w @param {number} h
+ * @param {number} [boundTexels=LABEL_FRINGE_TEXELS]
+ * @returns {Int32Array} same length as `labels`. Every originally-labelled
+ *   texel keeps its own label unchanged; every fringe texel within reach
+ *   inherits its nearest neighbour's; everything else stays -1.
+ */
+function propagateLabels(labels, w, h, boundTexels = LABEL_FRINGE_TEXELS) {
+  const n = w * h;
+  const out = Int32Array.from(labels);
+  const dist = new Float32Array(n);
+  const BIG = 1e9;
+  for (let i = 0; i < n; i++) dist[i] = out[i] === -1 ? BIG : 0;
+
+  // Relax texel `i` against an in-bounds neighbour `ni` — unlike
+  // `chamferDistance`, a neighbour that is ITSELF still unresolved (`out[ni]
+  // === -1`) contributes nothing; there is no synthetic label to fall back to.
+  const relax = (i, ni, step) => {
+    if (out[ni] === -1) return;
+    const d = dist[ni] + step;
+    if (d < dist[i]) {
+      dist[i] = d;
+      out[i] = out[ni];
+    }
+  };
+
+  // Forward pass. No edge substitution (contrast `chamferDistance`'s own
+  // border handling) — a missing neighbour is just skipped.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (dist[i] === 0) continue;
+      if (y > 0) {
+        relax(i, i - w, CHAMFER_ORTHO);
+        if (x > 0) relax(i, i - w - 1, CHAMFER_DIAG);
+        if (x < w - 1) relax(i, i - w + 1, CHAMFER_DIAG);
+      }
+      if (x > 0) relax(i, i - 1, CHAMFER_ORTHO);
+    }
+  }
+
+  // Backward pass.
+  for (let y = h - 1; y >= 0; y--) {
+    for (let x = w - 1; x >= 0; x--) {
+      const i = y * w + x;
+      if (dist[i] === 0) continue;
+      if (y < h - 1) {
+        relax(i, i + w, CHAMFER_ORTHO);
+        if (x > 0) relax(i, i + w - 1, CHAMFER_DIAG);
+        if (x < w - 1) relax(i, i + w + 1, CHAMFER_DIAG);
+      }
+      if (x < w - 1) relax(i, i + 1, CHAMFER_ORTHO);
+    }
+  }
+
+  const bound = boundTexels * CHAMFER_SCALE;
+  for (let i = 0; i < n; i++) {
+    if (dist[i] > bound) out[i] = -1;
+  }
+  return out;
+}
+
+/**
+ * A grid's texel size, with the same "derive from the world rect if the spec
+ * doesn't carry one" fallback this file and `fire-spawn-points.js` each
+ * computed inline, byte-for-byte, before this named it once.
+ *
+ * @param {{texelW?:number, texelH?:number, width:number, height:number}} spec
+ * @param {number} w @param {number} h
+ * @returns {{texelW:number, texelH:number}}
+ */
+export function maskTexelSize(spec, w, h) {
+  const texelW = Number.isFinite(spec.texelW) && spec.texelW > 0 ? spec.texelW : spec.width / w;
+  const texelH = Number.isFinite(spec.texelH) && spec.texelH > 0 ? spec.texelH : spec.height / h;
+  return { texelW, texelH };
+}
+
+/**
  * How many multiples of its OWN peak radius a component's long axis may span
  * before it counts as elongated (a real line) rather than compact (one blob
  * that merely isn't round).
@@ -213,20 +326,10 @@ function labelComponents(data, w, h, threshold) {
 const ELONGATION_RATIO = 8;
 
 /**
- * Turn a painted `_Fire` grid into fire sources.
- *
- * Greedy ridge extraction: repeatedly take the widest remaining point and
- * suppress everything within its own radius, so a blob yields its centre and a
- * line yields a spaced row down its spine. Deterministic — the same grid always
- * yields the same fires in the same order, which matters because the light
- * pool reuses meshes by `sourceId` and an unstable id rebuilds every light
- * every frame.
- *
- * ⚠️ SCOPED PER CONNECTED COMPONENT, not pooled across the whole grid. A
- * component whose long axis is not many multiples of its own peak radius (see
- * {@link ELONGATION_RATIO}) contributes ONLY its single best peak — it is one
- * blob that happens to be taller than it is wide, not a row of small flames.
- * An elongated component keeps the original multi-peak ridge walk unchanged.
+ * The strict/rescue orchestration, shared by {@link extractFiresFromMask} and
+ * {@link extractFiresWithLabels} so the two can never drift into two subtly
+ * different copies of the same algorithm
+ * (`feedback_mode_forks_silently_drop_features`).
  *
  * @param {{spec: object, data: Uint8Array}} grid - from `maskAuthority.getDerived('fire', floorIndex)`.
  * @param {object} [opts]
@@ -242,14 +345,14 @@ const ELONGATION_RATIO = 8;
  *   sensitivity dial, it is the repair for a state where flames render with no
  *   light. Omitted (or >= `paintThreshold`) ⇒ no rescue pass at all, and this
  *   function is byte-identical to before it existed.
- * @returns {Array<{id:string,x:number,y:number,diameterPx:number,intensity:number}>}
+ * @returns {ReturnType<typeof extractFiresAtThreshold>}
  */
-export function extractFiresFromMask(
+function extractWithRescue(
   grid,
   { maxFires = MAX_FIRES, minDiameterPx = 8, paintThreshold = PAINT_THRESHOLD, rescueThreshold } = {}
 ) {
   const strict = extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold });
-  if (strict.length > 0) return strict;
+  if (strict.fires.length > 0) return strict;
   // ══════════════════════════════════════════════════════════════════════
   // ⚠️ THE RESCUE PASS (2026-08-15) — THE INVARIANT: PAINT GOOD ENOUGH TO
   // SPAWN FLAMES IS GOOD ENOUGH TO MAKE A LIGHT.
@@ -293,6 +396,52 @@ export function extractFiresFromMask(
 }
 
 /**
+ * Turn a painted `_Fire` grid into fire sources.
+ *
+ * Greedy ridge extraction: repeatedly take the widest remaining point and
+ * suppress everything within its own radius, so a blob yields its centre and a
+ * line yields a spaced row down its spine. Deterministic — the same grid always
+ * yields the same fires in the same order, which matters because the light
+ * pool reuses meshes by `sourceId` and an unstable id rebuilds every light
+ * every frame.
+ *
+ * ⚠️ SCOPED PER CONNECTED COMPONENT, not pooled across the whole grid. A
+ * component whose long axis is not many multiples of its own peak radius (see
+ * {@link ELONGATION_RATIO}) contributes ONLY its single best peak — it is one
+ * blob that happens to be taller than it is wide, not a row of small flames.
+ * An elongated component keeps the original multi-peak ridge walk unchanged.
+ *
+ * @param {{spec: object, data: Uint8Array}} grid - from `maskAuthority.getDerived('fire', floorIndex)`.
+ * @param {object} [opts] - see {@link extractWithRescue} for every option.
+ * @returns {Array<{id:string,x:number,y:number,diameterPx:number,intensity:number,label:number}>}
+ */
+export function extractFiresFromMask(grid, opts = {}) {
+  return extractWithRescue(grid, opts).fires;
+}
+
+/**
+ * Identical extraction to {@link extractFiresFromMask} (same options, same
+ * strict/rescue orchestration, same fires) — but returns the connected-
+ * component field alongside them instead of throwing it away. The one
+ * consumer today is `fire-spawn-points.js#applyCohesion`: it needs to know
+ * which painted blob a spawn point structurally belongs to, which requires
+ * the SAME labelling this extraction already computed internally, not a
+ * second, separately-thresholded guess.
+ *
+ * @param {{spec: object, data: Uint8Array}} grid
+ * @param {object} [opts] - see {@link extractWithRescue}.
+ * @returns {{fires: Array<{id:string,x:number,y:number,diameterPx:number,intensity:number,label:number}>,
+ *   labels: Int32Array|null, nearestLabel: Int32Array|null, spec: object|null}}
+ *   `nearestLabel` is `labels` widened by {@link propagateLabels} to also
+ *   cover the antialiased fringe between the spawn and paint thresholds —
+ *   that is the field a cohesion consumer wants; `labels` alone is exposed
+ *   too since it's already in hand and free to return.
+ */
+export function extractFiresWithLabels(grid, opts = {}) {
+  return extractWithRescue(grid, opts);
+}
+
+/**
  * The extraction itself, at ONE threshold. Split out of
  * {@link extractFiresFromMask} 2026-08-15 so the rescue pass re-runs the
  * IDENTICAL algorithm rather than a second, subtly-different copy of it — the
@@ -301,24 +450,32 @@ export function extractFiresFromMask(
  *
  * @param {{spec: object, data: Uint8Array}} grid
  * @param {{maxFires: number, minDiameterPx: number, paintThreshold: number}} opts
- * @returns {Array<{id:string,x:number,y:number,diameterPx:number,intensity:number}>}
+ * @returns {{fires: Array<{id:string,x:number,y:number,diameterPx:number,intensity:number,label:number}>,
+ *   labels: Int32Array|null, nearestLabel: Int32Array|null, spec: object|null}}
+ *   `labels`/`nearestLabel` are the connected-component field this SAME
+ *   extraction already computed internally and `fire-spawn-points.js#applyCohesion`
+ *   needs to know which blob a spawn point belongs to — see
+ *   {@link extractFiresWithLabels}, the export that carries this past
+ *   `extractFiresFromMask`'s own unchanged plain-array contract.
  */
 function extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold }) {
   const spec = grid?.spec ?? null;
   const data = grid?.data ?? null;
-  if (!spec || !data) return [];
+  const empty = { fires: [], labels: null, nearestLabel: null, spec: null };
+  if (!spec || !data) return empty;
   const w = spec.w | 0;
   const h = spec.h | 0;
-  if (w <= 0 || h <= 0 || data.length < w * h) return [];
+  if (w <= 0 || h <= 0 || data.length < w * h) return empty;
 
   const dist = chamferDistance(data, w, h, paintThreshold);
   const { labels, boxes } = labelComponents(data, w, h, paintThreshold * 255);
+  const nearestLabel = propagateLabels(labels, w, h);
 
   // Candidate ridge texels, widest first. Anything under MIN_PEAK_TEXELS is a
   // one-texel speck of paint, not a fire.
   const candidates = [];
   for (let i = 0; i < w * h; i++) if (dist[i] >= MIN_PEAK_TEXELS) candidates.push(i);
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { fires: [], labels, nearestLabel, spec };
   // Tie-break on index so the order is total and the output is reproducible.
   candidates.sort((a, b) => dist[b] - dist[a] || a - b);
 
@@ -335,8 +492,7 @@ function extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold
   }
   const blobLabelTaken = new Set();
 
-  const texelW = Number.isFinite(spec.texelW) && spec.texelW > 0 ? spec.texelW : spec.width / w;
-  const texelH = Number.isFinite(spec.texelH) && spec.texelH > 0 ? spec.texelH : spec.height / h;
+  const { texelW, texelH } = maskTexelSize(spec, w, h);
   // Fires are round; a non-square texel would otherwise make diameter depend on
   // which axis it was measured along.
   const texelPx = (texelW + texelH) / 2;
@@ -386,8 +542,21 @@ function extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold
     const cx = i % w;
     const cy = (i / w) | 0;
 
+    // ⚠️ SAME-LABEL ONLY. `taken` holds every peak placed so far across the
+    // WHOLE grid, but PEAK_SEPARATION exists to space a ridge-walk's OWN
+    // multiple peaks (see the "row down its spine" case above) — it was never
+    // meant to let one blob's fire suppress a DIFFERENT, unrelated blob's
+    // fire just because the two happen to sit near each other in texel space.
+    // Before this filter, a small compact blob (which only ever gets a single
+    // suppression attempt — `blobLabelTaken` blocks a second try once one is
+    // taken) could be permanently silenced by a nearby, larger neighbour's
+    // already-placed peak, in direct contradiction of this function's own
+    // "SCOPED PER CONNECTED COMPONENT, not pooled across the whole grid"
+    // header. A real elongated component's internal spacing is completely
+    // unaffected: its own earlier peaks all carry the SAME label.
     let suppressed = false;
     for (const t of taken) {
+      if (t.label !== label) continue;
       const sep = Math.max(radiusTexels, t.r) * PEAK_SEPARATION;
       if ((cx - t.x) ** 2 + (cy - t.y) ** 2 < sep * sep) {
         suppressed = true;
@@ -400,7 +569,7 @@ function extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold
     if (diameterPx < minDiameterPx) continue;
 
     if (isBlobByLabel.get(label)) blobLabelTaken.add(label);
-    taken.push({ x: cx, y: cy, r: radiusTexels });
+    taken.push({ x: cx, y: cy, r: radiusTexels, label });
     fires.push({
       // Stable across frames AND across mask re-derivations at the same
       // resolution, because it is derived from the texel this fire sits on.
@@ -420,9 +589,13 @@ function extractFiresAtThreshold(grid, { maxFires, minDiameterPx, paintThreshold
       // shading control silently did nothing. The threshold decides whether a
       // texel is fire AT ALL; it has no business scaling how hot it is.
       intensity: 0.5 + (data[i] / 255) * 0.75,
+      // Which connected component this fire came from — `fire-spawn-points.js#
+      // applyCohesion`'s ONLY key for "does this spawn point belong to me".
+      // An elongated blob's whole spaced row shares one label on purpose.
+      label,
     });
   }
-  return fires;
+  return { fires, labels, nearestLabel, spec };
 }
 
 /**

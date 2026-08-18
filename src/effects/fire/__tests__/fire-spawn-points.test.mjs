@@ -18,6 +18,7 @@ import {
   applyCohesion,
   SPAWN_POINT_STRIDE,
 } from '../fire-spawn-points.js';
+import { extractFiresWithLabels } from '../fire-mask.js';
 
 /** Build a MaskGrid from an ASCII picture. `#` = full paint, `+` = mid, `.` = none. */
 function gridFrom(rows, { texel = 20, x = 0, y = 0 } = {}) {
@@ -253,6 +254,206 @@ export function run(t) {
     t.ok(
       'every point is pulled toward its NEAREST fire, not the far one',
       points(applyCohesion(cloud, twoFires, 1)).every((p) => p.x < 1000)
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // LABEL-SCOPED COHESION (2026-08-16) — the rebuild. The tests above pin
+  // the LEGACY nearest-of-all-fires path (omitting the 4th argument) byte-
+  // for-byte; everything below exercises the NEW path a real caller
+  // (`fire-subsystem.js`) now always supplies.
+  // ══════════════════════════════════════════════════════════════════════
+
+  {
+    // ⚠️ THE CORE ASK: "no risk of accidentally moving fires associated with
+    // other fires' spawn points." Same fixture `fire-mask.test.mjs` uses for
+    // the cross-component-suppression fix — a small 2×2 blob one empty column
+    // away from a much bigger 9×9 one, close enough that the OLD nearest-of-
+    // all-fires cohesion would happily pull the small blob's points toward
+    // the big one.
+    const rows = [
+      '................',
+      '..#########.....',
+      '..#########.....',
+      '..#########.....',
+      '..#########.##..',
+      '..#########.##..',
+      '..#########.....',
+      '..#########.....',
+      '..#########.....',
+      '..#########.....',
+      '................',
+    ];
+    const g = gridFrom(rows, { texel: 20 });
+    const { fires, nearestLabel, spec } = extractFiresWithLabels(g, { minDiameterPx: 4 });
+    t.ok('the fixture yields the expected big+small pair', fires.length === 2);
+    const bigFire = fires.find((f) => f.diameterPx > 100);
+    const smallFire = fires.find((f) => f.diameterPx < 100);
+    const cloud = extractFireSpawnPoints(g, { threshold: 0.5 });
+    const labelGrid = { nearestLabel, spec };
+    const cohesed = applyCohesion(cloud, fires, 1, labelGrid);
+
+    let smallOriginToSmallTarget = 0;
+    let smallOriginToBigTarget = 0;
+    let bigOriginToBigTarget = 0;
+    let bigOriginToSmallTarget = 0;
+    for (let i = 0; i < cloud.count; i++) {
+      const o = i * SPAWN_POINT_STRIDE;
+      const originX = cloud.points[o];
+      const targetX = cohesed.points[o];
+      const targetY = cohesed.points[o + 1];
+      const dBig = Math.hypot(targetX - bigFire.x, targetY - bigFire.y);
+      const dSmall = Math.hypot(targetX - smallFire.x, targetY - smallFire.y);
+      // The small blob sits at world x ~250-290 (columns 12-13); the big one
+      // spans x ~40-210 (columns 2-10) — a point's OWN origin unambiguously
+      // says which blob painted it.
+      if (originX > 240) {
+        if (dSmall < dBig) smallOriginToSmallTarget++;
+        else smallOriginToBigTarget++;
+      } else {
+        if (dBig < dSmall) bigOriginToBigTarget++;
+        else bigOriginToSmallTarget++;
+      }
+    }
+    t.ok(
+      `every small-blob point converges on the small blob's own centroid (${smallOriginToSmallTarget} of ${smallOriginToSmallTarget + smallOriginToBigTarget})`,
+      smallOriginToBigTarget === 0 && smallOriginToSmallTarget > 0
+    );
+    t.ok(
+      `every big-blob point converges on the big blob's own centroid (${bigOriginToBigTarget} of ${bigOriginToBigTarget + bigOriginToSmallTarget})`,
+      bigOriginToSmallTarget === 0 && bigOriginToBigTarget > 0
+    );
+
+    // The LEGACY 3-arg path (no label grid) is a DIFFERENT algorithm, not
+    // merely a relaxed version of this one — see the "two fires" legacy test
+    // above for its own pinned nearest-of-all-fires behaviour. What matters
+    // here is only that supplying a label grid is what changes the outcome;
+    // omitting it must keep running unchanged.
+    const legacy = applyCohesion(cloud, fires, 1);
+    t.ok('the legacy 3-arg call still runs (no label grid required)', legacy.points.length === cloud.points.length);
+  }
+
+  {
+    // Cohesion's OTHER promise: pull toward the BRIGHTEST part of the blob,
+    // not its geometric ridge peak. A uniform 7×7 blob (so the geometric peak
+    // sits at its exact centre regardless of paint VALUE) with one corner
+    // painted much brighter than the rest.
+    const w = 9;
+    const h = 9;
+    const texel = 20;
+    const data = new Uint8Array(w * h);
+    for (let r = 1; r <= 7; r++) {
+      for (let c = 1; c <= 7; c++) data[r * w + c] = r <= 3 && c <= 3 ? 255 : 90;
+    }
+    const grid = {
+      spec: { x: 0, y: 0, width: w * texel, height: h * texel, w, h, texelW: texel, texelH: texel },
+      data,
+    };
+    const { fires, nearestLabel, spec } = extractFiresWithLabels(grid, { minDiameterPx: 4 });
+    t.ok(`the uneven blob still yields one fire (got ${fires.length})`, fires.length === 1);
+    const peak = fires[0];
+    const cloud = extractFireSpawnPoints(grid, { threshold: 0.3 });
+    const cohesed = applyCohesion(cloud, fires, 1, { nearestLabel, spec });
+    // Bright 3×3 sub-block occupies texels (1..3, 1..3) → world 20..80 both
+    // axes, centred around (40, 40) — well off the blob's own centre (90, 90).
+    const brightCentre = { x: 40, y: 40 };
+    const dPeak = Math.hypot(peak.x - brightCentre.x, peak.y - brightCentre.y);
+    const dTarget = Math.hypot(cohesed.points[0] - brightCentre.x, cohesed.points[1] - brightCentre.y);
+    t.ok(
+      `the cohesion target sits closer to the bright corner than the ridge peak does (peak ${Math.round(dPeak)}px, target ${Math.round(dTarget)}px)`,
+      dTarget < dPeak
+    );
+  }
+
+  {
+    // Anchor safety: a fire with no confirmed label (an author-placed anchor,
+    // not mask-derived) sitting right on top of real mask spawn points must
+    // never attract them — there is nothing to key the match on. Proved by
+    // comparing WITH vs WITHOUT the anchor present: identical output means
+    // the anchor is completely inert.
+    const g = gridFrom(['....', '.##.', '.##.', '....'], { texel: 20 });
+    const { fires, nearestLabel, spec } = extractFiresWithLabels(g, { minDiameterPx: 4 });
+    const cloud = extractFireSpawnPoints(g);
+    const anchor = { x: cloud.points[0], y: cloud.points[1] }; // no `.label` — sits exactly on a real point
+    const labelGrid = { nearestLabel, spec };
+    const withAnchor = applyCohesion(cloud, [...fires, anchor], 1, labelGrid);
+    const withoutAnchor = applyCohesion(cloud, fires, 1, labelGrid);
+    t.ok(
+      'adding a label-less anchor changes nothing — every point still targets only its own labelled fire',
+      withAnchor.points.every((v, i) => v === withoutAnchor.points[i])
+    );
+  }
+
+  {
+    // Unconfirmed point stays put: a spawn point that clears the SPAWN
+    // threshold but sits far from ANY confirmed paint (`propagateLabels`
+    // gives up on it) must be returned bit-identical, never assigned an
+    // invented target.
+    const n = 17;
+    const centre = 8;
+    const w = n;
+    const h = n;
+    const texel = 20;
+    const data = new Uint8Array(w * h);
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const d = Math.max(Math.abs(r - centre), Math.abs(c - centre));
+        data[r * w + c] = d <= 2 ? 255 : 0;
+      }
+    }
+    // ONE isolated far-corner texel at 55/255 (~0.216) — clears the default
+    // SPAWN threshold (0.18) but not the PAINT threshold (0.25), and sits at
+    // Chebyshev distance 8 from the core: far outside LABEL_FRINGE_TEXELS.
+    data[0] = 55;
+    const grid = {
+      spec: { x: 0, y: 0, width: w * texel, height: h * texel, w, h, texelW: texel, texelH: texel },
+      data,
+    };
+    const { fires, nearestLabel, spec } = extractFiresWithLabels(grid, { minDiameterPx: 4 });
+    const cloud = extractFireSpawnPoints(grid);
+    const cornerWorld = { x: 0.5 * texel, y: 0.5 * texel };
+    let cornerIdx = -1;
+    for (let i = 0; i < cloud.count; i++) {
+      const o = i * SPAWN_POINT_STRIDE;
+      if (Math.abs(cloud.points[o] - cornerWorld.x) < 1 && Math.abs(cloud.points[o + 1] - cornerWorld.y) < 1) {
+        cornerIdx = i;
+        break;
+      }
+    }
+    t.ok('the fixture produced the isolated far-corner spawn point', cornerIdx >= 0);
+    const cohesed = applyCohesion(cloud, fires, 1, { nearestLabel, spec });
+    const o = cornerIdx * SPAWN_POINT_STRIDE;
+    t.ok(
+      'an unconfirmed point is untouched, never assigned to the nearest surviving fire',
+      cohesed.points[o] === cloud.points[o] && cohesed.points[o + 1] === cloud.points[o + 1]
+    );
+  }
+
+  {
+    // Label without a live fire: a real, confirmed label whose only fire was
+    // dropped (simulating `maxFires`/`minDiameterPx`) must leave its points
+    // alone rather than reassigning them to whatever fire IS still standing.
+    const rows = ['..............', '.###......###.', '.###......###.', '.###......###.', '..............'];
+    const g = gridFrom(rows, { texel: 20 });
+    const { fires, nearestLabel, spec } = extractFiresWithLabels(g, { minDiameterPx: 4 });
+    t.ok('the fixture yields two fires to start', fires.length === 2);
+    const cloud = extractFireSpawnPoints(g, { threshold: 0.5 });
+    const survivingOnly = [fires[0]]; // simulate fires[1] getting dropped upstream
+    const cohesed = applyCohesion(cloud, survivingOnly, 1, { nearestLabel, spec });
+    let untouched = 0;
+    let reassigned = 0;
+    for (let i = 0; i < cloud.count; i++) {
+      const o = i * SPAWN_POINT_STRIDE;
+      const origX = cloud.points[o];
+      const isDroppedBlob = fires[1] && Math.abs(origX - fires[1].x) < 60;
+      if (!isDroppedBlob) continue;
+      const moved = Math.abs(cohesed.points[o] - origX) > 1e-6;
+      if (moved) reassigned++;
+      else untouched++;
+    }
+    t.ok(
+      `the dropped label's points stay put rather than joining the survivor (${untouched} untouched, ${reassigned} reassigned)`,
+      untouched > 0 && reassigned === 0
     );
   }
 

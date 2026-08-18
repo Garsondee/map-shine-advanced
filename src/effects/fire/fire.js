@@ -55,7 +55,14 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 0.6,
     step: 0.01,
-    default: 0.2,
+    // ⚠️ 0.05, NOT 0.2 (2026-08-16, author live on Tower Bridge — the real
+    // multi-blob `_Fire.webp` in example_map/, ~20 painted regions). At 0.2
+    // only 3 of the ~20 valid areas produced flame particles; the rest are
+    // faint/small strokes (a few native px wide, well inside a ~20-29 px-per-
+    // texel derived grid) that a bolder threshold simply never sees. 0.05
+    // lit every one of them. See fire-mask.js's own MIN_PEAK_TEXELS/
+    // PAINT_THRESHOLD headers — real authored fire is routinely this small.
+    default: 0.05,
     category: 'Presence',
     label: 'Mask sensitivity',
     help: 'How much of the painted fire mask counts as real paint before a fire registers there. LOWER catches fainter or smaller painted strokes — turn this DOWN if fire you painted is not appearing. HIGHER requires bolder, more solid paint before a fire lights at all.',
@@ -191,10 +198,17 @@ export const FIRE_PARAMS = Object.freeze({
     min: -2,
     max: 3,
     step: 0.02,
-    default: 0,
+    // ⚠️ 0.5, NOT 0 (2026-08-17, author-confirmed live on Tower Bridge after
+    // the label-scoped rebuild — see `fire-spawn-points.js#applyCohesion`'s
+    // own header). Cohesion used to default OFF because "belongs to" was a
+    // raw-distance guess that could pull one fire's flames toward a
+    // different, disconnected fire; it is now a structural per-blob
+    // guarantee, so a real default that actually gives every fire a visible
+    // hot core is the correct ship state, not an opt-in experiment.
+    default: 0.5,
     category: 'Flame',
     label: 'Cohesion (pull together)',
-    help: 'Pulls every flame toward its fire’s own centre of mass. 0 = spawns spread across the full painted shape (the default — OFF). 1 = every flame collapses onto that single point. Negative pushes flames apart instead, beyond their painted region. ⚠ A good idea, currently buggy — the author has found the live result unreliable, so this defaults off until it is fixed. Move it off 0 to experiment, not to rely on.',
+    help: 'Pulls every flame toward the brightest part of its own fire. 0 = spawns spread across the full painted shape. 1 = every flame collapses onto that single hottest point. Negative pushes flames apart instead, beyond their painted region.',
   },
 
   // ── Ember ─────────────────────────────────────────────────────────────────

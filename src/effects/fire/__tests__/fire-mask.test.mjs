@@ -7,7 +7,7 @@
  * slow-pulsing bonfire instead of the row of small fast flames it looks like.
  * The distance-transform tests below pin exactly that.
  */
-import { chamferDistance, extractFiresFromMask, fireMaskSignature } from '../fire-mask.js';
+import { chamferDistance, extractFiresFromMask, extractFiresWithLabels, fireMaskSignature } from '../fire-mask.js';
 
 /** Build a MaskGrid from an ASCII picture. `#` = painted, `.` = not. */
 function gridFrom(rows, { texel = 10, x = 0, y = 0 } = {}) {
@@ -24,6 +24,22 @@ function gridFrom(rows, { texel = 10, x = 0, y = 0 } = {}) {
     spec: { x, y, width: w * texel, height: h * texel, w, h, texelW: texel, texelH: texel },
     data,
   };
+}
+
+/** Like `gridFrom`, but `o` paints a value between the SPAWN and PAINT
+ * thresholds (the antialiased-fringe band `propagateLabels` exists for)
+ * instead of `gridFrom`'s fixed `+` = 140. */
+function labeledGrid(rows, { solid = 255, ring = 50, texel = 20 } = {}) {
+  const h = rows.length;
+  const w = rows[0].length;
+  const data = new Uint8Array(w * h);
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      const ch = rows[r][c];
+      data[r * w + c] = ch === '#' ? solid : ch === 'o' ? ring : 0;
+    }
+  }
+  return { spec: { x: 0, y: 0, width: w * texel, height: h * texel, w, h, texelW: texel, texelH: texel }, data };
 }
 
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
@@ -104,6 +120,48 @@ export function run(t) {
       'neither fire sits in the empty gap',
       fires.every((f) => f.x < 110 || f.x > 190)
     );
+    // Cohesion's whole guarantee (`fire-spawn-points.js#applyCohesion`) rests
+    // on two disconnected blobs carrying two DIFFERENT labels.
+    t.ok('the two separate blobs carry different labels', fires[0].label !== fires[1].label);
+  }
+
+  {
+    // ⚠️ THE LIVE BUG (cross-component suppression). A SMALL blob sitting near
+    // a much LARGER, unrelated one used to get suppressed by the big blob's
+    // already-placed peak — `PEAK_SEPARATION`'s radius scales with the LARGER
+    // of the two, so a modest gap was enough to swallow a small neighbour
+    // entirely, even though the two are fully disconnected components. This
+    // is the exact promise this file's own header makes and the bug broke:
+    // "SCOPED PER CONNECTED COMPONENT, not pooled across the whole grid."
+    //
+    // A 9×9 block (peak radius ~5 texels, so a suppression radius of ~8.5)
+    // beside a 2×2 block (peak radius 1 texel) just one empty column away —
+    // close enough in texel space to fall inside that 8.5-texel radius, but
+    // a completely separate, validly-painted region.
+    const rows = [
+      '................',
+      '..#########.....',
+      '..#########.....',
+      '..#########.....',
+      '..#########.##..',
+      '..#########.##..',
+      '..#########.....',
+      '..#########.....',
+      '..#########.....',
+      '..#########.....',
+      '................',
+    ];
+    const g = gridFrom(rows, { texel: 20 });
+    const fires = extractFiresFromMask(g, { minDiameterPx: 4 });
+    t.ok(`a small blob near a big one still gets its own fire (got ${fires.length})`, fires.length === 2);
+    const diameters = fires.map((f) => f.diameterPx).sort((a, b) => a - b);
+    t.ok(
+      `one fire is big and one is small, not two mediums (${diameters.map((d) => Math.round(d)).join(', ')})`,
+      diameters[0] < 60 && diameters[1] > 150
+    );
+    // The fixture cohesion's own test reuses (fire-spawn-points.test.mjs) —
+    // must carry different labels or cohesion's grouping has nothing to key on.
+    t.ok('the small and big blob carry different labels', fires[0].label !== fires[1].label);
   }
 
   // ── THE LINE CASE — the reason this is a distance transform ────────────────
@@ -211,6 +269,15 @@ export function run(t) {
     const g = gridFrom(rows, { texel: 20 });
     const fires = extractFiresFromMask(g, { minDiameterPx: 4 });
     t.ok(`the SAME width, stretched long, goes back to a row of many (got ${fires.length})`, fires.length >= 4);
+    // One painted region, one label — even though it seeds a whole ROW of
+    // fires. Cohesion (`fire-spawn-points.js#applyCohesion`) relies on this:
+    // a line's spaced peaks must all be reachable from the SAME label, then
+    // told apart from each other by nearest-WITHIN-that-label, never by a
+    // label difference that isn't really there.
+    t.ok(
+      'the whole spaced row shares one label',
+      fires.every((f) => f.label === fires[0].label)
+    );
   }
 
   // ── ROBUSTNESS ─────────────────────────────────────────────────────────────
@@ -372,6 +439,83 @@ export function run(t) {
     t.ok(
       'paint below the SPAWN threshold too is still rejected — the bar moved, it did not vanish',
       extractFiresFromMask(belowBoth, { minDiameterPx: 4, paintThreshold: 0.25, rescueThreshold: 0.18 }).length === 0
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // LABEL PROPAGATION — the antialiased fringe between the SPAWN threshold
+  // (fire-spawn-points.js, lower) and the PAINT threshold `labelComponents`
+  // runs at (this file, higher). `fire-spawn-points.js#applyCohesion` needs
+  // to know which confirmed blob a spawn point in that fringe belongs to —
+  // see `propagateLabels`'s own header.
+  // ══════════════════════════════════════════════════════════════════════
+
+  {
+    // A solid 5×5 core (clears PAINT threshold) ringed by paint at 50/255
+    // (≈0.196 — between the spawn threshold 0.18 and the paint threshold
+    // 0.25), with enough empty margin beyond the ring that a far corner is
+    // genuinely unreachable within the propagation bound.
+    const n = 17;
+    const centre = 8;
+    const rows = [];
+    for (let r = 0; r < n; r++) {
+      let row = '';
+      for (let c = 0; c < n; c++) {
+        const d = Math.max(Math.abs(r - centre), Math.abs(c - centre));
+        row += d <= 2 ? '#' : d === 3 ? 'o' : '.';
+      }
+      rows.push(row);
+    }
+    const g = labeledGrid(rows);
+    const { fires, labels, nearestLabel } = extractFiresWithLabels(g, { minDiameterPx: 4 });
+    t.ok(`the solid core alone produces one fire (got ${fires.length})`, fires.length === 1);
+    const w = g.spec.w;
+    const label = fires[0].label;
+    const ringIdx = (centre - 3) * w + centre; // directly above the core, in the ring band
+    t.ok('raw labelComponents leaves the ring UNLABELLED (it never clears PAINT threshold)', labels[ringIdx] === -1);
+    t.ok("propagation gives the ring texel the core's own label", nearestLabel[ringIdx] === label);
+    const cornerIdx = 0; // far outside both the core and the ring's reach
+    t.ok(
+      'a texel with no nearby paint stays -1 in both the raw and the propagated field',
+      labels[cornerIdx] === -1 && nearestLabel[cornerIdx] === -1
+    );
+  }
+
+  {
+    // Two confirmed blobs, each with its OWN fringe ring, separated by a gap
+    // wider than either fringe could ever bridge. Each ring must resolve only
+    // to its own blob's label — cross-blob fringe bleed would be exactly the
+    // "pooled across the whole grid" bug this session already fixed once,
+    // one layer up.
+    const n = 19;
+    const cA = 3;
+    const cB = 15;
+    const rows = [];
+    for (let r = 0; r < n; r++) {
+      let row = '';
+      for (let c = 0; c < n; c++) {
+        const dA = Math.max(Math.abs(r - cA), Math.abs(c - cA));
+        const dB = Math.max(Math.abs(r - cB), Math.abs(c - cB));
+        if (dA <= 1 || dB <= 1) row += '#';
+        else if (dA === 2 || dB === 2) row += 'o';
+        else row += '.';
+      }
+      rows.push(row);
+    }
+    const g = labeledGrid(rows);
+    const { fires, labels, nearestLabel } = extractFiresWithLabels(g, { minDiameterPx: 4 });
+    t.ok(`two separate cores with their own fringes yield two fires (got ${fires.length})`, fires.length === 2);
+    t.ok('the two cores carry different labels', fires[0].label !== fires[1].label);
+    const w = g.spec.w;
+    const labelA = nearestLabel[cA * w + cA];
+    const labelB = nearestLabel[cB * w + cB];
+    t.ok("blob A's own ring resolves only to blob A", nearestLabel[cA * w + (cA + 2)] === labelA);
+    t.ok("blob B's own ring resolves only to blob B", nearestLabel[cB * w + (cB - 2)] === labelB);
+    // The genuine gap between the two rings — nowhere near either fringe.
+    const midIdx = cA * w + 9;
+    t.ok(
+      'the real gap between them stays unresolved in both fields',
+      labels[midIdx] === -1 && nearestLabel[midIdx] === -1
     );
   }
 }

@@ -45,6 +45,7 @@
  *
  * @module effects/fire/fire-spawn-points
  */
+import { maskTexelSize } from './fire-mask.js';
 
 /**
  * Painted-ness above which a texel can spawn fire.
@@ -117,8 +118,7 @@ export function extractFireSpawnPoints(grid, { maxPoints = MAX_SPAWN_POINTS, thr
   for (let i = 0; i < w * h; i++) if (data[i] >= cut) painted++;
   if (painted === 0) return empty;
 
-  const texelW = Number.isFinite(spec.texelW) && spec.texelW > 0 ? spec.texelW : spec.width / w;
-  const texelH = Number.isFinite(spec.texelH) && spec.texelH > 0 ? spec.texelH : spec.height / h;
+  const { texelW, texelH } = maskTexelSize(spec, w, h);
   if (!(texelW > 0) || !(texelH > 0)) return empty;
   // Half the texel, so a jitter of ±this covers exactly the texel's own area
   // and neighbouring points tile the region without gaps or double-density.
@@ -180,28 +180,79 @@ export function extractFireSpawnPoints(grid, { maxPoints = MAX_SPAWN_POINTS, thr
 }
 
 /**
- * Pull every spawn point toward the CENTRE OF MASS of the fire it belongs to —
- * "belongs to" meaning its NEAREST entry in `fires`, not one global average.
+ * Look up which painted blob a WORLD point structurally belongs to. O(1):
+ * converts world → texel through the SAME `spec` the label field was
+ * computed against, then a direct array read — never a search.
  *
- * ⚠️ NEAREST-FIRE, NOT ONE GLOBAL CENTROID, AND THAT DIFFERENCE IS THE WHOLE
- * DESIGN. `fires` already carries one entry per RIDGE PEAK from
- * `extractFiresFromMask` — a round hearth gets one, but a long painted line
- * gets a spaced ROW of them down its spine (`fire-mask.js`'s own ELONGATION
- * handling). Pulling toward the single nearest peak lets a compact hearth
- * collapse toward its own centre while a fire-line stays a line of tightened
- * clusters instead of every point on it collapsing to one spot in the middle.
+ * @param {number} x @param {number} y
+ * @param {{nearestLabel: Int32Array, spec: object}} labelGrid - from
+ *   `fire-mask.js#extractFiresWithLabels`.
+ * @returns {number} the label, or -1 if unresolved (off-grid, or genuinely
+ *   too far from any confirmed paint — see `fire-mask.js#propagateLabels`).
+ */
+function labelAtWorldPoint(x, y, { nearestLabel, spec }) {
+  const w = spec.w | 0;
+  const h = spec.h | 0;
+  const { texelW, texelH } = maskTexelSize(spec, w, h);
+  const col = Math.floor((x - spec.x) / texelW);
+  const row = Math.floor((y - spec.y) / texelH);
+  if (col < 0 || col >= w || row < 0 || row >= h) return -1;
+  const label = nearestLabel[row * w + col];
+  return Number.isInteger(label) ? label : -1;
+}
+
+/**
+ * Pull every spawn point toward the brightest part of the fire it structurally
+ * belongs to.
+ *
+ * ⚠️ THE LIVE BUG THIS REPLACED (2026-08-16). The previous version's idea of
+ * "belongs to" was "whichever fire is geometrically NEAREST", scanning the
+ * WHOLE `fires` list with no notion of which painted blob a point actually
+ * came from — the exact same bug SHAPE this session's `fire-mask.js` fix
+ * found in the peak-separation suppression, one layer up: a small blob's own
+ * points could get pulled toward a completely different, disconnected fire
+ * just because it happened to sit close by. Author's own ask: "no risk of
+ * accidentally moving fires associated with other fires' spawn points."
+ *
+ * "Belongs to" is now the CONNECTED-COMPONENT LABEL `labelGrid` carries
+ * (`fire-mask.js#extractFiresWithLabels`'s `nearestLabel`, keyed to `fires[i].
+ * label`) — a point's only ever-possible candidates are fires sharing its OWN
+ * label, structurally, never a distance comparison across labels. A compact
+ * blob's label maps to exactly one fire (the common case, free). An elongated
+ * blob's whole spaced ROW down its spine (`fire-mask.js`'s ELONGATION
+ * handling) shares ONE label — a point still picks its NEAREST peak, but only
+ * ever among that same label's own peaks, which is what keeps a fire-LINE a
+ * line of tightened local clusters instead of every point on it collapsing to
+ * one spot in the middle.
+ *
+ * The pull TARGET is the brightness-weighted centroid of the spawn points
+ * actually assigned to that peak (`Σ pos·brightness / Σ brightness`), not the
+ * peak's own ridge-position `x/y` — that is what "toward the brightest part
+ * of the mask" means, and it is deliberately never written back onto
+ * `fires[i].x/.y` themselves, which feed light placement and sprite geometry
+ * everywhere else in `fire-geometry.js`.
+ *
+ * ⚠️ `labelGrid` IS OPTIONAL, AND OMITTING IT RUNS THE OLD ALGORITHM VERBATIM.
+ * A caller with no label field (or one this function can't recognise) gets
+ * byte-identical legacy behaviour — full backward compatibility for any
+ * existing call site, never a silent behaviour change from adding a param.
  *
  * @param {{points: Float32Array, count: number}} cloud - already extracted (and
  *   brightness-sorted; irrelevant here, only x/y move).
- * @param {Array<{x:number,y:number}>} fires - from `extractFiresFromMask`.
- * @param {number} amount - lerp fraction toward the nearest fire's centre. 0 is
- *   a no-op, 1 collapses every point onto its fire's centre exactly, negative
- *   pushes points AWAY from it instead.
+ * @param {Array<{x:number,y:number,label?:number}>} fires - from
+ *   `extractFiresFromMask`/`extractFiresWithLabels`. A fire with no `label`
+ *   (anchor-placed, not mask-derived) never receives a spawn point under the
+ *   label-scoped path — it simply never matches anything's resolved label.
+ * @param {number} amount - lerp fraction toward the target. 0 is a no-op, 1
+ *   collapses every point onto its target exactly, negative pushes away.
+ * @param {{nearestLabel: Int32Array, spec: object}|null} [labelGrid] - from
+ *   `fire-mask.js#extractFiresWithLabels`/`boot.js#getFireRenderState`'s
+ *   `fireLabelGrid`. Falsy (the default) ⇒ the legacy nearest-of-all path.
  * @returns {{points: Float32Array, count: number, paintedTexels?: number}} a
  *   NEW cloud — the input is never mutated, since callers may share it across
  *   several kinds with different `amount`s.
  */
-export function applyCohesion(cloud, fires, amount) {
+export function applyCohesion(cloud, fires, amount, labelGrid = null) {
   const count = Math.max(0, Math.floor(cloud?.count ?? 0));
   if (
     !cloud?.points ||
@@ -215,13 +266,68 @@ export function applyCohesion(cloud, fires, amount) {
   }
   const out = new Float32Array(cloud.points.length);
   out.set(cloud.points);
+
+  if (!labelGrid?.nearestLabel || !labelGrid?.spec) {
+    // LEGACY PATH — no usable label grid supplied. Kept byte-for-byte so
+    // every existing caller (and the tests pinning this exact behaviour)
+    // keeps working unchanged; see this function's own header for why the
+    // label-scoped path below is what a NEW caller should reach for instead.
+    for (let i = 0; i < count; i++) {
+      const o = i * SPAWN_POINT_STRIDE;
+      const px = out[o];
+      const py = out[o + 1];
+      let bestF = fires[0];
+      let bestD2 = Infinity;
+      for (const f of fires) {
+        const dx = px - f.x;
+        const dy = py - f.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          bestF = f;
+        }
+      }
+      out[o] = px + (bestF.x - px) * amount;
+      out[o + 1] = py + (bestF.y - py) * amount;
+    }
+    return { points: out, count: cloud.count, paintedTexels: cloud.paintedTexels };
+  }
+
+  // LABEL-SCOPED PATH.
+  const firesByLabel = new Map();
+  for (const f of fires) {
+    const label = f?.label;
+    if (!Number.isInteger(label) || label === -1) continue;
+    if (!firesByLabel.has(label)) firesByLabel.set(label, []);
+    firesByLabel.get(label).push(f);
+  }
+
+  // Pass 1 — resolve each point's OWN fire (never a cross-label guess) and
+  // accumulate the brightness-weighted sum toward that fire's target, keyed
+  // by OBJECT REFERENCE. Not by `.id` string: `fire-subsystem.js`'s own
+  // `lastCohesionByEngine` already carries the scar from a string-keyed map
+  // colliding entries that were not actually the same thing — an object key
+  // makes two different fires colliding here structurally impossible.
+  const assignedFire = new Array(count).fill(null);
+  const weighted = new Map();
   for (let i = 0; i < count; i++) {
     const o = i * SPAWN_POINT_STRIDE;
     const px = out[o];
     const py = out[o + 1];
-    let bestF = fires[0];
+    const brightness = out[o + 2];
+    const label = labelAtWorldPoint(px, py, labelGrid);
+    if (label === -1) continue; // no confirmed paint within reach — leave it be.
+    const candidates = firesByLabel.get(label);
+    // The label is real, but its own fire didn't survive `maxFires`/
+    // `minDiameterPx` (fire-mask.js). No confirmed fire exists to pull
+    // toward — leaving the point alone is correct; reassigning it to the
+    // nearest SURVIVING fire would be exactly the cross-blob bug this
+    // rebuild exists to remove.
+    if (!candidates || candidates.length === 0) continue;
+
+    let bestF = candidates[0];
     let bestD2 = Infinity;
-    for (const f of fires) {
+    for (const f of candidates) {
       const dx = px - f.x;
       const dy = py - f.y;
       const d2 = dx * dx + dy * dy;
@@ -230,9 +336,32 @@ export function applyCohesion(cloud, fires, amount) {
         bestF = f;
       }
     }
-    out[o] = px + (bestF.x - px) * amount;
-    out[o + 1] = py + (bestF.y - py) * amount;
+    assignedFire[i] = bestF;
+    const wgt = Math.max(brightness, 0);
+    const acc = weighted.get(bestF) ?? { sx: 0, sy: 0, sw: 0 };
+    acc.sx += px * wgt;
+    acc.sy += py * wgt;
+    acc.sw += wgt;
+    weighted.set(bestF, acc);
   }
+
+  // Pass 2 — lerp each assigned point toward its own group's weighted
+  // centroid. Unassigned points were already copied into `out` untouched.
+  for (let i = 0; i < count; i++) {
+    const bestF = assignedFire[i];
+    if (!bestF) continue;
+    const o = i * SPAWN_POINT_STRIDE;
+    const px = out[o];
+    const py = out[o + 1];
+    const acc = weighted.get(bestF);
+    // `sw === 0` is not reachable with real painted brightness (every real
+    // spawn point clears a positive threshold) — defensive fallback only.
+    const tx = acc.sw > 0 ? acc.sx / acc.sw : bestF.x;
+    const ty = acc.sw > 0 ? acc.sy / acc.sw : bestF.y;
+    out[o] = px + (tx - px) * amount;
+    out[o + 1] = py + (ty - py) * amount;
+  }
+
   return { points: out, count: cloud.count, paintedTexels: cloud.paintedTexels };
 }
 
